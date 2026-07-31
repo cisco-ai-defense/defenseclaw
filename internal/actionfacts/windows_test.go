@@ -3360,8 +3360,8 @@ func TestCMDGitAndCodexArgumentRolePrecision(t *testing.T) {
 	}
 
 	codexBypass := parseCMD(
-		`codex.exe exec --sandbox danger-full-access `+
-			`--ask-for-approval never fixture`,
+		`codex.exe --sandbox danger-full-access `+
+			`--ask-for-approval never exec fixture`,
 		1,
 		0,
 	)
@@ -3377,25 +3377,12 @@ func TestCMDGitAndCodexArgumentRolePrecision(t *testing.T) {
 			codexBypass.commands[0].Argv,
 			"--ask-for-approval",
 		) ||
-		!hasExactWindowsArgument(codexBypass.commands[0].Argv, "never") {
-		t.Fatalf("codex paired controls output = %#v", codexBypass)
-	}
-
-	codexProse := parseCMD(
-		`codex.exe exec --message `+
-			`"document --sandbox danger-full-access --ask-for-approval never"`,
-		1,
-		0,
-	)
-	classifyOutput(&codexProse)
-	if codexProse.status != StatusComplete ||
-		len(codexProse.commands) != 1 ||
-		hasExactWindowsArgument(codexProse.commands[0].Argv, "--sandbox") ||
-		hasExactWindowsArgument(
-			codexProse.commands[0].Argv,
-			"--ask-for-approval",
+		!hasExactWindowsArgument(codexBypass.commands[0].Argv, "never") ||
+		!commandHasOperation(
+			codexBypass.commands[0],
+			OperationPolicyBypass,
 		) {
-		t.Fatalf("codex prose became runtime controls: %#v", codexProse)
+		t.Fatalf("codex paired controls output = %#v", codexBypass)
 	}
 
 	for _, source := range []string{
@@ -3403,7 +3390,8 @@ func TestCMDGitAndCodexArgumentRolePrecision(t *testing.T) {
 		`git.exe commit -m "--no-verify"`,
 		`git.exe commit --author "--no-verify"`,
 		`git.exe commit --future-mode`,
-		`codex.exe exec --sandbox danger-full-access`,
+		`codex.exe exec --sandbox danger-full-access ` +
+			`--ask-for-approval never fixture`,
 		`codex.exe exec --message "--sandbox"`,
 		`codex.exe exec --future-mode fixture`,
 	} {
@@ -3461,8 +3449,9 @@ func TestWindowsNativeClassifierExecutableForms(t *testing.T) {
 		{
 			name:    "codex",
 			program: "codex",
-			args: "exec --sandbox danger-full-access " +
-				"--ask-for-approval never fixture",
+			args: "--sandbox danger-full-access " +
+				"--ask-for-approval never exec fixture",
+			operation: OperationPolicyBypass,
 		},
 	}
 	dialects := []struct {

@@ -246,6 +246,7 @@ const (
 	OperationRootChange       OperationKind = "root_change"
 	OperationEnvironmentRead  OperationKind = "environment_read"
 	OperationCredentialRead   OperationKind = "credential_read"
+	OperationPolicyBypass     OperationKind = "policy_bypass"
 )
 
 // PathFact identifies a statically proven path operand.

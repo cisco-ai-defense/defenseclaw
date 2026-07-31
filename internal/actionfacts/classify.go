@@ -299,12 +299,28 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		classifyStructuredPowerShellStopProcess(out, command)
 	case "clear-disk":
 		classifyStructuredPowerShellClearDisk(out, command)
-	case "base64", "openssl", "certutil":
+	case "base64", "openssl", "openssl.exe":
 		classifyDecode(out, command, program)
+	case "certutil", "certutil.exe":
+		classifyStructuredWindowsArgv(
+			out,
+			command,
+			windowsClassifyCertutil,
+			DialectCMD,
+		)
 	case "sudo":
 		classifySudo(out, command)
 	case "doas", "su", "runas", "pkexec":
 		addOperation(command, OperationPrivilege)
+		out.markPartial(IssueUnsupportedConstruct)
+	case "reg", "reg.exe":
+		classifyStructuredWindowsArgv(
+			out,
+			command,
+			windowsClassifyRegistry,
+			DialectCMD,
+			DialectPowerShell,
+		)
 	case "crontab", "at", "schtasks", "launchctl", "systemctl":
 		classifySchedule(out, command, program)
 	case "register-scheduledtask":
@@ -343,7 +359,6 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		"echo", "printf", "pwd", "cd", "true", "false", "sleep", "date",
 		"whoami", "id", "uname", "test", "[", "expr", "read", "export",
 		"setenv", "which", "command", "exec", "eval",
-		"reg",
 		"write-output", "write-host":
 		// Known command grammar; the parser or wrapper analysis owns any nested
 		// command source.
@@ -8168,28 +8183,43 @@ func classifyAgentRuntime(
 	var (
 		parsed       ownedPOSIXOptionParse
 		valueOptions map[string]struct{}
+		preview      map[string]struct{}
 	)
 	switch program {
 	case "codex":
 		valueOptions = exactOptionSet(
-			"--sandbox", "-s", "--ask-for-approval",
-			"--approval-policy", "-a", "--message", "-m", "--model",
-			"-c", "--config", "-C", "--cd", "--color",
-			"-o", "--output-last-message", "-i", "--image",
-			"-p", "--profile", "--add-dir", "--local-provider",
+			"-c", "--config", "--enable", "--disable",
+			"-i", "--image", "-m", "--model",
+			"--local-provider", "-p", "--profile",
+			"-s", "--sandbox", "-C", "--cd", "--add-dir",
+			"--remote", "--remote-auth-token-env",
+			"-a", "--ask-for-approval",
+			"--output-schema", "--color",
+			"-o", "--output-last-message",
 		)
+		preview = exactOptionSet("-h", "--help", "-V", "--version")
 		parsed = parseOwnedPOSIXOptions(
 			command.Argv,
 			valueOptions,
 			exactOptionSet(
+				"--strict-config", "--oss",
 				"--dangerously-bypass-approvals-and-sandbox",
-				"--full-auto", "--json", "--skip-git-repo-check",
-				"--ephemeral", "--oss",
+				"--dangerously-bypass-hook-trust",
+				"--search", "--no-alt-screen",
+				"--full-auto", "--skip-git-repo-check",
+				"--ephemeral", "--ignore-user-config",
+				"--ignore-rules", "--json",
 			),
-			exactOptionSet("-h", "--help", "-V", "--version"),
+			preview,
 		)
-		if len(parsed.positionals) == 0 ||
-			!strings.EqualFold(parsed.positionals[0], "exec") {
+		hasExecSubcommand := len(parsed.positionals) > 0 &&
+			(parsed.positionals[0] == "exec" ||
+				parsed.positionals[0] == "e")
+		if !hasExecSubcommand &&
+			(!parsed.preview || len(parsed.positionals) > 0) {
+			parsed.complete = false
+		}
+		if !validCodexAgentRuntimeOptions(parsed, hasExecSubcommand) {
 			parsed.complete = false
 		}
 	case "claude":
@@ -8200,6 +8230,7 @@ func classifyAgentRuntime(
 			"--fallback-model", "--json-schema",
 			"--permission-prompt-tool", "--mcp-config", "--add-dir",
 		)
+		preview = exactOptionSet("-h", "--help", "-v", "--version")
 		parsed = parseOwnedPOSIXOptions(
 			command.Argv,
 			valueOptions,
@@ -8207,48 +8238,249 @@ func classifyAgentRuntime(
 				"-p", "--print", "--dangerously-skip-permissions",
 				"--verbose", "--debug", "--continue",
 			),
-			exactOptionSet("-h", "--help", "-v", "--version"),
+			preview,
 		)
+		if !validClaudeAgentRuntimeOptions(parsed) {
+			parsed.complete = false
+		}
 	case "gemini":
 		valueOptions = exactOptionSet(
 			"-p", "--prompt", "-o", "--output-format",
 			"--approval-mode", "-m", "--model",
 		)
+		preview = exactOptionSet("-h", "--help", "-v", "--version")
 		parsed = parseOwnedPOSIXOptions(
 			command.Argv,
 			valueOptions,
 			exactOptionSet("--yolo", "--debug"),
-			exactOptionSet("-h", "--help", "-v", "--version"),
+			preview,
 		)
 	case "opencode":
 		valueOptions = exactOptionSet(
 			"-m", "--model", "--agent", "-f", "--file",
 			"--format", "--attach", "-s", "--session", "--title",
 		)
+		preview = exactOptionSet("-h", "--help", "-v", "--version")
 		parsed = parseOwnedPOSIXOptions(
 			command.Argv,
 			valueOptions,
-			exactOptionSet("--yolo", "--continue"),
-			exactOptionSet("-h", "--help", "-v", "--version"),
+			exactOptionSet("--continue"),
+			preview,
 		)
-		if len(parsed.positionals) == 0 ||
-			!strings.EqualFold(parsed.positionals[0], "run") {
+		if !parsed.preview &&
+			(len(parsed.positionals) == 0 ||
+				parsed.positionals[0] != "run") {
 			parsed.complete = false
 		}
 	default:
 		out.markPartial(IssueUnknownOperandGrammar)
 		return
 	}
+	argumentsComplete, quotedPreview := agentRuntimeArgumentsOwned(
+		command,
+		preview,
+	)
+	if !argumentsComplete {
+		parsed.complete = false
+	}
+	if quotedPreview {
+		parsed.preview = false
+	}
 	if !strictCLIOptionValues(command.Argv, valueOptions) {
+		parsed.complete = false
+	}
+	if parsed.repeatedFlag {
+		parsed.complete = false
+	}
+	bypass, conflictingBypass := agentRuntimePolicyBypass(program, parsed)
+	if conflictingBypass {
 		parsed.complete = false
 	}
 	if parsed.preview {
 		command.Effect = EffectPreview
+		if !parsed.complete {
+			out.markPartial(IssueUnknownOperandGrammar)
+		}
 		return
 	}
 	if !parsed.complete {
 		out.markPartial(IssueUnknownOperandGrammar)
+		return
 	}
+	if bypass {
+		addOperation(command, OperationPolicyBypass)
+	}
+}
+
+func agentRuntimePolicyBypass(
+	program string,
+	parsed ownedPOSIXOptionParse,
+) (bypass, conflicting bool) {
+	switch program {
+	case "claude":
+		_, direct := parsed.seen["--dangerously-skip-permissions"]
+		permissionMode, modeSeen, modeUnique := ownedAgentRuntimeValue(
+			parsed,
+			"--permission-mode",
+		)
+		modeBypass := modeSeen && modeUnique &&
+			permissionMode == "bypassPermissions"
+		return direct || modeBypass, direct && modeBypass
+	case "codex":
+		_, direct := parsed.seen["--dangerously-bypass-approvals-and-sandbox"]
+		sandbox, sandboxSeen, sandboxUnique := ownedAgentRuntimeValue(
+			parsed,
+			"--sandbox",
+			"-s",
+		)
+		approval, approvalSeen, approvalUnique := ownedAgentRuntimeValue(
+			parsed,
+			"--ask-for-approval",
+			"-a",
+		)
+		paired := sandboxSeen && sandboxUnique &&
+			sandbox == "danger-full-access" &&
+			approvalSeen && approvalUnique && approval == "never"
+		return direct || paired, direct && paired
+	case "gemini":
+		_, yolo := parsed.seen["--yolo"]
+		return yolo, false
+	default:
+		return false, false
+	}
+}
+
+func validCodexAgentRuntimeOptions(
+	parsed ownedPOSIXOptionParse,
+	hasExecSubcommand bool,
+) bool {
+	for option, position := range parsed.optionPositions {
+		switch option {
+		case "--remote", "--remote-auth-token-env",
+			"-a", "--ask-for-approval",
+			"--search", "--no-alt-screen":
+			if hasExecSubcommand &&
+				position > parsed.firstPositionalPosition {
+				return false
+			}
+		case "--output-schema", "--color",
+			"-o", "--output-last-message",
+			"--full-auto", "--skip-git-repo-check",
+			"--ephemeral", "--ignore-user-config",
+			"--ignore-rules", "--json":
+			if !hasExecSubcommand ||
+				position < parsed.firstPositionalPosition {
+				return false
+			}
+		}
+	}
+	sandbox, sandboxSeen, sandboxUnique := ownedAgentRuntimeValue(
+		parsed,
+		"--sandbox",
+		"-s",
+	)
+	if sandboxSeen &&
+		(!sandboxUnique || !knownCodexSandbox(sandbox)) {
+		return false
+	}
+	approval, approvalSeen, approvalUnique := ownedAgentRuntimeValue(
+		parsed,
+		"--ask-for-approval",
+		"-a",
+	)
+	if approvalSeen &&
+		(!approvalUnique || !knownCodexApproval(approval)) {
+		return false
+	}
+	if color, present := parsed.values["--color"]; present {
+		switch color {
+		case "always", "never", "auto":
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func validClaudeAgentRuntimeOptions(parsed ownedPOSIXOptionParse) bool {
+	mode, present, unique := ownedAgentRuntimeValue(
+		parsed,
+		"--permission-mode",
+	)
+	if !present {
+		return true
+	}
+	if !unique {
+		return false
+	}
+	switch mode {
+	case "acceptEdits", "auto", "bypassPermissions", "manual", "dontAsk",
+		"plan":
+		return true
+	default:
+		return false
+	}
+}
+
+func ownedAgentRuntimeValue(
+	parsed ownedPOSIXOptionParse,
+	options ...string,
+) (value string, present, unique bool) {
+	unique = true
+	for _, option := range options {
+		candidate, ok := parsed.values[option]
+		if !ok {
+			continue
+		}
+		if present {
+			unique = false
+		}
+		value = candidate
+		present = true
+	}
+	return value, present, unique
+}
+
+func knownCodexSandbox(value string) bool {
+	switch value {
+	case "read-only", "workspace-write", "danger-full-access":
+		return true
+	default:
+		return false
+	}
+}
+
+func knownCodexApproval(value string) bool {
+	switch value {
+	case "untrusted", "on-failure", "on-request", "never":
+		return true
+	default:
+		return false
+	}
+}
+
+func agentRuntimeArgumentsOwned(
+	command *CommandFact,
+	previewOptions map[string]struct{},
+) (complete, quotedPreview bool) {
+	if len(command.Arguments) != len(command.Argv) {
+		return false, false
+	}
+	complete = true
+	for _, argument := range command.Arguments[1:] {
+		if argument.Expands {
+			complete = false
+		}
+		if argument.Quote == QuoteNone ||
+			!strings.HasPrefix(argument.Value, "-") {
+			continue
+		}
+		complete = false
+		if _, preview := previewOptions[argument.Value]; preview {
+			quotedPreview = true
+		}
+	}
+	return complete, quotedPreview
 }
 
 func strictCLIOptionValues(
@@ -8632,6 +8864,22 @@ func positionalPrefixExact(positionals []string, want ...string) bool {
 	return true
 }
 
+func classifyStructuredWindowsArgv(
+	out *parseOutput,
+	command *CommandFact,
+	classifier func(*CommandFact, []windowsWord, *windowsFactBuilder),
+	dialects ...Dialect,
+) {
+	if !requireCommandDialect(out, command, dialects...) {
+		return
+	}
+	args := make([]windowsWord, 0, len(command.Argv)-1)
+	for _, value := range command.Argv[1:] {
+		args = append(args, windowsWord{value: value, quote: QuoteNone})
+	}
+	classifier(command, args, newWindowsFactBuilder(out))
+}
+
 func classifyDecode(out *parseOutput, command *CommandFact, program string) {
 	switch program {
 	case "base64", "base64.exe":
@@ -8698,66 +8946,74 @@ func classifyDecode(out *parseOutput, command *CommandFact, program string) {
 			out.markPartial(IssueUnknownOperandGrammar)
 		}
 	case "openssl", "openssl.exe":
-		subcommand, _, ok := firstPositional(command.Argv, optionValues(
-			"-config", "-engine", "-provider", "-provider-path", "-propquery",
-		))
-		if !ok || subcommand != "base64" && subcommand != "enc" ||
-			!hasAnyArgument(command.Argv, "-d", "-decrypt") {
-			return
-		}
-		addOperation(command, OperationDecode)
-		for i := 1; i < len(command.Argv); i++ {
-			switch strings.ToLower(command.Argv[i]) {
-			case "-in":
-				if i+1 < len(command.Argv) {
-					i++
-					appendPath(out, command.ID, PathAccessRead, command.Argv[i])
-					appendFileToProcessFlow(out, command.ID)
-				} else {
-					out.markPartial(IssueUnknownOperandGrammar)
-				}
-			case "-out":
-				if i+1 < len(command.Argv) {
-					i++
-					appendPath(out, command.ID, PathAccessWrite, command.Argv[i])
-					appendProcessToFileFlow(out, command.ID)
-				} else {
-					out.markPartial(IssueUnknownOperandGrammar)
-				}
+		classifyOpenSSLDecode(out, command)
+	}
+}
+
+func classifyOpenSSLDecode(out *parseOutput, command *CommandFact) {
+	if len(command.Argv) < 2 {
+		out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
+	switch command.Argv[1] {
+	case "base64", "enc":
+	default:
+		out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
+	if openSSLDecodeHelpInvocation(command.Argv[2:]) {
+		command.Effect = EffectPreview
+		return
+	}
+
+	decode := false
+	seenValues := make(map[string]struct{}, 2)
+	for i := 2; i < len(command.Argv); i++ {
+		option := command.Argv[i]
+		switch option {
+		case "-d":
+			if decode {
+				out.markPartial(IssueUnknownOperandGrammar)
 			}
-		}
-	case "certutil", "certutil.exe":
-		actionIndex := -1
-		decodeHex := false
-		for i := 1; i < len(command.Argv); i++ {
-			switch strings.ToLower(command.Argv[i]) {
-			case "-decode":
-				actionIndex = i
-			case "-decodehex":
-				actionIndex = i
-				decodeHex = true
+			decode = true
+		case "-in", "-out":
+			if _, duplicate := seenValues[option]; duplicate {
+				out.markPartial(IssueUnknownOperandGrammar)
 			}
-			if actionIndex >= 0 {
-				break
+			seenValues[option] = struct{}{}
+			i++
+			if i >= len(command.Argv) || command.Argv[i] == "" ||
+				strings.HasPrefix(command.Argv[i], "-") {
+				out.markPartial(IssueUnknownOperandGrammar)
+				continue
 			}
-		}
-		if actionIndex < 0 {
-			return
-		}
-		addOperation(command, OperationDecode)
-		operands := command.Argv[actionIndex+1:]
-		if len(operands) < 2 {
-			out.markPartial(IssueUnknownOperandGrammar)
-			return
-		}
-		appendPath(out, command.ID, PathAccessRead, operands[0])
-		appendPath(out, command.ID, PathAccessWrite, operands[1])
-		appendFileToProcessFlow(out, command.ID)
-		appendProcessToFileFlow(out, command.ID)
-		if len(operands) > 2 && (!decodeHex || len(operands) != 3 ||
-			!allDecimalDigits(operands[2])) {
+			if option == "-in" {
+				appendPath(out, command.ID, PathAccessRead, command.Argv[i])
+				appendFileToProcessFlow(out, command.ID)
+			} else {
+				appendPath(out, command.ID, PathAccessWrite, command.Argv[i])
+				appendProcessToFileFlow(out, command.ID)
+			}
+		default:
 			out.markPartial(IssueUnknownOperandGrammar)
 		}
+	}
+	if !decode {
+		out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
+	addOperation(command, OperationDecode)
+}
+
+func openSSLDecodeHelpInvocation(args []string) bool {
+	switch len(args) {
+	case 1:
+		return args[0] == "-help"
+	case 2:
+		return args[0] == "-d" && args[1] == "-help" ||
+			args[0] == "-help" && args[1] == "-d"
+	default:
+		return false
 	}
 }
 
@@ -9140,11 +9396,14 @@ func allStaticAbsolutePOSIXPaths(values []string) bool {
 }
 
 type ownedPOSIXOptionParse struct {
-	positionals []string
-	values      map[string]string
-	seen        map[string]struct{}
-	preview     bool
-	complete    bool
+	positionals             []string
+	values                  map[string]string
+	seen                    map[string]struct{}
+	optionPositions         map[string]int
+	firstPositionalPosition int
+	preview                 bool
+	complete                bool
+	repeatedFlag            bool
 }
 
 func exactOptionSet(options ...string) map[string]struct{} {
@@ -9162,9 +9421,11 @@ func parseOwnedPOSIXOptions(
 	previewOptions map[string]struct{},
 ) ownedPOSIXOptionParse {
 	result := ownedPOSIXOptionParse{
-		values:   make(map[string]string),
-		seen:     make(map[string]struct{}),
-		complete: true,
+		values:                  make(map[string]string),
+		seen:                    make(map[string]struct{}),
+		optionPositions:         make(map[string]int),
+		firstPositionalPosition: -1,
+		complete:                true,
 	}
 	options := true
 	for i := 1; i < len(argv); i++ {
@@ -9174,6 +9435,9 @@ func parseOwnedPOSIXOptions(
 			continue
 		}
 		if !options || arg == "-" || !strings.HasPrefix(arg, "-") {
+			if result.firstPositionalPosition < 0 {
+				result.firstPositionalPosition = i
+			}
 			result.positionals = append(result.positionals, arg)
 			continue
 		}
@@ -9181,10 +9445,12 @@ func parseOwnedPOSIXOptions(
 		if strings.HasPrefix(arg, "--") {
 			key, joinedValue, joined := strings.Cut(arg, "=")
 			if _, preview := previewOptions[key]; preview && !joined {
+				result.recordOptionPosition(key, i)
 				result.preview = true
 				continue
 			}
 			if _, consumes := valueOptions[key]; consumes {
+				result.recordOptionPosition(key, i)
 				if _, duplicate := result.seen[key]; duplicate {
 					result.complete = false
 				}
@@ -9205,6 +9471,10 @@ func parseOwnedPOSIXOptions(
 				continue
 			}
 			if _, flag := flagOptions[key]; flag && !joined {
+				result.recordOptionPosition(key, i)
+				if _, duplicate := result.seen[key]; duplicate {
+					result.repeatedFlag = true
+				}
 				result.seen[key] = struct{}{}
 				continue
 			}
@@ -9215,16 +9485,25 @@ func parseOwnedPOSIXOptions(
 		for offset := 1; offset < len(arg); offset++ {
 			key := "-" + arg[offset:offset+1]
 			if _, preview := previewOptions[key]; preview {
+				result.recordOptionPosition(key, i)
 				result.preview = true
 				continue
 			}
 			if _, consumes := valueOptions[key]; consumes {
+				result.recordOptionPosition(key, i)
 				if _, duplicate := result.seen[key]; duplicate {
 					result.complete = false
 				}
 				result.seen[key] = struct{}{}
 				if offset+1 < len(arg) {
-					result.values[key] = arg[offset+1:]
+					value := arg[offset+1:]
+					if strings.HasPrefix(value, "=") {
+						value = strings.TrimPrefix(value, "=")
+					}
+					result.values[key] = value
+					if value == "" {
+						result.complete = false
+					}
 				} else if i+1 >= len(argv) || argv[i+1] == "" {
 					result.complete = false
 				} else {
@@ -9234,6 +9513,10 @@ func parseOwnedPOSIXOptions(
 				break
 			}
 			if _, flag := flagOptions[key]; flag {
+				result.recordOptionPosition(key, i)
+				if _, duplicate := result.seen[key]; duplicate {
+					result.repeatedFlag = true
+				}
 				result.seen[key] = struct{}{}
 				continue
 			}
@@ -9241,6 +9524,15 @@ func parseOwnedPOSIXOptions(
 		}
 	}
 	return result
+}
+
+func (p *ownedPOSIXOptionParse) recordOptionPosition(
+	option string,
+	position int,
+) {
+	if _, present := p.optionPositions[option]; !present {
+		p.optionPositions[option] = position
+	}
 }
 
 func (p ownedPOSIXOptionParse) sawAnyExcept(excluded ...string) bool {

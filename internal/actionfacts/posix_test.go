@@ -280,14 +280,17 @@ func TestParsePOSIXBareBracketIsLiteral(t *testing.T) {
 
 func TestParsePOSIXBackslashEscapesProjectRuntimeArgv(t *testing.T) {
 	out := parsePOSIX(
-		`printf '%s\n' foo\ bar \*.pem \~ "a\q" "a\$b"`,
+		`printf '%s\n' foo\ bar \*.pem \~ "a\q" "a\$b" 'same''quote' 'mixed'"quote"`,
 		1,
 		0,
 	)
 	if out.status != StatusComplete || len(out.commands) != 1 {
 		t.Fatalf("output = %#v", out)
 	}
-	want := []string{"printf", `%s\n`, "foo bar", "*.pem", "~", `a\q`, "a$b"}
+	want := []string{
+		"printf", `%s\n`, "foo bar", "*.pem", "~", `a\q`, "a$b",
+		"samequote", "mixedquote",
+	}
 	if !equalStrings(out.commands[0].Argv, want) ||
 		!out.commands[0].ArgvComplete {
 		t.Fatalf("argv = %#v, want %#v", out.commands[0].Argv, want)

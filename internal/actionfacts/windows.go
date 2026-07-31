@@ -1378,6 +1378,8 @@ func windowsClassifyPowerShell(
 	name := command.Program
 	if name != "stop-process" &&
 		!windowsScannerProgram(name) &&
+		!((name == "reg" || name == "reg.exe") &&
+			windowsRegistryHelpInvocation(args)) &&
 		windowsHasWildcard(args) {
 		builder.out.markPartial(IssueDynamicWord)
 	}
@@ -1486,8 +1488,11 @@ func windowsClassifyPowerShell(
 		windowsClassifySSH(command, args, builder)
 	case "git", "git.exe":
 		windowsClassifyGit(command, args, builder)
-	case "codex", "codex.exe":
-		windowsClassifyCodex(command, args, builder)
+	case "openssl", "openssl.exe":
+		classifyOpenSSLDecode(builder.out, command)
+	case "codex", "codex.exe", "claude", "claude.exe",
+		"gemini", "gemini.exe", "opencode", "opencode.exe":
+		classifyAgentRuntime(builder.out, command, command.Program)
 	case "start-process":
 		windowsAddPowerShellPrimaryPath(command.ID, PathAccessExecute, args, true, builder)
 		if windowsStartProcessHasActionArguments(args) {
@@ -1539,6 +1544,9 @@ func windowsClassifyCMD(
 ) {
 	if command.Program != "taskkill" && command.Program != "taskkill.exe" &&
 		!windowsScannerProgram(command.Program) &&
+		!((command.Program == "certutil" ||
+			command.Program == "certutil.exe") &&
+			windowsCertutilHelpInvocation(args)) &&
 		windowsHasWildcard(args) {
 		builder.out.markPartial(IssueDynamicWord)
 	}
@@ -1595,8 +1603,11 @@ func windowsClassifyCMD(
 		windowsClassifySSH(command, args, builder)
 	case "git", "git.exe":
 		windowsClassifyGit(command, args, builder)
-	case "codex", "codex.exe":
-		windowsClassifyCodex(command, args, builder)
+	case "openssl", "openssl.exe":
+		classifyOpenSSLDecode(builder.out, command)
+	case "codex", "codex.exe", "claude", "claude.exe",
+		"gemini", "gemini.exe", "opencode", "opencode.exe":
+		classifyAgentRuntime(builder.out, command, command.Program)
 	case "powershell", "powershell.exe", "pwsh", "pwsh.exe", "cmd", "cmd.exe",
 		"call", "for", "if", "start", "set", "setlocal":
 		builder.out.markPartial(IssueUnsupportedConstruct)
@@ -3070,180 +3081,6 @@ func windowsGitMessageMasksNoVerify(value string) bool {
 	return value == "-n" || value == "--no-verify"
 }
 
-func windowsClassifyCodex(
-	command *CommandFact,
-	args []windowsWord,
-	builder *windowsFactBuilder,
-) {
-	if !windowsExecutableFamily(command, "codex") || len(args) == 0 {
-		builder.out.markPartial(IssueUnknownOperandGrammar)
-		return
-	}
-	if windowsStaticOption(args[0]) {
-		switch args[0].value {
-		case "--help", "-h", "--version", "-V":
-			command.Effect = EffectPreview
-			return
-		}
-	}
-	if args[0].expands || !strings.EqualFold(args[0].value, "exec") {
-		builder.out.markPartial(IssueUnknownOperandGrammar)
-		return
-	}
-	valid := true
-	payloadSeen := false
-	sandboxSeen := false
-	approvalSeen := false
-	for i := 1; i < len(args); i++ {
-		arg := args[i]
-		if arg.expands || arg.wildcard || arg.value == "" {
-			valid = false
-			continue
-		}
-		if arg.quote == QuoteNone {
-			switch arg.value {
-			case "--help", "-h":
-				command.Effect = EffectPreview
-				return
-			case "--full-auto", "--json", "--skip-git-repo-check",
-				"--ephemeral", "--dangerously-bypass-approvals-and-sandbox":
-				continue
-			case "--sandbox", "-s":
-				value, ok := windowsNextStaticValue(args, &i, true, false)
-				if !ok || sandboxSeen ||
-					!windowsKnownCodexSandbox(value.value) {
-					valid = false
-				} else {
-					sandboxSeen = true
-				}
-				continue
-			case "--ask-for-approval", "--approval-policy", "-a":
-				value, ok := windowsNextStaticValue(args, &i, true, false)
-				if !ok || approvalSeen ||
-					!windowsKnownCodexApproval(value.value) {
-					valid = false
-				} else {
-					approvalSeen = true
-				}
-				continue
-			case "--message":
-				value, ok := windowsNextStaticValue(args, &i, false, false)
-				if !ok || payloadSeen ||
-					windowsCodexMessageMasksControl(value.value) {
-					valid = false
-				} else {
-					payloadSeen = true
-				}
-				continue
-			case "--model", "-m":
-				_, ok := windowsNextStaticValue(args, &i, true, false)
-				if !ok {
-					valid = false
-				}
-				continue
-			case "--color":
-				value, ok := windowsNextStaticValue(args, &i, true, false)
-				if !ok || value.value != "always" &&
-					value.value != "never" &&
-					value.value != "auto" {
-					valid = false
-				}
-				continue
-			}
-			switch {
-			case strings.HasPrefix(arg.value, "--sandbox="):
-				value := strings.TrimPrefix(arg.value, "--sandbox=")
-				if sandboxSeen || !windowsKnownCodexSandbox(value) {
-					valid = false
-				} else {
-					sandboxSeen = true
-				}
-				continue
-			case strings.HasPrefix(arg.value, "-s="):
-				value := strings.TrimPrefix(arg.value, "-s=")
-				if sandboxSeen || !windowsKnownCodexSandbox(value) {
-					valid = false
-				} else {
-					sandboxSeen = true
-				}
-				continue
-			case strings.HasPrefix(arg.value, "--ask-for-approval="):
-				value := strings.TrimPrefix(arg.value, "--ask-for-approval=")
-				if approvalSeen || !windowsKnownCodexApproval(value) {
-					valid = false
-				} else {
-					approvalSeen = true
-				}
-				continue
-			case strings.HasPrefix(arg.value, "--approval-policy="):
-				value := strings.TrimPrefix(arg.value, "--approval-policy=")
-				if approvalSeen || !windowsKnownCodexApproval(value) {
-					valid = false
-				} else {
-					approvalSeen = true
-				}
-				continue
-			case strings.HasPrefix(arg.value, "-a="):
-				value := strings.TrimPrefix(arg.value, "-a=")
-				if approvalSeen || !windowsKnownCodexApproval(value) {
-					valid = false
-				} else {
-					approvalSeen = true
-				}
-				continue
-			case strings.HasPrefix(arg.value, "--message="):
-				value := strings.TrimPrefix(arg.value, "--message=")
-				if value == "" || payloadSeen ||
-					windowsCodexMessageMasksControl(value) {
-					valid = false
-				} else {
-					payloadSeen = true
-				}
-				continue
-			case strings.HasPrefix(arg.value, "-"):
-				valid = false
-				continue
-			}
-		}
-		if payloadSeen {
-			valid = false
-			continue
-		}
-		payloadSeen = true
-	}
-	if !valid || !payloadSeen {
-		builder.out.markPartial(IssueUnknownOperandGrammar)
-	}
-}
-
-func windowsKnownCodexSandbox(value string) bool {
-	switch value {
-	case "read-only", "workspace-write", "danger-full-access":
-		return true
-	default:
-		return false
-	}
-}
-
-func windowsKnownCodexApproval(value string) bool {
-	switch value {
-	case "untrusted", "on-failure", "on-request", "never":
-		return true
-	default:
-		return false
-	}
-}
-
-func windowsCodexMessageMasksControl(value string) bool {
-	switch value {
-	case "--sandbox", "-s", "--ask-for-approval", "--approval-policy", "-a",
-		"--dangerously-bypass-approvals-and-sandbox":
-		return true
-	default:
-		return false
-	}
-}
-
 func windowsStaticOption(word windowsWord) bool {
 	return !word.expands && !word.wildcard &&
 		word.quote == QuoteNone && word.value != ""
@@ -4605,6 +4442,10 @@ func windowsClassifyCertutil(
 	args []windowsWord,
 	builder *windowsFactBuilder,
 ) {
+	if windowsCertutilHelpInvocation(args) {
+		command.Effect = EffectPreview
+		return
+	}
 	mode := ""
 	hasSplit := false
 	uncertain := false
@@ -4699,11 +4540,32 @@ func windowsClassifyCertutil(
 	}
 }
 
+func windowsCertutilHelpInvocation(args []windowsWord) bool {
+	if len(args) == 1 {
+		return !args[0].expands &&
+			strings.EqualFold(args[0].value, "-?")
+	}
+	if len(args) != 2 || args[0].expands || args[1].expands ||
+		!strings.EqualFold(args[1].value, "-?") {
+		return false
+	}
+	switch strings.ToLower(args[0].value) {
+	case "-decode", "-decodehex", "-urlcache":
+		return true
+	default:
+		return false
+	}
+}
+
 func windowsClassifyRegistry(
 	command *CommandFact,
 	args []windowsWord,
 	builder *windowsFactBuilder,
 ) {
+	if windowsRegistryHelpInvocation(args) {
+		command.Effect = EffectPreview
+		return
+	}
 	if len(args) < 2 || args[0].expands || args[1].expands {
 		builder.out.markPartial(IssueUnknownOperandGrammar)
 		return
@@ -4725,34 +4587,64 @@ func windowsClassifyRegistry(
 	}
 	builder.addPath(command.ID, access, args[1].value)
 
-	valueSwitches := map[string]bool{"/v": true, "/t": true, "/d": true, "/se": true}
-	flagSwitches := map[string]bool{
-		"/ve": true, "/va": true, "/f": true, "/reg:32": true, "/reg:64": true, "/z": true,
-	}
-	if verb == "add" {
-		valueSwitches["/s"] = true
-	} else if verb == "query" {
-		flagSwitches["/s"] = true
+	var (
+		valueSwitches         map[string]struct{}
+		optionalValueSwitches map[string]struct{}
+		flagSwitches          map[string]struct{}
+	)
+	switch verb {
+	case "add":
+		valueSwitches = exactOptionSet("/v", "/t", "/s", "/d")
+		flagSwitches = exactOptionSet("/ve", "/f", "/reg:32", "/reg:64")
+	case "delete":
+		valueSwitches = exactOptionSet("/v")
+		flagSwitches = exactOptionSet(
+			"/ve", "/va", "/f", "/reg:32", "/reg:64",
+		)
+	case "query":
+		valueSwitches = exactOptionSet("/se", "/f", "/t")
+		optionalValueSwitches = exactOptionSet("/v")
+		flagSwitches = exactOptionSet(
+			"/ve", "/s", "/k", "/d", "/c", "/e", "/z",
+			"/reg:32", "/reg:64",
+		)
 	}
 	seen := make(map[string]struct{})
+	queryValueNameOmitted := false
 	for i := 2; i < len(args); i++ {
 		if args[i].expands {
 			builder.out.markPartial(IssueDynamicWord)
 			continue
 		}
 		lower := strings.ToLower(args[i].value)
-		if valueSwitches[lower] {
+		if _, consumes := valueSwitches[lower]; consumes {
 			if _, duplicate := seen[lower]; duplicate {
 				builder.out.markPartial(IssueUnknownOperandGrammar)
 			}
 			seen[lower] = struct{}{}
 			i++
-			if i >= len(args) || args[i].expands {
+			if i >= len(args) || args[i].expands ||
+				args[i].value == "" ||
+				strings.HasPrefix(args[i].value, "/") {
 				builder.out.markPartial(IssueUnknownOperandGrammar)
 			}
 			continue
 		}
-		if flagSwitches[lower] {
+		if _, optional := optionalValueSwitches[lower]; optional {
+			if _, duplicate := seen[lower]; duplicate {
+				builder.out.markPartial(IssueUnknownOperandGrammar)
+			}
+			seen[lower] = struct{}{}
+			if i+1 < len(args) && !args[i+1].expands &&
+				args[i+1].value != "" &&
+				!strings.HasPrefix(args[i+1].value, "/") {
+				i++
+			} else {
+				queryValueNameOmitted = true
+			}
+			continue
+		}
+		if _, flag := flagSwitches[lower]; flag {
 			if _, duplicate := seen[lower]; duplicate {
 				builder.out.markPartial(IssueUnknownOperandGrammar)
 			}
@@ -4761,10 +4653,60 @@ func windowsClassifyRegistry(
 		}
 		builder.out.markPartial(IssueUnknownOperandGrammar)
 	}
-	if _, named := seen["/v"]; named {
-		if _, defaultValue := seen["/ve"]; defaultValue {
+	if windowsRegistryOptionsConflict(seen, "/reg:32", "/reg:64") {
+		builder.out.markPartial(IssueUnknownOperandGrammar)
+	}
+	switch verb {
+	case "add":
+		if windowsRegistryOptionsConflict(seen, "/v", "/ve") {
 			builder.out.markPartial(IssueUnknownOperandGrammar)
 		}
+	case "delete":
+		if windowsRegistryOptionsConflict(seen, "/v", "/ve", "/va") {
+			builder.out.markPartial(IssueUnknownOperandGrammar)
+		}
+	case "query":
+		if windowsRegistryOptionsConflict(seen, "/v", "/ve") {
+			builder.out.markPartial(IssueUnknownOperandGrammar)
+		}
+		_, search := seen["/f"]
+		if queryValueNameOmitted && !search {
+			builder.out.markPartial(IssueUnknownOperandGrammar)
+		}
+		for _, dependent := range []string{"/k", "/d", "/c", "/e"} {
+			if _, present := seen[dependent]; present && !search {
+				builder.out.markPartial(IssueUnknownOperandGrammar)
+			}
+		}
+	}
+}
+
+func windowsRegistryOptionsConflict(
+	seen map[string]struct{},
+	options ...string,
+) bool {
+	count := 0
+	for _, option := range options {
+		if _, present := seen[option]; present {
+			count++
+		}
+	}
+	return count > 1
+}
+
+func windowsRegistryHelpInvocation(args []windowsWord) bool {
+	if len(args) == 1 {
+		return !args[0].expands && strings.EqualFold(args[0].value, "/?")
+	}
+	if len(args) != 2 || args[0].expands || args[1].expands ||
+		!strings.EqualFold(args[1].value, "/?") {
+		return false
+	}
+	switch strings.ToLower(args[0].value) {
+	case "add", "delete", "query":
+		return true
+	default:
+		return false
 	}
 }
 

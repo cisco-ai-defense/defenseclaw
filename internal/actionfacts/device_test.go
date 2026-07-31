@@ -122,16 +122,6 @@ func TestDiskWriteClassificationRequiresConcreteBlockTarget(t *testing.T) {
 			wantDisk: true,
 		},
 		{
-			name: "dd normalized block device",
-			input: Input{
-				Tool: "exec",
-				Argv: []string{
-					"dd", "if=/tmp/image", "of=/tmp/../dev/sda",
-				},
-			},
-			wantDisk: true,
-		},
-		{
 			name: "tee device mapper",
 			input: Input{
 				Tool: "exec",

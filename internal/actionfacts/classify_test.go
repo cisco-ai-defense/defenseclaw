@@ -1893,9 +1893,8 @@ func TestStructuredWindowsGitAndAgentRuntimeOwnership(t *testing.T) {
 		{
 			name: "codex paired policies",
 			argv: []string{
-				"codex.exe", "exec",
-				"--sandbox", "danger-full-access",
-				"--ask-for-approval", "never", "fixture",
+				"codex.exe", "--sandbox", "danger-full-access",
+				"--ask-for-approval", "never", "exec", "fixture",
 			},
 		},
 		{
@@ -1918,10 +1917,6 @@ func TestStructuredWindowsGitAndAgentRuntimeOwnership(t *testing.T) {
 				"gemini.exe", "-p", "fixture", "-o", "json",
 				"--approval-mode", "yolo",
 			},
-		},
-		{
-			name: "opencode yolo",
-			argv: []string{"opencode.exe", "run", "--yolo"},
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -1950,6 +1945,11 @@ func TestStructuredWindowsGitAndAgentRuntimeOwnership(t *testing.T) {
 			"--future-mode", "fixture",
 		},
 		{"codex.exe", "exec", "--future-mode", "fixture"},
+		{"codex.exe", "exec", "--message", "fixture"},
+		{
+			"codex.exe", "--color", "never",
+			"-a", "never", "exec", "-s", "danger-full-access",
+		},
 		{"claude.exe", "--permission-mode"},
 		{
 			"claude.exe", "--permission-mode",
@@ -1957,6 +1957,7 @@ func TestStructuredWindowsGitAndAgentRuntimeOwnership(t *testing.T) {
 		},
 		{"gemini.exe", "--approval-mode"},
 		{"gemini.exe", "--approval-mode", "--yolo"},
+		{"opencode.exe", "run", "--yolo"},
 		{"opencode.exe", "run", "--future-mode"},
 		{"opencode.exe", "run", "--model", "--yolo"},
 	} {
@@ -4225,6 +4226,389 @@ func TestSemanticOperationsRequireMutatingOrReadingSubcommands(t *testing.T) {
 	}
 }
 
+func TestUnownedStructuredCommandGrammarRemainsFallbackOnly(t *testing.T) {
+	tests := []struct {
+		name    string
+		argv    []string
+		dialect Dialect
+		retain  OperationKind
+		reject  OperationKind
+	}{
+		{
+			name: "doas", argv: []string{"doas", "id"},
+			dialect: DialectPOSIX, retain: OperationPrivilege,
+		},
+		{
+			name: "su", argv: []string{"su", "-c", "id"},
+			dialect: DialectPOSIX, retain: OperationPrivilege,
+		},
+		{
+			name: "pkexec", argv: []string{"pkexec", "id"},
+			dialect: DialectPOSIX, retain: OperationPrivilege,
+		},
+		{
+			name: "runas",
+			argv: []string{
+				"runas", "/user:Administrator", "cmd.exe /c whoami",
+			},
+			dialect: DialectCMD, retain: OperationPrivilege,
+		},
+		{
+			name: "registry POSIX dialect",
+			argv: []string{
+				"reg", "query", `HKCU\Software\DefenseClaw`,
+			},
+			dialect: DialectPOSIX, reject: OperationRead,
+		},
+		{
+			name:    "OpenSSL encode",
+			argv:    []string{"openssl", "base64", "-in", "input.txt"},
+			dialect: DialectPOSIX, reject: OperationDecode,
+		},
+		{
+			name:    "OpenSSL unknown mode",
+			argv:    []string{"openssl", "dgst", "-sha256", "input.txt"},
+			dialect: DialectPOSIX, reject: OperationDecode,
+		},
+		{
+			name:    "OpenSSL uppercase subcommand",
+			argv:    []string{"openssl", "ENC", "-d"},
+			dialect: DialectPOSIX, reject: OperationDecode,
+		},
+		{
+			name:    "OpenSSL unsupported decrypt alias",
+			argv:    []string{"openssl", "enc", "-decrypt"},
+			dialect: DialectPOSIX, reject: OperationDecode,
+		},
+		{
+			name: "OpenSSL mixed decode help",
+			argv: []string{
+				"openssl", "enc", "-d", "-help", "-in", "encoded.txt",
+			},
+			dialect: DialectPOSIX, retain: OperationDecode,
+		},
+		{
+			name: "OpenSSL repeated decode help",
+			argv: []string{
+				"openssl", "enc", "-d", "-help", "-help",
+			},
+			dialect: DialectPOSIX, retain: OperationDecode,
+		},
+		{
+			name: "OpenSSL unknown decode option",
+			argv: []string{
+				"openssl", "enc", "-d", "-future-option",
+			},
+			dialect: DialectPOSIX, retain: OperationDecode,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			facts := Analyze(Input{
+				Tool:        "exec",
+				Argv:        test.argv,
+				DialectHint: test.dialect,
+			})
+			if facts.Parse.Status != StatusPartial ||
+				facts.Authoritative() ||
+				facts.EnforcementEligible() ||
+				facts.EnforcementProjection().EnforcementEligible() {
+				t.Fatalf("facts = %#v", facts)
+			}
+			if test.retain != "" &&
+				!factsHaveOperation(facts, test.retain) {
+				t.Fatalf("missing %q operation: %#v", test.retain, facts)
+			}
+			if test.reject != "" &&
+				factsHaveOperation(facts, test.reject) {
+				t.Fatalf("unexpected %q operation: %#v", test.reject, facts)
+			}
+		})
+	}
+}
+
+func TestOwnedOpenSSLDecodeGrammarIsAuthoritative(t *testing.T) {
+	for _, argv := range [][]string{
+		{"openssl", "base64", "-d", "-in", "encoded.txt"},
+		{
+			"openssl", "enc", "-d",
+			"-in", "encoded.txt", "-out", "decoded.bin",
+		},
+	} {
+		facts := Analyze(Input{
+			Tool:        "exec",
+			Argv:        argv,
+			DialectHint: DialectPOSIX,
+		})
+		if !facts.Authoritative() ||
+			!facts.EnforcementEligible() ||
+			!factsHaveOperation(facts, OperationDecode) {
+			t.Fatalf("%v facts = %#v", argv, facts)
+		}
+	}
+
+	for _, argv := range [][]string{
+		{"openssl", "base64", "-help"},
+		{"openssl", "base64", "-help", "-d"},
+		{"openssl", "enc", "-d", "-help"},
+	} {
+		facts := Analyze(Input{
+			Tool:        "exec",
+			Argv:        argv,
+			DialectHint: DialectPOSIX,
+		})
+		if !facts.Authoritative() ||
+			facts.EnforcementEligible() ||
+			len(facts.Commands) != 1 ||
+			facts.Commands[0].Effect != EffectPreview ||
+			factsHaveOperation(facts, OperationDecode) ||
+			len(facts.Paths) != 0 ||
+			len(facts.DataFlows) != 0 {
+			t.Fatalf("%v help facts = %#v", argv, facts)
+		}
+	}
+}
+
+func TestAgentRuntimeRawStructuredParity(t *testing.T) {
+	tests := []struct {
+		name      string
+		argv      []string
+		effect    CommandEffect
+		enforcing bool
+		bypass    bool
+	}{
+		{
+			name: "Claude direct permission bypass",
+			argv: []string{
+				"claude", "--dangerously-skip-permissions", "-p", "fixture",
+			},
+			effect: EffectExecute, enforcing: true, bypass: true,
+		},
+		{
+			name: "Claude joined permission bypass",
+			argv: []string{
+				"claude", "--permission-mode=bypassPermissions",
+			},
+			effect: EffectExecute, enforcing: true, bypass: true,
+		},
+		{
+			name: "Codex joined stdin controls",
+			argv: []string{
+				"codex", "--ask-for-approval=never", "exec",
+				"--sandbox=danger-full-access",
+			},
+			effect: EffectExecute, enforcing: true, bypass: true,
+		},
+		{
+			name: "Codex short equals controls",
+			argv: []string{
+				"codex", "-s=danger-full-access", "-a=never",
+				"exec", "fixture",
+			},
+			effect: EffectExecute, enforcing: true, bypass: true,
+		},
+		{
+			name: "Codex exec alias",
+			argv: []string{
+				"codex", "-a", "never", "e",
+				"-s", "danger-full-access", "fixture",
+			},
+			effect: EffectExecute, enforcing: true, bypass: true,
+		},
+		{
+			name: "Codex foreign option value",
+			argv: []string{
+				"codex", "--ask-for-approval", "never", "exec",
+				"--sandbox", "workspace-write",
+				"--model", "danger-full-access", "fixture",
+			},
+			effect: EffectExecute, enforcing: true,
+		},
+		{
+			name: "Claude foreign option value",
+			argv: []string{
+				"claude", "--permission-mode", "manual",
+				"--model", "bypassPermissions", "-p", "fixture",
+			},
+			effect: EffectExecute, enforcing: true,
+		},
+		{
+			name:   "Gemini yolo fact",
+			argv:   []string{"gemini", "--yolo", "-p", "fixture"},
+			effect: EffectExecute, enforcing: true, bypass: true,
+		},
+		{
+			name: "Claude help",
+			argv: []string{
+				"claude", "--help",
+				"--permission-mode=bypassPermissions",
+			},
+			effect: EffectPreview,
+		},
+		{
+			name:   "Codex help",
+			argv:   []string{"codex", "exec", "--help"},
+			effect: EffectPreview,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			inputs := []Input{
+				{
+					Tool: "exec", Command: strings.Join(test.argv, " "),
+					DialectHint: DialectPOSIX,
+				},
+				{
+					Tool: "exec", Argv: test.argv,
+					DialectHint: DialectPOSIX,
+				},
+			}
+			for _, input := range inputs {
+				facts := Analyze(input)
+				if !facts.Authoritative() ||
+					len(facts.Commands) != 1 ||
+					facts.Commands[0].Effect != test.effect ||
+					facts.EnforcementEligible() != test.enforcing ||
+					commandHasOperation(
+						facts.Commands[0],
+						OperationPolicyBypass,
+					) != test.bypass {
+					t.Fatalf("%#v facts = %#v", input, facts)
+				}
+			}
+		})
+	}
+
+	for _, input := range []Input{
+		{
+			Tool: "exec", Command: `claude '--permission-mode=bypassPermissions'`,
+			DialectHint: DialectPOSIX,
+		},
+		{
+			Tool: "exec", Argv: []string{"opencode", "run", "--future-mode"},
+			DialectHint: DialectPOSIX,
+		},
+		{
+			Tool: "exec", Argv: []string{"opencode", "run", "--yolo"},
+			DialectHint: DialectPOSIX,
+		},
+		{
+			Tool: "exec",
+			Argv: []string{
+				"codex", "EXEC",
+				"--dangerously-bypass-approvals-and-sandbox",
+			},
+			DialectHint: DialectPOSIX,
+		},
+		{
+			Tool:        "exec",
+			Argv:        []string{"opencode", "RUN", "--yolo"},
+			DialectHint: DialectPOSIX,
+		},
+		{
+			Tool:        "exec",
+			Command:     `claude.exe "--permission-mode=bypassPermissions"`,
+			DialectHint: DialectCMD,
+		},
+		{
+			Tool:        "exec",
+			Command:     `claude.exe '--permission-mode=bypassPermissions'`,
+			DialectHint: DialectPowerShell,
+		},
+		{
+			Tool: "exec", Command: `opencode.exe run --future-mode`,
+			DialectHint: DialectCMD,
+		},
+		{
+			Tool: "exec",
+			Argv: []string{
+				"claude", "--dangerously-skip-permissions",
+				"--dangerously-skip-permissions", "-p", "fixture",
+			},
+			DialectHint: DialectPOSIX,
+		},
+		{
+			Tool: "exec",
+			Argv: []string{
+				"claude", "--dangerously-skip-permissions",
+				"--permission-mode", "bypassPermissions", "-p", "fixture",
+			},
+			DialectHint: DialectPOSIX,
+		},
+		{
+			Tool: "exec",
+			Argv: []string{
+				"claude", "--permission-mode", "BYPASSPERMISSIONS",
+				"-p", "fixture",
+			},
+			DialectHint: DialectPOSIX,
+		},
+		{
+			Tool: "exec",
+			Argv: []string{
+				"codex",
+				"--dangerously-bypass-approvals-and-sandbox",
+				"--sandbox", "danger-full-access",
+				"--ask-for-approval", "never", "exec", "fixture",
+			},
+			DialectHint: DialectPOSIX,
+		},
+		{
+			Tool: "exec",
+			Argv: []string{
+				"opencode", "run", "--yolo", "--yolo",
+			},
+			DialectHint: DialectPOSIX,
+		},
+		{
+			Tool: "exec",
+			Argv: []string{
+				"codex", "exec", "-s", "danger-full-access",
+				"-a", "never", "fixture",
+			},
+			DialectHint: DialectPOSIX,
+		},
+		{
+			Tool: "exec",
+			Argv: []string{
+				"codex", "--color", "never",
+				"-s", "danger-full-access",
+				"-a", "never", "exec", "fixture",
+			},
+			DialectHint: DialectPOSIX,
+		},
+		{
+			Tool: "exec",
+			Argv: []string{
+				"codex", "-s", "danger-full-access",
+				"-a", "never", "--message", "fixture", "exec",
+			},
+			DialectHint: DialectPOSIX,
+		},
+		{
+			Tool: "exec",
+			Argv: []string{
+				"claude", "--help", "--future-option",
+			},
+			DialectHint: DialectPOSIX,
+		},
+		{
+			Tool: "exec",
+			Argv: []string{
+				"codex", "exec", "--help", "--future-option",
+			},
+			DialectHint: DialectPOSIX,
+		},
+	} {
+		facts := Analyze(input)
+		if facts.Authoritative() ||
+			facts.EnforcementEligible() ||
+			factsHaveOperation(facts, OperationPolicyBypass) {
+			t.Fatalf("%#v facts = %#v", input, facts)
+		}
+	}
+}
+
 func TestCommandSpecificNoEffectPrecedence(t *testing.T) {
 	t.Run("curl help", func(t *testing.T) {
 		out := classifyTestArgv([]string{
@@ -4925,14 +5309,38 @@ func TestTunnelDecodeAndCrontabGrammarsAreClosed(t *testing.T) {
 		t.Fatalf("generic tunnel fallback output=%#v", generic)
 	}
 
-	decode := classifyTestArgv([]string{
-		"base64", "-di", "/srv/payload.b64",
+	for _, bundle := range []string{"-di", "-id", "-Di", "-dd", "-dD"} {
+		decode := classifyTestArgvAs(
+			[]string{"base64", bundle, "/srv/payload.b64"},
+			DialectPOSIX,
+		)
+		if decode.status != StatusPartial ||
+			!commandHasOperation(decode.commands[0], OperationDecode) ||
+			!outputHasPath(decode, PathAccessRead, "/srv/payload.b64") ||
+			decode.facts("argv", "").EnforcementEligible() {
+			t.Fatalf("bundle=%q decode output=%#v", bundle, decode)
+		}
+	}
+	rawDecode := Analyze(Input{
+		Tool:        "exec",
+		Command:     "base64 -di /srv/payload.b64",
+		DialectHint: DialectPOSIX,
 	})
-	if decode.status != StatusPartial ||
-		!commandHasOperation(decode.commands[0], OperationDecode) ||
-		!outputHasPath(decode, PathAccessRead, "/srv/payload.b64") ||
-		decode.facts("argv", "").EnforcementEligible() {
-		t.Fatalf("decode output=%#v", decode)
+	if rawDecode.Parse.Status != StatusPartial ||
+		rawDecode.EnforcementEligible() ||
+		!factsHaveOperation(rawDecode, OperationDecode) ||
+		!factsHavePath(rawDecode, PathAccessRead, "/srv/payload.b64") {
+		t.Fatalf("raw decode output=%#v", rawDecode)
+	}
+	exactDecode := classifyTestArgvAs(
+		[]string{"base64", "-d", "/srv/payload.b64"},
+		DialectPOSIX,
+	)
+	if exactDecode.status != StatusComplete ||
+		!commandHasOperation(exactDecode.commands[0], OperationDecode) ||
+		!outputHasPath(exactDecode, PathAccessRead, "/srv/payload.b64") ||
+		!exactDecode.facts("argv", "").EnforcementEligible() {
+		t.Fatalf("exact decode output=%#v", exactDecode)
 	}
 	unknownDecode := classifyTestArgv([]string{
 		"base64", "-d", "--future-mode", "/srv/payload.b64",
@@ -4940,6 +5348,15 @@ func TestTunnelDecodeAndCrontabGrammarsAreClosed(t *testing.T) {
 	if unknownDecode.status != StatusPartial ||
 		unknownDecode.facts("argv", "").EnforcementEligible() {
 		t.Fatalf("unknown decode output=%#v", unknownDecode)
+	}
+	for _, option := range []string{"-ix", "-i", "--decode-extra"} {
+		out := classifyTestArgvAs(
+			[]string{"base64", option, "/srv/payload.b64"},
+			DialectPOSIX,
+		)
+		if commandHasOperation(out.commands[0], OperationDecode) {
+			t.Fatalf("non-decode option=%q output=%#v", option, out)
+		}
 	}
 
 	schedule := classifyTestArgv([]string{
@@ -5041,10 +5458,12 @@ func TestContainerNativeDispatchAndLongOptionsAreCaseSensitive(t *testing.T) {
 
 func TestNetAccountsMutationGrammarIsClosed(t *testing.T) {
 	for _, option := range []string{
+		"/forcelogoff:30",
 		"/minpwlen:14",
 		"/maxpwage:90",
 		"/minpwage:1",
 		"/uniquepw:12",
+		"/uniquepw:24",
 		"/forcelogoff:no",
 	} {
 		out := classifyTestArgvAs(
@@ -5055,7 +5474,9 @@ func TestNetAccountsMutationGrammarIsClosed(t *testing.T) {
 			!commandHasOperation(
 				out.commands[0],
 				OperationAccountChange,
-			) {
+			) ||
+			commandHasOperation(out.commands[0], OperationList) ||
+			!out.facts("argv", "").EnforcementEligible() {
 			t.Fatalf("option=%s output=%#v", option, out)
 		}
 	}
@@ -5070,15 +5491,19 @@ func TestNetAccountsMutationGrammarIsClosed(t *testing.T) {
 			commandHasOperation(
 				out.commands[0],
 				OperationAccountChange,
-			) {
+			) ||
+			!out.facts("argv", "").EnforcementEligible() {
 			t.Fatalf("query argv=%v output=%#v", argv, out)
 		}
 	}
 
 	for _, option := range []string{
 		"/future",
+		"/future:fixture",
 		"/minpwlen:",
 		"/minpwlen:not-a-number",
+		"/maxpwage:never",
+		"/uniquepw:-1",
 	} {
 		out := classifyTestArgvAs(
 			[]string{"net.exe", "accounts", option},
@@ -5088,6 +5513,21 @@ func TestNetAccountsMutationGrammarIsClosed(t *testing.T) {
 			out.facts("argv", "").EnforcementEligible() {
 			t.Fatalf("option=%s output=%#v", option, out)
 		}
+	}
+
+	preview := classifyTestArgvAs(
+		[]string{"net.exe", "accounts", "/?"},
+		DialectCMD,
+	)
+	if preview.status != StatusComplete ||
+		len(preview.commands) != 1 ||
+		preview.commands[0].Effect != EffectPreview ||
+		commandHasOperation(
+			preview.commands[0],
+			OperationAccountChange,
+		) ||
+		preview.facts("argv", "").EnforcementEligible() {
+		t.Fatalf("accounts preview output=%#v", preview)
 	}
 }
 
