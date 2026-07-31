@@ -1240,17 +1240,43 @@ def _windows_acl_has_required_access(path: str | os.PathLike[str]) -> bool:
         return False
     if not current_sid or null_dacl or owner_sid != current_sid:
         return False
-    allowed = {
-        sid for permissions, access_mode, _inheritance, sid in entries if access_mode in (1, 2) and permissions != 0
-    }
-    denied = {sid for permissions, access_mode, _inheritance, sid in entries if access_mode == 3 and permissions != 0}
+
+    file_read_data = 0x00000001
+    file_write_data = 0x00000002
+    required_content = file_read_data | file_write_data
+    generic_all = 0x10000000
+    generic_read = 0x80000000
+    generic_write = 0x40000000
+    inherit_only_ace = 0x08
+
+    def _content_mask(permissions: int) -> int:
+        concrete = permissions & required_content
+        if permissions & generic_all:
+            concrete |= required_content
+        if permissions & generic_read:
+            concrete |= file_read_data
+        if permissions & generic_write:
+            concrete |= file_write_data
+        return concrete
+
+    # Without complete token-group expansion for both the interactive owner
+    # and LocalSystem, an applicable group deny cannot be proven irrelevant.
+    # Reject it conservatively instead of preserving an unusable secret DACL.
+    for permissions, access_mode, inheritance, _sid in entries:
+        if access_mode == 3 and not inheritance & inherit_only_ace and _content_mask(permissions):
+            return False
+
+    def _has_content_access(principal_sids: set[str]) -> bool:
+        allowed_content = 0
+        for permissions, access_mode, inheritance, sid in entries:
+            if inheritance & inherit_only_ace or sid not in principal_sids:
+                continue
+            if access_mode in (1, 2):
+                allowed_content |= _content_mask(permissions)
+        return allowed_content == required_content
+
     required_owner_sids = {current_sid, "S-1-3-4"}
-    return (
-        "S-1-5-18" in allowed
-        and "S-1-5-18" not in denied
-        and bool(required_owner_sids & allowed)
-        and not required_owner_sids & denied
-    )
+    return _has_content_access({"S-1-5-18"}) and _has_content_access(required_owner_sids)
 
 
 def _windows_current_user_sid() -> str:

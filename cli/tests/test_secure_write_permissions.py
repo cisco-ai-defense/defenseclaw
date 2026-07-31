@@ -451,6 +451,34 @@ def test_owner_only_directory_assertion_rejects_untrusted_read_access(tmp_path):
 
 @pytest.mark.skipif(os.name != "nt", reason="validates native Windows DACL preservation")
 @pytest.mark.allow_subprocess
+def test_windows_required_access_rejects_metadata_only_native_dacl(tmp_path):
+    target = tmp_path / "metadata-only.json"
+    target.write_text("old", encoding="utf-8")
+    file_permissions._set_windows_current_user_owner(os.fspath(target))
+    current_sid = file_permissions._windows_current_user_sid()
+    subprocess.run(
+        [
+            "icacls",
+            os.fspath(target),
+            "/inheritance:r",
+            "/grant:r",
+            f"*{current_sid}:(RC,RA)",
+            "*S-1-5-18:(RC,RA)",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    try:
+        assert file_permissions._windows_acl_has_required_access(target) is False
+        assert file_permissions.windows_acl_confidentiality_error(target) == "owner/SYSTEM effective access is missing"
+    finally:
+        # Retain enough access for pytest to remove the fixture.
+        file_permissions._set_windows_owner_only_acl(os.fspath(target))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="validates native Windows DACL preservation")
+@pytest.mark.allow_subprocess
 def test_private_atomic_rewrite_preserves_stricter_existing_windows_dacl(tmp_path):
     target = tmp_path / "stricter ACL 雪.json"
     target.write_text("old", encoding="utf-8")
@@ -462,7 +490,7 @@ def test_private_atomic_rewrite_preserves_stricter_existing_windows_dacl(tmp_pat
             "/inheritance:r",
             "/grant:r",
             "*S-1-3-4:F",
-            "*S-1-5-18:R",
+            "*S-1-5-18:M",
         ],
         check=True,
         capture_output=True,
@@ -835,6 +863,134 @@ def test_windows_required_access_rejects_sid_resolution_error(monkeypatch):
     assert file_permissions._windows_acl_has_required_access("synthetic-user-path") is False
 
 
+def test_windows_required_access_rejects_metadata_only_grants(monkeypatch):
+    current_sid = "S-1-5-21-current"
+    fake_os = SimpleNamespace(name="nt", fspath=os.fspath)
+    metadata_only = 0x00020000 | 0x00000080  # READ_CONTROL | FILE_READ_ATTRIBUTES
+    entries = [
+        (metadata_only, 1, 0, current_sid),
+        (metadata_only, 1, 0, "S-1-5-18"),
+    ]
+    monkeypatch.setattr(file_permissions, "os", fake_os)
+    monkeypatch.setattr(
+        file_permissions,
+        "_windows_acl_snapshot",
+        lambda _path: (current_sid, False, entries),
+    )
+    monkeypatch.setattr(file_permissions, "_windows_current_user_sid", lambda: current_sid)
+
+    assert file_permissions._windows_acl_has_required_access("synthetic.env") is False
+    assert (
+        file_permissions.windows_acl_confidentiality_error("synthetic.env")
+        == "owner/SYSTEM effective access is missing"
+    )
+
+
+@pytest.mark.parametrize(
+    "permissions",
+    [
+        0x00000001 | 0x00000002,  # FILE_READ_DATA | FILE_WRITE_DATA
+        0x80000000 | 0x40000000,  # GENERIC_READ | GENERIC_WRITE
+        0x10000000,  # GENERIC_ALL
+    ],
+)
+def test_windows_required_access_maps_content_and_generic_rights(monkeypatch, permissions):
+    current_sid = "S-1-5-21-current"
+    fake_os = SimpleNamespace(name="nt", fspath=os.fspath)
+    entries = [
+        (permissions, 1, 0, current_sid),
+        (permissions, 1, 0, "S-1-5-18"),
+    ]
+    monkeypatch.setattr(file_permissions, "os", fake_os)
+    monkeypatch.setattr(
+        file_permissions,
+        "_windows_acl_snapshot",
+        lambda _path: (current_sid, False, entries),
+    )
+    monkeypatch.setattr(file_permissions, "_windows_current_user_sid", lambda: current_sid)
+
+    assert file_permissions._windows_acl_has_required_access("synthetic.env") is True
+
+
+def test_windows_required_access_accepts_owner_rights_and_split_grants(monkeypatch):
+    current_sid = "S-1-5-21-current"
+    fake_os = SimpleNamespace(name="nt", fspath=os.fspath)
+    entries = [
+        (0x00000001, 1, 0, "S-1-3-4"),
+        (0x00000002, 1, 0, "S-1-3-4"),
+        (0x80000000, 1, 0, "S-1-5-18"),
+        (0x40000000, 1, 0, "S-1-5-18"),
+    ]
+    monkeypatch.setattr(file_permissions, "os", fake_os)
+    monkeypatch.setattr(
+        file_permissions,
+        "_windows_acl_snapshot",
+        lambda _path: (current_sid, False, entries),
+    )
+    monkeypatch.setattr(file_permissions, "_windows_current_user_sid", lambda: current_sid)
+
+    assert file_permissions._windows_acl_has_required_access("synthetic.env") is True
+
+
+@pytest.mark.parametrize("denied_permissions", [0x00000002, 0x40000000, 0x10000000])
+@pytest.mark.parametrize("denied_sid", ["S-1-5-21-current", "S-1-5-18", "S-1-1-0"])
+def test_windows_required_access_rejects_applicable_deny(monkeypatch, denied_permissions, denied_sid):
+    current_sid = "S-1-5-21-current"
+    fake_os = SimpleNamespace(name="nt", fspath=os.fspath)
+    entries = [
+        (0x10000000, 1, 0, current_sid),
+        (0x10000000, 1, 0, "S-1-5-18"),
+        (denied_permissions, 3, 0, denied_sid),
+    ]
+    monkeypatch.setattr(file_permissions, "os", fake_os)
+    monkeypatch.setattr(
+        file_permissions,
+        "_windows_acl_snapshot",
+        lambda _path: (current_sid, False, entries),
+    )
+    monkeypatch.setattr(file_permissions, "_windows_current_user_sid", lambda: current_sid)
+
+    assert file_permissions._windows_acl_has_required_access("synthetic.env") is False
+
+
+@pytest.mark.parametrize("access_mode", [1, 3])
+def test_windows_required_access_ignores_inherit_only_ace(monkeypatch, access_mode):
+    current_sid = "S-1-5-21-current"
+    fake_os = SimpleNamespace(name="nt", fspath=os.fspath)
+    entries = [
+        (0x10000000, 1, 0, current_sid),
+        (0x10000000, 1, 0, "S-1-5-18"),
+        (0x10000000, access_mode, 0x08, "S-1-1-0"),
+    ]
+    monkeypatch.setattr(file_permissions, "os", fake_os)
+    monkeypatch.setattr(
+        file_permissions,
+        "_windows_acl_snapshot",
+        lambda _path: (current_sid, False, entries),
+    )
+    monkeypatch.setattr(file_permissions, "_windows_current_user_sid", lambda: current_sid)
+
+    assert file_permissions._windows_acl_has_required_access("synthetic.env") is True
+
+
+def test_windows_required_access_rejects_inherit_only_required_grants(monkeypatch):
+    current_sid = "S-1-5-21-current"
+    fake_os = SimpleNamespace(name="nt", fspath=os.fspath)
+    entries = [
+        (0x10000000, 1, 0x08, current_sid),
+        (0x10000000, 1, 0x08, "S-1-5-18"),
+    ]
+    monkeypatch.setattr(file_permissions, "os", fake_os)
+    monkeypatch.setattr(
+        file_permissions,
+        "_windows_acl_snapshot",
+        lambda _path: (current_sid, False, entries),
+    )
+    monkeypatch.setattr(file_permissions, "_windows_current_user_sid", lambda: current_sid)
+
+    assert file_permissions._windows_acl_has_required_access("synthetic.env") is False
+
+
 def test_windows_confidentiality_accepts_owner_and_system_only(monkeypatch):
     current_sid = "S-1-5-21-current"
     fake_os = SimpleNamespace(name="nt", fspath=os.fspath)
@@ -937,7 +1093,7 @@ def test_private_atomic_rewrite_does_not_preserve_system_deny_ace(tmp_path):
             "/inheritance:r",
             "/grant:r",
             "*S-1-3-4:F",
-            "*S-1-5-18:R",
+            "*S-1-5-18:M",
             "/deny",
             "*S-1-5-18:F",
         ],
