@@ -224,7 +224,9 @@ printf '{"nested":{"action":"deny"}}' | _dc_jq -r '.action // "allow"'
 
 func TestHermesConfigPathHonorsHermesHomeAndExplicitOverride(t *testing.T) {
 	hermesHome := filepath.Join(t.TempDir(), "Hermes Home")
+	externalSkills := filepath.Join(t.TempDir(), "Shared Skills")
 	t.Setenv("HERMES_HOME", hermesHome)
+	t.Setenv("HERMES_SHARED_SKILLS", externalSkills)
 
 	previous := HermesConfigPathOverride
 	HermesConfigPathOverride = ""
@@ -233,9 +235,40 @@ func TestHermesConfigPathHonorsHermesHomeAndExplicitOverride(t *testing.T) {
 	if got, want := hermesConfigPath(SetupOpts{}), filepath.Join(hermesHome, "config.yaml"); got != want {
 		t.Fatalf("hermesConfigPath() = %q, want %q", got, want)
 	}
+	if err := os.MkdirAll(externalSkills, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(hermesHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(hermesHome, "config.yaml"),
+		[]byte("skills:\n  external_dirs:\n    - ${HERMES_SHARED_SKILLS}\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
 	caps := NewHermesConnector().Capabilities(SetupOpts{})
-	if got, want := caps.Skills.ReadPaths, []string{filepath.Join(hermesHome, "skills")}; len(got) != 1 || got[0] != want[0] {
+	if got, want := caps.Skills.ReadPaths, []string{filepath.Join(hermesHome, "skills"), externalSkills}; !sameStrings(got, want) {
 		t.Fatalf("Hermes skill paths = %v, want %v", got, want)
+	}
+	if got, want := caps.Skills.WritePaths, []string{filepath.Join(hermesHome, "skills")}; !sameStrings(got, want) {
+		t.Fatalf("Hermes skill write paths = %v, want %v", got, want)
+	}
+	for _, want := range []string{
+		filepath.Join(hermesHome, "plugins"),
+		filepath.Join(hermesHome, "agent-hooks"),
+		filepath.Join(hermesHome, "hooks"),
+	} {
+		if !containsString(caps.Plugins.ReadPaths, want) {
+			t.Fatalf("Hermes plugin/hook paths = %v, missing %v", caps.Plugins.ReadPaths, want)
+		}
+	}
+	if !caps.Plugins.DiscoveryOnly || !caps.Rules.Supported || !caps.Rules.DiscoveryOnly {
+		t.Fatalf("Hermes read-only asset capabilities drifted: plugins=%+v rules=%+v", caps.Plugins, caps.Rules)
+	}
+	if !containsString(caps.Rules.ReadPaths, filepath.Join(hermesHome, "SOUL.md")) {
+		t.Fatalf("Hermes instruction paths = %v, missing SOUL.md", caps.Rules.ReadPaths)
 	}
 
 	explicit := filepath.Join(t.TempDir(), "explicit-config.yaml")
@@ -280,6 +313,10 @@ func TestHookOnlyConnector_SurfaceCapabilities(t *testing.T) {
 		{NewCopilotConnector(), []string{"skill", "rule"}, false, true, true},
 		{NewOpenHandsConnector(), []string{"skill"}, false, false, true},
 		{NewAntigravityConnector(), nil, false, true, true},
+	}
+	if runtime.GOOS == "darwin" {
+		cases[2].codeGuardTargets = []string{"skill", "rule"}
+		cases[5].nativeOTLP = true
 	}
 	for _, tc := range cases {
 		t.Run(tc.conn.Name(), func(t *testing.T) {
@@ -907,6 +944,15 @@ func mapKeys(m map[string]interface{}) []string {
 	return out
 }
 
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
+}
+
 // TestAntigravitySetup_WritesOfficialMixedSchema pins the documented
 // matcher-group shape for tool events, direct handler shape for invocation/Stop
 // events, and event-bound synchronous native command.
@@ -1247,6 +1293,174 @@ func TestOpenHandsSetup_PatchesDocumentedHookSchema(t *testing.T) {
 	}
 	if _, wrapped := cfg["hooks"]; wrapped {
 		t.Fatalf("OpenHands native schema should not add Claude-compatible top-level hooks wrapper: %#v", cfg["hooks"])
+	}
+}
+
+func TestOpenHandsSetupTeardownRestoresExactConfigBytesAndMode(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("OpenHands native Windows is unsupported")
+	}
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "home", ".openhands", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o700); err != nil {
+		t.Fatalf("mkdir config: %v", err)
+	}
+	original := []byte("{\n  \"session_start\": [{\"matcher\": \"*\", \"hooks\": [{\"command\": \"operator-hook.sh\"}]}]\n}\n")
+	if err := os.WriteFile(cfgPath, original, 0o640); err != nil {
+		t.Fatalf("write original config: %v", err)
+	}
+	prev := OpenHandsHooksPathOverride
+	OpenHandsHooksPathOverride = cfgPath
+	t.Cleanup(func() { OpenHandsHooksPathOverride = prev })
+
+	opts := SetupOpts{
+		DataDir:  filepath.Join(dir, "dc"),
+		APIAddr:  "127.0.0.1:18970",
+		APIToken: "tok-test",
+	}
+	conn := NewOpenHandsConnector()
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	if err := conn.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	got, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read restored config: %v", err)
+	}
+	if !bytes.Equal(got, original) {
+		t.Fatalf("restored bytes differ\nwant:\n%s\ngot:\n%s", original, got)
+	}
+	info, err := os.Stat(cfgPath)
+	if err != nil {
+		t.Fatalf("stat restored config: %v", err)
+	}
+	if gotMode := info.Mode().Perm(); gotMode != 0o640 {
+		t.Fatalf("restored mode=%#o want 0640", gotMode)
+	}
+	if token, err := LoadOTLPPathToken(opts.DataDir, OTLPScopeOpenHands); err != nil || token != "" {
+		t.Fatalf("teardown retained scoped OTLP token=%q err=%v", token, err)
+	}
+}
+
+func TestOpenHandsSetupMigratesBetweenGlobalAndWorkspaceWithExactRestore(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("OpenHands native Windows is unsupported")
+	}
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	workspace := filepath.Join(dir, "repo")
+	testenv.SetHome(t, home)
+	globalPath := filepath.Join(home, ".openhands", "hooks.json")
+	workspacePath := filepath.Join(workspace, ".openhands", "hooks.json")
+	if err := os.MkdirAll(filepath.Dir(globalPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(workspacePath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	globalOriginal := []byte("{\"session_start\":[{\"hooks\":[{\"command\":\"global-operator\"}]}]}\n")
+	workspaceOriginal := []byte("{\"session_end\":[{\"hooks\":[{\"command\":\"workspace-operator\"}]}]}\n")
+	if err := os.WriteFile(globalPath, globalOriginal, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(workspacePath, workspaceOriginal, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	conn := NewOpenHandsConnector()
+	base := SetupOpts{DataDir: filepath.Join(dir, "dc"), APIAddr: "127.0.0.1:18970"}
+	if err := conn.Setup(context.Background(), base); err != nil {
+		t.Fatalf("global setup: %v", err)
+	}
+	workspaceOpts := base
+	workspaceOpts.WorkspaceDir = workspace
+	if err := conn.Setup(context.Background(), workspaceOpts); err != nil {
+		t.Fatalf("workspace migration: %v", err)
+	}
+	if got, err := os.ReadFile(globalPath); err != nil || !bytes.Equal(got, globalOriginal) {
+		t.Fatalf("global target not exactly restored: %q err=%v", got, err)
+	}
+	if err := conn.Setup(context.Background(), base); err != nil {
+		t.Fatalf("global migration: %v", err)
+	}
+	if got, err := os.ReadFile(workspacePath); err != nil || !bytes.Equal(got, workspaceOriginal) {
+		t.Fatalf("workspace target not exactly restored: %q err=%v", got, err)
+	}
+	if err := conn.Teardown(context.Background(), base); err != nil {
+		t.Fatalf("global teardown: %v", err)
+	}
+	if got, err := os.ReadFile(globalPath); err != nil || !bytes.Equal(got, globalOriginal) {
+		t.Fatalf("final global restore differs: %q err=%v", got, err)
+	}
+}
+
+func TestOpenHandsSetupRepairsRegistrationWithoutClobberingOperatorHook(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("OpenHands native Windows is unsupported")
+	}
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "hooks.json")
+	original := []byte(`{"pre_tool_use":[{"matcher":"terminal","hooks":[{"command":"operator-hook.sh","timeout":5}]}]}`)
+	if err := os.WriteFile(cfgPath, original, 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	prev := OpenHandsHooksPathOverride
+	OpenHandsHooksPathOverride = cfgPath
+	t.Cleanup(func() { OpenHandsHooksPathOverride = prev })
+
+	opts := SetupOpts{
+		DataDir:  filepath.Join(dir, "dc"),
+		APIAddr:  "127.0.0.1:18970",
+		APIToken: "tok-test",
+	}
+	conn := NewOpenHandsConnector()
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("first Setup: %v", err)
+	}
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read setup config: %v", err)
+	}
+	var cfg map[string]interface{}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatalf("decode setup config: %v", err)
+	}
+	// Simulate registration tamper while preserving the operator's group.
+	for event, raw := range cfg {
+		groups, ok := raw.([]interface{})
+		if !ok {
+			continue
+		}
+		filtered := groups[:0]
+		for _, group := range groups {
+			encoded, _ := json.Marshal(group)
+			if !bytes.Contains(encoded, []byte("openhands-hook.sh")) {
+				filtered = append(filtered, group)
+			}
+		}
+		cfg[event] = filtered
+	}
+	tampered, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("encode tampered config: %v", err)
+	}
+	if err := os.WriteFile(cfgPath, tampered, 0o600); err != nil {
+		t.Fatalf("write tampered config: %v", err)
+	}
+
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("repair Setup: %v", err)
+	}
+	repaired, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatalf("read repaired config: %v", err)
+	}
+	if !bytes.Contains(repaired, []byte("operator-hook.sh")) {
+		t.Fatalf("repair clobbered operator hook:\n%s", repaired)
+	}
+	if !bytes.Contains(repaired, []byte("openhands-hook.sh")) {
+		t.Fatalf("repair did not restore DefenseClaw hook:\n%s", repaired)
 	}
 }
 
@@ -2169,5 +2383,86 @@ func TestOpenHandsHookScript_BlockExitsTwo(t *testing.T) {
 	}
 	if !strings.Contains(string(out), `"decision":"deny"`) {
 		t.Fatalf("OpenHands deny hook did not print decision JSON; output=%s", string(out))
+	}
+}
+
+func TestPatchCopilotHooksConvergesV2ToV1AndBack(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hooks.json")
+	script := filepath.Join(t.TempDir(), "copilot-hook.sh")
+	v1 := []string{
+		"sessionStart", "sessionEnd", "userPromptSubmitted", "preToolUse",
+		"postToolUse", "postToolUseFailure", "permissionRequest", "agentStop",
+		"subagentStart", "subagentStop", "errorOccurred", "preCompact", "notification",
+	}
+	v2 := append(append([]string{}, v1...), "userPromptTransformed")
+	if err := os.WriteFile(path, []byte(`{"version":1,"hooks":{"userPromptTransformed":[{"type":"command","bash":"/operator/hook","timeoutSec":10}]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := patchCopilotHooksForOS(path, script, v2, "darwin"); err != nil {
+		t.Fatalf("install v2: %v", err)
+	}
+	if err := patchCopilotHooksForOS(path, script, v1, "darwin"); err != nil {
+		t.Fatalf("rollback to v1: %v", err)
+	}
+	cfg, err := readJSONObject(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transformed := cfg["hooks"].(map[string]interface{})["userPromptTransformed"].([]interface{})
+	if len(transformed) != 1 {
+		t.Fatalf("rollback did not preserve exactly the foreign transformed handler: %#v", transformed)
+	}
+	if err := patchCopilotHooksForOS(path, script, v2, "darwin"); err != nil {
+		t.Fatalf("upgrade to v2: %v", err)
+	}
+	cfg, err = readJSONObject(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	transformed = cfg["hooks"].(map[string]interface{})["userPromptTransformed"].([]interface{})
+	if len(transformed) != 2 {
+		t.Fatalf("v2 repair count=%d, want foreign + managed: %#v", len(transformed), transformed)
+	}
+}
+
+func TestCopilotSetupRejectsSymlinkHookConfig(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX symlink trust check")
+	}
+	home := t.TempDir()
+	t.Setenv("COPILOT_HOME", home)
+	hooksDir := filepath.Join(home, "hooks")
+	if err := os.MkdirAll(hooksDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(t.TempDir(), "operator.json")
+	if err := os.WriteFile(target, []byte(`{"operator":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(hooksDir, "defenseclaw.json")
+	if err := os.Symlink(target, configPath); err != nil {
+		t.Fatal(err)
+	}
+	connector := NewCopilotConnector()
+	err := connector.patchConfig(
+		SetupOpts{DataDir: t.TempDir(), AgentVersion: "1.0.77"},
+		filepath.Join(t.TempDir(), "copilot-hook.sh"),
+	)
+	if err == nil || !strings.Contains(err.Error(), "must not be a symlink") {
+		t.Fatalf("symlink setup error=%v", err)
+	}
+	raw, readErr := os.ReadFile(target)
+	if readErr != nil || string(raw) != `{"operator":true}` {
+		t.Fatalf("symlink target changed: raw=%q err=%v", raw, readErr)
+	}
+	if err := os.Remove(target); err != nil {
+		t.Fatal(err)
+	}
+	err = connector.patchConfig(
+		SetupOpts{DataDir: t.TempDir(), AgentVersion: "1.0.77"},
+		filepath.Join(t.TempDir(), "copilot-hook.sh"),
+	)
+	if err == nil || !strings.Contains(err.Error(), "must not be a symlink") {
+		t.Fatalf("broken-symlink setup error=%v", err)
 	}
 }

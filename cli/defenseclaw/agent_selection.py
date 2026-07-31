@@ -28,8 +28,11 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import platform
 import re
 import stat
+import subprocess
+import sys
 import uuid
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -48,8 +51,28 @@ _CODEX_WINDOWS_PLATFORM_VARIANTS = (
     ("codex-win32-x64", "x86_64-pc-windows-msvc"),
     ("codex-win32-arm64", "aarch64-pc-windows-msvc"),
 )
+_CODEX_MACOS_PLATFORM_VARIANTS = (
+    ("codex-darwin-arm64", "aarch64-apple-darwin"),
+    ("codex-darwin-x64", "x86_64-apple-darwin"),
+)
+_CODEX_MACOS_TEAM_ID = "2DC432GLL2"
+_CODEX_MACOS_IDENTIFIER = "codex"
 _MAX_AGENT_EXECUTABLE_BYTES = 512 * 1024 * 1024
 _SUPPORTED_CONNECTORS = frozenset({"codex", "claudecode", "omnigent"})
+_CLAUDE_CODE_MACOS_IDENTIFIER = "com.anthropic.claude-code"
+_CLAUDE_CODE_MACOS_TEAM_ID = "Q6L2SF6YDW"
+_MACHO_MAGICS = frozenset(
+    {
+        b"\xce\xfa\xed\xfe",  # 32-bit little endian
+        b"\xcf\xfa\xed\xfe",  # 64-bit little endian
+        b"\xfe\xed\xfa\xce",  # 32-bit big endian
+        b"\xfe\xed\xfa\xcf",  # 64-bit big endian
+        b"\xca\xfe\xba\xbe",  # universal
+        b"\xbe\xba\xfe\xca",  # universal, swapped
+        b"\xca\xfe\xba\xbf",  # universal64
+        b"\xbf\xba\xfe\xca",  # universal64, swapped
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -119,7 +142,17 @@ def _select_agent_executable(data_dir: str, connector: str) -> SetupAgentSelecti
     spec = agent_discovery._SPECS[connector]
     rejection = "no installed executable was found in a built-in or operator-approved trusted prefix"
     for candidate in _setup_agent_candidates(connector, spec, data_dir):
-        if not is_setup_trusted_binary(candidate, data_dir):
+        macos_identity = (
+            _stable_selection_identity(candidate)
+            if connector == "claudecode" and sys.platform == "darwin"
+            else None
+        )
+        trusted = is_setup_trusted_binary(candidate, data_dir, connector=connector)
+        if not trusted or (
+            macos_identity is not None
+            and _stable_selection_identity(candidate) != macos_identity
+        ):
+            rejection = "selected executable changed during native identity verification"
             continue
         executable = os.path.realpath(os.path.abspath(candidate))
         raw_version, probe_error = agent_discovery._version_for_agent_binary(
@@ -136,14 +169,30 @@ def _select_agent_executable(data_dir: str, connector: str) -> SetupAgentSelecti
         if probe_error or not raw_version:
             rejection = probe_error or "version probe returned no version"
             continue
+        if macos_identity is not None and _stable_selection_identity(executable) != macos_identity:
+            rejection = "selected executable changed during version verification"
+            continue
         normalized = normalize_agent_version(raw_version)
         if not normalized:
             rejection = f"could not normalize agent version {raw_version!r}"
             continue
+        if (
+            connector == "claudecode"
+            and sys.platform == "darwin"
+            and tuple(int(part) for part in normalized.split("."))
+            >= (2, 1, 219)
+        ):
+            raise OSError(
+                "Claude Code macOS releases >=2.1.219 are uncertified because "
+                "DirectoryAdded has no published hook schema"
+            )
         try:
             digest = stable_executable_sha256(executable)
         except OSError as exc:
             rejection = str(exc)
+            continue
+        if macos_identity is not None and _stable_selection_identity(executable) != macos_identity:
+            rejection = "selected executable changed while sealing its digest"
             continue
         return SetupAgentSelection(
             connector=connector,
@@ -155,7 +204,25 @@ def _select_agent_executable(data_dir: str, connector: str) -> SetupAgentSelecti
     raise OSError(f"cannot select {connector} executable: {rejection}")
 
 
-def is_setup_trusted_binary(candidate: str, data_dir: str) -> bool:
+def _stable_selection_identity(path: str) -> tuple[int, int, int, int, int] | None:
+    """Return the immutable fields used to detect path replacement in Setup."""
+
+    try:
+        metadata = os.stat(os.path.realpath(os.path.abspath(path)), follow_symlinks=False)
+    except OSError:
+        return None
+    if not stat.S_ISREG(metadata.st_mode):
+        return None
+    return (
+        metadata.st_dev,
+        metadata.st_ino,
+        metadata.st_size,
+        metadata.st_mtime_ns,
+        metadata.st_ctime_ns,
+    )
+
+
+def is_setup_trusted_binary(candidate: str, data_dir: str, *, connector: str = "") -> bool:
     """Admit only built-in or protected-config prefixes, never env extras."""
 
     try:
@@ -178,6 +245,14 @@ def is_setup_trusted_binary(candidate: str, data_dir: str) -> bool:
         if os.path.splitext(resolved)[1].casefold() != ".exe":
             return False
         return any(agent_discovery._windows_acl_chain_is_safe(resolved, root) for root in matching_roots)
+    if sys.platform == "darwin":
+        if connector == "claudecode":
+            return any(
+                _posix_setup_chain_is_safe(resolved, root) for root in matching_roots
+            ) and _validate_macos_claudecode_binary(resolved) is None
+        if connector == "codex":
+            return os.path.basename(resolved) == "codex" and _macos_codex_binary_is_trusted(resolved)
+        return False
     if not os.path.isfile(resolved) or not os.access(resolved, os.X_OK):
         return False
     try:
@@ -196,6 +271,102 @@ def is_setup_trusted_binary(candidate: str, data_dir: str) -> bool:
     return True
 
 
+def _posix_setup_chain_is_safe(resolved: str, root: str) -> bool:
+    """Reject mutable group/world paths through the selected setup root."""
+
+    current = resolved
+    root_key = agent_discovery._path_key(root)
+    seen: set[str] = set()
+    while current:
+        key = agent_discovery._path_key(current)
+        if key in seen:
+            return False
+        seen.add(key)
+        try:
+            metadata = os.stat(current, follow_symlinks=False)
+        except OSError:
+            return False
+        if metadata.st_mode & 0o002:
+            return False
+        if stat.S_ISREG(metadata.st_mode) and metadata.st_mode & 0o020:
+            return False
+        if stat.S_ISDIR(metadata.st_mode):
+            mode_error = agent_discovery._trusted_prefix_dir_mode_error(metadata)
+            if mode_error is not None:
+                return False
+        if key == root_key:
+            return True
+        parent = os.path.dirname(current)
+        if parent == current:
+            return False
+        current = parent
+    return False
+
+
+def _run_macos_identity_command(args: list[str]) -> tuple[int, str]:
+    """Run a fixed Apple identity tool with bounded time and decoded output."""
+
+    try:
+        completed = subprocess.run(
+            args,
+            shell=False,
+            timeout=5.0,
+            capture_output=True,
+            text=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return -1, str(exc)
+    output = agent_discovery._decode_version_probe_output(
+        (completed.stdout or b"") + (completed.stderr or b"")
+    )
+    return completed.returncode, output[:65_536]
+
+
+def _validate_macos_claudecode_binary(path: str) -> str | None:
+    """Return a refusal reason unless *path* is Anthropic's native macOS CLI."""
+
+    try:
+        with open(path, "rb") as stream:
+            magic = stream.read(4)
+    except OSError as exc:
+        return f"cannot read native image: {exc}"
+    if magic not in _MACHO_MAGICS:
+        return "selected Claude Code executable is not a Mach-O image"
+
+    code, _detail = _run_macos_identity_command(
+        ["/usr/bin/codesign", "--verify", "--strict", "--verbose=2", path]
+    )
+    if code != 0:
+        return "Claude Code Mach-O code signature verification failed"
+    code, detail = _run_macos_identity_command(
+        ["/usr/bin/codesign", "-d", "--verbose=4", path]
+    )
+    required = (
+        f"Identifier={_CLAUDE_CODE_MACOS_IDENTIFIER}",
+        f"TeamIdentifier={_CLAUDE_CODE_MACOS_TEAM_ID}",
+        "Authority=Developer ID Application: Anthropic PBC (Q6L2SF6YDW)",
+    )
+    if code != 0 or any(marker not in detail for marker in required):
+        return "Claude Code Mach-O signature identity is not Anthropic's pinned Developer ID"
+
+    code, architectures = _run_macos_identity_command(["/usr/bin/lipo", "-archs", path])
+    current_arch = {"aarch64": "arm64", "x86_64": "x86_64"}.get(
+        platform.machine().lower(),
+        platform.machine().lower(),
+    )
+    if code != 0 or current_arch not in architectures.split():
+        return f"Claude Code Mach-O does not contain the native {current_arch} architecture"
+
+    code, quarantine = _run_macos_identity_command(
+        ["/usr/bin/xattr", "-p", "com.apple.quarantine", path]
+    )
+    if code == 0 and quarantine.strip():
+        return "Claude Code Mach-O is still quarantined; launch/approve the official client before setup"
+    if code not in {0, 1}:
+        return "Claude Code Mach-O quarantine state could not be inspected"
+    return None
+
+
 def _setup_agent_candidates(connector: str, spec, data_dir: str) -> tuple[str, ...]:
     """Enumerate PATH candidates plus exact names under trusted API roots."""
 
@@ -204,6 +375,9 @@ def _setup_agent_candidates(connector: str, spec, data_dir: str) -> tuple[str, .
     roots = agent_discovery._expand_bin_prefixes((*_builtin_setup_trusted_prefixes(), *configured))
     candidates: list[str] = []
     paired_codex_root = ""
+    if connector == "codex" and sys.platform == "darwin":
+        for root in roots:
+            candidates.extend(_codex_macos_npm_native_candidates(root))
     if connector == "codex" and discovered:
         # `_binary_candidates_for_agent` preserves PATH precedence, so its
         # first entry is the CLI the user actually launches.  When that entry
@@ -226,10 +400,39 @@ def _setup_agent_candidates(connector: str, spec, data_dir: str) -> tuple[str, .
                         candidates.extend(paired)
                         paired_codex_root = os.path.normcase(os.path.abspath(root))
                         break
+    if sys.platform == "darwin" and connector == "claudecode":
+        # The official native installer exposes ~/.local/bin/claude as a
+        # symlink. Setup binds the canonical signed Mach-O, never the mutable
+        # launcher alias. Enumerate the documented versions directory too so
+        # setup remains repairable when ~/.local/bin is not inherited in PATH.
+        candidates.extend(os.path.realpath(value) for value in discovered)
+        versions_root = os.path.join(
+            str(Path.home()), ".local", "share", "claude", "versions"
+        )
+        try:
+            installed_versions = [
+                entry.path
+                for entry in os.scandir(versions_root)
+                if entry.is_file(follow_symlinks=False)
+                and re.fullmatch(r"\d+(?:\.\d+)+", entry.name)
+            ]
+        except OSError:
+            installed_versions = []
+        installed_versions.sort(
+            key=lambda value: tuple(int(part) for part in os.path.basename(value).split(".")),
+            reverse=True,
+        )
+        candidates.extend(installed_versions)
     candidates.extend(discovered)
+    if connector == "codex" and sys.platform == "darwin":
+        candidates.extend(_macos_codex_standalone_candidates())
     names = {
         "codex": ("codex.exe", "codex.cmd", "codex.bat", "codex.com"),
-        "claudecode": ("claude.exe", "claude.cmd", "claude.bat", "claude.com"),
+        "claudecode": (
+            ("claude",)
+            if sys.platform == "darwin"
+            else ("claude.exe", "claude.cmd", "claude.bat", "claude.com")
+        ),
         "omnigent": ("omnigent.exe", "omni.exe"),
     }[connector]
     for root in roots:
@@ -252,7 +455,8 @@ def _setup_agent_candidates(connector: str, spec, data_dir: str) -> tuple[str, .
     # preserving PATH/discovery precedence within each class.  A stale package
     # tree must not outrank the currently selected Codex executable merely
     # because its absolute path sorts first.
-    candidates.sort(key=lambda value: os.path.splitext(value)[1].casefold() != ".exe")
+    if os.name == "nt":
+        candidates.sort(key=lambda value: os.path.splitext(value)[1].casefold() != ".exe")
     result: list[str] = []
     seen: set[str] = set()
     for candidate in candidates:
@@ -294,6 +498,132 @@ def _codex_npm_native_candidates(root: str) -> tuple[str, ...]:
                 candidates.append(candidate)
     candidates.extend(_codex_pnpm_native_candidates(root, _CODEX_WINDOWS_PLATFORM_VARIANTS, ()))
     return tuple(candidates)
+
+
+def _codex_macos_npm_native_candidates(root: str) -> tuple[str, ...]:
+    """Return exact native Codex images from official npm package layouts."""
+
+    host_machine = platform.machine().casefold()
+    expected_package = (
+        "codex-darwin-arm64" if host_machine in {"arm64", "aarch64"} else "codex-darwin-x64"
+    )
+    package_variants = (
+        ("node_modules", "@openai", "codex", "node_modules", "@openai"),
+        ("node_modules", "@openai"),
+    )
+    candidates: list[str] = []
+    for prefix in package_variants:
+        for package_name, target in _CODEX_MACOS_PLATFORM_VARIANTS:
+            if package_name != expected_package:
+                continue
+            candidate = os.path.join(
+                root,
+                *prefix,
+                package_name,
+                "vendor",
+                target,
+                "bin",
+                "codex",
+            )
+            if os.path.isfile(candidate):
+                candidates.append(candidate)
+    return tuple(candidates)
+
+
+def _macos_codex_standalone_candidates() -> tuple[str, ...]:
+    """Return exact native executables from Codex's standalone macOS layout."""
+
+    base = Path.home() / ".codex" / "packages" / "standalone"
+    paths = [base / "current" / "bin" / "codex"]
+    try:
+        paths.extend(sorted((base / "releases").glob("*-apple-darwin/bin/codex"), reverse=True))
+    except OSError:
+        pass
+    result: list[str] = []
+    for path in paths:
+        resolved = os.path.realpath(path)
+        if os.path.isfile(resolved):
+            result.append(resolved)
+    return tuple(dict.fromkeys(result))
+
+
+def _looks_like_macos_codex_native(path: str) -> bool:
+    try:
+        with open(os.path.realpath(path), "rb") as stream:
+            magic = stream.read(4)
+    except OSError:
+        return False
+    return magic in {
+        b"\xfe\xed\xfa\xcf",
+        b"\xcf\xfa\xed\xfe",
+        b"\xca\xfe\xba\xbe",
+        b"\xbe\xba\xfe\xca",
+    }
+
+
+def _macos_codex_binary_is_trusted(path: str) -> bool:
+    """Validate host architecture, official signing, and quarantine state."""
+
+    try:
+        info = os.stat(path, follow_symlinks=False)
+    except OSError:
+        return False
+    if not stat.S_ISREG(info.st_mode) or info.st_uid not in {0, os.getuid()}:
+        return False
+    if info.st_mode & (stat.S_IWGRP | stat.S_IWOTH) or not _looks_like_macos_codex_native(path):
+        return False
+    try:
+        architectures = subprocess.run(
+            ["/usr/bin/lipo", "-archs", path],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        expected_architecture = (
+            "arm64"
+            if platform.machine().casefold() in {"arm64", "aarch64"}
+            else "x86_64"
+        )
+        if (
+            architectures.returncode != 0
+            or expected_architecture not in architectures.stdout.split()
+        ):
+            return False
+        verify = subprocess.run(
+            ["/usr/bin/codesign", "--verify", "--strict", "--verbose=2", path],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        details = subprocess.run(
+            ["/usr/bin/codesign", "-dvvv", path],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        attributes = subprocess.run(
+            ["/usr/bin/xattr", "-l", path],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    signing = details.stdout + details.stderr
+    extended_attributes = attributes.stdout + attributes.stderr
+    return (
+        verify.returncode == 0
+        and details.returncode == 0
+        and attributes.returncode == 0
+        and f"Identifier={_CODEX_MACOS_IDENTIFIER}" in signing
+        and f"TeamIdentifier={_CODEX_MACOS_TEAM_ID}" in signing
+        and "Authority=Developer ID Application: OpenAI OpCo, LLC (2DC432GLL2)" in signing
+        and "com.apple.quarantine:" not in extended_attributes
+    )
 
 
 def _codex_wrapper_native_candidates(
@@ -448,7 +778,11 @@ def _builtin_setup_trusted_prefixes() -> tuple[str, ...]:
     """Resolve Windows roots through APIs, independent of inherited env vars."""
 
     if os.name != "nt":
-        return agent_discovery._builtin_trusted_bin_prefixes()
+        roots = list(agent_discovery._builtin_trusted_bin_prefixes())
+        if sys.platform == "darwin":
+            roots.append(os.path.join(str(Path.home()), ".local", "share", "claude", "versions"))
+            roots.append(str(Path.home() / ".codex" / "packages" / "standalone"))
+        return tuple(roots)
 
     local = _windows_known_folder("F1B32785-6FBA-4FCF-9D55-7B8E7F157091")
     roaming = _windows_known_folder("3EB685DB-65F9-4CF6-A03A-E3EF65729F3D")

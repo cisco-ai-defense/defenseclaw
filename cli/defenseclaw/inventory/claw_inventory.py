@@ -1663,6 +1663,7 @@ def _agents_for_connector(connector: str, cfg: Config) -> list[dict[str, Any]]:
       ``$COPILOT_HOME/agents`` (default ``~/.copilot/agents``)
     * cursor     — explicitly pinned project ``.cursor/agents`` and user ``~/.cursor/agents``
     * antigravity — global/workspace custom agents plus plugin agent components
+    * opencode   — singular/plural agent roots in project and config directories
     """
     home = os.path.expanduser("~")
     name = connector_paths.normalize(connector)
@@ -1701,6 +1702,21 @@ def _agents_for_connector(connector: str, cfg: Config) -> list[dict[str, Any]]:
         )
     if name == "antigravity":
         return _agents_from_antigravity_dirs(_antigravity_agent_dirs(_connector_workspace_dir(cfg)))
+    if name == "opencode":
+        custom = os.environ.get("OPENCODE_CONFIG_DIR", "").strip()
+        config_home = os.path.expanduser(custom) if custom else os.path.join(home, ".config", "opencode")
+        rows = _agents_from_md_dirs(
+            [
+                os.path.join(os.getcwd(), ".opencode", "agent"),
+                os.path.join(os.getcwd(), ".opencode", "agents"),
+                os.path.join(config_home, "agent"),
+                os.path.join(config_home, "agents"),
+            ]
+        )
+        workspace = _connector_workspace_dir(cfg)
+        for path in connector_paths._opencode_config_paths(workspace):  # type: ignore[attr-defined]
+            rows.extend(_agents_from_opencode_config(path))
+        return _dedup_agent_rows(rows)
     return []
 
 
@@ -1755,7 +1771,7 @@ def _tools_for_connector(connector: str, cfg: Config) -> list[dict[str, Any]]:
     """Per-connector tool enumeration.
 
     * claudecode — connector-home ``settings.json`` ``tools`` field
-    * codex      — connector-home ``config.toml`` ``[tools]`` table
+    * codex      — deprecated connector-home ``prompts/*.md`` slash commands
     * zeptoclaw  — ``~/.zeptoclaw/agents.json`` (tools are inline)
     * opencode   — ``opencode.json`` tool map + ``tools/`` JS/TS files
     * antigravity — plugin/global slash command files as invokable tools
@@ -1767,15 +1783,15 @@ def _tools_for_connector(connector: str, cfg: Config) -> list[dict[str, Any]]:
             os.path.join(connector_paths.connector_home(name), "settings.json"),
         )
     if name == "codex":
-        return _tools_from_codex_config(
-            os.path.join(connector_paths.connector_home(name), "config.toml"),
-        )
+        return _codex_custom_prompt_commands(os.path.join(connector_paths.connector_home(name), "prompts"))
     if name == "zeptoclaw":
         return _tools_from_zeptoclaw_json(
             os.path.join(home, ".zeptoclaw", "agents.json"),
         )
     if name == "opencode":
-        return []
+        # PR #655's native-Windows contract intentionally leaves this surface
+        # unsupported. The macOS audit verified OpenCode tool/command roots.
+        return [] if os.name == "nt" else _tools_from_opencode(cfg)
     if name == "antigravity":
         return _tools_from_antigravity(cfg)
     return []
@@ -2059,6 +2075,10 @@ def _agents_from_codex_toml_dirs(
                 isinstance(data.get(field), str) and data[field].strip()
                 for field in required
             )
+            # Codex ignores incomplete custom-agent TOML on every platform.
+            # Do not admit an unloadable file as an active inventory row.
+            if not eligible:
+                continue
             row: dict[str, Any] = {
                 "id": agent_id,
                 "name": agent_id,
@@ -2225,6 +2245,35 @@ def _load_codex_agent_toml(path: str) -> tuple[dict[str, Any] | None, str]:
     return data, ""
 
 
+def _codex_custom_prompt_commands(prompts_dir: str) -> list[dict[str, Any]]:
+    """Inventory deprecated Codex custom prompts as explicit slash commands."""
+
+    if not os.path.isdir(prompts_dir):
+        return []
+    rows: list[dict[str, Any]] = []
+    try:
+        entries = sorted(os.listdir(prompts_dir))
+    except OSError:
+        return []
+    for entry in entries:
+        if not entry.endswith(".md"):
+            continue
+        path = os.path.join(prompts_dir, entry)
+        if not os.path.isfile(path):
+            continue
+        command = os.path.splitext(entry)[0]
+        rows.append(
+            {
+                "id": f"prompts:{command}",
+                "name": f"/prompts:{command}",
+                "description": "Deprecated Codex custom prompt; migrate reusable workflows to skills.",
+                "source": path,
+                "kind": "custom-command",
+            }
+        )
+    return rows
+
+
 def _agents_from_zeptoclaw_json(path: str) -> list[dict[str, Any]]:
     """``~/.zeptoclaw/agents.json`` is a list of agent records."""
     raw = _safe_load_json(path)
@@ -2349,14 +2398,18 @@ def _tools_from_zeptoclaw_json(path: str) -> list[dict[str, Any]]:
 
 def _tools_from_opencode(cfg: Config) -> list[dict[str, Any]]:
     workspace = _connector_workspace_dir(cfg)
-    rows: list[dict[str, Any]] = []
-    for path in connector_paths._opencode_config_paths(workspace):  # type: ignore[attr-defined]
-        rows.extend(_tools_from_opencode_config(path))
-    rows.extend(
+    rows = (
         _tools_from_script_dirs(
             _opencode_tool_dirs(workspace),
             kind="custom-tool",
             extensions=(".js", ".mjs", ".cjs", ".ts", ".mts", ".cts"),
+        )
+    )
+    rows.extend(
+        _tools_from_script_dirs(
+            _opencode_command_dirs(workspace),
+            kind="slash-command",
+            extensions=(".md", ".txt"),
         )
     )
     return _dedup_tool_rows(rows)
@@ -2385,9 +2438,26 @@ def _opencode_tool_dirs(workspace_dir: str) -> list[str]:
     custom = os.environ.get("OPENCODE_CONFIG_DIR", "").strip()
     return _dedup_paths(
         [
+            os.path.join(workspace_dir, ".opencode", "tool") if workspace_dir else "",
             os.path.join(workspace_dir, ".opencode", "tools") if workspace_dir else "",
+            os.path.join(home, ".config", "opencode", "tool"),
             os.path.join(home, ".config", "opencode", "tools"),
+            os.path.join(os.path.expanduser(custom), "tool") if custom else "",
             os.path.join(os.path.expanduser(custom), "tools") if custom else "",
+        ]
+    )
+
+def _opencode_command_dirs(workspace_dir: str) -> list[str]:
+    home = os.path.expanduser("~")
+    custom = os.environ.get("OPENCODE_CONFIG_DIR", "").strip()
+    return _dedup_paths(
+        [
+            os.path.join(workspace_dir, ".opencode", "command") if workspace_dir else "",
+            os.path.join(workspace_dir, ".opencode", "commands") if workspace_dir else "",
+            os.path.join(home, ".config", "opencode", "command"),
+            os.path.join(home, ".config", "opencode", "commands"),
+            os.path.join(os.path.expanduser(custom), "command") if custom else "",
+            os.path.join(os.path.expanduser(custom), "commands") if custom else "",
         ]
     )
 
@@ -2436,37 +2506,48 @@ def _plugin_component_dirs(plugin_dirs: list[str], component: str) -> list[str]:
     return _dedup_paths(out)
 
 
-def _tools_from_opencode_config(path: str) -> list[dict[str, Any]]:
+def _agents_from_opencode_config(path: str) -> list[dict[str, Any]]:
     data = connector_paths._load_json_or_jsonc(path)  # type: ignore[attr-defined]
     if not isinstance(data, dict):
         return []
-    raw_tools = data.get("tool")
-    if raw_tools is None:
-        raw_tools = data.get("tools")
-    if not isinstance(raw_tools, dict):
+    raw_agents = data.get("agent")
+    if not isinstance(raw_agents, dict):
         return []
     rows: list[dict[str, Any]] = []
-    for tool_id, body in raw_tools.items():
+    for agent_id, body in raw_agents.items():
         if isinstance(body, dict):
             rows.append(
                 {
-                    "id": str(tool_id),
-                    "name": str(body.get("name") or tool_id),
+                    "id": str(agent_id),
+                    "name": str(body.get("name") or agent_id),
                     "description": str(body.get("description", "")),
                     "source": path,
-                    "kind": "config-tool",
+                    "kind": "agent",
+                    "model": str(body.get("model", "")),
                 }
             )
         else:
             rows.append(
                 {
-                    "id": str(tool_id),
-                    "name": str(tool_id),
+                    "id": str(agent_id),
+                    "name": str(agent_id),
                     "source": path,
-                    "kind": "config-tool",
+                    "kind": "agent",
                 }
             )
     return rows
+
+
+def _dedup_agent_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        key = str(row.get("id", "")).casefold()
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(row)
+    return out
 
 
 def _tools_from_script_dirs(
@@ -2716,10 +2797,166 @@ def _build_aibom_from_filesystem(
         "errors": errors,
         "limitations": limitations,
     }
+    if connector == "codex":
+        out["extension_surfaces"] = _codex_extension_surfaces(cfg)
     _attach_connector_paths(out, cfg, connector)
     _sync_legacy_connector_paths(out)
     out["summary"] = _build_summary(out)
     return out
+
+
+def _codex_extension_surfaces(cfg: Config) -> dict[str, dict[str, Any]]:
+    """Describe every current official Codex CLI extension inventory surface."""
+
+    workspace = _connector_workspace_dir(cfg)
+    codex_root = connector_paths.connector_home("codex")
+    home = os.path.expanduser("~")
+    project_layers = connector_paths._codex_project_layer_dirs(workspace)
+    project_root = project_layers[0] if project_layers else ""
+    project_codex_dirs = [os.path.join(layer, ".codex") for layer in project_layers]
+    project_agents_dirs = [os.path.join(layer, ".agents") for layer in reversed(project_layers)]
+    instruction_paths = [
+        os.path.join(codex_root, "AGENTS.override.md"),
+        os.path.join(codex_root, "AGENTS.md"),
+    ]
+    for layer in project_layers:
+        instruction_paths.extend(
+            [
+                os.path.join(layer, "AGENTS.override.md"),
+                os.path.join(layer, "AGENTS.md"),
+            ]
+        )
+    return {
+        "config": {
+            "classification": "I",
+            "paths": _dedup_paths(
+                [
+                    os.path.join(codex_root, "config.toml"),
+                    *(os.path.join(path, "config.toml") for path in project_codex_dirs),
+                    "/etc/codex/config.toml",
+                    "/etc/codex/managed_config.toml",
+                    "/etc/codex/requirements.toml",
+                ]
+            ),
+        },
+        "hooks_notify_otel": {
+            "classification": "I/L",
+            "paths": _dedup_paths(
+                [
+                    os.path.join(codex_root, "config.toml"),
+                    os.path.join(codex_root, "hooks.json"),
+                    *(os.path.join(path, "hooks.json") for path in project_codex_dirs),
+                ]
+            ),
+            "limitation": (
+                "DefenseClaw inventories command hooks; prompt and agent hook handlers "
+                "are parsed by Codex but skipped."
+            ),
+        },
+        "mcp": {
+            "classification": "I",
+            "paths": _dedup_paths(
+                [
+                    os.path.join(codex_root, "config.toml"),
+                    *(os.path.join(path, "config.toml") for path in project_codex_dirs),
+                    "/etc/codex/config.toml",
+                ]
+            ),
+        },
+        "skills": {
+            "classification": "I/L",
+            "paths": _dedup_paths(
+                [
+                    os.path.join(home, ".agents", "skills"),
+                    *(os.path.join(path, "skills") for path in project_agents_dirs),
+                    "/etc/codex/skills",
+                ]
+            ),
+            "limitation": "OpenAI-bundled system skills have no operator-owned filesystem root to scan.",
+        },
+        "plugins": {
+            "classification": "I",
+            "paths": _dedup_paths(
+                [
+                    os.path.join(codex_root, "plugins", "cache"),
+                    os.path.join(home, ".agents", "plugins", "marketplace.json"),
+                    os.path.join(home, ".agents", "plugins", "api_marketplace.json"),
+                    os.path.join(home, ".claude-plugin", "marketplace.json"),
+                    os.path.join(home, ".cursor-plugin", "marketplace.json"),
+                    os.path.join(project_root, ".agents", "plugins", "marketplace.json")
+                    if project_root
+                    else "",
+                    os.path.join(project_root, ".agents", "plugins", "api_marketplace.json")
+                    if project_root
+                    else "",
+                    os.path.join(project_root, ".claude-plugin", "marketplace.json")
+                    if project_root
+                    else "",
+                    os.path.join(project_root, ".cursor-plugin", "marketplace.json")
+                    if project_root
+                    else "",
+                ]
+            ),
+        },
+        "rules": {
+            "classification": "I/L",
+            "paths": _dedup_paths(
+                [
+                    os.path.join(codex_root, "rules"),
+                    *(os.path.join(path, "rules") for path in project_codex_dirs),
+                    "/etc/codex/rules",
+                    "/etc/codex/requirements.toml",
+                ]
+            ),
+            "limitation": "Project rules are effective only for a trusted project config layer.",
+        },
+        "instructions_agents_md": {
+            "classification": "I/L",
+            "paths": _dedup_paths(instruction_paths),
+            "limitation": (
+                "The inventory is bounded to the explicitly pinned workspace; Codex "
+                "resolves nested precedence at session start."
+            ),
+        },
+        "custom_agents": {
+            "classification": "I",
+            "paths": _dedup_paths(
+                [
+                    os.path.join(codex_root, "agents"),
+                    *(os.path.join(path, "agents") for path in project_codex_dirs),
+                ]
+            ),
+        },
+        "microagents": {
+            "classification": "N/A",
+            "paths": [],
+            "limitation": (
+                "Codex exposes custom agents and subagents; it does not document a "
+                "separate connector-owned microagents extension directory."
+            ),
+        },
+        "custom_commands": {
+            "classification": "L",
+            "paths": [os.path.join(codex_root, "prompts")],
+            "limitation": (
+                "Custom prompts remain readable as /prompts:* commands but are deprecated; "
+                "skills are the supported replacement."
+            ),
+        },
+        "legacy_extensions_directory": {
+            "classification": "N/A",
+            "paths": [],
+            "limitation": (
+                "Current Codex plugins use marketplace metadata and the plugin cache; "
+                "DefenseClaw does not invent ~/.codex/extensions."
+            ),
+        },
+        "separate_memory_files": {
+            "classification": "N/A",
+            "paths": [],
+            "limitation": "No current official connector-owned memory-file extension root is documented for Codex CLI.",
+        },
+    }
 
 
 def _enumerate_skills_filesystem(
@@ -2930,6 +3167,53 @@ def _enumerate_plugins_filesystem(
     seen: dict[str, str] = {}
     resolved_connector = connector or cfg.active_connector()
     workspace_dir = _connector_workspace_dir(cfg)
+    if connector_paths.normalize(resolved_connector) == "opencode":
+        for plugin_dir in connector_paths.plugin_dirs("opencode", workspace_dir=workspace_dir):
+            if not os.path.isdir(plugin_dir):
+                continue
+            try:
+                entries = sorted(os.listdir(plugin_dir))
+            except OSError:
+                continue
+            for entry in entries:
+                full = os.path.join(plugin_dir, entry)
+                if not os.path.isfile(full) or not entry.lower().endswith(
+                    (".js", ".mjs", ".cjs", ".ts", ".mts", ".cts")
+                ):
+                    continue
+                plugin_id = os.path.splitext(entry)[0]
+                if plugin_id.casefold() in seen:
+                    continue
+                seen[plugin_id.casefold()] = full
+                rows.append({
+                    "id": plugin_id,
+                    "name": plugin_id,
+                    "origin": plugin_dir,
+                    "enabled": True,
+                    "status": "loaded",
+                    "path": full,
+                })
+        for path in connector_paths._opencode_config_paths(workspace_dir):  # type: ignore[attr-defined]
+            data = connector_paths._load_json_or_jsonc(path)  # type: ignore[attr-defined]
+            configured = data.get("plugin") if isinstance(data, dict) else None
+            if not isinstance(configured, list):
+                continue
+            for value in configured:
+                if not isinstance(value, str) or not value.strip():
+                    continue
+                plugin_id = value.strip()
+                if plugin_id.casefold() in seen:
+                    continue
+                seen[plugin_id.casefold()] = path
+                rows.append({
+                    "id": plugin_id,
+                    "name": plugin_id,
+                    "origin": path,
+                    "enabled": True,
+                    "status": "configured",
+                    "path": path,
+                })
+        return rows
     plugin_dirs = (
         connector_paths.plugin_inventory_dirs(
             resolved_connector,

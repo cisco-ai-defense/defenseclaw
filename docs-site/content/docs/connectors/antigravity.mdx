@@ -1,6 +1,6 @@
 ---
 title: Antigravity
-description: Google Antigravity (`agy`) lifecycle hook contract and the native Windows implementation awaiting integrated certification.
+description: Google Antigravity (`agy`) lifecycle hook contract and native macOS/Windows certification status.
 keywords:
   - DefenseClaw Antigravity connector
   - Antigravity hooks
@@ -13,13 +13,47 @@ model provider directly, while its documented lifecycle hooks send local events
 to the authenticated DefenseClaw gateway. DefenseClaw does not proxy
 Antigravity model traffic.
 
-Google currently publishes Antigravity 2.0 v2.4.3 and CLI v1.1.8 (July 28,
-2026). The [official install page](https://antigravity.google/docs/cli/install)
-says the CLI runs natively on Windows, macOS, and Linux. The
-[download page](https://antigravity.google/download) provides native Windows
-x64 and ARM64 clients; DefenseClaw's native Windows x64 implementation remains
-behind the not-certified platform gate pending packaged and official-client validation. Windows 10
-64-bit is the documented minimum.
+Google's official macOS installer manifest now publishes Antigravity CLI
+v1.1.9. The [official install page](https://antigravity.google/docs/cli/install)
+says the CLI runs natively on Windows, macOS, and Linux. Native macOS is an
+available DefenseClaw preview pending durable latest-version packaged and
+authenticated official-client evidence. The native Windows x64 implementation
+remains behind the not-certified platform gate.
+DefenseClaw's reviewed macOS contract accepts `>=1.1.8, <1.1.10`; macOS
+remains preview and a later release still requires the normal contract-drift
+review before it can be treated as compatible or validated on that platform.
+The preserved Windows contract accepts `>=1.1.8` without a ceiling, but its
+not-certified state is unchanged. A version match on either platform is
+compatibility evidence, not validation or certification.
+
+## Native macOS setup
+
+Install the official client:
+
+```bash
+curl -fsSL https://antigravity.google/cli/install.sh | bash
+```
+
+Google installs `agy` at `~/.local/bin/agy`. Authentication first uses macOS
+Keychain and falls back to browser sign-in. `agy` is an alias for the
+`antigravity` connector in DefenseClaw; it is never normalized to Gemini CLI.
+Because `~/.local/bin` is user-writable, passive discovery does not execute
+`agy` until the operator admits that exact directory with
+`defenseclaw setup trusted-paths add ~/.local/bin`.
+
+```bash
+defenseclaw setup antigravity --yes
+defenseclaw setup agy --mode action --yes
+defenseclaw doctor
+```
+
+Setup writes only the five DefenseClaw-owned keys in
+`~/.gemini/config/hooks.json`. Teardown restores the original bytes and mode
+when the managed file is unchanged; if an operator edits the file after Setup,
+it removes only Antigravity-owned registrations and preserves unrelated and
+Gemini CLI state. Doctor validates the exact five-event schema, timeout,
+managed runtime, and event bindings without executing command text from the
+file.
 
 ## Native Windows setup
 
@@ -149,7 +183,8 @@ Claude Code fields such as `systemMessage`, `additionalContext`, and
 
 - the exact five-event mixed schema and 30-second timeouts;
 - each event's matching native `--event` binding;
-- the protected `defenseclaw-hook.exe` PE target and hook contract lock;
+- the managed POSIX hook target on macOS, or protected
+  `defenseclaw-hook.exe` PE target on Windows, plus the hook contract lock;
 - connector-scoped gateway authentication and runtime freshness;
 - stale, malformed, foreign, missing, or inconsistent registrations.
 
@@ -178,8 +213,10 @@ Google's [changelog](https://antigravity.google/changelog) records relevant
 Windows and hook transitions: v1.0.8 corrected the shared
 `~/.gemini/config/hooks.json` path; v1.0.10 selected PowerShell as the Windows
 default shell; v1.0.15 fixed Windows output behavior; v1.1.1 fixed workspace
-hook loading; v1.1.7 fixed disabled plugins still running hooks; and v1.1.8 is
-the current CLI release.
+hook loading; and v1.1.7 fixed disabled plugins still running hooks. The
+[CLI 1.1.9 release](https://github.com/google-antigravity/antigravity-cli/releases/tag/1.1.9)
+bounds repeated `Stop` continuations and fixes `PostToolUse` firing and matcher
+evaluation without changing the documented five-event contract.
 
 ## Local customization surfaces
 
@@ -193,6 +230,14 @@ the current CLI release.
         <File name="SKILL.md" />
       </Folder>
     </Folder>
+    <Folder name="agents">
+      <Folder name="<agent>">
+        <File name="agent.md" />
+      </Folder>
+    </Folder>
+  </Folder>
+  <Folder name="~/.gemini/antigravity-cli">
+    <Folder name="plugins" />
   </Folder>
   <Folder name="<workspace>/.agents">
     <File name="hooks.json" />
@@ -200,10 +245,19 @@ the current CLI release.
     <Folder name="agents" />
     <Folder name="skills" />
     <Folder name="plugins" />
+    <Folder name="agents" />
   </Folder>
 </Files>
 
 DefenseClaw writes hooks only to the global file to avoid duplicated global and
 workspace evaluation. MCP and AgentSkills retain their documented global and
-workspace behavior; rules plus standalone and plugin-contained agents remain
-discovery-only as listed in the connector matrix.
+workspace behavior. On macOS/Linux, plugin install/remove targets the
+documented CLI staging root first and scans shared/manual plugin roots. Windows
+plugin mutation remains discovery-only pending certification. Workspace
+`GEMINI.md`, `AGENTS.md`, rules, standalone custom agents, and plugin-contained
+agents remain discovery-only.
+
+Native OTLP, proxy/firewall/sandbox ownership, custom-agent activation,
+runtime subagent/microagent process management, workflow writes, Gemini CLI
+custody, and workspace/plugin hook writes are not applicable to this connector
+boundary.

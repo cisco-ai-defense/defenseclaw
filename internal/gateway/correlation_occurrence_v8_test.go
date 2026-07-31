@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"fmt"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"testing"
 	"time"
@@ -681,24 +682,34 @@ func TestHookOccurrenceExactTerminalIDNeverFallsBackToCurrentPendingOperation(t 
 	}
 }
 
-func TestHookOccurrenceOmniGentRejectsUnprovenModelAliasesAcrossRestart(t *testing.T) {
+// The historical test name is retained because integration jobs select it
+// exactly. "ReportedModelStart" describes the hook occurrence, not a trusted
+// provider request ID; OmniGent's FunctionPolicy event exposes no such ID.
+func TestHookOccurrenceReportedModelStartResolvesMissingEndIDAcrossRestart(t *testing.T) {
 	installCorrelationHMACForTest()
 	path := filepath.Join(t.TempDir(), "audit.db")
 	server, store := newHookCorrelationServer(t, path)
 	profile := server.hookProfileForConnector("omnigent")
 	startPayload := map[string]interface{}{
 		"hook_event_name": "BeforeModel", "conversation_id": "reported-model-session",
-		"response_id": "reported-model-turn", "agent_id": "reported-model-agent",
-		"request_id": "provider-model-request-1",
+		"response_id": "reported-model-turn",
+		"request_id":  "provider-model-request-1",
 	}
 	start := normalizeAgentHookRequestWithProfile("omnigent", startPayload, profile)
 	_, start, err := server.correlateHookOccurrence(t.Context(), profile, start,
-		[]byte(`{"agent_id":"reported-model-agent","conversation_id":"reported-model-session","hook_event_name":"BeforeModel","request_id":"provider-model-request-1","response_id":"reported-model-turn"}`))
+		[]byte(`{"conversation_id":"reported-model-session","hook_event_name":"BeforeModel","request_id":"provider-model-request-1","response_id":"reported-model-turn"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if start.ModelRequestID != "" {
-		t.Fatalf("unproven OmniGent request_id populated model identity: %q", start.ModelRequestID)
+	if runtime.GOOS == "darwin" {
+		if !validCorrelationUUIDv7(start.ModelRequestID) || start.ModelRequestID == "provider-model-request-1" {
+			t.Fatalf("OmniGent model start ID = %q, want internal UUIDv7 rather than undocumented request_id", start.ModelRequestID)
+		}
+	} else if start.ModelRequestID != "" {
+		t.Fatalf("unproven OmniGent request_id populated model identity outside macOS: %q", start.ModelRequestID)
+	}
+	if start.SessionID == "reported-model-session" || start.TurnID == "reported-model-turn" {
+		t.Fatalf("OmniGent accepted undocumented hook correlation aliases: session=%q turn=%q", start.SessionID, start.TurnID)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
@@ -709,16 +720,20 @@ func TestHookOccurrenceOmniGentRejectsUnprovenModelAliasesAcrossRestart(t *testi
 	profile = server.hookProfileForConnector("omnigent")
 	endPayload := map[string]interface{}{
 		"hook_event_name": "AfterModel", "conversation_id": "reported-model-session",
-		"response_id": "reported-model-turn", "agent_id": "reported-model-agent",
+		"response_id": "reported-model-turn",
 	}
 	end := normalizeAgentHookRequestWithProfile("omnigent", endPayload, profile)
 	_, end, err = server.correlateHookOccurrence(t.Context(), profile, end,
-		[]byte(`{"agent_id":"reported-model-agent","conversation_id":"reported-model-session","hook_event_name":"AfterModel","response_id":"reported-model-turn"}`))
+		[]byte(`{"conversation_id":"reported-model-session","hook_event_name":"AfterModel","response_id":"reported-model-turn"}`))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if end.ModelRequestID != "" {
-		t.Fatalf("unproven OmniGent aliases inferred model identity after restart: %q", end.ModelRequestID)
+	if runtime.GOOS == "darwin" {
+		if end.ModelRequestID != start.ModelRequestID {
+			t.Fatalf("OmniGent restart model ID = %q, want %q", end.ModelRequestID, start.ModelRequestID)
+		}
+	} else if end.ModelRequestID != "" {
+		t.Fatalf("unproven OmniGent aliases inferred model identity after restart outside macOS: %q", end.ModelRequestID)
 	}
 	repo, err := reopened.CorrelationRepository()
 	if err != nil {
@@ -731,8 +746,13 @@ func TestHookOccurrenceOmniGentRejectsUnprovenModelAliasesAcrossRestart(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(operations) != 0 {
-		t.Fatalf("unproven OmniGent model aliases created completed operations=%+v", operations)
+	if runtime.GOOS == "darwin" {
+		if len(operations) != 1 || operations[0].OperationID != start.ModelRequestID ||
+			operations[0].TerminalSemanticEventID != audit.SemanticEventID(end.SemanticEventID) {
+			t.Fatalf("internally normalized model pending resolution=%+v", operations)
+		}
+	} else if len(operations) != 0 {
+		t.Fatalf("unproven OmniGent model aliases created completed operations outside macOS=%+v", operations)
 	}
 }
 
@@ -785,7 +805,7 @@ func TestHookOccurrenceRejectsConflictingTypedAliasesBeforePersistence(t *testin
 	}
 }
 
-func TestOpenHandsActionIdentityIsPreservedWithoutBecomingToolInvocation(t *testing.T) {
+func TestOpenHandsUndocumentedActionIdentityIsIgnoredWithoutBecomingToolInvocation(t *testing.T) {
 	installCorrelationHMACForTest()
 	path := filepath.Join(t.TempDir(), "audit.db")
 	server, store := newHookCorrelationServer(t, path)
@@ -823,7 +843,7 @@ func TestOpenHandsActionIdentityIsPreservedWithoutBecomingToolInvocation(t *test
 		WHERE identifier_kind='tool_invocation' AND normalized_value='action-1'`).Scan(&tools); err != nil {
 		t.Fatal(err)
 	}
-	if actions != 1 || tools != 0 {
+	if actions != 0 || tools != 0 {
 		t.Fatalf("action/tool identifier rows=%d/%d", actions, tools)
 	}
 }

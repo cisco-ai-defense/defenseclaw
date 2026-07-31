@@ -79,16 +79,6 @@ class MakeCodexConfigShapeTests(unittest.TestCase):
                 body = fh.read()
             self.assertIn('model_provider = "openai"', body)
 
-    def test_with_hooks_block(self):
-        with _IsolatedHomeAndCwd() as iso:
-            block = '\n[hooks]\nbefore_tool = "/usr/local/bin/dc-hook.sh"'
-            path = make_codex_config(iso.home, hooks_block=block)
-            with open(path) as fh:
-                body = fh.read()
-            self.assertIn("[hooks]", body)
-            self.assertIn("before_tool", body)
-
-
 class CodexMCPReaderTests(unittest.TestCase):
     """``connector_paths.mcp_servers('codex')`` defaults to
     ``$CODEX_HOME/config.toml`` and reads project ``.codex/config.toml``
@@ -118,6 +108,8 @@ class CodexSkillAndPluginDirsTests(unittest.TestCase):
         with _IsolatedHomeAndCwd() as iso:
             dirs = connector_paths.skill_dirs("codex")
             self.assertIn(os.path.join(iso.home, ".agents", "skills"), dirs)
+            if os.name != "nt":
+                self.assertIn("/etc/codex/skills", dirs)
             cwd_skills = os.path.join(os.getcwd(), ".agents", "skills")
             self.assertNotIn(cwd_skills, dirs)
 
@@ -128,7 +120,7 @@ class CodexSkillAndPluginDirsTests(unittest.TestCase):
             cwd_skills = os.path.join(iso.cwd, ".agents", "skills")
             self.assertIn(cwd_skills, dirs)
 
-    def test_plugin_dirs_includes_home_and_cache(self):
+    def test_plugin_dirs_includes_installed_cache_only(self):
         with _IsolatedHomeAndCwd() as iso:
             dirs = connector_paths.plugin_dirs("codex")
             base = os.path.join(iso.home, ".codex", "plugins")

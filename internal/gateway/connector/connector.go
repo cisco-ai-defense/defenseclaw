@@ -681,6 +681,14 @@ type AgentPathProvider interface {
 	AgentPaths(opts SetupOpts) AgentPaths
 }
 
+// ExclusiveManagedPathProvider identifies PatchedFiles that are not shared
+// agent configuration. The enterprise guardian treats these whole-file,
+// DefenseClaw-owned artifacts as exclusive-writer paths so in-place writes
+// and chmod events trigger immediate reconciliation.
+type ExclusiveManagedPathProvider interface {
+	ExclusiveManagedPaths(opts SetupOpts) []string
+}
+
 // EnvScope describes where an environment variable needs to be set
 // for the connector's routing to take effect. DefenseClaw never
 // writes to user shell rc files; this enum is documentation for the

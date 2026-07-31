@@ -15,6 +15,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -57,6 +58,7 @@ from defenseclaw.config import (
     OpenShellConfig,
     PerConnectorGuardrailConfig,
 )
+from defenseclaw.doctor_hooks import validate_posix_copilot_hook_registration
 
 
 class DoctorSecurityOverrideTests(unittest.TestCase):
@@ -663,6 +665,20 @@ class DoctorHookReachabilityTests(unittest.TestCase):
             openshell=OpenShellConfig(),
         )
 
+    def _write_openhands_runtime(self, cfg: Config) -> None:
+        hook_dir = os.path.join(cfg.data_dir, "hooks")
+        os.makedirs(hook_dir, exist_ok=True)
+        script = os.path.join(hook_dir, "openhands-hook.sh")
+        with open(script, "w", encoding="utf-8") as fh:
+            fh.write("#!/bin/bash\n# defenseclaw-managed-hook v6\nexit 0\n")
+        os.chmod(script, 0o700)
+        for name in (".hook-openhands.token", ".otlp-openhands.token"):
+            path = os.path.join(hook_dir, name)
+            with open(path, "w", encoding="utf-8") as fh:
+                fh.write("a" * 64)
+            os.chmod(path, 0o600)
+
+    @unittest.skipIf(os.name == "nt", "POSIX OpenHands hook fixture")
     def test_openhands_hooks_accept_sdk_home_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = os.path.join(tmp, "home")
@@ -673,7 +689,7 @@ class DoctorHookReachabilityTests(unittest.TestCase):
             with open(hook_path, "w", encoding="utf-8") as fh:
                 json.dump(
                     {
-                        "pre_tool_use": [
+                        event: [
                             {
                                 "matcher": "*",
                                 "hooks": [
@@ -684,10 +700,19 @@ class DoctorHookReachabilityTests(unittest.TestCase):
                                 ],
                             }
                         ]
+                        for event in (
+                            "pre_tool_use",
+                            "post_tool_use",
+                            "user_prompt_submit",
+                            "stop",
+                            "session_start",
+                            "session_end",
+                        )
                     },
                     fh,
                 )
             cfg = self._cfg(tmp, "openhands")
+            self._write_openhands_runtime(cfg)
             cfg.claw.workspace_dir = workspace
             with patch.dict(os.environ, isolated_home_env(home), clear=False):
                 result = _DoctorResult()
@@ -696,14 +721,53 @@ class DoctorHookReachabilityTests(unittest.TestCase):
             self.assertEqual(result.passed, 1)
             self.assertIn("reachable", result.checks[0]["detail"])
 
+    def test_openhands_workspace_hooks_shadow_global_registration(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = os.path.join(tmp, "home")
+            workspace = os.path.join(tmp, "repo")
+            global_path = os.path.join(home, ".openhands", "hooks.json")
+            workspace_path = os.path.join(workspace, ".openhands", "hooks.json")
+            os.makedirs(os.path.dirname(global_path), exist_ok=True)
+            os.makedirs(os.path.dirname(workspace_path), exist_ok=True)
+            with open(global_path, "w", encoding="utf-8") as fh:
+                json.dump({"pre_tool_use": [{"hooks": [{"command": "openhands-hook.sh"}]}]}, fh)
+            with open(workspace_path, "w", encoding="utf-8") as fh:
+                json.dump({"pre_tool_use": [{"hooks": [{"command": "operator-hook.sh"}]}]}, fh)
+
+            cfg = self._cfg(tmp, "openhands")
+            cfg.claw.workspace_dir = workspace
+            with patch.dict(os.environ, isolated_home_env(home), clear=False):
+                result = _DoctorResult()
+                _check_openhands_hooks(cfg, result)
+
+            self.assertEqual(result.failed, 1, result.checks)
+            self.assertEqual(result.passed, 0, result.checks)
+            self.assertIn(workspace_path, result.checks[0]["detail"])
+            self.assertIn("setup openhands", result.checks[0]["detail"])
+
+    def test_openhands_incomplete_registration_is_tamper(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = os.path.join(tmp, "home")
+            hook_path = os.path.join(home, ".openhands", "hooks.json")
+            os.makedirs(os.path.dirname(hook_path), exist_ok=True)
+            with open(hook_path, "w", encoding="utf-8") as fh:
+                json.dump({"pre_tool_use": [{"hooks": [{"command": "openhands-hook.sh"}]}]}, fh)
+            cfg = self._cfg(tmp, "openhands")
+            self._write_openhands_runtime(cfg)
+            with patch.dict(os.environ, isolated_home_env(home), clear=False):
+                result = _DoctorResult()
+                _check_openhands_hooks(cfg, result)
+            self.assertEqual(result.failed, 1, result.checks)
+            self.assertIn("incomplete", result.checks[0]["detail"])
+
     # ------------------------------------------------------------------
     # Antigravity (`agy`) hook reachability
     #
     # `_check_antigravity_hooks` enforces four facts:
     #
     #   1. Missing global file → fail.
-    #   2. File exists but does not reference antigravity-hook.sh → fail.
-    #   3. File exists and references the script → pass.
+    #   2. Missing, extra, malformed, or event-mismatched managed keys → fail.
+    #   3. The exact five-event managed contract → pass.
     #   4. Pass + duplicate registration in the documented workspace
     #      .agents/hooks.json → emit a warn alongside the pass.
     # ------------------------------------------------------------------
@@ -719,7 +783,11 @@ class DoctorHookReachabilityTests(unittest.TestCase):
         ]
         cfg: dict = {}
         for event in events:
-            handler = {"type": "command", "command": hook_script_path, "timeout": 30}
+            handler = {
+                "type": "command",
+                "command": f"{hook_script_path} {event}",
+                "timeout": 30,
+            }
             entries = (
                 [{"matcher": "*", "hooks": [handler]}]
                 if event in {"PreToolUse", "PostToolUse"}
@@ -775,7 +843,7 @@ class DoctorHookReachabilityTests(unittest.TestCase):
                 _check_antigravity_hooks(cfg, result, platform_name="posix")
             self.assertEqual(result.passed, 0, result.checks)
             self.assertEqual(result.failed, 1)
-            self.assertIn("does not reference", result.checks[0]["detail"])
+            self.assertIn("stale or tampered", result.checks[0]["detail"])
 
     def test_antigravity_hooks_global_only_passes(self):
         # The documented global hooks file exists with the mixed schema.
@@ -795,6 +863,45 @@ class DoctorHookReachabilityTests(unittest.TestCase):
             self.assertEqual(result.passed, 1)
             self.assertEqual(result.warned, 0, result.checks)
             self.assertIn("reachable", result.checks[0]["detail"])
+
+    def test_antigravity_hooks_tampered_event_binding_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = os.path.join(tmp, "home")
+            hook_path = os.path.join(home, ".gemini", "config", "hooks.json")
+            os.makedirs(os.path.dirname(hook_path), exist_ok=True)
+            script_path = os.path.join(tmp, ".defenseclaw", "hooks", "antigravity-hook.sh")
+            payload = self._antigravity_hooks_payload(script_path)
+            payload["defenseclaw-antigravity-pretooluse"]["PreToolUse"][0]["hooks"][0][
+                "command"
+            ] = f"{script_path} PostToolUse"
+            with open(hook_path, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh)
+            cfg = self._cfg(tmp, "antigravity")
+            with patch.dict(os.environ, isolated_home_env(home), clear=False):
+                result = _DoctorResult()
+                _check_antigravity_hooks(cfg, result, platform_name="posix")
+            self.assertEqual(result.failed, 1, result.checks)
+            self.assertIn("PreToolUse command", result.checks[0]["detail"])
+            self.assertIn("setup antigravity --yes", result.checks[0]["detail"])
+
+    def test_antigravity_hooks_unexpected_managed_key_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = os.path.join(tmp, "home")
+            hook_path = os.path.join(home, ".gemini", "config", "hooks.json")
+            os.makedirs(os.path.dirname(hook_path), exist_ok=True)
+            script_path = os.path.join(tmp, ".defenseclaw", "hooks", "antigravity-hook.sh")
+            payload = self._antigravity_hooks_payload(script_path)
+            payload["defenseclaw-antigravity-legacy"] = {
+                "PreToolUse": [{"type": "command", "command": "/bin/true"}]
+            }
+            with open(hook_path, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh)
+            cfg = self._cfg(tmp, "antigravity")
+            with patch.dict(os.environ, isolated_home_env(home), clear=False):
+                result = _DoctorResult()
+                _check_antigravity_hooks(cfg, result, platform_name="posix")
+            self.assertEqual(result.failed, 1, result.checks)
+            self.assertIn("unexpected managed", result.checks[0]["detail"])
 
     def test_antigravity_hooks_ignore_undocumented_legacy_path_residue(self):
         # Undocumented residue is ignored; only the documented global hook
@@ -886,32 +993,81 @@ class DoctorHookReachabilityTests(unittest.TestCase):
             self.assertEqual(result.failed, 1, result.checks)
             self.assertIn("inside DefenseClaw data dir", result.checks[0]["detail"])
 
+    @unittest.skipIf(os.name == "nt", "POSIX Copilot hook fixture")
     def test_copilot_hooks_verify_workspace_config(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = os.path.join(tmp, "repo")
             hook_path = os.path.join(workspace, ".github", "hooks", "defenseclaw.json")
+            data_dir = os.path.join(tmp, ".defenseclaw")
+            script_path = os.path.join(data_dir, "hooks", "copilot-hook.sh")
+            os.makedirs(os.path.dirname(script_path), exist_ok=True)
+            with open(script_path, "w", encoding="utf-8") as fh:
+                fh.write("#!/bin/sh\n")
+            os.chmod(script_path, 0o700)
             os.makedirs(os.path.dirname(hook_path), exist_ok=True)
+            events = (
+                "sessionStart", "sessionEnd", "userPromptSubmitted",
+                "userPromptTransformed", "preToolUse", "postToolUse",
+                "postToolUseFailure", "permissionRequest", "agentStop",
+                "subagentStart", "subagentStop", "errorOccurred",
+                "preCompact", "notification",
+            )
             with open(hook_path, "w", encoding="utf-8") as fh:
                 json.dump(
                     {
                         "version": 1,
                         "hooks": {
-                            "PreToolUse": [
-                                {
-                                    "type": "command",
-                                    "bash": os.path.join(tmp, ".defenseclaw", "hooks", "copilot-hook.sh"),
-                                }
-                            ]
+                            event: [{"type": "command", "bash": script_path, "timeoutSec": 30}]
+                            for event in events
                         },
                     },
                     fh,
                 )
             cfg = self._cfg(tmp, "copilot")
             cfg.claw.workspace_dir = workspace
+            with open(os.path.join(data_dir, "hook_contract_lock.json"), "w", encoding="utf-8") as fh:
+                json.dump(
+                    {
+                        "connectors": {
+                            "copilot": {
+                                "contract_id": "copilot-hooks-v2",
+                                "compatibility_status": "unversioned",
+                                "hook_script_version": "v7",
+                                "hook_script_digests": {
+                                    "copilot-hook.sh": "sha256:"
+                                    + hashlib.sha256(b"#!/bin/sh\n").hexdigest()
+                                },
+                                "locations": {"hook_config_paths": [hook_path]},
+                            }
+                        }
+                    },
+                    fh,
+                )
             result = _DoctorResult()
             _check_copilot_hooks(cfg, result, platform_name="posix")
             self.assertEqual(result.failed, 0, result.checks)
             self.assertEqual(result.passed, 1)
+
+            document = json.load(open(hook_path, encoding="utf-8"))
+            del document["hooks"]["userPromptTransformed"]
+            with open(hook_path, "w", encoding="utf-8") as fh:
+                json.dump(document, fh)
+            check = validate_posix_copilot_hook_registration(config_path=hook_path, data_dir=data_dir)
+            self.assertFalse(check.healthy)
+            self.assertIn("userPromptTransformed", check.detail)
+
+            document["hooks"]["userPromptTransformed"] = [
+                {"type": "command", "bash": script_path, "timeoutSec": 30}
+            ]
+            with open(hook_path, "w", encoding="utf-8") as fh:
+                json.dump(document, fh)
+            with open(script_path, "a", encoding="utf-8") as fh:
+                fh.write("# tampered\n")
+            check = validate_posix_copilot_hook_registration(
+                config_path=hook_path, data_dir=data_dir
+            )
+            self.assertFalse(check.healthy)
+            self.assertIn("protected Setup evidence", check.detail)
 
 
 class DoctorLLMKeyProviderRoutingTests(unittest.TestCase):

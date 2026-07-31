@@ -634,7 +634,7 @@ def test_connector_labels_cover_hook_surface_connectors(monkeypatch, tmp_path) -
     cases = {
         "hermes": "Hermes",
         "cursor": "Cursor",
-        "windsurf": "Windsurf",
+        "windsurf": "Devin Desktop (Windsurf)",
         "geminicli": "Gemini CLI",
         "copilot": "GitHub Copilot CLI",
     }
@@ -685,8 +685,10 @@ def test_connector_labels_cover_hook_surface_connectors(monkeypatch, tmp_path) -
     assert ".gemini/config/plugins" in antigravity_plugins
     assert "read/write" in antigravity_plugins
     assert "OMNIGENT_CONFIG_HOME" in connector_source_label("omnigent", "config")
-    assert "managed by OmniGent" in connector_source_label("omnigent", "mcps")
-    assert "unsupported" in connector_source_label("omnigent", "skills")
+    assert "<workspace>/.omnigent/config.yaml" in connector_source_label("omnigent", "config")
+    assert "~/.omnigent/agents" in connector_source_label("omnigent", "mcps")
+    assert "discovery-only" in connector_source_label("omnigent", "mcps")
+    assert "~/.omnigent/agents" in connector_source_label("omnigent", "skills")
 
     health = HealthSnapshot(connector=ConnectorHealth(name="codex"))
     assert active_connector_name(health, "openclaw") == "codex"

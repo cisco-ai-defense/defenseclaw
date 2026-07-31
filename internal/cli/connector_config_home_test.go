@@ -24,8 +24,26 @@ x-defenseclaw-source = "codex"
 x-defenseclaw-client = "codex-otel/1.0"
 `
 
+// connectorConfigHomeTempDir returns a real path on macOS, where the Go test
+// root is commonly reported below /var even though /var is a system symlink to
+// /private/var. Lifecycle config-home validation intentionally rejects every
+// symlink in the supplied path, so security tests must not accidentally use
+// that ambient alias as their supposedly safe fixture root.
+func connectorConfigHomeTempDir(t *testing.T) string {
+	t.Helper()
+	root := testenv.PrivateTempDir(t)
+	if runtime.GOOS == "windows" {
+		return root
+	}
+	resolved, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve temporary config-home root: %v", err)
+	}
+	return resolved
+}
+
 func TestBindConnectorLifecycleConfigHomeOverridesAmbientAndRestoresIt(t *testing.T) {
-	root := t.TempDir()
+	root := connectorConfigHomeTempDir(t)
 	ambient := filepath.Join(root, "ambient")
 	bound := filepath.Join(root, "bound")
 	t.Setenv("CODEX_HOME", ambient)
@@ -46,7 +64,7 @@ func TestBindConnectorLifecycleConfigHomeOverridesAmbientAndRestoresIt(t *testin
 }
 
 func TestBindWindsurfLifecycleProfileOverridesAmbientAndRestoresIt(t *testing.T) {
-	root := t.TempDir()
+	root := connectorConfigHomeTempDir(t)
 	ambient := filepath.Join(root, "ambient-profile")
 	bound := filepath.Join(root, "bound-profile")
 	for _, path := range []string{ambient, bound} {
@@ -85,7 +103,7 @@ func TestBindWindsurfLifecycleProfileOverridesAmbientAndRestoresIt(t *testing.T)
 }
 
 func TestBindAntigravityLifecycleConfigHomeUsesHiddenOptsWithoutVendorEnv(t *testing.T) {
-	root := t.TempDir()
+	root := connectorConfigHomeTempDir(t)
 	ambient := filepath.Join(root, "ambient")
 	bound := filepath.Join(root, ".gemini", "config")
 	t.Setenv("ANTIGRAVITY_CONFIG_DIR", ambient)
@@ -111,8 +129,8 @@ func TestBindAntigravityLifecycleConfigHomeUsesHiddenOptsWithoutVendorEnv(t *tes
 }
 
 func TestBindOpenCodeLifecycleConfigHomeOverridesAmbientAndRestoresIt(t *testing.T) {
-	ambient := filepath.Join(t.TempDir(), "ambient-opencode")
-	bound := filepath.Join(t.TempDir(), "bound-opencode")
+	ambient := filepath.Join(connectorConfigHomeTempDir(t), "ambient-opencode")
+	bound := filepath.Join(connectorConfigHomeTempDir(t), "bound-opencode")
 	t.Setenv("OPENCODE_CONFIG_DIR", ambient)
 	connectorFlagConfigHome = bound
 	t.Cleanup(func() { connectorFlagConfigHome = "" })
@@ -131,7 +149,7 @@ func TestBindOpenCodeLifecycleConfigHomeOverridesAmbientAndRestoresIt(t *testing
 }
 
 func TestBindHermesLifecycleConfigHomeOverridesAmbientAndRestoresIt(t *testing.T) {
-	root := t.TempDir()
+	root := connectorConfigHomeTempDir(t)
 	ambient := filepath.Join(root, "ambient-hermes")
 	bound := filepath.Join(root, "bound-hermes")
 	t.Setenv("HERMES_HOME", ambient)
@@ -161,7 +179,7 @@ func TestBindHermesLifecycleConfigHomeOverridesAmbientAndRestoresIt(t *testing.T
 }
 
 func TestHermesLifecycleHookExecutableBindingRequiresExactNativePath(t *testing.T) {
-	root := t.TempDir()
+	root := connectorConfigHomeTempDir(t)
 	home := filepath.Join(root, "hermes")
 	valid := filepath.Join(root, "HookRuntime", "defenseclaw-hook.exe")
 	previousPaths := connectorHookRuntimePaths
@@ -198,7 +216,7 @@ func TestHermesLifecycleHookExecutableBindingRequiresExactNativePath(t *testing.
 }
 
 func TestBindConnectorLifecycleConfigHomeRejectsUnsafeTargets(t *testing.T) {
-	root := t.TempDir()
+	root := connectorConfigHomeTempDir(t)
 	unnormalized := root + string(filepath.Separator) + "child" + string(filepath.Separator) + ".." + string(filepath.Separator) + "codex"
 	for _, test := range []struct {
 		name      string
@@ -223,7 +241,7 @@ func TestBindConnectorLifecycleConfigHomeRejectsUnsafeTargets(t *testing.T) {
 }
 
 func TestConnectorVerifyUsesExplicitConfigHomeWithoutMutation(t *testing.T) {
-	root := t.TempDir()
+	root := connectorConfigHomeTempDir(t)
 	dataDir := filepath.Join(root, "data")
 	ambient := filepath.Join(root, "ambient")
 	bound := filepath.Join(root, "bound")
@@ -262,15 +280,22 @@ func TestConnectorVerifyUsesExplicitConfigHomeWithoutMutation(t *testing.T) {
 }
 
 func TestCursorVerifyUsesExplicitConfigHomeWithoutVendorEnvironmentOverride(t *testing.T) {
-	root := t.TempDir()
-	dataDir := testenv.PrivateTempDir(t)
+	root := connectorConfigHomeTempDir(t)
+	dataDir := connectorConfigHomeTempDir(t)
 	bound := filepath.Join(root, "cursor")
 	if err := os.MkdirAll(bound, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	adapter := filepath.Join(dataDir, "hooks", "cursor-hook.ps1")
+	adapterName := "cursor-hook.sh"
+	commandPrefix := "'"
+	commandSuffix := "'"
+	if runtime.GOOS == "windows" {
+		adapterName = "cursor-hook.ps1"
+		commandPrefix = "& '"
+	}
+	adapter := filepath.Join(dataDir, "hooks", adapterName)
 	config := []byte(`{"version":1,"hooks":{"preToolUse":[{"type":"command","command":"` +
-		`& '` + strings.ReplaceAll(adapter, `\`, `\\`) + `'` +
+		commandPrefix + strings.ReplaceAll(adapter, `\`, `\\`) + commandSuffix +
 		`","timeout":30,"failClosed":false}]}}`)
 	configPath := filepath.Join(bound, "hooks.json")
 	if err := os.WriteFile(configPath, config, 0o600); err != nil {
@@ -304,8 +329,8 @@ func TestCursorVerifyUsesExplicitConfigHomeWithoutVendorEnvironmentOverride(t *t
 }
 
 func TestCursorReconcileWritesOnlyExplicitConfigHome(t *testing.T) {
-	root := t.TempDir()
-	dataDir := testenv.PrivateTempDir(t)
+	root := connectorConfigHomeTempDir(t)
+	dataDir := connectorConfigHomeTempDir(t)
 	bound := filepath.Join(root, "cursor")
 	for _, path := range []string{bound} {
 		if err := os.MkdirAll(path, 0o700); err != nil {
@@ -330,7 +355,7 @@ func TestCursorReconcileWritesOnlyExplicitConfigHome(t *testing.T) {
 	)
 	if !strings.Contains(stdout, `"connector":"cursor"`) ||
 		!strings.Contains(stdout, `"fail_mode":"open"`) ||
-		(stderr != "" && !strings.Contains(stderr, "preview on windows")) {
+		(stderr != "" && !strings.Contains(stderr, "preview on ")) {
 		t.Fatalf("Cursor reconcile: stdout=%q stderr=%q", stdout, stderr)
 	}
 	hooksPath := filepath.Join(bound, "hooks.json")
@@ -362,7 +387,7 @@ func TestConnectorHookExecutableFlagIsMaintenanceOnly(t *testing.T) {
 }
 
 func TestBindConnectorLifecycleConfigHomeRejectsSymlinkChain(t *testing.T) {
-	root := t.TempDir()
+	root := connectorConfigHomeTempDir(t)
 	target := filepath.Join(root, "target")
 	if err := os.MkdirAll(target, 0o700); err != nil {
 		t.Fatal(err)

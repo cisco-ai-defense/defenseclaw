@@ -216,8 +216,9 @@ func TestResolveWatcherDirs_NilConnectorFallsBackToConfigDefault(t *testing.T) {
 //
 //  1. Hermes exposes documented user/workspace plugins as read-only
 //     inventory, and Cursor exposes its documented local plugin cache as
-//     read-only inventory, so both contribute plugin watcher paths. The
-//     other hook-only connectors in this matrix advertise no plugin
+//     read-only inventory, so both contribute plugin watcher paths. Copilot
+//     owns its command-backed plugin inventory without exposing filesystem
+//     directories. The remaining hook-only connectors advertise no plugin
 //     inventory and must fall back to cfg.PluginDirs(). This keeps watcher
 //     ownership aligned with each vendor surface rather than applying one
 //     connector's plugin semantics to all hook-only connectors.
@@ -244,7 +245,8 @@ func TestResolveWatcherDirs_HookOnlyConnectorMatrix(t *testing.T) {
 		expectSkillSrc   watcherDirSource
 		expectSkillFrag  string // empty when expectSkillSrc != watcherDirsFromConnector
 		expectPluginSrc  watcherDirSource
-		expectPluginFrag string // empty when expectPluginSrc != watcherDirsFromConnector
+		expectPluginFrag string // empty when the connector owns no filesystem directory
+		expectPluginNone bool
 	}{
 		{
 			name:             "hermes",
@@ -280,11 +282,12 @@ func TestResolveWatcherDirs_HookOnlyConnectorMatrix(t *testing.T) {
 			// must surface its user-scope skill directory
 			// (~/.copilot/skills) instead of inferring a
 			// workspace from the daemon's cwd.
-			name:            "copilot",
-			ctor:            func() connector.Connector { return connector.NewCopilotConnector() },
-			expectSkillSrc:  watcherDirsFromConnector,
-			expectSkillFrag: filepath.Join(".copilot", "skills"),
-			expectPluginSrc: watcherDirsFromDefault,
+			name:             "copilot",
+			ctor:             func() connector.Connector { return connector.NewCopilotConnector() },
+			expectSkillSrc:   watcherDirsFromConnector,
+			expectSkillFrag:  filepath.Join(".copilot", "skills"),
+			expectPluginSrc:  watcherDirsFromConnector,
+			expectPluginNone: true,
 		},
 		{
 			name:            "openhands",
@@ -299,6 +302,9 @@ func TestResolveWatcherDirs_HookOnlyConnectorMatrix(t *testing.T) {
 	wcfg.Skill.Enabled = true
 	wcfg.Plugin.Enabled = true
 	cfg := &config.Config{}
+	if runtime.GOOS == "darwin" {
+		cases[2].expectSkillSrc = watcherDirsFromConnector
+	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -320,6 +326,9 @@ func TestResolveWatcherDirs_HookOnlyConnectorMatrix(t *testing.T) {
 			if tc.expectPluginFrag != "" && !anyContains(pluginDirs, tc.expectPluginFrag) {
 				t.Errorf("plugin dirs %v do not contain %q (connector ComponentTargets misrouted?)",
 					pluginDirs, tc.expectPluginFrag)
+			}
+			if tc.expectPluginNone && len(pluginDirs) != 0 {
+				t.Errorf("plugin dirs = %v, want empty for connector-owned command inventory", pluginDirs)
 			}
 		})
 	}

@@ -491,11 +491,10 @@ func (a *APIServer) lookupOTLPPathToken(source string) string {
 	return tok
 }
 
-func (a *APIServer) hookAPITokenMatches(connectorName, presented string) bool {
+func (a *APIServer) lookupHookAPIToken(connectorName string) string {
 	name := strings.ToLower(strings.TrimSpace(connectorName))
-	presented = strings.TrimSpace(presented)
-	if name == "" || presented == "" {
-		return false
+	if name == "" {
+		return ""
 	}
 
 	dataDir := a.configDataDir()
@@ -506,7 +505,7 @@ func (a *APIServer) hookAPITokenMatches(connectorName, presented string) bool {
 			cached = a.hookAPITokens[name]
 		}
 		a.hookAPITokenMu.RUnlock()
-		return cached != "" && constantTimeStringMatch(presented, cached)
+		return cached
 	}
 	tok, err := connector.LoadHookAPIToken(dataDir, name)
 	if err != nil || tok == "" {
@@ -515,7 +514,7 @@ func (a *APIServer) hookAPITokenMatches(connectorName, presented string) bool {
 			delete(a.hookAPITokens, name)
 		}
 		a.hookAPITokenMu.Unlock()
-		return false
+		return ""
 	}
 	a.hookAPITokenMu.Lock()
 	if a.hookAPITokens == nil {
@@ -523,7 +522,16 @@ func (a *APIServer) hookAPITokenMatches(connectorName, presented string) bool {
 	}
 	a.hookAPITokens[name] = tok
 	a.hookAPITokenMu.Unlock()
-	return constantTimeStringMatch(presented, tok)
+	return tok
+}
+
+func (a *APIServer) hookAPITokenMatches(connectorName, presented string) bool {
+	presented = strings.TrimSpace(presented)
+	if presented == "" {
+		return false
+	}
+	expected := a.lookupHookAPIToken(connectorName)
+	return expected != "" && constantTimeStringMatch(presented, expected)
 }
 
 func (a *APIServer) hookTokenScopeForPath(path string) (string, bool) {
@@ -3151,10 +3159,17 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 				return
 			}
 		}
-		if hookScope, ok := a.hookTokenScopeForPath(r.URL.Path); ok && connector.IsLoopback(r) && token != "" {
-			if a.hookAPITokenMatches(hookScope, token) {
-				next.ServeHTTP(w, r)
-				return
+		if hookScope, ok := a.hookTokenScopeForPath(r.URL.Path); ok && connector.IsLoopback(r) {
+			if scoped := a.lookupHookAPIToken(hookScope); scoped != "" {
+				if token != "" && constantTimeStringMatch(token, scoped) {
+					next.ServeHTTP(w, r)
+					return
+				}
+				if strictScopedHookAuth(hookScope, runtime.GOOS) {
+					a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_scoped_hook_token")
+					http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+					return
+				}
 			}
 		}
 		if strings.HasPrefix(r.URL.Path, "/api/v1/inspect/") && connector.IsLoopback(r) && token != "" {
@@ -3187,6 +3202,10 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 		r = r.WithContext(PromoteSessionIfAuthenticated(r.Context()))
 		next.ServeHTTP(w, r)
 	})
+}
+
+func strictScopedHookAuth(connectorName, goos string) bool {
+	return goos == "darwin" && strings.EqualFold(strings.TrimSpace(connectorName), "windsurf")
 }
 
 // constantTimeStringMatch returns true iff a == b without leaking

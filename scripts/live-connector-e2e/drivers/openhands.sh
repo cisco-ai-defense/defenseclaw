@@ -10,15 +10,16 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Live driver for OpenHands (headless CLI).
-#   - install:  pipx/uv install openhands-ai (the `openhands` console script)
+#   - install:  uv tool install openhands (the official CLI package)
 #   - headless: openhands --headless -t "<prompt>"
 #   - auth:     LLM_API_KEY + LLM_MODEL (OpenHands' provider-agnostic env).
 #               OpenHands routes through LiteLLM, so it can target the public
 #               provider (default), Amazon Bedrock (DC_USE_BEDROCK=1), or
 #               Azure OpenAI (DC_USE_AZURE=1). Bedrock wins if both are set.
-#   - runtime:  Docker. LINUX ONLY — macOS/Windows runners lack a usable Docker
-#               daemon for the agent runtime, so the workflow restricts this
-#               connector to ubuntu-latest.
+#   - runtime:  local OpenHands SDK workspace for CLI/headless mode. Docker is
+#               required by `openhands serve`, not by the CLI path exercised
+#               here. The official CLI supports Linux and macOS; native Windows
+#               remains unsupported upstream.
 #   - hooks:    PreToolUse deny is honored (exit-2 style), so block is testable.
 #
 # Bedrock: LLM_MODEL=bedrock/<inference-profile>; LiteLLM uses the AWS chain
@@ -36,20 +37,25 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 DC_DRIVER_MODE=action
 DC_DRIVER_SUPPORTS_BLOCK=1
-DC_DRIVER_SUPPORTS_OTLP=0
+DC_DRIVER_SUPPORTS_OTLP=1
 
 OPENHANDS_MODEL="${OPENHANDS_MODEL:-openai/gpt-5-mini}"
 
 agent_install() {
-  if [ "$(dc_detect_os)" != "linux" ]; then
-    dc_warn "openhands requires Docker runtime; only supported on linux"
-    return 1
+  case "$(dc_detect_os)" in
+    linux|macos) ;;
+    *) dc_warn "openhands live driver supports the official Linux/macOS CLI only"; return 1 ;;
+  esac
+  local requested="${OPENHANDS_VERSION:-${DC_E2E_AGENT_VERSION_REQUEST:-latest}}"
+  local package="openhands"
+  if [ "${requested}" != "latest" ]; then
+    package="${package}==${requested}"
   fi
   if command -v uv >/dev/null 2>&1; then
-    uv tool install "openhands-ai${OPENHANDS_VERSION:+==${OPENHANDS_VERSION}}" || return 1
+    uv tool install --python 3.12 --force "${package}" || return 1
   else
-    pipx install "openhands-ai${OPENHANDS_VERSION:+==${OPENHANDS_VERSION}}" || \
-      pip install --user "openhands-ai${OPENHANDS_VERSION:+==${OPENHANDS_VERSION}}" || return 1
+    dc_err "openhands requires uv and Python 3.12 (the upstream-recommended install path)"
+    return 1
   fi
   DC_E2E_AGENT_VERSION="$(dc_capture_version openhands openhands --version)"
   export DC_E2E_AGENT_VERSION
@@ -84,7 +90,19 @@ agent_install() {
 
 agent_run() {
   local prompt="$1"
-  dc_timeout 300 openhands --headless -t "${prompt}"
+  local otlp_token_file="${DEFENSECLAW_HOME}/hooks/.otlp-openhands.token"
+  local otlp_token api_port
+  if [ ! -f "${otlp_token_file}" ]; then
+    dc_err "OpenHands scoped OTLP token was not provisioned"
+    return 1
+  fi
+  IFS= read -r otlp_token < "${otlp_token_file}" || return 1
+  api_port="${DC_PERSIST_API_PORT:-18970}"
+  export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT="http://127.0.0.1:${api_port}/v1/traces"
+  export OTEL_EXPORTER_OTLP_TRACES_PROTOCOL="http/protobuf"
+  export OTEL_EXPORTER_OTLP_TRACES_HEADERS="authorization=Bearer%20${otlp_token},x-defenseclaw-client=openhands-otel%2F1.0,x-defenseclaw-source=openhands"
+  export OTEL_TRACES_EXPORTER=otlp
+  dc_timeout 300 openhands --headless --override-with-envs -t "${prompt}"
 }
 
 dc_driver_main openhands

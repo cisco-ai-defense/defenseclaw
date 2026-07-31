@@ -188,7 +188,7 @@ boundary.
   `~/.openhands/mcp.json`, and installs current skills into
   `.agents/skills` while treating `.openhands/skills` and
   `.openhands/microagents` as deprecated discovery paths. The hook
-  contract is documented against `OpenHands CLI 1.16.0` while staying
+  contract is source-reviewed against `OpenHands CLI 1.16.0` while staying
   unbounded until upstream publishes a hook-version floor.
 - New `connector.HookProfile.Decode`, `MapVerdict`, and `Respond`
   function fields let codex / claudecode declare their per-event

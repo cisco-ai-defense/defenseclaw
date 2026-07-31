@@ -1,13 +1,13 @@
 ---
-title: Windsurf
-description: Windsurf connector wires Cascade hooks across pre_user_prompt, pre_read_code, pre_write_code, pre_run_command, and pre_mcp_tool_use.
+title: Devin Desktop (Windsurf)
+description: The stable windsurf connector wires Devin Desktop Cascade hooks across prompts, code, commands, and MCP tools.
 keywords:
   - DefenseClaw Windsurf connector
   - Windsurf Cascade hooks
   - Windsurf observability
 ---
 
-The Windsurf connector wires DefenseClaw into the official
+The stable `windsurf` connector wires DefenseClaw into the official
 [Cascade hooks](https://docs.devin.ai/desktop/cascade/hooks) surface so every
 prompt, code read, code write, command run, and MCP tool call can be scored
 before it lands. Windsurf is now named Devin Desktop; the official download
@@ -20,18 +20,19 @@ defenseclaw setup windsurf
 ```
 
 <Callout type="warning">
-Windsurf setup is supported on macOS and Linux. Native Windows x64 setup is
-available as a preview, but it is not yet certified for release.
+The macOS and native Windows implementations are previews. Deterministic
+contract tests exist, but neither platform has a durable genuine latest-version
+packaged and interactive live record, so neither is certified.
 </Callout>
 
 `setup windsurf` is the dedicated Windsurf alias. It uses the shared guardrail
 setup backend and wires hooks against `~/.codeium/windsurf/hooks.json`.
-DefenseClaw discovers existing MCP, global rules, `.devin/rules` and legacy
-Windsurf rule surfaces. When a workspace is explicitly pinned, inventory also
-includes its documented `.windsurf/skills` and `.agents/skills` roots.
-DefenseClaw never auto-creates workspace configuration. **There is no
-proxy-enforcement path** — blocking happens hook-side via Cascade's
-`pre_user_prompt`, `pre_read_code`,
+DefenseClaw uses the documented MCP, skills, rules, and instruction paths
+listed below. Existing global rules, `.devin/rules`, legacy Windsurf rules,
+and explicitly pinned workspace `.windsurf/skills` and `.agents/skills` roots
+are inventoried; DefenseClaw never auto-creates workspace configuration.
+**There is no proxy-enforcement path** — blocking
+happens hook-side via Cascade's `pre_user_prompt`, `pre_read_code`,
 `pre_write_code`, `pre_run_command`, and `pre_mcp_tool_use`. Windsurf has no
 native ask surface, so confirm verdicts use its non-pausing fallback with
 `raw_action` preserved for audit.
@@ -176,6 +177,25 @@ Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [int
     </Folder>
   </Folder>
 </Files>
+
+## Customization and asset inventory
+
+| Category | DefenseClaw coverage | Official local surfaces |
+| --- | --- | --- |
+| MCP | Read/write with backup and restoration | `~/.codeium/windsurf/mcp_config.json` |
+| Skills | Read/install at workspace/user scope, explicit opt-in; enterprise path read-only | `.windsurf/skills/`, `~/.codeium/windsurf/skills/`, cross-agent `.agents/skills/`, macOS enterprise `/Library/Application Support/Windsurf/skills/` |
+| Rules | Root-level read/install plus global/enterprise read paths; nested and git-parent traversal not implemented | Preferred `.devin/rules/`, legacy `.windsurf/rules/` and `.windsurfrules`, global `~/.codeium/windsurf/memories/global_rules.md`, macOS enterprise Devin/Windsurf rule roots |
+| Instructions | Workspace-root discovery only; recursive parent-to-git-root traversal not implemented | `AGENTS.md` or `agents.md` throughout the workspace |
+| Workflows | Documented only; not inventoried or installed | `.windsurf/workflows/`, `~/.codeium/windsurf/global_workflows/` |
+| Memories | Global rule file inventoried; broader directory documented only | `~/.codeium/windsurf/memories/` |
+| Plugins | N/A for this connector | Devin Local plugins are a separate agent surface; Cascade has no documented local plugin directory |
+| Agents/subagents | N/A for this connector | Devin Local custom subagents are separate from Cascade |
+| Native OTLP | N/A | No documented Cascade-native OTLP exporter; DefenseClaw emits hook-derived v8 telemetry |
+
+Project CodeGuard may be installed only with explicit opt-in as a Cascade skill
+or rule. DefenseClaw does not reinterpret workflows or memories as skills, and
+does not claim Devin Local plugin/subagent ownership for the `windsurf`
+connector.
 
 ## Hook capabilities
 

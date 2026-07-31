@@ -35,6 +35,12 @@ _FAIL_MODE = _decoded("{{FAIL_MODE_B64}}")
 _ENDPOINT = f"http://{_API_ADDR}/api/v1/omnigent/hook"
 _TIMEOUT_SECONDS = 10
 _MAX_RESPONSE_BYTES = 1024 * 1024
+_MAX_REQUEST_BYTES = 1024 * 1024
+_MAX_VALUE_CHARS = 16 * 1024
+_MAX_TOTAL_CHARS = 128 * 1024
+_MAX_COLLECTION_ITEMS = 128
+_MAX_DEPTH = 8
+_MAX_NODES = 2048
 _MAX_PROMPT_CHARS = 64 * 1024
 _MAX_ATTACHMENTS = 16
 _MAX_ATTACHMENT_TEXT_CHARS = 32 * 1024
@@ -75,13 +81,44 @@ _EVENT_NAMES = {
 }
 
 
-def _safe(value: Any) -> Any:
-    """Return a JSON-compatible copy without leaking Python objects."""
-    try:
-        json.dumps(value, allow_nan=False)
+def _bounded(value: Any, *, depth: int = 0, budget: dict[str, int] | None = None) -> Any:
+    """Return a bounded JSON-compatible copy of an untrusted policy value."""
+    if budget is None:
+        budget = {"chars": _MAX_TOTAL_CHARS, "nodes": _MAX_NODES}
+    if budget["nodes"] <= 0 or depth > _MAX_DEPTH:
+        return "<defenseclaw-truncated>"
+    budget["nodes"] -= 1
+    if value is None or isinstance(value, (bool, int)):
         return value
-    except (TypeError, ValueError, RecursionError):
-        return str(value)
+    if isinstance(value, float):
+        return value if value == value and abs(value) != float("inf") else str(value)
+    if isinstance(value, str):
+        limit = min(_MAX_VALUE_CHARS, max(0, budget["chars"]))
+        text = value[:limit]
+        budget["chars"] -= len(text)
+        return text if len(text) == len(value) else text + "<defenseclaw-truncated>"
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for index, (key, item) in enumerate(value.items()):
+            if index >= _MAX_COLLECTION_ITEMS or budget["nodes"] <= 0:
+                result["<defenseclaw-truncated>"] = True
+                break
+            result[str(_bounded(str(key), depth=depth + 1, budget=budget))] = _bounded(
+                item,
+                depth=depth + 1,
+                budget=budget,
+            )
+        return result
+    if isinstance(value, (list, tuple)):
+        result = [
+            _bounded(item, depth=depth + 1, budget=budget)
+            for item in value[:_MAX_COLLECTION_ITEMS]
+            if budget["nodes"] > 0
+        ]
+        if len(value) > len(result):
+            result.append("<defenseclaw-truncated>")
+        return result
+    return _bounded(str(value), depth=depth + 1, budget=budget)
 
 
 def _request_user_text(data: Any) -> tuple[str, bool]:
@@ -206,7 +243,8 @@ def _payload(event: dict[str, Any]) -> dict[str, Any]:
         "omnigent_actor_client_id": str(actor.get("client_id") or ""),
         "model": str(context.get("model") or ""),
         "tool_name": tool_name,
-        "tool_input": _safe(tool_input),
+        "tool_input": _bounded(tool_input),
+        "event_content": _bounded(data),
     }
     if prompt:
         payload["prompt"] = prompt
@@ -215,7 +253,7 @@ def _payload(event: dict[str, Any]) -> dict[str, Any]:
     if event_type == "request" and (prompt_truncated or attachments_truncated):
         payload["omnigent_content_truncated"] = True
     if tool_response is not None:
-        payload["tool_response"] = _safe(tool_response)
+        payload["tool_response"] = _bounded(tool_response)
     return payload
 
 

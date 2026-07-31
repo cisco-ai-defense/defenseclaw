@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -183,6 +184,10 @@ class TestSkillDirs:
         home = str(Path.home())
         assert os.path.join(home, ".agents", "skills") in dirs
         assert os.path.join(home, ".codex", "skills") not in dirs
+        if os.name != "nt":
+            assert "/etc/codex/skills" in dirs
+        workspace_dirs = connector_paths.skill_dirs("codex", workspace_dir=str(tmp_path))
+        assert os.path.join(str(tmp_path), ".agents", "skills") in workspace_dirs
 
     def test_codex_scans_skill_layers_from_active_dir_to_repo_root(self, tmp_path, monkeypatch):
         fake_home = tmp_path / "home"
@@ -324,11 +329,18 @@ class TestClaudeAutoMemory:
             "cursor",
             workspace_dir=str(tmp_path),
         )
-        assert connector_paths.skill_dirs("windsurf") == []
-        assert connector_paths.skill_dirs("windsurf", workspace_dir=str(tmp_path)) == [
-            os.path.join(str(tmp_path), ".windsurf", "skills"),
-            os.path.join(str(tmp_path), ".agents", "skills"),
-        ]
+        windsurf = connector_paths.skill_dirs("windsurf", workspace_dir=str(tmp_path))
+        if sys.platform != "win32":
+            assert os.path.join(str(tmp_path), ".windsurf", "skills") in windsurf
+            assert os.path.join(str(tmp_path), ".agents", "skills") in windsurf
+            assert os.path.join(str(tmp_path / "home"), ".codeium", "windsurf", "skills") in windsurf
+            assert os.path.join(str(tmp_path / "home"), ".agents", "skills") in windsurf
+        else:
+            assert windsurf == []
+        assert connector_paths._windsurf_skill_dirs(
+            str(tmp_path),
+            platform_name="nt",
+        ) == []
         antigravity = connector_paths.skill_dirs("antigravity", workspace_dir=str(tmp_path))
         assert os.path.join(str(tmp_path / "home"), ".gemini", "config", "skills") in antigravity
         assert os.path.join(str(tmp_path), ".agents", "skills") in antigravity
@@ -336,7 +348,13 @@ class TestClaudeAutoMemory:
         assert os.path.join(str(tmp_path / "home"), ".gemini", "antigravity-cli", "skills") in antigravity
         assert os.path.join(str(tmp_path / "home"), ".gemini", "skills") not in antigravity
         assert os.path.join(str(tmp_path / "home"), ".agents", "skills") not in antigravity
-        assert connector_paths.skill_dirs("opencode", workspace_dir=str(tmp_path)) == []
+        opencode_skills = connector_paths.skill_dirs("opencode", workspace_dir=str(tmp_path))
+        if os.name == "nt":
+            assert opencode_skills == []
+        else:
+            assert os.path.join(str(tmp_path), ".opencode", "skills") in opencode_skills
+            assert os.path.join(str(tmp_path / "home"), ".config", "opencode", "skills") in opencode_skills
+            assert os.path.join(str(tmp_path), "opencode-custom", "skills") in opencode_skills
         assert os.path.join(str(tmp_path / "home"), ".gemini", "skills") in connector_paths.skill_dirs("geminicli")
         assert os.path.join(str(tmp_path), ".gemini", "skills") in connector_paths.skill_dirs(
             "geminicli",
@@ -692,7 +710,17 @@ class TestPluginDirs:
         assert os.path.join(str(tmp_path), "_agents", "plugins") in antigravity
         assert os.path.join(str(tmp_path / "home"), ".gemini", "config", "plugins") in antigravity
         assert os.path.join(str(tmp_path / "home"), ".gemini", "antigravity-cli", "plugins") in antigravity
-        assert connector_paths.plugin_dirs("opencode", workspace_dir=str(tmp_path)) == []
+        if os.name != "nt":
+            assert antigravity[0] == os.path.join(
+                str(tmp_path / "home"), ".gemini", "antigravity-cli", "plugins"
+            )
+        opencode = connector_paths.plugin_dirs("opencode", workspace_dir=str(tmp_path))
+        if os.name == "nt":
+            assert opencode == []
+        else:
+            assert os.path.join(str(tmp_path), ".opencode", "plugins") in opencode
+            assert os.path.join(str(tmp_path / "home"), ".config", "opencode", "plugins") in opencode
+            assert os.path.join(str(tmp_path), "opencode-custom", "plugins") in opencode
 
     def test_no_overlap_between_connectors(self, tmp_path, monkeypatch):
         """Switching connectors must change the path set — pins the
@@ -841,7 +869,7 @@ class TestMCPServers:
 
         hermes = fake_home / ".hermes" / "config.yaml"
         hermes.parent.mkdir(parents=True)
-        hermes.write_text("mcp:\n  servers:\n    h:\n      command: hermes-mcp\n")
+        hermes.write_text("mcp_servers:\n  h:\n    command: hermes-mcp\n")
         assert connector_paths.mcp_servers("hermes")[0].command == "hermes-mcp"
 
         cursor = tmp_path / ".cursor" / "mcp.json"
@@ -911,6 +939,16 @@ class TestMCPServers:
 
         assert set(by_name) == {"shared", "package-only", "repo-only", "user-only"}
         assert by_name["shared"].command == "package"
+
+    def test_openhands_mcp_honors_persistence_dir(self, tmp_path, monkeypatch):
+        persistence = tmp_path / "custom-openhands"
+        persistence.mkdir()
+        (persistence / "mcp.json").write_text(
+            json.dumps({"mcpServers": {"custom": {"command": "custom-mcp"}}})
+        )
+        monkeypatch.setenv("OPENHANDS_PERSISTENCE_DIR", str(persistence))
+        entries = connector_paths.mcp_servers("openhands")
+        assert [entry.command for entry in entries] == ["custom-mcp"]
 
     def test_antigravity_reads_global_and_workspace_mcp_config(
         self,
@@ -999,6 +1037,7 @@ class TestMCPServers:
         assert connector_paths.mcp_servers("antigravity") == []
 
     def test_codex_reads_global_config_toml(self, tmp_path, monkeypatch):
+        """Codex inventory reads the official user config layer."""
         fake_home = tmp_path / "home"
         codex_dir = fake_home / ".codex"
         codex_dir.mkdir(parents=True)
@@ -1045,6 +1084,39 @@ class TestMCPServers:
         entries = connector_paths.mcp_servers("codex", workspace_dir=str(cwd))
         names = sorted(e.name for e in entries)
         assert names == ["global-fs", "local-search"]
+
+    def test_codex_project_layers_use_closest_mcp_and_all_skill_dirs(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        fake_home = tmp_path / "home"
+        (fake_home / ".codex").mkdir(parents=True)
+        (fake_home / ".codex" / "config.toml").write_text(
+            '[mcp_servers.same]\ncommand = "user-command"\n'
+        )
+        monkeypatch.setenv("HOME", str(fake_home))
+
+        repo = tmp_path / "repo"
+        active = repo / "packages" / "app"
+        (repo / ".git").mkdir(parents=True)
+        for layer, command in (
+            (repo, "root-command"),
+            (repo / "packages", "middle-command"),
+            (active, "closest-command"),
+        ):
+            (layer / ".codex").mkdir(parents=True, exist_ok=True)
+            (layer / ".codex" / "config.toml").write_text(
+                f'[mcp_servers.same]\ncommand = "{command}"\n'
+            )
+
+        entries = connector_paths.mcp_servers("codex", workspace_dir=str(active))
+        assert [(entry.name, entry.command) for entry in entries] == [
+            ("same", "closest-command")
+        ]
+        skill_dirs = connector_paths.skill_dirs("codex", workspace_dir=str(active))
+        for layer in (repo, repo / "packages", active):
+            assert os.path.join(str(layer), ".agents", "skills") in skill_dirs
 
     def test_codex_malformed_user_config_does_not_hide_project_config(
         self,
@@ -1405,6 +1477,29 @@ class TestOpenCodeMCPReader:
         assert names == ["mine"]
         assert "leaked" not in names
 
+    def test_hermes_skills_include_existing_external_dirs(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / "hermes-home"
+        external = tmp_path / "shared-skills"
+        relative = hermes_home / "team-skills"
+        external.mkdir()
+        relative.mkdir(parents=True)
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv("HERMES_SHARED_SKILLS", str(external))
+        (hermes_home / "config.yaml").write_text(
+            "skills:\n"
+            "  external_dirs:\n"
+            "    - ${HERMES_SHARED_SKILLS}\n"
+            "    - team-skills\n"
+            "    - missing\n",
+            encoding="utf-8",
+        )
+
+        assert connector_paths.skill_dirs("hermes") == [
+            str(hermes_home / "skills"),
+            str(external),
+            str(relative),
+        ]
+
     def test_project_file_layers_with_explicit_workspace(self, tmp_path, monkeypatch):
         home = tmp_path / "home"
         home.mkdir()
@@ -1450,6 +1545,30 @@ class TestOpenCodeMCPReader:
         assert set(entries) == {"shared", "global-only"}
         assert entries["shared"].command == "custom-command"
 
+    def test_project_search_walks_to_worktree_and_reads_dot_opencode(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        worktree = tmp_path / "repo"
+        nested = worktree / "src" / "package"
+        nested.mkdir(parents=True)
+        (worktree / ".git").mkdir()
+        config_dir = worktree / ".opencode"
+        config_dir.mkdir()
+        (config_dir / "opencode.jsonc").write_text(
+            '{"mcp":{"parent":{"type":"local","command":["parent-cmd"]}}}',
+            encoding="utf-8",
+        )
+
+        names = {
+            entry.name
+            for entry in connector_paths.mcp_servers("opencode", workspace_dir=str(nested))
+        }
+        assert names == {"parent"}
+        paths = connector_paths._opencode_config_paths(str(nested))
+        assert str(worktree / ".opencode" / "opencode.jsonc") in paths
+        assert str(tmp_path / "opencode.json") not in paths
+
     def test_no_config_returns_empty(self, tmp_path, monkeypatch):
         home = tmp_path / "home"
         home.mkdir()
@@ -1468,7 +1587,7 @@ class TestConnectorHome:
         [
             ("codex", "CODEX_HOME", "custom-codex", "config.toml"),
             ("claudecode", "CLAUDE_CONFIG_DIR", "custom-claude", "settings.json"),
-            ("copilot", "COPILOT_HOME", "custom-copilot", "config.json"),
+            ("copilot", "COPILOT_HOME", "custom-copilot", "settings.json"),
         ],
     )
     def test_clients_honor_client_home_overrides(
@@ -1730,6 +1849,46 @@ class TestConnectorConfigFiles:
         assert "added" in config_path.read_text(encoding="utf-8")
         connector_paths.unset_mcp_server(connector, "added")
         assert "added" not in config_path.read_text(encoding="utf-8")
+
+    def test_codex_workspace_mcp_writes_trusted_project_config(self, tmp_path, monkeypatch):
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setenv("HOME", str(fake_home))
+        project = tmp_path / "project"
+        project.mkdir()
+
+        connector_paths.set_mcp_server(
+            "codex",
+            "workspace",
+            {"command": "workspace-mcp"},
+            workspace_dir=str(project),
+        )
+
+        config_path = project / ".codex" / "config.toml"
+        assert config_path.is_file()
+        assert "workspace-mcp" in config_path.read_text(encoding="utf-8")
+        assert not (project / ".mcp.json").exists()
+        connector_paths.unset_mcp_server("codex", "workspace", workspace_dir=str(project))
+        assert "workspace-mcp" not in config_path.read_text(encoding="utf-8")
+
+    def test_codex_workspace_mcp_rejects_symlinked_config(self, tmp_path, monkeypatch):
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setenv("HOME", str(fake_home))
+        project_config = tmp_path / "project" / ".codex"
+        project_config.mkdir(parents=True)
+        target = tmp_path / "private.toml"
+        target.write_text("secret = true\n", encoding="utf-8")
+        (project_config / "config.toml").symlink_to(target)
+
+        with pytest.raises(ValueError, match="path is a symlink"):
+            connector_paths.set_mcp_server(
+                "codex",
+                "workspace",
+                {"command": "workspace-mcp"},
+                workspace_dir=str(tmp_path / "project"),
+            )
+        assert target.read_text(encoding="utf-8") == "secret = true\n"
 
 
 class TestConfigDispatch:

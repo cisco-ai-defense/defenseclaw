@@ -1715,10 +1715,10 @@ function Invoke-Hook([string]$EventName, [string]$Payload, [ValidateSet('allow',
     Write-Result "$EventName`:verdict" pass "$delivery expected=$Expected"
 }
 
-function New-DangerousCommandPayload([string]$Name, [string]$Command, [string]$Root) {
+function New-DangerousCommandPayload([string]$Name, [string]$Command, [string]$Root, [ValidateSet('observe', 'action')][string]$Mode) {
     if ($Connector -eq 'antigravity') {
         $payload = [ordered]@{
-            conversationId = "dc-windows-contract-$Connector"
+            conversationId = "dc-windows-contract-$Connector-$Mode-$Name"
             workspacePaths = @($Root)
             transcriptPath = (Join-Path $Root 'transcript.jsonl')
             artifactDirectoryPath = (Join-Path $Root 'artifacts')
@@ -1728,7 +1728,7 @@ function New-DangerousCommandPayload([string]$Name, [string]$Command, [string]$R
                 args = [ordered]@{ Cwd = $Root; CommandLine = $Command }
             }
         }
-        $path = Join-Path $Root "$Name.json"
+        $path = Join-Path $Root "$Mode-$Name.json"
         [IO.File]::WriteAllText($path, ($payload | ConvertTo-Json -Depth 6), [Text.UTF8Encoding]::new($false))
         return $path
     }
@@ -1744,14 +1744,14 @@ function New-DangerousCommandPayload([string]$Name, [string]$Command, [string]$R
     $payload = [ordered]@{
         hook_event_name = $toolEvent
         session_id = "dc-windows-contract-$Connector"
-        turn_id = "dc-windows-contract-$Name"
+        turn_id = "dc-windows-contract-$Mode-$Name"
         agent_id = "$Connector-windows-contract"
         agent_name = "$Connector Windows contract"
         agent_type = "$Connector-cli"
         tool_name = $toolName
         tool_input = [ordered]@{ command = $Command }
     }
-    $path = Join-Path $Root "$Name.json"
+    $path = Join-Path $Root "$Mode-$Name.json"
     [IO.File]::WriteAllText($path, ($payload | ConvertTo-Json -Depth 6), [Text.UTF8Encoding]::new($false))
     return $path
 }
@@ -1842,7 +1842,7 @@ function Invoke-DangerousCommandCorpus([ValidateSet('observe', 'action')][string
         } else {
             "$($case.Command); Set-Content -LiteralPath '$sentinel' -Value 'unexpected-execution'"
         }
-        $payload = New-DangerousCommandPayload $case.Name $command $payloadRoot
+        $payload = New-DangerousCommandPayload $case.Name $command $payloadRoot $Mode
         Invoke-DangerousHook $case.Name $case.Rule $payload $Mode $sentinel
     }
     foreach ($path in @((Join-Path $removeTarget 'keep.txt'), (Join-Path $rmdirTarget 'keep.txt'))) {

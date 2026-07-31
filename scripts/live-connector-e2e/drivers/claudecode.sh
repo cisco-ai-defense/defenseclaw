@@ -10,7 +10,7 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Live driver for Anthropic Claude Code.
-#   - install:  npm i -g @anthropic-ai/claude-code@${CLAUDE_VERSION:-latest}
+#   - install:  checksum-verified official native release manifest + binary
 #   - headless: claude -p "<prompt>" --output-format json
 #   - auth:     ANTHROPIC_API_KEY (Anthropic direct) OR Amazon Bedrock when
 #               DC_USE_BEDROCK=1 (CLAUDE_CODE_USE_BEDROCK + AWS creds).
@@ -41,7 +41,63 @@ DC_DRIVER_SUPPORTS_OTLP=1
 CLAUDE_MODEL="${CLAUDE_MODEL:-claude-haiku-4-5}"
 
 agent_install() {
-  npm install -g "@anthropic-ai/claude-code@${CLAUDE_VERSION:-latest}" || return 1
+  local requested="${CLAUDE_VERSION:-latest}"
+  local version platform manifest expected_checksum expected_size
+  local download_dir download_path target versions_root launcher
+  if [ "$requested" = "latest" ]; then
+    version="$(curl -fsSL --connect-timeout 5 --max-time 20 \
+      https://downloads.claude.ai/claude-code-releases/latest)" || return 1
+  else
+    version="$requested"
+  fi
+  case "$version" in
+    *[!0-9.]*|.*|*.) dc_err "invalid Claude Code release version: ${version}"; return 1 ;;
+  esac
+  case "$(uname -s)-$(uname -m)" in
+    Darwin-arm64) platform="darwin-arm64" ;;
+    Darwin-x86_64) platform="darwin-x64" ;;
+    Linux-aarch64|Linux-arm64) platform="linux-arm64" ;;
+    Linux-x86_64) platform="linux-x64" ;;
+    *) dc_err "unsupported Claude Code live platform: $(uname -s)-$(uname -m)"; return 1 ;;
+  esac
+  manifest="$(curl -fsSL --connect-timeout 5 --max-time 20 \
+    "https://downloads.claude.ai/claude-code-releases/${version}/manifest.json")" || return 1
+  expected_checksum="$(printf '%s' "$manifest" | _dc_jq -r \
+    ".platforms[\"${platform}\"].checksum // empty")"
+  expected_size="$(printf '%s' "$manifest" | _dc_jq -r \
+    ".platforms[\"${platform}\"].size // empty")"
+  if ! printf '%s' "$expected_checksum" | grep -Eq '^[0-9a-f]{64}$' ||
+     ! printf '%s' "$expected_size" | grep -Eq '^[1-9][0-9]*$'; then
+    dc_err "official Claude Code manifest lacks valid ${platform} evidence"
+    return 1
+  fi
+  download_dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/defenseclaw-claude.XXXXXX")" || return 1
+  download_path="${download_dir}/claude"
+  trap 'rm -rf -- "${download_dir:-}"' RETURN
+  curl -fsSL --connect-timeout 5 --max-time 300 \
+    --output "$download_path" \
+    "https://downloads.claude.ai/claude-code-releases/${version}/${platform}/claude" || return 1
+  if [ "$(wc -c < "$download_path" | tr -d ' ')" != "$expected_size" ]; then
+    dc_err "Claude Code native download size does not match official manifest"
+    return 1
+  fi
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s  %s\n' "$expected_checksum" "$download_path" | shasum -a 256 -c - || return 1
+  else
+    printf '%s  %s\n' "$expected_checksum" "$download_path" | sha256sum -c - || return 1
+  fi
+  versions_root="${HOME}/.local/share/claude/versions"
+  target="${versions_root}/${version}"
+  launcher="${HOME}/.local/bin/claude"
+  mkdir -p "$versions_root" "${HOME}/.local/bin"
+  chmod 0500 "$download_path"
+  if [ -e "$target" ]; then
+    dc_err "refusing to overwrite existing Claude Code version target: ${target}"
+    return 1
+  fi
+  mv "$download_path" "$target"
+  ln -sfn "$target" "$launcher"
+  export PATH="${HOME}/.local/bin:${PATH}"
   DC_E2E_AGENT_VERSION="$(dc_capture_version claudecode claude --version)"
   export DC_E2E_AGENT_VERSION
 

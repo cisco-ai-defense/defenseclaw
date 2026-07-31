@@ -24,7 +24,9 @@
         "/etc/codex/skills",
         ".agents/skills",
         ".agents/plugins/marketplace.json",
+        ".agents/plugins/api_marketplace.json",
         ".claude-plugin/marketplace.json",
+        ".cursor-plugin/marketplace.json",
         ".codex/config.toml",
         ".codex/agents",
         ".codex/rules",
@@ -266,8 +268,8 @@
     },
     {
       "id": "windsurf",
-      "name": "Windsurf",
-      "vendor": "Codeium",
+      "name": "Devin Desktop (Windsurf)",
+      "vendor": "Cognition",
       "category": "supported_connector",
       "confidence": 0.95,
       "supported_connector": "windsurf",
@@ -293,15 +295,15 @@
         ".windsurf/rules",
         ".windsurf/skills",
         ".agents/skills",
-        ".windsurfrules"
+        ".windsurfrules",
+        "AGENTS.md"
       ],
       "extension_ids": [
         "codeium.codeium",
         "windsurf"
       ],
       "mcp_paths": [
-        "~/.codeium/windsurf/mcp_config.json",
-        "~/.codeium/windsurf/mcp.json"
+        "~/.codeium/windsurf/mcp_config.json"
       ],
       "package_names": [],
       "env_var_names": [
@@ -317,6 +319,7 @@
         "codeium"
       ],
       "application_names": [
+        "Devin.app",
         "Devin Desktop",
         "Windsurf.app",
         "Windsurf"
@@ -445,10 +448,15 @@
         ".agents/skills",
         "~/.gemini/antigravity-cli/skills",
         "~/.gemini/GEMINI.md",
+        "GEMINI.md",
+        "AGENTS.md",
         ".agents/rules",
         "~/.gemini/config/plugins",
         "~/.gemini/antigravity-cli/plugins",
-        ".agents/plugins"
+        ".agents/plugins",
+        "_agents/plugins",
+        "~/.gemini/config/agents",
+        ".agents/agents"
       ],
       "extension_ids": [],
       "mcp_paths": [
@@ -489,23 +497,29 @@
         "~/.openhands/cli_config.json",
         "~/.openhands/mcp.json",
         ".agents/skills",
+        ".agents/agents",
         ".openhands/skills",
         ".openhands/microagents",
+        ".openhands/agents",
         "~/.openhands/skills/installed",
         "~/.openhands/cache/skills/public-skills/skills",
-        "AGENTS.md"
+        "AGENTS.md",
+        "AGENT.md",
+        "CLAUDE.md",
+        "GEMINI.md",
+        ".cursorrules"
       ],
       "extension_ids": [],
       "mcp_paths": [
         "~/.openhands/mcp.json"
       ],
       "package_names": [
-        "openhands-ai",
         "openhands"
       ],
       "env_var_names": [
-        "OPENHANDS_API_KEY",
-        "OPENHANDS_CONFIG_FILE"
+        "OPENHANDS_PERSISTENCE_DIR",
+        "OPENHANDS_WORK_DIR",
+        "OPENHANDS_CONVERSATIONS_DIR"
       ],
       "domain_patterns": [
         "openhands.dev"
@@ -607,17 +621,33 @@
       ],
       "config_paths": [
         "~/.config/opencode/opencode.json",
-        "opencode.json",
         "~/.config/opencode/opencode.jsonc",
-        "~/.config/opencode/.opencode.json",
-        "~/.opencode.json",
+        "~/.config/opencode/AGENTS.md",
+        "~/.config/opencode/CLAUDE.md",
+        "~/.config/opencode/agent",
+        "~/.config/opencode/agents",
+        "~/.config/opencode/command",
+        "~/.config/opencode/commands",
+        "~/.config/opencode/plugin",
+        "~/.config/opencode/plugins",
+        "~/.config/opencode/skills",
+        "~/.config/opencode/tool",
+        "~/.config/opencode/tools",
+        "AGENTS.md",
+        "CLAUDE.md",
+        "opencode.json",
         "opencode.jsonc",
         ".opencode/opencode.json",
         ".opencode/opencode.jsonc",
         ".opencode/agent",
-        "~/.config/opencode/agent",
+        ".opencode/agents",
+        ".opencode/command",
+        ".opencode/commands",
+        ".opencode/plugin",
         ".opencode/plugins",
-        "~/.config/opencode/plugins"
+        ".opencode/skills",
+        ".opencode/tool",
+        ".opencode/tools"
       ],
       "extension_ids": [],
       "mcp_paths": [
@@ -641,7 +671,10 @@
       "history_patterns": [
         "opencode"
       ],
-      "application_names": [],
+      "application_names": [
+        "OpenCode.app",
+        "OpenCode"
+      ],
       "local_endpoints": []
     },
     {
@@ -663,10 +696,13 @@
         "$OMNIGENT_CONFIG_HOME/config.yaml",
         "$OMNIGENT_CONFIG_HOME",
         "~/.omnigent/config.yaml",
-        "~/.omnigent"
+        "~/.omnigent",
+        "~/.omnigent/agents"
       ],
       "extension_ids": [],
-      "mcp_paths": [],
+      "mcp_paths": [
+        "~/.omnigent/agents"
+      ],
       "package_names": [
         "omnigent"
       ],

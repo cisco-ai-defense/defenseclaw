@@ -100,7 +100,7 @@ class _ConnectorFilterTestBase(unittest.TestCase):
         # transition path. ``Config.active_connector()`` consults
         # ``guardrail.connector`` first, so set both for symmetry.
         self._orig_home = os.environ.get("HOME")
-        # Use a fresh temp HOME so ``~/.codex/skills`` /
+        # Use a fresh temp HOME so ``~/.agents/skills`` /
         # ``~/.openclaw`` lookups don't see real user files.
         self._fake_home = tempfile.mkdtemp(prefix="dclaw-test-home-")
         os.environ["HOME"] = self._fake_home

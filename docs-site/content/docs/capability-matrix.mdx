@@ -21,6 +21,20 @@ before applying these rows to Windows.
 
 <CapabilityMatrix />
 
+<Callout type="info" title="Platform contract overlays">
+The block/ask columns describe product behavior, but version and telemetry
+contracts can differ by host. macOS/Linux uses OpenHands `>=1.12.0`; its
+trace-only process-environment exporter came from the stale SDK 1.21.0 review
+and awaits re-review against 1.39.1. It also uses OpenCode
+`>=1.16.2,<1.18.11` with the 35-event v7 bridge, Hermes `<0.20.0`, and
+Antigravity `<1.1.9` (so latest 1.1.9 is rejected pending review). Windows
+preserves OpenHands native OTLP off, OpenCode's unbounded nine-event v6 bridge,
+and open ceilings for Hermes and Antigravity. Copilot's upstream traces and
+metrics are modeled on macOS but are not auto-configured; Windows keeps
+native OTLP off. These compatibility descriptions do not certify a native
+platform.
+</Callout>
+
 ## Reading the matrix
 
 <Cards>
@@ -51,7 +65,8 @@ The Antigravity contract documents native ask and hard deny only on
 `PreToolUse`. `PreInvocation` and `PostInvocation` are context-transform
 surfaces, `PostToolUse` is observation-only, and DefenseClaw returns the
 documented allow shape for `Stop`. No permission-bypass override is claimed
-without persisted official-client evidence.
+without persisted official-client evidence. macOS remains preview until
+durable latest-version packaged and authenticated evidence is reviewed.
 </Callout>
 
 ## Common patterns

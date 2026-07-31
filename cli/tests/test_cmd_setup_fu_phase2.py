@@ -868,7 +868,7 @@ class TestBareSetupBatch(_BaseSetup):
 
         self.assertEqual(res.exit_code, 0, msg=res.output)
         self.assertIn("Gemini CLI: requested action mode was refused", res.output)
-        self.assertIn("Windsurf: requested action mode was refused", res.output)
+        self.assertIn("Devin Desktop (Windsurf): requested action mode was refused", res.output)
         gc = self.app.cfg.guardrail
         self.assertEqual(gc.effective_mode("geminicli"), "observe")
         self.assertEqual(gc.effective_mode("windsurf"), "observe")

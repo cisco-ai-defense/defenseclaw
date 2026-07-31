@@ -224,6 +224,8 @@ _COPILOT_CONTRACT_EVENTS = {
     ),
 }
 _COPILOT_REQUIRED_HOOKS = _COPILOT_CONTRACT_EVENTS["copilot-hooks-v2"]
+_COPILOT_REQUIRED_HOOKS_V1 = _COPILOT_CONTRACT_EVENTS["copilot-hooks-v1"]
+_COPILOT_REQUIRED_HOOKS_V2 = _COPILOT_CONTRACT_EVENTS["copilot-hooks-v2"]
 
 _COPILOT_POWERSHELL_COMMAND = re.compile(
     r"^\$ErrorActionPreference='Stop'; "
@@ -1043,10 +1045,16 @@ def _codex_policy_executable(data_dir: str) -> str:
     if not os.path.isabs(executable) or any(char in executable for char in "\x00\r\n"):
         raise _InspectionError("policy-blocked", f"selected Codex executable is not absolute: {executable!r}")
     executable = os.path.abspath(executable)
-    if os.path.splitext(executable)[1].casefold() != ".exe":
+    extension = os.path.splitext(executable)[1].casefold()
+    if extension in {".bat", ".cmd", ".ps1"} or (os.name == "nt" and extension != ".exe"):
         raise _InspectionError(
             "policy-blocked",
             "selected Codex policy executable is not a native Windows .exe image",
+        )
+    if sys.platform == "darwin" and extension:
+        raise _InspectionError(
+            "policy-blocked",
+            "selected Codex policy executable is not a native macOS image",
         )
 
     from defenseclaw.agent_selection import is_setup_trusted_binary, stable_executable_sha256
@@ -3014,16 +3022,28 @@ def _resolve_target(raw_target: str, kind: str, *, search_path: str, pathext: st
     return _case_insensitive_file(directory, filename)
 
 
-def _contract_evidence(data_dir: str, connector: str, config_path: str) -> tuple[str, str, str]:
+def _contract_evidence(
+    data_dir: str,
+    connector: str,
+    config_path: str,
+    *,
+    allow_windows_copilot_v1: bool = False,
+) -> tuple[str, str, str, dict[str, Any]]:
     lock_path = os.path.join(data_dir, "hook_contract_lock.json")
     try:
-        with open(lock_path, encoding="utf-8") as handle:
-            lock = json.load(handle)
-    except FileNotFoundError as exc:
-        raise _InspectionError("stale", "hook contract lock is missing") from exc
-    except PermissionError as exc:
-        raise _InspectionError("access-denied", f"access denied to hook contract lock {lock_path}: {exc}") from exc
-    except (OSError, ValueError) as exc:
+        raw = _stable_regular_file(
+            lock_path,
+            os.path.abspath(data_dir),
+            read_limit=2 * 1024 * 1024 + 1,
+        )
+        if len(raw) > 2 * 1024 * 1024:
+            raise _InspectionError("stale", "hook contract lock is too large")
+        lock = json.loads(raw.decode("utf-8"))
+    except _InspectionError as exc:
+        if exc.state == "missing":
+            raise _InspectionError("stale", f"hook contract lock is missing: {lock_path}") from exc
+        raise
+    except (OSError, UnicodeError, ValueError) as exc:
         raise _InspectionError("stale", f"hook contract lock is unreadable: {exc}") from exc
     entry = (lock.get("connectors") or {}).get(connector) if isinstance(lock, dict) else None
     if not isinstance(entry, dict):
@@ -3045,7 +3065,17 @@ def _contract_evidence(data_dir: str, connector: str, config_path: str) -> tuple
         normalized_agent_version if status == "known" else "",
     )
     resolved_contract = compatibility.contract.contract_id if compatibility.contract is not None else ""
-    if compatibility.status != status or resolved_contract != contract:
+    preserved_windows_copilot = (
+        allow_windows_copilot_v1
+        and connector == "copilot"
+        and contract == "copilot-hooks-v1"
+        and status == "known"
+        and re.fullmatch(r"\d+[.]\d+[.]\d+", normalized_agent_version) is not None
+        and tuple(int(part) for part in normalized_agent_version.split(".")) >= (1, 0, 18)
+    )
+    if (
+        compatibility.status != status or resolved_contract != contract
+    ) and not preserved_windows_copilot:
         evidence = (
             f"contract={contract or '?'}, status={status or '?'}, agent_version={normalized_agent_version or '?'}"
         )
@@ -3060,7 +3090,7 @@ def _contract_evidence(data_dir: str, connector: str, config_path: str) -> tuple
         actual = os.path.normcase(os.path.realpath(os.path.abspath(config_path)))
         if actual not in expected:
             raise _InspectionError("stale", "hook contract lock points at a different registration file")
-    return f"contract={contract} version={version} status={status}", version, contract
+    return f"contract={contract} version={version} status={status}", version, contract, entry
 
 
 def _copilot_powershell_binding(command: str) -> tuple[str, str] | None:
@@ -3189,7 +3219,12 @@ def validate_windows_copilot_hook_registration(
     raw_target = ""
     try:
         document = _read_config(config_path, "copilot")
-        evidence, _runtime_version, contract_id = _contract_evidence(data_dir, "copilot", config_path)
+        evidence, _runtime_version, contract_id, _entry = _contract_evidence(
+            data_dir,
+            "copilot",
+            config_path,
+            allow_windows_copilot_v1=True,
+        )
         command, raw_target, matrix_entries = _validate_copilot_hook_matrix(document, contract_id)
         resolved = _resolve_target(raw_target, "direct", search_path=search_path, pathext=pathext)
         if not resolved:
@@ -3218,6 +3253,127 @@ def validate_windows_copilot_hook_registration(
             command,
             target,
             raw_target,
+        )
+
+
+def validate_posix_copilot_hook_registration(
+    *,
+    config_path: str,
+    data_dir: str,
+) -> WindowsHookCheck:
+    """Passively validate the versioned Copilot command-hook registration."""
+
+    target = os.path.join(data_dir, "hooks", "copilot-hook.sh")
+    try:
+        document = _read_config(config_path, "copilot")
+        if type(document.get("version")) is not int or document.get("version") != 1:
+            raise _InspectionError("malformed", "Copilot hook registration version must be integer 1")
+        if document.get("disableAllHooks") is True:
+            raise _InspectionError("stale", "Copilot disableAllHooks disables the DefenseClaw registration")
+        hooks = document.get("hooks")
+        if not isinstance(hooks, dict):
+            raise _InspectionError("missing", "Copilot hook registration has no hooks object")
+
+        evidence, _runtime_version, contract_id, contract_entry = _contract_evidence(
+            data_dir, "copilot", config_path
+        )
+        expected_events = (
+            _COPILOT_REQUIRED_HOOKS_V2
+            if contract_id == "copilot-hooks-v2"
+            else _COPILOT_REQUIRED_HOOKS_V1
+        )
+        expected_target = os.path.realpath(os.path.abspath(target))
+        count = 0
+        for event in expected_events:
+            entries = hooks.get(event)
+            if not isinstance(entries, list):
+                raise _InspectionError("missing", f"Copilot DefenseClaw hook event {event} is missing")
+            owned = 0
+            for entry in entries:
+                if not isinstance(entry, dict) or not isinstance(entry.get("bash"), str):
+                    continue
+                try:
+                    parts = shlex.split(entry["bash"], posix=True)
+                except ValueError as exc:
+                    raise _InspectionError("malformed", f"Copilot event {event} bash command is malformed") from exc
+                if len(parts) != 1 or os.path.realpath(os.path.abspath(parts[0])) != expected_target:
+                    continue
+                owned += 1
+                if entry.get("type") != "command" or entry.get("timeoutSec") != 30:
+                    raise _InspectionError("stale", f"Copilot event {event} handler metadata has drifted")
+                if "powershell" in entry or "command" in entry:
+                    raise _InspectionError("stale", f"Copilot event {event} mixes command fields")
+            if owned != 1:
+                raise _InspectionError(
+                    "stale",
+                    f"Copilot event {event} has {owned} DefenseClaw handlers; expected exactly one",
+                )
+            count += owned
+
+        expected = set(expected_events)
+        for event, entries in hooks.items():
+            if event in expected or not isinstance(entries, list):
+                continue
+            for entry in entries:
+                if not isinstance(entry, dict) or not isinstance(entry.get("bash"), str):
+                    continue
+                try:
+                    parts = shlex.split(entry["bash"], posix=True)
+                except ValueError:
+                    continue
+                if len(parts) == 1 and os.path.realpath(os.path.abspath(parts[0])) == expected_target:
+                    raise _InspectionError("stale", f"unexpected Copilot event {event} contains a DefenseClaw handler")
+
+        before = os.lstat(target)
+        if is_link_or_reparse(target) or not stat.S_ISREG(before.st_mode):
+            raise _InspectionError("foreign", f"Copilot hook target is not a regular file: {target}")
+        if before.st_mode & 0o022:
+            raise _InspectionError("foreign", f"Copilot hook target is group/world-writable: {target}")
+        if hasattr(os, "getuid") and before.st_uid != os.getuid():
+            raise _InspectionError("foreign", f"Copilot hook target is not owned by the current user: {target}")
+        if not before.st_mode & stat.S_IXUSR:
+            raise _InspectionError("stale", f"Copilot hook target is not executable: {target}")
+        if sys.platform == "darwin":
+            from defenseclaw.inventory.agent_discovery import _macos_path_is_quarantined
+
+            try:
+                quarantined = _macos_path_is_quarantined(target)
+            except OSError as exc:
+                raise _InspectionError(
+                    "access-denied", f"cannot prove Copilot hook quarantine state: {exc}"
+                ) from exc
+            if quarantined:
+                raise _InspectionError("foreign", f"Copilot hook target is quarantined: {target}")
+        body = _stable_regular_file(
+            target,
+            os.path.abspath(data_dir),
+            read_limit=2 * 1024 * 1024 + 1,
+        )
+        if len(body) > 2 * 1024 * 1024:
+            raise _InspectionError("stale", "Copilot hook target is too large")
+        digests = contract_entry.get("hook_script_digests")
+        expected_digest = digests.get("copilot-hook.sh") if isinstance(digests, dict) else None
+        actual_digest = "sha256:" + hashlib.sha256(body).hexdigest()
+        if (
+            not isinstance(expected_digest, str)
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", expected_digest)
+            or actual_digest != expected_digest
+        ):
+            raise _InspectionError("stale", "Copilot hook target does not match protected Setup evidence")
+        return WindowsHookCheck(
+            "healthy",
+            f"healthy POSIX Copilot registration; entries={count}; target={target}; {evidence}",
+            target=target,
+            raw_target=target,
+        )
+    except (FileNotFoundError, PermissionError, OSError) as exc:
+        return WindowsHookCheck("missing", _repair_detail("copilot", str(exc)), target=target, raw_target=target)
+    except _InspectionError as exc:
+        return WindowsHookCheck(
+            exc.state,
+            _repair_detail("copilot", exc.detail),
+            target=target,
+            raw_target=target,
         )
 
 
@@ -3302,7 +3458,9 @@ def validate_windows_hook_registration(
             raise _InspectionError("missing", f"registered hook target cannot be resolved with PATHEXT: {raw_target}")
         target = resolved
         basename = ntpath.basename(resolved).casefold()
-        evidence, expected_runtime_version, contract_id = _contract_evidence(data_dir, connector, config_path)
+        evidence, expected_runtime_version, contract_id, _entry = _contract_evidence(
+            data_dir, connector, config_path
+        )
         antigravity_runtime_evidence = ""
         if connector == "antigravity":
             if basename != "defenseclaw-hook.exe":

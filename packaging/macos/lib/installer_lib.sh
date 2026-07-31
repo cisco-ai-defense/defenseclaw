@@ -57,7 +57,7 @@ parse_connectors() {
 # is_supported_connector NAME -> exit 0 if name is auto-wireable.
 is_supported_connector() {
   case "$1" in
-    codex|claudecode|cursor) return 0;;
+    codex|claudecode|cursor|opencode) return 0;;
     *) return 1;;
   esac
 }
@@ -280,6 +280,40 @@ discover_agent_version() {
           /Applications/Cursor.app/Contents/Info.plist 2>/dev/null || true
       fi
       ;;
+    opencode)
+      # Metadata-only: never execute a user-controlled binary as root.
+      local bundle
+      for bundle in /Applications/OpenCode.app/Contents/Info.plist /Applications/opencode.app/Contents/Info.plist; do
+        [[ -f "${bundle}" ]] || continue
+        local appv
+        appv="$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "${bundle}" 2>/dev/null || true)"
+        if [[ "${appv}" =~ ^[0-9]+\.[0-9]+ ]]; then echo "${appv}"; return; fi
+      done
+      local cellar dir ver
+      for cellar in /opt/homebrew/Cellar/opencode /usr/local/Cellar/opencode; do
+        [[ -d "${cellar}" ]] || continue
+        ver=""
+        for dir in "${cellar}"/*/; do
+          [[ -d "${dir}" ]] || continue
+          local candidate; candidate="$(basename "${dir}")"
+          [[ "${candidate}" =~ ^[0-9]+\.[0-9]+ ]] || continue
+          if [[ -z "${ver}" ]] || [[ "$(printf '%s\n%s\n' "${ver}" "${candidate}" | sort -V | tail -1)" == "${candidate}" ]]; then
+            ver="${candidate}"
+          fi
+        done
+        if [[ -n "${ver}" ]]; then echo "${ver}"; return; fi
+      done
+      local pkg
+      for pkg in \
+        "${home}"/.npm-global/lib/node_modules/opencode-ai/package.json \
+        "${home}"/.opencode/node_modules/opencode-ai/package.json \
+        /usr/local/lib/node_modules/opencode-ai/package.json \
+        /opt/homebrew/lib/node_modules/opencode-ai/package.json; do
+        [[ -f "${pkg}" ]] || continue
+        local v; v="$(_read_json_version "${pkg}")"
+        if [[ -n "${v}" ]]; then echo "${v}"; return; fi
+      done
+      ;;
   esac
 }
 
@@ -466,6 +500,8 @@ prepare_userspace_for() {
     codex)      prepare_codex_userspace      "${home}" "${uid}" "${gid}";;
     claudecode) prepare_claudecode_userspace "${home}" "${uid}" "${gid}";;
     cursor)     prepare_cursor_userspace     "${home}" "${uid}" "${gid}";;
+    # Setup owns the whole plugin file and creates its parent as the user.
+    opencode)    return 0;;
   esac
 }
 

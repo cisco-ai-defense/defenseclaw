@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "connector": "copilot",
+  "platform": "macos",
+  "observed_at": "2026-07-30",
+  "release": {
+    "version": "1.0.77",
+    "tag": "v1.0.77",
+    "published_at": "2026-07-30T23:36:02Z",
+    "source": "https://github.com/github/copilot-cli/releases/tag/v1.0.77",
+    "artifact": "copilot-darwin-arm64.tar.gz",
+    "sha256": "3ab9366cd96c06e4d90c6e77d7a9ffa06e2502aa1196ba20c555306c0d7a9592",
+    "x64_artifact": "copilot-darwin-x64.tar.gz",
+    "x64_sha256": "7c83fc16017a67b7b354dfca19a93342735d2ec710fb60cc174407958ab6702c"
+  },
+  "static_probe": {
+    "version_output": "GitHub Copilot CLI 1.0.77",
+    "format": "Mach-O 64-bit executable arm64",
+    "codesign_strict": "pass",
+    "team_identifier": "VEKTX9H2N7",
+    "hardened_runtime": true,
+    "quarantine_xattr_present": false,
+    "spctl_result": "rejected: valid CLI executable does not seem to be an app",
+    "plugin_list_json": "unsupported: plugin list rejects --json",
+    "skill_list_json": "supported",
+    "mcp_list_json": "supported"
+  },
+  "reproduction": {
+    "command": "scripts/live-connector-e2e/verify-copilot-macos-release.sh 1.0.77 arm64",
+    "result": "pass",
+    "scope": "release metadata, SHA-256, archive path safety, version, quarantine, and strict GitHub code signature"
+  },
+  "official_contract": {
+    "hook_events": 14,
+    "user_prompt_transformed": "supported; mutation-only; empty object preserves transformed prompt",
+    "native_otel_signals": [
+      "traces",
+      "metrics"
+    ],
+    "native_otel_logs": false,
+    "service_name": "github-copilot",
+    "source_attribute": "github.copilot",
+    "cleartext_otlp_http": "disabled"
+  },
+  "live_validation": {
+    "authenticated_agent_run": false,
+    "reason": "No GitHub Copilot credential was available in this isolated worktree.",
+    "certification_metadata_updated": false
+  }
+}

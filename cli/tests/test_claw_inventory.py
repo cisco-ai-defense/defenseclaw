@@ -2861,14 +2861,25 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
         root = os.path.join(home, ".config", "opencode")
         custom = os.path.join(home, "custom-opencode")
         _seed_skill(os.path.join(root, "skills"), "oc-skill")
-        _seed_plugin(os.path.join(root, "plugins"), "oc-plugin", manifest="package.json")
+        plugin_dir = os.path.join(root, "plugins")
+        os.makedirs(plugin_dir, exist_ok=True)
+        with open(os.path.join(plugin_dir, "oc-plugin.ts"), "w", encoding="utf-8") as f:
+            f.write("export const OCPlugin = async () => ({})\n")
         tool_dir = os.path.join(root, "tools")
         os.makedirs(tool_dir, exist_ok=True)
         with open(os.path.join(tool_dir, "file-tool.ts"), "w", encoding="utf-8") as f:
             f.write("export default {}\n")
+        command_dir = os.path.join(root, "commands")
+        os.makedirs(command_dir, exist_ok=True)
+        with open(os.path.join(command_dir, "review.md"), "w", encoding="utf-8") as f:
+            f.write("---\ndescription: Review changes\n---\n")
         with open(os.path.join(root, "opencode.json"), "w", encoding="utf-8") as f:
             json.dump(
-                {"tool": {"config-tool": {"description": "configured tool"}}},
+                {
+                    "tools": {"bash": False},
+                    "agent": {"reviewer": {"description": "Reviews code", "model": "openai/gpt-5"}},
+                    "plugin": ["npm-plugin@1.0.0"],
+                },
                 f,
             )
         os.makedirs(custom)
@@ -2890,9 +2901,20 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
             inv = build_claw_aibom(cfg, live=True)
 
         self.assertEqual(inv["connector"], "opencode")
-        self.assertEqual(inv["skills"], [])
-        self.assertEqual(inv["plugins"], [])
-        self.assertEqual(inv["tools"], [])
+        if os.name == "nt":
+            self.assertNotIn("oc-skill", {row["id"] for row in inv["skills"]})
+            self.assertNotIn("oc-plugin", {row["id"] for row in inv["plugins"]})
+            self.assertNotIn("file-tool", {row["id"] for row in inv["tools"]})
+            self.assertNotIn("review", {row["id"] for row in inv["tools"]})
+        else:
+            self.assertIn("oc-skill", {row["id"] for row in inv["skills"]})
+            self.assertIn("oc-plugin", {row["id"] for row in inv["plugins"]})
+            self.assertIn("file-tool", {row["id"] for row in inv["tools"]})
+            self.assertIn("review", {row["id"] for row in inv["tools"]})
+        self.assertIn("npm-plugin@1.0.0", {row["id"] for row in inv["plugins"]})
+        self.assertNotIn("bash", {row["id"] for row in inv["tools"]})
+        self.assertIn("reviewer", {row["id"] for row in inv["agents"]})
+        self.assertNotIn("opencode:tools", {e["command"] for e in inv["errors"]})
         self.assertEqual([row["id"] for row in inv["mcp"]], ["proven-mcp"])
 
     def test_antigravity_catalog_surfaces_skills_plugins_and_commands(self):

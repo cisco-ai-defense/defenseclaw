@@ -12,7 +12,7 @@
 # Persistent-macOS connector upgrade regression harness.
 #
 # The baseline and candidate executables are installed into a run-owned
-# scratch directory. The user's global codex/claude/agy binaries are never
+# scratch directory. The user's global codex/claude/agy/omnigent binaries are never
 # installed over or updated. They are only queried with `--version` when no
 # explicit baseline is supplied; native Claude is additionally invoked as an
 # exact-version installer under an isolated HOME. The real HOME is retained
@@ -43,7 +43,7 @@ KEEP_SCRATCH=0
 
 usage() {
   cat <<'EOF'
-Usage: upgrade-regression.sh --connector codex|claudecode|antigravity [options]
+Usage: upgrade-regression.sh --connector codex|claudecode|antigravity|omnigent [options]
 
 Required:
   --connector NAME              Connector to test.
@@ -87,8 +87,8 @@ while [ "$#" -gt 0 ]; do
 done
 
 case "${CONNECTOR}" in
-  codex|claudecode|antigravity) ;;
-  *) printf '[upgrade-regression][error] --connector must be codex, claudecode, or antigravity\n' >&2; exit 4 ;;
+  codex|claudecode|antigravity|omnigent) ;;
+  *) printf '[upgrade-regression][error] --connector must be codex, claudecode, antigravity, or omnigent\n' >&2; exit 4 ;;
 esac
 case "${MODE}" in
   action|observe) ;;
@@ -124,6 +124,9 @@ export DC_E2E_PROBE_LOG_DIR="${ARTIFACTS_DIR}/probes"
 export DC_E2E_AGENT_WORKSPACE="${SCRATCH}/workspace"
 export DC_E2E_SENTINEL_DIR="${DC_E2E_AGENT_WORKSPACE}/sentinels"
 export DC_E2E_OS=macos
+if [ "${CONNECTOR}" = "omnigent" ]; then
+  export OMNIGENT_CONFIG_HOME="${SCRATCH}/omnigent-config"
+fi
 mkdir -p "${DC_E2E_AGENT_WORKSPACE}"
 
 . "${HERE}/lib/common.sh"
@@ -287,6 +290,7 @@ dc_upgrade_installed_version() {
     codex) name=codex ;;
     claudecode) name=claude ;;
     antigravity) name=agy ;;
+    omnigent) name=omnigent ;;
   esac
   path="$(command -v "${name}" 2>/dev/null)" || {
     dc_err "${name} is not installed and --baseline-version was not supplied"
@@ -309,6 +313,32 @@ dc_upgrade_install_npm() {
     return 1
   fi
   printf '%s\t%s' "${prefix}/node_modules/.bin/${bin_name}" "${actual}"
+}
+
+dc_upgrade_install_omnigent() {
+  local prefix="$1" requested="$2" actual binary spec
+  command -v uv >/dev/null 2>&1 || {
+    dc_err "uv is required for isolated OmniGent installs"
+    return 1
+  }
+  mkdir -p "${prefix}/bin" "${prefix}/tools"
+  if [ "${requested}" = "latest" ]; then
+    spec="omnigent"
+  else
+    spec="omnigent==${requested}"
+  fi
+  dc_log "installing isolated ${spec}"
+  UV_TOOL_BIN_DIR="${prefix}/bin" UV_TOOL_DIR="${prefix}/tools" \
+    uv tool install --python 3.12 --force "${spec}" \
+    >"${ARTIFACTS_DIR}/$(basename "${prefix}")-install.log" 2>&1 || return 1
+  binary="${prefix}/bin/omnigent"
+  [ -x "${binary}" ] || return 1
+  actual="$(dc_upgrade_binary_version omnigent "${binary}")" || return 1
+  if [ "${requested}" != "latest" ] && [ "${actual}" != "${requested}" ]; then
+    dc_err "isolated OmniGent version ${actual}, requested ${requested}"
+    return 1
+  fi
+  printf '%s\t%s' "${binary}" "${actual}"
 }
 
 # Claude's npm package cannot access a macOS subscription login stored in the
@@ -440,6 +470,36 @@ case "${CONNECTOR}" in
     }
     IFS=$'\t' read -r CANDIDATE_BIN RESOLVED_CANDIDATE_VERSION <<< "${install_record}"
     ;;
+  omnigent)
+    install_record="$(dc_upgrade_install_omnigent "${SCRATCH}/baseline" "${BASELINE_VERSION}")" || {
+      DETAIL="isolated OmniGent baseline install failed"
+      exit 4
+    }
+    IFS=$'\t' read -r BASELINE_BIN RESOLVED_BASELINE_VERSION <<< "${install_record}"
+    install_record="$(dc_upgrade_install_omnigent "${SCRATCH}/candidate" "${CANDIDATE_VERSION}")" || {
+      DETAIL="isolated OmniGent candidate install failed"
+      exit 4
+    }
+    IFS=$'\t' read -r CANDIDATE_BIN RESOLVED_CANDIDATE_VERSION <<< "${install_record}"
+    # uv tool entry points use an absolute shebang whose interpreter can live
+    # under uv's managed Python root rather than the run-owned tool prefix.
+    # Trust only the two freshly selected interpreter directories so gateway
+    # reconciliation can prove provenance without broadening global defaults.
+    IFS= read -r baseline_shebang < "${BASELINE_BIN}"
+    IFS= read -r candidate_shebang < "${CANDIDATE_BIN}"
+    case "${baseline_shebang}:${candidate_shebang}" in
+      '#!'*':#!'*) ;;
+      *) DETAIL="isolated OmniGent entry point has no absolute Python shebang"; exit 4 ;;
+    esac
+    baseline_python="${baseline_shebang#'#!'}"
+    candidate_python="${candidate_shebang#'#!'}"
+    case "${baseline_python}:${candidate_python}" in
+      /*:/*) ;;
+      *) DETAIL="isolated OmniGent entry point Python shebang is not absolute"; exit 4 ;;
+    esac
+    OMNIGENT_BASELINE_PYTHON_DIR="$(dirname "${baseline_python}")"
+    OMNIGENT_CANDIDATE_PYTHON_DIR="$(dirname "${candidate_python}")"
+    ;;
 esac
 
 [ -x "${BASELINE_BIN}" ] && [ -x "${CANDIDATE_BIN}" ] || {
@@ -471,6 +531,14 @@ for trusted in "${SCRATCH}/baseline" "${SCRATCH}/candidate"; do
     exit 4
   }
 done
+if [ "${CONNECTOR}" = "omnigent" ]; then
+  for trusted in "${OMNIGENT_BASELINE_PYTHON_DIR}" "${OMNIGENT_CANDIDATE_PYTHON_DIR}"; do
+    defenseclaw setup trusted-paths add "${trusted}" --force --json >/dev/null || {
+      DETAIL="could not trust isolated OmniGent interpreter path ${trusted}"
+      exit 4
+    }
+  done
+fi
 
 dc_upgrade_setup_without_restart() {
   local binary="$1" sub
@@ -519,6 +587,15 @@ case "${CONNECTOR}" in
     DC_DRIVER_SUPPORTS_BLOCK=1
     DC_DRIVER_SUPPORTS_OTLP=0
     ;;
+  omnigent)
+    # This authentic live lane exercises the official OmniGent Python
+    # environment and awaited custom-policy callable without requiring an LLM
+    # provider. Native OTLP has a separate process-env contract probe.
+    DC_DRIVER_SUPPORTS_LIFECYCLE=1
+    DC_DRIVER_SUPPORTS_BLOCK=1
+    DC_DRIVER_SUPPORTS_OTLP=0
+    DC_DRIVER_OTLP_SKIP_REASON="official native OTLP requires a separately launched OMNIGENT_TELEMETRY_ENABLED server; EnvBlock/auth/correlation are covered by deterministic gateway tests"
+    ;;
 esac
 
 agent_run() {
@@ -539,6 +616,38 @@ agent_run() {
         # permission flag first so tool calls are actually auto-approved.
         dc_timeout 180 "${DC_UPGRADE_ACTIVE_BIN}" \
           --dangerously-skip-permissions --print "${prompt}"
+        ;;
+      omnigent)
+        omni_prefix="$(dirname "$(dirname "${DC_UPGRADE_ACTIVE_BIN}")")"
+        omni_python="${omni_prefix}/tools/omnigent/bin/python"
+        probe="${HERE}/omnigent-policy-probe.py"
+        event_type="tool_call"
+        if printf '%s' "${prompt}" | grep -q "only the word ready"; then
+          event_type="request"
+        fi
+        verdict="$(dc_timeout 60 "${omni_python}" -I "${probe}" \
+          --event-type "${event_type}" --content "${prompt}")"
+        if printf '%s' "${verdict}" | grep -q '"result":"DENY"'; then
+          printf 'DENY\n'
+          exit 0
+        fi
+        if [ "${event_type}" = "tool_call" ]; then
+          DC_OMNIGENT_PROMPT="${prompt}" "${omni_python}" -I -c '
+import os
+import pathlib
+import re
+
+prompt = os.environ["DC_OMNIGENT_PROMPT"]
+match = re.search(r">\s*(\S+)", prompt)
+if match:
+    target = pathlib.Path(match.group(1).rstrip(".")).resolve()
+    root = pathlib.Path(os.environ["DC_E2E_SENTINEL_DIR"]).resolve()
+    if target.parent != root:
+        raise SystemExit("refusing sentinel path outside isolated root")
+    target.write_text("dc-allow", encoding="utf-8")
+'
+        fi
+        printf '%s\n' "${verdict}"
         ;;
     esac
   )
@@ -584,16 +693,43 @@ else
   exit "${HARNESS_EXIT_CODE}"
 fi
 
-# Upgrade invariant: do not call setup here. The connector config hash is
-# recorded immediately before switching executable versions as audit evidence.
+# Record the installed config before switching executable versions as audit
+# evidence. Most connectors must survive this switch without setup. OmniGent's
+# official uv/pip isolation makes the import shim environment-scoped, so its
+# documented upgrade lifecycle explicitly reconciles the new environment
+# before the first policy evaluation.
 BASELINE_SETUP_HASH="$(dc_persist_sha256 "$(dc_connector_config_file "${CONNECTOR}")")"
 printf '%s\n' "${BASELINE_SETUP_HASH}" > "${ARTIFACTS_DIR}/baseline-setup-config.sha256"
-dc_log "switching to isolated candidate without re-running DefenseClaw setup"
+if [ "${CONNECTOR}" = "omnigent" ]; then
+  dc_log "reconciling OmniGent's environment-scoped import shim for the isolated candidate"
+  if ! dc_upgrade_setup_without_restart "${CANDIDATE_BIN}"; then
+    CANDIDATE_STATUS="fail"
+    CLASSIFICATION="candidate_regression"
+    DETAIL="candidate OmniGent environment reconciliation failed"
+    HARNESS_EXIT_CODE=2
+    exit 2
+  fi
+  if ! PATH="$(dirname "${CANDIDATE_BIN}"):${ORIGINAL_PATH}" defenseclaw-gateway restart || \
+     ! PATH="$(dirname "${CANDIDATE_BIN}"):${ORIGINAL_PATH}" dc_wait_for_gateway 30; then
+    CANDIDATE_STATUS="fail"
+    CLASSIFICATION="candidate_regression"
+    DETAIL="candidate OmniGent environment reconciliation could not restart the gateway"
+    HARNESS_EXIT_CODE=2
+    exit 2
+  fi
+  dc_record_result "candidate-upgrade:repair" pass "environment-scoped import shim reconciled"
+else
+  dc_log "switching to isolated candidate without re-running DefenseClaw setup"
+fi
 
 if dc_upgrade_run_phase candidate-upgrade "${CANDIDATE_BIN}" "${RESOLVED_CANDIDATE_VERSION}"; then
   CANDIDATE_STATUS="pass"
   CLASSIFICATION="pass"
-  DETAIL="baseline and in-place candidate upgrade probes passed"
+  if [ "${CONNECTOR}" = "omnigent" ]; then
+    DETAIL="baseline and candidate probes passed after documented OmniGent environment reconciliation"
+  else
+    DETAIL="baseline and in-place candidate upgrade probes passed"
+  fi
   HARNESS_EXIT_CODE=0
   exit 0
 fi

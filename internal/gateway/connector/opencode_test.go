@@ -17,7 +17,9 @@
 package connector
 
 import (
+	"bytes"
 	"context"
+	"net/http"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -26,6 +28,111 @@ import (
 	"strings"
 	"testing"
 )
+
+func TestOpenCodeAuthenticateRequiresScopedBearer(t *testing.T) {
+	conn := NewOpenCodeConnector()
+	conn.SetCredentials("connector-token", "gateway-master-key")
+
+	for _, tc := range []struct {
+		name       string
+		remoteAddr string
+		token      string
+		want       bool
+	}{
+		{name: "scoped loopback", remoteAddr: "127.0.0.1:49152", token: "connector-token", want: true},
+		{name: "scoped non-loopback", remoteAddr: "192.0.2.10:49152", token: "connector-token", want: true},
+		{name: "missing loopback", remoteAddr: "127.0.0.1:49152", want: false},
+		{name: "wrong loopback", remoteAddr: "127.0.0.1:49152", token: "wrong", want: false},
+		{name: "master key rejected", remoteAddr: "127.0.0.1:49152", token: "gateway-master-key", want: false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodPost, "http://127.0.0.1/api/v1/opencode/hook", nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.RemoteAddr = tc.remoteAddr
+			if tc.token != "" {
+				req.Header.Set("Authorization", "Bearer "+tc.token)
+			}
+			if got := conn.Authenticate(req); got != tc.want {
+				t.Fatalf("Authenticate() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestOpenCodeCompatibilityBoundary(t *testing.T) {
+	outsideReviewedRange := HookCompatibilityUnknown
+	defaultForUnversioned := false
+	if runtime.GOOS == "windows" {
+		outsideReviewedRange = HookCompatibilityKnown
+		defaultForUnversioned = true
+	}
+	for _, tc := range []struct {
+		version string
+		want    string
+	}{
+		{version: "1.16.1", want: outsideReviewedRange},
+		{version: "1.16.2", want: HookCompatibilityKnown},
+		{version: "1.18.10", want: HookCompatibilityKnown},
+		{version: "1.18.11", want: outsideReviewedRange},
+		{version: "1.19.0", want: outsideReviewedRange},
+		{version: "", want: HookCompatibilityUnversioned},
+	} {
+		t.Run(tc.version, func(t *testing.T) {
+			got := ResolveHookContract("opencode", tc.version)
+			if got.Status != tc.want {
+				t.Fatalf("ResolveHookContract(%q).Status = %q, want %q (%s)", tc.version, got.Status, tc.want, got.Reason)
+			}
+			if tc.version == "" && got.Contract.DefaultForUnversioned != defaultForUnversioned {
+				t.Fatalf("unversioned OpenCode default=%v want %v", got.Contract.DefaultForUnversioned, defaultForUnversioned)
+			}
+		})
+	}
+}
+
+func TestOpenCodeReviewedEventUnionIsComplete(t *testing.T) {
+	contract := ResolveHookContract("opencode", "1.18.10").Contract
+	got := make(map[string]bool, len(contract.Events))
+	for _, event := range contract.Events {
+		got[event] = true
+	}
+	// @opencode-ai/sdk Event union at the reviewed v1.18.10 tag, plus
+	// permission.asked observed on the runtime bus and the two direct tool
+	// hooks used by the DefenseClaw policy bridge. Windows retains PR #655's
+	// narrower reviewed event overlay.
+	reviewedEvents := []string{
+		"server.instance.disposed",
+		"installation.updated", "installation.update-available",
+		"lsp.client.diagnostics", "lsp.updated",
+		"message.updated", "message.removed", "message.part.updated", "message.part.removed",
+		"permission.updated", "permission.asked", "permission.replied",
+		"session.status", "session.idle", "session.compacted", "session.created",
+		"session.updated", "session.deleted", "session.diff", "session.error",
+		"file.edited", "file.watcher.updated", "todo.updated", "command.executed",
+		"vcs.branch.updated", "tui.prompt.append", "tui.command.execute", "tui.toast.show",
+		"pty.created", "pty.updated", "pty.exited", "pty.deleted", "server.connected",
+		"tool.execute.before", "tool.execute.after",
+	}
+	if runtime.GOOS == "windows" {
+		reviewedEvents = []string{
+			"session.created", "session.updated", "session.status", "session.idle",
+			"session.compacted", "session.error", "session.deleted",
+			"tool.execute.before", "tool.execute.after",
+		}
+	}
+	for _, event := range reviewedEvents {
+		if !got[event] {
+			t.Errorf("reviewed OpenCode event %q is absent from the contract", event)
+		}
+	}
+	if contract.Capabilities.CanAskNative {
+		t.Fatal("generic permission events must not be promoted to native ask semantics")
+	}
+	if !reflect.DeepEqual(contract.Capabilities.BlockEvents, []string{"tool.execute.before"}) {
+		t.Fatalf("only awaited pre-tool may block; got %v", contract.Capabilities.BlockEvents)
+	}
+}
 
 // TestOpenCodeSetup_WritesBridgePlugin pins the plugin-artifact install
 // path: Setup renders the embedded bridge template (gateway addr, token,
@@ -95,6 +202,75 @@ func TestOpenCodeSetup_WritesBridgePlugin(t *testing.T) {
 	}
 	if err := conn.VerifyClean(opts); err != nil {
 		t.Errorf("VerifyClean after teardown: %v", err)
+	}
+}
+
+func TestOpenCodeManagedPluginCustodyAndTamperDetection(t *testing.T) {
+	dir := t.TempDir()
+	pluginPath := filepath.Join(dir, ".config", "opencode", "plugins", "defenseclaw.js")
+	prev := OpenCodePluginPathOverride
+	OpenCodePluginPathOverride = pluginPath
+	t.Cleanup(func() { OpenCodePluginPathOverride = prev })
+
+	conn := NewOpenCodeConnector()
+	opts := SetupOpts{DataDir: filepath.Join(dir, "dc"), APIAddr: "127.0.0.1:18970", APIToken: "token", HookFailMode: "closed"}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatal(err)
+	}
+	if present, err := OwnedHooksPresent(conn, opts); err != nil || !present {
+		t.Fatalf("managed plugin not recognized: present=%v err=%v", present, err)
+	}
+	if paths := conn.AgentPaths(opts); len(paths.HookScripts) != 0 {
+		t.Fatalf("whole-file plugin incorrectly reported shell hooks: %v", paths.HookScripts)
+	}
+	if err := os.WriteFile(pluginPath, []byte("// tampered\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if present, err := OwnedHooksPresent(conn, opts); err != nil || present {
+		t.Fatalf("tampered plugin not detected: present=%v err=%v", present, err)
+	}
+}
+
+func TestOpenCodeTeardownRestoresPreexistingPluginExactly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("OpenCode plugin write and custody are unsupported on Windows")
+	}
+	dir := t.TempDir()
+	pluginPath := filepath.Join(dir, ".config", "opencode", "plugins", "defenseclaw.js")
+	if err := os.MkdirAll(filepath.Dir(pluginPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	original := []byte("// operator-owned preexisting plugin\nexport const x = 1;\n")
+	if err := os.WriteFile(pluginPath, original, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	prev := OpenCodePluginPathOverride
+	OpenCodePluginPathOverride = pluginPath
+	t.Cleanup(func() { OpenCodePluginPathOverride = prev })
+
+	conn := NewOpenCodeConnector()
+	opts := SetupOpts{DataDir: filepath.Join(dir, "dc"), APIAddr: "127.0.0.1:18970", APIToken: "token", HookFailMode: "closed"}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatal(err)
+	}
+	if err := conn.Teardown(context.Background(), opts); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(pluginPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, original) {
+		t.Fatalf("teardown did not restore exact bytes: got %q want %q", got, original)
+	}
+	if runtime.GOOS != "windows" {
+		info, err := os.Stat(pluginPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o640 {
+			t.Fatalf("restored mode=%o want 640", info.Mode().Perm())
+		}
 	}
 }
 

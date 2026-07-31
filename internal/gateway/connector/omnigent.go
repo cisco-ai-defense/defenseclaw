@@ -100,13 +100,25 @@ func omnigentNativeOTLPSpec(opts SetupOpts) *NativeOTLPSpec {
 		PerSignal:          true,
 		ServiceName:        "omnigent",
 		ResourceAttributes: map[string]string{"service.name": "omnigent", "defenseclaw.connector": "omnigent"},
-		ExtraEnv:           map[string]string{"OMNIGENT_OTEL_CAPTURE_CONTENT": "false"},
+		ExtraEnv: map[string]string{
+			"OMNIGENT_TELEMETRY_ENABLED":    "true",
+			"OMNIGENT_OTEL_CAPTURE_CONTENT": "false",
+		},
 	}
 }
 
 func (c *OmnigentConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 	configPath := omnigentConfigPath()
-	unsupported := unsupportedSurface("")
+	localConfigPath := omnigentLocalConfigPath(opts)
+	configPaths := uniqueNonEmptyStrings([]string{configPath, localConfigPath})
+	agentsRoot := homePath(".omnigent", "agents")
+	embeddedAgentSurface := SurfaceCapability{
+		Supported:     true,
+		Scope:         "user",
+		ConfigPaths:   []string{agentsRoot},
+		ReadPaths:     []string{agentsRoot},
+		DiscoveryOnly: true,
+	}
 	return ConnectorCapabilities{
 		LLMTrafficMode: LLMTrafficModeHooksOnly,
 		Hooks: HookCapability{
@@ -118,11 +130,27 @@ func (c *OmnigentConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 			Scope:              "user",
 			ConfigPath:         configPath,
 		},
-		MCP:     unsupportedSurface("OmniGent MCP configuration is managed by OmniGent and is not modified by this connector."),
-		Skills:  unsupported,
-		Rules:   unsupported,
-		Plugins: unsupported,
-		Agents:  unsupportedSurface("OmniGent agent bundles are not modified by this connector."),
+		MCP: func() SurfaceCapability {
+			capability := embeddedAgentSurface
+			capability.Notes = []string{"Discovery-only: MCP servers embedded in agent YAML under ~/.omnigent/agents; arbitrary bundles passed by path remain outside the safe global inventory root."}
+			return capability
+		}(),
+		Skills: func() SurfaceCapability {
+			capability := embeddedAgentSurface
+			capability.Notes = []string{"Discovery-only: skills embedded in agent bundles under ~/.omnigent/agents; underlying harness assets are not attributed to OmniGent."}
+			return capability
+		}(),
+		Rules: unsupportedSurface(
+			"OmniGent exposes policies and agent-spec sandbox settings, not a separate user-wide rules inventory surface.",
+		),
+		Plugins: unsupportedSurface(
+			"OmniGent harness plugins are Python package entry points, not a user-owned plugin directory that DefenseClaw can inventory safely.",
+		),
+		Agents: func() SurfaceCapability {
+			capability := embeddedAgentSurface
+			capability.Notes = []string{"Discovery-only: OmniGent's stable global agent root is ~/.omnigent/agents; agent bundles supplied by arbitrary path are not traversed."}
+			return capability
+		}(),
 		CodeGuard: CodeGuardCapability{
 			Supported: false, OptInOnly: true, Idempotent: true, ConflictSafe: true,
 		},
@@ -130,8 +158,9 @@ func (c *OmnigentConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 			NativeOTLP:    true,
 			NativeSignals: []string{"logs", "metrics", "traces"},
 			HookSignals:   []string{"logs", "metrics", "traces"},
-			ConfigPaths:   []string{configPath},
+			ConfigPaths:   configPaths,
 			Env: []EnvRequirement{
+				{Name: "OMNIGENT_TELEMETRY_ENABLED", Scope: EnvScopeProcess, Required: false, Description: "Set to true to activate OmniGent's official OpenTelemetry instrumentation; it is off by default."},
 				{Name: "OTEL_EXPORTER_OTLP_ENDPOINT", Scope: EnvScopeProcess, Required: false, Description: "Point OmniGent native OTLP at the DefenseClaw gateway."},
 				{Name: "OTEL_EXPORTER_OTLP_PROTOCOL", Scope: EnvScopeProcess, Required: false, Description: "Set to http/protobuf for DefenseClaw OTLP ingestion."},
 				{Name: "OTEL_EXPORTER_OTLP_HEADERS", Scope: EnvScopeProcess, Required: false, Description: "Carry the connector-scoped Authorization bearer plus x-defenseclaw-source and x-defenseclaw-client headers for native OTLP authentication and attribution."},
@@ -196,6 +225,9 @@ func (c *OmnigentConnector) setupLocked(ctx context.Context, opts SetupOpts) (re
 	}
 	sitePackages, err := omnigentSitePackages(ctx, opts)
 	if err != nil {
+		return err
+	}
+	if err := validateOmnigentLocalPolicyPrecedence(opts); err != nil {
 		return err
 	}
 	configPath := omnigentConfigPath()
@@ -467,7 +499,11 @@ func (c *OmnigentConnector) SetCredentials(gatewayToken, masterKey string) {
 func (c *OmnigentConnector) AgentPaths(opts SetupOpts) AgentPaths {
 	pthPath := managedFileBackupTargetPath(opts.DataDir, c.Name(), "pth", "")
 	paths := AgentPaths{
-		PatchedFiles: []string{omnigentConfigPath(), omnigentPolicyModulePath(opts)},
+		PatchedFiles: uniqueNonEmptyStrings([]string{
+			omnigentConfigPath(),
+			omnigentLocalConfigPath(opts),
+			omnigentPolicyModulePath(opts),
+		}),
 		BackupFiles: []string{
 			managedFileBackupPath(opts.DataDir, c.Name(), "config"),
 			managedFileBackupPath(opts.DataDir, c.Name(), "module"),
@@ -503,8 +539,18 @@ func (c *OmnigentConnector) RequiredEnv() []EnvRequirement {
 }
 
 func (c *OmnigentConnector) SupportsComponentScanning() bool { return true }
-func (c *OmnigentConnector) ComponentTargets(string) map[string][]string {
-	return map[string][]string{}
+func (c *OmnigentConnector) ComponentTargets(cwd string) map[string][]string {
+	opts := SetupOpts{WorkspaceDir: cwd}
+	caps := c.Capabilities(opts)
+	configPaths := uniqueNonEmptyStrings([]string{omnigentConfigPath(), omnigentLocalConfigPath(opts)})
+	targets := map[string][]string{
+		"config": configPaths,
+		"policy": configPaths,
+	}
+	addSurfaceTargets(targets, "mcp", caps.MCP)
+	addSurfaceTargets(targets, "skill", caps.Skills)
+	addSurfaceTargets(targets, "agent", caps.Agents)
+	return targets
 }
 func (c *OmnigentConnector) HasUsableProviders() (int, error) { return 1, nil }
 
@@ -520,6 +566,42 @@ func omnigentConfigPath() string {
 		return filepath.Join(home, "config.yaml")
 	}
 	return homePath(".omnigent", "config.yaml")
+}
+
+func omnigentLocalConfigPath(opts SetupOpts) string {
+	workspace := strings.TrimSpace(opts.WorkspaceDir)
+	if workspace == "" {
+		return ""
+	}
+	return filepath.Join(workspace, ".omnigent", "config.yaml")
+}
+
+func validateOmnigentLocalPolicyPrecedence(opts SetupOpts) error {
+	path := omnigentLocalConfigPath(opts)
+	if path == "" {
+		return nil
+	}
+	data, info, err := readManagedTarget(path)
+	if err != nil {
+		return fmt.Errorf("omnigent inspect project config precedence: %w", err)
+	}
+	if info == nil {
+		return nil
+	}
+	var local map[string]interface{}
+	if err := yaml.Unmarshal(data, &local); err != nil {
+		return fmt.Errorf("omnigent parse project config %s: %w", path, err)
+	}
+	for _, key := range []string{"policies", "policy_modules"} {
+		if _, exists := local[key]; exists {
+			return fmt.Errorf(
+				"omnigent project config %s defines %s and would replace the global DefenseClaw policy registration; remove that top-level override or run OmniGent with the explicit global --config path",
+				path,
+				key,
+			)
+		}
+	}
+	return nil
 }
 
 func omnigentSitePackages(ctx context.Context, opts SetupOpts) (string, error) {
@@ -591,8 +673,14 @@ func omnigentSitePackages(ctx context.Context, opts SetupOpts) (string, error) {
 	if installedVersion == "" {
 		return "", fmt.Errorf("omnigent connector: Python returned invalid OmniGent package version %q", lines[len(lines)-2])
 	}
-	if runtime.GOOS == "windows" && compareVersion(installedVersion, "0.7.0") < 0 {
-		return "", fmt.Errorf("omnigent connector: native Windows degraded mode requires OmniGent 0.7.0 or newer, found %s", installedVersion)
+	minimumVersion := "0.1.0"
+	minimumReason := "custom policy bridge"
+	if runtime.GOOS == "windows" {
+		minimumVersion = "0.7.0"
+		minimumReason = "native Windows degraded mode"
+	}
+	if compareVersion(installedVersion, minimumVersion) < 0 {
+		return "", fmt.Errorf("omnigent connector: %s requires OmniGent %s or newer, found %s", minimumReason, minimumVersion, installedVersion)
 	}
 	if selectedVersion := NormalizeAgentVersion("omnigent", opts.AgentVersion); selectedVersion != "" && selectedVersion != installedVersion {
 		return "", fmt.Errorf("omnigent connector: selected executable version %s does not match its Python environment version %s", selectedVersion, installedVersion)
@@ -772,6 +860,13 @@ func validateOmnigentInterpreter(path string) error {
 		"/usr/bin", "/usr/local/bin", "/usr/sbin", "/usr/local/sbin", "/bin", "/sbin",
 		"/opt/homebrew/bin", "/opt/homebrew/sbin", "/opt/homebrew/Cellar", "/opt/homebrew/Caskroom",
 		"/usr/local/Cellar", "/opt/local/bin", "/opt/local/sbin",
+	}
+	// uv tool entry points commonly use a shebang whose interpreter resolves
+	// into uv's managed Python store rather than beside the entry point. Trust
+	// only uv's documented per-user runtime root; the interpreter and its
+	// direct parent still must be regular, non-group/world-writable paths.
+	if home, homeErr := os.UserHomeDir(); homeErr == nil && strings.TrimSpace(home) != "" {
+		defaultPrefixes = append(defaultPrefixes, filepath.Join(home, ".local", "share", "uv", "python"))
 	}
 	prefixes := append([]string(nil), defaultPrefixes...)
 	prefixes = append(prefixes, filepath.SplitList(os.Getenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES"))...)

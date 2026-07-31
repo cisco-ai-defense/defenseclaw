@@ -91,7 +91,27 @@ drive_event() {
   local label="$1" payload="$2" expect="$3"
   local before after out code
   before="$(dc_event_cursor)"
-  out="$(dc_invoke_hook "${DC_E2E_CONNECTOR}" "${label}" "${payload}")"
+  if [ "${DC_E2E_CONNECTOR}" = "opencode" ]; then
+    local plugin scratch opencode_expect command
+    plugin="$(dc_connector_config_file opencode)"
+    scratch="${TMPDIR:-/tmp}/dc-e2e-opencode-contract-$$.mjs"
+    opencode_expect="${expect}"
+    command="printf defenseclaw-opencode-contract"
+    if [ "${label}" = "SessionStart" ]; then
+      opencode_expect="event"
+    elif [ "${expect}" = "block" ]; then
+      command="cat /etc/shadow"
+    fi
+    if node "${HERE}/assert-opencode-plugin.mjs" "${plugin}" "${scratch}" "${opencode_expect}" "${command}" >"${scratch}.out" 2>&1; then
+      out="$(cat "${scratch}.out")"$'\nexit:0'
+    else
+      code="$?"
+      out="$(cat "${scratch}.out")"$'\nexit:'"${code}"
+    fi
+    rm -f "${scratch}.out"
+  else
+    out="$(dc_invoke_hook "${DC_E2E_CONNECTOR}" "${label}" "${payload}")"
+  fi
   # Portable BRE: BSD sed (macOS) treats \+ as a literal '+', so use
   # [0-9][0-9]* for "one or more digits" — otherwise the exit code parses
   # empty on macOS and every allow assertion (which requires exit 0) fails.
@@ -142,6 +162,10 @@ drive_event() {
 [ -f "${golden_dir}/session_start.json" ] && drive_event "SessionStart" "${golden_dir}/session_start.json" allow
 [ -f "${golden_dir}/pre_tool_allow.json" ] && drive_event "PreTool-allow" "${golden_dir}/pre_tool_allow.json" allow
 [ -f "${golden_dir}/pre_tool_block.json" ] && drive_event "PreTool-block" "${golden_dir}/pre_tool_block.json" block
+[ -f "${golden_dir}/post_tool_allow.json" ] && drive_event "PostToolUse" "${golden_dir}/post_tool_allow.json" allow
+[ -f "${golden_dir}/response_allow.json" ] && drive_event "AfterAgentResponse" "${golden_dir}/response_allow.json" allow
+[ -f "${golden_dir}/before_model_allow.json" ] && drive_event "BeforeModel" "${golden_dir}/before_model_allow.json" allow
+[ -f "${golden_dir}/after_model_allow.json" ] && drive_event "AfterModel" "${golden_dir}/after_model_allow.json" allow
 
 # Schema invariant over everything emitted so far.
 if dc_assert_schema 1; then

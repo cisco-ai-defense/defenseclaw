@@ -293,6 +293,13 @@ t_scrub_py_syntax() {
   assert_status "${rc}" 0 "scrub_agent_configs.py parses"
 }
 
+t_uninstaller_restores_opencode_before_purge() {
+  local text
+  text="$(cat "${PKG_DIR}/uninstall.sh")"
+  assert_contains "${text}" "scrub_agent_config opencode" "purge invokes OpenCode custody restore"
+  assert_contains "${text}" "connector_backups/opencode/config.json" "purge keeps the exact-restore backup in scope"
+}
+
 # _setup_bundle_fixture WITH_BINARY
 #   Prints the fresh tmpdir path on stdout, populated with the installer
 #   scaffolding (install.sh, installer_lib.sh, plist stub). When
@@ -616,6 +623,7 @@ run_case "install.sh executable"      t_install_sh_is_executable
 run_case "uninstall.sh executable"    t_uninstall_sh_is_executable
 run_case "scrub_agent_configs.py present and +x" t_scrub_py_exists_and_executable
 run_case "scrub_agent_configs.py syntax"          t_scrub_py_syntax
+run_case "uninstaller restores OpenCode custody"  t_uninstaller_restores_opencode_before_purge
 run_case "install.sh does NOT create a service user (root-mode daemon)" t_install_does_not_create_service_user
 run_case "install.sh passes DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR on every hooks-install call" \
   t_install_passes_guardian_auth_dir_to_cli

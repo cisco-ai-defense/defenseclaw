@@ -656,7 +656,7 @@ func (c *Config) SkillDirsForConnector(connector string) []string {
 			workspaceJoin(cwd, ".zeptoclaw", "skills"),
 		})
 	case "hermes":
-		return []string{filepath.Join(hermespath.HomeDir(), "skills")}
+		return hermesSkillDirs()
 	case "cursor":
 		return dedupNonEmpty([]string{
 			filepath.Join(home, ".cursor", "skills"),
@@ -738,6 +738,8 @@ func (c *Config) PluginDirsForConnector(connector string) []string {
 	case "hermes":
 		return dedupNonEmpty([]string{
 			filepath.Join(hermespath.HomeDir(), "plugins"),
+			filepath.Join(hermespath.HomeDir(), "agent-hooks"),
+			filepath.Join(hermespath.HomeDir(), "hooks"),
 			workspaceJoin(cwd, ".hermes", "plugins"),
 		})
 	case "geminicli":
@@ -945,7 +947,58 @@ func readMCPServersZeptoClaw(workspaceDir string) ([]MCPServerEntry, error) {
 }
 
 func readMCPServersHermes() ([]MCPServerEntry, error) {
-	return readMCPFromYAMLPath(hermespath.ConfigPath(), []string{"mcp", "servers"}, []string{"mcpServers"})
+	return readMCPFromYAMLPath(
+		hermespath.ConfigPath(),
+		[]string{"mcp_servers"},
+		[]string{"mcp", "servers"},
+		[]string{"mcpServers"},
+	)
+}
+
+func hermesSkillDirs() []string {
+	home := hermespath.HomeDir()
+	paths := []string{filepath.Join(home, "skills")}
+	data, err := os.ReadFile(hermespath.ConfigPath())
+	if err != nil {
+		return paths
+	}
+	var document struct {
+		Skills struct {
+			ExternalDirs any `yaml:"external_dirs"`
+		} `yaml:"skills"`
+	}
+	if err := yaml.Unmarshal(data, &document); err != nil {
+		return paths
+	}
+	var configured []string
+	switch value := document.Skills.ExternalDirs.(type) {
+	case string:
+		configured = []string{value}
+	case []any:
+		for _, entry := range value {
+			configured = append(configured, fmt.Sprint(entry))
+		}
+	}
+	userHome, _ := os.UserHomeDir()
+	for _, entry := range configured {
+		entry = strings.TrimSpace(os.ExpandEnv(entry))
+		if entry == "" {
+			continue
+		}
+		if entry == "~" {
+			entry = userHome
+		} else if strings.HasPrefix(entry, "~/") {
+			entry = filepath.Join(userHome, strings.TrimPrefix(entry, "~/"))
+		}
+		if !filepath.IsAbs(entry) {
+			entry = filepath.Join(home, entry)
+		}
+		entry = filepath.Clean(entry)
+		if info, statErr := os.Stat(entry); statErr == nil && info.IsDir() {
+			paths = append(paths, entry)
+		}
+	}
+	return dedupNonEmpty(paths)
 }
 
 func readMCPServersCursor(workspaceDir string) ([]MCPServerEntry, error) {
@@ -965,16 +1018,7 @@ func readMCPServersCursor(workspaceDir string) ([]MCPServerEntry, error) {
 
 func readMCPServersWindsurf() ([]MCPServerEntry, error) {
 	home, _ := os.UserHomeDir()
-	var entries []MCPServerEntry
-	for _, path := range []string{
-		filepath.Join(home, ".codeium", "windsurf", "mcp_config.json"),
-		filepath.Join(home, ".codeium", "windsurf", "mcp.json"),
-	} {
-		if e, err := readMCPFromDotMCPJSON(path); err == nil {
-			entries = append(entries, e...)
-		}
-	}
-	return dedupMCPEntries(entries), nil
+	return readMCPFromDotMCPJSON(filepath.Join(home, ".codeium", "windsurf", "mcp_config.json"))
 }
 
 func readMCPServersGeminiCLI() ([]MCPServerEntry, error) {

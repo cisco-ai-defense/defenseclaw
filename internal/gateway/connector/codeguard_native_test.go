@@ -23,12 +23,19 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
+
+func TestNativeCodeGuardSourceIsPinnedToCommit(t *testing.T) {
+	if !regexp.MustCompile(`^[0-9a-f]{40}$`).MatchString(nativeCodeGuardRepoCommit) {
+		t.Fatalf("nativeCodeGuardRepoCommit = %q, want immutable full commit SHA", nativeCodeGuardRepoCommit)
+	}
+}
 
 func TestConnectorEnvHomeDirResolvesRelativeOverride(t *testing.T) {
 	root := t.TempDir()
@@ -503,10 +510,13 @@ func assertCodexFailedSetupBackupsRemoved(t *testing.T, dataDir string) {
 func TestClaudeCodeCodeGuardPluginInstallRunsMarketplaceAndPluginCommands(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "claude.log")
-	installFakeClaude(t, dir)
+	claudePath := installFakeClaude(t, dir)
+	previousValidator := validateClaudeCodeCodeGuardExecutable
+	validateClaudeCodeCodeGuardExecutable = func(SetupOpts) error { return nil }
+	t.Cleanup(func() { validateClaudeCodeCodeGuardExecutable = previousValidator })
 	t.Setenv("DEFENSECLAW_FAKE_CLAUDE_LOG", logPath)
 
-	if err := ensureClaudeCodeCodeGuardPlugin(context.Background()); err != nil {
+	if err := ensureClaudeCodeCodeGuardPlugin(context.Background(), SetupOpts{AgentExecutable: claudePath}); err != nil {
 		t.Fatalf("ensureClaudeCodeCodeGuardPlugin: %v", err)
 	}
 
@@ -529,11 +539,14 @@ func TestClaudeCodeCodeGuardPluginInstallRunsMarketplaceAndPluginCommands(t *tes
 func TestClaudeCodeCodeGuardPluginInstallSkipsWhenAlreadyInstalled(t *testing.T) {
 	dir := t.TempDir()
 	logPath := filepath.Join(dir, "claude.log")
-	installFakeClaude(t, dir)
+	claudePath := installFakeClaude(t, dir)
+	previousValidator := validateClaudeCodeCodeGuardExecutable
+	validateClaudeCodeCodeGuardExecutable = func(SetupOpts) error { return nil }
+	t.Cleanup(func() { validateClaudeCodeCodeGuardExecutable = previousValidator })
 	t.Setenv("DEFENSECLAW_FAKE_CLAUDE_LOG", logPath)
 	t.Setenv("DEFENSECLAW_FAKE_CLAUDE_LIST", nativeCodeGuardClaudePlugin)
 
-	if err := ensureClaudeCodeCodeGuardPlugin(context.Background()); err != nil {
+	if err := ensureClaudeCodeCodeGuardPlugin(context.Background(), SetupOpts{AgentExecutable: claudePath}); err != nil {
 		t.Fatalf("ensureClaudeCodeCodeGuardPlugin: %v", err)
 	}
 
@@ -547,7 +560,7 @@ func TestClaudeCodeCodeGuardPluginInstallSkipsWhenAlreadyInstalled(t *testing.T)
 	}
 }
 
-func installFakeClaude(t *testing.T, dir string) {
+func installFakeClaude(t *testing.T, dir string) string {
 	t.Helper()
 	binDir := filepath.Join(dir, "bin")
 	name := "claude"
@@ -565,10 +578,12 @@ func main() {
   if len(os.Args) >= 3 && os.Args[1] == "plugin" && os.Args[2] == "list" { fmt.Println(os.Getenv("DEFENSECLAW_FAKE_CLAUDE_LIST")) }
 }
 `)
-	if output, err := exec.Command("go", "build", "-o", filepath.Join(binDir, name), source).CombinedOutput(); err != nil {
+	claudePath := filepath.Join(binDir, name)
+	if output, err := exec.Command("go", "build", "-o", claudePath, source).CombinedOutput(); err != nil {
 		t.Fatalf("build fake claude: %v\n%s", err, output)
 	}
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return claudePath
 }
 
 func writeTestFile(t *testing.T, path, contents string) {

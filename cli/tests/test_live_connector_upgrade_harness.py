@@ -16,6 +16,7 @@ REPO = Path(__file__).resolve().parents[2]
 HARNESS = REPO / "scripts" / "live-connector-e2e" / "upgrade-regression.sh"
 PERSIST = REPO / "scripts" / "live-connector-e2e" / "lib" / "persistent-macos.sh"
 REPORT = REPO / "scripts" / "live-connector-e2e" / "report.py"
+OMNIGENT_PROBE = REPO / "scripts" / "live-connector-e2e" / "omnigent-policy-probe.py"
 ANTIGRAVITY_DRIVER = REPO / "scripts" / "live-connector-e2e" / "drivers" / "antigravity.sh"
 DRIVER_COMMON = REPO / "scripts" / "live-connector-e2e" / "drivers" / "_driver_common.sh"
 MACOS_PERSISTENCE_ONLY = pytest.mark.skipif(
@@ -106,6 +107,21 @@ def test_antigravity_permission_flag_precedes_print_prompt() -> None:
     expected = '--dangerously-skip-permissions --print "${prompt}"'
     assert expected in HARNESS.read_text(encoding="utf-8")
     assert expected in ANTIGRAVITY_DRIVER.read_text(encoding="utf-8")
+
+
+def test_omnigent_lane_uses_isolated_official_runtime_and_config() -> None:
+    text = HARNESS.read_text(encoding="utf-8")
+    assert "codex|claudecode|antigravity|omnigent" in text
+    assert 'export OMNIGENT_CONFIG_HOME="${SCRATCH}/omnigent-config"' in text
+    assert 'uv tool install --python 3.12 --force "${spec}"' in text
+    assert "baseline_shebang" in text
+    assert "OMNIGENT_BASELINE_PYTHON_DIR" in text
+    assert 'setup trusted-paths add "${trusted}"' in text
+    assert "environment-scoped import shim" in text
+    assert 'dc_upgrade_setup_without_restart "${CANDIDATE_BIN}"' in text
+    assert 'probe="${HERE}/omnigent-policy-probe.py"' in text
+    assert "resolve_function_policy" in OMNIGENT_PROBE.read_text(encoding="utf-8")
+    assert "load_registry" in OMNIGENT_PROBE.read_text(encoding="utf-8")
 
 
 def test_block_probe_forbids_model_retries() -> None:

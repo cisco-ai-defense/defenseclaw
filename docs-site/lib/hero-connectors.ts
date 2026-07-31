@@ -36,6 +36,6 @@ export const TERMINAL_CONNECTORS: ConnectorBlock[] = [
   { id: 'copilot',    label: 'GitHub Copilot CLI', command: 'defenseclaw setup copilot',     modeId: 'copilot' },
   { id: 'openhands',  label: 'OpenHands',          command: 'defenseclaw setup openhands',   modeId: 'openhands' },
   { id: 'antigravity',label: 'Antigravity',        command: 'defenseclaw setup antigravity', modeId: 'antigravity' },
-  { id: 'windsurf',   label: 'Windsurf',           command: 'defenseclaw setup windsurf',    modeId: 'windsurf' },
+  { id: 'windsurf',   label: 'Devin Desktop',      command: 'defenseclaw setup windsurf',    modeId: 'windsurf' },
   { id: 'zeptoclaw',  label: 'ZeptoClaw',          command: 'defenseclaw setup guardrail',   modeId: 'zeptoclaw' },
 ];

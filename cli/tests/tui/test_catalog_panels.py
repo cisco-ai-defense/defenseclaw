@@ -282,8 +282,10 @@ def test_catalog_empty_connector_stays_unowned_and_hook_connector_labels_contrac
     assert ".gemini/config/plugins" in antigravity_plugins
     assert "read/write" in antigravity_plugins
     assert "OMNIGENT_CONFIG_HOME" in connector_source_label("omnigent", "config")
-    assert "managed by OmniGent" in connector_source_label("omnigent", "mcps")
-    assert "unsupported" in mcp_unset_target_for_connector("omnigent")
+    assert "<workspace>/.omnigent/config.yaml" in connector_source_label("omnigent", "config")
+    assert "~/.omnigent/agents" in connector_source_label("omnigent", "mcps")
+    assert "discovery-only" in connector_source_label("omnigent", "mcps")
+    assert "~/.omnigent/agents" in mcp_unset_target_for_connector("omnigent")
 
     opencode_home = tmp_path / "opencode-config"
     monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(opencode_home))
@@ -294,7 +296,7 @@ def test_catalog_empty_connector_stays_unowned_and_hook_connector_labels_contrac
     assert str(opencode_home / "opencode.json") in connector_source_label("opencode", "mcps")
     assert str(opencode_home / "opencode.json") in mcp_unset_target_for_connector("opencode")
     assert "<workspace>/opencode.json" in mcp_unset_target_for_connector("opencode")
-    assert "unsupported" in connector_source_label("opencode", "skills")
+    assert ".opencode/skills" in connector_source_label("opencode", "skills")
 
 
 def test_catalog_codex_labels_use_current_official_asset_layouts() -> None:

@@ -121,3 +121,38 @@ def test_full_matrix_allowlist_rejects_unrelated_and_near_miss_paths(
     path: str,
 ) -> None:
     assert not _selects_full_connector_matrix(path)
+
+
+def test_manual_live_matrix_keeps_cursor_macos_credential_gated() -> None:
+    workflow = (ROOT / ".github/workflows/connector-live-e2e.yml").read_text(encoding="utf-8")
+    assert "- { connector: cursor,     os: macos-latest,   dcos: macos }" in workflow
+    assert '[ "${MATRIX_CONNECTOR}" = "cursor" ] && [ -z "${CURSOR_API_KEY:-}" ]' in workflow
+    assert "Cursor cell skipped: CURSOR_API_KEY is not configured" in workflow
+
+
+def test_manual_live_matrix_defers_runner_temp_to_step_scope() -> None:
+    workflow = (ROOT / ".github/workflows/connector-live-e2e.yml").read_text(encoding="utf-8")
+    live_job = workflow.split("\n  live-matrix:", 1)[1].split("\n  windows-live:", 1)[0]
+    job_env = live_job.split("\n    steps:", 1)[0]
+
+    assert "${{ runner.temp }}" not in job_env
+    assert (
+        'echo "HERMES_HOME=${RUNNER_TEMP}/hermes-home-${{ matrix.connector }}" '
+        '>> "$GITHUB_ENV"'
+    ) in live_job
+
+
+def test_contract_matrix_uses_isolated_opencode_calls_and_trusts_omnigent_owner() -> None:
+    workflow = (ROOT / ".github/workflows/connector-live-e2e.yml").read_text(encoding="utf-8")
+    opencode_probe = (ROOT / "scripts/live-connector-e2e/assert-opencode-plugin.mjs").read_text(
+        encoding="utf-8"
+    )
+
+    assert "-${expected}-call`" in opencode_probe
+    assert opencode_probe.count("callID: toolCallID") == 2
+    assert "uv python install 3.12" in workflow
+    assert "uv python find --managed-python 3.12" in workflow
+    assert 'uv tool install --python "${omnigent_python}" --force omnigent==0.7.0' in workflow
+    assert "os.path.realpath(sys.executable)" in workflow
+    assert "DEFENSECLAW_TRUSTED_BIN_PREFIXES=%s" in workflow
+    assert '"$(dirname "${omnigent_python}")" >> "$GITHUB_ENV"' in workflow

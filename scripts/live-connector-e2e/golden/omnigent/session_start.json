@@ -1,0 +1,16 @@
+{
+  "type": "request",
+  "data": {
+    "user_content": "Reply with only ready.",
+    "attachments": [
+      {
+        "filename": "contract.txt",
+        "content_type": "text/plain",
+        "text": "bounded contract attachment"
+      }
+    ]
+  },
+  "context": {
+    "model": "contract-test"
+  }
+}

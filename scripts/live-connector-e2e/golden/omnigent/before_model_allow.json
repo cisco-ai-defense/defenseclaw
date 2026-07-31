@@ -1,0 +1,13 @@
+{
+  "type": "llm_request",
+  "data": {
+    "model": "contract-test",
+    "messages_count": 1,
+    "tools_count": 1,
+    "system_prompt_preview": "contract system prompt",
+    "last_user_message": "contract user message"
+  },
+  "context": {
+    "model": "contract-test"
+  }
+}

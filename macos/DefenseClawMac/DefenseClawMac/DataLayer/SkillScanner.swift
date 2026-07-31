@@ -23,6 +23,14 @@
 
 import Foundation
 
+private func copilotHome() -> String {
+    if let override = ProcessInfo.processInfo.environment["COPILOT_HOME"],
+       !override.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        return URL(fileURLWithPath: override).standardizedFileURL.path
+    }
+    return FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".copilot").path
+}
+
 enum SkillScanner {
     /// Home-relative skill directories per connector (connector_paths.skill_dirs).
     /// Workspace-relative variants are omitted — the app has no project cwd.
@@ -36,7 +44,11 @@ enum SkillScanner {
         case "hermes": return [p(".hermes", "skills")]
         case "cursor": return [p(".cursor", "skills"), p(".agents", "skills")]
         case "geminicli": return [p(".gemini", "skills")]
-        case "copilot": return [p(".copilot", "skills")]
+        case "copilot":
+            let custom = ProcessInfo.processInfo.environment["COPILOT_SKILLS_DIRS"]?
+                .split(separator: ",")
+                .map { URL(fileURLWithPath: String($0)).standardizedFileURL.path } ?? []
+            return [copilotHome() + "/skills", p(".agents", "skills")] + custom
         case "openhands":
             return [p(".agents", "skills"), p(".openhands", "skills"),
                     p(".openhands", "microagents"),
@@ -169,7 +181,7 @@ enum MCPScanner {
         case "geminicli":
             return [(p(".gemini", "settings.json"), .settingsJSON([["mcpServers"]]))]
         case "copilot":
-            return [(p(".copilot", "mcp-config.json"), .dotMCPJSON)]
+            return [(copilotHome() + "/mcp-config.json", .dotMCPJSON)]
         case "openhands":
             return [(p(".openhands", "mcp.json"), .dotMCPJSON)]
         case "openclaw":
@@ -332,13 +344,15 @@ enum PluginScanner {
         case "hermes": return [p(".hermes", "plugins")]
         case "geminicli": return [p(".gemini", "extensions")]
         case "openclaw": return [p(".openclaw", "extensions")]
-        default: return [] // cursor, windsurf, copilot, openhands, antigravity: no plugin surface
+        case "copilot": return [copilotHome() + "/installed-plugins", copilotHome() + "/extensions"]
+        default: return [] // cursor, windsurf, openhands, antigravity: no plugin surface
         }
     }
 
     /// Manifest names recognized upstream (plugin_scanner._MANIFEST_CANDIDATES).
     private static let manifestFiles = [
         "package.json", "manifest.json", "plugin.json", "openclaw.plugin.json",
+        ".plugin/plugin.json", ".github/plugin/plugin.json",
         ".codex-plugin/plugin.json", ".claude-plugin/plugin.json",
     ]
 
@@ -354,10 +368,21 @@ enum PluginScanner {
                 guard fm.fileExists(atPath: dir, isDirectory: &isDir), isDir.boolValue,
                       let entries = try? fm.contentsOfDirectory(atPath: dir)
                 else { continue }
-                for entry in entries.sorted() {
+                let candidates: [(name: String, path: String)]
+                if connector.lowercased() == "copilot" && dir.hasSuffix("/installed-plugins") {
+                    candidates = entries.sorted().flatMap { namespace -> [(String, String)] in
+                        let namespacePath = dir + "/" + namespace
+                        guard let plugins = try? fm.contentsOfDirectory(atPath: namespacePath) else { return [] }
+                        return plugins.sorted().map { ($0, namespacePath + "/" + $0) }
+                    }
+                } else {
+                    candidates = entries.sorted().map { ($0, dir + "/" + $0) }
+                }
+                for candidate in candidates {
                     // "cache" siblings hold transient downloads, not plugins.
+                    let entry = candidate.name
                     guard entry != "cache" else { continue }
-                    let full = dir + "/" + entry
+                    let full = candidate.path
                     guard fm.fileExists(atPath: full, isDirectory: &isDir), isDir.boolValue,
                           seen.insert(entry).inserted
                     else { continue }

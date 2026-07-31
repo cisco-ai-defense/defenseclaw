@@ -27,7 +27,7 @@ A locally configured stdio server advertised a read-only-looking tool whose desc
 
 The wrapper at [`cli/defenseclaw/scanner/mcp.py`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/scanner/mcp.py) accepts two target shapes — both as a positional `TARGET` argument (there is no `--server` or `--remote` flag — the scanner figures out which from the target's shape):
 
-- **Local stdio server name** — described by a JSON file with a top-level `mcpServers` block (the format used by Claude Desktop, Cursor, OpenClaw, Gemini, Codex, and Copilot). DefenseClaw spins each server up in a sandbox, lists its tools, and records every advertised description, parameter schema, and example.
+- **Local stdio server name** — described by connector-native configuration (`mcpServers` JSON for Claude Desktop, Cursor, OpenClaw, Gemini, and Copilot; `[mcp_servers]` TOML for Codex). DefenseClaw spins each server up in a sandbox, lists its tools, and records every advertised description, parameter schema, and example.
 - **Remote HTTP server URL** — passed as the positional target. The scanner calls `scan_remote_server_tools` directly without spawning a subprocess.
 
 For every tool the scanner produces:

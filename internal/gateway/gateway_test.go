@@ -6013,6 +6013,29 @@ func TestTokenAuth_AcceptLoopbackOTLPScopedAuthorizationHeader(t *testing.T) {
 	}
 }
 
+func TestTokenAuth_AcceptsOpenHandsScopedTraceAuthorization(t *testing.T) {
+	api, called := tokenAuthTestServer(t, "master-token")
+	api.SetOTLPPathTokens(map[connector.OTLPPathTokenScope]string{
+		connector.OTLPScopeOpenHands: "openhands-scoped-token",
+	})
+	handler := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		*called = true
+		if got := r.Header.Get(otelSourceHeader); got != "openhands" {
+			t.Errorf("authenticated OTLP source = %q, want openhands", got)
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	req := httptest.NewRequest(http.MethodPost, "/v1/traces", nil)
+	req.RemoteAddr = "127.0.0.1:54321"
+	req.Header.Set("Authorization", "Bearer openhands-scoped-token")
+	req.Header.Set(otelSourceHeader, "openhands")
+	rr := httptest.NewRecorder()
+	handler.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK || !*called {
+		t.Fatalf("OpenHands scoped Authorization rejected: status=%d called=%v", rr.Code, *called)
+	}
+}
+
 func TestTokenAuth_AcceptsClaudeRenderedOTLPAuthorization(t *testing.T) {
 	const scopedToken = "claude-scoped-token"
 	profile := connector.NewClaudeCodeConnector().HookProfile(connector.SetupOpts{
@@ -6632,6 +6655,31 @@ func TestHookScopedTokenOnlyAuthenticatesHookRoutes(t *testing.T) {
 		if rec.Code != http.StatusNoContent {
 			t.Fatalf("%s (%s) with scoped token status = %d, want %d body=%s", name, path, rec.Code, http.StatusNoContent, rec.Body.String())
 		}
+		for label, tc := range map[string]struct {
+			bearer string
+			status int
+		}{
+			"missing": {"", http.StatusUnauthorized},
+			"master":  {"master-token", http.StatusNoContent},
+		} {
+			if label == "master" && strictScopedHookAuth(name, runtime.GOOS) {
+				tc.status = http.StatusUnauthorized
+			}
+			req = httptest.NewRequest(http.MethodPost, path, nil)
+			req.RemoteAddr = "127.0.0.1:47777"
+			if tc.bearer != "" {
+				req.Header.Set("Authorization", "Bearer "+tc.bearer)
+			}
+			rec = httptest.NewRecorder()
+			allowed.ServeHTTP(rec, req)
+			if rec.Code != tc.status {
+				t.Fatalf("%s (%s) with %s credential status = %d, want %d", name, path, label, rec.Code, tc.status)
+			}
+		}
+	}
+	if !strictScopedHookAuth("windsurf", "darwin") || strictScopedHookAuth("windsurf", "windows") ||
+		strictScopedHookAuth("codex", "darwin") {
+		t.Fatal("strict scoped hook auth platform policy changed")
 	}
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/codex/notify", nil)
 	req.RemoteAddr = "127.0.0.1:47777"

@@ -1,4 +1,4 @@
-// defenseclaw-managed-plugin v6
+// defenseclaw-managed-plugin v7
 // DefenseClaw opencode bridge plugin — DO NOT EDIT.
 //
 // opencode auto-loads JS/TS plugins from ~/.config/opencode/plugins/ at
@@ -14,7 +14,8 @@
 // detects digest drift and Setup reconciles it. The file is never executable.
 // DefenseClaw's Teardown removes it (managed-file backup heal).
 //
-// Wire contract: POST {hook_event_name, tool_name, tool_input, cwd} to
+// Wire contract: POST {hook_event_name, tool_name, tool_input, tool_output,
+// cwd} to
 // /api/v1/opencode/hook; the response carries hook_output={decision,
 // reason}; decision "deny"/"block" aborts the tool.
 
@@ -116,8 +117,17 @@ export const DefenseClaw = async ({ directory, worktree }) => {
     // child session ID.
     event: async ({ event }) => {
       if (!event || ![
+        "command.executed", "file.edited", "file.watcher.updated",
+        "installation.updated", "installation.update-available",
+        "lsp.client.diagnostics", "lsp.updated",
+        "message.part.removed", "message.part.updated", "message.removed",
+        "message.updated", "permission.asked", "permission.updated", "permission.replied",
+        "pty.created", "pty.updated", "pty.exited", "pty.deleted",
+        "server.connected", "server.instance.disposed", "vcs.branch.updated",
         "session.created", "session.updated", "session.status", "session.idle",
-        "session.compacted", "session.error", "session.deleted",
+        "session.compacted", "session.diff", "session.error", "session.deleted",
+        "todo.updated", "tui.prompt.append", "tui.command.execute",
+        "tui.toast.show",
       ].includes(event.type)) return;
       await defenseclawPostLifecycle(event, cwd);
     },

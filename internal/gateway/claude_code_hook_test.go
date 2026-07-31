@@ -30,6 +30,22 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
+func TestClaudeCodeTaskTeamBlocksUseExitTwoFallback(t *testing.T) {
+	for _, event := range []string{"TaskCreated", "TaskCompleted", "TeammateIdle"} {
+		t.Run(event, func(t *testing.T) {
+			if output := claudeCodeOutput(
+				claudeCodeHookRequest{HookEventName: event},
+				"block",
+				"block",
+				"blocked",
+				"",
+			); output != nil {
+				t.Fatalf("output = %#v, want nil so the hook bridge returns exit 2 + stderr", output)
+			}
+		})
+	}
+}
+
 // TestEvaluateClaudeCodeHook_ActiveConnectorImpliesEnabled documents the
 // invariant that selecting the claudecode connector is the only opt-in
 // an operator should need.

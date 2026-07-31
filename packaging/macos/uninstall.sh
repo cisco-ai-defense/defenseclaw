@@ -24,6 +24,8 @@
 #       ~/.codex/config.toml         (strip [hooks], [otel], notify=)
 #       ~/.claude/settings.json      (strip DC entries from hooks map)
 #       ~/.cursor/hooks.json         (strip DC entries from hooks map)
+#       ~/.config/opencode/plugins/defenseclaw.js
+#                                     (hash-gated exact restore/removal)
 #     Non-DefenseClaw user entries in those files are preserved verbatim.
 #     Pass --keep-agent-configs to skip the scrub.
 
@@ -107,6 +109,7 @@ Options:
                           ~/.codex/config.toml
                           ~/.claude/settings.json
                           ~/.cursor/hooks.json
+                          ~/.config/opencode/plugins/defenseclaw.js
                         Non-DefenseClaw entries in those files are preserved.
   --keep-agent-configs  With --purge, skip the agent-config scrub. Hook
                         scripts will be deleted, leaving dangling references
@@ -263,7 +266,8 @@ scrub_agent_config() {
   local connector="$1"
   local cfg="$2"
   local run_as_user="$3"   # empty ⇒ run as caller (root)
-  if [[ ! -f "${cfg}" ]]; then
+  local restore_backup="${4:-}"
+  if [[ ! -f "${cfg}" && ! -f "${restore_backup}" ]]; then
     return 0
   fi
   if [[ ! -f "${SCRUB_PY}" ]]; then
@@ -274,9 +278,9 @@ scrub_agent_config() {
   log "  scrubbing ${connector} entries from ${cfg}"
   local rc=0
   if [[ -n "${run_as_user}" && $(id -u "${run_as_user}" 2>/dev/null) != "0" ]]; then
-    sudo -u "${run_as_user}" "${PY}" "${SCRUB_PY}" "${connector}" "${cfg}" || rc=$?
+    sudo -u "${run_as_user}" "${PY}" "${SCRUB_PY}" "${connector}" "${cfg}" "${restore_backup}" || rc=$?
   else
-    "${PY}" "${SCRUB_PY}" "${connector}" "${cfg}" || rc=$?
+    "${PY}" "${SCRUB_PY}" "${connector}" "${cfg}" "${restore_backup}" || rc=$?
   fi
   case "${rc}" in
     0) ;;
@@ -297,6 +301,8 @@ if [[ "${PURGE}" == "true" \
     scrub_agent_config codex      "${_phome}/.codex/config.toml"    "${_pu}"
     scrub_agent_config claudecode "${_phome}/.claude/settings.json" "${_pu}"
     scrub_agent_config cursor     "${_phome}/.cursor/hooks.json"    "${_pu}"
+    scrub_agent_config opencode   "${_phome}/.config/opencode/plugins/defenseclaw.js" "${_pu}" \
+      "${_phome}/.defenseclaw/connector_backups/opencode/config.json"
   done <<< "${PURGE_TARGETS}"
   unset _pu _puid _pgid _phome
 fi
@@ -407,7 +413,8 @@ if [[ "${PURGE}" == "true" ]]; then
       if [[ "${KEEP_AGENT_CONFIGS}" == "true" ]]; then
         for cfg in "${_phome}/.codex/config.toml" \
                    "${_phome}/.claude/settings.json" \
-                   "${_phome}/.cursor/hooks.json"; do
+                   "${_phome}/.cursor/hooks.json" \
+                   "${_phome}/.config/opencode/plugins/defenseclaw.js"; do
           if [[ -f "${cfg}" ]]; then
             warn "--keep-agent-configs: ${cfg} still references deleted hook scripts (will fail-close every tool call)"
           fi

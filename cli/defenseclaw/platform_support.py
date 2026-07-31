@@ -22,10 +22,10 @@ objects. There is no Windows guardrail-proxy lifecycle. The proxy/chat
 connectors (``openclaw`` and ``zeptoclaw``) therefore cannot run on Windows,
 so the TUI/CLI must not offer or accept them there.
 
-This module mirrors ``internal/gateway/connector/platform_support.go``.  Tests
-pin the two taxonomies and all Python presentation lists together.  macOS and
-Linux retain their historical behavior: every built-in and plugin connector is
-offered there.
+This module mirrors ``internal/gateway/connector/platform_support.go``. Tests
+pin the taxonomies and all Python presentation lists together. Linux retains
+its historical behavior. macOS remains supported by default, with explicit
+entries for connectors whose native evidence status differs.
 """
 
 from __future__ import annotations
@@ -135,6 +135,44 @@ WINDOWS_CONNECTOR_SUPPORT: dict[str, ConnectorPlatformSupport] = {
     ),
 }
 
+MACOS_CONNECTOR_SUPPORT: dict[str, ConnectorPlatformSupport] = {
+    "codex": ConnectorPlatformSupport(
+        PREVIEW,
+        "Codex CLI 0.146.0 is implemented with native macOS hook, OTLP, notify, "
+        "signed-executable, and exact-restore validation; a green latest-version "
+        "packaged plus authenticated live record is not yet available.",
+    ),
+    "claudecode": ConnectorPlatformSupport(
+        PREVIEW,
+        "Claude Code and DefenseClaw have a native signed-Mach-O hook path on "
+        "macOS 13+ (arm64 and x86_64); latest-version packaged and authenticated "
+        "official-client validation is still pending.",
+    ),
+    "cursor": ConnectorPlatformSupport(
+        PREVIEW,
+        "Cursor Desktop and Cursor Agent hooks are implemented on macOS; "
+        "durable packaged and authenticated official-client certification is pending.",
+    ),
+    "windsurf": ConnectorPlatformSupport(
+        PREVIEW,
+        "Devin Desktop Cascade hooks are implemented on macOS, but a durable "
+        "genuine latest-version packaged and interactive live certification "
+        "record is not available.",
+    ),
+    "hermes": ConnectorPlatformSupport(
+        PREVIEW,
+        "Hermes Agent 0.19 shell hooks and the DefenseClaw POSIX hook entrypoint "
+        "are implemented on macOS; packaged plus genuine-client certification "
+        "is pending.",
+    ),
+    "antigravity": ConnectorPlatformSupport(
+        PREVIEW,
+        "The native macOS Antigravity hook integration is available as a preview; "
+        "latest-version packaged and authenticated official-client certification "
+        "evidence has not been recorded.",
+    ),
+}
+
 WINDOWS_SUPPORTED_CONNECTORS: frozenset[str] = frozenset(
     name for name, support in WINDOWS_CONNECTOR_SUPPORT.items() if support.status == SUPPORTED
 )
@@ -160,6 +198,10 @@ WINDOWS_UNSUPPORTED_FEATURES: frozenset[str] = frozenset(
         "zeptoclaw",
     }
 )
+
+# Compatibility alias for tests and callers introduced with the first macOS
+# connector evidence. Keep one authoritative map.
+DARWIN_CONNECTOR_SUPPORT = MACOS_CONNECTOR_SUPPORT
 
 
 def host_os() -> str:
@@ -190,7 +232,8 @@ def connector_platform_support(
     """Return the status and reason for *name* on *os_name*.
 
     Unknown/plugin connectors require separate native Windows certification.
-    macOS and Linux preserve their historical supported behavior.
+    macOS uses explicit evidence states where registered and otherwise
+    preserves its historical supported behavior.
     """
     resolved_os = host_os() if os_name is None else _normalize_os_name(os_name)
     if resolved_os == "windows":
@@ -200,6 +243,11 @@ def connector_platform_support(
                 NOT_CERTIFIED,
                 "This connector has not completed native Windows x64 certification.",
             ),
+        )
+    if resolved_os == "darwin":
+        return MACOS_CONNECTOR_SUPPORT.get(
+            name,
+            ConnectorPlatformSupport(SUPPORTED, "Connector setup is supported on darwin."),
         )
     return ConnectorPlatformSupport(
         SUPPORTED,

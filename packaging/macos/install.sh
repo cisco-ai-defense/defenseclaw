@@ -392,7 +392,7 @@ PRIMARY_CONNECTOR="${CONNECTORS[0]}"
 
 for c in "${CONNECTORS[@]}"; do
   if ! is_supported_connector "${c}"; then
-    warn "connector '${c}' is not in the auto-wire list (codex|claudecode|cursor); will be written to config but per-user hooks won't be auto-wired"
+    warn "connector '${c}' is not in the auto-wire list (codex|claudecode|cursor|opencode); will be written to config but per-user hooks won't be auto-wired"
   fi
 done
 

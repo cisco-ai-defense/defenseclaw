@@ -1981,12 +1981,16 @@ func resolveWatcherDirs(cfg *config.Config, conn connector.Connector, wcfg confi
 	}
 
 	if wcfg.Plugin.Enabled {
+		connectorPluginDirs, connectorOwnsPlugins := compTargets["plugin"]
 		switch {
 		case len(wcfg.Plugin.Dirs) > 0:
 			pluginDirs = append([]string(nil), wcfg.Plugin.Dirs...)
 			src.Plugin = watcherDirsFromConfig
-		case len(compTargets["plugin"]) > 0:
-			pluginDirs = append([]string(nil), compTargets["plugin"]...)
+		case connectorOwnsPlugins:
+			// A supported command-backed inventory surface can deliberately own
+			// plugin discovery without exposing filesystem directories. Preserve
+			// that empty target set instead of watching unrelated OpenClaw defaults.
+			pluginDirs = append([]string(nil), connectorPluginDirs...)
 			src.Plugin = watcherDirsFromConnector
 		default:
 			pluginDirs = cfg.PluginDirs()

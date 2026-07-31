@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-const correlationSourceCheckedDate = "2026-07-14"
+const correlationSourceCheckedDate = "2026-07-30"
 
 func correlationContractSources(name string) []CorrelationContractSource {
 	source := func(id, uri, revision string) []CorrelationContractSource {
@@ -74,8 +74,12 @@ func correlationContractSources(name string) []CorrelationContractSource {
 		return source("cursor-hooks-doc-d13a6fc6",
 			"https://cursor.com/docs/hooks", "sha256:d13a6fc6c1cc3fbe1abccf8bbd9044781a24ebb6cb8ed4870574c3bd4b9694d4")
 	case "windsurf":
-		return source("windsurf-hooks-doc-9a43fa5d",
-			"https://docs.windsurf.com/windsurf/cascade/hooks", "sha256:9a43fa5d3f3963f842e8b18b4861f59d121e3782c053dbedb230788f19ff04bd")
+		return []CorrelationContractSource{{
+			ID:          "devin-desktop-hooks-doc-113fadf3",
+			URI:         "https://docs.devin.ai/desktop/cascade/hooks",
+			Revision:    "sha256:113fadf3c87376b60aaa311c3ba82e6265af39c9093695cccaef82b37d785b54",
+			CheckedDate: "2026-07-30",
+		}}
 	case "geminicli":
 		return source("geminicli-source-fa975395",
 			"https://github.com/google-gemini/gemini-cli", "fa975395bcc6b609e44735e47320e54f51535d47")
@@ -83,8 +87,16 @@ func correlationContractSources(name string) []CorrelationContractSource {
 		return source("copilot-hooks-doc-d39949a7",
 			"https://github.com/github/docs/blob/2f383aa194327fbe933682cbe01dd4c5625f5239/content/copilot/reference/hooks-reference.md", "sha256:d39949a728947c06d1745133aa95dfaabac72c4d45918eed20ec13cbc0fb1d67")
 	case "openhands":
-		return source("openhands-source-a55f1ded",
-			"https://github.com/All-Hands-AI/OpenHands", "a55f1ded61cac85d6e42aee9e460320ead93ae6a")
+		return []CorrelationContractSource{
+			{
+				ID: "openhands-cli-source-2963442d", URI: "https://github.com/OpenHands/OpenHands-CLI",
+				Revision: "2963442dacc7cea44e39b7c4e73724295c853465", CheckedDate: correlationSourceCheckedDate,
+			},
+			{
+				ID: "openhands-sdk-source-bf57d16f", URI: "https://github.com/OpenHands/software-agent-sdk",
+				Revision: "bf57d16f3dde05b0b03fa0af3f7e0ae924043b80", CheckedDate: "2026-07-31",
+			},
+		}
 	case "antigravity":
 		return source("antigravity-hooks-doc-9c9b420a",
 			"https://antigravity.google/docs/hooks", "sha256:9c9b420a22b35ae6610133d803706678c66282cbb5479816a8f56f1175780acb")

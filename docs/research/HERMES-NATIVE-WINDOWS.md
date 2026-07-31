@@ -110,7 +110,7 @@ only Hermes-owned gaps.
 
 | Feature | Hermes classification and evidence |
 | --- | --- |
-| Native OTel logs, metrics, traces, resources | **Officially limited:** no official Hermes native OTLP surface is documented in the examined release. DefenseClaw must report `native_otlp=false`. |
+| Native OTel logs, metrics, traces, resources | **Officially limited:** the examined 0.19.0 release had no documented native OTLP surface. Hermes 0.19.1 later added optional `monitoring.export.otlp` for content-free gateway health, diagnostics, and cron signals; DefenseClaw does not configure it or treat it as policy telemetry and still reports `native_otlp=false`. |
 | Hook-derived telemetry | **Implemented:** authenticated gateway hook events generate connector-labelled audit, log, metric, and trace signals downstream. This does not relabel them as host-native OTLP. |
 | v8 audit and correlation | **Implemented downstream:** `connector=hermes`, hook contract/profile, session/event IDs, trace context when supplied, tool/prompt identity, and subagent correlation reach canonical v8 audit and routed copies. Legacy events that omit IDs remain explicitly partial. |
 | Observe/action modes | **Implemented:** observe records and may inject advisory context; action may block only valid `pre_tool_call` JSON or continue a bounded `pre_verify` loop. Post and audit-only events cannot undo side effects. |

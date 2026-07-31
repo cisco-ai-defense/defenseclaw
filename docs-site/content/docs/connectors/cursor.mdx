@@ -1,6 +1,6 @@
 ---
 title: Cursor
-description: Cursor connector wires hooks.json with native ask on beforeShellExecution and beforeMCPExecution and a native Windows preview.
+description: Cursor connector wires hooks.json with native ask on beforeShellExecution and beforeMCPExecution; macOS and Windows are preview.
 keywords:
   - DefenseClaw Cursor connector
   - Cursor hooks
@@ -11,6 +11,13 @@ keywords:
 The Cursor connector wires DefenseClaw into Cursor's
 [user-scoped hooks.json](https://cursor.com/docs/hooks) so documented prompt,
 tool, shell, MCP, file, and lifecycle events can be evaluated.
+
+<Callout type="warning" title="Native macOS is preview">
+Cursor Desktop and Cursor Agent hooks are implemented directly on macOS, but
+the connector has no durable packaged and authenticated official-client
+certification record. The latest upstream release is not treated as validated
+support, and `last_validated_version` remains empty.
+</Callout>
 
 <Callout type="warning" title="Native Windows is preview">
 Cursor Agent and the managed PowerShell hook adapter run directly on Windows,
@@ -148,7 +155,20 @@ Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [int
   </Folder>
 </Files>
 
-Cursor's MCP / skills / rules surfaces are discovered from user-global Cursor locations by default. Workspace-local overlays are included only when you explicitly pin a workspace.
+Cursor Desktop and Cursor Agent CLI are separate products with separate version
+schemes. DefenseClaw probes `agent`, then the compatibility alias
+`cursor-agent`, then the Desktop `cursor` launcher. On macOS it also checks the
+official `~/.local/bin` Agent locations and both system and per-user
+`Cursor.app` bundles.
+
+Cursor's MCP, skills, rules/instructions, custom subagents, and local plugins
+are inventoried from their documented user and workspace locations. Setup can
+write workspace MCP, skills, and `.cursor/rules` only after explicit opt-in.
+Custom subagents and local plugins are discovery-only: DefenseClaw does not
+install or modify them. `CLAUDE.md` is an Agent CLI instruction surface;
+`.cursorrules` is retained as deprecated compatibility evidence. Cursor editor
+extensions are a separate VS Code-compatible surface and are not managed by
+this connector.
 
 ## Hook capabilities
 
@@ -167,6 +187,10 @@ If a change is not loaded, restart Cursor. Teardown therefore restores the
 exact pre-DefenseClaw config or removes only DefenseClaw-owned entries, then
 removes only managed adapter files; it does not rely on an undocumented cached
 hook process.
+
+Cursor does not currently document a native OTLP exporter. DefenseClaw emits
+logs, metrics, traces, audit records, and correlation fields from the hook
+gateway path; it does not claim native Cursor telemetry.
 
 ## Disable
 

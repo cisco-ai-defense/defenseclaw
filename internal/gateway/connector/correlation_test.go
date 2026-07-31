@@ -8,8 +8,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -78,6 +80,26 @@ func TestCorrelationContractSourcesAndFixturesAreImmutable(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestOpenHandsCorrelationEvidenceTracksStandaloneSDK1391(t *testing.T) {
+	sources := correlationContractSources("openhands")
+	for _, source := range sources {
+		if source.URI != "https://github.com/OpenHands/software-agent-sdk" {
+			continue
+		}
+		if source.ID != "openhands-sdk-source-bf57d16f" {
+			t.Fatalf("SDK source ID=%q", source.ID)
+		}
+		if source.Revision != "bf57d16f3dde05b0b03fa0af3f7e0ae924043b80" {
+			t.Fatalf("SDK source revision=%q", source.Revision)
+		}
+		if source.CheckedDate != "2026-07-31" {
+			t.Fatalf("SDK source checked date=%q", source.CheckedDate)
+		}
+		return
+	}
+	t.Fatal("OpenHands SDK source evidence is missing")
 }
 
 func TestCorrelationAuthorityRequiresExactFieldEvidence(t *testing.T) {
@@ -281,6 +303,10 @@ func TestNativeTelemetryRegistryIsExplicit(t *testing.T) {
 		"openhands": NativeTelemetryNone, "antigravity": NativeTelemetryNone,
 		"opencode": NativeTelemetryNone, "omnigent": NativeTelemetryExperimental,
 	}
+	if runtime.GOOS == "darwin" {
+		wants["copilot"] = NativeTelemetryStable
+		wants["openhands"] = NativeTelemetryStable
+	}
 	for name, want := range wants {
 		spec := DefaultCorrelationSpec(name)
 		if spec.NativeTelemetry.Stability != want {
@@ -294,10 +320,41 @@ func TestNativeTelemetryRegistryIsExplicit(t *testing.T) {
 			for _, surface := range spec.Surfaces {
 				foundSurface = foundSurface || surface == CorrelationSurfaceNativeOTLP
 			}
-			if !foundSurface {
+			if name == "openhands" {
+				if runtime.GOOS == "darwin" && (!foundSurface || len(spec.NativeOTLPBindings) != 0) {
+					t.Errorf("OpenHands must expose trace-only native telemetry without identity bindings: surfaces=%v bindings=%v", spec.Surfaces, spec.NativeOTLPBindings)
+				}
+			} else if !foundSurface {
 				t.Errorf("%s native-capable but surfaces=%v", name, spec.Surfaces)
 			}
 		}
+	}
+}
+
+func TestCopilotNativeTelemetryDoesNotOverclaimLogsOrW3C(t *testing.T) {
+	spec, ok := CorrelationSpecForConnector("copilot", "copilot-hooks-v2")
+	if !ok {
+		t.Fatal("copilot v2 correlation profile missing")
+	}
+	if spec.NativeTelemetry.AcceptsW3C || spec.NativeTelemetry.PropagatesW3C {
+		t.Fatalf("undocumented native W3C claim: %+v", spec.NativeTelemetry)
+	}
+	for _, signal := range spec.NativeTelemetry.Signals {
+		if signal == NativeTelemetryLogs {
+			t.Fatalf("undocumented Copilot native logs claim: %+v", spec.NativeTelemetry)
+		}
+	}
+	for _, rule := range spec.AllowedInferenceRules {
+		if rule == CorrelationInferenceTraceLink {
+			t.Fatalf("undocumented Copilot cross-rail trace link: %v", spec.AllowedInferenceRules)
+		}
+	}
+	wantCompleteness := CorrelationCompletenessAbsent
+	if runtime.GOOS == "darwin" {
+		wantCompleteness = CorrelationCompletenessPartial
+	}
+	if spec.Completeness.NativeOTLP != wantCompleteness {
+		t.Fatalf("native completeness=%q, want %s", spec.Completeness.NativeOTLP, wantCompleteness)
 	}
 }
 
@@ -319,7 +376,7 @@ func TestEveryDeclaredCorrelationSurfaceHasReviewedBindings(t *testing.T) {
 			case CorrelationSurfaceNativeOTLP:
 				count = len(spec.NativeOTLPBindings)
 			}
-			if count == 0 {
+			if count == 0 && !(surface == CorrelationSurfaceNativeOTLP && spec.NativeTelemetry.BindingMode == NativeTelemetryBindingsExporterOnly) {
 				t.Errorf("%s declares %s without bindings", name, surface)
 			}
 		}
@@ -330,6 +387,62 @@ func TestEveryDeclaredCorrelationSurfaceHasReviewedBindings(t *testing.T) {
 				t.Errorf("%s advertises an event stream without a production adapter", name)
 			}
 		}
+	}
+}
+
+func TestExporterOnlyNativeTelemetryClassificationIsNarrow(t *testing.T) {
+	var exporterOnly []string
+	for _, name := range NewDefaultRegistry().Names() {
+		spec := DefaultCorrelationSpec(name)
+		if spec.NativeTelemetry.BindingMode == NativeTelemetryBindingsExporterOnly {
+			exporterOnly = append(exporterOnly, name)
+		}
+	}
+	if runtime.GOOS == "darwin" {
+		if len(exporterOnly) != 1 || exporterOnly[0] != "openhands" {
+			t.Fatalf("exporter-only native telemetry connectors=%v, want [openhands]", exporterOnly)
+		}
+
+		openhands := DefaultCorrelationSpec("openhands")
+		openhands.NativeTelemetry.BindingMode = NativeTelemetryBindingsReviewed
+		if err := openhands.Validate(); err == nil || !strings.Contains(err.Error(), "no reviewed bindings") {
+			t.Fatalf("reviewed binding mode accepted without bindings: %v", err)
+		}
+
+		openhands = DefaultCorrelationSpec("openhands")
+		openhands.NativeOTLPBindings = []CorrelationFieldBinding{
+			reported(CorrelationTargetSession, "openhands", "session", "undocumented.session.id"),
+		}
+		if err := openhands.Validate(); err == nil || !strings.Contains(err.Error(), "exporter-only") {
+			t.Fatalf("exporter-only mode accepted an invented binding: %v", err)
+		}
+	} else if len(exporterOnly) != 0 {
+		t.Fatalf("exporter-only native telemetry connectors=%v, want none on %s", exporterOnly, runtime.GOOS)
+	}
+}
+
+func TestOmnigentCorrelationDoesNotInventFunctionPolicyIDs(t *testing.T) {
+	spec := DefaultCorrelationSpec("omnigent")
+	canonical := ExplicitCanonicalCorrelationSpec("omnigent")
+	if len(spec.HookBindings) != len(canonical.HookBindings) {
+		t.Fatalf("OmniGent hook bindings = %+v, want only canonical DefenseClaw fields", spec.HookBindings)
+	}
+	for index := range canonical.HookBindings {
+		if fmt.Sprint(spec.HookBindings[index]) != fmt.Sprint(canonical.HookBindings[index]) {
+			t.Fatalf("OmniGent hook binding[%d] = %+v, want canonical %+v", index, spec.HookBindings[index], canonical.HookBindings[index])
+		}
+	}
+	if len(spec.NativeOTLPBindings) != 1 ||
+		spec.NativeOTLPBindings[0].Target != CorrelationTargetSession ||
+		len(spec.NativeOTLPBindings[0].Paths) != 1 ||
+		spec.NativeOTLPBindings[0].Paths[0] != "session.id" {
+		t.Fatalf("OmniGent native bindings = %+v, want only session.id", spec.NativeOTLPBindings)
+	}
+	if spec.Completeness.Session != CorrelationCompletenessPartial ||
+		spec.Completeness.Turn != CorrelationCompletenessAbsent ||
+		spec.Completeness.AgentLifecycle != CorrelationCompletenessAbsent ||
+		spec.Completeness.NativeOTLP != CorrelationCompletenessPartial {
+		t.Fatalf("OmniGent completeness overclaims reviewed evidence: %+v", spec.Completeness)
 	}
 }
 
@@ -487,7 +600,7 @@ func TestAllBuiltinCorrelationProfilesUseConnectorExactIDs(t *testing.T) {
 		{"windsurf", map[string]interface{}{"trajectory_id": "s", "execution_id": "t", "stepIndex": 3, "tool_call_id": "tc"}, map[CorrelationTarget]string{CorrelationTargetSession: "s", CorrelationTargetTurn: "t", CorrelationTargetExecution: "t", CorrelationTargetSourceSeq: "3", CorrelationTargetTool: "tc"}},
 		{"geminicli", map[string]interface{}{"session_id": "s", "prompt_id": "p", "response_id": "rs"}, map[CorrelationTarget]string{CorrelationTargetSession: "s", CorrelationTargetTurn: "p", CorrelationTargetModelResponse: "rs"}},
 		{"copilot", map[string]interface{}{"sessionId": "s"}, map[CorrelationTarget]string{CorrelationTargetSession: "s"}},
-		{"openhands", map[string]interface{}{"conversation_id": "s", "message_id": "t", "event_id": "e", "tool_call_id": "tc", "llm_response_id": "rs"}, map[CorrelationTarget]string{CorrelationTargetSession: "s", CorrelationTargetTurn: "t", CorrelationTargetSourceEvent: "e", CorrelationTargetTool: "tc", CorrelationTargetModelResponse: "rs"}},
+		{"openhands", map[string]interface{}{"session_id": "s"}, map[CorrelationTarget]string{CorrelationTargetSession: "s"}},
 		{"antigravity", map[string]interface{}{"conversationId": "s", "stepIdx": 4, "invocationNum": 8, "toolCall": map[string]interface{}{"id": "tc"}}, map[CorrelationTarget]string{CorrelationTargetSession: "s", CorrelationTargetStep: "4", CorrelationTargetExecution: "8", CorrelationTargetTool: "tc"}},
 		{"opencode", map[string]interface{}{"session_id": "s", "parentID": "ps", "messageId": "t", "part_id": "e", "callID": "tc"}, map[CorrelationTarget]string{CorrelationTargetSession: "s", CorrelationTargetParentSession: "ps", CorrelationTargetTurn: "t", CorrelationTargetSourceEvent: "e", CorrelationTargetTool: "tc"}},
 	}
@@ -524,7 +637,11 @@ func TestOmniGentOfficialPolicyEventDoesNotInventCorrelationIDs(t *testing.T) {
 		spec.Completeness.Model != CorrelationCompletenessAbsent {
 		t.Fatalf("OmniGent correlation completeness is overstated: %+v", spec.Completeness)
 	}
-	if len(spec.AllowedInferenceRules) != 0 || len(spec.ReceiptTargets) != 0 ||
+	wantInference := 0
+	if runtime.GOOS == "darwin" {
+		wantInference = 3
+	}
+	if len(spec.AllowedInferenceRules) != wantInference || len(spec.ReceiptTargets) != 0 ||
 		len(spec.MirrorIdentityTargets) != 0 {
 		t.Fatalf("OmniGent v0.7.0 invented correlation authority: %+v", spec)
 	}
@@ -640,11 +757,12 @@ func TestCopilotDocumentedHookIDsStayOnTheirRail(t *testing.T) {
 			t.Errorf("undocumented Copilot hook identity populated %s: %+v", target, value)
 		}
 	}
-	if len(spec.NativeOTLPBindings) != 0 {
+	if runtime.GOOS == "darwin" {
+		if len(spec.NativeOTLPBindings) == 0 {
+			t.Fatal("Copilot v2 is missing its reviewed macOS native OTLP bindings")
+		}
+	} else if len(spec.NativeOTLPBindings) != 0 {
 		t.Fatalf("Copilot gained unintegrated native OTLP bindings: %v", spec.NativeOTLPBindings)
-	}
-	if len(spec.MirrorIdentityTargets) != 0 {
-		t.Fatalf("Copilot undocumented hook/native mirrors remain enabled: %v", spec.MirrorIdentityTargets)
 	}
 }
 
@@ -764,24 +882,41 @@ func TestClaudeNativeRequestAndResponseIDsStayDistinct(t *testing.T) {
 	}
 }
 
-func TestOpenHandsActionIDNeverAliasesProviderToolInvocation(t *testing.T) {
+func TestOpenHandsCommandHookCorrelationMatchesOfficialEnvelope(t *testing.T) {
 	spec := DefaultCorrelationSpec("openhands")
-	action, ok := spec.HookValue(map[string]interface{}{"action_id": "shared"}, CorrelationTargetAction)
-	if !ok || action.IDKind != "action" {
-		t.Fatalf("action binding=(%+v,%v)", action, ok)
+	session, ok := spec.HookValue(map[string]interface{}{"session_id": "session-1"}, CorrelationTargetSession)
+	if !ok || session.Value != "session-1" {
+		t.Fatalf("session binding=(%+v,%v)", session, ok)
 	}
-	if tool, found := spec.HookValue(map[string]interface{}{"action_id": "shared"}, CorrelationTargetTool); found {
-		t.Fatalf("action ID populated tool invocation: %+v", tool)
+	for _, target := range []CorrelationTarget{
+		CorrelationTargetAction,
+		CorrelationTargetTurn,
+		CorrelationTargetSourceEvent,
+		CorrelationTargetTool,
+		CorrelationTargetModelResponse,
+	} {
+		if value, found := spec.HookValue(map[string]interface{}{
+			"action_id":       "action-1",
+			"message_id":      "message-1",
+			"event_id":        "event-1",
+			"tool_call_id":    "tool-1",
+			"llm_response_id": "response-1",
+		}, target); found {
+			t.Fatalf("unsupported OpenHands command-hook target %s was accepted: %+v", target, value)
+		}
 	}
-	tool, ok := spec.HookValue(map[string]interface{}{"tool_call_id": "shared"}, CorrelationTargetTool)
-	if !ok || tool.IDKind != "tool_invocation" {
-		t.Fatalf("hook tool binding=(%+v,%v)", tool, ok)
+	if runtime.GOOS == "darwin" {
+		if spec.NativeTelemetry.Stability != NativeTelemetryStable ||
+			len(spec.NativeTelemetry.Signals) != 1 ||
+			spec.NativeTelemetry.Signals[0] != NativeTelemetryTraces ||
+			spec.NativeTelemetry.BindingMode != NativeTelemetryBindingsExporterOnly {
+			t.Fatalf("OpenHands trace-only native exporter contract = %+v", spec.NativeTelemetry)
+		}
+	} else if spec.NativeTelemetry.Stability != NativeTelemetryNone {
+		t.Fatalf("OpenHands native telemetry must remain disabled on %s: %+v", runtime.GOOS, spec.NativeTelemetry)
 	}
-	if action.Target == tool.Target || action.IDKind == tool.IDKind {
-		t.Fatal("OpenHands action_id was made equivalent to tool invocation")
-	}
-	if spec.NativeTelemetry.Stability != NativeTelemetryNone {
-		t.Fatal("OpenHands advertises a native exporter that is not installed")
+	if len(spec.NativeOTLPBindings) != 0 {
+		t.Fatalf("OpenHands gained undocumented native correlation bindings: %v", spec.NativeOTLPBindings)
 	}
 }
 
@@ -796,12 +931,11 @@ func TestCorrelationAliasConflictsAreTypedAndFailClosed(t *testing.T) {
 	}
 
 	openhands := DefaultCorrelationSpec("openhands")
-	independent := openhands.HookValues(map[string]interface{}{
-		"action_id":    "shared-provider-value",
-		"tool_call_id": "shared-provider-value",
-	})
-	if err := ValidateCorrelationValues(independent); err != nil {
-		t.Fatalf("independent action and tool identities were treated as aliases: %v", err)
+	if values := openhands.HookValues(map[string]interface{}{
+		"action_id":    "unsupported-action",
+		"tool_call_id": "unsupported-tool",
+	}); len(values) != 0 {
+		t.Fatalf("unsupported OpenHands command-hook identities were accepted: %+v", values)
 	}
 }
 

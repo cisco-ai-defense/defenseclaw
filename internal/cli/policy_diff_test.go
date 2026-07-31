@@ -196,9 +196,18 @@ firewall := {
 }
 `
 
+func canonicalPolicyTestTempDir(t *testing.T) string {
+	t.Helper()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatalf("resolve temporary policy root: %v", err)
+	}
+	return root
+}
+
 func TestResolvePolicyPathsLayoutsAndManagedDefaults(t *testing.T) {
 	t.Run("canonical preferred", func(t *testing.T) {
-		root := t.TempDir()
+		root := canonicalPolicyTestTempDir(t)
 		canonical := filepath.Join(root, "rego")
 		writePolicyPathTestLayout(t, canonical, policyPathTestData(t, "canonical"), true)
 		writePolicyPathTestLayout(t, root, policyPathTestData(t, "legacy"), true)
@@ -213,7 +222,7 @@ func TestResolvePolicyPathsLayoutsAndManagedDefaults(t *testing.T) {
 	})
 
 	t.Run("legacy flat", func(t *testing.T) {
-		root := t.TempDir()
+		root := canonicalPolicyTestTempDir(t)
 		writePolicyPathTestLayout(t, root, policyPathTestData(t, "legacy"), true)
 		setPolicyPathTestConfig(t, &config.Config{PolicyDir: root})
 		paths, err := resolvePolicyPaths()
@@ -226,7 +235,7 @@ func TestResolvePolicyPathsLayoutsAndManagedDefaults(t *testing.T) {
 	})
 
 	t.Run("canonical data-only evidence", func(t *testing.T) {
-		root := t.TempDir()
+		root := canonicalPolicyTestTempDir(t)
 		canonical := filepath.Join(root, "rego")
 		writePolicyPathTestLayout(t, canonical, policyPathTestData(t, "canonical"), false)
 		writePolicyPathTestLayout(t, root, policyPathTestData(t, "legacy"), true)
@@ -244,7 +253,7 @@ func TestResolvePolicyPathsLayoutsAndManagedDefaults(t *testing.T) {
 	})
 
 	t.Run("configured data directory", func(t *testing.T) {
-		dataDir := t.TempDir()
+		dataDir := canonicalPolicyTestTempDir(t)
 		root := filepath.Join(dataDir, "policies")
 		writePolicyPathTestLayout(t, filepath.Join(root, "rego"), policyPathTestData(t, "configured"), true)
 		setPolicyPathTestConfig(t, &config.Config{DataDir: dataDir})
@@ -255,7 +264,7 @@ func TestResolvePolicyPathsLayoutsAndManagedDefaults(t *testing.T) {
 	})
 
 	t.Run("default managed home", func(t *testing.T) {
-		home := t.TempDir()
+		home := canonicalPolicyTestTempDir(t)
 		t.Setenv("DEFENSECLAW_HOME", home)
 		root := filepath.Join(home, "policies")
 		writePolicyPathTestLayout(t, filepath.Join(root, "rego"), policyPathTestData(t, "default"), true)
@@ -269,7 +278,7 @@ func TestResolvePolicyPathsLayoutsAndManagedDefaults(t *testing.T) {
 
 func TestResolvePolicyPathsSecurityBoundaries(t *testing.T) {
 	t.Run("working directory ignored", func(t *testing.T) {
-		trustedRoot := filepath.Join(t.TempDir(), "missing-policies")
+		trustedRoot := filepath.Join(canonicalPolicyTestTempDir(t), "missing-policies")
 		untrusted := t.TempDir()
 		writePolicyPathTestLayout(t, filepath.Join(untrusted, "policies", "rego"), policyPathTestData(t, "untrusted"), true)
 		previous, err := os.Getwd()
@@ -351,7 +360,7 @@ func TestResolvePolicyPathsSecurityBoundaries(t *testing.T) {
 
 func TestResolvePolicyPathsIgnoresUnusedFlatResidue(t *testing.T) {
 	t.Run("nonregular custom module", func(t *testing.T) {
-		root := t.TempDir()
+		root := canonicalPolicyTestTempDir(t)
 		canonical := filepath.Join(root, "rego")
 		writePolicyPathTestLayout(t, canonical, policyPathTestData(t, "canonical"), true)
 		if err := os.Mkdir(filepath.Join(root, "custom.rego"), 0o700); err != nil {
@@ -364,7 +373,7 @@ func TestResolvePolicyPathsIgnoresUnusedFlatResidue(t *testing.T) {
 	})
 
 	t.Run("legacy data alias", func(t *testing.T) {
-		root := t.TempDir()
+		root := canonicalPolicyTestTempDir(t)
 		canonical := filepath.Join(root, "rego")
 		writePolicyPathTestLayout(t, canonical, policyPathTestData(t, "canonical"), true)
 		if err := os.Symlink(filepath.Join(canonical, "data.json"), filepath.Join(root, "data.json")); err != nil {

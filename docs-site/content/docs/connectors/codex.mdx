@@ -18,6 +18,18 @@ official-client hook E2E. Static, synthetic, source-build, or locally installed
 client checks do not replace that evidence.
 </Callout>
 
+<Callout type="warning" title="Native macOS is preview">
+Codex CLI `0.146.0` is the current audited upstream release. DefenseClaw's
+native macOS implementation validates the selected Mach-O and OpenAI Developer
+ID signature, but a durable latest-version packaged + authenticated live record
+is still pending. Setup is available and labeled preview; no macOS
+`last_validated_version` is claimed.
+
+Compatibility is current, certification is not: `0.146.0` selects the
+open-ended `codex-hooks-v4` contract, while the latest authenticated macOS
+validation evidence remains absent.
+</Callout>
+
 <Callout type="info">
 The Codex connector is **hook-only**. There is no LLM-proxy data path — Codex talks directly to its native upstream (`api.openai.com` or the ChatGPT backend) and DefenseClaw observes via hooks + native OTel.
 
@@ -25,6 +37,11 @@ The Codex connector is **hook-only**. There is no LLM-proxy data path — Codex 
 example, `PreToolUse` can return `permissionDecision: "deny"` before the tool.
 Observation-only events and agent activity outside the registered hook contract
 are not proxy-intercepted.
+
+`SubagentStop` and `Stop` can return blocking feedback, but Codex continues the
+subagent or agent so it can address that feedback. DefenseClaw keeps
+`SessionStart`, `PreCompact`, `PostCompact`, and `SessionEnd` observation-only;
+it does not promise lifecycle cancellation through `continue:false`.
 </Callout>
 
 ## Setup
@@ -88,12 +105,21 @@ copy those entries manually. See the
   </Folder>
 </Files>
 
+On macOS, setup resolves the real binary and rejects symlinks, non-regular
+files, a mismatched architecture, unexpected signing identity, and
+`com.apple.quarantine`. The accepted signing identity is identifier `codex`,
+OpenAI Team ID `2DC432GLL2`. The selected path, raw version, and SHA-256 are
+bound into protected setup evidence and the runtime contract lock. Linux keeps
+the existing trusted-prefix behavior.
+
   </Tab>
 </Tabs>
 
 Everything outside DefenseClaw-marked fields is preserved. Teardown restores a
 pristine backup when its identity still matches; otherwise it removes only
-owned entries.
+owned entries. The persistent macOS lifecycle gate rejects symlinked or
+non-regular config inputs and verifies byte-for-byte content plus mode
+restoration.
 
 ## Hook capabilities
 
@@ -166,7 +192,10 @@ DefenseClaw follows the current Codex layouts rather than Claude Code's
 Codex activates project `.codex/` config, MCP, agent, and rule layers only for
 trusted projects. Filesystem inventory reports project entries as
 `trust_required`; it does not infer the client's private trust decision from
-the presence of a file.
+the presence of a file. DefenseClaw also inventories deprecated custom prompt
+commands from `$CODEX_HOME/prompts/*.md`. Codex does not publish a generic
+`$CODEX_HOME/extensions` contract or separate memory-file or
+microagents-directory categories; those categories are not inferred.
 
 ## Telemetry channels at boot
 

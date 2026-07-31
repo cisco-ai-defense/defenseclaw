@@ -133,11 +133,16 @@ func TestConnectorSupportOnOS(t *testing.T) {
 		}
 	}
 
-	for _, goos := range []string{"linux", "darwin"} {
-		for _, name := range allWindowsConnectorNames() {
-			if got := ConnectorSupportOnOS(name, goos).Status; got != PlatformSupported {
-				t.Errorf("%s on %s status=%q, want supported", name, goos, got)
-			}
+	for _, name := range allWindowsConnectorNames() {
+		if got := ConnectorSupportOnOS(name, "linux").Status; got != PlatformSupported {
+			t.Errorf("%s on linux status=%q, want supported", name, got)
+		}
+		wantDarwin := PlatformSupported
+		if name == "codex" || name == "claudecode" || name == "cursor" || name == "windsurf" || name == "hermes" || name == "antigravity" {
+			wantDarwin = PlatformPreview
+		}
+		if got := ConnectorSupportOnOS(name, "darwin").Status; got != wantDarwin {
+			t.Errorf("%s on darwin status=%q, want %q", name, got, wantDarwin)
 		}
 	}
 
@@ -161,10 +166,25 @@ func TestCheckPlatformSupportPreservesOperatorWording(t *testing.T) {
 	if err != nil || !strings.Contains(warning, "preview on windows") {
 		t.Fatalf("preview result warning=%q err=%v", warning, err)
 	}
+	warning, err = CheckPlatformSupport("cursor", "darwin")
+	if err != nil || !strings.Contains(warning, "preview on darwin") {
+		t.Fatalf("macOS preview result warning=%q err=%v", warning, err)
+	}
 
 	warning, err = CheckPlatformSupport("hermes", "windows")
 	if err != nil || !strings.Contains(warning, "preview") {
 		t.Fatalf("preview result warning=%q err=%v", warning, err)
+	}
+
+	warning, err = CheckPlatformSupport("hermes", "darwin")
+	if err != nil || !strings.Contains(warning, "preview on darwin") {
+		t.Fatalf("macOS preview result warning=%q err=%v", warning, err)
+	}
+
+	warning, err = CheckPlatformSupport("antigravity", "darwin")
+	if err != nil || !strings.Contains(warning, "preview on darwin") ||
+		!strings.Contains(warning, "official-client certification") {
+		t.Fatalf("macOS Antigravity warning=%q err=%v", warning, err)
 	}
 
 	warning, err = CheckPlatformSupport("openhands", "windows")

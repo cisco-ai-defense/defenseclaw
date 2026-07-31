@@ -421,6 +421,9 @@ func TestConnectorReconcileCopilotAllowsOnlyHomeBoundInstallerMaintenance(t *tes
 }
 
 func TestConnectorReconcileMixedModesKeepsBothContractsCurrent(t *testing.T) {
+	if runtime.GOOS == "darwin" {
+		t.Skip("requires an OpenAI-signed Codex fixture after native macOS executable provenance enforcement")
+	}
 	dataDir := testenv.PrivateTempDir(t)
 	seedCodexSelectionForTest(t, dataDir)
 	home := testenv.PrivateTempDir(t)

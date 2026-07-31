@@ -35,7 +35,9 @@ dc_connector_config_file() {
     copilot)     printf '%s/.copilot/hooks/defenseclaw.json' "${HOME}" ;;
     openhands)   printf '%s/.openhands/hooks.json' "${HOME}" ;;
     antigravity) printf '%s/.gemini/config/hooks.json' "${HOME}" ;;
-    hermes)      printf '%s/.hermes/config.yaml' "${HOME}" ;;
+    hermes)      printf '%s/config.yaml' "${HERMES_HOME:-${HOME}/.hermes}" ;;
+    omnigent)    printf '%s/config.yaml' "${OMNIGENT_CONFIG_HOME:-${HOME}/.omnigent}" ;;
+    opencode)    printf '%s/plugins/defenseclaw.js' "${OPENCODE_CONFIG_DIR:-${HOME}/.config/opencode}" ;;
     *)           printf '' ;;
   esac
 }

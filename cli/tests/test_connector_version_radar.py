@@ -71,16 +71,19 @@ class ConnectorVersionRadarTests(unittest.TestCase):
                     "--json",
                 ): self._success('"2.1.207"'),
                 ("agy", "--version"): self._success("Antigravity CLI v1.1.1"),
+                ("omnigent", "--version"): self._success("omnigent 0.7.0"),
             }
         )
 
     @staticmethod
     def _manifest_fetcher(url, timeout):
-        if not url.endswith("/darwin_arm64.json"):
-            raise AssertionError(f"unexpected release URL: {url}")
         if timeout <= 0:
             raise AssertionError("timeout must be positive")
-        return radar.ExternalResult(True, stdout='{"version":"1.1.1","url":"ignored"}')
+        if url.endswith("/darwin_arm64.json"):
+            return radar.ExternalResult(True, stdout='{"version":"1.1.1","url":"ignored"}')
+        if url == "https://pypi.org/pypi/omnigent/json":
+            return radar.ExternalResult(True, stdout='{"info":{"version":"0.7.0"}}')
+        raise AssertionError(f"unexpected release URL: {url}")
 
     def test_version_normalization_and_semver_ordering(self):
         self.assertEqual(radar.parse_version("codex-cli 0.144.1").normalized, "0.144.1")
@@ -108,13 +111,19 @@ class ConnectorVersionRadarTests(unittest.TestCase):
         self.assertEqual(payload["status"], "ok")
         self.assertEqual(
             [(item["connector"], item["candidate_version"]) for item in payload["candidates"]],
-            [("codex", "0.144.1"), ("claudecode", "2.1.207"), ("antigravity", "1.1.1")],
+            [
+                ("codex", "0.144.1"),
+                ("claudecode", "2.1.207"),
+                ("antigravity", "1.1.1"),
+                ("omnigent", "0.7.0"),
+            ],
         )
         self.assertTrue(payload["any_new"])
         self.assertEqual(payload["connectors"]["codex"]["status"], "update_available")
         self.assertEqual(payload["candidates"][0]["baseline_version"], "0.142.5")
         self.assertEqual(payload["connectors"]["claudecode"]["status"], "initial_test_required")
         self.assertEqual(payload["connectors"]["antigravity"]["status"], "initial_test_required")
+        self.assertEqual(payload["connectors"]["omnigent"]["status"], "initial_test_required")
 
         persisted = json.loads(self.state.read_text(encoding="utf-8"))
         self.assertEqual(persisted["connectors"]["codex"]["installed_seed_version"], "0.142.5")
@@ -254,6 +263,7 @@ class ConnectorVersionRadarTests(unittest.TestCase):
                     "--json",
                 ): self._success('"2.1.208"'),
                 ("agy", "--version"): self._success("1.1.1"),
+                ("omnigent", "--version"): self._success("omnigent 0.7.0"),
             }
         )
 
@@ -273,6 +283,7 @@ class ConnectorVersionRadarTests(unittest.TestCase):
                 ("codex", "latest_query"),
                 ("claudecode", "installed_probe"),
                 ("antigravity", "latest_query"),
+                ("omnigent", "latest_query"),
             },
         )
         self.assertTrue(all(item["status"] == "infrastructure_error" for item in payload["connectors"].values()))
@@ -331,6 +342,10 @@ class ConnectorVersionRadarTests(unittest.TestCase):
                     "codex": {"installed": "codex-cli 0.142.5", "latest": '"0.144.1"'},
                     "claudecode": {"installed": "2.1.207", "latest": '"2.1.208"'},
                     "antigravity": {"installed": "1.1.1", "latest": '{"version":"1.1.2"}'},
+                    "omnigent": {
+                        "installed": "omnigent 0.7.0",
+                        "latest": '{"info":{"version":"0.7.0"}}',
+                    },
                 }
             ),
             encoding="utf-8",
@@ -365,9 +380,9 @@ class ConnectorVersionRadarTests(unittest.TestCase):
         self.assertEqual(github_values["has_candidates"], "true")
         self.assertEqual(
             json.loads(github_values["candidate_connectors"]),
-            ["codex", "claudecode", "antigravity"],
+            ["codex", "claudecode", "antigravity", "omnigent"],
         )
-        self.assertEqual(len(json.loads(github_values["candidate_matrix"])["include"]), 3)
+        self.assertEqual(len(json.loads(github_values["candidate_matrix"])["include"]), 4)
         self.assertEqual(json.loads(github_values["matrix"]), json.loads(github_values["candidate_matrix"]))
         self.assertEqual(
             set(json.loads(github_values["matrix"])["include"][0]),

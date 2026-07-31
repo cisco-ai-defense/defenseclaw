@@ -552,6 +552,38 @@ func TestWatchOwnedFilesReturnsSpecificFilesNotDirs(t *testing.T) {
 	}
 }
 
+func TestWatchOwnedFilesTreatsOpenCodePluginAsExclusive(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
+	skipIfRoot(t)
+	home := newTestHome(t)
+	pluginPath := filepath.Join(home, ".config", "opencode", "plugins", "defenseclaw.js")
+	previous := connector.OpenCodePluginPathOverride
+	connector.OpenCodePluginPathOverride = pluginPath
+	t.Cleanup(func() { connector.OpenCodePluginPathOverride = previous })
+
+	own, err := WatchOwnedFiles(InstallOptions{
+		ConnectorName: "opencode",
+		UserHome:      home,
+		OwnerUID:      os.Getuid(),
+		OwnerGID:      os.Getgid(),
+		APIAddr:       "127.0.0.1:18970",
+		APIToken:      "test-token",
+		GuardrailMode: "action",
+		HookFailMode:  "closed",
+		AgentVersion:  "1.18.10",
+		Registry:      connector.NewDefaultRegistry(),
+	})
+	if err != nil {
+		t.Fatalf("WatchOwnedFiles: %v", err)
+	}
+	if !sliceContains(own.ExclusiveWriter, pluginPath) {
+		t.Fatalf("OpenCode plugin must be exclusive-writer; got %+v", own)
+	}
+	if sliceContains(own.SharedWriter, pluginPath) {
+		t.Fatalf("OpenCode plugin must not suppress Write/Chmod events; got %+v", own)
+	}
+}
+
 // TestInstallBootstrapsMissingHookConfigFirstTime locks the endpoint-
 // product contract: on a fresh target where the user has never
 // launched the agent (so ~/.codex/config.toml doesn't exist yet),

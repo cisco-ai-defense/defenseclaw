@@ -139,6 +139,8 @@ def test_antigravity_signature_tracks_mcp_and_customization_paths():
     assert ".agents/rules" in antigravity.config_paths
     assert "~/.gemini/config/plugins" in antigravity.config_paths
     assert "antigravity.google" in antigravity.domain_patterns
+    assert "~/.gemini/config/agents" in antigravity.config_paths
+    assert ".agents/agents" in antigravity.config_paths
 
 
 def test_codex_signature_tracks_current_official_asset_layouts():
@@ -160,6 +162,14 @@ def test_codex_signature_tracks_current_official_asset_layouts():
     } <= set(codex.config_paths)
     assert {".mcp.json", "~/.codex/skills", ".codex/skills"}.isdisjoint(codex.config_paths)
     assert set(codex.mcp_paths) == {"~/.codex/config.toml", ".codex/config.toml"}
+
+
+def test_omnigent_signature_tracks_stable_agent_inventory_root():
+    signatures = {sig.id: sig for sig in load_ai_signatures()}
+    omnigent = signatures["omnigent"]
+
+    assert "~/.omnigent/agents" in omnigent.config_paths
+    assert "~/.omnigent/agents" in omnigent.mcp_paths
 
 
 def test_custom_signature_pack_loads_from_managed_dir(tmp_path):

@@ -35,6 +35,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+import yaml
 
 try:
     import tomllib
@@ -804,7 +805,7 @@ class TestClaudeCodeWrites:
             if not swapped and os.path.normcase(snapshot.path) == os.path.normcase(str(settings)):
                 swapped = True
                 settings.parent.rename(displaced)
-                settings.parent.mkdir()
+                settings.parent.mkdir(exist_ok=True)
                 settings.write_bytes(external)
             return atomic_replace(
                 snapshot,
@@ -1417,7 +1418,7 @@ class TestClaudeCodeWrites:
             ):
                 swapped = True
                 settings.parent.rename(displaced)
-                settings.parent.mkdir()
+                settings.parent.mkdir(exist_ok=True)
                 (settings.parent / "marker").write_bytes(marker)
 
         monkeypatch.setattr(connector_paths, "make_private_directory", create_then_swap)
@@ -2341,6 +2342,20 @@ class TestAtomicity:
 
         assert path.read_text() == original
 
+    def test_codex_set_preserves_unrelated_toml(self, tmp_path, monkeypatch):
+        if os.name == "nt":
+            file_permissions._set_windows_owner_only_acl(os.fspath(tmp_path))
+        path = tmp_path / ".codex" / "config.toml"
+        path.parent.mkdir()
+        path.write_text('model = "gpt-5"\n')
+
+        set_mcp_server("codex", "demo", {"command": "uvx"}, workspace_dir=str(tmp_path))
+
+        assert 'model = "gpt-5"' in path.read_text()
+        entries = connector_paths._read_codex_config_toml(str(path))
+        assert [entry.name for entry in entries] == ["demo"]
+        assert entries[0].command == "uvx"
+
     def test_set_does_not_leave_tempfile_on_success(
         self,
         tmp_path,
@@ -2373,11 +2388,6 @@ class TestCoverage:
             elif name in {"zeptoclaw", "omnigent"}:
                 with pytest.raises(MCPWriteUnsupportedError):
                     set_mcp_server(name, "x", {"command": "y"})
-            elif name == "windsurf":
-                with pytest.MonkeyPatch.context() as m:
-                    m.setenv("HOME", str(tmp_path / "isolated-home"))
-                    with pytest.raises(MCPWriteUnsupportedError):
-                        set_mcp_server(name, "x", {"command": "y"})
             elif name == "antigravity":
                 # Antigravity now has a documented native MCP write path:
                 # ~/.gemini/config/mcp_config.json.
@@ -2392,6 +2402,9 @@ class TestCoverage:
                     m.setenv("HOME", str(tmp_path / "oc-home"))
                     set_mcp_server(name, "x", {"command": "y"})
                     assert (tmp_path / "oc-home" / ".config" / "opencode" / "opencode.json").is_file()
+            elif name == "windsurf" and os.name == "nt":
+                with pytest.raises(MCPWriteUnsupportedError):
+                    set_mcp_server(name, "x", {"command": "y"})
             else:
                 # All other connectors have a documented MCP write path.
                 # Use chdir + isolated HOME so the test doesn't trash
@@ -2404,6 +2417,42 @@ class TestCoverage:
                     set_mcp_server(name, "x", {"command": "y"})
 
 
+class TestWindsurfWrites:
+    def test_windows_write_path_requires_existing_config(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        monkeypatch.setenv("HOME", str(home))
+
+        assert connector_paths._windsurf_mcp_write_path(platform_name="nt") is None
+
+        path = home / ".codeium" / "windsurf" / "mcp_config.json"
+        path.parent.mkdir(parents=True)
+        path.write_text("{}\n", encoding="utf-8")
+        assert connector_paths._windsurf_mcp_write_path(platform_name="nt") == str(path)
+
+    def test_set_and_unset_use_documented_path_and_preserve_operator_keys(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        home = tmp_path / "home"
+        data_home = tmp_path / "defenseclaw"
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("DEFENSECLAW_HOME", str(data_home))
+        path = home / ".codeium" / "windsurf" / "mcp_config.json"
+        path.parent.mkdir(parents=True)
+        original = b'{\r\n  "theme": "operator-owned"\r\n}\r\n'
+        path.write_bytes(original)
+
+        set_mcp_server("windsurf", "demo", {"command": "uvx", "args": ["server"]})
+        configured = json.loads(path.read_text(encoding="utf-8"))
+        assert configured["mcpServers"]["demo"]["command"] == "uvx"
+
+        unset_mcp_server("windsurf", "demo")
+        restored = json.loads(path.read_text(encoding="utf-8"))
+        assert restored["theme"] == "operator-owned"
+        assert restored.get("mcpServers", {}) == {}
+
+
 class TestHermesWrites:
     def test_set_and_unset_honor_hermes_home(self, tmp_path, monkeypatch):
         hermes_home = tmp_path / "custom-hermes"
@@ -2413,11 +2462,15 @@ class TestHermesWrites:
 
         config = hermes_home / "config.yaml"
         assert config.is_file()
+        document = yaml.safe_load(config.read_text(encoding="utf-8"))
+        assert document["mcp_servers"]["demo"] == {"command": "hermes-mcp"}
         assert [entry.name for entry in connector_paths.mcp_servers("hermes")] == ["demo"]
 
         unset_mcp_server("hermes", "demo")
 
         assert connector_paths.mcp_servers("hermes") == []
+        document = yaml.safe_load(config.read_text(encoding="utf-8"))
+        assert document.get("mcp_servers", {}) == {}
 
 
 # ---------------------------------------------------------------------------

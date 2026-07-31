@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "defenseclaw_version": "0.5.0",
   "runtime_lock_file": "hook_contract_lock.json",
   "description": "DefenseClaw hook connector compatibility contracts. Each hook connector maps agent CLI version ranges to the hook script contract DefenseClaw knows how to install, decode, evaluate, and respond to.",
@@ -319,6 +319,13 @@
           ],
           "supports_traceparent": true,
           "native_otlp": true,
+          "native_otlp_auth": "header-token",
+          "native_otlp_signals": [
+            "logs",
+            "metrics",
+            "traces"
+          ],
+          "native_otlp_endpoint_template": "/v1/<signal>",
           "capabilities": {
             "can_block": true,
             "can_ask_native": true,
@@ -349,7 +356,8 @@
             "Claude Code PreToolUse supports native HITL via permissionDecision=ask.",
             "PostToolUse findings are advisory because the inspected tool side effects have already occurred.",
             "PostToolBatch can block continuation before the next model call, but cannot undo completed batch side effects.",
-            "ConfigChange is blockable except when source=policy_settings, where Claude Code ignores blocking decisions."
+            "ConfigChange is blockable except when source=policy_settings, where Claude Code ignores blocking decisions.",
+            "Native logs and metrics are enabled on supported hosts. Enhanced-telemetry beta traces are enabled only on macOS; Windows retains traces disabled."
           ]
         }
       ]
@@ -363,9 +371,16 @@
           "contract_id": "hermes-hooks-v1",
           "agent_version": {
             "min_inclusive": "0.19.0",
-            "max_exclusive": ""
+            "max_exclusive": "0.20.0"
           },
           "default_for_unversioned": true,
+          "platform_overrides": {
+            "windows": {
+              "agent_version": {
+                "max_exclusive": ""
+              }
+            }
+          },
           "hook_script_version": "v6",
           "hook_script": "hermes-hook.sh",
           "hook_config_path_templates": [
@@ -421,7 +436,8 @@
           "notes": [
             "Covers all 23 Hermes v0.19 VALID_HOOKS events. Hermes nests inspectable event content under the per-event extra envelope; the generic decoder lifts declared fields into the canonical lifecycle. Events whose official schema is not documented remain partial, attributed audit rather than inferred enforcement.",
             "pre_tool_call is the only blockable event; pre_llm_call injects context; pre_verify can continue the bounded verification loop. Transform hooks require Python string returns, pre_gateway_dispatch requires plugin skip/rewrite/allow results, and approval/API/Kanban/lifecycle return values are ignored or undocumented by the shell lane, so DefenseClaw audits them without claiming mutation. Confirm verdicts are recorded and alerted without hook output; Hermes never blocks on exit code or hook timeout so there is no fail-closed surface.",
-            "Multi-event registration requires hooks_auto_accept in the effective config.yaml on non-TTY/gateway runs (the upstream hook guide calls this cli-config.yaml); Setup writes it and the managed-backup heals it."
+            "Multi-event registration requires hooks_auto_accept in cli-config.yaml on non-TTY/gateway runs; Setup writes it and the managed-backup heals it.",
+            "Hermes 0.19.1 exposes optional monitoring.export.otlp for content-free gateway health, diagnostics, and cron signals. DefenseClaw does not manage that upstream block; policy-event telemetry remains hook-derived."
           ]
         }
       ]
@@ -559,9 +575,9 @@
             "scope": "user"
           },
           "notes": [
-            "Windsurf 1.12.41 added Cascade hooks on user prompts, completing the pre-hook set used by this contract.",
+            "Windsurf 1.12.41 added Cascade hooks on user prompts, completing the pre-hook set used by this contract; the renamed Devin Desktop 3.x line retains these legacy hook paths and events.",
             "Windsurf blocks only the five documented pre-hooks when a hook exits 2. Other non-zero exits fail open, post hooks never block, Cascade response post hooks are asynchronous, and Restricted Mode disables hooks.",
-            "Devin Desktop is a GUI and has no non-interactive version command; native Windows discovery reads trusted executable file-version metadata without launching it."
+            "Devin Desktop is a GUI and has no non-interactive version command; native Windows discovery reads trusted executable file-version metadata and macOS discovery reads canonical application-bundle metadata without launching it."
           ]
         }
       ]
@@ -694,6 +710,13 @@
             "max_exclusive": ""
           },
           "default_for_unversioned": true,
+          "platform_overrides": {
+            "windows": {
+              "native_otlp": false,
+              "native_otlp_auth": "",
+              "native_otlp_signals": []
+            }
+          },
           "hook_script_version": "v7",
           "hook_script": "copilot-hook.sh",
           "hook_config_path_templates": [
@@ -723,7 +746,12 @@
             "tool_result"
           ],
           "supports_traceparent": true,
-          "native_otlp": false,
+          "native_otlp": true,
+          "native_otlp_auth": "otel-exporter-headers",
+          "native_otlp_signals": [
+            "metrics",
+            "traces"
+          ],
           "capabilities": {
             "can_block": true,
             "can_ask_native": true,
@@ -743,7 +771,8 @@
             "Current GitHub Copilot CLI documentation includes the mutation-only userPromptTransformed event; DefenseClaw returns no modification.",
             "GitHub Copilot CLI 1.0.76 is the conservative reviewed floor for this current 14-event contract.",
             "Copilot CLI native ask is limited to preToolUse / PreToolUse hooks.",
-            "postToolUseFailure is advisory-only and can provide recovery additionalContext; it cannot block the failed tool."
+            "postToolUseFailure is advisory-only and can provide recovery additionalContext; it cannot block the failed tool.",
+            "Official native OpenTelemetry emits traces and metrics, but cleartext OTLP HTTP is disabled; the current loopback HTTP gateway therefore does not configure that exporter."
           ]
         }
       ]
@@ -757,9 +786,16 @@
           "contract_id": "antigravity-hooks-v2",
           "agent_version": {
             "min_inclusive": "1.1.8",
-            "max_exclusive": ""
+            "max_exclusive": "1.1.10"
           },
           "default_for_unversioned": true,
+          "platform_overrides": {
+            "windows": {
+              "agent_version": {
+                "max_exclusive": ""
+              }
+            }
+          },
           "hook_script_version": "v8",
           "hook_script": "antigravity-hook.sh",
           "hook_config_path_templates": [
@@ -792,6 +828,8 @@
             "scope": "user"
           },
           "notes": [
+            "CLI 1.1.8 and 1.1.9 are artifact-reviewed on macOS. The 1.1.10 exclusive ceiling prevents later patches from being classified as known without a fresh contract review.",
+            "CLI 1.1.9 bounds repeated Stop-hook continuations and fixes PostToolUse firing and matcher evaluation without changing the five-event schema or its payload and response fields.",
             "Antigravity 2.0 documents five lifecycle events. PreToolUse and PostToolUse use matcher groups with nested handlers; PreInvocation, PostInvocation, and Stop use direct handler lists.",
             "Hard blocking is claimed only for synchronous PreToolUse stdout {\"decision\":\"deny\"}. decision=ask provides native confirmation. Google does not document non-zero hook exit codes as an enforcement interface.",
             "PostToolUse output is {}. PreInvocation and PostInvocation may return injectSteps; DefenseClaw uses ephemeralMessage only for context. Stop requires a decision, where continue re-enters the loop and any other value permits stopping; DefenseClaw returns allow and does not claim Stop blocking.",
@@ -809,7 +847,7 @@
         {
           "contract_id": "openhands-hooks-v1",
           "agent_version": {
-            "min_inclusive": "0.0.0",
+            "min_inclusive": "1.12.0",
             "max_exclusive": ""
           },
           "default_for_unversioned": true,
@@ -835,7 +873,15 @@
             "event_content"
           ],
           "supports_traceparent": true,
-          "native_otlp": false,
+          "native_otlp": true,
+          "platform_overrides": {
+            "windows": {
+              "agent_version": {
+                "min_inclusive": "0.0.0"
+              },
+              "native_otlp": false
+            }
+          },
           "capabilities": {
             "can_block": true,
             "can_ask_native": false,
@@ -850,8 +896,9 @@
           },
           "notes": [
             "OpenHands hooks use native snake_case event keys and install to ~/.openhands/hooks.json by default, with repo-local .openhands/hooks.json when a workspace is pinned.",
-            "Validated with OpenHands CLI 1.16.0; the contract stays unbounded because upstream documents the hooks as a config contract rather than a versioned hook API floor.",
-            "OpenHands blocks by exit code 2 and optional decision=deny JSON; no native ask/permission prompt surface is documented, so confirm verdicts are downgraded to additionalContext alerts."
+            "OpenHands CLI 1.12.0 is the minimum because it first loads user-global ~/.openhands/hooks.json; source-reviewed against 1.16.0 with no maximum. macOS remains uncertified until a durable green latest-version live run is recorded.",
+            "OpenHands blocks by exit code 2 and optional decision=deny JSON; no native ask surface is documented. Confirm becomes additionalContext only for UserPromptSubmit; PreToolUse and Stop downgrades are audit-only.",
+            "OpenHands SDK 1.39.1 preserves process-environment OTLP traces only; DefenseClaw does not persist those variables in hooks.json or a shell profile."
           ]
         }
       ]
@@ -864,30 +911,82 @@
         {
           "contract_id": "opencode-hooks-v1",
           "agent_version": {
-            "min_inclusive": "0.0.0",
-            "max_exclusive": ""
+            "min_inclusive": "1.16.2",
+            "max_exclusive": "1.18.11"
           },
-          "default_for_unversioned": true,
-          "hook_script_version": "v6",
+          "default_for_unversioned": false,
+          "platform_overrides": {
+            "windows": {
+              "agent_version": {
+                "min_inclusive": "0.0.0",
+                "max_exclusive": ""
+              },
+              "default_for_unversioned": true,
+              "hook_script_version": "v6",
+              "events": [
+                "session.created",
+                "session.updated",
+                "session.status",
+                "session.idle",
+                "session.compacted",
+                "session.error",
+                "session.deleted",
+                "tool.execute.before",
+                "tool.execute.after"
+              ],
+              "aid_surfaces": [
+                "tool_call",
+                "tool_result"
+              ]
+            }
+          },
+          "hook_script_version": "v7",
           "hook_script": "opencode-plugin.js",
           "hook_config_path_templates": [
             "~/.config/opencode/plugins/defenseclaw.js"
           ],
           "response_field": "hook_output",
           "events": [
+            "command.executed",
+            "file.edited",
+            "file.watcher.updated",
+            "installation.updated",
+            "installation.update-available",
+            "lsp.client.diagnostics",
+            "lsp.updated",
+            "message.part.removed",
+            "message.part.updated",
+            "message.removed",
+            "message.updated",
+            "permission.asked",
+            "permission.updated",
+            "permission.replied",
+            "pty.created",
+            "pty.updated",
+            "pty.exited",
+            "pty.deleted",
+            "server.connected",
+            "server.instance.disposed",
+            "vcs.branch.updated",
             "session.created",
             "session.updated",
             "session.status",
             "session.idle",
             "session.compacted",
+            "session.diff",
             "session.error",
             "session.deleted",
+            "todo.updated",
+            "tui.prompt.append",
+            "tui.command.execute",
+            "tui.toast.show",
             "tool.execute.before",
             "tool.execute.after"
           ],
           "aid_surfaces": [
             "tool_call",
-            "tool_result"
+            "tool_result",
+            "event_content"
           ],
           "supports_traceparent": false,
           "native_otlp": false,
@@ -904,7 +1003,8 @@
           "notes": [
             "opencode auto-loads JS/TS plugins from ~/.config/opencode/plugins/ — no command-hook config file to patch. DefenseClaw writes a dependency-free bridge plugin (defenseclaw.js) whose tool.execute.before POSTs to /api/v1/opencode/hook and throws on a block decision, aborting the tool.",
             "Block is the only active verdict; tool.execute.after is observe-only. The bridge honors fail-closed by throwing when the gateway is unreachable and FAIL_MODE=closed.",
-            "Contract is unbounded (min 0.0.0): the plugin hook API is a stable contract rather than a versioned floor, matching the OpenHands precedent."
+            "The compatible floor remains OpenCode 1.16.2; 1.18.10 is the latest source-reviewed release and the exclusive 1.18.11 ceiling blocks unreviewed releases. This is compatibility, not certification; macOS last_validated_version remains empty pending a durable green latest-version run.",
+            "OpenCode 1.18.10 declares permission.ask in plugin types but does not dispatch it in the tagged runtime; permission.asked/replied are observe-only events, so native ask remains false."
           ]
         }
       ]
@@ -970,7 +1070,8 @@
             "DENY is authoritative on all six phases. Pre-action DENY prevents the action; post-phase DENY uses OmniGent's denial/sentinel behavior to suppress or replace onward-visible content but cannot roll back completed tool or model work. The bridge does not return custom replacement data.",
             "ASK is native only for OmniGent's pre-action request, tool_call, and llm_request phases; post-phase confirm findings remain attributed audit and continue without an approval pause.",
             "The in-process Python bridge forwards an active OpenTelemetry W3C trace context when present; otherwise DefenseClaw starts a new trace.",
-            "Optional native OTLP is inactive until the OmniGent launch process exports the standard environment variables; the base/default dependency set includes the required OpenTelemetry packages.",
+            "FunctionPolicy hook events expose no provider model-request ID. DefenseClaw mints an internal UUIDv7 at BeforeModel and resolves AfterModel against the unique durable pending operation, including after restart; native OTLP session.id remains a separate native-only binding.",
+            "Optional native OTLP is inactive until the OmniGent launch process sets OMNIGENT_TELEMETRY_ENABLED=true and exports the standard OTEL environment variables; OmniGent 0.7.0 includes logs, metrics, and traces in its base install.",
             "On Windows, OmniGent 0.7.0 server and SDK harnesses are a native degraded preview. Terminal wrappers and filesystem/network/L7 sandbox isolation are unavailable, and no WSL or POSIX shell path is used."
           ]
         }

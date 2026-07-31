@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from dataclasses import dataclass, field
 from importlib import resources
 from typing import Any
@@ -31,6 +32,33 @@ STATUS_UNKNOWN = "unknown"
 STATUS_NOT_GATED = "not-gated"
 
 _VERSION_RE = re.compile(r"(?i)(?:^|[^0-9])v?([0-9]+)(?:\.([0-9]+))?(?:\.([0-9]+))?")
+_CONTRACT_PLATFORMS = frozenset({"darwin", "linux", "windows"})
+_PLATFORM_OVERRIDE_FIELDS = frozenset(
+    {
+        "agent_version",
+        "default_for_unversioned",
+        "hook_script_version",
+        "events",
+        "aid_surfaces",
+        "native_otlp",
+        "native_otlp_auth",
+        "native_otlp_signals",
+        "native_otlp_endpoint_template",
+    }
+)
+_AGENT_VERSION_OVERRIDE_FIELDS = frozenset(
+    {"exact", "min_inclusive", "max_exclusive"}
+)
+_STRING_OVERRIDE_FIELDS = frozenset(
+    {
+        "hook_script_version",
+        "native_otlp_auth",
+        "native_otlp_endpoint_template",
+    }
+)
+_STRING_LIST_OVERRIDE_FIELDS = frozenset(
+    {"events", "aid_surfaces", "native_otlp_signals"}
+)
 
 
 @dataclass(frozen=True)
@@ -78,6 +106,8 @@ def normalize_connector(name: str | None) -> str:
         return "geminicli"
     if value in {"open-hands", "open_hands"}:
         return "openhands"
+    if value == "agy":
+        return "antigravity"
     return value
 
 
@@ -94,7 +124,10 @@ def hook_contract_manifest() -> dict[str, Any]:
 
 def _load_contracts_from_manifest(
     manifest: dict[str, Any],
+    *,
+    platform_name: str | None = None,
 ) -> tuple[frozenset[str], dict[str, tuple[ConnectorContract, ...]]]:
+    platform_name = _contract_platform(platform_name)
     connectors = manifest.get("connectors", {})
     if not isinstance(connectors, dict):
         raise ValueError("hook_contracts.json connectors must be an object")
@@ -111,45 +144,172 @@ def _load_contracts_from_manifest(
         for raw_contract in spec.get("contracts", []):
             if not isinstance(raw_contract, dict):
                 continue
-            version = raw_contract.get("agent_version", {})
+            contract_spec = _contract_spec_for_platform(
+                raw_contract,
+                connector=name,
+                platform_name=platform_name,
+            )
+            version = contract_spec.get("agent_version", {})
             if not isinstance(version, dict):
                 version = {}
             contracts.append(
                 ConnectorContract(
                     connector=name,
-                    contract_id=str(raw_contract.get("contract_id", "")).strip(),
+                    contract_id=str(contract_spec.get("contract_id", "")).strip(),
                     exact_agent_versions=tuple(
                         str(v) for v in version.get("exact", []) if v
                     ),
                     min_agent_version=str(version.get("min_inclusive", "") or ""),
                     max_agent_version=str(version.get("max_exclusive", "") or ""),
                     default_for_unversioned=bool(
-                        raw_contract.get("default_for_unversioned", False)
+                        contract_spec.get("default_for_unversioned", False)
                     ),
-                    hook_script_version=str(raw_contract.get("hook_script_version", "") or ""),
-                    hook_script=str(raw_contract.get("hook_script", "") or ""),
+                    hook_script_version=str(contract_spec.get("hook_script_version", "") or ""),
+                    hook_script=str(contract_spec.get("hook_script", "") or ""),
                     hook_config_path_templates=tuple(
-                        str(v) for v in raw_contract.get("hook_config_path_templates", []) if v
+                        str(v) for v in contract_spec.get("hook_config_path_templates", []) if v
                     ),
-                    response_field=str(raw_contract.get("response_field", "") or ""),
-                    events=tuple(str(v) for v in raw_contract.get("events", []) if v),
-                    aid_surfaces=tuple(str(v) for v in raw_contract.get("aid_surfaces", []) if v),
-                    supports_traceparent=bool(raw_contract.get("supports_traceparent", False)),
-                    native_otlp=bool(raw_contract.get("native_otlp", False)),
-                    native_otlp_auth=str(raw_contract.get("native_otlp_auth", "") or ""),
+                    response_field=str(contract_spec.get("response_field", "") or ""),
+                    events=tuple(str(v) for v in contract_spec.get("events", []) if v),
+                    aid_surfaces=tuple(str(v) for v in contract_spec.get("aid_surfaces", []) if v),
+                    supports_traceparent=bool(contract_spec.get("supports_traceparent", False)),
+                    native_otlp=bool(contract_spec.get("native_otlp", False)),
+                    native_otlp_auth=str(contract_spec.get("native_otlp_auth", "") or ""),
                     native_otlp_signals=tuple(
-                        str(v) for v in raw_contract.get("native_otlp_signals", []) if v
+                        str(v) for v in contract_spec.get("native_otlp_signals", []) if v
                     ),
                     native_otlp_endpoint_template=str(
-                        raw_contract.get("native_otlp_endpoint_template", "") or ""
+                        contract_spec.get("native_otlp_endpoint_template", "") or ""
                     ),
-                    capabilities=dict(raw_contract.get("capabilities", {}) or {}),
-                    notes=tuple(str(v) for v in raw_contract.get("notes", []) if v),
+                    capabilities=dict(contract_spec.get("capabilities", {}) or {}),
+                    notes=tuple(str(v) for v in contract_spec.get("notes", []) if v),
                 )
             )
         if contracts:
+            defaults = [contract.contract_id for contract in contracts if contract.default_for_unversioned]
+            if len(defaults) > 1:
+                raise ValueError(
+                    f"hook_contracts.json connector {name!r} has multiple default contracts "
+                    f"for platform {platform_name!r}: {defaults}"
+                )
             hook_contracts[name] = tuple(contracts)
     return frozenset(proxy_connectors), hook_contracts
+
+
+def _contract_platform(platform_name: str | None) -> str:
+    if platform_name is None:
+        if sys.platform == "darwin":
+            return "darwin"
+        if sys.platform == "win32":
+            return "windows"
+        return "linux"
+    if not isinstance(platform_name, str) or platform_name not in _CONTRACT_PLATFORMS:
+        raise ValueError(
+            "hook contract platform must be one of darwin, linux, or windows"
+        )
+    return platform_name
+
+
+def _contract_spec_for_platform(
+    raw_contract: dict[str, Any],
+    *,
+    connector: str,
+    platform_name: str,
+) -> dict[str, Any]:
+    raw_overrides = raw_contract.get("platform_overrides", {})
+    if not isinstance(raw_overrides, dict):
+        raise ValueError(
+            f"hook contract {connector!r} platform_overrides must be an object"
+        )
+    for raw_platform, raw_override in raw_overrides.items():
+        if raw_platform not in _CONTRACT_PLATFORMS:
+            raise ValueError(
+                f"hook contract {connector!r} has unknown platform override {raw_platform!r}"
+            )
+        _validate_platform_override(
+            raw_override,
+            connector=connector,
+            contract_id=str(raw_contract.get("contract_id", "") or ""),
+            platform_name=raw_platform,
+        )
+
+    contract_spec = dict(raw_contract)
+    contract_spec.pop("platform_overrides", None)
+    selected = raw_overrides.get(platform_name)
+    if selected is None:
+        return contract_spec
+    override = dict(selected)
+    version_override = override.pop("agent_version", None)
+    contract_spec.update(override)
+    if version_override is not None:
+        base_version = contract_spec.get("agent_version", {})
+        if not isinstance(base_version, dict):
+            base_version = {}
+        merged_version = dict(base_version)
+        merged_version.update(version_override)
+        contract_spec["agent_version"] = merged_version
+    return contract_spec
+
+
+def _validate_platform_override(
+    raw_override: Any,
+    *,
+    connector: str,
+    contract_id: str,
+    platform_name: str,
+) -> None:
+    location = f"{connector}/{contract_id or '<missing-id>'}/{platform_name}"
+    if not isinstance(raw_override, dict):
+        raise ValueError(f"hook contract platform override {location} must be an object")
+    unknown = sorted(set(raw_override) - _PLATFORM_OVERRIDE_FIELDS)
+    if unknown:
+        raise ValueError(
+            f"hook contract platform override {location} has unknown fields: {unknown}"
+        )
+    version = raw_override.get("agent_version")
+    if version is not None:
+        if not isinstance(version, dict):
+            raise ValueError(
+                f"hook contract platform override {location} agent_version must be an object"
+            )
+        unknown_version = sorted(set(version) - _AGENT_VERSION_OVERRIDE_FIELDS)
+        if unknown_version:
+            raise ValueError(
+                f"hook contract platform override {location} agent_version has unknown fields: "
+                f"{unknown_version}"
+            )
+        for field_name in ("min_inclusive", "max_exclusive"):
+            value = version.get(field_name)
+            if value is not None and not isinstance(value, str):
+                raise ValueError(
+                    f"hook contract platform override {location} agent_version.{field_name} "
+                    "must be a string"
+                )
+        if "exact" in version:
+            _validate_string_list(version["exact"], location=f"{location} agent_version.exact")
+    for field_name in ("default_for_unversioned", "native_otlp"):
+        if field_name in raw_override and type(raw_override[field_name]) is not bool:
+            raise ValueError(
+                f"hook contract platform override {location} {field_name} must be a boolean"
+            )
+    for field_name in _STRING_OVERRIDE_FIELDS:
+        if field_name in raw_override and not isinstance(raw_override[field_name], str):
+            raise ValueError(
+                f"hook contract platform override {location} {field_name} must be a string"
+            )
+    for field_name in _STRING_LIST_OVERRIDE_FIELDS:
+        if field_name in raw_override:
+            _validate_string_list(
+                raw_override[field_name],
+                location=f"{location} {field_name}",
+            )
+
+
+def _validate_string_list(value: Any, *, location: str) -> None:
+    if not isinstance(value, list) or not all(
+        isinstance(item, str) and item.strip() for item in value
+    ):
+        raise ValueError(f"hook contract platform override {location} must be a string list")
 
 
 HOOK_CONTRACT_MANIFEST = hook_contract_manifest()
@@ -173,10 +333,23 @@ def normalize_agent_version(raw: str | None) -> str:
     return ".".join(normalized)
 
 
-def resolve_connector_contract(connector: str, raw_version: str | None) -> ConnectorCompatibility:
+def resolve_connector_contract(
+    connector: str,
+    raw_version: str | None,
+    *,
+    platform_name: str | None = None,
+) -> ConnectorCompatibility:
     name = normalize_connector(connector)
     raw = (raw_version or "").strip()
-    if name in PROXY_CONNECTORS:
+    if platform_name is None:
+        proxy_connectors = PROXY_CONNECTORS
+        hook_contracts = HOOK_CONTRACTS
+    else:
+        proxy_connectors, hook_contracts = _load_contracts_from_manifest(
+            HOOK_CONTRACT_MANIFEST,
+            platform_name=platform_name,
+        )
+    if name in proxy_connectors:
         return ConnectorCompatibility(
             connector=name,
             raw_version=raw,
@@ -185,7 +358,7 @@ def resolve_connector_contract(connector: str, raw_version: str | None) -> Conne
             reason="proxy/chat connector; no hook contract gate",
             contract=None,
         )
-    contracts = HOOK_CONTRACTS.get(name, ())
+    contracts = hook_contracts.get(name, ())
     if not contracts:
         return ConnectorCompatibility(
             connector=name,

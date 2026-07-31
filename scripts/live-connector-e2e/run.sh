@@ -18,8 +18,8 @@
 #
 # Layer A targets every registry connector (golden payload -> installed hook
 # entrypoint). Layer B only targets connectors that ship a driver under
-# drivers/; contract-only connectors (hermes and windsurf) are
-# skipped with a recorded `skip` so the matrix stays honest.
+# drivers/; remaining contract-only connectors are skipped with a recorded
+# `skip` so the matrix stays honest.
 
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -43,7 +43,7 @@ done
 [ -n "${CONNECTOR}" ] || dc_die "--connector <name|all> is required"
 
 # Registry connectors (Layer A covers all; Layer B covers those with drivers).
-ALL_CONNECTORS=(codex claudecode geminicli cursor copilot openhands hermes windsurf antigravity)
+ALL_CONNECTORS=(codex claudecode opencode geminicli cursor copilot openhands hermes windsurf antigravity omnigent)
 
 resolve_connectors() {
   if [ "${CONNECTOR}" = "all" ]; then

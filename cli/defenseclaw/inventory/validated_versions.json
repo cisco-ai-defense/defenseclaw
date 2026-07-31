@@ -32,12 +32,23 @@
     },
     "cursor": {
       "version_probe": "agent --version",
+      "notes": "Cursor Agent CLI and Cursor Desktop have distinct version schemes. A current upstream version is not validated support; macOS remains uncertified until durable packaged and authenticated official-client evidence is recorded.",
       "live": false,
       "os": {
         "linux": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
         "macos": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
         "windows": { "last_validated_version": "", "last_validated_at": "", "run_url": "" }
       }
+    },
+    "opencode": {
+      "version_probe": "opencode --version",
+      "live": "pending-validation",
+      "os": {
+        "linux": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
+        "macos": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
+        "windows": { "last_validated_version": "", "last_validated_at": "", "run_url": "" }
+      },
+      "notes": "OpenCode 1.16.2 remains the compatible floor; 1.18.10 is the latest source-reviewed release and 1.18.11 is the exclusive review ceiling. Native Windows remains preview-only. No OS is certified until a durable latest-version packaged and authenticated official-client run is green and reviewed."
     },
     "copilot": {
       "version_probe": "copilot version",
@@ -52,33 +63,36 @@
     "openhands": {
       "version_probe": "openhands --version",
       "live": true,
+      "notes": "OpenHands CLI 1.16.0 is the current upstream release and supports macOS. Standalone OpenHands SDK 1.39.1 is separately source-reviewed and does not change the CLI compatibility range. Native macOS status is UNCERTIFIED pending a durable green latest-version live run.",
       "os": {
-        "linux": { "last_validated_version": "", "last_validated_at": "", "run_url": "" }
+        "linux": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
+        "macos": { "last_validated_version": "", "last_validated_at": "", "run_url": "" }
       }
     },
     "hermes": {
       "version_probe": "hermes --version",
-      "live": false,
-      "notes": "contract-only (Layer A); all 23 v0.19 shell-hook-valid events are mapped by official role; packaged and real-client Windows validation is pending"
+      "live": "pending-validation",
+      "os": {
+        "macos": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
+        "windows": { "last_validated_version": "", "last_validated_at": "", "run_url": "" }
+      },
+      "notes": "All 23 v0.19 shell-hook-valid events are mapped by official role. A genuine-client macOS driver is available for durable hosted validation, but packaged plus official-client macOS and Windows certification remains pending."
     },
     "windsurf": {
       "version_probe": "",
       "live": false,
-      "notes": "contract-only (Layer A); no headless CLI/SDK"
-    },
-    "opencode": {
-      "version_probe": "opencode --version",
-      "live": false,
       "os": {
+        "macos": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
         "windows": { "last_validated_version": "", "last_validated_at": "", "run_url": "" }
       },
-      "notes": "Native Windows implementation is preview-only; authentic packaged Setup and official-client certification evidence remain pending."
+      "notes": "contract-only (Layer A); Devin Desktop is a GUI with no headless Cascade driver. Latest stable 3.6.22 compatibility is source-reviewed, but macOS and Windows certification remain empty until a durable genuine packaged interactive live run exists."
     },
     "antigravity": {
       "version_probe": "agy --version",
-      "live": false,
-      "notes": "Native Windows x64 implementation and contract checks are present but certification remains pending integrated packaged and official-client validation. Real official-client E2E is manual on a dedicated pre-authenticated Windows runner because Google documents Windows Credential Manager/browser auth, not API-key bootstrap.",
+      "live": "pending-validation",
+      "notes": "Native macOS and Windows implementations and deterministic contract checks are present, but certification remains pending durable latest-version packaged and authenticated official-client evidence. The macOS connector lab and Windows manual cell reuse operating-system keyring/browser authentication; neither auto-stamps this inventory.",
       "os": {
+        "macos": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
         "windows": { "last_validated_version": "", "last_validated_at": "", "run_url": "" }
       }
     },
@@ -86,9 +100,10 @@
       "version_probe": "omnigent --version",
       "live": false,
       "os": {
+        "macos": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
         "windows": { "last_validated_version": "", "last_validated_at": "", "run_url": "" }
       },
-      "notes": "contract-only; native Windows server/SDK policy bridge is degraded preview and its official-client job remains advisory"
+      "notes": "contract-only on macOS and Windows; the 0.7.0 contract is current, but neither platform has a reviewed durable latest-version live certification record; native Windows remains degraded preview"
     }
   }
 }

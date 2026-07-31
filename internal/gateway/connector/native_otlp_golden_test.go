@@ -22,6 +22,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
 	"testing"
@@ -220,6 +221,7 @@ func TestNativeOTLPShape_ClaudeCode(t *testing.T) {
 
 	for _, want := range []string{
 		"CLAUDE_CODE_ENABLE_TELEMETRY",
+		"CLAUDE_CODE_ENHANCED_TELEMETRY_BETA",
 		"DEFENSECLAW_FAIL_MODE",
 		"OTEL_EXPORTER_OTLP_ENDPOINT",
 		"OTEL_EXPORTER_OTLP_HEADERS",
@@ -253,8 +255,21 @@ func TestNativeOTLPShape_ClaudeCode(t *testing.T) {
 	if env["OTEL_EXPORTER_OTLP_PROTOCOL"] != "http/json" {
 		t.Errorf("OTEL_EXPORTER_OTLP_PROTOCOL = %q; want \"http/json\"", env["OTEL_EXPORTER_OTLP_PROTOCOL"])
 	}
-	if env["OTEL_TRACES_EXPORTER"] != "none" {
-		t.Errorf("OTEL_TRACES_EXPORTER = %q; want none", env["OTEL_TRACES_EXPORTER"])
+	wantTraceExporter := "none"
+	wantEnhancedTelemetry := "0"
+	if runtime.GOOS == "darwin" {
+		wantTraceExporter = "otlp"
+		wantEnhancedTelemetry = "1"
+	}
+	if env["OTEL_TRACES_EXPORTER"] != wantTraceExporter {
+		t.Errorf("OTEL_TRACES_EXPORTER = %q; want %s", env["OTEL_TRACES_EXPORTER"], wantTraceExporter)
+	}
+	if env["CLAUDE_CODE_ENHANCED_TELEMETRY_BETA"] != wantEnhancedTelemetry {
+		t.Errorf(
+			"CLAUDE_CODE_ENHANCED_TELEMETRY_BETA = %q; want %s",
+			env["CLAUDE_CODE_ENHANCED_TELEMETRY_BETA"],
+			wantEnhancedTelemetry,
+		)
 	}
 	if !strings.HasPrefix(env["OTEL_EXPORTER_OTLP_ENDPOINT"], "http://"+opts.APIAddr) {
 		t.Errorf("OTEL_EXPORTER_OTLP_ENDPOINT = %q; want http://%s prefix",
@@ -393,6 +408,7 @@ func TestNativeOTLPShape_Omnigent(t *testing.T) {
 		"OTEL_TRACES_EXPORTER",
 		"OTEL_RESOURCE_ATTRIBUTES",
 		"OTEL_SERVICE_NAME",
+		"OMNIGENT_TELEMETRY_ENABLED",
 		"OMNIGENT_OTEL_CAPTURE_CONTENT",
 	} {
 		if _, ok := env[want]; !ok {
@@ -407,6 +423,9 @@ func TestNativeOTLPShape_Omnigent(t *testing.T) {
 	}
 	if env["OMNIGENT_OTEL_CAPTURE_CONTENT"] != "false" {
 		t.Errorf("OMNIGENT_OTEL_CAPTURE_CONTENT = %q; want false", env["OMNIGENT_OTEL_CAPTURE_CONTENT"])
+	}
+	if env["OMNIGENT_TELEMETRY_ENABLED"] != "true" {
+		t.Errorf("OMNIGENT_TELEMETRY_ENABLED = %q; want true", env["OMNIGENT_TELEMETRY_ENABLED"])
 	}
 	for _, signal := range []string{"LOGS", "METRICS", "TRACES"} {
 		if got := env["OTEL_"+signal+"_EXPORTER"]; got != "otlp" {

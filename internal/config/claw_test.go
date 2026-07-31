@@ -143,6 +143,7 @@ func TestConnectorHomesHonorClientOverrides(t *testing.T) {
 	root := t.TempDir()
 	codexHome := filepath.Join(root, "codex-home")
 	claudeHome := filepath.Join(root, "claude-home")
+	testenv.SetHome(t, root)
 	t.Setenv("CODEX_HOME", codexHome)
 	t.Setenv("CLAUDE_CONFIG_DIR", claudeHome)
 
@@ -319,6 +320,52 @@ args = ["hi"]
 	}
 	if entries[0].Source != mcpPath || entries[0].SourceScope != "project" || !entries[0].TrustRequired {
 		t.Errorf("project metadata = %+v, want source/project/trust-required", entries[0])
+	}
+}
+
+func TestCodexProjectLayersUseClosestMCPAndAllSkillDirs(t *testing.T) {
+	home := t.TempDir()
+	testenv.SetHome(t, home)
+	repo := filepath.Join(t.TempDir(), "repo")
+	active := filepath.Join(repo, "packages", "app")
+	if err := os.MkdirAll(filepath.Join(repo, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for path, command := range map[string]string{
+		repo:                            "root-command",
+		filepath.Join(repo, "packages"): "middle-command",
+		active:                          "closest-command",
+	} {
+		configPath := filepath.Join(path, ".codex", "config.toml")
+		if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(configPath, []byte("[mcp_servers.same]\ncommand = \""+command+"\"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	userConfig := filepath.Join(home, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(userConfig), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(userConfig, []byte("[mcp_servers.same]\ncommand = \"user-command\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := readMCPServersCodex(active)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Command != "closest-command" {
+		t.Fatalf("readMCPServersCodex() = %#v, want closest project layer", entries)
+	}
+	cfg := &Config{}
+	cfg.Claw.WorkspaceDir = active
+	dirs := cfg.SkillDirsForConnector("codex")
+	for _, layer := range []string{repo, filepath.Join(repo, "packages"), active} {
+		if !containsPath(dirs, filepath.Join(layer, ".agents", "skills")) {
+			t.Fatalf("SkillDirsForConnector(codex) = %v, missing layer %s", dirs, layer)
+		}
 	}
 }
 
@@ -835,12 +882,17 @@ func TestConnectorHomeDir_OmnigentConfigHome(t *testing.T) {
 
 func TestHermesSurfacesHonorHermesHome(t *testing.T) {
 	hermesHome := filepath.Join(t.TempDir(), "Hermes Home")
+	externalSkills := filepath.Join(t.TempDir(), "Shared Skills")
 	t.Setenv("HERMES_HOME", hermesHome)
+	t.Setenv("HERMES_SHARED_SKILLS", externalSkills)
 	configPath := filepath.Join(hermesHome, "config.yaml")
 	if err := os.MkdirAll(hermesHome, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	configYAML := []byte("mcp:\n  servers:\n    native-windows:\n      command: hermes-mcp\n")
+	if err := os.MkdirAll(externalSkills, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	configYAML := []byte("mcp_servers:\n  native-platform:\n    command: hermes-mcp\nskills:\n  external_dirs:\n    - ${HERMES_SHARED_SKILLS}\n")
 	if err := os.WriteFile(configPath, configYAML, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -849,8 +901,8 @@ func TestHermesSurfacesHonorHermesHome(t *testing.T) {
 	if got := cfg.ConnectorHomeDir("hermes"); got != hermesHome {
 		t.Errorf("ConnectorHomeDir(hermes) = %q, want %q", got, hermesHome)
 	}
-	if got, want := cfg.SkillDirsForConnector("hermes"), filepath.Join(hermesHome, "skills"); len(got) != 1 || got[0] != want {
-		t.Errorf("SkillDirsForConnector(hermes) = %v, want [%q]", got, want)
+	if got, want := cfg.SkillDirsForConnector("hermes"), []string{filepath.Join(hermesHome, "skills"), externalSkills}; len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("SkillDirsForConnector(hermes) = %v, want %v", got, want)
 	}
 	plugins := cfg.PluginDirsForConnector("hermes")
 	if want := filepath.Join(hermesHome, "plugins"); !containsPath(plugins, want) {
@@ -860,7 +912,7 @@ func TestHermesSurfacesHonorHermesHome(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReadMCPServersForConnector(hermes): %v", err)
 	}
-	if got := mcpEntriesByName(entries)["native-windows"].Command; got != "hermes-mcp" {
+	if got := mcpEntriesByName(entries)["native-platform"].Command; got != "hermes-mcp" {
 		t.Fatalf("Hermes MCP command = %q, want hermes-mcp; entries=%+v", got, entries)
 	}
 }

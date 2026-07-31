@@ -77,7 +77,10 @@ def test_record_setup_agent_selection_accepts_omnigent(
     assert errors == {}
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX executable fixture; Windows aliases are enumerated separately")
+@pytest.mark.skipif(
+    os.name == "nt" or sys.platform == "darwin",
+    reason="POSIX fixture exercises Windows aliases; macOS Setup admits only signed native connectors",
+)
 @pytest.mark.parametrize("alias", ["omnigent.exe", "omni.exe"])
 def test_omnigent_official_alias_selection_records_real_version_and_digest(
     tmp_path: Path,
@@ -130,6 +133,72 @@ def test_omnigent_candidate_aliases_do_not_raise_or_accept_unlisted_names(
     assert set(candidates) == expected
 
 
+def test_macos_claudecode_identity_requires_pinned_signature_arch_and_no_quarantine(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    executable = tmp_path / "2.1.220"
+    executable.write_bytes(b"\xcf\xfa\xed\xfe" + b"signed-claude")
+    executable.chmod(0o500)
+    monkeypatch.setattr(agent_selection.platform, "machine", lambda: "arm64")
+
+    def identity_command(args: list[str]) -> tuple[int, str]:
+        if args[0] == "/usr/bin/codesign" and "-d" in args:
+            return (
+                0,
+                "Identifier=com.anthropic.claude-code\n"
+                "Authority=Developer ID Application: Anthropic PBC (Q6L2SF6YDW)\n"
+                "TeamIdentifier=Q6L2SF6YDW\n",
+            )
+        if args[0] == "/usr/bin/lipo":
+            return 0, "arm64 x86_64\n"
+        if args[0] == "/usr/bin/xattr":
+            return 1, ""
+        return 0, ""
+
+    monkeypatch.setattr(agent_selection, "_run_macos_identity_command", identity_command)
+    assert agent_selection._validate_macos_claudecode_binary(str(executable)) is None
+
+    monkeypatch.setattr(
+        agent_selection,
+        "_run_macos_identity_command",
+        lambda args: (0, "Identifier=com.anthropic.claude-code\nTeamIdentifier=EVIL\n")
+        if args[0] == "/usr/bin/codesign" and "-d" in args
+        else identity_command(args),
+    )
+    assert "pinned Developer ID" in (
+        agent_selection._validate_macos_claudecode_binary(str(executable)) or ""
+    )
+
+
+def test_macos_claudecode_identity_rejects_quarantine(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    executable = tmp_path / "2.1.220"
+    executable.write_bytes(b"\xcf\xfa\xed\xfe" + b"signed-claude")
+    monkeypatch.setattr(agent_selection.platform, "machine", lambda: "arm64")
+
+    def identity_command(args: list[str]) -> tuple[int, str]:
+        if args[0] == "/usr/bin/codesign" and "-d" in args:
+            return (
+                0,
+                "Identifier=com.anthropic.claude-code\n"
+                "Authority=Developer ID Application: Anthropic PBC (Q6L2SF6YDW)\n"
+                "TeamIdentifier=Q6L2SF6YDW\n",
+            )
+        if args[0] == "/usr/bin/lipo":
+            return 0, "arm64\n"
+        if args[0] == "/usr/bin/xattr":
+            return 0, "0081;quarantined"
+        return 0, ""
+
+    monkeypatch.setattr(agent_selection, "_run_macos_identity_command", identity_command)
+    assert "still quarantined" in (
+        agent_selection._validate_macos_claudecode_binary(str(executable)) or ""
+    )
+
+
 def test_explicit_selection_probes_candidates_instead_of_discovery_cache(
     tmp_path: Path,
     monkeypatch,
@@ -141,7 +210,7 @@ def test_explicit_selection_probes_candidates_instead_of_discovery_cache(
         "_binary_candidates_for_agent",
         lambda *_args: (str(executable),),
     )
-    monkeypatch.setattr(agent_selection, "is_setup_trusted_binary", lambda *_args: True)
+    monkeypatch.setattr(agent_selection, "is_setup_trusted_binary", lambda *_args, **_kwargs: True)
     probe_options: dict[str, object] = {}
 
     def probe_version(*_args, **kwargs):
@@ -170,6 +239,58 @@ def test_explicit_selection_probes_candidates_instead_of_discovery_cache(
     assert selection.normalized_version == "0.144.3"
     assert selection.sha256 == hashlib.sha256(b"trusted-codex").hexdigest()
     assert probe_options["require_trusted_binary_paths"] is False
+
+
+def test_macos_claudecode_selection_rejects_directory_added_versions(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    executable = tmp_path / "2.1.220"
+    executable.write_bytes(b"\xcf\xfa\xed\xfe" + b"signed-claude")
+    executable.chmod(0o500)
+    monkeypatch.setattr(agent_selection.sys, "platform", "darwin")
+    monkeypatch.setattr(
+        agent_selection.agent_discovery,
+        "_binary_candidates_for_agent",
+        lambda *_args: (str(executable),),
+    )
+    monkeypatch.setattr(agent_selection, "is_setup_trusted_binary", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        agent_selection.agent_discovery,
+        "_version_for_agent_binary",
+        lambda *_args, **_kwargs: ("2.1.220 (Claude Code)", ""),
+    )
+
+    with pytest.raises(OSError, match="DirectoryAdded"):
+        agent_selection._select_agent_executable(str(tmp_path), "claudecode")
+
+
+def test_macos_claudecode_candidates_include_native_versions_without_path(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    versions = tmp_path / ".local" / "share" / "claude" / "versions"
+    versions.mkdir(parents=True)
+    older = versions / "2.1.160"
+    current = versions / "2.1.217"
+    older.write_bytes(b"older")
+    current.write_bytes(b"current")
+    monkeypatch.setattr(agent_selection.sys, "platform", "darwin")
+    monkeypatch.setattr(agent_selection.Path, "home", lambda: tmp_path)
+    monkeypatch.setattr(
+        agent_selection.agent_discovery,
+        "_binary_candidates_for_agent",
+        lambda *_args: (),
+    )
+    monkeypatch.setattr(agent_selection, "_builtin_setup_trusted_prefixes", lambda: (str(versions),))
+
+    candidates = agent_selection._setup_agent_candidates(
+        "claudecode",
+        agent_selection.agent_discovery._SPECS["claudecode"],
+        str(tmp_path / "state"),
+    )
+
+    assert candidates[:2] == (str(current), str(older))
 
 
 def test_setup_trust_rejects_path_admitted_only_by_environment_extension(
@@ -480,7 +601,7 @@ def test_configured_devtools_npm_root_selects_upgraded_native_codex_despite_old_
     )
     monkeypatch.setattr(agent_selection, "_builtin_setup_trusted_prefixes", lambda: (str(npm_root),))
     monkeypatch.setattr(agent_selection.agent_discovery, "_expand_bin_prefixes", lambda roots: list(roots))
-    monkeypatch.setattr(agent_selection, "is_setup_trusted_binary", lambda *_args: True)
+    monkeypatch.setattr(agent_selection, "is_setup_trusted_binary", lambda *_args, **_kwargs: True)
     monkeypatch.setattr(
         agent_selection.agent_discovery,
         "_version_for_agent_binary",

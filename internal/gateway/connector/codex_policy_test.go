@@ -117,8 +117,8 @@ func TestInspectCodexSystemRequirements(t *testing.T) {
 }
 
 func TestInspectCodexPolicyFailsClosedForLegacyLockEvidence(t *testing.T) {
-	if runtime.GOOS != "windows" {
-		t.Skip("protected Codex lock authority is native-Windows-only")
+	if runtime.GOOS != "windows" && runtime.GOOS != "darwin" {
+		t.Skip("protected Codex lock authority is native Windows/macOS only")
 	}
 	dir := testenv.PrivateTempDir(t)
 	body := []byte(`{"version":2,"updated_at":"2026-07-14T00:00:00Z","connectors":{"codex":{"connector":"codex","updated_at":"2026-07-14T00:00:00Z"}}}`)
@@ -128,6 +128,32 @@ func TestInspectCodexPolicyFailsClosedForLegacyLockEvidence(t *testing.T) {
 	if _, err := inspectCodexEffectivePolicy(context.Background(), SetupOpts{DataDir: dir}); err == nil ||
 		!strings.Contains(err.Error(), "repair") {
 		t.Fatalf("legacy lock inspection error = %v, want repair refusal", err)
+	}
+}
+
+func TestInspectCodexPolicyAgentlessDriftIsDarwinExploratoryOnly(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("agentless Codex contract smoke exception is Darwin-only")
+	}
+	dir := testenv.PrivateTempDir(t)
+	receipt := []byte(`{"schema_version":1,"updated_at":"2026-07-31T00:00:00Z","selections":{}}`)
+	if err := atomicWriteFile(filepath.Join(dir, agentSelectionFile), receipt, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	original := codexSystemRequirementsPathForInspection
+	t.Cleanup(func() { codexSystemRequirementsPathForInspection = original })
+	codexSystemRequirementsPathForInspection = func() (string, error) {
+		return filepath.Join(dir, "missing-system-requirements.toml"), nil
+	}
+
+	t.Setenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", "")
+	if _, err := inspectCodexEffectivePolicy(context.Background(), SetupOpts{DataDir: dir}); err == nil ||
+		!strings.Contains(err.Error(), "invalid or expired") {
+		t.Fatalf("production receipt error = %v, want fail-closed rejection", err)
+	}
+	t.Setenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", "1")
+	if _, err := inspectCodexEffectivePolicy(context.Background(), SetupOpts{DataDir: dir}); err != nil {
+		t.Fatalf("explicit agentless contract drift fallback: %v", err)
 	}
 }
 
@@ -202,8 +228,15 @@ func TestDecodeCodexRPCFiltersFloodAndKeepsTerminalOrdered(t *testing.T) {
 }
 
 func TestValidateCodexPolicyExecutableRejectsReplacement(t *testing.T) {
+	originalValidator := codexNativeExecutableValidator
+	codexNativeExecutableValidator = func(string) error { return nil }
+	t.Cleanup(func() { codexNativeExecutableValidator = originalValidator })
 	dir := testenv.PrivateTempDir(t)
-	executable := filepath.Join(dir, "codex.exe")
+	executableName := "codex.exe"
+	if runtime.GOOS == "darwin" {
+		executableName = "codex"
+	}
+	executable := filepath.Join(dir, executableName)
 	if err := atomicWriteFile(executable, []byte("original-codex"), 0o700); err != nil {
 		t.Fatal(err)
 	}

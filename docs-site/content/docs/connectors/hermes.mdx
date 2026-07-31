@@ -10,8 +10,12 @@ keywords:
 The Hermes connector wires DefenseClaw into the Hermes agent runtime through
 the effective `HERMES_HOME/config.yaml` (`%LOCALAPPDATA%\hermes\config.yaml` on
 native Windows when `HERMES_HOME` is unset), with discovery surfaces for MCP
-servers, skills, and plugins. Native Windows support is **preview / not
-certified** pending packaged and real-client validation.
+servers, skills, and plugins. Native macOS and Windows support is **preview /
+not certified** pending packaged and genuine-client validation. The latest
+official release is 0.19.1. On macOS/Linux, DefenseClaw accepts
+`>=0.19.0, <0.20.0`; the preserved Windows contract accepts `>=0.19.0` with
+no ceiling. Version compatibility on either platform does not imply
+certification.
 
 <Callout type="warning" title="Hermes terminal commands still use Git Bash on Windows">
 Hermes itself officially runs its terminal tool through installer-managed
@@ -33,7 +37,7 @@ or Cygwin bridge.
 defenseclaw setup hermes
 ```
 
-`setup hermes` is shorthand for `setup guardrail --connector hermes`: it adds or reconfigures Hermes, wires hooks against the resolved `config.yaml`, and discovers existing MCP servers, skills, and plugins. **There is no proxy-enforcement path** for Hermes — blocking happens hook-side only when a valid synchronous `pre_tool_call` stdout response requests block. Hermes has no documented native human-approval or system-message response shape, so confirm verdicts remain audit/alert-only with `raw_action` preserved for audit.
+`setup hermes` is shorthand for `setup guardrail --connector hermes`: it adds or reconfigures Hermes, wires hooks against the resolved `config.yaml`, and discovers existing MCP servers, skills (including configured existing `skills.external_dirs`), and plugins. **There is no proxy-enforcement path** for Hermes — blocking happens hook-side only when a valid synchronous `pre_tool_call` stdout response requests block. Hermes has no documented native human-approval or system-message response shape, so confirm verdicts remain audit/alert-only with `raw_action` preserved for audit.
 
 #### What `setup hermes` actually does
 
@@ -163,7 +167,9 @@ malformed, auth, or network failures and has no DefenseClaw ask surface.
 Confirm verdicts are audit/alert-only, with no synthesized hook output.
 </Callout>
 
-The official-source record and full cross-surface matrix are in
+The official-source records and full cross-surface matrices are in
+[`docs/research/HERMES-MACOS.md`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/research/HERMES-MACOS.md)
+and
 [`docs/research/HERMES-NATIVE-WINDOWS.md`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/research/HERMES-NATIVE-WINDOWS.md).
 
 ## Disable

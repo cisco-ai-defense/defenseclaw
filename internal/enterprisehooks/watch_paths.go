@@ -295,6 +295,16 @@ func WatchOwnedFiles(opts InstallOptions) (WatchOwnership, error) {
 		for _, p := range footprint.PatchedFiles {
 			addShared(p)
 		}
+		// Whole-file bridge plugins are PatchedFiles for lifecycle/backup
+		// purposes, but the agent never writes them. Promote them to the
+		// exclusive-writer set so Write and Chmod events are not suppressed.
+		if provider, ok := conn.(connector.ExclusiveManagedPathProvider); ok {
+			for _, p := range provider.ExclusiveManagedPaths(setupOpts) {
+				clean := filepath.Clean(strings.TrimSpace(p))
+				delete(shared, clean)
+				addExclusive(clean)
+			}
+		}
 		// EXCLUSIVE-WRITER: everything below. Only DefenseClaw writes
 		// to these paths, so any event is meaningful and worth acting
 		// on (either user tamper or our own reconcile tail; both are

@@ -985,6 +985,7 @@ def _plugin_install_targets(
     connectors: list[str],
     *,
     explicit_connector: bool = False,
+    platform_name: str | None = None,
 ) -> list[tuple[str, str]]:
     """Return ``(connector, install_root)`` targets for plugin installs.
 
@@ -995,8 +996,16 @@ def _plugin_install_targets(
     """
     targets: list[tuple[str, str]] = []
     skipped: list[str] = []
+    resolved_platform = platform_name or os.name
     for connector in connectors:
-        dirs = [d for d in app.cfg.plugin_dirs(connector) if d]
+        # PR #655 left native Windows Antigravity plugin mutation
+        # uncertified/discovery-only. Keep that behavior intact while macOS
+        # and Linux use the documented CLI staging directory.
+        dirs = (
+            []
+            if connector == "antigravity" and resolved_platform == "nt"
+            else [d for d in app.cfg.plugin_dirs(connector) if d]
+        )
         if not dirs:
             skipped.append(connector)
             continue
@@ -1026,10 +1035,10 @@ def _validate_connector_plugin_source(
 ) -> None:
     """Fail before copying a bundle that Antigravity cannot load.
 
-    Google's manual-install contract requires a regular root ``plugin.json``.
-    The IDE permits an omitted ``name`` (directory-name fallback), while the
-    CLI requires a restricted name. Accept their common contract: a JSON
-    object marker, with a valid CLI-shaped name whenever one is supplied.
+    Google's CLI staging contract requires a regular root ``plugin.json`` and
+    a restricted ``name``. DefenseClaw's macOS/Linux install target is that
+    staging root, so accepting the looser shared-customization shape here would
+    materialize a bundle that ``agy plugin`` cannot manage reliably.
     """
     if not any(connector == "antigravity" for connector, _root in targets):
         return
@@ -1060,9 +1069,7 @@ def _validate_connector_plugin_source(
         raise SystemExit(1)
 
     declared_name = manifest.get("name")
-    if declared_name is not None and (
-        not isinstance(declared_name, str) or re.fullmatch(r"[A-Za-z0-9_-]+", declared_name) is None
-    ):
+    if not isinstance(declared_name, str) or re.fullmatch(r"[A-Za-z0-9_-]+", declared_name) is None:
         click.echo(
             "error: Antigravity plugin.json name must match [A-Za-z0-9_-]+",
             err=True,
@@ -1993,6 +2000,9 @@ def _list_defenseclaw_plugins(plugin_dir: str) -> list[str]:
 # (large directory walks during ``plugin list``).
 _HOST_PLUGIN_MANIFEST_FILES = (
     os.path.join(".codex-plugin", "plugin.json"),
+    os.path.join(".plugin", "plugin.json"),
+    os.path.join(".github", "plugin", "plugin.json"),
+    os.path.join(".claude-plugin", "plugin.json"),
     "plugin.json",
     "plugin.yaml",
     "plugin.yml",
@@ -2145,9 +2155,20 @@ def _list_copilot_plugins(
     data_dir: str | os.PathLike[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Best-effort Copilot CLI plugin listing via documented CLI flow."""
+    from defenseclaw.connector_paths import copilot_home
+
+    home = copilot_home()
+    out = _scan_plugin_dir(os.path.join(home, "extensions"), "copilot")
+    installed = os.path.join(home, "installed-plugins")
+    try:
+        namespaces = sorted(entry.path for entry in os.scandir(installed) if entry.is_dir(follow_symlinks=False))
+    except OSError:
+        namespaces = []
+    for namespace in namespaces:
+        out.extend(_scan_plugin_dir(namespace, "copilot"))
     copilot = _trusted_copilot_binary(data_dir)
     if not copilot:
-        return []
+        return out
     try:
         proc = subprocess.run(
             [copilot, "plugins", "list", "--kind", "plugin", "--json"],
@@ -2156,15 +2177,16 @@ def _list_copilot_plugins(
             timeout=15,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
-        return []
+        return out
     if proc.returncode != 0:
-        return []
+        return out
     plugins = _parse_plugin_list_json(proc.stdout) or _parse_plugin_list_text(proc.stdout)
-    out: list[dict[str, Any]] = []
+    seen = {str(row.get("id") or "") for row in out}
     for p in plugins:
         pid = str(p.get("id") or p.get("name") or "").strip()
-        if not pid:
+        if not pid or pid in seen:
             continue
+        seen.add(pid)
         out.append(
             {
                 "id": pid,
@@ -2199,9 +2221,14 @@ def _parse_plugin_list_text(text: str) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     for line in (text or "").splitlines():
         line = line.strip()
-        if not line or line.lower().startswith(("name", "plugin")):
+        lowered = line.lower()
+        if (
+            not line
+            or lowered.startswith(("name", "plugin", "use ", "to install "))
+            or "no plugins installed" in lowered
+        ):
             continue
-        name = line.split()[0]
+        name = line.lstrip("-*• ").split()[0]
         out.append({"id": name, "name": name})
     return out
 

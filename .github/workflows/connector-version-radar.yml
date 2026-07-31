@@ -20,6 +20,7 @@ on:
           - codex
           - claudecode
           - antigravity
+          - omnigent
       force:
         description: "Run even when the candidate was already attempted"
         type: boolean

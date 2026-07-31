@@ -32,7 +32,8 @@ DC_DRIVER_SUPPORTS_BLOCK=1
 DC_DRIVER_SUPPORTS_OTLP=0
 
 agent_install() {
-  npm install -g "@github/copilot@${COPILOT_VERSION:-latest}" || return 1
+  local requested="${COPILOT_VERSION:-${DC_E2E_AGENT_VERSION_REQUEST:-latest}}"
+  npm install -g "@github/copilot@${requested}" || return 1
   DC_E2E_AGENT_VERSION="$(dc_capture_version copilot copilot version)"
   export DC_E2E_AGENT_VERSION
   # Copilot CLI reads the inherited official COPILOT_GITHUB_TOKEN directly.

@@ -13,14 +13,18 @@ DefenseClaw tracks hook connector compatibility with a packaged JSON manifest at
 
 <Callout type="warning" title="Version compatibility is not platform certification">
 A connector can have a valid hook contract and still be unsupported or not
-certified on native Windows. Claude Code, Codex, and OpenCode remain previews
-until their integrated packaged and authentic official-client gates pass. See the
-[native Windows connector matrix](/docs/get-started/windows#certified-connector-scope).
+certified on a native host. Native Windows and macOS status remains exactly as
+labeled on the platform and connector pages until integrated packaged and
+authentic official-client gates pass. Empty
+`last_validated_version` fields are intentional and a compatible hook contract
+does not constitute platform certification. See the
+[native Windows connector matrix](/docs/get-started/windows#connector-scope)
+and the connector pages.
 </Callout>
 
 ## Current contracts
 
-| Connector | Gate | Supported connector versions | Contract / hook script | AID surfaces |
+| Connector | Gate | Known-compatible versions (not certification) | Contract / hook script | AID surfaces |
 | --- | --- | --- | --- | --- |
 | <ConnectorLabel id="openclaw" /> | proxy, not hook-gated | not gated by hook contract | n/a | proxy request/response |
 | <ConnectorLabel id="zeptoclaw" /> | proxy, not hook-gated | not gated by hook contract | n/a | proxy request/response |
@@ -28,27 +32,75 @@ until their integrated packaged and authentic official-client gates pass. See th
 | <ConnectorLabel id="codex" /> | hook contract | `>=0.129.0, <0.133.0` | `codex-hooks-v2` / `v6` (8 events) | prompt, tool_call, tool_result |
 | <ConnectorLabel id="codex" /> | hook contract | `>=0.133.0, <0.145.0` | `codex-hooks-v3` / `v6` (10 events) | prompt, tool_call, tool_result |
 | <ConnectorLabel id="codex" /> | hook contract | `>=0.145.0` | `codex-hooks-v4` / `v6` (11 events) | prompt, tool_call, tool_result |
-| <ConnectorLabel id="claudecode" /> | hook contract + plugin state | `>=2.1.154` | `claudecode-hooks-v1` / `v7` | prompt, tool_call, tool_result, event_content |
-| <ConnectorLabel id="hermes" /> | hook contract | `>=0.19.0` | `hermes-hooks-v1` / `v6` | prompt, tool_call, tool_result, event_content |
+| <ConnectorLabel id="claudecode" /> | hook contract + plugin state | shared `>=2.1.154`; macOS protected admission `<2.1.219` | `claudecode-hooks-v1` / `v7` | prompt, tool_call, tool_result, event_content |
+| <ConnectorLabel id="hermes" /> | hook contract | macOS/Linux `>=0.19.0, <0.20.0`; Windows `>=0.19.0` | `hermes-hooks-v1` / `v6` (23 events) | prompt, tool_call, tool_result, event_content |
 | <ConnectorLabel id="cursor" /> | hook contract | `>=1.7.0` | `cursor-hooks-v1` / `v6` | prompt, tool_call, tool_result |
 | <ConnectorLabel id="windsurf" /> | hook contract | `>=1.12.41` | `windsurf-hooks-v1` / `v7` | prompt, tool_call, tool_result |
 | <ConnectorLabel id="geminicli" /> | hook contract | `>=0.26.0` (continuing enterprise/Google Cloud/paid API-key product only) | `geminicli-hooks-v1` / `v6` | prompt, tool_call, tool_result |
-| <ConnectorLabel id="copilot" /> | hook contract | `>=1.0.18, <1.0.76` | `copilot-hooks-v1` / `v7` (13 events) | prompt, tool_call, tool_result |
-| <ConnectorLabel id="copilot" /> | hook contract | `>=1.0.76` | `copilot-hooks-v2` / `v7` (14 events) | prompt, tool_call, tool_result |
-| <ConnectorLabel id="openhands" /> | hook contract | unversioned / documented hooks; tested with `OpenHands CLI 1.16.0` | `openhands-hooks-v1` / `v6` | prompt, tool_call, tool_result, event_content |
-| <ConnectorLabel id="antigravity" /> | hook contract | `>=1.1.8` | `antigravity-hooks-v2` / `v8` | tool_call, event_content |
-| <ConnectorLabel id="opencode" /> | hook contract | unversioned / plugin API; tested with `opencode 1.16.2` | `opencode-hooks-v1` / `v6` | tool_call, tool_result |
+| <ConnectorLabel id="copilot" /> | hook contract | `>=1.0.18, <1.0.76` on Windows/macOS/Linux | `copilot-hooks-v1` / `v7` (13 events) | prompt, tool_call, tool_result |
+| <ConnectorLabel id="copilot" /> | hook contract | `>=1.0.76` on Windows/macOS/Linux | `copilot-hooks-v2` / `v7` (14 events) | prompt, tool_call, tool_result |
+| <ConnectorLabel id="openhands" /> | hook contract | macOS/Linux `>=1.12.0`; Windows registry floor `>=0.0.0` (native setup unsupported) | `openhands-hooks-v1` / `v6` (6 events) | prompt, tool_call, tool_result, event_content |
+| <ConnectorLabel id="antigravity" /> | hook contract | macOS/Linux `>=1.1.8, <1.1.10`; Windows `>=1.1.8` (not certified) | `antigravity-hooks-v2` / `v8` (5 events) | tool_call, event_content |
+| <ConnectorLabel id="opencode" /> | hook contract | macOS/Linux `>=1.16.2, <1.18.11` | `opencode-hooks-v1` / `v7` (35 events) | tool_call, tool_result, event_content |
+| <ConnectorLabel id="opencode" /> | hook contract | Windows `>=0.0.0` (unbounded/default) | `opencode-hooks-v1` / `v6` (9 events) | tool_call, tool_result |
 | <ConnectorLabel id="omnigent" /> | hook contract | `>=0.7.0` / pinned custom-policy API | `omnigent-custom-policy-v1` / `v1` | prompt, tool_call, tool_result |
 
-Open-ended contracts leave `max_exclusive` empty until an upstream release
-publishes a breaking hook change. Codex is the current exception: its v1 and
-v2 ranges have explicit upper bounds because later releases add hook events.
-Installed versions and selected contracts are recorded in
-`hook_contract_lock.json` for doctor drift checks.
+The packaged contract contains the reviewed macOS/Linux values. Runtime
+platform overlays deliberately preserve the older Windows contracts where the
+Windows lane has different evidence: Hermes and Antigravity have no Windows
+ceiling, OpenCode remains the nine-event `v6` contract with an unbounded
+version range, and OpenHands has a zero floor with native OTLP disabled. Those
+Windows overlays do not promote unsupported or not-certified setup paths. Installed versions and
+selected contracts are recorded in `hook_contract_lock.json` for Doctor drift
+checks.
 
-The floors come from upstream release notes or current vendor docs: Codex `0.124.0` is the stable-hooks release, Gemini CLI `0.26.0` enabled hooks by default, Cursor `1.7.0` introduced beta hooks, and Hermes `0.19.0` is the floor for DefenseClaw's current 23-event shell-hook contract (earlier Hermes versions exposed smaller sets). Windsurf `1.12.41` added user prompt hooks to the Cascade pre-hook set. Copilot CLI `1.0.18` is the floor for the bounded 13-event v1 contract; `1.0.76` is the reviewed floor for the current 14-event v2 contract that adds `userPromptTransformed`. Gemini CLI consumer/free/Google AI Pro/Ultra service ended on June 18, 2026; its non-Windows version contract applies only to the continuing enterprise, Google Cloud, and paid API-key audience. OpenCode loads JS plugins through a stable plugin API rather than a versioned hook config, so it is accepted as unversioned (validated with `opencode 1.16.2`). OmniGent is pinned to `>=0.7.0`, the release whose six-phase custom-policy implementation and degraded native-Windows surface were reviewed; earlier or unversioned installations require an explicit action-mode compatibility override. OpenHands uses the current documented `.openhands/hooks.json` contract, installs globally through `~/.openhands/hooks.json` by default, has been validated with `OpenHands CLI 1.16.0`, and is accepted as unversioned until upstream publishes a hook-version floor. Antigravity (`agy`) is pinned at `>=1.1.8`, the release that includes the documented five-event lifecycle and current Windows hook behavior; the upper bound stays open because agy auto-updates and DefenseClaw tracks compatibility through `hook_contract_lock.json` plus doctor drift checks. Claude Code is pinned to `2.1.154`: `2.1.152` supplied the current hook surface, and `2.1.154` added the plugin `defaultEnabled` semantics used by inventory.
+The floors come from upstream release notes or current vendor docs: Codex
+`0.124.0` is the stable-hooks release, Gemini CLI `0.26.0` enabled hooks by
+default, Cursor `1.7.0` introduced beta hooks, and Hermes `0.19.0` is the floor
+for DefenseClaw's 23-event shell-hook contract. macOS/Linux Hermes stops before
+`0.20.0`; Windows retains its earlier open ceiling. Windsurf `1.12.41` added
+user-prompt hooks to the Cascade pre-hook set. Copilot CLI `1.0.18` is the
+floor for the 13-event v1 contract; `1.0.76` is the cross-platform floor for
+the 14-event v2 contract that adds `userPromptTransformed`. OpenHands requires
+`1.12.0` on macOS/Linux because that release first
+loads the user-global hook file. OpenCode's reviewed macOS/Linux contract spans
+`>=1.16.2, <1.18.11` and registers 35 events; Windows retains the unbounded
+nine-event v6 contract. Antigravity (`agy`) is source- and artifact-reviewed
+through 1.1.9, so macOS/Linux accepts `>=1.1.8, <1.1.10` while Windows keeps
+the previous open ceiling. OmniGent is pinned to `>=0.7.0`. Claude Code is pinned to `2.1.154`:
+`2.1.152` supplied the current hook surface, and `2.1.154` added the plugin
+`defaultEnabled` semantics used by inventory. Gemini CLI consumer/free/Google
+AI Pro/Ultra service ended on June 18, 2026; its non-Windows version contract
+applies only to the continuing enterprise, Google Cloud, and paid API-key
+audience.
+
+These compatibility ranges are not validation stamps. OpenCode 1.18.10,
+OpenHands CLI 1.16.0, and Antigravity 1.1.9 have source or artifact review
+records, but their macOS validation entries remain blank pending durable hosted
+evidence. Claude Code's shared floor remains 2.1.154 for plugin-state
+attribution; macOS protected admission additionally rejects 2.1.219 and later
+because the release-only `DirectoryAdded` event has no published hook schema.
+
+Native telemetry also has platform overlays. OpenHands reports
+`native_otlp=true` on macOS/Linux only for its trace-only, process-environment
+exporter; Setup does not persist that environment and upstream exposes no
+stable cross-rail correlation attribute in the prior SDK 1.21.0 review. The
+official SDK is now 1.39.1, so SDK-derived hook and OTLP evidence is stale
+pending re-review; the CLI floor and event inventory are not widened by
+inference. Windows keeps OpenHands native OTLP off. Copilot's official upstream
+traces and metrics are modeled as `native_otlp=true` on macOS but are not
+auto-configured; Windows remains `native_otlp=false`. Claude Code
+uses native logs and metrics on supported hosts, with enhanced beta traces
+enabled only on macOS and explicitly disabled on Windows.
 
 Codex `0.133.0` through `0.144.x` remain pinned to the ten-event `codex-hooks-v3` contract. The official [`0.145.0` release](https://github.com/openai/codex/releases/tag/rust-v0.145.0) added `SessionEnd`, beginning the eleven-event `codex-hooks-v4` contract. In both tiers, DefenseClaw preserves the [official hook response semantics](https://learn.chatgpt.com/docs/hooks): `SessionStart` `continue: false` ends the turn; `SubagentStop` `decision: "block"` continues the subagent; `PreCompact` stops before compaction; `PostCompact` stops only after compaction; `Stop` block continues with a new prompt; and `PostToolUse` block feeds/replaces the completed tool result (with the code-mode promise rejecting) rather than undoing the tool. These lifecycle-control claims are limited to v3/v4 (`>=0.133`) and are not inferred or backfilled onto the smaller v1/v2 contracts. `SessionEnd` is observation-only in DefenseClaw: it is a best-effort teardown notification with a three-second maximum timeout, not a block or native ask surface.
+
+The current audited upstream release is
+[`0.146.0`](https://github.com/openai/codex/releases/tag/rust-v0.146.0). It
+remains compatible with `codex-hooks-v4`. On macOS, compatibility does not
+bypass native admission: setup additionally requires the selected Codex
+Mach-O to have the expected OpenAI Developer ID identity, no quarantine
+attribute, and protected path/version/digest evidence.
 
 ## Setup-time checks
 
@@ -73,4 +125,4 @@ the lock records:
 | `hook_script_digests` | Hashes of installed hook scripts for drift detection. |
 | `defenseclaw_version` | The DefenseClaw build that produced the lock. |
 
-`defenseclaw doctor` reads the lock and compares it with the current discovery cache so connector upgrades, hook contract changes, and hook script drift show up before action-mode enforcement depends on them.
+`defenseclaw doctor` reads the lock and compares it with the current discovery cache so connector upgrades, hook contract changes, and hook script drift show up before action-mode enforcement depends on them. On macOS Claude Code, explicit Setup additionally seals the canonical Mach-O path and digest; Doctor rechecks permissions, architecture, quarantine, Anthropic's pinned Developer ID identity, and SHA-256 without trusting the launcher symlink.

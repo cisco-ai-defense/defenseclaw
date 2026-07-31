@@ -1,6 +1,6 @@
 {
   "_source": "Hand-curated from internal/gateway/connector setup paths and hook profiles plus cli/defenseclaw/inventory/hook_contracts.json. Re-extract on every connector or hook-contract change.",
-  "_lastVerified": "2026-07-30",
+  "_lastVerified": "2026-07-31",
   "_order": "By adoption / popularity — mirrors the hero rotation (lib/hero-connectors.ts) and the docs nav (content/docs/connectors/meta.json).",
   "connectors": [
     {
@@ -19,7 +19,7 @@
         "scope": "user"
       },
       "hilt": "Claude Code supports native PreToolUse ask prompts. CRITICAL findings still block; HIGH findings can pause for approval.",
-      "notes": "Hook-only connector — no proxy data path and no DefenseClaw subprocess sandbox or command shims. Observability and PreToolUse deny decisions both flow through the hook bus."
+      "notes": "Hook-only connector — no proxy data path and no DefenseClaw subprocess sandbox or command shims. The shared floor is >=2.1.154; macOS also requires <2.1.219, while Windows keeps the open ceiling. Native logs and metrics are configured on supported hosts, but enhanced beta traces are macOS-only and Windows traces remain disabled. Both native platforms remain preview/uncertified."
     },
     {
       "id": "codex",
@@ -70,18 +70,18 @@
         "askEvents": ["beforeShellExecution", "beforeMCPExecution"],
         "blockEvents": [
           "preToolUse",
+          "subagentStart",
           "beforeShellExecution",
           "beforeMCPExecution",
           "beforeReadFile",
           "beforeTabFileRead",
-          "beforeSubmitPrompt",
-          "subagentStart"
+          "beforeSubmitPrompt"
         ],
         "supportsFailClosed": true,
         "scope": "user"
       },
-      "hilt": "Cursor enforces native ask only on beforeShellExecution and beforeMCPExecution. preToolUse accepts ask in the schema but does not enforce it.",
-      "notes": "hooks.json under ~/.cursor; command hooks fail open by default and use failClosed=true only for an explicit closed failure mode. sessionStart/sessionEnd are fire-and-forget and Stop is followup-only. Native Windows uses the managed PowerShell stdin adapter."
+      "hilt": "Cursor enforces native ask only on beforeShellExecution and beforeMCPExecution. preToolUse accepts ask in the schema but does not enforce it; subagentStart confirm is downgraded to deny because that event accepts allow/deny only.",
+      "notes": "hooks.json under ~/.cursor; command hooks fail open by default and use failClosed=true only for an explicit closed failure mode. sessionStart/sessionEnd are fire-and-forget and Stop is followup-only. Native macOS and Windows are preview pending durable packaged and authenticated official-client certification. DefenseClaw discovers documented Cursor local plugins, skills, and custom subagents without modifying discovery-only surfaces; editor extensions, nested AGENTS.md traversal, custom commands, and separate microagents are not managed."
     },
     {
       "id": "hermes",
@@ -99,7 +99,7 @@
         "scope": "user"
       },
       "hilt": "Hermes has no native human-approval surface; confirm verdicts are recorded and alerted but cannot pause or resume the hook.",
-      "notes": "Preview/not certified on native Windows. Hooks live in %HERMES_HOME%/config.yaml (default %LOCALAPPDATA%/hermes; hermes-hooks-v1 >=0.19.0). The owned command is a directly quoted absolute native defenseclaw-hook.exe argv parsed by shlex.split and run with shell=False; DefenseClaw uses no shell wrapper. All 23 Hermes v0.19 VALID_HOOKS events are registered and classified independently. Only valid synchronous pre_tool_call block JSON vetoes a tool; pre_llm_call may inject context and pre_verify may continue a bounded verification loop. Transform, API, gateway, approval, Kanban, and ordinary lifecycle events are audit-only in DefenseClaw's shell lane unless the official shell parser proves an effect. Timeout, nonzero exit, malformed output, authentication, and transport failures warn and continue; exit status is not enforcement. Hermes's separate upstream terminal tool uses installer-managed PortableGit/Git Bash on Windows and is outside DefenseClaw integration. Discovery surfaces cover MCP, skills, and read-only plugins."
+      "notes": "Preview/not certified on native macOS and Windows. Hooks live in $HERMES_HOME/config.yaml (default ~/.hermes on macOS and %LOCALAPPDATA%/hermes on Windows). hermes-hooks-v1 accepts >=0.19.0,<0.20.0 on macOS/Linux; Windows preserves >=0.19.0 with no ceiling. macOS registers the absolute executable POSIX hook asset; Windows registers a directly quoted absolute native defenseclaw-hook.exe argv. Hermes parses both with shlex.split and runs shell=False. All 23 Hermes v0.19 VALID_HOOKS events are registered and classified independently. Only valid synchronous pre_tool_call block JSON vetoes a tool; pre_llm_call may inject context and pre_verify may continue a bounded verification loop. Transform, API, gateway, approval, Kanban, and ordinary lifecycle events are audit-only in DefenseClaw's shell lane unless the official shell parser proves an effect. Timeout, nonzero exit, malformed output, authentication, and transport failures warn and continue; exit status is not enforcement. Hermes's separate upstream terminal tool uses installer-managed PortableGit/Git Bash on Windows and is outside DefenseClaw integration. Discovery covers canonical mcp_servers, local and configured external skills, read-only user/project plugins, shell and gateway hook packages, and context/rule files. Hermes 0.19.1 native monitoring.export.otlp is upstream-owned gateway-health telemetry; DefenseClaw policy telemetry remains hook-derived."
     },
     {
       "id": "opencode",
@@ -117,7 +117,7 @@
         "scope": "user"
       },
       "hilt": "No native human-approval surface; blocks by throwing in the bridge plugin's tool.execute.before. confirm verdicts fall back to allow.",
-      "notes": "Native Windows is preview pending integrated packaged Setup and pinned official-client validation. Governed by a DefenseClaw JS bridge plugin auto-loaded from OPENCODE_CONFIG_DIR/plugins/defenseclaw.js or the default ~/.config/opencode/plugins/defenseclaw.js (no opencode.json edit). tool.execute.before POSTs to /api/v1/opencode/hook and throws new Error(reason) to abort the tool on a block decision; tool.execute.after is best-effort observe-only. Fail-closed applies only to the awaited before hook: the bridge throws there when the gateway is unreachable and FAIL_MODE=closed."
+      "notes": "OpenCode contracts differ by platform. macOS/Linux accepts >=1.16.2,<1.18.11 and uses the 35-event v7 bridge; Windows preserves its unbounded/default range and nine-event v6 bridge and remains preview pending packaged Setup plus official-client evidence. The DefenseClaw JS plugin auto-loads from OPENCODE_CONFIG_DIR/plugins/defenseclaw.js or ~/.config/opencode/plugins/defenseclaw.js without editing opencode.json. tool.execute.before throws to block; tool.execute.after and generic events are observe-only. Fail-closed applies only to the awaited before hook. Upstream 1.18.10 has experimental OTLP logs/traces, but DefenseClaw does not configure or certify them and the registry remains native_otlp=false."
     },
     {
       "id": "omnigent",
@@ -135,7 +135,7 @@
         "scope": "user"
       },
       "hilt": "OmniGent parks request, tool_call, and llm_request for native ASK approval. Post-phase confirm findings are audited and continue without a pause; DENY may suppress onward-visible content but cannot roll back completed work.",
-      "notes": "The documented custom Python policy bridge maps all six OmniGent policy phases. Post-phase DENY uses OmniGent's denial/sentinel behavior rather than custom replacement data. Native OTLP is inactive until the launch process exports the standard environment variables; OpenTelemetry packages are included in OmniGent's base/default dependency set."
+      "notes": "The documented custom Python policy bridge maps all six OmniGent policy phases. Post-phase DENY uses OmniGent's denial/sentinel behavior rather than custom replacement data. Optional native OTLP is inactive until the launch process sets OMNIGENT_TELEMETRY_ENABLED=true and exports the standard OTEL environment variables; OmniGent 0.7.0 includes logs, metrics, and traces in its base/default dependency set."
     },
     {
       "id": "geminicli",
@@ -176,7 +176,7 @@
         "scope": "user,workspace"
       },
       "hilt": "Copilot CLI supports native ask on documented preToolUse hooks.",
-      "notes": "Global hooks under ~/.copilot/hooks by default; optional workspace hooks under <workspace>/.github/hooks."
+      "notes": "Windows/macOS/Linux 1.0.76+ selects the 14-event v2 contract, including audit-only userPromptTransformed; 1.0.18 through 1.0.75 selects the 13-event v1 contract. Native Windows remains not certified. Upstream can emit native OTLP traces and metrics, which macOS models as native_otlp=true, but DefenseClaw does not auto-configure or certify the exporter; Windows remains native_otlp=false. Cleartext HTTP export is disabled, so the loopback gateway is not auto-wired. Global hooks live under ~/.copilot/hooks by default; workspace hooks are optional."
     },
     {
       "id": "openhands",
@@ -193,8 +193,8 @@
         "supportsFailClosed": true,
         "scope": "user,workspace"
       },
-      "hilt": "OpenHands has no native ask surface in the documented hook contract; confirm verdicts are downgraded with raw_action preserved and optional additionalContext returned to the agent.",
-      "notes": "Global ~/.openhands/hooks.json native hook schema by default; optional repo-local .openhands/hooks.json with --workspace; MCP lives in ~/.openhands/mcp.json; skills include user installs and ~/.openhands/cache/skills/public-skills/skills."
+      "hilt": "OpenHands has no native ask surface; UserPromptSubmit can receive additionalContext, while PreToolUse and Stop confirm downgrades are audit/TUI-only with raw_action preserved.",
+      "notes": "macOS/Linux requires OpenHands >=1.12.0 and uses six v6 hook events. Standalone OpenHands SDK 1.39.1 preserves exporter-only, process-environment native OTLP traces, so the macOS/Linux registry reports native_otlp=true; Setup does not persist the launch environment, no native logs/metrics are claimed, and no stable hook/native correlation attribute is documented. Windows preserves a zero version floor with native_otlp=false, but native Windows Setup is unsupported because DefenseClaw has no WSL connector path. Global ~/.openhands/hooks.json is used by default; optional repo-local .openhands/hooks.json takes precedence and files are not merged. MCP follows OPENHANDS_PERSISTENCE_DIR; skills include user installs and the public-skills cache; file agents use .agents/agents with .openhands/agents as a legacy fallback; third-party instruction files are discovery-only; CLI plugins are N/A."
     },
     {
       "id": "antigravity",
@@ -212,11 +212,11 @@
         "scope": "user"
       },
       "hilt": "Antigravity documents native ask on PreToolUse only. DefenseClaw does not claim that this response overrides permission-bypass flags without persisted official-client evidence; force_ask is retained only as internal raw_action telemetry.",
-      "notes": "DefenseClaw's v2 contract registers all five documented Antigravity lifecycle events (PreInvocation, PreToolUse, PostToolUse, PostInvocation, Stop) in ~/.gemini/config/hooks.json with their vendor-specific direct-list or matcher-group shapes. Only synchronous PreToolUse exposes documented hard deny and native ask decisions; invocation events are context-transform surfaces, PostToolUse is observe-only, and DefenseClaw returns allow for Stop rather than claiming stop blocking. MCP read/write uses ~/.gemini/config/mcp_config.json and <workspace>/.agents/mcp_config.json. AgentSkills folder form is read/write at ~/.gemini/config/skills and <workspace>/.agents/skills. Plugins live at ~/.gemini/config/plugins or <workspace>/.agents/plugins; the CLI staging path is also discovered. Rules and standalone or plugin-contained agents remain discovery/scan only."
+      "notes": "DefenseClaw's v2 contract accepts >=1.1.8,<1.1.9 on macOS/Linux; the official installer manifest now publishes 1.1.9, which is rejected as unknown pending contract review. Windows preserves >=1.1.8 with no ceiling but remains not certified. The reviewed contract registers all five documented Antigravity lifecycle events (PreInvocation, PreToolUse, PostToolUse, PostInvocation, Stop) in ~/.gemini/config/hooks.json. Only synchronous PreToolUse exposes documented hard deny and native ask decisions; invocation events are context-transform surfaces, PostToolUse is observe-only, and DefenseClaw returns allow for Stop rather than claiming stop blocking. Native macOS is preview with no last_validated_version stamp. MCP and AgentSkills folder form are read/write at documented global/workspace paths; macOS/Linux plugins install to the CLI staging root while Windows plugin mutation is discovery-only. Native OTLP, proxy/firewall/sandbox ownership, custom-agent activation, runtime subagent management, and Gemini CLI custody are N/A."
     },
     {
       "id": "windsurf",
-      "label": "Windsurf",
+      "label": "Devin Desktop (Windsurf)",
       "summary": "Cascade hooks across prompts, commands, code access, and MCP tools.",
       "family": "hooks",
       "toolInspection": "pre-execution + response-scan",
@@ -236,7 +236,7 @@
         "scope": "user"
       },
       "hilt": "Can block supported hook events but has no native human-approval surface; confirm verdicts fall back explicitly.",
-      "notes": "Cascade hooks under ~/.codeium/windsurf/hooks.json. DefenseClaw can map its configured availability failures to Windsurf's blocking exit 2 on the five documented pre-hooks; Windsurf itself fails open on other non-zero exits. Post hooks are non-blocking, Cascade response post hooks are asynchronous, and Restricted Mode disables hooks. Existing MCP/rules are discovered, never auto-created."
+      "notes": "Devin Desktop retains Cascade hooks under ~/.codeium/windsurf/hooks.json. DefenseClaw can map configured availability failures to exit 2 on the five documented pre-hooks; other vendor non-zero exits fail open. Post hooks are non-blocking, Cascade response hooks are asynchronous, and Restricted Mode disables hooks. MCP uses the documented mcp_config.json path; Cascade skills, .devin/.windsurf rules, and AGENTS.md instructions are inventoried. Devin Local plugins/subagents are explicitly outside this Cascade connector."
     },
     {
       "id": "zeptoclaw",

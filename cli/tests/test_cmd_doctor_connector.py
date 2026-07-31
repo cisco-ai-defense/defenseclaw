@@ -50,11 +50,13 @@ from unittest.mock import MagicMock, patch
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from defenseclaw.commands.cmd_doctor import (
+    _HERMES_HOOK_MATCHERS,
     _active_connector,
     _check_codex_hooks,
     _check_connector_hooks,
     _check_connector_inventory,
     _check_cursor_configured_runtime,
+    _check_hermes_hooks,
     _check_hook_contract_lock,
     _check_hook_health,
     _check_omnigent_policy_health,
@@ -65,9 +67,38 @@ from defenseclaw.commands.cmd_doctor import (
     _doctor_label_suffix,
     _DoctorResult,
     _fix_plugin_registry_required,
+    _macos_claudecode_provenance_error,
     _plugin_registry_required_offenders,
+    _probe_cursor_shell_runtime,
     _probe_cursor_windows_runtime,
 )
+
+
+def test_macos_claude_doctor_detects_active_launcher_target_drift(tmp_path: Path) -> None:
+    sealed = tmp_path / "versions" / "2.1.217"
+    active = tmp_path / "versions" / "2.1.220"
+    launcher = tmp_path / "bin" / "claude"
+    sealed.parent.mkdir()
+    launcher.parent.mkdir()
+    sealed.write_bytes(b"sealed")
+    active.write_bytes(b"active")
+    launcher.symlink_to(active)
+    digest = hashlib.sha256(b"sealed").hexdigest()
+
+    with (
+        patch("defenseclaw.agent_selection.is_setup_trusted_binary", return_value=True),
+        patch("defenseclaw.commands.cmd_doctor.shutil.which", return_value=str(launcher)),
+    ):
+        error = _macos_claudecode_provenance_error(
+            str(tmp_path),
+            {
+                "agent_executable": str(sealed),
+                "agent_executable_source": "setup-selected",
+                "agent_executable_sha256": digest,
+            },
+        )
+
+    assert "launcher target differs" in error
 
 
 class TestActiveConnectorResolver(unittest.TestCase):
@@ -359,6 +390,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
                 fh,
             )
         cfg = MagicMock()
+        cfg.data_dir = tmp
         cfg.guardrail.effective_mode.return_value = mode
         cfg.guardrail.effective_hook_fail_mode.return_value = "closed" if fail_closed else "open"
         return cfg, hooks_path, runtime
@@ -497,6 +529,131 @@ class TestCheckConnectorHooks(unittest.TestCase):
 
         self.assertEqual(r.checks[-1]["status"], "fail")
         self.assertIn("timeout=30 seconds", r.checks[-1]["detail"])
+
+    @unittest.skipUnless(sys.platform == "darwin", "macOS shell adapter fixture")
+    def test_cursor_doctor_validates_managed_macos_shell_adapter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg, hooks_path, _runtime = self._cursor_runtime_case(
+                tmp,
+                mode="observe",
+                fail_closed=False,
+            )
+            runtime = os.path.join(tmp, "DefenseClaw Hooks", "cursor-hook.sh")
+            with open(runtime, "w", encoding="utf-8") as fh:
+                fh.write(
+                    "#!/bin/sh\n"
+                    "# defenseclaw-managed-hook v8\n"
+                    'DEFENSECLAW_HOOK_CONNECTOR="cursor"\n'
+                    "# DEFENSECLAW_GATEWAY_TOKEN\n"
+                    "# /api/v1/cursor/hook\n"
+                    "# Authorization: Bearer\n"
+                    "# X-DefenseClaw-Client: cursor-hook/1.0\n"
+                    "# curl\n"
+                )
+            os.chmod(runtime, 0o700)
+            with open(runtime, "rb") as fh:
+                digest = hashlib.sha256(fh.read()).hexdigest()
+            with open(os.path.join(tmp, "hook_contract_lock.json"), "w", encoding="utf-8") as fh:
+                json.dump(
+                    {
+                        "connectors": {
+                            "cursor": {
+                                "locations": {"hook_script_paths": [runtime]},
+                                "hook_script_digests": {
+                                    "cursor-hook.sh": f"sha256:{digest}",
+                                },
+                            }
+                        }
+                    },
+                    fh,
+                )
+            with open(hooks_path, encoding="utf-8") as fh:
+                hooks = json.load(fh)
+            for entries in hooks["hooks"].values():
+                entries[0]["command"] = f"'{runtime}'"
+            with open(hooks_path, "w", encoding="utf-8") as fh:
+                json.dump(hooks, fh)
+
+            r = _DoctorResult()
+            _check_cursor_configured_runtime(
+                cfg,
+                hooks_path,
+                "Cursor hooks",
+                r,
+                platform_name="posix",
+                probe_runtime=False,
+            )
+
+        self.assertEqual(r.checks[-1]["status"], "pass")
+        self.assertIn(runtime, r.checks[-1]["detail"])
+
+    def test_cursor_doctor_rejects_unowned_macos_shell_adapter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg, hooks_path, runtime = self._cursor_runtime_case(
+                tmp,
+                mode="observe",
+                fail_closed=False,
+            )
+            shell_runtime = os.path.join(tmp, "DefenseClaw Hooks", "cursor-hook.sh")
+            with open(shell_runtime, "w", encoding="utf-8") as fh:
+                fh.write(
+                    "#!/bin/sh\n"
+                    "# defenseclaw-managed-hook v8\n"
+                    'DEFENSECLAW_HOOK_CONNECTOR="cursor"\n'
+                    "exit 0\n"
+                )
+            os.chmod(shell_runtime, 0o700)
+            with open(hooks_path, encoding="utf-8") as fh:
+                hooks = json.load(fh)
+            for entries in hooks["hooks"].values():
+                entries[0]["command"] = f"'{shell_runtime}'"
+            with open(hooks_path, "w", encoding="utf-8") as fh:
+                json.dump(hooks, fh)
+
+            r = _DoctorResult()
+            _check_cursor_configured_runtime(
+                cfg,
+                hooks_path,
+                "Cursor hooks",
+                r,
+                platform_name="posix",
+                probe_runtime=False,
+            )
+
+        self.assertNotEqual(runtime, shell_runtime)
+        self.assertEqual(r.checks[-1]["status"], "fail")
+        self.assertIn("shell adapter is stale or invalid", r.checks[-1]["detail"])
+
+    @patch("defenseclaw.commands.cmd_doctor._http_probe")
+    @patch("defenseclaw.commands.cmd_doctor.subprocess.run")
+    def test_cursor_shell_runtime_probe_requires_json_and_counter_advance(
+        self,
+        run_mock,
+        http_probe_mock,
+    ) -> None:
+        before = json.dumps(
+            {"connectors": [{"name": "cursor", "requests": 7, "errors": 0}]}
+        )
+        after = json.dumps(
+            {"connectors": [{"name": "cursor", "requests": 8, "errors": 0}]}
+        )
+        http_probe_mock.side_effect = [(200, before), (200, after)]
+        run_mock.return_value = subprocess.CompletedProcess(
+            args=["/tmp/cursor-hook.sh"],
+            returncode=0,
+            stdout='{"continue":true}',
+            stderr="",
+        )
+        cfg = MagicMock()
+        cfg.gateway.api_port = 18970
+
+        ok, detail = _probe_cursor_shell_runtime(cfg, "/tmp/cursor-hook.sh")
+
+        self.assertTrue(ok)
+        self.assertIn("requests 7->8", detail)
+        self.assertEqual(run_mock.call_args.args[0], ["/tmp/cursor-hook.sh"])
+        self.assertFalse(run_mock.call_args.kwargs.get("shell", False))
+        self.assertIn('"hook_event_name":"sessionStart"', run_mock.call_args.kwargs["input"])
 
     @patch("defenseclaw.commands.cmd_doctor._http_probe")
     @patch("defenseclaw.commands.cmd_doctor.subprocess.run")
@@ -947,6 +1104,58 @@ class TestCheckHookHealth(unittest.TestCase):
         self.assertEqual(r.checks[-1]["status"], "fail")
         self.assertIn("not found", r.checks[-1]["detail"])
 
+    @unittest.skipIf(os.name == "nt", "POSIX shell adapter fixture")
+    def test_hermes_structured_health_requires_all_23_exact_entries(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg = MagicMock()
+            cfg.data_dir = tmp
+            config_path = os.path.join(tmp, "config.yaml")
+            script_path = os.path.join(tmp, "hooks", "hermes-hook.sh")
+            os.makedirs(os.path.dirname(script_path))
+            Path(script_path).write_text("#!/bin/sh\n", encoding="utf-8")
+            os.chmod(script_path, 0o700)
+            hooks = {}
+            for event, matcher in _HERMES_HOOK_MATCHERS.items():
+                entry = {"command": script_path, "timeout": 30}
+                if matcher is not None:
+                    entry["matcher"] = matcher
+                hooks[event] = [entry]
+            import yaml
+
+            Path(config_path).write_text(
+                yaml.safe_dump({"hooks_auto_accept": True, "hooks": hooks}),
+                encoding="utf-8",
+            )
+            Path(os.path.join(tmp, "hook_contract_lock.json")).write_text(
+                json.dumps(
+                    {
+                        "connectors": {
+                            "hermes": {
+                                "locations": {
+                                    "hook_config_paths": [config_path],
+                                    "hook_script_paths": [script_path],
+                                }
+                            }
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            r = _DoctorResult()
+            _check_hermes_hooks(cfg, r, platform_name="posix")
+            self.assertEqual(r.checks[-1]["status"], "pass")
+            self.assertIn("23 exact managed entries", r.checks[-1]["detail"])
+
+            hooks.pop("pre_tool_call")
+            Path(config_path).write_text(
+                yaml.safe_dump({"hooks_auto_accept": True, "hooks": hooks}),
+                encoding="utf-8",
+            )
+            r = _DoctorResult()
+            _check_hermes_hooks(cfg, r, platform_name="posix")
+            self.assertEqual(r.checks[-1]["status"], "fail")
+            self.assertIn("pre_tool_call missing", r.checks[-1]["detail"])
+
     def test_opencode_flat_js_plugin_passes(self) -> None:
         """opencode's hook is a flat ``.js`` file (not JSON) keyed on the
         bare ``defenseclaw`` marker — the format-agnostic check must accept it."""
@@ -1086,6 +1295,41 @@ class TestCheckHookHealth(unittest.TestCase):
             _check_omnigent_policy_health(cfg, r)
         self.assertEqual(r.checks[-1]["status"], "fail")
         self.assertIn(".pth", r.checks[-1]["detail"])
+
+    def test_omnigent_project_policy_override_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = os.path.join(tmp, "config.yaml")
+            module = os.path.join(tmp, "defenseclaw_omnigent_policy.py")
+            pth = os.path.join(tmp, "defenseclaw_omnigent.pth")
+            workspace = os.path.join(tmp, "workspace")
+            os.makedirs(os.path.join(workspace, ".omnigent"))
+            with open(config, "w", encoding="utf-8") as fh:
+                fh.write("policy_modules: [defenseclaw_omnigent_policy]\npolicies: {defenseclaw_guardrail: {}}\n")
+            with open(module, "w", encoding="utf-8") as fh:
+                fh.write("def defenseclaw_policy(event): return {'result': 'ALLOW'}\nPOLICY_REGISTRY = []\n")
+            with open(pth, "w", encoding="utf-8") as fh:
+                fh.write(tmp + "\n")
+            with open(os.path.join(workspace, ".omnigent", "config.yaml"), "w", encoding="utf-8") as fh:
+                fh.write("policies: {}\n")
+            cfg = MagicMock()
+            cfg.data_dir = tmp
+            cfg.connector_workspace_dir.return_value = workspace
+            with open(os.path.join(tmp, "hook_contract_lock.json"), "w", encoding="utf-8") as fh:
+                json.dump(
+                    {"connectors": {"omnigent": {"locations": {
+                        "hook_config_paths": [config],
+                        "hook_script_paths": [module, pth],
+                    }}}},
+                    fh,
+                )
+            r = _DoctorResult()
+            with patch(
+                "defenseclaw.commands.cmd_doctor._omnigent_managed_artifact_drift",
+                return_value="",
+            ):
+                _check_omnigent_policy_health(cfg, r)
+        self.assertEqual(r.checks[-1]["status"], "fail")
+        self.assertIn("replaces global policies", r.checks[-1]["detail"])
 
     def test_omnigent_missing_policy_entry_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

@@ -83,6 +83,7 @@ _render_checkbox_menu = terminal_checkbox.render_checkbox_menu
             "copilot",
             "openhands",
             "antigravity",
+            "agy",
             "opencode",
             "omnigent",
             "none",
@@ -735,15 +736,20 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
 
     primary = connector_settings[0]
     extras = connector_settings[1:]
-    # The short-lived executable receipt authorizes only Windows flows that
-    # later refuse ambient executable discovery: Codex's app-server policy
-    # probe and OmniGent's selected uv-tool process. It is not part of the
-    # macOS/Linux lifecycle, and Claude Code never consumes this authority.
+    # The short-lived executable receipt authorizes Windows flows that later
+    # refuse ambient executable discovery and native Codex app-server policy
+    # inspection on macOS. Claude Code never consumes this authority.
     selected_agent_connectors = [
         item["connector"]
         for item in connector_settings
-        if platform_support.host_os() == "windows"
-        and connector_paths.normalize(item["connector"]) in {"codex", "omnigent"}
+        if (
+            platform_support.host_os() == "windows"
+            and connector_paths.normalize(item["connector"]) in {"codex", "omnigent"}
+        )
+        or (
+            platform_support.host_os() == "darwin"
+            and connector_paths.normalize(item["connector"]) == "codex"
+        )
     ]
     if selected_agent_connectors:
         from defenseclaw.agent_selection import record_setup_agent_selections
@@ -1831,6 +1837,8 @@ def _normalize_connector_arg(
     value = (connector or "codex").strip().lower()
     if value in {"claude-code", "claude_code", "claude"}:
         return "claudecode"
+    if value == "agy":
+        return "antigravity"
     return value
 
 

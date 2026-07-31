@@ -232,8 +232,11 @@ func openCodeManagedPluginPresent(conn Connector, opts SetupOpts) (bool, error) 
 	if info == nil || !managedFileBackupMatchesSnapshot(&backup, data, true) {
 		return false, nil
 	}
+	if !bytes.Contains(data, []byte("// defenseclaw-managed-plugin v7")) &&
+		!bytes.Contains(data, []byte("// defenseclaw-managed-plugin v6")) {
+		return false, nil
+	}
 	for _, marker := range [][]byte{
-		[]byte("// defenseclaw-managed-plugin v6"),
 		[]byte(`"/api/v1/opencode/hook"`),
 		[]byte(`"tool.execute.before": async`),
 		[]byte(`if (verdict) throw new Error(verdict.reason);`),

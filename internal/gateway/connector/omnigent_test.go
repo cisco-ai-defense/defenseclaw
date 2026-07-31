@@ -54,6 +54,58 @@ func withOmnigentPathOverrides(t *testing.T, configPath, sitePackages string) {
 	})
 }
 
+func TestOmnigentComponentTargetsExposeStablePolicyConfig(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "global", "config.yaml")
+	withOmnigentPathOverrides(t, configPath, filepath.Join(root, "site-packages"))
+
+	workspace := filepath.Join(root, "workspace")
+	targets := NewOmnigentConnector().ComponentTargets(workspace)
+	for _, surface := range []string{"config", "policy"} {
+		got := targets[surface]
+		localConfig := filepath.Join(workspace, ".omnigent", "config.yaml")
+		if !stringSliceContains(got, configPath) || !stringSliceContains(got, localConfig) {
+			t.Fatalf("%s targets = %#v, want global and local config", surface, got)
+		}
+	}
+	for _, supported := range []string{"mcp", "skill", "agent"} {
+		got := targets[supported]
+		if len(got) != 1 || got[0] != homePath(".omnigent", "agents") {
+			t.Fatalf("%s targets = %#v, want stable OmniGent agents root", supported, got)
+		}
+	}
+	for _, unsupported := range []string{"rule", "plugin"} {
+		if got := targets[unsupported]; len(got) != 0 {
+			t.Fatalf("%s targets = %#v, want explicit unsupported surface", unsupported, got)
+		}
+	}
+}
+
+func TestOmnigentSetupRejectsProjectPolicyOverride(t *testing.T) {
+	root := t.TempDir()
+	configPath := filepath.Join(root, "global", "config.yaml")
+	withOmnigentPathOverrides(t, configPath, filepath.Join(root, "site-packages"))
+	localConfig := filepath.Join(root, "workspace", ".omnigent", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(localConfig), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(localConfig, []byte("policies: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	opts := SetupOpts{
+		DataDir:      filepath.Join(root, "defenseclaw"),
+		WorkspaceDir: filepath.Join(root, "workspace"),
+		APIAddr:      "127.0.0.1:18970",
+	}
+	err := NewOmnigentConnector().Setup(context.Background(), opts)
+	if err == nil || !strings.Contains(err.Error(), "would replace the global DefenseClaw policy registration") {
+		t.Fatalf("Setup error = %v, want project precedence refusal", err)
+	}
+	if _, statErr := os.Stat(configPath); !os.IsNotExist(statErr) {
+		t.Fatalf("global config changed despite precedence refusal: %v", statErr)
+	}
+}
+
 func TestOmnigentSetupAndTeardown(t *testing.T) {
 	root := t.TempDir()
 	dataDir := filepath.Join(root, "defenseclaw")
@@ -287,6 +339,35 @@ func TestOmnigentSitePackagesIgnoresInterpreterStderr(t *testing.T) {
 	}
 }
 
+func TestOmnigentPolicyContractRejectsPreStableVersion(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("Windows retains its separate 0.7.0 native-degraded floor")
+	}
+	root := t.TempDir()
+	binDir := filepath.Join(root, "bin")
+	if err := os.MkdirAll(binDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for name, body := range map[string]string{
+		"omnigent": "#!/bin/sh\nexit 0\n",
+		"python":   "#!/bin/sh\nprintf '0.0.9\\n/tmp/omnigent-test-site-packages\\n'\n",
+	} {
+		if err := os.WriteFile(filepath.Join(binDir, name), []byte(body), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("PATH", binDir)
+	t.Setenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES", binDir)
+	previous := OmnigentSitePackagesPathOverride
+	OmnigentSitePackagesPathOverride = ""
+	t.Cleanup(func() { OmnigentSitePackagesPathOverride = previous })
+
+	_, err := omnigentSitePackages(context.Background(), SetupOpts{})
+	if err == nil || !strings.Contains(err.Error(), "custom policy bridge requires OmniGent 0.1.0 or newer") {
+		t.Fatalf("omnigentSitePackages error = %v, want stable contract floor", err)
+	}
+}
+
 func TestOmnigentSitePackagesRejectsUntrustedInterpreter(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("uses POSIX shell stubs")
@@ -486,8 +567,9 @@ print(json.dumps(payload, allow_nan=False))
 	if err := json.Unmarshal(output, &payload); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := payload["tool_input"].(string); !ok {
-		t.Fatalf("tool_input = %#v, want safe string fallback", payload["tool_input"])
+	input, ok := payload["tool_input"].(map[string]interface{})
+	if !ok || input["nan"] != "nan" || input["inf"] != "inf" {
+		t.Fatalf("tool_input = %#v, want JSON-safe non-finite strings", payload["tool_input"])
 	}
 }
 
@@ -685,9 +767,9 @@ print(json.dumps(module.defenseclaw_policy({"type": "request", "data": "hello"})
 			defer proxy.Close()
 
 			var gatewayCalls int
-			gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				gatewayCalls++
-				http.Redirect(w, nil, proxy.URL+"/leak", http.StatusFound)
+				http.Redirect(w, r, proxy.URL+"/leak", http.StatusFound)
 			}))
 			defer gateway.Close()
 			gatewayAddr := strings.TrimPrefix(gateway.URL, "http://")
@@ -875,7 +957,10 @@ func TestOmnigentDenyIsAuthoritativeAcrossAllPolicyPhases(t *testing.T) {
 
 func TestOmnigentPolicyBridgeVerdictMappingAndEmptyToken(t *testing.T) {
 	python := omnigentTestPython(t)
-	responses := map[string]string{"deny-case": "block", "ask-case": "confirm", "allow-case": "allow"}
+	responses := map[string]string{
+		"deny-case": "block", "ask-case": "confirm",
+		"allow-case": "allow", "alert-case": "alert",
+	}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if got := r.Header.Get("Authorization"); got != "" {
 			t.Errorf("empty configured token emitted Authorization = %q", got)
@@ -903,7 +988,7 @@ import importlib.util, json, sys
 spec = importlib.util.spec_from_file_location("defenseclaw_omnigent_policy", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
-for name in ("deny-case", "ask-case", "allow-case"):
+for name in ("deny-case", "ask-case", "allow-case", "alert-case"):
     print(json.dumps(module.defenseclaw_policy({"type": "tool_call", "data": {"name": name, "arguments": {}}})))
 `
 	output, err := exec.Command(python, "-c", script, omnigentPolicyModulePath(opts)).CombinedOutput()
@@ -911,7 +996,7 @@ for name in ("deny-case", "ask-case", "allow-case"):
 		t.Fatalf("execute policy module: %v\n%s", err, output)
 	}
 	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
-	want := []string{"DENY", "ASK", "ALLOW"}
+	want := []string{"DENY", "ASK", "ALLOW", "ALLOW"}
 	if len(lines) != len(want) {
 		t.Fatalf("verdict output = %q", output)
 	}

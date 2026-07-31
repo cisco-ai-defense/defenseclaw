@@ -33,6 +33,7 @@ _FAIL_MODE_PATTERN = re.compile(r"FAIL_MODE=\"\$\{DEFENSECLAW_FAIL_MODE:-(open|c
 _OPENCODE_FAIL_MODE_PATTERN = re.compile(r'const\s+DC_FAIL_MODE\s*=\s*"(open|closed)"\s*;')
 _EXPECTED_CONTRACTS = {
     "claudecode": frozenset({"claudecode-hooks-v1"}),
+    "copilot": frozenset({"copilot-hooks-v1", "copilot-hooks-v2"}),
     "codex": frozenset(
         {"codex-hooks-v1", "codex-hooks-v2", "codex-hooks-v3", "codex-hooks-v4"}
     ),
@@ -568,6 +569,16 @@ def _unix_registration_freshness(cfg: Any, connector: str) -> str | None:
     if connector == "claudecode":
         registration_path = Path(paths[0])
         script_name = "claude-code-hook.sh"
+    elif connector == "copilot":
+        hook_paths = [
+            Path(path)
+            for path in paths
+            if path.endswith(os.path.join("hooks", "defenseclaw.json"))
+        ]
+        if not hook_paths:
+            return "registration-missing"
+        registration_path = hook_paths[-1] if _connector_workspace(cfg) else hook_paths[0]
+        script_name = "copilot-hook.sh"
     else:
         registration_path = Path(paths[0])
         script_name = "codex-hook.sh"

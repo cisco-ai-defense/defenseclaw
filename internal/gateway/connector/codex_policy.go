@@ -58,6 +58,8 @@ var codexAppServerCommand = func(ctx context.Context, executable string) *exec.C
 	return newCodexAppServerCommand(ctx, executable)
 }
 
+var codexNativeExecutableValidator = validateCodexNativeExecutablePlatform
+
 // enforceCodexUserHookPolicy prevents Setup from reporting success when Codex
 // will ignore the hook source DefenseClaw is about to write. Native Windows
 // setup writes managed_config.toml, which is itself a Codex-managed source and
@@ -80,7 +82,7 @@ func enforceCodexUserHookPolicy(ctx context.Context, opts SetupOpts) error {
 func inspectCodexEffectivePolicy(ctx context.Context, opts SetupOpts) (codexEffectivePolicy, error) {
 	executable := strings.TrimSpace(opts.AgentExecutable)
 	if executable != "" {
-		if runtime.GOOS == "windows" {
+		if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
 			validated, err := validateCodexPolicyExecutable(opts)
 			if err != nil {
 				return codexEffectivePolicy{}, err
@@ -102,28 +104,40 @@ func inspectCodexEffectivePolicy(ctx context.Context, opts SetupOpts) (codexEffe
 		return policy, nil
 	}
 
-	if runtime.GOOS == "windows" {
-		if _, exists := loadProtectedCodexContractEntry(opts.DataDir); exists {
-			return codexEffectivePolicy{}, errors.New(
-				"Codex hook contract is missing valid setup-selected executable evidence; run connector repair",
-			)
+	if runtime.GOOS == "windows" || runtime.GOOS == "darwin" {
+		allowAgentlessDrift := runtime.GOOS == "darwin" &&
+			os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") == "1"
+		if entry, exists := loadProtectedCodexContractEntry(opts.DataDir); exists {
+			hasExecutableEvidence := strings.TrimSpace(entry.AgentExecutable) != "" ||
+				strings.TrimSpace(entry.AgentExecutableSource) != "" ||
+				strings.TrimSpace(entry.AgentExecutableSHA256) != ""
+			if runtime.GOOS == "windows" || hasExecutableEvidence || !opts.ManagedEnterprise {
+				return codexEffectivePolicy{}, errors.New(
+					"Codex hook contract is missing valid setup-selected executable evidence; run connector repair",
+				)
+			}
+			// A legacy macOS/administrator pre-provisioning entry can predate
+			// executable receipts entirely. Preserve its bounded system-policy
+			// fallback, but never accept a partially populated/tampered receipt.
 		}
 		if path := filepath.Join(opts.DataDir, agentSelectionFile); strings.TrimSpace(opts.DataDir) != "" {
-			if _, err := os.Lstat(path); err == nil || !os.IsNotExist(err) {
+			if _, err := os.Lstat(path); !allowAgentlessDrift && (err == nil || !os.IsNotExist(err)) {
 				return codexEffectivePolicy{}, errors.New(
 					"Codex setup selection receipt is invalid or expired; rerun fresh trusted setup discovery",
 				)
 			}
 		}
 
-		// A native Windows registration is executable-specific: setup must first
-		// select, hash, and protect the exact codex.exe that will own the hook
-		// contract. Falling back to a generic system-requirements read here would
-		// let Setup publish a lock with no executable evidence, which the next
-		// reconcile must correctly reject. Refuse before any registration mutation.
-		return codexEffectivePolicy{}, errors.New(
-			"Codex policy inspection requires a fresh setup-selected native executable; rerun trusted connector setup or repair",
-		)
+		// Native Windows registration has always required executable evidence
+		// because managed_config.toml is written through that protected path.
+		// macOS CLI setup also supplies and protects executable evidence, but
+		// retain the direct Go pre-provisioning path when no receipt exists so
+		// tests and administrator-authored system requirements remain usable.
+		if runtime.GOOS == "windows" {
+			return codexEffectivePolicy{}, errors.New(
+				"Codex policy inspection requires a fresh setup-selected native executable; rerun trusted connector setup or repair",
+			)
+		}
 	}
 
 	// Tests, pre-provisioning, and older non-Windows Codex installs may not have
@@ -151,6 +165,12 @@ func validateCodexPolicyExecutable(opts SetupOpts) (string, error) {
 				executable,
 			)
 		}
+	}
+	if runtime.GOOS == "darwin" && extension != "" {
+		return "", fmt.Errorf(
+			"selected Codex policy executable is not a native macOS image: %s",
+			executable,
+		)
 	}
 
 	expectedPath := ""
@@ -189,6 +209,9 @@ func validateCodexPolicyExecutable(opts SetupOpts) (string, error) {
 	}
 	if err := hookAPIValidateOwner(executable, info); err != nil {
 		return "", fmt.Errorf("validate selected Codex executable ACL: %w", err)
+	}
+	if err := codexNativeExecutableValidator(executable); err != nil {
+		return "", err
 	}
 	stablePath, digest, ok := setupSelectedAgentExecutableEvidence(executable)
 	if !ok || !sameCodexExecutablePath(stablePath, executable) {

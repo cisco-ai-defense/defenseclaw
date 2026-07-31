@@ -83,7 +83,6 @@ def _default_admission_policy() -> AdmissionPolicyData:
                     ".openclaw/extensions/defenseclaw",
                     ".zeptoclaw/extensions/defenseclaw",
                     ".claude/extensions/defenseclaw",
-                    ".codex/extensions/defenseclaw",
                 ],
             ),
             ("skill", "codeguard"): (
@@ -93,6 +92,7 @@ def _default_admission_policy() -> AdmissionPolicyData:
                     ".openclaw/skills/codeguard",
                     ".zeptoclaw/skills/codeguard",
                     ".claude/skills/codeguard",
+                    ".agents/skills/codeguard",
                 ],
             ),
         },

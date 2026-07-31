@@ -32,6 +32,9 @@ from click.testing import CliRunner
 from defenseclaw.commands.cmd_plugin import (
     _build_plugin_actions_map,
     _build_plugin_scan_map,
+    _list_copilot_plugins,
+    _parse_plugin_list_text,
+    _plugin_install_targets,
     _resolve_openclaw_plugin_id,
     _resolve_plugin_dir,
     plugin,
@@ -40,6 +43,27 @@ from defenseclaw.enforce import PolicyEngine
 from defenseclaw.enforce.plugin_enforcer import PluginEnforcer
 
 from tests.helpers import cleanup_app, make_app_context
+
+
+def test_copilot_empty_plugin_help_is_not_inventory() -> None:
+    assert _parse_plugin_list_text(
+        "No plugins installed.\n\nUse 'copilot plugin install OWNER/REPO' to install one.\n"
+    ) == []
+
+
+def test_copilot_nested_installed_plugin_inventory(monkeypatch, tmp_path) -> None:
+    home = tmp_path / ".copilot"
+    plugin_dir = home / "installed-plugins" / "marketplace" / "sample"
+    manifest = plugin_dir / ".github" / "plugin"
+    manifest.mkdir(parents=True)
+    (manifest / "plugin.json").write_text(
+        json.dumps({"name": "sample", "version": "1.2.3"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("COPILOT_HOME", str(home))
+    monkeypatch.setattr(shutil, "which", lambda _name: None)
+    rows = _list_copilot_plugins()
+    assert [(row["id"], row["version"]) for row in rows] == [("sample", "1.2.3")]
 
 
 def _seed_scan(store, result) -> None:
@@ -132,6 +156,18 @@ class PluginCommandTestBase(unittest.TestCase):
 
 
 class TestPluginInstall(PluginCommandTestBase):
+    def test_windows_antigravity_install_target_remains_unavailable(self):
+        root = os.path.join(self.tmp_dir, "antigravity-plugins")
+        self.app.cfg.plugin_dirs = lambda connector=None: [root]  # type: ignore[method-assign]
+
+        with self.assertRaises(SystemExit):
+            _plugin_install_targets(
+                self.app,
+                ["antigravity"],
+                explicit_connector=True,
+                platform_name="nt",
+            )
+
     """Local directory installs — scanner mocked to return clean."""
 
     def _invoke_install(self, args: list[str]):
@@ -1314,6 +1350,7 @@ class TestPluginMultiConnectorSemantics(PluginCommandTestBase):
         self.assertTrue(os.path.isdir(os.path.join(self.hermes_root, "narrow")))
         self.assertEqual(mock_scan.call_count, 1)
 
+    @unittest.skipUnless(sys.platform == "darwin", "native macOS Antigravity plugin surface")
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
     def test_install_antigravity_uses_documented_plugin_dir(self, mock_scan):
         mock_scan.side_effect = lambda path, **_kwargs: self._clean_scan_result(path)
@@ -1340,6 +1377,7 @@ class TestPluginMultiConnectorSemantics(PluginCommandTestBase):
         self.assertTrue(os.path.isfile(os.path.join(installed, "plugin.json")))
         mock_scan.assert_called_once_with(installed)
 
+    @unittest.skipUnless(sys.platform == "darwin", "native macOS Antigravity plugin surface")
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
     def test_install_antigravity_requires_root_plugin_manifest(self, mock_scan):
         antigravity_root = os.path.join(self.tmp_dir, "antigravity", "plugins")
@@ -1357,6 +1395,24 @@ class TestPluginMultiConnectorSemantics(PluginCommandTestBase):
         self.assertEqual(result.exit_code, 1, result.output)
         self.assertIn("require a regular root plugin.json", result.output)
         self.assertFalse(os.path.exists(os.path.join(antigravity_root, "not-an-antigravity-plugin")))
+        mock_scan.assert_not_called()
+
+    @unittest.skipUnless(sys.platform == "darwin", "native macOS Antigravity plugin surface")
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_install_antigravity_requires_cli_manifest_name(self, mock_scan):
+        antigravity_root = os.path.join(self.tmp_dir, "antigravity", "plugins")
+        os.makedirs(antigravity_root)
+        self.app.cfg.active_connector = lambda: "antigravity"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["antigravity"]  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda connector=None: [antigravity_root]  # type: ignore[method-assign]
+        src = self._create_plugin_dir("unnamed-antigravity-plugin")
+        with open(os.path.join(src, "plugin.json"), "w", encoding="utf-8") as fh:
+            json.dump({"description": "missing required CLI plugin name"}, fh)
+
+        result = self.invoke(["install", src, "--connector", "antigravity"])
+
+        self.assertEqual(result.exit_code, 1, result.output)
+        self.assertIn("name must match", result.output)
         mock_scan.assert_not_called()
 
     def test_policy_verbs_reject_unknown_connector_without_writing_rows(self):

@@ -3184,8 +3184,8 @@ _CONNECTOR_META: dict[str, dict[str, str]] = {
         "subprocess_policy": "none",
     },
     "windsurf": {
-        "label": "Windsurf",
-        "description": "Cascade hooks + documented local config discovery",
+        "label": "Devin Desktop (Windsurf)",
+        "description": "Cascade hooks + documented MCP/skills/rules/instructions",
         "tool_mode": "both",
         "subprocess_policy": "none",
     },
@@ -3227,7 +3227,7 @@ _CONNECTOR_META: dict[str, dict[str, str]] = {
     },
     "omnigent": {
         "label": "OmniGent",
-        "description": "custom Python policy bridge with ALLOW/ASK/DENY and optional native OTLP",
+        "description": "custom Python policy bridge with ALLOW/ASK/DENY and opt-in native OTLP",
         "tool_mode": "both",
         "subprocess_policy": "none",
     },
@@ -3299,7 +3299,9 @@ _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
     ),
     "windsurf": (
         "~/.codeium/windsurf/hooks.json hooks",
-        "Existing Windsurf MCP/rules paths are discovered but not guessed/created",
+        "~/.codeium/windsurf/mcp_config.json MCP entries when configured explicitly",
+        "<workspace>/.windsurf/skills and ~/.codeium/windsurf/skills install surfaces",
+        "<workspace>/.devin/rules preferred rules plus AGENTS.md instruction discovery",
         "~/.defenseclaw/hooks/windsurf-hook.sh",
     ),
     "geminicli": (
@@ -3319,12 +3321,19 @@ _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
     "openhands": (
         "~/.openhands/hooks.json hooks by default",
         "<workspace>/.openhands/hooks.json hooks only when --workspace is provided",
-        "~/.openhands/mcp.json MCP entries when configured explicitly",
+        "$OPENHANDS_PERSISTENCE_DIR/mcp.json or ~/.openhands/mcp.json MCP entries",
         (
             "~/.agents/skills install surface and ~/.openhands/cache/skills/"
             "public-skills/skills discovery by default; workspace .agents/skills "
             "only when --workspace is provided"
         ),
+        (
+            "~/.agents/agents/*.md file-agent install surface by default; "
+            "workspace .agents/agents/*.md only when --workspace is provided"
+        ),
+        "OpenHands CLI plugins: N/A (no persistent CLI plugin install/config path)",
+        "AGENTS.md, AGENT.md, CLAUDE.md, GEMINI.md, and .cursorrules instructions: discovery-only",
+        "Native OTLP traces use documented process environment variables; shell rc files are not mutated",
         "~/.defenseclaw/hooks/openhands-hook.sh",
     ),
     "antigravity": (
@@ -3334,6 +3343,8 @@ _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
             "the host separately discovers <workspace>/.agents/hooks.json, so "
             "DefenseClaw owns only the global registration"
         ),
+        "~/.gemini/config/mcp_config.json and optional <workspace>/.agents/mcp_config.json",
+        "Documented AgentSkills and manual plugin roots; CLI staging roots remain discovery-only",
         "~/.defenseclaw/hooks/antigravity-hook.sh",
     ),
     "opencode": (
@@ -3347,7 +3358,10 @@ _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
         "OmniGent's effective config.yaml policy_modules and server-wide policies",
         "~/.defenseclaw/hooks/defenseclaw_omnigent_policy.py",
         "OmniGent Python environment defenseclaw_omnigent.pth import-path file",
-        "Optional native OTLP uses documented process environment variables; shell startup files are not modified",
+        (
+            "Opt-in native OTLP requires OMNIGENT_TELEMETRY_ENABLED=true plus documented "
+            "OTEL process variables; shell startup files are not modified"
+        ),
     ),
 }
 
@@ -3705,15 +3719,22 @@ def _record_windows_setup_agent_selections(
     data_dir: str | os.PathLike[str] | None,
     connectors: list[str] | tuple[str, ...],
 ) -> None:
-    """Refresh protected executable authority for native runtime inspection."""
+    """Refresh protected executable authority for native runtime inspection.
 
-    if platform_support.host_os() != "windows":
+    The compatibility name is retained for tests and callers introduced with
+    native Windows setup. macOS Codex and Claude Code consume the same
+    short-lived protected receipt before the gateway seals executable evidence.
+    """
+
+    host = platform_support.host_os()
+    if host not in {"windows", "darwin"}:
         return
+    protected = {"codex", "omnigent"} if host == "windows" else {"codex", "claudecode"}
     selected = tuple(
         dict.fromkeys(
             connector
             for raw in connectors
-            if (connector := normalize_connector(raw)) in {"codex", "omnigent"}
+            if (connector := normalize_connector(raw)) in protected
         )
     )
     if not selected:
@@ -3730,6 +3751,15 @@ def _record_windows_setup_agent_selections(
     for connector in selected:
         if connector not in selections and connector not in selection_errors:
             selection_errors[connector] = "selection was not recorded"
+    if (
+        host == "darwin"
+        and os.environ.get("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") == "1"
+    ):
+        # Layer-A contract smoke deliberately runs without an upstream agent.
+        # Keep that explicit exploratory escape hatch usable while production
+        # and certification setup continue to require protected evidence.
+        for connector in ("codex", "claudecode"):
+            selection_errors.pop(connector, None)
     if selection_errors:
         details = "; ".join(f"{name}: {detail}" for name, detail in sorted(selection_errors.items()))
         raise click.ClickException(
@@ -5428,7 +5458,8 @@ def _print_connector_observability_banner(connector: str, *, mode: str = "observ
     if connector in native_otel_connectors:
         if connector == "omnigent":
             click.echo(
-                "    • Native OTel — optional; inactive until OTEL_* variables are exported for the OmniGent process"
+                "    • Native OTel — opt-in; inactive until OMNIGENT_TELEMETRY_ENABLED=true "
+                "and OTEL_* are exported for the OmniGent process"
             )
         elif connector == "codex":
             click.echo(
@@ -5536,7 +5567,7 @@ def _print_observability_summary(
         ("ai_discovery", f"enabled ({cfg.ai_discovery.mode})" if cfg else "enabled"),
     ]
     if connector == "omnigent":
-        rows.append(("native OTel", "optional; inactive until OTEL_* is exported for OmniGent"))
+        rows.append(("native OTel", "opt-in; requires OMNIGENT_TELEMETRY_ENABLED=true + OTEL_*"))
     elif connector == "hermes":
         rows.extend(
             [
@@ -7250,7 +7281,10 @@ for _observability_connector in (
     "opencode",
     "omnigent",
 ):
-    setup.add_command(_make_observability_setup_command(_observability_connector))
+    _observability_command = _make_observability_setup_command(_observability_connector)
+    setup.add_command(_observability_command)
+    if _observability_connector == "antigravity":
+        setup.add_command(_observability_command, name="agy")
 
 
 # Two orthogonal facts about a connector — split deliberately so the

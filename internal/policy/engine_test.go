@@ -488,7 +488,6 @@ func TestEngine_FirstPartyAllowList_AllConnectorPaths(t *testing.T) {
 		{"openclaw_plugin", "plugin", "defenseclaw", "/tmp/.openclaw/extensions/defenseclaw"},
 		{"zeptoclaw_plugin", "plugin", "defenseclaw", "/tmp/.zeptoclaw/extensions/defenseclaw"},
 		{"claudecode_plugin", "plugin", "defenseclaw", "/tmp/.claude/extensions/defenseclaw"},
-		{"codex_plugin", "plugin", "defenseclaw", "/tmp/.codex/extensions/defenseclaw"},
 		{"defenseclaw_root", "skill", "codeguard", "/tmp/.defenseclaw/skills/codeguard"},
 	}
 

@@ -1,0 +1,13 @@
+{
+  "type": "tool_call",
+  "target": "sys_os_shell",
+  "data": {
+    "name": "sys_os_shell",
+    "arguments": {
+      "command": "printf contract-allow"
+    }
+  },
+  "context": {
+    "model": "contract-test"
+  }
+}

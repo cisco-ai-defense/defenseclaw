@@ -399,6 +399,19 @@ func ensureManagedBackupDirRestricted(dir string) error {
 }
 
 func readManagedTarget(path string) ([]byte, os.FileInfo, error) {
+	lstat, err := os.Lstat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil, nil
+		}
+		return nil, nil, fmt.Errorf("inspect %s: %w", path, err)
+	}
+	if lstat.Mode()&os.ModeSymlink != 0 {
+		return nil, nil, fmt.Errorf("managed target must not be a symlink: %s", path)
+	}
+	if !lstat.Mode().IsRegular() {
+		return nil, nil, fmt.Errorf("managed target must be a regular file: %s", path)
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {

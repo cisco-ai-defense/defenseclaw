@@ -10,6 +10,13 @@ keywords:
 
 The OmniGent connector uses OmniGent's documented custom Python policy API. It does not proxy OmniGent's model traffic. A small in-process policy bridge sends each policy event to the local DefenseClaw gateway, then maps the result back to OmniGent `ALLOW`, `ASK`, or `DENY`.
 
+The latest official release and DefenseClaw's pinned contract version are both
+**OmniGent 0.7.0** (**CURRENT**). Versions below the six-phase policy-contract
+floor, **0.1.0**, are **OUTDATED**. macOS remains **UNCERTIFIED** until a
+reviewed, durable, latest-version live run is recorded in DefenseClaw's
+validation registry. The empty macOS validation stamp is deliberately not a
+claim that a local or hosted test passed.
+
 On Windows this is a **native degraded preview** for OmniGent 0.7.0 or newer.
 Only `omnigent server` and SDK-based harnesses are in scope. Native
 tmux/PTY terminal wrappers, filesystem/network sandboxing, and the L7 egress
@@ -19,6 +26,7 @@ compatibility layer.
 ## Setup
 
 ```bash
+uv tool install --python 3.12 omnigent==0.7.0
 defenseclaw setup omnigent                # observe (default)
 defenseclaw setup omnigent --mode action  # enforce ALLOW / ASK / DENY
 omnigent server --config ~/.omnigent/config.yaml
@@ -49,10 +57,19 @@ When `OMNIGENT_CONFIG_HOME` is set, DefenseClaw and OmniGent both use
 `$OMNIGENT_CONFIG_HOME/config.yaml`; otherwise they use
 `~/.omnigent/config.yaml`.
 
+OmniGent also loads `<workspace>/.omnigent/config.yaml` and shallowly replaces
+global `policies` and `policy_modules` when those keys occur there. Setup,
+Doctor, and repair refuse that ambiguous state before changing managed files.
+Remove the project policy keys or start OmniGent with the explicit global
+`--config` path shown above.
+
 The connector must write the `.pth` file into the Python environment that owns
 the `omnigent` executable. Use an isolated environment that your user can
 write; setup stops with a clear error instead of attempting a privileged
-system-Python install. Native Windows setup requires the official `uv tool`
+system-Python install. On macOS, official `uv tool`, Homebrew, and writable
+isolated Python installs are supported when the selected `omnigent`/`omni`
+entry point resolves to its owning Python environment. Native Windows setup
+requires the official `uv tool`
 layout and a fresh protected executable selection; discovery, setup, repair,
 and later reconciliation bind the exact `omnigent.exe` digest to the connector
 lock. Direct `uv.exe` and tool-Python metadata probes have connector-owned
@@ -69,6 +86,11 @@ process-local plus owned cross-process lifecycle lock; scoped credentials are
 refreshed inside that transaction and revoked only after clean teardown.
 
 All three managed files are backed up. Teardown restores unchanged files byte-for-byte and removes only DefenseClaw-owned YAML entries when the operator has edited the config.
+
+After upgrading or replacing an isolated `uv tool`/pip environment, run
+`defenseclaw setup omnigent` again before starting OmniGent. The `.pth` import
+shim belongs to the selected Python environment; setup/repair moves that
+binding transactionally and preserves the prior environment for rollback.
 
 ## Policy phases and decisions
 
@@ -115,6 +137,8 @@ process that starts OmniGent. Native OTLP uses its own connector-scoped token;
 it does not reuse the policy-hook token or the gateway master credential.
 Setup creates the owner-only token and successful teardown revokes it.
 
+On Windows PowerShell:
+
 ```powershell
 $tokenPath = Join-Path $env:USERPROFILE '.defenseclaw\hooks\.otlp-omnigent.token'
 $otlpToken = [IO.File]::ReadAllText($tokenPath).Trim()
@@ -128,22 +152,51 @@ $env:OMNIGENT_OTEL_CAPTURE_CONTENT = 'false'
 omnigent server --config (Join-Path $env:OMNIGENT_CONFIG_HOME 'config.yaml')
 ```
 
+On macOS or Linux:
+
+```bash
+otlp_token="$(< "$HOME/.defenseclaw/hooks/.otlp-omnigent.token")"
+export OTEL_EXPORTER_OTLP_ENDPOINT="http://127.0.0.1:18970"
+export OTEL_EXPORTER_OTLP_PROTOCOL="http/protobuf"
+export OTEL_EXPORTER_OTLP_HEADERS="authorization=Bearer%20${otlp_token},x-defenseclaw-source=omnigent,x-defenseclaw-client=omnigent-otel%2F1.0"
+export OTEL_LOGS_EXPORTER="otlp"
+export OTEL_METRICS_EXPORTER="otlp"
+export OTEL_TRACES_EXPORTER="otlp"
+export OMNIGENT_TELEMETRY_ENABLED="true"
+export OMNIGENT_OTEL_CAPTURE_CONTENT="false"
+omnigent server --config ~/.omnigent/config.yaml
+```
+
 Logs, metrics, and traces use OpenTelemetry packages present in OmniGent's
-base/default dependency set; no separate tracing extra is required. The status
-API reports only channels configured by DefenseClaw, so it continues to show
-`hooks`; native OTLP remains a separately documented capability because setup
-cannot verify another process's environment.
+base/default dependency set; no separate tracing extra is required. Native
+instrumentation is inert unless `OMNIGENT_TELEMETRY_ENABLED=true`, and content
+capture remains separately disabled in both examples. The status API reports
+only channels configured by DefenseClaw, so it continues to show `hooks`;
+native OTLP remains a separately documented capability because setup cannot
+verify another process's environment.
 
 OmniGent 0.7.0 policy events do not publish stable session, turn, tool-call, or
 model-request IDs. Native spans can carry OmniGent's `session.id`, but there is
 no source-proven field that joins that native session to a policy event.
 DefenseClaw therefore records native session correlation as partial and does
-not infer missing cross-rail identities.
+not infer missing cross-rail identities or label hook-derived telemetry as
+native OTLP.
+
+At `BeforeModel`, DefenseClaw therefore mints an internal UUIDv7 model-request
+ID. `AfterModel` resolves the unique durable pending model operation, including
+after a gateway restart. Payload fields named `request_id`, `conversation_id`,
+or `response_id` are not treated as OmniGent provider identities.
 
 ## Local surfaces
 
 <Files>
   <Folder name="~/.omnigent" defaultOpen>
+    <File name="config.yaml" />
+    <Folder name="agents">
+      <File name="*.yaml" />
+    </Folder>
+  </Folder>
+  <Folder name="<workspace>/.omnigent" defaultOpen>
     <File name="config.yaml" />
   </Folder>
   <Folder name="~/.defenseclaw/hooks" defaultOpen>
@@ -151,7 +204,21 @@ not infer missing cross-rail identities.
   </Folder>
 </Files>
 
-DefenseClaw v1 does not modify OmniGent MCP, skill, rule, plugin, or agent-bundle configuration.
+DefenseClaw inventories global and project config plus the official
+`~/.omnigent/agents` root. Agent YAML can embed MCP servers, skills,
+instructions/prompts, agents, and sub-agents (microagents), so those surfaces
+are discovery-only at that stable root. Agent bundles supplied from arbitrary
+paths to `omnigent run` are not traversed.
+
+The remaining vendor categories are explicitly N/A for filesystem inventory:
+
+- plugins are Python package entry points, not a user-owned plugin directory;
+- rules are policies and agent-spec sandbox settings, not a separate rules
+  directory; and
+- instructions have no separate root outside the inventoried agent YAML.
+
+DefenseClaw therefore does not guess roots, traverse arbitrary workspaces, or
+attribute underlying Claude/Codex/Cursor assets to OmniGent.
 
 ## Hook capabilities
 

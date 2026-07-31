@@ -464,7 +464,7 @@ func friendlyConnectorName(name string) string {
 	case "cursor":
 		return "Cursor"
 	case "windsurf":
-		return "Windsurf"
+		return "Devin Desktop (Windsurf)"
 	case "geminicli":
 		return "Gemini CLI"
 	case "copilot":

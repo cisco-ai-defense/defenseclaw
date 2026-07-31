@@ -634,7 +634,8 @@ func NewHookContractLockEntry(opts SetupOpts, conn Connector, defenseClawVersion
 		HookFailMode:           resolveHookFailMode(opts, conn),
 		UpdatedAt:              time.Now().UTC().Format(time.RFC3339),
 	}
-	if runtime.GOOS == "windows" && (entry.Connector == "codex" || entry.Connector == "omnigent") {
+	if (runtime.GOOS == "windows" && (entry.Connector == "codex" || entry.Connector == "omnigent")) ||
+		(runtime.GOOS == "darwin" && (entry.Connector == "codex" || entry.Connector == "claudecode")) {
 		executable, digest, ok := setupSelectedAgentExecutableEvidence(opts.AgentExecutable)
 		if ok {
 			entry.AgentExecutable = executable
@@ -992,7 +993,31 @@ func hookRuntimeArtifactPaths(opts SetupOpts, conn Connector) []string {
 
 func LoadCachedAgentVersion(dataDir, connectorName string) string {
 	normalizedName := normalizeConnectorName(connectorName)
+	if runtime.GOOS == "darwin" && normalizedName == "claudecode" {
+		if selection, ok := loadSetupAgentSelection(dataDir, normalizedName); ok {
+			return selection.RawVersion
+		}
+		if entry, exists := loadProtectedHookContractEntry(dataDir, normalizedName); exists {
+			if validSetupSelectedAgentExecutableEvidence(entry, normalizedName) {
+				return strings.TrimSpace(entry.RawAgentVersion)
+			}
+			return ""
+		}
+		return ""
+	}
 	if runtime.GOOS == "windows" && normalizedName == "codex" {
+		if entry, exists := loadProtectedCodexContractEntry(dataDir); exists {
+			if validCodexAgentExecutableEvidence(entry) {
+				return strings.TrimSpace(entry.RawAgentVersion)
+			}
+			return ""
+		}
+		if selection, ok := loadSetupAgentSelection(dataDir, normalizedName); ok {
+			return selection.RawVersion
+		}
+		return ""
+	}
+	if runtime.GOOS == "darwin" && normalizedName == "codex" {
 		if entry, exists := loadProtectedCodexContractEntry(dataDir); exists {
 			if validCodexAgentExecutableEvidence(entry) {
 				return strings.TrimSpace(entry.RawAgentVersion)
@@ -1027,7 +1052,7 @@ func LoadCachedAgentVersion(dataDir, connectorName string) string {
 }
 
 // LoadCachedAgentExecutable is retained as a compatibility name for setup
-// callers. On Windows, native executable-inspecting connectors never grant
+// callers. On Windows and macOS, native Codex executable inspection never grants
 // authority from agent_discovery.json: an existing install uses its protected,
 // version/contract-bound lock entry, while a fresh install may consume the
 // short-lived setup-selected receipt. The connector revalidates source,
@@ -1035,7 +1060,31 @@ func LoadCachedAgentVersion(dataDir, connectorName string) string {
 // established discovery-cache behavior.
 func LoadCachedAgentExecutable(dataDir, connectorName string) string {
 	normalizedName := normalizeConnectorName(connectorName)
+	if runtime.GOOS == "darwin" && normalizedName == "claudecode" {
+		if selection, ok := loadSetupAgentSelection(dataDir, normalizedName); ok {
+			return selection.Executable
+		}
+		if entry, exists := loadProtectedHookContractEntry(dataDir, normalizedName); exists {
+			if validSetupSelectedAgentExecutableEvidence(entry, normalizedName) {
+				return strings.TrimSpace(entry.AgentExecutable)
+			}
+			return ""
+		}
+		return ""
+	}
 	if runtime.GOOS == "windows" && normalizedName == "codex" {
+		if entry, exists := loadProtectedCodexContractEntry(dataDir); exists {
+			if validCodexAgentExecutableEvidence(entry) {
+				return strings.TrimSpace(entry.AgentExecutable)
+			}
+			return ""
+		}
+		if selection, ok := loadSetupAgentSelection(dataDir, normalizedName); ok {
+			return selection.Executable
+		}
+		return ""
+	}
+	if runtime.GOOS == "darwin" && normalizedName == "codex" {
 		if entry, exists := loadProtectedCodexContractEntry(dataDir); exists {
 			if validCodexAgentExecutableEvidence(entry) {
 				return strings.TrimSpace(entry.AgentExecutable)

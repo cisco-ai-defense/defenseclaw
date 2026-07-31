@@ -1,0 +1,13 @@
+{
+  "type": "tool_call",
+  "target": "sys_os_shell",
+  "data": {
+    "name": "sys_os_shell",
+    "arguments": {
+      "command": "cat /etc/shadow"
+    }
+  },
+  "context": {
+    "model": "contract-test"
+  }
+}

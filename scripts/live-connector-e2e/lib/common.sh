@@ -268,6 +268,22 @@ dc_hook_script() {
   printf '%s/hooks/%s' "${DEFENSECLAW_HOME}" "${base}"
 }
 
+dc_omnigent_python() {
+  local binary shebang python_path
+  binary="$(command -v omnigent 2>/dev/null)" || return 1
+  IFS= read -r shebang < "${binary}" || return 1
+  case "${shebang}" in
+    '#!'*) python_path="${shebang#'#!'}" ;;
+    *) return 1 ;;
+  esac
+  case "${python_path}" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  [ -x "${python_path}" ] || return 1
+  printf '%s' "${python_path}"
+}
+
 # dc_invoke_hook <connector> <event> <payload_file> — feed a golden event
 # payload into the installed hook entrypoint and echo "exit:<code>" on the
 # last line so callers can assert verdict shaping. On Windows this targets the
@@ -285,7 +301,18 @@ dc_invoke_hook() {
       bound_event="PreToolUse"
       ;;
   esac
-  if dc_is_windows; then
+  if [ "${connector}" = "omnigent" ] && ! dc_is_windows; then
+    local omni_python probe="${DC_E2E_ROOT}/omnigent-policy-probe.py"
+    omni_python="$(dc_omnigent_python)" || {
+      dc_err "could not resolve OmniGent's owning Python interpreter"
+      printf 'exit:127\n'
+      return 0
+    }
+    out="$("${omni_python}" -I "${probe}" "${payload}")" && code=0 || code=$?
+    if printf '%s' "${out}" | grep -q '"result":"DENY"'; then
+      code=2
+    fi
+  elif dc_is_windows; then
     if [ "${connector}" = "codex" ]; then
       out="$(defenseclaw-hook hook --connector "${connector}" --event "${bound_event}" --hook-contract codex-hooks-v4 < "${payload}" 2>&1)" && code=0 || code=$?
     else

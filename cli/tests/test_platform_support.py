@@ -31,6 +31,7 @@ from defenseclaw.commands.cmd_setup import (
 from defenseclaw.connector_paths import KNOWN_CONNECTORS
 from defenseclaw.context import AppContext
 from defenseclaw.platform_support import (
+    DARWIN_CONNECTOR_SUPPORT,
     NOT_CERTIFIED,
     PREVIEW,
     PROXY_CONNECTORS,
@@ -140,6 +141,14 @@ def test_windows_taxonomy_matches_go_mirror_and_has_reasons() -> None:
         )
         assert re.search(pattern, go_source), f"Go status/reason drift for {name}"
 
+    for name, support in DARWIN_CONNECTOR_SUPPORT.items():
+        pattern = (
+            rf'"{re.escape(name)}":\s*\{{\s*'
+            rf"Status:\s*{go_status[support.status]},\s*"
+            rf'Reason:\s*"{re.escape(support.reason)}",'
+        )
+        assert re.search(pattern, go_source), f"Go macOS status/reason drift for {name}"
+
 
 def test_proxy_topology_is_distinct_from_windows_support() -> None:
     assert set(PROXY_CONNECTORS) == {"openclaw", "zeptoclaw"}
@@ -173,12 +182,58 @@ def test_unknown_windows_connector_requires_certification() -> None:
     assert support.available is False
 
 
-def test_non_windows_behavior_is_unchanged() -> None:
-    for os_name in ("linux", "darwin"):
-        for name in ALL_CONNECTORS:
-            support = connector_platform_support(name, os_name)
-            assert support.status == SUPPORTED
-            assert support.available
+def test_linux_behavior_is_unchanged_and_macos_evidence_states_are_preview() -> None:
+    for name in ALL_CONNECTORS:
+        support = connector_platform_support(name, "linux")
+        assert support.status == SUPPORTED
+        assert support.available
+
+    assert set(DARWIN_CONNECTOR_SUPPORT) == {
+        "codex", "claudecode", "cursor", "windsurf", "hermes", "antigravity"
+    }
+    go_source = (
+        Path(__file__).resolve().parents[2] / "internal" / "gateway" / "connector" / "platform_support.go"
+    ).read_text(encoding="utf-8")
+    for name, support in DARWIN_CONNECTOR_SUPPORT.items():
+        pattern = (
+            rf'"{re.escape(name)}":\s*\{{\s*'
+            rf"Status:\s*PlatformPreview,\s*"
+            rf'Reason:\s*"{re.escape(support.reason)}",'
+        )
+        assert re.search(pattern, go_source), f"Go macOS status/reason drift for {name}"
+    for name in ALL_CONNECTORS:
+        support = connector_platform_support(name, "darwin")
+        assert support.status == (
+            PREVIEW
+            if name in {"codex", "claudecode", "cursor", "windsurf", "hermes", "antigravity"}
+            else SUPPORTED
+        )
+        assert support.available
+
+
+def test_macos_antigravity_is_available_but_not_overclaimed() -> None:
+    assert "antigravity" in DARWIN_CONNECTOR_SUPPORT
+    support = connector_platform_support("antigravity", "darwin")
+    assert support.status == PREVIEW
+    assert support.available
+    assert "official-client certification" in support.reason
+    assert connector_platform_support("geminicli", "darwin").status == SUPPORTED
+
+    go_source = (
+        Path(__file__).resolve().parents[2] / "internal" / "gateway" / "connector" / "platform_support.go"
+    ).read_text(encoding="utf-8")
+    assert '"antigravity": {' in go_source
+    assert f'Reason: "{support.reason}",' in go_source
+
+
+def test_antigravity_product_alias_is_canonical_and_visible() -> None:
+    assert _normalize_connector_arg("agy") == "antigravity"
+    assert setup_group.commands["agy"] is setup_group.commands["antigravity"]
+    with patch("defenseclaw.platform_support.host_os", return_value="darwin"):
+        result = CliRunner().invoke(setup_group, ["--help"], terminal_width=240)
+    assert result.exit_code == 0, result.output
+    assert re.search(r"(?m)^  agy\s+.*Antigravity", result.output)
+    assert re.search(r"(?m)^  antigravity\s+.*Antigravity", result.output)
 
 
 def test_supported_connectors_preserves_order_and_available_windows_scope() -> None:
@@ -303,9 +358,17 @@ def test_windows_views_include_labeled_preview_and_hide_unavailable() -> None:
     assert "omnigent" in {choice.wire for choice in win_modes}
 
 
-def test_non_windows_views_are_unfiltered() -> None:
+def test_non_windows_views_preserve_scope_and_label_macos_preview() -> None:
     assert supported_connector_choices("linux") == CONNECTORS
-    assert visible_mode_picker_choices("darwin") == MODE_PICKER_CHOICES
+    darwin_choices = visible_mode_picker_choices("darwin")
+    assert {choice.wire for choice in darwin_choices} == {choice.wire for choice in MODE_PICKER_CHOICES}
+    labels = {choice.wire: choice.label for choice in darwin_choices}
+    assert labels["claudecode"] == "Claude Code (preview)"
+    assert labels["codex"] == "Codex (preview)"
+    assert labels["cursor"] == "Cursor (preview)"
+    assert labels["windsurf"] == "Devin Desktop (preview)"
+    assert labels["hermes"] == "Hermes (preview)"
+    assert labels["antigravity"] == "Antigravity (preview)"
     assert visible_connector_choices("linux") == CONNECTOR_CHOICES
 
 

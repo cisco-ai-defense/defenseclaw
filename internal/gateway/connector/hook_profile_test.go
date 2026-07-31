@@ -52,7 +52,7 @@ func TestHookProfileMatrix(t *testing.T) {
 		{"claudecode", true, NativeOTLPEnvBlock, true, true, true, true},
 		{"geminicli", true, NativeOTLPJSONBlock, true, false, true, true},
 		{"copilot", true, "", true, true, false, true},
-		{"openhands", true, "", true, false, true, true},
+		{"openhands", true, NativeOTLPEnvBlock, true, false, true, true},
 		{"cursor", true, "", true, true, true, true},
 		{"windsurf", true, "", true, false, true, true},
 		{"hermes", true, "", true, false, false, true},
@@ -144,6 +144,28 @@ func TestHookProfileMatrix_AllCapabilityProvidersHaveProfile(t *testing.T) {
 		}
 		if _, ok := c.(HookProfileProvider); !ok {
 			t.Errorf("connector %q implements HookCapabilityProvider but not HookProfileProvider", c.Name())
+		}
+	}
+}
+
+func TestOpenHandsConfirmContextIsOnlyReturnedForUserPromptSubmit(t *testing.T) {
+	for _, tc := range []struct {
+		event string
+		want  bool
+	}{
+		{"user_prompt_submit", true},
+		{"pre_tool_use", false},
+		{"stop", false},
+	} {
+		out := hookOnlyProfileRespond(HookRespondInput{
+			Req:               HookProfileRequest{ConnectorName: "openhands", HookEventName: tc.event},
+			Action:            "alert",
+			RawAction:         "confirm",
+			AdditionalContext: "review required",
+		})
+		got := out.Output != nil && out.Output["additionalContext"] == "review required"
+		if got != tc.want {
+			t.Errorf("%s additionalContext=%v want %v; output=%v", tc.event, got, tc.want, out.Output)
 		}
 	}
 }

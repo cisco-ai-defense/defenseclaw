@@ -19,6 +19,7 @@ package connector
 import (
 	"fmt"
 	"regexp"
+	"runtime"
 	"strconv"
 	"strings"
 )
@@ -380,6 +381,7 @@ var builtinHookContracts = map[string][]HookContract{
 		Connector:               "hermes",
 		ContractID:              "hermes-hooks-v1",
 		MinAgentVersion:         "0.19.0",
+		MaxAgentVersion:         "0.20.0",
 		DefaultForUnversioned:   true,
 		HookScriptVersion:       "v6",
 		HookConfigPathTemplates: []string{"$HERMES_HOME/config.yaml", "%LOCALAPPDATA%/hermes/config.yaml", "~/.hermes/config.yaml"},
@@ -536,7 +538,7 @@ var builtinHookContracts = map[string][]HookContract{
 		},
 		SupportsTraceparent: true,
 		Notes: []string{
-			"Windsurf 1.12.41 added Cascade hooks on user prompts, completing the pre-hook set used by this contract.",
+			"Windsurf 1.12.41 added Cascade hooks on user prompts, completing the pre-hook set used by this contract; the renamed Devin Desktop 3.x line retains these legacy hook paths and events.",
 			"Only the five pre_* events are blocking, and Windsurf treats exit code 2 as the blocking decision; other non-zero exit codes continue.",
 			"Post hooks do not block Cascade, post_cascade_response hooks run asynchronously, and Restricted Mode disables hooks.",
 		},
@@ -638,6 +640,7 @@ var builtinHookContracts = map[string][]HookContract{
 				Scope:              "user,workspace",
 			},
 			SupportsTraceparent: true,
+			NativeOTLP:          true,
 			Notes: []string{
 				"Current GitHub Copilot CLI documentation includes the mutation-only userPromptTransformed event; DefenseClaw returns no modification.",
 				"GitHub Copilot CLI 1.0.76 is the conservative reviewed floor for this current 14-event contract.",
@@ -650,6 +653,7 @@ var builtinHookContracts = map[string][]HookContract{
 		Connector:               "antigravity",
 		ContractID:              "antigravity-hooks-v2",
 		MinAgentVersion:         "1.1.8",
+		MaxAgentVersion:         "1.1.10",
 		DefaultForUnversioned:   true,
 		HookScriptVersion:       "v8",
 		HookConfigPathTemplates: []string{"~/.gemini/config/hooks.json"},
@@ -679,6 +683,8 @@ var builtinHookContracts = map[string][]HookContract{
 		},
 		SupportsTraceparent: true,
 		Notes: []string{
+			"CLI 1.1.8 and 1.1.9 are artifact-reviewed on macOS. The 1.1.10 exclusive ceiling prevents later patches from being classified as known without a fresh contract review.",
+			"CLI 1.1.9 bounds repeated Stop-hook continuations and fixes PostToolUse firing and matcher evaluation without changing the five-event schema or its payload and response fields.",
 			"Antigravity 2.0 documents five lifecycle events. PreToolUse and PostToolUse use matcher groups with nested handlers; PreInvocation, PostInvocation, and Stop use direct handler lists.",
 			"Hard blocking is claimed only for synchronous PreToolUse stdout {\"decision\":\"deny\"}. decision=ask provides native confirmation. Google does not document non-zero hook exit codes as an enforcement interface.",
 			"PostToolUse output is {}. PreInvocation and PostInvocation may return injectSteps; DefenseClaw uses ephemeralMessage only for context. Stop requires a decision, where continue re-enters the loop and any other value permits stopping; DefenseClaw returns allow and does not claim Stop blocking.",
@@ -688,7 +694,7 @@ var builtinHookContracts = map[string][]HookContract{
 	"openhands": {{
 		Connector:               "openhands",
 		ContractID:              "openhands-hooks-v1",
-		MinAgentVersion:         "0.0.0",
+		MinAgentVersion:         "1.12.0",
 		DefaultForUnversioned:   true,
 		HookScriptVersion:       "v6",
 		HookConfigPathTemplates: []string{"~/.openhands/hooks.json", "<workspace>/.openhands/hooks.json"},
@@ -714,18 +720,21 @@ var builtinHookContracts = map[string][]HookContract{
 			Scope:              "user,workspace",
 		},
 		SupportsTraceparent: true,
+		NativeOTLP:          true,
 		Notes: []string{
 			"OpenHands hooks use native snake_case event keys and install to ~/.openhands/hooks.json by default, with repo-local .openhands/hooks.json when a workspace is pinned.",
-			"Validated with OpenHands CLI 1.16.0; the contract stays unbounded because upstream documents the hooks as a config contract rather than a versioned hook API floor.",
-			"OpenHands blocks by exit code 2 and optional decision=deny JSON; no native ask/permission prompt surface is documented, so confirm verdicts are downgraded to additionalContext alerts.",
+			"OpenHands CLI 1.12.0 is the minimum because it first loads user-global ~/.openhands/hooks.json; source-reviewed against 1.16.0 with no maximum. macOS remains uncertified until a durable green latest-version live run is recorded.",
+			"OpenHands blocks by exit code 2 and optional decision=deny JSON; no native ask surface is documented. Confirm becomes additionalContext only for UserPromptSubmit; PreToolUse and Stop downgrades are audit-only.",
+			"OpenHands SDK 1.39.1 preserves process-environment OTLP traces only; DefenseClaw does not persist those variables in hooks.json or a shell profile.",
 		},
 	}},
 	"opencode": {{
 		Connector:               "opencode",
 		ContractID:              "opencode-hooks-v1",
-		MinAgentVersion:         "0.0.0",
-		DefaultForUnversioned:   true,
-		HookScriptVersion:       "v6",
+		MinAgentVersion:         "1.16.2",
+		MaxAgentVersion:         "1.18.11",
+		DefaultForUnversioned:   false,
+		HookScriptVersion:       "v7",
 		HookConfigPathTemplates: []string{"~/.config/opencode/plugins/defenseclaw.js"},
 		ResponseFieldName:       "hook_output",
 		// opencode exposes plugin hooks (not shell hooks). DefenseClaw's
@@ -734,11 +743,19 @@ var builtinHookContracts = map[string][]HookContract{
 		// or context-injection channel, so blocking is the only active
 		// verdict and it is delivered by throwing inside the plugin.
 		Events: []string{
+			"command.executed", "file.edited", "file.watcher.updated",
+			"installation.updated", "installation.update-available",
+			"lsp.client.diagnostics", "lsp.updated",
+			"message.part.removed", "message.part.updated", "message.removed",
+			"message.updated", "permission.asked", "permission.updated", "permission.replied",
+			"pty.created", "pty.updated", "pty.exited", "pty.deleted",
+			"server.connected", "server.instance.disposed", "vcs.branch.updated",
 			"session.created", "session.updated", "session.status", "session.idle",
-			"session.compacted", "session.error", "session.deleted",
+			"session.compacted", "session.diff", "session.error", "session.deleted",
+			"todo.updated", "tui.prompt.append", "tui.command.execute", "tui.toast.show",
 			"tool.execute.before", "tool.execute.after",
 		},
-		AIDSurfaces: []string{"tool_call", "tool_result"},
+		AIDSurfaces: []string{"tool_call", "tool_result", "event_content"},
 		Capabilities: HookCapability{
 			CanBlock:     true,
 			CanAskNative: false,
@@ -755,7 +772,8 @@ var builtinHookContracts = map[string][]HookContract{
 		Notes: []string{
 			"opencode (https://opencode.ai) auto-loads JS/TS plugins from ~/.config/opencode/plugins/ — there is no command-hook config file to patch. DefenseClaw writes a dependency-free bridge plugin (defenseclaw.js) whose tool.execute.before POSTs to /api/v1/opencode/hook and throws new Error(reason) on a block decision, aborting the tool.",
 			"Block is the only active verdict: opencode has no hook-driven ask or context-injection surface. tool.execute.after is observe-only. The bridge honors fail-closed by throwing when the gateway is unreachable and FAIL_MODE=closed.",
-			"Contract is unbounded (min 0.0.0): the plugin hook API is documented as a stable contract rather than a versioned floor, matching the OpenHands precedent.",
+			"The recorded compatible floor remains OpenCode 1.16.2; the current source review is 1.18.10 and the exclusive 1.18.11 ceiling prevents unreviewed releases from silently entering action mode.",
+			"OpenCode 1.18.10 declares permission.ask in plugin types but does not dispatch it in the tagged runtime; permission.asked/replied are observe-only events, so native ask remains false.",
 		},
 	}},
 	"omnigent": {{
@@ -788,6 +806,7 @@ var builtinHookContracts = map[string][]HookContract{
 		Notes: []string{
 			"OmniGent invokes DefenseClaw through its documented custom Python policy API; the installed callable translates DefenseClaw allow, confirm, and block verdicts to ALLOW, ASK, and DENY.",
 			"The bridge covers request, tool_call, tool_result, response, llm_request, and llm_response phases exposed by OmniGent's PolicyEvent schema.",
+			"FunctionPolicy hook events expose no provider model-request ID. On macOS, DefenseClaw mints an internal UUIDv7 at BeforeModel and resolves AfterModel against the unique durable pending operation, including after restart; native OTLP session.id remains a separate native-only binding.",
 			"DENY is authoritative on all six phases. Pre-action DENY prevents the action; post-phase DENY uses OmniGent's denial/sentinel behavior to suppress or replace onward-visible content but cannot roll back completed tool or model work. The bridge does not return custom replacement data.",
 			"ASK is native only for OmniGent's pre-action request, tool_call, and llm_request phases; post-phase confirm findings remain attributed audit and continue without an approval pause.",
 			"The in-process Python bridge forwards an active OpenTelemetry W3C trace context when present; otherwise DefenseClaw starts a new trace.",
@@ -797,10 +816,44 @@ var builtinHookContracts = map[string][]HookContract{
 }
 
 func KnownHookContracts(connectorName string) []HookContract {
+	return hookContractsForOS(connectorName, runtime.GOOS)
+}
+
+// hookContractsForOS keeps platform-specific compatibility evidence explicit
+// and testable. The audited macOS surface must not silently widen the Windows
+// ranges or native-telemetry claims introduced by the Windows connector work.
+func hookContractsForOS(connectorName, goos string) []HookContract {
 	name := normalizeConnectorName(connectorName)
 	contracts := builtinHookContracts[name]
 	out := make([]HookContract, len(contracts))
-	copy(out, contracts)
+	for i, contract := range contracts {
+		contract.Events = append([]string(nil), contract.Events...)
+		contract.AIDSurfaces = append([]string(nil), contract.AIDSurfaces...)
+		contract.Notes = append([]string(nil), contract.Notes...)
+		if goos == "windows" {
+			switch contract.Connector {
+			case "hermes", "antigravity":
+				contract.MaxAgentVersion = ""
+			case "openhands":
+				contract.MinAgentVersion = "0.0.0"
+				contract.NativeOTLP = false
+			case "opencode":
+				contract.MinAgentVersion = "0.0.0"
+				contract.MaxAgentVersion = ""
+				contract.DefaultForUnversioned = true
+				contract.HookScriptVersion = "v6"
+				contract.Events = []string{
+					"session.created", "session.updated", "session.status", "session.idle",
+					"session.compacted", "session.error", "session.deleted",
+					"tool.execute.before", "tool.execute.after",
+				}
+				contract.AIDSurfaces = []string{"tool_call", "tool_result"}
+			case "copilot":
+				contract.NativeOTLP = false
+			}
+		}
+		out[i] = contract
+	}
 	return out
 }
 
@@ -818,6 +871,10 @@ func hookContractByID(connectorName, contractID string) (HookContract, bool) {
 }
 
 func ResolveHookContract(connectorName, rawVersion string) HookContractResolution {
+	return resolveHookContractForOS(connectorName, rawVersion, runtime.GOOS)
+}
+
+func resolveHookContractForOS(connectorName, rawVersion, goos string) HookContractResolution {
 	name := normalizeConnectorName(connectorName)
 	if proxyConnectorsWithoutHookGate[name] {
 		raw := strings.TrimSpace(rawVersion)
@@ -829,7 +886,7 @@ func ResolveHookContract(connectorName, rawVersion string) HookContractResolutio
 			Reason:            "proxy/chat connector; no hook contract gate",
 		}
 	}
-	contracts := KnownHookContracts(name)
+	contracts := hookContractsForOS(name, goos)
 	if len(contracts) == 0 {
 		return HookContractResolution{
 			Connector:  name,
@@ -841,13 +898,14 @@ func ResolveHookContract(connectorName, rawVersion string) HookContractResolutio
 	raw := strings.TrimSpace(rawVersion)
 	normalized := NormalizeAgentVersion(name, raw)
 	if raw == "" {
+		contract := defaultHookContract(contracts)
 		return HookContractResolution{
 			Connector:         name,
 			RawVersion:        "",
 			NormalizedVersion: "",
 			Status:            HookCompatibilityUnversioned,
 			Reason:            "agent version not probed; using connector default hook contract",
-			Contract:          defaultHookContract(contracts),
+			Contract:          contract,
 		}
 	}
 	if normalized == "" {

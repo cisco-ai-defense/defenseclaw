@@ -245,6 +245,10 @@ func TestSetupOneConnector_ObserveOverrideIgnoresGlobalActionContractGate(t *tes
 // needs Connector.Setup to replace; it is not evidence that the upstream
 // agent contract changed.
 func TestSetupConnectorsIsolated_RefreshesExistingStaleHookAlongsideNewPeer(t *testing.T) {
+	// This test exercises multi-connector refresh isolation, not the native
+	// signed-client selection gate. macOS cannot synthesize vendor-signed
+	// Claude/Codex fixtures, so admit the explicit exploratory contract seam.
+	t.Setenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", "1")
 	s := multiBootSidecar(t)
 	s.cfg.DataDir = testenv.PrivateTempDir(t)
 	s.cfg.Guardrail.Mode = "action"

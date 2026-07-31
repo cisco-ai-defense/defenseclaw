@@ -159,7 +159,7 @@ func NewCursorConnector() *hookOnlyConnector {
 func NewWindsurfConnector() *hookOnlyConnector {
 	return &hookOnlyConnector{
 		name:        "windsurf",
-		description: "Cascade hooks with documented MCP/rules discovery",
+		description: "Devin Desktop Cascade hooks with MCP, skills, rules, and instructions",
 		apiPath:     "/api/v1/windsurf/hook",
 		scriptName:  "windsurf-hook.sh",
 		configPath:  windsurfHooksPath,
@@ -210,6 +210,16 @@ func NewCopilotConnector() *hookOnlyConnector {
 		scriptName:  "copilot-hook.sh",
 		configPath:  copilotHooksPath,
 		capability: func(opts SetupOpts) HookCapability {
+			blockEvents := []string{
+				"preToolUse",
+				"permissionRequest",
+				"agentStop",
+				"subagentStop",
+			}
+			// Preserve the accepted PR #655 Windows/v1 capability surface.
+			if runtime.GOOS == "windows" || versionInRange(NormalizeAgentVersion("copilot", opts.AgentVersion), "1.0.18", "1.0.76") {
+				blockEvents = append(blockEvents, "postToolUseFailure")
+			}
 			return HookCapability{
 				CanBlock:     true,
 				CanAskNative: true,
@@ -296,6 +306,9 @@ func (c *hookOnlyConnector) ToolInspectionMode() ToolInspectionMode {
 }
 func (c *hookOnlyConnector) SubprocessPolicy() SubprocessPolicy { return SubprocessNone }
 func (c *hookOnlyConnector) HookScriptNames(SetupOpts) []string {
+	if c.pluginArtifact {
+		return nil
+	}
 	// Cursor and Windsurf require connector-specific PowerShell adapters only
 	// for their native Windows transports. Unix and macOS continue to use the
 	// existing shell hooks.
@@ -352,6 +365,9 @@ func (c *hookOnlyConnector) HookProfile(opts SetupOpts) HookProfile {
 	}
 	if c.name == "geminicli" {
 		profile.NativeOTLP = geminiCLINativeOTLPSpec(opts)
+	}
+	if c.name == "openhands" {
+		profile.NativeOTLP = openhandsNativeOTLPSpec(opts)
 	}
 	if c.name == "antigravity" {
 		// Antigravity's documented stdin is camelCase and intentionally omits
@@ -446,6 +462,42 @@ func geminiCLINativeOTLPSpec(opts SetupOpts) *NativeOTLPSpec {
 	return spec
 }
 
+// openhandsNativeOTLPSpec describes the process environment consumed by the
+// OpenHands SDK observability contract, source-reviewed through standalone SDK
+// 1.39.1. OpenHands CLI 1.16.0 remains a separate compatibility axis and
+// bundles SDK 1.21.0. Both initialize Laminar when an OTEL endpoint is present
+// and export traces only. No OpenHands config file or shell profile is mutated.
+func openhandsNativeOTLPSpec(opts SetupOpts) *NativeOTLPSpec {
+	endpoint := "http://" + strings.TrimSpace(opts.APIAddr)
+	headers := map[string]string{
+		"x-defenseclaw-source": "openhands",
+		"x-defenseclaw-client": "openhands-otel/1.0",
+	}
+	if token, err := resolveSetupOTLPPathToken(opts.DataDir, OTLPScopeOpenHands, opts.OTLPPathToken); err == nil && token != "" {
+		headers["authorization"] = "Bearer " + token
+	}
+	traceHeaders := serializeOTLPHeaders(headers)
+	return &NativeOTLPSpec{
+		Kind:        NativeOTLPEnvBlock,
+		Endpoint:    endpoint,
+		Protocol:    "http/protobuf",
+		Headers:     headers,
+		PerSignal:   false,
+		ServiceName: "openhands",
+		ResourceAttributes: map[string]string{
+			"defenseclaw.connector": "openhands",
+		},
+		ExtraEnv: map[string]string{
+			"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT": endpoint + "/v1/traces",
+			"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL": "http/protobuf",
+			"OTEL_EXPORTER_OTLP_TRACES_HEADERS":  traceHeaders,
+			"OTEL_TRACES_EXPORTER":               "otlp",
+			"OTEL_METRICS_EXPORTER":              "none",
+			"OTEL_LOGS_EXPORTER":                 "none",
+		},
+	}
+}
+
 func (c *hookOnlyConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 	caps := ConnectorCapabilities{
 		LLMTrafficMode: LLMTrafficModeForConnector(c.name),
@@ -470,6 +522,104 @@ func (c *hookOnlyConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 	}
 
 	switch c.name {
+	case "opencode":
+		if runtime.GOOS == "windows" {
+			// Preserve PR #655's Windows component boundary. The managed
+			// bridge plugin still has its explicit Setup destination, but
+			// generic inventory/watchers must not create unproven OpenCode
+			// skill, plugin, agent, rule, or MCP paths around it.
+			caps.MCP = unsupportedSurface("OpenCode MCP component management is not supported on Windows.")
+			caps.Skills = unsupportedSurface("OpenCode skill paths are not supported on Windows.")
+			caps.Rules = unsupportedSurface("OpenCode rule paths are not supported on Windows.")
+			caps.Plugins = unsupportedSurface("OpenCode plugin inventory paths are not supported on Windows.")
+			caps.Agents = unsupportedSurface("OpenCode agent paths are not supported on Windows.")
+			break
+		}
+		configDir := strings.TrimSpace(os.Getenv("OPENCODE_CONFIG_DIR"))
+		if configDir == "" {
+			configDir = homePath(".config", "opencode")
+		}
+		projectConfigPaths := []string{}
+		projectRulePaths := []string{}
+		workspaceRoot := strings.TrimSpace(opts.WorkspaceDir)
+		projectStop := workspaceRoot
+		for probe := workspaceRoot; probe != ""; {
+			if _, err := os.Stat(filepath.Join(probe, ".git")); err == nil {
+				projectStop = probe
+				break
+			}
+			parent := filepath.Dir(probe)
+			if parent == probe {
+				break
+			}
+			probe = parent
+		}
+		for root := workspaceRoot; root != ""; {
+			projectConfigPaths = append(projectConfigPaths,
+				filepath.Join(root, "opencode.json"),
+				filepath.Join(root, "opencode.jsonc"),
+				filepath.Join(root, ".opencode", "opencode.json"),
+				filepath.Join(root, ".opencode", "opencode.jsonc"),
+			)
+			projectRulePaths = append(projectRulePaths,
+				filepath.Join(root, "AGENTS.md"),
+				filepath.Join(root, "CLAUDE.md"),
+			)
+			if root == projectStop {
+				break
+			}
+			parent := filepath.Dir(root)
+			if parent == root {
+				break
+			}
+			root = parent
+		}
+		configPaths := []string{
+			filepath.Join(configDir, "opencode.json"),
+			filepath.Join(configDir, "opencode.jsonc"),
+			strings.TrimSpace(os.Getenv("OPENCODE_CONFIG")),
+		}
+		configPaths = append(configPaths, projectConfigPaths...)
+		configPaths = uniqueNonEmptyStrings(configPaths)
+		caps.MCP = SurfaceCapability{
+			Supported: true, Scope: "workspace,user", ConfigPaths: configPaths,
+			WritePaths:     []string{filepath.Join(configDir, "opencode.json"), workspacePath(opts, "opencode.json")},
+			SupportsBackup: true, SupportsRestore: true,
+		}
+		caps.Skills = SurfaceCapability{
+			Supported: true, Scope: "workspace,user",
+			ReadPaths: []string{
+				filepath.Join(configDir, "skills"), homePath(".claude", "skills"), homePath(".agents", "skills"),
+				workspacePath(opts, ".opencode", "skills"), workspacePath(opts, ".claude", "skills"), workspacePath(opts, ".agents", "skills"),
+			},
+			WritePaths:     []string{filepath.Join(configDir, "skills"), workspacePath(opts, ".opencode", "skills")},
+			InstallTargets: []string{"skill"}, RequiresOptIn: true,
+		}
+		caps.CodeGuard.Supported = true
+		caps.CodeGuard.InstallTargets = []string{"skill"}
+		caps.Rules = SurfaceCapability{
+			Supported: true, Scope: "workspace,user", DiscoveryOnly: true,
+			ReadPaths: uniqueNonEmptyStrings(append([]string{
+				filepath.Join(configDir, "AGENTS.md"),
+				filepath.Join(configDir, "CLAUDE.md"),
+			}, append(configPaths, projectRulePaths...)...)),
+			Notes: []string{"AGENTS.md, CLAUDE.md fallback files, and config instructions are discovery-only; DefenseClaw does not overwrite operator instructions."},
+		}
+		caps.Plugins = SurfaceCapability{
+			Supported: true, Scope: "workspace,user", DiscoveryOnly: true,
+			ReadPaths: []string{
+				filepath.Join(configDir, "plugin"), filepath.Join(configDir, "plugins"),
+				workspacePath(opts, ".opencode", "plugin"), workspacePath(opts, ".opencode", "plugins"),
+			},
+			Notes: []string{"Third-party plugins are inventory-only; Setup owns only defenseclaw.js with exact backup/restore."},
+		}
+		caps.Agents = SurfaceCapability{
+			Supported: true, Scope: "workspace,user", DiscoveryOnly: true,
+			ReadPaths: []string{
+				filepath.Join(configDir, "agent"), filepath.Join(configDir, "agents"),
+				workspacePath(opts, ".opencode", "agent"), workspacePath(opts, ".opencode", "agents"),
+			},
+		}
 	case "hermes":
 		caps.MCP = SurfaceCapability{
 			Supported:       true,
@@ -483,7 +633,7 @@ func (c *hookOnlyConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 		caps.Skills = SurfaceCapability{
 			Supported:      true,
 			Scope:          "user",
-			ReadPaths:      []string{filepath.Join(hermespath.HomeDir(), "skills")},
+			ReadPaths:      hermesSkillReadPaths(),
 			WritePaths:     []string{filepath.Join(hermespath.HomeDir(), "skills")},
 			InstallTargets: []string{"skill"},
 			RequiresOptIn:  true,
@@ -491,18 +641,32 @@ func (c *hookOnlyConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 		caps.CodeGuard.Supported = true
 		caps.CodeGuard.InstallTargets = []string{"skill"}
 		caps.Plugins = SurfaceCapability{
-			Supported: true,
-			Scope:     "workspace,user",
+			Supported:     true,
+			Scope:         "workspace,user",
+			DiscoveryOnly: true,
 			ReadPaths: []string{
 				filepath.Join(hermespath.HomeDir(), "plugins"),
+				filepath.Join(hermespath.HomeDir(), "agent-hooks"),
+				filepath.Join(hermespath.HomeDir(), "hooks"),
 				workspacePath(opts, ".hermes", "plugins"),
 			},
 			Notes: []string{
-				"Hermes plugins are inventory/discovery-only in DefenseClaw v1; connector setup does not install or modify them.",
+				"Hermes user/project plugins, conventional shell-hook scripts, and gateway-hook packages are inventory/discovery-only; connector setup does not install or modify them.",
 			},
 		}
-		caps.Rules = unsupportedSurface("Hermes rules are not a separate documented local surface.")
+		caps.Rules = SurfaceCapability{
+			Supported:     true,
+			Scope:         "workspace,user",
+			DiscoveryOnly: true,
+			ReadPaths:     hermesRuleReadPaths(opts),
+			Notes: []string{
+				"Hermes context files are prompt-bearing instructions and are scanned read-only. DefenseClaw never installs CodeGuard into SOUL.md or project instruction files.",
+			},
+		}
 		caps.Agents = unsupportedSurface("Hermes subagent/agent asset locations are not installed by DefenseClaw v1.")
+		caps.Telemetry.Notes = append(caps.Telemetry.Notes,
+			"Hermes 0.19.1 also exposes optional monitoring.export.otlp for content-free gateway-health and diagnostic signals. DefenseClaw does not manage that upstream block; policy-event telemetry remains hook-derived.",
+		)
 	case "cursor":
 		caps.MCP = SurfaceCapability{
 			Supported:       true,
@@ -521,12 +685,22 @@ func (c *hookOnlyConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 			RequiresOptIn:  true,
 		}
 		caps.Rules = SurfaceCapability{
-			Supported:      true,
-			Scope:          "workspace",
-			ReadPaths:      []string{workspacePath(opts, ".cursor", "rules"), workspacePath(opts, "AGENTS.md")},
+			Supported: true,
+			Scope:     "workspace",
+			ReadPaths: []string{
+				workspacePath(opts, ".cursor", "rules"),
+				workspacePath(opts, "AGENTS.md"),
+				workspacePath(opts, "CLAUDE.md"),
+				workspacePath(opts, ".cursorrules"),
+			},
 			WritePaths:     []string{workspacePath(opts, ".cursor", "rules")},
 			InstallTargets: []string{"rule"},
 			RequiresOptIn:  true,
+			Notes: []string{
+				"CLAUDE.md is read by Cursor Agent CLI; .cursorrules remains a deprecated compatibility surface.",
+				"Cursor supports nested AGENTS.md files. DefenseClaw v1 inventories the workspace-root instruction files only and does not recursively traverse nested workspaces.",
+				"Cursor custom commands under .cursor/commands are an official surface but have no DefenseClaw install/inventory category in v1.",
+			},
 		}
 		caps.CodeGuard.Supported = true
 		caps.CodeGuard.InstallTargets = []string{"skill", "rule"}
@@ -554,28 +728,44 @@ func (c *hookOnlyConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 			},
 		}
 	case "windsurf":
+		if preserveWindsurfNonDarwinCapabilities(&caps, opts, runtime.GOOS) {
+			break
+		}
 		caps.MCP = SurfaceCapability{
-			Supported:     true,
-			Scope:         "user",
-			ConfigPaths:   windsurfMCPPaths(),
-			ReadPaths:     windsurfMCPPaths(),
-			DiscoveryOnly: true,
-			RequiresOptIn: true,
-			Notes:         []string{"DefenseClaw discovers existing Windsurf MCP paths only; it does not create undocumented config files."},
+			Supported:       true,
+			Scope:           "user",
+			ConfigPaths:     windsurfMCPPaths(),
+			ReadPaths:       windsurfMCPPaths(),
+			WritePaths:      windsurfMCPPaths(),
+			InstallTargets:  []string{"mcp"},
+			RequiresOptIn:   true,
+			SupportsBackup:  true,
+			SupportsRestore: true,
+			Notes:           []string{"Devin Desktop documents ~/.codeium/windsurf/mcp_config.json as Cascade's MCP configuration file."},
+		}
+		caps.Skills = SurfaceCapability{
+			Supported:      true,
+			Scope:          "workspace,user",
+			ReadPaths:      windsurfSkillPaths(opts),
+			WritePaths:     windsurfSkillWritePaths(opts),
+			InstallTargets: []string{"skill"},
+			RequiresOptIn:  true,
+			Notes:          []string{"Cascade also discovers cross-agent skills under .agents/skills and ~/.agents/skills."},
 		}
 		caps.Rules = SurfaceCapability{
-			Supported:     true,
-			Scope:         "workspace",
-			ReadPaths:     existingWindsurfRulePaths(opts),
-			DiscoveryOnly: true,
-			Notes:         []string{"Windsurf rule writes are deferred unless a documented or pre-existing path is present."},
+			Supported:      true,
+			Scope:          "workspace,user",
+			ReadPaths:      windsurfRulePaths(opts),
+			WritePaths:     uniqueNonEmptyStrings([]string{workspacePath(opts, ".devin", "rules")}),
+			InstallTargets: []string{"rule"},
+			RequiresOptIn:  true,
+			Notes:          []string{"Devin Desktop prefers .devin/rules, retains .windsurf/rules as a fallback, and discovers AGENTS.md/agents.md as directory-scoped instructions."},
 		}
 		caps.CodeGuard.Supported = true
-		caps.CodeGuard.InstallTargets = []string{"rule"}
-		caps.CodeGuard.Notes = append(caps.CodeGuard.Notes, "Windsurf CodeGuard rule installation is available only when a documented/pre-existing rules path exists.")
-		caps.Skills = unsupportedSurface("Windsurf skills are not exposed as a documented local install surface.")
-		caps.Plugins = pluginsAreOpenClawOnly()
-		caps.Agents = unsupportedSurface("Windsurf agent/subagent asset installation is not supported.")
+		caps.CodeGuard.InstallTargets = []string{"skill", "rule"}
+		caps.CodeGuard.Notes = append(caps.CodeGuard.Notes, "Devin Desktop Cascade accepts Project CodeGuard as an opt-in skill or rule asset.")
+		caps.Plugins = unsupportedSurface("N/A for the Cascade connector: Devin Local plugins are a separate agent surface and Cascade exposes no documented local plugin directory.")
+		caps.Agents = unsupportedSurface("N/A for the Cascade connector: Devin Local custom subagents are separate from Cascade and are not installed by the stable windsurf connector.")
 	case "geminicli":
 		caps.MCP = SurfaceCapability{
 			Supported:       true,
@@ -623,6 +813,23 @@ func (c *hookOnlyConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 			Notes:            []string{"Gemini CLI telemetry is configured in settings.json with a path token because custom OTLP headers are not documented."},
 		}
 	case "copilot":
+		copilotPolicyReadPaths := []string{}
+		copilotTelemetryConfigPaths := []string{copilotHomePath("settings.json")}
+		copilotSkillPaths := []string{copilotHomePath("skills"), homePath(".agents", "skills"), workspacePath(opts, ".github", "skills"), workspacePath(opts, ".agents", "skills"), workspacePath(opts, ".claude", "skills")}
+		copilotSkillPaths = append(copilotSkillPaths, copilotEnvPathList("COPILOT_SKILLS_DIRS")...)
+		copilotInstructionPaths := []string{copilotHomePath("copilot-instructions.md"), copilotHomePath("instructions"), workspacePath(opts, "AGENTS.md"), workspacePath(opts, "CLAUDE.md"), workspacePath(opts, "GEMINI.md"), workspacePath(opts, ".claude", "CLAUDE.md"), workspacePath(opts, ".github", "copilot-instructions.md"), workspacePath(opts, ".github", "instructions")}
+		copilotInstructionPaths = append(copilotInstructionPaths, copilotEnvPathList("COPILOT_CUSTOM_INSTRUCTIONS_DIRS")...)
+		if runtime.GOOS == "darwin" {
+			copilotPolicyReadPaths = append(
+				copilotPolicyReadPaths,
+				"/Library/Application Support/GitHubCopilot/managed-settings.json",
+				"/etc/github-copilot/policy.d",
+			)
+			copilotTelemetryConfigPaths = append(
+				copilotTelemetryConfigPaths,
+				"/Library/Application Support/GitHubCopilot/managed-settings.json",
+			)
+		}
 		caps.MCP = SurfaceCapability{
 			Supported:       true,
 			Scope:           "workspace,user",
@@ -643,8 +850,8 @@ func (c *hookOnlyConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 		}
 		caps.Rules = SurfaceCapability{
 			Supported:      true,
-			Scope:          "workspace",
-			ReadPaths:      []string{workspacePath(opts, ".github", "instructions")},
+			Scope:          "workspace,user",
+			ReadPaths:      append(copilotInstructionPaths, copilotPolicyReadPaths...),
 			WritePaths:     []string{workspacePath(opts, ".github", "instructions")},
 			InstallTargets: []string{"rule"},
 			RequiresOptIn:  true,
@@ -719,12 +926,12 @@ func (c *hookOnlyConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 		caps.MCP = SurfaceCapability{
 			Supported:       true,
 			Scope:           "user",
-			ConfigPaths:     []string{homePath(".openhands", "mcp.json")},
-			ReadPaths:       []string{homePath(".openhands", "mcp.json")},
-			WritePaths:      []string{homePath(".openhands", "mcp.json")},
+			ConfigPaths:     []string{openhandsMCPPath()},
+			ReadPaths:       []string{openhandsMCPPath()},
+			WritePaths:      []string{openhandsMCPPath()},
 			SupportsBackup:  true,
 			SupportsRestore: true,
-			Notes:           []string{"OpenHands MCP servers are managed through the OpenHands CLI or ~/.openhands/mcp.json."},
+			Notes:           []string{"OpenHands MCP servers use <OPENHANDS_PERSISTENCE_DIR>/mcp.json when configured, otherwise ~/.openhands/mcp.json."},
 		}
 		caps.Skills = SurfaceCapability{
 			Supported:      true,
@@ -738,14 +945,42 @@ func (c *hookOnlyConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 		caps.Rules = SurfaceCapability{
 			Supported:     true,
 			Scope:         "user,workspace",
-			ReadPaths:     []string{filepath.Join(openhandsWorkspaceRoot(opts), "AGENTS.md")},
+			ReadPaths:     openhandsInstructionPaths(opts),
 			DiscoveryOnly: true,
-			Notes:         []string{"OpenHands permanent repository context is AGENTS.md; DefenseClaw discovers it but does not overwrite it."},
+			Notes:         []string{"OpenHands loads AGENTS.md, AGENT.md, CLAUDE.md, GEMINI.md, and .cursorrules case-insensitively as permanent third-party instruction skills; DefenseClaw discovers but never overwrites them."},
 		}
 		caps.CodeGuard.Supported = true
 		caps.CodeGuard.InstallTargets = []string{"skill"}
-		caps.Plugins = pluginsAreOpenClawOnly()
-		caps.Agents = unsupportedSurface("OpenHands agent-specific microagents are deprecated; install AgentSkills under .agents/skills instead.")
+		caps.Plugins = unsupportedSurface("N/A for the OpenHands CLI: the SDK accepts plugins programmatically, but CLI 1.16.0 exposes no persistent plugin install/config path for DefenseClaw to manage.")
+		caps.Agents = SurfaceCapability{
+			Supported:      true,
+			Scope:          "user,workspace",
+			ReadPaths:      openhandsAgentPaths(opts),
+			WritePaths:     openhandsAgentWritePaths(opts),
+			InstallTargets: []string{"agent"},
+			RequiresOptIn:  true,
+			Notes:          []string{"OpenHands loads file-based subagents from .agents/agents/*.md first and .openhands/agents/*.md as the legacy fallback. Built-in general-purpose/code-explorer/bash-runner agents are runtime-provided and are not filesystem assets; default/explore/bash are deprecated aliases."},
+		}
+		if runtime.GOOS == "darwin" {
+			caps.Telemetry = TelemetryCapability{
+				NativeOTLP:    true,
+				NativeSignals: []string{"traces"},
+				HookSignals:   []string{"logs", "metrics", "traces"},
+				Env: []EnvRequirement{
+					{Name: "OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", Scope: EnvScopeProcess, Required: false, Description: "Point OpenHands SDK native traces at the DefenseClaw gateway."},
+					{Name: "OTEL_EXPORTER_OTLP_TRACES_PROTOCOL", Scope: EnvScopeProcess, Required: false, Description: "Set to http/protobuf for DefenseClaw OTLP trace ingestion."},
+					{Name: "OTEL_EXPORTER_OTLP_TRACES_HEADERS", Scope: EnvScopeProcess, Required: false, Description: "Carry the connector-scoped bearer and OpenHands source/client attribution."},
+				},
+				AuthMode:         "scoped-header-token-loopback",
+				EndpointTemplate: "http://" + opts.APIAddr + "/v1/traces",
+				SourceModes:      []string{"native", "hook"},
+				Notes: []string{
+					"OpenHands CLI 1.16.0 bundles SDK 1.21.0; standalone SDK 1.39.1 preserves the same Laminar process-environment OTEL trace-export contract. The SDK review does not change the CLI compatibility range.",
+					"DefenseClaw does not persist OTEL variables in OpenHands config or mutate shell profiles; launch OpenHands with the rendered process environment.",
+					"Native trace attributes are not claimed as cross-rail identity until a stable exported session attribute is source-documented and live-validated.",
+				},
+			}
+		}
 	default:
 		caps.MCP = unsupportedSurface("")
 		caps.Skills = unsupportedSurface("")
@@ -756,10 +991,48 @@ func (c *hookOnlyConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 	return caps
 }
 
+func preserveWindsurfNonDarwinCapabilities(caps *ConnectorCapabilities, opts SetupOpts, goos string) bool {
+	if goos == "darwin" {
+		return false
+	}
+	caps.MCP = SurfaceCapability{
+		Supported:     true,
+		Scope:         "user",
+		ConfigPaths:   windsurfMCPPaths(),
+		ReadPaths:     windsurfMCPPaths(),
+		DiscoveryOnly: true,
+		RequiresOptIn: true,
+		Notes:         []string{"DefenseClaw preserves the existing discovery-only MCP contract outside macOS."},
+	}
+	caps.Rules = SurfaceCapability{
+		Supported:     true,
+		Scope:         "workspace",
+		ReadPaths:     existingWindsurfRulePaths(opts),
+		DiscoveryOnly: true,
+		Notes:         []string{"Windsurf rule writes remain deferred outside macOS unless a documented/pre-existing path is present."},
+	}
+	caps.CodeGuard.Supported = true
+	caps.CodeGuard.InstallTargets = []string{"rule"}
+	caps.CodeGuard.Notes = append(caps.CodeGuard.Notes, "Windsurf CodeGuard preserves the existing rule-only contract outside macOS.")
+	caps.Skills = unsupportedSurface("Windsurf skills remain unsupported outside the native macOS connector.")
+	caps.Plugins = pluginsAreOpenClawOnly()
+	caps.Agents = unsupportedSurface("Windsurf agent/subagent asset installation is not supported.")
+	return true
+}
+
 func (c *hookOnlyConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	_ = ctx
 	if c.pluginArtifact {
 		return c.setupPluginArtifact(opts)
+	}
+	if c.name == "openhands" {
+		target := c.configPath(opts)
+		if err := c.migrateOpenHandsConfigTarget(opts, target); err != nil {
+			return err
+		}
+		if _, err := resolveSetupOTLPPathToken(opts.DataDir, OTLPScopeOpenHands, opts.OTLPPathToken); err != nil {
+			return fmt.Errorf("resolve scoped OpenHands OTLP token: %w", err)
+		}
 	}
 	if err := c.migrateManagedBackup(opts); err != nil {
 		return fmt.Errorf("%s managed backup migration: %w", c.name, err)
@@ -774,6 +1047,45 @@ func (c *hookOnlyConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	return nil
 }
 
+// migrateOpenHandsConfigTarget closes the previous managed ownership cycle
+// before switching between the user and workspace hooks.json locations.
+func (c *hookOnlyConnector) migrateOpenHandsConfigTarget(opts SetupOpts, target string) error {
+	backup, err := loadManagedFileBackupPath(managedFileBackupPath(opts.DataDir, c.name, "config"))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("load previous OpenHands config backup: %w", err)
+	}
+	oldPath, err := validateManagedFileBackupTarget(backup, c.name, "config", backup.Path)
+	if err != nil {
+		return fmt.Errorf("validate previous OpenHands config backup: %w", err)
+	}
+	newPath, err := normalizeManagedTargetPath(target)
+	if err != nil {
+		return fmt.Errorf("resolve new OpenHands config target: %w", err)
+	}
+	equal := oldPath == newPath
+	if runtime.GOOS == "windows" {
+		equal = strings.EqualFold(oldPath, newPath)
+	}
+	if equal {
+		return nil
+	}
+	restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, c.name, "config", oldPath)
+	if err != nil {
+		return fmt.Errorf("restore previous OpenHands config target: %w", err)
+	}
+	if restored {
+		return nil
+	}
+	if err := c.removeConfigEntries(oldPath, c.hookCommand(opts), opts); err != nil {
+		return fmt.Errorf("remove previous OpenHands hook entries: %w", err)
+	}
+	discardManagedFileBackup(opts.DataDir, c.name, "config")
+	return nil
+}
+
 // setupPluginArtifact renders the embedded bridge-plugin template
 // (APIAddr / APIToken / FailMode substituted) and writes it to the host
 // agent's auto-load plugin directory at 0o600 (it carries the gateway
@@ -782,9 +1094,13 @@ func (c *hookOnlyConnector) Setup(ctx context.Context, opts SetupOpts) error {
 // plugin file is unchanged since setup it is removed (we created it);
 // if the operator hand-edited it, the backup restore leaves it alone.
 func (c *hookOnlyConnector) setupPluginArtifact(opts SetupOpts) error {
-	tmpl, err := hookFS.ReadFile("hooks/" + c.pluginArtifactAsset)
+	asset := c.pluginArtifactAsset
+	if c.name == "opencode" && runtime.GOOS == "windows" {
+		asset = "opencode-plugin-windows.js"
+	}
+	tmpl, err := hookFS.ReadFile("hooks/" + asset)
 	if err != nil {
-		return fmt.Errorf("%s read plugin template %s: %w", c.name, c.pluginArtifactAsset, err)
+		return fmt.Errorf("%s read plugin template %s: %w", c.name, asset, err)
 	}
 	failMode := normalizeHookFailMode(opts.HookFailMode)
 	if failMode == "closed" && !c.capability(opts).SupportsFailClosed {
@@ -890,6 +1206,11 @@ func (c *hookOnlyConnector) Teardown(ctx context.Context, opts SetupOpts) error 
 	if c.name == "windsurf" && runtime.GOOS == "windows" {
 		if err := writeDisabledPowerShellHookTombstone(opts, "windsurf-hook.ps1", c.name); err != nil {
 			errs = append(errs, fmt.Sprintf("disabled PowerShell hook tombstone: %v", err))
+		}
+	}
+	if c.name == "openhands" {
+		if err := RemoveOTLPPathToken(opts.DataDir, OTLPScopeOpenHands); err != nil {
+			errs = append(errs, fmt.Sprintf("revoke scoped OpenHands OTLP token: %v", err))
 		}
 	}
 
@@ -1037,6 +1358,24 @@ func (c *hookOnlyConnector) verifyCursorHookArtifactsClean(opts SetupOpts) error
 }
 
 func (c *hookOnlyConnector) Authenticate(r *http.Request) bool {
+	if c.pluginArtifact {
+		// The OpenCode plugin always carries the connector-scoped token.
+		// Do not grant it the legacy shell-hook loopback bypass or accept
+		// the gateway master key: either would turn a local process into an
+		// unauthenticated policy caller.
+		provided := ExtractBearerKey(r.Header.Get("Authorization"))
+		return c.gatewayToken != "" && SecureTokenMatch(provided, c.gatewayToken)
+	}
+	// Hermes on macOS always receives a connector-scoped token from the
+	// managed POSIX hook. Once that token exists, accepting a master key or an
+	// unauthenticated loopback request would let any local process forge
+	// Hermes audit/correlation events. Keep the historical generic behavior
+	// on other platforms so this macOS hardening does not alter PR #655's
+	// Windows contract.
+	if c.name == "hermes" && runtime.GOOS == "darwin" && strings.TrimSpace(c.gatewayToken) != "" {
+		provided := ExtractBearerKey(r.Header.Get("Authorization"))
+		return SecureTokenMatch(provided, c.gatewayToken)
+	}
 	return authenticateHookBridgeRequest(r, c.gatewayToken, c.masterKey, c.name,
 		"hook-only connectors run as local shell hooks; setup injects Authorization when possible, but loopback remains accepted for legacy hook installs",
 		&c.loopbackWarn)
@@ -1060,6 +1399,12 @@ func (c *hookOnlyConnector) SetCredentials(gatewayToken, masterKey string) {
 func (c *hookOnlyConnector) AgentPaths(opts SetupOpts) AgentPaths {
 	caps := c.Capabilities(opts)
 	patched := uniqueNonEmptyStrings(append([]string{c.configPath(opts)}, caps.Telemetry.ConfigPaths...))
+	if c.pluginArtifact {
+		return AgentPaths{
+			PatchedFiles: patched,
+			BackupFiles:  []string{managedFileBackupPath(opts.DataDir, c.name, "config")},
+		}
+	}
 	return AgentPaths{
 		PatchedFiles: patched,
 		BackupFiles:  []string{managedFileBackupPath(opts.DataDir, c.name, c.managedBackupLogicalName())},
@@ -1067,12 +1412,19 @@ func (c *hookOnlyConnector) AgentPaths(opts SetupOpts) AgentPaths {
 	}
 }
 
+func (c *hookOnlyConnector) ExclusiveManagedPaths(opts SetupOpts) []string {
+	if !c.pluginArtifact {
+		return nil
+	}
+	return []string{c.configPath(opts)}
+}
+
 func (c *hookOnlyConnector) HookScripts(opts SetupOpts) []string {
 	return c.AgentPaths(opts).HookScripts
 }
 
 func (c *hookOnlyConnector) RequiredEnv() []EnvRequirement {
-	if c.name == "copilot" {
+	if c.name == "copilot" || c.name == "openhands" {
 		return append([]EnvRequirement{{
 			Scope:       EnvScopeNone,
 			Description: "DefenseClaw's Copilot hook integration requires no shell environment variables; upstream OTel process variables are not configured or managed by this connector.",
@@ -1330,6 +1682,28 @@ func openhandsWorkspaceRoot(opts SetupOpts) string {
 	return root
 }
 
+func openhandsPersistenceRoot() string {
+	if root := strings.TrimSpace(os.Getenv("OPENHANDS_PERSISTENCE_DIR")); root != "" {
+		return filepath.Clean(root)
+	}
+	return homePath(".openhands")
+}
+
+func openhandsMCPPath() string {
+	return filepath.Join(openhandsPersistenceRoot(), "mcp.json")
+}
+
+func openhandsInstructionPaths(opts SetupOpts) []string {
+	root := openhandsWorkspaceRoot(opts)
+	return uniqueNonEmptyStrings([]string{
+		filepath.Join(root, "AGENTS.md"),
+		filepath.Join(root, "AGENT.md"),
+		filepath.Join(root, "CLAUDE.md"),
+		filepath.Join(root, "GEMINI.md"),
+		filepath.Join(root, ".cursorrules"),
+	})
+}
+
 func workspaceRoot(opts SetupOpts) string {
 	return selectedWorkspaceRoot(CopilotWorkspaceDirOverride, opts.WorkspaceDir)
 }
@@ -1506,6 +1880,33 @@ func copilotHomePath(parts ...string) string {
 	return filepath.Join(append([]string{root}, parts...)...)
 }
 
+func copilotCachePath(parts ...string) string {
+	root := strings.TrimSpace(os.Getenv("COPILOT_CACHE_HOME"))
+	if root == "" {
+		if runtime.GOOS == "darwin" {
+			root = homePath("Library", "Caches", "copilot")
+		} else {
+			root = homePath(".cache", "copilot")
+		}
+	}
+	return filepath.Join(append([]string{root}, parts...)...)
+}
+
+func copilotEnvPathList(name string) []string {
+	var out []string
+	for _, raw := range strings.Split(os.Getenv(name), ",") {
+		path := strings.TrimSpace(raw)
+		if path == "" {
+			continue
+		}
+		if abs, err := filepath.Abs(path); err == nil {
+			path = abs
+		}
+		out = append(out, filepath.Clean(path))
+	}
+	return out
+}
+
 func unsupportedSurface(note string) SurfaceCapability {
 	cap := SurfaceCapability{Supported: false}
 	if strings.TrimSpace(note) != "" {
@@ -1531,12 +1932,88 @@ func pluginsAreOpenClawOnly() SurfaceCapability {
 }
 
 func cursorSkillPaths(opts SetupOpts) []string {
-	return []string{
+	paths := []string{
 		homePath(".cursor", "skills"),
 		homePath(".agents", "skills"),
 		workspacePath(opts, ".cursor", "skills"),
 		workspacePath(opts, ".agents", "skills"),
 	}
+	if runtime.GOOS == "darwin" {
+		paths = append(paths,
+			homePath(".claude", "skills"),
+			homePath(".codex", "skills"),
+			workspacePath(opts, ".claude", "skills"),
+			workspacePath(opts, ".codex", "skills"),
+		)
+	}
+	return paths
+}
+
+func hermesSkillReadPaths() []string {
+	home := hermespath.HomeDir()
+	paths := []string{filepath.Join(home, "skills")}
+	data, err := os.ReadFile(hermespath.ConfigPath())
+	if err != nil {
+		return paths
+	}
+	var document struct {
+		Skills struct {
+			ExternalDirs any `yaml:"external_dirs"`
+		} `yaml:"skills"`
+	}
+	if err := yaml.Unmarshal(data, &document); err != nil {
+		return paths
+	}
+	var configured []string
+	switch value := document.Skills.ExternalDirs.(type) {
+	case string:
+		configured = []string{value}
+	case []any:
+		for _, entry := range value {
+			configured = append(configured, fmt.Sprint(entry))
+		}
+	}
+	userHome, _ := os.UserHomeDir()
+	for _, entry := range configured {
+		entry = strings.TrimSpace(os.ExpandEnv(entry))
+		if entry == "" {
+			continue
+		}
+		if entry == "~" {
+			entry = userHome
+		} else if strings.HasPrefix(entry, "~/") {
+			entry = filepath.Join(userHome, strings.TrimPrefix(entry, "~/"))
+		}
+		if !filepath.IsAbs(entry) {
+			entry = filepath.Join(home, entry)
+		}
+		entry = filepath.Clean(entry)
+		if info, statErr := os.Stat(entry); statErr == nil && info.IsDir() {
+			paths = append(paths, entry)
+		}
+	}
+	return uniqueNonEmptyStrings(paths)
+}
+
+func hermesRuleReadPaths(opts SetupOpts) []string {
+	root := strings.TrimSpace(opts.WorkspaceDir)
+	paths := []string{
+		filepath.Join(hermespath.HomeDir(), "SOUL.md"),
+		filepath.Join(hermespath.HomeDir(), "BOOT.md"),
+	}
+	if root != "" {
+		paths = append(paths,
+			filepath.Join(root, ".hermes.md"),
+			filepath.Join(root, "HERMES.md"),
+			filepath.Join(root, "AGENTS.md"),
+			filepath.Join(root, "agents.md"),
+			filepath.Join(root, "CLAUDE.md"),
+			filepath.Join(root, "claude.md"),
+			filepath.Join(root, ".cursorrules"),
+			filepath.Join(root, ".cursor", "rules"),
+		)
+	}
+	return uniqueNonEmptyStrings(paths)
 }
 
 func openhandsSkillPaths(opts SetupOpts) []string {
@@ -1555,6 +2032,25 @@ func openhandsSkillPaths(opts SetupOpts) []string {
 		homePath(".openhands", "skills", "installed"),
 		homePath(".openhands", "cache", "skills", "public-skills", "skills"),
 	)
+	return uniqueNonEmptyStrings(paths)
+}
+
+func openhandsAgentPaths(opts SetupOpts) []string {
+	paths := openhandsAgentWritePaths(opts)
+	paths = append(paths,
+		homePath(".openhands", "agents"),
+	)
+	if root := selectedWorkspaceRoot(OpenHandsWorkspaceDirOverride, opts.WorkspaceDir); root != "" && workspaceRootOutsideDataDir(root, opts.DataDir) {
+		paths = append(paths, filepath.Join(root, ".openhands", "agents"))
+	}
+	return uniqueNonEmptyStrings(paths)
+}
+
+func openhandsAgentWritePaths(opts SetupOpts) []string {
+	paths := []string{homePath(".agents", "agents")}
+	if root := selectedWorkspaceRoot(OpenHandsWorkspaceDirOverride, opts.WorkspaceDir); root != "" && workspaceRootOutsideDataDir(root, opts.DataDir) {
+		paths = append([]string{filepath.Join(root, ".agents", "agents")}, paths...)
+	}
 	return uniqueNonEmptyStrings(paths)
 }
 
@@ -1582,6 +2078,8 @@ func antigravitySkillWritePaths(opts SetupOpts) []string {
 func antigravityRuleReadPaths(opts SetupOpts) []string {
 	return uniqueNonEmptyStrings([]string{
 		homePath(".gemini", "GEMINI.md"),
+		antigravityWorkspacePath(opts, "GEMINI.md"),
+		antigravityWorkspacePath(opts, "AGENTS.md"),
 		antigravityWorkspacePath(opts, ".agents", "rules"),
 	})
 }
@@ -1629,10 +2127,27 @@ func antigravityWorkspacePath(opts SetupOpts, parts ...string) string {
 }
 
 func windsurfMCPPaths() []string {
-	return []string{
-		homePath(".codeium", "windsurf", "mcp_config.json"),
-		homePath(".codeium", "windsurf", "mcp.json"),
+	return []string{homePath(".codeium", "windsurf", "mcp_config.json")}
+}
+
+func windsurfSkillPaths(opts SetupOpts) []string {
+	paths := []string{
+		workspacePath(opts, ".windsurf", "skills"),
+		workspacePath(opts, ".agents", "skills"),
+		homePath(".codeium", "windsurf", "skills"),
+		homePath(".agents", "skills"),
 	}
+	if runtime.GOOS == "darwin" {
+		paths = append(paths, "/Library/Application Support/Windsurf/skills")
+	}
+	return uniqueNonEmptyStrings(paths)
+}
+
+func windsurfSkillWritePaths(opts SetupOpts) []string {
+	return uniqueNonEmptyStrings([]string{
+		workspacePath(opts, ".windsurf", "skills"),
+		homePath(".codeium", "windsurf", "skills"),
+	})
 }
 
 func existingWindsurfRulePaths(opts SetupOpts) []string {
@@ -1645,12 +2160,33 @@ func existingWindsurfRulePaths(opts SetupOpts) []string {
 		filepath.Join(root, ".codeium", "windsurf", "rules"),
 	}
 	out := make([]string, 0, len(candidates))
-	for _, p := range candidates {
-		if _, err := os.Stat(p); err == nil {
-			out = append(out, p)
+	for _, path := range candidates {
+		if _, err := os.Stat(path); err == nil {
+			out = append(out, path)
 		}
 	}
 	return out
+}
+
+func windsurfRulePaths(opts SetupOpts) []string {
+	root := workspaceRoot(opts)
+	candidates := []string{homePath(".codeium", "windsurf", "memories", "global_rules.md")}
+	if runtime.GOOS == "darwin" {
+		candidates = append(candidates,
+			"/Library/Application Support/Devin/rules",
+			"/Library/Application Support/Windsurf/rules",
+		)
+	}
+	if strings.TrimSpace(root) != "" {
+		candidates = append(candidates,
+			filepath.Join(root, ".devin", "rules"),
+			filepath.Join(root, ".windsurf", "rules"),
+			filepath.Join(root, ".windsurfrules"),
+			filepath.Join(root, "AGENTS.md"),
+			filepath.Join(root, "agents.md"),
+		)
+	}
+	return uniqueNonEmptyStrings(candidates)
 }
 
 func uniqueNonEmptyStrings(in []string) []string {

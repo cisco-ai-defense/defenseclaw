@@ -74,6 +74,7 @@ on:
           - hermes
           - windsurf
           - antigravity
+          - omnigent
       os:
         description: "OS to run (or 'all')"
         type: choice
@@ -142,7 +143,7 @@ jobs:
           set -euo pipefail
           # The Unix harness retains the full supported connector matrix.
           # Native Windows contract validation is a separate, explicit x64 matrix.
-          full='{"os":["ubuntu-latest","macos-latest"],"connector":["codex","claudecode","geminicli","cursor","copilot","openhands","hermes","windsurf","antigravity"]}'
+          full='{"os":["ubuntu-latest","macos-latest"],"connector":["codex","claudecode","opencode","geminicli","cursor","copilot","openhands","hermes","windsurf","antigravity","omnigent"]}'
           # Always-on PR smoke: one connector on one cross-platform OS. macOS is
           # chosen because windows-native.yml separately checks the native
           # Windows hook contract on every PR. This adds the missing native macOS
@@ -273,6 +274,17 @@ jobs:
             echo "${{ github.workspace }}/.venv/Scripts" >> "$GITHUB_PATH"
           fi
 
+      - name: Install official OmniGent contract runtime
+        if: steps.select.outputs.run == 'true' && matrix.connector == 'omnigent'
+        run: |
+          uv python install 3.12
+          omnigent_python="$(uv python find --managed-python 3.12)"
+          uv tool install --python "${omnigent_python}" --force omnigent==0.7.0
+          omnigent_python="$("${omnigent_python}" -I -c \
+            'import os, sys; print(os.path.realpath(sys.executable))')"
+          printf 'DEFENSECLAW_TRUSTED_BIN_PREFIXES=%s\n' \
+            "$(dirname "${omnigent_python}")" >> "$GITHUB_ENV"
+
       # Deterministic Go contract tests for this connector. The shared
       # connector lifecycle / observability / verify matrices are
       # connector-parameterized; filtering with -run to the active cell makes
@@ -336,23 +348,30 @@ jobs:
       fail-fast: false
       matrix:
         # The reality matrix: which agents have a headless CLI that fires hooks
-        # on which OS. Contract-only connectors (hermes, windsurf, antigravity)
-        # are absent here — they are covered by Layer A only. Native Windows
-        # Candidate Codex/Claude Windows certification evidence is handled by
-        # windows-live below; an unrun or failed cell proves nothing.
+        # on which OS. Hermes needs no model credential: its official
+        # `hermes hooks test` command exercises the genuine shell-hook parser
+        # and process boundary. Windsurf and Antigravity remain Layer-A only
+        # here. Native Windows candidate evidence is handled below; an unrun or
+        # failed cell proves nothing.
         #
-        # Currently scoped to the connectors we can authenticate with Azure
-        # OpenAI / Amazon Bedrock (Codex, Claude Code, OpenHands). Gemini CLI,
-        # Cursor, and Copilot are deferred until their native keys exist — add
-        # their cells back here when GOOGLE_API_KEY / CURSOR_API_KEY /
-        # COPILOT_GITHUB_TOKEN are configured.
+        # Credential-gated cells remain in the matrix so their absence is
+        # explicit rather than being mistaken for live coverage. In
+        # particular, an absent COPILOT_CLI_TOKEN makes that macOS cell
+        # fail/skip visibly and cannot promote validated_versions.json.
         include:
           - { connector: codex,      os: ubuntu-latest,  dcos: linux }
           - { connector: codex,      os: macos-latest,   dcos: macos }
           - { connector: claudecode, os: ubuntu-latest,  dcos: linux }
           - { connector: claudecode, os: macos-latest,   dcos: macos }
+          - { connector: opencode,   os: macos-latest,   dcos: macos }
+          - { connector: hermes,     os: macos-latest,   dcos: macos }
+          - { connector: copilot,    os: macos-latest,   dcos: macos }
+          - { connector: cursor,     os: macos-latest,   dcos: macos }
           # OpenHands needs the Docker runtime, so it is Linux-only.
           - { connector: openhands,  os: ubuntu-latest,  dcos: linux }
+          # OpenHands CLI/headless uses the local SDK workspace. Docker is
+          # required for `openhands serve`, not for this official CLI path.
+          - { connector: openhands,  os: macos-latest,   dcos: macos }
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40
     defaults:
@@ -420,8 +439,16 @@ jobs:
             [ "${in_conn}" = "all" ] || [ "${in_conn}" = "${MATRIX_CONNECTOR}" ] || run=false
             [ "${in_os}" = "all" ] || [ "${in_os}" = "${MATRIX_OS}" ] || run=false
           fi
+          if [ "${MATRIX_CONNECTOR}" = "cursor" ] && [ -z "${CURSOR_API_KEY:-}" ]; then
+            echo "Cursor cell skipped: CURSOR_API_KEY is not configured"
+            run=false
+          fi
           echo "run=${run}" >> "$GITHUB_OUTPUT"
           echo "cell ${{ matrix.connector }}/${{ matrix.dcos }} selected=${run}"
+
+      - name: Isolate Hermes home
+        if: steps.select.outputs.run == 'true' && matrix.connector == 'hermes'
+        run: echo "HERMES_HOME=${RUNNER_TEMP}/hermes-home-${{ matrix.connector }}" >> "$GITHUB_ENV"
 
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         if: steps.select.outputs.run == 'true'
@@ -432,9 +459,9 @@ jobs:
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         if: steps.select.outputs.run == 'true'
 
-      # Several live agents still use npm and OpenHands uses pipx. Claude's
-      # Windows lane uses Anthropic's native PowerShell installer; Node remains
-      # required by the other matrix cells.
+      # Most live agents use npm and OpenHands uses its official Python 3.12
+      # package. Claude's Windows lane uses Anthropic's native PowerShell
+      # installer; Node and uv remain required by the other matrix cells.
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         if: steps.select.outputs.run == 'true'
         with:

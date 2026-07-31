@@ -684,7 +684,7 @@ func TestHookConfigGuard_DoesNotReportRepairWhenClaudePolicyStillDisablesHooks(t
 	// installed bytes before the notifier step has completed.
 	select {
 	case <-notified:
-	case <-time.After(5 * time.Second):
+	case <-time.After(hookGuardSetupTimeout + time.Second):
 		present, presenceErr := connector.OwnedHooksPresent(conn, opts)
 		data, _ := os.ReadFile(settingsPath)
 		guard.mu.Lock()

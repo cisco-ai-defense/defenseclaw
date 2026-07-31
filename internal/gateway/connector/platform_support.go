@@ -106,6 +106,35 @@ var windowsConnectorSupport = map[string]PlatformSupport{
 	},
 }
 
+// macOSConnectorSupport records macOS-specific evidence states. Connectors
+// absent from this map retain the historical supported default.
+var macOSConnectorSupport = map[string]PlatformSupport{
+	"claudecode": {
+		Status: PlatformPreview,
+		Reason: "Claude Code and DefenseClaw have a native signed-Mach-O hook path on macOS 13+ (arm64 and x86_64); latest-version packaged and authenticated official-client validation is still pending.",
+	},
+	"codex": {
+		Status: PlatformPreview,
+		Reason: "Codex CLI 0.146.0 is implemented with native macOS hook, OTLP, notify, signed-executable, and exact-restore validation; a green latest-version packaged plus authenticated live record is not yet available.",
+	},
+	"cursor": {
+		Status: PlatformPreview,
+		Reason: "Cursor Desktop and Cursor Agent hooks are implemented on macOS; durable packaged and authenticated official-client certification is pending.",
+	},
+	"windsurf": {
+		Status: PlatformPreview,
+		Reason: "Devin Desktop Cascade hooks are implemented on macOS, but a durable genuine latest-version packaged and interactive live certification record is not available.",
+	},
+	"hermes": {
+		Status: PlatformPreview,
+		Reason: "Hermes Agent 0.19 shell hooks and the DefenseClaw POSIX hook entrypoint are implemented on macOS; packaged plus genuine-client certification is pending.",
+	},
+	"antigravity": {
+		Status: PlatformPreview,
+		Reason: "The native macOS Antigravity hook integration is available as a preview; latest-version packaged and authenticated official-client certification evidence has not been recorded.",
+	},
+}
+
 // IsProxyConnector reports whether name is a proxy/chat connector (as opposed
 // to a hook-based connector).
 func IsProxyConnector(name string) bool {
@@ -124,6 +153,11 @@ func ConnectorSupportOnOS(name, goos string) PlatformSupport {
 		return PlatformSupport{
 			Status: PlatformNotCertified,
 			Reason: "This connector has not completed native Windows x64 certification.",
+		}
+	}
+	if goos == "darwin" || goos == "macos" {
+		if support, ok := macOSConnectorSupport[name]; ok {
+			return support
 		}
 	}
 	return PlatformSupport{

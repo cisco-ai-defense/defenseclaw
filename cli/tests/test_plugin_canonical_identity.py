@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import stat
+import sys
+import tempfile
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -396,3 +398,12 @@ def test_windows_reparse_attribute_is_treated_as_link(lstat):
 def test_canonical_id_uses_manifest_not_space_containing_basename(tmp_path):
     source = _plugin(str(tmp_path / "source folder with spaces"), "canonical-id")
     assert canonical_plugin_id(source) == ("canonical-id", "plugin.json")
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS /var -> /private/var alias")
+def test_canonical_id_accepts_regular_manifest_through_macos_temp_alias():
+    with tempfile.TemporaryDirectory(dir="/var/tmp") as temp_dir:
+        source = _plugin(os.path.join(temp_dir, "agy-plugin"), "canonical-id")
+        assert source.startswith("/var/")
+        assert os.path.realpath(source).startswith("/private/var/")
+        assert canonical_plugin_id(source) == ("canonical-id", "plugin.json")

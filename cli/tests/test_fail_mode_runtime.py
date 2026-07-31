@@ -829,3 +829,19 @@ def test_unix_registration_freshness_requires_current_script_path(
             encoding="utf-8",
         )
         assert fail_mode_runtime._unix_registration_freshness(cfg, "claudecode") is None
+
+
+def test_unix_copilot_registration_uses_copilot_hook_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"copilot": "closed"})
+    monkeypatch.setenv("COPILOT_HOME", str(home / ".copilot"))
+    hooks_path = home / ".copilot" / "hooks"
+    hooks_path.mkdir(parents=True)
+    expected = str((Path(cfg.data_dir) / "hooks" / "copilot-hook.sh").resolve())
+    (hooks_path / "defenseclaw.json").write_text(
+        json.dumps({"hooks": {"preToolUse": [{"bash": expected}]}}),
+        encoding="utf-8",
+    )
+    with patch("defenseclaw.fail_mode.Path.home", return_value=home):
+        assert fail_mode_runtime._unix_registration_freshness(cfg, "copilot") is None

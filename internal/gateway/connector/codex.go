@@ -838,6 +838,7 @@ func (c *CodexConnector) SupportsComponentScanning() bool { return true }
 
 func (c *CodexConnector) ComponentTargets(cwd string) map[string][]string {
 	codexDir := codexHomeDir()
+	homeDir, _ := os.UserHomeDir()
 	targets := map[string][]string{
 		"skill": {},
 		"plugin": {
@@ -854,13 +855,29 @@ func (c *CodexConnector) ComponentTargets(cwd string) map[string][]string {
 	if runtime.GOOS != "windows" {
 		targets["skill"] = append(targets["skill"], filepath.FromSlash("/etc/codex/skills"))
 	}
-	for _, root := range CodexProjectLayerDirs(cwd) {
+	layers := CodexProjectLayerDirs(cwd)
+	for _, root := range layers {
 		targets["skill"] = append(targets["skill"], filepath.Join(root, ".agents", "skills"))
 		targets["mcp"] = append(targets["mcp"], filepath.Join(root, ".codex", "config.toml"))
 		targets["agent"] = append(targets["agent"], filepath.Join(root, ".codex", "agents"))
 		targets["rule"] = append(targets["rule"], filepath.Join(root, ".codex", "rules"))
 	}
+	if strings.TrimSpace(homeDir) != "" {
+		targets["plugin"] = append(targets["plugin"], codexMarketplaceManifestPaths(homeDir)...)
+	}
+	if len(layers) > 0 {
+		targets["plugin"] = append(targets["plugin"], codexMarketplaceManifestPaths(layers[len(layers)-1])...)
+	}
 	return targets
+}
+
+func codexMarketplaceManifestPaths(root string) []string {
+	return []string{
+		filepath.Join(root, ".agents", "plugins", "marketplace.json"),
+		filepath.Join(root, ".agents", "plugins", "api_marketplace.json"),
+		filepath.Join(root, ".claude-plugin", "marketplace.json"),
+		filepath.Join(root, ".cursor-plugin", "marketplace.json"),
+	}
 }
 
 // CodexPersonalSkillsPath returns the personal skill root. CODEX_HOME does not

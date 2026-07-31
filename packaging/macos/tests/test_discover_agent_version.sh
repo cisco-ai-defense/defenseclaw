@@ -154,10 +154,21 @@ t_unknown_connector() {
   assert_eq "${got}" "" "unknown connector returns empty string"
 }
 
+t_opencode_from_user_npm_metadata() {
+  local home; home="$(mktest_tmp)"
+  local pkg_dir="${home}/.npm-global/lib/node_modules/opencode-ai"
+  mkdir -p "${pkg_dir}"
+  printf '{"name":"opencode-ai","version":"1.18.10"}\n' >"${pkg_dir}/package.json"
+  local got
+  got="$(without_host_agent_bins discover_agent_version opencode "${home}")"
+  assert_eq "${got}" "1.18.10" "opencode version from user-npm metadata"
+}
+
 run_case "claudecode via Cursor extension"   t_claudecode_via_cursor_extension
 run_case "claudecode via VS Code extension"  t_claudecode_via_vscode_extension
 run_case "claudecode without install"        t_claudecode_no_install_returns_empty
 run_case "codex without home metadata"       t_codex_no_home_metadata_uses_system_or_empty
 run_case "codex from user npm metadata"      t_codex_from_user_npm_metadata
 run_case "codex ChatGPT.app-bundled wins over stale npm" t_codex_chatgpt_app_bundled_wins_over_npm
+run_case "opencode from user npm metadata"   t_opencode_from_user_npm_metadata
 run_case "unknown connector returns empty"   t_unknown_connector

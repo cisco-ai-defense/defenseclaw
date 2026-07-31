@@ -52,7 +52,7 @@ MODE_PICKER_CHOICES: tuple[ModeChoice, ...] = (
         "shell hooks; synchronous JSON pre-tool block; no ask or fail-closed",
     ),
     ModeChoice("cursor", "Cursor", "u", False, "command hooks + event-scoped ask/block"),
-    ModeChoice("windsurf", "Windsurf", "w", False, "Cascade hooks + fail-open block decisions"),
+    ModeChoice("windsurf", "Devin Desktop", "w", False, "Cascade hooks + exit-2 block decisions"),
     ModeChoice(
         "geminicli",
         "Gemini CLI",
@@ -64,7 +64,7 @@ MODE_PICKER_CHOICES: tuple[ModeChoice, ...] = (
     ModeChoice("openhands", "OpenHands", "n", False, "command hooks via ~/.openhands/hooks.json"),
     ModeChoice("antigravity", "Antigravity", "a", False, "PreToolUse hooks via ~/.gemini/config/hooks.json"),
     ModeChoice("opencode", "OpenCode", "e", False, "auto-loaded JS bridge plugin; tool.execute.before blocking"),
-    ModeChoice("omnigent", "OmniGent", "m", False, "custom policy ALLOW/ASK/DENY + optional native OTLP"),
+    ModeChoice("omnigent", "OmniGent", "m", False, "custom policy ALLOW/ASK/DENY + opt-in native OTLP"),
 )
 
 

@@ -817,7 +817,7 @@ func isDefenseClawHookExecutable(exe string) bool {
 		filepath.Join(userHomeDir(), ".local", "bin", windowsHookBinaryName),
 		filepath.Join(userHomeDir(), ".local", "bin", windowsGatewayBinaryName),
 	} {
-		if strings.TrimSpace(owned) != "" && pathidentity.Same(exe, owned) {
+		if strings.TrimSpace(owned) != "" && sameManagedHookPath(exe, owned) {
 			return true
 		}
 	}
@@ -849,11 +849,24 @@ func isDefenseClawManagedHookExecutable(exe string) bool {
 		canonicalNativeWindowsHookBinary(),
 		canonicalNativeWindowsInstalledHookBinary(),
 	}) {
-		if pathidentity.Same(exe, owned) {
+		if sameManagedHookPath(exe, owned) {
 			return true
 		}
 	}
 	return false
+}
+
+// sameManagedHookPath preserves exact ownership checks when a Windows command
+// is audited on macOS/Linux. pathidentity.Same intentionally follows host path
+// semantics, so normalize only when both operands are absolute drive paths.
+func sameManagedHookPath(left, right string) bool {
+	if isWindowsDriveAbsolutePath(left) && isWindowsDriveAbsolutePath(right) {
+		normalize := func(value string) string {
+			return strings.TrimRight(strings.ReplaceAll(strings.TrimSpace(value), `\`, "/"), "/")
+		}
+		return strings.EqualFold(normalize(left), normalize(right))
+	}
+	return pathidentity.Same(left, right)
 }
 
 // isWindowsDriveAbsolutePath keeps host-independent connector tests faithful

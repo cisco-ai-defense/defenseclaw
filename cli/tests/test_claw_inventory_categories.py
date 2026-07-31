@@ -305,21 +305,14 @@ class ToolsAdapterTests(unittest.TestCase):
         ids = sorted(t["id"] for t in out)
         self.assertEqual(ids, ["fs", "shell"])
 
-    def test_codex_tools_from_toml(self):
-        cd = os.path.join(self.tmp, ".codex")
-        os.makedirs(cd)
-        with open(os.path.join(cd, "config.toml"), "w") as fh:
-            fh.write(
-                "[tools]\n"
-                "[tools.run]\n"
-                'description = "Execute shell command"\n'
-                "[tools.read]\n"
-                'name = "Read File"\n'
-            )
+    def test_codex_tools_from_custom_prompts(self):
+        prompts = os.path.join(self.tmp, ".codex", "prompts")
+        os.makedirs(prompts)
+        with open(os.path.join(prompts, "review.md"), "w") as fh:
+            fh.write("# Review\nReview the current diff.\n")
 
         out = _tools_for_connector("codex", _FakeCfg())
-        ids = sorted(t["id"] for t in out)
-        self.assertEqual(ids, ["read", "run"])
+        self.assertEqual([tool["id"] for tool in out], ["prompts:review"])
 
     def test_zeptoclaw_tools_from_agents_json(self):
         zc = os.path.join(self.tmp, ".zeptoclaw")

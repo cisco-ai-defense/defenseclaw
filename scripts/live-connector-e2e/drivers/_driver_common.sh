@@ -32,6 +32,7 @@ DC_DRIVER_MODE="${DC_DRIVER_MODE:-action}"
 DC_DRIVER_SUPPORTS_LIFECYCLE="${DC_DRIVER_SUPPORTS_LIFECYCLE:-1}"
 DC_DRIVER_SUPPORTS_BLOCK="${DC_DRIVER_SUPPORTS_BLOCK:-1}"
 DC_DRIVER_SUPPORTS_OTLP="${DC_DRIVER_SUPPORTS_OTLP:-0}"
+DC_DRIVER_OTLP_SKIP_REASON="${DC_DRIVER_OTLP_SKIP_REASON:-}"
 DC_DRIVER_RESULT_PREFIX="${DC_DRIVER_RESULT_PREFIX:-}"
 
 # Set by dc_driver_run_probes for callers (notably upgrade-regression.sh) that
@@ -380,7 +381,8 @@ dc_driver_run_probes() {
       rc=1
     fi
   else
-    dc_record_result "$(dc_driver_event 'otlp')" skip "native OTLP not supported by ${connector}"
+    dc_record_result "$(dc_driver_event 'otlp')" skip \
+      "${DC_DRIVER_OTLP_SKIP_REASON:-native OTLP not supported by ${connector}}"
   fi
 
   if dc_assert_observability; then

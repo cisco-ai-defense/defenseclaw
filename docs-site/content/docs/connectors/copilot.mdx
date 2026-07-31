@@ -8,7 +8,7 @@ keywords:
   - Copilot guardrail
 ---
 
-The GitHub Copilot CLI connector wires DefenseClaw into [Copilot CLI hooks](https://docs.github.com/copilot/) globally under `~/.copilot/hooks/` by default, with an optional workspace mode for `<workspace>/.github/hooks/`. Native ask is supported on `preToolUse`, so HITL approvals surface inside the agent UI.
+The GitHub Copilot CLI connector wires DefenseClaw into [Copilot CLI hooks](https://docs.github.com/en/copilot/reference/hooks-reference) globally under `~/.copilot/hooks/` by default, with an optional workspace mode for `<workspace>/.github/hooks/`. Native ask is supported on `preToolUse`, so HITL approvals surface inside the agent UI. On Windows, macOS, and Linux, 1.0.76 and later select the v2 contract with all 14 documented events, including mutation-only `userPromptTransformed`; versions from 1.0.18 through 1.0.75 use the 13-event v1 contract. Native Windows remains uncertified.
 
 <Callout type="warn">
 Direct native Windows is eligible upstream but is not yet certified by DefenseClaw. The current Windows platform gate therefore refuses Copilot setup until the packaged and real official-client certification phase passes. WSL, Git Bash, Cygwin, MSYS, Docker, and VM workarounds are not supported.
@@ -199,6 +199,34 @@ Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [int
 <Callout type="info">
 Copilot CLI supports native ask on documented `preToolUse` hooks. The approval prompt surfaces inside the agent UI, not the DefenseClaw TUI.
 </Callout>
+
+`userPromptTransformed` is audit-only in DefenseClaw. Copilot permits only
+`modifiedTransformedPrompt` on that event; DefenseClaw returns an empty object
+and never changes the runtime-transformed prompt.
+
+## Upstream native OpenTelemetry
+
+Copilot CLI 1.0.76 officially emits OTLP traces and metrics when
+`COPILOT_OTEL_ENABLED=true`; it does not emit a native logs signal. Correlation
+uses `gen_ai.conversation.id`, `github.copilot.turn_id`,
+`github.copilot.interaction_id`, and `gen_ai.tool.call.id`.
+
+<Callout type="warning">
+Copilot disables export to cleartext `http://` OTLP endpoints. DefenseClaw
+therefore does not auto-wire Copilot's native exporter to the current
+cleartext loopback gateway. Hook telemetry remains active; native OTLP needs a
+trusted HTTPS endpoint or future file-export ingestion.
+</Callout>
+
+The macOS registry models the official exporter capability as
+`native_otlp=true`, but Setup does not auto-configure or certify it. Windows
+keeps `native_otlp=false`. On every platform, ordinary Copilot setup writes no
+Copilot OTel environment variables or native-exporter credentials.
+
+On macOS, passive discovery canonicalizes the executable path, rejects unsafe
+permissions and quarantine, and requires official native Mach-O artifacts to
+verify under GitHub's Developer ID team `VEKTX9H2N7`. npm launcher scripts
+remain subject to the shared trusted-prefix and permission checks.
 
 On native Windows, Copilot selects the hook's official `powershell` field.
 DefenseClaw's prepared contract invokes the stable `defenseclaw-hook.exe`

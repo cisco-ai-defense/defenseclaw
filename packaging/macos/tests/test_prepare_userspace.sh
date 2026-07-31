@@ -42,6 +42,7 @@ t_dispatch_via_helper() {
   prepare_userspace_for cursor     "${home}"
   prepare_userspace_for codex      "${home}"
   prepare_userspace_for claudecode "${home}"
+  prepare_userspace_for opencode   "${home}"
   assert_file_exists "${home}/.cursor/hooks.json"
   assert_file_exists "${home}/.codex/config.toml"
   assert_file_exists "${home}/.claude/settings.json"

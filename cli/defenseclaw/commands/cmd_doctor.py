@@ -32,14 +32,17 @@ import re
 import shlex
 import shutil
 import ssl
+import stat
 import subprocess
 import sys
 import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 
 import click
+import yaml
 
 from defenseclaw import ux
 from defenseclaw.audit_actions import ACTION_DOCTOR
@@ -62,6 +65,7 @@ from defenseclaw.doctor_gateway import (
 from defenseclaw.doctor_hooks import (
     WindowsHookCheck,
     _packaged_windows_install_root,
+    validate_posix_copilot_hook_registration,
     validate_windows_copilot_hook_registration,
     validate_windows_hook_registration,
 )
@@ -598,7 +602,8 @@ def _check_hilt_support(cfg, connector: str, r: _DoctorResult) -> None:
         _emit(
             "warn",
             "Human approval",
-            "Cursor enforces ask only for beforeShellExecution and beforeMCPExecution; "
+            "Cursor has documented ask-capable enforcement only for "
+            "beforeShellExecution and beforeMCPExecution; "
             "preToolUse accepts ask in the schema but does not enforce it",
             r=r,
         )
@@ -1567,7 +1572,117 @@ def _check_hermes_hooks(
             pathext=pathext,
         )
         return
-    _check_hook_health(cfg, "hermes", r)
+    _check_hermes_posix_hooks(cfg, r, config_path=config_path)
+
+
+_HERMES_HOOK_MATCHERS: dict[str, str | None] = {
+    "pre_tool_call": ".*",
+    "post_tool_call": ".*",
+    "transform_terminal_output": None,
+    "transform_tool_result": None,
+    "transform_llm_output": None,
+    "pre_llm_call": None,
+    "post_llm_call": None,
+    "pre_verify": None,
+    "pre_api_request": None,
+    "post_api_request": None,
+    "api_request_error": None,
+    "on_session_start": None,
+    "on_session_end": None,
+    "on_session_finalize": None,
+    "on_session_reset": None,
+    "subagent_start": None,
+    "subagent_stop": None,
+    "pre_gateway_dispatch": None,
+    "pre_approval_request": None,
+    "post_approval_response": None,
+    "kanban_task_claimed": None,
+    "kanban_task_completed": None,
+    "kanban_task_blocked": None,
+}
+
+
+def _check_hermes_posix_hooks(cfg, r: _DoctorResult, *, config_path: str | None = None) -> None:
+    """Validate the complete managed Hermes shell-hook contract on POSIX."""
+    label = "Hermes hooks (preview; fail-open)"
+    paths = [config_path] if config_path else _hook_health_paths_from_lock(cfg, "hermes")
+    path = next((p for p in paths if p), None) or hermes_config_path()
+    runtime_paths = _hook_runtime_paths_from_lock(cfg, "hermes")
+    expected_script = os.path.abspath(
+        runtime_paths[0]
+        if runtime_paths
+        else os.path.join(getattr(cfg, "data_dir", "") or "", "hooks", "hermes-hook.sh")
+    )
+    try:
+        with open(path, encoding="utf-8") as fh:
+            document = yaml.safe_load(fh) or {}
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        _emit("fail", label, f"cannot read {path}: {exc}; run `defenseclaw setup hermes --yes --restart`", r=r)
+        return
+    reasons: list[str] = []
+    if not isinstance(document, dict):
+        reasons.append("config root is not a mapping")
+        document = {}
+    if document.get("hooks_auto_accept") is not True:
+        reasons.append("hooks_auto_accept is not true")
+    hooks = document.get("hooks")
+    if not isinstance(hooks, dict):
+        reasons.append("hooks is not a mapping")
+        hooks = {}
+    expected_command: str | None = None
+    for event, matcher in _HERMES_HOOK_MATCHERS.items():
+        entries = hooks.get(event)
+        if not isinstance(entries, list):
+            reasons.append(f"{event} missing")
+            continue
+        owned: list[dict] = []
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            command = entry.get("command")
+            if isinstance(command, str) and "hermes-hook.sh" in command:
+                owned.append(entry)
+        if len(owned) != 1:
+            reasons.append(f"{event} has {len(owned)} managed entries")
+            continue
+        entry = owned[0]
+        command = entry.get("command", "")
+        try:
+            tokens = shlex.split(command)
+        except ValueError:
+            tokens = []
+        if tokens != [expected_script]:
+            reasons.append(f"{event} command does not exactly target {expected_script}")
+        if expected_command is None:
+            expected_command = command
+        elif command != expected_command:
+            reasons.append(f"{event} command differs")
+        if entry.get("timeout") != 30:
+            reasons.append(f"{event} timeout is not 30")
+        if matcher is None:
+            if entry.get("matcher") not in (None, ""):
+                reasons.append(f"{event} has an unexpected matcher")
+        elif entry.get("matcher") != matcher:
+            reasons.append(f"{event} matcher is not {matcher}")
+    for event, entries in hooks.items():
+        if event in _HERMES_HOOK_MATCHERS or not isinstance(entries, list):
+            continue
+        if any(
+            isinstance(entry, dict) and isinstance(entry.get("command"), str) and "hermes-hook.sh" in entry["command"]
+            for entry in entries
+        ):
+            reasons.append(f"unexpected managed event {event}")
+    if not os.path.isfile(expected_script):
+        reasons.append(f"runtime script missing at {expected_script}")
+    elif not os.access(expected_script, os.X_OK):
+        reasons.append(f"runtime script is not executable at {expected_script}")
+    if reasons:
+        detail = "; ".join(reasons[:3])
+        if len(reasons) > 3:
+            detail += f"; +{len(reasons) - 3} more"
+        _emit("fail", label, f"{detail}; run `defenseclaw setup hermes --yes --restart`", r=r)
+        return
+    _emit("pass", label, f"23 exact managed entries in {path}; fail-open", r=r)
 
 
 # ---------------------------------------------------------------------------
@@ -1844,6 +1959,148 @@ def _probe_cursor_windows_runtime(cfg, adapter_path: str) -> tuple[bool, str]:
     return True, f"live round trip OK (requests {before_requests}->{after_requests})"
 
 
+def _probe_cursor_shell_runtime(cfg, adapter_path: str) -> tuple[bool, str]:
+    """Exercise the configured POSIX adapter and prove gateway receipt."""
+    gateway = getattr(cfg, "gateway", None)
+    try:
+        api_port = int(getattr(gateway, "api_port", 0) or 0)
+    except (TypeError, ValueError):
+        api_port = 0
+    if api_port <= 0 or api_port > 65535:
+        return False, "cannot resolve the sidecar API port for a Cursor runtime probe"
+
+    health_url = f"http://127.0.0.1:{api_port}/health"
+    before_code, before_body = _http_probe(
+        health_url,
+        timeout=3.0,
+        response_limit=_HEALTH_DOCUMENT_MAX_BYTES,
+        allow_truncation=False,
+    )
+    before = _cursor_health_row(before_body) if before_code == 200 else None
+    if before is None:
+        return False, "sidecar /health has no live Cursor connector row"
+
+    payload = json.dumps(
+        {
+            "hook_event_name": "sessionStart",
+            "session_id": "defenseclaw-doctor-probe",
+            "source": "defenseclaw-doctor",
+            "workspace_roots": [],
+        },
+        separators=(",", ":"),
+    )
+    try:
+        proc = subprocess.run(
+            [adapter_path],
+            input=payload,
+            text=True,
+            capture_output=True,
+            timeout=15.0,
+            check=False,
+        )
+    except FileNotFoundError:
+        return False, "configured Cursor shell adapter is unavailable"
+    except subprocess.TimeoutExpired:
+        return False, "Cursor runtime probe timed out"
+    except OSError as exc:
+        return False, f"Cursor runtime probe could not start: {exc}"
+
+    stdout = proc.stdout[:_HTTP_PROBE_DISPLAY_BYTES].lstrip("\ufeff").strip()
+    stderr = proc.stderr[:_HTTP_PROBE_DISPLAY_BYTES].strip()
+    if proc.returncode != 0:
+        detail = stderr.splitlines()[0] if stderr else f"exit code {proc.returncode}"
+        return False, f"configured Cursor adapter failed: {detail}"
+    try:
+        response = json.loads(stdout)
+    except (json.JSONDecodeError, TypeError):
+        return False, "configured Cursor adapter returned no valid JSON response"
+    if not isinstance(response, dict) or response.get("continue") is not True:
+        return False, "configured Cursor adapter did not return an allow response"
+
+    after_code, after_body = _http_probe(
+        health_url,
+        timeout=3.0,
+        response_limit=_HEALTH_DOCUMENT_MAX_BYTES,
+        allow_truncation=False,
+    )
+    after = _cursor_health_row(after_body) if after_code == 200 else None
+    if after is None:
+        return False, "sidecar /health lost the Cursor connector row after the probe"
+    try:
+        before_requests = int(before.get("requests") or 0)
+        after_requests = int(after.get("requests") or 0)
+        before_errors = int(before.get("errors") or 0)
+        after_errors = int(after.get("errors") or 0)
+    except (TypeError, ValueError):
+        return False, "sidecar returned invalid Cursor counter values"
+    if after_requests <= before_requests:
+        return False, "adapter returned allow JSON but the gateway Cursor request counter did not advance"
+    if after_errors > before_errors:
+        return False, "gateway Cursor error counter increased during the runtime probe"
+    return True, f"live round trip OK (requests {before_requests}->{after_requests})"
+
+
+def _cursor_shell_runtime_provenance(cfg, runtime_path: str) -> tuple[bool, str]:
+    """Validate POSIX ownership/mode plus the digest recorded by Setup."""
+    try:
+        metadata = os.lstat(runtime_path)
+    except OSError as exc:
+        return False, f"cannot inspect configured Cursor shell adapter: {exc}"
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        return False, "configured Cursor shell adapter must be a regular, non-symlink file"
+    getuid = getattr(os, "getuid", None)
+    if callable(getuid) and metadata.st_uid != getuid():
+        return False, "configured Cursor shell adapter is not owned by the current user"
+    if metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        return False, "configured Cursor shell adapter is group/world writable"
+    if not metadata.st_mode & stat.S_IXUSR:
+        return False, "configured Cursor shell adapter is not executable"
+
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    try:
+        with open(os.path.join(data_dir, "hook_contract_lock.json"), encoding="utf-8") as fh:
+            lock = json.load(fh)
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return False, "hook contract lock is unavailable for Cursor runtime provenance"
+    if not isinstance(lock, dict):
+        return False, "hook contract lock is malformed for Cursor runtime provenance"
+    connectors = lock.get("connectors")
+    if not isinstance(connectors, dict):
+        return False, "hook contract lock is malformed for Cursor runtime provenance"
+    entry = connectors.get("cursor")
+    if not isinstance(entry, dict):
+        return False, "hook contract lock has no Cursor runtime provenance"
+    locations = entry.get("locations") or {}
+    if not isinstance(locations, dict):
+        return False, "hook contract lock has malformed Cursor runtime locations"
+    raw_paths = locations.get("hook_script_paths") or []
+    if not isinstance(raw_paths, list):
+        return False, "hook contract lock has malformed Cursor runtime locations"
+    recorded_paths = {
+        os.path.realpath(os.path.expanduser(str(path)))
+        for path in raw_paths
+        if path
+    }
+    if os.path.realpath(runtime_path) not in recorded_paths:
+        return False, "configured Cursor shell adapter is not recorded by Setup"
+    digests = entry.get("hook_script_digests")
+    if not isinstance(digests, dict):
+        return False, "hook contract lock has no valid Cursor shell adapter digest"
+    raw_digest = str(digests.get(os.path.basename(runtime_path)) or "")
+    if not re.fullmatch(r"sha256:[0-9a-fA-F]{64}", raw_digest):
+        return False, "hook contract lock has no valid Cursor shell adapter digest"
+    try:
+        with open(runtime_path, "rb") as fh:
+            body = fh.read(2 * 1024 * 1024 + 1)
+    except OSError as exc:
+        return False, f"cannot read configured Cursor shell adapter: {exc}"
+    if len(body) > 2 * 1024 * 1024:
+        return False, "configured Cursor shell adapter exceeds the provenance size limit"
+    if hashlib.sha256(body).hexdigest() != raw_digest.removeprefix("sha256:").lower():
+        return False, "configured Cursor shell adapter digest does not match Setup"
+    return True, "ownership/mode/digest provenance OK"
+
+
 def _check_cursor_configured_runtime(
     cfg,
     path: str,
@@ -2003,6 +2260,29 @@ def _check_cursor_configured_runtime(
             r=r,
         )
         return
+    shell_markers = (
+        "defenseclaw-managed-hook v8",
+        'DEFENSECLAW_HOOK_CONNECTOR="cursor"',
+        "DEFENSECLAW_GATEWAY_TOKEN",
+        "/api/v1/cursor/hook",
+        "Authorization: Bearer",
+        "X-DefenseClaw-Client: cursor-hook/1.0",
+        "curl",
+    )
+    if shell_script and not all(_file_references_marker(resolved, (marker,)) for marker in shell_markers):
+        _emit(
+            "fail",
+            label,
+            f"configured Cursor shell adapter is stale or invalid: {resolved}; {repair}",
+            r=r,
+        )
+        return
+    provenance_detail = ""
+    if shell_script:
+        provenance_ok, provenance_detail = _cursor_shell_runtime_provenance(cfg, resolved)
+        if not provenance_ok:
+            _emit("fail", label, f"{provenance_detail}: {resolved}; {repair}", r=r)
+            return
 
     guardrail = getattr(cfg, "guardrail", None)
     mode_resolver = getattr(guardrail, "effective_mode", None)
@@ -2041,6 +2321,11 @@ def _check_cursor_configured_runtime(
         if not runtime_ok:
             _emit("fail", label, runtime_detail, r=r)
             return
+    if shell_script and (platform_name or os.name) != "nt" and probe_runtime:
+        runtime_ok, runtime_detail = _probe_cursor_shell_runtime(cfg, resolved)
+        if not runtime_ok:
+            _emit("fail", label, runtime_detail, r=r)
+            return
 
     _emit(
         "pass",
@@ -2050,6 +2335,7 @@ def _check_cursor_configured_runtime(
         f"failure={'fail-closed' if expected_fail_closed else 'fail-open (Cursor default)'}; "
         "ask=beforeShellExecution,beforeMCPExecution only; "
         "fire-and-forget=sessionStart,sessionEnd; stop=followup-only"
+        + (f"; {provenance_detail}" if provenance_detail else "")
         + (f"; {runtime_detail}" if runtime_detail else ""),
         r=r,
     )
@@ -2212,6 +2498,24 @@ def _check_omnigent_policy_health(cfg, r: _DoctorResult) -> None:
         if drift := _omnigent_managed_artifact_drift(cfg, logical, path):
             _emit("fail", "OmniGent policy", drift, r=r)
             return
+    workspace = _workspace_dir(cfg)
+    local_config = os.path.join(workspace, ".omnigent", "config.yaml") if workspace else ""
+    if local_config and os.path.isfile(local_config):
+        try:
+            with open(local_config, encoding="utf-8") as fh:
+                local_text = fh.read()
+        except (OSError, UnicodeError) as exc:
+            _emit("fail", "OmniGent policy", f"cannot read project config {local_config}: {exc}", r=r)
+            return
+        if re.search(r"(?m)^(?:policies|policy_modules)\s*:", local_text):
+            _emit(
+                "fail",
+                "OmniGent policy",
+                f"project config {local_config} replaces global policies/policy_modules; "
+                "remove those keys or start OmniGent with the global --config path",
+                r=r,
+            )
+            return
     _emit(
         "pass",
         "OmniGent policy",
@@ -2347,7 +2651,9 @@ def _workspace_dir(cfg) -> str:
     resolver = getattr(cfg, "connector_workspace_dir", None)
     if callable(resolver):
         try:
-            return resolver()
+            resolved = resolver()
+            if isinstance(resolved, str):
+                return resolved
         except Exception:
             pass
     claw = getattr(cfg, "claw", None)
@@ -2389,6 +2695,61 @@ def _hook_json_references(path: str, script_name: str) -> bool:
     return False
 
 
+_ANTIGRAVITY_POSIX_EVENTS: dict[str, bool] = {
+    "PreInvocation": False,
+    "PreToolUse": True,
+    "PostToolUse": True,
+    "PostInvocation": False,
+    "Stop": False,
+}
+
+
+def _validate_antigravity_posix_hooks(document: object, hook_script: str) -> None:
+    """Validate the exact managed Antigravity lifecycle without execution."""
+
+    if not isinstance(document, dict):
+        raise ValueError("hooks.json root is not an object")
+    expected_keys = {
+        f"defenseclaw-antigravity-{event.lower()}" for event in _ANTIGRAVITY_POSIX_EVENTS
+    }
+    for event, uses_matcher in _ANTIGRAVITY_POSIX_EVENTS.items():
+        key = f"defenseclaw-antigravity-{event.lower()}"
+        container = document.get(key)
+        if not isinstance(container, dict):
+            raise ValueError(f"managed registration {key} is missing")
+        entries = container.get(event)
+        if not isinstance(entries, list) or len(entries) != 1:
+            raise ValueError(f"{event} must contain exactly one registered entry")
+        handler: object
+        if uses_matcher:
+            group = entries[0]
+            if not isinstance(group, dict) or group.get("matcher") != "*":
+                raise ValueError(f"{event} matcher must be '*'")
+            handlers = group.get("hooks")
+            if not isinstance(handlers, list) or len(handlers) != 1:
+                raise ValueError(f"{event} must contain exactly one command handler")
+            handler = handlers[0]
+        else:
+            handler = entries[0]
+            if isinstance(handler, dict) and ("matcher" in handler or "hooks" in handler):
+                raise ValueError(f"{event} must use a direct handler list")
+        if not isinstance(handler, dict) or handler.get("type") != "command":
+            raise ValueError(f"{event} handler type is not command")
+        if handler.get("timeout") != 30:
+            raise ValueError(f"{event} timeout must be 30 seconds")
+        expected_command = f"{hook_script} {event}"
+        if handler.get("command") != expected_command:
+            raise ValueError(f"{event} command is not bound to the managed runtime and event")
+
+    for key in document:
+        if (
+            isinstance(key, str)
+            and key.startswith("defenseclaw-antigravity-")
+            and key not in expected_keys
+        ):
+            raise ValueError(f"unexpected managed Antigravity registration {key}")
+
+
 def _check_antigravity_hooks(cfg, r: _DoctorResult, platform_name: str | None = None) -> None:
     """Validate Antigravity's documented global lifecycle registration."""
 
@@ -2398,6 +2759,7 @@ def _check_antigravity_hooks(cfg, r: _DoctorResult, platform_name: str | None = 
         return
 
     canonical = os.path.join(connector_home("antigravity"), "hooks.json")
+    hook_script = os.path.join(cfg.data_dir, "hooks", "antigravity-hook.sh")
     if not os.path.isfile(canonical):
         _emit(
             "fail",
@@ -2405,15 +2767,26 @@ def _check_antigravity_hooks(cfg, r: _DoctorResult, platform_name: str | None = 
             f"not found at {canonical}; re-run `defenseclaw setup antigravity`",
             r=r,
         )
-    elif _hook_json_references(canonical, "antigravity-hook.sh"):
-        _emit("pass", "Antigravity hooks", f"reachable at {canonical}", r=r)
     else:
-        _emit(
-            "fail",
-            "Antigravity hooks",
-            f"{canonical} exists but does not reference DefenseClaw hook script",
-            r=r,
-        )
+        try:
+            with open(canonical, encoding="utf-8") as fh:
+                document = json.load(fh)
+            _validate_antigravity_posix_hooks(document, hook_script)
+        except (json.JSONDecodeError, OSError, ValueError) as exc:
+            _emit(
+                "fail",
+                "Antigravity hooks",
+                f"{canonical} is stale or tampered: {exc}; "
+                "re-run `defenseclaw setup antigravity --yes`",
+                r=r,
+            )
+        else:
+            _emit(
+                "pass",
+                "Antigravity hooks",
+                f"exact five-event contract reachable at {canonical}",
+                r=r,
+            )
 
     _check_antigravity_workspace_duplicates(cfg, r)
 
@@ -2442,25 +2815,80 @@ def _check_openhands_hooks(cfg, r: _DoctorResult) -> None:
     candidates = [os.path.join(home, ".openhands", "hooks.json")]
     if workspace:
         candidates.insert(0, os.path.join(workspace, ".openhands", "hooks.json"))
-    present = [path for path in candidates if os.path.isfile(path)]
-    if not present:
+    active = next((path for path in candidates if os.path.isfile(path)), "")
+    repair = "run `defenseclaw setup openhands --yes --restart` to reconcile the managed registration"
+    if not active:
         _emit(
             "fail",
             "OpenHands hooks",
-            "not found in OpenHands SDK search paths: " + ", ".join(candidates),
+            "not found in OpenHands SDK search paths: " + ", ".join(candidates) + f"; {repair}",
             r=r,
         )
         return
-    for path in present:
-        if _hook_json_references(path, "openhands-hook.sh"):
-            _emit("pass", "OpenHands hooks", f"reachable at {path}", r=r)
-            return
-    _emit(
-        "fail",
-        "OpenHands hooks",
-        "hooks.json exists but does not reference DefenseClaw hook script: " + ", ".join(present),
-        r=r,
+    # HookConfig.load selects the first existing file (workspace before user)
+    # and does not merge the two. Never pass doctor because a shadowed global
+    # file still references DefenseClaw when the active workspace file does not.
+    try:
+        with open(active, encoding="utf-8") as fh:
+            config = json.load(fh)
+    except (json.JSONDecodeError, OSError) as exc:
+        _emit("fail", "OpenHands hooks", f"cannot parse active config {active}: {exc}; {repair}", r=r)
+        return
+    required_events = (
+        "pre_tool_use",
+        "post_tool_use",
+        "user_prompt_submit",
+        "stop",
+        "session_start",
+        "session_end",
     )
+    missing = [
+        event
+        for event in required_events
+        if not isinstance(config.get(event), list)
+        or "openhands-hook.sh" not in json.dumps(config[event], sort_keys=True)
+    ]
+    if missing:
+        _emit(
+            "fail",
+            "OpenHands hooks",
+            f"active config {active} has incomplete DefenseClaw registration "
+            f"(missing: {', '.join(missing)}); {repair}",
+            r=r,
+        )
+        return
+
+    hook_dir = os.path.join(cfg.data_dir, "hooks")
+    script = os.path.join(hook_dir, "openhands-hook.sh")
+    token_paths = (
+        os.path.join(hook_dir, ".hook-openhands.token"),
+        os.path.join(hook_dir, ".otlp-openhands.token"),
+    )
+    try:
+        with open(script, encoding="utf-8") as fh:
+            marker = fh.read(4096)
+    except OSError as exc:
+        _emit("fail", "OpenHands hooks", f"managed hook script unavailable: {exc}; {repair}", r=r)
+        return
+    if "defenseclaw-managed-hook" not in marker or not os.access(script, os.X_OK):
+        _emit("fail", "OpenHands hooks", f"managed hook script is tampered or not executable: {script}; {repair}", r=r)
+        return
+    for token_path in token_paths:
+        try:
+            token = Path(token_path).read_text(encoding="utf-8").strip()
+            mode = os.stat(token_path).st_mode & 0o777
+        except OSError as exc:
+            _emit("fail", "OpenHands hooks", f"scoped credential unavailable: {exc}; {repair}", r=r)
+            return
+        if not re.fullmatch(r"[0-9a-f]{64}", token) or mode & 0o077:
+            _emit(
+                "fail",
+                "OpenHands hooks",
+                f"scoped credential is invalid or over-permissive: {token_path}; {repair}",
+                r=r,
+            )
+            return
+    _emit("pass", "OpenHands hooks", f"complete registration and scoped runtime reachable at {active}", r=r)
 
 
 def _check_copilot_hooks(
@@ -2500,19 +2928,15 @@ def _check_copilot_hooks(
         if not os.path.isfile(path):
             _emit("fail", "Copilot hooks", f"{path} not found", r=r)
             return
-        if _hook_json_references(path, "copilot-hook.sh"):
-            _emit("pass", "Copilot hooks", f"reachable at {path}", r=r)
-            return
-        _emit("fail", "Copilot hooks", f"{path} does not reference DefenseClaw hook script", r=r)
+        check = validate_posix_copilot_hook_registration(config_path=path, data_dir=data_dir)
+        _emit("pass" if check.healthy else "fail", "Copilot hooks", check.detail, r=r)
         return
     path = os.path.join(workspace, ".github", "hooks", "defenseclaw.json")
     if not os.path.isfile(path):
         _emit("fail", "Copilot hooks", f"{path} not found", r=r)
         return
-    if _hook_json_references(path, "copilot-hook.sh"):
-        _emit("pass", "Copilot hooks", f"reachable at {path}", r=r)
-    else:
-        _emit("fail", "Copilot hooks", f"{path} does not reference DefenseClaw hook script", r=r)
+    check = validate_posix_copilot_hook_registration(config_path=path, data_dir=data_dir)
+    _emit("pass" if check.healthy else "fail", "Copilot hooks", check.detail, r=r)
 
 
 def _check_zeptoclaw_config(cfg, r: _DoctorResult) -> None:
@@ -4543,8 +4967,9 @@ def _check_hook_contract_lock(
             " consumer-free-AI-Pro-Ultra-ended=2026-06-18"
         )
     locations = entry.get("locations") or {}
+    resolved_platform = platform_name or ("darwin" if sys.platform == "darwin" else os.name)
     native_runtime = None
-    if (platform_name or os.name) == "nt" and connector in {
+    if resolved_platform in {"nt", "windows"} and connector in {
         "codex",
         "claudecode",
         "copilot",
@@ -4564,7 +4989,7 @@ def _check_hook_contract_lock(
         workspace_dir = str(locations.get("workspace_dir") or "").strip()
         hook_paths = [str(v) for v in locations.get("hook_config_paths", []) if v]
         runtime_paths = [str(v) for v in locations.get("hook_script_paths", []) if v]
-        if (platform_name or os.name) == "nt":
+        if resolved_platform in {"nt", "windows"}:
             # The lock also records portable generated assets for digest and
             # freshness checks.  They are not Windows runtimes.  Retain real
             # native artifacts such as Cursor's .ps1 adapter and OmniGent's
@@ -4593,7 +5018,21 @@ def _check_hook_contract_lock(
             str(entry.get("agent_executable_source") or "").strip() == "setup-selected",
         )
     )
-    current_version = "" if protected_codex_agent else _discovered_agent_version(data_dir, connector)
+    protected_macos_claude = resolved_platform == "darwin" and connector == "claudecode"
+    if protected_macos_claude:
+        provenance_error = _macos_claudecode_provenance_error(data_dir, entry)
+        if provenance_error:
+            _emit(
+                "fail",
+                "Hook contract",
+                f"{detail}; macOS executable provenance: {provenance_error}; "
+                "run `defenseclaw setup claude-code --yes --restart` to repair",
+                r=r,
+            )
+            return
+        detail += f" executable={entry.get('agent_executable')}"
+    protected_agent = protected_codex_agent or protected_macos_claude
+    current_version = "" if protected_agent else _discovered_agent_version(data_dir, connector)
     if current_version and raw_version and current_version != raw_version:
         _emit(
             "fail",
@@ -4611,6 +5050,60 @@ def _check_hook_contract_lock(
         _emit("pass", "Hook contract", detail, r=r)
     else:
         _emit("warn", "Hook contract", detail, r=r)
+
+
+def _macos_claudecode_provenance_error(data_dir: str, entry: dict) -> str:
+    """Return a passive Doctor diagnostic for sealed and active Claude."""
+
+    executable = str(entry.get("agent_executable") or "").strip()
+    source = str(entry.get("agent_executable_source") or "").strip()
+    expected_digest = str(entry.get("agent_executable_sha256") or "").strip()
+    if source != "setup-selected":
+        return "protected Setup selection is missing"
+    if not os.path.isabs(executable) or any(char in executable for char in "\x00\r\n"):
+        return "selected executable path is not canonical and absolute"
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_digest):
+        return "protected SHA-256 digest is missing or malformed"
+
+    from defenseclaw.agent_selection import is_setup_trusted_binary, stable_executable_sha256
+
+    if not is_setup_trusted_binary(executable, data_dir, connector="claudecode"):
+        return "Mach-O path, permissions, architecture, quarantine, or Anthropic code signature is invalid"
+    try:
+        actual_digest = stable_executable_sha256(executable)
+    except OSError as exc:
+        return f"cannot hash selected executable: {exc}"
+    if actual_digest != expected_digest:
+        return "selected executable digest no longer matches protected Setup evidence"
+
+    launchers = (
+        shutil.which("claude") or "",
+        os.path.join(os.path.expanduser("~"), ".local", "bin", "claude"),
+        "/opt/homebrew/bin/claude",
+        "/usr/local/bin/claude",
+    )
+    active = ""
+    for launcher in launchers:
+        if not launcher or not os.path.exists(launcher):
+            continue
+        resolved = os.path.realpath(os.path.abspath(launcher))
+        if is_setup_trusted_binary(resolved, data_dir, connector="claudecode"):
+            active = resolved
+            break
+    if not active:
+        return "no currently launchable verified Claude Code executable was found"
+    if active != executable:
+        return (
+            "active Claude Code launcher target differs from protected Setup evidence "
+            f"({active} != {executable})"
+        )
+    try:
+        active_digest = stable_executable_sha256(active)
+    except OSError as exc:
+        return f"cannot hash active executable: {exc}"
+    if active_digest != expected_digest:
+        return "active Claude Code executable digest differs from protected Setup evidence"
+    return ""
 
 
 def _discovered_agent_version(data_dir: str, connector: str) -> str:

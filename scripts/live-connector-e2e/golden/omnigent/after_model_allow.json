@@ -1,0 +1,15 @@
+{
+  "type": "llm_response",
+  "data": {
+    "model": "contract-test",
+    "text_preview": "contract model response",
+    "tool_calls_count": 0,
+    "usage": {
+      "input_tokens": 4,
+      "output_tokens": 3
+    }
+  },
+  "context": {
+    "model": "contract-test"
+  }
+}

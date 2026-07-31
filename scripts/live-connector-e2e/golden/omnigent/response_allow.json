@@ -1,0 +1,7 @@
+{
+  "type": "response",
+  "data": "contract response",
+  "context": {
+    "model": "contract-test"
+  }
+}

@@ -18,6 +18,7 @@ package connector
 
 import (
 	"fmt"
+	"runtime"
 	"strings"
 )
 
@@ -106,7 +107,8 @@ func hookOnlyProfileRespond(in HookRespondInput) HookRespondOutput {
 	case "openhands":
 		if in.Action == "block" {
 			output = map[string]interface{}{"decision": "deny", "reason": reason}
-		} else if (in.Action == "alert" || in.RawAction == "confirm") && in.AdditionalContext != "" {
+		} else if canonicalHookEvent(in.Req.HookEventName) == "userpromptsubmit" &&
+			(in.Action == "alert" || in.RawAction == "confirm") && in.AdditionalContext != "" {
 			output = map[string]interface{}{"additionalContext": in.AdditionalContext}
 		}
 	case "opencode":
@@ -240,6 +242,10 @@ func antigravityHookOutputForProfile(event, action, _ string, reason, additional
 
 func copilotHookOutputForProfile(event, action, rawAction, reason, additional string) map[string]interface{} {
 	switch canonicalHookEvent(event) {
+	case "userprompttransformed":
+		// This event is mutation-only. DefenseClaw observes it but does not
+		// rewrite the transformed prompt, so the valid no-op response is {}.
+		return map[string]interface{}{}
 	case "pretooluse":
 		switch action {
 		case "confirm":
@@ -252,7 +258,11 @@ func copilotHookOutputForProfile(event, action, rawAction, reason, additional st
 			// interrupt=true stops the entire Copilot agent. An ordinary
 			// DefenseClaw tool denial must short-circuit only this permission
 			// request, so leave the optional interrupt field absent.
-			return map[string]interface{}{"behavior": "deny", "message": reason}
+			out := map[string]interface{}{"behavior": "deny", "message": reason}
+			if runtime.GOOS == "darwin" {
+				out["interrupt"] = true
+			}
+			return out
 		}
 	case "agentstop", "stop", "subagentstop":
 		if action == "block" {
@@ -262,10 +272,6 @@ func copilotHookOutputForProfile(event, action, rawAction, reason, additional st
 		if additional != "" {
 			return map[string]interface{}{"additionalContext": additional}
 		}
-	case "userprompttransformed":
-		// This event is mutation-only. DefenseClaw observes and audits the
-		// transformed prompt but never rewrites model-facing content.
-		return map[string]interface{}{}
 	}
 	return nil
 }

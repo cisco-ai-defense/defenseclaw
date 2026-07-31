@@ -624,6 +624,15 @@ def copilot_home() -> str:
 
     return _connector_env_home("COPILOT_HOME", ".copilot")
 
+def openhands_persistence_dir() -> str:
+    """Return the persistence root used by the OpenHands CLI."""
+
+    return _connector_env_home("OPENHANDS_PERSISTENCE_DIR", ".openhands")
+
+
+def openhands_mcp_path() -> str:
+    return os.path.join(openhands_persistence_dir(), "mcp.json")
+
 
 def windsurf_user_home() -> str:
     """Return DefenseClaw's exact Windsurf user-profile binding.
@@ -857,11 +866,20 @@ def connector_config_files(
     elif name == "copilot":
         copilot_root = copilot_home()
         paths = [
+            os.path.join(copilot_root, "settings.json"),
             os.path.join(copilot_root, "config.json"),
+            os.path.join(copilot_root, "mcp-config.json"),
             os.path.join(copilot_root, "hooks", "defenseclaw.json"),
-            _workspace_path(workspace_dir, ".github", "copilot.json"),
+            _workspace_path(workspace_dir, ".github", "copilot", "settings.json"),
+            _workspace_path(workspace_dir, ".github", "copilot", "settings.local.json"),
             _workspace_path(workspace_dir, ".github", "hooks", "defenseclaw.json"),
+            _workspace_path(workspace_dir, ".github", "mcp.json"),
+            _workspace_path(workspace_dir, ".mcp.json"),
+            _workspace_path(workspace_dir, ".claude", "settings.json"),
+            _workspace_path(workspace_dir, ".claude", "settings.local.json"),
         ]
+        if sys.platform == "darwin":
+            paths.append("/Library/Application Support/GitHubCopilot/managed-settings.json")
     elif name == "openhands":
         paths = [
             os.path.join(home, ".openhands", "hooks.json"),
@@ -953,7 +971,10 @@ def skill_dirs(
     if name == "antigravity":
         return _antigravity_skill_dirs(workspace_dir)
     if name == "opencode":
-        return []
+        # PR #655 deliberately left this unproven on native Windows. The
+        # macOS audit verified OpenCode's documented skill roots, so expose
+        # them only on the Unix side of this stacked change.
+        return [] if os.name == "nt" else _opencode_skill_dirs(workspace_dir)
     if name == "omnigent":
         return []
     return _openclaw_skill_dirs(openclaw_home, openclaw_config)
@@ -998,7 +1019,9 @@ def plugin_dirs(
     if name == "antigravity":
         return _antigravity_plugin_dirs(workspace_dir)
     if name == "opencode":
-        return []
+        # Preserve the Windows registry contract while enabling the paths
+        # independently verified by the macOS connector audit.
+        return [] if os.name == "nt" else _opencode_plugin_dirs(workspace_dir)
     if name == "omnigent":
         return []
     return _openclaw_plugin_dirs(openclaw_home)
@@ -1395,7 +1418,29 @@ def _zeptoclaw_skill_dirs(workspace_dir: str | None = None) -> list[str]:
 
 
 def _hermes_skill_dirs() -> list[str]:
-    return [os.path.join(hermes_home(), "skills")]
+    home = hermes_home()
+    paths = [os.path.join(home, "skills")]
+    try:
+        with open(hermes_config_path(), encoding="utf-8") as handle:
+            document = yaml.safe_load(handle) or {}
+    except (OSError, yaml.YAMLError):
+        return paths
+    skills = document.get("skills") if isinstance(document, dict) else None
+    external = skills.get("external_dirs") if isinstance(skills, dict) else None
+    if isinstance(external, str):
+        external = [external]
+    if not isinstance(external, list):
+        return paths
+    for value in external:
+        expanded = os.path.expanduser(os.path.expandvars(str(value).strip()))
+        if not expanded:
+            continue
+        if not os.path.isabs(expanded):
+            expanded = os.path.join(home, expanded)
+        resolved = os.path.realpath(expanded)
+        if os.path.isdir(resolved):
+            paths.append(resolved)
+    return _dedup(paths)
 
 
 def _cursor_skill_dirs(workspace_dir: str | None = None) -> list[str]:
@@ -1410,13 +1455,25 @@ def _cursor_skill_dirs(workspace_dir: str | None = None) -> list[str]:
     )
 
 
-def _windsurf_skill_dirs(workspace_dir: str | None = None) -> list[str]:
-    return _dedup(
-        [
-            _workspace_path(workspace_dir, ".windsurf", "skills"),
-            _workspace_path(workspace_dir, ".agents", "skills"),
-        ]
-    )
+def _windsurf_skill_dirs(
+    workspace_dir: str | None = None,
+    *,
+    platform_name: str | None = None,
+) -> list[str]:
+    if (platform_name or os.name) == "nt":
+        # Preserve the PR #655 Windows connector contract. The Devin Desktop
+        # skill surfaces added later are enabled only for non-Windows hosts.
+        return []
+    home = str(Path.home())
+    paths = [
+        _workspace_path(workspace_dir, ".windsurf", "skills"),
+        _workspace_path(workspace_dir, ".agents", "skills"),
+        os.path.join(home, ".codeium", "windsurf", "skills"),
+        os.path.join(home, ".agents", "skills"),
+    ]
+    if sys.platform == "darwin":
+        paths.append("/Library/Application Support/Windsurf/skills")
+    return _dedup(paths)
 
 
 def _opencode_config_dir() -> str:
@@ -1694,9 +1751,12 @@ def _zeptoclaw_plugin_dirs() -> list[str]:
 
 
 def _hermes_plugin_dirs(workspace_dir: str | None = None) -> list[str]:
+    home = hermes_home()
     return _dedup(
         [
-            os.path.join(hermes_home(), "plugins"),
+            os.path.join(home, "plugins"),
+            os.path.join(home, "agent-hooks"),
+            os.path.join(home, "hooks"),
             _workspace_path(workspace_dir, ".hermes", "plugins"),
         ]
     )
@@ -1707,8 +1767,11 @@ def _opencode_plugin_dirs(workspace_dir: str | None = None) -> list[str]:
     custom = _opencode_config_dir()
     return _dedup(
         [
+            _workspace_path(workspace_dir, ".opencode", "plugin"),
             _workspace_path(workspace_dir, ".opencode", "plugins"),
+            os.path.join(home, ".config", "opencode", "plugin"),
             os.path.join(home, ".config", "opencode", "plugins"),
+            os.path.join(custom, "plugin") if custom else "",
             os.path.join(custom, "plugins") if custom else "",
         ]
     )
@@ -1716,13 +1779,18 @@ def _opencode_plugin_dirs(workspace_dir: str | None = None) -> list[str]:
 
 def _antigravity_plugin_dirs(workspace_dir: str | None = None) -> list[str]:
     home = str(Path.home())
+    cli_staging = os.path.join(home, ".gemini", "antigravity-cli", "plugins")
+    manual_paths = [
+        _workspace_path(workspace_dir, ".agents", "plugins"),
+        _workspace_path(workspace_dir, "_agents", "plugins"),
+        os.path.join(home, ".gemini", "config", "plugins"),
+    ]
+    # Preserve PR #655's Windows discovery ordering and behavior. On Unix,
+    # DefenseClaw installs to the CLI's documented staging root first while
+    # still scanning the shared/manual customization roots.
+    ordered = [*manual_paths, cli_staging] if os.name == "nt" else [cli_staging, *manual_paths]
     return _dedup(
-        [
-            _workspace_path(workspace_dir, ".agents", "plugins"),
-            _workspace_path(workspace_dir, "_agents", "plugins"),
-            os.path.join(home, ".gemini", "config", "plugins"),
-            os.path.join(home, ".gemini", "antigravity-cli", "plugins"),
-        ]
+        ordered
     )
 
 
@@ -1851,6 +1919,13 @@ def _codex_mcp_servers(workspace_dir: str | None = None) -> list[MCPServerEntry]
             source_scope="user",
         )
     )
+    if os.name != "nt":
+        entries.extend(
+            _read_codex_config_toml(
+                "/etc/codex/config.toml",
+                source_scope="system",
+            )
+        )
     return _dedup_mcp_entries(entries)
 
 
@@ -1936,7 +2011,11 @@ def _openclaw_mcp_servers(
 def _hermes_mcp_servers() -> list[MCPServerEntry]:
     return _read_yaml_mcp_servers(
         hermes_config_path(),
-        key_paths=(("mcp", "servers"), ("mcpServers",)),
+        # Hermes Agent v0.19's documented and runtime-consumed shape is the
+        # top-level ``mcp_servers`` mapping. Keep the older DefenseClaw shapes
+        # as read-only compatibility fallbacks so existing operator files are
+        # still inventoried and can be migrated deliberately.
+        key_paths=(("mcp_servers",), ("mcp", "servers"), ("mcpServers",)),
     )
 
 
@@ -1976,7 +2055,7 @@ def _copilot_mcp_servers(workspace_dir: str | None = None) -> list[MCPServerEntr
 
 
 def _openhands_mcp_servers() -> list[MCPServerEntry]:
-    return _read_dotmcp_json(os.path.join(str(Path.home()), ".openhands", "mcp.json"))
+    return _read_dotmcp_json(openhands_mcp_path())
 
 
 def _antigravity_global_mcp_path() -> str:
@@ -2019,18 +2098,45 @@ def _opencode_config_paths(workspace_dir: str | None) -> list[str]:
     the project layer, so the active custom directory is last here too.
     """
     home = str(Path.home())
+    custom = _opencode_config_dir()
+    explicit = os.environ.get("OPENCODE_CONFIG", "").strip()
     paths = [
         os.path.join(home, ".config", "opencode", "opencode.json"),
         os.path.join(home, ".config", "opencode", "opencode.jsonc"),
+        os.path.abspath(os.path.expanduser(_expand(explicit))) if explicit else "",
     ]
     root = _workspace_dir(workspace_dir)
-    if root:
-        paths.append(os.path.join(root, "opencode.json"))
-        paths.append(os.path.join(root, "opencode.jsonc"))
-    custom = _opencode_config_dir()
-    if custom:
-        paths.append(os.path.join(custom, "opencode.json"))
-        paths.append(os.path.join(custom, "opencode.jsonc"))
+    stop = root
+    probe = root
+    while probe:
+        if os.path.exists(os.path.join(probe, ".git")):
+            stop = probe
+            break
+        parent = os.path.dirname(probe)
+        if parent == probe:
+            break
+        probe = parent
+    while root:
+        paths.extend([
+            os.path.join(root, "opencode.json"),
+            os.path.join(root, "opencode.jsonc"),
+            os.path.join(root, ".opencode", "opencode.json"),
+            os.path.join(root, ".opencode", "opencode.jsonc"),
+        ])
+        if root == stop:
+            break
+        parent = os.path.dirname(root)
+        if parent == root:
+            break
+        root = parent
+    # OpenCode applies the active custom config directory after project
+    # discovery, so it must remain the final/highest-precedence layer.
+    paths.extend(
+        [
+            os.path.join(custom, "opencode.json") if custom else "",
+            os.path.join(custom, "opencode.jsonc") if custom else "",
+        ]
+    )
     return _dedup(paths)
 
 
@@ -2478,7 +2584,7 @@ def set_mcp_server(
         _set_codex_mcp_server_at_path(path, name, entry)
         return
     if name_n == "hermes":
-        _atomic_yaml_merge(hermes_config_path(), ("mcp", "servers", name), entry)
+        _atomic_yaml_merge(hermes_config_path(), ("mcp_servers", name), entry)
         return
     if name_n == "cursor":
         workspace = _workspace_dir(workspace_dir)
@@ -2490,12 +2596,11 @@ def set_mcp_server(
         _atomic_json_merge(path, ("mcpServers", name), entry)
         return
     if name_n == "windsurf":
-        path = _windsurf_existing_mcp_write_path()
+        path = _windsurf_mcp_write_path()
         if not path:
             raise MCPWriteUnsupportedError(
-                "windsurf MCP writes are disabled until an existing documented "
-                "Windsurf MCP config file is present; DefenseClaw will not "
-                "create guessed Windsurf config paths.",
+                "windsurf MCP writes on Windows require an existing documented "
+                "Windsurf MCP config file, preserving the PR #655 contract.",
             )
         _atomic_json_merge(path, ("mcpServers", name), entry)
         return
@@ -2513,7 +2618,7 @@ def set_mcp_server(
         _atomic_json_merge(path, ("mcpServers", name), entry)
         return
     if name_n == "openhands":
-        path = os.path.join(str(Path.home()), ".openhands", "mcp.json")
+        path = openhands_mcp_path()
         _atomic_json_merge(path, ("mcpServers", name), entry)
         return
     if name_n == "antigravity":
@@ -2524,8 +2629,9 @@ def set_mcp_server(
         return
     if name_n == "omnigent":
         raise MCPWriteUnsupportedError(
-            "omnigent MCP configuration is managed by OmniGent; the DefenseClaw "
-            "connector only installs a custom policy bridge.",
+            "omnigent embeds MCP declarations inside agent YAML and exposes no "
+            "stable connector-wide MCP write target; DefenseClaw inventories "
+            "~/.omnigent/agents read-only.",
         )
     if name_n == "zeptoclaw":
         raise MCPWriteUnsupportedError(
@@ -2581,7 +2687,7 @@ def unset_mcp_server(
         _unset_codex_mcp_server_at_path(path, name)
         return
     if name_n == "hermes":
-        _atomic_yaml_delete(hermes_config_path(), ("mcp", "servers", name))
+        _atomic_yaml_delete(hermes_config_path(), ("mcp_servers", name))
         return
     if name_n == "cursor":
         workspace = _workspace_dir(workspace_dir)
@@ -2593,10 +2699,11 @@ def unset_mcp_server(
         _atomic_json_delete(path, ("mcpServers", name))
         return
     if name_n == "windsurf":
-        path = _windsurf_existing_mcp_write_path()
+        path = _windsurf_mcp_write_path()
         if not path:
             raise MCPWriteUnsupportedError(
-                "windsurf MCP writes are disabled until an existing documented Windsurf MCP config file is present.",
+                "windsurf MCP writes on Windows require an existing documented "
+                "Windsurf MCP config file, preserving the PR #655 contract.",
             )
         _atomic_json_delete(path, ("mcpServers", name))
         return
@@ -2614,7 +2721,7 @@ def unset_mcp_server(
         _atomic_json_delete(path, ("mcpServers", name))
         return
     if name_n == "openhands":
-        path = os.path.join(str(Path.home()), ".openhands", "mcp.json")
+        path = openhands_mcp_path()
         _atomic_json_delete(path, ("mcpServers", name))
         return
     if name_n == "antigravity":
@@ -2625,8 +2732,9 @@ def unset_mcp_server(
         return
     if name_n == "omnigent":
         raise MCPWriteUnsupportedError(
-            "omnigent MCP configuration is managed by OmniGent; the DefenseClaw "
-            "connector only installs a custom policy bridge.",
+            "omnigent embeds MCP declarations inside agent YAML and exposes no "
+            "stable connector-wide MCP write target; DefenseClaw inventories "
+            "~/.omnigent/agents read-only.",
         )
     if name_n == "zeptoclaw":
         raise MCPWriteUnsupportedError(
@@ -2704,6 +2812,7 @@ def _strip_codex_mcp_block(text: str, name: str) -> str:
 
 
 def _set_codex_mcp_server_at_path(path: str, name: str, entry: dict[str, Any]) -> None:
+    _reject_symlink_config(path)
     try:
         with open(path, encoding="utf-8") as f:
             text = f.read()
@@ -2722,7 +2831,20 @@ def _set_codex_mcp_server_at_path(path: str, name: str, entry: dict[str, Any]) -
     _atomic_write_text(path, updated)
 
 
+def _set_codex_mcp_server(path: str, name: str, entry: dict[str, Any]) -> None:
+    _set_codex_mcp_server_at_path(path, name, entry)
+
+
+def _set_codex_global_mcp_server(name: str, entry: dict[str, Any]) -> None:
+    _set_codex_mcp_server(_codex_config_toml_path(), name, entry)
+
+
+def _unset_codex_mcp_server(path: str, name: str) -> bool:
+    return _unset_codex_mcp_server_at_path(path, name)
+
+
 def _unset_codex_mcp_server_at_path(path: str, name: str) -> bool:
+    _reject_symlink_config(path)
     try:
         with open(path, encoding="utf-8") as f:
             text = f.read()
@@ -2734,6 +2856,10 @@ def _unset_codex_mcp_server_at_path(path: str, name: str) -> bool:
     _capture_managed_mcp_backup(path)
     _atomic_write_text(path, updated)
     return True
+
+
+def _unset_codex_global_mcp_server(name: str) -> bool:
+    return _unset_codex_mcp_server(_codex_config_toml_path(), name)
 
 
 # ---------------------------------------------------------------------------
@@ -5821,6 +5947,12 @@ def _atomic_write_yaml(path: str, data: dict[str, Any]) -> None:
 def _atomic_write_text(path: str, text: str) -> None:
     """Atomically write UTF-8 text with private permissions."""
     atomic_write_private_bytes(path, text.encode("utf-8"))
+
+
+def _windsurf_mcp_write_path(*, platform_name: str | None = None) -> str | None:
+    if (platform_name or os.name) == "nt":
+        return _windsurf_existing_mcp_write_path()
+    return _windsurf_mcp_paths()[0]
 
 
 def _windsurf_existing_mcp_write_path() -> str | None:

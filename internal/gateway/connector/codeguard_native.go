@@ -35,7 +35,7 @@ import (
 
 const (
 	nativeCodeGuardRepoURL             = "https://github.com/cosai-oasis/project-codeguard.git"
-	nativeCodeGuardRepoBranch          = "main"
+	nativeCodeGuardRepoCommit          = "a6aaed7bba31cfc68463fa5bb69e8ea24f9d5ad0"
 	nativeCodeGuardCodexSkillName      = "software-security"
 	nativeCodeGuardClaudeMarketplace   = "cosai-oasis/project-codeguard"
 	nativeCodeGuardClaudeMarketplaceID = "project-codeguard"
@@ -48,7 +48,8 @@ const (
 )
 
 var (
-	nativeCodeGuardInstallTimeout = 2 * time.Minute
+	nativeCodeGuardInstallTimeout         = 2 * time.Minute
+	validateClaudeCodeCodeGuardExecutable = validateClaudeCodeAgentProvenance
 
 	// nativeCodeGuardRepoDirOverride lets tests exercise the Codex
 	// installer without cloning GitHub.
@@ -65,13 +66,16 @@ type codexCodeGuardReceipt struct {
 	CreatedAgentsDir bool   `json:"created_agents_dir,omitempty"`
 }
 
-func ensureClaudeCodeCodeGuardPlugin(ctx context.Context) error {
+func ensureClaudeCodeCodeGuardPlugin(ctx context.Context, opts SetupOpts) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	claudePath, err := exec.LookPath("claude")
-	if err != nil {
-		return fmt.Errorf("claude CLI not found on PATH")
+	claudePath := strings.TrimSpace(opts.AgentExecutable)
+	if claudePath == "" || !filepath.IsAbs(claudePath) || filepath.Clean(claudePath) != claudePath {
+		return errors.New("Claude Code CodeGuard installation requires the sealed absolute agent executable")
+	}
+	if err := validateClaudeCodeCodeGuardExecutable(opts); err != nil {
+		return fmt.Errorf("revalidate Claude Code executable before CodeGuard installation: %w", err)
 	}
 
 	if installed, _ := claudeCodeGuardPluginInstalled(ctx, claudePath); installed {
@@ -602,8 +606,30 @@ func prepareProjectCodeGuardRepo(ctx context.Context, opts SetupOpts) (string, f
 	if err := os.MkdirAll(filepath.Dir(repoDir), 0o700); err != nil {
 		return "", func() {}, fmt.Errorf("create Project CodeGuard clone parent: %w", err)
 	}
-	if _, err := runNativeCodeGuardCommand(ctx, gitPath, "clone", "--depth", "1", "--branch", nativeCodeGuardRepoBranch, nativeCodeGuardRepoURL, repoDir); err != nil {
-		return "", func() {}, fmt.Errorf("clone Project CodeGuard: %w", err)
+	if err := os.MkdirAll(repoDir, 0o700); err != nil {
+		return "", func() {}, fmt.Errorf("create Project CodeGuard repository: %w", err)
+	}
+	commands := [][]string{
+		{"init", repoDir},
+		{"-C", repoDir, "remote", "add", "origin", nativeCodeGuardRepoURL},
+		{"-C", repoDir, "fetch", "--depth", "1", "origin", nativeCodeGuardRepoCommit},
+		{"-C", repoDir, "checkout", "--detach", "FETCH_HEAD"},
+	}
+	for _, args := range commands {
+		if _, err := runNativeCodeGuardCommand(ctx, gitPath, args...); err != nil {
+			return "", func() {}, fmt.Errorf("prepare pinned Project CodeGuard repository: %w", err)
+		}
+	}
+	resolved, err := runNativeCodeGuardCommand(ctx, gitPath, "-C", repoDir, "rev-parse", "HEAD")
+	if err != nil {
+		return "", func() {}, fmt.Errorf("verify Project CodeGuard revision: %w", err)
+	}
+	if strings.TrimSpace(resolved) != nativeCodeGuardRepoCommit {
+		return "", func() {}, fmt.Errorf(
+			"Project CodeGuard revision mismatch: got %s, want %s",
+			strings.TrimSpace(resolved),
+			nativeCodeGuardRepoCommit,
+		)
 	}
 	return repoDir, func() {}, nil
 }

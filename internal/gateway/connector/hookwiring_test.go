@@ -1962,3 +1962,16 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 		})
 	}
 }
+
+func TestHermesMacOSCommandIsAbsoluteExecutablePOSIXAsset(t *testing.T) {
+	command := "/Users/test/Defense Claw/hooks/hermes-hook.sh"
+	got := hookInvocationCommandFor("darwin", "hermes", command)
+	if got != command {
+		t.Fatalf("Hermes macOS command=%q, want exact absolute POSIX asset %q", got, command)
+	}
+	for _, forbidden := range []string{"bash -c", "sh -c", "powershell", "defenseclaw-hook.exe"} {
+		if strings.Contains(strings.ToLower(got), strings.ToLower(forbidden)) {
+			t.Fatalf("Hermes macOS command contains forbidden process fallback %q: %q", forbidden, got)
+		}
+	}
+}

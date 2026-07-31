@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import plistlib
 import stat
 import subprocess
 import sys
@@ -127,6 +128,129 @@ def test_omnigent_version_probe_uses_bounded_slow_start_timeout(monkeypatch) -> 
     assert invocation["timeout"] == 8.0
     assert invocation["capture_output"] is True
     assert invocation["text"] is False
+
+
+def test_windsurf_macos_version_reads_bundle_metadata_without_launch(monkeypatch) -> None:
+    calls: list[str] = []
+    path = "/Applications/Devin.app/Contents/MacOS/Devin"
+    monkeypatch.setattr(ad, "_is_macos_host", lambda: True)
+    monkeypatch.setattr(
+        ad,
+        "_macos_bundle_version_for_binary",
+        lambda candidate: (calls.append(candidate) or "3.6.22", ""),
+    )
+    monkeypatch.setattr(
+        ad,
+        "_version_for_binary",
+        lambda *_args, **_kwargs: pytest.fail("GUI version discovery must not launch Devin Desktop"),
+    )
+
+    result = ad._version_for_agent_binary("windsurf", path, ("--version",))
+
+    assert result == ("3.6.22", "")
+    assert calls == [path]
+
+
+def test_windsurf_macos_bundle_metadata_requires_matching_product_and_executable(tmp_path) -> None:
+    bundle = tmp_path / "Devin.app"
+    executable = bundle / "Contents" / "MacOS" / "Devin"
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"not executed")
+    plist_path = bundle / "Contents" / "Info.plist"
+    with plist_path.open("wb") as handle:
+        plistlib.dump(
+            {
+                "CFBundleDisplayName": "Devin Desktop",
+                "CFBundleIdentifier": "com.exafunction.windsurf",
+                "CFBundleExecutable": "Devin",
+                "CFBundleShortVersionString": "3.6.22",
+            },
+            handle,
+        )
+
+    assert ad._macos_bundle_version_for_binary(
+        str(executable),
+        allowed_bundles={bundle},
+        signature_validator=lambda _bundle: (True, ""),
+    ) == ("3.6.22", "")
+
+    with plist_path.open("wb") as handle:
+        plistlib.dump(
+            {
+                "CFBundleDisplayName": "Unrelated IDE",
+                "CFBundleIdentifier": "com.exafunction.windsurf",
+                "CFBundleExecutable": "Devin",
+                "CFBundleShortVersionString": "3.6.22",
+            },
+            handle,
+        )
+    version, error = ad._macos_bundle_version_for_binary(
+        str(executable),
+        allowed_bundles={bundle},
+        signature_validator=lambda _bundle: (True, ""),
+    )
+    assert version == ""
+    assert "unexpected Devin Desktop bundle identity" in error
+
+
+def test_windsurf_macos_candidates_never_probe_path(monkeypatch) -> None:
+    monkeypatch.setattr(ad, "_is_macos_host", lambda: True)
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: False)
+    monkeypatch.setattr(
+        ad,
+        "_which",
+        lambda _name: pytest.fail("macOS Devin Desktop discovery must not probe PATH"),
+    )
+    monkeypatch.setattr(ad, "_macos_windsurf_binary_candidates", lambda: ("/Applications/Devin.app/bin",))
+
+    assert ad._binary_candidates_for_agent("windsurf", ad._SPECS["windsurf"]) == (
+        "/Applications/Devin.app/bin",
+    )
+
+
+def test_windsurf_macos_bundle_rejects_wrong_identifier_before_signature(tmp_path) -> None:
+    bundle = tmp_path / "Devin.app"
+    executable = bundle / "Contents" / "MacOS" / "Devin"
+    executable.parent.mkdir(parents=True)
+    executable.write_bytes(b"not executed")
+    with (bundle / "Contents" / "Info.plist").open("wb") as handle:
+        plistlib.dump(
+            {
+                "CFBundleDisplayName": "Devin Desktop",
+                "CFBundleIdentifier": "example.spoof",
+                "CFBundleExecutable": "Devin",
+                "CFBundleShortVersionString": "3.6.22",
+            },
+            handle,
+        )
+
+    version, error = ad._macos_bundle_version_for_binary(
+        str(executable),
+        allowed_bundles={bundle},
+        signature_validator=lambda _bundle: pytest.fail("wrong bundle ID must fail before signature"),
+    )
+    assert version == ""
+    assert "unexpected Devin Desktop bundle identifier" in error
+
+
+def test_windsurf_macos_signature_rejects_wrong_team(monkeypatch, tmp_path) -> None:
+    responses = iter(
+        [
+            subprocess.CompletedProcess([], 0, "", ""),
+            subprocess.CompletedProcess(
+                [],
+                0,
+                "",
+                "Identifier=com.exafunction.windsurf\nTeamIdentifier=ATTACKER1\n",
+            ),
+        ],
+    )
+    monkeypatch.setattr(ad.subprocess, "run", lambda *_args, **_kwargs: next(responses))
+
+    valid, error = ad._validate_devin_macos_signature(tmp_path / "Devin.app")
+
+    assert not valid
+    assert "unexpected signing team" in error
 
 
 @pytest.fixture
@@ -387,6 +511,7 @@ def test_empty_home_has_no_config_only_false_positives(monkeypatch, tmp_path):
     monkeypatch.setenv("ProgramFiles", str(tmp_path / "program-files"))
     monkeypatch.setenv("ProgramFiles(x86)", str(tmp_path / "program-files-x86"))
     monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(ad, "_cursor_darwin_application_evidence", lambda: ("", ""))
 
     signals = {name: ad._scan_agent(name) for name in KNOWN_CONNECTORS}
 
@@ -445,6 +570,7 @@ def test_each_connector_tracks_meaningful_config_separately_from_installation(
     if connector == "hermes":
         monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
     monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(ad, "_cursor_darwin_application_evidence", lambda: ("", ""))
 
     signal = ad._scan_agent(connector)
 
@@ -458,9 +584,10 @@ def test_each_connector_tracks_meaningful_config_separately_from_installation(
     [
         ("codex", "CODEX_HOME", "config.toml"),
         ("claudecode", "CLAUDE_CONFIG_DIR", "settings.json"),
+        ("copilot", "COPILOT_HOME", "settings.json"),
     ],
 )
-def test_codex_and_claude_discovery_honor_client_config_homes(
+def test_client_discovery_honors_config_homes(
     monkeypatch,
     tmp_path,
     connector,
@@ -1312,22 +1439,52 @@ def test_windsurf_windows_discovery_finds_devin_executable_in_documented_product
 def test_cursor_discovery_prefers_primary_agent_entrypoint(monkeypatch, tmp_path):
     primary = tmp_path / "agent.exe"
     compatibility = tmp_path / "cursor-agent.exe"
-    desktop = tmp_path / "cursor.cmd"
-    for path in (primary, compatibility, desktop):
+    for path in (primary, compatibility):
         path.write_bytes(b"test executable")
 
     candidates = {
         "agent": str(primary),
         "cursor-agent": str(compatibility),
-        "cursor": str(desktop),
     }
     monkeypatch.setattr(ad, "_which", lambda name: candidates.get(name, ""))
     monkeypatch.setattr(ad, "_is_windows_host", lambda: False)
+    monkeypatch.setattr(ad, "_is_darwin_host", lambda: False)
 
     resolved = ad._binary_candidates_for_agent("cursor", ad._SPECS["cursor"])
 
     assert tuple(map(ad._path_key, resolved)) == tuple(
-        map(ad._path_key, (str(primary), str(compatibility), str(desktop)))
+        map(ad._path_key, (str(primary), str(compatibility)))
+    )
+
+
+def test_cursor_discovery_includes_trusted_off_path_macos_agent_entrypoints(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    agent = home / ".local" / "bin" / "agent"
+    agent.parent.mkdir(parents=True, exist_ok=True)
+    agent.write_bytes(b"test executable")
+
+    monkeypatch.setattr(ad, "_which", lambda _name: "")
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: False)
+    monkeypatch.setattr(ad, "_is_darwin_host", lambda: True)
+    monkeypatch.setattr(ad, "_cursor_darwin_agent_binary_candidates", lambda: (str(agent),))
+
+    assert ad._binary_candidates_for_agent("cursor", ad._SPECS["cursor"]) == ()
+    resolved = ad._binary_candidates_for_agent(
+        "cursor",
+        ad._SPECS["cursor"],
+        include_off_path_user_candidates=True,
+    )
+
+    assert tuple(map(ad._path_key, resolved)) == (ad._path_key(str(agent)),)
+
+
+def test_cursor_macos_agent_candidates_exclude_desktop(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    monkeypatch.setattr(ad.os.path, "expanduser", lambda value: str(home) if value == "~" else value)
+
+    assert ad._cursor_darwin_agent_binary_candidates() == (
+        str(home / ".local" / "bin" / "agent"),
+        str(home / ".local" / "bin" / "cursor-agent"),
     )
 
 
@@ -1377,6 +1534,31 @@ def test_cursor_windows_discovery_uses_official_token_bound_agent_root(
     assert signal.installed is True
     assert signal.binary_path == str(primary)
     assert signal.version == "2026.07.23-e383d2b"
+
+
+def test_cursor_macos_desktop_is_nonexecuting_separate_evidence(monkeypatch, tmp_path):
+    home = tmp_path / "home"
+    app = home / "Applications" / "Cursor.app"
+    info = app / "Contents" / "Info.plist"
+    info.parent.mkdir(parents=True)
+    info.write_bytes(plistlib.dumps({"CFBundleShortVersionString": "3.13"}))
+    monkeypatch.setattr(ad, "_cursor_darwin_application_candidates", lambda: (str(app),))
+    monkeypatch.setattr(ad, "_which", lambda _name: "")
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: False)
+    monkeypatch.setattr(ad, "_is_darwin_host", lambda: True)
+    monkeypatch.setattr(
+        ad,
+        "_version_for_agent_binary",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("Desktop must not execute")),
+    )
+
+    signal = ad._scan_agent("cursor")
+
+    assert signal.installed is True
+    assert signal.binary_path == ""
+    assert signal.version == ""
+    assert signal.application_path == str(app)
+    assert signal.application_version == "3.13"
 
 
 def test_timeout_sets_error_and_does_not_mark_binary_only_install(monkeypatch, tmp_path):
@@ -1673,6 +1855,29 @@ def test_version_probe_refuses_binary_outside_trusted_prefix_when_enabled(monkey
     assert "trusted install prefix" in signal.error.lower()
 
 
+def test_antigravity_passive_probe_always_refuses_untrusted_path(monkeypatch, tmp_path):
+    hostile = tmp_path / "hostile_bin" / "agy"
+    hostile.parent.mkdir(parents=True, exist_ok=True)
+    hostile.write_text("#!/bin/sh\nexit 0\n")
+    hostile.chmod(0o755)
+    monkeypatch.setattr(ad.shutil, "which", lambda name: str(hostile))
+    called = []
+
+    def fake_run(*args, **kwargs):
+        called.append((args, kwargs))
+        return subprocess.CompletedProcess(args=args, returncode=0, stdout=b"1.1.8\n", stderr=b"")
+
+    monkeypatch.setattr(ad.subprocess, "run", fake_run)
+    monkeypatch.delenv("DEFENSECLAW_TRUSTED_BIN_PREFIXES", raising=False)
+
+    signal = ad._scan_agent("antigravity")
+
+    assert called == []
+    assert signal.installed is False
+    assert signal.binary_path == str(hostile)
+    assert "trusted install prefix" in signal.error.lower()
+
+
 def test_trust_check_accepts_canonical_prefix(monkeypatch, tmp_path):
     # Add tmp_path as a trusted prefix and place a real, non-world-writable
     # binary inside it.
@@ -1962,6 +2167,44 @@ def test_first_installed_precedence():
     assert ad.first_installed(_discovery(*KNOWN_CONNECTORS), "codex") == "codex"
     assert ad.first_installed(_discovery(), "codex") == "codex"
     assert ad.first_installed(_discovery("openclaw"), "not-real") == "openclaw"
+
+
+def test_macos_copilot_native_provenance_requires_github_signature(monkeypatch, tmp_path):
+    binary = tmp_path / "copilot"
+    binary.write_bytes(b"\xcf\xfa\xed\xfe" + b"\x00" * 32)
+    monkeypatch.setattr(ad, "_macos_path_is_quarantined", lambda _path: False)
+
+    def run(command, **_kwargs):
+        if "--display" in command:
+            return subprocess.CompletedProcess(command, 0, "", "TeamIdentifier=VEKTX9H2N7\n")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(ad.subprocess, "run", run)
+    assert ad._validate_macos_copilot_provenance(str(binary)) == ""
+
+    def wrong_team(command, **_kwargs):
+        return subprocess.CompletedProcess(command, 0, "", "TeamIdentifier=ATTACKER\n")
+
+    monkeypatch.setattr(ad.subprocess, "run", wrong_team)
+    assert "not signed by GitHub" in ad._validate_macos_copilot_provenance(str(binary))
+
+
+def test_macos_copilot_provenance_rejects_quarantine(monkeypatch, tmp_path):
+    binary = tmp_path / "copilot"
+    binary.write_bytes(b"#!/bin/sh\n")
+    monkeypatch.setattr(ad, "_macos_path_is_quarantined", lambda _path: True)
+    assert ad._validate_macos_copilot_provenance(str(binary)) == "macOS Copilot binary is quarantined"
+
+
+def test_macos_copilot_provenance_fails_closed_when_quarantine_probe_errors(monkeypatch, tmp_path):
+    binary = tmp_path / "copilot"
+    binary.write_bytes(b"#!/bin/sh\n")
+
+    def denied(_path):
+        raise PermissionError("denied")
+
+    monkeypatch.setattr(ad, "_macos_path_is_quarantined", denied)
+    assert "quarantine inspection failed" in ad._validate_macos_copilot_provenance(str(binary))
 
 
 def test_render_discovery_table_includes_connectors_and_cache_state():

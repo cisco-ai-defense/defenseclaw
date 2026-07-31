@@ -66,6 +66,8 @@ t_is_supported() {
   assert_status "${rc}" 0 "claudecode supported"
   is_supported_connector "cursor"; rc=$?
   assert_status "${rc}" 0 "cursor supported"
+  is_supported_connector "opencode"; rc=$?
+  assert_status "${rc}" 0 "opencode supported"
   is_supported_connector "geminicli"; rc=$?
   assert_status "${rc}" 1 "geminicli not auto-wired"
 }

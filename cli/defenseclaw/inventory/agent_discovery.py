@@ -18,14 +18,19 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import locale
 import ntpath
 import os
+import plistlib
+import re
 import shutil
 import stat
 import subprocess
+import sys
 import uuid
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
@@ -68,7 +73,8 @@ UNTRUSTED_PREFIX_ERROR = "binary path is not in a trusted install prefix"
 # Version 3 separates a connector's on-disk configuration from a verified
 # application installation.  Version 2 caches treated either signal as
 # ``installed``, which produced false positives for observe-only connectors.
-CACHE_SCHEMA_VERSION = 3
+# v4 records Cursor Agent CLI and Cursor Desktop evidence independently.
+CACHE_SCHEMA_VERSION = 4
 CACHE_TTL_SECONDS = 86_400
 CACHE_FILENAME = "agent_discovery.json"
 VERSION_TIMEOUT_SECONDS = 2.0
@@ -780,6 +786,8 @@ class AgentSignal:
     binary_path: str
     version: str
     error: str
+    application_path: str = ""
+    application_version: str = ""
     configured: bool = False
     active: bool = False
     mode: str = ""
@@ -820,7 +828,6 @@ _SPECS: dict[str, _AgentSpec] = {
         (
             "~/.codeium/windsurf/hooks.json",
             "~/.codeium/windsurf/mcp_config.json",
-            "~/.codeium/windsurf/mcp.json",
         ),
         "windsurf",
         ("--version",),
@@ -989,7 +996,6 @@ def render_discovery_table(disc: AgentDiscovery) -> str:
 
     for name in _ordered_connector_names(disc):
         signal = disc.agents[name]
-        detail = signal.version or signal.error
         table.add_row(
             signal.name,
             "yes" if signal.installed else "no",
@@ -997,7 +1003,7 @@ def render_discovery_table(disc: AgentDiscovery) -> str:
             signal.mode if signal.active else "no",
             _display_path(signal.config_path),
             _display_path(signal.binary_path),
-            detail,
+            _signal_version_detail(signal),
         )
 
     console.print(table)
@@ -1010,6 +1016,12 @@ def _scan_agent(
     data_dir: str | os.PathLike[str] | None = None,
     require_trusted_binary_paths: bool = False,
 ) -> AgentSignal:
+    # Antigravity's official macOS installer writes a user-owned executable
+    # under ~/.local/bin. Never execute an arbitrary PATH match during passive
+    # discovery: the operator must explicitly admit that install prefix through
+    # DefenseClaw's trusted-path configuration first.
+    if name == "antigravity":
+        require_trusted_binary_paths = True
     spec = _SPECS.get(name, _AgentSpec((), "", ("--version",)))
     config_candidates = spec.config_candidates
     if name == "codex":
@@ -1033,6 +1045,11 @@ def _scan_agent(
             os.path.join(config_home, "tui.jsonc"),
             *spec.config_candidates,
         )
+    elif name == "copilot":
+        # Resolve COPILOT_HOME and current repository settings dynamically.
+        # The static _SPECS entry is retained for registry readability but
+        # must not bypass the connector's documented config cascade.
+        config_candidates = tuple(connector_config_files("copilot"))
     elif name == "omnigent":
         config_path = omnigent_config_path()
         config_candidates = (config_path,)
@@ -1042,19 +1059,26 @@ def _scan_agent(
             *connector_config_files("windsurf"),
         )
     config_path = _first_existing_file(config_candidates)
-    binary_candidates = _binary_candidates_for_agent(name, spec)
+    binary_candidates = _binary_candidates_for_agent(
+        name,
+        spec,
+        include_off_path_user_candidates=require_trusted_binary_paths,
+    )
     binary_path = binary_candidates[0] if binary_candidates else ""
     version = ""
     error = ""
     version_ok = False
 
     probe_errors: list[str] = []
+    require_native_provenance = require_trusted_binary_paths or (
+        name == "claudecode" and sys.platform == "darwin"
+    )
     for candidate in binary_candidates:
         candidate_version, candidate_error = _version_for_agent_binary(
             name,
             candidate,
             spec.version_args,
-            require_trusted_binary_paths=require_trusted_binary_paths,
+            require_trusted_binary_paths=require_native_provenance,
             data_dir=data_dir,
         )
         if candidate_version and not candidate_error:
@@ -1068,7 +1092,11 @@ def _scan_agent(
     if not version_ok and probe_errors:
         error = "; ".join(probe_errors)
 
-    installed = bool(binary_path) and version_ok
+    application_path = ""
+    application_version = ""
+    if name == "cursor" and _is_darwin_host():
+        application_path, application_version = _cursor_darwin_application_evidence()
+    installed = (bool(binary_path) and version_ok) or bool(application_path)
     return AgentSignal(
         name=name,
         installed=installed,
@@ -1076,6 +1104,8 @@ def _scan_agent(
         binary_path=binary_path,
         version=version,
         error=error,
+        application_path=application_path,
+        application_version=application_version,
         configured=bool(config_path),
     )
 
@@ -1676,7 +1706,35 @@ def _version_for_agent_binary(
 ) -> tuple[str, str]:
     """Probe a CLI, or read metadata for a GUI that must not be launched."""
 
+    if (
+        name == "claudecode"
+        and sys.platform == "darwin"
+        and require_trusted_binary_paths
+    ):
+        # Claude's official native installer exposes a user-scoped symlink to
+        # a signed Mach-O. The generic path allow-list intentionally rejects
+        # user-writable trees; explicit Claude admission instead verifies the
+        # canonical image, permissions, architecture, quarantine, and pinned
+        # Anthropic Developer ID before the passive version probe.
+        from defenseclaw.agent_selection import is_setup_trusted_binary  # noqa: PLC0415
+
+        resolved = os.path.realpath(os.path.abspath(binary_path))
+        if not is_setup_trusted_binary(
+            resolved,
+            os.fspath(data_dir) if data_dir is not None else os.path.expanduser("~/.defenseclaw"),
+            connector="claudecode",
+        ):
+            return "", UNTRUSTED_PREFIX_ERROR
+        binary_path = resolved
+        require_trusted_binary_paths = False
+
     command_name = _binary_command_name(binary_path)
+    if name == "windsurf" and _is_macos_host() and ".app/Contents/MacOS/" in binary_path:
+        return _macos_bundle_version_for_binary(binary_path)
+    if name == "copilot" and sys.platform == "darwin":
+        provenance_error = _validate_macos_copilot_provenance(binary_path)
+        if provenance_error:
+            return "", provenance_error
     if (
         (name == "antigravity" and command_name == "antigravity")
         or (
@@ -1702,6 +1760,84 @@ def _version_for_agent_binary(
         require_trusted_binary_paths=require_trusted_binary_paths,
         data_dir=data_dir,
     )
+
+
+def _validate_macos_copilot_provenance(binary_path: str) -> str:
+    """Refuse quarantined or improperly signed native Copilot executables.
+
+    npm launch scripts remain governed by the existing canonical-path,
+    symlink, owner, and permission checks. An official Mach-O distribution
+    additionally must carry GitHub's Developer ID team identifier.
+    """
+
+    resolved = os.path.realpath(binary_path)
+    try:
+        if _macos_path_is_quarantined(resolved):
+            return "macOS Copilot binary is quarantined"
+    except OSError as exc:
+        return f"macOS Copilot quarantine inspection failed: {exc}"
+    try:
+        with open(resolved, "rb") as handle:
+            magic = handle.read(4)
+    except OSError as exc:
+        return f"macOS Copilot provenance read failed: {exc}"
+    if magic not in {
+        b"\xca\xfe\xba\xbe", b"\xbe\xba\xfe\xca",
+        b"\xfe\xed\xfa\xce", b"\xce\xfa\xed\xfe",
+        b"\xfe\xed\xfa\xcf", b"\xcf\xfa\xed\xfe",
+    }:
+        return ""
+    try:
+        verify = subprocess.run(
+            ["/usr/bin/codesign", "--verify", "--strict", "--verbose=2", resolved],
+            shell=False,
+            timeout=VERSION_TIMEOUT_SECONDS,
+            capture_output=True,
+            text=True,
+        )
+        detail = subprocess.run(
+            ["/usr/bin/codesign", "--display", "--verbose=4", resolved],
+            shell=False,
+            timeout=VERSION_TIMEOUT_SECONDS,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"macOS Copilot signature probe failed: {exc}"
+    signature = f"{detail.stdout}\n{detail.stderr}"
+    if verify.returncode != 0 or detail.returncode != 0:
+        return "macOS Copilot binary failed codesign verification"
+    if "TeamIdentifier=VEKTX9H2N7" not in signature:
+        return "macOS Copilot binary is not signed by GitHub team VEKTX9H2N7"
+    return ""
+
+
+def _macos_path_is_quarantined(path: str) -> bool:
+    getxattr = getattr(os, "getxattr", None)
+    if getxattr is not None:
+        try:
+            return bool(getxattr(path, "com.apple.quarantine"))
+        except OSError as exc:
+            missing_attr = {getattr(errno, "ENODATA", -1), getattr(errno, "ENOATTR", -2)}
+            if exc.errno in missing_attr:
+                return False
+            raise
+    try:
+        result = subprocess.run(
+            ["/usr/bin/xattr", "-p", "com.apple.quarantine", path],
+            shell=False,
+            timeout=VERSION_TIMEOUT_SECONDS,
+            capture_output=True,
+            text=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise OSError(f"xattr probe failed: {exc}") from exc
+    if result.returncode == 0:
+        return bool(result.stdout)
+    stderr = result.stderr.decode("utf-8", errors="replace").lower()
+    if result.returncode == 1 and ("no such xattr" in stderr or "no such extended attribute" in stderr):
+        return False
+    raise OSError(f"xattr probe failed with exit {result.returncode}: {stderr.strip()}")
 
 
 def _windows_file_version_for_binary(
@@ -1823,7 +1959,12 @@ def _binary_path_for_agent(name: str, spec: _AgentSpec) -> str:
     return candidates[0] if candidates else ""
 
 
-def _binary_candidates_for_agent(name: str, spec: _AgentSpec) -> tuple[str, ...]:
+def _binary_candidates_for_agent(
+    name: str,
+    spec: _AgentSpec,
+    *,
+    include_off_path_user_candidates: bool = False,
+) -> tuple[str, ...]:
     """Enumerate launchable-location candidates without trusting the first alias.
 
     Windows App Execution Aliases can exist on PATH while being protected or
@@ -1833,14 +1974,23 @@ def _binary_candidates_for_agent(name: str, spec: _AgentSpec) -> tuple[str, ...]
 
     if not spec.binary_name:
         return ()
+    if name == "windsurf" and _is_macos_host() and not _is_windows_host():
+        # Devin Desktop is a GUI application. Never execute PATH aliases named
+        # ``windsurf`` or ``devin-desktop`` merely to discover its version.
+        return _macos_windsurf_binary_candidates()
     candidates: list[str] = []
     # Cursor made ``agent`` its primary CLI entrypoint on 2026-01-08 while
     # retaining ``cursor-agent`` as a compatibility alias. The desktop
-    # ``cursor`` launcher remains useful installation/version evidence. Probe
-    # the official primary name first, then both documented/installed aliases.
+    # ``cursor`` is a Desktop launcher, not an Agent CLI compatibility alias.
+    # Desktop evidence is collected separately without executing app-bundle
+    # code so its version cannot select the Agent hook contract.
     binary_names = (spec.binary_name,)
     if name == "cursor":
-        binary_names = ("agent", "cursor-agent", "cursor")
+        binary_names = ("agent", "cursor-agent")
+        # Preserve PR #655's Windows launcher discovery. The macOS Desktop
+        # bundle remains separate non-executing application evidence.
+        if _is_windows_host():
+            binary_names = (*binary_names, "cursor")
     if name == "windsurf":
         # Devin Desktop is the official renamed GUI. Its optional terminal
         # launcher is `devin-desktop`; retain `windsurf` for pre-rename and OTA
@@ -1850,35 +2000,37 @@ def _binary_candidates_for_agent(name: str, spec: _AgentSpec) -> tuple[str, ...]
         path = _which(binary_name)
         if path:
             candidates.append(path)
-    if not _is_windows_host():
-        return tuple(candidates)
-
-    for binary_name in binary_names:
-        for candidate in _windows_binary_candidates(name, binary_name):
-            if os.path.isfile(candidate):
-                candidates.append(os.path.abspath(candidate))
-
-    if name == "codex":
-        for local_app_data in _windows_current_user_local_app_data_roots():
-            desktop_bin = Path(local_app_data) / "OpenAI" / "Codex" / "bin"
-            # Codex Desktop stores versioned native CLIs one directory below
-            # the product bin root. Prefer a stable lexical order; the version
-            # probe, not directory naming, decides whether a candidate works.
-            for candidate in sorted(desktop_bin.glob("*/codex.exe")):
-                if candidate.is_file():
-                    candidates.append(os.path.abspath(candidate))
-
-    if name == "antigravity":
-        local_app_data = os.environ.get("LOCALAPPDATA", "")
-        if local_app_data:
-            for candidate in (
-                os.path.join(local_app_data, "agy", "bin", "agy.exe"),
-                os.path.join(local_app_data, "Programs", "antigravity", "Antigravity.exe"),
-            ):
+    if _is_windows_host():
+        for binary_name in binary_names:
+            for candidate in _windows_binary_candidates(name, binary_name):
                 if os.path.isfile(candidate):
                     candidates.append(os.path.abspath(candidate))
 
-    if name == "windsurf":
+        if name == "codex":
+            for local_app_data in _windows_current_user_local_app_data_roots():
+                desktop_bin = Path(local_app_data) / "OpenAI" / "Codex" / "bin"
+                # Codex Desktop stores versioned native CLIs one directory below
+                # the product bin root. Prefer a stable lexical order; the version
+                # probe, not directory naming, decides whether a candidate works.
+                for candidate in sorted(desktop_bin.glob("*/codex.exe")):
+                    if candidate.is_file():
+                        candidates.append(os.path.abspath(candidate))
+
+        if name == "antigravity":
+            local_app_data = os.environ.get("LOCALAPPDATA", "")
+            if local_app_data:
+                for candidate in (
+                    os.path.join(local_app_data, "agy", "bin", "agy.exe"),
+                    os.path.join(local_app_data, "Programs", "antigravity", "Antigravity.exe"),
+                ):
+                    if os.path.isfile(candidate):
+                        candidates.append(os.path.abspath(candidate))
+    elif _is_darwin_host() and name == "cursor" and include_off_path_user_candidates:
+        for candidate in _cursor_darwin_agent_binary_candidates():
+            if os.path.isfile(candidate):
+                candidates.append(os.path.abspath(candidate))
+
+    if _is_windows_host() and name == "windsurf":
         # The terminal launcher is optional during Devin Desktop onboarding.
         # Discover the GUI directly from narrow current and legacy product
         # roots, then read version metadata without launching it.
@@ -1926,6 +2078,183 @@ def _is_windows_host() -> bool:
     Windows install locations without mutating ``os.name`` process-wide.
     """
     return os.name == "nt"
+
+
+def _is_darwin_host() -> bool:
+    """Return whether documented native macOS lookup rules apply."""
+
+    return sys.platform == "darwin"
+
+
+def _is_macos_host() -> bool:
+    """Compatibility name for native macOS application-bundle lookup."""
+
+    return _is_darwin_host()
+
+
+def _cursor_darwin_agent_binary_candidates() -> tuple[str, ...]:
+    """Return official off-PATH Cursor Agent CLI locations.
+
+    Agent CLI uses ``agent`` as the primary entrypoint and retains
+    ``cursor-agent`` as a compatibility alias. These user-writable paths are
+    considered only when trusted-path enforcement is enabled, so passive
+    default discovery never expands its execution authority beyond PATH.
+    """
+
+    home = os.path.expanduser("~")
+    return (
+        os.path.join(home, ".local", "bin", "agent"),
+        os.path.join(home, ".local", "bin", "cursor-agent"),
+    )
+
+
+def _cursor_darwin_application_evidence() -> tuple[str, str]:
+    """Read Cursor Desktop bundle metadata without launching its CLI."""
+
+    for app_path in _cursor_darwin_application_candidates():
+        info_path = os.path.join(app_path, "Contents", "Info.plist")
+        try:
+            with open(info_path, "rb") as fh:
+                body = fh.read(1024 * 1024 + 1)
+            if len(body) > 1024 * 1024:
+                continue
+            metadata = plistlib.loads(body)
+        except (OSError, ValueError, plistlib.InvalidFileException):
+            continue
+        if not isinstance(metadata, dict):
+            continue
+        version = str(metadata.get("CFBundleShortVersionString") or "").strip()
+        if version:
+            return os.path.abspath(app_path), version
+    return "", ""
+
+
+def _cursor_darwin_application_candidates() -> tuple[str, ...]:
+    home = os.path.expanduser("~")
+    return (
+        "/Applications/Cursor.app",
+        os.path.join(home, "Applications", "Cursor.app"),
+    )
+
+
+def _macos_windsurf_binary_candidates() -> tuple[str, ...]:
+    """Return canonical Devin Desktop/Windsurf application executables.
+
+    The GUI has no safe non-interactive version command. Read only the two
+    official system Applications bundle locations; arbitrary Spotlight and
+    user Applications results are intentionally excluded.
+    """
+
+    candidates: list[str] = []
+    for app_name in ("Devin.app", "Windsurf.app"):
+        bundle = Path("/Applications") / app_name
+        plist_path = bundle / "Contents" / "Info.plist"
+        try:
+            with plist_path.open("rb") as handle:
+                metadata = plistlib.load(handle)
+        except (OSError, plistlib.InvalidFileException):
+            continue
+        executable = str(metadata.get("CFBundleExecutable") or "").strip()
+        if not executable or executable != os.path.basename(executable):
+            continue
+        path = bundle / "Contents" / "MacOS" / executable
+        if path.is_file():
+            candidates.append(str(path.resolve()))
+    return tuple(candidates)
+
+
+def _macos_bundle_version_for_binary(
+    binary_path: str,
+    *,
+    allowed_bundles: set[Path] | None = None,
+    signature_validator: Callable[[Path], tuple[bool, str]] | None = None,
+) -> tuple[str, str]:
+    """Read Devin Desktop bundle metadata without launching the GUI."""
+
+    resolved = Path(binary_path).resolve()
+    if allowed_bundles is None:
+        allowed_bundles = {
+            Path("/Applications/Devin.app").resolve(),
+            Path("/Applications/Windsurf.app").resolve(),
+        }
+    else:
+        allowed_bundles = {path.resolve() for path in allowed_bundles}
+    try:
+        bundle = resolved.parents[2]
+    except IndexError:
+        return "", "Devin Desktop executable is not inside an application bundle"
+    if bundle not in allowed_bundles or resolved.parent != bundle / "Contents" / "MacOS":
+        return "", "Devin Desktop application is outside the canonical /Applications bundle"
+
+    plist_path = bundle / "Contents" / "Info.plist"
+    try:
+        with plist_path.open("rb") as handle:
+            metadata = plistlib.load(handle)
+    except (OSError, plistlib.InvalidFileException) as exc:
+        return "", f"cannot read Devin Desktop bundle metadata: {exc}"
+
+    executable = str(metadata.get("CFBundleExecutable") or "").strip()
+    product = str(metadata.get("CFBundleDisplayName") or metadata.get("CFBundleName") or "").strip()
+    version = str(metadata.get("CFBundleShortVersionString") or "").strip()
+    if executable != resolved.name:
+        return "", "Devin Desktop bundle executable metadata does not match the discovered binary"
+    if product.lower() not in {"devin", "devin desktop", "windsurf"}:
+        return "", f"unexpected Devin Desktop bundle identity {product!r}"
+    bundle_identifier = str(metadata.get("CFBundleIdentifier") or "").strip()
+    if bundle_identifier != "com.exafunction.windsurf":
+        return "", f"unexpected Devin Desktop bundle identifier {bundle_identifier!r}"
+    if not version or not re.fullmatch(r"\d+(?:\.\d+){1,3}", version):
+        return "", "Devin Desktop bundle has no valid semantic product version"
+    validator = signature_validator or _validate_devin_macos_signature
+    valid, error = validator(bundle)
+    if not valid:
+        return "", error or "Devin Desktop application signature is not trusted"
+    return version, ""
+
+
+def _validate_devin_macos_signature(bundle: Path) -> tuple[bool, str]:
+    """Validate the official notarized Devin Desktop signing identity."""
+
+    try:
+        verified = subprocess.run(
+            ["/usr/bin/codesign", "--verify", "--deep", "--strict", str(bundle)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        if verified.returncode != 0:
+            detail = (verified.stderr or verified.stdout).strip()
+            return False, f"invalid Devin Desktop code signature: {detail or 'codesign rejected the bundle'}"
+
+        identity = subprocess.run(
+            ["/usr/bin/codesign", "-dv", "--verbose=4", str(bundle)],
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=False,
+        )
+        details = f"{identity.stdout}\n{identity.stderr}"
+        if identity.returncode != 0:
+            return False, "cannot inspect Devin Desktop signing identity"
+        if "Identifier=com.exafunction.windsurf" not in details:
+            return False, "Devin Desktop signature has an unexpected designated identifier"
+        if "TeamIdentifier=83Z2LHX6XW" not in details:
+            return False, "Devin Desktop signature has an unexpected signing team"
+
+        assessed = subprocess.run(
+            ["/usr/sbin/spctl", "--assess", "--type", "execute", "--verbose=2", str(bundle)],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return False, f"cannot verify Devin Desktop code signature: {exc}"
+    if assessed.returncode != 0:
+        detail = (assessed.stderr or assessed.stdout).strip()
+        return False, f"Devin Desktop failed Gatekeeper assessment: {detail or 'spctl rejected the bundle'}"
+    return True, ""
 
 
 def _windows_binary_candidates(connector: str, binary_name: str) -> tuple[str, ...]:
@@ -2043,6 +2372,8 @@ def _read_cache(*, data_dir: str | os.PathLike[str] | None = None) -> AgentDisco
                 binary_path=str(raw.get("binary_path") or ""),
                 version=str(raw.get("version") or ""),
                 error=str(raw.get("error") or ""),
+                application_path=str(raw.get("application_path") or ""),
+                application_version=str(raw.get("application_version") or ""),
                 configured=bool(raw.get("configured")),
             )
     except Exception:
@@ -2119,6 +2450,17 @@ def _display_path(path: str) -> str:
     return path or "-"
 
 
+def _signal_version_detail(signal: AgentSignal) -> str:
+    parts: list[str] = []
+    if signal.version:
+        parts.append(f"agent={signal.version}" if signal.name == "cursor" else signal.version)
+    elif signal.error:
+        parts.append(signal.error)
+    if signal.application_version:
+        parts.append(f"desktop={signal.application_version} ({_display_path(signal.application_path)})")
+    return "; ".join(parts)
+
+
 def _render_plain_table(disc: AgentDiscovery) -> str:
     lines = ["Agent discovery (cached)" if disc.cache_hit else "Agent discovery"]
     lines.append("connector | installed | configured | active/mode | config | binary | version/error")
@@ -2133,7 +2475,7 @@ def _render_plain_table(disc: AgentDiscovery) -> str:
                     signal.mode if signal.active else "no",
                     _display_path(signal.config_path),
                     _display_path(signal.binary_path),
-                    signal.version or signal.error,
+                    _signal_version_detail(signal),
                 ]
             )
         )

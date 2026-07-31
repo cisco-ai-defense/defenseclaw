@@ -860,6 +860,53 @@ func TestCodex_ImplementsComponentScanner(t *testing.T) {
 	}
 }
 
+func TestCodex_ComponentTargetsUseCurrentOfficialSurfaces(t *testing.T) {
+	homeDir := t.TempDir()
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	t.Setenv("HOME", homeDir)
+	t.Setenv("CODEX_HOME", filepath.Join(homeDir, "custom-codex"))
+
+	targets := NewCodexConnector().ComponentTargets(workspace)
+	skillTargets := []string{filepath.Join(workspace, ".agents", "skills")}
+	pluginTargets := []string{
+		filepath.Join(homeDir, "custom-codex", "plugins", "cache"),
+		filepath.Join(workspace, ".agents", "plugins", "marketplace.json"),
+		filepath.Join(workspace, ".agents", "plugins", "api_marketplace.json"),
+	}
+	if runtime.GOOS != "windows" {
+		skillTargets = append([]string{filepath.Join(homeDir, ".agents", "skills")}, skillTargets...)
+		pluginTargets = append(pluginTargets,
+			filepath.Join(homeDir, ".agents", "plugins", "marketplace.json"),
+			filepath.Join(homeDir, ".agents", "plugins", "api_marketplace.json"),
+		)
+	}
+	for component, expected := range map[string][]string{
+		"skill":  skillTargets,
+		"plugin": pluginTargets,
+		"mcp": {
+			filepath.Join(homeDir, "custom-codex", "config.toml"),
+			filepath.Join(workspace, ".codex", "config.toml"),
+		},
+	} {
+		for _, path := range expected {
+			if !slices.Contains(targets[component], path) {
+				t.Errorf("ComponentTargets(%q) = %v, missing %q", component, targets[component], path)
+			}
+		}
+	}
+	for _, obsolete := range []string{
+		filepath.Join(homeDir, "custom-codex", "skills"),
+		filepath.Join(workspace, ".codex", "skills"),
+		filepath.Join(workspace, ".mcp.json"),
+	} {
+		for component, paths := range targets {
+			if slices.Contains(paths, obsolete) {
+				t.Errorf("ComponentTargets(%q) retains obsolete path %q", component, obsolete)
+			}
+		}
+	}
+}
+
 func TestOpenClaw_ImplementsComponentScanner(t *testing.T) {
 	c := NewOpenClawConnector()
 	var _ ComponentScanner = c
@@ -3806,6 +3853,8 @@ func TestCodex_Setup_RegistersHooksInline(t *testing.T) {
 
 func TestCodex_Setup_HonorsCodexHome(t *testing.T) {
 	dir := t.TempDir()
+	homeDir := filepath.Join(dir, "home")
+	t.Setenv("HOME", homeDir)
 	codexHome := filepath.Join(dir, "custom-codex-home")
 	t.Setenv("CODEX_HOME", codexHome)
 	previous := CodexConfigPathOverride

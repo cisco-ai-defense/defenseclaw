@@ -73,15 +73,18 @@ var (
 
 type claudeCodeBoundedCommandBuffer struct {
 	bytes.Buffer
-	limit int64
+	limit    int64
+	overflow bool
 }
 
 func (b *claudeCodeBoundedCommandBuffer) Write(p []byte) (int, error) {
 	remaining := b.limit - int64(b.Len())
 	if remaining <= 0 {
+		b.overflow = true
 		return 0, fmt.Errorf("command output exceeds %d bytes", b.limit)
 	}
 	if int64(len(p)) > remaining {
+		b.overflow = true
 		written, _ := b.Buffer.Write(p[:remaining])
 		return written, fmt.Errorf("command output exceeds %d bytes", b.limit)
 	}
@@ -124,6 +127,12 @@ func runClaudeCodeManagedPreferenceCommandWithLimits(
 			err = fmt.Errorf("%w: %s", err, diagnostic)
 		}
 		return nil, err
+	}
+	if stdout.overflow || int64(stdout.Len()) >= stdout.limit {
+		return nil, fmt.Errorf("command output exceeds %d bytes", stdout.limit)
+	}
+	if stderr.overflow || int64(stderr.Len()) >= stderr.limit {
+		return nil, fmt.Errorf("command diagnostic exceeds %d bytes", stderr.limit)
 	}
 	return append([]byte(nil), stdout.Bytes()...), nil
 }

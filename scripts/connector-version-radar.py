@@ -11,7 +11,7 @@
 
 """Discover untested stable connector releases without modifying installations.
 
-The radar intentionally has a small scope: the three CLI connectors exercised by
+The radar intentionally has a small scope: the four CLI connectors exercised by
 the dedicated macOS connector lab.  It probes installed binaries, queries the
 upstream stable release channels, and keeps attempted/passed history in a
 caller-supplied machine-local state file.  It never changes an installed tool and
@@ -32,6 +32,10 @@ whole discovery path hermetic for tests and local workflow development::
       "antigravity": {
         "installed": "1.1.1",
         "latest": "{\"version\": \"1.1.2\"}"
+      },
+      "omnigent": {
+        "installed": "omnigent 0.7.0",
+        "latest": "{\"info\": {\"version\": \"0.7.0\"}}"
       }
     }
 
@@ -64,7 +68,7 @@ DEFAULT_TIMEOUT_SECONDS = 20.0
 ANTIGRAVITY_MANIFEST_BASE = (
     "https://antigravity-cli-auto-updater-974169037036.us-central1.run.app/manifests"
 )
-CONNECTOR_ORDER = ("codex", "claudecode", "antigravity")
+CONNECTOR_ORDER = ("codex", "claudecode", "antigravity", "omnigent")
 _VERSION_RE = re.compile(
     r"(?<![0-9A-Za-z])v?(?P<major>\d+)\.(?P<minor>\d+)\.(?P<patch>\d+)"
     r"(?:-(?P<prerelease>[0-9A-Za-z.-]+))?"
@@ -83,6 +87,7 @@ class ConnectorSpec:
     executable: str
     installed_command: tuple[str, ...]
     npm_package: str | None = None
+    pypi_project: str | None = None
 
 
 SPECS: dict[str, ConnectorSpec] = {
@@ -102,6 +107,12 @@ SPECS: dict[str, ConnectorSpec] = {
         name="antigravity",
         executable="agy",
         installed_command=("agy", "--version"),
+    ),
+    "omnigent": ConnectorSpec(
+        name="omnigent",
+        executable="omnigent",
+        installed_command=("omnigent", "--version"),
+        pypi_project="omnigent",
     ),
 }
 
@@ -318,6 +329,9 @@ def query_latest(
     if spec.npm_package:
         command = ("npm", "view", spec.npm_package, "dist-tags.latest", "--json")
         return command_runner(command, timeout), f"npm:{spec.npm_package}:dist-tags.latest"
+    if spec.pypi_project:
+        project_url = f"https://pypi.org/pypi/{spec.pypi_project}/json"
+        return url_fetcher(project_url, timeout), project_url
     manifest_url = f"{ANTIGRAVITY_MANIFEST_BASE}/{antigravity_platform_name}.json"
     return url_fetcher(manifest_url, timeout), manifest_url
 
@@ -335,6 +349,11 @@ def _latest_version_from_output(spec: ConnectorSpec, output: str) -> SemVersion:
             value = parsed_json
         elif parsed_json is not None:
             raise ValueError("Antigravity release metadata did not contain an object or string")
+    elif spec.pypi_project:
+        if isinstance(parsed_json, dict) and isinstance(parsed_json.get("info"), dict):
+            value = parsed_json["info"].get("version", "")
+        else:
+            raise ValueError("PyPI release metadata did not contain info.version")
     elif isinstance(parsed_json, str):
         value = parsed_json
     elif parsed_json is not None:
@@ -694,7 +713,7 @@ def _build_parser() -> argparse.ArgumentParser:
         action="append",
         choices=CONNECTOR_ORDER,
         dest="connectors",
-        help="Limit discovery to a connector (repeatable; default: all three).",
+        help="Limit discovery to a connector (repeatable; default: all four).",
     )
     check.add_argument("--timeout", type=float, default=DEFAULT_TIMEOUT_SECONDS)
     check.add_argument(

@@ -1,0 +1,19 @@
+{
+  "type": "tool_result",
+  "target": "sys_os_shell",
+  "data": {
+    "result": {
+      "stdout": "contract-allow",
+      "exit_code": 0
+    }
+  },
+  "request_data": {
+    "name": "sys_os_shell",
+    "arguments": {
+      "command": "printf contract-allow"
+    }
+  },
+  "context": {
+    "model": "contract-test"
+  }
+}

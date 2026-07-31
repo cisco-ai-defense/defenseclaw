@@ -118,7 +118,11 @@ def read_plugin_manifest(plugin_path: str) -> tuple[dict[str, Any], str] | None:
     if is_link_or_reparse(plugin_path) or not os.path.isdir(root):
         raise PluginIdentityError("plugin source must be a regular directory, not a link")
     for rel in MANIFEST_FILES:
-        path = os.path.join(plugin_path, rel)
+        # Bind manifest traversal to the canonical source root. On macOS,
+        # tempfile paths commonly enter through /var while realpath resolves
+        # them under /private/var; mixing those lexical roots makes the
+        # no-link ancestry walk reject a regular in-tree plugin.json.
+        path = os.path.join(root, rel)
         if not _regular_file_no_links(path, root):
             continue
         try:

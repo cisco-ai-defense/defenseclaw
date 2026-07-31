@@ -18,17 +18,20 @@ Exit codes:
   2   — file missing (nothing to do)
   3   — unsupported connector
   4   — file unreadable / parse failure (left untouched)
+  5   — managed OpenCode plugin drifted (plugin and backup preserved)
 
 Usage:
-  scrub_agent_configs.py CONNECTOR FILE [DATADIR_PATTERN]
+  scrub_agent_configs.py CONNECTOR FILE [DATADIR_PATTERN_OR_BACKUP]
 """
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import os
 import re
+import stat
 import sys
-
 
 DEFAULT_MARKERS = (
     "/.defenseclaw/hooks/",
@@ -300,6 +303,128 @@ def scrub_codex(path: str, markers: tuple[str, ...]) -> tuple[bool, str | None]:
     return True, None
 
 
+# ---------- whole-file plugin: OpenCode ---------------------------------
+
+
+def _read_regular_nofollow(path: str, limit: int = 2 * 1024 * 1024) -> bytes:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(path, flags)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise ValueError("not a single-link regular file")
+        if info.st_size > limit:
+            raise ValueError("file exceeds managed restore limit")
+        data = os.read(fd, limit + 1)
+        if len(data) > limit:
+            raise ValueError("file exceeds managed restore limit")
+        return data
+    finally:
+        os.close(fd)
+
+
+def _sha256(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _normalize_opencode_target(path: object) -> str | None:
+    """Return the absolute, cleaned path shape stored by the Go backup code."""
+    if not isinstance(path, str) or not os.path.isabs(path):
+        return None
+    try:
+        return os.path.normpath(os.path.abspath(path))
+    except (OSError, ValueError):
+        return None
+
+
+def restore_opencode(backup_path: str, expected_target: str) -> tuple[bool, str | None]:
+    """Restore OpenCode's whole-file plugin only when it still matches the
+    exact bytes DefenseClaw installed. A drifted plugin is preserved so purge
+    cannot erase user changes or delete the only pristine snapshot. The backup
+    target must also match the explicit plugin path selected by the caller."""
+    backup_raw = _read_regular_nofollow(backup_path)
+    backup = json.loads(backup_raw.decode("utf-8"))
+    if not isinstance(backup, dict):
+        return False, "backup is not an object"
+    if (
+        backup.get("version") != 1
+        or backup.get("connector") != "opencode"
+        or backup.get("logical_name") != "config"
+    ):
+        return False, "backup identity mismatch"
+
+    target = _normalize_opencode_target(backup.get("path"))
+    if target is None:
+        return False, "backup target is not absolute"
+    requested_target = _normalize_opencode_target(expected_target)
+    if requested_target is None:
+        return False, "requested OpenCode plugin target is not absolute"
+    if target != requested_target:
+        return False, "backup target does not match requested OpenCode plugin"
+    if os.path.basename(target) != "defenseclaw.js" or os.path.basename(os.path.dirname(target)) != "plugins":
+        return False, "backup target is not an OpenCode plugin path"
+    parent = os.path.dirname(target)
+    parent_info = os.lstat(parent)
+    if not stat.S_ISDIR(parent_info.st_mode) or stat.S_ISLNK(parent_info.st_mode):
+        return False, "plugin parent is not a direct directory"
+
+    expected = backup.get("post_sha256") or backup.get("pristine_sha256")
+    if not isinstance(expected, str) or not re.fullmatch(r"[0-9a-f]{64}|missing", expected):
+        return False, "backup post hash is invalid"
+    try:
+        current = _read_regular_nofollow(target)
+        current_hash = _sha256(current)
+    except FileNotFoundError:
+        current_hash = "missing"
+    if current_hash != expected:
+        return False, "managed OpenCode plugin changed after Setup"
+
+    if backup.get("existed") is True:
+        encoded = backup.get("pristine_bytes")
+        pristine_hash = backup.get("pristine_sha256")
+        if not isinstance(encoded, str) or not isinstance(pristine_hash, str):
+            return False, "pristine snapshot is incomplete"
+        pristine = base64.b64decode(encoded, validate=True)
+        if _sha256(pristine) != pristine_hash:
+            return False, "pristine snapshot hash mismatch"
+        mode = backup.get("mode")
+        mode = (mode if isinstance(mode, int) else 0o600) & 0o777
+        if mode == 0:
+            mode = 0o600
+        temp = os.path.join(parent, f".defenseclaw.restore.{os.getpid()}")
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(temp, flags, mode)
+        try:
+            view = memoryview(pristine)
+            while view:
+                written = os.write(fd, view)
+                if written <= 0:
+                    raise OSError("short write while restoring plugin")
+                view = view[written:]
+            os.fsync(fd)
+            os.fchmod(fd, mode)
+        finally:
+            os.close(fd)
+        try:
+            os.replace(temp, target)
+        finally:
+            try:
+                os.unlink(temp)
+            except FileNotFoundError:
+                pass
+    else:
+        try:
+            os.unlink(target)
+        except FileNotFoundError:
+            pass
+    os.unlink(backup_path)
+    return True, None
+
+
 # ---------- dispatch -----------------------------------------------------
 
 
@@ -316,6 +441,23 @@ def main(argv: list[str]) -> int:
         return 64
     connector = argv[1]
     path = argv[2]
+    if connector == "opencode":
+        if len(argv) < 4 or not argv[3]:
+            print("opencode restore requires a managed backup path", file=sys.stderr)
+            return 4
+        backup_path = argv[3]
+        if not os.path.exists(backup_path):
+            return 2
+        try:
+            ok, err = restore_opencode(backup_path, path)
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as e:
+            print(f"restore failed for {path}: {e}", file=sys.stderr)
+            return 4
+        if not ok:
+            print(f"restore skipped: {err}", file=sys.stderr)
+            return 5 if err == "managed OpenCode plugin changed after Setup" else 4
+        return 0
+
     markers = list(DEFAULT_MARKERS)
     if len(argv) >= 4 and argv[3]:
         markers.insert(0, argv[3])

@@ -30,8 +30,18 @@ setup backend as `setup guardrail`, adds or reconfigures `claudecode`, wires
 hooks + native OTel, and can join an existing hook-connector roster when you
 choose **Add**. No proxy listener binds in either mode.
 
+On macOS, Anthropic supports macOS 13+ and publishes native `arm64` and
+`x86_64` binaries through the recommended native installer (and Homebrew).
+DefenseClaw resolves the launcher's symlink to the canonical Mach-O, then
+checks path permissions, native architecture, quarantine state, Anthropic's
+Developer ID signature, version, and SHA-256 before sealing the selected
+identity into the hook contract lock. macOS remains **preview** until a green
+latest-version packaged + authenticated official-client run is durably
+recorded; the validation ledger therefore leaves `last_validated_version`
+empty. See the [native setup](https://code.claude.com/docs/en/setup).
+
 On native Windows, install and run Claude Code directly from PowerShell or CMD
-using Anthropic's [native setup](https://code.claude.com/docs/en/setup).
+using the same official setup.
 DefenseClaw registers a native executable with Claude Code's `args` exec form;
 Git for Windows is optional and is not part of the connector contract. WSL,
 Git Bash, Cygwin, MSYS, containers, and virtual machines are not certification
@@ -41,11 +51,23 @@ Claude Code native Windows support is a preview. The hook and lifecycle
 contract is implemented, but no immutable packaged plus official-client
 Windows certification record is persisted.
 
+#### Version contract
+
+The shared `claudecode-hooks-v1` floor is `>=2.1.154`. macOS applies an
+additional protected-admission ceiling of `<2.1.219` because 2.1.219 introduced
+the release-only `DirectoryAdded` event without a published schema, ordering,
+or blocking contract. Windows retains the shared open ceiling. A version match
+selects a known hook contract; it does not certify either native platform.
+
 Native OTLP uses managed loopback exporter settings with a Claude-scoped
-Authorization bearer. Logs and metrics are enabled; traces are explicitly
-disabled. Prompt and assistant-response content logging are independent
-vendor opt-ins and DefenseClaw explicitly defaults both off; downstream
-redaction settings do not silently authorize source capture. The scoped
+Authorization bearer. Logs and metrics are enabled on every supported host.
+On macOS, DefenseClaw also enables Anthropic's documented enhanced-telemetry
+beta trace exporter. Windows retains its existing logs+metrics posture with
+traces explicitly disabled. Detailed `claude_code.hook` spans need additional
+upstream flags and organization allowlisting and are not claimed. Prompt and
+assistant-response content logging are independent vendor opt-ins and
+DefenseClaw explicitly defaults both off; downstream redaction settings do not
+silently authorize source capture. The scoped
 credential cannot authenticate management or another connector and must never
 be printed or copied.
 
@@ -120,6 +142,15 @@ marked unverified when session `--settings`, remote settings, or native policy
 could change the active path.
 Runtime `/add-dir` roots remain outside passive inventory until the
 release-only `DirectoryAdded` event has a published hook schema.
+
+The read-only inventory also classifies all official customization families:
+skills (including legacy compatibility commands), plugins/marketplaces and
+their components, agents/subagents, `CLAUDE.md` plus rules, and Claude-owned
+auto memory. Session-dependent project, nested, additional-directory, CLI, and
+server-managed sources are reported only when their workspace/source is
+explicitly known; DefenseClaw does not guess them or emulate Claude's loader.
+Model proxying, a native sandbox, firewalling, and egress interception are
+explicitly N/A for this connector.
 
 ## Hook capabilities
 
