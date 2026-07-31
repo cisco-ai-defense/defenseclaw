@@ -788,8 +788,7 @@ func assertRuleSeverity(t *testing.T, findings []RuleFinding, ruleID, severity s
 // implementation wholesale-replaced allRuleCategories, which silently
 // dropped whole detection surfaces whenever a pack was deployed.
 func TestApplyRulePackOverrides_AddsNewCategoryKeepsDefaults(t *testing.T) {
-	savedCategories := allRuleCategories
-	defer func() { allRuleCategories = savedCategories }()
+	resetConnectorRuleCategories(t)
 
 	rp := &guardrail.RulePack{
 		RuleFiles: []*guardrail.RulesFileYAML{
@@ -833,8 +832,7 @@ func TestApplyRulePackOverrides_AddsNewCategoryKeepsDefaults(t *testing.T) {
 // with category="secret" replaces the compiled-in secret rules but leaves
 // the other default categories untouched.
 func TestApplyRulePackOverrides_ReplacesNamedCategoryOnly(t *testing.T) {
-	savedCategories := allRuleCategories
-	defer func() { allRuleCategories = savedCategories }()
+	resetConnectorRuleCategories(t)
 
 	rp := &guardrail.RulePack{
 		RuleFiles: []*guardrail.RulesFileYAML{
@@ -879,8 +877,7 @@ func TestApplyRulePackOverrides_ReplacesNamedCategoryOnly(t *testing.T) {
 }
 
 func TestApplyRulePackOverrides_NilRulePack(t *testing.T) {
-	savedCategories := allRuleCategories
-	defer func() { allRuleCategories = savedCategories }()
+	resetConnectorRuleCategories(t)
 
 	if err := ApplyRulePackOverrides(secretOverridePack("STALE", `stale_[a-f0-9]+`)); err != nil {
 		t.Fatal(err)
@@ -897,8 +894,7 @@ func TestApplyRulePackOverrides_NilRulePack(t *testing.T) {
 }
 
 func TestApplyRulePackOverrides_InvalidRegexRejectedAtomically(t *testing.T) {
-	savedCategories := allRuleCategories
-	defer func() { allRuleCategories = savedCategories }()
+	resetConnectorRuleCategories(t)
 
 	if err := ApplyRulePackOverrides(secretOverridePack("ACTIVE", `active_[a-f0-9]+`)); err != nil {
 		t.Fatal(err)
@@ -926,8 +922,7 @@ func TestApplyRulePackOverrides_InvalidRegexRejectedAtomically(t *testing.T) {
 }
 
 func TestApplyRulePackOverrides_DisabledInvalidRegexRejected(t *testing.T) {
-	savedCategories := allRuleCategories
-	defer func() { allRuleCategories = savedCategories }()
+	resetConnectorRuleCategories(t)
 
 	if err := ApplyRulePackOverrides(secretOverridePack("ACTIVE", `active_[a-f0-9]+`)); err != nil {
 		t.Fatal(err)
@@ -982,13 +977,18 @@ func resetConnectorRuleCategories(t *testing.T) {
 	t.Helper()
 	ruleCategoriesMu.Lock()
 	savedGlobal := allRuleCategories
+	savedGlobalGeneration := allRuleGeneration
 	savedConn := connectorRuleCategories
+	savedConnGenerations := connectorRuleGenerations
 	connectorRuleCategories = map[string][]ruleCategory{}
+	connectorRuleGenerations = map[string]*compiledRulePackCategories{}
 	ruleCategoriesMu.Unlock()
 	t.Cleanup(func() {
 		ruleCategoriesMu.Lock()
 		allRuleCategories = savedGlobal
+		allRuleGeneration = savedGlobalGeneration
 		connectorRuleCategories = savedConn
+		connectorRuleGenerations = savedConnGenerations
 		ruleCategoriesMu.Unlock()
 	})
 }
