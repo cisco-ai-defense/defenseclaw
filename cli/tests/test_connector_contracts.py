@@ -13,9 +13,11 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -41,6 +43,8 @@ from defenseclaw.connector_paths import KNOWN_CONNECTORS
 
 from tests.helpers import cleanup_app, make_app_context
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
 
 def _discovery(connector: str, *, installed: bool, version: str, error: str = ""):
     return SimpleNamespace(
@@ -63,6 +67,29 @@ class TestConnectorContractManifest(unittest.TestCase):
             set(HOOK_CONTRACT_MANIFEST["connectors"]),
             set(KNOWN_CONNECTORS),
         )
+
+    def test_live_e2e_pretool_goldens_follow_exact_default_contract(self) -> None:
+        golden_root = REPO_ROOT / "scripts" / "live-connector-e2e" / "golden"
+        for connector_dir in sorted(golden_root.iterdir()):
+            manifest = HOOK_CONTRACT_MANIFEST["connectors"].get(connector_dir.name)
+            if manifest is None:
+                continue
+            contracts = manifest.get("contracts", ())
+            contract = next(
+                (item for item in contracts if item.get("default_for_unversioned")),
+                contracts[0],
+            )
+            structured = set(contract["tool_call_lifecycle"]["routing"]["structured_action_events"])
+            blocked = set(contract["capabilities"]["block_events"])
+            for fixture_name in ("pre_tool_allow.json", "pre_tool_block.json"):
+                fixture = connector_dir / fixture_name
+                if not fixture.is_file():
+                    continue
+                event = json.loads(fixture.read_text(encoding="utf-8"))["hook_event_name"]
+                with self.subTest(connector=connector_dir.name, fixture=fixture_name):
+                    self.assertIn(event, structured)
+                    if fixture_name == "pre_tool_block.json":
+                        self.assertIn(event, blocked)
 
     def test_proxy_connectors_are_not_hook_gated(self) -> None:
         self.assertEqual(PROXY_CONNECTORS, frozenset({"openclaw", "zeptoclaw"}))

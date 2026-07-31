@@ -1,5 +1,5 @@
 {
-  "hook_event_name": "PreToolUse",
+  "hook_event_name": "preToolUse",
   "session_id": "dc-e2e-copilot",
   "turn_id": "dc-e2e-turn",
   "agent_id": "copilot-e2e",
