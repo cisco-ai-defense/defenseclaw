@@ -498,9 +498,18 @@ def test_inspect_status_compiles_exact_snapshot_across_concurrent_atomic_replace
     inspected_sources: list[bytes] = []
     snapshot_paths: list[Path] = []
 
-    def inspect_snapshot(_operation: str, *, config_path: str):
+    def inspect_snapshot(
+        _operation: str,
+        *,
+        config_path: str,
+        data_dir: str,
+        environment_overrides: dict[str, str],
+    ):
         snapshot = Path(config_path)
         snapshot_paths.append(snapshot)
+        assert snapshot.parent != tmp_path
+        assert data_dir == str(tmp_path)
+        assert environment_overrides == {"DEFENSECLAW_CONFIG": config_path}
         replacement.replace(path)
         inspected_sources.append(snapshot.read_bytes())
         return SimpleNamespace(
@@ -510,7 +519,10 @@ def test_inspect_status_compiles_exact_snapshot_across_concurrent_atomic_replace
             plan_digest="b" * 64,
         )
 
-    with patch("defenseclaw.observability.v8_status.inspect_v8_config", side_effect=inspect_snapshot):
+    with (
+        patch("defenseclaw.observability.v8_status.default_data_path", return_value=tmp_path),
+        patch("defenseclaw.observability.v8_status.inspect_v8_config", side_effect=inspect_snapshot),
+    ):
         status = inspect_v8_operator_status(path)
 
     assert inspected_sources == [original]
@@ -520,14 +532,62 @@ def test_inspect_status_compiles_exact_snapshot_across_concurrent_atomic_replace
     assert all(not snapshot.exists() for snapshot in snapshot_paths)
 
 
+def test_inspect_status_preserves_explicit_data_dir_for_relocated_snapshot(tmp_path: Path) -> None:
+    source_root = tmp_path / "source"
+    source_root.mkdir()
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir()
+    path = source_root / "config.yaml"
+    path.write_text(
+        f"config_version: 8\ndata_dir: {runtime_root}\nobservability: {{}}\n",
+        encoding="utf-8",
+    )
+    snapshot_paths: list[Path] = []
+
+    def inspect_snapshot(
+        _operation: str,
+        *,
+        config_path: str,
+        data_dir: str,
+        environment_overrides: dict[str, str],
+    ):
+        snapshot = Path(config_path)
+        snapshot_paths.append(snapshot)
+        assert snapshot.parent not in {source_root, runtime_root}
+        assert snapshot.read_bytes() == path.read_bytes()
+        assert data_dir == str(runtime_root)
+        assert environment_overrides == {"DEFENSECLAW_CONFIG": config_path}
+        return SimpleNamespace(
+            effective=_effective(),
+            source=str(snapshot),
+            data_dir=str(runtime_root),
+            plan_digest="d" * 64,
+        )
+
+    with patch("defenseclaw.observability.v8_status.inspect_v8_config", side_effect=inspect_snapshot):
+        status = inspect_v8_operator_status(path)
+
+    assert status.data_dir == str(runtime_root)
+    assert status.source == str(path.absolute())
+    assert all(not snapshot.exists() for snapshot in snapshot_paths)
+
+
 def test_inspect_status_fails_closed_if_private_snapshot_changes(tmp_path: Path) -> None:
     path = tmp_path / "config.yaml"
     path.write_text("config_version: 8\nobservability: {}\n")
     snapshot_paths: list[Path] = []
 
-    def mutate_snapshot(_operation: str, *, config_path: str):
+    def mutate_snapshot(
+        _operation: str,
+        *,
+        config_path: str,
+        data_dir: str,
+        environment_overrides: dict[str, str],
+    ):
         snapshot = Path(config_path)
         snapshot_paths.append(snapshot)
+        assert data_dir == str(tmp_path)
+        assert environment_overrides == {"DEFENSECLAW_CONFIG": config_path}
         snapshot.write_text("config_version: 8\nobservability: {defaults: {redaction_profile: none}}\n")
         return SimpleNamespace(
             effective=_effective(),
@@ -537,6 +597,7 @@ def test_inspect_status_fails_closed_if_private_snapshot_changes(tmp_path: Path)
         )
 
     with (
+        patch("defenseclaw.observability.v8_status.default_data_path", return_value=tmp_path),
         patch("defenseclaw.observability.v8_status.inspect_v8_config", side_effect=mutate_snapshot),
         pytest.raises(ValueError, match="snapshot changed"),
     ):

@@ -34,6 +34,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from defenseclaw.config import CONFIG_PATH_ENV, default_data_path
 from defenseclaw.config_inspect import inspect_v8_config
 from defenseclaw.observability.display import redact_endpoint_for_display
 from defenseclaw.observability.v8_config import V8ConfigError, load_validate_v8
@@ -248,6 +249,12 @@ def inspect_v8_operator_status(config_path: str | Path) -> V8OperatorStatus:
     if isinstance(guardrail, Mapping) and "retain_judge_bodies" in guardrail:
         retain_judge_bodies = guardrail["retain_judge_bodies"] is True
 
+    source_data_dir = validated.get("data_dir")
+    inspection_data_dir = (
+        source_data_dir.strip()
+        if isinstance(source_data_dir, str) and source_data_dir.strip()
+        else str(default_data_path())
+    )
     descriptor, snapshot_name = tempfile.mkstemp(
         prefix=".defenseclaw-observability-v8-status-",
         suffix=".yaml",
@@ -262,7 +269,19 @@ def inspect_v8_operator_status(config_path: str | Path) -> V8OperatorStatus:
             stream.write(source)
             stream.flush()
             os.fsync(stream.fileno())
-        result = inspect_v8_config("effective", config_path=str(snapshot_path))
+        # The helper must compile the immutable snapshot, but its runtime-v8
+        # decoder also derives omitted path defaults by comparing --config to
+        # DEFENSECLAW_CONFIG.  Bind that comparison to the private snapshot and
+        # pass the source's canonical data-root context explicitly.  Otherwise
+        # a snapshot in TEMP is incorrectly treated as a different
+        # installation (notably when native Windows setup records a data root
+        # outside the runner's TEMP profile).
+        result = inspect_v8_config(
+            "effective",
+            config_path=str(snapshot_path),
+            data_dir=inspection_data_dir,
+            environment_overrides={CONFIG_PATH_ENV: str(snapshot_path)},
+        )
         try:
             inspected_source = snapshot_path.read_bytes()
         except OSError:
