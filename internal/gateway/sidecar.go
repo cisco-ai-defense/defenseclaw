@@ -1557,8 +1557,9 @@ func (s *Sidecar) bindHookRuntimePolicyResolver(guard *HookConfigGuard) {
 			return hookRuntimePolicy{}, nil, false
 		}
 		return hookRuntimePolicy{
-			hookFailMode: cfg.EffectiveHookFailModeForConnector(connectorName),
-			hiltEnabled:  cfg.EffectiveHILTForConnector(connectorName).Enabled,
+			hookFailMode:  cfg.EffectiveHookFailModeForConnector(connectorName),
+			guardrailMode: cfg.EffectiveGuardrailModeForConnector(connectorName),
+			hiltEnabled:   cfg.EffectiveHILTForConnector(connectorName).Enabled,
 		}, sync.OnceFunc(s.hookPolicyMu.RUnlock), true
 	})
 }
@@ -2512,12 +2513,12 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		HookAPITokenScoped: setupTokens.hookTokenScoped,
 		WorkspaceDir:       workspaceDir,
 		// HookFailMode controls delivery, authentication, and invalid-response
-		// failures for generated hooks (see GuardrailConfig.HookFailMode).
-		// This single-connector path uses the persisted global value, whose
-		// secure fallback is "closed"; the multi-connector path below uses the
-		// connector-aware effective resolver.
-		HookFailMode:     s.currentConfig().Guardrail.EffectiveHookFailMode(),
-		HILTEnabled:      s.currentConfig().Guardrail.HILT.Enabled,
+		// failures for generated hooks. Use the same connector-aware effective
+		// posture as multi-connector setup so Cursor receives failClosed only
+		// for an explicit action+closed combination.
+		HookFailMode:     s.currentConfig().EffectiveHookFailModeForConnector(conn.Name()),
+		GuardrailMode:    s.currentConfig().EffectiveGuardrailModeForConnector(conn.Name()),
+		HILTEnabled:      s.currentConfig().EffectiveHILTForConnector(conn.Name()).Enabled,
 		InstallCodeGuard: false,
 		AgentVersion:     agentVersion,
 		AgentExecutable:  agentExecutable,
@@ -3430,6 +3431,7 @@ func (s *Sidecar) connectorSetupOptsChecked(conn connector.Connector, apiToken, 
 		HookAPITokenScoped: setupTokens.hookTokenScoped,
 		WorkspaceDir:       s.currentConfig().ConnectorWorkspaceDir(),
 		HookFailMode:       s.currentConfig().EffectiveHookFailModeForConnector(conn.Name()),
+		GuardrailMode:      s.currentConfig().EffectiveGuardrailModeForConnector(conn.Name()),
 		HILTEnabled:        s.currentConfig().EffectiveHILTForConnector(conn.Name()).Enabled,
 		InstallCodeGuard:   false,
 		AgentVersion:       agentVersion,

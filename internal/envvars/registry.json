@@ -205,6 +205,36 @@
       "since": "0.8.4"
     },
     {
+      "name": "DEFENSECLAW_CURSOR_CONFIG_HOME",
+      "category": "upgrade_internal",
+      "purpose": "Carries the exact Cursor configuration home already captured and validated by the native Windows Setup transaction into its isolated connector maintenance child. The child converts it to the hidden --config-home binding; Cursor itself never reads this variable.",
+      "default": "unset",
+      "accepted_values": ["absolute normalized path selected by the Setup transaction", "unset"],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw-setup/transaction.go", "description": "Filters ambient copies and passes only the transaction-bound Cursor home to connector lifecycle children"},
+        {"location": "cmd/defenseclaw-setup/main.go", "description": "Requires one absolute normalized value and converts it to the hidden --config-home argument"}
+      ],
+      "since": "0.8.9",
+      "security_note": "Trusted Setup custody binding only. This is not a Cursor vendor environment variable and must never be used for ordinary Cursor discovery."
+    },
+    {
+      "name": "DEFENSECLAW_ANTIGRAVITY_CONFIG_HOME",
+      "category": "upgrade_internal",
+      "purpose": "Carries the exact Antigravity configuration home already captured and validated by the native Windows Setup transaction into its isolated connector maintenance child. The child converts it to the hidden --config-home binding; Antigravity itself never reads this variable.",
+      "default": "unset",
+      "accepted_values": ["absolute normalized path selected by the Setup transaction", "unset"],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw-setup/transaction.go", "description": "Filters ambient copies and passes only the transaction-bound Antigravity home to connector lifecycle children"},
+        {"location": "cmd/defenseclaw-setup/main.go", "description": "Requires one absolute normalized value and converts it to the hidden --config-home argument"}
+      ],
+      "since": "0.8.9",
+      "security_note": "Trusted Setup custody binding only. This is not an Antigravity vendor environment variable and must never be used for ordinary Antigravity discovery."
+    },
+    {
       "name": "DEFENSECLAW_UPGRADE_TEST_MODE",
       "category": "test_fixture",
       "purpose": "Explicitly enables the loopback-only unpublished release endpoint used by upgrade protocol release-candidate tests.",

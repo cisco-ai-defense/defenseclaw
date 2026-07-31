@@ -52,7 +52,7 @@ type templateData struct {
 	ScopedToken   bool
 	ConnectorName string
 	HookBinaryPS  string // absolute launcher path, escaped for a PowerShell single-quoted literal
-	HookTimeoutMS int    // Cursor adapter child timeout; zero for templates that do not use it
+	HookTimeoutMS int    // Native PowerShell adapter child timeout; zero for templates that do not use it
 }
 
 // defaultHookFailMode is injected into every hook when the caller does not
@@ -68,11 +68,11 @@ type templateData struct {
 // persists to guardrail.hook_fail_mode in config.yaml).
 const defaultHookFailMode = "closed"
 
-// cursorAdapterTimeoutMS matches the existing 10-second Cursor shell-hook
-// request budget while staying inside Cursor's 30-second command-hook timeout.
-// Keeping the adapter bound shorter than the vendor timeout gives it time to
-// terminate the launcher, remove the temporary payload, and emit fail-open JSON.
-const cursorAdapterTimeoutMS = 10_000
+// windowsHookAdapterTimeoutMS matches the existing 10-second connector hook
+// request budget and stays inside Cursor's configured 30-second command-hook
+// timeout. Keeping adapters bounded lets them terminate a stuck launcher and
+// return the selected availability posture to the host.
+const windowsHookAdapterTimeoutMS = 10_000
 
 // normalizeHookFailMode coerces a caller-supplied string to one of
 // the two values the hook scripts understand. Anything other than
@@ -391,9 +391,9 @@ func WriteHookScriptsWithToken(hookDir, apiAddr, token string) error {
 	}
 
 	// Never bake the real token into template output — scripts read
-	// the .token file or the env var at runtime. FailMode defaults
-	// to "open" so a fresh setup never bricks the agent on a
-	// gateway outage; see defaultHookFailMode for rationale.
+	// the .token file or the env var at runtime. This legacy all-script
+	// writer uses the product-wide default; connector-aware setup uses
+	// resolveHookFailMode so Cursor can retain its vendor fail-open default.
 	data := templateData{APIAddr: apiAddr, APIToken: "", FailMode: defaultHookFailMode, TokenFile: ".token"}
 
 	for _, name := range hookScripts {
@@ -469,7 +469,7 @@ func writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, failMode string,
 		ScopedToken:   scopedToken,
 		ConnectorName: strings.ToLower(strings.TrimSpace(connectorName)),
 		HookBinaryPS:  strings.ReplaceAll(defenseclawHookBinary(), "'", "''"),
-		HookTimeoutMS: cursorAdapterTimeoutMS,
+		HookTimeoutMS: windowsHookAdapterTimeoutMS,
 	}
 	// The inspect-* family has one physical copy per data directory.  Its
 	// bytes must therefore depend only on install-wide inputs; connector mode,
@@ -866,15 +866,19 @@ func WriteHookScriptsForConnectorObject(hookDir, apiAddr, token string, c Connec
 // (see templateData.FailMode and defaultHookFailMode for the
 // contract):
 //
-//  1. An EXPLICIT operator value in opts.HookFailMode — either
-//     "open" or "closed" — always wins. The operator answered
+//  1. Cursor observe mode always resolves to "open"; host failClosed and
+//     adapter transport failures must not enforce outside action mode.
+//  2. Otherwise, an EXPLICIT operator value in opts.HookFailMode — either
+//     "open" or "closed" — wins. The operator answered
 //     `defenseclaw setup guardrail`'s fail-mode prompt (or used
 //     `defenseclaw guardrail fail-mode <value>`); silently
 //     overriding their answer would violate the operator-defined
 //     fail-mode contract documented in
 //     “GuardrailConfig.HookFailMode“.
-//  2. EMPTY/unset opts.HookFailMode uses defaultHookFailMode ("closed").
-//  3. Hook-only connectors may use explicit "closed" only when their
+//  3. EMPTY/unset opts.HookFailMode uses the connector default. Cursor uses
+//     "open" to match the vendor's documented command-hook default; other
+//     connectors use defaultHookFailMode ("closed").
+//  4. Hook-only connectors may use explicit "closed" only when their
 //     documented hook surface supports fail-closed behavior. Unsupported
 //     connectors stay fail-open and rely on their config writer to omit
 //     vendor fail-closed fields.
@@ -908,16 +912,30 @@ func WriteHookScriptsForConnectorObjectWithOpts(hookDir string, opts SetupOpts, 
 
 // resolveHookFailMode picks the delivery/response fail mode for a hook render
 // given the operator's setup opts and the connector identity.
-// The explicit string in opts.HookFailMode always wins; an empty
-// value falls back to the connector-default and is upgraded to
-// "closed" when the operator has set the matching enforcement flag
-// for codex / claudecode (avarice F-0681).
+// The explicit string in opts.HookFailMode normally wins; Cursor first applies
+// its observe/action boundary because observe is never allowed to block.
+// An empty value falls back to the connector-default and is upgraded to
+// "closed" when the operator has set the matching enforcement flag for
+// codex / claudecode (avarice F-0681).
 func resolveHookFailMode(opts SetupOpts, c Connector) string {
+	if c != nil && c.Name() == "cursor" &&
+		!strings.EqualFold(strings.TrimSpace(opts.GuardrailMode), "action") {
+		// Cursor defaults command-hook failures to fail-open. DefenseClaw's
+		// observe mode must never turn either the host failClosed field or the
+		// native adapter's transport failures into a block, even if a global
+		// hook_fail_mode=closed is inherited from another connector.
+		return "open"
+	}
 	if strings.TrimSpace(opts.HookFailMode) != "" {
 		return normalizeHookFailMode(opts.HookFailMode)
 	}
 	if c != nil {
 		switch c.Name() {
+		case "cursor":
+			// Cursor's host schema is explicitly fail-open unless
+			// failClosed=true. Keep the rendered adapter aligned with the
+			// hooks.json value when no operator choice was supplied.
+			return "open"
 		case "codex":
 			if opts.CodexEnforcement {
 				return "closed"
@@ -1130,6 +1148,29 @@ func writeDisabledHookTombstone(opts SetupOpts, scriptName, vendorLabel string) 
 		"# " + vendorLabel + " connector was torn down. Existing host processes may\n" +
 		"# keep this hook path cached until restart, so exit successfully\n" +
 		"# without forwarding stale payloads.\n" +
+		"exit 0\n"
+	return atomicWriteFile(filepath.Join(hookDir, scriptName), []byte(body), 0o700)
+}
+
+// writeDisabledPowerShellHookTombstone is the native Windows equivalent used
+// by connector adapters cached by long-running desktop hosts. It emits no
+// protocol output and succeeds, so teardown cannot leave a stale adapter
+// forwarding payloads to a connector that is no longer active.
+func writeDisabledPowerShellHookTombstone(opts SetupOpts, scriptName, vendorLabel string) error {
+	if strings.TrimSpace(scriptName) == "" {
+		return fmt.Errorf("PowerShell tombstone: empty scriptName")
+	}
+	hookDir := filepath.Join(opts.DataDir, "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		return fmt.Errorf("ensure hook dir: %w", err)
+	}
+	if vendorLabel == "" {
+		vendorLabel = "DefenseClaw connector"
+	}
+	body := "# DefenseClaw native Windows hook adapter\n" +
+		"# defenseclaw-managed-hook v0 (disabled tombstone)\n" +
+		"# " + vendorLabel + " connector was torn down; cached host processes\n" +
+		"# must succeed without forwarding stale payloads.\n" +
 		"exit 0\n"
 	return atomicWriteFile(filepath.Join(hookDir, scriptName), []byte(body), 0o700)
 }

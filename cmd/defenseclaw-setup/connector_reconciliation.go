@@ -101,13 +101,29 @@ func retryPendingConnectorReconciliation(
 		}
 		seen[identity] = true
 		connectorName := strings.ToLower(failure.Connector)
-		codexHome, claudeHome := "", ""
+		codexHome, claudeHome, copilotHome, cursorHome, windsurfHome, antigravityHome, openCodeHome, omnigentHome, hermesHome := "", "", "", "", "", "", "", "", ""
 		if connectorName == "codex" {
 			codexHome = failure.ConfigHome
-		} else {
+		} else if connectorName == "claudecode" {
 			claudeHome = failure.ConfigHome
+		} else if connectorName == "copilot" {
+			copilotHome = failure.ConfigHome
+		} else if connectorName == "cursor" {
+			cursorHome = failure.ConfigHome
+		} else if connectorName == "windsurf" {
+			windsurfHome = failure.ConfigHome
+		} else if connectorName == "antigravity" {
+			antigravityHome = failure.ConfigHome
+		} else if connectorName == "opencode" {
+			openCodeHome = failure.ConfigHome
+		} else if connectorName == "omnigent" {
+			omnigentHome = failure.ConfigHome
+		} else if connectorName == "hermes" {
+			hermesHome = failure.ConfigHome
 		}
-		env := transactionChildEnvForHomes(transaction, codexHome, claudeHome)
+		env := transactionChildEnvForConnectorHomes(
+			transaction, codexHome, claudeHome, copilotHome, cursorHome, windsurfHome, antigravityHome, openCodeHome, omnigentHome, hermesHome,
+		)
 		verify := func() error {
 			return run(gatewayPath, transaction.DataRoot, connectorName, "verify", env)
 		}
@@ -207,16 +223,34 @@ func connectorCleanupHomes(transaction setupTransaction, connectorName string) [
 			candidates = append(candidates, transaction.PreviousState.CodexHome)
 		case "claudecode":
 			candidates = append(candidates, transaction.PreviousState.ClaudeConfigDir)
+		case "copilot":
+			candidates = append(candidates, transaction.PreviousState.CopilotHome)
+		case "cursor":
+			candidates = append(candidates, transaction.PreviousState.CursorHome)
+		case "windsurf":
+			candidates = append(candidates, transaction.PreviousState.WindsurfUserHome)
+		case "antigravity":
+			candidates = append(candidates, transaction.PreviousState.AntigravityConfigDir)
+		case "opencode":
+			candidates = append(candidates, transaction.PreviousState.OpenCodeConfigDir)
+		case "omnigent":
+			candidates = append(candidates, transaction.PreviousState.OmnigentConfigHome)
+		case "hermes":
+			candidates = append(candidates, transaction.PreviousState.HermesHome)
 		}
 	}
 	candidates = append(candidates, connectorConfigHome(transaction, connectorName, false))
-	if !connectorManagedBackupExists(transaction.DataRoot, connectorName) {
+	if connectorName != "windsurf" &&
+		!connectorManagedBackupExists(transaction.DataRoot, connectorName) {
 		// A predecessor or concurrent reconcile can discard its exact managed
 		// backup after detecting config drift while retaining the field-level
 		// cleanup authority. Installer state from a pre-home-binding release can
 		// then name only a stale override. The native data root is already bound
 		// to %USERPROFILE%\.defenseclaw, so its finite sibling is the only safe
-		// default-home fallback. Verification runs before any mutation, and the
+		// default-home fallback. Windsurf is deliberately excluded: it has no
+		// vendor home override and maintenance may target only the profile root
+		// captured in installer state or managed backup, never an inferred
+		// ambient profile. Verification runs before any mutation, and the
 		// lifecycle command still rejects reparse points and unsafe ownership.
 		candidates = append(candidates, connectorDefaultHomeBesideDataRoot(
 			transaction.DataRoot,
@@ -253,11 +287,27 @@ func connectorManagedBackupExists(dataRoot, connectorName string) bool {
 		logicalName = "config.toml"
 	case "claudecode":
 		logicalName = "settings.json"
+	case "copilot", "omnigent":
+		logicalName = "config"
+	case "cursor":
+		logicalName = "hooks.json"
+	case "windsurf":
+		logicalName = "config"
+	case "antigravity":
+		logicalName = "hooks.json"
+	case "opencode":
+		logicalName = "config"
+	case "hermes":
+		logicalName = "config.yaml"
 	default:
 		return false
 	}
 	backupName := strings.NewReplacer("/", "_", `\`, "_", ":", "_", " ", "_").Replace(logicalName)
-	return pathExists(filepath.Join(dataRoot, "connector_backups", connectorName, backupName+".json"))
+	if pathExists(filepath.Join(dataRoot, "connector_backups", connectorName, backupName+".json")) {
+		return true
+	}
+	return connectorName == "antigravity" &&
+		pathExists(filepath.Join(dataRoot, "connector_backups", connectorName, "config.json"))
 }
 
 func connectorDefaultHomeBesideDataRoot(dataRoot, connectorName string) string {
@@ -271,6 +321,21 @@ func connectorDefaultHomeBesideDataRoot(dataRoot, connectorName string) string {
 		directory = ".codex"
 	case "claudecode":
 		directory = ".claude"
+	case "copilot":
+		directory = ".copilot"
+	case "cursor":
+		directory = ".cursor"
+	case "antigravity":
+		return filepath.Join(filepath.Dir(cleanDataRoot), ".gemini", "config")
+	case "opencode":
+		directory = filepath.Join(".config", "opencode")
+	case "omnigent":
+		directory = ".omnigent"
+	case "hermes":
+		// Native Hermes defaults to LocalAppData, which is not derivable from
+		// DataRoot's profile sibling. Only transaction/install-state/backup
+		// bindings may authorize cleanup.
+		return ""
 	default:
 		return ""
 	}
@@ -280,25 +345,86 @@ func connectorDefaultHomeBesideDataRoot(dataRoot, connectorName string) string {
 func connectorLifecycleEnvForHome(transaction setupTransaction, connectorName, configHome string) []string {
 	codexHome := transaction.PreviousCodexHome
 	claudeHome := transaction.PreviousClaudeConfigDir
+	copilotHome := transaction.PreviousCopilotHome
+	cursorHome := transaction.PreviousCursorHome
+	windsurfHome := transaction.PreviousWindsurfUserHome
+	antigravityHome := transaction.PreviousAntigravityConfigDir
+	openCodeHome := transaction.PreviousOpenCodeConfigDir
+	omnigentHome := transaction.PreviousOmnigentConfigHome
+	hermesHome := transaction.PreviousHermesHome
 	if connectorName == "codex" {
 		codexHome = configHome
 	} else if connectorName == "claudecode" {
 		claudeHome = configHome
+	} else if connectorName == "copilot" {
+		copilotHome = configHome
+	} else if connectorName == "cursor" {
+		cursorHome = configHome
+	} else if connectorName == "windsurf" {
+		windsurfHome = configHome
+	} else if connectorName == "antigravity" {
+		antigravityHome = configHome
+	} else if connectorName == "opencode" {
+		openCodeHome = configHome
+	} else if connectorName == "omnigent" {
+		omnigentHome = configHome
+	} else if connectorName == "hermes" {
+		hermesHome = configHome
 	}
-	return transactionChildEnvForHomes(transaction, codexHome, claudeHome)
+	return transactionChildEnvForConnectorHomes(
+		transaction, codexHome, claudeHome, copilotHome, cursorHome, windsurfHome, antigravityHome, openCodeHome, omnigentHome, hermesHome,
+	)
 }
 
 func reconcilePreservedConnectors(
 	transaction setupTransaction,
 	gatewayPath string,
-	childEnv []string,
+	previousChildEnv []string,
+	currentChildEnv []string,
 	run connectorLifecycleRunner,
 ) connectorReconciliationRecorder {
 	reconciliation := connectorReconciliationRecorder{}
 	for _, connectorName := range transaction.PreviousConnectors {
-		configHome := connectorConfigHome(transaction, connectorName, true)
-		reconciliation.run(transaction.ID, connectorName, configHome, "reconcile", func() error {
-			return run(gatewayPath, transaction.DataRoot, connectorName, "reconcile", childEnv)
+		previousHome := connectorConfigHome(transaction, connectorName, true)
+		currentHome := connectorConfigHome(transaction, connectorName, false)
+		if !samePath(previousHome, currentHome) {
+			if !reconciliation.run(
+				transaction.ID,
+				connectorName,
+				previousHome,
+				"teardown",
+				func() error {
+					return run(
+						gatewayPath,
+						transaction.DataRoot,
+						connectorName,
+						"teardown",
+						previousChildEnv,
+					)
+				},
+			) {
+				continue
+			}
+			if !reconciliation.run(
+				transaction.ID,
+				connectorName,
+				previousHome,
+				"verify",
+				func() error {
+					return run(
+						gatewayPath,
+						transaction.DataRoot,
+						connectorName,
+						"verify",
+						previousChildEnv,
+					)
+				},
+			) {
+				continue
+			}
+		}
+		reconciliation.run(transaction.ID, connectorName, currentHome, "reconcile", func() error {
+			return run(gatewayPath, transaction.DataRoot, connectorName, "reconcile", currentChildEnv)
 		})
 	}
 	return reconciliation
@@ -465,7 +591,7 @@ func validateConnectorReconciliationState(state *connectorReconciliationState) e
 }
 
 func validateConnectorReconciliationIdentity(connectorName, configHome string) error {
-	if connectorName != "codex" && connectorName != "claudecode" {
+	if connectorName == "none" || !validConnector(connectorName) {
 		return fmt.Errorf("invalid connector reconciliation target %q", connectorName)
 	}
 	if configHome == "" || !filepath.IsAbs(configHome) || filepath.Clean(configHome) != configHome {
@@ -528,6 +654,41 @@ func connectorConfigHome(transaction setupTransaction, connectorName string, pre
 			return transaction.PreviousClaudeConfigDir
 		}
 		return transaction.ClaudeConfigDir
+	case "copilot":
+		if previous {
+			return transaction.PreviousCopilotHome
+		}
+		return transaction.CopilotHome
+	case "cursor":
+		if previous {
+			return transaction.PreviousCursorHome
+		}
+		return transaction.CursorHome
+	case "windsurf":
+		if previous {
+			return transaction.PreviousWindsurfUserHome
+		}
+		return transaction.WindsurfUserHome
+	case "antigravity":
+		if previous {
+			return transaction.PreviousAntigravityConfigDir
+		}
+		return transaction.AntigravityConfigDir
+	case "opencode":
+		if previous {
+			return transaction.PreviousOpenCodeConfigDir
+		}
+		return transaction.OpenCodeConfigDir
+	case "omnigent":
+		if previous {
+			return transaction.PreviousOmnigentConfigHome
+		}
+		return transaction.OmnigentConfigHome
+	case "hermes":
+		if previous {
+			return transaction.PreviousHermesHome
+		}
+		return transaction.HermesHome
 	default:
 		return ""
 	}

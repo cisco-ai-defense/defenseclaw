@@ -499,6 +499,64 @@ func TestOwnedHookNeedles_WindowsSurvivesConfigEscaping(t *testing.T) {
 	}
 }
 
+func TestEventBoundOwnedHookNeedlesMatchRegisteredCommands(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		connector *hookOnlyConnector
+	}{
+		{
+			name:      "copilot",
+			connector: NewCopilotConnector(),
+		},
+		{
+			name:      "antigravity",
+			connector: NewAntigravityConnector(),
+		},
+	} {
+		for _, goos := range []string{"linux", "windows"} {
+			t.Run(tc.name+"/"+goos, func(t *testing.T) {
+				root := t.TempDir()
+				opts := SetupOpts{DataDir: filepath.Join(root, "defenseclaw")}
+				hookScript := filepath.Join(opts.DataDir, "hooks", tc.connector.scriptName)
+				path := filepath.Join(root, "hooks.json")
+				hooks := make(map[string]interface{})
+				if tc.name == "copilot" {
+					for _, event := range copilotCurrentHookEvents {
+						key := "bash"
+						if goos == "windows" {
+							key = "powershell"
+						}
+						hooks[event] = []interface{}{map[string]interface{}{
+							key: copilotHookInvocationCommandForEvent(goos, event, hookScript),
+						}}
+					}
+				} else {
+					for _, event := range antigravityLifecycleEvents {
+						hooks[event] = map[string]interface{}{
+							"command": antigravityHookInvocationCommandForEvent(goos, event, hookScript),
+						}
+					}
+				}
+				data, err := json.Marshal(map[string]interface{}{"hooks": hooks})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				needles := ownedHookCommandNeedlesFor(goos, opts, tc.connector)
+				present, err := configFileReferencesHook(path, needles)
+				if err != nil {
+					t.Fatalf("configFileReferencesHook: %v", err)
+				}
+				if !present {
+					t.Fatalf("event-bound %s config did not match owned needles: %v", tc.name, needles)
+				}
+			})
+		}
+	}
+}
+
 func TestConfigFileReferencesHookIgnoresDecoyPathOutsideCommandField(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "hooks.json")
 	needle := "/home/alice/.defenseclaw/hooks/cursor-hook.sh"
@@ -544,6 +602,48 @@ func TestConfigFileReferencesHookAcceptsManagedCommandField(t *testing.T) {
 	}
 	if !present {
 		t.Fatal("managed command field was not detected")
+	}
+}
+
+func TestConfigFileReferencesCopilotPowerShellRequiresCanonicalCommand(t *testing.T) {
+	const hookBinary = `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`
+	setHookBinaryOverride(t, hookBinary)
+	needle := nativeHookFlag + "copilot"
+	path := filepath.Join(t.TempDir(), "defenseclaw.json")
+	write := func(command string) {
+		t.Helper()
+		data, err := json.Marshal(map[string]interface{}{
+			"version": 1,
+			"hooks": map[string]interface{}{
+				"preToolUse": []interface{}{
+					map[string]interface{}{"type": "command", "powershell": command, "timeoutSec": 30},
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("marshal config: %v", err)
+		}
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+	}
+
+	write(windowsCopilotPowerShellHookCommandForBinary(hookBinary))
+	present, err := configFileReferencesHook(path, []string{needle})
+	if err != nil {
+		t.Fatalf("canonical configFileReferencesHook: %v", err)
+	}
+	if !present {
+		t.Fatal("canonical Copilot powershell hook was not detected")
+	}
+
+	write(legacyWindowsCopilotDoubleCallOperatorHookCommandForBinary(hookBinary))
+	present, err = configFileReferencesHook(path, []string{needle})
+	if err != nil {
+		t.Fatalf("legacy configFileReferencesHook: %v", err)
+	}
+	if present {
+		t.Fatal("broken legacy Copilot hook was considered healthy instead of requiring repair")
 	}
 }
 

@@ -59,6 +59,76 @@ def _pin_home(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
 
 
+def _pin_claude_home(monkeypatch, tmp_path: Path) -> None:
+    """Bind Claude's platform home without activating its optional override."""
+
+    _pin_home(monkeypatch, tmp_path)
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+
+
+def test_windsurf_windows_version_reads_trusted_desktop_metadata_without_launch(monkeypatch) -> None:
+    calls: list[tuple[str, bool]] = []
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: True)
+    monkeypatch.setattr(
+        ad,
+        "_windows_file_version_for_binary",
+        lambda path, **kwargs: (
+            calls.append((path, kwargs["require_trusted_binary_paths"])) or "3.6.22",
+            "",
+        ),
+    )
+    monkeypatch.setattr(
+        ad,
+        "_version_for_binary",
+        lambda *_args, **_kwargs: pytest.fail("GUI version discovery must not launch Devin Desktop"),
+    )
+
+    result = ad._version_for_agent_binary(
+        "windsurf",
+        r"C:\Users\tester\AppData\Local\Programs\Devin\Devin.exe",
+        ("--version",),
+        require_trusted_binary_paths=False,
+    )
+
+    assert result == ("3.6.22", "")
+    assert calls == [
+        (r"C:\Users\tester\AppData\Local\Programs\Devin\Devin.exe", True),
+    ]
+
+
+def test_omnigent_version_probe_uses_bounded_slow_start_timeout(monkeypatch) -> None:
+    invocation: dict[str, object] = {}
+
+    def run(command, **kwargs):
+        invocation["command"] = command
+        invocation.update(kwargs)
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=b"omnigent 0.7.0 (built 2026-07-27T22:01:50Z)\r\n",
+            stderr=b"",
+        )
+
+    monkeypatch.setattr(ad.subprocess, "run", run)
+
+    version, error = ad._version_for_agent_binary(
+        "omnigent",
+        r"C:\Users\tester\.local\bin\omnigent.exe",
+        ("--version",),
+        require_trusted_binary_paths=False,
+    )
+
+    assert (version, error) == ("omnigent 0.7.0 (built 2026-07-27T22:01:50Z)", "")
+    assert invocation["command"] == [
+        r"C:\Users\tester\.local\bin\omnigent.exe",
+        "--version",
+    ]
+    assert invocation["shell"] is False
+    assert invocation["timeout"] == 8.0
+    assert invocation["capture_output"] is True
+    assert invocation["text"] is False
+
+
 @pytest.fixture
 def windows_host_no_path(monkeypatch) -> None:
     monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
@@ -209,6 +279,46 @@ def test_empty_connector_home_does_not_detect_opencode(monkeypatch, tmp_path):
     assert signal.binary_path == ""
 
 
+def test_opencode_discovery_honors_custom_config_dir(monkeypatch, tmp_path):
+    _pin_home(monkeypatch, tmp_path / "ambient-home")
+    monkeypatch.chdir(tmp_path)
+    custom = tmp_path / "custom-opencode"
+    plugin = custom / "plugins" / "defenseclaw.js"
+    plugin.parent.mkdir(parents=True)
+    plugin.write_text("// defenseclaw-managed-plugin v6\n", encoding="utf-8")
+    monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(custom))
+    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+
+    signal = ad._scan_agent("opencode")
+
+    # Config evidence alone does not manufacture a verified installation;
+    # discovery schema v3 keeps those states separate.
+    assert signal.installed is False
+    assert signal.configured is True
+    assert signal.config_path == str(plugin)
+
+
+@pytest.mark.parametrize("filename", ["opencode.json", "opencode.jsonc", "tui.json", "tui.jsonc"])
+def test_opencode_discovery_honors_config_files_in_custom_dir(
+    monkeypatch,
+    tmp_path,
+    filename,
+):
+    _pin_home(monkeypatch, tmp_path / "ambient-home")
+    monkeypatch.chdir(tmp_path)
+    custom = tmp_path / "custom-opencode"
+    config = custom / filename
+    config.parent.mkdir(parents=True)
+    config.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(custom))
+    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+
+    signal = ad._scan_agent("opencode")
+
+    assert signal.configured is True
+    assert signal.config_path == str(config)
+
+
 def test_config_evidence_helper_rejects_directories(tmp_path):
     directory = tmp_path / "config-parent"
     directory.mkdir()
@@ -283,6 +393,25 @@ def test_empty_home_has_no_config_only_false_positives(monkeypatch, tmp_path):
     assert {name for name, signal in signals.items() if signal.installed} == set()
 
 
+def test_windsurf_discovery_uses_bound_profile_not_ambient(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    bound = tmp_path / "bound-profile"
+    ambient = tmp_path / "ambient-profile"
+    hooks = bound / ".codeium" / "windsurf" / "hooks.json"
+    hooks.parent.mkdir(parents=True)
+    hooks.write_text("{}\n", encoding="utf-8")
+    _pin_home(monkeypatch, ambient)
+    monkeypatch.setenv("WINDSURF_USER_HOME", str(bound))
+    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+
+    signal = ad._scan_agent("windsurf")
+
+    assert signal.configured is True
+    assert signal.config_path == str(hooks)
+    assert str(ambient) not in signal.config_path
+
+
 @pytest.mark.parametrize(
     ("connector", "relative_config"),
     [
@@ -350,6 +479,76 @@ def test_codex_and_claude_discovery_honor_client_config_homes(
 
     assert signal.configured is True
     assert signal.config_path == str(config)
+
+
+def test_claude_discovery_does_not_count_mcp_only_state_as_generic_config(
+    monkeypatch,
+    tmp_path,
+):
+    home = tmp_path / "default-home"
+    _pin_claude_home(monkeypatch, home)
+    state = home / ".claude.json"
+    state.parent.mkdir(parents=True, exist_ok=True)
+    state.write_text('{"mcpServers": {}}\n', encoding="utf-8")
+    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+
+    signal = ad._scan_agent("claudecode")
+
+    assert signal.configured is False
+    assert signal.config_path == ""
+
+
+def test_claude_discovery_finds_project_settings_without_user_settings(
+    monkeypatch,
+    tmp_path,
+):
+    _pin_claude_home(monkeypatch, tmp_path / "default-home")
+    project_settings = tmp_path / ".claude" / "settings.json"
+    project_settings.parent.mkdir(parents=True)
+    project_settings.write_text("{}\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+
+    signal = ad._scan_agent("claudecode")
+
+    assert signal.configured is True
+    assert signal.config_path == str(project_settings)
+
+
+def test_claude_discovery_prefers_local_over_project_and_user_settings(
+    monkeypatch,
+    tmp_path,
+):
+    home = tmp_path / "default-home"
+    _pin_claude_home(monkeypatch, home)
+    user_settings = home / ".claude" / "settings.json"
+    project_settings = tmp_path / ".claude" / "settings.json"
+    local_settings = tmp_path / ".claude" / "settings.local.json"
+    for settings in (user_settings, project_settings, local_settings):
+        settings.parent.mkdir(parents=True, exist_ok=True)
+        settings.write_text("{}\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+
+    signal = ad._scan_agent("claudecode")
+
+    assert signal.configured is True
+    assert signal.config_path == str(local_settings)
+
+
+def test_claude_discovery_falls_back_to_user_settings(monkeypatch, tmp_path):
+    home = tmp_path / "default-home"
+    _pin_claude_home(monkeypatch, home)
+    user_settings = home / ".claude" / "settings.json"
+    user_settings.parent.mkdir(parents=True)
+    user_settings.write_text("{}\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+
+    signal = ad._scan_agent("claudecode")
+
+    assert signal.configured is True
+    assert signal.config_path == str(user_settings)
 
 
 def test_hermes_legacy_windows_config_is_not_current_configuration_evidence(
@@ -432,6 +631,26 @@ def test_antigravity_windows_cli_fallback_is_detected(
     assert signal.binary_path == str(agy)
     assert signal.config_path == ""
     assert signal.version == "1.0.13"
+
+
+def test_antigravity_config_evidence_ignores_undocumented_home_overrides(monkeypatch, tmp_path):
+    _pin_home(monkeypatch, tmp_path)
+    configured = tmp_path / "custom-antigravity"
+    decoy = configured / "hooks.json"
+    decoy.parent.mkdir(parents=True)
+    decoy.write_text("{}\n", encoding="utf-8")
+    hooks = tmp_path / ".gemini" / "config" / "hooks.json"
+    hooks.parent.mkdir(parents=True)
+    hooks.write_text("{}\n", encoding="utf-8")
+    monkeypatch.setenv("ANTIGRAVITY_CONFIG_DIR", str(configured))
+    monkeypatch.setenv("GEMINI_CONFIG_DIR", str(configured / "gemini"))
+    monkeypatch.setattr(ad, "_binary_candidates_for_agent", lambda *_args, **_kwargs: ())
+
+    signal = ad._scan_agent("antigravity")
+
+    assert signal.installed is False
+    assert signal.configured is True
+    assert signal.config_path == str(hooks)
 
 
 def test_antigravity_gui_fallback_reads_metadata_without_launch(
@@ -991,6 +1210,18 @@ def test_hermes_windows_venv_is_a_narrow_trusted_prefix(monkeypatch, tmp_path):
     assert ad._path_key(str(local_app_data)) not in prefixes
 
 
+def test_windsurf_windows_desktop_uses_narrow_product_trust_roots(monkeypatch, tmp_path):
+    local_app_data = tmp_path / "local-app-data"
+    monkeypatch.setenv("LOCALAPPDATA", str(local_app_data))
+
+    prefixes = {ad._path_key(path) for path in ad._windows_default_trusted_bin_prefixes()}
+
+    assert ad._path_key(str(local_app_data / "Programs" / "Devin")) in prefixes
+    assert ad._path_key(str(local_app_data / "Programs" / "Windsurf")) in prefixes
+    assert ad._path_key(str(local_app_data / "Programs")) not in prefixes
+    assert ad._path_key(str(local_app_data)) not in prefixes
+
+
 @pytest.mark.parametrize(
     ("connector", "relative_binary"),
     [
@@ -1040,6 +1271,112 @@ def test_windows_discovery_finds_known_binary_outside_path(
     resolved = ad._binary_path_for_agent(connector, ad._SPECS[connector])
 
     assert ad._path_key(resolved) == ad._path_key(str(binary))
+
+
+def test_windsurf_windows_discovery_finds_devin_desktop_without_optional_launcher(
+    monkeypatch,
+    tmp_path,
+    windows_host_no_path,
+):
+    local = tmp_path / "local-app-data"
+    binary = local / "Programs" / "Devin" / "Devin.exe"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"test executable")
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+    monkeypatch.delenv("ProgramFiles", raising=False)
+    monkeypatch.delenv("ProgramFiles(x86)", raising=False)
+
+    candidates = ad._binary_candidates_for_agent("windsurf", ad._SPECS["windsurf"])
+
+    assert tuple(map(ad._path_key, candidates)) == (ad._path_key(str(binary)),)
+
+
+def test_windsurf_windows_discovery_finds_devin_executable_in_documented_product_root(
+    monkeypatch,
+    tmp_path,
+    windows_host_no_path,
+):
+    local = tmp_path / "local-app-data"
+    binary = local / "Programs" / "Windsurf" / "Devin.exe"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"test executable")
+    monkeypatch.setenv("LOCALAPPDATA", str(local))
+    monkeypatch.delenv("ProgramFiles", raising=False)
+    monkeypatch.delenv("ProgramFiles(x86)", raising=False)
+
+    candidates = ad._binary_candidates_for_agent("windsurf", ad._SPECS["windsurf"])
+
+    assert tuple(map(ad._path_key, candidates)) == (ad._path_key(str(binary)),)
+
+
+def test_cursor_discovery_prefers_primary_agent_entrypoint(monkeypatch, tmp_path):
+    primary = tmp_path / "agent.exe"
+    compatibility = tmp_path / "cursor-agent.exe"
+    desktop = tmp_path / "cursor.cmd"
+    for path in (primary, compatibility, desktop):
+        path.write_bytes(b"test executable")
+
+    candidates = {
+        "agent": str(primary),
+        "cursor-agent": str(compatibility),
+        "cursor": str(desktop),
+    }
+    monkeypatch.setattr(ad, "_which", lambda name: candidates.get(name, ""))
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: False)
+
+    resolved = ad._binary_candidates_for_agent("cursor", ad._SPECS["cursor"])
+
+    assert tuple(map(ad._path_key, resolved)) == tuple(
+        map(ad._path_key, (str(primary), str(compatibility), str(desktop)))
+    )
+
+
+def test_cursor_windows_discovery_uses_official_token_bound_agent_root(
+    monkeypatch,
+    tmp_path,
+    windows_host_no_path,
+):
+    known_local_app_data = tmp_path / "token-local-app-data"
+    redirected_local_app_data = tmp_path / "redirected-local-app-data"
+    primary = known_local_app_data / "cursor-agent" / "agent.exe"
+    primary.parent.mkdir(parents=True)
+    primary.write_bytes(b"native Cursor agent")
+    monkeypatch.setenv("LOCALAPPDATA", str(redirected_local_app_data))
+    monkeypatch.setattr(
+        ad,
+        "_windows_current_user_known_folder",
+        lambda identifier: (
+            str(known_local_app_data)
+            if identifier == "F1B32785-6FBA-4FCF-9D55-7B8E7F157091"
+            else ""
+        ),
+    )
+
+    candidates = ad._binary_candidates_for_agent("cursor", ad._SPECS["cursor"])
+    trusted = {ad._path_key(path) for path in ad._windows_default_trusted_bin_prefixes()}
+    official_root = known_local_app_data / "cursor-agent"
+
+    assert ad._path_key(str(primary)) in {ad._path_key(path) for path in candidates}
+    assert ad._path_key(str(official_root)) in trusted
+    assert ad._path_key(str(known_local_app_data)) not in trusted
+    assert ad._path_key(str(redirected_local_app_data / "cursor-agent" / "agent.exe")) not in {
+        ad._path_key(path) for path in candidates
+    }
+    monkeypatch.setattr(
+        ad,
+        "_version_for_agent_binary",
+        lambda name, path, _args, **_kwargs: (
+            ("2026.07.23-e383d2b", "")
+            if name == "cursor" and ad._path_key(path) == ad._path_key(str(primary))
+            else ("", "not launchable")
+        ),
+    )
+
+    signal = ad._scan_agent("cursor")
+
+    assert signal.installed is True
+    assert signal.binary_path == str(primary)
+    assert signal.version == "2026.07.23-e383d2b"
 
 
 def test_timeout_sets_error_and_does_not_mark_binary_only_install(monkeypatch, tmp_path):

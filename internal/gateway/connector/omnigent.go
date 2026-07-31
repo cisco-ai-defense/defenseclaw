@@ -12,7 +12,6 @@ package connector
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
@@ -21,9 +20,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/processutil"
 	"gopkg.in/yaml.v3"
 )
 
@@ -38,6 +40,8 @@ const (
 var (
 	OmnigentConfigPathOverride       string
 	OmnigentSitePackagesPathOverride string
+	omnigentProcessProbeTimeout      = 15 * time.Second
+	omnigentLifecycleMu              sync.Mutex
 )
 
 // OmnigentConnector integrates through OmniGent's documented custom Python
@@ -77,12 +81,16 @@ func (c *OmnigentConnector) HookProfile(opts SetupOpts) HookProfile {
 }
 
 func omnigentNativeOTLPSpec(opts SetupOpts) *NativeOTLPSpec {
+	otlpToken := strings.TrimSpace(opts.OTLPPathToken)
+	if otlpToken == "" && opts.DataDir != "" {
+		otlpToken, _ = LoadOTLPPathToken(opts.DataDir, OTLPScopeOmnigent)
+	}
 	headers := map[string]string{
 		"x-defenseclaw-source": "omnigent",
 		"x-defenseclaw-client": "omnigent-otel/1.0",
 	}
-	if opts.APIToken != "" {
-		headers["x-defenseclaw-token"] = opts.APIToken
+	if otlpToken != "" {
+		headers["authorization"] = "Bearer " + otlpToken
 	}
 	return &NativeOTLPSpec{
 		Kind:               NativeOTLPEnvBlock,
@@ -126,25 +134,67 @@ func (c *OmnigentConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 			Env: []EnvRequirement{
 				{Name: "OTEL_EXPORTER_OTLP_ENDPOINT", Scope: EnvScopeProcess, Required: false, Description: "Point OmniGent native OTLP at the DefenseClaw gateway."},
 				{Name: "OTEL_EXPORTER_OTLP_PROTOCOL", Scope: EnvScopeProcess, Required: false, Description: "Set to http/protobuf for DefenseClaw OTLP ingestion."},
-				{Name: "OTEL_EXPORTER_OTLP_HEADERS", Scope: EnvScopeProcess, Required: false, Description: "Carry x-defenseclaw-token, x-defenseclaw-source, and x-defenseclaw-client headers for native OTLP authentication and attribution."},
+				{Name: "OTEL_EXPORTER_OTLP_HEADERS", Scope: EnvScopeProcess, Required: false, Description: "Carry the connector-scoped Authorization bearer plus x-defenseclaw-source and x-defenseclaw-client headers for native OTLP authentication and attribution."},
 				{Name: "OTEL_LOGS_EXPORTER", Scope: EnvScopeProcess, Required: false, Description: "Set to otlp to enable OmniGent native log export."},
 				{Name: "OTEL_METRICS_EXPORTER", Scope: EnvScopeProcess, Required: false, Description: "Set to otlp to enable OmniGent native metric export."},
-				{Name: "OTEL_TRACES_EXPORTER", Scope: EnvScopeProcess, Required: false, Description: "Set to otlp to enable native traces when OmniGent is installed with its tracing extra."},
+				{Name: "OTEL_TRACES_EXPORTER", Scope: EnvScopeProcess, Required: false, Description: "Set to otlp to enable native traces."},
 			},
 			AuthMode:         "header-token",
 			EndpointTemplate: "http://" + strings.TrimSpace(opts.APIAddr),
 			SourceModes:      []string{"native", "hook"},
 			Notes: []string{
 				"Custom policy evaluations synthesize hook logs, metrics, and traces.",
-				"OmniGent exports native logs and metrics with its standard OpenTelemetry dependencies; native traces require OmniGent's optional tracing extra.",
+				"OmniGent's base/default dependency set includes the OpenTelemetry packages used for native logs, metrics, and traces.",
 				"Native OTLP is inactive until the OmniGent launch process exports the required variables; DefenseClaw does not mutate shell startup files.",
 			},
 		},
 	}
 }
 
+func withOmnigentLifecycleTransaction(opts SetupOpts, fn func() error) error {
+	if strings.TrimSpace(opts.DataDir) == "" {
+		return errors.New("omnigent lifecycle transaction: empty data dir")
+	}
+	if err := os.MkdirAll(opts.DataDir, 0o700); err != nil {
+		return fmt.Errorf("omnigent lifecycle transaction: create lock dir: %w", err)
+	}
+	omnigentLifecycleMu.Lock()
+	defer omnigentLifecycleMu.Unlock()
+	return withOwnedFileLock(filepath.Join(opts.DataDir, ".omnigent-lifecycle.lock"), fn)
+}
+
 func (c *OmnigentConnector) Setup(ctx context.Context, opts SetupOpts) error {
-	sitePackages, err := omnigentSitePackages(ctx)
+	return withOmnigentLifecycleTransaction(opts, func() error {
+		return c.setupLocked(ctx, opts)
+	})
+}
+
+func (c *OmnigentConnector) setupLocked(ctx context.Context, opts SetupOpts) (retErr error) {
+	if opts.HookAPITokenScoped {
+		existingHookToken, err := LoadHookAPIToken(opts.DataDir, c.Name())
+		if err != nil {
+			return fmt.Errorf("omnigent inspect scoped hook token inside lifecycle transaction: %w", err)
+		}
+		hookToken, err := EnsureHookAPIToken(opts.DataDir, c.Name())
+		if err != nil {
+			return fmt.Errorf("omnigent refresh scoped hook token inside lifecycle transaction: %w", err)
+		}
+		createdHookToken := existingHookToken == ""
+		previousGatewayToken := c.gatewayToken
+		defer func() {
+			if retErr == nil || !createdHookToken {
+				return
+			}
+			c.gatewayToken = previousGatewayToken
+			if err := RemoveHookAPIToken(opts.DataDir, c.Name()); err != nil {
+				retErr = errors.Join(retErr, fmt.Errorf("omnigent revoke scoped hook token after failed setup: %w", err))
+			}
+		}()
+		opts.APIToken = hookToken
+		opts.HookAPIToken = hookToken
+		c.gatewayToken = hookToken
+	}
+	sitePackages, err := omnigentSitePackages(ctx, opts)
 	if err != nil {
 		return err
 	}
@@ -187,6 +237,24 @@ func (c *OmnigentConnector) Setup(ctx context.Context, opts SetupOpts) error {
 		}
 		return errors.Join(rollbackErrs...)
 	}
+	existingOTLPToken, err := LoadOTLPPathToken(opts.DataDir, OTLPScopeOmnigent)
+	if err != nil {
+		return rollback(fmt.Errorf("omnigent inspect scoped OTLP token: %w", err))
+	}
+	otlpToken, err := resolveSetupOTLPPathToken(opts.DataDir, OTLPScopeOmnigent, opts.OTLPPathToken)
+	if err != nil {
+		return rollback(fmt.Errorf("omnigent scoped OTLP token: %w", err))
+	}
+	if existingOTLPToken == "" {
+		previousRollback := rollback
+		rollback = func(cause error) error {
+			if err := RemoveOTLPPathToken(opts.DataDir, OTLPScopeOmnigent); err != nil {
+				cause = errors.Join(cause, fmt.Errorf("omnigent revoke scoped OTLP token after failed setup: %w", err))
+			}
+			return previousRollback(cause)
+		}
+	}
+	opts.OTLPPathToken = otlpToken
 	for _, managed := range managedPaths {
 		logical, path := managed.logical, managed.path
 		if err := prepareOmnigentManagedBackup(opts.DataDir, c.Name(), logical, path); err != nil {
@@ -293,6 +361,12 @@ func restoreOmnigentFileSnapshot(snapshot omnigentFileSnapshot) error {
 }
 
 func (c *OmnigentConnector) Teardown(ctx context.Context, opts SetupOpts) error {
+	return withOmnigentLifecycleTransaction(opts, func() error {
+		return c.teardownLocked(ctx, opts)
+	})
+}
+
+func (c *OmnigentConnector) teardownLocked(ctx context.Context, opts SetupOpts) error {
 	paths := map[string]string{
 		"config": managedFileBackupTargetPath(opts.DataDir, c.Name(), "config", omnigentConfigPath()),
 		"module": managedFileBackupTargetPath(opts.DataDir, c.Name(), "module", omnigentPolicyModulePath(opts)),
@@ -300,7 +374,7 @@ func (c *OmnigentConnector) Teardown(ctx context.Context, opts SetupOpts) error 
 	}
 	currentConfigPath := omnigentConfigPath()
 	currentPthPath := ""
-	if sitePackages, err := omnigentSitePackages(ctx); err == nil {
+	if sitePackages, err := omnigentSitePackages(ctx, opts); err == nil {
 		currentPthPath = filepath.Join(sitePackages, "defenseclaw_omnigent.pth")
 	}
 	var errs []error
@@ -337,7 +411,19 @@ func (c *OmnigentConnector) Teardown(ctx context.Context, opts SetupOpts) error 
 			}
 		}
 	}
-	return errors.Join(errs...)
+	if err := errors.Join(errs...); err != nil {
+		return err
+	}
+	if err := c.VerifyClean(opts); err != nil {
+		return err
+	}
+	if err := RemoveOTLPPathToken(opts.DataDir, OTLPScopeOmnigent); err != nil {
+		return fmt.Errorf("omnigent revoke scoped OTLP token: %w", err)
+	}
+	if err := RemoveHookAPIToken(opts.DataDir, c.Name()); err != nil {
+		return fmt.Errorf("omnigent revoke scoped hook token: %w", err)
+	}
+	return nil
 }
 
 func (c *OmnigentConnector) VerifyClean(opts SetupOpts) error {
@@ -387,6 +473,10 @@ func (c *OmnigentConnector) AgentPaths(opts SetupOpts) AgentPaths {
 			managedFileBackupPath(opts.DataDir, c.Name(), "module"),
 			managedFileBackupPath(opts.DataDir, c.Name(), "pth"),
 		},
+		GeneratedFiles: []string{
+			filepath.Join(opts.DataDir, "hooks", otlpPathTokenFileName(OTLPScopeOmnigent)),
+			filepath.Join(opts.DataDir, "hooks", ".hook-omnigent.token"),
+		},
 	}
 	if pthPath != "" {
 		paths.PatchedFiles = append(paths.PatchedFiles, pthPath)
@@ -432,46 +522,47 @@ func omnigentConfigPath() string {
 	return homePath(".omnigent", "config.yaml")
 }
 
-func omnigentSitePackages(ctx context.Context) (string, error) {
+func omnigentSitePackages(ctx context.Context, opts SetupOpts) (string, error) {
 	if OmnigentSitePackagesPathOverride != "" {
 		return OmnigentSitePackagesPathOverride, nil
 	}
-	var executable string
-	for _, name := range []string{"omnigent", "omni"} {
-		if path, err := exec.LookPath(name); err == nil {
-			executable = path
-			break
-		}
-	}
-	if executable == "" {
-		return "", fmt.Errorf("omnigent connector: neither 'omnigent' nor 'omni' is on PATH")
+	executable, err := resolveOmnigentExecutable(opts)
+	if err != nil {
+		return "", err
 	}
 	pythonPath := ""
-	for _, name := range []string{"python", "python3", "python.exe", "python3.exe"} {
-		candidate := filepath.Join(filepath.Dir(executable), name)
-		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-			pythonPath = candidate
-			break
+	if runtime.GOOS == "windows" {
+		pythonPath, err = resolveOmnigentUVToolPython(ctx, executable)
+		if err != nil {
+			return "", err
 		}
-	}
-	if pythonPath == "" {
-		file, openErr := os.Open(executable)
-		if openErr == nil {
-			line, _ := bufio.NewReader(file).ReadString('\n')
-			_ = file.Close()
-			if strings.HasPrefix(line, "#!") {
-				fields := strings.Fields(strings.TrimSpace(strings.TrimPrefix(line, "#!")))
-				switch {
-				case len(fields) == 1:
-					pythonPath = fields[0]
-				case len(fields) == 2 && filepath.Base(fields[0]) == "env":
-					resolved, err := exec.LookPath(fields[1])
-					if err != nil {
-						return "", fmt.Errorf("omnigent connector: resolve Python from env shebang: %w", err)
+	} else {
+		for _, name := range []string{"python", "python3", "python.exe", "python3.exe"} {
+			candidate := filepath.Join(filepath.Dir(executable), name)
+			if info, statErr := os.Stat(candidate); statErr == nil && !info.IsDir() {
+				pythonPath = candidate
+				break
+			}
+		}
+		if pythonPath == "" {
+			file, openErr := os.Open(executable)
+			if openErr == nil {
+				line, _ := bufio.NewReader(file).ReadString('\n')
+				_ = file.Close()
+				if strings.HasPrefix(line, "#!") {
+					fields := strings.Fields(strings.TrimSpace(strings.TrimPrefix(line, "#!")))
+					switch {
+					case len(fields) == 1:
+						pythonPath = fields[0]
+					case len(fields) == 2 && filepath.Base(fields[0]) == "env":
+						resolved, lookErr := exec.LookPath(fields[1])
+						if lookErr != nil {
+							return "", fmt.Errorf("omnigent connector: resolve Python from env shebang: %w", lookErr)
+						}
+						pythonPath = resolved
+					case len(fields) > 0:
+						return "", fmt.Errorf("omnigent connector: unsupported interpreter arguments in shebang for %s", executable)
 					}
-					pythonPath = resolved
-				case len(fields) > 0:
-					return "", fmt.Errorf("omnigent connector: unsupported interpreter arguments in shebang for %s", executable)
 				}
 			}
 		}
@@ -482,31 +573,193 @@ func omnigentSitePackages(ctx context.Context) (string, error) {
 	if err := validateOmnigentInterpreter(pythonPath); err != nil {
 		return "", err
 	}
-	cmd := exec.CommandContext(ctx, pythonPath, "-c", "import sysconfig; print(sysconfig.get_paths()['purelib'])")
-	var stderr bytes.Buffer
-	cmd.Stderr = &stderr
-	output, err := cmd.Output()
+	output, err := omnigentCommandOutput(
+		ctx,
+		pythonPath,
+		"-I",
+		"-c",
+		"import importlib.metadata as m,sysconfig; print(m.version('omnigent')); print(sysconfig.get_paths()['purelib'])",
+	)
 	if err != nil {
-		return "", fmt.Errorf("omnigent connector: resolve Python site-packages with %s: %w (%s)", pythonPath, err, strings.TrimSpace(stderr.String()))
+		return "", fmt.Errorf("omnigent connector: resolve Python site-packages with %s: %w", pythonPath, err)
 	}
-	path := ""
-	lines := strings.Split(strings.ReplaceAll(string(output), "\r\n", "\n"), "\n")
-	for i := len(lines) - 1; i >= 0; i-- {
-		if candidate := strings.TrimSpace(lines[i]); candidate != "" {
-			path = candidate
-			break
-		}
+	lines := omnigentNonEmptyOutputLines(output)
+	if len(lines) < 2 {
+		return "", fmt.Errorf("omnigent connector: Python did not report both package version and site-packages")
 	}
-	if path == "" {
-		return "", fmt.Errorf("omnigent connector: Python returned an empty site-packages path")
+	installedVersion := NormalizeAgentVersion("omnigent", lines[len(lines)-2])
+	if installedVersion == "" {
+		return "", fmt.Errorf("omnigent connector: Python returned invalid OmniGent package version %q", lines[len(lines)-2])
 	}
+	if runtime.GOOS == "windows" && compareVersion(installedVersion, "0.7.0") < 0 {
+		return "", fmt.Errorf("omnigent connector: native Windows degraded mode requires OmniGent 0.7.0 or newer, found %s", installedVersion)
+	}
+	if selectedVersion := NormalizeAgentVersion("omnigent", opts.AgentVersion); selectedVersion != "" && selectedVersion != installedVersion {
+		return "", fmt.Errorf("omnigent connector: selected executable version %s does not match its Python environment version %s", selectedVersion, installedVersion)
+	}
+	path := lines[len(lines)-1]
 	if !filepath.IsAbs(path) {
 		return "", fmt.Errorf("omnigent connector: Python returned a non-absolute site-packages path %q", path)
 	}
 	return filepath.Clean(path), nil
 }
 
+func resolveOmnigentExecutable(opts SetupOpts) (string, error) {
+	selected := strings.TrimSpace(opts.AgentExecutable)
+	if selected != "" {
+		if strings.ContainsAny(selected, "\x00\r\n") || !filepath.IsAbs(selected) {
+			return "", fmt.Errorf("omnigent connector: selected executable is not an absolute clean path: %q", selected)
+		}
+		selected = filepath.Clean(selected)
+		product := strings.TrimSuffix(strings.ToLower(filepath.Base(selected)), strings.ToLower(filepath.Ext(selected)))
+		if product != "omnigent" && product != "omni" {
+			return "", fmt.Errorf("omnigent connector: selected executable has unexpected product name: %s", selected)
+		}
+		if runtime.GOOS == "windows" {
+			return validateOmnigentWindowsExecutable(opts, selected)
+		}
+		return selected, nil
+	}
+	if runtime.GOOS == "windows" {
+		return "", errors.New("omnigent connector: native Windows setup requires a fresh protected setup-selected omnigent.exe; rerun trusted discovery, setup, or repair")
+	}
+	for _, name := range []string{"omnigent", "omni"} {
+		if path, lookErr := exec.LookPath(name); lookErr == nil {
+			return path, nil
+		}
+	}
+	return "", errors.New("omnigent connector: neither 'omnigent' nor 'omni' is on PATH")
+}
+
+func validateOmnigentWindowsExecutable(opts SetupOpts, selected string) (string, error) {
+	if !strings.EqualFold(filepath.Ext(selected), ".exe") {
+		return "", fmt.Errorf("omnigent connector: selected executable is not a native Windows .exe image: %s", selected)
+	}
+	expectedPath := ""
+	expectedDigest := ""
+	expectedVersion := ""
+	if selection, ok := loadSetupAgentSelection(opts.DataDir, "omnigent"); ok {
+		expectedPath, expectedDigest, expectedVersion = selection.Executable, selection.SHA256, selection.RawVersion
+	} else if entry, exists := loadProtectedHookContractEntry(opts.DataDir, "omnigent"); exists {
+		if !validSetupSelectedAgentExecutableEvidence(entry, "omnigent") {
+			return "", errors.New("omnigent connector: protected hook contract has invalid setup-selected executable evidence")
+		}
+		expectedPath, expectedDigest, expectedVersion = entry.AgentExecutable, entry.AgentExecutableSHA256, entry.RawAgentVersion
+	} else {
+		return "", errors.New("omnigent connector: native Windows setup requires protected setup-selected executable evidence")
+	}
+	if !strings.EqualFold(filepath.Clean(expectedPath), selected) {
+		return "", fmt.Errorf("omnigent connector: selected executable does not match protected evidence: %s", selected)
+	}
+	if selectedVersion, evidenceVersion := NormalizeAgentVersion("omnigent", opts.AgentVersion), NormalizeAgentVersion("omnigent", expectedVersion); selectedVersion == "" || selectedVersion != evidenceVersion {
+		return "", errors.New("omnigent connector: selected executable evidence is bound to a different agent version")
+	}
+	if err := validateOmnigentNativeFile(selected, "selected executable"); err != nil {
+		return "", err
+	}
+	stablePath, digest, ok := setupSelectedAgentExecutableEvidence(selected)
+	if !ok || !strings.EqualFold(stablePath, selected) || !strings.EqualFold(digest, expectedDigest) {
+		return "", fmt.Errorf("omnigent connector: selected executable changed or does not match its protected digest: %s", selected)
+	}
+	return selected, nil
+}
+
+func resolveOmnigentUVToolPython(ctx context.Context, selected string) (string, error) {
+	uvPath, err := exec.LookPath("uv")
+	if err != nil {
+		return "", fmt.Errorf("omnigent connector: official native Windows installation requires uv.exe on PATH: %w", err)
+	}
+	uvPath, err = filepath.Abs(filepath.Clean(uvPath))
+	if err != nil {
+		return "", fmt.Errorf("omnigent connector: resolve uv executable path: %w", err)
+	}
+	if err := validateOmnigentNativeFile(uvPath, "uv executable"); err != nil {
+		return "", err
+	}
+	binOutput, err := omnigentCommandOutput(ctx, uvPath, "tool", "dir", "--bin")
+	if err != nil {
+		return "", fmt.Errorf("omnigent connector: query uv tool executable directory: %w", err)
+	}
+	binDir, err := omnigentAbsoluteOutputPath(binOutput)
+	if err != nil {
+		return "", fmt.Errorf("omnigent connector: invalid uv tool executable directory: %w", err)
+	}
+	if !strings.EqualFold(filepath.Clean(filepath.Dir(selected)), binDir) {
+		return "", fmt.Errorf("omnigent connector: selected executable %s is not in uv's active tool executable directory %s", selected, binDir)
+	}
+	toolOutput, err := omnigentCommandOutput(ctx, uvPath, "tool", "dir")
+	if err != nil {
+		return "", fmt.Errorf("omnigent connector: query uv tool environment directory: %w", err)
+	}
+	toolDir, err := omnigentAbsoluteOutputPath(toolOutput)
+	if err != nil {
+		return "", fmt.Errorf("omnigent connector: invalid uv tool environment directory: %w", err)
+	}
+	pythonPath := filepath.Join(toolDir, "omnigent", "Scripts", "python.exe")
+	if err := validateOmnigentNativeFile(pythonPath, "uv tool Python interpreter"); err != nil {
+		return "", err
+	}
+	return pythonPath, nil
+}
+
+func omnigentCommandOutput(ctx context.Context, executable string, args ...string) ([]byte, error) {
+	probeCtx, cancel := context.WithTimeout(ctx, omnigentProcessProbeTimeout)
+	defer cancel()
+	cmd := processutil.CommandContext(probeCtx, executable, args...)
+	output, err := processutil.CombinedOutputTree(cmd, false)
+	if err != nil {
+		if errors.Is(probeCtx.Err(), context.DeadlineExceeded) {
+			return nil, fmt.Errorf("native metadata probe timed out after %s: %w", omnigentProcessProbeTimeout, context.DeadlineExceeded)
+		}
+		return nil, fmt.Errorf("%w (%s)", err, strings.TrimSpace(string(output)))
+	}
+	return output, nil
+}
+
+func omnigentAbsoluteOutputPath(output []byte) (string, error) {
+	lines := omnigentNonEmptyOutputLines(output)
+	if len(lines) != 1 || !filepath.IsAbs(lines[0]) {
+		return "", fmt.Errorf("expected one absolute path, got %q", strings.TrimSpace(string(output)))
+	}
+	return filepath.Clean(lines[0]), nil
+}
+
+func omnigentNonEmptyOutputLines(output []byte) []string {
+	rawLines := strings.Split(strings.ReplaceAll(string(output), "\r\n", "\n"), "\n")
+	lines := make([]string, 0, len(rawLines))
+	for _, line := range rawLines {
+		if line = strings.TrimSpace(line); line != "" {
+			lines = append(lines, line)
+		}
+	}
+	return lines
+}
+
+func validateOmnigentNativeFile(path, purpose string) error {
+	clean := filepath.Clean(path)
+	if strings.ContainsAny(path, "\x00\r\n") || !filepath.IsAbs(path) || clean != path {
+		return fmt.Errorf("omnigent connector: %s is not an absolute clean path: %q", purpose, path)
+	}
+	info, err := os.Lstat(clean)
+	if err != nil {
+		return fmt.Errorf("omnigent connector: inspect %s %s: %w", purpose, clean, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return fmt.Errorf("omnigent connector: %s is not a regular non-link file: %s", purpose, clean)
+	}
+	if err := hookAPIValidateDirectory(filepath.Dir(clean)); err != nil {
+		return fmt.Errorf("omnigent connector: validate %s ancestry: %w", purpose, err)
+	}
+	if err := hookAPIValidateOwner(clean, info); err != nil {
+		return fmt.Errorf("omnigent connector: validate %s owner/ACL: %w", purpose, err)
+	}
+	return nil
+}
+
 func validateOmnigentInterpreter(path string) error {
+	if runtime.GOOS == "windows" {
+		return validateOmnigentNativeFile(filepath.Clean(path), "Python interpreter")
+	}
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		return fmt.Errorf("omnigent connector: resolve Python interpreter %s: %w", path, err)

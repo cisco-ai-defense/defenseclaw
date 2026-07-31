@@ -115,7 +115,7 @@ func windowsCommandText(text, toolName string) (string, windowsShellDialect, boo
 
 	var object map[string]interface{}
 	if json.Unmarshal([]byte(text), &object) == nil {
-		for _, key := range []string{"command", "cmd", "script", "input"} {
+		for _, key := range []string{"command", "CommandLine", "commandLine", "cmd", "script", "input"} {
 			if value, ok := object[key].(string); ok && strings.TrimSpace(value) != "" {
 				return value, dialect, true
 			}

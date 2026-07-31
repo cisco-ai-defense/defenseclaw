@@ -99,10 +99,9 @@ func normalizedGuardrailAction(action string) string {
 //     (we route the confirm via systemMessage instead — Respond handles
 //     that shaping).
 //
-// Codex's CanBlock surface is restricted to {UserPromptSubmit,
-// PreToolUse, PermissionRequest, PostToolUse, Stop} via
-// HookCapabilities; the in.Caps.BlockEvents check protects against
-// us telling codex to block on an event it cannot honor.
+// Codex's CanBlock surface is restricted by the resolved versioned
+// HookCapabilities. The in.Caps.BlockEvents check protects against emitting a
+// control shape on unsupported tiers or on advisory SessionEnd.
 func codexProfileMapVerdict(in HookVerdictInput) HookVerdictOutput {
 	raw := normalizedGuardrailAction(in.RawAction)
 	if raw == "" {
@@ -152,6 +151,11 @@ func codexProfileRespond(in HookRespondInput) HookRespondOutput {
 // any divergence breaks the PR-5 parity tests and ships a silent
 // behavior regression for codex operators.
 func codexOutputForProfile(event, action, rawAction, reason, additional string) map[string]interface{} {
+	if event == "SessionEnd" {
+		// SessionEnd is advisory. Official Codex behavior ignores output, so do
+		// not emit a block/ask-looking shape even if an upstream verdict drifts.
+		return nil
+	}
 	if action == "block" {
 		switch event {
 		case "PreToolUse":
@@ -172,7 +176,12 @@ func codexOutputForProfile(event, action, rawAction, reason, additional string) 
 					},
 				},
 			}
-		case "UserPromptSubmit", "PostToolUse", "Stop":
+		case "SessionStart", "PreCompact", "PostCompact":
+			return map[string]interface{}{
+				"continue":   false,
+				"stopReason": codexReasonOrDefault(reason),
+			}
+		case "UserPromptSubmit", "PostToolUse", "SubagentStop", "Stop":
 			out := map[string]interface{}{
 				"decision": "block",
 				"reason":   codexReasonOrDefault(reason),

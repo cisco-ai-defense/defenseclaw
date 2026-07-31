@@ -8,9 +8,11 @@
 // .env-protection example — when the gateway returns a block decision.
 //
 // The gateway address, bearer token, and fail mode are substituted in at
-// setup time. The file is written 0o600 (owner-only) because it carries
-// the gateway token; it is never executable. DefenseClaw's Teardown
-// removes this file (managed-file backup heal).
+// setup time. The file carries the gateway token, so Unix uses mode 0600
+// and Windows publishes a DACL restricted to the user, administrators,
+// and SYSTEM. The owning user/administrators can still modify it; Doctor
+// detects digest drift and Setup reconciles it. The file is never executable.
+// DefenseClaw's Teardown removes it (managed-file backup heal).
 //
 // Wire contract: POST {hook_event_name, tool_name, tool_input, cwd} to
 // /api/v1/opencode/hook; the response carries hook_output={decision,
@@ -23,25 +25,27 @@ const DC_API_TOKEN = "{{.APIToken}}";
 const DC_FAIL_MODE = "{{.FailMode}}"; // "open" or "closed"
 const DC_TIMEOUT_MS = 10000;
 
-async function defenseclawPost(event, toolName, toolInput, cwd, context) {
+async function defenseclawPost(event, toolName, toolInput, cwd, context, toolResult) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DC_TIMEOUT_MS);
   const headers = { "Content-Type": "application/json", "X-DefenseClaw-Client": "opencode-plugin/1.0" };
   if (DC_API_TOKEN) headers["Authorization"] = "Bearer " + DC_API_TOKEN;
   try {
+    const payload = {
+      hook_event_name: event,
+      tool_name: toolName || "",
+      tool_input: toolInput || {},
+      session_id: context && (context.sessionID || context.sessionId) || "",
+      turn_id: context && (context.messageID || context.messageId) || "",
+      tool_call_id: context && (context.callID || context.callId) || "",
+      agent_name: context && context.agent || "",
+      cwd: cwd || "",
+    };
+    if (toolResult !== undefined) payload.tool_result = toolResult;
     const res = await fetch("http://" + DC_API_ADDR + "/api/v1/opencode/hook", {
       method: "POST",
       headers,
-      body: JSON.stringify({
-        hook_event_name: event,
-        tool_name: toolName || "",
-        tool_input: toolInput || {},
-        session_id: context && (context.sessionID || context.sessionId) || "",
-        turn_id: context && (context.messageID || context.messageId) || "",
-        tool_call_id: context && (context.callID || context.callId) || "",
-        agent_name: context && context.agent || "",
-        cwd: cwd || "",
-      }),
+      body: JSON.stringify(payload),
       signal: controller.signal,
     });
     if (!res.ok) {
@@ -84,6 +88,7 @@ async function defenseclawPostLifecycle(event, cwd) {
       body: JSON.stringify({
         hook_event_name: event.type,
         event_type: event.type,
+        source_event_id: event.id || "",
         session_id: properties.sessionID || properties.sessionId || info.id || "",
         parent_session_id: properties.parentID || properties.parentId || info.parentID || info.parentId || "",
         agent_id: properties.agentID || properties.agentId || info.agentID || info.agentId || "",
@@ -105,8 +110,10 @@ export const DefenseClaw = async ({ directory, worktree }) => {
   const cwd = directory || worktree || "";
   return {
     // OpenCode publishes its session lifecycle through the generic event
-    // hook. Child sessions carry info.parentID, which DefenseClaw maps to
-    // a parent-agent relationship while preserving the child session ID.
+    // hook. OpenCode does not await this hook dispatch, so lifecycle delivery
+    // is best-effort telemetry only. Child sessions carry info.parentID, which
+    // DefenseClaw maps to a parent-agent relationship while preserving the
+    // child session ID.
     event: async ({ event }) => {
       if (!event || ![
         "session.created", "session.updated", "session.status", "session.idle",
@@ -128,10 +135,22 @@ export const DefenseClaw = async ({ directory, worktree }) => {
       );
       if (verdict) throw new Error(verdict.reason);
     },
-    // tool.execute.after is observe-only telemetry: fire-and-forget so it
-    // never adds latency to (or blocks) the tool result.
+    // tool.execute.after is observe-only telemetry: it does not await the
+    // gateway response and cannot turn telemetry failure into a tool block.
     "tool.execute.after": async (input, output) => {
-      defenseclawPost("tool.execute.after", input && input.tool, output && output.args, cwd, input).catch(() => {});
+      const result = output && {
+        title: output.title,
+        output: output.output,
+        metadata: output.metadata,
+      };
+      defenseclawPost(
+        "tool.execute.after",
+        input && input.tool,
+        input && input.args,
+        cwd,
+        input,
+        result,
+      ).catch(() => {});
     },
   };
 };

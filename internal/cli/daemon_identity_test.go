@@ -63,6 +63,13 @@ func startupTestConfig(t *testing.T) *config.Config {
 	t.Helper()
 	cfg := config.DefaultConfig()
 	cfg.DataDir = t.TempDir()
+	// Daemon token resolution deliberately checks the installed default home
+	// before the explicit config directory so readiness matches the child
+	// process. Keep identity tests independent from a developer's real
+	// ~/.defenseclaw/.env and process-token state.
+	t.Setenv("DEFENSECLAW_HOME", cfg.DataDir)
+	t.Setenv("DEFENSECLAW_GATEWAY_TOKEN", "")
+	t.Setenv("OPENCLAW_GATEWAY_TOKEN", "")
 	cfg.Gateway.APIBind = "127.0.0.1"
 	cfg.Gateway.APIPort = 18970
 	cfg.Gateway.Token = "unit-test-token"

@@ -64,8 +64,9 @@ const (
 )
 
 var (
-	errInstalledProcessRunning = errors.New("an installed DefenseClaw process is still running")
-	errSetupCancelled          = errors.New("setup cancelled by user")
+	errInstalledProcessRunning  = errors.New("an installed DefenseClaw process is still running")
+	errSetupCancelled           = errors.New("setup cancelled by user")
+	currentUserHookRuntimePaths = hookruntime.CurrentUserPaths
 )
 
 func checkSetupContext(ctx context.Context) error {
@@ -160,22 +161,29 @@ func validateRunCommand(command string) error {
 }
 
 type options struct {
-	Action             string
-	Quiet              bool
-	NoRestart          bool // Standard installer property; setup never initiates an OS reboot.
-	InstallScope       string
-	Connector          string
-	Mode               string
-	StartGateway       bool
-	DeleteUserData     bool
-	ConnectorSet       bool
-	ModeSet            bool
-	StartGatewaySet    bool
-	WaitPID            uint32
-	FromVersion        string
-	CleanupTransaction string
-	CodexHome          string
-	ClaudeConfigDir    string
+	Action               string
+	Quiet                bool
+	NoRestart            bool // Standard installer property; setup never initiates an OS reboot.
+	InstallScope         string
+	Connector            string
+	Mode                 string
+	StartGateway         bool
+	DeleteUserData       bool
+	ConnectorSet         bool
+	ModeSet              bool
+	StartGatewaySet      bool
+	WaitPID              uint32
+	FromVersion          string
+	CleanupTransaction   string
+	CodexHome            string
+	ClaudeConfigDir      string
+	CopilotHome          string
+	CursorHome           string
+	WindsurfUserHome     string
+	AntigravityConfigDir string
+	OpenCodeConfigDir    string
+	OmnigentConfigHome   string
+	HermesHome           string
 	// PreserveConnectorConfiguration is internal transaction intent, never a
 	// command-line property. Servicing an existing install without an explicit
 	// connector or mode selection must refresh its owned registrations in place
@@ -249,6 +257,14 @@ type installState struct {
 	Mode                   string            `json:"mode"`
 	CodexHome              string            `json:"codex_home,omitempty"`
 	ClaudeConfigDir        string            `json:"claude_config_dir,omitempty"`
+	CopilotHome            string            `json:"copilot_home,omitempty"`
+	CursorHome             string            `json:"cursor_home,omitempty"`
+	WindsurfUserHome       string            `json:"windsurf_user_home,omitempty"`
+	WindsurfHooksPath      string            `json:"windsurf_hooks_path,omitempty"`
+	AntigravityConfigDir   string            `json:"antigravity_config_dir,omitempty"`
+	OpenCodeConfigDir      string            `json:"opencode_config_dir,omitempty"`
+	OmnigentConfigHome     string            `json:"omnigent_config_home,omitempty"`
+	HermesHome             string            `json:"hermes_home,omitempty"`
 	UnsignedLocalArtifact  bool              `json:"unsigned_local_artifact"`
 	ReleaseSigningRequired bool              `json:"release_signing_required"`
 	Toolchain              map[string]string `json:"toolchain"`
@@ -487,6 +503,13 @@ func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot 
 	// must never depend on a later process inheriting the same environment.
 	opts.CodexHome = transaction.CodexHome
 	opts.ClaudeConfigDir = transaction.ClaudeConfigDir
+	opts.CopilotHome = transaction.CopilotHome
+	opts.CursorHome = transaction.CursorHome
+	opts.WindsurfUserHome = transaction.WindsurfUserHome
+	opts.AntigravityConfigDir = transaction.AntigravityConfigDir
+	opts.OpenCodeConfigDir = transaction.OpenCodeConfigDir
+	opts.OmnigentConfigHome = transaction.OmnigentConfigHome
+	opts.HermesHome = transaction.HermesHome
 	if err := beginSetupTransaction(transaction); err != nil {
 		return retryRequiredCode, err
 	}
@@ -889,9 +912,9 @@ func requestedServices(opts options, previous serviceState) serviceState {
 
 func connectorsForNativeUninstall(state *installState, dataRoot string) ([]string, error) {
 	seen := map[string]bool{}
-	connectors := make([]string, 0, 2)
+	connectors := make([]string, 0, len(nativeLifecycleConnectorNames))
 	add := func(name string) {
-		if (name == "codex" || name == "claudecode") && !seen[name] {
+		if validConnector(name) && name != "none" && !seen[name] {
 			seen[name] = true
 			connectors = append(connectors, name)
 		}
@@ -921,6 +944,31 @@ func connectorsForNativeUninstall(state *installState, dataRoot string) ([]strin
 	if pathExists(filepath.Join(dataRoot, "claudecode_backup.json")) ||
 		pathExists(filepath.Join(dataRoot, "connector_backups", "claudecode", "settings.json.json")) {
 		add("claudecode")
+	}
+	if pathExists(filepath.Join(dataRoot, "connector_backups", "copilot", "config.json")) {
+		add("copilot")
+	}
+	if pathExists(filepath.Join(dataRoot, "connector_backups", "cursor", "hooks.json.json")) {
+		add("cursor")
+	}
+	if pathExists(filepath.Join(dataRoot, "connector_backups", "windsurf", "config.json")) {
+		add("windsurf")
+	}
+	if pathExists(filepath.Join(dataRoot, "connector_backups", "antigravity", "hooks.json.json")) ||
+		pathExists(filepath.Join(dataRoot, "connector_backups", "antigravity", "config.json")) {
+		add("antigravity")
+	}
+	if pathExists(filepath.Join(dataRoot, "connector_backups", "opencode", "config.json")) {
+		add("opencode")
+	}
+	for _, logicalName := range []string{"config", "module", "pth"} {
+		if pathExists(filepath.Join(dataRoot, "connector_backups", "omnigent", logicalName+".json")) {
+			add("omnigent")
+			break
+		}
+	}
+	if pathExists(filepath.Join(dataRoot, "connector_backups", "hermes", "config.yaml.json")) {
+		add("hermes")
 	}
 	return connectors, nil
 }
@@ -985,7 +1033,7 @@ func readNativeConfiguredConnectors(dataRoot string) ([]string, error) {
 	seen := map[string]bool{}
 	add := func(value string) {
 		name := normalizeConnector(strings.TrimSpace(value))
-		if name == "codex" || name == "claudecode" {
+		if name != "none" && validConnector(name) {
 			seen[name] = true
 		}
 	}
@@ -1168,13 +1216,27 @@ func connectorLifecycleCommandArgs(dataRoot, connectorName, action string, env [
 	if err != nil {
 		return nil, err
 	}
-	return []string{
+	args := []string{
 		"connector", action,
 		"--connector", connectorName,
 		"--data-dir", dataRoot,
 		"--config-home", configHome,
-		"--json",
-	}, nil
+	}
+	if connectorName == "hermes" {
+		paths, err := currentUserHookRuntimePaths()
+		if err != nil {
+			return nil, fmt.Errorf("resolve stable Hermes hook launcher: %w", err)
+		}
+		hookExecutable := strings.TrimSpace(paths.Launcher)
+		if hookExecutable == "" ||
+			!filepath.IsAbs(hookExecutable) ||
+			filepath.Clean(hookExecutable) != hookExecutable ||
+			!strings.EqualFold(filepath.Base(hookExecutable), hookruntime.LauncherName) {
+			return nil, errors.New("stable Hermes hook launcher is not an absolute normalized DefenseClaw launcher path")
+		}
+		args = append(args, "--hook-executable", hookExecutable)
+	}
+	return append(args, "--json"), nil
 }
 
 func connectorLifecycleConfigHome(env []string, connectorName string) (string, error) {
@@ -1184,6 +1246,23 @@ func connectorLifecycleConfigHome(env []string, connectorName string) (string, e
 		variable = "CODEX_HOME"
 	case "claudecode":
 		variable = "CLAUDE_CONFIG_DIR"
+	case "copilot":
+		variable = "COPILOT_HOME"
+	case "cursor":
+		variable = "DEFENSECLAW_CURSOR_CONFIG_HOME"
+	case "windsurf":
+		variable = "WINDSURF_USER_HOME"
+	case "antigravity":
+		// DefenseClaw-internal custody binding used to construct the hidden
+		// --config-home argument. Google publishes no Antigravity config-home
+		// environment override.
+		variable = "DEFENSECLAW_ANTIGRAVITY_CONFIG_HOME"
+	case "opencode":
+		variable = "OPENCODE_CONFIG_DIR"
+	case "omnigent":
+		variable = "OMNIGENT_CONFIG_HOME"
+	case "hermes":
+		variable = "HERMES_HOME"
 	default:
 		return "", fmt.Errorf("unsupported native connector %q", connectorName)
 	}
@@ -1224,7 +1303,23 @@ func samePath(a, b string) bool {
 }
 
 func validConnector(value string) bool {
-	return value == "none" || value == "codex" || value == "claudecode"
+	return value == "none" || isNativeLifecycleConnector(value)
+}
+
+var nativeLifecycleConnectorNames = []string{
+	"antigravity",
+	"claudecode",
+	"codex",
+	"copilot",
+	"cursor",
+	"hermes",
+	"omnigent",
+	"opencode",
+	"windsurf",
+}
+
+func isNativeLifecycleConnector(value string) bool {
+	return slices.Contains(nativeLifecycleConnectorNames, value)
 }
 
 func validMode(value string) bool {
@@ -1477,6 +1572,10 @@ func stageInstallTree(payload loadedPayload, staging, installRoot, dataRoot, mai
 	if err := writeJSON(filepath.Join(staging, "installer", "payload-manifest.json"), payload.Manifest); err != nil {
 		return err
 	}
+	windsurfHooksPath := ""
+	if opts.WindsurfUserHome != "" {
+		windsurfHooksPath = filepath.Join(opts.WindsurfUserHome, ".codeium", "windsurf", "hooks.json")
+	}
 	state := installState{
 		SchemaVersion:          1,
 		Version:                payload.Manifest.Version,
@@ -1496,6 +1595,14 @@ func stageInstallTree(payload loadedPayload, staging, installRoot, dataRoot, mai
 		Mode:                   opts.Mode,
 		CodexHome:              opts.CodexHome,
 		ClaudeConfigDir:        opts.ClaudeConfigDir,
+		CopilotHome:            opts.CopilotHome,
+		CursorHome:             opts.CursorHome,
+		WindsurfUserHome:       opts.WindsurfUserHome,
+		WindsurfHooksPath:      windsurfHooksPath,
+		AntigravityConfigDir:   opts.AntigravityConfigDir,
+		OpenCodeConfigDir:      opts.OpenCodeConfigDir,
+		OmnigentConfigHome:     opts.OmnigentConfigHome,
+		HermesHome:             opts.HermesHome,
 		UnsignedLocalArtifact:  payload.Manifest.Unsigned,
 		ReleaseSigningRequired: true,
 		Toolchain:              payload.Manifest.Toolchain,
@@ -1692,12 +1799,24 @@ func runInitialConfigurationWithEnv(root, dataRoot string, opts options, env []s
 }
 
 func initialConfigurationArgs(opts options) []string {
-	return []string{
+	args := []string{
 		"init", "--skip-install", "--non-interactive", "--yes",
 		"--connector", opts.Connector,
 		"--profile", opts.Mode,
 		"--no-start-gateway", "--no-verify",
 	}
+	switch opts.Connector {
+	case "copilot":
+		// This hidden, installer-shaped escape hatch permits the staged native
+		// implementation to be exercised without changing Copilot's public
+		// not_certified platform classification.
+		args = append(args, "--native-setup-copilot")
+	case "antigravity":
+		// Antigravity remains publicly not_certified. Native Setup alone may
+		// seed canonical state before the home-bound maintenance reconcile.
+		args = append(args, "--native-setup-antigravity")
+	}
+	return args
 }
 
 func runCanonicalInitializationWithEnv(root, dataRoot string, env []string) error {
@@ -2483,8 +2602,8 @@ func parseArgs(args []string) (options, error) {
 	if opts.InstallScope != "user" {
 		return opts, errors.New("only per-user INSTALLSCOPE=user is supported by this installer")
 	}
-	if opts.Connector != "none" && opts.Connector != "codex" && opts.Connector != "claudecode" {
-		return opts, fmt.Errorf("invalid CONNECTOR %q; expected codex, claudecode, or none", opts.Connector)
+	if !validConnector(opts.Connector) {
+		return opts, fmt.Errorf("invalid CONNECTOR %q; expected antigravity, codex, claudecode, copilot, cursor, hermes, omnigent, opencode, windsurf, or none", opts.Connector)
 	}
 	if opts.Mode != "observe" && opts.Mode != "action" {
 		return opts, fmt.Errorf("invalid MODE %q; expected observe or action", opts.Mode)
@@ -2529,13 +2648,25 @@ func normalizeConnector(value string) string {
 		return "codex"
 	case "claude", "claudecode", "claude-code":
 		return "claudecode"
+	case "copilot", "githubcopilot", "github-copilot":
+		return "copilot"
+	case "cursor", "cursoragent", "cursor-agent":
+		return "cursor"
+	case "windsurf":
+		return "windsurf"
+	case "antigravity", "agy":
+		return "antigravity"
+	case "opencode", "open-code":
+		return "opencode"
+	case "omnigent":
+		return "omnigent"
 	default:
 		return strings.ToLower(value)
 	}
 }
 
 func printUsage() {
-	fmt.Println("DefenseClawSetup-x64.exe [/quiet] [/norestart] [INSTALLSCOPE=user] [CONNECTOR=codex|claudecode|none] [MODE=observe|action] [STARTGATEWAY=1] | /verify")
+	fmt.Println("DefenseClawSetup-x64.exe [/quiet] [/norestart] [INSTALLSCOPE=user] [CONNECTOR=antigravity|codex|claudecode|copilot|cursor|hermes|omnigent|opencode|windsurf|none] [MODE=observe|action] [STARTGATEWAY=1] | /verify")
 	fmt.Println("Maintenance: DefenseClawSetup-x64.exe /repair | /upgrade | /uninstall [DELETEUSERDATA=1]")
 }
 

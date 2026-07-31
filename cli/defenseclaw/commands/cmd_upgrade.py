@@ -2796,7 +2796,17 @@ def _native_windows_install_state(
         or state.get("install_scope") != "user"
         or not isinstance(state.get("version"), str)
         or _CANONICAL_VERSION_RE.fullmatch(state["version"]) is None
-        or state.get("connector") not in {"none", "codex", "claudecode"}
+        or state.get("connector")
+        not in {
+            "none",
+            "antigravity",
+            "codex",
+            "claudecode",
+            "copilot",
+            "cursor",
+            "windsurf",
+            "opencode",
+        }
         or state.get("mode") not in {"observe", "action"}
     ):
         ux.err("Native installer state is not a supported native Windows install.", indent="  ")
@@ -3824,7 +3834,16 @@ def _handoff_windows_setup_upgrade(
     """Launch setup from its trusted cache, then return so this runtime can exit."""
     _windows_installer_policy(manifest)
     connector = state.get("connector")
-    if connector not in {"codex", "claudecode", "none"}:
+    if connector not in {
+        "antigravity",
+        "codex",
+        "claudecode",
+        "copilot",
+        "cursor",
+        "windsurf",
+        "opencode",
+        "none",
+    }:
         connector = "none"
     mode = state.get("mode")
     if mode not in {"observe", "action"}:

@@ -169,6 +169,38 @@ func TestLoadAISignatures_ContainsRequiredSurfaces(t *testing.T) {
 	}
 }
 
+func TestLoadAISignatures_WindsurfIncludesOfficialDevinDesktopRename(t *testing.T) {
+	sigs, err := LoadAISignatures()
+	if err != nil {
+		t.Fatalf("LoadAISignatures: %v", err)
+	}
+	for _, sig := range sigs {
+		if sig.ID != "windsurf" {
+			continue
+		}
+		for field, values := range map[string][]string{
+			"binary_names":      sig.BinaryNames,
+			"process_names":     sig.ProcessNames,
+			"config_paths":      sig.ConfigPaths,
+			"application_names": sig.ApplicationNames,
+			"domain_patterns":   sig.DomainPatterns,
+		} {
+			want := map[string]string{
+				"binary_names":      "Devin.exe",
+				"process_names":     "Devin.exe",
+				"config_paths":      ".devin/rules",
+				"application_names": "Devin Desktop",
+				"domain_patterns":   "devin.ai",
+			}[field]
+			if !slices.Contains(values, want) {
+				t.Errorf("Windsurf %s missing official renamed identity %q: %v", field, want, values)
+			}
+		}
+		return
+	}
+	t.Fatal("Windsurf signature missing")
+}
+
 func TestLoadAISignatures_LemonadeServerSurface(t *testing.T) {
 	sigs, err := LoadAISignatures()
 	if err != nil {

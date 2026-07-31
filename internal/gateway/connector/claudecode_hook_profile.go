@@ -53,10 +53,60 @@ func claudeCodeProfileDecode(payload map[string]interface{}) HookProfileRequest 
 		req.Direction = "prompt"
 	case "PostToolUse", "PostToolUseFailure", "PostToolBatch":
 		req.Direction = "tool_result"
+	case "MessageDisplay":
+		req.Content = hookFirstString(payload, "delta")
+		req.Direction = "response"
+	case "StopFailure":
+		req.Content = strings.Join(hookNonEmptyStrings(
+			hookFirstString(payload, "error"),
+			hookFirstString(payload, "error_details", "errorDetails"),
+		), "\n")
+		req.Direction = "tool_result"
+	case "SubagentStart", "CwdChanged", "WorktreeRemove", "TaskCreated",
+		"TaskCompleted", "TeammateIdle", "PreCompact", "PostCompact",
+		"Elicitation", "ElicitationResult", "Notification":
+		req.Content = claudeCodeProfileEventContent(payload)
+		req.Direction = "event_content"
 	default:
 		req.Direction = "tool_call"
 	}
 	return req
+}
+
+func hookNonEmptyStrings(values ...string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func claudeCodeProfileEventContent(payload map[string]interface{}) string {
+	return strings.Join(hookNonEmptyStrings(
+		hookFirstString(payload, "message"),
+		hookFirstString(payload, "title"),
+		hookFirstString(payload, "file_path", "filePath"),
+		hookFirstString(payload, "source"),
+		hookFirstString(payload, "load_reason", "loadReason"),
+		hookFirstString(payload, "memory_type", "memoryType"),
+		hookFirstString(payload, "mcp_server_name", "mcpServerName"),
+		hookFirstString(payload, "action"),
+		hookFirstString(payload, "url"),
+		hookFirstString(payload, "agent_id", "agentId"),
+		hookFirstString(payload, "agent_type", "agentType"),
+		hookFirstString(payload, "old_cwd", "oldCwd"),
+		hookFirstString(payload, "new_cwd", "newCwd"),
+		hookFirstString(payload, "worktree_path", "worktreePath"),
+		hookFirstString(payload, "last_assistant_message", "lastAssistantMessage"),
+		hookFirstString(payload, "content"),
+		hookFirstString(payload, "compact_summary", "compactSummary"),
+		hookFirstString(payload, "custom_instructions", "customInstructions"),
+		hookFirstString(payload, "task_subject", "taskSubject"),
+		hookFirstString(payload, "task_description", "taskDescription"),
+		hookFirstString(payload, "reason"),
+	), "\n")
 }
 
 // claudeCodeProfileMapVerdict implements HookProfile.MapVerdict for
@@ -138,7 +188,9 @@ func claudeCodeOutputForProfile(req HookProfileRequest, action, rawAction, reaso
 				},
 			}}
 		case "TaskCreated", "TaskCompleted", "TeammateIdle":
-			return map[string]interface{}{"continue": false, "stopReason": claudeCodeReasonOrDefault(reason)}
+			// No structured output: hookexec must render the policy reason on
+			// stderr and exit 2 so Claude applies the event-specific feedback.
+			return nil
 		case "Elicitation":
 			return map[string]interface{}{"hookSpecificOutput": map[string]interface{}{
 				"hookEventName": "Elicitation",
@@ -155,17 +207,33 @@ func claudeCodeOutputForProfile(req HookProfileRequest, action, rawAction, reaso
 			return map[string]interface{}{"decision": "block", "reason": claudeCodeReasonOrDefault(reason)}
 		}
 	}
-	// CwdChanged / FileChanged: PR 5 keeps watchPaths derivation in
-	// the gateway (it consults req.NewCWD which is connector-specific
-	// and not in HookProfileRequest yet). Until PR 6 widens
-	// HookProfileRequest, the unified path falls back to nil here and
-	// the legacy handler keeps producing watchPaths.
+	watchRoot := strings.TrimSpace(hookFirstString(req.Payload, "new_cwd", "newCwd"))
+	if watchRoot == "" {
+		watchRoot = req.CWD
+	}
+	if event == "SessionStart" {
+		output := map[string]interface{}{
+			"hookEventName": "SessionStart",
+			"watchPaths":    ClaudeCodeWatchPaths(watchRoot),
+		}
+		if additional != "" {
+			output["additionalContext"] = additional
+		}
+		return map[string]interface{}{"hookSpecificOutput": output}
+	}
+	if event == "CwdChanged" || event == "FileChanged" {
+		output := map[string]interface{}{"watchPaths": ClaudeCodeWatchPaths(watchRoot)}
+		if additional != "" {
+			output["systemMessage"] = additional
+		}
+		return output
+	}
 	if additional == "" {
 		return nil
 	}
 	switch event {
-	case "SessionStart", "UserPromptSubmit", "UserPromptExpansion", "PostToolUse", "PostToolUseFailure",
-		"PostToolBatch", "Notification", "SubagentStart", "SubagentStop":
+	case "UserPromptSubmit", "UserPromptExpansion", "PostToolUse", "PostToolUseFailure",
+		"PostToolBatch", "SubagentStart", "SubagentStop":
 		return map[string]interface{}{"hookSpecificOutput": map[string]interface{}{
 			"hookEventName":     event,
 			"additionalContext": additional,

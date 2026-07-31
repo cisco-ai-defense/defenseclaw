@@ -86,8 +86,7 @@
                 ".openclaw/workspace/skills/codeguard",
                 ".openclaw/skills/codeguard",
                 ".zeptoclaw/skills/codeguard",
-                ".claude/skills/codeguard",
-                ".codex/skills/codeguard"
+                ".claude/skills/codeguard"
               ]
             }
           ],
@@ -2221,8 +2220,7 @@
                 ".openclaw/workspace/skills/codeguard",
                 ".openclaw/skills/codeguard",
                 ".zeptoclaw/skills/codeguard",
-                ".claude/skills/codeguard",
-                ".codex/skills/codeguard"
+                ".claude/skills/codeguard"
               ]
             }
           ],
@@ -4279,8 +4277,7 @@
                 ".openclaw/workspace/skills/codeguard",
                 ".openclaw/skills/codeguard",
                 ".zeptoclaw/skills/codeguard",
-                ".claude/skills/codeguard",
-                ".codex/skills/codeguard"
+                ".claude/skills/codeguard"
               ]
             }
           ],

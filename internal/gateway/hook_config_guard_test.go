@@ -213,8 +213,11 @@ func TestHookConfigGuardRepairUsesCurrentRuntimePolicy(t *testing.T) {
 	conn.mu.Lock()
 	last := conn.lastOpts
 	conn.mu.Unlock()
-	if last.HookFailMode != "closed" || !last.HILTEnabled {
-		t.Fatalf("repair posture = fail:%q hilt:%t, want closed/true", last.HookFailMode, last.HILTEnabled)
+	if last.HookFailMode != "closed" || last.GuardrailMode != "action" || !last.HILTEnabled {
+		t.Fatalf(
+			"repair posture = mode:%q fail:%q hilt:%t, want action/closed/true",
+			last.GuardrailMode, last.HookFailMode, last.HILTEnabled,
+		)
 	}
 
 	stale := cloneConfig(live)
@@ -276,8 +279,11 @@ func TestHookConfigGuardRepairUsesCurrentRuntimePolicy(t *testing.T) {
 	conn.releaseSetup = nil
 	last = conn.lastOpts
 	conn.mu.Unlock()
-	if last.HookFailMode != "closed" || !last.HILTEnabled {
-		t.Fatalf("post-publication registration = fail:%q hilt:%t, want closed/true", last.HookFailMode, last.HILTEnabled)
+	if last.HookFailMode != "closed" || last.GuardrailMode != "action" || !last.HILTEnabled {
+		t.Fatalf(
+			"post-publication registration = mode:%q fail:%q hilt:%t, want action/closed/true",
+			last.GuardrailMode, last.HookFailMode, last.HILTEnabled,
+		)
 	}
 }
 

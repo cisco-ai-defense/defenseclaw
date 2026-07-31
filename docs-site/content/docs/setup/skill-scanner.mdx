@@ -140,7 +140,7 @@ first_party_allow_list:
   - target_type: skill
     target_name: codeguard
     reason: first-party DefenseClaw skill
-    source_path_contains: [".defenseclaw", ".openclaw/skills", ".claude/skills", ".codex/skills"]
+    source_path_contains: [".openclaw/workspace/skills/codeguard", ".openclaw/skills/codeguard", ".zeptoclaw/skills/codeguard", ".claude/skills/codeguard"]
 ```
 
 Each severity bucket has three independent actions:
@@ -150,6 +150,11 @@ Each severity bucket has three independent actions:
 - **`install`** — `none` or `block`. Whether to refuse a fresh install.
 
 `first_party_allow_list` is a **policy-file** key (not `~/.defenseclaw/config.yaml`) — bundles whose source path contains any of the listed substrings are exempted from `skill_actions`. See [Policies](/docs/policies) for the full schema and [Defaults](/docs/defaults) for what each shipped rule pack sets these to.
+
+Codex's personal and project skill directories both use the shared
+`.agents/skills` namespace. Path alone cannot distinguish a protected install
+from an attacker-controlled repository entry, so CodeGuard at either Codex
+location remains scan-required unless stronger provenance is available.
 
 To switch profiles for the entire `skill_actions` table:
 

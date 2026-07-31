@@ -23,7 +23,10 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
+
+import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -170,6 +173,20 @@ class BootstrapEnvTests(unittest.TestCase):
 
         self.assertEqual(result.status, "pass")
         self.assertIn("Hermes config found", result.detail)
+
+    def test_opencode_readiness_honors_custom_config_dir(self):
+        cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
+        config_home = os.path.join(self._tmp.name, "opencode-config")
+        plugin_dir = os.path.join(config_home, "plugins")
+        os.makedirs(plugin_dir)
+        with open(os.path.join(plugin_dir, "defenseclaw.js"), "w", encoding="utf-8") as fh:
+            fh.write("// defenseclaw-managed-plugin v6\n")
+
+        with patch.dict(os.environ, {"OPENCODE_CONFIG_DIR": config_home}):
+            result = _connector_readiness(cfg, "opencode")
+
+        self.assertEqual(result.status, "pass")
+        self.assertIn("OpenCode bridge plugin found", result.detail)
 
     def test_omnigent_readiness_honors_config_home(self):
         cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
@@ -1394,6 +1411,22 @@ class ApplyGatewayDefaultsTokenGateTests(unittest.TestCase):
         _apply_gateway_defaults(cfg, is_new_config=True)
 
         self.assertEqual(cfg.gateway.token_env, "OPENCLAW_GATEWAY_TOKEN")
+
+
+def test_windsurf_readiness_uses_bound_profile_not_ambient(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bound = tmp_path / "bound-profile"
+    ambient = tmp_path / "ambient-profile"
+    hooks = bound / ".codeium" / "windsurf" / "hooks.json"
+    hooks.parent.mkdir(parents=True)
+    hooks.write_text("{}", encoding="utf-8")
+    monkeypatch.setenv("WINDSURF_USER_HOME", str(bound))
+    monkeypatch.setattr(Path, "home", lambda: ambient)
+
+    result = _connector_readiness(SimpleNamespace(), "windsurf")
+
+    assert result.status == "pass"
 
 
 if __name__ == "__main__":

@@ -28,6 +28,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hookruntime"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
@@ -70,12 +71,14 @@ var (
 	connectorFlagJSON       bool
 	connectorFlagDataDir    string
 	connectorFlagConfigHome string
+	connectorFlagHookExe    string
 )
 
 // connectorExit is the indirection used in place of os.Exit so tests can
 // observe the exit code without terminating the test binary. Production
 // code paths leave this at the default (real os.Exit).
 var connectorExit = os.Exit
+var connectorHookRuntimePaths = hookruntime.CurrentUserPaths
 
 var connectorTeardownCmd = &cobra.Command{
 	Use:   "teardown",
@@ -155,6 +158,9 @@ func init() {
 	connectorCmd.PersistentFlags().StringVar(&connectorFlagConfigHome, "config-home", "",
 		"Bind native connector maintenance to an installer-validated configuration home")
 	_ = connectorCmd.PersistentFlags().MarkHidden("config-home")
+	connectorCmd.PersistentFlags().StringVar(&connectorFlagHookExe, "hook-executable", "",
+		"Bind native connector maintenance to an installer-validated hook launcher")
+	_ = connectorCmd.PersistentFlags().MarkHidden("hook-executable")
 
 	connectorCmd.AddCommand(connectorTeardownCmd)
 	connectorCmd.AddCommand(connectorVerifyCmd)
@@ -210,6 +216,9 @@ func resolveConnectorDataDir() string {
 func bindConnectorLifecycleConfigHome(connectorName string) (func(), error) {
 	home := connectorFlagConfigHome
 	if home == "" {
+		if err := validateConnectorLifecycleHookExecutable(connectorName, home); err != nil {
+			return nil, err
+		}
 		return func() {}, nil
 	}
 	if strings.TrimSpace(home) != home || strings.ContainsAny(home, "\x00\r\n") ||
@@ -219,6 +228,9 @@ func bindConnectorLifecycleConfigHome(connectorName string) (func(), error) {
 	if err := validateConnectorLifecycleConfigHomePath(home); err != nil {
 		return nil, fmt.Errorf("config home path is unsafe: %w", err)
 	}
+	if err := validateConnectorLifecycleHookExecutable(connectorName, home); err != nil {
+		return nil, err
+	}
 
 	variable := ""
 	switch connectorName {
@@ -226,6 +238,27 @@ func bindConnectorLifecycleConfigHome(connectorName string) (func(), error) {
 		variable = "CODEX_HOME"
 	case "claudecode":
 		variable = "CLAUDE_CONFIG_DIR"
+	case "copilot":
+		variable = "COPILOT_HOME"
+	case "cursor":
+		// Cursor has no documented configuration-home environment variable.
+		// The hidden maintenance flag is carried through SetupOpts.ConfigHome
+		// instead of inventing an upstream-facing override.
+		return func() {}, nil
+	case "windsurf":
+		// Windsurf has no vendor home override variable. Bind DefenseClaw's
+		// connector path resolver directly to Setup's validated profile root;
+		// never inherit a maintenance process's ambient USERPROFILE.
+		return connector.BindUserHomeDir(home)
+	case "antigravity":
+		// Google has no documented Antigravity configuration-home environment
+		// variable. The hidden maintenance flag already flows through
+		// SetupOpts.ConfigHome, so do not invent or export a vendor override.
+		return func() {}, nil
+	case "opencode":
+		variable = "OPENCODE_CONFIG_DIR"
+	case "hermes":
+		variable = "HERMES_HOME"
 	default:
 		return nil, fmt.Errorf("explicit config home is unsupported for connector %q", connectorName)
 	}
@@ -240,6 +273,38 @@ func bindConnectorLifecycleConfigHome(connectorName string) (func(), error) {
 			_ = os.Unsetenv(variable)
 		}
 	}, nil
+}
+
+func validateConnectorLifecycleHookExecutable(connectorName, configHome string) error {
+	executable := connectorFlagHookExe
+	if executable == "" {
+		if connectorName == "hermes" && configHome != "" {
+			return fmt.Errorf("Hermes maintenance hook executable is empty")
+		}
+		return nil
+	}
+	if connectorName != "hermes" {
+		return fmt.Errorf("explicit hook executable is unsupported for connector %q", connectorName)
+	}
+	if configHome == "" {
+		return fmt.Errorf("explicit Hermes hook executable requires an installer-bound config home")
+	}
+	if strings.TrimSpace(executable) != executable ||
+		strings.ContainsAny(executable, "\"\x00\r\n") ||
+		!filepath.IsAbs(executable) ||
+		filepath.Clean(executable) != executable ||
+		!strings.EqualFold(filepath.Base(executable), "defenseclaw-hook.exe") {
+		return fmt.Errorf("Hermes maintenance hook executable is not an absolute normalized DefenseClaw launcher path")
+	}
+	paths, err := connectorHookRuntimePaths()
+	if err != nil {
+		return fmt.Errorf("resolve canonical Hermes hook executable: %w", err)
+	}
+	canonical := strings.TrimSpace(paths.Launcher)
+	if canonical == "" || executable != canonical {
+		return fmt.Errorf("Hermes maintenance hook executable is not the exact canonical stable HookRuntime launcher")
+	}
+	return nil
 }
 
 // newConnectorRegistryWithPlugins mirrors the sidecar startup path
@@ -279,8 +344,10 @@ func newConnectorRegistryWithPlugins() *connector.Registry {
 // them mirrors what the sidecar would pass at boot.
 func resolveConnectorOpts(dataDir string) connector.SetupOpts {
 	opts := connector.SetupOpts{
-		DataDir:     dataDir,
-		Interactive: false,
+		DataDir:        dataDir,
+		ConfigHome:     connectorFlagConfigHome,
+		HookExecutable: connectorFlagHookExe,
+		Interactive:    false,
 	}
 	if cfg == nil {
 		return opts
@@ -315,19 +382,42 @@ func runConnectorReconcile(cmd *cobra.Command, _ []string) error {
 	if !ok {
 		return fmt.Errorf("connector reconcile: unknown connector %q", name)
 	}
-	if name != "claudecode" && name != "codex" {
-		return fmt.Errorf("connector reconcile: selected refresh is supported only for claudecode and codex")
+	if name != "antigravity" && name != "claudecode" && name != "codex" &&
+		name != "copilot" && name != "cursor" && name != "hermes" && name != "omnigent" &&
+		name != "opencode" && name != "windsurf" {
+		return fmt.Errorf("connector reconcile: selected refresh is supported only for antigravity, claudecode, codex, copilot, cursor, hermes, omnigent, opencode, and windsurf")
 	}
 	if warning, supportErr := connector.CheckPlatformSupportOnHost(name); supportErr != nil {
-		return fmt.Errorf("connector reconcile %s: %w", name, supportErr)
+		// Transactional Windows Setup must be able to preserve and repair a
+		// preview registration while its public certification classification
+		// remains not_certified. The hidden, absolute --config-home binding is
+		// Setup's custody proof. Unsupported connectors and ordinary unbound
+		// calls remain rejected.
+		support := connector.ConnectorSupportOnHostOS(name)
+		if connectorFlagConfigHome == "" || support.Status != connector.PlatformNotCertified {
+			return fmt.Errorf("connector reconcile %s: %w", name, supportErr)
+		}
+		fmt.Fprintf(
+			cmd.ErrOrStderr(),
+			"connector reconcile %s: installer maintenance for not-certified native Windows connector: %s\n",
+			name,
+			support.Reason,
+		)
 	} else if warning != "" {
 		fmt.Fprintf(cmd.ErrOrStderr(), "connector reconcile %s: warning: %s\n", name, warning)
 	}
 	opts := resolveConnectorOpts(dataDir)
 	if cfg != nil {
 		opts.HookFailMode = cfg.EffectiveHookFailModeForConnector(name)
+		opts.GuardrailMode = cfg.EffectiveGuardrailModeForConnector(name)
 		opts.HILTEnabled = cfg.EffectiveHILTForConnector(name).Enabled
 		opts.ManagedEnterprise = managed.IsManagedEnterprise(cfg.DeploymentMode)
+	}
+	if name == "cursor" && !strings.EqualFold(strings.TrimSpace(opts.GuardrailMode), "action") {
+		// Keep maintenance output and persisted lock evidence truthful: Cursor
+		// observe mode is always fail-open even when a global closed setting is
+		// inherited for connectors that enforce failures independently.
+		opts.HookFailMode = "open"
 	}
 	hookToken, err := connector.LoadHookAPIToken(dataDir, name)
 	if err != nil {
@@ -339,9 +429,10 @@ func runConnectorReconcile(cmd *cobra.Command, _ []string) error {
 			return fmt.Errorf("connector reconcile: ensure scoped hook token: %w", err)
 		}
 	}
-	// Match the sidecar's least-privilege registration semantics: Claude and
-	// Codex use the connector-scoped token for both native telemetry and hook
-	// calls. Never write the gateway master token into agent-owned config.
+	// Match the sidecar's least-privilege registration semantics: native hook
+	// connectors use the connector-scoped token for hook calls and, where
+	// supported by the vendor, native telemetry. Never write the gateway
+	// master token into agent-owned config.
 	opts.APIToken = hookToken
 	opts.HookAPIToken = hookToken
 	opts.HookAPITokenScoped = true

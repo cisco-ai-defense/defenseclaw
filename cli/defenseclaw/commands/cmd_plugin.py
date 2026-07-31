@@ -469,7 +469,11 @@ def _plugin_match_dir_scopes(
                 key = filesystem_identity_key(name, root)
                 root_matches = [
                     entry
-                    for entry in discover_plugin_directories(root, connector=resolved)
+                    for entry in discover_plugin_directories(
+                        root,
+                        connector=resolved,
+                        workspace_dir=app.cfg.connector_workspace_dir(),
+                    )
                     if filesystem_identity_key(entry.id, root) == key
                 ]
                 if len(root_matches) > 1:
@@ -1544,7 +1548,11 @@ def _assert_connector_plugin_identities_unambiguous(app: AppContext, connector: 
     """Preflight all configured roots without collapsing physical aliases."""
     claimed: dict[str, str] = {}
     for root in _plugin_roots_for_connector(app, connector):
-        for entry in discover_plugin_directories(root, connector=connector):
+        for entry in discover_plugin_directories(
+            root,
+            connector=connector,
+            workspace_dir=app.cfg.connector_workspace_dir(),
+        ):
             key = filesystem_identity_key(entry.id, root)
             previous = claimed.get(key)
             if previous is not None and os.path.realpath(previous) != os.path.realpath(entry.path):
@@ -2021,16 +2029,24 @@ def _read_host_plugin_manifest(plugin_path: str) -> dict[str, Any] | None:
     return None
 
 
-def _scan_plugin_dir(host_dir: str, connector: str) -> list[dict[str, Any]]:
+def _scan_plugin_dir(
+    host_dir: str,
+    connector: str,
+    *,
+    workspace_dir: str = "",
+) -> list[dict[str, Any]]:
     """Walk one level under *host_dir* and emit one dict per plugin.
 
-    Only one level — host-agent plugin directories are conventionally
-    flat (``~/.claude/plugins/<name>/plugin.json``). Recursing risks
-    picking up unrelated nested package.json files (e.g. a plugin's
-    own node_modules tree).
+    Connector-specific discovery owns the exact storage layout. In
+    particular, Claude marketplace plugins are versioned below its cache
+    parent and skills-directory plugins require a manifest.
     """
     out: list[dict[str, Any]] = []
-    for discovered in discover_plugin_directories(host_dir, connector=connector):
+    for discovered in discover_plugin_directories(
+        host_dir,
+        connector=connector,
+        workspace_dir=workspace_dir,
+    ):
         entry = discovered.id
         plugin_path = discovered.path
         manifest = _read_host_plugin_manifest(plugin_path) or {}
@@ -2056,6 +2072,9 @@ def _scan_plugin_dir(host_dir: str, connector: str) -> list[dict[str, Any]]:
             row["registry"] = discovered.registry
         if discovered.cached:
             row["cached"] = True
+            row["activation_verified"] = discovered.activation_verified
+        if discovered.logical_id and discovered.logical_id != discovered.id:
+            row["logical_id"] = discovered.logical_id
         out.append(row)
     return out
 
@@ -2078,15 +2097,21 @@ def _list_host_plugins(connector: str, cfg) -> list[dict[str, Any]]:
         # binary (see _list_openclaw_plugins). Don't double-count.
         return []
     if name == "copilot":
-        return _list_copilot_plugins()
+        return _list_copilot_plugins(data_dir=getattr(cfg, "data_dir", None))
     try:
         dirs = cfg.plugin_dirs(connector)
     except Exception:
         return []
     out: list[dict[str, Any]] = []
     seen_ids: set[str] = set()
+    workspace_resolver = getattr(cfg, "connector_workspace_dir", None)
+    workspace_dir = workspace_resolver() if callable(workspace_resolver) else ""
     for d in dirs:
-        for entry in _scan_plugin_dir(d, name):
+        for entry in _scan_plugin_dir(
+            d,
+            name,
+            workspace_dir=workspace_dir,
+        ):
             pid = filesystem_identity_key(entry["id"], d)
             if pid in seen_ids:
                 raise AmbiguousPluginIdentityError(
@@ -2098,14 +2123,34 @@ def _list_host_plugins(connector: str, cfg) -> list[dict[str, Any]]:
     return out
 
 
-def _list_copilot_plugins() -> list[dict[str, Any]]:
+def _trusted_copilot_binary(
+    data_dir: str | os.PathLike[str] | None = None,
+) -> str:
+    """Resolve Copilot through the passive inventory's executable trust gate."""
+    from defenseclaw.inventory.agent_discovery import (
+        _SPECS,
+        _binary_candidates_for_agent,
+        _is_trusted_binary_path,
+    )
+
+    spec = _SPECS["copilot"]
+    for candidate in _binary_candidates_for_agent("copilot", spec):
+        if _is_trusted_binary_path(candidate, data_dir=data_dir):
+            return candidate
+    return ""
+
+
+def _list_copilot_plugins(
+    *,
+    data_dir: str | os.PathLike[str] | None = None,
+) -> list[dict[str, Any]]:
     """Best-effort Copilot CLI plugin listing via documented CLI flow."""
-    copilot = shutil.which("copilot")
+    copilot = _trusted_copilot_binary(data_dir)
     if not copilot:
         return []
     try:
         proc = subprocess.run(
-            [copilot, "plugin", "list", "--json"],
+            [copilot, "plugins", "list", "--kind", "plugin", "--json"],
             capture_output=True,
             text=True,
             timeout=15,

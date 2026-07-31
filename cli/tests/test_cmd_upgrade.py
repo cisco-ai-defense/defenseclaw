@@ -8095,6 +8095,45 @@ class TestUpgradeManifest(unittest.TestCase):
         self.assertTrue(any(arg.startswith("WAITPID=") for arg in args))
         self.assertIn("DefenseClaw 9.9.9", output)
 
+    def test_windows_setup_handoff_preserves_windsurf_selection(self):
+        manifest = {
+            "windows_installer": {
+                "asset": "DefenseClawSetup-x64.exe",
+                "architectures": ["amd64"],
+                "handoff_args": ["/upgrade", "/quiet", "/norestart", "INSTALLSCOPE=user"],
+                "authenticode": {
+                    "required": False,
+                    "publisher": "Cisco Systems, Inc.",
+                },
+                "managed_policy": "respect",
+            },
+        }
+        state = {
+            "version": "0.8.7",
+            "connector": "windsurf",
+            "mode": "action",
+            "maintenance_path": r"C:\Trusted\DefenseClawSetup-x64.exe",
+        }
+        with (
+            patch(
+                "defenseclaw.commands.cmd_upgrade._cache_verified_windows_setup",
+                return_value=state["maintenance_path"],
+            ),
+            patch("defenseclaw.commands.cmd_upgrade.subprocess.Popen") as popen_mock,
+        ):
+            _handoff_windows_setup_upgrade(
+                r"C:\Download\DefenseClawSetup-x64.exe",
+                "DefenseClawSetup-x64.exe",
+                "9.9.9",
+                state,
+                manifest,
+                yes=True,
+            )
+
+        args = popen_mock.call_args.args[0]
+        self.assertIn("CONNECTOR=windsurf", args)
+        self.assertIn("MODE=action", args)
+
     def test_machine_install_self_update_is_rejected(self):
         with self.assertRaises(SystemExit) as ctx:
             _enforce_windows_self_update_policy({"install_scope": "machine"})

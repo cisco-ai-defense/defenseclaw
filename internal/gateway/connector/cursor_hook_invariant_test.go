@@ -81,7 +81,7 @@ func TestCursorHook_GatewayAllowEnvelopePassedThrough(t *testing.T) {
 		t.Skip("shell scripts not supported on windows")
 	}
 	addr := stubGatewayAddr(t, http.StatusOK,
-		`{"hook_output":{"continue":true,"permission":"allow"}}`)
+		`{"hook_output":{"permission":"allow"}}`)
 	stdout, stderr, err := runCursorHookAgainst(
 		t,
 		addr,
@@ -100,7 +100,7 @@ func TestCursorHook_GatewayDenyEnvelopePassedThrough(t *testing.T) {
 	}
 	// A real block decision must still reach Cursor verbatim — the
 	// fail-open hardening must not swallow deny verdicts.
-	want := `{"continue":false,"permission":"deny","user_message":"blocked by policy"}`
+	want := `{"permission":"deny","user_message":"blocked by policy","agent_message":"blocked by policy"}`
 	addr := stubGatewayAddr(t, http.StatusOK, `{"hook_output":`+want+`}`)
 	stdout, _, err := runCursorHookAgainst(
 		t,
@@ -119,7 +119,7 @@ func TestCursorHook_GatewayDenyEnvelopePassedThrough(t *testing.T) {
 
 // TestCursorHook_NeverEmptyStdout is the umbrella guard: across every
 // scenario a Cursor agent can drive, stdout is a valid, non-empty JSON
-// object carrying a permission. Empty stdout on any of these would let
+// object carrying only fields documented for that event. Empty stdout would let
 // Cursor's failClosed:true guard block the tool.
 func TestCursorHook_NeverEmptyStdout(t *testing.T) {
 	if runtime.GOOS == "windows" {
@@ -169,7 +169,7 @@ func TestCursorHook_NeverEmptyStdout(t *testing.T) {
 		if err != nil {
 			t.Fatalf("expected exit 0 for oversized fail-open input, got %v; stderr=%s", err, stderr)
 		}
-		assertAllowEnvelope(t, stdout)
+		assertJSONEnvelope(t, stdout)
 	})
 }
 

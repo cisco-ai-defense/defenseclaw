@@ -5,7 +5,7 @@
   "connectors": {
     "codex": {
       "version_probe": "codex --version",
-      "live": true,
+      "live": false,
       "os": {
         "linux": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
         "macos": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
@@ -14,7 +14,7 @@
     },
     "claudecode": {
       "version_probe": "claude --version",
-      "live": true,
+      "live": false,
       "os": {
         "linux": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
         "macos": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
@@ -31,8 +31,8 @@
       }
     },
     "cursor": {
-      "version_probe": "cursor-agent --version",
-      "live": "pending-validation",
+      "version_probe": "agent --version",
+      "live": false,
       "os": {
         "linux": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
         "macos": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
@@ -40,12 +40,14 @@
       }
     },
     "copilot": {
-      "version_probe": "copilot --version",
-      "live": true,
+      "version_probe": "copilot version",
+      "live": false,
       "os": {
         "linux": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
-        "macos": { "last_validated_version": "", "last_validated_at": "", "run_url": "" }
-      }
+        "macos": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
+        "windows": { "last_validated_version": "", "last_validated_at": "", "run_url": "" }
+      },
+      "notes": "Native Windows implementation is present but not certified; official-client Windows evidence remains pending."
     },
     "openhands": {
       "version_probe": "openhands --version",
@@ -57,22 +59,36 @@
     "hermes": {
       "version_probe": "hermes --version",
       "live": false,
-      "notes": "contract-only (Layer A); only pre_tool_call is mapped"
+      "notes": "contract-only (Layer A); all 23 v0.19 shell-hook-valid events are mapped by official role; packaged and real-client Windows validation is pending"
     },
     "windsurf": {
       "version_probe": "",
       "live": false,
       "notes": "contract-only (Layer A); no headless CLI/SDK"
     },
+    "opencode": {
+      "version_probe": "opencode --version",
+      "live": false,
+      "os": {
+        "windows": { "last_validated_version": "", "last_validated_at": "", "run_url": "" }
+      },
+      "notes": "Native Windows implementation is preview-only; authentic packaged Setup and official-client certification evidence remain pending."
+    },
     "antigravity": {
       "version_probe": "agy --version",
       "live": false,
-      "notes": "contract-only (Layer A); headless auth is Google Sign-In/keyring OAuth, no API key"
+      "notes": "Native Windows x64 implementation and contract checks are present but certification remains pending integrated packaged and official-client validation. Real official-client E2E is manual on a dedicated pre-authenticated Windows runner because Google documents Windows Credential Manager/browser auth, not API-key bootstrap.",
+      "os": {
+        "windows": { "last_validated_version": "", "last_validated_at": "", "run_url": "" }
+      }
     },
     "omnigent": {
       "version_probe": "omnigent --version",
       "live": false,
-      "notes": "contract-only (Layer A); custom Python policy bridge"
+      "os": {
+        "windows": { "last_validated_version": "", "last_validated_at": "", "run_url": "" }
+      },
+      "notes": "contract-only; native Windows server/SDK policy bridge is degraded preview and its official-client job remains advisory"
     }
   }
 }

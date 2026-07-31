@@ -19,6 +19,7 @@ package gateway
 import (
 	"context"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -41,6 +42,115 @@ func attrByKey(kv []attribute.KeyValue, key string) (attribute.Value, bool) {
 // repo's own PreToolUse hook would block writing the test.
 func trustExploitKeyword() string {
 	return "jail" + "break ai"
+}
+
+func TestCodexOutputUsesExactLifecycleControlSemantics(t *testing.T) {
+	tests := []struct {
+		event string
+		want  map[string]interface{}
+	}{
+		{
+			event: "SessionStart",
+			want: map[string]interface{}{
+				"continue":   false,
+				"stopReason": "policy blocked lifecycle",
+			},
+		},
+		{
+			event: "PreCompact",
+			want: map[string]interface{}{
+				"continue":   false,
+				"stopReason": "policy blocked lifecycle",
+			},
+		},
+		{
+			event: "PostCompact",
+			want: map[string]interface{}{
+				"continue":   false,
+				"stopReason": "policy blocked lifecycle",
+			},
+		},
+		{
+			event: "SubagentStop",
+			want: map[string]interface{}{
+				"decision": "block",
+				"reason":   "policy blocked lifecycle",
+			},
+		},
+		{
+			event: "SessionEnd",
+			want:  nil,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.event, func(t *testing.T) {
+			got := codexOutput(test.event, "block", "block", "policy blocked lifecycle", "")
+			if !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("codexOutput(%s)=%#v want %#v", test.event, got, test.want)
+			}
+		})
+	}
+}
+
+func TestCodexRuntimeVersionGatesLifecycleControls(t *testing.T) {
+	tests := []struct {
+		contractID string
+		event      string
+		wantBlock  bool
+	}{
+		{contractID: "codex-hooks-v1", event: "SessionStart"},
+		{contractID: "codex-hooks-v2", event: "PreCompact"},
+		{contractID: "codex-hooks-v2", event: "PostCompact"},
+		{contractID: "codex-hooks-v3", event: "SessionStart", wantBlock: true},
+		{contractID: "codex-hooks-v3", event: "PreCompact", wantBlock: true},
+		{contractID: "codex-hooks-v4", event: "PostCompact", wantBlock: true},
+		{contractID: "codex-hooks-v4", event: "SubagentStop", wantBlock: true},
+	}
+	for _, test := range tests {
+		t.Run(test.contractID+"/"+test.event, func(t *testing.T) {
+			profile := connector.NewCodexConnector().HookProfile(connector.SetupOpts{
+				HookContractID: test.contractID,
+			})
+			action, wouldBlock := mapHookActionForProfile(
+				"block",
+				"action",
+				test.event,
+				profile.Capabilities,
+				profile,
+				nil,
+			)
+			resp := codexResponseFor(
+				test.event,
+				action,
+				"block",
+				"HIGH",
+				"test policy block",
+				nil,
+				"action",
+				wouldBlock,
+			)
+			if test.wantBlock {
+				if resp.Action != "block" || resp.WouldBlock {
+					t.Fatalf("current contract response=%+v, want enforced block", resp)
+				}
+				if resp.CodexOutput == nil {
+					t.Fatal("current contract omitted certified lifecycle control output")
+				}
+				return
+			}
+			if resp.Action != "allow" || !resp.WouldBlock {
+				t.Fatalf("legacy contract response=%+v, want allow + would_block", resp)
+			}
+			if resp.CodexOutput != nil {
+				if continued, ok := resp.CodexOutput["continue"].(bool); ok && !continued {
+					t.Fatalf("legacy contract emitted continue=false: %+v", resp.CodexOutput)
+				}
+				if decision, _ := resp.CodexOutput["decision"].(string); decision == "block" {
+					t.Fatalf("legacy contract emitted decision=block: %+v", resp.CodexOutput)
+				}
+			}
+		})
+	}
 }
 
 // TestEvaluateCodexHook_ActiveConnectorImpliesEnabled mirrors the

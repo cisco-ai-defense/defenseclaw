@@ -1,4 +1,4 @@
-﻿# Copyright 2026 Cisco Systems, Inc. and its affiliates
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
 
 <#
@@ -22,7 +22,7 @@ param(
     [string]$StateRoot = (Join-Path ([IO.Path]::GetTempPath()) "defenseclaw-wizard-smoke-$PID"),
     [ValidateRange(1, 60)]
     [int]$TimeoutSeconds = 15,
-    [ValidateSet('none', 'codex', 'claudecode')]
+    [ValidateSet('none', 'antigravity', 'codex', 'claudecode', 'copilot', 'cursor', 'hermes', 'windsurf', 'omnigent', 'opencode')]
     [string]$Connector = 'claudecode',
     [ValidateSet('observe', 'action')]
     [string]$Mode = 'observe',
@@ -364,7 +364,18 @@ function Get-WizardObservation(
     }
 }
 
-$connectorIndices = @{ none = 0; codex = 1; claudecode = 2 }
+$connectorIndices = @{
+    none = 0
+    antigravity = 1
+    codex = 2
+    claudecode = 3
+    copilot = 4
+    cursor = 5
+    hermes = 6
+    windsurf = 7
+    omnigent = 8
+    opencode = 9
+}
 $modeIndices = @{ observe = 0; action = 1 }
 $process = $null
 $finished = $false
@@ -452,7 +463,7 @@ try {
     $headingControl = Get-WizardControl $window 1011 'heading'
 
     $control = [Diagnostics.Stopwatch]::StartNew()
-    foreach ($index in 0..2) {
+    foreach ($index in 0..3) {
         Set-AndAssertComboSelection $connectorControl $index 'Connector'
     }
     foreach ($index in 0..1) {

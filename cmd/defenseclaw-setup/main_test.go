@@ -180,6 +180,18 @@ func TestParseArgsSilentInstallProperties(t *testing.T) {
 	}
 }
 
+func TestParseArgsNormalizesCursorAgentAliases(t *testing.T) {
+	for _, alias := range []string{"cursor", "cursor-agent", "cursoragent"} {
+		opts, err := parseArgs([]string{"/quiet", "CONNECTOR=" + alias})
+		if err != nil {
+			t.Fatalf("parseArgs(%q): %v", alias, err)
+		}
+		if opts.Connector != "cursor" || !opts.ConnectorSet {
+			t.Fatalf("parseArgs(%q) connector = %q, set=%t", alias, opts.Connector, opts.ConnectorSet)
+		}
+	}
+}
+
 func TestParseArgsVerifyAction(t *testing.T) {
 	opts, err := parseArgs([]string{"/verify"})
 	if err != nil {
@@ -222,7 +234,7 @@ func TestParseArgsDeferredCleanupQuietRestartContract(t *testing.T) {
 }
 
 func TestParseArgsQuietPropertyMatrix(t *testing.T) {
-	for _, connector := range []string{"none", "codex", "claudecode"} {
+	for _, connector := range []string{"none", "antigravity", "claudecode", "codex", "copilot", "cursor", "hermes", "omnigent", "opencode", "windsurf"} {
 		for _, mode := range []string{"observe", "action"} {
 			for _, start := range []string{"0", "1"} {
 				t.Run(connector+"/"+mode+"/start-"+start, func(t *testing.T) {
@@ -297,7 +309,7 @@ func TestNoRestartStillRestartsPreviouslyRunningOwnedServices(t *testing.T) {
 }
 
 func TestConfiguredConnectorRequiresPersistentGateway(t *testing.T) {
-	for _, connectorName := range []string{"codex", "claudecode"} {
+	for _, connectorName := range []string{"antigravity", "claudecode", "codex", "copilot", "cursor", "hermes", "omnigent", "opencode", "windsurf"} {
 		wanted := requestedServices(options{Connector: connectorName}, serviceState{})
 		if !wanted.Gateway {
 			t.Fatalf("connector %s did not require gateway startup", connectorName)
@@ -318,6 +330,34 @@ func TestCanonicalInitializationUsesExplicitNoConnectorAuthority(t *testing.T) {
 	}
 	if !slices.Equal(args, want) {
 		t.Fatalf("canonical initialization args = %v, want %v", args, want)
+	}
+}
+
+func TestCopilotInitializationUsesNarrowNativeSetupBootstrap(t *testing.T) {
+	args := initialConfigurationArgs(options{Connector: "copilot", Mode: "action"})
+	want := []string{
+		"init", "--skip-install", "--non-interactive", "--yes",
+		"--connector", "copilot",
+		"--profile", "action",
+		"--no-start-gateway", "--no-verify",
+		"--native-setup-copilot",
+	}
+	if !slices.Equal(args, want) {
+		t.Fatalf("Copilot initialization args = %v, want %v", args, want)
+	}
+}
+
+func TestAntigravityInitializationUsesNarrowNativeSetupBootstrap(t *testing.T) {
+	args := initialConfigurationArgs(options{Connector: "antigravity", Mode: "action"})
+	want := []string{
+		"init", "--skip-install", "--non-interactive", "--yes",
+		"--connector", "antigravity",
+		"--profile", "action",
+		"--no-start-gateway", "--no-verify",
+		"--native-setup-antigravity",
+	}
+	if !slices.Equal(args, want) {
+		t.Fatalf("Antigravity initialization args = %v, want %v", args, want)
 	}
 }
 
@@ -523,7 +563,7 @@ func TestConnectorsForNativeUninstallUsesDurableBackups(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{"codex", "claudecode"}
-	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+	if !slices.Equal(got, want) {
 		t.Fatalf("connectors = %v, want %v", got, want)
 	}
 }
@@ -531,8 +571,15 @@ func TestConnectorsForNativeUninstallUsesDurableBackups(t *testing.T) {
 func TestConnectorsForNativeUninstallUsesStructuredBackupMarkers(t *testing.T) {
 	dataRoot := t.TempDir()
 	markers := []string{
+		filepath.Join("connector_backups", "antigravity", "hooks.json.json"),
 		filepath.Join("connector_backups", "codex", "config.toml.json"),
 		filepath.Join("connector_backups", "claudecode", "settings.json.json"),
+		filepath.Join("connector_backups", "copilot", "config.json"),
+		filepath.Join("connector_backups", "cursor", "hooks.json.json"),
+		filepath.Join("connector_backups", "windsurf", "config.json"),
+		filepath.Join("connector_backups", "opencode", "config.json"),
+		filepath.Join("connector_backups", "omnigent", "config.json"),
+		filepath.Join("connector_backups", "hermes", "config.yaml.json"),
 	}
 	for _, marker := range markers {
 		path := filepath.Join(dataRoot, marker)
@@ -548,15 +595,15 @@ func TestConnectorsForNativeUninstallUsesStructuredBackupMarkers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"codex", "claudecode"}
-	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+	want := []string{"codex", "claudecode", "copilot", "cursor", "windsurf", "antigravity", "opencode", "omnigent", "hermes"}
+	if !slices.Equal(got, want) {
 		t.Fatalf("connectors = %v, want %v", got, want)
 	}
 }
 
 func TestConnectorsForNativeUninstallUsesActiveConnectorRoster(t *testing.T) {
 	dataRoot := t.TempDir()
-	state := []byte(`{"version":3,"names":["claudecode","codex"],"name":"claudecode"}`)
+	state := []byte(`{"version":3,"names":["claudecode","codex","copilot","cursor","opencode"],"name":"claudecode"}`)
 	if err := os.WriteFile(filepath.Join(dataRoot, "active_connector.json"), state, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -565,8 +612,8 @@ func TestConnectorsForNativeUninstallUsesActiveConnectorRoster(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"claudecode", "codex"}
-	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+	want := []string{"claudecode", "codex", "copilot", "cursor", "opencode"}
+	if !slices.Equal(got, want) {
 		t.Fatalf("connectors = %v, want %v", got, want)
 	}
 }
@@ -579,9 +626,16 @@ guardrail:
   enabled: false
   connector: openclaw
   connectors:
+    antigravity:
+      mode: observe
     claudecode:
       mode: action
     codex:
+      mode: observe
+    copilot:
+      mode: observe
+    cursor:
+    opencode:
       mode: observe
 gateway:
   token: private-synthetic-value-must-not-appear
@@ -596,7 +650,7 @@ observability:
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"claudecode", "codex"}
+	want := []string{"antigravity", "claudecode", "codex", "copilot", "cursor", "opencode"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("connectors = %v, want %v", got, want)
 	}

@@ -2401,7 +2401,8 @@ class Config:
         """Return skill directories for a connector.
 
         Polymorphic — when ``guardrail.connector`` is set, the
-        connector-specific layout (e.g. ``~/.codex/skills``) is
+        connector-specific layout (for Codex, project and personal
+        ``.agents/skills`` layers) is
         returned; otherwise falls back to OpenClaw paths derived
         from ``claw.home_dir`` and ``claw.config_file``.
 

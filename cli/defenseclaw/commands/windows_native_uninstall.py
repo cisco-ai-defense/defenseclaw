@@ -87,6 +87,14 @@ _INSTALL_STATE_OPTIONAL_FIELDS = frozenset(
         "path_value_created",
         "codex_home",
         "claude_config_dir",
+        "copilot_home",
+        "cursor_home",
+        "windsurf_user_home",
+        "windsurf_hooks_path",
+        "antigravity_config_dir",
+        "opencode_config_dir",
+        "omnigent_config_home",
+        "hermes_home",
         "transaction_id",
     }
 )
@@ -487,7 +495,19 @@ def _validate_install_state(
         state.get("distribution_flavor") != "oss"
         or state.get("install_kind") != "native-windows-exe"
         or state.get("install_scope") != "user"
-        or state.get("connector") not in {"codex", "claudecode", "none"}
+        or state.get("connector")
+        not in {
+            "antigravity",
+            "codex",
+            "claudecode",
+            "copilot",
+            "cursor",
+            "hermes",
+            "omnigent",
+            "windsurf",
+            "opencode",
+            "none",
+        }
         or state.get("mode") not in {"observe", "action"}
         or state.get("unsigned_local_artifact") is not False
         or state.get("release_signing_required") is not True

@@ -13,12 +13,11 @@
 #   - install:  npm i -g @github/copilot@${COPILOT_VERSION:-latest}
 #   - headless: copilot -p "<prompt>" --allow-all-tools
 #   - auth:     an ENTITLED GitHub token (Copilot subscription). Provide it via
-#               the COPILOT_CLI_TOKEN secret; we export it as GH_COPILOT_TOKEN
-#               and GITHUB_TOKEN so the CLI picks it up.
-#   - hooks:    USER-LEVEL ONLY. Repo-level .github/hooks/*.json do NOT load in
-#               `-p` mode (upstream bug github/copilot-cli#3345), so
-#               `defenseclaw setup copilot` must write ~/.copilot/hooks/*.json.
-#               We force user scope by NOT passing --workspace.
+#               the official COPILOT_GITHUB_TOKEN token-precedence variable.
+#   - hooks:    USER-LEVEL by default. Programmatic `-p` repo hooks require the
+#               documented GITHUB_COPILOT_PROMPT_MODE_REPO_HOOKS=true opt-in
+#               unless the repository is already trusted or the run allows all
+#               paths/tools. The driver avoids that extra trust dimension.
 #   - status:   continue-on-error in the workflow until proven stable.
 
 set -euo pipefail
@@ -34,11 +33,9 @@ DC_DRIVER_SUPPORTS_OTLP=0
 
 agent_install() {
   npm install -g "@github/copilot@${COPILOT_VERSION:-latest}" || return 1
-  DC_E2E_AGENT_VERSION="$(dc_capture_version copilot copilot --version)"
+  DC_E2E_AGENT_VERSION="$(dc_capture_version copilot copilot version)"
   export DC_E2E_AGENT_VERSION
-  # Copilot CLI reads an entitled token from the environment.
-  export GH_COPILOT_TOKEN="${COPILOT_CLI_TOKEN:-${GH_COPILOT_TOKEN:-}}"
-  export GITHUB_TOKEN="${COPILOT_CLI_TOKEN:-${GITHUB_TOKEN:-}}"
+  # Copilot CLI reads the inherited official COPILOT_GITHUB_TOKEN directly.
 }
 
 agent_run() {

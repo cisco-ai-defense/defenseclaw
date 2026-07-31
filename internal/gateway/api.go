@@ -1340,7 +1340,7 @@ func connectorModeFor(name, policyMode string) map[string]interface{} {
 		intercept = false
 		surface = "agent_lifecycle_hooks"
 		telemetry = []string{"hooks"}
-		if name == "geminicli" || name == "copilot" {
+		if name == "geminicli" {
 			telemetry = append(telemetry, "otel")
 		}
 	case "omnigent":

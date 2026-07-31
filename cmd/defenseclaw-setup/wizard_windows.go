@@ -210,8 +210,15 @@ type wizardChoice struct {
 var (
 	wizardConnectorChoices = []wizardChoice{
 		{Label: "Configure later", Value: "none"},
+		{Label: "Google Antigravity", Value: "antigravity"},
 		{Label: "Codex CLI", Value: "codex"},
 		{Label: "Claude Code", Value: "claudecode"},
+		{Label: "GitHub Copilot CLI", Value: "copilot"},
+		{Label: "Cursor Agent", Value: "cursor"},
+		{Label: "Hermes Agent (preview)", Value: "hermes"},
+		{Label: "Windsurf", Value: "windsurf"},
+		{Label: "OmniGent (native degraded preview)", Value: "omnigent"},
+		{Label: "OpenCode (preview)", Value: "opencode"},
 	}
 	wizardModeChoices = []wizardChoice{
 		{Label: "Observe", Value: "observe"},
@@ -732,8 +739,22 @@ func wizardCompletionDescription(connector string) string {
 		return "Codex CLI is configured and the DefenseClaw hooks are trusted automatically." + installed
 	case "claudecode":
 		return "Claude Code is configured and its native Windows hooks are ready." + installed
+	case "copilot":
+		return "GitHub Copilot CLI is configured and its native Windows hooks are ready." + installed
+	case "cursor":
+		return "Cursor Agent is configured with the native Windows PowerShell hook adapter." + installed
+	case "hermes":
+		return "Hermes preview hooks are configured through the direct native launcher. Valid synchronous JSON can block pre-tool calls; hook failures remain open and no native ask surface exists." + installed
+	case "windsurf":
+		return "Windsurf native Windows support is configured as preview with PowerShell Cascade hooks. Blocking applies only to documented pre-hooks; post hooks remain non-blocking." + installed
+	case "antigravity":
+		return "Google Antigravity is configured with its native Windows hooks." + installed
+	case "opencode":
+		return "OpenCode preview is configured with the native Windows bridge plugin. Restart OpenCode to load it." + installed
+	case "omnigent":
+		return "OmniGent's native degraded policy preview is configured; terminal and sandbox parity are not included." + installed
 	default:
-		return "Open a terminal and run defenseclaw init when you are ready to configure Codex, Claude Code, or another connector." + installed
+		return "Open a terminal and run defenseclaw init when you are ready to configure a connector." + installed
 	}
 }
 

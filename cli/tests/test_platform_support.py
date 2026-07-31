@@ -62,10 +62,18 @@ from defenseclaw.tui.services.cli_choices import (
 
 from tests.helpers import cleanup_app, make_app_context
 
-WINDOWS_SUPPORTED = {"codex", "claudecode"}
-WINDOWS_PREVIEW: set[str] = set()
-WINDOWS_NOT_CERTIFIED = {"cursor", "windsurf", "geminicli", "copilot", "antigravity", "opencode", "hermes"}
-WINDOWS_UNSUPPORTED = {"openhands", "omnigent", "openclaw", "zeptoclaw"}
+WINDOWS_SUPPORTED: set[str] = set()
+WINDOWS_PREVIEW: set[str] = {
+    "claudecode",
+    "codex",
+    "cursor",
+    "hermes",
+    "windsurf",
+    "opencode",
+    "omnigent",
+}
+WINDOWS_NOT_CERTIFIED = {"copilot", "antigravity"}
+WINDOWS_UNSUPPORTED = {"geminicli", "openhands", "openclaw", "zeptoclaw"}
 ALL_CONNECTORS = WINDOWS_SUPPORTED | WINDOWS_PREVIEW | WINDOWS_NOT_CERTIFIED | WINDOWS_UNSUPPORTED
 
 
@@ -173,9 +181,23 @@ def test_non_windows_behavior_is_unchanged() -> None:
             assert support.available
 
 
-def test_supported_connectors_preserves_order_and_certified_windows_scope() -> None:
-    ordered = ["openclaw", "codex", "hermes", "openhands", "claudecode"]
-    assert supported_connectors(ordered, "windows") == ["codex", "claudecode"]
+def test_supported_connectors_preserves_order_and_available_windows_scope() -> None:
+    ordered = [
+        "openclaw",
+        "cursor",
+        "codex",
+        "opencode",
+        "hermes",
+        "openhands",
+        "claudecode",
+    ]
+    assert supported_connectors(ordered, "windows") == [
+        "cursor",
+        "codex",
+        "opencode",
+        "hermes",
+        "claudecode",
+    ]
     assert supported_connectors(ordered, "linux") == ordered
 
 
@@ -264,14 +286,21 @@ def test_all_connector_lists_share_one_taxonomy() -> None:
     assert set(_HOOK_ENFORCED_CONNECTORS) == ALL_CONNECTORS - set(PROXY_CONNECTORS)
 
 
-def test_windows_views_hide_unsupported_and_have_no_preview() -> None:
-    expected = WINDOWS_SUPPORTED
+def test_windows_views_include_labeled_preview_and_hide_unavailable() -> None:
+    expected = WINDOWS_SUPPORTED | WINDOWS_PREVIEW
     assert set(supported_connector_choices("windows")) == expected
     assert set(visible_connector_choices("windows")) == expected
 
     win_modes = visible_mode_picker_choices("windows")
     assert {choice.wire for choice in win_modes} == expected
-    assert all("preview" not in choice.label.lower() for choice in win_modes)
+    labels = {choice.wire: choice.label.lower() for choice in win_modes}
+    assert all("preview" in labels[connector] for connector in WINDOWS_PREVIEW)
+    assert all(
+        "preview" not in label
+        for connector, label in labels.items()
+        if connector not in WINDOWS_PREVIEW
+    )
+    assert "omnigent" in {choice.wire for choice in win_modes}
 
 
 def test_non_windows_views_are_unfiltered() -> None:
@@ -323,17 +352,9 @@ def test_direct_windows_setup_rejects_unsupported_with_reason() -> None:
                 ["openhands", "--yes", "--no-restart"],
                 obj=app,
             )
-            omnigent = runner.invoke(
-                setup_group,
-                ["omnigent", "--yes", "--no-restart"],
-                obj=app,
-            )
         assert openhands.exit_code != 0
         assert "unsupported on windows" in openhands.output
         assert "requires WSL" in openhands.output
-        assert omnigent.exit_code != 0
-        assert "unsupported on windows" in omnigent.output
-        assert "no supported native Windows" in omnigent.output
     finally:
         cleanup_app(app, db_path, tmp_dir)
 

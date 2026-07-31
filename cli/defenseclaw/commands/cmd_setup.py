@@ -148,6 +148,13 @@ _TOKEN_ROTATION_CHILD_ENV_ALLOWLIST = (
     # connector homes; preserve that binding across every rotation child.
     "CODEX_HOME",
     "CLAUDE_CONFIG_DIR",
+    "COPILOT_HOME",
+    "DEFENSECLAW_CURSOR_CONFIG_HOME",
+    "WINDSURF_USER_HOME",
+    "WINDSURF_HOOK_CONFIG_PATH",
+    "OPENCODE_CONFIG_DIR",
+    "OMNIGENT_CONFIG_HOME",
+    "HERMES_HOME",
 )
 _NATIVE_SPLUNK_CONFIG_SNAPSHOT_ATTR = "_native_splunk_config_snapshot"
 _NATIVE_SPLUNK_DOTENV_SNAPSHOT_ATTR = "_native_splunk_dotenv_snapshot"
@@ -3154,7 +3161,7 @@ _CONNECTOR_META: dict[str, dict[str, str]] = {
     },
     "claudecode": {
         "label": "Claude Code",
-        "description": "env var + PreToolUse hook script",
+        "description": "native owned hook matrix + OTLP env",
         "tool_mode": "both",
         "subprocess_policy": "none",
     },
@@ -3166,7 +3173,7 @@ _CONNECTOR_META: dict[str, dict[str, str]] = {
     },
     "hermes": {
         "label": "Hermes",
-        "description": "config.yaml hooks + MCP/skills/plugins surfaces",
+        "description": "config.yaml hooks (JSON block; fail-open) + MCP/skills/plugin inventory",
         "tool_mode": "both",
         "subprocess_policy": "none",
     },
@@ -3184,7 +3191,10 @@ _CONNECTOR_META: dict[str, dict[str, str]] = {
     },
     "geminicli": {
         "label": "Gemini CLI",
-        "description": "settings.json hooks + native OTLP + extensions",
+        "description": (
+            "enterprise/Google Cloud/paid API-key settings.json hooks + "
+            "native OTLP + extensions"
+        ),
         "tool_mode": "both",
         "subprocess_policy": "none",
     },
@@ -3203,10 +3213,10 @@ _CONNECTOR_META: dict[str, dict[str, str]] = {
     "antigravity": {
         "label": "Antigravity",
         "description": (
-            "five lifecycle hooks in ~/.gemini/config/hooks.json; PreToolUse "
-            "native ask is empirically verified to override --dangerously-skip-permissions"
+            "five lifecycle hooks in ~/.gemini/config/hooks.json; only "
+            "PreToolUse has documented native ask and deny responses"
         ),
-        "tool_mode": "both",
+        "tool_mode": "pre-execution",
         "subprocess_policy": "none",
     },
     "opencode": {
@@ -3272,13 +3282,20 @@ _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
         ),
         "HERMES_HOME/config.yaml MCP entries when configured explicitly",
         "HERMES_HOME/skills and HERMES_HOME/plugins discovery/install surfaces",
-        "~/.defenseclaw/hooks/hermes-hook.sh",
+        "DefenseClaw's platform-native hook runtime and connector-scoped token files",
     ),
     "cursor": (
         "~/.cursor/hooks.json hooks",
         "<workspace>/.cursor/mcp.json MCP entries when configured explicitly",
         "<workspace>/.cursor/skills and <workspace>/.cursor/rules install surfaces",
-        "~/.defenseclaw/hooks/cursor-hook.sh",
+        (
+            "Existing ~/.cursor/plugins/local plugins and user/project "
+            ".cursor/agents subagents are inventoried read-only"
+        ),
+        (
+            "~/.defenseclaw/hooks/cursor-hook.ps1 on Windows; "
+            "~/.defenseclaw/hooks/cursor-hook.sh on non-Windows"
+        ),
     ),
     "windsurf": (
         "~/.codeium/windsurf/hooks.json hooks",
@@ -3286,10 +3303,10 @@ _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
         "~/.defenseclaw/hooks/windsurf-hook.sh",
     ),
     "geminicli": (
-        "~/.gemini/settings.json hooks",
+        "~/.gemini/settings.json hooks (continuing enterprise/Google Cloud/paid API-key product only)",
         "~/.gemini/settings.json native OTLP telemetry and MCP entries",
         "<workspace>/.gemini/skills, extensions, and agents install surfaces",
-        "~/.defenseclaw/hooks/geminicli-hook.sh",
+        "~/.defenseclaw/hooks/geminicli-hook.sh (supported non-Windows hosts only)",
     ),
     "copilot": (
         "~/.copilot/hooks/defenseclaw.json hooks by default",
@@ -3312,9 +3329,10 @@ _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
     ),
     "antigravity": (
         (
-            "~/.gemini/config/hooks.json — single global hook entry in agy's "
-            "Claude-Code-compatible nested schema; agy merges every discovered "
-            "hooks file, so DefenseClaw never patches workspace-local copies"
+            "~/.gemini/config/hooks.json — five DefenseClaw-owned registrations "
+            "using Antigravity's documented direct-list and matcher-group shapes; "
+            "the host separately discovers <workspace>/.agents/hooks.json, so "
+            "DefenseClaw owns only the global registration"
         ),
         "~/.defenseclaw/hooks/antigravity-hook.sh",
     ),
@@ -3687,7 +3705,7 @@ def _record_windows_setup_agent_selections(
     data_dir: str | os.PathLike[str] | None,
     connectors: list[str] | tuple[str, ...],
 ) -> None:
-    """Refresh protected executable authority required by native Codex setup."""
+    """Refresh protected executable authority for native runtime inspection."""
 
     if platform_support.host_os() != "windows":
         return
@@ -3695,7 +3713,7 @@ def _record_windows_setup_agent_selections(
         dict.fromkeys(
             connector
             for raw in connectors
-            if (connector := normalize_connector(raw)) == "codex"
+            if (connector := normalize_connector(raw)) in {"codex", "omnigent"}
         )
     )
     if not selected:
@@ -3823,14 +3841,11 @@ def _hilt_support_note(connector: str) -> str:
     if connector == "cursor":
         return "Cursor supports native ask only on documented ask-capable hook events."
     if connector == "antigravity":
-        return (
-            "Antigravity supports native PreToolUse ask; returning decision=ask "
-            "from a hook overrides agy's --dangerously-skip-permissions flag."
-        )
+        return "Antigravity documents native ask only for PreToolUse."
     if connector == "omnigent":
         return (
             "OmniGent parks request, tool_call, and llm_request policy phases for native ASK approval; "
-            "post-action confirm verdicts use the configured fallback."
+            "post-phase confirm findings are audited and continue without an approval pause."
         )
     if connector in {"hermes", "windsurf", "geminicli", "openhands", "opencode"}:
         return (
@@ -5311,6 +5326,21 @@ def _apply_hook_connector_setup(
     # but presenting that as guardrail.mode nudges users toward unsafe global
     # edits on multi-connector installs.
     click.echo(f"  ✓ {connector} mode={desired_mode}")
+    if connector == "cursor":
+        requested_fail_mode = (gc.effective_hook_fail_mode("cursor") or "open").strip().lower()
+        effective_fail_mode = (
+            "closed"
+            if desired_mode == "action" and requested_fail_mode == "closed"
+            else "open"
+        )
+        click.echo(
+            f"  ✓ cursor hook failures={effective_fail_mode} "
+            f"(failClosed={str(effective_fail_mode == 'closed').lower()}; vendor default is fail-open)"
+        )
+        click.echo(
+            "  ℹ Cursor ask is enforced only for beforeShellExecution and beforeMCPExecution; "
+            "sessionStart/sessionEnd are fire-and-forget and stop is followup-only"
+        )
 
     if restart:
         click.echo()
@@ -5370,7 +5400,15 @@ def _print_connector_observability_banner(connector: str, *, mode: str = "observ
     else:
         click.echo(f"  This wires {label} into DefenseClaw via the agent's")
         click.echo("  native hook bus. No proxy is inserted in the LLM data")
-        if mode == "action":
+        if connector == "hermes" and mode == "action":
+            click.echo("  path; valid synchronous pre_tool_call JSON can deny tools,")
+            click.echo("  while pre_verify JSON can continue verification. Failures")
+            click.echo("  remain open, exit status is not enforcement, and there is no ask.")
+        elif connector == "antigravity" and mode == "action":
+            click.echo("  path; only synchronous PreToolUse JSON can ask or deny.")
+            click.echo("  Other lifecycle outputs are non-blocking, and nonzero")
+            click.echo("  hook exit status is not an enforcement interface.")
+        elif mode == "action":
             click.echo("  path; supported actions flagged by policy are blocked")
             click.echo("  by the connector's native lifecycle verdict.")
         else:
@@ -5379,9 +5417,14 @@ def _print_connector_observability_banner(connector: str, *, mode: str = "observ
     click.echo("  Telemetry channels:")
     if connector == "omnigent":
         click.echo("    • Policy API — six request/tool/model phases → /api/v1/omnigent/hook")
+    elif connector == "hermes":
+        click.echo("    • Hooks      — 23 classified v0.19 events → /api/v1/hermes/hook")
+    elif connector == "antigravity":
+        click.echo("    • Hooks      — five bound lifecycle events → /api/v1/antigravity/hook")
+        click.echo("                   only PreToolUse carries documented ask/deny output")
     else:
         click.echo(f"    • Hooks      — tool calls, prompt-submit, agent stop → /api/v1/{connector}/hook")
-    native_otel_connectors = {"codex", "claudecode", "geminicli", "copilot", "omnigent"}
+    native_otel_connectors = {"codex", "claudecode", "geminicli", "omnigent"}
     if connector in native_otel_connectors:
         if connector == "omnigent":
             click.echo(
@@ -5445,6 +5488,12 @@ def _print_observability_summary(
     label = _CONNECTOR_META[connector]["label"]
     if connector == "omnigent":
         enforcement_label = "enabled (custom policy API)" if mode == "action" else "disabled (observe-only)"
+    elif connector == "hermes":
+        enforcement_label = (
+            "preview (pre_tool deny; pre_verify continue; failures open; no ask)"
+            if mode == "action"
+            else "disabled (observe-only)"
+        )
     else:
         enforcement_label = "enabled (hook-driven)" if mode == "action" else "disabled (observe-only)"
 
@@ -5488,6 +5537,14 @@ def _print_observability_summary(
     ]
     if connector == "omnigent":
         rows.append(("native OTel", "optional; inactive until OTEL_* is exported for OmniGent"))
+    elif connector == "hermes":
+        rows.extend(
+            [
+                ("hook failure posture", "upstream fail-open"),
+                ("native ask/approve", "unsupported"),
+                ("native OTel", "unsupported; hook-derived audit only"),
+            ]
+        )
     for k, v in rows:
         click.echo(f"    {k + ':':<22s} {v}")
     click.echo()
@@ -5682,17 +5739,17 @@ def _setup_observability_alias(
         raise click.ClickException(f"unsupported connector for hook alias: {connector!r}")
     _ensure_connector_available(connector)
 
-    # Antigravity is global-only by design. agy v1.0.x merges every
-    # hooks file it discovers (~/.gemini/config/hooks.json,
-    # legacy ~/.gemini/hooks.json, workspace .antigravitycli/hooks.json),
-    # so a workspace-scoped install would silently fire the same hook
-    # multiple times per tool call. Reject --workspace explicitly rather
-    # than accepting it and quietly doing the wrong thing.
+    # Antigravity documents global customization at
+    # ~/.gemini/config/hooks.json and workspace customization at
+    # <workspace>/.agents/hooks.json. The host discovers both, so Setup owns
+    # only the global file and rejects --workspace to avoid duplicate
+    # DefenseClaw registrations.
     if connector == "antigravity" and (workspace_dir or "").strip():
         raise click.ClickException(
-            "antigravity setup does not support --workspace: agy merges every "
-            "hooks file it discovers, so DefenseClaw only writes the global "
-            "~/.gemini/config/hooks.json to avoid duplicate firings. "
+            "antigravity setup does not support --workspace: Antigravity "
+            "discovers both ~/.gemini/config/hooks.json and "
+            "<workspace>/.agents/hooks.json, so DefenseClaw owns only the "
+            "global file to avoid duplicate registrations. "
             "Re-run without --workspace."
         )
 
@@ -5709,6 +5766,11 @@ def _setup_observability_alias(
         normalized_mode = _prompt_connector_mode(connector, default_mode=normalized_mode)
 
     _print_connector_observability_banner(connector, mode=normalized_mode)
+    if connector == "hermes" and (fail_mode or "").strip().lower() == "closed":
+        ux.warn(
+            "Hermes remains upstream fail-open. --fail-mode closed is recorded only as policy "
+            "provenance; timeout, nonzero, malformed, authentication, and transport failures continue."
+        )
 
     # WU7: resolve add-vs-replace. Only HOOK-ENFORCED peers count as valid
     # multi-connector neighbors (D4=A) — proxy-backed connectors
@@ -6609,19 +6671,21 @@ def setup_codex(
 
     Alias for the hook-driven path of ``setup guardrail`` with
     ``--connector codex``. Configures Codex in the hook connector set
-    so the TUI, skill scanner, MCP scanner, and plugin scanner read
-    from ``~/.codex/`` for Codex-scoped surfaces.
+    so inventory follows Codex's current ``.agents`` asset layouts and
+    user/project ``.codex/config.toml`` layers.
 
     Wires three telemetry channels at gateway boot:
 
     \b
       • Hooks   — version-selected lifecycle contract: six events on
-                  0.124-0.128, eight on 0.129-0.132, and ten on 0.133+
+                  0.124-0.128, eight on 0.129-0.132, ten on
+                  0.133-0.144, and eleven from 0.145 (with SessionEnd
+                  advisory-only)
       • OTel    — native Codex logs, metrics, and traces using a
                   connector-scoped bearer and X-DefenseClaw-Source
                   header on the loopback /v1/<signal> routes
       • Notify  — agent-turn-complete webhooks via the bundled
-                  notify-bridge.sh shim
+                  native notification bridge
 
     Default mode is ``observe`` (record only). Pass ``--mode action``
     to provision hook-driven enforcement: the PreToolUse hook returns
@@ -6764,7 +6828,7 @@ def setup_claude_code(
     Wires two telemetry channels at gateway boot:
 
     \b
-      • Hooks — the supported Claude Code 2.1.152+ contract's 28
+      • Hooks — the supported Claude Code 2.1.154+ contract's 28
                 lifecycle, prompt, tool, subagent, task, compact,
                 elicitation, configuration, and notification events
       • OTel  — native Claude Code OTel exporter (env-driven) pointing
@@ -7015,7 +7079,18 @@ def _make_observability_setup_command(connector: str) -> click.Command:
             f"{platform.status} — {platform.reason}"
         )
     )
-    short_help = f"Configure DefenseClaw for {label}."
+    product_note = (
+        "\n\nGemini CLI scope: continuing enterprise, Google Cloud, and paid "
+        "API-key access only. Consumer/free/Google AI Pro/Ultra service ended "
+        "on June 18, 2026; this setup does not restore that access."
+        if connector == "geminicli"
+        else ""
+    )
+    short_help = (
+        "Configure continuing paid/enterprise Gemini CLI hooks."
+        if connector == "geminicli"
+        else f"Configure DefenseClaw for {label}."
+    )
     if platform.status != platform_support.SUPPORTED:
         short_help = f"{label}: {platform.status} on {platform_support.host_os()}."
 
@@ -7028,6 +7103,7 @@ def _make_observability_setup_command(connector: str) -> click.Command:
             "mode is observe; pass "
             "--mode action to enable agent-native blocking/approval verdicts "
             "on supported events. No proxy is involved in either mode."
+            f"{product_note}"
             f"{platform_note}"
         ),
         short_help=short_help,
@@ -7158,6 +7234,7 @@ def _make_observability_setup_command(connector: str) -> click.Command:
         "scanners read that agent's documented local surfaces. Default "
         "mode is observe; pass "
         "--mode action to enable agent-native lifecycle verdicts on policy hits."
+        f"{product_note}"
     )
     return _cmd
 

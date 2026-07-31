@@ -16,16 +16,24 @@
       ],
       "config_paths": [
         "~/.codex/config.toml",
-        "~/.codex/skills",
-        "~/.codex/plugins",
-        ".codex/skills",
-        ".mcp.json",
+        "~/.agents/skills",
+        "~/.agents/plugins/marketplace.json",
+        "~/.codex/plugins/cache",
+        "~/.codex/agents",
+        "~/.codex/rules",
+        "/etc/codex/skills",
+        ".agents/skills",
+        ".agents/plugins/marketplace.json",
+        ".claude-plugin/marketplace.json",
+        ".codex/config.toml",
+        ".codex/agents",
+        ".codex/rules",
         "AGENTS.md"
       ],
       "extension_ids": [],
       "mcp_paths": [
         "~/.codex/config.toml",
-        ".mcp.json"
+        ".codex/config.toml"
       ],
       "package_names": [
         "@openai/codex"
@@ -61,19 +69,21 @@
       "config_paths": [
         "~/.claude/settings.json",
         "~/.claude",
-        "~/.claude/settings.local.json",
-        "~/.claude.json",
         ".claude/settings.json",
         ".claude/settings.local.json",
-        ".mcp.json",
         "CLAUDE.md",
         ".claude/CLAUDE.md",
+        "~/.claude/skills",
+        "~/.claude/commands",
+        "~/.claude/agents",
+        "~/.claude/plugins/cache",
         ".claude/skills",
-        ".claude/plugins"
+        ".claude/commands",
+        ".claude/agents"
       ],
       "extension_ids": [],
       "mcp_paths": [
-        "~/.claude/settings.json",
+        "~/.claude.json",
         ".mcp.json"
       ],
       "package_names": [
@@ -81,6 +91,9 @@
       ],
       "env_var_names": [
         "ANTHROPIC_API_KEY",
+        "CLAUDE_CONFIG_DIR",
+        "CLAUDE_CODE_PLUGIN_CACHE_DIR",
+        "CLAUDE_CODE_USE_POWERSHELL_TOOL",
         "CLAUDE_CODE_ENABLE_TELEMETRY"
       ],
       "domain_patterns": [
@@ -209,6 +222,8 @@
       "confidence": 0.95,
       "supported_connector": "cursor",
       "binary_names": [
+        "agent",
+        "cursor-agent",
         "cursor"
       ],
       "process_names": [
@@ -257,9 +272,15 @@
       "confidence": 0.95,
       "supported_connector": "windsurf",
       "binary_names": [
+        "Devin.exe",
+        "devin-desktop",
         "windsurf"
       ],
       "process_names": [
+        "Devin",
+        "Devin.exe",
+        "devin-desktop",
+        "Devin Desktop",
         "windsurf",
         "Windsurf"
       ],
@@ -267,8 +288,11 @@
         "~/.codeium/windsurf/hooks.json",
         "~/.codeium/windsurf/mcp_config.json",
         "~/.codeium/windsurf/mcp.json",
+        "~/.codeium/windsurf/memories/global_rules.md",
+        ".devin/rules",
         ".windsurf/rules",
-        ".codeium/windsurf/rules",
+        ".windsurf/skills",
+        ".agents/skills",
         ".windsurfrules"
       ],
       "extension_ids": [
@@ -284,6 +308,7 @@
         "CODEIUM_API_KEY"
       ],
       "domain_patterns": [
+        "devin.ai",
         "codeium.com",
         "windsurf.com"
       ],
@@ -292,6 +317,7 @@
         "codeium"
       ],
       "application_names": [
+        "Devin Desktop",
         "Windsurf.app",
         "Windsurf"
       ],
@@ -385,9 +411,7 @@
         ".mcp.json"
       ],
       "package_names": [],
-      "env_var_names": [
-        "COPILOT_OTEL_ENABLED"
-      ],
+      "env_var_names": [],
       "domain_patterns": [
         "api.githubcopilot.com",
         "copilot-proxy.githubusercontent.com"
@@ -434,6 +458,7 @@
       "package_names": [],
       "env_var_names": [],
       "domain_patterns": [
+        "antigravity.google",
         "antigravity.google.com",
         "antigravity.dev"
       ],

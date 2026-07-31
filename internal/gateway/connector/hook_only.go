@@ -141,12 +141,12 @@ func NewCursorConnector() *hookOnlyConnector {
 				},
 				BlockEvents: []string{
 					"preToolUse",
+					"subagentStart",
 					"beforeShellExecution",
 					"beforeMCPExecution",
 					"beforeReadFile",
 					"beforeTabFileRead",
 					"beforeSubmitPrompt",
-					"stop",
 				},
 				SupportsFailClosed: true,
 				Scope:              "user",
@@ -168,7 +168,7 @@ func NewWindsurfConnector() *hookOnlyConnector {
 				CanBlock:           true,
 				CanAskNative:       false,
 				BlockEvents:        []string{"pre_user_prompt", "pre_read_code", "pre_write_code", "pre_run_command", "pre_mcp_tool_use"},
-				SupportsFailClosed: false,
+				SupportsFailClosed: true,
 				Scope:              "user",
 				ConfigPath:         windsurfHooksPath(opts),
 			}
@@ -179,7 +179,7 @@ func NewWindsurfConnector() *hookOnlyConnector {
 func NewGeminiCLIConnector() *hookOnlyConnector {
 	return &hookOnlyConnector{
 		name:        "geminicli",
-		description: "settings.json hooks with native OTLP, MCP, skills, extensions, and agents",
+		description: "enterprise/Cloud/paid-key settings.json hooks with native OTLP, MCP, skills, extensions, and agents",
 		apiPath:     "/api/v1/geminicli/hook",
 		scriptName:  "geminicli-hook.sh",
 		configPath:  geminiSettingsPath,
@@ -219,7 +219,6 @@ func NewCopilotConnector() *hookOnlyConnector {
 					"permissionRequest",
 					"agentStop",
 					"subagentStop",
-					"postToolUseFailure",
 				},
 				SupportsFailClosed: false,
 				Scope:              "user,workspace",
@@ -253,21 +252,19 @@ func NewOpenHandsConnector() *hookOnlyConnector {
 	}
 }
 
-// NewAntigravityConnector wires Google's Antigravity (`agy`) CLI through
-// the unified hook collector. agy reads PreToolUse hooks from
-// ~/.gemini/config/hooks.json in a Claude-Code-compatible nested
-// schema (see patchAntigravityHooks) and supports a documented "ask"
-// decision that bypasses --dangerously-skip-permissions, which is the
-// strongest user-prompt primitive any connector currently exposes.
+// NewAntigravityConnector wires Google's Antigravity (`agy`) CLI through the
+// unified hook collector. agy reads global hooks from
+// ~/.gemini/config/hooks.json. PreToolUse and PostToolUse use matcher groups;
+// PreInvocation, PostInvocation, and Stop use direct command-handler lists.
+// PreToolUse supports documented allow/deny/ask/force_ask decisions.
 //
-// Scope is intentionally "user" only: Antigravity merges every
-// discovered hooks.json (global, project, legacy) so writing into
-// more than one path causes duplicate firing. Setup writes only the
-// single global file (see antigravityHooksPath).
+// Scope is intentionally "user" only. Antigravity also discovers
+// <workspace>/.agents/hooks.json, but Setup owns only the global file so the
+// registration is deterministic and is not duplicated per workspace.
 func NewAntigravityConnector() *hookOnlyConnector {
 	return &hookOnlyConnector{
 		name:        "antigravity",
-		description: "Antigravity (agy) lifecycle hooks with native pre-event ask/deny decisions",
+		description: "Antigravity (agy) lifecycle hooks with synchronous PreToolUse ask/deny decisions",
 		apiPath:     "/api/v1/antigravity/hook",
 		scriptName:  "antigravity-hook.sh",
 		configPath:  antigravityHooksPath,
@@ -275,8 +272,8 @@ func NewAntigravityConnector() *hookOnlyConnector {
 			return HookCapability{
 				CanBlock:           true,
 				CanAskNative:       true,
-				AskEvents:          []string{"PreInvocation", "PreToolUse"},
-				BlockEvents:        []string{"PreInvocation", "PreToolUse", "Stop"},
+				AskEvents:          []string{"PreToolUse"},
+				BlockEvents:        []string{"PreToolUse"},
 				SupportsFailClosed: false,
 				Scope:              "user",
 				ConfigPath:         antigravityHooksPath(opts),
@@ -285,16 +282,30 @@ func NewAntigravityConnector() *hookOnlyConnector {
 	}
 }
 
-func (c *hookOnlyConnector) Name() string                           { return c.name }
-func (c *hookOnlyConnector) Description() string                    { return c.description }
-func (c *hookOnlyConnector) HookAPIPath() string                    { return c.apiPath }
-func (c *hookOnlyConnector) ToolInspectionMode() ToolInspectionMode { return ToolModeBoth }
-func (c *hookOnlyConnector) SubprocessPolicy() SubprocessPolicy     { return SubprocessNone }
+func (c *hookOnlyConnector) Name() string        { return c.name }
+func (c *hookOnlyConnector) Description() string { return c.description }
+func (c *hookOnlyConnector) HookAPIPath() string { return c.apiPath }
+func (c *hookOnlyConnector) ToolInspectionMode() ToolInspectionMode {
+	if c.name == "antigravity" {
+		// Antigravity's PostToolUse input contains only lifecycle metadata
+		// (stepIdx and optional error), not tool-result content. DefenseClaw
+		// therefore claims inspection only at the documented PreToolUse gate.
+		return ToolModePreExecution
+	}
+	return ToolModeBoth
+}
+func (c *hookOnlyConnector) SubprocessPolicy() SubprocessPolicy { return SubprocessNone }
 func (c *hookOnlyConnector) HookScriptNames(SetupOpts) []string {
-	// Cursor's PowerShell adapter is required only for its native Windows
-	// transport. Unix and macOS continue to use the existing shell hook.
-	if c.name == "cursor" && runtime.GOOS == "windows" {
-		return []string{c.scriptName, "cursor-hook.ps1"}
+	// Cursor and Windsurf require connector-specific PowerShell adapters only
+	// for their native Windows transports. Unix and macOS continue to use the
+	// existing shell hooks.
+	if runtime.GOOS == "windows" {
+		switch c.name {
+		case "cursor":
+			return []string{c.scriptName, "cursor-hook.ps1"}
+		case "windsurf":
+			return []string{c.scriptName, "windsurf-hook.ps1"}
+		}
 	}
 	return []string{c.scriptName}
 }
@@ -302,15 +313,15 @@ func (c *hookOnlyConnector) HookCapabilities(opts SetupOpts) HookCapability {
 	return c.Capabilities(opts).Hooks
 }
 
-// HookProfile implements HookProfileProvider for the 6 generic
-// hook-only connectors. Today only geminicli emits native OTLP (via
-// the JSON-block telemetry section in settings.json with a scoped
-// path-token); copilot returns an env-block spec that mirrors the
-// NativeOTLP capability advertised to doctor/setup; cursor, windsurf,
-// hermes, and openhands return spec=nil because their CLIs do not
-// expose a native OTel exporter. When a future cursor release adds
-// native OTLP support, that connector can flip its branch here to
-// return a non-nil spec without changing the dispatcher.
+// HookProfile implements HookProfileProvider for the generic hook-only
+// connectors. Today only geminicli has a DefenseClaw-integrated native OTLP
+// path (via the JSON-block telemetry section in settings.json with a scoped
+// path-token). Copilot upstream documents an optional OTel exporter, but
+// DefenseClaw does not configure or certify that surface; its profile remains
+// hook-only until a scoped-auth, custody, correlation, and teardown contract
+// is implemented. Cursor, Windsurf, Hermes, and OpenHands likewise return
+// spec=nil. A future reviewed integration can return a non-nil spec without
+// changing the dispatcher.
 //
 // SupportsTraceparent is true for the entire generic family: every
 // shipped hook script (cursor-hook.sh, windsurf-hook.sh,
@@ -333,24 +344,21 @@ func (c *hookOnlyConnector) HookProfile(opts SetupOpts) HookProfile {
 		MapVerdict:          hookOnlyProfileMapVerdict,
 		Respond:             hookOnlyProfileRespond,
 	}
+	if c.name == "hermes" {
+		// Hermes pre_verify is a bounded-control surface, not a blocking
+		// surface. Keep it out of BlockEvents while allowing its documented
+		// synchronous {"action":"continue"} response to reach the responder.
+		profile.MapVerdict = hermesProfileMapVerdict
+	}
 	if c.name == "geminicli" {
 		profile.NativeOTLP = geminiCLINativeOTLPSpec(opts)
 	}
-	if c.name == "copilot" {
-		profile.NativeOTLP = copilotNativeOTLPSpec(opts)
-	}
 	if c.name == "antigravity" {
-		// Antigravity is the only generic hook-only connector whose
-		// upstream wire shape is NOT flat hook_event_name +
-		// tool_name / tool_input. agy v1 nests the tool descriptor
-		// under `toolCall` (Claude-Code derived), so the unified
-		// handler's generic normalizer can't extract the event name
-		// or tool name and rejects every PreToolUse with HTTP 400
-		// ("hook event name is required"). The connector-side
-		// decoder maps agy's payload onto the canonical
-		// HookProfileRequest fields. See antigravity_hook_profile.go
-		// for the wire-shape contract this decoder honours and the
-		// empirical agy-version notes.
+		// Antigravity's documented stdin is camelCase and intentionally omits
+		// the event name. Setup binds each handler to a distinct --event
+		// argument; the bridge forwards that trusted registration metadata in
+		// a header and the unified HTTP handler injects it before this decoder.
+		// See antigravity_hook_profile.go for the exact official field mapping.
 		profile.Decode = antigravityProfileDecode
 	}
 	if c.name == "cursor" {
@@ -402,25 +410,6 @@ func windsurfProfileDecode(payload map[string]interface{}) HookProfileRequest {
 			"turn_id", "turnId", "turnID",
 		),
 		Payload: payload,
-	}
-}
-
-func copilotNativeOTLPSpec(opts SetupOpts) *NativeOTLPSpec {
-	headers := map[string]string{
-		"x-defenseclaw-source": "copilot",
-		"x-defenseclaw-client": "copilot-otel/1.0",
-	}
-	if opts.APIToken != "" {
-		headers["x-defenseclaw-token"] = opts.APIToken
-	}
-	return &NativeOTLPSpec{
-		Kind:               NativeOTLPEnvBlock,
-		Endpoint:           "http://" + strings.TrimSpace(opts.APIAddr),
-		Protocol:           "http/json",
-		Headers:            headers,
-		ServiceName:        "copilot",
-		ResourceAttributes: map[string]string{"service.name": "copilot", "defenseclaw.connector": "copilot"},
-		ExtraEnv:           map[string]string{"COPILOT_OTEL_ENABLED": "true"},
 	}
 }
 
@@ -501,7 +490,17 @@ func (c *hookOnlyConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 		}
 		caps.CodeGuard.Supported = true
 		caps.CodeGuard.InstallTargets = []string{"skill"}
-		caps.Plugins = pluginsAreOpenClawOnly()
+		caps.Plugins = SurfaceCapability{
+			Supported: true,
+			Scope:     "workspace,user",
+			ReadPaths: []string{
+				filepath.Join(hermespath.HomeDir(), "plugins"),
+				workspacePath(opts, ".hermes", "plugins"),
+			},
+			Notes: []string{
+				"Hermes plugins are inventory/discovery-only in DefenseClaw v1; connector setup does not install or modify them.",
+			},
+		}
 		caps.Rules = unsupportedSurface("Hermes rules are not a separate documented local surface.")
 		caps.Agents = unsupportedSurface("Hermes subagent/agent asset locations are not installed by DefenseClaw v1.")
 	case "cursor":
@@ -531,8 +530,29 @@ func (c *hookOnlyConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 		}
 		caps.CodeGuard.Supported = true
 		caps.CodeGuard.InstallTargets = []string{"skill", "rule"}
-		caps.Plugins = pluginsAreOpenClawOnly()
-		caps.Agents = unsupportedSurface("Cursor subagent installation is not a documented local surface for this connector.")
+		caps.Plugins = SurfaceCapability{
+			Supported:     true,
+			Scope:         "user",
+			ReadPaths:     []string{homePath(".cursor", "plugins", "local")},
+			DiscoveryOnly: true,
+			Notes: []string{
+				"Cursor local plugins use <plugin>/.cursor-plugin/plugin.json under ~/.cursor/plugins/local.",
+				"DefenseClaw inventories existing Cursor plugins only; connector setup does not install, remove, or modify them.",
+			},
+		}
+		caps.Agents = SurfaceCapability{
+			Supported: true,
+			Scope:     "workspace,user",
+			ReadPaths: uniqueNonEmptyStrings([]string{
+				workspacePath(opts, ".cursor", "agents"),
+				homePath(".cursor", "agents"),
+			}),
+			DiscoveryOnly: true,
+			Notes: []string{
+				"Cursor subagents are read from <workspace>/.cursor/agents and ~/.cursor/agents.",
+				"DefenseClaw inventories existing Cursor subagents only; connector setup does not install, remove, or modify them.",
+			},
+		}
 	case "windsurf":
 		caps.MCP = SurfaceCapability{
 			Supported:     true,
@@ -606,18 +626,20 @@ func (c *hookOnlyConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 		caps.MCP = SurfaceCapability{
 			Supported:       true,
 			Scope:           "workspace,user",
-			ConfigPaths:     []string{homePath(".copilot", "mcp-config.json"), workspacePath(opts, ".github", "mcp.json"), workspacePath(opts, ".mcp.json")},
-			WritePaths:      []string{homePath(".copilot", "mcp-config.json"), workspacePath(opts, ".github", "mcp.json")},
+			ConfigPaths:     copilotMCPReadPaths(opts),
+			WritePaths:      []string{copilotHomePath("mcp-config.json"), workspacePath(opts, ".github", "mcp.json")},
 			SupportsBackup:  true,
 			SupportsRestore: true,
+			Notes:           []string{"Reads declared .mcp.json and .github/mcp.json from the pinned workspace through its Git root, then the Copilot user config. Declaration inventory is independent of folder trust; effective workspace activation requires a trusted folder, or GITHUB_COPILOT_PROMPT_MODE_WORKSPACE_MCP=true in untrusted prompt mode. Session --additional-mcp-config, plugin, built-in, and remote runtime servers require official-client live inspection."},
 		}
 		caps.Skills = SurfaceCapability{
 			Supported:      true,
 			Scope:          "workspace,user",
-			ReadPaths:      []string{homePath(".copilot", "skills"), workspacePath(opts, ".github", "skills"), workspacePath(opts, ".agents", "skills")},
-			WritePaths:     []string{homePath(".copilot", "skills"), workspacePath(opts, ".github", "skills")},
+			ReadPaths:      copilotSkillReadPaths(opts),
+			WritePaths:     []string{copilotHomePath("skills"), workspacePath(opts, ".github", "skills")},
 			InstallTargets: []string{"skill"},
 			RequiresOptIn:  true,
+			Notes:          []string{"Reads documented local project, inherited .github, personal, and COPILOT_SKILLS_DIRS sources in Copilot precedence order. Plugin, built-in, and organization/remote skills are not expanded from private caches; plugins are listed separately through Copilot's official read-only command."},
 		}
 		caps.Rules = SurfaceCapability{
 			Supported:      true,
@@ -627,30 +649,27 @@ func (c *hookOnlyConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 			InstallTargets: []string{"rule"},
 			RequiresOptIn:  true,
 		}
-		caps.Plugins = pluginsAreOpenClawOnly()
+		caps.Plugins = SurfaceCapability{
+			Supported:     true,
+			Scope:         "workspace,user",
+			DiscoveryOnly: true,
+			Notes:         []string{"Read-only discovery uses the official `copilot plugins list --kind plugin --json` command; DefenseClaw does not install, enable, disable, or remove Copilot plugins."},
+		}
 		caps.Agents = SurfaceCapability{
 			Supported:      true,
 			Scope:          "workspace,user",
-			ReadPaths:      []string{homePath(".copilot", "agents"), workspacePath(opts, ".github", "agents")},
-			WritePaths:     []string{homePath(".copilot", "agents"), workspacePath(opts, ".github", "agents")},
+			ReadPaths:      copilotAgentReadPaths(opts),
+			WritePaths:     []string{copilotHomePath("agents"), workspacePath(opts, ".github", "agents")},
 			InstallTargets: []string{"agent"},
 			RequiresOptIn:  true,
+			Notes:          []string{"Reads .github/agents and .claude/agents from the pinned workspace through its Git root, then the Copilot user home. Inventory includes the reviewed Copilot CLI 1.0.77 built-in IDs, which cannot be shadowed. Plugin-contributed and remote organization/enterprise agents require official-client live-session inspection; owning plugins are listed separately."},
 		}
 		caps.CodeGuard.Supported = true
 		caps.CodeGuard.InstallTargets = []string{"skill", "rule"}
 		caps.Telemetry = TelemetryCapability{
-			NativeOTLP:    true,
-			NativeSignals: []string{"traces", "metrics"},
-			HookSignals:   []string{"logs", "metrics", "traces"},
-			Env: []EnvRequirement{
-				{Name: "COPILOT_OTEL_ENABLED", Scope: EnvScopeProcess, Required: false, Description: "Set to true in the Copilot CLI process environment to enable native OpenTelemetry."},
-				{Name: "OTEL_EXPORTER_OTLP_ENDPOINT", Scope: EnvScopeProcess, Required: false, Description: "Point Copilot native OTLP at the DefenseClaw gateway /v1 endpoints."},
-				{Name: "OTEL_EXPORTER_OTLP_HEADERS", Scope: EnvScopeProcess, Required: false, Description: "Carry x-defenseclaw-token and x-defenseclaw-source headers for native OTLP authentication."},
-			},
-			AuthMode:         "header-token",
-			EndpointTemplate: "http://" + opts.APIAddr,
-			SourceModes:      []string{"native", "hook"},
-			Notes:            []string{"DefenseClaw reports the required environment variables but does not mutate shell rc files."},
+			HookSignals: []string{"logs", "metrics", "traces"},
+			SourceModes: []string{"hook"},
+			Notes:       []string{"DefenseClaw derives Copilot telemetry from the documented hook bus. Copilot upstream documents optional OTel traces and metrics, but DefenseClaw does not configure or certify that native surface."},
 		}
 	case "antigravity":
 		caps.MCP = SurfaceCapability{
@@ -680,18 +699,20 @@ func (c *hookOnlyConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 			Notes:         []string{"Antigravity rules are discovery-only; DefenseClaw does not write rules until activation metadata and file naming are documented."},
 		}
 		caps.Plugins = SurfaceCapability{
-			Supported:     true,
-			Scope:         "workspace,user",
-			ReadPaths:     antigravityPluginPaths(opts),
-			DiscoveryOnly: true,
-			Notes:         []string{"Antigravity plugins are scan/discovery-only; DefenseClaw does not install or disable agy plugins in PR #365."},
+			Supported:      true,
+			Scope:          "workspace,user",
+			ReadPaths:      antigravityPluginPaths(opts),
+			WritePaths:     antigravityPluginWritePaths(opts),
+			InstallTargets: []string{"plugin"},
+			RequiresOptIn:  true,
+			Notes:          []string{"DefenseClaw can scan, install, and remove Antigravity plugins at Google's documented manual global/workspace paths. The Antigravity CLI staging path is discovery-only. Runtime disable remains DefenseClaw policy/advisory state; the connector does not invoke agy plugin disable."},
 		}
 		caps.Agents = SurfaceCapability{
 			Supported:     true,
-			Scope:         "plugin",
-			ReadPaths:     antigravityPluginPaths(opts),
+			Scope:         "workspace,user,plugin",
+			ReadPaths:     antigravityAgentPaths(opts),
 			DiscoveryOnly: true,
-			Notes:         []string{"No standalone Antigravity agent path is documented. Plugin-contained agents under <plugin>/agents are discovered through Antigravity plugin roots only."},
+			Notes:         []string{"Antigravity agents under ~/.gemini/config/agents, <workspace>/.agents/agents, and <plugin>/agents are discovery-only; DefenseClaw does not install or modify them."},
 		}
 		caps.CodeGuard.Supported = false
 	case "openhands":
@@ -740,6 +761,9 @@ func (c *hookOnlyConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	if c.pluginArtifact {
 		return c.setupPluginArtifact(opts)
 	}
+	if err := c.migrateManagedBackup(opts); err != nil {
+		return fmt.Errorf("%s managed backup migration: %w", c.name, err)
+	}
 	hookDir := filepath.Join(opts.DataDir, "hooks")
 	if err := WriteHookScriptsForConnectorObjectWithOpts(hookDir, opts, c); err != nil {
 		return fmt.Errorf("%s hook script: %w", c.name, err)
@@ -776,8 +800,8 @@ func (c *hookOnlyConnector) setupPluginArtifact(opts SetupOpts) error {
 		return fmt.Errorf("%s render plugin template: %w", c.name, err)
 	}
 	path := c.configPath(opts)
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return fmt.Errorf("%s create plugin dir: %w", c.name, err)
+	if err := prepareOpenCodePluginArtifactDestination(path); err != nil {
+		return fmt.Errorf("%s prepare plugin destination: %w", c.name, err)
 	}
 	if err := captureManagedFileBackup(opts.DataDir, c.name, "config", path); err != nil {
 		return fmt.Errorf("%s capture plugin backup: %w", c.name, err)
@@ -790,24 +814,35 @@ func (c *hookOnlyConnector) setupPluginArtifact(opts SetupOpts) error {
 
 // hookCommand returns the command an agent runs for this connector's hook. On
 // Unix it is the bundled .sh path. Most Windows connectors use the native
-// DefenseClaw `hook` subcommand; Cursor uses a PowerShell adapter because its
-// object pipeline does not preserve native stdin JSON. The same value is used
-// at setup, teardown, and VerifyClean so the JSON/YAML hook removers (which
-// match on the exact command string) recognize the entries DefenseClaw added.
+// DefenseClaw `hook` subcommand; Cursor and Windsurf use PowerShell adapters
+// for their documented Windows transports. The same value is used at setup,
+// teardown, and VerifyClean so the JSON/YAML hook removers (which match on the
+// exact command string) recognize the entries DefenseClaw added.
 func (c *hookOnlyConnector) hookCommand(opts SetupOpts) string {
-	return hookInvocationCommand(c.name, filepath.Join(opts.DataDir, "hooks", c.scriptName))
+	return c.hookCommandForOS(runtime.GOOS, opts)
 }
 
-// Teardown restores the host agent's config (or removes our entries
-// when restoration is unsafe) AND replaces the hook script with a
-// disabled tombstone.
+func (c *hookOnlyConnector) hookCommandForOS(goos string, opts SetupOpts) string {
+	unixCommand := filepath.Join(opts.DataDir, "hooks", c.scriptName)
+	if goos == "windows" && c.name == "hermes" && strings.TrimSpace(opts.HookExecutable) != "" {
+		return windowsHermesDirectHookCommand(opts.HookExecutable)
+	}
+	return hookInvocationCommandFor(goos, c.name, unixCommand)
+}
+
+// Teardown restores the host agent's config (or removes our entries when
+// restoration is unsafe). Connectors whose hosts are known to retain hook
+// paths also receive a disabled tombstone.
 //
-// The tombstone step is unconditional and runs even when the config
-// restore path returns early. The reason is symmetric with codex /
-// claudecode: host agents that have been running since before teardown
-// (cursor desktop, copilot IDE session, hermes daemon) cache the
-// absolute hook path at startup and will keep invoking it for the life
-// of the process. Without the tombstone they hit either:
+// Cursor is deliberately different. Its official hook contract says command
+// hooks are spawned processes and hooks.json changes auto-reload; it does not
+// document a cached hook-process/path lifecycle. After restoring hooks.json we
+// therefore remove both Cursor-owned runtime files instead of leaving a POSIX
+// tombstone beside the native PowerShell adapter. Other hook-only connectors
+// retain the established tombstone behavior because their lifecycle is outside
+// this Cursor-specific contract.
+//
+// Without a tombstone where one is required, a retained host path can hit:
 //
 //   - exit-127 ("command not found") if the file was deleted, or
 //   - a strict-availability fail-closed block when
@@ -820,27 +855,74 @@ func (c *hookOnlyConnector) Teardown(ctx context.Context, opts SetupOpts) error 
 	if c.pluginArtifact {
 		return c.teardownPluginArtifact(opts)
 	}
+	if err := c.migrateManagedBackup(opts); err != nil {
+		return fmt.Errorf("%s managed backup migration: %w", c.name, err)
+	}
 	var errs []string
 
-	path := managedFileBackupTargetPath(opts.DataDir, c.name, "config", c.configPath(opts))
-	restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, c.name, "config", path)
+	logicalName := c.managedBackupLogicalName()
+	path := managedFileBackupTargetPath(opts.DataDir, c.name, logicalName, c.configPath(opts))
+	restored, err := restoreManagedFileBackupIfUnchanged(opts.DataDir, c.name, logicalName, path)
 	switch {
 	case err != nil:
 		errs = append(errs, fmt.Sprintf("restore config backup: %v", err))
+	case restored:
 	case !restored:
-		if err := c.removeConfigEntries(path, c.hookCommand(opts)); err != nil {
+		if err := c.removeConfigEntriesWithManagedBackup(
+			opts,
+			logicalName,
+			path,
+			c.hookCommand(opts),
+		); err != nil {
 			errs = append(errs, fmt.Sprintf("remove hook entries: %v", err))
 		} else {
-			discardManagedFileBackup(opts.DataDir, c.name, "config")
+			discardManagedFileBackup(opts.DataDir, c.name, logicalName)
 		}
 	}
 
-	if err := writeDisabledHookTombstone(opts, c.scriptName, c.name); err != nil {
+	if c.name == "cursor" {
+		if err := removeCursorHookArtifacts(opts); err != nil {
+			errs = append(errs, fmt.Sprintf("remove Cursor hook artifacts: %v", err))
+		}
+	} else if err := writeDisabledHookTombstone(opts, c.scriptName, c.name); err != nil {
 		errs = append(errs, fmt.Sprintf("disabled hook tombstone: %v", err))
+	}
+	if c.name == "windsurf" && runtime.GOOS == "windows" {
+		if err := writeDisabledPowerShellHookTombstone(opts, "windsurf-hook.ps1", c.name); err != nil {
+			errs = append(errs, fmt.Sprintf("disabled PowerShell hook tombstone: %v", err))
+		}
 	}
 
 	if len(errs) > 0 {
 		return fmt.Errorf("%s teardown: %s", c.name, strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+// removeCursorHookArtifacts removes only files that still carry the
+// DefenseClaw ownership marker. A foreign replacement is retained and turns
+// teardown into an actionable error rather than deleting operator data.
+func removeCursorHookArtifacts(opts SetupOpts) error {
+	var errs []string
+	for _, name := range []string{"cursor-hook.sh", "cursor-hook.ps1"} {
+		path := filepath.Join(opts.DataDir, "hooks", name)
+		if _, err := os.Stat(path); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			errs = append(errs, fmt.Sprintf("%s: %v", name, err))
+			continue
+		}
+		if !scriptHasMarker(path) {
+			errs = append(errs, fmt.Sprintf("%s: refusing to remove file without DefenseClaw ownership marker", name))
+			continue
+		}
+		if err := os.Remove(path); err != nil {
+			errs = append(errs, fmt.Sprintf("%s: %v", name, err))
+		}
+	}
+	if len(errs) > 0 {
+		return errors.New(strings.Join(errs, "; "))
 	}
 	return nil
 }
@@ -870,15 +952,15 @@ func (c *hookOnlyConnector) teardownPluginArtifact(opts SetupOpts) error {
 }
 
 func (c *hookOnlyConnector) VerifyClean(opts SetupOpts) error {
-	path := managedFileBackupTargetPath(opts.DataDir, c.name, "config", c.configPath(opts))
+	logicalName := c.managedBackupLogicalName()
+	path := managedFileBackupTargetPath(opts.DataDir, c.name, logicalName, c.configPath(opts))
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil
+			return c.verifyCursorHookArtifactsClean(opts)
 		}
 		return err
-	}
-	if c.pluginArtifact {
+	} else if c.pluginArtifact {
 		// The bridge plugin is a standalone managed file; a clean
 		// teardown removes it entirely. Any residual DefenseClaw marker
 		// means the heal did not complete.
@@ -887,22 +969,69 @@ func (c *hookOnlyConnector) VerifyClean(opts SetupOpts) error {
 		}
 		return nil
 	}
+	if c.name == "cursor" {
+		var cfg map[string]interface{}
+		if err := json.Unmarshal(data, &cfg); err != nil {
+			return fmt.Errorf("%s teardown verification could not parse hook config %s: %w", c.name, path, err)
+		}
+		if structuredHookCommandReferences(cfg, cursorOwnedHookCommands(opts)) {
+			return fmt.Errorf("%s teardown incomplete: config still references %s", c.name, c.scriptName)
+		}
+		return c.verifyCursorHookArtifactsClean(opts)
+	}
 	needle := c.hookCommand(opts)
-	if c.name == "antigravity" {
+	if c.name == "copilot" {
+		var cfg map[string]interface{}
+		if err := json.Unmarshal(data, &cfg); err == nil && containsHookScript(cfg, needle) {
+			return fmt.Errorf("%s teardown incomplete: config still references %s", c.name, c.scriptName)
+		}
+	}
+	if c.name == "windsurf" {
 		var cfg map[string]interface{}
 		if err := json.Unmarshal(data, &cfg); err == nil &&
 			structuredHookCommandReferences(cfg, []string{
 				needle,
-				legacyAntigravityWindowsHookCommand(),
-				legacyAntigravityNonWaitingWindowsHookCommand(),
+				legacyWindsurfWindowsHookCommand(),
 			}) {
+			return fmt.Errorf("%s teardown incomplete: config still references %s", c.name, c.scriptName)
+		}
+	}
+	if c.name == "antigravity" {
+		ownedCommands := antigravityOwnedHookCommands(needle)
+		ownedCommands = append(ownedCommands,
+			legacyAntigravityWindowsHookCommand(),
+			legacyAntigravityNonWaitingWindowsHookCommand(),
+		)
+		var cfg map[string]interface{}
+		if err := json.Unmarshal(data, &cfg); err == nil &&
+			structuredHookCommandReferences(cfg, ownedCommands) {
 			return fmt.Errorf("%s teardown incomplete: config still references %s", c.name, c.scriptName)
 		}
 	}
 	if bytes.Contains(data, []byte(needle)) || bytes.Contains(data, []byte(c.scriptName)) ||
 		(c.name == "antigravity" && bytes.Contains(data, []byte(legacyAntigravityWindowsHookCommand()))) ||
-		(c.name == "antigravity" && bytes.Contains(data, []byte(legacyAntigravityNonWaitingWindowsHookCommand()))) {
+		(c.name == "antigravity" && bytes.Contains(data, []byte(legacyAntigravityNonWaitingWindowsHookCommand()))) ||
+		(c.name == "windsurf" && bytes.Contains(data, []byte(legacyWindsurfWindowsHookCommand()))) {
 		return fmt.Errorf("%s teardown incomplete: config still references %s", c.name, c.scriptName)
+	}
+	return c.verifyCursorHookArtifactsClean(opts)
+}
+
+func (c *hookOnlyConnector) verifyCursorHookArtifactsClean(opts SetupOpts) error {
+	if c.name != "cursor" {
+		return nil
+	}
+	for _, name := range []string{"cursor-hook.sh", "cursor-hook.ps1"} {
+		path := filepath.Join(opts.DataDir, "hooks", name)
+		if _, err := os.Stat(path); err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return err
+		}
+		if scriptHasMarker(path) {
+			return fmt.Errorf("cursor teardown incomplete: managed runtime still present at %s", path)
+		}
 	}
 	return nil
 }
@@ -933,7 +1062,7 @@ func (c *hookOnlyConnector) AgentPaths(opts SetupOpts) AgentPaths {
 	patched := uniqueNonEmptyStrings(append([]string{c.configPath(opts)}, caps.Telemetry.ConfigPaths...))
 	return AgentPaths{
 		PatchedFiles: patched,
-		BackupFiles:  []string{managedFileBackupPath(opts.DataDir, c.name, "config")},
+		BackupFiles:  []string{managedFileBackupPath(opts.DataDir, c.name, c.managedBackupLogicalName())},
 		HookScripts:  hookScriptPathsForConnector(opts, c),
 	}
 }
@@ -946,7 +1075,7 @@ func (c *hookOnlyConnector) RequiredEnv() []EnvRequirement {
 	if c.name == "copilot" {
 		return append([]EnvRequirement{{
 			Scope:       EnvScopeNone,
-			Description: "Hooks and managed workspace config do not require shell environment variables; native Copilot OTLP uses optional process env vars.",
+			Description: "DefenseClaw's Copilot hook integration requires no shell environment variables; upstream OTel process variables are not configured or managed by this connector.",
 		}}, c.Capabilities(SetupOpts{APIAddr: "127.0.0.1:18970"}).Telemetry.Env...)
 	}
 	return []EnvRequirement{{
@@ -986,14 +1115,15 @@ func (c *hookOnlyConnector) patchConfig(opts SetupOpts, hookScript string) error
 	if strings.TrimSpace(path) == "" {
 		return fmt.Errorf("%s setup could not resolve a hook config path", c.name)
 	}
-	if err := captureManagedFileBackup(opts.DataDir, c.name, "config", path); err != nil {
+	logicalName := c.managedBackupLogicalName()
+	if err := captureManagedFileBackup(opts.DataDir, c.name, logicalName, path); err != nil {
 		return err
 	}
 
 	var err error
 	switch c.name {
 	case "hermes":
-		err = patchHermesHooks(path, hookScript)
+		err = patchHermesHooks(path, hookScript, opts.HookExecutable)
 	case "cursor":
 		err = patchCursorHooks(
 			path,
@@ -1002,13 +1132,21 @@ func (c *hookOnlyConnector) patchConfig(opts SetupOpts, hookScript string) error
 			c.effectiveFailClosed(opts),
 		)
 	case "windsurf":
-		err = patchWindsurfHooks(path, hookScript)
+		err = patchWindsurfHooks(
+			path,
+			hookScript,
+			filepath.Join(opts.DataDir, "hooks", c.scriptName),
+		)
 	case "geminicli":
 		if err = patchGeminiHooks(path, hookScript); err == nil {
 			err = patchGeminiTelemetry(path, opts)
 		}
 	case "copilot":
-		err = patchCopilotHooks(path, hookScript)
+		events := c.HookProfile(opts).SupportedEvents
+		if len(events) == 0 {
+			events = copilotCurrentHookEvents
+		}
+		err = patchCopilotHooksForOS(path, hookScript, events, runtime.GOOS)
 	case "openhands":
 		err = patchOpenHandsHooks(path, hookScript)
 	case "antigravity":
@@ -1019,24 +1157,72 @@ func (c *hookOnlyConnector) patchConfig(opts SetupOpts, hookScript string) error
 	if err != nil {
 		return err
 	}
-	return updateManagedFileBackupPostHash(opts.DataDir, c.name, "config", path)
+	return updateManagedFileBackupPostHash(opts.DataDir, c.name, logicalName, path)
 }
 
-func (c *hookOnlyConnector) removeConfigEntries(path, hookScript string) error {
+func (c *hookOnlyConnector) managedBackupLogicalName() string {
+	switch c.name {
+	case "antigravity":
+		return "hooks.json"
+	case "hermes":
+		return "config.yaml"
+	default:
+		return "config"
+	}
+}
+
+func (c *hookOnlyConnector) migrateManagedBackup(opts SetupOpts) error {
+	switch c.name {
+	case "antigravity", "hermes":
+		return migrateManagedFileBackupLogicalName(
+			opts.DataDir,
+			c.name,
+			"config",
+			c.managedBackupLogicalName(),
+		)
+	default:
+		return nil
+	}
+}
+
+func (c *hookOnlyConnector) removeConfigEntriesWithManagedBackup(
+	opts SetupOpts,
+	logicalName, path, hookScript string,
+) error {
+	if c.name != "hermes" {
+		return c.removeConfigEntries(path, hookScript, opts)
+	}
+	backup, err := loadManagedFileBackupForTransform(
+		opts.DataDir,
+		c.name,
+		logicalName,
+		path,
+	)
+	if err != nil {
+		return fmt.Errorf("load Hermes pristine custody: %w", err)
+	}
+	return removeHermesHooks(path, hookScript, backup)
+}
+
+func (c *hookOnlyConnector) removeConfigEntries(path, hookScript string, opts SetupOpts) error {
 	switch c.name {
 	case "hermes":
-		return removeHermesHooks(path, hookScript)
+		return removeHermesHooks(path, hookScript, nil)
 	case "geminicli":
 		return removeGeminiConfigEntries(path, hookScript)
-	case "cursor", "windsurf", "copilot", "openhands":
+	case "cursor":
+		return removeJSONHookReferences(path, cursorOwnedHookCommands(opts)...)
+	case "copilot", "openhands":
 		return removeJSONHookReferences(path, hookScript)
+	case "windsurf":
+		return removeJSONHookReferences(path, hookScript, legacyWindsurfWindowsHookCommand())
 	case "antigravity":
-		return removeJSONHookReferences(
-			path,
-			hookScript,
+		ownedCommands := antigravityOwnedHookCommands(hookScript)
+		ownedCommands = append(ownedCommands,
 			legacyAntigravityWindowsHookCommand(),
 			legacyAntigravityNonWaitingWindowsHookCommand(),
 		)
+		return removeJSONHookReferences(path, ownedCommands...)
 	default:
 		return nil
 	}
@@ -1044,7 +1230,7 @@ func (c *hookOnlyConnector) removeConfigEntries(path, hookScript string) error {
 
 func (c *hookOnlyConnector) effectiveFailClosed(opts SetupOpts) bool {
 	cap := c.HookCapabilities(opts)
-	return cap.SupportsFailClosed && strings.TrimSpace(opts.HookFailMode) == "closed"
+	return cap.SupportsFailClosed && resolveHookFailMode(opts, c) == "closed"
 }
 
 func hermesConfigPath(SetupOpts) string {
@@ -1062,12 +1248,20 @@ func opencodePluginPath(SetupOpts) string {
 	if OpenCodePluginPathOverride != "" {
 		return OpenCodePluginPathOverride
 	}
+	if configDir := strings.TrimSpace(os.Getenv("OPENCODE_CONFIG_DIR")); configDir != "" {
+		if absolute, err := filepath.Abs(configDir); err == nil {
+			return filepath.Join(absolute, "plugins", "defenseclaw.js")
+		}
+	}
 	return homePath(".config", "opencode", "plugins", "defenseclaw.js")
 }
 
-func cursorHooksPath(SetupOpts) string {
+func cursorHooksPath(opts SetupOpts) string {
 	if CursorHooksPathOverride != "" {
 		return CursorHooksPathOverride
+	}
+	if strings.TrimSpace(opts.ConfigHome) != "" {
+		return filepath.Join(opts.ConfigHome, "hooks.json")
 	}
 	return homePath(".cursor", "hooks.json")
 }
@@ -1093,7 +1287,7 @@ func copilotHooksPath(opts SetupOpts) string {
 	if root := workspaceRoot(opts); root != "" {
 		return filepath.Join(root, ".github", "hooks", "defenseclaw.json")
 	}
-	return homePath(".copilot", "hooks", "defenseclaw.json")
+	return copilotHomePath("hooks", "defenseclaw.json")
 }
 
 func openhandsHooksPath(opts SetupOpts) string {
@@ -1113,9 +1307,15 @@ func openhandsHooksPath(opts SetupOpts) string {
 // files, so writing the same DefenseClaw hook to more than one path
 // would duplicate-fire policy evaluations. Workspace and plugin hook
 // files remain discovery-only surfaces.
-func antigravityHooksPath(SetupOpts) string {
+func antigravityHooksPath(opts SetupOpts) string {
 	if AntigravityHooksPathOverride != "" {
 		return AntigravityHooksPathOverride
+	}
+	if strings.TrimSpace(opts.ConfigHome) != "" {
+		// Hidden native-maintenance commands use this DefenseClaw-internal
+		// binding only to restore or migrate a path already recorded in Setup
+		// custody. Ordinary calls always use Google's documented global path.
+		return filepath.Join(opts.ConfigHome, "hooks.json")
 	}
 	return homePath(".gemini", "config", "hooks.json")
 }
@@ -1149,6 +1349,113 @@ func workspacePath(opts SetupOpts, parts ...string) string {
 	}
 	all := append([]string{root}, parts...)
 	return filepath.Join(all...)
+}
+
+func copilotSkillReadPaths(opts SetupOpts) []string {
+	roots := copilotWorkspaceAncestors(opts)
+	paths := make([]string, 0, len(roots)+6)
+	if len(roots) > 0 {
+		paths = append(paths,
+			filepath.Join(roots[0], ".github", "skills"),
+			filepath.Join(roots[0], ".agents", "skills"),
+			filepath.Join(roots[0], ".claude", "skills"),
+		)
+		for _, root := range roots[1:] {
+			paths = append(paths, filepath.Join(root, ".github", "skills"))
+		}
+	}
+	paths = append(paths, copilotHomePath("skills"), homePath(".agents", "skills"))
+	for _, raw := range strings.Split(os.Getenv("COPILOT_SKILLS_DIRS"), ",") {
+		path := strings.TrimSpace(raw)
+		if path == "" {
+			continue
+		}
+		if strings.HasPrefix(path, "~/") || strings.HasPrefix(path, `~\`) {
+			path = filepath.Join(homePath(), path[2:])
+		} else if !filepath.IsAbs(path) {
+			if workspaceRoot(opts) == "" {
+				// Relative custom paths belong to Copilot's launch
+				// workspace, not the gateway daemon's current directory.
+				continue
+			}
+			path = filepath.Join(workspaceRoot(opts), path)
+		}
+		paths = append(paths, path)
+	}
+	return copilotUniquePaths(paths)
+}
+
+func copilotAgentReadPaths(opts SetupOpts) []string {
+	roots := copilotWorkspaceAncestors(opts)
+	paths := make([]string, 0, len(roots)*2+1)
+	for _, root := range roots {
+		paths = append(paths,
+			filepath.Join(root, ".github", "agents"),
+			filepath.Join(root, ".claude", "agents"),
+		)
+	}
+	paths = append(paths, copilotHomePath("agents"))
+	return copilotUniquePaths(paths)
+}
+
+func copilotMCPReadPaths(opts SetupOpts) []string {
+	roots := copilotWorkspaceAncestors(opts)
+	paths := make([]string, 0, len(roots)*2+1)
+	for _, root := range roots {
+		paths = append(paths,
+			filepath.Join(root, ".mcp.json"),
+			filepath.Join(root, ".github", "mcp.json"),
+		)
+	}
+	paths = append(paths, copilotHomePath("mcp-config.json"))
+	return copilotUniquePaths(paths)
+}
+
+func copilotWorkspaceAncestors(opts SetupOpts) []string {
+	root := strings.TrimSpace(workspaceRoot(opts))
+	if root == "" {
+		return nil
+	}
+	if absolute, err := filepath.Abs(root); err == nil {
+		root = absolute
+	}
+	current := filepath.Clean(root)
+	candidates := make([]string, 0, 4)
+	for {
+		candidates = append(candidates, current)
+		if _, err := os.Stat(filepath.Join(current, ".git")); err == nil {
+			return candidates
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			// A pinned non-repository workspace has only its immediate
+			// project surface; never scan unrelated filesystem ancestors.
+			return candidates[:1]
+		}
+		current = parent
+	}
+}
+
+func copilotUniquePaths(paths []string) []string {
+	seen := make(map[string]struct{}, len(paths))
+	out := make([]string, 0, len(paths))
+	for _, path := range paths {
+		path = strings.TrimSpace(path)
+		if path == "" {
+			continue
+		}
+		path = filepath.Clean(path)
+		key := path
+		if runtime.GOOS == "windows" {
+			key = strings.ToLower(key)
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, path)
+	}
+	return out
 }
 
 func workspaceRootOutsideDataDir(root, dataDir string) bool {
@@ -1192,6 +1499,11 @@ func homePath(parts ...string) string {
 	}
 	all := append([]string{home}, parts...)
 	return filepath.Join(all...)
+}
+
+func copilotHomePath(parts ...string) string {
+	root := connectorEnvHomeDir("COPILOT_HOME", ".copilot")
+	return filepath.Join(append([]string{root}, parts...)...)
 }
 
 func unsupportedSurface(note string) SurfaceCapability {
@@ -1275,12 +1587,36 @@ func antigravityRuleReadPaths(opts SetupOpts) []string {
 }
 
 func antigravityPluginPaths(opts SetupOpts) []string {
+	return uniqueNonEmptyStrings(append(antigravityPluginWritePaths(opts),
+		homePath(".gemini", "antigravity-cli", "plugins"),
+	))
+}
+
+func antigravityPluginWritePaths(opts SetupOpts) []string {
 	return uniqueNonEmptyStrings([]string{
 		homePath(".gemini", "config", "plugins"),
-		homePath(".gemini", "antigravity-cli", "plugins"),
 		antigravityWorkspacePath(opts, ".agents", "plugins"),
 		antigravityWorkspacePath(opts, "_agents", "plugins"),
 	})
+}
+
+func antigravityAgentPaths(opts SetupOpts) []string {
+	paths := []string{
+		homePath(".gemini", "config", "agents"),
+		antigravityWorkspacePath(opts, ".agents", "agents"),
+	}
+	for _, pluginRoot := range antigravityPluginPaths(opts) {
+		entries, err := os.ReadDir(pluginRoot)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if entry.IsDir() {
+				paths = append(paths, filepath.Join(pluginRoot, entry.Name(), "agents"))
+			}
+		}
+	}
+	return uniqueNonEmptyStrings(paths)
 }
 
 func antigravityWorkspacePath(opts SetupOpts, parts ...string) string {
@@ -1341,7 +1677,7 @@ func addSurfaceTargets(targets map[string][]string, key string, cap SurfaceCapab
 	targets[key] = uniqueNonEmptyStrings(append(append([]string{}, cap.ReadPaths...), cap.ConfigPaths...))
 }
 
-func patchHermesHooks(path, hookScript string) error {
+func patchHermesHooks(path, hookScript, hookExecutable string) error {
 	cfg, err := readYAMLObject(path)
 	if err != nil {
 		return err
@@ -1357,12 +1693,19 @@ func patchHermesHooks(path, hookScript string) error {
 	// daemon, cron, CI) there is no prompt, so an un-accepted hook is
 	// silently skipped and never fires. hooks_auto_accept is the
 	// documented escape hatch that lets all of DefenseClaw's lifecycle
-	// hooks register without an interactive prompt. We only set it when
-	// the operator has not made an explicit choice, so a deliberate
-	// `hooks_auto_accept: false` is preserved (and surfaced by doctor).
-	// The managed-file backup captures and heals this key on teardown.
-	if _, ok := cfg["hooks_auto_accept"]; !ok {
-		cfg["hooks_auto_accept"] = true
+	// hooks register without an interactive prompt. Selecting Hermes
+	// Setup is an explicit request to register those hooks, so Setup sets
+	// the key even when the prior value was false. The managed-file backup
+	// restores the operator's exact prior bytes on teardown.
+	cfg["hooks_auto_accept"] = true
+	hookCommand := shellWord(hookScript)
+	if bound := windowsHermesDirectHookCommand(hookExecutable); bound != "" && hookScript == bound {
+		// Native maintenance may run from a quarantined or temporary gateway,
+		// so generic process-local ownership cannot identify the stable command
+		// that Setup explicitly bound. Preserve that exact direct argv without
+		// adding shell quoting; Hermes will pass it through shlex.split and
+		// subprocess.run(shell=False).
+		hookCommand = hookScript
 	}
 	for _, spec := range []struct {
 		event   string
@@ -1370,17 +1713,30 @@ func patchHermesHooks(path, hookScript string) error {
 	}{
 		{"pre_tool_call", ".*"},
 		{"post_tool_call", ".*"},
+		{"transform_terminal_output", ""},
+		{"transform_tool_result", ""},
+		{"transform_llm_output", ""},
 		{"pre_llm_call", ""},
 		{"post_llm_call", ""},
+		{"pre_verify", ""},
+		{"pre_api_request", ""},
+		{"post_api_request", ""},
+		{"api_request_error", ""},
 		{"on_session_start", ""},
 		{"on_session_end", ""},
 		{"on_session_finalize", ""},
 		{"on_session_reset", ""},
 		{"subagent_start", ""},
 		{"subagent_stop", ""},
+		{"pre_gateway_dispatch", ""},
+		{"pre_approval_request", ""},
+		{"post_approval_response", ""},
+		{"kanban_task_claimed", ""},
+		{"kanban_task_completed", ""},
+		{"kanban_task_blocked", ""},
 	} {
 		entry := map[string]interface{}{
-			"command": shellWord(hookScript),
+			"command": hookCommand,
 			"timeout": 30,
 		}
 		if spec.matcher != "" {
@@ -1395,7 +1751,11 @@ func patchHermesHooks(path, hookScript string) error {
 	return atomicWriteFile(path, data, 0o600)
 }
 
-func removeHermesHooks(path, hookScript string) error {
+func removeHermesHooks(path, hookScript string, backup *managedFileBackup) error {
+	pristineAutoAccept, pristineHadAutoAccept, pristineKnown, err := hermesPristineAutoAccept(backup)
+	if err != nil {
+		return err
+	}
 	cfg, err := readYAMLObject(path)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -1409,11 +1769,45 @@ func removeHermesHooks(path, hookScript string) error {
 		}
 		pruneEmptyMapArrays(hooks)
 	}
+	// Setup writes exactly boolean true. Restore the captured value/absence
+	// only while that installed scalar remains unchanged; a later operator edit
+	// belongs to the operator and survives surgical hook cleanup.
+	currentAutoAccept, currentAutoAcceptPresent := cfg["hooks_auto_accept"]
+	if pristineKnown && currentAutoAcceptPresent && currentAutoAccept == true {
+		if pristineHadAutoAccept {
+			cfg["hooks_auto_accept"] = pristineAutoAccept
+		} else {
+			delete(cfg, "hooks_auto_accept")
+		}
+	}
 	data, err := yaml.Marshal(cfg)
 	if err != nil {
 		return err
 	}
 	return atomicWriteFile(path, data, 0o600)
+}
+
+func hermesPristineAutoAccept(backup *managedFileBackup) (interface{}, bool, bool, error) {
+	if backup == nil {
+		return nil, false, false, nil
+	}
+	if !backup.Existed {
+		if backup.PristineSHA256 != managedBackupMissingHash || len(backup.PristineBytes) != 0 {
+			return nil, false, false, fmt.Errorf("Hermes pristine custody for a missing config is inconsistent")
+		}
+		return nil, false, true, nil
+	}
+	if backup.PristineSHA256 != sha256Hex(backup.PristineBytes) {
+		return nil, false, false, fmt.Errorf("Hermes pristine custody hash does not match its captured config bytes")
+	}
+	var pristine map[string]interface{}
+	if len(bytes.TrimSpace(backup.PristineBytes)) != 0 {
+		if err := yaml.Unmarshal(backup.PristineBytes, &pristine); err != nil {
+			return nil, false, false, fmt.Errorf("parse Hermes pristine custody: %w", err)
+		}
+	}
+	value, present := pristine["hooks_auto_accept"]
+	return value, present, true, nil
 }
 
 func patchCursorHooks(path, hookScript, legacyShellScript string, failClosed bool) error {
@@ -1447,9 +1841,10 @@ func patchCursorHooks(path, hookScript, legacyShellScript string, failClosed boo
 		"workspaceOpen",
 	} {
 		entry := map[string]interface{}{
-			"type":       "command",
-			"command":    shellWord(hookScript),
-			"timeout":    30000,
+			"type":    "command",
+			"command": shellWord(hookScript),
+			// Cursor's hook schema defines timeout in seconds.
+			"timeout":    30,
 			"failClosed": failClosed,
 		}
 		// Replace instead of merely appending. This both migrates the previous
@@ -1464,10 +1859,16 @@ func patchCursorHooks(path, hookScript, legacyShellScript string, failClosed boo
 func replaceManagedCursorHooks(raw interface{}, hookScript, legacyShellScript string, entry map[string]interface{}) []interface{} {
 	list, _ := raw.([]interface{})
 	out := make([]interface{}, 0, len(list)+1)
+	ownedCommands := uniqueNonEmptyStrings(append(
+		[]string{
+			hookScript,
+			legacyShellScript,
+			hookInvocationCommandFor("windows", "cursor", legacyShellScript),
+		},
+		legacyCursorNativeHookCommands()...,
+	))
 	for _, item := range list {
-		if managedHookCommandEntry(item, hookScript) ||
-			managedHookCommandEntry(item, legacyShellScript) ||
-			managedCursorNativeHookEntry(item) {
+		if managedCursorHookEntry(item, ownedCommands) {
 			continue
 		}
 		out = append(out, item)
@@ -1475,17 +1876,49 @@ func replaceManagedCursorHooks(raw interface{}, hookScript, legacyShellScript st
 	return append(out, entry)
 }
 
-func managedCursorNativeHookEntry(raw interface{}) bool {
-	entry, ok := raw.(map[string]interface{})
-	if !ok {
-		return false
-	}
-	command, _ := entry["command"].(string)
-	command = strings.TrimSpace(command)
-	return strings.HasSuffix(command, nativeHookFlag+"cursor") && isNativeHookCommand(command)
+func cursorOwnedHookCommands(opts SetupOpts) []string {
+	portableScript := filepath.Join(opts.DataDir, "hooks", "cursor-hook.sh")
+	return uniqueNonEmptyStrings(append(
+		[]string{
+			portableScript,
+			hookInvocationCommandFor("windows", "cursor", portableScript),
+		},
+		legacyCursorNativeHookCommands()...,
+	))
 }
 
-func patchWindsurfHooks(path, hookScript string) error {
+// legacyCursorNativeHookCommands returns only direct-native command strings
+// emitted by the pre-adapter Windows implementation. Each executable path is
+// one of DefenseClaw's finite installer or legacy user-install locations.
+// Arbitrary commands that merely end in "hook --connector cursor" are foreign.
+func legacyCursorNativeHookCommands() []string {
+	binaries := append(
+		nativeHookBinaryOwnershipCandidates(),
+		defenseclawGatewayBinary(),
+		canonicalNativeWindowsInstalledGatewayBinary(),
+		filepath.Join(userHomeDir(), ".local", "bin", windowsGatewayBinaryName),
+	)
+	commands := make([]string, 0, len(binaries))
+	for _, binary := range uniqueNonEmptyStrings(binaries) {
+		commands = append(commands, windowsQuoteExe(binary)+" "+nativeHookFlag+"cursor")
+	}
+	return uniqueNonEmptyStrings(commands)
+}
+
+func managedCursorHookEntry(raw interface{}, ownedCommands []string) bool {
+	for _, command := range ownedCommands {
+		if managedHookCommandEntry(raw, command) {
+			return true
+		}
+	}
+	return false
+}
+
+func patchWindsurfHooks(path, hookScript, legacyShellScript string) error {
+	return patchWindsurfHooksForOS(path, hookScript, legacyShellScript, runtime.GOOS)
+}
+
+func patchWindsurfHooksForOS(path, hookScript, legacyShellScript, goos string) error {
 	cfg, err := readJSONObject(path)
 	if err != nil {
 		return err
@@ -1505,13 +1938,38 @@ func patchWindsurfHooks(path, hookScript string) error {
 		"post_cascade_response_with_transcript",
 		"post_setup_worktree",
 	} {
-		entry := map[string]interface{}{
-			"command":     shellWord(hookScript),
-			"show_output": true,
+		entry := map[string]interface{}{"show_output": true}
+		if goos == "windows" {
+			// Windsurf executes this field with `powershell -Command`. Do not
+			// provide `command`: the documented fallback would use bash -c on
+			// other platforms and obscures whether native Windows enforcement
+			// is actually active.
+			entry["powershell"] = hookScript
+		} else {
+			entry["command"] = shellWord(hookScript)
 		}
-		hooks[event] = appendUniqueFlatHook(hooks[event], hookScript, entry)
+		hooks[event] = replaceManagedWindsurfHooks(
+			hooks[event],
+			hookScript,
+			legacyShellScript,
+			entry,
+		)
 	}
 	return writeJSONObject(path, cfg)
+}
+
+func replaceManagedWindsurfHooks(raw interface{}, hookScript, legacyShellScript string, entry map[string]interface{}) []interface{} {
+	list, _ := raw.([]interface{})
+	out := make([]interface{}, 0, len(list)+1)
+	for _, item := range list {
+		if managedHookCommandEntry(item, hookScript) ||
+			managedHookCommandEntry(item, legacyShellScript) ||
+			managedHookCommandEntry(item, legacyWindsurfWindowsHookCommand()) {
+			continue
+		}
+		out = append(out, item)
+	}
+	return append(out, entry)
 }
 
 func patchGeminiHooks(path, hookScript string) error {
@@ -1622,43 +2080,59 @@ func patchGeminiTelemetry(path string, opts SetupOpts) error {
 }
 
 func patchCopilotHooks(path, hookScript string) error {
+	return patchCopilotHooksForOS(path, hookScript, copilotCurrentHookEvents, runtime.GOOS)
+}
+
+func patchCopilotHooksForOS(path, hookScript string, events []string, goos string) error {
 	cfg, err := readJSONObject(path)
 	if err != nil {
 		return err
 	}
 	hooks := ensureJSONObject(cfg, "hooks")
 	cfg["version"] = 1
-	for _, event := range []string{
-		"sessionStart",
-		"sessionEnd",
-		"userPromptSubmitted",
-		"preToolUse",
-		"postToolUse",
-		"postToolUseFailure",
-		"permissionRequest",
-		"agentStop",
-		"subagentStart",
-		"subagentStop",
-		"errorOccurred",
-		"preCompact",
-		"notification",
-	} {
+	selected := make(map[string]bool, len(events))
+	for _, event := range events {
+		if !ValidCopilotHookEvent(event) {
+			return fmt.Errorf("copilot: unsupported hook event %q in resolved contract", event)
+		}
+		selected[event] = true
 		entry := map[string]interface{}{
 			"type":       "command",
 			"timeoutSec": 30,
 		}
-		if runtime.GOOS == "windows" {
-			// Copilot selects the command field by host OS. A `bash`-only
-			// entry is ignored on Windows even when its value names a native
-			// executable. PowerShell requires the call operator before a quoted
-			// executable path, otherwise the path is parsed as a string literal.
-			entry["powershell"] = "& " + hookScript
+		eventCommand := copilotHookInvocationCommandForEvent(goos, event, hookScript)
+		if goos == "windows" {
+			// Copilot selects this field itself and evaluates it with PowerShell.
+			// eventCommand is therefore the complete vendor-specific program:
+			// do not prepend a call operator or another PowerShell process.
+			entry["powershell"] = eventCommand
 		} else {
-			entry["bash"] = shellWord(hookScript)
+			entry["bash"] = eventCommand
 		}
-		hooks[event] = appendUniqueFlatHook(hooks[event], hookScript, entry)
+		hooks[event] = reconcileCopilotFlatHook(hooks[event], hookScript, entry)
+	}
+	// A version downgrade must remove only the now-out-of-contract managed
+	// handler (currently userPromptTransformed), while retaining operator hooks
+	// registered for that event and every unknown/future event verbatim.
+	for _, event := range copilotCurrentHookEvents {
+		if selected[event] {
+			continue
+		}
+		remaining := removeOwnedFlatHooks(hooks[event], hookScript)
+		if len(remaining) == 0 {
+			delete(hooks, event)
+		} else {
+			hooks[event] = remaining
+		}
 	}
 	return writeJSONObject(path, cfg)
+}
+
+func copilotHookInvocationCommandForEvent(goos, event, hookScript string) string {
+	if goos == "windows" {
+		return windowsCopilotPowerShellHookCommandForEvent(event, defenseclawHookBinary())
+	}
+	return shellWord(hookScript) + " --event " + shellWord(event)
 }
 
 func patchOpenHandsHooks(path, hookScript string) error {
@@ -1692,8 +2166,8 @@ func patchOpenHandsHooks(path, hookScript string) error {
 	return writeJSONObject(path, cfg)
 }
 
-// antigravityLifecycleEvents is the canonical Antigravity 2.0 hook
-// lifecycle event list per the published spec:
+// antigravityLifecycleEvents is the canonical Antigravity 2.0 hook lifecycle
+// event list in its documented order:
 //
 //	PreInvocation  — before the agent calls the LLM
 //	PreToolUse     — before a tool executes
@@ -1705,24 +2179,6 @@ func patchOpenHandsHooks(path, hookScript string) error {
 // hooks.json is human-readable in chronological sequence — useful
 // when operators are debugging which hooks fired in what order
 // against the gateway log.
-//
-// All five events are registered together to deliver Antigravity
-// 2.0 spec parity. Per the spec the events are official, stable
-// names; agy v1.0.x may not yet emit every event at runtime
-// (PreToolUse is empirically verified; the others are gated on
-// upstream agy implementation parity with the published spec),
-// but registering all five in hooks.json is still correct: when
-// agy starts emitting a previously-quiet event, DefenseClaw
-// handles it with zero redeploy. The forward-compat decoder /
-// respond branches in antigravity_hook_profile.go and
-// hook_only_profile.go are the runtime side of this guarantee.
-//
-// Tracking gap: if empirical testing reveals agy v1.0.x rejects
-// hooks.json on unknown event keys (rather than silently ignoring
-// them), narrow this list to the verified-emitting subset and
-// keep the code branches in place for a future agy version. As of
-// the spec publication, agy is documented to share its hooks.json
-// schema with Claude Code, which tolerates unknown event keys.
 var antigravityLifecycleEvents = []string{
 	"PreInvocation",
 	"PreToolUse",
@@ -1731,8 +2187,20 @@ var antigravityLifecycleEvents = []string{
 	"Stop",
 }
 
-// patchAntigravityHooks writes Antigravity's hooks.json in the
-// Claude-Code-compatible nested schema agy v1.0.x actually evaluates:
+func antigravityOwnedHookCommands(hookScript string) []string {
+	return antigravityOwnedHookCommandsForOS(runtime.GOOS, hookScript)
+}
+
+func antigravityOwnedHookCommandsForOS(goos, hookScript string) []string {
+	commands := []string{hookScript}
+	for _, event := range antigravityLifecycleEvents {
+		commands = append(commands, antigravityHookInvocationCommandForEvent(goos, event, hookScript))
+	}
+	return uniqueNonEmptyStrings(commands)
+}
+
+// patchAntigravityHooks writes the documented mixed Antigravity hooks.json
+// schema:
 //
 //	{
 //	  "defenseclaw-antigravity-preinvocation":  { "PreInvocation":  [...] },
@@ -1742,19 +2210,10 @@ var antigravityLifecycleEvents = []string{
 //	  "defenseclaw-antigravity-stop":           { "Stop":           [...] }
 //	}
 //
-// where each per-event value follows agy's Claude-Code-derived
-// shape:
-//
-//	{
-//	  "<EventName>": [
-//	    {
-//	      "matcher": "*",
-//	      "hooks": [
-//	        { "type": "command", "command": "/abs/path/antigravity-hook.sh" }
-//	      ]
-//	    }
-//	  ]
-//	}
+// PreToolUse and PostToolUse contain matcher groups with nested handlers.
+// PreInvocation, PostInvocation, and Stop contain direct handler lists and
+// ignore matchers. Every handler is synchronous and uses the documented
+// 30-second default explicitly.
 //
 // Each outer key ("defenseclaw-antigravity-<event>") is a stable,
 // DefenseClaw-owned identifier that scopes ownership for re-setup
@@ -1762,55 +2221,39 @@ var antigravityLifecycleEvents = []string{
 // to the same hooks.json file under their own keys are not
 // disturbed.
 //
-// This shape was determined empirically for PreToolUse:
-//   - During the v0.5.0 smoke test, an earlier flat schema
-//     ({event, matcher, command, description}) was ignored entirely
-//     by agy — no tracer fires, no agy log lines, nothing.
-//   - Replacing the file with a Claude-Code-nested schema at
-//     ~/.gemini/config/hooks.json caused agy to invoke the
-//     configured command on every tool call, with the canonical
-//     PreToolUse payload {toolCall: {name, args}, conversationId,
-//     stepIdx, transcriptPath, ...} (decoded by
-//     antigravityProfileDecode in antigravity_hook_profile.go).
-//
-// PreInvocation, PostToolUse, PostInvocation, and Stop reuse the
-// same nested schema per the Antigravity 2.0 spec, which inherits
-// the hooks.json structure from Claude Code wholesale. agy's
-// parser is documented to tolerate unknown event keys (it merges
-// every discovered hooks.json file and dispatches by event name);
-// if empirical testing reveals it rejects unknown events instead,
-// scope antigravityLifecycleEvents to the verified-emitting
-// subset.
-//
-// The "command" field is written WITHOUT shellWord() quoting. agy v1.0.x
-// tokenizes the command itself and passes quote characters through to direct
-// exec, so shell quoting becomes literal path bytes and the hook silently
-// no-fires (verified empirically via the v0.5.0 Antigravity smoke test). On
-// Unix hookScript is the bare absolute .sh path. On Windows it is a
-// tokenizer-safe PowerShell command whose encoded script invokes the absolute
-// managed defenseclaw-hook.exe path. The visible command has no quoted tokens
-// or user-profile path segments for agy to mis-tokenize, and the launcher lookup
-// does not depend on Antigravity's current directory or PATH.
+// The "command" field is written WITHOUT shellWord() quoting because
+// Antigravity tokenizes the command before direct execution. On Unix hookScript
+// is the bare absolute .sh path. On Windows it is a tokenizer-safe PowerShell
+// command whose encoded script invokes the absolute managed
+// defenseclaw-hook.exe path. The visible command has no quoted tokens or
+// user-profile path segments for Antigravity to mis-tokenize, and the launcher
+// lookup does not depend on Antigravity's current directory or PATH.
 func patchAntigravityHooks(path, hookScript string) error {
+	return patchAntigravityHooksForOS(path, hookScript, runtime.GOOS)
+}
+
+func patchAntigravityHooksForOS(path, hookScript, goos string) error {
 	cfg, err := readJSONObject(path)
 	if err != nil {
 		return err
 	}
 	for _, event := range antigravityLifecycleEvents {
 		key := "defenseclaw-antigravity-" + strings.ToLower(event)
-		cfg[key] = map[string]interface{}{
-			event: []interface{}{
-				map[string]interface{}{
-					"matcher": "*",
-					"hooks": []interface{}{
-						map[string]interface{}{
-							"type":    "command",
-							"command": hookScript,
-						},
-					},
-				},
-			},
+		handler := map[string]interface{}{
+			"type":    "command",
+			"command": antigravityHookInvocationCommandForEvent(goos, event, hookScript),
+			"timeout": 30,
 		}
+		var handlers []interface{}
+		if event == "PreToolUse" || event == "PostToolUse" {
+			handlers = []interface{}{map[string]interface{}{
+				"matcher": "*",
+				"hooks":   []interface{}{handler},
+			}}
+		} else {
+			handlers = []interface{}{handler}
+		}
+		cfg[key] = map[string]interface{}{event: handlers}
 	}
 	return writeJSONObject(path, cfg)
 }
@@ -1884,6 +2327,26 @@ func appendUniqueFlatHook(raw interface{}, hookScript string, entry map[string]i
 		}
 	}
 	return append(list, entry)
+}
+
+func reconcileCopilotFlatHook(raw interface{}, hookScript string, entry map[string]interface{}) []interface{} {
+	list, _ := raw.([]interface{})
+	out := make([]interface{}, 0, len(list)+1)
+	replaced := false
+	for _, item := range list {
+		if managedHookCommandEntry(item, hookScript) {
+			if !replaced {
+				out = append(out, entry)
+				replaced = true
+			}
+			continue
+		}
+		out = append(out, item)
+	}
+	if !replaced {
+		out = append(out, entry)
+	}
+	return out
 }
 
 func appendUniqueGeminiHookGroup(raw interface{}, hookScript string, group map[string]interface{}) []interface{} {
@@ -2042,15 +2505,57 @@ func legacyAntigravityNonWaitingWindowsHookCommand() string {
 	return legacyWindowsNativePowerShellHookCommandForBinary("antigravity", defenseclawHookBinary())
 }
 
+func legacyWindsurfWindowsHookCommand() string {
+	return "& " + powershellQuoteLiteral(defenseclawHookBinary()) + " " + nativeHookFlag + "windsurf"
+}
+
 func managedHookCommandEntry(raw interface{}, hookScript string) bool {
 	entry, ok := raw.(map[string]interface{})
 	if !ok {
 		return false
 	}
-	for _, key := range []string{"command", "bash"} {
+	for _, key := range []string{"command", "bash", "powershell"} {
 		command, _ := entry[key].(string)
 		command = strings.TrimSpace(command)
 		if command == strings.TrimSpace(hookScript) || command == strings.TrimSpace(shellWord(hookScript)) {
+			return true
+		}
+		if isCopilotNativeHookCommand(hookScript) && isCopilotNativeHookCommand(command) {
+			return true
+		}
+		if isCopilotShellHookScript(hookScript) && isCopilotEventBoundShellCommand(command, hookScript) {
+			return true
+		}
+	}
+	return false
+}
+
+func isCopilotNativeHookCommand(command string) bool {
+	command = strings.TrimSpace(command)
+	for _, hookBinary := range nativeHookBinaryOwnershipCandidates() {
+		if command == windowsCopilotPowerShellHookCommandForBinary(hookBinary) ||
+			command == legacyWindowsCopilotPowerShellHookCommandForBinary(hookBinary) ||
+			command == legacyWindowsCopilotDoubleCallOperatorHookCommandForBinary(hookBinary) {
+			return true
+		}
+		for _, event := range copilotCurrentHookEvents {
+			if command == windowsCopilotPowerShellHookCommandForEvent(event, hookBinary) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isCopilotShellHookScript(command string) bool {
+	command = strings.Trim(strings.TrimSpace(command), `"'`)
+	return filepath.Base(filepath.FromSlash(command)) == "copilot-hook.sh"
+}
+
+func isCopilotEventBoundShellCommand(command, hookScript string) bool {
+	command = strings.TrimSpace(command)
+	for _, event := range copilotCurrentHookEvents {
+		if command == copilotHookInvocationCommandForEvent("linux", event, hookScript) {
 			return true
 		}
 	}

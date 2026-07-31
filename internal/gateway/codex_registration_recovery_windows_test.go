@@ -283,6 +283,7 @@ func TestCodexRegistrationRecoversOnAuthenticatedSessionStartAfterReadditionAndR
 	unauthorized := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:18970/api/v1/codex/hook", bytes.NewReader(body))
 	unauthorized.RemoteAddr = "127.0.0.1:49151"
 	unauthorized.Header.Set("Authorization", "Bearer non-secret-wrong-fixture")
+	setTestCodexHookBinding(unauthorized, "SessionStart", restartOpts.HookContractID)
 	unauthorizedRecorder := httptest.NewRecorder()
 	api.tokenAuth(api.handleAgentHook("codex")).ServeHTTP(unauthorizedRecorder, unauthorized)
 	if unauthorizedRecorder.Code != http.StatusUnauthorized {
@@ -298,6 +299,7 @@ func TestCodexRegistrationRecoversOnAuthenticatedSessionStartAfterReadditionAndR
 	req := httptest.NewRequest(http.MethodPost, "http://127.0.0.1:18970/api/v1/codex/hook", bytes.NewReader(body))
 	req.RemoteAddr = "127.0.0.1:49152"
 	req.Header.Set("Authorization", "Bearer "+hookToken)
+	setTestCodexHookBinding(req, "SessionStart", restartOpts.HookContractID)
 	recorder := httptest.NewRecorder()
 	requestDone := make(chan struct{})
 	go func() {
@@ -423,6 +425,7 @@ func TestCodexRegistrationRecoversOnAuthenticatedSessionStartAfterReadditionAndR
 	)
 	lockRepairRequest.RemoteAddr = "127.0.0.1:49153"
 	lockRepairRequest.Header.Set("Authorization", "Bearer "+hookToken)
+	setTestCodexHookBinding(lockRepairRequest, "SessionStart", restartOpts.HookContractID)
 	lockRepairRecorder := httptest.NewRecorder()
 	api.tokenAuth(api.handleAgentHook("codex")).ServeHTTP(lockRepairRecorder, lockRepairRequest)
 	if lockRepairRecorder.Code != http.StatusOK {

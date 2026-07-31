@@ -9,10 +9,10 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 #
-# One-time gate: does headless `cursor-agent -p` actually fire
+# One-time gate: does headless `agent -p` actually fire
 # ~/.cursor/hooks.json? Cursor exposes both a project cli-config.json and a
 # user hooks.json; it is not guaranteed the agentic-print mode honors the hook
-# bus. This script installs cursor-agent, wires DefenseClaw, drives a trivial
+# bus. This script installs Cursor Agent, wires DefenseClaw, drives a trivial
 # prompt, and checks whether any cursor-tagged event reached the gateway.
 #
 # Exit 0 + "CURSOR_HOOKS_FIRE=1" on $GITHUB_OUTPUT  -> live Cursor coverage is
@@ -29,11 +29,17 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 dc_section "cursor headless hook validation"
 
-if ! command -v cursor-agent >/dev/null 2>&1; then
-  curl https://cursor.com/install -fsS | bash || dc_die "cursor-agent install failed"
+if ! command -v agent >/dev/null 2>&1 && ! command -v cursor-agent >/dev/null 2>&1; then
+  curl https://cursor.com/install -fsS | bash || dc_die "Cursor Agent install failed"
   export PATH="${HOME}/.local/bin:${PATH}"
 fi
-DC_E2E_AGENT_VERSION="$(dc_capture_version cursor cursor-agent --version)"
+if command -v agent >/dev/null 2>&1; then
+  cursor_agent_bin="$(command -v agent)"
+else
+  # Cursor documents cursor-agent as a compatibility alias.
+  cursor_agent_bin="$(command -v cursor-agent)"
+fi
+DC_E2E_AGENT_VERSION="$(dc_capture_version cursor "${cursor_agent_bin}" --version)"
 export DC_E2E_AGENT_VERSION
 dc_write_env_key CURSOR_API_KEY "${CURSOR_API_KEY:-}"
 
@@ -41,19 +47,19 @@ dc_init_defenseclaw
 dc_setup_connector cursor action
 
 before="$(dc_event_cursor)"
-dc_log "driving trivial headless prompt through cursor-agent"
-dc_timeout 120 cursor-agent -p "Reply with only the word ready. Do not use any tools." \
+dc_log "driving trivial headless prompt through agent"
+dc_timeout 120 "${cursor_agent_bin}" -p "Reply with only the word ready. Do not use any tools." \
   --output-format json --force >/tmp/dc-cursor-validation.log 2>&1 || \
-  dc_warn "cursor-agent exited non-zero (see /tmp/dc-cursor-validation.log)"
+  dc_warn "Cursor Agent exited non-zero (see /tmp/dc-cursor-validation.log)"
 dc_wait_for_connector_event cursor "${before}" || true
 
 fired=1
 if dc_assert_fired cursor "${before}"; then
-  dc_log "RESULT: cursor-agent -p FIRES ~/.cursor/hooks.json"
+  dc_log "RESULT: agent -p FIRES ~/.cursor/hooks.json"
   dc_record_result "validation:hooks-fire" pass ""
 else
   fired=0
-  dc_log "RESULT: cursor-agent -p did NOT fire the hook bus"
+  dc_log "RESULT: agent -p did NOT fire the hook bus"
   dc_record_result "validation:hooks-fire" fail "no cursor events reached gateway in -p mode"
 fi
 

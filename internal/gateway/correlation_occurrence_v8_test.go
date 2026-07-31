@@ -681,7 +681,7 @@ func TestHookOccurrenceExactTerminalIDNeverFallsBackToCurrentPendingOperation(t 
 	}
 }
 
-func TestHookOccurrenceReportedModelStartResolvesMissingEndIDAcrossRestart(t *testing.T) {
+func TestHookOccurrenceOmniGentRejectsUnprovenModelAliasesAcrossRestart(t *testing.T) {
 	installCorrelationHMACForTest()
 	path := filepath.Join(t.TempDir(), "audit.db")
 	server, store := newHookCorrelationServer(t, path)
@@ -697,8 +697,8 @@ func TestHookOccurrenceReportedModelStartResolvesMissingEndIDAcrossRestart(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if start.ModelRequestID != "provider-model-request-1" {
-		t.Fatalf("reported model request ID changed: %q", start.ModelRequestID)
+	if start.ModelRequestID != "" {
+		t.Fatalf("unproven OmniGent request_id populated model identity: %q", start.ModelRequestID)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
@@ -717,9 +717,8 @@ func TestHookOccurrenceReportedModelStartResolvesMissingEndIDAcrossRestart(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if end.ModelRequestID != start.ModelRequestID {
-		t.Fatalf("missing model end ID did not resolve reported start: start=%q end=%q",
-			start.ModelRequestID, end.ModelRequestID)
+	if end.ModelRequestID != "" {
+		t.Fatalf("unproven OmniGent aliases inferred model identity after restart: %q", end.ModelRequestID)
 	}
 	repo, err := reopened.CorrelationRepository()
 	if err != nil {
@@ -732,9 +731,8 @@ func TestHookOccurrenceReportedModelStartResolvesMissingEndIDAcrossRestart(t *te
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(operations) != 1 || operations[0].OperationID != "provider-model-request-1" ||
-		operations[0].TerminalSemanticEventID != audit.SemanticEventID(end.SemanticEventID) {
-		t.Fatalf("reported model pending resolution=%+v", operations)
+	if len(operations) != 0 {
+		t.Fatalf("unproven OmniGent model aliases created completed operations=%+v", operations)
 	}
 }
 

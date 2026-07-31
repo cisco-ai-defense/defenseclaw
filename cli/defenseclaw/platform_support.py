@@ -15,11 +15,12 @@ agent/runtime and a DefenseClaw integration that can be wired without WSL are
 both required. The resulting status is one of ``supported``, ``preview``,
 ``not_certified``, or ``unsupported`` and always carries a reason.
 
-DefenseClaw runs hook-only on Windows: agents invoke the native Go hook
-entrypoint (``defenseclaw-gateway hook``) directly, and there is no Windows
-guardrail-proxy lifecycle. The proxy/chat connectors (``openclaw`` and
-``zeptoclaw``) therefore cannot run on Windows, so the TUI/CLI must not offer
-or accept them there.
+DefenseClaw runs hook-only on Windows: most agents invoke the native Go hook
+entrypoint directly. Cursor invokes a native PowerShell adapter first because
+its Windows command-hook transport materializes stdin as PowerShell pipeline
+objects. There is no Windows guardrail-proxy lifecycle. The proxy/chat
+connectors (``openclaw`` and ``zeptoclaw``) therefore cannot run on Windows,
+so the TUI/CLI must not offer or accept them there.
 
 This module mirrors ``internal/gateway/connector/platform_support.go``.  Tests
 pin the two taxonomies and all Python presentation lists together.  macOS and
@@ -67,24 +68,33 @@ class ConnectorPlatformSupport:
 # upstream Windows binary is not sufficient for DefenseClaw certification.
 WINDOWS_CONNECTOR_SUPPORT: dict[str, ConnectorPlatformSupport] = {
     "codex": ConnectorPlatformSupport(
-        SUPPORTED,
-        "Codex CLI and the DefenseClaw hook entrypoint are certified on native Windows x64.",
+        PREVIEW,
+        "Codex CLI and the DefenseClaw hook entrypoint are available as a native "
+        "Windows x64 preview; no authentic packaged plus official-client "
+        "release-certification record is available.",
     ),
     "claudecode": ConnectorPlatformSupport(
-        SUPPORTED,
-        "Claude Code with Git for Windows and native hooks is certified on native Windows x64.",
+        PREVIEW,
+        "Claude Code and the DefenseClaw native executable hook entrypoint are "
+        "available as a native Windows x64 preview; no immutable packaged plus "
+        "official-client certification record is persisted.",
     ),
     "cursor": ConnectorPlatformSupport(
-        NOT_CERTIFIED,
-        "The DefenseClaw Cursor integration has not completed native Windows x64 certification.",
+        PREVIEW,
+        "Cursor Agent and the DefenseClaw PowerShell hook adapter are available "
+        "as a native Windows x64 preview pending integrated packaged and "
+        "official-client validation.",
     ),
     "windsurf": ConnectorPlatformSupport(
-        NOT_CERTIFIED,
-        "The DefenseClaw Windsurf integration has not completed native Windows x64 certification.",
+        PREVIEW,
+        "Windsurf Cascade hooks and the native PowerShell adapter are implemented; "
+        "packaged and official-client Windows x64 certification is pending.",
     ),
     "geminicli": ConnectorPlatformSupport(
-        NOT_CERTIFIED,
-        "The DefenseClaw Gemini CLI integration has not completed native Windows x64 certification.",
+        UNSUPPORTED,
+        "Gemini CLI native Windows support is excluded from this release because "
+        "the intended product and audience path was discontinued; existing "
+        "non-Windows support is unchanged.",
     ),
     "copilot": ConnectorPlatformSupport(
         NOT_CERTIFIED,
@@ -92,23 +102,28 @@ WINDOWS_CONNECTOR_SUPPORT: dict[str, ConnectorPlatformSupport] = {
     ),
     "antigravity": ConnectorPlatformSupport(
         NOT_CERTIFIED,
-        "The DefenseClaw Antigravity integration has not completed native Windows x64 certification.",
+        "The native Windows x64 implementation is awaiting integrated packaged and official-client validation.",
     ),
     "opencode": ConnectorPlatformSupport(
-        NOT_CERTIFIED,
-        "The DefenseClaw OpenCode integration has not completed native Windows x64 certification.",
+        PREVIEW,
+        "OpenCode native Windows support is preview pending integrated packaged "
+        "Setup and official-client validation; OpenCode recommends WSL but does "
+        "not require it.",
     ),
     "hermes": ConnectorPlatformSupport(
-        NOT_CERTIFIED,
-        "The DefenseClaw Hermes integration has not completed native Windows x64 certification.",
+        PREVIEW,
+        "Hermes native shell hooks use a direct DefenseClaw executable; "
+        "packaged and official-client Windows x64 certification is pending.",
     ),
     "openhands": ConnectorPlatformSupport(
         UNSUPPORTED,
         "OpenHands CLI requires WSL; DefenseClaw does not implement a WSL connector path.",
     ),
     "omnigent": ConnectorPlatformSupport(
-        UNSUPPORTED,
-        "OmniGent has no supported native Windows terminal/sandbox path for this connector.",
+        PREVIEW,
+        "OmniGent 0.7.0 supports native Windows server and SDK harnesses in "
+        "degraded mode; DefenseClaw uses its awaited in-process policy API "
+        "without terminal wrapping or filesystem/network sandbox parity.",
     ),
     "openclaw": ConnectorPlatformSupport(
         UNSUPPORTED,
@@ -140,7 +155,7 @@ WINDOWS_UNSUPPORTED_FEATURES: frozenset[str] = frozenset(
         "sandbox",
         "enterprise-hooks",
         "openhands",
-        "omnigent",
+        "omnigent-terminal-sandbox",
         "openclaw",
         "zeptoclaw",
     }

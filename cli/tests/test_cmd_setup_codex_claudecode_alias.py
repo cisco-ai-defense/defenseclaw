@@ -364,6 +364,15 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
                 self.assertNotIn("guardrail.mode=observe", result.output)
                 self.assertNotIn("guardrail.mode:", result.output)
                 self.assertNotIn("set guardrail.mode=action", result.output)
+                if connector == "cursor":
+                    self.assertIn(
+                        "cursor hook failures=open (failClosed=false; vendor default is fail-open)",
+                        result.output,
+                    )
+                    self.assertIn(
+                        "sessionStart/sessionEnd are fire-and-forget and stop is followup-only",
+                        result.output,
+                    )
                 restart_mock.assert_not_called()
 
                 hint_path = os.path.join(self.app.cfg.data_dir, "picked_connector")
@@ -403,6 +412,15 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
                 self.assertNotIn("guardrail.mode:", result.output)
                 self.assertIn(f"defenseclaw setup {connector} --mode observe", result.output)
                 self.assertNotIn("set guardrail.mode=observe", result.output)
+                if connector == "cursor":
+                    self.assertIn(
+                        "cursor hook failures=closed (failClosed=true; vendor default is fail-open)",
+                        result.output,
+                    )
+                    self.assertIn(
+                        "ask is enforced only for beforeShellExecution and beforeMCPExecution",
+                        result.output,
+                    )
                 version_mock.assert_called_with(
                     connector,
                     mode="action",
@@ -410,6 +428,39 @@ class TestSetupNewConnectorAliases(unittest.TestCase):
                     _allow_prompt=False,
                 )
                 restart_mock.assert_not_called()
+
+    def test_cursor_observe_reports_fail_open_despite_explicit_closed_preference(self):
+        from defenseclaw.config import PerConnectorGuardrailConfig
+
+        self.app.cfg.guardrail.connectors = {
+            "cursor": PerConnectorGuardrailConfig(
+                mode="observe",
+                hook_fail_mode="closed",
+            )
+        }
+        with (
+            patch(
+                "defenseclaw.commands.cmd_setup._restart_services",
+                return_value=None,
+            ),
+            patch(
+                "defenseclaw.commands.cmd_setup._maybe_bring_up_local_stack",
+                return_value=None,
+            ),
+            patch(
+                "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                return_value=True,
+            ),
+        ):
+            result = _invoke(["cursor", "--yes", "--mode", "observe", "--no-restart"], self.app)
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("cursor mode=observe", result.output)
+        self.assertIn(
+            "cursor hook failures=open (failClosed=false; vendor default is fail-open)",
+            result.output,
+        )
+        self.assertNotIn("failClosed=true", result.output)
 
     def test_yes_no_restart_setup_does_not_reference_missing_interactive_flag(self):
         for connector in ["hermes", "codex", "opencode"]:

@@ -141,6 +141,39 @@ class TestConnectorContractManifest(unittest.TestCase):
                     "Stop",
                 ),
             ),
+            (
+                "0.144.99",
+                "codex-hooks-v3",
+                (
+                    "SessionStart",
+                    "UserPromptSubmit",
+                    "PreToolUse",
+                    "PermissionRequest",
+                    "PostToolUse",
+                    "SubagentStart",
+                    "SubagentStop",
+                    "PreCompact",
+                    "PostCompact",
+                    "Stop",
+                ),
+            ),
+            (
+                "0.145.0",
+                "codex-hooks-v4",
+                (
+                    "SessionStart",
+                    "UserPromptSubmit",
+                    "PreToolUse",
+                    "PermissionRequest",
+                    "PostToolUse",
+                    "SubagentStart",
+                    "SubagentStop",
+                    "PreCompact",
+                    "PostCompact",
+                    "Stop",
+                    "SessionEnd",
+                ),
+            ),
         )
         for version, contract_id, events in expected:
             with self.subTest(version=version):
@@ -151,11 +184,15 @@ class TestConnectorContractManifest(unittest.TestCase):
                 self.assertEqual(known.contract.events, events)
                 self.assertEqual(known.contract.hook_script_version, "v6")
                 self.assertIn("~/.codex/config.toml", known.contract.hook_config_path_templates)
+                self.assertIn(
+                    "~/.codex/managed_config.toml",
+                    known.contract.hook_config_path_templates,
+                )
                 self.assertIn("tool_call", known.contract.aid_surfaces)
 
         unversioned = resolve_connector_contract("codex", "")
         self.assertEqual(unversioned.status, STATUS_UNVERSIONED)
-        self.assertEqual(unversioned.contract.contract_id, "codex-hooks-v3")
+        self.assertEqual(unversioned.contract.contract_id, "codex-hooks-v4")
         self.assertTrue(unversioned.contract.default_for_unversioned)
         self.assertTrue(unversioned.contract.native_otlp)
         self.assertEqual(unversioned.contract.native_otlp_auth, "header-token")
@@ -181,21 +218,21 @@ class TestConnectorContractManifest(unittest.TestCase):
         self.assertNotIn("/otlp/codex/<token>", rendered)
 
     def test_claude_aliases_resolve_to_claudecode(self) -> None:
-        compat = resolve_connector_contract("claude-code", "Claude Code 2.1.152")
+        compat = resolve_connector_contract("claude-code", "Claude Code 2.1.154")
         self.assertEqual(compat.status, STATUS_KNOWN)
         self.assertEqual(compat.connector, "claudecode")
         self.assertEqual(compat.contract.contract_id, "claudecode-hooks-v1")
         self.assertEqual(compat.contract.hook_script_version, "v7")
         self.assertIn("event_content", compat.contract.aid_surfaces)
 
-    def test_copilot_contract_describes_optional_native_otlp(self) -> None:
+    def test_copilot_contract_does_not_claim_native_otlp(self) -> None:
         compat = resolve_connector_contract("copilot", "")
 
-        self.assertEqual(compat.contract.contract_id, "copilot-hooks-v1")
-        self.assertTrue(compat.contract.native_otlp)
-        self.assertEqual(compat.contract.native_otlp_auth, "header-token")
-        self.assertEqual(compat.contract.native_otlp_signals, ("metrics", "traces"))
-        self.assertEqual(compat.contract.native_otlp_endpoint_template, "/v1/<signal>")
+        self.assertEqual(compat.contract.contract_id, "copilot-hooks-v2")
+        self.assertFalse(compat.contract.native_otlp)
+        self.assertEqual(compat.contract.native_otlp_auth, "")
+        self.assertEqual(compat.contract.native_otlp_signals, ())
+        self.assertEqual(compat.contract.native_otlp_endpoint_template, "")
 
     def test_unversioned_connectors_use_default_contract(self) -> None:
         compat = resolve_connector_contract("cursor", "")
@@ -208,6 +245,29 @@ class TestConnectorContractManifest(unittest.TestCase):
         gemini = resolve_connector_contract("gemini-cli", "")
         self.assertEqual(gemini.connector, "geminicli")
         self.assertEqual(gemini.status, STATUS_UNVERSIONED)
+
+    def test_cursor_current_preview_contract_is_pinned_to_exact_agent_build(self) -> None:
+        for raw_version in (
+            "2026.07.23-e383d2b",
+            "agent v2026.07.23-e383d2b",
+            "cursor-agent 2026.07.23-e383d2b",
+        ):
+            with self.subTest(raw_version=raw_version):
+                compat = resolve_connector_contract("cursor", raw_version)
+                self.assertEqual(compat.status, STATUS_KNOWN)
+                self.assertEqual(compat.contract.contract_id, "cursor-hooks-v1")
+                self.assertIn("subagentStart", compat.contract.capabilities["block_events"])
+                self.assertNotIn("subagentStart", compat.contract.capabilities["ask_events"])
+
+        for raw_version in (
+            "cursor-agent 2026.07.23-deadbee",
+            "cursor 3.13.21",
+            "Cursor Agent 2026.07.23-e383d2b",
+        ):
+            with self.subTest(raw_version=raw_version):
+                compat = resolve_connector_contract("cursor", raw_version)
+                self.assertEqual(compat.status, STATUS_UNKNOWN)
+                self.assertFalse(compat.supported)
 
     def test_openhands_cli_version_matches_documented_contract(self) -> None:
         compat = resolve_connector_contract("openhands", "OpenHands CLI 1.16.0")
@@ -223,12 +283,23 @@ class TestConnectorContractManifest(unittest.TestCase):
         compat = resolve_connector_contract("omnigent", "")
         templates = compat.contract.hook_config_path_templates
 
+        self.assertEqual(compat.status, STATUS_UNVERSIONED)
+        self.assertEqual(compat.contract.min_agent_version, "0.7.0")
         self.assertIn("$OMNIGENT_CONFIG_HOME/config.yaml", templates)
         self.assertIn("~/.omnigent/config.yaml", templates)
         self.assertLess(
             templates.index("$OMNIGENT_CONFIG_HOME/config.yaml"),
             templates.index("~/.omnigent/config.yaml"),
         )
+
+        before_floor = resolve_connector_contract("omnigent", "omnigent 0.6.99")
+        self.assertFalse(before_floor.supported)
+        self.assertEqual(before_floor.status, STATUS_UNKNOWN)
+
+        proven = resolve_connector_contract("omnigent", "omnigent 0.7.0")
+        self.assertTrue(proven.supported)
+        self.assertEqual(proven.status, STATUS_KNOWN)
+        self.assertEqual(proven.contract.contract_id, "omnigent-custom-policy-v1")
 
     def test_hermes_contract_advertises_native_windows_path_precedence(self) -> None:
         compat = resolve_connector_contract("hermes", "")
@@ -328,7 +399,7 @@ class TestSetupConnectorVersionGate(unittest.TestCase):
         GuardrailConfig.Validate now rejects at load)."""
         with patch(
             "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
-            return_value=_discovery("claudecode", installed=True, version="2.1.152"),
+            return_value=_discovery("claudecode", installed=True, version="2.1.154"),
         ):
             ok = _apply_hook_connector_setup(
                 self.app,
@@ -345,7 +416,7 @@ class TestSetupConnectorVersionGate(unittest.TestCase):
         with (
             patch(
                 "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
-                return_value=_discovery("claudecode", installed=True, version="2.1.152"),
+                return_value=_discovery("claudecode", installed=True, version="2.1.154"),
             ),
             patch("defenseclaw.commands.cmd_setup._sync_guardrail_hilt_to_opa") as sync_hilt,
         ):

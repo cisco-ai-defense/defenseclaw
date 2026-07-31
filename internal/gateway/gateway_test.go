@@ -2709,11 +2709,11 @@ func TestAPIStatusEmitsConnectorMode(t *testing.T) {
 			wantTelemetryAll: []string{"hooks", "otel"},
 		},
 		{
-			name:             "copilot_observability_hooks_and_otel",
+			name:             "copilot_observability_hooks_only",
 			connector:        "copilot",
 			wantMode:         "observability",
 			wantIntercept:    false,
-			wantTelemetryAll: []string{"hooks", "otel"},
+			wantTelemetryAll: []string{"hooks"},
 		},
 		{
 			name:             "openhands_observability_hooks",

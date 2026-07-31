@@ -17,6 +17,7 @@
 package connector
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -30,6 +31,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
+	"gopkg.in/yaml.v3"
 )
 
 func TestHookOnlyConnector_CapabilityMatrix(t *testing.T) {
@@ -43,7 +45,7 @@ func TestHookOnlyConnector_CapabilityMatrix(t *testing.T) {
 	}{
 		{NewHermesConnector(), false, false, "user", "config.yaml"},
 		{NewCursorConnector(), true, true, "user", "hooks.json"},
-		{NewWindsurfConnector(), false, false, "user", "hooks.json"},
+		{NewWindsurfConnector(), false, true, "user", "hooks.json"},
 		{NewGeminiCLIConnector(), false, true, "user", "settings.json"},
 		{NewCopilotConnector(), true, false, "user,workspace", "defenseclaw.json"},
 		{NewOpenHandsConnector(), false, true, "user,workspace", "hooks.json"},
@@ -271,11 +273,11 @@ func TestHookOnlyConnector_SurfaceCapabilities(t *testing.T) {
 		// MCP install surface.
 		mcpSupported bool
 	}{
-		{NewHermesConnector(), []string{"skill"}, false, false, true},
-		{NewCursorConnector(), []string{"skill", "rule"}, false, false, true},
+		{NewHermesConnector(), []string{"skill"}, false, true, true},
+		{NewCursorConnector(), []string{"skill", "rule"}, false, true, true},
 		{NewWindsurfConnector(), []string{"rule"}, false, false, true},
 		{NewGeminiCLIConnector(), []string{"skill"}, true, false, true},
-		{NewCopilotConnector(), []string{"skill", "rule"}, true, false, true},
+		{NewCopilotConnector(), []string{"skill", "rule"}, false, true, true},
 		{NewOpenHandsConnector(), []string{"skill"}, false, false, true},
 		{NewAntigravityConnector(), nil, false, true, true},
 	}
@@ -304,11 +306,41 @@ func TestHookOnlyConnector_SurfaceCapabilities(t *testing.T) {
 	}
 }
 
+func TestCursorConnector_InventoryOnlyPluginAndSubagentCapabilities(t *testing.T) {
+	dir := t.TempDir()
+	home := filepath.Join(dir, "home")
+	workspace := filepath.Join(dir, "repo")
+	testenv.SetHome(t, home)
+
+	caps := NewCursorConnector().Capabilities(SetupOpts{WorkspaceDir: workspace})
+
+	wantPlugins := []string{filepath.Join(home, ".cursor", "plugins", "local")}
+	if !caps.Plugins.Supported || !caps.Plugins.DiscoveryOnly || !sameStrings(caps.Plugins.ReadPaths, wantPlugins) {
+		t.Fatalf("Cursor plugin inventory capability drifted: %+v", caps.Plugins)
+	}
+	if len(caps.Plugins.WritePaths) != 0 || len(caps.Plugins.InstallTargets) != 0 {
+		t.Fatalf("Cursor plugins must remain inventory-only: %+v", caps.Plugins)
+	}
+
+	wantAgents := []string{
+		filepath.Join(workspace, ".cursor", "agents"),
+		filepath.Join(home, ".cursor", "agents"),
+	}
+	if !caps.Agents.Supported || !caps.Agents.DiscoveryOnly || !sameStrings(caps.Agents.ReadPaths, wantAgents) {
+		t.Fatalf("Cursor subagent inventory capability drifted: %+v", caps.Agents)
+	}
+	if len(caps.Agents.WritePaths) != 0 || len(caps.Agents.InstallTargets) != 0 {
+		t.Fatalf("Cursor subagents must remain inventory-only: %+v", caps.Agents)
+	}
+}
+
 func TestAntigravityConnector_CapabilityContract(t *testing.T) {
 	dir := t.TempDir()
 	home := filepath.Join(dir, "home")
 	workspace := filepath.Join(dir, "repo")
 	testenv.SetHome(t, home)
+	t.Setenv("ANTIGRAVITY_CONFIG_DIR", filepath.Join(dir, "vendor-looking-decoy"))
+	t.Setenv("GEMINI_CONFIG_DIR", filepath.Join(dir, "gemini-decoy"))
 
 	conn := NewAntigravityConnector()
 	opts := SetupOpts{
@@ -326,6 +358,16 @@ func TestAntigravityConnector_CapabilityContract(t *testing.T) {
 	}
 	if caps.Hooks.ConfigPath == filepath.Join(workspace, ".agents", "hooks.json") {
 		t.Fatalf("Antigravity hook config must remain global-write only: %q", caps.Hooks.ConfigPath)
+	}
+	custodyHome := filepath.Join(dir, "legacy-custody")
+	maintenanceCaps := conn.Capabilities(SetupOpts{
+		DataDir:      opts.DataDir,
+		WorkspaceDir: workspace,
+		APIAddr:      opts.APIAddr,
+		ConfigHome:   custodyHome,
+	})
+	if maintenanceCaps.Hooks.ConfigPath != filepath.Join(custodyHome, "hooks.json") {
+		t.Fatalf("Antigravity hidden custody hook ConfigPath=%q", maintenanceCaps.Hooks.ConfigPath)
 	}
 
 	wantMCP := []string{
@@ -366,11 +408,22 @@ func TestAntigravityConnector_CapabilityContract(t *testing.T) {
 	if !caps.Rules.Supported || !caps.Rules.DiscoveryOnly || len(caps.Rules.WritePaths) != 0 {
 		t.Fatalf("Antigravity rules should be discovery-only with no write paths: %+v", caps.Rules)
 	}
-	if !caps.Plugins.Supported || !caps.Plugins.DiscoveryOnly || len(caps.Plugins.WritePaths) != 0 {
-		t.Fatalf("Antigravity plugins should be discovery-only with no write paths: %+v", caps.Plugins)
+	if !caps.Plugins.Supported || caps.Plugins.DiscoveryOnly || !caps.Plugins.RequiresOptIn {
+		t.Fatalf("Antigravity plugins should expose explicit opt-in install support: %+v", caps.Plugins)
+	}
+	if len(caps.Plugins.InstallTargets) != 1 || caps.Plugins.InstallTargets[0] != "plugin" {
+		t.Fatalf("Antigravity plugin install targets = %v, want [plugin]", caps.Plugins.InstallTargets)
 	}
 	if !caps.Agents.Supported || !caps.Agents.DiscoveryOnly || len(caps.Agents.WritePaths) != 0 {
-		t.Fatalf("Antigravity plugin-contained agents should be discovery-only with no write paths: %+v", caps.Agents)
+		t.Fatalf("Antigravity agents should be discovery-only with no write paths: %+v", caps.Agents)
+	}
+	for _, want := range []string{
+		filepath.Join(home, ".gemini", "config", "agents"),
+		filepath.Join(workspace, ".agents", "agents"),
+	} {
+		if !stringInSlice(caps.Agents.ReadPaths, want) {
+			t.Fatalf("Antigravity agent read paths missing %q: %v", want, caps.Agents.ReadPaths)
+		}
 	}
 	for _, want := range []string{
 		filepath.Join(home, ".gemini", "config", "plugins"),
@@ -381,9 +434,40 @@ func TestAntigravityConnector_CapabilityContract(t *testing.T) {
 		if !stringInSlice(caps.Plugins.ReadPaths, want) {
 			t.Fatalf("Antigravity plugin read paths missing %q: %v", want, caps.Plugins.ReadPaths)
 		}
-		if !stringInSlice(caps.Agents.ReadPaths, want) {
-			t.Fatalf("Antigravity agent read paths missing plugin root %q: %v", want, caps.Agents.ReadPaths)
+	}
+	for _, want := range []string{
+		filepath.Join(home, ".gemini", "config", "plugins"),
+		filepath.Join(workspace, ".agents", "plugins"),
+		filepath.Join(workspace, "_agents", "plugins"),
+	} {
+		if !stringInSlice(caps.Plugins.WritePaths, want) {
+			t.Fatalf("Antigravity plugin write paths missing %q: %v", want, caps.Plugins.WritePaths)
 		}
+	}
+	if cliStaging := filepath.Join(home, ".gemini", "antigravity-cli", "plugins"); stringInSlice(caps.Plugins.WritePaths, cliStaging) {
+		t.Fatalf("Antigravity CLI staging path must remain discovery-only: %v", caps.Plugins.WritePaths)
+	}
+}
+
+func TestAntigravityAgentPathsDiscoverPluginComponents(t *testing.T) {
+	root := t.TempDir()
+	globalPlugins := filepath.Join(root, ".gemini", "config", "plugins")
+	pluginAgents := filepath.Join(globalPlugins, "review-bundle", "agents")
+	if err := os.MkdirAll(pluginAgents, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var paths []string
+	if err := WithUserHomeDir(root, func() error {
+		paths = antigravityAgentPaths(SetupOpts{})
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !stringInSlice(paths, filepath.Join(root, ".gemini", "config", "agents")) {
+		t.Fatalf("global standalone agent path missing: %v", paths)
+	}
+	if !stringInSlice(paths, pluginAgents) {
+		t.Fatalf("plugin agent component path missing: %v", paths)
 	}
 }
 
@@ -431,19 +515,43 @@ func TestHookOnlyConnector_SetupTeardown_BackupRestore(t *testing.T) {
 			}
 			wantConfigNeedle := conn.scriptName
 			if runtime.GOOS == "windows" {
-				if conn.Name() == "cursor" {
-					wantConfigNeedle = "cursor-hook.ps1"
+				if conn.Name() == "cursor" || conn.Name() == "windsurf" {
+					wantConfigNeedle = conn.Name() + "-hook.ps1"
 				} else {
 					wantConfigNeedle = nativeHookFlag + conn.Name()
 				}
 			}
-			if runtime.GOOS == "windows" && conn.Name() == "antigravity" {
+			if runtime.GOOS == "windows" &&
+				(conn.Name() == "antigravity" || conn.Name() == "copilot") {
 				var cfg map[string]interface{}
 				if err := json.Unmarshal(data, &cfg); err != nil {
-					t.Fatalf("parse antigravity config after setup: %v\n%s", err, data)
+					t.Fatalf("parse %s config after setup: %v\n%s", conn.Name(), err, data)
 				}
-				if !structuredHookCommandReferences(cfg, []string{conn.hookCommand(opts)}) {
-					t.Fatalf("config after setup does not reference safe Antigravity command:\n%s", string(data))
+				ownedCommands := []string{conn.hookCommand(opts)}
+				if conn.Name() == "antigravity" {
+					ownedCommands = antigravityOwnedHookCommands(conn.hookCommand(opts))
+					// The first entry is the generic pre-event command retained
+					// only for legacy ownership cleanup. Current Antigravity
+					// registration always carries one of its five trusted
+					// --event bindings.
+					ownedCommands = ownedCommands[1:]
+				} else if conn.Name() == "copilot" {
+					ownedCommands = make([]string, 0, len(copilotCurrentHookEvents))
+					for _, event := range copilotCurrentHookEvents {
+						ownedCommands = append(ownedCommands, copilotHookInvocationCommandForEvent(
+							"windows", event, conn.hookCommand(opts),
+						))
+					}
+				}
+				for _, command := range ownedCommands {
+					encodedCommand, err := json.Marshal(command)
+					if err != nil {
+						t.Fatalf("encode %s hook command: %v", conn.Name(), err)
+					}
+					if !strings.Contains(string(data), string(encodedCommand)) {
+						t.Fatalf("config after setup does not reference safe %s command %q:\n%s",
+							conn.Name(), command, string(data))
+					}
 				}
 			} else if !strings.Contains(string(data), wantConfigNeedle) {
 				t.Fatalf("config after setup does not reference %s:\n%s", wantConfigNeedle, string(data))
@@ -461,13 +569,13 @@ func TestHookOnlyConnector_SetupTeardown_BackupRestore(t *testing.T) {
 }
 
 // TestHermesSetup_WritesFullLifecycleAndAutoAccept pins the
-// hermes-hooks-v1 setup contract: Setup must register every lifecycle
-// event in the cli-config.yaml `hooks:` block AND set hooks_auto_accept
+// hermes-hooks-v1 setup contract: Setup must register all 23 v0.19 hooks
+// event in the effective config.yaml `hooks:` block AND set hooks_auto_accept
 // so the hooks actually register on non-TTY/gateway runs (Hermes
 // silently skips un-accepted hooks there). Teardown must heal a
 // previously-missing config back to absent.
 func TestHermesSetup_WritesFullLifecycleAndAutoAccept(t *testing.T) {
-	dir := t.TempDir()
+	dir := testenv.PrivateTempDir(t)
 	cfgPath := filepath.Join(dir, ".hermes", "config.yaml")
 	prev := HermesConfigPathOverride
 	HermesConfigPathOverride = cfgPath
@@ -477,6 +585,12 @@ func TestHermesSetup_WritesFullLifecycleAndAutoAccept(t *testing.T) {
 	opts := SetupOpts{DataDir: filepath.Join(dir, "dc"), APIAddr: "127.0.0.1:18970", APIToken: "tok-test"}
 	if err := conn.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
+	}
+	if _, err := os.Stat(managedFileBackupPath(opts.DataDir, "hermes", "config.yaml")); err != nil {
+		t.Fatalf("canonical Hermes config.yaml backup was not captured: %v", err)
+	}
+	if _, err := os.Stat(managedFileBackupPath(opts.DataDir, "hermes", "config")); !os.IsNotExist(err) {
+		t.Fatalf("legacy Hermes config backup was created: %v", err)
 	}
 
 	cfg, err := readYAMLObject(cfgPath)
@@ -491,13 +605,21 @@ func TestHermesSetup_WritesFullLifecycleAndAutoAccept(t *testing.T) {
 		t.Fatalf("hooks block missing or wrong type: %#v", cfg["hooks"])
 	}
 	for _, event := range []string{
-		"pre_llm_call", "pre_tool_call", "post_tool_call", "post_llm_call",
+		"pre_tool_call", "post_tool_call",
+		"transform_terminal_output", "transform_tool_result", "transform_llm_output",
+		"pre_llm_call", "post_llm_call", "pre_verify",
+		"pre_api_request", "post_api_request", "api_request_error",
 		"on_session_start", "on_session_end", "on_session_finalize", "on_session_reset",
 		"subagent_start", "subagent_stop",
+		"pre_gateway_dispatch", "pre_approval_request", "post_approval_response",
+		"kanban_task_claimed", "kanban_task_completed", "kanban_task_blocked",
 	} {
 		if _, ok := hooks[event]; !ok {
 			t.Errorf("hooks block missing lifecycle event %q; got keys %v", event, mapKeys(hooks))
 		}
+	}
+	if len(hooks) != 23 {
+		t.Errorf("Hermes hooks count = %d, want 23; got keys %v", len(hooks), mapKeys(hooks))
 	}
 
 	if err := conn.Teardown(context.Background(), opts); err != nil {
@@ -510,13 +632,13 @@ func TestHermesSetup_WritesFullLifecycleAndAutoAccept(t *testing.T) {
 	}
 }
 
-// TestHermesSetup_RespectsExplicitAutoAcceptAndHealsUserConfig asserts
-// two coupled behaviors: (1) Setup does NOT override an operator's
-// explicit hooks_auto_accept:false, and (2) Teardown heals a
-// pre-existing config back to its pristine bytes (managed-file backup),
-// preserving the user's own hook and their auto-accept choice.
-func TestHermesSetup_RespectsExplicitAutoAcceptAndHealsUserConfig(t *testing.T) {
-	dir := t.TempDir()
+// TestHermesSetup_OverridesExplicitAutoAcceptAndHealsUserConfig asserts
+// two coupled behaviors: (1) selecting Setup enables non-interactive
+// registration even when the prior hooks_auto_accept value was false,
+// and (2) Teardown heals a pre-existing config back to its pristine
+// bytes, preserving the user's hook and prior auto-accept choice.
+func TestHermesSetup_OverridesExplicitAutoAcceptAndHealsUserConfig(t *testing.T) {
+	dir := testenv.PrivateTempDir(t)
 	cfgPath := filepath.Join(dir, ".hermes", "config.yaml")
 	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o755); err != nil {
 		t.Fatalf("mkdir: %v", err)
@@ -539,8 +661,8 @@ func TestHermesSetup_RespectsExplicitAutoAcceptAndHealsUserConfig(t *testing.T) 
 	if err != nil {
 		t.Fatalf("read after setup: %v", err)
 	}
-	if v, ok := cfg["hooks_auto_accept"].(bool); !ok || v {
-		t.Fatalf("explicit hooks_auto_accept:false was overridden: %#v", cfg["hooks_auto_accept"])
+	if v, ok := cfg["hooks_auto_accept"].(bool); !ok || !v {
+		t.Fatalf("hooks_auto_accept was not enabled by Setup: %#v", cfg["hooks_auto_accept"])
 	}
 
 	if err := conn.Teardown(context.Background(), opts); err != nil {
@@ -555,6 +677,228 @@ func TestHermesSetup_RespectsExplicitAutoAcceptAndHealsUserConfig(t *testing.T) 
 	}
 }
 
+func TestHermesTeardownMigratesLegacyBackupAndRestoresExactBytes(t *testing.T) {
+	root := testenv.PrivateTempDir(t)
+	configHome := filepath.Join(root, "custom-hermes-home")
+	configPath := filepath.Join(configHome, "config.yaml")
+	pristine := []byte("hooks_auto_accept: false\r\noperator_setting: keep-exact\r\n")
+	if err := os.MkdirAll(configHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, pristine, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previous := HermesConfigPathOverride
+	HermesConfigPathOverride = configPath
+	t.Cleanup(func() { HermesConfigPathOverride = previous })
+
+	conn := NewHermesConnector()
+	opts := SetupOpts{
+		DataDir:  filepath.Join(root, ".defenseclaw"),
+		APIAddr:  "127.0.0.1:18970",
+		APIToken: "tok-test",
+	}
+	if err := captureManagedFileBackup(opts.DataDir, "hermes", "config", configPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := patchHermesHooks(configPath, conn.hookCommand(opts), opts.HookExecutable); err != nil {
+		t.Fatal(err)
+	}
+	if err := updateManagedFileBackupPostHash(opts.DataDir, "hermes", "config", configPath); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := conn.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	got, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(pristine) {
+		t.Fatalf("restored config.yaml bytes changed:\n got %q\nwant %q", got, pristine)
+	}
+	for _, logicalName := range []string{"config", "config.yaml"} {
+		if _, err := os.Stat(managedFileBackupPath(opts.DataDir, "hermes", logicalName)); !os.IsNotExist(err) {
+			t.Fatalf("%s backup survived exact restoration: %v", logicalName, err)
+		}
+	}
+	if err := conn.VerifyClean(opts); err != nil {
+		t.Fatalf("VerifyClean: %v", err)
+	}
+}
+
+func TestHermesTeardownSurgicalCleanupRestoresAutoAcceptFromPristineCustody(t *testing.T) {
+	for _, test := range []struct {
+		name                string
+		pristine            string
+		userAutoAccept      interface{}
+		wantAutoAccept      interface{}
+		wantAutoAcceptFound bool
+	}{
+		{
+			name: "false",
+			pristine: "hooks_auto_accept: false\noperator_setting: keep\nhooks:\n" +
+				"  pre_tool_call:\n    - command: foreign-before-setup\n",
+			wantAutoAccept:      false,
+			wantAutoAcceptFound: true,
+		},
+		{
+			name: "absent",
+			pristine: "operator_setting: keep\nhooks:\n" +
+				"  pre_tool_call:\n    - command: foreign-before-setup\n",
+		},
+		{
+			name: "post-setup user edit survives",
+			pristine: "operator_setting: keep\nhooks:\n" +
+				"  pre_tool_call:\n    - command: foreign-before-setup\n",
+			userAutoAccept:      false,
+			wantAutoAccept:      false,
+			wantAutoAcceptFound: true,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			root := testenv.PrivateTempDir(t)
+			configPath := filepath.Join(root, "hermes", "config.yaml")
+			if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(configPath, []byte(test.pristine), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			previous := HermesConfigPathOverride
+			HermesConfigPathOverride = configPath
+			t.Cleanup(func() { HermesConfigPathOverride = previous })
+
+			conn := NewHermesConnector()
+			opts := SetupOpts{
+				DataDir:  filepath.Join(root, ".defenseclaw"),
+				APIAddr:  "127.0.0.1:18970",
+				APIToken: "tok-test",
+			}
+			if err := conn.Setup(context.Background(), opts); err != nil {
+				t.Fatalf("Setup: %v", err)
+			}
+
+			drifted, err := readYAMLObject(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			drifted["operator_edit"] = "after-setup"
+			if test.userAutoAccept != nil {
+				drifted["hooks_auto_accept"] = test.userAutoAccept
+			}
+			hooks := drifted["hooks"].(map[string]interface{})
+			hooks["pre_tool_call"] = append(
+				hooks["pre_tool_call"].([]interface{}),
+				map[string]interface{}{"command": "foreign-after-setup"},
+			)
+			driftedBytes, err := yaml.Marshal(drifted)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(configPath, driftedBytes, 0o600); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := conn.Teardown(context.Background(), opts); err != nil {
+				t.Fatalf("Teardown: %v", err)
+			}
+			cleaned, err := readYAMLObject(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			gotAutoAccept, gotAutoAcceptFound := cleaned["hooks_auto_accept"]
+			if gotAutoAcceptFound != test.wantAutoAcceptFound ||
+				(gotAutoAcceptFound && gotAutoAccept != test.wantAutoAccept) {
+				t.Fatalf(
+					"hooks_auto_accept = %#v, present=%t; want %#v, present=%t",
+					gotAutoAccept,
+					gotAutoAcceptFound,
+					test.wantAutoAccept,
+					test.wantAutoAcceptFound,
+				)
+			}
+			if cleaned["operator_setting"] != "keep" || cleaned["operator_edit"] != "after-setup" {
+				t.Fatalf("operator edits were not preserved: %#v", cleaned)
+			}
+			cleanedBytes, err := yaml.Marshal(cleaned)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, foreign := range []string{"foreign-before-setup", "foreign-after-setup"} {
+				if !bytes.Contains(cleanedBytes, []byte(foreign)) {
+					t.Errorf("foreign hook %q was not preserved:\n%s", foreign, cleanedBytes)
+				}
+			}
+			if bytes.Contains(cleanedBytes, []byte(conn.hookCommand(opts))) {
+				t.Fatalf("DefenseClaw hook survived surgical cleanup:\n%s", cleanedBytes)
+			}
+			if _, err := os.Stat(managedFileBackupPath(opts.DataDir, "hermes", "config.yaml")); !os.IsNotExist(err) {
+				t.Fatalf("canonical backup survived surgical cleanup: %v", err)
+			}
+		})
+	}
+}
+
+func TestHermesTeardownRejectsTamperedPristineCustodyBeforeSurgicalCleanup(t *testing.T) {
+	root := testenv.PrivateTempDir(t)
+	configPath := filepath.Join(root, "hermes", "config.yaml")
+	if err := os.MkdirAll(filepath.Dir(configPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, []byte("hooks_auto_accept: false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previous := HermesConfigPathOverride
+	HermesConfigPathOverride = configPath
+	t.Cleanup(func() { HermesConfigPathOverride = previous })
+
+	conn := NewHermesConnector()
+	opts := SetupOpts{
+		DataDir:  filepath.Join(root, ".defenseclaw"),
+		APIAddr:  "127.0.0.1:18970",
+		APIToken: "tok-test",
+	}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	config, err := readYAMLObject(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config["operator_edit"] = "force-surgical-path"
+	drifted, err := yaml.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, drifted, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	backupPath := managedFileBackupPath(opts.DataDir, "hermes", "config.yaml")
+	backup, err := loadManagedFileBackupPath(backupPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backup.PristineBytes = []byte("hooks_auto_accept: true\n")
+	if err := writeManagedFileBackup(backupPath, backup); err != nil {
+		t.Fatal(err)
+	}
+
+	err = conn.Teardown(context.Background(), opts)
+	if err == nil || !strings.Contains(err.Error(), "pristine custody hash") {
+		t.Fatalf("Teardown error = %v, want pristine custody hash rejection", err)
+	}
+	got, readErr := os.ReadFile(configPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(got) != string(drifted) {
+		t.Fatalf("config changed after rejecting tampered custody:\n got %q\nwant %q", got, drifted)
+	}
+}
+
 func mapKeys(m map[string]interface{}) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {
@@ -563,43 +907,10 @@ func mapKeys(m map[string]interface{}) []string {
 	return out
 }
 
-// TestAntigravitySetup_WritesClaudeCodeNestedSchema pins the
-// hooks.json shape that agy v1.0.x actually evaluates and is the
-// regression guard for two cumulative empirical findings from the
-// v0.5.0 smoke test:
-//
-//  1. **Nested schema, not flat.** An earlier draft wrote a flat
-//     {event, matcher, command, description} object per top-level
-//     key. agy never evaluated those entries — neither tracer hooks
-//     nor DefenseClaw hooks fired. Replacing the file with a
-//     Claude-Code-style nested schema (top-level key →
-//     {<EventName>: [{matcher, hooks: [{type, command}]}]}) caused
-//     agy to invoke the configured command on every tool call. agy
-//     binary `strings` confirms only the nested shape is parsed.
-//
-//  2. **No embedded quotes in command.** Empirical D3 of the smoke
-//     test (D1=bare-path-OK, D2=sh -c-OK, D3=direct-exec-FAILS-127)
-//     proved agy invokes the configured command via direct exec()
-//     not through a shell, so any '/" added by shellWord() would
-//     become literal path bytes and the hook would silently
-//     no-fire.
-//
-// Combined assertions:
-//
-//   - top-level key "defenseclaw-antigravity-pretooluse" exists
-//   - its value is a map with key "PreToolUse"
-//   - "PreToolUse" is a list with exactly one entry
-//   - that entry has matcher="*" and hooks=[{type="command",
-//     command=<tokenizer-safe Antigravity command>}]
-//   - the inner command field has no visible quote characters and no
-//     surrounding whitespace; on Windows the absolute managed launcher path
-//     lives inside the PowerShell encoded command instead
-//
-// If a future agy release pivots back to a flat schema, OR adds
-// shell invocation, OR moves the hooks file again, this test must
-// be updated in lockstep with patchAntigravityHooks /
-// antigravityHooksPath. Until then this test pins the contract.
-func TestAntigravitySetup_WritesClaudeCodeNestedSchema(t *testing.T) {
+// TestAntigravitySetup_WritesOfficialMixedSchema pins the documented
+// matcher-group shape for tool events, direct handler shape for invocation/Stop
+// events, and event-bound synchronous native command.
+func TestAntigravitySetup_WritesOfficialMixedSchema(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, ".gemini", "config", "hooks.json")
 	prev := AntigravityHooksPathOverride
@@ -624,99 +935,6 @@ func TestAntigravitySetup_WritesClaudeCodeNestedSchema(t *testing.T) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		t.Fatalf("antigravity hooks.json is not valid JSON: %v\n%s", err, string(data))
 	}
-
-	entry, ok := cfg["defenseclaw-antigravity-pretooluse"].(map[string]interface{})
-	if !ok {
-		t.Fatalf("defenseclaw-antigravity-pretooluse missing or wrong shape: %#v", cfg)
-	}
-
-	preToolUse, ok := entry["PreToolUse"].([]interface{})
-	if !ok {
-		t.Fatalf("PreToolUse is not an array: %#v\nfull entry: %#v", entry["PreToolUse"], entry)
-	}
-	if len(preToolUse) != 1 {
-		t.Fatalf("PreToolUse must hold exactly one matcher group, got %d:\n%#v", len(preToolUse), preToolUse)
-	}
-
-	group, ok := preToolUse[0].(map[string]interface{})
-	if !ok {
-		t.Fatalf("PreToolUse[0] is not an object: %#v", preToolUse[0])
-	}
-	if group["matcher"] != "*" {
-		t.Fatalf("matcher=%#v want *", group["matcher"])
-	}
-
-	hooks, ok := group["hooks"].([]interface{})
-	if !ok {
-		t.Fatalf("hooks is not an array: %#v", group["hooks"])
-	}
-	if len(hooks) != 1 {
-		t.Fatalf("hooks must hold exactly one entry, got %d:\n%#v", len(hooks), hooks)
-	}
-
-	hook, ok := hooks[0].(map[string]interface{})
-	if !ok {
-		t.Fatalf("hooks[0] is not an object: %#v", hooks[0])
-	}
-	if hook["type"] != "command" {
-		t.Fatalf("hook type=%#v want command", hook["type"])
-	}
-	command, isString := hook["command"].(string)
-	if !isString {
-		t.Fatalf("command field is not a string: %#v", hook["command"])
-	}
-
-	// Primary assertion: no quote characters at all. agy v1.0.x
-	// exec()s the command directly, so any '/" would become a
-	// literal byte in the path and the hook would silently
-	// no-fire.
-	if strings.ContainsAny(command, `'"`) {
-		t.Fatalf(
-			"antigravity command field contains quote characters %q — "+
-				"agy v1.0.x exec()s this directly so the quotes become "+
-				"literal path bytes. Did shellWord() get re-introduced?",
-			command,
-		)
-	}
-	wantCommand := conn.hookCommand(opts)
-	if command != wantCommand {
-		t.Fatalf("command=%q want %q", command, wantCommand)
-	}
-	// Unix runs the absolute shell hook. Windows runs a tokenizer-safe system
-	// PowerShell command whose encoded script invokes the absolute no-console
-	// hook launcher path; agy's direct-exec tokenizer cannot dequote that path
-	// if it is placed visibly in hooks.json.
-	if runtime.GOOS == "windows" {
-		if command == legacyAntigravityWindowsHookCommand() {
-			t.Fatalf("windows command still uses vulnerable bare launcher: %q", command)
-		}
-		decoded := decodePowerShellEncodedCommandForTest(t, command)
-		if !strings.Contains(decoded, windowsNativePowerShellStartForTest(defenseclawHookBinary(), "antigravity")) ||
-			!strings.Contains(decoded, "NoDefaultCurrentDirectoryInExePath") {
-			t.Fatalf("windows encoded command lost managed launcher or hardening:\n%s", decoded)
-		}
-	} else {
-		if !strings.HasSuffix(command, "antigravity-hook.sh") {
-			t.Fatalf("command=%q does not end with antigravity-hook.sh", command)
-		}
-		if !filepath.IsAbs(command) {
-			t.Fatalf("command=%q is not an absolute path", command)
-		}
-	}
-	// Tertiary: no surrounding whitespace either.
-	if command != strings.TrimSpace(command) {
-		t.Fatalf("command=%q has surrounding whitespace", command)
-	}
-
-	// Quaternary: all five Antigravity 2.0 lifecycle events are
-	// registered under their own DefenseClaw-owned outer keys, with
-	// the same nested Claude-Code-derived schema. Spec source:
-	// Antigravity 2.0 hook docs (PreInvocation, PreToolUse,
-	// PostToolUse, PostInvocation, Stop). PreToolUse is the only
-	// event empirically verified against agy v1.0.1; the other four
-	// keys are registered for spec parity so DefenseClaw is ready
-	// when agy starts emitting them upstream — see
-	// patchAntigravityHooks docs in hook_only.go for the rationale.
 	for _, event := range []string{"PreInvocation", "PreToolUse", "PostToolUse", "PostInvocation", "Stop"} {
 		outerKey := "defenseclaw-antigravity-" + strings.ToLower(event)
 		eventEntry, ok := cfg[outerKey].(map[string]interface{})
@@ -730,33 +948,186 @@ func TestAntigravitySetup_WritesClaudeCodeNestedSchema(t *testing.T) {
 			continue
 		}
 		if len(eventList) != 1 {
-			t.Errorf("%s[%q] must hold exactly one matcher group, got %d", outerKey, event, len(eventList))
+			t.Errorf("%s[%q] must hold exactly one entry, got %d", outerKey, event, len(eventList))
 			continue
 		}
-		matcherGroup, ok := eventList[0].(map[string]interface{})
+		var hookEntry map[string]interface{}
+		if event == "PreToolUse" || event == "PostToolUse" {
+			group, ok := eventList[0].(map[string]interface{})
+			if !ok || group["matcher"] != "*" {
+				t.Errorf("%s must use matcher group '*': %#v", event, eventList[0])
+				continue
+			}
+			hooks, ok := group["hooks"].([]interface{})
+			if !ok || len(hooks) != 1 {
+				t.Errorf("%s nested handlers=%#v", event, group["hooks"])
+				continue
+			}
+			hookEntry, ok = hooks[0].(map[string]interface{})
+			if !ok {
+				t.Errorf("%s handler=%#v", event, hooks[0])
+				continue
+			}
+		} else {
+			hookEntry, ok = eventList[0].(map[string]interface{})
+			if !ok || hookEntry["matcher"] != nil || hookEntry["hooks"] != nil {
+				t.Errorf("%s must use a direct handler: %#v", event, eventList[0])
+				continue
+			}
+		}
 		if !ok {
-			t.Errorf("%s[%q][0] is not an object: %#v", outerKey, event, eventList[0])
 			continue
 		}
-		if matcherGroup["matcher"] != "*" {
-			t.Errorf("%s[%q][0].matcher=%#v want *", outerKey, event, matcherGroup["matcher"])
-		}
-		hookList, ok := matcherGroup["hooks"].([]interface{})
-		if !ok || len(hookList) != 1 {
-			t.Errorf("%s[%q][0].hooks not a single-entry array: %#v", outerKey, event, matcherGroup["hooks"])
-			continue
-		}
-		hookEntry, ok := hookList[0].(map[string]interface{})
-		if !ok {
-			t.Errorf("%s[%q][0].hooks[0] is not an object: %#v", outerKey, event, hookList[0])
-			continue
-		}
-		if hookEntry["type"] != "command" {
-			t.Errorf("%s[%q][0].hooks[0].type=%#v want command", outerKey, event, hookEntry["type"])
+		if hookEntry["type"] != "command" || hookEntry["timeout"] != float64(30) {
+			t.Errorf("%s handler type/timeout=%#v/%#v", event, hookEntry["type"], hookEntry["timeout"])
 		}
 		eventCommand, ok := hookEntry["command"].(string)
+		wantCommand := antigravityHookInvocationCommandForEvent(
+			runtime.GOOS,
+			event,
+			filepath.Join(opts.DataDir, "hooks", "antigravity-hook.sh"),
+		)
 		if !ok || eventCommand != wantCommand {
-			t.Errorf("%s[%q][0].hooks[0].command=%#v want %q", outerKey, event, hookEntry["command"], wantCommand)
+			t.Errorf("%s command=%#v want %q", event, hookEntry["command"], wantCommand)
+			continue
+		}
+		if strings.ContainsAny(eventCommand, `'"`) {
+			t.Errorf("%s command contains visible quotes: %q", event, eventCommand)
+		}
+		if runtime.GOOS == "windows" {
+			decoded := decodePowerShellEncodedCommandForTest(t, eventCommand)
+			if !strings.Contains(decoded, "'--event','"+event+"'") ||
+				!strings.Contains(decoded, powershellQuoteLiteral(defenseclawHookBinary())) {
+				t.Errorf("%s encoded command is not event-bound:\n%s", event, decoded)
+			}
+		} else if !strings.HasSuffix(eventCommand, "antigravity-hook.sh "+event) {
+			t.Errorf("%s Unix command is not event-bound: %q", event, eventCommand)
+		}
+	}
+}
+
+func TestAntigravityTeardownMigratesLegacyBackupAndRestoresExactBytes(t *testing.T) {
+	root := t.TempDir()
+	configHome := filepath.Join(root, "custom-antigravity-home")
+	configPath := filepath.Join(configHome, "hooks.json")
+	pristine := []byte("{\r\n  \"operator-hook\": {\"enabled\": true}\r\n}\r\n")
+	if err := os.MkdirAll(configHome, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, pristine, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previous := AntigravityHooksPathOverride
+	AntigravityHooksPathOverride = configPath
+	t.Cleanup(func() { AntigravityHooksPathOverride = previous })
+
+	conn := NewAntigravityConnector()
+	opts := SetupOpts{
+		DataDir:  filepath.Join(root, ".defenseclaw"),
+		APIAddr:  "127.0.0.1:18970",
+		APIToken: "tok-test",
+	}
+	if err := captureManagedFileBackup(opts.DataDir, "antigravity", "config", configPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := patchAntigravityHooks(configPath, conn.hookCommand(opts)); err != nil {
+		t.Fatal(err)
+	}
+	if err := updateManagedFileBackupPostHash(opts.DataDir, "antigravity", "config", configPath); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := conn.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	got, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(pristine) {
+		t.Fatalf("restored hooks.json bytes changed:\n got %q\nwant %q", got, pristine)
+	}
+	for _, logicalName := range []string{"config", "hooks.json"} {
+		if _, err := os.Stat(managedFileBackupPath(opts.DataDir, "antigravity", logicalName)); !os.IsNotExist(err) {
+			t.Fatalf("%s backup survived exact restoration: %v", logicalName, err)
+		}
+	}
+	if err := conn.VerifyClean(opts); err != nil {
+		t.Fatalf("VerifyClean: %v", err)
+	}
+}
+
+func TestAntigravityManagedBackupMigrationCollapsesIdenticalRecords(t *testing.T) {
+	dataDir := filepath.Join(t.TempDir(), ".defenseclaw")
+	target := filepath.Join(t.TempDir(), "antigravity-home", "hooks.json")
+	base := managedFileBackup{
+		Version:        managedBackupVersion,
+		Connector:      "antigravity",
+		Path:           target,
+		Existed:        false,
+		PristineSHA256: managedBackupMissingHash,
+		PostSHA256:     managedBackupMissingHash,
+		CapturedAt:     "2026-07-30T00:00:00Z",
+	}
+	legacy := base
+	legacy.LogicalName = "config"
+	canonical := base
+	canonical.LogicalName = "hooks.json"
+	legacyPath := managedFileBackupPath(dataDir, "antigravity", "config")
+	canonicalPath := managedFileBackupPath(dataDir, "antigravity", "hooks.json")
+	if err := writeManagedFileBackup(legacyPath, legacy); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeManagedFileBackup(canonicalPath, canonical); err != nil {
+		t.Fatal(err)
+	}
+
+	conn := NewAntigravityConnector()
+	if err := conn.migrateManagedBackup(SetupOpts{DataDir: dataDir}); err != nil {
+		t.Fatalf("migrateManagedBackup: %v", err)
+	}
+	if _, err := os.Stat(legacyPath); !os.IsNotExist(err) {
+		t.Fatalf("identical legacy backup survived migration: %v", err)
+	}
+	got, err := loadManagedFileBackupPath(canonicalPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.LogicalName != "hooks.json" || !sameManagedTargetPath(got.Path, target) {
+		t.Fatalf("canonical backup changed custody: %#v", got)
+	}
+}
+
+func TestAntigravityManagedBackupMigrationRejectsConflictingCustody(t *testing.T) {
+	dataDir := filepath.Join(t.TempDir(), ".defenseclaw")
+	legacy := managedFileBackup{
+		Version:        managedBackupVersion,
+		Connector:      "antigravity",
+		LogicalName:    "config",
+		Path:           filepath.Join(t.TempDir(), "legacy-home", "hooks.json"),
+		PristineSHA256: managedBackupMissingHash,
+		CapturedAt:     "2026-07-30T00:00:00Z",
+	}
+	canonical := legacy
+	canonical.LogicalName = "hooks.json"
+	canonical.Path = filepath.Join(t.TempDir(), "canonical-home", "hooks.json")
+	legacyPath := managedFileBackupPath(dataDir, "antigravity", "config")
+	canonicalPath := managedFileBackupPath(dataDir, "antigravity", "hooks.json")
+	if err := writeManagedFileBackup(legacyPath, legacy); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeManagedFileBackup(canonicalPath, canonical); err != nil {
+		t.Fatal(err)
+	}
+
+	conn := NewAntigravityConnector()
+	err := conn.migrateManagedBackup(SetupOpts{DataDir: dataDir})
+	if err == nil || !strings.Contains(err.Error(), "conflicting config and hooks.json managed backup custody") {
+		t.Fatalf("migrateManagedBackup error = %v, want conflicting custody", err)
+	}
+	for _, path := range []string{legacyPath, canonicalPath} {
+		if _, statErr := os.Stat(path); statErr != nil {
+			t.Fatalf("conflicting backup %q was modified or removed: %v", path, statErr)
 		}
 	}
 }
@@ -801,7 +1172,7 @@ func TestAntigravityRemoveConfigEntriesPrunesLegacyWindowsCommand(t *testing.T) 
 	}
 
 	conn := NewAntigravityConnector()
-	if err := conn.removeConfigEntries(path, current); err != nil {
+	if err := conn.removeConfigEntries(path, current, SetupOpts{}); err != nil {
 		t.Fatalf("removeConfigEntries: %v", err)
 	}
 	after, err := os.ReadFile(path)
@@ -880,7 +1251,7 @@ func TestOpenHandsSetup_PatchesDocumentedHookSchema(t *testing.T) {
 }
 
 func TestGeminiSetup_PatchesNativeTelemetryPathToken(t *testing.T) {
-	dir := t.TempDir()
+	dir := testenv.PrivateTempDir(t)
 	cfgPath := filepath.Join(dir, "settings.json")
 	prev := GeminiSettingsPathOverride
 	GeminiSettingsPathOverride = cfgPath
@@ -947,7 +1318,7 @@ func TestGeminiSetup_MigratesLegacySchemaInPlace(t *testing.T) {
 	// `gemini` refuses to start until the file is repaired. Running
 	// `defenseclaw setup` against a stale settings.json must
 	// migrate the keys (not just append).
-	dir := t.TempDir()
+	dir := testenv.PrivateTempDir(t)
 	cfgPath := filepath.Join(dir, "settings.json")
 	prev := GeminiSettingsPathOverride
 	GeminiSettingsPathOverride = cfgPath
@@ -1000,7 +1371,7 @@ func TestGeminiSetup_MigratesLegacySchemaInPlace(t *testing.T) {
 }
 
 func TestGeminiTeardown_DriftedConfigRemovesManagedTelemetry(t *testing.T) {
-	dir := t.TempDir()
+	dir := testenv.PrivateTempDir(t)
 	cfgPath := filepath.Join(dir, "settings.json")
 	prev := GeminiSettingsPathOverride
 	GeminiSettingsPathOverride = cfgPath
@@ -1185,6 +1556,288 @@ func TestCopilotSetupDefaultsToGlobalWhenDaemonCwdIsDataDir(t *testing.T) {
 	}
 }
 
+func TestCopilotHomeOverrideDrivesHooksAndInventory(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "copilot-home")
+	t.Setenv("COPILOT_HOME", root)
+	opts := SetupOpts{}
+
+	if got, want := copilotHooksPath(opts), filepath.Join(root, "hooks", "defenseclaw.json"); got != want {
+		t.Fatalf("copilotHooksPath = %q, want %q", got, want)
+	}
+	caps := NewCopilotConnector().Capabilities(opts)
+	for _, want := range []string{
+		filepath.Join(root, "mcp-config.json"),
+		filepath.Join(root, "skills"),
+		filepath.Join(root, "agents"),
+	} {
+		found := false
+		for _, paths := range [][]string{
+			caps.MCP.ConfigPaths,
+			caps.Skills.ReadPaths,
+			caps.Agents.ReadPaths,
+		} {
+			if stringInSlice(paths, want) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("Copilot capabilities do not contain COPILOT_HOME path %q: %+v", want, caps)
+		}
+	}
+}
+
+func TestCopilotInventoryReadsOfficialWorkspacePrecedence(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.Mkdir(filepath.Join(repo, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	workspace := filepath.Join(repo, "packages", "service")
+	if err := os.MkdirAll(workspace, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	custom := filepath.Join(t.TempDir(), "custom-skills")
+	t.Setenv("COPILOT_SKILLS_DIRS", custom+",relative-skills")
+	opts := SetupOpts{WorkspaceDir: workspace}
+	caps := NewCopilotConnector().Capabilities(opts)
+
+	wantSkillPrefix := []string{
+		filepath.Join(workspace, ".github", "skills"),
+		filepath.Join(workspace, ".agents", "skills"),
+		filepath.Join(workspace, ".claude", "skills"),
+		filepath.Join(filepath.Dir(workspace), ".github", "skills"),
+		filepath.Join(repo, ".github", "skills"),
+	}
+	if len(caps.Skills.ReadPaths) < len(wantSkillPrefix) {
+		t.Fatalf("Copilot skill read paths too short: %v", caps.Skills.ReadPaths)
+	}
+	for i, want := range wantSkillPrefix {
+		if caps.Skills.ReadPaths[i] != want {
+			t.Fatalf("Copilot skill read path %d=%q, want %q; all=%v", i, caps.Skills.ReadPaths[i], want, caps.Skills.ReadPaths)
+		}
+	}
+	for _, want := range []string{custom, filepath.Join(workspace, "relative-skills")} {
+		if !stringInSlice(caps.Skills.ReadPaths, want) {
+			t.Fatalf("Copilot skill read paths missing %q: %v", want, caps.Skills.ReadPaths)
+		}
+	}
+
+	wantMCP := []string{
+		filepath.Join(workspace, ".mcp.json"),
+		filepath.Join(workspace, ".github", "mcp.json"),
+		filepath.Join(filepath.Dir(workspace), ".mcp.json"),
+		filepath.Join(filepath.Dir(workspace), ".github", "mcp.json"),
+		filepath.Join(repo, ".mcp.json"),
+		filepath.Join(repo, ".github", "mcp.json"),
+		copilotHomePath("mcp-config.json"),
+	}
+	if !sameStrings(caps.MCP.ConfigPaths, wantMCP) {
+		t.Fatalf("Copilot MCP read paths=%v, want %v", caps.MCP.ConfigPaths, wantMCP)
+	}
+
+	wantAgents := []string{
+		filepath.Join(workspace, ".github", "agents"),
+		filepath.Join(workspace, ".claude", "agents"),
+		filepath.Join(filepath.Dir(workspace), ".github", "agents"),
+		filepath.Join(filepath.Dir(workspace), ".claude", "agents"),
+		filepath.Join(repo, ".github", "agents"),
+		filepath.Join(repo, ".claude", "agents"),
+	}
+	for i, want := range wantAgents {
+		if caps.Agents.ReadPaths[i] != want {
+			t.Fatalf("Copilot agent read path %d=%q, want %q; all=%v", i, caps.Agents.ReadPaths[i], want, caps.Agents.ReadPaths)
+		}
+	}
+	for _, forbidden := range []string{
+		filepath.Join(workspace, ".claude", "skills"),
+		filepath.Join(workspace, ".claude", "agents"),
+		custom,
+	} {
+		if stringInSlice(caps.Skills.WritePaths, forbidden) || stringInSlice(caps.Agents.WritePaths, forbidden) {
+			t.Fatalf("discovery-only Copilot path became writable: %q", forbidden)
+		}
+	}
+}
+
+func TestCopilotShellBootstrapFailuresAlwaysOpen(t *testing.T) {
+	script, err := hookFS.ReadFile("hooks/copilot-hook.sh")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := string(script)
+	if strings.Contains(body, "exit 2") {
+		t.Fatalf("Copilot shell bootstrap contains a fail-closed exit: %s", body)
+	}
+	for _, required := range []string{
+		`HOME="$(cd ~ 2>/dev/null && pwd)" || exit 0`,
+		`HOOK_BASE="$(cd -P -- "$HOOK_PARENT" 2>/dev/null && pwd)" || exit 0`,
+		`HOOK_DIR="$(cd -P -- "$HOOK_PARENT" 2>/dev/null && pwd)" || exit 0`,
+		`if [ ! -r "${HOOK_DIR}/_hardening.sh" ]; then`,
+		`if ! . "${HOOK_DIR}/_hardening.sh"; then`,
+		`if ! defenseclaw_harden_resources; then`,
+		`if ! defenseclaw_harden_env; then`,
+	} {
+		if !strings.Contains(body, required) {
+			t.Errorf("Copilot shell bootstrap missing fail-open guard %q", required)
+		}
+	}
+}
+
+func TestCopilotWindowsHooksRepairAndTeardown(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("Copilot selects the powershell hook field only on Windows")
+	}
+	const hookBinary = `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`
+	setHookBinaryOverride(t, hookBinary)
+	current := windowsCopilotPowerShellHookCommandForBinary(hookBinary)
+	legacy := legacyWindowsCopilotPowerShellHookCommandForBinary(hookBinary)
+	duplicated := legacyWindowsCopilotDoubleCallOperatorHookCommandForBinary(hookBinary)
+	historic := legacyWindowsCopilotDoubleCallOperatorHookCommandForBinary(
+		filepath.Join(userHomeDir(), ".local", "bin", windowsHookBinaryName),
+	)
+	foreign := "Write-Output 'operator hook'"
+	path := filepath.Join(t.TempDir(), "defenseclaw.json")
+	cfg := map[string]interface{}{
+		"version": 1,
+		"hooks": map[string]interface{}{
+			"preToolUse": []interface{}{
+				map[string]interface{}{"type": "command", "powershell": duplicated, "timeoutSec": 30},
+				map[string]interface{}{"type": "command", "powershell": legacy, "timeoutSec": 30},
+				map[string]interface{}{"type": "command", "powershell": historic, "timeoutSec": 30},
+				map[string]interface{}{"type": "command", "powershell": foreign, "timeoutSec": 10},
+			},
+		},
+	}
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		t.Fatalf("marshal fixture: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+
+	if err := patchCopilotHooks(path, current); err != nil {
+		t.Fatalf("patchCopilotHooks: %v", err)
+	}
+	repaired, err := readJSONObject(path)
+	if err != nil {
+		t.Fatalf("read repaired hooks: %v", err)
+	}
+	hooks := repaired["hooks"].(map[string]interface{})
+	for event, raw := range hooks {
+		entries := raw.([]interface{})
+		managed := 0
+		wantEventCommand := windowsCopilotPowerShellHookCommandForEvent(event, hookBinary)
+		for _, rawEntry := range entries {
+			entry := rawEntry.(map[string]interface{})
+			command, _ := entry["powershell"].(string)
+			if command == wantEventCommand {
+				managed++
+				if entry["type"] != "command" || fmt.Sprint(entry["timeoutSec"]) != "30" {
+					t.Errorf("%s canonical entry drifted: %#v", event, entry)
+				}
+			}
+			if command == legacy || command == duplicated || command == historic {
+				t.Errorf("%s retained legacy Copilot command %q", event, command)
+			}
+		}
+		if managed != 1 {
+			t.Errorf("%s managed entry count = %d, want 1", event, managed)
+		}
+	}
+	repairedData, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read repaired config: %v", err)
+	}
+	if !strings.Contains(string(repairedData), foreign) {
+		t.Fatal("repair removed the operator-owned hook")
+	}
+
+	if err := removeJSONHookReferences(path, current); err != nil {
+		t.Fatalf("removeJSONHookReferences: %v", err)
+	}
+	afterData, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read config after teardown: %v", err)
+	}
+	after := string(afterData)
+	ownedCommands := []string{current, legacy, duplicated, historic}
+	for _, event := range copilotCurrentHookEvents {
+		ownedCommands = append(ownedCommands, windowsCopilotPowerShellHookCommandForEvent(event, hookBinary))
+	}
+	for _, owned := range ownedCommands {
+		if strings.Contains(after, owned) {
+			t.Errorf("owned Copilot command survived teardown: %q", owned)
+		}
+	}
+	if !strings.Contains(after, foreign) {
+		t.Fatal("teardown removed the operator-owned hook")
+	}
+}
+
+func TestCopilotHookContractReconciliationIsEventBoundAndVersionExact(t *testing.T) {
+	const hookScript = `/opt/defenseclaw/hooks/copilot-hook.sh`
+	path := filepath.Join(t.TempDir(), "defenseclaw.json")
+	if err := os.WriteFile(path, []byte(`{
+  "version": 1,
+  "hooks": {
+    "userPromptTransformed": [
+      {"type":"command","bash":"/opt/operator/transform.sh","timeoutSec":15}
+    ],
+    "futureEvent": [
+      {"type":"command","bash":"/opt/operator/future.sh","timeoutSec":15}
+    ]
+  }
+}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := patchCopilotHooksForOS(path, hookScript, copilotCurrentHookEvents, "linux"); err != nil {
+		t.Fatalf("patch current contract: %v", err)
+	}
+	current, err := readJSONObject(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hooks := current["hooks"].(map[string]interface{})
+	if len(hooks) != len(copilotCurrentHookEvents)+1 {
+		t.Fatalf("current hook count=%d, want 14 managed event keys plus foreign future event: %v", len(hooks), mapKeys(hooks))
+	}
+	for _, event := range copilotCurrentHookEvents {
+		entries := hooks[event].([]interface{})
+		want := copilotHookInvocationCommandForEvent("linux", event, hookScript)
+		found := false
+		for _, raw := range entries {
+			entry := raw.(map[string]interface{})
+			if entry["bash"] == want {
+				found = true
+				if fmt.Sprint(entry["timeoutSec"]) != "30" {
+					t.Fatalf("%s timeout=%#v, want 30", event, entry["timeoutSec"])
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("%s missing event-bound command %q: %#v", event, want, entries)
+		}
+	}
+
+	if err := patchCopilotHooksForOS(path, hookScript, copilotLegacyHookEvents, "linux"); err != nil {
+		t.Fatalf("reconcile legacy contract: %v", err)
+	}
+	legacy, err := readJSONObject(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacyHooks := legacy["hooks"].(map[string]interface{})
+	transformed := legacyHooks["userPromptTransformed"].([]interface{})
+	if len(transformed) != 1 || transformed[0].(map[string]interface{})["bash"] != "/opt/operator/transform.sh" {
+		t.Fatalf("v2-to-v1 reconciliation did not preserve only foreign transformed handler: %#v", transformed)
+	}
+	if future := legacyHooks["futureEvent"].([]interface{}); len(future) != 1 {
+		t.Fatalf("unknown future event was changed: %#v", future)
+	}
+}
+
 func TestCursorHooks_FailClosedOnlyWhenExplicit(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "hooks.json")
@@ -1194,10 +1847,11 @@ func TestCursorHooks_FailClosedOnlyWhenExplicit(t *testing.T) {
 
 	conn := NewCursorConnector()
 	opts := SetupOpts{
-		DataDir:      filepath.Join(dir, "dc"),
-		APIAddr:      "127.0.0.1:18970",
-		APIToken:     "tok-test",
-		HookFailMode: "closed",
+		DataDir:       filepath.Join(dir, "dc"),
+		APIAddr:       "127.0.0.1:18970",
+		APIToken:      "tok-test",
+		HookFailMode:  "closed",
+		GuardrailMode: "action",
 	}
 	if err := conn.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
@@ -1210,9 +1864,9 @@ func TestCursorHooks_FailClosedOnlyWhenExplicit(t *testing.T) {
 		t.Fatalf("cursor hooks did not enable failClosed when explicitly requested:\n%s", string(data))
 	}
 
-	// Refreshing the same connector in observe/fail-open mode must replace the
+	// Refreshing the same connector in observe mode must replace the
 	// managed entries rather than retaining stale host-side enforcement.
-	opts.HookFailMode = "open"
+	opts.GuardrailMode = "observe"
 	if err := conn.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("observe refresh Setup: %v", err)
 	}
@@ -1230,6 +1884,139 @@ func TestCursorHooks_FailClosedOnlyWhenExplicit(t *testing.T) {
 		if entry["failClosed"] != false {
 			t.Fatalf("Cursor %s retained failClosed=true after observe refresh: %#v", event, entry)
 		}
+		if fmt.Sprint(entry["timeout"]) != "30" {
+			t.Fatalf("Cursor %s timeout=%#v, want 30 seconds", event, entry["timeout"])
+		}
+	}
+}
+
+func TestCursorTeardownRestoresConfigAndRemovesOwnedRuntimes(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, ".cursor", "hooks.json")
+	prev := CursorHooksPathOverride
+	CursorHooksPathOverride = cfgPath
+	t.Cleanup(func() { CursorHooksPathOverride = prev })
+
+	if err := os.MkdirAll(filepath.Dir(cfgPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const original = "{\n  \"version\": 1,\n  \"hooks\": {}\n}\n"
+	if err := os.WriteFile(cfgPath, []byte(original), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	conn := NewCursorConnector()
+	opts := SetupOpts{
+		DataDir:      filepath.Join(dir, "dc"),
+		APIAddr:      "127.0.0.1:18970",
+		APIToken:     "tok-test",
+		HookFailMode: "open",
+	}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	for _, name := range conn.HookScriptNames(opts) {
+		if _, err := os.Stat(filepath.Join(opts.DataDir, "hooks", name)); err != nil {
+			t.Fatalf("runtime %s missing after setup: %v", name, err)
+		}
+	}
+
+	if err := conn.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	restored, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(restored) != original {
+		t.Fatalf("Cursor config was not restored byte-for-byte:\n%s", restored)
+	}
+	for _, name := range []string{"cursor-hook.sh", "cursor-hook.ps1"} {
+		if _, err := os.Stat(filepath.Join(opts.DataDir, "hooks", name)); !os.IsNotExist(err) {
+			t.Fatalf("Cursor runtime %s remains after teardown: %v", name, err)
+		}
+	}
+}
+
+func TestCursorTeardownRefusesForeignRuntimeReplacement(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "hooks.json")
+	prev := CursorHooksPathOverride
+	CursorHooksPathOverride = cfgPath
+	t.Cleanup(func() { CursorHooksPathOverride = prev })
+
+	conn := NewCursorConnector()
+	opts := SetupOpts{DataDir: filepath.Join(dir, "dc"), APIAddr: "127.0.0.1:18970"}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	foreign := filepath.Join(opts.DataDir, "hooks", "cursor-hook.sh")
+	if err := os.WriteFile(foreign, []byte("# operator-owned replacement\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	err := conn.Teardown(context.Background(), opts)
+	if err == nil || !strings.Contains(err.Error(), "without DefenseClaw ownership marker") {
+		t.Fatalf("Teardown error = %v, want foreign-runtime refusal", err)
+	}
+	body, readErr := os.ReadFile(foreign)
+	if readErr != nil || string(body) != "# operator-owned replacement\n" {
+		t.Fatalf("foreign runtime was not preserved: body=%q err=%v", body, readErr)
+	}
+}
+
+func TestCursorTeardownSurgicallyRemovesOnlyProvenOwnedCommands(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "hooks.json")
+	prev := CursorHooksPathOverride
+	CursorHooksPathOverride = cfgPath
+	t.Cleanup(func() { CursorHooksPathOverride = prev })
+
+	opts := SetupOpts{DataDir: filepath.Join(dir, "dc")}
+	owned := cursorOwnedHookCommands(opts)
+	if len(owned) < 3 {
+		t.Fatalf("owned Cursor commands = %v, want portable, adapter, and legacy native forms", owned)
+	}
+	foreignAdapter := "& " + powershellQuoteLiteral(filepath.Join(dir, "operator", "cursor-hook.ps1"))
+	foreignNative := windowsQuoteExe(filepath.Join(dir, "operator", windowsGatewayBinaryName)) +
+		" " + nativeHookFlag + "cursor"
+	entries := make([]interface{}, 0, len(owned)+2)
+	for _, command := range owned {
+		entries = append(entries, map[string]interface{}{"type": "command", "command": command})
+	}
+	for _, command := range []string{foreignAdapter, foreignNative} {
+		entries = append(entries, map[string]interface{}{"type": "command", "command": command})
+	}
+	fixture := map[string]interface{}{
+		"version": 1,
+		"hooks": map[string]interface{}{
+			"preToolUse": entries,
+		},
+	}
+	body, err := json.MarshalIndent(fixture, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfgPath, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	conn := NewCursorConnector()
+	if err := conn.Teardown(context.Background(), opts); err != nil {
+		t.Fatalf("Teardown: %v", err)
+	}
+	after, err := readJSONObject(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if structuredHookCommandReferences(after, owned) {
+		t.Fatalf("managed Cursor command survived teardown: %#v", after)
+	}
+	for _, command := range []string{foreignAdapter, foreignNative} {
+		if !structuredHookCommandReferences(after, []string{command}) {
+			t.Fatalf("foreign Cursor command %q was removed: %#v", command, after)
+		}
+	}
+	if err := conn.VerifyClean(opts); err != nil {
+		t.Fatalf("VerifyClean rejected foreign-only config: %v", err)
 	}
 }
 
@@ -1307,11 +2094,13 @@ func TestCursorHooks_RefreshMigratesNativeCommandAndUpdatesFailClosed(t *testing
 
 func TestHookOnlyHookScripts_RespectFailClosedCapability(t *testing.T) {
 	cases := []struct {
-		name         string
-		connector    *hookOnlyConnector
-		wantFailMode string
+		name          string
+		connector     *hookOnlyConnector
+		guardrailMode string
+		wantFailMode  string
 	}{
-		{name: "cursor_supports_fail_closed", connector: NewCursorConnector(), wantFailMode: "closed"},
+		{name: "cursor_action_supports_fail_closed", connector: NewCursorConnector(), guardrailMode: "action", wantFailMode: "closed"},
+		{name: "cursor_observe_forces_fail_open", connector: NewCursorConnector(), guardrailMode: "observe", wantFailMode: "open"},
 		{name: "geminicli_supports_fail_closed", connector: NewGeminiCLIConnector(), wantFailMode: "closed"},
 		{name: "openhands_supports_fail_closed", connector: NewOpenHandsConnector(), wantFailMode: "closed"},
 		{name: "hermes_downgrades_to_fail_open", connector: NewHermesConnector(), wantFailMode: "open"},
@@ -1322,11 +2111,12 @@ func TestHookOnlyHookScripts_RespectFailClosedCapability(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			dir := t.TempDir()
 			opts := SetupOpts{
-				DataDir:      filepath.Join(dir, "dc"),
-				APIAddr:      "127.0.0.1:18970",
-				APIToken:     "tok-test",
-				HookFailMode: "closed",
-				WorkspaceDir: dir,
+				DataDir:       filepath.Join(dir, "dc"),
+				APIAddr:       "127.0.0.1:18970",
+				APIToken:      "tok-test",
+				HookFailMode:  "closed",
+				GuardrailMode: tc.guardrailMode,
+				WorkspaceDir:  dir,
 			}
 			if err := WriteHookScriptsForConnectorObjectWithOpts(filepath.Join(dir, "hooks"), opts, tc.connector); err != nil {
 				t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
@@ -1336,6 +2126,12 @@ func TestHookOnlyHookScripts_RespectFailClosedCapability(t *testing.T) {
 				t.Fatalf("read hook script: %v", err)
 			}
 			want := `FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-` + tc.wantFailMode + `}"`
+			if tc.connector.Name() == "copilot" {
+				want = `FAIL_MODE="open"`
+				if strings.Contains(string(body), "DEFENSECLAW_FAIL_MODE:-") {
+					t.Fatalf("Copilot shell hook still accepts an inherited closed fail mode:\n%s", string(body))
+				}
+			}
 			if !strings.Contains(string(body), want) {
 				t.Fatalf("hook script missing %s:\n%s", want, string(body))
 			}

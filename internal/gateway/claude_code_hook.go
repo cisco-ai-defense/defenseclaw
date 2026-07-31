@@ -25,6 +25,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/claudecodepath"
+	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
@@ -44,6 +46,7 @@ type claudeCodeHookRequest struct {
 	AgentType            string                 `json:"agent_type,omitempty"`
 	OldCWD               string                 `json:"old_cwd,omitempty"`
 	NewCWD               string                 `json:"new_cwd,omitempty"`
+	WorktreePath         string                 `json:"worktree_path,omitempty"`
 	ToolName             string                 `json:"tool_name,omitempty"`
 	ToolUseID            string                 `json:"tool_use_id,omitempty"`
 	ToolInput            map[string]interface{} `json:"tool_input,omitempty"`
@@ -153,6 +156,13 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		if decision, matched := a.claudeCodeSkillAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "skill", decision: decision})
 		}
+	case "MessageDisplay":
+		// Anthropic sends the displayed assistant text incrementally in delta.
+		// DefenseClaw registers this event async, so findings are observation
+		// only and can never retract text already being displayed.
+		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: req.Delta, Direction: "response", Connector: "claudecode"})
+	case "StopFailure":
+		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: claudeCodeToolOutput(req), Direction: "tool_result", Connector: "claudecode"})
 	case "Stop", "SubagentStop", "SessionEnd":
 		if !req.StopHookActive && a.scannerCfg != nil && a.scannerCfg.ConnectorHookConfig("claudecode").ScanOnStop {
 			verdict = a.scanClaudeCodeChangedFiles(ctx, req)
@@ -162,9 +172,10 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		if verdict == nil {
 			verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: claudeCodeEventContent(req), Direction: "prompt", Connector: "claudecode"})
 		}
-	case "TaskCreated", "TaskCompleted", "TeammateIdle",
+	case "SubagentStart", "CwdChanged", "WorktreeRemove",
+		"TaskCreated", "TaskCompleted", "TeammateIdle",
 		"PreCompact", "PostCompact", "Elicitation", "ElicitationResult", "Notification":
-		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: claudeCodeEventContent(req), Direction: "prompt", Connector: "claudecode"})
+		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: claudeCodeEventContent(req), Direction: "event_content", Connector: "claudecode"})
 	}
 
 	// Inject the cloud-controlled per-inspection redaction directive
@@ -413,7 +424,10 @@ func claudeCodeOutput(req claudeCodeHookRequest, action, rawAction, reason, addi
 				},
 			}}
 		case "TaskCreated", "TaskCompleted", "TeammateIdle":
-			return map[string]interface{}{"continue": false, "stopReason": reasonOrDefaultClaudeCode(reason)}
+			// These team/task events use exit 2 + stderr as event-specific
+			// feedback. Top-level continue:false stops the teammate entirely,
+			// which is not the documented denial behavior for these events.
+			return nil
 		case "Elicitation":
 			return map[string]interface{}{"hookSpecificOutput": map[string]interface{}{
 				"hookEventName": "Elicitation",
@@ -430,8 +444,22 @@ func claudeCodeOutput(req claudeCodeHookRequest, action, rawAction, reason, addi
 			return map[string]interface{}{"decision": "block", "reason": reasonOrDefaultClaudeCode(reason)}
 		}
 	}
+	watchRoot := strings.TrimSpace(req.NewCWD)
+	if watchRoot == "" {
+		watchRoot = req.CWD
+	}
+	if event == "SessionStart" {
+		output := map[string]interface{}{
+			"hookEventName": "SessionStart",
+			"watchPaths":    gatewayconnector.ClaudeCodeWatchPaths(watchRoot),
+		}
+		if additional != "" {
+			output["additionalContext"] = additional
+		}
+		return map[string]interface{}{"hookSpecificOutput": output}
+	}
 	if event == "CwdChanged" || event == "FileChanged" {
-		out := map[string]interface{}{"watchPaths": claudeCodeWatchPaths(req)}
+		out := map[string]interface{}{"watchPaths": gatewayconnector.ClaudeCodeWatchPaths(watchRoot)}
 		if additional != "" {
 			out["systemMessage"] = additional
 		}
@@ -441,8 +469,8 @@ func claudeCodeOutput(req claudeCodeHookRequest, action, rawAction, reason, addi
 		return nil
 	}
 	switch event {
-	case "SessionStart", "UserPromptSubmit", "UserPromptExpansion", "PostToolUse", "PostToolUseFailure",
-		"PostToolBatch", "Notification", "SubagentStart", "SubagentStop":
+	case "UserPromptSubmit", "UserPromptExpansion", "PostToolUse", "PostToolUseFailure",
+		"PostToolBatch", "SubagentStart", "SubagentStop":
 		return map[string]interface{}{"hookSpecificOutput": map[string]interface{}{
 			"hookEventName":     event,
 			"additionalContext": additional,
@@ -506,6 +534,7 @@ func claudeCodeToolOutput(req claudeCodeHookRequest) string {
 func claudeCodeEventContent(req claudeCodeHookRequest) string {
 	fields := []string{
 		req.Message,
+		req.Delta,
 		req.Title,
 		req.FilePath,
 		req.Source,
@@ -514,8 +543,11 @@ func claudeCodeEventContent(req claudeCodeHookRequest) string {
 		req.MCPServerName,
 		req.ElicitationAction,
 		req.URL,
+		req.AgentID,
+		req.AgentType,
 		req.OldCWD,
 		req.NewCWD,
+		req.WorktreePath,
 		req.LastAssistantMessage,
 		claudeCodePayloadString(req.Payload, "content"),
 		claudeCodePayloadString(req.Payload, "compact_summary"),
@@ -525,38 +557,6 @@ func claudeCodeEventContent(req claudeCodeHookRequest) string {
 		claudeCodePayloadString(req.Payload, "reason"),
 	}
 	return strings.Join(nonEmptyStrings(fields...), "\n")
-}
-
-func claudeCodeWatchPaths(req claudeCodeHookRequest) []string {
-	root := strings.TrimSpace(req.NewCWD)
-	if root == "" {
-		root = strings.TrimSpace(req.CWD)
-	}
-	if root == "" {
-		return []string{}
-	}
-	candidates := []string{
-		"CLAUDE.md",
-		".mcp.json",
-		".env",
-		".envrc",
-		"package.json",
-		"pyproject.toml",
-		"go.mod",
-		"Cargo.toml",
-		"requirements.txt",
-		filepath.Join(".claude", "settings.json"),
-		filepath.Join(".claude", "settings.local.json"),
-	}
-	out := make([]string, 0, len(candidates))
-	for _, p := range candidates {
-		if filepath.IsAbs(p) {
-			out = append(out, filepath.Clean(p))
-			continue
-		}
-		out = append(out, filepath.Join(root, p))
-	}
-	return out
 }
 
 func nonEmptyStrings(values ...string) []string {
@@ -775,28 +775,48 @@ func claudeCodeComponentTargets(cwd string) map[string][]string {
 		"mcp":     {},
 		"agent":   {},
 		"command": {},
+		"memory":  {},
 		"config":  {},
 	}
-	home, err := os.UserHomeDir()
-	if err == nil {
-		claudeHome := filepath.Join(home, ".claude")
-		targets["skill"] = append(targets["skill"], childDirs(filepath.Join(claudeHome, "skills"))...)
-		targets["plugin"] = append(targets["plugin"], childDirs(filepath.Join(claudeHome, "plugins"))...)
-		targets["agent"] = append(targets["agent"], childDirs(filepath.Join(claudeHome, "agents"))...)
-		targets["command"] = append(targets["command"], childDirs(filepath.Join(claudeHome, "commands"))...)
-		targets["mcp"] = append(targets["mcp"], existingFiles(filepath.Join(claudeHome, "settings.json"))...)
-		targets["config"] = append(targets["config"], existingFiles(filepath.Join(claudeHome, "settings.json"), filepath.Join(claudeHome, "rules"), filepath.Join(home, ".claude.json"))...)
-		targets["config"] = append(targets["config"], childDirs(filepath.Join(claudeHome, "rules"))...)
+	claudeHome := gatewayconnector.ClaudeCodeConfigDir()
+	userSkills := filepath.Join(claudeHome, "skills")
+	targets["skill"] = append(targets["skill"], claudePlainSkillDirs(userSkills)...)
+	userCommands := claudeCommandFiles(filepath.Join(claudeHome, "commands"))
+	targets["skill"] = append(targets["skill"], userCommands...)
+	// Marketplace cache presence does not prove the active version: Claude
+	// retains orphaned versions for 14 days. Do not turn stale cache copies
+	// into protected HookRuntime evidence. The host semantic inventory owns
+	// marketplace installed/version/enable attribution.
+	targets["plugin"] = append(targets["plugin"], claudeSkillsPluginDirs(userSkills)...)
+	targets["agent"] = append(targets["agent"], claudecodepath.AgentFiles(filepath.Join(claudeHome, "agents"))...)
+	targets["command"] = append(targets["command"], userCommands...)
+	targets["mcp"] = append(targets["mcp"], existingFiles(gatewayconnector.ClaudeCodeMCPStatePath())...)
+	targets["config"] = append(targets["config"], existingFiles(
+		filepath.Join(claudeHome, "settings.json"),
+		filepath.Join(claudeHome, "CLAUDE.md"),
+		filepath.Join(claudeHome, "rules"),
+	)...)
+	targets["config"] = append(targets["config"], childDirs(filepath.Join(claudeHome, "rules"))...)
+	memory := claudecodepath.ResolveAutoMemory(claudeHome, cwd, nil)
+	targets["memory"] = append(targets["memory"], existingFiles(memory.Path)...)
+	targets["memory"] = append(targets["memory"], claudecodepath.AutoMemoryFiles(memory)...)
+	for _, workspaceSkills := range gatewayconnector.ClaudeCodeProjectSkillDirs(cwd) {
+		targets["skill"] = append(targets["skill"], claudePlainSkillDirs(workspaceSkills)...)
+		targets["plugin"] = append(targets["plugin"], claudeSkillsPluginDirs(workspaceSkills)...)
+	}
+	for _, projectAgents := range gatewayconnector.ClaudeCodeProjectAgentDirs(cwd) {
+		targets["agent"] = append(targets["agent"], claudecodepath.AgentFiles(projectAgents)...)
 	}
 	for _, root := range workspaceCodexRoots(cwd) {
 		claudeDir := filepath.Join(root, ".claude")
-		targets["skill"] = append(targets["skill"], childDirs(filepath.Join(claudeDir, "skills"))...)
-		targets["plugin"] = append(targets["plugin"], childDirs(filepath.Join(claudeDir, "plugins"))...)
-		targets["agent"] = append(targets["agent"], childDirs(filepath.Join(claudeDir, "agents"))...)
-		targets["command"] = append(targets["command"], childDirs(filepath.Join(claudeDir, "commands"))...)
-		targets["mcp"] = append(targets["mcp"], existingFiles(filepath.Join(root, ".mcp.json"), filepath.Join(claudeDir, "settings.json"), filepath.Join(claudeDir, "settings.local.json"))...)
+		projectCommands := claudeCommandFiles(filepath.Join(claudeDir, "commands"))
+		targets["skill"] = append(targets["skill"], projectCommands...)
+		targets["command"] = append(targets["command"], projectCommands...)
+		targets["mcp"] = append(targets["mcp"], existingFiles(filepath.Join(root, ".mcp.json"))...)
 		targets["config"] = append(targets["config"], existingFiles(
 			filepath.Join(root, "CLAUDE.md"),
+			filepath.Join(root, "CLAUDE.local.md"),
+			filepath.Join(claudeDir, "CLAUDE.md"),
 			filepath.Join(claudeDir, "settings.json"),
 			filepath.Join(claudeDir, "settings.local.json"),
 			filepath.Join(claudeDir, "rules"),
@@ -807,6 +827,50 @@ func claudeCodeComponentTargets(cwd string) map[string][]string {
 		targets[k] = uniqueExistingPaths(paths)
 	}
 	return targets
+}
+
+func claudePluginManifestPath(root string) string {
+	return filepath.Join(root, ".claude-plugin", "plugin.json")
+}
+
+func claudeSkillsPluginDirs(root string) []string {
+	var plugins []string
+	for _, candidate := range claudecodepath.SkillDirs(root) {
+		if info, err := os.Lstat(claudePluginManifestPath(candidate)); err == nil &&
+			info.Mode().IsRegular() {
+			plugins = append(plugins, candidate)
+		}
+	}
+	return plugins
+}
+
+func claudePlainSkillDirs(root string) []string {
+	var skills []string
+	for _, candidate := range claudecodepath.SkillDirs(root) {
+		if _, err := os.Lstat(claudePluginManifestPath(candidate)); err == nil {
+			continue
+		}
+		skills = append(skills, candidate)
+	}
+	return skills
+}
+
+func claudeCommandFiles(root string) []string {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil
+	}
+	commands := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.EqualFold(filepath.Ext(entry.Name()), ".md") {
+			continue
+		}
+		path := filepath.Join(root, entry.Name())
+		if info, err := os.Lstat(path); err == nil && info.Mode().IsRegular() {
+			commands = append(commands, path)
+		}
+	}
+	return commands
 }
 
 func (a *APIServer) scanClaudeCodeComponent(ctx context.Context, component, target string) bool {

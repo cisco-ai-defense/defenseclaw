@@ -3,6 +3,8 @@
 
 """Consistency gates for the certified native Windows release surface."""
 
+import json
+import re
 from pathlib import Path
 
 import yaml
@@ -10,6 +12,7 @@ from defenseclaw.platform_support import (
     WINDOWS_CERTIFIED_ARCHITECTURES,
     WINDOWS_NOT_CERTIFIED_ARCHITECTURES,
     WINDOWS_NOT_CERTIFIED_CONNECTORS,
+    WINDOWS_PREVIEW_CONNECTORS,
     WINDOWS_SUPPORTED_CONNECTORS,
     WINDOWS_UNSUPPORTED_CONNECTORS,
     WINDOWS_UNSUPPORTED_FEATURES,
@@ -19,24 +22,33 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_windows_release_metadata_is_exact() -> None:
-    assert WINDOWS_SUPPORTED_CONNECTORS == {"codex", "claudecode"}
-    assert WINDOWS_NOT_CERTIFIED_CONNECTORS == {
+    assert WINDOWS_SUPPORTED_CONNECTORS == set()
+    assert WINDOWS_PREVIEW_CONNECTORS == {
+        "claudecode",
+        "codex",
         "cursor",
+        "hermes",
         "windsurf",
-        "geminicli",
+        "opencode",
+        "omnigent",
+    }
+    assert WINDOWS_NOT_CERTIFIED_CONNECTORS == {
         "copilot",
         "antigravity",
-        "opencode",
-        "hermes",
     }
-    assert WINDOWS_UNSUPPORTED_CONNECTORS == {"openhands", "omnigent", "openclaw", "zeptoclaw"}
+    assert WINDOWS_UNSUPPORTED_CONNECTORS == {
+        "geminicli",
+        "openhands",
+        "openclaw",
+        "zeptoclaw",
+    }
     assert WINDOWS_CERTIFIED_ARCHITECTURES == {"amd64"}
     assert WINDOWS_NOT_CERTIFIED_ARCHITECTURES == {"arm64"}
     assert WINDOWS_UNSUPPORTED_FEATURES == {
         "sandbox",
         "enterprise-hooks",
         "openhands",
-        "omnigent",
+        "omnigent-terminal-sandbox",
         "openclaw",
         "zeptoclaw",
     }
@@ -51,14 +63,17 @@ def test_windows_guide_has_unambiguous_claims_and_powershell_examples() -> None:
     assert "WSL is not supported" in text
     assert "Windows x64" in text and "`amd64`" in text
     assert "Windows ARM64" in text and "Not certified" in text
-    assert "| Codex | `codex` | **Supported**" in text
-    assert "| Claude Code | `claudecode` | **Supported**" in text
+    assert "| Codex | `codex` | **Preview**" in text
+    assert "| Claude Code | `claudecode` | **Preview**" in text
+    assert "| Windsurf | `windsurf` | **Preview**" in text
+    assert "| OpenCode | `opencode` | **Preview**" in text
+    assert "| OmniGent | `omnigent` | **Preview — native degraded**" in text
     assert "local observability" in text
     assert "Local Splunk" in text
     assert "Hyper-V backend" in text
     assert "per-user Docker Desktop" in text
     assert "WSL2 engines" in text
-    assert "Hermes remains preview" not in text
+    assert "Hermes" in text and "Preview" in text
     assert "```bash" not in text and "```sh" not in text
     assert text.count("```powershell") >= 8
     for label in (
@@ -70,6 +85,44 @@ def test_windows_guide_has_unambiguous_claims_and_powershell_examples() -> None:
         "ZeptoClaw",
     ):
         assert label in text
+
+
+def test_claude_windows_docs_keep_preview_and_optional_git_boundary() -> None:
+    windows_docs = ROOT / "docs-site/content/docs/get-started/windows"
+    capabilities = (windows_docs / "capabilities-commands.mdx").read_text(
+        encoding="utf-8"
+    )
+    lifecycle = (windows_docs / "install-lifecycle.mdx").read_text(encoding="utf-8")
+    install = (
+        ROOT / "docs-site/content/docs/get-started/install.mdx"
+    ).read_text(encoding="utf-8")
+    live_workflow = (
+        ROOT / ".github/workflows/connector-live-e2e.yml"
+    ).read_text(encoding="utf-8")
+
+    assert "| Claude Code connector setup | **Preview**" in capabilities
+    assert (
+        "**Preview** for Claude Code/Codex/Cursor/Windsurf/Hermes/OpenCode/OmniGent"
+        in capabilities
+    )
+    assert "`claude-code`, `codex`, `cursor`, `windsurf`, `hermes`" in capabilities
+    assert "`opencode`, and `omnigent` are selectable previews" in capabilities
+    assert "Claude Code connector setup | **Supported**" not in capabilities
+    assert "`claude-code` is the certified connector alias" not in capabilities
+    assert (
+        "Native Windows x64 release certification currently covers Claude Code"
+        not in live_workflow
+    )
+    assert (
+        "Native Windows x64 release certification remains closed for Claude Code"
+        in live_workflow
+    )
+
+    for text in (lifecycle, install):
+        assert "Git for Windows" in text
+        assert "it is optional; without it Claude uses its native PowerShell tool" in text
+        assert "Claude Code's Git for Windows requirement" not in text
+        assert "Claude Code retains its Git for Windows requirement" not in text
 
 
 def test_release_runtime_custody_splits_certified_x64_from_compatibility_arm64() -> None:
@@ -114,7 +167,16 @@ def test_release_runtime_custody_splits_certified_x64_from_compatibility_arm64()
 
     installer = (ROOT / "scripts/install.ps1").read_text(encoding="utf-8")
     assert '"ARM64" { Die "Windows ARM64 is not certified' in installer
-    assert '"codex",\n    "claudecode",\n    "none"' in installer
+    choices_match = re.search(r"\$ConnectorChoices = @\((.*?)\)", installer, re.DOTALL)
+    assert choices_match is not None
+    choices = tuple(re.findall(r'"([^"]+)"', choices_match.group(1)))
+    assert choices[-1] == "none"
+    assert len(choices) == len(set(choices))
+    assert set(choices[:-1]) == (
+        WINDOWS_SUPPORTED_CONNECTORS
+        | WINDOWS_PREVIEW_CONNECTORS
+        | WINDOWS_NOT_CERTIFIED_CONNECTORS
+    )
 
 
 def test_connector_matrix_delegates_current_support_to_the_website() -> None:
@@ -142,6 +204,46 @@ def test_connector_matrix_delegates_current_support_to_the_website() -> None:
         "zeptoclaw",
     ):
         assert f'<ConnectorLabel id="{connector_id}" />' in compatibility
+
+
+def test_antigravity_windows_claims_match_official_hook_boundary() -> None:
+    connector_index = (ROOT / "docs-site/content/docs/connectors/index.mdx").read_text(
+        encoding="utf-8"
+    )
+    connector_page = (
+        ROOT / "docs-site/content/docs/connectors/antigravity.mdx"
+    ).read_text(encoding="utf-8")
+    config_reference = (
+        ROOT / "docs-site/content/docs/reference/configuration.mdx"
+    ).read_text(encoding="utf-8")
+    setup_source = (
+        ROOT / "cli/defenseclaw/commands/cmd_setup.py"
+    ).read_text(encoding="utf-8")
+    matrix = json.loads(
+        (ROOT / "docs-site/data/capability-matrix.json").read_text(encoding="utf-8")
+    )
+    row = next(entry for entry in matrix["connectors"] if entry["id"] == "antigravity")
+    connector_page_text = " ".join(connector_page.split())
+
+    assert "Antigravity (`PreToolUse` only)" in connector_index
+    assert row["toolInspection"] == "pre-execution"
+    assert row["hooks"]["askEvents"] == ["PreToolUse"]
+    assert row["hooks"]["blockEvents"] == ["PreToolUse"]
+    assert row["hooks"]["supportsFailClosed"] is False
+    assert "`~/.gemini/config/hooks.json`" in config_reference
+    assert "Google documents no configuration-home environment override" in config_reference
+    assert "<workspace>/.agents/hooks.json" in config_reference
+    assert "only hard-blocking claim for the connector" in connector_page_text
+    assert "does not document non-zero hook exit status as enforcement" in connector_page_text
+
+    combined = "\n".join((connector_index, connector_page, config_reference, setup_source))
+    assert "Claude-Code-compatible" not in combined
+    assert "single global hook entry" not in combined
+    assert "decision=ask overrides" not in combined
+    assert "PreInvocation`, `PreToolUse" not in combined
+    assert ".antigravitycli/hooks.json" not in combined
+    assert "ANTIGRAVITY_CONFIG_DIR" not in combined
+    assert "GEMINI_CONFIG_DIR" not in combined
 
 
 def test_windows_live_harness_avoids_automatic_variable_assignments() -> None:

@@ -385,6 +385,26 @@ class TestObservabilitySummaryDisplay(unittest.TestCase):
         self.assertNotIn("gateway.jsonl", out)
         self.assertNotIn("Get-Content -LiteralPath", out)
 
+    def test_hermes_action_summary_reports_preview_posture(self):
+        self._seed_map("hermes")
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            _print_observability_summary(
+                "hermes",
+                self.app.cfg,
+                mode="action",
+                os_name="nt",
+            )
+        out = buf.getvalue()
+
+        self.assertIn("pre_tool deny; pre_verify continue", out)
+        self.assertIn("hook failure posture:", out)
+        self.assertIn("upstream fail-open", out)
+        self.assertIn("native ask/approve:", out)
+        self.assertIn("unsupported", out)
+        self.assertIn("native OTel:", out)
+        self.assertIn("hook-derived audit only", out)
+
 
 class TestConfiguredConnectorSet(unittest.TestCase):
     def setUp(self):

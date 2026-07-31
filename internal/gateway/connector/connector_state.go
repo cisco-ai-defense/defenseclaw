@@ -631,10 +631,10 @@ func NewHookContractLockEntry(opts SetupOpts, conn Connector, defenseClawVersion
 		HookScriptDigests:      HookScriptDigests(opts, conn),
 		Locations:              ResolvedConnectorLocations(opts, conn),
 		DefenseClawVersion:     defenseClawVersion,
-		HookFailMode:           normalizeHookFailMode(opts.HookFailMode),
+		HookFailMode:           resolveHookFailMode(opts, conn),
 		UpdatedAt:              time.Now().UTC().Format(time.RFC3339),
 	}
-	if runtime.GOOS == "windows" && entry.Connector == "codex" {
+	if runtime.GOOS == "windows" && (entry.Connector == "codex" || entry.Connector == "omnigent") {
 		executable, digest, ok := setupSelectedAgentExecutableEvidence(opts.AgentExecutable)
 		if ok {
 			entry.AgentExecutable = executable
@@ -991,7 +991,8 @@ func hookRuntimeArtifactPaths(opts SetupOpts, conn Connector) []string {
 }
 
 func LoadCachedAgentVersion(dataDir, connectorName string) string {
-	if runtime.GOOS == "windows" && normalizeConnectorName(connectorName) == "codex" {
+	normalizedName := normalizeConnectorName(connectorName)
+	if runtime.GOOS == "windows" && normalizedName == "codex" {
 		if entry, exists := loadProtectedCodexContractEntry(dataDir); exists {
 			if validCodexAgentExecutableEvidence(entry) {
 				return strings.TrimSpace(entry.RawAgentVersion)
@@ -1001,8 +1002,20 @@ func LoadCachedAgentVersion(dataDir, connectorName string) string {
 			// must never fall back to an automatic discovery cache or receipt.
 			return ""
 		}
-		if selection, ok := loadSetupAgentSelection(dataDir, "codex"); ok {
+		if selection, ok := loadSetupAgentSelection(dataDir, normalizedName); ok {
 			return selection.RawVersion
+		}
+		return ""
+	}
+	if runtime.GOOS == "windows" && normalizedName == "omnigent" {
+		if selection, ok := loadSetupAgentSelection(dataDir, normalizedName); ok {
+			return selection.RawVersion
+		}
+		if entry, exists := loadProtectedHookContractEntry(dataDir, normalizedName); exists {
+			if validSetupSelectedAgentExecutableEvidence(entry, normalizedName) {
+				return strings.TrimSpace(entry.RawAgentVersion)
+			}
+			return ""
 		}
 		return ""
 	}
@@ -1014,21 +1027,38 @@ func LoadCachedAgentVersion(dataDir, connectorName string) string {
 }
 
 // LoadCachedAgentExecutable is retained as a compatibility name for setup
-// callers. On Windows, Codex never reads agent_discovery.json here: an existing
-// install uses only its protected, version/contract-bound lock entry, while a
-// fresh install may consume the short-lived setup-selected receipt. The policy
-// inspector revalidates source, product, path, ACL, and digest before launch.
-// Other platforms retain their established discovery-cache behavior.
+// callers. On Windows, native executable-inspecting connectors never grant
+// authority from agent_discovery.json: an existing install uses its protected,
+// version/contract-bound lock entry, while a fresh install may consume the
+// short-lived setup-selected receipt. The connector revalidates source,
+// product, path, ACL, and digest before launch. Other platforms retain their
+// established discovery-cache behavior.
 func LoadCachedAgentExecutable(dataDir, connectorName string) string {
-	if runtime.GOOS == "windows" && normalizeConnectorName(connectorName) == "codex" {
+	normalizedName := normalizeConnectorName(connectorName)
+	if runtime.GOOS == "windows" && normalizedName == "codex" {
 		if entry, exists := loadProtectedCodexContractEntry(dataDir); exists {
 			if validCodexAgentExecutableEvidence(entry) {
 				return strings.TrimSpace(entry.AgentExecutable)
 			}
 			return ""
 		}
-		if selection, ok := loadSetupAgentSelection(dataDir, "codex"); ok {
+		if selection, ok := loadSetupAgentSelection(dataDir, normalizedName); ok {
 			return selection.Executable
+		}
+		return ""
+	}
+	if runtime.GOOS == "windows" && normalizedName == "omnigent" {
+		// A fresh explicit setup/repair selection supersedes the sealed lock.
+		// After the short receipt expires, reconciliation keeps using the
+		// executable identity persisted in the protected contract lock.
+		if selection, ok := loadSetupAgentSelection(dataDir, normalizedName); ok {
+			return selection.Executable
+		}
+		if entry, exists := loadProtectedHookContractEntry(dataDir, normalizedName); exists {
+			if validSetupSelectedAgentExecutableEvidence(entry, normalizedName) {
+				return strings.TrimSpace(entry.AgentExecutable)
+			}
+			return ""
 		}
 		return ""
 	}
@@ -1040,6 +1070,21 @@ func LoadCachedAgentExecutable(dataDir, connectorName string) string {
 }
 
 func loadProtectedCodexContractEntry(dataDir string) (HookContractLockEntry, bool) {
+	entry, fileExists := loadProtectedHookContractEntry(dataDir, "codex")
+	if entry.Connector == "" {
+		return HookContractLockEntry{}, fileExists
+	}
+	if _, supersedes := supersedingCodexSetupSelection(dataDir, entry); supersedes {
+		// The short-lived receipt is explicit repair authority, not discovery
+		// cache authority. Returning exists=false makes the existing callers use
+		// that receipt and lets policy validation re-check its exact path, ACL,
+		// version, and digest before any hook registration is changed.
+		return HookContractLockEntry{}, false
+	}
+	return entry, true
+}
+
+func loadProtectedHookContractEntry(dataDir, connectorName string) (HookContractLockEntry, bool) {
 	path := filepath.Join(dataDir, hookContractLockFile)
 	_, statErr := os.Lstat(path)
 	fileExists := statErr == nil || !os.IsNotExist(statErr)
@@ -1053,15 +1098,8 @@ func loadProtectedCodexContractEntry(dataDir string) (HookContractLockEntry, boo
 		// callers fail closed instead of treating it as a fresh installation.
 		return HookContractLockEntry{}, true
 	}
-	entry, ok := lock.Connectors["codex"]
+	entry, ok := lock.Connectors[normalizeConnectorName(connectorName)]
 	if !ok {
-		return HookContractLockEntry{}, false
-	}
-	if _, supersedes := supersedingCodexSetupSelection(dataDir, entry); supersedes {
-		// The short-lived receipt is explicit repair authority, not discovery
-		// cache authority. Returning exists=false makes the existing callers use
-		// that receipt and lets policy validation re-check its exact path, ACL,
-		// version, and digest before any hook registration is changed.
 		return HookContractLockEntry{}, false
 	}
 	return entry, true
@@ -1108,7 +1146,12 @@ func codexSelectionMatchesLock(selection agentSelectionEvidence, entry HookContr
 }
 
 func validCodexAgentExecutableEvidence(entry HookContractLockEntry) bool {
-	if entry.Connector != "codex" ||
+	return validSetupSelectedAgentExecutableEvidence(entry, "codex")
+}
+
+func validSetupSelectedAgentExecutableEvidence(entry HookContractLockEntry, connectorName string) bool {
+	connectorName = normalizeConnectorName(connectorName)
+	if entry.Connector != connectorName ||
 		entry.AgentExecutableSource != "setup-selected" ||
 		strings.ContainsAny(entry.AgentExecutable, "\x00\r\n") ||
 		!filepath.IsAbs(entry.AgentExecutable) ||
@@ -1117,7 +1160,7 @@ func validCodexAgentExecutableEvidence(entry HookContractLockEntry) bool {
 		entry.NormalizedAgentVersion == "" || entry.ContractID == "" {
 		return false
 	}
-	resolution := ResolveHookContract("codex", entry.RawAgentVersion)
+	resolution := ResolveHookContract(connectorName, entry.RawAgentVersion)
 	return resolution.Status == HookCompatibilityKnown &&
 		resolution.NormalizedVersion == entry.NormalizedAgentVersion &&
 		resolution.Contract.ContractID == entry.ContractID &&

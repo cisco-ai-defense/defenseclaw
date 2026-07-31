@@ -17,17 +17,28 @@ from pathlib import Path
 from typing import Any
 
 from defenseclaw import config as config_module
-from defenseclaw.connector_paths import codex_home, connector_config_files, normalize
+from defenseclaw.connector_paths import (
+    codex_home,
+    connector_config_files,
+    normalize,
+    windsurf_hook_config_path,
+    windsurf_user_home,
+)
 from defenseclaw.file_lock import _lock_file_exclusive, _unlock_file
 
 _VALID_MODES = frozenset({"open", "closed"})
 _MAX_RUNTIME_FILE = 2 * 1024 * 1024
 _MAX_DIGEST_FILE = 128 * 1024 * 1024
 _FAIL_MODE_PATTERN = re.compile(r"FAIL_MODE=\"\$\{DEFENSECLAW_FAIL_MODE:-(open|closed)\}\"")
+_OPENCODE_FAIL_MODE_PATTERN = re.compile(r'const\s+DC_FAIL_MODE\s*=\s*"(open|closed)"\s*;')
 _EXPECTED_CONTRACTS = {
     "claudecode": frozenset({"claudecode-hooks-v1"}),
-    "codex": frozenset({"codex-hooks-v1", "codex-hooks-v2", "codex-hooks-v3"}),
+    "codex": frozenset(
+        {"codex-hooks-v1", "codex-hooks-v2", "codex-hooks-v3", "codex-hooks-v4"}
+    ),
+    "windsurf": frozenset({"windsurf-hooks-v1"}),
 }
+_UPSTREAM_FAIL_OPEN_CONNECTORS = frozenset({"antigravity", "copilot", "hermes"})
 _SHARED_HOOK_SCRIPTS = frozenset(
     {
         "inspect-tool.sh",
@@ -131,7 +142,7 @@ def resolve_connector_fail_mode(
     if runtime_source[0].endswith("-legacy"):
         drift.append("windows-sidecar-legacy")
     process_env = str(os.environ.get("DEFENSECLAW_FAIL_MODE", "")).strip().lower()
-    if process_env in _VALID_MODES:
+    if name != "opencode" and process_env in _VALID_MODES:
         sources.append(("process-env", process_env))
         runtime = process_env
 
@@ -206,7 +217,21 @@ def connector_fail_mode_report(
     guardrail = cfg.guardrail
     resolver = getattr(guardrail, "effective_hook_fail_mode", None)
     configured = normalize_fail_mode(resolver(name) if callable(resolver) else getattr(guardrail, "hook_fail_mode", ""))
-    if name in _EXPECTED_CONTRACTS:
+    if name in _UPSTREAM_FAIL_OPEN_CONNECTORS:
+        return {
+            "effective": "open",
+            "provenance": f"{name}-upstream-fail-open",
+            "configured": configured,
+            "desired": "open",
+            "runtime": "open",
+            "current": True,
+            "drift": [],
+            "sources": [
+                {"name": "config", "mode": configured},
+                {"name": f"{name}-upstream", "mode": "open"},
+            ],
+        }
+    if name in _EXPECTED_CONTRACTS or name == "opencode":
         return resolve_connector_fail_mode(
             cfg,
             name,
@@ -225,6 +250,8 @@ def connector_fail_mode_report(
 
 
 def _platform_runtime_source(cfg: Any, connector: str) -> tuple[str, str | None]:
+    if connector == "opencode":
+        return "opencode-plugin", _read_opencode_plugin_mode(cfg)
     if _is_windows():
         mode, legacy = _read_windows_hook_mode(Path(cfg.data_dir) / "hooks" / ".hookcfg", connector)
         if legacy:
@@ -266,6 +293,30 @@ def _read_baked_hook_mode(path: Path) -> str | None:
         return None
     match = _FAIL_MODE_PATTERN.search(data)
     return match.group(1) if match else None
+
+
+def _read_opencode_plugin_mode(cfg: Any) -> str | None:
+    data = _read_small_file(Path(cfg.data_dir) / "hook_contract_lock.json")
+    if data is None:
+        return None
+    try:
+        payload = json.loads(data)
+    except (TypeError, ValueError):
+        return None
+    connectors = payload.get("connectors") if isinstance(payload, dict) else None
+    entry = connectors.get("opencode") if isinstance(connectors, dict) else None
+    locations = entry.get("locations") if isinstance(entry, dict) else None
+    paths = locations.get("hook_config_paths") if isinstance(locations, dict) else None
+    if not isinstance(paths, list):
+        return None
+    for raw_path in paths:
+        plugin = _read_small_file(Path(str(raw_path)))
+        if plugin is None:
+            continue
+        match = _OPENCODE_FAIL_MODE_PATTERN.search(plugin)
+        if match:
+            return match.group(1)
+    return None
 
 
 def _connector_workspace(cfg: Any) -> str:
@@ -429,14 +480,22 @@ def _windows_registration_freshness(
         validate_windows_hook_registration,
     )
 
-    workspace = _connector_workspace(cfg)
-    paths = connector_config_files(connector, workspace_dir=workspace)
-    if connector == "codex":
+    if connector == "windsurf":
+        try:
+            config_path = windsurf_hook_config_path()
+        except ValueError:
+            return "registration-profile-binding-missing"
+        locked_paths = _registration_hook_config_paths(cfg, connector)
+        if len(locked_paths) != 1 or not _same_config_path(locked_paths[0], config_path):
+            return "registration-profile-binding-stale"
+    elif connector == "codex":
         # Native Setup registers Codex hooks in the supported managed layer so
         # they are source-trusted without a manual /hooks approval. Keep the
         # fail-mode freshness guard on that effective source as well.
         config_path = str(Path(codex_home()) / "managed_config.toml")
     else:
+        workspace = _connector_workspace(cfg)
+        paths = connector_config_files(connector, workspace_dir=workspace)
         config_path = (
             paths[0]
             if paths
@@ -444,6 +503,8 @@ def _windows_registration_freshness(
         )
     install_root = _packaged_windows_install_root(str(cfg.data_dir))
     if install_root is None:
+        if connector == "windsurf":
+            return "registration-install-root-unverified"
         install_root = str(Path.home() / ".local" / "bin")
     check = validate_windows_hook_registration(
         connector=connector,
@@ -455,6 +516,47 @@ def _windows_registration_freshness(
         inspect_effective_policy=inspect_effective_policy,
     )
     return None if check.healthy else f"registration-{check.state}"
+
+
+def _registration_hook_config_paths(cfg: Any, connector: str) -> tuple[str, ...]:
+    """Read the exact config targets recorded by the connector contract lock."""
+
+    data = _read_small_file(Path(cfg.data_dir) / "hook_contract_lock.json")
+    if data is None:
+        return ()
+    try:
+        payload = json.loads(data)
+    except (TypeError, ValueError):
+        return ()
+    connectors = payload.get("connectors") if isinstance(payload, dict) else None
+    entry = connectors.get(connector) if isinstance(connectors, dict) else None
+    locations = entry.get("locations") if isinstance(entry, dict) else None
+    raw_paths = locations.get("hook_config_paths") if isinstance(locations, dict) else None
+    if not isinstance(raw_paths, list):
+        return ()
+    return tuple(str(path) for path in raw_paths if isinstance(path, str) and path)
+
+
+def _same_config_path(left: str, right: str) -> bool:
+    def key(value: str) -> str | None:
+        if (
+            not value
+            or value.strip() != value
+            or "\x00" in value
+            or "\r" in value
+            or "\n" in value
+            or not os.path.isabs(value)
+            or os.path.normpath(value) != value
+        ):
+            return None
+        return os.path.normcase(value)
+
+    try:
+        left_key = key(left)
+        right_key = key(right)
+        return left_key is not None and left_key == right_key
+    except ValueError:
+        return False
 
 
 def _unix_registration_freshness(cfg: Any, connector: str) -> str | None:
@@ -598,8 +700,15 @@ def snapshot_fail_mode_transaction(cfg: Any, connectors: list[str]) -> tuple[Fil
         name = normalize(raw_name)
         paths.add(hook_dir / f".hook-{name}.token")
         paths.add(hook_dir / f".hookcfg.{name}")
-        for config_path in connector_config_files(name, workspace_dir=workspace):
+        try:
+            config_paths = connector_config_files(name, workspace_dir=workspace)
+            windsurf_hooks = windsurf_hook_config_path() if name == "windsurf" else ""
+        except ValueError as exc:
+            raise OSError(f"{name} profile binding is invalid: {exc}") from exc
+        for config_path in config_paths:
             paths.add(Path(config_path))
+        if windsurf_hooks:
+            paths.add(Path(windsurf_hooks))
         paths.add(hook_dir / f"{name}-hook.sh")
         paths.add(Path(cfg.data_dir) / f"{name}_backup.json")
         backup_dir = Path(cfg.data_dir) / "connector_backups" / name
@@ -693,23 +802,31 @@ def restore_fail_mode_transaction(snapshots: tuple[FileSnapshot, ...]) -> None:
 
 
 def reconcile_connector_registration(cfg: Any, connector: str) -> ConnectorFailModeState:
+    name = normalize(connector)
+    try:
+        config_home = windsurf_user_home() if name == "windsurf" else ""
+    except ValueError as exc:
+        raise OSError(f"Windsurf profile binding is invalid: {exc}") from exc
     executable = shutil.which("defenseclaw-gateway")
     if not executable or (_is_windows() and Path(executable).suffix.lower() != ".exe"):
         raise OSError("native defenseclaw-gateway executable not found")
     environment = os.environ.copy()
     environment[config_module.CONFIG_PATH_ENV] = str(config_module.config_path_for_data_dir(cfg.data_dir))
     try:
+        args = [
+            executable,
+            "connector",
+            "reconcile",
+            "--connector",
+            name,
+            "--data-dir",
+            str(cfg.data_dir),
+        ]
+        if name == "windsurf":
+            args.extend(("--config-home", config_home))
+        args.append("--json")
         result = subprocess.run(
-            [
-                executable,
-                "connector",
-                "reconcile",
-                "--connector",
-                normalize(connector),
-                "--data-dir",
-                str(cfg.data_dir),
-                "--json",
-            ],
+            args,
             capture_output=True,
             text=True,
             timeout=30,
@@ -721,7 +838,7 @@ def reconcile_connector_registration(cfg: Any, connector: str) -> ConnectorFailM
     if result.returncode != 0:
         detail = (result.stderr or result.stdout or "connector reconcile failed").splitlines()[0]
         raise OSError(detail[:240])
-    state = resolve_connector_fail_mode(cfg, connector)
+    state = resolve_connector_fail_mode(cfg, name)
     if not state.current:
         raise OSError(f"connector runtime verification failed for {state.connector}: " + ", ".join(state.drift))
     return state

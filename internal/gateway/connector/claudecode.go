@@ -28,6 +28,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/claudecodepath"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
 )
@@ -307,10 +308,10 @@ func (c *ClaudeCodeConnector) RequiredEnv() []EnvRequirement {
 //
 // CanBlock=true: PreToolUse/PermissionRequest honour permissionDecision=
 // deny; UserPromptSubmit and other pre-action events honour decision=block;
-// tasks honour continue=false. PostToolUse is advisory because the tool side
-// effects have already occurred; PostToolBatch can still stop the agentic loop
-// before the next model call. ConfigChange is blockable except for the
-// policy_settings source.
+// task/team lifecycle hooks honour exit 2 with stderr feedback. PostToolUse is
+// advisory because the tool side effects have already occurred; PostToolBatch
+// can still stop the agentic loop before the next model call. ConfigChange is
+// blockable except for the policy_settings source.
 //
 // CanAskNative=true: PreToolUse renders permissionDecision=ask when a
 // hook returns confirm, which Claude Code surfaces as a native HITL
@@ -354,11 +355,9 @@ func (c *ClaudeCodeConnector) HookCapabilities(opts SetupOpts) HookCapability {
 // buildClaudeCodeOtelEnv renders this spec via spec.EnvBlock()
 // instead of computing the map by hand.
 //
-// ExtraEnv carries the connector-specific vars that the OTel
-// renderer does not emit: CLAUDE_CODE_ENABLE_TELEMETRY (the
-// vendor's master switch), DEFENSECLAW_FAIL_MODE (read by the hook
-// script for fail-closed handling), and OTEL_LOG_USER_PROMPTS when
-// redaction is disabled.
+// ExtraEnv carries connector-specific vars that the OTel renderer does not
+// emit. Content capture remains explicitly disabled: downstream redaction is
+// not informed consent to collect prompts or responses at the source.
 func (c *ClaudeCodeConnector) HookProfile(opts SetupOpts) HookProfile {
 	otlpToken := strings.TrimSpace(opts.OTLPPathToken)
 	if otlpToken == "" && opts.DataDir != "" {
@@ -384,11 +383,18 @@ func (c *ClaudeCodeConnector) HookProfile(opts SetupOpts) HookProfile {
 		"OTEL_METRICS_EXPORTER": "otlp",
 		"OTEL_LOGS_EXPORTER":    "otlp",
 		"OTEL_TRACES_EXPORTER":  "none",
+		"OTEL_LOG_USER_PROMPTS": "0",
+		// Claude inherits assistant-response capture from the prompt flag when
+		// this setting is absent. Pin it off independently so a later operator
+		// prompt opt-in cannot silently broaden response capture.
+		"OTEL_LOG_ASSISTANT_RESPONSES": "0",
+		// Pin every other documented content-bearing telemetry gate off too.
+		// Upstream defaults are not custody: an inherited shell value must not
+		// enable tool arguments/content or full API request/response bodies.
+		"OTEL_LOG_TOOL_DETAILS":   "0",
+		"OTEL_LOG_TOOL_CONTENT":   "0",
+		"OTEL_LOG_RAW_API_BODIES": "0",
 	}
-	// Capture schema-supported prompt facts at the source. The unified v8
-	// router owns destination-specific redaction; a connector-local privacy
-	// switch would irreversibly discard content before routing.
-	extra["OTEL_LOG_USER_PROMPTS"] = "1"
 	profile := HookProfile{
 		Name:                "claudecode",
 		Capabilities:        c.HookCapabilities(opts),
@@ -403,7 +409,7 @@ func (c *ClaudeCodeConnector) HookProfile(opts SetupOpts) HookProfile {
 			ServiceName:        "claudecode",
 			ResourceAttributes: map[string]string{"service.name": "claudecode", "defenseclaw.connector": "claudecode"},
 			ExtraEnv:           extra,
-			LogUserPrompts:     true,
+			LogUserPrompts:     false,
 		},
 		// Profile-driven callbacks are the canonical shape for
 		// claudecode hook decode / verdict mapping / response. The
@@ -424,20 +430,44 @@ func (c *ClaudeCodeConnector) SupportsComponentScanning() bool { return true }
 
 func (c *ClaudeCodeConnector) ComponentTargets(cwd string) map[string][]string {
 	userDir := claudeCodeConfigDir()
+	pluginParent := ClaudeCodePluginParentDir()
+	mcpState := claudeCodeMCPStatePath()
 	workspaceDir := filepath.Join(cwd, ".claude")
+	projectSkillDirs := claudecodepath.ProjectSkillDirs(cwd)
+	projectAgentDirs := claudecodepath.ProjectAgentDirs(cwd)
+	memory := claudecodepath.ResolveAutoMemory(userDir, cwd, nil)
 
 	targets := map[string][]string{
-		"skill":   {filepath.Join(userDir, "skills"), filepath.Join(workspaceDir, "skills")},
-		"plugin":  {filepath.Join(userDir, "plugins"), filepath.Join(workspaceDir, "plugins")},
-		"mcp":     {filepath.Join(userDir, "settings.json"), filepath.Join(cwd, ".mcp.json")},
-		"agent":   {filepath.Join(userDir, "agents"), filepath.Join(workspaceDir, "agents")},
+		"skill": {
+			filepath.Join(userDir, "skills"),
+			filepath.Join(userDir, "commands"),
+			filepath.Join(workspaceDir, "commands"),
+		},
+		"plugin": {
+			filepath.Join(pluginParent, "cache"),
+			filepath.Join(userDir, "skills"),
+		},
+		"mcp":     {mcpState, filepath.Join(cwd, ".mcp.json")},
+		"agent":   {filepath.Join(userDir, "agents")},
 		"command": {filepath.Join(userDir, "commands"), filepath.Join(workspaceDir, "commands")},
+		"memory":  {},
 		"config": {
 			filepath.Join(userDir, "settings.json"),
+			filepath.Join(userDir, "CLAUDE.md"),
+			filepath.Join(userDir, "rules"),
+			filepath.Join(workspaceDir, "settings.json"),
+			filepath.Join(workspaceDir, "settings.local.json"),
+			filepath.Join(workspaceDir, "CLAUDE.md"),
 			filepath.Join(workspaceDir, "rules"),
 			filepath.Join(cwd, "CLAUDE.md"),
-			filepath.Join(cwd, ".claude.json"),
+			filepath.Join(cwd, "CLAUDE.local.md"),
 		},
+	}
+	targets["skill"] = append(targets["skill"], projectSkillDirs...)
+	targets["plugin"] = append(targets["plugin"], projectSkillDirs...)
+	targets["agent"] = append(targets["agent"], projectAgentDirs...)
+	if memory.Path != "" {
+		targets["memory"] = append(targets["memory"], memory.Path)
 	}
 	return targets
 }
@@ -523,6 +553,26 @@ func claudeCodeConfigDir() string {
 	return filepath.Join(userHomeDir(), ".claude")
 }
 
+// ClaudeCodePluginParentDir returns Anthropic's documented plugin parent.
+// Despite its name, CLAUDE_CODE_PLUGIN_CACHE_DIR overrides the parent that
+// contains both marketplaces and the cache.
+func ClaudeCodePluginParentDir() string {
+	parent := strings.TrimSpace(os.Getenv("CLAUDE_CODE_PLUGIN_CACHE_DIR"))
+	if parent == "" {
+		return filepath.Join(claudeCodeConfigDir(), "plugins")
+	}
+	if parent == "~" {
+		parent = userHomeDir()
+	} else if strings.HasPrefix(parent, "~"+string(filepath.Separator)) ||
+		strings.HasPrefix(parent, "~/") {
+		parent = filepath.Join(userHomeDir(), strings.TrimLeft(parent[1:], `/\`))
+	}
+	if absolute, err := filepath.Abs(parent); err == nil {
+		return absolute
+	}
+	return filepath.Clean(parent)
+}
+
 func claudeCodeSettingsPath() string {
 	if ClaudeCodeSettingsPathOverride != "" {
 		return ClaudeCodeSettingsPathOverride
@@ -530,11 +580,173 @@ func claudeCodeSettingsPath() string {
 	return filepath.Join(claudeCodeConfigDir(), "settings.json")
 }
 
-// fileChangedMatcher targets config files that affect Claude Code's
-// behavior or the sandbox's trust boundary. Regular source file writes
-// are already covered by PostToolUse — narrowing FileChanged keeps the
-// hook bus from thundering on every edit.
-const fileChangedMatcher = "CLAUDE.md|.claude/settings.json|.claude/settings.local.json|.mcp.json|.env|.envrc|package.json|pyproject.toml|go.mod|Cargo.toml|requirements.txt"
+// claudeCodeMCPStatePath resolves Claude Code's user/local MCP state file.
+// The default lives beside ~/.claude rather than inside it. A configured
+// CLAUDE_CONFIG_DIR relocates all Claude state under the configured directory.
+func claudeCodeMCPStatePath() string {
+	if ClaudeCodeSettingsPathOverride != "" {
+		return filepath.Join(filepath.Dir(ClaudeCodeSettingsPathOverride), ".claude.json")
+	}
+	if configDir := strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR")); configDir != "" {
+		return filepath.Join(configDir, ".claude.json")
+	}
+	return filepath.Join(userHomeDir(), ".claude.json")
+}
+
+// ClaudeCodeConfigDir exposes the user configuration root to the gateway's
+// runtime component scanner so setup, watching, and hook-triggered inventory
+// share one CLAUDE_CONFIG_DIR-aware path model.
+func ClaudeCodeConfigDir() string {
+	return claudeCodeConfigDir()
+}
+
+// ClaudeCodeMCPStatePath exposes the user/local MCP state path to the
+// gateway's runtime scanner. It deliberately remains distinct from
+// settings.json, which Claude Code does not use for MCP registration.
+func ClaudeCodeMCPStatePath() string {
+	return claudeCodeMCPStatePath()
+}
+
+// ClaudeCodeProjectSkillDirs exposes the shared documented launch-ancestor and
+// lazy nested project skill roots to runtime scanning and hook watch refresh.
+func ClaudeCodeProjectSkillDirs(cwd string) []string {
+	return claudecodepath.ProjectSkillDirs(cwd)
+}
+
+// ClaudeCodeProjectAgentDirs exposes the shared documented closest-first
+// project agent roots to runtime scanning and dynamic watch refresh.
+func ClaudeCodeProjectAgentDirs(cwd string) []string {
+	return claudecodepath.ProjectAgentDirs(cwd)
+}
+
+// ClaudeCodeWatchPaths returns the absolute dynamic watch list installed by
+// SessionStart and refreshed by CwdChanged/FileChanged. Claude Code treats a
+// FileChanged matcher as both a pipe-separated literal watch list rooted at the
+// current working directory and a later filter against each changed basename.
+// The canonical FileChanged matcher below therefore matches every dynamic path;
+// this helper supplies the actual user/project files DefenseClaw needs.
+func ClaudeCodeWatchPaths(cwd string) []string {
+	root := claudeCodeAbsoluteWatchPath(cwd)
+	userDir := claudeCodeAbsoluteWatchPath(claudeCodeConfigDir())
+	userMCP := claudeCodeAbsoluteWatchPath(claudeCodeMCPStatePath())
+
+	candidates := make([]string, 0, 12)
+	rulesDirs := make([]string, 0, 2)
+	if userDir != "" {
+		candidates = append(candidates,
+			filepath.Join(userDir, "settings.json"),
+			filepath.Join(userDir, "CLAUDE.md"),
+		)
+		rulesDirs = append(rulesDirs, filepath.Join(userDir, "rules"))
+	}
+	if userMCP != "" {
+		candidates = append(candidates, userMCP)
+	}
+	if root != "" {
+		candidates = append(candidates,
+			filepath.Join(root, "CLAUDE.md"),
+			filepath.Join(root, "CLAUDE.local.md"),
+			filepath.Join(root, ".mcp.json"),
+			filepath.Join(root, ".env"),
+			filepath.Join(root, ".envrc"),
+			filepath.Join(root, "package.json"),
+			filepath.Join(root, "pyproject.toml"),
+			filepath.Join(root, "go.mod"),
+			filepath.Join(root, "Cargo.toml"),
+			filepath.Join(root, "requirements.txt"),
+			filepath.Join(root, ".claude", "settings.json"),
+			filepath.Join(root, ".claude", "settings.local.json"),
+			filepath.Join(root, ".claude", "CLAUDE.md"),
+		)
+		rulesDirs = append(rulesDirs, filepath.Join(root, ".claude", "rules"))
+	}
+	skillRoots := []string{filepath.Join(userDir, "skills")}
+	skillRoots = append(skillRoots, claudecodepath.ProjectSkillDirs(root)...)
+	for _, skillRoot := range skillRoots {
+		for _, skillDir := range claudecodepath.SkillDirs(skillRoot) {
+			skillPath := filepath.Join(skillDir, "SKILL.md")
+			if info, err := os.Lstat(skillPath); err == nil && info.Mode().IsRegular() {
+				candidates = append(candidates, skillPath)
+			}
+		}
+	}
+	for _, commandRoot := range []string{
+		filepath.Join(userDir, "commands"),
+		filepath.Join(root, ".claude", "commands"),
+	} {
+		entries, err := os.ReadDir(commandRoot)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if entry.IsDir() || !strings.EqualFold(filepath.Ext(entry.Name()), ".md") {
+				continue
+			}
+			commandPath := filepath.Join(commandRoot, entry.Name())
+			if info, err := os.Lstat(commandPath); err == nil && info.Mode().IsRegular() {
+				candidates = append(candidates, commandPath)
+			}
+		}
+	}
+	agentRoots := []string{filepath.Join(userDir, "agents")}
+	agentRoots = append(agentRoots, claudecodepath.ProjectAgentDirs(root)...)
+	for _, agentRoot := range agentRoots {
+		candidates = append(candidates, claudecodepath.AgentFiles(agentRoot)...)
+	}
+	memory := claudecodepath.ResolveAutoMemory(userDir, root, nil)
+	if memory.Path != "" {
+		candidates = append(candidates, filepath.Join(memory.Path, "MEMORY.md"))
+		candidates = append(candidates, claudecodepath.AutoMemoryFiles(memory)...)
+	}
+	for _, rulesDir := range rulesDirs {
+		_ = filepath.WalkDir(rulesDir, func(path string, entry os.DirEntry, err error) error {
+			if err != nil || entry.IsDir() {
+				return nil
+			}
+			if strings.EqualFold(filepath.Ext(entry.Name()), ".md") {
+				candidates = append(candidates, path)
+			}
+			return nil
+		})
+	}
+
+	out := make([]string, 0, len(candidates))
+	seen := make(map[string]struct{}, len(candidates))
+	for _, candidate := range candidates {
+		path := claudeCodeAbsoluteWatchPath(candidate)
+		if path == "" {
+			continue
+		}
+		key := path
+		if runtime.GOOS == "windows" {
+			key = strings.ToLower(key)
+		}
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, path)
+	}
+	return out
+}
+
+func claudeCodeAbsoluteWatchPath(path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return ""
+	}
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return ""
+	}
+	return filepath.Clean(absolute)
+}
+
+// fileChangedMatcher is intentionally a match-all regular expression for every
+// non-empty basename. Claude also registers the matcher segment as a literal
+// filename in the CWD, so ".+" is preferable to ".*" on native Windows: ".+"
+// is a valid literal Windows filename while "*" is not.
+const fileChangedMatcher = ".+"
 
 // hookGroups defines the full Claude Code event coverage. Mirrors the
 // _CLAUDE_CODE_EVENTS list established by PR #140 so every server case
@@ -545,8 +757,8 @@ const fileChangedMatcher = "CLAUDE.md|.claude/settings.json|.claude/settings.loc
 //   - Tool-use events: "*" so new Claude tools are inspected by default.
 //     Hard-coded tool regexes silently drop coverage as Claude ships new
 //     tools (Skill, ToolSearch, etc. appeared mid-release cycle).
-//   - SessionStart: the four lifecycle phases worth observing.
-//   - FileChanged: config-file allowlist — see fileChangedMatcher above.
+//   - SessionStart: every documented lifecycle phase, including fork.
+//   - FileChanged: canonical dynamic-path filter — see fileChangedMatcher above.
 //
 // Timeouts in seconds, as required by Claude Code. Slow events get a larger budget:
 //   - PostToolBatch summarizes many tool results → 90s.
@@ -568,8 +780,9 @@ func newClaudeCodeHookGroup(eventType, matcher string) claudeCodeHookGroup {
 		// MessageDisplay is observational: the server records its streamed
 		// response delta but cannot return an enforcement decision for this
 		// event. Running it synchronously adds interactive latency without a
-		// security benefit. Every other registered surface remains synchronous
-		// so tool, permission, lifecycle, and stop decisions can block.
+		// security benefit. Every other handler is registered with async=false
+		// so decision-capable tool, permission, lifecycle, and stop events wait;
+		// host-defined non-blocking events remain observational.
 		async: eventType == "MessageDisplay",
 	}
 }
@@ -578,7 +791,7 @@ func newClaudeCodeHookGroup(eventType, matcher string) claudeCodeHookGroup {
 // Claude's default git behavior and must create/print a worktree path, so the
 // generic security hook intentionally owns neither event.
 var hookGroups = []claudeCodeHookGroup{
-	newClaudeCodeHookGroup("SessionStart", "startup|resume|clear|compact"),
+	newClaudeCodeHookGroup("SessionStart", "startup|resume|clear|compact|fork"),
 	newClaudeCodeHookGroup("InstructionsLoaded", "*"),
 	newClaudeCodeHookGroup("UserPromptSubmit", ""),
 	newClaudeCodeHookGroup("UserPromptExpansion", ""),
@@ -1042,6 +1255,10 @@ var claudeCodeOtelEnvKeys = []string{
 	"OTEL_EXPORTER_OTLP_TRACES_PROTOCOL",
 	"OTEL_EXPORTER_OTLP_TRACES_ENDPOINT",
 	"OTEL_EXPORTER_OTLP_TRACES_HEADERS",
+	"OTEL_LOG_ASSISTANT_RESPONSES",
+	"OTEL_LOG_RAW_API_BODIES",
+	"OTEL_LOG_TOOL_CONTENT",
+	"OTEL_LOG_TOOL_DETAILS",
 	"OTEL_LOG_USER_PROMPTS",
 	"OTEL_RESOURCE_ATTRIBUTES",
 	"OTEL_SERVICE_NAME",
@@ -1054,11 +1271,11 @@ var claudeCodeOtelEnvKeys = []string{
 // telemetry as originating from a Claude Code process so the gateway
 // can fan out to per-connector dashboards.
 //
-// Privacy note: Claude Code redacts prompt content by default. When
-// DefenseClaw redaction is explicitly disabled, we set
-// OTEL_LOG_USER_PROMPTS=1 so Claude's native OTel follows the same raw
-// prompt contract as DefenseClaw's own hook telemetry. Teardown restores
-// unchanged managed values and preserves operator edits made afterward.
+// Privacy note: prompt, assistant-response, tool detail/content, and raw API
+// body capture are vendor opt-ins. DefenseClaw pins every documented content
+// gate off; routing/redaction choices do not silently authorize collection at
+// the source. Teardown restores unchanged managed values and preserves operator
+// edits made afterward.
 func buildClaudeCodeOtelEnv(opts SetupOpts) map[string]string {
 	// Spec-driven: render from the connector's declarative
 	// NativeOTLPSpec via spec.EnvBlock(). Returning an empty map on

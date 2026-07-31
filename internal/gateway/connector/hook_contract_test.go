@@ -61,12 +61,21 @@ func TestHookContractResolution(t *testing.T) {
 		{"codex_eight_event_minimum", "codex", "codex 0.129.0", HookCompatibilityKnown, "codex-hooks-v2", "0.129.0"},
 		{"codex_eight_event_upper_boundary", "codex", "codex 0.132.99", HookCompatibilityKnown, "codex-hooks-v2", "0.132.99"},
 		{"codex_ten_event_minimum", "codex", "codex 0.133.0", HookCompatibilityKnown, "codex-hooks-v3", "0.133.0"},
-		{"codex_current", "codex", "codex 0.144.3", HookCompatibilityKnown, "codex-hooks-v3", "0.144.3"},
-		{"codex_unversioned_uses_full_default", "codex", "", HookCompatibilityUnversioned, "codex-hooks-v3", ""},
+		{"codex_ten_event_upper_boundary", "codex", "codex 0.144.99", HookCompatibilityKnown, "codex-hooks-v3", "0.144.99"},
+		{"codex_session_end_minimum", "codex", "codex 0.145.0", HookCompatibilityKnown, "codex-hooks-v4", "0.145.0"},
+		{"codex_current", "codex", "codex 0.146.0", HookCompatibilityKnown, "codex-hooks-v4", "0.146.0"},
+		{"codex_unversioned_uses_full_default", "codex", "", HookCompatibilityUnversioned, "codex-hooks-v4", ""},
 		{"codex_unknown_before_stable", "codex", "codex 0.123.0", HookCompatibilityUnknown, "", "0.123.0"},
 		{"claude_before_message_display", "claude-code", "Claude Code v2.1.151", HookCompatibilityUnknown, "", "2.1.151"},
-		{"claude_alias_known", "claude-code", "Claude Code v2.1.152", HookCompatibilityKnown, "claudecode-hooks-v1", "2.1.152"},
+		{"claude_alias_known", "claude-code", "Claude Code v2.1.154", HookCompatibilityKnown, "claudecode-hooks-v1", "2.1.154"},
 		{"openhands_alias_known", "open-hands", "OpenHands 1.0.0", HookCompatibilityKnown, "openhands-hooks-v1", "1.0.0"},
+		{"cursor_exact_agent_preview_pin", "cursor", "2026.07.23-e383d2b", HookCompatibilityKnown, "cursor-hooks-v1", "2026.7.23"},
+		{"cursor_exact_agent_preview_command_prefix", "cursor", "agent v2026.07.23-e383d2b", HookCompatibilityKnown, "cursor-hooks-v1", "2026.7.23"},
+		{"cursor_other_agent_build_unknown", "cursor", "cursor-agent 2026.07.23-deadbee", HookCompatibilityUnknown, "", "2026.7.23"},
+		{"cursor_desktop_version_not_agent_contract", "cursor", "cursor 3.13.21", HookCompatibilityUnknown, "", "3.13.21"},
+		{"omnigent_before_proven_floor", "omnigent", "omnigent 0.6.99", HookCompatibilityUnknown, "", "0.6.99"},
+		{"omnigent_proven_floor", "omnigent", "omnigent 0.7.0", HookCompatibilityKnown, "omnigent-custom-policy-v1", "0.7.0"},
+		{"omnigent_unversioned_requires_override", "omnigent", "", HookCompatibilityUnversioned, "omnigent-custom-policy-v1", ""},
 		{"unversioned_uses_default", "cursor", "", HookCompatibilityUnversioned, "cursor-hooks-v1", ""},
 		{"openclaw_proxy_not_gated", "openclaw", "", HookCompatibilityNotGated, "", ""},
 		{"zeptoclaw_proxy_not_gated", "zeptoclaw", "zeptoclaw 0.5.0", HookCompatibilityNotGated, "", "0.5.0"},
@@ -120,6 +129,16 @@ func TestCodexHookContractVersionedEventMatrix(t *testing.T) {
 				"SubagentStop", "PreCompact", "PostCompact", "Stop",
 			},
 		},
+		{
+			version: "0.145.0",
+			wantID:  "codex-hooks-v4",
+			events: []string{
+				"SessionStart", "UserPromptSubmit", "PreToolUse",
+				"PermissionRequest", "PostToolUse", "SubagentStart",
+				"SubagentStop", "PreCompact", "PostCompact", "Stop",
+				"SessionEnd",
+			},
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.version, func(t *testing.T) {
@@ -134,6 +153,32 @@ func TestCodexHookContractVersionedEventMatrix(t *testing.T) {
 				t.Fatalf("events = %#v, want %#v", resolution.Contract.Events, test.events)
 			}
 		})
+	}
+}
+
+func TestCodexHookContractPinsLifecycleControlsToV3AndV4(t *testing.T) {
+	for _, version := range []string{"0.133.0", "0.144.0", "0.145.0"} {
+		contract := ResolveHookContract("codex", version).Contract
+		for _, event := range []string{"SessionStart", "SubagentStop", "PreCompact", "PostCompact"} {
+			if !stringInSlice(contract.Capabilities.BlockEvents, event) {
+				t.Errorf("%s %s does not own official %s control: %v",
+					version, contract.ContractID, event, contract.Capabilities.BlockEvents)
+			}
+		}
+		if stringInSlice(contract.Capabilities.BlockEvents, "SessionEnd") {
+			t.Errorf("%s %s incorrectly treats advisory SessionEnd as control", version, contract.ContractID)
+		}
+		if contract.Capabilities.CanAskNative || len(contract.Capabilities.AskEvents) != 0 {
+			t.Errorf("%s %s fabricated native ask: %+v", version, contract.ContractID, contract.Capabilities)
+		}
+	}
+	for _, version := range []string{"0.124.0", "0.129.0"} {
+		contract := ResolveHookContract("codex", version).Contract
+		for _, event := range []string{"SessionStart", "SubagentStop", "PreCompact", "PostCompact"} {
+			if stringInSlice(contract.Capabilities.BlockEvents, event) {
+				t.Errorf("%s %s backfilled uncertified %s control", version, contract.ContractID, event)
+			}
+		}
 	}
 }
 
@@ -191,6 +236,66 @@ func TestHookContractsCoverHookEndpoints(t *testing.T) {
 	}
 }
 
+func TestHermesHookContractV019ClassifiesAllValidEventsWithoutInventingBlockSurfaces(t *testing.T) {
+	if got := ResolveHookContract("hermes", "0.18.99").Status; got != HookCompatibilityUnknown {
+		t.Fatalf("Hermes 0.18 compatibility = %q, want unknown for the v0.19 event contract", got)
+	}
+	resolution := ResolveHookContract("hermes", "0.19.0")
+	if resolution.Status != HookCompatibilityKnown {
+		t.Fatalf("Hermes 0.19 compatibility = %q, want known", resolution.Status)
+	}
+	contract := resolution.Contract
+	if len(contract.Events) != 23 {
+		t.Fatalf("Hermes event count = %d, want 23: %v", len(contract.Events), contract.Events)
+	}
+	seen := make(map[string]struct{}, len(contract.Events))
+	for _, event := range contract.Events {
+		if _, exists := seen[event]; exists {
+			t.Fatalf("Hermes event %q appears more than once", event)
+		}
+		seen[event] = struct{}{}
+	}
+	for _, event := range []string{
+		"pre_tool_call", "pre_llm_call", "pre_verify",
+		"transform_terminal_output", "pre_gateway_dispatch",
+		"pre_approval_request", "api_request_error", "kanban_task_blocked",
+	} {
+		if _, ok := seen[event]; !ok {
+			t.Errorf("Hermes v0.19 contract missing classified event %q", event)
+		}
+	}
+	if got := contract.Capabilities.BlockEvents; !reflect.DeepEqual(got, []string{"pre_tool_call"}) {
+		t.Fatalf("Hermes block events = %v, want only pre_tool_call", got)
+	}
+	if contract.Capabilities.CanAskNative || contract.Capabilities.SupportsFailClosed {
+		t.Fatalf("Hermes contract invented ask/fail-closed support: %+v", contract.Capabilities)
+	}
+}
+
+func TestOmniGentV070ContractPreservesPostPhaseDenyWithoutPostPhaseAsk(t *testing.T) {
+	resolution := ResolveHookContract("omnigent", "omnigent 0.7.0")
+	if resolution.Status != HookCompatibilityKnown {
+		t.Fatalf("OmniGent v0.7.0 compatibility = %q, want known", resolution.Status)
+	}
+	contract := resolution.Contract
+	if contract.MinAgentVersion != "0.7.0" {
+		t.Fatalf("OmniGent minimum version = %q, want 0.7.0", contract.MinAgentVersion)
+	}
+	if got, want := contract.Events, []string{
+		"UserPromptSubmit", "PreToolUse", "PostToolUse",
+		"AfterAgentResponse", "BeforeModel", "AfterModel",
+	}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("OmniGent events = %v, want %v", got, want)
+	}
+	wantPre := []string{"UserPromptSubmit", "PreToolUse", "BeforeModel"}
+	if !reflect.DeepEqual(contract.Capabilities.AskEvents, wantPre) {
+		t.Fatalf("OmniGent ASK events = %v, want %v", contract.Capabilities.AskEvents, wantPre)
+	}
+	if !reflect.DeepEqual(contract.Capabilities.BlockEvents, contract.Events) {
+		t.Fatalf("OmniGent DENY events = %v, want all six %v", contract.Capabilities.BlockEvents, contract.Events)
+	}
+}
+
 // TestContentEnvelopeKeyDeclarations pins which connectors declare a
 // content envelope: hermes nests inspectable content under the
 // per-event "extra" object; every other contract is flat (and must
@@ -223,8 +328,9 @@ func TestHookContractsManifestMatchesRuntime(t *testing.T) {
 	type manifestContract struct {
 		ContractID   string `json:"contract_id"`
 		AgentVersion struct {
-			MinInclusive string `json:"min_inclusive"`
-			MaxExclusive string `json:"max_exclusive"`
+			Exact        []string `json:"exact"`
+			MinInclusive string   `json:"min_inclusive"`
+			MaxExclusive string   `json:"max_exclusive"`
 		} `json:"agent_version"`
 		DefaultForUnversioned   bool     `json:"default_for_unversioned"`
 		HookScriptVersion       string   `json:"hook_script_version"`
@@ -308,6 +414,9 @@ func TestHookContractsManifestMatchesRuntime(t *testing.T) {
 			}
 			if manifestContract.AgentVersion.MaxExclusive != runtime.MaxAgentVersion {
 				t.Fatalf("%s max version=%q want %q", runtime.ContractID, manifestContract.AgentVersion.MaxExclusive, runtime.MaxAgentVersion)
+			}
+			if !sameStrings(manifestContract.AgentVersion.Exact, runtime.ExactAgentVersions) {
+				t.Fatalf("%s exact versions=%v want %v", runtime.ContractID, manifestContract.AgentVersion.Exact, runtime.ExactAgentVersions)
 			}
 			if manifestContract.DefaultForUnversioned != runtime.DefaultForUnversioned {
 				t.Fatalf("%s default_for_unversioned=%v want %v", runtime.ContractID, manifestContract.DefaultForUnversioned, runtime.DefaultForUnversioned)
@@ -412,7 +521,7 @@ func stringInSlice(values []string, want string) bool {
 func TestApplyHookContractPinsProfileCapabilities(t *testing.T) {
 	profile := NewClaudeCodeConnector().HookProfile(SetupOpts{
 		APIAddr:      "127.0.0.1:18970",
-		AgentVersion: "Claude Code v2.1.152",
+		AgentVersion: "Claude Code v2.1.154",
 	})
 	if profile.ContractID != "claudecode-hooks-v1" {
 		t.Fatalf("ContractID=%q", profile.ContractID)

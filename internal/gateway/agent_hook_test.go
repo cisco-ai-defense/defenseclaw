@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -262,6 +263,7 @@ func TestHookOutputFor_AllConnectors_AllActions(t *testing.T) {
 
 		// cursor -- permission field; supports deny + ask + allow.
 		{connector: "cursor", event: "preToolUse", action: "block", rawAction: "block", expectedKey: "permission", expectedValue: "deny"},
+		{connector: "cursor", event: "subagentStart", action: "block", rawAction: "block", expectedKey: "permission", expectedValue: "deny"},
 		{connector: "cursor", event: "beforeShellExecution", action: "confirm", rawAction: "confirm", expectedKey: "permission", expectedValue: "ask"},
 
 		// windsurf -- minimal shape; only block surfaces a message.
@@ -312,6 +314,127 @@ func TestHookOutputFor_AllConnectors_AllActions(t *testing.T) {
 					tc.connector, tc.event, tc.action, tc.expectedKey, gotStr, tc.expectedValue)
 			}
 		})
+	}
+}
+
+func TestCursorLegacyHookOutputUsesEventSpecificSchemas(t *testing.T) {
+	tests := []struct {
+		name       string
+		event      string
+		action     string
+		additional string
+		want       map[string]interface{}
+	}{
+		{
+			name:   "subagent start deny has no ask or agent message",
+			event:  "subagentStart",
+			action: "block",
+			want: map[string]interface{}{
+				"permission":   "deny",
+				"user_message": "blocked",
+			},
+		},
+		{
+			name:       "subagent stop uses only followup",
+			event:      "subagentStop",
+			action:     "alert",
+			additional: "review child result",
+			want:       map[string]interface{}{"followup_message": "review child result"},
+		},
+		{
+			name:   "before submit deny omits permission and agent message",
+			event:  "beforeSubmitPrompt",
+			action: "block",
+			want: map[string]interface{}{
+				"continue":     false,
+				"user_message": "blocked",
+			},
+		},
+		{
+			name:   "after event has no invented fields",
+			event:  "postToolUseFailure",
+			action: "block",
+			want:   map[string]interface{}{},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := hookOutputFor(agentHookRequest{
+				ConnectorName: "cursor",
+				HookEventName: test.event,
+				ToolName:      "test-tool",
+			}, test.action, test.action, "blocked", test.additional, capsForConnector("cursor"))
+			if !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("hookOutputFor(%s) = %#v, want %#v", test.event, got, test.want)
+			}
+		})
+	}
+}
+
+func TestCopilotOfficialCamelCaseSubagentIdentity(t *testing.T) {
+	profile := connector.NewCopilotConnector().HookProfile(connector.SetupOpts{
+		APIAddr:      "127.0.0.1:18970",
+		AgentVersion: "GitHub Copilot CLI 1.0.76",
+	})
+	startPayload := map[string]interface{}{
+		"sessionId":        "session-1",
+		"timestamp":        float64(1),
+		"cwd":              `C:\workspace`,
+		"transcriptPath":   `C:\state\transcript.jsonl`,
+		"agentName":        "security-review",
+		"agentDisplayName": "Security review",
+	}
+	start := normalizeAgentHookRequestWithProfileEvent("copilot", startPayload, profile, "subagentStart")
+	if start.HookEventName != "subagentStart" || start.SessionID != "session-1" ||
+		start.AgentName != "security-review" || start.ChildAgentID != "" ||
+		start.AgentID == "" {
+		t.Fatalf("official subagentStart identity was not preserved: %+v", start)
+	}
+	if _, invented := start.Payload["hook_event_name"]; invented {
+		t.Fatalf("trusted event binding mutated official start payload: %#v", start.Payload)
+	}
+
+	stopPayload := map[string]interface{}{
+		"sessionId":      "session-1",
+		"timestamp":      float64(2),
+		"cwd":            `C:\workspace`,
+		"transcriptPath": `C:\state\transcript.jsonl`,
+		"agentId":        "agent-42",
+		"agentType":      "custom",
+		"agentName":      "security-review",
+		"response":       "done",
+		"stopReason":     "end_turn",
+	}
+	stop := normalizeAgentHookRequestWithProfileEvent("copilot", stopPayload, profile, "subagentStop")
+	if stop.HookEventName != "subagentStop" || stop.ChildAgentID != "agent-42" ||
+		stop.AgentID != "agent-42" || stop.AgentName != "security-review" ||
+		stop.AgentType != "custom" {
+		t.Fatalf("official subagentStop identity was not preserved: %+v", stop)
+	}
+	if _, invented := stop.Payload["hookEventName"]; invented {
+		t.Fatalf("trusted event binding mutated official stop payload: %#v", stop.Payload)
+	}
+}
+
+func TestCopilotResponseSemanticsRemainEventScoped(t *testing.T) {
+	caps := connector.NewCopilotConnector().HookCapabilities(connector.SetupOpts{})
+	if action, wouldBlock := mapHookAction("block", "action", "postToolUseFailure", caps); action != "allow" || !wouldBlock {
+		t.Fatalf("postToolUseFailure block mapping=(%q,%v), want advisory allow/would-block", action, wouldBlock)
+	}
+	advisory := copilotHookOutput("postToolUseFailure", "allow", "block", "policy", "recovery guidance")
+	if advisory["additionalContext"] != "recovery guidance" {
+		t.Fatalf("postToolUseFailure output=%#v, want recovery additionalContext", advisory)
+	}
+	permission := copilotHookOutput("permissionRequest", "block", "block", "denied", "")
+	if permission["behavior"] != "deny" {
+		t.Fatalf("permissionRequest output=%#v, want deny", permission)
+	}
+	if _, interruptsAgent := permission["interrupt"]; interruptsAgent {
+		t.Fatalf("ordinary permission denial stops the entire agent: %#v", permission)
+	}
+	transformed := copilotHookOutput("userPromptTransformed", "allow", "block", "policy", "warning")
+	if len(transformed) != 0 {
+		t.Fatalf("mutation-only userPromptTransformed output=%#v, want no-op {}", transformed)
 	}
 }
 

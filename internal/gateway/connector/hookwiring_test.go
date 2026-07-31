@@ -33,6 +33,7 @@ import (
 	"time"
 	"unicode/utf16"
 
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 	"github.com/pelletier/go-toml/v2"
 )
 
@@ -379,14 +380,24 @@ func TestCodexSetupRepairsLegacyNonWaitingPowerShellCommand(t *testing.T) {
 	}
 
 	const hookBinary = `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`
+	const event = "PreToolUse"
+	const contractID = "codex-hooks-v4"
 	setHookBinaryOverride(t, hookBinary)
-	current := windowsNativePowerShellHookCommandForBinary("codex", hookBinary)
+	current := windowsNativePowerShellHookCommandForCodexEvent(event, contractID, hookBinary)
 	legacyCommands := []struct {
 		name    string
 		command string
 	}{
 		{name: "non-waiting", command: legacyWindowsNativePowerShellHookCommandForBinary("codex", hookBinary)},
 		{name: "unqualified-start-process", command: legacyUnqualifiedWindowsNativePowerShellHookCommandForBinary("codex", hookBinary)},
+		{
+			name: "event-bound-non-waiting",
+			command: legacyWindowsNativePowerShellHookCommandForCodexEvent(
+				event,
+				contractID,
+				hookBinary,
+			),
+		},
 	}
 	for _, testCase := range legacyCommands {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -406,8 +417,19 @@ func TestCodexSetupRepairsLegacyNonWaitingPowerShellCommand(t *testing.T) {
 					},
 				},
 			}
-			generated := buildCodexHooksTable(filepath.Join(t.TempDir(), "managed_config.toml"), "")
-			replacement := generated["PreToolUse"].([]interface{})
+			opts := SetupOpts{
+				AgentVersion:   "codex-cli 0.145.0",
+				HookContractID: contractID,
+			}
+			generated, err := buildCodexHooksTable(
+				opts,
+				filepath.Join(t.TempDir(), "managed_config.toml"),
+				"",
+			)
+			if err != nil {
+				t.Fatalf("build Codex hooks: %v", err)
+			}
+			replacement := generated[event].([]interface{})
 			repaired, err := replaceOwnedCodexHookInPlace(existing, replacement, t.TempDir())
 			if err != nil {
 				t.Fatalf("repair legacy Codex hook: %v", err)
@@ -458,7 +480,10 @@ func TestWindowsHookContractLockIncludesNativeLauncherDigest(t *testing.T) {
 }
 
 // TestHookInvocationCommand pins the platform split: Unix runs the bundled .sh
-// path; Windows Cursor uses the PowerShell object-pipeline adapter while other
+// path; Windows Cursor uses the PowerShell object-pipeline adapter, Copilot
+// receives a synchronous program in its native powershell field, and other
+// connectors invoke the native Go `hook` subcommand directly.
+// path; Windows Cursor and Windsurf use PowerShell adapters while other
 // connectors invoke the native Go `hook` subcommand directly. PowerShell
 // shell-string connectors include its call operator.
 func TestHookInvocationCommand(t *testing.T) {
@@ -490,6 +515,16 @@ func TestHookInvocationCommand(t *testing.T) {
 		t.Errorf("isNativeHookCommand(%q) = true, want false for a .sh path", unix)
 	}
 
+	windsurf := hookInvocationCommandFor("windows", "windsurf", unix)
+	wantWindsurf := "& " + powershellQuoteLiteral(strings.TrimSuffix(unix, ".sh")+".ps1")
+	if windsurf != wantWindsurf {
+		t.Errorf("windsurf command = %q, want %q", windsurf, wantWindsurf)
+	}
+	if strings.Contains(windsurf, "bash") || strings.Contains(windsurf, "wsl") ||
+		strings.Contains(windsurf, nativeHookFlag) {
+		t.Errorf("windsurf command bypasses its documented PowerShell adapter: %q", windsurf)
+	}
+
 	// Codex passes this string to cmd.exe /C as one argument. The outer command
 	// uses an unquoted system PowerShell path and an encoded script; the decoded
 	// script synchronously starts the stable absolute GUI-subsystem launcher.
@@ -506,6 +541,37 @@ func TestHookInvocationCommand(t *testing.T) {
 		t.Errorf("isNativeHookCommand(%q) = false, want true", codex)
 	}
 
+	copilot := hookInvocationCommandFor("windows", "copilot", unix)
+	wantCopilot := windowsCopilotPowerShellHookCommandForBinary(windowsExe)
+	if copilot != wantCopilot {
+		t.Errorf("copilot command = %q, want %q", copilot, wantCopilot)
+	}
+	for _, marker := range []string{
+		"Microsoft.PowerShell.Management\\Start-Process",
+		"-NoNewWindow -Wait -PassThru",
+		"exit $hookProcess.ExitCode",
+		powershellQuoteLiteral(windowsExe),
+	} {
+		if !strings.Contains(copilot, marker) {
+			t.Errorf("copilot command missing synchronous marker %q: %q", marker, copilot)
+		}
+	}
+	if strings.HasPrefix(copilot, "& ") || strings.Contains(copilot, "powershell.exe") ||
+		strings.Contains(copilot, ".sh") || strings.Contains(copilot, "bash") {
+		t.Errorf("copilot command nests an invalid vendor boundary: %q", copilot)
+	}
+	if !isNativeHookCommand(copilot) {
+		t.Errorf("isNativeHookCommand(%q) = false, want true", copilot)
+	}
+	for _, legacy := range []string{
+		legacyWindowsCopilotPowerShellHookCommandForBinary(windowsExe),
+		legacyWindowsCopilotDoubleCallOperatorHookCommandForBinary(windowsExe),
+	} {
+		if !isNativeHookCommand(legacy) {
+			t.Errorf("legacy Copilot command is not owned for repair/teardown: %q", legacy)
+		}
+	}
+
 	// Claude Code accepts an exact command string and therefore uses the
 	// absolute, quoted, installer-managed launcher. It must never regress to a
 	// bare or PATH-resolved form that an untrusted current directory can shadow.
@@ -520,6 +586,22 @@ func TestHookInvocationCommand(t *testing.T) {
 	}
 	if !isNativeHookCommand(claude) {
 		t.Errorf("isNativeHookCommand(%q) = false, want true", claude)
+	}
+
+	// Hermes passes this exact string through shlex.split and then
+	// subprocess.run(shell=False). It therefore receives only a quoted absolute
+	// executable plus argv, never PowerShell syntax or a script wrapper.
+	hermes := hookInvocationCommandFor("windows", "hermes", unix)
+	wantHermes := `"C:/Program Files/DefenseClaw/defenseclaw-hook.exe" hook --connector hermes`
+	if hermes != wantHermes {
+		t.Errorf("hermes command = %q, want %q", hermes, wantHermes)
+	}
+	if strings.Contains(hermes, "& ") || strings.Contains(strings.ToLower(hermes), "powershell") ||
+		strings.Contains(strings.ToLower(hermes), "bash") || strings.Contains(hermes, ".ps1") {
+		t.Errorf("hermes command contains a shell or wrapper: %q", hermes)
+	}
+	if !isNativeHookCommand(hermes) {
+		t.Errorf("isNativeHookCommand(%q) = false, want true", hermes)
 	}
 
 	// Antigravity's direct-exec parser does not dequote command paths. Keep the
@@ -539,6 +621,110 @@ func TestHookInvocationCommand(t *testing.T) {
 	if !strings.Contains(decoded, windowsNativePowerShellStartForTest(windowsExe, "antigravity")) ||
 		!strings.Contains(decoded, "NoDefaultCurrentDirectoryInExePath") {
 		t.Errorf("antigravity encoded command lost managed launcher or hardening:\n%s", decoded)
+	}
+}
+
+func TestWindowsHermesDirectHookCommandQuotesAndRejectsUnsafePaths(t *testing.T) {
+	valid := `C:\Users\Kevin O'Brien\Defense Claw $Preview\defenseclaw-hook.exe`
+	setHookBinaryOverride(t, valid)
+	want := `"C:/Users/Kevin O'Brien/Defense Claw $Preview/defenseclaw-hook.exe" hook --connector hermes`
+	if got := windowsHermesDirectHookCommand(valid); got != want {
+		t.Fatalf("Hermes direct command = %q, want %q", got, want)
+	}
+	if !isNativeHookCommand(want) {
+		t.Fatalf("quoted Hermes direct command was not recognized as owned: %q", want)
+	}
+	for _, invalid := range []string{
+		`defenseclaw-hook.exe`,
+		`C:\Defense"Claw\defenseclaw-hook.exe`,
+		"C:\\DefenseClaw\\defenseclaw-hook.exe\nother.exe",
+	} {
+		if got := windowsHermesDirectHookCommand(invalid); got != "" {
+			t.Errorf("unsafe Hermes path %q produced command %q", invalid, got)
+		}
+	}
+}
+
+func TestHermesDirectNativeHookOwnershipIsExact(t *testing.T) {
+	const owned = `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`
+	setHookBinaryOverride(t, owned)
+
+	exact := windowsHermesDirectHookCommand(owned)
+	if !isNativeHookCommand(exact) {
+		t.Fatalf("exact Hermes direct command was not recognized as owned: %q", exact)
+	}
+
+	for name, command := range map[string]string{
+		"bare PATH executable":      `defenseclaw-hook.exe hook --connector hermes`,
+		"unquoted absolute path":    `C:/Program Files/DefenseClaw/defenseclaw-hook.exe hook --connector hermes`,
+		"single-quoted path":        `'C:/Program Files/DefenseClaw/defenseclaw-hook.exe' hook --connector hermes`,
+		"backslash serialization":   `"C:\Program Files\DefenseClaw\defenseclaw-hook.exe" hook --connector hermes`,
+		"PowerShell call operator":  `& "C:/Program Files/DefenseClaw/defenseclaw-hook.exe" hook --connector hermes`,
+		"foreign matching basename": `"C:/Other Product/defenseclaw-hook.exe" hook --connector hermes`,
+		"extra argument":            `"C:/Program Files/DefenseClaw/defenseclaw-hook.exe" hook --connector hermes --verbose`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if isNativeHookCommand(command) {
+				t.Errorf("non-exact Hermes command was recognized as owned: %q", command)
+			}
+		})
+	}
+}
+
+func TestHermesMaintenanceCommandPreservesStableLauncherAcrossQuarantine(t *testing.T) {
+	const temporary = `C:\Users\Kevin\AppData\Local\Temp\DefenseClaw-maintenance\defenseclaw-hook.exe`
+	const stable = `C:\Users\Kevin\AppData\Local\DefenseClaw\HookRuntime\defenseclaw-hook.exe`
+	setHookBinaryOverride(t, temporary)
+
+	conn := NewHermesConnector()
+	opts := SetupOpts{
+		DataDir:        t.TempDir(),
+		HookExecutable: stable,
+	}
+	command := conn.hookCommandForOS("windows", opts)
+	want := `"C:/Users/Kevin/AppData/Local/DefenseClaw/HookRuntime/defenseclaw-hook.exe" hook --connector hermes`
+	if command != want {
+		t.Fatalf("maintenance Hermes command = %q, want stable command %q", command, want)
+	}
+	if isNativeHookCommand(command) {
+		t.Fatal("temporary process identity unexpectedly claimed the separately bound stable command")
+	}
+
+	configPath := filepath.Join(testenv.PrivateTempDir(t), "config.yaml")
+	if err := patchHermesHooks(configPath, command, stable); err != nil {
+		t.Fatal(err)
+	}
+	config, err := readYAMLObject(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hooks, ok := config["hooks"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Hermes maintenance registration has no hooks map: %#v", config)
+	}
+	entries, ok := hooks["pre_tool_call"].([]interface{})
+	if !ok || len(entries) != 1 {
+		t.Fatalf("Hermes maintenance pre_tool_call entries = %#v", hooks["pre_tool_call"])
+	}
+	entry, ok := entries[0].(map[string]interface{})
+	if !ok {
+		t.Fatalf("Hermes maintenance pre_tool_call entry = %#v", entries[0])
+	}
+	if got, _ := entry["command"].(string); got != command {
+		t.Fatalf("Hermes maintenance registration command = %q, want exact %q", got, command)
+	} else if strings.Contains(got, "& ") || strings.Contains(strings.ToLower(got), "powershell") ||
+		strings.Contains(strings.ToLower(got), "bash") || strings.Contains(got, ".ps1") {
+		t.Fatalf("Hermes maintenance registration introduced a shell wrapper: %q", got)
+	}
+	if err := removeHermesHooks(configPath, command, nil); err != nil {
+		t.Fatal(err)
+	}
+	cleaned, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(cleaned, []byte(command)) {
+		t.Fatalf("Hermes teardown did not remove the exact stable command:\n%s", cleaned)
 	}
 }
 
@@ -568,8 +754,27 @@ func TestWindowsNativeHookCommandPreservesConnectorSpecificPayload(t *testing.T)
 	}
 }
 
+func TestAntigravityWindowsHookCommandBindsOfficialEvent(t *testing.T) {
+	const windowsExe = `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`
+	setHookBinaryOverride(t, windowsExe)
+	command := antigravityHookInvocationCommandForEvent("windows", "PostInvocation", "")
+	if strings.ContainsAny(command, `"'`) {
+		t.Fatalf("visible Antigravity command contains quote characters: %q", command)
+	}
+	decoded := decodePowerShellEncodedCommandForTest(t, command)
+	for _, expected := range []string{
+		powershellQuoteLiteral(windowsExe),
+		"'hook','--connector','antigravity','--event','PostInvocation'",
+		"-NoNewWindow -Wait -PassThru",
+	} {
+		if !strings.Contains(decoded, expected) {
+			t.Fatalf("encoded event command missing %q:\n%s", expected, decoded)
+		}
+	}
+}
+
 // TestWindowsNativePowerShellHookCommandPropagatesProcessResults executes the
-// exact emitted command across both supported agent launch boundaries. The
+// exact emitted command across the supported agent launch boundaries. The
 // probe uses the same GUI subsystem as release defenseclaw-hook.exe so this
 // catches PowerShell returning before the process exits.
 const windowsNativePowerShellTestTimeout = time.Minute
@@ -631,12 +836,17 @@ func main() {
 		{connector: "codex", exitCode: 1},
 		{connector: "codex", exitCode: 2},
 		{connector: "antigravity", exitCode: 2},
+		{connector: "copilot", exitCode: 0},
+		{connector: "copilot", exitCode: 2},
 	}
 	for _, testCase := range cases {
 		t.Run(fmt.Sprintf("%s-exit-%d", testCase.connector, testCase.exitCode), func(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), windowsNativePowerShellTestTimeout)
 			defer cancel()
 			command := windowsNativePowerShellHookCommand(testCase.connector)
+			if testCase.connector == "copilot" {
+				command = windowsCopilotPowerShellHookCommand()
+			}
 			cmd := windowsNativePowerShellTestProcess(ctx, testCase.connector, command)
 			cmd.Env = minimalWindowsHookTestEnvironment(
 				"PSModuleAnalysisCachePath="+filepath.Join(t.TempDir(), "module-analysis-cache"),
@@ -669,11 +879,12 @@ func main() {
 	}
 }
 
-// TestWindowsNativePowerShellHookCommandPropagatesRealFailClosedBlock runs the
-// actual native hook entrypoint against isolated state. A deliberately absent
-// token under strict availability produces the real action-blocking exit 2
-// without reading an installed profile or contacting a live sidecar.
-func TestWindowsNativePowerShellHookCommandPropagatesRealFailClosedBlock(t *testing.T) {
+// TestWindowsNativePowerShellHookCommandPreservesAntigravityFailureResponse
+// runs the actual native hook entrypoint against isolated state. Antigravity
+// does not use process exit status as an enforcement interface, so strict
+// availability must retain the connector's event-specific synchronous response
+// when its scoped token is deliberately absent.
+func TestWindowsNativePowerShellHookCommandPreservesAntigravityFailureResponse(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("native Windows hook integration is Windows-specific")
 	}
@@ -706,7 +917,7 @@ func TestWindowsNativePowerShellHookCommandPropagatesRealFailClosedBlock(t *test
 	}
 	setHookBinaryOverride(t, helper)
 
-	command := windowsNativePowerShellHookCommand("antigravity")
+	command := antigravityHookInvocationCommandForEvent("windows", "PreToolUse", "")
 	ctx, cancel := context.WithTimeout(context.Background(), windowsNativePowerShellTestTimeout)
 	defer cancel()
 	cmd := windowsNativePowerShellTestProcess(ctx, "antigravity", command)
@@ -725,13 +936,17 @@ func TestWindowsNativePowerShellHookCommandPropagatesRealFailClosedBlock(t *test
 		t.Fatalf("fail-closed generated command exceeded %s: %v\ncommand: %s\nstdout: %s\nstderr: %s",
 			windowsNativePowerShellTestTimeout, ctx.Err(), command, stdout.String(), stderr.String())
 	}
-	if got := windowsProcessExitCodeForTest(t, err); got != 2 {
-		t.Fatalf("fail-closed generated command exit = %d, want 2\ncommand: %s\nstdout: %s\nstderr: %s",
+	if got := windowsProcessExitCodeForTest(t, err); got != 0 {
+		t.Fatalf("Antigravity generated command exit = %d, want fail-open 0\ncommand: %s\nstdout: %s\nstderr: %s",
 			got, command, stdout.String(), stderr.String())
 	}
-	if diagnostic := strings.ToLower(stderr.String()); !strings.Contains(diagnostic, "blocking") ||
-		!strings.Contains(diagnostic, "missing gateway token") {
-		t.Fatalf("fail-closed diagnostic was not preserved on stderr: %q", stderr.String())
+	wantFailure := `{"decision":"deny","reason":"DefenseClaw policy service is unavailable."}`
+	if got := strings.TrimSpace(stdout.String()); got != wantFailure {
+		t.Fatalf("Antigravity failure response = %q, want %s", got, wantFailure)
+	}
+	if diagnostic := strings.ToLower(stderr.String()); !strings.Contains(diagnostic, "missing gateway token") ||
+		!strings.Contains(diagnostic, "event-specific failure response") {
+		t.Fatalf("Antigravity failure-response provenance was not preserved on stderr: %q", stderr.String())
 	}
 }
 
@@ -742,6 +957,17 @@ func windowsNativePowerShellTestProcess(ctx context.Context, connector, command 
 			comspec = "cmd.exe"
 		}
 		return exec.CommandContext(ctx, comspec, "/D", "/S", "/C", command)
+	}
+	if connector == "copilot" {
+		return exec.CommandContext(
+			ctx,
+			"pwsh.exe",
+			"-NoLogo",
+			"-NoProfile",
+			"-NonInteractive",
+			"-Command",
+			command,
+		)
 	}
 	argv := strings.Fields(command)
 	return exec.CommandContext(ctx, argv[0], argv[1:]...)
@@ -1060,13 +1286,20 @@ func TestBuildCodexHooksTableUsesSupportedTrustFlow(t *testing.T) {
 	const configPath = "/home/u/.codex/config.toml"
 	setHookBinaryOverride(t, `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`)
 
-	table := buildCodexHooksTable(configPath, cmd)
-	wantCommand := cmd
-	if runtime.GOOS == "windows" {
-		wantCommand = hookInvocationCommandFor("windows", "codex", cmd)
+	opts := SetupOpts{}
+	table, err := buildCodexHooksTable(opts, configPath, cmd)
+	if err != nil {
+		t.Fatalf("build Codex hooks: %v", err)
 	}
-
-	for _, group := range codexHookGroups {
+	groups, err := codexHookGroupsForSetup(opts)
+	if err != nil {
+		t.Fatalf("resolve Codex hook groups: %v", err)
+	}
+	contract, err := codexHookContractForSetup(opts)
+	if err != nil {
+		t.Fatalf("resolve Codex hook contract: %v", err)
+	}
+	for _, group := range groups {
 		raw, ok := table[group.eventType].([]interface{})
 		if !ok || len(raw) == 0 {
 			t.Fatalf("missing event %s", group.eventType)
@@ -1074,15 +1307,22 @@ func TestBuildCodexHooksTableUsesSupportedTrustFlow(t *testing.T) {
 		mg := raw[0].(map[string]interface{})
 		hooks := mg["hooks"].([]interface{})
 		h0 := hooks[0].(map[string]interface{})
+		wantCommand := codexHookCommandForPlatform(
+			runtime.GOOS,
+			group.eventType,
+			contract.ContractID,
+			cmd,
+		)
 		if got := h0["command"].(string); got != wantCommand {
 			t.Errorf("event %s command = %q, want %q", group.eventType, got, wantCommand)
 		}
 		if runtime.GOOS == "windows" {
 			generic := h0["command"].(string)
 			windowsCommand := h0["command_windows"].(string)
-			if windowsCommand != windowsCodexHookCommand() {
+			wantEventCommand := windowsCodexHookCommandForEvent(group.eventType, contract.ContractID)
+			if windowsCommand != wantEventCommand {
 				got := windowsCommand
-				t.Errorf("event %s command_windows = %q, want %q", group.eventType, got, windowsCodexHookCommand())
+				t.Errorf("event %s command_windows = %q, want %q", group.eventType, got, wantEventCommand)
 			}
 			if generic != windowsCommand {
 				t.Errorf(
@@ -1092,11 +1332,245 @@ func TestBuildCodexHooksTableUsesSupportedTrustFlow(t *testing.T) {
 					windowsCommand,
 				)
 			}
+			decoded := decodePowerShellEncodedCommandForTest(t, windowsCommand)
+			if !strings.Contains(decoded, "'--event','"+group.eventType+"'") ||
+				!strings.Contains(decoded, "'--hook-contract','"+contract.ContractID+"'") {
+				t.Errorf(
+					"event %s command did not bind event and contract %s: %s",
+					group.eventType,
+					contract.ContractID,
+					decoded,
+				)
+			}
 		}
 	}
 
 	if _, ok := table["state"]; ok {
 		t.Fatal("buildCodexHooksTable added state before final merge positions were known")
+	}
+}
+
+func TestLegacyEventBoundCodexOwnershipIsStrictAndFinite(t *testing.T) {
+	const hookBinary = `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`
+	setHookBinaryOverride(t, hookBinary)
+	legacy := legacyWindowsNativePowerShellHookCommandForCodexEvent(
+		"SessionStart",
+		"codex-hooks-v4",
+		hookBinary,
+	)
+	wantLegacyScript := "$ErrorActionPreference='Stop'; " +
+		"$env:NoDefaultCurrentDirectoryInExePath='1'; " +
+		"& 'C:\\Program Files\\DefenseClaw\\defenseclaw-hook.exe' " +
+		"'hook' '--connector' 'codex' '--event' 'SessionStart' " +
+		"'--hook-contract' 'codex-hooks-v4'; exit $LASTEXITCODE"
+	if got := decodePowerShellEncodedCommandForTest(t, legacy); got != wantLegacyScript {
+		t.Fatalf("legacy event-bound script = %q, want %q", got, wantLegacyScript)
+	}
+	if !isNativeHookCommand(legacy) {
+		t.Fatalf("exact legacy event-bound command was not recognized: %q", legacy)
+	}
+
+	for _, tampered := range []string{
+		legacyWindowsNativePowerShellHookCommandForCodexEvent("FutureEvent", "codex-hooks-v4", hookBinary),
+		legacyWindowsNativePowerShellHookCommandForCodexEvent("SessionStart", "codex-hooks-v999", hookBinary),
+		legacyWindowsNativePowerShellHookCommandForCodexEvent(
+			"SessionStart",
+			"codex-hooks-v4",
+			`C:\Temp\defenseclaw-hook.exe`,
+		),
+	} {
+		if isNativeHookCommand(tampered) {
+			t.Fatalf("ownership accepted tampered legacy event-bound command: %q", tampered)
+		}
+	}
+}
+
+func TestCodexEventBoundUnixCommandsCoverFiniteContracts(t *testing.T) {
+	const hookPath = "/home/u/.defenseclaw/hooks/codex-hook.sh"
+	const hooksDir = "/home/u/.defenseclaw/hooks"
+	for _, goos := range []string{"linux", "darwin"} {
+		for _, contract := range builtinHookContracts["codex"] {
+			for _, event := range contract.Events {
+				command := codexHookCommandForPlatform(
+					goos,
+					event,
+					contract.ContractID,
+					hookPath,
+				)
+				want := hookPath +
+					" --event " + event +
+					" --hook-contract " + contract.ContractID
+				if command != want {
+					t.Fatalf(
+						"%s %s/%s command=%q want=%q",
+						goos,
+						contract.ContractID,
+						event,
+						command,
+						want,
+					)
+				}
+				if !isOwnedCodexHookHandler(
+					map[string]interface{}{"command": command},
+					hooksDir,
+				) {
+					t.Fatalf(
+						"%s %s/%s event-bound command is not owned",
+						goos,
+						contract.ContractID,
+						event,
+					)
+				}
+			}
+		}
+	}
+}
+
+func TestCodexEventBoundWindowsCommandsHaveFiniteOwnership(t *testing.T) {
+	const hookBinary = `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`
+	setHookBinaryOverride(t, hookBinary)
+
+	for _, contract := range builtinHookContracts["codex"] {
+		for _, event := range contract.Events {
+			command := windowsNativePowerShellHookCommandForCodexEvent(event, contract.ContractID, hookBinary)
+			if !isNativeHookCommand(command) {
+				t.Errorf("contract %s event %s command is not owned", contract.ContractID, event)
+			}
+		}
+	}
+
+	future := windowsNativePowerShellHookCommandForCodexEvent("FutureEvent", "codex-hooks-v4", hookBinary)
+	if isNativeHookCommand(future) {
+		t.Fatal("arbitrary future event command was treated as owned")
+	}
+	invalidContract := windowsNativePowerShellHookCommandForCodexEvent("SessionEnd", "codex-hooks-v999", hookBinary)
+	if isNativeHookCommand(invalidContract) {
+		t.Fatal("arbitrary contract command was treated as owned")
+	}
+	impossiblePair := windowsNativePowerShellHookCommandForCodexEvent("SessionEnd", "codex-hooks-v3", hookBinary)
+	if isNativeHookCommand(impossiblePair) {
+		t.Fatal("event/contract pair outside the registered matrix was treated as owned")
+	}
+	foreign := windowsNativePowerShellHookCommandForCodexEvent(
+		"SessionEnd",
+		"codex-hooks-v4",
+		`C:\foreign\defenseclaw-hook.exe`,
+	)
+	if isNativeHookCommand(foreign) {
+		t.Fatal("foreign event-bound hook binary was treated as owned")
+	}
+}
+
+func TestBuildCodexHooksTableRespectsSessionEndVersionBoundary(t *testing.T) {
+	tests := []struct {
+		name           string
+		version        string
+		contractID     string
+		wantEventCount int
+		wantSessionEnd bool
+		wantMatcher    string
+	}{
+		{
+			name:           "0.128 retains certified legacy matcher",
+			version:        "codex-cli 0.128.0",
+			contractID:     "codex-hooks-v1",
+			wantEventCount: 6,
+			wantMatcher:    "startup|resume|clear",
+		},
+		{
+			name:           "0.132 retains certified legacy matcher",
+			version:        "codex-cli 0.132.0",
+			contractID:     "codex-hooks-v2",
+			wantEventCount: 8,
+			wantMatcher:    "startup|resume|clear",
+		},
+		{
+			name:           "0.144 keeps versioned ten-event matrix",
+			version:        "codex-cli 0.144.0",
+			contractID:     "codex-hooks-v3",
+			wantEventCount: 10,
+			wantMatcher:    "startup|resume|clear|compact",
+		},
+		{
+			name:           "0.145 adds SessionEnd",
+			version:        "codex-cli 0.145.0",
+			contractID:     "codex-hooks-v4",
+			wantEventCount: 11,
+			wantSessionEnd: true,
+			wantMatcher:    "startup|resume|clear|compact",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			opts := SetupOpts{
+				AgentVersion:   test.version,
+				HookContractID: test.contractID,
+			}
+			table, err := buildCodexHooksTable(
+				opts,
+				filepath.Join(t.TempDir(), "managed_config.toml"),
+				filepath.Join(t.TempDir(), "codex-hook.sh"),
+			)
+			if err != nil {
+				t.Fatalf("build Codex hook table: %v", err)
+			}
+			if len(table) != test.wantEventCount {
+				t.Fatalf("event count = %d, want %d: %#v", len(table), test.wantEventCount, table)
+			}
+			sessionStartGroups := table["SessionStart"].([]interface{})
+			sessionStartGroup := sessionStartGroups[0].(map[string]interface{})
+			if got := sessionStartGroup["matcher"]; got != test.wantMatcher {
+				t.Fatalf("SessionStart matcher = %#v, want %q", got, test.wantMatcher)
+			}
+			rawSessionEnd, hasSessionEnd := table["SessionEnd"]
+			if hasSessionEnd != test.wantSessionEnd {
+				t.Fatalf("SessionEnd present = %v, want %v", hasSessionEnd, test.wantSessionEnd)
+			}
+			if !hasSessionEnd {
+				return
+			}
+			groups := rawSessionEnd.([]interface{})
+			group := groups[0].(map[string]interface{})
+			if _, hasMatcher := group["matcher"]; hasMatcher {
+				t.Fatalf("SessionEnd unexpectedly has matcher: %#v", group)
+			}
+			handlers := group["hooks"].([]interface{})
+			handler := handlers[0].(map[string]interface{})
+			if got := handler["timeout"]; got != 3 {
+				t.Fatalf("SessionEnd timeout = %#v, want 3", got)
+			}
+			if _, async := handler["async"]; async {
+				t.Fatalf("SessionEnd handler is asynchronous: %#v", handler)
+			}
+		})
+	}
+}
+
+func TestMergeOwnedCodexHooksReconcilesSessionEndAcrossBoundary(t *testing.T) {
+	root := t.TempDir()
+	hooksDir := filepath.Join(root, "hooks")
+	hookPath := filepath.Join(hooksDir, "codex-hook.sh")
+	configPath := filepath.Join(root, "managed_config.toml")
+	setHookBinaryOverride(t, filepath.Join(root, windowsHookBinaryName))
+
+	hooks := map[string]interface{}{}
+	v4 := SetupOpts{AgentVersion: "codex-cli 0.145.0", HookContractID: "codex-hooks-v4"}
+	if err := mergeOwnedCodexHooks(hooks, configPath, hookPath, hooksDir, v4, false); err != nil {
+		t.Fatalf("merge v4 hooks: %v", err)
+	}
+	if _, ok := hooks["SessionEnd"]; !ok {
+		t.Fatal("v4 merge did not add SessionEnd")
+	}
+
+	v3 := SetupOpts{AgentVersion: "codex-cli 0.144.0", HookContractID: "codex-hooks-v3"}
+	if err := mergeOwnedCodexHooks(hooks, configPath, hookPath, hooksDir, v3, false); err != nil {
+		t.Fatalf("reconcile v3 hooks: %v", err)
+	}
+	if _, ok := hooks["SessionEnd"]; ok {
+		t.Fatal("v3 reconciliation retained the v4 SessionEnd handler")
+	}
+	if err := verifyManagedCodexHookMatrix(hooks, configPath, hooksDir, v3); err != nil {
+		t.Fatalf("verify reconciled v3 hooks: %v", err)
 	}
 }
 
@@ -1248,7 +1722,6 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 		{"claudecode", NewClaudeCodeConnector(), &ClaudeCodeSettingsPathOverride, ".json"},
 		{"cursor", NewCursorConnector(), &CursorHooksPathOverride, ".json"},
 		{"windsurf", NewWindsurfConnector(), &WindsurfHooksPathOverride, ".json"},
-		{"geminicli", NewGeminiCLIConnector(), &GeminiSettingsPathOverride, ".json"},
 		{"copilot", NewCopilotConnector(), &CopilotHooksPathOverride, ".json"},
 		{"antigravity", NewAntigravityConnector(), &AntigravityHooksPathOverride, ".json"},
 		{"hermes-preview", NewHermesConnector(), &HermesConfigPathOverride, ".yaml"},
@@ -1315,9 +1788,39 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 						t.Errorf("Cursor adapter missing hardening marker %q:\n%s", marker, adapter)
 					}
 				}
-			} else if connectorName == "antigravity" {
+			} else if connectorName == "windsurf" {
 				wantCommand := hookInvocationCommand(
-					"antigravity",
+					"windsurf",
+					filepath.Join(dataDir, "hooks", "windsurf-hook.sh"),
+				)
+				encodedCommand, err := json.Marshal(wantCommand)
+				if err != nil {
+					t.Fatalf("encode Windsurf Windows adapter command: %v", err)
+				}
+				if !strings.Contains(text, string(encodedCommand)) {
+					t.Errorf("config missing Windsurf Windows adapter command %q:\n%s", wantCommand, text)
+				}
+				adapter, err := os.ReadFile(filepath.Join(dataDir, "hooks", "windsurf-hook.ps1"))
+				if err != nil {
+					t.Fatalf("read Windsurf Windows adapter: %v", err)
+				}
+				adapterText := string(adapter)
+				for _, marker := range []string{
+					windowsHookBinaryName,
+					"hook --connector windsurf",
+					fmt.Sprintf("$timeoutMS = %d", windowsHookAdapterTimeoutMS),
+					"WaitForExit($remainingMS)",
+					"$process.Kill()",
+					"[Environment]::Exit([int]$exitCode)",
+				} {
+					if !strings.Contains(adapterText, marker) {
+						t.Errorf("Windsurf adapter missing hardening marker %q:\n%s", marker, adapter)
+					}
+				}
+			} else if connectorName == "antigravity" {
+				wantCommand := antigravityHookInvocationCommandForEvent(
+					"windows",
+					"PreToolUse",
 					filepath.Join(dataDir, "hooks", "antigravity-hook.sh"),
 				)
 				encodedCommand, err := json.Marshal(wantCommand)
@@ -1331,7 +1834,8 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 					t.Errorf("config still contains legacy bare Antigravity launcher:\n%s", text)
 				}
 				decoded := decodePowerShellEncodedCommandForTest(t, wantCommand)
-				if !strings.Contains(decoded, powershellQuoteLiteral(defenseclawHookBinary())) {
+				if !strings.Contains(decoded, powershellQuoteLiteral(defenseclawHookBinary())) ||
+					!strings.Contains(decoded, "'--event','PreToolUse'") {
 					t.Errorf("Antigravity encoded command missing managed launcher path:\n%s", decoded)
 				}
 			} else if connectorName == "claudecode" {
@@ -1351,9 +1855,22 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 				groups := hooks["PreToolUse"].([]interface{})
 				handlers := groups[0].(map[string]interface{})["hooks"].([]interface{})
 				command := handlers[0].(map[string]interface{})["command_windows"].(string)
+				wantCommand := windowsNativePowerShellHookCommandForCodexEvent(
+					"PreToolUse",
+					"codex-hooks-v4",
+					defenseclawHookBinary(),
+				)
+				if command != wantCommand {
+					t.Errorf("Codex PreToolUse command_windows = %q, want %q", command, wantCommand)
+				}
 				decoded := decodePowerShellEncodedCommandForTest(t, command)
-				if !strings.Contains(decoded, windowsNativePowerShellStartForTest(defenseclawHookBinary(), connectorName)) {
-					t.Errorf("config missing native command_windows connector command for %s:\n%s", connectorName, text)
+				if !strings.Contains(decoded, "'--event','PreToolUse'") ||
+					!strings.Contains(decoded, "'--hook-contract','codex-hooks-v4'") {
+					t.Errorf("config missing event-bound native command_windows for %s:\n%s", connectorName, text)
+				}
+			} else if connectorName == "copilot" {
+				if !strings.Contains(text, "Microsoft.PowerShell.Management\\\\Start-Process") {
+					t.Errorf("config missing synchronous Copilot PowerShell command:\n%s", text)
 				}
 			} else {
 				if !strings.Contains(text, windowsHookBinaryName) {
@@ -1376,15 +1893,18 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 					t.Fatalf("parse Copilot config: %v", err)
 				}
 				hooks, _ := cfg["hooks"].(map[string]interface{})
-				want := "& " + hookInvocationCommand("copilot", "")
 				for event, raw := range hooks {
 					entries, _ := raw.([]interface{})
 					if len(entries) == 0 {
 						t.Fatalf("Copilot %s hook has no entries", event)
 					}
 					entry, _ := entries[0].(map[string]interface{})
+					want := copilotHookInvocationCommandForEvent("windows", event, "")
 					if got, _ := entry["powershell"].(string); got != want {
 						t.Errorf("Copilot %s powershell command = %q, want %q", event, got, want)
+					}
+					if strings.Contains(entry["powershell"].(string), "& &") {
+						t.Errorf("Copilot %s retained duplicated PowerShell call operator", event)
 					}
 					if _, present := entry["bash"]; present {
 						t.Errorf("Copilot %s retained a bash command on Windows", event)

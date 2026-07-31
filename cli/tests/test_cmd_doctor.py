@@ -604,7 +604,10 @@ class DoctorGuardrailTests(unittest.TestCase):
         result = _DoctorResult()
         _check_hilt_support(cfg, "cursor", result)
         self.assertEqual(result.warned, 1)
-        self.assertIn("documented ask-capable", result.checks[0]["detail"])
+        self.assertIn(
+            "preToolUse accepts ask in the schema but does not enforce it",
+            result.checks[0]["detail"],
+        )
 
         result = _DoctorResult()
         _check_hilt_support(cfg, "geminicli", result)
@@ -616,15 +619,35 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertEqual(result.warned, 1)
         self.assertIn("no native human approval surface", result.checks[0]["detail"])
 
-        # Antigravity is the one hook-only connector with a native ask
-        # surface that overrides --dangerously-skip-permissions, so it
-        # should pass HILT (not warn like the rest of the hook-only crowd).
+        # Antigravity documents native ask only at PreToolUse. No override of
+        # permission-bypass flags is claimed without persisted client evidence.
         result = _DoctorResult()
         _check_hilt_support(cfg, "antigravity", result)
         self.assertEqual(result.passed, 1, result.checks)
         self.assertEqual(result.warned, 0, result.checks)
         self.assertIn("PreToolUse ask", result.checks[0]["detail"])
-        self.assertIn("dangerously-skip-permissions", result.checks[0]["detail"])
+        self.assertIn("no override", result.checks[0]["detail"])
+
+    def test_hilt_omnigent_preserves_preview_and_pre_action_ask_scope(self):
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(enabled=True, mode="action", connector="omnigent"),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        cfg.guardrail.hilt.enabled = True
+
+        result = _DoctorResult()
+        _check_hilt_support(cfg, "omnigent", result)
+
+        self.assertEqual(result.passed, 1, result.checks)
+        self.assertEqual(result.warned, 0, result.checks)
+        self.assertIn("native-degraded preview", result.checks[0]["detail"])
+        self.assertIn("request, tool_call, and llm_request", result.checks[0]["detail"])
 
 
 class DoctorHookReachabilityTests(unittest.TestCase):
@@ -681,26 +704,12 @@ class DoctorHookReachabilityTests(unittest.TestCase):
     #   1. Missing global file → fail.
     #   2. File exists but does not reference antigravity-hook.sh → fail.
     #   3. File exists and references the script → pass.
-    #   4. Pass + duplicate registration in the legacy
-    #      ~/.gemini/hooks.json or workspace .antigravitycli/hooks.json
-    #      → emit a warn alongside the pass, because agy merges every
-    #      discovered hooks file and would fire each registered hook
-    #      once per discovery (silent double-billing).
+    #   4. Pass + duplicate registration in the documented workspace
+    #      .agents/hooks.json → emit a warn alongside the pass.
     # ------------------------------------------------------------------
 
     def _antigravity_hooks_payload(self, hook_script_path: str) -> dict:
-        # Returns the Claude-Code-compatible nested schema agy
-        # v1.0.x evaluates at runtime, with all five Antigravity
-        # 2.0 lifecycle events (PreInvocation, PreToolUse,
-        # PostToolUse, PostInvocation, Stop) registered under
-        # separate DefenseClaw-owned outer keys. Matches what
-        # `defenseclaw setup antigravity` writes after the Hooks
-        # v2 contract bump. See patchAntigravityHooks in
-        # internal/gateway/connector/hook_only.go for the
-        # empirical evidence behind the nested shape and the
-        # rationale for registering all five events even when
-        # only PreToolUse is empirically verified to fire on agy
-        # v1.0.1.
+        # Returns Google's documented mixed matcher/direct lifecycle schema.
         events = [
             "PreInvocation",
             "PreToolUse",
@@ -710,19 +719,13 @@ class DoctorHookReachabilityTests(unittest.TestCase):
         ]
         cfg: dict = {}
         for event in events:
-            cfg[f"defenseclaw-antigravity-{event.lower()}"] = {
-                event: [
-                    {
-                        "matcher": "*",
-                        "hooks": [
-                            {
-                                "type": "command",
-                                "command": hook_script_path,
-                            }
-                        ],
-                    }
-                ]
-            }
+            handler = {"type": "command", "command": hook_script_path, "timeout": 30}
+            entries = (
+                [{"matcher": "*", "hooks": [handler]}]
+                if event in {"PreToolUse", "PostToolUse"}
+                else [handler]
+            )
+            cfg[f"defenseclaw-antigravity-{event.lower()}"] = {event: entries}
         return cfg
 
     def test_antigravity_hooks_missing_global_file_fails(self):
@@ -736,7 +739,7 @@ class DoctorHookReachabilityTests(unittest.TestCase):
             cfg = self._cfg(tmp, "antigravity")
             with patch.dict(os.environ, isolated_home_env(home), clear=False):
                 result = _DoctorResult()
-                _check_antigravity_hooks(cfg, result)
+                _check_antigravity_hooks(cfg, result, platform_name="posix")
             self.assertEqual(result.passed, 0, result.checks)
             self.assertEqual(result.failed, 1)
             detail = result.checks[0]["detail"]
@@ -769,16 +772,14 @@ class DoctorHookReachabilityTests(unittest.TestCase):
             cfg = self._cfg(tmp, "antigravity")
             with patch.dict(os.environ, isolated_home_env(home), clear=False):
                 result = _DoctorResult()
-                _check_antigravity_hooks(cfg, result)
+                _check_antigravity_hooks(cfg, result, platform_name="posix")
             self.assertEqual(result.passed, 0, result.checks)
             self.assertEqual(result.failed, 1)
             self.assertIn("does not reference", result.checks[0]["detail"])
 
     def test_antigravity_hooks_global_only_passes(self):
-        # Canonical happy path: the new ~/.gemini/config/hooks.json
-        # exists with the nested schema and the legacy
-        # antigravity-cli/ path is absent. Doctor should report
-        # exactly one PASS, zero WARNs, zero FAILs.
+        # The documented global hooks file exists with the mixed schema.
+        # Doctor should report exactly one PASS, zero WARNs, zero FAILs.
         with tempfile.TemporaryDirectory() as tmp:
             home = os.path.join(tmp, "home")
             hook_path = os.path.join(home, ".gemini", "config", "hooks.json")
@@ -789,19 +790,15 @@ class DoctorHookReachabilityTests(unittest.TestCase):
             cfg = self._cfg(tmp, "antigravity")
             with patch.dict(os.environ, isolated_home_env(home), clear=False):
                 result = _DoctorResult()
-                _check_antigravity_hooks(cfg, result)
+                _check_antigravity_hooks(cfg, result, platform_name="posix")
             self.assertEqual(result.failed, 0, result.checks)
             self.assertEqual(result.passed, 1)
             self.assertEqual(result.warned, 0, result.checks)
             self.assertIn("reachable", result.checks[0]["detail"])
 
-    def test_antigravity_hooks_warn_on_legacy_path_residue(self):
-        # Pre-v0.5.0 install left a stale defenseclaw-managed
-        # entry at ~/.gemini/antigravity-cli/hooks.json. agy
-        # ignores that path at runtime, so it doesn't break the
-        # integration, but doctor must surface a WARN explaining
-        # the situation. The canonical path still exists and is
-        # valid, so PASS=1 and WARN=1.
+    def test_antigravity_hooks_ignore_undocumented_legacy_path_residue(self):
+        # Undocumented residue is ignored; only the documented global hook
+        # file is authoritative for this check.
         with tempfile.TemporaryDirectory() as tmp:
             home = os.path.join(tmp, "home")
             canonical = os.path.join(home, ".gemini", "config", "hooks.json")
@@ -816,47 +813,76 @@ class DoctorHookReachabilityTests(unittest.TestCase):
             cfg = self._cfg(tmp, "antigravity")
             with patch.dict(os.environ, isolated_home_env(home), clear=False):
                 result = _DoctorResult()
-                _check_antigravity_hooks(cfg, result)
+                _check_antigravity_hooks(cfg, result, platform_name="posix")
             self.assertEqual(result.failed, 0, result.checks)
             self.assertEqual(result.passed, 1)
-            self.assertEqual(result.warned, 1, result.checks)
-            warn_check = next(c for c in result.checks if c["status"] == "warn")
-            self.assertIn("pre-v0.5.0", warn_check["detail"])
-            self.assertIn(legacy, warn_check["detail"])
+            self.assertEqual(result.warned, 0, result.checks)
 
     def test_antigravity_hooks_warn_on_duplicate_registration(self):
-        # ~/.gemini/hooks.json (the legacy global hooks file agy
-        # also reads) carries a duplicate DefenseClaw entry —
-        # agy will fire DefenseClaw twice per tool call. Doctor
-        # must surface a WARN distinct from the legacy-residue
-        # warn above.
+        # The documented workspace .agents/hooks.json carries a duplicate
+        # DefenseClaw entry, so Doctor warns about double evaluation.
         with tempfile.TemporaryDirectory() as tmp:
             home = os.path.join(tmp, "home")
             canonical = os.path.join(home, ".gemini", "config", "hooks.json")
-            legacy_global = os.path.join(home, ".gemini", "hooks.json")
+            workspace = os.path.join(tmp, "workspace")
+            legacy_global = os.path.join(workspace, ".agents", "hooks.json")
             os.makedirs(os.path.dirname(canonical), exist_ok=True)
+            os.makedirs(os.path.dirname(legacy_global), exist_ok=True)
             script_path = os.path.join(tmp, ".defenseclaw", "hooks", "antigravity-hook.sh")
             payload = self._antigravity_hooks_payload(script_path)
             for path in (canonical, legacy_global):
                 with open(path, "w", encoding="utf-8") as fh:
                     json.dump(payload, fh)
             cfg = self._cfg(tmp, "antigravity")
+            cfg.claw.workspace_dir = workspace
             with patch.dict(os.environ, isolated_home_env(home), clear=False):
                 result = _DoctorResult()
-                _check_antigravity_hooks(cfg, result)
+                _check_antigravity_hooks(cfg, result, platform_name="posix")
             self.assertEqual(result.failed, 0, result.checks)
             self.assertEqual(result.passed, 1)
             self.assertEqual(result.warned, 1, result.checks)
             warn_check = next(c for c in result.checks if c["status"] == "warn")
-            self.assertIn("duplicate firings", warn_check["detail"])
+            self.assertIn("fire twice", warn_check["detail"])
             self.assertIn(legacy_global, warn_check["detail"])
+
+    def test_antigravity_windows_hooks_warn_on_workspace_duplicate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = os.path.join(tmp, "workspace")
+            workspace_hooks = os.path.join(workspace, ".agents", "hooks.json")
+            os.makedirs(os.path.dirname(workspace_hooks), exist_ok=True)
+            script_path = os.path.join(tmp, ".defenseclaw", "hooks", "defenseclaw-hook.exe")
+            with open(workspace_hooks, "w", encoding="utf-8") as fh:
+                json.dump(self._antigravity_hooks_payload(script_path), fh)
+            cfg = self._cfg(tmp, "antigravity")
+            cfg.claw.workspace_dir = workspace
+            result = _DoctorResult()
+
+            def healthy_native(_cfg, _connector, _label, native_result, **_kwargs):
+                native_result.passed += 1
+                native_result.checks.append(
+                    {"status": "pass", "label": "Antigravity hooks", "detail": "healthy native matrix"}
+                )
+
+            with patch(
+                "defenseclaw.commands.cmd_doctor._check_windows_native_hooks",
+                side_effect=healthy_native,
+            ) as native_check:
+                _check_antigravity_hooks(cfg, result, platform_name="nt")
+
+            native_check.assert_called_once()
+            self.assertEqual(result.failed, 0, result.checks)
+            self.assertEqual(result.passed, 1, result.checks)
+            self.assertEqual(result.warned, 1, result.checks)
+            warning = next(check for check in result.checks if check["status"] == "warn")
+            self.assertIn(workspace_hooks, warning["detail"])
+            self.assertIn("fire twice", warning["detail"])
 
     def test_copilot_hooks_fail_when_workspace_is_data_dir(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = self._cfg(tmp, "copilot")
             cfg.claw.workspace_dir = cfg.data_dir
             result = _DoctorResult()
-            _check_copilot_hooks(cfg, result)
+            _check_copilot_hooks(cfg, result, platform_name="posix")
             self.assertEqual(result.failed, 1, result.checks)
             self.assertIn("inside DefenseClaw data dir", result.checks[0]["detail"])
 
@@ -883,7 +909,7 @@ class DoctorHookReachabilityTests(unittest.TestCase):
             cfg = self._cfg(tmp, "copilot")
             cfg.claw.workspace_dir = workspace
             result = _DoctorResult()
-            _check_copilot_hooks(cfg, result)
+            _check_copilot_hooks(cfg, result, platform_name="posix")
             self.assertEqual(result.failed, 0, result.checks)
             self.assertEqual(result.passed, 1)
 
@@ -2182,7 +2208,23 @@ class GuardrailProxyMultiConnectorTests(unittest.TestCase):
 
         self.assertTrue(detail.startswith("enforced for"), detail)
         self.assertIn("codex (mode=action via PreToolUse deny)", detail)
-        self.assertIn("omnigent (mode=action via ALLOW/ASK/DENY)", detail)
+        self.assertIn(
+            "omnigent (native-degraded preview; mode=action via ALLOW/ASK/DENY)",
+            detail,
+        )
+        self.assertIn("proxy port intentionally closed", detail)
+
+    def test_single_omnigent_status_preserves_native_degraded_preview(self):
+        from defenseclaw.commands.cmd_doctor import (
+            _guardrail_proxy_intentionally_closed,
+        )
+
+        detail = _guardrail_proxy_intentionally_closed(
+            self._cfg(["omnigent"], mode="action")
+        )
+
+        self.assertIn("native-degraded preview", detail)
+        self.assertIn("mode=action via ALLOW/ASK/DENY", detail)
         self.assertIn("proxy port intentionally closed", detail)
 
     def test_proxy_peer_forces_real_probe(self):

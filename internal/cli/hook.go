@@ -48,6 +48,7 @@ func newHookCmd() *cobra.Command {
 	var (
 		connector         string
 		event             string
+		hookContractID    string
 		apiAddr           string
 		failMode          string
 		inputFile         string
@@ -70,6 +71,7 @@ func newHookCmd() *cobra.Command {
 				return nil
 			}
 			opts := buildHookOptionsForRuntime(connector, event, apiAddr, failMode, enterpriseManaged)
+			opts.HookContractID = hookContractID
 			var input *os.File
 			if inputFile != "" {
 				if runtime.GOOS != "windows" || connector != "cursor" {
@@ -82,8 +84,9 @@ func newHookCmd() *cobra.Command {
 				}
 				opts.Stdin = input
 			}
-			// hookexec returns the exact agent exit code (0 allow / 2 block).
-			// os.Exit is required because cobra collapses RunE outcomes to 0/1.
+			// hookexec returns the connector-native process status after writing
+			// any structured decision. os.Exit is required because cobra
+			// collapses RunE outcomes to 0/1.
 			code := hookexec.Run(cmd.Context(), opts)
 			if input != nil {
 				// Preserve hookexec's exact allow/block exit code after it has
@@ -98,11 +101,13 @@ func newHookCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&connector, "connector", "", "connector name (e.g. claudecode, codex, cursor)")
 	cmd.Flags().StringVar(&event, "event", "", "agent hook event name (selects the request deadline; inferred when omitted)")
+	cmd.Flags().StringVar(&hookContractID, "hook-contract", "", "installer-bound connector hook contract")
 	cmd.Flags().StringVar(&apiAddr, "api-addr", "", "gateway host:port (defaults to the hook sidecar / local gateway)")
 	cmd.Flags().StringVar(&failMode, "fail-mode", "", "response-failure policy: open or closed (defaults to the hook sidecar / open)")
 	cmd.Flags().StringVar(&inputFile, "input-file", "", "Cursor Windows adapter payload file")
 	cmd.Flags().BoolVar(&enterpriseManaged, "enterprise-managed", false, "resolve the current SID's administrator-managed hook runtime")
 	_ = cmd.Flags().MarkHidden("input-file")
+	_ = cmd.Flags().MarkHidden("hook-contract")
 	_ = cmd.Flags().MarkHidden("enterprise-managed")
 	_ = cmd.MarkFlagRequired("connector")
 

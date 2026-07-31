@@ -589,6 +589,13 @@ class RotateTokenCommandFlowTests(unittest.TestCase):
             "USERPROFILE": "D:\\foreign-user-profile",
             "CODEX_HOME": "D:\\authoritative-codex-home",
             "CLAUDE_CONFIG_DIR": "D:\\authoritative-claude-home",
+            "COPILOT_HOME": "D:\\authoritative-copilot-home",
+            "DEFENSECLAW_CURSOR_CONFIG_HOME": "D:\\authoritative-cursor-home",
+            "WINDSURF_USER_HOME": "D:\\authoritative-windsurf-profile",
+            "WINDSURF_HOOK_CONFIG_PATH": "D:\\authoritative-windsurf-hooks.json",
+            "OPENCODE_CONFIG_DIR": "D:\\authoritative-opencode-home",
+            "OMNIGENT_CONFIG_HOME": "D:\\authoritative-omnigent-home",
+            "HERMES_HOME": "D:\\authoritative-hermes-home",
             "DEFENSECLAW_INSTALL_ROOT": "D:\\ambient-install-root",
             "UNRELATED_SENTINEL": "sentinel-value",
             "UNRELATED_SECRET": "private-fixture-value",
@@ -618,6 +625,19 @@ class RotateTokenCommandFlowTests(unittest.TestCase):
         self.assertEqual(child_env["USERPROFILE"], ambient["USERPROFILE"])
         self.assertEqual(child_env["CODEX_HOME"], ambient["CODEX_HOME"])
         self.assertEqual(child_env["CLAUDE_CONFIG_DIR"], ambient["CLAUDE_CONFIG_DIR"])
+        self.assertEqual(child_env["COPILOT_HOME"], ambient["COPILOT_HOME"])
+        self.assertEqual(
+            child_env["DEFENSECLAW_CURSOR_CONFIG_HOME"],
+            ambient["DEFENSECLAW_CURSOR_CONFIG_HOME"],
+        )
+        self.assertEqual(child_env["WINDSURF_USER_HOME"], ambient["WINDSURF_USER_HOME"])
+        self.assertEqual(
+            child_env["WINDSURF_HOOK_CONFIG_PATH"],
+            ambient["WINDSURF_HOOK_CONFIG_PATH"],
+        )
+        self.assertEqual(child_env["OPENCODE_CONFIG_DIR"], ambient["OPENCODE_CONFIG_DIR"])
+        self.assertEqual(child_env["OMNIGENT_CONFIG_HOME"], ambient["OMNIGENT_CONFIG_HOME"])
+        self.assertEqual(child_env["HERMES_HOME"], ambient["HERMES_HOME"])
         self.assertEqual(child_env[cmd_setup._DEFENSECLAW_HOME_ENV], os.path.abspath(data_dir))
         self.assertEqual(child_env[cmd_setup._DEFENSECLAW_DATA_DIR_ENV], os.path.abspath(data_dir))
         self.assertEqual(child_env[CONFIG_PATH_ENV], os.path.abspath(config_file))
@@ -634,12 +654,75 @@ class RotateTokenCommandFlowTests(unittest.TestCase):
                 "USERPROFILE",
                 "CODEX_HOME",
                 "CLAUDE_CONFIG_DIR",
+                "COPILOT_HOME",
+                "DEFENSECLAW_CURSOR_CONFIG_HOME",
+                "WINDSURF_USER_HOME",
+                "WINDSURF_HOOK_CONFIG_PATH",
+                "OPENCODE_CONFIG_DIR",
+                "OMNIGENT_CONFIG_HOME",
+                "HERMES_HOME",
                 CONFIG_PATH_ENV,
                 cmd_setup._DEFENSECLAW_HOME_ENV,
                 cmd_setup._DEFENSECLAW_DATA_DIR_ENV,
                 cmd_setup._GATEWAY_TOKEN_ENV,
             },
         )
+
+    def test_lifecycle_child_environment_does_not_invent_hermes_home(self) -> None:
+        completed = subprocess.CompletedProcess([], 0)
+        with (
+            mock.patch.dict(os.environ, {"PATH": "D:\\fixture-bin"}, clear=True),
+            mock.patch.object(cmd_setup, "_gateway_lifecycle_executable", return_value="gateway-fixture"),
+            mock.patch.object(cmd_setup.subprocess, "run", return_value=completed) as run,
+        ):
+            cmd_setup._run_rotate_token_lifecycle(
+                "D:\\fixture-data",
+                "stop",
+                token="explicit-a-value",
+                config_file="D:\\fixture-data\\config.yaml",
+            )
+
+        self.assertNotIn("HERMES_HOME", run.call_args.kwargs["env"])
+
+    def test_lifecycle_child_environment_does_not_invent_opencode_config_dir(self) -> None:
+        completed = subprocess.CompletedProcess([], 0)
+        with (
+            mock.patch.dict(os.environ, {"PATH": "D:\\fixture-bin"}, clear=True),
+            mock.patch.object(cmd_setup, "_gateway_lifecycle_executable", return_value="gateway-fixture"),
+            mock.patch.object(cmd_setup.subprocess, "run", return_value=completed) as run,
+        ):
+            cmd_setup._run_rotate_token_lifecycle(
+                "D:\\fixture-data",
+                "stop",
+                token="explicit-a-value",
+                config_file="D:\\fixture-data\\config.yaml",
+            )
+
+        self.assertNotIn("OPENCODE_CONFIG_DIR", run.call_args.kwargs["env"])
+
+    def test_lifecycle_child_environment_does_not_invent_other_connector_homes(self) -> None:
+        completed = subprocess.CompletedProcess([], 0)
+        with (
+            mock.patch.dict(os.environ, {"PATH": "D:\\fixture-bin"}, clear=True),
+            mock.patch.object(cmd_setup, "_gateway_lifecycle_executable", return_value="gateway-fixture"),
+            mock.patch.object(cmd_setup.subprocess, "run", return_value=completed) as run,
+        ):
+            cmd_setup._run_rotate_token_lifecycle(
+                "D:\\fixture-data",
+                "stop",
+                token="explicit-a-value",
+                config_file="D:\\fixture-data\\config.yaml",
+            )
+
+        child_env = run.call_args.kwargs["env"]
+        for name in (
+            "COPILOT_HOME",
+            "DEFENSECLAW_CURSOR_CONFIG_HOME",
+            "WINDSURF_USER_HOME",
+            "WINDSURF_HOOK_CONFIG_PATH",
+            "OMNIGENT_CONFIG_HOME",
+        ):
+            self.assertNotIn(name, child_env)
 
     def test_start_b_failure_restores_exact_snapshot_and_ready_a(self) -> None:
         from tempfile import TemporaryDirectory

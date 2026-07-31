@@ -14,6 +14,19 @@ import (
 	"unicode/utf8"
 )
 
+func TestAntigravityDefaultCleanupHomeIsNarrowGeminiConfigDirectory(t *testing.T) {
+	profile := t.TempDir()
+	dataRoot := filepath.Join(profile, ".defenseclaw")
+	got := connectorDefaultHomeBesideDataRoot(dataRoot, "antigravity")
+	want := filepath.Join(profile, ".gemini", "config")
+	if !samePath(got, want) {
+		t.Fatalf("Antigravity cleanup home = %q, want %q", got, want)
+	}
+	if samePath(got, filepath.Join(profile, ".gemini")) {
+		t.Fatal("Antigravity cleanup claimed the shared Gemini root")
+	}
+}
+
 func TestConnectorReconciliationRecordsAndClearsPerConfigHome(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -398,6 +411,21 @@ func TestConnectorCleanupHomesDoesNotAddDefaultFallbackWithManagedBinding(t *tes
 	}
 }
 
+func TestConnectorCleanupHomesNeverInfersWindsurfProfileFromDataRoot(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	boundProfile := filepath.Join(root, "bound-profile")
+	ambientProfile := filepath.Join(root, "ambient-profile")
+	homes := connectorCleanupHomes(setupTransaction{
+		DataRoot:                 filepath.Join(ambientProfile, ".defenseclaw"),
+		PreviousWindsurfUserHome: boundProfile,
+		WindsurfUserHome:         boundProfile,
+	}, "windsurf")
+	if !reflect.DeepEqual(homes, []string{boundProfile}) {
+		t.Fatalf("Windsurf cleanup homes = %v, want only bound profile %q", homes, boundProfile)
+	}
+}
+
 func TestConnectorDefaultHomeBesideDataRootIsStrictlyBound(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
@@ -405,6 +433,8 @@ func TestConnectorDefaultHomeBesideDataRootIsStrictlyBound(t *testing.T) {
 	for connectorName, want := range map[string]string{
 		"codex":      filepath.Join(root, ".codex"),
 		"claudecode": filepath.Join(root, ".claude"),
+		"copilot":    filepath.Join(root, ".copilot"),
+		"cursor":     filepath.Join(root, ".cursor"),
 	} {
 		if got := connectorDefaultHomeBesideDataRoot(dataRoot, connectorName); !samePath(got, want) {
 			t.Fatalf("%s default home = %q, want %q", connectorName, got, want)
@@ -416,11 +446,50 @@ func TestConnectorDefaultHomeBesideDataRootIsStrictlyBound(t *testing.T) {
 	}{
 		{dataRoot: filepath.Join(root, "data"), name: "codex"},
 		{dataRoot: ".defenseclaw", name: "codex"},
+		{dataRoot: dataRoot, name: "windsurf"},
+		{dataRoot: dataRoot, name: "hermes"},
 		{dataRoot: dataRoot, name: "openclaw"},
 	} {
 		if got := connectorDefaultHomeBesideDataRoot(test.dataRoot, test.name); got != "" {
 			t.Fatalf("unbound default home for %q/%q = %q", test.dataRoot, test.name, got)
 		}
+	}
+}
+
+func TestReconcileRemovedHermesUsesOnlyRecordedCurrentAndPreviousHomes(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	historicalHome := filepath.Join(root, "historical-hermes")
+	currentHome := filepath.Join(root, "current-hermes")
+	transaction := setupTransaction{
+		ID:                 strings.Repeat("b", 32),
+		DataRoot:           filepath.Join(root, "data"),
+		PreviousConnectors: []string{"hermes"},
+		PreviousHermesHome: historicalHome,
+		HermesHome:         currentHome,
+	}
+	var calls []string
+	run := func(_, _, connector, action string, env []string) error {
+		calls = append(calls, connector+":"+action+":"+envValue(env, "HERMES_HOME"))
+		return nil
+	}
+
+	recorder := reconcileRemovedConnectors(
+		transaction,
+		filepath.Join(root, "gateway.exe"),
+		transactionPreviousChildEnv(transaction),
+		run,
+	)
+	want := []string{
+		"hermes:teardown:" + historicalHome,
+		"hermes:verify:" + historicalHome,
+		"hermes:verify:" + currentHome,
+	}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("Hermes current/previous cleanup calls = %v, want %v", calls, want)
+	}
+	if len(recorder.failures) != 0 {
+		t.Fatalf("Hermes cleanup produced residue: %+v", recorder.failures)
 	}
 }
 
@@ -488,7 +557,7 @@ func TestReconcileRemovedConnectorsRetainsFallbackFailureAtExactHome(t *testing.
 	recorder := reconcileRemovedConnectors(
 		transaction,
 		filepath.Join(root, "gateway.exe"),
-		transactionChildEnvForHomes(transaction, historicalHome, ""),
+		transactionChildEnvForHomes(transaction, historicalHome, "", ""),
 		run,
 	)
 	want := []string{
@@ -509,28 +578,129 @@ func TestReconcilePreservedConnectorsRefreshesEntireExistingRoster(t *testing.T)
 	t.Parallel()
 	root := t.TempDir()
 	transaction := setupTransaction{
-		ID:                      strings.Repeat("a", 32),
-		DataRoot:                filepath.Join(root, "data"),
-		PreviousConnectors:      []string{"codex", "claudecode"},
-		PreviousCodexHome:       filepath.Join(root, "codex"),
-		PreviousClaudeConfigDir: filepath.Join(root, "claude"),
+		ID:                           strings.Repeat("a", 32),
+		DataRoot:                     filepath.Join(root, "data"),
+		PreviousConnectors:           []string{"codex", "claudecode", "copilot", "cursor", "windsurf", "antigravity", "opencode"},
+		PreviousCodexHome:            filepath.Join(root, "codex"),
+		PreviousClaudeConfigDir:      filepath.Join(root, "claude"),
+		PreviousCopilotHome:          filepath.Join(root, "copilot"),
+		PreviousCursorHome:           filepath.Join(root, "cursor"),
+		PreviousWindsurfUserHome:     filepath.Join(root, "windsurf-profile"),
+		PreviousAntigravityConfigDir: filepath.Join(root, ".gemini", "config"),
+		PreviousOpenCodeConfigDir:    filepath.Join(root, "opencode"),
+		CodexHome:                    filepath.Join(root, "codex"),
+		ClaudeConfigDir:              filepath.Join(root, "claude"),
+		CopilotHome:                  filepath.Join(root, "copilot"),
+		CursorHome:                   filepath.Join(root, "cursor"),
+		WindsurfUserHome:             filepath.Join(root, "windsurf-profile"),
+		AntigravityConfigDir:         filepath.Join(root, ".gemini", "config"),
+		OpenCodeConfigDir:            filepath.Join(root, "opencode"),
 	}
 	var calls []string
 	recorder := reconcilePreservedConnectors(
 		transaction,
 		filepath.Join(root, "defenseclaw-gateway.exe"),
 		[]string{"PRESERVED=1"},
+		[]string{"PRESERVED=1"},
 		func(_, _, connector, action string, env []string) error {
 			calls = append(calls, connector+":"+action+":"+strings.Join(env, ","))
 			return nil
 		},
 	)
-	want := "codex:reconcile:PRESERVED=1,claudecode:reconcile:PRESERVED=1"
+	want := "codex:reconcile:PRESERVED=1,claudecode:reconcile:PRESERVED=1,copilot:reconcile:PRESERVED=1,cursor:reconcile:PRESERVED=1,windsurf:reconcile:PRESERVED=1,antigravity:reconcile:PRESERVED=1,opencode:reconcile:PRESERVED=1"
 	if got := strings.Join(calls, ","); got != want {
 		t.Fatalf("preserved connector calls = %q, want %q", got, want)
 	}
-	if len(recorder.attempts) != 2 || len(recorder.failures) != 0 {
+	if len(recorder.attempts) != 7 || len(recorder.failures) != 0 {
 		t.Fatalf("preserved connector reconciliation = %+v", recorder)
+	}
+}
+
+func TestReconcilePreservedAntigravityMigratesCustomCustodyToOfficialHome(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	customHome := filepath.Join(root, "legacy-custom")
+	officialHome := filepath.Join(root, ".gemini", "config")
+	transaction := setupTransaction{
+		ID:                           strings.Repeat("a", 32),
+		DataRoot:                     filepath.Join(root, "data"),
+		PreviousConnectors:           []string{"antigravity"},
+		PreviousAntigravityConfigDir: customHome,
+		AntigravityConfigDir:         officialHome,
+	}
+	previousEnv := transactionPreviousChildEnv(transaction)
+	currentEnv := transactionChildEnv(transaction)
+	var calls []string
+	recorder := reconcilePreservedConnectors(
+		transaction,
+		filepath.Join(root, "defenseclaw-gateway.exe"),
+		previousEnv,
+		currentEnv,
+		func(_, _, connector, action string, env []string) error {
+			home := envValue(env, "DEFENSECLAW_ANTIGRAVITY_CONFIG_HOME")
+			if envValue(env, "ANTIGRAVITY_CONFIG_DIR") != "" ||
+				envValue(env, "GEMINI_CONFIG_DIR") != "" {
+				t.Fatalf("invented Antigravity vendor environment survived: %v", env)
+			}
+			calls = append(calls, connector+":"+action+":"+home)
+			return nil
+		},
+	)
+	want := []string{
+		"antigravity:teardown:" + customHome,
+		"antigravity:verify:" + customHome,
+		"antigravity:reconcile:" + officialHome,
+	}
+	if !reflect.DeepEqual(calls, want) {
+		t.Fatalf("Antigravity migration calls = %v, want %v", calls, want)
+	}
+	if len(recorder.attempts) != 3 || len(recorder.failures) != 0 {
+		t.Fatalf("Antigravity preserved migration = %+v", recorder)
+	}
+}
+
+func TestRetryPendingCursorReconciliationUsesExactHomeBinding(t *testing.T) {
+	t.Parallel()
+	root := t.TempDir()
+	cursorHome := filepath.Join(root, "cursor")
+	transaction := setupTransaction{
+		ID:       strings.Repeat("c", 32),
+		DataRoot: filepath.Join(root, "data"),
+	}
+	recorder := connectorReconciliationRecorder{}
+	state := &connectorReconciliationState{
+		SchemaVersion: connectorReconciliationSchemaVersion,
+		Failures: []connectorReconciliationFailure{{
+			Connector: "cursor", Operation: "verify", ConfigHome: cursorHome,
+			Message: "old failure", TransactionID: strings.Repeat("d", 32),
+		}},
+	}
+	var actions []string
+	err := retryPendingConnectorReconciliation(
+		transaction,
+		filepath.Join(root, "gateway.exe"),
+		&recorder,
+		func() (*connectorReconciliationState, error) { return state, nil },
+		func(_, _, connector, action string, env []string) error {
+			actions = append(actions, connector+":"+action)
+			if got := envValue(env, "DEFENSECLAW_CURSOR_CONFIG_HOME"); got != cursorHome {
+				t.Fatalf("Cursor retry home = %q, want %q", got, cursorHome)
+			}
+			if action == "verify" && len(actions) == 1 {
+				return errors.New("stale registration")
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"cursor:verify", "cursor:teardown", "cursor:verify"}
+	if !reflect.DeepEqual(actions, want) {
+		t.Fatalf("Cursor retry actions = %v, want %v", actions, want)
+	}
+	if len(recorder.failures) != 0 {
+		t.Fatalf("healed Cursor failure was retained: %+v", recorder.failures)
 	}
 }
 

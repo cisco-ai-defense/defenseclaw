@@ -41,7 +41,8 @@ Public surface
   (trim, lowercase, default to ``"openclaw"``). Mirrors
   ``Config.activeConnector`` semantics in claw.go.
 * :func:`is_known` — connector-name allow-list check.
-* :func:`skill_dirs` / :func:`plugin_dirs` / :func:`mcp_servers` —
+* :func:`skill_dirs` / :func:`plugin_dirs` / :func:`agent_dirs` /
+  :func:`rule_dirs` / :func:`mcp_servers` / :func:`claude_agent_dirs` —
   polymorphic dispatchers; pass a connector name and they return the
   paths or MCP entries for that connector.
 """
@@ -55,6 +56,7 @@ import hashlib
 import json
 import ntpath
 import os
+import re
 import stat
 import subprocess
 import sys
@@ -80,6 +82,7 @@ from defenseclaw.file_permissions import (
     open_regular_file_no_follow,
     reject_reparse_path,
 )
+from defenseclaw.safety import is_symlink
 
 # ---------------------------------------------------------------------------
 # Public constants
@@ -141,7 +144,7 @@ class MCPServerEntry:
 
     The fields are a superset across every supported framework's
     on-disk schema (Claude Code's ``settings.json``, Codex's
-    ``.mcp.json``, ZeptoClaw's ``config.json``, OpenClaw's
+    ``config.toml``, ZeptoClaw's ``config.json``, OpenClaw's
     ``openclaw.json``). Optional fields default to empty so callers
     can treat the struct uniformly.
     """
@@ -158,6 +161,20 @@ class MCPServerEntry:
     oauth: dict[str, Any] = field(default_factory=dict)
     disabled: bool = False
     disabled_tools: list[str] = field(default_factory=list)
+    source: str = ""
+    source_scope: str = ""
+    trust_required: bool = False
+
+
+@dataclass(frozen=True)
+class ClaudeAutoMemoryResolution:
+    """One offline resolution of Claude Code's project auto-memory path."""
+
+    path: str = ""
+    source: str = ""
+    project_root: str = ""
+    activation_verified: bool = False
+    limitation: str = ""
 
 
 def infer_mcp_transport(
@@ -200,6 +217,10 @@ def normalize(connector: str | None) -> str:
     name = connector.strip().lower()
     if name in {"open-hands", "open_hands"}:
         return "openhands"
+    if name in {"claude-code", "claude_code"}:
+        return "claudecode"
+    if name in {"gemini-cli", "gemini_cli", "gemini"}:
+        return "geminicli"
     return name or "openclaw"
 
 
@@ -270,10 +291,394 @@ def claude_config_dir() -> str:
     return _connector_env_home("CLAUDE_CONFIG_DIR", ".claude")
 
 
+def claude_mcp_state_path() -> str:
+    """Return Claude Code's user/local MCP state file.
+
+    Claude Code keeps user-scoped MCP servers at ``~/.claude.json`` by
+    default. When ``CLAUDE_CONFIG_DIR`` is set, Claude stores its state under
+    that override instead of the default home locations.
+    """
+
+    configured = (os.environ.get("CLAUDE_CONFIG_DIR") or "").strip()
+    if configured:
+        return os.path.join(claude_config_dir(), ".claude.json")
+    return os.path.join(os.path.abspath(str(Path.home())), ".claude.json")
+
+
+def claude_settings_paths(workspace_dir: str | None = None) -> list[str]:
+    """Return Claude Code settings files without mixing in MCP state.
+
+    Structural callers keep user, project, then local order. Callers that need
+    effective-precedence order can reverse the three entries to obtain
+    local, project, then user.
+    """
+
+    return _dedup(
+        [
+            os.path.join(claude_config_dir(), "settings.json"),
+            _workspace_path(workspace_dir, ".claude", "settings.json"),
+            _workspace_path(workspace_dir, ".claude", "settings.local.json"),
+        ]
+    )
+
+
+def claude_agent_dirs(workspace_dir: str | None = None) -> list[str]:
+    """Return Claude agent roots in effective precedence order.
+
+    Project roots are ordered from the launch directory through the nearest
+    repository root, then the user root. Claude identifies definitions by
+    frontmatter ``name`` and lets the closest project definition win.
+    """
+
+    return _dedup(
+        [
+            *_claudecode_project_agent_dirs(workspace_dir),
+            os.path.join(claude_config_dir(), "agents"),
+        ]
+    )
+
+
+def claude_auto_memory_resolution(
+    workspace_dir: str | None,
+    *,
+    managed_settings_paths: list[str] | None = None,
+) -> ClaudeAutoMemoryResolution:
+    """Resolve Claude's documented auto-memory path without session guessing.
+
+    File-based settings are read in user → project → local → managed override
+    order so the last valid scalar wins. Session-only ``--settings``, remote
+    managed settings, registry/MDM policies, and policy-helper output are not
+    observable from a passive filesystem inventory, so the result is always
+    labelled unverified and carries that limitation.
+    """
+
+    workspace = _workspace_dir(workspace_dir)
+    if not workspace:
+        return ClaudeAutoMemoryResolution(
+            limitation=(
+                "Claude auto-memory project identity is unresolved because no "
+                "connector workspace/session CWD is available"
+            ),
+        )
+    project_root, project_limitation = _claude_project_root(workspace)
+    if not project_root:
+        return ClaudeAutoMemoryResolution(limitation=project_limitation)
+
+    sources = [
+        os.path.join(claude_config_dir(), "settings.json"),
+        os.path.join(project_root, ".claude", "settings.json"),
+        os.path.join(project_root, ".claude", "settings.local.json"),
+    ]
+    managed = (
+        list(managed_settings_paths)
+        if managed_settings_paths is not None
+        else _claude_file_managed_settings_paths()
+    )
+    sources.extend(managed)
+
+    override = ""
+    override_source = ""
+    limitations = [project_limitation] if project_limitation else []
+    for source in sources:
+        document, error = _read_bounded_json_object_no_follow(source)
+        if error:
+            limitations.append(error)
+            continue
+        if document is None:
+            continue
+        if source in managed and document.get("policyHelper"):
+            limitations.append(
+                f"{source} configures policyHelper; dynamic managed settings "
+                "cannot be resolved by passive inventory",
+            )
+        value = document.get("autoMemoryDirectory")
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            limitations.append(
+                f"{source} has non-string autoMemoryDirectory and cannot "
+                "establish an effective memory path",
+            )
+            continue
+        candidate = value.strip()
+        if candidate.startswith("~/") or candidate.startswith("~\\"):
+            candidate = os.path.join(str(Path.home()), candidate[2:])
+        elif not os.path.isabs(candidate):
+            limitations.append(
+                f"{source} has non-absolute autoMemoryDirectory; Claude "
+                "requires an absolute path or ~/ prefix",
+            )
+            continue
+        override = os.path.abspath(candidate)
+        override_source = source
+
+    if override:
+        path = override
+        source = override_source
+    else:
+        project_key = _claude_project_storage_key(project_root)
+        if not project_key:
+            return ClaudeAutoMemoryResolution(
+                project_root=project_root,
+                limitation="Claude auto-memory project storage identity could not be derived",
+            )
+        path = os.path.join(
+            claude_config_dir(),
+            "projects",
+            project_key,
+            "memory",
+        )
+        source = "derived-project-default"
+
+    limitations.append(
+        "passive inventory cannot observe session --settings, remote managed "
+        "settings, or native registry/MDM policy; confirm the active path with "
+        "Claude Code /memory or /status",
+    )
+    return ClaudeAutoMemoryResolution(
+        path=os.path.abspath(path),
+        source=source,
+        project_root=project_root,
+        activation_verified=False,
+        limitation="; ".join(item for item in limitations if item),
+    )
+
+
+def claude_auto_memory_files(
+    workspace_dir: str | None,
+    *,
+    managed_settings_paths: list[str] | None = None,
+) -> tuple[ClaudeAutoMemoryResolution, list[str]]:
+    """Return bounded regular Markdown files under the resolved memory path."""
+
+    resolution = claude_auto_memory_resolution(
+        workspace_dir,
+        managed_settings_paths=managed_settings_paths,
+    )
+    root = resolution.path
+    if not root or not os.path.isdir(root) or is_symlink(root):
+        return resolution, []
+    files: list[str] = []
+    visited = 0
+    for current, dirs, names in os.walk(root, topdown=True, followlinks=False):
+        dirs[:] = [
+            name
+            for name in sorted(dirs, key=str.casefold)
+            if not is_symlink(os.path.join(current, name))
+        ]
+        visited += 1
+        if visited > _CLAUDE_SKILL_DISCOVERY_DIR_LIMIT:
+            dirs[:] = []
+            break
+        for name in sorted(names, key=str.casefold):
+            path = os.path.join(current, name)
+            if (
+                name.lower().endswith(".md")
+                and os.path.isfile(path)
+                and not is_symlink(path)
+            ):
+                files.append(os.path.abspath(path))
+    return resolution, _dedup(files)
+
+
 def codex_home() -> str:
     """Return Codex's effective home directory."""
 
     return _connector_env_home("CODEX_HOME", ".codex")
+
+
+def _read_bounded_stable_file(path: str, *, max_bytes: int) -> bytes:
+    """Read one regular file without reparse traversal or replacement races."""
+    fd = open_regular_file_no_follow(path)
+    try:
+        before = os.fstat(fd)
+        if before.st_size > max_bytes:
+            raise OSError(f"file exceeds {max_bytes} byte inventory limit")
+        chunks: list[bytes] = []
+        remaining = max_bytes + 1
+        while remaining:
+            chunk = os.read(fd, min(64 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+        if len(payload) > max_bytes:
+            raise OSError(f"file exceeds {max_bytes} byte inventory limit")
+        after = os.fstat(fd)
+        before_identity = (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        )
+        after_identity = (
+            after.st_dev,
+            after.st_ino,
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        )
+        if before_identity != after_identity:
+            raise OSError("file changed while it was being inventoried")
+        reject_reparse_path(path)
+        named = os.stat(path, follow_symlinks=False)
+        if not os.path.samestat(before, named):
+            raise OSError("file was replaced while it was being inventoried")
+        return payload
+    finally:
+        os.close(fd)
+
+
+def _codex_project_root_markers() -> tuple[str, ...]:
+    """Return the configured project-root markers, or Codex's default.
+
+    ``project_root_markers = []`` intentionally makes the active directory the
+    project root. A malformed or unreadable user config cannot safely alter
+    discovery, so it falls back to the documented ``.git`` default.
+    """
+    path = os.path.join(codex_home(), "config.toml")
+    try:
+        payload = _read_bounded_stable_file(path, max_bytes=1024 * 1024)
+        config = tomllib.loads(payload.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return (".git",)
+    raw = config.get("project_root_markers")
+    if not isinstance(raw, list):
+        return (".git",)
+    if not all(isinstance(marker, str) for marker in raw):
+        return (".git",)
+    return tuple(marker for marker in raw if marker)
+
+
+def _codex_project_layer_dirs(workspace_dir: str | None) -> list[str]:
+    """Return project config layers from the active directory toward its root.
+
+    The result is highest-precedence first. When no configured root marker is
+    found, Codex treats the active directory as the project root rather than
+    scanning arbitrary filesystem ancestors.
+    """
+    active = _workspace_dir(workspace_dir)
+    if not active:
+        return []
+    markers = _codex_project_root_markers()
+    if not markers:
+        return [active]
+
+    current = active
+    candidates: list[str] = []
+    while True:
+        candidates.append(current)
+        if any(os.path.exists(os.path.join(current, marker)) for marker in markers):
+            return candidates
+        parent = os.path.dirname(current)
+        if parent == current:
+            return [active]
+        current = parent
+
+
+def _codex_project_config_paths(workspace_dir: str | None) -> list[str]:
+    """Return project ``.codex/config.toml`` files, closest layer first."""
+    return [
+        os.path.join(layer, ".codex", "config.toml")
+        for layer in _codex_project_layer_dirs(workspace_dir)
+    ]
+
+
+def _codex_project_root(workspace_dir: str | None) -> str:
+    """Return the detected project root for an explicit active workspace."""
+    layers = _codex_project_layer_dirs(workspace_dir)
+    return layers[-1] if layers else ""
+
+
+def _codex_marketplace_files(workspace_dir: str | None) -> list[tuple[str, str]]:
+    """Return ``(marketplace.json, source-root)`` pairs in Codex precedence."""
+    pairs: list[tuple[str, str]] = []
+    project_root = _codex_project_root(workspace_dir)
+    if project_root:
+        pairs.extend(
+            (
+                (
+                    os.path.join(project_root, ".agents", "plugins", "marketplace.json"),
+                    project_root,
+                ),
+                (
+                    os.path.join(project_root, ".claude-plugin", "marketplace.json"),
+                    project_root,
+                ),
+            )
+        )
+    user_root = os.path.abspath(str(Path.home()))
+    pairs.append(
+        (
+            os.path.join(user_root, ".agents", "plugins", "marketplace.json"),
+            user_root,
+        )
+    )
+    return pairs
+
+
+def copilot_home() -> str:
+    """Return GitHub Copilot CLI's effective user configuration directory."""
+
+    return _connector_env_home("COPILOT_HOME", ".copilot")
+
+
+def windsurf_user_home() -> str:
+    """Return DefenseClaw's exact Windsurf user-profile binding.
+
+    Windsurf has no vendor configuration-home override. Native Setup records
+    the Windows Profile Known Folder and the packaged launcher supplies that
+    validated value through this DefenseClaw-only environment contract.
+    Reject malformed bindings instead of falling back to an ambient profile.
+    """
+
+    configured = os.environ.get("WINDSURF_USER_HOME")
+    if configured:
+        if (
+            configured.strip() != configured
+            or "\x00" in configured
+            or "\r" in configured
+            or "\n" in configured
+            or not os.path.isabs(configured)
+            or os.path.normpath(configured) != configured
+        ):
+            raise ValueError("WINDSURF_USER_HOME is not an absolute normalized path")
+        return configured
+    if os.name == "nt" and os.environ.get("DEFENSECLAW_INSTALL_ROOT"):
+        raise ValueError("packaged Windsurf profile binding is missing")
+    return os.path.abspath(str(Path.home()))
+
+
+def windsurf_config_home() -> str:
+    """Return the bound user-level Windsurf configuration directory."""
+
+    root = windsurf_user_home()
+    candidate = os.path.normpath(os.path.join(root, ".codeium", "windsurf"))
+    if os.path.commonpath((root, candidate)) != os.path.commonpath((root, root)):
+        raise ValueError("Windsurf configuration path escapes its bound profile")
+    return candidate
+
+
+def windsurf_hook_config_path() -> str:
+    """Return the exact bound user-level Cascade hooks file."""
+
+    expected = os.path.join(windsurf_config_home(), "hooks.json")
+    configured = os.environ.get("WINDSURF_HOOK_CONFIG_PATH")
+    if configured:
+        if (
+            configured.strip() != configured
+            or "\x00" in configured
+            or "\r" in configured
+            or "\n" in configured
+            or not os.path.isabs(configured)
+            or os.path.normpath(configured) != configured
+            or os.path.normcase(configured) != os.path.normcase(expected)
+        ):
+            raise ValueError("WINDSURF_HOOK_CONFIG_PATH does not match the bound profile")
+        return configured
+    return expected
 
 
 def _resolve_hermes_home(
@@ -371,41 +776,29 @@ def connector_home(
     if name == "geminicli":
         return os.path.join(home, ".gemini")
     if name == "copilot":
-        return os.path.join(home, ".copilot")
+        return copilot_home()
     if name == "openhands":
         root = _workspace_dir(workspace_dir)
         if root:
             return os.path.join(root, ".openhands")
         return os.path.join(home, ".openhands")
     if name == "antigravity":
-        # Antigravity (`agy`) is global-only by design: agy v1.0.x
-        # merges every discovered hooks.json (global, project,
-        # legacy ~/.gemini/hooks.json), so DefenseClaw deliberately
-        # does NOT honor workspace_dir — multiple writes cause
-        # duplicate firings.
-        #
-        # NOTE: agy *advertises* ~/.gemini/antigravity-cli/ in its
-        # --help output, but empirically it reads PreToolUse hooks
-        # only from ~/.gemini/config/hooks.json (see
-        # internal/gateway/connector/hook_only.go ::
-        # antigravityHooksPath for the smoke-test evidence). We
-        # report the marketing-facing dir here as the "connector
-        # home" because it's the agy-owned directory operators
-        # know about; the actual hooks file path comes back via
-        # connector_config_files() below, which points at the
-        # path agy actually evaluates.
-        return os.path.join(home, ".gemini", "antigravity-cli")
+        # Google documents one global customization root at ~/.gemini/config
+        # and publishes no config-home environment override. workspace_dir is
+        # intentionally ignored because DefenseClaw does not patch the host's
+        # separate <workspace>/.agents/hooks.json surface.
+        return os.path.join(home, ".gemini", "config")
     if name == "cursor":
         return os.path.join(home, ".cursor")
     if name == "windsurf":
-        return os.path.join(home, ".codeium", "windsurf")
+        return windsurf_config_home()
     if name == "hermes":
         return hermes_home()
     if name == "opencode":
         # opencode keeps its config under ~/.config/opencode/ (XDG-style).
         # Surfaced so inventory/doctor render a truthful home label rather
         # than an empty string or — worse — OpenClaw's path.
-        return os.path.join(home, ".config", "opencode")
+        return _opencode_config_dir() or os.path.join(home, ".config", "opencode")
     if name == "omnigent":
         return _omnigent_config_home()
     if name == "openclaw":
@@ -434,14 +827,21 @@ def connector_config_files(
     home = str(Path.home())
     paths: list[str] = []
     if name == "claudecode":
+        settings_paths = claude_settings_paths(workspace_dir)
         paths = [
-            os.path.join(claude_config_dir(), "settings.json"),
-            _workspace_path(workspace_dir, ".claude", "settings.json"),
+            settings_paths[0],
+            claude_mcp_state_path(),
+            *settings_paths[1:],
+            _workspace_path(workspace_dir, ".mcp.json"),
         ]
     elif name == "codex":
         paths = [
             os.path.join(codex_home(), "config.toml"),
-            _workspace_path(workspace_dir, ".mcp.json"),
+            *_codex_project_config_paths(workspace_dir),
+            *[
+                marketplace_file
+                for marketplace_file, _source_root in _codex_marketplace_files(workspace_dir)
+            ],
         ]
     elif name == "zeptoclaw":
         zepto_home = os.environ.get("ZEPTOCLAW_HOME") or os.path.join(home, ".zeptoclaw")
@@ -455,9 +855,10 @@ def connector_config_files(
             _workspace_path(workspace_dir, ".gemini", "settings.json"),
         ]
     elif name == "copilot":
+        copilot_root = copilot_home()
         paths = [
-            os.path.join(home, ".copilot", "config.json"),
-            os.path.join(home, ".copilot", "hooks", "defenseclaw.json"),
+            os.path.join(copilot_root, "config.json"),
+            os.path.join(copilot_root, "hooks", "defenseclaw.json"),
             _workspace_path(workspace_dir, ".github", "copilot.json"),
             _workspace_path(workspace_dir, ".github", "hooks", "defenseclaw.json"),
         ]
@@ -468,24 +869,20 @@ def connector_config_files(
             _workspace_path(workspace_dir, ".openhands", "hooks.json"),
         ]
     elif name == "antigravity":
-        # Antigravity has two independently documented surfaces under
-        # ~/.gemini/config/: hooks.json for lifecycle hooks and
-        # mcp_config.json for MCP servers. Workspace MCP lives in
-        # <workspace>/.agents/mcp_config.json when an explicit workspace
-        # is pinned. The legacy antigravity-cli hooks path is discovery-only
-        # so doctor/inventory can surface stale pre-v0.5.0 entries.
+        # Google's global Hooks and MCP contract is pinned to
+        # ~/.gemini/config. Setup does not own workspace hooks.
+        hooks_home = connector_home("antigravity")
         paths = [
             os.path.join(home, ".gemini", "config", "mcp_config.json"),
             _workspace_path(workspace_dir, ".agents", "mcp_config.json"),
-            os.path.join(home, ".gemini", "config", "hooks.json"),
-            os.path.join(home, ".gemini", "antigravity-cli", "hooks.json"),
+            os.path.join(hooks_home, "hooks.json"),
         ]
     elif name == "opencode":
         # opencode auto-loads plugins from ~/.config/opencode/plugins/;
         # DefenseClaw installs a single bridge plugin there. There is no
         # command-hook config file to patch.
         paths = [
-            os.path.join(home, ".config", "opencode", "plugins", "defenseclaw.js"),
+            os.path.join(connector_home("opencode"), "plugins", "defenseclaw.js"),
         ]
     elif name == "omnigent":
         paths = [omnigent_config_path()]
@@ -495,7 +892,7 @@ def connector_config_files(
             _workspace_path(workspace_dir, ".cursor", "mcp.json"),
         ]
     elif name == "windsurf":
-        paths = list(_windsurf_mcp_paths(home))
+        paths = list(_windsurf_mcp_paths())
     elif name == "hermes":
         # Hermes' real config file is YAML, not JSON. HERMES_HOME takes
         # precedence, native Windows defaults to %LOCALAPPDATA%\\hermes, and
@@ -522,9 +919,10 @@ def skill_dirs(
 ) -> list[str]:
     """Return the skill directory list for *connector*.
 
-    For Claude Code / Codex / ZeptoClaw the layout is fixed
-    (``$HOME/.<framework>/skills`` plus the project-local
-    ``./.<framework>/skills``). For OpenClaw — and any unknown
+    Codex follows its current cross-client skill layout: ``.agents/skills``
+    at every repository directory from the active workspace to the project
+    root, then ``$HOME/.agents/skills`` and the Unix admin directory
+    ``/etc/codex/skills``. For OpenClaw — and any unknown
     name — we walk ``openclaw.json`` to honor any ``skills.load.extraDirs``
     overrides, then add the home_dir/skills fallback.
 
@@ -545,7 +943,7 @@ def skill_dirs(
     if name == "cursor":
         return _cursor_skill_dirs(workspace_dir)
     if name == "windsurf":
-        return _windsurf_skill_dirs()
+        return _windsurf_skill_dirs(workspace_dir)
     if name == "geminicli":
         return _gemini_skill_dirs(workspace_dir)
     if name == "copilot":
@@ -555,7 +953,7 @@ def skill_dirs(
     if name == "antigravity":
         return _antigravity_skill_dirs(workspace_dir)
     if name == "opencode":
-        return _opencode_skill_dirs(workspace_dir)
+        return []
     if name == "omnigent":
         return []
     return _openclaw_skill_dirs(openclaw_home, openclaw_config)
@@ -571,8 +969,10 @@ def plugin_dirs(
 
     Uses each framework's documented plugin location:
 
-    * Claude Code: ``~/.claude/plugins`` and ``./.claude/plugins``
-    * Codex:       ``~/.codex/plugins`` (+ ``cache`` subdir)
+    * Claude Code: ``~/.claude/plugins/cache`` plus manifest-bearing
+                   user/project skills-directory plugins
+    * Codex:       local paths declared by repo/user marketplace files plus
+                   the installed ``$CODEX_HOME/plugins/cache`` hierarchy
     * ZeptoClaw:   ``~/.zeptoclaw/plugins`` (+ ``cache`` subdir)
     * OpenClaw:    ``<home_dir>/extensions``
     """
@@ -580,7 +980,7 @@ def plugin_dirs(
     if name == "claudecode":
         return _claudecode_plugin_dirs(workspace_dir)
     if name == "codex":
-        return _codex_plugin_dirs()
+        return _codex_plugin_dirs(workspace_dir)
     if name == "zeptoclaw":
         return _zeptoclaw_plugin_dirs()
     if name == "hermes":
@@ -598,10 +998,87 @@ def plugin_dirs(
     if name == "antigravity":
         return _antigravity_plugin_dirs(workspace_dir)
     if name == "opencode":
-        return _opencode_plugin_dirs(workspace_dir)
+        return []
     if name == "omnigent":
         return []
     return _openclaw_plugin_dirs(openclaw_home)
+
+
+def plugin_inventory_dirs(
+    connector: str | None,
+    *,
+    openclaw_home: str | None = None,
+    workspace_dir: str | None = None,
+) -> list[str]:
+    """Return read-only plugin discovery roots for *connector*.
+
+    Most connectors use the same roots for inventory and installation. Cursor
+    is intentionally different: its documented local-plugin root is an
+    applicable inventory surface, but DefenseClaw does not install, remove, or
+    otherwise claim custody of Cursor plugins. Write paths must continue to use
+    :func:`plugin_dirs`, which returns no Cursor target.
+    """
+
+    if normalize(connector) == "cursor":
+        return [os.path.join(str(Path.home()), ".cursor", "plugins", "local")]
+    return plugin_dirs(
+        connector,
+        openclaw_home=openclaw_home,
+        workspace_dir=workspace_dir,
+    )
+
+
+def agent_dirs(
+    connector: str | None,
+    *,
+    workspace_dir: str | None = None,
+) -> list[str]:
+    """Return documented custom-agent directories for *connector*.
+
+    Codex custom agents are standalone TOML files. Candidate project layers
+    have higher precedence than the user layer, and the nearest project layer
+    wins when Codex trusts the project. This path inventory does not infer the
+    client's private trust decision. Other connector agent layouts remain
+    owned by their existing inventory adapters.
+    """
+    if normalize(connector) == "codex":
+        return _dedup(
+            [
+                *[
+                    os.path.join(layer, ".codex", "agents")
+                    for layer in _codex_project_layer_dirs(workspace_dir)
+                ],
+                os.path.join(codex_home(), "agents"),
+            ]
+        )
+    return []
+
+
+def rule_dirs(
+    connector: str | None,
+    *,
+    workspace_dir: str | None = None,
+) -> list[str]:
+    """Return documented command-rule directories for *connector*.
+
+    Codex loads ``rules/*.rules`` beside every active config layer. Candidate
+    project layers are returned closest-first for deterministic inventory and
+    require project trust at runtime; unlike scalar configuration, rules
+    combine and the most restrictive decision wins. The Unix system layer is
+    omitted on native Windows.
+    """
+    if normalize(connector) != "codex":
+        return []
+    paths = [
+        *[
+            os.path.join(layer, ".codex", "rules")
+            for layer in _codex_project_layer_dirs(workspace_dir)
+        ],
+        os.path.join(codex_home(), "rules"),
+    ]
+    if os.name != "nt":
+        paths.append(os.path.join(os.sep, "etc", "codex", "rules"))
+    return _dedup(paths)
 
 
 def mcp_servers(
@@ -616,8 +1093,10 @@ def mcp_servers(
 
     Reads each framework's canonical config:
 
-    * Claude Code: ``~/.claude/settings.json`` then explicit workspace ``.mcp.json``
-    * Codex:       ``~/.codex/config.toml`` then explicit workspace ``.mcp.json``
+    * Claude Code: local/user ``~/.claude.json`` plus explicit workspace
+                   ``.mcp.json``, in local → project → user precedence
+    * Codex:       project ``.codex/config.toml`` layers (closest first), then
+                   user ``~/.codex/config.toml``
     * ZeptoClaw:   ``~/.zeptoclaw/config.json`` then explicit workspace ``.mcp.json``
     * Antigravity: ``~/.gemini/config/mcp_config.json`` then explicit workspace
                     ``.agents/mcp_config.json``
@@ -670,22 +1149,239 @@ def mcp_servers(
 # ---------------------------------------------------------------------------
 
 
+_CLAUDE_SKILL_DISCOVERY_DIR_LIMIT = 32768
+
+
 def _claudecode_skill_dirs(workspace_dir: str | None = None) -> list[str]:
+    # Claude resolves true skills before legacy commands. Personal skills have
+    # higher precedence than project skills; command roots come only after all
+    # skill roots so a same-name command never hides a skill.
     return _dedup(
         [
             os.path.join(claude_config_dir(), "skills"),
-            _workspace_path(workspace_dir, ".claude", "skills"),
+            *_claudecode_project_skill_dirs(workspace_dir),
+            os.path.join(claude_config_dir(), "commands"),
+            _workspace_path(workspace_dir, ".claude", "commands"),
         ]
     )
+
+
+def _claudecode_project_skill_dirs(workspace_dir: str | None) -> list[str]:
+    """Return Claude's launch-ancestor and lazy nested project skill roots."""
+
+    raw = (workspace_dir or "").strip()
+    if not raw:
+        return []
+    start = os.path.abspath(os.path.expanduser(raw))
+    repository_root = _claudecode_repository_root(start)
+    roots: list[str] = []
+    current = start
+    while True:
+        roots.append(os.path.join(current, ".claude", "skills"))
+        if (
+            not repository_root
+            or os.path.normcase(current) == os.path.normcase(repository_root)
+        ):
+            break
+        parent = os.path.dirname(current)
+        if os.path.normcase(parent) == os.path.normcase(current):
+            break
+        current = parent
+
+    visited = 0
+    if os.path.isdir(start) and not is_symlink(start):
+        for current, dirs, _files in os.walk(
+            start,
+            topdown=True,
+            followlinks=False,
+        ):
+            dirs[:] = [
+                name
+                for name in sorted(dirs, key=str.casefold)
+                if name != ".git"
+                and not is_symlink(os.path.join(current, name))
+            ]
+            visited += 1
+            if visited > _CLAUDE_SKILL_DISCOVERY_DIR_LIMIT:
+                dirs[:] = []
+                break
+            if (
+                os.path.basename(current).casefold() == "skills"
+                and os.path.basename(os.path.dirname(current)).casefold()
+                == ".claude"
+            ):
+                roots.append(os.path.abspath(current))
+    return _dedup(roots)
+
+
+def _claudecode_project_agent_dirs(workspace_dir: str | None) -> list[str]:
+    """Return closest-first project agent roots through the repository root."""
+
+    raw = (workspace_dir or "").strip()
+    if not raw:
+        return []
+    start = os.path.abspath(os.path.expanduser(raw))
+    repository_root = _claudecode_repository_root(start)
+    roots: list[str] = []
+    current = start
+    while True:
+        roots.append(os.path.join(current, ".claude", "agents"))
+        if (
+            not repository_root
+            or os.path.normcase(current) == os.path.normcase(repository_root)
+        ):
+            break
+        parent = os.path.dirname(current)
+        if os.path.normcase(parent) == os.path.normcase(current):
+            break
+        current = parent
+    return _dedup(roots)
+
+
+def _claudecode_repository_root(start: str) -> str:
+    current = os.path.abspath(start)
+    while True:
+        marker = os.path.join(current, ".git")
+        try:
+            info = os.lstat(marker)
+        except OSError:
+            info = None
+        if info is not None and (
+            stat.S_ISDIR(info.st_mode) or stat.S_ISREG(info.st_mode)
+        ):
+            return current
+        parent = os.path.dirname(current)
+        if os.path.normcase(parent) == os.path.normcase(current):
+            return ""
+        current = parent
+
+
+def _claude_project_root(workspace: str) -> tuple[str, str]:
+    """Resolve the shared main-checkout root without invoking Git."""
+
+    root = _claudecode_repository_root(workspace)
+    if not root:
+        return workspace, (
+            "workspace is outside a discoverable Git repository; Claude's "
+            "documented outside-repository project-root identity is assumed "
+            "to be the explicit connector workspace"
+        )
+    marker = os.path.join(root, ".git")
+    try:
+        marker_info = os.lstat(marker)
+    except (OSError, ValueError, UnsafePathError) as exc:
+        return root, f"cannot inspect Git project marker {marker}: {exc}"
+    if stat.S_ISDIR(marker_info.st_mode):
+        return root, ""
+    if not stat.S_ISREG(marker_info.st_mode) or is_symlink(marker):
+        return "", f"Git project marker {marker} is not a stable regular file"
+    marker_text, error = _read_bounded_text_no_follow(marker, 8192)
+    if error:
+        return "", error
+    prefix = "gitdir:"
+    if not marker_text.lower().startswith(prefix):
+        return "", f"Git project marker {marker} has an unsupported format"
+    git_dir = marker_text[len(prefix) :].strip()
+    if not os.path.isabs(git_dir):
+        git_dir = os.path.abspath(os.path.join(root, git_dir))
+    common_path = os.path.join(git_dir, "commondir")
+    common_text, common_error = _read_bounded_text_no_follow(common_path, 8192)
+    if common_error:
+        return root, (
+            f"linked-worktree project identity is unresolved: {common_error}"
+        )
+    common_dir = common_text.strip()
+    if not common_dir:
+        return root, (
+            f"linked-worktree project identity is unresolved: {common_path} is empty"
+        )
+    if not os.path.isabs(common_dir):
+        common_dir = os.path.abspath(os.path.join(git_dir, common_dir))
+    if os.path.basename(common_dir).casefold() != ".git":
+        return root, (
+            "linked-worktree common Git directory does not identify a main "
+            f"checkout root: {common_dir}"
+        )
+    return os.path.dirname(common_dir), ""
+
+
+def _claude_project_storage_key(project_root: str) -> str:
+    """Mirror Claude's on-disk project-key encoding for absolute paths."""
+
+    return re.sub(r"[^A-Za-z0-9_-]", "-", os.path.abspath(project_root))
+
+
+def _claude_file_managed_settings_paths() -> list[str]:
+    if os.name == "nt":
+        program_files = os.environ.get("ProgramFiles") or r"C:\Program Files"
+        parent = os.path.join(program_files, "ClaudeCode")
+    elif sys.platform == "darwin":
+        parent = "/Library/Application Support/ClaudeCode"
+    else:
+        parent = "/etc/claude-code"
+    paths = [os.path.join(parent, "managed-settings.json")]
+    dropins = os.path.join(parent, "managed-settings.d")
+    if os.path.isdir(dropins) and not is_symlink(dropins):
+        try:
+            names = sorted(os.listdir(dropins), key=str.casefold)
+        except OSError:
+            names = []
+        for name in names[:256]:
+            path = os.path.join(dropins, name)
+            if (
+                name.lower().endswith(".json")
+                and not name.startswith(".")
+                and os.path.isfile(path)
+                and not is_symlink(path)
+            ):
+                paths.append(path)
+    return paths
+
+
+def _read_bounded_text_no_follow(path: str, limit: int) -> tuple[str, str]:
+    try:
+        descriptor = open_regular_file_no_follow(path)
+        with os.fdopen(descriptor, "rb") as source:
+            raw = source.read(limit + 1)
+    except OSError as exc:
+        return "", f"cannot read stable file {path}: {exc}"
+    if len(raw) > limit:
+        return "", f"stable file {path} exceeds the {limit}-byte inventory limit"
+    try:
+        return raw.decode("utf-8"), ""
+    except UnicodeDecodeError as exc:
+        return "", f"stable file {path} is not UTF-8: {exc}"
+
+
+def _read_bounded_json_object_no_follow(
+    path: str,
+    limit: int = 1024 * 1024,
+) -> tuple[dict[str, Any] | None, str]:
+    if not os.path.exists(path):
+        return None, ""
+    text, error = _read_bounded_text_no_follow(path, limit)
+    if error:
+        return None, error
+    try:
+        document = json.loads(text)
+    except json.JSONDecodeError as exc:
+        return None, f"settings file {path} is invalid JSON: {exc}"
+    if not isinstance(document, dict):
+        return None, f"settings file {path} is not a JSON object"
+    return document, ""
 
 
 def _codex_skill_dirs(workspace_dir: str | None = None) -> list[str]:
-    return _dedup(
-        [
-            os.path.join(codex_home(), "skills"),
-            _workspace_path(workspace_dir, ".codex", "skills"),
-        ]
-    )
+    paths = [
+        *[
+            os.path.join(layer, ".agents", "skills")
+            for layer in _codex_project_layer_dirs(workspace_dir)
+        ],
+        os.path.join(str(Path.home()), ".agents", "skills"),
+    ]
+    if os.name != "nt":
+        paths.append(os.path.join(os.sep, "etc", "codex", "skills"))
+    return _dedup(paths)
 
 
 def _zeptoclaw_skill_dirs(workspace_dir: str | None = None) -> list[str]:
@@ -714,8 +1410,13 @@ def _cursor_skill_dirs(workspace_dir: str | None = None) -> list[str]:
     )
 
 
-def _windsurf_skill_dirs() -> list[str]:
-    return []
+def _windsurf_skill_dirs(workspace_dir: str | None = None) -> list[str]:
+    return _dedup(
+        [
+            _workspace_path(workspace_dir, ".windsurf", "skills"),
+            _workspace_path(workspace_dir, ".agents", "skills"),
+        ]
+    )
 
 
 def _opencode_config_dir() -> str:
@@ -749,11 +1450,10 @@ def _antigravity_skill_dirs(workspace_dir: str | None = None) -> list[str]:
     )
     return _dedup(
         [
+            os.path.join(home, ".gemini", "config", "skills"),
             _workspace_path(workspace_dir, ".agents", "skills"),
-            _workspace_path(workspace_dir, "_agents", "skills"),
+            _workspace_path(workspace_dir, ".agent", "skills"),
             os.path.join(home, ".gemini", "antigravity-cli", "skills"),
-            os.path.join(home, ".gemini", "skills"),
-            os.path.join(home, ".agents", "skills"),
             *plugin_skill_dirs,
         ]
     )
@@ -770,14 +1470,98 @@ def _gemini_skill_dirs(workspace_dir: str | None = None) -> list[str]:
 
 
 def _copilot_skill_dirs(workspace_dir: str | None = None) -> list[str]:
-    home = str(Path.home())
+    workspace = _workspace_dir(workspace_dir)
+    ancestors = _copilot_workspace_ancestors(workspace)
+    project: list[str] = []
+    if ancestors:
+        # Current-project precedence is exact: GitHub, Agents, then Claude.
+        project.extend(
+            [
+                os.path.join(ancestors[0], ".github", "skills"),
+                os.path.join(ancestors[0], ".agents", "skills"),
+                os.path.join(ancestors[0], ".claude", "skills"),
+            ]
+        )
+        # The official inherited skill surface is parent .github/skills,
+        # deepest first, through the Git root.
+        project.extend(os.path.join(root, ".github", "skills") for root in ancestors[1:])
     return _dedup(
         [
-            os.path.join(home, ".copilot", "skills"),
-            _workspace_path(workspace_dir, ".github", "skills"),
-            _workspace_path(workspace_dir, ".agents", "skills"),
+            *project,
+            os.path.join(copilot_home(), "skills"),
+            os.path.join(str(Path.home()), ".agents", "skills"),
+            *_copilot_custom_skill_dirs(workspace),
         ]
     )
+
+
+def copilot_agent_dirs(workspace_dir: str | None = None) -> list[str]:
+    """Return every documented local Copilot custom-agent directory.
+
+    Project agents are loaded at every ancestor from the pinned workspace to
+    the Git root, deepest first, with ``.github`` taking precedence over
+    ``.claude`` at each level. Plugin-contributed agents are deliberately not
+    expanded from an undocumented on-disk cache; callers inventory the plugin
+    itself through Copilot's official read-only command instead.
+    """
+
+    project: list[str] = []
+    for root in _copilot_workspace_ancestors(_workspace_dir(workspace_dir)):
+        project.extend(
+            [
+                os.path.join(root, ".github", "agents"),
+                os.path.join(root, ".claude", "agents"),
+            ]
+        )
+    return _dedup([*project, os.path.join(copilot_home(), "agents")])
+
+
+def copilot_mcp_config_files(workspace_dir: str | None = None) -> list[str]:
+    """Return documented local Copilot MCP files in effective priority order."""
+
+    project: list[str] = []
+    for root in _copilot_workspace_ancestors(_workspace_dir(workspace_dir)):
+        project.extend(
+            [
+                os.path.join(root, ".mcp.json"),
+                os.path.join(root, ".github", "mcp.json"),
+            ]
+        )
+    return _dedup([*project, os.path.join(copilot_home(), "mcp-config.json")])
+
+
+def _copilot_workspace_ancestors(workspace_dir: str) -> list[str]:
+    if not workspace_dir:
+        return []
+    current = os.path.abspath(workspace_dir)
+    candidates: list[str] = []
+    while True:
+        candidates.append(current)
+        if os.path.exists(os.path.join(current, ".git")):
+            return candidates
+        parent = os.path.dirname(current)
+        if parent == current:
+            # A pinned non-repository workspace has only its immediate
+            # project surface; never scan unrelated filesystem ancestors.
+            return candidates[:1]
+        current = parent
+
+
+def _copilot_custom_skill_dirs(workspace_dir: str) -> list[str]:
+    out: list[str] = []
+    for raw in os.environ.get("COPILOT_SKILLS_DIRS", "").split(","):
+        candidate = os.path.expanduser(_expand(raw.strip()))
+        if not candidate:
+            continue
+        if not os.path.isabs(candidate):
+            if not workspace_dir:
+                # Relative custom paths are meaningful only in Copilot's
+                # launch workspace. Do not reinterpret them against the
+                # long-lived DefenseClaw daemon directory.
+                continue
+            candidate = os.path.join(workspace_dir, candidate)
+        out.append(os.path.abspath(candidate))
+    return _dedup(out)
 
 
 def _openhands_skill_dirs(workspace_dir: str | None = None) -> list[str]:
@@ -819,22 +1603,83 @@ def _openclaw_skill_dirs(
 
 
 def _claudecode_plugin_dirs(workspace_dir: str | None = None) -> list[str]:
+    user_skills = os.path.join(claude_config_dir(), "skills")
+    plugin_parent = os.path.abspath(
+        os.path.expanduser(
+            (os.environ.get("CLAUDE_CODE_PLUGIN_CACHE_DIR") or "").strip()
+            or os.path.join(claude_config_dir(), "plugins")
+        )
+    )
     return _dedup(
         [
-            os.path.join(claude_config_dir(), "plugins"),
-            _workspace_path(workspace_dir, ".claude", "plugins"),
+            os.path.join(plugin_parent, "cache"),
+            user_skills,
+            *_claudecode_project_skill_dirs(workspace_dir),
         ]
     )
 
 
-def _codex_plugin_dirs() -> list[str]:
-    base = os.path.join(codex_home(), "plugins")
-    return _dedup(
-        [
-            base,
-            os.path.join(base, "cache"),
-        ]
-    )
+def _codex_plugin_dirs(workspace_dir: str | None = None) -> list[str]:
+    """Return documented local and installed Codex plugin roots.
+
+    Marketplace ``source.path`` values are resolved relative to the marketplace
+    root and must remain inside it. Git, URL, and npm entries do not expose a
+    stable local source path; installed copies of those entries are still
+    discovered through the canonical cache.
+    """
+    cache = os.path.join(codex_home(), "plugins", "cache")
+    paths = codex_marketplace_plugin_dirs(workspace_dir)
+    paths.append(cache)
+    return _dedup(paths)
+
+
+def codex_marketplace_plugin_dirs(workspace_dir: str | None = None) -> list[str]:
+    """Return exact local plugin roots declared by Codex marketplaces."""
+    paths: list[str] = []
+    for marketplace_file, source_root in _codex_marketplace_files(workspace_dir):
+        paths.extend(_read_codex_local_marketplace_paths(marketplace_file, source_root))
+    return _dedup(paths)
+
+
+def _read_codex_local_marketplace_paths(path: str, source_root: str) -> list[str]:
+    """Safely resolve local ``source.path`` entries from one marketplace."""
+    try:
+        payload = _read_bounded_stable_file(path, max_bytes=1024 * 1024)
+    except OSError:
+        return []
+    try:
+        document = json.loads(payload)
+    except (UnicodeDecodeError, ValueError):
+        return []
+    if not isinstance(document, dict) or not isinstance(document.get("plugins"), list):
+        return []
+
+    root = os.path.abspath(source_root)
+    try:
+        reject_reparse_path(root)
+    except OSError:
+        return []
+    resolved: list[str] = []
+    for plugin in document["plugins"]:
+        if not isinstance(plugin, dict):
+            continue
+        source = plugin.get("source")
+        relative = ""
+        if isinstance(source, str):
+            relative = source
+        elif isinstance(source, dict) and source.get("source") == "local":
+            relative = source.get("path") if isinstance(source.get("path"), str) else ""
+        if not relative.startswith("./"):
+            continue
+        candidate = os.path.abspath(os.path.join(root, relative[2:]))
+        try:
+            if os.path.commonpath([root, candidate]) != root:
+                continue
+            reject_reparse_path(candidate)
+        except (OSError, ValueError):
+            continue
+        resolved.append(candidate)
+    return _dedup(resolved)
 
 
 def _zeptoclaw_plugin_dirs() -> list[str]:
@@ -920,43 +1765,101 @@ def _openclaw_plugin_dirs(openclaw_home: str | None) -> list[str]:
 
 def _claudecode_mcp_servers(workspace_dir: str | None = None) -> list[MCPServerEntry]:
     entries: list[MCPServerEntry] = []
-    entries.extend(
-        _read_mcp_settings_block(
-            os.path.join(claude_config_dir(), "settings.json"),
-            keys=("mcpServers",),
-        )
+    # Claude's documented precedence is local, project, then user. Local and
+    # user entries share one state document, so parse it once and select only
+    # the local entry whose project key resolves to the explicitly pinned
+    # workspace. Never infer a project from DefenseClaw's daemon cwd.
+    local_entries, user_entries = _read_claude_mcp_state(
+        claude_mcp_state_path(),
+        workspace_dir=workspace_dir,
     )
+    entries.extend(local_entries)
     project_mcp = _workspace_path(workspace_dir, ".mcp.json")
     if project_mcp:
         entries.extend(_read_dotmcp_json(project_mcp))
+    entries.extend(user_entries)
     return _dedup_mcp_entries(entries)
+
+
+def _read_claude_mcp_state(
+    path: str,
+    *,
+    workspace_dir: str | None = None,
+) -> tuple[list[MCPServerEntry], list[MCPServerEntry]]:
+    """Return Claude Code ``(local, user)`` MCP entries from one state file.
+
+    Local entries live at ``projects[<absolute workspace>].mcpServers`` and
+    user entries at top-level ``mcpServers``. Project keys are compared using
+    the host filesystem's native normalization rules (including case folding
+    on Windows). An unpinned workspace intentionally yields no local entries.
+    """
+
+    try:
+        with open(path) as handle:
+            data = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return [], []
+    if not isinstance(data, dict):
+        return [], []
+
+    local_entries: list[MCPServerEntry] = []
+    workspace = _workspace_dir(workspace_dir)
+    projects = data.get("projects")
+    if workspace and isinstance(projects, dict):
+        normalized_workspace = os.path.normcase(os.path.normpath(workspace))
+        for project_key, project_state in projects.items():
+            if not isinstance(project_key, str) or not isinstance(project_state, dict):
+                continue
+            normalized_key = os.path.normcase(
+                os.path.normpath(
+                    os.path.abspath(os.path.expanduser(_expand(project_key)))
+                )
+            )
+            if normalized_key != normalized_workspace:
+                continue
+            local_entries = _parse_mcp_servers_value(project_state.get("mcpServers"))
+            break
+
+    user_entries = _parse_mcp_servers_value(data.get("mcpServers"))
+    return local_entries, user_entries
 
 
 def _codex_mcp_servers(workspace_dir: str | None = None) -> list[MCPServerEntry]:
     """Return the merged Codex MCP server list.
 
-    Codex stores its global MCP server registry in
-    ``~/.codex/config.toml`` under the ``[mcp_servers]`` table, and
-    *additionally* honors a project-local ``./.mcp.json`` (a
-    convention shared with Claude Code SDK). Pre-S5.x we only read
-    ``./.mcp.json``, which silently dropped every globally-registered
-    server from ``defenseclaw mcp list`` for Codex users — the
-    gateway's connector watch path read config.toml fine, but the
-    CLI/TUI saw an empty registry.
-
-    We read the global registry first (config.toml) and let the
-    project-local file override matching names, mirroring how Codex
-    itself layers them at runtime.
+    Codex stores both user and project MCP registries in ``config.toml``
+    under ``[mcp_servers]`` tables. Project layers are ordered from project
+    root through the current working directory, and the closest layer wins.
+    This read-only inventory accepts an explicit workspace as the active
+    directory, walks its candidate project layers closest-first, then falls
+    back to the user registry. Codex activates those project layers only for a
+    trusted project; DefenseClaw reports that requirement but does not infer
+    the client's private trust decision from filesystem presence.
     """
     entries: list[MCPServerEntry] = []
-    entries.extend(_read_codex_config_toml(os.path.join(codex_home(), "config.toml")))
-    project_mcp = _workspace_path(workspace_dir, ".mcp.json")
-    if project_mcp:
-        entries.extend(_read_dotmcp_json(project_mcp))
+    for project_config in _codex_project_config_paths(workspace_dir):
+        entries.extend(
+            _read_codex_config_toml(
+                project_config,
+                source_scope="project",
+                trust_required=True,
+            )
+        )
+    entries.extend(
+        _read_codex_config_toml(
+            os.path.join(codex_home(), "config.toml"),
+            source_scope="user",
+        )
+    )
     return _dedup_mcp_entries(entries)
 
 
-def _read_codex_config_toml(path: str) -> list[MCPServerEntry]:
+def _read_codex_config_toml(
+    path: str,
+    *,
+    source_scope: str = "",
+    trust_required: bool = False,
+) -> list[MCPServerEntry]:
     """Parse the ``[mcp_servers]`` table out of Codex's config.toml.
 
     Codex's documented schema (developers.openai.com/codex/config) is::
@@ -969,16 +1872,16 @@ def _read_codex_config_toml(path: str) -> list[MCPServerEntry]:
     Values may also use a flat ``[mcp_servers]`` mapping where each
     entry is itself a table — both shapes are accepted. Failures
     (missing file, malformed TOML, missing block) return ``[]`` so
-    callers can soft-fall back to ``./.mcp.json``.
+    callers can continue inventorying lower-precedence layers.
 
     Implementation note: we use the stdlib :mod:`tomllib` (Python
     3.11+), falling back to the ``tomli`` backport on Python 3.10
     (see the module-level import); no exec-based parser is used.
     """
     try:
-        with open(path, "rb") as f:
-            data = tomllib.load(f)
-    except (OSError, tomllib.TOMLDecodeError):
+        payload = _read_bounded_stable_file(path, max_bytes=1024 * 1024)
+        data = tomllib.loads(payload.decode("utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
         return []
     servers = data.get("mcp_servers")
     if not isinstance(servers, dict):
@@ -995,6 +1898,9 @@ def _read_codex_config_toml(path: str) -> list[MCPServerEntry]:
                 env={str(k): str(v) for k, v in (cfg.get("env", {}) or {}).items()},
                 url=str(cfg.get("url", "") or ""),
                 transport=str(cfg.get("transport", "") or ""),
+                source=path,
+                source_scope=source_scope,
+                trust_required=trust_required,
             )
         )
     return out
@@ -1060,15 +1966,12 @@ def _gemini_mcp_servers() -> list[MCPServerEntry]:
 
 
 def _copilot_mcp_servers(workspace_dir: str | None = None) -> list[MCPServerEntry]:
-    home = str(Path.home())
     entries: list[MCPServerEntry] = []
-    entries.extend(_read_dotmcp_json(os.path.join(home, ".copilot", "mcp-config.json")))
-    github_mcp = _workspace_path(workspace_dir, ".github", "mcp.json")
-    if github_mcp:
-        entries.extend(_read_dotmcp_json(github_mcp))
-    project_mcp = _workspace_path(workspace_dir, ".mcp.json")
-    if project_mcp:
-        entries.extend(_read_dotmcp_json(project_mcp))
+    # Copilot loads both workspace forms at every ancestor through the Git
+    # root. Deeper entries are visited first so name deduplication below
+    # preserves the documented higher-priority registration.
+    for path in copilot_mcp_config_files(workspace_dir):
+        entries.extend(_read_dotmcp_json(path))
     return _dedup_mcp_entries(entries)
 
 
@@ -1106,12 +2009,14 @@ def _read_antigravity_mcp_config(path: str) -> list[MCPServerEntry]:
 
 
 def _opencode_config_paths(workspace_dir: str | None) -> list[str]:
-    """Return opencode's MCP config search paths, global-first.
+    """Return opencode's MCP config search paths in effective merge order.
 
     The global ``~/.config/opencode/opencode.json`` (and ``.jsonc``) is
     always consulted; the project ``<workspace>/opencode.json`` (and
     ``.jsonc``) is added only when an explicit workspace is pinned, so
-    the daemon never infers a project file from its own cwd.
+    the daemon never infers a project file from its own cwd. OpenCode
+    v1.18.10 then merges ``OPENCODE_CONFIG_DIR/opencode.json{,c}`` after
+    the project layer, so the active custom directory is last here too.
     """
     home = str(Path.home())
     paths = [
@@ -1122,7 +2027,11 @@ def _opencode_config_paths(workspace_dir: str | None) -> list[str]:
     if root:
         paths.append(os.path.join(root, "opencode.json"))
         paths.append(os.path.join(root, "opencode.jsonc"))
-    return paths
+    custom = _opencode_config_dir()
+    if custom:
+        paths.append(os.path.join(custom, "opencode.json"))
+        paths.append(os.path.join(custom, "opencode.jsonc"))
+    return _dedup(paths)
 
 
 def _opencode_mcp_servers(workspace_dir: str | None = None) -> list[MCPServerEntry]:
@@ -1131,35 +2040,57 @@ def _opencode_mcp_servers(workspace_dir: str | None = None) -> list[MCPServerEnt
     opencode stores MCP servers under a top-level ``mcp`` map in its
     JSON/JSONC config — a different schema from the ``mcpServers`` shape
     every other connector uses. Global servers are read first, then the
-    pinned project file layers on top, matching how opencode itself
-    loads them at runtime.
+    pinned project and active custom-directory files layer on top, matching
+    how opencode itself loads them at runtime.
     """
-    entries: list[MCPServerEntry] = []
+    order: list[str] = []
+    entries: dict[str, dict[str, Any]] = {}
     for path in _opencode_config_paths(workspace_dir):
-        entries.extend(_read_opencode_mcp(path))
-    return _dedup_mcp_entries(entries)
+        for name, cfg in _read_opencode_mcp_block(path).items():
+            if name not in entries:
+                order.append(name)
+            # OpenCode deep-merges config objects. Merge the raw entry before
+            # projecting it into MCPServerEntry so a higher-precedence
+            # enabled-only override preserves the lower command/url.
+            entries[name] = _merge_opencode_mcp_config(entries.get(name, {}), cfg)
+    return [_opencode_entry_to_mcp(name, entries[name]) for name in order]
 
 
-def _read_opencode_mcp(path: str) -> list[MCPServerEntry]:
-    """Parse opencode's top-level ``mcp`` map into MCPServerEntry list.
+def _read_opencode_mcp_block(path: str) -> dict[str, dict[str, Any]]:
+    """Parse opencode's top-level ``mcp`` map without losing partial overrides.
 
     Tolerates JSONC (``//`` and ``/* */`` comments) via the optional
     ``json5`` backport — mirroring the OpenClaw reader — so a
     hand-authored ``opencode.jsonc`` still parses. A missing file,
-    unparseable content, or missing ``mcp`` block all yield ``[]``.
+    unparseable content, or missing ``mcp`` block all yield ``{}``.
     """
     data = _load_json_or_jsonc(path)
     if not isinstance(data, dict):
-        return []
+        return {}
     servers = data.get("mcp")
     if not isinstance(servers, dict):
-        return []
-    out: list[MCPServerEntry] = []
+        return {}
+    out: dict[str, dict[str, Any]] = {}
     for name, cfg in servers.items():
         if not isinstance(cfg, dict):
             continue
-        out.append(_opencode_entry_to_mcp(str(name), cfg))
+        out[str(name)] = cfg
     return out
+
+
+def _merge_opencode_mcp_config(
+    base: dict[str, Any],
+    override: dict[str, Any],
+) -> dict[str, Any]:
+    """Deep-merge one OpenCode MCP config layer over another."""
+    merged = dict(base)
+    for key, value in override.items():
+        previous = merged.get(key)
+        if isinstance(previous, dict) and isinstance(value, dict):
+            merged[key] = _merge_opencode_mcp_config(previous, value)
+        else:
+            merged[key] = value
+    return merged
 
 
 def _opencode_entry_to_mcp(name: str, cfg: dict[str, Any]) -> MCPServerEntry:
@@ -1173,8 +2104,9 @@ def _opencode_entry_to_mcp(name: str, cfg: dict[str, Any]) -> MCPServerEntry:
     kind = str(cfg.get("type", "") or "").strip().lower()
     url = str(cfg.get("url", "") or "")
     command_list = cfg.get("command")
+    disabled = cfg.get("enabled", True) is False
     if kind == "remote" or (not kind and url and not command_list):
-        return MCPServerEntry(name=name, url=url, transport="remote")
+        return MCPServerEntry(name=name, url=url, transport="remote", disabled=disabled)
     command = ""
     args: list[str] = []
     if isinstance(command_list, list) and command_list:
@@ -1183,7 +2115,14 @@ def _opencode_entry_to_mcp(name: str, cfg: dict[str, Any]) -> MCPServerEntry:
     elif isinstance(command_list, str):
         command = command_list
     env = {str(k): str(v) for k, v in (cfg.get("environment", {}) or {}).items()}
-    return MCPServerEntry(name=name, command=command, args=args, env=env, transport="local")
+    return MCPServerEntry(
+        name=name,
+        command=command,
+        args=args,
+        env=env,
+        transport="local",
+        disabled=disabled,
+    )
 
 
 def _load_json_or_jsonc(path: str) -> Any:
@@ -1300,7 +2239,7 @@ def _read_zepto_config(path: str) -> list[MCPServerEntry]:
 
 
 def _windsurf_mcp_paths(home: str | None = None) -> list[str]:
-    home = home or str(Path.home())
+    home = home or windsurf_user_home()
     return [
         os.path.join(home, ".codeium", "windsurf", "mcp_config.json"),
         os.path.join(home, ".codeium", "windsurf", "mcp.json"),
@@ -1494,10 +2433,11 @@ def set_mcp_server(
                      ``(path, json_value_str)``). Caller injects this
                      so we can keep subprocess access out of this
                      module.
-    * Claude Code  — ``$HOME/.claude/settings.json[mcpServers][name]``
+    * Claude Code  — ``$HOME/.claude.json[mcpServers][name]`` (or the
+                     equivalent file under ``CLAUDE_CONFIG_DIR``)
                      via :func:`_atomic_json_merge`.
     * Codex        — ``~/.codex/config.toml[mcp_servers][name]``
-                     by default, or ``<workspace>/.mcp.json`` when
+                     by default, or ``<workspace>/.codex/config.toml`` when
                      *workspace_dir* is explicit.
     * opencode     — global ``~/.config/opencode/opencode.json[mcp][name]``
                      by default, or ``<workspace>/opencode.json`` when
@@ -1522,7 +2462,7 @@ def set_mcp_server(
         openclaw_config_setter(f"mcp.servers.{name}", json.dumps(entry))
         return
     if name_n == "claudecode":
-        path = os.path.join(claude_config_dir(), "settings.json")
+        path = claude_mcp_state_path()
         try:
             _set_claudecode_mcp_server(path, name, entry)
         except UnsafePathError as exc:
@@ -1530,10 +2470,12 @@ def set_mcp_server(
         return
     if name_n == "codex":
         workspace = _workspace_dir(workspace_dir)
-        if workspace:
-            _atomic_json_merge(os.path.join(workspace, ".mcp.json"), ("mcpServers", name), entry)
-        else:
-            _set_codex_global_mcp_server(name, entry)
+        path = (
+            os.path.join(workspace, ".codex", "config.toml")
+            if workspace
+            else _codex_config_toml_path()
+        )
+        _set_codex_mcp_server_at_path(path, name, entry)
         return
     if name_n == "hermes":
         _atomic_yaml_merge(hermes_config_path(), ("mcp", "servers", name), entry)
@@ -1566,7 +2508,7 @@ def set_mcp_server(
         path = (
             os.path.join(workspace, ".github", "mcp.json")
             if workspace
-            else os.path.join(str(Path.home()), ".copilot", "mcp-config.json")
+            else os.path.join(copilot_home(), "mcp-config.json")
         )
         _atomic_json_merge(path, ("mcpServers", name), entry)
         return
@@ -1607,8 +2549,8 @@ def unset_mcp_server(
 ) -> None:
     """Remove an MCP server from the active connector's registry.
 
-    Mirrors :func:`set_mcp_server` and uses :func:`_atomic_json_delete`
-    on Claude Code / Codex; OpenClaw delegates to the injected
+    Mirrors :func:`set_mcp_server` and uses the connector's native JSON or TOML
+    format; OpenClaw delegates to the injected
     *openclaw_config_unsetter*; ZeptoClaw raises
     :class:`MCPWriteUnsupportedError`.
     """
@@ -1623,7 +2565,7 @@ def unset_mcp_server(
         openclaw_config_unsetter(f"mcp.servers.{name}")
         return
     if name_n == "claudecode":
-        path = os.path.join(claude_config_dir(), "settings.json")
+        path = claude_mcp_state_path()
         try:
             _unset_claudecode_mcp_server(path, name)
         except UnsafePathError as exc:
@@ -1631,10 +2573,12 @@ def unset_mcp_server(
         return
     if name_n == "codex":
         workspace = _workspace_dir(workspace_dir)
-        if workspace:
-            _atomic_json_delete(os.path.join(workspace, ".mcp.json"), ("mcpServers", name))
-        else:
-            _unset_codex_global_mcp_server(name)
+        path = (
+            os.path.join(workspace, ".codex", "config.toml")
+            if workspace
+            else _codex_config_toml_path()
+        )
+        _unset_codex_mcp_server_at_path(path, name)
         return
     if name_n == "hermes":
         _atomic_yaml_delete(hermes_config_path(), ("mcp", "servers", name))
@@ -1665,7 +2609,7 @@ def unset_mcp_server(
         path = (
             os.path.join(workspace, ".github", "mcp.json")
             if workspace
-            else os.path.join(str(Path.home()), ".copilot", "mcp-config.json")
+            else os.path.join(copilot_home(), "mcp-config.json")
         )
         _atomic_json_delete(path, ("mcpServers", name))
         return
@@ -1759,13 +2703,17 @@ def _strip_codex_mcp_block(text: str, name: str) -> str:
     return "\n".join(out).rstrip() + ("\n" if out else "")
 
 
-def _set_codex_global_mcp_server(name: str, entry: dict[str, Any]) -> None:
-    path = _codex_config_toml_path()
+def _set_codex_mcp_server_at_path(path: str, name: str, entry: dict[str, Any]) -> None:
     try:
         with open(path, encoding="utf-8") as f:
             text = f.read()
     except FileNotFoundError:
         text = ""
+    if text.strip():
+        try:
+            tomllib.loads(text)
+        except tomllib.TOMLDecodeError as exc:
+            raise ValueError(f"refusing to modify malformed Codex config.toml: {exc}") from exc
     updated = _strip_codex_mcp_block(text, name)
     if updated and not updated.endswith("\n\n"):
         updated = updated.rstrip() + "\n\n"
@@ -1774,8 +2722,7 @@ def _set_codex_global_mcp_server(name: str, entry: dict[str, Any]) -> None:
     _atomic_write_text(path, updated)
 
 
-def _unset_codex_global_mcp_server(name: str) -> bool:
-    path = _codex_config_toml_path()
+def _unset_codex_mcp_server_at_path(path: str, name: str) -> bool:
     try:
         with open(path, encoding="utf-8") as f:
             text = f.read()
@@ -1974,9 +2921,9 @@ def _unset_antigravity_mcp_server(
 # where each entry is ``{type: local, command: [...], environment: {...},
 # enabled: bool}`` or ``{type: remote, url: ..., enabled: bool}`` — a
 # different shape from the ``mcpServers`` schema the other JSON connectors
-# use. Writes default to the global ``~/.config/opencode/opencode.json``
-# and only touch a project ``<workspace>/opencode.json`` when an explicit
-# workspace is pinned.
+# use. Writes target an explicitly pinned project first, then the active
+# ``OPENCODE_CONFIG_DIR/opencode.json``, and otherwise the documented global
+# ``~/.config/opencode/opencode.json``.
 #
 # Write policy is plain JSON (documented, mcp.md M5 open decision): every
 # unrelated key is round-tripped by value, but JSONC comments are NOT
@@ -1988,9 +2935,18 @@ def _unset_antigravity_mcp_server(
 
 def _opencode_write_path(workspace_dir: str | None) -> str:
     root = _workspace_dir(workspace_dir)
-    if root:
-        return os.path.join(root, "opencode.json")
-    return os.path.join(str(Path.home()), ".config", "opencode", "opencode.json")
+    config_root = root or _opencode_config_dir() or os.path.join(
+        str(Path.home()),
+        ".config",
+        "opencode",
+    )
+    # OpenCode loads .jsonc after .json in component directories. Update the
+    # existing higher-precedence document when present so a same-name entry in
+    # it cannot silently override a newly written lower-precedence JSON file.
+    jsonc = os.path.join(config_root, "opencode.jsonc")
+    if os.path.lexists(jsonc):
+        return jsonc
+    return os.path.join(config_root, "opencode.json")
 
 
 def _opencode_mcp_entry_from_generic(entry: dict[str, Any]) -> dict[str, Any]:
@@ -2074,19 +3030,25 @@ def _unset_opencode_mcp_server(
     *,
     workspace_dir: str | None = None,
 ) -> bool:
-    path = _opencode_write_path(workspace_dir)
-    if not os.path.lexists(path):
-        return False
-    _reject_symlink_config(path)
-    data = _read_opencode_doc_for_write(path)
-    mcp = data.get("mcp")
-    if not isinstance(mcp, dict) or name not in mcp:
-        return False
-    del mcp[name]
-    data["mcp"] = mcp
-    _capture_managed_mcp_backup(path)
-    _atomic_write_json(path, data)
-    return True
+    updates: list[tuple[str, dict[str, Any]]] = []
+    # OpenCode merges every active layer. Removing only the winning custom or
+    # project declaration would let a same-name lower layer silently resurface,
+    # so validate first and then remove the name from every active config file.
+    for path in _opencode_config_paths(workspace_dir):
+        if not os.path.lexists(path):
+            continue
+        _reject_symlink_config(path)
+        data = _read_opencode_doc_for_write(path)
+        mcp = data.get("mcp")
+        if not isinstance(mcp, dict) or name not in mcp:
+            continue
+        del mcp[name]
+        data["mcp"] = mcp
+        updates.append((path, data))
+    for path, data in updates:
+        _capture_managed_mcp_backup(path)
+        _atomic_write_json(path, data)
+    return bool(updates)
 
 
 # ---------------------------------------------------------------------------
@@ -2096,7 +3058,7 @@ def _unset_opencode_mcp_server(
 # These mirror the Go-side atomicWriteFile pattern in
 # internal/gateway/connector/codex.go: write to a tempfile in the same
 # directory, fsync, then os.replace. Permissions are forced to 0o600
-# because the targets (~/.claude/settings.json, ./.mcp.json) frequently
+# because the targets (~/.claude.json, ./.mcp.json) frequently
 # carry credentials in the env: block.
 
 
@@ -4359,7 +5321,7 @@ def _unset_claudecode_mcp_server(path: str, name: str) -> bool:
 def _reject_symlink_config(path: str) -> None:
     """Refuse to read/merge through a symlinked connector config path.
 
-    Workspace-scoped MCP configs (Codex ``.mcp.json``, Cursor
+    Workspace-scoped MCP configs (Codex ``.codex/config.toml``, Cursor
     ``.cursor/mcp.json``, Copilot ``.github/mcp.json``) live in an
     operator-chosen CWD. A malicious repository can pre-place that path
     as a symlink to a private file readable by the operator (``~/.netrc``,
@@ -4598,7 +5560,7 @@ def restore_managed_mcp_backup(path: str) -> bool:
 
 
 def _capture_managed_mcp_backup(path: str) -> None:
-    # workspace-scoped MCP configs (Codex .mcp.json,
+    # workspace-scoped MCP configs (Codex .codex/config.toml,
     # Cursor .cursor/mcp.json, Copilot .github/mcp.json) live in a
     # CWD chosen by the operator. A malicious repository can pre-place
     # those config paths as symlinks to private files readable by the
@@ -4679,7 +5641,7 @@ def _managed_mcp_backup_path(path: str) -> str:
 # ---------------------------------------------------------------------------
 #
 # The historical ``.defenseclaw-<name>.bak`` sibling-file scheme works
-# fine for user-scope configs (``~/.claude/settings.json``) because the
+# fine for user-scope configs (``~/.claude.json``) because the
 # absolute path is stable. It breaks for explicitly pinned workspace configs
 # (for example Copilot's ``<workspace>/.github/mcp.json``) because the .bak
 # is anchored to the target directory; restoring after a ``cd`` used to lose

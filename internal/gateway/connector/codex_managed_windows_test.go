@@ -84,7 +84,7 @@ func TestCodexManagedHooksPreserveUnrelatedConfigWithoutPrivateTrustState(t *tes
 	if operatorHandler["command"] != "operator-policy.exe" {
 		t.Fatalf("operator managed hook changed: %#v", operatorHandler)
 	}
-	if err := verifyManagedCodexHookMatrix(hooks, managedPath, filepath.Join(opts.DataDir, "hooks")); err != nil {
+	if err := verifyManagedCodexHookMatrix(hooks, managedPath, filepath.Join(opts.DataDir, "hooks"), opts); err != nil {
 		t.Fatalf("managed hook matrix: %v", err)
 	}
 	if got := conn.HookCapabilities(opts).ConfigPath; got != managedPath {
@@ -295,6 +295,7 @@ func codexLegacyHooksForExactRestoreTest(
 		configPath,
 		filepath.Join(hooksDir, "codex-hook.sh"),
 		hooksDir,
+		SetupOpts{},
 		true,
 	); err != nil {
 		t.Fatalf("seed legacy Codex hooks: %v", err)

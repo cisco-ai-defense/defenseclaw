@@ -289,10 +289,25 @@ func runConnectorCmd(t *testing.T, args ...string) (stdout, stderr string, exitC
 	return out.String(), errb.String(), exitCode
 }
 
+func assertConnectorReconcileStderr(t *testing.T, name, stderr string) {
+	t.Helper()
+	warning, err := connector.CheckPlatformSupport(name, runtime.GOOS)
+	if err != nil {
+		t.Fatalf("platform support for %s: %v", name, err)
+	}
+	expected := ""
+	if warning != "" {
+		expected = fmt.Sprintf("connector reconcile %s: warning: %s\n", name, warning)
+	}
+	if stderr != expected {
+		t.Fatalf("%s reconcile stderr = %q, want %q", name, stderr, expected)
+	}
+}
+
 func TestConnectorReconcileRefreshesOnlySelectedRegistration(t *testing.T) {
 	dataDir := testenv.PrivateTempDir(t)
 	seedCodexSelectionForTest(t, dataDir)
-	home := t.TempDir()
+	home := testenv.PrivateTempDir(t)
 	codexPath := filepath.Join(home, ".codex", "config.toml")
 	if err := os.MkdirAll(filepath.Dir(codexPath), 0o700); err != nil {
 		t.Fatal(err)
@@ -322,9 +337,7 @@ func TestConnectorReconcileRefreshesOnlySelectedRegistration(t *testing.T) {
 		"claudecode": {HookFailMode: "open"},
 	}
 	stdout, stderr, _ := runConnectorCmd(t, "reconcile", "--connector", "codex", "--json")
-	if stderr != "" {
-		t.Fatalf("reconcile stderr: %s", stderr)
-	}
+	assertConnectorReconcileStderr(t, "codex", stderr)
 	if !strings.Contains(stdout, `"fail_mode":"closed"`) {
 		t.Fatalf("reconcile output = %s", stdout)
 	}
@@ -361,10 +374,56 @@ func TestConnectorReconcileRefreshesOnlySelectedRegistration(t *testing.T) {
 	}
 }
 
+func TestConnectorReconcileCopilotAllowsOnlyHomeBoundInstallerMaintenance(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("native Windows Setup maintenance contract")
+	}
+	dataDir := testenv.PrivateTempDir(t)
+	home := filepath.Join(testenv.PrivateTempDir(t), ".copilot")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	defer withConnectorState(t, dataDir, "copilot")()
+	cfg.Guardrail.Enabled = true
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+		"copilot": {HookFailMode: "open"},
+	}
+
+	_, stderr, _ := runConnectorCmd(t, "reconcile", "--connector", "copilot", "--json")
+	if !strings.Contains(stderr, "not certified on windows") {
+		t.Fatalf("unbound Copilot reconcile bypassed public platform gate: %q", stderr)
+	}
+	if _, err := os.Stat(filepath.Join(home, "hooks", "defenseclaw.json")); !os.IsNotExist(err) {
+		t.Fatalf("unbound Copilot reconcile mutated hook config: %v", err)
+	}
+
+	connectorFlagConfigHome = home
+	stdout, stderr, _ := runConnectorCmd(t, "reconcile", "--connector", "copilot", "--json")
+	if !strings.Contains(stderr, "installer maintenance for not-certified native Windows connector") {
+		t.Fatalf("bound Copilot reconcile omitted certification warning: %q", stderr)
+	}
+	if !strings.Contains(stdout, `"connector":"copilot"`) {
+		t.Fatalf("bound Copilot reconcile output = %q", stdout)
+	}
+	hookConfig := filepath.Join(home, "hooks", "defenseclaw.json")
+	if _, err := os.Stat(hookConfig); err != nil {
+		t.Fatalf("bound Copilot reconcile did not publish hook config: %v", err)
+	}
+
+	_, stderr, exitCode := runConnectorCmd(t, "teardown", "--connector", "copilot")
+	if stderr != "" || exitCode != 0 {
+		t.Fatalf("Copilot teardown failed: exit=%d stderr=%q", exitCode, stderr)
+	}
+	_, stderr, exitCode = runConnectorCmd(t, "verify", "--connector", "copilot", "--json")
+	if stderr != "" || exitCode != 0 {
+		t.Fatalf("Copilot verify failed: exit=%d stderr=%q", exitCode, stderr)
+	}
+}
+
 func TestConnectorReconcileMixedModesKeepsBothContractsCurrent(t *testing.T) {
 	dataDir := testenv.PrivateTempDir(t)
 	seedCodexSelectionForTest(t, dataDir)
-	home := t.TempDir()
+	home := testenv.PrivateTempDir(t)
 	testenv.SetHome(t, home)
 	claudePath := filepath.Join(home, ".claude", "settings.json")
 	codexPath := filepath.Join(home, ".codex", "config.toml")
@@ -403,9 +462,7 @@ func TestConnectorReconcileMixedModesKeepsBothContractsCurrent(t *testing.T) {
 			t.Fatalf("ensure %s token: %v", name, err)
 		}
 		_, stderr, _ := runConnectorCmd(t, "reconcile", "--connector", name, "--json")
-		if stderr != "" {
-			t.Fatalf("initial %s reconcile: %s", name, stderr)
-		}
+		assertConnectorReconcileStderr(t, name, stderr)
 	}
 	initial := assertMixedHookContractsCurrent(t, dataDir, home)
 	codexBefore, err := os.ReadFile(codexPath)
@@ -418,9 +475,7 @@ func TestConnectorReconcileMixedModesKeepsBothContractsCurrent(t *testing.T) {
 	claudeMode.HookFailMode = "closed"
 	cfg.Guardrail.Connectors["claudecode"] = claudeMode
 	_, stderr, _ := runConnectorCmd(t, "reconcile", "--connector", "claudecode", "--json")
-	if stderr != "" {
-		t.Fatalf("Claude close reconcile: %s", stderr)
-	}
+	assertConnectorReconcileStderr(t, "claudecode", stderr)
 	closed := assertMixedHookContractsCurrent(t, dataDir, home)
 	if closed.Connectors["claudecode"].HookFailMode != "closed" || closed.Connectors["codex"].HookFailMode != "open" {
 		t.Fatalf("mixed lock modes are wrong: Claude=%q Codex=%q", closed.Connectors["claudecode"].HookFailMode, closed.Connectors["codex"].HookFailMode)
@@ -468,9 +523,7 @@ func TestConnectorReconcileMixedModesKeepsBothContractsCurrent(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, stderr, _ = runConnectorCmd(t, "reconcile", "--connector", "claudecode", "--json")
-	if stderr != "" {
-		t.Fatalf("legacy migration reconcile: %s", stderr)
-	}
+	assertConnectorReconcileStderr(t, "claudecode", stderr)
 	assertMixedHookContractsCurrent(t, dataDir, home)
 
 	// Reverse the mixed state and repeatedly switch one connector.  Every
@@ -479,16 +532,12 @@ func TestConnectorReconcileMixedModesKeepsBothContractsCurrent(t *testing.T) {
 	claudeMode.HookFailMode = "open"
 	cfg.Guardrail.Connectors["claudecode"] = claudeMode
 	_, stderr, _ = runConnectorCmd(t, "reconcile", "--connector", "claudecode", "--json")
-	if stderr != "" {
-		t.Fatalf("Claude reopen reconcile: %s", stderr)
-	}
+	assertConnectorReconcileStderr(t, "claudecode", stderr)
 	codexMode := cfg.Guardrail.Connectors["codex"]
 	codexMode.HookFailMode = "closed"
 	cfg.Guardrail.Connectors["codex"] = codexMode
 	_, stderr, _ = runConnectorCmd(t, "reconcile", "--connector", "codex", "--json")
-	if stderr != "" {
-		t.Fatalf("Codex close reconcile: %s", stderr)
-	}
+	assertConnectorReconcileStderr(t, "codex", stderr)
 	reverse := assertMixedHookContractsCurrent(t, dataDir, home)
 	if reverse.Connectors["claudecode"].HookFailMode != "open" || reverse.Connectors["codex"].HookFailMode != "closed" {
 		t.Fatalf("reverse mixed modes are wrong: %+v", reverse.Connectors)
@@ -498,9 +547,7 @@ func TestConnectorReconcileMixedModesKeepsBothContractsCurrent(t *testing.T) {
 		claudeMode.HookFailMode = mode
 		cfg.Guardrail.Connectors["claudecode"] = claudeMode
 		_, stderr, _ = runConnectorCmd(t, "reconcile", "--connector", "claudecode", "--json")
-		if stderr != "" {
-			t.Fatalf("repeated Claude %s reconcile: %s", mode, stderr)
-		}
+		assertConnectorReconcileStderr(t, "claudecode", stderr)
 		assertMixedHookContractsCurrent(t, dataDir, home)
 	}
 }
@@ -515,7 +562,7 @@ func TestResolveActiveConnectorName_FlagWins(t *testing.T) {
 }
 
 func TestResolveActiveConnectorName_StateFileFallback(t *testing.T) {
-	dir := t.TempDir()
+	dir := testenv.PrivateTempDir(t)
 	defer withConnectorState(t, dir, "")()
 	if err := connector.SaveActiveConnector(dir, "claudecode"); err != nil {
 		t.Fatal(err)
@@ -698,10 +745,10 @@ func TestConnectorTeardown_UnknownConnector(t *testing.T) {
 }
 
 func TestConnectorTeardownMarksConnectorInactiveBeforeRemoval(t *testing.T) {
-	dir := t.TempDir()
+	dir := testenv.PrivateTempDir(t)
 	defer withConnectorState(t, dir, "cursor")()
 
-	cfgPath := filepath.Join(t.TempDir(), "hooks.json")
+	cfgPath := filepath.Join(testenv.PrivateTempDir(t), "hooks.json")
 	previous := connector.CursorHooksPathOverride
 	connector.CursorHooksPathOverride = cfgPath
 	t.Cleanup(func() { connector.CursorHooksPathOverride = previous })
@@ -731,10 +778,10 @@ func TestConnectorTeardownMarksConnectorInactiveBeforeRemoval(t *testing.T) {
 }
 
 func TestConnectorTeardownFailureRestoresActiveState(t *testing.T) {
-	dir := t.TempDir()
+	dir := testenv.PrivateTempDir(t)
 	defer withConnectorState(t, dir, "cursor")()
 
-	cfgPath := filepath.Join(t.TempDir(), "hooks.json")
+	cfgPath := filepath.Join(testenv.PrivateTempDir(t), "hooks.json")
 	previous := connector.CursorHooksPathOverride
 	connector.CursorHooksPathOverride = cfgPath
 	t.Cleanup(func() { connector.CursorHooksPathOverride = previous })

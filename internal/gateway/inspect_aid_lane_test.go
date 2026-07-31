@@ -71,7 +71,7 @@ func TestHandleAgentHook_AIDAppliesAcrossHookProfiles(t *testing.T) {
 		{"geminicli", "/api/v1/geminicli/hook", "BeforeTool"},
 		{"hermes", "/api/v1/hermes/hook", "pre_tool_call"},
 		{"windsurf", "/api/v1/windsurf/hook", "pre_run_command"},
-		{"copilot", "/api/v1/copilot/hook", "PreToolUse"},
+		{"copilot", "/api/v1/copilot/hook", "preToolUse"},
 		{"openhands", "/api/v1/openhands/hook", "PreToolUse"},
 	}
 
@@ -115,6 +115,12 @@ func TestHandleAgentHook_AIDAppliesAcrossHookProfiles(t *testing.T) {
 				t.Fatalf("marshal: %v", err)
 			}
 			req := httptest.NewRequest(http.MethodPost, tc.path, bytes.NewReader(body))
+			if tc.connector == "copilot" {
+				req.Header.Set("X-DefenseClaw-Copilot-Event", tc.event)
+			}
+			if tc.connector == "codex" {
+				setTestCodexHookBinding(req, tc.event, defaultTestCodexHookContract)
+			}
 			w := httptest.NewRecorder()
 			api.handleAgentHook(tc.connector).ServeHTTP(w, req)
 			if w.Code != http.StatusOK {

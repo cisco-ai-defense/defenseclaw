@@ -53,24 +53,24 @@ var proxyConnectors = map[string]struct{}{
 // cli/defenseclaw/platform_support.py WINDOWS_CONNECTOR_SUPPORT mapping.
 var windowsConnectorSupport = map[string]PlatformSupport{
 	"codex": {
-		Status: PlatformSupported,
-		Reason: "Codex CLI and the DefenseClaw hook entrypoint are certified on native Windows x64.",
+		Status: PlatformPreview,
+		Reason: "Codex CLI and the DefenseClaw hook entrypoint are available as a native Windows x64 preview; no authentic packaged plus official-client release-certification record is available.",
 	},
 	"claudecode": {
-		Status: PlatformSupported,
-		Reason: "Claude Code with Git for Windows and native hooks is certified on native Windows x64.",
+		Status: PlatformPreview,
+		Reason: "Claude Code and the DefenseClaw native executable hook entrypoint are available as a native Windows x64 preview; no immutable packaged plus official-client certification record is persisted.",
 	},
 	"cursor": {
-		Status: PlatformNotCertified,
-		Reason: "The DefenseClaw Cursor integration has not completed native Windows x64 certification.",
+		Status: PlatformPreview,
+		Reason: "Cursor Agent and the DefenseClaw PowerShell hook adapter are available as a native Windows x64 preview pending integrated packaged and official-client validation.",
 	},
 	"windsurf": {
-		Status: PlatformNotCertified,
-		Reason: "The DefenseClaw Windsurf integration has not completed native Windows x64 certification.",
+		Status: PlatformPreview,
+		Reason: "Windsurf Cascade hooks and the native PowerShell adapter are implemented; packaged and official-client Windows x64 certification is pending.",
 	},
 	"geminicli": {
-		Status: PlatformNotCertified,
-		Reason: "The DefenseClaw Gemini CLI integration has not completed native Windows x64 certification.",
+		Status: PlatformUnsupported,
+		Reason: "Gemini CLI native Windows support is excluded from this release because the intended product and audience path was discontinued; existing non-Windows support is unchanged.",
 	},
 	"copilot": {
 		Status: PlatformNotCertified,
@@ -78,23 +78,23 @@ var windowsConnectorSupport = map[string]PlatformSupport{
 	},
 	"antigravity": {
 		Status: PlatformNotCertified,
-		Reason: "The DefenseClaw Antigravity integration has not completed native Windows x64 certification.",
+		Reason: "The native Windows x64 implementation is awaiting integrated packaged and official-client validation.",
 	},
 	"opencode": {
-		Status: PlatformNotCertified,
-		Reason: "The DefenseClaw OpenCode integration has not completed native Windows x64 certification.",
+		Status: PlatformPreview,
+		Reason: "OpenCode native Windows support is preview pending integrated packaged Setup and official-client validation; OpenCode recommends WSL but does not require it.",
 	},
 	"hermes": {
-		Status: PlatformNotCertified,
-		Reason: "The DefenseClaw Hermes integration has not completed native Windows x64 certification.",
+		Status: PlatformPreview,
+		Reason: "Hermes native shell hooks use a direct DefenseClaw executable; packaged and official-client Windows x64 certification is pending.",
 	},
 	"openhands": {
 		Status: PlatformUnsupported,
 		Reason: "OpenHands CLI requires WSL; DefenseClaw does not implement a WSL connector path.",
 	},
 	"omnigent": {
-		Status: PlatformUnsupported,
-		Reason: "OmniGent has no supported native Windows terminal/sandbox path for this connector.",
+		Status: PlatformPreview,
+		Reason: "OmniGent 0.7.0 supports native Windows server and SDK harnesses in degraded mode; DefenseClaw uses its awaited in-process policy API without terminal wrapping or filesystem/network sandbox parity.",
 	},
 	"openclaw": {
 		Status: PlatformUnsupported,

@@ -37,12 +37,14 @@ Coverage:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -307,6 +309,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
             with open(runtime, "w", encoding="utf-8") as fh:
                 fh.write(
                     "# defenseclaw-managed-hook v8\n"
+                    f"$failClosed = ${str(fail_closed).lower()}\n"
                     "$startInfo = New-Object System.Diagnostics.ProcessStartInfo\n"
                     "$startInfo.RedirectStandardOutput = $true\n"
                     "$process.WaitForExit()\n"
@@ -315,16 +318,42 @@ class TestCheckConnectorHooks(unittest.TestCase):
             command = "& '" + runtime.replace("'", "''") + "'"
         hooks_path = os.path.join(tmp, "hooks.json")
         with open(hooks_path, "w", encoding="utf-8") as fh:
+            events = (
+                "sessionStart",
+                "sessionEnd",
+                "preToolUse",
+                "postToolUse",
+                "postToolUseFailure",
+                "subagentStart",
+                "subagentStop",
+                "beforeShellExecution",
+                "beforeMCPExecution",
+                "afterShellExecution",
+                "afterMCPExecution",
+                "beforeReadFile",
+                "beforeTabFileRead",
+                "afterFileEdit",
+                "afterTabFileEdit",
+                "beforeSubmitPrompt",
+                "afterAgentResponse",
+                "afterAgentThought",
+                "stop",
+                "preCompact",
+                "workspaceOpen",
+            )
             json.dump(
                 {
                     "version": 1,
                     "hooks": {
-                        "beforeSubmitPrompt": [
+                        event: [
                             {
+                                "type": "command",
                                 "command": command,
+                                "timeout": 30,
                                 "failClosed": fail_closed,
                             }
                         ]
+                        for event in events
                     },
                 },
                 fh,
@@ -355,7 +384,30 @@ class TestCheckConnectorHooks(unittest.TestCase):
         self.assertIn(runtime, r.checks[-1]["detail"])
         self.assertIn("mode=observe", r.checks[-1]["detail"])
         self.assertIn("failClosed=false", r.checks[-1]["detail"])
+        self.assertIn("fail-open (Cursor default)", r.checks[-1]["detail"])
+        self.assertIn("fire-and-forget=sessionStart,sessionEnd", r.checks[-1]["detail"])
         self.assertNotIn("inspect-tool.sh", r.checks[-1]["detail"])
+
+    @patch("defenseclaw.commands.cmd_doctor._probe_cursor_windows_runtime")
+    def test_cursor_doctor_is_passive_by_default(self, probe_mock) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg, hooks_path, _runtime = self._cursor_runtime_case(
+                tmp,
+                mode="observe",
+                fail_closed=False,
+            )
+            r = _DoctorResult()
+            _check_cursor_configured_runtime(
+                cfg,
+                hooks_path,
+                "Cursor hooks",
+                r,
+                platform_name="nt",
+            )
+
+        probe_mock.assert_not_called()
+        self.assertEqual(r.checks[-1]["status"], "pass")
+        self.assertNotIn("live round trip", r.checks[-1]["detail"])
 
     def test_cursor_doctor_rejects_legacy_direct_windows_launcher(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -419,10 +471,36 @@ class TestCheckConnectorHooks(unittest.TestCase):
         self.assertEqual(r.checks[-1]["status"], "pass")
         self.assertIn("mode=action", r.checks[-1]["detail"])
         self.assertIn("failClosed=true", r.checks[-1]["detail"])
+        self.assertIn("failure=fail-closed", r.checks[-1]["detail"])
+
+    def test_cursor_doctor_rejects_millisecond_timeout(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            cfg, hooks_path, _runtime = self._cursor_runtime_case(
+                tmp,
+                mode="observe",
+                fail_closed=False,
+            )
+            with open(hooks_path, encoding="utf-8") as fh:
+                hooks = json.load(fh)
+            hooks["hooks"]["preToolUse"][0]["timeout"] = 30000
+            with open(hooks_path, "w", encoding="utf-8") as fh:
+                json.dump(hooks, fh)
+            r = _DoctorResult()
+            _check_cursor_configured_runtime(
+                cfg,
+                hooks_path,
+                "Cursor hooks",
+                r,
+                platform_name="nt",
+                probe_runtime=False,
+            )
+
+        self.assertEqual(r.checks[-1]["status"], "fail")
+        self.assertIn("timeout=30 seconds", r.checks[-1]["detail"])
 
     @patch("defenseclaw.commands.cmd_doctor._http_probe")
     @patch("defenseclaw.commands.cmd_doctor.subprocess.run")
-    def test_cursor_windows_runtime_probe_requires_json_and_counter_advance(
+    def test_cursor_windows_runtime_probe_accepts_event_native_json_and_counter_advance(
         self,
         run_mock,
         http_probe_mock,
@@ -446,7 +524,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
         run_mock.return_value = subprocess.CompletedProcess(
             args=["powershell.exe"],
             returncode=0,
-            stdout=b'{"continue":true}',
+            stdout=b"{}",
             stderr=b"",
         )
         cfg = MagicMock()
@@ -465,6 +543,31 @@ class TestCheckConnectorHooks(unittest.TestCase):
 
     @patch("defenseclaw.commands.cmd_doctor._http_probe")
     @patch("defenseclaw.commands.cmd_doctor.subprocess.run")
+    def test_cursor_windows_runtime_probe_rejects_generic_continue_output(
+        self,
+        run_mock,
+        http_probe_mock,
+    ) -> None:
+        health = json.dumps(
+            {"connectors": [{"name": "cursor", "requests": 4, "errors": 0}]}
+        )
+        http_probe_mock.return_value = (200, health)
+        run_mock.return_value = subprocess.CompletedProcess(
+            args=["powershell.exe"],
+            returncode=0,
+            stdout=b'{"continue":true}',
+            stderr=b"",
+        )
+        cfg = MagicMock()
+        cfg.gateway.api_port = 18970
+
+        ok, detail = _probe_cursor_windows_runtime(cfg, r"C:\DefenseClaw\cursor-hook.ps1")
+
+        self.assertFalse(ok)
+        self.assertIn("invalid sessionStart fields: continue", detail)
+
+    @patch("defenseclaw.commands.cmd_doctor._http_probe")
+    @patch("defenseclaw.commands.cmd_doctor.subprocess.run")
     def test_cursor_windows_runtime_probe_rejects_fail_open_without_delivery(
         self,
         run_mock,
@@ -477,7 +580,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
         run_mock.return_value = subprocess.CompletedProcess(
             args=["powershell.exe"],
             returncode=0,
-            stdout=b'{"continue":true}',
+            stdout=b"{}",
             stderr=b"",
         )
         cfg = MagicMock()
@@ -797,6 +900,23 @@ class TestCheckHookHealth(unittest.TestCase):
             )
         return cfg
 
+    def _write_omnigent_backup(self, data_dir: str, logical: str, path: str) -> None:
+        backup_dir = os.path.join(data_dir, "connector_backups", "omnigent")
+        os.makedirs(backup_dir, exist_ok=True)
+        with open(path, "rb") as fh:
+            digest = hashlib.sha256(fh.read()).hexdigest()
+        with open(os.path.join(backup_dir, f"{logical}.json"), "w", encoding="utf-8") as fh:
+            json.dump(
+                {
+                    "version": 1,
+                    "connector": "omnigent",
+                    "logical_name": logical,
+                    "path": path,
+                    "post_sha256": digest,
+                },
+                fh,
+            )
+
     def test_lock_path_with_marker_passes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             hook = os.path.join(tmp, "config.yaml")
@@ -805,7 +925,7 @@ class TestCheckHookHealth(unittest.TestCase):
             r = _DoctorResult()
             _check_hook_health(self._cfg(tmp, "hermes", [hook]), "hermes", r)
         self.assertEqual(r.checks[-1]["status"], "pass")
-        self.assertEqual(r.checks[-1]["label"], "Hermes hooks")
+        self.assertEqual(r.checks[-1]["label"], "Hermes hooks (preview; fail-open)")
         self.assertIn(hook, r.checks[-1]["detail"])
 
     def test_lock_path_without_marker_fails(self) -> None:
@@ -834,10 +954,83 @@ class TestCheckHookHealth(unittest.TestCase):
             hook = os.path.join(tmp, "defenseclaw.js")
             with open(hook, "w", encoding="utf-8") as fh:
                 fh.write("export const plugin = () => fetch('http://127.0.0.1:4000');  // defenseclaw bridge\n")
+            body = Path(hook).read_bytes()
+            backup = Path(tmp) / "connector_backups" / "opencode" / "config.json"
+            backup.parent.mkdir(parents=True)
+            backup.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "connector": "opencode",
+                        "logical_name": "config",
+                        "path": hook,
+                        "post_sha256": hashlib.sha256(body).hexdigest(),
+                    }
+                ),
+                encoding="utf-8",
+            )
             r = _DoctorResult()
             _check_hook_health(self._cfg(tmp, "opencode", [hook]), "opencode", r)
         self.assertEqual(r.checks[-1]["status"], "pass")
         self.assertEqual(r.checks[-1]["label"], "OpenCode hooks")
+        self.assertIn("does not revalidate the Windows DACL", r.checks[-1]["detail"])
+        self.assertIn("not tamper-proof", r.checks[-1]["detail"])
+
+    def test_opencode_tamper_fails_digest_check(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            hook = Path(tmp) / "defenseclaw.js"
+            original = b"// defenseclaw managed plugin\n"
+            hook.write_bytes(original)
+            backup = Path(tmp) / "connector_backups" / "opencode" / "config.json"
+            backup.parent.mkdir(parents=True)
+            backup.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "connector": "opencode",
+                        "logical_name": "config",
+                        "path": str(hook),
+                        "post_sha256": hashlib.sha256(original).hexdigest(),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            hook.write_text("// defenseclaw operator edit\n", encoding="utf-8")
+            r = _DoctorResult()
+            _check_hook_health(self._cfg(tmp, "opencode", [str(hook)]), "opencode", r)
+        self.assertEqual(r.checks[-1]["status"], "fail")
+        self.assertIn("drift detected", r.checks[-1]["detail"])
+
+    def test_opencode_lockless_fallback_honors_custom_config_dir(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config_home = Path(tmp) / "custom-opencode"
+            hook = config_home / "plugins" / "defenseclaw.js"
+            hook.parent.mkdir(parents=True)
+            body = b"// defenseclaw managed plugin\n"
+            hook.write_bytes(body)
+            data_dir = Path(tmp) / "data"
+            backup = data_dir / "connector_backups" / "opencode" / "config.json"
+            backup.parent.mkdir(parents=True)
+            backup.write_text(
+                json.dumps(
+                    {
+                        "version": 1,
+                        "connector": "opencode",
+                        "logical_name": "config",
+                        "path": str(hook),
+                        "post_sha256": hashlib.sha256(body).hexdigest(),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            cfg = MagicMock()
+            cfg.data_dir = str(data_dir)
+            r = _DoctorResult()
+            with patch.dict(os.environ, {"OPENCODE_CONFIG_DIR": str(config_home)}):
+                _check_hook_health(cfg, "opencode", r)
+
+        self.assertEqual(r.checks[-1]["status"], "pass")
+        self.assertIn(str(hook), r.checks[-1]["detail"])
 
     def test_unknown_connector_is_noop(self) -> None:
         r = _DoctorResult()
@@ -855,6 +1048,8 @@ class TestCheckHookHealth(unittest.TestCase):
                 fh.write("def defenseclaw_policy(event): return {'result': 'ALLOW'}\nPOLICY_REGISTRY = []\n")
             with open(pth, "w", encoding="utf-8") as fh:
                 fh.write(tmp + "\n")
+            for logical, path in (("config", config), ("module", module), ("pth", pth)):
+                self._write_omnigent_backup(tmp, logical, path)
             cfg = MagicMock()
             cfg.data_dir = tmp
             with open(os.path.join(tmp, "hook_contract_lock.json"), "w", encoding="utf-8") as fh:
@@ -939,12 +1134,8 @@ class TestCheckHookHealth(unittest.TestCase):
                 fh.write(module_dir + "\n")
             backup_dir = os.path.join(tmp, "connector_backups", "omnigent")
             os.makedirs(backup_dir)
-            for logical, path in (("module", module), ("pth", pth)):
-                with open(os.path.join(backup_dir, f"{logical}.json"), "w", encoding="utf-8") as fh:
-                    json.dump(
-                        {"connector": "omnigent", "logical_name": logical, "path": path},
-                        fh,
-                    )
+            for logical, path in (("config", config), ("module", module), ("pth", pth)):
+                self._write_omnigent_backup(tmp, logical, path)
             cfg = MagicMock()
             cfg.data_dir = tmp
             with patch.dict(os.environ, {"OMNIGENT_CONFIG_HOME": config_home}):
@@ -952,6 +1143,37 @@ class TestCheckHookHealth(unittest.TestCase):
                 _check_omnigent_policy_health(cfg, r)
 
         self.assertEqual(r.checks[-1]["status"], "pass")
+
+    def test_omnigent_policy_module_tamper_fails_digest_check(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            config = os.path.join(tmp, "config.yaml")
+            module = os.path.join(tmp, "defenseclaw_omnigent_policy.py")
+            pth = os.path.join(tmp, "defenseclaw_omnigent.pth")
+            with open(config, "w", encoding="utf-8") as fh:
+                fh.write("policy_modules: [defenseclaw_omnigent_policy]\npolicies: {defenseclaw_guardrail: {}}\n")
+            with open(module, "w", encoding="utf-8") as fh:
+                fh.write("def defenseclaw_policy(event): return {'result': 'ALLOW'}\nPOLICY_REGISTRY = []\n")
+            with open(pth, "w", encoding="utf-8") as fh:
+                fh.write(tmp + "\n")
+            for logical, path in (("config", config), ("module", module), ("pth", pth)):
+                self._write_omnigent_backup(tmp, logical, path)
+            with open(module, "a", encoding="utf-8") as fh:
+                fh.write("# tampered\n")
+            cfg = MagicMock()
+            cfg.data_dir = tmp
+            with open(os.path.join(tmp, "hook_contract_lock.json"), "w", encoding="utf-8") as fh:
+                json.dump(
+                    {"connectors": {"omnigent": {"locations": {
+                        "hook_config_paths": [config],
+                        "hook_script_paths": [module, pth],
+                    }}}},
+                    fh,
+                )
+            r = _DoctorResult()
+            _check_omnigent_policy_health(cfg, r)
+
+        self.assertEqual(r.checks[-1]["status"], "fail")
+        self.assertIn("module drift detected", r.checks[-1]["detail"])
 
     def test_omnigent_malformed_utf8_metadata_fails_cleanly(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -1014,7 +1236,7 @@ class TestCheckHookHealth(unittest.TestCase):
         """``_check_connector_hooks`` must dispatch each generic connector
         unhandled connectors to the generic hook-health row."""
         for connector, label in (
-            ("hermes", "Hermes hooks"),
+            ("hermes", "Hermes hooks (preview; fail-open)"),
             ("cursor", "Cursor hooks"),
             ("windsurf", "Windsurf hooks"),
             ("geminicli", "Gemini CLI hooks"),

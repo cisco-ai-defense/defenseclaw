@@ -49,6 +49,7 @@ from defenseclaw.config import (
     OpenShellConfig,
     PerConnectorAssetPolicy,
     PerConnectorAssetTypePolicy,
+    PerConnectorGuardrailConfig,
     PluginActionsConfig,
     SeverityAction,
     SkillActionsConfig,
@@ -676,6 +677,16 @@ class TestDefaultConfig(unittest.TestCase):
         self.assertTrue(cfg.asset_policy.mcp.runtime_detection.terminal_commands)
         self.assertFalse(cfg.asset_policy.skill.runtime_detection.enabled)
         self.assertFalse(cfg.asset_policy.plugin.runtime_detection.enabled)
+
+    def test_claude_alias_roster_dedupes_and_validation_rejects_duplicates(self):
+        cfg = default_config()
+        cfg.guardrail.connectors = {
+            "claudecode": PerConnectorGuardrailConfig(),
+            "claude-code": PerConnectorGuardrailConfig(),
+        }
+        self.assertEqual(cfg.active_connectors(), ["claudecode"])
+        with self.assertRaisesRegex(ValueError, "refer to the same connector"):
+            cfg.guardrail.validate()
 
 
 class TestConfigLoadSave(unittest.TestCase):

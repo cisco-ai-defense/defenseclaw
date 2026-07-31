@@ -19,7 +19,7 @@ param(
     [Parameter(Mandatory)]
     [ValidateSet('setup-acceptance', 'bootstrap-acceptance', 'wizard-smoke', 'contract')]
     [string]$Mode,
-    [ValidateSet('codex', 'claudecode')][string]$Connector = 'codex',
+    [ValidateSet('codex', 'claudecode', 'copilot', 'cursor', 'hermes', 'windsurf', 'antigravity', 'opencode')][string]$Connector = 'codex',
     [Parameter(Mandatory)][string]$ArtifactRoot,
     [Parameter(Mandatory)][string]$StateRoot,
     [string]$TargetVersion = '',
@@ -741,7 +741,7 @@ function Publish-BoundedDisposableContractResults {
         [Parameter(Mandatory)][string]$SourceRoot,
         [Parameter(Mandatory)][string]$DestinationPath,
         [Parameter(Mandatory)][string]$DestinationRoot,
-        [Parameter(Mandatory)][ValidateSet('codex', 'claudecode')]
+        [Parameter(Mandatory)][ValidateSet('codex', 'claudecode', 'copilot', 'cursor', 'hermes', 'windsurf', 'antigravity', 'opencode')]
         [string]$ExpectedConnector
     )
 
@@ -996,13 +996,18 @@ try {
         $harnessFiles += @(
             'assert-gateway-jsonl.py',
             'assert-observability-v8-jsonl.py',
+            'prepare-windows-contract-v8.py',
             'live-connector-e2e\run-windows.ps1',
+            'live-connector-e2e\assert-opencode-plugin.mjs',
             'live-connector-e2e\assert-windows-evidence.py',
             'live-connector-e2e\testdata\windows-mock.ps1',
             "live-connector-e2e\golden\$Connector\pre_tool_allow.json",
-            "live-connector-e2e\golden\$Connector\pre_tool_block.json",
-            "live-connector-e2e\golden\$Connector\session_start.json"
+            "live-connector-e2e\golden\$Connector\pre_tool_block.json"
         )
+        $optionalSessionGolden = "live-connector-e2e\golden\$Connector\session_start.json"
+        if (Test-Path -LiteralPath (Join-Path $PSScriptRoot $optionalSessionGolden) -PathType Leaf) {
+            $harnessFiles += $optionalSessionGolden
+        }
     } elseif ($Mode -eq 'bootstrap-acceptance') {
         $harnessFiles += @(
             'test-fresh-install-release-windows.ps1'

@@ -1,163 +1,193 @@
 ---
 title: Antigravity
-description: Antigravity (`agy`) connector registers all five 2.0 lifecycle hooks. PreInvocation and PreToolUse are ask-capable; PreInvocation, PreToolUse, and Stop are block-capable in the current contract.
+description: Google Antigravity (`agy`) lifecycle hook contract and the native Windows implementation awaiting integrated certification.
 keywords:
   - DefenseClaw Antigravity connector
   - Antigravity hooks
-  - agy hooks
+  - agy Windows
   - Google Antigravity guardrail
-  - Antigravity 2.0 lifecycle hooks
 ---
 
-The Antigravity connector wires DefenseClaw into Google's [Antigravity CLI](https://antigravity.google.com) (binary name `agy`) via all five Antigravity 2.0 lifecycle hooks installed in `~/.gemini/config/hooks.json` using the Claude-Code-compatible nested schema agy v1.0.x evaluates at runtime. DefenseClaw installs the hooks globally so every Antigravity session on the host reports into the same DefenseClaw gateway, while Antigravity continues to talk directly to its configured upstream model provider.
+The Antigravity connector is hook-only: Antigravity continues to contact its
+model provider directly, while its documented lifecycle hooks send local events
+to the authenticated DefenseClaw gateway. DefenseClaw does not proxy
+Antigravity model traffic.
 
-<Video
-  src="antigravity"
-  caption="Three scenarios end-to-end against the same agy session: (1) a benign command flows through with action=allow / severity=NONE; (2) a sensitive-file read lands on a HIGH finding → DefenseClaw returns decision=ask → agy surfaces its native approval prompt and the operator declines; (3) writing a synthetic secret to an environment file matches a CRITICAL finding → DefenseClaw returns decision=deny → agy refuses without prompting. Each verdict appears live in the Splunk pane on the left. This historical demo used an unredacted destination projection; current v8 deployments select an explicit redaction profile per destination or route."
-/>
+Google currently publishes Antigravity 2.0 v2.4.3 and CLI v1.1.8 (July 28,
+2026). The [official install page](https://antigravity.google/docs/cli/install)
+says the CLI runs natively on Windows, macOS, and Linux. The
+[download page](https://antigravity.google/download) provides native Windows
+x64 and ARM64 clients; DefenseClaw's native Windows x64 implementation remains
+behind the not-certified platform gate pending packaged and official-client validation. Windows 10
+64-bit is the documented minimum.
 
-<Callout type="info">
-**Why `~/.gemini/config/hooks.json` and not `~/.gemini/antigravity-cli/hooks.json`?** The marketing-facing path printed by `agy --help` (`~/.gemini/antigravity-cli/`) is silently ignored by agy v1.0.x at runtime — agy actually reads PreToolUse hooks from `~/.gemini/config/hooks.json` in a Claude-Code-compatible nested schema. This was determined empirically during the v0.5.0 smoke test: tracer hooks installed at the marketing path never fired; the same entries at the canonical path fired reliably on every tool call. DefenseClaw writes only the canonical path. `defenseclaw doctor` will surface a migration warning if a stale entry is left behind from a pre-v0.5.0 install at the legacy path.
-</Callout>
+## Native Windows setup
 
-## Setup
+Install the official client from PowerShell:
 
-```bash
-defenseclaw setup antigravity                # observe (default) - record only
-defenseclaw setup antigravity --mode action  # block on policy hits via hook deny
+```powershell
+irm https://antigravity.google/cli/install.ps1 | iex
 ```
 
-<Callout type="warning">
-Antigravity setup is supported on macOS and Linux. The DefenseClaw connector
-is not certified on native Windows x64, so setup rejects it there.
-</Callout>
+Google installs `agy.exe` under
+`%LOCALAPPDATA%\agy\bin` (normally
+`C:\Users\<Username>\AppData\Local\agy\bin`). Authentication uses Windows
+Credential Manager for secure token profiles, with browser authentication as
+the fallback.
 
-This connector is **global/user-scoped only**. DefenseClaw writes five owned
-entries—one per lifecycle event—into `~/.gemini/config/hooks.json` and
-installs the shared hook script at
-`~/.defenseclaw/hooks/antigravity-hook.sh`. Antigravity merges every
-discovered `hooks.json` it finds (the canonical global file, project-local
-`<workspace>/.antigravitycli/hooks.json`, and legacy
-`~/.gemini/hooks.json`), so writing the same handlers to more than one
-location causes duplicate firings. DefenseClaw deliberately writes only the
-global file.
+The native Setup/bootstrap lifecycle and manual validation harness implement
+this connector for integration testing. The ordinary `defenseclaw setup`
+CLI/TUI platform gate does not expose Antigravity while it is not certified;
+there is no supported public setup command until authentic packaged and
+official-client evidence is approved.
 
-There is **no proxy-enforcement path** for Antigravity — blocking happens hook-side using Antigravity's documented JSON deny response.
+DefenseClaw uses a native Windows process chain:
 
-<Callout type="info">
-The Antigravity connector is **hook-only**. `defenseclaw setup antigravity` defaults to observability-only `mode=observe`, and `defenseclaw setup antigravity --mode action` enables hook-native blocking. Antigravity still talks directly to its configured upstream model provider in both modes; DefenseClaw never inserts an LLM proxy.
-</Callout>
+`agy.exe` → system Windows PowerShell 5.1 `Start-Process -Wait` →
+`defenseclaw-hook.exe` → loopback gateway.
 
-#### What `setup antigravity` actually does
+The registered command uses `-EncodedCommand`, keeps Windows paths with spaces
+out of Antigravity's visible tokenizer input, inherits stdin/stdout, waits
+synchronously, and propagates the launcher status. Enforcement does not depend
+on that status: Google documents structured stdout, not non-zero hook exit
+codes, as the policy interface.
 
-The wrapper accepts the same hook-alias flags as the other hook connectors. The underlying guardrail config falls back to the values DefenseClaw ships with — schema-defined in [`internal/config/config.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/config/config.go) and documented on the [Defaults page](/docs/defaults).
+Native Setup writes five DefenseClaw-owned registrations to the official
+`%USERPROFILE%\.gemini\config\hooks.json` path. Google documents no
+configuration-home environment override. Setup retains a predecessor custom
+path only as internal custody needed for exact restoration and migration;
+backs up the original file; preserves unrelated hooks; writes connector-scoped
+gateway credentials into the protected DefenseClaw runtime; and records the resolved contract in
+`%USERPROFILE%\.defenseclaw\hook_contract_lock.json`.
 
-| Flag | Default | What it does |
-| --- | --- | --- |
-| `--yes / -y` | off | Skip the confirmation prompt. |
-| `--mode observe\|action` | `observe` | `observe` records only; `action` returns the event's declared native deny/block response on policy hits. |
-| `--restart / --no-restart` | `--restart` | Bounce `defenseclaw-gateway` after applying changes so the new hooks wire in. |
-| `--with-local-stack / --no-local-stack` | `--no-local-stack` | Also run `setup local-observability up`; follow the command's printed gateway-restart step after it writes the export destination. |
+## Modes and enforcement
 
-`setup antigravity` is the dedicated Antigravity alias. It uses the shared
-guardrail setup backend, defaults to observe mode, and can join an existing
-hook-connector roster when you choose **Add**. `claw.workspace_dir` is cleared
-because Antigravity hook setup is global by design. See the
-[quick-alias reference](/docs/setup/guardrail/aliases) for the common options
-and [full guardrail setup](/docs/setup/guardrail) for advanced scanner and
-judge configuration.
+`observe` records findings and always permits tool execution. `action` may deny
+or ask only at `PreToolUse`.
 
-#### Version contract
-
-DefenseClaw validates the installed Antigravity CLI version during setup using the trusted `agy --version` probe. The Antigravity connector pins a minimum-inclusive version of `1.0.0` and intentionally leaves the upper bound open: `agy` auto-updates in the background, so a strict ceiling would create a brittle compatibility window. The `agy --version` output is a bare semver string (e.g. `1.0.1`) parsed with the standard semver range matcher.
-
-The current contract is `antigravity-hooks-v2` (hook script `v7`), which expanded coverage from the v1 PreToolUse-only baseline to the full Antigravity 2.0 lifecycle (PreInvocation, PreToolUse, PostToolUse, PostInvocation, Stop). PreToolUse is the only event empirically verified to fire on agy v1.0.1; the other four event branches are spec-conformant but gated on upstream agy implementation parity. Registering all five up front is intentional: when agy starts emitting a previously-quiet event, DefenseClaw handles it with zero redeploy.
-
-## Lifecycle events
-
-DefenseClaw registers the full Antigravity 2.0 hook lifecycle. After setup
-selects `antigravity-hooks-v2`, that pinned runtime profile advertises
-`PreInvocation` and `PreToolUse` as ask-capable, and `PreInvocation`,
-`PreToolUse`, and `Stop` as block-capable. Only
-`PreToolUse` has been empirically verified against agy v1.0.1; the other four
-branches follow the published contract but still depend on upstream agy
-implementation parity.
-
-Use `hook_contract_lock.json` or `defenseclaw doctor` to identify the contract
-actually pinned on a host.
-
-| Event | When it fires | DefenseClaw role | Action verdict → wire shape |
-| --- | --- | --- | --- |
-| `PreInvocation` | Just before the agent calls the LLM | Inspect the prompt before the model call | `block` → `{decision: "deny"}`, eligible `confirm` → `{decision: "ask"}`; spec-conformant, not yet empirically verified |
-| `PreToolUse` | Right before a tool (`run_command`, `replace_file_content`, etc.) executes | Validate tool args; intercept risky commands | `block` → `{decision: "deny"}`, `confirm` → `{decision: "ask"}`, `alert` → `{systemMessage}`; empirically verified on agy v1.0.1 |
-| `PostToolUse` | Immediately after a tool finishes execution | Capture diagnostics; flag PII / secrets in tool output. **Cannot block** — tool already ran. | `alert` → `{additionalContext: "..."}` for next-turn ingestion |
-| `PostInvocation` | After the LLM call + all associated tool calls finish | Post-process model output; flag policy violations in the response. **Cannot block** — response already generated. | `alert` → `{additionalContext: "..."}` |
-| `Stop` | When the agent's main execution loop is about to terminate | Record the stop reason and honor a block verdict | `block` → `{decision: "block"}`; spec-conformant, not yet empirically verified |
-
-`Post*` events never emit `deny` or `ask` because the inspected action has already executed at the agent layer. If agy emits those registered events, DefenseClaw's response shaper uses `additionalContext` for the next turn.
-
-## Hook schema
-
-DefenseClaw writes the Claude-Code-compatible nested schema agy v1.0.x evaluates at runtime. The file is a JSON object whose top-level keys are stable, DefenseClaw-owned hook identifiers — one per lifecycle event. Each value is an object keyed by event name, mapping to a list of `(matcher, hooks[])` tuples, and each hook in the inner list is a `{type, command}` record:
-
-```json
-{
-  "defenseclaw-antigravity-preinvocation": {
-    "PreInvocation": [
-      { "matcher": "*", "hooks": [ { "type": "command", "command": "/Users/<you>/.defenseclaw/hooks/antigravity-hook.sh" } ] }
-    ]
-  },
-  "defenseclaw-antigravity-pretooluse": {
-    "PreToolUse": [
-      { "matcher": "*", "hooks": [ { "type": "command", "command": "/Users/<you>/.defenseclaw/hooks/antigravity-hook.sh" } ] }
-    ]
-  },
-  "defenseclaw-antigravity-posttooluse": {
-    "PostToolUse": [
-      { "matcher": "*", "hooks": [ { "type": "command", "command": "/Users/<you>/.defenseclaw/hooks/antigravity-hook.sh" } ] }
-    ]
-  },
-  "defenseclaw-antigravity-postinvocation": {
-    "PostInvocation": [
-      { "matcher": "*", "hooks": [ { "type": "command", "command": "/Users/<you>/.defenseclaw/hooks/antigravity-hook.sh" } ] }
-    ]
-  },
-  "defenseclaw-antigravity-stop": {
-    "Stop": [
-      { "matcher": "*", "hooks": [ { "type": "command", "command": "/Users/<you>/.defenseclaw/hooks/antigravity-hook.sh" } ] }
-    ]
-  }
-}
-```
-
-The `command` field is a **bare absolute path** — agy v1.0.x invokes hooks via direct `exec()` (not through a shell), so any embedded quote characters would be interpreted as literal path bytes and the hook would silently no-fire. Operators with whitespace in their home path should set `DEFENSECLAW_HOME` to a whitespace-free directory before setup.
-
-When DefenseClaw blocks on a pre-action event, the hook script returns a flat
-JSON envelope on stdout:
+The [official hooks documentation](https://antigravity.google/docs/hooks)
+defines `PreToolUse` as a synchronous pre-execution hook. Its stdout must carry
+one of `allow`, `deny`, `ask`, or `force_ask` in `decision`. DefenseClaw uses:
 
 ```json
 { "decision": "deny", "reason": "policy denied" }
 ```
 
-Antigravity recognizes a native `"ask"` decision that pauses the agent and
-prompts the operator. A returned `"ask"` decision **bypasses
-`--dangerously-skip-permissions`**. DefenseClaw maps eligible confirm verdicts
-to `{"decision":"ask"}` on `PreInvocation` and `PreToolUse`; only the latter
-has been empirically verified against agy v1.0.1. The literal string
-`"force_ask"` is intentionally not emitted because `agy` v1.0.0 does not
-recognize it; the conceptual distinction is preserved in `raw_action`
-telemetry.
+for a hard block and:
 
-`Stop` uses the spec-conformant `{"decision":"block"}` form rather than the
-`"deny"` verb used by pre-action events. `PostToolUse` and `PostInvocation`
-never block.
+```json
+{ "decision": "ask", "reason": "operator confirmation required" }
+```
 
-## Local surfaces
+for native confirmation. This synchronous `PreToolUse` decision is the only
+hard-blocking claim for the connector.
+
+Antigravity does not document non-zero hook exit status as enforcement.
+DefenseClaw therefore does not advertise connector-wide fail-closed support.
+Gateway, authentication, or decoding failures use an event-correct no-op
+response in normal fail-open operation. A strict local fallback can emit
+`decision: "deny"` for `PreToolUse`; other events still use their documented
+non-blocking output shapes.
+
+## Official lifecycle schema
+
+All command handlers are synchronous and registered with a 30-second timeout.
+The event name is not present in Antigravity's documented stdin. DefenseClaw
+binds each registration to a trusted `--event` argument and forwards that
+metadata to the gateway in a local header without rewriting the original stdin
+captured for audit.
+
+| Event | Registration shape | Documented stdin beyond common metadata | DefenseClaw stdout |
+| --- | --- | --- | --- |
+| `PreInvocation` | direct handler list; matcher ignored | `invocationNum`, `initialNumSteps` | `{}` or `injectSteps` containing `ephemeralMessage` |
+| `PreToolUse` | matcher group with nested `hooks` | `toolCall{name,args}`, `stepIdx` | required `decision`; `deny` is the hard block |
+| `PostToolUse` | matcher group with nested `hooks` | `stepIdx`, optional `error` | `{}` |
+| `PostInvocation` | direct handler list; matcher ignored | `invocationNum`, `initialNumSteps` | `{}` or `injectSteps`; optional documented `terminationBehavior` is not used |
+| `Stop` | direct handler list; matcher ignored | `executionNum`, `terminationReason`, `error`, `fullyIdle` | required `decision`; DefenseClaw uses `allow` |
+
+Common stdin fields are `conversationId`, `workspacePaths`,
+`transcriptPath`, and `artifactDirectoryPath`. The documented transcript roots
+are `~/.gemini/antigravity` for the app and
+`~/.gemini/antigravity-cli` for the CLI.
+
+The on-disk registration intentionally mixes two schemas:
+
+```json
+{
+  "defenseclaw-antigravity-pretooluse": {
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "<event-bound native command>",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  },
+  "defenseclaw-antigravity-stop": {
+    "Stop": [
+      {
+        "type": "command",
+        "command": "<event-bound native command>",
+        "timeout": 30
+      }
+    ]
+  }
+}
+```
+
+Claude Code fields such as `systemMessage`, `additionalContext`, and
+`permissionDecision` are not part of this connector's output.
+
+## Repair, Doctor, and removal
+
+`defenseclaw doctor` passively validates:
+
+- the exact five-event mixed schema and 30-second timeouts;
+- each event's matching native `--event` binding;
+- the protected `defenseclaw-hook.exe` PE target and hook contract lock;
+- connector-scoped gateway authentication and runtime freshness;
+- stale, malformed, foreign, missing, or inconsistent registrations.
+
+Doctor never executes command text read from `hooks.json`. Use
+`defenseclaw doctor --fix` or rerun Setup to reconcile drift.
+
+Teardown restores the pre-Setup file when it is unchanged. If an operator
+edited it, teardown removes only DefenseClaw-owned current and legacy commands,
+preserves foreign hooks, tombstones cached hook launchers, and verifies that no
+managed registration remains:
+
+```powershell
+defenseclaw setup guardrail --disable
+```
+
+## Gemini CLI coexistence
+
+Antigravity and Gemini CLI both use files under `~/.gemini`, but they are
+different connectors. DefenseClaw keeps separate lifecycle schemas, gateway
+routes, hook commands, connector-scoped tokens, audit identities, contract
+locks, and teardown ownership. Installing, repairing, or removing Antigravity
+must not be reported as Gemini CLI enforcement or remove Gemini-managed
+entries.
+
+Google's [changelog](https://antigravity.google/changelog) records relevant
+Windows and hook transitions: v1.0.8 corrected the shared
+`~/.gemini/config/hooks.json` path; v1.0.10 selected PowerShell as the Windows
+default shell; v1.0.15 fixed Windows output behavior; v1.1.1 fixed workspace
+hook loading; v1.1.7 fixed disabled plugins still running hooks; and v1.1.8 is
+the current CLI release.
+
+## Local customization surfaces
 
 <Files>
   <Folder name="~/.gemini/config" defaultOpen>
     <File name="hooks.json" />
     <File name="mcp_config.json" />
+    <Folder name="agents" />
     <Folder name="skills">
       <Folder name="<skill>">
         <File name="SKILL.md" />
@@ -165,60 +195,15 @@ never block.
     </Folder>
   </Folder>
   <Folder name="<workspace>/.agents">
+    <File name="hooks.json" />
     <File name="mcp_config.json" />
-    <Folder name="skills">
-      <Folder name="<skill>">
-        <File name="SKILL.md" />
-      </Folder>
-    </Folder>
-    <Folder name="plugins">
-      <Folder name="<plugin>">
-        <File name="plugin.json" />
-      </Folder>
-    </Folder>
-  </Folder>
-  <Folder name="~/.defenseclaw" defaultOpen>
-    <Folder name="hooks">
-      <File name="antigravity-hook.sh" />
-    </Folder>
+    <Folder name="agents" />
+    <Folder name="skills" />
+    <Folder name="plugins" />
   </Folder>
 </Files>
 
-Antigravity publishes MCP, skills, rules, and plugin customization surfaces in
-addition to hooks. DefenseClaw writes hooks only to the global
-`~/.gemini/config/hooks.json` path, reads and writes MCP servers from
-`~/.gemini/config/mcp_config.json` and
-`<workspace>/.agents/mcp_config.json`, and supports read/write installation of
-the AgentSkills folder form under `skills/<skill>/SKILL.md`. Rules and plugins
-are discovery/scan-only: DefenseClaw reads plugin roots under
-`~/.gemini/config/plugins/`, `<workspace>/.agents/plugins/`, and the
-CLI-managed `~/.gemini/antigravity-cli/plugins/`, but does not install or
-disable Antigravity plugins. CLI direct-markdown skills and plugin-contained
-agents are also discovery/scan-only.
-
-`claw.workspace_dir` is intentionally not honored by Antigravity hook setup. Antigravity merges discovered `hooks.json` files from the global, project, and legacy locations, so layering DefenseClaw hooks across multiple files would cause duplicate hook firings. Workspace MCP and asset discovery still use the workspace paths above when a workspace is explicitly selected.
-
-The resolved paths are captured in `~/.defenseclaw/hook_contract_lock.json` under `locations`, so `defenseclaw doctor` can report both the hook contract and the concrete hook location it is using.
-
-## Hook capabilities
-
-The authoritative contract is `antigravity-hooks-v2`: ask on
-`PreInvocation` and `PreToolUse`; block on `PreInvocation`, `PreToolUse`, and
-`Stop`; fail-closed transport is not supported. `PostToolUse` and
-`PostInvocation` are observe/context-only.
-
-<Callout>
-Antigravity's verified `PreToolUse` event has a native unbypassable ask
-primitive. Returning `decision=ask` there overrides
-`--dangerously-skip-permissions`, so eligible confirm verdicts cannot be
-silently auto-approved. `PreInvocation` has the same advertised ask shape but
-has not yet been empirically verified against agy v1.0.1.
-</Callout>
-
-## Disable
-
-```bash
-defenseclaw guardrail disable --connector antigravity --yes
-```
-
-Teardown removes all DefenseClaw-owned `defenseclaw-antigravity-*` entries (one per lifecycle event) from `~/.gemini/config/hooks.json` and leaves unrelated hooks untouched. If the file becomes empty after teardown, it is deleted. Teardown does **not** modify the legacy `~/.gemini/antigravity-cli/hooks.json` — `defenseclaw doctor` will surface a separate migration warning if a stale entry from a pre-v0.5.0 install is detected there, prompting the operator to remove the file or the obsolete keys manually.
+DefenseClaw writes hooks only to the global file to avoid duplicated global and
+workspace evaluation. MCP and AgentSkills retain their documented global and
+workspace behavior; rules plus standalone and plugin-contained agents remain
+discovery-only as listed in the connector matrix.

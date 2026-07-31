@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -520,6 +521,27 @@ func TestDeferredCleanupTransactionRootExpectationFailsClosed(t *testing.T) {
 	}
 }
 
+func TestDeferredCleanupAcceptsVerifiedOpenCodeConnector(t *testing.T) {
+	fixture := newDeferredCleanupFixture(t)
+	fixture.record.VerifiedConnectors = []string{"claudecode", "codex", "opencode"}
+	paths := hookruntime.Paths{
+		Root:     fixture.record.RuntimeRoot,
+		Launcher: fixture.record.LauncherPath,
+		State:    fixture.record.StatePath,
+	}
+
+	if err := validateDeferredUninstallCleanupRecord(
+		fixture.record,
+		paths,
+		fixture.record.InstallerStateRoot,
+		fixture.record.MaintenancePath,
+		fixture.record.RunValueName,
+		fixture.record.RunCommand,
+	); err != nil {
+		t.Fatalf("OpenCode deferred cleanup custody: %v", err)
+	}
+}
+
 func newDeferredCleanupFixture(t *testing.T) deferredCleanupFixture {
 	t.Helper()
 	productRoot := filepath.Join(t.TempDir(), "DefenseClaw")
@@ -627,6 +649,79 @@ func newDeferredCleanupFixture(t *testing.T) deferredCleanupFixture {
 	}
 }
 
+func TestDeferredCleanupRecordCarriesCopilotRestorationReceipt(t *testing.T) {
+	fixture := newDeferredCleanupFixture(t)
+	fixture.record.VerifiedConnectors = []string{"claudecode", "codex", "copilot"}
+	paths := hookruntime.Paths{
+		Root:     fixture.record.RuntimeRoot,
+		Launcher: fixture.record.LauncherPath,
+		State:    fixture.record.StatePath,
+	}
+	if err := validateDeferredUninstallCleanupRecord(
+		fixture.record,
+		paths,
+		fixture.record.InstallerStateRoot,
+		fixture.record.MaintenancePath,
+		fixture.record.RunValueName,
+		fixture.record.RunCommand,
+	); err != nil {
+		t.Fatalf("Copilot deferred-cleanup receipt rejected: %v", err)
+	}
+}
+
+func TestDeferredCleanupAcceptsCompleteWindsurfConnectorSet(t *testing.T) {
+	fixture := newDeferredCleanupFixture(t)
+	fixture.record.VerifiedConnectors = []string{"claudecode", "codex", "windsurf"}
+	paths := hookruntime.Paths{
+		Root:     fixture.record.RuntimeRoot,
+		Launcher: fixture.record.LauncherPath,
+		State:    fixture.record.StatePath,
+	}
+	if err := validateDeferredUninstallCleanupRecord(
+		fixture.record,
+		paths,
+		fixture.record.InstallerStateRoot,
+		fixture.record.MaintenancePath,
+		fixture.record.RunValueName,
+		fixture.record.RunCommand,
+	); err != nil {
+		t.Fatalf("Windsurf deferred-cleanup receipt rejected: %v", err)
+	}
+}
+
+func TestDeferredCleanupConnectorCustodyAcceptsAntigravityAndRejectsGemini(t *testing.T) {
+	fixture := newDeferredCleanupFixture(t)
+	paths := hookruntime.Paths{
+		Root:     fixture.record.RuntimeRoot,
+		Launcher: fixture.record.LauncherPath,
+		State:    fixture.record.StatePath,
+	}
+
+	fixture.record.VerifiedConnectors = []string{"antigravity", "claudecode", "codex"}
+	if err := validateDeferredUninstallCleanupRecord(
+		fixture.record,
+		paths,
+		fixture.record.InstallerStateRoot,
+		fixture.record.MaintenancePath,
+		fixture.record.RunValueName,
+		fixture.record.RunCommand,
+	); err != nil {
+		t.Fatalf("Antigravity deferred-cleanup custody rejected: %v", err)
+	}
+
+	fixture.record.VerifiedConnectors = []string{"antigravity", "geminicli"}
+	if err := validateDeferredUninstallCleanupRecord(
+		fixture.record,
+		paths,
+		fixture.record.InstallerStateRoot,
+		fixture.record.MaintenancePath,
+		fixture.record.RunValueName,
+		fixture.record.RunCommand,
+	); err == nil || !strings.Contains(err.Error(), "invalid connector") {
+		t.Fatalf("Gemini entered native-Windows deferred-cleanup custody: %v", err)
+	}
+}
+
 func writeDeferredCleanupHookState(t *testing.T, path string, state hookruntime.State) {
 	t.Helper()
 	body, err := json.MarshalIndent(state, "", "  ")
@@ -643,6 +738,19 @@ func replaceDeferredCleanupRecord(t *testing.T, record deferredUninstallCleanupR
 	t.Helper()
 	if err := writeDurableValue(record.RecordPath, record, true); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestDeferredCleanupRecordAcceptsCursorInVerifiedConnectorCustody(t *testing.T) {
+	fixture := newDeferredCleanupFixture(t)
+	fixture.record.VerifiedConnectors = []string{"claudecode", "codex", "cursor"}
+	replaceDeferredCleanupRecord(t, fixture.record)
+	stored, err := readDeferredUninstallCleanupRecord(fixture.record.RecordPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored == nil || !slices.Equal(stored.VerifiedConnectors, fixture.record.VerifiedConnectors) {
+		t.Fatalf("verified connector custody = %+v", stored)
 	}
 }
 

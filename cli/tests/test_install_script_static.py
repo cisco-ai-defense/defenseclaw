@@ -18,7 +18,7 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
     import tomli as tomllib
 
-from defenseclaw.platform_support import supported_connectors
+from defenseclaw.platform_support import UNSUPPORTED, WINDOWS_CONNECTOR_SUPPORT
 from defenseclaw.tui.panels.first_run import CONNECTOR_CHOICES
 from packaging.requirements import Requirement
 from packaging.specifiers import SpecifierSet
@@ -149,8 +149,14 @@ def test_release_installers_track_known_connector_choices() -> None:
 
     assert shell_choices == (*CONNECTOR_CHOICES, "none")
 
-    windows_choices = tuple(supported_connectors(CONNECTOR_CHOICES, "windows"))
-    assert ps_choices == (*windows_choices, "none")
+    expected_windows_choices = {
+        name
+        for name, support in WINDOWS_CONNECTOR_SUPPORT.items()
+        if support.status != UNSUPPORTED
+    }
+    assert ps_choices[-1] == "none"
+    assert len(ps_choices) == len(set(ps_choices))
+    assert set(ps_choices[:-1]) == expected_windows_choices
     assert hook_choices == ()
 
 

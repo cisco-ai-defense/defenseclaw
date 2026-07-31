@@ -693,6 +693,13 @@ class TestHelpParity(unittest.TestCase):
         out = self._help(["codex", "--help"])
         self.assertIn("proxy", out.lower())
 
+    def test_codex_help_reports_exact_versioned_event_tiers(self):
+        out = self._help(["codex", "--help"])
+        self.assertIn("0.133-0.144", out)
+        self.assertIn("eleven from 0.145", out)
+        self.assertIn("SessionEnd", out)
+        self.assertNotIn("ten on 0.133+", out)
+
 
 # ---------------------------------------------------------------------------
 # SU-11 — bare `setup` picker + scripting flags

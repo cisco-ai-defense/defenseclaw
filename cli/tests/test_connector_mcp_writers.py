@@ -19,7 +19,7 @@
 Pins three contracts:
 
 1. The dispatch matrix — OpenClaw delegates to its CLI shim,
-   Claude Code patches ~/.claude/settings.json, Codex patches
+   Claude Code patches ~/.claude.json, Codex patches
    ~/.codex/config.toml by default, ZeptoClaw refuses with a clear error.
 2. Atomicity + 0o600 perms on the JSON-rewriting branches.
 3. Round-trip — what we set is what we read back via mcp_servers().
@@ -35,6 +35,12 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10
+    import tomli as tomllib
+
 from defenseclaw import connector_paths, file_permissions, windows_acl
 from defenseclaw.connector_paths import (
     KNOWN_CONNECTORS,
@@ -57,6 +63,14 @@ def _claude_released_names(data_home: Path) -> set[str]:
     metadata = _claude_ownership_files(data_home)
     assert len(metadata) == 1
     return set(json.loads(metadata[0].read_text(encoding="utf-8"))["released"])
+
+
+def _pin_claude_home(monkeypatch, home: Path) -> None:
+    """Bind both platform home selectors, then disable Claude's override."""
+
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
 
 
 # ---------------------------------------------------------------------------
@@ -123,13 +137,27 @@ class TestZeptoClawUnsupported:
 
 
 # ---------------------------------------------------------------------------
-# Claude Code — patches ~/.claude/settings.json
+# Claude Code — patches ~/.claude.json
 # ---------------------------------------------------------------------------
 
 
 class TestClaudeCodeWrites:
     @pytest.fixture(autouse=True)
-    def _isolate_defenseclaw_home(self, tmp_path, monkeypatch):
+    def _isolate_claude_and_defenseclaw_homes(self, tmp_path, monkeypatch):
+        # The suite-wide Windows fixture mirrors later HOME changes into
+        # connector-specific override variables. Keep that safety behavior,
+        # but clear Claude's optional override after this class's legacy HOME
+        # assignments so these tests exercise the documented default root.
+        original_setenv = monkeypatch.setenv
+
+        def setenv(name: str, value: str, prepend: str | None = None) -> None:
+            original_setenv(name, value, prepend=prepend)
+            if name == "HOME":
+                original_setenv("USERPROFILE", value)
+                monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+
+        monkeypatch.setattr(monkeypatch, "setenv", setenv)
+        _pin_claude_home(monkeypatch, tmp_path)
         monkeypatch.setenv(
             "DEFENSECLAW_HOME",
             str(tmp_path / "d"),
@@ -139,15 +167,15 @@ class TestClaudeCodeWrites:
         monkeypatch.setenv("HOME", str(tmp_path))
         set_mcp_server("claudecode", "demo", {"command": "uvx"})
 
-        settings = tmp_path / ".claude" / "settings.json"
+        settings = tmp_path / ".claude.json"
         assert settings.is_file()
         data = json.loads(settings.read_text())
         assert data["mcpServers"]["demo"] == {"command": "uvx"}
 
     def test_set_preserves_unrelated_keys(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))
-        settings = tmp_path / ".claude" / "settings.json"
-        settings.parent.mkdir(parents=True)
+        settings = tmp_path / ".claude.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
         settings.write_text(
             json.dumps(
                 {
@@ -179,7 +207,7 @@ class TestClaudeCodeWrites:
             "demo",
             {"command": "uvx", "env": {"API_KEY": "secret"}},
         )
-        settings = tmp_path / ".claude" / "settings.json"
+        settings = tmp_path / ".claude.json"
         assert_owner_only_file(settings)
         metadata_dir = data_home / "connector_backups" / "mcp"
         metadata_files = _claude_ownership_files(data_home)
@@ -192,8 +220,8 @@ class TestClaudeCodeWrites:
         monkeypatch.setenv("HOME", str(tmp_path))
         target = tmp_path / "operator-settings.json"
         target.write_text('{"theme":"unchanged"}', encoding="utf-8")
-        settings = tmp_path / ".claude" / "settings.json"
-        settings.parent.mkdir(parents=True)
+        settings = tmp_path / ".claude.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
         try:
             settings.symlink_to(target)
         except OSError:
@@ -207,7 +235,7 @@ class TestClaudeCodeWrites:
         assert target.read_text(encoding="utf-8") == '{"theme":"unchanged"}'
 
     def test_public_set_and_unset_normalize_unsafe_path_error(self, tmp_path, monkeypatch):
-        monkeypatch.setattr(connector_paths, "claude_config_dir", lambda: str(tmp_path / ".claude"))
+        monkeypatch.setattr(connector_paths, "claude_mcp_state_path", lambda: str(tmp_path / ".claude.json"))
 
         def refuse_unsafe_path(*_args):
             raise file_permissions.UnsafePathError("refusing sensitive write through symlink")
@@ -224,8 +252,8 @@ class TestClaudeCodeWrites:
 
     def test_unset_removes_key(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))
-        settings = tmp_path / ".claude" / "settings.json"
-        settings.parent.mkdir(parents=True)
+        settings = tmp_path / ".claude.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
         settings.write_text(
             json.dumps(
                 {
@@ -273,8 +301,8 @@ class TestClaudeCodeWrites:
     ):
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path / "defenseclaw-home"))
-        settings = tmp_path / ".claude" / "settings.json"
-        settings.parent.mkdir(parents=True)
+        settings = tmp_path / ".claude.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
         settings.write_bytes(original)
 
         set_mcp_server("claudecode", "demo", {"command": "inert-demo"})
@@ -285,7 +313,7 @@ class TestClaudeCodeWrites:
     def test_set_unset_removes_file_created_by_defenseclaw(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path / "defenseclaw-home"))
-        settings = tmp_path / ".claude" / "settings.json"
+        settings = tmp_path / ".claude.json"
 
         set_mcp_server("claudecode", "demo", {"command": "inert-demo"})
         assert settings.is_file()
@@ -303,7 +331,7 @@ class TestClaudeCodeWrites:
     ):
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path / "defenseclaw-home"))
-        settings = tmp_path / ".claude" / "settings.json"
+        settings = tmp_path / ".claude.json"
 
         set_mcp_server("claudecode", "managed", {"command": "inert-managed"})
         external = json.loads(settings.read_text(encoding="utf-8"))
@@ -324,7 +352,7 @@ class TestClaudeCodeWrites:
     ):
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path / "defenseclaw-home"))
-        settings = tmp_path / ".claude" / "settings.json"
+        settings = tmp_path / ".claude.json"
 
         set_mcp_server("claudecode", "managed", {"command": "inert-managed"})
         external = json.loads(settings.read_text(encoding="utf-8"))
@@ -345,8 +373,8 @@ class TestClaudeCodeWrites:
     ):
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path / "defenseclaw-home"))
-        settings = tmp_path / ".claude" / "settings.json"
-        settings.parent.mkdir(parents=True)
+        settings = tmp_path / ".claude.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
         original = b'{\n "theme": "dark"\n}\n'
         settings.write_bytes(original)
 
@@ -378,8 +406,8 @@ class TestClaudeCodeWrites:
         monkeypatch.setenv("HOME", str(tmp_path))
         data_home = tmp_path / "d"
         monkeypatch.setenv("DEFENSECLAW_HOME", str(data_home))
-        settings = tmp_path / ".claude" / "settings.json"
-        settings.parent.mkdir()
+        settings = tmp_path / ".claude.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
         settings.write_bytes(original)
 
         with pytest.raises(MCPWriteUnsupportedError, match="JSON object"):
@@ -396,8 +424,8 @@ class TestClaudeCodeWrites:
         monkeypatch.setenv("HOME", str(tmp_path))
         data_home = tmp_path / "d"
         monkeypatch.setenv("DEFENSECLAW_HOME", str(data_home))
-        settings = tmp_path / ".claude" / "settings.json"
-        settings.parent.mkdir()
+        settings = tmp_path / ".claude.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
         original = b'{\r\n "theme": "operator"\r\n}\r\n'
         settings.write_bytes(original)
         publish = connector_paths._publish_claude_config_if_unchanged
@@ -440,8 +468,8 @@ class TestClaudeCodeWrites:
         monkeypatch.setenv("HOME", str(tmp_path))
         data_home = tmp_path / "d"
         monkeypatch.setenv("DEFENSECLAW_HOME", str(data_home))
-        settings = tmp_path / ".claude" / "settings.json"
-        settings.parent.mkdir()
+        settings = tmp_path / ".claude.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
         original = b'{\r\n "theme": "operator"\r\n}\r\n'
         settings.write_bytes(original)
         publish = connector_paths._atomic_replace_claude_with_proof
@@ -485,8 +513,8 @@ class TestClaudeCodeWrites:
         monkeypatch.setenv("HOME", str(tmp_path))
         data_home = tmp_path / "d"
         monkeypatch.setenv("DEFENSECLAW_HOME", str(data_home))
-        settings = tmp_path / ".claude" / "settings.json"
-        settings.parent.mkdir()
+        settings = tmp_path / ".claude.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
         original = b'{ "theme" : "operator" }\n'
         settings.write_bytes(original)
         finalize = connector_paths._finalize_claude_mcp_transaction
@@ -545,8 +573,8 @@ class TestClaudeCodeWrites:
         monkeypatch.setenv("HOME", str(tmp_path))
         data_home = tmp_path / "d"
         monkeypatch.setenv("DEFENSECLAW_HOME", str(data_home))
-        settings = tmp_path / ".claude" / "settings.json"
-        settings.parent.mkdir()
+        settings = tmp_path / ".claude.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
         original = b'{ "theme" : "operator" }\r\n'
         settings.write_bytes(original)
         project = connector_paths._claude_postimage_identity_from_snapshot
@@ -590,8 +618,8 @@ class TestClaudeCodeWrites:
         monkeypatch.setenv("HOME", str(tmp_path))
         data_home = tmp_path / "d"
         monkeypatch.setenv("DEFENSECLAW_HOME", str(data_home))
-        settings = tmp_path / ".claude" / "settings.json"
-        settings.parent.mkdir()
+        settings = tmp_path / ".claude.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
         original = b'{\n  "mcpServers": {\n    "demo": {\n      "command": "inert-demo"\n    }\n  }\n}\n'
         settings.write_bytes(original)
         finalize = connector_paths._finalize_claude_mcp_transaction
@@ -624,8 +652,8 @@ class TestClaudeCodeWrites:
         monkeypatch.setenv("HOME", str(tmp_path))
         data_home = tmp_path / "d"
         monkeypatch.setenv("DEFENSECLAW_HOME", str(data_home))
-        settings = tmp_path / ".claude" / "settings.json"
-        settings.parent.mkdir()
+        settings = tmp_path / ".claude.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
         original = b'{"theme":"operator"}\n'
         settings.write_bytes(original)
         set_mcp_server("claudecode", "demo", {"command": "inert-demo"})
@@ -666,8 +694,8 @@ class TestClaudeCodeWrites:
         monkeypatch.setenv("HOME", str(tmp_path))
         data_home = tmp_path / "d"
         monkeypatch.setenv("DEFENSECLAW_HOME", str(data_home))
-        settings = tmp_path / ".claude" / "settings.json"
-        settings.parent.mkdir()
+        settings = tmp_path / ".claude.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
         original = b'{\r\n "mcpServers": {"demo": {"command": "operator"}},\r\n "theme": "operator"\r\n}\r\n'
         settings.write_bytes(original)
         set_mcp_server("claudecode", "demo", {"command": "inert-demo"})
@@ -700,8 +728,8 @@ class TestClaudeCodeWrites:
         monkeypatch.setenv("HOME", str(tmp_path))
         data_home = tmp_path / "d"
         monkeypatch.setenv("DEFENSECLAW_HOME", str(data_home))
-        settings = tmp_path / ".claude" / "settings.json"
-        settings.parent.mkdir()
+        settings = tmp_path / ".claude.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
         settings.write_bytes(b'{"theme":"before"}\n')
         external = b'{ "theme": "operator-raced" }\r\n'
         raced = False
@@ -751,10 +779,12 @@ class TestClaudeCodeWrites:
 
     def test_parent_swap_before_native_replace_preserves_new_tree(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))
+        config_home = tmp_path / ".claude"
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_home))
         data_home = tmp_path / "d"
         monkeypatch.setenv("DEFENSECLAW_HOME", str(data_home))
-        settings = tmp_path / ".claude" / "settings.json"
-        settings.parent.mkdir()
+        settings = config_home / ".claude.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
         settings.write_bytes(b'{"theme":"original-tree"}\n')
         displaced = tmp_path / ".claude-displaced"
         external = b'{"theme":"new-tree"}\n'
@@ -794,7 +824,7 @@ class TestClaudeCodeWrites:
 
         assert swapped
         assert settings.read_bytes() == external
-        assert (displaced / "settings.json").read_bytes() == b'{"theme":"original-tree"}\n'
+        assert (displaced / ".claude.json").read_bytes() == b'{"theme":"original-tree"}\n'
 
     @pytest.mark.skipif(os.name != "nt", reason="exact raw DACL contract is Windows-specific")
     def test_set_unset_preserves_exact_windows_security(self, tmp_path, monkeypatch):
@@ -802,8 +832,8 @@ class TestClaudeCodeWrites:
 
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path / "d"))
-        settings = tmp_path / ".claude" / "settings.json"
-        settings.parent.mkdir()
+        settings = tmp_path / ".claude.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
         original = b'{"theme":"operator"}\r\n'
         settings.write_bytes(original)
         security = windows_acl.capture_path(str(settings))
@@ -849,7 +879,7 @@ class TestClaudeCodeWrites:
 
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path / "d"))
-        settings = tmp_path / ".claude" / "settings.json"
+        settings = tmp_path / ".claude.json"
         capture = windows_acl.capture_path
 
         def capture_with_foreign_settings_parent(path, *, directory=False):
@@ -881,7 +911,7 @@ class TestClaudeCodeWrites:
         monkeypatch.setenv("HOME", str(tmp_path))
         data_home = tmp_path / "d"
         monkeypatch.setenv("DEFENSECLAW_HOME", str(data_home))
-        settings = tmp_path / ".claude" / "settings.json"
+        settings = tmp_path / ".claude.json"
         set_mcp_server("claudecode", "demo", {"command": "inert-demo"})
         before = settings.read_bytes()
         metadata = _claude_ownership_files(data_home)
@@ -903,8 +933,8 @@ class TestClaudeCodeWrites:
         monkeypatch.setenv("HOME", str(tmp_path))
         data_home = tmp_path / "d"
         monkeypatch.setenv("DEFENSECLAW_HOME", str(data_home))
-        settings = tmp_path / ".claude" / "settings.json"
-        settings.parent.mkdir()
+        settings = tmp_path / ".claude.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
         original = b'{ "theme": "operator" }\n'
         settings.write_bytes(original)
         backup = Path(connector_paths._managed_mcp_backup_path(str(settings)))
@@ -934,8 +964,8 @@ class TestClaudeCodeWrites:
     def test_legacy_registry_mutation_holds_target_lock(self, tmp_path, monkeypatch, operation):
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path / "d"))
-        settings = tmp_path / ".claude" / "settings.json"
-        settings.parent.mkdir()
+        settings = tmp_path / ".claude.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
         settings.write_bytes(b'{"theme":"operator"}\n')
         ownership = os.path.abspath(connector_paths._claude_mcp_ownership_path(str(settings)))
         registry = os.path.abspath(connector_paths._registry_path())
@@ -972,7 +1002,7 @@ class TestClaudeCodeWrites:
         monkeypatch.setenv("HOME", str(tmp_path))
         data_home = tmp_path / "d"
         monkeypatch.setenv("DEFENSECLAW_HOME", str(data_home))
-        settings = tmp_path / ".claude" / "settings.json"
+        settings = tmp_path / ".claude.json"
         assert_guard = connector_paths._assert_claude_mutation_guard
         attempted = False
 
@@ -1007,8 +1037,8 @@ class TestClaudeCodeWrites:
     def test_windows_legacy_aliases_share_ownership_and_retire_together(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path / "d"))
-        settings = tmp_path / ".claude" / "settings.json"
-        settings.parent.mkdir()
+        settings = tmp_path / ".claude.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
         settings.write_bytes(b'{"theme":"operator"}\n')
         backup = Path(connector_paths._managed_mcp_backup_path(str(settings)))
         backup.write_bytes(settings.read_bytes())
@@ -1048,8 +1078,8 @@ class TestClaudeCodeWrites:
     def test_legacy_backup_retirement_preserves_same_byte_replacement(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path / "d"))
-        settings = tmp_path / ".claude" / "settings.json"
-        settings.parent.mkdir()
+        settings = tmp_path / ".claude.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
         original = b'{"theme":"operator"}\n'
         settings.write_bytes(original)
         backup = Path(connector_paths._managed_mcp_backup_path(str(settings)))
@@ -1090,8 +1120,8 @@ class TestClaudeCodeWrites:
     ):
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path / "d"))
-        settings = tmp_path / ".claude" / "settings.json"
-        settings.parent.mkdir()
+        settings = tmp_path / ".claude.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
         original = b'{"theme":"operator"}\n'
         settings.write_bytes(original)
         backup = Path(connector_paths._managed_mcp_backup_path(str(settings)))
@@ -1138,7 +1168,7 @@ class TestClaudeCodeWrites:
     ):
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path / "d"))
-        settings = tmp_path / ".claude" / "settings.json"
+        settings = tmp_path / ".claude.json"
         set_mcp_server("claudecode", "first", {"command": "inert-first"})
         publish = connector_paths._publish_claude_config_if_unchanged
 
@@ -1205,8 +1235,8 @@ class TestClaudeCodeWrites:
     def test_initial_pending_episode_preimage_mismatch_fails_closed(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path / "d"))
-        settings = tmp_path / ".claude" / "settings.json"
-        settings.parent.mkdir()
+        settings = tmp_path / ".claude.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
         original = b'{"theme":"operator"}\n'
         settings.write_bytes(original)
         publish = connector_paths._publish_claude_config_if_unchanged
@@ -1247,8 +1277,8 @@ class TestClaudeCodeWrites:
     def test_unowned_pending_config_must_be_a_json_object(self, tmp_path, monkeypatch, field):
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path / "d"))
-        settings = tmp_path / ".claude" / "settings.json"
-        settings.parent.mkdir()
+        settings = tmp_path / ".claude.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
         original = b'{"mcpServers":{"demo":{"command":"operator"}}}\n'
         settings.write_bytes(original)
         publish = connector_paths._publish_claude_config_if_unchanged
@@ -1299,7 +1329,7 @@ class TestClaudeCodeWrites:
     ):
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path / "d"))
-        settings = tmp_path / ".claude" / "settings.json"
+        settings = tmp_path / ".claude.json"
         set_mcp_server("claudecode", "demo", {"command": "inert-demo"})
         metadata = Path(connector_paths._claude_mcp_ownership_path(str(settings)))
         envelope = json.loads(metadata.read_text(encoding="utf-8"))
@@ -1320,8 +1350,8 @@ class TestClaudeCodeWrites:
     def test_non_finite_settings_fail_closed(self, tmp_path, monkeypatch, non_finite):
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path / "d"))
-        settings = tmp_path / ".claude" / "settings.json"
-        settings.parent.mkdir()
+        settings = tmp_path / ".claude.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
         settings.write_bytes(non_finite)
 
         with pytest.raises(MCPWriteUnsupportedError, match="JSON object"):
@@ -1344,8 +1374,8 @@ class TestClaudeCodeWrites:
         monkeypatch.setenv("HOME", str(tmp_path))
         data_home = tmp_path / "d"
         monkeypatch.setenv("DEFENSECLAW_HOME", str(data_home))
-        settings = tmp_path / ".claude" / "settings.json"
-        settings.parent.mkdir()
+        settings = tmp_path / ".claude.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
         original = (json.dumps({"mcpServers": invalid_container}) + "\n").encode()
         settings.write_bytes(original)
 
@@ -1362,7 +1392,7 @@ class TestClaudeCodeWrites:
         monkeypatch.setenv("HOME", str(tmp_path))
         data_home = tmp_path / "d"
         monkeypatch.setenv("DEFENSECLAW_HOME", str(data_home))
-        settings = tmp_path / ".claude" / "settings.json"
+        settings = tmp_path / ".claude.json"
 
         with pytest.raises(MCPWriteUnsupportedError, match="not finite"):
             set_mcp_server("claudecode", "demo", {"command": "inert", "value": float("nan")})
@@ -1370,8 +1400,10 @@ class TestClaudeCodeWrites:
 
     def test_absent_settings_parent_swap_fails_closed(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))
+        config_home = tmp_path / ".claude"
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_home))
         monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path / "d"))
-        settings = tmp_path / ".claude" / "settings.json"
+        settings = config_home / ".claude.json"
         displaced = tmp_path / ".claude-displaced"
         marker = b"operator tree"
         make_private = connector_paths.make_private_directory
@@ -1395,7 +1427,7 @@ class TestClaudeCodeWrites:
         assert swapped
         assert (settings.parent / "marker").read_bytes() == marker
         assert not settings.exists()
-        assert not (displaced / "settings.json").exists()
+        assert not (displaced / ".claude.json").exists()
 
     @pytest.mark.skipif(os.name != "nt", reason="Windows lock-leaf reparse contract")
     @pytest.mark.parametrize("reject_on", [1, 2], ids=["preexisting", "acquisition-race"])
@@ -1407,7 +1439,7 @@ class TestClaudeCodeWrites:
     ):
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path / "d"))
-        settings = tmp_path / ".claude" / "settings.json"
+        settings = tmp_path / ".claude.json"
         lock_path = connector_paths._claude_mcp_ownership_path(str(settings)) + ".lock"
         reject = connector_paths.reject_reparse_path
         seen = 0
@@ -1431,7 +1463,7 @@ class TestClaudeCodeWrites:
         monkeypatch.setenv("HOME", str(tmp_path))
         data_home = tmp_path / "d"
         monkeypatch.setenv("DEFENSECLAW_HOME", str(data_home))
-        settings = tmp_path / ".claude" / "settings.json"
+        settings = tmp_path / ".claude.json"
         move = windows_acl.move_file_no_replace
 
         def install_external_then_fail(source, target):
@@ -1461,7 +1493,7 @@ class TestClaudeCodeWrites:
         monkeypatch.setenv("HOME", str(tmp_path))
         data_home = tmp_path / "d"
         monkeypatch.setenv("DEFENSECLAW_HOME", str(data_home))
-        settings = tmp_path / ".claude" / "settings.json"
+        settings = tmp_path / ".claude.json"
         move = windows_acl.move_file_no_replace
         external = b'{"mcpServers":{"operator":{"command":"external"}}}\n'
 
@@ -1491,7 +1523,7 @@ class TestClaudeCodeWrites:
         monkeypatch.setenv("HOME", str(tmp_path))
         data_home = tmp_path / "d"
         monkeypatch.setenv("DEFENSECLAW_HOME", str(data_home))
-        settings = tmp_path / ".claude" / "settings.json"
+        settings = tmp_path / ".claude.json"
         external = b'{"mcpServers":{"operator":{"command":"external"}}}\n'
         publish = connector_paths._atomic_replace_claude_with_proof
 
@@ -1535,7 +1567,7 @@ class TestClaudeCodeWrites:
     def test_windows_unsafe_private_journal_acl_fails_closed(self, tmp_path, monkeypatch, leaf):
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path / "d"))
-        settings = tmp_path / ".claude" / "settings.json"
+        settings = tmp_path / ".claude.json"
         set_mcp_server("claudecode", "first", {"command": "inert-first"})
         ownership = Path(connector_paths._claude_mcp_ownership_path(str(settings)))
         target = ownership if leaf == "ownership" else Path(f"{ownership}.lock")
@@ -1560,7 +1592,7 @@ class TestClaudeCodeWrites:
     def test_posix_unsafe_private_journal_mode_fails_closed(self, tmp_path, monkeypatch, leaf):
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path / "d"))
-        settings = tmp_path / ".claude" / "settings.json"
+        settings = tmp_path / ".claude.json"
         set_mcp_server("claudecode", "first", {"command": "inert-first"})
         ownership = Path(connector_paths._claude_mcp_ownership_path(str(settings)))
         target = ownership if leaf == "ownership" else Path(f"{ownership}.lock")
@@ -1577,8 +1609,8 @@ class TestClaudeCodeWrites:
     def test_shared_registry_concurrent_edit_is_preserved(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path / "d"))
-        settings = tmp_path / ".claude" / "settings.json"
-        settings.parent.mkdir()
+        settings = tmp_path / ".claude.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
         original = b'{"theme":"operator"}\n'
         settings.write_bytes(original)
         backup = Path(connector_paths._managed_mcp_backup_path(str(settings)))
@@ -1634,7 +1666,7 @@ class TestClaudeCodeWrites:
     def test_ownership_metadata_concurrent_edit_is_preserved(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path / "d"))
-        settings = tmp_path / ".claude" / "settings.json"
+        settings = tmp_path / ".claude.json"
         set_mcp_server("claudecode", "first", {"command": "inert-first"})
         settings_before = settings.read_bytes()
         metadata = Path(connector_paths._claude_mcp_ownership_path(str(settings)))
@@ -1670,8 +1702,8 @@ class TestClaudeCodeWrites:
         monkeypatch.setenv("HOME", str(tmp_path))
         data_home = tmp_path / "d"
         monkeypatch.setenv("DEFENSECLAW_HOME", str(data_home))
-        settings = tmp_path / ".claude" / "settings.json"
-        settings.parent.mkdir()
+        settings = tmp_path / ".claude.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
         original = b'{ "theme" : "operator" }\n'
         settings.write_bytes(original)
         set_mcp_server("claudecode", "demo", {"command": "inert-demo"})
@@ -1703,8 +1735,8 @@ class TestClaudeCodeWrites:
         monkeypatch.setenv("HOME", str(tmp_path))
         data_home = tmp_path / "d"
         monkeypatch.setenv("DEFENSECLAW_HOME", str(data_home))
-        settings = tmp_path / ".claude" / "settings.json"
-        settings.parent.mkdir()
+        settings = tmp_path / ".claude.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
         original = b'{"theme":"operator"}\n'
         settings.write_bytes(original)
         metadata_path = Path(connector_paths._claude_mcp_ownership_path(str(settings)))
@@ -1742,9 +1774,9 @@ class TestClaudeCodeWrites:
         monkeypatch.setenv("HOME", str(tmp_path))
         data_home = tmp_path / "d"
         monkeypatch.setenv("DEFENSECLAW_HOME", str(data_home))
-        settings = tmp_path / ".claude" / "settings.json"
+        settings = tmp_path / ".claude.json"
         if preexisting:
-            settings.parent.mkdir()
+            settings.parent.mkdir(parents=True, exist_ok=True)
             settings.write_bytes(b'{"theme":"operator"}\n')
         set_mcp_server("claudecode", "demo", {"command": "inert-demo"})
         managed_bytes = settings.read_bytes()
@@ -1768,9 +1800,9 @@ class TestClaudeCodeWrites:
         monkeypatch.setenv("HOME", str(tmp_path))
         data_home = tmp_path / "d"
         monkeypatch.setenv("DEFENSECLAW_HOME", str(data_home))
-        settings = tmp_path / ".claude" / "settings.json"
+        settings = tmp_path / ".claude.json"
         if preexisting:
-            settings.parent.mkdir()
+            settings.parent.mkdir(parents=True, exist_ok=True)
             settings.write_bytes(b'{"theme":"operator"}\n')
         publish = connector_paths._atomic_replace_claude_with_proof
 
@@ -1805,7 +1837,7 @@ class TestClaudeCodeWrites:
         monkeypatch.setenv("HOME", str(tmp_path))
         data_home = tmp_path / "d"
         monkeypatch.setenv("DEFENSECLAW_HOME", str(data_home))
-        settings = tmp_path / ".claude" / "settings.json"
+        settings = tmp_path / ".claude.json"
         finalize = connector_paths._finalize_claude_mcp_transaction
 
         def replace_before_finalize(path, next_state, next_released):
@@ -1832,7 +1864,7 @@ class TestClaudeCodeWrites:
         monkeypatch.setenv("HOME", str(tmp_path))
         data_home = tmp_path / "d"
         monkeypatch.setenv("DEFENSECLAW_HOME", str(data_home))
-        settings = tmp_path / ".claude" / "settings.json"
+        settings = tmp_path / ".claude.json"
         set_mcp_server("claudecode", "demo", {"command": "inert-demo"})
         managed_bytes = settings.read_bytes()
         delete = connector_paths._delete_private_regular_file
@@ -1862,7 +1894,7 @@ class TestClaudeCodeWrites:
     def test_ambiguous_recovery_never_acquires_next_only_server(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path / "d"))
-        settings = tmp_path / ".claude" / "settings.json"
+        settings = tmp_path / ".claude.json"
         set_mcp_server("claudecode", "first", {"command": "inert-first"})
         publish = connector_paths._publish_claude_config_if_unchanged
 
@@ -1898,8 +1930,8 @@ class TestClaudeCodeWrites:
         monkeypatch.setenv("HOME", str(tmp_path))
         data_home = tmp_path / "d"
         monkeypatch.setenv("DEFENSECLAW_HOME", str(data_home))
-        settings = tmp_path / ".claude" / "settings.json"
-        settings.parent.mkdir()
+        settings = tmp_path / ".claude.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
         original = b'{\r\n  "mcpServers": {},\r\n  "theme": "operator"\r\n}\r\n'
         settings.write_bytes(original)
 
@@ -1934,8 +1966,8 @@ class TestClaudeCodeWrites:
 
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("DEFENSECLAW_HOME", str(tmp_path / "d"))
-        settings = tmp_path / ".claude" / "settings.json"
-        settings.parent.mkdir()
+        settings = tmp_path / ".claude.json"
+        settings.parent.mkdir(parents=True, exist_ok=True)
         original = b'{ "theme" : "operator" }\r\n'
         settings.write_bytes(original)
         verify = v8_activation._repair_and_verify_windows_publication
@@ -2073,8 +2105,9 @@ class TestCodexWrites:
         workspace = tmp_path / "ws"
         workspace.mkdir()
         monkeypatch.chdir(workspace)
-        path = workspace / ".mcp.json"
-        path.write_text(json.dumps({"mcpServers": {"old": {"command": "old"}}}))
+        path = workspace / ".codex" / "config.toml"
+        path.parent.mkdir()
+        path.write_text('[mcp_servers.old]\ncommand = "old"\n')
 
         set_mcp_server("codex", "demo", {"command": "uvx"}, workspace_dir=str(workspace))
 
@@ -2092,9 +2125,9 @@ class TestCodexWrites:
         far_away.mkdir()
         monkeypatch.chdir(far_away)
         assert restore_managed_mcp_backup(str(path)) is True
-        data = json.loads(path.read_text())
-        assert "demo" not in data["mcpServers"]
-        assert data["mcpServers"]["old"]["command"] == "old"
+        data = tomllib.loads(path.read_text())
+        assert "demo" not in data["mcp_servers"]
+        assert data["mcp_servers"]["old"]["command"] == "old"
 
 
 # ---------------------------------------------------------------------------
@@ -2251,8 +2284,8 @@ class TestRoundTrip:
         # Isolate HOME so the real user's ``~/.codex/config.toml``
         # (which may register global MCP servers like ``playwright``)
         # doesn't bleed into ``mcp_servers("codex")`` — the codex
-        # reader merges the global TOML table with the project-local
-        # ``./.mcp.json`` we're about to write, and without HOME
+        # reader merges user and project ``.codex/config.toml`` layers,
+        # and without HOME
         # pinned to ``tmp_path`` this assertion is non-deterministic
         # across dev machines.
         monkeypatch.setenv("HOME", str(tmp_path))
@@ -2291,16 +2324,22 @@ class TestRoundTrip:
 
 
 class TestAtomicity:
-    def test_set_recovers_from_corrupt_json(self, tmp_path, monkeypatch):
+    def test_codex_workspace_write_rejects_corrupt_toml_without_clobbering(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
         if os.name == "nt":
             file_permissions._set_windows_owner_only_acl(os.fspath(tmp_path))
-        path = tmp_path / ".mcp.json"
-        path.write_text("{ this is not valid json")
+        path = tmp_path / ".codex" / "config.toml"
+        path.parent.mkdir()
+        original = "[mcp_servers.demo\nbroken"
+        path.write_text(original)
 
-        set_mcp_server("codex", "demo", {"command": "uvx"}, workspace_dir=str(tmp_path))
+        with pytest.raises(ValueError, match="malformed Codex config.toml"):
+            set_mcp_server("codex", "demo", {"command": "uvx"}, workspace_dir=str(tmp_path))
 
-        data = json.loads(path.read_text())
-        assert data["mcpServers"]["demo"]["command"] == "uvx"
+        assert path.read_text() == original
 
     def test_set_does_not_leave_tempfile_on_success(
         self,
@@ -2382,9 +2421,10 @@ class TestHermesWrites:
 
 
 # ---------------------------------------------------------------------------
-# opencode — full read+write parity (mcp.md M2/M5). Writes the global
-# ~/.config/opencode/opencode.json (project file under explicit workspace),
-# mapping into opencode's `mcp` schema (type/command-argv/environment).
+# opencode — full read+write parity (mcp.md M2/M5). Writes an explicitly
+# pinned project, then OPENCODE_CONFIG_DIR when active, otherwise the global
+# ~/.config/opencode/opencode.json, mapping into opencode's `mcp` schema
+# (type/command-argv/environment).
 # ---------------------------------------------------------------------------
 
 
@@ -2495,6 +2535,135 @@ class TestOpenCodeWrites:
         assert not self._global(tmp_path / "home").exists()
         names = {e.name for e in connector_paths.mcp_servers("opencode", workspace_dir=str(workspace))}
         assert names == {"demo"}
+
+    def test_custom_config_dir_is_default_user_write_target(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        custom = tmp_path / "custom-opencode"
+        monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(custom))
+
+        set_mcp_server("opencode", "demo", {"command": "npx"})
+
+        target = custom / "opencode.json"
+        assert target.is_file()
+        assert not self._global(tmp_path / "home").exists()
+        assert [entry.name for entry in connector_paths.mcp_servers("opencode")] == ["demo"]
+        unset_mcp_server("opencode", "demo")
+        assert connector_paths.mcp_servers("opencode") == []
+
+    def test_custom_jsonc_is_updated_in_place_as_higher_precedence(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path / "home"))
+        custom = tmp_path / "custom-opencode"
+        custom.mkdir()
+        custom_jsonc = custom / "opencode.jsonc"
+        custom_jsonc.write_text(
+            json.dumps(
+                {
+                    "theme": "tokyonight",
+                    "mcp": {"demo": {"type": "local", "command": ["old-command"]}},
+                }
+            )
+        )
+        monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(custom))
+
+        set_mcp_server("opencode", "demo", {"command": "new-command"})
+
+        data = json.loads(custom_jsonc.read_text())
+        assert data["theme"] == "tokyonight"
+        assert data["mcp"]["demo"]["command"] == ["new-command"]
+        assert not (custom / "opencode.json").exists()
+
+        unset_mcp_server("opencode", "demo")
+        data = json.loads(custom_jsonc.read_text())
+        assert "demo" not in data["mcp"]
+        assert data["theme"] == "tokyonight"
+
+    def test_unset_removes_shadowed_name_from_all_active_layers(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        monkeypatch.setenv("HOME", str(home))
+        global_path = self._global(home)
+        global_path.parent.mkdir(parents=True)
+        global_path.write_text(
+            json.dumps({"mcp": {"demo": {"type": "local", "command": ["global-command"]}}})
+        )
+        custom = tmp_path / "custom-opencode"
+        custom.mkdir()
+        custom_jsonc = custom / "opencode.jsonc"
+        custom_jsonc.write_text(
+            json.dumps({"mcp": {"demo": {"type": "local", "command": ["custom-command"]}}})
+        )
+        monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(custom))
+        assert connector_paths.mcp_servers("opencode")[0].command == "custom-command"
+
+        unset_mcp_server("opencode", "demo")
+
+        assert connector_paths.mcp_servers("opencode") == []
+        assert "demo" not in json.loads(global_path.read_text())["mcp"]
+        assert "demo" not in json.loads(custom_jsonc.read_text())["mcp"]
+
+    def test_project_enabled_only_override_preserves_global_local_entry(
+        self, tmp_path, monkeypatch
+    ):
+        home = tmp_path / "home"
+        monkeypatch.setenv("HOME", str(home))
+        global_path = self._global(home)
+        global_path.parent.mkdir(parents=True)
+        global_path.write_text(
+            json.dumps(
+                {
+                    "mcp": {
+                        "demo": {
+                            "type": "local",
+                            "command": ["global-command", "--serve"],
+                            "environment": {"API_KEY": "secret"},
+                        }
+                    }
+                }
+            )
+        )
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        (workspace / "opencode.json").write_text(
+            json.dumps({"mcp": {"demo": {"enabled": True}}})
+        )
+
+        [entry] = connector_paths.mcp_servers("opencode", workspace_dir=str(workspace))
+
+        assert entry.command == "global-command"
+        assert entry.args == ["--serve"]
+        assert entry.env == {"API_KEY": "secret"}
+        assert entry.disabled is False
+
+    def test_custom_enabled_only_override_disables_global_remote_entry(
+        self, tmp_path, monkeypatch
+    ):
+        home = tmp_path / "home"
+        monkeypatch.setenv("HOME", str(home))
+        global_path = self._global(home)
+        global_path.parent.mkdir(parents=True)
+        global_path.write_text(
+            json.dumps(
+                {
+                    "mcp": {
+                        "demo": {
+                            "type": "remote",
+                            "url": "https://example.test/mcp",
+                        }
+                    }
+                }
+            )
+        )
+        custom = tmp_path / "custom-opencode"
+        custom.mkdir()
+        (custom / "opencode.jsonc").write_text(
+            json.dumps({"mcp": {"demo": {"enabled": False}}})
+        )
+        monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(custom))
+
+        [entry] = connector_paths.mcp_servers("opencode")
+
+        assert entry.url == "https://example.test/mcp"
+        assert entry.transport == "remote"
+        assert entry.disabled is True
 
     def test_set_fails_closed_on_unparseable_existing(self, tmp_path, monkeypatch):
         """A config we can't safely parse must NOT be clobbered — the

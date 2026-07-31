@@ -6,6 +6,15 @@
 > and
 > [capability matrix](https://cisco-ai-defense.github.io/defenseclaw/docs/capability-matrix/)
 > for current behavior.
+>
+> In particular, the Codex column below intentionally records superseded
+> commit-era `.codex/skills`, `.mcp.json`, and broad plugin-root behavior. Do
+> not use those historical paths as implementation guidance. Current Codex
+> uses project/personal `.agents/skills`, user and trusted-project
+> `.codex/config.toml` MCP tables, exact marketplace local sources, and the
+> implementation-observed installed `$CODEX_HOME/plugins/cache` hierarchy.
+> The cache is preview inventory evidence, not a promised stable Codex CLI
+> public contract.
 
 **Commits covered:**
 - `d3b94fb` — Go-side sentinel elimination, polymorphic config + discovery, hook registration, tests
@@ -42,7 +51,7 @@
 | Feature | OpenClaw | ZeptoClaw | Claude Code | Codex |
 |---|---|---|---|---|
 | **Hook scripts written to disk** | ✅ 🆕 `WriteHookScriptsForConnector` writes only generic + openclaw-specific scripts | ✅ 🆕 generic scripts only (no connector-specific hook script for zeptoclaw) | ✅ 🆕 generic + `claude-code-hook.sh` | ✅ 🆕 generic + `codex-hook.sh` |
-| **Hook auto-wired into agent's config** | ✅ via `before_tool_call` plugin hook | ❌ **not wired**: `patchZeptoClawConfig` only touches `providers.*.api_base` and `safety.allow_private_endpoints`. Comment on `zeptoclaw.go:30-35` now accurately states proxy-side response-scan, not config-based hooks. | ✅ `patchClaudeCodeHooks` registers 26 events in `~/.claude/settings.json` | ⚠️ Codex doesn't have a settings-based hook system; script sits on disk but Codex never invokes it on its own |
+| **Hook auto-wired into agent's config** | ✅ via `before_tool_call` plugin hook | ❌ **not wired**: `patchZeptoClawConfig` only touches `providers.*.api_base` and `safety.allow_private_endpoints`. Comment on `zeptoclaw.go:30-35` now accurately states proxy-side response-scan, not config-based hooks. | ⚠️ preview: `patchClaudeCodeHooks` registers the 28-event owned documented matrix in `~/.claude/settings.json`; v2.1.219's release-only `DirectoryAdded` remains unregistered pending a published schema/order/blocking contract | ⚠️ Codex doesn't have a settings-based hook system; script sits on disk but Codex never invokes it on its own |
 | **Pre-execution tool gating works end-to-end** | ✅ | ❌ | ✅ | ❌ |
 | **`/api/v1/claude-code/hook` endpoint** | n/a | n/a | ✅ 🆕 dynamically registered via `HookEndpoint` interface (`registerConnectorHookRoutes`) | n/a |
 | **`/api/v1/codex/hook` endpoint** | n/a | n/a | n/a | ✅ 🆕 dynamically registered via `HookEndpoint` interface |
@@ -68,14 +77,14 @@
 
 | Sub-feature | OpenClaw | ZeptoClaw | Claude Code | Codex |
 |---|---|---|---|---|
-| **`mcp list`** | ✅ | ✅ 🆕 Python `config.py:mcp_servers()` dispatches to `_read_mcp_servers_zeptoclaw()` (reads `~/.zeptoclaw/config.json` mcp.servers + `.mcp.json`) | ✅ 🆕 dispatches to `_read_mcp_servers_claudecode()` (reads `~/.claude/settings.json` mcpServers + `.mcp.json`) | ✅ 🆕 dispatches to `_read_mcp_servers_codex()` (reads `.mcp.json`) |
+| **`mcp list`** | ✅ | ✅ 🆕 Python `config.py:mcp_servers()` dispatches to `_read_mcp_servers_zeptoclaw()` (reads `~/.zeptoclaw/config.json` mcp.servers + `.mcp.json`) | ✅ 🆕 dispatches to `_read_mcp_servers_claudecode()` (reads user `~/.claude.json` mcpServers + project `.mcp.json`) | ✅ 🆕 dispatches to `_read_mcp_servers_codex()` (reads `.mcp.json`) |
 | **`mcp scan <path>` (explicit)** | ✅ | ✅ path-agnostic | ✅ | ✅ |
 | **`mcp scan --all`** | ✅ | ✅ 🆕 `app.cfg.mcp_servers()` is connector-aware | ✅ 🆕 same | ✅ 🆕 same |
-| **`mcp set`** | ✅ writes `openclaw.json` via `openclaw config set` | ✅ 🆕🆕 `_connector_config_set_mcp()` writes to `~/.zeptoclaw/config.json` under `mcp.servers.<name>` | ✅ 🆕🆕 writes to `~/.claude/settings.json` under `mcpServers.<name>` | ✅ 🆕🆕 writes to `.mcp.json` under `mcpServers.<name>` |
-| **`mcp unset`** | ✅ removes from `openclaw.json` via `openclaw config unset` | ✅ 🆕🆕 `_connector_config_unset_mcp()` removes from `~/.zeptoclaw/config.json` | ✅ 🆕🆕 removes from `~/.claude/settings.json` | ✅ 🆕🆕 removes from `.mcp.json` |
+| **`mcp set`** | ✅ writes `openclaw.json` via `openclaw config set` | ✅ 🆕🆕 `_connector_config_set_mcp()` writes to `~/.zeptoclaw/config.json` under `mcp.servers.<name>` | ✅ 🆕🆕 writes user scope to `~/.claude.json` under `mcpServers.<name>` | ✅ 🆕🆕 writes to `.mcp.json` under `mcpServers.<name>` |
+| **`mcp unset`** | ✅ removes from `openclaw.json` via `openclaw config unset` | ✅ 🆕🆕 `_connector_config_unset_mcp()` removes from `~/.zeptoclaw/config.json` | ✅ 🆕🆕 removes from user `~/.claude.json` or project `.mcp.json`, matching scope | ✅ 🆕🆕 removes from `.mcp.json` |
 | **`mcp block` / `mcp allow`** | ✅ | ✅ connector-agnostic (stored in DefenseClaw policy DB) | ✅ | ✅ |
-| **MCP scanned at SessionStart hook** | n/a (handled by extension) | ❌ | ✅ `claudeCodeComponentTargets` includes `~/.claude/settings.json` and `<cwd>/.mcp.json` | ✅ `codexComponentTargets` includes `~/.codex/config.toml` and `<cwd>/.mcp.json` |
-| **Go-side `ReadMCPServers()` (watcher/rescan)** | ✅ | ✅ 🆕 `ReadMCPServers()` dispatches to `ReadMCPServersForConnector()` which reads `~/.zeptoclaw/config.json` | ✅ 🆕 reads `~/.claude/settings.json` + `.mcp.json` | ✅ 🆕 reads `.mcp.json` |
+| **MCP scanned at SessionStart hook** | n/a (handled by extension) | ❌ | ✅ includes user/local `~/.claude.json` and project `<cwd>/.mcp.json`; settings remain settings-only | ✅ `codexComponentTargets` includes `~/.codex/config.toml` and `<cwd>/.mcp.json` |
+| **Go-side `ReadMCPServers()` (watcher/rescan)** | ✅ | ✅ 🆕 `ReadMCPServers()` dispatches to `ReadMCPServersForConnector()` which reads `~/.zeptoclaw/config.json` | ✅ 🆕 reads local/user `~/.claude.json` + project `.mcp.json` with local > project > user precedence | ✅ 🆕 reads `.mcp.json` |
 
 ---
 
@@ -87,7 +96,7 @@
 | **`plugin scan <name>` resolution** | ✅ via `openclaw plugins info <name>` | ⚠️ 🆕🆕 `_get_openclaw_plugin_info` takes connector param, returns `None` for non-OpenClaw — falls back to DefenseClaw plugin dir lookup | ⚠️ 🆕🆕 same | ⚠️ 🆕🆕 same |
 | **`plugin list`** | ✅ DefenseClaw plugins + OpenClaw plugins | ⚠️ 🆕🆕 `_merge_all_plugins` passes connector — `_list_openclaw_plugins("zeptoclaw")` returns `[]`, so only DefenseClaw-managed plugins shown. Error message now says "Check your zeptoclaw installation" instead of "Is openclaw installed?" | ⚠️ 🆕🆕 same — shows DefenseClaw-managed plugins only | ⚠️ 🆕🆕 same |
 | **`plugin enable` / `disable` runtime via gateway** | ✅ | ✅ 🆕🆕 `_resolve_openclaw_plugin_id` passes connector — for non-OpenClaw, skips OpenClaw lookup and uses bare name. Gateway RPC is connector-agnostic. | ✅ 🆕🆕 same | ✅ 🆕🆕 same |
-| **Plugin scanned at SessionStart hook** | n/a | ❌ | ✅ `~/.claude/plugins`, `<cwd>/.claude/plugins` | ✅ `~/.codex/plugins` |
+| **Plugin scanned at SessionStart hook** | n/a | ❌ | ⚠️ exact manifest-bearing user/project `.claude/skills` plugins; retained marketplace-cache versions are not inferred active | ✅ `~/.codex/plugins` |
 
 ---
 
@@ -105,7 +114,7 @@
 
 | Feature | OpenClaw | ZeptoClaw | Claude Code | Codex |
 |---|---|---|---|---|
-| **Inventory of skills/plugins/MCP** | ✅ shells out to `openclaw <cat> --json` for full inventory (7 categories) | ✅ 🆕🆕 `build_claw_aibom` dispatches to `_build_filesystem_aibom` — enumerates skills from `cfg.skill_dirs()`, plugins from `cfg.plugin_dirs()`, MCP servers from `cfg.mcp_servers()` | ✅ 🆕🆕 same — reads `~/.claude/settings.json` MCPs, `~/.claude/skills/`, `~/.claude/plugins/` | ✅ 🆕🆕 same — reads `.mcp.json` MCPs, `~/.codex/skills/`, `~/.codex/plugins/` |
+| **Inventory of skills/plugins/MCP** | ✅ shells out to `openclaw <cat> --json` for full inventory (7 categories) | ✅ 🆕🆕 `build_claw_aibom` dispatches to `_build_filesystem_aibom` — enumerates skills from `cfg.skill_dirs()`, plugins from `cfg.plugin_dirs()`, MCP servers from `cfg.mcp_servers()` | ✅ 🆕🆕 manual MCP scopes from `~/.claude.json` + project `.mcp.json`; user/project skills and commands; skills-dir plugins; ambiguous retained marketplace versions are marked unverified | ✅ 🆕🆕 same — reads `.mcp.json` MCPs, `~/.codex/skills/`, `~/.codex/plugins/` |
 | **Inventory of agents/tools/models/memory** | ✅ via OpenClaw CLI | ⚠️ 🆕🆕 empty arrays (no CLI to query). `_build_filesystem_aibom` returns `agents: [], tools: [], model_providers: [], memory: []` | ⚠️ 🆕🆕 same | ⚠️ 🆕🆕 same |
 | **Output includes `connector` field** | ✅ 🆕🆕 `"connector": "openclaw"` in output | ✅ 🆕🆕 `"connector": "zeptoclaw"` | ✅ 🆕🆕 `"connector": "claudecode"` | ✅ 🆕🆕 `"connector": "codex"` |
 
@@ -137,7 +146,7 @@
 | Feature | OpenClaw | ZeptoClaw | Claude Code | Codex |
 |---|---|---|---|---|
 | **fsnotify watch on skill dirs** | ✅ | ✅ 🆕 sidecar resolves dirs from `ComponentTargets` — watches `~/.zeptoclaw/skills` + `<cwd>/.zeptoclaw/skills` | ✅ 🆕 watches `~/.claude/skills` + `<cwd>/.claude/skills` | ✅ 🆕 watches `~/.codex/skills` |
-| **fsnotify watch on plugin dirs** | ✅ | ✅ 🆕 watches `~/.zeptoclaw/plugins` | ✅ 🆕 watches `~/.claude/plugins` | ✅ 🆕 watches `~/.codex/plugins` |
+| **fsnotify watch on plugin dirs** | ✅ | ✅ 🆕 watches `~/.zeptoclaw/plugins` | ✅ 🆕 watches the documented plugin-cache parent (including its environment override) and manifest-bearing skills-directory plugins | ✅ 🆕 watches `~/.codex/plugins` |
 | **Admission gate (block/allow/scan)** | ✅ | ✅ 🆕 runs and watches correct dirs | ✅ 🆕 same | ✅ 🆕 same |
 | **Go-side MCP rescan** | ✅ | ✅ 🆕 `ReadMCPServers()` now dispatches via `ReadMCPServersForConnector()` | ✅ 🆕 same | ✅ 🆕 same |
 
@@ -230,7 +239,7 @@
 |---|---|
 | 🆕🆕 **`cmd_skill.py` — `_list_skills_from_dirs(cfg)` filesystem fallback** | ✅ `_list_openclaw_skills_full` checks connector, builds skill list from `cfg.skill_dirs()` for non-OpenClaw |
 | 🆕🆕 **`cmd_skill.py` — `_get_openclaw_skill_info` filesystem fallback** | ✅ Falls back to `cfg.installed_skill_candidates(name)` for non-OpenClaw |
-| 🆕🆕 **`cmd_mcp.py` — `_connector_config_set_mcp` / `_connector_config_unset_mcp`** | ✅ Writes to `~/.claude/settings.json`, `.mcp.json`, or `~/.zeptoclaw/config.json` based on connector |
+| 🆕🆕 **`cmd_mcp.py` — `_connector_config_set_mcp` / `_connector_config_unset_mcp`** | ✅ Writes to Claude user `~/.claude.json`, project `.mcp.json`, or `~/.zeptoclaw/config.json` based on connector/scope |
 | 🆕🆕 **`cmd_plugin.py` — connector-dispatched list/resolve** | ✅ All of `_list_openclaw_plugins`, `_get_openclaw_plugin_info`, `_resolve_openclaw_plugin_id`, `_merge_all_plugins` take `connector` param |
 | 🆕🆕 **`codeguard_skill.py` — skip OpenClaw-only enable step** | ✅ `install_codeguard_skill` skips `_enable_codeguard_in_openclaw()` for non-OpenClaw. `ensure_codeguard_skill` takes `connector` param — `main.py` and `guardrail.py` both pass it. |
 | 🆕🆕 **`claw_inventory.py` — filesystem-based AIBOM** | ✅ `build_claw_aibom` dispatches to `_build_filesystem_aibom` for non-OpenClaw — uses `cfg.skill_dirs()`, `cfg.plugin_dirs()`, `cfg.mcp_servers()` |
@@ -316,5 +325,5 @@
 
 1. Either delete or fully implement `cli/defenseclaw/guardrail.py` — it's a leftover OpenClaw-only patcher superseded by the polymorphic Go path.
 2. Clean up dead `HookEventHandler` interface or implement it.
-3. Consider connector-specific plugin enumeration for Claude Code (`~/.claude/plugins/`) and Codex (`~/.codex/plugins/`) in `_merge_all_plugins`.
+3. Keep connector-specific plugin enumeration aligned with Claude Code's versioned cache plus skills-directory plugin model, and Codex's `~/.codex/plugins/`, in `_merge_all_plugins`.
 4. Add per-connector AIBOM adapters for agents/tools/models/memory categories (currently empty for non-OpenClaw).

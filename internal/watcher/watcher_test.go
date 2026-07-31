@@ -127,6 +127,60 @@ func TestClassifyEvent_SkillDir(t *testing.T) {
 	}
 }
 
+func TestClassifyEvent_ClaudeSkillsAndCacheUseExactBoundaries(t *testing.T) {
+	cfg, store, logger, skillDir := setupTestEnv(t)
+	cfg.Guardrail.Connector = "claudecode"
+	cacheRoot := filepath.Join(t.TempDir(), "plugins", "cache")
+	plain := filepath.Join(skillDir, "plain")
+	plugin := filepath.Join(skillDir, "plugin")
+	cacheVersion := filepath.Join(cacheRoot, "marketplace", "cached", "1.2.3")
+	for _, dir := range []string{plain, plugin, cacheVersion} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	manifestDir := filepath.Join(plugin, ".claude-plugin")
+	if err := os.MkdirAll(manifestDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(manifestDir, "plugin.json"), []byte(`{"name":"semantic-name"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	w := New(
+		cfg,
+		[]string{skillDir},
+		[]string{skillDir, cacheRoot},
+		store,
+		logger,
+		nil,
+		nil,
+		nil,
+	)
+
+	if got := w.classifyEvent(plain).Type; got != InstallSkill {
+		t.Fatalf("plain Claude skill classified as %q", got)
+	}
+	if got := w.classifyEvent(plugin).Type; got != InstallPlugin {
+		t.Fatalf("skills-directory Claude plugin classified as %q", got)
+	}
+	if got := w.classifyEvent(plugin).Name; got != "semantic-name@skills-dir" {
+		t.Fatalf("skills-directory Claude plugin identity = %q", got)
+	}
+	cacheEvent := w.classifyEvent(cacheVersion)
+	if cacheEvent.Type != InstallPlugin {
+		t.Fatalf("Claude cache version classified as %q", cacheEvent.Type)
+	}
+	if cacheEvent.Name != "cached@marketplace" {
+		t.Fatalf("Claude cache plugin identity = %q", cacheEvent.Name)
+	}
+	if !w.isDirectChildDir(cacheVersion) {
+		t.Fatal("exact Claude cache version was not an admission boundary")
+	}
+	if w.isDirectChildDir(filepath.Dir(cacheVersion)) {
+		t.Fatal("Claude cache plugin container was treated as an admission boundary")
+	}
+}
+
 func TestAdmission_BlockedSkill(t *testing.T) {
 	cfg, store, logger, skillDir := setupTestEnv(t)
 	shell := sandbox.New(cfg.OpenShell.Binary, cfg.OpenShell.PolicyDir)

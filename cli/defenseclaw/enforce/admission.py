@@ -93,7 +93,6 @@ def _default_admission_policy() -> AdmissionPolicyData:
                     ".openclaw/skills/codeguard",
                     ".zeptoclaw/skills/codeguard",
                     ".claude/skills/codeguard",
-                    ".codex/skills/codeguard",
                 ],
             ),
         },
@@ -682,10 +681,10 @@ def _scan_summary(scan_result: Any) -> tuple[int, str]:
 # F-0141: a first-party provenance marker is only trustworthy when it lives
 # under a DefenseClaw/agent-framework *home* the attacker cannot create siblings
 # in without already owning that home. These are the leaf directory names of the
-# per-connector homes (mirrors ``connector_paths.connector_home``). A marker run
-# must be anchored to one of these (either the marker begins with a home, or the
-# component immediately preceding the matched run is a home) so a user-writable
-# parent that merely *contains* the component subsequence — e.g.
+# per-connector or shared agent-framework homes. A marker run must be anchored
+# to one of these (either the marker begins with a home, or the component
+# immediately preceding the matched run is a home) so a user-writable parent
+# that merely *contains* the component subsequence — e.g.
 # ``/tmp/attacker/extensions/defenseclaw`` — does NOT bless the asset.
 _DEFENSECLAW_HOME_COMPONENTS = frozenset(
     {

@@ -467,10 +467,10 @@ defenseclaw_json_string_field() {
 # (all Unix installs; some Windows installs) it is used unchanged.
 # When jq is absent the shim tries python3 (handles both string and
 # object fields such as claude_code_output), then falls back to
-# defenseclaw_json_string_field for string-only fields.  Object fields
-# (e.g. claude_code_output) return empty from the string-only fallback;
-# hook scripts handle empty output correctly (fall through to exit-2
-# block path).
+# defenseclaw_json_string_field for string-only fields. For object fields
+# (e.g. codex_output), a valid response where the field is absent still
+# produces the requested jq default. A present structured value cannot be
+# decoded by the string-only fallback and fails closed at the response layer.
 #
 # Supported filter forms (covers all patterns in DefenseClaw hooks):
 #   .field                    — raw value
@@ -573,7 +573,7 @@ else:
       ;;
   esac
   case "$_dcjq_field" in
-    action|reason|block_reason|decision|permissionDecision|permissionDecisionReason)
+    action|reason|block_reason|decision|permissionDecision|permissionDecisionReason|hook_event_name)
       _dcjq_json="$(cat)"
       if _dcjq_value="$(defenseclaw_json_string_field "$_dcjq_json" "$_dcjq_field")"; then
         printf '%s\n' "$_dcjq_value"
@@ -589,7 +589,21 @@ else:
       fi
       ;;
     *)
-      cat >/dev/null
+      _dcjq_json="$(cat)"
+      if _dcjq_value="$(defenseclaw_json_string_field "$_dcjq_json" "$_dcjq_field")"; then
+        # This fallback cannot validate an object field that is present as a
+        # string. Treat it as a schema error instead of emitting an attacker-
+        # controlled scalar where the hook expects structured JSON.
+        return 1
+      else
+        _dcjq_status=$?
+      fi
+      if [ "$_dcjq_status" -eq 1 ]; then
+        if [ "$_dcjq_default_kind" != "empty" ]; then
+          printf '%s\n' "$_dcjq_default"
+        fi
+        return 0
+      fi
       return 1
       ;;
   esac

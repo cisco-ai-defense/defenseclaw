@@ -16,6 +16,7 @@
 
 """Tests for 'defenseclaw init' command."""
 
+import hashlib
 import json
 import os
 import shutil
@@ -339,6 +340,164 @@ class TestInitFirstRunBackend(unittest.TestCase):
 
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
         self.selection_mock.assert_not_called()
+
+    def test_windows_omnigent_init_records_required_executable_receipt(self):
+        self.selection_patcher.stop()
+        trusted = Path(self.tmp_dir) / "trusted"
+        trusted.mkdir()
+        executable = trusted / "omnigent.exe"
+        executable.write_bytes(b"native omnigent fixture")
+
+        with (
+            patch("defenseclaw.commands.cmd_init.platform_support.host_os", return_value="windows"),
+            patch(
+                "defenseclaw.agent_selection._builtin_setup_trusted_prefixes",
+                return_value=(str(trusted),),
+            ),
+            patch(
+                "defenseclaw.agent_selection.agent_discovery._binary_candidates_for_agent",
+                return_value=(),
+            ),
+            patch("defenseclaw.agent_selection.is_setup_trusted_binary", return_value=True),
+            patch(
+                "defenseclaw.agent_selection.agent_discovery._version_for_agent_binary",
+                return_value=("omnigent 0.7.0", ""),
+            ),
+        ):
+            result = self._invoke([
+                "--non-interactive",
+                "--yes",
+                "--connector",
+                "omnigent",
+                "--profile",
+                "observe",
+                "--skip-install",
+                "--no-start-gateway",
+                "--no-verify",
+                "--json-summary",
+            ])
+
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        with open(os.path.join(self.tmp_dir, "agent_selection.json"), encoding="utf-8") as fh:
+            receipt = json.load(fh)
+        selection = receipt["selections"]["omnigent"]
+        self.assertEqual(selection["connector"], "omnigent")
+        self.assertEqual(selection["source"], "setup-selected")
+        self.assertEqual(selection["executable"], str(executable.resolve()))
+        self.assertEqual(selection["raw_version"], "omnigent 0.7.0")
+        self.assertEqual(selection["normalized_version"], "0.7.0")
+        self.assertEqual(
+            selection["sha256"],
+            hashlib.sha256(executable.read_bytes()).hexdigest(),
+        )
+
+    def test_windows_copilot_remains_publicly_not_certified(self):
+        with patch("defenseclaw.commands.cmd_init.platform_support.host_os", return_value="windows"):
+            result = self._invoke([
+                "--non-interactive",
+                "--yes",
+                "--connector",
+                "copilot",
+                "--profile",
+                "observe",
+                "--skip-install",
+                "--no-start-gateway",
+                "--no-verify",
+            ])
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("not_certified", result.output)
+
+    def test_native_setup_copilot_bootstrap_seeds_canonical_config(self):
+        with patch("defenseclaw.commands.cmd_init.platform_support.host_os", return_value="windows"):
+            result = self._invoke([
+                "--non-interactive",
+                "--yes",
+                "--connector",
+                "copilot",
+                "--profile",
+                "observe",
+                "--skip-install",
+                "--no-start-gateway",
+                "--no-verify",
+                "--native-setup-copilot",
+                "--json-summary",
+            ])
+
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        summary = json.loads(result.output)
+        self.assertEqual(summary["connector"], "copilot")
+        import yaml
+
+        with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh)
+        self.assertEqual(cfg["claw"]["mode"], "copilot")
+        self.assertEqual(cfg["guardrail"]["connector"], "copilot")
+
+    def test_native_setup_copilot_escape_hatch_rejects_non_setup_shape(self):
+        with patch("defenseclaw.commands.cmd_init.platform_support.host_os", return_value="windows"):
+            result = self._invoke([
+                "--connector",
+                "copilot",
+                "--native-setup-copilot",
+            ])
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("reserved for the exact non-interactive native Windows Setup invocation", result.output)
+
+    def test_windows_antigravity_remains_publicly_not_certified(self):
+        with patch("defenseclaw.commands.cmd_init.platform_support.host_os", return_value="windows"):
+            result = self._invoke([
+                "--non-interactive",
+                "--yes",
+                "--connector",
+                "antigravity",
+                "--profile",
+                "observe",
+                "--skip-install",
+                "--no-start-gateway",
+                "--no-verify",
+            ])
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("not_certified", result.output)
+
+    def test_native_setup_antigravity_bootstrap_seeds_canonical_config(self):
+        with patch("defenseclaw.commands.cmd_init.platform_support.host_os", return_value="windows"):
+            result = self._invoke([
+                "--non-interactive",
+                "--yes",
+                "--connector",
+                "antigravity",
+                "--profile",
+                "observe",
+                "--skip-install",
+                "--no-start-gateway",
+                "--no-verify",
+                "--native-setup-antigravity",
+                "--json-summary",
+            ])
+
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        summary = json.loads(result.output)
+        self.assertEqual(summary["connector"], "antigravity")
+        import yaml
+
+        with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh)
+        self.assertEqual(cfg["claw"]["mode"], "antigravity")
+        self.assertEqual(cfg["guardrail"]["connector"], "antigravity")
+
+    def test_native_setup_antigravity_escape_hatch_rejects_non_setup_shape(self):
+        with patch("defenseclaw.commands.cmd_init.platform_support.host_os", return_value="windows"):
+            result = self._invoke([
+                "--connector",
+                "antigravity",
+                "--native-setup-antigravity",
+            ])
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("reserved for the exact non-interactive native Windows Setup invocation", result.output)
 
     def test_sandbox_flag_reports_explicit_scope(self):
         with patch("defenseclaw.platform_support.host_os", return_value="linux"):

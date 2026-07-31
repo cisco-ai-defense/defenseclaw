@@ -65,6 +65,8 @@ _render_checkbox_menu = terminal_checkbox.render_checkbox_menu
 @click.option("--non-interactive", is_flag=True, help="Run the guided first-run backend without prompts.")
 @click.option("--yes", "-y", is_flag=True, help="Assume defaults/yes for first-run prompts.")
 @click.option("--rescan-agents", is_flag=True, help="Refresh cached local agent discovery before choosing a connector.")
+@click.option("--native-setup-copilot", is_flag=True, hidden=True)
+@click.option("--native-setup-antigravity", is_flag=True, hidden=True)
 @click.option(
     "--connector",
     type=click.Choice(
@@ -186,6 +188,8 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     non_interactive: bool,
     yes: bool,
     rescan_agents: bool,
+    native_setup_copilot: bool,
+    native_setup_antigravity: bool,
     connector: str | None,
     profile: str | None,
     observe_all: bool,
@@ -231,11 +235,52 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     if connector:
         requested_connectors.append(_normalize_connector_arg(connector))
     requested_connectors.extend(_parse_connector_list(action_connectors))
+    installer_copilot = native_setup_copilot and _native_setup_copilot_invocation_allowed(
+        connector=connector,
+        requested_connectors=requested_connectors,
+        skip_install=skip_install,
+        non_interactive=non_interactive,
+        yes=yes,
+        sandbox=sandbox,
+        observe_all=observe_all,
+        action_connectors=action_connectors,
+        start_gateway=start_gateway,
+        verify=verify,
+    )
+    installer_antigravity = (
+        native_setup_antigravity
+        and _native_setup_antigravity_invocation_allowed(
+            connector=connector,
+            requested_connectors=requested_connectors,
+            skip_install=skip_install,
+            non_interactive=non_interactive,
+            yes=yes,
+            sandbox=sandbox,
+            observe_all=observe_all,
+            action_connectors=action_connectors,
+            start_gateway=start_gateway,
+            verify=verify,
+        )
+    )
+    if native_setup_copilot and not installer_copilot:
+        raise click.ClickException(
+            "--native-setup-copilot is reserved for the exact non-interactive native Windows Setup invocation"
+        )
+    if native_setup_antigravity and not installer_antigravity:
+        raise click.ClickException(
+            "--native-setup-antigravity is reserved for the exact non-interactive native Windows Setup invocation"
+        )
     for requested in requested_connectors:
         if requested == "none":
             continue
         support = platform_support.connector_platform_support(requested)
-        if not support.available:
+        installer_preview = (
+            (installer_copilot and requested == "copilot")
+            or (installer_antigravity and requested == "antigravity")
+        )
+        if not support.available and not (
+            installer_preview and support.status == platform_support.NOT_CERTIFIED
+        ):
             raise click.ClickException(
                 f"connector {requested!r} is {support.status} on "
                 f"{platform_support.host_os()}: {support.reason}"
@@ -690,16 +735,15 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
 
     primary = connector_settings[0]
     extras = connector_settings[1:]
-    # The short-lived executable receipt authorizes the Windows-only Codex
-    # app-server policy probe. It is not part of the macOS/Linux connector
-    # lifecycle, and Claude Code never consumes this authority. Keeping the
-    # gate this narrow avoids making an installed agent executable a new
-    # prerequisite for those otherwise-supported setup paths.
+    # The short-lived executable receipt authorizes only Windows flows that
+    # later refuse ambient executable discovery: Codex's app-server policy
+    # probe and OmniGent's selected uv-tool process. It is not part of the
+    # macOS/Linux lifecycle, and Claude Code never consumes this authority.
     selected_agent_connectors = [
         item["connector"]
         for item in connector_settings
         if platform_support.host_os() == "windows"
-        and connector_paths.normalize(item["connector"]) == "codex"
+        and connector_paths.normalize(item["connector"]) in {"codex", "omnigent"}
     ]
     if selected_agent_connectors:
         from defenseclaw.agent_selection import record_setup_agent_selections
@@ -1788,6 +1832,72 @@ def _normalize_connector_arg(
     if value in {"claude-code", "claude_code", "claude"}:
         return "claudecode"
     return value
+
+
+def _native_setup_copilot_invocation_allowed(
+    *,
+    connector: str | None,
+    requested_connectors: list[str],
+    skip_install: bool,
+    non_interactive: bool,
+    yes: bool,
+    sandbox: bool,
+    observe_all: bool,
+    action_connectors: str,
+    start_gateway: bool | None,
+    verify: bool | None,
+) -> bool:
+    """Recognize only Setup's narrow pre-certification Copilot bootstrap.
+
+    Public CLI/TUI setup remains governed by the not_certified platform
+    classification. Native Windows Setup uses this hidden path to seed the
+    canonical config inside its durable transaction before the maintenance
+    gateway performs the explicitly home-bound connector reconcile.
+    """
+
+    return (
+        platform_support.host_os() == "windows"
+        and _normalize_connector_arg(connector) == "copilot"
+        and requested_connectors == ["copilot"]
+        and skip_install
+        and non_interactive
+        and yes
+        and not sandbox
+        and not observe_all
+        and not action_connectors.strip()
+        and start_gateway is False
+        and verify is False
+    )
+
+
+def _native_setup_antigravity_invocation_allowed(
+    *,
+    connector: str | None,
+    requested_connectors: list[str],
+    skip_install: bool,
+    non_interactive: bool,
+    yes: bool,
+    sandbox: bool,
+    observe_all: bool,
+    action_connectors: str,
+    start_gateway: bool | None,
+    verify: bool | None,
+) -> bool:
+    """Recognize only Setup's narrow pre-certification Antigravity bootstrap."""
+
+    return (
+        platform_support.host_os() == "windows"
+        and _normalize_connector_arg(connector) == "antigravity"
+        and requested_connectors == ["antigravity"]
+        and skip_install
+        and non_interactive
+        and yes
+        and not sandbox
+        and not observe_all
+        and not action_connectors.strip()
+        and start_gateway is False
+        and verify is False
+    )
 
 
 def _render_first_run_report(report, renderer) -> None:

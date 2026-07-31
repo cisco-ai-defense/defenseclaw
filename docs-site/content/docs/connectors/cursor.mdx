@@ -1,6 +1,6 @@
 ---
 title: Cursor
-description: Cursor connector wires hooks.json with native ask on beforeShellExecution and beforeMCPExecution. Block on preToolUse, beforeReadFile, beforeTabFileRead, beforeSubmitPrompt, stop.
+description: Cursor connector wires hooks.json with native ask on beforeShellExecution and beforeMCPExecution and a native Windows preview.
 keywords:
   - DefenseClaw Cursor connector
   - Cursor hooks
@@ -8,7 +8,16 @@ keywords:
   - Cursor beforeMCPExecution
 ---
 
-The Cursor connector wires DefenseClaw into Cursor's [user-scoped hooks.json](https://docs.cursor.com/) so every shell command and MCP tool call is inspected before it runs.
+The Cursor connector wires DefenseClaw into Cursor's
+[user-scoped hooks.json](https://cursor.com/docs/hooks) so documented prompt,
+tool, shell, MCP, file, and lifecycle events can be evaluated.
+
+<Callout type="warning" title="Native Windows is preview">
+Cursor Agent and the managed PowerShell hook adapter run directly on Windows,
+but packaged Setup and official-client validation is still pending. This is a
+preview, not a certified Windows connector. WSL and mixed Windows/WSL paths are
+outside this preview.
+</Callout>
 
 ## Setup
 
@@ -16,17 +25,12 @@ The Cursor connector wires DefenseClaw into Cursor's [user-scoped hooks.json](ht
 defenseclaw setup cursor
 ```
 
-<Callout type="warning">
-Cursor setup is supported on macOS and Linux. The DefenseClaw connector is not
-certified on native Windows x64, so setup rejects it there.
-</Callout>
-
-This runs the observe-mode template. Cursor talks directly to its native
+This runs the observability-only template. Cursor talks directly to its native
 upstream; DefenseClaw inspects via hooks. **There is no proxy-enforcement
-path** for Cursor — blocking happens hook-side via `preToolUse`,
+path** for Cursor. Hook-side blocking is available on `preToolUse`,
 `beforeShellExecution`, `beforeMCPExecution`, `beforeReadFile`,
-`beforeTabFileRead`, `beforeSubmitPrompt`, and `stop`. Native ask is supported
-only on the two `before*Execution` events.
+`beforeTabFileRead`, and `beforeSubmitPrompt`. Native ask is enforceable only
+on the two `before*Execution` events.
 
 #### What `setup cursor` actually does
 
@@ -100,10 +104,18 @@ Cursor has no proxy enforcement, but its hooks can enforce directly:
 defenseclaw setup cursor --mode action --human-approval --fail-mode closed
 ```
 
-With `mode=action`, `beforeShellExecution` and `beforeMCPExecution` surface a
-native ask when policy returns an eligible confirmation verdict. The other
-block events use an alert/context fallback with `raw_action` preserved; the
-TUI can review but not resume them.
+Then `defenseclaw setup guardrail --restart` to re-wire. With `mode: action`,
+`beforeShellExecution` and `beforeMCPExecution` surface a native ask in Cursor
+when the gateway returns a HITL verdict. `preToolUse` accepts `ask` in its
+schema but Cursor does not enforce it. Other block events use their documented
+deny surface or a non-pausing fallback with `raw_action` preserved; the TUI can
+review but not resume a call that has already continued.
+
+Cursor command hooks fail open by vendor default (`failClosed: false`).
+Selecting `fail_mode: closed` writes `failClosed: true`, so crashes, timeouts,
+invalid JSON, and the documented exit-2 path deny instead. `sessionStart` and
+`sessionEnd` are fire-and-forget. `stop` accepts a follow-up message only and
+is not a blocking gate.
 
 </Tab>
 
@@ -130,7 +142,8 @@ Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [int
   </Folder>
   <Folder name="~/.defenseclaw" defaultOpen>
     <Folder name="hooks">
-      <File name="cursor-hook.sh" />
+      <File name="cursor-hook.sh (macOS and Linux)" />
+      <File name="cursor-hook.ps1 (native Windows preview)" />
     </Folder>
   </Folder>
 </Files>
@@ -142,11 +155,18 @@ Cursor's MCP / skills / rules surfaces are discovered from user-global Cursor lo
 <HookEventsList connector="cursor" />
 
 <Callout type="info">
-Cursor supports native ask only on `beforeShellExecution` and
-`beforeMCPExecution`. The other block events (`preToolUse`, `beforeReadFile`,
-`beforeTabFileRead`, `beforeSubmitPrompt`, `stop`) return an alert/context
-fallback and retain the original confirm intent in audit.
+Cursor supports native ask only on documented ask-capable hook events:
+`beforeShellExecution` and `beforeMCPExecution`. `preToolUse` accepts `ask` in
+its schema but does not enforce it. Non-ask events retain the original confirm
+intent in audit, but DefenseClaw cannot resume a call that Cursor already
+continued.
 </Callout>
+
+Cursor spawns command-hook processes and automatically reloads `hooks.json`.
+If a change is not loaded, restart Cursor. Teardown therefore restores the
+exact pre-DefenseClaw config or removes only DefenseClaw-owned entries, then
+removes only managed adapter files; it does not rely on an undocumented cached
+hook process.
 
 ## Disable
 

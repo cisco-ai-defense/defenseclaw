@@ -22,6 +22,7 @@ from defenseclaw.connector_paths import (
     connector_home,
     hermes_config_path,
     hermes_home,
+    windsurf_hook_config_path,
 )
 from defenseclaw.observability.display import redact_endpoint_for_display
 from defenseclaw.observability.v8_status import (
@@ -1258,10 +1259,24 @@ def connector_source_label(connector: str, category: str) -> str:
     codex_root = connector_home("codex")
     claude_config = connector_config_files("claudecode")[0]
     codex_config = connector_config_files("codex")[0]
+    opencode_plugin = connector_config_files("opencode")[0]
+    opencode_mcp_sources = [
+        "~/.config/opencode/opencode.json (mcp)",
+        "./opencode.json (mcp; explicit workspace)",
+    ]
+    if os.environ.get("OPENCODE_CONFIG_DIR", "").strip():
+        opencode_mcp_sources.append(
+            os.path.join(connector_home("opencode"), "opencode.json") + " (mcp; custom override)"
+        )
+    windsurf_configs = connector_config_files("windsurf") if connector == "windsurf" else []
+    windsurf_hooks = windsurf_hook_config_path() if connector == "windsurf" else ""
     sources = {
         ("openclaw", "skills"): ("./skills", "~/.openclaw/skills"),
         ("claudecode", "skills"): (os.path.join(claude_root, "skills"), "./.claude/skills"),
-        ("codex", "skills"): (os.path.join(codex_root, "skills"), "./.codex/skills"),
+        ("codex", "skills"): (
+            "~/.agents/skills",
+            "./.agents/skills (active directory to repository root)",
+        ),
         ("zeptoclaw", "skills"): ("~/.zeptoclaw/skills", "./.zeptoclaw/skills"),
         ("hermes", "skills"): (os.path.join(hermes_root, "skills"),),
         ("cursor", "skills"): ("./.cursor/skills", "./.agents/skills", "~/.cursor/skills", "~/.agents/skills"),
@@ -1278,11 +1293,14 @@ def connector_source_label(connector: str, category: str) -> str:
         ("omnigent", "skills"): ("unsupported by the OmniGent connector",),
         ("openclaw", "mcps"): ("openclaw config get mcp.servers", "openclaw.json (mcp.servers)"),
         ("claudecode", "mcps"): (f"{claude_config} (mcpServers)", "./.mcp.json"),
-        ("codex", "mcps"): (f"{codex_config} ([mcp_servers])", "./.mcp.json"),
+        ("codex", "mcps"): (
+            f"{codex_config} ([mcp_servers])",
+            "./.codex/config.toml ([mcp_servers]; trusted projects only)",
+        ),
         ("zeptoclaw", "mcps"): ("~/.zeptoclaw/config.json (mcp.servers)", "./.mcp.json"),
         ("hermes", "mcps"): (f"{hermes_config} (mcp.servers)",),
         ("cursor", "mcps"): ("./.cursor/mcp.json", "~/.cursor/mcp.json"),
-        ("windsurf", "mcps"): ("~/.codeium/windsurf/mcp_config.json", "~/.codeium/windsurf/mcp.json"),
+        ("windsurf", "mcps"): tuple(windsurf_configs),
         ("geminicli", "mcps"): ("~/.gemini/settings.json (mcpServers)", "./.mcp.json"),
         ("copilot", "mcps"): ("~/.copilot/mcp-config.json", "./.github/mcp.json", "./.mcp.json"),
         ("openhands", "mcps"): ("~/.openhands/mcp.json",),
@@ -1291,11 +1309,16 @@ def connector_source_label(connector: str, category: str) -> str:
             "<workspace>/.agents/mcp_config.json",
             "<plugin>/mcp_config.json (discovery-only)",
         ),
-        ("opencode", "mcps"): ("~/.config/opencode/opencode.json (mcp)", "./opencode.json (mcp)"),
+        ("opencode", "mcps"): tuple(opencode_mcp_sources),
         ("omnigent", "mcps"): ("managed by OmniGent; not modified by DefenseClaw",),
         ("openclaw", "plugins"): ("~/.openclaw/extensions",),
         ("claudecode", "plugins"): (os.path.join(claude_root, "plugins"),),
-        ("codex", "plugins"): (os.path.join(codex_root, "plugins"),),
+        ("codex", "plugins"): (
+            "./.agents/plugins/marketplace.json",
+            "./.claude-plugin/marketplace.json (legacy-compatible)",
+            "~/.agents/plugins/marketplace.json",
+            os.path.join(codex_root, "plugins", "cache"),
+        ),
         ("zeptoclaw", "plugins"): ("~/.zeptoclaw/plugins",),
         ("hermes", "plugins"): (
             os.path.join(hermes_root, "plugins"),
@@ -1304,14 +1327,14 @@ def connector_source_label(connector: str, category: str) -> str:
         ("cursor", "plugins"): ("unsupported",),
         ("windsurf", "plugins"): ("unsupported",),
         ("geminicli", "plugins"): ("./.gemini/extensions",),
-        ("copilot", "plugins"): ("copilot plugin list",),
+        ("copilot", "plugins"): ("copilot plugins list --kind plugin --json",),
         ("openhands", "plugins"): ("unsupported",),
         ("antigravity", "plugins"): (
             "~/.gemini/config/plugins/<plugin>/ (read/write)",
             "~/.gemini/antigravity-cli/plugins/<plugin>/ (discovery-only)",
             "<workspace>/.agents/plugins/<plugin>/ (read/write)",
         ),
-        ("opencode", "plugins"): ("~/.config/opencode/plugins/defenseclaw.js (DefenseClaw bridge)",),
+        ("opencode", "plugins"): (f"{opencode_plugin} (DefenseClaw bridge only)",),
         ("omnigent", "plugins"): ("unsupported by the OmniGent connector",),
         ("openclaw", "config"): ("~/.openclaw/openclaw.json",),
         ("claudecode", "config"): (claude_config,),
@@ -1319,12 +1342,12 @@ def connector_source_label(connector: str, category: str) -> str:
         ("zeptoclaw", "config"): ("~/.zeptoclaw/config.json",),
         ("hermes", "config"): (hermes_config,),
         ("cursor", "config"): ("~/.cursor/hooks.json",),
-        ("windsurf", "config"): ("~/.codeium/windsurf/hooks.json",),
+        ("windsurf", "config"): (windsurf_hooks,),
         ("geminicli", "config"): ("~/.gemini/settings.json",),
         ("copilot", "config"): ("./.github/hooks/*.json",),
         ("openhands", "config"): ("~/.openhands/hooks.json",),
         ("antigravity", "config"): ("~/.gemini/config/hooks.json",),
-        ("opencode", "config"): ("~/.config/opencode/plugins/defenseclaw.js",),
+        ("opencode", "config"): (opencode_plugin,),
         ("omnigent", "config"): ("$OMNIGENT_CONFIG_HOME/config.yaml or ~/.omnigent/config.yaml",),
     }
     return ", ".join(sources.get((connector, category), ()))

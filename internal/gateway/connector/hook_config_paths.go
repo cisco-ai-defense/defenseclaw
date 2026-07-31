@@ -13,6 +13,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/pelletier/go-toml/v2"
 	"gopkg.in/yaml.v3"
 )
@@ -107,10 +108,11 @@ func ownedHookCommandNeedles(opts SetupOpts, conn Connector) []string {
 //     (`"C:\...\defenseclaw-hook.exe" hook --connector <name>`). The absolute
 //     exe path's backslashes and surrounding quotes are escaped during config
 //     serialization, so their stable marker is `hook --connector <name>`.
-//     Cursor is matched exactly because its native transport requires the
-//     generated cursor-hook.ps1 adapter. Antigravity is also matched exactly
-//     because its direct-exec tokenizer requires a PowerShell encoded-command
-//     wrapper rather than a visibly quoted absolute executable path.
+//     Cursor and Windsurf are matched exactly because their native transports
+//     require generated PowerShell adapters. Antigravity is also matched
+//     exactly because its direct-exec tokenizer requires a PowerShell
+//     encoded-command wrapper rather than a visibly quoted absolute executable
+//     path.
 func ownedHookCommandNeedlesFor(goos string, opts SetupOpts, conn Connector) []string {
 	if owner, ok := conn.(HookConfigReferenceOwner); ok {
 		return uniqueNonEmptyStrings(owner.HookConfigReferenceNeedles(opts))
@@ -119,9 +121,29 @@ func ownedHookCommandNeedlesFor(goos string, opts SetupOpts, conn Connector) []s
 	if !ok {
 		return nil
 	}
+	scriptNames := owner.HookScriptNames(opts)
+	if len(scriptNames) != 0 {
+		hookScript := filepath.Join(opts.DataDir, "hooks", scriptNames[0])
+		switch conn.Name() {
+		case "copilot":
+			events := copilotCurrentHookEvents
+			if provider, profileOK := conn.(HookProfileProvider); profileOK {
+				if resolved := provider.HookProfile(opts).SupportedEvents; len(resolved) != 0 {
+					events = resolved
+				}
+			}
+			needles := make([]string, 0, len(events))
+			for _, event := range events {
+				needles = append(needles, copilotHookInvocationCommandForEvent(goos, event, hookScript))
+			}
+			return uniqueNonEmptyStrings(needles)
+		case "antigravity":
+			return antigravityOwnedHookCommandsForOS(goos, hookScript)
+		}
+	}
 	if goos == "windows" {
-		if conn.Name() == "cursor" {
-			unixCommand := filepath.Join(opts.DataDir, "hooks", "cursor-hook.sh")
+		if conn.Name() == "cursor" || conn.Name() == "windsurf" {
+			unixCommand := filepath.Join(opts.DataDir, "hooks", conn.Name()+"-hook.sh")
 			return []string{hookInvocationCommandFor("windows", conn.Name(), unixCommand)}
 		}
 		return []string{nativeHookFlag + conn.Name()}
@@ -151,6 +173,9 @@ func OwnedHooksPresent(conn Connector, opts SetupOpts) (bool, error) {
 	if inspector, ok := conn.(ownedHookContractInspector); ok {
 		return inspector.ownedHookContractPresent(opts)
 	}
+	if conn != nil && conn.Name() == "opencode" {
+		return openCodeManagedPluginPresent(conn, opts)
+	}
 	paths := HookConfigPathsForConnector(conn, opts)
 	if len(paths) == 0 {
 		return true, nil
@@ -165,6 +190,58 @@ func OwnedHooksPresent(conn Connector, opts SetupOpts) (bool, error) {
 			return false, err
 		}
 		if !present {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// openCodeManagedPluginPresent validates the standalone JavaScript artifact
+// that OpenCode auto-loads. It deliberately does not route .js through the
+// generic JSON/YAML/TOML hook-config parser: the managed-file receipt is the
+// ownership and digest authority for this whole-file plugin.
+func openCodeManagedPluginPresent(conn Connector, opts SetupOpts) (bool, error) {
+	paths := HookConfigPathsForConnector(conn, opts)
+	if len(paths) != 1 {
+		return false, fmt.Errorf("opencode managed plugin path count is %d; want 1", len(paths))
+	}
+	path := paths[0]
+	backup, err := loadManagedFileBackupPath(
+		managedFileBackupPath(opts.DataDir, "opencode", "config"),
+	)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("load opencode managed plugin receipt: %w", err)
+	}
+	boundPath, err := validateManagedFileBackupTarget(backup, "opencode", "config", path)
+	if err != nil {
+		return false, fmt.Errorf("validate opencode managed plugin receipt: %w", err)
+	}
+	if err := safefile.ValidatePrivateFile(boundPath); err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("validate opencode managed plugin protection: %w", err)
+	}
+	data, info, err := readManagedTarget(boundPath)
+	if err != nil {
+		return false, fmt.Errorf("read opencode managed plugin: %w", err)
+	}
+	if info == nil || !managedFileBackupMatchesSnapshot(&backup, data, true) {
+		return false, nil
+	}
+	for _, marker := range [][]byte{
+		[]byte("// defenseclaw-managed-plugin v6"),
+		[]byte(`"/api/v1/opencode/hook"`),
+		[]byte(`"tool.execute.before": async`),
+		[]byte(`if (verdict) throw new Error(verdict.reason);`),
+		[]byte(`"tool.execute.after": async`),
+		[]byte(`input && input.args`),
+		[]byte(`payload.tool_result = toolResult`),
+	} {
+		if !bytes.Contains(data, marker) {
 			return false, nil
 		}
 	}
@@ -220,7 +297,7 @@ func structuredHookCommandReferences(raw interface{}, needles []string) bool {
 			return true
 		}
 		for key, item := range value {
-			if key == "command" || key == "bash" || key == "handler" {
+			if key == "command" || key == "bash" || key == "handler" || key == "powershell" {
 				command := strings.TrimSpace(stringValue(item))
 				for _, needle := range needles {
 					needle = strings.TrimSpace(needle)

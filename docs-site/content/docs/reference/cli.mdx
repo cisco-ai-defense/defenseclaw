@@ -16,10 +16,11 @@ Authoritative source for any flag is `defenseclaw <command> --help`. These group
 
 <Callout title="Command availability is platform-specific">
 A registered command or connector alias is not, by itself, a native Windows
-support claim. Native Windows certifies Codex and Claude Code only, and some
+support claim. Native Windows offers Claude Code, Codex, and the other labeled
+implementations only as previews or not-certified choices, and some
 commands require optional configuration or are unavailable there. Use the
 [native Windows command matrix](/docs/get-started/windows/capabilities-commands)
-for the certified Windows classification and safe examples.
+for the Windows classification and safe examples.
 </Callout>
 
 DefenseClaw ships **two** binaries:
@@ -51,11 +52,11 @@ Hook setup aliases (`setup codex`, `setup claude-code`, `setup hermes`, and the 
 | `defenseclaw setup codex` | Hook setup alias for Codex; defaults to observe, pass `--mode action` to block hook-side. |
 | `defenseclaw setup cursor` | Hook setup alias for Cursor; defaults to observe, pass `--mode action` to block hook-side. |
 | `defenseclaw setup windsurf` | Hook setup alias for Windsurf; defaults to observe, pass `--mode action` to block hook-side. |
-| `defenseclaw setup geminicli` | Hook setup alias for Gemini CLI; defaults to observe, pass `--mode action` to block hook-side. |
+| `defenseclaw setup geminicli` | Hook setup alias for the continuing enterprise/Google Cloud/paid API-key Gemini CLI product; defaults to observe, pass `--mode action` to block hook-side. Consumer/free/Google AI Pro/Ultra service ended June 18, 2026. |
 | `defenseclaw setup copilot` | Hook setup alias for GitHub Copilot CLI; defaults to observe, pass `--mode action` to block hook-side. |
 | `defenseclaw setup hermes` | Hook setup alias for Hermes; defaults to observe, pass `--mode action` to block hook-side. |
 | `defenseclaw setup openhands` | Hook setup alias for OpenHands; defaults to observe, pass `--mode action` to block hook-side. |
-| `defenseclaw setup antigravity` | Hook setup alias for Antigravity (`agy`); defaults to observe, pass `--mode action` to block hook-side. Returning `decision=ask` from the hook overrides agy's `--dangerously-skip-permissions` flag. |
+| `defenseclaw setup antigravity` | Hook setup alias for Antigravity (`agy`); defaults to observe, pass `--mode action` to block hook-side. Native ask and deny are documented only for `PreToolUse`; no permission-bypass override is claimed. |
 | `defenseclaw setup opencode` | Hook setup alias for OpenCode; writes the auto-loaded bridge plugin. Defaults to observe, pass `--mode action` to block hook-side. |
 | `defenseclaw setup omnigent` | Hook setup alias for OmniGent; installs the custom Python policy bridge. Defaults to observe, pass `--mode action` for ALLOW/ASK/DENY enforcement. |
 | `defenseclaw setup openclaw` | Full guardrail alias for OpenClaw (proxy connector). |

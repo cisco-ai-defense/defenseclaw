@@ -487,9 +487,19 @@ run_reconcile_checked "${target_home}/reconcile-noop.json"
 
 hook_stdout="${target_home}/hook.stdout"
 hook_stderr="${target_home}/hook.stderr"
-if ! printf '%s\n' "$hook_payload" | \
-    HOME="$target_home" DEFENSECLAW_GATEWAY_TOKEN='attacker-inherited-token' \
-    "$hook_script" >"$hook_stdout" 2>"$hook_stderr"; then
+if [ "$connector" = 'codex' ]; then
+    hook_completed=0
+    printf '%s\n' "$hook_payload" | \
+        HOME="$target_home" DEFENSECLAW_GATEWAY_TOKEN='attacker-inherited-token' \
+        "$hook_script" --event PreToolUse --hook-contract codex-hooks-v3 \
+        >"$hook_stdout" 2>"$hook_stderr" || hook_completed=$?
+else
+    hook_completed=0
+    printf '%s\n' "$hook_payload" | \
+        HOME="$target_home" DEFENSECLAW_GATEWAY_TOKEN='attacker-inherited-token' \
+        "$hook_script" >"$hook_stdout" 2>"$hook_stderr" || hook_completed=$?
+fi
+if [ "$hook_completed" -ne 0 ]; then
     cat "$hook_stderr" >&2
     fail "managed hook did not complete an allow request"
 fi

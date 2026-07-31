@@ -1,14 +1,14 @@
 # Antigravity MCP and Customization Contract
 
-> **Status: historical pre-implementation research contract.** Antigravity is
-> now implemented under `internal/gateway/connector/`; use the
+> **Status: implementation research contract.** Antigravity is implemented
+> under `internal/gateway/connector/`; use the
 > [published Antigravity guide](https://cisco-ai-defense.github.io/defenseclaw/docs/connectors/antigravity/)
-> and current connector tests for supported behavior. Upstream paths and CLI
-> behavior below were observed on the stated research date only.
+> and current connector tests for supported behavior. This contract records the
+> official-source decisions and native Windows eligibility refreshed below.
 
-Scope: PR #365 follow-up contract for Google's Antigravity (`agy`) connector. This pins the file paths and JSON shapes DefenseClaw should rely on before implementation.
+Scope: Google's Antigravity (`agy`) connector. This pins native Windows eligibility, hook enforcement, file paths, and JSON shapes DefenseClaw relies on.
 
-Research date: 2026-06-16. Local cross-check: `agy --version` returned `1.0.5`; the local install exposes `agy plugin ...` commands and has `~/.gemini/config/mcp_config.json` plus `~/.gemini/config/hooks.json`. No local Antigravity plugins were installed.
+Research refreshed: 2026-07-30.
 
 ## Official Sources
 
@@ -18,8 +18,45 @@ Research date: 2026-06-16. Local cross-check: `agy --version` returned `1.0.5`; 
 - [Antigravity Rules and Workflows](https://antigravity.google/docs/rules-workflows)
 - [Antigravity Plugins](https://antigravity.google/docs/plugins)
 - [Antigravity CLI Plugins and Skills](https://antigravity.google/docs/cli-plugins)
+- [Antigravity Agents command](https://antigravity.google/docs/cli/commands/agents)
+- [Antigravity Subagents](https://antigravity.google/docs/subagents)
 - [Antigravity CLI Migration](https://antigravity.google/docs/gcli-migration)
 - [Antigravity Changelog](https://antigravity.google/changelog)
+- [Antigravity CLI install](https://antigravity.google/docs/cli/install)
+- [Antigravity downloads](https://antigravity.google/download)
+- [Google I/O 2026 feature deep dive](https://antigravity.google/blog/google-io-2026-feature-deep-dive)
+
+## Native Windows Research Gate
+
+| Evidence | Official result |
+| --- | --- |
+| Current release | Antigravity 2.0 v2.4.3 and CLI v1.1.8, released 2026-07-28. |
+| Native support | The install page says the CLI runs natively on Windows, macOS, and Linux. The download page publishes Windows x64 and ARM64 clients with Windows 10 64-bit minimum. DefenseClaw's x64 implementation awaits integrated certification. |
+| Install | PowerShell: `irm https://antigravity.google/cli/install.ps1 \| iex`; CMD installer is also published. The official PowerShell installer selects `windows_amd64` or `windows_arm64`, verifies the download checksum, installs `%LOCALAPPDATA%\agy\bin\agy.exe`, and invokes the native executable. |
+| Authentication | Windows Credential Manager stores secure token profiles; browser authentication is the fallback. No API-key-based headless authentication is documented. |
+| Config | Global hooks: `~/.gemini/config/hooks.json`; workspace hooks: `<workspace>/.agents/hooks.json`. |
+| Process contract | Command handlers receive JSON on stdin and return JSON on stdout. `timeout` defaults to 30 seconds. `PreToolUse` runs before execution and its synchronous stdout decision can deny the tool. |
+| Exit behavior | The official hook documentation does not define non-zero process exit status as an enforcement mechanism. DefenseClaw does not claim it. |
+
+The five official inputs share `conversationId`, `workspacePaths`,
+`transcriptPath`, and `artifactDirectoryPath`. `PreToolUse` adds
+`toolCall{name,args}` and `stepIdx`; `PostToolUse` adds `stepIdx` and optional
+`error`; Pre/PostInvocation add `invocationNum` and `initialNumSteps`; Stop adds
+`executionNum`, `terminationReason`, `error`, and `fullyIdle`.
+
+The output contracts are event-specific:
+
+- `PreToolUse`: required `decision` (`allow`, `deny`, `ask`, or `force_ask`),
+  with optional `reason` and `permissionOverrides`.
+- `PostToolUse`: `{}`.
+- Pre/PostInvocation: optional `injectSteps`; PostInvocation may also return
+  `terminationBehavior`.
+- Stop: required `decision`; `continue` re-enters the loop and any other value
+  permits stopping.
+
+`PreToolUse` and `PostToolUse` use matcher groups with nested `hooks`.
+PreInvocation, PostInvocation, and Stop use direct handler lists; matchers are
+ignored for those events. Reusing Claude Code response fields is not valid.
 
 ## Contract Decisions
 
@@ -30,13 +67,13 @@ Research date: 2026-06-16. Local cross-check: `agy --version` returned `1.0.5`; 
 | Skills | `~/.gemini/config/skills/<skill>/SKILL.md`; CLI also documents `~/.gemini/antigravity-cli/skills/` | `<workspace>/.agents/skills/<skill>/SKILL.md`; legacy `.agent/skills` remains readable | `<plugin>/skills/<skill>/SKILL.md` | Read/write AgentSkills folder form; discover CLI direct-`.md` skill files until shape conflict is resolved. |
 | Rules | `~/.gemini/GEMINI.md`; migration/changelog also mention `AGENTS.md` as context | `<workspace>/.agents/rules/` | `<plugin>/rules/*.md` | Discovery-only. Do not write rules until activation metadata/file naming is documented. |
 | Workflows | UI supports global workflows but no path is documented | UI supports workspace workflows but no path is documented | Not documented | Unsupported for write; discovery only if a documented path appears later. |
-| Agents | No standalone path documented | No standalone path documented | CLI plugins may include `<plugin>/agents/` | Unsupported standalone; plugin-contained agents are discovery-only. |
+| Agents | `~/.gemini/config/agents/<agent>.md` or `<agent>/agent.md` | `<workspace>/.agents/agents/<agent>.md` or `<agent>/agent.md` | `<plugin>/agents/` | Global, workspace, and plugin-contained agents are discovery-only; DefenseClaw does not install or modify them. |
 | Plugins | `~/.gemini/config/plugins/<plugin>/`; CLI stages installed plugins under `~/.gemini/antigravity-cli/plugins/<plugin>/` | `<workspace>/.agents/plugins/<plugin>/` or `<workspace>/_agents/plugins/<plugin>/` | N/A | Install/list/scan/remove at the documented global or workspace path. Discover the CLI staging path. Runtime disable remains policy/advisory state. |
 
 Notes:
 
 - The CLI plugins page mentions `~/.gemini/antigravity-cli/mcp_config.json`, but the IDE MCP docs, CLI migration docs, and the local `agy 1.0.5` install point to `~/.gemini/config/mcp_config.json`. DefenseClaw should write `~/.gemini/config/mcp_config.json` and treat `~/.gemini/antigravity-cli/mcp_config.json` as discovery-only until Google resolves the conflict.
-- Official hook docs do not specify precedence or deduplication. Current PR evidence says Antigravity merges global and workspace hook files, causing duplicate firing if DefenseClaw writes both. Therefore write only the global hook file and record workspace hook files as discovered state.
+- Official hook docs document both global and workspace discovery. DefenseClaw writes only the global hook file and reports a duplicate if its managed hook is also present in the workspace file.
 
 ## MCP Schema
 
@@ -95,10 +132,10 @@ Remote schema contract:
 
 DefenseClaw should read both `serverUrl` and `url`, preserve unknown fields, and write `serverUrl` for new or migrated remote entries.
 
-## Implemented PR #365 Decisions
+## Implemented Decisions
 
-- DefenseClaw writes Antigravity hooks only to `~/.gemini/config/hooks.json`. Workspace and plugin hook files are discovery-only so agy's multi-file merge cannot duplicate DefenseClaw hook firings.
-- `PreToolUse` remains the only empirically verified ask/block event in agy v1.0.x. Other lifecycle events are registered according to the Antigravity 2.0 contract and handled when upstream starts emitting them.
+- DefenseClaw writes Antigravity hooks only to `~/.gemini/config/hooks.json`. Google documents no `ANTIGRAVITY_CONFIG_DIR` or `GEMINI_CONFIG_DIR` override. Older DefenseClaw-only custom bindings remain internal custody solely for exact restoration and migration to the official path. Workspace and plugin hook files are discovery-only so agy's multi-file merge cannot duplicate DefenseClaw hook firings.
+- All five documented events are registered with their exact mixed schema and an event-bound command. Only synchronous `PreToolUse` stdout `{"decision":"deny"}` is claimed as hard blocking; non-zero exit status is not.
 - MCP read/write support uses `~/.gemini/config/mcp_config.json` and `<workspace>/.agents/mcp_config.json`; plugin MCP configs are discovery-only. DefenseClaw writes `serverUrl` for remote entries, reads `url` for compatibility, preserves unknown fields, and does not log secret-bearing `env` or `headers` values.
 - AgentSkills folder form is read/write at `~/.gemini/config/skills/<skill>/SKILL.md` and `<workspace>/.agents/skills/<skill>/SKILL.md`. CLI direct markdown skills under `~/.gemini/antigravity-cli/skills/` remain discovery-only because they use a different shape.
-- Rules, workflows, and plugin-contained agents remain discovery/scan only as listed in the contract table. DefenseClaw installs and removes Antigravity plugins at Google's documented manual plugin paths; runtime disable remains policy/advisory state rather than invoking `agy plugin disable`.
+- Rules, workflows, and global, workspace, or plugin-contained agents remain discovery/scan only as listed in the contract table. DefenseClaw installs and removes Antigravity plugins at Google's documented manual global/workspace paths; the CLI staging path remains discovery-only, and runtime disable remains policy/advisory state rather than invoking `agy plugin disable`.

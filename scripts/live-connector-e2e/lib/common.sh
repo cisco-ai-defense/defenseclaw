@@ -276,9 +276,21 @@ dc_hook_script() {
 # Stdout of the hook (the agent-native decision JSON) is forwarded verbatim
 # before the trailing exit line.
 dc_invoke_hook() {
-  local connector="$1" event="$2" payload="$3" code out
+  local connector="$1" event="$2" payload="$3" code out bound_event
+  bound_event="${event}"
+  case "${connector}:${event}" in
+    copilot:SessionStart) bound_event="sessionStart" ;;
+    copilot:PreTool-allow|copilot:PreTool-block) bound_event="preToolUse" ;;
+    codex:PreTool-allow|codex:PreTool-block|antigravity:PreTool-allow|antigravity:PreTool-block)
+      bound_event="PreToolUse"
+      ;;
+  esac
   if dc_is_windows; then
-    out="$(defenseclaw-hook hook --connector "${connector}" --event "${event}" < "${payload}" 2>&1)" && code=0 || code=$?
+    if [ "${connector}" = "codex" ]; then
+      out="$(defenseclaw-hook hook --connector "${connector}" --event "${bound_event}" --hook-contract codex-hooks-v4 < "${payload}" 2>&1)" && code=0 || code=$?
+    else
+      out="$(defenseclaw-hook hook --connector "${connector}" --event "${bound_event}" < "${payload}" 2>&1)" && code=0 || code=$?
+    fi
   else
     local script; script="$(dc_hook_script "${connector}")"
     if [ ! -x "${script}" ]; then
@@ -286,7 +298,20 @@ dc_invoke_hook() {
       printf 'exit:127\n'
       return 0
     fi
-    out="$(bash "${script}" < "${payload}" 2>&1)" && code=0 || code=$?
+    case "${connector}" in
+      codex)
+        out="$(bash "${script}" --event "${bound_event}" --hook-contract codex-hooks-v4 < "${payload}" 2>&1)" && code=0 || code=$?
+        ;;
+      copilot)
+        out="$(bash "${script}" --event "${bound_event}" < "${payload}" 2>&1)" && code=0 || code=$?
+        ;;
+      antigravity)
+        out="$(bash "${script}" "${bound_event}" < "${payload}" 2>&1)" && code=0 || code=$?
+        ;;
+      *)
+        out="$(bash "${script}" < "${payload}" 2>&1)" && code=0 || code=$?
+        ;;
+    esac
   fi
   printf '%s\n' "${out}"
   printf 'exit:%s\n' "${code}"

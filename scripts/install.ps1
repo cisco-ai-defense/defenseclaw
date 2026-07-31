@@ -83,8 +83,15 @@ $CosignSha256 = "DD6C61E510DA627BCAED4CD9DB844EC11CACD09826D814D89F7F68D40FEB07B
 $CosignMaximumBytes = 268435456
 $CosignUrl = "https://github.com/sigstore/cosign/releases/download/v$CosignVersion/$CosignAsset"
 $ConnectorChoices = @(
+    "antigravity",
     "codex",
     "claudecode",
+    "copilot",
+    "cursor",
+    "hermes",
+    "omnigent",
+    "opencode",
+    "windsurf",
     "none"
 )
 $HookConnectors = @()

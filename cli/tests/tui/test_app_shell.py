@@ -5468,9 +5468,12 @@ async def test_overview_prefers_persisted_hook_totals_over_gateway_request_count
     )
     app = DefenseClawTUI(overview_model=overview, audit_model=audit, alerts_model=alerts)
     # This contract covers reuse of the grouped persisted totals within one
-    # render generation.  Do not let Textual's independent two-second refresh
-    # timer create another generation while the full suite is instrumented.
+    # render generation. Do not let Textual's independent mount polls create
+    # another generation while the full suite is instrumented.
     app._periodic_refresh = lambda: None  # type: ignore[method-assign]
+    app._schedule_health_poll = lambda: None  # type: ignore[method-assign]
+    app._schedule_ai_usage_poll = lambda: None  # type: ignore[method-assign]
+    app._schedule_config_poll = lambda: None  # type: ignore[method-assign]
 
     async with app.run_test(size=(190, 50)) as pilot:
         await pilot.pause()

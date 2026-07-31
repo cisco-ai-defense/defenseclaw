@@ -255,7 +255,7 @@ func TestSetupConnectorsIsolated_RefreshesExistingStaleHookAlongsideNewPeer(t *t
 	discovery := map[string]any{
 		"agents": map[string]any{
 			"codex":      map[string]any{"version": "codex-cli 0.142.4"},
-			"claudecode": map[string]any{"version": "Claude Code v2.1.152"},
+			"claudecode": map[string]any{"version": "Claude Code v2.1.154"},
 		},
 	}
 	raw, err := json.Marshal(discovery)
@@ -448,9 +448,15 @@ func TestConnectorSetupOpts_PerConnectorHookFailMode(t *testing.T) {
 	if cursorOpts.HookFailMode != "closed" {
 		t.Errorf("cursor HookFailMode=%q, want override %q", cursorOpts.HookFailMode, "closed")
 	}
+	if cursorOpts.GuardrailMode != "action" {
+		t.Errorf("cursor GuardrailMode=%q, want action", cursorOpts.GuardrailMode)
+	}
 	windsurfOpts := mustConnectorSetupOpts(t, s, &bootStubConnector{stubConnector: stubConnector{name: "windsurf"}}, "tok", "a", "b")
 	if windsurfOpts.HookFailMode != "closed" {
 		t.Errorf("windsurf HookFailMode=%q, want connector override independent of observe mode", windsurfOpts.HookFailMode)
+	}
+	if windsurfOpts.GuardrailMode != "observe" {
+		t.Errorf("windsurf GuardrailMode=%q, want observe", windsurfOpts.GuardrailMode)
 	}
 }
 
@@ -649,10 +655,7 @@ func TestConnectorSetupTokensProxyKeepsMasterOutOfScopedSidecar(t *testing.T) {
 }
 
 func TestConnectorSetupTokensOmnigentGetsScopedToken(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("OmniGent is unsupported on native Windows; platform gate coverage remains active")
-	}
-	tokens, err := connectorSetupTokensFor(t.TempDir(), connector.NewOmnigentConnector(), "gateway-master", false)
+	tokens, err := connectorSetupTokensFor(testenv.PrivateTempDir(t), connector.NewOmnigentConnector(), "gateway-master", false)
 	if err != nil {
 		t.Fatalf("connectorSetupTokensFor omnigent: %v", err)
 	}

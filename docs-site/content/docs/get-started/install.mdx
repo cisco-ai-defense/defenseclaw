@@ -77,9 +77,9 @@ retires the temporary verifier. Nothing is installed globally.
 
 The current native Windows Setup bundles its managed runtime. A packaged Windows
 install does not require Python, `uv`, Go, Node.js, Git, or a PowerShell
-installation command after the authenticated Setup artifact is downloaded. This does
-not remove an upstream agent prerequisite such as Claude Code's Git for Windows
-requirement.
+installation command after the authenticated Setup artifact is downloaded. For
+native Claude Code, Git for Windows is recommended so Claude can use its Bash
+tool, but it is optional; without it Claude uses its native PowerShell tool.
 
 ## What's bundled (LLM backends)
 

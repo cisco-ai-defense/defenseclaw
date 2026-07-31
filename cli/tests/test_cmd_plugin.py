@@ -23,6 +23,7 @@ import sys
 import tempfile
 import unittest
 import uuid
+from types import SimpleNamespace
 from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -2302,6 +2303,45 @@ class HostPluginEnumerationTests(unittest.TestCase):
 
         with self.assertRaisesRegex(AmbiguousPluginIdentityError, "ambiguous plugin identity"):
             _list_host_plugins("claudecode", FakeCfg())
+
+    @patch("defenseclaw.commands.cmd_plugin.subprocess.run")
+    @patch(
+        "defenseclaw.commands.cmd_plugin._trusted_copilot_binary",
+        return_value=r"C:\Tools\copilot.exe",
+    )
+    def test_list_copilot_plugins_uses_official_read_only_command(self, _trusted, run):
+        from defenseclaw.commands.cmd_plugin import _list_copilot_plugins
+
+        run.return_value = SimpleNamespace(
+            returncode=0,
+            stdout='{"plugins":[{"id":"acme@example","name":"Acme","version":"1.2.3","enabled":true}]}',
+        )
+
+        self.assertEqual(
+            _list_copilot_plugins(),
+            [{
+                "id": "acme@example",
+                "name": "Acme",
+                "version": "1.2.3",
+                "enabled": True,
+                "source": "host:copilot",
+                "path": "",
+            }],
+        )
+        run.assert_called_once_with(
+            [r"C:\Tools\copilot.exe", "plugins", "list", "--kind", "plugin", "--json"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+    @patch("defenseclaw.commands.cmd_plugin.subprocess.run")
+    @patch("defenseclaw.commands.cmd_plugin._trusted_copilot_binary", return_value="")
+    def test_list_copilot_plugins_does_not_execute_untrusted_path(self, _trusted, run):
+        from defenseclaw.commands.cmd_plugin import _list_copilot_plugins
+
+        self.assertEqual(_list_copilot_plugins(), [])
+        run.assert_not_called()
 
 
 class MergeAllPluginsHostBranchTests(unittest.TestCase):

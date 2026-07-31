@@ -43,8 +43,11 @@ from typing import TYPE_CHECKING
 
 from defenseclaw.connector_paths import (
     connector_config_files,
+    connector_home,
+    copilot_home,
     hermes_config_path,
     omnigent_config_path,
+    windsurf_hook_config_path,
 )
 from defenseclaw.inventory import agent_discovery
 
@@ -1435,7 +1438,7 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
             return StepResult("Connector", "pass", "Cursor hooks found")
         return StepResult("Connector", "warn", "Cursor hooks not found yet", "defenseclaw setup cursor")
     if connector == "windsurf":
-        path = os.path.expanduser("~/.codeium/windsurf/hooks.json")
+        path = windsurf_hook_config_path()
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "Windsurf hooks found")
         return StepResult("Connector", "warn", "Windsurf hooks not found yet", "defenseclaw setup windsurf")
@@ -1450,7 +1453,7 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
         if workspace:
             path = os.path.join(workspace, ".github", "hooks", "defenseclaw.json")
         else:
-            path = os.path.expanduser("~/.copilot/hooks/defenseclaw.json")
+            path = os.path.join(copilot_home(), "hooks", "defenseclaw.json")
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "Copilot hooks found")
         return StepResult("Connector", "warn", "Copilot hooks not found yet", "defenseclaw setup copilot")
@@ -1466,17 +1469,11 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
             return StepResult("Connector", "pass", "OpenHands hooks found")
         return StepResult("Connector", "warn", "OpenHands hooks not found yet", "defenseclaw setup openhands")
     if connector == "antigravity":
-        # Antigravity is global-only by design — agy merges discovered
-        # hooks files, so DefenseClaw never writes to a workspace copy.
-        # The canonical path is ~/.gemini/config/hooks.json (the path
-        # agy v1.0.x actually evaluates). The legacy
-        # ~/.gemini/antigravity-cli/hooks.json is also accepted as a
-        # pass signal so operators recovering from a pre-v0.5.0
-        # install don't see a confusing "missing hooks" error before
-        # doctor's migration warning has had a chance to surface.
-        canonical = os.path.expanduser("~/.gemini/config/hooks.json")
-        legacy = os.path.expanduser("~/.gemini/antigravity-cli/hooks.json")
-        if os.path.isfile(canonical) or os.path.isfile(legacy):
+        # DefenseClaw owns only the documented global hook file, under the
+        # effective Antigravity config home. Workspace .agents/hooks.json is a
+        # host customization surface but is not a setup-complete signal here.
+        canonical = os.path.join(connector_home("antigravity"), "hooks.json")
+        if os.path.isfile(canonical):
             return StepResult("Connector", "pass", "Antigravity hooks found")
         return StepResult(
             "Connector",
@@ -1487,7 +1484,9 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
     if connector == "opencode":
         # opencode is governed by a bridge plugin DefenseClaw writes into
         # opencode's auto-load plugin directory (no hooks.json to patch).
-        path = os.path.expanduser("~/.config/opencode/plugins/defenseclaw.js")
+        # Resolve through the shared path contract so OPENCODE_CONFIG_DIR
+        # registrations are reported just like Setup, Doctor, and inventory.
+        path = connector_config_files("opencode")[0]
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "OpenCode bridge plugin found")
         return StepResult(

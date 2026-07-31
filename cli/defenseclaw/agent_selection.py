@@ -49,7 +49,7 @@ _CODEX_WINDOWS_PLATFORM_VARIANTS = (
     ("codex-win32-arm64", "aarch64-pc-windows-msvc"),
 )
 _MAX_AGENT_EXECUTABLE_BYTES = 512 * 1024 * 1024
-_SUPPORTED_CONNECTORS = frozenset({"codex", "claudecode"})
+_SUPPORTED_CONNECTORS = frozenset({"codex", "claudecode", "omnigent"})
 
 
 @dataclass(frozen=True)
@@ -178,9 +178,22 @@ def is_setup_trusted_binary(candidate: str, data_dir: str) -> bool:
         if os.path.splitext(resolved)[1].casefold() != ".exe":
             return False
         return any(agent_discovery._windows_acl_chain_is_safe(resolved, root) for root in matching_roots)
-    # Reuse the complete executable/owner validation after independently
-    # proving the match did not come solely from a mutable environment prefix.
-    return agent_discovery._is_trusted_binary_path(resolved, data_dir=data_dir)
+    if not os.path.isfile(resolved) or not os.access(resolved, os.X_OK):
+        return False
+    try:
+        binary_info = os.stat(resolved)
+        parent_info = os.stat(os.path.dirname(resolved))
+    except OSError:
+        return False
+    if binary_info.st_mode & 0o022:
+        return False
+    if agent_discovery._trusted_prefix_dir_mode_error(parent_info) is not None:
+        return False
+    # Setup's built-in roots are explicit executable authority, but they still
+    # receive the same per-file and parent permission checks as passive
+    # discovery. Do not re-resolve them through the passive discovery registry:
+    # that would discard a setup-only root after it was already validated.
+    return True
 
 
 def _setup_agent_candidates(connector: str, spec, data_dir: str) -> tuple[str, ...]:
@@ -217,6 +230,7 @@ def _setup_agent_candidates(connector: str, spec, data_dir: str) -> tuple[str, .
     names = {
         "codex": ("codex.exe", "codex.cmd", "codex.bat", "codex.com"),
         "claudecode": ("claude.exe", "claude.cmd", "claude.bat", "claude.com"),
+        "omnigent": ("omnigent.exe", "omni.exe"),
     }[connector]
     for root in roots:
         for name in names:

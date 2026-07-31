@@ -139,7 +139,7 @@ func TestInstallOmnigentPolicyModuleThroughGuardian(t *testing.T) {
 		APIToken:      "omnigent-scoped-token",
 		GuardrailMode: "action",
 		HookFailMode:  "closed",
-		AgentVersion:  "omnigent 0.1.0",
+		AgentVersion:  "omnigent 0.7.0",
 		Registry:      connector.NewDefaultRegistry(),
 	})
 	if err != nil {

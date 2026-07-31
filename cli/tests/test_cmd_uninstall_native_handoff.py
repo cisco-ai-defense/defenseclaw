@@ -80,6 +80,8 @@ def _install_state(local_app_data: Path, profile: Path) -> dict[str, object]:
         "release_signing_required": True,
         "toolchain": {"go": "go1.25.0"},
         "installed_at_utc": "2026-07-28T12:00:00Z",
+        "omnigent_config_home": str(profile / ".omnigent"),
+        "hermes_home": str(local_app_data / "hermes"),
         "transaction_id": "1" * 32,
     }
 
@@ -198,6 +200,21 @@ def test_prepare_uses_known_folders_and_exact_fixed_argv(tmp_path: Path) -> None
     assert request.install_root == str(local_app_data / "Programs" / "DefenseClaw")
     assert request.version == _VERSION
     assert request.source_commit == _SOURCE
+
+
+def test_prepare_accepts_bound_windsurf_profile_state(tmp_path: Path) -> None:
+    local_app_data, profile = _native_tree(tmp_path)
+    state_path = local_app_data / "Programs" / "DefenseClaw" / "installer" / "install-state.json"
+    state = _install_state(local_app_data, profile)
+    state["connector"] = "windsurf"
+    state["windsurf_user_home"] = str(profile)
+    state["windsurf_hooks_path"] = str(profile / ".codeium" / "windsurf" / "hooks.json")
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    request = _prepare_from_tree(local_app_data, profile)
+
+    assert request is not None
+    assert request.argv[1:] == ("/uninstall", "/quiet")
 
 
 @pytest.mark.skipif(os.name != "nt", reason="validates native Windows inherited ACLs")
@@ -657,6 +674,20 @@ def test_prepare_accepts_explicitly_absent_legacy_transaction_identity(
     state_path = local_app_data / "Programs" / "DefenseClaw" / "installer" / "install-state.json"
     state = _install_state(local_app_data, profile)
     del state["transaction_id"]
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    assert _prepare_from_tree(local_app_data, profile) is not None
+
+
+@pytest.mark.parametrize("connector", ["hermes", "omnigent"])
+def test_prepare_accepts_current_native_connector_identities(
+    tmp_path: Path,
+    connector: str,
+) -> None:
+    local_app_data, profile = _native_tree(tmp_path)
+    state_path = local_app_data / "Programs" / "DefenseClaw" / "installer" / "install-state.json"
+    state = _install_state(local_app_data, profile)
+    state["connector"] = connector
     state_path.write_text(json.dumps(state), encoding="utf-8")
 
     assert _prepare_from_tree(local_app_data, profile) is not None

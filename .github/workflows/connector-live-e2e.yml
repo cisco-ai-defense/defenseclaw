@@ -11,7 +11,7 @@
 #     clean. Fork-safe; runs on pull requests as well — one always-on macOS
 #     cell (codex / macOS, intended as a required check) plus the full
 #     Linux + macOS matrix when connector code changes. Deterministic native
-#     Windows x64 certification lives in windows-native.yml.
+#     Windows x64 contract checks live in windows-native.yml.
 #
 #   live-matrix (Layer B) — installs the real upstream agent at its latest
 #     version, wires it with `defenseclaw setup`, and drives lifecycle + forced
@@ -21,10 +21,9 @@
 #
 #     ROLLOUT STATUS: Layer B is currently manual-only (workflow_dispatch). The
 #     nightly schedule runs Layer A alone until the live secrets are in place.
-#     Gemini CLI, Cursor, and Copilot are deferred entirely (their native keys
-#     — GOOGLE_API_KEY / CURSOR_API_KEY / COPILOT_CLI_TOKEN — are not yet set
-#     and have no Azure/Bedrock substitute). Re-add their matrix cells and
-#     restore the schedule trigger here once those keys exist.
+#     Gemini CLI and Copilot remain deferred (their native keys are not yet set
+#     and have no Azure/Bedrock substitute). Cursor has a manual native-Windows
+#     preview cell using CURSOR_API_KEY; it is not a release-certification cell.
 #
 #   report — rolls every per-cell result up into the job summary, records the
 #     resolved upstream version, and opens/updates a `connector-regression`
@@ -32,8 +31,16 @@
 #     approved version (that stays a deliberate human edit of
 #     cli/defenseclaw/inventory/validated_versions.json).
 #
-# Native Windows x64 certification is intentionally limited to Codex and
-# Claude Code. Unsupported Windows connectors are not scheduled as green cells.
+# Native Windows x64 release certification remains closed for Claude Code.
+# The manual, source-built Windows cells here, including Claude Code, are
+# evidence-producing preview checks rather than release certification. Codex,
+# Claude Code, Cursor, OpenCode, and Antigravity remain pending authentic
+# packaged plus official-client evidence. Deterministic contract checks run in
+# windows-native.yml; certification stays closed until those gates are integrated.
+# Antigravity's official client uses Windows Credential Manager/browser auth,
+# so its real-client cell runs only on a dedicated pre-authenticated runner.
+# OmniGent 0.7.0 has a separate advisory packaged native-degraded cell in
+# windows-native.yml; it is not scheduled as a green certification cell here.
 
 name: Connector Live E2E
 
@@ -59,6 +66,7 @@ on:
           - all
           - codex
           - claudecode
+          - opencode
           - geminicli
           - cursor
           - copilot
@@ -133,11 +141,11 @@ jobs:
         run: |
           set -euo pipefail
           # The Unix harness retains the full supported connector matrix.
-          # Native Windows certification is a separate, explicit x64 matrix.
+          # Native Windows contract validation is a separate, explicit x64 matrix.
           full='{"os":["ubuntu-latest","macos-latest"],"connector":["codex","claudecode","geminicli","cursor","copilot","openhands","hermes","windsurf","antigravity"]}'
           # Always-on PR smoke: one connector on one cross-platform OS. macOS is
-          # chosen because windows-native.yml separately certifies the native
-          # Windows hook path on every PR. This adds the missing native macOS
+          # chosen because windows-native.yml separately checks the native
+          # Windows hook contract on every PR. This adds the missing native macOS
           # connector signal and is the cell to mark "required" in branch
           # protection. Its check name is "Contract codex / macos-latest".
           minimal='{"os":["macos-latest"],"connector":["codex"]}'
@@ -330,13 +338,14 @@ jobs:
         # The reality matrix: which agents have a headless CLI that fires hooks
         # on which OS. Contract-only connectors (hermes, windsurf, antigravity)
         # are absent here — they are covered by Layer A only. Native Windows
-        # Codex/Claude certification is handled by windows-live below.
+        # Candidate Codex/Claude Windows certification evidence is handled by
+        # windows-live below; an unrun or failed cell proves nothing.
         #
         # Currently scoped to the connectors we can authenticate with Azure
         # OpenAI / Amazon Bedrock (Codex, Claude Code, OpenHands). Gemini CLI,
         # Cursor, and Copilot are deferred until their native keys exist — add
         # their cells back here when GOOGLE_API_KEY / CURSOR_API_KEY /
-        # COPILOT_CLI_TOKEN are configured.
+        # COPILOT_GITHUB_TOKEN are configured.
         include:
           - { connector: codex,      os: ubuntu-latest,  dcos: linux }
           - { connector: codex,      os: macos-latest,   dcos: macos }
@@ -363,9 +372,9 @@ jobs:
       GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
       GEMINI_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
       CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
-      # GitHub Copilot CLI authenticates with an entitled token.
-      COPILOT_CLI_TOKEN: ${{ secrets.COPILOT_CLI_TOKEN }}
-      GH_TOKEN: ${{ secrets.COPILOT_CLI_TOKEN }}
+      # GitHub Copilot CLI authenticates with an entitled token through its
+      # documented highest-precedence environment variable.
+      COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
       # Generic fallback key for the guardrail/judge if a connector needs it.
       LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
       # --- Alternative auth backends -----------------------------------------
@@ -423,8 +432,9 @@ jobs:
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         if: steps.select.outputs.run == 'true'
 
-      # Most live agents (codex, claude, gemini, copilot, cursor) ship as npm
-      # packages; OpenHands installs via pipx. Node + uv cover both.
+      # Several live agents still use npm and OpenHands uses pipx. Claude's
+      # Windows lane uses Anthropic's native PowerShell installer; Node remains
+      # required by the other matrix cells.
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         if: steps.select.outputs.run == 'true'
         with:
@@ -469,7 +479,7 @@ jobs:
           write_key CURSOR_API_KEY    "${CURSOR_API_KEY:-}"
           write_key LLM_API_KEY       "${LLM_API_KEY:-}"
 
-      # For Cursor, confirm headless `cursor-agent -p` actually fires
+      # For Cursor, confirm headless `agent -p` actually fires
       # ~/.cursor/hooks.json before spending a full live run on it. If hooks
       # never reach the gateway, the live driver is skipped (recorded as a
       # skip) and Cursor stays Layer-A only for this cell.
@@ -517,15 +527,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        connector: [codex, claudecode]
+        connector: [codex, claudecode, cursor, opencode]
     env:
       DC_WINDOWS_STATE: ${{ github.workspace }}/.dc-e2e-${{ matrix.connector }}-live
       DC_E2E_RESULTS: ${{ github.workspace }}/connector-live-e2e-results.jsonl
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
       LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
       CODEX_VERSION: ${{ inputs.version }}
       CLAUDE_VERSION: ${{ inputs.version }}
+      OPENCODE_VERSION: ${{ inputs.version }}
     steps:
       - name: Select requested Windows connector
         id: select
@@ -601,12 +613,94 @@ jobs:
         shell: pwsh
         run: ./scripts/live-connector-e2e/run-windows.ps1 -Operation cleanup -Connector '${{ matrix.connector }}' -StateRoot $env:DC_WINDOWS_STATE
 
+  windows-antigravity-live:
+    name: Windows x64 live / antigravity (authenticated)
+    if: >-
+      ${{ github.event_name == 'workflow_dispatch' &&
+          (inputs.os == 'all' || inputs.os == 'windows') &&
+          (inputs.connector == 'all' || inputs.connector == 'antigravity') }}
+    runs-on: [self-hosted, Windows, X64, antigravity-authenticated]
+    timeout-minutes: 40
+    env:
+      DC_WINDOWS_STATE: ${{ github.workspace }}/.dc-e2e-antigravity-live
+      DC_E2E_RESULTS: ${{ github.workspace }}/connector-live-e2e-results.jsonl
+      DC_ANTIGRAVITY_DEDICATED_RUNNER: "1"
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - name: Require official authenticated Antigravity client
+        shell: pwsh
+        run: |
+          $agy = Get-Command agy.exe -ErrorAction Stop
+          $version = & $agy.Source --version
+          if ("$version" -notmatch '(?<!\d)1\.(?:[2-9]|\d{2,})\.' -and
+              "$version" -notmatch '(?<!\d)1\.1\.(?:[89]|\d{2,})(?!\d)') {
+            throw "Antigravity CLI 1.1.8+ is required, got: $version"
+          }
+      - name: Build native DefenseClaw tools
+        shell: pwsh
+        run: |
+          $embed = Join-Path $env:GITHUB_WORKSPACE 'internal\gateway\connector\openclaw_extension'
+          New-Item -ItemType Directory -Force -Path $embed | Out-Null
+          Set-Content -LiteralPath (Join-Path $embed '.placeholder') -Value 'OpenClaw extension not built.'
+          $bin = Join-Path $env:RUNNER_TEMP 'defenseclaw-bin'
+          New-Item -ItemType Directory -Force -Path $bin | Out-Null
+          go build -o (Join-Path $bin 'defenseclaw-gateway.exe') ./cmd/defenseclaw
+          go build -ldflags '-H=windowsgui' -o (Join-Path $bin 'defenseclaw-hook.exe') ./cmd/defenseclaw-hook
+          uv sync
+          $bin | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+          (Join-Path $env:GITHUB_WORKSPACE '.venv\Scripts') | Out-File -FilePath $env:GITHUB_PATH -Append -Encoding utf8
+      - name: Real official-client E2E
+        shell: pwsh
+        run: |
+          ./scripts/live-connector-e2e/run-windows.ps1 `
+            -Layer live `
+            -Connector antigravity `
+            -AuthenticatedAntigravityRunner `
+            -StateRoot $env:DC_WINDOWS_STATE `
+            -ResultsPath $env:DC_E2E_RESULTS `
+            -ArtifactPath (Join-Path $env:RUNNER_TEMP 'defenseclaw-live-e2e-logs')
+      - name: Upload Antigravity live results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: connector-live-e2e-results-live-antigravity-windows-x64
+          path: ${{ env.DC_E2E_RESULTS }}
+          if-no-files-found: error
+          retention-days: 7
+      - name: Upload Antigravity diagnostics on failure
+        if: ${{ failure() || cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: connector-live-e2e-logs-live-antigravity-windows-x64
+          path: ${{ runner.temp }}/defenseclaw-live-e2e-logs/**
+          if-no-files-found: warn
+          retention-days: 7
+          include-hidden-files: true
+      - name: Antigravity teardown safety net
+        if: ${{ always() }}
+        shell: pwsh
+        run: |
+          defenseclaw-gateway connector teardown --connector antigravity
+          ./scripts/live-connector-e2e/run-windows.ps1 `
+            -Operation cleanup `
+            -Layer live `
+            -Connector antigravity `
+            -AuthenticatedAntigravityRunner `
+            -StateRoot $env:DC_WINDOWS_STATE
+
   # ---------------------------------------------------------------------------
   # Report — aggregate every cell, render the matrix, and alert on regressions.
   # ---------------------------------------------------------------------------
   report:
     name: Report + regression radar
-    needs: [contract-matrix, live-matrix, windows-live]
+    needs: [contract-matrix, live-matrix, windows-live, windows-antigravity-live]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     permissions:

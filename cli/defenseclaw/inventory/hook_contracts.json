@@ -37,7 +37,8 @@
           "hook_script_version": "v6",
           "hook_script": "codex-hook.sh",
           "hook_config_path_templates": [
-            "~/.codex/config.toml"
+            "~/.codex/config.toml",
+            "~/.codex/managed_config.toml"
           ],
           "response_field": "codex_output",
           "events": [
@@ -85,7 +86,8 @@
           "hook_script_version": "v6",
           "hook_script": "codex-hook.sh",
           "hook_config_path_templates": [
-            "~/.codex/config.toml"
+            "~/.codex/config.toml",
+            "~/.codex/managed_config.toml"
           ],
           "response_field": "codex_output",
           "events": [
@@ -129,13 +131,14 @@
           "contract_id": "codex-hooks-v3",
           "agent_version": {
             "min_inclusive": "0.133.0",
-            "max_exclusive": ""
+            "max_exclusive": "0.145.0"
           },
-          "default_for_unversioned": true,
+          "default_for_unversioned": false,
           "hook_script_version": "v6",
           "hook_script": "codex-hook.sh",
           "hook_config_path_templates": [
-            "~/.codex/config.toml"
+            "~/.codex/config.toml",
+            "~/.codex/managed_config.toml"
           ],
           "response_field": "codex_output",
           "events": [
@@ -169,18 +172,92 @@
             "can_ask_native": false,
             "ask_events": [],
             "block_events": [
+              "SessionStart",
               "UserPromptSubmit",
               "PreToolUse",
               "PermissionRequest",
               "PostToolUse",
+              "SubagentStop",
+              "PreCompact",
+              "PostCompact",
               "Stop"
             ],
             "supports_fail_closed": true,
             "scope": "user"
           },
           "notes": [
-            "Codex 0.133.0 is the first release with the complete ten-event DefenseClaw matrix, adding SubagentStart and SubagentStop.",
-            "Native release certification verifies hooks/list reports every owned handler enabled and trusted without a manual approval step.",
+            "Codex 0.133.0 through 0.144.x expose the versioned ten-event DefenseClaw matrix, adding SubagentStart and SubagentStop.",
+            "SessionStart, PreCompact, and PostCompact blocks render continue=false to stop the current turn, stop before compaction, or stop after compaction respectively. SubagentStop blocks render decision=block to continue the subagent flow.",
+            "Stop decision=block continues Codex with a new continuation prompt. PostToolUse block cannot undo the completed tool side effect; its feedback replaces the result flow and rejects the tool promise in code mode.",
+            "Release certification requires authentic packaged plus official-client evidence that hooks/list reports every owned handler enabled and trusted without a manual approval step; no such Windows record is attached, so this contract remains preview.",
+            "Codex has no native hook-side ask surface in this contract; confirm verdicts render as alert/systemMessage."
+          ]
+        },
+        {
+          "contract_id": "codex-hooks-v4",
+          "agent_version": {
+            "min_inclusive": "0.145.0",
+            "max_exclusive": ""
+          },
+          "default_for_unversioned": true,
+          "hook_script_version": "v6",
+          "hook_script": "codex-hook.sh",
+          "hook_config_path_templates": [
+            "~/.codex/config.toml",
+            "~/.codex/managed_config.toml"
+          ],
+          "response_field": "codex_output",
+          "events": [
+            "SessionStart",
+            "UserPromptSubmit",
+            "PreToolUse",
+            "PermissionRequest",
+            "PostToolUse",
+            "SubagentStart",
+            "SubagentStop",
+            "PreCompact",
+            "PostCompact",
+            "Stop",
+            "SessionEnd"
+          ],
+          "aid_surfaces": [
+            "prompt",
+            "tool_call",
+            "tool_result"
+          ],
+          "supports_traceparent": true,
+          "native_otlp": true,
+          "native_otlp_auth": "header-token",
+          "native_otlp_signals": [
+            "logs",
+            "metrics",
+            "traces"
+          ],
+          "native_otlp_endpoint_template": "/v1/<signal>",
+          "capabilities": {
+            "can_block": true,
+            "can_ask_native": false,
+            "ask_events": [],
+            "block_events": [
+              "SessionStart",
+              "UserPromptSubmit",
+              "PreToolUse",
+              "PermissionRequest",
+              "PostToolUse",
+              "SubagentStop",
+              "PreCompact",
+              "PostCompact",
+              "Stop"
+            ],
+            "supports_fail_closed": true,
+            "scope": "user"
+          },
+          "notes": [
+            "Codex 0.145.0 adds SessionEnd to the ten-event 0.133.0 through 0.144.x matrix.",
+            "SessionEnd is a best-effort observation and telemetry event; it is not a block or native ask surface.",
+            "SessionStart, PreCompact, and PostCompact blocks render continue=false to stop the current turn, stop before compaction, or stop after compaction respectively. SubagentStop blocks render decision=block to continue the subagent flow.",
+            "Stop decision=block continues Codex with a new continuation prompt. PostToolUse block cannot undo the completed tool side effect; its feedback replaces the result flow and rejects the tool promise in code mode.",
+            "Release certification requires authentic packaged plus official-client evidence that hooks/list reports every owned handler enabled and trusted without a manual approval step; no such Windows record is attached, so this contract remains preview.",
             "Codex has no native hook-side ask surface in this contract; confirm verdicts render as alert/systemMessage."
           ]
         }
@@ -194,7 +271,7 @@
         {
           "contract_id": "claudecode-hooks-v1",
           "agent_version": {
-            "min_inclusive": "2.1.152",
+            "min_inclusive": "2.1.154",
             "max_exclusive": ""
           },
           "default_for_unversioned": true,
@@ -268,7 +345,7 @@
             "scope": "user"
           },
           "notes": [
-            "Pinned to the documented Claude Code hook surface as of 2.1.152, which introduced MessageDisplay; older Claude Code releases exposed smaller hook event sets.",
+            "Pinned to Claude Code 2.1.154: 2.1.152 introduced MessageDisplay and 2.1.154 added the plugin defaultEnabled semantics required by inventory.",
             "Claude Code PreToolUse supports native HITL via permissionDecision=ask.",
             "PostToolUse findings are advisory because the inspected tool side effects have already occurred.",
             "PostToolBatch can block continuation before the next model call, but cannot undo completed batch side effects.",
@@ -285,7 +362,7 @@
         {
           "contract_id": "hermes-hooks-v1",
           "agent_version": {
-            "min_inclusive": "0.11.0",
+            "min_inclusive": "0.19.0",
             "max_exclusive": ""
           },
           "default_for_unversioned": true,
@@ -298,16 +375,29 @@
           ],
           "response_field": "hook_output",
           "events": [
-            "pre_llm_call",
             "pre_tool_call",
             "post_tool_call",
+            "transform_terminal_output",
+            "transform_tool_result",
+            "transform_llm_output",
+            "pre_llm_call",
             "post_llm_call",
+            "pre_verify",
+            "pre_api_request",
+            "post_api_request",
+            "api_request_error",
             "on_session_start",
             "on_session_end",
             "on_session_finalize",
             "on_session_reset",
             "subagent_start",
-            "subagent_stop"
+            "subagent_stop",
+            "pre_gateway_dispatch",
+            "pre_approval_request",
+            "post_approval_response",
+            "kanban_task_claimed",
+            "kanban_task_completed",
+            "kanban_task_blocked"
           ],
           "aid_surfaces": [
             "prompt",
@@ -329,9 +419,9 @@
             "scope": "user"
           },
           "notes": [
-            "Covers the documented shell-hook lifecycle including session start/end/finalize/reset and subagent start/stop telemetry. Hermes nests prompt/result and delegation identity under the per-event extra envelope; the generic decoder lifts those fields into the canonical lifecycle.",
-            "pre_tool_call is the only blockable event; pre_llm_call injects context; confirm verdicts downgrade to a systemMessage alert (no native ask surface); Hermes never blocks on exit code or hook timeout so there is no fail-closed surface.",
-            "Multi-event registration requires hooks_auto_accept in cli-config.yaml on non-TTY/gateway runs; Setup writes it and the managed-backup heals it."
+            "Covers all 23 Hermes v0.19 VALID_HOOKS events. Hermes nests inspectable event content under the per-event extra envelope; the generic decoder lifts declared fields into the canonical lifecycle. Events whose official schema is not documented remain partial, attributed audit rather than inferred enforcement.",
+            "pre_tool_call is the only blockable event; pre_llm_call injects context; pre_verify can continue the bounded verification loop. Transform hooks require Python string returns, pre_gateway_dispatch requires plugin skip/rewrite/allow results, and approval/API/Kanban/lifecycle return values are ignored or undocumented by the shell lane, so DefenseClaw audits them without claiming mutation. Confirm verdicts are recorded and alerted without hook output; Hermes never blocks on exit code or hook timeout so there is no fail-closed surface.",
+            "Multi-event registration requires hooks_auto_accept in the effective config.yaml on non-TTY/gateway runs (the upstream hook guide calls this cli-config.yaml); Setup writes it and the managed-backup heals it."
           ]
         }
       ]
@@ -339,13 +429,14 @@
     "cursor": {
       "kind": "hook",
       "compatibility_gate": "hook-contract",
-      "version_probe": "cursor --version",
+      "version_probe": "agent --version",
       "contracts": [
         {
           "contract_id": "cursor-hooks-v1",
           "agent_version": {
-            "min_inclusive": "1.7.0",
-            "max_exclusive": ""
+            "exact": [
+              "2026.07.23-e383d2b"
+            ]
           },
           "default_for_unversioned": true,
           "hook_script_version": "v8",
@@ -393,19 +484,23 @@
             ],
             "block_events": [
               "preToolUse",
+              "subagentStart",
               "beforeShellExecution",
               "beforeMCPExecution",
               "beforeReadFile",
               "beforeTabFileRead",
-              "beforeSubmitPrompt",
-              "stop"
+              "beforeSubmitPrompt"
             ],
             "supports_fail_closed": true,
             "scope": "user"
           },
           "notes": [
-            "Cursor 1.7 introduced beta hooks for the agent loop.",
-            "Cursor native ask is limited to beforeShellExecution and beforeMCPExecution."
+            "Cursor 1.7 introduced beta hooks for the agent loop, but Cursor does not publish per-event introduction versions for the current 21-event reference. This preview contract is pinned only to the exact Cursor Agent build 2026.07.23-e383d2b published by the official native Windows installer inspected on 2026-07-30; it does not treat the separate Cursor Desktop 3.13 release as an Agent CLI version.",
+            "Cursor Agent uses agent as its primary CLI command; cursor-agent remains a compatibility alias.",
+            "Cursor native ask is enforced only for beforeShellExecution and beforeMCPExecution. preToolUse and subagentStart expose allow/deny only; DefenseClaw never emits ask for them.",
+            "Command hooks fail open by default. An explicit action-mode closed fail mode writes failClosed=true so crashes, timeouts, and invalid JSON block.",
+            "sessionStart and sessionEnd are fire-and-forget policy-wise; sessionStart documents only env/additional_context output and sessionEnd has no output. stop and subagentStop accept only followup_message; none is a block or ask gate.",
+            "Every command-hook invocation returns a JSON object. beforeSubmitPrompt uses continue; the six permission gates use only their documented permission/message fields; postToolUse, preCompact, sessionStart, stop, subagentStop, and workspaceOpen retain their event-specific outputs; unsupported output events return {}."
           ]
         }
       ]
@@ -413,7 +508,7 @@
     "windsurf": {
       "kind": "hook",
       "compatibility_gate": "hook-contract",
-      "version_probe": "windsurf --version",
+      "version_probe": "",
       "contracts": [
         {
           "contract_id": "windsurf-hooks-v1",
@@ -422,7 +517,7 @@
             "max_exclusive": ""
           },
           "default_for_unversioned": true,
-          "hook_script_version": "v6",
+          "hook_script_version": "v7",
           "hook_script": "windsurf-hook.sh",
           "hook_config_path_templates": [
             "~/.codeium/windsurf/hooks.json"
@@ -460,11 +555,13 @@
               "pre_run_command",
               "pre_mcp_tool_use"
             ],
-            "supports_fail_closed": false,
+            "supports_fail_closed": true,
             "scope": "user"
           },
           "notes": [
-            "Windsurf 1.12.41 added Cascade hooks on user prompts, completing the pre-hook set used by this contract."
+            "Windsurf 1.12.41 added Cascade hooks on user prompts, completing the pre-hook set used by this contract.",
+            "Windsurf blocks only the five documented pre-hooks when a hook exits 2. Other non-zero exits fail open, post hooks never block, Cascade response post hooks are asynchronous, and Restricted Mode disables hooks.",
+            "Devin Desktop is a GUI and has no non-interactive version command; native Windows discovery reads trusted executable file-version metadata without launching it."
           ]
         }
       ]
@@ -522,7 +619,8 @@
             "scope": "user"
           },
           "notes": [
-            "Gemini CLI 0.26.0 enabled hooks by default."
+            "Gemini CLI 0.26.0 enabled hooks by default.",
+            "Gemini CLI consumer/free/Google AI Pro/Ultra service ended on 2026-06-18; this contract applies only to continuing enterprise, Google Cloud, and paid API-key access."
           ]
         }
       ]
@@ -536,10 +634,10 @@
           "contract_id": "copilot-hooks-v1",
           "agent_version": {
             "min_inclusive": "1.0.18",
-            "max_exclusive": ""
+            "max_exclusive": "1.0.76"
           },
-          "default_for_unversioned": true,
-          "hook_script_version": "v6",
+          "default_for_unversioned": false,
+          "hook_script_version": "v7",
           "hook_script": "copilot-hook.sh",
           "hook_config_path_templates": [
             "~/.copilot/hooks/defenseclaw.json",
@@ -567,13 +665,7 @@
             "tool_result"
           ],
           "supports_traceparent": true,
-          "native_otlp": true,
-          "native_otlp_auth": "header-token",
-          "native_otlp_signals": [
-            "metrics",
-            "traces"
-          ],
-          "native_otlp_endpoint_template": "/v1/<signal>",
+          "native_otlp": false,
           "capabilities": {
             "can_block": true,
             "can_ask_native": true,
@@ -584,8 +676,7 @@
               "preToolUse",
               "permissionRequest",
               "agentStop",
-              "subagentStop",
-              "postToolUseFailure"
+              "subagentStop"
             ],
             "supports_fail_closed": false,
             "scope": "user,workspace"
@@ -593,7 +684,66 @@
           "notes": [
             "GitHub Copilot CLI shipped preToolUse earlier, but the full DefenseClaw contract also needs postToolUseFailure, permissionRequest, and notification hooks; notification landed in 1.0.18.",
             "Copilot CLI native ask is limited to preToolUse / PreToolUse hooks.",
-            "Copilot CLI can emit optional native traces and metrics through standard OTLP environment variables; DefenseClaw reports the required values but does not mutate shell startup files."
+            "postToolUseFailure is advisory-only and can provide recovery additionalContext; it cannot block the failed tool."
+          ]
+        },
+        {
+          "contract_id": "copilot-hooks-v2",
+          "agent_version": {
+            "min_inclusive": "1.0.76",
+            "max_exclusive": ""
+          },
+          "default_for_unversioned": true,
+          "hook_script_version": "v7",
+          "hook_script": "copilot-hook.sh",
+          "hook_config_path_templates": [
+            "~/.copilot/hooks/defenseclaw.json",
+            "<workspace>/.github/hooks/defenseclaw.json"
+          ],
+          "response_field": "hook_output",
+          "events": [
+            "sessionStart",
+            "sessionEnd",
+            "userPromptSubmitted",
+            "userPromptTransformed",
+            "preToolUse",
+            "postToolUse",
+            "permissionRequest",
+            "agentStop",
+            "subagentStart",
+            "subagentStop",
+            "postToolUseFailure",
+            "errorOccurred",
+            "preCompact",
+            "notification"
+          ],
+          "aid_surfaces": [
+            "prompt",
+            "tool_call",
+            "tool_result"
+          ],
+          "supports_traceparent": true,
+          "native_otlp": false,
+          "capabilities": {
+            "can_block": true,
+            "can_ask_native": true,
+            "ask_events": [
+              "preToolUse"
+            ],
+            "block_events": [
+              "preToolUse",
+              "permissionRequest",
+              "agentStop",
+              "subagentStop"
+            ],
+            "supports_fail_closed": false,
+            "scope": "user,workspace"
+          },
+          "notes": [
+            "Current GitHub Copilot CLI documentation includes the mutation-only userPromptTransformed event; DefenseClaw returns no modification.",
+            "GitHub Copilot CLI 1.0.76 is the conservative reviewed floor for this current 14-event contract.",
+            "Copilot CLI native ask is limited to preToolUse / PreToolUse hooks.",
+            "postToolUseFailure is advisory-only and can provide recovery additionalContext; it cannot block the failed tool."
           ]
         }
       ]
@@ -606,11 +756,11 @@
         {
           "contract_id": "antigravity-hooks-v2",
           "agent_version": {
-            "min_inclusive": "1.0.0",
+            "min_inclusive": "1.1.8",
             "max_exclusive": ""
           },
           "default_for_unversioned": true,
-          "hook_script_version": "v7",
+          "hook_script_version": "v8",
           "hook_script": "antigravity-hook.sh",
           "hook_config_path_templates": [
             "~/.gemini/config/hooks.json"
@@ -624,9 +774,8 @@
             "Stop"
           ],
           "aid_surfaces": [
-            "prompt",
             "tool_call",
-            "tool_result"
+            "event_content"
           ],
           "supports_traceparent": true,
           "native_otlp": false,
@@ -634,22 +783,19 @@
             "can_block": true,
             "can_ask_native": true,
             "ask_events": [
-              "PreInvocation",
               "PreToolUse"
             ],
             "block_events": [
-              "PreInvocation",
-              "PreToolUse",
-              "Stop"
+              "PreToolUse"
             ],
             "supports_fail_closed": false,
             "scope": "user"
           },
           "notes": [
-            "Hooks v2 expands to all five Antigravity 2.0 lifecycle events (PreInvocation, PreToolUse, PostToolUse, PostInvocation, Stop) per the published spec; v1 covered PreToolUse only. PreToolUse remains the only event empirically verified against agy v1.0.1 \u2014 the other four event branches are spec-conformant but gated on upstream agy implementation parity.",
-            "agy returning decision=ask bypasses --dangerously-skip-permissions, which is the strongest user-prompt primitive any DefenseClaw connector currently exposes. AskEvents covers PreInvocation and PreToolUse; agy does not recognize a literal \"force_ask\" decision so DefenseClaw emits \"ask\".",
-            "Stop's wire decision verb is \"block\" (matching agy's Claude-Code lineage) rather than the \"deny\" verb used by Pre* events; this aligns with the spec's \"block-terminating the agent if validation checks fail\" phrasing. PostToolUse and PostInvocation NEVER block \u2014 findings surface as additionalContext for next-turn ingestion.",
-            "Setup writes only the global ~/.gemini/config/hooks.json (the path agy v1.0.x actually evaluates; the marketing-facing ~/.gemini/antigravity-cli/hooks.json is silently ignored at runtime). agy merges all discovered hooks files (global, project, legacy ~/.gemini/hooks.json), so multiple writes cause duplicate firing. Doctor warns when defenseclaw-managed entries appear in more than one merged location, and separately warns when the legacy antigravity-cli path still holds defenseclaw-managed entries from a pre-v0.5.0 install."
+            "Antigravity 2.0 documents five lifecycle events. PreToolUse and PostToolUse use matcher groups with nested handlers; PreInvocation, PostInvocation, and Stop use direct handler lists.",
+            "Hard blocking is claimed only for synchronous PreToolUse stdout {\"decision\":\"deny\"}. decision=ask provides native confirmation. Google does not document non-zero hook exit codes as an enforcement interface.",
+            "PostToolUse output is {}. PreInvocation and PostInvocation may return injectSteps; DefenseClaw uses ephemeralMessage only for context. Stop requires a decision, where continue re-enters the loop and any other value permits stopping; DefenseClaw returns allow and does not claim Stop blocking.",
+            "Setup writes only ~/.gemini/config/hooks.json. Antigravity also discovers <workspace>/.agents/hooks.json. Gemini CLI shares the global config namespace, but its connector registration, lifecycle schema, gateway route, token, and teardown ownership remain separate."
           ]
         }
       ]
@@ -767,12 +913,12 @@
       "kind": "hook",
       "compatibility_gate": "hook-contract",
       "version_probe": "omnigent --version",
-      "docs_url": "https://omnigent.ai/docs/policies/custom",
+      "docs_url": "https://github.com/omnigent-ai/omnigent/blob/v0.7.0/docs/POLICIES.md",
       "contracts": [
         {
           "contract_id": "omnigent-custom-policy-v1",
           "agent_version": {
-            "min_inclusive": "0.0.0",
+            "min_inclusive": "0.7.0",
             "max_exclusive": ""
           },
           "default_for_unversioned": true,
@@ -821,9 +967,11 @@
           "notes": [
             "OmniGent invokes DefenseClaw through its documented custom Python policy API; the installed callable translates DefenseClaw allow, confirm, and block verdicts to ALLOW, ASK, and DENY.",
             "The bridge covers request, tool_call, tool_result, response, llm_request, and llm_response phases exposed by OmniGent's PolicyEvent schema.",
-            "ASK is native only for OmniGent's pre-action request, tool_call, and llm_request phases; post-action confirm verdicts use DefenseClaw's explicit fallback.",
+            "DENY is authoritative on all six phases. Pre-action DENY prevents the action; post-phase DENY uses OmniGent's denial/sentinel behavior to suppress or replace onward-visible content but cannot roll back completed tool or model work. The bridge does not return custom replacement data.",
+            "ASK is native only for OmniGent's pre-action request, tool_call, and llm_request phases; post-phase confirm findings remain attributed audit and continue without an approval pause.",
             "The in-process Python bridge forwards an active OpenTelemetry W3C trace context when present; otherwise DefenseClaw starts a new trace.",
-            "Optional native OTLP is inactive until the OmniGent launch process exports the standard environment variables; native traces require its optional tracing extra."
+            "Optional native OTLP is inactive until the OmniGent launch process exports the standard environment variables; the base/default dependency set includes the required OpenTelemetry packages.",
+            "On Windows, OmniGent 0.7.0 server and SDK harnesses are a native degraded preview. Terminal wrappers and filesystem/network/L7 sandbox isolation are unavailable, and no WSL or POSIX shell path is used."
           ]
         }
       ]

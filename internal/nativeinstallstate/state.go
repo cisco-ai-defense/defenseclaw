@@ -24,28 +24,47 @@ const maxStateBytes = 128 << 10
 var nativeInstallStateBeforeOpen func(string) error
 
 type State struct {
-	SchemaVersion   int    `json:"schema_version"`
-	InstallKind     string `json:"install_kind"`
-	InstallScope    string `json:"install_scope"`
-	InstallRoot     string `json:"install_root"`
-	CommandDir      string `json:"command_dir"`
-	DataRoot        string `json:"data_root"`
-	Runtime         string `json:"runtime"`
-	CodexHome       string `json:"codex_home,omitempty"`
-	ClaudeConfigDir string `json:"claude_config_dir,omitempty"`
+	SchemaVersion        int    `json:"schema_version"`
+	InstallKind          string `json:"install_kind"`
+	InstallScope         string `json:"install_scope"`
+	InstallRoot          string `json:"install_root"`
+	CommandDir           string `json:"command_dir"`
+	DataRoot             string `json:"data_root"`
+	Runtime              string `json:"runtime"`
+	CodexHome            string `json:"codex_home,omitempty"`
+	ClaudeConfigDir      string `json:"claude_config_dir,omitempty"`
+	CopilotHome          string `json:"copilot_home,omitempty"`
+	CursorHome           string `json:"cursor_home,omitempty"`
+	WindsurfUserHome     string `json:"windsurf_user_home,omitempty"`
+	WindsurfHooksPath    string `json:"windsurf_hooks_path,omitempty"`
+	AntigravityConfigDir string `json:"antigravity_config_dir,omitempty"`
+	OpenCodeConfigDir    string `json:"opencode_config_dir,omitempty"`
+	OmnigentConfigHome   string `json:"omnigent_config_home,omitempty"`
+	HermesHome           string `json:"hermes_home,omitempty"`
 }
 
-// Environment removes ambient profile selectors and restores the exact
-// installer-owned values. Empty connector homes are retained only for legacy
-// state written before those fields existed; current setup always records both.
+// Environment removes ambient profile selectors and restores the documented
+// installer-owned values. AntigravityConfigDir remains internal custody state
+// for migration/restoration only; no invented Antigravity or Gemini config-home
+// environment variable is exported to child processes.
 func (state State) Environment(base []string) []string {
 	owned := map[string]bool{
-		"DEFENSECLAW_INSTALL_ROOT": true,
-		"DEFENSECLAW_HOME":         true,
-		"CODEX_HOME":               true,
-		"CLAUDE_CONFIG_DIR":        true,
+		"DEFENSECLAW_INSTALL_ROOT":            true,
+		"DEFENSECLAW_HOME":                    true,
+		"CODEX_HOME":                          true,
+		"CLAUDE_CONFIG_DIR":                   true,
+		"COPILOT_HOME":                        true,
+		"DEFENSECLAW_CURSOR_CONFIG_HOME":      true,
+		"WINDSURF_USER_HOME":                  true,
+		"WINDSURF_HOOK_CONFIG_PATH":           true,
+		"OPENCODE_CONFIG_DIR":                 true,
+		"OMNIGENT_CONFIG_HOME":                true,
+		"HERMES_HOME":                         true,
+		"ANTIGRAVITY_CONFIG_DIR":              true,
+		"GEMINI_CONFIG_DIR":                   true,
+		"DEFENSECLAW_ANTIGRAVITY_CONFIG_HOME": true,
 	}
-	result := make([]string, 0, len(base)+4)
+	result := make([]string, 0, len(base)+11)
 	for _, entry := range base {
 		name, _, ok := strings.Cut(entry, "=")
 		if !ok || owned[strings.ToUpper(name)] {
@@ -62,6 +81,27 @@ func (state State) Environment(base []string) []string {
 	}
 	if state.ClaudeConfigDir != "" {
 		result = append(result, "CLAUDE_CONFIG_DIR="+state.ClaudeConfigDir)
+	}
+	if state.CopilotHome != "" {
+		result = append(result, "COPILOT_HOME="+state.CopilotHome)
+	}
+	if state.CursorHome != "" {
+		result = append(result, "DEFENSECLAW_CURSOR_CONFIG_HOME="+state.CursorHome)
+	}
+	if state.WindsurfUserHome != "" {
+		result = append(result, "WINDSURF_USER_HOME="+state.WindsurfUserHome)
+	}
+	if state.WindsurfHooksPath != "" {
+		result = append(result, "WINDSURF_HOOK_CONFIG_PATH="+state.WindsurfHooksPath)
+	}
+	if state.OpenCodeConfigDir != "" {
+		result = append(result, "OPENCODE_CONFIG_DIR="+state.OpenCodeConfigDir)
+	}
+	if state.OmnigentConfigHome != "" {
+		result = append(result, "OMNIGENT_CONFIG_HOME="+state.OmnigentConfigHome)
+	}
+	if state.HermesHome != "" {
+		result = append(result, "HERMES_HOME="+state.HermesHome)
 	}
 	return result
 }
@@ -139,13 +179,32 @@ func loadAt(executable, installRoot string) (State, error) {
 			return State{}, errors.New("native install state does not match its physical installation")
 		}
 	}
-	for _, value := range []string{state.DataRoot, state.CodexHome, state.ClaudeConfigDir} {
+	for _, value := range []string{
+		state.DataRoot,
+		state.CodexHome,
+		state.ClaudeConfigDir,
+		state.CopilotHome,
+		state.CursorHome,
+		state.WindsurfUserHome,
+		state.WindsurfHooksPath,
+		state.AntigravityConfigDir,
+		state.OpenCodeConfigDir,
+		state.OmnigentConfigHome,
+		state.HermesHome,
+	} {
 		if value != "" && !absoluteCleanPath(value) {
 			return State{}, errors.New("native install state contains an invalid profile path")
 		}
 	}
 	if state.DataRoot == "" {
 		return State{}, errors.New("native install state has no data root")
+	}
+	if state.WindsurfHooksPath != "" && (state.WindsurfUserHome == "" ||
+		!strings.EqualFold(
+			state.WindsurfHooksPath,
+			filepath.Join(state.WindsurfUserHome, ".codeium", "windsurf", "hooks.json"),
+		)) {
+		return State{}, errors.New("native install state has an inconsistent Windsurf hooks path")
 	}
 	return state, nil
 }

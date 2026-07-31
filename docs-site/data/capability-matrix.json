@@ -1,6 +1,6 @@
 {
   "_source": "Hand-curated from internal/gateway/connector setup paths and hook profiles plus cli/defenseclaw/inventory/hook_contracts.json. Re-extract on every connector or hook-contract change.",
-  "_lastVerified": "2026-07-29",
+  "_lastVerified": "2026-07-30",
   "_order": "By adoption / popularity — mirrors the hero rotation (lib/hero-connectors.ts) and the docs nav (content/docs/connectors/meta.json).",
   "connectors": [
     {
@@ -32,7 +32,7 @@
         "canBlock": true,
         "canAskNative": false,
         "askEvents": [],
-        "blockEvents": ["UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse", "Stop"],
+        "blockEvents": ["SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse", "SubagentStop", "PreCompact", "PostCompact", "Stop"],
         "supportsFailClosed": true,
         "scope": "user"
       },
@@ -75,18 +75,18 @@
           "beforeReadFile",
           "beforeTabFileRead",
           "beforeSubmitPrompt",
-          "stop"
+          "subagentStart"
         ],
         "supportsFailClosed": true,
         "scope": "user"
       },
-      "hilt": "Cursor supports native ask only on documented ask-capable hook events (beforeShellExecution, beforeMCPExecution).",
-      "notes": "hooks.json under ~/.cursor; user-global MCP / skills / rules discovery by default, with workspace overlays only when pinned."
+      "hilt": "Cursor enforces native ask only on beforeShellExecution and beforeMCPExecution. preToolUse accepts ask in the schema but does not enforce it.",
+      "notes": "hooks.json under ~/.cursor; command hooks fail open by default and use failClosed=true only for an explicit closed failure mode. sessionStart/sessionEnd are fire-and-forget and Stop is followup-only. Native Windows uses the managed PowerShell stdin adapter."
     },
     {
       "id": "hermes",
       "label": "Hermes",
-      "summary": "Configuration hooks across the Hermes agent runtime lifecycle.",
+      "summary": "Preview native lifecycle hooks with valid-JSON pre-tool blocking and unconditional failure-open behavior.",
       "family": "hooks",
       "toolInspection": "pre-execution + response-scan",
       "subprocessPolicy": "none",
@@ -98,8 +98,8 @@
         "supportsFailClosed": false,
         "scope": "user"
       },
-      "hilt": "Can block supported hook events but has no native human-approval surface; confirm verdicts fall back explicitly.",
-      "notes": "Hooks live in ~/.hermes/config.yaml (hermes-hooks-v1; generic decoder lifts content from the per-event extra envelope). Full shell-hook lifecycle: pre_tool_call blocks, pre_llm_call injects context, post_tool_call/post_llm_call/on_session_start/on_session_end/subagent_stop observe. Setup sets hooks_auto_accept so events register on non-TTY/gateway runs. Discovery surfaces for MCP, skills, plugins."
+      "hilt": "Hermes has no native human-approval surface; confirm verdicts are recorded and alerted but cannot pause or resume the hook.",
+      "notes": "Preview/not certified on native Windows. Hooks live in %HERMES_HOME%/config.yaml (default %LOCALAPPDATA%/hermes; hermes-hooks-v1 >=0.19.0). The owned command is a directly quoted absolute native defenseclaw-hook.exe argv parsed by shlex.split and run with shell=False; DefenseClaw uses no shell wrapper. All 23 Hermes v0.19 VALID_HOOKS events are registered and classified independently. Only valid synchronous pre_tool_call block JSON vetoes a tool; pre_llm_call may inject context and pre_verify may continue a bounded verification loop. Transform, API, gateway, approval, Kanban, and ordinary lifecycle events are audit-only in DefenseClaw's shell lane unless the official shell parser proves an effect. Timeout, nonzero exit, malformed output, authentication, and transport failures warn and continue; exit status is not enforcement. Hermes's separate upstream terminal tool uses installer-managed PortableGit/Git Bash on Windows and is outside DefenseClaw integration. Discovery surfaces cover MCP, skills, and read-only plugins."
     },
     {
       "id": "opencode",
@@ -117,7 +117,7 @@
         "scope": "user"
       },
       "hilt": "No native human-approval surface; blocks by throwing in the bridge plugin's tool.execute.before. confirm verdicts fall back to allow.",
-      "notes": "Governed by a DefenseClaw JS bridge plugin auto-loaded from ~/.config/opencode/plugins/defenseclaw.js (no opencode.json edit). tool.execute.before POSTs to /api/v1/opencode/hook and throws new Error(reason) to abort the tool on a block decision; tool.execute.after is observe-only. Fail-closed is genuine — the bridge throws when the gateway is unreachable and FAIL_MODE=closed."
+      "notes": "Native Windows is preview pending integrated packaged Setup and pinned official-client validation. Governed by a DefenseClaw JS bridge plugin auto-loaded from OPENCODE_CONFIG_DIR/plugins/defenseclaw.js or the default ~/.config/opencode/plugins/defenseclaw.js (no opencode.json edit). tool.execute.before POSTs to /api/v1/opencode/hook and throws new Error(reason) to abort the tool on a block decision; tool.execute.after is best-effort observe-only. Fail-closed applies only to the awaited before hook: the bridge throws there when the gateway is unreachable and FAIL_MODE=closed."
     },
     {
       "id": "omnigent",
@@ -134,8 +134,8 @@
         "supportsFailClosed": true,
         "scope": "user"
       },
-      "hilt": "OmniGent parks request, tool_call, and llm_request policy phases for native ASK approval; post-action confirm verdicts use the configured fallback.",
-      "notes": "Documented custom Python policy bridge maps all six OmniGent policy phases to DefenseClaw. Optional native OTLP is inactive until the OmniGent launch process exports the standard environment variables; native traces require OmniGent's optional tracing extra."
+      "hilt": "OmniGent parks request, tool_call, and llm_request for native ASK approval. Post-phase confirm findings are audited and continue without a pause; DENY may suppress onward-visible content but cannot roll back completed work.",
+      "notes": "The documented custom Python policy bridge maps all six OmniGent policy phases. Post-phase DENY uses OmniGent's denial/sentinel behavior rather than custom replacement data. Native OTLP is inactive until the launch process exports the standard environment variables; OpenTelemetry packages are included in OmniGent's base/default dependency set."
     },
     {
       "id": "geminicli",
@@ -170,8 +170,7 @@
           "preToolUse",
           "permissionRequest",
           "agentStop",
-          "subagentStop",
-          "postToolUseFailure"
+          "subagentStop"
         ],
         "supportsFailClosed": false,
         "scope": "user,workspace"
@@ -200,20 +199,20 @@
     {
       "id": "antigravity",
       "label": "Antigravity",
-      "summary": "Five lifecycle hooks, with a verified native ask on PreToolUse.",
+      "summary": "Five lifecycle hooks, with documented native ask on PreToolUse.",
       "family": "hooks",
-      "toolInspection": "pre-execution + response-scan",
+      "toolInspection": "pre-execution",
       "subprocessPolicy": "none",
       "hooks": {
         "canBlock": true,
         "canAskNative": true,
-        "askEvents": ["PreInvocation", "PreToolUse"],
-        "blockEvents": ["PreInvocation", "PreToolUse", "Stop"],
+        "askEvents": ["PreToolUse"],
+        "blockEvents": ["PreToolUse"],
         "supportsFailClosed": false,
         "scope": "user"
       },
-      "hilt": "Antigravity has an empirically verified native ask on PreToolUse. Returning decision=ask there overrides agy's --dangerously-skip-permissions flag; force_ask is retained only as internal raw_action telemetry.",
-      "notes": "DefenseClaw's default v2 contract registers the full Antigravity lifecycle (PreInvocation, PreToolUse, PostToolUse, PostInvocation, Stop) as separate owned keys in ~/.gemini/config/hooks.json. It advertises native ask on PreInvocation and PreToolUse, and block on PreInvocation, PreToolUse, and Stop. Only PreToolUse is empirically verified on agy v1.0.1; the other four registrations and their verdict branches remain spec-conformant surfaces gated on upstream implementation parity. MCP read/write uses ~/.gemini/config/mcp_config.json and <workspace>/.agents/mcp_config.json. AgentSkills folder form is read/write at ~/.gemini/config/skills and <workspace>/.agents/skills. Plugins install to ~/.gemini/config/plugins or <workspace>/.agents/plugins; the CLI staging path is also discovered. CLI direct markdown skills, rules, and plugin-contained agents remain discovery/scan only."
+      "hilt": "Antigravity documents native ask on PreToolUse only. DefenseClaw does not claim that this response overrides permission-bypass flags without persisted official-client evidence; force_ask is retained only as internal raw_action telemetry.",
+      "notes": "DefenseClaw's v2 contract registers all five documented Antigravity lifecycle events (PreInvocation, PreToolUse, PostToolUse, PostInvocation, Stop) in ~/.gemini/config/hooks.json with their vendor-specific direct-list or matcher-group shapes. Only synchronous PreToolUse exposes documented hard deny and native ask decisions; invocation events are context-transform surfaces, PostToolUse is observe-only, and DefenseClaw returns allow for Stop rather than claiming stop blocking. MCP read/write uses ~/.gemini/config/mcp_config.json and <workspace>/.agents/mcp_config.json. AgentSkills folder form is read/write at ~/.gemini/config/skills and <workspace>/.agents/skills. Plugins live at ~/.gemini/config/plugins or <workspace>/.agents/plugins; the CLI staging path is also discovered. Rules and standalone or plugin-contained agents remain discovery/scan only."
     },
     {
       "id": "windsurf",
@@ -233,11 +232,11 @@
           "pre_run_command",
           "pre_mcp_tool_use"
         ],
-        "supportsFailClosed": false,
+        "supportsFailClosed": true,
         "scope": "user"
       },
       "hilt": "Can block supported hook events but has no native human-approval surface; confirm verdicts fall back explicitly.",
-      "notes": "Cascade hooks under ~/.codeium/windsurf/hooks.json. Existing MCP/rules discovered, never auto-created."
+      "notes": "Cascade hooks under ~/.codeium/windsurf/hooks.json. DefenseClaw can map its configured availability failures to Windsurf's blocking exit 2 on the five documented pre-hooks; Windsurf itself fails open on other non-zero exits. Post hooks are non-blocking, Cascade response post hooks are asynchronous, and Restricted Mode disables hooks. Existing MCP/rules are discovered, never auto-created."
     },
     {
       "id": "zeptoclaw",

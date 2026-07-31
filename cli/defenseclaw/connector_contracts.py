@@ -37,6 +37,7 @@ _VERSION_RE = re.compile(r"(?i)(?:^|[^0-9])v?([0-9]+)(?:\.([0-9]+))?(?:\.([0-9]+
 class ConnectorContract:
     connector: str
     contract_id: str
+    exact_agent_versions: tuple[str, ...] = ()
     min_agent_version: str = ""
     max_agent_version: str = ""
     default_for_unversioned: bool = False
@@ -117,6 +118,9 @@ def _load_contracts_from_manifest(
                 ConnectorContract(
                     connector=name,
                     contract_id=str(raw_contract.get("contract_id", "")).strip(),
+                    exact_agent_versions=tuple(
+                        str(v) for v in version.get("exact", []) if v
+                    ),
                     min_agent_version=str(version.get("min_inclusive", "") or ""),
                     max_agent_version=str(version.get("max_exclusive", "") or ""),
                     default_for_unversioned=bool(
@@ -212,7 +216,7 @@ def resolve_connector_contract(connector: str, raw_version: str | None) -> Conne
             contract=None,
         )
     for contract in contracts:
-        if _version_in_range(normalized, contract.min_agent_version, contract.max_agent_version):
+        if _contract_matches_agent_version(contract, raw, normalized):
             return ConnectorCompatibility(
                 connector=name,
                 raw_version=raw,
@@ -229,6 +233,32 @@ def resolve_connector_contract(connector: str, raw_version: str | None) -> Conne
         reason="no hook contract matches normalized agent version",
         contract=None,
     )
+
+
+def _contract_matches_agent_version(
+    contract: ConnectorContract,
+    raw_version: str,
+    normalized_version: str,
+) -> bool:
+    if contract.exact_agent_versions:
+        return _exact_agent_version_match(raw_version, contract.exact_agent_versions)
+    return _version_in_range(
+        normalized_version,
+        contract.min_agent_version,
+        contract.max_agent_version,
+    )
+
+
+def _exact_agent_version_match(raw: str, expected: tuple[str, ...]) -> bool:
+    fields = raw.strip().split()
+    if not fields or len(fields) > 2:
+        return False
+    token = fields[-1]
+    if len(fields) == 2 and fields[0].lower() not in {"agent", "cursor-agent"}:
+        return False
+    if token[:1].lower() == "v":
+        token = token[1:]
+    return any(token.lower() == candidate.strip().lower() for candidate in expected)
 
 
 def _version_in_range(version: str, min_version: str, max_version: str) -> bool:
