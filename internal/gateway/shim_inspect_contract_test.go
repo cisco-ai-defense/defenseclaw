@@ -22,6 +22,9 @@ import (
 )
 
 func TestInspectToolShimRequestBodies(t *testing.T) {
+	const connector = "trusted-shim-contract"
+	installDefaultProfileConnector(t, connector)
+
 	tests := []struct {
 		name    string
 		tool    string
@@ -72,7 +75,12 @@ func TestInspectToolShimRequestBodies(t *testing.T) {
 			if err != nil {
 				t.Fatalf("marshal shim request: %v", err)
 			}
-			_, verdict := postInspect(t, api, string(body))
+			_, verdict := postInspectForConnector(
+				t,
+				api,
+				connector,
+				string(body),
+			)
 			if verdict.Action != test.action {
 				t.Fatalf("action = %q, want %q; findings=%v", verdict.Action, test.action, verdict.Findings)
 			}
