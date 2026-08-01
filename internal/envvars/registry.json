@@ -928,6 +928,138 @@
       "security_note": "Privileged repair authorization — must remain root/admin-owned and non-writable by the DefenseClaw service account."
     },
     {
+      "name": "DEFENSECLAW_WINDOWS_ENTERPRISE_INSTALLER",
+      "category": "runtime_path",
+      "purpose": "Select the signed Windows enterprise PowerShell installer used by the native lifecycle CLI when --installer is omitted.",
+      "default": "unset (resolve the trusted installer adjacent to the native binary)",
+      "accepted_values": ["absolute path to a trusted install-enterprise.ps1", "unset"],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/cli/windows_enterprise_service.go", "description": "Resolves and trust-validates the installer delegated to by enterprise windows lifecycle commands"}
+      ],
+      "since": "0.8.0",
+      "security_note": "Privileged code-selection boundary — the resolved installer and adjacent module must pass the native trust checks before elevation."
+    },
+    {
+      "name": "DEFENSECLAW_WINDOWS_SERVICE_NAME",
+      "category": "runtime_path",
+      "purpose": "Select the SCM service role hosted by the signed native defenseclaw binary.",
+      "default": "unset (run as an ordinary CLI process)",
+      "accepted_values": ["installer-owned Windows service name", "unset"],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw/service_windows.go", "description": "Opts the native binary into SCM hosting for the named enterprise service"}
+      ],
+      "since": "0.8.0",
+      "security_note": "Installer-owned service switch — production values belong in the protected per-service registry Environment value, not an interactive user environment."
+    },
+    {
+      "name": "DEFENSECLAW_WINDOWS_SERVICE_LOG",
+      "category": "runtime_path",
+      "purpose": "Select the absolute append-only log path used when the native binary is hosted by the Windows SCM.",
+      "default": "unset (retain the inherited service output handles)",
+      "accepted_values": ["absolute administrator-approved log path", "unset"],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw/service_windows.go", "description": "Redirects native Windows service stdout and stderr to the configured file"}
+      ],
+      "since": "0.8.0",
+      "security_note": "Service output path — the enterprise installer pins this in protected SCM configuration and hardens its parent directory."
+    },
+    {
+      "name": "DEFENSECLAW_WINDOWS_GATEWAY_SERVICE_NAME",
+      "category": "runtime_path",
+      "purpose": "Identify the exact enterprise gateway SCM service used for service-SID ACLs and managed hook peer verification.",
+      "default": "DefenseClawGateway",
+      "accepted_values": ["installer-owned Windows gateway service name"],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/cli/windows_codex_requirements.go", "description": "Binds managed Codex runtime metadata to the gateway service identity"},
+        {"location": "internal/cli/enterprise_hooks_token_windows.go", "description": "Derives the gateway virtual-service SID for protected token ACLs"}
+      ],
+      "since": "0.8.0",
+      "security_note": "Service-identity boundary — changing this value changes which virtual service SID is authorized to read managed runtime secrets."
+    },
+    {
+      "name": "DEFENSECLAW_WINDOWS_SERVICE_ACCOUNT",
+      "category": "runtime_path",
+      "purpose": "Identify the exact virtual Windows service account permitted to write the managed runtime tree.",
+      "default": "NT SERVICE\\${DEFENSECLAW_WINDOWS_GATEWAY_SERVICE_NAME}",
+      "accepted_values": ["NT SERVICE\\<installer-owned-service-name>"],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/managed/managed.go", "description": "Defines the protected service-account environment contract"},
+        {"location": "internal/managed/trust_windows.go", "description": "Resolves and validates the virtual-service SID"},
+        {"location": "internal/gateway/connector/hook_api_token_windows.go", "description": "Authorizes the service SID on managed hook token files"}
+      ],
+      "since": "0.8.0",
+      "security_note": "Managed-runtime writer identity — only the installer-pinned virtual service account may receive the corresponding write grants."
+    },
+    {
+      "name": "DEFENSECLAW_WINDOWS_APPROVED_AGENT_CLIENTS_ENFORCED",
+      "category": "hook_internal",
+      "purpose": "Carry protected installer evidence that application control restricts every enabled enterprise agent client to approved binaries.",
+      "default": "unset (application-control prerequisite is unverified)",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/cli/windows_codex_requirements.go", "description": "Gates protected Codex requirements reconciliation on approved-agent application-control evidence"},
+        {"location": "packaging/windows/DefenseClawEnterprise.psm1", "description": "Pins the authenticated attestation in each protected service environment"}
+      ],
+      "since": "0.8.0",
+      "security_note": "Authenticated service evidence — only the signed installer may publish this marker after live WDAC or AppLocker certification."
+    },
+    {
+      "name": "DEFENSECLAW_WINDOWS_CODEX_APPROVED_CLIENT_ENFORCED",
+      "category": "hook_internal",
+      "purpose": "Retain the protected Codex-specific compatibility alias for the all-agent application-control attestation.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "packaging/windows/DefenseClawEnterprise.psm1", "description": "Publishes the compatibility claim alongside the authoritative approved-agent marker"}
+      ],
+      "since": "0.8.0",
+      "security_note": "Compatibility-only service claim — it is not a substitute for DEFENSECLAW_WINDOWS_APPROVED_AGENT_CLIENTS_ENFORCED or live application-control certification."
+    },
+    {
+      "name": "DEFENSECLAW_WINDOWS_CLAUDE_EFFECTIVE_POLICY_VERIFIED",
+      "category": "hook_internal",
+      "purpose": "Carry protected installer evidence that DefenseClaw is Claude Code's effective first-source-wins managed policy.",
+      "default": "unset (effective policy is unverified)",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/cli/windows_codex_requirements.go", "description": "Includes Claude effective-policy evidence in the aggregate Windows enterprise report"},
+        {"location": "packaging/windows/DefenseClawEnterprise.psm1", "description": "Pins fresh effective-policy certification in each protected service environment"}
+      ],
+      "since": "0.8.0",
+      "security_note": "Authenticated service evidence — protected local policy bytes alone do not establish which Claude managed-policy source is effective."
+    },
+    {
+      "name": "DEFENSECLAW_WINDOWS_CODEX_TRUSTED_HOOK_LAUNCHER_VERIFIED",
+      "category": "hook_internal",
+      "purpose": "Carry protected installer evidence that the approved Codex distribution has a fixed fail-closed trusted Windows hook launcher.",
+      "default": "unset (trusted hook launcher is unverified)",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/cli/windows_codex_requirements.go", "description": "Fails closed before Codex requirements mutation when trusted-launcher evidence is absent"},
+        {"location": "packaging/windows/DefenseClawEnterprise.psm1", "description": "Pins the authenticated launcher attestation in each protected service environment"}
+      ],
+      "since": "0.8.0",
+      "security_note": "Authenticated service evidence — stock Codex releases that continue after hook-launch failure must leave this unset."
+    },
+    {
       "name": "DEFENSECLAW_IPC_SOCKET",
       "category": "runtime_path",
       "purpose": "Override the local UDS gRPC socket path used by the internal/ipc server in unmanaged and test deployments. Managed-enterprise resolution deliberately ignores this environment variable; use administrator-owned managed.socket_path instead.",

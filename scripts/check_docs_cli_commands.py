@@ -28,6 +28,21 @@ SUPPORTING_DOCS_ROOT = REPO_ROOT / "docs"
 SHELL_FENCE_LANGUAGES = {"bash", "console", "sh", "shell", "zsh"}
 COMMAND_NAME = "defenseclaw"
 
+# Public Windows enterprise lifecycle commands are implemented by the native
+# Cobra binary rather than the Python Click controller parsed below. Keep their
+# command paths explicit so inline documentation is checked without pretending
+# that Click owns or validates the native command's options.
+_NATIVE_GO_COMMAND_PATHS = frozenset(
+    {
+        ("enterprise",),
+        ("enterprise", "windows"),
+        *(
+            ("enterprise", "windows", action)
+            for action in ("install", "upgrade", "repair", "reconcile", "status", "verify", "uninstall")
+        ),
+    }
+)
+
 
 @dataclass(frozen=True)
 class DocumentedCommand:
@@ -238,6 +253,16 @@ def _validate_inline_path(command: click.Command, documented: DocumentedCommand)
     except ValueError as exc:
         return str(exc)
     if not tokens or tokens[0] != COMMAND_NAME:
+        return None
+
+    path: list[str] = []
+    for token in tokens[1:]:
+        if token.startswith("-") or any(
+            marker in token for marker in ("<", ">", "[", "]", "{", "}", "|", "/", "*", "...", "…")
+        ):
+            break
+        path.append(token)
+    if tuple(path) in _NATIVE_GO_COMMAND_PATHS:
         return None
 
     node = command

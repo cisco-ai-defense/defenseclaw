@@ -14,6 +14,11 @@ local gateway, native hook launcher, CLI, TUI, scanners, and managed Python
 runtime. The certified connector scope is deliberately narrow: **Codex** and
 **Claude Code**.
 
+For centrally managed endpoints, the separate
+[managed-enterprise lifecycle](/docs/get-started/windows/managed-enterprise)
+installs administrator-owned Windows services. It is explicitly opt-in and
+does not change this per-user package or its existing auto-heal behavior.
+
 <Callout type="warning" title="WSL is not supported">
 This guide is for DefenseClaw, the agent, and its configuration running in the
 same native Windows user session. Do not install DefenseClaw in WSL, point a
@@ -46,6 +51,7 @@ hook and native telemetry surfaces.
 
 <Cards>
   <Card title="Install and maintain" href="/docs/get-started/windows/install-lifecycle" description="Requirements, authenticated release Setup, repair, upgrade qualification, recovery, and uninstall." />
+  <Card title="Managed enterprise" href="/docs/get-started/windows/managed-enterprise" description="Protected Windows services, guardian auto-heal, non-admin guarantees, and the enterprise CLI lifecycle." />
   <Card title="Connectors and enforcement" href="/docs/get-started/windows/connectors-enforcement" description="Exact Codex and Claude Code events, observe/action behavior, fail modes, and enable/disable controls." />
   <Card title="Capabilities and commands" href="/docs/get-started/windows/capabilities-commands" description="Windows-specific capability and complete public command-family matrices." />
   <Card title="Telemetry and security" href="/docs/get-started/windows/telemetry-security" description="Native OTLP, local audit, scoped credentials, loopback boundaries, release provenance, and recovery guarantees." />
@@ -84,14 +90,14 @@ the authentication, redaction, and local-storage boundaries.
 | A remote agent-to-DefenseClaw gateway topology | **Not certified** | The certified connector path is same-user native hooks to loopback. Remote observability destinations are separate. |
 | OpenShell sandbox and `sandbox` commands | **Unsupported** | The Windows release does not host the Linux sandbox lifecycle. |
 | `systemd`, `launchd`, Unix sockets, and POSIX hook shells | **Not applicable** | Windows uses native processes, Windows process identity, and a native hook executable. |
-| General enterprise hook guardian | **Unsupported** | The public per-user package does not install an elevated guardian or system service. A narrow Claude Code administrator-managed policy path is documented separately. |
+| Machine services from the public per-user Setup | **Unsupported** | The current-user Setup never elevates or installs services. Use the separate [managed-enterprise lifecycle](/docs/get-started/windows/managed-enterprise) for the supported SCM gateway and guardian. |
 | Docker Desktop WSL2 backend for bundled local stacks | **Not certified** | The optional certified local-stack path uses Linux containers on the Hyper-V backend. |
 
 No roadmap is implied by these classifications.
 
 ## If you are migrating
 
-From macOS or Linux, expect a per-user Setup EXE instead of a shell installer,
+For a normal-mode migration from macOS or Linux, expect a per-user Setup EXE instead of a shell installer,
 HKCU `PATH` and Run registration instead of a service manager, native process
 identity instead of PID-only signaling, and a native hook executable instead
 of Bash hooks. Sandbox and proxy connector features do not move with you.

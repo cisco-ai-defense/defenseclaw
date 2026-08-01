@@ -39,12 +39,15 @@ const hookContractLockFile = "hook_contract_lock.json"
 const agentSelectionFile = "agent_selection.json"
 
 const (
-	agentSelectionSchemaVersion = 1
-	agentSelectionMaxBytes      = 64 << 10
-	hookContractLockMaxBytes    = 2 << 20
-	hookRuntimeEvidenceMaxBytes = 64 << 10
-	agentSelectionMaxLifetime   = 15 * time.Minute
-	agentSelectionClockSkew     = 5 * time.Minute
+	agentSelectionSchemaVersion              = 1
+	agentSelectionMaxBytes                   = 64 << 10
+	hookContractLockMaxBytes                 = 2 << 20
+	hookRuntimeEvidenceMaxBytes              = 64 << 10
+	agentSelectionMaxLifetime                = 15 * time.Minute
+	agentSelectionClockSkew                  = 5 * time.Minute
+	managedHookContractLockMaxBytes    int64 = 4 << 20
+	managedHookRuntimeArtifactMaxBytes int64 = 4 << 20
+	managedProtectedArtifactMaxBytes   int64 = 1 << 30
 )
 
 type agentSelectionReceipt struct {
@@ -64,7 +67,11 @@ type agentSelectionEvidence struct {
 	ExpiresAt         string `json:"expires_at"`
 }
 
-// Version 2 stores physically shared hook artifacts once at the lock root.
+// hookContractLockVersion 2 separates artifacts that have one physical copy
+// per data directory from connector-owned registration artifacts.  Version 1
+// repeated the shared inspect-script hashes in every connector entry, which
+// could make a mixed installation impossible to validate when a selected
+// connector rendered different bytes into those shared paths.
 const hookContractLockVersion = 2
 
 var activeConnectorStateMu sync.Mutex
@@ -452,8 +459,29 @@ func LoadHookContractLockEntry(dataDir, connectorName string) HookContractLockEn
 	return entry
 }
 
+// LoadHookContractLockEntryForMode preserves the permissive legacy loader for
+// ordinary per-user setups. Managed enterprise callers instead receive a
+// bounded, stable, single-link read error so target-owned sparse files cannot
+// exhaust the guardian and malformed state cannot be mistaken for absence.
+func LoadHookContractLockEntryForMode(
+	dataDir, connectorName string,
+	managedEnterprise bool,
+) (HookContractLockEntry, error) {
+	if !managedEnterprise {
+		return LoadHookContractLockEntry(dataDir, connectorName), nil
+	}
+	lock, err := loadManagedHookContractLock(dataDir)
+	if err != nil {
+		return HookContractLockEntry{}, err
+	}
+	if lock.Connectors == nil {
+		return HookContractLockEntry{}, nil
+	}
+	return lock.Connectors[normalizeConnectorName(connectorName)], nil
+}
+
 func SaveHookContractLockEntry(dataDir string, entry HookContractLockEntry) error {
-	return saveHookContractLockEntry(dataDir, entry, false)
+	return saveHookContractLockEntry(dataDir, entry, false, false)
 }
 
 // SaveFreshHookContractLockEntry persists the same contract evidence as
@@ -461,22 +489,40 @@ func SaveHookContractLockEntry(dataDir string, entry HookContractLockEntry) erro
 // otherwise unchanged. Gateway boot uses this narrow variant as its durable
 // readiness acknowledgement; ordinary callers retain idempotent no-op saves.
 func SaveFreshHookContractLockEntry(dataDir string, entry HookContractLockEntry) error {
-	return saveHookContractLockEntry(dataDir, entry, true)
+	return saveHookContractLockEntry(dataDir, entry, false, true)
 }
 
-func saveHookContractLockEntry(dataDir string, entry HookContractLockEntry, forceRefresh bool) error {
+func SaveHookContractLockEntryForMode(
+	dataDir string,
+	entry HookContractLockEntry,
+	managedEnterprise bool,
+) error {
+	return saveHookContractLockEntry(dataDir, entry, managedEnterprise, false)
+}
+
+func saveHookContractLockEntry(
+	dataDir string,
+	entry HookContractLockEntry,
+	managedEnterprise bool,
+	forceRefresh bool,
+) error {
 	if strings.TrimSpace(dataDir) == "" || strings.TrimSpace(entry.Connector) == "" {
 		return nil
 	}
 	path := filepath.Join(dataDir, hookContractLockFile)
-	return withFileLock(path, func() error {
+	return withFileLockMode(path, managedEnterprise, func() error {
 		entry.Connector = normalizeConnectorName(entry.Connector)
 		entry.HookScriptDigests = cloneHookScriptDigests(entry.HookScriptDigests)
-		lock, err := loadHookContractLockForUpdate(dataDir)
+		lock, err := loadHookContractLockForUpdate(dataDir, managedEnterprise)
 		if err != nil {
 			return fmt.Errorf("load hook contract lock for update: %w", err)
 		}
-		if err := validateHookRuntimeStateForContract(dataDir, entry.Connector, entry.HookFailMode); err != nil {
+		if err := validateHookRuntimeStateForContract(
+			dataDir,
+			entry.Connector,
+			entry.HookFailMode,
+			managedEnterprise,
+		); err != nil {
 			return fmt.Errorf("validate hook runtime state for contract: %w", err)
 		}
 		if lock.Connectors == nil {
@@ -553,13 +599,20 @@ func saveHookContractLockEntry(dataDir string, entry HookContractLockEntry, forc
 }
 
 func ClearHookContractLockEntry(dataDir, connectorName string) error {
+	return ClearHookContractLockEntryForMode(dataDir, connectorName, false)
+}
+
+func ClearHookContractLockEntryForMode(
+	dataDir, connectorName string,
+	managedEnterprise bool,
+) error {
 	if strings.TrimSpace(dataDir) == "" {
 		return nil
 	}
 	connectorName = normalizeConnectorName(connectorName)
 	path := filepath.Join(dataDir, hookContractLockFile)
-	return withFileLock(path, func() error {
-		lock, err := loadHookContractLockForUpdate(dataDir)
+	return withFileLockMode(path, managedEnterprise, func() error {
+		lock, err := loadHookContractLockForUpdate(dataDir, managedEnterprise)
 		if err != nil {
 			return fmt.Errorf("load hook contract lock for clear: %w", err)
 		}
@@ -585,8 +638,12 @@ func ClearHookContractLockEntry(dataDir, connectorName string) error {
 			return fmt.Errorf("inspect hook runtime directory: %w", statErr)
 		}
 		runtimePath := filepath.Join(hookDir, hookConfigSidecarName)
-		return withFileLock(runtimePath, func() error {
-			snapshots, err := clearHookConfigSidecarEntryLocked(hookDir, connectorName)
+		return withFileLockMode(runtimePath, managedEnterprise, func() error {
+			snapshots, err := clearHookConfigSidecarEntryLocked(
+				hookDir,
+				connectorName,
+				managedEnterprise,
+			)
 			if err != nil {
 				return fmt.Errorf("clear hook runtime state for %s: %w", connectorName, err)
 			}
@@ -609,6 +666,37 @@ func ClearHookContractLockEntry(dataDir, connectorName string) error {
 }
 
 func NewHookContractLockEntry(opts SetupOpts, conn Connector, defenseClawVersion string) HookContractLockEntry {
+	entry := newHookContractLockEntry(opts, conn, defenseClawVersion)
+	entry.HookScriptDigests = HookScriptDigests(opts, conn)
+	return entry
+}
+
+// NewHookContractLockEntryForMode uses constant-memory, identity-stable hashing
+// for managed target-owned artifacts. The legacy constructor intentionally
+// retains its historical missing/error behavior for unmanaged installations.
+func NewHookContractLockEntryForMode(
+	opts SetupOpts,
+	conn Connector,
+	defenseClawVersion string,
+	managedEnterprise bool,
+) (HookContractLockEntry, error) {
+	if !managedEnterprise {
+		return NewHookContractLockEntry(opts, conn, defenseClawVersion), nil
+	}
+	entry := newHookContractLockEntry(opts, conn, defenseClawVersion)
+	digests, err := managedHookScriptDigests(opts, conn)
+	if err != nil {
+		return HookContractLockEntry{}, err
+	}
+	entry.HookScriptDigests = digests
+	return entry, nil
+}
+
+func newHookContractLockEntry(
+	opts SetupOpts,
+	conn Connector,
+	defenseClawVersion string,
+) HookContractLockEntry {
 	name := ""
 	if conn != nil {
 		name = conn.Name()
@@ -628,7 +716,6 @@ func NewHookContractLockEntry(opts SetupOpts, conn Connector, defenseClawVersion
 		CompatibilityStatus:    resolution.Status,
 		CompatibilityReason:    resolution.Reason,
 		HookScriptVersion:      contract.HookScriptVersion,
-		HookScriptDigests:      HookScriptDigests(opts, conn),
 		Locations:              ResolvedConnectorLocations(opts, conn),
 		DefenseClawVersion:     defenseClawVersion,
 		HookFailMode:           normalizeHookFailMode(opts.HookFailMode),
@@ -920,6 +1007,146 @@ func HookScriptDigests(opts SetupOpts, conn Connector) map[string]string {
 		return nil
 	}
 	return out
+}
+
+func managedHookScriptDigests(
+	opts SetupOpts,
+	conn Connector,
+) (map[string]string, error) {
+	if conn == nil || strings.TrimSpace(opts.DataDir) == "" {
+		return nil, nil
+	}
+	out := map[string]string{}
+	for _, path := range hookRuntimeArtifactPaths(opts, conn) {
+		limit := managedProtectedArtifactMaxBytes
+		if pathInsideConnectorDataDir(opts.DataDir, path) {
+			limit = managedHookRuntimeArtifactMaxBytes
+		}
+		digest, exists, err := stableManagedArtifactDigest(
+			path,
+			"managed hook runtime artifact",
+			limit,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("digest managed hook artifact %s: %w", path, err)
+		}
+		if !exists {
+			continue
+		}
+		out[filepath.Base(path)] = digest
+	}
+	if len(out) == 0 {
+		return nil, nil
+	}
+	return out, nil
+}
+
+func pathInsideConnectorDataDir(dataDir, path string) bool {
+	base, err := filepath.Abs(dataDir)
+	if err != nil {
+		return false
+	}
+	candidate, err := filepath.Abs(path)
+	if err != nil {
+		return false
+	}
+	rel, err := filepath.Rel(filepath.Clean(base), filepath.Clean(candidate))
+	if err != nil {
+		return false
+	}
+	return rel != ".." &&
+		rel != "." &&
+		!strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+func stableManagedArtifactDigest(
+	path, label string,
+	maxBytes int64,
+) (string, bool, error) {
+	if maxBytes <= 0 {
+		return "", false, fmt.Errorf("%s has an invalid digest limit", label)
+	}
+	expected, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	if expected.Mode()&os.ModeSymlink != 0 || !expected.Mode().IsRegular() {
+		return "", true, fmt.Errorf("%s is not a regular non-link file", label)
+	}
+	if expected.Size() < 0 || expected.Size() > maxBytes {
+		return "", true, fmt.Errorf("%s exceeds %d-byte limit", label, maxBytes)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return "", true, err
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil {
+		return "", true, err
+	}
+	if !opened.Mode().IsRegular() || !os.SameFile(expected, opened) {
+		return "", true, fmt.Errorf("%s changed identity before digest", label)
+	}
+	if err := validateHookRuntimeOpenedFile(file, label); err != nil {
+		return "", true, err
+	}
+	hashOnce := func() ([sha256.Size]byte, int64, error) {
+		if _, err := file.Seek(0, io.SeekStart); err != nil {
+			return [sha256.Size]byte{}, 0, err
+		}
+		hash := sha256.New()
+		count, err := io.Copy(hash, io.LimitReader(file, maxBytes+1))
+		if err != nil {
+			return [sha256.Size]byte{}, count, err
+		}
+		if count > maxBytes {
+			return [sha256.Size]byte{}, count, fmt.Errorf(
+				"%s exceeds %d-byte limit",
+				label,
+				maxBytes,
+			)
+		}
+		var digest [sha256.Size]byte
+		copy(digest[:], hash.Sum(nil))
+		return digest, count, nil
+	}
+	first, firstSize, err := hashOnce()
+	if err != nil {
+		return "", true, err
+	}
+	between, err := file.Stat()
+	if err != nil {
+		return "", true, err
+	}
+	second, secondSize, err := hashOnce()
+	if err != nil {
+		return "", true, err
+	}
+	after, err := file.Stat()
+	if err != nil {
+		return "", true, err
+	}
+	current, err := os.Lstat(path)
+	if err != nil {
+		return "", true, fmt.Errorf("%s changed after open: %w", label, err)
+	}
+	if current.Mode()&os.ModeSymlink != 0 ||
+		!current.Mode().IsRegular() ||
+		!os.SameFile(opened, current) ||
+		firstSize != opened.Size() ||
+		secondSize != firstSize ||
+		between.Size() != opened.Size() ||
+		after.Size() != opened.Size() ||
+		!between.ModTime().Equal(opened.ModTime()) ||
+		!after.ModTime().Equal(opened.ModTime()) ||
+		first != second {
+		return "", true, fmt.Errorf("%s changed during bounded digest", label)
+	}
+	return "sha256:" + hex.EncodeToString(first[:]), true, nil
 }
 
 func sharedHookScriptName(name string) bool {
@@ -1274,10 +1501,16 @@ func loadHookContractLock(dataDir string) hookContractLock {
 	return lock
 }
 
-func loadHookContractLockForUpdate(dataDir string) (hookContractLock, error) {
+func loadHookContractLockForUpdate(
+	dataDir string,
+	managedEnterprise bool,
+) (hookContractLock, error) {
 	empty := hookContractLock{Version: 1, Connectors: map[string]HookContractLockEntry{}}
 	if strings.TrimSpace(dataDir) == "" {
 		return empty, nil
+	}
+	if managedEnterprise {
+		return loadManagedHookContractLock(dataDir)
 	}
 	data, err := os.ReadFile(filepath.Join(dataDir, hookContractLockFile))
 	if os.IsNotExist(err) {
@@ -1295,6 +1528,43 @@ func loadHookContractLockForUpdate(dataDir string) (hookContractLock, error) {
 	}
 	if lock.Version < 1 || lock.Version > hookContractLockVersion {
 		return hookContractLock{}, fmt.Errorf("unsupported hook contract lock version %d", lock.Version)
+	}
+	if lock.Connectors == nil {
+		lock.Connectors = map[string]HookContractLockEntry{}
+	}
+	return lock, nil
+}
+
+func loadManagedHookContractLock(dataDir string) (hookContractLock, error) {
+	empty := hookContractLock{Version: 1, Connectors: map[string]HookContractLockEntry{}}
+	if strings.TrimSpace(dataDir) == "" {
+		return empty, nil
+	}
+	path := filepath.Join(dataDir, hookContractLockFile)
+	data, exists, err := readStableManagedRuntimeFile(
+		path,
+		"managed hook contract lock",
+		true,
+		managedHookContractLockMaxBytes,
+	)
+	if err != nil {
+		return hookContractLock{}, err
+	}
+	if !exists {
+		return empty, nil
+	}
+	var lock hookContractLock
+	if err := json.Unmarshal(data, &lock); err != nil {
+		return hookContractLock{}, err
+	}
+	if lock.Version == 0 {
+		lock.Version = 1
+	}
+	if lock.Version < 1 || lock.Version > hookContractLockVersion {
+		return hookContractLock{}, fmt.Errorf(
+			"unsupported hook contract lock version %d",
+			lock.Version,
+		)
 	}
 	if lock.Connectors == nil {
 		lock.Connectors = map[string]HookContractLockEntry{}

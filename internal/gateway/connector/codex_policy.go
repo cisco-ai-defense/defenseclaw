@@ -54,6 +54,8 @@ var codexPolicyInspector = inspectCodexEffectivePolicy
 
 var codexSystemRequirementsPathForInspection = codexSystemRequirementsPath
 
+var codexSystemRequirementsFileOpen = os.Open
+
 var codexAppServerCommand = func(ctx context.Context, executable string) *exec.Cmd {
 	return newCodexAppServerCommand(ctx, executable)
 }
@@ -95,6 +97,9 @@ func inspectCodexEffectivePolicy(ctx context.Context, opts SetupOpts) (codexEffe
 			}
 			executable = filepath.Clean(executable)
 		}
+		if err := validateCodexManagedAgentExecutable(executable, opts.ManagedEnterprise); err != nil {
+			return codexEffectivePolicy{}, err
+		}
 		policy, err := inspectCodexPolicyWithAppServer(ctx, executable, codexHomeDir())
 		if err != nil {
 			return codexEffectivePolicy{}, fmt.Errorf("%s configRequirements/read: %w", executable, err)
@@ -102,7 +107,7 @@ func inspectCodexEffectivePolicy(ctx context.Context, opts SetupOpts) (codexEffe
 		return policy, nil
 	}
 
-	if runtime.GOOS == "windows" {
+	if runtime.GOOS == "windows" && !opts.ManagedEnterprise {
 		if _, exists := loadProtectedCodexContractEntry(opts.DataDir); exists {
 			return codexEffectivePolicy{}, errors.New(
 				"Codex hook contract is missing valid setup-selected executable evidence; run connector repair",
@@ -126,10 +131,10 @@ func inspectCodexEffectivePolicy(ctx context.Context, opts SetupOpts) (codexEffe
 		)
 	}
 
-	// Tests, pre-provisioning, and older non-Windows Codex installs may not have
-	// a runnable app-server path. In that case still honor the documented system
-	// source. This fallback deliberately does not claim to inspect cloud policy.
-	return inspectCodexSystemRequirements()
+	// Tests, pre-provisioning, and older Codex installs may not have a runnable
+	// app-server path. In that case still honor the documented system source.
+	// This fallback deliberately does not claim to have inspected cloud policy.
+	return inspectCodexSystemRequirementsForMode(opts.ManagedEnterprise)
 }
 
 func validateCodexPolicyExecutable(opts SetupOpts) (string, error) {
@@ -210,16 +215,20 @@ func sameCodexExecutablePath(left, right string) bool {
 }
 
 func inspectCodexSystemRequirements() (codexEffectivePolicy, error) {
+	return inspectCodexSystemRequirementsForMode(false)
+}
+
+func inspectCodexSystemRequirementsForMode(managedEnterprise bool) (codexEffectivePolicy, error) {
 	path, err := codexSystemRequirementsPathForInspection()
 	if err != nil {
 		return codexEffectivePolicy{}, fmt.Errorf("resolve Codex system requirements path: %w", err)
 	}
-	raw, err := os.ReadFile(path)
-	if errors.Is(err, os.ErrNotExist) {
-		return codexEffectivePolicy{Source: path}, nil
-	}
+	raw, exists, err := readCodexSystemRequirements(path, managedEnterprise)
 	if err != nil {
 		return codexEffectivePolicy{}, fmt.Errorf("read %s: %w", path, err)
+	}
+	if !exists {
+		return codexEffectivePolicy{Source: path}, nil
 	}
 	if len(raw) > codexPolicyMessageLimit {
 		return codexEffectivePolicy{}, fmt.Errorf("%s exceeds %d bytes", path, codexPolicyMessageLimit)
@@ -234,6 +243,56 @@ func inspectCodexSystemRequirements() (codexEffectivePolicy, error) {
 		AllowManagedHooksOnly: requirements.AllowManagedHooksOnly,
 		Source:                path,
 	}, nil
+}
+
+// readLegacyCodexSystemRequirements is the exact unmanaged reader used before
+// Windows enterprise mode existed. It intentionally follows links and reads
+// the complete file; the caller applies the historical post-read size check.
+func readLegacyCodexSystemRequirements(path string) ([]byte, bool, error) {
+	raw, err := os.ReadFile(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return raw, true, nil
+}
+
+func readBoundedCodexSystemRequirements(path string) ([]byte, bool, error) {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, false, fmt.Errorf("requirements source is not a regular file")
+	}
+	if info.Size() > codexPolicyMessageLimit {
+		return nil, false, fmt.Errorf("exceeds %d bytes", codexPolicyMessageLimit)
+	}
+	file, err := codexSystemRequirementsFileOpen(path)
+	if err != nil {
+		return nil, false, err
+	}
+	defer file.Close()
+	openedInfo, err := file.Stat()
+	if err != nil {
+		return nil, false, err
+	}
+	if !openedInfo.Mode().IsRegular() || !os.SameFile(info, openedInfo) || openedInfo.Size() > codexPolicyMessageLimit {
+		return nil, false, fmt.Errorf("requirements source changed identity, type, or exceeds %d bytes", codexPolicyMessageLimit)
+	}
+	raw, err := io.ReadAll(io.LimitReader(file, codexPolicyMessageLimit+1))
+	if err != nil {
+		return nil, false, err
+	}
+	if len(raw) > codexPolicyMessageLimit {
+		return nil, false, fmt.Errorf("exceeds %d bytes", codexPolicyMessageLimit)
+	}
+	return raw, true, nil
 }
 
 type codexRPCEnvelope struct {

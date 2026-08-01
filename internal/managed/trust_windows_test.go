@@ -13,6 +13,8 @@
 package managed
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -34,6 +36,89 @@ func TestWindowsWriteLikeAccess(t *testing.T) {
 	}
 	if windowsWriteLikeAccess(windows.GENERIC_READ | windows.FILE_READ_DATA) {
 		t.Fatal("read-only access classified as write-like")
+	}
+}
+
+func TestRejectUntrustedWindowsWriteACEsAllowsOnlyExactServiceSID(t *testing.T) {
+	serviceSID, err := windows.StringToSid("S-1-5-80-111-222-333-444-555")
+	if err != nil {
+		t.Fatalf("StringToSid service: %v", err)
+	}
+	otherServiceSID, err := windows.StringToSid("S-1-5-80-999-888-777-666-555")
+	if err != nil {
+		t.Fatalf("StringToSid other service: %v", err)
+	}
+	sddl := "D:P(A;;GA;;;S-1-5-80-111-222-333-444-555)(A;;GA;;;BA)(A;;GR;;;BU)"
+	descriptor, err := windows.SecurityDescriptorFromString(sddl)
+	if err != nil {
+		t.Fatalf("SecurityDescriptorFromString: %v", err)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		t.Fatalf("DACL: %v", err)
+	}
+	if err := rejectUntrustedWindowsWriteACEsWithWriter("runtime", dacl, serviceSID, false); err != nil {
+		t.Fatalf("exact service SID rejected: %v", err)
+	}
+	if err := rejectUntrustedWindowsWriteACEsWithWriter("runtime", dacl, otherServiceSID, false); err == nil {
+		t.Fatal("foreign service SID write ACE was accepted")
+	}
+	if err := rejectUntrustedWindowsWriteACEs("config", dacl); err == nil {
+		t.Fatal("service SID write ACE was accepted for strict administrator path")
+	}
+}
+
+func TestWindowsTrustedPathOwnerAllowsExactServiceOnlyForScopedValidator(t *testing.T) {
+	serviceSID, err := windows.StringToSid("S-1-5-80-111-222-333-444-555")
+	if err != nil {
+		t.Fatalf("StringToSid service: %v", err)
+	}
+	otherServiceSID, err := windows.StringToSid("S-1-5-80-999-888-777-666-555")
+	if err != nil {
+		t.Fatalf("StringToSid other service: %v", err)
+	}
+	if windowsTrustedOwner(serviceSID) {
+		t.Fatal("strict administrator owner check accepted service SID")
+	}
+	if !windowsTrustedPathOwner(serviceSID, serviceSID) {
+		t.Fatal("scoped service runtime owner check rejected exact service SID")
+	}
+	if windowsTrustedPathOwner(serviceSID, otherServiceSID) {
+		t.Fatal("scoped service runtime owner check accepted foreign service SID")
+	}
+}
+
+func TestWindowsVirtualServiceSIDRejectsBroadOrMalformedAccounts(t *testing.T) {
+	for _, account := range []string{
+		"BUILTIN\\Users",
+		"LocalSystem",
+		`NT SERVICE\`,
+		`NT SERVICE\DefenseClaw Gateway`,
+		`NT SERVICE\DefenseClawGateway\Other`,
+	} {
+		if _, err := windowsVirtualServiceSID(account); err == nil {
+			t.Fatalf("windowsVirtualServiceSID(%q) succeeded, want rejection", account)
+		}
+	}
+}
+
+func TestRejectWindowsReparsePoint(t *testing.T) {
+	root := t.TempDir()
+	regular := filepath.Join(root, "regular")
+	if err := os.WriteFile(regular, []byte("ok"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := rejectWindowsReparsePoint(regular, "test"); err != nil {
+		t.Fatalf("regular file rejected as reparse point: %v", err)
+	}
+
+	link := filepath.Join(root, "link")
+	if err := os.Symlink(regular, link); err != nil {
+		t.Skipf("Windows symlink creation unavailable: %v", err)
+	}
+	err := rejectWindowsReparsePoint(link, "test")
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "reparse") {
+		t.Fatalf("rejectWindowsReparsePoint error = %v, want reparse refusal", err)
 	}
 }
 
@@ -107,4 +192,135 @@ func TestRejectUntrustedWindowsWriteACEs(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestWindowsAncestorAllowsCreateOnlyButRejectsReplacementRights(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		mask    string
+		wantErr bool
+	}{
+		{name: "add file and subdirectory only", mask: "0x00000003"},
+		{name: "delete child", mask: "0x00000040", wantErr: true},
+		{name: "delete", mask: "SD", wantErr: true},
+		{name: "change dacl", mask: "WD", wantErr: true},
+		{name: "change owner", mask: "WO", wantErr: true},
+		{name: "generic write", mask: "GW", wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			descriptor, err := windows.SecurityDescriptorFromString(
+				"D:P(A;;" + test.mask + ";;;BU)(A;;GA;;;BA)",
+			)
+			if err != nil {
+				t.Fatalf("SecurityDescriptorFromString: %v", err)
+			}
+			dacl, _, err := descriptor.DACL()
+			if err != nil {
+				t.Fatalf("DACL: %v", err)
+			}
+			err = rejectUntrustedWindowsWriteACEsWithWriter("ancestor", dacl, nil, true)
+			if test.wantErr && err == nil {
+				t.Fatal("ancestor replacement rights accepted")
+			}
+			if !test.wantErr && err != nil {
+				t.Fatalf("limited ancestor create rights rejected: %v", err)
+			}
+		})
+	}
+}
+
+func TestWindowsDefaultKnownFolderAncestorsAreTrusted(t *testing.T) {
+	for _, envName := range []string{"ProgramFiles", "ProgramData"} {
+		path := os.Getenv(envName)
+		if path == "" {
+			t.Fatalf("%s is unset", envName)
+		}
+		t.Run(envName, func(t *testing.T) {
+			if err := validateTrustedWindowsPathElementWithWriter(path, true, "known-folder ancestor", nil, true); err != nil {
+				t.Fatalf("default %s trust probe failed for %s: %v", envName, path, err)
+			}
+		})
+	}
+}
+
+func TestValidateTrustedFilePathRejectsRawPerLogonDriveAliasToTrustedTree(t *testing.T) {
+	windowsDir, err := windows.GetSystemWindowsDirectory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	volume := filepath.VolumeName(windowsDir)
+	if len(volume) != 2 {
+		t.Skipf("Windows directory has no drive-letter volume: %s", windowsDir)
+	}
+	volumePtr, err := windows.UTF16PtrFromString(volume)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetBuffer := make([]uint16, 1024)
+	n, err := windows.QueryDosDevice(volumePtr, &targetBuffer[0], uint32(len(targetBuffer)))
+	if err != nil || n == 0 {
+		t.Fatalf("resolve Windows drive device target: %v", err)
+	}
+	rawTarget := windows.UTF16ToString(targetBuffer[:n]) +
+		strings.TrimPrefix(filepath.Clean(windowsDir), volume)
+
+	alias, ok := unusedManagedTestDriveLetter()
+	if !ok {
+		t.Skip("no unused drive letter available")
+	}
+	aliasPtr, err := windows.UTF16PtrFromString(alias)
+	if err != nil {
+		t.Fatal(err)
+	}
+	targetPtr, err := windows.UTF16PtrFromString(rawTarget)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const noBroadcast = 0x00000008
+	if err := windows.DefineDosDevice(
+		windows.DDD_RAW_TARGET_PATH|noBroadcast,
+		aliasPtr,
+		targetPtr,
+	); err != nil {
+		t.Skipf("cannot create per-logon raw DOS alias: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := windows.DefineDosDevice(
+			windows.DDD_REMOVE_DEFINITION|
+				windows.DDD_EXACT_MATCH_ON_REMOVE|
+				windows.DDD_RAW_TARGET_PATH|
+				noBroadcast,
+			aliasPtr,
+			targetPtr,
+		); err != nil {
+			t.Errorf("remove raw DOS alias %s: %v", alias, err)
+		}
+	})
+
+	aliasedPowerShell := filepath.Join(
+		alias+`\`,
+		"System32",
+		"WindowsPowerShell",
+		"v1.0",
+		"powershell.exe",
+	)
+	if info, err := os.Stat(aliasedPowerShell); err != nil || !info.Mode().IsRegular() {
+		t.Fatalf("trusted file is not reachable through raw alias: %v", err)
+	}
+	err = ValidateTrustedFilePath(aliasedPowerShell, "raw-alias regression")
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "mount-manager") {
+		t.Fatalf("ValidateTrustedFilePath error = %v, want mount-manager refusal", err)
+	}
+}
+
+func unusedManagedTestDriveLetter() (string, bool) {
+	mask, err := windows.GetLogicalDrives()
+	if err != nil {
+		return "", false
+	}
+	const letter = byte('O')
+	if mask&(uint32(1)<<(letter-'A')) != 0 {
+		return "", false
+	}
+	return `O:`, true
 }

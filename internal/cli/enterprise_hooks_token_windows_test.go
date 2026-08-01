@@ -25,7 +25,7 @@ func TestAlignEnterpriseWindowsTokenOwnerRejectsReparseChainBeforeACLWrites(t *t
 		return errors.New("reparse point in path")
 	}
 	writes := 0
-	enterpriseWindowsProtectionWriter = func(string, *windows.SID, bool) error {
+	enterpriseWindowsProtectionWriter = func(string, *windows.SID, *windows.SID, windows.ACCESS_MASK, bool) error {
 		writes++
 		return nil
 	}

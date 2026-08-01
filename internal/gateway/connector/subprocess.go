@@ -17,9 +17,12 @@
 package connector
 
 import (
+	"bytes"
 	"embed"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -331,22 +334,29 @@ func bytesIndex(hay []byte, needle string) int {
 // `# defenseclaw-managed-hook vN` marker is the explicit signal to roll
 // forward.
 func writeHookHelpers(hookDir string) error {
+	return writeHookHelpersForMode(hookDir, false)
+}
+
+func writeHookHelpersForMode(hookDir string, managedEnterprise bool) error {
 	for _, name := range hookHelperScripts {
 		content, err := hookFS.ReadFile("hooks/" + name)
 		if err != nil {
 			return fmt.Errorf("read hook helper %s: %w", name, err)
 		}
 		helperPath := filepath.Join(hookDir, name)
-		if existing, err := os.ReadFile(helperPath); err == nil {
-			diskV := parseHookSchemaVersion(existing)
-			embedV := parseHookSchemaVersion(content)
-			if diskV > 0 && embedV > 0 && diskV > embedV {
-				// Newer-on-disk wins. Skip silently so a
-				// repeat-setup with an older binary doesn't
-				// noisily report "downgraded" when the
-				// operator's intent was to keep the newer
-				// helper installed by a more recent build.
-				continue
+		if !managedEnterprise {
+			existing, err := os.ReadFile(helperPath)
+			if err == nil {
+				diskV := parseHookSchemaVersion(existing)
+				embedV := parseHookSchemaVersion(content)
+				if diskV > 0 && embedV > 0 && diskV > embedV {
+					// Newer-on-disk wins. Skip silently so a
+					// repeat-setup with an older binary doesn't
+					// noisily report "downgraded" when the
+					// operator's intent was to keep the newer
+					// helper installed by a more recent build.
+					continue
+				}
 			}
 		}
 		if err := atomicWriteFile(helperPath, content, 0o600); err != nil {
@@ -456,7 +466,7 @@ func writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, failMode string,
 		return err
 	}
 
-	if err := writeHookHelpers(hookDir); err != nil {
+	if err := writeHookHelpersForMode(hookDir, managed); err != nil {
 		return err
 	}
 
@@ -543,6 +553,12 @@ func writeHookTokenFiles(hookDir, connectorName, token string) (string, error) {
 // commands stay free of per-install flags while preserving mixed fail modes.
 const hookConfigSidecarName = ".hookcfg"
 
+// Hook runtime records are generated from a handful of scalar fields. A
+// generous 64-KiB ceiling avoids changing legitimate unmanaged installations
+// while ensuring a target-owned sparse/huge sidecar is rejected from metadata
+// before the guardian allocates for it.
+const hookRuntimeSidecarMaxBytes int64 = 64 << 10
+
 type hookConfigSidecar struct {
 	Version     int               `json:"version"`
 	GatewayAddr string            `json:"gateway_addr"`
@@ -561,6 +577,95 @@ func writeHookConfigSidecar(hookDir, apiAddr, connectorName, failMode string, ma
 	return writeHookConfigSidecarUsing(hookDir, apiAddr, connectorName, failMode, managed, atomicWriteFile)
 }
 
+// ReconcileManagedNativeHookRuntime writes only DefenseClaw's connector-scoped
+// native runtime. It deliberately does not invoke the connector Setup method,
+// so Windows machine-policy connectors never read or modify the agent's
+// user-level configuration file.
+func ReconcileManagedNativeHookRuntime(
+	dataDir, apiAddr, connectorName, token string,
+) error {
+	name := normalizeConnectorName(connectorName)
+	if name != "codex" && name != "claudecode" {
+		return fmt.Errorf("unsupported managed native hook connector %q", connectorName)
+	}
+	hookDir := filepath.Join(dataDir, "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		return fmt.Errorf("create managed native hook directory: %w", err)
+	}
+	if _, err := writeHookTokenFiles(hookDir, name, token); err != nil {
+		return err
+	}
+	return writeHookConfigSidecar(hookDir, apiAddr, name, "closed", true)
+}
+
+// ValidateManagedNativeHookRuntime requires the v2 managed marker, protected
+// endpoint agreement, connector closed mode, flat record, and scoped token.
+func ValidateManagedNativeHookRuntime(
+	dataDir, apiAddr, connectorName string,
+) error {
+	name := normalizeConnectorName(connectorName)
+	if name != "codex" && name != "claudecode" {
+		return fmt.Errorf("unsupported managed native hook connector %q", connectorName)
+	}
+	hookDir := filepath.Join(dataDir, "hooks")
+	body, _, err := readStableHookRuntimeSidecar(
+		filepath.Join(hookDir, hookConfigSidecarName),
+		"managed hook config sidecar",
+		false,
+	)
+	if err != nil {
+		return fmt.Errorf("read managed hook config sidecar: %w", err)
+	}
+	var state hookConfigSidecar
+	if err := decodeManagedHookConfigSidecar(body, &state); err != nil {
+		return fmt.Errorf("parse managed hook config sidecar: %w", err)
+	}
+	if state.Version != 2 || !state.Managed {
+		return fmt.Errorf(
+			"managed hook config has version=%d managed_enterprise=%t, want version=2 managed_enterprise=true",
+			state.Version,
+			state.Managed,
+		)
+	}
+	if strings.TrimSpace(state.GatewayAddr) != strings.TrimSpace(apiAddr) {
+		return fmt.Errorf(
+			"managed hook gateway address %q does not match protected address %q",
+			state.GatewayAddr,
+			apiAddr,
+		)
+	}
+	if state.FailModes[name] != "closed" {
+		return fmt.Errorf(
+			"managed hook connector %s fail mode %q, want %q",
+			name,
+			state.FailModes[name],
+			"closed",
+		)
+	}
+	flat, _, err := readStableHookRuntimeSidecar(
+		filepath.Join(hookDir, hookConfigSidecarName+"."+name),
+		"managed connector runtime sidecar",
+		false,
+	)
+	if err != nil {
+		return fmt.Errorf("read managed connector runtime sidecar: %w", err)
+	}
+	if got := legacyHookConfigValue(flat, "DEFENSECLAW_CONNECTOR"); got != name {
+		return fmt.Errorf("managed shell runtime connector %q, want %q", got, name)
+	}
+	if got := legacyHookConfigValue(flat, "DEFENSECLAW_FAIL_MODE"); got != "closed" {
+		return fmt.Errorf("managed shell runtime fail mode %q, want %q", got, "closed")
+	}
+	tokenPath, err := HookTokenFilePath(hookDir, name)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(tokenPath); err != nil {
+		return fmt.Errorf("inspect managed connector token: %w", err)
+	}
+	return nil
+}
+
 type hookRuntimeFileSnapshot struct {
 	path    string
 	existed bool
@@ -575,6 +680,31 @@ func snapshotHookRuntimeFile(path string) (hookRuntimeFileSnapshot, error) {
 	}
 	if err != nil {
 		return snapshot, err
+	}
+	snapshot.existed = true
+	snapshot.data = data
+	return snapshot, nil
+}
+
+func snapshotHookRuntimeFileForMode(
+	path string,
+	managedEnterprise bool,
+) (hookRuntimeFileSnapshot, error) {
+	if !managedEnterprise {
+		return snapshotHookRuntimeFile(path)
+	}
+	snapshot := hookRuntimeFileSnapshot{path: path}
+	data, exists, err := readStableManagedRuntimeFile(
+		path,
+		"managed hook runtime snapshot",
+		true,
+		hookRuntimeSidecarMaxBytes,
+	)
+	if err != nil {
+		return snapshot, err
+	}
+	if !exists {
+		return snapshot, nil
 	}
 	snapshot.existed = true
 	snapshot.data = data
@@ -607,18 +737,18 @@ func writeHookConfigSidecarUsing(
 	writeFile func(string, []byte, os.FileMode) error,
 ) error {
 	path := filepath.Join(hookDir, hookConfigSidecarName)
-	return withFileLock(path, func() error {
+	return withFileLockMode(path, managed, func() error {
 		name := normalizeConnectorName(connectorName)
 		runtimeName := name
 		if runtimeName == "" {
 			runtimeName = "legacy"
 		}
 		flatPath := filepath.Join(hookDir, hookConfigSidecarName+"."+runtimeName)
-		jsonSnapshot, err := snapshotHookRuntimeFile(path)
+		jsonSnapshot, err := snapshotHookRuntimeFileForMode(path, managed)
 		if err != nil {
 			return fmt.Errorf("read hook config sidecar: %w", err)
 		}
-		flatSnapshot, err := snapshotHookRuntimeFile(flatPath)
+		flatSnapshot, err := snapshotHookRuntimeFileForMode(flatPath, managed)
 		if err != nil {
 			return fmt.Errorf("read shell hook runtime sidecar: %w", err)
 		}
@@ -691,19 +821,22 @@ func clearHookConfigSidecarEntry(hookDir, connectorName string) error {
 	}
 	path := filepath.Join(hookDir, hookConfigSidecarName)
 	return withFileLock(path, func() error {
-		_, err := clearHookConfigSidecarEntryLocked(hookDir, name)
+		_, err := clearHookConfigSidecarEntryLocked(hookDir, name, false)
 		return err
 	})
 }
 
-func clearHookConfigSidecarEntryLocked(hookDir, name string) ([]hookRuntimeFileSnapshot, error) {
+func clearHookConfigSidecarEntryLocked(
+	hookDir, name string,
+	managedEnterprise bool,
+) ([]hookRuntimeFileSnapshot, error) {
 	path := filepath.Join(hookDir, hookConfigSidecarName)
 	flatPath := filepath.Join(hookDir, hookConfigSidecarName+"."+name)
-	jsonSnapshot, err := snapshotHookRuntimeFile(path)
+	jsonSnapshot, err := snapshotHookRuntimeFileForMode(path, managedEnterprise)
 	if err != nil {
 		return nil, fmt.Errorf("read hook config sidecar: %w", err)
 	}
-	flatSnapshot, err := snapshotHookRuntimeFile(flatPath)
+	flatSnapshot, err := snapshotHookRuntimeFileForMode(flatPath, managedEnterprise)
 	if err != nil {
 		return nil, fmt.Errorf("read shell hook runtime sidecar: %w", err)
 	}
@@ -749,7 +882,10 @@ func clearHookConfigSidecarEntryLocked(hookDir, name string) ([]hookRuntimeFileS
 // runtime records still agree. Absence of the shared sidecar is tolerated for
 // legacy/direct lock writers that do not install hooks; once the sidecar
 // exists, a missing or stale selected entry is an error.
-func validateHookRuntimeStateForContract(dataDir, connectorName, failMode string) error {
+func validateHookRuntimeStateForContract(
+	dataDir, connectorName, failMode string,
+	managedEnterprise bool,
+) error {
 	name := normalizeConnectorName(connectorName)
 	if strings.TrimSpace(dataDir) == "" || name == "" {
 		return nil
@@ -759,15 +895,41 @@ func validateHookRuntimeStateForContract(dataDir, connectorName, failMode string
 	}
 	hookDir := filepath.Join(dataDir, "hooks")
 	path := filepath.Join(hookDir, hookConfigSidecarName)
-	body, err := os.ReadFile(path)
-	if os.IsNotExist(err) {
-		return nil
+	var (
+		body   []byte
+		exists bool
+		err    error
+	)
+	if managedEnterprise {
+		body, exists, err = readStableHookRuntimeSidecar(
+			path,
+			"hook config sidecar",
+			true,
+		)
+	} else {
+		// Preserve the pre-enterprise unmanaged contract exactly: follow the
+		// operator's path and let json.Unmarshal handle the complete file.
+		body, err = os.ReadFile(path)
+		if os.IsNotExist(err) {
+			return nil
+		}
+		exists = err == nil
 	}
 	if err != nil {
 		return fmt.Errorf("read hook config sidecar: %w", err)
 	}
+	if !exists {
+		return nil
+	}
 	var state hookConfigSidecar
-	if err := json.Unmarshal(body, &state); err != nil {
+	if managedEnterprise {
+		if err := decodeManagedHookConfigSidecar(body, &state); err != nil {
+			return fmt.Errorf("parse managed hook config sidecar: %w", err)
+		}
+		if !state.Managed {
+			return errors.New("managed hook config sidecar is missing managed_enterprise=true")
+		}
+	} else if err := json.Unmarshal(body, &state); err != nil {
 		return fmt.Errorf("parse hook config sidecar: %w", err)
 	}
 	if state.Version != 2 {
@@ -778,7 +940,16 @@ func validateHookRuntimeStateForContract(dataDir, connectorName, failMode string
 		return fmt.Errorf("connector %s JSON fail mode %q, want %q", name, got, want)
 	}
 	flatPath := filepath.Join(hookDir, hookConfigSidecarName+"."+name)
-	flat, err := os.ReadFile(flatPath)
+	var flat []byte
+	if managedEnterprise {
+		flat, _, err = readStableHookRuntimeSidecar(
+			flatPath,
+			"connector shell runtime sidecar",
+			false,
+		)
+	} else {
+		flat, err = os.ReadFile(flatPath)
+	}
 	if err != nil {
 		return fmt.Errorf("read connector shell runtime sidecar: %w", err)
 	}
@@ -789,6 +960,155 @@ func validateHookRuntimeStateForContract(dataDir, connectorName, failMode string
 		return fmt.Errorf("connector %s shell fail mode %q, want %q", name, got, want)
 	}
 	return nil
+}
+
+func decodeManagedHookConfigSidecar(data []byte, state *hookConfigSidecar) error {
+	if state == nil {
+		return errors.New("managed hook config destination is nil")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(state); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("managed hook config contains trailing JSON")
+		}
+		return err
+	}
+	return nil
+}
+
+// readStableHookRuntimeSidecar bounds allocation from file metadata, rejects
+// links and non-regular objects, pins the opened file identity, and performs
+// two identical bounded reads. The second read closes same-inode rewrite and
+// truncate races that an lstat/open/lstat sequence alone would miss.
+func readStableHookRuntimeSidecar(
+	path, label string,
+	allowMissing bool,
+) ([]byte, bool, error) {
+	return readStableManagedRuntimeFile(
+		path,
+		label,
+		allowMissing,
+		hookRuntimeSidecarMaxBytes,
+	)
+}
+
+// ReadManagedHookRuntimeFile reads an already-authorized target-owned runtime
+// leaf through an identity-pinned, no-reparse, single-link handle. Callers
+// provide a format-specific allocation ceiling; trust in the owning directory
+// and DACL remains the caller's responsibility.
+func ReadManagedHookRuntimeFile(path, label string, maxBytes int64) ([]byte, error) {
+	data, _, err := readStableManagedRuntimeFile(path, label, false, maxBytes)
+	return data, err
+}
+
+func readStableManagedRuntimeFile(
+	path, label string,
+	allowMissing bool,
+	maxBytes int64,
+) ([]byte, bool, error) {
+	if maxBytes <= 0 {
+		return nil, false, fmt.Errorf("%s has an invalid read limit", label)
+	}
+	expected, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) && allowMissing {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if expected.Mode()&os.ModeSymlink != 0 || !expected.Mode().IsRegular() {
+		return nil, false, fmt.Errorf("%s is not a regular non-link file", label)
+	}
+	if expected.Size() < 0 || expected.Size() > maxBytes {
+		return nil, false, fmt.Errorf(
+			"%s exceeds %d-byte limit",
+			label,
+			maxBytes,
+		)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, false, err
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil {
+		return nil, false, err
+	}
+	if opened.Mode()&os.ModeSymlink != 0 || !opened.Mode().IsRegular() ||
+		!os.SameFile(expected, opened) {
+		return nil, false, fmt.Errorf("%s changed identity before open", label)
+	}
+	if err := validateHookRuntimeOpenedFile(file, label); err != nil {
+		return nil, false, err
+	}
+	readOnce := func() ([]byte, error) {
+		data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
+		if err != nil {
+			return nil, err
+		}
+		if int64(len(data)) > maxBytes {
+			return nil, fmt.Errorf(
+				"%s exceeds %d-byte limit",
+				label,
+				maxBytes,
+			)
+		}
+		return data, nil
+	}
+	first, err := readOnce()
+	if err != nil {
+		return nil, false, err
+	}
+	between, err := file.Stat()
+	if err != nil {
+		return nil, false, err
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return nil, false, err
+	}
+	second, err := readOnce()
+	if err != nil {
+		return nil, false, err
+	}
+	after, err := file.Stat()
+	if err != nil {
+		return nil, false, err
+	}
+	current, err := os.Lstat(path)
+	if err != nil {
+		return nil, false, fmt.Errorf("%s changed after open: %w", label, err)
+	}
+	if current.Mode()&os.ModeSymlink != 0 || !current.Mode().IsRegular() ||
+		!os.SameFile(opened, current) ||
+		opened.Size() != int64(len(first)) ||
+		between.Size() != opened.Size() ||
+		after.Size() != opened.Size() ||
+		!between.ModTime().Equal(opened.ModTime()) ||
+		!after.ModTime().Equal(opened.ModTime()) ||
+		!bytes.Equal(first, second) {
+		return nil, false, fmt.Errorf("%s changed during bounded read", label)
+	}
+	return first, true, nil
+}
+
+// ValidateHookRuntimeState performs the read-only connector-aware sidecar
+// consistency check used when committing hook contracts. Enterprise guardian
+// status/verify paths use the same parser so they cannot report a runtime as
+// healthy when the JSON and flat sidecars disagree.
+func ValidateHookRuntimeState(dataDir, connectorName, failMode string) error {
+	return validateHookRuntimeStateForContract(dataDir, connectorName, failMode, false)
+}
+
+// ValidateManagedHookRuntimeState applies strict single-link identity and
+// exact-schema parsing for enterprise guardian status and verification.
+func ValidateManagedHookRuntimeState(dataDir, connectorName, failMode string) error {
+	return validateHookRuntimeStateForContract(dataDir, connectorName, failMode, true)
 }
 
 func legacyHookConfigValue(data []byte, wanted string) string {

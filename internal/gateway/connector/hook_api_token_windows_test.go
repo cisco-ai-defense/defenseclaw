@@ -7,14 +7,124 @@
 package connector
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"golang.org/x/sys/windows"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
+
+func TestHookAPIWindowsTrustUsesEffectiveImpersonatedUserSID(t *testing.T) {
+	t.Setenv(managed.DeploymentModeEnv, managed.DeploymentModeManagedEnterprise)
+	targetSID, err := windows.StringToSid("S-1-5-21-111-222-333-1001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	previous := hookAPIWindowsEffectiveUserSID
+	hookAPIWindowsEffectiveUserSID = func() (*windows.SID, error) {
+		return targetSID, nil
+	}
+	t.Cleanup(func() { hookAPIWindowsEffectiveUserSID = previous })
+	if !hookAPIWindowsTrustedPrincipal(targetSID) {
+		t.Fatal("effective impersonated user SID was not trusted")
+	}
+	hookAPIWindowsEffectiveUserSID = func() (*windows.SID, error) {
+		return nil, errors.New("thread token unavailable")
+	}
+	if hookAPIWindowsTrustedPrincipal(targetSID) {
+		t.Fatal("effective-token lookup failure trusted a non-system target SID")
+	}
+}
+
+func TestManagedWindowsTokenOperationsAllowOnlyPinnedGatewayServiceSID(t *testing.T) {
+	const serviceAccount = `NT SERVICE\EventLog`
+	serviceSID, err := managed.WindowsServiceAccountSID(serviceAccount)
+	if err != nil {
+		t.Fatalf("resolve fixture service SID: %v", err)
+	}
+	dataDir := testenv.PrivateTempDir(t)
+	setHookAPITokenWindowsServiceDACL(t, dataDir, serviceSID)
+	t.Setenv(managed.DeploymentModeEnv, managed.DeploymentModeManagedEnterprise)
+	t.Setenv(managed.WindowsServiceAccountEnv, serviceAccount)
+
+	hookToken, err := EnsureHookAPIToken(dataDir, "codex")
+	if err != nil {
+		t.Fatalf("EnsureHookAPIToken with pinned service SID: %v", err)
+	}
+	if loaded, err := LoadHookAPIToken(dataDir, "codex"); err != nil || loaded != hookToken {
+		t.Fatalf("LoadHookAPIToken = %q, %v; want %q", loaded, err, hookToken)
+	}
+	otlpToken, err := EnsureOTLPPathToken(dataDir, OTLPScopeCodex)
+	if err != nil {
+		t.Fatalf("EnsureOTLPPathToken with pinned service SID: %v", err)
+	}
+	if loaded, err := LoadOTLPPathToken(dataDir, OTLPScopeCodex); err != nil || loaded != otlpToken {
+		t.Fatalf("LoadOTLPPathToken = %q, %v; want %q", loaded, err, otlpToken)
+	}
+
+	t.Setenv(managed.WindowsServiceAccountEnv, `NT SERVICE\DefenseClawNonexistentFixture`)
+	if token, err := LoadHookAPIToken(dataDir, "codex"); err == nil {
+		t.Fatalf("LoadHookAPIToken accepted a different/unresolved service SID; token=%q", token)
+	}
+	t.Setenv(managed.WindowsServiceAccountEnv, serviceAccount)
+	t.Setenv(managed.DeploymentModeEnv, "")
+	if token, err := LoadHookAPIToken(dataDir, "codex"); err == nil {
+		t.Fatalf("normal mode accepted managed service-SID write access; token=%q", token)
+	}
+}
+
+func setHookAPITokenWindowsServiceDACL(t *testing.T, path string, serviceSID *windows.SID) {
+	t.Helper()
+	currentUser, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatalf("current token user: %v", err)
+	}
+	const serviceModify = windows.GENERIC_READ |
+		windows.GENERIC_WRITE |
+		windows.GENERIC_EXECUTE |
+		windows.DELETE
+	entries := []windows.EXPLICIT_ACCESS{
+		{
+			AccessPermissions: windows.GENERIC_ALL,
+			AccessMode:        windows.GRANT_ACCESS,
+			Inheritance:       windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+			Trustee: windows.TRUSTEE{
+				TrusteeForm:  windows.TRUSTEE_IS_SID,
+				TrusteeType:  windows.TRUSTEE_IS_USER,
+				TrusteeValue: windows.TrusteeValueFromSID(currentUser.User.Sid),
+			},
+		},
+		{
+			AccessPermissions: serviceModify,
+			AccessMode:        windows.GRANT_ACCESS,
+			Inheritance:       windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+			Trustee: windows.TRUSTEE{
+				TrusteeForm:  windows.TRUSTEE_IS_SID,
+				TrusteeType:  windows.TRUSTEE_IS_USER,
+				TrusteeValue: windows.TrusteeValueFromSID(serviceSID),
+			},
+		},
+	}
+	acl, err := windows.ACLFromEntries(entries, nil)
+	if err != nil {
+		t.Fatalf("build service runtime DACL: %v", err)
+	}
+	if err := windows.SetNamedSecurityInfo(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil,
+		nil,
+		acl,
+		nil,
+	); err != nil {
+		t.Fatalf("set service runtime DACL: %v", err)
+	}
+}
 
 func TestHookAPITokenWindowsRejectsUntrustedDirectoryACL(t *testing.T) {
 	assertHookAPITokenRejectedByEnsureAndLoad(t, "untrusted Windows principal", func(t *testing.T) string {

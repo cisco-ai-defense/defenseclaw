@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -3268,30 +3269,121 @@ func (s *Sidecar) runManagedEnterpriseMultiHookGuardrail(ctx context.Context, re
 }
 
 type managedGuardianAuthorization struct {
-	ProtectedTargets []struct {
-		Connector string `json:"connector"`
-		OK        bool   `json:"ok"`
-	} `json:"protected_targets"`
+	Version          int                                  `json:"version"`
+	UpdatedAt        string                               `json:"updated_at"`
+	OK               bool                                 `json:"ok"`
+	TargetCount      int                                  `json:"target_count"`
+	SuccessCount     int                                  `json:"success_count"`
+	FailureCount     int                                  `json:"failure_count"`
+	ProtectedTargets []managedGuardianAuthorizationTarget `json:"protected_targets"`
 }
+
+type managedGuardianAuthorizationTarget struct {
+	User      string                              `json:"user,omitempty"`
+	UserHome  string                              `json:"user_home,omitempty"`
+	SID       string                              `json:"sid,omitempty"`
+	Connector string                              `json:"connector"`
+	OK        bool                                `json:"ok"`
+	Error     string                              `json:"error,omitempty"`
+	Result    *managedGuardianAuthorizationResult `json:"result,omitempty"`
+}
+
+type managedGuardianAuthorizationResult struct {
+	Connector       string   `json:"connector"`
+	UserHome        string   `json:"user_home"`
+	DataDir         string   `json:"data_dir"`
+	HookConfigPaths []string `json:"hook_config_paths,omitempty"`
+	HookScripts     []string `json:"hook_scripts,omitempty"`
+	BackupFiles     []string `json:"backup_files,omitempty"`
+	CreatedDirs     []string `json:"created_dirs,omitempty"`
+	AgentVersion    string   `json:"agent_version,omitempty"`
+	HookContractID  string   `json:"hook_contract_id,omitempty"`
+}
+
+const managedGuardianAuthorizationMaxBytes int64 = 4 << 20
 
 func managedGuardianCoversConnectors(dataDir string, connectorNames []string) (bool, string) {
 	path := managed.HookGuardianAuthorizationPath(dataDir)
 	if err := validateManagedGuardianAuthorization(path, "hook guardian authorization"); err != nil {
 		return false, err.Error()
 	}
-	data, err := os.ReadFile(path)
+	file, err := os.Open(path)
+	if err != nil {
+		return false, fmt.Sprintf("open hook guardian authorization: %v", err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return false, fmt.Sprintf("inspect hook guardian authorization: %v", err)
+	}
+	if !info.Mode().IsRegular() {
+		return false, "hook guardian authorization is not a regular file"
+	}
+	if info.Size() > managedGuardianAuthorizationMaxBytes {
+		return false, fmt.Sprintf(
+			"hook guardian authorization exceeds %d bytes",
+			managedGuardianAuthorizationMaxBytes,
+		)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, managedGuardianAuthorizationMaxBytes+1))
 	if err != nil {
 		return false, fmt.Sprintf("read hook guardian authorization: %v", err)
 	}
+	if int64(len(data)) > managedGuardianAuthorizationMaxBytes {
+		return false, fmt.Sprintf(
+			"hook guardian authorization exceeds %d bytes",
+			managedGuardianAuthorizationMaxBytes,
+		)
+	}
 	var authorization managedGuardianAuthorization
-	if err := json.Unmarshal(data, &authorization); err != nil {
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&authorization); err != nil {
 		return false, fmt.Sprintf("parse hook guardian authorization: %v", err)
 	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return false, "parse hook guardian authorization: trailing content"
+	}
+	if authorization.Version != 1 {
+		return false, fmt.Sprintf("hook guardian authorization has unsupported version %d", authorization.Version)
+	}
+	if err := managed.ValidateHookGuardianFreshness(authorization.UpdatedAt, time.Now()); err != nil {
+		return false, fmt.Sprintf("hook guardian authorization is not fresh: %v", err)
+	}
+	if !authorization.OK ||
+		authorization.TargetCount < 0 ||
+		authorization.SuccessCount < 0 ||
+		authorization.FailureCount < 0 ||
+		authorization.FailureCount != 0 ||
+		authorization.SuccessCount != authorization.TargetCount ||
+		authorization.TargetCount != len(authorization.ProtectedTargets) {
+		return false, fmt.Sprintf(
+			"hook guardian authorization is incomplete (%d/%d targets succeeded, %d failed)",
+			authorization.SuccessCount,
+			authorization.TargetCount,
+			authorization.FailureCount,
+		)
+	}
 	covered := make(map[string]struct{}, len(authorization.ProtectedTargets))
+	targets := make(map[string]struct{}, len(authorization.ProtectedTargets))
 	for _, target := range authorization.ProtectedTargets {
-		if target.OK {
-			covered[strings.ToLower(strings.TrimSpace(target.Connector))] = struct{}{}
+		if !target.OK || strings.TrimSpace(target.Error) != "" {
+			return false, "hook guardian authorization contains an unsuccessful protected target"
 		}
+		connectorName := strings.ToLower(strings.TrimSpace(target.Connector))
+		if connectorName == "" && target.Result != nil {
+			connectorName = strings.ToLower(strings.TrimSpace(target.Result.Connector))
+		}
+		key := managedGuardianTargetKey(target, connectorName)
+		if connectorName == "" || key == "" {
+			return false, "hook guardian authorization contains an incomplete protected target"
+		}
+		if _, duplicate := targets[key]; duplicate {
+			return false, fmt.Sprintf("hook guardian authorization contains duplicate protected target %q", key)
+		}
+		targets[key] = struct{}{}
+		covered[connectorName] = struct{}{}
 	}
 	for _, name := range connectorNames {
 		if _, ok := covered[strings.ToLower(strings.TrimSpace(name))]; !ok {
@@ -3299,6 +3391,26 @@ func managedGuardianCoversConnectors(dataDir string, connectorNames []string) (b
 		}
 	}
 	return true, ""
+}
+
+func managedGuardianTargetKey(target managedGuardianAuthorizationTarget, connectorName string) string {
+	if connectorName == "" {
+		return ""
+	}
+	if sid := strings.ToUpper(strings.TrimSpace(target.SID)); sid != "" {
+		return connectorName + "\x00sid\x00" + sid
+	}
+	if userName := strings.TrimSpace(target.User); userName != "" {
+		return connectorName + "\x00user\x00" + userName
+	}
+	home := strings.TrimSpace(target.UserHome)
+	if home == "" && target.Result != nil {
+		home = strings.TrimSpace(target.Result.UserHome)
+	}
+	if home == "" {
+		return ""
+	}
+	return connectorName + "\x00home\x00" + filepath.Clean(home)
 }
 
 func connectorNames(conns []connector.Connector) []string {

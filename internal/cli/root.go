@@ -17,7 +17,9 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -246,6 +248,18 @@ func prepareCompiledObservabilityV8Startup(c *config.Config, loaded *loadedConfi
 	}, nil
 }
 
+// SetCommandName selects one of the two release-owned names for the shared Go
+// executable. The enterprise package installs the same command surface as
+// defenseclaw.exe for administrator lifecycle operations and as
+// defenseclaw-gateway.exe for SCM hosting. Arbitrary argv[0] values are never
+// reflected into help or diagnostics.
+func SetCommandName(name string) {
+	switch name {
+	case "defenseclaw", "defenseclaw-gateway":
+		rootCmd.Use = name
+	}
+}
+
 func init() {
 	rootCmd.Flags().BoolVar(&versionJSON, "version-json", false, "emit the exact build version as JSON and exit")
 }
@@ -254,7 +268,26 @@ func init() {
 // os.Exit call belongs in main() so deferred cleanup (PersistentPostRun)
 // always executes.
 func Execute() int {
-	if err := rootCmd.Execute(); err != nil {
+	return ExecuteContext(context.Background())
+}
+
+// ExecuteContext runs the root command with a caller-owned lifetime.
+//
+// Interactive invocations use Execute, which preserves the historical
+// background context. A native Windows Service Control Manager host uses this
+// entry point so SERVICE_CONTROL_STOP and SERVICE_CONTROL_SHUTDOWN can cancel
+// the long-running gateway or hook-guardian command without terminating the
+// process abruptly.
+func ExecuteContext(ctx context.Context) int {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if err := rootCmd.ExecuteContext(ctx); err != nil {
+		// Cancellation is the expected completion path for an SCM stop. Do not
+		// report it as a service failure or trigger failure-recovery restarts.
+		if errors.Is(err, context.Canceled) {
+			return 0
+		}
 		return 1
 	}
 	return 0

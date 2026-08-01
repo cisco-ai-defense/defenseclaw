@@ -20,12 +20,14 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 func TestWriteEnterpriseHookGuardianState(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("enterprise hook guardian persistence is unsupported on native Windows; lifecycle gate coverage remains active")
 	}
+	stubEnterpriseHookAuthorizationTrustForTempDir(t)
 	dir := t.TempDir()
 	authorizationDir := t.TempDir()
 	t.Setenv(hookGuardianAuthorizationDirEnv, authorizationDir)
@@ -67,10 +69,39 @@ func TestWriteEnterpriseHookGuardianState(t *testing.T) {
 	}
 }
 
+func TestCompareEnterpriseHookGuardianRecordsRejectsStaleOrFutureReconcile(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		updatedAt string
+		want      string
+	}{
+		{
+			name:      "stale",
+			updatedAt: time.Now().Add(-managed.HookGuardianMaxAge - time.Minute).UTC().Format(time.RFC3339),
+			want:      "not fresh",
+		},
+		{
+			name:      "future",
+			updatedAt: time.Now().Add(managed.HookGuardianFutureSkew + time.Minute).UTC().Format(time.RFC3339),
+			want:      "not fresh",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			state := enterpriseHookGuardianState{Version: 1, UpdatedAt: tc.updatedAt, OK: true}
+			authorization := enterpriseHookGuardianAuthorization{Version: 1, UpdatedAt: tc.updatedAt, OK: true}
+			issues := compareEnterpriseHookGuardianRecords(state, authorization, "")
+			if !strings.Contains(strings.Join(issues, "\n"), tc.want) {
+				t.Fatalf("issues = %v, want %q", issues, tc.want)
+			}
+		})
+	}
+}
+
 func TestWriteEnterpriseHookGuardianStateRefusesSymlink(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("enterprise hook guardian symlink writer is unreachable on native Windows; lifecycle gate coverage remains active")
 	}
+	stubEnterpriseHookAuthorizationTrustForTempDir(t)
 	dir := t.TempDir()
 	t.Setenv(hookGuardianAuthorizationDirEnv, t.TempDir())
 	outside := filepath.Join(t.TempDir(), "outside.json")
@@ -86,10 +117,30 @@ func TestWriteEnterpriseHookGuardianStateRefusesSymlink(t *testing.T) {
 	}
 }
 
+func stubEnterpriseHookAuthorizationTrustForTempDir(t *testing.T) {
+	t.Helper()
+	originalDirTrust := enterpriseHookAuthorizationDirTrustCheck
+	originalFileTrust := enterpriseHookAuthorizationFileTrustCheck
+	enterpriseHookAuthorizationDirTrustCheck = func(string) error { return nil }
+	enterpriseHookAuthorizationFileTrustCheck = func(string) error { return nil }
+	t.Cleanup(func() {
+		enterpriseHookAuthorizationDirTrustCheck = originalDirTrust
+		enterpriseHookAuthorizationFileTrustCheck = originalFileTrust
+	})
+}
+
 func TestWriteEnterpriseHookGuardianStatePreservesProtectedTargets(t *testing.T) {
 	originalOwnershipSetter := enterpriseHookAuthorizationOwnershipSetter
+	originalDirTrust := enterpriseHookAuthorizationDirTrustCheck
+	originalFileTrust := enterpriseHookAuthorizationFileTrustCheck
 	enterpriseHookAuthorizationOwnershipSetter = func(string) error { return nil }
-	t.Cleanup(func() { enterpriseHookAuthorizationOwnershipSetter = originalOwnershipSetter })
+	enterpriseHookAuthorizationDirTrustCheck = func(string) error { return nil }
+	enterpriseHookAuthorizationFileTrustCheck = func(string) error { return nil }
+	t.Cleanup(func() {
+		enterpriseHookAuthorizationOwnershipSetter = originalOwnershipSetter
+		enterpriseHookAuthorizationDirTrustCheck = originalDirTrust
+		enterpriseHookAuthorizationFileTrustCheck = originalFileTrust
+	})
 	dir := t.TempDir()
 	authorizationDir := t.TempDir()
 	t.Setenv(hookGuardianAuthorizationDirEnv, authorizationDir)
@@ -109,7 +160,11 @@ func TestWriteEnterpriseHookGuardianStatePreservesProtectedTargets(t *testing.T)
 	if err := writeEnterpriseHookGuardianState(dir, "manifest.yaml", successRows, 0); err != nil {
 		t.Fatalf("write initial state: %v", err)
 	}
-	if !previousEnterpriseHookSuccess(dir, "alice", "/home/alice", "codex") {
+	protected, err := previousEnterpriseHookSuccess(dir, "alice", "/home/alice", "", "codex")
+	if err != nil {
+		t.Fatalf("previousEnterpriseHookSuccess: %v", err)
+	}
+	if !protected {
 		t.Fatal("previousEnterpriseHookSuccess = false after successful state")
 	}
 
@@ -134,7 +189,11 @@ func TestWriteEnterpriseHookGuardianStatePreservesProtectedTargets(t *testing.T)
 	if len(state.ProtectedTargets) != 1 || state.ProtectedTargets[0].Connector != "codex" {
 		t.Fatalf("ProtectedTargets = %+v, want preserved codex target", state.ProtectedTargets)
 	}
-	if !previousEnterpriseHookSuccess(dir, "alice", "/home/alice", "codex") {
+	protected, err = previousEnterpriseHookSuccess(dir, "alice", "/home/alice", "", "codex")
+	if err != nil {
+		t.Fatalf("previousEnterpriseHookSuccess after failure: %v", err)
+	}
+	if !protected {
 		t.Fatal("previousEnterpriseHookSuccess = false after failed state overwrote results")
 	}
 }
@@ -153,8 +212,200 @@ func TestPreviousEnterpriseHookSuccessIgnoresServiceWritableStatus(t *testing.T)
 	if err := os.WriteFile(filepath.Join(dataDir, hookGuardianStateFile), data, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if previousEnterpriseHookSuccess(dataDir, "alice", "/home/alice", "codex") {
+	protected, err := previousEnterpriseHookSuccess(dataDir, "alice", "/home/alice", "", "codex")
+	if err != nil {
+		t.Fatalf("previousEnterpriseHookSuccess: %v", err)
+	}
+	if protected {
 		t.Fatal("service-writable status file granted privileged repair authorization")
+	}
+}
+
+func TestEnterpriseHookRowMatchRejectsMismatchedAuthoritativeSID(t *testing.T) {
+	row := enterpriseHookReconcileRow{
+		User:      "alice",
+		UserHome:  `C:\Users\alice`,
+		SID:       "S-1-5-21-111-222-333-1001",
+		Connector: "codex",
+		OK:        true,
+	}
+	if enterpriseHookRowMatches(
+		row,
+		"alice",
+		filepath.Clean(`C:\Users\alice`),
+		"S-1-5-21-111-222-333-1002",
+		"codex",
+	) {
+		t.Fatal("mismatched SIDs fell back to matching user/home authorization")
+	}
+}
+
+func TestCompareEnterpriseHookGuardianRecordsRejectsExtraStaleProtectedTarget(t *testing.T) {
+	updatedAt := time.Now().UTC().Format(time.RFC3339)
+	alice := enterpriseHookReconcileRow{
+		User:      "alice",
+		UserHome:  `C:\Users\alice`,
+		SID:       "S-1-5-21-111-222-333-1001",
+		Connector: "codex",
+		OK:        true,
+	}
+	bob := enterpriseHookReconcileRow{
+		User:      "bob",
+		UserHome:  `C:\Users\bob`,
+		SID:       "S-1-5-21-111-222-333-1002",
+		Connector: "codex",
+		OK:        true,
+	}
+	state := enterpriseHookGuardianState{
+		Version:      1,
+		UpdatedAt:    updatedAt,
+		OK:           true,
+		TargetCount:  1,
+		SuccessCount: 1,
+		Results:      []enterpriseHookReconcileRow{alice},
+	}
+	authorization := enterpriseHookGuardianAuthorization{
+		Version:          1,
+		UpdatedAt:        updatedAt,
+		OK:               true,
+		TargetCount:      1,
+		SuccessCount:     1,
+		ProtectedTargets: []enterpriseHookReconcileRow{alice, bob},
+	}
+	issues := compareEnterpriseHookGuardianRecords(state, authorization, "")
+	if got := strings.Join(issues, "\n"); !strings.Contains(got, "extra or stale target codex@"+bob.SID) {
+		t.Fatalf("issues = %v, want stale protected-target rejection", issues)
+	}
+}
+
+func TestEnterpriseHookProtectedTargetSetsRejectRemovedOrDisabledStaleTarget(t *testing.T) {
+	enabled := enterpriseHookReconcileRow{
+		SID:       "S-1-5-21-111-222-333-1001",
+		Connector: "codex",
+		OK:        true,
+	}
+	removedOrDisabled := enterpriseHookReconcileRow{
+		SID:       "S-1-5-21-111-222-333-1002",
+		Connector: "claudecode",
+		OK:        true,
+	}
+	issues := compareEnterpriseHookProtectedTargetSets(
+		[]enterpriseHookReconcileRow{enabled},
+		[]enterpriseHookReconcileRow{enabled, removedOrDisabled},
+	)
+	if got := strings.Join(issues, "\n"); !strings.Contains(got, "extra or stale target claudecode@"+removedOrDisabled.SID) {
+		t.Fatalf("issues = %v, want removed/disabled target rejection", issues)
+	}
+}
+
+func TestWriteEnterpriseHookGuardianStateRevokesRemovedManifestTarget(t *testing.T) {
+	originalOwnershipSetter := enterpriseHookAuthorizationOwnershipSetter
+	originalDirTrust := enterpriseHookAuthorizationDirTrustCheck
+	originalFileTrust := enterpriseHookAuthorizationFileTrustCheck
+	enterpriseHookAuthorizationOwnershipSetter = func(string) error { return nil }
+	enterpriseHookAuthorizationDirTrustCheck = func(string) error { return nil }
+	enterpriseHookAuthorizationFileTrustCheck = func(string) error { return nil }
+	t.Cleanup(func() {
+		enterpriseHookAuthorizationOwnershipSetter = originalOwnershipSetter
+		enterpriseHookAuthorizationDirTrustCheck = originalDirTrust
+		enterpriseHookAuthorizationFileTrustCheck = originalFileTrust
+	})
+
+	dataDir := t.TempDir()
+	authorizationDir := t.TempDir()
+	t.Setenv(hookGuardianAuthorizationDirEnv, authorizationDir)
+	rows := []enterpriseHookReconcileRow{{
+		User:      "alice",
+		UserHome:  "/home/alice",
+		Connector: "codex",
+		OK:        true,
+	}}
+	if err := writeEnterpriseHookGuardianState(dataDir, "manifest.yaml", rows, 0); err != nil {
+		t.Fatalf("write initial authorization: %v", err)
+	}
+	if err := writeEnterpriseHookGuardianState(dataDir, "manifest.yaml", nil, 0); err != nil {
+		t.Fatalf("write authorization after manifest removal: %v", err)
+	}
+
+	state, exists, err := loadEnterpriseHookGuardianAuthorization(dataDir)
+	if err != nil {
+		t.Fatalf("load authorization: %v", err)
+	}
+	if !exists {
+		t.Fatal("authorization ledger is missing")
+	}
+	if len(state.ProtectedTargets) != 0 || state.TargetCount != 0 || state.SuccessCount != 0 || !state.OK {
+		t.Fatalf("authorization after removal = %+v, want empty healthy ledger", state)
+	}
+	protected, err := previousEnterpriseHookSuccess(dataDir, "alice", "/home/alice", "", "codex")
+	if err != nil {
+		t.Fatalf("previousEnterpriseHookSuccess: %v", err)
+	}
+	if protected {
+		t.Fatal("removed manifest target retained privileged repair authorization")
+	}
+}
+
+func TestEnterpriseHookGuardianStateRejectsSparseOversizedInput(t *testing.T) {
+	originalCfg := cfg
+	originalTrust := enterpriseHookGuardianStateFileTrustCheck
+	trustChecked := false
+	cfg = &config.Config{DeploymentMode: "managed_enterprise"}
+	enterpriseHookGuardianStateFileTrustCheck = func(string) error {
+		trustChecked = true
+		return nil
+	}
+	t.Cleanup(func() {
+		cfg = originalCfg
+		enterpriseHookGuardianStateFileTrustCheck = originalTrust
+	})
+
+	dataDir := t.TempDir()
+	path := filepath.Join(dataDir, hookGuardianStateFile)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(enterpriseHookGuardianStateMaxBytes + 1); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	_, exists, err := loadEnterpriseHookGuardianState(dataDir)
+	if !exists || err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("oversized state exists=%v error=%v, want bounded refusal", exists, err)
+	}
+	if !trustChecked {
+		t.Fatal("guardian state was read before managed trust validation")
+	}
+}
+
+func TestEnterpriseHookAuthorizationRejectsSparseOversizedInput(t *testing.T) {
+	originalTrust := enterpriseHookAuthorizationFileTrustCheck
+	enterpriseHookAuthorizationFileTrustCheck = func(string) error { return nil }
+	t.Cleanup(func() { enterpriseHookAuthorizationFileTrustCheck = originalTrust })
+
+	dataDir := t.TempDir()
+	path := managed.HookGuardianAuthorizationPath(dataDir)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(enterpriseHookGuardianAuthorizationMaxBytes + 1); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	_, exists, err := loadEnterpriseHookGuardianAuthorization(dataDir)
+	if !exists || err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("oversized authorization exists=%v error=%v, want bounded refusal", exists, err)
 	}
 }
 
@@ -489,12 +740,14 @@ func TestEnterpriseHooksReconcileManagedRejectsUntrustedManifest(t *testing.T) {
 	origJSON := enterpriseHookJSON
 	origAPIAddr := enterpriseHookAPIAddr
 	origProxyAddr := enterpriseHookProxyAddr
+	origMutationPreflight := enterpriseHooksMutationIdentityPreflight
 	t.Cleanup(func() {
 		cfg = origCfg
 		enterpriseHookManifest = origManifest
 		enterpriseHookJSON = origJSON
 		enterpriseHookAPIAddr = origAPIAddr
 		enterpriseHookProxyAddr = origProxyAddr
+		enterpriseHooksMutationIdentityPreflight = origMutationPreflight
 	})
 
 	cfg = &config.Config{DataDir: dir, DeploymentMode: "managed_enterprise"}
@@ -505,6 +758,9 @@ func TestEnterpriseHooksReconcileManagedRejectsUntrustedManifest(t *testing.T) {
 	enterpriseHookJSON = false
 	enterpriseHookAPIAddr = ""
 	enterpriseHookProxyAddr = ""
+	// This unit isolates manifest trust. Production intentionally performs
+	// the LocalSystem mutation gate first, before reading any manifest bytes.
+	enterpriseHooksMutationIdentityPreflight = func() error { return nil }
 
 	cmd := &cobra.Command{}
 	err := runEnterpriseHooksReconcile(cmd, nil)
@@ -591,5 +847,45 @@ func TestResolveEnterpriseHookTargetValuesResolvesSIDOnlyProfile(t *testing.T) {
 	}
 	if target.home != `C:\Users\alice` || target.sid != "S-1-5-21-111-222-333-1001" {
 		t.Fatalf("target = %+v, want resolved SID-only profile", target)
+	}
+}
+
+func TestEnterpriseHooksClaudeEffectivePolicyVerified(t *testing.T) {
+	tests := []struct {
+		name string
+		rows []enterpriseHookReconcileRow
+		want bool
+	}{
+		{
+			name: "no generic row carries approved-client proof",
+			rows: []enterpriseHookReconcileRow{
+				{Connector: "codex", OK: false},
+			},
+			want: false,
+		},
+		{
+			name: "OK Claude rows prove local integrity but not effective precedence",
+			rows: []enterpriseHookReconcileRow{
+				{Connector: "ClaudeCode", OK: true},
+				{Connector: " claudecode ", OK: true},
+				{Connector: "codex", OK: false},
+			},
+			want: false,
+		},
+		{
+			name: "one failed Claude target rejects aggregate evidence",
+			rows: []enterpriseHookReconcileRow{
+				{Connector: "claudecode", OK: true},
+				{Connector: "claudecode", OK: false, Error: "effective policy inactive"},
+			},
+			want: false,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := enterpriseHooksClaudeEffectivePolicyVerified(tc.rows); got != tc.want {
+				t.Fatalf("enterpriseHooksClaudeEffectivePolicyVerified() = %t, want %t", got, tc.want)
+			}
+		})
 	}
 }

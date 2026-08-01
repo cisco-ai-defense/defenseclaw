@@ -226,6 +226,371 @@ func TestHookConfigSidecarSecondWriteFailureRollsBackBothFiles(t *testing.T) {
 	}
 }
 
+func seedManagedHookRuntimeForValidation(
+	t *testing.T,
+	connectorName string,
+) (dataDir, jsonPath, flatPath string) {
+	t.Helper()
+	dataDir = t.TempDir()
+	if err := ReconcileManagedNativeHookRuntime(
+		dataDir,
+		"127.0.0.1:18970",
+		connectorName,
+		"scoped-test-token",
+	); err != nil {
+		t.Fatal(err)
+	}
+	hookDir := filepath.Join(dataDir, "hooks")
+	return dataDir,
+		filepath.Join(hookDir, hookConfigSidecarName),
+		filepath.Join(hookDir, hookConfigSidecarName+"."+connectorName)
+}
+
+func managedHookRuntimeValidators(
+	dataDir, connectorName string,
+) map[string]func() error {
+	return map[string]func() error{
+		"native": func() error {
+			return ValidateManagedNativeHookRuntime(
+				dataDir,
+				"127.0.0.1:18970",
+				connectorName,
+			)
+		},
+		"contract": func() error {
+			return ValidateManagedHookRuntimeState(dataDir, connectorName, "closed")
+		},
+	}
+}
+
+func TestManagedHookRuntimeValidationRejectsOversizedSparseSidecars(t *testing.T) {
+	for _, selected := range []string{"json", "flat"} {
+		t.Run(selected, func(t *testing.T) {
+			dataDir, jsonPath, flatPath := seedManagedHookRuntimeForValidation(t, "codex")
+			path := jsonPath
+			if selected == "flat" {
+				path = flatPath
+			}
+			if err := os.Truncate(path, hookRuntimeSidecarMaxBytes+1); err != nil {
+				t.Fatal(err)
+			}
+			for name, validate := range managedHookRuntimeValidators(dataDir, "codex") {
+				t.Run(name, func(t *testing.T) {
+					err := validate()
+					if err == nil || !strings.Contains(err.Error(), "byte limit") {
+						t.Fatalf("validation error = %v, want bounded rejection", err)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestManagedHookRuntimeWriteRejectsOversizedSparseSnapshotBeforeMutation(t *testing.T) {
+	dataDir, jsonPath, _ := seedManagedHookRuntimeForValidation(t, "codex")
+	if err := os.Truncate(jsonPath, hookRuntimeSidecarMaxBytes+1); err != nil {
+		t.Fatal(err)
+	}
+	writes := 0
+	err := writeHookConfigSidecarUsing(
+		filepath.Join(dataDir, "hooks"),
+		"127.0.0.1:18970",
+		"codex",
+		"closed",
+		true,
+		func(string, []byte, os.FileMode) error {
+			writes++
+			return nil
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "byte limit") {
+		t.Fatalf("managed sidecar write error = %v, want bounded snapshot rejection", err)
+	}
+	if writes != 0 {
+		t.Fatalf("managed sidecar writer called %d time(s) after unsafe snapshot", writes)
+	}
+}
+
+func TestManagedHookRuntimeValidationRejectsLinksAndNonRegularFiles(t *testing.T) {
+	tests := []struct {
+		name       string
+		selectPath func(jsonPath, flatPath string) string
+		replace    func(t *testing.T, path string)
+	}{
+		{
+			name:       "hardlink",
+			selectPath: func(jsonPath, _ string) string { return jsonPath },
+			replace: func(t *testing.T, path string) {
+				body, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				source := filepath.Join(filepath.Dir(path), ".attacker-hardlink-source")
+				if err := os.WriteFile(source, body, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Link(source, path); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name:       "directory",
+			selectPath: func(_, flatPath string) string { return flatPath },
+			replace: func(t *testing.T, path string) {
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(path, 0o700); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			dataDir, jsonPath, flatPath := seedManagedHookRuntimeForValidation(t, "codex")
+			test.replace(t, test.selectPath(jsonPath, flatPath))
+			for name, validate := range managedHookRuntimeValidators(dataDir, "codex") {
+				t.Run(name, func(t *testing.T) {
+					if err := validate(); err == nil {
+						t.Fatal("unsafe managed sidecar was accepted")
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestManagedHookRuntimeValidationRejectsUnknownAndTrailingJSON(t *testing.T) {
+	for _, mutation := range []struct {
+		name string
+		body func(t *testing.T, path string) []byte
+	}{
+		{
+			name: "unknown field",
+			body: func(t *testing.T, path string) []byte {
+				raw, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				var document map[string]any
+				if err := json.Unmarshal(raw, &document); err != nil {
+					t.Fatal(err)
+				}
+				document["untrusted_extension"] = true
+				body, err := json.Marshal(document)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return body
+			},
+		},
+		{
+			name: "trailing document",
+			body: func(t *testing.T, path string) []byte {
+				raw, err := os.ReadFile(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return append(raw, []byte("{}\n")...)
+			},
+		},
+	} {
+		t.Run(mutation.name, func(t *testing.T) {
+			dataDir, jsonPath, _ := seedManagedHookRuntimeForValidation(t, "codex")
+			if err := os.WriteFile(jsonPath, mutation.body(t, jsonPath), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			for name, validate := range managedHookRuntimeValidators(dataDir, "codex") {
+				t.Run(name, func(t *testing.T) {
+					if err := validate(); err == nil {
+						t.Fatal("non-exact managed JSON was accepted")
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestUnmanagedHookRuntimeContractRetainsUnknownFieldCompatibility(t *testing.T) {
+	dataDir := t.TempDir()
+	hookDir := filepath.Join(dataDir, "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeHookConfigSidecar(
+		hookDir,
+		"127.0.0.1:18970",
+		"codex",
+		"closed",
+		false,
+	); err != nil {
+		t.Fatal(err)
+	}
+	jsonPath := filepath.Join(hookDir, hookConfigSidecarName)
+	raw, err := os.ReadFile(jsonPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal(raw, &document); err != nil {
+		t.Fatal(err)
+	}
+	document["future_unmanaged_field"] = "preserved"
+	raw, err = json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(jsonPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateHookRuntimeState(dataDir, "codex", "closed"); err != nil {
+		t.Fatalf("unmanaged forward-compatible field was rejected: %v", err)
+	}
+}
+
+func TestUnmanagedHookRuntimeContractRetainsHardlinkCompatibility(t *testing.T) {
+	dataDir := t.TempDir()
+	hookDir := filepath.Join(dataDir, "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeHookConfigSidecar(
+		hookDir,
+		"127.0.0.1:18970",
+		"codex",
+		"closed",
+		false,
+	); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{
+		filepath.Join(hookDir, hookConfigSidecarName),
+		filepath.Join(hookDir, hookConfigSidecarName+".codex"),
+	} {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		source := path + ".legacy-hardlink-source"
+		if err := os.WriteFile(source, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Link(source, path); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := ValidateHookRuntimeState(dataDir, "codex", "closed"); err != nil {
+		t.Fatalf("unmanaged hard-linked sidecars were rejected: %v", err)
+	}
+	if err := ValidateManagedHookRuntimeState(dataDir, "codex", "closed"); err == nil {
+		t.Fatal("managed validation accepted unmanaged hard-linked sidecars")
+	}
+}
+
+func TestUnmanagedHookRuntimeContractRetainsUnboundedLegacyReads(t *testing.T) {
+	dataDir := t.TempDir()
+	hookDir := filepath.Join(dataDir, "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeHookConfigSidecar(
+		hookDir,
+		"127.0.0.1:18970",
+		"codex",
+		"closed",
+		false,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	jsonPath := filepath.Join(hookDir, hookConfigSidecarName)
+	raw, err := os.ReadFile(jsonPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal(raw, &document); err != nil {
+		t.Fatal(err)
+	}
+	document["large_legacy_extension"] = strings.Repeat("x", int(hookRuntimeSidecarMaxBytes)+1)
+	raw, err = json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(jsonPath, raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	flatPath := filepath.Join(hookDir, hookConfigSidecarName+".codex")
+	flat, err := os.ReadFile(flatPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	flat = append(
+		[]byte("# "+strings.Repeat("x", int(hookRuntimeSidecarMaxBytes))+"\n"),
+		flat...,
+	)
+	if err := os.WriteFile(flatPath, flat, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateHookRuntimeState(dataDir, "codex", "closed"); err != nil {
+		t.Fatalf("unmanaged legacy sidecars above the enterprise limit were rejected: %v", err)
+	}
+	if err := ValidateManagedHookRuntimeState(dataDir, "codex", "closed"); err == nil {
+		t.Fatal("managed validation accepted oversized legacy sidecars")
+	}
+}
+
+func TestUnmanagedHookRuntimeContractRetainsSymlinkCompatibility(t *testing.T) {
+	dataDir := t.TempDir()
+	hookDir := filepath.Join(dataDir, "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeHookConfigSidecar(
+		hookDir,
+		"127.0.0.1:18970",
+		"codex",
+		"closed",
+		false,
+	); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{
+		filepath.Join(hookDir, hookConfigSidecarName),
+		filepath.Join(hookDir, hookConfigSidecarName+".codex"),
+	} {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		target := path + ".legacy-symlink-target"
+		if err := os.WriteFile(target, body, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, path); err != nil {
+			t.Skipf("symlink creation unavailable: %v", err)
+		}
+	}
+	if err := ValidateHookRuntimeState(dataDir, "codex", "closed"); err != nil {
+		t.Fatalf("unmanaged symlink sidecars were rejected: %v", err)
+	}
+	if err := ValidateManagedHookRuntimeState(dataDir, "codex", "closed"); err == nil {
+		t.Fatal("managed validation accepted symlink sidecars")
+	}
+}
+
 func TestWindowsHookBinaryUsesStableInstalledLocation(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows installed launcher path")

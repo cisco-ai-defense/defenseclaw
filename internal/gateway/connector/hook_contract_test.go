@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -506,6 +507,69 @@ func TestSaveFreshHookContractLockEntryRefreshesIdempotentEvidence(t *testing.T)
 	}
 	if info.ModTime().Equal(old) {
 		t.Fatal("fresh boot save did not rewrite unchanged contract evidence")
+	}
+}
+
+func TestManagedHookContractLockRejectsOversizedSparseFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, hookContractLockFile)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(managedHookContractLockMaxBytes + 1); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := LoadHookContractLockEntryForMode(dir, "claudecode", true); err == nil ||
+		!strings.Contains(err.Error(), "byte limit") {
+		t.Fatalf("managed contract load error = %v, want bounded rejection", err)
+	}
+	entry := HookContractLockEntry{Connector: "claudecode"}
+	if err := SaveHookContractLockEntryForMode(dir, entry, true); err == nil ||
+		!strings.Contains(err.Error(), "byte limit") {
+		t.Fatalf("managed contract update error = %v, want bounded rejection", err)
+	}
+}
+
+func TestManagedHookScriptDigestsRejectSparseArtifactWithoutChangingUnmanagedMode(t *testing.T) {
+	dir := t.TempDir()
+	hookDir := filepath.Join(dir, "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(hookDir, "_hardening.sh")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(managedHookRuntimeArtifactMaxBytes + 1); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	opts := SetupOpts{
+		DataDir:      dir,
+		AgentVersion: "2.1.152",
+	}
+	conn := NewClaudeCodeConnector()
+	if _, err := NewHookContractLockEntryForMode(
+		opts,
+		conn,
+		"test-build",
+		true,
+	); err == nil || !strings.Contains(err.Error(), "byte limit") {
+		t.Fatalf("managed digest error = %v, want bounded rejection", err)
+	}
+	unmanaged := NewHookContractLockEntry(opts, conn, "test-build")
+	if unmanaged.HookScriptDigests["_hardening.sh"] == "" {
+		t.Fatal("unmanaged digest behavior changed for an ordinary regular file")
 	}
 }
 

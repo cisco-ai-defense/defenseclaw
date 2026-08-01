@@ -114,6 +114,140 @@ func TestInspectCodexSystemRequirements(t *testing.T) {
 	if _, err := inspectCodexSystemRequirements(); err == nil || !strings.Contains(err.Error(), path) {
 		t.Fatalf("malformed requirements error = %v", err)
 	}
+
+	if err := os.WriteFile(path, make([]byte, codexPolicyMessageLimit+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inspectCodexSystemRequirements(); err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("oversized requirements error = %v", err)
+	}
+}
+
+func TestInspectUnmanagedCodexSystemRequirementsRetainsLegacySymlinkBehavior(t *testing.T) {
+	original := codexSystemRequirementsPathForInspection
+	t.Cleanup(func() { codexSystemRequirementsPathForInspection = original })
+	root := t.TempDir()
+	target := filepath.Join(root, "requirements-target.toml")
+	path := filepath.Join(root, "requirements.toml")
+	if err := os.WriteFile(target, []byte("allow_managed_hooks_only = true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, path); err != nil {
+		t.Skipf("symlink creation unavailable: %v", err)
+	}
+	codexSystemRequirementsPathForInspection = func() (string, error) { return path, nil }
+
+	policy, err := inspectCodexSystemRequirementsForMode(false)
+	if err != nil {
+		t.Fatalf("unmanaged legacy symlink was rejected: %v", err)
+	}
+	if policy.AllowManagedHooksOnly == nil || !*policy.AllowManagedHooksOnly {
+		t.Fatalf("unmanaged symlink policy = %+v, want managed-only=true", policy)
+	}
+}
+
+func TestInspectUnmanagedCodexSystemRequirementsMissingParentRemainsAbsent(t *testing.T) {
+	original := codexSystemRequirementsPathForInspection
+	t.Cleanup(func() { codexSystemRequirementsPathForInspection = original })
+	path := filepath.Join(t.TempDir(), "missing", "Codex", "requirements.toml")
+	codexSystemRequirementsPathForInspection = func() (string, error) { return path, nil }
+
+	policy, err := inspectCodexSystemRequirementsForMode(false)
+	if err != nil {
+		t.Fatalf("unmanaged missing-parent requirements: %v", err)
+	}
+	if policy.AllowManagedHooksOnly != nil || policy.Source != path {
+		t.Fatalf("unmanaged missing-parent policy = %+v, want absent source %s", policy, path)
+	}
+}
+
+func TestReadBoundedCodexSystemRequirementsRejectsReplacementBeforeOpen(t *testing.T) {
+	originalOpen := codexSystemRequirementsFileOpen
+	t.Cleanup(func() { codexSystemRequirementsFileOpen = originalOpen })
+	dir := t.TempDir()
+	path := filepath.Join(dir, "requirements.toml")
+	replacement := filepath.Join(dir, "replacement.toml")
+	for _, candidate := range []string{path, replacement} {
+		if err := os.WriteFile(candidate, []byte("allow_managed_hooks_only = true\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	codexSystemRequirementsFileOpen = func(string) (*os.File, error) {
+		return os.Open(replacement)
+	}
+
+	if _, _, err := readBoundedCodexSystemRequirements(path); err == nil ||
+		!strings.Contains(err.Error(), "changed identity") {
+		t.Fatalf("replacement read error = %v, want changed-identity refusal", err)
+	}
+}
+
+func TestInspectManagedCodexSystemRequirementsRejectsUserWritableSource(t *testing.T) {
+	original := codexSystemRequirementsPathForInspection
+	t.Cleanup(func() { codexSystemRequirementsPathForInspection = original })
+	path := filepath.Join(t.TempDir(), "requirements.toml")
+	if err := os.WriteFile(path, []byte("allow_managed_hooks_only = false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	codexSystemRequirementsPathForInspection = func() (string, error) { return path, nil }
+
+	if _, err := inspectCodexSystemRequirementsForMode(true); err == nil ||
+		!strings.Contains(strings.ToLower(err.Error()), "untrusted") {
+		t.Fatalf("managed user-writable requirements error = %v", err)
+	}
+}
+
+func TestInspectManagedCodexSystemRequirementsMissingParentPlatformContract(t *testing.T) {
+	original := codexSystemRequirementsPathForInspection
+	t.Cleanup(func() { codexSystemRequirementsPathForInspection = original })
+	path := filepath.Join(t.TempDir(), "missing", "Codex", "requirements.toml")
+	codexSystemRequirementsPathForInspection = func() (string, error) { return path, nil }
+
+	policy, err := inspectCodexSystemRequirementsForMode(true)
+	if runtime.GOOS != "windows" {
+		if err != nil || policy.AllowManagedHooksOnly != nil || policy.Source != path {
+			t.Fatalf("managed missing-parent Unix policy=%+v err=%v, want absent source", policy, err)
+		}
+		return
+	}
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "parent") ||
+		!strings.Contains(strings.ToLower(err.Error()), "pre-provision") {
+		t.Fatalf("managed missing-parent Windows requirements error = %v", err)
+	}
+}
+
+func TestInspectManagedCodexPolicyNeverExecutesUserWritableBinary(t *testing.T) {
+	executable := filepath.Join(t.TempDir(), "codex.exe")
+	if err := os.WriteFile(executable, []byte("not a trusted binary"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(executable, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	originalCommand := codexAppServerCommand
+	called := false
+	codexAppServerCommand = func(ctx context.Context, executable string) *exec.Cmd {
+		called = true
+		return originalCommand(ctx, executable)
+	}
+	t.Cleanup(func() { codexAppServerCommand = originalCommand })
+
+	_, err := inspectCodexEffectivePolicy(context.Background(), SetupOpts{
+		AgentExecutable:   executable,
+		ManagedEnterprise: true,
+	})
+	errText := strings.ToLower(fmt.Sprint(err))
+	if err == nil ||
+		(!strings.Contains(errText, "untrusted") &&
+			!strings.Contains(errText, "protected setup-selected executable evidence")) {
+		t.Fatalf("managed user-writable executable error = %v", err)
+	}
+	if called {
+		t.Fatal("managed policy inspection executed a user-writable Codex binary")
+	}
 }
 
 func TestInspectCodexPolicyFailsClosedForLegacyLockEvidence(t *testing.T) {

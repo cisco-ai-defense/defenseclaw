@@ -188,6 +188,15 @@ func defenseclawHookBinary() string {
 	return "defenseclaw-gateway"
 }
 
+// NativeHookExecutable returns the exact launcher path connector setup will
+// persist on the current host. The enterprise guardian compares this path to
+// its separately trusted sibling executable before allowing an impersonated
+// per-user mutation, preventing connector rendering from falling back to a
+// user-writable launcher.
+func NativeHookExecutable() string {
+	return defenseclawHookBinary()
+}
+
 type nativeWindowsInstallState struct {
 	SchemaVersion int    `json:"schema_version"`
 	InstallKind   string `json:"install_kind"`

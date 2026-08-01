@@ -1007,7 +1007,7 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 	if err := ensureCodexConfigDir(filepath.Dir(configPath)); err != nil {
 		return fmt.Errorf("create Codex config directory: %w", err)
 	}
-	if err := withFileLock(configPath, func() error {
+	if err := withFileLockMode(configPath, opts.ManagedEnterprise, func() error {
 		if err := captureManagedFileBackup(opts.DataDir, c.Name(), "config.toml", configPath); err != nil {
 			return fmt.Errorf("capture codex config backup: %w", err)
 		}
@@ -1688,7 +1688,7 @@ func (c *CodexConnector) restoreCodexConfig(opts SetupOpts) error {
 		transformed = cleaned
 		return nil
 	}
-	if err := withFileLock(configPath, func() error {
+	if err := withFileLockMode(configPath, opts.ManagedEnterprise, func() error {
 		return atomicTransformFileWithStateDir(configPath, opts.DataDir, 0o600, func(raw []byte, exists bool) (atomicTransformResult, error) {
 			if err := render(raw, exists); err != nil {
 				return atomicTransformResult{}, err

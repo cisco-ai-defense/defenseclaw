@@ -6,12 +6,57 @@
 package connector
 
 import (
+	"errors"
+	"fmt"
+	"os"
 	"os/exec"
 	"sync"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 func codexSystemRequirementsPath() (string, error) {
 	return "/etc/codex/requirements.toml", nil
+}
+
+func validateCodexManagedAgentExecutable(path string, managedEnterprise bool) error {
+	if !managedEnterprise {
+		return nil
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("inspect selected managed Codex executable: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("selected managed Codex executable is not a regular file: %s", path)
+	}
+	if err := managed.ValidateTrustedFilePath(path, "selected managed Codex executable"); err != nil {
+		return fmt.Errorf("selected managed Codex executable is untrusted: %w", err)
+	}
+	return nil
+}
+
+func readCodexSystemRequirements(path string, managedEnterprise bool) ([]byte, bool, error) {
+	if !managedEnterprise {
+		return readLegacyCodexSystemRequirements(path)
+	}
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, false, fmt.Errorf("managed Codex requirements source is not a regular file")
+	}
+	if info.Size() > codexPolicyMessageLimit {
+		return nil, false, fmt.Errorf("exceeds %d bytes", codexPolicyMessageLimit)
+	}
+	if err := managed.ValidateTrustedFilePath(path, "managed Codex requirements source"); err != nil {
+		return nil, false, fmt.Errorf("managed Codex requirements source is untrusted: %w", err)
+	}
+	return readBoundedCodexSystemRequirements(path)
 }
 
 func startCodexAppServerTree(cmd *exec.Cmd) (func(), error) {

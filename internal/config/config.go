@@ -2487,11 +2487,21 @@ func loadConfigSource(
 				return nil, fmt.Errorf("config: managed_enterprise config trust check failed: %w", err)
 			}
 		}
-		if err := managed.ValidateTrustedRuntimeDir(cfg.DataDir, "managed data_dir"); err != nil {
+		if err := managed.ValidateTrustedServiceRuntimeDir(
+			cfg.DataDir,
+			"managed data_dir",
+			os.Getenv(managed.WindowsServiceAccountEnv),
+		); err != nil {
 			if ReportConfigLoadError != nil {
 				ReportConfigLoadError(context.Background(), "managed_data_dir_untrusted")
 			}
 			return nil, fmt.Errorf("config: managed_enterprise data_dir trust check failed: %w", err)
+		}
+		if err := validateManagedEnterpriseListenerBindings(&cfg); err != nil {
+			if ReportConfigLoadError != nil {
+				ReportConfigLoadError(context.Background(), "managed_listener_non_loopback")
+			}
+			return nil, err
 		}
 	}
 
@@ -2678,6 +2688,57 @@ func restoreRuntimeV8GuardrailConnectors(cfg *Config, raw []byte) error {
 	return nil
 }
 
+// validateManagedEnterpriseListenerBindings keeps every inbound enterprise
+// surface on loopback. The managed hook transport is intentionally pinned to
+// canonical numeric IPv4, so the API listener must be exactly 127.0.0.1 rather
+// than another loopback spelling or address. This is enterprise-only:
+// unmanaged/BYOD deployments retain their existing remote-bind behavior.
+func validateManagedEnterpriseListenerBindings(cfg *Config) error {
+	if cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		return nil
+	}
+
+	apiBind := cfg.Gateway.APIBind
+	if apiBind == "" {
+		// Persist the effective managed bind into the in-memory config so
+		// standalone topology cannot later derive the API listener from an
+		// independent IPv6 guardrail host.
+		cfg.Gateway.APIBind = "127.0.0.1"
+		apiBind = cfg.Gateway.APIBind
+	}
+	if apiBind != "127.0.0.1" {
+		return fmt.Errorf(
+			"config: managed_enterprise gateway API must bind to exact canonical 127.0.0.1, got %q",
+			apiBind,
+		)
+	}
+
+	if cfg.Guardrail.Enabled {
+		proxyBind := strings.TrimSpace(cfg.Guardrail.EffectiveHost())
+		if !isLoopbackListenerHost(proxyBind) {
+			return fmt.Errorf(
+				"config: managed_enterprise guardrail proxy must bind to loopback, got %q",
+				proxyBind,
+			)
+		}
+	}
+	return nil
+}
+
+func isLoopbackListenerHost(host string) bool {
+	host = strings.TrimSpace(host)
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	host = strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func guardrailRuntimeMigrationAllowed(requested bool, deploymentMode string) bool {
+	return requested && !managed.IsManagedEnterprise(deploymentMode)
+}
+
 // clearLegacyObservabilityRuntimeConfig makes the general application Config
 // a one-way consumer of the v8 compiler. These fields remain on Config solely
 // so the upgrade/preview loaders can decode historical v7 sources; no target
@@ -2693,10 +2754,6 @@ func clearLegacyObservabilityRuntimeConfig(cfg *Config) {
 		connector.AuditSinks = nil
 		cfg.Observability.Connectors[name] = connector
 	}
-}
-
-func guardrailRuntimeMigrationAllowed(requested bool, deploymentMode string) bool {
-	return requested && !managed.IsManagedEnterprise(deploymentMode)
 }
 
 // seedProvenanceOnLoad stamps the process-wide content hash from the

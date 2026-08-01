@@ -7,6 +7,7 @@ package cli
 import (
 	"bytes"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io/fs"
 	"os"
@@ -17,6 +18,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 	"github.com/spf13/cobra"
 )
@@ -30,7 +34,7 @@ type enterpriseHooksTreeEntry struct {
 }
 
 func TestEnterpriseHooksWindowsAdministratorGatePrecedesRootAndCommandLifecycle(t *testing.T) {
-	for _, command := range []string{"install", "uninstall", "reconcile", "watch"} {
+	for _, command := range []string{"install", "uninstall", "reconcile", "watch", "status", "verify"} {
 		t.Run(command, func(t *testing.T) {
 			restoreEnterpriseHooksLifecycleTestState(t)
 			enterpriseHooksPlatformPreflight = func() error {
@@ -67,12 +71,14 @@ func TestEnterpriseHooksWindowsAdministratorGatePrecedesRootAndCommandLifecycle(
 			enterpriseHooksUninstallRunE = blockedRun
 			enterpriseHooksReconcileRunE = blockedRun
 			enterpriseHooksWatchRunE = blockedRun
+			enterpriseHooksStatusRunE = blockedRun
+			enterpriseHooksVerifyRunE = blockedRun
 
 			args := []string{"enterprise", "hooks", command}
 			switch command {
 			case "install", "uninstall":
 				args = append(args, "--connector", "codex", "--user", "alice", "--user-home", userHome)
-			case "reconcile", "watch":
+			case "reconcile", "watch", "status", "verify":
 				args = append(args, "--manifest", manifest)
 			}
 			var stdout, stderr bytes.Buffer
@@ -126,7 +132,7 @@ func TestEnterpriseHooksWindowsAdministratorGatePrecedesRootAndCommandLifecycle(
 }
 
 func TestEnterpriseHooksSupportedPlatformChainsRootPreRunAndCommand(t *testing.T) {
-	for _, command := range []string{"install", "uninstall", "reconcile", "watch"} {
+	for _, command := range []string{"install", "uninstall", "reconcile", "watch", "status", "verify"} {
 		t.Run(command, func(t *testing.T) {
 			restoreEnterpriseHooksLifecycleTestState(t)
 			enterpriseHooksRuntimeGOOS = func() string { return "linux" }
@@ -148,6 +154,10 @@ func TestEnterpriseHooksSupportedPlatformChainsRootPreRunAndCommand(t *testing.T
 				enterpriseHooksReconcileRunE = commandRun
 			case "watch":
 				enterpriseHooksWatchRunE = commandRun
+			case "status":
+				enterpriseHooksStatusRunE = commandRun
+			case "verify":
+				enterpriseHooksVerifyRunE = commandRun
 			}
 
 			rootCmd.SetArgs([]string{"enterprise", "hooks", command})
@@ -186,25 +196,136 @@ func TestEnterpriseHooksNativeWindowsAdministratorPreflightSmoke(t *testing.T) {
 	}
 }
 
+func TestEnterpriseHooksManagedMutationPreflightPrecedesTokenMinting(t *testing.T) {
+	for _, command := range []string{"install", "reconcile", "watch"} {
+		t.Run(command, func(t *testing.T) {
+			restoreEnterpriseHooksLifecycleTestState(t)
+			previousJSON := enterpriseHookJSON
+			previousManifest := enterpriseHookManifest
+			previousInterval := enterpriseHookWatchInterval
+			previousDebounce := enterpriseHookWatchDebounce
+			t.Cleanup(func() {
+				enterpriseHookJSON = previousJSON
+				enterpriseHookManifest = previousManifest
+				enterpriseHookWatchInterval = previousInterval
+				enterpriseHookWatchDebounce = previousDebounce
+			})
+			cfg = &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+			enterpriseHookJSON = false
+			enterpriseHookManifest = filepath.Join(t.TempDir(), "must-not-be-read.yaml")
+			enterpriseHookWatchInterval = time.Minute
+			enterpriseHookWatchDebounce = time.Second
+			refusal := errors.New("elevated administrator is not the LocalSystem guardian")
+			enterpriseHooksMutationIdentityPreflight = func() error { return refusal }
+			tokenCalled := false
+			enterpriseHookScopedTokenMinter = func(string, string) (string, error) {
+				tokenCalled = true
+				return "", nil
+			}
+			enterpriseHookScopedOTLPTokenMinter = func(string, string) (string, error) {
+				tokenCalled = true
+				return "", nil
+			}
+			cmd := &cobra.Command{}
+			var err error
+			switch command {
+			case "install":
+				err = runEnterpriseHooksInstall(cmd, nil)
+			case "reconcile":
+				err = runEnterpriseHooksReconcile(cmd, nil)
+			case "watch":
+				err = runEnterpriseHooksWatch(cmd, nil)
+			}
+			if !errors.Is(err, refusal) {
+				t.Fatalf("%s error = %v, want LocalSystem preflight refusal", command, err)
+			}
+			if tokenCalled {
+				t.Fatalf("%s minted or loaded a scoped token before LocalSystem preflight", command)
+			}
+		})
+	}
+}
+
+func TestEnterpriseHooksMutationPreflightIsNoOpOutsideManagedMode(t *testing.T) {
+	restoreEnterpriseHooksLifecycleTestState(t)
+	cfg = &config.Config{DeploymentMode: "local"}
+	called := false
+	enterpriseHooksMutationIdentityPreflight = func() error {
+		called = true
+		return errors.New("must not run")
+	}
+	if err := enterpriseHooksManagedMutationPreflight(); err != nil {
+		t.Fatalf("non-managed mutation preflight = %v", err)
+	}
+	if called {
+		t.Fatal("non-managed mode invoked the Windows managed-mutation identity gate")
+	}
+}
+
+func TestEnterpriseHooksPluginRegistryBehaviorUnchangedOutsideManagedWindows(t *testing.T) {
+	restoreEnterpriseHooksLifecycleTestState(t)
+	originalPluginFactory := enterpriseHooksPluginRegistryFactory
+	originalCertifiedFactory := enterpriseHooksCertifiedRegistryFactory
+	t.Cleanup(func() {
+		enterpriseHooksPluginRegistryFactory = originalPluginFactory
+		enterpriseHooksCertifiedRegistryFactory = originalCertifiedFactory
+	})
+	pluginCalls := 0
+	certifiedCalls := 0
+	enterpriseHooksPluginRegistryFactory = func() *connector.Registry {
+		pluginCalls++
+		return connector.NewDefaultRegistry()
+	}
+	enterpriseHooksCertifiedRegistryFactory = func() *connector.Registry {
+		certifiedCalls++
+		return newWindowsEnterpriseCertifiedConnectorRegistry()
+	}
+
+	for _, tc := range []struct {
+		goos string
+		mode string
+	}{
+		{goos: "windows", mode: "unmanaged_byod"},
+		{goos: "linux", mode: managed.DeploymentModeManagedEnterprise},
+	} {
+		enterpriseHooksRuntimeGOOS = func() string { return tc.goos }
+		cfg = &config.Config{DeploymentMode: tc.mode}
+		_ = newEnterpriseHooksConnectorRegistry()
+	}
+	if pluginCalls != 2 || certifiedCalls != 0 {
+		t.Fatalf("registry calls outside managed Windows = plugin:%d certified:%d, want 2/0", pluginCalls, certifiedCalls)
+	}
+}
+
 func restoreEnterpriseHooksLifecycleTestState(t *testing.T) {
 	t.Helper()
 	originalGOOS := enterpriseHooksRuntimeGOOS
 	originalPlatformPreflight := enterpriseHooksPlatformPreflight
+	originalMutationPreflight := enterpriseHooksMutationIdentityPreflight
 	originalRootPreRun := enterpriseHooksRootPersistentPreRun
 	originalInstall := enterpriseHooksInstallRunE
 	originalUninstall := enterpriseHooksUninstallRunE
 	originalReconcile := enterpriseHooksReconcileRunE
 	originalWatch := enterpriseHooksWatchRunE
+	originalStatus := enterpriseHooksStatusRunE
+	originalVerify := enterpriseHooksVerifyRunE
+	originalTokenMinter := enterpriseHookScopedTokenMinter
+	originalOTLPTokenMinter := enterpriseHookScopedOTLPTokenMinter
 	originalCfg, originalAuditStore, originalAuditLog := cfg, auditStore, auditLog
 	originalOut, originalErr := rootCmd.OutOrStdout(), rootCmd.ErrOrStderr()
 	t.Cleanup(func() {
 		enterpriseHooksRuntimeGOOS = originalGOOS
 		enterpriseHooksPlatformPreflight = originalPlatformPreflight
+		enterpriseHooksMutationIdentityPreflight = originalMutationPreflight
 		enterpriseHooksRootPersistentPreRun = originalRootPreRun
 		enterpriseHooksInstallRunE = originalInstall
 		enterpriseHooksUninstallRunE = originalUninstall
 		enterpriseHooksReconcileRunE = originalReconcile
 		enterpriseHooksWatchRunE = originalWatch
+		enterpriseHooksStatusRunE = originalStatus
+		enterpriseHooksVerifyRunE = originalVerify
+		enterpriseHookScopedTokenMinter = originalTokenMinter
+		enterpriseHookScopedOTLPTokenMinter = originalOTLPTokenMinter
 		cfg, auditStore, auditLog = originalCfg, originalAuditStore, originalAuditLog
 		rootCmd.SetArgs(nil)
 		rootCmd.SetOut(originalOut)
