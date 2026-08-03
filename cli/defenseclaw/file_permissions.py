@@ -30,9 +30,32 @@ from contextlib import contextmanager, suppress
 from pathlib import Path
 from typing import TextIO
 
+# Stable UnsafePathError.code values. Add a constant rather than a new bare
+# string so every consumer's match stays exhaustive and greppable.
+UNSAFE_PATH_UNKNOWN = "unsafe-path-unknown"
+UNSAFE_PATH_NOT_REGULAR_FILE = "unsafe-path-not-regular-file"
+UNSAFE_PATH_SYMLINK_OR_REPARSE = "unsafe-path-symlink-or-reparse"
+UNSAFE_PATH_EXCEEDS_LIMIT = "unsafe-path-exceeds-limit"
+UNSAFE_PATH_CHANGED = "unsafe-path-changed"
+UNSAFE_PATH_UNTRUSTED_CUSTODY = "unsafe-path-untrusted-custody"
+UNSAFE_PATH_NOT_ABSOLUTE = "unsafe-path-not-absolute"
+UNSAFE_PATH_INSPECTION_FAILED = "unsafe-path-inspection-failed"
+
 
 class UnsafePathError(OSError):
-    """Raised when a sensitive write would traverse a reparse point."""
+    """Raised when a sensitive path fails a custody or stability check.
+
+    ``code`` is the stable, machine-readable reason. Callers that must map a
+    refusal onto their own vocabulary (Doctor turns these into PID-record
+    evidence statuses, and the distinction between "malformed" and
+    "unavailable" changes which repairs are allowed to run) branch on it
+    instead of matching the human-readable message, so rewording a message
+    cannot silently reclassify a security refusal.
+    """
+
+    def __init__(self, message: str, *, code: str = UNSAFE_PATH_UNKNOWN) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 MAX_DOTENV_BYTES = 1024 * 1024
@@ -254,9 +277,15 @@ def open_regular_file_no_follow(
     expected = _reject_reparse_path(target, allow_missing=False)
     assert expected is not None
     if expected_stat is not None and not os.path.samestat(expected_stat, expected):
-        raise UnsafePathError(f"sensitive file changed before opening: {target}")
+        raise UnsafePathError(
+            f"sensitive file changed before opening: {target}",
+            code=UNSAFE_PATH_CHANGED,
+        )
     if not stat.S_ISREG(expected.st_mode):
-        raise UnsafePathError(f"refusing sensitive access to non-file: {target}")
+        raise UnsafePathError(
+            f"refusing sensitive access to non-file: {target}",
+            code=UNSAFE_PATH_NOT_REGULAR_FILE,
+        )
     # Windows CRT text mode translates CRLF while ``fstat().st_size`` reports
     # the exact bytes on disk. Callers that bind security evidence to the
     # opened file size must therefore always receive a binary descriptor.
@@ -268,9 +297,15 @@ def open_regular_file_no_follow(
     try:
         opened = os.fstat(fd)
         if not stat.S_ISREG(opened.st_mode):
-            raise UnsafePathError(f"refusing sensitive access to non-file: {target}")
+            raise UnsafePathError(
+                f"refusing sensitive access to non-file: {target}",
+                code=UNSAFE_PATH_NOT_REGULAR_FILE,
+            )
         if not os.path.samestat(expected, opened):
-            raise UnsafePathError(f"sensitive file changed while opening: {target}")
+            raise UnsafePathError(
+                f"sensitive file changed while opening: {target}",
+                code=UNSAFE_PATH_CHANGED,
+            )
     except Exception:
         os.close(fd)
         raise
@@ -396,7 +431,10 @@ def read_regular_file_no_follow(
         opened = os.fstat(fd)
         before = _file_stability_snapshot(fd)
         if before[0] > max_bytes:
-            raise UnsafePathError(f"sensitive file exceeds {max_bytes}-byte read limit")
+            raise UnsafePathError(
+                f"sensitive file exceeds {max_bytes}-byte read limit",
+                code=UNSAFE_PATH_EXCEEDS_LIMIT,
+            )
         chunks: list[bytes] = []
         remaining = max_bytes + 1
         while remaining:
@@ -410,14 +448,23 @@ def read_regular_file_no_follow(
     finally:
         os.close(fd)
     if len(body) > max_bytes:
-        raise UnsafePathError(f"sensitive file exceeds {max_bytes}-byte read limit")
+        raise UnsafePathError(
+            f"sensitive file exceeds {max_bytes}-byte read limit",
+            code=UNSAFE_PATH_EXCEEDS_LIMIT,
+        )
     if before != after or len(body) != before[0]:
-        raise UnsafePathError(f"sensitive file changed while reading: {target}")
+        raise UnsafePathError(
+            f"sensitive file changed while reading: {target}",
+            code=UNSAFE_PATH_CHANGED,
+        )
     _reject_reparse_chain(os.path.dirname(target) or os.curdir)
     current = _reject_reparse_path(target, allow_missing=False)
     assert current is not None
     if not os.path.samestat(opened, current):
-        raise UnsafePathError(f"sensitive file changed while reading: {target}")
+        raise UnsafePathError(
+            f"sensitive file changed while reading: {target}",
+            code=UNSAFE_PATH_CHANGED,
+        )
     return body
 
 
@@ -442,31 +489,55 @@ def trusted_posix_executable_path(path: str | os.PathLike[str]) -> str:
         raise OSError("POSIX executable custody is unavailable on Windows")
     raw_path = os.fspath(path)
     if not os.path.isabs(raw_path):
-        raise UnsafePathError("gateway executable path is not absolute")
+        raise UnsafePathError(
+            "gateway executable path is not absolute",
+            code=UNSAFE_PATH_NOT_ABSOLUTE,
+        )
     candidate = os.path.abspath(raw_path)
     resolved = os.path.realpath(candidate)
     try:
         info = os.lstat(resolved)
     except OSError as exc:
-        raise UnsafePathError("gateway executable could not be inspected") from exc
+        raise UnsafePathError(
+            "gateway executable could not be inspected",
+            code=UNSAFE_PATH_INSPECTION_FAILED,
+        ) from exc
     if not stat.S_ISREG(info.st_mode) or not os.access(resolved, os.X_OK):
-        raise UnsafePathError("gateway executable is not an executable regular file")
+        raise UnsafePathError(
+            "gateway executable is not an executable regular file",
+            code=UNSAFE_PATH_NOT_REGULAR_FILE,
+        )
     geteuid = getattr(os, "geteuid", None)
     current_uid = geteuid() if callable(geteuid) else info.st_uid
     if info.st_uid not in {0, current_uid} or stat.S_IMODE(info.st_mode) & 0o022:
-        raise UnsafePathError("gateway executable is writable by an untrusted principal")
+        raise UnsafePathError(
+            "gateway executable is writable by an untrusted principal",
+            code=UNSAFE_PATH_UNTRUSTED_CUSTODY,
+        )
     if sys.platform == "darwin" and darwin_acl_write_error(resolved):
-        raise UnsafePathError("gateway executable has a write-capable extended ACL")
+        raise UnsafePathError(
+            "gateway executable has a write-capable extended ACL",
+            code=UNSAFE_PATH_UNTRUSTED_CUSTODY,
+        )
 
     current = Path(resolved).parent
     while True:
         parent_info = os.lstat(current)
         if not stat.S_ISDIR(parent_info.st_mode):
-            raise UnsafePathError("gateway executable ancestor is not a directory")
+            raise UnsafePathError(
+                "gateway executable ancestor is not a directory",
+                code=UNSAFE_PATH_NOT_REGULAR_FILE,
+            )
         if parent_info.st_uid not in {0, current_uid} or stat.S_IMODE(parent_info.st_mode) & 0o022:
-            raise UnsafePathError("gateway executable ancestor is writable by an untrusted principal")
+            raise UnsafePathError(
+                "gateway executable ancestor is writable by an untrusted principal",
+                code=UNSAFE_PATH_UNTRUSTED_CUSTODY,
+            )
         if sys.platform == "darwin" and darwin_acl_write_error(current):
-            raise UnsafePathError("gateway executable ancestor has a write-capable extended ACL")
+            raise UnsafePathError(
+                "gateway executable ancestor has a write-capable extended ACL",
+                code=UNSAFE_PATH_UNTRUSTED_CUSTODY,
+            )
         if current.parent == current:
             break
         current = current.parent
@@ -570,7 +641,10 @@ def _clear_darwin_extended_acl(fd: int, path: str) -> None:
         raise OSError("could not clear the private file's extended ACL")
     current = os.lstat(path)
     if not os.path.samestat(expected, current):
-        raise UnsafePathError("sensitive file changed while clearing its extended ACL")
+        raise UnsafePathError(
+            "sensitive file changed while clearing its extended ACL",
+            code=UNSAFE_PATH_CHANGED,
+        )
 
 
 def set_file_mode(fd: int, path: str, mode: int, *, set_owner: bool = False) -> None:
@@ -1363,10 +1437,16 @@ def _reject_reparse_path(path: str, *, allow_missing: bool) -> os.stat_result | 
             return None
         raise
     if os.path.islink(path):
-        raise UnsafePathError(f"refusing sensitive write through symlink: {path}")
+        raise UnsafePathError(
+            f"refusing sensitive write through symlink: {path}",
+            code=UNSAFE_PATH_SYMLINK_OR_REPARSE,
+        )
     attributes = getattr(info, "st_file_attributes", 0)
     if attributes & 0x400:  # FILE_ATTRIBUTE_REPARSE_POINT
-        raise UnsafePathError(f"refusing sensitive write through reparse point: {path}")
+        raise UnsafePathError(
+            f"refusing sensitive write through reparse point: {path}",
+            code=UNSAFE_PATH_SYMLINK_OR_REPARSE,
+        )
     return info
 
 

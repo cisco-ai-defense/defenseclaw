@@ -357,11 +357,16 @@ func (exporter *MetricExporter) Export(ctx context.Context, metrics *metricdata.
 		return newError(ErrorExport, nil)
 	}
 	now := exporter.nowUTC()
+	// metricCount only sums per-scope slice lengths, so it is safe to charge
+	// suppressed records before admission. conservativeMetricBytes below is the
+	// expensive estimation that an open circuit must continue to skip.
+	count := metricCount(metrics)
 	switch exporter.circuit.Admit(now) {
 	case delivery.CircuitAdmissionBlocked:
 		exporter.counters.circuitRejectedBatches.Add(1)
+		exporter.counters.circuitRejectedRecords.Add(count)
 		unlock()
-		// The circuit health snapshot and rejection counter remain the
+		// The circuit health snapshot and rejection counters remain the
 		// authoritative failure signal. Returning an error here would make the
 		// SDK PeriodicReader invoke the global OTel error handler on every
 		// collection interval while the circuit is open (24 hours for an
@@ -372,7 +377,6 @@ func (exporter *MetricExporter) Export(ctx context.Context, metrics *metricdata.
 		probePending = true
 		exporter.setHealth(delivery.HealthDegraded, delivery.HealthReasonCircuitHalfOpen)
 	}
-	count := metricCount(metrics)
 	bound, ok := conservativeMetricBytes(metrics)
 	if !ok || bound > exporter.maxBytes {
 		if probePending {
@@ -540,7 +544,11 @@ func (exporter *MetricExporter) deliveryHealthSnapshot() delivery.HealthSnapshot
 		CircuitOpenUntil: circuit.OpenUntil, LastFailureClass: circuit.LastFailureClass,
 		Counters: delivery.Counters{
 			Accepted: counters.Accepted, Delivered: counters.Exported, Retried: counters.Retried,
-			Dropped: counters.DroppedQueueFull,
+			// Circuit-suppressed records never reached the destination and are
+			// never retried, so they belong in the operator-facing drop total.
+			// Export returns success for them to avoid an error-handler loop,
+			// which makes this the only surface where that loss is visible.
+			Dropped: addMetricHealthCounter(counters.DroppedQueueFull, counters.CircuitRejectedRecords),
 			Rejected: addMetricHealthCounter(
 				addMetricHealthCounter(counters.RejectedPartial, counters.RejectedOversize), counters.Failed,
 			),

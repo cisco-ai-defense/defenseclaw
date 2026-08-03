@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import base64
 import contextlib
+import hmac
 import io
 import ipaddress
 import json
@@ -126,6 +127,21 @@ _DOCTOR_GALILEO_CANARY_LIMIT = 4
 def _normalized_gateway_token(value: object) -> str:
     """Preserve token bytes while treating whitespace-only values as empty."""
     return value if isinstance(value, str) and value.strip() else ""
+
+
+def _gateway_tokens_equal(left: str, right: str) -> bool:
+    """Compare two gateway tokens in constant time.
+
+    Both operands are already readable by this local user, so this is defense
+    in depth rather than the fix for a live timing oracle. It keeps every
+    token comparison on one auditable path, so none of them turns into an
+    oracle later if a token starts crossing a process or RPC boundary.
+
+    Bytes rather than str: ``compare_digest`` rejects non-ASCII str operands,
+    and a custom ``gateway.token_env`` provider is externally managed and may
+    legitimately hold any UTF-8 value.
+    """
+    return hmac.compare_digest(left.encode("utf-8"), right.encode("utf-8"))
 
 
 def _gateway_api_host(cfg) -> str:
@@ -1076,7 +1092,7 @@ def _daemon_effective_gateway_token(cfg) -> tuple[str, str, str]:
     if configured_env and _normalized_gateway_token(os.environ.get(configured_env, "")):
         return resolved, configured_env, "configured environment"
     for candidate in (_CANONICAL_GATEWAY_TOKEN_ENV, _LEGACY_GATEWAY_TOKEN_ENV):
-        if _normalized_gateway_token(os.environ.get(candidate, "")) == resolved:
+        if _gateway_tokens_equal(_normalized_gateway_token(os.environ.get(candidate, "")), resolved):
             return resolved, candidate, "process environment"
     return resolved, "", "gateway config"
 
@@ -1121,7 +1137,7 @@ def _gateway_cli_token_mismatch_detail(cfg, daemon_token: str) -> str:
         )
 
     cli_token, source = _cli_effective_gateway_token(cfg)
-    if not cli_token or cli_token == daemon_token:
+    if not cli_token or _gateway_tokens_equal(cli_token, daemon_token):
         return ""
     if source == "gateway.token":
         return (
@@ -2694,7 +2710,7 @@ def _check_gateway_token_drift(cfg, r: _DoctorResult) -> None:
         )
         return
 
-    if process_token == configured_token:
+    if _gateway_tokens_equal(process_token, configured_token):
         _emit(
             "pass",
             "Gateway token drift",
@@ -8264,7 +8280,7 @@ def _fix_gateway_token(
         if token:
             env_var = "OPENCLAW_GATEWAY_TOKEN"
             current = _gateway_dotenv_tokens(cfg.data_dir).get(env_var, "")
-            if current == token:
+            if _gateway_tokens_equal(current, token):
                 return ("skip", "token already persisted and in sync")
             if plan_only:
                 return ("plan", f"persist {env_var} from the trusted OpenClaw configuration")
@@ -8791,7 +8807,7 @@ def _fix_gateway_token_drift(
         process_token = _normalized_gateway_token(process_token)
         if not process_token:
             return ("skip", f"sidecar pid {pid} has no inspectable {token_env_name} value")
-        if process_token == probe_token:
+        if _gateway_tokens_equal(process_token, probe_token):
             return ("skip", "sidecar token already matches the daemon-effective token")
 
     if plan_only:

@@ -37,6 +37,14 @@ from dataclasses import dataclass
 from typing import Literal
 
 from defenseclaw.file_permissions import (
+    UNSAFE_PATH_CHANGED,
+    UNSAFE_PATH_EXCEEDS_LIMIT,
+    UNSAFE_PATH_INSPECTION_FAILED,
+    UNSAFE_PATH_NOT_ABSOLUTE,
+    UNSAFE_PATH_NOT_REGULAR_FILE,
+    UNSAFE_PATH_SYMLINK_OR_REPARSE,
+    UNSAFE_PATH_UNKNOWN,
+    UNSAFE_PATH_UNTRUSTED_CUSTODY,
     UnsafePathError,
     open_regular_file_no_follow,
     read_regular_file_no_follow,
@@ -120,8 +128,26 @@ def paths_same(left: str, right: str) -> bool:
     return bool(left_canonical) and left_canonical == right_canonical
 
 
-def _pid_record_integrity_error(path: str, info: os.stat_result) -> str:
-    """Return why a PID record is mutable by a different local principal."""
+def _pid_record_integrity_error(path: str, info: os.stat_result) -> tuple[EvidenceStatus, str]:
+    """Classify why a PID record may be mutable by a different principal.
+
+    Returns ``("ok", "")`` when custody is proven safe. Otherwise the status
+    distinguishes two situations Doctor must not conflate:
+
+    ``denied``
+        Custody was inspected and is positively untrusted -- foreign owner,
+        group/world-writable leaf, a write-capable ACL, or a replaceable
+        ancestor. The record is refused.
+
+    ``unavailable``
+        Custody could not be established at all. Network or container homes
+        with UID mapping, an unreadable ancestor, or an ACL query failure land
+        here. The record is still refused, but reporting it as ``malformed``
+        would tell an operator their PID file is corrupt when it is not.
+
+    ``malformed`` is reserved for records whose *contents* are bad, so a
+    custody problem never masquerades as a parse failure.
+    """
     if os.name == "nt":
         try:
             from defenseclaw.file_permissions import windows_acl_custody_write_error
@@ -131,7 +157,7 @@ def _pid_record_integrity_error(path: str, info: os.stat_result) -> str:
                 allow_current_user=True,
                 require_current_user_owner=True,
             ):
-                return file_problem
+                return "denied", file_problem
             ancestor = os.path.dirname(os.path.abspath(path)) or os.curdir
             while ancestor:
                 parent = os.path.dirname(ancestor)
@@ -145,46 +171,100 @@ def _pid_record_integrity_error(path: str, info: os.stat_result) -> str:
                     ancestor,
                     allow_current_user=True,
                 ):
-                    return f"PID file ancestor directory has unsafe ACLs ({ancestor_problem})"
+                    return (
+                        "denied",
+                        f"PID file ancestor directory has unsafe ACLs ({ancestor_problem})",
+                    )
                 ancestor = parent
-            return ""
+            return "ok", ""
         except OSError:
-            return "PID file ACL could not be verified"
+            return "unavailable", "PID file ACL could not be verified"
     geteuid = getattr(os, "geteuid", None)
     current_uid = geteuid() if callable(geteuid) else info.st_uid
     if info.st_uid != current_uid:
-        return "PID file is not owned by the current user"
+        return "denied", "PID file is not owned by the current user"
     if stat.S_IMODE(info.st_mode) & 0o022:
-        return "PID file is writable by another local principal"
+        return "denied", "PID file is writable by another local principal"
     if sys.platform == "darwin":
         from defenseclaw.file_permissions import darwin_acl_write_error
 
         if acl_problem := darwin_acl_write_error(path):
-            return acl_problem
+            return "denied", acl_problem
 
     # A protected leaf can still be replaced by renaming it from a writable
     # directory. Walk the POSIX custody chain; sticky root-owned/current-user
     # directories (for example /tmp) preserve ownership of existing children.
     current = os.path.realpath(os.path.dirname(os.path.abspath(path)) or os.curdir)
     while True:
-        directory_info = os.lstat(current)
+        try:
+            directory_info = os.lstat(current)
+        except OSError:
+            # An ancestor we cannot stat is unproven custody, not proof of
+            # tampering. Common on network homes and bind-mounted containers.
+            return "unavailable", "PID file ancestor custody could not be verified"
         if not stat.S_ISDIR(directory_info.st_mode):
-            return "PID file ancestor is not a directory"
+            return "denied", "PID file ancestor is not a directory"
         if directory_info.st_uid not in {0, current_uid}:
-            return "PID file ancestor directory is not owned by a trusted principal"
+            # A foreign-owned ancestor is frequently a UID-mapped network or
+            # container mount rather than an attacker, so this refusal is
+            # reported as unverifiable custody instead of positive tampering.
+            return (
+                "unavailable",
+                "PID file ancestor directory is not owned by a trusted principal",
+            )
         mode = stat.S_IMODE(directory_info.st_mode)
         if mode & 0o022 and not mode & stat.S_ISVTX:
-            return "PID file ancestor directory is writable by another local principal"
+            return (
+                "denied",
+                "PID file ancestor directory is writable by another local principal",
+            )
         if sys.platform == "darwin":
             from defenseclaw.file_permissions import darwin_acl_write_error
 
             if acl_problem := darwin_acl_write_error(current):
-                return f"PID file ancestor directory has unsafe ACLs ({acl_problem})"
+                return (
+                    "denied",
+                    f"PID file ancestor directory has unsafe ACLs ({acl_problem})",
+                )
         parent = os.path.dirname(current)
         if parent == current:
             break
         current = parent
-    return ""
+    return "ok", ""
+
+
+_UNSAFE_PATH_PID_EVIDENCE: dict[str, tuple[EvidenceStatus, str]] = {
+    UNSAFE_PATH_EXCEEDS_LIMIT: ("malformed", "PID file exceeds the inspection limit"),
+    UNSAFE_PATH_NOT_REGULAR_FILE: ("malformed", "PID file is not a regular file"),
+    UNSAFE_PATH_SYMLINK_OR_REPARSE: (
+        "malformed",
+        "PID file is a symbolic link or reparse point",
+    ),
+    UNSAFE_PATH_CHANGED: (
+        "unavailable",
+        "PID file changed while it was being inspected",
+    ),
+    UNSAFE_PATH_UNTRUSTED_CUSTODY: (
+        "denied",
+        "PID file custody is not trusted",
+    ),
+    UNSAFE_PATH_NOT_ABSOLUTE: ("malformed", "PID file path is not absolute"),
+    UNSAFE_PATH_INSPECTION_FAILED: (
+        "unavailable",
+        "PID file could not be inspected",
+    ),
+}
+
+
+def _pid_record_unsafe_path_evidence(exc: UnsafePathError) -> tuple[EvidenceStatus, str]:
+    """Map a stable reader refusal code onto PID-record evidence."""
+    return _UNSAFE_PATH_PID_EVIDENCE.get(
+        getattr(exc, "code", UNSAFE_PATH_UNKNOWN),
+        # An unrecognized code is treated as an unproven inspection failure
+        # rather than a content verdict, keeping the refusal fail-closed
+        # without asserting the record is corrupt.
+        ("unavailable", "PID file could not be safely inspected"),
+    )
 
 
 def read_pid_record(path: str) -> PIDRecord:
@@ -197,8 +277,9 @@ def read_pid_record(path: str) -> PIDRecord:
             return PIDRecord("malformed", reason="PID file is a symbolic link or reparse point")
         if not stat.S_ISREG(info.st_mode):
             return PIDRecord("malformed", reason="PID file is not a regular file")
-        if integrity_error := _pid_record_integrity_error(path, info):
-            return PIDRecord("malformed", reason=integrity_error)
+        integrity_status, integrity_error = _pid_record_integrity_error(path, info)
+        if integrity_status != "ok":
+            return PIDRecord(integrity_status, reason=integrity_error)
         raw_bytes = read_regular_file_no_follow(
             path,
             max_bytes=_MAX_PID_RECORD_BYTES,
@@ -212,13 +293,11 @@ def read_pid_record(path: str) -> PIDRecord:
     except PermissionError:
         return PIDRecord("denied", reason="PID file access denied")
     except UnsafePathError as exc:
-        if "exceeds" in str(exc):
-            return PIDRecord("malformed", reason="PID file exceeds the inspection limit")
-        if "non-file" in str(exc):
-            return PIDRecord("malformed", reason="PID file is not a regular file")
-        if "symlink" in str(exc) or "reparse" in str(exc):
-            return PIDRecord("malformed", reason="PID file is a symbolic link or reparse point")
-        return PIDRecord("unavailable", reason="PID file changed while it was being inspected")
+        # Branch on the reader's stable code, never on its message text: these
+        # statuses gate which lifecycle repairs Doctor will run, so a reworded
+        # message must not be able to reclassify a refusal.
+        status, reason = _pid_record_unsafe_path_evidence(exc)
+        return PIDRecord(status, reason=reason)
     except OSError:
         return PIDRecord("unavailable", reason="PID file could not be inspected")
 
@@ -321,7 +400,7 @@ def pid_file_fingerprint(path: str) -> tuple[int, int, int, int, bytes] | None:
             return None
         if not stat.S_ISREG(info.st_mode):
             return None
-        if _pid_record_integrity_error(path, info):
+        if _pid_record_integrity_error(path, info)[0] != "ok":
             return None
         fd = open_regular_file_no_follow(path)
         try:

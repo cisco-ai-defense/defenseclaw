@@ -303,8 +303,17 @@ func acquireWatchdogPIDFileWith(
 	// Close the publication writer, then reacquire the exact record as a
 	// read-only, non-write/non-delete-shared ownership handle. Another
 	// publisher can win this narrow handoff, so the new handle is locked and
-	// its complete random-capability-bearing fingerprint is revalidated
-	// before it is accepted.
+	// the record it contains is compared field-for-field against what this
+	// process just wrote before it is accepted.
+	//
+	// The fingerprint carries no secret or random capability: it is
+	// {PID, Executable, StartTime, StartIdentity, ControlName}, all derived
+	// from this process. What makes the comparison sufficient is PID
+	// exclusivity, not unguessability -- no other live process can publish
+	// this PID while this process holds it, so any record that still matches
+	// after the unlocked window is necessarily the one written above. Do not
+	// drop a field from watchdogPIDInfo on the assumption that the remaining
+	// ones are hard to predict; the guarantee is identity, not entropy.
 	if err := windows.UnlockFileEx(windows.Handle(f.Fd()), 0, 1, 0, ol); err != nil {
 		_ = f.Close()
 		return nil, err

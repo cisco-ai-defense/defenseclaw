@@ -21,6 +21,15 @@ const (
 	defaultCircuitFailureThreshold = 3
 	defaultCircuitOpenDuration     = 30 * time.Second
 	immediateCircuitOpenDuration   = maxCircuitOpenDuration
+
+	// halfOpenProbeDeadline bounds how long a granted probe may remain
+	// unresolved. A correct caller always reports the probe outcome through
+	// RecordSuccess, RecordFailure, or AbortProbe, so this deadline never
+	// fires for them. It exists so that a caller which loses a probe -- an
+	// early return that skips its defer, a panic recovered upstream, a
+	// goroutine that never reports -- degrades to a delayed retry instead of
+	// silently suppressing a destination for the process lifetime.
+	halfOpenProbeDeadline = 10 * time.Minute
 )
 
 // CircuitAdmission is the bounded result of consulting a delivery circuit
@@ -51,6 +60,7 @@ type Circuit struct {
 	state               CircuitState
 	consecutiveFailures uint64
 	openUntil           time.Time
+	halfOpenUntil       time.Time
 	lastFailureClass    FailureClass
 }
 
@@ -64,7 +74,9 @@ func NewCircuit(policy CircuitPolicy) (*Circuit, error) {
 }
 
 // Admit rejects while open, atomically grants exactly one post-cooldown probe,
-// and admits normal work while closed.
+// and admits normal work while closed. A probe that is never resolved expires
+// after halfOpenProbeDeadline and the next caller reclaims it, so a lost
+// admission cannot suppress a destination indefinitely.
 func (circuit *Circuit) Admit(now time.Time) CircuitAdmission {
 	if circuit == nil {
 		return CircuitAdmissionBlocked
@@ -78,13 +90,28 @@ func (circuit *Circuit) Admit(now time.Time) CircuitAdmission {
 		if now.Before(circuit.openUntil) {
 			return CircuitAdmissionBlocked
 		}
-		circuit.state = CircuitHalfOpen
+		circuit.grantProbeLocked(now)
 		return CircuitAdmissionProbe
 	case CircuitHalfOpen:
-		return CircuitAdmissionBlocked
+		if now.Before(circuit.halfOpenUntil) {
+			return CircuitAdmissionBlocked
+		}
+		// The previous probe was granted but never reported an outcome.
+		// Reclaiming it is safe: a late RecordSuccess/RecordFailure from the
+		// lost probe still transitions this circuit correctly, and a late
+		// AbortProbe becomes a no-op because the state it expects is gone.
+		circuit.grantProbeLocked(now)
+		return CircuitAdmissionProbe
 	default:
 		return CircuitAdmissionBlocked
 	}
+}
+
+// grantProbeLocked moves the circuit into a deadline-bounded half-open probe.
+// The caller must hold circuit.mu.
+func (circuit *Circuit) grantProbeLocked(now time.Time) {
+	circuit.state = CircuitHalfOpen
+	circuit.halfOpenUntil = now.UTC().Add(halfOpenProbeDeadline)
 }
 
 // RecordSuccess closes the circuit and clears the active failure streak. The
@@ -97,6 +124,7 @@ func (circuit *Circuit) RecordSuccess() {
 	circuit.state = CircuitClosed
 	circuit.consecutiveFailures = 0
 	circuit.openUntil = time.Time{}
+	circuit.halfOpenUntil = time.Time{}
 	circuit.mu.Unlock()
 }
 
@@ -115,6 +143,7 @@ func (circuit *Circuit) AbortProbe() bool {
 		return false
 	}
 	circuit.state = CircuitOpen
+	circuit.halfOpenUntil = time.Time{}
 	return true
 }
 
@@ -147,6 +176,7 @@ func (circuit *Circuit) RecordFailure(class FailureClass, at time.Time) bool {
 		return false
 	}
 	circuit.state = CircuitOpen
+	circuit.halfOpenUntil = time.Time{}
 	openDuration := circuit.policy.OpenDuration
 	if immediateFailure {
 		openDuration = immediateCircuitOpenDuration

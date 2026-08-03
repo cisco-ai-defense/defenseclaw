@@ -31,8 +31,10 @@ from __future__ import annotations
 
 import os
 import shutil
+import socket
 import sys
 from collections.abc import Mapping
+from functools import lru_cache
 from typing import Any
 from urllib.parse import quote
 
@@ -55,10 +57,35 @@ def gateway_api_client_host(cfg: Any) -> str:
         if standalone and guardrail_host and guardrail_host != "localhost":
             bind = guardrail_host
     if bind in {"::", "[::]"}:
-        return "::1"
+        # An unspecified IPv6 bind is reachable on the IPv6 loopback, which is
+        # the exact target. But a host can have IPv6 disabled at the kernel or
+        # image level while still running this gateway (hardened base images
+        # and some container runtimes do), and on those hosts a ``::`` listener
+        # is reached through the IPv4 loopback. Only claim ``::1`` when this
+        # process can actually open an IPv6 socket; otherwise fall back to the
+        # historical 127.0.0.1 rather than emitting an unconnectable host.
+        return "::1" if _ipv6_loopback_available() else "127.0.0.1"
     if bind in {"", "0.0.0.0", "*"}:
         return "127.0.0.1"
     return bind
+
+
+@lru_cache(maxsize=1)
+def _ipv6_loopback_available() -> bool:
+    """Return whether this process can bind the IPv6 loopback.
+
+    Cached: the answer is a property of the running kernel and cannot change
+    within one CLI invocation. Binding port 0 is a purely local operation --
+    it sends no traffic and needs no privileges.
+    """
+    if not getattr(socket, "has_ipv6", False):
+        return False
+    try:
+        with socket.socket(socket.AF_INET6, socket.SOCK_STREAM) as probe:
+            probe.bind(("::1", 0))
+    except OSError:
+        return False
+    return True
 
 
 def _url_host(host: str) -> str:
@@ -117,16 +144,15 @@ class OrchestratorClient:
         return resp.json()
 
     def status(self) -> dict[str, Any]:
+        # No per-method redirect check: the session-level ``_refuse_gateway_redirect``
+        # hook already raises before any method sees a 3xx response, so a local
+        # copy here would be unreachable and would imply — wrongly — that
+        # redirect safety is something each new endpoint must remember to add.
         resp = self._session.get(
             f"{self.base_url}/status",
             timeout=self.timeout,
             allow_redirects=False,
         )
-        if 300 <= resp.status_code < 400:
-            raise requests.HTTPError(
-                f"gateway status redirect refused ({resp.status_code})",
-                response=resp,
-            )
         resp.raise_for_status()
         return resp.json()
 

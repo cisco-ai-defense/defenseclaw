@@ -24,7 +24,7 @@ import stat
 from types import SimpleNamespace
 
 import pytest
-from defenseclaw import doctor_gateway
+from defenseclaw import doctor_gateway, file_permissions
 
 
 def test_gateway_executable_name_uses_target_platform_separators() -> None:
@@ -266,7 +266,11 @@ def test_pid_readers_reject_writable_parent_directory(tmp_path):
     try:
         record = doctor_gateway.read_pid_record(os.fspath(path))
 
-        assert record.status == "malformed"
+        # A group/world-writable ancestor is positively-observed untrusted
+        # custody, so the record is refused as "denied". It is explicitly not
+        # "malformed": the bytes on disk parse fine, and telling an operator
+        # their PID file is corrupt would send them to the wrong repair.
+        assert record.status == "denied"
         assert "ancestor directory is writable" in record.reason
         assert doctor_gateway.pid_file_fingerprint(os.fspath(path)) is None
     finally:
@@ -344,3 +348,85 @@ def test_listener_address_matching_is_address_family_aware(
     expected,
 ):
     assert doctor_gateway._listener_address_matches(local_address, target_host) is expected
+
+
+def test_pid_record_maps_reader_codes_not_message_text(monkeypatch, tmp_path) -> None:
+    """Doctor must classify reader refusals by stable code, not by prose.
+
+    These statuses gate which lifecycle repairs are allowed to run, so the
+    mapping is pinned against a deliberately misleading message: an error whose
+    text says "exceeds" while its code says the object changed must be reported
+    as ``unavailable``, not as a malformed size violation.
+    """
+    path = tmp_path / "gateway.pid"
+    path.write_text("4242", encoding="utf-8")
+    os.chmod(path, 0o600)
+
+    cases = [
+        (file_permissions.UNSAFE_PATH_EXCEEDS_LIMIT, "malformed", "exceeds the inspection limit"),
+        (file_permissions.UNSAFE_PATH_NOT_REGULAR_FILE, "malformed", "not a regular file"),
+        (file_permissions.UNSAFE_PATH_SYMLINK_OR_REPARSE, "malformed", "symbolic link or reparse point"),
+        (file_permissions.UNSAFE_PATH_CHANGED, "unavailable", "changed while it was being inspected"),
+        (file_permissions.UNSAFE_PATH_UNTRUSTED_CUSTODY, "denied", "custody is not trusted"),
+        (file_permissions.UNSAFE_PATH_INSPECTION_FAILED, "unavailable", "could not be inspected"),
+    ]
+    for code, expected_status, expected_reason in cases:
+        def refuse(*_args, _code=code, **_kwargs):
+            # The message intentionally contradicts the code.
+            raise file_permissions.UnsafePathError(
+                "sensitive file exceeds a symlink non-file limit",
+                code=_code,
+            )
+
+        monkeypatch.setattr(doctor_gateway, "read_regular_file_no_follow", refuse)
+        record = doctor_gateway.read_pid_record(os.fspath(path))
+        assert record.status == expected_status, code
+        assert expected_reason in record.reason, code
+        assert record.pid == 0
+
+
+def test_pid_record_unknown_reader_code_fails_closed_as_unavailable(monkeypatch, tmp_path) -> None:
+    """An unrecognized refusal must not be reported as a content verdict."""
+    path = tmp_path / "gateway.pid"
+    path.write_text("4242", encoding="utf-8")
+    os.chmod(path, 0o600)
+
+    def refuse(*_args, **_kwargs):
+        raise file_permissions.UnsafePathError("brand new refusal", code="unsafe-path-future")
+
+    monkeypatch.setattr(doctor_gateway, "read_regular_file_no_follow", refuse)
+    record = doctor_gateway.read_pid_record(os.fspath(path))
+
+    assert record.status == "unavailable"
+    assert "could not be safely inspected" in record.reason
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ancestor-custody classification")
+def test_pid_record_unverifiable_ancestor_is_unavailable_not_malformed(monkeypatch, tmp_path) -> None:
+    """A UID-mapped or unstattable ancestor is unproven custody, not corruption.
+
+    Network homes and bind-mounted containers routinely present an ancestor
+    owned by neither root nor the current user. Reporting that as ``malformed``
+    told operators their PID file was corrupt and sent them to the wrong fix.
+    """
+    path = tmp_path / "gateway.pid"
+    path.write_text("4242", encoding="utf-8")
+    os.chmod(path, 0o600)
+
+    real_lstat = os.lstat
+    foreign_dir = os.fspath(tmp_path)
+
+    def lstat_with_foreign_ancestor(target, *args, **kwargs):
+        info = real_lstat(target, *args, **kwargs)
+        if os.fspath(target) == foreign_dir:
+            fields = list(info)
+            fields[stat.ST_UID] = info.st_uid + 4242
+            return os.stat_result(fields)
+        return info
+
+    monkeypatch.setattr(doctor_gateway.os, "lstat", lstat_with_foreign_ancestor)
+    record = doctor_gateway.read_pid_record(os.fspath(path))
+
+    assert record.status == "unavailable"
+    assert "not owned by a trusted principal" in record.reason
+    assert record.pid == 0

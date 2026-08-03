@@ -317,6 +317,78 @@ func TestWindowsWatchdogOwnershipOpenRetriesSharingViolation(t *testing.T) {
 	}
 }
 
+// acquireWatchdogPIDFileWith deliberately releases the lock and closes the
+// publication writer before reopening the record read-only, so a competing
+// publisher can win that window. The whole safety argument for that window is
+// the field-for-field comparison afterwards, which had no coverage: this drives
+// a competitor through the injectable open seam and asserts the loser refuses
+// to take ownership of a record it did not write.
+func TestWindowsWatchdogOwnershipHandoffRefusesCompetingPublisher(t *testing.T) {
+	pidPath := filepath.Join(t.TempDir(), "watchdog.pid")
+	mine := watchdogPIDInfo{PID: os.Getpid(), StartIdentity: "mine", ControlName: "dc-a"}
+	competitor := watchdogPIDInfo{PID: os.Getpid() + 1, StartIdentity: "theirs", ControlName: "dc-b"}
+
+	overwrites := 0
+	owner, err := acquireWatchdogPIDFileWith(
+		pidPath,
+		mine,
+		func(path string) (*os.File, error) {
+			// Stand in for the racing publisher: replace the record's contents
+			// while nobody holds the file, then hand back a real ownership
+			// handle so the caller reaches its identity comparison.
+			overwrites++
+			writer, writeErr := os.OpenFile(path, os.O_RDWR|os.O_TRUNC, 0o600)
+			if writeErr != nil {
+				return nil, writeErr
+			}
+			if writeErr := writeWatchdogPIDInfo(writer, competitor); writeErr != nil {
+				_ = writer.Close()
+				return nil, writeErr
+			}
+			if writeErr := writer.Close(); writeErr != nil {
+				return nil, writeErr
+			}
+			return openWatchdogOwnershipFile(path)
+		},
+		func(time.Duration) {},
+	)
+	if err == nil {
+		_ = owner.Close()
+		t.Fatal("handoff accepted a record written by another publisher")
+	}
+	if owner != nil {
+		_ = owner.Close()
+		t.Fatal("failed handoff returned a non-nil ownership handle")
+	}
+	if overwrites != 1 {
+		t.Fatalf("ownership open called %d times, want 1", overwrites)
+	}
+	if !strings.Contains(err.Error(), "ownership changed during publication handoff") {
+		t.Fatalf("handoff error = %v, want a publication-handoff mismatch", err)
+	}
+
+	// The refusal must not strand the lock or the handle: the competitor's
+	// record stays readable and writable by the next publisher.
+	if _, err := openWatchdogOwnershipFile(pidPath); err != nil {
+		t.Fatalf("refused handoff left the PID file unopenable: %v", err)
+	}
+	reopened, err := os.OpenFile(pidPath, os.O_RDWR, 0o600)
+	if err != nil {
+		t.Fatalf("refused handoff left a retained handle on the PID file: %v", err)
+	}
+	current, err := readWatchdogPIDInfoFile(reopened)
+	if err != nil {
+		_ = reopened.Close()
+		t.Fatal(err)
+	}
+	if err := reopened.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if current != competitor {
+		t.Fatalf("record after refused handoff = %+v, want the competitor's %+v", current, competitor)
+	}
+}
+
 func TestWindowsWatchdogOwnershipOpenSharingRetryIsBounded(t *testing.T) {
 	attempts := 0
 	sleeps := 0

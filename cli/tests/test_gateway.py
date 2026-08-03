@@ -203,6 +203,26 @@ class OrchestratorClientWireFormatTests(unittest.TestCase):
 
         self.assertIs(client._session.trust_env, False)
 
+    def test_redirect_refusal_is_a_session_hook_not_a_per_method_check(self):
+        """Redirect safety must stay central.
+
+        Every management method passes ``allow_redirects=False`` and the session
+        response hook raises before any method body inspects a 3xx. That is what
+        makes a newly added endpoint safe by default, so pin the hook's presence:
+        if it is ever dropped in favor of per-method checks, new endpoints start
+        shipping without redirect protection.
+        """
+        client = gateway.OrchestratorClient(host="127.0.0.1", port=29871, token="t")
+        self.assertIn(gateway._refuse_gateway_redirect, client._session.hooks["response"])
+
+        response = gateway.requests.Response()
+        response.status_code = 302
+        with self.assertRaises(gateway.requests.HTTPError):
+            gateway._refuse_gateway_redirect(response)
+
+        response.status_code = 200
+        self.assertIs(gateway._refuse_gateway_redirect(response), response)
+
     def test_management_methods_refuse_cross_origin_redirect_without_replaying_tokens(self):
         origin_requests: list[dict[str, str | None]] = []
         target_requests: list[dict[str, str | None]] = []

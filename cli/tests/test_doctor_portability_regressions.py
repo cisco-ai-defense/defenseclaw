@@ -27,6 +27,7 @@ from unittest.mock import Mock
 
 import pytest
 from defenseclaw import doctor_gateway, file_permissions
+from defenseclaw import gateway as gateway_module
 from defenseclaw.commands import cmd_doctor
 from defenseclaw.gateway import gateway_api_client_host
 
@@ -69,10 +70,37 @@ def test_paths_same_uses_darwin_filesystem_case_identity(tmp_path):
 
 
 @pytest.mark.parametrize("bind", ["::", "[::]"])
-def test_gateway_api_client_host_uses_ipv6_loopback_for_ipv6_wildcard(bind):
+def test_gateway_api_client_host_uses_ipv6_loopback_for_ipv6_wildcard(bind, monkeypatch):
+    # Pinned rather than inherited from the runner: the resolver now consults a
+    # real IPv6 probe, and this case is specifically "IPv6 is usable".
+    monkeypatch.setattr(gateway_module, "_ipv6_loopback_available", lambda: True)
     cfg = SimpleNamespace(gateway=SimpleNamespace(api_bind=bind))
 
     assert gateway_api_client_host(cfg) == "::1"
+
+
+@pytest.mark.parametrize("bind", ["::", "[::]"])
+def test_gateway_api_client_host_falls_back_when_ipv6_is_unavailable(bind, monkeypatch):
+    """A ``::`` listener is reached over IPv4 when the host has no usable IPv6.
+
+    Hardened base images and some container runtimes disable IPv6 while still
+    running the gateway. Returning ``::1`` there hands callers an address they
+    can never connect to, so the resolver falls back to the loopback that
+    worked before ``::`` was split out from the wildcard set.
+    """
+    monkeypatch.setattr(gateway_module, "_ipv6_loopback_available", lambda: False)
+    cfg = SimpleNamespace(gateway=SimpleNamespace(api_bind=bind))
+
+    assert gateway_api_client_host(cfg) == "127.0.0.1"
+
+
+def test_ipv6_loopback_probe_is_local_and_cached():
+    """The probe must not depend on network egress and must be memoized."""
+    gateway_module._ipv6_loopback_available.cache_clear()
+    first = gateway_module._ipv6_loopback_available()
+    assert isinstance(first, bool)
+    assert gateway_module._ipv6_loopback_available() is first
+    assert gateway_module._ipv6_loopback_available.cache_info().hits >= 1
 
 
 @pytest.mark.skipif(os.name == "nt", reason="/proc socket fixture uses POSIX symlinks")
@@ -352,12 +380,12 @@ def test_windows_pid_integrity_checks_every_replaceable_ancestor(
         ),
     )
 
-    problem = doctor_gateway._pid_record_integrity_error(
+    status, problem = doctor_gateway._pid_record_integrity_error(
         os.fspath(pid_file),
         info,
     )
 
-    assert problem == ""
+    assert (status, problem) == ("ok", "")
     expected = [f"{os.path.normpath(os.fspath(pid_file))}:True:True"]
     ancestor = pid_file.parent
     while ancestor.parent != ancestor:

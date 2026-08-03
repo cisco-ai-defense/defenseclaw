@@ -439,6 +439,9 @@ func (exporter *SpanExporter) exportBatch(
 		switch exporter.circuit.Admit(exporter.nowUTC()) {
 		case delivery.CircuitAdmissionBlocked:
 			exporter.counters.circuitRejectedBatches.Add(1)
+			// len(spans) is O(1), so suppressed spans stay countable without
+			// running the per-span size estimation admission exists to skip.
+			exporter.counters.circuitRejectedRecords.Add(uint64(len(spans)))
 			return nil
 		case delivery.CircuitAdmissionProbe:
 			probePending = true
@@ -701,7 +704,10 @@ func (exporter *SpanExporter) deliveryHealthSnapshot() delivery.HealthSnapshot {
 		CircuitOpenUntil: circuit.OpenUntil, LastFailureClass: circuit.LastFailureClass,
 		Counters: delivery.Counters{
 			Accepted: counters.Accepted, Delivered: counters.Exported, Retried: counters.Retried,
-			Dropped: counters.DroppedQueueFull,
+			// See the metrics exporter: circuit-suppressed spans are a real,
+			// unretried loss that Export deliberately reports as success, so
+			// the drop total is where it has to become visible.
+			Dropped: addMetricHealthCounter(counters.DroppedQueueFull, counters.CircuitRejectedRecords),
 			Rejected: addMetricHealthCounter(
 				addMetricHealthCounter(counters.RejectedPartial, counters.RejectedOversize), counters.Failed,
 			),
