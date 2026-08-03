@@ -30,6 +30,21 @@ assert_no_defenseclaw_identity() {
     fi
 }
 
+# sha256_of PATH -> echoes the sha256 hex or exits the whole script.
+# `shasum | awk` swallows shasum's exit status; if the file is missing
+# or unreadable through sudo, the awk pipe returns "" and downstream
+# hash-equality assertions would silently compare "" = "" and pass. Use
+# this helper for every reinstall/relocation hash capture so an empty
+# capture is a hard test failure, not a vacuous pass.
+sha256_of() {
+    local path="$1"
+    local out
+    out="$(sudo -n shasum -a 256 -- "$path" 2>/dev/null | awk '{print $1}')" \
+        || fail "sha256_of: shasum failed for $path"
+    [ -n "$out" ] || fail "sha256_of: empty hash captured for $path (missing/unreadable?)"
+    printf '%s\n' "$out"
+}
+
 [ "$(uname -s)" = Darwin ] || fail "this smoke test requires macOS"
 [ "$(id -u)" -ne 0 ] || fail "run as a non-root CI user"
 [ "${MACOS_ENTERPRISE_PACKAGING_SMOKE:-}" = 1 ] || fail "set MACOS_ENTERPRISE_PACKAGING_SMOKE=1 on a disposable host"
@@ -144,7 +159,7 @@ EOF
 sudo -n mkdir -m 0700 -- "$trusted_fixture"
 trusted_fixture_owned=true
 sudo -n cp -- "$config_source" "${trusted_fixture}/config.yaml"
-sudo -n bash -c "printf 'version: 1\ntargets: []\n' >'${trusted_fixture}/targets.yaml'"
+printf 'version: 1\ntargets: []\n' | sudo -n tee -- "${trusted_fixture}/targets.yaml" >/dev/null
 sudo -n chown root:wheel "${trusted_fixture}/config.yaml" "${trusted_fixture}/targets.yaml"
 sudo -n chmod 0644 "${trusted_fixture}/config.yaml" "${trusted_fixture}/targets.yaml"
 config_source="${trusted_fixture}/config.yaml"
@@ -166,8 +181,8 @@ wheel_gid="$(stat -f '%g' /Library)"
 assert_no_defenseclaw_identity "installer created a defenseclaw identity during fresh install"
 
 # Record hashes so we can prove the reinstall below actually swapped the files.
-config_hash_after_install="$(sudo -n shasum -a 256 "$config_dest" | awk '{print $1}')"
-gateway_hash_after_install="$(sudo -n shasum -a 256 "$gateway_dest" | awk '{print $1}')"
+config_hash_after_install="$(sha256_of "$config_dest")"
+gateway_hash_after_install="$(sha256_of "$gateway_dest")"
 
 # Drop a marker inside the per-user probe home so we can verify a
 # reinstall doesn't touch it.
@@ -179,8 +194,8 @@ printf 'preserve\n' >"${probe_marker}/existing-state"
 
 # Mutate the managed config on disk so the fresh render will produce a
 # different sha256 — proves the reinstall is not a no-op.
-sudo -n bash -c "printf '\n# reinstall-should-overwrite\n' >>'$config_dest'"
-config_hash_before_reinstall="$(sudo -n shasum -a 256 "$config_dest" | awk '{print $1}')"
+printf '\n# reinstall-should-overwrite\n' | sudo -n tee -a -- "$config_dest" >/dev/null
+config_hash_before_reinstall="$(sha256_of "$config_dest")"
 [ "$config_hash_before_reinstall" != "$config_hash_after_install" ] \
     || fail "test setup bug: config hash did not change after appending mutation"
 
@@ -197,12 +212,12 @@ grep -Fq "reconciling existing DefenseClaw installation in place" \
 
 # The reinstalled config must equal the freshly-rendered content (i.e.,
 # our earlier mutation was overwritten).
-config_hash_after_reinstall="$(sudo -n shasum -a 256 "$config_dest" | awk '{print $1}')"
+config_hash_after_reinstall="$(sha256_of "$config_dest")"
 [ "$config_hash_after_reinstall" = "$config_hash_after_install" ] \
     || fail "reinstall did not restore config to freshly-rendered content"
 
 # Binary should also match the original.
-gateway_hash_after_reinstall="$(sudo -n shasum -a 256 "$gateway_dest" | awk '{print $1}')"
+gateway_hash_after_reinstall="$(sha256_of "$gateway_dest")"
 [ "$gateway_hash_after_reinstall" = "$gateway_hash_after_install" ] \
     || fail "reinstall did not restore gateway binary to source content"
 
@@ -240,9 +255,9 @@ grep -Fq "managed config is not root-owned" "${fixture}/untrusted-source.stderr"
     || fail "untrusted source refusal did not identify managed config trust"
 
 # The untrusted-source refusal must not have mutated the installed state.
-[ "$(sudo -n shasum -a 256 "$config_dest" | awk '{print $1}')" = "$config_hash_after_reinstall" ] \
+[ "$(sha256_of "$config_dest")" = "$config_hash_after_reinstall" ] \
     || fail "untrusted-source refusal modified managed config"
-[ "$(sudo -n shasum -a 256 "$gateway_dest" | awk '{print $1}')" = "$gateway_hash_after_reinstall" ] \
+[ "$(sha256_of "$gateway_dest")" = "$gateway_hash_after_reinstall" ] \
     || fail "untrusted-source refusal modified gateway binary"
 
 # ---- 4. Legacy path relocation -----------------------------------------
@@ -250,7 +265,7 @@ grep -Fq "managed config is not root-owned" "${fixture}/untrusted-source.stderr"
 # it under LOG_DIR with a timestamped suffix rather than refuse.
 
 sudo -n mkdir -p -- "$legacy_binary_root"
-sudo -n bash -c "printf 'legacy-content\n' >'${legacy_binary_root}/marker'"
+printf 'legacy-content\n' | sudo -n tee -- "${legacy_binary_root}/marker" >/dev/null
 sudo -n "$installer" \
     --binary "$binary" \
     --config "$config_source" \
@@ -266,7 +281,7 @@ grep -Fq "moved legacy path aside" \
     || fail "legacy path was not relocated: $legacy_binary_root still exists"
 
 # The relocated content must be discoverable under LOG_DIR.
-if ! sudo -n bash -c "ls '${log_dir}' | grep -q '^DefenseClaw\.pre-'"; then
+if ! sudo -n ls -- "${log_dir}" | grep -q '^DefenseClaw\.pre-'; then
     fail "legacy content not found under ${log_dir} with pre- prefix"
 fi
 
