@@ -24,8 +24,6 @@ import (
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 )
 
 // ForkMetricFactory creates a claim-independent metric transport factory from
@@ -393,7 +391,7 @@ func (exporter *MetricExporter) Export(ctx context.Context, metrics *metricdata.
 	err := exporter.inner.Export(attemptContext, metrics)
 	if err != nil {
 		exporter.counters.failed.Add(count)
-		class := metricFailureClass(exporter.config.tracker, dialSequence, err)
+		class := otlpFailureClass(exporter.config.tracker, dialSequence, err)
 		exporter.recordCircuitFailure(class, exporter.nowUTC())
 		probePending = false
 		unlock()
@@ -519,27 +517,6 @@ func (exporter *MetricExporter) recordCircuitFailure(class delivery.FailureClass
 		reason = delivery.HealthReasonCircuitOpen
 	}
 	exporter.recordHealthAt(delivery.HealthFailing, reason, false, at)
-}
-
-func metricFailureClass(
-	tracker *dialOutcomeTracker,
-	baseline uint64,
-	err error,
-) delivery.FailureClass {
-	switch {
-	case tracker.unsafeSince(baseline):
-		return delivery.FailureClassUnsafeEndpoint
-	case tracker.authenticationSince(baseline):
-		return delivery.FailureClassAuthentication
-	}
-	switch status.Code(err) {
-	case codes.Unauthenticated, codes.PermissionDenied:
-		return delivery.FailureClassAuthentication
-	case codes.InvalidArgument, codes.FailedPrecondition, codes.Unimplemented, codes.OutOfRange:
-		return delivery.FailureClassPermanentPayload
-	default:
-		return delivery.FailureClassTransient
-	}
 }
 
 func (exporter *MetricExporter) deliveryHealthSnapshot() delivery.HealthSnapshot {

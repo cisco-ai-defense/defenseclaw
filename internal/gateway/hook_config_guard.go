@@ -645,6 +645,45 @@ func (g *HookConfigGuard) repairCurrent(
 		g.reportPolicyFailure(conn, err)
 		return err
 	}
+	// Claude policy directories are commonly replaced atomically. A delete
+	// event can therefore expose a brief absence between the old directory and
+	// a replacement that explicitly sets disableAllHooks=true. Reconfirm an
+	// absent contract after one bounded quiet window before Setup, otherwise the
+	// guard can race the replacement and report a repair underneath an explicit
+	// administrator/user policy. A genuinely deleted config remains absent and
+	// is still healed after this short delay.
+	if !present && conn.Name() == "claudecode" {
+		if baseCtx == nil {
+			baseCtx = context.Background()
+		}
+		settle := g.debounce
+		if settle <= 0 || settle > 100*time.Millisecond {
+			settle = 100 * time.Millisecond
+		}
+		timer := time.NewTimer(settle)
+		select {
+		case <-timer.C:
+		case <-baseCtx.Done():
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			if releasePolicy != nil {
+				releasePolicy()
+			}
+			return baseCtx.Err()
+		}
+		present, err = connector.OwnedHooksPresent(conn, opts)
+		if err != nil {
+			if releasePolicy != nil {
+				releasePolicy()
+			}
+			g.reportPolicyFailure(conn, err)
+			return err
+		}
+	}
 	evidenceCurrent, err := connector.HookRuntimeRegistrationCurrent(
 		opts,
 		conn,

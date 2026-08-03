@@ -25,7 +25,7 @@ const encodedEnvelopeAllowance = 65_536
 
 // ExportCounters are content-free, monotonic per-signal counters. Fields count
 // records except CircuitRejectedBatches, which deliberately counts exporter
-// calls because open-circuit admission runs before inspecting metric content.
+// batch attempts because open-circuit admission runs before inspecting content.
 type ExportCounters struct {
 	Accepted               uint64
 	Exported               uint64
