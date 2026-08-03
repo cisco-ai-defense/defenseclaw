@@ -125,9 +125,12 @@ wait_for_file() {
     return 1
 }
 
-[ "$#" -eq 2 ] || fail "usage: $0 <defenseclaw-gateway-binary> <codex|claudecode>"
+[ "$#" -eq 2 ] || fail "usage: $0 <defenseclaw-gateway-binary> <codex|claudecode|amp>"
 
 connector="$2"
+artifact_kind='hook'
+native_otlp='true'
+user_token_sidecar='true'
 
 case "$connector" in
     codex)
@@ -146,10 +149,31 @@ case "$connector" in
         hook_request_path='/api/v1/claude-code/hook'
         hook_payload='{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"printf enterprise-ci"}}'
         ;;
+    amp)
+        artifact_kind='plugin'
+        native_otlp='false'
+        user_token_sidecar='false'
+        agent_version='0.0.1785334225'
+        hook_name='amp-plugin.ts'
+        native_config_rel='.config/amp/plugins/defenseclaw.ts'
+        native_config_seed=''
+        hook_request_path='/api/v1/amp/hook'
+        hook_payload='{"hook_event_name":"tool.call","session_id":"enterprise-ci","thread_id":"enterprise-ci","turn_id":"turn-1","tool_call_id":"tool-1","tool_name":"Bash","tool_input":{"command":"printf enterprise-ci"}}'
+        ;;
     *)
         fail "unsupported connector: $connector"
         ;;
 esac
+
+# The managed Amp plugin needs only its connector-scoped gateway bearer.
+# No model-provider credential is needed to install, repair, or validate it.
+unset \
+    AMP_API_KEY \
+    ANTHROPIC_API_KEY \
+    GEMINI_API_KEY \
+    GOOGLE_API_KEY \
+    OPENAI_API_KEY \
+    SOURCEGRAPH_ACCESS_TOKEN
 
 [ "$(id -u)" -ne 0 ] || fail "run as a non-root test user"
 [ -n "${HOME:-}" ] && [ "$HOME" != '/' ] && [ -d "$HOME" ] && [ ! -L "$HOME" ] || fail "HOME must be a real non-root directory"
@@ -187,6 +211,12 @@ service_token="${service_data}/hooks/.hook-${connector}.token"
 service_otlp_token="${service_data}/hooks/.otlp-${connector}.token"
 user_otlp_token="${hook_dir}/.otlp-${connector}.token"
 native_config="${target_home}/${native_config_rel}"
+managed_artifact="$hook_script"
+managed_artifact_mode='700'
+if [ "$artifact_kind" = plugin ]; then
+    managed_artifact="$native_config"
+    managed_artifact_mode='600'
+fi
 auth_record="${auth_dir}/protected_targets.json"
 server_ready="${target_home}/fake-gateway.ready"
 server_result="${target_home}/fake-gateway-result.json"
@@ -231,11 +261,18 @@ trap 'exit 130' HUP INT TERM
 ensure_service_identity
 
 rm -rf -- "$target_home"
-install -d -m 0700 "$target_home" "$(dirname "$native_config")"
-printf '%s\n' "$native_config_seed" >"$native_config"
-chmod 0600 "$native_config"
+install -d -m 0700 "$target_home"
+if [ "$artifact_kind" = plugin ]; then
+    [ ! -e "$native_config" ] || fail "managed plugin must be absent before first install"
+else
+    install -d -m 0700 "$(dirname "$native_config")"
+    printf '%s\n' "$native_config_seed" >"$native_config"
+    chmod 0600 "$native_config"
+fi
 
 TOKEN_PATH="$user_token" \
+TOKEN_SOURCE="$artifact_kind" \
+PLUGIN_PATH="$native_config" \
 EXPECTED_PATH="$hook_request_path" \
 SERVER_READY="$server_ready" \
 SERVER_RESULT="$server_result" \
@@ -243,11 +280,27 @@ python3 - >"$server_log" 2>&1 <<'PY' &
 import json
 import os
 import pathlib
+import re
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 expected_path = os.environ["EXPECTED_PATH"]
 result_path = os.environ["SERVER_RESULT"]
 token_path = os.environ["TOKEN_PATH"]
+token_source = os.environ["TOKEN_SOURCE"]
+plugin_path = os.environ["PLUGIN_PATH"]
+
+
+def expected_token():
+    if token_source != "plugin":
+        return pathlib.Path(token_path).read_text(encoding="utf-8").rstrip("\n")
+    source = pathlib.Path(plugin_path).read_text(encoding="utf-8")
+    match = re.search(
+        r'(?m)^const DC_API_TOKEN\s*=\s*("(?:\\.|[^"\\])*")\s*$',
+        source,
+    )
+    if match is None:
+        raise RuntimeError("managed Amp plugin is missing DC_API_TOKEN")
+    return json.loads(match.group(1))
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -259,8 +312,7 @@ class Handler(BaseHTTPRequestHandler):
             body_ok = isinstance(parsed, dict)
         except json.JSONDecodeError:
             body_ok = False
-        expected_token = pathlib.Path(token_path).read_text(encoding="utf-8").rstrip("\n")
-        auth_ok = self.headers.get("Authorization") == f"Bearer {expected_token}"
+        auth_ok = self.headers.get("Authorization") == f"Bearer {expected_token()}"
         path_ok = self.path == expected_path
         result = {
             "auth_ok": auth_ok,
@@ -363,12 +415,95 @@ run_reconcile_checked() {
     fail "enterprise hook reconcile failed; detailed JSON emitted above"
 }
 
+validate_amp_plugin_constants() {
+    local mode="${1:-validate}"
+    local scoped_token
+    scoped_token="$(sudo -n cat "$service_token")"
+    AMP_SCOPED_TOKEN="$scoped_token" HOOK_PAYLOAD="$hook_payload" \
+        python3 - "$native_config" "127.0.0.1:${api_port}" "$hook_request_path" "$mode" <<'PY'
+import json
+import os
+import pathlib
+import re
+import sys
+import urllib.request
+
+plugin_path = pathlib.Path(sys.argv[1])
+expected_addr, expected_path, mode = sys.argv[2:]
+source = plugin_path.read_text(encoding="utf-8")
+
+
+def string_constant(name):
+    match = re.search(
+        rf'(?m)^const {re.escape(name)}(?:\s*:\s*[^=]+)?\s*=\s*("(?:\\.|[^"\\])*")\s*$',
+        source,
+    )
+    if match is None:
+        raise SystemExit(f"managed Amp plugin is missing {name}")
+    return json.loads(match.group(1))
+
+
+api_addr = string_constant("DC_API_ADDR")
+api_token = string_constant("DC_API_TOKEN")
+endpoint = re.search(
+    r'fetch\(`http://\$\{DC_API_ADDR\}([^`$]+)`\s*,',
+    source,
+)
+if api_addr != expected_addr:
+    raise SystemExit("managed Amp plugin has the wrong gateway address")
+if endpoint is None or endpoint.group(1) != expected_path:
+    raise SystemExit("managed Amp plugin has the wrong hook endpoint")
+if api_token != os.environ.pop("AMP_SCOPED_TOKEN"):
+    raise SystemExit("managed Amp plugin does not embed the connector-scoped token")
+if "{{." in source:
+    raise SystemExit("managed Amp plugin retains an unresolved template placeholder")
+for provider_secret in (
+    "AMP_API_KEY",
+    "ANTHROPIC_API_KEY",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "OPENAI_API_KEY",
+    "SOURCEGRAPH_ACCESS_TOKEN",
+):
+    if provider_secret in source:
+        raise SystemExit(f"managed Amp plugin references provider secret {provider_secret}")
+
+if mode == "request":
+    payload = json.loads(os.environ["HOOK_PAYLOAD"])
+    request = urllib.request.Request(
+        f"http://{api_addr}{endpoint.group(1)}",
+        data=json.dumps(payload).encode("utf-8"),
+        headers={
+            "Authorization": f"Bearer {api_token}",
+            "Content-Type": "application/json",
+            "X-DefenseClaw-Client": "amp-enterprise-hardening-ci/1.0",
+        },
+        method="POST",
+    )
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(request, timeout=10) as response:
+        verdict = json.load(response)
+    if verdict.get("action") != "allow":
+        raise SystemExit(f"managed Amp plugin probe received an invalid verdict: {verdict}")
+elif mode != "validate":
+    raise SystemExit(f"unsupported Amp plugin validation mode: {mode}")
+PY
+}
+
 run_reconcile_checked "${target_home}/reconcile-initial.json"
 
-[ -f "$hook_script" ] || fail "managed hook was not installed"
-[ -f "$user_token" ] || fail "connector-scoped user token was not installed"
+[ -f "$managed_artifact" ] || fail "managed connector artifact was not installed"
+if [ "$user_token_sidecar" = true ]; then
+    [ -f "$user_token" ] || fail "connector-scoped user token was not installed"
+else
+    [ ! -e "$user_token" ] || fail "managed plugin wrote an unnecessary user token sidecar"
+fi
 sudo -n test -f "$service_token" || fail "connector-scoped service token was not created"
-sudo -n test -f "$service_otlp_token" || fail "connector-scoped service OTLP token was not created"
+if [ "$native_otlp" = true ]; then
+    sudo -n test -f "$service_otlp_token" || fail "connector-scoped service OTLP token was not created"
+else
+    sudo -n test ! -e "$service_otlp_token" || fail "connector without native OTLP received a service OTLP token"
+fi
 [ ! -e "$user_otlp_token" ] || fail "managed install wrote an unrecognized per-user OTLP token"
 sudo -n test -f "$auth_record" || fail "root-owned authorization record was not created"
 [ "$(protected_file_owner_uid "$auth_record")" = 0 ] || fail "authorization record is not root-owned"
@@ -378,37 +513,52 @@ sudo -n -u defenseclaw test -r "$auth_record" || fail "defenseclaw service ident
 if cat "$auth_record" >/dev/null 2>&1; then
     fail "ordinary user can read the authorization record"
 fi
-[ "$(file_mode "$hook_script")" = '700' ] || fail "hook mode is not 0700"
-[ "$(file_mode "$user_token")" = '600' ] || fail "user token mode is not 0600"
+[ "$(file_mode "$managed_artifact")" = "$managed_artifact_mode" ] || fail "managed artifact mode is not 0${managed_artifact_mode}"
 [ "$(file_mode "$native_config")" = '600' ] || fail "native config mode is not 0600"
-[ "$(file_owner_uid "$hook_script")" = "$uid" ] || fail "hook owner does not match the target user"
-[ "$(file_owner_uid "$user_token")" = "$uid" ] || fail "user token owner does not match the target user"
+[ "$(file_owner_uid "$managed_artifact")" = "$uid" ] || fail "managed artifact owner does not match the target user"
 [ "$(file_owner_uid "$native_config")" = "$uid" ] || fail "native config owner does not match the target user"
-[ "$(protected_file_owner_uid "$service_otlp_token")" = 0 ] || fail "service OTLP token is not root-owned"
-[ "$(protected_file_mode "$service_otlp_token")" = 600 ] || fail "service OTLP token mode is not 0600"
-[ ! -e "${hook_dir}/.token" ] || fail "legacy shared token was written"
-[ "$(wc -l <"$user_token" | tr -d ' ')" = '1' ] || fail "scoped token is not one raw line"
-! grep -q '^DEFENSECLAW_GATEWAY_TOKEN=' "$user_token" || fail "scoped token used legacy assignment format"
-grep -Fq "$hook_script" "$native_config" || fail "native agent config does not reference the managed hook"
-service_otlp_value="$(sudo -n cat "$service_otlp_token")"
-if grep -Fq "/otlp/${connector}/${service_otlp_value}" "$native_config"; then
-    fail "native agent config leaked the gateway service OTLP token in an endpoint"
+if [ "$user_token_sidecar" = true ]; then
+    [ "$(file_mode "$user_token")" = '600' ] || fail "user token mode is not 0600"
+    [ "$(file_owner_uid "$user_token")" = "$uid" ] || fail "user token owner does not match the target user"
 fi
-case "$connector" in
-    codex)
-        if ! grep -Fq "authorization = \"Bearer ${service_otlp_value}\"" "$native_config" &&
-            ! grep -Fq "authorization = 'Bearer ${service_otlp_value}'" "$native_config"; then
-            fail "Codex config does not carry the gateway service OTLP token as an Authorization bearer"
-        fi
-        ;;
-    claudecode)
-        grep -Fq "authorization=Bearer ${service_otlp_value}" "$native_config" || fail "Claude config does not carry the gateway service OTLP token as a literal Authorization bearer"
-        if grep -Fq "authorization=Bearer%20${service_otlp_value}" "$native_config"; then
-            fail "Claude config retained the obsolete percent-encoded Authorization bearer"
-        fi
-        ;;
-esac
-sudo -n cmp -s "$service_token" "$user_token" || fail "service and user scoped tokens differ"
+if [ "$native_otlp" = true ]; then
+    [ "$(protected_file_owner_uid "$service_otlp_token")" = 0 ] || fail "service OTLP token is not root-owned"
+    [ "$(protected_file_mode "$service_otlp_token")" = 600 ] || fail "service OTLP token mode is not 0600"
+fi
+[ ! -e "${hook_dir}/.token" ] || fail "legacy shared token was written"
+if [ "$user_token_sidecar" = true ]; then
+    [ "$(wc -l <"$user_token" | tr -d ' ')" = '1' ] || fail "scoped token is not one raw line"
+    ! grep -q '^DEFENSECLAW_GATEWAY_TOKEN=' "$user_token" || fail "scoped token used legacy assignment format"
+fi
+if [ "$artifact_kind" = plugin ]; then
+    [ ! -x "$managed_artifact" ] || fail "managed Amp plugin is executable"
+    validate_amp_plugin_constants
+else
+    grep -Fq "$hook_script" "$native_config" || fail "native agent config does not reference the managed hook"
+fi
+if [ "$native_otlp" = true ]; then
+    service_otlp_value="$(sudo -n cat "$service_otlp_token")"
+    if grep -Fq "/otlp/${connector}/${service_otlp_value}" "$native_config"; then
+        fail "native agent config leaked the gateway service OTLP token in an endpoint"
+    fi
+    case "$connector" in
+        codex)
+            if ! grep -Fq "authorization = \"Bearer ${service_otlp_value}\"" "$native_config" &&
+                ! grep -Fq "authorization = 'Bearer ${service_otlp_value}'" "$native_config"; then
+                fail "Codex config does not carry the gateway service OTLP token as an Authorization bearer"
+            fi
+            ;;
+        claudecode)
+            grep -Fq "authorization=Bearer ${service_otlp_value}" "$native_config" || fail "Claude config does not carry the gateway service OTLP token as a literal Authorization bearer"
+            if grep -Fq "authorization=Bearer%20${service_otlp_value}" "$native_config"; then
+                fail "Claude config retained the obsolete percent-encoded Authorization bearer"
+            fi
+            ;;
+    esac
+fi
+if [ "$user_token_sidecar" = true ]; then
+    sudo -n cmp -s "$service_token" "$user_token" || fail "service and user scoped tokens differ"
+fi
 
 sudo -n -u defenseclaw python3 - "$auth_record" "$connector" "$target_home" <<'PY'
 import json
@@ -441,57 +591,96 @@ if cat "$service_token" >/dev/null 2>&1; then
     fail "standard user read the root-owned service token"
 fi
 
-canonical_hook_hash="$(file_hash "$hook_script")"
-printf '#!/bin/sh\nexit 0\n' >"$hook_script"
-chmod 4777 "$hook_script"
-printf 'attacker-controlled-token\n' >"$user_token"
-printf '%s\n' "$native_config_seed" >"$native_config"
-chmod 0777 "$native_config"
+canonical_artifact_hash="$(file_hash "$managed_artifact")"
+if [ "$artifact_kind" = plugin ]; then
+    printf '// attacker-controlled Amp plugin\nconst DC_API_TOKEN = "attacker-controlled-token"\n' >"$managed_artifact"
+else
+    printf '#!/bin/sh\nexit 0\n' >"$managed_artifact"
+fi
+chmod 4777 "$managed_artifact"
+if [ "$user_token_sidecar" = true ]; then
+    printf 'attacker-controlled-token\n' >"$user_token"
+fi
+if [ "$artifact_kind" != plugin ]; then
+    printf '%s\n' "$native_config_seed" >"$native_config"
+    chmod 0777 "$native_config"
+fi
 
 run_reconcile_checked "${target_home}/reconcile-regular-tamper.json"
 
-[ "$(file_hash "$hook_script")" = "$canonical_hook_hash" ] || fail "regular-file hook tamper was not repaired"
-[ "$(file_mode "$hook_script")" = '700' ] || fail "hook special/writable mode was not normalized"
-[ "$(file_mode "$user_token")" = '600' ] || fail "token mode was not normalized"
+[ "$(file_hash "$managed_artifact")" = "$canonical_artifact_hash" ] || fail "regular-file artifact tamper was not repaired"
+[ "$(file_mode "$managed_artifact")" = "$managed_artifact_mode" ] || fail "managed artifact special/writable mode was not normalized"
+[ "$artifact_kind" != plugin ] || [ ! -x "$managed_artifact" ] || fail "repaired Amp plugin is executable"
 [ "$(file_mode "$native_config")" = '600' ] || fail "native config mode was not normalized"
-sudo -n cmp -s "$service_token" "$user_token" || fail "user token tamper was not repaired"
-grep -Fq "$hook_script" "$native_config" || fail "native hook wiring tamper was not repaired"
+if [ "$user_token_sidecar" = true ]; then
+    [ "$(file_mode "$user_token")" = '600' ] || fail "token mode was not normalized"
+    sudo -n cmp -s "$service_token" "$user_token" || fail "user token tamper was not repaired"
+fi
+if [ "$artifact_kind" = plugin ]; then
+    validate_amp_plugin_constants
+else
+    grep -Fq "$hook_script" "$native_config" || fail "native hook wiring tamper was not repaired"
+fi
 
-hook_decoy="${target_home}/hook-decoy"
-config_decoy="${target_home}/config-decoy"
-printf 'hook decoy must remain unchanged\n' >"$hook_decoy"
-printf 'config decoy must remain unchanged\n' >"$config_decoy"
-hook_decoy_hash="$(file_hash "$hook_decoy")"
-config_decoy_hash="$(file_hash "$config_decoy")"
-rm -f "$hook_script" "$native_config"
-ln -s "$hook_decoy" "$hook_script"
-ln -s "$config_decoy" "$native_config"
+artifact_decoy="${target_home}/artifact-decoy"
+printf 'artifact decoy must remain unchanged\n' >"$artifact_decoy"
+artifact_decoy_hash="$(file_hash "$artifact_decoy")"
+rm -f "$managed_artifact"
+ln -s "$artifact_decoy" "$managed_artifact"
+if [ "$artifact_kind" != plugin ]; then
+    config_decoy="${target_home}/config-decoy"
+    printf 'config decoy must remain unchanged\n' >"$config_decoy"
+    config_decoy_hash="$(file_hash "$config_decoy")"
+    rm -f "$native_config"
+    ln -s "$config_decoy" "$native_config"
+fi
 
 run_reconcile_checked "${target_home}/reconcile-symlink-tamper.json"
 
-[ ! -L "$hook_script" ] && [ -f "$hook_script" ] || fail "hook symlink was not replaced safely"
-[ ! -L "$native_config" ] && [ -f "$native_config" ] || fail "native config symlink was not replaced safely"
-[ "$(file_hash "$hook_script")" = "$canonical_hook_hash" ] || fail "canonical hook was not restored after symlink tamper"
-[ "$(file_hash "$hook_decoy")" = "$hook_decoy_hash" ] || fail "hook symlink target was modified"
-[ "$(file_hash "$config_decoy")" = "$config_decoy_hash" ] || fail "config symlink target was modified"
-grep -Fq "$hook_script" "$native_config" || fail "native hook wiring was not restored after symlink tamper"
+[ ! -L "$managed_artifact" ] && [ -f "$managed_artifact" ] || fail "managed artifact symlink was not replaced safely"
+[ "$(file_hash "$managed_artifact")" = "$canonical_artifact_hash" ] || fail "canonical artifact was not restored after symlink tamper"
+[ "$(file_hash "$artifact_decoy")" = "$artifact_decoy_hash" ] || fail "artifact symlink target was modified"
+if [ "$artifact_kind" = plugin ]; then
+    [ "$(file_mode "$managed_artifact")" = '600' ] || fail "Amp plugin mode was not restored after symlink tamper"
+    [ ! -x "$managed_artifact" ] || fail "Amp plugin became executable after symlink repair"
+    validate_amp_plugin_constants
+else
+    [ ! -L "$native_config" ] && [ -f "$native_config" ] || fail "native config symlink was not replaced safely"
+    [ "$(file_hash "$config_decoy")" = "$config_decoy_hash" ] || fail "config symlink target was modified"
+    grep -Fq "$hook_script" "$native_config" || fail "native hook wiring was not restored after symlink tamper"
+fi
 
-touch -t 200001010000 "$hook_script" "$user_token" "$native_config"
-hook_mtime="$(file_mtime "$hook_script")"
-token_mtime="$(file_mtime "$user_token")"
-config_mtime="$(file_mtime "$native_config")"
+if [ "$user_token_sidecar" = true ]; then
+    touch -t 200001010000 "$managed_artifact" "$user_token" "$native_config"
+else
+    touch -t 200001010000 "$managed_artifact"
+fi
+artifact_mtime="$(file_mtime "$managed_artifact")"
+if [ "$user_token_sidecar" = true ]; then
+    token_mtime="$(file_mtime "$user_token")"
+    config_mtime="$(file_mtime "$native_config")"
+fi
 run_reconcile_checked "${target_home}/reconcile-noop.json"
-[ "$(file_mtime "$hook_script")" = "$hook_mtime" ] || fail "no-op reconcile rewrote the hook"
-[ "$(file_mtime "$user_token")" = "$token_mtime" ] || fail "no-op reconcile rewrote the scoped token"
-[ "$(file_mtime "$native_config")" = "$config_mtime" ] || fail "no-op reconcile rewrote the native config"
+[ "$(file_mtime "$managed_artifact")" = "$artifact_mtime" ] || fail "no-op reconcile rewrote the managed artifact"
+if [ "$user_token_sidecar" = true ]; then
+    [ "$(file_mtime "$user_token")" = "$token_mtime" ] || fail "no-op reconcile rewrote the scoped token"
+    [ "$(file_mtime "$native_config")" = "$config_mtime" ] || fail "no-op reconcile rewrote the native config"
+fi
 
 hook_stdout="${target_home}/hook.stdout"
 hook_stderr="${target_home}/hook.stderr"
-if ! printf '%s\n' "$hook_payload" | \
-    HOME="$target_home" DEFENSECLAW_GATEWAY_TOKEN='attacker-inherited-token' \
-    "$hook_script" >"$hook_stdout" 2>"$hook_stderr"; then
-    cat "$hook_stderr" >&2
-    fail "managed hook did not complete an allow request"
+if [ "$artifact_kind" = plugin ]; then
+    if ! validate_amp_plugin_constants request >"$hook_stdout" 2>"$hook_stderr"; then
+        cat "$hook_stderr" >&2
+        fail "managed Amp plugin constants did not complete an allow request"
+    fi
+else
+    if ! printf '%s\n' "$hook_payload" | \
+        HOME="$target_home" DEFENSECLAW_GATEWAY_TOKEN='attacker-inherited-token' \
+        "$hook_script" >"$hook_stdout" 2>"$hook_stderr"; then
+        cat "$hook_stderr" >&2
+        fail "managed hook did not complete an allow request"
+    fi
 fi
 if ! wait_for_file "$server_result"; then
     cat "$server_log" >&2 || true

@@ -632,6 +632,18 @@ func TestConnectorSetupTokensUnmanagedFallsBackToMasterToken(t *testing.T) {
 	}
 }
 
+func TestConnectorSetupTokensAMPRefusesMasterTokenFallback(t *testing.T) {
+	_, err := connectorSetupTokensFor(
+		failingHookTokenDataDir(t),
+		connector.NewAMPConnector(),
+		"gateway-master",
+		false,
+	)
+	if err == nil {
+		t.Fatal("Amp setup accepted the gateway master token after scoped-token creation failed")
+	}
+}
+
 func TestConnectorSetupTokensProxyKeepsMasterOutOfScopedSidecar(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("proxy connectors are unsupported on native Windows; platform gate coverage remains active")

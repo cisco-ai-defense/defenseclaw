@@ -77,6 +77,15 @@ const (
 // specs is the single source of truth for the Go hook contract. Every entry
 // here is pinned by a golden test against the corresponding .sh hook.
 var specs = map[string]spec{
+	"amp": {
+		connector: "amp", hookName: "amp-plugin", errLabel: "amp",
+		subject: "amp tool", endpoint: "/api/v1/amp/hook",
+		outputField: "", style: styleActionStderr,
+		defaultBlockReason: "Blocked by DefenseClaw Amp policy.",
+		oversizedClosed:    failResult{exit: blockExit},
+		unreachableStrict:  failResult{exit: blockExit},
+		responseClosed:     failResult{exit: blockExit},
+	},
 	"claudecode": {
 		connector: "claudecode", hookName: "claude-code-hook", errLabel: "claude-code",
 		subject: "claude-code tool", endpoint: "/api/v1/claude-code/hook",

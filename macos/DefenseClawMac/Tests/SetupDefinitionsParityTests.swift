@@ -103,6 +103,7 @@ struct SetupDefinitionsParityTests {
         seedsDiscoveryFromTheSelectedConfig()
         validatesDiscoveryCLIRanges()
         observabilityNeverEmitsAnUnsupportedConnectorOption()
+        includesAmpAcrossSetupSurfaces()
         guardrailDefaultsNeverGuessTheWrongConnector()
         llmDefaultsPreserveTheSelectedProvider()
         llmBuilderDropsStaleRegionalOptions()
@@ -212,6 +213,18 @@ struct SetupDefinitionsParityTests {
         ], false)
         expect(commands.count == 1, "observability add is one command")
         expect(!commands[0].contains("--connector"), "global observability CLI has no connector option")
+    }
+
+    private static func includesAmpAcrossSetupSurfaces() {
+        expect(TUIWizards.connectors.contains("amp"), "Amp appears in the native connector picker")
+        expect(TUIWizards.hookConnectors.contains("amp"), "Amp is treated as a hook connector")
+        let definition = TUIWizards.all.first { $0.id == "connector" }
+        let connectorField = definition?.fields.first { $0.key == "connector" }
+        guard case .choice(let options) = connectorField?.kind else {
+            expect(false, "connector setup field is a choice")
+            return
+        }
+        expect(options.contains("amp"), "Amp appears in connector setup choices")
     }
 
     private static func guardrailDefaultsNeverGuessTheWrongConnector() {

@@ -3082,6 +3082,7 @@ _CONNECTOR_NAMES_FALLBACK = [
     "openhands",
     "antigravity",
     "opencode",
+    "amp",
     "omnigent",
 ]
 
@@ -3215,6 +3216,12 @@ _CONNECTOR_META: dict[str, dict[str, str]] = {
         "tool_mode": "both",
         "subprocess_policy": "none",
     },
+    "amp": {
+        "label": "Amp",
+        "description": "system TypeScript policy plugin with synchronous tool.call allow/confirm/block verdicts",
+        "tool_mode": "both",
+        "subprocess_policy": "none",
+    },
     "omnigent": {
         "label": "OmniGent",
         "description": "custom Python policy bridge with ALLOW/ASK/DENY and optional native OTLP",
@@ -3324,6 +3331,26 @@ _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
             "plugin auto-loaded by opencode; no opencode.json edit and no "
             "shell-hook config patch"
         ),
+    ),
+    "amp": (
+        (
+            "~/.config/amp/plugins/defenseclaw.ts — owner-only system "
+            "policy plugin loaded by Amp on macOS, Linux, and native Windows"
+        ),
+        (
+            "~/.config/amp/settings.json or settings.jsonc, "
+            "<workspace>/.amp/settings.json or settings.jsonc, "
+            "and OS enterprise managed-settings.json are discovery-only"
+        ),
+        (
+            "Amp-native amp.permissions, amp.guardedFiles.allowlist, "
+            "amp.dangerouslyAllowAll, and amp.mcpPermissions are reported but never mutated"
+        ),
+        (
+            "AGENTS.md guidance and .agents/checks / global checks are "
+            "discovered read-only; DefenseClaw does not rewrite them"
+        ),
+        "Amp MCP registrations are discovered read-only; manage them with `amp mcp add`",
     ),
     "omnigent": (
         "OmniGent's effective config.yaml policy_modules and server-wide policies",
@@ -3826,6 +3853,12 @@ def _hilt_support_note(connector: str) -> str:
         return (
             "Antigravity supports native PreToolUse ask; returning decision=ask "
             "from a hook overrides agy's --dangerously-skip-permissions flag."
+        )
+    if connector == "amp":
+        return (
+            "Amp supports native confirmation for synchronous foreground tool.call and "
+            "model-bound tool.result events; background or UI-unavailable confirmations "
+            "reject the call or withhold the result safely."
         )
     if connector == "omnigent":
         return (
@@ -5359,7 +5392,15 @@ def _print_connector_observability_banner(connector: str, *, mode: str = "observ
     click.echo(f"  DefenseClaw — {label} {mode} setup")
     click.echo("  ─────────────────────────────────────────────────────────")
     click.echo()
-    if connector == "omnigent":
+    if connector == "amp":
+        click.echo("  This installs DefenseClaw as Amp's system TypeScript policy")
+        click.echo("  plugin. No proxy is inserted in the LLM data path; Amp")
+        if mode == "action":
+            click.echo("  waits for synchronous tool.call allow, confirm, or reject")
+            click.echo("  verdicts before the requested tool can execute.")
+        else:
+            click.echo("  tool activity is recorded but never blocked.")
+    elif connector == "omnigent":
         click.echo("  This wires OmniGent into DefenseClaw through its custom")
         click.echo("  Python policy API. No proxy is inserted in the LLM data")
         if mode == "action":
@@ -5377,7 +5418,17 @@ def _print_connector_observability_banner(connector: str, *, mode: str = "observ
             click.echo("  path; activity is recorded but never blocked.")
     click.echo()
     click.echo("  Telemetry channels:")
-    if connector == "omnigent":
+    if connector == "amp":
+        click.echo("    • Plugin API — session/agent/tool lifecycle → /api/v1/amp/hook")
+        click.echo(
+            "    • Enforcement — synchronous tool.call execution gate "
+            "+ model-bound tool.result output gate"
+        )
+        click.echo(
+            "    • Agent360 / Galileo — correlated session, turn, tool, outcome, "
+            "decision, audit, log, metric, and trace views"
+        )
+    elif connector == "omnigent":
         click.echo("    • Policy API — six request/tool/model phases → /api/v1/omnigent/hook")
     else:
         click.echo(f"    • Hooks      — tool calls, prompt-submit, agent stop → /api/v1/{connector}/hook")
@@ -5395,6 +5446,8 @@ def _print_connector_observability_banner(connector: str, *, mode: str = "observ
             click.echo("    • Native OTel — documented agent telemetry → /v1/logs, /v1/metrics, and/or /v1/traces")
     if connector == "codex":
         click.echo("    • Notify     — agent-turn-complete events → /api/v1/codex/notify")
+    if connector == "amp":
+        click.echo("    • Headless   — use `amp -x ... --plugin-ready-timeout 30` for complete lifecycle telemetry")
     click.echo()
     if mode == "observe":
         click.echo("  To later turn enforcement on:")
@@ -5443,7 +5496,9 @@ def _print_observability_summary(
 ) -> None:
     """One-screen summary surfaced after a successful alias run."""
     label = _CONNECTOR_META[connector]["label"]
-    if connector == "omnigent":
+    if connector == "amp":
+        enforcement_label = "enabled (synchronous policy plugin)" if mode == "action" else "disabled (observe-only)"
+    elif connector == "omnigent":
         enforcement_label = "enabled (custom policy API)" if mode == "action" else "disabled (observe-only)"
     else:
         enforcement_label = "enabled (hook-driven)" if mode == "action" else "disabled (observe-only)"
@@ -7005,7 +7060,11 @@ def setup_remove(
 def _make_observability_setup_command(connector: str) -> click.Command:
     """Create a ``defenseclaw setup <connector>`` hook-driven alias."""
     label = _CONNECTOR_META[connector]["label"]
-    surface_name = "custom policy API" if connector == "omnigent" else "agent lifecycle hooks"
+    surface_name = (
+        "synchronous policy plugin"
+        if connector == "amp"
+        else ("custom policy API" if connector == "omnigent" else "agent lifecycle hooks")
+    )
     platform = platform_support.connector_platform_support(connector)
     platform_note = (
         ""
@@ -7171,6 +7230,7 @@ for _observability_connector in (
     "openhands",
     "antigravity",
     "opencode",
+    "amp",
     "omnigent",
 ):
     setup.add_command(_make_observability_setup_command(_observability_connector))
@@ -7209,6 +7269,7 @@ _HOOK_ENFORCED_CONNECTORS = frozenset(
         "openhands",
         "antigravity",
         "opencode",
+        "amp",
         "omnigent",
     }
 )
@@ -8684,7 +8745,11 @@ def _restart_services(
         # No proxy listener binds for hook-only connectors — the agent
         # talks directly to its native upstream and DefenseClaw
         # observes/enforces via the hook bus on the sidecar API port.
-        surface = "custom policy API" if connector == "omnigent" else "hook bus"
+        surface = (
+            "synchronous policy plugin"
+            if connector == "amp"
+            else ("custom policy API" if connector == "omnigent" else "hook bus")
+        )
         ux.subhead(
             f"{connector} connector: enforcement via {surface} on the sidecar API port. "
             f"No proxy listener — {connector} talks directly to its native upstream."

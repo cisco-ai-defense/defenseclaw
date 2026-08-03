@@ -41,7 +41,7 @@ defenseclaw agent discover
 
 That's it. The CLI walks the known connector paths (OpenClaw, ZeptoClaw,
 Claude Code, Codex, Cursor, Windsurf, Gemini CLI, GitHub Copilot CLI,
-OpenHands, Antigravity, Hermes, OpenCode, OmniGent), checks for config files
+OpenHands, Antigravity, Hermes, OpenCode, Amp, OmniGent), checks for config files
 and binaries, probes versions under the configured trusted-prefix policy, and
 prints a table of what's installed.
 
@@ -87,7 +87,7 @@ The continuous scanner (`internal/inventory/ai_discovery.go`) classifies every s
 
 | Category | What it surfaces |
 | --- | --- |
-| `supported_connector` | OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Windsurf, Gemini CLI, GitHub Copilot CLI, OpenHands, Antigravity, Hermes, OpenCode, OmniGent |
+| `supported_connector` | OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Windsurf, Gemini CLI, GitHub Copilot CLI, OpenHands, Antigravity, Hermes, OpenCode, Amp, OmniGent |
 | `ai_cli` | Standalone AI CLIs and helpers (`gh copilot`, `aider`, `chatblade`, …) |
 | `active_process` | Live AI processes — model serving, sandbox runners, scanner subprocesses |
 | `editor_extension` | VS Code / JetBrains / Cursor extensions that talk to providers |

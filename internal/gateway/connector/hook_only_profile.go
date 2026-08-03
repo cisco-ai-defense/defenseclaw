@@ -103,6 +103,12 @@ func hookOnlyProfileRespond(in HookRespondInput) HookRespondOutput {
 		if in.Action == "block" {
 			output = map[string]interface{}{"decision": "deny", "reason": reason}
 		}
+	case "amp":
+		// The Amp policy plugin consumes the unified top-level action,
+		// reason, and additional_context fields. It translates block to
+		// reject-and-continue and confirm to ctx.ui.confirm itself, so no
+		// connector-specific nested hook_output is needed.
+		return HookRespondOutput{}
 	case "antigravity":
 		output = antigravityHookOutputForProfile(in.Req.HookEventName, in.Action, in.RawAction, reason, in.AdditionalContext)
 	case "omnigent":

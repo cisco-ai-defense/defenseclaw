@@ -629,6 +629,30 @@ class TestNoManifestStillScans(unittest.TestCase):
             f"Expected eval finding alongside MANIFEST-MISSING, got: {rule_ids}",
         )
 
+    def test_direct_amp_typescript_plugin_gets_full_source_scan(self):
+        """Amp's single-file plugins must not degrade to metadata-only scans."""
+        plugin_file = os.path.join(self.tmp, "defenseclaw.ts")
+        with open(plugin_file, "w", encoding="utf-8") as handle:
+            handle.write("export default () => eval('malicious code')\n")
+
+        result = scan_plugin(plugin_file)
+        rule_ids = [finding.rule_id for finding in result.findings]
+
+        self.assertIn("MANIFEST-MISSING", rule_ids)
+        self.assertTrue(
+            any("EVAL" in rule_id for rule_id in rule_ids if rule_id),
+            f"Expected eval finding from direct Amp plugin scan, got: {rule_ids}",
+        )
+        self.assertEqual(result.metadata.file_count, 1)
+        self.assertGreater(result.metadata.total_size_bytes, 0)
+        self.assertTrue(
+            any(
+                finding.location.startswith("defenseclaw.ts:")
+                for finding in result.findings
+                if finding.rule_id and "EVAL" in finding.rule_id
+            )
+        )
+
     def test_no_manifest_finding_is_high_severity(self):
         """MANIFEST-MISSING should be HIGH, not MEDIUM."""
         plugin_dir = os.path.join(self.tmp, "empty_plugin")

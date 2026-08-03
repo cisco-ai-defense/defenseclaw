@@ -77,7 +77,7 @@ COSIGN_BIN=""
 # Supported connectors. Keep in sync with cli/defenseclaw/connector_paths.py
 # KNOWN_CONNECTORS. The "none" pseudo-value means "lay binaries only — pick
 # a connector later with `defenseclaw init --connector ...`".
-readonly CONNECTOR_CHOICES=(codex claudecode zeptoclaw openclaw hermes cursor windsurf geminicli copilot openhands antigravity opencode omnigent none)
+readonly CONNECTOR_CHOICES=(codex claudecode zeptoclaw openclaw hermes cursor windsurf geminicli copilot openhands antigravity opencode amp omnigent none)
 
 # ── Terminal Formatting ───────────────────────────────────────────────────────
 
@@ -733,6 +733,7 @@ connector_display_name() {
         openhands) echo "OpenHands" ;;
         antigravity) echo "Antigravity" ;;
         opencode) echo "OpenCode" ;;
+        amp) echo "Amp" ;;
         omnigent) echo "OmniGent" ;;
         *) echo "$1" ;;
     esac

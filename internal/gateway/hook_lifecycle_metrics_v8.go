@@ -67,7 +67,7 @@ func (a *APIServer) recordHookLifecycleMetricsV8(
 	}
 	now := time.Now().UTC()
 	connector := telemetry.NormalizeMetricTextLabel(meta.Source)
-	provider := telemetry.NormalizeGenAIProviderLabel(firstNonEmpty(meta.Provider, meta.Source))
+	provider := telemetry.NormalizeGenAIProviderLabel(hookProviderOrConnector(meta.Provider, meta.Source))
 	model := telemetry.NormalizeModelLabel(meta.Model)
 	agentType := telemetry.NormalizeMetricTextLabel(meta.AgentType)
 	lifecycleEvent := telemetry.NormalizeMetricTextLabel(firstNonEmpty(meta.LifecycleEvent, "event"))

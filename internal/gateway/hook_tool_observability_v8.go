@@ -270,7 +270,7 @@ func hookToolV8AgentInput(observation generatedToolV8Observation) (observability
 		}
 	}
 	identity := hookModelV8Observation{
-		meta: meta, provider: firstNonEmpty(meta.Provider, meta.Source),
+		meta: meta, provider: hookProviderOrConnector(meta.Provider, meta.Source),
 		agentName: observation.agentName, agentType: observation.agentType,
 		agentID: observation.agentID, sessionID: observation.sessionID,
 	}

@@ -66,6 +66,13 @@ type SetupOpts struct {
 	ProxyAddr string // 127.0.0.1:4000 (guardrail proxy — LLM traffic)
 	APIAddr   string // 127.0.0.1:18970 (API server — inspection endpoints)
 	APIToken  string // gateway bearer token; baked into hook curl -H
+	// ConfigHome is an explicit, caller-validated connector-native config
+	// directory for lifecycle operations. It prevents privileged setup,
+	// repair, teardown, and verification from resolving a different user
+	// profile through mutable process environment. Connectors that support
+	// it define the directory's exact meaning; Amp uses its ~/.config/amp
+	// root. An empty value preserves normal interactive home discovery.
+	ConfigHome string
 	// HookAPIToken is the least-privilege credential written beside generated
 	// hook artifacts. Proxy connectors keep APIToken as the master credential
 	// for their in-process/plugin integration while their generic shell hooks
@@ -758,6 +765,45 @@ type HookScriptOwner interface {
 // pretending the connector owns a shell script.
 type HookConfigReferenceOwner interface {
 	HookConfigReferenceNeedles(opts SetupOpts) []string
+}
+
+// ScopedHookTokenRequirement is implemented by connector runtimes that place
+// a bearer credential in a host-agent auto-loaded artifact. Such connectors
+// must fail setup if a least-privilege hook token cannot be established; they
+// may never fall back to embedding the gateway master token.
+type ScopedHookTokenRequirement interface {
+	RequiresScopedHookToken() bool
+}
+
+// ManagedPluginArtifactOwner identifies connector-managed plugin files that
+// host agents auto-load directly. Unlike shell hooks, these artifacts are
+// owner-readable policy/config files: they may be absent before first install,
+// must remain mode 0600 when they embed a scoped token, and are exclusively
+// written by DefenseClaw.
+type ManagedPluginArtifactOwner interface {
+	ManagedPluginArtifacts(opts SetupOpts) []string
+}
+
+// ManagedPluginArtifacts returns the connector's auto-loaded managed plugin
+// files, if any. The normalized list lets privileged installers distinguish a
+// plugin artifact from an executable hook even when legacy AgentPaths reports
+// the same file in HookScripts for lifecycle compatibility.
+func ManagedPluginArtifacts(conn Connector, opts SetupOpts) []string {
+	if conn == nil {
+		return nil
+	}
+	owner, ok := conn.(ManagedPluginArtifactOwner)
+	if !ok {
+		return nil
+	}
+	return uniqueNonEmptyStrings(owner.ManagedPluginArtifacts(opts))
+}
+
+// RequiresScopedHookToken reports whether conn must have a connector-scoped
+// credential before its managed runtime can be installed.
+func RequiresScopedHookToken(conn Connector) bool {
+	requirement, ok := conn.(ScopedHookTokenRequirement)
+	return ok && requirement.RequiresScopedHookToken()
 }
 
 // OwnsManagedHookRuntime reports whether the enterprise guardian can install

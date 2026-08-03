@@ -26,7 +26,7 @@ import (
 )
 
 func TestNormalizeConnectorTelemetrySourceIncludesHookOnlyBuiltins(t *testing.T) {
-	for _, source := range []string{"opencode", "omnigent"} {
+	for _, source := range []string{"opencode", "omnigent", "amp"} {
 		if got := normalizeConnectorTelemetrySource(source); got != source {
 			t.Errorf("normalizeConnectorTelemetrySource(%q) = %q", source, got)
 		}

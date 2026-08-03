@@ -151,7 +151,14 @@ export async function bootstrapProviderOverlay(guardrailPort, options) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
-        const res = await doFetch(`http://127.0.0.1:${guardrailPort}/v1/config/providers`, { method: "GET", signal: ctrl.signal, cache: "no-store" });
+        const res = await doFetch(`http://127.0.0.1:${guardrailPort}/v1/config/providers`, {
+            method: "GET",
+            signal: ctrl.signal,
+            cache: "no-store",
+            headers: options?.token
+                ? { [DC_AUTH_HEADER]: `Bearer ${options.token}` }
+                : undefined,
+        });
         if (!res.ok)
             return;
         // If Content-Length advertises more than the cap, bail early —
@@ -872,6 +879,7 @@ export function createFetchInterceptor(portOrOpts) {
         // wrapper we're about to install.
         void bootstrapProviderOverlay(guardrailPort, {
             fetchImpl: originalFetch,
+            token: loadSidecarConfig().token,
         });
         globalThis.fetch = async (input, init) => {
             const urlStr = String(input instanceof Request ? input.url : input);

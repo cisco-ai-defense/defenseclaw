@@ -2418,6 +2418,21 @@ class Config:
             workspace_dir=self.connector_workspace_dir(),
         )
 
+    def skill_write_dirs(self, connector: str | None = None) -> list[str]:
+        """Return native skill install targets for a connector.
+
+        This is intentionally separate from discovery precedence. Amp, for
+        example, discovers multiple compatibility/plugin roots but writes only
+        to the pinned workspace or the explicit user-global AgentSkills root.
+        """
+
+        return connector_paths.skill_write_dirs(
+            connector or self.active_connector(),
+            openclaw_home=self.claw.home_dir,
+            openclaw_config=self.claw.config_file,
+            workspace_dir=self.connector_workspace_dir(),
+        )
+
     def plugin_dirs(self, connector: str | None = None) -> list[str]:
         """Return plugin/extension directories for a connector.
 

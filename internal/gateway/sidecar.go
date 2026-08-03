@@ -2012,6 +2012,15 @@ func resolveWatcherDirs(cfg *config.Config, conn connector.Connector, wcfg confi
 				workspaceDir = cfg.ConnectorWorkspaceDir()
 			}
 			compTargets = scanner.ComponentTargets(workspaceDir)
+			if cfg != nil && strings.EqualFold(strings.TrimSpace(conn.Name()), "amp") {
+				// Amp's effective skill roots depend on settings
+				// (amp.skills.path and amp.skills.disableClaudeCodeSkills).
+				// ComponentTargets cannot read Config without introducing a
+				// package cycle, so bind the watch set through Config's
+				// schema-aware Amp resolver instead of watching static defaults.
+				compTargets["skill"] = ampWatcherSkillDirs(cfg)
+				compTargets["plugin"] = cfg.PluginDirsForConnector("amp")
+			}
 		}
 	}
 
@@ -2048,6 +2057,34 @@ func resolveWatcherDirs(cfg *config.Config, conn connector.Connector, wcfg confi
 	}
 
 	return skillDirs, pluginDirs, src
+}
+
+// ampWatcherSkillDirs keeps Amp's Claude-compatible skill roots available for
+// discovery without letting the watcher materialize another connector's home.
+// The watcher creates each configured directory before registering fsnotify,
+// so optional .claude/skills roots are watchable only when they already exist.
+func ampWatcherSkillDirs(cfg *config.Config) []string {
+	dirs := cfg.SkillDirsForConnector("amp")
+	optionalClaudeRoots := make(map[string]struct{}, 2)
+	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+		optionalClaudeRoots[filepath.Clean(filepath.Join(home, ".claude", "skills"))] = struct{}{}
+	}
+	if workspace := cfg.ConnectorWorkspaceDir(); workspace != "" {
+		optionalClaudeRoots[filepath.Clean(filepath.Join(workspace, ".claude", "skills"))] = struct{}{}
+	}
+
+	filtered := make([]string, 0, len(dirs))
+	for _, dir := range dirs {
+		cleaned := filepath.Clean(dir)
+		if _, optional := optionalClaudeRoots[cleaned]; optional {
+			info, err := os.Stat(cleaned)
+			if err != nil || !info.IsDir() {
+				continue
+			}
+		}
+		filtered = append(filtered, dir)
+	}
+	return filtered
 }
 
 // runWatcher starts the skill/MCP install watcher if enabled in config.
@@ -2445,7 +2482,12 @@ func resolveActiveConnector(reg *connector.Registry, name, surface string) (conn
 	}
 	conn, ok := reg.Get(trimmed)
 	if !ok {
-		return nil, fmt.Errorf("[%s] guardrail.connector=%q not found in registry — set guardrail.connector to one of the registered connectors (openclaw, codex, claudecode, zeptoclaw, hermes, cursor, windsurf, geminicli, copilot, openhands) or remove the field to default to openclaw", surface, trimmed)
+		return nil, fmt.Errorf(
+			"[%s] guardrail.connector=%q not found in registry — set guardrail.connector to one of the registered connectors (%s) or remove the field to default to openclaw",
+			surface,
+			trimmed,
+			strings.Join(reg.Names(), ", "),
+		)
 	}
 	return conn, nil
 }
@@ -3508,7 +3550,7 @@ func connectorSetupTokensFor(dataDir string, conn connector.Connector, gatewayTo
 	}
 	scoped, err := connector.EnsureHookAPIToken(dataDir, conn.Name())
 	if err != nil {
-		if managedMode {
+		if managedMode || connector.RequiresScopedHookToken(conn) {
 			return connectorSetupTokens{}, err
 		}
 		// Unmanaged installs historically allowed symlinked/group-writable data
