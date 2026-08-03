@@ -228,6 +228,10 @@ def _compile_rules_file(raw: dict, pack: RulePack) -> None:
     for rule in raw.get("rules", []) or []:
         if not isinstance(rule, dict):
             continue
+        # Tool-call-only rules are evaluated only at an authenticated tool
+        # boundary. Static artifact scanning cannot establish that context.
+        if rule.get("tool_call_only") is True:
+            continue
         # ``enabled: false`` disables a single rule; absent / true keeps it.
         if rule.get("enabled") is False:
             continue

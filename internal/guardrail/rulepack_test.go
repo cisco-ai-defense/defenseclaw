@@ -309,6 +309,11 @@ func TestLoadRulePackRuleValidation(t *testing.T) {
 		{name: "blank pattern", body: strings.Replace(validRulesYAML("custom", "R-1"), "pattern: 'a+'", "pattern: ''", 1), code: "validation"},
 		{name: "invalid regex", body: strings.Replace(validRulesYAML("custom", "R-1"), "pattern: 'a+'", "pattern: '['", 1), code: "regex"},
 		{name: "oversized regex", body: strings.Replace(validRulesYAML("custom", "R-1"), "pattern: 'a+'", "pattern: '"+tooLongPattern+"'", 1), code: "pattern_size_limit"},
+		{name: "empty expression", body: strings.Replace(validRulesYAML("custom", "R-1"), "    title:", "    tool_call_only: true\n    expression: ''\n    title:", 1), code: "validation"},
+		{name: "blank expression", body: strings.Replace(validRulesYAML("custom", "R-1"), "    title:", "    tool_call_only: true\n    expression: '   '\n    title:", 1), code: "validation"},
+		{name: "padded expression", body: strings.Replace(validRulesYAML("custom", "R-1"), "    title:", "    tool_call_only: true\n    expression: ' true'\n    title:", 1), code: "validation"},
+		{name: "non-string expression", body: strings.Replace(validRulesYAML("custom", "R-1"), "    title:", "    tool_call_only: true\n    expression: true\n    title:", 1), code: "yaml_invalid"},
+		{name: "disabled invalid expression", body: strings.Replace(validRulesYAML("custom", "R-1"), "    pattern:", "    enabled: false\n    tool_call_only: true\n    expression: 'f.missing'\n    pattern:", 1), code: "semantic_type"},
 		{name: "blank title", body: strings.Replace(validRulesYAML("custom", "R-1"), "title: valid", "title: ''", 1), code: "validation"},
 		{name: "severity", body: strings.Replace(validRulesYAML("custom", "R-1"), "severity: HIGH", "severity: SEVERE", 1), code: "severity"},
 		{name: "confidence low", body: strings.Replace(validRulesYAML("custom", "R-1"), "confidence: 0.5", "confidence: -0.1", 1), code: "confidence"},
@@ -328,6 +333,62 @@ func TestLoadRulePackRuleValidation(t *testing.T) {
 			requireRulePackError(t, err, test.code)
 		})
 	}
+}
+
+func TestLoadRulePackSemanticExpressionPreservesRegexExposure(t *testing.T) {
+	dir := t.TempDir()
+	body := strings.Replace(
+		validRulesYAML("custom", "R-1"),
+		"    pattern:",
+		"    expression: 'true'\n    pattern:",
+		1,
+	)
+	writeRulePackFile(t, dir, "rules/custom.yaml", body)
+	rule := mustLoadRulePack(t, dir).RuleFiles[0].Rules[0]
+	if rule.Expression != "true" || rule.ToolCallOnly {
+		t.Fatalf("semantic regex rule decoded as expression=%q tool_call_only=%v", rule.Expression, rule.ToolCallOnly)
+	}
+}
+
+func TestLoadRulePackToolCallOnlyRegexFallback(t *testing.T) {
+	dir := t.TempDir()
+	body := strings.Replace(
+		validRulesYAML("custom", "R-1"),
+		"    pattern:",
+		"    tool_call_only: true\n    pattern:",
+		1,
+	)
+	writeRulePackFile(t, dir, "rules/custom.yaml", body)
+	pack := mustLoadRulePack(t, dir)
+	if !pack.RuleFiles[0].Rules[0].ToolCallOnly {
+		t.Fatal("tool_call_only was not decoded")
+	}
+}
+
+func TestRulePackRejectsTooManySemanticRules(t *testing.T) {
+	disabled := false
+	rules := make([]RuleDefYAML, maxSemanticRules+1)
+	for index := range rules {
+		rules[index] = RuleDefYAML{
+			ID:           fmt.Sprintf("SEMANTIC-%03d", index),
+			Enabled:      &disabled,
+			Pattern:      "a+",
+			Expression:   "true",
+			ToolCallOnly: true,
+			Title:        "valid",
+			Severity:     "HIGH",
+			Confidence:   0.5,
+			Tags:         []string{"test"},
+		}
+	}
+	rules[0].Enabled = nil
+	pack := mustLoadRulePack(t, "")
+	pack.RuleFiles = []*RulesFileYAML{{
+		Version:  1,
+		Category: "custom",
+		Rules:    rules,
+	}}
+	requireRulePackError(t, pack.Validate(), "semantic_rule_count_limit")
 }
 
 func TestLoadRulePackDuplicateRulesAndCategories(t *testing.T) {
@@ -684,6 +745,23 @@ func TestRulePackSummaryIsSafeAndContentSensitive(t *testing.T) {
 	pack2 := mustLoadRulePack(t, dir2)
 	if pack2.Summary().Digest == summary.Digest {
 		t.Fatal("digest did not change when rule semantics changed")
+	}
+}
+
+func TestRulePackSummaryDigestIncludesSemanticMetadata(t *testing.T) {
+	dir := t.TempDir()
+	writeRulePackFile(t, dir, "rules/custom.yaml", validRulesYAML("custom", "R-1"))
+	regexOnly := mustLoadRulePack(t, dir).Summary().Digest
+
+	body := strings.Replace(
+		validRulesYAML("custom", "R-1"),
+		"    pattern:",
+		"    tool_call_only: true\n    expression: 'true'\n    pattern:",
+		1,
+	)
+	writeRulePackFile(t, dir, "rules/custom.yaml", body)
+	if semantic := mustLoadRulePack(t, dir).Summary().Digest; semantic == regexOnly {
+		t.Fatal("digest did not change when semantic metadata changed")
 	}
 }
 

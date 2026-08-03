@@ -37,8 +37,9 @@ RESPONSE=$("$REAL_BINARY" -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api
   "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
   --connect-timeout 2 \
   --max-time 5 \
-  -d "$(jq -n --arg tool "curl" --arg cmd "$*" \
-    '{tool: $tool, args: {command: $cmd}}')" 2>/dev/null) || {
+  -d "$(jq -cn --arg tool "curl" --args \
+    '{tool: $tool, args: {argv: ([$tool] + $ARGS.positional)}}' \
+    -- "$@")" 2>/dev/null) || {
   # Transport failures fall back to the real binary (gateway down must
   # not brick the agent) — same posture as the connector hooks.
   exec "$REAL_BINARY" "$@"

@@ -285,6 +285,9 @@ cp "${WHEEL}" "${PAYLOAD}/$(basename "${WHEEL}")"
 cp "${OVERRIDES}" "${PAYLOAD}/overrides.txt"
 cp "${UPGRADE_MANIFEST}" "${PAYLOAD}/upgrade-manifest.json"
 cp "${RUNTIME_ATTESTATION}" "${PAYLOAD}/runtime-candidate-checksums.txt"
+cp "${ROOT}/LICENSE" "${PAYLOAD}/LICENSE"
+cp "${ROOT}/NOTICE" "${PAYLOAD}/NOTICE"
+cp "${ROOT}/THIRD_PARTY_LICENSES.txt" "${PAYLOAD}/THIRD_PARTY_LICENSES.txt"
 
 codesign "${sign_args[@]}" --identifier com.cisco.defenseclaw.gateway \
     "${PAYLOAD}/defenseclaw-gateway"

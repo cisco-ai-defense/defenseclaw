@@ -25,6 +25,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
@@ -137,15 +138,35 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		if req.HookEventName == "UserPromptExpansion" {
 			assetDecisions = append(assetDecisions, a.claudeCodePromptExpansionAssetDecisions(ctx, req)...)
 		}
-	case "PreToolUse", "PermissionRequest", "PermissionDenied":
-		verdict = a.inspectToolPolicyCtx(ctx, &ToolInspectRequest{Tool: claudeCodeToolName(req), Args: claudeCodeToolArgs(req), Direction: "tool_call", Connector: "claudecode", MCPServerName: req.MCPServerName})
+	case "PreToolUse", "PermissionRequest":
+		toolName := claudeCodeToolName(req)
+		toolArgs := claudeCodeToolArgs(req)
+		toolRequest := &ToolInspectRequest{
+			Tool:          toolName,
+			Args:          toolArgs,
+			Direction:     "tool_call",
+			Connector:     "claudecode",
+			MCPServerName: req.MCPServerName,
+		}
+		verdict = a.inspectTrustedToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
+			Input: actionfacts.Input{
+				Tool:       toolName,
+				Args:       toolArgs,
+				CWD:        req.CWD,
+				ActiveHome: trustedSameHostHome(),
+			},
+			LegacyText:         string(toolArgs),
+			Connector:          "claudecode",
+			EnforcementCapable: true,
+			record:             toolChainRecorderFromContext(ctx),
+		})
 		if decision, matched := a.claudeCodeMCPAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "mcp", decision: decision})
 		}
 		if decision, matched := a.claudeCodeSkillAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "skill", decision: decision})
 		}
-	case "PostToolUse", "PostToolUseFailure", "PostToolBatch":
+	case "PostToolUse", "PostToolUseFailure", "PermissionDenied", "PostToolBatch":
 		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: claudeCodeToolOutput(req), Direction: "tool_result", Connector: "claudecode"})
 		if decision, matched := a.claudeCodeMCPAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "mcp", decision: decision})

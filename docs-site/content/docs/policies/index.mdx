@@ -1,6 +1,6 @@
 ---
 title: Policies
-description: How DefenseClaw decides — repo policies (OPA/Rego), guardrail rule packs (regex + LLM judge), scanner policies, and the suppression layer that keeps your alert volume sane.
+description: How DefenseClaw decides — OPA/Rego policy, structured tool-call rules, regex and judge detection, scanner policy, and noise suppression.
 keywords:
   - DefenseClaw policies
   - LLM judge
@@ -70,7 +70,18 @@ The guided trace normalizes a connector event, matches a deterministic rule, che
   <Edge from="corr" to="synthetic" label="pattern matched" />
 </Flow>
 
-Plain local rules cover many secrets and explicit prompt-injection patterns. The optional judge handles ambiguous and semantic cases. Suppressions remove known noise before the verdict is aggregated. The session correlator independently watches persisted findings for cross-event patterns such as the lethal trifecta. OPA/Rego also powers admission, firewall, sandbox, audit, and direct guardrail-policy evaluation.
+Structured tool calls first produce normalized operations, arguments, paths,
+endpoints, and data-flow facts for precise CEL rules. Plain local rules cover
+unstructured secrets and explicit prompt-injection patterns, while bounded
+regex remains the fail-closed fallback when a tool action cannot be modeled
+authoritatively. The optional judge handles ambiguous content cases.
+Suppressions remove known noise before the verdict is aggregated. The legacy
+session correlator independently watches persisted findings for post-event
+patterns such as the lethal trifecta. Separately, fixed ordered tool-call
+chains join exact authenticated hook events before the verdict; only an
+enforcement-safe synchronous pre-tool final step can deny, and only when the
+active profile maps the chain's severity to `block`. OPA/Rego continues to
+power admission, firewall, sandbox, audit, and direct guardrail-policy evaluation.
 
 ## Layer 1 — Repo policies (OPA / Rego)
 
@@ -140,7 +151,9 @@ Guardrail scanner and hook events separately preserve matching rule IDs, evaluat
 
 ## Layer 2 — Guardrail rule packs
 
-The guardrail rule pack is the *content* the gateway evaluates against — the actual regex patterns, judge prompts, and category taxonomies. Three packs ship out of the box:
+The guardrail rule pack is the *content* the gateway evaluates against — the
+tool-call CEL expressions and bounded regex fallbacks, judge prompts, and
+category taxonomies. Three packs ship out of the box:
 
 <Cards>
   <Card title="permissive" href="/docs/defaults" description="Permissive runtime posture: CRITICAL blocks, HIGH alerts, and lower severities allow. Pair with observe mode for a non-enforcing pilot." />

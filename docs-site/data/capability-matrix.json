@@ -207,13 +207,13 @@
       "hooks": {
         "canBlock": true,
         "canAskNative": true,
-        "askEvents": ["PreInvocation", "PreToolUse"],
-        "blockEvents": ["PreInvocation", "PreToolUse", "Stop"],
+        "askEvents": ["PreToolUse"],
+        "blockEvents": ["PreToolUse"],
         "supportsFailClosed": false,
         "scope": "user"
       },
       "hilt": "Antigravity has an empirically verified native ask on PreToolUse. Returning decision=ask there overrides agy's --dangerously-skip-permissions flag; force_ask is retained only as internal raw_action telemetry.",
-      "notes": "DefenseClaw's default v2 contract registers the full Antigravity lifecycle (PreInvocation, PreToolUse, PostToolUse, PostInvocation, Stop) as separate owned keys in ~/.gemini/config/hooks.json. It advertises native ask on PreInvocation and PreToolUse, and block on PreInvocation, PreToolUse, and Stop. Only PreToolUse is empirically verified on agy v1.0.1; the other four registrations and their verdict branches remain spec-conformant surfaces gated on upstream implementation parity. MCP read/write uses ~/.gemini/config/mcp_config.json and <workspace>/.agents/mcp_config.json. AgentSkills folder form is read/write at ~/.gemini/config/skills and <workspace>/.agents/skills. Plugins install to ~/.gemini/config/plugins or <workspace>/.agents/plugins; the CLI staging path is also discovered. CLI direct markdown skills, rules, and plugin-contained agents remain discovery/scan only."
+      "notes": "DefenseClaw's v2 contract registers the full Antigravity lifecycle (PreInvocation, PreToolUse, PostToolUse, PostInvocation, Stop) as separate owned keys in ~/.gemini/config/hooks.json and requires agy 1.1.9 or newer for reliable PostToolUse/matcher behavior. Only PreToolUse can ask or deny; PreInvocation injects context, Stop can continue, and the post events are observe-only. MCP read/write uses ~/.gemini/config/mcp_config.json and <workspace>/.agents/mcp_config.json. AgentSkills folder form is read/write at ~/.gemini/config/skills and <workspace>/.agents/skills. Plugins install to ~/.gemini/config/plugins or <workspace>/.agents/plugins; the CLI staging path is also discovered. CLI direct markdown skills, rules, and plugin-contained agents remain discovery/scan only."
     },
     {
       "id": "windsurf",

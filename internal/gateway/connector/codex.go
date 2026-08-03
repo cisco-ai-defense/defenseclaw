@@ -125,7 +125,7 @@ func (c *CodexConnector) HookScriptNames(SetupOpts) []string {
 	return []string{"codex-hook.sh"}
 }
 func (c *CodexConnector) Description() string {
-	return "config.toml model_providers patch + hook script (10 events, component scanning)"
+	return "config.toml model_providers patch + hook script (versioned event matrix, component scanning)"
 }
 func (c *CodexConnector) ToolInspectionMode() ToolInspectionMode { return ToolModeBoth }
 func (c *CodexConnector) SubprocessPolicy() SubprocessPolicy     { return SubprocessNone }
@@ -653,6 +653,11 @@ func codexHookConfigPath() string {
 // guardian repair cannot mistake a partial, moved, disabled, asynchronous, or
 // untrusted matrix for active protection.
 func (c *CodexConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) {
+	resolution := resolveHookContractForOptions("codex", opts)
+	if resolution.Contract.ContractID == "" {
+		return false, nil
+	}
+	expectedGroups := codexHookGroupsForContract(resolution.Contract.ContractID)
 	userConfigPath := codexConfigPath()
 	data, err := os.ReadFile(userConfigPath)
 	if err != nil {
@@ -712,9 +717,13 @@ func (c *CodexConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) 
 	}
 	var verifyErr error
 	if runtime.GOOS == "windows" {
-		verifyErr = verifyManagedCodexHookMatrix(hooks, configPath, filepath.Join(opts.DataDir, "hooks"))
+		verifyErr = verifyManagedCodexHookMatrixForGroups(
+			hooks, configPath, filepath.Join(opts.DataDir, "hooks"), expectedGroups,
+		)
 	} else {
-		verifyErr = verifyTrustedCodexHookMatrix(hooks, configPath, filepath.Join(opts.DataDir, "hooks"))
+		verifyErr = verifyTrustedCodexHookMatrixForGroups(
+			hooks, configPath, filepath.Join(opts.DataDir, "hooks"), expectedGroups,
+		)
 	}
 	if verifyErr != nil {
 		return false, nil
@@ -776,11 +785,13 @@ func (c *CodexConnector) loadConfigBackup(dataDir string) (codexConfigBackup, er
 // codexHookGroups mirrors claudecode.go's grouping, but timeout is in
 // seconds (not ms) per codex's TOML schema. Stop-time scans get a
 // larger budget.
-var codexHookGroups = []struct {
+type codexHookGroup struct {
 	eventType string
 	matcher   string
 	timeout   int
-}{
+}
+
+var codexHookGroups = []codexHookGroup{
 	{"SessionStart", "startup|resume|clear", 30},
 	{"UserPromptSubmit", "", 30},
 	{"PreToolUse", "*", 30},
@@ -791,6 +802,24 @@ var codexHookGroups = []struct {
 	{"PreCompact", "", 30},
 	{"PostCompact", "", 30},
 	{"Stop", "", 90},
+}
+
+var codexSessionEndHookGroup = codexHookGroup{"SessionEnd", "", 60}
+
+func codexHookGroupsForContract(contractID string) []codexHookGroup {
+	groups := append([]codexHookGroup(nil), codexHookGroups...)
+	if contractID == "codex-hooks-v4" {
+		groups = append(groups, codexSessionEndHookGroup)
+	}
+	return groups
+}
+
+func codexHookGroupsForOptions(opts SetupOpts) ([]codexHookGroup, error) {
+	resolution := resolveHookContractForOptions("codex", opts)
+	if resolution.Contract.ContractID == "" {
+		return nil, fmt.Errorf("resolve Codex hook contract: %s", resolution.Reason)
+	}
+	return codexHookGroupsForContract(resolution.Contract.ContractID), nil
 }
 
 // isDefenseClawCodexProxyRedirect reports whether v is the loopback
@@ -832,6 +861,10 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 	backupPath := filepath.Join(opts.DataDir, "codex_config_backup.json")
 	backupExists := false
 	hooksDir := filepath.Join(opts.DataDir, "hooks")
+	hookGroups, err := codexHookGroupsForOptions(opts)
+	if err != nil {
+		return err
+	}
 
 	var transformed []byte
 	var backupToSave codexConfigBackup
@@ -922,7 +955,10 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 			if !hooksExist {
 				hooks = map[string]interface{}{}
 			}
-			if err := mergeOwnedCodexHooks(hooks, configPath, hookScript, hooksDir, true); err != nil {
+			if err := mergeOwnedCodexHooks(
+				hooks, configPath, hookScript, hooksDir, true,
+				hookGroups,
+			); err != nil {
 				return err
 			}
 			cfg["hooks"] = hooks
@@ -990,7 +1026,9 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 			if !ok {
 				return fmt.Errorf("verify rendered codex config: hooks has unsupported type %T", rendered["hooks"])
 			}
-			if err := verifyTrustedCodexHookMatrix(renderedHooks, configPath, hooksDir); err != nil {
+			if err := verifyTrustedCodexHookMatrixForGroups(
+				renderedHooks, configPath, hooksDir, hookGroups,
+			); err != nil {
 				return fmt.Errorf("verify trusted DefenseClaw Codex hooks: %w", err)
 			}
 		} else if err := verifyNoOwnedCodexHooks(rendered, hooksDir); err != nil {
@@ -1070,7 +1108,9 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 			if !ok {
 				return fmt.Errorf("verify persisted codex config: hooks has unsupported type %T", persistedConfig["hooks"])
 			}
-			if err := verifyTrustedCodexHookMatrix(persistedHooks, configPath, hooksDir); err != nil {
+			if err := verifyTrustedCodexHookMatrixForGroups(
+				persistedHooks, configPath, hooksDir, hookGroups,
+			); err != nil {
 				return fmt.Errorf("verify persisted trusted DefenseClaw Codex hooks: %w", err)
 			}
 		} else if err := verifyNoOwnedCodexHooks(persistedConfig, hooksDir); err != nil {
@@ -1118,6 +1158,13 @@ func (c *CodexConnector) patchCodexConfig(opts SetupOpts, hookScript string) err
 // SetupOpts: observability-only installs allow the tool when the
 // gateway is unavailable, while enforcement installs can block.
 func buildCodexHooksTable(configPath, hookCommand string) map[string]interface{} {
+	return buildCodexHooksTableForGroups(configPath, hookCommand, codexHookGroups)
+}
+
+func buildCodexHooksTableForGroups(
+	configPath, hookCommand string,
+	groups []codexHookGroup,
+) map[string]interface{} {
 	out := map[string]interface{}{}
 	_ = configPath // retained for source-compatible migration tests
 	if runtime.GOOS == "windows" {
@@ -1127,7 +1174,7 @@ func buildCodexHooksTable(configPath, hookCommand string) map[string]interface{}
 		// select the Unix hook script on a Windows installation.
 		hookCommand = hookInvocationCommandFor("windows", "codex", hookCommand)
 	}
-	for _, group := range codexHookGroups {
+	for _, group := range groups {
 		handler := map[string]interface{}{
 			"type":    "command",
 			"command": hookCommand,
@@ -1173,6 +1220,8 @@ func codexHookEventKeyLabel(eventType string) string {
 		return "user_prompt_submit"
 	case "Stop":
 		return "stop"
+	case "SessionEnd":
+		return "session_end"
 	default:
 		return eventType
 	}
@@ -2017,11 +2066,12 @@ func mergeOwnedCodexHooks(
 	hooks map[string]interface{},
 	configPath, hookScript, hooksDir string,
 	writeTrustState bool,
+	groups []codexHookGroup,
 ) error {
 	if _, err := removeOwnedCodexHookState(hooks, configPath, hooksDir); err != nil {
 		return fmt.Errorf("inspect existing DefenseClaw Codex hook trust: %w", err)
 	}
-	generatedHooks := buildCodexHooksTable(configPath, hookScript)
+	generatedHooks := buildCodexHooksTableForGroups(configPath, hookScript, groups)
 	for eventType, value := range hooks {
 		if eventType == "state" {
 			continue
@@ -2049,12 +2099,14 @@ func mergeOwnedCodexHooks(
 		hooks[eventType] = merged
 	}
 	if writeTrustState {
-		if err := trustOwnedCodexHooks(hooks, configPath, hooksDir); err != nil {
+		if err := trustOwnedCodexHooks(hooks, configPath, hooksDir, groups); err != nil {
 			return fmt.Errorf("trust DefenseClaw Codex hooks: %w", err)
 		}
 		return nil
 	}
-	if err := verifyManagedCodexHookMatrix(hooks, configPath, hooksDir); err != nil {
+	if err := verifyManagedCodexHookMatrixForGroups(
+		hooks, configPath, hooksDir, groups,
+	); err != nil {
 		return fmt.Errorf("verify managed DefenseClaw Codex hooks: %w", err)
 	}
 	return nil
@@ -2302,7 +2354,11 @@ func ownedCodexHookLocations(
 // keys are derived from the final table. A colliding state record is overwritten
 // only when its hash already proves that it belongs to the exact handler at that
 // position; otherwise setup fails without touching the file.
-func trustOwnedCodexHooks(hooks map[string]interface{}, configPath, hooksDir string) error {
+func trustOwnedCodexHooks(
+	hooks map[string]interface{},
+	configPath, hooksDir string,
+	groups []codexHookGroup,
+) error {
 	state, exists := hooks["state"].(map[string]interface{})
 	if rawState, present := hooks["state"]; present && !exists {
 		return fmt.Errorf("hooks.state has unsupported type %T", rawState)
@@ -2311,7 +2367,7 @@ func trustOwnedCodexHooks(hooks map[string]interface{}, configPath, hooksDir str
 		state = map[string]interface{}{}
 	}
 	keySource := codexHookStateKeySource(configPath)
-	for _, expected := range codexHookGroups {
+	for _, expected := range groups {
 		eventKey := codexHookEventKeyLabel(expected.eventType)
 		locations, err := ownedCodexHookLocations(runtime.GOOS, eventKey, hooks[expected.eventType], hooksDir)
 		if err != nil {
@@ -2332,7 +2388,7 @@ func trustOwnedCodexHooks(hooks map[string]interface{}, configPath, hooksDir str
 		state[key] = map[string]interface{}{"trusted_hash": location.currentHash}
 	}
 	hooks["state"] = state
-	return verifyTrustedCodexHookMatrix(hooks, configPath, hooksDir)
+	return verifyTrustedCodexHookMatrixForGroups(hooks, configPath, hooksDir, groups)
 }
 
 // verifyTrustedCodexHookMatrix applies Codex's discovery/hash contract to the
@@ -2340,7 +2396,15 @@ func trustOwnedCodexHooks(hooks map[string]interface{}, configPath, hooksDir str
 // native Windows override and generic fallback), synchronous execution,
 // matcher, timeout, positional key, enabled state, and trusted hash.
 func verifyTrustedCodexHookMatrix(hooks map[string]interface{}, configPath, hooksDir string) error {
-	return verifyCodexHookMatrix(hooks, configPath, hooksDir, true)
+	return verifyCodexHookMatrix(hooks, configPath, hooksDir, true, nil)
+}
+
+func verifyTrustedCodexHookMatrixForGroups(
+	hooks map[string]interface{},
+	configPath, hooksDir string,
+	groups []codexHookGroup,
+) error {
+	return verifyCodexHookMatrix(hooks, configPath, hooksDir, true, groups)
 }
 
 // verifyManagedCodexHookMatrix verifies the same complete synchronous matrix
@@ -2348,10 +2412,23 @@ func verifyTrustedCodexHookMatrix(hooks map[string]interface{}, configPath, hook
 // managed_config.toml by source, including when allow_managed_hooks_only is
 // enabled, so no per-user approval record is either needed or supported.
 func verifyManagedCodexHookMatrix(hooks map[string]interface{}, configPath, hooksDir string) error {
-	return verifyCodexHookMatrix(hooks, configPath, hooksDir, false)
+	return verifyCodexHookMatrix(hooks, configPath, hooksDir, false, nil)
 }
 
-func verifyCodexHookMatrix(hooks map[string]interface{}, configPath, hooksDir string, requireTrustState bool) error {
+func verifyManagedCodexHookMatrixForGroups(
+	hooks map[string]interface{},
+	configPath, hooksDir string,
+	groups []codexHookGroup,
+) error {
+	return verifyCodexHookMatrix(hooks, configPath, hooksDir, false, groups)
+}
+
+func verifyCodexHookMatrix(
+	hooks map[string]interface{},
+	configPath, hooksDir string,
+	requireTrustState bool,
+	groups []codexHookGroup,
+) error {
 	var state map[string]interface{}
 	if requireTrustState {
 		var ok bool
@@ -2360,10 +2437,33 @@ func verifyCodexHookMatrix(hooks map[string]interface{}, configPath, hooksDir st
 			return fmt.Errorf("hooks.state has unsupported type %T", hooks["state"])
 		}
 	}
+	if len(groups) == 0 {
+		groups = append([]codexHookGroup(nil), codexHookGroups...)
+		if raw, present := hooks[codexSessionEndHookGroup.eventType]; present {
+			locations, err := ownedCodexHookLocations(
+				runtime.GOOS,
+				codexHookEventKeyLabel(codexSessionEndHookGroup.eventType),
+				raw,
+				hooksDir,
+			)
+			if err != nil {
+				return fmt.Errorf("SessionEnd: %w", err)
+			}
+			if len(locations) != 0 {
+				groups = append(groups, codexSessionEndHookGroup)
+			}
+		}
+	} else {
+		groups = append([]codexHookGroup(nil), groups...)
+	}
 	keySource := codexHookStateKeySource(configPath)
-	expectedTable := buildCodexHooksTable(configPath, filepath.ToSlash(filepath.Join(hooksDir, "codex-hook.sh")))
-	expectedEvents := make(map[string]struct{}, len(codexHookGroups))
-	for _, expected := range codexHookGroups {
+	expectedTable := buildCodexHooksTableForGroups(
+		configPath,
+		filepath.ToSlash(filepath.Join(hooksDir, "codex-hook.sh")),
+		groups,
+	)
+	expectedEvents := make(map[string]struct{}, len(groups))
+	for _, expected := range groups {
 		expectedEvents[expected.eventType] = struct{}{}
 		eventKey := codexHookEventKeyLabel(expected.eventType)
 		locations, err := ownedCodexHookLocations(runtime.GOOS, eventKey, hooks[expected.eventType], hooksDir)

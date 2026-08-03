@@ -36,6 +36,33 @@ version, or invalid replacement component fails the pack. DefenseClaw does not
 silently discard the bad file or keep only the entries that happened to parse.
 </Callout>
 
+## Tool-call semantic rules
+
+A rule may include an optional CEL `expression`. DefenseClaw compiles every
+supplied expression during validation, including expressions on disabled
+rules, and rejects the candidate pack if admission fails. Expressions run only
+inside authenticated trusted tool-call evaluation; the rule's
+regular-expression `pattern` remains required as its bounded fallback.
+
+`tool_call_only` controls where the regex is eligible. It is not a trust
+switch: expressions are always evaluated only after the server has established
+an authenticated tool-call boundary. With `tool_call_only: true`, the regex is
+also excluded from prompt, completion, tool-result, and static-artifact scans.
+A tool-call-only regex rule may omit `expression`.
+
+For an authoritative structured action, the CEL owner and its equivalent
+legacy IDs are evaluated as one exclusive route: a semantic match emits one
+canonical finding, and a semantic negative suppresses only the legacy patterns
+that owner can safely disprove. Unsupported, malformed, ambiguous, or
+unprojected actions retain the bounded regex fallback. DefenseClaw does not run
+CEL and the owned fallback as two independent detectors, so migrating a rule
+does not create duplicate findings.
+
+CEL is intentionally narrow. It adds operation, argument, path, endpoint, and
+data-flow predicates to trusted tool calls; it does not replace OPA/Rego
+policy, scan prompts or completions, or create a second general policy
+endpoint.
+
 ## Partial packs and fallback
 
 A nonempty rule-pack directory is an overlay on the gateway's compiled

@@ -78,11 +78,15 @@ func NormalizeRuleFindings(findings []RuleFinding, source string) []NormalizedFi
 
 	out := make([]NormalizedFinding, 0, len(findings))
 	for _, f := range findings {
+		category := categoryFromTags(f.Tags)
+		if _, ok := canonicalDottedRuleID(f.RuleID); ok {
+			category = categoryFromFindingID(f.RuleID)
+		}
 		nf := NormalizedFinding{
 			CanonicalID: canonicalIDFromRuleID(f.RuleID),
 			Source:      source,
 			OriginalID:  f.RuleID,
-			Category:    categoryFromTags(f.Tags),
+			Category:    category,
 			Severity:    normalizeSeverity(f.Severity),
 			Title:       f.Title,
 			Confidence:  f.Confidence,
@@ -133,6 +137,9 @@ func canonicalIDFromRuleID(ruleID string) string {
 	if strings.HasPrefix(upper, "CISCO-") || strings.HasPrefix(upper, "AID-") {
 		return "CISCO-" + strings.TrimPrefix(strings.TrimPrefix(upper, "CISCO-"), "AID-")
 	}
+	if canonical, ok := canonicalDottedRuleID(ruleID); ok {
+		return canonical
+	}
 
 	// Local pattern match strings: map to canonical
 	lower := strings.ToLower(ruleID)
@@ -154,6 +161,73 @@ func canonicalIDFromRuleID(ruleID string) string {
 	}
 
 	return "UNKNOWN-" + strings.ReplaceAll(upper, " ", "-")
+}
+
+func canonicalDottedRuleID(ruleID string) (string, bool) {
+	switch strings.ToLower(ruleID) {
+	case "secrets.cloud_credential_read":
+		return "secrets.cloud_credential_read", true
+	case "secrets.browser_session_store_read":
+		return "secrets.browser_session_store_read", true
+	case "secrets.cloud_secret_manager_read":
+		return "secrets.cloud_secret_manager_read", true
+	case "secrets.workload_identity_token_read":
+		return "secrets.workload_identity_token_read", true
+	case "exfil.secret_read_and_egress_oneliner":
+		return "exfil.secret_read_and_egress_oneliner", true
+	case "exec.reverse_tunnel":
+		return "exec.reverse_tunnel", true
+	case "exec.agent_runtime_bypass_flags":
+		return "exec.agent_runtime_bypass_flags", true
+	case "integrity.git_hooks_bypass":
+		return "integrity.git_hooks_bypass", true
+	case "recon.network_sweep":
+		return "recon.network_sweep", true
+	case "privilege.container_host_escape":
+		return "privilege.container_host_escape", true
+	case "privilege.container_runtime_socket_access":
+		return "privilege.container_runtime_socket_access", true
+	case "privilege.host_namespace_entry":
+		return "privilege.host_namespace_entry", true
+	case "lateral.workload_exec":
+		return "lateral.workload_exec", true
+	case "impact.cryptomining_launch":
+		return "impact.cryptomining_launch", true
+	case "impact.fork_bomb":
+		return "impact.fork_bomb", true
+	case "impact.mass_process_termination":
+		return "impact.mass_process_termination", true
+	case "source.git_remote_tamper":
+		return "source.git_remote_tamper", true
+	case "source.git_config_exec":
+		return "source.git_config_exec", true
+	case "tamper.detector_state_write":
+		return "tamper.detector_state_write", true
+	case "tamper.guardrails_off":
+		return "tamper.guardrails_off", true
+	case "persistence.shell_profile_write":
+		return "persistence.shell_profile_write", true
+	case "persistence.git_hook_write":
+		return "persistence.git_hook_write", true
+	case "persistence.ssh_authorized_keys_command":
+		return "persistence.ssh_authorized_keys_command", true
+	case "persistence.privileged_account_change":
+		return "persistence.privileged_account_change", true
+	case "chain.guardrails_off_then_egress":
+		return "chain.guardrails_off_then_egress", true
+	case "chain.permission_denied_then_runtime_bypass":
+		return "chain.permission_denied_then_runtime_bypass", true
+	case "chain.privilege_discovery_then_elevation":
+		return "chain.privilege_discovery_then_elevation", true
+	case "chain.secret_manager_read_then_egress":
+		return "chain.secret_manager_read_then_egress", true
+	case "chain.secret_read_then_egress":
+		return "chain.secret_read_then_egress", true
+	case "chain.workload_identity_then_lateral_execution":
+		return "chain.workload_identity_then_lateral_execution", true
+	default:
+		return "", false
+	}
 }
 
 // categoryFromTags derives a normalized category from rule tags.
@@ -187,6 +261,23 @@ func categoryFromTags(tags []string) string {
 func categoryFromFindingID(id string) string {
 	upper := strings.ToUpper(id)
 	switch {
+	case strings.HasPrefix(upper, "SECRETS."):
+		return CatCredentialLeak
+	case strings.HasPrefix(upper, "EXFIL."):
+		return CatDataExfil
+	case strings.HasPrefix(upper, "EXEC."):
+		return CatDangerousExec
+	case strings.HasPrefix(upper, "TAMPER."),
+		strings.HasPrefix(upper, "SOURCE."):
+		return CatCognitiveTamper
+	case strings.HasPrefix(upper, "INTEGRITY."),
+		strings.HasPrefix(upper, "RECON."),
+		strings.HasPrefix(upper, "PRIVILEGE."),
+		strings.HasPrefix(upper, "LATERAL."),
+		strings.HasPrefix(upper, "IMPACT."),
+		strings.HasPrefix(upper, "PERSISTENCE."),
+		strings.HasPrefix(upper, "CHAIN."):
+		return CatDangerousExec
 	case strings.HasPrefix(upper, "SEC-"):
 		return CatCredentialLeak
 	case strings.HasPrefix(upper, "CMD-"):

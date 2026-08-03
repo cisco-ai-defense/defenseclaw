@@ -15,7 +15,7 @@ import { ChipsField } from '../ui/chips-field';
 import { RecipePicker } from '../ui/recipe-picker';
 import { RegexInput } from '../ui/regex-input';
 import { SegmentedControl } from '../ui/segmented-control';
-import { TextField } from '../ui/text-field';
+import { TextArea, TextField } from '../ui/text-field';
 import { Toggle } from '../ui/toggle';
 
 const RULE_RECIPE_KINDS: Recipe['kind'][] = [
@@ -281,6 +281,27 @@ export function RulesSection({
                           onCounterexamplesChange={(next) => setExamplesFor(key, { no: next })}
                           hint="Engine compiles with Go's regexp (RE2). Lookarounds and backrefs are not supported."
                         />
+                        <div className="space-y-2 rounded-md border border-fd-border bg-fd-background/50 p-2">
+                          <Toggle
+                            label="authenticated tool calls only"
+                            checked={rule.tool_call_only === true}
+                            onChange={(v) =>
+                              updateRule(fileIdx, ruleIdx, { tool_call_only: v })
+                            }
+                          />
+                          <TextArea
+                            label="CEL expression (optional)"
+                            value={rule.expression ?? ''}
+                            onChange={(v) =>
+                              updateRule(fileIdx, ruleIdx, {
+                                expression: v || undefined,
+                              })
+                            }
+                            rows={3}
+                            monospace
+                            hint="Evaluated only after the server establishes an authenticated tool-call boundary. Setting this field does not make an untrusted event trusted."
+                          />
+                        </div>
                       </li>
                     );
                   })

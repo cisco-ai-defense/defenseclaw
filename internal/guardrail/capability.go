@@ -87,6 +87,28 @@ func ClassifyToolName(tool string) ToolCapabilityClass {
 // DESTRUCTIVE-FLOW pattern never escalates on a bare secret or
 // injection finding.
 var ruleCapabilities = map[string]ToolCapabilityClass{
+	"secrets.cloud_credential_read":             CapReadFS,
+	"secrets.browser_session_store_read":        CapReadFS,
+	"secrets.cloud_secret_manager_read":         CapReadFS,
+	"secrets.workload_identity_token_read":      CapReadFS,
+	"exfil.secret_read_and_egress_oneliner":     CapNetworkFetch,
+	"exec.reverse_tunnel":                       CapNetworkFetch,
+	"exec.agent_runtime_bypass_flags":           CapExecShell,
+	"integrity.git_hooks_bypass":                CapExecShell,
+	"recon.network_sweep":                       CapNetworkFetch,
+	"privilege.container_host_escape":           CapExecShell,
+	"privilege.container_runtime_socket_access": CapNetworkFetch,
+	"privilege.host_namespace_entry":            CapExecShell,
+	"lateral.workload_exec":                     CapExecShell,
+	"impact.cryptomining_launch":                CapExecShell,
+	"impact.fork_bomb":                          CapExecShell,
+	"impact.mass_process_termination":           CapExecShell,
+	"tamper.detector_state_write":               CapWriteFS,
+	"persistence.shell_profile_write":           CapWriteFS,
+	"persistence.git_hook_write":                CapWriteFS,
+	"persistence.ssh_authorized_keys_command":   CapWriteFS,
+	"persistence.privileged_account_change":     CapExecShell,
+
 	// Shell / code execution (the destructive class).
 	"CMD-EVAL":               CapExecShell,
 	"CMD-BASH-C":             CapExecShell,
@@ -119,6 +141,7 @@ var ruleCapabilities = map[string]ToolCapabilityClass{
 	// Outbound network fetch / listener.
 	"CMD-CURL-UPLOAD": CapNetworkFetch,
 	"CMD-WGET-POST":   CapNetworkFetch,
+	"CMD-ENV-DUMP":    CapNetworkFetch,
 	"CMD-PIPE-CURL":   CapNetworkFetch,
 	"CMD-PIPE-WGET":   CapNetworkFetch,
 	"SRC-FETCH":       CapNetworkFetch,

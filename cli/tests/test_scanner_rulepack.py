@@ -57,6 +57,14 @@ def _write_pack(root: str) -> str:
             "    severity: LOW\n"
             "    confidence: 0.1\n"
             "    tags: []\n"
+            "  - id: SEC-TOOL-ONLY\n"
+            "    tool_call_only: true\n"
+            "    expression: 'true'\n"
+            "    pattern: 'tool-only-static-marker'\n"
+            "    title: \"tool-only rule\"\n"
+            "    severity: HIGH\n"
+            "    confidence: 0.9\n"
+            "    tags: [tool-call]\n"
         )
     with open(os.path.join(rules, "local-patterns.yaml"), "w") as fh:
         fh.write(
@@ -102,6 +110,7 @@ class TestLoadRulePack(unittest.TestCase):
         self.assertIn("RP-INJECTION-0", ids)
         # Disabled rule, broken regex, and substring families are excluded.
         self.assertNotIn("SEC-DISABLED", ids)
+        self.assertNotIn("SEC-TOOL-ONLY", ids)
         self.assertNotIn("BAD", ids)
         # No substring "secrets" family rule (we only apply regex families).
         self.assertFalse(any(r.rule_id.startswith("RP-SECRET") for r in pack.rules))

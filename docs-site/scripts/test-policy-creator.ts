@@ -973,6 +973,89 @@ test('validators: properly-shaped CISCO env var passes', () => {
   assert.equal(findings.length, 0, 'valid env var name must not trip the secret-paste lint');
 });
 
+test('semantic rule fields validate and survive YAML emit', async () => {
+  const rule = {
+    id: 'TOOL-CALL-RULE',
+    enabled: true,
+    pattern: 'dangerous-tool-call',
+    expression: "f.tool == 'shell'",
+    tool_call_only: true,
+    title: 'Semantic tool-call rule',
+    severity: 'HIGH' as const,
+    confidence: 0.9,
+    tags: ['tool-call'],
+  };
+  const policy = makePolicy({
+    rule_pack: {
+      name: 'test-policy',
+      files: [{ filename: 'commands', category: 'command', rules: [rule] }],
+    },
+  });
+  assert.equal(
+    validatePolicy(policy).filter((f) => f.code.startsWith('CEL_')).length,
+    0,
+  );
+
+  const file = emit(policy).find((f) => f.path.endsWith('rules/commands.yaml'));
+  assert.ok(file, 'commands rule file must be emitted');
+  const yaml = await import('js-yaml');
+  const decoded = yaml.load(file!.contents) as {
+    rules: Array<Record<string, unknown>>;
+  };
+  assert.equal(decoded.rules[0].expression, rule.expression);
+  assert.equal(decoded.rules[0].tool_call_only, true);
+
+  const messageLaneRegex = makePolicy({
+    rule_pack: {
+      name: 'test-policy',
+      files: [{
+        filename: 'commands',
+        category: 'command',
+        rules: [{ ...rule, tool_call_only: false }],
+      }],
+    },
+  });
+  assert.equal(
+    validatePolicy(messageLaneRegex).filter((f) => f.code.startsWith('CEL_')).length,
+    0,
+    'regex exposure must not change the trusted boundary for CEL evaluation',
+  );
+  const compound = structuredClone(messageLaneRegex);
+  compound.rule_pack.files[0].rules[0].expression = ' true';
+  const compoundCodes = validatePolicy(compound).map((f) => f.code);
+  assert.ok(
+    compoundCodes.includes('CEL_EXPRESSION_BLANK'),
+    'expression formatting errors must still be reported',
+  );
+
+  for (const expression of ['', '   ', ' true', 'true ']) {
+    const malformed = makePolicy({
+      rule_pack: {
+        name: 'test-policy',
+        files: [{
+          filename: 'commands',
+          category: 'command',
+          rules: [{ ...rule, expression }],
+        }],
+      },
+    });
+    assert.ok(
+      validatePolicy(malformed).some((f) => f.code === 'CEL_EXPRESSION_BLANK'),
+      `expression ${JSON.stringify(expression)} must fail`,
+    );
+  }
+
+  const nonString = structuredClone(policy);
+  (nonString.rule_pack.files[0].rules[0] as unknown as { expression: unknown }).expression =
+    true;
+  nonString.rule_pack.files[0].rules[0].tool_call_only = false;
+  const nonStringCodes = validatePolicy(nonString).map((f) => f.code);
+  assert.ok(
+    nonStringCodes.includes('CEL_EXPRESSION_TYPE'),
+    'a non-string expression must report its type error without crashing',
+  );
+});
+
 // ── rego-highlight ──────────────────────────────────────────────────
 
 test('rego-highlight: classifies keywords vs identifiers', () => {

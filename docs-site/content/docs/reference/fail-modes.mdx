@@ -39,11 +39,18 @@ classified as transport.
 | Hook input exceeds its bounded payload | Refuse to process it, record the condition, and allow. | Refuse to process it, record the condition, and block where the connector supports a block response. |
 | Valid gateway verdict | Honor the connector/event mapping. | Honor the same mapping. Fail mode does not turn an observation-only event into a blocking surface. |
 | Internal policy evaluator panic | Allow with `would_block`, warning, and telemetry. | The same fail-open boundary; no authoritative verdict was produced. |
+| Ordered-chain state unavailable or inconsistent | Preserve the current event's standalone verdict; skip only the chain join. | The same standalone verdict. Chain storage never fabricates or removes a single-event block. |
 
 The final row is intentional and important. Hook fail mode governs delivery,
 authentication, parsing, and response availability. It does not fabricate a
 policy denial after an internal evaluator panic. Treat that condition as a
 degraded security incident and inspect gateway health.
+
+Ordered chains follow the same non-weakening rule. A SQLite timeout, closed
+store, missing canonical session, or integrity conflict can prevent a new
+chain match, but it cannot turn an independently blocked tool call into allow.
+An exact unexpired deny receipt can replay its stable denial without emitting
+duplicate finding telemetry.
 
 ## Persisted fail mode
 

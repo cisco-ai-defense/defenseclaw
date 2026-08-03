@@ -342,13 +342,10 @@ func TestApplyMode_AllowVerdictUnchanged(t *testing.T) {
 }
 
 // TestInspectRequest_ObserveDoesNotBlock exercises the same exfiltration
-// payload as TestInspectRequest_ExfiltrationAttempt (which runs in action
-// mode and asserts a block) but in observe mode. The exfil payload is
-// CRITICAL severity, so the prompt-surface clamp does NOT touch it; the
-// latent decision remains "block" and observe mode collapses it to "allow"
-// + would_block=true, exactly as before. Lower-severity prompts (HIGH and
-// below) take the demote-to-alert path and are covered separately by the
-// clampPromptDirectionVerdict unit tests.
+// payload as TestInspectRequest_ExfiltrationAttempt but in observe mode.
+// Semantic command rules are isolated to trusted tool-call boundaries, so
+// ordinary prompt text stays on the message lane and its HIGH path finding is
+// clamped to an alert rather than becoming a latent block.
 func TestInspectRequest_ObserveDoesNotBlock(t *testing.T) {
 	api := testAPIServerWithConfig(t, "observe")
 	_, verdict := postInspectRequest(t, api,
@@ -357,11 +354,11 @@ func TestInspectRequest_ObserveDoesNotBlock(t *testing.T) {
 	if verdict.Action != "allow" {
 		t.Errorf("action = %q, want allow (observe mode must not exit hook script)", verdict.Action)
 	}
-	if verdict.RawAction == "" || verdict.RawAction == "allow" {
-		t.Errorf("raw_action = %q, want a non-allow latent decision", verdict.RawAction)
+	if verdict.RawAction != "alert" {
+		t.Errorf("raw_action = %q, want alert", verdict.RawAction)
 	}
-	if !verdict.WouldBlock {
-		t.Errorf("would_block = false, want true (CRITICAL exfil bypasses prompt-surface clamp)")
+	if verdict.WouldBlock {
+		t.Errorf("would_block = true, want false for an alert-only message finding")
 	}
 	if verdict.Mode != "observe" {
 		t.Errorf("mode = %q, want observe", verdict.Mode)
