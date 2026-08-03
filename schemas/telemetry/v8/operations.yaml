@@ -783,6 +783,153 @@ attributes:
     overrides: {max_utf8_bytes: 256}
     notes: Catalog or detector-produced product label
   introduced_in: telemetry-registry-v1
+- id: defenseclaw.ai.model.provenance.publisher
+  type: string
+  brief: Reviewed publisher of the resolved root model weights
+  examples: [Alibaba Cloud]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    overrides: {max_utf8_bytes: 128}
+    notes: Catalog-reviewed publisher label; absent when lineage is ambiguous or unknown
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.ai.model.provenance.country_code
+  type: string
+  brief: ISO 3166-1 alpha-2 country code of the resolved root model publisher
+  examples: [CN]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    overrides:
+      max_utf8_bytes: 2
+      pattern: '^[A-Z]{2}$'
+    notes: Presentation layers derive flags; absent when publisher origin is unknown
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.ai.model.provenance.root_model
+  type: string
+  brief: Best-known root model identifier for a discovered local model
+  examples: [Qwen/Qwen3-8B]
+  stability: stable
+  owner: defenseclaw
+  field_class: content
+  sensitivity: sensitive
+  cardinality: high
+  normalization:
+    id: redacted-content-v1
+    overrides: {max_utf8_bytes: 512}
+    notes: Log-only lineage content; never a metric label and subject to destination redaction
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.ai.model.provenance.base_models
+  type: string[]
+  brief: Bounded ordered ancestry for a discovered local model
+  examples:
+  - - Qwen/Qwen3-8B
+  stability: stable
+  owner: defenseclaw
+  field_class: content
+  sensitivity: sensitive
+  cardinality: high
+  normalization:
+    id: redacted-content-v1
+    overrides:
+      max_utf8_bytes: 4096
+      max_item_utf8_bytes: 512
+      max_items: 8
+    notes: Log-only lineage content; at most eight 512-byte items and 4096 canonical JSON bytes, never a metric label, and subject to destination redaction
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.ai.model.provenance.quantized
+  type: boolean
+  brief: Whether the discovered local model is positively identified as quantized
+  examples: [true]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: Optional tri-state field; absent means unknown and false is authoritative
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.ai.model.provenance.quantization
+  type: string
+  brief: Normalized quantization encoding of the discovered local model
+  examples: [Q4_K_M]
+  stability: stable
+  owner: defenseclaw
+  field_class: content
+  sensitivity: sensitive
+  cardinality: bounded
+  normalization:
+    id: redacted-content-v1
+    overrides: {max_utf8_bytes: 64}
+    notes: Log-only local encoding text; bounded because config-provided method names are not a closed vocabulary
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.ai.model.provenance.distilled
+  type: boolean
+  brief: Whether the discovered local model is positively identified as distilled
+  examples: [true]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: Optional tri-state field; absent means unknown and false is authoritative
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.ai.model.provenance.derivation
+  type: string
+  brief: Normalized derivation summary for the discovered local model
+  examples: [distilled+quantized]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [distilled, quantized, distilled+quantized]
+    notes: Present only when at least one authoritative derivation flag is true
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.ai.model.provenance.source
+  type: string
+  brief: Evidence source used to resolve local model provenance
+  examples: [catalog_family]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [catalog_exact, catalog_family, hf_cache, gguf_metadata, model_config, ollama_metadata, checkpoint, model_id, huggingface_hub, mixed]
+    notes: Closed resolver source vocabulary; never a local path or URL
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.ai.model.provenance.confidence
+  type: string
+  brief: Confidence of the resolved local model provenance claim
+  examples: [high]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [high, medium, low]
+    notes: Resolver confidence only; distinct from discovery signal confidence
+  introduced_in: telemetry-registry-v1
 - id: defenseclaw.inventory.item.name
   type: string
   brief: Bounded configured name of one endpoint inventory item
@@ -4949,7 +5096,27 @@ groups:
   extends:
   - body.ai.discovery
   attributes: []
-  body_fields: []
+  body_fields:
+  - ref: defenseclaw.ai.model.provenance.publisher
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.provenance.country_code
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.provenance.root_model
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.provenance.base_models
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.provenance.quantized
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.provenance.quantization
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.provenance.distilled
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.provenance.derivation
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.provenance.source
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.provenance.confidence
+    requirement_level: recommended
   log:
     event_name: ai_component.changed
   x-defenseclaw:
@@ -4995,7 +5162,27 @@ groups:
   extends:
   - body.ai.discovery
   attributes: []
-  body_fields: []
+  body_fields:
+  - ref: defenseclaw.ai.model.provenance.publisher
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.provenance.country_code
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.provenance.root_model
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.provenance.base_models
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.provenance.quantized
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.provenance.quantization
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.provenance.distilled
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.provenance.derivation
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.provenance.source
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.provenance.confidence
+    requirement_level: recommended
   log:
     event_name: ai_component.discovered
   x-defenseclaw:
@@ -5018,7 +5205,27 @@ groups:
   extends:
   - body.endpoint.inventory
   attributes: []
-  body_fields: []
+  body_fields:
+  - ref: defenseclaw.ai.model.provenance.publisher
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.provenance.country_code
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.provenance.root_model
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.provenance.base_models
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.provenance.quantized
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.provenance.quantization
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.provenance.distilled
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.provenance.derivation
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.provenance.source
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.provenance.confidence
+    requirement_level: recommended
   log:
     event_name: ai_component.observed
   x-defenseclaw:
@@ -5041,7 +5248,27 @@ groups:
   extends:
   - body.ai.discovery
   attributes: []
-  body_fields: []
+  body_fields:
+  - ref: defenseclaw.ai.model.provenance.publisher
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.provenance.country_code
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.provenance.root_model
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.provenance.base_models
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.provenance.quantized
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.provenance.quantization
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.provenance.distilled
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.provenance.derivation
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.provenance.source
+    requirement_level: recommended
+  - ref: defenseclaw.ai.model.provenance.confidence
+    requirement_level: recommended
   log:
     event_name: ai_component.removed
   x-defenseclaw:

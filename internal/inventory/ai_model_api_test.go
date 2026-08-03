@@ -186,7 +186,7 @@ func TestDetectLocalAPIModelsOllamaTagsAndPS(t *testing.T) {
 				"size":1234,
 				"digest":"sha256:abc",
 				"modified_at":"2026-07-01T00:00:00Z",
-				"details":{"format":"gguf"}
+				"details":{"format":"gguf","family":"qwen2","families":["qwen2"],"parameter_size":"7.6B","quantization_level":"Q4_K_M"}
 			}]}`))
 		case "/api/ps":
 			_, _ = w.Write([]byte(`{"models":[{
@@ -194,7 +194,7 @@ func TestDetectLocalAPIModelsOllamaTagsAndPS(t *testing.T) {
 				"size":1234,
 				"size_vram":900,
 				"expires_at":"2026-07-09T12:00:00Z",
-				"details":{"format":"gguf"}
+				"details":{"format":"gguf","family":"qwen2","families":["qwen2"],"parameter_size":"7.6B","quantization_level":"Q4_K_M"}
 			}]}`))
 		default:
 			http.NotFound(w, r)
@@ -224,6 +224,11 @@ func TestDetectLocalAPIModelsOllamaTagsAndPS(t *testing.T) {
 	}
 	if installed.Model.Format != "gguf" || installed.Model.SizeBytes != 1234 || installed.Model.Provider != "ollama" {
 		t.Fatalf("installed = %+v", installed.Model)
+	}
+	if installed.Model.Provenance == nil || installed.Model.Provenance.Publisher != "Alibaba Cloud" ||
+		installed.Model.Provenance.CountryCode != "CN" || installed.Model.Provenance.Quantized == nil ||
+		!*installed.Model.Provenance.Quantized || installed.Model.Provenance.Quantization != "Q4_K_M" {
+		t.Fatalf("installed provenance = %+v", installed.Model.Provenance)
 	}
 	if loaded.Model.Status != "loaded" || loaded.Model.SizeBytes != 1234 {
 		t.Fatalf("loaded = %+v", loaded.Model)
