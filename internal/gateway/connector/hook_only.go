@@ -267,7 +267,7 @@ func NewOpenHandsConnector() *hookOnlyConnector {
 func NewAntigravityConnector() *hookOnlyConnector {
 	return &hookOnlyConnector{
 		name:        "antigravity",
-		description: "Antigravity (agy) PreToolUse hooks with native ask/deny decisions",
+		description: "Antigravity (agy) lifecycle hooks with native pre-event ask/deny decisions",
 		apiPath:     "/api/v1/antigravity/hook",
 		scriptName:  "antigravity-hook.sh",
 		configPath:  antigravityHooksPath,
@@ -275,8 +275,8 @@ func NewAntigravityConnector() *hookOnlyConnector {
 			return HookCapability{
 				CanBlock:           true,
 				CanAskNative:       true,
-				AskEvents:          []string{"PreToolUse"},
-				BlockEvents:        []string{"PreToolUse"},
+				AskEvents:          []string{"PreInvocation", "PreToolUse"},
+				BlockEvents:        []string{"PreInvocation", "PreToolUse", "Stop"},
 				SupportsFailClosed: false,
 				Scope:              "user",
 				ConfigPath:         antigravityHooksPath(opts),

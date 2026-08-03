@@ -24,6 +24,16 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
+func TestAntigravityDefaultCapabilitiesMatchResolvedContract(t *testing.T) {
+	opts := SetupOpts{DataDir: t.TempDir()}
+	conn := NewAntigravityConnector()
+	direct := conn.HookCapabilities(opts)
+	resolved := conn.HookProfile(opts).Capabilities
+	if !reflect.DeepEqual(direct, resolved) {
+		t.Fatalf("HookCapabilities()=%+v, default resolved contract=%+v", direct, resolved)
+	}
+}
+
 func sharedHookBytes(t *testing.T, hookDir string) map[string][]byte {
 	t.Helper()
 	out := make(map[string][]byte, len(genericHookScripts)+len(hookHelperScripts))

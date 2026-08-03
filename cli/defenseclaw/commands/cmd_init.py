@@ -51,7 +51,11 @@ _render_checkbox_menu = terminal_checkbox.render_checkbox_menu
 
 
 @click.command("init")
-@click.option("--skip-install", is_flag=True, help="Skip automatic scanner dependency installation")
+@click.option(
+    "--skip-install",
+    is_flag=True,
+    help="Skip scanner and built-in guardrail availability checks (legacy option name).",
+)
 @click.option("--enable-guardrail", is_flag=True, help="Configure LLM guardrail during init")
 @click.option(
     "--sandbox",
@@ -123,10 +127,10 @@ _render_checkbox_menu = terminal_checkbox.render_checkbox_menu
     type=click.Choice(["open", "closed"], case_sensitive=False),
     default=None,
     help=(
-        "Hook fail-mode for response-layer failures (gateway returns 4xx, malformed JSON, "
-        "or missing action). 'open' = allow + log (recommended); 'closed' = block. "
-        "Transport failures (gateway unreachable / 5xx) ALWAYS allow unless "
-        "DEFENSECLAW_STRICT_AVAILABILITY=1, regardless of this setting."
+        "Hook fail-mode for delivery, authentication, and invalid gateway responses. "
+        "'open' = allow + log (recommended); 'closed' = block where the hook supports "
+        "a blocking response. DEFENSECLAW_STRICT_AVAILABILITY=1 additionally forces "
+        "transport and missing-token failures closed."
     ),
 )
 @click.option(
@@ -206,8 +210,9 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
 ) -> None:
     """Initialize DefenseClaw environment.
 
-    Creates ~/.defenseclaw/, default config, SQLite database,
-    and installs scanner dependencies.
+    Creates ~/.defenseclaw/, default config, and the SQLite database, then
+    verifies scanner availability. Runtime dependencies belong to the
+    installation lifecycle; init does not install Python packages.
 
     The guided wizard detects every installed hook connector, brings them all
     up in observe mode, and asks which subset should enforce (action mode).
@@ -1105,15 +1110,15 @@ def _prompt_action_policy(
     rather than per connector. Pre-supplied flags skip the matching prompt."""
     # Hook fail-mode: surface the choice so first-run operators don't have to
     # discover `defenseclaw guardrail fail-mode` later. Default is "open"
-    # because silently bricking the agent on a transient gateway response
+    # because silently bricking the agent on a transient delivery or response
     # error is worse than leaking a single tool call.
     if fail_mode is None:
-        ux.section("Hook fail-mode (response-layer failures)")
+        ux.section("Hook fail-mode (delivery and response failures)")
         ux.subhead(
-            "What hooks do when the gateway returns 4xx, malformed JSON, or no action.",
+            "What hooks do when delivery/authentication fails or the gateway response is invalid.",
         )
         ux.subhead(
-            "Transport failures (gateway down / 5xx) ALWAYS allow unless DEFENSECLAW_STRICT_AVAILABILITY=1.",
+            "Strict availability can additionally force transport and missing-token failures closed.",
         )
         fail_mode = click.prompt(
             "  " + ux.bold("Fail mode"),
@@ -1995,6 +2000,7 @@ def _ensure_observability_stack_executables(dest: str) -> None:
 
 
 def _install_scanners(cfg, logger, skip: bool) -> None:
+    """Verify bundled scanner SDKs; retained name preserves test/API patches."""
     if skip:
         click.echo("  Scanners:      skipped (--skip-install)")
         return
@@ -2021,7 +2027,12 @@ def _verify_scanner_sdk(name: str, import_name: str, min_python: tuple[int, ...]
         click.echo(f"  {label}{ux._style('available', fg='green')}")
     except ImportError:
         click.echo(f"  {label}{ux._style('not installed', fg='yellow')}")
-        click.echo("                 " + ux.dim("install with: pip install defenseclaw"))
+        click.echo(
+            "                 "
+            + ux.dim(
+                "repair the managed installation; source checkouts: uv sync"
+            )
+        )
 
 
 def _show_scanner_defaults(cfg) -> None:

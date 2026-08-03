@@ -27,7 +27,7 @@ interface DiagramLightboxProps {
   // when the user clicks the "expand" button.
   children: ReactNode;
   // Marks the figure with `data-oversize="true"` so the build-time
-  // width gate (scripts/check-diagram-widths.ts) skips its >1500px
+  // width gate (scripts/check-diagram-widths.ts) skips its >1168px
   // check for this diagram. Use only when no smaller layout works.
   oversize?: boolean;
 }

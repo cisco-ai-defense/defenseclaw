@@ -1,190 +1,57 @@
-# DefenseClaw macOS 0.8.0 — Install & Uninstall
+# macOS gateway bundle packaging
 
-**Artifact:** `defenseclaw-macos-0.8.0-darwin-universal.tar.gz` (fat binary — `x86_64` + `arm64`; produced by `make packaging-macos-bundle` with the default `BUNDLE_GOARCH=universal`. Single-arch tarballs `-darwin-arm64` / `-darwin-amd64` are available via `make packaging-macos-bundle BUNDLE_GOARCH=arm64` etc.)
-**SHA-256:** see accompanying `defenseclaw-macos-0.8.0-darwin-universal.tar.gz.sha256`
-**Target:** macOS (Intel or Apple Silicon), `launchctl` + `/usr/bin/python3` present, root privileges.
+This file documents the source layout and build contract for the standalone
+macOS gateway bundle. Installation and upgrade instructions belong in the
+[published installation guide](https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/install/).
+The short README shipped inside each bundle is generated from
+[`scripts/write-macos-bundle-readme.sh`](../../scripts/write-macos-bundle-readme.sh).
 
-## 1. Verify + unpack
+## Build entry points
 
-```sh
-shasum -a 256 -c defenseclaw-macos-0.8.0-darwin-universal.tar.gz.sha256
-tar -xzf defenseclaw-macos-0.8.0-darwin-universal.tar.gz
-cd defenseclaw-macos-0.8.0-darwin-universal
-```
+- `make packaging-macos-test` runs the side-effect-free shell tests in
+  [`packaging/macos/tests/`](tests/).
+- `make packaging-macos-bundle` invokes
+  [`scripts/build-macos-bundle.sh`](../../scripts/build-macos-bundle.sh).
+- `BUNDLE_GOARCH` accepts `universal` (the default), `amd64`, or `arm64`.
+  Universal builds require macOS and `lipo`.
+- Release builds provide the managed cloud-auth overlay and its pinned module
+  version through `CMID_OVERLAY` and `CMID_VERSION`. Omitting that overlay is
+  suitable only for local packaging tests; the resulting binary fails closed
+  when configured for `managed_enterprise`.
 
-The bundle is self-contained — no Go toolchain, no Homebrew, no repo checkout. `install.sh` resolves the gateway binary and plist next to itself.
+The bundle name is
+`defenseclaw-macos-${VERSION}-darwin-${BUNDLE_GOARCH}`. The build creates that
+directory plus a `.tar.gz` archive and a sibling `.sha256` file under `dist/`.
 
-## 2. Install
+## Bundle contents
 
-Standard install (action mode, Codex connector only):
+The build script assembles:
 
-```sh
-sudo ./install.sh
-```
+- the gateway executable as `defenseclaw`;
+- [`install.sh`](install.sh) and [`uninstall.sh`](uninstall.sh);
+- `lib/installer_lib.sh`, `lib/render-targets.sh`, and
+  `lib/scrub_agent_configs.py`;
+- the gateway, hook-guardian, and hook-enumerator LaunchDaemon property lists
+  from [`packaging/launchd/`](../launchd/); and
+- a versioned `README.md` generated for the assembled artifact.
 
-Typical enterprise install (action mode, Cursor + Claude Code hooks):
+`install.sh` installs the bundle-local `defenseclaw` executable as
+`defenseclaw-gateway` in the managed runtime tree. It is a fresh-install
+surface and deliberately refuses an existing managed or legacy deployment;
+upgrade behavior is owned by the release upgrade protocol.
 
-```sh
-sudo ./install.sh --mode action --connector cursor,claudecode
-```
+## Source ownership
 
-Common flags:
-
-| Flag | Default | Purpose |
-| --- | --- | --- |
-| `--mode {observe\|action}` | `action` | Guardrail + asset_policy mode |
-| `--connector LIST` | `codex` | Comma-separated: `codex`, `claudecode`, `cursor` |
-| `--port PORT` | `18970` | Loopback API port |
-| `--config-file PATH` | `/opt/cisco/secureclient/defenseclaw/env_config.json` | Path to the AVC-authored JSON that supplies `cisco_ai_defense_endpoint` (see [AVC env_config.json](#avc-env_configjson)) |
-| `--override-endpoint URL` | — | Adhoc-testing seam that wins over `--config-file`; must be a full http(s) URL |
-| `--disable-redaction` | not set (redaction **on**) | Turn off audit/sink redaction |
-| `--user USER` | `$SUDO_USER` | Target user for per-user hook wiring |
-| `--skip-connector` | — | Gateway only; skip user-space hook wiring |
-| `--skip-launchd` | — | Install files without bootstrapping the daemon |
-
-### AVC env_config.json
-
-On managed_enterprise hosts, the AI Defense endpoint the daemon
-inspects against comes from a static JSON file that the Cisco Secure
-Client (AVC) module drops at
-`/opt/cisco/secureclient/defenseclaw/env_config.json`. `install.sh`
-reads a single top-level field:
-
-```json
-{
-  "cisco_ai_defense_endpoint": "https://us.api.inspect.aidefense.security.cisco.com"
-}
-```
-
-Trust requirements (enforced by `install.sh` via the shared
-managed-installer helpers):
-
-- File must be root-owned with no group/other write bits.
-- No symlinks on the file or any ancestor directory.
-- No write-capable macOS ACL anywhere in the ancestor chain.
-- Every ancestor must be root-owned and non-writable by group/other.
-
-Any of the four checks failing → `install.sh` fails closed with a
-message naming the offending path. Extra fields in the JSON are
-ignored for forward compatibility — a later AVC drop can add keys
-without breaking older DefenseClaw builds.
-
-For adhoc / preview testing, `--override-endpoint URL` bypasses the
-file entirely.
-
-Full reference: `./install.sh --help`.
-
-`install.sh` is idempotent. A second run on the same host reconciles
-machine-wide state in place: the gateway binary, `config.yaml`, both plists,
-and the guardian manifest are atomically replaced with the current source
-content; the current-generation launchd jobs are booted out and rebootstrapped;
-legacy paths from the pre-Cisco layout (e.g. `/Library/DefenseClaw`,
-`com.defenseclaw.gateway.plist`) are relocated under
-`/Library/Logs/Cisco/SecureClient/DefenseClaw/` with a
-`.pre-<version>-<timestamp>` suffix (best-effort, never deleted); and legacy
-launchd labels are unloaded. Runtime state (`audit.db`, `judge_bodies.db`,
-`device.key`, `hook-guardian-state/`) is preserved across reinstalls, and any
-`~/.defenseclaw/` under a local user account is left untouched — the
-hook-guardian daemon reconciles the per-user layer on its 60 s tick.
-
-Symlinks under a DefenseClaw-owned install destination are still refused: a
-symlink there can only get placed via privileged tampering, and an atomic
-rename over the symlink target would corrupt whatever the link pointed at.
-
-**Pre-flight requirement:** the target user's home must not be group/other-writable. If it is, `install.sh` refuses with the exact `chmod` fix in its error output.
-
-### Custom plist source
-
-`install.sh` picks the LaunchDaemon plist from the first path that exists in this order:
-
-1. `--plist <path>` flag or `DEFENSECLAW_PLIST_SRC` env var (**explicit override**)
-2. `com.cisco.secureclient.defenseclaw.plist` next to `install.sh` (**bundle default**)
-3. `packaging/launchd/com.cisco.secureclient.defenseclaw.plist` under a repo checkout (**dev-tree default**)
-
-The plist source is validated before it is copied to `/Library/LaunchDaemons/`:
-
-| Source | Owner requirement | Mode requirement |
-| --- | --- | --- |
-| `--plist` / `DEFENSECLAW_PLIST_SRC` (override) | `root:*` | `!(mode & 0022)` |
-| Bundle default / repo default | any (extraction uid is fine) | `!(mode & 0022)` |
-
-The override tier is strict because the installer treats `--plist` as untrusted operator input; the bundle default is relaxed because the plist next to `install.sh` inherits the extracting user's uid when you `tar -xzf` the tarball but its content came from this signed bundle. Group- or world-writable sources are refused on either tier; `stat`-failure aborts with `cannot stat plist source ...`.
-
-Fix a rejection with:
-
-```sh
-sudo chown root:wheel <path-to-plist>   # only needed for --plist / DEFENSECLAW_PLIST_SRC
-sudo chmod 0644 <path-to-plist>          # required for either tier
-```
-
-## 3. Uninstall
-
-Full wipe (system files, runtime state, any legacy service-user records, and DefenseClaw entries in per-user agent configs — non-DefenseClaw entries preserved):
-
-```sh
-sudo ./uninstall.sh --purge -y
-```
-
-Reversible alternative (preserves config + audit DB so a reinstall keeps history):
-
-```sh
-sudo ./uninstall.sh
-```
-
-Purge flags:
-
-| Flag | Purpose |
+| Concern | Source |
 | --- | --- |
-| `--purge` | Delete `/opt/cisco/secureclient/defenseclaw/` (runtime + config + audit DB), `/Library/Logs/Cisco/SecureClient/DefenseClaw/`, `~/.defenseclaw/`, legacy service-user dscl records from pre-root installs, and scrub `~/.codex/config.toml`, `~/.claude/settings.json`, `~/.cursor/hooks.json` |
-| `--keep-agent-configs` | With `--purge`, skip the agent-config scrub. Only safe if reinstalling immediately — otherwise dangling hook refs will fail-close every agent tool call. |
-| `--user USER` | Per-user cleanup target (default `$SUDO_USER`) |
-| `-y, --yes` | Skip purge confirmation prompt |
+| Bundle assembly and architecture selection | [`scripts/build-macos-bundle.sh`](../../scripts/build-macos-bundle.sh) |
+| Generated bundle README | [`scripts/write-macos-bundle-readme.sh`](../../scripts/write-macos-bundle-readme.sh) |
+| Install and fresh-host safety contract | [`packaging/macos/install.sh`](install.sh) |
+| Uninstall and purge behavior | [`packaging/macos/uninstall.sh`](uninstall.sh) |
+| Pure installer helpers | [`packaging/macos/lib/installer_lib.sh`](lib/installer_lib.sh) |
+| Agent-config cleanup | [`packaging/macos/lib/scrub_agent_configs.py`](lib/scrub_agent_configs.py) |
+| Installer tests | [`packaging/macos/tests/`](tests/) |
 
-Full reference: `./uninstall.sh --help`.
-
-## 4. Verification after install
-
-```sh
-sudo launchctl print system/com.cisco.secureclient.defenseclaw | head
-curl -sS http://127.0.0.1:18970/healthz
-```
-
-## 5. Permissions the binary requests
-
-### macOS OS-level permissions
-
-- **No TCC prompts.** The gateway does not touch Full Disk Access, Accessibility, Camera/Mic, Screen Recording, Contacts, Location, or any other TCC-gated service.
-- **No firewall prompts.** The gateway listens only on `127.0.0.1:18970` (loopback). Non-loopback bind addresses are rejected in config. macOS does not surface an Application Firewall prompt for loopback-only listeners.
-- **No inbound connections from outside the host.**
-
-### Code signing
-
-- The shipped binary is **adhoc-signed** (`Signature=adhoc`, no `TeamIdentifier`, no entitlements).
-- Consequences for distribution:
-  - Downloading the tarball onto another Mac will trigger **Gatekeeper quarantine** (`com.apple.quarantine` xattr). Either strip it (`xattr -d com.apple.quarantine defenseclaw`) or sign + notarize before shipping.
-  - For MDM/enterprise deployment, sign with a Developer ID cert and notarize — LaunchDaemon load may succeed, but user-facing invocation can be blocked otherwise.
-
-### Root-level actions during install
-
-Requires `sudo`. The installer:
-
-- Creates directories under the managed install tree (all `root:wheel`):
-  - `/opt/cisco/secureclient/defenseclaw/bin/` — `0755` (gateway binary)
-  - `/opt/cisco/secureclient/defenseclaw/etc/` — `0755` (config.yaml)
-  - `/opt/cisco/secureclient/defenseclaw/runtime/` — `0750` (audit DB, tokens, device key)
-  - `/opt/cisco/secureclient/defenseclaw/hook-guardian-state/` — `0750` (authorization records)
-  - `/Library/Logs/Cisco/SecureClient/DefenseClaw/` — `0750`
-- Writes `/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.plist` (`root:wheel 0644`) and `launchctl bootstrap`s it.
-- Writes `/opt/cisco/secureclient/defenseclaw/etc/config.yaml` as `root:wheel 0640`.
-- Does NOT create a dedicated service user. The gateway daemon runs as root (uid 0) because the managed cloud auth provider requires root to read and re-perm its credential store on disk.
-- Wires per-user hook configs in the target user's `~/.codex/config.toml`, `~/.claude/settings.json`, and/or `~/.cursor/hooks.json` depending on `--connector`.
-- Relocates legacy pre-managed-layout install locations (`/Library/DefenseClaw/`, `/Library/Application Support/DefenseClaw/`, `/Library/Logs/DefenseClaw/`, `/Library/LaunchDaemons/com.defenseclaw.gateway.plist`, and `/Library/LaunchDaemons/com.defenseclaw.hook-guardian.plist`) under `/Library/Logs/Cisco/SecureClient/DefenseClaw/` with a `.pre-<version>-<timestamp>` suffix (best-effort, never deleted), and unloads the corresponding legacy `com.defenseclaw.gateway` / `com.defenseclaw.hook-guardian` launchd jobs before mutation. Existing deployments must use the release-owned staged upgrader; the fresh installer does not sweep or cut over legacy state beyond this relocation.
-
-### Runtime privileges
-
-The daemon runs as **root** (uid 0). The plist deliberately omits `UserName` / `GroupName` so launchd defaults to root; the managed cloud auth provider requires root to read and re-perm its on-disk credential store. No dedicated service user is created. Every install-time chown of a DefenseClaw-owned path uses `root:wheel`.
-
-Do not turn a pre-root deployment into an upgrade by running
-`uninstall.sh --purge` and reinstalling: that discards the rollback and state
-migration contract. Use the release-owned staged upgrader. Purge is reserved
-for an intentional decommission and removes the legacy service uid/gid.
+The native SwiftUI app has a separate release pipeline under
+[`macos/DefenseClawMac/`](../../macos/DefenseClawMac/) and is not produced by
+`make packaging-macos-bundle`.

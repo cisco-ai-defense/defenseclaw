@@ -48,7 +48,6 @@ def test_windows_guide_has_unambiguous_claims_and_powershell_examples() -> None:
         page.read_text(encoding="utf-8") for page in sorted(guide_dir.glob("*.mdx"))
     )
     text = " ".join(raw_text.split())
-    install_text = (ROOT / "docs/INSTALL.md").read_text(encoding="utf-8")
     assert "WSL is not supported" in text
     assert "Windows x64" in text and "`amd64`" in text
     assert "Windows ARM64" in text and "Not certified" in text
@@ -60,7 +59,6 @@ def test_windows_guide_has_unambiguous_claims_and_powershell_examples() -> None:
     assert "per-user Docker Desktop" in text
     assert "WSL2 engines" in text
     assert "Hermes remains preview" not in text
-    assert "Hermes is preview" not in install_text
     assert "```bash" not in text and "```sh" not in text
     assert text.count("```powershell") >= 8
     for label in (
@@ -119,27 +117,31 @@ def test_release_runtime_custody_splits_certified_x64_from_compatibility_arm64()
     assert '"codex",\n    "claudecode",\n    "none"' in installer
 
 
-def test_connector_matrix_preserves_macos_and_linux_support() -> None:
-    text = (ROOT / "docs/CONNECTOR-MATRIX.md").read_text(encoding="utf-8")
-    assert "### WSL research (out of current Windows scope)" in text
-    assert "current Windows product scope is **native Windows only**" in text
-    for connector in (
-        "Codex",
-        "Claude Code",
-        "Cursor",
-        "Windsurf",
-        "Gemini CLI",
-        "Copilot CLI",
-        "Antigravity",
-        "OpenCode",
-        "Hermes",
-        "OpenHands",
-        "OmniGent",
-        "OpenClaw",
-        "ZeptoClaw",
+def test_connector_matrix_delegates_current_support_to_the_website() -> None:
+    repository_pointer = (ROOT / "docs/CONNECTOR-MATRIX.md").read_text(encoding="utf-8")
+    compatibility = (
+        ROOT / "docs-site/content/docs/connectors/compatibility.mdx"
+    ).read_text(encoding="utf-8")
+
+    assert "https://cisco-ai-defense.github.io/defenseclaw/docs/connectors/compatibility/" in repository_pointer
+    assert "https://cisco-ai-defense.github.io/defenseclaw/docs/capability-matrix/" in repository_pointer
+    assert "not current support matrices" in " ".join(repository_pointer.split())
+    for connector_id in (
+        "codex",
+        "claudecode",
+        "cursor",
+        "windsurf",
+        "geminicli",
+        "copilot",
+        "antigravity",
+        "opencode",
+        "hermes",
+        "openhands",
+        "omnigent",
+        "openclaw",
+        "zeptoclaw",
     ):
-        row = next(line for line in text.splitlines() if line.startswith(f"| {connector} |"))
-        assert "| supported | supported |" in row
+        assert f'<ConnectorLabel id="{connector_id}" />' in compatibility
 
 
 def test_windows_live_harness_avoids_automatic_variable_assignments() -> None:

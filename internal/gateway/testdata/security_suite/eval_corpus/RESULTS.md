@@ -1,5 +1,9 @@
 # Judge Evaluation Results
 
+> **Historical benchmark snapshot.** These values describe the dated model,
+> corpus, and code revision recorded below. Re-run the benchmark before making
+> a claim about a different model or current branch.
+
 Headline metrics below are from the 2026-06-22 run
 (`us.anthropic.claude-sonnet-4-6`). The per-category and severity-distribution
 breakdowns further down are representative of judge behavior across runs.

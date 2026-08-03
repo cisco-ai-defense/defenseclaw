@@ -3273,8 +3273,8 @@ func TestCodex_ToolMode(t *testing.T) {
 		t.Errorf("expected both, got %q", c.ToolInspectionMode())
 	}
 	policy := c.SubprocessPolicy()
-	if policy != SubprocessSandbox && policy != SubprocessShims {
-		t.Errorf("expected sandbox or shims, got %q", policy)
+	if policy != SubprocessNone {
+		t.Errorf("expected no subprocess enforcement, got %q", policy)
 	}
 }
 
@@ -7199,16 +7199,16 @@ func TestTeardown_DoesNotDeleteOtherConnectorsHookScripts(t *testing.T) {
 
 func TestSecuritySurfaceCoverage(t *testing.T) {
 	type expectation struct {
-		name      string
-		toolMode  ToolInspectionMode
-		wantShims bool
+		name     string
+		toolMode ToolInspectionMode
+		policy   SubprocessPolicy
 	}
 
 	expectations := []expectation{
-		{"openclaw", ToolModeBoth, true},
-		{"zeptoclaw", ToolModeBoth, true},
-		{"claudecode", ToolModeBoth, true},
-		{"codex", ToolModeBoth, true},
+		{"openclaw", ToolModeBoth, ResolveSubprocessPolicy(SubprocessSandbox)},
+		{"zeptoclaw", ToolModeBoth, ResolveSubprocessPolicy(SubprocessSandbox)},
+		{"claudecode", ToolModeBoth, SubprocessNone},
+		{"codex", ToolModeBoth, SubprocessNone},
 	}
 
 	reg := NewDefaultRegistry()
@@ -7222,8 +7222,8 @@ func TestSecuritySurfaceCoverage(t *testing.T) {
 			t.Errorf("%s: ToolInspectionMode = %q, want %q", exp.name, c.ToolInspectionMode(), exp.toolMode)
 		}
 		policy := c.SubprocessPolicy()
-		if policy != SubprocessSandbox && policy != SubprocessShims {
-			t.Errorf("%s: SubprocessPolicy = %q, want sandbox or shims", exp.name, policy)
+		if policy != exp.policy {
+			t.Errorf("%s: SubprocessPolicy = %q, want %q", exp.name, policy, exp.policy)
 		}
 	}
 }

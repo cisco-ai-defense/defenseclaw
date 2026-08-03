@@ -13,8 +13,8 @@
 //
 //  1. Operators see exactly which security overrides are active via
 //     `defenseclaw doctor`.
-//  2. Docs (docs/ENV-VARS.md and docs-site/.../env-vars.mdx) are generated
-//     from one source and never drift.
+//  2. The website catalog (docs-site/.../env-vars.mdx) is generated
+//     from one source and cannot drift.
 //  3. CI fails if a new env var is added without a registry entry.
 //
 // The cross-language sync test in registry_test.go asserts the Go and

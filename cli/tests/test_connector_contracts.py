@@ -158,19 +158,16 @@ class TestConnectorContractManifest(unittest.TestCase):
         self.assertEqual(unversioned.contract.contract_id, "codex-hooks-v3")
         self.assertTrue(unversioned.contract.default_for_unversioned)
         self.assertTrue(unversioned.contract.native_otlp)
-        self.assertEqual(unversioned.contract.native_otlp_auth, "path-token-loopback")
+        self.assertEqual(unversioned.contract.native_otlp_auth, "header-token")
         self.assertEqual(
             unversioned.contract.native_otlp_signals,
             ("logs", "metrics", "traces"),
         )
         self.assertEqual(
             unversioned.contract.native_otlp_endpoint_template,
-            "/otlp/codex/<scoped-token>/v1/<signal>",
+            "/v1/<signal>",
         )
-        self.assertNotIn(
-            "Authorization",
-            unversioned.contract.native_otlp_endpoint_template,
-        )
+        self.assertNotIn("<scoped-token>", unversioned.contract.native_otlp_endpoint_template)
 
         older = resolve_connector_contract("codex", "codex 0.123.0")
         self.assertEqual(older.status, STATUS_UNKNOWN)
@@ -180,8 +177,8 @@ class TestConnectorContractManifest(unittest.TestCase):
         with patch("defenseclaw.commands.cmd_setup.click.echo") as echo:
             _print_connector_observability_banner("codex")
         rendered = "\n".join(str(call.args[0]) for call in echo.call_args_list if call.args)
-        self.assertIn("/otlp/codex/<token>/v1/<signal>", rendered)
-        self.assertNotIn("Native OTel — documented agent telemetry → /v1/logs", rendered)
+        self.assertIn("scoped bearer + source header on /v1/<signal>", rendered)
+        self.assertNotIn("/otlp/codex/<token>", rendered)
 
     def test_claude_aliases_resolve_to_claudecode(self) -> None:
         compat = resolve_connector_contract("claude-code", "Claude Code 2.1.152")
@@ -190,6 +187,15 @@ class TestConnectorContractManifest(unittest.TestCase):
         self.assertEqual(compat.contract.contract_id, "claudecode-hooks-v1")
         self.assertEqual(compat.contract.hook_script_version, "v7")
         self.assertIn("event_content", compat.contract.aid_surfaces)
+
+    def test_copilot_contract_describes_optional_native_otlp(self) -> None:
+        compat = resolve_connector_contract("copilot", "")
+
+        self.assertEqual(compat.contract.contract_id, "copilot-hooks-v1")
+        self.assertTrue(compat.contract.native_otlp)
+        self.assertEqual(compat.contract.native_otlp_auth, "header-token")
+        self.assertEqual(compat.contract.native_otlp_signals, ("metrics", "traces"))
+        self.assertEqual(compat.contract.native_otlp_endpoint_template, "/v1/<signal>")
 
     def test_unversioned_connectors_use_default_contract(self) -> None:
         compat = resolve_connector_contract("cursor", "")

@@ -98,7 +98,7 @@ endef
         security-suite-test security-suite-eval \
         connector-matrix-test go-connector-matrix-test py-connector-matrix-test \
         test-verbose test-file lint py-lint go-lint ts-test rego-test clean \
-        check check-audit-actions check-error-codes check-schemas telemetry-generate telemetry-check check-grafana-dashboards check-observability-v8-hard-cut check-observability-v8-spec check-v7 check-provider-coverage check-llm-catalog check-version-sync check-upgrade-manifest \
+        check check-audit-actions check-error-codes check-schemas telemetry-generate telemetry-check check-grafana-dashboards check-observability-v8-hard-cut check-v7 check-provider-coverage check-llm-catalog check-version-sync check-upgrade-manifest \
         upgrade-smoke upgrade-smoke-matrix upgrade-refusal-contract-matrix upgrade-developer-activation \
         upgrade-legacy-smoke upgrade-legacy-smoke-matrix upgrade-signed-protocol upgrade-signed-protocol-matrix \
         set-version \
@@ -869,7 +869,7 @@ test-file:
 # too and will fail the build on drift.
 # ---------------------------------------------------------------------------
 
-check: check-v7 check-observability-v8-hard-cut check-observability-v8-spec check-grafana-dashboards check-provider-coverage check-llm-catalog check-upgrade-manifest
+check: check-v7 check-observability-v8-hard-cut check-grafana-dashboards check-provider-coverage check-llm-catalog check-upgrade-manifest
 
 check-v7: check-audit-actions check-audit-no-raw-literals check-error-codes check-schemas
 	@echo "check-v7: all parity gates passed."
@@ -897,10 +897,6 @@ telemetry-check:
 # patterns, not fragile repository-wide inventory totals.
 check-observability-v8-hard-cut:
 	@$(VENV_BIN)/python$(EXE) scripts/check_observability_v8_hard_cut.py
-
-check-observability-v8-spec:
-	@$(VENV_BIN)/python$(EXE) scripts/check_observability_v8_spec.py \
-		--package docs/design/observability-v8
 
 check-grafana-dashboards: _bundle-data
 	@$(VENV_BIN)/python$(EXE) scripts/check_grafana_dashboards.py --require-packaged

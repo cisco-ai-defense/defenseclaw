@@ -1,5 +1,10 @@
 ## Webhook Notifications for Enforcement Events
 
+> **Status: archived PR description.** The implementation and test claims below
+> describe the reviewed change at that time. Current webhook setup belongs on
+> the
+> [published webhooks page](https://cisco-ai-defense.github.io/defenseclaw/docs/setup/webhooks/).
+
 ### Summary
 
 Adds an outbound webhook notification system that pushes enforcement events (skill/plugin blocks, drift alerts, guardrail blocks) to external systems in real time. Supports Slack, PagerDuty, Webex, and generic HTTP endpoints with per-endpoint severity filtering, event-type filtering, and automatic retry with exponential backoff.

@@ -1,6 +1,6 @@
 ---
 title: Gateway API
-description: defenseclaw-gateway HTTP surface — every route registered in internal/gateway/api.go, the auth + CSRF model, and the verdict shape that inspect/scan endpoints return. Authoritative source is api.go itself.
+description: The defenseclaw-gateway sidecar API — its registered route patterns, authentication and CSRF model, and inspection verdict shape. The handler code is authoritative.
 keywords:
   - DefenseClaw gateway API
   - defenseclaw-gateway endpoints
@@ -9,32 +9,72 @@ keywords:
   - X-DefenseClaw-Client
 ---
 
-`defenseclaw-gateway` exposes an HTTP surface used by hook scripts, the OpenClaw plugin, the CLI, and the TUI. This page lists every route the gateway actually registers, grouped by purpose.
+`defenseclaw-gateway` exposes a sidecar management API used by hook scripts,
+connector plugins, the CLI, and the TUI. This page lists every static route
+pattern registered by `APIServer.Run`, the two provider routes installed by
+`registerProviderRoutes`, and every built-in connector hook route.
 
-This is **not** an OpenAPI spec — request/response shapes evolve and the canonical source is the handler code. For exact field names, point at the handler in [`internal/gateway/api.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/api.go) (which `mux.HandleFunc` references the implementing file).
+This is **not** an OpenAPI specification. The canonical request and response
+shapes are the handlers in
+[`internal/gateway/api.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/api.go)
+and the files referenced from its `mux.HandleFunc` registrations.
 
 <Callout type="info">
-Last audited: every entry on this page was verified against `mux.HandleFunc` calls in `internal/gateway/api.go:Run()` (lines 304-393). If you add or rename a route in code, update this page in the same PR — `make docs-check` will fail otherwise.
+This page covers the sidecar API on `gateway.api_port`. The separate guardrail
+proxy listener on `guardrail.port` has its own OpenAI-compatible and provider
+routes in `internal/gateway/proxy.go`.
 </Callout>
 
 ## Bind address
 
-| Knob | Default | Where set |
+| Knob | Config default | Effective value |
 | --- | --- | --- |
-| `gateway.api_port` | `18970` | `~/.defenseclaw/config.yaml` |
-| `gateway.api_bind` | `127.0.0.1` | `~/.defenseclaw/config.yaml` (override only when running the sandbox/lan profile) |
-| `gateway.port` (proxy) | `18789` | Separate from the API server — the proxy port the LiteLLM/Bifrost upstream listens on |
+| `gateway.api_port` | `18970` | Sidecar API port |
+| `gateway.api_bind` | empty | `127.0.0.1` when empty, except for the standalone OpenShell rule below |
 
-The gateway binds to localhost by default. To expose the API to the LAN (sandbox/multi-host setups), set `gateway.api_bind: "0.0.0.0"` in `~/.defenseclaw/config.yaml`. `defenseclaw setup` does this for you when it provisions the sandbox profile.
+The API binds to loopback by default. In standalone OpenShell mode only, an
+empty `gateway.api_bind` inherits `guardrail.host` when that value is non-empty
+and is not the literal `localhost`; set `gateway.api_bind: 127.0.0.1`
+explicitly when the management API must remain loopback-only. A non-loopback
+value expands access to the authenticated management surface; protect that
+listener with host firewalling and a deployment-specific network design.
+`gateway.host` and `gateway.port` describe the upstream agent gateway, while
+`guardrail.host`/`guardrail.port` control the separate guardrail proxy
+listener.
 
 ## Auth
 
-Every request — except `GET /health` — must carry the gateway token. Two header forms are accepted (constant-time compared in [`tokenAuth`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/api.go)):
+Every request except `GET /health` must authenticate. The shared authentication
+middleware accepts these header forms; all three are constant-time compared
+with the resolved gateway token:
 
 ```
-X-DefenseClaw-Token: <token>
-Authorization:        Bearer <token>
+Authorization:         Bearer <token>
+X-DefenseClaw-Token:   <token>
+X-DC-Auth:             Bearer <token>
 ```
+
+`PATCH /v1/guardrail/config` performs a second, endpoint-local check and accepts
+only `Authorization: Bearer` or `X-DefenseClaw-Token`; `X-DC-Auth` alone is
+rejected there. The endpoint also rejects every patch in
+`managed_enterprise` deployment mode.
+
+Loopback connector hook routes can instead use the matching connector's narrow
+hook token. The Codex token also authorizes `/api/v1/codex/notify`. A
+connector-scoped token on a generic `/api/v1/inspect/*` route is accepted only
+over loopback and only when `X-DefenseClaw-Connector` names the same registered
+connector.
+
+OTLP credentials are source-specific only for the closed scope set
+`geminicli`, `codex`, and `claudecode`. Codex and Claude Code send their scoped
+bearer to `/v1/{logs,metrics,traces}` together with
+`X-DefenseClaw-Source: codex|claudecode`; that header selects and must match the
+scoped credential. Gemini CLI uses
+`/otlp/geminicli/{token}/v1/{signal}` because its exporter cannot add the
+authorization header. Once a scoped token exists for one of those sources, the
+master gateway token is rejected for that source's scoped route. Other native
+OTLP sources, including Copilot and OmniGent, currently authenticate their
+loopback `/v1/{signal}` requests with the master gateway token.
 
 The token is resolved from one of, in priority order:
 
@@ -43,11 +83,29 @@ The token is resolved from one of, in priority order:
 3. `OPENCLAW_GATEWAY_TOKEN` (legacy fallback for existing installs)
 4. `gateway.token` directly in `~/.defenseclaw/config.yaml`
 
-There is **no** standalone token file (`~/.defenseclaw/gateway-token` is sometimes mentioned in older docs but the gateway never reads it). Use `defenseclaw keys set DEFENSECLAW_GATEWAY_TOKEN` to set the canonical env var; it lands in `~/.defenseclaw/.env`.
+There is **no** standalone `~/.defenseclaw/gateway-token` file. On first boot
+the sidecar creates `DEFENSECLAW_GATEWAY_TOKEN` in
+`~/.defenseclaw/.env` when neither a supported environment nor dotenv source
+already supplies a token. Rotate a locally managed token with
+`defenseclaw setup rotate-token --yes`; that transaction restarts the gateway
+and refreshes active connector credentials. An externally managed custom
+`gateway.token_env` must be rotated by its owning secret system.
 
 ### CSRF protection
 
-Every state-changing request also requires `X-DefenseClaw-Client` (any non-empty value identifying the caller — `cli`, `openclaw-plugin`, `inspect-hook/1.0`, etc.). The middleware rejects same-origin browser requests that lack it with `403`. See [`apiCSRFProtect`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/api.go) in api.go.
+Every non-`GET`/`HEAD` request also requires `X-DefenseClaw-Client` (any
+non-empty caller identifier such as `cli`, `openclaw-plugin`, or
+`inspect-hook/1.0`). POST, PUT, PATCH, and DELETE requests require
+`Content-Type: application/json`; OTLP requests instead require
+`application/json` or `application/x-protobuf`. OPTIONS requires the client
+header but no content type. The only narrow client-header exception is a
+loopback scoped-token OTLP path, because some native exporters cannot add
+arbitrary headers; that path still requires an OTLP content type and rejects a
+non-local browser origin.
+
+All ordinary mutations also reject a non-local `Origin`; cross-site requests
+are rejected when `Sec-Fetch-Site` identifies them. A shared middleware caps
+POST, PUT, and PATCH bodies at 1 MiB.
 
 ```
 X-DefenseClaw-Client: cli
@@ -60,41 +118,75 @@ X-DefenseClaw-Client: cli
 | Method | Path | Auth | Purpose |
 | --- | --- | --- | --- |
 | `GET` | `/health` | exempt | Liveness + uptime + version. Used by k8s probes and `defenseclaw doctor`. |
-| `GET` | `/status` | required | Active connector roster + enforcement flags + legacy `connector_mode` + `connector_modes` (one entry per active connector: `connector`, `mode`, `policy_mode`, `enforcement_surface`, `telemetry`, `proxy_intercept`) + provenance. Used by `defenseclaw status` and the TUI. |
+| `GET` | `/status` | required | Health, process identity, provenance, an optional connected-gateway hello, legacy singular `connector_mode`, and `connector_modes` (one entry per active connector). Used by `defenseclaw status` and the TUI. |
 | `GET` | `/v1/connectors` | required | Lists every connector registered in the gateway (name, description, source, hook capabilities, tool inspection mode). |
 
 `GET /status` carries both a singular and a plural connector field so old and new clients keep working on a multi-connector install:
 
-```json title="GET /status (excerpt)"
+```json title="GET /status (connector fields example)"
 {
-  "connector_mode": "action",
+  "connector_mode": {
+    "connector": "codex",
+    "mode": "observability",
+    "policy_mode": "action",
+    "guardrail_mode": "action",
+    "hook_fail_mode": "closed",
+    "enabled": true,
+    "hook_enforcement": true,
+    "enforcement_surface": "agent_lifecycle_hooks",
+    "telemetry": ["hooks", "otel", "notify"],
+    "proxy_intercept": false
+  },
   "connector_modes": [
     {
       "connector": "codex",
       "mode": "observability",
       "policy_mode": "action",
+      "guardrail_mode": "action",
+      "hook_fail_mode": "closed",
+      "enabled": true,
+      "hook_enforcement": true,
       "enforcement_surface": "agent_lifecycle_hooks",
-      "telemetry": ["hook", "otel"],
+      "telemetry": ["hooks", "otel", "notify"],
       "proxy_intercept": false
     },
     {
       "connector": "claudecode",
       "mode": "observability",
       "policy_mode": "observe",
+      "guardrail_mode": "observe",
+      "hook_fail_mode": "closed",
+      "enabled": true,
+      "hook_enforcement": false,
       "enforcement_surface": "agent_lifecycle_hooks",
-      "telemetry": ["hook"],
+      "telemetry": ["hooks", "otel"],
       "proxy_intercept": false
     }
   ]
 }
 ```
 
-- **`connector_mode`** (singular) is a legacy compatibility value for clients written before multi-connector existed. On a fan-out install it is not the authoritative roster view; use `connector_modes` instead.
-- **`connector_modes`** (plural) is the authoritative per-connector view: one entry per **active** connector. `mode` is the backward-compatible data-path value (`guardrail` or `observability`); `policy_mode` is the operator posture (`observe` or `action`); `enforcement_surface` identifies the proxy, lifecycle-hook, or OmniGent policy API path; `telemetry` lists active signal sources; and `proxy_intercept` is `true` only for proxy connectors. `defenseclaw-gateway status` renders its per-connector **"Connector Mode"** section directly from this array.
+- **`connector_mode`** (singular) is the same summary object for the primary
+  connector, retained for clients written before multi-connector existed. On a
+  fan-out install it is not the authoritative roster view; use
+  `connector_modes` instead.
+- **`connector_modes`** (plural) is the authoritative per-connector view: one
+  entry per **active** connector. `mode` is the backward-compatible data-path
+  value (`guardrail` or `observability`); `policy_mode` and `guardrail_mode`
+  report the effective `observe`/`action` posture; `hook_fail_mode` is the
+  effective hook fail mode; `enabled` is the connector's effective guardrail
+  enablement; `hook_enforcement` is true for a non-proxy connector in action
+  mode; `enforcement_surface` identifies the proxy, lifecycle-hook, or OmniGent
+  policy API path; `telemetry` lists reported wiring channels; and
+  `proxy_intercept` is true only for proxy connectors.
+  `defenseclaw-gateway status` renders its per-connector **"Connector Mode"**
+  section directly from this array.
 
 ### Connector hooks
 
-Each connector registers exactly one hook endpoint. The path is owned by the connector, declared in its `HookAPIPath()` method, and registered dynamically in [`registerConnectorHookRoutes`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/api.go).
+Built-in connectors that implement the hook endpoint contract register the
+following routes. Proxy connectors such as OpenClaw and ZeptoClaw do not
+register a connector hook route.
 
 | Method | Path | Connector | Source |
 | --- | --- | --- | --- |
@@ -118,83 +210,99 @@ The `/api/v1/inspect/*` family is the hot path that connector hooks and the Open
 
 | Method | Path | Used by | Purpose |
 | --- | --- | --- | --- |
-| `POST` | `/api/v1/inspect/tool` | Hook scripts, OpenClaw plugin | Inspect a tool call (name + args). Returns the verdict envelope below. |
-| `POST` | `/api/v1/inspect/request` | Hook scripts, plugin | Inspect an outbound LLM request (prompt). |
-| `POST` | `/api/v1/inspect/response` | Hook scripts, plugin | Inspect a model response. |
-| `POST` | `/api/v1/inspect/tool-response` | Hook scripts, plugin | Inspect a tool's output before it returns to the agent. |
+| `POST` | `/api/v1/inspect/tool` | Shared hook script; OpenClaw extension | Inspect a tool call (`tool` + `args`), or inspect message content when `tool: "message"` supplies `content` and `direction`. Returns the verdict envelope below. |
+| `POST` | `/api/v1/inspect/request` | Shared hook script | Inspect an outbound LLM request (prompt). |
+| `POST` | `/api/v1/inspect/response` | Shared hook script | Inspect a model response. |
+| `POST` | `/api/v1/inspect/tool-response` | Shared hook script | Inspect a tool's output before it returns to the agent. |
 
 ### Code & network scanning
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `POST` | `/api/v1/scan/code` | CodeGuard scan of a code blob — used by the codeguard skill and the IDE plugin to lint with the rule pack's code-scanning rules. |
-| `POST` | `/api/v1/network-egress` | Egress decision for an outbound HTTP/DNS lookup (used by the OpenShell sandbox profile). |
+| `POST` | `/api/v1/scan/code` | Run the built-in CodeGuard scanner on the local filesystem `path` supplied in the JSON body. |
+| `GET` | `/api/v1/network-egress` | List persisted egress audit records. Supports `limit`, `hostname`, `session_id`, `agent_id`, `root_agent_id`, `user_id`, `blocked`, and RFC3339 `since` filters. |
+| `POST` | `/api/v1/network-egress` | Ingest one observed egress event into the audit logger; this is not an allow/block decision endpoint. |
 
 ### Asset scanning
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `POST` | `/v1/skill/scan` | Run the skill scanner against a fetched skill bundle. |
-| `POST` | `/v1/plugin/scan` | Run the plugin scanner against a plugin manifest + sources. |
-| `POST` | `/v1/mcp/scan` | Run the MCP scanner against an MCP server's `mcpServers.json`. |
-| `POST` | `/v1/skill/fetch` | Fetch a skill from a registry source so it can be scanned before install. |
+| `POST` | `/v1/skill/scan` | Run the skill scanner against the local target directory named in the request. |
+| `POST` | `/v1/plugin/scan` | Run the plugin scanner against the local target directory named in the request. |
+| `POST` | `/v1/mcp/scan` | Run the MCP scanner against a target URL or local path. |
+| `POST` | `/v1/skill/fetch` | Stream a tar.gz of an existing local directory after resolving it beneath a configured skill or plugin root; this does not fetch from a registry. |
+| `POST` | `/scan/result` | Persist a scanner result through the canonical audit logger. |
 
 ### Asset enable / disable
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `POST` | `/skill/disable` | Quarantine a skill by key. |
-| `POST` | `/skill/enable` | Re-enable a previously disabled / quarantined skill. |
-| `POST` | `/plugin/disable` | Quarantine a plugin by name. |
-| `POST` | `/plugin/enable` | Re-enable a plugin. |
+| `POST` | `/skill/disable` | Ask the connected upstream agent gateway to disable a skill by key (`skills.update`). |
+| `POST` | `/skill/enable` | Ask the connected upstream agent gateway to enable a skill by key (`skills.update`). |
+| `POST` | `/plugin/disable` | Ask the connected upstream/OpenClaw gateway to disable a plugin through its config RPC. |
+| `POST` | `/plugin/enable` | Ask the connected upstream/OpenClaw gateway to enable a plugin through its config RPC. |
+
+These routes return `503` when no upstream client object is present and `502`
+when an attempted upstream RPC fails, including a disconnected client. They do
+not perform the CLI's filesystem quarantine/restore workflow.
 
 ### Inventory
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `GET` | `/skills` | List discovered skills with admission state. |
-| `GET` | `/mcps` | List discovered MCP servers with admission state. |
-| `GET` | `/tools/catalog` | Aggregate tool catalogue across the active connector roster. |
+| `GET` | `/skills` | Return the connected upstream agent gateway's `skills.status` RPC payload. An absent client returns `503`; an RPC/disconnection failure returns `502`. |
+| `GET` | `/mcps` | Return MCP server entries for the singular active connector from DefenseClaw configuration; unavailable or malformed input returns an empty list. |
+| `GET` | `/tools/catalog` | Return the one connected upstream agent gateway's `tools.catalog` RPC payload. An absent client returns `503`; an RPC/disconnection failure returns `502`. |
+
+### Provider registry
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET`, `HEAD` | `/v1/config/providers` | Return the merged built-in and operator provider registry plus overlay status. |
+| `POST` | `/v1/config/providers/reload` | Reload the built-in registry and `custom-providers.json` overlay. |
 
 ### Policy
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `POST` | `/policy/evaluate` | Evaluate the OPA admission policy against an arbitrary input. Used internally by the scanners and exposed for debugging. |
+| `POST` | `/policy/evaluate` | Debug the admission policy with `{domain?: "admission", input: {target_type, target_name, path?, scan_result?}}`. DefenseClaw injects its current allow/block lists and returns `{ok: true, data: <AdmissionOutput>}`; arbitrary OPA domains/input are rejected. |
 | `POST` | `/policy/evaluate/firewall` | Evaluate the firewall sub-policy in isolation. |
 | `POST` | `/policy/evaluate/audit` | Evaluate the audit sub-policy. |
 | `POST` | `/policy/evaluate/skill-actions` | Evaluate the `skill_actions` sub-policy by severity. |
-| `POST` | `/policy/reload` | Reload the OPA policy bundle (`policies/<name>.yaml` + `policies/rego/`) without restarting the gateway. Returns 200 + the active policy name. |
+| `POST` | `/policy/reload` | Atomically reload `.rego` modules plus optional `data.json` from configured `policy_dir` (or its `rego` child), invalidate the judge cache, and return `{"status":"reloaded","policy_dir":"..."}`. |
 
 ### Guardrail control plane
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `POST` | `/v1/guardrail/event` | Submit a guardrail event (used by the LiteLLM bridge for upstream-triggered events). |
-| `POST` | `/v1/guardrail/evaluate` | Evaluate the guardrail rule pack against arbitrary content. |
+| `POST` | `/v1/guardrail/event` | Emit canonical telemetry for an already-decided guardrail event. Requires `evaluation_id`, `direction` (`prompt` or `completion`), `action` (`allow`, `alert`, or `block`), and severity (`NONE` through `CRITICAL`); latency/token values must be finite and nonnegative. Returns `{"status":"ok"}`. No production caller is wired in this repository. |
+| `POST` | `/v1/guardrail/evaluate` | Combine caller-supplied, precomputed `local_result` / `cisco_result` values with required `evaluation_id`, `direction`, and `mode`, plus optional model/scanner/content/timing metadata. It does not scan arbitrary content and returns a `GuardrailOutput` with `action`, `severity`, `reason`, and `scanner_sources`. |
 | `GET` | `/v1/guardrail/config` | Return the active guardrail config snapshot. |
-| `PATCH` | `/v1/guardrail/config` | Patch supported guardrail runtime fields into `~/.defenseclaw/config.yaml`, validate the full YAML file, and let the config watcher/reconciler apply the latest config. Body is JSON, not raw YAML. Supported fields: `mode`, `scanner_mode`, `block_message`, `connector`, `hilt_enabled`, `hilt_min_severity`. |
+| `PATCH` | `/v1/guardrail/config` | Patch supported guardrail runtime fields into the active DefenseClaw config file, validate the full YAML file, and apply it through the central reloader. Body is JSON, not raw YAML. Supported fields: `mode`, `scanner_mode`, `block_message`, `connector`, `hilt_enabled`, `hilt_min_severity`. Managed-enterprise deployments reject this API mutation. |
 
 Changing `connector` uses restart semantics so listener and hook state are rebuilt; it is not accepted as an in-place connector swap.
 
 ### Enforcement logging
 
-These endpoints are write-only "I just blocked / allowed something" telemetry endpoints used by the OpenClaw plugin to keep the gateway's audit DB authoritative when the plugin makes the decision out-of-band.
+These endpoints manage the durable enforcement allow/block lists.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `POST` | `/enforce/block` | Log an enforcement-time block. |
-| `POST` | `/enforce/allow` | Log an enforcement-time allow. |
-| `POST` | `/enforce/blocked` | List recent enforcement-time blocks. |
-| `POST` | `/enforce/allowed` | List recent enforcement-time allows. |
+| `POST`, `DELETE` | `/enforce/block` | Add a block, or remove it with `DELETE`. |
+| `POST` | `/enforce/allow` | Add an allow and re-enable a disabled skill/plugin when required. |
+| `GET` | `/enforce/blocked` | List blocked entries. |
+| `GET` | `/enforce/allowed` | List allowed entries. |
 
 ### Audit
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `POST` | `/audit/event` | Append a single audit-event JSON to the SQLite store. Used by hook scripts and plugin SDKs. |
+| `POST` | `/audit/event` | Append one audit-event JSON object to the configured audit logger/store. The production OpenClaw extension client uses this route; managed connector hook routes audit internally. |
+| `GET` | `/alerts` | Return recent alert rows. `limit` defaults to 50 and is capped at 500. |
+| `POST` | `/api/v1/alerts/disposition` | Preview or apply an audited alert acknowledgement/disposition operation. |
 
-The gateway has no streaming or query HTTP endpoint — read history through the CLI:
+There is no general audit-history or streaming HTTP route. Read/export history
+through the CLI:
 
 ```bash
 defenseclaw-gateway audit export --output audit.jsonl     # JSONL of audit_events
@@ -209,7 +317,20 @@ Audit export includes the legacy `details` text and, when present, first-class `
 
 | Method | Path | Purpose |
 | --- | --- | --- |
-| `POST` | `/config/patch` | Apply a JSON-Patch-style update to a single config key (used by the TUI's quick-edit panel). The gateway watches `config.yaml` and reconciles valid changes; set `gateway.config_reload.mode: restart` when a deployment should use a fresh process for substantive config edits. |
+| `POST` | `/config/patch` | Bridge `{path, value}` to the connected upstream agent gateway's WebSocket `config.patch` RPC. It does not write DefenseClaw's `config.yaml`; an absent client returns `503`, while an RPC/disconnection failure returns `502`. |
+
+### Runtime control and internal observability bridges
+
+These authenticated routes are narrow process/CLI integration seams rather
+than general-purpose ingestion APIs.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `POST` | `/api/v1/admin/shutdown` | Request graceful shutdown. Restricted to loopback and requires the current PID and data directory identity. |
+| `POST` | `/api/v1/telemetry/canary` | Emit a trace canary through the active observability-v8 runtime. |
+| `POST` | `/api/v1/watchdog/recovery` | Record a watchdog recovery metric. Restricted to loopback. |
+| `POST` | `/api/v1/observability/destination-test/activity` | Persist destination-test compliance activity. Restricted to loopback and the exact `python-cli` client marker. |
+| `POST` | `/api/v1/observability/cli` | Hand validated CLI events to the process-owned observability-v8 runtime. |
 
 ### AI usage / discovery (AIBOM)
 
@@ -227,6 +348,20 @@ The continuous AI Discovery surface — see [AI Discovery](/docs/ai-discovery) f
 | `GET` | `/api/v1/ai-usage/confidence/policy` | Show the active confidence-scoring policy. |
 | `POST` | `/api/v1/ai-usage/confidence/policy/validate` | Dry-run validation of a candidate policy file. |
 
+### Correlation ledger
+
+Each read route accepts exactly one supported identity anchor (for example
+`record_id`, `evaluation_id` is not a supported query key here,
+`semantic_event_id`, `session_id`, `trace_id`, or `tool_invocation_id`) and
+supports bounded cursor pagination.
+
+| Method | Path | Purpose |
+| --- | --- | --- |
+| `GET` | `/api/v1/correlation/graph` | Return the evidence-backed identity graph around an anchor. |
+| `GET` | `/api/v1/correlation/explain` | Explain how records are linked to an anchor. |
+| `GET` | `/api/v1/correlation/timeline` | Return the correlated event timeline. |
+| `GET` | `/api/v1/correlation/conflicts` | Return identity conflicts associated with an anchor. |
+
 ### Codex bridge
 
 | Method | Path | Purpose |
@@ -235,26 +370,29 @@ The continuous AI Discovery surface — see [AI Discovery](/docs/ai-discovery) f
 
 ### OTLP receiver
 
-The gateway accepts OTLP-HTTP from connectors (Codex, Gemini CLI native OTLP) and from the local-observability stack. Body is OTLP-JSON.
+The gateway accepts OTLP-HTTP from configured connectors. Both OTLP JSON and
+protobuf content types are accepted; decoding is implemented in
+`internal/gateway/otel_ingest.go`.
 
 | Method | Path | Purpose |
 | --- | --- | --- |
 | `POST` | `/v1/logs` | Ingest OTLP logs. |
 | `POST` | `/v1/metrics` | Ingest OTLP metrics. |
 | `POST` | `/v1/traces` | Ingest OTLP traces. |
-| `POST` | `/otlp/{source}/{token}/v1/{signal}` | Connector-scoped logs, metrics, or traces. The token rides in the URL path, is accepted only for its source namespace over loopback, and is removed from route telemetry. Used by Codex and Gemini CLI. |
+| `POST` | `/otlp/{source}/{token}/v1/{signal}` | Connector-scoped logs, metrics, or traces for a native exporter that cannot set an auth header. The path token is accepted only over loopback and is removed from route telemetry. |
 
 See [`internal/gateway/otel_ingest.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/otel_ingest.go) for the parsing details and [Local observability](/docs/observability/local-observability) for the operator setup.
 
 ## Verdict envelope
 
-The four `/api/v1/inspect/*` endpoints return a [`ToolInspectVerdict`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/inspect.go) (or its near-twin for response-side inspection):
+All four `/api/v1/inspect/*` endpoints serialize the same
+[`ToolInspectVerdict`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/inspect.go):
 
 ```json
 {
   "action":     "block | confirm | alert | allow",
   "raw_action": "block",
-  "severity":   "CRITICAL | HIGH | MEDIUM | LOW | INFO",
+  "severity":   "CRITICAL | HIGH | MEDIUM | LOW | INFO | NONE",
   "confidence": 0.93,
   "reason":     "matched: CMD-RM-RF:Recursive force delete from critical root path",
   "findings":   ["CMD-RM-RF:Recursive force delete from critical root path"],
@@ -270,13 +408,17 @@ The four `/api/v1/inspect/*` endpoints return a [`ToolInspectVerdict`](https://g
   ],
   "mode":       "action | observe",
   "would_block": true,
-  "approval_timeout_ms": 0
+  "approval_timeout_ms": 45000
 }
 ```
 
 Notable behaviours:
 
-- **`action` is the *effective* verdict, not the raw policy decision.** `applyMode()` downgrades `block` / `confirm` / `alert` to `allow` when the gateway is in `observe` mode, but preserves the raw verdict in `raw_action` and the would-have-blocked signal in `would_block`. This is how observe-mode dry-runs work without touching the rule pack.
+- **`action` is the *effective* verdict, not the raw policy decision.**
+  `applyMode()` downgrades `block`, `confirm`, and `alert` to `allow` outside
+  action mode and preserves the original in `raw_action`. It sets
+  `would_block: true` only for a downgraded `block`; downgraded `confirm` and
+  `alert` leave that field false/omitted.
 - **`confirm` is surface-dependent.** A native OpenClaw tool-approval caller can
   receive `confirm` and resolve it in the plugin. A non-native caller cannot
   safely pause, so the inspect handler fails the confirmation closed to
@@ -288,36 +430,53 @@ Notable behaviours:
   `ToolInspectVerdict` HTTP schema does not expose `evaluation_id` or
   `rule_ids`. Connector-hook responses do expose both fields, as shown below.
   See [Observability §1.4](/docs/observability) for the per-surface contract.
-- **`detailed_findings` and `findings` are both populated** for backward compatibility. Existing clients that only read `findings: []string` are unaffected by the new structured field.
+- **Pattern-rule and CodeGuard decisions populate both representations** for
+  backward compatibility. Clean verdicts can omit details, and static, MCP, or
+  AID merge paths can add string `findings` without synthesizing matching
+  `detailed_findings`.
+- **Optional fields are omitted when empty.** In particular,
+  `approval_timeout_ms` is absent when its value is zero. A structured finding
+  can additionally include `tool_capability_class`; it has no `remediation`
+  field.
+- **Empty request/response content takes a fast allow path.** Those two
+  handlers return the same verdict type, but before `applyMode()` runs; the
+  serialized non-optional `mode` is therefore an empty string and
+  `raw_action` is absent.
 
-Other endpoints return their own shapes — `/v1/skill/scan` returns a scanner-specific envelope, `/audit/event` returns `{"status": "stored", "id": "..."}`, `/skill/disable` returns `{"status": "disabled", "skillKey": "..."}`. Always confirm against the handler code before assuming a shape.
+Other endpoints return their own shapes — `/v1/skill/scan` returns a scanner-specific envelope, `/audit/event` returns `{"status": "ok"}`, and `/skill/disable` returns `{"status": "disabled", "skillKey": "..."}`. Always confirm against the handler code before assuming a shape.
 
 ## Connector hook responses
 
-Every connector hook response (`/api/v1/{claude-code,codex,cursor,...}/hook`)
-carries `evaluation_id` and the top `rule_ids` so clients can join it to the
-audit and scan rows:
+A connector hook response can carry `evaluation_id` and the top `rule_ids`
+when the evaluation produced correlation data:
 
 ```json
 {
   "action":        "allow | block | deny | …",
   "reason":        "rule X fired",
-  "findings":      ["rule.id.one", "rule.id.two"],
+  "findings":      ["rule.id.one:First finding", "rule.id.two:Second finding"],
   "evaluation_id": "eval-c1d0…",
   "rule_ids":      ["rule.id.one", "rule.id.two"]
 }
 ```
 
-Connector-hook responses expose the string `findings` list, not the inspect
-endpoint's `detailed_findings` objects. For `/api/v1/inspect/*`, evidence is
-redacted by default; `X-DefenseClaw-Reveal-PII: 1` requests raw evidence and
-creates an audited reveal event. `evaluation_id` and `rule_ids` are populated
-when the hook evaluation produced correlation data.
+Connector-hook responses expose a string `findings` list, not the inspect
+endpoint's `detailed_findings` objects. Pattern-rule entries normally use
+`rule_id:title`; some scanner-specific paths emit bare finding IDs.
+`rule_ids` is the canonical bare-ID list populated with `evaluation_id` when
+the hook evaluation produced correlation data.
+
+For `/api/v1/inspect/*`, evidence is redacted by default.
+`X-DefenseClaw-Reveal-PII: 1` requests raw response evidence. The tool-inspect
+handler records an `inspect-reveal` audit event; the request, response, and
+tool-response handlers currently reveal without that extra audit event.
 
 ## Headers
 
 | Header | Direction | Purpose |
 | --- | --- | --- |
-| `X-DefenseClaw-Token` *(or* `Authorization: Bearer ...`*)* | request | Gateway auth. Required on every endpoint except `GET /health`. |
-| `X-DefenseClaw-Client` | request | CSRF marker — any non-empty caller identifier (`cli`, `openclaw-plugin`, `inspect-hook/1.0`). Required on every state-changing endpoint. |
-| `X-DefenseClaw-Request-Id` | request *(optional)* | Caller-supplied correlation id. The gateway also accepts the more common `X-Request-Id` and `X-Correlation-Id` for compatibility with OpenTelemetry / Envoy / Microsoft / New Relic instrumentation. If unset, the gateway mints one. See [`requestctx.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/requestctx.go). |
+| `X-DefenseClaw-Token`, `Authorization: Bearer ...`, or `X-DC-Auth: Bearer ...` | request | Master gateway authentication. Every route except `GET /health` requires either this credential or a route-appropriate scoped token. |
+| `X-DefenseClaw-Client` | request | CSRF marker — any non-empty caller identifier (`cli`, `openclaw-plugin`, `inspect-hook/1.0`). Required on non-`GET`/`HEAD` requests except the constrained loopback path-token OTLP case described above. |
+| `X-DefenseClaw-Connector` | request | On loopback generic inspect routes, selects the registered connector whose scoped hook token is being presented. |
+| `X-DefenseClaw-Source` | request | On loopback `/v1/{logs,metrics,traces}`, selects and must match a header-scoped Codex or Claude Code OTLP token. |
+| `X-DefenseClaw-Request-Id` | request *(optional)*, response | Caller-supplied correlation id. The gateway also accepts `X-Request-Id` and `X-Correlation-Id`; if none is supplied, it mints one. The chosen ID is always returned as `X-DefenseClaw-Request-Id`. See [`requestctx.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/requestctx.go). |

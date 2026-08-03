@@ -108,7 +108,7 @@ interface FlowProps {
   // reach for 'native' only when readability of every label at full
   // pixel size matters more than fitting the column.
   fit?: DiagramFit;
-  // Tighten dagre spacing (`ranksep` 80→50, `nodesep` 50→30) and
+  // Tighten dagre spacing (`ranksep` 78→54, `nodesep` 56→38) and
   // shrink the per-node max-width upper bound. Cuts ~15-20% off the
   // natural width on most graphs with negligible legibility cost.
   compact?: boolean;

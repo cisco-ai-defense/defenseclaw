@@ -1,9 +1,7 @@
 <!--
-Use the PR #361 description style:
-https://github.com/cisco-ai-defense/defenseclaw/pull/361
-
-Rule: every future action item must have a GitHub issue before it appears in this PR body.
-List linked issues under "Open Issues / Follow-ups". If there are no follow-ups, write "None".
+Every future action item must have a GitHub issue before it appears in this PR
+body. List linked issues under "Open Issues / Follow-ups". If there are no
+follow-ups, write "None".
 -->
 
 ## Problem

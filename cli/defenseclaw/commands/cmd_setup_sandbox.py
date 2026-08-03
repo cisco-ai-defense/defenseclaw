@@ -485,7 +485,7 @@ def setup_sandbox(
         click.echo("       defenseclaw-gateway start")
         click.echo()
         click.echo("  Stop:")
-        click.echo("       sudo systemctl stop defenseclaw-sandbox.target")
+        click.echo("       sudo systemctl stop openshell-sandbox.service")
         click.echo()
         click.echo("  Logs:")
         click.echo("       sudo journalctl -u openshell-sandbox -f")
@@ -511,7 +511,7 @@ def setup_sandbox(
         click.echo("       defenseclaw-gateway start")
         click.echo()
         click.echo("  Stop:")
-        click.echo("       sudo systemctl stop defenseclaw-sandbox.target")
+        click.echo("       sudo systemctl stop openshell-sandbox.service")
         click.echo()
         click.echo("  Logs:")
         click.echo("       sudo journalctl -u openshell-sandbox -f")
@@ -705,8 +705,14 @@ def _disable_sandbox(app: AppContext) -> None:
     sandbox_ip = cfg_host if cfg_host not in ("127.0.0.1", "localhost", "") else "10.200.0.2"
     openclaw_port = int(app.cfg.gateway.port)
 
-    # 1. Stop and disable systemd units
-    _disable_systemd_units()
+    # 1. Stop and disable systemd units when systemd is available. The
+    # generated non-systemd launcher must be stopped explicitly by its owner
+    # before disable; invoking a user-writable launcher through sudo here would
+    # cross a privilege boundary.
+    if shutil.which("systemctl") is not None:
+        _disable_systemd_units()
+    else:
+        click.echo("  Systemd:       not detected; no systemd units changed")
 
     # 2. Remove iptables rules
     if app.cfg.openshell.host_networking:

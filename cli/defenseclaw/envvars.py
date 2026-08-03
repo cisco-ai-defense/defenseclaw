@@ -95,7 +95,7 @@ _ACTIVE_WHEN_NONEMPTY = frozenset({"DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS"})
 
 @dataclass(frozen=True)
 class Consumer:
-    """A single ``file:line`` location that reads or references the var."""
+    """A source file that reads or references the variable."""
 
     location: str
     description: str

@@ -22,8 +22,8 @@ import (
 // Async judge-persistence queue tuning. The defaults are picked so a
 // single-writer worker can serve the realistic burst rate
 // (~100 RPS of tool-call inspections during an MCP-heavy session)
-// without ever entering the BUSY retry loop on audit.db. See
-// docs/OBSERVABILITY.md for the operator-facing tuning guide.
+// without ever entering the BUSY retry loop on audit.db. See the published
+// observability guide: https://cisco-ai-defense.github.io/defenseclaw/docs/observability/
 const (
 	// defaultJudgePersistQueueDepth is the fallback when neither the
 	// config field nor the env override supplies a positive value.

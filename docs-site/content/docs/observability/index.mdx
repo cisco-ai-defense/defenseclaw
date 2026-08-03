@@ -39,9 +39,10 @@ collection, local retention, resource attributes, sampling, metric policy,
 redaction profiles, destination routing, and transport settings. Notification
 webhooks remain a separate product surface.
 
-Connector-native OTLP ingress is separate from outbound destination routing. For
-Codex, setup owns three loopback-only, scoped-token endpoints under
-`/otlp/codex/<scoped-token>/v1/{logs,metrics,traces}`; see the
+Connector-native OTLP ingress is separate from outbound destination routing.
+For Codex, setup writes a connector-scoped bearer and
+`X-DefenseClaw-Source: codex` header for the loopback
+`/v1/{logs,metrics,traces}` endpoints; see the
 [Codex connector guide](/docs/connectors/codex) for credential, permission, and
 teardown behavior.
 
@@ -343,6 +344,69 @@ references with `token_env`, `bearer_env`, or `{env: NAME}`; secret values stay 
 of the source and rendered plan.
 
 See [Upgrade DefenseClaw](/docs/get-started/upgrade) for rollback and verification.
+
+## Alert runbooks
+
+These procedures are the canonical targets used by the bundled alert rules.
+Keep connector IDs, trace IDs, and destination names in incident evidence, but
+do not paste prompt content, credentials, or raw audit databases into tickets.
+
+### Runbook: schema violations
+
+1. Open **Runtime & Reliability → Schema violations by event type/code** in the
+   bundled Grafana dashboard and identify the producing event and violation
+   code.
+2. Run `defenseclaw doctor`, `defenseclaw config validate`, and
+   `defenseclaw observability plan`. Resolve configuration or registry errors
+   before restarting anything.
+3. Inspect correlated gateway or Collector logs without copying event content
+   into the incident. A sustained nonzero count normally indicates that a
+   producer and the generated telemetry registry disagree.
+4. For a source checkout, run `make telemetry-check`, `make check-schemas`, and
+   the owning producer tests. Roll back an incompatible producer or regenerate
+   and validate its registry change before redeploying.
+
+### Runbook: block SLO
+
+1. Confirm that the alert window contains real guardrail traffic; an idle
+   histogram is not a latency breach.
+2. Open **Admission block SLO compliance**, then pivot through **Guardrail
+   Evaluations** and **Connector Detail** for the affected connector and
+   policy.
+3. Compare regex, AI Defense, judge, policy, and finalization latency to
+   isolate the slow stage or upstream dependency.
+4. Preserve the configured enforcement action during diagnosis. Change to a
+   fail-open posture only under the incident commander's approved procedure,
+   and retain the connector and trace IDs used to justify that decision.
+
+### Runbook: exporter stalled
+
+1. Run `defenseclaw observability plan` and confirm that the named destination
+   is enabled and that its selectors include the expected signals and buckets.
+2. Check `defenseclaw status`, the gateway log, and local Collector logs. For a
+   remote destination, also verify DNS, TLS, credentials, and network reachability.
+3. Run `defenseclaw observability destination test <name>`. Add
+   `--write-probe` only when a bounded delivery write is appropriate; the
+   probe is isolated and does not create normal dashboard traffic.
+4. Inspect that destination's queue, retry, and drop telemetry. Other
+   destinations and mandatory local SQLite operate independently, so confirm
+   their health rather than assuming a shared outage.
+
+### Runbook: audit sink
+
+For compatibility, this alert can still use the historical `audit.sink`
+metric name. In live config v8 the affected target is a named
+`observability.destinations` entry; there is no live `audit_sinks` section.
+
+1. Identify the `sink_kind` and destination name, then inspect its delivered,
+   dropped, retry, and circuit-state telemetry.
+2. Verify its referenced credential, endpoint, `network_safety`, `send`, and
+   `routes` without revealing secret values.
+3. Run `defenseclaw observability destination test <name>`; use
+   `--write-probe` only for an approved isolated write.
+4. Confirm mandatory local SQLite remains healthy. Repair or disable only the
+   affected optional destination; do not remove local retention or broaden
+   routing/redaction merely to clear the alert.
 
 ## Common questions
 

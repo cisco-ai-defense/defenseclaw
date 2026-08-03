@@ -26,33 +26,32 @@ defenseclaw setup codex                # observe (default) — record only
 defenseclaw setup codex --mode action  # block on policy hits via PreToolUse deny
 ```
 
-`setup codex` is shorthand for `setup guardrail --connector codex`: it adds or reconfigures Codex, wires hooks + OTel + notify bridge, and can join an existing hook-connector roster when you choose **Add**. No proxy listener binds for Codex in either mode.
+`setup codex` is the dedicated Codex setup alias. It uses the same setup
+backend as `setup guardrail`, adds or reconfigures Codex, wires hooks + OTel +
+the notify bridge, and can join an existing hook-connector roster when you
+choose **Add**. No proxy listener binds in either mode.
 
-Native logs, metrics, and traces use Codex-scoped loopback OTLP endpoints and
-an Authorization bearer managed in Codex's exporter configuration. The
-credential is separate from both the gateway master token and the Codex hook
-credential, is accepted only for Codex OTLP over loopback, and cannot call
-management or another connector. DefenseClaw redacts it from route telemetry.
+Native logs, metrics, and traces use the standard loopback
+`/v1/{logs,metrics,traces}` endpoints with
+`X-DefenseClaw-Source: codex` and an Authorization bearer managed in Codex's
+exporter configuration. The credential is separate from both the gateway
+master token and the Codex hook credential, is accepted only for matching Codex
+OTLP over loopback, and cannot call management or another connector.
 Do not print or copy the managed exporter header or its protected sidecar.
 
-#### What this command sets vs. leaves at defaults
+Redaction is configured through the v8 bucket/profile policy: edit
+`observability.destinations[].routes[].selector.buckets` and
+`observability.redaction_profiles`, then follow
+[Redaction → Verify policy](/docs/reference/redaction#verify-policy).
 
-The three flags above explicitly set: connector, mode, and post-setup restart. Every other knob falls back to the values DefenseClaw ships with — schema-defined in [`internal/config/config.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/config/config.go) and documented on the [Defaults page](/docs/defaults).
-
-| Knob | Value when omitted | Flag to override |
-| --- | --- | --- |
-| Policy mode | `observe` (record only) | `--mode observe\|action` |
-| Scanner backend | `local` (bundled regex packs, zero key) | `--scanner-mode local\|remote\|both` |
-| Rule pack | unset → built-in baseline (no overlay) | `--rule-pack default\|strict\|permissive` |
-| LLM judge | **off** (regex-only triage) | `--judge-model <model>` plus `--judge-api-key-env` |
-| Detection strategy | `regex_judge` if judge is on, else regex-only | `--detection-strategy regex_only\|regex_judge\|judge_first` |
-| HITL | **off** (no operator approval prompts) | `--human-approval` plus `--hilt-min-severity ...` |
-| Hook fail-mode | current config; `closed` on a fresh install (`open` is retained for migrated legacy configs) | `defenseclaw guardrail fail-mode <open\|closed>` (no flag) |
-| Block message | empty (uses built-in copy) | `--block-message "<text>"` |
-| Redaction | v8 bucket/profile policy (`none` for fresh v8) | Edit `observability.destinations[].routes[].selector.buckets` and `observability.redaction_profiles`; then follow [Redaction → Verify policy](/docs/reference/redaction#verify-policy). |
-| Verify after setup | on | `--no-verify` |
-
-See [the full flag reference](/docs/setup/guardrail#every-flag) for the complete table or run `defenseclaw setup guardrail --help`.
+The alias defaults to observe mode and accepts the common hook-connector
+options, including `--mode`, `--workspace`, `--rule-pack`,
+`--human-approval`, `--hilt-min-severity`, `--fail-mode`, `--block-message`,
+`--replace`, `--with-local-stack`, and restart controls. Use the
+[quick-alias reference](/docs/setup/guardrail/aliases) for that surface. Use
+the [full guardrail setup](/docs/setup/guardrail) when you also need scanner,
+detection-strategy, or judge-provider configuration. Defaults are documented
+once on the [Defaults page](/docs/defaults).
 
 ## Files DefenseClaw will modify
 

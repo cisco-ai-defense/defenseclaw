@@ -33,7 +33,7 @@ export const site = {
     name: 'DefenseClaw',
     license: 'Apache-2.0',
     licenseUrl: 'https://opensource.org/licenses/Apache-2.0',
-    operatingSystem: 'macOS, Linux',
+    operatingSystem: 'Windows, macOS, Linux',
     applicationCategory: 'SecurityApplication',
   },
 } as const;

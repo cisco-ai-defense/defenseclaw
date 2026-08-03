@@ -15,7 +15,7 @@ on:
       - "cli/tests/test_telemetry_ci_strategy.py"
       - "cli/tests/test_telemetry_registry_*.py"
       - "cli/tests/support/telemetry_registry_manifest_driver.py"
-      - "docs/design/observability-v8/current-state-inventory.yaml"
+      - "schemas/telemetry/v8/compatibility/v7-compatibility-inputs.yaml"
       - "internal/observability/zz_generated_telemetry_*.go"
       - "Makefile"
       - "pyproject.toml"
