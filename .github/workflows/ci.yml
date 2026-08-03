@@ -462,7 +462,7 @@ jobs:
               "urllib3": ">=2.7.0",
               "idna": ">=3.15",
               "pydantic-settings": ">=2.14.2",
-              "aiohttp": ">=3.14.1,<4",
+              "aiohttp": ">=3.14.2,<4",
               "pyjwt": ">=2.13.0",
               "starlette": ">=1.3.1,<1.4",
               "fastapi": ">=0.137.1,<0.138",
