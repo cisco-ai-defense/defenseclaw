@@ -588,7 +588,6 @@ jobs:
           OPENAI_API_KEY: ${{ contains(fromJSON('["codex","opencode"]'), matrix.connector) && secrets.OPENAI_API_KEY || '' }}
           ANTHROPIC_API_KEY: ${{ matrix.connector == 'claudecode' && secrets.ANTHROPIC_API_KEY || '' }}
           CURSOR_API_KEY: ${{ matrix.connector == 'cursor' && secrets.CURSOR_API_KEY || '' }}
-          LLM_API_KEY: ${{ contains(fromJSON('["codex","claudecode","opencode"]'), matrix.connector) && secrets.LLM_API_KEY || '' }}
         run: |
           ./scripts/live-connector-e2e/run-windows.ps1 `
             -Layer live `
