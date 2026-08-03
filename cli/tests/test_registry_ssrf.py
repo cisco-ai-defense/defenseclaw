@@ -18,17 +18,23 @@ so the suite never touches real DNS.
 
 from __future__ import annotations
 
+import asyncio
 import os
+import socket
 import sys
 import unittest
 from unittest.mock import patch
+
+import anyio
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from defenseclaw.registries.ssrf import (
     SSRFError,
+    analyzer_dns_resolution,
     guard_git_url,
     guard_url,
+    pinned_async_getaddrinfo,
     pinned_getaddrinfo,
     resolve_and_pin,
 )
@@ -314,8 +320,6 @@ class TestPinnedGetaddrinfo(unittest.TestCase):
     at connect time instead of honouring a urllib3-level connect pin."""
 
     def test_pinned_host_resolves_to_vetted_ip(self):
-        import socket
-
         # Inside the pin, a lookup for the vetted host returns the pinned
         # IP — NOT whatever a (rebinding) DNS would now answer.
         with pinned_getaddrinfo("rebind.example", 443, "93.184.216.34"):
@@ -323,42 +327,355 @@ class TestPinnedGetaddrinfo(unittest.TestCase):
         addrs = {info[4][0] for info in infos}
         self.assertEqual(addrs, {"93.184.216.34"})
 
-    def test_unexpected_host_is_refused(self):
-        import socket
+    def test_anyio_bytes_hostname_resolves_to_vetted_ip(self):
+        calls = []
 
-        # A side-channel lookup for a *different* host during the pinned
-        # operation is refused, so a library cannot escape to an unvetted
-        # (and possibly internal) destination mid-request.
+        def fake_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+            calls.append((host, port, family, type, proto, flags))
+            return [
+                (
+                    family,
+                    type or socket.SOCK_STREAM,
+                    proto,
+                    "",
+                    (str(host), port),
+                )
+            ]
+
+        with patch.object(socket, "getaddrinfo", fake_getaddrinfo):
+            with pinned_getaddrinfo("rebind.example", 443, "93.184.216.34"):
+                infos = anyio.run(anyio.getaddrinfo, "rebind.example", 443)
+
+        self.assertEqual(infos[0][4][0], "93.184.216.34")
+        self.assertEqual(calls[0][0], "93.184.216.34")
+
+    def test_bytes_hostname_accepts_keyword_family(self):
+        calls = []
+
+        def fake_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+            calls.append((host, port, family, type, proto, flags))
+            return [(family, type, proto, "", (str(host), port))]
+
+        with patch.object(socket, "getaddrinfo", fake_getaddrinfo):
+            with pinned_getaddrinfo("rebind.example", 443, "93.184.216.34"):
+                socket.getaddrinfo(
+                    b"rebind.example",
+                    8443,
+                    family=socket.AF_UNSPEC,
+                    type=socket.SOCK_STREAM,
+                    proto=socket.IPPROTO_TCP,
+                    flags=socket.AI_NUMERICHOST,
+                )
+
+        self.assertEqual(
+            calls,
+            [
+                (
+                    "93.184.216.34",
+                    8443,
+                    socket.AF_INET,
+                    socket.SOCK_STREAM,
+                    socket.IPPROTO_TCP,
+                    socket.AI_NUMERICHOST,
+                )
+            ],
+        )
+
+    def test_unicode_hostname_matches_anyio_alabel(self):
+        calls = []
+
+        def fake_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+            calls.append(host)
+            return [(family, type, proto, "", (str(host), port))]
+
+        with patch.object(socket, "getaddrinfo", fake_getaddrinfo):
+            with pinned_getaddrinfo("faß.example", 443, "93.184.216.34"):
+                socket.getaddrinfo(b"xn--fa-hia.example", 443)
+
+        self.assertEqual(calls, ["93.184.216.34"])
+
+    def test_invalid_host_shapes_are_refused_before_resolving(self):
+        calls = []
+
+        def fake_getaddrinfo(*args, **kwargs):
+            calls.append((args, kwargs))
+            return []
+
+        bad_hosts = (
+            ("none", None),
+            ("non-ascii-bytes", b"\xff.example"),
+            ("nul", "bad\x00.example"),
+            ("surrogate", "\ud800.example"),
+        )
+        with patch.object(socket, "getaddrinfo", fake_getaddrinfo):
+            with pinned_getaddrinfo("rebind.example", 443, "93.184.216.34"):
+                for case, host in bad_hosts:
+                    with self.subTest(case=case):
+                        with self.assertRaises(SSRFError):
+                            socket.getaddrinfo(host, 443)
+
+        self.assertEqual(calls, [])
+
+    def test_unexpected_public_host_is_refused(self):
+        calls = []
+
+        def fake_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+            calls.append((host, port))
+            return [
+                (
+                    socket.AF_INET,
+                    type or socket.SOCK_STREAM,
+                    proto,
+                    "",
+                    ("8.8.8.8", port),
+                )
+            ]
+
+        with patch.object(socket, "getaddrinfo", fake_getaddrinfo):
+            with pinned_getaddrinfo("rebind.example", 443, "93.184.216.34"):
+                for host in ("proxy.example", b"proxy.example"):
+                    with self.subTest(host=host):
+                        with self.assertRaises(SSRFError):
+                            socket.getaddrinfo(host, 443)
+
+        self.assertEqual(calls, [])
+
+    def test_analyzer_dns_scope_allows_unrelated_host_and_resets(self):
+        calls = []
+
+        def fake_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+            calls.append((host, port))
+            return [
+                (
+                    socket.AF_INET,
+                    type or socket.SOCK_STREAM,
+                    proto,
+                    "",
+                    ("8.8.8.8", port),
+                )
+            ]
+
+        with patch.object(socket, "getaddrinfo", fake_getaddrinfo):
+            with pinned_getaddrinfo("rebind.example", 443, "93.184.216.34"):
+                with analyzer_dns_resolution():
+                    infos = socket.getaddrinfo("analyzer.example", 443)
+                with self.assertRaises(SSRFError):
+                    socket.getaddrinfo("analyzer.example", 443)
+
+        self.assertEqual(calls, [("analyzer.example", 443)])
+        self.assertEqual({info[4][0] for info in infos}, {"8.8.8.8"})
+
+    def test_analyzer_dns_scope_resets_on_exception(self):
         with pinned_getaddrinfo("rebind.example", 443, "93.184.216.34"):
+            with self.assertRaises(RuntimeError):
+                with analyzer_dns_resolution():
+                    raise RuntimeError("boom")
             with self.assertRaises(SSRFError):
-                socket.getaddrinfo("evil.internal", 443)
+                socket.getaddrinfo("analyzer.example", 443)
+
+    def test_analyzer_dns_scope_is_task_local(self):
+        calls = []
+
+        def fake_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+            node = host.decode("ascii") if isinstance(host, bytes) else str(host)
+            calls.append(node)
+            return [
+                (
+                    socket.AF_INET,
+                    type or socket.SOCK_STREAM,
+                    proto,
+                    "",
+                    ("8.8.8.8", port),
+                )
+            ]
+
+        async def run_lookups():
+            async def analyzer_lookup():
+                with analyzer_dns_resolution():
+                    return await anyio.getaddrinfo("analyzer.example", 443)
+
+            async def transport_lookup():
+                with self.assertRaises(SSRFError):
+                    await anyio.getaddrinfo("proxy.example", 443)
+
+            async with pinned_async_getaddrinfo():
+                return await asyncio.gather(analyzer_lookup(), transport_lookup())
+
+        with patch.object(socket, "getaddrinfo", fake_getaddrinfo):
+            with pinned_getaddrinfo("rebind.example", 443, "93.184.216.34"):
+                results = anyio.run(run_lookups)
+
+        self.assertEqual(calls, ["analyzer.example"])
+        self.assertEqual({info[4][0] for info in results[0]}, {"8.8.8.8"})
 
     def test_getaddrinfo_restored_after_block(self):
-        import socket
-
         original = socket.getaddrinfo
         with pinned_getaddrinfo("rebind.example", 443, "93.184.216.34"):
             pass
         self.assertIs(socket.getaddrinfo, original)
 
     def test_getaddrinfo_restored_on_exception(self):
-        import socket
-
         original = socket.getaddrinfo
         with self.assertRaises(RuntimeError):
             with pinned_getaddrinfo("rebind.example", 443, "93.184.216.34"):
                 raise RuntimeError("boom")
         self.assertIs(socket.getaddrinfo, original)
 
-    def test_ip_literal_matching_pin_is_allowed(self):
-        import socket
+    def test_async_getaddrinfo_restored_after_block(self):
+        async def check_restoration():
+            loop = asyncio.get_running_loop()
+            original = loop.getaddrinfo
+            had_override = "getaddrinfo" in vars(loop)
+            async with pinned_async_getaddrinfo():
+                self.assertNotEqual(loop.getaddrinfo, original)
+            self.assertEqual(loop.getaddrinfo, original)
+            self.assertEqual("getaddrinfo" in vars(loop), had_override)
 
+        anyio.run(check_restoration)
+
+    def test_async_getaddrinfo_restored_on_exception(self):
+        async def check_restoration():
+            loop = asyncio.get_running_loop()
+            original = loop.getaddrinfo
+            with self.assertRaises(RuntimeError):
+                async with pinned_async_getaddrinfo():
+                    raise RuntimeError("boom")
+            self.assertEqual(loop.getaddrinfo, original)
+
+        anyio.run(check_restoration)
+
+    def test_overlapping_async_pin_scopes_restore_after_last_exit(self):
+        try:
+            __import__("uvloop")
+        except ImportError:
+            self.skipTest("uvloop is not installed")
+
+        async def check_overlap():
+            loop = asyncio.get_running_loop()
+            had_override = "getaddrinfo" in vars(loop)
+            first_entered = asyncio.Event()
+            second_entered = asyncio.Event()
+            first_exited = asyncio.Event()
+
+            async def first_scope():
+                async with pinned_async_getaddrinfo():
+                    first_entered.set()
+                    await second_entered.wait()
+                first_exited.set()
+
+            async def second_scope():
+                await first_entered.wait()
+                async with pinned_async_getaddrinfo():
+                    second_entered.set()
+                    await first_exited.wait()
+                    with self.assertRaises(SSRFError):
+                        await anyio.getaddrinfo("localhost", 443)
+
+            await asyncio.gather(first_scope(), second_scope())
+            self.assertEqual("getaddrinfo" in vars(loop), had_override)
+
+        with pinned_getaddrinfo("rebind.example", 443, "93.184.216.34"):
+            anyio.run(
+                check_overlap,
+                backend_options={"use_uvloop": True},
+            )
+
+    def test_async_pin_covers_uvloop(self):
+        try:
+            __import__("uvloop")
+        except ImportError:
+            self.skipTest("uvloop is not installed")
+        calls = []
+
+        def fake_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+            node = host.decode("ascii") if isinstance(host, bytes) else str(host)
+            calls.append(node)
+            address = "8.8.8.8" if node == "analyzer.example" else node
+            return [
+                (
+                    socket.AF_INET,
+                    type or socket.SOCK_STREAM,
+                    proto,
+                    "",
+                    (address, port),
+                )
+            ]
+
+        async def run_lookups():
+            async with pinned_async_getaddrinfo():
+                target = await anyio.getaddrinfo("rebind.example", 443)
+                with analyzer_dns_resolution():
+                    analyzer = await anyio.getaddrinfo("analyzer.example", 443)
+                with self.assertRaises(SSRFError):
+                    await anyio.getaddrinfo("proxy.example", 443)
+                return target, analyzer
+
+        with patch.object(socket, "getaddrinfo", fake_getaddrinfo):
+            with pinned_getaddrinfo("rebind.example", 443, "93.184.216.34"):
+                target, analyzer = anyio.run(
+                    run_lookups,
+                    backend_options={"use_uvloop": True},
+                )
+
+        self.assertEqual(calls, ["93.184.216.34", "analyzer.example"])
+        self.assertEqual({info[4][0] for info in target}, {"93.184.216.34"})
+        self.assertEqual({info[4][0] for info in analyzer}, {"8.8.8.8"})
+
+    def test_ip_literal_matching_pin_is_allowed(self):
         # A client that pre-resolves and re-calls getaddrinfo with the IP
         # literal equal to the pin is allowed through.
         with pinned_getaddrinfo("rebind.example", 443, "93.184.216.34"):
-            infos = socket.getaddrinfo("93.184.216.34", 443)
-        self.assertTrue(infos)
+            for host in ("93.184.216.34", b"93.184.216.34"):
+                infos = socket.getaddrinfo(host, 443)
+                self.assertTrue(infos)
 
+    def test_different_ip_literal_is_refused(self):
+        with pinned_getaddrinfo("rebind.example", 443, "93.184.216.34"):
+            with self.assertRaises(SSRFError):
+                socket.getaddrinfo("127.0.0.1", 443)
+
+    def test_ipv6_pin_forces_ipv6_family(self):
+        calls = []
+
+        def fake_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+            calls.append((host, port, family, type, proto, flags))
+            return [(family, type, proto, "", (str(host), port, 0, 0))]
+
+        with patch.object(socket, "getaddrinfo", fake_getaddrinfo):
+            with pinned_getaddrinfo("v6.example", 443, "2001:4860:4860::8888"):
+                socket.getaddrinfo(
+                    "v6.example",
+                    443,
+                    socket.AF_UNSPEC,
+                    socket.SOCK_STREAM,
+                    socket.IPPROTO_TCP,
+                )
+
+        self.assertEqual(calls[0][0], "2001:4860:4860::8888")
+        self.assertEqual(calls[0][2], socket.AF_INET6)
+
+    def test_incompatible_requested_family_is_refused(self):
+        with pinned_getaddrinfo("v6.example", 443, "2001:4860:4860::8888"):
+            with self.assertRaises(socket.gaierror):
+                socket.getaddrinfo("v6.example", 443, family=socket.AF_INET)
+
+    def test_unicode_url_uses_anyio_alabel_for_validation(self):
+        seen = []
+
+        def resolver(host):
+            seen.append(host)
+            return ["93.184.216.34"]
+
+        ip, host, port = resolve_and_pin(
+            "https://faß.example/mcp",
+            resolver=resolver,
+        )
+
+        self.assertEqual(
+            (ip, host, port),
+            ("93.184.216.34", "xn--fa-hia.example", 443),
+        )
+        self.assertEqual(seen, ["xn--fa-hia.example"])
 
     # --- Private upstream allowlist tests ---
 

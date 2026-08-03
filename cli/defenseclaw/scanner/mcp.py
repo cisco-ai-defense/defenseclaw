@@ -38,11 +38,11 @@ import subprocess
 import sys
 import tempfile
 import threading
-from collections.abc import Iterator
+from collections.abc import Awaitable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
 
 from defenseclaw.config import (
     CiscoAIDefenseConfig,
@@ -54,6 +54,8 @@ from defenseclaw.config import (
 from defenseclaw.models import Finding, ScanResult
 from defenseclaw.registries.ssrf import (
     SSRFError,
+    analyzer_dns_resolution,
+    pinned_async_getaddrinfo,
     pinned_getaddrinfo,
     resolve_and_pin,
 )
@@ -65,6 +67,8 @@ from defenseclaw.scanner._llm_env import (
 
 if TYPE_CHECKING:
     pass
+
+_T = TypeVar("_T")
 
 
 # env vars whose names contain any of these
@@ -837,6 +841,26 @@ def _inspect_to_llm(il: InspectLLMConfig) -> LLMConfig:
     )
 
 
+def _scope_network_analyzer_dns(scanner: object) -> None:
+    """Keep analyzer traffic separate from the pinned MCP transport."""
+    for attr_name in ("_api_analyzer", "_llm_analyzer"):
+        analyzer = getattr(scanner, attr_name, None)
+        analyze = getattr(analyzer, "analyze", None)
+        if not callable(analyze):
+            continue
+
+        async def run_analyzer(*args, _analyze=analyze, **kwargs):
+            with analyzer_dns_resolution():
+                return await _analyze(*args, **kwargs)
+
+        setattr(analyzer, "analyze", run_analyzer)
+
+
+async def _run_with_pinned_dns(scan: Awaitable[_T]) -> _T:
+    async with pinned_async_getaddrinfo():
+        return await scan
+
+
 class MCPScannerWrapper:
     """Wraps the cisco-ai-mcp-scanner SDK.
 
@@ -1000,6 +1024,7 @@ class MCPScannerWrapper:
         )
 
         scanner = MCPSDKScanner(sdk_config)
+        _scope_network_analyzer_dns(scanner)
         analyzers = self._parse_analyzers(AnalyzerEnum)
 
         start = time.monotonic()
@@ -1219,7 +1244,9 @@ class MCPScannerWrapper:
         all_findings: list[object] = []
 
         tool_results = asyncio.run(
-            scanner.scan_remote_server_tools(target, analyzers=analyzers)
+            _run_with_pinned_dns(
+                scanner.scan_remote_server_tools(target, analyzers=analyzers)
+            )
         )
         for tr in tool_results:
             entity_name = getattr(tr, "tool_name", "")
@@ -1230,7 +1257,9 @@ class MCPScannerWrapper:
 
         if cfg.scan_prompts:
             prompt_results = asyncio.run(
-                scanner.scan_remote_server_prompts(target, analyzers=analyzers)
+                _run_with_pinned_dns(
+                    scanner.scan_remote_server_prompts(target, analyzers=analyzers)
+                )
             )
             for pr in prompt_results:
                 entity_name = getattr(pr, "prompt_name", "")
@@ -1241,7 +1270,9 @@ class MCPScannerWrapper:
 
         if cfg.scan_resources:
             resource_results = asyncio.run(
-                scanner.scan_remote_server_resources(target, analyzers=analyzers)
+                _run_with_pinned_dns(
+                    scanner.scan_remote_server_resources(target, analyzers=analyzers)
+                )
             )
             for rr in resource_results:
                 entity_name = getattr(rr, "resource_name", "") or getattr(rr, "resource_uri", "")
@@ -1253,7 +1284,11 @@ class MCPScannerWrapper:
         if cfg.scan_instructions:
             try:
                 instr_results = asyncio.run(
-                    scanner.scan_remote_server_instructions(target, analyzers=analyzers)
+                    _run_with_pinned_dns(
+                        scanner.scan_remote_server_instructions(
+                            target, analyzers=analyzers
+                        )
+                    )
                 )
                 items = instr_results if isinstance(instr_results, list) else [instr_results]
                 for ir in items:
