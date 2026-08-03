@@ -47,7 +47,7 @@ RUNTIME_CONTRACT = {
 }
 
 WHEEL_SECURITY_FLOOR_CONTRACT = {
-    "cryptography": (">=48.0.1,<49", None),
+    "cryptography": (">=50.0.0,<51", None),
     "python-dotenv": (">=1.2.2", None),
     "python-multipart": (">=0.0.31", None),
     "urllib3": (">=2.7.0", None),

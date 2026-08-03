@@ -456,7 +456,7 @@ jobs:
               ),
           }
           security_floors = {
-              "cryptography": ">=48.0.1,<49",
+              "cryptography": ">=50.0.0,<51",
               "python-dotenv": ">=1.2.2",
               "python-multipart": ">=0.0.31",
               "urllib3": ">=2.7.0",
