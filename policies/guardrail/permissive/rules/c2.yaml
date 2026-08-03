@@ -62,6 +62,12 @@ rules:
     confidence: 0.70
     tags: [exfiltration, c2]
   - id: C2-METADATA-AWS
+    expression: >-
+      f.commands.exists(c, c.argv_complete &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_FETCH in c.operations &&
+      f.network.exists(n, n.command_id == c.id &&
+      n.action in [defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_DOWNLOAD,
+      defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_CONNECT]))
     pattern: '169\.254\.169\.254'
     title: "AWS metadata endpoint (SSRF)"
     severity: CRITICAL
@@ -102,14 +108,12 @@ rules:
     confidence: 0.93
     tags: [ssrf, credential]
   - id: C2-DNS-TUNNEL
-    tool_call_only: true
     pattern: '(?i)\b(?:dig|host|nslookup)\b\s+[^;\n]*\$\((?:whoami|hostname|id(?:\s+-u)?|cat\s+(?:/etc/hostname|/etc/machine-id))\)[A-Za-z0-9._-]*\.[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+'
     title: "DNS TXT query with high-entropy label (tunneling indicator)"
     severity: HIGH
     confidence: 0.78
     tags: [exfiltration, dns-tunnel]
   - id: C2-DNS-EXFIL
-    tool_call_only: true
     pattern: '(?i)\bnslookup\b\s+[a-f0-9]{8,}\.\w+\.'
     title: "nslookup with hex subdomain (DNS exfil)"
     severity: HIGH

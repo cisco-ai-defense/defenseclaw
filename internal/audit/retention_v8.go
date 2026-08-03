@@ -14,6 +14,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
 const (
@@ -35,6 +37,9 @@ const (
 	RetentionScanResults              RetentionTableClass = "scan_results"
 	RetentionLegacyJudgeResponses     RetentionTableClass = "legacy_judge_responses"
 	RetentionAuthoritativeJudgeBodies RetentionTableClass = "authoritative_judge_bodies"
+	RetentionGuardrailChainReceipts   RetentionTableClass = "guardrail_chain_deny_receipts"
+	RetentionGuardrailChainEvents     RetentionTableClass = "guardrail_chain_events"
+	RetentionGuardrailChainPartitions RetentionTableClass = "guardrail_chain_partitions"
 	RetentionCorrelationReceipts      RetentionTableClass = "correlation_receipts"
 	RetentionCorrelationCursors       RetentionTableClass = "correlation_cursors"
 	RetentionCorrelationPending       RetentionTableClass = "correlation_pending_operations"
@@ -52,6 +57,9 @@ var retentionTableClasses = [...]RetentionTableClass{
 	RetentionScanResults,
 	RetentionLegacyJudgeResponses,
 	RetentionAuthoritativeJudgeBodies,
+	RetentionGuardrailChainReceipts,
+	RetentionGuardrailChainEvents,
+	RetentionGuardrailChainPartitions,
 	RetentionCorrelationReceipts,
 	RetentionCorrelationCursors,
 	RetentionCorrelationPending,
@@ -385,6 +393,9 @@ const (
 // counted; identifiers, observations, and relationship evidence are removed by
 // declared foreign-key cascades from their owning event/relationship.
 var retentionCorrelationGraphTables = map[string]bool{
+	"guardrail_chain_deny_receipts": true, "guardrail_chain_events": true,
+	"guardrail_chain_partitions": true, "guardrail_chain_pending_actions": true,
+	"guardrail_chain_pending_boundaries": true, "guardrail_chain_terminal_resets": true,
 	"correlation_events": true, "correlation_identifiers": true,
 	"correlation_identity_claims": true,
 	"correlation_observations":    true, "correlation_relationships": true,
@@ -402,13 +413,20 @@ var retentionAuditMigrationCatalog = map[string]retentionOwnership{
 	"scan_results": retentionOwnedHistory, "judge_responses": retentionOwnedHistory,
 	"actions": retentionOwnedProtected, "target_snapshots": retentionOwnedProtected,
 	"schema_version": retentionOwnedProtected, "observability_store_readiness": retentionOwnedProtected,
-	"alert_acknowledgement_projection": retentionOwnedProtected,
-	"alert_acknowledgement_operations": retentionOwnedProtected,
-	"alert_acknowledgement_baselines":  retentionOwnedProtected,
-	"alert_acknowledgement_health":     retentionOwnedProtected,
-	"quarantine_records":               retentionOwnedProtected,
-	"quarantine_record_connectors":     retentionOwnedProtected,
-	"runtime_asset_state":              retentionOwnedProtected,
+	"alert_acknowledgement_projection":   retentionOwnedProtected,
+	"alert_acknowledgement_operations":   retentionOwnedProtected,
+	"alert_acknowledgement_baselines":    retentionOwnedProtected,
+	"alert_acknowledgement_health":       retentionOwnedProtected,
+	"quarantine_records":                 retentionOwnedProtected,
+	"quarantine_record_connectors":       retentionOwnedProtected,
+	"runtime_asset_state":                retentionOwnedProtected,
+	"guardrail_chain_deny_receipts":      retentionOwnedGraph,
+	"guardrail_chain_events":             retentionOwnedGraph,
+	"guardrail_chain_partitions":         retentionOwnedGraph,
+	"guardrail_chain_pending_actions":    retentionOwnedGraph,
+	"guardrail_chain_pending_boundaries": retentionOwnedGraph,
+	"guardrail_chain_terminal_resets":    retentionOwnedGraph,
+	"guardrail_chain_cutoff_barriers":    retentionOwnedProtected,
 	// Correlation state is graph-owned rather than independent row history.
 	// Its bounded graph reaper is added alongside the ledger so the generic
 	// table reaper can never delete a parent before its cursor, receipt, or
@@ -699,7 +717,8 @@ func (reaper *RetentionReaper) drainAuditTable(
 // drainCorrelationState follows dependency order. Receipts and inactive state
 // release event references first; relationships release their evidence; only
 // then may an old, wholly unreferenced event cascade to identifiers and
-// observations. Connector instances and active state are never candidates.
+// observations. Connector instances are never candidates; bounded chain
+// partitions become candidates only after their events are gone.
 func (reaper *RetentionReaper) drainCorrelationState(
 	ctx context.Context,
 	cutoff time.Time,
@@ -710,11 +729,19 @@ func (reaper *RetentionReaper) drainCorrelationState(
 		class RetentionTableClass
 		args  []any
 	}{
+		{RetentionGuardrailChainReceipts, []any{unixNano(now)}},
+		{RetentionGuardrailChainEvents, []any{
+			unixNano(now.Add(-guardrail.ToolChainMaxHorizon)),
+			guardrail.ToolChainMaxEvents, guardrail.ToolChainMaxEvents,
+		}},
+		{RetentionGuardrailChainPartitions, []any{
+			unixNano(now.Add(-guardrail.ToolChainMaxHorizon)),
+		}},
 		{RetentionCorrelationReceipts, []any{unixNano(now)}},
 		{RetentionCorrelationCursors, []any{unixNano(cutoff)}},
 		{RetentionCorrelationPending, []any{unixNano(cutoff)}},
 		{RetentionCorrelationRelationships, []any{unixNano(now), unixNano(now), unixNano(cutoff)}},
-		{RetentionCorrelationEvents, []any{unixNano(cutoff)}},
+		{RetentionCorrelationEvents, []any{unixNano(now), unixNano(cutoff)}},
 	}
 	for _, stage := range stages {
 		for {
@@ -790,6 +817,37 @@ func (reaper *RetentionReaper) deleteCorrelationBatch(
 
 func correlationRetentionDeleteStatement(class RetentionTableClass) (string, error) {
 	switch class {
+	case RetentionGuardrailChainReceipts:
+		return `DELETE FROM guardrail_chain_deny_receipts WHERE rowid IN (
+			SELECT rowid FROM guardrail_chain_deny_receipts
+			WHERE expires_time_unix_nano < ?
+			ORDER BY expires_time_unix_nano, receipt_id LIMIT ?
+		)`, nil
+	case RetentionGuardrailChainEvents:
+		return `DELETE FROM guardrail_chain_events WHERE rowid IN (
+			SELECT event.rowid FROM guardrail_chain_events AS event
+			JOIN guardrail_chain_partitions AS partition
+				ON partition.connector_instance_id=event.connector_instance_id
+				AND partition.session_value_digest=event.session_value_digest
+			WHERE event.received_time_unix_nano < ?
+				OR event.sequence < CASE
+					WHEN partition.next_sequence > ? THEN partition.next_sequence - ?
+					ELSE 1 END
+			ORDER BY event.received_time_unix_nano, event.semantic_event_id LIMIT ?
+		)`, nil
+	case RetentionGuardrailChainPartitions:
+		return `DELETE FROM guardrail_chain_partitions
+			WHERE (connector_instance_id, session_value_digest) IN (
+				SELECT partition.connector_instance_id, partition.session_value_digest
+				FROM guardrail_chain_partitions AS partition
+				WHERE partition.updated_time_unix_nano < ?
+				AND NOT EXISTS (
+					SELECT 1 FROM guardrail_chain_events AS event
+					WHERE event.connector_instance_id=partition.connector_instance_id
+					AND event.session_value_digest=partition.session_value_digest)
+				ORDER BY partition.updated_time_unix_nano,
+					partition.connector_instance_id, partition.session_value_digest LIMIT ?
+			)`, nil
 	case RetentionCorrelationReceipts:
 		return `DELETE FROM correlation_receipts WHERE rowid IN (
 			SELECT rowid FROM correlation_receipts
@@ -856,7 +914,12 @@ func correlationRetentionDeleteStatement(class RetentionTableClass) (string, err
 	case RetentionCorrelationEvents:
 		return `DELETE FROM correlation_events WHERE rowid IN (
 			SELECT event.rowid FROM correlation_events AS event
-			WHERE event.received_time_unix_nano < ?
+			WHERE NOT EXISTS (
+				SELECT 1 FROM guardrail_chain_deny_receipts AS chain_receipt
+				WHERE chain_receipt.expires_time_unix_nano >= ?
+				AND (chain_receipt.final_semantic_event_id=event.semantic_event_id OR
+					chain_receipt.predecessor_semantic_event_id=event.semantic_event_id))
+			AND event.received_time_unix_nano < ?
 			AND NOT EXISTS (SELECT 1 FROM correlation_receipts AS receipt WHERE
 				receipt.semantic_event_id=event.semantic_event_id OR
 				receipt.conflicts_with_semantic_event_id=event.semantic_event_id)

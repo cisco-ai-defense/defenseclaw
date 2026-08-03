@@ -106,14 +106,14 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 		},
 		{
 			connector:      "copilot",
-			event:          "PreToolUse",
+			event:          "preToolUse",
 			toolName:       "shell",
 			topLevelOutput: "hook_output",
 			expectAction:   "block",
 		},
 		{
 			connector:      "openhands",
-			event:          "PreToolUse",
+			event:          "pre_tool_use",
 			toolName:       "terminal",
 			topLevelOutput: "hook_output",
 			expectAction:   "block",

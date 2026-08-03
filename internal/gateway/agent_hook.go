@@ -113,6 +113,7 @@ type agentHookRequest struct {
 	Content                   string
 	Direction                 string
 	Payload                   map[string]interface{}
+	toolChain                 *toolChainHookCapture
 }
 
 type agentHookResponse struct {
@@ -201,6 +202,12 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		} else {
 			req = correlatedReq
 		}
+		// Capture trusted ActionFacts even when correlation persistence is
+		// degraded. Durable cross-call joins require correlation, but the
+		// experimental final-artifact execution gate is a same-request
+		// decision and can still protect the exact pre-execution boundary.
+		req.toolChain = &toolChainHookCapture{}
+		ctx = withToolChainHookCapture(ctx, req.toolChain)
 		ctx = enrichAgentHookContext(ctx, req)
 		t0 := time.Now()
 		// attemptedWrite covers BOTH "writeJSON returned successfully"
@@ -326,6 +333,24 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// they round-trip back to the HTTP response and onto the
 		// audit envelope without a second pass here.
 		resp, panicked := a.safeEvaluateHook(ctx, connectorName, req, b, payload, runtime)
+		var chainFinalization toolChainHookFinalization
+		if !panicked {
+			resp = a.safeApplyExperimentalArtifactPromotion(
+				ctx,
+				profile,
+				req,
+				resp,
+				time.Since(t0),
+			)
+			resp, chainFinalization = a.safeApplyAgentHookToolChains(
+				ctx,
+				profile,
+				req,
+				b,
+				resp,
+				time.Since(t0),
+			)
+		}
 		elapsed := time.Since(t0)
 		enrichAgentHookSpan(ctx, req, resp, elapsed)
 		if panicked {
@@ -349,6 +374,10 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		}
 
 		persisted := a.finalizeAgentHook(ctx, connectorName, req, resp, rawEventIDs, b, elapsed, panicked, hookCompatibilityExtra(profile))
+		if err := chainFinalization.attach(ctx, resp.EvaluationID); err != nil {
+			fmt.Fprintf(os.Stderr, "[gateway] tool-call chain finalization failed connector=%s event=%s: %v\n",
+				connectorName, req.HookEventName, err)
+		}
 		if persisted {
 			if err := a.finalizeHookCorrelationReceipt(ctx, req.CorrelationReceipt); err != nil {
 				fmt.Fprintf(os.Stderr, "[gateway] hook receipt finalization failed connector=%s event=%s: %v\n",
@@ -1621,6 +1650,11 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 
 	verdict := &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
 	var assetDecisions []runtimeAssetDecision
+	profile := a.hookProfileForConnector(req.ConnectorName)
+	toolCallRoute := profile.ToolCallLifecycle.RouteForEvent(req.HookEventName)
+	structuredToolEvent := toolCallRoute == connector.ToolEventRouteStructuredAction ||
+		(profile.ToolCallLifecycle.Version == 0 &&
+			isGenericToolInspectionEvent(req.HookEventName))
 	switch {
 	case isPromptLikeEvent(req.HookEventName):
 		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: req.Content, Direction: "prompt", Connector: req.ConnectorName})
@@ -1632,7 +1666,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		// handles the "non-enforceable event" case by downgrading to
 		// would-block automatically.
 		assetDecisions = a.collectAgentHookAssetDecisions(ctx, req)
-	case isGenericToolInspectionEvent(req.HookEventName):
+	case structuredToolEvent:
 		toolRequest := &ToolInspectRequest{
 			Tool:          req.ToolName,
 			Args:          req.ToolArgs,
@@ -1640,7 +1674,6 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			Connector:     req.ConnectorName,
 			MCPServerName: payloadString(req.Payload, "mcp_server_name"),
 		}
-		profile := a.hookProfileForConnector(req.ConnectorName)
 		enforcementCapable := profile.Capabilities.CanBlock &&
 			eventIn(req.HookEventName, profile.Capabilities.BlockEvents)
 		verdict = a.inspectTrustedToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
@@ -1653,6 +1686,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			LegacyText:         string(req.ToolArgs),
 			Connector:          req.ConnectorName,
 			EnforcementCapable: enforcementCapable,
+			record:             toolChainRecorder(req.toolChain),
 		})
 		assetDecisions = a.collectAgentHookAssetDecisions(ctx, req)
 	}
@@ -1664,7 +1698,6 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 
 	rawAction := normalizeCodexAction(verdict.Action)
 	rawActionBeforeAssets := rawAction
-	profile := a.hookProfileForConnector(req.ConnectorName)
 	caps := profile.Capabilities
 	action, wouldBlock := mapHookActionForProfile(rawAction, mode, req.HookEventName, caps, profile, req.Payload)
 	severity := verdict.Severity
@@ -2298,7 +2331,7 @@ func isPromptLikeEvent(event string) bool {
 
 func isResultLikeEvent(event string) bool {
 	switch canonicalEvent(event) {
-	case "posttooluse", "posttoolusefailure", "aftertool", "posttoolcall",
+	case "posttooluse", "posttoolusefailure", "permissiondenied", "aftertool", "posttoolcall",
 		"postreadcode", "postwritecode", "postruncommand", "postmcptooluse",
 		"aftershellexecution", "aftermcpexecution", "afterfileedit", "aftertabfileedit",
 		"afteragentresponse", "afteragentthought", "afteragent", "aftermodel",

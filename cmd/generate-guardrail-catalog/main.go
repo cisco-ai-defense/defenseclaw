@@ -264,9 +264,6 @@ func validateRule(filename string, rule *ruleDef) error {
 	if hasExpression && strings.TrimSpace(rule.Expression) != rule.Expression {
 		return fmt.Errorf("%s: rule %s expression must not have surrounding whitespace", filename, rule.ID)
 	}
-	if hasExpression && !rule.ToolCallOnly {
-		return fmt.Errorf("%s: rule %s expression requires tool_call_only", filename, rule.ID)
-	}
 	if strings.TrimSpace(rule.Title) == "" {
 		return fmt.Errorf("%s: rule %s title must not be empty", filename, rule.ID)
 	}

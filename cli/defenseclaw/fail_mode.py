@@ -26,7 +26,15 @@ _MAX_DIGEST_FILE = 128 * 1024 * 1024
 _FAIL_MODE_PATTERN = re.compile(r"FAIL_MODE=\"\$\{DEFENSECLAW_FAIL_MODE:-(open|closed)\}\"")
 _EXPECTED_CONTRACTS = {
     "claudecode": frozenset({"claudecode-hooks-v1"}),
-    "codex": frozenset({"codex-hooks-v1", "codex-hooks-v2", "codex-hooks-v3"}),
+    "codex": frozenset(
+        {
+            "codex-hooks-v1",
+            "codex-hooks-v2",
+            "codex-hooks-v3",
+            "codex-hooks-v3-generic",
+            "codex-hooks-v4",
+        }
+    ),
 }
 _SHARED_HOOK_SCRIPTS = frozenset(
     {

@@ -130,6 +130,7 @@ const (
 	IssueInvalidSyntax         IssueCode = "invalid_syntax"
 	IssueDynamicWord           IssueCode = "dynamic_word"
 	IssueUnsupportedConstruct  IssueCode = "unsupported_construct"
+	IssueOpaqueArtifact        IssueCode = "opaque_artifact"
 	IssueUnknownOperandGrammar IssueCode = "unknown_operand_grammar"
 	IssueConflictingSources    IssueCode = "conflicting_sources"
 	IssueInputLimit            IssueCode = "input_limit"

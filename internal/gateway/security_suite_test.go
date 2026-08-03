@@ -16,9 +16,11 @@
 
 // Security + PII coverage suite.
 //
-// The suite is split into three tiers so it is always explicit WHICH layer
+// The suite is split into four tiers so it is always explicit WHICH layer
 // is under test:
 //
+//   - TestSecuritySuiteToolCall — trusted structured tool-call semantics.
+//     Deterministic ActionFacts + CEL/fallback dispatch. No LLM.
 //   - TestSecuritySuiteRegex  — the deterministic regex/rule layer
 //     (ScanAllRules + GuardrailInspector in regex_only mode). No LLM.
 //   - TestSecuritySuiteJudge  — the LLM-judge layer. Deterministic by

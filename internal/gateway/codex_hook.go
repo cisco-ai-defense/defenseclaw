@@ -198,6 +198,7 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 			LegacyText:         string(toolArgs),
 			Connector:          "codex",
 			EnforcementCapable: true,
+			record:             toolChainRecorderFromContext(ctx),
 		})
 		if decision, matched := a.codexMCPAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "mcp", decision: decision})

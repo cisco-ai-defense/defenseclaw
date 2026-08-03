@@ -138,7 +138,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		if req.HookEventName == "UserPromptExpansion" {
 			assetDecisions = append(assetDecisions, a.claudeCodePromptExpansionAssetDecisions(ctx, req)...)
 		}
-	case "PreToolUse", "PermissionRequest", "PermissionDenied":
+	case "PreToolUse", "PermissionRequest":
 		toolName := claudeCodeToolName(req)
 		toolArgs := claudeCodeToolArgs(req)
 		toolRequest := &ToolInspectRequest{
@@ -157,7 +157,8 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			},
 			LegacyText:         string(toolArgs),
 			Connector:          "claudecode",
-			EnforcementCapable: req.HookEventName != "PermissionDenied",
+			EnforcementCapable: true,
+			record:             toolChainRecorderFromContext(ctx),
 		})
 		if decision, matched := a.claudeCodeMCPAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "mcp", decision: decision})
@@ -165,7 +166,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		if decision, matched := a.claudeCodeSkillAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "skill", decision: decision})
 		}
-	case "PostToolUse", "PostToolUseFailure", "PostToolBatch":
+	case "PostToolUse", "PostToolUseFailure", "PermissionDenied", "PostToolBatch":
 		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: claudeCodeToolOutput(req), Direction: "tool_result", Connector: "claudecode"})
 		if decision, matched := a.claudeCodeMCPAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "mcp", decision: decision})

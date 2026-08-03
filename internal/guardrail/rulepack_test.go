@@ -309,7 +309,6 @@ func TestLoadRulePackRuleValidation(t *testing.T) {
 		{name: "blank pattern", body: strings.Replace(validRulesYAML("custom", "R-1"), "pattern: 'a+'", "pattern: ''", 1), code: "validation"},
 		{name: "invalid regex", body: strings.Replace(validRulesYAML("custom", "R-1"), "pattern: 'a+'", "pattern: '['", 1), code: "regex"},
 		{name: "oversized regex", body: strings.Replace(validRulesYAML("custom", "R-1"), "pattern: 'a+'", "pattern: '"+tooLongPattern+"'", 1), code: "pattern_size_limit"},
-		{name: "expression outside tool call", body: strings.Replace(validRulesYAML("custom", "R-1"), "    title:", "    expression: 'true'\n    title:", 1), code: "validation"},
 		{name: "empty expression", body: strings.Replace(validRulesYAML("custom", "R-1"), "    title:", "    tool_call_only: true\n    expression: ''\n    title:", 1), code: "validation"},
 		{name: "blank expression", body: strings.Replace(validRulesYAML("custom", "R-1"), "    title:", "    tool_call_only: true\n    expression: '   '\n    title:", 1), code: "validation"},
 		{name: "padded expression", body: strings.Replace(validRulesYAML("custom", "R-1"), "    title:", "    tool_call_only: true\n    expression: ' true'\n    title:", 1), code: "validation"},
@@ -333,6 +332,21 @@ func TestLoadRulePackRuleValidation(t *testing.T) {
 			_, err := LoadRulePack(dir)
 			requireRulePackError(t, err, test.code)
 		})
+	}
+}
+
+func TestLoadRulePackSemanticExpressionPreservesRegexExposure(t *testing.T) {
+	dir := t.TempDir()
+	body := strings.Replace(
+		validRulesYAML("custom", "R-1"),
+		"    pattern:",
+		"    expression: 'true'\n    pattern:",
+		1,
+	)
+	writeRulePackFile(t, dir, "rules/custom.yaml", body)
+	rule := mustLoadRulePack(t, dir).RuleFiles[0].Rules[0]
+	if rule.Expression != "true" || rule.ToolCallOnly {
+		t.Fatalf("semantic regex rule decoded as expression=%q tool_call_only=%v", rule.Expression, rule.ToolCallOnly)
 	}
 }
 

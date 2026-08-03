@@ -352,15 +352,6 @@ export function validatePolicy(policy: Policy): ValidationFinding[] {
           fix: 'Remove the expression field or provide a trimmed Boolean CEL expression.',
         });
       }
-      if (expression !== undefined && !rule.tool_call_only) {
-        findings.push({
-          level: 'error',
-          code: 'CEL_TOOL_CALL_REQUIRED',
-          message: `Rule "${rule.id}" has a CEL expression but is not restricted to authenticated tool calls.`,
-          location: `rules.${file.filename}.${rule.id}`,
-          fix: 'Enable authenticated tool calls only, or remove the CEL expression.',
-        });
-      }
       const expressionText = typeof expression === 'string' ? expression : '';
       const expressionBytes = new TextEncoder().encode(expressionText).length;
       const expressionCodePoints = Array.from(expressionText).length;

@@ -885,9 +885,6 @@ func (rp *RulePack) validateRuleFiles() error {
 			if hasExpression && strings.TrimSpace(rule.Expression) != rule.Expression {
 				return rulePackErr(rel, "validation", fmt.Sprintf("rule %d expression must not have surrounding whitespace", ruleIndex))
 			}
-			if hasExpression && !rule.ToolCallOnly {
-				return rulePackErr(rel, "validation", fmt.Sprintf("rule %d expression requires tool_call_only", ruleIndex))
-			}
 			if hasExpression {
 				semanticRules++
 				if semanticRules > maxSemanticRules {

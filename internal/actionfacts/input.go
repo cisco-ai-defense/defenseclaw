@@ -27,15 +27,18 @@ import (
 )
 
 type extractedInput struct {
-	command string
-	argv    []string
-	cwd     string
-	paths   []extractedScalar
-	urls    []string
-	method  string
-	payload []extractedPayload
-	status  ParseStatus
-	issues  []IssueCode
+	command      string
+	argv         []string
+	cwd          string
+	paths        []extractedScalar
+	patchChanges []patchPathChange
+	patchMove    bool
+	patchSet     bool
+	urls         []string
+	method       string
+	payload      []extractedPayload
+	status       ParseStatus
+	issues       []IssueCode
 }
 
 type extractedScalar struct {
@@ -94,10 +97,22 @@ func (out extractedInput) sourceDestinationArguments() (
 const maxArgsProjectionDepth = 2
 
 func extractArgs(raw json.RawMessage) extractedInput {
-	return extractArgsAt(raw, 0)
+	return extractArgsAtSchema(raw, 0, false)
+}
+
+func extractArgsForTool(raw json.RawMessage, tool string) extractedInput {
+	return extractArgsAtSchema(raw, 0, isApplyPatchTool(tool))
 }
 
 func extractArgsAt(raw json.RawMessage, projectionDepth int) extractedInput {
+	return extractArgsAtSchema(raw, projectionDepth, false)
+}
+
+func extractArgsAtSchema(
+	raw json.RawMessage,
+	projectionDepth int,
+	patchSchema bool,
+) extractedInput {
 	if projectionDepth > maxArgsProjectionDepth {
 		return extractedInput{status: StatusLimitExceeded, issues: []IssueCode{IssueDepthLimit}}
 	}
@@ -110,7 +125,11 @@ func extractArgsAt(raw json.RawMessage, projectionDepth int) extractedInput {
 	if !utf8.Valid(raw) {
 		return extractedInput{status: StatusInvalid, issues: []IssueCode{IssueInvalidUTF8}}
 	}
-	if issue := validateJSON(raw); issue != "" {
+	stringLimit := maxCommandBytes
+	if patchSchema {
+		stringLimit = maxArgsJSONBytes
+	}
+	if issue := validateJSONWithStringLimit(raw, stringLimit); issue != "" {
 		status := StatusInvalid
 		if issue == IssueDuplicateJSONKey {
 			status = StatusAmbiguous
@@ -126,10 +145,15 @@ func extractArgsAt(raw json.RawMessage, projectionDepth int) extractedInput {
 	if err := decoder.Decode(&value); err != nil {
 		return extractedInput{status: StatusInvalid, issues: []IssueCode{IssueInvalidJSON}}
 	}
-	return extractJSONValue(value, projectionDepth, true)
+	return extractJSONValue(value, projectionDepth, true, patchSchema)
 }
 
-func extractJSONValue(value any, projectionDepth int, malformedJSONIsCommand bool) extractedInput {
+func extractJSONValue(
+	value any,
+	projectionDepth int,
+	malformedJSONIsCommand bool,
+	patchSchema bool,
+) extractedInput {
 	switch value := value.(type) {
 	case string:
 		if issue := validateCommandText(value); issue != "" {
@@ -146,7 +170,11 @@ func extractJSONValue(value any, projectionDepth int, malformedJSONIsCommand boo
 					issues: []IssueCode{IssueDepthLimit},
 				}
 			}
-			nested := extractArgsAt(json.RawMessage(trimmed), projectionDepth+1)
+			nested := extractArgsAtSchema(
+				json.RawMessage(trimmed),
+				projectionDepth+1,
+				patchSchema,
+			)
 			if !malformedJSONIsCommand ||
 				nested.status != StatusInvalid ||
 				!containsIssue(nested.issues, IssueInvalidJSON) {
@@ -165,7 +193,7 @@ func extractJSONValue(value any, projectionDepth int, malformedJSONIsCommand boo
 		}
 		return extractedInput{argv: argv, status: StatusComplete}
 	case map[string]any:
-		return extractJSONObject(value, projectionDepth)
+		return extractJSONObject(value, projectionDepth, patchSchema)
 	case nil:
 		return extractedInput{status: StatusNotApplicable}
 	default:
@@ -173,7 +201,11 @@ func extractJSONValue(value any, projectionDepth int, malformedJSONIsCommand boo
 	}
 }
 
-func extractJSONObject(object map[string]any, projectionDepth int) extractedInput {
+func extractJSONObject(
+	object map[string]any,
+	projectionDepth int,
+	patchSchema bool,
+) extractedInput {
 	out := extractedInput{status: StatusNotApplicable}
 	keys := make([]string, 0, len(object))
 	for key := range object {
@@ -187,6 +219,15 @@ func extractJSONObject(object map[string]any, projectionDepth int) extractedInpu
 			continue
 		}
 		value := object[key]
+		if patchSchema && isPatchInputField(key) {
+			text, ok := value.(string)
+			if !ok {
+				out.mergeProblem(StatusInvalid, IssueInvalidJSON)
+				continue
+			}
+			appendExtractedPatch(&out, text)
+			continue
+		}
 		field, known := canonicalInputFieldName(key)
 		if !known {
 			// ActionFacts uses closed schemas. Silently ignoring an unfamiliar
@@ -241,7 +282,7 @@ func extractJSONObject(object map[string]any, projectionDepth int) extractedInpu
 				}
 				mergeExtractedArgv(&out, argv)
 			case string, map[string]any:
-				mergeNestedExtractedValue(&out, value, projectionDepth)
+				mergeNestedExtractedValue(&out, value, projectionDepth, patchSchema)
 			default:
 				out.mergeProblem(StatusInvalid, IssueInvalidJSON)
 			}
@@ -269,6 +310,10 @@ func extractJSONObject(object map[string]any, projectionDepth int) extractedInpu
 			}
 			out.cwd = text
 		case "path", "source", "destination", "target":
+			if patchSchema {
+				out.mergeProblem(StatusAmbiguous, IssueConflictingSources)
+				continue
+			}
 			text, ok := value.(string)
 			if !ok {
 				out.mergeProblem(StatusInvalid, IssueInvalidJSON)
@@ -352,7 +397,7 @@ func extractJSONObject(object map[string]any, projectionDepth int) extractedInpu
 				out.markApplicable()
 			}
 		case "nested":
-			mergeNestedExtractedValue(&out, value, projectionDepth)
+			mergeNestedExtractedValue(&out, value, projectionDepth, patchSchema)
 		}
 	}
 	return out
@@ -409,14 +454,19 @@ func nonEmptyPayload(value any) bool {
 	}
 }
 
-func mergeNestedExtractedValue(out *extractedInput, value any, projectionDepth int) {
+func mergeNestedExtractedValue(
+	out *extractedInput,
+	value any,
+	projectionDepth int,
+	patchSchema bool,
+) {
 	if projectionDepth >= maxArgsProjectionDepth {
 		out.mergeProblem(StatusLimitExceeded, IssueDepthLimit)
 		return
 	}
 	switch value.(type) {
 	case string, []any, map[string]any:
-		out.merge(extractJSONValue(value, projectionDepth+1, false))
+		out.merge(extractJSONValue(value, projectionDepth+1, false, patchSchema))
 	default:
 		out.mergeProblem(StatusInvalid, IssueInvalidJSON)
 	}
@@ -498,10 +548,14 @@ func appendExtractedPayload(
 }
 
 func validateJSON(raw []byte) IssueCode {
+	return validateJSONWithStringLimit(raw, maxCommandBytes)
+}
+
+func validateJSONWithStringLimit(raw []byte, maxStringBytes int) IssueCode {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	decoder.UseNumber()
 	members := 0
-	if issue := consumeJSONValue(decoder, 0, &members); issue != "" {
+	if issue := consumeJSONValue(decoder, 0, &members, maxStringBytes); issue != "" {
 		return issue
 	}
 	if _, err := decoder.Token(); !errors.Is(err, io.EOF) {
@@ -510,7 +564,12 @@ func validateJSON(raw []byte) IssueCode {
 	return ""
 }
 
-func consumeJSONValue(decoder *json.Decoder, depth int, members *int) IssueCode {
+func consumeJSONValue(
+	decoder *json.Decoder,
+	depth int,
+	members *int,
+	maxStringBytes int,
+) IssueCode {
 	if depth > maxJSONDepth {
 		return IssueDepthLimit
 	}
@@ -543,7 +602,12 @@ func consumeJSONValue(decoder *json.Decoder, depth int, members *int) IssueCode 
 				if *members > maxJSONMembers {
 					return IssueInputLimit
 				}
-				if issue := consumeJSONValue(decoder, depth+1, members); issue != "" {
+				if issue := consumeJSONValue(
+					decoder,
+					depth+1,
+					members,
+					maxStringBytes,
+				); issue != "" {
 					return issue
 				}
 			}
@@ -556,7 +620,12 @@ func consumeJSONValue(decoder *json.Decoder, depth int, members *int) IssueCode 
 				if *members > maxJSONMembers {
 					return IssueInputLimit
 				}
-				if issue := consumeJSONValue(decoder, depth+1, members); issue != "" {
+				if issue := consumeJSONValue(
+					decoder,
+					depth+1,
+					members,
+					maxStringBytes,
+				); issue != "" {
 					return issue
 				}
 			}
@@ -567,7 +636,7 @@ func consumeJSONValue(decoder *json.Decoder, depth int, members *int) IssueCode 
 			return IssueInvalidJSON
 		}
 	case string:
-		if len(token) > maxCommandBytes {
+		if len(token) > maxStringBytes {
 			return IssueInputLimit
 		}
 	}
@@ -638,6 +707,15 @@ func (out *extractedInput) merge(other extractedInput) {
 			out.cwd = other.cwd
 		}
 	}
+	if other.patchSet {
+		if out.patchSet {
+			out.mergeProblem(StatusAmbiguous, IssueConflictingSources)
+		} else {
+			out.patchSet = true
+			out.patchMove = other.patchMove
+			out.patchChanges = cloneSlice(other.patchChanges)
+		}
+	}
 	if other.method != "" {
 		if out.method != "" && !strings.EqualFold(out.method, other.method) {
 			out.mergeProblem(StatusAmbiguous, IssueConflictingSources)
@@ -664,6 +742,7 @@ func (out *extractedInput) merge(other extractedInput) {
 
 func (out extractedInput) hasFacts() bool {
 	return out.command != "" || len(out.argv) > 0 || len(out.paths) > 0 ||
+		len(out.patchChanges) > 0 ||
 		len(out.urls) > 0 || out.method != "" || len(out.payload) > 0
 }
 

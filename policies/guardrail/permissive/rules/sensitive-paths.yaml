@@ -2,6 +2,12 @@ version: 1
 category: sensitive-path
 rules:
   - id: PATH-SSH-DIR
+    expression: >-
+      f.commands.exists(c,
+      f.paths.exists(p, p.command_id == c.id &&
+      p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE,
+      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND,
+      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))
     # Covers ~, $HOME, /home/<user>/ (Linux), /root, and /Users/<user>/ (macOS).
     # The macOS branch matters because agy's run_command tool expands ~ via the
     # shell BEFORE the regex sees it, so on macOS the command line lands as
@@ -12,7 +18,6 @@ rules:
     confidence: 0.95
     tags: [credential, file-sensitive]
   - id: PATH-SSH-KEY
-    tool_call_only: true
     expression: >-
       f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations &&
       f.paths.exists(p, p.command_id == c.id &&
@@ -23,7 +28,6 @@ rules:
     confidence: 0.90
     tags: [credential, file-sensitive]
   - id: PATH-AWS-CREDS
-    tool_call_only: true
     expression: >-
       f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations &&
       f.paths.exists(p, p.command_id == c.id &&
@@ -43,7 +47,6 @@ rules:
     confidence: 0.85
     tags: [credential, file-sensitive]
   - id: PATH-KUBE
-    tool_call_only: true
     expression: >-
       f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations &&
       f.paths.exists(p, p.command_id == c.id &&
@@ -54,7 +57,6 @@ rules:
     confidence: 0.90
     tags: [credential, file-sensitive]
   - id: PATH-DOCKER
-    tool_call_only: true
     expression: >-
       f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations &&
       f.paths.exists(p, p.command_id == c.id &&
@@ -71,21 +73,18 @@ rules:
     confidence: 0.95
     tags: [credential, file-sensitive]
   - id: PATH-NPMRC
-    tool_call_only: true
     pattern: '(?:~|\$HOME|\$\{HOME\}|/home/\w+|/root|/Users/\w+)/\.npmrc'
     title: "npm config (may contain tokens)"
     severity: MEDIUM
     confidence: 0.80
     tags: [credential, file-sensitive]
   - id: PATH-PYPIRC
-    tool_call_only: true
     pattern: '(?:~|\$HOME|\$\{HOME\}|/home/\w+|/root|/Users/\w+)/\.pypirc'
     title: "PyPI config (may contain tokens)"
     severity: MEDIUM
     confidence: 0.80
     tags: [credential, file-sensitive]
   - id: PATH-GIT-CREDS
-    tool_call_only: true
     expression: >-
       f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations &&
       f.paths.exists(p, p.command_id == c.id &&
@@ -97,7 +96,6 @@ rules:
     confidence: 0.95
     tags: [credential, file-sensitive]
   - id: PATH-NETRC
-    tool_call_only: true
     # Backport of default pack: add braced-HOME form `${HOME}/.netrc`.
     pattern: '(?:~|\$HOME|\$\{HOME\}|/home/\w+|/root|/Users/\w+)/\.netrc'
     title: "netrc credentials file"
@@ -105,7 +103,6 @@ rules:
     confidence: 0.90
     tags: [credential, file-sensitive]
   - id: PATH-ENV-FILE
-    tool_call_only: true
     expression: >-
       f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations &&
       f.paths.exists(p, p.command_id == c.id &&
@@ -130,13 +127,18 @@ rules:
     confidence: 0.95
     tags: [system-file, credential]
   - id: PATH-ETC-SUDOERS
+    expression: >-
+      f.commands.exists(c,
+      f.paths.exists(p, p.command_id == c.id &&
+      p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE,
+      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND,
+      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))
     pattern: '(?i)(?:\betc[\s/\\]+(?:slash[\s]+)?sudoers\b|\betc%2Fsudoers\b)'
     title: "/etc/sudoers access"
     severity: HIGH
     confidence: 0.90
     tags: [system-file, privilege]
   - id: PATH-PROC-ENVIRON
-    tool_call_only: true
     expression: >-
       f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations &&
       f.paths.exists(p, p.command_id == c.id &&
@@ -152,7 +154,7 @@ rules:
       f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations &&
       f.paths.exists(p, p.command_id == c.id &&
       p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))
-    pattern: '(?i)(?:~|\$HOME|\$\{HOME\}|/root|/(?:home|Users)/[^/\\"'']+|[a-z]:[/\\]Users[/\\][^/\\"'']+)[/\\](?:\.config[/\\]gcloud[/\\](?:application_default_credentials\.json|(?:access_tokens|credentials)\.db)|AppData[/\\]Roaming[/\\]gcloud[/\\](?:application_default_credentials\.json|(?:access_tokens|credentials)\.db)|\.azure[/\\](?:azureProfile\.json|TokenCache\.dat|msal_token_cache[^/\\]*\.(?:json|bin)))(?:$|["''\s])'
+    pattern: '(?i)(?:~|\$HOME|\$\{HOME\}|/root|/(?:home|Users)/[^/\\"'']+|[a-z]:[/\\]Users[/\\][^/\\"'']+)[/\\](?:\.config[/\\](?:gcloud[/\\](?:application_default_credentials\.json|(?:access_tokens|credentials)\.db)|gh[/\\]hosts\.yml)|AppData[/\\]Roaming[/\\](?:gcloud[/\\](?:application_default_credentials\.json|(?:access_tokens|credentials)\.db)|GitHub CLI[/\\]hosts\.yml)|\.azure[/\\](?:azureProfile\.json|TokenCache\.dat|msal_token_cache[^/\\]*\.(?:json|bin)))(?:$|["''\s])'
     title: "Cloud credential material read"
     severity: CRITICAL
     confidence: 0.92
@@ -174,14 +176,58 @@ rules:
       f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations &&
       f.paths.exists(p, p.command_id == c.id &&
       p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))
-    pattern: '/var/run/secrets/(?:kubernetes\.io|eks\.amazonaws\.com)/serviceaccount/token(?:$|["''\s])'
+    pattern: '/var/run/secrets/(?:(?:kubernetes\.io|eks\.amazonaws\.com)/serviceaccount/token|azure/tokens/azure-identity-token)(?:$|["''\s])'
     title: "Workload identity token read"
     severity: CRITICAL
     confidence: 0.96
     tags: [credential, workload-identity, file-sensitive]
   - id: PATH-HISTORY
+    expression: >-
+      f.commands.exists(c,
+      f.paths.exists(p, p.command_id == c.id &&
+      p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE,
+      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND,
+      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))
     pattern: '(?:~|\$HOME|\$\{HOME\}|/home/\w+|/root|/Users/\w+)/\.(?:bash_history|zsh_history|python_history)'
     title: "Shell history file"
     severity: MEDIUM
     confidence: 0.80
     tags: [credential, file-sensitive]
+  - id: privilege.container_runtime_socket_access
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c,
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONNECT in c.operations &&
+      f.paths.exists(p, p.command_id == c.id &&
+      p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_CONNECT))
+    pattern: '(?i)(?:unix://)?/(?:var/)?run/(?:docker\.sock|containerd/containerd\.sock|crio/crio\.sock|podman/podman\.sock)\b'
+    title: "Container runtime socket access"
+    severity: HIGH
+    confidence: 0.95
+    tags: [privilege, container, socket]
+  - id: persistence.shell_profile_write
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c,
+      f.paths.exists(p, p.command_id == c.id &&
+      p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE,
+      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND,
+      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))
+    pattern: '(?i)(?:~|\$HOME|\$\{HOME\}|/root|/(?:home|Users)/[^/\\"'']+|[a-z]:[/\\]Users[/\\][^/\\"'']+)[/\\](?:\.(?:profile|bash_profile|bashrc|zprofile|zshrc)|\.config[/\\](?:fish[/\\]config\.fish|powershell[/\\](?:profile|microsoft\.powershell_profile)\.ps1)|Documents[/\\](?:Windows)?PowerShell[/\\](?:profile|Microsoft\.PowerShell_profile)\.ps1)\b'
+    title: "Shell startup profile mutation"
+    severity: MEDIUM
+    confidence: 0.92
+    tags: [persistence, shell, file-sensitive]
+  - id: persistence.git_hook_write
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c,
+      f.paths.exists(p, p.command_id == c.id &&
+      p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE,
+      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND,
+      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))
+    pattern: '(?i)(?:^|[/\\])\.git[/\\]hooks[/\\](?:applypatch-msg|commit-msg|fsmonitor-watchman|post-checkout|post-commit|post-merge|post-receive|post-rewrite|pre-applypatch|pre-commit|pre-push|pre-rebase|pre-receive|prepare-commit-msg|push-to-checkout|update)(?:$|["''\s])'
+    title: "Active Git hook mutation"
+    severity: MEDIUM
+    confidence: 0.92
+    tags: [persistence, source-control, file-sensitive]
