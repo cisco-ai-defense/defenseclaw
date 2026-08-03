@@ -88,6 +88,7 @@ class GoFieldConstraintsPlanIR:
     """Exact projection into ``familyFieldConstraints``."""
 
     max_utf8_bytes: int
+    max_item_utf8_bytes: int
     min_items: int
     max_items: int
     pattern: str
@@ -1138,6 +1139,7 @@ def _typed_constraints(field: _Field) -> GoFieldConstraintsPlanIR:
         structured = GoKernelLimitsIR(*(integer(name) for name in required))
     return GoFieldConstraintsPlanIR(
         integer("max_utf8_bytes") if field.primitive_type in {"string", "string[]"} else 0,
+        integer("max_item_utf8_bytes") if field.primitive_type == "string[]" else 0,
         integer("min_items") if field.primitive_type == "string[]" else 0,
         integer("max_items") if field.primitive_type == "string[]" else 0,
         text("pattern") if field.primitive_type in {"string", "string[]"} else "",

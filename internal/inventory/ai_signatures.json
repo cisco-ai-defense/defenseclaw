@@ -42,7 +42,11 @@
         "codex",
         "openai"
       ],
-      "application_names": [],
+      "application_names": [
+        "Codex",
+        "package-id:OpenAI.Codex_2p2nqsd0c76g0",
+        "package-id:OpenAI.CodexBeta_2p2nqsd0c76g0"
+      ],
       "local_endpoints": []
     },
     {
@@ -91,9 +95,7 @@
         "claude",
         "anthropic"
       ],
-      "application_names": [
-        "Claude.app"
-      ],
+      "application_names": [],
       "local_endpoints": []
     },
     {
@@ -356,13 +358,14 @@
       "confidence": 0.95,
       "supported_connector": "copilot",
       "binary_names": [
-        "gh"
+        "copilot"
       ],
       "process_names": [
         "copilot",
         "GitHub Copilot"
       ],
       "config_paths": [
+        "~/.copilot/config.json",
         "~/.copilot/mcp-config.json",
         ".github/hooks/defenseclaw.json",
         ".github/mcp.json",
@@ -384,7 +387,9 @@
         ".github/mcp.json",
         ".mcp.json"
       ],
-      "package_names": [],
+      "package_names": [
+        "@github/copilot"
+      ],
       "env_var_names": [
         "COPILOT_OTEL_ENABLED"
       ],
@@ -663,7 +668,9 @@
       "category": "editor_extension",
       "confidence": 0.88,
       "supported_connector": "",
-      "binary_names": [],
+      "binary_names": [
+        "cn"
+      ],
       "process_names": [],
       "config_paths": [
         "~/.continue/config.json",
@@ -675,9 +682,12 @@
       ],
       "mcp_paths": [],
       "package_names": [
-        "@continuedev/continue"
+        "@continuedev/continue",
+        "@continuedev/cli"
       ],
-      "env_var_names": [],
+      "env_var_names": [
+        "CONTINUE_API_KEY"
+      ],
       "domain_patterns": [
         "continue.dev"
       ],
@@ -694,12 +704,17 @@
       "category": "editor_extension",
       "confidence": 0.88,
       "supported_connector": "",
-      "binary_names": [],
+      "binary_names": [
+        "cline"
+      ],
       "process_names": [
         "Cline",
         "cline"
       ],
       "config_paths": [
+        "~/.cline",
+        "~/.cline/data/settings",
+        ".cline",
         "~/Library/Application Support/Code/User/globalStorage/saoudrizwan.claude-dev",
         "~/Library/Application Support/Code/User/globalStorage/rooveterinaryinc.roo-cline"
       ],
@@ -795,7 +810,9 @@
       "category": "editor_extension",
       "confidence": 0.84,
       "supported_connector": "",
-      "binary_names": [],
+      "binary_names": [
+        "cody"
+      ],
       "process_names": [
         "Cody"
       ],
@@ -804,7 +821,9 @@
         "sourcegraph.cody-ai"
       ],
       "mcp_paths": [],
-      "package_names": [],
+      "package_names": [
+        "@sourcegraph/cody"
+      ],
       "env_var_names": [
         "SRC_ENDPOINT",
         "SRC_ACCESS_TOKEN"
@@ -1086,12 +1105,14 @@
       ],
       "config_paths": [
         "~/Library/Application Support/Claude/claude_desktop_config.json",
-        "~/.config/Claude/claude_desktop_config.json"
+        "~/.config/Claude/claude_desktop_config.json",
+        "$APPDATA/Claude/claude_desktop_config.json"
       ],
       "extension_ids": [],
       "mcp_paths": [
         "~/Library/Application Support/Claude/claude_desktop_config.json",
-        "~/.config/Claude/claude_desktop_config.json"
+        "~/.config/Claude/claude_desktop_config.json",
+        "$APPDATA/Claude/claude_desktop_config.json"
       ],
       "package_names": [],
       "env_var_names": [],
@@ -1118,7 +1139,8 @@
       ],
       "application_names": [
         "ChatGPT.app",
-        "ChatGPT"
+        "ChatGPT",
+        "package-id:OpenAI.ChatGPT-Desktop_2p2nqsd0c76g0"
       ],
       "config_paths": [
         "~/Library/Application Support/com.openai.chat",
@@ -1311,7 +1333,8 @@
       "config_paths": [
         "~/Library/Application Support/Jan/data",
         "~/.config/Jan/data",
-        "~/.local/share/Jan/data"
+        "~/.local/share/Jan/data",
+        "$APPDATA/Jan/data"
       ],
       "extension_ids": [],
       "mcp_paths": [],
@@ -1593,7 +1616,7 @@
     },
     {
       "id": "replit",
-      "name": "Replit AI",
+      "name": "Replit Agent",
       "vendor": "Replit",
       "category": "editor_extension",
       "confidence": 0.72,
@@ -1617,6 +1640,587 @@
         "replit ai"
       ],
       "local_endpoints": []
+    },
+    {
+      "id": "notion",
+      "name": "Notion",
+      "vendor": "Notion Labs",
+      "category": "desktop_app",
+      "confidence": 0.72,
+      "specificity": 0.65,
+      "supported_connector": "",
+      "application_names": ["Notion.app"]
+    },
+    {
+      "id": "perplexity-comet",
+      "name": "Perplexity Comet",
+      "vendor": "Perplexity AI",
+      "category": "desktop_app",
+      "confidence": 0.88,
+      "specificity": 0.82,
+      "supported_connector": "",
+      "application_names": ["Comet.app"]
+    },
+    {
+      "id": "zed",
+      "name": "Zed",
+      "vendor": "Zed Industries",
+      "category": "desktop_app",
+      "confidence": 0.9,
+      "specificity": 0.9,
+      "supported_connector": "",
+      "binary_names": ["zed", "zeditor", "zed.exe"],
+      "application_names": ["Zed.app"],
+      "config_paths": ["~/.config/zed/settings.json", "~/Library/Application Support/Zed", "~/.local/share/zed", "$APPDATA/Zed/settings.json", "$LOCALAPPDATA/Zed"]
+    },
+    {
+      "id": "warp",
+      "name": "Warp",
+      "vendor": "Warp",
+      "category": "desktop_app",
+      "confidence": 0.86,
+      "specificity": 0.82,
+      "supported_connector": "",
+      "application_names": ["Warp.app"],
+      "config_paths": ["~/.warp", "~/.config/warp-terminal", "~/.local/state/warp-terminal", "~/.local/share/warp-terminal", "$APPDATA/warp/Warp", "$LOCALAPPDATA/warp/Warp"]
+    },
+    {
+      "id": "raycast",
+      "name": "Raycast",
+      "vendor": "Raycast",
+      "category": "desktop_app",
+      "confidence": 0.78,
+      "specificity": 0.75,
+      "supported_connector": "",
+      "application_names": ["Raycast.app"]
+    },
+    {
+      "id": "gpt4all",
+      "name": "GPT4All",
+      "vendor": "Nomic AI",
+      "category": "desktop_app",
+      "confidence": 0.9,
+      "specificity": 0.95,
+      "supported_connector": "",
+      "process_names": ["GPT4All"],
+      "application_names": ["GPT4All.app"],
+      "config_paths": ["~/Library/Application Support/nomic.ai/GPT4All", "~/.local/share/nomic.ai/GPT4All", "$LOCALAPPDATA/nomic.ai/GPT4All"],
+      "package_names": ["gpt4all"],
+      "domain_patterns": ["gpt4all.io"]
+    },
+    {
+      "id": "devin",
+      "name": "Devin",
+      "vendor": "Cognition",
+      "category": "ai_cli",
+      "confidence": 0.84,
+      "specificity": 0.94,
+      "supported_connector": "",
+      "binary_names": ["devin"],
+      "process_names": ["devin"],
+      "env_var_names": ["DEVIN_API_KEY", "DEVIN_ORG_ID"]
+    },
+    {
+      "id": "anythingllm",
+      "name": "AnythingLLM",
+      "vendor": "Mintplex Labs",
+      "category": "desktop_app",
+      "confidence": 0.9,
+      "specificity": 0.94,
+      "supported_connector": "",
+      "process_names": ["anythingllm-desktop"],
+      "application_names": ["AnythingLLM.app"],
+      "config_paths": ["~/Library/Application Support/anythingllm-desktop/storage", "~/.config/anythingllm-desktop/storage", "$APPDATA/anythingllm-desktop/storage"],
+      "package_names": ["mintplexlabs/anythingllm"]
+    },
+    {
+      "id": "lobechat",
+      "name": "LobeChat / LobeHub",
+      "vendor": "LobeHub",
+      "category": "ai_cli",
+      "confidence": 0.86,
+      "specificity": 0.92,
+      "supported_connector": "",
+      "package_names": ["lobehub/lobehub", "lobehub/lobe-chat"],
+      "env_var_names": ["LOBE_PORT"],
+      "domain_patterns": ["lobehub.com", "lobe.chat"],
+      "history_patterns": ["lobehub/lobehub", "lobehub/lobe-chat"]
+    },
+    {
+      "id": "trae",
+      "name": "TRAE",
+      "vendor": "ByteDance",
+      "category": "desktop_app",
+      "confidence": 0.86,
+      "specificity": 0.88,
+      "supported_connector": "",
+      "application_names": ["TRAE.app", "Trae.app"]
+    },
+    {
+      "id": "pieces",
+      "name": "Pieces for Developers",
+      "vendor": "Pieces for Developers",
+      "category": "desktop_app",
+      "confidence": 0.88,
+      "specificity": 0.9,
+      "supported_connector": "",
+      "binary_names": ["pieces", "pieces-os"],
+      "config_paths": ["~/Library/com.pieces.os", "~/.local/share/com.pieces.os", "$LOCALAPPDATA/Mesh Intelligent Technologies, Inc/Pieces OS/com.pieces.os/production"]
+    },
+    {
+      "id": "amp",
+      "name": "Amp",
+      "vendor": "Amp",
+      "category": "ai_cli",
+      "confidence": 0.82,
+      "specificity": 0.74,
+      "supported_connector": "",
+      "binary_names": ["amp"],
+      "config_paths": ["~/.config/amp/settings.json", "~/.config/amp/settings.jsonc", ".amp/settings.json", ".amp/settings.jsonc"]
+    },
+    {
+      "id": "void",
+      "name": "Void",
+      "vendor": "Glass Devtools",
+      "category": "desktop_app",
+      "confidence": 0.82,
+      "specificity": 0.76,
+      "supported_connector": "",
+      "binary_names": ["void"],
+      "application_names": ["Void.app"],
+      "config_paths": ["~/.void-editor", "~/.void-server"]
+    },
+    {
+      "id": "kiro",
+      "name": "Kiro CLI",
+      "vendor": "AWS",
+      "category": "ai_cli",
+      "confidence": 0.9,
+      "specificity": 0.95,
+      "supported_connector": "",
+      "binary_names": ["kiro-cli", "kiro-cli.appimage"],
+      "config_paths": ["~/.kiro/settings/cli.json", "~/.kiro/settings/mcp.json", "~/.kiro/agents", ".kiro/settings/mcp.json", ".kiro/agents"],
+      "mcp_paths": ["~/.kiro/settings/mcp.json", ".kiro/settings/mcp.json"]
+    },
+    {
+      "id": "auggie",
+      "name": "Auggie (Augment Code CLI)",
+      "vendor": "Augment Code",
+      "category": "ai_cli",
+      "confidence": 0.9,
+      "specificity": 0.96,
+      "supported_connector": "",
+      "binary_names": ["auggie"],
+      "config_paths": ["~/.augment/settings.json", "~/.augment/session.json", ".augment/settings.json", ".augment/settings.local.json"]
+    },
+    {
+      "id": "plandex",
+      "name": "Plandex CLI",
+      "vendor": "Plandex AI",
+      "category": "ai_cli",
+      "confidence": 0.88,
+      "specificity": 0.9,
+      "supported_connector": "",
+      "binary_names": ["plandex", "pdx"],
+      "config_paths": [".plandex"]
+    },
+    {
+      "id": "swe-agent",
+      "name": "SWE-agent",
+      "vendor": "SWE-agent",
+      "category": "ai_cli",
+      "confidence": 0.86,
+      "specificity": 0.92,
+      "supported_connector": "",
+      "binary_names": ["sweagent"],
+      "package_names": ["sweagent"]
+    },
+    {
+      "id": "koboldcpp",
+      "name": "KoboldCpp",
+      "vendor": "KoboldAI",
+      "category": "ai_cli",
+      "confidence": 0.9,
+      "specificity": 0.94,
+      "supported_connector": "",
+      "binary_names": ["koboldcpp", "koboldcpp.exe", "koboldcpp-linux-x64", "koboldcpp-linux-x64-oldpc", "koboldcpp-mac-arm64"],
+      "process_names": ["koboldcpp", "koboldcpp.exe", "koboldcpp-linux-x64", "koboldcpp-mac-arm64"],
+      "package_names": ["koboldai/koboldcpp"],
+      "history_patterns": ["koboldcpp.py", "koboldcpp.sh", "koboldcpp-mac-arm64", "koboldcpp-linux-x64"]
+    },
+    {
+      "id": "pinokio",
+      "name": "Pinokio",
+      "vendor": "Pinokio Computer",
+      "category": "desktop_app",
+      "confidence": 0.9,
+      "specificity": 0.92,
+      "supported_connector": "",
+      "process_names": ["Pinokio"],
+      "application_names": ["Pinokio.app"],
+      "config_paths": ["~/pinokio", "~/pinokio/api", "~/pinokio/bin"]
+    },
+    {
+      "id": "mistral-vibe",
+      "name": "Mistral Vibe",
+      "vendor": "Mistral AI",
+      "category": "ai_cli",
+      "confidence": 0.84,
+      "specificity": 0.74,
+      "supported_connector": "",
+      "binary_names": ["vibe", "vibe-acp"],
+      "config_paths": ["~/.vibe/config.toml", ".vibe/config.toml", "~/.vibe/trusted_folders.toml"]
+    },
+    {
+      "id": "crush",
+      "name": "Crush",
+      "vendor": "Charmbracelet",
+      "category": "ai_cli",
+      "confidence": 0.82,
+      "specificity": 0.76,
+      "supported_connector": "",
+      "binary_names": ["crush"],
+      "config_paths": ["~/.config/crush/crush.json", ".crush.json", "crush.json", "~/.local/share/crush/crush.json", "$LOCALAPPDATA/crush/crush.json"]
+    },
+    {
+      "id": "gptscript",
+      "name": "GPTScript",
+      "vendor": "Acorn Labs",
+      "category": "ai_cli",
+      "confidence": 0.88,
+      "specificity": 0.94,
+      "supported_connector": "",
+      "binary_names": ["gptscript"],
+      "process_names": ["gptscript"]
+    },
+    {
+      "id": "docker-agent",
+      "name": "Docker Agent",
+      "vendor": "Docker",
+      "category": "ai_cli",
+      "confidence": 0.9,
+      "specificity": 0.86,
+      "supported_connector": "",
+      "binary_names": ["docker-agent", "cagent"],
+      "config_paths": ["~/.docker/cli-plugins/docker-agent", "~/.cagent/session.db"]
+    },
+    {
+      "id": "msty",
+      "name": "Msty",
+      "vendor": "CloudStack",
+      "category": "desktop_app",
+      "confidence": 0.88,
+      "specificity": 0.9,
+      "supported_connector": "",
+      "binary_names": ["msty"],
+      "process_names": ["Msty", "msty-local"],
+      "application_names": ["Msty.app"],
+      "config_paths": ["~/Library/Application Support/Msty", "~/.config/Msty", "$APPDATA/Msty"]
+    },
+    {
+      "id": "boltai",
+      "name": "BoltAI",
+      "vendor": "BoltAI",
+      "category": "desktop_app",
+      "confidence": 0.9,
+      "specificity": 0.92,
+      "supported_connector": "",
+      "process_names": ["BoltAI"],
+      "application_names": ["BoltAI.app"]
+    },
+    {
+      "id": "uipath-assistant",
+      "name": "UiPath Assistant",
+      "vendor": "UiPath",
+      "category": "desktop_app",
+      "confidence": 0.88,
+      "specificity": 0.9,
+      "supported_connector": "",
+      "application_names": ["UiPath Assistant.app"]
+    },
+    {
+      "id": "wave-terminal",
+      "name": "Wave Terminal",
+      "vendor": "Wave Terminal",
+      "category": "desktop_app",
+      "confidence": 0.9,
+      "specificity": 0.92,
+      "supported_connector": "",
+      "binary_names": ["wsh", "waveterm"],
+      "process_names": ["waveterm"],
+      "application_names": ["Wave.app", "Wave Terminal.app"],
+      "config_paths": ["~/.config/waveterm", "~/.config/waveterm/settings.json", "~/.config/waveterm/waveai.json", "$APPDATA/waveterm"]
+    },
+    {
+      "id": "tabby-terminal",
+      "name": "Tabby Terminal AI Integration",
+      "vendor": "Tabby",
+      "category": "mcp_server",
+      "confidence": 0.84,
+      "specificity": 0.96,
+      "supported_connector": "",
+      "config_paths": ["~/Library/Application Support/tabby/plugins/node_modules/tabby-mcp"],
+      "package_names": ["tabby-mcp"],
+      "history_patterns": ["tabby-mcp-server", "tabby-mcp"]
+    },
+    {
+      "id": "ui-tars-desktop",
+      "name": "UI-TARS Desktop",
+      "vendor": "ByteDance",
+      "category": "desktop_app",
+      "confidence": 0.9,
+      "specificity": 0.94,
+      "supported_connector": "",
+      "binary_names": ["UI-TARS"],
+      "process_names": ["UI-TARS"],
+      "application_names": ["UI TARS.app", "UI-TARS.app"]
+    },
+    {
+      "id": "backyard-ai",
+      "name": "Backyard AI",
+      "vendor": "Backyard AI",
+      "category": "desktop_app",
+      "confidence": 0.84,
+      "specificity": 0.9,
+      "supported_connector": "",
+      "process_names": ["Backyard AI"],
+      "application_names": ["Backyard AI.app"]
+    },
+    {
+      "id": "dia-browser",
+      "name": "Dia Browser",
+      "vendor": "The Browser Company",
+      "category": "desktop_app",
+      "confidence": 0.88,
+      "specificity": 0.82,
+      "supported_connector": "",
+      "application_names": ["Dia.app"]
+    },
+    {
+      "id": "browseros",
+      "name": "BrowserOS",
+      "vendor": "BrowserOS",
+      "category": "desktop_app",
+      "confidence": 0.92,
+      "specificity": 0.96,
+      "supported_connector": "",
+      "binary_names": ["browseros-cli"],
+      "process_names": ["BrowserOS", "BrowserOS Dev"],
+      "application_names": ["BrowserOS.app", "BrowserOS Dev.app"]
+    },
+    {
+      "id": "chat2db",
+      "name": "Chat2DB",
+      "vendor": "OtterMind",
+      "category": "desktop_app",
+      "confidence": 0.9,
+      "specificity": 0.94,
+      "supported_connector": "",
+      "binary_names": ["chat2db"],
+      "process_names": ["Chat2DB", "chat2db"],
+      "application_names": ["Chat2DB.app"],
+      "config_paths": ["~/.chat2db-docker"],
+      "package_names": ["chat2db/chat2db"]
+    },
+    {
+      "id": "monday-desktop",
+      "name": "monday.com Desktop",
+      "vendor": "monday.com",
+      "category": "desktop_app",
+      "confidence": 0.7,
+      "specificity": 0.68,
+      "supported_connector": "",
+      "application_names": ["monday.com.app"]
+    },
+    {
+      "id": "eigent",
+      "name": "Eigent",
+      "vendor": "Eigent AI",
+      "category": "desktop_app",
+      "confidence": 0.9,
+      "specificity": 0.94,
+      "supported_connector": "",
+      "process_names": ["Eigent"],
+      "application_names": ["Eigent.app"]
+    },
+    {
+      "id": "melty",
+      "name": "Melty",
+      "vendor": "Melty Labs",
+      "category": "desktop_app",
+      "confidence": 0.82,
+      "specificity": 0.84,
+      "supported_connector": "",
+      "binary_names": ["meltycode"],
+      "process_names": ["meltycode"],
+      "application_names": ["meltycode.app"],
+      "config_paths": ["~/.meltycode", "~/.meltycode-server"]
+    },
+    {
+      "id": "bloop",
+      "name": "bloop",
+      "vendor": "Bloop AI",
+      "category": "desktop_app",
+      "confidence": 0.86,
+      "specificity": 0.88,
+      "supported_connector": "",
+      "application_names": ["bloop.app", "Bloop.app"],
+      "config_paths": ["~/Library/Application Support/ai.bloop.bloop/bleep", "~/.local/share/bloop/bleep", "$APPDATA/bloop/bleep"]
+    },
+    {
+      "id": "forge",
+      "name": "Forge",
+      "vendor": "Forge Agents",
+      "category": "ai_cli",
+      "confidence": 0.92,
+      "specificity": 0.98,
+      "supported_connector": "",
+      "package_names": ["@forge-agents/forge"]
+    },
+    {
+      "id": "sculptor",
+      "name": "Sculptor",
+      "vendor": "Imbue",
+      "category": "desktop_app",
+      "confidence": 0.88,
+      "specificity": 0.88,
+      "supported_connector": "",
+      "application_names": ["Sculptor.app"]
+    },
+    {
+      "id": "crab-code",
+      "name": "Crab Code",
+      "vendor": "Crab Code",
+      "category": "ai_cli",
+      "confidence": 0.9,
+      "specificity": 0.98,
+      "supported_connector": "",
+      "binary_names": ["crab-code", "crabcode"],
+      "process_names": ["crab-code", "crabcode"],
+      "package_names": ["crabcode"]
+    },
+    {
+      "id": "cmux",
+      "name": "cmux",
+      "vendor": "Manaflow",
+      "category": "desktop_app",
+      "confidence": 0.9,
+      "specificity": 0.94,
+      "supported_connector": "",
+      "application_names": ["cmux.app"],
+      "config_paths": ["~/.config/cmux/cmux.json", "~/Library/Application Support/cmux", "~/.cmuxterm"],
+      "history_patterns": ["brew install --cask cmux", "cmux hooks setup --agent"]
+    },
+    {
+      "id": "opcode",
+      "name": "opcode",
+      "vendor": "winfunc",
+      "category": "desktop_app",
+      "confidence": 0.88,
+      "specificity": 0.88,
+      "supported_connector": "",
+      "binary_names": ["opcode"],
+      "process_names": ["opcode"],
+      "application_names": ["Opcode.app", "opcode.app"]
+    },
+    {
+      "id": "smelt",
+      "name": "Smelt",
+      "vendor": "Smelt",
+      "category": "package_dependency",
+      "confidence": 0.86,
+      "specificity": 0.98,
+      "supported_connector": "",
+      "package_names": ["smeltworkflow"]
+    },
+    {
+      "id": "klaw",
+      "name": "klaw",
+      "vendor": "Klaw",
+      "category": "ai_cli",
+      "confidence": 0.86,
+      "specificity": 0.92,
+      "supported_connector": "",
+      "config_paths": ["~/.klaw/agents", "~/.klaw/workspace"],
+      "history_patterns": ["klaw create agent"]
+    },
+    {
+      "id": "agent-deck",
+      "name": "Agent Deck",
+      "vendor": "Agent Deck",
+      "category": "ai_cli",
+      "confidence": 0.86,
+      "specificity": 0.92,
+      "supported_connector": "",
+      "binary_names": ["agent-deck"],
+      "process_names": ["agent-deck"],
+      "config_paths": ["~/.agent-deck/config.toml", "~/.agent-deck"]
+    },
+    {
+      "id": "agent-of-empires",
+      "name": "Agent of Empires",
+      "vendor": "Nate Brake",
+      "category": "ai_cli",
+      "confidence": 0.78,
+      "specificity": 0.7,
+      "supported_connector": "",
+      "binary_names": ["aoe"],
+      "history_patterns": ["brew install aoe"]
+    },
+    {
+      "id": "agent-macos",
+      "name": "Agent! for macOS",
+      "vendor": "macOS26",
+      "category": "desktop_app",
+      "confidence": 0.9,
+      "specificity": 0.94,
+      "supported_connector": "",
+      "application_names": ["Agent!.app"]
+    },
+    {
+      "id": "betterbot",
+      "name": "BetterBot",
+      "vendor": "BetterBot",
+      "category": "desktop_app",
+      "confidence": 0.88,
+      "specificity": 0.94,
+      "supported_connector": "",
+      "process_names": ["BetterBot"],
+      "application_names": ["BetterBot.app"]
+    },
+    {
+      "id": "cyclop-one",
+      "name": "Cyclop One",
+      "vendor": "Cyclop",
+      "category": "desktop_app",
+      "confidence": 0.9,
+      "specificity": 0.94,
+      "supported_connector": "",
+      "process_names": ["CyclopOne"],
+      "application_names": ["Cyclop One.app", "CyclopOne.app"],
+      "config_paths": ["~/.cyclopone/skills", "~/.cyclopone"]
+    },
+    {
+      "id": "fazm",
+      "name": "Fazm",
+      "vendor": "Fazm",
+      "category": "desktop_app",
+      "confidence": 0.88,
+      "specificity": 0.94,
+      "supported_connector": "",
+      "binary_names": ["fazm"],
+      "process_names": ["fazm", "Fazm"],
+      "application_names": ["Fazm.app"]
+    },
+    {
+      "id": "zia-search",
+      "name": "Zia Search",
+      "vendor": "Zoho",
+      "category": "plugin",
+      "confidence": 0.94,
+      "specificity": 1.0,
+      "supported_connector": "",
+      "config_paths": ["~/Library/Application Support/Google/Chrome/Default/Extensions/jebapbhanimlfnddnammimbopafiddkd", "~/Library/Application Support/Microsoft Edge/Default/Extensions/jebapbhanimlfnddnammimbopafiddkd", "~/Library/Application Support/BraveSoftware/Brave-Browser/Default/Extensions/jebapbhanimlfnddnammimbopafiddkd", "~/.config/google-chrome/Default/Extensions/jebapbhanimlfnddnammimbopafiddkd", "~/.config/chromium/Default/Extensions/jebapbhanimlfnddnammimbopafiddkd", "$LOCALAPPDATA/Google/Chrome/User Data/Default/Extensions/jebapbhanimlfnddnammimbopafiddkd", "$LOCALAPPDATA/Microsoft/Edge/User Data/Default/Extensions/jebapbhanimlfnddnammimbopafiddkd"]
     }
   ]
 }

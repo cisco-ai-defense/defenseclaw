@@ -263,6 +263,25 @@ func (adapter *aiDiscoveryV8Adapter) emitSignalLog(
 			DefenseClawAIComponentVendor:     aiDiscoveryV8OptionalText(signal.Vendor),
 			DefenseClawAIComponentProduct:    aiDiscoveryV8OptionalText(signal.Product),
 		}
+		if signal.Category == inventory.SignalLocalModel && signal.Model != nil && signal.Model.Provenance != nil {
+			provenance := signal.Model.Provenance
+			base.DefenseClawAIModelProvenancePublisher = aiDiscoveryV8OptionalText(provenance.Publisher)
+			base.DefenseClawAIModelProvenanceCountryCode = aiDiscoveryV8OptionalText(provenance.CountryCode)
+			// Local filenames, cache IDs, and embedded/config metadata can contain
+			// operator-chosen names. Export lineage names only when they came from a
+			// reviewed exact lineage or a successful public Hub lookup. Publisher,
+			// country, and derivation evidence remain useful when names are withheld.
+			if aiDiscoveryV8PublicLineageNames(provenance.Source) {
+				base.DefenseClawAIModelProvenanceRootModel = aiDiscoveryV8OptionalText(provenance.RootModel)
+				base.DefenseClawAIModelProvenanceBaseModels = aiDiscoveryV8OptionalStrings(provenance.BaseModels)
+			}
+			base.DefenseClawAIModelProvenanceQuantized = aiDiscoveryV8OptionalBool(provenance.Quantized)
+			base.DefenseClawAIModelProvenanceQuantization = aiDiscoveryV8OptionalText(provenance.Quantization)
+			base.DefenseClawAIModelProvenanceDistilled = aiDiscoveryV8OptionalBool(provenance.Distilled)
+			base.DefenseClawAIModelProvenanceDerivation = aiDiscoveryV8OptionalText(provenance.Derivation)
+			base.DefenseClawAIModelProvenanceSource = aiDiscoveryV8OptionalText(provenance.Source)
+			base.DefenseClawAIModelProvenanceConfidence = aiDiscoveryV8OptionalText(provenance.Confidence)
+		}
 		switch eventName {
 		case "ai_component.discovered":
 			return builder.BuildLogAIComponentDiscovered(observability.LogAIComponentDiscoveredInput(base))
@@ -270,19 +289,29 @@ func (adapter *aiDiscoveryV8Adapter) emitSignalLog(
 			return builder.BuildLogAIComponentChanged(base)
 		case "ai_component.observed":
 			return builder.BuildLogAIComponentObserved(observability.LogAIComponentObservedInput{
-				Envelope:                         base.Envelope,
-				Severity:                         base.Severity,
-				LogLevel:                         base.LogLevel,
-				DefenseClawAIComponentID:         base.DefenseClawAIComponentID,
-				DefenseClawAIComponentType:       base.DefenseClawAIComponentType,
-				DefenseClawAIDiscoveryDetector:   base.DefenseClawAIDiscoveryDetector,
-				DefenseClawAIDiscoverySignal:     base.DefenseClawAIDiscoverySignal,
-				DefenseClawAIDiscoveryConfidence: base.DefenseClawAIDiscoveryConfidence,
-				DefenseClawAIDiscoveryScanID:     base.DefenseClawAIDiscoveryScanID,
-				DefenseClawAIDiscoverySignalID:   base.DefenseClawAIDiscoverySignalID,
-				DefenseClawAIDiscoverySource:     base.DefenseClawAIDiscoverySource,
-				DefenseClawAIComponentVendor:     base.DefenseClawAIComponentVendor,
-				DefenseClawAIComponentProduct:    base.DefenseClawAIComponentProduct,
+				Envelope:                                 base.Envelope,
+				Severity:                                 base.Severity,
+				LogLevel:                                 base.LogLevel,
+				DefenseClawAIComponentID:                 base.DefenseClawAIComponentID,
+				DefenseClawAIComponentType:               base.DefenseClawAIComponentType,
+				DefenseClawAIDiscoveryDetector:           base.DefenseClawAIDiscoveryDetector,
+				DefenseClawAIDiscoverySignal:             base.DefenseClawAIDiscoverySignal,
+				DefenseClawAIDiscoveryConfidence:         base.DefenseClawAIDiscoveryConfidence,
+				DefenseClawAIDiscoveryScanID:             base.DefenseClawAIDiscoveryScanID,
+				DefenseClawAIDiscoverySignalID:           base.DefenseClawAIDiscoverySignalID,
+				DefenseClawAIDiscoverySource:             base.DefenseClawAIDiscoverySource,
+				DefenseClawAIComponentVendor:             base.DefenseClawAIComponentVendor,
+				DefenseClawAIComponentProduct:            base.DefenseClawAIComponentProduct,
+				DefenseClawAIModelProvenancePublisher:    base.DefenseClawAIModelProvenancePublisher,
+				DefenseClawAIModelProvenanceCountryCode:  base.DefenseClawAIModelProvenanceCountryCode,
+				DefenseClawAIModelProvenanceRootModel:    base.DefenseClawAIModelProvenanceRootModel,
+				DefenseClawAIModelProvenanceBaseModels:   base.DefenseClawAIModelProvenanceBaseModels,
+				DefenseClawAIModelProvenanceQuantized:    base.DefenseClawAIModelProvenanceQuantized,
+				DefenseClawAIModelProvenanceQuantization: base.DefenseClawAIModelProvenanceQuantization,
+				DefenseClawAIModelProvenanceDistilled:    base.DefenseClawAIModelProvenanceDistilled,
+				DefenseClawAIModelProvenanceDerivation:   base.DefenseClawAIModelProvenanceDerivation,
+				DefenseClawAIModelProvenanceSource:       base.DefenseClawAIModelProvenanceSource,
+				DefenseClawAIModelProvenanceConfidence:   base.DefenseClawAIModelProvenanceConfidence,
 			})
 		case "ai_component.removed":
 			return builder.BuildLogAIComponentRemoved(observability.LogAIComponentRemovedInput(base))
@@ -673,6 +702,29 @@ func aiDiscoveryV8OptionalText(value string) observability.Optional[string] {
 		return observability.Absent[string]()
 	}
 	return observability.Present(value)
+}
+
+func aiDiscoveryV8OptionalStrings(values []string) observability.Optional[[]string] {
+	if len(values) == 0 {
+		return observability.Absent[[]string]()
+	}
+	return observability.Present(append([]string(nil), values...))
+}
+
+func aiDiscoveryV8OptionalBool(value *bool) observability.Optional[bool] {
+	if value == nil {
+		return observability.Absent[bool]()
+	}
+	return observability.Present(*value)
+}
+
+func aiDiscoveryV8PublicLineageNames(source string) bool {
+	switch source {
+	case "catalog_exact", "huggingface_hub":
+		return true
+	default:
+		return false
+	}
 }
 
 func aiDiscoveryV8SummaryValid(summary inventory.AIDiscoverySummary) bool {

@@ -21,6 +21,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from defenseclaw.tui.app import DefenseClawTUI
+from defenseclaw.tui.services.ai_discovery_state import (
+    AIUsageModel,
+    AIUsageSignal,
+    AIUsageSnapshot,
+)
 from defenseclaw.tui.services.gateway_log_views import GatewayLogViews
 from defenseclaw.tui.services.read_repository import TUIReadSnapshot
 from defenseclaw.tui.services.tui_state import TUIStateStore
@@ -108,6 +113,28 @@ def test_panel_total_count_sums_alerts_streams() -> None:
     app.alerts_model.audit_events = [object()] * 3  # type: ignore[attr-defined]
     app.alerts_model.egress_events = [object()] * 4  # type: ignore[attr-defined]
     assert app._panel_total_count("alerts") == 7
+
+
+def test_ai_discovery_total_and_unread_counts_include_model_signals() -> None:
+    app = DefenseClawTUI(config=_config_for())
+    app.ai_discovery_model.set_snapshot(
+        AIUsageSnapshot(
+            enabled=True,
+            signals=(
+                AIUsageSignal(signal_id="agent", product="Codex"),
+                AIUsageSignal(
+                    signal_id="model",
+                    category="local_model",
+                    model=AIUsageModel(id="Qwen/Qwen3"),
+                ),
+            ),
+        )
+    )
+    app.state_store.record_seen_count("ai", 1)
+    app.active_panel = "overview"
+
+    assert app._panel_total_count("ai") == 2
+    assert app._panel_unread_count("ai") == 1
 
 
 def test_hidden_stream_counts_use_latest_snapshot_without_hydrating_models() -> None:

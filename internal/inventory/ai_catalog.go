@@ -132,7 +132,7 @@ func LoadAISignaturesForConfig(cfg *config.Config) ([]AISignature, error) {
 	if cfg == nil {
 		return LoadAISignatures()
 	}
-	home, _ := os.UserHomeDir()
+	home, _ := platformDiscoveryHomeDir()
 	wd, _ := os.Getwd()
 	return LoadAISignaturesWithOptions(AISignatureLoadOptions{
 		DataDir:                  cfg.DataDir,
@@ -355,7 +355,7 @@ func expandHome(path, home string) string {
 	}
 	if strings.HasPrefix(path, "~/") {
 		if home == "" {
-			if h, err := os.UserHomeDir(); err == nil {
+			if h, err := platformDiscoveryHomeDir(); err == nil {
 				home = h
 			}
 		}
