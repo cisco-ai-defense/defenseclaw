@@ -42,14 +42,22 @@ import (
 // instance. The multi-connector boot loop creates one and reuses it across
 // the connectors it spins up.
 //
-// Concurrency: Load is safe for concurrent use. It uses an RWMutex with
-// double-checked locking — the common "already cached" path takes only a
-// read lock, while a miss takes the write lock, re-checks, and loads under
-// the lock so two goroutines racing on the same directory load it once.
+// Concurrency: Load is safe for concurrent use. Concurrent misses for one key
+// share an in-flight load, while distinct directories load in parallel.
+// Failed loads are shared only by callers already waiting on that attempt and
+// are never retained in the success cache.
 type RulePackCache struct {
-	mu     sync.RWMutex
-	packs  map[string]*RulePack
-	loader func(string) *RulePack
+	mu       sync.Mutex
+	packs    map[string]*RulePack
+	inflight map[string]*rulePackLoad
+	loader   func(string) (*RulePack, error)
+}
+
+type rulePackLoad struct {
+	ready     chan struct{}
+	pack      *RulePack
+	err       error
+	followers int
 }
 
 // NewRulePackCache returns an empty cache backed by the real LoadRulePack
@@ -62,41 +70,63 @@ func NewRulePackCache() *RulePackCache {
 // newRulePackCacheWithLoader builds a cache with an injectable loader so
 // tests can count loads, simulate slow loads, or avoid touching disk without
 // changing the de-dup / concurrency behavior under test.
-func newRulePackCacheWithLoader(loader func(string) *RulePack) *RulePackCache {
+func newRulePackCacheWithLoader(loader func(string) (*RulePack, error)) *RulePackCache {
 	if loader == nil {
 		loader = LoadRulePack
 	}
 	return &RulePackCache{
-		packs:  make(map[string]*RulePack),
-		loader: loader,
+		packs:    make(map[string]*RulePack),
+		inflight: make(map[string]*rulePackLoad),
+		loader:   loader,
 	}
 }
 
 // Load returns the rule pack for dir, loading and caching it on first use.
 // Subsequent calls for the same (normalized) directory return the identical
-// cached *RulePack without re-reading disk. The empty string is a valid key
-// and maps to the compiled-in embedded defaults, mirroring LoadRulePack("").
-func (c *RulePackCache) Load(dir string) *RulePack {
+// cached *RulePack without re-reading disk. Only successful loads are cached;
+// after a failed load, a repaired directory is retried on the next call. The
+// empty string maps to the validated embedded defaults.
+func (c *RulePackCache) Load(dir string) (rp *RulePack, err error) {
 	key := normalizeRulePackDir(dir)
 
-	// Fast path: already cached. Read lock only.
-	c.mu.RLock()
-	rp, ok := c.packs[key]
-	c.mu.RUnlock()
-	if ok {
-		return rp
-	}
-
-	// Slow path: load under the write lock, re-checking first so two
-	// goroutines that both missed the read-lock check do not both load.
 	c.mu.Lock()
-	defer c.mu.Unlock()
-	if rp, ok := c.packs[key]; ok {
-		return rp
+	cached, ok := c.packs[key]
+	if ok {
+		c.mu.Unlock()
+		return cached, nil
 	}
-	rp = c.loader(dir)
-	c.packs[key] = rp
-	return rp
+	if pending, exists := c.inflight[key]; exists {
+		pending.followers++
+		c.mu.Unlock()
+		<-pending.ready
+		return pending.pack, pending.err
+	}
+	pending := &rulePackLoad{ready: make(chan struct{})}
+	c.inflight[key] = pending
+	c.mu.Unlock()
+
+	defer func() {
+		if recover() != nil {
+			rp = nil
+			err = rulePackErr(".", "loader_panic", "rule-pack loader terminated unexpectedly")
+		}
+
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		if err == nil && rp != nil {
+			c.packs[key] = rp
+		}
+		pending.pack = rp
+		pending.err = err
+		delete(c.inflight, key)
+		close(pending.ready)
+	}()
+
+	rp, err = c.loader(dir)
+	if err == nil && rp == nil {
+		err = rulePackErr(".", "loader_nil", "rule-pack loader returned no result")
+	}
+	return rp, err
 }
 
 // normalizeRulePackDir canonicalizes a rule-pack directory into a stable

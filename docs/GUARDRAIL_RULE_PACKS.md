@@ -10,7 +10,7 @@ DefenseClaw deliberately ships two distinct policy mechanisms:
 | Layer | Repository authority | Purpose |
 | --- | --- | --- |
 | Admission and policy domains | [`../policies/rego/`](../policies/rego/) | OPA decisions for admission, guardrail actions, firewall, audit, sandbox, and skill actions |
-| Guardrail rule packs | [`../policies/guardrail/`](../policies/guardrail/) | Runtime regex rules, sensitive-tool metadata, judge prompts, and suppressions |
+| Guardrail rule packs | [`../policies/guardrail/`](../policies/guardrail/) | Trusted tool-call CEL rules with bounded regex fallback, unstructured runtime rules, sensitive-tool metadata, judge prompts, and suppressions |
 
 Activating an admission policy does not select a rule-pack directory, and
 selecting `guardrail.rule_pack_dir` does not activate an admission policy. Keep
@@ -35,3 +35,19 @@ that separation explicit in code and tests.
 
 Any format or precedence change must update both language implementations and
 their focused tests.
+
+## Trusted tool-call boundary
+
+CEL expressions run only inside the existing authenticated tool-call
+evaluation path. They do not replace OPA, scan arbitrary prompt or result
+text, or expose another policy endpoint. `tool_call_only` independently limits
+the rule's regex fallback to that path; omitting it preserves legacy
+prompt/result regex coverage while CEL remains tool-call scoped.
+Authoritative ActionFacts own the semantic decision; unsupported or ambiguous
+input keeps the legacy fallback. Each migrated owner emits one canonical
+finding rather than independent regex and CEL findings.
+
+Durable ordered-chain enforcement is limited to authenticated connector hooks
+with canonical connector/session correlation. The audit store persists only
+bounded masks and fingerprints, never raw commands, arguments, paths, URLs, or
+ActionFacts.

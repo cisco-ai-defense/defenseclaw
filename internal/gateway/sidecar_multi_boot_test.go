@@ -105,7 +105,7 @@ func TestRunActiveGuardrailPublishesScopedTokenFailure(t *testing.T) {
 			},
 		},
 		health: NewSidecarHealth(),
-		router: NewEventRouter(nil, nil, nil, false),
+		router: routerWithDefaultRulePack(t),
 	}
 
 	err := s.runActiveGuardrail(context.Background())
@@ -403,6 +403,93 @@ func TestSetupConnectorsIsolated_AllFailReturnsEmpty(t *testing.T) {
 	}
 }
 
+func TestSetupConnectorsIsolated_InvalidRulePackDoesNotBlockValidPeer(t *testing.T) {
+	resetConnectorRuleCategories(t)
+	mustApplyConnectorRulePack(t, "codex", secretOverridePack("STALE-CODEX", `stale_codex_token`))
+
+	s := multiBootSidecar(t)
+	s.cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+		"codex":      {RulePackDir: invalidRulePackDir(t)},
+		"claudecode": {RulePackDir: ""},
+	}
+	invalid := &bootStubConnector{stubConnector: stubConnector{name: "codex"}}
+	valid := &bootStubConnector{stubConnector: stubConnector{name: "claudecode"}}
+
+	got, err := s.setupConnectorsIsolated(
+		context.Background(),
+		[]connector.Connector{invalid, valid},
+		"tok", "127.0.0.1:0", "127.0.0.1:0", "master",
+		guardrail.NewRulePackCache(),
+	)
+	if err != nil {
+		t.Fatalf("setupConnectorsIsolated: %v", err)
+	}
+	if want := []string{"claudecode"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("survivors = %v, want %v", got, want)
+	}
+	if invalid.setupCalls != 0 || invalid.credsSet {
+		t.Fatalf("invalid connector mutated before rejection: setup=%d credentials=%t", invalid.setupCalls, invalid.credsSet)
+	}
+	if valid.setupCalls != 1 || !valid.credsSet {
+		t.Fatalf("valid connector did not activate: setup=%d credentials=%t", valid.setupCalls, valid.credsSet)
+	}
+	ruleCategoriesMu.RLock()
+	_, invalidOverridePresent := connectorRuleCategories["codex"]
+	_, validOverridePresent := connectorRuleCategories["claudecode"]
+	ruleCategoriesMu.RUnlock()
+	if invalidOverridePresent || !validOverridePresent {
+		t.Fatalf(
+			"connector overrides after isolated setup: invalid=%t valid=%t, want false/true",
+			invalidOverridePresent,
+			validOverridePresent,
+		)
+	}
+}
+
+func TestManagedMultiConnectorAllInvalidRulePacksReturnsErrorWithoutPanic(t *testing.T) {
+	resetConnectorRuleCategories(t)
+	mustApplyConnectorRulePack(t, "codex", secretOverridePack("STALE-CODEX", `stale_codex_token`))
+	mustApplyConnectorRulePack(t, "claudecode", secretOverridePack("STALE-CLAUDE", `stale_claude_token`))
+
+	s := multiBootSidecar(t)
+	s.health = NewSidecarHealth()
+	s.cfg.DeploymentMode = string(config.DeploymentModeManagedEnterprise)
+	s.cfg.Guardrail.Enabled = true
+	s.cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+		"codex":      {RulePackDir: invalidRulePackDir(t)},
+		"claudecode": {RulePackDir: invalidRulePackDir(t)},
+	}
+	registry := connector.NewRegistry()
+	first := &bootStubConnector{stubConnector: stubConnector{name: "codex"}}
+	second := &bootStubConnector{stubConnector: stubConnector{name: "claudecode"}}
+	registry.RegisterBuiltin(first)
+	registry.RegisterBuiltin(second)
+
+	err := s.runManagedEnterpriseMultiHookGuardrail(
+		context.Background(),
+		registry,
+		[]connector.Connector{first, second},
+		"gateway-token", "127.0.0.1:0", "127.0.0.1:0", "master",
+	)
+	if err == nil || !strings.Contains(err.Error(), "all 2 configured connectors") {
+		t.Fatalf("managed all-invalid error = %v", err)
+	}
+	if first.credsSet || second.credsSet {
+		t.Fatal("invalid managed connectors received credentials before policy preflight")
+	}
+	ruleCategoriesMu.RLock()
+	_, firstOverridePresent := connectorRuleCategories["codex"]
+	_, secondOverridePresent := connectorRuleCategories["claudecode"]
+	ruleCategoriesMu.RUnlock()
+	if firstOverridePresent || secondOverridePresent {
+		t.Fatalf(
+			"rejected managed connectors retained stale overrides: codex=%t claudecode=%t",
+			firstOverridePresent,
+			secondOverridePresent,
+		)
+	}
+}
+
 func TestSetupConnectorsIsolatedPreflightsAllScopedTokens(t *testing.T) {
 	s := multiBootSidecar(t)
 	s.cfg.DataDir = failingHookTokenDataDir(t)
@@ -679,7 +766,7 @@ func TestRunGuardrailMulti_FailFastProxyGuard(t *testing.T) {
 			},
 		},
 		health: NewSidecarHealth(),
-		router: &EventRouter{},
+		router: routerWithDefaultRulePack(t),
 	}
 
 	err := s.runGuardrailMulti(context.Background())
@@ -716,7 +803,7 @@ func TestRunGuardrailManagedEnterpriseSingleHookSkipsServiceHomeLifecycle(t *tes
 			},
 		},
 		health: NewSidecarHealth(),
-		router: NewEventRouter(nil, nil, nil, false),
+		router: routerWithDefaultRulePack(t),
 	}
 
 	// Cancellation makes the long-running loop return immediately after its
@@ -772,7 +859,7 @@ func TestRunGuardrailMultiManagedEnterpriseSkipsServiceHomeLifecycle(t *testing.
 			},
 		},
 		health: NewSidecarHealth(),
-		router: NewEventRouter(nil, nil, nil, false),
+		router: routerWithDefaultRulePack(t),
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())

@@ -70,6 +70,13 @@ runtime guardrail rule packs under `policies/guardrail/`. The code-level
 boundary is documented in
 [`GUARDRAIL_RULE_PACKS.md`](GUARDRAIL_RULE_PACKS.md).
 
+Trusted tool-call parsing is private to `internal/actionfacts/`. Narrow CEL
+expressions are compiled with rule packs and dispatched by
+`internal/gateway/`; OPA keeps its existing policy-domain role. Fixed ordered
+tool chains are defined in `internal/guardrail/` and use content-free state in
+the existing `internal/audit/` SQLite store. Only authenticated connector-hook
+events with canonical session correlation can join a blocking chain.
+
 ### Observability
 
 Telemetry families are authored in

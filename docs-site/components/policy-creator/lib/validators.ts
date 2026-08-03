@@ -330,6 +330,40 @@ export function validatePolicy(policy: Policy): ValidationFinding[] {
       for (const f of lint.findings) {
         findings.push({ ...f, location: `rules.${file.filename}.${rule.id}` });
       }
+      const expression = rule.expression;
+      if (expression !== undefined && typeof expression !== 'string') {
+        findings.push({
+          level: 'error',
+          code: 'CEL_EXPRESSION_TYPE',
+          message: `Rule "${rule.id}" has a non-string CEL expression.`,
+          location: `rules.${file.filename}.${rule.id}`,
+          fix: 'Remove the expression field or provide a trimmed Boolean CEL expression string.',
+        });
+      }
+      if (
+        typeof expression === 'string' &&
+        (expression.trim() === '' || expression.trim() !== expression)
+      ) {
+        findings.push({
+          level: 'error',
+          code: 'CEL_EXPRESSION_BLANK',
+          message: `Rule "${rule.id}" has an empty or whitespace-padded CEL expression.`,
+          location: `rules.${file.filename}.${rule.id}`,
+          fix: 'Remove the expression field or provide a trimmed Boolean CEL expression.',
+        });
+      }
+      const expressionText = typeof expression === 'string' ? expression : '';
+      const expressionBytes = new TextEncoder().encode(expressionText).length;
+      const expressionCodePoints = Array.from(expressionText).length;
+      if (expressionBytes > 16 * 1024 || expressionCodePoints > 16 * 1024) {
+        findings.push({
+          level: 'error',
+          code: 'CEL_EXPRESSION_SIZE',
+          message: `Rule "${rule.id}" CEL expression exceeds the 16 KiB admission limit.`,
+          location: `rules.${file.filename}.${rule.id}`,
+          fix: 'Simplify the expression before server-side CEL compilation.',
+        });
+      }
     }
   }
 

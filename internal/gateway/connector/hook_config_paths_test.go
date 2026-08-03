@@ -329,6 +329,14 @@ func TestOwnedHooksPresent_ClaudeAcceptsEffectiveMatcherSupersets(t *testing.T) 
 }
 
 func installedCodexConnectorForPresence(t *testing.T) (Connector, SetupOpts, string) {
+	return installedCodexConnectorForPresenceWithContract(t, "", "")
+}
+
+func installedCodexConnectorForPresenceWithContract(
+	t *testing.T,
+	agentVersion string,
+	contractID string,
+) (Connector, SetupOpts, string) {
 	t.Helper()
 	configPath := filepath.Join(t.TempDir(), "config.toml")
 	previousPath := CodexConfigPathOverride
@@ -342,15 +350,64 @@ func installedCodexConnectorForPresence(t *testing.T) (Connector, SetupOpts, str
 	t.Cleanup(func() { codexPolicyInspector = previousInspector })
 
 	opts := SetupOpts{
-		DataDir:  t.TempDir(),
-		APIAddr:  "127.0.0.1:18970",
-		APIToken: "tok-test",
+		DataDir:        t.TempDir(),
+		APIAddr:        "127.0.0.1:18970",
+		APIToken:       "tok-test",
+		AgentVersion:   agentVersion,
+		HookContractID: contractID,
 	}
 	conn := NewCodexConnector()
 	if err := conn.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Codex Setup: %v", err)
 	}
 	return conn, opts, codexHookConfigPathForTest(configPath)
+}
+
+func TestOwnedHooksPresent_CodexPinnedContractDrivesInstalledMatrix(t *testing.T) {
+	tests := []struct {
+		name, version, contract string
+		wantSessionEnd          bool
+	}{
+		{name: "unknown-pinned-v4", version: "codex nightly", contract: "codex-hooks-v4", wantSessionEnd: true},
+		{name: "current-pinned-v1", version: "codex 0.146.0", contract: "codex-hooks-v1"},
+		{name: "current-pinned-v3-generic", version: "codex 0.146.0", contract: "codex-hooks-v3-generic"},
+		{name: "legacy-pinned-v4", version: "codex 0.124.0", contract: "codex-hooks-v4", wantSessionEnd: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			conn, opts, configPath := installedCodexConnectorForPresenceWithContract(
+				t, test.version, test.contract,
+			)
+			data, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			config := map[string]interface{}{}
+			if err := toml.Unmarshal(data, &config); err != nil {
+				t.Fatal(err)
+			}
+			hooks, ok := config["hooks"].(map[string]interface{})
+			if !ok {
+				t.Fatalf("hooks has type %T", config["hooks"])
+			}
+			_, hasSessionEnd := hooks["SessionEnd"]
+			if hasSessionEnd != test.wantSessionEnd {
+				t.Fatalf("SessionEnd present=%t want=%t", hasSessionEnd, test.wantSessionEnd)
+			}
+			present, err := OwnedHooksPresent(conn, opts)
+			if err != nil || !present {
+				t.Fatalf("OwnedHooksPresent=%t err=%v", present, err)
+			}
+			profile := conn.(HookProfileProvider).HookProfile(opts)
+			lock := NewHookContractLockEntry(opts, conn, "test")
+			if profile.ContractID != test.contract || lock.ContractID != test.contract ||
+				profile.CompatibilityStatus != lock.CompatibilityStatus {
+				t.Fatalf("profile/lock contract drift: profile=%s/%s lock=%s/%s",
+					profile.ContractID, profile.CompatibilityStatus,
+					lock.ContractID, lock.CompatibilityStatus)
+			}
+		})
+	}
 }
 
 func mutateCodexConfig(t *testing.T, path string, mutate func(map[string]interface{})) {
@@ -413,6 +470,9 @@ func TestOwnedHooksPresent_CodexRequiresTrustedCompleteContract(t *testing.T) {
 	tests := map[string]func(map[string]interface{}){
 		"missing-event": func(config map[string]interface{}) {
 			delete(config["hooks"].(map[string]interface{}), "PreToolUse")
+		},
+		"missing-session-end": func(config map[string]interface{}) {
+			delete(config["hooks"].(map[string]interface{}), "SessionEnd")
 		},
 		"asynchronous-handler": func(config map[string]interface{}) {
 			firstCodexHandler(t, config, "PreToolUse")["async"] = true

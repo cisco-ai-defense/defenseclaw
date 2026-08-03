@@ -1,4 +1,12 @@
 {
   "title": "Policies",
-  "pages": ["index", "creator", "verify-locally", "recipes", "suppression-cookbook", "regex-cookbook"]
+  "pages": [
+    "index",
+    "rulepack-validation",
+    "creator",
+    "verify-locally",
+    "recipes",
+    "suppression-cookbook",
+    "regex-cookbook"
+  ]
 }

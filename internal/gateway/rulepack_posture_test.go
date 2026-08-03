@@ -47,7 +47,7 @@ func TestProfilePosture_InjectionJudge(t *testing.T) {
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.profile, func(t *testing.T) {
-			rp := guardrail.LoadRulePack(filepath.Join(policiesRoot, tc.profile))
+			rp := mustLoadRulePack(t, filepath.Join(policiesRoot, tc.profile))
 			if rp == nil {
 				t.Fatalf("LoadRulePack(%s) returned nil", tc.profile)
 				return
@@ -84,7 +84,7 @@ func TestGuardrailPolicyProfilesHaveGoCompatibleRegexes(t *testing.T) {
 	for _, profile := range []string{"strict", "default", "permissive"} {
 		profile := profile
 		t.Run(profile, func(t *testing.T) {
-			rp := guardrail.LoadRulePack(filepath.Join(policiesRoot, profile))
+			rp := mustLoadRulePack(t, filepath.Join(policiesRoot, profile))
 			if rp == nil {
 				t.Fatalf("LoadRulePack(%s) returned nil", profile)
 			}
@@ -112,7 +112,7 @@ func TestProfilePosture_InjectionLabelingIsUnified(t *testing.T) {
 	profiles := []string{"strict", "default", "permissive"}
 	var first *guardrail.JudgeYAML
 	for _, profile := range profiles {
-		ij := guardrail.LoadRulePack(filepath.Join(policiesRoot, profile)).InjectionJudge()
+		ij := mustLoadRulePack(t, filepath.Join(policiesRoot, profile)).InjectionJudge()
 		if ij == nil {
 			t.Fatalf("profile=%s missing injection judge config", profile)
 		}
@@ -147,7 +147,7 @@ func TestProfilePosture_SSNIsCriticalOnlyInStrict(t *testing.T) {
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.profile, func(t *testing.T) {
-			rp := guardrail.LoadRulePack(filepath.Join(policiesRoot, tc.profile))
+			rp := mustLoadRulePack(t, filepath.Join(policiesRoot, tc.profile))
 			if rp == nil {
 				t.Fatalf("LoadRulePack(%s) returned nil", tc.profile)
 			}
@@ -189,7 +189,7 @@ func TestProfilePosture_ExactCredentialSignalsAreCriticalAcrossProfiles(t *testi
 	for _, profile := range []string{"strict", "default", "permissive"} {
 		profile := profile
 		t.Run(profile, func(t *testing.T) {
-			rp := guardrail.LoadRulePack(filepath.Join(policiesRoot, profile))
+			rp := mustLoadRulePack(t, filepath.Join(policiesRoot, profile))
 			if rp == nil {
 				t.Fatalf("LoadRulePack(%s) returned nil", profile)
 			}
@@ -222,7 +222,7 @@ func TestProfilePosture_InjectionJudgeDocumentsFPExclusions(t *testing.T) {
 	for _, profile := range []string{"strict", "default", "permissive"} {
 		profile := profile
 		t.Run(profile, func(t *testing.T) {
-			rp := guardrail.LoadRulePack(filepath.Join(policiesRoot, profile))
+			rp := mustLoadRulePack(t, filepath.Join(policiesRoot, profile))
 			if rp == nil || rp.InjectionJudge() == nil {
 				t.Fatalf("LoadRulePack(%s) missing injection judge", profile)
 			}
@@ -242,7 +242,7 @@ func TestProfilePosture_InjectionJudgeDocumentsFPExclusions(t *testing.T) {
 }
 
 func TestGeneratedDefaultRuleCatalogMatchesShippedYAML(t *testing.T) {
-	defaultPack := guardrail.LoadRulePack(filepath.Join(guardrailPoliciesRoot(t), "default"))
+	defaultPack := mustLoadRulePack(t, filepath.Join(guardrailPoliciesRoot(t), "default"))
 	if defaultPack == nil {
 		t.Fatal("LoadRulePack(default) returned nil")
 	}
@@ -292,6 +292,17 @@ func TestGeneratedDefaultRuleCatalogMatchesShippedYAML(t *testing.T) {
 				t.Fatalf("generated catalog contains duplicate rule id %q", generatedRule.ID)
 			}
 			seenIDs[generatedRule.ID] = true
+			if generatedRule.Expression != yamlRule.Expression ||
+				generatedRule.ToolCallOnly != yamlRule.ToolCallOnly {
+				t.Fatalf(
+					"generated rule %s semantic metadata = (%q, %t), YAML = (%q, %t)",
+					generatedRule.ID,
+					generatedRule.Expression,
+					generatedRule.ToolCallOnly,
+					yamlRule.Expression,
+					yamlRule.ToolCallOnly,
+				)
+			}
 			if generatedRule.ID != yamlRule.ID ||
 				generatedRule.Pattern.String() != yamlRule.Pattern ||
 				generatedRule.Title != yamlRule.Title ||
@@ -377,7 +388,7 @@ func TestProfilePosture_EnterpriseRuleEnablement(t *testing.T) {
 	for _, tc := range cases {
 		tc := tc
 		t.Run(tc.profile, func(t *testing.T) {
-			pack := guardrail.LoadRulePack(filepath.Join(guardrailPoliciesRoot(t), tc.profile))
+			pack := mustLoadRulePack(t, filepath.Join(guardrailPoliciesRoot(t), tc.profile))
 			var gotIDs []string
 			for _, file := range pack.RuleFiles {
 				if file == nil || file.Category != "enterprise-data" {
@@ -404,7 +415,7 @@ func TestShippedProfilesContainUnicodeObfuscationRule(t *testing.T) {
 	for _, profile := range []string{"default", "strict", "permissive"} {
 		profile := profile
 		t.Run(profile, func(t *testing.T) {
-			pack := guardrail.LoadRulePack(filepath.Join(guardrailPoliciesRoot(t), profile))
+			pack := mustLoadRulePack(t, filepath.Join(guardrailPoliciesRoot(t), profile))
 			var matches []guardrail.RuleDefYAML
 			for _, file := range pack.RuleFiles {
 				for _, rule := range file.Rules {
@@ -442,14 +453,14 @@ func TestShippedProfilesKeepSharedDriftCorrections(t *testing.T) {
 		},
 		{
 			id:      "CMD-ENV-DUMP",
-			pattern: `(?i)(?:^|[^A-Za-z0-9_./-])(?:printenv\b|export\s+-p\b|env\s*[|>])`,
+			pattern: `(?i)\b(?:printenv|export\s+-p|env)\b[^|;\n]*\|\s*(?:curl\b[^;\n]*(?:--data(?:-binary|-raw)?\s+@-|--upload-file\s+-|-T\s+-)|wget\b[^;\n]*--post-(?:data|file)(?:=|\s+)@?-)`,
 		},
 	}
 
 	for _, profile := range []string{"default", "strict", "permissive"} {
 		profile := profile
 		t.Run(profile, func(t *testing.T) {
-			pack := guardrail.LoadRulePack(filepath.Join(guardrailPoliciesRoot(t), profile))
+			pack := mustLoadRulePack(t, filepath.Join(guardrailPoliciesRoot(t), profile))
 			for _, tc := range cases {
 				var patterns []string
 				for _, file := range pack.RuleFiles {

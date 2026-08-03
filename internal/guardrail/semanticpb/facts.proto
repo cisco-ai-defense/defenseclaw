@@ -1,0 +1,255 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// SPDX-License-Identifier: Apache-2.0
+
+syntax = "proto3";
+
+package defenseclaw.guardrail.semantic.v1;
+
+option go_package =
+  "github.com/defenseclaw/defenseclaw/internal/guardrail/semanticpb;semanticpb";
+
+// Facts is the closed, bounded CEL activation for one trusted tool call.
+// It is private in-process policy material and must not be logged, audited,
+// persisted, or exposed through an API.
+message Facts {
+  string tool = 1;
+  string cwd = 2;
+  string active_home = 3;
+  ParseResult parse = 4;
+  repeated CommandFact commands = 5;
+  repeated PathFact paths = 6;
+  repeated NetworkFact network = 7;
+  repeated DataFlowFact data_flows = 8;
+}
+
+message ParseResult {
+  ParseStatus status = 1;
+  Dialect dialect = 2;
+  repeated IssueCode issues = 3;
+}
+
+message CommandFact {
+  int64 id = 1;
+  int64 parent_command_id = 2;
+  int64 pipeline_id = 3;
+  CommandKind kind = 4;
+  Dialect dialect = 5;
+  CommandEffect effect = 6;
+  string executable = 7;
+  string program = 8;
+  repeated string argv = 9;
+  repeated ArgumentFact arguments = 10;
+  bool argv_complete = 11;
+  repeated OperationKind operations = 12;
+  repeated RedirectFact redirects = 13;
+  repeated WrapperFact wrappers = 14;
+}
+
+message ArgumentFact {
+  string value = 1;
+  QuoteKind quote = 2;
+  bool expands = 3;
+}
+
+message RedirectFact {
+  int64 fd = 1;
+  PathAccess access = 2;
+  string target = 3;
+  bool expands = 4;
+}
+
+message WrapperFact {
+  string executable = 1;
+  repeated string argv = 2;
+}
+
+message PathFact {
+  int64 command_id = 1;
+  PathAccess access = 2;
+  PathFlavor flavor = 3;
+  string value = 4;
+  string normalized = 5;
+  bool absolute = 6;
+  string resolved = 7;
+}
+
+message NetworkFact {
+  int64 command_id = 1;
+  NetworkAction action = 2;
+  string scheme = 3;
+  string host = 4;
+  int64 port = 5;
+  string normalized_host = 6;
+  NetworkScope scope = 7;
+  NetworkTargetKind target_kind = 8;
+  int64 prefix_length = 9;
+}
+
+message DataFlowFact {
+  int64 from_command_id = 1;
+  int64 to_command_id = 2;
+  DataKind from = 3;
+  DataKind to = 4;
+}
+
+enum ParseStatus {
+  PARSE_STATUS_UNSPECIFIED = 0;
+  PARSE_STATUS_NOT_APPLICABLE = 1;
+  PARSE_STATUS_COMPLETE = 2;
+  PARSE_STATUS_PARTIAL = 3;
+  PARSE_STATUS_UNSUPPORTED = 4;
+  PARSE_STATUS_INVALID = 5;
+  PARSE_STATUS_LIMIT_EXCEEDED = 6;
+  PARSE_STATUS_AMBIGUOUS = 7;
+}
+
+enum Dialect {
+  DIALECT_UNSPECIFIED = 0;
+  DIALECT_NONE = 1;
+  DIALECT_ARGV = 2;
+  DIALECT_POSIX = 3;
+  DIALECT_POWERSHELL = 4;
+  DIALECT_CMD = 5;
+  DIALECT_MIXED = 6;
+}
+
+enum IssueCode {
+  ISSUE_CODE_UNSPECIFIED = 0;
+  ISSUE_CODE_INVALID_JSON = 1;
+  ISSUE_CODE_INVALID_UTF8 = 2;
+  ISSUE_CODE_INVALID_SYNTAX = 3;
+  ISSUE_CODE_DYNAMIC_WORD = 4;
+  ISSUE_CODE_UNSUPPORTED_CONSTRUCT = 5;
+  ISSUE_CODE_UNKNOWN_OPERAND_GRAMMAR = 6;
+  ISSUE_CODE_CONFLICTING_SOURCES = 7;
+  ISSUE_CODE_INPUT_LIMIT = 8;
+  ISSUE_CODE_NODE_LIMIT = 9;
+  ISSUE_CODE_DEPTH_LIMIT = 10;
+  ISSUE_CODE_FACT_LIMIT = 11;
+  ISSUE_CODE_WRAPPER_LIMIT = 12;
+  ISSUE_CODE_DUPLICATE_JSON_KEY = 13;
+  ISSUE_CODE_INTERNAL_PARSER_FAILURE = 14;
+}
+
+enum CommandKind {
+  COMMAND_KIND_UNSPECIFIED = 0;
+  COMMAND_KIND_PROCESS = 1;
+  COMMAND_KIND_SHELL_REDIRECT = 2;
+}
+
+enum CommandEffect {
+  COMMAND_EFFECT_UNSPECIFIED = 0;
+  COMMAND_EFFECT_EXECUTE = 1;
+  COMMAND_EFFECT_PREVIEW = 2;
+  COMMAND_EFFECT_UNCERTAIN = 3;
+}
+
+enum QuoteKind {
+  QUOTE_KIND_UNSPECIFIED = 0;
+  QUOTE_KIND_NONE = 1;
+  QUOTE_KIND_SINGLE = 2;
+  QUOTE_KIND_DOUBLE = 3;
+  QUOTE_KIND_MIXED = 4;
+}
+
+enum OperationKind {
+  OPERATION_KIND_UNSPECIFIED = 0;
+  OPERATION_KIND_EXECUTE = 1;
+  OPERATION_KIND_READ = 2;
+  OPERATION_KIND_WRITE = 3;
+  OPERATION_KIND_APPEND = 4;
+  OPERATION_KIND_DELETE = 5;
+  OPERATION_KIND_COPY = 6;
+  OPERATION_KIND_MOVE = 7;
+  OPERATION_KIND_LIST = 8;
+  OPERATION_KIND_SEARCH = 9;
+  OPERATION_KIND_FETCH = 10;
+  OPERATION_KIND_UPLOAD = 11;
+  OPERATION_KIND_CONNECT = 12;
+  OPERATION_KIND_LISTEN = 13;
+  OPERATION_KIND_TUNNEL = 14;
+  OPERATION_KIND_NETWORK_SCAN = 15;
+  OPERATION_KIND_DECODE = 16;
+  OPERATION_KIND_PROCESS_KILL = 17;
+  OPERATION_KIND_DISK_WRITE = 18;
+  OPERATION_KIND_PRIVILEGE = 19;
+  OPERATION_KIND_PERMISSION_CHANGE = 20;
+  OPERATION_KIND_CONFIG_CHANGE = 21;
+  OPERATION_KIND_ACCOUNT_CHANGE = 22;
+  OPERATION_KIND_SCHEDULE = 23;
+  OPERATION_KIND_CONTAINER_RUN = 24;
+  OPERATION_KIND_WORKLOAD_EXEC = 25;
+  OPERATION_KIND_NAMESPACE_ENTER = 26;
+  OPERATION_KIND_ROOT_CHANGE = 27;
+  OPERATION_KIND_ENVIRONMENT_READ = 28;
+  OPERATION_KIND_CREDENTIAL_READ = 29;
+  OPERATION_KIND_POLICY_BYPASS = 30;
+}
+
+enum PathAccess {
+  PATH_ACCESS_UNSPECIFIED = 0;
+  PATH_ACCESS_READ = 1;
+  PATH_ACCESS_WRITE = 2;
+  PATH_ACCESS_APPEND = 3;
+  PATH_ACCESS_DELETE = 4;
+  PATH_ACCESS_EXECUTE = 5;
+  PATH_ACCESS_LIST = 6;
+  PATH_ACCESS_METADATA = 7;
+  PATH_ACCESS_CONNECT = 8;
+}
+
+enum PathFlavor {
+  PATH_FLAVOR_UNSPECIFIED = 0;
+  PATH_FLAVOR_UNKNOWN = 1;
+  PATH_FLAVOR_POSIX = 2;
+  PATH_FLAVOR_WINDOWS = 3;
+  PATH_FLAVOR_DEVICE = 4;
+  PATH_FLAVOR_REGISTRY = 5;
+}
+
+enum NetworkScope {
+  NETWORK_SCOPE_UNSPECIFIED = 0;
+  NETWORK_SCOPE_UNKNOWN = 1;
+  NETWORK_SCOPE_LOOPBACK = 2;
+  NETWORK_SCOPE_LINK_LOCAL = 3;
+  NETWORK_SCOPE_PRIVATE = 4;
+  NETWORK_SCOPE_PUBLIC = 5;
+}
+
+enum NetworkTargetKind {
+  NETWORK_TARGET_KIND_UNSPECIFIED = 0;
+  NETWORK_TARGET_KIND_UNKNOWN = 1;
+  NETWORK_TARGET_KIND_SINGLE_HOST = 2;
+  NETWORK_TARGET_KIND_SINGLE_ADDRESS_CIDR = 3;
+  NETWORK_TARGET_KIND_MULTI_ADDRESS_CIDR = 4;
+  NETWORK_TARGET_KIND_RANGE = 5;
+  NETWORK_TARGET_KIND_LIST = 6;
+  NETWORK_TARGET_KIND_GENERATED = 7;
+}
+
+enum NetworkAction {
+  NETWORK_ACTION_UNSPECIFIED = 0;
+  NETWORK_ACTION_CONNECT = 1;
+  NETWORK_ACTION_LISTEN = 2;
+  NETWORK_ACTION_DOWNLOAD = 3;
+  NETWORK_ACTION_UPLOAD = 4;
+  NETWORK_ACTION_DNS = 5;
+  NETWORK_ACTION_TUNNEL = 6;
+  NETWORK_ACTION_SCAN = 7;
+}
+
+enum DataKind {
+  DATA_KIND_UNSPECIFIED = 0;
+  DATA_KIND_STDIN = 1;
+  DATA_KIND_STDOUT = 2;
+  DATA_KIND_FILE = 3;
+  DATA_KIND_NETWORK = 4;
+  DATA_KIND_PROCESS = 5;
+}

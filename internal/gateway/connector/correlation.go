@@ -447,6 +447,7 @@ func correlationLifecycleForContract(contract HookContract) []CorrelationLifecyc
 		}},
 		{Lifecycle: CorrelationLifecycleToolEnd, Events: []string{
 			"PostToolUse", "postToolUse", "post_tool_use", "PostToolUseFailure", "postToolUseFailure",
+			"PermissionDenied",
 			"AfterTool", "post_tool_call", "post_read_code", "post_write_code", "post_run_command",
 			"post_mcp_tool_use", "afterShellExecution", "afterMCPExecution", "afterFileEdit",
 			"afterTabFileEdit", "tool.execute.after",
@@ -611,13 +612,13 @@ func CorrelationSpecForConnector(name, hookContractID string) (CorrelationSpec, 
 		}
 		return spec, ok
 	case "codex":
-		// The correlation field mapping is unchanged across the three reviewed
+		// The correlation field mapping is unchanged across the reviewed
 		// Codex hook transports. Keep the selected transport contract exact so
 		// lifecycle events and version bounds come from that contract, while an
 		// unknown/future contract continues to fail closed.
 		correlationContractID := hookContractID
 		switch correlationContractID {
-		case "codex-hooks-v1", "codex-hooks-v2", "codex-hooks-v3":
+		case "codex-hooks-v1", "codex-hooks-v2", "codex-hooks-v3", "codex-hooks-v3-generic", "codex-hooks-v4":
 		default:
 			return CorrelationSpec{}, false
 		}
@@ -798,7 +799,7 @@ func DefaultCorrelationSpec(name string) CorrelationSpec {
 
 func correlationSpecForOptions(name string, opts SetupOpts) CorrelationSpec {
 	contractID := strings.TrimSpace(opts.HookContractID)
-	resolution := ResolveHookContract(name, opts.AgentVersion)
+	resolution := resolveHookContractForOptions(name, opts)
 	if contractID == "" {
 		contractID = resolution.Contract.ContractID
 	}

@@ -1,0 +1,1291 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package gateway
+
+import (
+	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+)
+
+var semanticIntegrityPersistenceOwners = map[string]semanticOwner{
+	"CMD-CRONTAB": {
+		prerequisite:     crontabInstallPrerequisite,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"CMD-SYSTEMCTL": {
+		matchedOnlyAliases: []string{"CMD-WIN-REG-PERSIST"},
+		prerequisite:       schedulerInstallPrerequisite,
+		suppressFallback:   authoritativeSemanticSafeNegative,
+	},
+	"integrity.git_hooks_bypass": {
+		prerequisite:     gitHooksBypassPrerequisite,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"source.git_remote_tamper": {
+		prerequisite:     gitRemoteTamperPrerequisite,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"source.git_config_exec": {
+		prerequisite:     gitConfigExecPrerequisite,
+		suppressFallback: gitConfigExecSafeNegative,
+	},
+	"persistence.ssh_authorized_keys_command": {
+		prerequisite:     sshAuthorizedKeysCommandPrerequisite,
+		suppressFallback: sshAuthorizedKeysCommandSafeNegative,
+	},
+	"PATH-HISTORY": integrityMutationOwner(
+		matchesShellHistoryCandidate, matchesActiveShellHistory, nil,
+		"PATH-WIN-PS-HISTORY",
+	),
+	"PATH-ETC-SUDOERS": integrityMutationOwner(
+		matchesSudoersCandidate, matchesActiveSudoers, nil,
+	),
+	"PATH-SSH-DIR": {
+		prerequisite:     sshAuthorizedKeysStructuredPrerequisite,
+		suppressFallback: sshAuthorizedKeysPathSafeNegative,
+	},
+	"privilege.container_runtime_socket_access": {
+		prerequisite:     containerRuntimeSocketPrerequisite,
+		suppressFallback: containerRuntimeSocketSafeNegative,
+	},
+	"persistence.shell_profile_write": integrityMutationOwner(
+		matchesShellProfileCandidate, matchesActiveShellProfile, nil,
+	),
+	"persistence.git_hook_write": integrityMutationOwner(
+		matchesGitHookCandidate,
+		matchesActiveGitHook,
+		matchesSafeGitHookCandidate,
+	),
+	"C2-METADATA-AWS": {
+		equivalentAliases: []string{
+			"C2-METADATA-GCP",
+			"C2-METADATA-AZURE",
+			"C2-METADATA-HEX",
+			"C2-METADATA-DECIMAL",
+			"C2-METADATA-OCTAL",
+		},
+		prerequisite:     cloudMetadataPrerequisite,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"COG-OPENCLAW-JSON": integrityMutationOwner(
+		matchesAgentConfigCandidate, matchesActiveAgentConfig, nil,
+		"COG-GATEWAY-JSON",
+	),
+	"tamper.detector_state_write": integrityMutationOwner(
+		matchesDefenseClawStateCandidate,
+		matchesActiveDefenseClawState,
+		matchesSafeDefenseClawStateCandidate,
+	),
+}
+
+// The dispatcher integrates these aliases only after the command-specific
+// owner matched. Keeping this relationship separate from equivalent aliases
+// lets PATH-SSH-DIR remain the fallback when the more specific rule is
+// disabled or when a structured file mutation owns the path.
+var semanticIntegrityPersistenceFallbackAliasesOnMatch = map[string][]string{
+	"persistence.ssh_authorized_keys_command": {"PATH-SSH-DIR"},
+}
+
+type integrityPathMatcher func(actionfacts.Facts, actionfacts.PathFact) bool
+
+func integrityMutationOwner(
+	isCandidate semanticPathCandidate,
+	isActive integrityPathMatcher,
+	isSafe integrityPathMatcher,
+	aliases ...string,
+) semanticOwner {
+	return semanticOwner{
+		equivalentAliases: aliases,
+		prerequisite:      integrityMutationPrerequisite(isActive),
+		suppressFallback: integrityMutationSafeNegative(
+			isCandidate, isActive, isSafe,
+		),
+	}
+}
+
+func integrityMutationPrerequisite(
+	matches integrityPathMatcher,
+) semanticOwnerPrerequisite {
+	return func(facts actionfacts.Facts) bool {
+		for _, candidate := range facts.Paths {
+			command, ok := integrityCommandByID(facts, candidate.CommandID)
+			if ok &&
+				matches(facts, candidate) &&
+				integrityCommandMutatesPath(command, candidate) {
+				return true
+			}
+		}
+		return false
+	}
+}
+
+func integrityMutationSafeNegative(
+	isCandidate semanticPathCandidate,
+	isActive integrityPathMatcher,
+	isSafe integrityPathMatcher,
+) semanticOwnerPrerequisite {
+	return func(facts actionfacts.Facts) bool {
+		if !facts.Authoritative() {
+			return false
+		}
+		safePaths := make(map[int64]map[string]struct{})
+		for _, candidate := range facts.Paths {
+			command, ok := integrityCommandByID(facts, candidate.CommandID)
+			if !ok || !integrityPathIsProvenNonMutation(command, candidate) {
+				continue
+			}
+			paths := safePaths[candidate.CommandID]
+			if paths == nil {
+				paths = make(map[string]struct{})
+				safePaths[candidate.CommandID] = paths
+			}
+			paths[semanticPathValue(candidate)] = struct{}{}
+		}
+		sawCandidate := false
+		for _, candidate := range semanticPathCandidates(facts) {
+			if !isCandidate(semanticPathValue(candidate)) {
+				continue
+			}
+			sawCandidate = true
+			if _, safe := safePaths[candidate.CommandID][semanticPathValue(candidate)]; safe {
+				continue
+			}
+			if isActive(facts, candidate) ||
+				isSafe != nil && isSafe(facts, candidate) ||
+				isDefiniteFixturePath(facts, candidate) {
+				continue
+			}
+			return false
+		}
+		return sawCandidate
+	}
+}
+
+func integrityPathIsProvenNonMutation(
+	command actionfacts.CommandFact,
+	candidate actionfacts.PathFact,
+) bool {
+	if command.Effect == actionfacts.EffectPreview {
+		return !integrityCommandOwnsStaticRedirect(command, candidate)
+	}
+	if command.Effect != actionfacts.EffectExecute {
+		return false
+	}
+	switch candidate.Access {
+	case actionfacts.PathAccessRead,
+		actionfacts.PathAccessList,
+		actionfacts.PathAccessMetadata,
+		actionfacts.PathAccessConnect,
+		actionfacts.PathAccessExecute:
+		return true
+	case actionfacts.PathAccessDelete:
+		// Classifiers represent a move source with delete access, but the
+		// destination is the only mutation target owned by these rules.
+		return hasOperation(command, actionfacts.OperationMove)
+	default:
+		return false
+	}
+}
+
+func integrityCommandByID(
+	facts actionfacts.Facts,
+	commandID int64,
+) (actionfacts.CommandFact, bool) {
+	for _, command := range facts.Commands {
+		if command.ID == commandID {
+			return command, true
+		}
+	}
+	return actionfacts.CommandFact{}, false
+}
+
+func integrityCommandMutatesPath(
+	command actionfacts.CommandFact,
+	candidate actionfacts.PathFact,
+) bool {
+	if command.Effect == actionfacts.EffectPreview {
+		return integrityCommandOwnsStaticRedirect(command, candidate)
+	}
+	if command.Effect != actionfacts.EffectExecute {
+		return false
+	}
+	switch candidate.Access {
+	case actionfacts.PathAccessWrite:
+		return hasAnyOperation(
+			command,
+			actionfacts.OperationWrite,
+			actionfacts.OperationAppend,
+			actionfacts.OperationCopy,
+			actionfacts.OperationMove,
+			actionfacts.OperationConfigChange,
+		)
+	case actionfacts.PathAccessAppend:
+		return hasAnyOperation(
+			command,
+			actionfacts.OperationAppend,
+			actionfacts.OperationWrite,
+		)
+	case actionfacts.PathAccessDelete:
+		// A move source is not a mutation target for these owners.
+		return hasOperation(command, actionfacts.OperationDelete)
+	default:
+		return false
+	}
+}
+
+func integrityCommandOwnsStaticRedirect(
+	command actionfacts.CommandFact,
+	candidate actionfacts.PathFact,
+) bool {
+	for _, redirect := range command.Redirects {
+		if !redirect.Expands &&
+			redirect.Target == candidate.Value &&
+			redirect.Access == candidate.Access &&
+			integrityMutationAccess(redirect.Access) {
+			return true
+		}
+	}
+	return false
+}
+
+func integrityMutationAccess(access actionfacts.PathAccess) bool {
+	return access == actionfacts.PathAccessWrite ||
+		access == actionfacts.PathAccessAppend ||
+		access == actionfacts.PathAccessDelete
+}
+
+func crontabInstallPrerequisite(facts actionfacts.Facts) bool {
+	for _, command := range facts.Commands {
+		if !integrityExecutingOwnedCommand(command, "crontab") ||
+			!hasOperation(command, actionfacts.OperationSchedule) {
+			continue
+		}
+		removeOrList := false
+		for _, argument := range command.Argv[1:] {
+			switch strings.ToLower(argument) {
+			case "-l", "-r":
+				removeOrList = true
+			}
+		}
+		if !removeOrList {
+			return true
+		}
+	}
+	return false
+}
+
+func schedulerInstallPrerequisite(facts actionfacts.Facts) bool {
+	for _, command := range facts.Commands {
+		if command.Effect != actionfacts.EffectExecute ||
+			!command.ArgvComplete {
+			continue
+		}
+		switch strings.ToLower(command.Program) {
+		case "systemctl":
+			if hasOperation(command, actionfacts.OperationSchedule) &&
+				systemctlInstallForm(command.Argv) {
+				return true
+			}
+		case "launchctl":
+			if hasOperation(command, actionfacts.OperationSchedule) &&
+				launchctlInstallForm(command.Argv) {
+				return true
+			}
+		case "schtasks", "schtasks.exe", "register-scheduledtask":
+			if hasOperation(command, actionfacts.OperationSchedule) {
+				return true
+			}
+		case "reg", "reg.exe", "set-itemproperty", "sp",
+			"new-itemproperty":
+			if !hasOperation(command, actionfacts.OperationConfigChange) {
+				continue
+			}
+			for _, candidate := range facts.Paths {
+				if candidate.CommandID == command.ID &&
+					candidate.Access == actionfacts.PathAccessWrite &&
+					matchesActiveRunKey(candidate) {
+					return true
+				}
+			}
+		}
+	}
+	return integrityMutationPrerequisite(matchesActiveSchedulerPath)(facts)
+}
+
+func systemctlInstallForm(argv []string) bool {
+	verb, ok := integrityFirstPositional(argv)
+	return ok && oneOfFold(verb, "enable", "reenable", "preset")
+}
+
+func launchctlInstallForm(argv []string) bool {
+	if len(argv) < 2 {
+		return false
+	}
+	switch strings.ToLower(argv[1]) {
+	case "load", "bootstrap", "enable":
+		return true
+	default:
+		return false
+	}
+}
+
+func integrityFirstPositional(argv []string) (string, bool) {
+	for index := 1; index < len(argv); index++ {
+		argument := argv[index]
+		lower := strings.ToLower(argument)
+		if argument == "--" {
+			if index+1 < len(argv) {
+				return strings.ToLower(argv[index+1]), true
+			}
+			return "", false
+		}
+		if !strings.HasPrefix(argument, "-") {
+			return lower, true
+		}
+		key, _, joined := strings.Cut(lower, "=")
+		if systemctlValueOption(key) && !joined {
+			index++
+		}
+	}
+	return "", false
+}
+
+func systemctlValueOption(option string) bool {
+	switch option {
+	case "-h", "--host", "-m", "--machine", "-n", "--lines",
+		"-o", "--output", "-p", "--property", "--root",
+		"--runtime-scope", "--state", "-t", "--type":
+		return true
+	default:
+		return false
+	}
+}
+
+func matchesActiveRunKey(candidate actionfacts.PathFact) bool {
+	if candidate.Flavor != actionfacts.PathFlavorRegistry {
+		return false
+	}
+	value := strings.Trim(semanticPathValue(candidate), "/")
+	return value == "hkcu/software/microsoft/windows/currentversion/run" ||
+		value == "hkcu/software/microsoft/windows/currentversion/runonce" ||
+		value == "hklm/software/microsoft/windows/currentversion/run" ||
+		value == "hklm/software/microsoft/windows/currentversion/runonce"
+}
+
+func matchesActiveSchedulerPath(
+	facts actionfacts.Facts,
+	candidate actionfacts.PathFact,
+) bool {
+	value := canonicalSemanticPath(semanticPathValue(candidate))
+	if value == "/etc/crontab" ||
+		integritySingleChild(value, "/etc/cron.d") ||
+		integritySingleChildWithSuffix(
+			value, "/etc/systemd/system",
+			".service", ".timer", ".socket", ".path", ".target",
+		) ||
+		integritySingleChild(value, "c:/windows/system32/tasks") {
+		return true
+	}
+	for _, parent := range []string{
+		"/library/launchagents",
+		"/library/launchdaemons",
+	} {
+		if integritySingleChildWithSuffix(value, parent, ".plist") {
+			return true
+		}
+	}
+	relative, ok := activeHomeRelative(facts, candidate)
+	if !ok {
+		return false
+	}
+	if integritySingleChildWithSuffix(
+		relative, ".config/systemd/user",
+		".service", ".timer", ".socket", ".path", ".target",
+	) || integritySingleChildWithSuffix(
+		relative, ".config/autostart", ".desktop",
+	) || integritySingleChildWithSuffix(
+		relative, "library/launchagents", ".plist",
+	) || integritySingleChild(
+		relative,
+		"appdata/roaming/microsoft/windows/start menu/programs/startup",
+	) {
+		return true
+	}
+	return false
+}
+
+type integrityGitInvocation struct {
+	subcommand        string
+	subcommandIndex   int
+	configAssignments []string
+}
+
+func parseIntegrityGitInvocation(
+	command actionfacts.CommandFact,
+) (integrityGitInvocation, bool) {
+	if !integrityExecutingOwnedCommand(command, "git") {
+		return integrityGitInvocation{}, false
+	}
+	invocation := integrityGitInvocation{}
+	for index := 1; index < len(command.Argv); index++ {
+		argument := command.Argv[index]
+		lower := strings.ToLower(argument)
+		if argument == "--" {
+			index++
+			if index >= len(command.Argv) {
+				return integrityGitInvocation{}, false
+			}
+			invocation.subcommand = strings.ToLower(command.Argv[index])
+			invocation.subcommandIndex = index
+			return invocation, true
+		}
+		key, value, joined := strings.Cut(argument, "=")
+		if key == "-C" {
+			if !joined {
+				index++
+				if index >= len(command.Argv) {
+					return integrityGitInvocation{}, false
+				}
+			}
+			continue
+		}
+		switch strings.ToLower(key) {
+		case "-c":
+			if joined {
+				invocation.configAssignments = append(
+					invocation.configAssignments,
+					value,
+				)
+				continue
+			}
+			index++
+			if index >= len(command.Argv) {
+				return integrityGitInvocation{}, false
+			}
+			invocation.configAssignments = append(
+				invocation.configAssignments,
+				command.Argv[index],
+			)
+		case "--config-env", "--exec-path", "--git-dir",
+			"--namespace", "--super-prefix", "--work-tree":
+			if !joined {
+				index++
+				if index >= len(command.Argv) {
+					return integrityGitInvocation{}, false
+				}
+			}
+		default:
+			if strings.HasPrefix(lower, "-") {
+				continue
+			}
+			invocation.subcommand = lower
+			invocation.subcommandIndex = index
+			return invocation, true
+		}
+	}
+	return integrityGitInvocation{}, false
+}
+
+func gitHooksBypassPrerequisite(facts actionfacts.Facts) bool {
+	for _, command := range facts.Commands {
+		invocation, ok := parseIntegrityGitInvocation(command)
+		if !ok {
+			continue
+		}
+		switch invocation.subcommand {
+		case "commit", "push":
+			if gitNoVerify(command.Argv[invocation.subcommandIndex:]) ||
+				gitHooksPathDisabled(invocation.configAssignments) {
+				return true
+			}
+		case "config":
+			if gitConfigDisablesHooks(
+				command.Argv[invocation.subcommandIndex:],
+			) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func gitConfigDisablesHooks(argv []string) bool {
+	if len(argv) != 3 ||
+		!strings.EqualFold(argv[0], "config") ||
+		!strings.EqualFold(argv[1], "core.hookspath") {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(argv[2])) {
+	case "", "/dev/null", "nul", "nul:":
+		return true
+	default:
+		return false
+	}
+}
+
+func gitNoVerify(argv []string) bool {
+	subcommand := ""
+	if len(argv) != 0 {
+		subcommand = strings.ToLower(argv[0])
+	}
+	valueOptions := map[string]bool{
+		"-m": true, "--message": true, "-F": true, "--file": true,
+		"--author": true, "--date": true, "--cleanup": true,
+		"--fixup": true, "--squash": true, "-C": true,
+		"--reuse-message": true, "-c": true, "--reedit-message": true,
+		"--pathspec-from-file": true,
+	}
+	for index := 1; index < len(argv); index++ {
+		argument := argv[index]
+		lower := strings.ToLower(argument)
+		if argument == "--" {
+			return false
+		}
+		key, _, joined := strings.Cut(lower, "=")
+		if valueOptions[key] {
+			if !joined {
+				index++
+			}
+			continue
+		}
+		if lower == "--no-verify" ||
+			subcommand == "commit" && lower == "-n" {
+			return true
+		}
+	}
+	return false
+}
+
+func gitHooksPathDisabled(assignments []string) bool {
+	for _, assignment := range assignments {
+		key, value, ok := strings.Cut(assignment, "=")
+		if !ok || !strings.EqualFold(key, "core.hookspath") {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "", "/dev/null", "nul", "nul:":
+			return true
+		}
+	}
+	return false
+}
+
+func gitRemoteTamperPrerequisite(facts actionfacts.Facts) bool {
+	for _, command := range facts.Commands {
+		invocation, ok := parseIntegrityGitInvocation(command)
+		if !ok || invocation.subcommand != "remote" ||
+			!hasOperation(command, actionfacts.OperationConfigChange) {
+			continue
+		}
+		argv := lowerArgv(command.Argv[invocation.subcommandIndex:])
+		if len(argv) < 2 ||
+			(argv[1] != "add" && argv[1] != "set-url") {
+			continue
+		}
+		if hasExternalNetworkAction(
+			facts,
+			command.ID,
+			actionfacts.NetworkConnect,
+		) {
+			return true
+		}
+	}
+	return false
+}
+
+func gitConfigExecPrerequisite(facts actionfacts.Facts) bool {
+	for _, command := range facts.Commands {
+		invocation, ok := parseIntegrityGitInvocation(command)
+		if !ok || invocation.subcommand != "config" ||
+			!hasOperation(command, actionfacts.OperationConfigChange) {
+			continue
+		}
+		key, value, active, indirection := gitConfigExecutableSetting(
+			command.Argv[invocation.subcommandIndex+1:],
+		)
+		if active && !indirection &&
+			gitConfigValueActivatesExecution(key, value) {
+			return true
+		}
+	}
+	return false
+}
+
+func gitConfigExecSafeNegative(facts actionfacts.Facts) bool {
+	if !facts.Authoritative() {
+		return false
+	}
+	for _, command := range facts.Commands {
+		invocation, ok := parseIntegrityGitInvocation(command)
+		if !ok || invocation.subcommand != "config" {
+			continue
+		}
+		_, _, _, indirection := gitConfigExecutableSetting(
+			command.Argv[invocation.subcommandIndex+1:],
+		)
+		if indirection && !gitConfigIndirectionIsFixture(facts, command) {
+			return false
+		}
+	}
+	return true
+}
+
+func gitConfigExecutableSetting(
+	argv []string,
+) (key string, value string, active bool, indirection bool) {
+	positionals := make([]string, 0, 3)
+	readOnly := false
+	for index := 0; index < len(argv); index++ {
+		argument := argv[index]
+		lower := strings.ToLower(argument)
+		option, joinedValue, joined := strings.Cut(argument, "=")
+		switch strings.ToLower(option) {
+		case "--file", "-f", "--blob":
+			indirection = true
+			if !joined {
+				index++
+			}
+		case "--default", "--comment", "--type":
+			if !joined {
+				index++
+			}
+		case "--get", "--get-all", "--get-regexp", "--get-urlmatch",
+			"--list", "-l", "--show-origin", "--show-scope",
+			"--name-only":
+			readOnly = true
+		default:
+			if strings.HasPrefix(lower, "-") {
+				continue
+			}
+			if joined && !strings.HasPrefix(argument, "-") {
+				positionals = append(positionals, option, joinedValue)
+				continue
+			}
+			positionals = append(positionals, argument)
+		}
+	}
+	if len(positionals) > 0 &&
+		strings.EqualFold(positionals[0], "set") {
+		positionals = positionals[1:]
+	}
+	if readOnly || len(positionals) < 2 {
+		return "", "", false, indirection
+	}
+	return strings.ToLower(positionals[0]), positionals[1], true, indirection
+}
+
+func gitConfigValueActivatesExecution(key, value string) bool {
+	value = strings.TrimSpace(value)
+	switch {
+	case strings.HasPrefix(key, "alias."):
+		return strings.HasPrefix(value, "!")
+	case key == "credential.helper":
+		if !strings.HasPrefix(value, "!") {
+			return false
+		}
+		return !strings.EqualFold(
+			strings.Join(strings.Fields(value), " "),
+			"!gh auth git-credential",
+		)
+	case key == "core.sshcommand":
+		return value != "" &&
+			!strings.EqualFold(value, "ssh") &&
+			!strings.EqualFold(value, "ssh.exe")
+	case key == "core.hookspath":
+		switch strings.ToLower(value) {
+		case "", "/dev/null", "nul", "nul:":
+			return false
+		default:
+			return true
+		}
+	default:
+		return false
+	}
+}
+
+func gitConfigIndirectionIsFixture(
+	facts actionfacts.Facts,
+	command actionfacts.CommandFact,
+) bool {
+	for index := 1; index < len(command.Argv); index++ {
+		option, value, joined := strings.Cut(command.Argv[index], "=")
+		switch strings.ToLower(option) {
+		case "--blob":
+			return false
+		case "--file", "-f":
+			if !joined {
+				index++
+				if index >= len(command.Argv) {
+					return false
+				}
+				value = command.Argv[index]
+			}
+			candidate := actionfacts.PathFact{
+				CommandID:  command.ID,
+				Value:      value,
+				Normalized: canonicalSemanticPath(value),
+			}
+			if isAbsoluteSemanticPath(candidate.Normalized) {
+				candidate.Resolved = candidate.Normalized
+			} else if facts.CWD != "" {
+				candidate.Resolved = canonicalSemanticPath(
+					strings.TrimRight(
+						canonicalSemanticPath(facts.CWD),
+						"/",
+					) + "/" + value,
+				)
+			}
+			return isDefiniteFixturePath(facts, candidate)
+		}
+	}
+	return false
+}
+
+func sshAuthorizedKeysCommandPrerequisite(facts actionfacts.Facts) bool {
+	return sshAuthorizedKeysPrerequisite(facts, false)
+}
+
+func sshAuthorizedKeysStructuredPrerequisite(
+	facts actionfacts.Facts,
+) bool {
+	return sshAuthorizedKeysPrerequisite(facts, true)
+}
+
+func sshAuthorizedKeysPrerequisite(
+	facts actionfacts.Facts,
+	structured bool,
+) bool {
+	for _, candidate := range facts.Paths {
+		command, ok := integrityCommandByID(facts, candidate.CommandID)
+		if !ok ||
+			!matchesActiveAuthorizedKeys(facts, candidate) ||
+			!integrityCommandMutatesPath(command, candidate) {
+			continue
+		}
+		isStructured := integrityStructuredFileMutator(facts, command)
+		if isStructured == structured &&
+			(structured ||
+				integrityExplicitCommandMutator(command, candidate)) {
+			return true
+		}
+	}
+	return false
+}
+
+func sshAuthorizedKeysCommandSafeNegative(
+	facts actionfacts.Facts,
+) bool {
+	return sshAuthorizedKeysSafeNegative(facts, true)
+}
+
+func sshAuthorizedKeysPathSafeNegative(
+	facts actionfacts.Facts,
+) bool {
+	return sshAuthorizedKeysSafeNegative(facts, false)
+}
+
+func sshAuthorizedKeysSafeNegative(
+	facts actionfacts.Facts,
+	commandOwner bool,
+) bool {
+	if !facts.Authoritative() {
+		return false
+	}
+	for _, candidate := range facts.Paths {
+		command, ok := integrityCommandByID(facts, candidate.CommandID)
+		if !ok ||
+			!matchesActiveAuthorizedKeys(facts, candidate) ||
+			!integrityCommandMutatesPath(command, candidate) {
+			continue
+		}
+		structured := integrityStructuredFileMutator(facts, command)
+		if commandOwner && structured {
+			continue
+		}
+		// Unsupported commands keep N23's fallback. Exact N23 commands keep
+		// H27's fallback until match-only alias suppression is applied.
+		if commandOwner ||
+			!structured {
+			return false
+		}
+	}
+	return integrityMutationSafeNegative(
+		matchesSSHDirectoryCandidate,
+		matchesActiveAuthorizedKeys,
+		matchesSafeSSHDirectoryCandidate,
+	)(facts)
+}
+
+func integrityExplicitCommandMutator(
+	command actionfacts.CommandFact,
+	candidate actionfacts.PathFact,
+) bool {
+	if integrityCommandOwnsStaticRedirect(command, candidate) {
+		return true
+	}
+	if command.Effect != actionfacts.EffectExecute ||
+		!command.ArgvComplete {
+		return false
+	}
+	switch strings.ToLower(command.Program) {
+	case "tee", "truncate", "rm", "unlink", "cp", "mv", "copy",
+		"move", "set-content", "sc", "add-content", "ac", "out-file",
+		"remove-item", "ri", "copy-item", "cpi", "move-item", "mi":
+		return true
+	default:
+		return false
+	}
+}
+
+func integrityStructuredFileMutator(
+	facts actionfacts.Facts,
+	command actionfacts.CommandFact,
+) bool {
+	if !strings.EqualFold(facts.Tool, command.Executable) &&
+		!strings.EqualFold(facts.Tool, command.Program) {
+		return false
+	}
+	switch strings.ToLower(command.Program) {
+	case "write", "edit", "multiedit", "multi_edit", "multi-edit",
+		"notebookedit", "notebook_edit", "notebook-edit",
+		"writefile", "write_file", "write-file",
+		"fswrite", "fs_write", "fs-write", "fs.write", "fs.write_file",
+		"filewrite", "file_write", "file-write",
+		"createfile", "create_file", "create-file",
+		"editfile", "edit_file", "edit-file",
+		"applypatch", "apply_patch", "apply-patch",
+		"appendfile", "append_file", "append-file",
+		"deletefile", "delete_file", "delete-file",
+		"removefile", "remove_file", "remove-file",
+		"copyfile", "copy_file", "copy-file",
+		"movefile", "move_file", "move-file":
+		return true
+	default:
+		return false
+	}
+}
+
+func containerRuntimeSocketPrerequisite(facts actionfacts.Facts) bool {
+	for _, command := range facts.Commands {
+		if command.Effect != actionfacts.EffectExecute ||
+			!hasOperation(command, actionfacts.OperationConnect) {
+			continue
+		}
+		for _, candidate := range facts.Paths {
+			if candidate.CommandID == command.ID &&
+				candidate.Access == actionfacts.PathAccessConnect &&
+				matchesContainerRuntimeSocket(
+					semanticPathValue(candidate),
+				) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func containerRuntimeSocketSafeNegative(
+	facts actionfacts.Facts,
+) bool {
+	if !facts.Authoritative() {
+		return false
+	}
+	for _, candidate := range semanticPathCandidates(facts) {
+		if matchesContainerRuntimeSocket(semanticPathValue(candidate)) {
+			return true
+		}
+	}
+	return false
+}
+
+func matchesContainerRuntimeSocket(value string) bool {
+	value = canonicalSemanticPath(value)
+	switch value {
+	case "/var/run/docker.sock",
+		"/run/docker.sock",
+		"/run/containerd/containerd.sock",
+		"/var/run/crio/crio.sock",
+		"/run/podman/podman.sock":
+		return true
+	}
+	parts := strings.Split(strings.Trim(value, "/"), "/")
+	return len(parts) == 5 &&
+		parts[0] == "run" &&
+		parts[1] == "user" &&
+		integrityDecimal(parts[2]) &&
+		parts[3] == "podman" &&
+		parts[4] == "podman.sock"
+}
+
+func cloudMetadataPrerequisite(facts actionfacts.Facts) bool {
+	for _, command := range facts.Commands {
+		if command.Effect != actionfacts.EffectExecute ||
+			!hasOperation(command, actionfacts.OperationFetch) {
+			continue
+		}
+		for _, network := range facts.Network {
+			if network.CommandID == command.ID &&
+				networkActionIn(
+					network.Action,
+					actionfacts.NetworkDownload,
+					actionfacts.NetworkConnect,
+				) &&
+				matchesCloudMetadataHost(network.NormalizedHost) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func matchesCloudMetadataHost(value string) bool {
+	value = strings.Trim(
+		strings.TrimSuffix(strings.ToLower(strings.TrimSpace(value)), "."),
+		"[]",
+	)
+	switch value {
+	case "169.254.169.254",
+		"169.254.170.2",
+		"fd00:ec2::254",
+		"metadata.google.internal",
+		"metadata.azure.internal",
+		"100.100.100.200":
+		return true
+	default:
+		return false
+	}
+}
+
+func matchesShellHistoryCandidate(value string) bool {
+	switch pathBase(canonicalSemanticPath(value)) {
+	case ".bash_history", ".zsh_history", ".python_history",
+		"consolehost_history.txt":
+		return true
+	default:
+		return false
+	}
+}
+
+func matchesActiveShellHistory(
+	facts actionfacts.Facts,
+	candidate actionfacts.PathFact,
+) bool {
+	relative, ok := activeHomeRelative(facts, candidate)
+	if !ok {
+		return false
+	}
+	switch relative {
+	case ".bash_history", ".zsh_history", ".python_history",
+		".local/share/powershell/psreadline/consolehost_history.txt",
+		"appdata/roaming/microsoft/windows/powershell/psreadline/consolehost_history.txt":
+		return true
+	default:
+		return false
+	}
+}
+
+func matchesSudoersCandidate(value string) bool {
+	value = canonicalSemanticPath(value)
+	return value == "/etc/sudoers" ||
+		strings.Contains(value, "/etc/sudoers.d/")
+}
+
+func matchesActiveSudoers(
+	_ actionfacts.Facts,
+	candidate actionfacts.PathFact,
+) bool {
+	value := canonicalSemanticPath(semanticPathValue(candidate))
+	return value == "/etc/sudoers" ||
+		integritySingleChild(value, "/etc/sudoers.d")
+}
+
+func matchesSSHDirectoryCandidate(value string) bool {
+	value = canonicalSemanticPath(value)
+	return strings.Contains(value, "/.ssh/") ||
+		strings.HasPrefix(value, ".ssh/") ||
+		strings.HasSuffix(
+			value,
+			"/programdata/ssh/administrators_authorized_keys",
+		)
+}
+
+func matchesActiveAuthorizedKeys(
+	facts actionfacts.Facts,
+	candidate actionfacts.PathFact,
+) bool {
+	relative, ok := activeHomeRelative(facts, candidate)
+	if ok &&
+		(relative == ".ssh/authorized_keys" ||
+			relative == ".ssh/authorized_keys2") {
+		return true
+	}
+	value := canonicalSemanticPath(semanticPathValue(candidate))
+	const adminPath = "/programdata/ssh/administrators_authorized_keys"
+	return len(value) == 2+len(adminPath) &&
+		value[1] == ':' &&
+		value[2:] == adminPath
+}
+
+func matchesSafeSSHDirectoryCandidate(
+	facts actionfacts.Facts,
+	candidate actionfacts.PathFact,
+) bool {
+	value := canonicalSemanticPath(semanticPathValue(candidate))
+	if strings.HasSuffix(value, ".sample") ||
+		strings.HasSuffix(value, ".example") {
+		return true
+	}
+	relative, ok := activeHomeRelative(facts, candidate)
+	return ok && strings.HasPrefix(relative, ".ssh/")
+}
+
+func matchesShellProfileCandidate(value string) bool {
+	value = canonicalSemanticPath(value)
+	switch pathBase(value) {
+	case ".profile", ".bash_profile", ".bashrc", ".zprofile", ".zshrc",
+		"config.fish", "profile.ps1", "microsoft.powershell_profile.ps1":
+		return true
+	default:
+		return false
+	}
+}
+
+func matchesActiveShellProfile(
+	facts actionfacts.Facts,
+	candidate actionfacts.PathFact,
+) bool {
+	relative, ok := activeHomeRelative(facts, candidate)
+	if !ok {
+		return false
+	}
+	switch relative {
+	case ".profile", ".bash_profile", ".bashrc", ".zprofile", ".zshrc",
+		".config/fish/config.fish",
+		".config/powershell/profile.ps1",
+		".config/powershell/microsoft.powershell_profile.ps1",
+		"documents/powershell/profile.ps1",
+		"documents/powershell/microsoft.powershell_profile.ps1",
+		"documents/windowspowershell/profile.ps1",
+		"documents/windowspowershell/microsoft.powershell_profile.ps1":
+		return true
+	default:
+		return false
+	}
+}
+
+func matchesGitHookCandidate(value string) bool {
+	value = canonicalSemanticPath(value)
+	components := strings.Split(strings.Trim(value, "/"), "/")
+	for index := 0; index+2 < len(components); index++ {
+		if components[index] == ".git" &&
+			components[index+1] == "hooks" &&
+			index+3 == len(components) {
+			return components[index+2] != ""
+		}
+	}
+	return false
+}
+
+func matchesActiveGitHook(
+	facts actionfacts.Facts,
+	candidate actionfacts.PathFact,
+) bool {
+	if matchesSafeGitHookCandidate(facts, candidate) ||
+		integrityPathHasFixtureSegment(facts.CWD) {
+		return false
+	}
+	cwd := canonicalSemanticPath(facts.CWD)
+	value := canonicalSemanticPath(semanticPathValue(candidate))
+	if cwd == "" || value == "" ||
+		!strings.HasPrefix(value, strings.TrimRight(cwd, "/")+"/.git/hooks/") {
+		return false
+	}
+	return integritySingleChild(value, strings.TrimRight(cwd, "/")+"/.git/hooks")
+}
+
+func matchesSafeGitHookCandidate(
+	_ actionfacts.Facts,
+	candidate actionfacts.PathFact,
+) bool {
+	value := canonicalSemanticPath(semanticPathValue(candidate))
+	return strings.HasSuffix(value, ".sample") ||
+		strings.HasSuffix(value, ".example")
+}
+
+func matchesAgentConfigCandidate(value string) bool {
+	switch pathBase(canonicalSemanticPath(value)) {
+	case "openclaw.json", "gateway.json":
+		return true
+	default:
+		return false
+	}
+}
+
+func matchesActiveAgentConfig(
+	facts actionfacts.Facts,
+	candidate actionfacts.PathFact,
+) bool {
+	relative, ok := activeHomeRelative(facts, candidate)
+	return ok &&
+		(relative == ".openclaw/openclaw.json" ||
+			relative == ".openclaw/gateway.json")
+}
+
+func matchesDefenseClawStateCandidate(value string) bool {
+	value = canonicalSemanticPath(value)
+	return strings.Contains(value, "/.defenseclaw/") ||
+		strings.HasPrefix(value, ".defenseclaw/")
+}
+
+func matchesActiveDefenseClawState(
+	facts actionfacts.Facts,
+	candidate actionfacts.PathFact,
+) bool {
+	relative, ok := activeHomeRelative(facts, candidate)
+	if !ok || !strings.HasPrefix(relative, ".defenseclaw/") {
+		return false
+	}
+	state := strings.TrimPrefix(relative, ".defenseclaw/")
+	switch state {
+	case ".env", "config.yaml", "confidence_policy.yaml",
+		"guardrail_runtime.json", "device.key", "picked_connector",
+		"custom-providers.json", "audit.db", "audit.db-wal",
+		"audit.db-shm", "judge.db", "judge.db-wal", "judge.db-shm",
+		"judge_bodies.db", "judge_bodies.db-wal", "judge_bodies.db-shm":
+		return true
+	}
+	for _, prefix := range []string{
+		"cache/",
+		"policies/",
+		"quarantine/",
+		"receipts/",
+		"registries/",
+	} {
+		if strings.HasPrefix(state, prefix) &&
+			strings.TrimPrefix(state, prefix) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func matchesSafeDefenseClawStateCandidate(
+	facts actionfacts.Facts,
+	candidate actionfacts.PathFact,
+) bool {
+	relative, ok := activeHomeRelative(facts, candidate)
+	if !ok || !strings.HasPrefix(relative, ".defenseclaw/") {
+		return false
+	}
+	state := strings.TrimPrefix(relative, ".defenseclaw/")
+	for _, prefix := range []string{
+		"logs/",
+		"reports/",
+		"exports/",
+		"tui/",
+	} {
+		if strings.HasPrefix(state, prefix) {
+			return true
+		}
+	}
+	return state == "gateway.jsonl" ||
+		state == "gateway.log" ||
+		state == "gateway.pid"
+}
+
+func integritySingleChild(value, parent string) bool {
+	value = strings.Trim(canonicalSemanticPath(value), "/")
+	parent = strings.Trim(canonicalSemanticPath(parent), "/")
+	if !strings.HasPrefix(value, parent+"/") {
+		return false
+	}
+	child := strings.TrimPrefix(value, parent+"/")
+	return child != "" && !strings.ContainsRune(child, '/')
+}
+
+func integritySingleChildWithSuffix(
+	value, parent string,
+	suffixes ...string,
+) bool {
+	if !integritySingleChild(value, parent) {
+		return false
+	}
+	if len(suffixes) == 0 {
+		return true
+	}
+	base := pathBase(canonicalSemanticPath(value))
+	for _, suffix := range suffixes {
+		if suffix == "" || strings.HasSuffix(base, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func integrityPathHasFixtureSegment(value string) bool {
+	for _, component := range strings.Split(
+		strings.Trim(canonicalSemanticPath(value), "/"),
+		"/",
+	) {
+		switch component {
+		case "testdata", "test-data", "fixture", "fixtures",
+			"example", "examples", "docs":
+			return true
+		}
+	}
+	return false
+}
+
+func integrityDecimal(value string) bool {
+	if value == "" {
+		return false
+	}
+	for _, character := range value {
+		if character < '0' || character > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func integrityExecutingOwnedCommand(
+	command actionfacts.CommandFact,
+	programs ...string,
+) bool {
+	if command.Effect != actionfacts.EffectExecute ||
+		!command.ArgvComplete {
+		return false
+	}
+	return oneOfFold(command.Program, programs...)
+}
+
+const typedGuardrailsOffRuleID = "tamper.guardrails_off"
+
+func provesTypedGuardrailsOff(
+	kind string,
+	trusted bool,
+	previousEnforcementEnabled bool,
+	newEnforcementEnabled bool,
+	effect actionfacts.CommandEffect,
+) bool {
+	return kind == "guardrail_config_change" &&
+		trusted &&
+		previousEnforcementEnabled &&
+		!newEnforcementEnabled &&
+		effect == actionfacts.EffectExecute
+}

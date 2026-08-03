@@ -334,11 +334,59 @@ class TestMCPConnectorScope(MCPCommandTestBase):
 
 
 class TestMCPScan(MCPCommandTestBase):
+    @patch("defenseclaw.scanner.rulepack.maybe_wrap")
+    @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")
+    def test_run_scan_threads_connector_to_rule_pack_overlay(
+        self,
+        mock_scan,
+        mock_maybe_wrap,
+    ):
+        from defenseclaw.commands.cmd_mcp import _run_scan
+
+        mock_maybe_wrap.side_effect = lambda inner, *_args, **_kwargs: inner
+        mock_scan.return_value = ScanResult(
+            scanner="mcp-scanner",
+            target="https://example.test/mcp",
+            timestamp=datetime.now(timezone.utc),
+            findings=[],
+        )
+        pack_cache = {}
+
+        result = _run_scan(
+            self.app,
+            "https://example.test/mcp",
+            "",
+            False,
+            False,
+            False,
+            connector="hermes",
+            pack_cache=pack_cache,
+        )
+
+        self.assertIsNotNone(result)
+        self.assertEqual(mock_maybe_wrap.call_args.args[2], "hermes")
+        self.assertIs(
+            mock_maybe_wrap.call_args.kwargs["pack_cache"],
+            pack_cache,
+        )
+
     @patch("defenseclaw.commands.cmd_mcp._run_scan")
     def test_scan_all_flag_without_target(self, mock_run_scan):
-        self.app.cfg.mcp_servers = MagicMock(return_value=[
-            MCPServerEntry(name="context7", url="http://localhost:3000", transport="sse"),
-        ])
+        self.app.cfg.mcp_servers = MagicMock(
+            return_value=[
+                MCPServerEntry(
+                    name="context7",
+                    url="http://localhost:3000",
+                    transport="sse",
+                ),
+                MCPServerEntry(
+                    name="filesystem",
+                    command="npx",
+                    args=["server-filesystem"],
+                    transport="stdio",
+                ),
+            ]
+        )
         mock_run_scan.return_value = ScanResult(
             scanner="mcp-scanner",
             target="http://localhost:3000",
@@ -349,7 +397,9 @@ class TestMCPScan(MCPCommandTestBase):
         result = self.invoke(["scan", "--all"])
 
         self.assertEqual(result.exit_code, 0, result.output)
-        mock_run_scan.assert_called_once()
+        self.assertEqual(mock_run_scan.call_count, 2)
+        caches = [call.kwargs["pack_cache"] for call in mock_run_scan.call_args_list]
+        self.assertIs(caches[0], caches[1])
 
     @patch("defenseclaw.commands.cmd_mcp._scan_all_mcp")
     def test_scan_all_multi_connector_fans_out(self, mock_scan_all):
@@ -361,6 +411,32 @@ class TestMCPScan(MCPCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         fanned = {c.args[1] for c in mock_scan_all.call_args_list}
         self.assertEqual(fanned, {"claudecode", "codex"})
+        caches = [call.kwargs["pack_cache"] for call in mock_scan_all.call_args_list]
+        self.assertIs(caches[0], caches[1])
+
+    @patch(
+        "defenseclaw.commands.cmd_mcp._scan_one_resolved",
+        return_value="clean",
+    )
+    def test_scan_bare_name_multi_owner_shares_rule_pack_cache(
+        self,
+        mock_scan_one,
+    ):
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+        self.app.cfg.mcp_servers = lambda connector=None: [  # type: ignore[method-assign]
+            MCPServerEntry(
+                name="ctx7",
+                url=f"http://{connector}-ctx7",
+                transport="sse",
+            )
+        ]
+
+        result = self.invoke(["scan", "ctx7"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(mock_scan_one.call_count, 2)
+        caches = [call.kwargs["pack_cache"] for call in mock_scan_one.call_args_list]
+        self.assertIs(caches[0], caches[1])
 
     @patch("defenseclaw.commands.cmd_mcp._scan_all_mcp")
     def test_scan_all_no_configured_connectors_exits_without_openclaw_fallback(self, mock_scan_all):

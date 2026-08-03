@@ -66,6 +66,12 @@ from defenseclaw.commands.cmd_doctor import (
     _plugin_registry_required_offenders,
     _probe_cursor_windows_runtime,
 )
+from defenseclaw.rulepack_validation import (
+    RulePackValidationBridgeError,
+    RulePackValidationIssue,
+    RulePackValidationResult,
+    safe_display_path,
+)
 
 
 class TestActiveConnectorResolver(unittest.TestCase):
@@ -666,12 +672,12 @@ class TestCheckScanCoverage(unittest.TestCase):
 
 
 class TestConnectorInventoryRulePack(unittest.TestCase):
-    """The inventory block surfaces each connector's effective rule pack,
-    warning when the resolved directory is missing/empty on disk.
+    """The inventory block authoritatively validates each effective rule pack.
 
     D9: when no explicit ``rule_pack_dir`` is set, the gateway resolves the
-    built-in default to ``<data_dir>/policies/guardrail/default`` and loads
-    packs from there — doctor must validate THAT path, not emit a benign skip.
+    built-in default to ``<data_dir>/policies/guardrail/default``. Doctor must
+    send that effective path to the Go helper, not infer validity from whether
+    the directory happens to contain files.
     """
 
     def _cfg(self, *, rule_pack_dir="", data_dir="/tmp/dc-doctor-test-datadir"):
@@ -688,57 +694,227 @@ class TestConnectorInventoryRulePack(unittest.TestCase):
         cfg.guardrail.judge.hook_connectors = []
         return cfg
 
-    def test_rule_pack_dir_missing_warns(self):
+    @staticmethod
+    def _valid(**overrides: int | str) -> RulePackValidationResult:
+        summary: dict[str, int | str] = {
+            "judge_count": 2,
+            "judge_category_count": 2,
+            "rule_file_count": 4,
+            "rule_count": 12,
+            "enabled_rule_count": 11,
+            "local_pattern_count": 6,
+            "suppression_count": 3,
+            "sensitive_tool_count": 5,
+            "digest": "a" * 64,
+        }
+        summary.update(overrides)
+        return RulePackValidationResult(
+            wire_version=1,
+            kind="validation",
+            valid=True,
+            summary=summary,
+        )
+
+    @staticmethod
+    def _invalid() -> RulePackValidationResult:
+        return RulePackValidationResult(
+            wire_version=1,
+            kind="validation_error",
+            valid=False,
+            error=RulePackValidationIssue(
+                path="$",
+                code="pack_not_found",
+                reason="rule-pack directory does not exist",
+            ),
+        )
+
+    @patch(
+        "defenseclaw.commands.cmd_doctor.rulepack_validation.validate_rule_pack",
+    )
+    def test_rule_pack_invalid_fails(self, validate):
+        validate.return_value = self._invalid()
         r = _DoctorResult()
         _check_connector_inventory(self._cfg(rule_pack_dir="/nonexistent/rule/pack/dir"), "cursor", r)
         rp = next(c for c in r.checks if c["label"] == "Rule pack")
-        self.assertEqual(rp["status"], "warn")
+        self.assertEqual(rp["status"], "fail")
+        self.assertIn("pack_not_found", rp["detail"])
         self.assertIn("/nonexistent/rule/pack/dir", rp["detail"])
+        validate.assert_called_once_with("/nonexistent/rule/pack/dir")
 
-    def test_rule_pack_dir_present_passes(self):
+    @patch(
+        "defenseclaw.commands.cmd_doctor.rulepack_validation.validate_rule_pack",
+    )
+    def test_rule_pack_helper_valid_passes(self, validate):
+        validate.return_value = self._valid()
         r = _DoctorResult()
         _check_connector_inventory(self._cfg(rule_pack_dir=os.getcwd()), "cursor", r)
         rp = next(c for c in r.checks if c["label"] == "Rule pack")
         self.assertEqual(rp["status"], "pass")
+        self.assertIn("11/12 rules enabled", rp["detail"])
+        validate.assert_called_once_with(os.getcwd())
 
-    def test_rule_pack_dir_empty_validates_resolved_default_missing(self):
-        # D9: empty rule_pack_dir → resolve <data_dir>/policies/guardrail/default;
-        # when it's absent, WARN (enforcement would run with no rule packs)
-        # rather than the old benign skip.
+    @patch(
+        "defenseclaw.commands.cmd_doctor.rulepack_validation.validate_rule_pack",
+    )
+    def test_valid_partial_pack_with_no_direct_rules_warns(self, validate):
+        validate.return_value = self._valid(
+            rule_file_count=0,
+            rule_count=0,
+            enabled_rule_count=0,
+        )
+        r = _DoctorResult()
+        _check_connector_inventory(self._cfg(rule_pack_dir="/tmp/pack"), "cursor", r)
+        rp = next(c for c in r.checks if c["label"] == "Rule pack")
+        self.assertEqual(rp["status"], "warn")
+        self.assertIn("0/0 rules enabled", rp["detail"])
+        self.assertIn("compiled default categories retained", rp["detail"])
+
+    @patch(
+        "defenseclaw.commands.cmd_doctor.rulepack_validation.validate_rule_pack",
+    )
+    def test_valid_pack_with_all_rules_disabled_warns_without_default_hint(
+        self, validate,
+    ):
+        validate.return_value = self._valid(rule_count=5, enabled_rule_count=0)
+        r = _DoctorResult()
+        _check_connector_inventory(self._cfg(rule_pack_dir="/tmp/pack"), "cursor", r)
+        rp = next(c for c in r.checks if c["label"] == "Rule pack")
+        self.assertEqual(rp["status"], "warn")
+        self.assertIn("0/5 rules enabled", rp["detail"])
+        self.assertNotIn("compiled default categories retained", rp["detail"])
+
+    @patch(
+        "defenseclaw.commands.cmd_doctor.rulepack_validation.validate_rule_pack",
+    )
+    def test_empty_digest_is_omitted_from_valid_pack_detail(self, validate):
+        validate.return_value = self._valid(digest="")
+        r = _DoctorResult()
+        _check_connector_inventory(self._cfg(rule_pack_dir="/tmp/pack"), "cursor", r)
+        rp = next(c for c in r.checks if c["label"] == "Rule pack")
+        self.assertEqual(rp["status"], "pass")
+        self.assertNotIn("digest=", rp["detail"])
+
+    @patch(
+        "defenseclaw.commands.cmd_doctor.rulepack_validation.validate_rule_pack",
+    )
+    def test_unset_rule_pack_validates_resolved_default(self, validate):
+        validate.return_value = self._invalid()
         with tempfile.TemporaryDirectory() as data_dir:
             r = _DoctorResult()
             _check_connector_inventory(self._cfg(rule_pack_dir="", data_dir=data_dir), "codex", r)
             rp = next(c for c in r.checks if c["label"] == "Rule pack")
-            self.assertEqual(rp["status"], "warn")
+            self.assertEqual(rp["status"], "fail")
             self.assertIn("built-in default", rp["detail"])
-            self.assertIn(
-                os.path.join(data_dir, "policies", "guardrail", "default"),
-                rp["detail"],
-            )
-
-    def test_rule_pack_dir_empty_validates_resolved_default_empty(self):
-        # D9: the default dir exists but is empty → still a degradation (zero
-        # rule packs loaded), so WARN.
-        with tempfile.TemporaryDirectory() as data_dir:
-            os.makedirs(os.path.join(data_dir, "policies", "guardrail", "default"))
-            r = _DoctorResult()
-            _check_connector_inventory(self._cfg(rule_pack_dir="", data_dir=data_dir), "codex", r)
-            rp = next(c for c in r.checks if c["label"] == "Rule pack")
-            self.assertEqual(rp["status"], "warn")
-            self.assertIn("empty", rp["detail"])
-
-    def test_rule_pack_dir_empty_validates_resolved_default_present(self):
-        # D9: the resolved default dir exists and is seeded → PASS.
-        with tempfile.TemporaryDirectory() as data_dir:
             default_dir = os.path.join(data_dir, "policies", "guardrail", "default")
-            os.makedirs(default_dir)
-            with open(os.path.join(default_dir, "injection.yaml"), "w") as fh:
-                fh.write("rules: []\n")
-            r = _DoctorResult()
-            _check_connector_inventory(self._cfg(rule_pack_dir="", data_dir=data_dir), "codex", r)
-            rp = next(c for c in r.checks if c["label"] == "Rule pack")
-            self.assertEqual(rp["status"], "pass")
-            self.assertIn("built-in default", rp["detail"])
+            self.assertIn(safe_display_path(default_dir), rp["detail"])
+            validate.assert_called_once_with(default_dir)
+
+    @patch(
+        "defenseclaw.commands.cmd_doctor.rulepack_validation.validate_rule_pack",
+        side_effect=RulePackValidationBridgeError(
+            "rule-pack validation helper protocol is incompatible; run defenseclaw upgrade",
+            code="protocol_error",
+        ),
+    )
+    def test_incompatible_helper_warns_and_never_passes(self, _validate):
+        r = _DoctorResult()
+        _check_connector_inventory(self._cfg(rule_pack_dir="/tmp/pack"), "codex", r)
+        rp = next(c for c in r.checks if c["label"] == "Rule pack")
+        self.assertEqual(rp["status"], "warn")
+        self.assertIn("validation unavailable", rp["detail"])
+
+    @patch(
+        "defenseclaw.commands.cmd_doctor.rulepack_validation.validate_rule_pack",
+        side_effect=RulePackValidationBridgeError(
+            "defenseclaw-gateway is required for authoritative rule-pack validation; "
+            "run defenseclaw upgrade",
+            code="gateway_unavailable",
+        ),
+    )
+    def test_missing_helper_warns_and_never_passes(self, _validate):
+        r = _DoctorResult()
+        _check_connector_inventory(self._cfg(rule_pack_dir="/tmp/pack"), "codex", r)
+        rp = next(c for c in r.checks if c["label"] == "Rule pack")
+        self.assertEqual(rp["status"], "warn")
+        self.assertNotEqual(rp["status"], "pass")
+        self.assertIn("defenseclaw-gateway is required", rp["detail"])
+
+    @patch(
+        "defenseclaw.commands.cmd_doctor.rulepack_validation.validate_rule_pack",
+        return_value={"valid": True, "secret": "DO-NOT-ECHO"},
+    )
+    def test_wrong_validator_outcome_type_warns_safely(self, _validate):
+        r = _DoctorResult()
+        _check_connector_inventory(self._cfg(rule_pack_dir="/tmp/pack"), "codex", r)
+        rp = next(c for c in r.checks if c["label"] == "Rule pack")
+        self.assertEqual(rp["status"], "warn")
+        self.assertIn("internal response mismatch", rp["detail"])
+        self.assertNotIn("DO-NOT-ECHO", rp["detail"])
+
+    @patch(
+        "defenseclaw.commands.cmd_doctor.rulepack_validation.validate_rule_pack",
+        return_value=RulePackValidationResult(
+            wire_version=1,
+            kind="validation_error",
+            valid=False,
+        ),
+    )
+    def test_invalid_outcome_missing_error_warns(self, _validate):
+        r = _DoctorResult()
+        _check_connector_inventory(self._cfg(rule_pack_dir="/tmp/pack"), "codex", r)
+        rp = next(c for c in r.checks if c["label"] == "Rule pack")
+        self.assertEqual(rp["status"], "warn")
+        self.assertIn("missing diagnostic", rp["detail"])
+
+    @patch(
+        "defenseclaw.commands.cmd_doctor.rulepack_validation.validate_rule_pack",
+    )
+    def test_shared_pack_is_validated_once_with_connector_attribution(self, validate):
+        validate.return_value = self._valid()
+        r = _DoctorResult()
+        cache: dict[str, object] = {}
+        cfg = self._cfg(rule_pack_dir="/tmp/shared")
+        for connector in ("codex", "cursor"):
+            with _doctor_label_suffix(f"[{connector}]"):
+                _check_connector_inventory(
+                    cfg,
+                    connector,
+                    r,
+                    rule_pack_validation_cache=cache,
+                )
+
+        validate.assert_called_once_with("/tmp/shared")
+        rows = [c for c in r.checks if c["label"].startswith("Rule pack")]
+        self.assertEqual(
+            [row["label"] for row in rows],
+            ["Rule pack [codex]", "Rule pack [cursor]"],
+        )
+        self.assertTrue(all(row["status"] == "pass" for row in rows))
+
+    @patch(
+        "defenseclaw.commands.cmd_doctor.rulepack_validation.validate_rule_pack",
+        side_effect=RuntimeError("sensitive validator value"),
+    )
+    def test_unexpected_validator_failure_warns_safely_and_is_cached(self, validate):
+        r = _DoctorResult()
+        cache: dict[str, object] = {}
+        cfg = self._cfg(rule_pack_dir="/tmp/shared")
+        for connector in ("codex", "cursor"):
+            with _doctor_label_suffix(f"[{connector}]"):
+                _check_connector_inventory(
+                    cfg,
+                    connector,
+                    r,
+                    rule_pack_validation_cache=cache,
+                )
+
+        validate.assert_called_once_with("/tmp/shared")
+        rows = [c for c in r.checks if c["label"].startswith("Rule pack")]
+        self.assertTrue(all(row["status"] == "warn" for row in rows))
+        details = "\n".join(row["detail"] for row in rows)
+        self.assertIn("unexpected validator failure", details)
+        self.assertIn("RuntimeError", details)
+        self.assertNotIn("sensitive validator value", details)
 
 
 class TestDoctorActiveConnectors(unittest.TestCase):

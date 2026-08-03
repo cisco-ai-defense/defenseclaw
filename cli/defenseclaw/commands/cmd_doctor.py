@@ -40,7 +40,7 @@ import urllib.request
 
 import click
 
-from defenseclaw import ux
+from defenseclaw import rulepack_validation, ux
 from defenseclaw.audit_actions import ACTION_DOCTOR
 from defenseclaw.connector_paths import (
     codex_home,
@@ -3678,6 +3678,10 @@ def doctor(
             "no connector configured — run 'defenseclaw setup <connector>'",
             r=r,
         )
+    # Validate each distinct effective pack once. Per-connector inventory rows
+    # still render inside their label context, so two peers sharing a pack
+    # retain attribution without executing the authoritative helper twice.
+    rule_pack_validation_cache: dict[str, object] = {}
     for _c in inventory_connectors:
         if not _connector_enabled(cfg, _c):
             # Operator-disabled (guardrail disable --connector X): the Go boot
@@ -3696,7 +3700,12 @@ def doctor(
                 )
             continue
         with _doctor_label_suffix(f"[{_c}]"):
-            _check_connector_inventory(cfg, _c, r)
+            _check_connector_inventory(
+                cfg,
+                _c,
+                r,
+                rule_pack_validation_cache=rule_pack_validation_cache,
+            )
             _check_hook_contract_lock(cfg, _c, r)
     # S7.5 — surface inactive-connector residue (backup files / hook
     # scripts left over from a previous connector). Without this check
@@ -4049,40 +4058,134 @@ _CONNECTOR_LABELS = {
 }
 
 
-def _emit_rule_pack_row(path: str, kind: str, r: _DoctorResult) -> None:
-    """Validate a resolved rule-pack directory and emit one doctor row.
+def _rule_pack_cache_key(path: str) -> str:
+    """Return a stable identity for de-duplicating helper invocations."""
+    return os.path.normcase(
+        os.path.realpath(os.path.abspath(os.path.expanduser(path)))
+    )
 
-    *kind* is a human label for the source of the path (``"configured
-    rule_pack_dir"`` or ``"built-in default rule pack"``). A directory that is
-    missing — or present but empty — silently degrades guardrail enforcement
-    because the gateway loads zero rule packs from it, so both cases WARN; a
-    populated directory passes. (D9)
+
+_SAFE_EXCEPTION_CLASS_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+
+
+class _UnexpectedRulePackValidatorFailure:
+    """Cached, display-safe evidence for an unexpected validator exception."""
+
+    __slots__ = ("exception_class",)
+
+    def __init__(self, exc: Exception) -> None:
+        name = type(exc).__name__
+        self.exception_class = (
+            name if _SAFE_EXCEPTION_CLASS_NAME.fullmatch(name) else "Exception"
+        )
+
+
+def _emit_rule_pack_row(
+    path: str,
+    kind: str,
+    r: _DoctorResult,
+    *,
+    validation_cache: dict[str, object] | None = None,
+) -> None:
+    """Authoritatively validate a resolved rule pack and emit one doctor row.
+
+    *kind* identifies a configured or built-in-default path. Filesystem
+    presence is never treated as proof of validity: only a compatible response
+    from the offline Go validator can emit PASS. Invalid packs FAIL. A missing,
+    unstartable, or protocol-incompatible helper emits WARN so doctor remains
+    usable during an incomplete upgrade without claiming enforcement is sound.
+    A valid partial overlay with no direct rule-category overrides also WARNs;
+    compiled categories remain active, but the row does not claim that the
+    overlay itself enables rules.
     """
-    if not os.path.isdir(path):
+    cache_key = _rule_pack_cache_key(path)
+    outcome: object
+    if validation_cache is not None and cache_key in validation_cache:
+        outcome = validation_cache[cache_key]
+    else:
+        try:
+            outcome = rulepack_validation.validate_rule_pack(path)
+        except rulepack_validation.RulePackValidationBridgeError as exc:
+            outcome = exc
+        except Exception as exc:  # noqa: BLE001 - doctor must remain usable on unexpected validator failures.
+            outcome = _UnexpectedRulePackValidatorFailure(exc)
+        if validation_cache is not None:
+            validation_cache[cache_key] = outcome
+
+    shown_path = rulepack_validation.safe_display_path(path)
+    if isinstance(outcome, _UnexpectedRulePackValidatorFailure):
         _emit(
             "warn",
             "Rule pack",
-            f"{kind} not found on disk: {path} — guardrail enforcement would run with no rule packs",
+            f"{kind} {shown_path}: validation unavailable "
+            f"(unexpected validator failure: {outcome.exception_class})",
             r=r,
         )
         return
-    try:
-        with os.scandir(path) as entries:
-            has_contents = any(True for _ in entries)
-    except OSError:
-        has_contents = False
-    if not has_contents:
+
+    if isinstance(outcome, rulepack_validation.RulePackValidationBridgeError):
         _emit(
             "warn",
             "Rule pack",
-            f"{kind} is empty: {path} — guardrail enforcement would run with no rule packs",
+            f"{kind} {shown_path}: validation unavailable ({outcome})",
             r=r,
         )
         return
-    _emit("pass", "Rule pack", f"{path} ({kind})", r=r)
+
+    if not isinstance(outcome, rulepack_validation.RulePackValidationResult):
+        _emit(
+            "warn",
+            "Rule pack",
+            f"{kind} {shown_path}: validation unavailable (internal response mismatch)",
+            r=r,
+        )
+        return
+
+    if not outcome.valid:
+        issue = outcome.error
+        if issue is None:  # Defensive: the wire decoder already enforces this.
+            _emit(
+                "warn",
+                "Rule pack",
+                f"{kind} {shown_path}: validation unavailable (missing diagnostic)",
+                r=r,
+            )
+            return
+        _emit(
+            "fail",
+            "Rule pack",
+            f"{kind} {shown_path}: {issue.code} at {issue.path}: {issue.reason}",
+            r=r,
+        )
+        return
+
+    summary = outcome.summary or {}
+    enabled_rule_count = summary.get("enabled_rule_count", 0)
+    rule_count = summary.get("rule_count", 0)
+    digest = summary.get("digest", "")
+    detail = (
+        f"{kind} {shown_path}: "
+        f"{enabled_rule_count}/{rule_count} rules enabled"
+    )
+    if enabled_rule_count == 0 and rule_count == 0:
+        detail += "; compiled default categories retained"
+    if digest:
+        detail += f"; digest={digest}"
+    _emit(
+        "warn" if enabled_rule_count == 0 else "pass",
+        "Rule pack",
+        detail,
+        r=r,
+    )
 
 
-def _check_connector_inventory(cfg, connector: str, r: _DoctorResult) -> None:
+def _check_connector_inventory(
+    cfg,
+    connector: str,
+    r: _DoctorResult,
+    *,
+    rule_pack_validation_cache: dict[str, object] | None = None,
+) -> None:
     """Surface one connector and everything it resolves to.
 
     Each connector has its own conventions for where skills, plugins,
@@ -4184,16 +4287,21 @@ def _check_connector_inventory(cfg, connector: str, r: _DoctorResult) -> None:
     else:
         _emit("skip", "MCP servers", "no MCP servers registered", r=r)
 
-    # Effective rule pack for this connector (falls back to built-in
-    # defaults when no rule_pack_dir is configured). Warn when the resolved
-    # directory is missing/empty on disk — that silently degrades enforcement.
+    # Effective rule pack for this connector (falls back to built-in defaults
+    # when no rule_pack_dir is configured). The offline Go loader validates
+    # the resolved pack; Python filesystem presence is never treated as proof.
     if gc is not None and hasattr(gc, "effective_rule_pack_dir"):
         try:
             rule_pack_dir = (gc.effective_rule_pack_dir(connector) or "").strip()
         except Exception:  # noqa: BLE001
             rule_pack_dir = ""
         if rule_pack_dir:
-            _emit_rule_pack_row(rule_pack_dir, "configured rule_pack_dir", r)
+            _emit_rule_pack_row(
+                rule_pack_dir,
+                "configured rule_pack_dir",
+                r,
+                validation_cache=rule_pack_validation_cache,
+            )
         else:
             # No explicit rule_pack_dir → the gateway resolves the built-in
             # default to <data_dir>/policies/guardrail/default and loads packs
@@ -4205,7 +4313,12 @@ def _check_connector_inventory(cfg, connector: str, r: _DoctorResult) -> None:
             data_dir = getattr(cfg, "data_dir", "") or ""
             if data_dir:
                 default_dir = os.path.join(data_dir, "policies", "guardrail", "default")
-                _emit_rule_pack_row(default_dir, "built-in default rule pack", r)
+                _emit_rule_pack_row(
+                    default_dir,
+                    "built-in default rule pack",
+                    r,
+                    validation_cache=rule_pack_validation_cache,
+                )
             else:
                 _emit(
                     "skip",

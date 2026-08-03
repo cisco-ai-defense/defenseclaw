@@ -781,7 +781,7 @@ func TestRouteApprovalDangerousCommand(t *testing.T) {
 	}
 }
 
-func TestRouteApprovalDangerousArgvOnly(t *testing.T) {
+func TestRouteApprovalDownloadOnlyArgvAutoApproved(t *testing.T) {
 	received := make(chan receivedRequest, 5)
 	srv := startMockGW(t, rpcRecordingLoop(received))
 	client := connectToMockGW(t, srv)
@@ -808,8 +808,8 @@ func TestRouteApprovalDangerousArgvOnly(t *testing.T) {
 	}
 	var params ApprovalResolveParams
 	json.Unmarshal(rpc.Params, &params)
-	if params.Decision != "deny" {
-		t.Errorf("Decision = %q, want deny", params.Decision)
+	if params.Decision != "allow-once" {
+		t.Errorf("Decision = %q, want allow-once", params.Decision)
 	}
 }
 
