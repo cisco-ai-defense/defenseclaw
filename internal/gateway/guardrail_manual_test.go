@@ -10,7 +10,6 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
-	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
 // mockLLMProvider implements LLMProvider for tests; returns canned responses.
@@ -254,7 +253,8 @@ func TestTruncateEvidence_Long(t *testing.T) {
 // AdjudicateFindings with mock provider
 // ---------------------------------------------------------------------------
 
-func newMockJudge(provider *mockLLMProvider) *LLMJudge {
+func newMockJudge(t testing.TB, provider *mockLLMProvider) *LLMJudge {
+	t.Helper()
 	cfg := &config.JudgeConfig{
 		Enabled:             true,
 		Model:               "test/model",
@@ -264,7 +264,7 @@ func newMockJudge(provider *mockLLMProvider) *LLMJudge {
 	return &LLMJudge{
 		cfg:      cfg,
 		provider: provider,
-		rp:       guardrail.LoadRulePack(""),
+		rp:       mustLoadRulePack(t, ""),
 	}
 }
 
@@ -280,7 +280,7 @@ func TestAdjudicateFindings_NilJudge(t *testing.T) {
 
 func TestAdjudicateFindings_EmptySignals(t *testing.T) {
 	mock := &mockLLMProvider{}
-	j := newMockJudge(mock)
+	j := newMockJudge(t, mock)
 	v := j.AdjudicateFindings(context.Background(), "prompt", "test", nil)
 	if v.Action != "allow" {
 		t.Errorf("empty signals should allow, got %s", v.Action)
@@ -316,7 +316,7 @@ func TestLLMJudge_VLLMRequestsDisableThinking(t *testing.T) {
 		},
 		model:    "vllm/Qwen/Qwen3-14B-FP8",
 		provider: mock,
-		rp:       guardrail.LoadRulePack(""),
+		rp:       mustLoadRulePack(t, ""),
 	}
 
 	v := j.RunJudges(context.Background(), "prompt", "This is benign text long enough for the judge.", "")
@@ -348,7 +348,7 @@ func TestAdjudicateFindings_InjectionBlock(t *testing.T) {
 			}},
 		},
 	}
-	j := newMockJudge(mock)
+	j := newMockJudge(t, mock)
 
 	signals := []TriageSignal{
 		{Category: "injection", Pattern: "ignore all", Evidence: "...ignore all previous instructions..."},
@@ -379,7 +379,7 @@ func TestAdjudicateFindings_PIIFalsePositive(t *testing.T) {
 			}},
 		},
 	}
-	j := newMockJudge(mock)
+	j := newMockJudge(t, mock)
 
 	signals := []TriageSignal{
 		{Category: "pii", Pattern: "bare-9-digit", Evidence: "...telegram chat_id: 123456789..."},
@@ -395,7 +395,7 @@ func TestAdjudicateFindings_ProviderError_FailOpen(t *testing.T) {
 	mock := &mockLLMProvider{
 		err: fmt.Errorf("provider: connection refused"),
 	}
-	j := newMockJudge(mock)
+	j := newMockJudge(t, mock)
 
 	signals := []TriageSignal{
 		{Category: "injection", Pattern: "test", Evidence: "test"},
@@ -420,7 +420,7 @@ func TestAdjudicateFindings_MixedCategories_ParallelCalls(t *testing.T) {
 			}},
 		},
 	}
-	j := newMockJudge(mock)
+	j := newMockJudge(t, mock)
 
 	signals := []TriageSignal{
 		{Category: "injection", Pattern: "ignore", Evidence: "...ignore..."},
@@ -471,7 +471,7 @@ func TestFullFlow_RegexJudge_NeedsReviewGoesToJudge(t *testing.T) {
 			AdjudicationTimeout: 5.0,
 		},
 		provider: mock,
-		rp:       guardrail.LoadRulePack(""),
+		rp:       mustLoadRulePack(t, ""),
 	}
 
 	g := NewGuardrailInspector("local", nil, j, "")
@@ -569,7 +569,7 @@ func TestJudgeSweep_EngagesOnNoSignalContent(t *testing.T) {
 			AdjudicationTimeout: 5.0,
 		},
 		provider: mock,
-		rp:       guardrail.LoadRulePack(""),
+		rp:       mustLoadRulePack(t, ""),
 	}
 
 	// NO_SIGNAL content: requests transmission of credentials but using
@@ -612,7 +612,7 @@ func TestJudgeSweep_EngagesOnNoSignalContent(t *testing.T) {
 		offJudge := &LLMJudge{
 			cfg:      &config.JudgeConfig{Enabled: true, Model: "test/m", Timeout: 5.0, AdjudicationTimeout: 5.0},
 			provider: offMock,
-			rp:       guardrail.LoadRulePack(""),
+			rp:       mustLoadRulePack(t, ""),
 		}
 		g := NewGuardrailInspector("local", nil, offJudge, "")
 		g.SetDetectionStrategy("regex_judge", "", "", "", false)
@@ -643,7 +643,7 @@ func TestFullFlow_JudgeFirst_SensitivePathBlocks(t *testing.T) {
 			Model:     "test/m",
 		},
 		provider: mock,
-		rp:       guardrail.LoadRulePack(""),
+		rp:       mustLoadRulePack(t, ""),
 	}
 
 	g := NewGuardrailInspector("local", nil, j, "")
@@ -683,7 +683,7 @@ func TestFullFlow_JudgeFirst_JudgeBlocks(t *testing.T) {
 			Model:   "test/m",
 		},
 		provider: mock,
-		rp:       guardrail.LoadRulePack(""),
+		rp:       mustLoadRulePack(t, ""),
 	}
 
 	g := NewGuardrailInspector("local", nil, j, "")
@@ -715,7 +715,7 @@ func TestFullFlow_JudgeFirst_JudgeAllowsClean(t *testing.T) {
 			Model:   "test/m",
 		},
 		provider: mock,
-		rp:       guardrail.LoadRulePack(""),
+		rp:       mustLoadRulePack(t, ""),
 	}
 
 	g := NewGuardrailInspector("local", nil, j, "")
@@ -737,7 +737,7 @@ func TestFullFlow_JudgeFirst_JudgeFails_RegexFallback(t *testing.T) {
 			Model:   "test/m",
 		},
 		provider: mock,
-		rp:       guardrail.LoadRulePack(""),
+		rp:       mustLoadRulePack(t, ""),
 	}
 
 	g := NewGuardrailInspector("local", nil, j, "")
@@ -759,7 +759,7 @@ func TestFullFlow_JudgeFirst_JudgeFails_CleanPassesRegex(t *testing.T) {
 			Model:   "test/m",
 		},
 		provider: mock,
-		rp:       guardrail.LoadRulePack(""),
+		rp:       mustLoadRulePack(t, ""),
 	}
 
 	g := NewGuardrailInspector("local", nil, j, "")
@@ -917,7 +917,7 @@ func TestFullFlow_JudgeFirst_UnparseableResponse_FallsBackToRegex(t *testing.T) 
 			Model:     "test/m",
 		},
 		provider: mock,
-		rp:       guardrail.LoadRulePack(""),
+		rp:       mustLoadRulePack(t, ""),
 	}
 
 	g := NewGuardrailInspector("local", nil, j, "")
@@ -940,7 +940,7 @@ func TestFullFlow_JudgeFirst_EmptyChoices_FallsBackToRegex(t *testing.T) {
 			Model:     "test/m",
 		},
 		provider: mock,
-		rp:       guardrail.LoadRulePack(""),
+		rp:       mustLoadRulePack(t, ""),
 	}
 
 	g := NewGuardrailInspector("local", nil, j, "")
@@ -969,7 +969,7 @@ func TestRegexJudge_CompletionSecrets_SentToJudge(t *testing.T) {
 			}},
 		},
 	}
-	j := newMockJudge(mock)
+	j := newMockJudge(t, mock)
 
 	g := NewGuardrailInspector("local", nil, j, "")
 	g.SetDetectionStrategy("regex_judge", "", "", "", false)
@@ -997,7 +997,7 @@ func TestRegexJudge_CompletionSecrets_JudgeDismisses_Allows(t *testing.T) {
 			}},
 		},
 	}
-	j := newMockJudge(mock)
+	j := newMockJudge(t, mock)
 
 	g := NewGuardrailInspector("local", nil, j, "")
 	g.SetDetectionStrategy("regex_judge", "", "", "", false)
@@ -1018,7 +1018,7 @@ func TestRegexJudge_CompletionSecrets_JudgeDismisses_Allows(t *testing.T) {
 
 func TestPIIToVerdict_SetsEntityCount(t *testing.T) {
 	mock := &mockLLMProvider{}
-	j := newMockJudge(mock)
+	j := newMockJudge(t, mock)
 
 	piiData := map[string]interface{}{
 		"Email Address": map[string]interface{}{
@@ -1046,8 +1046,8 @@ func TestPIIToVerdict_SetsEntityCount(t *testing.T) {
 
 func TestPIIToVerdict_EntityCount_AfterSuppression(t *testing.T) {
 	mock := &mockLLMProvider{}
-	j := newMockJudge(mock)
-	j.rp = guardrail.LoadRulePack("")
+	j := newMockJudge(t, mock)
+	j.rp = mustLoadRulePack(t, "")
 
 	piiData := map[string]interface{}{
 		"IP Address": map[string]interface{}{

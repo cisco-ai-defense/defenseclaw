@@ -22,9 +22,17 @@ import (
 // be represented safely by a flat substring regexp. It performs lexical
 // normalization only: input is never decoded, expanded, or executed.
 func windowsCommandFindings(text, toolName string) []RuleFinding {
+	return windowsCommandFindingsWithOptions(text, toolName, ruleScanOptions{})
+}
+
+func windowsCommandFindingsWithOptions(
+	text string,
+	toolName string,
+	options ruleScanOptions,
+) []RuleFinding {
 	command, dialect, ok := windowsCommandText(text, toolName)
 	if !ok {
-		return windowsSensitivePathFindings(text, toolName, false)
+		return windowsSensitivePathFindingsWithOptions(text, toolName, false, options)
 	}
 
 	pipeline, dialect := unwrapWindowsCommand(command, dialect, 0)
@@ -35,7 +43,7 @@ func windowsCommandFindings(text, toolName string) []RuleFinding {
 	findings := make([]RuleFinding, 0, 4)
 	seen := make(map[string]bool)
 	add := func(id, title, severity string, confidence float64, tags ...string) {
-		if seen[id] {
+		if seen[id] || !options.allows(id, hardcodedToolCallOnlyRule(id)) {
 			return
 		}
 		seen[id] = true
@@ -64,7 +72,12 @@ func windowsCommandFindings(text, toolName string) []RuleFinding {
 		}
 
 		if windowsCommandCanReadSensitivePath(name) {
-			for _, f := range windowsSensitivePathFindings(strings.Join(args, " "), toolName, true) {
+			for _, f := range windowsSensitivePathFindingsWithOptions(
+				strings.Join(args, " "),
+				toolName,
+				true,
+				options,
+			) {
 				if !seen[f.RuleID] {
 					seen[f.RuleID] = true
 					findings = append(findings, f)
@@ -477,6 +490,20 @@ func windowsCommandCanReadSensitivePath(name string) bool {
 }
 
 func windowsSensitivePathFindings(text, toolName string, commandContext bool) []RuleFinding {
+	return windowsSensitivePathFindingsWithOptions(
+		text,
+		toolName,
+		commandContext,
+		ruleScanOptions{},
+	)
+}
+
+func windowsSensitivePathFindingsWithOptions(
+	text string,
+	toolName string,
+	commandContext bool,
+	options ruleScanOptions,
+) []RuleFinding {
 	tool := strings.ToLower(strings.TrimSpace(toolName))
 	if !commandContext {
 		switch tool {
@@ -504,6 +531,9 @@ func windowsSensitivePathFindings(text, toolName string, commandContext bool) []
 	seen := make(map[string]bool)
 	var findings []RuleFinding
 	for _, rule := range windowsSensitivePathRules {
+		if !options.allows(rule.id, hardcodedToolCallOnlyRule(rule.id)) {
+			continue
+		}
 		if !seen[rule.id] && rule.pattern.MatchString(n) {
 			seen[rule.id] = true
 			findings = append(findings, RuleFinding{

@@ -111,6 +111,28 @@ def _is_help_invocation(ctx: click.Context) -> bool:
     return any(a in {"-h", "--help"} for a in argv)
 
 
+def _is_offline_rulepack_validation(ctx: click.Context) -> bool:
+    """Return whether the nested command is ``guardrail validate-pack``.
+
+    Click exposes only the top-level ``guardrail`` name while the root callback
+    is running. Use that parsed name as the trust anchor, then locate its exact
+    argv token so root-option and ``--`` prefixes do not change the result. The
+    next token must be the exact nested command; intervening options or a
+    different subcommand do not receive the config-independent bypass.
+    """
+    if ctx.invoked_subcommand != "guardrail":
+        return False
+    argv = sys.argv[1:]
+    try:
+        guardrail_index = argv.index("guardrail")
+    except ValueError:
+        return False
+    return (
+        guardrail_index + 1 < len(argv)
+        and argv[guardrail_index + 1] == "validate-pack"
+    )
+
+
 def _emit_version_json(ctx: click.Context, _param: click.Parameter | None, value: bool) -> None:
     """Emit a stable installer-facing version record before config loading."""
     if not value or ctx.resilient_parsing:
@@ -175,6 +197,8 @@ def cli(ctx: click.Context) -> None:
             )
             raise SystemExit(1)
     if _is_help_invocation(ctx):
+        return
+    if _is_offline_rulepack_validation(ctx):
         return
 
     from defenseclaw import config as cfg_mod

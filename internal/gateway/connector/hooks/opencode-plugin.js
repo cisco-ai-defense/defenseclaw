@@ -1,4 +1,4 @@
-// defenseclaw-managed-plugin v6
+// defenseclaw-managed-plugin v7
 // DefenseClaw opencode bridge plugin — DO NOT EDIT.
 //
 // opencode auto-loads JS/TS plugins from ~/.config/opencode/plugins/ at
@@ -12,7 +12,8 @@
 // the gateway token; it is never executable. DefenseClaw's Teardown
 // removes this file (managed-file backup heal).
 //
-// Wire contract: POST {hook_event_name, tool_name, tool_input, cwd} to
+// Wire contract: POST {hook_event_name, tool_name, tool_input,
+// tool_response, cwd} to
 // /api/v1/opencode/hook; the response carries hook_output={decision,
 // reason}; decision "deny"/"block" aborts the tool.
 
@@ -23,7 +24,7 @@ const DC_API_TOKEN = "{{.APIToken}}";
 const DC_FAIL_MODE = "{{.FailMode}}"; // "open" or "closed"
 const DC_TIMEOUT_MS = 10000;
 
-async function defenseclawPost(event, toolName, toolInput, cwd, context) {
+async function defenseclawPost(event, toolName, toolInput, toolResponse, cwd, context) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DC_TIMEOUT_MS);
   const headers = { "Content-Type": "application/json", "X-DefenseClaw-Client": "opencode-plugin/1.0" };
@@ -36,6 +37,7 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context) {
         hook_event_name: event,
         tool_name: toolName || "",
         tool_input: toolInput || {},
+        tool_response: toolResponse || null,
         session_id: context && (context.sessionID || context.sessionId) || "",
         turn_id: context && (context.messageID || context.messageId) || "",
         tool_call_id: context && (context.callID || context.callId) || "",
@@ -123,15 +125,25 @@ export const DefenseClaw = async ({ directory, worktree }) => {
         "tool.execute.before",
         input && input.tool,
         output && output.args,
+        null,
         cwd,
         input,
       );
       if (verdict) throw new Error(verdict.reason);
     },
-    // tool.execute.after is observe-only telemetry: fire-and-forget so it
-    // never adds latency to (or blocks) the tool result.
+    // tool.execute.after is observe-only telemetry. Await delivery so the
+    // gateway can attribute this successful outcome to the exact call before
+    // a later tool starts; failures remain fail-open because the bridge never
+    // throws on an after-hook transport error.
     "tool.execute.after": async (input, output) => {
-      defenseclawPost("tool.execute.after", input && input.tool, output && output.args, cwd, input).catch(() => {});
+      await defenseclawPost(
+        "tool.execute.after",
+        input && input.tool,
+        input && input.args,
+        output,
+        cwd,
+        input,
+      );
     },
   };
 };

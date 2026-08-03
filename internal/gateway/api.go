@@ -3053,6 +3053,21 @@ func (sw *statusWriter) Flush() {
 	}
 }
 
+type authenticatedInspectConnectorKey struct{}
+
+func withAuthenticatedInspectConnector(ctx context.Context, connectorName string) context.Context {
+	connectorName = canonicalConnectorRulePackKey(connectorName)
+	if connectorName == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, authenticatedInspectConnectorKey{}, connectorName)
+}
+
+func authenticatedInspectConnector(ctx context.Context) string {
+	connectorName, _ := ctx.Value(authenticatedInspectConnectorKey{}).(string)
+	return canonicalConnectorRulePackKey(connectorName)
+}
+
 // tokenAuth wraps a handler with Bearer token authentication. Management
 // clients may use Authorization, X-DefenseClaw-Token, or the proxy-compatible
 // X-DC-Auth header; all are compared against the same gateway token.
@@ -3164,6 +3179,10 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 				_, registered = a.connectorRegistry.Get(hookScope)
 			}
 			if registered && a.hookAPITokenMatches(hookScope, token) {
+				r = r.WithContext(withAuthenticatedInspectConnector(
+					PromoteSessionIfAuthenticated(r.Context()),
+					hookScope,
+				))
 				next.ServeHTTP(w, r)
 				return
 			}

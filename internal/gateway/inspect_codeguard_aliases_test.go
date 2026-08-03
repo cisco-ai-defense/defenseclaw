@@ -26,7 +26,8 @@ import (
 // and edit_file do.
 func TestF3327_NativeWriteAliases(t *testing.T) {
 	for _, tool := range []string{
-		"Write", "Edit", "MultiEdit", "applyDiff", "patch",
+		"Write", "Edit", "MultiEdit", "applyDiff", "apply_patch",
+		"applypatch", "NotebookEdit", "notebook_edit", "patch",
 		"write", "edit", "multi_edit", "apply_diff",
 		"create_file", "fs_write", "fs_edit",
 	} {

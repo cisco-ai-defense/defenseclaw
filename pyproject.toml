@@ -4,7 +4,8 @@ version = "0.8.6"
 description = "Enterprise governance layer for OpenClaw — secures agentic AI deployments"
 readme = "README.md"
 requires-python = ">=3.10,<3.14"
-license = { text = "Apache-2.0" }
+license = "Apache-2.0"
+license-files = ["LICENSE", "NOTICE", "THIRD_PARTY_LICENSES.txt"]
 dependencies = [
     "click>=8.3.3,<9",
     "pyyaml==6.0.3",

@@ -1322,65 +1322,98 @@ func compileBaseline(sources []string) []*regexp.Regexp {
 //   - empty slice (lp.X != nil, len 0) → operator explicitly cleared the field
 //   - populated slice → wholesale replacement of the default
 //
-// Regex sources that fail to compile are logged and dropped from the
-// override; the default for that single regex slot is *not* retained
-// for the failed entry (the override is best-effort within the field).
-// A separate `compileRegexSafe`-style ReDoS guard would be sound but
-// is intentionally NOT applied here because the only producer of these
-// YAMLs today is human operators, not multi-tenant input — the rule
-// pack itself is a trust boundary upstream of the gateway. Callers
-// who need stricter compile guarantees should validate the YAML at
-// activation time (see cli/defenseclaw/commands/cmd_policy.py).
-func ApplyLocalPatternsOverride(lp *guardrail.LocalPatterns) {
-	localPatternsMu.Lock()
-	defer localPatternsMu.Unlock()
+// The candidate is compiled completely before any runtime state is mutated.
+// Invalid operator regexes therefore reject activation instead of silently
+// dropping only the failed entries. Every activation starts from the generated
+// defaults, so removing a field from an override restores its default rather
+// than retaining the previous candidate's value.
+func ApplyLocalPatternsOverride(lp *guardrail.LocalPatterns) error {
+	activation, err := prepareLocalPatternsOverride(lp)
+	if err != nil {
+		return err
+	}
+	publishLocalPatternsOverride(activation)
+	return nil
+}
 
-	if lp == nil {
-		injectionPatterns = append([]string(nil), defaultInjectionPatterns...)
-		injectionRegexes = compileBaseline(defaultInjectionRegexSources)
-		piiRequestPatterns = append([]string(nil), defaultPIIRequestPatterns...)
-		piiDataRegexes = compileBaseline(defaultPIIDataRegexSources)
-		secretPatterns = append([]string(nil), defaultSecretPatterns...)
-		exfilPatterns = append([]string(nil), defaultExfilPatterns...)
+type localPatternsActivation struct {
+	injectionPatterns  []string
+	injectionRegexes   []*regexp.Regexp
+	piiRequestPatterns []string
+	piiDataRegexes     []*regexp.Regexp
+	secretPatterns     []string
+	exfilPatterns      []string
+}
+
+func prepareLocalPatternsOverride(lp *guardrail.LocalPatterns) (*localPatternsActivation, error) {
+	activation := &localPatternsActivation{
+		injectionPatterns:  append([]string(nil), defaultInjectionPatterns...),
+		injectionRegexes:   compileBaseline(defaultInjectionRegexSources),
+		piiRequestPatterns: append([]string(nil), defaultPIIRequestPatterns...),
+		piiDataRegexes:     compileBaseline(defaultPIIDataRegexSources),
+		secretPatterns:     append([]string(nil), defaultSecretPatterns...),
+		exfilPatterns:      append([]string(nil), defaultExfilPatterns...),
+	}
+	if lp != nil {
+		if lp.Injection != nil {
+			activation.injectionPatterns = append([]string(nil), lp.Injection...)
+		}
+		if lp.InjectionRegexes != nil {
+			compiled, err := compileLocalPatternSources("injection_regexes", lp.InjectionRegexes)
+			if err != nil {
+				return nil, err
+			}
+			activation.injectionRegexes = compiled
+		}
+		if lp.PIIRequests != nil {
+			activation.piiRequestPatterns = append([]string(nil), lp.PIIRequests...)
+		}
+		if lp.PIIDataRegexes != nil {
+			compiled, err := compileLocalPatternSources("pii_data_regexes", lp.PIIDataRegexes)
+			if err != nil {
+				return nil, err
+			}
+			activation.piiDataRegexes = compiled
+		}
+		if lp.Secrets != nil {
+			activation.secretPatterns = append([]string(nil), lp.Secrets...)
+		}
+		if lp.Exfiltration != nil {
+			activation.exfilPatterns = append([]string(nil), lp.Exfiltration...)
+		}
+	}
+	return activation, nil
+}
+
+func publishLocalPatternsOverride(activation *localPatternsActivation) {
+	if activation == nil {
 		return
 	}
+	localPatternsMu.Lock()
+	injectionPatterns = activation.injectionPatterns
+	injectionRegexes = activation.injectionRegexes
+	piiRequestPatterns = activation.piiRequestPatterns
+	piiDataRegexes = activation.piiDataRegexes
+	secretPatterns = activation.secretPatterns
+	exfilPatterns = activation.exfilPatterns
+	localPatternsMu.Unlock()
+}
 
-	if lp.Injection != nil {
-		injectionPatterns = append([]string(nil), lp.Injection...)
-	}
-	if lp.InjectionRegexes != nil {
-		out := make([]*regexp.Regexp, 0, len(lp.InjectionRegexes))
-		for _, src := range lp.InjectionRegexes {
-			re, err := regexp.Compile(src)
-			if err != nil {
-				fmt.Fprintf(defaultLogWriter, "[guardrail] local-patterns: skip injection_regexes %q: %v\n", src, err)
-				continue
-			}
-			out = append(out, re)
+func compileLocalPatternSources(field string, sources []string) ([]*regexp.Regexp, error) {
+	compiled := make([]*regexp.Regexp, 0, len(sources))
+	for index, src := range sources {
+		re, err := compileRegexSafe(src)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"local-patterns %s entry %d contains an invalid regular expression: %w",
+				field,
+				index,
+				err,
+			)
 		}
-		injectionRegexes = out
+		compiled = append(compiled, re)
 	}
-	if lp.PIIRequests != nil {
-		piiRequestPatterns = append([]string(nil), lp.PIIRequests...)
-	}
-	if lp.PIIDataRegexes != nil {
-		out := make([]*regexp.Regexp, 0, len(lp.PIIDataRegexes))
-		for _, src := range lp.PIIDataRegexes {
-			re, err := regexp.Compile(src)
-			if err != nil {
-				fmt.Fprintf(defaultLogWriter, "[guardrail] local-patterns: skip pii_data_regexes %q: %v\n", src, err)
-				continue
-			}
-			out = append(out, re)
-		}
-		piiDataRegexes = out
-	}
-	if lp.Secrets != nil {
-		secretPatterns = append([]string(nil), lp.Secrets...)
-	}
-	if lp.Exfiltration != nil {
-		exfilPatterns = append([]string(nil), lp.Exfiltration...)
-	}
+	return compiled, nil
 }
 
 // secretPatternRegexes tighten patterns that cause false positives as bare

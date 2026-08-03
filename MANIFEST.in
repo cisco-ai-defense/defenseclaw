@@ -14,6 +14,9 @@ prune .git
 prune .github
 prune .pytest_cache
 include setup.py
+include LICENSE
+include NOTICE
+include THIRD_PARTY_LICENSES.txt
 include internal/envvars/registry.json
 include scripts/telemetry_runtime_assets.py
 include schemas/config/v8/defenseclaw-config.schema.json

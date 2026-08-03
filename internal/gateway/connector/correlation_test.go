@@ -144,6 +144,8 @@ func TestCodexCorrelationProfileSupportsExactReviewedHookContracts(t *testing.T)
 		{contractID: "codex-hooks-v1"},
 		{contractID: "codex-hooks-v2"},
 		{contractID: "codex-hooks-v3", wantSubagentStart: true},
+		{contractID: "codex-hooks-v3-generic", wantSubagentStart: true},
+		{contractID: "codex-hooks-v4", wantSubagentStart: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.contractID, func(t *testing.T) {

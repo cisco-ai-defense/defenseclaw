@@ -41,6 +41,7 @@ import (
 	"golang.org/x/crypto/pbkdf2"
 	"golang.org/x/time/rate"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/configs"
@@ -4788,7 +4789,15 @@ func (p *GuardrailProxy) inspectToolCalls(ctx context.Context, toolCallsJSON jso
 		toolName := tc.Function.Name
 		args := tc.Function.Arguments
 
-		findings := ScanAllRules(args, toolName)
+		findings := dispatchTrustedAction(ctx, trustedActionRequest{
+			Input: actionfacts.Input{
+				Tool: toolName,
+				Args: json.RawMessage(args),
+			},
+			LegacyText:         args,
+			Connector:          p.connectorName(),
+			EnforcementCapable: true,
+		})
 		// Stamp the tool's capability class (read_fs / exec_shell /
 		// network_fetch / …) onto each finding from this call so the
 		// sliding-window correlator can reason about capability
@@ -4812,7 +4821,15 @@ func (p *GuardrailProxy) inspectToolCalls(ctx context.Context, toolCallsJSON jso
 	severity := HighestSeverity(allFindings)
 	confidence := HighestConfidence(allFindings, severity)
 
-	action := guardrailRuntimeActionForGuardrail(p.cfg, severity, false)
+	enforceable := enforceableRuleFindings(allFindings)
+	action := guardrailActionAlert
+	if len(enforceable) > 0 {
+		action = guardrailRuntimeActionForGuardrail(
+			p.cfg,
+			HighestSeverity(enforceable),
+			false,
+		)
+	}
 	if action == guardrailActionAllow {
 		return nil
 	}

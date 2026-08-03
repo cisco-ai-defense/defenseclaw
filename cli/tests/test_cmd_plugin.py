@@ -1071,10 +1071,16 @@ class TestPluginMultiConnectorSemantics(PluginCommandTestBase):
             findings=[], duration=timedelta(seconds=0.1),
         )
 
+    @patch("defenseclaw.scanner.rulepack.maybe_wrap")
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
-    def test_bare_scan_duplicate_scans_every_connector_copy(self, mock_scan):
+    def test_bare_scan_duplicate_scans_every_connector_copy(
+        self,
+        mock_scan,
+        mock_maybe_wrap,
+    ):
         codex_path = self._seed_connector_plugin("codex", "shared")
         hermes_path = self._seed_connector_plugin("hermes", "shared")
+        mock_maybe_wrap.side_effect = lambda inner, *_args, **_kwargs: inner
         mock_scan.side_effect = lambda path, **_kwargs: self._clean_scan_result(path)
 
         result = self.invoke(["scan", "shared"])
@@ -1085,6 +1091,8 @@ class TestPluginMultiConnectorSemantics(PluginCommandTestBase):
         self.assertEqual(mock_scan.call_count, 2)
         scanned = {call.args[0] for call in mock_scan.call_args_list}
         self.assertEqual(scanned, {codex_path, hermes_path})
+        overlay_connectors = [call.args[2] for call in mock_maybe_wrap.call_args_list]
+        self.assertEqual(overlay_connectors, ["codex", "hermes"])
 
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
     def test_scoped_scan_json_includes_connector_metadata(self, mock_scan):

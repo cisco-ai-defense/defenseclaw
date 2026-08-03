@@ -2905,6 +2905,22 @@
       "since": "0.8.8"
     },
     {
+      "name": "DEFENSECLAW_SHIM_CAPTURE",
+      "category": "test_fixture",
+      "purpose": "Carries the output path used by the isolated PATH-shim argv fidelity fixture.",
+      "default": "unset",
+      "accepted_values": ["test-defined absolute path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/connector_test.go",
+          "description": "Captures the fake curl request body so the test can verify exact shim argv forwarding; never read by production runtime paths"
+        }
+      ],
+      "since": "0.9.0"
+    },
+    {
       "name": "DEFENSECLAW_GATEWAY_URL",
       "category": "test_fixture",
       "purpose": "Base URL of an external gateway for the security-suite e2e tier (TestSecuritySuiteE2E). When set, the test posts to that gateway's /api/v1/inspect/* endpoints; when unset, the tier runs against an in-process inspect server.",

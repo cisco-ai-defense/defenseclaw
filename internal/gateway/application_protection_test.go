@@ -30,6 +30,23 @@ func enabledApplicationProtectionConfig() config.ApplicationProtectionConfig {
 	return appProtection
 }
 
+func TestNewApplicationProtectionControllerHandlesMissingConfig(t *testing.T) {
+	controller := newApplicationProtectionController(
+		&Sidecar{},
+		connector.NewRegistry(),
+		"tok",
+		"127.0.0.1:4000",
+		"127.0.0.1:18970",
+		"master",
+	)
+	if controller == nil {
+		t.Fatal("controller is nil")
+	}
+	if len(controller.activeAuto) != 0 {
+		t.Fatalf("active automatic connectors = %v, want none", controller.activeAuto)
+	}
+}
+
 func TestApplicationProtectionControllerActivatesHookConnector(t *testing.T) {
 	dir := t.TempDir()
 	hookConfigPath := filepath.Join(dir, "codex", "config.toml")
@@ -85,6 +102,83 @@ func TestApplicationProtectionControllerActivatesHookConnector(t *testing.T) {
 	}
 	if state.Active[0].Source != "automatic" {
 		t.Errorf("state active source = %q, want automatic", state.Active[0].Source)
+	}
+}
+
+func TestApplicationProtectionRulePackFailureIsConnectorScoped(t *testing.T) {
+	resetConnectorRuleCategories(t)
+
+	dir := t.TempDir()
+	paths := map[string]string{
+		"codex":      filepath.Join(dir, "codex", "config.toml"),
+		"claudecode": filepath.Join(dir, "claudecode", "config.toml"),
+	}
+	for name, path := range paths {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatalf("mkdir %s hook config: %v", name, err)
+		}
+		if err := os.WriteFile(path, []byte("model = \"test\"\n"), 0o600); err != nil {
+			t.Fatalf("write %s hook config: %v", name, err)
+		}
+	}
+	appProtection := enabledApplicationProtectionConfig()
+	appProtection.Connectors = map[string]config.ApplicationProtectionConnectorConfig{
+		"codex": {
+			Guardrail: config.PerConnectorGuardrailConfig{RulePackDir: invalidRulePackDir(t)},
+		},
+		"claudecode": {
+			Guardrail: config.PerConnectorGuardrailConfig{RulePackDir: ""},
+		},
+	}
+	cfg := &config.Config{
+		DataDir:               dir,
+		ApplicationProtection: appProtection,
+		Guardrail:             config.GuardrailConfig{HookSelfHeal: false},
+	}
+	health := NewSidecarHealth()
+	sidecar := &Sidecar{cfg: cfg, health: health}
+	registry := connector.NewRegistry()
+	invalid := &appProtectionHookStub{
+		bootStubConnector: bootStubConnector{stubConnector: stubConnector{name: "codex"}},
+		hookConfigPath:    paths["codex"],
+	}
+	valid := &appProtectionHookStub{
+		bootStubConnector: bootStubConnector{stubConnector: stubConnector{name: "claudecode"}},
+		hookConfigPath:    paths["claudecode"],
+	}
+	registry.RegisterBuiltin(invalid)
+	registry.RegisterBuiltin(valid)
+	controller := newApplicationProtectionController(
+		sidecar, registry, "tok", "127.0.0.1:4000", "127.0.0.1:18970", "master",
+	)
+
+	now := time.Now().UTC()
+	controller.OnDiscoveryReport(context.Background(), inventory.AIDiscoveryReport{
+		Summary: inventory.AIDiscoverySummary{ScannedAt: now},
+		Signals: []inventory.AISignal{
+			{
+				Category: inventory.SignalSupportedConnector, SupportedConnector: "codex",
+				Name: "Codex", Confidence: 0.95, State: "active", LastSeen: now,
+			},
+			{
+				Category: inventory.SignalSupportedConnector, SupportedConnector: "claudecode",
+				Name: "Claude Code", Confidence: 0.95, State: "active", LastSeen: now,
+			},
+		},
+	})
+
+	if invalid.setupCalls != 0 || valid.setupCalls != 1 {
+		t.Fatalf("setup calls invalid/valid = %d/%d, want 0/1", invalid.setupCalls, valid.setupCalls)
+	}
+	state := loadApplicationProtectionState(dir)
+	if len(state.Active) != 1 || state.Active[0].Connector != "claudecode" {
+		t.Fatalf("active connectors = %+v, want only claudecode; state=%+v", state.Active, state)
+	}
+	if len(state.LastErrors) != 1 || state.LastErrors["codex"] == "" {
+		t.Fatalf("last activation errors = %+v, want only codex", state.LastErrors)
+	}
+	if _, leaked := state.LastErrors["claudecode"]; leaked {
+		t.Fatalf("valid connector inherited peer error: %+v", state.LastErrors)
 	}
 }
 
