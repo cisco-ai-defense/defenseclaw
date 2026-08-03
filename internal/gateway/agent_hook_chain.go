@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strconv"
@@ -33,7 +34,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
-const toolChainGatewayProjectionRevision = "authenticated-hook-projection-v1"
+const toolChainGatewayProjectionRevision = "authenticated-hook-projection-v2"
 
 type toolChainHookCaptureContextKey struct{}
 
@@ -61,9 +62,32 @@ func toolChainRecorderFromContext(
 // trusted dispatch. It prevents the hook boundary from reparsing the action or
 // running a second rule scan solely to build chain state.
 type toolChainHookCapture struct {
-	facts    actionfacts.Facts
-	findings []RuleFinding
-	recorded bool
+	facts               actionfacts.Facts
+	findings            []RuleFinding
+	artifactProjections []guardrail.ToolChainProjection
+	recorded            bool
+}
+
+func (capture *toolChainHookCapture) recordArtifactTrustedAction(
+	facts actionfacts.Facts,
+	findings []RuleFinding,
+	enforcementCapable bool,
+) {
+	if capture == nil {
+		return
+	}
+	projection := guardrail.ToolChainProjection{ParseStatus: facts.Parse.Status}
+	projectTrustedActionChainSteps(&projection, facts, findings)
+	if !enforcementCapable {
+		projection.EnforcementStepMask = 0
+	}
+	if !toolChainProjectionHasSteps(projection) {
+		return
+	}
+	capture.artifactProjections = append(
+		capture.artifactProjections,
+		projection,
+	)
 }
 
 func toolChainRecorder(
@@ -137,7 +161,20 @@ func (a *APIServer) applyAgentHookToolChains(
 		return resp, finalization
 	}
 
-	projection, typedFindings := projectAgentHookToolChains(req)
+	lifecycle := profile.ToolCallLifecycle
+	route := lifecycle.RouteForEvent(req.HookEventName)
+	structuredAction := route == connector.ToolEventRouteStructuredAction
+	stateTransition := route == connector.ToolEventRouteStateTransition
+	pairedResult := route == connector.ToolEventRouteResultContent &&
+		lifecycle.SupportsExactInvocationJoin()
+	lifecycleEligible := profile.ExperimentalToolLifecycleEligible()
+	projectionEligible := lifecycleEligible &&
+		(structuredAction || stateTransition || pairedResult)
+	var projection guardrail.ToolChainProjection
+	var typedFindings []RuleFinding
+	if projectionEligible {
+		projection, typedFindings = projectAgentHookToolChains(req, lifecycle)
+	}
 	if len(typedFindings) != 0 {
 		intent := guardrailRuntimeActionForConnector(
 			a.scannerCfg,
@@ -166,13 +203,14 @@ func (a *APIServer) applyAgentHookToolChains(
 			resp.RuleIDs = mergeBoundedRuleIDs(8, eval.RuleIDs, resp.RuleIDs)
 		}
 	}
+	if stateTransition && resp.Action == guardrailActionBlock {
+		// A synchronous transition that DefenseClaw denied is an attempted
+		// mutation, not durable evidence that enforcement actually changed.
+		return resp, finalization
+	}
 
 	if a.store == nil || req.SemanticEventID == "" ||
 		req.ConnectorInstanceID == "" {
-		return resp, finalization
-	}
-	rulesetFingerprint, err := activeToolChainRulesetFingerprint(req.ConnectorName)
-	if err != nil {
 		return resp, finalization
 	}
 	repository, err := a.store.ToolChainRepository()
@@ -180,6 +218,118 @@ func (a *APIServer) applyAgentHookToolChains(
 		return resp, finalization
 	}
 	rawFingerprint := sha256.Sum256(rawBody)
+	inputFingerprint := hex.EncodeToString(rawFingerprint[:])
+	if !lifecycleEligible {
+		// Compatibility loss can only reduce authority. Clear the exact
+		// authenticated session's pending proposals so an ignored outcome
+		// cannot be replayed later after compatibility becomes known again.
+		_, _ = repository.DiscardPendingForEventSession(
+			ctx,
+			audit.ToolChainDiscardPendingForEventSessionInput{
+				ConnectorInstanceID:      audit.ConnectorInstanceID(req.ConnectorInstanceID),
+				TerminalSemanticEventID:  audit.SemanticEventID(req.SemanticEventID),
+				TerminalInputFingerprint: inputFingerprint,
+			},
+		)
+		return resp, finalization
+	}
+	if lifecycle.IsAuthoritativeTerminalEvent(req.HookEventName) {
+		// A reviewed session-end, deletion, or reset boundary clears pending and
+		// committed inputs only through the exact authenticated session join. The
+		// durable cutoff also prevents stale pre-terminal replays from re-arming
+		// state; deny receipts remain replayable. Per-turn Stop/idle events are not
+		// terminal. Terminal events never imply tool success or enter semantic
+		// chain evaluation themselves.
+		_, _ = repository.ResetForTerminalEventSession(
+			ctx,
+			audit.ToolChainResetForTerminalEventSessionInput{
+				ConnectorInstanceID:      audit.ConnectorInstanceID(req.ConnectorInstanceID),
+				TerminalSemanticEventID:  audit.SemanticEventID(req.SemanticEventID),
+				TerminalInputFingerprint: inputFingerprint,
+			},
+		)
+		return resp, finalization
+	}
+	if lifecycle.IsAuthoritativePendingDiscardEvent(req.HookEventName) {
+		// A reviewed turn/response boundary invalidates unfinished proposals so a
+		// late result cannot promote them. Successful predecessors from earlier
+		// turns remain available to the same authenticated session.
+		_, _ = repository.DiscardPendingForEventSession(
+			ctx,
+			audit.ToolChainDiscardPendingForEventSessionInput{
+				ConnectorInstanceID:      audit.ConnectorInstanceID(req.ConnectorInstanceID),
+				TerminalSemanticEventID:  audit.SemanticEventID(req.SemanticEventID),
+				TerminalInputFingerprint: inputFingerprint,
+			},
+		)
+		return resp, finalization
+	}
+	if !projectionEligible {
+		return resp, finalization
+	}
+	rulesetFingerprint, err := activeToolChainRulesetFingerprint(
+		req.ConnectorName,
+		profile,
+	)
+	if err != nil {
+		return resp, finalization
+	}
+
+	predecessorProjection, terminalProjection := splitToolChainProjection(projection)
+	observationProjection := projection
+	if structuredAction {
+		// A pre-tool proposal is not proof that the action ran. Only its
+		// terminal-step evidence is evaluated synchronously against prior,
+		// outcome-confirmed predecessors. Step-one evidence remains pending
+		// until an exact success event promotes it below.
+		observationProjection = terminalProjection
+	}
+
+	invocationDigest := exactToolChainInvocationDigest(lifecycle, req)
+	resolvedSuccess := false
+	resolvedInvocation := false
+	if invocationDigest != "" &&
+		lifecycle.ExactInvocationJoinEligible(req.HookEventName) &&
+		route == connector.ToolEventRouteResultContent {
+		outcome := lifecycle.ClassifyTerminalOutcome(
+			req.ConnectorName,
+			req.HookEventName,
+			req.Payload,
+		)
+		resolved, resolveErr := repository.ResolvePending(
+			ctx,
+			audit.ToolChainResolvePendingInput{
+				ConnectorInstanceID:      audit.ConnectorInstanceID(req.ConnectorInstanceID),
+				ToolInvocationDigest:     invocationDigest,
+				Outcome:                  auditToolChainPendingOutcome(outcome),
+				RulesetFingerprint:       rulesetFingerprint,
+				TerminalSemanticEventID:  audit.SemanticEventID(req.SemanticEventID),
+				TerminalInputFingerprint: inputFingerprint,
+			},
+		)
+		if resolveErr != nil {
+			return resp, finalization
+		}
+		resolvedInvocation = resolved.Status == audit.ToolChainPendingResolved
+		resolvedSuccess = outcome == connector.ToolLifecycleOutcomeSuccess &&
+			resolvedInvocation
+		if outcome != connector.ToolLifecycleOutcomeSuccess {
+			// A failed, denied, cancelled, or ambiguous result must not
+			// replay command-derived step evidence from its proposal. Retain
+			// only independently typed event evidence (for example Claude's
+			// invocation-bound PermissionDenied transition).
+			typedOnly := req
+			typedOnly.toolChain = nil
+			observationProjection, _ = projectAgentHookToolChains(typedOnly, lifecycle)
+			if !resolvedInvocation {
+				// A reported call ID proves only that this result names an
+				// invocation. Enforcement state additionally requires the exact
+				// prepared proposal in the same authenticated session.
+				observationProjection.EnforcementStepMask = 0
+			}
+		}
+	}
+
 	caps := profile.Capabilities
 	chainRuntimeIntent := guardrailRuntimeActionForConnector(
 		a.scannerCfg,
@@ -189,19 +339,22 @@ func (a *APIServer) applyAgentHookToolChains(
 	)
 	denyEligible := chainRuntimeIntent == guardrailActionBlock &&
 		resp.Mode == "action" &&
-		isGenericToolInspectionEvent(req.HookEventName) &&
+		structuredAction &&
 		caps.CanBlock &&
 		eventIn(req.HookEventName, caps.BlockEvents)
-	result, err := repository.Observe(ctx, audit.ToolChainObserveInput{
-		SemanticEventID:     audit.SemanticEventID(req.SemanticEventID),
-		ConnectorInstanceID: audit.ConnectorInstanceID(req.ConnectorInstanceID),
-		InputFingerprint:    hex.EncodeToString(rawFingerprint[:]),
-		RulesetFingerprint:  rulesetFingerprint,
-		Projection:          projection,
-		DenyEligible:        denyEligible,
-	})
-	if err != nil {
-		return resp, finalization
+	var result audit.ToolChainObserveResult
+	if !resolvedSuccess && toolChainProjectionHasSteps(observationProjection) {
+		result, err = repository.Observe(ctx, audit.ToolChainObserveInput{
+			SemanticEventID:     audit.SemanticEventID(req.SemanticEventID),
+			ConnectorInstanceID: audit.ConnectorInstanceID(req.ConnectorInstanceID),
+			InputFingerprint:    inputFingerprint,
+			RulesetFingerprint:  rulesetFingerprint,
+			Projection:          observationProjection,
+			DenyEligible:        denyEligible,
+		})
+		if err != nil {
+			return resp, finalization
+		}
 	}
 	if result.DeniedMask != 0 && panicState != nil {
 		// Observe commits the deny receipt before returning. Snapshot an
@@ -285,7 +438,84 @@ func (a *APIServer) applyAgentHookToolChains(
 		finalization.repository = repository
 		finalization.receiptIDs = append([]string(nil), result.ReceiptIDs...)
 	}
+
+	if structuredAction &&
+		resp.Action != guardrailActionBlock &&
+		invocationDigest != "" &&
+		lifecycle.IsPreProposalEvent(req.HookEventName) {
+		if _, prepareErr := repository.PreparePending(
+			ctx,
+			audit.ToolChainPreparePendingInput{
+				ConnectorInstanceID:  audit.ConnectorInstanceID(req.ConnectorInstanceID),
+				ToolInvocationDigest: invocationDigest,
+				PreSemanticEventID:   audit.SemanticEventID(req.SemanticEventID),
+				PreInputFingerprint:  inputFingerprint,
+				RulesetFingerprint:   rulesetFingerprint,
+				Projection:           predecessorProjection,
+			},
+		); prepareErr != nil {
+			// Pending state is an additive experimental lane. A persistence
+			// failure must not replace the already-computed direct verdict.
+			return resp, finalization
+		}
+	}
 	return resp, finalization
+}
+
+func splitToolChainProjection(
+	projection guardrail.ToolChainProjection,
+) (predecessor guardrail.ToolChainProjection, terminal guardrail.ToolChainProjection) {
+	predecessor.ParseStatus = projection.ParseStatus
+	terminal.ParseStatus = projection.ParseStatus
+	var predecessorMask, terminalMask uint16
+	for _, definition := range guardrail.ToolChainDefinitions() {
+		predecessorMask |= definition.Step1Bit
+		terminalMask |= definition.Step2Bit
+	}
+	predecessor.DetectionStepMask = projection.DetectionStepMask & predecessorMask
+	predecessor.EnforcementStepMask = projection.EnforcementStepMask & predecessorMask
+	terminal.DetectionStepMask = projection.DetectionStepMask & terminalMask
+	terminal.EnforcementStepMask = projection.EnforcementStepMask & terminalMask
+	return predecessor, terminal
+}
+
+func toolChainProjectionHasSteps(projection guardrail.ToolChainProjection) bool {
+	return projection.DetectionStepMask != 0 || projection.EnforcementStepMask != 0
+}
+
+func exactToolChainInvocationDigest(
+	lifecycle connector.ToolCallLifecycleContract,
+	req agentHookRequest,
+) string {
+	if !lifecycle.ExactInvocationJoinEligible(req.HookEventName) {
+		return ""
+	}
+	value, ok := req.CorrelationValues[connector.CorrelationTargetTool]
+	if !ok || value.Origin != connector.CorrelationOriginReported ||
+		strings.TrimSpace(value.Value) == "" || value.Value != req.ToolInvocationID {
+		return ""
+	}
+	return correlationValueDigest(
+		audit.ConnectorInstanceID(req.ConnectorInstanceID),
+		value,
+	)
+}
+
+func auditToolChainPendingOutcome(
+	outcome connector.ToolLifecycleOutcome,
+) audit.ToolChainPendingOutcome {
+	switch outcome {
+	case connector.ToolLifecycleOutcomeSuccess:
+		return audit.ToolChainPendingOutcomeSuccess
+	case connector.ToolLifecycleOutcomeFailure:
+		return audit.ToolChainPendingOutcomeFailure
+	case connector.ToolLifecycleOutcomeDenied:
+		return audit.ToolChainPendingOutcomeDenied
+	case connector.ToolLifecycleOutcomeCancelled:
+		return audit.ToolChainPendingOutcomeCancelled
+	default:
+		return audit.ToolChainPendingOutcomeUnknown
+	}
 }
 
 func toolChainHookIntent(
@@ -351,6 +581,7 @@ func (a *APIServer) safeApplyAgentHookToolChains(
 
 func projectAgentHookToolChains(
 	req agentHookRequest,
+	lifecycle connector.ToolCallLifecycleContract,
 ) (guardrail.ToolChainProjection, []RuleFinding) {
 	projection := guardrail.ToolChainProjection{
 		ParseStatus: actionfacts.StatusNotApplicable,
@@ -359,35 +590,23 @@ func projectAgentHookToolChains(
 	if capture != nil && capture.recorded {
 		projection.ParseStatus = capture.facts.Parse.Status
 		projectTrustedActionChainSteps(&projection, capture.facts, capture.findings)
+		for _, artifact := range capture.artifactProjections {
+			projection.DetectionStepMask |= artifact.DetectionStepMask
+			projection.EnforcementStepMask |= artifact.EnforcementStepMask
+		}
 	}
 
-	var typedFindings []RuleFinding
-	if exactGuardrailsOffTransition(req) {
-		addToolChainStep(
-			&projection,
-			guardrail.ToolChainGuardrailsOffThenEgress,
-			1,
-			true,
-			true,
-		)
-		typedFindings = append(typedFindings, RuleFinding{
-			RuleID:   typedGuardrailsOffRuleID,
-			Title:    "Guardrail enforcement disabled",
-			Severity: "HIGH", Confidence: 1,
-			Tags:        []string{"tampering", "guardrail"},
-			enforcement: findingEnforcementAllowed,
-		})
-	}
-	if exactPermissionDeniedEvent(req) {
+	permissionDenied, permissionDeniedExact := permissionDeniedChainEvidence(req, lifecycle)
+	if permissionDenied {
 		addToolChainStep(
 			&projection,
 			guardrail.ToolChainPermissionDeniedThenBypass,
 			1,
 			true,
-			true,
+			permissionDeniedExact,
 		)
 	}
-	return projection, typedFindings
+	return projection, nil
 }
 
 func projectTrustedActionChainSteps(
@@ -430,9 +649,11 @@ func projectTrustedActionChainSteps(
 		"secrets.workload_identity_token_read",
 	}
 	secretRead := hasAnyFinding(secretReadIDs...)
-	secretReadExact := facts.Authoritative() &&
-		facts.EnforcementEligible() &&
-		hasEnforceableFinding(secretReadIDs...)
+	// A sensitive read and a later upload in the same session prove temporal
+	// proximity, not that the uploaded bytes came from the read. Retain the
+	// detection until an exact artifact or payload join key is available, but
+	// never authorize a deny from coincidence alone.
+	secretReadExact := false
 	addToolChainStep(
 		projection,
 		guardrail.ToolChainSecretReadThenEgress,
@@ -442,10 +663,7 @@ func projectTrustedActionChainSteps(
 	)
 
 	secretManager := hasAnyFinding("secrets.cloud_secret_manager_read")
-	secretManagerExact := facts.Authoritative() &&
-		facts.EnforcementEligible() &&
-		cloudSecretManagerPrerequisite(facts) &&
-		hasEnforceableFinding("secrets.cloud_secret_manager_read")
+	secretManagerExact := false
 	addToolChainStep(
 		projection,
 		guardrail.ToolChainSecretManagerReadThenEgress,
@@ -455,9 +673,7 @@ func projectTrustedActionChainSteps(
 	)
 
 	workloadIdentity := hasAnyFinding("secrets.workload_identity_token_read")
-	workloadIdentityExact := facts.Authoritative() &&
-		facts.EnforcementEligible() &&
-		hasEnforceableFinding("secrets.workload_identity_token_read")
+	workloadIdentityExact := false
 	addToolChainStep(
 		projection,
 		guardrail.ToolChainWorkloadIdentityThenLateralExec,
@@ -497,9 +713,11 @@ func projectTrustedActionChainSteps(
 		hostNamespaceEntryFallbackProof(facts)
 	runtimeSocket := hasAnyFinding("privilege.container_runtime_socket_access") &&
 		containerRuntimeSocketPrerequisite(facts)
-	privilegeElevation := sudoElevation || hostNamespace || runtimeSocket
+	privilegeShell := exactPrivilegeShellLaunch(facts)
+	privilegeElevation := sudoElevation || privilegeShell || hostNamespace || runtimeSocket
 	privilegeElevationExact :=
 		(sudoElevation && facts.EnforcementEligible()) ||
+			(privilegeShell && facts.EnforcementEligible()) ||
 			hostNamespace ||
 			(runtimeSocket && facts.EnforcementEligible())
 	addToolChainStep(
@@ -517,12 +735,11 @@ func projectTrustedActionChainSteps(
 		guardrail.ToolChainWorkloadIdentityThenLateralExec,
 		2,
 		lateral,
-		lateral,
+		false,
 	)
 
 	externalEgress := externalDataBearingUpload(facts)
 	egressDetection := externalEgress || hasAnyFinding(
-		"CMD-ENV-DUMP",
 		"CMD-WGET-POST",
 		"CMD-CURL-UPLOAD",
 		"exfil.secret_read_and_egress_oneliner",
@@ -570,6 +787,7 @@ func sudoChainRoles(facts actionfacts.Facts) (discovery, elevation bool) {
 			continue
 		}
 		if hasArgumentFold(command.Argv, "-l") ||
+			hasArgumentFold(command.Argv, "-ll") ||
 			hasArgumentFold(command.Argv, "--list") {
 			discovery = true
 		} else {
@@ -577,6 +795,54 @@ func sudoChainRoles(facts actionfacts.Facts) (discovery, elevation bool) {
 		}
 	}
 	return discovery, elevation
+}
+
+func exactPrivilegeShellLaunch(facts actionfacts.Facts) bool {
+	for _, command := range facts.Commands {
+		if command.ParentCommandID != 0 || command.PipelineID != 0 ||
+			command.Effect != actionfacts.EffectExecute || !command.ArgvComplete {
+			continue
+		}
+		switch strings.ToLower(command.Program) {
+		case "doas":
+			if len(command.Argv) == 2 &&
+				command.Argv[1] == "-s" ||
+				exactElevatedShellArgv(command.Argv[1:]) {
+				return true
+			}
+		case "su":
+			if len(command.Argv) == 1 ||
+				len(command.Argv) == 2 &&
+					(command.Argv[1] == "root" || command.Argv[1] == "-" ||
+						command.Argv[1] == "-l" || command.Argv[1] == "--login") ||
+				len(command.Argv) == 3 &&
+					(command.Argv[1] == "-" || command.Argv[1] == "-l" ||
+						command.Argv[1] == "--login") &&
+					command.Argv[2] == "root" {
+				return true
+			}
+		case "pkexec":
+			if exactElevatedShellArgv(command.Argv[1:]) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func exactElevatedShellArgv(argv []string) bool {
+	if len(argv) == 0 || !shellProgram(argv[0]) {
+		return false
+	}
+	for _, argument := range argv[1:] {
+		switch argument {
+		case "-i", "-l", "--login", "--noprofile", "--norc":
+			continue
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func systemRootPrivilegeDiscovery(facts actionfacts.Facts) bool {
@@ -672,51 +938,17 @@ func externalDataBearingUpload(facts actionfacts.Facts) bool {
 	return false
 }
 
-func exactGuardrailsOffTransition(req agentHookRequest) bool {
-	if canonicalEvent(req.HookEventName) != "configchange" ||
-		strings.EqualFold(
-			strings.TrimSpace(firstString(req.Payload, "source")),
-			"policy_settings",
-		) {
-		return false
-	}
-	kind := strings.ToLower(strings.TrimSpace(firstString(
-		req.Payload,
-		"kind",
-		"change_kind",
-		"changeKind",
-	)))
-	effect := strings.ToLower(strings.TrimSpace(firstString(
-		req.Payload,
-		"effect",
-		"command_effect",
-		"commandEffect",
-	)))
-	previous := firstObject(req.Payload, "previous_state", "previousState", "previous")
-	next := firstObject(req.Payload, "new_state", "newState", "resulting_state", "resultingState", "next")
-	previousEnabled, previousOK := exactBool(
-		previous,
-		"enforcement_enabled",
-		"enforcementEnabled",
-	)
-	nextEnabled, nextOK := exactBool(
-		next,
-		"enforcement_enabled",
-		"enforcementEnabled",
-	)
-	return previousOK && nextOK &&
-		provesTypedGuardrailsOff(
-			kind,
-			true,
-			previousEnabled,
-			nextEnabled,
-			actionfacts.CommandEffect(effect),
-		)
-}
-
-func exactPermissionDeniedEvent(req agentHookRequest) bool {
-	if !isResultLikeEvent(req.HookEventName) {
-		return false
+func permissionDeniedChainEvidence(
+	req agentHookRequest,
+	lifecycle connector.ToolCallLifecycleContract,
+) (detected, enforcementSafe bool) {
+	event := canonicalEvent(req.HookEventName)
+	exactInvocation := exactReportedToolInvocation(lifecycle, req)
+	// A connector-authenticated, invocation-bound denial event is the only
+	// enforcement-safe predecessor. Generic operating-system access errors are
+	// useful intent telemetry but may describe an unrelated file or service.
+	if event == "permissiondenied" {
+		return true, exactInvocation
 	}
 	candidates := []map[string]interface{}{req.Payload}
 	for _, key := range []string{
@@ -735,7 +967,19 @@ func exactPermissionDeniedEvent(req agentHookRequest) bool {
 			"access_denied",
 			"accessDenied",
 		); ok && denied {
-			return true
+			exact := event == "posttoolusefailure" && exactInvocation
+			return true, exact
+		}
+		failureType := strings.ToLower(strings.TrimSpace(firstString(
+			candidate,
+			"failure_type",
+			"failureType",
+			"outcome",
+			"status",
+		)))
+		if failureType == "permission_denied" || failureType == "permissiondenied" {
+			exact := event == "posttoolusefailure" && exactInvocation
+			return true, exact
 		}
 		code := strings.ToUpper(strings.TrimSpace(firstString(
 			candidate,
@@ -747,10 +991,22 @@ func exactPermissionDeniedEvent(req agentHookRequest) bool {
 		)))
 		switch code {
 		case "EACCES", "EPERM", "PERMISSION_DENIED", "ACCESS_DENIED":
-			return true
+			return true, false
 		}
 	}
-	return false
+	return false, false
+}
+
+func exactReportedToolInvocation(
+	lifecycle connector.ToolCallLifecycleContract,
+	req agentHookRequest,
+) bool {
+	if !lifecycle.ExactInvocationJoinEligible(req.HookEventName) {
+		return false
+	}
+	value, ok := req.CorrelationValues[connector.CorrelationTargetTool]
+	return ok && value.Origin == connector.CorrelationOriginReported &&
+		strings.TrimSpace(value.Value) != "" && value.Value == req.ToolInvocationID
 }
 
 func firstObject(
@@ -1031,10 +1287,12 @@ var toolChainRelevantRuleIDs = []string{
 	"secrets.cloud_credential_read",
 	"secrets.cloud_secret_manager_read",
 	"secrets.workload_identity_token_read",
-	typedGuardrailsOffRuleID,
 }
 
-func activeToolChainRulesetFingerprint(connectorName string) (string, error) {
+func activeToolChainRulesetFingerprint(
+	connectorName string,
+	profile connector.HookProfile,
+) (string, error) {
 	generation := snapshotRulePackGeneration(connectorName)
 	active := make(map[string]PatternRule, len(toolChainRelevantRuleIDs))
 	if generation != nil {
@@ -1048,6 +1306,15 @@ func activeToolChainRulesetFingerprint(connectorName string) (string, error) {
 	sort.Strings(ids)
 	digest := sha256.New()
 	writeToolChainDigestPart(digest, toolChainGatewayProjectionRevision)
+	writeToolChainDigestPart(digest, profile.ContractID)
+	writeToolChainDigestPart(digest, profile.HookScriptVersion)
+	writeToolChainDigestPart(digest, profile.NormalizedAgentVersion)
+	writeToolChainDigestPart(digest, profile.CompatibilityStatus)
+	lifecycleJSON, err := json.Marshal(profile.ToolCallLifecycle)
+	if err != nil {
+		return "", err
+	}
+	writeToolChainDigestPart(digest, string(lifecycleJSON))
 	for _, id := range ids {
 		writeToolChainDigestPart(digest, id)
 		rule, ok := active[id]

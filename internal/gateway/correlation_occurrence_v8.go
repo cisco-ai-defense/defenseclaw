@@ -361,8 +361,9 @@ func (a *APIServer) correlateHookOccurrence(
 	}
 	if stateAdmissible && lifecycle == connector.CorrelationLifecycleToolEnd && pendingLocator != nil &&
 		pendingLocator.OperationID != "" {
+		terminalStatus := hookToolCorrelationTerminalStatus(profile, req)
 		if resolveErr := tx.ResolvePendingOperation(ctx, *pendingLocator,
-			semantic, audit.CorrelationOperationCompleted, now); resolveErr != nil &&
+			semantic, terminalStatus, now); resolveErr != nil &&
 			!errors.Is(resolveErr, audit.ErrCorrelationStale) &&
 			!errors.Is(resolveErr, audit.ErrCorrelationNotFound) {
 			return ctx, req, resolveErr
@@ -388,6 +389,27 @@ func (a *APIServer) correlateHookOccurrence(
 		fmt.Fprintln(os.Stderr, "[gateway] committed correlation relationship export incomplete")
 	}
 	return correlatedCtx, req, nil
+}
+
+func hookToolCorrelationTerminalStatus(
+	profile connector.HookProfile,
+	req agentHookRequest,
+) audit.CorrelationOperationStatus {
+	switch profile.ToolCallLifecycle.ClassifyTerminalOutcome(
+		req.ConnectorName,
+		req.HookEventName,
+		req.Payload,
+	) {
+	case connector.ToolLifecycleOutcomeSuccess:
+		return audit.CorrelationOperationCompleted
+	case connector.ToolLifecycleOutcomeFailure,
+		connector.ToolLifecycleOutcomeDenied:
+		return audit.CorrelationOperationFailed
+	case connector.ToolLifecycleOutcomeCancelled:
+		return audit.CorrelationOperationCancelled
+	default:
+		return audit.CorrelationOperationUnresolved
+	}
 }
 
 // finalizeHookCorrelationReceipt authorizes exact replay suppression only

@@ -201,8 +201,12 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			req.SuppressCorrelationEmit = true
 		} else {
 			req = correlatedReq
-			req.toolChain = &toolChainHookCapture{}
 		}
+		// Capture trusted ActionFacts even when correlation persistence is
+		// degraded. Durable cross-call joins require correlation, but the
+		// experimental final-artifact execution gate is a same-request
+		// decision and can still protect the exact pre-execution boundary.
+		req.toolChain = &toolChainHookCapture{}
 		ctx = withToolChainHookCapture(ctx, req.toolChain)
 		ctx = enrichAgentHookContext(ctx, req)
 		t0 := time.Now()
@@ -331,6 +335,13 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		resp, panicked := a.safeEvaluateHook(ctx, connectorName, req, b, payload, runtime)
 		var chainFinalization toolChainHookFinalization
 		if !panicked {
+			resp = a.safeApplyExperimentalArtifactPromotion(
+				ctx,
+				profile,
+				req,
+				resp,
+				time.Since(t0),
+			)
 			resp, chainFinalization = a.safeApplyAgentHookToolChains(
 				ctx,
 				profile,
@@ -1639,6 +1650,11 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 
 	verdict := &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
 	var assetDecisions []runtimeAssetDecision
+	profile := a.hookProfileForConnector(req.ConnectorName)
+	toolCallRoute := profile.ToolCallLifecycle.RouteForEvent(req.HookEventName)
+	structuredToolEvent := toolCallRoute == connector.ToolEventRouteStructuredAction ||
+		(profile.ToolCallLifecycle.Version == 0 &&
+			isGenericToolInspectionEvent(req.HookEventName))
 	switch {
 	case isPromptLikeEvent(req.HookEventName):
 		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: req.Content, Direction: "prompt", Connector: req.ConnectorName})
@@ -1650,7 +1666,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		// handles the "non-enforceable event" case by downgrading to
 		// would-block automatically.
 		assetDecisions = a.collectAgentHookAssetDecisions(ctx, req)
-	case isGenericToolInspectionEvent(req.HookEventName):
+	case structuredToolEvent:
 		toolRequest := &ToolInspectRequest{
 			Tool:          req.ToolName,
 			Args:          req.ToolArgs,
@@ -1658,7 +1674,6 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			Connector:     req.ConnectorName,
 			MCPServerName: payloadString(req.Payload, "mcp_server_name"),
 		}
-		profile := a.hookProfileForConnector(req.ConnectorName)
 		enforcementCapable := profile.Capabilities.CanBlock &&
 			eventIn(req.HookEventName, profile.Capabilities.BlockEvents)
 		verdict = a.inspectTrustedToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
@@ -1683,7 +1698,6 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 
 	rawAction := normalizeCodexAction(verdict.Action)
 	rawActionBeforeAssets := rawAction
-	profile := a.hookProfileForConnector(req.ConnectorName)
 	caps := profile.Capabilities
 	action, wouldBlock := mapHookActionForProfile(rawAction, mode, req.HookEventName, caps, profile, req.Payload)
 	severity := verdict.Severity
@@ -2317,7 +2331,7 @@ func isPromptLikeEvent(event string) bool {
 
 func isResultLikeEvent(event string) bool {
 	switch canonicalEvent(event) {
-	case "posttooluse", "posttoolusefailure", "aftertool", "posttoolcall",
+	case "posttooluse", "posttoolusefailure", "permissiondenied", "aftertool", "posttoolcall",
 		"postreadcode", "postwritecode", "postruncommand", "postmcptooluse",
 		"aftershellexecution", "aftermcpexecution", "afterfileedit", "aftertabfileedit",
 		"afteragentresponse", "afteragentthought", "afteragent", "aftermodel",

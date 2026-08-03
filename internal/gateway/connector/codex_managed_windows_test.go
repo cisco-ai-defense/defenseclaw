@@ -296,6 +296,7 @@ func codexLegacyHooksForExactRestoreTest(
 		filepath.Join(hooksDir, "codex-hook.sh"),
 		hooksDir,
 		true,
+		codexHookGroups,
 	); err != nil {
 		t.Fatalf("seed legacy Codex hooks: %v", err)
 	}

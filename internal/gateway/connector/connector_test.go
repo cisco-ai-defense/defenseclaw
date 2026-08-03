@@ -3499,7 +3499,7 @@ env_key = "OPENAI_API_KEY"
 
 // TestCodex_Setup_RegistersHooksInline verifies the Codex connector
 // writes an inline [hooks] HookEventsToml struct into config.toml
-// covering all ten Codex events and pointing at the platform-native hook
+// covering the current Codex event matrix and pointing at the platform-native hook
 // command. The hooks key is NOT a path to a hooks.json file —
 // that would trigger a TOML parse error at codex startup.
 func TestCodex_Setup_RegistersHooksInline(t *testing.T) {
@@ -3532,7 +3532,7 @@ func TestCodex_Setup_RegistersHooksInline(t *testing.T) {
 	for _, evt := range []string{
 		"SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest",
 		"PostToolUse", "SubagentStart", "SubagentStop", "PreCompact",
-		"PostCompact", "Stop",
+		"PostCompact", "Stop", "SessionEnd",
 	} {
 		if !strings.Contains(content, "hooks."+evt) && !strings.Contains(content, "hooks\n"+evt) {
 			// Accept either dotted or nested rendering.

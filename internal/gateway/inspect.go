@@ -598,12 +598,13 @@ func unmarshalArgsObject(raw json.RawMessage) (map[string]interface{}, bool) {
 // isWriteToolName reports whether the lowercased tool name should
 // trigger CodeGuard inspection. includes native
 // connector aliases that previously bypassed CodeGuard (Write/Edit/
-// MultiEdit/applyDiff/patch).
+// MultiEdit/applyDiff/apply_patch/NotebookEdit/patch).
 func isWriteToolName(tool string) bool {
 	switch tool {
 	case "write_file", "edit_file",
 		"write", "edit", "multiedit", "multi_edit",
-		"applydiff", "apply_diff", "patch",
+		"applydiff", "apply_diff", "applypatch", "apply_patch",
+		"notebookedit", "notebook_edit", "patch",
 		"create_file", "createfile", "fs_write", "fs_edit":
 		return true
 	}

@@ -612,8 +612,12 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 				return lexemes, false
 			}
 			if (r == '\n' || r == '\r') && len(lexemes) > 0 &&
-				lexemes[len(lexemes)-1].kind != windowsSeparatorLexeme {
-				out.markPartial(IssueUnsupportedConstruct)
+				lexemes[len(lexemes)-1].kind != windowsSeparatorLexeme &&
+				!windowsOnlyTrailingWhitespace(runes[i+1:]) {
+				// An unescaped physical line ending is an unconditional
+				// statement boundary in the conservative PowerShell/cmd subset.
+				// Continuations were already consumed above and retain a dynamic
+				// parse issue, while control-flow tokens remain unsupported.
 				if !appendLexeme(windowsLexeme{kind: windowsSeparatorLexeme, operator: "newline"}) {
 					return lexemes, false
 				}
@@ -804,6 +808,15 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 		return lexemes, false
 	}
 	return lexemes, true
+}
+
+func windowsOnlyTrailingWhitespace(runes []rune) bool {
+	for _, r := range runes {
+		if !unicode.IsSpace(r) {
+			return false
+		}
+	}
+	return true
 }
 
 func windowsExtendedPathPrefixQuestion(
@@ -1085,7 +1098,13 @@ func windowsProjectCommands(
 			windowsPathFlavor(parsedCommand.words[0].value) == PathFlavorWindows {
 			builder.addPath(command.ID, PathAccessExecute, parsedCommand.words[0].value)
 		}
-		windowsClassifyCommand(&command, parsedCommand.words[1:], dialect, builder)
+		windowsClassifyCommand(
+			&command,
+			parsedCommand.words[0],
+			parsedCommand.words[1:],
+			dialect,
+			builder,
+		)
 		out.appendCommand(command)
 	}
 
@@ -1171,10 +1190,66 @@ func windowsExecutable(value string) string {
 	}
 	value = strings.ReplaceAll(value, `\`, `/`)
 	base := path.Base(value)
-	if base == "." || base == "/" {
+	if base == "/" {
 		return ""
 	}
 	return strings.ToLower(base)
+}
+
+// windowsScriptProgram grants command-name stability only to an explicit
+// script path whose dialect fixes the interpreter. It deliberately excludes
+// bare names, which may resolve through PATH to a different artifact.
+func windowsScriptProgram(value string, dialect Dialect) (string, bool) {
+	if dialect == DialectPowerShell && value == "." {
+		return ".", true
+	}
+	if dialect != DialectPowerShell && dialect != DialectCMD {
+		return "", false
+	}
+	canonical, ok := windowsCanonicalPathFactValue(value)
+	if !ok || !windowsExplicitScriptPath(canonical) ||
+		!windowsScriptExtensionAllowed(canonical, dialect) {
+		return "", false
+	}
+	return strings.ToLower(path.Base(strings.ReplaceAll(canonical, "\\", "/"))), true
+}
+
+func windowsExplicitScriptPath(value string) bool {
+	return strings.ContainsAny(value, "/\\")
+}
+
+func windowsScriptExtensionAllowed(value string, dialect Dialect) bool {
+	extension := strings.ToLower(path.Ext(strings.ReplaceAll(value, "\\", "/")))
+	switch dialect {
+	case DialectPowerShell:
+		return extension == ".ps1" || extension == ".psm1"
+	case DialectCMD:
+		return extension == ".cmd" || extension == ".bat"
+	default:
+		return false
+	}
+}
+
+func windowsStaticScriptArtifact(
+	word windowsWord,
+	dialect Dialect,
+	requireAbsolute bool,
+) (string, bool) {
+	if word.expands || word.wildcard || word.quote == QuoteMixed {
+		return "", false
+	}
+	canonical, ok := windowsCanonicalPathFactValue(word.value)
+	if !ok || !windowsExplicitScriptPath(canonical) ||
+		!windowsScriptExtensionAllowed(canonical, dialect) {
+		return "", false
+	}
+	if requireAbsolute {
+		parsed := parseWindowsPath(canonical)
+		if !parsed.absolute || parsed.unresolved {
+			return "", false
+		}
+	}
+	return canonical, true
 }
 
 func windowsExecutableFamily(command *CommandFact, family string) bool {
@@ -1357,6 +1432,7 @@ func (b *windowsFactBuilder) addFlow(fact DataFlowFact) {
 
 func windowsClassifyCommand(
 	command *CommandFact,
+	executableWord windowsWord,
 	args []windowsWord,
 	dialect windowsDialect,
 	builder *windowsFactBuilder,
@@ -1380,11 +1456,49 @@ func windowsClassifyCommand(
 		builder.out.markPartial(IssueUnknownOperandGrammar)
 		return
 	}
+	if windowsClassifyDirectScriptArtifact(
+		command,
+		executableWord,
+		args,
+		dialect,
+		builder,
+	) {
+		return
+	}
 	if dialect == windowsPowerShell {
 		windowsClassifyPowerShell(command, args, builder)
 		return
 	}
 	windowsClassifyCMD(command, args, builder)
+}
+
+func windowsClassifyDirectScriptArtifact(
+	command *CommandFact,
+	executableWord windowsWord,
+	args []windowsWord,
+	dialect windowsDialect,
+	builder *windowsFactBuilder,
+) bool {
+	target, ok := windowsStaticScriptArtifact(
+		executableWord,
+		windowsOutputDialect(dialect),
+		false,
+	)
+	if !ok {
+		return false
+	}
+	builder.addPath(command.ID, PathAccessExecute, target)
+	builder.out.markPartial(IssueOpaqueArtifact)
+	if len(args) != 0 {
+		builder.out.markPartial(IssueUnsupportedConstruct)
+		for _, arg := range args {
+			if arg.expands || arg.wildcard {
+				builder.out.markPartial(IssueDynamicWord)
+				break
+			}
+		}
+	}
+	return true
 }
 
 func windowsClassifyPowerShell(
@@ -1546,8 +1660,21 @@ func windowsClassifyPowerShell(
 		windowsAddOperation(command, OperationList)
 	case "remove-process":
 		windowsAddOperation(command, OperationProcessKill)
-	case "powershell", "powershell.exe", "pwsh", "pwsh.exe", "cmd", "cmd.exe",
-		"start-job":
+	case ".":
+		windowsAddOperation(command, OperationRead)
+		if !windowsClassifyPowerShellDotSource(command, args, builder) {
+			builder.out.markPartial(IssueUnsupportedConstruct)
+		}
+	case "powershell", "powershell.exe", "pwsh", "pwsh.exe":
+		artifactPath, found, exact := windowsPowerShellFileArtifact(args)
+		if found {
+			builder.addPath(command.ID, PathAccessExecute, artifactPath)
+			builder.out.markPartial(IssueOpaqueArtifact)
+		}
+		if !exact {
+			builder.out.markPartial(IssueUnsupportedConstruct)
+		}
+	case "cmd", "cmd.exe", "start-job":
 		builder.out.markPartial(IssueUnsupportedConstruct)
 	case "invoke-expression", "iex":
 		if command.PipelineID == 0 || len(args) != 0 {
@@ -1558,6 +1685,73 @@ func windowsClassifyPowerShell(
 	default:
 		builder.out.markPartial(IssueUnknownOperandGrammar)
 	}
+}
+
+func windowsClassifyPowerShellDotSource(
+	command *CommandFact,
+	args []windowsWord,
+	builder *windowsFactBuilder,
+) bool {
+	if len(args) == 0 {
+		return false
+	}
+	target, ok := windowsStaticScriptArtifact(
+		args[0],
+		DialectPowerShell,
+		false,
+	)
+	if !ok {
+		return false
+	}
+	builder.addPath(command.ID, PathAccessRead, target)
+	builder.out.markPartial(IssueOpaqueArtifact)
+	if len(args) != 1 {
+		builder.out.markPartial(IssueUnsupportedConstruct)
+		for _, arg := range args[1:] {
+			if arg.expands || arg.wildcard {
+				builder.out.markPartial(IssueDynamicWord)
+				break
+			}
+		}
+	}
+	return true
+}
+
+// windowsPowerShellFileArtifact recognizes the one profile-independent form
+// whose final script is an absolute static path. A visible -File target is
+// still returned for diagnostics when another option makes the invocation
+// ambiguous, but exact remains false so promotion cannot use it.
+func windowsPowerShellFileArtifact(args []windowsWord) (
+	artifactPath string,
+	found bool,
+	exact bool,
+) {
+	fileIndex := -1
+	for index, arg := range args {
+		if arg.quote != QuoteNone || arg.expands || arg.wildcard ||
+			!strings.EqualFold(arg.value, "-File") {
+			continue
+		}
+		if fileIndex >= 0 {
+			return artifactPath, found, false
+		}
+		fileIndex = index
+		if index+1 >= len(args) {
+			return "", false, false
+		}
+		artifactPath, found = windowsStaticScriptArtifact(
+			args[index+1],
+			DialectPowerShell,
+			true,
+		)
+	}
+	if !found {
+		return "", false, false
+	}
+	exact = len(args) == 3 && fileIndex == 1 &&
+		args[0].quote == QuoteNone && !args[0].expands &&
+		!args[0].wildcard && strings.EqualFold(args[0].value, "-NoProfile")
+	return artifactPath, true, exact
 }
 
 func windowsClassifyCMD(
