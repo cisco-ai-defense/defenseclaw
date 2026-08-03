@@ -7,7 +7,7 @@ in
 
 | Target | Scope |
 | --- | --- |
-| `make security-suite-test` | Deterministic regex/rule, stubbed-judge, and severity benchmark tests |
+| `make security-suite-test` | Deterministic trusted-tool-call, regex/rule, stubbed-judge, and severity benchmark tests |
 | `make security-suite-eval` | Opt-in live-model evaluation; requires `DEFENSECLAW_LLM_KEY` |
 | `go test ./internal/gateway/ -run TestSecuritySuiteE2E -v` | In-process HTTP inspect and audit path; `DEFENSECLAW_GATEWAY_URL` selects an external gateway |
 
@@ -22,3 +22,7 @@ Regenerate them with the gated
 `TestGenerateRegexImportFromEvalCorpus` path documented in the corpus README.
 The deterministic suite is also covered by `make gateway-test` and therefore
 by `make test`.
+
+The compact `toolcall/corpus.jsonl` is the TP/FP acceptance set for structured
+tool actions. It contains inert payloads only and asserts canonical owner
+routing without duplicating low-level parser grammar tests.

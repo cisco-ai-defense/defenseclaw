@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 	"gopkg.in/yaml.v3"
 )
 
@@ -47,13 +48,17 @@ type rulesFile struct {
 }
 
 type ruleDef struct {
-	ID         string   `yaml:"id"`
-	Enabled    *bool    `yaml:"enabled,omitempty"`
-	Pattern    string   `yaml:"pattern"`
-	Title      string   `yaml:"title"`
-	Severity   string   `yaml:"severity"`
-	Confidence float64  `yaml:"confidence"`
-	Tags       []string `yaml:"tags"`
+	ID           string   `yaml:"id"`
+	Enabled      *bool    `yaml:"enabled,omitempty"`
+	Pattern      string   `yaml:"pattern"`
+	Expression   string   `yaml:"expression,omitempty"`
+	ToolCallOnly bool     `yaml:"tool_call_only,omitempty"`
+	Title        string   `yaml:"title"`
+	Severity     string   `yaml:"severity"`
+	Confidence   float64  `yaml:"confidence"`
+	Tags         []string `yaml:"tags"`
+
+	expressionSet bool `yaml:"-"`
 }
 
 func main() {
@@ -146,6 +151,9 @@ func loadCatalog(root string) ([]rulesFile, error) {
 		}
 		catalog = append(catalog, file)
 	}
+	if err := validateSemanticCatalog(catalog); err != nil {
+		return nil, err
+	}
 	return catalog, nil
 }
 
@@ -192,7 +200,51 @@ func decodeRulesFile(path string) (rulesFile, error) {
 		}
 		return rulesFile{}, fmt.Errorf("%s: multiple YAML documents are not allowed", filepath.Base(path))
 	}
+	if err := markExpressionPresence(data, filepath.Base(path), &file); err != nil {
+		return rulesFile{}, err
+	}
 	return file, nil
+}
+
+func markExpressionPresence(data []byte, filename string, file *rulesFile) error {
+	var document yaml.Node
+	if err := yaml.Unmarshal(data, &document); err != nil {
+		return fmt.Errorf("parse %s: %w", filename, err)
+	}
+	root := &document
+	if document.Kind == yaml.DocumentNode && len(document.Content) == 1 {
+		root = document.Content[0]
+	}
+	rules := yamlMappingValue(root, "rules")
+	if rules == nil || rules.Kind != yaml.SequenceNode {
+		return nil
+	}
+	for index := range file.Rules {
+		if index >= len(rules.Content) {
+			break
+		}
+		expression := yamlMappingValue(rules.Content[index], "expression")
+		if expression == nil {
+			continue
+		}
+		file.Rules[index].expressionSet = true
+		if expression.Kind != yaml.ScalarNode || expression.ShortTag() != "!!str" {
+			return fmt.Errorf("%s: rule %d expression must be a string", filename, index)
+		}
+	}
+	return nil
+}
+
+func yamlMappingValue(node *yaml.Node, key string) *yaml.Node {
+	if node == nil || node.Kind != yaml.MappingNode {
+		return nil
+	}
+	for index := 0; index+1 < len(node.Content); index += 2 {
+		if node.Content[index].Value == key {
+			return node.Content[index+1]
+		}
+	}
+	return nil
 }
 
 func validateRule(filename string, rule *ruleDef) error {
@@ -204,6 +256,13 @@ func validateRule(filename string, rule *ruleDef) error {
 	}
 	if _, err := regexp.Compile(rule.Pattern); err != nil {
 		return fmt.Errorf("%s: rule %s pattern: %w", filename, rule.ID, err)
+	}
+	hasExpression := rule.Expression != "" || rule.expressionSet
+	if hasExpression && strings.TrimSpace(rule.Expression) == "" {
+		return fmt.Errorf("%s: rule %s expression must not be blank", filename, rule.ID)
+	}
+	if hasExpression && strings.TrimSpace(rule.Expression) != rule.Expression {
+		return fmt.Errorf("%s: rule %s expression must not have surrounding whitespace", filename, rule.ID)
 	}
 	if strings.TrimSpace(rule.Title) == "" {
 		return fmt.Errorf("%s: rule %s title must not be empty", filename, rule.ID)
@@ -223,6 +282,46 @@ func validateRule(filename string, rule *ruleDef) error {
 	for _, tag := range rule.Tags {
 		if strings.TrimSpace(tag) == "" {
 			return fmt.Errorf("%s: rule %s contains an empty tag", filename, rule.ID)
+		}
+	}
+	return nil
+}
+
+func validateSemanticCatalog(catalog []rulesFile) error {
+	var compiler *semantic.Compiler
+	count := 0
+	var enabledCost uint64
+	for _, file := range catalog {
+		for _, rule := range file.Rules {
+			if rule.Expression == "" {
+				continue
+			}
+			count++
+			if count > semantic.MaxCatalogRules {
+				return fmt.Errorf("semantic rule count exceeds %d", semantic.MaxCatalogRules)
+			}
+			if compiler == nil {
+				var err error
+				compiler, err = semantic.NewCompiler()
+				if err != nil {
+					return errors.New("semantic expression validation is unavailable")
+				}
+			}
+			program, code := compiler.Compile(rule.Expression)
+			if code != semantic.CompileOK {
+				return fmt.Errorf(
+					"category %s rule %s has invalid semantic expression (%s)",
+					file.Category,
+					rule.ID,
+					code,
+				)
+			}
+			if rule.Enabled == nil || *rule.Enabled {
+				enabledCost += program.StaticCost()
+				if enabledCost > semantic.MaxEnabledCatalogStaticCost {
+					return errors.New("enabled semantic rules exceed the catalog cost limit")
+				}
+			}
 		}
 	}
 	return nil
@@ -254,9 +353,19 @@ var defaultRuleCategories = []ruleCategory{
 			}
 			fmt.Fprintf(
 				&out,
-				"\t\t\t{ID: %s, Pattern: regexp.MustCompile(%s), Title: %s, Severity: %s, Confidence: %s, Tags: []string{%s}},\n",
+				"\t\t\t{ID: %s, Pattern: regexp.MustCompile(%s)",
 				strconv.Quote(rule.ID),
 				strconv.Quote(rule.Pattern),
+			)
+			if rule.Expression != "" {
+				fmt.Fprintf(&out, ", Expression: %s", strconv.Quote(rule.Expression))
+			}
+			if rule.ToolCallOnly {
+				out.WriteString(", ToolCallOnly: true")
+			}
+			fmt.Fprintf(
+				&out,
+				", Title: %s, Severity: %s, Confidence: %s, Tags: []string{%s}},\n",
 				strconv.Quote(rule.Title),
 				strconv.Quote(rule.Severity),
 				strconv.FormatFloat(rule.Confidence, 'f', -1, 64),

@@ -75,6 +75,31 @@ func TestParsePowerShellLiteralSubset(t *testing.T) {
 			},
 		},
 		{
+			name:       "terminal PowerShell CRLF is inert",
+			source:     "Remove-Item -Recurse -Force C:\\\r\n",
+			wantStatus: StatusComplete,
+			wantExec:   []string{"remove-item"},
+			wantPaths: []pathExpectation{
+				{commandID: 1, access: PathAccessDelete, value: `C:\`},
+			},
+		},
+		{
+			name:       "terminal PowerShell LF and whitespace are inert",
+			source:     "codex exec --dangerously-bypass-approvals-and-sandbox\n\t ",
+			wantStatus: StatusComplete,
+			wantExec:   []string{"codex"},
+		},
+		{
+			name: "straight-line PowerShell CRLF separates commands",
+			source: "Write-Output ready\r\n" +
+				`Remove-Item -Recurse -Force 'C:\tmp\old'`,
+			wantStatus: StatusComplete,
+			wantExec:   []string{"write-output", "remove-item"},
+			wantPaths: []pathExpectation{
+				{commandID: 2, access: PathAccessDelete, value: `C:\tmp\old`},
+			},
+		},
+		{
 			name:       "registry property write",
 			source:     `Set-ItemProperty -Path 'HKCU:\Software\Example' -Name Enabled -Value 1`,
 			wantStatus: StatusComplete,
@@ -2074,6 +2099,16 @@ func TestPowerShellOwnedDiskAndProcessGrammar(t *testing.T) {
 		{
 			name: "clear disk unknown option", source: `Clear-Disk -Number 0 -RemoveData -FutureMode`,
 			wantStatus: StatusPartial,
+		},
+		{
+			name: "format volume explicit execute", source: `Format-Volume -DriveLetter C -WhatIf:$false`,
+			wantStatus: StatusComplete, wantEffect: EffectExecute,
+			wantOp: OperationDiskWrite, wantEnforce: true,
+		},
+		{
+			name: "format volume explicit preview", source: `Format-Volume -DriveLetter C -WhatIf:$true`,
+			wantStatus: StatusComplete, wantEffect: EffectPreview,
+			wantOp: OperationDiskWrite,
 		},
 		{
 			name: "stop wildcard", source: `Stop-Process -Name * -Force`,

@@ -216,12 +216,51 @@ func TestCanonicalIDFromRuleID(t *testing.T) {
 		{"sk-ant-something", "LP-SECRET-MATCH"},
 		{"/etc/passwd", "LP-SYSTEM-FILE"},
 		{"base64 --decode", "LP-EXFIL"},
+		{"SECRETS.CLOUD_CREDENTIAL_READ", "secrets.cloud_credential_read"},
+		{"exfil.secret_read_and_egress_oneliner", "exfil.secret_read_and_egress_oneliner"},
+		{"exec.agent_runtime_bypass_flags", "exec.agent_runtime_bypass_flags"},
+		{"IMPACT.MASS_PROCESS_TERMINATION", "impact.mass_process_termination"},
+		{"Persistence.Shell_Profile_Write", "persistence.shell_profile_write"},
+		{"chain.secret_read_then_egress", "chain.secret_read_then_egress"},
 	}
 
 	for _, tt := range tests {
 		got := canonicalIDFromRuleID(tt.input)
 		if got != tt.expected {
 			t.Errorf("canonicalIDFromRuleID(%q) = %q, want %q", tt.input, got, tt.expected)
+		}
+	}
+}
+
+func TestNormalizeDottedSemanticRuleCategories(t *testing.T) {
+	findings := []RuleFinding{
+		{RuleID: "secrets.browser_session_store_read", Tags: []string{"credential"}},
+		{
+			RuleID: "exfil.secret_read_and_egress_oneliner",
+			Tags:   []string{"credential", "exfiltration"},
+		},
+		{RuleID: "exec.reverse_tunnel", Tags: []string{"network", "tunnel"}},
+		{RuleID: "tamper.detector_state_write", Tags: []string{"state"}},
+		{RuleID: "impact.fork_bomb", Tags: []string{"impact"}},
+		{RuleID: "chain.secret_read_then_egress", Tags: []string{"chain"}},
+	}
+	got := NormalizeRuleFindings(findings, "rules")
+	want := []string{
+		CatCredentialLeak,
+		CatDataExfil,
+		CatDangerousExec,
+		CatCognitiveTamper,
+		CatDangerousExec,
+		CatDangerousExec,
+	}
+	for index := range want {
+		if got[index].Category != want[index] {
+			t.Errorf(
+				"NormalizeRuleFindings(%q).Category = %q, want %q",
+				findings[index].RuleID,
+				got[index].Category,
+				want[index],
+			)
 		}
 	}
 }

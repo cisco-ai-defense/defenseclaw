@@ -292,6 +292,17 @@ func TestGeneratedDefaultRuleCatalogMatchesShippedYAML(t *testing.T) {
 				t.Fatalf("generated catalog contains duplicate rule id %q", generatedRule.ID)
 			}
 			seenIDs[generatedRule.ID] = true
+			if generatedRule.Expression != yamlRule.Expression ||
+				generatedRule.ToolCallOnly != yamlRule.ToolCallOnly {
+				t.Fatalf(
+					"generated rule %s semantic metadata = (%q, %t), YAML = (%q, %t)",
+					generatedRule.ID,
+					generatedRule.Expression,
+					generatedRule.ToolCallOnly,
+					yamlRule.Expression,
+					yamlRule.ToolCallOnly,
+				)
+			}
 			if generatedRule.ID != yamlRule.ID ||
 				generatedRule.Pattern.String() != yamlRule.Pattern ||
 				generatedRule.Title != yamlRule.Title ||
@@ -442,7 +453,7 @@ func TestShippedProfilesKeepSharedDriftCorrections(t *testing.T) {
 		},
 		{
 			id:      "CMD-ENV-DUMP",
-			pattern: `(?i)(?:^|[^A-Za-z0-9_./-])(?:printenv\b|export\s+-p\b|env\s*[|>])`,
+			pattern: `(?i)\b(?:printenv|export\s+-p|env)\b[^|;\n]*\|\s*(?:curl\b[^;\n]*(?:--data(?:-binary|-raw)?\s+@-|--upload-file\s+-|-T\s+-)|wget\b[^;\n]*--post-(?:data|file)(?:=|\s+)@?-)`,
 		},
 	}
 

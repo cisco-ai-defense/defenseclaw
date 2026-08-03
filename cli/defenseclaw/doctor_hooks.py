@@ -44,7 +44,15 @@ from defenseclaw.inventory.plugin_identity import is_link_or_reparse
 _SAFE_PATHEXT = (".exe", ".cmd")
 _MANAGED_MARKER = re.compile(r"(?im)^\s*(?:#|rem\s+)\s*defenseclaw-managed-hook\s+v(\d+)\b")
 _EXPECTED_CONTRACTS = {
-    "codex": frozenset({"codex-hooks-v1", "codex-hooks-v2", "codex-hooks-v3"}),
+    "codex": frozenset(
+        {
+            "codex-hooks-v1",
+            "codex-hooks-v2",
+            "codex-hooks-v3",
+            "codex-hooks-v3-generic",
+            "codex-hooks-v4",
+        }
+    ),
     "claudecode": frozenset({"claudecode-hooks-v1"}),
 }
 _CODEX_HOOK_SPECS = {
@@ -59,7 +67,8 @@ _CODEX_HOOK_SPECS = {
     "PostCompact": ("post_compact", None, 30),
     "Stop": ("stop", None, 90),
 }
-_CODEX_TRUSTED_CONTRACTS = frozenset({"codex-hooks-v2", "codex-hooks-v3"})
+_CODEX_SESSION_END_SPEC = {"SessionEnd": ("session_end", None, 60)}
+_CODEX_TRUSTED_CONTRACTS = frozenset({"codex-hooks-v2", "codex-hooks-v3", "codex-hooks-v3-generic", "codex-hooks-v4"})
 _CODEX_POLICY_TIMEOUT_SECONDS = 20.0
 _CODEX_POLICY_MESSAGE_LIMIT = 2 * 1024 * 1024
 _CLAUDE_FILE_CHANGED_MATCHER = (
@@ -83,6 +92,14 @@ _CODEX_REQUIRED_HOOKS: dict[str, tuple[str, str | None, int]] = {
     "PostCompact": ("post_compact", None, 30),
     "Stop": ("stop", None, 90),
 }
+
+
+def _codex_hook_specs(contract_id: str) -> dict[str, tuple[str, str | None, int]]:
+    specs = dict(_CODEX_HOOK_SPECS)
+    if contract_id == "codex-hooks-v4":
+        specs.update(_CODEX_SESSION_END_SPEC)
+    return specs
+
 
 _CLAUDE_REQUIRED_HOOKS: dict[str, tuple[str | None, int]] = {
     "SessionStart": ("startup|resume|clear|compact", 30),
@@ -1241,9 +1258,7 @@ def _claude_managed_sources(
         remote_path = remote_settings_path or _default_claude_remote_settings_path(config_path)
         remote_doc = _read_optional_claude_policy(remote_path)
         remote = (
-            _ClaudeSettingsSource("remote/server-managed settings", remote_path, remote_doc)
-            if remote_doc
-            else None
+            _ClaudeSettingsSource("remote/server-managed settings", remote_path, remote_doc) if remote_doc else None
         )
         hklm_doc = _read_claude_registry_policy("HKEY_LOCAL_MACHINE")
         hklm = (
@@ -1284,9 +1299,7 @@ def _claude_managed_sources(
         )
     file_doc, loaded_file_paths = _merge_claude_file_policies(managed_settings_paths)
     file_source = (
-        _ClaudeSettingsSource("explicit managed settings", ", ".join(loaded_file_paths), file_doc)
-        if file_doc
-        else None
+        _ClaudeSettingsSource("explicit managed settings", ", ".join(loaded_file_paths), file_doc) if file_doc else None
     )
     return remote, None, file_source, None
 
@@ -1453,10 +1466,11 @@ def _malformed_owned_hook_target(command: str, connector: str) -> str:
         owned_target = ""
         if "-encodedcommand" in lowered:
             encoded_index = lowered.index("-encodedcommand")
-            if (
-                encoded_index + 2 == len(parts)
-                and lowered[1:encoded_index] == ["-nologo", "-noprofile", "-noninteractive"]
-            ):
+            if encoded_index + 2 == len(parts) and lowered[1:encoded_index] == [
+                "-nologo",
+                "-noprofile",
+                "-noninteractive",
+            ]:
                 try:
                     encoded = base64.b64decode(parts[encoded_index + 1], validate=True)
                     if len(encoded) <= 16 * 1024 and len(encoded) % 2 == 0:
@@ -1597,9 +1611,10 @@ def _validate_codex_hook_contract(
 ) -> None:
     """Require the complete installed Codex matrix and native trust evidence.
 
-    Setup deliberately renders the current ten-row registration on every
-    supported version. Older clients expose only the contract-tier subset at
-    runtime, but keeping the installed superset makes upgrades deterministic.
+    Setup deliberately renders the ten common rows on every supported version
+    and adds SessionEnd only where Codex exposes it. Older clients expose only
+    the contract-tier subset at runtime, but keeping the common installed
+    superset makes upgrades deterministic.
     User-scoped hooks on Codex 0.129+ require ``hooks.state``; for those sources
     Doctor reproduces the vendor's positional hash contract instead of merely
     checking that some state value exists. Managed configuration is trusted by
@@ -1616,8 +1631,9 @@ def _validate_codex_hook_contract(
 
     key_source = _codex_hook_state_key_source(config_path)
     managed_commands: list[str] = []
-    expected_events = set(_CODEX_HOOK_SPECS)
-    for event, (event_key, expected_matcher, expected_timeout) in _CODEX_HOOK_SPECS.items():
+    hook_specs = _codex_hook_specs(contract_id)
+    expected_events = set(hook_specs)
+    for event, (event_key, expected_matcher, expected_timeout) in hook_specs.items():
         raw_groups = hooks.get(event)
         if not isinstance(raw_groups, list):
             raise _InspectionError("stale", f"Codex hook contract is missing {event}")
@@ -1863,7 +1879,7 @@ def _codex_trusted_hash(event_key: str, matcher: Any, handler: dict[str, Any]) -
     return "sha256:" + hashlib.sha256(canonical).hexdigest()
 
 
-def _validate_codex_hook_matrix(document: dict[str, Any], config_path: str) -> int:
+def _validate_codex_hook_matrix(document: dict[str, Any], config_path: str, contract_id: str) -> int:
     hooks = document.get("hooks")
     if not isinstance(hooks, dict):
         raise _InspectionError("missing", "Codex hook registration has no hooks table")
@@ -1876,7 +1892,10 @@ def _validate_codex_hook_matrix(document: dict[str, Any], config_path: str) -> i
     windows_commands: set[str] = set()
     source = _codex_normalized_source(config_path)
     count = 0
-    for event, (event_key, expected_matcher, expected_timeout) in _CODEX_REQUIRED_HOOKS.items():
+    required_hooks = dict(_CODEX_REQUIRED_HOOKS)
+    if contract_id == "codex-hooks-v4":
+        required_hooks.update(_CODEX_SESSION_END_SPEC)
+    for event, (event_key, expected_matcher, expected_timeout) in required_hooks.items():
         groups = hooks.get(event)
         if not isinstance(groups, list):
             raise _InspectionError("missing", f"Codex DefenseClaw hook event {event} is missing")
@@ -1950,7 +1969,7 @@ def _validate_codex_hook_matrix(document: dict[str, Any], config_path: str) -> i
         raise _InspectionError("stale", "Codex DefenseClaw hook events use inconsistent command identities")
 
     for event, groups in hooks.items():
-        if event == "state" or event in _CODEX_REQUIRED_HOOKS or not isinstance(groups, list):
+        if event == "state" or event in required_hooks or not isinstance(groups, list):
             continue
         if any(
             _handler_targets_defenseclaw(handler, "codex")
@@ -2283,7 +2302,7 @@ def validate_windows_hook_registration(
             _stable_regular_file(resolved, install_root, read_limit=64 * 1024)
             raise _InspectionError("stale", f"registered hook uses the obsolete gateway launcher: {resolved}")
         if connector == "codex":
-            matrix_entries = _validate_codex_hook_matrix(document, config_path)
+            matrix_entries = _validate_codex_hook_matrix(document, config_path, contract_id)
             _validate_codex_hook_contract(document, contract_id, config_path)
         if kind == "powershell":
             if not basename.endswith(".ps1") or basename not in {"defenseclaw-hook.ps1", "defenseclaw-gateway.ps1"}:

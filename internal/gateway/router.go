@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
@@ -1248,8 +1249,17 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 		}
 	}
 
-	// Use the shared rule engine — no tool-name gating.
-	findings := ScanAllRules(string(payload.Args), payload.Tool)
+	// The typed router frame establishes a trusted action boundary, but this
+	// lane is observational and therefore cannot synchronously deny.
+	findings := dispatchTrustedAction(context.Background(), trustedActionRequest{
+		Input: actionfacts.Input{
+			Tool: payload.Tool,
+			Args: payload.Args,
+		},
+		LegacyText:         string(payload.Args),
+		Connector:          r.connectorName(),
+		EnforcementCapable: false,
+	})
 	severity := HighestSeverity(findings)
 	dangerous := len(findings) > 0 && severityRank[severity] >= severityRank["HIGH"]
 	flaggedPattern := ""
@@ -1465,10 +1475,10 @@ func (r *EventRouter) handleApprovalRequest(evt EventFrame) {
 	}
 
 	rawCmd, argv, cwd := payload.CommandContext()
-	if rawCmd == "" && len(argv) > 0 {
-		rawCmd = strings.Join(argv, " ")
-	}
 	cmdName := baseCommand(rawCmd)
+	if cmdName == "" && len(argv) > 0 {
+		cmdName = baseCommand(argv[0])
+	}
 	correlation := payload.CorrelationContext()
 	approval := eventRouterApprovalObservation{
 		id: payload.ID, sessionKey: correlation.SessionKey, sessionID: correlation.SessionID,
@@ -1531,14 +1541,30 @@ func (r *EventRouter) handleApprovalRequest(evt EventFrame) {
 	// already inert in managed; also short-circuit the legacy heuristics so
 	// nothing here can deny.
 	managedAIDOnly := ManagedEnterpriseActive()
-	cmdFindings := ScanAllRules(rawCmd, "shell")
-	argvFindings := ScanAllRules(strings.Join(argv, " "), "shell")
-	allFindings := append(cmdFindings, argvFindings...)
-	dangerousByRules := len(allFindings) > 0 && severityRank[HighestSeverity(allFindings)] >= severityRank["HIGH"]
-	dangerousByLegacy := !managedAIDOnly && (r.isCommandDangerous(rawCmd) || r.isArgvDangerous(argv))
+	legacyText := rawCmd
+	if legacyText == "" {
+		legacyText = serializeArgvForLegacyScan(argv)
+	}
+	allFindings := dispatchTrustedAction(context.Background(), trustedActionRequest{
+		Input: actionfacts.Input{
+			Tool:       "shell",
+			Command:    rawCmd,
+			Argv:       append([]string(nil), argv...),
+			CWD:        cwd,
+			ActiveHome: trustedSameHostHome(),
+		},
+		LegacyText:         legacyText,
+		Connector:          r.connectorName(),
+		EnforcementCapable: true,
+	})
+	enforceableFindings := enforceableRuleFindings(allFindings)
+	dangerousByRules := len(enforceableFindings) > 0 &&
+		severityRank[HighestSeverity(enforceableFindings)] >= severityRank["HIGH"]
+	dangerousByLegacy := !managedAIDOnly &&
+		(r.isResidualCommandDangerous(rawCmd) || r.isResidualArgvDangerous(argv))
 	dangerous := dangerousByRules || dangerousByLegacy
 	topFinding := RuleFinding{RuleID: "UNKNOWN", Title: "dangerous command pattern"}
-	for _, f := range allFindings {
+	for _, f := range enforceableFindings {
 		if severityRank[f.Severity] >= severityRank["HIGH"] {
 			topFinding = f
 			break
@@ -1624,6 +1650,26 @@ func baseCommand(cmd string) string {
 	return base
 }
 
+func serializeArgvForLegacyScan(argv []string) string {
+	serialized := make([]string, 0, len(argv))
+	for _, argument := range argv {
+		if argument != "" && strings.IndexFunc(argument, func(character rune) bool {
+			return !((character >= 'a' && character <= 'z') ||
+				(character >= 'A' && character <= 'Z') ||
+				(character >= '0' && character <= '9') ||
+				strings.ContainsRune("_-./:=@%+,", character))
+		}) == -1 {
+			serialized = append(serialized, argument)
+			continue
+		}
+		serialized = append(
+			serialized,
+			"'"+strings.ReplaceAll(argument, "'", "'\"'\"'")+"'",
+		)
+	}
+	return strings.Join(serialized, " ")
+}
+
 // Legacy pattern helpers retained for backward-compat tests and fallback checks.
 var dangerousPatterns = []string{
 	"curl",
@@ -1691,6 +1737,53 @@ func (r *EventRouter) isArgvDangerous(argv []string) bool {
 var dangerousBinaries = []string{
 	"curl", "wget", "nc", "ncat", "netcat",
 	"dd", "mkfs", "rm",
+}
+
+var residualDangerousPatterns = []string{
+	"eval ",
+	"bash -c",
+	"sh -c",
+	"python -c",
+	"perl -e",
+	"ruby -e",
+	"rm -rf /",
+	"dd if=",
+	"mkfs",
+	"chmod 777",
+	"> /etc/",
+	">> /etc/",
+	"passwd",
+	"shadow",
+	"sudoers",
+}
+
+func (r *EventRouter) isResidualCommandDangerous(rawCmd string) bool {
+	lower := strings.ToLower(rawCmd)
+	for _, pattern := range residualDangerousPatterns {
+		if strings.Contains(lower, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *EventRouter) isResidualArgvDangerous(argv []string) bool {
+	if len(argv) == 0 {
+		return false
+	}
+	if r.isResidualCommandDangerous(strings.Join(argv, " ")) {
+		return true
+	}
+	base := argv[0]
+	if index := strings.LastIndexAny(base, `/\`); index >= 0 {
+		base = base[index+1:]
+	}
+	switch strings.ToLower(base) {
+	case "dd", "mkfs", "mkfs.ext2", "mkfs.ext3", "mkfs.ext4", "rm":
+		return true
+	default:
+		return false
+	}
 }
 
 // inferSystem derives the gen_ai.system value from provider and model strings.

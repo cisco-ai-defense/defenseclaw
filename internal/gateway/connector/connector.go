@@ -437,6 +437,10 @@ type HookProfile struct {
 	NormalizedAgentVersion  string
 	CompatibilityStatus     string
 	CompatibilityReason     string
+	// ToolCallLifecycle is the resolved, versioned routing and trust contract
+	// for structured tool proposals, result content, and lifecycle audit
+	// events. A zero value means the experimental stateful path is disabled.
+	ToolCallLifecycle ToolCallLifecycleContract
 
 	// ContentEnvelopeKey names the single nested payload object this
 	// connector hides inspectable content in (hermes nests prompt /
@@ -459,6 +463,21 @@ type HookProfile struct {
 	Decode     func(payload map[string]interface{}) HookProfileRequest
 	MapVerdict func(in HookVerdictInput) HookVerdictOutput
 	Respond    func(in HookRespondInput) HookRespondOutput
+}
+
+// ExperimentalToolLifecycleEligible reports whether the resolved upstream
+// schema is trusted for stateful enforcement. Unversioned connectors use their
+// explicitly reviewed default contract; a known version mismatch never does.
+func (profile HookProfile) ExperimentalToolLifecycleEligible() bool {
+	if profile.ToolCallLifecycle.Version != ToolCallLifecycleContractVersion {
+		return false
+	}
+	switch profile.CompatibilityStatus {
+	case HookCompatibilityKnown, HookCompatibilityUnversioned:
+		return true
+	default:
+		return false
+	}
 }
 
 // HookProfileRequest is the shared representation of a decoded hook
