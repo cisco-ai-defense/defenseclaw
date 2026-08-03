@@ -369,8 +369,17 @@ func TestWindowsWatchdogOwnershipHandoffRefusesCompetingPublisher(t *testing.T) 
 
 	// The refusal must not strand the lock or the handle: the competitor's
 	// record stays readable and writable by the next publisher.
-	if _, err := openWatchdogOwnershipFile(pidPath); err != nil {
+	//
+	// Close each probe before opening the next. An ownership handle denies
+	// write sharing, so holding one open here would make the O_RDWR check
+	// below fail with a sharing violation caused by this test rather than by
+	// a handle the production path forgot to release.
+	probe, err := openWatchdogOwnershipFile(pidPath)
+	if err != nil {
 		t.Fatalf("refused handoff left the PID file unopenable: %v", err)
+	}
+	if err := probe.Close(); err != nil {
+		t.Fatalf("close ownership probe: %v", err)
 	}
 	reopened, err := os.OpenFile(pidPath, os.O_RDWR, 0o600)
 	if err != nil {
