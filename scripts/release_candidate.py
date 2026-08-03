@@ -193,7 +193,9 @@ WINDOWS_SETUP_PUBLISHER = "Cisco Systems, Inc."
 WINDOWS_SETUP_CLIENTS = {
     "codex": "0.144.3",
     "claudecode": "2.1.208",
+    "amp": "0.0.1785334225-g9abe75",
 }
+WINDOWS_SETUP_CONNECTORS = ["codex", "claudecode", "amp"]
 WINDOWS_SETUP_CERTIFICATION_REQUIREMENTS = (
     "automatic-codex-trust",
     "lifecycle",
@@ -201,7 +203,7 @@ WINDOWS_SETUP_CERTIFICATION_REQUIREMENTS = (
     "tool-block",
     "gateway-jsonl",
     "audit-correlation",
-    "connector-otlp",
+    "gateway-generated-connector-telemetry",
     "repair",
     "upgrade",
     "uninstall",
@@ -4835,7 +4837,7 @@ def _validate_windows_setup_certification(
                 "publisher": WINDOWS_SETUP_PUBLISHER,
             }
             or document.get("clients") != WINDOWS_SETUP_CLIENTS
-            or document.get("connectors") != ["codex", "claudecode"]
+            or document.get("connectors") != WINDOWS_SETUP_CONNECTORS
             or document.get("requirements") != list(WINDOWS_SETUP_CERTIFICATION_REQUIREMENTS)
         )
     else:

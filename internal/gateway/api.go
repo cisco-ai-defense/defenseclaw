@@ -543,11 +543,18 @@ func (a *APIServer) hookTokenScopeForPath(path string) (string, bool) {
 		}
 		return "", false
 	}
-	switch path {
-	case "/api/v1/codex/hook":
-		return "codex", true
-	case "/api/v1/claude-code/hook":
-		return "claudecode", true
+	// Legacy/test boot still registers every built-in HookEndpoint. Resolve
+	// authentication from that same reviewed built-in roster so a newly added
+	// connector route cannot silently accept only the master token.
+	registry := sharedDefaultRegistry()
+	for _, name := range registry.Names() {
+		conn, ok := registry.Get(name)
+		if !ok {
+			continue
+		}
+		if endpoint, ok := conn.(connector.HookEndpoint); ok && endpoint.HookAPIPath() == path {
+			return strings.ToLower(name), true
+		}
 	}
 	return "", false
 }
@@ -675,7 +682,7 @@ func (a *APIServer) registerConnectorHookRoutes(mux *http.ServeMux, wrap ...func
 		if f, ok := connectorHookHandlerByName["codex"]; ok {
 			register("/api/v1/codex/hook", http.HandlerFunc(f(a)))
 		}
-		for _, name := range []string{"hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent"} {
+		for _, name := range []string{"hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "amp", "omnigent"} {
 			if f, ok := connectorHookHandlerByName[name]; ok {
 				register("/api/v1/"+name+"/hook", http.HandlerFunc(f(a)))
 			}
@@ -1335,7 +1342,7 @@ func connectorModeFor(name, policyMode string) map[string]interface{} {
 		// Claude Code uses hooks + the OTel env-block; no notify
 		// equivalent (Anthropic doesn't ship a turn-complete shim).
 		telemetry = []string{"hooks", "otel"}
-	case "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode":
+	case "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "amp":
 		mode = "observability"
 		intercept = false
 		surface = "agent_lifecycle_hooks"

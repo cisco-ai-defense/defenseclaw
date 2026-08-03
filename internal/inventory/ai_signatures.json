@@ -47,7 +47,18 @@
         "package-id:OpenAI.Codex_2p2nqsd0c76g0",
         "package-id:OpenAI.CodexBeta_2p2nqsd0c76g0"
       ],
-      "local_endpoints": []
+      "local_endpoints": [],
+      "skill_paths": [
+        "~/.codex/skills",
+        ".codex/skills"
+      ],
+      "rule_paths": [
+        "~/.codex/rules",
+        ".codex/rules"
+      ],
+      "plugin_paths": [
+        "~/.codex/plugins"
+      ]
     },
     {
       "id": "claudecode",
@@ -95,8 +106,16 @@
         "claude",
         "anthropic"
       ],
-      "application_names": [],
-      "local_endpoints": []
+      "application_names": [
+        "Claude.app"
+      ],
+      "local_endpoints": [],
+      "skill_paths": [
+        "~/.claude/skills"
+      ],
+      "rule_paths": [
+        "~/.claude/rules"
+      ]
     },
     {
       "id": "openclaw",
@@ -127,7 +146,10 @@
         "openclaw"
       ],
       "application_names": [],
-      "local_endpoints": []
+      "local_endpoints": [],
+      "plugin_paths": [
+        "~/.openclaw/plugins"
+      ]
     },
     {
       "id": "zeptoclaw",
@@ -201,7 +223,17 @@
         "hermes agent"
       ],
       "application_names": [],
-      "local_endpoints": []
+      "local_endpoints": [],
+      "skill_paths": [
+        "$HERMES_HOME/skills",
+        "$LOCALAPPDATA/hermes/skills",
+        "~/.hermes/skills"
+      ],
+      "plugin_paths": [
+        "$HERMES_HOME/plugins",
+        "$LOCALAPPDATA/hermes/plugins",
+        "~/.hermes/plugins"
+      ]
     },
     {
       "id": "cursor",
@@ -249,7 +281,11 @@
         "Cursor.app",
         "Cursor"
       ],
-      "local_endpoints": []
+      "local_endpoints": [],
+      "rule_paths": [
+        "~/.cursor/rules",
+        ".cursor/rules"
+      ]
     },
     {
       "id": "windsurf",
@@ -297,7 +333,11 @@
         "Windsurf.app",
         "Windsurf"
       ],
-      "local_endpoints": []
+      "local_endpoints": [],
+      "rule_paths": [
+        ".windsurf/rules",
+        ".codeium/windsurf/rules"
+      ]
     },
     {
       "id": "geminicli",
@@ -620,6 +660,72 @@
       "domain_patterns": [],
       "history_patterns": [
         "opencode"
+      ],
+      "application_names": [],
+      "local_endpoints": []
+    },
+    {
+      "id": "amp",
+      "name": "Amp",
+      "vendor": "Amp",
+      "category": "supported_connector",
+      "confidence": 0.95,
+      "supported_connector": "amp",
+      "binary_names": [
+        "amp"
+      ],
+      "process_names": [
+        "amp"
+      ],
+      "config_paths": [
+        "~/.config/amp/settings.json",
+        "~/.config/amp/settings.jsonc",
+        "/Library/Application Support/ampcode/managed-settings.json",
+        "/etc/ampcode/managed-settings.json",
+        "$ProgramData/ampcode/managed-settings.json",
+        ".amp/settings.json",
+        ".amp/settings.jsonc",
+        ".amp/plugins",
+        "~/.config/amp/plugins",
+        "~/.config/agents/skills",
+        "~/.agents/skills",
+        "~/.config/amp/skills",
+        ".agents/skills",
+        ".claude/skills",
+        "~/.claude/skills",
+        ".agents/checks",
+        "~/.config/amp/checks",
+        "~/.config/agents/checks",
+        "~/.config/amp/AGENTS.md",
+        "~/.config/AGENTS.md",
+        "/Library/Application Support/ampcode/AGENTS.md",
+        "/etc/ampcode/AGENTS.md",
+        "$ProgramData/ampcode/AGENTS.md",
+        "AGENTS.md"
+      ],
+      "extension_ids": [],
+      "mcp_paths": [
+        "~/.config/amp/settings.json",
+        "~/.config/amp/settings.jsonc",
+        "/Library/Application Support/ampcode/managed-settings.json",
+        "/etc/ampcode/managed-settings.json",
+        "$ProgramData/ampcode/managed-settings.json",
+        ".amp/settings.json",
+        ".amp/settings.jsonc"
+      ],
+      "package_names": [
+        "@ampcode/cli"
+      ],
+      "env_var_names": [
+        "AMP_API_KEY"
+      ],
+      "domain_patterns": [
+        "ampcode.com"
+      ],
+      "history_patterns": [
+        "ampcode",
+        "amp -x",
+        "amp --execute"
       ],
       "application_names": [],
       "local_endpoints": []
@@ -1766,17 +1872,6 @@
       "supported_connector": "",
       "binary_names": ["pieces", "pieces-os"],
       "config_paths": ["~/Library/com.pieces.os", "~/.local/share/com.pieces.os", "$LOCALAPPDATA/Mesh Intelligent Technologies, Inc/Pieces OS/com.pieces.os/production"]
-    },
-    {
-      "id": "amp",
-      "name": "Amp",
-      "vendor": "Amp",
-      "category": "ai_cli",
-      "confidence": 0.82,
-      "specificity": 0.74,
-      "supported_connector": "",
-      "binary_names": ["amp"],
-      "config_paths": ["~/.config/amp/settings.json", "~/.config/amp/settings.jsonc", ".amp/settings.json", ".amp/settings.jsonc"]
     },
     {
       "id": "void",

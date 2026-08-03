@@ -37,7 +37,7 @@ EOF
 
 t_extract_connectors_multi_connector_no_duplicates() {
   # This is the exact shape render_config emits for a
-  # --connector codex,claudecode,cursor install (see t_multi_connector
+  # --connector amp,codex,claudecode,cursor install (see t_multi_connector
   # in test_render_config.sh). Both the primary scalar AND the map are
   # present. The extractor must return each connector exactly once.
   local dir cfg wrapper out lines
@@ -55,6 +55,9 @@ guardrail:
     enabled: false
   connector: codex
   connectors:
+    amp:
+      enabled: true
+      mode: action
     codex:
       enabled: true
       mode: action
@@ -71,10 +74,11 @@ YAML
   wrapper="$(_seed_extract_wrapper "${dir}" "${cfg}")"
   out="$(bash "${wrapper}" 2>&1)"
   lines="$(printf '%s\n' "${out}" | grep -c . || true)"
+  assert_contains "${out}" "amp"        "amp extracted"
   assert_contains "${out}" "codex"      "codex extracted"
   assert_contains "${out}" "claudecode" "claudecode extracted"
   assert_contains "${out}" "cursor"     "cursor extracted"
-  assert_eq "${lines}" "3" "exactly 3 connectors extracted (no duplicate from primary + map both present)"
+  assert_eq "${lines}" "4" "exactly 4 connectors extracted (no duplicate from primary + map both present)"
 }
 
 t_extract_connectors_single_connector_scalar_only() {

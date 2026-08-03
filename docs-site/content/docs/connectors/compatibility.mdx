@@ -13,8 +13,8 @@ DefenseClaw tracks hook connector compatibility with a packaged JSON manifest at
 
 <Callout type="warning" title="Version compatibility is not platform certification">
 A connector can have a valid hook contract and still be unsupported or not
-certified on native Windows. The Windows release currently certifies only
-Codex and Claude Code; see the
+certified on native Windows. The current packaged Windows release contract
+certifies Codex, Claude Code, and Amp; see the
 [native Windows connector matrix](/docs/get-started/windows#certified-connector-scope).
 </Callout>
 
@@ -36,6 +36,7 @@ Codex and Claude Code; see the
 | <ConnectorLabel id="openhands" /> | hook contract | unversioned / documented hooks; tested with `OpenHands CLI 1.16.0` | `openhands-hooks-v1` / `v6` | prompt, tool_call, tool_result, event_content |
 | <ConnectorLabel id="antigravity" /> | hook contract | `>=1.0.0` | `antigravity-hooks-v2` / `v7` | prompt, tool_call, tool_result |
 | <ConnectorLabel id="opencode" /> | hook contract | unversioned / plugin API; tested with `opencode 1.16.2` | `opencode-hooks-v1` / `v6` | tool_call, tool_result |
+| <ConnectorLabel id="amp" /> | plugin contract | `>=0.0.1785334225` | `amp-plugin-v1` / `v1` | prompt, tool_call, tool_result, event_content |
 | <ConnectorLabel id="omnigent" /> | hook contract | unversioned / documented custom-policy API | `omnigent-custom-policy-v1` / `v1` | prompt, tool_call, tool_result |
 
 Open-ended contracts leave `max_exclusive` empty until an upstream release
@@ -56,7 +57,12 @@ the first release containing every event in the current DefenseClaw contract.
 OpenCode's plugin API, OmniGent's six-phase custom-policy API, and OpenHands'
 documented hooks are accepted as unversioned contracts. The manifest records
 validation with `opencode 1.16.2` and `OpenHands CLI 1.16.0`; those are
-validation points, not minimum versions. Antigravity is gated at `>=1.0.0`.
+validation points, not minimum versions. Amp's normalized `0.0.1785334225`
+value is DefenseClaw's pinned contract snapshot and certification floor for the
+documented five-event API used by `amp-plugin-v1`; Amp does not declare it as
+the upstream minimum. Execute mode additionally needs
+`--plugin-ready-timeout 30` so policy plugins load before the turn starts.
+Antigravity is gated at `>=1.0.0`.
 Claude Code is gated at `>=2.1.152`, which is the 28-event surface represented
 by the current contract.
 

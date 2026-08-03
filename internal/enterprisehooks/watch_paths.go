@@ -257,6 +257,7 @@ func WatchOwnedFiles(opts InstallOptions) (WatchOwnership, error) {
 		setupOpts.HookContractID = resolution.Contract.ContractID
 	}
 
+	managedPluginArtifacts := map[string]struct{}{}
 	exclusive := map[string]struct{}{}
 	shared := map[string]struct{}{}
 	addExclusive := func(path string) {
@@ -264,17 +265,28 @@ func WatchOwnedFiles(opts InstallOptions) (WatchOwnership, error) {
 		if path == "" {
 			return
 		}
-		exclusive[filepath.Clean(path)] = struct{}{}
+		path = filepath.Clean(path)
+		exclusive[path] = struct{}{}
+		delete(shared, path)
 	}
 	addShared := func(path string) {
 		path = strings.TrimSpace(path)
 		if path == "" {
 			return
 		}
-		shared[filepath.Clean(path)] = struct{}{}
+		path = filepath.Clean(path)
+		if _, exclusiveWriter := exclusive[path]; exclusiveWriter {
+			return
+		}
+		shared[path] = struct{}{}
 	}
 
 	err = connector.WithUserHomeDir(home, func() error {
+		for _, artifact := range connector.ManagedPluginArtifacts(conn, setupOpts) {
+			if artifact = strings.TrimSpace(artifact); artifact != "" {
+				managedPluginArtifacts[filepath.Clean(artifact)] = struct{}{}
+			}
+		}
 		// SHARED-WRITER: the native hook config file (codex
 		// config.toml / claudecode settings.json / cursor hooks.json).
 		// The agent itself writes to this constantly during normal use
@@ -282,7 +294,11 @@ func WatchOwnedFiles(opts InstallOptions) (WatchOwnership, error) {
 		// to Create/Remove/Rename here. Any in-place stripping via
 		// `sed -i` is caught by the 5-min backstop reconcile.
 		for _, path := range connector.HookConfigPathsForConnector(conn, setupOpts) {
-			addShared(path)
+			if _, managedPlugin := managedPluginArtifacts[filepath.Clean(path)]; managedPlugin {
+				addExclusive(path)
+			} else {
+				addShared(path)
+			}
 		}
 		footprint := connector.AgentPaths{}
 		if ap, ok := conn.(connector.AgentPathProvider); ok {
@@ -291,7 +307,11 @@ func WatchOwnedFiles(opts InstallOptions) (WatchOwnership, error) {
 		// PatchedFiles are typically the same as HookConfigPaths — the
 		// agent's own config file — so they are shared-writer too.
 		for _, p := range footprint.PatchedFiles {
-			addShared(p)
+			if _, managedPlugin := managedPluginArtifacts[filepath.Clean(p)]; managedPlugin {
+				addExclusive(p)
+			} else {
+				addShared(p)
+			}
 		}
 		// EXCLUSIVE-WRITER: everything below. Only DefenseClaw writes
 		// to these paths, so any event is meaningful and worth acting

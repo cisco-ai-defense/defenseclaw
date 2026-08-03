@@ -24,6 +24,9 @@
 #       ~/.codex/config.toml         (strip [hooks], [otel], notify=)
 #       ~/.claude/settings.json      (strip DC entries from hooks map)
 #       ~/.cursor/hooks.json         (strip DC entries from hooks map)
+#       ~/.config/amp/plugins/defenseclaw.ts
+#                                    (restore/remove only when the structured
+#                                     backup identity + post hash still match)
 #     Non-DefenseClaw user entries in those files are preserved verbatim.
 #     Pass --keep-agent-configs to skip the scrub.
 
@@ -107,7 +110,11 @@ Options:
                           ~/.codex/config.toml
                           ~/.claude/settings.json
                           ~/.cursor/hooks.json
+                          ~/.config/amp/plugins/defenseclaw.ts
                         Non-DefenseClaw entries in those files are preserved.
+                        Amp cleanup uses:
+                          ~/.defenseclaw/connector_backups/amp/config.json
+                        and refuses to change a drifted or unsafe plugin.
   --keep-agent-configs  With --purge, skip the agent-config scrub. Hook
                         scripts will be deleted, leaving dangling references
                         that fail-close every agent tool call. Use only if
@@ -207,6 +214,7 @@ if [[ "${PURGE}" == "true" ]]; then
       if [[ "${KEEP_AGENT_CONFIGS}" != "true" ]]; then
         printf '[uninstall] and will SCRUB DefenseClaw entries from each user'\''s:\n'
         printf '  ~/.codex/config.toml\n  ~/.claude/settings.json\n  ~/.cursor/hooks.json\n'
+        printf '  ~/.config/amp/plugins/defenseclaw.ts (exact backup authority required)\n'
         printf '  (non-DefenseClaw entries preserved)\n'
       fi
     fi
@@ -263,8 +271,13 @@ scrub_agent_config() {
   local connector="$1"
   local cfg="$2"
   local run_as_user="$3"   # empty ⇒ run as caller (root)
-  if [[ ! -f "${cfg}" ]]; then
-    return 0
+  local authority="${4:-}"
+  if [[ "${connector}" == "amp" ]]; then
+    if [[ ! -e "${cfg}" && ! -L "${cfg}" ]]; then
+      return 0
+    fi
+  elif [[ ! -f "${cfg}" ]]; then
+      return 0
   fi
   if [[ ! -f "${SCRUB_PY}" ]]; then
     warn "scrub helper missing: ${SCRUB_PY}; skipping ${cfg}"
@@ -274,9 +287,17 @@ scrub_agent_config() {
   log "  scrubbing ${connector} entries from ${cfg}"
   local rc=0
   if [[ -n "${run_as_user}" && $(id -u "${run_as_user}" 2>/dev/null) != "0" ]]; then
-    sudo -u "${run_as_user}" "${PY}" "${SCRUB_PY}" "${connector}" "${cfg}" || rc=$?
+    if [[ -n "${authority}" ]]; then
+      sudo -u "${run_as_user}" "${PY}" "${SCRUB_PY}" "${connector}" "${cfg}" "${authority}" || rc=$?
+    else
+      sudo -u "${run_as_user}" "${PY}" "${SCRUB_PY}" "${connector}" "${cfg}" || rc=$?
+    fi
   else
-    "${PY}" "${SCRUB_PY}" "${connector}" "${cfg}" || rc=$?
+    if [[ -n "${authority}" ]]; then
+      "${PY}" "${SCRUB_PY}" "${connector}" "${cfg}" "${authority}" || rc=$?
+    else
+      "${PY}" "${SCRUB_PY}" "${connector}" "${cfg}" || rc=$?
+    fi
   fi
   case "${rc}" in
     0) ;;
@@ -297,6 +318,9 @@ if [[ "${PURGE}" == "true" \
     scrub_agent_config codex      "${_phome}/.codex/config.toml"    "${_pu}"
     scrub_agent_config claudecode "${_phome}/.claude/settings.json" "${_pu}"
     scrub_agent_config cursor     "${_phome}/.cursor/hooks.json"    "${_pu}"
+    scrub_agent_config amp \
+      "${_phome}/.config/amp/plugins/defenseclaw.ts" "${_pu}" \
+      "${_phome}/.defenseclaw/connector_backups/amp/config.json"
   done <<< "${PURGE_TARGETS}"
   unset _pu _puid _pgid _phome
 fi
@@ -407,9 +431,10 @@ if [[ "${PURGE}" == "true" ]]; then
       if [[ "${KEEP_AGENT_CONFIGS}" == "true" ]]; then
         for cfg in "${_phome}/.codex/config.toml" \
                    "${_phome}/.claude/settings.json" \
-                   "${_phome}/.cursor/hooks.json"; do
+                   "${_phome}/.cursor/hooks.json" \
+                   "${_phome}/.config/amp/plugins/defenseclaw.ts"; do
           if [[ -f "${cfg}" ]]; then
-            warn "--keep-agent-configs: ${cfg} still references deleted hook scripts (will fail-close every tool call)"
+            warn "--keep-agent-configs: ${cfg} remains after DefenseClaw runtime deletion (its managed hook/plugin may fail closed)"
           fi
         done
       fi

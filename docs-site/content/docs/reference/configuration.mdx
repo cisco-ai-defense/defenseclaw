@@ -556,6 +556,7 @@ upstream agent-gateway address. Set log verbosity through the sidecar's
 | Antigravity | `~/.gemini/config/hooks.json` (global only — the path agy v1.0.x actually evaluates; the marketing-facing `~/.gemini/antigravity-cli/hooks.json` is silently ignored at runtime; agy merges all discovered hooks files, so DefenseClaw never patches workspace-local copies) |
 | Hermes | `~/.hermes/config.yaml` |
 | OpenCode | `~/.config/opencode/plugins/defenseclaw.js` (managed bridge plugin — written whole, not patched; removed on teardown) |
+| Amp | `~/.config/amp/plugins/defenseclaw.ts` on macOS/Linux or `%USERPROFILE%\.config\amp\plugins\defenseclaw.ts` on native Windows (managed system policy plugin) |
 | OmniGent | `$OMNIGENT_CONFIG_HOME/config.yaml` when set (otherwise `~/.omnigent/config.yaml`), `~/.defenseclaw/hooks/defenseclaw_omnigent_policy.py`, and `defenseclaw_omnigent.pth` in OmniGent's Python environment |
 
 A managed backup record is stored at

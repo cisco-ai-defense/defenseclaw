@@ -47,6 +47,7 @@ const (
 	CorrelationProfileOpenHandsV1   CorrelationProfileVersion = "openhands-correlation-v1"
 	CorrelationProfileAntigravityV1 CorrelationProfileVersion = "antigravity-correlation-v1"
 	CorrelationProfileOpenCodeV1    CorrelationProfileVersion = "opencode-correlation-v1"
+	CorrelationProfileAMPV1         CorrelationProfileVersion = "amp-correlation-v1"
 	CorrelationProfileOmniGentV1    CorrelationProfileVersion = "omnigent-correlation-v1"
 )
 
@@ -426,30 +427,30 @@ func correlationLifecycleForContract(contract HookContract) []CorrelationLifecyc
 	}
 	candidates := []CorrelationLifecycleBinding{
 		{Lifecycle: CorrelationLifecycleSessionStart, Events: []string{
-			"SessionStart", "sessionStart", "session_start", "session.created", "on_session_start",
+			"SessionStart", "sessionStart", "session_start", "session.start", "session.created", "on_session_start",
 		}},
 		{Lifecycle: CorrelationLifecycleSessionEnd, Events: []string{
 			"SessionEnd", "sessionEnd", "session_end", "session.deleted", "on_session_end", "on_session_finalize",
 		}},
 		{Lifecycle: CorrelationLifecycleTurnStart, Events: []string{
 			"UserPromptSubmit", "userPromptSubmitted", "user_prompt_submit", "beforeSubmitPrompt",
-			"BeforeAgent", "PreInvocation", "pre_user_prompt", "pre_llm_call",
+			"BeforeAgent", "PreInvocation", "pre_user_prompt", "pre_llm_call", "agent.start",
 		}},
 		{Lifecycle: CorrelationLifecycleTurnEnd, Events: []string{
 			"Stop", "stop", "agentStop", "AfterAgent", "AfterAgentResponse", "PostInvocation",
-			"afterAgentResponse", "post_cascade_response", "post_cascade_response_with_transcript", "post_llm_call",
+			"afterAgentResponse", "post_cascade_response", "post_cascade_response_with_transcript", "post_llm_call", "agent.end",
 		}},
 		{Lifecycle: CorrelationLifecycleToolStart, Events: []string{
 			"PreToolUse", "preToolUse", "pre_tool_use", "BeforeTool", "pre_tool_call",
 			"pre_read_code", "pre_write_code", "pre_run_command", "pre_mcp_tool_use",
 			"beforeShellExecution", "beforeMCPExecution", "beforeReadFile", "beforeTabFileRead",
-			"tool.execute.before",
+			"tool.execute.before", "tool.call",
 		}},
 		{Lifecycle: CorrelationLifecycleToolEnd, Events: []string{
 			"PostToolUse", "postToolUse", "post_tool_use", "PostToolUseFailure", "postToolUseFailure",
 			"AfterTool", "post_tool_call", "post_read_code", "post_write_code", "post_run_command",
 			"post_mcp_tool_use", "afterShellExecution", "afterMCPExecution", "afterFileEdit",
-			"afterTabFileEdit", "tool.execute.after",
+			"afterTabFileEdit", "tool.execute.after", "tool.result",
 		}},
 		{Lifecycle: CorrelationLifecycleModelStart, Events: []string{
 			"BeforeModel",
@@ -761,6 +762,16 @@ func CorrelationSpecForConnector(name, hookContractID string) (CorrelationSpec, 
 			reported(CorrelationTargetTool, ns, "tool_invocation", "callID", "callId", "toolCallId"),
 		)
 		return makeSpec(CorrelationProfileOpenCodeV1, "opencode-hooks-v1", []CorrelationSurface{CorrelationSurfaceHook}, bindings, nil, []CorrelationInferenceRule{CorrelationInferenceUniquePendingTool}, complete(CorrelationCompletenessComplete, CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessAbsent, "no authenticated server-event adapter or reviewed native exporter is installed"))
+	case "amp":
+		bindings := appendBindings(base,
+			reported(CorrelationTargetThread, ns, "thread", "thread_id"),
+			reported(CorrelationTargetSession, ns, "thread_session", "session_id"),
+			reported(CorrelationTargetTurn, ns, "message", "turn_id"),
+			reported(CorrelationTargetMessage, ns, "message", "message_id"),
+			reported(CorrelationTargetTool, ns, "tool_invocation", "tool_call_id"),
+			reported(CorrelationTargetSourceEvent, ns, "plugin_event", "source_event_id"),
+		)
+		return makeSpec(CorrelationProfileAMPV1, "amp-plugin-v1", []CorrelationSurface{CorrelationSurfaceHook}, bindings, nil, []CorrelationInferenceRule{CorrelationInferencePromptBoundaryTurn, CorrelationInferenceUniquePendingTool}, complete(CorrelationCompletenessComplete, CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessComplete, CorrelationCompletenessAbsent, CorrelationCompletenessAbsent, "Amp plugin events do not report a stable agent ID, parent thread ID, or provider model request/response IDs", "Amp exposes no documented customer native-OTLP exporter"))
 	case "omnigent":
 		bindings := appendBindings(base,
 			reported(CorrelationTargetSession, ns, "conversation", "conversation_id", "conversationId"),

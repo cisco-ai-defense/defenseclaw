@@ -160,26 +160,45 @@ func withLockedDirectory(path string, write func() error) error {
 }
 
 func windowsPathOwnedByCurrentUser(path string) (bool, error) {
-	extended, err := winpath.Extended(path)
+	owner, err := windowsPathOwner(path)
 	if err != nil {
 		return false, err
+	}
+	user, err := currentWindowsUserSID()
+	if err != nil {
+		return false, err
+	}
+	return owner != nil && owner.Equals(user), nil
+}
+
+func windowsPathOwner(path string) (*windows.SID, error) {
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		return nil, err
 	}
 	sd, err := windows.GetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
 	if err != nil {
-		return false, err
+		return nil, err
 	}
 	if sd == nil {
-		return false, fmt.Errorf("safefile: path has no security descriptor: %s", path)
+		return nil, fmt.Errorf("safefile: path has no security descriptor: %s", path)
 	}
 	owner, _, err := sd.Owner()
 	if err != nil {
-		return false, err
+		return nil, err
 	}
+	return owner, nil
+}
+
+func currentWindowsUserSID() (*windows.SID, error) {
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
-	if err != nil || user == nil || user.User.Sid == nil {
-		return false, err
+	if err != nil {
+		return nil, err
 	}
-	return owner != nil && owner.Equals(user.User.Sid), nil
+	if user == nil || user.User.Sid == nil {
+		return nil, fmt.Errorf("safefile: current token user is unavailable")
+	}
+	return user.User.Sid, nil
 }
 
 func preserveExistingProtection(source, destination string) error {
@@ -358,9 +377,20 @@ func setPrivateDACL(path string, inherit bool) error {
 	if err != nil {
 		return err
 	}
-	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	user, err := currentWindowsUserSID()
 	if err != nil {
 		return err
+	}
+	// File owners receive implicit WRITE_DAC, but not WRITE_OWNER. Re-applying
+	// the already-correct owner therefore fails for a normal (non-elevated)
+	// Windows user. Require the expected owner and change only the DACL; this
+	// also fails closed if an operator- or attacker-owned path reaches here.
+	owner, err := windowsPathOwner(path)
+	if err != nil {
+		return err
+	}
+	if owner == nil || !owner.Equals(user) {
+		return fmt.Errorf("safefile: refusing foreign-owned path: %s", path)
 	}
 	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
 	if err != nil {
@@ -371,7 +401,7 @@ func setPrivateDACL(path string, inherit bool) error {
 		inheritance = uint32(windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT)
 	}
 	entries := make([]windows.EXPLICIT_ACCESS, 0, 2)
-	for _, sid := range []*windows.SID{user.User.Sid, system} {
+	for _, sid := range []*windows.SID{user, system} {
 		entries = append(entries, windows.EXPLICIT_ACCESS{
 			AccessPermissions: windows.GENERIC_ALL,
 			AccessMode:        windows.GRANT_ACCESS,
@@ -385,31 +415,6 @@ func setPrivateDACL(path string, inherit bool) error {
 	}
 	acl, err := windows.ACLFromEntries(entries, nil)
 	if err != nil {
-		return err
-	}
-	current, err := windows.GetNamedSecurityInfo(
-		extended,
-		windows.SE_FILE_OBJECT,
-		windows.OWNER_SECURITY_INFORMATION,
-	)
-	if err != nil {
-		return err
-	}
-	if current == nil {
-		return fmt.Errorf("safefile: path has no security descriptor: %s", path)
-	}
-	owner, _, err := current.Owner()
-	if err != nil {
-		return err
-	}
-	// Rewriting even the same owner requires WRITE_OWNER; the current owner
-	// can tighten the DACL through its implicit WRITE_DAC right.
-	if err := setWindowsOwnerIfDifferent(
-		extended,
-		owner,
-		user.User.Sid,
-		windows.SetNamedSecurityInfo,
-	); err != nil {
 		return err
 	}
 	return windows.SetNamedSecurityInfo(

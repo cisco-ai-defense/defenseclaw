@@ -93,7 +93,7 @@ endef
 
 .PHONY: help all path doctor uninstall quickstart llm-setup \
         build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
-        plugin plugin-install maybe-openclaw-plugin-install extensions test cli-test cli-test-cov cli-test-snap tui-test gateway-test go-test-cov \
+        plugin plugin-install amp-plugin-typecheck maybe-openclaw-plugin-install extensions test cli-test cli-test-cov cli-test-snap tui-test gateway-test go-test-cov \
         packaging-macos-test packaging-macos-bundle macos-app-license-check macos-app-upstream-check macos-app-build macos-app-test macos-app-release macos-app-release-verify \
         security-suite-test security-suite-eval \
         connector-matrix-test go-connector-matrix-test py-connector-matrix-test \
@@ -516,6 +516,10 @@ plugin:
 	@echo ""
 	@echo "Built OpenClaw plugin → $(PLUGIN_DIR)/dist/"
 	@echo "  Install with: make plugin-install"
+
+amp-plugin-typecheck:
+	cd scripts/amp-plugin-typecheck && npm ci --ignore-scripts --no-audit --no-fund
+	cd scripts/amp-plugin-typecheck && npm test
 
 # ---------------------------------------------------------------------------
 # Individual install targets

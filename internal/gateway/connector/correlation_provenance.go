@@ -91,6 +91,13 @@ func correlationContractSources(name string) []CorrelationContractSource {
 	case "opencode":
 		return source("opencode-source-75cf4cc8",
 			"https://github.com/anomalyco/opencode", "75cf4cc8a83a5b5f99ba974f135f690a1f9b5a76")
+	case "amp":
+		return []CorrelationContractSource{{
+			ID:          "amp-plugin-npm-0.0.0-20260729002615-g8a974c9",
+			URI:         "https://registry.npmjs.org/@ampcode/plugin/-/plugin-0.0.0-20260729002615-g8a974c9.tgz",
+			Revision:    "sha256:25f3484eee38353e63d734c20556f6136e2b307a21d5e7b8c3f828a726b93606",
+			CheckedDate: "2026-07-29",
+		}}
 	case "omnigent":
 		return source("omnigent-source-9ee53ece",
 			"https://github.com/omnigent-ai/omnigent", "9ee53ecea9ceaab679f84c0c5f15695c8ccd0c3d")

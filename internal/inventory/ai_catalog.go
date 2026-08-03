@@ -72,26 +72,40 @@ type AISignatureComponent struct {
 //     overly-generic signatures (e.g. matching the literal word "ai")
 //     contribute less per observation than tightly-scoped ones.
 type AISignature struct {
-	ID                 string                 `json:"id"`
-	Name               string                 `json:"name"`
-	Vendor             string                 `json:"vendor"`
-	Category           string                 `json:"category"`
-	Confidence         float64                `json:"confidence,omitempty"`         // legacy seed; normalized into CuratorConfidence on load
-	CuratorConfidence  float64                `json:"curator_confidence,omitempty"` // operator-meaningful base prior on identity, in (0, 1)
-	Specificity        float64                `json:"specificity,omitempty"`        // how unique the matched value is; (0, 1], default 0.7
-	SupportedConnector string                 `json:"supported_connector,omitempty"`
-	BinaryNames        []string               `json:"binary_names,omitempty"`
-	ProcessNames       []string               `json:"process_names,omitempty"`
-	ApplicationNames   []string               `json:"application_names,omitempty"`
-	ConfigPaths        []string               `json:"config_paths,omitempty"`
-	ExtensionIDs       []string               `json:"extension_ids,omitempty"`
-	MCPPaths           []string               `json:"mcp_paths,omitempty"`
-	PackageNames       []string               `json:"package_names,omitempty"`
-	EnvVarNames        []string               `json:"env_var_names,omitempty"`
-	DomainPatterns     []string               `json:"domain_patterns,omitempty"`
-	HistoryPatterns    []string               `json:"history_patterns,omitempty"`
-	LocalEndpoints     []string               `json:"local_endpoints,omitempty"`
-	Components         []AISignatureComponent `json:"components,omitempty"`
+	ID                 string   `json:"id"`
+	Name               string   `json:"name"`
+	Vendor             string   `json:"vendor"`
+	Category           string   `json:"category"`
+	Confidence         float64  `json:"confidence,omitempty"`         // legacy seed; normalized into CuratorConfidence on load
+	CuratorConfidence  float64  `json:"curator_confidence,omitempty"` // operator-meaningful base prior on identity, in (0, 1)
+	Specificity        float64  `json:"specificity,omitempty"`        // how unique the matched value is; (0, 1], default 0.7
+	SupportedConnector string   `json:"supported_connector,omitempty"`
+	BinaryNames        []string `json:"binary_names,omitempty"`
+	ProcessNames       []string `json:"process_names,omitempty"`
+	ApplicationNames   []string `json:"application_names,omitempty"`
+	ConfigPaths        []string `json:"config_paths,omitempty"`
+	ExtensionIDs       []string `json:"extension_ids,omitempty"`
+	MCPPaths           []string `json:"mcp_paths,omitempty"`
+	// SkillPaths / RulePaths / PluginPaths are directory globs whose
+	// per-user existence + non-emptiness produce SignalSkill / SignalRule /
+	// SignalPlugin signals. Semantics mirror MCPPaths (path-based detection,
+	// no content scan) but each targets a specific agent-component surface:
+	//   - Codex: ~/.codex/skills, ~/.codex/plugins, .codex/skills, .codex/rules
+	//   - Claude Code: ~/.claude/skills, ~/.claude/rules
+	//   - Cursor: ~/.cursor/rules, .cursor/rules
+	// Watcher-scanned skills/plugins live under the same directories, so an
+	// inventory hit here means "this endpoint has that surface configured
+	// with at least one entry" — dashboarding rollup, not per-file safety
+	// (which is what the watcher's EventScan captures).
+	SkillPaths      []string               `json:"skill_paths,omitempty"`
+	RulePaths       []string               `json:"rule_paths,omitempty"`
+	PluginPaths     []string               `json:"plugin_paths,omitempty"`
+	PackageNames    []string               `json:"package_names,omitempty"`
+	EnvVarNames     []string               `json:"env_var_names,omitempty"`
+	DomainPatterns  []string               `json:"domain_patterns,omitempty"`
+	HistoryPatterns []string               `json:"history_patterns,omitempty"`
+	LocalEndpoints  []string               `json:"local_endpoints,omitempty"`
+	Components      []AISignatureComponent `json:"components,omitempty"`
 }
 
 type aiSignatureCatalog struct {
@@ -99,6 +113,45 @@ type aiSignatureCatalog struct {
 	ID         string        `json:"id,omitempty"`
 	Name       string        `json:"name,omitempty"`
 	Signatures []AISignature `json:"signatures"`
+}
+
+// promotedAgentKinds maps signature.ID → connector slug for
+// signatures we treat as first-class agents WITHOUT setting the
+// catalog's `supported_connector` field on them.
+//
+// Why keep this separate from `SupportedConnector`: setting the
+// catalog field would flip the emitted `category` inside
+// `detectConfigPaths` from `workspace_artifact` (or `editor_extension`
+// / `desktop_app`) to `supported_connector`, which in turn changes
+// every affected signal's fingerprint. In non-managed_enterprise mode
+// the sidecar ships only lifecycle deltas, so that reclassification
+// would produce a one-time `gone`+`new` delta pair per user on every
+// host running one of these agents. This table gives us the agent
+// identity on the wire (as `agent_kind`) without disturbing the
+// existing category-level classification or the signal fingerprints.
+//
+// Only expand this table for signatures whose product IS an agent the
+// dashboards should treat as first-class. For signatures that already
+// carry `SupportedConnector` in ai_signatures.json (openclaw, codex,
+// claudecode, cursor, windsurf, …), the connector value flows through
+// directly and this table is not consulted.
+var promotedAgentKinds = map[string]string{
+	"aider":          "aider",
+	"continue":       "continue",
+	"cline":          "cline",
+	"claude-desktop": "claudedesktop",
+}
+
+// AgentKindForSignature returns the connector slug that identifies
+// this signature's owning agent (e.g. "cursor", "claudecode",
+// "aider"), or "" if the signature is not associated with a
+// first-class agent. Callers should prefer `sig.SupportedConnector`
+// when set — this helper only handles the promotion cases above.
+func AgentKindForSignature(sig AISignature) string {
+	if sig.SupportedConnector != "" {
+		return sig.SupportedConnector
+	}
+	return promotedAgentKinds[sig.ID]
 }
 
 // LoadAISignatures returns the embedded catalog after basic validation.
@@ -444,6 +497,9 @@ func validateAISignature(sig AISignature) error {
 		"config_paths":      sig.ConfigPaths,
 		"extension_ids":     sig.ExtensionIDs,
 		"mcp_paths":         sig.MCPPaths,
+		"skill_paths":       sig.SkillPaths,
+		"rule_paths":        sig.RulePaths,
+		"plugin_paths":      sig.PluginPaths,
 		"package_names":     sig.PackageNames,
 		"env_var_names":     sig.EnvVarNames,
 		"domain_patterns":   sig.DomainPatterns,

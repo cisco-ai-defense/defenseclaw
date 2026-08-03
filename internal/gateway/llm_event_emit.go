@@ -888,14 +888,7 @@ func (a *APIServer) emitClaudeCodeHookLLMEvent(ctx context.Context, req claudeCo
 
 func hookLLMEventMeta(source, sessionID, turnID, model, hookSource, agentID, agentName, agentType string, payload map[string]interface{}) llmEventMeta {
 	userID, userName := userFromHookPayload(payload)
-	provider := inferSystem("", model)
-	if provider == "unknown" {
-		provider = strings.TrimSpace(hookSource)
-		switch strings.ToLower(provider) {
-		case "", "startup", "resume", "clear", "compact":
-			provider = source
-		}
-	}
+	provider := hookReportedProvider(source, model, hookSource, payload)
 	lifecycleEvent := canonicalHookLifecycleEvent(firstString(payload,
 		"hook_event_name", "hookEventName", "event_type", "eventType", "event_name", "eventName",
 	))
@@ -1001,6 +994,51 @@ func hookLLMEventMeta(source, sessionID, turnID, model, hookSource, agentID, age
 	}
 }
 
+// hookReportedProvider preserves the established connector-name fallback for
+// generic hook integrations whose contract treats the hook source as provider
+// identity. Amp is different: its five plugin callbacks report no provider
+// field. An explicitly reported custom-agent model is trustworthy provider
+// evidence only when it uses Amp's documented provider/model form. For Amp,
+// only that exact prefix or an explicit source payload field may populate
+// gen_ai.provider.name; otherwise provider identity remains absent.
+func hookReportedProvider(source, model, hookSource string, payload map[string]interface{}) string {
+	if strings.EqualFold(strings.TrimSpace(source), "amp") {
+		reported := firstString(payload, "provider", "provider_name", "providerName")
+		if reported != "" {
+			return inferSystem(reported, "")
+		}
+		provider, modelName, qualified := strings.Cut(strings.TrimSpace(model), "/")
+		if !qualified || strings.TrimSpace(provider) == "" || strings.TrimSpace(modelName) == "" {
+			return ""
+		}
+		return inferSystem(provider, "")
+	}
+
+	provider := inferSystem("", model)
+	if provider == "unknown" {
+		provider = strings.TrimSpace(hookSource)
+		switch strings.ToLower(provider) {
+		case "", "startup", "resume", "clear", "compact":
+			provider = source
+		}
+	}
+	return provider
+}
+
+// hookProviderOrConnector is used only where a generated family historically
+// requires a provider fallback. Required metric dimensions normalize an empty
+// Amp provider to "unknown"; spans and logs keep it absent. Other connectors
+// retain their existing connector-name fallback.
+func hookProviderOrConnector(provider, source string) string {
+	if provider = strings.TrimSpace(provider); provider != "" {
+		return provider
+	}
+	if strings.EqualFold(strings.TrimSpace(source), "amp") {
+		return ""
+	}
+	return strings.TrimSpace(source)
+}
+
 // applyHookEventMeta makes the normalized request event authoritative. Typed
 // connector decoders keep the event outside Payload, while generic decoders
 // usually leave it inside; relying only on Payload made those two paths produce
@@ -1068,19 +1106,19 @@ func canonicalHookLifecycleEvent(event string) string {
 		return "compact_end"
 	case "stop", "stopfailure", "agentstop", "afteragent", "afteragentresponse",
 		"postllmcall", "postinvocation", "sessionidle", "teammateidle",
-		"postcascaderesponse", "postcascaderesponsewithtranscript":
+		"postcascaderesponse", "postcascaderesponsewithtranscript", "agentend":
 		return "turn_end"
 	case "userpromptsubmit", "userpromptsubmitted", "beforesubmitprompt", "preuserprompt",
-		"prellmcall", "beforeagent", "beforemodel", "preinvocation":
+		"prellmcall", "beforeagent", "beforemodel", "preinvocation", "agentstart":
 		return "turn_start"
 	case "pretooluse", "beforetool", "beforetoolselection", "pretoolcall", "preruncommand", "premcptooluse",
 		"beforemcpexecution", "beforeshellexecution", "beforereadfile", "beforetabfileread",
-		"prereadcode", "prewritecode", "toolexecutebefore", "permissionrequest":
+		"prereadcode", "prewritecode", "toolexecutebefore", "permissionrequest", "toolcall":
 		return "tool_start"
 	case "posttooluse", "aftertool", "posttoolcall", "posttoolusefailure", "posttoolbatch",
 		"postreadcode", "postwritecode", "postruncommand", "postmcptooluse",
 		"aftershellexecution", "aftermcpexecution", "afterfileedit", "aftertabfileedit",
-		"toolexecuteafter", "permissiondenied", "postsetupworktree":
+		"toolexecuteafter", "permissiondenied", "postsetupworktree", "toolresult":
 		return "tool_end"
 	default:
 		return "event"
@@ -1326,23 +1364,23 @@ func hookLifecyclePhase(rawEvent, lifecycleEvent, lifecycleState string) string 
 	switch canon {
 	case "sessionstart", "onsessionstart", "onsessionreset", "sessioncreated", "subagentstart":
 		return "session"
-	case "userpromptsubmit", "userpromptsubmitted", "beforesubmitprompt", "preuserprompt", "beforeagent":
+	case "userpromptsubmit", "userpromptsubmitted", "beforesubmitprompt", "preuserprompt", "beforeagent", "agentstart":
 		return "planning"
 	case "prellmcall", "beforemodel", "preinvocation":
 		return "model"
 	case "postllmcall", "aftermodel", "postinvocation", "afteragentresponse",
-		"postcascaderesponse", "postcascaderesponsewithtranscript", "stop", "agentstop":
+		"postcascaderesponse", "postcascaderesponsewithtranscript", "stop", "agentstop", "agentend":
 		return "responding"
 	case "permissionrequest":
 		return "approval"
 	case "pretooluse", "beforetool", "beforetoolselection", "pretoolcall", "preruncommand", "premcptooluse",
 		"beforemcpexecution", "beforeshellexecution", "beforereadfile", "beforetabfileread",
-		"prereadcode", "prewritecode", "toolexecutebefore":
+		"prereadcode", "prewritecode", "toolexecutebefore", "toolcall":
 		return "tool"
 	case "posttooluse", "aftertool", "posttoolcall", "posttoolusefailure", "posttoolbatch",
 		"postreadcode", "postwritecode", "postruncommand", "postmcptooluse",
 		"aftershellexecution", "aftermcpexecution", "afterfileedit", "aftertabfileedit",
-		"toolexecuteafter", "permissiondenied", "postsetupworktree":
+		"toolexecuteafter", "permissiondenied", "postsetupworktree", "toolresult":
 		return "planning"
 	case "sessionidle", "teammateidle", "notification":
 		return "waiting"
@@ -2204,7 +2242,12 @@ func (a *APIServer) emitHookToolSpan(
 func isModelCompletionEvent(event string) bool {
 	switch canonicalEvent(event) {
 	case "postllmcall", "afteragentresponse", "aftermodel", "postinvocation",
-		"postcascaderesponse", "postcascaderesponsewithtranscript":
+		"postcascaderesponse", "postcascaderesponsewithtranscript",
+		// Amp agent.end carries the projected final assistant response. Keep
+		// it result-like for post-output guardrail scanning, but classify it
+		// as a completion first in emitAgentHookLLMEvent so it closes the
+		// turn/model span instead of fabricating a "message" tool span.
+		"agentend":
 		return true
 	default:
 		return false

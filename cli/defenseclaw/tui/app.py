@@ -13237,7 +13237,7 @@ def _enforcement_label(cfg: OverviewConfig | None) -> str:
         return f"not configured ({mode})"
     if connector in {"openclaw", "zeptoclaw"}:
         return f"{connector} proxy guardrail ({mode})"
-    surface = "policy" if connector == "omnigent" else "hook"
+    surface = "policy plugin" if connector == "amp" else ("policy" if connector == "omnigent" else "hook")
     posture = "enforcement" if mode == "action" else "observability"
     return f"{connector} {surface} {posture} ({mode})"
 

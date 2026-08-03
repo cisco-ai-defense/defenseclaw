@@ -30,6 +30,7 @@ struct ConnectorOnboardingTests {
         subsetWithoutGatewayStartNeverRestarts()
         emptyRegistrationDefensivelyRegistersEverything()
         setupCommandNameHyphenatesOnlyClaudeCode()
+        commandRegistryIncludesAmpSetup()
         parsesCommandArguments()
         rejectsMalformedCommandArguments()
         quotesDisplayedShellArguments()
@@ -191,6 +192,12 @@ struct ConnectorOnboardingTests {
         expect(ConnectorOnboarding.setupCommandName("claudecode") == "claude-code", "claudecode maps to claude-code")
         expect(ConnectorOnboarding.setupCommandName("claude-code") == "claude-code", "claude-code stays hyphenated")
         expect(ConnectorOnboarding.setupCommandName("codex") == "codex", "other connectors map to themselves")
+    }
+
+    private static func commandRegistryIncludesAmpSetup() {
+        let command = CommandRegistry.all.first { $0.title == "setup amp" }
+        expect(command?.arguments == ["setup", "amp", "--yes"], "Amp setup command is available")
+        expect(CommandRegistry.all.count == CommandRegistry.sourceCount, "native command count matches source")
     }
 
     private static func parsesCommandArguments() {

@@ -92,6 +92,10 @@ func applyHermeticConnectorHomes(t *testing.T) {
 		connector.OmnigentSitePackagesPathOverride = prevOmnigentSite
 	})
 
+	prevAMP := connector.AMPPluginPathOverride
+	connector.AMPPluginPathOverride = filepath.Join(tmpHome, ".config", "amp", "plugins", "defenseclaw.ts")
+	t.Cleanup(func() { connector.AMPPluginPathOverride = prevAMP })
+
 	// Plan A4 / S0.12: ZeptoClaw's Setup refuses to proceed when the
 	// provider list is empty. Seed a single usable provider so the
 	// matrix subtest reaches the persist step.
@@ -214,7 +218,7 @@ func TestSwitchConnector_PerConnectorPersistsState(t *testing.T) {
 	// under -race.
 	applyHermeticConnectorHomes(t)
 
-	cases := []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent"}
+	cases := []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent", "amp"}
 	for _, target := range cases {
 		t.Run(target, func(t *testing.T) {
 			dir := t.TempDir()
@@ -319,7 +323,7 @@ func TestApplyRuntime_PerConnectorSwitch(t *testing.T) {
 	// than parallelize them.
 	applyHermeticConnectorHomes(t)
 
-	for _, target := range []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent"} {
+	for _, target := range []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent", "amp"} {
 		t.Run(target, func(t *testing.T) {
 			dir := t.TempDir()
 			// See note in TestSwitchConnector_PerConnectorPersistsState:

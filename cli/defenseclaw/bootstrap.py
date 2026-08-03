@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from defenseclaw.connector_paths import (
+    amp_policy_plugin_path,
     connector_config_files,
     hermes_config_path,
     omnigent_config_path,
@@ -1509,6 +1510,25 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
             "warn",
             "OpenCode bridge plugin not found yet",
             "defenseclaw setup opencode",
+        )
+    if connector == "amp":
+        # Amp's DefenseClaw plugin is global even when a workspace is set.
+        # Do not select it by position from ``connector_config_files``:
+        # that list includes optional workspace files and managed settings,
+        # so its indices are intentionally not a stable artifact contract.
+        path = amp_policy_plugin_path()
+        try:
+            plugin_text = Path(path).read_text(encoding="utf-8")
+            configured = "DefenseClaw" in plugin_text and "/api/v1/amp/hook" in plugin_text
+        except (OSError, UnicodeError):
+            configured = False
+        if configured:
+            return StepResult("Connector", "pass", f"Amp system policy plugin found at {path}")
+        return StepResult(
+            "Connector",
+            "warn",
+            f"Amp system policy plugin not found at {path}",
+            "defenseclaw setup amp",
         )
     if connector == "omnigent":
         path = omnigent_config_path()

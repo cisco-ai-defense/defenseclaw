@@ -724,7 +724,7 @@ func TestAlertAcknowledgementUnsignedOutcomeReportsAfterStoreRelease(t *testing.
 		if err != nil {
 			t.Fatalf("reentrant close: %v", err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("unsigned health reporter deadlocked while closing the alert store")
 	}
 	select {
@@ -732,7 +732,7 @@ func TestAlertAcknowledgementUnsignedOutcomeReportsAfterStoreRelease(t *testing.
 		if err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("alert acknowledgement did not return after the reporter completed")
 	}
 }

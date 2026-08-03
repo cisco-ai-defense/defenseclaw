@@ -213,7 +213,7 @@ runtime_action := "allow" if {
 		},
 		"scanner_overrides": map[string]interface{}{},
 		"first_party_allow_list": []map[string]interface{}{
-			{"target_type": "plugin", "target_name": "defenseclaw", "reason": "first-party DefenseClaw plugin", "source_path_contains": []string{".defenseclaw", ".openclaw/extensions", ".zeptoclaw/extensions", ".claude/extensions", ".codex/extensions", ".codex-plugin"}},
+			{"target_type": "plugin", "target_name": "defenseclaw", "reason": "first-party DefenseClaw plugin", "source_path_contains": []string{".defenseclaw", ".openclaw/extensions", ".zeptoclaw/extensions", ".claude/extensions", ".codex/extensions", ".codex-plugin", ".config/amp/plugins/defenseclaw.ts"}},
 			{"target_type": "skill", "target_name": "codeguard", "reason": "first-party DefenseClaw skill", "source_path_contains": []string{".defenseclaw", ".openclaw/workspace/skills", ".openclaw/skills", ".zeptoclaw/skills", ".claude/skills", ".codex/skills"}},
 		},
 	}
@@ -457,8 +457,8 @@ func TestEngine_Compile(t *testing.T) {
 // skill scanned from a Codex / Claude Code / ZeptoClaw home would
 // fall through to the standard severity-action rules and get
 // quarantined under strict policy. The fix extends
-// source_path_contains to cover all four built-in connectors plus
-// the bare ~/.defenseclaw/ install location.
+// source_path_contains to cover every built-in connector plus the
+// bare ~/.defenseclaw/ install location.
 //
 // The test drives the Rego engine end-to-end so a future refactor
 // that splits the allow-list out of policies/strict.yaml without
@@ -490,6 +490,7 @@ func TestEngine_FirstPartyAllowList_AllConnectorPaths(t *testing.T) {
 		{"zeptoclaw_plugin", "plugin", "defenseclaw", "/tmp/.zeptoclaw/extensions/defenseclaw"},
 		{"claudecode_plugin", "plugin", "defenseclaw", "/tmp/.claude/extensions/defenseclaw"},
 		{"codex_plugin", "plugin", "defenseclaw", "/tmp/.codex/extensions/defenseclaw"},
+		{"amp_plugin", "plugin", "defenseclaw", "/tmp/.config/amp/plugins/defenseclaw.ts"},
 		{"defenseclaw_root", "skill", "codeguard", "/tmp/.defenseclaw/skills/codeguard"},
 	}
 
@@ -513,6 +514,27 @@ func TestEngine_FirstPartyAllowList_AllConnectorPaths(t *testing.T) {
 					tc.targetType, tc.targetName, tc.path, out.Verdict)
 			}
 		})
+	}
+}
+
+func TestEngine_FirstPartyAllowList_AmpSiblingPluginDoesNotMatch(t *testing.T) {
+	dir := setupRegoDir(t)
+	eng, err := New(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := eng.Evaluate(context.Background(), AdmissionInput{
+		TargetType: "plugin",
+		TargetName: "defenseclaw",
+		Path:       "/tmp/.config/amp/plugins/untrusted.ts",
+		ScanResult: &ScanResultInput{MaxSeverity: "HIGH", TotalFindings: 1},
+	})
+	if err != nil {
+		t.Fatalf("Evaluate Amp sibling plugin: %v", err)
+	}
+	if out.Verdict == "allowed" {
+		t.Fatalf("untrusted Amp sibling plugin received the first-party allow-list verdict")
 	}
 }
 

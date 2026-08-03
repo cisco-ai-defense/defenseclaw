@@ -62,6 +62,7 @@ import uuid
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
+from itertools import islice
 from pathlib import Path
 from typing import Any
 
@@ -98,6 +99,7 @@ KNOWN_CONNECTORS: tuple[str, ...] = (
     "openhands",
     "antigravity",
     "opencode",
+    "amp",
     "omnigent",
 )
 """Allow-list of recognized agent-framework connector names.
@@ -107,6 +109,35 @@ OpenClaw". Keeping the list explicit (rather than discovering at
 import time) means a typo in ``guardrail.connector`` surfaces in
 :func:`is_known` and in setup-time validation, instead of silently
 producing wrong paths.
+"""
+
+KNOWN_AGENT_KINDS: tuple[str, ...] = (
+    *KNOWN_CONNECTORS,
+    # Discovery-only agents. These have AI-signature entries in
+    # ai_signatures.json (mirrored between Go and Python copies) but no
+    # DefenseClaw enforcement path, so they do NOT appear in
+    # KNOWN_CONNECTORS (which is the enforcement-connector allow-list).
+    # They ARE first-class agents on the discovery/inventory side:
+    # ``defenseclaw agent discover`` reports them, and the wire
+    # payload's ``agent_kind`` gets populated for their signals via the
+    # promotion table in internal/inventory/ai_catalog.go.
+    #
+    # Keep this list in sync with ``promotedAgentKinds`` in the Go
+    # catalog — the connector slug values here (aider, continue, cline,
+    # claudedesktop) must match the values in that map for dashboards
+    # to join cleanly across the two sides.
+    "aider",
+    "continue",
+    "cline",
+    "claudedesktop",
+)
+"""All agent slugs the CLI's discovery / inventory paths know about.
+
+Superset of :data:`KNOWN_CONNECTORS`: adds discovery-only agents that
+have AI-signature entries but no DefenseClaw enforcement path.
+Consumers that walk *installed* connectors keep using
+:data:`KNOWN_CONNECTORS`; consumers that enumerate *known agents*
+(inventory / agent_discovery) use this.
 """
 
 HOOK_ONLY_CONNECTORS: frozenset[str] = frozenset(
@@ -119,6 +150,7 @@ HOOK_ONLY_CONNECTORS: frozenset[str] = frozenset(
         "openhands",
         "antigravity",
         "opencode",
+        "amp",
         "omnigent",
     }
 )
@@ -276,6 +308,73 @@ def codex_home() -> str:
     return _connector_env_home("CODEX_HOME", ".codex")
 
 
+def amp_config_home() -> str:
+    """Return Amp's documented system configuration directory.
+
+    Amp uses the same ``~/.config/amp`` location on macOS, Linux, and native
+    Windows (where ``~`` resolves to ``%USERPROFILE%``). Unlike Codex and
+    Claude Code, Amp does not document a configuration-home environment
+    override, so discovery must not invent one.
+    """
+
+    return os.path.join(os.path.abspath(str(Path.home())), ".config", "amp")
+
+
+def amp_policy_plugin_path() -> str:
+    """Return the single global DefenseClaw policy-plugin path Amp loads."""
+
+    return os.path.join(amp_config_home(), "plugins", "defenseclaw.ts")
+
+
+def _resolve_amp_managed_settings_path(
+    *,
+    platform_name: str,
+    platform_id: str,
+    program_data: str,
+) -> str:
+    """Resolve Amp's platform-owned enterprise settings file.
+
+    The Windows branch deliberately uses :mod:`ntpath` so tests and inventory
+    pack generation on non-Windows hosts preserve the documented native path
+    shape. Amp does not define a fallback when ``ProgramData`` is absent; an
+    empty result avoids accidentally treating a relative path as managed
+    policy.
+    """
+
+    if platform_name == "nt":
+        root = (program_data or "").strip()
+        if not root:
+            return ""
+        return ntpath.join(root, "ampcode", "managed-settings.json")
+    if platform_id == "darwin":
+        return "/Library/Application Support/ampcode/managed-settings.json"
+    return "/etc/ampcode/managed-settings.json"
+
+
+def amp_managed_settings_path() -> str:
+    """Return Amp's current-platform enterprise managed-settings path.
+
+    This is a read-only discovery surface. DefenseClaw must never create,
+    patch, remove, or take ownership of this administrator-managed file.
+    """
+
+    return _resolve_amp_managed_settings_path(
+        platform_name=os.name,
+        platform_id=sys.platform,
+        program_data=os.environ.get("ProgramData", "") or os.environ.get("PROGRAMDATA", ""),
+    )
+
+
+def amp_managed_agents_path() -> str:
+    """Return Amp's current-platform system-wide ``AGENTS.md`` path."""
+
+    settings_path = amp_managed_settings_path()
+    if not settings_path:
+        return ""
+    path_module = ntpath if os.name == "nt" else os.path
+    return path_module.join(path_module.dirname(settings_path), "AGENTS.md")
+
+
 def _resolve_hermes_home(
     *,
     platform_name: str,
@@ -366,6 +465,8 @@ def connector_home(
         return claude_config_dir()
     if name == "codex":
         return codex_home()
+    if name == "amp":
+        return amp_config_home()
     if name == "zeptoclaw":
         return os.environ.get("ZEPTOCLAW_HOME") or os.path.join(home, ".zeptoclaw")
     if name == "geminicli":
@@ -443,6 +544,15 @@ def connector_config_files(
             os.path.join(codex_home(), "config.toml"),
             _workspace_path(workspace_dir, ".mcp.json"),
         ]
+    elif name == "amp":
+        paths = [
+            os.path.join(amp_config_home(), "settings.json"),
+            os.path.join(amp_config_home(), "settings.jsonc"),
+            _workspace_path(workspace_dir, ".amp", "settings.json"),
+            _workspace_path(workspace_dir, ".amp", "settings.jsonc"),
+            amp_managed_settings_path(),
+            amp_policy_plugin_path(),
+        ]
     elif name == "zeptoclaw":
         zepto_home = os.environ.get("ZEPTOCLAW_HOME") or os.path.join(home, ".zeptoclaw")
         paths = [
@@ -513,6 +623,141 @@ def connector_config_files(
     return _dedup(paths)
 
 
+def rule_paths(
+    connector: str | None,
+    *,
+    workspace_dir: str | None = None,
+    target_path: str | None = None,
+) -> list[str]:
+    """Return connector-owned guidance and policy-bearing read surfaces.
+
+    The initial public consumer is Amp inventory. These paths are strictly
+    discovery-only: setup never writes user, workspace, or enterprise Amp
+    guidance/checks. Unknown connectors return an empty list instead of
+    borrowing another connector's policy files.
+    """
+
+    if normalize(connector) != "amp":
+        return []
+    home = os.path.abspath(str(Path.home()))
+    workspace = _workspace_dir(workspace_dir)
+    scoped_dirs = _amp_guidance_scope_dirs(workspace, target_path)
+    guidance = [_amp_guidance_file_for_dir(path) for path in scoped_dirs]
+    checks = [os.path.join(path, ".agents", "checks") for path in scoped_dirs]
+    return _dedup(
+        [
+            *guidance,
+            *checks,
+            os.path.join(amp_config_home(), "checks"),
+            os.path.join(home, ".config", "agents", "checks"),
+            os.path.join(amp_config_home(), "AGENTS.md"),
+            os.path.join(home, ".config", "AGENTS.md"),
+            amp_managed_agents_path(),
+        ]
+    )
+
+
+def _amp_guidance_file_for_dir(directory: str) -> str:
+    """Select Amp's per-directory guidance filename with exact fallback."""
+
+    candidates = ("AGENTS.md", "AGENT.md", "CLAUDE.md")
+    for name in candidates:
+        path = os.path.join(directory, name)
+        if os.path.isfile(path):
+            return path
+    # Keep the documented primary as the expected discovery path even before
+    # an operator creates it; connector path APIs intentionally report
+    # expected locations as well as existing ones.
+    return os.path.join(directory, "AGENTS.md")
+
+
+def _amp_guidance_scope_dirs(workspace: str, target_path: str | None) -> list[str]:
+    """Return deterministic parent and on-demand subtree guidance scopes.
+
+    Parent traversal stops after ``$HOME`` when the workspace is below it.
+    ``target_path`` models Amp reading a file: only directories on that
+    subtree path are added, so inventory never scans unrelated repository
+    subtrees or eagerly loads their guidance.
+    """
+
+    if not workspace:
+        return []
+    home = os.path.abspath(str(Path.home()))
+    upward: list[str] = []
+    current = workspace
+    home_is_ancestor = False
+    try:
+        home_is_ancestor = os.path.commonpath((workspace, home)) == home
+    except ValueError:
+        pass
+    while current:
+        upward.append(current)
+        if not home_is_ancestor:
+            break
+        if home_is_ancestor and os.path.normcase(current) == os.path.normcase(home):
+            break
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+
+    # Present broad-to-specific, matching Amp's override intuition while
+    # preserving exactly one guidance filename per directory.
+    scopes = list(reversed(upward))
+    raw_target = (target_path or "").strip()
+    if not raw_target:
+        return scopes
+    expanded_target = os.path.expanduser(_expand(raw_target))
+    target = (
+        os.path.abspath(expanded_target)
+        if os.path.isabs(expanded_target)
+        else os.path.abspath(os.path.join(workspace, expanded_target))
+    )
+    target_dir = target if os.path.isdir(target) else os.path.dirname(target)
+    try:
+        if os.path.commonpath((workspace, target_dir)) != workspace:
+            return scopes
+    except ValueError:
+        return scopes
+    relative = os.path.relpath(target_dir, workspace)
+    cursor = workspace
+    for part in (() if relative == "." else Path(relative).parts):
+        cursor = os.path.join(cursor, part)
+        scopes.append(cursor)
+    return _dedup(scopes)
+
+
+_AMP_POLICY_SETTING_KEYS: tuple[str, ...] = (
+    "amp.permissions",
+    "amp.guardedFiles.allowlist",
+    "amp.dangerouslyAllowAll",
+    "amp.mcpPermissions",
+)
+
+
+def connector_policy_settings(
+    connector: str | None,
+    *,
+    workspace_dir: str | None = None,
+) -> dict[str, Any]:
+    """Return effective connector-native policy settings for inventory.
+
+    Amp enterprise settings are loaded last and therefore override workspace
+    and user values. Returned values are deep-copied so read-only inventory
+    callers cannot mutate parsed documents accidentally.
+    """
+
+    if normalize(connector) != "amp":
+        return {}
+    effective: dict[str, Any] = {}
+    for document in _amp_settings_documents(workspace_dir):
+        for key in _AMP_POLICY_SETTING_KEYS:
+            value = _amp_setting_value(document, key)
+            if value is not _MISSING:
+                effective[key] = copy.deepcopy(value)
+    return effective
+
+
 def skill_dirs(
     connector: str | None,
     *,
@@ -538,6 +783,8 @@ def skill_dirs(
         return _claudecode_skill_dirs(workspace_dir)
     if name == "codex":
         return _codex_skill_dirs(workspace_dir)
+    if name == "amp":
+        return _amp_skill_dirs(workspace_dir)
     if name == "zeptoclaw":
         return _zeptoclaw_skill_dirs(workspace_dir)
     if name == "hermes":
@@ -561,6 +808,35 @@ def skill_dirs(
     return _openclaw_skill_dirs(openclaw_home, openclaw_config)
 
 
+def skill_write_dirs(
+    connector: str | None,
+    *,
+    openclaw_home: str | None = None,
+    openclaw_config: str | None = None,
+    workspace_dir: str | None = None,
+) -> list[str]:
+    """Return connector-native install targets, not discovery precedence.
+
+    Amp discovers several user, project, compatibility, configured, and
+    plugin-bundled roots. Its default write scope is narrower: a pinned
+    workspace uses ``.agents/skills`` and an unpinned install is explicitly
+    user-global. Other connectors retain their historical first-discovery-root
+    install behavior.
+    """
+
+    if normalize(connector) == "amp":
+        workspace = _workspace_dir(workspace_dir)
+        if workspace:
+            return [os.path.join(workspace, ".agents", "skills")]
+        return [os.path.join(str(Path.home()), ".config", "agents", "skills")]
+    return skill_dirs(
+        connector,
+        openclaw_home=openclaw_home,
+        openclaw_config=openclaw_config,
+        workspace_dir=workspace_dir,
+    )
+
+
 def plugin_dirs(
     connector: str | None,
     *,
@@ -581,6 +857,8 @@ def plugin_dirs(
         return _claudecode_plugin_dirs(workspace_dir)
     if name == "codex":
         return _codex_plugin_dirs()
+    if name == "amp":
+        return _amp_plugin_dirs(workspace_dir)
     if name == "zeptoclaw":
         return _zeptoclaw_plugin_dirs()
     if name == "hermes":
@@ -634,6 +912,8 @@ def mcp_servers(
         return _claudecode_mcp_servers(workspace_dir)
     if name == "codex":
         return _codex_mcp_servers(workspace_dir)
+    if name == "amp":
+        return _amp_mcp_servers(workspace_dir)
     if name == "zeptoclaw":
         return _zeptoclaw_mcp_servers(workspace_dir)
     if name == "hermes":
@@ -686,6 +966,258 @@ def _codex_skill_dirs(workspace_dir: str | None = None) -> list[str]:
             _workspace_path(workspace_dir, ".codex", "skills"),
         ]
     )
+
+
+def _amp_settings_paths(workspace_dir: str | None = None) -> list[str]:
+    """Return Amp settings candidates in user/workspace/managed layer order."""
+
+    return _dedup(
+        [
+            os.path.join(amp_config_home(), "settings.json"),
+            os.path.join(amp_config_home(), "settings.jsonc"),
+            _workspace_path(workspace_dir, ".amp", "settings.json"),
+            _workspace_path(workspace_dir, ".amp", "settings.jsonc"),
+            amp_managed_settings_path(),
+        ]
+    )
+
+
+def _amp_settings_documents(workspace_dir: str | None = None) -> list[dict[str, Any]]:
+    """Load at most one settings document per Amp scope.
+
+    Amp documents ``settings.json`` and ``settings.jsonc`` as alternative
+    spellings. Prefer JSON when both exist rather than double-counting one
+    scope, and preserve user-before-workspace order so callers can compute an
+    effective workspace and administrator override deterministically.
+    """
+
+    candidates = (
+        (
+            os.path.join(amp_config_home(), "settings.json"),
+            os.path.join(amp_config_home(), "settings.jsonc"),
+        ),
+        (
+            _workspace_path(workspace_dir, ".amp", "settings.json"),
+            _workspace_path(workspace_dir, ".amp", "settings.jsonc"),
+        ),
+        (amp_managed_settings_path(),),
+    )
+    documents: list[dict[str, Any]] = []
+    for scope in candidates:
+        selected = next(
+            (path for path in scope if path and os.path.lexists(path)),
+            None,
+        )
+        if not selected:
+            continue
+        document = _load_amp_settings_document(selected)
+        if isinstance(document, dict):
+            documents.append(document)
+    return documents
+
+
+_AMP_SETTINGS_MAX_BYTES = 2 * 1024 * 1024
+
+
+def _load_amp_settings_document(path: str) -> Any:
+    """Parse one bounded, stable, non-symlink Amp settings document."""
+
+    try:
+        before = os.lstat(path)
+    except OSError:
+        return None
+    if (
+        stat.S_ISLNK(before.st_mode)
+        or not stat.S_ISREG(before.st_mode)
+        or before.st_size > _AMP_SETTINGS_MAX_BYTES
+    ):
+        return None
+
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    descriptor = -1
+    try:
+        descriptor = os.open(path, flags)
+        opened_before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened_before.st_mode)
+            or opened_before.st_size > _AMP_SETTINGS_MAX_BYTES
+            or not os.path.samestat(before, opened_before)
+        ):
+            return None
+        with os.fdopen(descriptor, "rb", closefd=True) as stream:
+            descriptor = -1
+            raw = stream.read(_AMP_SETTINGS_MAX_BYTES + 1)
+            opened_after = os.fstat(stream.fileno())
+    except (OSError, ValueError):
+        return None
+    finally:
+        if descriptor >= 0:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+    if (
+        len(raw) > _AMP_SETTINGS_MAX_BYTES
+        or not os.path.samestat(opened_before, opened_after)
+        or (opened_before.st_size, opened_before.st_mtime_ns, opened_before.st_mode)
+        != (opened_after.st_size, opened_after.st_mtime_ns, opened_after.st_mode)
+    ):
+        return None
+    try:
+        named_after = os.lstat(path)
+    except OSError:
+        return None
+    if (
+        stat.S_ISLNK(named_after.st_mode)
+        or not stat.S_ISREG(named_after.st_mode)
+        or not os.path.samestat(opened_after, named_after)
+        or (before.st_size, before.st_mtime_ns, before.st_mode)
+        != (named_after.st_size, named_after.st_mtime_ns, named_after.st_mode)
+    ):
+        return None
+    try:
+        return _parse_json_or_jsonc(raw.decode("utf-8"))
+    except UnicodeDecodeError:
+        return None
+
+
+_MISSING = object()
+
+
+def _amp_setting_value(document: dict[str, Any], dotted_key: str) -> Any:
+    """Read one documented dotted Amp key with nested compatibility."""
+
+    if dotted_key in document:
+        return document[dotted_key]
+    current: Any = document
+    for part in dotted_key.split("."):
+        if not isinstance(current, dict) or part not in current:
+            return _MISSING
+        current = current[part]
+    return current
+
+
+def _amp_skill_settings(workspace_dir: str | None = None) -> tuple[list[str], bool]:
+    """Return configured extra skill paths and effective Claude compatibility."""
+
+    configured: Any = _MISSING
+    disable_setting: Any = _MISSING
+    disable_claude = False
+    for document in _amp_settings_documents(workspace_dir):
+        candidate = _amp_setting_value(document, "amp.skills.path")
+        if candidate is not _MISSING:
+            configured = candidate
+        candidate = _amp_setting_value(document, "amp.skills.disableClaudeCodeSkills")
+        if candidate is not _MISSING:
+            disable_setting = candidate
+
+    if isinstance(configured, str):
+        configured_paths = configured.split(os.pathsep)
+    elif isinstance(configured, list):
+        configured_paths = configured
+    else:
+        configured_paths = []
+    extras: list[str] = []
+    for raw in configured_paths:
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        path = os.path.expanduser(_expand(raw.strip()))
+        if not os.path.isabs(path):
+            workspace = _workspace_dir(workspace_dir)
+            if not workspace:
+                # The daemon must never reinterpret an Amp-relative skill root
+                # against its own process cwd. Relative roots are meaningful
+                # only when an explicit connector workspace is pinned.
+                continue
+            path = os.path.join(workspace, path)
+        extras.append(os.path.abspath(path))
+    if isinstance(disable_setting, bool):
+        disable_claude = disable_setting
+    return _dedup(extras), disable_claude
+
+
+def _amp_skill_dirs(workspace_dir: str | None = None) -> list[str]:
+    """Return Amp's documented skill roots in its discovery precedence."""
+
+    home = str(Path.home())
+    custom, disable_claude = _amp_skill_settings(workspace_dir)
+    paths = [
+        os.path.join(home, ".config", "agents", "skills"),
+        os.path.join(home, ".agents", "skills"),
+        os.path.join(amp_config_home(), "skills"),
+        _workspace_path(workspace_dir, ".agents", "skills"),
+    ]
+    if not disable_claude:
+        paths.extend(
+            [
+                _workspace_path(workspace_dir, ".claude", "skills"),
+                os.path.join(home, ".claude", "skills"),
+            ]
+        )
+        paths.extend(_amp_claude_plugin_cache_skill_dirs(home))
+    paths.extend(custom)
+    paths.extend(_plugin_component_dirs(_amp_plugin_dirs(workspace_dir), "skills"))
+    return _dedup(paths)
+
+
+def _amp_claude_plugin_cache_skill_dirs(home: str) -> list[str]:
+    """Expand bounded Claude plugin-cache entries into skill containers.
+
+    Amp treats ``~/.claude/plugins/cache/`` as a Claude-compatible skill
+    source unless ``amp.skills.disableClaudeCodeSkills`` is enabled.  Cache
+    layouts include marketplace, plugin, and version components before the
+    plugin's ``skills`` directory, so returning only the cache root would make
+    DefenseClaw inventory misclassify those containers as skills.  Walk only
+    four directory levels below the fixed user cache, never follow links, and
+    cap the number of inspected entries.
+    """
+
+    root = os.path.join(home, ".claude", "plugins", "cache")
+    if not os.path.isdir(root) or os.path.islink(root):
+        return []
+
+    max_depth = 4
+    max_entries = 4096
+    inspected = 0
+    pending: list[tuple[str, int]] = [(root, 0)]
+    skill_dirs: list[str] = []
+    while pending and inspected < max_entries:
+        directory, depth = pending.pop(0)
+        entries = _bounded_amp_directory_entries(directory, max_entries - inspected)
+        for entry in entries:
+            inspected += 1
+            try:
+                if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
+                    continue
+            except OSError:
+                continue
+            child_depth = depth + 1
+            if entry.name.casefold() == "skills":
+                skill_dirs.append(entry.path)
+                continue
+            if child_depth < max_depth:
+                pending.append((entry.path, child_depth))
+    return _dedup(skill_dirs)
+
+
+def _bounded_amp_directory_entries(directory: str, remaining: int) -> list[os.DirEntry[str]]:
+    """Read and sort at most ``remaining`` entries from one Amp cache dir."""
+
+    if remaining <= 0:
+        return []
+    try:
+        with os.scandir(directory) as iterator:
+            entries = list(islice(iterator, remaining))
+    except OSError:
+        return []
+    entries.sort(key=lambda entry: entry.name.casefold())
+    return entries
 
 
 def _zeptoclaw_skill_dirs(workspace_dir: str | None = None) -> list[str]:
@@ -837,6 +1369,15 @@ def _codex_plugin_dirs() -> list[str]:
     )
 
 
+def _amp_plugin_dirs(workspace_dir: str | None = None) -> list[str]:
+    return _dedup(
+        [
+            _workspace_path(workspace_dir, ".amp", "plugins"),
+            os.path.join(amp_config_home(), "plugins"),
+        ]
+    )
+
+
 def _zeptoclaw_plugin_dirs() -> list[str]:
     zepto_home = os.environ.get("ZEPTOCLAW_HOME") or os.path.join(str(Path.home()), ".zeptoclaw")
     base = os.path.join(zepto_home, "plugins")
@@ -954,6 +1495,50 @@ def _codex_mcp_servers(workspace_dir: str | None = None) -> list[MCPServerEntry]
     if project_mcp:
         entries.extend(_read_dotmcp_json(project_mcp))
     return _dedup_mcp_entries(entries)
+
+
+def _amp_mcp_servers(workspace_dir: str | None = None) -> list[MCPServerEntry]:
+    """Return Amp MCP registrations using its documented precedence.
+
+    Workspace settings override user settings, and both override a skill's
+    bundled ``mcp.json``. ``--mcp-config`` is intentionally absent because it
+    is an invocation-scoped CLI override rather than durable inventory.
+    """
+
+    entries: list[MCPServerEntry] = []
+    documents = _amp_settings_documents(workspace_dir)
+    for document in reversed(documents):
+        servers = _amp_setting_value(document, "amp.mcpServers")
+        if servers is _MISSING:
+            servers = document.get("mcpServers")
+        entries.extend(_parse_mcp_servers_value(servers))
+
+    for root in _amp_skill_dirs(workspace_dir):
+        for path in _amp_skill_mcp_paths(root):
+            entries.extend(_read_dotmcp_json(path))
+    return _dedup_mcp_entries(entries)
+
+
+def _amp_skill_mcp_paths(root: str) -> list[str]:
+    """Return direct skill-bundled ``mcp.json`` files below *root*."""
+
+    paths: list[str] = []
+    root_manifest = os.path.join(root, "mcp.json")
+    if os.path.isfile(root_manifest):
+        paths.append(root_manifest)
+    try:
+        children = sorted(os.scandir(root), key=lambda item: item.name.casefold())
+    except OSError:
+        return paths
+    for child in children:
+        try:
+            if child.is_dir(follow_symlinks=False):
+                manifest = os.path.join(child.path, "mcp.json")
+                if os.path.isfile(manifest):
+                    paths.append(manifest)
+        except OSError:
+            continue
+    return _dedup(paths)
 
 
 def _read_codex_config_toml(path: str) -> list[MCPServerEntry]:
@@ -1198,6 +1783,12 @@ def _load_json_or_jsonc(path: str) -> Any:
             raw = f.read()
     except OSError:
         return None
+    return _parse_json_or_jsonc(raw)
+
+
+def _parse_json_or_jsonc(raw: str) -> Any:
+    """Parse already-read JSON/JSONC text without changing read policy."""
+
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
@@ -1206,7 +1797,82 @@ def _load_json_or_jsonc(path: str) -> Any:
 
             return json5.loads(raw)
         except Exception:
-            return None
+            try:
+                return json.loads(_strip_jsonc(raw))
+            except json.JSONDecodeError:
+                return None
+
+
+def _strip_jsonc(raw: str) -> str:
+    """Remove JSONC comments and trailing commas without touching strings."""
+
+    out: list[str] = []
+    index = 0
+    in_string = False
+    escaped = False
+    while index < len(raw):
+        char = raw[index]
+        if in_string:
+            out.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            index += 1
+            continue
+        if char == '"':
+            in_string = True
+            out.append(char)
+            index += 1
+            continue
+        if char == "/" and index + 1 < len(raw):
+            next_char = raw[index + 1]
+            if next_char == "/":
+                index += 2
+                while index < len(raw) and raw[index] not in "\r\n":
+                    index += 1
+                continue
+            if next_char == "*":
+                index += 2
+                while index + 1 < len(raw) and raw[index : index + 2] != "*/":
+                    if raw[index] in "\r\n":
+                        out.append(raw[index])
+                    index += 1
+                index = min(index + 2, len(raw))
+                continue
+        if char == "," and _next_jsonc_significant_char(raw, index + 1) in ("}", "]"):
+            index += 1
+            continue
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
+def _next_jsonc_significant_char(raw: str, index: int) -> str:
+    """Return the next non-whitespace, non-comment JSONC character."""
+
+    while index < len(raw):
+        char = raw[index]
+        if char.isspace():
+            index += 1
+            continue
+        if char == "/" and index + 1 < len(raw):
+            next_char = raw[index + 1]
+            if next_char == "/":
+                index += 2
+                while index < len(raw) and raw[index] not in "\r\n":
+                    index += 1
+                continue
+            if next_char == "*":
+                end = raw.find("*/", index + 2)
+                if end < 0:
+                    return ""
+                index = end + 2
+                continue
+        return char
+    return ""
 
 
 # --- Low-level file/CLI helpers --------------------------------------------
@@ -1535,6 +2201,11 @@ def set_mcp_server(
         else:
             _set_codex_global_mcp_server(name, entry)
         return
+    if name_n == "amp":
+        raise MCPWriteUnsupportedError(
+            "amp MCP discovery is read-only in DefenseClaw. Add or update the "
+            "server with `amp mcp add`, then re-run `defenseclaw mcp scan`.",
+        )
     if name_n == "hermes":
         _atomic_yaml_merge(hermes_config_path(), ("mcp", "servers", name), entry)
         return
@@ -1636,6 +2307,11 @@ def unset_mcp_server(
         else:
             _unset_codex_global_mcp_server(name)
         return
+    if name_n == "amp":
+        raise MCPWriteUnsupportedError(
+            "amp MCP discovery is read-only in DefenseClaw. Remove the server "
+            "with Amp's MCP command, then re-run `defenseclaw mcp scan`.",
+        )
     if name_n == "hermes":
         _atomic_yaml_delete(hermes_config_path(), ("mcp", "servers", name))
         return
@@ -3535,18 +4211,25 @@ def _atomic_replace_claude_windows_with_proof(
     if security is None:
         raise OSError(errno.ENOTSUP, "Windows security metadata is unavailable")
     parent = os.path.dirname(snapshot.path) or "."
-    basename = os.path.basename(snapshot.path)
+    # Keep native transient names compact.  The Win32 APIs below deliberately
+    # operate on the already-validated parent and some supported Windows hosts
+    # still enforce MAX_PATH for direct CreateFileW calls.  Repeating a long
+    # ownership-metadata basename here can otherwise make CREATE_NEW report
+    # ERROR_PATH_NOT_FOUND even though the private parent exists.  The random
+    # transaction identifier retains the same create-if-absent collision
+    # protection without weakening the bound-parent or reparse checks.
+    transaction_id = uuid.uuid4().hex
     temporary_path = os.path.join(
         parent,
-        f".{basename}.observability-v8-candidate-{uuid.uuid4().hex}.tmp",
+        f".dc-v8-c-{transaction_id}.tmp",
     )
     backup_path = os.path.join(
         parent,
-        f".{basename}.observability-v8-replaced-{uuid.uuid4().hex}.tmp",
+        f".dc-v8-r-{transaction_id}.tmp",
     )
     discard_path = os.path.join(
         parent,
-        f".{basename}.observability-v8-discard-{uuid.uuid4().hex}.tmp",
+        f".dc-v8-d-{transaction_id}.tmp",
     )
     preserve_transients = False
     staged = None

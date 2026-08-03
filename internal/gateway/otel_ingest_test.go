@@ -26,7 +26,7 @@ import (
 )
 
 func TestNormalizeConnectorTelemetrySourceIncludesHookOnlyBuiltins(t *testing.T) {
-	for _, source := range []string{"opencode", "omnigent"} {
+	for _, source := range []string{"opencode", "omnigent", "amp"} {
 		if got := normalizeConnectorTelemetrySource(source); got != source {
 			t.Errorf("normalizeConnectorTelemetrySource(%q) = %q", source, got)
 		}
@@ -478,6 +478,15 @@ func splitCodexNotifyAuditRows(t *testing.T, store *audit.Store) (canonical, syn
 			canonical = append(canonical, r)
 		case r.Action == string(audit.ActionConnectorHookSynthetic):
 			synthetic = append(synthetic, r)
+		case r.Action == "scan":
+			// Zero-finding scan rows are legitimate under the
+			// TotalScans-includes-zero-finding-inspections
+			// contract (see TestEmitInspectVerdictFindings_
+			// ZeroFindingsStillCountsAsScan). They flow from the
+			// hook inspect emitter alongside the notify rows and
+			// are not part of this split (canonical/synthetic
+			// notify rows only), so simply ignore them here.
+			continue
 		default:
 			t.Fatalf("unexpected audit Action=%q (test fixture should only produce codex.notify* + %s)",
 				r.Action, audit.ActionConnectorHookSynthetic)

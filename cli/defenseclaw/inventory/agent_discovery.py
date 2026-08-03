@@ -48,6 +48,7 @@ from defenseclaw.config import config_path_for_data_dir, default_data_path
 from defenseclaw.connector_paths import (
     KNOWN_CONNECTORS,
     _expand,
+    amp_managed_settings_path,
     connector_config_files,
     hermes_config_path,
     omnigent_config_path,
@@ -749,6 +750,7 @@ DISCOVERY_PRECEDENCE: tuple[str, ...] = (
     "openhands",
     "antigravity",
     "opencode",
+    "amp",
     "omnigent",
 )
 
@@ -858,6 +860,18 @@ _SPECS: dict[str, _AgentSpec] = {
             ".opencode/plugins/defenseclaw.js",
         ),
         "opencode",
+        ("--version",),
+    ),
+    "amp": _AgentSpec(
+        (
+            "~/.config/amp/plugins/defenseclaw.ts",
+            "~/.config/amp/settings.json",
+            "~/.config/amp/settings.jsonc",
+            ".amp/plugins/defenseclaw.ts",
+            ".amp/settings.json",
+            ".amp/settings.jsonc",
+        ),
+        "amp",
         ("--version",),
     ),
     "omnigent": _AgentSpec(
@@ -1008,6 +1022,13 @@ def _scan_agent(
         )
     elif name == "hermes":
         config_candidates = (hermes_config_path(),)
+    elif name == "amp":
+        # Enterprise managed settings are valid configuration evidence but
+        # are platform-specific and administrator-owned. Keep them read-only
+        # and ahead of user/workspace candidates in the displayed signal.
+        config_candidates = _dedup_nonempty_candidates(
+            (amp_managed_settings_path(), *config_candidates),
+        )
     elif name == "omnigent":
         config_path = omnigent_config_path()
         config_candidates = (config_path,)
@@ -1048,6 +1069,19 @@ def _scan_agent(
         error=error,
         configured=bool(config_path),
     )
+
+
+def _dedup_nonempty_candidates(candidates: tuple[str, ...]) -> tuple[str, ...]:
+    """Preserve ordered discovery candidates without empty path aliases."""
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        if not candidate or candidate in seen:
+            continue
+        seen.add(candidate)
+        out.append(candidate)
+    return tuple(out)
 
 
 def _ai_discovery_trust_config(

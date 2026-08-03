@@ -49,6 +49,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from defenseclaw.commands.cmd_doctor import (
     _active_connector,
+    _check_amp_native_policy_surfaces,
     _check_codex_hooks,
     _check_connector_hooks,
     _check_connector_inventory,
@@ -870,6 +871,66 @@ class TestCheckHookHealth(unittest.TestCase):
             _check_hook_health(self._cfg(tmp, "opencode", [hook]), "opencode", r)
         self.assertEqual(r.checks[-1]["status"], "pass")
         self.assertEqual(r.checks[-1]["label"], "OpenCode hooks")
+
+    def test_amp_warns_for_other_direct_plugins_without_following_links(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            amp_home = os.path.join(tmp, "system", "amp")
+            system_plugins = os.path.join(amp_home, "plugins")
+            project_plugins = os.path.join(tmp, "workspace", ".amp", "plugins")
+            os.makedirs(system_plugins)
+            os.makedirs(project_plugins)
+            first_party = os.path.join(system_plugins, "defenseclaw.ts")
+            system_third_party = os.path.join(system_plugins, "telemetry.ts")
+            project_third_party = os.path.join(project_plugins, "custom-agent.ts")
+            for path in (first_party, system_third_party, project_third_party):
+                with open(path, "w", encoding="utf-8") as handle:
+                    handle.write("throw new Error('doctor must not execute TypeScript')\n")
+            linked = os.path.join(project_plugins, "linked.ts")
+            try:
+                os.symlink(system_third_party, linked)
+            except OSError:
+                linked = ""
+
+            cfg = MagicMock()
+            cfg.plugin_dirs.return_value = [project_plugins, system_plugins]
+            cfg.connector_workspace_dir.return_value = os.path.join(tmp, "workspace")
+            with (
+                patch(
+                    "defenseclaw.commands.cmd_doctor.amp_config_home",
+                    return_value=amp_home,
+                ),
+                patch(
+                    "defenseclaw.commands.cmd_doctor.amp_managed_settings_path",
+                    return_value="",
+                ),
+                patch(
+                    "defenseclaw.commands.cmd_doctor.connector_policy_settings",
+                    return_value={},
+                ),
+                patch(
+                    "defenseclaw.commands.cmd_doctor.rule_paths",
+                    return_value=[],
+                ),
+            ):
+                r = _DoctorResult()
+                _check_amp_native_policy_surfaces(cfg, r)
+
+        warnings = [
+            check
+            for check in r.checks
+            if check["label"] == "Amp plugin initialization"
+        ]
+        self.assertEqual(len(warnings), 1)
+        detail = warnings[0]["detail"]
+        self.assertEqual(warnings[0]["status"], "warn")
+        self.assertIn(system_third_party, detail)
+        self.assertIn(project_third_party, detail)
+        self.assertNotIn(first_party, detail)
+        if linked:
+            self.assertNotIn(linked, detail)
+        self.assertIn("outside DefenseClaw's tool.call interception", detail)
+        self.assertIn("handler order is undefined", detail)
+        self.assertIn("does not sandbox Amp plugin initialization", detail)
 
     def test_unknown_connector_is_noop(self) -> None:
         r = _DoctorResult()

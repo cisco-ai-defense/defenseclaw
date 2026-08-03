@@ -701,7 +701,13 @@ if report["effective"] != "open" or report["runtime"] != "open":
 if report["current"] is not True or report["drift"]:
     raise SystemExit("Codex runtime fail-mode report is not current: " + ", ".join(report["drift"]))
 `
-	const pythonFailModeAcceptanceTimeout = 60 * time.Second
+	// A saturated Windows CI runner has been observed to exceed the
+	// 60 s budget on this Python fail-mode subprocess — same class of
+	// scheduler flake as TestAlertAcknowledgementUnsignedOutcomeReports
+	// AfterStoreRelease (5ad96d6c). The command itself finishes in a
+	// few seconds on a healthy box; bump the ceiling so process-start
+	// latency alone can't fail the acceptance.
+	const pythonFailModeAcceptanceTimeout = 3 * time.Minute
 	ctx, cancel := context.WithTimeout(context.Background(), pythonFailModeAcceptanceTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, python, "-S", "-c", script)

@@ -450,8 +450,24 @@ def test_connector_wizard_builds_go_argv_for_supported_connectors() -> None:
         "openhands",
         "antigravity",
         "opencode",
+        "amp",
         "omnigent",
     }
+
+
+def test_connector_wizard_builds_amp_action_setup_argv() -> None:
+    fields = connector_setup_wizard_fields({})
+    assert "amp" in _wizard_options(fields, "Connector")
+    fields = _with_field(fields, "Connector", "amp")
+    fields = _with_field(fields, "Guardrail Mode", "action")
+
+    assert build_wizard_args(SetupWizard.CONNECTOR_SETUP, fields) == (
+        "setup",
+        "amp",
+        "--yes",
+        "--mode",
+        "action",
+    )
 
 
 def test_connector_setup_wizard_is_lifecycle_only() -> None:
@@ -489,6 +505,7 @@ def test_connector_choices_are_os_filtered_for_windows() -> None:
     assert "openclaw" not in win_options
     assert "zeptoclaw" not in win_options
     assert "codex" in win_options and "claudecode" in win_options
+    assert "amp" in win_options
     assert wizard_field_value(win_fields, "Connector") not in {"openclaw", "zeptoclaw"}
 
     # A stored proxy ``claw.mode`` (e.g. a config copied from macOS) is
@@ -616,18 +633,14 @@ def test_trusted_paths_wizard_builds_real_setup_commands() -> None:
         "--force",
         "--json",
     )
-    assert missing_required_fields(SetupWizard.TRUSTED_PATHS, _with_field(fields, "Directory", "")) == (
-        "Directory",
-    )
+    assert missing_required_fields(SetupWizard.TRUSTED_PATHS, _with_field(fields, "Directory", "")) == ("Directory",)
 
 
 def test_guardrail_actions_wizard_builds_connector_scoped_commands() -> None:
     fields = wizard_form_defs(SetupWizard.GUARDRAIL_ACTIONS)
     assert build_wizard_args(SetupWizard.GUARDRAIL_ACTIONS, fields) == ("guardrail", "status")
 
-    scoped_status = _guardrail_actions_wizard_fields(
-        {"@Scope": "selected-connector", "--connector": "codex"}
-    )
+    scoped_status = _guardrail_actions_wizard_fields({"@Scope": "selected-connector", "--connector": "codex"})
     assert build_wizard_args(SetupWizard.GUARDRAIL_ACTIONS, scoped_status) == (
         "guardrail",
         "status",
@@ -646,9 +659,7 @@ def test_guardrail_actions_wizard_builds_connector_scoped_commands() -> None:
         "--no-restart",
     )
 
-    fail_mode = _guardrail_actions_wizard_fields(
-        {"@Scope": "selected-connector", "--connector": "hermes"}
-    )
+    fail_mode = _guardrail_actions_wizard_fields({"@Scope": "selected-connector", "--connector": "hermes"})
     fail_mode = _with_field(fail_mode, "Action", "fail-mode")
     fail_mode = _with_field(fail_mode, "Fail Mode", "closed")
     assert build_wizard_args(SetupWizard.GUARDRAIL_ACTIONS, fail_mode) == (
@@ -674,9 +685,7 @@ def test_guardrail_actions_wizard_builds_connector_scoped_commands() -> None:
         "--no-restart",
     )
 
-    block = _guardrail_actions_wizard_fields(
-        {"@Scope": "selected-connector", "--connector": "antigravity"}
-    )
+    block = _guardrail_actions_wizard_fields({"@Scope": "selected-connector", "--connector": "antigravity"})
     block = _with_field(block, "Action", "block-message")
     assert missing_required_fields(SetupWizard.GUARDRAIL_ACTIONS, block) == ("Block Message or Clear Message",)
     block = _with_field(block, "Block Message", "Blocked by policy.")
@@ -1101,18 +1110,14 @@ def test_setup_section_tabs_wrap_hit_test_and_field_actions() -> None:
 
 def test_setup_review_save_action_and_saved_hint_are_model_level() -> None:
     model = SetupPanelModel({})
-    model.sections = (
-        ConfigSection("Gateway", (ConfigField("Port", "gateway.port", "int", "70000", "9090"),), ""),
-    )
+    model.sections = (ConfigSection("Gateway", (ConfigField("Port", "gateway.port", "int", "70000", "9090"),), ""),)
 
     invalid = model.review_save_action()
     assert invalid.handled is True
     assert invalid.open_diff is False
     assert "Fix config validation" in invalid.hint
 
-    model.sections = (
-        ConfigSection("Gateway", (ConfigField("Port", "gateway.port", "int", "9091", "9090"),), ""),
-    )
+    model.sections = (ConfigSection("Gateway", (ConfigField("Port", "gateway.port", "int", "9091", "9090"),), ""),)
     review = model.review_save_action()
     assert review.handled is True
     assert review.open_diff is True
@@ -1280,8 +1285,12 @@ def test_scanner_wizards_offer_unified_llm_provider_list() -> None:
     mcp_fields = _with_field(mcp_fields, "API Key Env", "CISCO_AI_DEFENSE_API_KEY")
     mcp_fields = _with_field(mcp_fields, "API Timeout (ms)", "5000")
     argv = build_wizard_args(SetupWizard.MCP_SCANNER, mcp_fields)
-    assert ("--api-endpoint", "https://example.cisco.com/v1") == argv[argv.index("--api-endpoint") : argv.index("--api-endpoint") + 2]
-    assert ("--api-key-env", "CISCO_AI_DEFENSE_API_KEY") == argv[argv.index("--api-key-env") : argv.index("--api-key-env") + 2]
+    assert ("--api-endpoint", "https://example.cisco.com/v1") == argv[
+        argv.index("--api-endpoint") : argv.index("--api-endpoint") + 2
+    ]
+    assert ("--api-key-env", "CISCO_AI_DEFENSE_API_KEY") == argv[
+        argv.index("--api-key-env") : argv.index("--api-key-env") + 2
+    ]
     assert ("--api-timeout-ms", "5000") == argv[argv.index("--api-timeout-ms") : argv.index("--api-timeout-ms") + 2]
 
 
@@ -1340,9 +1349,7 @@ def test_guardrail_wizard_argv_is_accepted_by_real_cli() -> None:
 
     bedrock = list(_guardrail_wizard_fields_for({"@Provider": "bedrock"}, None))
     bedrock = [
-        f.with_value("us.anthropic.claude-sonnet-4-6")
-        if f.label == "Model" and f.flag == "--judge-model"
-        else f
+        f.with_value("us.anthropic.claude-sonnet-4-6") if f.label == "Model" and f.flag == "--judge-model" else f
         for f in bedrock
     ]
     assert_options_known(bedrock)
@@ -1652,9 +1659,7 @@ def test_every_wizard_arg_builder_returns_non_empty_argv_for_defaults() -> None:
         assert argv, f"{wizard.name}: build_wizard_args returned empty argv for defaults"
         prefix = WIZARD_COMMANDS.get(wizard)
         if prefix is not None and prefix:
-            assert tuple(argv[: len(prefix)]) == prefix, (
-                f"{wizard.name}: expected argv prefix {prefix!r}, got {argv!r}"
-            )
+            assert tuple(argv[: len(prefix)]) == prefix, f"{wizard.name}: expected argv prefix {prefix!r}, got {argv!r}"
 
 
 # ---------------------------------------------------------------------------
@@ -1698,9 +1703,7 @@ def test_llm_wizard_emits_role_and_non_interactive() -> None:
 
 
 def test_llm_wizard_bedrock_group_visible_and_repeatable_deployment() -> None:
-    fields = _llm_wizard_fields_for(
-        provider="bedrock", role="unified", overrides={"--provider": "bedrock"}, cfg=None
-    )
+    fields = _llm_wizard_fields_for(provider="bedrock", role="unified", overrides={"--provider": "bedrock"}, cfg=None)
     labels = {f.label for f in fields}
     # Bedrock rows are visible, vertex/azure rows are filtered out.
     assert "Bedrock" in labels
@@ -1757,7 +1760,10 @@ def test_llm_wizard_tls_visible_for_regional_and_custom_only() -> None:
     assert "TLS" not in openai
 
     for prov in ("bedrock", "vertex_ai", "azure", "custom"):
-        labels = {f.label for f in _llm_wizard_fields_for(provider=prov, role="unified", overrides={"--provider": prov}, cfg=None)}
+        labels = {
+            f.label
+            for f in _llm_wizard_fields_for(provider=prov, role="unified", overrides={"--provider": prov}, cfg=None)
+        }
         assert "TLS" in labels, prov
 
 
@@ -1821,9 +1827,7 @@ def test_guardrail_wizard_regional_judge_families_and_llm_role() -> None:
 
     fields = _set_by_flag(fields, "--judge-bedrock-region", "us-west-2")
     fields = _set_by_flag(fields, "--llm-role", "judge_and_agent")
-    fields = [
-        f.with_value("us.anthropic.claude-sonnet-4-6") if f.flag == "--judge-model" else f for f in fields
-    ]
+    fields = [f.with_value("us.anthropic.claude-sonnet-4-6") if f.flag == "--judge-model" else f for f in fields]
     argv = build_wizard_args(SetupWizard.GUARDRAIL, fields)
     assert _pair_after(argv, "--judge-bedrock-region") == "us-west-2"
     assert _pair_after(argv, "--llm-role") == "judge_and_agent"
@@ -1906,9 +1910,7 @@ def test_custom_provider_base_type_drives_family_visibility() -> None:
         ("vertex_ai", "Vertex AI", "Azure"),
         ("azure", "Azure", "Bedrock"),
     ):
-        labels = {
-            f.label for f in _custom_providers_fields_for({"@Action": "add", "--base-provider-type": base_type})
-        }
+        labels = {f.label for f in _custom_providers_fields_for({"@Action": "add", "--base-provider-type": base_type})}
         assert shown in labels, base_type
         assert hidden not in labels, base_type
     # ``list`` hides every add-only row.
@@ -2332,9 +2334,7 @@ def test_guardrail_section_renders_effective_per_connector_overrides() -> None:
     # codex pins its own overrides — the editor shows the *effective* value.
     assert fields["guardrail.connectors.codex.enabled"].value == "false"
     assert fields["guardrail.connectors.codex.enabled"].kind == "bool"
-    assert fields["guardrail.connectors.codex.hook_fail_mode"].value.startswith(
-        "closed (provenance: config; status:"
-    )
+    assert fields["guardrail.connectors.codex.hook_fail_mode"].value.startswith("closed (provenance: config; status:")
     policy_status = fields["guardrail.connectors.codex.hook_fail_mode"].value
     if os.name == "nt":
         assert "policy-unverified" in policy_status
@@ -2419,10 +2419,32 @@ def test_guardrail_editor_uses_runtime_fail_mode_resolver(monkeypatch: pytest.Mo
     monkeypatch.setattr("defenseclaw.fail_mode.connector_fail_mode_report", resolve)
 
     fields = {f.key: f for f in _section(build_setup_sections(cfg), "Guardrail").fields}
-    assert fields["guardrail.connectors.codex.hook_fail_mode"].value == (
-        "open (provenance: process-env)"
-    )
+    assert fields["guardrail.connectors.codex.hook_fail_mode"].value == ("open (provenance: process-env)")
     assert calls and all(call == {"inspect_effective_policy": False} for call in calls)
+
+
+def test_guardrail_editor_uses_amp_plugin_runtime_fail_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    from defenseclaw.config import PerConnectorGuardrailConfig
+
+    cfg = _multi_connector_cfg()
+    cfg.guardrail.connectors["amp"] = PerConnectorGuardrailConfig(hook_fail_mode="closed")
+    cfg.data_dir = "runtime-state"
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    def resolve(_cfg, connector, **kwargs):
+        calls.append((connector, kwargs))
+        return {
+            "effective": "closed" if connector == "amp" else "open",
+            "provenance": "amp-plugin" if connector == "amp" else "hook-script",
+            "drift": [],
+        }
+
+    monkeypatch.setattr("defenseclaw.fail_mode.connector_fail_mode_report", resolve)
+
+    fields = {f.key: f for f in _section(build_setup_sections(cfg), "Guardrail").fields}
+
+    assert fields["guardrail.connectors.amp.hook_fail_mode"].value == ("closed (provenance: amp-plugin)")
+    assert ("amp", {"inspect_effective_policy": False}) in calls
 
 
 def test_guardrail_editor_surfaces_passive_policy_uncertainty(monkeypatch: pytest.MonkeyPatch) -> None:

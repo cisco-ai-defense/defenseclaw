@@ -23,6 +23,9 @@
 # Per-user (target-user-owned, written by the guardian dropping euid/egid):
 #   ~/.<agent>/<hook-config-file>                          (target-user 0600)
 #   ~/.defenseclaw/hooks/<connector>-hook.sh               (target-user 0700)
+#   ~/.config/amp/plugins/defenseclaw.ts                   (target-user 0600)
+#     Amp's TypeScript plugin is rendered by connector reconciliation; the
+#     package never precreates it.
 #
 # This script orchestrates side-effecting steps (sudo, launchctl, install(8))
 # and delegates pure logic (arg parsing, config rendering, version probing,
@@ -292,9 +295,9 @@ Usage: sudo $0 [options]
 Gateway options:
   --mode {observe|action}   Guardrail + asset_policy mode (default: ${DEFAULT_MODE})
   --connector LIST          Hook connector(s), comma-separated (default: ${DEFAULT_CONNECTOR})
-                            Supported: codex, claudecode, cursor
-                            Examples: --connector cursor
-                                      --connector cursor,claudecode
+                            Supported: amp, codex, claudecode, cursor
+                            Examples: --connector amp
+                                      --connector amp,cursor,claudecode
   --port PORT               Loopback API port (default: ${DEFAULT_API_PORT})
   --env {prod|preview}      AI Defense cloud environment (default: ${DEFAULT_ENV}).
                             Selects the cisco_ai_defense.endpoint that the
@@ -392,7 +395,7 @@ PRIMARY_CONNECTOR="${CONNECTORS[0]}"
 
 for c in "${CONNECTORS[@]}"; do
   if ! is_supported_connector "${c}"; then
-    warn "connector '${c}' is not in the auto-wire list (codex|claudecode|cursor); will be written to config but per-user hooks won't be auto-wired"
+    warn "connector '${c}' is not in the auto-wire list (amp|codex|claudecode|cursor); will be written to config but per-user hooks won't be auto-wired"
   fi
 done
 
@@ -818,7 +821,7 @@ if [[ "${SKIP_CONNECTOR}" != "true" ]]; then
   # green while enforcing nothing.
   MANIFEST_TARGETS="$(grep -c '^  - user:' "${MANIFEST_TMP}" || true)"
   if [[ "${MANIFEST_TARGETS}" == "0" ]] && [[ -n "${USER_LINES}" ]] && [[ "${ALLOW_EMPTY_USERS}" != "true" ]]; then
-    die "rendered hook-guardian manifest has zero targets despite ${USER_COUNT} eligible user(s) and connectors=${CONNECTOR} — every connector may be unsupported (only codex/claudecode/cursor auto-wire today). Fix --connector or pass --allow-empty-users to proceed anyway."
+    die "rendered hook-guardian manifest has zero targets despite ${USER_COUNT} eligible user(s) and connectors=${CONNECTOR} — every connector may be unsupported (only amp/codex/claudecode/cursor auto-wire today). Fix --connector or pass --allow-empty-users to proceed anyway."
   fi
   chown root:wheel "${MANIFEST_TMP}"
   chmod 0640 "${MANIFEST_TMP}"

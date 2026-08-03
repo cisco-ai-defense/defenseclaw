@@ -1,6 +1,6 @@
 ---
 title: Quick setup aliases
-description: defenseclaw setup codex, setup claude-code, setup cursor, setup copilot, setup openhands, setup antigravity, setup hermes, setup opencode, setup omnigent, setup geminicli, setup windsurf, setup openclaw, setup zeptoclaw — one connector-oriented command per agent.
+description: defenseclaw setup codex, setup claude-code, setup cursor, setup copilot, setup openhands, setup antigravity, setup hermes, setup opencode, setup amp, setup omnigent, setup geminicli, setup windsurf, setup openclaw, setup zeptoclaw — one connector-oriented command per agent.
 keywords:
   - defenseclaw setup codex
   - defenseclaw setup claude-code
@@ -11,6 +11,7 @@ keywords:
   - defenseclaw setup gemini cli
   - defenseclaw setup hermes
   - defenseclaw setup opencode
+  - defenseclaw setup amp
   - defenseclaw setup omnigent
   - defenseclaw setup windsurf
   - defenseclaw setup openclaw
@@ -24,7 +25,7 @@ documented non-interactive flags in CI.
 
 ## Direct-to-upstream aliases (hook or policy enforcement)
 
-These connectors talk directly to their native upstream, so DefenseClaw never sits in the LLM data path. Observe mode records telemetry; action mode returns supported agent-native hook verdicts or, for OmniGent, native `ALLOW` / `ASK` / `DENY` policy decisions.
+These connectors talk directly to their native upstream, so DefenseClaw never proxies model traffic. Observe mode records telemetry; action mode returns supported agent-native hook verdicts, Amp's synchronous pre-execution `tool.call` and model-bound `tool.result` allow/reject decisions, or OmniGent's native `ALLOW` / `ASK` / `DENY` policy decisions. Amp native confirmation is available only in the active foreground thread; background confirmation falls back to safe rejection or withholding.
 
 <Cards>
   <Card title="Codex" href="/docs/connectors/codex" description="defenseclaw setup codex" />
@@ -37,6 +38,7 @@ These connectors talk directly to their native upstream, so DefenseClaw never si
   <Card title="Antigravity" href="/docs/connectors/antigravity" description="defenseclaw setup antigravity" />
   <Card title="Hermes" href="/docs/connectors/hermes" description="defenseclaw setup hermes" />
   <Card title="OpenCode" href="/docs/connectors/opencode" description="defenseclaw setup opencode" />
+  <Card title="Amp" href="/docs/connectors/amp" description="defenseclaw setup amp — synchronous pre-execution and model-bound result policy, with foreground native confirmation" />
   <Card title="OmniGent" href="/docs/connectors/omnigent" description="defenseclaw setup omnigent — custom policy bridge with native ALLOW / ASK / DENY" />
 </Cards>
 
@@ -59,11 +61,11 @@ Selects the target connector exactly as if you had passed `defenseclaw setup gua
 </Step>
 
 <Step>
-Wires the connector's documented hook surface or OmniGent policy bridge and, where supported, native OTel exporter settings. No proxy listener binds; the agent talks directly to its native upstream.
+Wires the connector's documented hook, Amp plugin, or OmniGent policy surface and, where supported, native OTel exporter settings. No proxy listener binds; the agent talks directly to its native upstream.
 </Step>
 
 <Step>
-Uses observe mode by default. With `--mode action`, supported lifecycle callbacks return native block/approval decisions; OmniGent maps all six policy phases to `ALLOW`, `ASK`, or `DENY`.
+Uses observe mode by default. With `--mode action`, supported lifecycle callbacks return native block/approval decisions; Amp synchronously governs pre-execution `tool.call` and every model-bound `tool.result`, with native confirmation limited to the active foreground thread, and OmniGent maps all six policy phases to `ALLOW`, `ASK`, or `DENY`.
 </Step>
 
 <Step>
@@ -135,6 +137,7 @@ Operators previously walked through the full `setup guardrail` wizard just to co
 ```bash
 defenseclaw setup codex                         # observe by default
 defenseclaw setup claude-code --mode action    # native lifecycle verdicts
+defenseclaw setup amp --mode action            # tool execution + model-bound result enforcement
 defenseclaw setup omnigent --mode action       # native ALLOW / ASK / DENY policy
 defenseclaw setup openclaw       # full guardrail for OpenClaw
 ```
