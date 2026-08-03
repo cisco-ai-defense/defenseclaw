@@ -8,7 +8,10 @@ keywords:
   - DefenseClaw native ask
 ---
 
-HITL is for actions that are risky enough to need context but not categorical enough to block. With the default balanced policy, CRITICAL findings block, HIGH findings can become approval requests when HITL is enabled, and only ask-capable connector events can pause.
+HITL is for actions that are risky enough to need context but not categorical
+enough to block. With the bundled default guardrail policy, CRITICAL findings
+block, while eligible HIGH findings can become approval requests when HITL is
+enabled. Only ask-capable connector events can pause.
 
 <Steps>
 
@@ -18,10 +21,6 @@ HITL is for actions that are risky enough to need context but not categorical en
 
 This walkthrough uses [Claude Code](/docs/connectors/claudecode), whose `PreToolUse` hook can return a native approval decision. [OpenClaw](/docs/connectors/openclaw), [Cursor](/docs/connectors/cursor), [GitHub Copilot CLI](/docs/connectors/copilot), [Antigravity](/docs/connectors/antigravity), [Amp](/docs/connectors/amp), and [OmniGent](/docs/connectors/omnigent) also expose native ask on the specific events listed on the [HITL reference](/docs/hitl).
 
-```bash
-defenseclaw setup claude-code --yes --mode action --restart
-```
-
 </Step>
 
 <Step>
@@ -29,16 +28,18 @@ defenseclaw setup claude-code --yes --mode action --restart
 ### Enable HITL at HIGH
 
 ```bash
-defenseclaw setup guardrail \
-  --connector claudecode \
+defenseclaw setup claude-code \
+  --yes \
   --mode action \
   --human-approval \
   --hilt-min-severity high \
-  --restart \
-  --non-interactive
+  --restart
 ```
 
-With the default balanced thresholds, a HIGH finding is eligible for confirmation and a CRITICAL finding blocks before the HITL branch. The configured minimum of `high` therefore includes HIGH findings in the confirmation flow.
+The direct connector alias accepts the approval flags. With the default
+thresholds, a HIGH finding is eligible for confirmation and a CRITICAL finding
+blocks before the HITL branch. The configured minimum of `high` therefore
+includes HIGH findings in the confirmation flow.
 
 </Step>
 
@@ -68,7 +69,9 @@ The attempted file read matches the bundled `PATH-ENV-FILE` rule at HIGH. Claude
 Review the rendered tool action and finding in Claude Code. Approve to let the read continue, or deny to stop it. Then inspect the gateway audit stream:
 
 ```bash
-defenseclaw-gateway audit export --output - | jq '
+defenseclaw-gateway audit export --connector claudecode --output - \
+  | tail -n 200 \
+  | jq '
   select(.severity == "HIGH") |
   select((.structured.rule_ids // []) | index("PATH-ENV-FILE"))
 '
@@ -121,7 +124,7 @@ The TUI is useful for reviewing audit events, alerts, logs, and inventory. It do
 
 ## When HITL is not the right answer
 
-<Callout type="warn">
+<Callout type="warning">
 If nearly every tool call asks for approval, tune the policy instead of training operators to click through. If required actions never pause, first confirm that the finding reaches `--hilt-min-severity` and that the exact connector event supports native ask.
 </Callout>
 

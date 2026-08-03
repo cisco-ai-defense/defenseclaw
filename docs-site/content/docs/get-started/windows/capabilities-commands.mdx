@@ -21,6 +21,7 @@ the release actually qualifies.
 | OpenHands, OmniGent, OpenClaw, and ZeptoClaw setup | **Unsupported** | Their required WSL, terminal/sandbox, or proxy topology is not hosted by native Windows DefenseClaw. |
 | Python CLI | **Supported** | Packaged launcher and embedded runtime; PowerShell and cmd. Individual optional/network subcommands retain their caveats below. |
 | TUI | **Supported** | Native console input, UTF-8 output, clipboard support, managed process cancellation, and safe fallback when redraw is unavailable. |
+| AI Discovery and model provenance | **Supported** | Native process enumeration covers unique exact executable aliases across the full discovery catalog and fails closed on shared aliases. Classic installed-app metadata and current-user Store/MSIX/UWP registrations from the supported AppsFolder Shell API, PowerShell history, AppData editor-extension stores, and common local-model roots use bounded native discovery. The TUI keeps models in a separate table with ISO country code/flag, publisher, root/base, and derivation. Public Hugging Face enrichment is off by default and requires explicit opt-in. |
 | Gateway start/status/restart/stop | **Supported** | Detached current-user process with authenticated PID/start/executable identity. Not a Windows service. |
 | Logon startup | **Supported** | Installer-owned HKCU Run value and no-console startup helper when a connector is configured. |
 | Watchdog | **Limited** | Config-enabled detached process with protected identity. Not a service or Scheduled Task. |
@@ -43,8 +44,8 @@ the release actually qualifies.
 | Status, doctor, config, and version | **Supported** | Safe default output masks secrets; doctor can preview approved repair actions. |
 | Connector/global enable and disable | **Supported** | Restart reconciles runtime state. `--no-restart` can leave visible desired/runtime drift. |
 | Gateway token rotation | **Supported** | Global transactional rotation, all active connectors refreshed, readiness/auth verified, exact prior state restored on failure. |
-| Native automatic upgrade | **Limited** | Only from a source version authorized by the target's signed Windows baseline matrix. No manual downgrade/rollback command. |
-| Fresh/repair/uninstall packaged lifecycle | **Supported** | Signed per-user Setup in a non-elevated interactive user session. |
+| Native automatic upgrade | **Unavailable for published releases through 0.8.10** | Every published manifest has an empty Windows tested-source list. A future target could authorize only sources named by its authenticated manifest. No manual downgrade/rollback command. |
+| Fresh/repair/uninstall packaged lifecycle | **Supported** | Release-authenticated per-user Setup in a non-elevated interactive user session. Current Setup is not Authenticode-signed. |
 | Offline install/servicing | **Limited** | Self-contained Setup after authenticated staging; remote registries/providers/destinations are not offline features. |
 | Local observability and Local Splunk | **Limited** | Optional Hyper-V Docker Desktop/Linux-container path on x64 Pro/Enterprise/Education only. |
 | OpenShell sandbox | **Unsupported** | Linux-only lifecycle. |
@@ -59,12 +60,12 @@ or an advanced operation; it does not mean every listed subcommand is broken.
 
 | Command family | Public subcommands | Windows classification |
 | --- | --- | --- |
-| `agent` | `components`, `history`, `show`; `confidence explain`, `confidence policy default/show/validate`; `discover`; `discovery disable/enable/scan/setup/status`; `processes`; `signatures disable/enable/install/list/validate`; `usage` | **Supported** for local inventory/discovery; external metadata sources are optional. |
+| `agent` | `components`, `history`, `show`; `confidence explain`, `confidence policy default/show/validate`; `discover`; `discovery disable/enable/scan/setup/status`; `processes`; `signatures disable/enable/install/list/validate`; `usage` | **Supported** for local inventory/discovery. Public Hugging Face model-card enrichment is optional, transmits an exact recovered repository ID, and remains off until `--lookup-model-provenance-online` (or the matching interactive/config setting) is selected. |
 | `aibom` | `scan` | **Supported** local scan. |
 | `alerts` | `acknowledge`, `dismiss`; the group itself lists/shows alerts | **Supported**. |
 | `audit` | `log-activity` | **Supported**. Audit export is on `defenseclaw-gateway`. |
 | `codeguard` | `install`, `install-skill`, `status` | **Limited** explicit opt-in; agent/network requirements apply. |
-| `config` | `path`, `reference`, `show`, `validate` | **Supported**. Do not use `config show --reveal` in diagnostics. |
+| `config` | `path`, `reference`, `show`, `validate` | **Supported**. Configuration v8 rejects `config show --reveal`; effective and source views remain masked. |
 | `doctor` | no subcommands | **Supported**. Use `--fix --dry-run` before approving fixes. |
 | `guardrail` | `block-message`, `disable`, `enable`, `fail-mode`, `hilt`; `judge add/list/remove`; `list-packs`; `status` | **Supported** for Codex, Claude Code, and Amp; event limits still apply. |
 | `init` | no subcommands | **Limited** to supported native connector choices; sandbox setup is unsupported. |
@@ -85,7 +86,7 @@ or an advanced operation; it does not mean every listed subcommand is broken.
 | `tool` | `allow`, `block`, `list`, `status`, `unblock` | **Supported** local policy state. |
 | `tui` | no subcommands | **Supported**. |
 | `uninstall` | no subcommands | **Supported**; packaged installs hand off to trusted Setup. |
-| `upgrade` | no subcommands | **Limited** to signed-manifest-authorized Windows sources. |
+| `upgrade` | no subcommands | **Unavailable for published releases through 0.8.10** because no target manifest authorizes a Windows source. |
 | `version` | no subcommands | **Supported**; detects component drift. |
 
 The root also exposes `--version`. With no command, an interactive terminal can
@@ -164,7 +165,7 @@ defenseclaw guardrail fail-mode
 
 The product commands are identical in cmd. PowerShell-specific multiline
 syntax and path expressions in this guide are labeled. Avoid environment-dump
-commands, `config show --reveal`, credential display flags, or copying audit
+commands, the unsupported v8 `config show --reveal` flag, credential display flags, or copying audit
 and backup trees into a support ticket.
 
 For the cross-platform option reference, see [CLI reference](/docs/reference/cli).

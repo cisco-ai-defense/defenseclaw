@@ -50,7 +50,7 @@ def test_posix_requires_portable_litellm_and_windows_delegates_to_native_setup()
 
 WINDOWS_NATIVE_WORKFLOW = ROOT / ".github" / "workflows" / "windows-native.yml"
 MAKEFILE = ROOT / "Makefile"
-INSTALL_DOC = ROOT / "docs" / "INSTALL.md"
+INSTALL_DOC = ROOT / "docs-site" / "content" / "docs" / "get-started" / "install.mdx"
 
 
 def test_local_dist_is_never_advertised_as_authenticated_release_input() -> None:
@@ -64,8 +64,10 @@ def test_local_dist_is_never_advertised_as_authenticated_release_input() -> None
     assert "Setup signing state conflicts with authenticated provenance" in windows
     assert "Invoke-StagedChecksumVerification" in windows
     assert "$(DIST_DIR)/ is not authenticated installer input for 0.8.4+" in makefile
-    assert "Do not pass the unsigned output of `make dist`" in docs
-    assert "signed checksums and certificate" in docs
+    assert "`make dist`" in docs
+    assert "unauthenticated local developer artifacts" in docs
+    assert "checksum" in docs
+    assert "provenance" in docs
     assert "./scripts/install.sh --local dist/" not in docs
 
 
@@ -76,7 +78,11 @@ def test_existing_install_refusal_names_authenticated_latest_mode_resolver() -> 
     assert posix.count("authenticated release-owned upgrade resolver from the target release in latest mode") == 2
     assert "bash defenseclaw-upgrade.sh --yes" in posix
     assert "Do not pass --version" in posix
-    assert "blob/main/docs/CLI.md#upgrade" in posix
+    assert (
+        "https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/upgrade/"
+        in posix
+    )
+    assert "blob/main/docs/CLI.md#upgrade" not in posix
 
     # Windows servicing is owned by the authenticated native Setup executable;
     # the compatibility bootstrap must not route existing installs through the

@@ -392,9 +392,9 @@ install_python_cli() {
         log_info "Skipping shared CLI publication (--skip-install)"
     fi
     
-    # Note: cisco-ai-skill-scanner requires additional dependencies.
-    # Users can manually install: pip install cisco-ai-skill-scanner
-    log_info "Scanner dependencies: install manually with pip install cisco-ai-skill-scanner"
+    # Scanner SDKs are project dependencies and were synchronized into this
+    # isolated source environment by the editable install above.
+    log_info "Scanner dependencies synchronized from project metadata"
     
     # Install dev dependencies (ruff, pytest, pytest-cov)
     log_info "Installing Python dev dependencies..."

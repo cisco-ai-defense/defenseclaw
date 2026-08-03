@@ -7,7 +7,7 @@ DefenseClaw has Python, Go, TypeScript, Rego, docs, and end-to-end test surfaces
 | Command | Scope |
 |---------|-------|
 | `make test` | Python CLI unit tests plus focused Go gateway/test packages |
-| `make cli-test` | Python `unittest` suite under `cli/tests/` |
+| `make cli-test` | Python `pytest` suite under `cli/tests/` |
 | `make cli-test-cov` | Python pytest coverage report |
 | `make gateway-test` | Race-enabled Go tests for gateway and `test/` |
 | `make security-suite-test` | Deterministic security + PII coverage suite (regex + stubbed judge); see [SECURITY-TEST-SUITE.md](SECURITY-TEST-SUITE.md) |
@@ -15,7 +15,7 @@ DefenseClaw has Python, Go, TypeScript, Rego, docs, and end-to-end test surfaces
 | `make go-test-cov` | Race-enabled Go coverage across all packages |
 | `make ts-test` | OpenClaw plugin Vitest suite |
 | `make rego-test` | OPA tests for `policies/rego/` |
-| `make check` | Audit action, error code, schema, and provider coverage parity gates |
+| `make check` | v7 parity, observability-v8, dashboard, provider, model-catalog, and upgrade-manifest gates |
 | `make lint` | Ruff, Go formatting/linting, and Python compile check |
 | `make upgrade-smoke` | Build an unsigned schema-2 candidate and prove an old controller refuses it before mutation |
 | `make upgrade-smoke-matrix` | Run that unsigned-candidate refusal contract across all supported historical baselines |
@@ -41,7 +41,9 @@ opa test policies/rego/ -v
 
 ## End-to-End Tests
 
-E2E scripts live under `scripts/` and are documented in [E2E.md](E2E.md). They cover local CLI flows, sandbox behavior, tool blocking, proxy behavior, and platform-specific setups.
+E2E orchestration lives in `.github/workflows/e2e.yml`,
+`scripts/test-e2e-full-stack.sh`, and `test/e2e/`. Its runner and profile
+contract is documented in [E2E.md](E2E.md).
 
 Run E2E tests only when the required local services, credentials, and platform assumptions are available.
 
@@ -157,8 +159,11 @@ handoff. It also runs the public POSIX installer on Linux
 and macOS, the public PowerShell installer through the exact native Setup on
 Windows, and the macOS app packaging lifecycle. The Windows release
 includes both protected runtime architectures and
-`DefenseClawSetup-x64.exe` with its checksum, provenance, and SBOM. The first
-native Windows release makes no Windows upgrade claim. Partial platform-signing
+`DefenseClawSetup-x64.exe` with its checksum, provenance, and SBOM. Version
+`0.8.7` was the first release to publish native Setup and made no Windows
+upgrade claim. Releases `0.8.7` through `0.8.10` record the outer Setup and
+DefenseClaw executables as `NotSigned`; their exact bytes are authenticated by
+the signed checksums and release provenance, not by Authenticode. Partial platform-signing
 credentials, a failed install, a failed POSIX upgrade, or any candidate-byte
 mismatch aborts before publication. Complete credentials require the signed
 platform result; absent credentials require explicit unverified provenance.

@@ -29,6 +29,10 @@ The import includes the Xcode project, Swift sources, tests, developer build/tes
 
 Cisco integration changes after import include the Cisco bundle identifier, unified release source, synchronized DefenseClaw version, ad-hoc-by-default signing, the runtime-bearing DMG plus app-only update zip, monorepo CI/release workflows, and Cisco Apache-2.0 headers.
 
-The same immutable release and commit are recorded in [upstream.lock.toml](upstream.lock.toml). The weekly freshness workflow reports a newer stable release, and the DefenseClaw release preflight refuses to sign stale source.
+The same immutable release and commit are recorded in
+[upstream.lock.toml](upstream.lock.toml). The weekly freshness workflow reports
+a newer stable release. Release preflight validates the checked-in lock
+offline; it deliberately does not query the upstream repository or prove that
+the pin is the latest release.
 
 Update this file and the lock whenever the imported app is refreshed. Follow [UPDATING.md](UPDATING.md); do not copy the standalone repository wholesale.

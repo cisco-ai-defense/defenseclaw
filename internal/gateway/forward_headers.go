@@ -72,8 +72,8 @@ const (
 // hop-by-hop per RFC 7230 §6.1, Baggage, Content-Type) is intentionally
 // commented out below — each entry carries a danger rating so operators
 // can re-enable selected names by uncommenting if they observe upstream
-// regressions or want stricter posture. See docs/GUARDRAIL.md for
-// guidance.
+// regressions or want stricter posture. See the published configuration
+// reference: https://cisco-ai-defense.github.io/defenseclaw/docs/reference/configuration/
 var alwaysDeniedHeaders = map[string]struct{}{
 	// Proxy-hop / framework-internal headers (pre-existing).
 	"x-dc-target-url": {},

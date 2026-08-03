@@ -1025,10 +1025,17 @@ class TestTrustedPrivilegedCommands(unittest.TestCase):
             traversal.assert_not_called()
             acls.assert_not_called()
 
-    def test_install_preserves_openshell_version_across_sudo(self):
+    def test_install_preserves_openshell_integrity_env_across_sudo(self):
         cfg = SimpleNamespace(openshell=SimpleNamespace(sandbox_version="1.2.3"))
         command = ["/usr/bin/sudo", "/bin/bash", "/trusted/install", "--install-dir", "/usr/local/bin"]
+        integrity_env = {
+            "OPENSHELL_SANDBOX_SHA256": "a" * 64,
+            "DEFENSECLAW_OPENSHELL_BINARY_SHA256": "b" * 64,
+            "DEFENSECLAW_OPENSHELL_ARCH_DIGEST": "sha256:" + ("c" * 64),
+            "DEFENSECLAW_OPENSHELL_ALLOW_UNPINNED": "0",
+        }
         with (
+            patch.dict(os.environ, integrity_env, clear=False),
             patch.object(cmd_init_sandbox, "_find_installer_script", return_value="/trusted/install"),
             patch.object(cmd_init_sandbox, "_trusted_privileged_argv", return_value=command.copy()),
             patch.object(cmd_init_sandbox, "_needs_sudo", return_value=True),
@@ -1037,8 +1044,16 @@ class TestTrustedPrivilegedCommands(unittest.TestCase):
         ):
             self.assertTrue(cmd_init_sandbox._install_openshell_sandbox(cfg))
         argv = run.call_args.args[0]
-        self.assertEqual(argv[1], "--preserve-env=OPENSHELL_VERSION")
-        self.assertEqual(run.call_args.kwargs["env"]["OPENSHELL_VERSION"], "1.2.3")
+        self.assertEqual(
+            argv[1],
+            "--preserve-env=OPENSHELL_VERSION,OPENSHELL_SANDBOX_SHA256,"
+            "DEFENSECLAW_OPENSHELL_BINARY_SHA256,DEFENSECLAW_OPENSHELL_ARCH_DIGEST,"
+            "DEFENSECLAW_OPENSHELL_ALLOW_UNPINNED",
+        )
+        passed_env = run.call_args.kwargs["env"]
+        self.assertEqual(passed_env["OPENSHELL_VERSION"], "1.2.3")
+        for name, value in integrity_env.items():
+            self.assertEqual(passed_env[name], value)
 
 
 if __name__ == "__main__":

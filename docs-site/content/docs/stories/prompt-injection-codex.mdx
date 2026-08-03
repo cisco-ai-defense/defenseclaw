@@ -25,7 +25,13 @@ Prompt injection can arrive in a user message or in content an agent reads. Defe
 defenseclaw setup codex --yes --mode action --restart
 ```
 
-DefenseClaw wires `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, `Stop`, and `SessionStart`, plus Codex's native OTel exporter and the agent-turn-complete notify bridge. Action mode allows block-capable events to enforce policy.
+Every supported Codex version gets the six-event base contract:
+`SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`,
+`PostToolUse`, and `Stop`. Codex `0.129.0` and later add compact events, and
+`0.133.0` and later add subagent events. Setup also wires native OTel and the
+agent-turn-complete notify bridge. See
+[Connector Compatibility](/docs/connectors/compatibility) for the exact
+ranges.
 
 </Step>
 
@@ -44,6 +50,7 @@ defenseclaw setup guardrail \
   --detection-strategy regex_judge \
   --judge-model anthropic/claude-sonnet-4-20250514 \
   --judge-api-key-env DEFENSECLAW_LLM_KEY \
+  --judge-hook-connectors codex \
   --restart \
   --non-interactive
 ```
@@ -71,7 +78,8 @@ The bundled `TRUST-IGNORE-PREVIOUS` rule is CRITICAL. The `UserPromptSubmit` hoo
 ```bash
 defenseclaw alerts --limit 10
 # or inspect the latest structured events from mandatory SQLite history:
-defenseclaw-gateway audit export --limit 200 --output - \
+defenseclaw-gateway audit export --connector codex --output - \
+  | tail -n 200 \
   | jq 'select(.connector == "codex" and .severity == "CRITICAL")'
 ```
 
@@ -126,9 +134,12 @@ Yes. Omit the judge flags, or explicitly choose `--detection-strategy regex_only
 
 </Accordion>
 
-<Accordion title="What about a response that contains a secret?">
+<Accordion title="What about a tool result that contains a secret?">
 
-`PostToolUse` and completion/response inspection can still detect sensitive output after a tool runs. That is detection and containment context for the next step, not a promise that an already-returned tool result can be retroactively prevented.
+`PostToolUse` can detect sensitive output after a tool runs. Codex's supported
+hook contracts do not provide a pre-delivery model-response hook, and a
+post-tool finding cannot retroactively prevent an already-returned result. Use
+that finding as containment context for the next step.
 
 </Accordion>
 
@@ -138,5 +149,5 @@ Yes. Omit the judge flags, or explicitly choose `--detection-strategy regex_only
 
 <Cards>
   <Card title="Block secret exfiltration from Cursor" href="/docs/stories/cursor-secret-exfil" description="The companion story — a safe synthetic file and a pre-execution tool-call gate." />
-  <Card title="Capability Matrix" href="/docs/capability-matrix" description="Which events block, ask, and fail closed on each connector." />
+  <Card title="Connector compatibility" href="/docs/connectors/compatibility" description="Exact hook contracts, version ranges, and script generations." />
 </Cards>

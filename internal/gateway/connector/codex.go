@@ -128,9 +128,7 @@ func (c *CodexConnector) Description() string {
 	return "config.toml model_providers patch + hook script (10 events, component scanning)"
 }
 func (c *CodexConnector) ToolInspectionMode() ToolInspectionMode { return ToolModeBoth }
-func (c *CodexConnector) SubprocessPolicy() SubprocessPolicy {
-	return ResolveSubprocessPolicy(SubprocessSandbox)
-}
+func (c *CodexConnector) SubprocessPolicy() SubprocessPolicy     { return SubprocessNone }
 
 func (c *CodexConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	return withCodexLifecycleTransaction(opts, func() error {
@@ -573,8 +571,8 @@ func (c *CodexConnector) HookProfile(opts SetupOpts) HookProfile {
 	// The M3 work (consistent resource attributes across all
 	// connectors) applies to env-block-style connectors like
 	// claudecode where the agent's natural service.name would
-	// otherwise be useless to operators. For TOML/path-token
-	// connectors that already self-identify (codex, geminicli),
+	// otherwise be useless to operators. For native TOML exporters
+	// native exporters that already self-identify (codex, geminicli),
 	// the upstream tags are richer than anything we could
 	// synthesize from the outside.
 	profile := HookProfile{

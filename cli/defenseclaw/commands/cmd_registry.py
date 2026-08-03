@@ -889,9 +889,10 @@ def _print_sync_reports(reports: list[SyncReport]) -> None:
     click.echo()
 
 
-# Lazy scanner factory — keeps the heavy SDK import off the hot path
-# of `registry list` / `registry show`. Returns None when scanner SDKs
-# aren't installed so the operator still gets a metadata-only sync.
+# Lazy scanner factory — keeps scanner work off the hot path of
+# `registry list` / `registry show`. MCP unavailability returns ``None`` and
+# leaves that entry pending; a missing unconditional Skill Scanner dependency
+# becomes an entry-level error when the delegated scan exits.
 _HASH_REQUIRED_SKILL_SOURCE_KINDS = {"http_yaml", "http_json", "git", "file"}
 
 
@@ -925,16 +926,15 @@ def _run_skill_scan(  # type: ignore[no-untyped-def]
 
     The full clawhub:// / https:// download flow is delegated to the
     existing helpers in :mod:`cmd_skill` so we don't duplicate the
-    archive-extraction logic. Missing scanner extras fall through to
-    ``None`` (metadata-only / pending); hard download, hash, or scan
-    failures raise so the sync report marks the entry ``error`` rather
-    than silently leaving an unsafe asset eligible for manual confusion.
+    archive-extraction logic. A missing Skill Scanner SDK reaches the
+    delegated scan as a hard failure, so the sync report marks the entry
+    ``error`` rather than silently leaving an unsafe asset eligible for
+    manual confusion.
     """
-    # Optional dep: the skill scanner SDK ships separately from the
-    # CLI so on a stripped install (operator without the scanner
-    # extras) we degrade to "leave the entry pending" instead of
-    # crashing the whole sync. The import is purely a presence
-    # check; the actual scan goes through cmd_skill below.
+    # This import checks the lightweight wrapper only; the unconditional
+    # external SDK is imported lazily by the delegated cmd_skill scan below.
+    # If that SDK is missing, the delegated SystemExit is converted to a
+    # RuntimeError and the sync engine records an entry-level error.
     try:
         from defenseclaw.scanner.skill import SkillScannerWrapper  # noqa: F401
     except ImportError:

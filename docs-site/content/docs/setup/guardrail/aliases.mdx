@@ -1,6 +1,6 @@
 ---
 title: Quick setup aliases
-description: defenseclaw setup codex, setup claude-code, setup cursor, setup copilot, setup openhands, setup antigravity, setup hermes, setup opencode, setup amp, setup omnigent, setup geminicli, setup windsurf, setup openclaw, setup zeptoclaw — one command per agent, no questions asked.
+description: defenseclaw setup codex, setup claude-code, setup cursor, setup copilot, setup openhands, setup antigravity, setup hermes, setup opencode, setup amp, setup omnigent, setup geminicli, setup windsurf, setup openclaw, setup zeptoclaw — one connector-oriented command per agent.
 keywords:
   - defenseclaw setup codex
   - defenseclaw setup claude-code
@@ -18,7 +18,10 @@ keywords:
   - defenseclaw setup zeptoclaw
 ---
 
-Each connector has a top-level alias that wraps `defenseclaw setup guardrail --connector <name>` with the right defaults. Use them for fast subsequent runs and CI scripts.
+Each connector has a setup alias that selects the corresponding
+`setup guardrail --connector <name>` posture while exposing a smaller,
+connector-oriented flag surface. Use them for fast subsequent runs; pass the
+documented non-interactive flags in CI.
 
 ## Direct-to-upstream aliases (hook or policy enforcement)
 
@@ -100,6 +103,14 @@ Restarts the gateway (unless `--no-restart`).
     },
   }}
 />
+
+<Callout type="warning" title="Port 3000 is the current local-stack preflight">
+`--with-local-stack` treats any TCP listener on `127.0.0.1:3000` as an
+already-running stack and skips `local-observability up`, including its
+destination wiring. If the bundled stack or expected destination is absent,
+run `defenseclaw setup local-observability up` explicitly and follow the
+printed `defenseclaw-gateway restart` step.
+</Callout>
 
 ## Full guardrail aliases (proxy connectors)
 

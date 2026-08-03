@@ -952,8 +952,17 @@ def _install_openshell_sandbox(cfg) -> bool:
         env["OPENSHELL_VERSION"] = sandbox_version
 
     cmd = _trusted_privileged_argv("bash", script, "--install-dir", "/usr/local/bin")
-    if sandbox_version and _needs_sudo():
-        cmd.insert(1, "--preserve-env=OPENSHELL_VERSION")
+    if _needs_sudo():
+        integrity_env = (
+            "OPENSHELL_VERSION",
+            "OPENSHELL_SANDBOX_SHA256",
+            "DEFENSECLAW_OPENSHELL_BINARY_SHA256",
+            "DEFENSECLAW_OPENSHELL_ARCH_DIGEST",
+            "DEFENSECLAW_OPENSHELL_ALLOW_UNPINNED",
+        )
+        present = [name for name in integrity_env if name in env]
+        if present:
+            cmd.insert(1, f"--preserve-env={','.join(present)}")
 
     try:
         result = subprocess.run(

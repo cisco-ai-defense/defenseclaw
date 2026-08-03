@@ -22,9 +22,7 @@
 # No Go, Node.js, or git required — only Python and uv.
 #
 #   # From GitHub release:
-#   VERSION=0.8.6
-#   INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"
-#   curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash
+#   curl -LsSf https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh | bash
 #
 #   # From a complete authenticated release-asset directory (fresh installs only):
 #   ./scripts/install.sh --local /path/to/release-assets
@@ -1829,9 +1827,7 @@ while [[ $# -gt 0 ]]; do
         --help|-h)
             echo ""
             echo "Usage:"
-            echo '  VERSION=0.8.6'
-            echo '  INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"'
-            echo '  curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash'
+            echo '  curl -LsSf https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh | bash'
             echo "  ./scripts/install.sh --local /path/to/release-assets  # complete authenticated assets"
             echo "  curl -LsSf <url>/install.sh | bash -s -- --yes    # non-interactive"
             echo "  curl ... | bash -s -- --sandbox                   # OpenClaw/OpenShell sandbox support"
@@ -1893,7 +1889,7 @@ if existing_install_detected && ! interrupted_install_attempt_detected; then
   Use the authenticated release-owned upgrade resolver from the target release in latest mode:
     bash defenseclaw-upgrade.sh --yes
   Do not pass --version. Download and verify the resolver with its signed checksums:
-    https://github.com/${REPO}/blob/main/docs/CLI.md#upgrade"
+    https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/upgrade/"
 fi
 
 detect_platform
@@ -1939,7 +1935,7 @@ if existing_install_detected; then
   Use the authenticated release-owned upgrade resolver from the target release in latest mode:
     bash defenseclaw-upgrade.sh --yes
   Do not pass --version. Download and verify the resolver with its signed checksums:
-    https://github.com/${REPO}/blob/main/docs/CLI.md#upgrade"
+    https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/upgrade/"
 fi
 
 if [[ "${MODERN_RELEASE:-false}" == true ]]; then

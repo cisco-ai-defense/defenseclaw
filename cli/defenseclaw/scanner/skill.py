@@ -97,7 +97,8 @@ class SkillScannerWrapper:
         except ImportError:
             print(
                 "error: cisco-ai-skill-scanner not installed.\n"
-                "  Install with: pip install cisco-ai-skill-scanner",
+                "  Repair the managed DefenseClaw installation.\n"
+                "  Source checkouts: uv sync",
                 file=sys.stderr,
             )
             raise SystemExit(1)

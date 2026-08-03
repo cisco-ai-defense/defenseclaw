@@ -128,17 +128,14 @@ class FirstRunOptions:
     cisco_endpoint: str = ""
     cisco_api_key: str = ""
     cisco_api_key_env: str = "CISCO_AI_DEFENSE_API_KEY"
-    # hook_fail_mode controls what generated hooks
-    # (codex-hook, claude-code-hook, inspect-*) do when the
-    # gateway returns a *response-layer* failure (4xx, malformed
-    # JSON, missing action). Empty string means "leave the
+    # hook_fail_mode controls what generated hooks (codex-hook,
+    # claude-code-hook, inspect-*) do when delivery, authentication,
+    # or a gateway response fails. Empty string means "leave the
     # current cfg.guardrail.hook_fail_mode untouched" so callers
     # who don't care don't accidentally clobber an operator's
-    # earlier choice. Transport-layer failures (gateway
-    # unreachable / 5xx) ALWAYS allow unless
-    # DEFENSECLAW_STRICT_AVAILABILITY=1, regardless of this
-    # value — see _normalize_hook_fail_mode for the canonical
-    # rule.
+    # earlier choice. Transport failures and invalid responses
+    # follow the same effective value. DEFENSECLAW_STRICT_AVAILABILITY=1
+    # additionally forces transport and missing-token failures closed.
     hook_fail_mode: str = ""
     # human_approval is the operator's HITL (Human-In-the-Loop)
     # toggle. ``None`` means "leave whatever was loaded alone" —

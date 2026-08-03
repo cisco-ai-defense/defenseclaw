@@ -733,12 +733,16 @@ function compileWasm(opts: { skipMissingOpa: boolean }): { compiled: string[]; s
   const compiled: string[] = [];
   const skipped: string[] = [];
 
-  // Locate `opa` on PATH. We resolve via `which` instead of a hard-
-  // coded path so the script works on Linux CI runners and macOS dev
-  // boxes alike.
+  // Locate `opa` on PATH without hard-coding an installation directory.
+  // `which` emits MSYS paths such as /tmp/... on Windows; Node's native
+  // process launcher cannot execute those paths. Use the platform resolver
+  // so Windows receives a native drive-qualified path from where.exe.
   let opaPath = '';
   try {
-    opaPath = execFileSync('which', ['opa'], { encoding: 'utf-8' }).trim();
+    const resolver = process.platform === 'win32' ? 'where.exe' : 'which';
+    opaPath = execFileSync(resolver, ['opa'], { encoding: 'utf-8' })
+      .trim()
+      .split(/\r?\n/, 1)[0] ?? '';
   } catch {
     /* missing — fall through */
   }

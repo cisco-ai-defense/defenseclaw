@@ -27,7 +27,7 @@ rows to Windows.
 <Cards>
   <Card title="Family" description="proxy = DefenseClaw sits in the LLM data path. hooks = DefenseClaw hooks into the agent's lifecycle; the agent talks directly to its upstream." />
   <Card title="Tool inspection" description="When DefenseClaw can see the tool call. pre-execution + response-scan means we score before the call fires and after it returns." />
-  <Card title="Subprocess policy" description="sandbox = DefenseClaw wires the agent into the openshell sandbox. none = the agent's own runtime executes commands; we observe via hooks." />
+  <Card title="Subprocess policy" description="sandbox = connector setup calls DefenseClaw's OpenShell/shim enforcement wiring. none = the agent's own runtime executes commands; DefenseClaw observes or blocks only through the connector's hook/proxy surface." />
   <Card title="Block" description="Whether the hooks the connector exposes can return a block decision at all." />
   <Card title="Native ask" description="Whether the connector's hooks can prompt the operator inside the agent UI for approval. Without native ask, confirm uses a connector-specific alert/allow/context fallback; the TUI can review the event but cannot resume it." />
   <Card title="Fail-closed" description="Whether the hook surface supports a fail-closed response — i.e. block on transport failure to the gateway. Connectors marked false require operator-managed timeouts." />
@@ -40,12 +40,21 @@ rows to Windows.
 | --- | --- |
 | Family | `internal/gateway/connector/*.go` (whether the connector implements `RoutingConnector` for proxy mode) |
 | Tool inspection | `_CONNECTOR_META[<id>].tool_mode` in `cli/defenseclaw/commands/cmd_setup.py` |
-| Subprocess policy | `_CONNECTOR_META[<id>].subprocess_policy` in `cli/defenseclaw/commands/cmd_setup.py` |
+| Subprocess policy | Effective setup call sites for `SetupSubprocessEnforcement` in `internal/gateway/connector/*.go`, cross-checked with `_CONNECTOR_META[<id>].subprocess_policy` |
 | Block / Native ask / Fail-closed | `HookCapability{}` literals in `internal/gateway/connector/hook_only.go` and the per-connector files |
 | Hook contract versions | `cli/defenseclaw/inventory/hook_contracts.json`, checked against `internal/gateway/connector/hook_contract.go` |
 | HITL behaviour | `_hilt_support_note(<id>)` in `cli/defenseclaw/commands/cmd_setup.py` |
 
 The component renders from `data/capability-matrix.json`, which is the single editable copy and is refreshed against the Go source on every connector change.
+
+<Callout type="info" title="Advertised contract vs empirical verification">
+The Antigravity v2 contract advertises native ask on `PreInvocation` and
+`PreToolUse`, and block on `PreInvocation`, `PreToolUse`, and `Stop`.
+DefenseClaw has empirically verified only the `PreToolUse` ask/block branch
+against `agy` v1.0.1. The additional registered branches remain gated on
+upstream implementation parity; an advertised branch is not the same as an
+end-to-end verification claim.
+</Callout>
 
 ## Common patterns
 
@@ -59,7 +68,13 @@ Direct-to-upstream hook enforcement is supported on [Claude Code](/docs/connecto
 
 ### "I want HITL approvals to surface inside the agent UI"
 
-Pick a row with **native ask: yes**: OpenClaw, Claude Code (PreToolUse), Cursor (beforeShellExecution / beforeMCPExecution), GitHub Copilot CLI (preToolUse), Antigravity (verified PreToolUse), Amp (`tool.call` and model-bound `tool.result` in the active foreground thread), or OmniGent (`request`, `tool_call`, `llm_request`). Confirm verdicts on every other connector/event take an immediate connector-specific fallback; there is no TUI approval queue.
+Pick a row with **native ask: yes**: OpenClaw, Claude Code (PreToolUse), Cursor
+(beforeShellExecution / beforeMCPExecution), GitHub Copilot CLI (preToolUse),
+Antigravity (`PreInvocation` advertised by the v2 contract and `PreToolUse`
+empirically verified), Amp (`tool.call` and model-bound `tool.result` in the
+active foreground thread), or OmniGent (`request`, `tool_call`, `llm_request`).
+Confirm verdicts on every other connector/event take an immediate
+connector-specific fallback; there is no TUI approval queue.
 
 ### "I want fail-closed on transport failures"
 

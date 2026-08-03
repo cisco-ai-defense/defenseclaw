@@ -1,5 +1,12 @@
 # Connector Package — Remaining Fixes
 
+> **Status: historical review tracker.** DONE/open labels record the cited PR
+> review state and are not the active issue tracker. Check
+> [GitHub issues](https://github.com/cisco-ai-defense/defenseclaw/issues),
+> current connector tests, and the
+> [published compatibility matrix](https://cisco-ai-defense.github.io/defenseclaw/docs/connectors/compatibility/)
+> before treating an item as current.
+
 **Date**: 2026-04-28 (updated by PR #194 single rollup; PR #284 hook-contract update)
 **Package**: `internal/gateway/connector/`
 **Review base**: Full code review against techspec, 18 findings total, 12 fixed.

@@ -111,7 +111,7 @@ Policy activation is written to the isolated audit database. Export it with the
 gateway binary and select the activation event:
 
 ```bash
-defenseclaw-gateway audit export --limit 20 --output - \
+defenseclaw-gateway audit export --output - \
   | jq 'select(.action == "policy-activate")'
 ```
 

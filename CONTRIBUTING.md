@@ -1,58 +1,62 @@
-# How to Contribute
+# Contributing to DefenseClaw
 
-Thanks for your interest in contributing to `defenseclaw`! Here are a few
-general guidelines on contributing and reporting bugs that we ask you to review.
-Following these guidelines helps to communicate that you respect the time of the
-contributors managing and developing this open source project. In return, they
-should reciprocate that respect in addressing your issue, assessing changes, and
-helping you finalize your pull requests. In that spirit of mutual respect, we
-endeavor to review incoming issues and pull requests within 10 days, and will
-close any lingering issues or pull requests after 60 days of inactivity.
+Thank you for contributing. Project interactions are governed by
+[`CODE_OF_CONDUCT.md`](CODE_OF_CONDUCT.md).
 
-Please note that all of your interactions in the project are subject to our
-[Code of Conduct](/CODE_OF_CONDUCT.md). This includes creation of issues or pull
-requests, commenting on issues or pull requests, and extends to all interactions
-in any real-time space e.g., Slack, Discord, etc.
+## Before opening an issue
 
-## Reporting Issues
+Search the
+[existing issues](https://github.com/cisco-ai-defense/defenseclaw/issues) and
+include a clear problem statement, reproduction steps, affected platform and
+version, relevant logs with secrets removed, and a minimal test case when
+possible.
 
-Before reporting a new issue, please ensure that the issue was not already
-reported or fixed by searching through our [issues
-list](https://github.com/cisco-ai-defense/defenseclaw/issues).
+Do not file suspected vulnerabilities in a public issue. Follow the private
+reporting process in [`SECURITY.md`](SECURITY.md).
 
-When creating a new issue, please be sure to include a **title and clear
-description**, as much relevant information as possible, and, if possible, a
-test case.
+## Development contract
 
-**If you discover a security bug, please do not report it through GitHub.
-Instead, please see security procedures in [SECURITY.md](/SECURITY.md).**
+The checked-in toolchain requirements are Python `>=3.10,<3.14`
+([`pyproject.toml`](pyproject.toml)) and Go `1.26.4` ([`go.mod`](go.mod)).
+Project CI uses Node.js 24 for TypeScript components. Run `make help` before
+using state-changing source targets.
 
-## Sending Pull Requests
+Common contributor checks are:
 
-Before sending a new pull request, take a look at existing pull requests and
-issues to see if the proposed change or fix has been discussed in the past, or
-if the change was already implemented but not yet released.
+```bash
+make build
+make test
+make ts-test
+make rego-test
+make check
+make lint
+```
 
-We expect new pull requests to include tests for any affected behavior, and, as
-we follow semantic versioning, we may reserve breaking changes until the next
-major version release.
+`make test` runs the Python CLI suite and race-enabled gateway/E2E Go packages.
+`make ts-test` and `make rego-test` are separate. `make check` runs schema,
+generated-artifact, provider, dashboard, and release-manifest parity gates.
+Use focused tests while iterating, then run the checks relevant to every area
+you changed.
 
-## Other Ways to Contribute
+Source activation is different from release installation. `make build` does not
+install or mutate managed state. `make all` deliberately activates the current
+checkout for local development. Direct install targets and
+`scripts/install-dev.sh` enforce checkout ownership and are not an operator
+upgrade path.
 
-We welcome anyone that wants to contribute to `defenseclaw` to triage and
-reply to open issues to help troubleshoot and fix existing bugs. Here is what
-you can do:
+## Pull requests
 
-- Help ensure that existing issues follows the recommendations from the
-  _[Reporting Issues](#reporting-issues)_ section, providing feedback to the
-  issue's author on what might be missing.
-- Review and update the existing content of our
-  [Wiki](https://github.com/cisco-ai-defense/defenseclaw/wiki) with up-to-date
-  instructions and code samples.
-- Review existing pull requests, and testing patches against real existing
-  applications that use `defenseclaw`.
-- Write a test, or add a missing test case to an existing test.
+- Keep each change focused and explain the problem, solution, risk, and
+  verification evidence.
+- Add or update tests for changed behavior.
+- Update the canonical
+  [documentation website](https://cisco-ai-defense.github.io/defenseclaw/docs/)
+  when operator behavior changes. Repository Markdown should contain only
+  contributor, implementation, package-local, generated-schema, fixture, or
+  clearly historical material.
+- Complete the pull-request template, including linked issues for deferred
+  follow-up work.
+- Do not commit credentials, private customer data, generated build outputs, or
+  local runtime state.
 
-Thanks again for your interest on contributing to `defenseclaw`!
-
-:heart:
+The repository-specific testing map is in [`docs/TESTING.md`](docs/TESTING.md).

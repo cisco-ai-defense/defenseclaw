@@ -12,7 +12,11 @@ keywords:
   - defenseclaw non-interactive
 ---
 
-`defenseclaw setup guardrail` is the operator command. It picks the connector, picks the mode, points the scanners at the right backend, optionally enables the LLM judge, and configures human-in-the-loop. Every other setup verb in DefenseClaw is a thin wrapper around this one.
+`defenseclaw setup guardrail` is the central operator command. It picks the
+connector, mode, scanner backend, optional LLM judge, and human-in-the-loop
+posture. Connector setup aliases select a connector through a smaller flag
+surface; auxiliary setup commands independently manage webhooks,
+observability, scanners, providers, and other focused configuration.
 
 <Callout>
 Run it interactively the first time — the wizard explains each choice and picks safe defaults. Once the configuration is happy, re-run with explicit flags (or use `--non-interactive`) for unattended setups and CI.
@@ -267,7 +271,7 @@ defenseclaw setup guardrail \
 
 Routes the judge through AWS Bedrock instead of a SaaS endpoint. `boto3` ships in the base install, so no extra `pip install` is needed. Swap `--judge-provider vertex_ai` + `--judge-vertex-{project-id,region,auth-mode,service-account-json-env}` for GCP Vertex, or `--judge-provider azure` + `--judge-azure-{endpoint,api-version,auth-mode,deployment-alias}` for Azure OpenAI. For self-signed lab endpoints, add `--judge-tls-ca-cert-file /etc/ssl/lab-root.pem`. See [Unified LLM key → Regional providers](/docs/setup/unified-llm-key#regional-providers-bedrock-vertex-ai-azure-openai) for the full matrix.
 
-If the same Bedrock / Vertex / Azure posture is already configured on a custom-provider overlay entry (region, auth mode, deployment aliases, TLS — see [Bedrock / Vertex AI / Azure on a custom instance](/docs/setup/unified-llm-key#bedrock--vertex-ai--azure-on-a-custom-instance)), the judge can inherit it with a single `--judge-instance-name <name>` instead of repeating every flag. Role-level judge flags still win field-by-field, so a shared overlay can supply auth credentials while `--judge-bedrock-region` pins a different region per environment.
+If the same Bedrock / Vertex / Azure posture is already configured on a custom-provider overlay entry (region, auth mode, deployment aliases, TLS — see [Bedrock / Vertex AI / Azure on a custom instance](/docs/setup/unified-llm-key#bedrock-vertex-ai-azure-on-a-custom-instance)), the judge can inherit it with a single `--judge-instance-name <name>` instead of repeating every flag. Role-level judge flags still win field-by-field, so a shared overlay can supply auth credentials while `--judge-bedrock-region` pins a different region per environment.
 
 </Tab>
 
@@ -363,7 +367,7 @@ If the same Bedrock / Vertex / Azure posture is already configured on a custom-p
     },
     "--judge-vertex-project-id / --judge-vertex-region / --judge-vertex-auth-mode / --judge-vertex-service-account-json-env": {
       type: "string",
-      description: "Vertex AI judge backend. Mirrors the agent-side --vertex-* flags. The Vertex SDK is an opt-in extra (`pip install 'defenseclaw[vertex]'`); the gateway falls back to LiteLLM's REST transport when the SDK is absent.",
+      description: "Vertex AI judge backend. Mirrors the agent-side --vertex-* flags. The Go gateway routes Vertex through Bifrost; Python CLI scanner/judge paths use LiteLLM and require the opt-in Google SDK extra. Source contributors can install it with `uv sync --extra vertex`; there is no documented SDK-less Python fallback.",
     },
     "--judge-azure-endpoint / --judge-azure-api-version / --judge-azure-auth-mode / --judge-azure-deployment-alias": {
       type: "string",
@@ -460,8 +464,8 @@ The matrix below is the source of truth. ✓ means "supported"; ✗ means "not s
 
 | Command | Interactive wizard | Non-interactive flags | Notes |
 | --- | --- | --- | --- |
-| [`defenseclaw init`](/docs/get-started/quickstart#path-a--interactive-defenseclaw-init) | ✓ default on a TTY | ✓ `--non-interactive --yes` + per-knob flags | Identical to the wizard mode of `quickstart` once choices are made; both call `bootstrap.run_first_run()`. |
-| [`defenseclaw quickstart`](/docs/get-started/quickstart#path-b--zero-prompts-defenseclaw-quickstart) | ✗ never prompts | ✓ always | Zero-prompt by design. There is no wizard variant — use `init` for that. |
+| [`defenseclaw init`](/docs/get-started/quickstart#path-a-interactive-defenseclaw-init) | ✓ default on a TTY | ✓ `--non-interactive --yes` + per-knob flags | Identical to the wizard mode of `quickstart` once choices are made; both call `bootstrap.run_first_run()`. |
+| [`defenseclaw quickstart`](/docs/get-started/quickstart#path-b-zero-prompts-defenseclaw-quickstart) | ✗ never prompts | ✓ always | Zero-prompt by design. There is no wizard variant — use `init` for that. |
 | `defenseclaw setup guardrail` | ✓ default | ✓ `--non-interactive` + flags | Two prompts have **no flag** — see callout above. |
 | [`defenseclaw setup claude-code`](/docs/connectors/claudecode) | ✓ confirm prompt | ✓ `--yes`, `--mode`, `--restart/--no-restart`, policy flags | Direct-to-upstream wrapper; observe by default, action returns supported lifecycle verdicts. |
 | [`defenseclaw setup codex`](/docs/connectors/codex) | ✓ confirm prompt | ✓ `--yes`, `--mode`, `--restart/--no-restart`, policy flags | Same shape as `setup claude-code`. |
@@ -474,7 +478,7 @@ The matrix below is the source of truth. ✓ means "supported"; ✗ means "not s
 | `defenseclaw registry add / edit / remove / sync` | ✓ prompts for missing args | ✓ `--non-interactive` + required flags | `sync` (not `refresh`) fetches + scans + promotes. Module is built dual-path on purpose. |
 | `defenseclaw doctor` | conditional — only with `--fix` | ✓ `--fix --yes` | Default run is read-only and never prompts. |
 | [`defenseclaw agent discover`](/docs/ai-discovery) | ✗ no prompts | ✓ flags / `--json` | Read-only inventory command. |
-| [`defenseclaw aibom scan`](/docs/ai-discovery#aibom) | ✗ no prompts | ✓ flags only | Read-only. |
+| [`defenseclaw aibom scan`](/docs/ai-discovery#aibom-ai-bill-of-materials) | ✗ no prompts | ✓ flags only | Read-only. |
 | `defenseclaw policy ...` | ✗ no prompts | ✓ flags only | Pure CLI for repeatable policy authoring. |
 | `defenseclaw tui` | ✓ full TUI | — | Interactive only — Textual dashboard with audit, alerts, logs, inventory, and setup panels. |
 | `defenseclaw alerts` | ✗ no prompts | ✓ `--limit`, `--show <n>`, `acknowledge` / `dismiss` subcommands | Snapshot view of recent alerts; not a live tail. |

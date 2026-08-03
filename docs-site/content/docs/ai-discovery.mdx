@@ -22,7 +22,7 @@ Connector configuration, process, MCP, package, provider-domain, and environment
 
 ![DefenseClaw TUI · AI Discovery view showing detected AI connectors, processes, package dependencies, and provider domains with identity and presence confidence scores](/images/tui/ai-discovery.jpg)
 
-The TUI's `AI Discovery` view (above) is the operator-facing rendering of the same pipeline this page documents — a live table of every detected AI agent, model, MCP server, skill, and package dependency with per-signal identity / presence confidence scores. Model columns appear when the snapshot contains local models.
+The TUI's `AI Discovery` view (above) is the operator-facing rendering of the same pipeline this page documents. Local models appear in their own compact provenance table above the agent/tool inventory, so high-cardinality model IDs and lineage columns do not make the main discovery table unreadably wide.
 
 <Cards>
   <Card title="Continuous discovery" description="Go sidecar scanner. Fingerprints local AI artifacts, emits ai_discovery events on new / changed / gone." />
@@ -39,12 +39,21 @@ The four are independent — you can run any subset. Most teams start with `defe
 defenseclaw agent discover
 ```
 
-That's it. The CLI walks the known connector paths (OpenClaw, ZeptoClaw, Claude Code, Codex, Cursor, Windsurf, Gemini CLI, GitHub Copilot CLI, OpenHands, Antigravity, Hermes, OpenCode, Amp, OmniGent), checks for config files and binaries, probes versions inside trusted prefixes, and prints a table of what's installed.
+That's it. The CLI walks the known connector paths (OpenClaw, ZeptoClaw,
+Claude Code, Codex, Cursor, Windsurf, Gemini CLI, GitHub Copilot CLI,
+OpenHands, Antigravity, Hermes, OpenCode, Amp, OmniGent), checks for config files
+and binaries, probes versions under the configured trusted-prefix policy, and
+prints a table of what's installed.
 
-Add `--json` for machine-readable output or `--emit-otel` to also publish a sanitized report to the gateway so Splunk and Grafana light up:
+Add `--json` for machine-readable output. Sanitized telemetry emission is
+best-effort and **enabled by default**; use `--no-emit-otel` for a strictly
+local run, or `--require-otel` when an unreachable gateway must fail the
+command:
 
 ```bash
-defenseclaw agent discover --json --emit-otel
+defenseclaw agent discover --json
+defenseclaw agent discover --json --no-emit-otel
+defenseclaw agent discover --require-otel
 ```
 
 ## How the four surfaces relate
@@ -116,9 +125,11 @@ The generic `/v1/models` integrations are recorded with `status=installed`; `sta
 
 For [Lemonade Server](https://lemonade-server.ai/models.html), the built-in signature recognizes the `lemonade`, `lemond`, `lemonade-tray`, and `LemonadeServer.exe` binaries/processes, the desktop app, [documented configuration locations](https://lemonade-server.ai/docs/guide/configuration/), environment-variable names, and the default loopback port `13305`. Its model list includes only downloaded local entries; `downloaded=false` and cloud-recipe entries are ignored. Configured `models_dir` and `extra_models_dir` values are also added as filesystem model roots.
 
-**Bounded filesystem metadata.** The scanner recognizes GGUF/GGML, safetensors, ONNX/ORT, Core ML, TFLite, Q4NX, MLX, Hugging Face cache layouts, and Ollama manifests/blob stores. It groups sharded weights and model-cache directories into model rows instead of reporting every shard or blob. Generic PyTorch extensions such as `.pt`, `.pth`, `.ckpt`, and `.bin` count only inside a strong model context. The scan emits at most `max_files_per_scan` matching artifacts and also enforces separate global and per-root traversal budgets; it never opens model binaries. Small Ollama manifest JSON is the only model-store content read, and that read is regular-file checked and bounded by the configured file-size limit.
+**Bounded filesystem metadata.** The scanner recognizes GGUF/GGML, safetensors, ONNX/ORT, Core ML, TFLite, Q4NX, MLX, Hugging Face cache layouts, and Ollama manifests/blob stores. It groups sharded weights and model-cache directories into model rows instead of reporting every shard or blob. Generic PyTorch extensions such as `.pt`, `.pth`, `.ckpt`, and `.bin` count only inside a strong model context. The scan emits at most `max_files_per_scan` matching artifacts and also enforces separate global and per-root traversal budgets. It never reads tensor payloads: provenance extraction is limited to a regular-file-checked GGUF header prefix and small adjacent JSON configuration/Ollama manifests, each with explicit byte, count, string, and array bounds.
 
-Known model stores are automatic and additive. The scanner checks environment-selected roots (`HF_HUB_CACHE`, `HF_HOME`, `OLLAMA_MODELS`, `LM_STUDIO_HOME`, and `FLM_MODEL_PATH`), conventional Hugging Face, Ollama, LM Studio, llama.cpp, and MLX caches, Lemonade-configured model directories, and then the operator's `scan_roots`. Setting `--scan-roots` adds broad roots; it does not disable the specialized stores.
+Known model stores are automatic and additive. The scanner checks environment-selected roots (`HF_HUB_CACHE`, `HF_HOME`, `OLLAMA_MODELS`, `LM_STUDIO_HOME`, and `FLM_MODEL_PATH`), conventional Hugging Face, Ollama, LM Studio, llama.cpp, and MLX caches, Lemonade-configured model directories, and then the operator's `scan_roots`. On native Windows it additionally prioritizes the documented [GPT4All LocalAppData store](https://docs.gpt4all.io/gpt4all_desktop/settings.html), the [Jan RoamingAppData model store](https://jan.ai/docs/data-folder), and the catalogued AnythingLLM model directory, so a bounded home scan does not need several cursor cycles to reach them. Setting `--scan-roots` adds broad roots; it does not disable the specialized stores.
+
+Windows discovery uses token-bound Known Folders rather than trusting process overrides for Profile, AppData, ProgramData, or Program Files. It inventories unique exact executable aliases across the full signature catalog and fails closed when a basename is shared by multiple products. Installed applications come from Start Menu/Programs roots, uninstall display names, and the current user's supported virtual AppsFolder, including launchable Store/MSIX/UWP registrations; discovery also covers both Windows PowerShell and PowerShell 7 history plus AppData-backed VS Code-family and JetBrains extension stores. Application display names and bounded, path-free package identity names are reduced to hashed evidence before they leave the detector, just like the existing macOS and Linux application inventory.
 
 Each `local_model` signal keeps its potentially high-cardinality identity under a dedicated `model` block. For example, an installed Lemonade model can appear as:
 
@@ -132,12 +143,37 @@ Each `local_model` signal keeps its potentially high-cardinality identity under 
     "format": "gguf",
     "provider": "lemonade",
     "recipe": "llamacpp",
-    "size_bytes": 380000000
+    "size_bytes": 380000000,
+    "provenance": {
+      "publisher": "Alibaba Cloud",
+      "country_code": "CN",
+      "root_model": "Qwen/Qwen3-0.6B",
+      "quantized": true,
+      "quantization": "Q4_K_M",
+      "derivation": "quantized",
+      "source": "gguf_metadata",
+      "confidence": "medium"
+    }
   }
 }
 ```
 
 Loaded-model rows can additionally carry `modality`, `device`, and `pinned`, plus a separate runtime block when the server reports a PID. The model ID is not copied into `product` or `component`, which keeps product and telemetry labels bounded.
+
+The country is the ISO 3166-1 alpha-2 country associated with the organization that released the resolved root/base weights—not the quantizer, Hub uploader, local runtime, or download location. The TUI and macOS app derive the flag locally (`CN 🇨🇳`); emoji is never stored on the wire. `base_models`, `quantized`, `distilled`, and `derivation` preserve the detected lineage, while `source` and `confidence` distinguish embedded/runtime evidence from catalog or Hub enrichment. Missing evidence stays absent/unknown rather than becoming a guess.
+
+Canonical v8 `ai_component.*` logs carry this bounded provenance subset for `local_model` signals, but never the installed artifact's model ID and never as metric labels. Publisher, country, derivation flags, source, and confidence are metadata fields. Root/base model names are included only for a reviewed exact lineage or a successful public Hub lookup. Those names and config-derived quantization text are log-only `content` fields so each OTLP destination's selected redaction profile can transform or remove them.
+
+**Optional Hugging Face enrichment.** Set `ai_discovery.lookup_model_provenance_online=true` (or pass `--lookup-model-provenance-online` to `agent discovery enable`) to look up public model-card ancestry. This is off by default because a lookup transmits a model repository ID. The resolver calls only the fixed public Hugging Face model-info endpoint, refuses redirects, bounds responses and recursion, caches positive and negative results, and starts only from an exact ID recovered from a Hugging Face cache path, an explicit `huggingface.co` URL in embedded metadata, or a reviewed exact lineage rule. It does not send local paths or slash-shaped relative aliases, fuzzy-search arbitrary filenames, or use a private Hub token. Transient failures retain a previously resolved result for at most seven days; a definitive not-found response clears it. A fully renamed GGUF can still resolve when its embedded `general.source.*` or `general.base_model.*` repository URL survives conversion; if identifiers and metadata were stripped, discovery reports the provenance as unknown.
+
+New `config.yaml` files persist the opt-in explicitly as disabled:
+
+```yaml
+ai_discovery:
+  lookup_model_provenance_online: false
+```
+
+Enable it by editing that value to `true`, interactively with `defenseclaw agent discovery setup`, or non-interactively with `defenseclaw agent discovery enable --lookup-model-provenance-online`.
 
 ### Model lifecycle and bounded scans
 
@@ -223,17 +259,28 @@ The CLI has two distinct discovery paths. `agent discover` runs a connector inve
 defenseclaw agent discover --json --emit-otel
 ```
 
-Walks the connector specs (`KNOWN_CONNECTORS` in `cli/defenseclaw/inventory/agent_discovery.py`) and reports:
+Walks the connector specs (`KNOWN_CONNECTORS` in
+`cli/defenseclaw/inventory/agent_discovery.py`). The local `--json` output is
+the full `AgentDiscovery` object:
 
 | Field | What it means |
 | --- | --- |
-| `installed` | Has config OR (binary present AND version probe succeeded) |
-| `has_config` / `config_basename` / `config_path_hash` | Config detection (basename and a hash, never the raw path) |
-| `has_binary` / `binary_basename` / `binary_path_hash` | Binary detection, same shape |
-| `version` / `version_probe_status` | Version string + probe outcome |
-| `error_class` | Reason if the probe failed (no exception text) |
+| `installed` | A binary was found and its version probe succeeded. Configuration is reported independently; a config file alone does not mark the application installed. |
+| `config_path` / `binary_path` | Full local paths found by discovery |
+| `version` / `error` | Version string or the local probe error |
+| `configured` / `active` / `mode` | State reconciled from DefenseClaw config |
 
-Notice what's *not* included: no full paths, no env values, no command output, no file contents. The on-demand report is sanitized at the source, then signed and sent to the gateway. See [Privacy and trust model](#privacy-and-trust-model) below.
+<Callout type="warning" title="Local JSON contains full paths">
+Treat redirected `agent discover --json` output as host inventory. It includes
+full config and binary paths and may include local probe error detail. It does
+not include file contents or environment values.
+</Callout>
+
+Before the default telemetry emission, DefenseClaw builds a separate sanitized
+report. That projection replaces raw paths with `has_*`, basename, and
+installation-scoped path-hash fields, bounds the version, and reduces probe
+errors to `version_probe_status` plus `error_class`. See
+[Privacy and trust model](#privacy-and-trust-model) below.
 
 ### `agent usage`, `processes`, `components`
 
@@ -272,9 +319,9 @@ Package-dependency view: every AI-adjacent npm/pip/cargo dep across your workspa
   </Tab>
 </Tabs>
 
-### TUI behavior
+### TUI and macOS behavior
 
-The full `AI Discovery` panel groups local models by model ID and conditionally adds `Model`, `Model status`, and `Format` columns. Its detail view shows the remaining model metadata, including recipe, modality, device, `size_bytes`, and pinned state. The separate Overview tile remains an **AI Agents** summary: it excludes `local_model` rows from its count and row cap so a large model inventory cannot hide agent rows.
+The full `AI Discovery` panel groups local models case-insensitively by model ID in a separate compact table with state, model, country/flag, publisher, root, derivation, status, and format. Everything else remains in the existing agent/tool table. Press `t` to move keyboard focus between the product and model tables; arrow keys and Enter then operate on the visible selection. Model detail shows base models, quantization/distillation, recipe, modality, device, `size_bytes`, pinned state, and provenance source/confidence. The macOS app decodes the same wire shape and presents the same model/non-model split and detail fields. The separate Overview tile remains an **AI Agents** summary: it excludes `local_model` rows from its count and row cap so a large model inventory cannot hide agent rows.
 
 ### `agent confidence`
 
@@ -303,27 +350,37 @@ For OpenClaw, `aibom scan` calls the live `openclaw` binary in parallel for each
 On a multi-connector install, a default `aibom scan` **fans out**: it produces one BOM section per active connector and merges them into a single document, mirroring the rest of the read/inventory commands. Pass `--connector <name>` to scope the BOM to a single connector.
 </Callout>
 
-The output is a custom JSON document with **per-item provenance** stamped by `stamp_aibom_inventory`:
+The output is a custom JSON document. `stamp_aibom_inventory` attaches the
+same v7 provenance quartet to the top-level document and to each list item.
+The `content_hash` is the SHA-256 of the active DefenseClaw configuration and
+policy inputs; it is **not** a hash of an individual inventory item or of the
+complete BOM:
 
 ```json title="defenseclaw aibom scan --json (excerpt)"
 {
   "provenance": {
-    "schema_version": "1.0.0",
-    "content_hash": "sha256:8c3a...",
-    "generation": "defenseclaw 2.4.1",
-    "binary_version": "..."
+    "schema_version": 7,
+    "content_hash": "8c3a000000000000000000000000000000000000000000000000000000000000",
+    "generation": 0,
+    "binary_version": "0.8.10"
   },
   "skills": [
     {
       "name": "code-review",
       "version": "1.2.0",
       "source": "~/.claude/skills/code-review",
-      "provenance": { "content_hash": "sha256:...", "generation": "..." }
+      "provenance": {
+        "schema_version": 7,
+        "content_hash": "8c3a000000000000000000000000000000000000000000000000000000000000",
+        "generation": 0,
+        "binary_version": "0.8.10"
+      }
     }
   ],
-  "mcp_servers": [...],
+  "mcp": [...],
   "agents": [...],
-  "models": [...],
+  "tools": [...],
+  "model_providers": [...],
   "memory": [...]
 }
 ```
@@ -337,10 +394,10 @@ Useful flags:
 | `--only` | CSV of categories: `skills,plugins,mcp,agents,models,memory` |
 
 <Callout type="info">
-There's no `--sign` or `--format=cyclonedx` today. Provenance is
-content-addressed (SHA-256 of each item) and stamped, but the
-output is a custom JSON shape — you'd export to CycloneDX
-downstream if your SBOM tooling requires it.
+There's no `--sign` or `--format=cyclonedx` today. The stamped provenance
+binds the report to the active DefenseClaw config/policy generation and binary
+version, but does not sign the report or content-address each item. Export the
+custom JSON downstream if your SBOM tooling requires CycloneDX.
 </Callout>
 
 ## Where the data lands
@@ -375,7 +432,17 @@ Discovery touches the most sensitive parts of the host filesystem. DefenseClaw i
     **Metadata-only model discovery.** Model binaries are never opened, and API discovery never calls inference or model-control routes. API discovery caps each decoded response at 1 MiB, emits at most 256 model items, considers at most 24 endpoints, and has both per-request and whole-pass time budgets. Per-source cursors and rotating origins give later models/providers a bounded turn on subsequent passes. Authenticated Lemonade discovery uses only the least-privileged `LEMONADE_API_KEY`—never `LEMONADE_ADMIN_API_KEY`—and sends it only when the loopback origin came from explicit `LEMONADE_HOST`/`LEMONADE_PORT` settings or Lemonade's config and its credential-free `/live` check succeeds. The value is never stored in a signal, log, or event.
   </Step>
   <Step>
-    **Trusted-prefix binary probing.** Version probes (`<binary> --version`) only run inside an allow-listed set of prefixes (`/usr/bin`, `/opt/homebrew`, …) plus anything in `DEFENSECLAW_TRUSTED_BIN_PREFIXES`. Untrusted binaries are recorded as present but not executed — `defenseclaw agent discover` prints the offending directory and the command to trust it. Manage the allow-list with `defenseclaw setup trusted-paths list|add|remove` (or the TUI's Trusted Paths panel): `add` validates the directory (refusing world-writable or relative paths unless `--force`) and persists it to `~/.defenseclaw/.env`; built-in defaults can never be removed.
+    **Optional trusted-prefix binary probing.** The on-demand connector
+    inventory defaults `ai_discovery.require_trusted_binary_paths` to `false`.
+    Set it to `true` when version probes must execute only below the built-in
+    trusted prefixes (`/usr/bin`, `/opt/homebrew`, …) or operator-added
+    prefixes. With that gate enabled, an untrusted binary is recorded but not
+    executed, and `agent discover` prints the directory plus the remediation
+    command. Manage additions with `defenseclaw setup trusted-paths
+    list|add|remove` (or the TUI Trusted Paths panel): `add` validates the
+    directory, refuses unsafe permissions unless `--force`, and persists it
+    under `ai_discovery.trusted_binary_prefixes` in `config.yaml`; built-in
+    defaults cannot be removed.
   </Step>
   <Step>
     **HMAC-stamped events.** Continuous-discovery events are signed with a per-installation HMAC (`PayloadHMAC` on the gateway envelope). Tampering downstream of the gateway is detectable.
@@ -392,7 +459,8 @@ The local `GET /api/v1/ai-usage` response—and therefore `defenseclaw agent usa
 
 ## Use it alongside Registry
 
-Discovery tells you *what's there*. The [Registry](/docs/integrations) tells you *what's allowed*.
+Discovery tells you *what's there*. The [Registry](/docs/setup/registries)
+tells you *what's allowed*.
 
 A common production pattern:
 
@@ -421,7 +489,10 @@ A common production pattern:
     `defenseclaw agent discovery scan`. Faster than waiting for the next scheduled rescan, and fires `ai_discovery` events for the new artifacts so your dashboards reflect the install immediately.
   </Accordion>
   <Accordion title="Build an SBOM-shaped artifact for a release">
-    `defenseclaw aibom scan --json > aibom.json`. The provenance block is content-addressed so two independent runs produce identical hashes for unchanged inputs — useful for CI determinism checks.
+    `defenseclaw aibom scan --json > aibom.json`. The provenance
+    `content_hash` is stable while the active DefenseClaw configuration and
+    policy files are unchanged. Hash or sign the complete exported file
+    separately when CI needs BOM-content integrity.
   </Accordion>
   <Accordion title="My internal connector is mis-detected as `unknown`">
     Two options: (1) author a custom signature pack and `defenseclaw agent signatures install ./my-pack` so continuous discovery learns it, or (2) run `defenseclaw agent confidence policy validate ./policy.yaml` and adjust the weights so the existing detectors score it correctly.

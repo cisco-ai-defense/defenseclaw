@@ -330,7 +330,7 @@ var builtinHookContracts = map[string][]HookContract{
 		ContentEnvelopeKey: "extra",
 		Notes: []string{
 			"Covers the documented shell-hook lifecycle including session start/end/finalize/reset and subagent start/stop telemetry. Hermes nests prompt/result and delegation identity under the per-event `extra` envelope; the generic decoder lifts those fields into the canonical lifecycle.",
-			"pre_tool_call is the only blockable event: Hermes accepts both {\"action\":\"block\",\"message\"} (canonical) and {\"decision\":\"block\",\"reason\"} (Claude-Code style) and normalizes internally. pre_llm_call injects via {\"context\":...}. Confirm verdicts (no native ask surface) downgrade to a {\"systemMessage\":...} alert via the shared responder epilogue. Non-zero exit codes and hook timeouts only log a warning upstream, so there is no fail-closed surface; hermes remains live-smoke pending (docs/CONNECTOR-MATRIX.md).",
+			"pre_tool_call is the only blockable event: Hermes accepts both {\"action\":\"block\",\"message\"} (canonical) and {\"decision\":\"block\",\"reason\"} (Claude-Code style) and normalizes internally. pre_llm_call injects via {\"context\":...}. Confirm verdicts (no native ask surface) downgrade to a {\"systemMessage\":...} alert via the shared responder epilogue. Non-zero exit codes and hook timeouts only log a warning upstream, so there is no fail-closed surface; Hermes remains live-smoke pending (https://cisco-ai-defense.github.io/defenseclaw/docs/connectors/hermes/).",
 			"Multi-event registration requires hooks_auto_accept in cli-config.yaml on non-TTY/gateway runs; otherwise Hermes prompts for per-(event,command) consent on first use and silently skips unaccepted hooks. Setup writes hooks_auto_accept so all events register, and the managed-backup heals it.",
 		},
 	}},
@@ -507,9 +507,11 @@ var builtinHookContracts = map[string][]HookContract{
 			Scope:              "user,workspace",
 		},
 		SupportsTraceparent: true,
+		NativeOTLP:          true,
 		Notes: []string{
 			"GitHub Copilot CLI shipped preToolUse earlier, but the full DefenseClaw contract also needs postToolUseFailure, permissionRequest, and notification hooks; notification landed in 1.0.18.",
 			"Copilot CLI native ask is limited to preToolUse / PreToolUse hooks.",
+			"Copilot CLI can emit optional native traces and metrics through standard OTLP environment variables; DefenseClaw reports the required values but does not mutate shell startup files.",
 		},
 	}},
 	"antigravity": {{

@@ -60,8 +60,10 @@ before locating or editing Windows state.
       </Folder>
       <Folder name="codeguard" />
     </Folder>
-    <Folder name="backups">
-      <File name="<connector>-<timestamp>.json" />
+    <Folder name="connector_backups">
+      <Folder name="<connector>">
+        <File name="<logical-name>.json" />
+      </Folder>
     </Folder>
   </Folder>
 </Files>
@@ -84,10 +86,10 @@ claw:
                                # `defenseclaw.claw.mode`.
 
 gateway:
-  host: 127.0.0.1              # gateway proxy bind host
-  port: 18789                  # gateway proxy port (sidecar -> upstream LLM traffic)
+  host: 127.0.0.1              # upstream agent gateway host (OpenClaw/ZeptoClaw fleet link)
+  port: 18789                  # upstream agent gateway port
   api_port: 18970              # gateway REST API port (hooks + TUI dial this)
-  api_bind: ""                 # optional override for the REST API bind address
+  api_bind: ""                 # REST API bind override; normally 127.0.0.1 when empty
   config_reload:
     mode: hot                  # hot | restart; omitted means hot
 
@@ -190,7 +192,7 @@ llm:
   # from the secrets sidecar. A small blocklist (proxy-hop, auth, host,
   # X-DC-*, X-DefenseClaw-*, W3C trace context) plus RFC 7230 /
   # printable-ASCII validation and 64-header / 32 KiB caps apply
-  # regardless. See docs/GUARDRAIL.md → Custom Header Forwarding.
+  # regardless.
   forward_custom_headers: true
 
   # Provider-specific sub-blocks. Only the one matching `provider`
@@ -288,6 +290,12 @@ webhooks:
     secret_env: ""             # optional HMAC for `type: generic`
     min_severity: HIGH
 ```
+
+When `gateway.api_bind` is empty, the sidecar uses `127.0.0.1` except in
+standalone OpenShell mode: if `guardrail.host` is non-empty and is not the
+literal `localhost`, the management API inherits that host. Pin
+`gateway.api_bind: 127.0.0.1` when the API must stay loopback-only. See
+[Gateway API: bind address](/docs/reference/gateway-api#bind-address).
 
 The source file stays small because omissions compile to explicit effective
 policy. With `observability: {}`, all 14 buckets collect logs, traces, and
@@ -461,11 +469,11 @@ A handful of high-traffic env vars are inlined below. The full inventory — eve
     },
     "DEFENSECLAW_STRICT_AVAILABILITY": {
       type: "0|1",
-      description: "When 1, transport-layer hook failures (gateway unreachable / 5xx) block the tool. Default is fail-open on transport.",
+      description: "When 1, transport-layer and missing-token hook failures are forced closed. Without this override, both transport and response failures follow guardrail.hook_fail_mode (closed on fresh installs; migrated configs can retain open).",
     },
     "DEFENSECLAW_FAIL_MODE": {
       type: "open|closed",
-      description: "Per-shell override of guardrail.hook_fail_mode for response-layer failures. Read by every connector hook script.",
+      description: "Runtime override of guardrail.hook_fail_mode for transport, authentication, and invalid-response failures on hook connectors.",
     },
     "SPLUNK_ACCESS_TOKEN": {
       type: "string",
@@ -474,7 +482,13 @@ A handful of high-traffic env vars are inlined below. The full inventory — eve
   }}
 />
 
-There is **no** `DEFENSECLAW_GATEWAY_BIND`, `DEFENSECLAW_DATA_DIR`, or `DEFENSECLAW_LOG_LEVEL` env var today. Use `DEFENSECLAW_HOME` to relocate the data directory, edit `gateway.host` / `gateway.port` / `gateway.api_port` in `config.yaml` to change bind addresses, and set log verbosity through the sidecar's `--log-level` flag (see `defenseclaw-gateway start --help`).
+There is **no** `DEFENSECLAW_GATEWAY_BIND`, `DEFENSECLAW_DATA_DIR`, or
+`DEFENSECLAW_LOG_LEVEL` env var today. Use `DEFENSECLAW_HOME` to relocate the
+data directory. Configure the sidecar API listener with `gateway.api_bind` and
+`gateway.api_port`, and the separate guardrail proxy listener with
+`guardrail.host` and `guardrail.port`; `gateway.host`/`gateway.port` are the
+upstream agent-gateway address. Set log verbosity through the sidecar's
+`--log-level` flag (see `defenseclaw-gateway start --help`).
 
 ## Per-connector source-of-truth files
 
@@ -495,7 +509,14 @@ There is **no** `DEFENSECLAW_GATEWAY_BIND`, `DEFENSECLAW_DATA_DIR`, or `DEFENSEC
 | Amp | `~/.config/amp/plugins/defenseclaw.ts` on macOS/Linux or `%USERPROFILE%\.config\amp\plugins\defenseclaw.ts` on native Windows (managed system policy plugin) |
 | OmniGent | `$OMNIGENT_CONFIG_HOME/config.yaml` when set (otherwise `~/.omnigent/config.yaml`), `~/.defenseclaw/hooks/defenseclaw_omnigent_policy.py`, and `defenseclaw_omnigent.pth` in OmniGent's Python environment |
 
-A hash-checked backup of each file is stored in `~/.defenseclaw/backups/` before any mutation. Teardown (or `--disable`) restores the backup byte-for-byte; if the file has drifted since the backup, only DefenseClaw-owned entries are surgically removed.
+A managed backup record is stored at
+`~/.defenseclaw/connector_backups/<connector>/<logical-name>.json` before the
+first mutation. The JSON record binds the connector, logical name, and absolute
+target path and stores the pristine bytes, permissions, pristine hash, and
+post-setup hash. Teardown (or `--disable`) restores the pristine bytes only
+when the current file still matches the recorded managed-file identity. If the
+file has drifted, connector-specific teardown removes only DefenseClaw-owned
+entries and preserves unrelated operator edits.
 
 Hook connectors default to global/user scope. `claw.workspace_dir` is empty unless you pass `--workspace`; when set, OpenHands uses it for repo-local `.openhands/hooks.json`, `.agents/skills`, and deprecated `.openhands/skills` discovery while still scanning global user skills and the OpenHands public skills cache. Copilot uses it for `.github/hooks/defenseclaw.json` and workspace-local component discovery. Re-run `defenseclaw setup <connector>` without `--workspace` to return to global scope.
 

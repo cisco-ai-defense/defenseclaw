@@ -48,8 +48,11 @@ from [GitHub Releases](https://github.com/cisco-ai-defense/defenseclaw/releases)
 The release EXE already contains the installation payload; there is no product
 ZIP to unpack.
 
-Local and pull-request artifacts are unsigned test builds. Do not use an
-Actions artifact as production release evidence.
+Local and pull-request artifacts are test builds without authenticated
+production release provenance. Do not use an Actions artifact as production
+release evidence. The published `0.8.10` Setup is also not
+Authenticode-signed, but its exact bytes are authenticated by the release's
+Sigstore-signed checksum set and provenance.
 
 </Step>
 
@@ -57,20 +60,23 @@ Actions artifact as production release evidence.
 
 ### Verify before installing
 
-In File Explorer, open **Properties > Digital Signatures** and require a valid
-signature from `Cisco Systems, Inc.`. Compare the file's SHA-256 with the
-published release checksum. PowerShell can display both facts without reading
-any DefenseClaw state:
+Authenticate the published checksum set and release-workflow Sigstore
+provenance, then compare the file's SHA-256 with its authenticated checksum.
+PowerShell can display the digest and observed Authenticode state without
+reading any DefenseClaw state:
 
 ```powershell
 Get-AuthenticodeSignature -LiteralPath ".\DefenseClawSetup-x64.exe" |
-  Select-Object Status, StatusMessage
+  Select-Object Status, StatusMessage, SignerCertificate
 Get-FileHash -Algorithm SHA256 -LiteralPath ".\DefenseClawSetup-x64.exe"
 & ".\DefenseClawSetup-x64.exe" /verify
 ```
 
-`/verify` is read-only. An unknown publisher, wrong digest, or failed
-verification is a stop condition; do not bypass it.
+For `0.8.10`, the authenticated provenance records `unsigned: true` and
+Windows reports `NotSigned`; there is no expected publisher certificate.
+`/verify` is read-only. A wrong digest, failed Sigstore/provenance validation,
+recorded-versus-observed signing-state mismatch, or failed Setup verification
+is a stop condition; do not bypass it.
 
 </Step>
 
@@ -235,27 +241,31 @@ processes.
 
 ## Upgrade and release eligibility
 
-The first signed native Setup release, `0.8.6`, has no earlier native Windows
-Setup baseline. Its certified lifecycle is fresh install, repair, same-version
-servicing, and uninstall. It does not turn the POSIX-only `0.8.5` release into
-a Windows upgrade source.
+Releases `0.8.5` and `0.8.6` published no native Windows Setup. Release `0.8.7`
+was the first to publish one. Every published upgrade manifest from `0.8.5`
+through `0.8.10` declares an empty Windows tested-source list, so no currently
+published target authorizes an automatic cross-release native Windows upgrade.
+The documented current lifecycle is fresh install, repair, same-version
+servicing, and uninstall.
 
-A later release can authorize an automatic native Windows upgrade only when
-its signed manifest lists the exact installed source as a tested Windows
-baseline. When authorized:
+A future release can authorize an automatic native Windows upgrade only when
+its authenticated manifest lists the exact installed source as a tested
+Windows baseline. Only then would this command be eligible:
 
 ```powershell
 defenseclaw upgrade --yes
 ```
 
 The command authenticates the signed checksum set, manifest, provenance,
-payload digest, and Cisco Authenticode publisher before stopping the gateway.
-It creates a private managed-state backup, starts the cached Setup, then exits
-so its embedded runtime can be replaced. The Setup payload itself is
+payload digest, and matching observed Authenticode state before stopping the
+gateway. Signed releases require the recorded publisher; an explicitly
+unsigned release must instead match authenticated `unsigned` provenance. It
+creates a private managed-state backup, starts the cached Setup, then exits so
+its embedded runtime can be replaced. The Setup payload itself is
 self-contained, but this CLI command needs network access to retrieve release
 metadata and the target EXE.
 
-If the signed manifest does not authorize the installed source, the command
+If the authenticated manifest does not authorize the installed source, the command
 must refuse before mutation. Do not copy release files over the installation,
 use the unsafe verification-bypass option, or treat a downgrade as rollback.
 Downgrade is rejected and there is no public manual rollback command. See the

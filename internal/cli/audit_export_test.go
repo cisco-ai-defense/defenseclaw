@@ -5,6 +5,7 @@
 package cli
 
 import (
+	"bytes"
 	"database/sql"
 	"encoding/json"
 	"os"
@@ -15,6 +16,46 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
+
+func TestExportAuditEventsFallbackHonorsLimit(t *testing.T) {
+	db, err := sql.Open("sqlite", t.TempDir()+"/legacy-audit.db")
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+	if _, err := db.Exec(`CREATE TABLE audit_events (
+		id TEXT, timestamp TEXT, action TEXT, target TEXT, actor TEXT,
+		details TEXT, severity TEXT, run_id TEXT)`); err != nil {
+		t.Fatalf("create legacy table: %v", err)
+	}
+	for i, id := range []string{
+		"11111111-1111-1111-1111-111111111111",
+		"22222222-2222-2222-2222-222222222222",
+		"33333333-3333-3333-3333-333333333333",
+	} {
+		if _, err := db.Exec(
+			`INSERT INTO audit_events (id,timestamp,action,actor,details,severity,run_id)
+			 VALUES (?,?,?,?,?,?,?)`,
+			id, "2026-05-19T12:00:0"+string(rune('0'+i))+"Z",
+			string(audit.ActionConnectorHook), "defenseclaw", "connector=codex", "INFO", "run-1",
+		); err != nil {
+			t.Fatalf("insert legacy row: %v", err)
+		}
+	}
+
+	previousLimit := auditExportLimit
+	auditExportLimit = 2
+	t.Cleanup(func() { auditExportLimit = previousLimit })
+
+	var out bytes.Buffer
+	if err := exportAuditEventsFallback(db, &out, version.Provenance{}, ""); err != nil {
+		t.Fatalf("fallback export: %v", err)
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("fallback emitted %d rows, want 2:\n%s", len(lines), out.String())
+	}
+}
 
 // TestNormalizeAuditAction_PassesThroughKnownActions guards the F3 fix:
 // `defenseclaw audit export` previously kept a hand-maintained copy of the

@@ -1604,7 +1604,8 @@ class JudgeConfig:
 @dataclass
 class WebhookConfig:
     # Mirrors ``internal/config.WebhookConfig`` (notifier webhook, not an
-    # audit sink — see docs/OBSERVABILITY.md §7).
+    # audit sink). See the published webhook guide:
+    # https://cisco-ai-defense.github.io/defenseclaw/docs/setup/webhooks/
     #
     # ``name`` is the CLI-visible identifier used by
     # ``defenseclaw setup webhook {enable,disable,remove,show,test}``.
@@ -1802,18 +1803,19 @@ class GuardrailConfig:
     rule_pack_dir: str = ""  # path to guardrail rule-pack profile directory
     connector: str = ""  # empty => fall back to claw.mode; otherwise a registered connector name
     hilt: HILTConfig = field(default_factory=HILTConfig)
-    # ``hook_fail_mode`` is the operator-chosen response-layer fail
-    # mode for every generated hook (codex-hook, claude-code-hook,
-    # inspect-*). Two values are supported:
+    # ``hook_fail_mode`` is the operator-chosen failure behavior for every
+    # generated hook (codex-hook, claude-code-hook, inspect-*). It covers
+    # transport, missing-token/authentication, and invalid-response failures.
+    # Two values are supported:
     #
-    #   - ``"closed"`` (default, safer): when the gateway answers
-    #     with a 4xx, malformed JSON, or a missing action field,
-    #     hooks BLOCK the tool/prompt at the response-layer boundary.
+    #   - ``"closed"`` (default, safer): connection failures, timeouts,
+    #     5xx/4xx responses, missing authentication, malformed JSON, or a
+    #     missing action BLOCK the event where the connector has a block shape.
     #     CodeGuard rule codeguard-0-authorization-access-control:
     #     deny by default.
     #
-    #   - ``"open"``: the same response-layer failures ALLOW the
-    #     tool/prompt with a stderr warning and a record in
+    #   - ``"open"``: those failures ALLOW the event with a stderr warning and
+    #     a record in
     #     ``$DEFENSECLAW_HOME/logs/hook-failures.jsonl``. Choose when
     #     a brief observability gap is preferable to bricking the
     #     agent on a gateway hiccup.
@@ -1822,10 +1824,9 @@ class GuardrailConfig:
     # by ``_migrate_0_4_0_seed_hook_fail_mode`` so the flip is a
     # NEW-INSTALL-ONLY behavior change.
     #
-    # Transport-layer failures (gateway unreachable / timeout / 5xx)
-    # follow this same mode. ``DEFENSECLAW_STRICT_AVAILABILITY=1``
-    # remains an unconditional force-closed override. Mirrors
-    # ``GuardrailConfig.HookFailMode`` in internal/config/config.go.
+    # ``DEFENSECLAW_STRICT_AVAILABILITY=1`` additionally forces transport and
+    # missing-token failures closed. Mirrors ``GuardrailConfig.HookFailMode``
+    # in internal/config/config.go.
     hook_fail_mode: str = "closed"
     # ``llm_role`` is the operator's answer to "should DefenseClaw's
     # LLM be used only as a judge, or also as the agent's upstream?".
@@ -2076,6 +2077,7 @@ class AIDiscoveryConfig:
     include_package_manifests: bool = True
     include_env_var_names: bool = True
     include_network_domains: bool = True
+    lookup_model_provenance_online: bool = False
     max_files_per_scan: int = 1000
     max_file_bytes: int = 512 * 1024
     store_raw_local_paths: bool = False
@@ -4022,7 +4024,7 @@ def _normalize_hook_fail_mode(value: Any) -> str:
     ``internal/gateway/connector/subprocess.go``. Anything other than
     the explicit ``"open"`` sentinel collapses to ``"closed"`` so a
     typo in config.yaml never accidentally puts the agent into
-    fail-OPEN mode at the response-layer boundary (CodeGuard rule
+    fail-OPEN mode at the hook failure boundary (CodeGuard rule
     codeguard-0-authorization-access-control: deny by default).
     """
     if isinstance(value, str) and value.strip().lower() == "open":
@@ -4694,6 +4696,9 @@ def _merge_ai_discovery(raw: dict[str, Any] | None) -> AIDiscoveryConfig:
         include_package_manifests=bool(raw.get("include_package_manifests", True)),
         include_env_var_names=bool(raw.get("include_env_var_names", True)),
         include_network_domains=bool(raw.get("include_network_domains", True)),
+        lookup_model_provenance_online=_coerce_bool(
+            raw.get("lookup_model_provenance_online", False)
+        ),
         max_files_per_scan=int(raw.get("max_files_per_scan", 1000) or 1000),
         max_file_bytes=int(raw.get("max_file_bytes", 512 * 1024) or 512 * 1024),
         store_raw_local_paths=bool(raw.get("store_raw_local_paths", False)),

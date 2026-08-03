@@ -95,8 +95,8 @@ type SetupOpts struct {
 	// connectors fall back to the process working directory.
 	WorkspaceDir string
 
-	// HookFailMode is the operator-chosen response-layer fail mode supplied to
-	// setup and hook-writing paths. Values: "open" (allow on response or
+	// HookFailMode is the operator-chosen hook failure mode supplied to setup
+	// and hook-writing paths. Values: "open" (allow on response or
 	// transport failures) or "closed" (block on either failure class). Runtime
 	// setup populates it from cfg.EffectiveHookFailModeForConnector(conn.Name()).
 	// Hook-writing helpers normalize an empty or invalid value to the secure

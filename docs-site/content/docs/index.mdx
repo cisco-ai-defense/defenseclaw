@@ -45,7 +45,7 @@ DefenseClaw combines a **Python operator CLI**, a **Go gateway sidecar**, and an
   <Node id="connector" kind="connector">{`Connector\nproxy or hooks`}</Node>
   <Node id="gateway" kind="gateway">{`defenseclaw-gateway\nGo sidecar`}</Node>
   <Node id="policy" kind="policy">{`Policy + Scanners\n+ optional LLM Judge`}</Node>
-  <Node id="audit" kind="datastore">SQLite + JSONL</Node>
+  <Node id="audit" kind="datastore">{`SQLite\n+ optional JSONL`}</Node>
   <Node id="sinks" kind="datastore">OTLP · Splunk · Webhooks</Node>
   <Node id="operator" kind="operator">{`Operator\nCLI · TUI · HITL`}</Node>
   <Edge from="agent" to="connector" />

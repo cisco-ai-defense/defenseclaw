@@ -157,13 +157,13 @@
           ],
           "supports_traceparent": true,
           "native_otlp": true,
-          "native_otlp_auth": "path-token-loopback",
+          "native_otlp_auth": "header-token",
           "native_otlp_signals": [
             "logs",
             "metrics",
             "traces"
           ],
-          "native_otlp_endpoint_template": "/otlp/codex/<scoped-token>/v1/<signal>",
+          "native_otlp_endpoint_template": "/v1/<signal>",
           "capabilities": {
             "can_block": true,
             "can_ask_native": false,
@@ -567,7 +567,13 @@
             "tool_result"
           ],
           "supports_traceparent": true,
-          "native_otlp": false,
+          "native_otlp": true,
+          "native_otlp_auth": "header-token",
+          "native_otlp_signals": [
+            "metrics",
+            "traces"
+          ],
+          "native_otlp_endpoint_template": "/v1/<signal>",
           "capabilities": {
             "can_block": true,
             "can_ask_native": true,
@@ -586,7 +592,8 @@
           },
           "notes": [
             "GitHub Copilot CLI shipped preToolUse earlier, but the full DefenseClaw contract also needs postToolUseFailure, permissionRequest, and notification hooks; notification landed in 1.0.18.",
-            "Copilot CLI native ask is limited to preToolUse / PreToolUse hooks."
+            "Copilot CLI native ask is limited to preToolUse / PreToolUse hooks.",
+            "Copilot CLI can emit optional native traces and metrics through standard OTLP environment variables; DefenseClaw reports the required values but does not mutate shell startup files."
           ]
         }
       ]

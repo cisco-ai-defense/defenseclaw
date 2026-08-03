@@ -118,7 +118,9 @@ If `status` is `needs_attention` the command exits non-zero and lists the gaps (
 
 ### Drive the agent
 
-Open Claude Code (or whichever connector you picked). Every prompt and tool call now flows through DefenseClaw. Watch decisions land in the live dashboard:
+Open Claude Code (or whichever connector you picked). DefenseClaw now receives
+the lifecycle events and interception surfaces supported by that connector.
+Watch the resulting decisions land in the live dashboard:
 
 ```bash
 defenseclaw tui
@@ -127,7 +129,7 @@ defenseclaw tui
 Or take a scriptable snapshot from mandatory SQLite event history:
 
 ```bash
-defenseclaw-gateway audit export --limit 200 --output - | jq .
+defenseclaw-gateway audit export --output - | tail -n 200 | jq .
 ```
 
 JSONL is no longer an implicit mirror. If you need a continuous external file,
@@ -186,7 +188,7 @@ and redaction profile that file is allowed to receive.
     },
     "--fail-mode": {
       type: "open|closed",
-      description: "Hook fail-mode for response-layer failures. Defaults to preserving whatever the connector already had.",
+      description: "Hook fail-mode for delivery, authentication, and invalid gateway responses. Defaults to preserving whatever the connector already had.",
     },
     "--human-approval / --no-human-approval": {
       type: "flag",
@@ -200,7 +202,7 @@ and redaction profile that file is allowed to receive.
       type: "flag",
       description: "Hard-skip every confirmation. Implied by --json-summary.",
     },
-    "--yes / -y": {
+    "--yes": {
       type: "flag",
       description: "Auto-accept every confirmation. Pair with --non-interactive in CI.",
     },

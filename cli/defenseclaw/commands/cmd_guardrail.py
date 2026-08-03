@@ -986,7 +986,7 @@ def _set_connector_fail_mode(app: AppContext, requested: str, mode: str | None, 
 
     Per-connector analog of the global ``guardrail fail-mode``: writes
     ``guardrail.connectors[X].hook_fail_mode`` so one connector can run a
-    different response-layer fail posture than its peers. On restart the Go
+    different delivery/response fail posture than its peers. On restart the Go
     boot loop regenerates that connector's hook with the new ``FAIL_MODE``;
     the others are untouched.
 
@@ -1255,25 +1255,23 @@ def fail_mode_cmd(
     yes: bool,
     connector_flag: str | None,
 ) -> None:
-    """Show or change the hook fail mode (response-layer behavior).
+    """Show or change the hook failure behavior.
 
-    The hook fail mode controls what generated hooks do when the
-    DefenseClaw gateway answers but the answer is bad — a 4xx, an
-    unparseable JSON body, or a missing ``action`` field. Two values
-    are supported:
+    The hook fail mode controls what generated hooks do when delivery or
+    authentication fails, or when the DefenseClaw gateway returns a 4xx,
+    an unparseable JSON body, or no ``action`` field. Two values are supported:
 
       \b
       open   — allow the tool/prompt and log the failure.
                A misbehaving gateway never bricks your agent.
                Recommended for almost all installs.
-      closed — block the tool/prompt on any gateway error.
+      closed — block supported events when inspection is unavailable.
                Choose for regulated workflows where every prompt
                MUST be inspected.
 
-    Transport-layer failures (gateway unreachable / timeout / 5xx)
-    follow the same connector-scoped setting. ``closed`` blocks them;
-    ``open`` allows them. ``DEFENSECLAW_STRICT_AVAILABILITY=1`` remains
-    an unconditional force-closed override for compatibility.
+    Transport failures (gateway unreachable / timeout / 5xx) follow the
+    same connector-scoped setting. ``DEFENSECLAW_STRICT_AVAILABILITY=1``
+    additionally forces transport and missing-token failures closed.
 
     Without an argument this prints the current value. With
     ``open`` or ``closed`` it persists the choice to ~/.defenseclaw/
