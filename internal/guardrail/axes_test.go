@@ -191,6 +191,7 @@ func TestCapabilityForRuleID_ProducerCoverage(t *testing.T) {
 		"exfil.secret_read_and_egress_oneliner": CapNetworkFetch,
 		"exec.reverse_tunnel":                   CapNetworkFetch,
 		"exec.agent_runtime_bypass_flags":       CapExecShell,
+		"integrity.history_tamper":              CapExecShell,
 		"recon.network_sweep":                   CapNetworkFetch,
 		"privilege.host_namespace_entry":        CapExecShell,
 		"lateral.workload_exec":                 CapExecShell,

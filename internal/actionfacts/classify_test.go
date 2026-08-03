@@ -444,6 +444,47 @@ func TestStaticPathOperandClassification(t *testing.T) {
 	}
 }
 
+func TestPOSIXHistoryTamperBuiltinGrammars(t *testing.T) {
+	for _, argv := range [][]string{
+		{"history"},
+		{"unset", "HISTFILE"},
+		{"unset", "-f", "HISTFILE"},
+		{"unset", "-v", "HISTFILE"},
+		{"unset", "--", "HISTFILE"},
+		{"unset", "HISTSIZE", "HISTFILE"},
+		{"unset", "-fv", "HISTFILE"},
+		{"unset", "HISTSIZE"},
+	} {
+		out := classifyTestArgvAs(argv, DialectPOSIX)
+		if out.status != StatusComplete ||
+			out.commands[0].Effect != EffectExecute ||
+			!commandHasOperation(out.commands[0], OperationExecute) ||
+			len(out.paths) != 0 || len(out.network) != 0 {
+			t.Fatalf("argv=%v output=%#v", argv, out)
+		}
+	}
+
+	for _, argv := range [][]string{
+		{"history", "-c"},
+		{"history", "-a", "-c"},
+		{"history", "-ac"},
+		{"history", "-w", "-c"},
+		{"history", "-cw", "/dev/null"},
+		{"history", "-wc", "/dev/null"},
+		{"history", "-w", "/tmp/history"},
+		{"history", "-r", "/tmp/history"},
+		{"history", "-c", "not-a-history-file-mode"},
+		{"history", "--future-mode"},
+		{"unset", "--future-mode", "HISTFILE"},
+	} {
+		out := classifyTestArgvAs(argv, DialectPOSIX)
+		if out.status != StatusPartial ||
+			!containsIssue(out.issues, IssueUnknownOperandGrammar) {
+			t.Fatalf("argv=%v output=%#v", argv, out)
+		}
+	}
+}
+
 func TestPOSIXRemoveOwnsItsOptionGrammar(t *testing.T) {
 	for _, test := range []struct {
 		name string

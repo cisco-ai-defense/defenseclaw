@@ -621,6 +621,10 @@ func expandStaticPOSIXWrappers(out *parseOutput, wrapperDepth int) {
 		var child parseOutput
 		switch program {
 		case "bash", "sh", "zsh", "dash", "ksh", "mksh":
+			if structuralPOSIXPipelineStdinInterpreter(out, &command) ||
+				exactPOSIXShellPreviewInvocation(&command) {
+				continue
+			}
 			commandIndex, ok, unsafe := posixShellCommandIndex(command.Argv)
 			if unsafe {
 				if _, script := exactPOSIXShellScriptOperand(command.Argv); script {

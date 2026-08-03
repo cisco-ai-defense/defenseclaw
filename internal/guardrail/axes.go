@@ -198,6 +198,7 @@ var ruleAxes = map[string][]DataAxis{
 	"exec.reverse_tunnel":                         {AxisEgressExternal},
 	"exec.agent_runtime_bypass_flags":             nil,
 	"integrity.git_hooks_bypass":                  nil,
+	"integrity.history_tamper":                    nil,
 	"recon.network_sweep":                         {AxisEgressExternal},
 	"privilege.container_host_escape":             nil,
 	"privilege.container_runtime_socket_access":   nil,

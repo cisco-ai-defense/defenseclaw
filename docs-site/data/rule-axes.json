@@ -451,6 +451,10 @@
       "axes": []
     },
     {
+      "id": "integrity.history_tamper",
+      "axes": []
+    },
+    {
       "id": "lateral.workload_exec",
       "axes": []
     },

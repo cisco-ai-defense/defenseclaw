@@ -1275,7 +1275,10 @@ func enforceAnalyzeAuthority(out *parseOutput) {
 		case "source", ".":
 			out.markPartial(IssueOpaqueArtifact)
 		case "bash", "sh", "zsh", "dash", "ksh", "mksh":
-			if _, commandMode, unsafe := posixShellCommandIndex(command.Argv); commandMode && !unsafe {
+			if exactPOSIXPipelineStdinInterpreter(out, command) ||
+				exactPOSIXShellPreviewInvocation(command) {
+				continue
+			} else if _, commandMode, unsafe := posixShellCommandIndex(command.Argv); commandMode && !unsafe {
 				continue
 			} else if _, script := exactPOSIXShellScriptOperand(command.Argv); script {
 				out.markPartial(IssueOpaqueArtifact)

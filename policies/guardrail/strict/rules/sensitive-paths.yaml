@@ -222,7 +222,9 @@ rules:
       p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE,
       defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND,
       defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))
-    pattern: '(?i)(?:^|[/\\])\.git[/\\]hooks[/\\](?:applypatch-msg|commit-msg|fsmonitor-watchman|post-checkout|post-commit|post-merge|post-receive|post-rewrite|pre-applypatch|pre-commit|pre-push|pre-rebase|pre-receive|prepare-commit-msg|push-to-checkout|update)(?:$|["''\s])'
+    # Candidate discovery also recognizes git read-command --output targets;
+    # the exact fallback contract proves the active hook write.
+    pattern: '(?i)(?:(?:^|[/\\])\.git[/\\]hooks[/\\]|--output(?:=|\s+)[^;\r\n]*\.git[/\\]hooks[/\\])(?:applypatch-msg|commit-msg|fsmonitor-watchman|post-checkout|post-commit|post-merge|post-receive|post-rewrite|pre-applypatch|pre-commit|pre-push|pre-rebase|pre-receive|prepare-commit-msg|push-to-checkout|update)(?:$|["''\s])'
     title: "Active Git hook mutation"
     severity: MEDIUM
     confidence: 0.92
