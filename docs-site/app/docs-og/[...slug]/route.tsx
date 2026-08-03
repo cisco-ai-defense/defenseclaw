@@ -8,7 +8,7 @@ import { site } from '@/lib/site';
 // 1200x630 social size with a dark canvas + the Cisco brand accent
 // so the unfurled card matches the site visuals. `dynamic =
 // 'force-static'` keeps the route compatible with `output: 'export'`
-// — Next prerenders one PNG per docs page at build time using
+// — Next prerenders one PNG for the home page and every docs page using
 // `generateStaticParams` below.
 export const dynamic = 'force-static';
 export const contentType = 'image/png';
@@ -29,15 +29,17 @@ export async function generateStaticParams() {
   // the `.png` suffix as part of the last slug segment when the
   // request is `/docs-og/some/page.png`. We reproduce that by
   // appending the suffix to the final slug entry.
-  return pages.map((p) => {
-    // p.url shape: "/docs/foo/bar"
-    const segments = p.url.split('/').filter(Boolean); // ["docs","foo","bar"]
-    if (segments.length === 0) return { slug: ['index.png'] };
-    const last = segments[segments.length - 1];
-    return {
-      slug: [...segments.slice(0, -1), `${last}.png`],
-    };
-  });
+  return [
+    { slug: ['index.png'] },
+    ...pages.map((p) => {
+      // p.url shape: "/docs/foo/bar"
+      const segments = p.url.split('/').filter(Boolean); // ["docs","foo","bar"]
+      const last = segments[segments.length - 1];
+      return {
+        slug: [...segments.slice(0, -1), `${last}.png`],
+      };
+    }),
+  ];
 }
 
 export async function GET(
@@ -45,6 +47,7 @@ export async function GET(
   { params }: { params: Promise<{ slug: string[] }> },
 ) {
   const { slug } = await params;
+  const isHomeImage = slug.length === 1 && slug[0] === 'index.png';
   // Strip the trailing ".png" off the final segment so we can resolve
   // the matching docs page via Fumadocs' source loader.
   const cleaned = [...slug];
@@ -52,13 +55,22 @@ export async function GET(
   cleaned.push(last.replace(/\.png$/, ''));
   // The OG slug already begins with "docs/...". Drop the leading
   // "docs" so it matches the `getPage(slug)` contract.
-  const docsSlug = cleaned[0] === 'docs' ? cleaned.slice(1) : cleaned;
-  const page = source.getPage(docsSlug.length > 0 ? docsSlug : undefined);
+  const docsSlug = isHomeImage
+    ? []
+    : cleaned[0] === 'docs'
+      ? cleaned.slice(1)
+      : cleaned;
+  const page = isHomeImage
+    ? undefined
+    : source.getPage(docsSlug.length > 0 ? docsSlug : undefined);
 
   const title = page?.data.title ?? site.name;
   const description = page?.data.description ?? site.tagline;
-  const section =
-    docsSlug.length > 1 ? docsSlug[0].replace(/-/g, ' ').toUpperCase() : 'DOCS';
+  const section = isHomeImage
+    ? 'CISCO AI SECURITY'
+    : docsSlug.length > 1
+      ? docsSlug[0].replace(/-/g, ' ').toUpperCase()
+      : 'DOCS';
   const ciscoLogo = await loadCiscoLogo();
 
   return new ImageResponse(
