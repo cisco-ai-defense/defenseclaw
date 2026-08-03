@@ -16,7 +16,7 @@ Authoritative source for any flag is `defenseclaw <command> --help`. These group
 
 <Callout title="Command availability is platform-specific">
 A registered command or connector alias is not, by itself, a native Windows
-support claim. Native Windows certifies Codex and Claude Code only, and some
+support claim. Native Windows certifies Codex, Claude Code, and Amp, and some
 commands require optional configuration or are unavailable there. Use the
 [native Windows command matrix](/docs/get-started/windows/capabilities-commands)
 for the certified Windows classification and safe examples.
@@ -57,6 +57,7 @@ Hook setup aliases (`setup codex`, `setup claude-code`, `setup hermes`, and the 
 | `defenseclaw setup openhands` | Hook setup alias for OpenHands; defaults to observe, pass `--mode action` to block hook-side. |
 | `defenseclaw setup antigravity` | Hook setup alias for Antigravity (`agy`); defaults to observe, pass `--mode action` to block hook-side. Returning `decision=ask` from the hook overrides agy's `--dangerously-skip-permissions` flag. |
 | `defenseclaw setup opencode` | Hook setup alias for OpenCode; writes the auto-loaded bridge plugin. Defaults to observe, pass `--mode action` to block hook-side. |
+| `defenseclaw setup amp` | Direct-to-upstream system-policy setup for Amp; writes the TypeScript plugin. Defaults to observe; pass `--mode action` for synchronous `tool.call` execution gating and model-bound `tool.result` output gating. Native confirmation is available only in the active foreground thread; background confirmation falls back to safe rejection or withholding. |
 | `defenseclaw setup omnigent` | Hook setup alias for OmniGent; installs the custom Python policy bridge. Defaults to observe, pass `--mode action` for ALLOW/ASK/DENY enforcement. |
 | `defenseclaw setup openclaw` | Full guardrail alias for OpenClaw (proxy connector). |
 | `defenseclaw setup zeptoclaw` | Full guardrail alias for ZeptoClaw (proxy connector). |
@@ -149,7 +150,7 @@ local model APIs, known model caches, and standalone model files.
 | Command | Use it for |
 | --- | --- |
 | `defenseclaw agent discover [--refresh] [--no-cache] [--json] [--emit-otel/--no-emit-otel]` | Inspect known connector configs and binaries without requiring the gateway. This does not run the continuous local-model scan. |
-| `defenseclaw agent discovery enable [--scan-roots ROOTS] [--include-network-domains/--no-include-network-domains] [--restart/--no-restart] [--scan/--no-scan]` | Enable and tune the sidecar scanner. Vetted loopback model API reads follow `include_network_domains`; filesystem model discovery runs independently. |
+| `defenseclaw agent discovery enable [--scan-roots ROOTS] [--include-network-domains/--no-include-network-domains] [--lookup-model-provenance-online/--no-lookup-model-provenance-online] [--restart/--no-restart] [--scan/--no-scan]` | Enable and tune the sidecar scanner. Vetted loopback model API reads follow `include_network_domains`; filesystem model discovery runs independently. Public Hugging Face lineage lookup is a separate opt-in because it transmits recovered model repository IDs. |
 | `defenseclaw agent discovery setup\|status\|scan\|disable` | Configure discovery interactively, inspect on-disk/live state, trigger a full scan, or disable the service. |
 | `defenseclaw agent usage [--refresh] [--detail] [--state STATE] [--category CAT] [--product NAME] [--component NAME] [--show-gone] [--by-detector] [--json]` | Read the sidecar snapshot. Local-model rows show model ID, `installed`/`loaded` status, and format; `--component` also matches model IDs. `active` remains an alias for the steady `seen` lifecycle state. JSON output is the unfiltered API payload. |
 | `defenseclaw agent processes [--refresh] [--json] [--limit N]` | List live AI process signals with PID, user, command name, and uptime. |

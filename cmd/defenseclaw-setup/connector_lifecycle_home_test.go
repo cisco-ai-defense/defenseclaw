@@ -14,10 +14,12 @@ func TestConnectorLifecycleConfigHomeSelectsExactNativeBinding(t *testing.T) {
 	root := t.TempDir()
 	codexHome := filepath.Join(root, "codex")
 	claudeHome := filepath.Join(root, "claude")
+	profile := filepath.Join(root, "profile")
 	env := []string{
 		"UNRELATED=preserved",
 		"codex_home=" + codexHome,
 		"CLAUDE_CONFIG_DIR=" + claudeHome,
+		"USERPROFILE=" + profile,
 	}
 	for _, test := range []struct {
 		connector string
@@ -25,6 +27,7 @@ func TestConnectorLifecycleConfigHomeSelectsExactNativeBinding(t *testing.T) {
 	}{
 		{connector: "codex", want: codexHome},
 		{connector: "claudecode", want: claudeHome},
+		{connector: "amp", want: filepath.Join(profile, ".config", "amp")},
 	} {
 		t.Run(test.connector, func(t *testing.T) {
 			got, err := connectorLifecycleConfigHome(env, test.connector)
@@ -35,6 +38,32 @@ func TestConnectorLifecycleConfigHomeSelectsExactNativeBinding(t *testing.T) {
 				t.Fatalf("config home = %q, want %q", got, test.want)
 			}
 		})
+	}
+}
+
+func TestAmpLifecycleCommandArgsBindDocumentedWindowsConfigHome(t *testing.T) {
+	root := t.TempDir()
+	dataRoot := filepath.Join(root, ".defenseclaw")
+	profile := filepath.Join(root, "profile")
+	configHome := filepath.Join(profile, ".config", "amp")
+	args, err := connectorLifecycleCommandArgs(
+		dataRoot,
+		"amp",
+		"reconcile",
+		[]string{"USERPROFILE=" + profile},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{
+		"connector", "reconcile",
+		"--connector", "amp",
+		"--data-dir", dataRoot,
+		"--config-home", configHome,
+		"--json",
+	}
+	if !reflect.DeepEqual(args, want) {
+		t.Fatalf("connector lifecycle args = %q, want %q", args, want)
 	}
 }
 
@@ -78,6 +107,8 @@ func TestConnectorLifecycleConfigHomeRejectsAmbiguousOrUnsafeBinding(t *testing.
 		{name: "relative", connector: "codex", env: []string{"CODEX_HOME=relative"}, want: "absolute normalized path"},
 		{name: "unnormalized", connector: "codex", env: []string{"CODEX_HOME=" + unnormalized}, want: "absolute normalized path"},
 		{name: "newline", connector: "codex", env: []string{"CODEX_HOME=" + valid + "\nother"}, want: "absolute normalized path"},
+		{name: "amp missing profile", connector: "amp", env: []string{"UNRELATED=1"}, want: "USERPROFILE is empty"},
+		{name: "amp duplicate profile", connector: "amp", env: []string{"USERPROFILE=" + valid, "userprofile=" + valid}, want: "USERPROFILE is duplicated"},
 		{name: "unsupported", connector: "openclaw", env: []string{"CODEX_HOME=" + valid}, want: "unsupported native connector"},
 	} {
 		t.Run(test.name, func(t *testing.T) {

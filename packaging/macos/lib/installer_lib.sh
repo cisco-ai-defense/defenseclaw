@@ -57,7 +57,7 @@ parse_connectors() {
 # is_supported_connector NAME -> exit 0 if name is auto-wireable.
 is_supported_connector() {
   case "$1" in
-    codex|claudecode|cursor) return 0;;
+    amp|codex|claudecode|cursor) return 0;;
     *) return 1;;
   esac
 }
@@ -85,6 +85,7 @@ home_perms_ok() {
 # explicitly for connectors that don't ship a stable metadata file.
 _read_json_version() {
   local path="$1"
+  local expected_name="${2:-}"
   local py
   py="$(command -v python3 || echo /usr/bin/python3)"
   "${py}" -c '
@@ -109,7 +110,11 @@ try:
   payload = b"".join(chunks)
   if len(payload) > 256 * 1024:
     raise OSError("agent package metadata exceeds its size bound")
-  value = json.loads(payload).get("version", "")
+  document = json.loads(payload)
+  expected_name = sys.argv[2]
+  if expected_name and document.get("name") != expected_name:
+    raise ValueError("agent package metadata identity mismatch")
+  value = document.get("version", "")
   if isinstance(value, str) and re.fullmatch(r"[0-9A-Za-z.+_-]{1,128}", value):
     print(value)
 except Exception:
@@ -117,7 +122,7 @@ except Exception:
 finally:
   if fd >= 0:
     os.close(fd)
-' "${path}" 2>/dev/null
+' "${path}" "${expected_name}" 2>/dev/null
 }
 
 _read_codex_version_as_user() {
@@ -172,6 +177,24 @@ discover_agent_version() {
   local connector="$1"
   local home="$2"
   case "${connector}" in
+    amp)
+      # Amp's supported npm distribution is @ampcode/cli. Read only the
+      # package metadata from known npm prefixes; never execute the user-owned
+      # `amp` shim while this helper is running beneath a root LaunchDaemon.
+      # Curl/native installs may not retain package metadata, in which case an
+      # empty version is intentional and the connector contract decides
+      # whether unversioned reconciliation is permitted.
+      local pkg
+      for pkg in \
+        "${home}"/.npm-global/lib/node_modules/@ampcode/cli/package.json \
+        "${home}"/.local/lib/node_modules/@ampcode/cli/package.json \
+        /usr/local/lib/node_modules/@ampcode/cli/package.json \
+        /opt/homebrew/lib/node_modules/@ampcode/cli/package.json; do
+        [[ -f "${pkg}" ]] || continue
+        local v; v="$(_read_json_version "${pkg}" "@ampcode/cli")"
+        if [[ -n "${v}" ]]; then echo "${v}"; return; fi
+      done
+      ;;
     codex)
       # Codex-cli is a Rust binary that ships from three OpenAI-owned
       # channels on macOS. Probe order picks the first-party
@@ -463,6 +486,11 @@ prepare_userspace_for() {
   local uid="${3:-}"
   local gid="${4:-}"
   case "${connector}" in
+    # Amp's hook is a managed TypeScript plugin. The connector reconciliation
+    # owns creating ~/.config/amp/plugins/defenseclaw.ts together with its
+    # backup metadata; this packaging helper must never precreate a placeholder
+    # file that would be mistaken for user state.
+    amp)        : ;;
     codex)      prepare_codex_userspace      "${home}" "${uid}" "${gid}";;
     claudecode) prepare_claudecode_userspace "${home}" "${uid}" "${gid}";;
     cursor)     prepare_cursor_userspace     "${home}" "${uid}" "${gid}";;
@@ -562,7 +590,7 @@ enumerate_local_users() {
 #
 # Args:
 #   SUPPORT_DIR    e.g. /opt/cisco/secureclient/defenseclaw
-#   CONNECTORS_CSV comma-separated list of connectors (e.g. codex,claudecode,cursor)
+#   CONNECTORS_CSV comma-separated list of connectors (e.g. amp,codex,claudecode,cursor)
 #   USER_LINES     newline-separated user:uid:gid:home lines (as produced by
 #                  enumerate_local_users)
 #

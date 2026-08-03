@@ -249,6 +249,23 @@ class TestScanHostConnectorResolve(_PluginScanUXBase):
             os.path.join(host_dir, "hostplug"),
         )
 
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_scan_resolves_direct_amp_typescript_plugin(self, mock_scan, _mock_oc) -> None:
+        mock_scan.return_value = self._clean_result()
+        host_dir = os.path.join(self.tmp_dir, "amp-plugins")
+        os.makedirs(host_dir)
+        plugin_file = os.path.join(host_dir, "defenseclaw.ts")
+        with open(plugin_file, "w", encoding="utf-8") as handle:
+            handle.write("export default function defenseclaw() {}\n")
+        self.app.cfg.active_connectors = lambda: ["amp"]  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda c=None: [host_dir] if c == "amp" else []  # type: ignore[method-assign]
+
+        result = self.invoke(["scan", "defenseclaw", "--connector", "amp"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(mock_scan.call_args.args[0], plugin_file)
+
 
 class TestScanAllSweep(_PluginScanUXBase):
     """P-C: ``plugin scan --all`` sweeps installed plugins across connectors."""
@@ -287,6 +304,25 @@ class TestScanAllSweep(_PluginScanUXBase):
         mock_scan.return_value = self._clean_result()
         result = self.invoke(["scan", "all"])
         self.assertEqual(result.exit_code, 0, result.output)
+
+    @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
+    @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")
+    def test_all_scans_direct_amp_typescript_plugins(self, mock_scan, _mock_oc) -> None:
+        mock_scan.return_value = self._clean_result()
+        host_dir = os.path.join(self.tmp_dir, "amp-plugins")
+        os.makedirs(host_dir)
+        plugin_file = os.path.join(host_dir, "defenseclaw.ts")
+        with open(plugin_file, "w", encoding="utf-8") as handle:
+            handle.write("export default function defenseclaw() {}\n")
+        self.app.cfg.active_connector = lambda: "amp"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["amp"]  # type: ignore[method-assign]
+        self.app.cfg.plugin_dirs = lambda c=None: [host_dir] if c == "amp" else []  # type: ignore[method-assign]
+
+        result = self.invoke(["scan", "--all", "--connector", "amp"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        scanned = {call.args[0] for call in mock_scan.call_args_list}
+        self.assertIn(plugin_file, scanned)
 
     @patch("defenseclaw.commands.cmd_plugin._list_openclaw_plugins", return_value=[])
     @patch("defenseclaw.scanner.plugin.PluginScannerWrapper.scan")

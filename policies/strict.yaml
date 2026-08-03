@@ -74,6 +74,7 @@ first_party_allow_list:
       - ".zeptoclaw/extensions/defenseclaw"
       - ".claude/extensions/defenseclaw"
       - ".codex/extensions/defenseclaw"
+      - ".config/amp/plugins/defenseclaw.ts"
   - target_type: skill
     target_name: codeguard
     reason: first-party DefenseClaw skill

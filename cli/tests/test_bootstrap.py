@@ -206,6 +206,27 @@ class BootstrapEnvTests(unittest.TestCase):
 
         self.assertEqual(result.status, "warn")
 
+    def test_amp_readiness_uses_global_plugin_with_or_without_workspace(self):
+        plugin = Path(self._tmp.name) / "amp-home" / "plugins" / "defenseclaw.ts"
+        plugin.parent.mkdir(parents=True)
+        plugin.write_text(
+            "// DefenseClaw\nconst endpoint = '/api/v1/amp/hook';\n",
+            encoding="utf-8",
+        )
+
+        for workspace in ("", os.path.join(self._tmp.name, "workspace")):
+            with self.subTest(workspace=workspace or "<none>"):
+                cfg = _cfg_for(os.path.join(self._tmp.name, "dchome"))
+                cfg.claw.workspace_dir = workspace
+                with patch(
+                    "defenseclaw.bootstrap.amp_policy_plugin_path",
+                    return_value=str(plugin),
+                ):
+                    result = _connector_readiness(cfg, "amp")
+
+                self.assertEqual(result.status, "pass")
+                self.assertIn(str(plugin), result.detail)
+
 
 class FreshMigrationCursorTests(unittest.TestCase):
     """Fresh v8 publication seeds one non-clobbering migration cursor."""

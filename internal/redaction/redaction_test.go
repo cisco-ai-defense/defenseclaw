@@ -488,6 +488,7 @@ func TestForSinkReason_PositiveCatalog(t *testing.T) {
 		"direction=prompt",
 		"scanner=codeguard",
 		"connector=openclaw",
+		"connector=amp",
 		"rule=pii.phone",
 	}
 	for _, in := range cases {

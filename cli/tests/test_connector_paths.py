@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -94,6 +95,156 @@ class TestSkillDirs:
         dirs = connector_paths.skill_dirs("codex")
         home = str(Path.home())
         assert os.path.join(home, ".codex", "skills") in dirs
+
+    def test_amp_honors_documented_precedence_and_custom_settings(self, tmp_path, monkeypatch):
+        fake_home = tmp_path / "home"
+        workspace = tmp_path / "repo"
+        settings_dir = workspace / ".amp"
+        settings_dir.mkdir(parents=True)
+        (fake_home / ".config" / "amp").mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(fake_home))
+        custom_one = tmp_path / "team-skills"
+        custom_two = tmp_path / "shared-skills"
+        custom_path = f"{custom_one}{os.pathsep}{custom_two}"
+        (settings_dir / "settings.jsonc").write_text(
+            "{\n"
+            '  // Amp settings use dotted keys.\n'
+            f'  "amp.skills.path": {json.dumps(custom_path)},\n'
+            '  "amp.skills.disableClaudeCodeSkills": true\n'
+            "}\n"
+        )
+
+        dirs = connector_paths.skill_dirs("amp", workspace_dir=str(workspace))
+
+        assert dirs[:4] == [
+            str(fake_home / ".config" / "agents" / "skills"),
+            str(fake_home / ".agents" / "skills"),
+            str(fake_home / ".config" / "amp" / "skills"),
+            str(workspace / ".agents" / "skills"),
+        ]
+        assert str(custom_one) in dirs
+        assert str(custom_two) in dirs
+        assert str(workspace / ".claude" / "skills") not in dirs
+        assert str(fake_home / ".claude" / "skills") not in dirs
+
+    def test_amp_claude_plugin_cache_skills_follow_disable_setting(self, tmp_path, monkeypatch):
+        fake_home = tmp_path / "home"
+        workspace = tmp_path / "repo"
+        settings_dir = workspace / ".amp"
+        cached_skills = (
+            fake_home
+            / ".claude"
+            / "plugins"
+            / "cache"
+            / "marketplace"
+            / "review-plugin"
+            / "1.2.3"
+            / "skills"
+        )
+        cached_skills.mkdir(parents=True)
+        settings_dir.mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(fake_home))
+
+        enabled = connector_paths.skill_dirs("amp", workspace_dir=str(workspace))
+        assert str(cached_skills) in enabled
+
+        (settings_dir / "settings.json").write_text(
+            json.dumps({"amp.skills.disableClaudeCodeSkills": True}),
+        )
+        disabled = connector_paths.skill_dirs("amp", workspace_dir=str(workspace))
+        assert str(cached_skills) not in disabled
+        assert str(workspace / ".claude" / "skills") not in disabled
+        assert str(fake_home / ".claude" / "skills") not in disabled
+
+    def test_amp_settings_reader_rejects_symlink(self, tmp_path):
+        target = tmp_path / "target.json"
+        target.write_text(json.dumps({"amp.skills.disableClaudeCodeSkills": True}))
+        link = tmp_path / "settings-link.json"
+        try:
+            link.symlink_to(target)
+        except OSError as exc:
+            pytest.skip(f"symlink unavailable: {exc}")
+        assert connector_paths._load_amp_settings_document(str(link)) is None
+
+    def test_amp_settings_reader_rejects_oversize(self, tmp_path):
+        oversized = tmp_path / "oversized.json"
+        oversized.write_bytes(b" " * (connector_paths._AMP_SETTINGS_MAX_BYTES + 1))
+        assert connector_paths._load_amp_settings_document(str(oversized)) is None
+
+    def test_amp_cache_directory_reader_enforces_requested_entry_cap(self, tmp_path):
+        for name in ("zeta", "alpha", "middle", "omega"):
+            (tmp_path / name).mkdir()
+
+        entries = connector_paths._bounded_amp_directory_entries(str(tmp_path), 2)
+
+        assert len(entries) == 2
+        assert [entry.name.casefold() for entry in entries] == sorted(
+            entry.name.casefold() for entry in entries
+        )
+
+    def test_amp_relative_custom_skill_requires_explicit_workspace(self, tmp_path, monkeypatch):
+        fake_home = tmp_path / "home"
+        settings = fake_home / ".config" / "amp" / "settings.json"
+        settings.parent.mkdir(parents=True)
+        settings.write_text(json.dumps({"amp.skills.path": "relative-skills"}))
+        monkeypatch.setenv("HOME", str(fake_home))
+        monkeypatch.chdir(tmp_path)
+
+        assert str(tmp_path / "relative-skills") not in connector_paths.skill_dirs("amp")
+        assert str(tmp_path / "repo" / "relative-skills") in connector_paths.skill_dirs(
+            "amp",
+            workspace_dir=str(tmp_path / "repo"),
+        )
+
+    def test_amp_skill_write_scope_is_workspace_when_pinned_else_global(self, tmp_path, monkeypatch):
+        fake_home = tmp_path / "home"
+        workspace = tmp_path / "repo"
+        monkeypatch.setenv("HOME", str(fake_home))
+        monkeypatch.setenv("USERPROFILE", str(fake_home))
+
+        assert connector_paths.skill_write_dirs("amp") == [
+            str(fake_home / ".config" / "agents" / "skills")
+        ]
+        assert connector_paths.skill_write_dirs(
+            "amp",
+            workspace_dir=str(workspace),
+        ) == [str(workspace / ".agents" / "skills")]
+
+    def test_amp_settings_json_wins_same_scope_then_jsonc_falls_back(self, tmp_path, monkeypatch):
+        fake_home = tmp_path / "home"
+        config = fake_home / ".config" / "amp"
+        config.mkdir(parents=True)
+        json_skills = tmp_path / "json-skills"
+        jsonc_skills = tmp_path / "jsonc-skills"
+        monkeypatch.setenv("HOME", str(fake_home))
+        monkeypatch.setenv("USERPROFILE", str(fake_home))
+        json_path = config / "settings.json"
+        jsonc_path = config / "settings.jsonc"
+        json_path.write_text(
+            json.dumps(
+                {
+                    "amp.skills.path": str(json_skills),
+                    "amp.skills.disableClaudeCodeSkills": True,
+                }
+            )
+        )
+        jsonc_path.write_text(
+            "{\n"
+            f'  "amp.skills.path": {json.dumps(str(jsonc_skills))},\n'
+            '  "amp.skills.disableClaudeCodeSkills": false\n'
+            "}\n"
+        )
+
+        dirs = connector_paths.skill_dirs("amp")
+        assert str(json_skills) in dirs
+        assert str(jsonc_skills) not in dirs
+        assert str(fake_home / ".claude" / "skills") not in dirs
+
+        json_path.unlink()
+        dirs = connector_paths.skill_dirs("amp")
+        assert str(jsonc_skills) in dirs
+        assert str(json_skills) not in dirs
+        assert str(fake_home / ".claude" / "skills") in dirs
 
     def test_zeptoclaw(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
@@ -223,6 +374,14 @@ class TestPluginDirs:
         # Codex plugins live at ~/.codex/plugins (with cache subdir)
         assert os.path.join(home, ".codex", "plugins") in dirs
 
+    def test_amp_project_and_system_plugin_dirs(self, tmp_path, monkeypatch):
+        fake_home = tmp_path / "home"
+        monkeypatch.setenv("HOME", str(fake_home))
+        assert connector_paths.plugin_dirs("amp", workspace_dir=str(tmp_path)) == [
+            str(tmp_path / ".amp" / "plugins"),
+            str(fake_home / ".config" / "amp" / "plugins"),
+        ]
+
     def test_zeptoclaw(self):
         dirs = connector_paths.plugin_dirs("zeptoclaw")
         home = str(Path.home())
@@ -308,6 +467,233 @@ class TestMCPServers:
         monkeypatch.setenv("HOME", str(fake_home))
         assert connector_paths.mcp_servers("codex") == []
         assert connector_paths.mcp_servers("codex", workspace_dir=str(tmp_path)) == []
+
+    def test_amp_reads_jsonc_workspace_user_and_skill_mcp_with_precedence(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        fake_home = tmp_path / "home"
+        workspace = tmp_path / "repo"
+        user_config = fake_home / ".config" / "amp"
+        workspace_config = workspace / ".amp"
+        user_skill = fake_home / ".config" / "agents" / "skills" / "browser"
+        managed_settings = tmp_path / "managed" / "managed-settings.json"
+        user_config.mkdir(parents=True)
+        workspace_config.mkdir(parents=True)
+        user_skill.mkdir(parents=True)
+        managed_settings.parent.mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(fake_home))
+        monkeypatch.setattr(
+            connector_paths,
+            "amp_managed_settings_path",
+            lambda: str(managed_settings),
+        )
+        (user_config / "settings.json").write_text(
+            json.dumps(
+                {
+                    "amp.mcpServers": {
+                        "shared": {"command": "from-user"},
+                        "user-only": {"url": "https://user.example/mcp"},
+                    }
+                }
+            )
+        )
+        (workspace_config / "settings.jsonc").write_text(
+            "{\n"
+            '  "amp.mcpServers": {\n'
+            '    "shared": {"command": "from-workspace"}, // wins\n'
+            '    "workspace-only": {"command": "workspace-mcp"}\n'
+            "  }\n"
+            "}\n"
+        )
+        managed_settings.write_text(
+            json.dumps(
+                {
+                    "amp.mcpServers": {
+                        "shared": {"command": "from-managed"},
+                        "managed-only": {"command": "managed-mcp"},
+                    }
+                }
+            )
+        )
+        (user_skill / "mcp.json").write_text(
+            json.dumps(
+                {
+                    "shared": {"command": "from-skill"},
+                    "skill-only": {"command": "skill-mcp"},
+                }
+            )
+        )
+
+        entries = connector_paths.mcp_servers("amp", workspace_dir=str(workspace))
+        by_name = {entry.name: entry for entry in entries}
+
+        assert list(by_name) == [
+            "shared",
+            "managed-only",
+            "workspace-only",
+            "user-only",
+            "skill-only",
+        ]
+        assert by_name["shared"].command == "from-managed"
+        assert by_name["user-only"].url == "https://user.example/mcp"
+
+    def test_amp_jsonc_fallback_preserves_comma_bracket_text_in_quoted_mcp_values(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        fake_home = tmp_path / "home"
+        workspace = tmp_path / "repo"
+        settings = workspace / ".amp" / "settings.jsonc"
+        settings.parent.mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(fake_home))
+        monkeypatch.setenv("USERPROFILE", str(fake_home))
+        monkeypatch.setitem(sys.modules, "json5", None)
+        monkeypatch.setattr(
+            connector_paths,
+            "amp_managed_settings_path",
+            lambda: str(tmp_path / "missing-managed-settings.json"),
+        )
+        settings.write_text(
+            "{\n"
+            "  // Force the string-aware fallback parser.\n"
+            '  "amp.mcpServers": {\n'
+            '    "quoted": {\n'
+            '      "command": "runner,}",\n'
+            '      "args": ["literal,]"],\n'
+            '      "env": {"PATTERN": "abc,}"},\n'
+            "    },\n"
+            '    "remote": {"url": "https://example.test/a,]"},\n'
+            "  },\n"
+            "}\n"
+        )
+
+        entries = connector_paths.mcp_servers("amp", workspace_dir=str(workspace))
+        by_name = {entry.name: entry for entry in entries}
+
+        assert by_name["quoted"].command == "runner,}"
+        assert by_name["quoted"].args == ["literal,]"]
+        assert by_name["quoted"].env == {"PATTERN": "abc,}"}
+        assert by_name["remote"].url == "https://example.test/a,]"
+
+    def test_amp_config_and_home_are_explicit_on_all_platforms(self, tmp_path, monkeypatch):
+        fake_home = tmp_path / "profile"
+        workspace = tmp_path / "repo"
+        monkeypatch.setenv("HOME", str(fake_home))
+        assert connector_paths.connector_home("amp") == str(fake_home / ".config" / "amp")
+        assert connector_paths.connector_config_files("amp", workspace_dir=str(workspace)) == [
+            str(fake_home / ".config" / "amp" / "settings.json"),
+            str(fake_home / ".config" / "amp" / "settings.jsonc"),
+            str(workspace / ".amp" / "settings.json"),
+            str(workspace / ".amp" / "settings.jsonc"),
+            connector_paths.amp_managed_settings_path(),
+            str(fake_home / ".config" / "amp" / "plugins" / "defenseclaw.ts"),
+        ]
+
+    def test_amp_managed_settings_paths_are_platform_specific(self):
+        assert connector_paths._resolve_amp_managed_settings_path(
+            platform_name="posix",
+            platform_id="darwin",
+            program_data="",
+        ) == "/Library/Application Support/ampcode/managed-settings.json"
+        assert connector_paths._resolve_amp_managed_settings_path(
+            platform_name="posix",
+            platform_id="linux",
+            program_data="",
+        ) == "/etc/ampcode/managed-settings.json"
+        assert connector_paths._resolve_amp_managed_settings_path(
+            platform_name="nt",
+            platform_id="win32",
+            program_data=r"C:\ProgramData",
+        ) == r"C:\ProgramData\ampcode\managed-settings.json"
+        assert (
+            connector_paths._resolve_amp_managed_settings_path(
+                platform_name="nt",
+                platform_id="win32",
+                program_data="",
+            )
+            == ""
+        )
+
+    def test_amp_policy_settings_managed_override_and_rules_are_read_only_discovery(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        fake_home = tmp_path / "home"
+        workspace = fake_home / "src" / "repo"
+        subtree = workspace / "service" / "api"
+        managed_settings = tmp_path / "enterprise" / "managed-settings.json"
+        (fake_home / ".config" / "amp").mkdir(parents=True)
+        (workspace / ".amp").mkdir(parents=True)
+        subtree.mkdir(parents=True)
+        managed_settings.parent.mkdir()
+        monkeypatch.setenv("HOME", str(fake_home))
+        monkeypatch.setattr(
+            connector_paths,
+            "amp_managed_settings_path",
+            lambda: str(managed_settings),
+        )
+        monkeypatch.setattr(
+            connector_paths,
+            "amp_managed_agents_path",
+            lambda: str(managed_settings.parent / "AGENTS.md"),
+        )
+        (fake_home / ".config" / "amp" / "settings.json").write_text(
+            json.dumps(
+                {
+                    "amp.permissions": [{"matches": {"tool": "Bash"}, "action": "ask"}],
+                    "amp.dangerouslyAllowAll": True,
+                }
+            )
+        )
+        (workspace / ".amp" / "settings.json").write_text(
+            json.dumps(
+                {
+                    "amp.guardedFiles.allowlist": ["README.md"],
+                    "amp.dangerouslyAllowAll": True,
+                }
+            )
+        )
+        managed_settings.write_text(
+            json.dumps(
+                {
+                    "amp.dangerouslyAllowAll": False,
+                    "amp.mcpPermissions": [
+                        {"matches": {"command": "*"}, "action": "reject"},
+                    ],
+                }
+            )
+        )
+        (fake_home / "AGENT.md").write_text("home fallback")
+        (workspace / "CLAUDE.md").write_text("workspace fallback")
+        (subtree / "AGENTS.md").write_text("scoped")
+
+        policy = connector_paths.connector_policy_settings(
+            "amp",
+            workspace_dir=str(workspace),
+        )
+        assert set(policy) == {
+            "amp.permissions",
+            "amp.guardedFiles.allowlist",
+            "amp.dangerouslyAllowAll",
+            "amp.mcpPermissions",
+        }
+        assert policy["amp.dangerouslyAllowAll"] is False
+
+        paths = connector_paths.rule_paths(
+            "amp",
+            workspace_dir=str(workspace),
+            target_path=os.path.join("service", "api", "handler.ts"),
+        )
+        assert str(fake_home / "AGENT.md") in paths
+        assert str(workspace / "CLAUDE.md") in paths
+        assert str(subtree / "AGENTS.md") in paths
+        assert str(subtree / ".agents" / "checks") in paths
+        assert str(managed_settings.parent / "AGENTS.md") in paths
+        assert str(workspace / "AGENTS.md") not in paths
 
     def test_new_connector_mcp_readers(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)

@@ -86,7 +86,7 @@ is a stop condition; do not bypass it.
 
 Double-click the EXE without **Run as administrator**. Choose one of:
 
-- **Codex** or **Claude Code** to configure that native connector.
+- **Codex**, **Claude Code**, or **Amp** to configure that native connector.
 - **Configure later** for a CLI-only installation with no agent changes.
 
 Start in **Observe** mode. Choose **Action** only after reviewing observed
@@ -132,10 +132,11 @@ DefenseClawSetup-x64.exe /quiet /norestart INSTALLSCOPE=user CONNECTOR=codex MOD
   </Tab>
 </Tabs>
 
-Use `CONNECTOR=claudecode` for Claude Code. To install without configuring an
-agent or starting the gateway, use `CONNECTOR=none STARTGATEWAY=0`.
-`STARTGATEWAY=0` cannot leave a Codex or Claude Code installation stopped:
-those connectors require gateway startup and current-user logon integration.
+Use `CONNECTOR=claudecode` for Claude Code or `CONNECTOR=amp` for Amp. To
+install without configuring an agent or starting the gateway, use
+`CONNECTOR=none STARTGATEWAY=0`. `STARTGATEWAY=0` cannot leave a Codex, Claude
+Code, or Amp installation stopped: those connectors require gateway startup
+and current-user logon integration.
 
 Public Setup properties are:
 
@@ -144,7 +145,7 @@ Public Setup properties are:
 | Action | fresh install, `/repair`, `/upgrade`, or `/uninstall` |
 | UI | interactive or `/quiet` (`/qn` alias); `/norestart` is accepted |
 | Scope | `INSTALLSCOPE=user` only |
-| Connector | `CONNECTOR=codex`, `claudecode`, or `none` |
+| Connector | `CONNECTOR=codex`, `claudecode`, `amp`, or `none` |
 | Policy mode | `MODE=observe` or `action` |
 | Gateway | `STARTGATEWAY=1` or `0`, subject to the connector rule above |
 | User data on uninstall | `DELETEUSERDATA=0` (default) or `1` |
@@ -165,15 +166,17 @@ For explicit supported connectors:
 ```powershell
 defenseclaw setup codex --mode observe
 defenseclaw setup claude-code --mode observe
+defenseclaw setup amp --mode observe
 ```
 
-One local gateway can host both. Add the second connector without removing the
-first:
+One local gateway can host any or all three. Add connectors without removing
+an existing one:
 
 ```powershell
 defenseclaw setup `
   --connector codex `
   --connector claudecode `
+  --connector amp `
   --mode observe `
   --restart `
   --yes
@@ -181,8 +184,16 @@ defenseclaw setup `
 
 Setup records validated `CODEX_HOME` and `CLAUDE_CONFIG_DIR` values when they
 are used. Repair and upgrade preserve those recorded homes instead of following
-later environment drift. The packaged data root itself is fixed to the current
-Windows profile; see [Path and override rules](/docs/get-started/windows/paths-troubleshooting#supported-path-overrides).
+later environment drift. Amp has no connector-home override: its system plugin
+uses `%USERPROFILE%\.config\amp\plugins\defenseclaw.ts`. The packaged data root
+itself is fixed to the current Windows profile; see
+[Path and override rules](/docs/get-started/windows/paths-troubleshooting#supported-path-overrides).
+
+Fully restart Codex or Claude Code after setup changes. Fully exit and relaunch
+Amp; for headless execute mode, use `--plugin-ready-timeout 30` so the policy
+plugin is ready before the turn begins. An authenticated live Amp turn requires
+`AMP_API_KEY`, but that optional smoke is not the deterministic native Windows
+certification gate.
 
 ## Startup behavior
 

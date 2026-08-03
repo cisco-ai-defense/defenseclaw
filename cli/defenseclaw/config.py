@@ -2077,6 +2077,7 @@ class AIDiscoveryConfig:
     include_package_manifests: bool = True
     include_env_var_names: bool = True
     include_network_domains: bool = True
+    lookup_model_provenance_online: bool = False
     max_files_per_scan: int = 1000
     max_file_bytes: int = 512 * 1024
     store_raw_local_paths: bool = False
@@ -2411,6 +2412,21 @@ class Config:
         connector's directories. Defaults to :meth:`active_connector`.
         """
         return connector_paths.skill_dirs(
+            connector or self.active_connector(),
+            openclaw_home=self.claw.home_dir,
+            openclaw_config=self.claw.config_file,
+            workspace_dir=self.connector_workspace_dir(),
+        )
+
+    def skill_write_dirs(self, connector: str | None = None) -> list[str]:
+        """Return native skill install targets for a connector.
+
+        This is intentionally separate from discovery precedence. Amp, for
+        example, discovers multiple compatibility/plugin roots but writes only
+        to the pinned workspace or the explicit user-global AgentSkills root.
+        """
+
+        return connector_paths.skill_write_dirs(
             connector or self.active_connector(),
             openclaw_home=self.claw.home_dir,
             openclaw_config=self.claw.config_file,
@@ -4680,6 +4696,9 @@ def _merge_ai_discovery(raw: dict[str, Any] | None) -> AIDiscoveryConfig:
         include_package_manifests=bool(raw.get("include_package_manifests", True)),
         include_env_var_names=bool(raw.get("include_env_var_names", True)),
         include_network_domains=bool(raw.get("include_network_domains", True)),
+        lookup_model_provenance_online=_coerce_bool(
+            raw.get("lookup_model_provenance_online", False)
+        ),
         max_files_per_scan=int(raw.get("max_files_per_scan", 1000) or 1000),
         max_file_bytes=int(raw.get("max_file_bytes", 512 * 1024) or 512 * 1024),
         store_raw_local_paths=bool(raw.get("store_raw_local_paths", False)),

@@ -23,6 +23,7 @@ import (
 )
 
 var windowsSupportedConnectorNames = []string{
+	"amp",
 	"claudecode",
 	"codex",
 }

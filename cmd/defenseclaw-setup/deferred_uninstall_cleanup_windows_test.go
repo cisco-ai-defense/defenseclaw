@@ -639,6 +639,27 @@ func writeDeferredCleanupHookState(t *testing.T, path string, state hookruntime.
 	}
 }
 
+func TestValidateDeferredUninstallCleanupRecordAcceptsAllManagedConnectors(t *testing.T) {
+	fixture := newDeferredCleanupFixture(t)
+	fixture.record.VerifiedConnectors = []string{"amp", "claudecode", "codex"}
+	paths := hookruntime.Paths{
+		Root:     fixture.record.RuntimeRoot,
+		Launcher: fixture.record.LauncherPath,
+		State:    fixture.record.StatePath,
+	}
+
+	if err := validateDeferredUninstallCleanupRecord(
+		fixture.record,
+		paths,
+		fixture.record.InstallerStateRoot,
+		fixture.maintenance,
+		fixture.record.RunValueName,
+		fixture.record.RunCommand,
+	); err != nil {
+		t.Fatalf("all managed connectors rejected: %v", err)
+	}
+}
+
 func replaceDeferredCleanupRecord(t *testing.T, record deferredUninstallCleanupRecord) {
 	t.Helper()
 	if err := writeDurableValue(record.RecordPath, record, true); err != nil {

@@ -15,8 +15,8 @@ import (
 
 func TestBuiltinCorrelationProfilesAreVersionedAndValid(t *testing.T) {
 	reg := NewDefaultRegistry()
-	if got := len(reg.Names()); got != 13 {
-		t.Fatalf("builtin count=%d want 13", got)
+	if got := len(reg.Names()); got != 14 {
+		t.Fatalf("builtin count=%d want 14", got)
 	}
 	for _, name := range reg.Names() {
 		name := name
@@ -108,7 +108,7 @@ func TestCorrelationAuthorityRequiresExactFieldEvidence(t *testing.T) {
 
 func TestHookProfilesCarryResolvedCorrelationVersion(t *testing.T) {
 	reg := NewDefaultRegistry()
-	for _, name := range []string{"codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent"} {
+	for _, name := range []string{"codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent", "amp"} {
 		conn, _ := reg.Get(name)
 		profile := conn.(HookProfileProvider).HookProfile(SetupOpts{})
 		if profile.Correlation.ProfileVersion == "" || profile.Correlation.ProfileVersion == CorrelationProfileExplicitV1 {
@@ -278,6 +278,7 @@ func TestNativeTelemetryRegistryIsExplicit(t *testing.T) {
 		"geminicli": NativeTelemetryStable, "copilot": NativeTelemetryStable,
 		"openhands": NativeTelemetryNone, "antigravity": NativeTelemetryNone,
 		"opencode": NativeTelemetryNone, "omnigent": NativeTelemetryExperimental,
+		"amp": NativeTelemetryNone,
 	}
 	for name, want := range wants {
 		spec := DefaultCorrelationSpec(name)
@@ -322,7 +323,7 @@ func TestEveryDeclaredCorrelationSurfaceHasReviewedBindings(t *testing.T) {
 			}
 		}
 	}
-	for _, name := range []string{"openhands", "opencode"} {
+	for _, name := range []string{"openhands", "opencode", "amp"} {
 		for _, surface := range DefaultCorrelationSpec(name).Surfaces {
 			if surface == CorrelationSurfaceStream {
 				t.Errorf("%s advertises an event stream without a production adapter", name)
@@ -413,7 +414,7 @@ func TestCorrelationRegistryRetainsAllTypedNativeIdentifiers(t *testing.T) {
 func TestHookLifecycleBindingsUseOnlyReviewedContractEvents(t *testing.T) {
 	for _, name := range []string{
 		"codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli",
-		"copilot", "openhands", "antigravity", "opencode", "omnigent",
+		"copilot", "openhands", "antigravity", "opencode", "omnigent", "amp",
 	} {
 		t.Run(name, func(t *testing.T) {
 			spec := DefaultCorrelationSpec(name)
@@ -450,6 +451,7 @@ func TestConnectorLifecycleSemantics(t *testing.T) {
 		{"antigravity", "PostInvocation", CorrelationLifecycleTurnEnd},
 		{"opencode", "tool.execute.after", CorrelationLifecycleToolEnd},
 		{"omnigent", "AfterAgentResponse", CorrelationLifecycleTurnEnd},
+		{"amp", "agent.end", CorrelationLifecycleTurnEnd},
 	}
 	for _, tc := range cases {
 		t.Run(tc.connector+"/"+tc.event, func(t *testing.T) {
@@ -489,6 +491,7 @@ func TestAllBuiltinCorrelationProfilesUseConnectorExactIDs(t *testing.T) {
 		{"antigravity", map[string]interface{}{"conversationId": "s", "stepIdx": 4, "invocationNum": 8, "toolCall": map[string]interface{}{"id": "tc"}}, map[CorrelationTarget]string{CorrelationTargetSession: "s", CorrelationTargetStep: "4", CorrelationTargetExecution: "8", CorrelationTargetTool: "tc"}},
 		{"opencode", map[string]interface{}{"session_id": "s", "parentID": "ps", "messageId": "t", "part_id": "e", "callID": "tc"}, map[CorrelationTarget]string{CorrelationTargetSession: "s", CorrelationTargetParentSession: "ps", CorrelationTargetTurn: "t", CorrelationTargetSourceEvent: "e", CorrelationTargetTool: "tc"}},
 		{"omnigent", map[string]interface{}{"conversation_id": "s", "root_conversation_id": "rs", "response_id": "t", "item_id": "e", "call_id": "tc"}, map[CorrelationTarget]string{CorrelationTargetSession: "s", CorrelationTargetRootSession: "rs", CorrelationTargetTurn: "t", CorrelationTargetSourceEvent: "e", CorrelationTargetTool: "tc"}},
+		{"amp", map[string]interface{}{"thread_id": "th", "session_id": "s", "turn_id": "t", "message_id": "m", "source_event_id": "e", "tool_call_id": "tc"}, map[CorrelationTarget]string{CorrelationTargetThread: "th", CorrelationTargetSession: "s", CorrelationTargetTurn: "t", CorrelationTargetMessage: "m", CorrelationTargetSourceEvent: "e", CorrelationTargetTool: "tc"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

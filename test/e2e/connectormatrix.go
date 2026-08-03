@@ -152,6 +152,12 @@ func connectorMatrix(t *testing.T) []ConnectorFixture {
 			Apply:          hookOnlyFixtureApply("opencode"),
 		},
 		{
+			Name:           "amp",
+			DestinationApp: "amp",
+			ClawMode:       "amp",
+			Apply:          hookOnlyFixtureApply("amp"),
+		},
+		{
 			Name:           "omnigent",
 			DestinationApp: "omnigent",
 			ClawMode:       "omnigent",
@@ -197,6 +203,10 @@ func hookOnlyFixtureApply(name string) func(t *testing.T) (string, string) {
 			prev := connector.OpenCodePluginPathOverride
 			connector.OpenCodePluginPathOverride = filepath.Join(home, ".config", "opencode", "plugins", "defenseclaw.js")
 			t.Cleanup(func() { connector.OpenCodePluginPathOverride = prev })
+		case "amp":
+			prev := connector.AMPPluginPathOverride
+			connector.AMPPluginPathOverride = filepath.Join(home, ".config", "amp", "plugins", "defenseclaw.ts")
+			t.Cleanup(func() { connector.AMPPluginPathOverride = prev })
 		case "omnigent":
 			prevConfig := connector.OmnigentConfigPathOverride
 			prevSite := connector.OmnigentSitePackagesPathOverride

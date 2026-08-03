@@ -67,9 +67,10 @@ class TestCheckSchemasResourceEnum(unittest.TestCase):
                 "geminicli",
                 "copilot",
                 "openhands",
-                "antigravity",
-                "opencode",
-                "omnigent",
+        "antigravity",
+        "opencode",
+        "amp",
+        "omnigent",
                 # Sentinel set by telemetry/resource.go when more than one
                 # connector is active (multi-connector install). Not a
                 # connector name — see buildResource / WU4.

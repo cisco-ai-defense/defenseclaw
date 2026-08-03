@@ -222,6 +222,7 @@ def test_config_evidence_helper_rejects_directories(tmp_path):
         ("claudecode", (".claude",)),
         ("openhands", (".openhands",)),
         ("antigravity", (".gemini", "antigravity-cli")),
+        ("amp", (".config", "amp")),
         ("omnigent", (".omnigent",)),
     ],
 )
@@ -298,6 +299,7 @@ def test_empty_home_has_no_config_only_false_positives(monkeypatch, tmp_path):
         ("openhands", (".openhands", "hooks.json")),
         ("antigravity", (".gemini", "config", "hooks.json")),
         ("opencode", (".config", "opencode", "opencode.json")),
+        ("amp", (".config", "amp", "settings.json")),
         ("omnigent", (".omnigent", "config.yaml")),
     ],
 )
@@ -350,6 +352,26 @@ def test_codex_and_claude_discovery_honor_client_config_homes(
 
     assert signal.configured is True
     assert signal.config_path == str(config)
+
+
+def test_amp_discovery_reads_platform_managed_settings_without_mutating(
+    monkeypatch,
+    tmp_path,
+):
+    _pin_home(monkeypatch, tmp_path / "home")
+    managed = tmp_path / "program-data" / "ampcode" / "managed-settings.json"
+    managed.parent.mkdir(parents=True)
+    managed.write_text('{"amp.dangerouslyAllowAll": false}\n', encoding="utf-8")
+    monkeypatch.setattr(ad, "amp_managed_settings_path", lambda: str(managed))
+    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+
+    before = managed.read_bytes()
+    signal = ad._scan_agent("amp")
+
+    assert signal.installed is False
+    assert signal.configured is True
+    assert signal.config_path == str(managed)
+    assert managed.read_bytes() == before
 
 
 def test_hermes_legacy_windows_config_is_not_current_configuration_evidence(
@@ -1016,6 +1038,7 @@ def test_hermes_windows_venv_is_a_narrow_trusted_prefix(monkeypatch, tmp_path):
         ("openhands", ("home", ".local", "bin", "openhands.exe")),
         ("antigravity", ("local", "agy", "bin", "agy.exe")),
         ("opencode", ("home", ".opencode", "bin", "opencode.exe")),
+        ("amp", ("roaming", "npm", "amp.cmd")),
         ("omnigent", ("home", ".local", "bin", "omnigent.exe")),
     ],
 )

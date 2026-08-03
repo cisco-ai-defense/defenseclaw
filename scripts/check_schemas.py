@@ -76,6 +76,7 @@ EXPECTED_CLAW_MODE_ENUM = {
     "openhands",
     "antigravity",
     "opencode",
+    "amp",
     "omnigent",
     # Sentinel emitted when one gateway process serves >1 connector at once.
     # Not a connector name: the true connector is carried per-event by the

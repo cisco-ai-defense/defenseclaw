@@ -396,3 +396,17 @@ def test_windows_reparse_attribute_is_treated_as_link(lstat):
 def test_canonical_id_uses_manifest_not_space_containing_basename(tmp_path):
     source = _plugin(str(tmp_path / "source folder with spaces"), "canonical-id")
     assert canonical_plugin_id(source) == ("canonical-id", "plugin.json")
+
+
+def test_canonical_id_allows_symlinked_system_ancestor(tmp_path):
+    physical = tmp_path / "physical"
+    physical.mkdir()
+    alias = tmp_path / "alias"
+    try:
+        alias.symlink_to(physical, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation unavailable")
+
+    source = _plugin(str(alias / "plugin"), "canonical-id")
+
+    assert canonical_plugin_id(source) == ("canonical-id", "plugin.json")

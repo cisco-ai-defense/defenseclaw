@@ -193,6 +193,7 @@ func newBuiltinConnectors() []Connector {
 		NewOpenHandsConnector(),
 		NewAntigravityConnector(),
 		NewOpenCodeConnector(),
+		NewAMPConnector(),
 		NewOmnigentConnector(),
 	}
 }

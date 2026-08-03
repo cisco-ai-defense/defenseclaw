@@ -22,7 +22,7 @@ import Foundation
 enum TUIWizards {
     static let connectors = ["openclaw", "zeptoclaw", "codex", "claudecode", "hermes",
                              "cursor", "windsurf", "geminicli", "copilot", "openhands",
-                             "antigravity", "opencode", "omnigent"]
+                             "antigravity", "opencode", "amp", "omnigent"]
     static let proxyConnectors = ["openclaw", "zeptoclaw"]
     static let hookConnectors = connectors.filter { !proxyConnectors.contains($0) }
     static let llmProviders = ["anthropic", "openai", "openrouter", "azure", "gemini",

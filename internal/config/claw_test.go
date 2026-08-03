@@ -672,6 +672,240 @@ func TestConnectorHomeDir_OmnigentConfigHome(t *testing.T) {
 	}
 }
 
+func TestAMPReadsJSONCSettingsAndSkillBundledMCPWithPrecedence(t *testing.T) {
+	home := t.TempDir()
+	testenv.SetHome(t, home)
+	workspace := filepath.Join(home, "repo")
+	for _, dir := range []string{
+		filepath.Join(home, ".config", "amp"),
+		filepath.Join(home, ".config", "agents", "skills", "browser"),
+		filepath.Join(workspace, ".amp"),
+	} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	userSettings := `{
+	  // Amp uses dotted top-level setting names.
+	  "amp.mcpServers": {
+	    "user-only": {"command": "user-mcp", "args": ["--stdio"],},
+	    "shared": {"command": "user-shared"}
+	  },
+	}`
+	if err := os.WriteFile(filepath.Join(home, ".config", "amp", "settings.jsonc"), []byte(userSettings), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	workspaceSettings := `{"amp.mcpServers":{
+	  "shared":{"command":"workspace-shared"},
+	  "remote":{"url":"https://example.test/mcp","headers":{"Authorization":"${TOKEN}"}}
+	}}`
+	if err := os.WriteFile(filepath.Join(workspace, ".amp", "settings.json"), []byte(workspaceSettings), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	skillMCP := `{
+	  "skill-only":{"command":"skill-mcp"},
+	  "shared":{"command":"skill-must-not-win"}
+	}`
+	if err := os.WriteFile(filepath.Join(home, ".config", "agents", "skills", "browser", "mcp.json"), []byte(skillMCP), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &Config{}
+	cfg.Claw.WorkspaceDir = workspace
+	entries, err := cfg.ReadMCPServersForConnector("amp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := mcpEntriesByName(entries)
+	for _, want := range []string{"user-only", "shared", "remote", "skill-only"} {
+		if _, ok := byName[want]; !ok {
+			t.Fatalf("entries=%+v missing %q", entries, want)
+		}
+	}
+	if got := byName["shared"].Command; got != "workspace-shared" {
+		t.Fatalf("shared command=%q want workspace override", got)
+	}
+	if got := byName["remote"].Headers["Authorization"]; got != "${TOKEN}" {
+		t.Fatalf("remote header=%q", got)
+	}
+}
+
+func TestAMPSkillAndPluginDiscoveryHonorsSettings(t *testing.T) {
+	home := t.TempDir()
+	testenv.SetHome(t, home)
+	workspace := filepath.Join(home, "repo")
+	custom := filepath.Join(home, "team-skills")
+	pluginSkills := filepath.Join(home, ".config", "amp", "plugins", "team-plugin", "skills")
+	for _, dir := range []string{
+		filepath.Join(workspace, ".amp"),
+		custom,
+		pluginSkills,
+	} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	settings := `{
+	  "amp.skills.path": "` + strings.ReplaceAll(custom, `\`, `\\`) + `",
+	  "amp.skills.disableClaudeCodeSkills": true
+	}`
+	if err := os.WriteFile(filepath.Join(workspace, ".amp", "settings.jsonc"), []byte(settings), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &Config{}
+	cfg.Claw.WorkspaceDir = workspace
+	skills := cfg.SkillDirsForConnector("amp")
+	for _, want := range []string{
+		filepath.Join(home, ".config", "agents", "skills"),
+		filepath.Join(home, ".agents", "skills"),
+		filepath.Join(home, ".config", "amp", "skills"),
+		filepath.Join(workspace, ".agents", "skills"),
+		custom,
+		pluginSkills,
+	} {
+		if !containsPath(skills, want) {
+			t.Errorf("Amp skills=%v missing %q", skills, want)
+		}
+	}
+	for _, path := range skills {
+		if strings.Contains(path, filepath.Join(".claude", "skills")) {
+			t.Fatalf("Claude skill path present despite disable setting: %v", skills)
+		}
+	}
+	plugins := cfg.PluginDirsForConnector("amp")
+	for _, want := range []string{
+		filepath.Join(home, ".config", "amp", "plugins"),
+		filepath.Join(workspace, ".amp", "plugins"),
+	} {
+		if !containsPath(plugins, want) {
+			t.Errorf("Amp plugins=%v missing %q", plugins, want)
+		}
+	}
+	if got, want := cfg.ConnectorHomeDir("amp"), filepath.Join(home, ".config", "amp"); got != want {
+		t.Fatalf("ConnectorHomeDir(amp)=%q want %q", got, want)
+	}
+}
+
+func TestAMPClaudePluginCacheSkillsFollowDisableSetting(t *testing.T) {
+	home := t.TempDir()
+	testenv.SetHome(t, home)
+	workspace := filepath.Join(home, "repo")
+	settingsDir := filepath.Join(workspace, ".amp")
+	cachedSkills := filepath.Join(
+		home,
+		".claude",
+		"plugins",
+		"cache",
+		"marketplace",
+		"review-plugin",
+		"1.2.3",
+		"skills",
+	)
+	for _, dir := range []string{settingsDir, cachedSkills} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if skills := ampSkillDirs(home, workspace); !containsPath(skills, cachedSkills) {
+		t.Fatalf("Amp skills=%v missing Claude plugin-cache skills %q", skills, cachedSkills)
+	}
+
+	settings := `{"amp.skills.disableClaudeCodeSkills":true}`
+	if err := os.WriteFile(filepath.Join(settingsDir, "settings.json"), []byte(settings), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	skills := ampSkillDirs(home, workspace)
+	if containsPath(skills, cachedSkills) {
+		t.Fatalf("Claude plugin-cache skills present despite disable setting: %v", skills)
+	}
+	for _, path := range skills {
+		if strings.Contains(path, filepath.Join(".claude", "skills")) {
+			t.Fatalf("Claude skill path present despite disable setting: %v", skills)
+		}
+	}
+}
+
+func TestAMPSettingsReaderRejectsSymlinkAndOversize(t *testing.T) {
+	t.Run("symlink", func(t *testing.T) {
+		root := t.TempDir()
+		target := filepath.Join(root, "target.json")
+		link := filepath.Join(root, "settings.json")
+		if err := os.WriteFile(
+			target,
+			[]byte(`{"amp.skills.disableClaudeCodeSkills":true}`),
+			0o600,
+		); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(target, link); err != nil {
+			t.Skipf("symlink unavailable: %v", err)
+		}
+		if _, err := readJSONObjectJSONC(link); err == nil {
+			t.Fatal("Amp settings reader followed a symlink")
+		}
+	})
+
+	t.Run("oversize", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "settings.json")
+		if err := os.WriteFile(path, make([]byte, ampSettingsReadLimit+1), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := readJSONObjectJSONC(path); err == nil {
+			t.Fatalf("Amp settings reader accepted a file larger than %d bytes", ampSettingsReadLimit)
+		}
+	})
+}
+
+func TestAMPSkillSettingsPreferJSONAndFallBackToJSONC(t *testing.T) {
+	home := t.TempDir()
+	testenv.SetHome(t, home)
+	configDir := filepath.Join(home, ".config", "amp")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	jsonSkills := filepath.Join(home, "json-skills")
+	jsoncSkills := filepath.Join(home, "jsonc-skills")
+	jsonSettings := `{
+	  "amp.skills.path": "` + strings.ReplaceAll(jsonSkills, `\`, `\\`) + `",
+	  "amp.skills.disableClaudeCodeSkills": true
+	}`
+	jsoncSettings := `{
+	  "amp.skills.path": "` + strings.ReplaceAll(jsoncSkills, `\`, `\\`) + `",
+	  "amp.skills.disableClaudeCodeSkills": false
+	}`
+	jsonPath := filepath.Join(configDir, "settings.json")
+	jsoncPath := filepath.Join(configDir, "settings.jsonc")
+	if err := os.WriteFile(jsonPath, []byte(jsonSettings), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(jsoncPath, []byte(jsoncSettings), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	skills := ampSkillDirs(home, "")
+	if !containsPath(skills, jsonSkills) || containsPath(skills, jsoncSkills) {
+		t.Fatalf("both settings files skills=%v; want JSON only", skills)
+	}
+	for _, path := range skills {
+		if strings.Contains(path, filepath.Join(".claude", "skills")) {
+			t.Fatalf("JSON disable setting did not win: %v", skills)
+		}
+	}
+
+	if err := os.Remove(jsonPath); err != nil {
+		t.Fatal(err)
+	}
+	skills = ampSkillDirs(home, "")
+	if !containsPath(skills, jsoncSkills) || containsPath(skills, jsonSkills) {
+		t.Fatalf("JSON absent skills=%v; want JSONC fallback only", skills)
+	}
+	if !containsPath(skills, filepath.Join(home, ".claude", "skills")) {
+		t.Fatalf("JSONC fallback disable setting was not applied: %v", skills)
+	}
+}
+
 func TestHermesSurfacesHonorHermesHome(t *testing.T) {
 	hermesHome := filepath.Join(t.TempDir(), "Hermes Home")
 	t.Setenv("HERMES_HOME", hermesHome)
