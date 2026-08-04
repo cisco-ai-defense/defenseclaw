@@ -29,14 +29,15 @@ static int read_bytes(Reader *r, void *dst, size_t n) {
     r->pos += n;
     return 0;
 }
-static uint32_t read_u32(Reader *r) { uint32_t v; read_bytes(r, &v, 4); return v; }
-static uint64_t read_u64(Reader *r) { uint64_t v; read_bytes(r, &v, 8); return v; }
-static int64_t  read_i64(Reader *r) { int64_t v;  read_bytes(r, &v, 8); return v; }
-static float    read_f32(Reader *r) { float v;    read_bytes(r, &v, 4); return v; }
+static uint32_t read_u32(Reader *r) { uint32_t v = 0; read_bytes(r, &v, 4); return v; }
+static uint64_t read_u64(Reader *r) { uint64_t v = 0; read_bytes(r, &v, 8); return v; }
+static int64_t  read_i64(Reader *r) { int64_t v = 0;  read_bytes(r, &v, 8); return v; }
+static float    read_f32(Reader *r) { float v = 0.0f;    read_bytes(r, &v, 4); return v; }
 
 static char *read_str(Reader *r) {
     uint64_t len = read_u64(r);
-    if (r->pos + len > r->size) return NULL;
+    /* Guard against overflow: len could wrap r->pos beyond r->size */
+    if (len > r->size || len > r->size - r->pos) return NULL;
     char *s = (char *)malloc(len + 1);
     if (!s) return NULL;
     memcpy(s, r->data + r->pos, len);
@@ -55,7 +56,11 @@ static void skip_value(Reader *r, uint32_t vtype) {
         case GV_ARR: {
             uint32_t atype = read_u32(r);
             uint64_t alen = read_u64(r);
-            for (uint64_t i = 0; i < alen; i++) skip_value(r, atype);
+            for (uint64_t i = 0; i < alen; i++) {
+                /* Guard against buffer overrun in recursive array skip */
+                if (r->pos >= r->size) return;
+                skip_value(r, atype);
+            }
             break;
         }
     }
@@ -120,9 +125,10 @@ int gguf_open(GgufFile *gf, const char *path) {
             if (strstr(key, "rms_norm_eps"))   gf->rms_eps = val;
             else if (strstr(key, "rope.freq_base")) gf->rope_theta = val;
         } else {
+            /* Must skip value even if key read failed (NULL key) */
             skip_value(&r, vtype);
         }
-        free(key);
+        free(key); /* free(NULL) is safe */
     }
 
     if (gf->n_heads > 0 && gf->hidden_dim > 0)
@@ -135,6 +141,11 @@ int gguf_open(GgufFile *gf, const char *path) {
 
     for (int64_t i = 0; i < gf->n_tensors; i++) {
         gf->tensors[i].name = read_str(&r);
+        /* If name read fails, treat as parse error to avoid memory leak */
+        if (!gf->tensors[i].name) {
+            fprintf(stderr, "gguf: failed to read tensor name at index %lld\n", (long long)i);
+            goto bad;
+        }
         gf->tensors[i].n_dims = (int)read_u32(&r);
         for (int d = 0; d < gf->tensors[i].n_dims; d++)
             gf->tensors[i].dims[d] = (int64_t)read_u64(&r);
@@ -153,8 +164,15 @@ int gguf_open(GgufFile *gf, const char *path) {
     /* Compute nbytes per tensor from dtype and dims */
     for (int64_t i = 0; i < gf->n_tensors; i++) {
         int64_t numel = 1;
-        for (int d = 0; d < gf->tensors[i].n_dims; d++)
+        for (int d = 0; d < gf->tensors[i].n_dims; d++) {
+            /* Guard against integer overflow in tensor size calculation */
+            if (numel > INT64_MAX / gf->tensors[i].dims[d]) {
+                fprintf(stderr, "gguf: tensor %lld has overflowing dimensions\n", (long long)i);
+                numel = INT64_MAX / 2; /* Cap to safe value */
+                break;
+            }
             numel *= gf->tensors[i].dims[d];
+        }
         switch (gf->tensors[i].dtype) {
             case GGUF_TYPE_F32:  gf->tensors[i].nbytes = numel * 4; break;
             case GGUF_TYPE_F16:  gf->tensors[i].nbytes = numel * 2; break;
@@ -167,6 +185,18 @@ int gguf_open(GgufFile *gf, const char *path) {
     gf->fd = fd;
     free(buf);
     return 0;
+
+bad:
+    /* Cleanup on parse error */
+    if (gf->tensors) {
+        for (int64_t j = 0; j < gf->n_tensors; j++)
+            free(gf->tensors[j].name);
+        free(gf->tensors);
+        gf->tensors = NULL;
+    }
+    free(buf);
+    close(fd);
+    return -1;
 }
 
 void gguf_close(GgufFile *gf) {
