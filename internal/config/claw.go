@@ -403,6 +403,35 @@ func ParseMCPServersJSONArray(data []byte) ([]MCPServerEntry, error) {
 	return parseMCPServersJSONArray(data)
 }
 
+// ReadMCPFromDotMCPJSON is the exported wrapper around the internal
+// `.mcp.json` reader so AI-discovery / signature-catalog callers can
+// enumerate the servers declared inside a matched file without
+// re-implementing the "wrapped in mcpServers vs bare map" fallback.
+func ReadMCPFromDotMCPJSON(path string) ([]MCPServerEntry, error) {
+	return readMCPFromDotMCPJSON(path)
+}
+
+// ReadMCPFromClaudeSettings is the exported wrapper around the
+// Claude Code settings.json / .claude.json reader; input is a path to
+// a JSON file with a top-level `mcpServers` map.
+func ReadMCPFromClaudeSettings(path string) ([]MCPServerEntry, error) {
+	return readMCPFromClaudeSettings(path)
+}
+
+// ReadMCPFromCodexConfigTOML is the exported wrapper around the
+// Codex `~/.codex/config.toml` reader for callers that need to
+// enumerate mcp_servers entries out of a TOML file.
+func ReadMCPFromCodexConfigTOML(path string) ([]MCPServerEntry, error) {
+	return readMCPFromCodexConfigTOML(path)
+}
+
+// ReadMCPFromYAMLPath is the exported wrapper around readMCPFromYAMLPath;
+// each `paths` argument is a JSON-pointer-style chain of keys to walk
+// (e.g. `[]string{"mcp", "servers"}`).
+func ReadMCPFromYAMLPath(path string, paths ...[]string) ([]MCPServerEntry, error) {
+	return readMCPFromYAMLPath(path, paths...)
+}
+
 func workspaceSkillsDir(homeDir string, oc *openclawConfig) string {
 	workspace := filepath.Join(homeDir, "workspace")
 	if oc != nil && oc.Agents.Defaults.Workspace != "" {

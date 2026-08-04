@@ -1588,12 +1588,84 @@ func (s *ContinuousDiscoveryService) detectMCPPaths() []AISignal {
 		for _, candidate := range sig.MCPPaths {
 			for _, path := range s.expandCandidatePath(candidate) {
 				if pathExists(path) {
-					out = append(out, s.signalFromPath(sig, SignalMCPServer, "mcp", path))
+					out = append(out, s.signalFromMCPConfigPath(sig, path))
 				}
 			}
 		}
 	}
 	return out
+}
+
+// signalFromMCPConfigPath builds a SignalMCPServer signal for an MCP
+// configuration file, extending signalFromPath by parsing the file
+// and folding each declared server name into Evidence + Basenames.
+// The base config-file evidence row is preserved so PathHashes still
+// identifies the physical file (needed for lifecycle stability and
+// operator triage). Parse failures fall back to the plain file-only
+// signal so a malformed config never suppresses the "endpoint has
+// MCP configured" signal itself.
+func (s *ContinuousDiscoveryService) signalFromMCPConfigPath(sig AISignature, path string) AISignal {
+	base := AIEvidence{Type: "mcp", Basename: filepath.Base(path), PathHash: hashPath(path)}
+	if s.opts.StoreRawLocalPaths {
+		base.RawPath = path
+	}
+	evidence := []AIEvidence{base}
+	for _, name := range readMCPServerNames(path) {
+		if len(evidence) >= maxEvidencePerSignal {
+			break
+		}
+		if name = sanitizeBasenameValue(name); name == "" {
+			continue
+		}
+		evidence = append(evidence, AIEvidence{
+			Type:      "mcp_server",
+			Basename:  name,
+			ValueHash: hashValue(name),
+		})
+	}
+	out := s.signalFromEvidence(sig, SignalMCPServer, "mcp", evidence)
+	if st, err := os.Stat(path); err == nil {
+		mt := st.ModTime().UTC()
+		out.LastActiveAt = &mt
+	}
+	return out
+}
+
+// readMCPServerNames parses `path` with the appropriate format-specific
+// reader and returns the declared MCP server names. Best-effort: an
+// unreadable/unparseable/format-unknown file yields nil.
+func readMCPServerNames(path string) []string {
+	entries, err := parseMCPConfigForNames(path)
+	if err != nil || len(entries) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		name := strings.TrimSpace(e.Name)
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+// parseMCPConfigForNames dispatches to the right config parser for
+// `path` and returns MCP server entries. Kept alongside the detector
+// so future signature-catalog additions (new MCP config shapes) can
+// extend the switch in one place without changing the caller.
+func parseMCPConfigForNames(path string) ([]config.MCPServerEntry, error) {
+	lower := strings.ToLower(path)
+	base := strings.ToLower(filepath.Base(path))
+	switch {
+	case strings.HasSuffix(lower, ".toml"):
+		return config.ReadMCPFromCodexConfigTOML(path)
+	case strings.HasSuffix(lower, ".yaml") || strings.HasSuffix(lower, ".yml"):
+		return config.ReadMCPFromYAMLPath(path, []string{"mcp", "servers"}, []string{"mcpServers"})
+	case base == "settings.json" || base == "settings.local.json" || base == ".claude.json":
+		return config.ReadMCPFromClaudeSettings(path)
+	default:
+		return config.ReadMCPFromDotMCPJSON(path)
+	}
 }
 
 // dirHasEntry reports whether path exists AND, if it's a directory,
@@ -1644,7 +1716,7 @@ func (s *ContinuousDiscoveryService) detectSkills() []AISignal {
 		for _, candidate := range sig.SkillPaths {
 			for _, path := range s.expandCandidatePath(candidate) {
 				if dirHasEntry(path) {
-					out = append(out, s.signalFromPath(sig, SignalSkill, "skill", path))
+					out = append(out, s.signalFromDirectoryChildren(sig, SignalSkill, "skill", path))
 				}
 			}
 		}
@@ -1658,7 +1730,7 @@ func (s *ContinuousDiscoveryService) detectRules() []AISignal {
 		for _, candidate := range sig.RulePaths {
 			for _, path := range s.expandCandidatePath(candidate) {
 				if dirHasEntry(path) {
-					out = append(out, s.signalFromPath(sig, SignalRule, "rule", path))
+					out = append(out, s.signalFromDirectoryChildren(sig, SignalRule, "rule", path))
 				}
 			}
 		}
@@ -1672,12 +1744,93 @@ func (s *ContinuousDiscoveryService) detectPlugins() []AISignal {
 		for _, candidate := range sig.PluginPaths {
 			for _, path := range s.expandCandidatePath(candidate) {
 				if dirHasEntry(path) {
-					out = append(out, s.signalFromPath(sig, SignalPlugin, "plugin", path))
+					out = append(out, s.signalFromDirectoryChildren(sig, SignalPlugin, "plugin", path))
 				}
 			}
 		}
 	}
 	return out
+}
+
+// signalFromDirectoryChildren emits a signal whose Evidence enumerates
+// the *direct children* of a skills / rules / plugins directory, so
+// Basenames carries the actual skill / rule / plugin names on the wire
+// rather than the constant string "skills" / "rules" / "plugins" that
+// filepath.Base returns for the parent directory itself. When `path`
+// is a single file (the operator-authored scalar case, e.g.
+// `~/.claude/CLAUDE.md` as a rule), the child enumeration is skipped
+// and behaviour matches signalFromPath.
+//
+// The parent-directory row is retained as evidence[0] so PathHashes
+// still identifies the parent surface — needed for lifecycle stability
+// across scans where the child set changes but the surface does not.
+// Evidence is capped at maxEvidencePerSignal so a pathological skill
+// directory with thousands of children cannot blow up payload size.
+func (s *ContinuousDiscoveryService) signalFromDirectoryChildren(sig AISignature, category, detector, path string) AISignal {
+	base := AIEvidence{Type: detector, Basename: filepath.Base(path), PathHash: hashPath(path)}
+	if s.opts.StoreRawLocalPaths {
+		base.RawPath = path
+	}
+	evidence := []AIEvidence{base}
+	fi, statErr := os.Stat(path)
+	if statErr == nil && fi.IsDir() {
+		if entries, err := os.ReadDir(path); err == nil {
+			for _, entry := range entries {
+				if len(evidence) >= maxEvidencePerSignal {
+					break
+				}
+				name := sanitizeBasenameValue(entry.Name())
+				if name == "" {
+					continue
+				}
+				child := filepath.Join(path, entry.Name())
+				ev := AIEvidence{
+					Type:     detector + "_entry",
+					Basename: name,
+					PathHash: hashPath(child),
+				}
+				if s.opts.StoreRawLocalPaths {
+					ev.RawPath = child
+				}
+				evidence = append(evidence, ev)
+			}
+		}
+	}
+	out := s.signalFromEvidence(sig, category, detector, evidence)
+	if statErr == nil {
+		mt := fi.ModTime().UTC()
+		out.LastActiveAt = &mt
+	}
+	return out
+}
+
+// sanitizeBasenameValue returns the trimmed name if it is a legitimate
+// single-component basename (no path separators, no unicode control
+// chars) and does not exceed the wire-schema length bound. Empty
+// values, dotfiles that are OS metadata (`.DS_Store`, `Thumbs.db`),
+// and separator-bearing values are rejected. Kept in the detector
+// package so the sanitized value matches what
+// ValidateSanitizedAIDiscoveryReport will accept — a leaked separator
+// would trip the validator and drop the entire report.
+func sanitizeBasenameValue(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	if strings.ContainsAny(name, "/\\") {
+		return ""
+	}
+	if containsUnicodeControl(name) {
+		return ""
+	}
+	switch name {
+	case ".DS_Store", "Thumbs.db", "desktop.ini":
+		return ""
+	}
+	if len(name) > 255 {
+		return ""
+	}
+	return name
 }
 
 func (s *ContinuousDiscoveryService) detectBinaries() []AISignal {
