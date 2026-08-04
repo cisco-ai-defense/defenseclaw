@@ -47,13 +47,13 @@ RUNTIME_CONTRACT = {
 }
 
 WHEEL_SECURITY_FLOOR_CONTRACT = {
-    "cryptography": (">=48.0.1,<49", None),
+    "cryptography": (">=50.0.0,<51", None),
     "python-dotenv": (">=1.2.2", None),
     "python-multipart": (">=0.0.31", None),
     "urllib3": (">=2.7.0", None),
     "idna": (">=3.15", None),
     "pydantic-settings": (">=2.14.2", None),
-    "aiohttp": (">=3.14.1,<4", None),
+    "aiohttp": (">=3.14.3,<4", None),
     "pyjwt": (">=2.13.0", None),
     "starlette": (">=1.3.1,<1.4", None),
     "fastapi": (">=0.137.1,<0.138", None),
@@ -254,7 +254,7 @@ def test_scanner_metadata_intersection_is_satisfiable() -> None:
     # Textual 8.2.8: rich>=14.2; MCP scanner 4.3.0: litellm>=1.77.0;
     # project policy: Textual>=8.2.8,<9, Rich>=14.2,<15, LiteLLM>=1.84,<1.92.
     # Scanner 2.0.5-2.0.9 instead pin old LiteLLM/Textual releases, and
-    # 2.0.10-2.0.12 cap Textual<8, so 2.0.4 is the newest viable wheel.
+    # 2.0.10-2.0.13 cap Textual<8, so 2.0.4 is the newest viable wheel.
     intersections = {
         "rich": [Requirement("rich>=13"), Requirement("rich>=14.2"), Requirement("rich>=14.2,<15")],
         "textual": [Requirement("textual>=1"), Requirement("textual>=8.2.8,<9")],
