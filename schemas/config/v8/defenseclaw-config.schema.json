@@ -1006,6 +1006,13 @@
             "$ref": "#/$defs/pathString"
           }
         },
+        "home_dirs": {
+          "type": "array",
+          "maxItems": 1024,
+          "items": {
+            "$ref": "#/$defs/pathString"
+          }
+        },
         "signature_packs": {
           "type": "array",
           "maxItems": 1024,
