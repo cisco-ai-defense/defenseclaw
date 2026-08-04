@@ -19,6 +19,7 @@ package semantic
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semanticpb"
@@ -148,6 +149,52 @@ func TestCompilerAdmissionAndCache(t *testing.T) {
 				t.Fatalf("Compile() = (%v, %q)", program, code)
 			}
 		})
+	}
+}
+
+func TestCompilerConcurrentCompileAndCache(t *testing.T) {
+	compiler, err := NewCompiler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	expressions := []string{
+		`f.commands.exists(c, c.program == "rm" && ` +
+			operationDelete + ` in c.operations)`,
+		`f.tool == "shell"`,
+	}
+	const workers = 32
+	programs := make([]*Program, workers)
+	codes := make([]CompileCode, workers)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for index := range workers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			programs[index], codes[index] = compiler.Compile(
+				expressions[index%len(expressions)],
+			)
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	firstByExpression := make([]*Program, len(expressions))
+	for index, program := range programs {
+		if codes[index] != CompileOK || program == nil {
+			t.Fatalf("Compile(%q) = (%v, %q)",
+				expressions[index%len(expressions)], program, codes[index])
+		}
+		expressionIndex := index % len(expressions)
+		if firstByExpression[expressionIndex] == nil {
+			firstByExpression[expressionIndex] = program
+			continue
+		}
+		if program != firstByExpression[expressionIndex] {
+			t.Fatalf("concurrent Compile(%q) returned distinct cached programs",
+				expressions[expressionIndex])
+		}
 	}
 }
 

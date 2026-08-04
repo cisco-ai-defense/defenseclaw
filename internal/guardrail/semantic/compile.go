@@ -18,6 +18,7 @@ package semantic
 
 import (
 	"math"
+	"sync"
 	"unicode/utf8"
 
 	"github.com/google/cel-go/cel"
@@ -29,9 +30,10 @@ type cachedCompile struct {
 	code    CompileCode
 }
 
-// Compiler owns one candidate-local expression cache. It is construction
-// state, not a process-global service, and need not be used concurrently.
+// Compiler owns one candidate-local expression cache. Compile is safe for
+// concurrent use so callers may validate independent rules in parallel.
 type Compiler struct {
+	mu    sync.Mutex
 	env   *cel.Env
 	cache map[string]cachedCompile
 }
@@ -56,7 +58,12 @@ func NewCompiler() (*Compiler, error) {
 
 // Compile admits and compiles one Boolean semantic expression.
 func (c *Compiler) Compile(expression string) (*Program, CompileCode) {
-	if c == nil || c.env == nil {
+	if c == nil {
+		return nil, CompileProgram
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.env == nil {
 		return nil, CompileProgram
 	}
 	if cached, ok := c.cache[expression]; ok {
