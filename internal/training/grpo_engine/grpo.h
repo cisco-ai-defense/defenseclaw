@@ -99,4 +99,16 @@ int         grpo_load_lora(GrpoCtx *ctx, const char *path);
 int         grpo_export_merged_gguf(GrpoCtx *ctx, const char *output_path);
 GrpoStats   grpo_stats(GrpoCtx *ctx);
 
+/* ─── Math Kernels ─── */
+void grpo_rmsnorm(float *y, const float *x, const float *w, int n, float eps);
+void grpo_matmul_f32(float *out, const float *x, const float *W, int rows, int cols, int in_dim);
+void grpo_matmul_q4(float *out, const float *x, const void *W_packed, int rows, int in_dim);
+void grpo_silu(float *x, int n);
+void grpo_rope(float *q, float *k, int pos, int n_heads, int head_dim, float theta);
+void grpo_softmax(float *x, int n);
+void grpo_gqa_attention(float *out, const float *q, const float *k_cache, const float *v_cache,
+                        int n_heads, int n_kv_heads, int head_dim, int seq_pos);
+int  grpo_top_p_sample(const float *logits, int vocab_size, float temp, float top_p,
+                       unsigned int *rng_state);
+
 #endif /* GRPO_H */
