@@ -1198,7 +1198,7 @@ func TestTeardownSupersededConnectorsSwitchesConnector(t *testing.T) {
 func TestTeardownSupersededConnectorsOptOutRemovesEveryPreviousConnector(t *testing.T) {
 	transaction := setupTransaction{
 		DataRoot:           `C:\Users\tester\.defenseclaw`,
-		PreviousConnectors: []string{"codex", "claudecode"},
+		PreviousConnectors: []string{"codex", "claudecode", "amp"},
 		TargetConnector:    "none",
 	}
 	var calls []string
@@ -1212,6 +1212,7 @@ func TestTeardownSupersededConnectorsOptOutRemovesEveryPreviousConnector(t *test
 	want := []string{
 		"codex:teardown", "codex:verify",
 		"claudecode:teardown", "claudecode:verify",
+		"amp:teardown", "amp:verify",
 	}
 	if !reflect.DeepEqual(calls, want) {
 		t.Fatalf("connector opt-out calls = %v, want %v", calls, want)

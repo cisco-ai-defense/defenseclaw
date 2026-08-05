@@ -42,6 +42,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from defenseclaw.connector_paths import (
+    amp_policy_plugin_path,
     connector_config_files,
     hermes_config_path,
     omnigent_config_path,
@@ -693,7 +694,14 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
         try:
             store.init()
         except Exception as exc:  # broad: sqlite/file errors need to surface
-            setup.append(StepResult("Audit DB", "fail", str(exc), "defenseclaw doctor --fix"))
+            setup.append(
+                StepResult(
+                    "Audit DB",
+                    "fail",
+                    str(exc),
+                    "defenseclaw doctor --fix --dry-run",
+                )
+            )
         # A genuinely new/pre-v8 bootstrap has no canonical graph yet. Re-running
         # first-run against v8 must use the live owner and must not silently drop
         # ordinary v8 setup mutations.
@@ -705,7 +713,9 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
 
         bootstrap = bootstrap_env(cfg, logger)
         if bootstrap.errors:
-            setup.extend(StepResult("Bootstrap", "fail", e, "defenseclaw doctor --fix") for e in bootstrap.errors)
+            setup.extend(
+                StepResult("Bootstrap", "fail", e, "defenseclaw doctor --fix --dry-run") for e in bootstrap.errors
+            )
         else:
             setup.append(StepResult("Bootstrap", "pass", cfg.data_dir))
 
@@ -803,7 +813,11 @@ def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult
             "Audit database",
             "pass" if os.path.isfile(cfg.audit_db) else "fail",
             cfg.audit_db,
-            "defenseclaw doctor --fix" if not os.path.isfile(cfg.audit_db) else "",
+            (
+                "defenseclaw doctor --fix --fix-id doctor.state.audit-db.initialize"
+                if not os.path.isfile(cfg.audit_db)
+                else ""
+            ),
         )
     )
     device_key = cfg.gateway.device_key_file
@@ -812,7 +826,11 @@ def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult
             "Device key",
             "pass" if device_key and os.path.isfile(device_key) else "fail",
             device_key or "(unset)",
-            "defenseclaw doctor --fix" if not (device_key and os.path.isfile(device_key)) else "",
+            (
+                "defenseclaw doctor --fix --fix-id doctor.identity.device-key.initialize"
+                if not (device_key and os.path.isfile(device_key))
+                else ""
+            ),
         )
     )
 
@@ -1361,11 +1379,10 @@ def _pid_file_running(pid_file: str) -> bool:
     planted or staled gateway.pid could make ``quickstart``/``init`` skip
     starting the sidecar — generated hooks then forwarded uninspected traffic
     because the default fail mode for the inspect hook is "open" until the
-    gateway is up. We additionally require the PID's argv0 to match a known
-    gateway binary name (POSIX, via /proc or ``ps``). Windows has no equally
-    cheap argv0 probe and the Go daemon's ``processExists``
-    (internal/daemon/proc_windows.go) is liveness-only too, so there a live
-    PID is accepted.
+    gateway is up. We additionally require the PID's process image to match a
+    known gateway binary name. POSIX uses ``/proc`` or ``ps``; Windows uses
+    ``QueryFullProcessImageNameW`` through the shared fail-closed identity
+    verifier.
     """
     from defenseclaw.process_liveness import pid_alive, read_pid_file
 
@@ -1374,8 +1391,6 @@ def _pid_file_running(pid_file: str) -> bool:
         return False
     if not pid_alive(pid):
         return False
-    if os.name == "nt":
-        return True
     return _pid_looks_like_gateway(pid)
 
 
@@ -1495,6 +1510,25 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
             "warn",
             "OpenCode bridge plugin not found yet",
             "defenseclaw setup opencode",
+        )
+    if connector == "amp":
+        # Amp's DefenseClaw plugin is global even when a workspace is set.
+        # Do not select it by position from ``connector_config_files``:
+        # that list includes optional workspace files and managed settings,
+        # so its indices are intentionally not a stable artifact contract.
+        path = amp_policy_plugin_path()
+        try:
+            plugin_text = Path(path).read_text(encoding="utf-8")
+            configured = "DefenseClaw" in plugin_text and "/api/v1/amp/hook" in plugin_text
+        except (OSError, UnicodeError):
+            configured = False
+        if configured:
+            return StepResult("Connector", "pass", f"Amp system policy plugin found at {path}")
+        return StepResult(
+            "Connector",
+            "warn",
+            f"Amp system policy plugin not found at {path}",
+            "defenseclaw setup amp",
         )
     if connector == "omnigent":
         path = omnigent_config_path()

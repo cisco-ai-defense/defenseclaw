@@ -128,6 +128,170 @@ def _write_current_runtime(cfg: SimpleNamespace, home: Path, modes: dict[str, st
     )
 
 
+def _write_current_amp_runtime(
+    cfg: SimpleNamespace,
+    plugin_path: Path,
+    mode: str,
+) -> None:
+    plugin_path.parent.mkdir(parents=True, exist_ok=True)
+    plugin_body = (
+        "// defenseclaw-managed-plugin v2\n"
+        f'const DC_FAIL_MODE: string = "{mode}"\n'
+        'const endpoint = "/api/v1/amp/hook"\n'
+        'amp.on("session.start", () => {})\n'
+        'amp.on("agent.start", () => {})\n'
+        'amp.on("tool.call", () => {})\n'
+        'amp.on("tool.result", () => {})\n'
+        'amp.on("agent.end", () => {})\n'
+    ).encode()
+    plugin_path.write_bytes(plugin_body)
+    entry = {
+        "connector": "amp",
+        "contract_id": "amp-plugin-v1",
+        "compatibility_status": "known",
+        "hook_script_version": "v2",
+        "hook_script_digests": {
+            "defenseclaw.ts": "sha256:" + hashlib.sha256(plugin_body).hexdigest(),
+        },
+        "locations": {
+            "hook_config_paths": [str(plugin_path)],
+            "hook_script_paths": [str(plugin_path)],
+        },
+        "hook_fail_mode": mode,
+    }
+    (Path(cfg.data_dir) / "hook_contract_lock.json").write_text(
+        json.dumps({"version": 2, "connectors": {"amp": entry}}),
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize("windows", [False, True])
+def test_amp_runtime_is_resolved_from_baked_plugin_on_every_platform(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    windows: bool,
+) -> None:
+    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"amp": "closed"})
+    plugin_path = tmp_path / "amp-home" / "plugins" / "defenseclaw.ts"
+    _write_current_amp_runtime(cfg, plugin_path, "closed")
+    monkeypatch.setattr("defenseclaw.fail_mode.amp_policy_plugin_path", lambda: str(plugin_path))
+    monkeypatch.setattr("defenseclaw.fail_mode._is_windows", lambda: windows)
+
+    state = resolve_connector_fail_mode(cfg, "amp")
+
+    assert state.current
+    assert state.runtime == "closed"
+    assert state.provenance == "amp-plugin"
+    assert dict(state.sources)["registration-lock"] == "closed"
+    assert state.drift == ()
+
+
+def test_amp_runtime_ignores_invoking_process_fail_mode(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"amp": "closed"})
+    plugin_path = tmp_path / "amp-home" / "plugins" / "defenseclaw.ts"
+    _write_current_amp_runtime(cfg, plugin_path, "closed")
+    monkeypatch.setattr("defenseclaw.fail_mode.amp_policy_plugin_path", lambda: str(plugin_path))
+    monkeypatch.setenv("DEFENSECLAW_FAIL_MODE", "open")
+
+    state = resolve_connector_fail_mode(cfg, "amp")
+
+    assert state.current
+    assert state.runtime == "closed"
+    assert all(source != "process-env" for source, _mode in state.sources)
+
+
+def test_amp_runtime_reports_plugin_and_digest_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"amp": "closed"})
+    plugin_path = tmp_path / "amp-home" / "plugins" / "defenseclaw.ts"
+    _write_current_amp_runtime(cfg, plugin_path, "closed")
+    monkeypatch.setattr("defenseclaw.fail_mode.amp_policy_plugin_path", lambda: str(plugin_path))
+    plugin_path.write_text(
+        plugin_path.read_text(encoding="utf-8").replace(
+            'const DC_FAIL_MODE: string = "closed"',
+            'const DC_FAIL_MODE: string = "open"',
+        ),
+        encoding="utf-8",
+    )
+
+    state = resolve_connector_fail_mode(cfg, "amp")
+
+    assert not state.current
+    assert state.runtime == "open"
+    assert "amp-plugin-open" in state.drift
+    assert "registration-digest-stale" in state.drift
+
+
+def test_amp_runtime_requires_exact_five_callback_registration(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"amp": "closed"})
+    plugin_path = tmp_path / "amp-home" / "plugins" / "defenseclaw.ts"
+    _write_current_amp_runtime(cfg, plugin_path, "closed")
+    monkeypatch.setattr("defenseclaw.fail_mode.amp_policy_plugin_path", lambda: str(plugin_path))
+    plugin_path.write_text(
+        plugin_path.read_text(encoding="utf-8").replace('amp.on("tool.result"', 'amp.on("tool.output"'),
+        encoding="utf-8",
+    )
+
+    state = resolve_connector_fail_mode(cfg, "amp")
+
+    assert not state.current
+    assert "registration-command-stale" in state.drift
+    assert "registration-digest-stale" in state.drift
+
+
+def test_scoped_amp_fail_mode_refreshes_plugin_registration(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"amp": "open", "codex": "open"})
+    plugin_path = tmp_path / "amp-home" / "plugins" / "defenseclaw.ts"
+    _write_current_amp_runtime(cfg, plugin_path, "open")
+    monkeypatch.setattr("defenseclaw.fail_mode.amp_policy_plugin_path", lambda: str(plugin_path))
+    app = AppContext()
+    app.cfg = cfg
+    app.logger = MagicMock()
+
+    with patch("defenseclaw.commands.cmd_guardrail.reconcile_connector_registration") as reconcile:
+        result = CliRunner().invoke(
+            cmd_guardrail.fail_mode_cmd,
+            ["closed", "--connector", "amp", "--yes"],
+            obj=app,
+        )
+
+    assert result.exit_code == 0, result.output
+    assert cfg.guardrail.connectors["amp"].hook_fail_mode == "closed"
+    reconcile.assert_called_once_with(cfg, "amp")
+
+
+def test_global_amp_fail_mode_refreshes_plugin_registration(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    cfg, _home = _runtime_cfg(monkeypatch, tmp_path, {"amp": "open"})
+    plugin_path = tmp_path / "amp-home" / "plugins" / "defenseclaw.ts"
+    _write_current_amp_runtime(cfg, plugin_path, "open")
+    monkeypatch.setattr("defenseclaw.fail_mode.amp_policy_plugin_path", lambda: str(plugin_path))
+    app = AppContext()
+    app.cfg = cfg
+    app.logger = MagicMock()
+
+    with patch("defenseclaw.commands.cmd_guardrail.reconcile_connector_registration") as reconcile:
+        result = CliRunner().invoke(cmd_guardrail.fail_mode_cmd, ["closed", "--yes"], obj=app)
+
+    assert result.exit_code == 0, result.output
+    assert cfg.guardrail.hook_fail_mode == "closed"
+    assert cfg.guardrail.connectors["amp"].hook_fail_mode == "closed"
+    reconcile.assert_called_once_with(cfg, "amp")
+
+
 def test_fail_mode_state_reports_effective_provenance() -> None:
     state = ConnectorFailModeState(
         connector="codex",
@@ -237,9 +401,7 @@ def test_windows_codex_presence_uses_native_registration_validator(
     assert "registration-missing" not in state.drift
 
 
-def test_windows_resolver_reports_effective_mixed_modes(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_windows_resolver_reports_effective_mixed_modes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "closed", "codex": "open"})
     _write_current_runtime(cfg, home, {"claudecode": "closed", "codex": "open"})
     with (
@@ -291,9 +453,7 @@ def test_cli_status_reports_effective_mixed_modes_without_drift(
     assert "runtime fail-mode drift" not in result.output
 
 
-def test_stale_persisted_closed_runtime_open_is_not_current(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_stale_persisted_closed_runtime_open_is_not_current(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "closed", "codex": "open"})
     _write_current_runtime(cfg, home, {"claudecode": "open", "codex": "open"})
     with (
@@ -307,9 +467,7 @@ def test_stale_persisted_closed_runtime_open_is_not_current(
     assert "claude-env-open" in state.drift
 
 
-def test_stale_closed_never_reports_already_closed(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_stale_closed_never_reports_already_closed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "closed", "codex": "open"})
     _write_current_runtime(cfg, home, {"claudecode": "open", "codex": "open"})
     app = AppContext()
@@ -422,9 +580,7 @@ def test_scoped_reconcile_failure_rolls_back_config_and_registration(
     assert "restored" in result.output
 
 
-def test_truthful_noop_requires_current_runtime(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_truthful_noop_requires_current_runtime(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "closed", "codex": "open"})
     _write_current_runtime(cfg, home, {"claudecode": "closed", "codex": "open"})
     app = AppContext()
@@ -448,9 +604,7 @@ def test_truthful_noop_requires_current_runtime(
     cfg.save.assert_not_called()
 
 
-def test_stale_registered_script_digest_rejects_noop(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_stale_registered_script_digest_rejects_noop(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "closed", "codex": "open"})
     _write_current_runtime(cfg, home, {"claudecode": "closed", "codex": "open"})
     (Path(cfg.data_dir) / "hooks" / "claude-code-hook.sh").write_text("stale launcher", encoding="utf-8")
@@ -463,9 +617,7 @@ def test_stale_registered_script_digest_rejects_noop(
     assert "registration-digest-stale" in state.drift
 
 
-def test_stale_windows_launcher_digest_rejects_noop(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_stale_windows_launcher_digest_rejects_noop(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "closed", "codex": "open"})
     _write_current_runtime(cfg, home, {"claudecode": "closed", "codex": "open"})
     (home / ".local" / "bin" / "defenseclaw-hook.exe").write_bytes(b"MZstale-launcher")
@@ -525,9 +677,7 @@ def test_divergent_v1_shared_digests_require_controlled_migration(
     assert "registration-shared-digest-divergent" in codex.drift
 
 
-def test_single_connector_v1_shared_digests_remain_compatible(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_single_connector_v1_shared_digests_remain_compatible(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "closed"})
     _write_current_runtime(cfg, home, {"claudecode": "closed"})
     lock_path = Path(cfg.data_dir) / "hook_contract_lock.json"
@@ -544,9 +694,7 @@ def test_single_connector_v1_shared_digests_remain_compatible(
     assert state.current
 
 
-def test_single_connector_v1_missing_shared_digests_is_stale(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_single_connector_v1_missing_shared_digests_is_stale(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     cfg, home = _runtime_cfg(monkeypatch, tmp_path, {"claudecode": "closed"})
     _write_current_runtime(cfg, home, {"claudecode": "closed"})
     lock_path = Path(cfg.data_dir) / "hook_contract_lock.json"

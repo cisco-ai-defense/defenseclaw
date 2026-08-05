@@ -137,9 +137,11 @@ type Event struct {
 	Enforced    bool   `json:"enforced,omitempty"`
 	RulePackDir string `json:"rule_pack_dir,omitempty"`
 
-	// Structured carries sanitized machine-readable data for sink fanout.
-	// It is intentionally not persisted in SQLite audit_events; callers that
-	// need durable structured records should use their native table/log path.
+	// Structured carries sanitized machine-readable data for sink fanout
+	// AND is persisted verbatim in the SQLite audit_events.structured_json
+	// column (see migration 14). Downstream queries — the Alerts counter
+	// via connector-hook severity, the alert-acknowledgement projection —
+	// key off this durable column.
 	Structured map[string]any `json:"structured,omitempty"`
 
 	// RedactionEnabled carries the cloud-controlled per-inspection
@@ -3634,7 +3636,22 @@ func (s *Store) GetCounts() (Counts, error) {
 		{`SELECT COUNT(*) FROM actions WHERE target_type = 'skill' AND json_extract(actions_json, '$.install') = 'allow'`, &c.AllowedSkills},
 		{`SELECT COUNT(*) FROM actions WHERE target_type = 'mcp' AND json_extract(actions_json, '$.install') = 'block'`, &c.BlockedMCPs},
 		{`SELECT COUNT(*) FROM actions WHERE target_type = 'mcp' AND json_extract(actions_json, '$.install') = 'allow'`, &c.AllowedMCPs},
-		{`SELECT COUNT(*) FROM audit_events WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW')`, &c.Alerts},
+		// Alerts feeds the IPC GetStatsSnapshot ActiveAlerts field. The
+		// severity column is the primary source, but connector-hook rows
+		// are hardcoded to INFO on the column (see
+		// gateway.logConnectorHookAuditEnvelope — a deliberate
+		// noise-reduction choice because every tool call produces a row).
+		// The real verdict severity for those rows lives on the
+		// structured_json envelope, so we OR in a JSON-extract branch
+		// scoped to action='connector-hook' to pick up enforced blocks /
+		// high-severity findings that would otherwise be invisible on the
+		// IPC stat (the managed_enterprise deployment mode's sole
+		// enforcement path is hooks, which is where this used to pin at 0).
+		// The two branches are disjoint by column value, so no double-count.
+		{`SELECT COUNT(*) FROM audit_events
+			 WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW')
+			    OR (action = 'connector-hook'
+			        AND json_extract(structured_json, '$.severity') IN ('CRITICAL','HIGH','MEDIUM','LOW'))`, &c.Alerts},
 		{`SELECT COUNT(*) FROM scan_results`, &c.TotalScans},
 		{`SELECT COUNT(*) FROM network_egress_events WHERE blocked = 1`, &c.BlockedEgressCalls},
 	}

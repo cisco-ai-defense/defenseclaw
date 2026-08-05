@@ -2304,7 +2304,9 @@ func isGenericToolInspectionEvent(event string) bool {
 		// opencode plugin hook: tool.execute.before fires before a tool
 		// runs; the DefenseClaw bridge plugin throws to abort it. Routes
 		// through inspectToolPolicy so tool-call rules can block.
-		"toolexecutebefore":
+		"toolexecutebefore",
+		// Amp's documented synchronous pre-execution plugin request.
+		"toolcall":
 		return true
 	default:
 		return false
@@ -2315,6 +2317,8 @@ func isPromptLikeEvent(event string) bool {
 	switch canonicalEvent(event) {
 	case "userpromptsubmit", "userpromptsubmitted", "beforesubmitprompt", "preuserprompt", "subagentstart",
 		"prellmcall", "beforeagent", "beforemodel",
+		// Amp agent.start carries the exact user prompt and stable message ID.
+		"agentstart",
 		// Antigravity 2.0 spec: PreInvocation fires just before the
 		// agent makes an invocation (call) to the LLM. Best used for
 		// dynamically injecting context, modifying system instructions,
@@ -2344,6 +2348,10 @@ func isResultLikeEvent(event string) bool {
 		// opencode plugin hook: tool.execute.after fires after a tool
 		// returns; observe-only telemetry routed as a tool_result.
 		"toolexecuteafter",
+		// Amp tool.result is terminal after tool execution, but its plugin
+		// result can replace unsafe output before model delivery. agent.end
+		// carries only projected assistant text and remains observe-only.
+		"toolresult", "agentend",
 		// Antigravity 2.0 spec: PostInvocation fires after the LLM
 		// invocation completes and all associated tool calls have
 		// finished running. Best used for post-processing outputs,

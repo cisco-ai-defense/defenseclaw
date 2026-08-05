@@ -16,7 +16,9 @@ import json
 import os
 import re
 import subprocess
+import sys
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
@@ -121,6 +123,37 @@ class RotateTokenFileWriteTests(unittest.TestCase):
                 b"DEFENSECLAW_GATEWAY_TOKEN=" + b"b" * 64 + b"\r\n",
             )
 
+    def test_renderer_removes_exact_legacy_key_but_preserves_prefixed_keys(self) -> None:
+        secret = "replacement-token-that-must-stay-redacted"
+        snapshot = cmd_setup._RotateTokenDotenvSnapshot(
+            existed=True,
+            body=(
+                b"OPENCLAW_GATEWAY_TOKEN=exposed-a\r\n"
+                b"OPENCLAW_GATEWAY_TOKEN_SUFFIX=keep-legacy-prefix\r\n"
+                b"XOPENCLAW_GATEWAY_TOKEN=keep-leading-prefix\r\n"
+                b"DEFENSECLAW_GATEWAY_TOKEN=exposed-b\r\n"
+                b"DEFENSE"
+                b"CLAW_GATEWAY_TOKEN_BACKUP=keep-canonical-prefix\r\n"
+            ),
+            mode=0o644,
+        )
+
+        body = cmd_setup._rotate_token_render(snapshot, secret)
+
+        self.assertNotIn(b"OPENCLAW_GATEWAY_TOKEN=exposed-a", body)
+        self.assertNotIn(b"DEFENSECLAW_GATEWAY_TOKEN=exposed-b", body)
+        self.assertIn(
+            b"OPENCLAW_GATEWAY_TOKEN_SUFFIX=keep-legacy-prefix\r\n",
+            body,
+        )
+        self.assertIn(b"XOPENCLAW_GATEWAY_TOKEN=keep-leading-prefix\r\n", body)
+        self.assertIn(
+            b"DEFENSE" + b"CLAW_GATEWAY_TOKEN_BACKUP=keep-canonical-prefix\r\n",
+            body,
+        )
+        self.assertEqual(body.count(b"DEFENSECLAW_GATEWAY_TOKEN="), 1)
+        self.assertTrue(body.endswith(f"DEFENSECLAW_GATEWAY_TOKEN={secret}\r\n".encode()))
+
     def test_atomic_via_replace(self) -> None:
         """A failure mid-write must NOT leave the original .env truncated.
         We simulate this by failing the shared durable-replacement primitive;
@@ -177,6 +210,90 @@ class RotateTokenCommandFlowTests(unittest.TestCase):
                 os.environ.pop(name, None)
             else:
                 os.environ[name] = value
+
+    def test_lifecycle_executable_never_returns_a_bare_name(self) -> None:
+        canonical = os.path.realpath(sys.executable)
+        with (
+            mock.patch(
+                "defenseclaw.gateway.packaged_windows_install_root",
+                return_value=None,
+            ),
+            mock.patch(
+                "defenseclaw.commands.cmd_setup.shutil.which",
+                return_value="defenseclaw-gateway",
+            ),
+            mock.patch(
+                "defenseclaw.gateway.canonical_install_path",
+                return_value=canonical,
+            ),
+            mock.patch(
+                "defenseclaw.commands.cmd_setup._trusted_gateway_lifecycle_executable",
+                side_effect=lambda path: path,
+            ) as trust,
+        ):
+            executable = cmd_setup._gateway_lifecycle_executable()
+
+        self.assertIsNotNone(executable)
+        self.assertTrue(os.path.isabs(executable))
+        self.assertNotEqual(executable, "defenseclaw-gateway")
+        self.assertEqual(os.path.normcase(executable or ""), os.path.normcase(canonical))
+        trust.assert_called_once_with(str(Path(canonical).resolve()))
+
+    def test_lifecycle_executable_uses_only_absolute_non_current_path_entries(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as td:
+            current = os.path.join(td, "current")
+            allowed = os.path.join(td, "allowed")
+            os.makedirs(current)
+            os.makedirs(allowed)
+            raw_search_path = os.pathsep.join(("", os.curdir, current, "relative-bin", allowed, allowed))
+            previous = os.getcwd()
+            try:
+                os.chdir(current)
+                with (
+                    mock.patch(
+                        "defenseclaw.gateway.packaged_windows_install_root",
+                        return_value=None,
+                    ),
+                    mock.patch(
+                        "defenseclaw.commands.cmd_setup.shutil.which",
+                        return_value=None,
+                    ) as which,
+                    mock.patch(
+                        "defenseclaw.gateway.canonical_install_path",
+                        return_value=os.path.join(td, "missing"),
+                    ),
+                ):
+                    self.assertIsNone(
+                        cmd_setup._gateway_lifecycle_executable(
+                            search_path=raw_search_path,
+                        )
+                    )
+            finally:
+                os.chdir(previous)
+
+        which.assert_called_once_with(
+            "defenseclaw-gateway",
+            path=os.path.abspath(allowed),
+        )
+
+    def test_packaged_lifecycle_does_not_fall_back_when_sibling_is_missing(self) -> None:
+        with (
+            mock.patch(
+                "defenseclaw.gateway.packaged_windows_install_root",
+                return_value="C:\\Program Files\\DefenseClaw",
+            ),
+            mock.patch(
+                "defenseclaw.gateway.packaged_windows_gateway_path",
+                return_value=None,
+            ),
+            mock.patch("defenseclaw.gateway.resolve_gateway_binary") as resolve,
+        ):
+            executable = cmd_setup._gateway_lifecycle_executable()
+
+        self.assertIsNone(executable)
+        resolve.assert_not_called()
 
     def test_connector_state_serializes_exact_dual_and_mixed_postures(self) -> None:
         cases = {
@@ -741,6 +858,64 @@ class RotateTokenCommandFlowTests(unittest.TestCase):
         self.assertEqual(restored_config, original_config)
         self.assertNotIn("b" * 64, result.output)
         self.assertNotIn("Hook scripts refreshed", result.output)
+
+    def test_exposure_transaction_failure_never_restarts_compromised_a(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as td:
+            app = _make_rotate_ctx(td, ["codex"])
+            dotenv = os.path.join(td, ".env")
+            old_token = "a" * 64
+            new_token = "b" * 64
+            original = b"KEEP=exact\r\n" + b"DEFENSECLAW_GATEWAY_TOKEN=" + old_token.encode() + b"\r\n"
+            with open(dotenv, "wb") as fh:
+                fh.write(original)
+            events: list[tuple[str, bool, str]] = []
+
+            def lifecycle(
+                _data_dir: str,
+                action: str,
+                *,
+                token: str,
+                config_file: str,
+                connector_state: str | None = None,
+                cleanup: bool = False,
+            ) -> None:
+                events.append((action, cleanup, token))
+                if action == "start":
+                    raise click.ClickException("gateway B activation failed")
+
+            with (
+                mock.patch.object(cmd_setup, "load_config", return_value=app.cfg),
+                mock.patch.object(cmd_setup, "_is_pid_alive", return_value=True),
+                mock.patch.object(
+                    cmd_setup,
+                    "_run_rotate_token_lifecycle",
+                    side_effect=lifecycle,
+                ),
+                self.assertRaises(click.ClickException),
+            ):
+                cmd_setup._rotate_token_transaction(
+                    app,
+                    dotenv,
+                    new_token,
+                    "action=doctor-exposure-rotation restart=true",
+                    recover_previous_runtime=False,
+                )
+
+            with open(dotenv, "rb") as fh:
+                restored = fh.read()
+
+        self.assertEqual(
+            events,
+            [
+                ("stop", False, old_token),
+                ("start", False, new_token),
+                ("stop", True, new_token),
+            ],
+        )
+        self.assertEqual(restored, original)
+        self.assertNotIn(("start", False, old_token), events)
 
 
 if __name__ == "__main__":

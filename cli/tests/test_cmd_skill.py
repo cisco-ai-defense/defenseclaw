@@ -26,6 +26,7 @@ import tempfile
 import unittest
 import uuid
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import click
@@ -38,6 +39,7 @@ from defenseclaw.commands.cmd_skill import (
     _build_scan_map,
     _get_openclaw_skill_info,
     _skill_display_name,
+    _skill_install_targets,
     _skill_status_display,
     skill,
 )
@@ -73,6 +75,20 @@ class TestOpenClawSkillInfo(unittest.TestCase):
     @patch("defenseclaw.commands.cmd_skill._run_openclaw", return_value='{"error": ""}')
     def test_empty_error_field_is_still_an_error(self, _mock_run):
         self.assertIsNone(_get_openclaw_skill_info("missing"))
+
+
+class TestSkillInstallTargets(unittest.TestCase):
+    def test_uses_connector_write_scope_instead_of_discovery_precedence(self):
+        cfg = SimpleNamespace(
+            skill_dirs=lambda _connector: ["/global/discovery"],
+            skill_write_dirs=lambda _connector: ["/workspace/.agents/skills"],
+        )
+        app = SimpleNamespace(cfg=cfg)
+
+        self.assertEqual(
+            _skill_install_targets(app, ["amp"], explicit_connector=True),
+            [("amp", "/workspace/.agents/skills")],
+        )
 
 
 class TestSkillBlock(SkillCommandTestBase):

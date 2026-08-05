@@ -200,6 +200,7 @@ register a connector hook route.
 | `POST` | `/api/v1/antigravity/hook` | Antigravity | same |
 | `POST` | `/api/v1/hermes/hook` | Hermes | same |
 | `POST` | `/api/v1/opencode/hook` | OpenCode | same |
+| `POST` | `/api/v1/amp/hook` | Amp | [`internal/gateway/connector/amp.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/connector/amp.go) |
 | `POST` | `/api/v1/omnigent/hook` | OmniGent | [`internal/gateway/connector/omnigent.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/connector/omnigent.go) |
 
 All hook endpoints share a per-IP rate limiter (20 RPS, burst 40 — see `hookLimiter` in api.go). Loopback callers (the on-host hook scripts) are exempt; the limit only applies to remote callers.

@@ -87,10 +87,11 @@ _CONNECTOR_LABELS = {
     "openhands": "OpenHands",
     "antigravity": "Antigravity",
     "opencode": "OpenCode",
+    "amp": "Amp",
     "omnigent": "OmniGent",
 }
 
-_RUNTIME_FAIL_MODE_CONNECTORS = frozenset({"claudecode", "codex"})
+_RUNTIME_FAIL_MODE_CONNECTORS = frozenset({"claudecode", "codex", "amp"})
 
 
 def _preflight_config_write(app: AppContext) -> None:

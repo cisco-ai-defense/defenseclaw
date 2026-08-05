@@ -75,7 +75,8 @@
                 ".openclaw/extensions/defenseclaw",
                 ".zeptoclaw/extensions/defenseclaw",
                 ".claude/extensions/defenseclaw",
-                ".codex/extensions/defenseclaw"
+                ".codex/extensions/defenseclaw",
+                ".config/amp/plugins/defenseclaw.ts"
               ]
             },
             {
@@ -2576,7 +2577,8 @@
                 ".openclaw/extensions/defenseclaw",
                 ".zeptoclaw/extensions/defenseclaw",
                 ".claude/extensions/defenseclaw",
-                ".codex/extensions/defenseclaw"
+                ".codex/extensions/defenseclaw",
+                ".config/amp/plugins/defenseclaw.ts"
               ]
             },
             {
@@ -5000,7 +5002,8 @@
                 ".openclaw/extensions/defenseclaw",
                 ".zeptoclaw/extensions/defenseclaw",
                 ".claude/extensions/defenseclaw",
-                ".codex/extensions/defenseclaw"
+                ".codex/extensions/defenseclaw",
+                ".config/amp/plugins/defenseclaw.ts"
               ]
             },
             {

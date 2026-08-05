@@ -120,6 +120,24 @@
       "notes": "Governed by a DefenseClaw JS bridge plugin auto-loaded from ~/.config/opencode/plugins/defenseclaw.js (no opencode.json edit). tool.execute.before POSTs to /api/v1/opencode/hook and throws new Error(reason) to abort the tool on a block decision; tool.execute.after is observe-only. Fail-closed is genuine — the bridge throws when the gateway is unreachable and FAIL_MODE=closed."
     },
     {
+      "id": "amp",
+      "label": "Amp",
+      "summary": "Synchronous policy plugin with five lifecycle events and native confirmation.",
+      "family": "hooks",
+      "toolInspection": "pre-execution + response-scan",
+      "subprocessPolicy": "none",
+      "hooks": {
+        "canBlock": true,
+        "canAskNative": true,
+        "askEvents": ["tool.call", "tool.result"],
+        "blockEvents": ["tool.call", "tool.result"],
+        "supportsFailClosed": true,
+        "scope": "user"
+      },
+      "hilt": "Amp can ask in the active foreground thread during tool.call and before a tool.result reaches the model. Denial, a background thread, or unavailable plugin UI rejects the call or withholds the result rather than silently allowing it.",
+      "notes": "A managed TypeScript plugin at ~/.config/amp/plugins/defenseclaw.ts forwards session.start, agent.start, tool.call, tool.result, and agent.end to /api/v1/amp/hook. tool.call is synchronously enforceable before execution, and tool.result can be replaced before model delivery but cannot undo completed side effects. Execute mode must use --plugin-ready-timeout 30 for lifecycle capture and guard readiness. Amp's reported custom-agent definition or built-in mode enriches Agent360 without being treated as a stable ID, request trace, or parent link. Delegation tools such as Task and oracle are governed at launch, and any emitted child-thread events remain independently correlated unless Amp supplies canonical parent evidence. No native OTLP or W3C traceparent channel is advertised."
+    },
+    {
       "id": "omnigent",
       "label": "OmniGent",
       "summary": "Custom policy bridge with allow, ask, and deny enforcement.",

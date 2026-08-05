@@ -68,7 +68,8 @@ first_party_allow_list:
   # sibling plugin/skill could be dropped into to spoof first-party status.
   #
   # F-0902: every marker MUST be anchored to a DefenseClaw/agent-framework
-  # *home* the operator owns (".openclaw", ".zeptoclaw", ".claude", ".codex").
+  # *home* the operator owns (".openclaw", ".zeptoclaw", ".claude", ".codex",
+  # or Amp's exact managed bridge file under ".config/amp/plugins").
   # A bare relative marker such as "extensions/defenseclaw" or "skills/codeguard"
   # matches the same component sequence under ANY parent, so an attacker who
   # drops "<untrusted-home>/extensions/defenseclaw" inherits the first-party
@@ -81,6 +82,7 @@ first_party_allow_list:
       - ".zeptoclaw/extensions/defenseclaw"
       - ".claude/extensions/defenseclaw"
       - ".codex/extensions/defenseclaw"
+      - ".config/amp/plugins/defenseclaw.ts"
   - target_type: skill
     target_name: codeguard
     reason: first-party DefenseClaw skill

@@ -4389,7 +4389,12 @@ def _skill_install_targets(
     targets: list[tuple[str, str]] = []
     skipped: list[str] = []
     for connector in connectors:
-        dirs = [d for d in app.cfg.skill_dirs(connector) if d]
+        resolver = (
+            getattr(app.cfg, "skill_write_dirs", app.cfg.skill_dirs)
+            if _normalize_runtime_connector(connector) == "amp"
+            else app.cfg.skill_dirs
+        )
+        dirs = [d for d in resolver(connector) if d]
         if not dirs:
             skipped.append(connector)
             continue

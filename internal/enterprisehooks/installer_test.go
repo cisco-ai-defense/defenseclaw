@@ -6,6 +6,7 @@ package enterprisehooks
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -157,6 +158,156 @@ func TestInstallOmnigentPolicyModuleThroughGuardian(t *testing.T) {
 	}
 	if !strings.Contains(string(configData), "defenseclaw_omnigent_policy.defenseclaw_policy") {
 		t.Fatalf("OmniGent config does not reference DefenseClaw policy module:\n%s", configData)
+	}
+}
+
+func TestInstallAMPManagedPluginThroughGuardian(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
+	skipIfRoot(t)
+	home := newTestHome(t)
+	pluginPath := filepath.Join(home, ".config", "amp", "plugins", "defenseclaw.ts")
+	previousPluginPath := connector.AMPPluginPathOverride
+	connector.AMPPluginPathOverride = ""
+	t.Cleanup(func() { connector.AMPPluginPathOverride = previousPluginPath })
+	if _, err := os.Lstat(pluginPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("precondition: Amp plugin must be absent before first install: %v", err)
+	}
+
+	opts := InstallOptions{
+		ConnectorName: "amp",
+		UserHome:      home,
+		OwnerUID:      os.Getuid(),
+		OwnerGID:      os.Getgid(),
+		APIAddr:       "127.0.0.1:18970",
+		ProxyAddr:     "127.0.0.1:4000",
+		APIToken:      "amp-enterprise-scoped-token",
+		GuardrailMode: "action",
+		HookFailMode:  "closed",
+		AgentVersion:  "0.0.1785334225",
+		Registry:      connector.NewDefaultRegistry(),
+	}
+
+	result, err := Install(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Install Amp: %v", err)
+	}
+	if result.Connector != "amp" {
+		t.Fatalf("connector = %q, want amp", result.Connector)
+	}
+	if len(result.HookConfigPaths) != 1 || result.HookConfigPaths[0] != pluginPath {
+		t.Fatalf("hook config paths = %v, want %s", result.HookConfigPaths, pluginPath)
+	}
+	if len(result.HookScripts) != 1 || result.HookScripts[0] != pluginPath {
+		t.Fatalf("managed runtime artifacts = %v, want %s", result.HookScripts, pluginPath)
+	}
+	info, err := os.Stat(pluginPath)
+	if err != nil {
+		t.Fatalf("stat Amp plugin: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("Amp plugin mode = %#o, want 0600", got)
+	}
+	body, err := os.ReadFile(pluginPath)
+	if err != nil {
+		t.Fatalf("read Amp plugin: %v", err)
+	}
+	for _, marker := range []string{
+		"// defenseclaw-managed-plugin v2",
+		"amp-enterprise-scoped-token",
+		`amp.on("tool.call"`,
+		`amp.on("tool.result"`,
+	} {
+		if !strings.Contains(string(body), marker) {
+			t.Fatalf("Amp plugin missing %q", marker)
+		}
+	}
+	backupPath := filepath.Join(home, ".defenseclaw", "connector_backups", "amp", "config.json")
+	if backupInfo, err := os.Stat(backupPath); err != nil {
+		t.Fatalf("Amp managed backup missing: %v", err)
+	} else if got := backupInfo.Mode().Perm(); got != 0o600 {
+		t.Fatalf("Amp managed backup mode = %#o, want 0600", got)
+	}
+	if _, err := os.Stat(filepath.Join(home, ".defenseclaw", "hooks", ".hook-amp.token")); !os.IsNotExist(err) {
+		t.Fatalf("plugin install wrote an unnecessary user token sidecar: %v", err)
+	}
+
+	if err := os.WriteFile(pluginPath, []byte("// attacker replacement\n"), 0o644); err != nil {
+		t.Fatalf("tamper Amp plugin: %v", err)
+	}
+	opts.AllowMissingHookConfigRepair = true
+	if _, err := Install(context.Background(), opts); err != nil {
+		t.Fatalf("repair tampered Amp plugin: %v", err)
+	}
+	repaired, err := os.ReadFile(pluginPath)
+	if err != nil {
+		t.Fatalf("read repaired Amp plugin: %v", err)
+	}
+	if !strings.Contains(string(repaired), "amp-enterprise-scoped-token") ||
+		strings.Contains(string(repaired), "attacker replacement") {
+		t.Fatalf("Amp plugin was not repaired:\n%s", repaired)
+	}
+	if info, err := os.Stat(pluginPath); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("repaired Amp plugin mode/info = %v, %v", info, err)
+	}
+
+	decoy := filepath.Join(home, "amp-plugin-decoy")
+	if err := os.WriteFile(decoy, []byte("decoy must remain unchanged\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(pluginPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(decoy, pluginPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Install(context.Background(), opts); err != nil {
+		t.Fatalf("repair symlinked Amp plugin: %v", err)
+	}
+	if info, err := os.Lstat(pluginPath); err != nil || info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("Amp plugin symlink survived repair: info=%v err=%v", info, err)
+	}
+	if got, err := os.ReadFile(decoy); err != nil || string(got) != "decoy must remain unchanged\n" {
+		t.Fatalf("Amp decoy changed: %q err=%v", got, err)
+	}
+}
+
+func TestInstallAMPFirstInstallRefusesPluginSymlink(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
+	skipIfRoot(t)
+	home := newTestHome(t)
+	pluginPath := filepath.Join(home, ".config", "amp", "plugins", "defenseclaw.ts")
+	if err := os.MkdirAll(filepath.Dir(pluginPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	decoy := filepath.Join(home, "decoy")
+	if err := os.WriteFile(decoy, []byte("unchanged\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(decoy, pluginPath); err != nil {
+		t.Fatal(err)
+	}
+	previousPluginPath := connector.AMPPluginPathOverride
+	connector.AMPPluginPathOverride = pluginPath
+	t.Cleanup(func() { connector.AMPPluginPathOverride = previousPluginPath })
+
+	_, err := Install(context.Background(), InstallOptions{
+		ConnectorName: "amp",
+		UserHome:      home,
+		OwnerUID:      os.Getuid(),
+		OwnerGID:      os.Getgid(),
+		APIAddr:       "127.0.0.1:18970",
+		ProxyAddr:     "127.0.0.1:4000",
+		APIToken:      "amp-enterprise-scoped-token",
+		GuardrailMode: "action",
+		HookFailMode:  "closed",
+		AgentVersion:  "0.0.1785334225",
+		Registry:      connector.NewDefaultRegistry(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "refusing symlink hook config") {
+		t.Fatalf("first Amp install error = %v, want symlink refusal", err)
+	}
+	if got, readErr := os.ReadFile(decoy); readErr != nil || string(got) != "unchanged\n" {
+		t.Fatalf("Amp symlink decoy changed: %q err=%v", got, readErr)
 	}
 }
 
@@ -549,6 +700,39 @@ func TestWatchOwnedFilesReturnsSpecificFilesNotDirs(t *testing.T) {
 				t.Fatalf("WatchOwnedFiles leaked unrelated agent-runtime path %s", f)
 			}
 		}
+	}
+}
+
+func TestWatchOwnedFilesClassifiesAMPPluginAsExclusive(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
+	skipIfRoot(t)
+	home := newTestHome(t)
+	pluginPath := filepath.Join(home, ".config", "amp", "plugins", "defenseclaw.ts")
+	previousPluginPath := connector.AMPPluginPathOverride
+	connector.AMPPluginPathOverride = ""
+	t.Cleanup(func() { connector.AMPPluginPathOverride = previousPluginPath })
+
+	own, err := WatchOwnedFiles(InstallOptions{
+		ConnectorName: "amp",
+		UserHome:      home,
+		OwnerUID:      os.Getuid(),
+		OwnerGID:      os.Getgid(),
+		APIAddr:       "127.0.0.1:18970",
+		ProxyAddr:     "127.0.0.1:4000",
+		APIToken:      "amp-enterprise-scoped-token",
+		GuardrailMode: "action",
+		HookFailMode:  "closed",
+		AgentVersion:  "0.0.1785334225",
+		Registry:      connector.NewDefaultRegistry(),
+	})
+	if err != nil {
+		t.Fatalf("WatchOwnedFiles Amp: %v", err)
+	}
+	if !sliceContains(own.ExclusiveWriter, pluginPath) {
+		t.Fatalf("Amp plugin missing from ExclusiveWriter: %v", own.ExclusiveWriter)
+	}
+	if sliceContains(own.SharedWriter, pluginPath) {
+		t.Fatalf("Amp plugin must not be a shared-writer config file: %v", own.SharedWriter)
 	}
 }
 
@@ -1089,7 +1273,7 @@ func TestHardenInstallFootprintRefusesCreatedDirOutsideHome(t *testing.T) {
 
 	err := hardenInstallFootprint(os.Getuid(), os.Getgid(), home, dataDir, "codex", connector.AgentPaths{
 		CreatedDirs: []string{outside},
-	}, nil)
+	}, nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "refusing created dir outside user home") {
 		t.Fatalf("hardenInstallFootprint error = %v, want outside created dir refusal", err)
 	}

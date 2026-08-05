@@ -473,6 +473,8 @@ func friendlyConnectorName(name string) string {
 		return "OpenHands"
 	case "antigravity":
 		return "Antigravity"
+	case "amp":
+		return "Amp"
 	case "omnigent":
 		return "OmniGent"
 	default:

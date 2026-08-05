@@ -313,6 +313,34 @@ func (contract ToolCallLifecycleContract) ClassifyTerminalOutcome(
 			}
 		}
 		return ToolLifecycleOutcomeSuccess
+	case "amp":
+		return classifyAmpResult(payload)
+	default:
+		return ToolLifecycleOutcomeUnknown
+	}
+}
+
+func classifyAmpResult(payload map[string]interface{}) ToolLifecycleOutcome {
+	statusValue, ok := firstPresent(payload, "status")
+	if !ok {
+		return ToolLifecycleOutcomeUnknown
+	}
+	status, ok := statusValue.(string)
+	if !ok {
+		return ToolLifecycleOutcomeUnknown
+	}
+	switch status {
+	case "done":
+		// Amp's result type does not permit an error on a completed tool. Treat
+		// that contradictory shape as unknown instead of advancing state.
+		if errorValue, exists := firstPresent(payload, "error"); exists && hasErrorValue(errorValue) {
+			return ToolLifecycleOutcomeUnknown
+		}
+		return ToolLifecycleOutcomeSuccess
+	case "error":
+		return ToolLifecycleOutcomeFailure
+	case "cancelled":
+		return ToolLifecycleOutcomeCancelled
 	default:
 		return ToolLifecycleOutcomeUnknown
 	}
@@ -1018,6 +1046,40 @@ func openCodeToolCallLifecycle() ToolCallLifecycleContract {
 		Limitations: []string{
 			"Stateful success requires the v7 bridge, which forwards input.args plus the actual output and awaits delivery before returning to the agent.",
 			"Exceptions can skip tool.execute.after, and delegated-task paths can emit it without a result; only a validated result payload is authoritative success. Bash additionally requires metadata.exit=0.",
+		},
+	}
+}
+
+func ampToolCallLifecycle() ToolCallLifecycleContract {
+	return ToolCallLifecycleContract{
+		Version:                           ToolCallLifecycleContractVersion,
+		PreProposalEvents:                 []string{"tool.call"},
+		AuthoritativeSuccessEvents:        []string{"tool.result"},
+		AuthoritativeFailureEvents:        []string{"tool.result"},
+		AuthoritativeDenialEvents:         []string{},
+		AuthoritativePendingDiscardEvents: []string{"agent.end"},
+		AuthoritativeTerminalEvents:       []string{},
+		InvocationIDAuthority:             ToolInvocationIDPairedID,
+		OutcomeAuthority:                  ToolOutcomeResultPayload,
+		StatefulEnforcementLevel:          StatefulToolPairedOutcomes,
+		Routing: ToolEventRouting{
+			StructuredActionEvents: []string{"tool.call"},
+			ResultContentEvents:    []string{"tool.result"},
+			StateTransitionEvents:  []string{},
+			AuditOnlyEvents:        []string{"session.start", "agent.start", "agent.end"},
+		},
+		CoveredToolSurfaces: []ToolSurface{
+			ToolSurfaceGeneric, ToolSurfaceShell, ToolSurfaceFileRead,
+			ToolSurfaceFileWrite, ToolSurfaceFileEdit, ToolSurfaceMCP,
+		},
+		OfficialSourceURLs: []string{
+			"https://ampcode.com/manual/plugin-api",
+			"https://registry.npmjs.org/@ampcode/plugin/-/plugin-0.0.0-20260729002615-g8a974c9.tgz",
+		},
+		Limitations: []string{
+			"toolUseID is Amp's stable per-invocation join; tool.result status must be exactly done, error, or cancelled, and missing, contradictory, or unknown statuses never prove success.",
+			"agent.end discards unfinished proposals for that turn but is not a documented session-end event; Amp exposes no terminal session or subagent-parent lifecycle boundary.",
+			"tool.result gating can withhold or replace model-bound content but cannot undo completed tool side effects; skill invocation and remote Orb execution do not have separately certified lifecycle coverage.",
 		},
 	}
 }

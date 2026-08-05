@@ -1034,6 +1034,7 @@ def test_windows_release_accepts_signed_or_explicitly_unverified_setup_and_is_fr
         "-Operation release-certification",
         "OPENAI_API_KEY",
         "ANTHROPIC_API_KEY",
+        "AMP_API_KEY",
     ):
         assert retired not in smoke_text
 

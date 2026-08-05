@@ -1478,6 +1478,51 @@ func TestBoundedSpanProcessorEnforcesQueueAndBatchBytes(t *testing.T) {
 	}
 }
 
+func TestSpanObserverCanShutdownWithoutLockInversion(t *testing.T) {
+	span := testSpan("observer.shutdown")
+	bound, ok := conservativeSpanBytes(span)
+	if !ok {
+		t.Fatal("span bound failed")
+	}
+	inner := &capturingSpanExporter{}
+	exporter := &SpanExporter{
+		inner: inner, maxBytes: bound,
+		config: signalConfig{tracker: &dialOutcomeTracker{}},
+	}
+	observerDone := make(chan error, 1)
+	exporter.config.observer = SignalObserverFunc(func(event SignalEvent) {
+		if event.Outcome != SignalOutcomeExported {
+			return
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		observerDone <- exporter.Shutdown(ctx)
+	})
+	exportDone := make(chan error, 1)
+	go func() {
+		exportDone <- exporter.ExportSpans(context.Background(), []sdktrace.ReadOnlySpan{span})
+	}()
+	select {
+	case err := <-observerDone:
+		if err != nil {
+			t.Fatalf("observer shutdown error=%v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("span observer deadlocked while shutting down exporter")
+	}
+	select {
+	case err := <-exportDone:
+		if err != nil {
+			t.Fatalf("span export error=%v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("span export did not return after observer shutdown")
+	}
+	if inner.shutdowns.Load() != 1 {
+		t.Fatalf("inner span exporter shutdowns=%d", inner.shutdowns.Load())
+	}
+}
+
 func TestBoundedSpanProcessorShutdownAfterFlushTimeoutStillTerminatesWorkerAndExporter(t *testing.T) {
 	inner := &capturingSpanExporter{}
 	exporter := &SpanExporter{

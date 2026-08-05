@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 )
 
@@ -245,4 +246,11 @@ func (processor *boundedSpanProcessor) Counters() ExportCounters {
 		return ExportCounters{}
 	}
 	return processor.exporter.Counters()
+}
+
+func (processor *boundedSpanProcessor) DeliveryHealthSource(generation uint64) (delivery.SnapshotSource, error) {
+	if processor == nil || processor.exporter == nil {
+		return nil, newError(ErrorInvalidConfig, nil)
+	}
+	return processor.exporter.DeliveryHealthSource(generation)
 }

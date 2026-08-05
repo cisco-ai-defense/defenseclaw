@@ -17,14 +17,21 @@ from pathlib import Path
 from typing import Any
 
 from defenseclaw import config as config_module
-from defenseclaw.connector_paths import codex_home, connector_config_files, normalize
+from defenseclaw.connector_paths import (
+    amp_policy_plugin_path,
+    codex_home,
+    connector_config_files,
+    normalize,
+)
 from defenseclaw.file_lock import _lock_file_exclusive, _unlock_file
 
 _VALID_MODES = frozenset({"open", "closed"})
 _MAX_RUNTIME_FILE = 2 * 1024 * 1024
 _MAX_DIGEST_FILE = 128 * 1024 * 1024
 _FAIL_MODE_PATTERN = re.compile(r"FAIL_MODE=\"\$\{DEFENSECLAW_FAIL_MODE:-(open|closed)\}\"")
+_AMP_FAIL_MODE_PATTERN = re.compile(r'\bconst\s+DC_FAIL_MODE:\s*string\s*=\s*"(open|closed)"')
 _EXPECTED_CONTRACTS = {
+    "amp": frozenset({"amp-plugin-v1"}),
     "claudecode": frozenset({"claudecode-hooks-v1"}),
     "codex": frozenset(
         {
@@ -36,6 +43,8 @@ _EXPECTED_CONTRACTS = {
         }
     ),
 }
+_SHARED_RUNTIME_CONNECTORS = frozenset({"claudecode", "codex"})
+_WINDOWS_LAUNCHER_CONNECTORS = frozenset({"claudecode", "codex"})
 _SHARED_HOOK_SCRIPTS = frozenset(
     {
         "inspect-tool.sh",
@@ -139,7 +148,10 @@ def resolve_connector_fail_mode(
     if runtime_source[0].endswith("-legacy"):
         drift.append("windows-sidecar-legacy")
     process_env = str(os.environ.get("DEFENSECLAW_FAIL_MODE", "")).strip().lower()
-    if process_env in _VALID_MODES:
+    # Amp's TypeScript plugin bakes this value at setup time. Environment
+    # variables in the invoking CLI process cannot alter the already-loaded
+    # plugin and therefore must never be reported as runtime authority.
+    if name != "amp" and process_env in _VALID_MODES:
         sources.append(("process-env", process_env))
         runtime = process_env
 
@@ -165,7 +177,11 @@ def resolve_connector_fail_mode(
         drift.append("registration-stale")
     if lock_drift:
         drift.append(lock_drift)
-    if _is_windows() and name in _EXPECTED_CONTRACTS:
+    if name == "amp":
+        amp_registration = _amp_registration_freshness()
+        if amp_registration:
+            drift.append(amp_registration)
+    elif _is_windows() and name in _EXPECTED_CONTRACTS:
         if inspect_effective_policy:
             windows_registration = _windows_registration_freshness(cfg, name)
         else:
@@ -233,6 +249,8 @@ def connector_fail_mode_report(
 
 
 def _platform_runtime_source(cfg: Any, connector: str) -> tuple[str, str | None]:
+    if connector == "amp":
+        return "amp-plugin", _read_amp_plugin_mode(Path(amp_policy_plugin_path()))
     if _is_windows():
         mode, legacy = _read_windows_hook_mode(Path(cfg.data_dir) / "hooks" / ".hookcfg", connector)
         if legacy:
@@ -274,6 +292,39 @@ def _read_baked_hook_mode(path: Path) -> str | None:
         return None
     match = _FAIL_MODE_PATTERN.search(data)
     return match.group(1) if match else None
+
+
+def _read_amp_plugin_mode(path: Path) -> str | None:
+    data = _read_small_file(path)
+    if data is None:
+        return None
+    match = _AMP_FAIL_MODE_PATTERN.search(data)
+    return match.group(1) if match else None
+
+
+def _amp_registration_freshness() -> str | None:
+    """Verify Amp's live user-scoped policy plugin contract.
+
+    Amp has no shell registration or Windows launcher. Its installed
+    TypeScript plugin is both the registration and runtime artifact, while the
+    protected contract-lock digest below provides byte-exact freshness.
+    """
+
+    data = _read_small_file(Path(amp_policy_plugin_path()))
+    if data is None:
+        return "registration-missing"
+    for marker in (
+        "// defenseclaw-managed-plugin v2",
+        "/api/v1/amp/hook",
+        'amp.on("session.start"',
+        'amp.on("agent.start"',
+        'amp.on("tool.call"',
+        'amp.on("tool.result"',
+        'amp.on("agent.end"',
+    ):
+        if marker not in data:
+            return "registration-command-stale"
+    return None
 
 
 def _connector_workspace(cfg: Any) -> str:
@@ -362,12 +413,13 @@ def _registration_lock_state(cfg: Any, connector: str) -> tuple[str | None, str 
     if lock_version > 2:
         return mode, "registration-lock-version-unsupported"
     shared_digests: dict[str, object] = {}
-    if lock_version >= 2:
+    requires_shared_runtime = connector in _SHARED_RUNTIME_CONNECTORS
+    if lock_version >= 2 and requires_shared_runtime:
         raw_shared = payload.get("shared_hook_script_digests")
         if not isinstance(raw_shared, dict) or not _SHARED_HOOK_SCRIPTS.issubset(raw_shared):
             return mode, "registration-shared-digests-missing"
         shared_digests = raw_shared
-    else:
+    elif lock_version < 2 and requires_shared_runtime:
         # A v1 lock duplicated shared-file expectations in every connector
         # entry.  Divergent values cannot be reconciled by choosing whichever
         # connector happens to match disk; require controlled setup to render
@@ -388,12 +440,12 @@ def _registration_lock_state(cfg: Any, connector: str) -> tuple[str | None, str 
                 return mode, "registration-shared-digest-divergent"
         if legacy_shared and len(connectors or {}) > 1:
             return mode, "registration-shared-lock-legacy"
-    if _is_windows() and expected_contracts:
+    if _is_windows() and connector in _WINDOWS_LAUNCHER_CONNECTORS:
         digest_names = {str(filename).casefold() for filename in digests}
         if "defenseclaw-hook.exe" not in digest_names:
             return mode, "registration-launcher-digest-missing"
     digest_sets = [digests or {}]
-    if lock_version >= 2:
+    if lock_version >= 2 and requires_shared_runtime:
         digest_sets.append(shared_digests)
     for digest_set in digest_sets:
         for filename, expected in digest_set.items():

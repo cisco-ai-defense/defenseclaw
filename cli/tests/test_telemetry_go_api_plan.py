@@ -220,6 +220,12 @@ def enriched_field(
             "max_properties": 256,
         }
         if structured_type is not None
+        else {
+            "max_utf8_bytes": 4096,
+            "max_item_utf8_bytes": 1024,
+            "max_items": 256,
+        }
+        if primitive_type == "string[]"
         else {}
     )
     return {
@@ -905,7 +911,11 @@ def test_catalog_structured_and_callable_rendering_contracts_are_closed_and_type
     assert model.field_class_ref.symbol == "FieldClassMetadata"
     assert model.source_ref.symbol == "familyValueInput"
     assert model.typed_constraints == plan.GoFieldConstraintsPlanIR(
-        0, 0, 0, "", (), None, None, None, None, None, None, None
+        0, 0, 0, 0, "", (), None, None, None, None, None, None, None
+    )
+    tags = next(field for field in base.fields if field.descriptor_id == "log-tags")
+    assert tags.typed_constraints == plan.GoFieldConstraintsPlanIR(
+        4096, 1024, 0, 256, "", (), None, None, None, None, None, None, None
     )
     box = next(field for field in base.fields if field.descriptor_id == "log-box")
     assert box.type_ref.symbol == "familyFieldStructured"

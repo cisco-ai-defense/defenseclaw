@@ -223,8 +223,34 @@ func TestWriteAndReadPIDInfo(t *testing.T) {
 	if info.Executable != "/usr/bin/defenseclaw-gateway" {
 		t.Errorf("Executable = %q, want /usr/bin/defenseclaw-gateway", info.Executable)
 	}
+	if info.DataDir != dir {
+		t.Errorf("DataDir = %q, want %q", info.DataDir, dir)
+	}
 	if info.StartTime < now-1 || info.StartTime > now+1 {
 		t.Errorf("StartTime = %d, want ~%d", info.StartTime, now)
+	}
+}
+
+func TestVerifyProcessRejectsCopiedCrossHomePIDRecord(t *testing.T) {
+	dir := t.TempDir()
+	foreignDir := t.TempDir()
+	d := New(dir)
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	identity, err := processStartIdentity(os.Getpid())
+	if err != nil {
+		t.Fatalf("processStartIdentity: %v", err)
+	}
+	info := pidInfo{
+		PID:           os.Getpid(),
+		Executable:    executable,
+		DataDir:       foreignDir,
+		StartIdentity: identity,
+	}
+	if d.verifyProcess(info) {
+		t.Fatal("copied PID record from another data directory was accepted")
 	}
 }
 
@@ -495,11 +521,46 @@ func TestVerifyProcessCurrentPID(t *testing.T) {
 	info := pidInfo{
 		PID:        os.Getpid(),
 		Executable: exe,
+		DataDir:    d.dataDir,
 		StartTime:  time.Now().Unix(),
 	}
 
 	if !d.verifyProcess(info) {
 		t.Error("verifyProcess should return true for current process")
+	}
+}
+
+func TestLegacyPIDIdentityIsDetectionOnly(t *testing.T) {
+	d := New(t.TempDir())
+	executable, err := os.Executable()
+	if err != nil {
+		t.Skipf("cannot determine executable: %v", err)
+	}
+	startIdentity, identityErr := processStartIdentity(os.Getpid())
+	if identityErr != nil {
+		startIdentity = ""
+	}
+	legacy := pidInfo{
+		PID:           os.Getpid(),
+		Executable:    executable,
+		StartIdentity: startIdentity,
+	}
+	if !d.verifyProcess(legacy) {
+		t.Skip("current process cannot be inspected on this platform")
+	}
+	if d.verifyProcessForControl(legacy) {
+		t.Fatal("legacy PID record without data_dir authorized process control")
+	}
+
+	current := legacy
+	current.DataDir = d.dataDir
+	if !d.verifyProcessForControl(current) {
+		t.Fatal("current data-directory-bound PID record did not authorize control")
+	}
+
+	current.DataDir = t.TempDir()
+	if d.verifyProcessForControl(current) {
+		t.Fatal("PID record bound to another data directory authorized control")
 	}
 }
 
@@ -510,6 +571,33 @@ func TestHasManagedProcessIdentityRejectsLegacyPIDRecord(t *testing.T) {
 	}
 	if d.HasManagedProcessIdentity(os.Getpid()) {
 		t.Fatal("legacy PID record must not prove managed startup identity")
+	}
+}
+
+func TestHasManagedProcessIdentityRejectsStrongRecordWithoutDataDir(t *testing.T) {
+	d := New(t.TempDir())
+	executable, err := os.Executable()
+	if err != nil {
+		t.Skipf("cannot determine executable: %v", err)
+	}
+	identity, err := processStartIdentity(os.Getpid())
+	if err != nil || identity == "" {
+		t.Skipf("strong process generation unavailable: identity=%q err=%v", identity, err)
+	}
+	data, err := json.Marshal(pidInfo{
+		PID:           os.Getpid(),
+		Executable:    executable,
+		StartTime:     time.Now().Unix(),
+		StartIdentity: identity,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := safefile.WritePrivate(d.pidFile, data); err != nil {
+		t.Fatal(err)
+	}
+	if d.HasManagedProcessIdentity(os.Getpid()) {
+		t.Fatal("strong PID record without data_dir proved managed identity")
 	}
 }
 
@@ -721,6 +809,153 @@ func TestStopReturnsErrNotRunningOnMissingPID(t *testing.T) {
 	err := d.Stop(time.Second)
 	if err != ErrNotRunning {
 		t.Errorf("Stop with no PID file: got %v, want ErrNotRunning", err)
+	}
+}
+
+func TestStopAndRestartRefuseLegacyPIDControl(t *testing.T) {
+	t.Setenv(EnvDaemon, "")
+	dataDir := t.TempDir()
+	d := New(dataDir)
+	marker := filepath.Join(t.TempDir(), "legacy-control-probe")
+	t.Setenv(daemonRestartProbeEnv, marker)
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestDaemonRestartProbe$")
+	cmd.Env = os.Environ()
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start unmanaged probe: %v", err)
+	}
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	waitForProbeMarker(t, marker)
+
+	if err := os.WriteFile(d.pidFile, []byte(strconv.Itoa(cmd.Process.Pid)), 0o600); err != nil {
+		t.Fatalf("write legacy PID record: %v", err)
+	}
+	if running, pid := d.IsRunning(); !running || pid != cmd.Process.Pid {
+		t.Fatalf("legacy liveness = (%v, %d), want live PID %d", running, pid, cmd.Process.Pid)
+	}
+
+	if err := d.Stop(100 * time.Millisecond); !errors.Is(err, ErrUnsafeProcessIdentity) {
+		t.Fatalf("Stop legacy PID error = %v, want ErrUnsafeProcessIdentity", err)
+	}
+	if !processExists(cmd.Process.Pid) {
+		t.Fatal("Stop signalled a process identified only by a legacy PID record")
+	}
+
+	if pid, err := d.Restart(nil, 100*time.Millisecond); pid != 0 ||
+		!errors.Is(err, ErrUnsafeProcessIdentity) {
+		t.Fatalf("Restart legacy PID = (%d, %v), want (0, ErrUnsafeProcessIdentity)", pid, err)
+	}
+	if !processExists(cmd.Process.Pid) {
+		t.Fatal("Restart signalled a process identified only by a legacy PID record")
+	}
+}
+
+func TestStopGracefullyMigratesOriginMainStrongPIDRecordWithoutSignalFallback(t *testing.T) {
+	t.Setenv(EnvDaemon, "")
+	dataDir := t.TempDir()
+	d := New(dataDir)
+	marker := filepath.Join(t.TempDir(), "origin-main-control-probe")
+	t.Setenv(daemonRestartProbeEnv, marker)
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestDaemonRestartProbe$")
+	cmd.Env = os.Environ()
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start origin/main probe: %v", err)
+	}
+	waitCh := make(chan error, 1)
+	go func() { waitCh <- cmd.Wait() }()
+	reaped := false
+	t.Cleanup(func() {
+		if reaped {
+			return
+		}
+		_ = cmd.Process.Kill()
+		select {
+		case <-waitCh:
+		case <-time.After(5 * time.Second):
+		}
+	})
+	waitForProbeMarker(t, marker)
+
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatalf("resolve origin/main executable: %v", err)
+	}
+	startIdentity, err := processStartIdentity(cmd.Process.Pid)
+	if runtime.GOOS == "darwin" {
+		// origin/main wrote the whole-second `ps -o lstart=` identity.
+		startIdentity, err = darwinLegacyProcessStartIdentity(cmd.Process.Pid)
+	}
+	if err != nil || startIdentity == "" {
+		t.Fatalf("capture origin/main start identity: identity=%q err=%v", startIdentity, err)
+	}
+	originMain := pidInfo{
+		PID:           cmd.Process.Pid,
+		Executable:    executable,
+		StartTime:     time.Now().Unix(),
+		StartIdentity: startIdentity,
+		// origin/main did not yet write data_dir.
+	}
+	raw, err := json.Marshal(originMain)
+	if err != nil {
+		t.Fatalf("marshal origin/main PID record: %v", err)
+	}
+	if err := safefile.WritePrivate(d.pidFile, raw); err != nil {
+		t.Fatalf("write origin/main PID record: %v", err)
+	}
+	if running, pid := d.IsRunning(); !running || pid != cmd.Process.Pid {
+		t.Fatalf("origin/main liveness = (%v, %d), want live PID %d", running, pid, cmd.Process.Pid)
+	}
+
+	if err := d.Stop(50 * time.Millisecond); !errors.Is(err, ErrUnsafeProcessIdentity) {
+		t.Fatalf("direct Stop error = %v, want ErrUnsafeProcessIdentity", err)
+	}
+	if !processExists(cmd.Process.Pid) {
+		t.Fatal("direct Stop signalled an unbound origin/main process")
+	}
+
+	rejected := errors.New("authenticated shutdown rejected")
+	err = d.StopGracefully(50*time.Millisecond, func(pid int) error {
+		if pid != cmd.Process.Pid {
+			t.Fatalf("graceful callback PID = %d, want %d", pid, cmd.Process.Pid)
+		}
+		return rejected
+	})
+	if !errors.Is(err, ErrUnsafeProcessIdentity) {
+		t.Fatalf("rejected authenticated stop error = %v, want ErrUnsafeProcessIdentity", err)
+	}
+	if !processExists(cmd.Process.Pid) {
+		t.Fatal("rejected authenticated stop fell back to an OS signal")
+	}
+
+	err = d.StopGracefully(50*time.Millisecond, func(int) error { return nil })
+	if !errors.Is(err, ErrStopTimeout) {
+		t.Fatalf("accepted non-exiting stop error = %v, want ErrStopTimeout", err)
+	}
+	if !processExists(cmd.Process.Pid) {
+		t.Fatal("timed-out authenticated stop fell back to an OS signal")
+	}
+	if _, err := os.Stat(d.pidFile); err != nil {
+		t.Fatalf("migration PID record was cleared before confirmed exit: %v", err)
+	}
+
+	err = d.StopGracefully(3*time.Second, func(int) error {
+		return cmd.Process.Kill()
+	})
+	if err != nil {
+		t.Fatalf("accepted authenticated migration stop: %v", err)
+	}
+	if _, err := os.Stat(d.pidFile); !os.IsNotExist(err) {
+		t.Fatalf("migration PID record remains after confirmed exit: %v", err)
+	}
+	select {
+	case <-waitCh:
+		reaped = true
+	case <-time.After(time.Second):
+		t.Fatal("origin/main probe was not reaped")
 	}
 }
 

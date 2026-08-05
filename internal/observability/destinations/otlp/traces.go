@@ -17,8 +17,10 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	tracegrpc "go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
@@ -26,6 +28,8 @@ import (
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
+	grpcCodes "google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // NewSpanExporter returns a single generation-owned exporter with guarded
@@ -38,6 +42,10 @@ func (factory *Factory) NewSpanExporter(ctx context.Context) (*SpanExporter, err
 	config, err := factory.claim(observability.SignalTraces)
 	if err != nil {
 		return nil, err
+	}
+	circuit, err := delivery.NewCircuit(delivery.CircuitPolicy{})
+	if err != nil {
+		return nil, newError(ErrorInitialization, err)
 	}
 	if config.protocol == ProtocolHTTP {
 		initialRetry, maximumRetry := retryBounds(config.timeout)
@@ -61,6 +69,7 @@ func (factory *Factory) NewSpanExporter(ctx context.Context) (*SpanExporter, err
 		return &SpanExporter{
 			inner: exporter, httpTransport: transport, maxBytes: factory.config.Batch.MaxExportBatchBytes,
 			config: config, destination: factory.config.Destination,
+			circuit: circuit, now: time.Now,
 		}, nil
 	}
 	connection, err := newGRPCConnection(config)
@@ -84,6 +93,7 @@ func (factory *Factory) NewSpanExporter(ctx context.Context) (*SpanExporter, err
 	return &SpanExporter{
 		inner: exporter, connection: connection, maxBytes: factory.config.Batch.MaxExportBatchBytes,
 		config: config, destination: factory.config.Destination,
+		circuit: circuit, now: time.Now,
 	}, nil
 }
 
@@ -161,41 +171,86 @@ func (processor *filteredSpanProcessor) TerminalDone() <-chan struct{} {
 	return closed
 }
 
+func (processor *filteredSpanProcessor) DeliveryHealthSource(generation uint64) (delivery.SnapshotSource, error) {
+	health, ok := processor.inner.(interface {
+		DeliveryHealthSource(uint64) (delivery.SnapshotSource, error)
+	})
+	if !ok {
+		return nil, newError(ErrorInvalidConfig, nil)
+	}
+	return health.DeliveryHealthSource(generation)
+}
+
 type SpanExporter struct {
-	inner         sdktrace.SpanExporter
-	connection    *grpc.ClientConn
-	httpTransport *http.Transport
-	config        signalConfig
-	destination   string
-	maxBytes      int
-	counters      mutableCounters
-	mu            sync.RWMutex
-	closed        bool
+	inner            sdktrace.SpanExporter
+	connection       *grpc.ClientConn
+	httpTransport    *http.Transport
+	config           signalConfig
+	destination      string
+	maxBytes         int
+	counters         mutableCounters
+	mu               sync.RWMutex
+	closed           bool
+	healthMu         sync.Mutex
+	health           delivery.HealthState
+	healthReason     delivery.HealthReason
+	lastSuccess      time.Time
+	lastFailure      time.Time
+	circuit          *delivery.Circuit
+	now              func() time.Time
+	healthGeneration uint64
 }
 
 func (exporter *SpanExporter) ExportSpans(ctx context.Context, spans []sdktrace.ReadOnlySpan) error {
 	if exporter == nil || ctx == nil {
 		return newError(ErrorExport, nil)
 	}
+	events := make([]SignalEvent, 0, 4)
+	acknowledgements := make([]CanaryAcknowledgement, 0, 1)
+	eventCollector := SignalObserverFunc(func(event SignalEvent) {
+		events = append(events, event)
+	})
+	acknowledgementCollector := CanaryAcknowledgementObserverFunc(func(event CanaryAcknowledgement) {
+		acknowledgements = append(acknowledgements, event)
+	})
 	exporter.mu.RLock()
+	locked := true
+	unlock := func() {
+		if locked {
+			exporter.mu.RUnlock()
+			locked = false
+		}
+	}
+	defer unlock()
 	closed := exporter.closed
-	defer exporter.mu.RUnlock()
 	if closed {
+		unlock()
 		return newError(ErrorExport, nil)
 	}
 	spans = canarySpansForOTLPDestination(spans, exporter.destination)
 	regular, canaries := partitionOTLPCanarySpans(spans)
 	var exportErrors []error
 	if len(regular) > 0 {
-		if err := exporter.exportBatch(ctx, regular, ""); err != nil {
+		if err := exporter.exportBatch(
+			ctx, regular, "", eventCollector, acknowledgementCollector,
+		); err != nil {
 			exportErrors = append(exportErrors, err)
 		}
 	}
 	for _, canary := range canaries {
 		traceID := completeOTLPCanaryTrace(canary, exporter.destination)
-		if err := exporter.exportBatch(ctx, canary, traceID); err != nil {
+		if err := exporter.exportBatch(
+			ctx, canary, traceID, eventCollector, acknowledgementCollector,
+		); err != nil {
 			exportErrors = append(exportErrors, err)
 		}
+	}
+	unlock()
+	for _, event := range events {
+		observe(exporter.config.observer, event)
+	}
+	for _, acknowledgement := range acknowledgements {
+		observeCanaryAcknowledgement(exporter.config.canary, acknowledgement)
 	}
 	return errors.Join(exportErrors...)
 }
@@ -372,13 +427,43 @@ func otlpCanonicalScopeEqual(root, child sdktrace.ReadOnlySpan) bool {
 		semanticOK && semanticProfile == observability.RuntimeSemanticProfileID
 }
 
-func (exporter *SpanExporter) exportBatch(ctx context.Context, spans []sdktrace.ReadOnlySpan, canaryTraceID string) error {
+func (exporter *SpanExporter) exportBatch(
+	ctx context.Context,
+	spans []sdktrace.ReadOnlySpan,
+	canaryTraceID string,
+	observer SignalObserver,
+	canaryObserver CanaryAcknowledgementObserver,
+) error {
+	probePending := false
+	if exporter.circuit != nil {
+		switch exporter.circuit.Admit(exporter.nowUTC()) {
+		case delivery.CircuitAdmissionBlocked:
+			exporter.counters.circuitRejectedBatches.Add(1)
+			// len(spans) is O(1), so suppressed spans stay countable without
+			// running the per-span size estimation admission exists to skip.
+			exporter.counters.circuitRejectedRecords.Add(uint64(len(spans)))
+			return nil
+		case delivery.CircuitAdmissionProbe:
+			probePending = true
+			exporter.setHealth(delivery.HealthDegraded, delivery.HealthReasonCircuitHalfOpen)
+		}
+	}
+	defer func() {
+		if probePending && exporter.circuit != nil && exporter.circuit.AbortProbe() {
+			exporter.setHealth(delivery.HealthFailing, delivery.HealthReasonCircuitOpen)
+		}
+	}()
 	total := 0
 	for _, span := range spans {
 		bound, ok := conservativeSpanBytes(span)
 		if !ok || bound > exporter.maxBytes-total {
+			if probePending && exporter.circuit != nil {
+				exporter.circuit.AbortProbe()
+				probePending = false
+			}
 			exporter.counters.rejectedOversize.Add(uint64(len(spans)))
-			observe(exporter.config.observer, SignalEvent{Signal: observability.SignalTraces, Outcome: SignalOutcomeRejectedOversize, Count: uint64(len(spans))})
+			exporter.recordHealth(delivery.HealthFailing, delivery.HealthReasonDeliveryFailed, false)
+			observe(observer, SignalEvent{Signal: observability.SignalTraces, Outcome: SignalOutcomeRejectedOversize, Count: uint64(len(spans))})
 			return newError(ErrorExport, nil)
 		}
 		total += bound
@@ -387,19 +472,27 @@ func (exporter *SpanExporter) exportBatch(ctx context.Context, spans []sdktrace.
 	dialSequence := exporter.config.tracker.snapshot()
 	attemptContext, attempts := withAttemptCounter(ctx)
 	err := exporter.inner.ExportSpans(attemptContext, spans)
-	recordRetryAttempts(&exporter.counters, exporter.config.observer, observability.SignalTraces, uint64(len(spans)), attempts.Load())
+	recordRetryAttempts(&exporter.counters, observer, observability.SignalTraces, uint64(len(spans)), attempts.Load())
 	if err != nil {
 		exporter.counters.failed.Add(uint64(len(spans)))
-		observe(exporter.config.observer, SignalEvent{Signal: observability.SignalTraces, Outcome: SignalOutcomeExportFailed, Count: uint64(len(spans))})
-		if exporter.config.tracker.unsafeSince(dialSequence) {
+		class := otlpFailureClass(exporter.config.tracker, dialSequence, err)
+		exporter.recordCircuitFailure(class, exporter.nowUTC())
+		probePending = false
+		observe(observer, SignalEvent{Signal: observability.SignalTraces, Outcome: SignalOutcomeExportFailed, Count: uint64(len(spans))})
+		if class == delivery.FailureClassUnsafeEndpoint {
 			return newError(ErrorUnsafeEndpoint, err)
 		}
 		return newError(ErrorExport, err)
 	}
 	exporter.counters.exported.Add(uint64(len(spans)))
-	observe(exporter.config.observer, SignalEvent{Signal: observability.SignalTraces, Outcome: SignalOutcomeExported, Count: uint64(len(spans))})
+	if exporter.circuit != nil {
+		exporter.circuit.RecordSuccess()
+	}
+	probePending = false
+	exporter.recordHealth(delivery.HealthHealthy, delivery.HealthReasonRecovered, true)
+	observe(observer, SignalEvent{Signal: observability.SignalTraces, Outcome: SignalOutcomeExported, Count: uint64(len(spans))})
 	if canaryTraceID != "" {
-		observeCanaryAcknowledgement(exporter.config.canary, CanaryAcknowledgement{
+		observeCanaryAcknowledgement(canaryObserver, CanaryAcknowledgement{
 			Destination: exporter.destination, TraceID: canaryTraceID,
 		})
 	}
@@ -493,8 +586,13 @@ func (exporter *SpanExporter) Shutdown(ctx context.Context) error {
 		}
 	}
 	if err != nil {
+		exporter.recordHealth(delivery.HealthFailing, delivery.HealthReasonDeliveryFailed, false)
 		return newError(ErrorShutdown, err)
 	}
+	exporter.healthMu.Lock()
+	exporter.health = delivery.HealthStopped
+	exporter.healthReason = delivery.HealthReasonClosed
+	exporter.healthMu.Unlock()
 	return nil
 }
 
@@ -503,4 +601,139 @@ func (exporter *SpanExporter) Counters() ExportCounters {
 		return ExportCounters{}
 	}
 	return exporter.counters.snapshot()
+}
+
+type spanExporterHealthSource struct {
+	exporter   *SpanExporter
+	generation uint64
+}
+
+// DeliveryHealthSource binds this generation-owned SDK trace route to Doctor's
+// content-free destination health inventory.
+func (exporter *SpanExporter) DeliveryHealthSource(generation uint64) (delivery.SnapshotSource, error) {
+	if exporter == nil || generation == 0 || !observability.IsStableToken(exporter.destination) {
+		return nil, newError(ErrorInvalidConfig, nil)
+	}
+	exporter.mu.Lock()
+	defer exporter.mu.Unlock()
+	if exporter.healthGeneration != 0 && exporter.healthGeneration != generation {
+		return nil, newError(ErrorInvalidConfig, nil)
+	}
+	exporter.healthGeneration = generation
+	return &spanExporterHealthSource{exporter: exporter, generation: generation}, nil
+}
+
+func (source *spanExporterHealthSource) DeliveryHealthSnapshot() delivery.HealthSnapshot {
+	if source == nil || source.exporter == nil {
+		return delivery.HealthSnapshot{State: delivery.HealthStopped}
+	}
+	snapshot := source.exporter.deliveryHealthSnapshot()
+	snapshot.Destination = source.exporter.destination
+	snapshot.Generation = source.generation
+	snapshot.Signal = string(observability.SignalTraces)
+	return snapshot
+}
+
+func (exporter *SpanExporter) recordHealth(state delivery.HealthState, reason delivery.HealthReason, success bool) {
+	exporter.recordHealthAt(state, reason, success, exporter.nowUTC())
+}
+
+func (exporter *SpanExporter) recordHealthAt(
+	state delivery.HealthState,
+	reason delivery.HealthReason,
+	success bool,
+	at time.Time,
+) {
+	if exporter == nil {
+		return
+	}
+	exporter.healthMu.Lock()
+	exporter.health = state
+	exporter.healthReason = reason
+	if success {
+		exporter.lastSuccess = at.UTC()
+	} else {
+		exporter.lastFailure = at.UTC()
+	}
+	exporter.healthMu.Unlock()
+}
+
+func (exporter *SpanExporter) setHealth(state delivery.HealthState, reason delivery.HealthReason) {
+	if exporter == nil {
+		return
+	}
+	exporter.healthMu.Lock()
+	exporter.health = state
+	exporter.healthReason = reason
+	exporter.healthMu.Unlock()
+}
+
+func (exporter *SpanExporter) nowUTC() time.Time {
+	if exporter == nil || exporter.now == nil {
+		return time.Now().UTC()
+	}
+	return exporter.now().UTC()
+}
+
+func (exporter *SpanExporter) recordCircuitFailure(class delivery.FailureClass, at time.Time) {
+	reason := delivery.HealthReasonDeliveryFailed
+	if exporter.circuit != nil && exporter.circuit.RecordFailure(class, at) {
+		reason = delivery.HealthReasonCircuitOpen
+	}
+	exporter.recordHealthAt(delivery.HealthFailing, reason, false, at)
+}
+
+func (exporter *SpanExporter) deliveryHealthSnapshot() delivery.HealthSnapshot {
+	if exporter == nil {
+		return delivery.HealthSnapshot{State: delivery.HealthStopped}
+	}
+	exporter.healthMu.Lock()
+	state := exporter.health
+	if state == "" {
+		state = delivery.HealthInitializing
+	}
+	reason := exporter.healthReason
+	lastSuccess := exporter.lastSuccess
+	lastFailure := exporter.lastFailure
+	exporter.healthMu.Unlock()
+	circuit := exporter.circuit.Snapshot()
+	counters := exporter.Counters()
+	return delivery.HealthSnapshot{
+		State: state, Reason: string(reason),
+		CircuitState: circuit.State, ConsecutiveFailures: circuit.ConsecutiveFailures,
+		CircuitOpenUntil: circuit.OpenUntil, LastFailureClass: circuit.LastFailureClass,
+		Counters: delivery.Counters{
+			Accepted: counters.Accepted, Delivered: counters.Exported, Retried: counters.Retried,
+			// See the metrics exporter: circuit-suppressed spans are a real,
+			// unretried loss that Export deliberately reports as success, so
+			// the drop total is where it has to become visible.
+			Dropped: addMetricHealthCounter(counters.DroppedQueueFull, counters.CircuitRejectedRecords),
+			Rejected: addMetricHealthCounter(
+				addMetricHealthCounter(counters.RejectedPartial, counters.RejectedOversize), counters.Failed,
+			),
+			Failed: counters.Failed,
+		},
+		LastSuccess: lastSuccess, LastFailure: lastFailure,
+	}
+}
+
+func otlpFailureClass(
+	tracker *dialOutcomeTracker,
+	baseline uint64,
+	err error,
+) delivery.FailureClass {
+	switch {
+	case tracker.unsafeSince(baseline):
+		return delivery.FailureClassUnsafeEndpoint
+	case tracker.authenticationSince(baseline):
+		return delivery.FailureClassAuthentication
+	}
+	switch status.Code(err) {
+	case grpcCodes.Unauthenticated, grpcCodes.PermissionDenied:
+		return delivery.FailureClassAuthentication
+	case grpcCodes.InvalidArgument, grpcCodes.FailedPrecondition, grpcCodes.Unimplemented, grpcCodes.OutOfRange:
+		return delivery.FailureClassPermanentPayload
+	default:
+		return delivery.FailureClassTransient
+	}
 }

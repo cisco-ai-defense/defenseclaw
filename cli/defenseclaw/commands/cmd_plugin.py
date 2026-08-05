@@ -316,7 +316,10 @@ def _scan_one_plugin_dir(
         return
 
     try:
-        target_name, _manifest = canonical_plugin_id(scan_dir)
+        if connector == "amp" and os.path.isfile(scan_dir) and scan_dir.casefold().endswith(".ts"):
+            target_name = validate_plugin_id(os.path.basename(scan_dir)[:-3])
+        else:
+            target_name, _manifest = canonical_plugin_id(scan_dir)
     except PluginIdentityError as exc:
         raise click.ClickException(f"invalid plugin identity at {scan_dir}: {exc}") from exc
     if result.is_clean():
@@ -575,9 +578,9 @@ def _scan_all_plugins(
             click.echo(ux._style(f"\n── connector: {connector} ──", fg="cyan"))
 
         plugins = _merge_all_plugins(app.cfg.plugin_dir, connector, cfg=app.cfg)
-        # Resolve each plugin id to a directory on disk (managed dir or the
-        # connector's own dirs). Skip phantom (scan-history / enforcement-only)
-        # rows that have no files to scan.
+        # Resolve each plugin id to a scannable artifact on disk (managed dir,
+        # connector-owned dir, or Amp's documented direct ``*.ts`` file).
+        # Skip phantom (scan-history / enforcement-only) rows with no artifact.
         host_dirs = _host_plugin_dirs(app, connector)
         targets: list[tuple[str, str]] = []
         for p in plugins:
@@ -585,7 +588,13 @@ def _scan_all_plugins(
             if not pid:
                 continue
             scan_dir = str(p.get("host_path") or "")
-            if not os.path.isdir(scan_dir):
+            direct_amp_plugin = (
+                connector == "amp"
+                and os.path.isfile(scan_dir)
+                and scan_dir.casefold().endswith(".ts")
+                and not is_link_or_reparse(scan_dir)
+            )
+            if not os.path.isdir(scan_dir) and not direct_amp_plugin:
                 scan_dir = _resolve_plugin_dir(pid, app.cfg.plugin_dir, connector, host_dirs) or ""
             if scan_dir:
                 targets.append((pid, scan_dir))
@@ -1829,11 +1838,11 @@ def _resolve_plugin_dir(
     connector: str = "",
     search_dirs: list[str] | None = None,
 ) -> str | None:
-    """Resolve a plugin name or path to a directory on disk.
+    """Resolve a plugin name or path to a scannable artifact on disk.
 
     Resolution order:
-      1. Literal path (already a directory) — only when the input
-         clearly looks like a path (absolute, or contains a path
+      1. Literal path (a directory or direct Amp ``.ts`` plugin) — only
+         when the input clearly looks like a path (absolute, or contains a path
          separator). A bare token like ``my-plugin`` is intentionally
          NOT treated as a relative path here, even if a directory of
          that name happens to exist in the current working directory:
@@ -1850,7 +1859,15 @@ def _resolve_plugin_dir(
          mirrors ``info()`` so list/scan/info agree across peers.
       4. Connector plugin by name (openclaw CLI or filesystem)
     """
-    if _looks_like_explicit_path(name_or_path) and os.path.isdir(name_or_path):
+    if _looks_like_explicit_path(name_or_path) and (
+        os.path.isdir(name_or_path)
+        or (
+            connector == "amp"
+            and os.path.isfile(name_or_path)
+            and name_or_path.casefold().endswith(".ts")
+            and not is_link_or_reparse(name_or_path)
+        )
+    ):
         return name_or_path
     if _looks_like_explicit_path(name_or_path):
         return None

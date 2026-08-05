@@ -212,6 +212,36 @@ projection; a lost acknowledgement can create a duplicate, so consumers use the
 record ID for deduplication. See the generated
 [configuration reference](/docs/reference/configuration) for kind-specific fields.
 
+### Destination failure circuits
+
+Each optional destination signal route (logs, traces, or metrics) has an
+independent in-memory delivery circuit. By default, three consecutive terminal
+transient or permanent-payload batches open that route for 30 seconds. A single
+payload rejection therefore does not suppress later valid telemetry.
+Authentication and unsafe-endpoint failures open the affected route
+immediately for 24 hours because retrying unchanged configuration would only
+repeat expensive or unsafe work.
+
+While a circuit is open, new and already queued work for that route is rejected
+before adapter delivery and size-estimation work. Sibling signals,
+destinations, and mandatory local SQLite persistence continue. When cooldown
+expires, exactly one record is admitted as a half-open recovery probe. Success
+closes the circuit; another terminal failure reopens it.
+
+Gateway health and `defenseclaw doctor` expose the circuit state, consecutive
+failures, bounded failure class, and open deadline. Transient-open and
+half-open states are warnings; an open authentication, permanent-payload, or
+unsafe-endpoint circuit is a failed Doctor check.
+
+The circuit is runtime suppression, not a silent policy edit. It does not
+rewrite `config.yaml` or permanently disable a route. Repair the destination
+credential or endpoint and reload the gateway. If export is no longer wanted,
+disable that named optional route explicitly:
+
+```bash
+defenseclaw setup observability disable NAME
+```
+
 ## Edit bucket and redaction policy safely
 
 Bucket names form a closed fourteen-name catalog; operators override collection
@@ -388,9 +418,11 @@ do not paste prompt content, credentials, or raw audit databases into tickets.
 3. Run `defenseclaw observability destination test <name>`. Add
    `--write-probe` only when a bounded delivery write is appropriate; the
    probe is isolated and does not create normal dashboard traffic.
-4. Inspect that destination's queue, retry, and drop telemetry. Other
-   destinations and mandatory local SQLite operate independently, so confirm
-   their health rather than assuming a shared outage.
+4. Inspect that destination's queue, retry, drop, and circuit telemetry. An open
+   circuit suppresses only that route's adapter work while mandatory local
+   SQLite and sibling destinations continue. Repair and reload the destination,
+   or run `defenseclaw setup observability disable <name>` when disabling it is
+   the intended policy change.
 
 ### Runbook: audit sink
 

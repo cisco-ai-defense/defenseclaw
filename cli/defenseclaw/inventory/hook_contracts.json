@@ -1649,6 +1649,118 @@
         }
       ]
     },
+    "amp": {
+      "kind": "hook",
+      "compatibility_gate": "hook-contract",
+      "version_probe": "amp --version",
+      "docs_url": "https://ampcode.com/manual/plugin-api",
+      "contracts": [
+        {
+          "contract_id": "amp-plugin-v1",
+          "agent_version": {
+            "min_inclusive": "0.0.1785334225",
+            "max_exclusive": ""
+          },
+          "default_for_unversioned": true,
+          "hook_script_version": "v2",
+          "hook_script": "amp-plugin.ts",
+          "hook_config_path_templates": [
+            "~/.config/amp/plugins/defenseclaw.ts",
+            "%USERPROFILE%\\.config\\amp\\plugins\\defenseclaw.ts"
+          ],
+          "response_field": "",
+          "events": [
+            "session.start",
+            "agent.start",
+            "tool.call",
+            "tool.result",
+            "agent.end"
+          ],
+          "aid_surfaces": [
+            "prompt",
+            "tool_call",
+            "tool_result",
+            "event_content"
+          ],
+          "supports_traceparent": false,
+          "native_otlp": false,
+          "tool_call_lifecycle": {
+            "version": 1,
+            "pre_proposal_events": [
+              "tool.call"
+            ],
+            "authoritative_success_events": [
+              "tool.result"
+            ],
+            "authoritative_failure_events": [
+              "tool.result"
+            ],
+            "authoritative_denial_events": [],
+            "authoritative_pending_discard_events": [
+              "agent.end"
+            ],
+            "authoritative_terminal_events": [],
+            "invocation_id_authority": "paired-id",
+            "outcome_authority": "result-payload",
+            "stateful_enforcement_level": "paired-outcomes",
+            "routing": {
+              "structured_action_events": [
+                "tool.call"
+              ],
+              "result_content_events": [
+                "tool.result"
+              ],
+              "state_transition_events": [],
+              "audit_only_events": [
+                "session.start",
+                "agent.start",
+                "agent.end"
+              ]
+            },
+            "covered_tool_surfaces": [
+              "generic",
+              "shell",
+              "file-read",
+              "file-write",
+              "file-edit",
+              "mcp"
+            ],
+            "official_source_urls": [
+              "https://ampcode.com/manual/plugin-api",
+              "https://registry.npmjs.org/@ampcode/plugin/-/plugin-0.0.0-20260729002615-g8a974c9.tgz"
+            ],
+            "limitations": [
+              "toolUseID is Amp's stable per-invocation join; tool.result status must be exactly done, error, or cancelled, and missing, contradictory, or unknown statuses never prove success.",
+              "agent.end discards unfinished proposals for that turn but is not a documented session-end event; Amp exposes no terminal session or subagent-parent lifecycle boundary.",
+              "tool.result gating can withhold or replace model-bound content but cannot undo completed tool side effects; skill invocation and remote Orb execution do not have separately certified lifecycle coverage."
+            ]
+          },
+          "capabilities": {
+            "can_block": true,
+            "can_ask_native": true,
+            "ask_events": [
+              "tool.call",
+              "tool.result"
+            ],
+            "block_events": [
+              "tool.call",
+              "tool.result"
+            ],
+            "supports_fail_closed": true,
+            "scope": "user"
+          },
+          "notes": [
+            "Amp auto-loads system TypeScript plugins from ~/.config/amp/plugins on macOS/Linux and %USERPROFILE%\\.config\\amp\\plugins on Windows. DefenseClaw installs a dependency-free owner-only policy plugin there.",
+            "tool.call is synchronous before execution; tool.result can replace unsafe output before model delivery but cannot undo completed side effects. Both support native confirmation only for the active foreground thread and reject safely when UI is unavailable.",
+            "session.start, agent.start, tool.call, tool.result, and agent.end feed Agent360, Galileo, audit, and generated hook telemetry. Amp documents no session.end or dedicated subagent lifecycle plugin event.",
+            "The plugin reports Amp's first-class custom-agent name/display/declared model or built-in mode when available; this metadata is not a stable agent ID, model request ID, trace context, or parent-thread link.",
+            "Oracle, Task/subagent launchers, MCP tools, and plugin tools remain policy-controlled at the tool.call delegation boundary. Child-thread events are ingested under their reported thread ID when Amp emits them.",
+            "Amp does not document arbitrary model-endpoint proxying, native customer OTLP, or W3C trace propagation from plugins.",
+            "Headless `amp -x` action-mode launches require `--plugin-ready-timeout 30` to guarantee plugin readiness and complete lifecycle capture before the turn; fail-closed cannot protect work that starts before Amp loads the plugin."
+          ]
+        }
+      ]
+    },
     "omnigent": {
       "kind": "hook",
       "compatibility_gate": "hook-contract",

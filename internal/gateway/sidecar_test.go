@@ -256,6 +256,9 @@ func TestResolveActiveConnector_UnknownNameReturnsError(t *testing.T) {
 			if !strings.Contains(err.Error(), "openclaw") {
 				t.Errorf("error message should mention the openclaw default, got: %v", err)
 			}
+			if !strings.Contains(err.Error(), "amp") {
+				t.Errorf("error message should list the registered Amp connector, got: %v", err)
+			}
 		})
 	}
 }

@@ -26,10 +26,13 @@ from pathlib import Path
 from unittest.mock import patch
 
 import defenseclaw.inventory.plugin_directories as plugin_directories_module
+import pytest
 from defenseclaw.inventory.plugin_directories import (
     discover_plugin_directories,
     plugin_directory_entries,
+    read_amp_plugin_source,
 )
+from defenseclaw.inventory.plugin_identity import AmbiguousPluginIdentityError
 
 from tests.helpers import seed_cached_plugin
 
@@ -130,6 +133,55 @@ def test_regular_plugin_root_still_returns_immediate_plugins(tmp_path: Path) -> 
     assert [(entry.id, entry.path) for entry in entries] == [
         ("real-plugin", str(root / "real-plugin"))
     ]
+
+
+def test_amp_discovers_bounded_direct_typescript_plugins_without_links(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "plugins"
+    root.mkdir()
+    defenseclaw = root / "defenseclaw.ts"
+    architect = root / "architect-mode.ts"
+    defenseclaw.write_text("// DefenseClaw Amp policy bridge\n", encoding="utf-8")
+    architect.write_text("// @amp-agent-mode {\"key\":\"architect\",\"label\":\"architect\"}\n", encoding="utf-8")
+    (root / "directory-plugin").mkdir()
+    (root / "ordinary.js").write_text("export default () => {}\n", encoding="utf-8")
+    oversized = root / "oversized.ts"
+    oversized.write_bytes(b"x" * (plugin_directories_module._MAX_AMP_PLUGIN_BYTES + 1))
+    linked = root / "linked.ts"
+    try:
+        linked.symlink_to(defenseclaw)
+    except OSError:
+        linked = None
+
+    entries = discover_plugin_directories(str(root), connector="amp")
+
+    assert [entry.id for entry in entries] == [
+        "architect-mode",
+        "defenseclaw",
+        "directory-plugin",
+    ]
+    by_id = {entry.id: entry for entry in entries}
+    assert by_id["defenseclaw"].path == str(defenseclaw)
+    assert by_id["defenseclaw"].manifest == "defenseclaw.ts"
+    assert read_amp_plugin_source(str(architect)).startswith("// @amp-agent-mode")
+    if linked is not None:
+        assert read_amp_plugin_source(str(linked)) == ""
+    assert discover_plugin_directories(str(root), connector="codex") == [
+        by_id["directory-plugin"],
+    ]
+
+
+def test_amp_file_and_directory_plugin_identity_collision_fails_closed(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "plugins"
+    root.mkdir()
+    (root / "reviewer").mkdir()
+    (root / "reviewer.ts").write_text("export default () => {}\n", encoding="utf-8")
+
+    with pytest.raises(AmbiguousPluginIdentityError):
+        discover_plugin_directories(str(root), connector="amp")
 
 
 def test_plugin_directory_entries_missing_root(tmp_path: Path) -> None:

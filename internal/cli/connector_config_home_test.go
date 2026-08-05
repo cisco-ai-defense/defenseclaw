@@ -40,6 +40,37 @@ func TestBindConnectorLifecycleConfigHomeOverridesAmbientAndRestoresIt(t *testin
 	}
 }
 
+func TestBindAmpLifecycleConfigHomeDoesNotMutateUserProfile(t *testing.T) {
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	bound := filepath.Join(root, "amp")
+	if err := os.MkdirAll(bound, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	ambient := filepath.Join(root, "ambient-profile")
+	t.Setenv("USERPROFILE", ambient)
+	connectorFlagName = "amp"
+	connectorFlagConfigHome = bound
+	t.Cleanup(func() {
+		connectorFlagName = ""
+		connectorFlagConfigHome = ""
+	})
+
+	restore, err := bindConnectorLifecycleConfigHome("amp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restore()
+	if got := os.Getenv("USERPROFILE"); got != ambient {
+		t.Fatalf("USERPROFILE mutated to %q, want %q", got, ambient)
+	}
+	if got := resolveConnectorOpts(filepath.Join(root, "data")).ConfigHome; got != bound {
+		t.Fatalf("Amp SetupOpts.ConfigHome = %q, want %q", got, bound)
+	}
+}
+
 func TestBindConnectorLifecycleConfigHomeRejectsUnsafeTargets(t *testing.T) {
 	root := t.TempDir()
 	unnormalized := root + string(filepath.Separator) + "child" + string(filepath.Separator) + ".." + string(filepath.Separator) + "codex"

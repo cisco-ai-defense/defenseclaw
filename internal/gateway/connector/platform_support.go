@@ -84,6 +84,10 @@ var windowsConnectorSupport = map[string]PlatformSupport{
 		Status: PlatformNotCertified,
 		Reason: "The DefenseClaw OpenCode integration has not completed native Windows x64 certification.",
 	},
+	"amp": {
+		Status: PlatformSupported,
+		Reason: "Amp and the DefenseClaw system policy plugin are supported on native Windows x64.",
+	},
 	"hermes": {
 		Status: PlatformNotCertified,
 		Reason: "The DefenseClaw Hermes integration has not completed native Windows x64 certification.",

@@ -28,6 +28,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
@@ -2825,6 +2826,40 @@ func TestAPIStatusOmnigentActionPolicyMode(t *testing.T) {
 	}
 	if cm["enforcement_surface"] != "omnigent_policy_api" {
 		t.Fatalf("enforcement_surface = %v, want omnigent_policy_api", cm["enforcement_surface"])
+	}
+}
+
+func TestAPIStatusAMPActionPolicyModeUsesHooksWithoutProxy(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Connector = "amp"
+	cfg.Guardrail.Mode = "action"
+	api := &APIServer{health: NewSidecarHealth(), scannerCfg: cfg}
+	req := httptest.NewRequest(http.MethodGet, "/status", nil)
+	w := httptest.NewRecorder()
+
+	api.handleStatus(w, req)
+
+	var result map[string]interface{}
+	if err := json.NewDecoder(w.Result().Body).Decode(&result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	mode, ok := result["connector_mode"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("connector_mode missing or wrong type: %T", result["connector_mode"])
+	}
+	for key, want := range map[string]interface{}{
+		"mode":                "observability",
+		"policy_mode":         "action",
+		"enforcement_surface": "agent_lifecycle_hooks",
+		"proxy_intercept":     false,
+		"hook_enforcement":    true,
+	} {
+		if got := mode[key]; got != want {
+			t.Errorf("%s = %v, want %v", key, got, want)
+		}
+	}
+	if got := mode["telemetry"]; !reflect.DeepEqual(got, []interface{}{"hooks"}) {
+		t.Errorf("telemetry = %#v, want hooks only", got)
 	}
 }
 
@@ -6743,15 +6778,16 @@ func TestHookScopedTokenRevalidatesDeletionAndRotation(t *testing.T) {
 	}
 }
 
-func TestHookScopedTokenLegacyFallbackDoesNotInferWildcardHookScopes(t *testing.T) {
+func TestHookScopedTokenLegacyFallbackUsesBuiltinHookRosterOnly(t *testing.T) {
 	api := &APIServer{
 		scannerCfg: &config.Config{
 			Gateway: config.GatewayConfig{Token: "master-token"},
 		},
 	}
 	api.SetHookAPITokens(map[string]string{
-		"codex":  "codex-scoped-token",
-		"hermes": "hermes-scoped-token",
+		"codex":          "codex-scoped-token",
+		"amp":            "amp-scoped-token",
+		"plugin-example": "plugin-scoped-token",
 	})
 	allowed := api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
@@ -6766,12 +6802,21 @@ func TestHookScopedTokenLegacyFallbackDoesNotInferWildcardHookScopes(t *testing.
 		t.Fatalf("legacy codex hook fallback status = %d, want %d", rec.Code, http.StatusNoContent)
 	}
 
-	req = httptest.NewRequest(http.MethodPost, "/api/v1/hermes/hook", nil)
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/amp/hook", nil)
 	req.RemoteAddr = "127.0.0.1:47777"
-	req.Header.Set("Authorization", "Bearer hermes-scoped-token")
+	req.Header.Set("Authorization", "Bearer amp-scoped-token")
+	rec = httptest.NewRecorder()
+	allowed.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNoContent {
+		t.Fatalf("legacy Amp hook fallback status = %d, want %d", rec.Code, http.StatusNoContent)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "/api/v1/plugin-example/hook", nil)
+	req.RemoteAddr = "127.0.0.1:47777"
+	req.Header.Set("Authorization", "Bearer plugin-scoped-token")
 	rec = httptest.NewRecorder()
 	allowed.ServeHTTP(rec, req)
 	if rec.Code != http.StatusUnauthorized {
-		t.Fatalf("unregistered wildcard hook scope status = %d, want %d", rec.Code, http.StatusUnauthorized)
+		t.Fatalf("unknown wildcard hook scope status = %d, want %d", rec.Code, http.StatusUnauthorized)
 	}
 }

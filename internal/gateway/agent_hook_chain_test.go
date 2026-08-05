@@ -397,6 +397,85 @@ func TestAuthenticatedHookToolChainDoesNotArmOnAttemptOrFailure(t *testing.T) {
 	})
 }
 
+func TestAuthenticatedAMPToolChainUsesExactResultLifecycle(t *testing.T) {
+	installCorrelationHMACForTest()
+	installDefaultProfileConnector(t, "amp")
+	store, logger := testStoreAndV8Logger(t)
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "amp"
+	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, store, logger, cfg)
+	handler := http.HandlerFunc(api.handleAgentHook("amp"))
+
+	for _, test := range []struct {
+		name       string
+		emitResult bool
+		status     string
+		wantChain  bool
+	}{
+		{name: "attempt only"},
+		{name: "missing status", emitResult: true},
+		{name: "failed", emitResult: true, status: "error"},
+		{name: "cancelled", emitResult: true, status: "cancelled"},
+		{name: "successful", emitResult: true, status: "done", wantChain: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			session := "amp-outcome-" + test.name
+			discoveryID := "amp-discover-" + test.name
+			callAgentHookForTest(t, handler, ampToolCall(session, discoveryID, "sudo -l"))
+			if test.emitResult {
+				callAgentHookForTest(t, handler, ampToolResult(session, discoveryID, test.status))
+			}
+			got := callAgentHookForTest(t, handler, ampToolCall(
+				session, "amp-elevate-"+test.name, "sudo -u root /bin/sh",
+			))
+			if present := slices.Contains(
+				got.RuleIDs,
+				guardrail.ToolChainPrivilegeDiscoveryThenElevation,
+			); present != test.wantChain {
+				t.Fatalf("chain present=%t want=%t response=%+v", present, test.wantChain, got)
+			}
+		})
+	}
+
+	t.Run("late success after agent end", func(t *testing.T) {
+		const session = "amp-outcome-late-after-agent-end"
+		callAgentHookForTest(t, handler, ampToolCall(session, "amp-late-discover", "sudo -l"))
+		callAgentHookForTest(t, handler, map[string]interface{}{
+			"hook_event_name": "agent.end",
+			"session_id":      session,
+			"thread_id":       session,
+		})
+		callAgentHookForTest(t, handler, ampToolResult(session, "amp-late-discover", "done"))
+		got := callAgentHookForTest(t, handler, ampToolCall(
+			session, "amp-late-elevate", "sudo -u root /bin/sh",
+		))
+		if slices.Contains(got.RuleIDs, guardrail.ToolChainPrivilegeDiscoveryThenElevation) {
+			t.Fatalf("late result after Amp turn boundary armed chain: %+v", got)
+		}
+	})
+
+	for _, boundary := range []string{"agent.end", "session.start"} {
+		t.Run("committed result survives "+boundary, func(t *testing.T) {
+			session := "amp-committed-survives-" + boundary
+			discoveryID := "amp-boundary-discover-" + boundary
+			callAgentHookForTest(t, handler, ampToolCall(session, discoveryID, "sudo -l"))
+			callAgentHookForTest(t, handler, ampToolResult(session, discoveryID, "done"))
+			callAgentHookForTest(t, handler, map[string]interface{}{
+				"hook_event_name": boundary,
+				"session_id":      session,
+				"thread_id":       session,
+			})
+			got := callAgentHookForTest(t, handler, ampToolCall(
+				session, "amp-boundary-elevate-"+boundary, "sudo -u root /bin/sh",
+			))
+			if !slices.Contains(got.RuleIDs, guardrail.ToolChainPrivilegeDiscoveryThenElevation) {
+				t.Fatalf("Amp %s cleared committed predecessor: %+v", boundary, got)
+			}
+		})
+	}
+}
+
 func TestAuthenticatedHookToolChainResetsOnlyAtSessionBoundary(t *testing.T) {
 	installCorrelationHMACForTest()
 	for _, test := range []struct {
@@ -595,6 +674,35 @@ func openCodeToolResult(session, invocation, command string) map[string]interfac
 	payload["tool_response"] = map[string]interface{}{
 		"output":   "",
 		"metadata": map[string]interface{}{"exit": 0},
+	}
+	return payload
+}
+
+func ampToolCall(session, invocation, command string) map[string]interface{} {
+	return map[string]interface{}{
+		"hook_event_name": "tool.call",
+		"session_id":      session,
+		"thread_id":       session,
+		"tool_call_id":    invocation,
+		"tool_name":       "Bash",
+		"tool_input":      map[string]interface{}{"command": command},
+	}
+}
+
+func ampToolResult(session, invocation, status string) map[string]interface{} {
+	payload := map[string]interface{}{
+		"hook_event_name": "tool.result",
+		"session_id":      session,
+		"thread_id":       session,
+		"tool_call_id":    invocation,
+		"tool_name":       "Bash",
+		"tool_response":   "",
+	}
+	if status != "" {
+		payload["status"] = status
+	}
+	if status == "error" {
+		payload["error"] = "command failed"
 	}
 	return payload
 }

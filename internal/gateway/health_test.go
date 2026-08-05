@@ -290,12 +290,18 @@ func TestObservabilityV8HealthRendersBoundedGenerationSnapshot(t *testing.T) {
 					observability.SignalLogs, observability.SignalTraces, observability.SignalMetrics,
 				},
 				State: delivery.HealthDegraded, Reason: string(delivery.HealthReasonQueueFull),
-				Queue: queue, Counters: delivery.Counters{Accepted: 8, Delivered: 5, Dropped: 2},
+				CircuitState: delivery.CircuitOpen, ConsecutiveFailures: 4,
+				CircuitOpenUntil: now.Add(24 * time.Hour),
+				LastFailureClass: delivery.FailureClassAuthentication,
+				Queue:            queue, Counters: delivery.Counters{Accepted: 8, Delivered: 5, Dropped: 2},
 				LastSuccess: now.Add(-time.Minute), LastFailure: now,
 				Sources: []delivery.HealthSnapshot{{
 					Destination: "all-signals", Generation: 4, Signal: string(observability.SignalTraces),
 					State: delivery.HealthDegraded, Reason: string(delivery.HealthReasonQueueFull),
-					Queue: queue, Counters: delivery.Counters{Accepted: 8, Delivered: 5, Dropped: 2},
+					CircuitState: delivery.CircuitOpen, ConsecutiveFailures: 4,
+					CircuitOpenUntil: now.Add(24 * time.Hour),
+					LastFailureClass: delivery.FailureClassAuthentication,
+					Queue:            queue, Counters: delivery.Counters{Accepted: 8, Delivered: 5, Dropped: 2},
 					LastSuccess: now.Add(-time.Minute), LastFailure: now,
 				}},
 			},
@@ -328,8 +334,17 @@ func TestObservabilityV8HealthRendersBoundedGenerationSnapshot(t *testing.T) {
 	}
 	row := rows[1]
 	if row["name"] != "all-signals" || row["state"] != "degraded" ||
-		row["reason"] != "queue_full" || row["failure"] != nil {
+		row["reason"] != "queue_full" || row["failure"] != nil ||
+		row["circuit_state"] != "open" || row["consecutive_failures"] != uint64(4) ||
+		row["circuit_open_until"] != now.Add(24*time.Hour).Format(time.RFC3339Nano) ||
+		row["last_failure_class"] != "authentication" {
 		t.Fatalf("destination row=%+v", row)
+	}
+	signalRows, ok := row["signal_health"].([]map[string]interface{})
+	if !ok || len(signalRows) != 1 || signalRows[0]["circuit_state"] != "open" ||
+		signalRows[0]["consecutive_failures"] != uint64(4) ||
+		signalRows[0]["last_failure_class"] != "authentication" {
+		t.Fatalf("signal health=%T %+v", row["signal_health"], row["signal_health"])
 	}
 	queueMap, ok := row["queue"].(map[string]interface{})
 	if !ok || queueMap["items"] != 2 || queueMap["max_items"] != 16 ||

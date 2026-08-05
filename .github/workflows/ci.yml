@@ -162,8 +162,12 @@ jobs:
         with:
           node-version: "24"
           cache: npm
-          cache-dependency-path: extensions/defenseclaw/package-lock.json
+          cache-dependency-path: |
+            extensions/defenseclaw/package-lock.json
+            scripts/amp-plugin-typecheck/package-lock.json
       - run: make plugin
+      - name: Type-check Amp policy plugin against official API
+        run: make amp-plugin-typecheck
       - run: make go-lint
 
   go-test-gateway:
@@ -860,7 +864,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        connector: [codex, claudecode]
+        connector: [codex, claudecode, amp]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:

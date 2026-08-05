@@ -144,14 +144,16 @@ contract or agent-version boundary.
 | [OpenHands](https://docs.openhands.dev/sdk/guides/hooks) | `pre_tool_use` | `post_tool_use`; only `tool_response.is_error=false` succeeds | the shell-hook payload omits the SDK's internal action ID | `detection-only` |
 | [Antigravity](https://www.antigravity.google/docs/hooks) | `PreToolUse` | `PostToolUse`; success requires an absent/empty error | paired `(conversationId, stepIdx)` sequence, not an opaque call ID | `detection-only` |
 | [OpenCode](https://github.com/anomalyco/opencode/blob/e4bd9757a3a5dc7461d286000a19e9bd7df57c40/packages/plugin/src/index.ts) | `tool.execute.before` | v7 awaits `tool.execute.after` with the executed args and validated result; `bash` additionally requires numeric `metadata.exit=0` | paired `(sessionID, callID)` | `paired-outcomes` |
+| [Amp](https://ampcode.com/manual/plugin-api) | `tool.call` | terminal `tool.result`; `status=done` succeeds, `error` fails, and `cancelled` discards | paired `toolUseID` on both events | `paired-outcomes` |
 | [OmniGent](https://omnigent.ai/docs/policies/custom) | `tool_call` mapped to `PreToolUse` | `tool_result` repeats request data but has no authoritative success/failure field | no stable call or session ID in `PolicyEvent` | `direct-only` |
 
-Turn-completion events such as Codex, Claude Code, or Cursor `Stop` and OpenCode
-`session.idle` discard only unfinished proposals. They deliberately preserve
-successful predecessor history so a reviewed chain can span user turns; a late
-result cannot promote work left pending when the turn ended. True session-end,
-deletion, or reset events atomically discard pending intent and close the exact
-session's committed chain window. Bounded, content-free cutoffs make both
+Turn-completion events such as Codex, Claude Code, or Cursor `Stop`, OpenCode
+`session.idle`, and Amp `agent.end` discard only unfinished proposals. They
+deliberately preserve successful predecessor history so a reviewed chain can
+span user turns; a late result cannot promote work left pending when the turn
+ended. True session-end, deletion, or reset events atomically discard pending
+intent and close the exact session's committed chain window. Bounded,
+content-free cutoffs make both
 operations replay-safe: a turn cutoff suppresses only stale pending proposals,
 while a session cutoff also suppresses stale committed events. Neither kind of
 boundary implies that an unfinished tool succeeded. Native OTel IDs may enrich
@@ -195,6 +197,7 @@ supported there.
 | OpenHands | yes | yes | yes | yes | yes | yes (`InvokeSkill`) | generic or MCP only |
 | Antigravity | yes | yes | yes | yes | undocumented | no dedicated lifecycle | generic only; MCP undocumented |
 | OpenCode | yes | yes | yes | yes | yes | yes | generic or MCP only |
+| Amp | yes | yes | yes | yes | yes | no dedicated lifecycle | generic or MCP only |
 | OmniGent | yes | yes | yes | yes | yes | yes | generic or MCP only |
 
 ## Files written now and executed later

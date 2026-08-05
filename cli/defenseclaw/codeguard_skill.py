@@ -173,11 +173,18 @@ def _normalize_target(target: str) -> str:
 
 def _target_path(cfg, connector: str, target: str) -> str:
     if target == "skill":
-        dirs = connector_paths.skill_dirs(
-            connector,
-            openclaw_home=getattr(getattr(cfg, "claw", object()), "home_dir", None),
-            openclaw_config=getattr(getattr(cfg, "claw", object()), "config_file", None),
-        )
+        resolver = getattr(cfg, "skill_write_dirs", None)
+        if callable(resolver):
+            dirs = resolver(connector)
+        else:
+            claw = getattr(cfg, "claw", object())
+            workspace_dir = getattr(claw, "workspace_dir", None)
+            dirs = connector_paths.skill_write_dirs(
+                connector,
+                openclaw_home=getattr(claw, "home_dir", None),
+                openclaw_config=getattr(claw, "config_file", None),
+                workspace_dir=workspace_dir,
+            )
         return os.path.join(dirs[0], "codeguard") if dirs else ""
     cwd = os.getcwd()
     if connector == "cursor":

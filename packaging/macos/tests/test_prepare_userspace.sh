@@ -37,14 +37,30 @@ t_cursor_creates() {
   assert_contains "${body}" '"hooks":{}'  "hooks.json has empty hooks map"
 }
 
+t_amp_does_not_precreate_plugin() {
+  local home; home="$(mktest_tmp)"
+  prepare_userspace_for amp "${home}" "$(id -u)" "$(id -g)"
+  if [[ -e "${home}/.config/amp/plugins/defenseclaw.ts" \
+     || -L "${home}/.config/amp/plugins/defenseclaw.ts" ]]; then
+    _fail "packaging precreated Amp's managed TypeScript plugin"
+  fi
+  if [[ -e "${home}/.config/amp/plugins" ]]; then
+    _fail "packaging created Amp's plugin directory before connector reconciliation"
+  fi
+}
+
 t_dispatch_via_helper() {
   local home; home="$(mktest_tmp)"
+  prepare_userspace_for amp        "${home}"
   prepare_userspace_for cursor     "${home}"
   prepare_userspace_for codex      "${home}"
   prepare_userspace_for claudecode "${home}"
   assert_file_exists "${home}/.cursor/hooks.json"
   assert_file_exists "${home}/.codex/config.toml"
   assert_file_exists "${home}/.claude/settings.json"
+  if [[ -e "${home}/.config/amp/plugins/defenseclaw.ts" ]]; then
+    _fail "dispatch helper precreated Amp's managed plugin"
+  fi
 }
 
 t_descriptor_anchored_ownership() {
@@ -164,6 +180,7 @@ t_atomic_creator_rejects_post_check_directory_swap() {
 run_case "codex userspace pre-create + idempotent" t_codex_creates
 run_case "claudecode userspace pre-create"         t_claudecode_creates
 run_case "cursor userspace pre-create"             t_cursor_creates
+run_case "amp userspace prep does not precreate plugin" t_amp_does_not_precreate_plugin
 run_case "prepare_userspace_for dispatch"          t_dispatch_via_helper
 run_case "descriptor-anchored ownership"           t_descriptor_anchored_ownership
 run_case "descriptor ownership rejects hardlink"  t_descriptor_ownership_rejects_hardlinked_config

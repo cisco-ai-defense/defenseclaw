@@ -45,6 +45,7 @@ CONNECTORS: tuple[str, ...] = (
     "openhands",
     "antigravity",
     "opencode",
+    "amp",
     "omnigent",
 )
 
