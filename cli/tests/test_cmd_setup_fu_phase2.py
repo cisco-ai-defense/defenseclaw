@@ -419,7 +419,8 @@ class TestInteractiveModeJudgePrompts(_BaseSetup):
         with _stub_side_effects(), \
                 patch("defenseclaw.commands.cmd_setup._is_interactive", return_value=True), \
                 patch("defenseclaw.commands.cmd_setup.click.confirm", return_value=True), \
-                patch("defenseclaw.commands.cmd_setup.click.prompt", return_value="2"):
+                patch("defenseclaw.commands.cmd_setup.click.prompt", return_value="2"), \
+                patch("defenseclaw.commands.cmd_setup._prompt_judge_model_config"):
             res = _invoke(["codex", "--no-restart"], self.app)
         self.assertEqual(res.exit_code, 0, msg=res.output)
         # Sole connector (replace shape) -> global mode.

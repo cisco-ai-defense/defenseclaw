@@ -33,6 +33,7 @@ before locating or editing Windows state.
     <File name="config.yaml" />
     <File name="audit.db" />
     <File name=".env" />
+    <File name="doctor_cache.json" />
     <File name="picked_connector" />
     <Folder name=".venv">
       <File name="…" />
@@ -67,6 +68,55 @@ before locating or editing Windows state.
     </Folder>
   </Folder>
 </Files>
+
+## Doctor cache
+
+`~/.defenseclaw/doctor_cache.json` is the latest non-dry-run Doctor snapshot.
+The Textual TUI reads it for the Overview panel instead of repeating
+network-intensive probes on every redraw.
+
+```json
+{
+  "schema_version": 2,
+  "captured_at": "2026-04-17T18:21:09Z",
+  "mode": "repair",
+  "outcome": "failed",
+  "exit_code": 1,
+  "passed": 12,
+  "failed": 0,
+  "warned": 1,
+  "skipped": 2,
+  "summary": {"passed": 12, "failed": 0, "warned": 1, "skipped": 2},
+  "checks": [
+    {"status": "warn", "label": "Splunk HEC", "detail": "queue depth 4200/5000"}
+  ],
+  "repair_summary": {
+    "planned": 0,
+    "applied": 1,
+    "failed": 0,
+    "blocked": 1,
+    "manual": 0,
+    "noop": 0,
+    "declined": 0,
+    "requires_confirmation": 0
+  },
+  "repairs": [
+    {"repair_id": "doctor.gateway.service.reconcile", "state": "blocked"}
+  ]
+}
+```
+
+The top-level and `summary` counts retain their health-only meaning.
+`repair_summary` and `repairs` form a separate ledger; a failed or blocked
+repair can make the aggregate outcome fail without increasing the health
+failure count.
+
+The CLI publishes the cache with an atomic temporary-file replacement after
+each non-dry-run Doctor invocation, including nonzero outcomes.
+`doctor --fix --dry-run` is read-only and never writes it. The TUI marks
+snapshots older than 15 minutes stale. A later healthy check can show that live
+health recovered, but does not erase a cached failed or blocked repair. A
+missing cache is normal before the first Doctor run.
 
 ## config.yaml schema
 

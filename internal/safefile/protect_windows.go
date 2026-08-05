@@ -180,6 +180,9 @@ func windowsPathOwner(path string) (*windows.SID, error) {
 	if err != nil {
 		return nil, err
 	}
+	if sd == nil {
+		return nil, fmt.Errorf("safefile: path has no security descriptor: %s", path)
+	}
 	owner, _, err := sd.Owner()
 	if err != nil {
 		return nil, err
@@ -421,6 +424,36 @@ func setPrivateDACL(path string, inherit bool) error {
 		nil,
 		nil,
 		acl,
+		nil,
+	)
+}
+
+type windowsOwnerSetter func(
+	objectName string,
+	objectType windows.SE_OBJECT_TYPE,
+	securityInformation windows.SECURITY_INFORMATION,
+	owner *windows.SID,
+	group *windows.SID,
+	dacl *windows.ACL,
+	sacl *windows.ACL,
+) error
+
+func setWindowsOwnerIfDifferent(
+	path string,
+	currentOwner *windows.SID,
+	desiredOwner *windows.SID,
+	setOwner windowsOwnerSetter,
+) error {
+	if currentOwner != nil && currentOwner.Equals(desiredOwner) {
+		return nil
+	}
+	return setOwner(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION,
+		desiredOwner,
+		nil,
+		nil,
 		nil,
 	)
 }

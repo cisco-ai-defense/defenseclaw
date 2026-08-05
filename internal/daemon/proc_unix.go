@@ -84,10 +84,7 @@ func waitForProcessExit(_ *os.Process, pid int, timeout time.Duration) bool {
 //
 //   - Linux: field 22 of /proc/<pid>/stat (starttime in clock ticks since
 //     boot). Stable for the lifetime of the process; resets after PID reuse.
-//   - Darwin: `ps -p <pid> -o lstart=` ("Sun May 10 12:34:56 2026"). The
-//     1-second granularity creates a tiny theoretical collision window
-//     immediately after PID reuse, but the executable check in verifyProcess
-//     covers that — both signals must agree.
+//   - Darwin: native kern.proc start time with microsecond precision.
 //
 // Returns ("", nil) on platforms where we can't read a stable identity (e.g.
 // FreeBSD); callers should treat that as "skip the start-time check" rather
@@ -114,15 +111,7 @@ func processStartIdentity(pid int) (string, error) {
 		}
 		return tail[19], nil
 	case "darwin":
-		out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "lstart=").Output()
-		if err != nil {
-			return "", err
-		}
-		s := strings.TrimSpace(string(out))
-		if s == "" {
-			return "", fmt.Errorf("daemon: ps returned empty lstart for pid %d", pid)
-		}
-		return s, nil
+		return darwinProcessStartIdentity(pid)
 	default:
 		return "", nil
 	}
@@ -146,20 +135,25 @@ func (d *Daemon) killStaleProcesses() error {
 		return nil
 	}
 
-	self, _ := os.Executable()
-	binName := filepath.Base(self)
-	if binName == "" || binName == "." {
-		binName = "defenseclaw-gateway"
+	self, err := os.Executable()
+	if err != nil || self == "" {
+		return nil
 	}
 
-	out, err := exec.Command("pgrep", "-f", binName).Output()
+	// Enumerate the kernel process table directly instead of invoking pgrep.
+	// Start/restart can run with gateway credentials in the parent environment;
+	// a PATH-resolved helper would both permit executable injection and inherit
+	// those credentials. proveStaleDaemonProcess performs the exact executable,
+	// daemon marker, data-directory, and start-identity checks for each numeric
+	// candidate before any signal is sent.
+	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		return nil
 	}
 	myPID := os.Getpid()
 
-	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
-		pid, err := strconv.Atoi(strings.TrimSpace(line))
+	for _, entry := range entries {
+		pid, err := strconv.Atoi(entry.Name())
 		if err != nil || pid <= 0 || pid == myPID || pid == trackedPID || pid == watchdogPID {
 			continue
 		}
@@ -185,7 +179,7 @@ func (d *Daemon) killStaleProcesses() error {
 
 // proveStaleDaemonProcess returns the Linux start identity only after proving
 // that pid is the exact gateway executable running as a daemon child for this
-// Daemon's data directory.  pgrep -f candidates are untrusted: a phase-two
+// Daemon's data directory. Numeric /proc entries are untrusted: a phase-two
 // mutator wrapper legitimately contains "defenseclaw-gateway start" in its
 // argv, and signalling it would race the real child against upgrade rollback.
 func (d *Daemon) proveStaleDaemonProcess(pid int, executable string) (string, bool) {

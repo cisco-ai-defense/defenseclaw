@@ -48,6 +48,8 @@ import subprocess
 import sys
 from collections.abc import Iterable
 
+from defenseclaw.file_permissions import read_regular_file_no_follow
+
 __all__ = [
     "pid_alive",
     "read_pid_file",
@@ -67,6 +69,9 @@ GATEWAY_PROCESS_NAMES: tuple[str, ...] = (
     "defenseclaw-gateway.exe",
 )
 
+_POSIX_PS_PATH = "/bin/ps"
+_MAX_PID_FILE_BYTES = 16 * 1024
+
 
 def pid_alive(pid: int) -> bool:
     """Return True when a process with ``pid`` is currently running.
@@ -74,7 +79,7 @@ def pid_alive(pid: int) -> bool:
     A non-positive PID is never alive (0 and negatives are signal/group
     sentinels on POSIX, never real daemon PIDs here).
     """
-    if pid <= 0:
+    if not 0 < pid <= 2_147_483_647:
         return False
     if sys.platform == "win32":  # pragma: no cover - exercised on Windows runners
         return _pid_alive_windows(pid)
@@ -133,13 +138,21 @@ def read_pid_file(pid_file: str) -> int | None:
     """Parse a daemon PID file.
 
     The file is either a bare integer or a JSON object with a ``pid`` key
-    (the richer form the gateway writes). Returns None for a missing,
-    unreadable, or malformed file.
+    (the richer form the gateway writes). Reads are bounded and reject links,
+    reparses, and non-regular files so lifecycle checks cannot be redirected
+    or blocked by a planted identity path. Returns None for a missing,
+    unreadable, unsafe, oversized, or malformed file.
     """
     try:
-        with open(pid_file, encoding="utf-8") as fh:
-            raw = fh.read().strip()
-    except OSError:
+        raw = (
+            read_regular_file_no_follow(
+                pid_file,
+                max_bytes=_MAX_PID_FILE_BYTES,
+            )
+            .decode("utf-8")
+            .strip()
+        )
+    except (OSError, UnicodeDecodeError):
         return None
     if not raw:
         return None
@@ -154,7 +167,13 @@ def read_pid_file(pid_file: str) -> int | None:
 
 
 def pid_file_alive(pid_file: str) -> bool:
-    """Return True when the PID recorded in ``pid_file`` is alive."""
+    """Return True when the PID recorded in ``pid_file`` is alive.
+
+    This is a read-only compatibility observation. It does not authenticate
+    the process as DefenseClaw or authorize signaling/lifecycle mutation;
+    callers performing control actions must validate that stronger identity
+    separately.
+    """
     pid = read_pid_file(pid_file)
     if pid is None:
         return False
@@ -164,10 +183,12 @@ def pid_file_alive(pid_file: str) -> bool:
 def process_argv0_basename(pid: int) -> str | None:
     """Best-effort basename of a running process's argv0.
 
-    Reads ``/proc/<pid>/cmdline`` (Linux) and falls back to
-    ``ps -p <pid> -o comm=`` (macOS/BSD). Returns the lowercased
-    basename, or ``None`` when the process identity cannot be determined
-    (so callers can fail closed).
+    Reads ``/proc/<pid>/cmdline`` (Linux) and falls back to the fixed OS
+    binary ``/bin/ps`` (macOS/BSD). The helper receives a locale-only
+    environment so gateway credentials and attacker-controlled ``PATH``
+    entries are never inherited. Returns the lowercased basename, or
+    ``None`` when the process identity cannot be determined (so callers can
+    fail closed).
     """
     if pid <= 0:
         return None
@@ -187,13 +208,15 @@ def process_argv0_basename(pid: int) -> str | None:
         # /proc not present (macOS/BSD) — fall back to ps.
         try:
             out = subprocess.run(
-                ["ps", "-p", str(pid), "-o", "comm="],
+                [_POSIX_PS_PATH, "-p", str(pid), "-o", "comm="],
                 capture_output=True,
                 text=True,
                 check=False,
                 timeout=5,
+                stdin=subprocess.DEVNULL,
+                env={"LC_ALL": "C", "LANG": "C"},
             )
-        except (FileNotFoundError, subprocess.SubprocessError):
+        except (OSError, subprocess.SubprocessError):
             # No ps either — identity unknown.
             return None
         if out.returncode != 0:

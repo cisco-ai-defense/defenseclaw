@@ -95,7 +95,7 @@ def test_authenticated_sidecar_uses_api_bind_port_and_token_in_hook_only_topolog
     (
         ("darwin", "", "127.0.0.1"),
         ("linux", "0.0.0.0", "127.0.0.1"),
-        ("linux", "::", "127.0.0.1"),
+        ("linux", "::", "::1"),
         ("darwin", "localhost", "localhost"),
     ),
 )

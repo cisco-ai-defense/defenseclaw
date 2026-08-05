@@ -49,6 +49,15 @@ type fakeStrongDaemonState struct {
 
 func (f fakeStrongDaemonState) HasManagedProcessIdentity(int) bool { return f.identityOK }
 
+type fakeMigrationDaemonState struct {
+	fakeStrongDaemonState
+	migrationIdentityOK bool
+}
+
+func (f fakeMigrationDaemonState) HasAuthenticatedMigrationProcessIdentity(int) bool {
+	return f.migrationIdentityOK
+}
+
 type fakeUpgradeDaemonState struct {
 	fakeStrongDaemonState
 	startedAt    time.Time
@@ -67,6 +76,19 @@ func startupTestConfig(t *testing.T) *config.Config {
 	cfg.Gateway.APIPort = 18970
 	cfg.Gateway.Token = "unit-test-token"
 	return cfg
+}
+
+func pinStartupTestToken(t *testing.T, cfg *config.Config) {
+	t.Helper()
+	t.Setenv("DEFENSECLAW_HOME", cfg.DataDir)
+	t.Setenv("DEFENSECLAW_DATA_DIR", cfg.DataDir)
+	if err := os.WriteFile(
+		filepath.Join(cfg.DataDir, ".env"),
+		[]byte("DEFENSECLAW_GATEWAY_TOKEN="+cfg.Gateway.Token+"\n"),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func withStartupListenerInspector(t *testing.T, fn func(string, int) (int, error)) {
@@ -365,6 +387,7 @@ func TestInspectConfiguredListenerRejectsForeignCollisionAndStalePID(t *testing.
 
 func TestInspectConfiguredListenerAcceptsAuthenticatedExpectedInstance(t *testing.T) {
 	cfg := startupTestConfig(t)
+	pinStartupTestToken(t, cfg)
 	status := gatewayStatusEnvelope{}
 	status.Runtime.PID = 42
 	status.Runtime.DataDir = cfg.DataDir
@@ -379,6 +402,73 @@ func TestInspectConfiguredListenerAcceptsAuthenticatedExpectedInstance(t *testin
 	running, pid, err := inspectConfiguredListener(fakeDaemonState{running: true, pid: 42}, cfg, srv.Client())
 	if err != nil || !running || pid != 42 {
 		t.Fatalf("inspect = (%v, %d, %v), want authenticated PID 42", running, pid, err)
+	}
+}
+
+func TestInspectConfiguredListenerAcceptsAuthenticatedOriginMainMigration(t *testing.T) {
+	cfg := startupTestConfig(t)
+	pinStartupTestToken(t, cfg)
+	status := gatewayStatusEnvelope{}
+	status.Runtime.PID = 42
+	status.Runtime.DataDir = cfg.DataDir
+	srv := authenticatedStatusServer(t, cfg.Gateway.Token, status)
+	defer srv.Close()
+	host, port := splitHostPortForTest(t, strings.TrimPrefix(srv.URL, "http://"))
+	cfg.Gateway.APIBind, cfg.Gateway.APIPort = host, port
+	withStartupListenerInspector(t, func(string, int) (int, error) { return 42, nil })
+	state := fakeMigrationDaemonState{
+		fakeStrongDaemonState: fakeStrongDaemonState{
+			fakeDaemonState: fakeDaemonState{running: true, pid: 42},
+		},
+		migrationIdentityOK: true,
+	}
+
+	running, pid, err := inspectConfiguredListener(state, cfg, srv.Client())
+	if err != nil || !running || pid != 42 {
+		t.Fatalf("migration inspect = (%v, %d, %v), want authenticated PID 42", running, pid, err)
+	}
+}
+
+func TestInspectConfiguredListenerRejectsUnauthenticatedOriginMainMigration(t *testing.T) {
+	cfg := startupTestConfig(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+	host, port := splitHostPortForTest(t, strings.TrimPrefix(srv.URL, "http://"))
+	cfg.Gateway.APIBind, cfg.Gateway.APIPort = host, port
+	withStartupListenerInspector(t, func(string, int) (int, error) { return 42, nil })
+	state := fakeMigrationDaemonState{
+		fakeStrongDaemonState: fakeStrongDaemonState{
+			fakeDaemonState: fakeDaemonState{running: true, pid: 42},
+		},
+		migrationIdentityOK: true,
+	}
+
+	_, _, err := inspectConfiguredListener(state, cfg, srv.Client())
+	if err == nil || !strings.Contains(err.Error(), "authentication failed") {
+		t.Fatalf("migration error = %v, want authentication failure", err)
+	}
+}
+
+func TestInspectConfiguredListenerNeverSendsMigrationTokenOffLoopback(t *testing.T) {
+	cfg := startupTestConfig(t)
+	cfg.Gateway.APIBind = "198.51.100.8"
+	withStartupListenerInspector(t, func(string, int) (int, error) { return 42, nil })
+	state := fakeMigrationDaemonState{
+		fakeStrongDaemonState: fakeStrongDaemonState{
+			fakeDaemonState: fakeDaemonState{running: true, pid: 42},
+		},
+		migrationIdentityOK: true,
+	}
+
+	_, _, err := inspectConfiguredListener(
+		state,
+		cfg,
+		&http.Client{Timeout: time.Millisecond},
+	)
+	if err == nil || !strings.Contains(err.Error(), "non-loopback migration") {
+		t.Fatalf("migration error = %v, want pre-token loopback refusal", err)
 	}
 }
 

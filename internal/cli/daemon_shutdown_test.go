@@ -134,3 +134,24 @@ func TestRequestGatewayShutdownDoesNotFollowRedirects(t *testing.T) {
 		t.Fatalf("redirect target received %d authenticated request(s)", got)
 	}
 }
+
+func TestFetchSidecarStatusDoesNotFollowRedirects(t *testing.T) {
+	var redirectedRequests atomic.Int32
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		redirectedRequests.Add(1)
+		_ = json.NewEncoder(w).Encode(gatewayStatusEnvelope{})
+	}))
+	defer target.Close()
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
+	}))
+	defer origin.Close()
+
+	_, err := fetchSidecarStatus(origin.Client(), origin.URL+"/status", "must-not-leak")
+	if err == nil || !strings.Contains(err.Error(), "307") {
+		t.Fatalf("redirect status error = %v, want 307 rejection", err)
+	}
+	if got := redirectedRequests.Load(); got != 0 {
+		t.Fatalf("redirect target received %d authenticated status request(s)", got)
+	}
+}

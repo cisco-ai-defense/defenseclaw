@@ -45,7 +45,7 @@ type e2e1DefaultLogCase struct {
 func TestE2E1EmptyConfigRuntimeCollectsAllSignalsLocallyWithoutExporters(t *testing.T) {
 	dependencies := newRuntimeTestDependencies(t)
 	compiled, err := config.ParseCompileObservabilityV8(
-		"config.yaml",
+		"<config.yaml>",
 		[]byte(fmt.Sprintf(
 			"config_version: 8\ndata_dir: %q\nobservability: {}\n",
 			filepath.Dir(dependencies.storePath),

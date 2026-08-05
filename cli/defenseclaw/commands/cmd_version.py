@@ -98,7 +98,17 @@ def _gateway_component() -> Component:
     missing components are excluded from drift comparison, the command
     would falsely report no drift against the real binary (F-0001).
     """
-    bin_path = gateway.resolve_gateway_binary()
+    return _gateway_component_for_binary(gateway.resolve_gateway_binary())
+
+
+def _gateway_component_for_binary(bin_path: str | None) -> Component:
+    """Interrogate one exact gateway binary selected by a trusted caller.
+
+    Doctor lifecycle compatibility checks use this entrypoint so the version
+    evidence always describes the same controller binary that a repair would
+    execute.  The normal ``version`` command continues to use
+    :func:`_gateway_component`, which owns its general-purpose resolution.
+    """
     if not bin_path:
         return Component(
             name="gateway",

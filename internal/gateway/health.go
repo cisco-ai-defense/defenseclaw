@@ -834,6 +834,8 @@ func renderObservabilityV8Health(
 		row := map[string]interface{}{
 			"name": destination.Name, "kind": string(destination.Kind),
 			"enabled": destination.Enabled, "generation": snapshot.Generation,
+			"circuit_state":        string(destination.CircuitState),
+			"consecutive_failures": destination.ConsecutiveFailures,
 		}
 		signals := make([]string, len(destination.Signals))
 		for index, signal := range destination.Signals {
@@ -846,6 +848,12 @@ func renderObservabilityV8Health(
 		if destination.Reason != "" {
 			row["reason"] = destination.Reason
 		}
+		if !destination.CircuitOpenUntil.IsZero() {
+			row["circuit_open_until"] = destination.CircuitOpenUntil.UTC().Format(time.RFC3339Nano)
+		}
+		if destination.LastFailureClass != "" {
+			row["last_failure_class"] = string(destination.LastFailureClass)
+		}
 		if destination.Queue != nil {
 			row["queue"] = renderObservabilityV8Queue(*destination.Queue, destination.Counters)
 		}
@@ -855,7 +863,9 @@ func renderObservabilityV8Health(
 		for _, source := range destination.Sources {
 			signalRow := map[string]interface{}{
 				"signal": source.Signal, "state": string(source.State),
-				"counters": renderObservabilityV8Counters(source.Counters),
+				"counters":             renderObservabilityV8Counters(source.Counters),
+				"circuit_state":        string(source.CircuitState),
+				"consecutive_failures": source.ConsecutiveFailures,
 			}
 			if source.Reason != "" {
 				signalRow["reason"] = source.Reason
@@ -865,6 +875,12 @@ func renderObservabilityV8Health(
 			}
 			if !source.LastFailure.IsZero() {
 				signalRow["last_failure_at"] = source.LastFailure.UTC().Format(time.RFC3339Nano)
+			}
+			if !source.CircuitOpenUntil.IsZero() {
+				signalRow["circuit_open_until"] = source.CircuitOpenUntil.UTC().Format(time.RFC3339Nano)
+			}
+			if source.LastFailureClass != "" {
+				signalRow["last_failure_class"] = string(source.LastFailureClass)
 			}
 			if source.Queue != nil {
 				queue := renderObservabilityV8Queue(*source.Queue, source.Counters)
@@ -880,6 +896,14 @@ func renderObservabilityV8Health(
 				}
 				if !source.LastFailure.IsZero() {
 					queueRow["last_failure_at"] = source.LastFailure.UTC().Format(time.RFC3339Nano)
+				}
+				queueRow["circuit_state"] = string(source.CircuitState)
+				queueRow["consecutive_failures"] = source.ConsecutiveFailures
+				if !source.CircuitOpenUntil.IsZero() {
+					queueRow["circuit_open_until"] = source.CircuitOpenUntil.UTC().Format(time.RFC3339Nano)
+				}
+				if source.LastFailureClass != "" {
+					queueRow["last_failure_class"] = string(source.LastFailureClass)
 				}
 				queueRows = append(queueRows, queueRow)
 			}

@@ -67,7 +67,14 @@ from defenseclaw.connector_paths import (  # noqa: F401
     _read_openclaw_json as _read_openclaw_config,
 )
 from defenseclaw.file_lock import locked_file_update
-from defenseclaw.file_permissions import atomic_write_text_secure, make_private_directory
+from defenseclaw.file_permissions import (
+    MAX_DOTENV_BYTES,
+    atomic_write_text_secure,
+    dotenv_key_is_process_control,
+    dotenv_key_is_valid,
+    make_private_directory,
+    read_regular_file_no_follow,
+)
 
 _log = logging.getLogger(__name__)
 _llm_migration_warned_keys: set[tuple[str, ...]] = set()
@@ -117,9 +124,7 @@ def source_config_version(*, path: str | None = None) -> int | None:
     if not isinstance(root, yaml.MappingNode):
         return 0
     version_nodes = [
-        value
-        for key, value in root.value
-        if isinstance(key, yaml.ScalarNode) and key.value == "config_version"
+        value for key, value in root.value if isinstance(key, yaml.ScalarNode) and key.value == "config_version"
     ]
     if len(version_nodes) != 1 or not isinstance(version_nodes[0], yaml.ScalarNode):
         return 0
@@ -136,13 +141,9 @@ def require_v8_config(*, path: str | None = None, allow_missing: bool = False) -
     if version is None and allow_missing:
         return
     if version is None:
-        raise ConfigVersionError(
-            "DefenseClaw is not initialized — run 'defenseclaw init' first."
-        )
+        raise ConfigVersionError("DefenseClaw is not initialized — run 'defenseclaw init' first.")
     if version != 8:
-        raise ConfigVersionError(
-            "Configuration schema v8 is required — run 'defenseclaw upgrade' first."
-        )
+        raise ConfigVersionError("Configuration schema v8 is required — run 'defenseclaw upgrade' first.")
 
 
 LEGACY_DEPLOYMENT_MODE_ALIASES = {
@@ -357,10 +358,7 @@ def _managed_config_trust_problem(path: str) -> str | None:
         elif not stat.S_ISDIR(mode):
             return f"{current}: expected a directory in the managed config path"
         if stat.S_IMODE(mode) & 0o022:
-            return (
-                f"{current}: group/other writable permissions "
-                f"{stat.S_IMODE(mode):04o} are not trusted"
-            )
+            return f"{current}: group/other writable permissions {stat.S_IMODE(mode):04o} are not trusted"
 
         acl_problem = _macos_write_acl_problem(current)
         if acl_problem is not None:
@@ -370,10 +368,7 @@ def _managed_config_trust_problem(path: str) -> str | None:
         if owner_uid is None:
             return f"{current}: cannot inspect path owner"
         if owner_uid != 0:
-            return (
-                f"{current}: owner uid {owner_uid} is not trusted; "
-                "expected root/admin uid 0"
-            )
+            return f"{current}: owner uid {owner_uid} is not trusted; expected root/admin uid 0"
 
         parent = os.path.dirname(current)
         if parent == current:
@@ -1125,6 +1120,7 @@ class GatewayConfigReloadConfig:
 class GatewayConfig:
     host: str = "127.0.0.1"
     port: int = 18789
+    fleet_mode: str = ""
     api_bind: str = ""
     token: str = ""
     token_env: str = ""
@@ -2664,9 +2660,7 @@ class Config:
             self._source_config_version = 8
             self._loaded_v8_modeled_snapshot = _config_to_dict(default_config())
         if self._source_config_version != 8:
-            raise ConfigVersionError(
-                "Configuration schema v8 is required — run 'defenseclaw upgrade' first."
-            )
+            raise ConfigVersionError("Configuration schema v8 is required — run 'defenseclaw upgrade' first.")
         dataclass_data = _config_to_dict(self)
         existing = _load_existing_config_yaml(path)
         merged = _merge_v8_modeled_changes(existing, dataclass_data, self._loaded_v8_modeled_snapshot)
@@ -3155,9 +3149,7 @@ def _merge_v8_modeled_changes(
     current_observability = current.get("observability")
     baseline_observability = baseline.get("observability")
     current_connectors = (
-        current_observability.get("connectors", _V8_MISSING)
-        if isinstance(current_observability, dict)
-        else _V8_MISSING
+        current_observability.get("connectors", _V8_MISSING) if isinstance(current_observability, dict) else _V8_MISSING
     )
     baseline_connectors = (
         baseline_observability.get("connectors", _V8_MISSING)
@@ -4415,30 +4407,44 @@ def _load_dotenv_into_os(data_dir: str) -> None:
     credential_provenance.begin_dotenv_load(data_dir, env_path)
     seen_keys: set[str] = set()
     try:
-        with open(env_path) as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                key, _, value = line.partition("=")
-                key, value = key.strip(), value.strip()
-                if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
-                    value = value[1:-1]
-                if key and key not in seen_keys:
-                    seen_keys.add(key)
-                    injected = key not in os.environ
-                    if injected:
-                        os.environ[key] = value
-                    credential_provenance.note_dotenv_candidate(
-                        data_dir,
-                        key,
-                        value,
-                        injected=injected,
-                    )
+        body = read_regular_file_no_follow(env_path, max_bytes=MAX_DOTENV_BYTES)
+        for raw_line in body.splitlines():
+            line = raw_line.strip()
+            if not line or line.startswith(b"#"):
+                continue
+            raw_key, separator, raw_value = line.partition(b"=")
+            if not separator:
+                continue
+            try:
+                key = raw_key.strip().decode("ascii")
+                value = raw_value.strip().decode("utf-8")
+            except UnicodeError:
+                # Match the Go daemon's line-oriented parser: one malformed
+                # unrelated entry must not hide a later valid credential.
+                continue
+            if not dotenv_key_is_valid(key) or "\x00" in value:
+                _log.warning("config: ignored malformed dotenv entry from %s", env_path)
+                continue
+            if dotenv_key_is_process_control(key):
+                _log.warning("config: ignored unsafe process-control key %s from %s", key, env_path)
+                continue
+            if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
+                value = value[1:-1]
+            if key and key not in seen_keys:
+                seen_keys.add(key)
+                injected = key not in os.environ
+                if injected:
+                    os.environ[key] = value
+                credential_provenance.note_dotenv_candidate(
+                    data_dir,
+                    key,
+                    value,
+                    injected=injected,
+                )
     except FileNotFoundError:
         pass
     except OSError as exc:
-        _log.debug("config: cannot read %s: %s", env_path, exc)
+        _log.warning("config: ignoring unreadable or unsafe dotenv %s: %s", env_path, exc)
 
 
 def _warn_plaintext_secrets(cfg: Config) -> None:
@@ -4466,6 +4472,7 @@ def _warn_plaintext_secrets(cfg: Config) -> None:
         _warn("scanners.skill_scanner", "virustotal_api_key", "VIRUSTOTAL_API_KEY")
     if cfg._source_config_version != 8 and cfg.splunk.hec_token:
         _warn("splunk", "hec_token", "DEFENSECLAW_SPLUNK_HEC_TOKEN")
+
 
 def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
     """Load config from the active config path, applying defaults.
@@ -4605,6 +4612,7 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
         gateway=GatewayConfig(
             host=gw_raw.get("host", "127.0.0.1"),
             port=gw_raw.get("port", 18789),
+            fleet_mode=gw_raw.get("fleet_mode", ""),
             api_bind=gw_raw.get("api_bind", ""),
             token=gw_raw.get("token", ""),
             token_env=gw_raw.get("token_env", ""),

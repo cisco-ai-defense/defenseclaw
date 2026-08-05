@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from types import SimpleNamespace
 
 import click
 
@@ -198,11 +199,30 @@ def cli(ctx: click.Context) -> None:
     try:
         app.cfg = cfg_mod.load()
     except Exception as exc:
+        if invoked == "doctor":
+            from defenseclaw.doctor_preflight import inspect_doctor_config_load_failure
+
+            # Doctor is a recovery surface. Preserve the canonical raw-source
+            # diagnostics for its own renderer instead of aborting before the
+            # command starts or constructing authoritative runtime state.
+            app.doctor_startup_diagnostics = inspect_doctor_config_load_failure(exc)
+            # Preserve a failed cache snapshot in the same operational home the
+            # TUI uses. This is not a runtime Config and is consumed only by
+            # Doctor's best-effort cache writer.
+            app.cfg = SimpleNamespace(data_dir=str(cfg_mod.default_data_path()))
+            return
         ux.echo(
             f"Failed to load config — run 'defenseclaw init' first: {exc}",
             err=True,
         )
         raise SystemExit(1)
+
+    # Doctor must observe the audit database exactly as it existed at command
+    # start. Generic Store.init() performs CREATE TABLE IF NOT EXISTS and would
+    # turn a missing/corrupt-store diagnosis into a false pass before Doctor
+    # gets a chance to inspect it. Doctor owns any explicitly requested repair.
+    if invoked == "doctor":
+        return
 
     # The upgrade controller owns its authenticated preflight, receipts, and
     # rollback transaction. Do not initialize generic audit state before that
@@ -230,7 +250,8 @@ def cli(ctx: click.Context) -> None:
             for issue in result.errors:
                 ux.echo(f"  ✗ {issue}", err=True)
             ux.echo(
-                "  Run 'defenseclaw config validate' for details, or 'defenseclaw doctor --fix' to auto-repair.",
+                "  Run 'defenseclaw config validate' for details, repair or upgrade the configuration, "
+                "then rerun the command.",
                 err=True,
             )
             raise SystemExit(1)

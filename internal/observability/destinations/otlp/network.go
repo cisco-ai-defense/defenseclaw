@@ -41,7 +41,8 @@ func withAttemptCounter(ctx context.Context) (context.Context, *atomic.Uint64) {
 }
 
 type observedRoundTripper struct {
-	inner http.RoundTripper
+	inner   http.RoundTripper
+	tracker *dialOutcomeTracker
 }
 
 func (transport observedRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
@@ -51,6 +52,10 @@ func (transport observedRoundTripper) RoundTrip(request *http.Request) (*http.Re
 		WroteRequest: func(httptrace.WroteRequestInfo) { wroteRequest.Store(true) },
 	}))
 	response, err := transport.inner.RoundTrip(traced)
+	if response != nil &&
+		(response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden) {
+		transport.tracker.recordAuthentication()
+	}
 	if err != nil && wroteRequest.Load() &&
 		!errors.Is(err, netguard.ErrV8AddressProhibited) && !errors.Is(err, netguard.ErrV8EndpointInvalid) {
 		return response, retryableTransportError{cause: err}
@@ -66,9 +71,10 @@ func (retryableTransportError) Temporary() bool   { return true }
 func (retryableTransportError) Timeout() bool     { return false }
 
 type dialOutcomeTracker struct {
-	mu           sync.Mutex
-	sequence     uint64
-	latestUnsafe uint64
+	mu                   sync.Mutex
+	sequence             uint64
+	latestUnsafe         uint64
+	latestAuthentication uint64
 }
 
 func (tracker *dialOutcomeTracker) snapshot() uint64 {
@@ -99,6 +105,25 @@ func (tracker *dialOutcomeTracker) unsafeSince(sequence uint64) bool {
 	tracker.mu.Lock()
 	defer tracker.mu.Unlock()
 	return tracker.latestUnsafe > sequence
+}
+
+func (tracker *dialOutcomeTracker) recordAuthentication() {
+	if tracker == nil {
+		return
+	}
+	tracker.mu.Lock()
+	tracker.sequence++
+	tracker.latestAuthentication = tracker.sequence
+	tracker.mu.Unlock()
+}
+
+func (tracker *dialOutcomeTracker) authenticationSince(sequence uint64) bool {
+	if tracker == nil {
+		return false
+	}
+	tracker.mu.Lock()
+	defer tracker.mu.Unlock()
+	return tracker.latestAuthentication > sequence
 }
 
 func newGRPCConnection(config signalConfig) (*grpc.ClientConn, error) {
@@ -141,6 +166,10 @@ func newGRPCConnection(config signalConfig) (*grpc.ClientConn, error) {
 				// only the in-memory RPC status so a prohibited dial is terminal;
 				// the outer exporter uses the tracker to retain unsafe classification.
 				return status.Error(codes.PermissionDenied, "OTLP endpoint is prohibited")
+			}
+			switch status.Code(err) {
+			case codes.Unauthenticated, codes.PermissionDenied:
+				config.tracker.recordAuthentication()
 			}
 			return err
 		}),

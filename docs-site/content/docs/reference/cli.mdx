@@ -35,8 +35,48 @@ Tables below tag each row with the binary that owns it.
 | --- | --- |
 | `defenseclaw init` | Interactive first-run wizard. On a TTY, pre-selects installed hook connectors and lets you choose which ones stay observe vs action. Non-interactive multi-connector flags are `--observe-all` and `--action-connectors`; an explicit `--connector` keeps the single-connector path. |
 | `defenseclaw quickstart` | Zero-prompt first-run for **one** connector with safe defaults. Pass `--connector <name>` when more than one connector is configured or detected. See [Quickstart](/docs/get-started/quickstart). |
-| `defenseclaw doctor` | Health check. Run this first whenever something feels off. |
+| `defenseclaw doctor` | Health and repair check. Run this first whenever something feels off; see [Doctor](#doctor) below. |
 | `defenseclaw status` | Enforcement flags and gateway state, plus a per-connector block for **every** active connector. Read commands like this fan out to all actives — the same layout whether one or N are wired. |
+
+## Doctor
+
+```text
+defenseclaw doctor [--json-output | --json] [--passive]
+defenseclaw doctor --fix [--dry-run] [--yes] [--fix-id REPAIR_ID]...
+```
+
+Common invocations:
+
+```bash
+defenseclaw doctor --json
+defenseclaw doctor --passive
+defenseclaw doctor --fix --dry-run
+defenseclaw doctor --fix --fix-id doctor.gateway.token.ensure
+```
+
+Doctor checks configuration, audit and identity state, component and active
+connector compatibility, scanner binaries, managed gateway health and
+authentication, configured guardrail and scanner services, credentials, and
+observability destination health.
+
+`--json-output` (also available as `--json`) emits schema v2. Health remains in
+`checks` and `summary`; repair attempts are independent records under `repairs`
+and `repair_summary`. Repair states are `applicable`, `noop`, `blocked`,
+`manual`, `requires_confirmation`, `declined`, `applied`, and `failed`. Each
+record also carries its stable repair ID, risk, dependencies, effects, blockers,
+restart potential, and platform. The top-level `outcome` and `exit_code`
+combine health and repair results without adding repair failures to health
+counters.
+
+Use `--passive` to suppress synthetic telemetry, LLM, and
+inspection-content-submitting probes. Every `--fix --dry-run` is passive and
+runs planners only, so it cannot mutate disk or restart a service.
+
+`--fix-id` is repeatable and selects exact work plus declared dependencies.
+`--yes` may approve eligible safe and disruptive repairs, but does not select
+policy or experimental work. A JSON repair must be a dry-run preview or include
+`--yes`. See [Reporting and diagnosis](/docs/reference/fail-modes#reporting-and-diagnosis)
+for token, audit, identity, compatibility, and recovery safety boundaries.
 
 ## Setup
 

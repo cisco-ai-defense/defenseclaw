@@ -17,7 +17,6 @@
 from __future__ import annotations
 
 import ctypes
-import ntpath
 import os
 import struct
 import sys
@@ -98,7 +97,7 @@ class _FakeApi:
     def open_directory_no_delete(self, path: str, *, protect_name: bool = True) -> int:
         handle = self.next_handle
         self.next_handle += 1
-        self.events.append(("lease-open", (path, protect_name)))
+        self.events.append(("lease-open", (path, protect_name, handle)))
         return handle
 
     def assert_real_directory(self, handle: int) -> None:
@@ -148,11 +147,23 @@ class _FakeApi:
     def move_file_no_replace(self, source: str, target: str) -> None:
         self.events.append(("move", (source, target)))
 
-    def replace_regular_file_by_handle(self, source: str, target: str) -> None:
-        self.events.append(("handle-replace", (source, target)))
+    def _open_regular_mutator(self, path: str) -> int:
+        handle = self.next_handle
+        self.next_handle += 1
+        self.events.append(("mutator-open", (path, handle)))
+        return handle
 
-    def delete_regular_file_by_handle(self, path: str) -> None:
-        self.events.append(("handle-delete", path))
+    def _rename_open_regular_file(
+        self,
+        handle: int,
+        target: str,
+        *,
+        replace_existing: bool,
+    ) -> None:
+        self.events.append(("handle-replace", (handle, target, replace_existing)))
+
+    def delete_open_regular_file(self, handle: int) -> None:
+        self.events.append(("handle-delete", handle))
 
     def private_security(self, owner: bytes, *, ace_flags: int = 0) -> WindowsFileSecurity:
         assert owner == OWNER
@@ -750,6 +761,7 @@ def test_windows_directory_chain_stays_held_across_handle_mutations(
 
     with windows_acl.hold_directory_chain(r"C:\Users\operator\.defenseclaw"):
         outer_handles = [value for event, value in api.events if event == "lease-validate"]
+        original_parent_handle = outer_handles[-1]
         windows_acl.replace_regular_file_by_handle(
             r"C:\Users\operator\.defenseclaw\candidate.tmp",
             r"C:\Users\operator\.defenseclaw\config.yaml",
@@ -757,30 +769,224 @@ def test_windows_directory_chain_stays_held_across_handle_mutations(
         windows_acl.delete_regular_file_by_handle(
             r"C:\Users\operator\.defenseclaw\retired.yaml",
         )
-        assert not any(event == "close" and value in outer_handles for event, value in api.events)
+        protected_opens = [
+            value
+            for event, value in api.events
+            if event == "lease-open" and value[1]
+        ]
+        assert len(protected_opens) == 3
+        protected_handles = [value[2] for value in protected_opens]
+        member_opens = [value for event, value in api.events if event == "mutator-open"]
+        assert len(member_opens) == 2
+        source_handle = member_opens[0][1]
+        retired_handle = member_opens[1][1]
+
+        def event_index(expected: tuple[str, object]) -> int:
+            return api.events.index(expected)
+
+        assert (
+            event_index(("mutator-open", member_opens[0]))
+            < event_index(("close", original_parent_handle))
+            < event_index(
+                (
+                    "handle-replace",
+                    (
+                        source_handle,
+                        r"C:\Users\operator\.defenseclaw\config.yaml",
+                        True,
+                    ),
+                )
+            )
+            < event_index(("lease-validate", protected_handles[1]))
+            < event_index(("close", source_handle))
+        )
+        assert (
+            event_index(("mutator-open", member_opens[1]))
+            < event_index(("close", protected_handles[1]))
+            < event_index(("handle-delete", retired_handle))
+            < event_index(("lease-validate", protected_handles[2]))
+            < event_index(("close", retired_handle))
+        )
+        assert not any(
+            event == "close" and value in (*outer_handles[:-1], protected_handles[2])
+            for event, value in api.events
+        )
 
     opened = [value for event, value in api.events if event == "lease-open"]
     assert opened[:4] == [
-        ("C:\\", False),
-        (r"C:\Users", False),
-        (r"C:\Users\operator", False),
-        (r"C:\Users\operator\.defenseclaw", True),
+        ("C:\\", False, outer_handles[0]),
+        (r"C:\Users", False, outer_handles[1]),
+        (r"C:\Users\operator", False, outer_handles[2]),
+        (r"C:\Users\operator\.defenseclaw", True, outer_handles[3]),
     ]
-    for nested_ancestors in (opened[4:7], opened[7:10]):
-        assert tuple(ntpath.normcase(path) for path, _protect_name in nested_ancestors) == tuple(
-            ntpath.normcase(path) for path, _protect_name in opened[:3]
+    outer_ancestor_closes = [
+        value
+        for event, value in api.events
+        if event == "close" and value in outer_handles[:-1]
+    ]
+    assert outer_ancestor_closes == list(reversed(outer_handles[:-1]))
+    assert [value for event, value in api.events if event == "close"].count(
+        protected_handles[2],
+    ) == 1
+
+
+def test_windows_handoff_reuses_stronger_protected_ancestor_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _FakeApi()
+    monkeypatch.setattr(windows_acl, "_api", api)
+    monkeypatch.setattr(windows_acl.os, "name", "nt")
+
+    with windows_acl.hold_directory(r"C:\state"):
+        protected_ancestor_handle = next(
+            value
+            for event, value in api.events
+            if event == "lease-validate"
         )
-        assert all(not protect_name for _path, protect_name in nested_ancestors)
-    replace_index = next(index for index, event in enumerate(api.events) if event[0] == "handle-replace")
-    delete_index = next(index for index, event in enumerate(api.events) if event[0] == "handle-delete")
-    outer_close_indexes = [
-        index for index, event in enumerate(api.events) if event[0] == "close" and event[1] in outer_handles
+        windows_acl.replace_regular_file_by_handle(
+            r"C:\state\child\candidate.tmp",
+            r"C:\state\child\active.yaml",
+        )
+        assert ("close", protected_ancestor_handle) not in api.events
+
+    state_opens = [
+        value
+        for event, value in api.events
+        if event == "lease-open" and value[0] == r"C:\state"
     ]
-    assert replace_index < outer_close_indexes[0]
-    assert delete_index < outer_close_indexes[0]
-    assert [api.events[index][1] for index in outer_close_indexes] == list(
-        reversed(outer_handles),
+    assert state_opens == [(r"C:\state", True, protected_ancestor_handle)]
+    assert [value for event, value in api.events if event == "close"].count(
+        protected_ancestor_handle,
+    ) == 1
+
+
+def test_windows_directory_handoff_restores_lease_after_mutation_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _FakeApi()
+    monkeypatch.setattr(windows_acl, "_api", api)
+    monkeypatch.setattr(windows_acl.os, "name", "nt")
+
+    def fail_rename(
+        handle: int,
+        target: str,
+        *,
+        replace_existing: bool,
+    ) -> None:
+        api.events.append(("handle-replace-failed", (handle, target, replace_existing)))
+        raise WindowsAclError("injected rename failure")
+
+    monkeypatch.setattr(api, "_rename_open_regular_file", fail_rename)
+
+    with pytest.raises(WindowsAclError, match="injected rename failure"):
+        windows_acl.replace_regular_file_by_handle(
+            r"C:\state\candidate.tmp",
+            r"C:\state\active.yaml",
+        )
+
+    protected_opens = [
+        value
+        for event, value in api.events
+        if event == "lease-open" and value[1]
+    ]
+    assert len(protected_opens) == 2
+    original_parent_handle = protected_opens[0][2]
+    restored_parent_handle = protected_opens[1][2]
+    member_handle = next(value[1] for event, value in api.events if event == "mutator-open")
+    failed_index = next(
+        index
+        for index, event in enumerate(api.events)
+        if event[0] == "handle-replace-failed"
     )
+    assert api.events.index(("close", original_parent_handle)) < failed_index
+    assert failed_index < api.events.index(("lease-validate", restored_parent_handle))
+    assert api.events.index(("lease-validate", restored_parent_handle)) < api.events.index(
+        ("close", member_handle)
+    )
+    assert api.events.index(("close", member_handle)) < api.events.index(
+        ("close", restored_parent_handle)
+    )
+
+
+def test_windows_directory_handoff_fails_closed_when_lease_restore_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _FakeApi()
+    monkeypatch.setattr(windows_acl, "_api", api)
+    monkeypatch.setattr(windows_acl.os, "name", "nt")
+    mutation_completed = False
+
+    original_rename = api._rename_open_regular_file
+    original_validate = api.assert_real_directory
+
+    def complete_rename(
+        handle: int,
+        target: str,
+        *,
+        replace_existing: bool,
+    ) -> None:
+        nonlocal mutation_completed
+        original_rename(
+            handle,
+            target,
+            replace_existing=replace_existing,
+        )
+        mutation_completed = True
+
+    def fail_restore_validation(handle: int) -> None:
+        original_validate(handle)
+        if mutation_completed:
+            raise WindowsAclError("injected lease restore failure")
+
+    monkeypatch.setattr(api, "_rename_open_regular_file", complete_rename)
+    monkeypatch.setattr(api, "assert_real_directory", fail_restore_validation)
+
+    with pytest.raises(WindowsAclError, match="injected lease restore failure"):
+        windows_acl.replace_regular_file_by_handle(
+            r"C:\state\candidate.tmp",
+            r"C:\state\active.yaml",
+        )
+
+    protected_opens = [
+        value
+        for event, value in api.events
+        if event == "lease-open" and value[1]
+    ]
+    assert len(protected_opens) == 2
+    original_parent_handle = protected_opens[0][2]
+    failed_restore_handle = protected_opens[1][2]
+    member_handle = next(value[1] for event, value in api.events if event == "mutator-open")
+    close_events = [value for event, value in api.events if event == "close"]
+    assert close_events.count(original_parent_handle) == 1
+    assert close_events.count(failed_restore_handle) == 1
+    assert close_events.count(member_handle) == 1
+    assert api.events.index(("close", failed_restore_handle)) < api.events.index(
+        ("close", member_handle)
+    )
+
+
+def test_windows_handle_mutations_freeze_absolute_paths_before_handoff(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _FakeApi()
+    resolved = {
+        "candidate.tmp": r"C:\frozen\candidate.tmp",
+        "active.yaml": r"C:\frozen\active.yaml",
+        "retired.yaml": r"C:\frozen\retired.yaml",
+    }
+    monkeypatch.setattr(windows_acl, "_api", api)
+    monkeypatch.setattr(windows_acl.os, "name", "nt")
+    monkeypatch.setattr(windows_acl.ntpath, "abspath", resolved.__getitem__)
+
+    windows_acl.replace_regular_file_by_handle("candidate.tmp", "active.yaml")
+    windows_acl.delete_regular_file_by_handle("retired.yaml")
+
+    assert [value[0] for event, value in api.events if event == "mutator-open"] == [
+        r"C:\frozen\candidate.tmp",
+        r"C:\frozen\retired.yaml",
+    ]
+    rename = next(value for event, value in api.events if event == "handle-replace")
+    assert rename[1:] == (r"C:\frozen\active.yaml", True)
 
 
 @pytest.mark.parametrize(
@@ -842,6 +1048,27 @@ def test_native_claim_reader_requests_delete_sharing() -> None:
         r"C:\state\created.claim",
         windows_acl._GENERIC_READ,
         (windows_acl._FILE_SHARE_READ | windows_acl._FILE_SHARE_WRITE | windows_acl._FILE_SHARE_DELETE),
+        None,
+        windows_acl._OPEN_EXISTING,
+        windows_acl._FILE_FLAG_OPEN_REPARSE_POINT,
+        None,
+    )
+    api.close_handle.assert_not_called()
+
+
+def test_native_handoff_mutator_requests_delete_without_delete_sharing() -> None:
+    api = object.__new__(windows_acl._CtypesWindowsApi)
+    create_file = Mock(return_value=79)
+    api._create_file = create_file
+    api._file_information = Mock(return_value=SimpleNamespace(file_attributes=windows_acl._FILE_ATTRIBUTE_NORMAL))
+    api.close_handle = Mock()
+
+    assert api._open_regular_mutator(r"C:\state\candidate.tmp") == 79
+
+    create_file.assert_called_once_with(
+        r"C:\state\candidate.tmp",
+        windows_acl._DELETE | windows_acl._FILE_READ_ATTRIBUTES,
+        windows_acl._FILE_SHARE_READ | windows_acl._FILE_SHARE_WRITE,
         None,
         windows_acl._OPEN_EXISTING,
         windows_acl._FILE_FLAG_OPEN_REPARSE_POINT,
@@ -1137,7 +1364,11 @@ def test_native_windows_directory_lease_and_handle_mutators(tmp_path) -> None:
         with pytest.raises(OSError):
             parent.rename(moved)
         windows_acl.replace_regular_file_by_handle(str(source), str(target))
+        with pytest.raises(OSError):
+            parent.rename(moved)
         windows_acl.delete_regular_file_by_handle(str(retired))
+        with pytest.raises(OSError):
+            parent.rename(moved)
 
     assert target.read_bytes() == b"restored\n"
     assert not source.exists()

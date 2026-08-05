@@ -422,15 +422,21 @@ class TestCheckConnectorHooks(unittest.TestCase):
         self.assertIn("failClosed=true", r.checks[-1]["detail"])
 
     @patch("defenseclaw.commands.cmd_doctor._http_probe")
+    @patch(
+        "defenseclaw.commands.cmd_doctor._windows_system_powershell",
+        return_value=(
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+            r"C:\Windows",
+        ),
+    )
     @patch("defenseclaw.commands.cmd_doctor.subprocess.run")
     def test_cursor_windows_runtime_probe_requires_json_and_counter_advance(
         self,
         run_mock,
+        _powershell_mock,
         http_probe_mock,
     ) -> None:
-        before = json.dumps(
-            {"connectors": [{"name": "cursor", "requests": 4, "errors": 0}]}
-        )
+        before = json.dumps({"connectors": [{"name": "cursor", "requests": 4, "errors": 0}]})
         after = json.dumps(
             {
                 "connectors": [
@@ -460,20 +466,33 @@ class TestCheckConnectorHooks(unittest.TestCase):
         argv = run_mock.call_args.args[0]
         self.assertEqual(
             argv[:4],
-            ["powershell.exe", "-NoProfile", "-NonInteractive", "-EncodedCommand"],
+            [
+                r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+                "-NoProfile",
+                "-NonInteractive",
+                "-EncodedCommand",
+            ],
         )
         self.assertFalse(run_mock.call_args.kwargs.get("shell", False))
+        self.assertEqual(run_mock.call_args.kwargs["env"]["SystemRoot"], r"C:\Windows")
+        self.assertEqual(run_mock.call_args.kwargs["env"]["WINDIR"], r"C:\Windows")
 
     @patch("defenseclaw.commands.cmd_doctor._http_probe")
+    @patch(
+        "defenseclaw.commands.cmd_doctor._windows_system_powershell",
+        return_value=(
+            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
+            r"C:\Windows",
+        ),
+    )
     @patch("defenseclaw.commands.cmd_doctor.subprocess.run")
     def test_cursor_windows_runtime_probe_rejects_fail_open_without_delivery(
         self,
         run_mock,
+        _powershell_mock,
         http_probe_mock,
     ) -> None:
-        health = json.dumps(
-            {"connectors": [{"name": "cursor", "requests": 4, "errors": 0}]}
-        )
+        health = json.dumps({"connectors": [{"name": "cursor", "requests": 4, "errors": 0}]})
         http_probe_mock.side_effect = [(200, health), (200, health)]
         run_mock.return_value = subprocess.CompletedProcess(
             args=["powershell.exe"],
@@ -659,9 +678,7 @@ class TestCheckScanCoverage(unittest.TestCase):
         # Plugin row should literally contain every plugin category from
         # _scan_ui — locking the contract that doctor and the scanner
         # preamble can never disagree on what's being checked.
-        plugin_row = next(
-            c for c in r.checks if c["label"] == "Scanner coverage (plugin)"
-        )
+        plugin_row = next(c for c in r.checks if c["label"] == "Scanner coverage (plugin)")
         for cat in _scan_ui.categories_for("plugin"):
             self.assertIn(cat, plugin_row["detail"])
 
@@ -823,10 +840,25 @@ class TestCheckHookHealth(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             r = _DoctorResult()
             _check_hook_health(
-                self._cfg(tmp, "hermes", [os.path.join(tmp, "nope.yaml")]), "hermes", r,
+                self._cfg(tmp, "hermes", [os.path.join(tmp, "nope.yaml")]),
+                "hermes",
+                r,
             )
         self.assertEqual(r.checks[-1]["status"], "fail")
         self.assertIn("not found", r.checks[-1]["detail"])
+
+    @patch("defenseclaw.commands.cmd_doctor._check_cursor_configured_runtime")
+    def test_passive_cursor_health_disables_runtime_probe(self, configured_runtime) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            hook = os.path.join(tmp, "hooks.json")
+            with open(hook, "w", encoding="utf-8") as fh:
+                fh.write('{"hooks": [], "owner": "defenseclaw"}\n')
+            r = _DoctorResult(passive=True)
+
+            _check_hook_health(self._cfg(tmp, "cursor", [hook]), "cursor", r)
+
+        configured_runtime.assert_called_once()
+        self.assertIs(configured_runtime.call_args.kwargs["probe_runtime"], False)
 
     def test_opencode_flat_js_plugin_passes(self) -> None:
         """opencode's hook is a flat ``.js`` file (not JSON) keyed on the
@@ -920,10 +952,16 @@ class TestCheckHookHealth(unittest.TestCase):
             cfg.data_dir = tmp
             with open(os.path.join(tmp, "hook_contract_lock.json"), "w", encoding="utf-8") as fh:
                 json.dump(
-                    {"connectors": {"omnigent": {"locations": {
-                        "hook_config_paths": [config],
-                        "hook_script_paths": [module, pth],
-                    }}}},
+                    {
+                        "connectors": {
+                            "omnigent": {
+                                "locations": {
+                                    "hook_config_paths": [config],
+                                    "hook_script_paths": [module, pth],
+                                }
+                            }
+                        }
+                    },
                     fh,
                 )
             r = _DoctorResult()
@@ -942,10 +980,16 @@ class TestCheckHookHealth(unittest.TestCase):
             cfg.data_dir = tmp
             with open(os.path.join(tmp, "hook_contract_lock.json"), "w", encoding="utf-8") as fh:
                 json.dump(
-                    {"connectors": {"omnigent": {"locations": {
-                        "hook_config_paths": [config],
-                        "hook_script_paths": [module],
-                    }}}},
+                    {
+                        "connectors": {
+                            "omnigent": {
+                                "locations": {
+                                    "hook_config_paths": [config],
+                                    "hook_script_paths": [module],
+                                }
+                            }
+                        }
+                    },
                     fh,
                 )
             r = _DoctorResult()
@@ -968,10 +1012,16 @@ class TestCheckHookHealth(unittest.TestCase):
             cfg.data_dir = tmp
             with open(os.path.join(tmp, "hook_contract_lock.json"), "w", encoding="utf-8") as fh:
                 json.dump(
-                    {"connectors": {"omnigent": {"locations": {
-                        "hook_config_paths": [config],
-                        "hook_script_paths": [module, pth],
-                    }}}},
+                    {
+                        "connectors": {
+                            "omnigent": {
+                                "locations": {
+                                    "hook_config_paths": [config],
+                                    "hook_script_paths": [module, pth],
+                                }
+                            }
+                        }
+                    },
                     fh,
                 )
             with patch.dict(os.environ, {"OMNIGENT_CONFIG_HOME": tmp}):
@@ -1048,10 +1098,16 @@ class TestCheckHookHealth(unittest.TestCase):
             cfg.data_dir = tmp
             with open(os.path.join(tmp, "hook_contract_lock.json"), "w", encoding="utf-8") as fh:
                 json.dump(
-                    {"connectors": {"omnigent": {"locations": {
-                        "hook_config_paths": [config],
-                        "hook_script_paths": [module, pth],
-                    }}}},
+                    {
+                        "connectors": {
+                            "omnigent": {
+                                "locations": {
+                                    "hook_config_paths": [config],
+                                    "hook_script_paths": [module, pth],
+                                }
+                            }
+                        }
+                    },
                     fh,
                 )
             r = _DoctorResult()
@@ -1171,29 +1227,21 @@ class TestDetectionStrategyRow(unittest.TestCase):
     def test_hook_connector_not_gated(self):
         # judge enabled but this hook connector is NOT in hook_connectors →
         # surfaces root #4: the judge won't actually fire for it.
-        row = self._detection_row(
-            self._cfg(judge_enabled=True, hook_connectors=["hermes"]), "codex"
-        )
+        row = self._detection_row(self._cfg(judge_enabled=True, hook_connectors=["hermes"]), "codex")
         self.assertIn("NOT gated", row["detail"])
 
     def test_hook_connector_gated_explicit(self):
-        row = self._detection_row(
-            self._cfg(judge_enabled=True, hook_connectors=["codex"]), "codex"
-        )
+        row = self._detection_row(self._cfg(judge_enabled=True, hook_connectors=["codex"]), "codex")
         self.assertIn("judge active (hook lane)", row["detail"])
 
     def test_hook_connector_gated_wildcard(self):
-        row = self._detection_row(
-            self._cfg(judge_enabled=True, hook_connectors=["*"]), "codex"
-        )
+        row = self._detection_row(self._cfg(judge_enabled=True, hook_connectors=["*"]), "codex")
         self.assertIn("judge active (hook lane)", row["detail"])
 
     def test_proxy_connector_uses_proxy_lane(self):
         # openclaw is a proxy connector: the judge runs in the proxy lane
         # whenever it's enabled, regardless of hook_connectors.
-        row = self._detection_row(
-            self._cfg(judge_enabled=True, hook_connectors=[]), "openclaw"
-        )
+        row = self._detection_row(self._cfg(judge_enabled=True, hook_connectors=[]), "openclaw")
         self.assertIn("judge active (proxy lane)", row["detail"])
 
 
@@ -1235,9 +1283,7 @@ class TestPluginRegistryRequiredCheck(unittest.TestCase):
 
     def test_per_connector_required_warns(self):
         r = _DoctorResult()
-        _check_plugin_registry_required(
-            self._cfg(global_required=False, connector_required=True), r
-        )
+        _check_plugin_registry_required(self._cfg(global_required=False, connector_required=True), r)
         row = next(c for c in r.checks if c["label"] == "Plugin registry policy")
         self.assertEqual(row["status"], "warn")
         self.assertIn("connector:codex", row["detail"])
@@ -1291,7 +1337,8 @@ class TestPluginRegistryRequiredFixer(unittest.TestCase):
 
     def test_clears_global(self):
         cfg = self._cfg(global_required=True)
-        tag, detail = _fix_plugin_registry_required(cfg, assume_yes=True)
+        with patch("defenseclaw.commands.cmd_doctor._doctor_config_present", return_value=True):
+            tag, detail = _fix_plugin_registry_required(cfg, assume_yes=True)
         self.assertEqual(tag, "pass")
         self.assertFalse(cfg.asset_policy.plugin.registry_required)
         cfg.save.assert_called_once()
@@ -1299,7 +1346,8 @@ class TestPluginRegistryRequiredFixer(unittest.TestCase):
 
     def test_clears_per_connector_to_none(self):
         cfg = self._cfg(global_required=False, connector_required=True)
-        tag, _ = _fix_plugin_registry_required(cfg, assume_yes=True)
+        with patch("defenseclaw.commands.cmd_doctor._doctor_config_present", return_value=True):
+            tag, _ = _fix_plugin_registry_required(cfg, assume_yes=True)
         self.assertEqual(tag, "pass")
         # Tri-state field reset to None (inherit), not False.
         self.assertIsNone(cfg.asset_policy.connectors["codex"].plugin.registry_required)
@@ -1313,6 +1361,15 @@ class TestPluginRegistryRequiredFixer(unittest.TestCase):
         cfg.save.assert_not_called()
         # Flag is untouched on decline.
         self.assertTrue(cfg.asset_policy.plugin.registry_required)
+
+    def test_missing_config_refuses_to_create_it(self):
+        cfg = self._cfg(global_required=True)
+        with patch("defenseclaw.commands.cmd_doctor._doctor_config_present", return_value=False):
+            tag, detail = _fix_plugin_registry_required(cfg, assume_yes=True)
+        self.assertEqual(tag, "skip")
+        self.assertIn("config.yaml is missing", detail)
+        self.assertTrue(cfg.asset_policy.plugin.registry_required)
+        cfg.save.assert_not_called()
 
 
 if __name__ == "__main__":
