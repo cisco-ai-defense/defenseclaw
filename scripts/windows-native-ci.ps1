@@ -5808,14 +5808,47 @@ function Stop-StateProcesses([string]$Root) {
     if ($remaining.Count) { throw "isolated process cleanup timed out: $($remaining -join ', ')" }
 }
 
+function Test-WindowsNativeReparsePoint([IO.FileSystemInfo]$Item) {
+    return (($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
+}
+
 function Get-WindowsNativeCaptureFiles([string]$Root) {
     if (-not (Test-Path -LiteralPath $Root)) { return @() }
+    try {
+        $rootItem = [IO.DirectoryInfo](Get-Item -LiteralPath $Root -Force -ErrorAction Stop)
+    } catch {
+        return @()
+    }
+    if (Test-WindowsNativeReparsePoint $rootItem) { return @() }
+
+    $pending = [Collections.Generic.Queue[IO.DirectoryInfo]]::new()
+    $pending.Enqueue($rootItem)
+    $matches = [Collections.Generic.List[IO.FileInfo]]::new()
+    $visited = 0
+    while ($pending.Count -gt 0 -and $visited -lt 4096) {
+        $directory = $pending.Dequeue()
+        if (Test-WindowsNativeReparsePoint $directory) { continue }
+        try {
+            $children = @(Get-ChildItem -LiteralPath $directory.FullName -Force -ErrorAction SilentlyContinue)
+        } catch {
+            continue
+        }
+        foreach ($child in $children) {
+            $visited++
+            if (Test-WindowsNativeReparsePoint $child) { continue }
+            if ($child.PSIsContainer) {
+                $pending.Enqueue([IO.DirectoryInfo]$child)
+            } elseif ($child -is [IO.FileInfo] -and
+                $child.Name -match '^(gateway|watchdog|results|doctor|.*\.log)' -and
+                $child.Length -le 1048576) {
+                $matches.Add([IO.FileInfo]$child)
+            }
+            if ($visited -ge 4096) { break }
+        }
+    }
+
     return @(
-        Get-ChildItem -LiteralPath $Root -Recurse -File -ErrorAction SilentlyContinue |
-            Where-Object {
-                $_.Name -match '^(gateway|watchdog|results|doctor|.*\.log)' -and
-                    $_.Length -le 1048576
-            } |
+        $matches |
             Sort-Object @{
                 Expression = {
                     if ($_.Name -eq 'wizard-driver.log') { 0 }
@@ -5902,6 +5935,7 @@ function Invoke-SelfTest {
     $boundedLimit = 256
     $boundedSecret = 'bounded-secret-value'
     $captureFixture = Join-Path $root 'bounded-capture-selection'
+    $symlinkTarget = $null
     $originalBoundedSecret = [Environment]::GetEnvironmentVariable('DC_E2E_TEST_SECRET')
     try {
         $env:DC_E2E_TEST_SECRET = $boundedSecret
@@ -6087,6 +6121,10 @@ function Invoke-SelfTest {
             [IO.FileShare]::None
         )
         try { $oversized.SetLength(1048577) } finally { $oversized.Dispose() }
+        $symlinkTarget = Join-Path $root 'outside-capture-secret.bin'
+        $symlinkPath = Join-Path $captureFixture 'doctor.log'
+        Set-Content -LiteralPath $symlinkTarget -Value 'sensitive diagnostic fixture' -NoNewline
+        New-Item -ItemType SymbolicLink -Path $symlinkPath -Target $symlinkTarget -ErrorAction Stop | Out-Null
 
         $captureFiles = @(Get-WindowsNativeCaptureFiles $root)
         if (-not ($captureFiles | Where-Object {
@@ -6104,10 +6142,18 @@ function Invoke-SelfTest {
         }) {
             throw 'oversized diagnostic bypassed the native capture size guard'
         }
+        if ($captureFiles | Where-Object {
+            $_.FullName.Equals($symlinkPath, [StringComparison]::OrdinalIgnoreCase)
+        }) {
+            throw 'reparse-point diagnostic bypassed the native capture symlink guard'
+        }
     } finally {
         [Environment]::SetEnvironmentVariable('DC_E2E_TEST_SECRET', $originalBoundedSecret)
         if (Test-Path -LiteralPath $captureFixture) {
             Remove-SafeDisposableTree -Path $captureFixture -Root $root
+        }
+        if ($symlinkTarget -and (Test-Path -LiteralPath $symlinkTarget)) {
+            Remove-Item -LiteralPath $symlinkTarget -Force
         }
     }
 
