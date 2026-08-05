@@ -693,6 +693,20 @@ def test_bridge_comment_restore_is_ordered_before_seal_and_uses_source_snapshot(
     assert "info.st_dev != directory_device" in cleanup
     assert "info.st_ino != observed_inode" in cleanup
     assert "if len(members) == 100000:" in cleanup
+    bridge_cleanup_start = source.index("    python3 - \\", source.index("bridge_phase1_cleanup_owned_temporaries()"))
+    bridge_cleanup_end = source.index("\nPY\n}", bridge_cleanup_start)
+    bridge_cleanup = source[bridge_cleanup_start:bridge_cleanup_end]
+    assert "members = list(entries)" not in bridge_cleanup
+    assert "members.append((entry.name, entry.inode()))" in bridge_cleanup
+    assert "members.append(entry)" not in bridge_cleanup
+    assert "for name, observed_inode in members:" in bridge_cleanup
+    assert "os.lstat(name, dir_fd=descriptor)" in bridge_cleanup
+    assert "entry.stat(" not in bridge_cleanup
+    assert "entry.is_symlink()" not in bridge_cleanup
+    assert "os.unlink(name, dir_fd=descriptor)" in bridge_cleanup
+    assert "os.unlink(entry.path)" not in bridge_cleanup
+    assert "info.st_dev != directory_device" in bridge_cleanup
+    assert "info.st_ino != observed_inode" in bridge_cleanup
 
 
 @POSIX_UPGRADE_CUSTODY

@@ -7248,24 +7248,33 @@ roots = sorted(roots)
 seen = 0
 for root in roots:
     with os.scandir(root) as entries:
-        members = list(entries)
-    if len(members) > 100000:
-        raise RuntimeError("phase-one temporary cleanup exceeded its scan bound")
-    for entry in members:
-        name = entry.name
-        owned = (
-            name.startswith(generic_prefix)
-            or (name.startswith(cursor_prefix) and name.endswith(".tmp"))
-            or tagged_writer.fullmatch(name) is not None
-        )
-        if not owned:
-            continue
-        info = entry.stat(follow_symlinks=False)
-        if entry.is_symlink() or not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
-            raise RuntimeError("phase-one owned temporary has an unsafe identity")
-        os.unlink(entry.path)
+        members = []
+        for entry in entries:
+            if len(members) == 100000:
+                raise RuntimeError("phase-one temporary cleanup exceeded its scan bound")
+            members.append((entry.name, entry.inode()))
     descriptor = os.open(root, os.O_RDONLY)
     try:
+        directory_device = os.fstat(descriptor).st_dev
+        for name, observed_inode in members:
+            owned = (
+                name.startswith(generic_prefix)
+                or (name.startswith(cursor_prefix) and name.endswith(".tmp"))
+                or tagged_writer.fullmatch(name) is not None
+            )
+            if not owned:
+                continue
+            info = os.lstat(name, dir_fd=descriptor)
+            if (
+                info.st_dev != directory_device
+                or info.st_ino != observed_inode
+            ):
+                raise RuntimeError(
+                    "phase-one owned temporary identity changed before inspection"
+                )
+            if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid():
+                raise RuntimeError("phase-one owned temporary has an unsafe identity")
+            os.unlink(name, dir_fd=descriptor)
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
