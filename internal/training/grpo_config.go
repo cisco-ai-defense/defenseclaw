@@ -6,6 +6,7 @@ type GrpoLocalConfig struct {
 	PolicyGGUF    string
 	ReferenceGGUF string
 	RewardGGUF    string
+	TokenizerPath string
 
 	GroupSize      int
 	MaxGenLength   int

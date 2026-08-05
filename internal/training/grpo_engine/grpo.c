@@ -5,6 +5,7 @@
  * to the actual engines that do real transformer computation.
  */
 #include "grpo.h"
+#include "tokenizer.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -90,6 +91,7 @@ struct GrpoCtx {
     struct StreamEngine *ref_stream;
     struct StreamEngine *reward_stream;
     LoRAEngine           lora;
+    GrpoTokenizer       *tokenizer;
 
     /* Model metadata (from policy GGUF) */
     GgufFile  policy_gf;
@@ -178,6 +180,14 @@ GrpoCtx *grpo_init(GrpoConfig *cfg) {
               ctx->hidden_dim, ctx->intermediate_dim,
               ctx->n_heads, ctx->n_kv_heads, ctx->head_dim);
 
+    /* Load tokenizer (if provided) */
+    if (cfg->tokenizer_path && cfg->tokenizer_path[0] != '\0') {
+        ctx->tokenizer = grpo_tokenizer_load(cfg->tokenizer_path);
+        if (!ctx->tokenizer) {
+            fprintf(stderr, "grpo_init: warning — failed to load tokenizer from %s\n", cfg->tokenizer_path);
+        }
+    }
+
     /* Set OpenMP thread count to use all performance cores */
 #ifdef _OPENMP
     int n_threads = cfg->num_threads > 0 ? cfg->num_threads : omp_get_max_threads();
@@ -197,6 +207,7 @@ void grpo_free(GrpoCtx *ctx) {
     if (ctx->ref_stream) stream_close(ctx->ref_stream);
     if (ctx->reward_stream) stream_close(ctx->reward_stream);
     lora_free(&ctx->lora);
+    grpo_tokenizer_free(ctx->tokenizer);
     gguf_close(&ctx->policy_gf);
     free(ctx);
 }
@@ -289,8 +300,20 @@ int grpo_backward(GrpoCtx *ctx, const float *advantages,
             float policy_lp = policy_logprobs[idx];
             float old_lp = old_logprobs[idx];
 
+            /* Skip padding positions (both zero = unused slot) */
+            if (policy_lp == 0.0f && old_lp == 0.0f) continue;
+
+            /* Clamp log-ratio to prevent exp overflow.
+             * |policy_lp - old_lp| > 20 means ratio > 5e8 or < 2e-9,
+             * which indicates the policy has diverged catastrophically
+             * from the generation-time distribution. Clamping here
+             * prevents NaN without losing meaningful gradient signal. */
+            float log_ratio = policy_lp - old_lp;
+            if (log_ratio > 20.0f) log_ratio = 20.0f;
+            if (log_ratio < -20.0f) log_ratio = -20.0f;
+
             /* Importance ratio */
-            float ratio = expf(policy_lp - old_lp);
+            float ratio = expf(log_ratio);
             float clipped = ratio;
             if (clipped < 1.0f - clip_eps) clipped = 1.0f - clip_eps;
             if (clipped > 1.0f + clip_eps) clipped = 1.0f + clip_eps;
@@ -300,12 +323,12 @@ int grpo_backward(GrpoCtx *ctx, const float *advantages,
             float surr2 = clipped * adv;
             float grad;
             if (surr1 <= surr2) {
-                grad = -ratio * adv; /* unclipped region: d/d(logp) of ratio*adv */
+                grad = -ratio * adv;
             } else {
-                grad = 0.0f; /* clipped region: no gradient */
+                grad = 0.0f;
             }
 
-            /* KL penalty gradient: d/d(logp) of β*(logp_policy - logp_ref) = β */
+            /* KL penalty gradient */
             if (kl_coef > 0.0f && ref_logprobs) {
                 grad += kl_coef;
             }
@@ -317,7 +340,10 @@ int grpo_backward(GrpoCtx *ctx, const float *advantages,
             if (kl_coef > 0.0f && ref_logprobs) {
                 loss_token += kl_coef * (policy_lp - ref_logprobs[idx]);
             }
-            total_loss += loss_token;
+            /* Guard against NaN propagation */
+            if (loss_token == loss_token) { /* NaN != NaN */
+                total_loss += loss_token;
+            }
         }
     }
 
@@ -418,4 +444,11 @@ void grpo_restore_kv_snapshot(GrpoCtx *ctx) {
 void grpo_free_kv_snapshot(GrpoCtx *ctx) {
     if (!ctx) return;
     grpo_policy_free_kv_snapshot_internal();
+}
+
+/* ─── Tokenizer API ─── */
+
+int grpo_detokenize(GrpoCtx *ctx, const int *ids, int n_ids, char *buf, int buf_size) {
+    if (!ctx || !ctx->tokenizer) return -1;
+    return grpo_tokenizer_decode(ctx->tokenizer, ids, n_ids, buf, buf_size);
 }
