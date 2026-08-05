@@ -114,7 +114,11 @@ static const void *resolve_tensor_ptr(const GgufFile *gf, void *mmap_base,
     }
     (void)expected_dtype;
     if (dtype_out) *dtype_out = (int)t->dtype;
-    return (const uint8_t *)mmap_base + t->offset;
+    /* t->offset is absolute (already includes data_offset from gguf_open).
+     * mmap_base points to data_offset in the file.
+     * So we subtract data_offset to get the offset within the mmap'd region. */
+    int64_t rel_offset = t->offset - gf->data_offset;
+    return (const uint8_t *)mmap_base + rel_offset;
 }
 
 /* ─── Policy Engine Initialization ─── */
@@ -173,10 +177,10 @@ static PolicyEngine *policy_init(const char *gguf_path, int max_seq_len) {
         return NULL;
     }
 
-    pe->embed = (const void *)((const uint8_t *)pe->mmap_base + t_embed->offset);
+    pe->embed = (const void *)((const uint8_t *)pe->mmap_base + (t_embed->offset - pe->gf.data_offset));
     pe->embed_dtype = (int)t_embed->dtype;
-    pe->output_norm = (const float *)((const uint8_t *)pe->mmap_base + t_norm->offset);
-    pe->output_weight = (const void *)((const uint8_t *)pe->mmap_base + t_output->offset);
+    pe->output_norm = (const float *)((const uint8_t *)pe->mmap_base + (t_norm->offset - pe->gf.data_offset));
+    pe->output_weight = (const void *)((const uint8_t *)pe->mmap_base + (t_output->offset - pe->gf.data_offset));
     pe->output_dtype = (int)t_output->dtype;
     fprintf(stderr, "policy: tensors resolved (embed dtype=%d, norm dtype=%d, output dtype=%d, tied=%d)\n",
             t_embed->dtype, t_norm->dtype, t_output->dtype, t_output == t_embed);
