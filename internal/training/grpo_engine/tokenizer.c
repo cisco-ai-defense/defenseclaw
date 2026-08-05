@@ -51,7 +51,12 @@ static unsigned int hash_bytes(const char *data, int len) {
 static void hash_insert(struct GrpoTokenizer *tok, const char *key, int key_len, int id) {
     unsigned int idx = hash_bytes(key, key_len) % (unsigned int)tok->hash_capacity;
     struct TokenHashEntry *entry = (struct TokenHashEntry *)malloc(sizeof(struct TokenHashEntry));
+    if (!entry) return; /* Safe degradation: skip insertion if allocation fails */
     entry->key = (char *)malloc((size_t)key_len + 1);
+    if (!entry->key) {
+        free(entry);
+        return; /* Safe degradation: skip insertion if key allocation fails */
+    }
     memcpy(entry->key, key, (size_t)key_len);
     entry->key[key_len] = '\0';
     entry->key_len = key_len;
@@ -207,9 +212,17 @@ GrpoTokenizer *grpo_tokenizer_load(const char *path) {
 
     /* Find "vocab": { ... } section */
     const char *vocab_start = strstr(json, "\"vocab\"");
-    if (!vocab_start) { free(json); free(tok); return NULL; }
+    if (!vocab_start) {
+        free(json);
+        grpo_tokenizer_free(tok);
+        return NULL;
+    }
     vocab_start = strchr(vocab_start, '{');
-    if (!vocab_start) { free(json); free(tok); return NULL; }
+    if (!vocab_start) {
+        free(json);
+        grpo_tokenizer_free(tok);
+        return NULL;
+    }
 
     /* Count entries and find max ID */
     const char *p = vocab_start + 1;
@@ -431,10 +444,8 @@ int grpo_tokenizer_encode(const GrpoTokenizer *tok, const char *text, int text_l
         int id = hash_lookup(tok, byte_str, 1);
         if (id >= 0) {
             ids[n++] = id;
-        } else {
-            /* Fallback: unknown byte — skip or assign UNK */
-            ids[n++] = 0;
         }
+        /* Skip unknown bytes silently — don't add invalid token IDs */
     }
 
     /* Apply merges in priority order */
