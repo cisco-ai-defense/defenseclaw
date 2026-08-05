@@ -462,6 +462,9 @@ Gateway options:
   --config-file PATH        Path to the AVC-authored env_config.json that
                             supplies cisco_ai_defense.endpoint. Default:
                             ${DEFAULT_CONFIG_FILE}
+                            Explicit override paths must exist and contain a
+                            valid endpoint; only the implicit default path can
+                            fall back during AVC packaging sequencing.
                             The file must be root-owned and non-writable by
                             group/other, per the managed_enterprise trust
                             contract. Expected JSON shape:
@@ -499,6 +502,7 @@ MODE="${DEFAULT_MODE}"
 CONNECTOR="${DEFAULT_CONNECTOR}"
 API_PORT="${DEFAULT_API_PORT}"
 CONFIG_FILE="${DEFAULT_CONFIG_FILE}"
+CONFIG_FILE_EXPLICIT="false"
 OVERRIDE_ENDPOINT=""
 ALLOW_EMPTY_USERS="false"
 
@@ -507,7 +511,7 @@ while [[ $# -gt 0 ]]; do
     --mode)             MODE="${2:?}"; shift 2;;
     --connector)        CONNECTOR="${2:?}"; shift 2;;
     --port)             API_PORT="${2:?}"; shift 2;;
-    --config-file)      CONFIG_FILE="${2:?}"; shift 2;;
+    --config-file)      CONFIG_FILE="${2:?}"; CONFIG_FILE_EXPLICIT="true"; shift 2;;
     --override-endpoint) OVERRIDE_ENDPOINT="${2:?}"; shift 2;;
     --disable-redaction|--no-redact) DISABLE_REDACTION="true"; shift;;
     --binary)           BINARY_SRC="${2:?}"; SKIP_BUILD="true"; shift 2;;
@@ -580,6 +584,9 @@ AID_ENDPOINT="$(resolve_aid_endpoint "${OVERRIDE_ENDPOINT}" "${CONFIG_FILE}")" |
 if (( _ep_rc == 3 )); then
   die "--override-endpoint must be an HTTPS bare origin (no userinfo, path, query, or fragment) — got: ${OVERRIDE_ENDPOINT}"
 elif (( _ep_rc == 2 )); then
+  if [[ "${CONFIG_FILE_EXPLICIT}" == "true" ]]; then
+    die "--config-file ${CONFIG_FILE} is malformed: expected a JSON object with a valid \"cisco_ai_defense_endpoint\" URL. Correct the file or pass --override-endpoint URL for adhoc testing."
+  fi
   # Malformed env_config.json (bad JSON, missing cisco_ai_defense_endpoint
   # field, or bad URL shape). Fall through to the US-prod default so a
   # stale, corrupt, or partially-written AVC drop can't brick the
@@ -591,6 +598,9 @@ elif (( _ep_rc == 2 )); then
   warn "env_config.json at ${CONFIG_FILE} is malformed (expected a JSON object with a valid \"cisco_ai_defense_endpoint\" URL). Installing with default endpoint ${DEFAULT_AID_ENDPOINT}."
   AID_ENDPOINT="${DEFAULT_AID_ENDPOINT}"
 elif (( _ep_rc == 1 )); then
+  if [[ "${CONFIG_FILE_EXPLICIT}" == "true" ]]; then
+    die "env_config.json not found at ${CONFIG_FILE}; correct the explicit --config-file path or pass --override-endpoint URL for adhoc testing."
+  fi
   # Missing env_config.json is expected under the AVC packaging
   # sequencing where AVC installs DefenseClaw before its own bundle
   # drops env_config.json. Fall through to the US-prod default so
