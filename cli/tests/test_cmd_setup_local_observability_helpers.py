@@ -118,8 +118,8 @@ class TestV8LocalDestinationWriter(unittest.TestCase):
         cfg = SimpleNamespace(_source_config_version=8)
         status, label, command = redaction_status_hint(cfg)
         self.assertEqual(status, "PER DESTINATION (defaults are unredacted)")
-        self.assertIn("route redaction", label)
-        self.assertIn("config show --effective", command)
+        self.assertIn("destination redaction", label)
+        self.assertEqual(command, "defenseclaw setup redaction status")
 
 
 if __name__ == "__main__":

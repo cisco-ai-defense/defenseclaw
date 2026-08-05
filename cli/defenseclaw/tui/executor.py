@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import contextlib
 import ntpath
 import os
@@ -44,9 +45,9 @@ class CommandAlreadyRunningError(RuntimeError):
 class CommandExecutor:
     """Single-flight subprocess executor.
 
-    The Phase 1 implementation covers non-interactive subprocesses.
-    PTY execution is intentionally isolated behind the same API so the
-    full interactive escape hatch can be added without touching panels.
+    POSIX uses a PTY for interactive commands. Native Windows uses captured
+    pipes plus chunked output and writable stdin, which preserves prompt text
+    that does not end in a newline (for example Click's ``Select:`` prompt).
     """
 
     def __init__(
@@ -179,11 +180,15 @@ class CommandExecutor:
                 await process.stdin.drain()
         try:
             assert process.stdout is not None
+            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
             while True:
-                line = await process.stdout.readline()
-                if not line:
+                chunk = await process.stdout.read(4096)
+                if not chunk:
                     break
-                yield CommandEvent("output", line.decode(errors="replace").rstrip("\n"))
+                for text in _split_terminal_chunk(decoder.decode(chunk)):
+                    yield CommandEvent("output", text)
+            for text in _split_terminal_chunk(decoder.decode(b"", final=True)):
+                yield CommandEvent("output", text)
             exit_code = await process.wait()
         finally:
             async with self._cancel_lock:

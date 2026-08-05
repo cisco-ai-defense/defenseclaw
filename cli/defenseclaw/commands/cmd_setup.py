@@ -328,6 +328,12 @@ from defenseclaw.commands.cmd_setup_observability import observability  # noqa: 
 
 setup.add_command(observability)
 
+# Register the canonical v8 redaction-policy editor.  This is deliberately a
+# profile/bucket/route workflow rather than the retired v7 global bypass.
+from defenseclaw.commands.cmd_setup_redaction import redaction  # noqa: E402
+
+setup.add_command(redaction)
+
 # Register the first-class Galileo cloud/self-hosted setup workflow. It writes
 # a named OTLP destination through the shared observability writer, so Galileo
 # can coexist with local-observability and every other OTLP backend.

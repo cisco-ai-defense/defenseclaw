@@ -262,6 +262,14 @@ boundary, apply the profile only to that destination's `send` or matching route.
 
 ## Centralized redaction
 
+Use `defenseclaw setup redaction` for the guided policy editor. The first screen
+covers broad policy choices; **Show advanced settings?** opens bucket collection,
+custom profiles, destination policy, and ordered routes. For automation, start
+with `defenseclaw setup redaction status --json` and preview changes with
+`--dry-run`. `defenseclaw setup redaction remove-all --yes` selects `none` for
+every configurable log and trace projection while leaving the managed enterprise
+destination locked.
+
 Profile resolution is route, then bucket, then global default, then catalog:
 
 ```yaml

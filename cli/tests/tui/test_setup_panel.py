@@ -48,6 +48,7 @@ from defenseclaw.tui.panels.setup import (
     notifications_desired_action,
     notifications_toggle_intent,
     observability_wizard_fields,
+    redaction_wizard_fields,
     render_wizard_value,
     uninstall_args_for_option,
     uninstall_intent,
@@ -183,6 +184,105 @@ def test_local_observability_wizard_has_no_retired_audit_sink_flag() -> None:
     up_fields = _with_field(fields, "Action", "up")
     argv = build_wizard_args(SetupWizard.LOCAL_OBSERVABILITY, up_fields)
     assert "--no-audit-sink" not in argv
+
+
+def test_redaction_is_first_class_setup_wizard_with_safe_quick_actions() -> None:
+    model = SetupPanelModel({"config_version": 8, "observability": {"defaults": {"redaction_profile": "content"}}})
+    info = next(item for item in model.wizard_infos() if item.wizard == SetupWizard.REDACTION)
+
+    assert info.name == "Redaction Policy"
+    assert info.command == ("setup", "redaction")
+    assert "Default profile: content" in wizard_state_summary(SetupWizard.REDACTION, model.config)
+    assert [goal.label for goal in wizard_goals(SetupWizard.REDACTION, model.config)] == [
+        "Inspect effective redaction",
+        "Remove all configurable redaction",
+        "Apply one profile everywhere",
+        "Change the global baseline",
+        "Show advanced settings",
+        "Open the complete guided workflow",
+        "Advanced — show all settings",
+    ]
+
+    model.open_goal_menu(SetupWizard.REDACTION)
+    model.goal_cursor = next(index for index, goal in enumerate(model.goals) if goal.id == "remove-all")
+    model.select_active_goal()
+    assert build_wizard_args(SetupWizard.REDACTION, model.form_fields) == (
+        "setup",
+        "redaction",
+        "remove-all",
+        "--yes",
+        "--dry-run",
+    )
+    action = model.submit_wizard_form()
+    assert action.intent is not None
+    assert action.intent.risk == "setup"
+
+
+def test_redaction_advanced_tui_form_covers_bucket_profile_destination_and_route_commands() -> None:
+    from defenseclaw.tui.panels.setup import _redaction_wizard_fields_for
+
+    bucket_fields = _redaction_wizard_fields_for(
+        {
+            "@Action": "bucket-set",
+            "@Bucket": "model.io",
+            "--profile": "content",
+            "--logs": "off",
+            "--dry-run": "no",
+        }
+    )
+    assert build_wizard_args(SetupWizard.REDACTION, bucket_fields) == (
+        "setup",
+        "redaction",
+        "bucket",
+        "set",
+        "model.io",
+        "--profile",
+        "content",
+        "--no-logs",
+        "--yes",
+    )
+
+    profile_fields = _redaction_wizard_fields_for(
+        {
+            "@Action": "profile-set",
+            "@Custom Profile Name": "soc",
+            "--extends": "strict",
+            "--detector": "pii,secrets",
+            "--field-path": "hash",
+        }
+    )
+    profile_argv = build_wizard_args(SetupWizard.REDACTION, profile_fields)
+    assert profile_argv[:6] == ("setup", "redaction", "profile", "set", "soc", "--extends")
+    assert ("--field", "path=hash") == tuple(profile_argv[-4:-2])
+    assert profile_argv[-2:] == ("--yes", "--dry-run")
+
+    route_fields = _redaction_wizard_fields_for(
+        {
+            "@Action": "route-add",
+            "@Destination": "collector",
+            "@Route Name": "critical",
+            "--signal": "logs,traces",
+            "--bucket": "security.finding,enforcement.action",
+            "--connector": "codex,claude-code",
+            "--min-severity": "HIGH",
+            "--route-action": "send",
+            "--profile": "strict",
+            "--position": "2",
+        }
+    )
+    route_argv = build_wizard_args(SetupWizard.REDACTION, route_fields)
+    assert route_argv[:6] == ("setup", "redaction", "route", "add", "collector", "critical")
+    assert route_argv.count("--signal") == 2
+    assert route_argv.count("--bucket") == 2
+    assert route_argv.count("--connector") == 2
+    assert ("--position", "2") == tuple(route_argv[-4:-2])
+    assert route_argv[-2:] == ("--yes", "--dry-run")
+
+
+def test_redaction_tui_default_form_is_read_only_status() -> None:
+    fields = redaction_wizard_fields()
+
+    assert build_wizard_args(SetupWizard.REDACTION, fields) == ("setup", "redaction", "status")
 
 
 def test_notifications_fields_preserve_config_editor_catalog() -> None:
@@ -1948,6 +2048,31 @@ def test_every_setup_wizard_emits_only_real_cli_options() -> None:
             continue
         result = runner.invoke(cmd_setup.setup, argv[1:], catch_exceptions=True)
         assert "No such option" not in (result.output or ""), f"{wizard.name}: {result.output}"
+
+
+def test_every_redaction_tui_action_maps_to_the_registered_cli_surface() -> None:
+    from click.testing import CliRunner
+    from defenseclaw.commands import cmd_setup
+    from defenseclaw.tui.panels.setup import (
+        _REDACTION_ACTIONS,
+        _redaction_wizard_fields_for,
+    )
+
+    runner = CliRunner()
+    seed = {
+        "@Custom Profile Name": "soc",
+        "@Destination": "collector",
+        "@Route Name": "critical",
+        "--signal": "logs",
+        "--bucket": "*",
+        "--position": "1",
+    }
+    for action in _REDACTION_ACTIONS:
+        fields = _redaction_wizard_fields_for({**seed, "@Action": action})
+        assert missing_required_fields(SetupWizard.REDACTION, fields) == (), action
+        argv = build_wizard_args(SetupWizard.REDACTION, fields)
+        result = runner.invoke(cmd_setup.setup, [*argv[1:], "--help"], catch_exceptions=True)
+        assert result.exit_code == 0, f"{action}: {result.output}\n{result.exception!r}"
 
 
 def test_model_picker_filter_and_freeform_row() -> None:

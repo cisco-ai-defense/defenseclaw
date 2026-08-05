@@ -22,7 +22,11 @@ from pathlib import Path
 
 from defenseclaw.config import _assert_config_write_allowed, locked_config_yaml
 from defenseclaw.config_inspect import inspect_v8_config
-from defenseclaw.file_permissions import set_file_mode
+from defenseclaw.file_permissions import (
+    atomic_write_private_bytes,
+    replace_file_durable,
+    set_file_mode,
+)
 from defenseclaw.observability.v8_config import load_validate_v8
 from defenseclaw.observability.v8_yaml import V8YAMLMutation, prepare_v8_yaml_write
 
@@ -34,6 +38,7 @@ class V8PolicyWriteResult:
     changed: bool
     before_sha256: str
     after_sha256: str
+    backup_path: str = ""
 
 
 V8CandidateValidator = Callable[[str, str | None], None]
@@ -48,6 +53,8 @@ def mutate_v8_config(
     data_dir: str | None = None,
     validator: V8CandidateValidator | None = None,
     dry_run: bool = False,
+    expected_before_sha256: str | None = None,
+    backup_path: str | Path | None = None,
 ) -> V8PolicyWriteResult:
     """Prepare, validate, and atomically install one ordinary v8 edit.
 
@@ -64,6 +71,9 @@ def mutate_v8_config(
         _assert_safe_target(path)
         _assert_config_write_allowed(path)
         original = Path(path).read_bytes()
+        original_sha256 = hashlib.sha256(original).hexdigest()
+        if expected_before_sha256 is not None and original_sha256 != expected_before_sha256:
+            raise RuntimeError("config.yaml changed after the observability policy preview")
         prepared = prepare_v8_yaml_write(original, tuple(mutations), source_name=path)
         load_validate_v8(prepared.candidate, source_name=path)
         candidate_path = _stage_candidate(path, prepared.candidate)
@@ -86,16 +96,23 @@ def mutate_v8_config(
             current = Path(path).read_bytes()
             if hashlib.sha256(current).hexdigest() != prepared.expected_sha256:
                 raise RuntimeError("config.yaml changed while the observability policy edit was being validated")
-            os.replace(candidate_path, path)
+            installed_backup = ""
+            if backup_path is not None:
+                installed_backup = _write_private_backup(path, os.fspath(backup_path), original)
+            replace_file_durable(candidate_path, path)
             candidate_path = ""
-            _fsync_directory(os.path.dirname(path) or ".")
         finally:
             if candidate_path:
                 try:
                     os.unlink(candidate_path)
                 except FileNotFoundError:
                     pass
-        return V8PolicyWriteResult(True, prepared.expected_sha256, prepared.candidate_sha256)
+        return V8PolicyWriteResult(
+            True,
+            prepared.expected_sha256,
+            prepared.candidate_sha256,
+            installed_backup,
+        )
 
 
 def _validate_candidate(path: str, data_dir: str | None) -> None:
@@ -151,6 +168,27 @@ def _stage_candidate(path: str, candidate: bytes) -> str:
     return staged
 
 
+def _write_private_backup(config_path: str, backup_path: str, source: bytes) -> str:
+    """Atomically install one private, regular-file pre-change backup."""
+
+    target = os.path.abspath(backup_path)
+    if target == config_path:
+        raise ValueError("redaction backup path must differ from config.yaml")
+    try:
+        existing = os.lstat(target)
+    except FileNotFoundError:
+        existing = None
+    if existing is not None and (stat.S_ISLNK(existing.st_mode) or not stat.S_ISREG(existing.st_mode)):
+        raise OSError("refusing to replace a non-regular redaction backup")
+
+    # This shared primitive creates/tightens an owner-private parent (0700 on
+    # POSIX; protected owner/SYSTEM DACL on Windows), protects the sibling
+    # before writing any bytes, and uses a durable atomic replacement on both
+    # platform families.
+    atomic_write_private_bytes(target, source)
+    return target
+
+
 def _candidate_snapshot(path: str) -> tuple[_CandidateIdentity, str]:
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     descriptor = -1
@@ -204,20 +242,6 @@ def _stat_identity(metadata: os.stat_result) -> _StatIdentity:
         metadata.st_mtime_ns,
         ctime_ns,
     )
-
-
-def _fsync_directory(path: str) -> None:
-    try:
-        descriptor = os.open(path, os.O_RDONLY)
-    except OSError:
-        return
-    try:
-        try:
-            os.fsync(descriptor)
-        except OSError:
-            pass
-    finally:
-        os.close(descriptor)
 
 
 __all__ = ["V8PolicyWriteResult", "mutate_v8_config"]

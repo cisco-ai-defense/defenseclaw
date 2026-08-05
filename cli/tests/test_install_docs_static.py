@@ -2027,7 +2027,8 @@ def test_current_observability_docs_do_not_advertise_retired_redaction_controls(
     retired_guidance = (
         "--disable-redaction",
         "--enable-redaction",
-        "setup redaction",
+        "setup redaction on",
+        "setup redaction off",
         "privacy.disable_redaction",
         "disableRedaction",
     )
@@ -2088,9 +2089,76 @@ def test_setup_index_separates_commands_from_policy_reference_cards() -> None:
     matrix_start = text.index("## Interactive vs non-interactive")
     command_cards = text[command_start:reference_start]
     reference_cards = text[reference_start:matrix_start]
-    assert 'title="Redaction profiles"' not in command_cards
+    assert 'title="setup redaction"' in command_cards
     assert 'title="Redaction profiles"' in reference_cards
-    assert "not\nadditional `defenseclaw setup` verbs" in reference_cards
+    assert "more depth\nthan the command cards above" in reference_cards
+
+
+def test_redaction_cli_docs_cover_simple_advanced_and_scripted_workflows() -> None:
+    redaction = (ROOT / "docs-site/content/docs/reference/redaction.mdx").read_text()
+    setup = (ROOT / "docs-site/content/docs/setup/index.mdx").read_text()
+    cli = (ROOT / "docs-site/content/docs/reference/cli.mdx").read_text()
+
+    for text in (redaction, setup, cli):
+        assert "defenseclaw setup redaction" in text
+        normalized = " ".join(text.replace("**", "").split())
+        assert "Show advanced settings?" in normalized
+        assert "remove-all" in text
+    for expected in (
+        "bucket set",
+        "profile set",
+        "destination send",
+        "route add",
+        "--dry-run",
+        "managed enterprise destination",
+        "config.yaml.before-redaction",
+    ):
+        assert expected in redaction
+
+
+def test_redaction_workflow_documents_linux_windows_macos_and_tui_surfaces() -> None:
+    redaction = (ROOT / "docs-site/content/docs/reference/redaction.mdx").read_text()
+    setup = (ROOT / "docs-site/content/docs/setup/index.mdx").read_text()
+    windows = (
+        ROOT / "docs-site/content/docs/get-started/windows/capabilities-commands.mdx"
+    ).read_text()
+
+    for expected in (
+        "macOS, Linux, and native Windows",
+        "Setup → Redaction Policy",
+        "%USERPROFILE%\\.defenseclaw\\backups\\config.yaml.before-redaction",
+        "protected current-user/SYSTEM DACL",
+        "0700`/`0600",
+    ):
+        assert expected in redaction
+    assert "TUI → Setup → Redaction Policy" in setup
+    assert "Logs → Redaction policy…" in setup
+    assert "Redaction policy CLI and TUI" in windows
+    assert (
+        "redaction status/remove-all/apply/defaults/bucket/profile/destination/route"
+        in windows
+    )
+
+
+def test_macos_redaction_sheet_exposes_the_complete_advanced_cli_surface() -> None:
+    source = (
+        ROOT / "macos/DefenseClawMac/DefenseClawMac/Features/LogsView.swift"
+    ).read_text()
+
+    assert 'DisclosureGroup("Show advanced settings"' in source
+    assert source.count('case bucket') >= 3
+    assert source.count('case profile') >= 4
+    assert source.count('case destination') >= 3
+    assert source.count('case route') >= 5
+    for expected in (
+        '"compliance.activity"',
+        '"diagnostic"',
+        '"--producer-action"',
+        '"--event-name"',
+        '"--min-severity"',
+        '"--dry-run"',
+    ):
+        assert expected in source
 
 
 def test_zeptoclaw_calls_out_local_history_retention_and_trust_boundary() -> None:

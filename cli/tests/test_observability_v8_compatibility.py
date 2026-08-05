@@ -167,7 +167,7 @@ def test_packaged_loader_reads_the_checked_generated_artifact() -> None:
     audit_selector = next(
         selector for selector in selection.exporter_selectors("audit_sink", "logs") if selector.actions
     )
-    assert len(audit_selector.actions) == 188
+    assert len(audit_selector.actions) == 189
     gateway_events = selection.exporter_selectors("gateway_jsonl", "logs")[0].event_names
     assert {
         "guardrail.evaluation.completed",

@@ -201,7 +201,7 @@ async def test_executor_launches_self_cli_with_resolved_argv(monkeypatch) -> Non
 
     class EmptyStdout:
         @staticmethod
-        async def readline() -> bytes:
+        async def read(_limit: int) -> bytes:
             return b""
 
     class Process:
@@ -304,6 +304,30 @@ async def test_redirected_subprocess_output_is_decoded_as_utf8() -> None:
 
     assert [event.text for event in events if event.kind == "output"] == [payload]
     assert events[-1].exit_code == 0
+
+
+@pytest.mark.asyncio
+async def test_pipe_executor_streams_prompt_without_waiting_for_newline() -> None:
+    executor = CommandExecutor(use_pty=False)
+    output: list[str] = []
+
+    async for event in executor.run(
+        sys.executable,
+        (
+            "-u",
+            "-c",
+            "import sys; sys.stdout.write('Select: '); sys.stdout.flush(); "
+            "answer=sys.stdin.readline().strip(); print('picked ' + answer)",
+        ),
+    ):
+        if event.kind != "output":
+            continue
+        output.append(event.text)
+        if "Select:" in event.text:
+            executor.write_stdin("2\n")
+
+    assert any("Select:" in text for text in output)
+    assert any("picked 2" in text for text in output)
 
 
 @pytest.mark.asyncio

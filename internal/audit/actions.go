@@ -256,6 +256,7 @@ const (
 	ActionSetupHookConnector       Action = "setup-hook-connector"
 	ActionSetupConnectorMode       Action = "setup-connector-mode"
 	ActionSetupRedactionToggle     Action = "setup-redaction-toggle"
+	ActionSetupRedactionPolicy     Action = "setup-redaction-policy"
 	ActionSetupNotificationsToggle Action = "setup-notifications-toggle"
 	ActionSetupNotificationsSet    Action = "setup-notifications-set"
 	ActionSetupSplunk              Action = "setup-splunk"
@@ -451,6 +452,7 @@ func AllActions() []Action {
 		ActionSetupHookConnector,
 		ActionSetupConnectorMode,
 		ActionSetupRedactionToggle,
+		ActionSetupRedactionPolicy,
 		ActionSetupNotificationsToggle,
 		ActionSetupNotificationsSet,
 		ActionSetupSplunk,

@@ -54,6 +54,11 @@ class SetupCommandIntent:
     # environment rather than passed as ``--env KEY=secret`` on the command
     # line. Empty mapping means "no overrides".
     env_overrides: tuple[tuple[str, str], ...] = ()
+    # Explicit command risk used by the preview dispatcher. Most legacy setup
+    # intents keep the read-only default and are classified from argv by the
+    # preview screen; interactive redaction setup sets this to ``setup`` so the
+    # TUI switches to Activity before the child asks for input.
+    risk: str = "read-only"
 
     @property
     def argv(self) -> tuple[str, ...]:
