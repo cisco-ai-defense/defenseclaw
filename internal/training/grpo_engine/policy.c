@@ -452,18 +452,73 @@ static void policy_forward_token(PolicyEngine *pe, int token, int pos) {
     grpo_matmul_any(pe->logits, pe->hidden, pe->output_weight, vocab_size, hidden_dim, pe->output_dtype);
 }
 
-/* ─── Autoregressive Generation ─── */
-static int policy_generate(PolicyEngine *pe, const int *prompt, int prompt_len,
-                          int *output, int max_len, float *logprobs_out,
-                          float temp, float top_p, unsigned int *rng) {
-    pe->seq_pos = 0;
-    int total_gen = 0;
+/* ─── KV Cache Snapshot for Multi-Completion Sharing ─── */
+typedef struct {
+    float *k_cache_copy;
+    float *v_cache_copy;
+    int seq_pos;
+    size_t cache_bytes;
+} KVSnapshot;
 
-    /* Prefill: process all prompt tokens */
+static KVSnapshot *kv_snapshot = NULL;
+
+static void policy_save_kv(PolicyEngine *pe) {
+    if (kv_snapshot) {
+        free(kv_snapshot->k_cache_copy);
+        free(kv_snapshot->v_cache_copy);
+        free(kv_snapshot);
+    }
+    kv_snapshot = (KVSnapshot *)malloc(sizeof(KVSnapshot));
+    if (!kv_snapshot) return;
+
+    size_t bytes = (size_t)pe->seq_pos * (size_t)pe->gf.n_kv_heads * (size_t)pe->gf.head_dim * sizeof(float);
+    kv_snapshot->k_cache_copy = (float *)malloc(bytes);
+    kv_snapshot->v_cache_copy = (float *)malloc(bytes);
+    if (!kv_snapshot->k_cache_copy || !kv_snapshot->v_cache_copy) {
+        free(kv_snapshot->k_cache_copy);
+        free(kv_snapshot->v_cache_copy);
+        free(kv_snapshot);
+        kv_snapshot = NULL;
+        return;
+    }
+
+    memcpy(kv_snapshot->k_cache_copy, pe->k_cache, bytes);
+    memcpy(kv_snapshot->v_cache_copy, pe->v_cache, bytes);
+    kv_snapshot->seq_pos = pe->seq_pos;
+    kv_snapshot->cache_bytes = bytes;
+}
+
+static void policy_restore_kv(PolicyEngine *pe) {
+    if (!kv_snapshot) return;
+    memcpy(pe->k_cache, kv_snapshot->k_cache_copy, kv_snapshot->cache_bytes);
+    memcpy(pe->v_cache, kv_snapshot->v_cache_copy, kv_snapshot->cache_bytes);
+    pe->seq_pos = kv_snapshot->seq_pos;
+}
+
+static void policy_free_kv_snapshot(void) {
+    if (kv_snapshot) {
+        free(kv_snapshot->k_cache_copy);
+        free(kv_snapshot->v_cache_copy);
+        free(kv_snapshot);
+        kv_snapshot = NULL;
+    }
+}
+
+/* ─── Prefill (for KV cache sharing) ─── */
+static int policy_prefill(PolicyEngine *pe, const int *prompt, int prompt_len) {
+    pe->seq_pos = 0;
     for (int i = 0; i < prompt_len; i++) {
         policy_forward_token(pe, prompt[i], pe->seq_pos);
         pe->seq_pos++;
     }
+    return pe->seq_pos;
+}
+
+/* ─── Continue Generation (from saved KV cache state) ─── */
+static int policy_generate_continue(PolicyEngine *pe, int *output, int max_len,
+                                   float *logprobs_out, float temp, float top_p,
+                                   unsigned int *rng) {
+    int total_gen = 0;
 
     /* Generate: sample and feed back */
     for (int i = 0; i < max_len; i++) {
@@ -503,6 +558,14 @@ static int policy_generate(PolicyEngine *pe, const int *prompt, int prompt_len,
     }
 
     return total_gen;
+}
+
+/* ─── Autoregressive Generation ─── */
+static int policy_generate(PolicyEngine *pe, const int *prompt, int prompt_len,
+                          int *output, int max_len, float *logprobs_out,
+                          float temp, float top_p, unsigned int *rng) {
+    policy_prefill(pe, prompt, prompt_len);
+    return policy_generate_continue(pe, output, max_len, logprobs_out, temp, top_p, rng);
 }
 
 /* ─── Teacher-Forced Logprobs ─── */
@@ -553,4 +616,26 @@ int grpo_policy_generate_internal(PolicyEngine *pe, const int *prompt, int promp
 
 int grpo_policy_logprobs_internal(PolicyEngine *pe, const int *tokens, int len, float *logprobs_out) {
     return policy_logprobs(pe, tokens, len, logprobs_out);
+}
+
+int grpo_policy_prefill_internal(PolicyEngine *pe, const int *prompt, int prompt_len) {
+    return policy_prefill(pe, prompt, prompt_len);
+}
+
+int grpo_policy_generate_continue_internal(PolicyEngine *pe, int *output, int max_len,
+                                           float *logprobs_out, float temp, float top_p,
+                                           unsigned int *rng) {
+    return policy_generate_continue(pe, output, max_len, logprobs_out, temp, top_p, rng);
+}
+
+void grpo_policy_save_kv_internal(PolicyEngine *pe) {
+    policy_save_kv(pe);
+}
+
+void grpo_policy_restore_kv_internal(PolicyEngine *pe) {
+    policy_restore_kv(pe);
+}
+
+void grpo_policy_free_kv_snapshot_internal(void) {
+    policy_free_kv_snapshot();
 }

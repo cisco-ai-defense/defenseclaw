@@ -101,11 +101,19 @@ func RunGrpoLocal(ctx context.Context, cfg GrpoLocalConfig) (*RunResult, error) 
 		prompt := prompts[step%len(prompts)]
 		meta := metadata[step%len(prompts)]
 
-		// Step 1: Generate G completions
+		// Step 1: Prefill once, then generate G completions from same starting point
+		if err := engine.Prefill(prompt); err != nil {
+			continue
+		}
+		engine.SaveKVSnapshot()
+
 		var completionTokens [][]int
 		var oldLogprobs [][]float32
 		for g := 0; g < cfg.GroupSize; g++ {
-			tokens, lp, err := engine.Generate(prompt, cfg.MaxGenLength,
+			if g > 0 {
+				engine.RestoreKVSnapshot()
+			}
+			tokens, lp, err := engine.GenerateContinue(cfg.MaxGenLength,
 				float32(cfg.Temperature), float32(cfg.TopP))
 			if err != nil {
 				continue
@@ -113,6 +121,7 @@ func RunGrpoLocal(ctx context.Context, cfg GrpoLocalConfig) (*RunResult, error) 
 			completionTokens = append(completionTokens, tokens)
 			oldLogprobs = append(oldLogprobs, lp)
 		}
+		engine.FreeKVSnapshot()
 
 		if len(completionTokens) == 0 {
 			continue

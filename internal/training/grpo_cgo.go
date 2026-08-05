@@ -199,5 +199,53 @@ func (e *GrpoEngine) Close() {
 	}
 }
 
+// Prefill runs the prompt through the model and saves KV cache state
+func (e *GrpoEngine) Prefill(prompt []int) error {
+	promptC := make([]C.int, len(prompt))
+	for i, t := range prompt {
+		promptC[i] = C.int(t)
+	}
+	ret := C.grpo_prefill(e.ctx, &promptC[0], C.int(len(prompt)))
+	if ret < 0 {
+		return fmt.Errorf("prefill failed")
+	}
+	return nil
+}
+
+// GenerateContinue continues generation from current KV cache position
+func (e *GrpoEngine) GenerateContinue(maxLen int, temp, topP float32) (tokens []int, logprobs []float32, err error) {
+	output := make([]C.int, maxLen)
+	lp := make([]C.float, maxLen)
+
+	n := C.grpo_generate_continue(e.ctx, &output[0], C.int(maxLen),
+		&lp[0], C.float(temp), C.float(topP))
+	if n < 0 {
+		return nil, nil, fmt.Errorf("generate_continue failed")
+	}
+
+	tokens = make([]int, int(n))
+	logprobs = make([]float32, int(n))
+	for i := 0; i < int(n); i++ {
+		tokens[i] = int(output[i])
+		logprobs[i] = float32(lp[i])
+	}
+	return tokens, logprobs, nil
+}
+
+// SaveKVSnapshot saves current KV cache state
+func (e *GrpoEngine) SaveKVSnapshot() {
+	C.grpo_save_kv_snapshot(e.ctx)
+}
+
+// RestoreKVSnapshot restores previously saved KV cache state
+func (e *GrpoEngine) RestoreKVSnapshot() {
+	C.grpo_restore_kv_snapshot(e.ctx)
+}
+
+// FreeKVSnapshot frees the saved KV cache snapshot
+func (e *GrpoEngine) FreeKVSnapshot() {
+	C.grpo_free_kv_snapshot(e.ctx)
+}
+
 // GrpoEngineAvailable returns true when the C engine is compiled in.
 func GrpoEngineAvailable() bool { return true }

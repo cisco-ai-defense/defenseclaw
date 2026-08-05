@@ -10,6 +10,10 @@
 #include <stdio.h>
 #include <math.h>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 /* Forward declarations for internal engine types and functions.
  * These are defined in policy.c, stream.c, lora.c but not in grpo.h
  * (they are implementation details, not public API). */
@@ -22,6 +26,13 @@ int grpo_policy_generate_internal(PolicyEngine *pe, const int *prompt, int promp
                                   int *output, int max_len, float *logprobs_out,
                                   float temp, float top_p, unsigned int *rng);
 int grpo_policy_logprobs_internal(PolicyEngine *pe, const int *tokens, int len, float *logprobs_out);
+int grpo_policy_prefill_internal(PolicyEngine *pe, const int *prompt, int prompt_len);
+int grpo_policy_generate_continue_internal(PolicyEngine *pe, int *output, int max_len,
+                                           float *logprobs_out, float temp, float top_p,
+                                           unsigned int *rng);
+void grpo_policy_save_kv_internal(PolicyEngine *pe);
+void grpo_policy_restore_kv_internal(PolicyEngine *pe);
+void grpo_policy_free_kv_snapshot_internal(void);
 
 /* stream.c */
 struct StreamEngine;
@@ -166,6 +177,13 @@ GrpoCtx *grpo_init(GrpoConfig *cfg) {
               cfg->lora_alpha > 0 ? cfg->lora_alpha : ctx->lora_rank,
               ctx->hidden_dim, ctx->intermediate_dim,
               ctx->n_heads, ctx->n_kv_heads, ctx->head_dim);
+
+    /* Set OpenMP thread count to use all performance cores */
+#ifdef _OPENMP
+    int n_threads = cfg->num_threads > 0 ? cfg->num_threads : omp_get_max_threads();
+    omp_set_num_threads(n_threads);
+    fprintf(stderr, "grpo_init: OpenMP using %d threads\n", n_threads);
+#endif
 
     fprintf(stderr, "grpo_init: ready (LoRA rank=%d, %d layers × %d targets = %d adapters)\n",
             ctx->lora_rank, ctx->n_layers, MAX_TARGETS, ctx->n_layers * MAX_TARGETS);
@@ -370,4 +388,34 @@ GrpoStats grpo_stats(GrpoCtx *ctx) {
     }
     ctx->stats.last_reward_mean = 0; /* updated by Go layer */
     return ctx->stats;
+}
+
+/* ─── KV Cache Sharing for Multi-Completion ─── */
+
+int grpo_prefill(GrpoCtx *ctx, const int *prompt, int prompt_len) {
+    if (!ctx || !ctx->policy || !prompt) return -1;
+    return grpo_policy_prefill_internal(ctx->policy, prompt, prompt_len);
+}
+
+int grpo_generate_continue(GrpoCtx *ctx, int *output, int max_len,
+                          float *logprobs_out, float temp, float top_p) {
+    if (!ctx || !ctx->policy || !output) return -1;
+    return grpo_policy_generate_continue_internal(ctx->policy, output, max_len,
+                                                  logprobs_out, temp, top_p,
+                                                  &ctx->rng_state);
+}
+
+void grpo_save_kv_snapshot(GrpoCtx *ctx) {
+    if (!ctx || !ctx->policy) return;
+    grpo_policy_save_kv_internal(ctx->policy);
+}
+
+void grpo_restore_kv_snapshot(GrpoCtx *ctx) {
+    if (!ctx || !ctx->policy) return;
+    grpo_policy_restore_kv_internal(ctx->policy);
+}
+
+void grpo_free_kv_snapshot(GrpoCtx *ctx) {
+    if (!ctx) return;
+    grpo_policy_free_kv_snapshot_internal();
 }

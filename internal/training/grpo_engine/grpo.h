@@ -99,6 +99,14 @@ int         grpo_load_lora(GrpoCtx *ctx, const char *path);
 int         grpo_export_merged_gguf(GrpoCtx *ctx, const char *output_path);
 GrpoStats   grpo_stats(GrpoCtx *ctx);
 
+/* KV cache sharing for multi-completion generation */
+int         grpo_prefill(GrpoCtx *ctx, const int *prompt, int prompt_len);
+int         grpo_generate_continue(GrpoCtx *ctx, int *output, int max_len,
+                                  float *logprobs_out, float temp, float top_p);
+void        grpo_save_kv_snapshot(GrpoCtx *ctx);
+void        grpo_restore_kv_snapshot(GrpoCtx *ctx);
+void        grpo_free_kv_snapshot(GrpoCtx *ctx);
+
 /* ─── Math Kernels ─── */
 void grpo_rmsnorm(float *y, const float *x, const float *w, int n, float eps);
 void grpo_matmul_f32(float *out, const float *x, const float *W, int rows, int cols, int in_dim);
