@@ -21,6 +21,7 @@
 #include <math.h>
 
 #include "grpo.h"
+#include "uring.h"
 
 /* ─── Stream Engine Structure ─── */
 
@@ -36,6 +37,7 @@ typedef struct {
 struct StreamEngine {
     GgufFile      gf;
     int           fd;           /* O_DIRECT fd (or regular fd on macOS) */
+    char         *file_path;    /* path to GGUF file (for io_uring) */
     void         *layer_buf;    /* aligned buffer for one layer's weights */
     size_t        layer_buf_sz; /* size of largest layer */
     int           use_direct;
@@ -397,8 +399,17 @@ struct StreamEngine *stream_open(const char *gguf_path, int use_direct_io) {
         return NULL;
     }
 
+    /* Store file path for io_uring */
+    se->file_path = strdup(gguf_path);
+    if (!se->file_path) {
+        gguf_close(&se->gf);
+        free(se);
+        return NULL;
+    }
+
     /* Open with O_DIRECT or F_NOCACHE */
     if (stream_open_file(se, gguf_path, use_direct_io) != 0) {
+        free(se->file_path);
         gguf_close(&se->gf);
         free(se);
         return NULL;
@@ -464,16 +475,71 @@ int stream_forward_logprobs(struct StreamEngine *se, const int *tokens, int len,
     }
 
     /* Process each layer: read from disk, compute, discard weights */
-    for (int l = 0; l < se->gf.n_layers; l++) {
-        /* Read this layer's weights into layer_buf via pread */
-        if (read_layer_data(se, l) != 0) {
-            free(hidden);
-            return -1;
+#ifdef GRPO_HAS_URING
+    UringReader *ur = NULL;
+    void *buf_B = NULL;
+    int n_layers = se->gf.n_layers;
+
+    if (uring_available()) {
+        ur = uring_open(se->file_path, 2, 4096);
+        if (ur) {
+            /* Allocate second buffer for double-buffering */
+            buf_B = alloc_aligned(se->layer_buf_sz, 4096);
+            if (!buf_B) { uring_close(ur); ur = NULL; }
+        }
+    }
+
+    if (ur && buf_B) {
+        /* Double-buffered io_uring path */
+        void *bufs[2] = { se->layer_buf, buf_B };
+
+        /* Submit first layer read */
+        size_t read_size = (se->layer_info[0].total_size + 4095) & ~4095UL;
+        if (read_size > se->layer_buf_sz) read_size = se->layer_buf_sz;
+        uring_submit_read(ur, bufs[0], read_size, se->layer_info[0].file_offset);
+
+        for (int L = 0; L < n_layers; L++) {
+            /* Wait for current layer */
+            if (uring_wait_completion(ur) < 0) {
+                fprintf(stderr, "stream: uring_wait_completion failed for layer %d\n", L);
+                free(buf_B);
+                uring_close(ur);
+                free(hidden);
+                return -1;
+            }
+
+            /* Submit next layer while we compute */
+            if (L + 1 < n_layers) {
+                read_size = (se->layer_info[L + 1].total_size + 4095) & ~4095UL;
+                if (read_size > se->layer_buf_sz) read_size = se->layer_buf_sz;
+                uring_submit_read(ur, bufs[(L + 1) % 2], read_size,
+                                 se->layer_info[L + 1].file_offset);
+            }
+
+            /* Compute on current buffer */
+            void *saved = se->layer_buf;
+            se->layer_buf = bufs[L % 2];
+            apply_stream_layer(se, hidden, len, L);
+            se->layer_buf = saved;
         }
 
-        /* Apply transformer layer using weights in layer_buf */
-        apply_stream_layer(se, hidden, len, l);
-        /* layer_buf is now free to be overwritten by next layer */
+        free(buf_B);
+        uring_close(ur);
+    } else
+#endif
+    {
+        /* Fallback: synchronous pread (existing behavior) */
+        for (int l = 0; l < se->gf.n_layers; l++) {
+            /* Read this layer's weights into layer_buf via pread */
+            if (read_layer_data(se, l) != 0) {
+                free(hidden);
+                return -1;
+            }
+
+            /* Apply transformer layer using weights in layer_buf */
+            apply_stream_layer(se, hidden, len, l);
+            /* layer_buf is now free to be overwritten by next layer */
+        }
     }
 
     /* Apply final norm + output head → logits → logprobs */
@@ -528,6 +594,9 @@ void stream_close(struct StreamEngine *se) {
 
     if (se->layer_info)
         free(se->layer_info);
+
+    if (se->file_path)
+        free(se->file_path);
 
     if (se->fd >= 0)
         close(se->fd);

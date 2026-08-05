@@ -30,6 +30,17 @@ ifeq ($(AVX2_OK),1)
 endif
 
 SRCS = gguf.c kernels.c policy.c stream.c lora.c grpo.c tokenizer.c bench_io.c
+
+# io_uring detection (Linux only)
+ifeq ($(UNAME_S),Linux)
+  URING_OK := $(shell echo '\#include <liburing.h>\nint main(){return 0;}' | $(CC) -x c - -luring -o /dev/null 2>/dev/null && echo 1)
+  ifeq ($(URING_OK),1)
+    SRCS += uring.c
+    CFLAGS += -DGRPO_HAS_URING
+    LDFLAGS += -luring
+  endif
+endif
+
 OBJS = $(SRCS:.c=.o)
 
 .PHONY: all clean test portable
