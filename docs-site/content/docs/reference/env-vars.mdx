@@ -217,6 +217,7 @@ scope at each such row.
 
 | Env var | Impact | Default | Accepted values | Purpose | Security concern | Consumers |
 | --- | --- | --- | --- | --- | --- | --- |
+| `DEFENSECLAW_AUDIT_DB_LOCK_HELPER_PATH` | — | `unset` | `absolute temporary database path`, `unset` | Passes the temporary audit database path to isolated subprocesses that verify SQLite kernel-lock and WAL lifecycle behavior. | — | `internal/audit/audit_db_lock_unix_test.go` — Peer-process lock and SQLite-close fixtures; never read by production runtime paths |
 | `DEFENSECLAW_AUTHENTICODE_HELPER` | — | `unset` | `test-defined absolute path`, `unset` | Carries the Authenticode PowerShell helper path to the native unsigned-PE regression fixture. | — | `cli/tests/test_windows_installer_artifacts.py` — Native Windows test fixture; never read by production runtime paths |
 | `DEFENSECLAW_CODEX_POLICY_ENTRY_PATH` | — | `unset` | `absolute test marker path`, `unset` | Test-only marker path used by the Codex effective-policy subprocess fixture to record helper entry. | — | `internal/gateway/connector/codex_policy_test.go` — Codex policy timeout/process-tree test fixture; never read by production runtime paths |
 | `DEFENSECLAW_CODEX_POLICY_GRANDCHILD_HELPER` | — | `unset` | `1`, `unset` | Selects the Codex policy grandchild fixture used to verify process-tree containment. | — | `internal/gateway/connector/codex_policy_test.go` — Test-only Codex policy grandchild helper |
