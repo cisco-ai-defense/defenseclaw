@@ -6,6 +6,10 @@
 #include <float.h>
 #include <stdio.h>
 
+#ifdef __ARM_NEON
+#include <arm_neon.h>
+#endif
+
 /* ─── RMS Normalization ─── */
 void grpo_rmsnorm(float *y, const float *x, const float *w, int n, float eps) {
     double ss = 0.0;
@@ -22,10 +26,48 @@ void grpo_matmul_f32(float *out, const float *x, const float *W,
     (void)cols; /* unused in this signature */
     #pragma omp parallel for
     for (int r = 0; r < rows; r++) {
+#ifdef __ARM_NEON
+        /* NEON path: process 4 elements at a time */
+        float32x4_t acc0 = vdupq_n_f32(0), acc1 = vdupq_n_f32(0);
+        float32x4_t acc2 = vdupq_n_f32(0), acc3 = vdupq_n_f32(0);
+
+        const float *W_row = W + r * in_dim;
+        int c = 0;
+        for (; c + 15 < in_dim; c += 16) {
+            float32x4_t xv0 = vld1q_f32(x + c);
+            float32x4_t xv1 = vld1q_f32(x + c + 4);
+            float32x4_t xv2 = vld1q_f32(x + c + 8);
+            float32x4_t xv3 = vld1q_f32(x + c + 12);
+
+            float32x4_t wv0 = vld1q_f32(W_row + c);
+            float32x4_t wv1 = vld1q_f32(W_row + c + 4);
+            float32x4_t wv2 = vld1q_f32(W_row + c + 8);
+            float32x4_t wv3 = vld1q_f32(W_row + c + 12);
+
+            acc0 = vfmaq_f32(acc0, xv0, wv0);
+            acc1 = vfmaq_f32(acc1, xv1, wv1);
+            acc2 = vfmaq_f32(acc2, xv2, wv2);
+            acc3 = vfmaq_f32(acc3, xv3, wv3);
+        }
+
+        /* Reduce 4 accumulators */
+        float32x4_t sum01 = vaddq_f32(acc0, acc1);
+        float32x4_t sum23 = vaddq_f32(acc2, acc3);
+        float32x4_t sum = vaddq_f32(sum01, sum23);
+        float result = vaddvq_f32(sum);
+
+        /* Handle remaining elements */
+        for (; c < in_dim; c++)
+            result += x[c] * W_row[c];
+
+        out[r] = result;
+#else
+        /* Scalar fallback */
         double acc = 0.0;
         for (int c = 0; c < in_dim; c++)
             acc += (double)x[c] * (double)W[r * in_dim + c];
         out[r] = (float)acc;
+#endif
     }
 }
 
@@ -122,8 +164,60 @@ void grpo_matmul_q8_0(float *out, const float *x, const void *W_packed,
 
     #pragma omp parallel for
     for (int r = 0; r < rows; r++) {
-        double acc = 0.0;
         const uint8_t *row_data = W + (size_t)r * blocks_per_row * Q8_0_BLOCK_BYTES;
+
+#ifdef __ARM_NEON
+        /* NEON path: process 16 int8 values at a time */
+        float32x4_t acc0 = vdupq_n_f32(0), acc1 = vdupq_n_f32(0);
+        float32x4_t acc2 = vdupq_n_f32(0), acc3 = vdupq_n_f32(0);
+
+        for (int b = 0; b < blocks_per_row; b++) {
+            const uint8_t *block = row_data + b * Q8_0_BLOCK_BYTES;
+
+            /* Read scale factor (fp16) */
+            uint16_t d_bits;
+            memcpy(&d_bits, block, 2);
+            float d = fp16_to_fp32(d_bits);
+            float32x4_t vd = vdupq_n_f32(d);
+
+            /* Read quantized values (int8_t[32]) */
+            const int8_t *qs = (const int8_t *)(block + 2);
+            const float *xb = x + b * Q8_0_BLOCK_SIZE;
+
+            /* Process 32 elements in two groups of 16 */
+            for (int half = 0; half < 2; half++) {
+                int base = half * 16;
+                int8x16_t qi = vld1q_s8(qs + base);
+
+                float32x4_t xv0 = vld1q_f32(xb + base);
+                float32x4_t xv1 = vld1q_f32(xb + base + 4);
+                float32x4_t xv2 = vld1q_f32(xb + base + 8);
+                float32x4_t xv3 = vld1q_f32(xb + base + 12);
+
+                /* Widen int8 → int16 → int32 → float32 */
+                int16x8_t qi_lo = vmovl_s8(vget_low_s8(qi));
+                int16x8_t qi_hi = vmovl_s8(vget_high_s8(qi));
+
+                float32x4_t w0 = vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_low_s16(qi_lo))), vd);
+                float32x4_t w1 = vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_high_s16(qi_lo))), vd);
+                float32x4_t w2 = vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_low_s16(qi_hi))), vd);
+                float32x4_t w3 = vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_high_s16(qi_hi))), vd);
+
+                acc0 = vfmaq_f32(acc0, xv0, w0);
+                acc1 = vfmaq_f32(acc1, xv1, w1);
+                acc2 = vfmaq_f32(acc2, xv2, w2);
+                acc3 = vfmaq_f32(acc3, xv3, w3);
+            }
+        }
+
+        /* Reduce 4 accumulators */
+        float32x4_t sum01 = vaddq_f32(acc0, acc1);
+        float32x4_t sum23 = vaddq_f32(acc2, acc3);
+        float32x4_t sum = vaddq_f32(sum01, sum23);
+        out[r] = vaddvq_f32(sum);
+#else
+        /* Scalar fallback */
+        double acc = 0.0;
         for (int b = 0; b < blocks_per_row; b++) {
             const uint8_t *block = row_data + b * Q8_0_BLOCK_BYTES;
 
@@ -142,6 +236,7 @@ void grpo_matmul_q8_0(float *out, const float *x, const void *W_packed,
             }
         }
         out[r] = (float)acc;
+#endif
     }
 }
 
@@ -155,8 +250,74 @@ void grpo_matmul_q5_0(float *out, const float *x, const void *W_packed,
 
     #pragma omp parallel for
     for (int r = 0; r < rows; r++) {
-        double acc = 0.0;
         const uint8_t *row_data = W + (size_t)r * blocks_per_row * Q5_0_BLOCK_BYTES;
+
+#ifdef __ARM_NEON
+        /* NEON path: process 16 elements at a time */
+        float32x4_t acc0 = vdupq_n_f32(0), acc1 = vdupq_n_f32(0);
+        float32x4_t acc2 = vdupq_n_f32(0), acc3 = vdupq_n_f32(0);
+
+        for (int b = 0; b < blocks_per_row; b++) {
+            const uint8_t *block = row_data + b * Q5_0_BLOCK_BYTES;
+
+            /* Read scale factor (fp16) */
+            uint16_t d_bits;
+            memcpy(&d_bits, block, 2);
+            float d = fp16_to_fp32(d_bits);
+            float32x4_t vd = vdupq_n_f32(d);
+
+            /* qs: 16 bytes storing 4-bit signed values (2 elements per byte) */
+            const uint8_t *qs = block + 2;
+            const float *xb = x + b * Q5_0_BLOCK_SIZE;
+
+            /* Process 32 elements in two groups of 16 */
+            for (int half = 0; half < 2; half++) {
+                int base = half * 16;
+
+                /* Load 8 bytes (16 packed 4-bit values) */
+                uint8x8_t packed = vld1_u8(qs + half * 8);
+
+                /* Unpack nibbles: low 4 bits and high 4 bits */
+                uint8x16_t unpacked;
+                uint8x8_t low = vand_u8(packed, vdup_n_u8(0x0F));
+                uint8x8_t high = vshr_n_u8(packed, 4);
+
+                /* Interleave: low[0], high[0], low[1], high[1], ... */
+                unpacked = vcombine_u8(vzip1_u8(low, high), vzip2_u8(low, high));
+
+                /* Convert to signed: subtract 8 (range [0,15] → [-8,7]) */
+                int8x16_t q_signed = vsubq_s8(vreinterpretq_s8_u8(unpacked), vdupq_n_s8(8));
+
+                /* Load input values */
+                float32x4_t xv0 = vld1q_f32(xb + base);
+                float32x4_t xv1 = vld1q_f32(xb + base + 4);
+                float32x4_t xv2 = vld1q_f32(xb + base + 8);
+                float32x4_t xv3 = vld1q_f32(xb + base + 12);
+
+                /* Widen int8 → int16 → int32 → float32 and scale */
+                int16x8_t q_lo = vmovl_s8(vget_low_s8(q_signed));
+                int16x8_t q_hi = vmovl_s8(vget_high_s8(q_signed));
+
+                float32x4_t w0 = vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_low_s16(q_lo))), vd);
+                float32x4_t w1 = vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_high_s16(q_lo))), vd);
+                float32x4_t w2 = vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_low_s16(q_hi))), vd);
+                float32x4_t w3 = vmulq_f32(vcvtq_f32_s32(vmovl_s16(vget_high_s16(q_hi))), vd);
+
+                acc0 = vfmaq_f32(acc0, xv0, w0);
+                acc1 = vfmaq_f32(acc1, xv1, w1);
+                acc2 = vfmaq_f32(acc2, xv2, w2);
+                acc3 = vfmaq_f32(acc3, xv3, w3);
+            }
+        }
+
+        /* Reduce 4 accumulators */
+        float32x4_t sum01 = vaddq_f32(acc0, acc1);
+        float32x4_t sum23 = vaddq_f32(acc2, acc3);
+        float32x4_t sum = vaddq_f32(sum01, sum23);
+        out[r] = vaddvq_f32(sum);
+#else
+        /* Scalar fallback */
+        double acc = 0.0;
         for (int b = 0; b < blocks_per_row; b++) {
             const uint8_t *block = row_data + b * Q5_0_BLOCK_BYTES;
 
@@ -182,6 +343,7 @@ void grpo_matmul_q5_0(float *out, const float *x, const void *W_packed,
             }
         }
         out[r] = (float)acc;
+#endif
     }
 }
 
@@ -196,8 +358,106 @@ void grpo_matmul_q6_k(float *out, const float *x, const void *W_packed,
 
     #pragma omp parallel for
     for (int r = 0; r < rows; r++) {
-        double acc = 0.0;
         const uint8_t *row_data = W + (size_t)r * blocks_per_row * Q6_K_BLOCK_BYTES;
+
+#ifdef __ARM_NEON
+        /* NEON path: process 16 elements per sub-block */
+        float32x4_t acc0 = vdupq_n_f32(0), acc1 = vdupq_n_f32(0);
+        float32x4_t acc2 = vdupq_n_f32(0), acc3 = vdupq_n_f32(0);
+
+        for (int b = 0; b < blocks_per_row; b++) {
+            const uint8_t *block = row_data + b * Q6_K_BLOCK_BYTES;
+
+            /* Read super-block scale (fp16) */
+            uint16_t d_bits;
+            memcpy(&d_bits, block + 208, 2);
+            float d = fp16_to_fp32(d_bits);
+
+            /* Read sub-block scales (int8_t[16]) */
+            const int8_t *scales = (const int8_t *)(block + 192);
+
+            /* ql: low 4 bits (128 bytes for 256 elements, packed 2 per byte) */
+            const uint8_t *ql = block;
+            /* qh: high 2 bits (64 bytes for 256 elements, packed 4 per byte) */
+            const uint8_t *qh = block + 128;
+
+            const float *xb = x + b * Q6_K_BLOCK_SIZE;
+
+            /* Process 16 sub-blocks of 16 elements each */
+            for (int sb = 0; sb < 16; sb++) {
+                float scale = (float)scales[sb] * d;
+                float32x4_t vscale = vdupq_n_f32(scale);
+                float32x4_t voffset = vdupq_n_f32(-32.0f * scale);
+
+                int base_idx = sb * 16;
+
+                /* Process 16 elements in this sub-block, 8 at a time */
+                for (int half = 0; half < 2; half++) {
+                    int idx = base_idx + half * 8;
+
+                    /* Load 4 packed bytes (8 elements worth of low bits) */
+                    uint8x8_t ql_vec = vld1_u8(ql + idx / 2);
+
+                    /* Unpack low 4 bits: extract both nibbles */
+                    uint8x8_t low4_even = vand_u8(ql_vec, vdup_n_u8(0x0F));
+                    uint8x8_t low4_odd = vshr_n_u8(ql_vec, 4);
+
+                    /* Interleave to get sequential elements */
+                    uint8x8x2_t low4_pairs = vzip_u8(low4_even, low4_odd);
+                    uint8x16_t low4 = vcombine_u8(low4_pairs.val[0], low4_pairs.val[1]);
+
+                    /* Load 2 packed bytes (8 elements worth of high bits, 4 per byte) */
+                    uint8x8_t qh_vec = vld1_u8(qh + idx / 4);
+
+                    /* Unpack high 2 bits (more complex) */
+                    uint8x16_t high2;
+                    {
+                        /* For each qh byte, extract 4 2-bit values */
+                        uint8x8_t h0 = vand_u8(qh_vec, vdup_n_u8(0x03));
+                        uint8x8_t h1 = vand_u8(vshr_n_u8(qh_vec, 2), vdup_n_u8(0x03));
+                        uint8x8_t h2 = vand_u8(vshr_n_u8(qh_vec, 4), vdup_n_u8(0x03));
+                        uint8x8_t h3 = vshr_n_u8(qh_vec, 6);
+
+                        /* Interleave: h0[0],h1[0],h2[0],h3[0], h0[1],h1[1],h2[1],h3[1], ... */
+                        uint8x8x2_t p01 = vzip_u8(h0, h1);
+                        uint8x8x2_t p23 = vzip_u8(h2, h3);
+                        uint8x8x2_t p0123_lo = vzip_u8(p01.val[0], p23.val[0]);
+
+                        high2 = vcombine_u8(p0123_lo.val[0], p0123_lo.val[1]);
+                        (void)p01; (void)p23; /* silence warnings */
+                    }
+
+                    /* Combine: q6 = low4 | (high2 << 4) */
+                    uint8x16_t q6 = vorrq_u8(low4, vshlq_n_u8(high2, 4));
+
+                    /* Convert to float and dequantize: w = (q6 - 32) * scale */
+                    uint16x8_t q6_lo_u16 = vmovl_u8(vget_low_u8(q6));
+
+                    float32x4_t q6_f0 = vcvtq_f32_u32(vmovl_u16(vget_low_u16(q6_lo_u16)));
+                    float32x4_t q6_f1 = vcvtq_f32_u32(vmovl_u16(vget_high_u16(q6_lo_u16)));
+
+                    float32x4_t w0 = vfmaq_f32(voffset, q6_f0, vscale);
+                    float32x4_t w1 = vfmaq_f32(voffset, q6_f1, vscale);
+
+                    /* Load input values */
+                    float32x4_t xv0 = vld1q_f32(xb + idx);
+                    float32x4_t xv1 = vld1q_f32(xb + idx + 4);
+
+                    /* Accumulate */
+                    acc0 = vfmaq_f32(acc0, xv0, w0);
+                    acc1 = vfmaq_f32(acc1, xv1, w1);
+                }
+            }
+        }
+
+        /* Reduce 4 accumulators */
+        float32x4_t sum01 = vaddq_f32(acc0, acc1);
+        float32x4_t sum23 = vaddq_f32(acc2, acc3);
+        float32x4_t sum = vaddq_f32(sum01, sum23);
+        out[r] = vaddvq_f32(sum);
+#else
+        /* Scalar fallback */
+        double acc = 0.0;
         for (int b = 0; b < blocks_per_row; b++) {
             const uint8_t *block = row_data + b * Q6_K_BLOCK_BYTES;
 
@@ -239,6 +499,7 @@ void grpo_matmul_q6_k(float *out, const float *x, const void *W_packed,
             }
         }
         out[r] = (float)acc;
+#endif
     }
 }
 
