@@ -23,7 +23,7 @@ int uring_available(void) {
     /* Probe: try io_uring_setup with 0 entries to check kernel support */
     struct io_uring_params params = {0};
     int ret = (int)syscall(__NR_io_uring_setup, 1, &params);
-    if (ret >= 0) {
+    if (ret > 0) {
         close(ret);
         return 1;
     }

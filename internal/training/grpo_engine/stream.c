@@ -419,6 +419,7 @@ struct StreamEngine *stream_open(const char *gguf_path, int use_direct_io) {
     if (compute_layer_offsets(se) != 0) {
         close(se->fd);
         gguf_close(&se->gf);
+        free(se->file_path);
         free(se);
         return NULL;
     }
@@ -430,6 +431,7 @@ struct StreamEngine *stream_open(const char *gguf_path, int use_direct_io) {
         free(se->layer_info);
         close(se->fd);
         gguf_close(&se->gf);
+        free(se->file_path);
         free(se);
         return NULL;
     }
@@ -440,6 +442,7 @@ struct StreamEngine *stream_open(const char *gguf_path, int use_direct_io) {
         free(se->layer_info);
         close(se->fd);
         gguf_close(&se->gf);
+        free(se->file_path);
         free(se);
         return NULL;
     }
@@ -496,38 +499,49 @@ int stream_forward_logprobs(struct StreamEngine *se, const int *tokens, int len,
         /* Submit first layer read */
         size_t read_size = (se->layer_info[0].total_size + 4095) & ~4095UL;
         if (read_size > se->layer_buf_sz) read_size = se->layer_buf_sz;
-        uring_submit_read(ur, bufs[0], read_size, se->layer_info[0].file_offset);
 
-        for (int L = 0; L < n_layers; L++) {
-            /* Wait for current layer */
-            if (uring_wait_completion(ur) < 0) {
-                fprintf(stderr, "stream: uring_wait_completion failed for layer %d\n", L);
-                free(buf_B);
-                uring_close(ur);
-                free(hidden);
-                return -1;
+        /* Skip io_uring if first layer read_size is 0 */
+        if (read_size == 0) {
+            free(buf_B);
+            uring_close(ur);
+            ur = NULL;
+        } else {
+            uring_submit_read(ur, bufs[0], read_size, se->layer_info[0].file_offset);
+
+            for (int L = 0; L < n_layers; L++) {
+                /* Wait for current layer */
+                if (uring_wait_completion(ur) < 0) {
+                    fprintf(stderr, "stream: uring_wait_completion failed for layer %d\n", L);
+                    free(buf_B);
+                    uring_close(ur);
+                    free(hidden);
+                    return -1;
+                }
+
+                /* Submit next layer while we compute */
+                if (L + 1 < n_layers) {
+                    read_size = (se->layer_info[L + 1].total_size + 4095) & ~4095UL;
+                    if (read_size > se->layer_buf_sz) read_size = se->layer_buf_sz;
+                    if (read_size > 0) {
+                        uring_submit_read(ur, bufs[(L + 1) % 2], read_size,
+                                         se->layer_info[L + 1].file_offset);
+                    }
+                }
+
+                /* Compute on current buffer */
+                void *saved = se->layer_buf;
+                se->layer_buf = bufs[L % 2];
+                apply_stream_layer(se, hidden, len, L);
+                se->layer_buf = saved;
             }
 
-            /* Submit next layer while we compute */
-            if (L + 1 < n_layers) {
-                read_size = (se->layer_info[L + 1].total_size + 4095) & ~4095UL;
-                if (read_size > se->layer_buf_sz) read_size = se->layer_buf_sz;
-                uring_submit_read(ur, bufs[(L + 1) % 2], read_size,
-                                 se->layer_info[L + 1].file_offset);
-            }
-
-            /* Compute on current buffer */
-            void *saved = se->layer_buf;
-            se->layer_buf = bufs[L % 2];
-            apply_stream_layer(se, hidden, len, L);
-            se->layer_buf = saved;
+            free(buf_B);
+            uring_close(ur);
         }
+    }
 
-        free(buf_B);
-        uring_close(ur);
-    } else
+    if (!ur) {
 #endif
-    {
         /* Fallback: synchronous pread (existing behavior) */
         for (int l = 0; l < se->gf.n_layers; l++) {
             /* Read this layer's weights into layer_buf via pread */
@@ -540,7 +554,9 @@ int stream_forward_logprobs(struct StreamEngine *se, const int *tokens, int len,
             apply_stream_layer(se, hidden, len, l);
             /* layer_buf is now free to be overwritten by next layer */
         }
+#ifdef GRPO_HAS_URING
     }
+#endif
 
     /* Apply final norm + output head → logits → logprobs */
     float *logits = (float *)malloc((size_t)vocab_size * sizeof(float));
