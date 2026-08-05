@@ -11,6 +11,83 @@
 
 #include "grpo.h"
 
+/* ─── LoRA Injection Hook ─── */
+/* Global pointer to active LoRA engine for injection during forward pass.
+ * Set by grpo.c before calling policy_logprobs (where LoRA must be active)
+ * and cleared afterward. NULL = no LoRA injection (used during generation
+ * to capture old_logprobs without LoRA influence). */
+typedef struct {
+    float *A;
+    float *B;
+    float *dA;
+    float *dB;
+    float *mA;
+    float *mB;
+    float *vA;
+    float *vB;
+    float *x_stored;
+    int    in_dim;
+    int    out_dim;
+} PolicyLoRAAdapter;
+
+typedef struct {
+    PolicyLoRAAdapter adapters[7]; /* q,k,v,o,gate,up,down */
+} PolicyLoRALayer;
+
+typedef struct {
+    PolicyLoRALayer *layers;
+    int n_layers;
+    int rank;
+    float scale; /* alpha/rank */
+} PolicyLoRARef;
+
+static PolicyLoRARef *g_active_lora = NULL;
+
+void policy_set_active_lora(void *lora_ref) {
+    g_active_lora = (PolicyLoRARef *)lora_ref;
+}
+
+/* Inject LoRA contribution: output += (input @ A) @ B * scale */
+static void inject_lora(float *output, const float *input, int layer, int target_idx,
+                        int out_dim, int in_dim) {
+    if (!g_active_lora || !g_active_lora->layers) return;
+    if (layer >= g_active_lora->n_layers) return;
+
+    PolicyLoRAAdapter *a = &g_active_lora->layers[layer].adapters[target_idx];
+    if (!a->A || !a->B) return;
+
+    int rank = g_active_lora->rank;
+    float scale = g_active_lora->scale;
+
+    /* h = input @ A  [rank] */
+    float *h = (float *)malloc((size_t)rank * sizeof(float));
+    if (!h) return;
+    for (int r = 0; r < rank; r++) {
+        double acc = 0.0;
+        for (int c = 0; c < in_dim; c++)
+            acc += (double)input[c] * (double)a->A[c * rank + r];
+        h[r] = (float)acc;
+    }
+
+    /* output += h @ B * scale  [out_dim] */
+    for (int o = 0; o < out_dim; o++) {
+        double acc = 0.0;
+        for (int r = 0; r < rank; r++)
+            acc += (double)h[r] * (double)a->B[r * out_dim + o];
+        output[o] += (float)acc * scale;
+    }
+
+    /* Store input for backward pass */
+    if (a->x_stored) {
+        memcpy(a->x_stored, input, (size_t)in_dim * sizeof(float));
+    } else {
+        a->x_stored = (float *)malloc((size_t)in_dim * sizeof(float));
+        if (a->x_stored) memcpy(a->x_stored, input, (size_t)in_dim * sizeof(float));
+    }
+
+    free(h);
+}
+
 /* ─── Internal Policy Engine Structure ─── */
 
 /* Quantization block sizes */
@@ -399,10 +476,15 @@ static void policy_forward_token(PolicyEngine *pe, int token, int pos) {
         /* Attention norm */
         grpo_rmsnorm(pe->hidden, residual, layer->attn_norm, hidden_dim, pe->gf.rms_eps);
 
-        /* Q, K, V projections */
+        /* Q, K, V projections + LoRA injection */
         grpo_matmul_any(pe->q_buf, pe->hidden, layer->q_weight, n_heads * head_dim, hidden_dim, layer->q_dtype);
+        inject_lora(pe->q_buf, pe->hidden, l, 0, n_heads * head_dim, hidden_dim);
+
         grpo_matmul_any(pe->k_buf, pe->hidden, layer->k_weight, n_kv_heads * head_dim, hidden_dim, layer->k_dtype);
+        inject_lora(pe->k_buf, pe->hidden, l, 1, n_kv_heads * head_dim, hidden_dim);
+
         grpo_matmul_any(pe->v_buf, pe->hidden, layer->v_weight, n_kv_heads * head_dim, hidden_dim, layer->v_dtype);
+        inject_lora(pe->v_buf, pe->hidden, l, 2, n_kv_heads * head_dim, hidden_dim);
 
         /* RoPE on Q and K */
         grpo_rope(pe->q_buf, pe->k_buf, pos, n_heads, head_dim, pe->gf.rope_theta);
@@ -416,8 +498,9 @@ static void policy_forward_token(PolicyEngine *pe, int token, int pos) {
         grpo_gqa_attention(pe->attn_out, pe->q_buf, pe->k_cache, pe->v_cache,
                           n_heads, n_kv_heads, head_dim, pos);
 
-        /* Output projection */
+        /* Output projection + LoRA */
         grpo_matmul_any(pe->hidden, pe->attn_out, layer->o_weight, hidden_dim, hidden_dim, layer->o_dtype);
+        inject_lora(pe->hidden, pe->attn_out, l, 3, hidden_dim, hidden_dim);
 
         /* Residual connection */
         for (int i = 0; i < hidden_dim; i++)
@@ -427,16 +510,21 @@ static void policy_forward_token(PolicyEngine *pe, int token, int pos) {
         memcpy(residual, pe->hidden, (size_t)hidden_dim * sizeof(float));
         grpo_rmsnorm(pe->hidden, residual, layer->ffn_norm, hidden_dim, pe->gf.rms_eps);
 
+        /* Gate + Up projections + LoRA */
         grpo_matmul_any(pe->ffn_gate, pe->hidden, layer->gate_weight, intermediate_dim, hidden_dim, layer->gate_dtype);
+        inject_lora(pe->ffn_gate, pe->hidden, l, 4, intermediate_dim, hidden_dim);
+
         grpo_matmul_any(pe->ffn_up, pe->hidden, layer->up_weight, intermediate_dim, hidden_dim, layer->up_dtype);
+        inject_lora(pe->ffn_up, pe->hidden, l, 5, intermediate_dim, hidden_dim);
 
         /* SiLU activation on gate and elementwise multiply with up */
         grpo_silu(pe->ffn_gate, intermediate_dim);
         for (int i = 0; i < intermediate_dim; i++)
             pe->ffn_gate[i] *= pe->ffn_up[i];
 
-        /* Down projection */
+        /* Down projection + LoRA */
         grpo_matmul_any(pe->ffn_out, pe->ffn_gate, layer->down_weight, hidden_dim, intermediate_dim, layer->down_dtype);
+        inject_lora(pe->ffn_out, pe->ffn_gate, l, 6, hidden_dim, intermediate_dim);
 
         /* Residual */
         for (int i = 0; i < hidden_dim; i++)
