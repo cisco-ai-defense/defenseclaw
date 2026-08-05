@@ -3015,6 +3015,14 @@ func exactPOSIXShellStdinArguments(program string, argv []string) bool {
 			return forcedStdin
 		}
 		if !strings.HasPrefix(argument, "-") {
+			if program == "bash" && argument == "+o" {
+				if index+1 >= len(argv) ||
+					!exactBashNamedStdinOption(false, argv[index+1]) {
+					return false
+				}
+				index++
+				continue
+			}
 			// With -s, the first non-option starts positional parameters rather
 			// than naming a script file.
 			return forcedStdin
@@ -3036,7 +3044,15 @@ func exactPOSIXShellStdinArguments(program string, argv []string) bool {
 		if program == "bash" {
 			allowedOptions = "abefhiklmprstuvxBCEHPT"
 		}
+		namedOption := false
 		for _, option := range argument[1:] {
+			if program == "bash" && option == 'o' {
+				if namedOption {
+					return false
+				}
+				namedOption = true
+				continue
+			}
 			if !strings.ContainsRune(allowedOptions, option) {
 				return false
 			}
@@ -3044,8 +3060,33 @@ func exactPOSIXShellStdinArguments(program string, argv []string) bool {
 				forcedStdin = true
 			}
 		}
+		if namedOption {
+			if index+1 >= len(argv) ||
+				!exactBashNamedStdinOption(true, argv[index+1]) {
+				return false
+			}
+			index++
+		}
 	}
 	return true
+}
+
+func exactBashNamedStdinOption(enable bool, option string) bool {
+	// Bash accepts these stable `set -o` names during invocation. Enabling
+	// noexec reads stdin without executing it, so it cannot prove an
+	// interpreter sink; disabling noexec restores normal stdin execution.
+	switch option {
+	case "noexec":
+		return !enable
+	case "allexport", "braceexpand", "emacs", "errexit", "errtrace",
+		"functrace", "hashall", "histexpand", "history", "ignoreeof",
+		"interactive-comments", "keyword", "monitor", "noclobber",
+		"noglob", "nolog", "notify", "nounset", "onecmd", "physical",
+		"pipefail", "posix", "privileged", "verbose", "vi", "xtrace":
+		return true
+	default:
+		return false
+	}
 }
 
 func exactPOSIXShellPreviewInvocation(command *CommandFact) bool {
@@ -3167,6 +3208,13 @@ func exactPOSIXCurlResponseStdout(argv []string) bool {
 		if !options {
 			continue
 		}
+		if curlBundledSeparatedOutputOption(argument) {
+			if index+1 >= len(argv) || argv[index+1] != "-" {
+				return false
+			}
+			index++
+			continue
+		}
 		if posixCurlShortBundleObscuresResponse(argument) {
 			return false
 		}
@@ -3239,16 +3287,11 @@ func posixCurlShortBundleObscuresResponse(argument string) bool {
 }
 
 func curlBundledStdoutOutput(argument string) bool {
-	if len(argument) < 4 || argument[0] != '-' || argument[1] == '-' ||
-		!strings.HasSuffix(argument, "o-") {
-		return false
-	}
-	for _, option := range argument[1 : len(argument)-2] {
-		if !strings.ContainsRune("fsSLkNg46v", option) {
-			return false
-		}
-	}
-	return true
+	return exactBundledOutputOption(argument, "o-", "fsSLkNg46v")
+}
+
+func curlBundledSeparatedOutputOption(argument string) bool {
+	return exactBundledOutputOption(argument, "o", "fsSLkNg46v")
 }
 
 func exactPOSIXWgetResponseStdout(argv []string) bool {
@@ -3261,6 +3304,14 @@ func exactPOSIXWgetResponseStdout(argv []string) bool {
 			continue
 		}
 		if !options {
+			continue
+		}
+		if wgetBundledSeparatedOutputOption(argument) {
+			if index+1 >= len(argv) || argv[index+1] != "-" {
+				return false
+			}
+			stdoutOutput = true
+			index++
 			continue
 		}
 		if posixWgetShortBundleObscuresResponse(argument) {
@@ -3319,12 +3370,21 @@ func posixWgetShortBundleObscuresResponse(argument string) bool {
 }
 
 func wgetBundledStdoutOutput(argument string) bool {
-	if len(argument) < 4 || argument[0] != '-' || argument[1] == '-' ||
-		!strings.HasSuffix(argument, "O-") {
+	return exactBundledOutputOption(argument, "O-", "qS")
+}
+
+func wgetBundledSeparatedOutputOption(argument string) bool {
+	return exactBundledOutputOption(argument, "O", "qS")
+}
+
+func exactBundledOutputOption(argument, suffix, allowedPrefix string) bool {
+	if len(argument) <= len(suffix)+1 || argument[0] != '-' ||
+		argument[1] == '-' || !strings.HasSuffix(argument, suffix) {
 		return false
 	}
-	for _, option := range argument[1 : len(argument)-2] {
-		if option != 'q' && option != 'S' {
+	prefixEnd := len(argument) - len(suffix)
+	for _, option := range argument[1:prefixEnd] {
+		if !strings.ContainsRune(allowedPrefix, option) {
 			return false
 		}
 	}
@@ -3919,6 +3979,20 @@ func classifyWebTransfer(out *parseOutput, command *CommandFact, program string)
 			continue
 		}
 		switch {
+		case options && isCurlProgram(program) &&
+			curlBundledSeparatedOutputOption(arg):
+			matched = true
+			if i+1 < len(command.Argv) {
+				i++
+				value = command.Argv[i]
+			}
+		case options && isWgetProgram(program) &&
+			wgetBundledSeparatedOutputOption(arg):
+			matched = true
+			if i+1 < len(command.Argv) {
+				i++
+				value = command.Argv[i]
+			}
 		case options && isCurlProgram(program):
 			value, matched = webOptionValue(command.Argv, &i, "-o", "--output")
 		case options && isWgetProgram(program):
@@ -4292,6 +4366,9 @@ func webControlMode(argv []string, program string) (preview bool, spider bool) {
 
 func webControlOptionConsumesValue(program, option string) bool {
 	if isCurlProgram(program) {
+		if curlBundledSeparatedOutputOption(option) {
+			return true
+		}
 		key, _, _ := strings.Cut(option, "=")
 		switch key {
 		case "--user-agent", "--cookie", "--cookie-jar", "--data",
@@ -4317,6 +4394,9 @@ func webControlOptionConsumesValue(program, option string) bool {
 		}
 	}
 	if isWgetProgram(program) {
+		if wgetBundledSeparatedOutputOption(option) {
+			return true
+		}
 		key, _, _ := strings.Cut(option, "=")
 		switch key {
 		case "--append-output", "--bind-address", "--body-data",

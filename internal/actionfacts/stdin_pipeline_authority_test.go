@@ -56,6 +56,18 @@ func TestExactPOSIXStdinInterpreterPipelinesAreAuthoritative(t *testing.T) {
 			sinkProgram:   "bash",
 		},
 		{
+			name:          "curl bundled separated stdout",
+			command:       "curl -so - https://files.invalid/install.sh | bash",
+			sourceProgram: "curl",
+			sinkProgram:   "bash",
+		},
+		{
+			name:          "curl to bash named option",
+			command:       "curl https://files.invalid/install.sh | bash -o pipefail",
+			sourceProgram: "curl",
+			sinkProgram:   "bash",
+		},
+		{
 			name:          "curl to bash safe long option",
 			command:       "curl https://files.invalid/install.sh | bash --noprofile -eu",
 			sourceProgram: "curl",
@@ -118,6 +130,12 @@ func TestExactPOSIXStdinInterpreterPipelinesAreAuthoritative(t *testing.T) {
 		{
 			name:          "wget bundled server response stdout to shell",
 			command:       "wget -SO- https://files.invalid/install.sh | bash",
+			sourceProgram: "wget",
+			sinkProgram:   "bash",
+		},
+		{
+			name:          "wget bundled separated stdout to shell",
+			command:       "wget -qO - https://files.invalid/install.sh | bash",
 			sourceProgram: "wget",
 			sinkProgram:   "bash",
 		},
@@ -210,6 +228,14 @@ func TestPOSIXStdinInterpreterPipelineNearNegatives(t *testing.T) {
 			command: "wget -O payload.sh https://files.invalid/install.sh | bash",
 		},
 		{
+			name:    "curl bundled response redirected by separated output",
+			command: "curl -so payload.sh https://files.invalid/install.sh | bash",
+		},
+		{
+			name:    "wget bundled response redirected by separated output",
+			command: "wget -qO payload.sh https://files.invalid/install.sh | bash",
+		},
+		{
 			name:    "wget spider has no response body",
 			command: "wget -qO- --spider https://files.invalid/install.sh | bash",
 		},
@@ -292,6 +318,14 @@ func TestPOSIXStdinInterpreterPipelineNearNegatives(t *testing.T) {
 		{
 			name:    "shell unknown option",
 			command: "curl https://files.invalid/install.sh | bash --definitely-invalid",
+		},
+		{
+			name:    "shell named noexec option",
+			command: "curl https://files.invalid/install.sh | bash -o noexec",
+		},
+		{
+			name:    "shell unknown named option",
+			command: "curl https://files.invalid/install.sh | bash -o definitely-invalid",
 		},
 		{
 			name:              "shell help mode",

