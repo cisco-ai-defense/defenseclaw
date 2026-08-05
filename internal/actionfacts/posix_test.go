@@ -463,7 +463,7 @@ func TestParsePOSIXStaticShellWrapper(t *testing.T) {
 }
 
 func TestParsePOSIXCombinedShellFlagsAndParentFlow(t *testing.T) {
-	out := parsePOSIX(`bash -lc 'cat /repo/.env'`, 1, 0)
+	out := parsePOSIX(`bash -ec 'cat /repo/.env'`, 1, 0)
 	if out.status != StatusComplete || len(out.commands) != 2 {
 		t.Fatalf("output = %#v", out)
 	}
@@ -585,8 +585,11 @@ func TestParsePOSIXContextChangingWrappersFailClosed(t *testing.T) {
 		{name: "exec clear login bundle", source: `exec -cl rm -rf /tmp/victim`},
 		{name: "env assignment", source: `env MODE=check rm -rf /tmp/victim`},
 		{name: "env nonidentifier assignment", source: `env A-B=check rm -rf /tmp/victim`},
+		{name: "env assignment after separator", source: `env -- MODE=check rm -rf /tmp/victim`},
 		{name: "sudo assignment", source: `sudo MODE=check rm -rf /tmp/victim`},
 		{name: "sudo nonidentifier assignment", source: `sudo A-B=check rm -rf /tmp/victim`},
+		{name: "sudo assignment after separator", source: `sudo -- MODE=check rm -rf /tmp/victim`},
+		{name: "sudo shell after separator", source: `sudo -- bash -c 'rm -rf /tmp/victim'`},
 	}
 	for _, test := range tests {
 		test := test
@@ -632,7 +635,8 @@ func TestParsePOSIXNoExecShellCommandIsPreviewOnly(t *testing.T) {
 		`sh -n -c 'rm -rf /tmp/victim'`,
 		`bash -nc 'rm -rf /tmp/victim'`,
 		`bash -cn 'rm -rf /tmp/victim'`,
-		`bash -lnc 'rm -rf /tmp/victim'`,
+		`bash +n -n -c 'rm -rf /tmp/victim'`,
+		`bash +o noexec -o noexec -c 'rm -rf /tmp/victim'`,
 	}
 	for _, source := range tests {
 		source := source
@@ -694,28 +698,39 @@ func TestParsePOSIXNoExecDoesNotSuppressOuterRedirect(t *testing.T) {
 }
 
 func TestParsePOSIXNoExecPositionAndOpaqueInputsFailClosed(t *testing.T) {
-	executing := Analyze(Input{
-		Tool:        "exec",
-		Command:     `bash -c 'rm -rf /tmp/victim' -n`,
-		DialectHint: DialectPOSIX,
-	})
-	if !executing.Authoritative() ||
-		!executing.EnforcementEligible() ||
-		!hasExecutable(executing.Commands, "rm") ||
-		!factsHavePath(executing, PathAccessDelete, "/tmp/victim") ||
-		!factsHavePath(
-			executing.EnforcementProjection(),
-			PathAccessDelete,
-			"/tmp/victim",
-		) {
-		t.Fatalf("post-command -n suppressed execution: %#v", executing)
+	for _, source := range []string{
+		`bash -c 'rm -rf /tmp/victim' -n`,
+		`sh -n +n -c 'rm -rf /tmp/victim'`,
+		`bash -n +n -c 'rm -rf /tmp/victim'`,
+		`bash -o noexec +o noexec -c 'rm -rf /tmp/victim'`,
+	} {
+		source := source
+		t.Run(source, func(t *testing.T) {
+			t.Parallel()
+
+			executing := Analyze(Input{
+				Tool:        "exec",
+				Command:     source,
+				DialectHint: DialectPOSIX,
+			})
+			if !executing.Authoritative() ||
+				!executing.EnforcementEligible() ||
+				!hasExecutable(executing.Commands, "rm") ||
+				!factsHavePath(executing, PathAccessDelete, "/tmp/victim") ||
+				!factsHavePath(
+					executing.EnforcementProjection(),
+					PathAccessDelete,
+					"/tmp/victim",
+				) {
+				t.Fatalf("executing shell facts = %#v", executing)
+			}
+		})
 	}
 
 	for _, source := range []string{
 		`sh -n`,
 		`sh -n ./script.sh`,
 		`sh -n -- -c 'rm -rf /tmp/victim'`,
-		`sh -n +n -c 'rm -rf /tmp/victim'`,
 	} {
 		source := source
 		t.Run(source, func(t *testing.T) {

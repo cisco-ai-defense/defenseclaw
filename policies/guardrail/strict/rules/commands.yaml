@@ -72,7 +72,7 @@ rules:
       f.commands.exists(c, c.argv_complete && c.program in ['base64', 'base64.exe'] &&
       defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DECODE in c.operations)
     # Closes (parity with CMD-PIPE-CURL above).
-    pattern: '(?i)\bbase64\b[^|;\n]*\s(?:-[dD]|--decode)\b[^|;\n]*\|\s*(?:[/\w.-]+/)?(?:bash|zsh|sh|dash|ksh|python(?:[0-9.]*)?|perl|ruby)\b'
+    pattern: '(?i:\bbase64\b)[^|;\n]*\s(?:-d+i?|--decode)\b[^|;\n]*\|\s*(?i:(?:[/\w.-]+/)?(?:bash|zsh|sh|dash|ksh|python(?:[0-9.]*)?|perl|ruby))\b'
     title: "base64 decode piped to shell"
     severity: CRITICAL
     confidence: 0.95

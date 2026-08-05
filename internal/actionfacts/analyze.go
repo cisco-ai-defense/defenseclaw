@@ -255,6 +255,29 @@ func analyzeStructuredArgv(
 		}
 		nestedDialect = DialectPOSIX
 		child = parsePOSIX(nested, out.nextID, wrapperDepth+1)
+	case "bash", "sh", "zsh", "dash", "ksh", "mksh":
+		invocation := parsePOSIXShellInvocation(program, argv)
+		if !invocation.valid ||
+			invocation.mode != posixShellModeCommand ||
+			invocation.commandIndex >= len(argv) ||
+			strings.TrimSpace(argv[invocation.commandIndex]) == "" {
+			out.markUnsupported(IssueUnsupportedConstruct)
+			return out
+		}
+		if invocation.noExec {
+			out.commands[0].Effect = EffectPreview
+			return out
+		}
+		if wrapperDepth >= maxWrapperDepth {
+			out.markLimit(IssueWrapperLimit)
+			return out
+		}
+		nestedDialect = DialectPOSIX
+		child = parsePOSIX(
+			argv[invocation.commandIndex],
+			out.nextID,
+			wrapperDepth+1,
+		)
 	default:
 		nested, dialect, ok, unsafe := nestedCommand(argv, program)
 		if unsafe {
@@ -336,7 +359,7 @@ func commandFromArgvAs(id int64, argv []string, dialect Dialect) CommandFact {
 func nestedCommand(argv []string, program string) (string, Dialect, bool, bool) {
 	switch program {
 	case "bash", "sh", "zsh", "dash", "ksh", "mksh":
-		commandIndex, ok, unsafe := posixShellCommandIndex(argv)
+		commandIndex, ok, unsafe := posixShellCommandIndex(program, argv)
 		if unsafe || !ok || commandIndex >= len(argv) ||
 			strings.TrimSpace(argv[commandIndex]) == "" {
 			return "", DialectPOSIX, false, true
@@ -411,47 +434,431 @@ func nestedCommand(argv []string, program string) (string, Dialect, bool, bool) 
 	return "", DialectNone, false, false
 }
 
-func posixShellCommandIndex(argv []string) (int, bool, bool) {
-	if len(argv) < 2 {
-		return 0, false, true
+type posixShellMode uint8
+
+const (
+	posixShellModeUnknown posixShellMode = iota
+	posixShellModeStdin
+	posixShellModeCommand
+	posixShellModeScript
+)
+
+type posixShellInvocation struct {
+	mode         posixShellMode
+	commandIndex int
+	scriptIndex  int
+	noExec       bool
+	valid        bool
+}
+
+func parsePOSIXShellInvocation(
+	program string,
+	argv []string,
+) posixShellInvocation {
+	program = strings.ToLower(program)
+	if len(argv) == 0 {
+		return posixShellInvocation{}
 	}
-	for i := 1; i < len(argv); i++ {
-		option := argv[i]
-		switch option {
-		case "-c", "--command":
-			if i+1 >= len(argv) {
-				return 0, false, true
+	switch program {
+	case "bash":
+		return parseBashInvocation(argv)
+	case "zsh":
+		// Zsh unconditionally executes the system zshenv before any command,
+		// script, or stdin body. No invocation flag disables that file, so argv
+		// alone cannot prove the complete action.
+		return posixShellInvocation{}
+	case "sh", "dash", "ksh", "mksh":
+		return parseConservativePOSIXShellInvocation(program, argv)
+	default:
+		return posixShellInvocation{}
+	}
+}
+
+func parseBashInvocation(argv []string) posixShellInvocation {
+	invocation := posixShellInvocation{
+		mode:         posixShellModeStdin,
+		commandIndex: -1,
+		scriptIndex:  -1,
+		valid:        true,
+	}
+	forcedStdin := false
+	interactive := false
+	login := false
+	noRC := false
+	posixMode := false
+	startupFile := false
+	seenShortOption := false
+
+	for index := 1; index < len(argv); {
+		argument := argv[index]
+		switch argument {
+		case "-", "--":
+			if index+1 == len(argv) || forcedStdin {
+				invocation.mode = posixShellModeStdin
+			} else {
+				if argv[index+1] == "" {
+					return posixShellInvocation{}
+				}
+				invocation.mode = posixShellModeScript
+				invocation.scriptIndex = index + 1
 			}
-			return i + 1, true, false
-		case "--":
-			return 0, false, true
-		case "--login", "--noprofile", "--norc", "--posix", "--restricted":
+			return finishBashInvocation(
+				invocation,
+				interactive,
+				login,
+				noRC,
+				posixMode,
+				startupFile,
+			)
+		}
+
+		if strings.HasPrefix(argument, "--") {
+			if seenShortOption {
+				return posixShellInvocation{}
+			}
+			switch argument {
+			case "--login":
+				login = true
+				index++
+			case "--noediting", "--noprofile", "--norc", "--posix",
+				"--restricted", "--verbose":
+				switch argument {
+				case "--norc":
+					noRC = true
+				case "--posix":
+					posixMode = true
+				}
+				index++
+			case "--debugger":
+				// The debugger profile is executable startup input with no
+				// invocation flag that proves it disabled.
+				return posixShellInvocation{}
+			case "--rcfile", "--init-file":
+				if index+1 >= len(argv) || argv[index+1] == "" {
+					return posixShellInvocation{}
+				}
+				// Consume the value so it can never be mistaken for a script or
+				// command. Keep the action non-authoritative because a later
+				// interactive flag can make this file executable startup input.
+				startupFile = true
+				index += 2
+			default:
+				return posixShellInvocation{}
+			}
 			continue
 		}
-		if len(option) > 1 && option[0] == '-' && option[1] != '-' {
-			valid := true
+
+		if len(argument) > 1 &&
+			(argument[0] == '-' || argument[0] == '+') {
+			enable := argument[0] == '-'
+			seenShortOption = true
 			hasCommand := false
-			for _, flag := range option[1:] {
-				if !strings.ContainsRune("abcefhiklmnprstuvxBCEHPT", flag) {
-					valid = false
-					break
+			valueOptions := make([]byte, 0, 2)
+			for optionIndex := 1; optionIndex < len(argument); optionIndex++ {
+				option := argument[optionIndex]
+				switch option {
+				case 'c':
+					// Bash treats +c as command mode too, but it is undocumented
+					// invocation syntax. Keep that form fail-closed.
+					if !enable {
+						return posixShellInvocation{}
+					}
+					hasCommand = true
+				case 's':
+					forcedStdin = enable
+				case 'n':
+					invocation.noExec = enable
+				case 'i':
+					interactive = enable
+				case 'l':
+					login = enable
+				case 'o', 'O':
+					valueOptions = append(valueOptions, option)
+				default:
+					if !strings.ContainsRune(
+						"abefhkmprtuvxBCEHPT",
+						rune(option),
+					) {
+						return posixShellInvocation{}
+					}
 				}
-				hasCommand = hasCommand || flag == 'c'
 			}
-			if !valid {
-				return 0, false, true
+
+			next := index + 1
+			for _, option := range valueOptions {
+				if next >= len(argv) || argv[next] == "" {
+					return posixShellInvocation{}
+				}
+				value := argv[next]
+				switch option {
+				case 'o':
+					if !applyBashNamedInvocationOption(
+						&invocation,
+						&posixMode,
+						enable,
+						value,
+					) {
+						return posixShellInvocation{}
+					}
+				case 'O':
+					if !validBashShoptInvocationOption(value) {
+						return posixShellInvocation{}
+					}
+				}
+				next++
 			}
 			if hasCommand {
-				if i+1 >= len(argv) {
-					return 0, false, true
+				if next >= len(argv) || strings.TrimSpace(argv[next]) == "" {
+					return posixShellInvocation{}
 				}
-				return i + 1, true, false
+				invocation.mode = posixShellModeCommand
+				invocation.commandIndex = next
+				return finishBashInvocation(
+					invocation,
+					interactive,
+					login,
+					noRC,
+					posixMode,
+					startupFile,
+				)
 			}
+			index = next
 			continue
 		}
+
+		if argument == "" {
+			return posixShellInvocation{}
+		}
+		if forcedStdin {
+			invocation.mode = posixShellModeStdin
+		} else {
+			invocation.mode = posixShellModeScript
+			invocation.scriptIndex = index
+		}
+		return finishBashInvocation(
+			invocation,
+			interactive,
+			login,
+			noRC,
+			posixMode,
+			startupFile,
+		)
+	}
+
+	return finishBashInvocation(
+		invocation,
+		interactive,
+		login,
+		noRC,
+		posixMode,
+		startupFile,
+	)
+}
+
+func finishBashInvocation(
+	invocation posixShellInvocation,
+	interactive bool,
+	login bool,
+	noRC bool,
+	posixMode bool,
+	startupFile bool,
+) posixShellInvocation {
+	// Login shells also execute a logout file, for which Bash has no matching
+	// command-line disable. Interactive shells execute startup input unless an
+	// order-valid --norc proves it disabled; POSIX mode substitutes ENV instead.
+	if login || startupFile || interactive && (!noRC || posixMode) {
+		return posixShellInvocation{}
+	}
+	return invocation
+}
+
+func applyBashNamedInvocationOption(
+	invocation *posixShellInvocation,
+	posixMode *bool,
+	enable bool,
+	option string,
+) bool {
+	switch option {
+	case "noexec":
+		invocation.noExec = enable
+		return true
+	case "posix":
+		*posixMode = enable
+		return true
+	case "allexport", "braceexpand", "emacs", "errexit", "errtrace",
+		"functrace", "hashall", "histexpand", "history", "ignoreeof",
+		"interactive-comments", "keyword", "monitor", "noclobber",
+		"noglob", "nolog", "notify", "nounset", "onecmd", "physical",
+		"pipefail", "privileged", "verbose", "vi", "xtrace":
+		return true
+	default:
+		return false
+	}
+}
+
+func validBashShoptInvocationOption(option string) bool {
+	// Keep this to options present in all supported Bash generations. Unknown
+	// or version-specific shopt names fail closed instead of minting authority.
+	switch option {
+	case "cdable_vars", "cdspell", "checkhash", "checkwinsize", "cmdhist",
+		"dotglob", "execfail", "expand_aliases", "extdebug", "extglob",
+		"extquote", "failglob", "force_fignore", "gnu_errfmt", "histappend",
+		"histreedit", "histverify", "hostcomplete", "huponexit",
+		"interactive_comments", "lithist", "mailwarn",
+		"no_empty_cmd_completion", "nocaseglob", "nocasematch", "nullglob",
+		"progcomp", "promptvars", "shift_verbose", "sourcepath", "xpg_echo":
+		return true
+	default:
+		return false
+	}
+}
+
+func parseConservativePOSIXShellInvocation(
+	program string,
+	argv []string,
+) posixShellInvocation {
+	invocation := posixShellInvocation{
+		mode:         posixShellModeStdin,
+		commandIndex: -1,
+		scriptIndex:  -1,
+		valid:        true,
+	}
+	allowedOptions := conservativePOSIXShellShortOptions(program)
+	if allowedOptions == "" {
+		return posixShellInvocation{}
+	}
+	forcedStdin := false
+	interactive := false
+	login := false
+	explicitStartup := false
+
+	for index := 1; index < len(argv); index++ {
+		argument := argv[index]
+		switch argument {
+		case "-", "--":
+			if index+1 == len(argv) || forcedStdin {
+				invocation.mode = posixShellModeStdin
+			} else {
+				if argv[index+1] == "" {
+					return posixShellInvocation{}
+				}
+				invocation.mode = posixShellModeScript
+				invocation.scriptIndex = index + 1
+			}
+			return finishConservativePOSIXShellInvocation(
+				invocation,
+				interactive,
+				login,
+				explicitStartup,
+			)
+		}
+		if strings.HasPrefix(argument, "--") || len(argument) < 2 ||
+			(argument[0] != '-' && argument[0] != '+') {
+			if argument == "" {
+				return posixShellInvocation{}
+			}
+			if argument[0] == '-' || argument[0] == '+' {
+				return posixShellInvocation{}
+			}
+			if forcedStdin {
+				invocation.mode = posixShellModeStdin
+			} else {
+				invocation.mode = posixShellModeScript
+				invocation.scriptIndex = index
+			}
+			return finishConservativePOSIXShellInvocation(
+				invocation,
+				interactive,
+				login,
+				explicitStartup,
+			)
+		}
+
+		enable := argument[0] == '-'
+		hasCommand := false
+		for optionIndex := 1; optionIndex < len(argument); optionIndex++ {
+			option := argument[optionIndex]
+			if !strings.ContainsRune(allowedOptions, rune(option)) {
+				return posixShellInvocation{}
+			}
+			switch option {
+			case 'c':
+				if !enable {
+					return posixShellInvocation{}
+				}
+				hasCommand = true
+			case 's':
+				forcedStdin = enable
+			case 'n':
+				invocation.noExec = enable
+			case 'i':
+				interactive = enable
+			case 'l':
+				login = enable
+			case 'E':
+				if program == "ksh" {
+					explicitStartup = enable
+				}
+			}
+		}
+		if hasCommand {
+			if index+1 >= len(argv) || strings.TrimSpace(argv[index+1]) == "" {
+				return posixShellInvocation{}
+			}
+			invocation.mode = posixShellModeCommand
+			invocation.commandIndex = index + 1
+			return finishConservativePOSIXShellInvocation(
+				invocation,
+				interactive,
+				login,
+				explicitStartup,
+			)
+		}
+	}
+
+	return finishConservativePOSIXShellInvocation(
+		invocation,
+		interactive,
+		login,
+		explicitStartup,
+	)
+}
+
+func conservativePOSIXShellShortOptions(program string) string {
+	switch program {
+	case "sh", "dash", "mksh":
+		return "abceilmnsuvxC"
+	case "ksh":
+		return "abcefhiklmnprstuvxBCEGH"
+	default:
+		return ""
+	}
+}
+
+func finishConservativePOSIXShellInvocation(
+	invocation posixShellInvocation,
+	interactive bool,
+	login bool,
+	explicitStartup bool,
+) posixShellInvocation {
+	if interactive || login || explicitStartup {
+		return posixShellInvocation{}
+	}
+	return invocation
+}
+
+func posixShellCommandIndex(
+	program string,
+	argv []string,
+) (int, bool, bool) {
+	invocation := parsePOSIXShellInvocation(program, argv)
+	if !invocation.valid {
 		return 0, false, true
 	}
-	return 0, false, true
+	if invocation.mode != posixShellModeCommand {
+		return 0, false, false
+	}
+	return invocation.commandIndex, true, false
 }
 
 func parseCommandAs(source string, dialect Dialect, startID int64, wrapperDepth int) parseOutput {
@@ -1278,14 +1685,20 @@ func enforceAnalyzeAuthority(out *parseOutput) {
 			if exactPOSIXPipelineStdinInterpreter(out, command) ||
 				exactPOSIXShellPreviewInvocation(command) {
 				continue
-			} else if _, commandMode, unsafe := posixShellCommandIndex(command.Argv); commandMode && !unsafe {
+			}
+			invocation := parsePOSIXShellInvocation(
+				command.Program,
+				command.Argv,
+			)
+			if invocation.valid && invocation.mode == posixShellModeCommand {
 				continue
-			} else if _, script := exactPOSIXShellScriptOperand(command.Argv); script {
+			}
+			if _, script := exactPOSIXShellScriptOperand(
+				command.Program,
+				command.Argv,
+			); script {
 				out.markPartial(IssueOpaqueArtifact)
-			} else if _, script := shellScriptOperand(command.Argv); script {
-				out.markPartial(IssueOpaqueArtifact)
-				out.markPartial(IssueUnsupportedConstruct)
-			} else if unsafe || !commandMode {
+			} else {
 				out.markPartial(IssueUnsupportedConstruct)
 			}
 		case "fish":

@@ -200,6 +200,11 @@ func projectPOSIXStatement(
 		ArgvComplete:    true,
 	}
 	if len(call.Assigns) > 0 {
+		// Prefix assignments can change executable lookup and runtime startup
+		// behavior (for example PATH, ENV, or BASH_ENV). Keep the outer command
+		// visible, but do not treat its argv as a self-contained envelope that
+		// can safely publish facts from a nested shell or wrapper.
+		command.ArgvComplete = false
 		out.markPartial(IssueUnsupportedConstruct)
 	}
 	for index, word := range call.Args {
@@ -625,18 +630,15 @@ func expandStaticPOSIXWrappers(out *parseOutput, wrapperDepth int) {
 				exactPOSIXShellPreviewInvocation(&command) {
 				continue
 			}
-			commandIndex, ok, unsafe := posixShellCommandIndex(command.Argv)
-			if unsafe {
-				if _, script := exactPOSIXShellScriptOperand(command.Argv); script {
-					continue
-				}
+			invocation := parsePOSIXShellInvocation(program, command.Argv)
+			if !invocation.valid {
 				out.markPartial(IssueUnsupportedConstruct)
 				continue
 			}
-			if !ok {
+			if invocation.mode != posixShellModeCommand {
 				continue
 			}
-			if posixShellNoExecBeforeCommand(command.Argv, commandIndex) {
+			if invocation.noExec {
 				setPOSIXCommandEffect(out, command.ID, EffectPreview)
 				continue
 			}
@@ -644,7 +646,11 @@ func expandStaticPOSIXWrappers(out *parseOutput, wrapperDepth int) {
 				out.markLimit(IssueWrapperLimit)
 				return
 			}
-			child = parsePOSIX(command.Argv[commandIndex], out.nextID, wrapperDepth+1)
+			child = parsePOSIX(
+				command.Argv[invocation.commandIndex],
+				out.nextID,
+				wrapperDepth+1,
+			)
 		case "eval":
 			if wrapperDepth >= maxWrapperDepth {
 				out.markLimit(IssueWrapperLimit)
@@ -708,22 +714,6 @@ func expandStaticPOSIXWrappers(out *parseOutput, wrapperDepth int) {
 		}
 		out.mergeNested(child)
 	}
-}
-
-func posixShellNoExecBeforeCommand(argv []string, commandIndex int) bool {
-	if commandIndex <= 1 || commandIndex > len(argv) {
-		return false
-	}
-	for _, arg := range argv[1:commandIndex] {
-		if arg == "-n" {
-			return true
-		}
-		if len(arg) > 2 && arg[0] == '-' && arg[1] != '-' &&
-			strings.ContainsRune(arg[1:], 'n') {
-			return true
-		}
-	}
-	return false
 }
 
 func setPOSIXCommandEffect(
@@ -792,6 +782,9 @@ func staticPOSIXWrapperArgv(argv []string, program string) ([]string, bool, bool
 			arg := argv[i]
 			if arg == "--" {
 				if i+1 < len(argv) {
+					if isStaticEnvironmentAssignment(argv[i+1]) {
+						return nil, false, true
+					}
 					return cloneSlice(argv[i+1:]), true, false
 				}
 				return nil, false, false
@@ -830,6 +823,15 @@ func staticPOSIXWrapperArgv(argv []string, program string) ([]string, bool, bool
 			arg := argv[i]
 			if arg == "--" {
 				if i+1 < len(argv) {
+					if isStaticEnvironmentAssignment(argv[i+1]) {
+						return nil, false, true
+					}
+					if posixShellProgram(commandProgram(argv[i+1])) {
+						if terminalPOSIXShellArgv(argv[i+1:]) {
+							return nil, false, false
+						}
+						return nil, false, true
+					}
 					return cloneSlice(argv[i+1:]), true, false
 				}
 				return nil, false, false

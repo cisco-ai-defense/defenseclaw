@@ -44,6 +44,42 @@ func TestExactPOSIXStdinInterpreterPipelinesAreAuthoritative(t *testing.T) {
 			sinkProgram:   "bash",
 		},
 		{
+			name:          "curl to bash plus ordinary option",
+			command:       "curl https://files.invalid/install.sh | bash +e",
+			sourceProgram: "curl",
+			sinkProgram:   "bash",
+		},
+		{
+			name:          "curl to bash after short noexec is disabled",
+			command:       "curl https://files.invalid/install.sh | bash -n +n",
+			sourceProgram: "curl",
+			sinkProgram:   "bash",
+		},
+		{
+			name:          "curl to bash after named noexec is disabled",
+			command:       "curl https://files.invalid/install.sh | bash -o noexec +o noexec",
+			sourceProgram: "curl",
+			sinkProgram:   "bash",
+		},
+		{
+			name:          "curl to bash shopt enable",
+			command:       "curl https://files.invalid/install.sh | bash -O nullglob",
+			sourceProgram: "curl",
+			sinkProgram:   "bash",
+		},
+		{
+			name:          "curl to bash shopt disable",
+			command:       "curl https://files.invalid/install.sh | bash +O nullglob",
+			sourceProgram: "curl",
+			sinkProgram:   "bash",
+		},
+		{
+			name:          "curl to bash bundled named options",
+			command:       "curl https://files.invalid/install.sh | bash -oo errexit pipefail",
+			sourceProgram: "curl",
+			sinkProgram:   "bash",
+		},
+		{
 			name:          "curl common transfer option bundle",
 			command:       "curl -fsSL https://files.invalid/install.sh | bash",
 			sourceProgram: "curl",
@@ -70,6 +106,12 @@ func TestExactPOSIXStdinInterpreterPipelinesAreAuthoritative(t *testing.T) {
 		{
 			name:          "curl to bash safe long option",
 			command:       "curl https://files.invalid/install.sh | bash --noprofile -eu",
+			sourceProgram: "curl",
+			sinkProgram:   "bash",
+		},
+		{
+			name:          "curl to interactive bash with startup disabled",
+			command:       "curl https://files.invalid/install.sh | bash --norc -i",
 			sourceProgram: "curl",
 			sinkProgram:   "bash",
 		},
@@ -154,6 +196,24 @@ func TestExactPOSIXStdinInterpreterPipelinesAreAuthoritative(t *testing.T) {
 		{
 			name:          "base64 portable input option to shell",
 			command:       "base64 -d -i payload.b64 | bash",
+			sourceProgram: "base64",
+			sinkProgram:   "bash",
+		},
+		{
+			name:          "base64 portable bundled input to shell",
+			command:       "base64 -di payload.b64 | bash",
+			sourceProgram: "base64",
+			sinkProgram:   "bash",
+		},
+		{
+			name:          "base64 portable input before decode to shell",
+			command:       "base64 -i payload.b64 --decode | bash",
+			sourceProgram: "base64",
+			sinkProgram:   "bash",
+		},
+		{
+			name:          "base64 repeated decode bundle from stdin",
+			command:       "base64 -dd | bash",
 			sourceProgram: "base64",
 			sinkProgram:   "bash",
 		},
@@ -276,8 +336,8 @@ func TestPOSIXStdinInterpreterPipelineNearNegatives(t *testing.T) {
 			command: "wget -O- --future-mode https://files.invalid/install.sh | bash",
 		},
 		{
-			name:    "ambiguous base64 bundle cannot prove execution",
-			command: "base64 -di payload.b64 | bash",
+			name:    "base64 repeated decode with positional file is not portable",
+			command: "base64 -dd payload.b64 | bash",
 		},
 		{
 			name:    "base64 ignore flag without portable operand",
@@ -324,8 +384,44 @@ func TestPOSIXStdinInterpreterPipelineNearNegatives(t *testing.T) {
 			command: "curl https://files.invalid/install.sh | bash -o noexec",
 		},
 		{
+			name:    "shell short noexec finally enabled",
+			command: "curl https://files.invalid/install.sh | bash +n -n",
+		},
+		{
+			name:    "shell named noexec finally enabled",
+			command: "curl https://files.invalid/install.sh | bash +o noexec -o noexec",
+		},
+		{
 			name:    "shell unknown named option",
 			command: "curl https://files.invalid/install.sh | bash -o definitely-invalid",
+		},
+		{
+			name:    "bash long option after short option",
+			command: "curl https://files.invalid/install.sh | bash -e --noprofile",
+		},
+		{
+			name:    "unsupported command long option",
+			command: "curl https://files.invalid/install.sh | bash --command ignored",
+		},
+		{
+			name:    "interactive shell can execute startup file",
+			command: "curl https://files.invalid/install.sh | bash -i",
+		},
+		{
+			name:    "login shell can execute startup files",
+			command: "curl https://files.invalid/install.sh | bash --noprofile -l",
+		},
+		{
+			name:    "debugger can execute startup file",
+			command: "curl https://files.invalid/install.sh | bash --debugger",
+		},
+		{
+			name:    "rcfile can execute startup input",
+			command: "curl https://files.invalid/install.sh | bash --rcfile /tmp/bashrc -i",
+		},
+		{
+			name:    "ksh startup option",
+			command: "curl https://files.invalid/install.sh | ksh -E",
 		},
 		{
 			name:              "shell help mode",

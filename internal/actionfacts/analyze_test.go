@@ -2065,7 +2065,7 @@ func TestAnalyzeExactStructuredWrapperModesRemainAuthoritative(t *testing.T) {
 	}{
 		{
 			name:        "combined POSIX flags",
-			argv:        []string{"bash", "-lc", "printf safe"},
+			argv:        []string{"bash", "-ec", "printf safe"},
 			executable:  "printf",
 			wantDialect: DialectPOSIX,
 		},

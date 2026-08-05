@@ -444,6 +444,9 @@ func ProvesPOSIXHistoryClear(command CommandFact) bool {
 }
 
 func exactPOSIXHistoryClearArguments(argv []string) bool {
+	if len(argv) == 0 {
+		return false
+	}
 	sawClear := false
 	allowsFile := false
 	options := true
@@ -2916,14 +2919,15 @@ func classifyShellInvocation(out *parseOutput, command *CommandFact) {
 	if exactPOSIXPipelineStdinInterpreter(out, command) {
 		return
 	}
-	if _, hasCommand, unsafe := posixShellCommandIndex(command.Argv); hasCommand && !unsafe {
+	invocation := parsePOSIXShellInvocation(command.Program, command.Argv)
+	if invocation.valid && invocation.mode == posixShellModeCommand {
 		return
 	}
 	if exactPOSIXShellPreviewInvocation(command) {
 		command.Effect = EffectPreview
 		return
 	}
-	if script, ok := shellScriptOperand(command.Argv); ok {
+	if script, ok := shellScriptOperand(command.Program, command.Argv); ok {
 		appendPath(out, command.ID, PathAccessExecute, script)
 	}
 	// A script file, stdin, or an interactive shell carries action-bearing
@@ -3000,97 +3004,15 @@ func ProvesPOSIXStdinInterpreter(command CommandFact) bool {
 }
 
 func exactPOSIXShellStdinArguments(program string, argv []string) bool {
-	forcedStdin := false
-	for index := 1; index < len(argv); index++ {
-		argument := argv[index]
-		switch argument {
-		case "-":
-			// Without -s, a following operand can become a local script rather
-			// than a positional parameter. A terminal dash still selects stdin.
-			return index+1 == len(argv) || forcedStdin
-		case "--":
-			if index+1 == len(argv) {
-				return true
-			}
-			return forcedStdin
-		}
-		if !strings.HasPrefix(argument, "-") {
-			if program == "bash" && argument == "+o" {
-				if index+1 >= len(argv) ||
-					!exactBashNamedStdinOption(false, argv[index+1]) {
-					return false
-				}
-				index++
-				continue
-			}
-			// With -s, the first non-option starts positional parameters rather
-			// than naming a script file.
-			return forcedStdin
-		}
-		if strings.HasPrefix(argument, "--") {
-			if program == "bash" {
-				switch argument {
-				case "--debugger", "--login", "--noediting", "--noprofile",
-					"--norc", "--posix", "--restricted", "--verbose":
-					continue
-				}
-			}
-			return false
-		}
-		if len(argument) == 1 {
-			return false
-		}
-		allowedOptions := "efsuvx"
-		if program == "bash" {
-			allowedOptions = "abefhiklmprstuvxBCEHPT"
-		}
-		namedOption := false
-		for _, option := range argument[1:] {
-			if program == "bash" && option == 'o' {
-				if namedOption {
-					return false
-				}
-				namedOption = true
-				continue
-			}
-			if !strings.ContainsRune(allowedOptions, option) {
-				return false
-			}
-			if option == 's' {
-				forcedStdin = true
-			}
-		}
-		if namedOption {
-			if index+1 >= len(argv) ||
-				!exactBashNamedStdinOption(true, argv[index+1]) {
-				return false
-			}
-			index++
-		}
-	}
-	return true
-}
-
-func exactBashNamedStdinOption(enable bool, option string) bool {
-	// Bash accepts these stable `set -o` names during invocation. Enabling
-	// noexec reads stdin without executing it, so it cannot prove an
-	// interpreter sink; disabling noexec restores normal stdin execution.
-	switch option {
-	case "noexec":
-		return !enable
-	case "allexport", "braceexpand", "emacs", "errexit", "errtrace",
-		"functrace", "hashall", "histexpand", "history", "ignoreeof",
-		"interactive-comments", "keyword", "monitor", "noclobber",
-		"noglob", "nolog", "notify", "nounset", "onecmd", "physical",
-		"pipefail", "posix", "privileged", "verbose", "vi", "xtrace":
-		return true
-	default:
-		return false
-	}
+	invocation := parsePOSIXShellInvocation(program, argv)
+	return invocation.valid &&
+		invocation.mode == posixShellModeStdin &&
+		!invocation.noExec
 }
 
 func exactPOSIXShellPreviewInvocation(command *CommandFact) bool {
-	if command == nil || !command.ArgvComplete || len(command.Argv) != 2 {
+	if command == nil || command.Program != "bash" ||
+		!command.ArgvComplete || len(command.Argv) != 2 {
 		return false
 	}
 	switch strings.ToLower(command.Argv[1]) {
@@ -3197,93 +3119,7 @@ func posixCommandRedirectsStdout(command *CommandFact) bool {
 }
 
 func exactPOSIXCurlResponseStdout(argv []string) bool {
-	options := true
-	requestMethod := ""
-	for index := 1; index < len(argv); index++ {
-		argument := argv[index]
-		if options && argument == "--" {
-			options = false
-			continue
-		}
-		if !options {
-			continue
-		}
-		if curlBundledSeparatedOutputOption(argument) {
-			if index+1 >= len(argv) || argv[index+1] != "-" {
-				return false
-			}
-			index++
-			continue
-		}
-		if posixCurlShortBundleObscuresResponse(argument) {
-			return false
-		}
-		if curlBundledStdoutOutput(argument) {
-			continue
-		}
-		switch {
-		case argument == "-K", argument == "--config",
-			strings.HasPrefix(argument, "-K") && len(argument) > 2,
-			strings.HasPrefix(argument, "--config="):
-			return false
-		case argument == "-I", argument == "--head":
-			return false
-		case argument == "-X", argument == "--request":
-			if index+1 >= len(argv) {
-				return false
-			}
-			requestMethod = argv[index+1]
-			index++
-		case strings.HasPrefix(argument, "-X") && len(argument) > 2:
-			requestMethod = strings.TrimPrefix(argument, "-X")
-		case strings.HasPrefix(argument, "--request="):
-			requestMethod = strings.TrimPrefix(argument, "--request=")
-		case argument == "-O", argument == "--remote-name",
-			argument == "--remote-name-all":
-			return false
-		case argument == "-o", argument == "--output":
-			if index+1 >= len(argv) || argv[index+1] != "-" {
-				return false
-			}
-			index++
-		case strings.HasPrefix(argument, "--output="):
-			if strings.TrimPrefix(argument, "--output=") != "-" {
-				return false
-			}
-		case strings.HasPrefix(argument, "-o") && len(argument) > 2:
-			if strings.TrimPrefix(argument, "-o") != "-" {
-				return false
-			}
-		case strings.HasPrefix(argument, "-") && argument != "-":
-			if webControlOptionConsumesValue("curl", argument) {
-				if !consumeExactWebOptionValue(argv, &index, "curl") {
-					return false
-				}
-				continue
-			}
-			if !webNoValueOption("curl", argument) {
-				return false
-			}
-		}
-	}
-	return !strings.EqualFold(requestMethod, "HEAD")
-}
-
-func posixCurlShortBundleObscuresResponse(argument string) bool {
-	if curlBundledStdoutOutput(argument) {
-		return false
-	}
-	if len(argument) <= 2 || argument[0] != '-' || argument[1] == '-' {
-		return false
-	}
-	// Value-taking forms are parsed below when they lead the short token.
-	// Elsewhere in a bundle, conservatively reject options that can select a
-	// header-only request, a file output, or config/method indirection.
-	switch argument[1] {
-	case 'K', 'X', 'o':
-		return false
-	}
-	return strings.ContainsAny(argument[1:], "IKOXo")
+	return parseCurlArgv(argv).provesResponseStdout()
 }
 
 func curlBundledStdoutOutput(argument string) bool {
@@ -3295,78 +3131,16 @@ func curlBundledSeparatedOutputOption(argument string) bool {
 }
 
 func exactPOSIXWgetResponseStdout(argv []string) bool {
-	options := true
-	stdoutOutput := false
-	for index := 1; index < len(argv); index++ {
-		argument := argv[index]
-		if options && argument == "--" {
-			options = false
-			continue
-		}
-		if !options {
-			continue
-		}
-		if wgetBundledSeparatedOutputOption(argument) {
-			if index+1 >= len(argv) || argv[index+1] != "-" {
-				return false
-			}
-			stdoutOutput = true
-			index++
-			continue
-		}
-		if posixWgetShortBundleObscuresResponse(argument) {
-			return false
-		}
-		if wgetBundledStdoutOutput(argument) {
-			stdoutOutput = true
-			continue
-		}
-		switch {
-		case argument == "-s", argument == "--spider",
-			argument == "-e", argument == "--execute",
-			argument == "--config",
-			strings.HasPrefix(argument, "-e") && len(argument) > 2,
-			strings.HasPrefix(argument, "--execute="),
-			strings.HasPrefix(argument, "--config="):
-			return false
-		case argument == "-qO-", argument == "-O-",
-			argument == "--output-document=-":
-			stdoutOutput = true
-		case argument == "-O", argument == "--output-document":
-			if index+1 >= len(argv) || argv[index+1] != "-" {
-				return false
-			}
-			stdoutOutput = true
-			index++
-		case strings.HasPrefix(argument, "-O") && len(argument) > 2:
-			return false
-		case strings.HasPrefix(argument, "--output-document="):
-			return false
-		case argument == "-i", argument == "--input-file",
-			strings.HasPrefix(argument, "-i") && len(argument) > 2,
-			strings.HasPrefix(argument, "--input-file="):
-			return false
-		case strings.HasPrefix(argument, "-") && argument != "-":
-			if webControlOptionConsumesValue("wget", argument) {
-				if !consumeExactWebOptionValue(argv, &index, "wget") {
-					return false
-				}
-				continue
-			}
-			if !webNoValueOption("wget", argument) {
-				return false
-			}
-		}
-	}
-	return stdoutOutput
-}
-
-func posixWgetShortBundleObscuresResponse(argument string) bool {
-	if wgetBundledStdoutOutput(argument) || argument == "-O-" ||
-		len(argument) <= 2 || argument[0] != '-' || argument[1] == '-' {
+	parsed := parseWgetArgv(argv)
+	if !parsed.provesResponseStdout() {
 		return false
 	}
-	return strings.ContainsAny(argument[1:], "seO")
+	for _, target := range parsed.Targets {
+		if _, ok := webTargetFact(0, target, NetworkDownload); ok {
+			return true
+		}
+	}
+	return false
 }
 
 func wgetBundledStdoutOutput(argument string) bool {
@@ -3392,72 +3166,7 @@ func exactBundledOutputOption(argument, suffix, allowedPrefix string) bool {
 }
 
 func exactPOSIXBase64DecodeMode(argv []string) bool {
-	decode := false
-	options := true
-	operands := 0
-	portableInputOperand := false
-	for index := 1; index < len(argv); index++ {
-		argument := argv[index]
-		if options && argument == "--" {
-			options = false
-			continue
-		}
-		if options {
-			switch argument {
-			case "-d", "--decode":
-				decode = true
-				continue
-			case "-i":
-				// BSD consumes an input path while GNU treats -i as an
-				// ignore-garbage flag. Requiring one following operand yields
-				// the same decoded-file-to-stdout behavior on both families.
-				if index+1 >= len(argv) || argv[index+1] == "" ||
-					argv[index+1] != "-" && strings.HasPrefix(argv[index+1], "-") {
-					return false
-				}
-				index++
-				operands++
-				portableInputOperand = true
-				continue
-			}
-			if strings.HasPrefix(argument, "-") && argument != "-" {
-				return false
-			}
-		}
-		operands++
-		if operands > 1 {
-			return false
-		}
-	}
-	// GNU coreutils accepts a positional input path, while BSD/macOS base64
-	// requires -i. Without trusted platform identity, only stdin or the -i
-	// shape proves the same decode-to-stdout behavior on both families.
-	return decode && (operands == 0 || operands == 1 && portableInputOperand)
-}
-
-func consumeExactWebOptionValue(
-	argv []string,
-	index *int,
-	program string,
-) bool {
-	argument := argv[*index]
-	if !webControlOptionConsumesValue(program, argument) {
-		return false
-	}
-	if strings.HasPrefix(argument, "--") {
-		_, value, joined := strings.Cut(argument, "=")
-		if joined {
-			return value != ""
-		}
-	} else if len(argument) > 2 {
-		return argument[2:] != ""
-	}
-	if *index+1 >= len(argv) || argv[*index+1] == "" ||
-		argv[*index+1] != "-" && strings.HasPrefix(argv[*index+1], "-") {
-		return false
-	}
-	*index++
-	return true
+	return parsePortableBase64DecodeArgv(argv).provesDecodedStdout()
 }
 
 func posixVersionedPythonProgram(program string) bool {
@@ -3485,47 +3194,19 @@ func posixVersionedPythonProgram(program string) bool {
 	return !previousDot
 }
 
-func shellScriptOperand(argv []string) (string, bool) {
-	options := true
-	for i := 1; i < len(argv); i++ {
-		arg := argv[i]
-		if options && arg == "--" {
-			options = false
-			continue
-		}
-		if options && strings.HasPrefix(arg, "-") || options && strings.HasPrefix(arg, "+") {
-			switch arg {
-			case "-O", "+O", "-o", "+o", "--rcfile", "--init-file":
-				if i+1 < len(argv) {
-					i++
-				}
-			}
-			continue
-		}
-		if arg == "-" {
-			return "", false
-		}
-		return arg, true
+func shellScriptOperand(program string, argv []string) (string, bool) {
+	invocation := parsePOSIXShellInvocation(program, argv)
+	if !invocation.valid || invocation.mode != posixShellModeScript ||
+		invocation.scriptIndex < 0 || invocation.scriptIndex >= len(argv) {
+		return "", false
 	}
-	return "", false
+	return argv[invocation.scriptIndex], true
 }
 
-// exactPOSIXShellScriptOperand recognizes the narrow script-launch form whose
-// only unresolved semantics are the final file bytes. Options vary across
-// shells, so option-bearing forms remain non-authoritative until reviewed.
-func exactPOSIXShellScriptOperand(argv []string) (string, bool) {
-	if len(argv) < 2 {
-		return "", false
-	}
-	index := 1
-	if argv[index] == "--" {
-		index++
-	}
-	if index >= len(argv) || argv[index] == "" || argv[index] == "-" ||
-		strings.HasPrefix(argv[index], "-") || strings.HasPrefix(argv[index], "+") {
-		return "", false
-	}
-	return argv[index], true
+// exactPOSIXShellScriptOperand recognizes a reviewed shell launch whose only
+// unresolved semantics are the selected script bytes.
+func exactPOSIXShellScriptOperand(program string, argv []string) (string, bool) {
+	return shellScriptOperand(program, argv)
 }
 
 func classifySourceInvocation(out *parseOutput, command *CommandFact) {
@@ -3845,6 +3526,14 @@ func classifierOptionValue(
 }
 
 func classifyWebTransfer(out *parseOutput, command *CommandFact, program string) {
+	if isCurlProgram(program) {
+		classifyParsedCurlTransfer(out, command)
+		return
+	}
+	if isWgetProgram(program) {
+		classifyParsedWgetTransfer(out, command)
+		return
+	}
 	preview, spider := webControlMode(command.Argv, program)
 	if preview {
 		command.Effect = EffectPreview
@@ -10315,6 +10004,22 @@ func classifyStructuredWindowsArgv(
 func classifyDecode(out *parseOutput, command *CommandFact, program string) {
 	switch program {
 	case "base64", "base64.exe":
+		portable := parsePortableBase64DecodeArgv(command.Argv)
+		if portable.Complete {
+			if portable.InputSet && portable.Input != "-" {
+				appendCommandPath(
+					out,
+					command,
+					PathAccessRead,
+					portable.Input,
+				)
+				appendFileToProcessFlow(out, command.ID)
+			}
+			if portable.Decode {
+				addOperation(command, OperationDecode)
+			}
+			return
+		}
 		valueOptions := exactOptionSet("-w", "--wrap")
 		parsed := parseOwnedPOSIXOptions(
 			command.Argv,
@@ -10340,10 +10045,8 @@ func classifyDecode(out *parseOutput, command *CommandFact, program string) {
 				continue
 			}
 			decodeBundle = true
-			// GNU base64 accepts bundled short flags, while BSD base64
-			// rejects even repeated decode bundles such as -dd; -i also
-			// has different operand ownership. Retain the diagnostic decode
-			// fact, but never make a bundle authoritative across platforms.
+			// Retain diagnostics for non-portable or malformed bundles. The
+			// portable bundle subset returned above is authoritative.
 			complete = false
 		}
 		if parsed.preview {

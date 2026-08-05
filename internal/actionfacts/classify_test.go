@@ -445,6 +445,9 @@ func TestStaticPathOperandClassification(t *testing.T) {
 }
 
 func TestPOSIXHistoryTamperBuiltinGrammars(t *testing.T) {
+	if exactPOSIXHistoryClearArguments(nil) {
+		t.Fatal("empty history argv was accepted")
+	}
 	for _, argv := range [][]string{
 		{"history"},
 		{"unset", "HISTFILE"},
@@ -5394,7 +5397,19 @@ func TestTunnelDecodeAndCrontabGrammarsAreClosed(t *testing.T) {
 		t.Fatalf("generic tunnel fallback output=%#v", generic)
 	}
 
-	for _, bundle := range []string{"-di", "-id", "-Di", "-dd", "-dD"} {
+	for _, argv := range [][]string{
+		{"base64", "-dd"},
+		{"base64", "-di", "/srv/payload.b64"},
+		{"base64", "-ddi", "/srv/payload.b64"},
+	} {
+		decode := classifyTestArgvAs(argv, DialectPOSIX)
+		if decode.status != StatusComplete ||
+			!commandHasOperation(decode.commands[0], OperationDecode) ||
+			!decode.facts("argv", "").EnforcementEligible() {
+			t.Fatalf("portable argv=%v decode output=%#v", argv, decode)
+		}
+	}
+	for _, bundle := range []string{"-id", "-Di", "-dd", "-dD"} {
 		decode := classifyTestArgvAs(
 			[]string{"base64", bundle, "/srv/payload.b64"},
 			DialectPOSIX,
@@ -5411,11 +5426,21 @@ func TestTunnelDecodeAndCrontabGrammarsAreClosed(t *testing.T) {
 		Command:     "base64 -di /srv/payload.b64",
 		DialectHint: DialectPOSIX,
 	})
-	if rawDecode.Parse.Status != StatusPartial ||
-		rawDecode.EnforcementEligible() ||
+	if rawDecode.Parse.Status != StatusComplete ||
+		!rawDecode.EnforcementEligible() ||
 		!factsHaveOperation(rawDecode, OperationDecode) ||
 		!factsHavePath(rawDecode, PathAccessRead, "/srv/payload.b64") {
 		t.Fatalf("raw decode output=%#v", rawDecode)
+	}
+	portableEncode := classifyTestArgvAs(
+		[]string{"base64", "-i", "/srv/payload.b64"},
+		DialectPOSIX,
+	)
+	if portableEncode.status != StatusComplete ||
+		commandHasOperation(portableEncode.commands[0], OperationDecode) ||
+		!outputHasPath(portableEncode, PathAccessRead, "/srv/payload.b64") ||
+		!portableEncode.facts("argv", "").EnforcementEligible() {
+		t.Fatalf("portable encode output=%#v", portableEncode)
 	}
 	exactDecode := classifyTestArgvAs(
 		[]string{"base64", "-d", "/srv/payload.b64"},
