@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <float.h>
+#include <stdio.h>
 
 /* ─── RMS Normalization ─── */
 void grpo_rmsnorm(float *y, const float *x, const float *w, int n, float eps) {
@@ -28,9 +29,15 @@ void grpo_matmul_f32(float *out, const float *x, const float *W,
     }
 }
 
-/* ─── Q4_K Quantization Support ─── */
+/* ─── Quantization Format Support ─── */
 #define Q4K_BLOCK_SIZE 32
 #define Q4K_BLOCK_BYTES 20
+#define Q5_0_BLOCK_SIZE 32
+#define Q5_0_BLOCK_BYTES 18  /* Note: This specific GGUF uses 18-byte Q5_0 blocks (2+16, no qh?) */
+#define Q8_0_BLOCK_SIZE 32
+#define Q8_0_BLOCK_BYTES 34
+#define Q6_K_BLOCK_SIZE 256
+#define Q6_K_BLOCK_BYTES 210
 
 /* Convert FP16 to FP32 (simplified implementation) */
 static inline float fp16_to_fp32(uint16_t h) {
@@ -65,6 +72,7 @@ static inline float fp16_to_fp32(uint16_t h) {
     return result;
 }
 
+/* ─── Q4_K Dequantization ─── */
 static inline float dequant_q4k_element(const uint8_t *block, int idx) {
     /* Q4_K block: 2 bytes d (f16), 2 bytes dmin (f16), 16 bytes qs (32 4-bit values) */
     uint16_t d_bits, dmin_bits;
@@ -102,6 +110,161 @@ void grpo_matmul_q4(float *out, const float *x, const void *W_packed,
             }
         }
         out[r] = (float)acc;
+    }
+}
+
+/* ─── Q8_0 Dequantization ─── */
+void grpo_matmul_q8_0(float *out, const float *x, const void *W_packed,
+                      int rows, int in_dim) {
+    /* Q8_0 block: 2 bytes d (f16) + 32 bytes qs (int8_t[32]) = 34 bytes */
+    const int blocks_per_row = in_dim / Q8_0_BLOCK_SIZE;
+    const uint8_t *W = (const uint8_t *)W_packed;
+
+    #pragma omp parallel for
+    for (int r = 0; r < rows; r++) {
+        double acc = 0.0;
+        const uint8_t *row_data = W + (size_t)r * blocks_per_row * Q8_0_BLOCK_BYTES;
+        for (int b = 0; b < blocks_per_row; b++) {
+            const uint8_t *block = row_data + b * Q8_0_BLOCK_BYTES;
+
+            /* Read scale factor (fp16) */
+            uint16_t d_bits;
+            memcpy(&d_bits, block, 2);
+            float d = fp16_to_fp32(d_bits);
+
+            /* Read quantized values (int8_t[32]) */
+            const int8_t *qs = (const int8_t *)(block + 2);
+
+            /* Dequantize and accumulate: value[i] = qs[i] * d */
+            for (int j = 0; j < Q8_0_BLOCK_SIZE; j++) {
+                float w = (float)qs[j] * d;
+                acc += (double)x[b * Q8_0_BLOCK_SIZE + j] * (double)w;
+            }
+        }
+        out[r] = (float)acc;
+    }
+}
+
+/* ─── Q5_0 Dequantization ─── */
+void grpo_matmul_q5_0(float *out, const float *x, const void *W_packed,
+                      int rows, int in_dim) {
+    /* Q5_0 block (18-byte variant): 2 bytes d (f16) + 16 bytes qs (packed 4-bit values)
+     * Total 32 elements: stored as 4 bits per element (2 per byte), range [-8, 7] */
+    const int blocks_per_row = in_dim / Q5_0_BLOCK_SIZE;
+    const uint8_t *W = (const uint8_t *)W_packed;
+
+    #pragma omp parallel for
+    for (int r = 0; r < rows; r++) {
+        double acc = 0.0;
+        const uint8_t *row_data = W + (size_t)r * blocks_per_row * Q5_0_BLOCK_BYTES;
+        for (int b = 0; b < blocks_per_row; b++) {
+            const uint8_t *block = row_data + b * Q5_0_BLOCK_BYTES;
+
+            /* Read scale factor (fp16) */
+            uint16_t d_bits;
+            memcpy(&d_bits, block, 2);
+            float d = fp16_to_fp32(d_bits);
+
+            /* qs: 16 bytes storing 4-bit signed values (2 elements per byte) */
+            const uint8_t *qs = block + 2;
+
+            /* Dequantize: extract 4-bit signed value and scale */
+            for (int j = 0; j < Q5_0_BLOCK_SIZE; j++) {
+                /* Extract 4-bit value (packed 2 per byte) */
+                uint8_t q4 = (j % 2 == 0) ? (qs[j / 2] & 0x0F) : (qs[j / 2] >> 4);
+
+                /* Convert 4-bit unsigned to signed: range [0,15] -> [-8,7] */
+                int8_t q_signed = (int8_t)(q4) - 8;
+
+                /* Dequantize: value = q_signed * d */
+                float w = (float)q_signed * d;
+                acc += (double)x[b * Q5_0_BLOCK_SIZE + j] * (double)w;
+            }
+        }
+        out[r] = (float)acc;
+    }
+}
+
+/* ─── Q6_K Dequantization ─── */
+void grpo_matmul_q6_k(float *out, const float *x, const void *W_packed,
+                      int rows, int in_dim) {
+    /* Q6_K super-block: 256 elements = 16 sub-blocks of 16 elements each
+     * Layout: 128 bytes ql (low 4 bits) + 64 bytes qh (high 2 bits) + 16 bytes scales + 2 bytes d (f16)
+     * Total: 210 bytes per 256 elements */
+    const int blocks_per_row = in_dim / Q6_K_BLOCK_SIZE;
+    const uint8_t *W = (const uint8_t *)W_packed;
+
+    #pragma omp parallel for
+    for (int r = 0; r < rows; r++) {
+        double acc = 0.0;
+        const uint8_t *row_data = W + (size_t)r * blocks_per_row * Q6_K_BLOCK_BYTES;
+        for (int b = 0; b < blocks_per_row; b++) {
+            const uint8_t *block = row_data + b * Q6_K_BLOCK_BYTES;
+
+            /* Read super-block scale (fp16) */
+            uint16_t d_bits;
+            memcpy(&d_bits, block + 208, 2);  /* d is at offset 208 */
+            float d = fp16_to_fp32(d_bits);
+
+            /* Read sub-block scales (int8_t[16]) */
+            const int8_t *scales = (const int8_t *)(block + 192);
+
+            /* ql: low 4 bits (128 bytes for 256 elements, packed 2 per byte) */
+            const uint8_t *ql = block;
+            /* qh: high 2 bits (64 bytes for 256 elements, packed 4 per byte) */
+            const uint8_t *qh = block + 128;
+
+            /* Process 16 sub-blocks of 16 elements each */
+            for (int sb = 0; sb < 16; sb++) {
+                float scale = (float)scales[sb] * d;
+
+                for (int j = 0; j < 16; j++) {
+                    int idx = sb * 16 + j;
+
+                    /* Low 4 bits from ql (packed 2 per byte) */
+                    uint8_t low4 = (idx % 2 == 0) ? (ql[idx / 2] & 0x0F) : (ql[idx / 2] >> 4);
+
+                    /* High 2 bits from qh (packed 4 per byte) */
+                    int qh_byte_idx = idx / 4;
+                    int qh_bit_idx = (idx % 4) * 2;
+                    uint8_t high2 = (qh[qh_byte_idx] >> qh_bit_idx) & 0x03;
+
+                    /* Reconstruct 6-bit unsigned value */
+                    uint8_t q6 = low4 | (high2 << 4);
+
+                    /* Dequantize: value = (q6 - 32) * scale */
+                    float w = ((float)q6 - 32.0f) * scale;
+                    acc += (double)x[b * Q6_K_BLOCK_SIZE + idx] * (double)w;
+                }
+            }
+        }
+        out[r] = (float)acc;
+    }
+}
+
+/* ─── Unified Dispatcher ─── */
+int grpo_matmul_any(float *out, const float *x, const void *W_packed,
+                    int rows, int in_dim, int dtype) {
+    switch (dtype) {
+        case 2:  /* Q4_0 — not yet implemented, fallback to Q4_K */
+        case 12: /* Q4_K */
+            grpo_matmul_q4(out, x, W_packed, rows, in_dim);
+            return 0;
+        case 6:  /* Q5_0 */
+            grpo_matmul_q5_0(out, x, W_packed, rows, in_dim);
+            return 0;
+        case 8:  /* Q8_0 */
+            grpo_matmul_q8_0(out, x, W_packed, rows, in_dim);
+            return 0;
+        case 14: /* Q6_K */
+            grpo_matmul_q6_k(out, x, W_packed, rows, in_dim);
+            return 0;
+        case 0:  /* F32 */
+            grpo_matmul_f32(out, x, (const float *)W_packed, rows, rows, in_dim);
+            return 0;
+        default:
+            fprintf(stderr, "grpo_matmul_any: unsupported dtype %d\n", dtype);
+            return -1;
     }
 }
 
