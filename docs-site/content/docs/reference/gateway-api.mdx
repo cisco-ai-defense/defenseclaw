@@ -226,10 +226,11 @@ Single-call semantic findings are available on this inspect route and on
 native pre-tool hooks. Ordered tool chains are stricter: they use durable
 SQLite state only on authenticated `/api/v1/{connector}/hook` events with
 canonical connector and session correlation. Inspect, proxy, router, and OTLP
-traffic never advance a chain. Exact authenticated config-change and
-result-like hook events may supply an antecedent, but a chain can deny only
-its final step on an enforcement-safe synchronous pre-tool event. Post-tool
-and tool-result events never make the final blocking decision.
+traffic never advance a chain. Only a matching authoritative successful result
+can promote an existing pending proposal into a durable successful predecessor.
+A chain can deny only its final step on an enforcement-safe synchronous
+pre-tool event. Post-tool and tool-result events never make the final blocking
+decision.
 See the [stateful connector lifecycle](/docs/policies/cel/tool-call-state) for
 the pairing, state-level, and cutoff contracts.
 Chain matches are `HIGH` severity and retain the connector's effective action

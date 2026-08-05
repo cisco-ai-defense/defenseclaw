@@ -47,7 +47,7 @@ Validation compiles every supplied `expression`, including expressions on
 disabled rules, and rejects the complete candidate if admission fails. It also
 enforces the semantic rule-count and aggregate-cost limits. Expressions must
 be non-empty, free of surrounding whitespace, and Boolean; a rule with an
-expression must still provide its required bounded `pattern` fallback.
+expression must still provide its required, bounded `pattern` fallback.
 
 `tool_call_only` does not bypass any of these checks or establish a trusted
 boundary. During validation it only controls the eventual eligibility of the
