@@ -13,9 +13,50 @@
 
 /* ─── Internal Policy Engine Structure ─── */
 
+/* Quantization block sizes */
+#define Q8_0_BLOCK_SIZE 32
+#define Q8_0_BLOCK_BYTES 34
+#define Q5_0_BLOCK_SIZE 32
+#define Q5_0_BLOCK_BYTES 18
+#define Q6_K_BLOCK_SIZE 256
+#define Q6_K_BLOCK_BYTES 210
+
+/* FP16 to FP32 conversion (duplicated from kernels.c) */
+static inline float fp16_to_fp32(uint16_t h) {
+    uint32_t sign = (h >> 15) & 1;
+    uint32_t exp = (h >> 10) & 0x1F;
+    uint32_t mant = h & 0x3FF;
+
+    uint32_t f;
+    if (exp == 0) {
+        if (mant == 0) {
+            f = sign << 31;
+        } else {
+            /* subnormal */
+            exp = 127 - 14;
+            while ((mant & 0x400) == 0) {
+                mant <<= 1;
+                exp--;
+            }
+            mant &= 0x3FF;
+            f = (sign << 31) | (exp << 23) | (mant << 13);
+        }
+    } else if (exp == 0x1F) {
+        /* inf or nan */
+        f = (sign << 31) | (0xFF << 23) | (mant << 13);
+    } else {
+        /* normal */
+        f = (sign << 31) | ((exp + (127 - 15)) << 23) | (mant << 13);
+    }
+
+    float result;
+    memcpy(&result, &f, sizeof(float));
+    return result;
+}
+
 typedef struct {
     /* Per-layer weight pointers (into mmap region) */
-    const void *q_weight;   /* Q4_K packed */
+    const void *q_weight;
     const void *k_weight;
     const void *v_weight;
     const void *o_weight;
@@ -24,16 +65,22 @@ typedef struct {
     const void *down_weight;
     const float *attn_norm; /* f32 norm weights */
     const float *ffn_norm;
+    /* Dtypes for dynamic dispatch */
+    int q_dtype, k_dtype, v_dtype, o_dtype;
+    int gate_dtype, up_dtype, down_dtype;
 } PolicyLayer;
 
 typedef struct {
     GgufFile     gf;
-    void        *mmap_base;
-    size_t       mmap_size;
+    void        *mmap_base;         /* Adjusted pointer to data start */
+    void        *mmap_base_actual;  /* Original mmap pointer for munmap */
+    size_t       mmap_size;         /* Original mmap size for munmap */
     PolicyLayer *layers;
-    const float *embed;        /* token embedding table */
+    const void  *embed;        /* token embedding table (may be quantized) */
+    int          embed_dtype;  /* dtype of embedding table */
     const float *output_norm;  /* final RMS norm */
     const void  *output_weight; /* lm_head (may be Q4 or f32) */
+    int          output_dtype; /* dtype of output weight */
 
     /* KV cache: [max_seq_len × n_kv_heads × head_dim] */
     float       *k_cache;
@@ -53,9 +100,9 @@ typedef struct {
     float       *logits;       /* [vocab_size] */
 } PolicyEngine;
 
-/* ─── Helper: Find and resolve tensor pointer ─── */
+/* ─── Helper: Find and resolve tensor pointer with dtype ─── */
 static const void *resolve_tensor_ptr(const GgufFile *gf, void *mmap_base,
-                                      const char *name, GgufDtype expected_dtype) {
+                                      const char *name, GgufDtype expected_dtype, int *dtype_out) {
     GgufTensor *t = gguf_find_tensor(gf, name);
     if (!t) return NULL;
     /* Accept any quantized type for weight tensors — the matmul kernel handles
@@ -66,6 +113,7 @@ static const void *resolve_tensor_ptr(const GgufFile *gf, void *mmap_base,
         return NULL;
     }
     (void)expected_dtype;
+    if (dtype_out) *dtype_out = (int)t->dtype;
     return (const uint8_t *)mmap_base + t->offset;
 }
 
@@ -94,9 +142,9 @@ static PolicyEngine *policy_init(const char *gguf_path, int max_seq_len) {
     int64_t aligned_offset = (pe->gf.data_offset / page_size) * page_size;
     size_t offset_adj = (size_t)(pe->gf.data_offset - aligned_offset);
     pe->mmap_size = (size_t)(st.st_size - aligned_offset);
-    pe->mmap_base = mmap(NULL, pe->mmap_size, PROT_READ, MAP_SHARED,
-                         pe->gf.fd, aligned_offset);
-    if (pe->mmap_base == MAP_FAILED) {
+    pe->mmap_base_actual = mmap(NULL, pe->mmap_size, PROT_READ, MAP_SHARED,
+                                pe->gf.fd, aligned_offset);
+    if (pe->mmap_base_actual == MAP_FAILED) {
         fprintf(stderr, "policy: mmap failed for %s (offset=%lld, aligned=%lld, size=%zu)\n",
                 gguf_path, (long long)pe->gf.data_offset, (long long)aligned_offset, pe->mmap_size);
         gguf_close(&pe->gf);
@@ -104,7 +152,7 @@ static PolicyEngine *policy_init(const char *gguf_path, int max_seq_len) {
         return NULL;
     }
     /* Adjust mmap_base to point at actual data start */
-    pe->mmap_base = (uint8_t *)pe->mmap_base + offset_adj;
+    pe->mmap_base = (uint8_t *)pe->mmap_base_actual + offset_adj;
 
     /* Resolve global tensors.
      * Quantized models may store embeddings in Q8_0, Q6_K, or Q4_K — not F32.
@@ -119,22 +167,24 @@ static PolicyEngine *policy_init(const char *gguf_path, int max_seq_len) {
     if (!t_embed || !t_norm || !t_output) {
         fprintf(stderr, "policy: missing global tensors (embed=%p, norm=%p, output=%p)\n",
                 (void*)t_embed, (void*)t_norm, (void*)t_output);
-        munmap((void*)((uint8_t*)pe->mmap_base - offset_adj), pe->mmap_size);
+        munmap(pe->mmap_base_actual, pe->mmap_size);
         gguf_close(&pe->gf);
         free(pe);
         return NULL;
     }
 
-    pe->embed = (const float *)((const uint8_t *)pe->mmap_base + t_embed->offset);
+    pe->embed = (const void *)((const uint8_t *)pe->mmap_base + t_embed->offset);
+    pe->embed_dtype = (int)t_embed->dtype;
     pe->output_norm = (const float *)((const uint8_t *)pe->mmap_base + t_norm->offset);
     pe->output_weight = (const void *)((const uint8_t *)pe->mmap_base + t_output->offset);
+    pe->output_dtype = (int)t_output->dtype;
     fprintf(stderr, "policy: tensors resolved (embed dtype=%d, norm dtype=%d, output dtype=%d, tied=%d)\n",
             t_embed->dtype, t_norm->dtype, t_output->dtype, t_output == t_embed);
 
     /* Resolve per-layer tensors */
     pe->layers = (PolicyLayer *)calloc((size_t)pe->gf.n_layers, sizeof(PolicyLayer));
     if (!pe->layers) {
-        munmap(pe->mmap_base, pe->mmap_size);
+        munmap(pe->mmap_base_actual, pe->mmap_size);
         gguf_close(&pe->gf);
         free(pe);
         return NULL;
@@ -144,38 +194,38 @@ static PolicyEngine *policy_init(const char *gguf_path, int max_seq_len) {
         char name[128];
 
         snprintf(name, sizeof(name), "blk.%d.attn_q.weight", l);
-        pe->layers[l].q_weight = resolve_tensor_ptr(&pe->gf, pe->mmap_base, name, GGUF_TYPE_Q4_K);
+        pe->layers[l].q_weight = resolve_tensor_ptr(&pe->gf, pe->mmap_base, name, GGUF_TYPE_Q4_K, &pe->layers[l].q_dtype);
 
         snprintf(name, sizeof(name), "blk.%d.attn_k.weight", l);
-        pe->layers[l].k_weight = resolve_tensor_ptr(&pe->gf, pe->mmap_base, name, GGUF_TYPE_Q4_K);
+        pe->layers[l].k_weight = resolve_tensor_ptr(&pe->gf, pe->mmap_base, name, GGUF_TYPE_Q4_K, &pe->layers[l].k_dtype);
 
         snprintf(name, sizeof(name), "blk.%d.attn_v.weight", l);
-        pe->layers[l].v_weight = resolve_tensor_ptr(&pe->gf, pe->mmap_base, name, GGUF_TYPE_Q4_K);
+        pe->layers[l].v_weight = resolve_tensor_ptr(&pe->gf, pe->mmap_base, name, GGUF_TYPE_Q4_K, &pe->layers[l].v_dtype);
 
         snprintf(name, sizeof(name), "blk.%d.attn_output.weight", l);
-        pe->layers[l].o_weight = resolve_tensor_ptr(&pe->gf, pe->mmap_base, name, GGUF_TYPE_Q4_K);
+        pe->layers[l].o_weight = resolve_tensor_ptr(&pe->gf, pe->mmap_base, name, GGUF_TYPE_Q4_K, &pe->layers[l].o_dtype);
 
         snprintf(name, sizeof(name), "blk.%d.ffn_gate.weight", l);
-        pe->layers[l].gate_weight = resolve_tensor_ptr(&pe->gf, pe->mmap_base, name, GGUF_TYPE_Q4_K);
+        pe->layers[l].gate_weight = resolve_tensor_ptr(&pe->gf, pe->mmap_base, name, GGUF_TYPE_Q4_K, &pe->layers[l].gate_dtype);
 
         snprintf(name, sizeof(name), "blk.%d.ffn_up.weight", l);
-        pe->layers[l].up_weight = resolve_tensor_ptr(&pe->gf, pe->mmap_base, name, GGUF_TYPE_Q4_K);
+        pe->layers[l].up_weight = resolve_tensor_ptr(&pe->gf, pe->mmap_base, name, GGUF_TYPE_Q4_K, &pe->layers[l].up_dtype);
 
         snprintf(name, sizeof(name), "blk.%d.ffn_down.weight", l);
-        pe->layers[l].down_weight = resolve_tensor_ptr(&pe->gf, pe->mmap_base, name, GGUF_TYPE_Q4_K);
+        pe->layers[l].down_weight = resolve_tensor_ptr(&pe->gf, pe->mmap_base, name, GGUF_TYPE_Q4_K, &pe->layers[l].down_dtype);
 
         snprintf(name, sizeof(name), "blk.%d.attn_norm.weight", l);
         pe->layers[l].attn_norm = (const float *)resolve_tensor_ptr(&pe->gf, pe->mmap_base,
-                                                                     name, GGUF_TYPE_F32);
+                                                                     name, GGUF_TYPE_F32, NULL);
 
         snprintf(name, sizeof(name), "blk.%d.ffn_norm.weight", l);
         pe->layers[l].ffn_norm = (const float *)resolve_tensor_ptr(&pe->gf, pe->mmap_base,
-                                                                    name, GGUF_TYPE_F32);
+                                                                    name, GGUF_TYPE_F32, NULL);
 
         if (!pe->layers[l].q_weight || !pe->layers[l].attn_norm || !pe->layers[l].ffn_norm) {
             fprintf(stderr, "policy: missing tensors for layer %d\n", l);
             free(pe->layers);
-            munmap(pe->mmap_base, pe->mmap_size);
+            munmap(pe->mmap_base_actual, pe->mmap_size);
             gguf_close(&pe->gf);
             free(pe);
             return NULL;
@@ -238,10 +288,90 @@ static void policy_free(PolicyEngine *pe) {
     free(pe->ffn_out);
     free(pe->logits);
     free(pe->layers);
-    if (pe->mmap_base != MAP_FAILED)
-        munmap(pe->mmap_base, pe->mmap_size);
+    if (pe->mmap_base_actual != MAP_FAILED)
+        munmap(pe->mmap_base_actual, pe->mmap_size);
     gguf_close(&pe->gf);
     free(pe);
+}
+
+/* ─── Helper: Dequantize a single row from embedding table ─── */
+static void dequant_embed_row(float *out, const void *embed_table, int embed_dtype,
+                               int token, int hidden_dim) {
+    if (embed_dtype == 0) {  /* F32 */
+        const float *embed_f32 = (const float *)embed_table;
+        memcpy(out, embed_f32 + (size_t)token * (size_t)hidden_dim,
+               (size_t)hidden_dim * sizeof(float));
+    } else {
+        /* Quantized: treat as 1-row matmul with identity vector */
+        /* Create identity input: [1.0, 1.0, ...] */
+        float *identity = (float *)malloc((size_t)hidden_dim * sizeof(float));
+        for (int i = 0; i < hidden_dim; i++) identity[i] = 1.0f;
+
+        /* Compute single row dequantization */
+        const uint8_t *row_start;
+        switch (embed_dtype) {
+            case 8: { /* Q8_0 */
+                int blocks = hidden_dim / Q8_0_BLOCK_SIZE;
+                row_start = (const uint8_t *)embed_table + (size_t)token * blocks * Q8_0_BLOCK_BYTES;
+                for (int i = 0; i < hidden_dim; i++) {
+                    int b = i / Q8_0_BLOCK_SIZE;
+                    int j = i % Q8_0_BLOCK_SIZE;
+                    const uint8_t *block = row_start + b * Q8_0_BLOCK_BYTES;
+                    uint16_t d_bits;
+                    memcpy(&d_bits, block, 2);
+                    float d = fp16_to_fp32(d_bits);
+                    const int8_t *qs = (const int8_t *)(block + 2);
+                    out[i] = (float)qs[j] * d;
+                }
+                break;
+            }
+            case 6: { /* Q5_0 (18-byte variant) */
+                int blocks = hidden_dim / Q5_0_BLOCK_SIZE;
+                row_start = (const uint8_t *)embed_table + (size_t)token * blocks * Q5_0_BLOCK_BYTES;
+                for (int i = 0; i < hidden_dim; i++) {
+                    int b = i / Q5_0_BLOCK_SIZE;
+                    int j = i % Q5_0_BLOCK_SIZE;
+                    const uint8_t *block = row_start + b * Q5_0_BLOCK_BYTES;
+                    uint16_t d_bits;
+                    memcpy(&d_bits, block, 2);
+                    float d = fp16_to_fp32(d_bits);
+                    const uint8_t *qs = block + 2;
+                    uint8_t q4 = (j % 2 == 0) ? (qs[j / 2] & 0x0F) : (qs[j / 2] >> 4);
+                    int8_t q_signed = (int8_t)(q4) - 8;
+                    out[i] = (float)q_signed * d;
+                }
+                break;
+            }
+            case 14: { /* Q6_K */
+                int blocks = hidden_dim / Q6_K_BLOCK_SIZE;
+                row_start = (const uint8_t *)embed_table + (size_t)token * blocks * Q6_K_BLOCK_BYTES;
+                for (int i = 0; i < hidden_dim; i++) {
+                    int b = i / Q6_K_BLOCK_SIZE;
+                    int idx = i % Q6_K_BLOCK_SIZE;
+                    const uint8_t *block = row_start + b * Q6_K_BLOCK_BYTES;
+                    uint16_t d_bits;
+                    memcpy(&d_bits, block + 208, 2);
+                    float d = fp16_to_fp32(d_bits);
+                    const int8_t *scales = (const int8_t *)(block + 192);
+                    const uint8_t *ql = block;
+                    const uint8_t *qh = block + 128;
+                    int sb = idx / 16;
+                    float scale = (float)scales[sb] * d;
+                    uint8_t low4 = (idx % 2 == 0) ? (ql[idx / 2] & 0x0F) : (ql[idx / 2] >> 4);
+                    int qh_byte_idx = idx / 4;
+                    int qh_bit_idx = (idx % 4) * 2;
+                    uint8_t high2 = (qh[qh_byte_idx] >> qh_bit_idx) & 0x03;
+                    uint8_t q6 = low4 | (high2 << 4);
+                    out[i] = ((float)q6 - 32.0f) * scale;
+                }
+                break;
+            }
+            default:
+                fprintf(stderr, "dequant_embed_row: unsupported dtype %d\n", embed_dtype);
+                memset(out, 0, (size_t)hidden_dim * sizeof(float));
+        }
+        free(identity);
+    }
 }
 
 /* ─── Single-Token Forward Pass ─── */
@@ -253,9 +383,8 @@ static void policy_forward_token(PolicyEngine *pe, int token, int pos) {
     const int head_dim = (int)pe->gf.head_dim;
     const int vocab_size = (int)pe->gf.vocab_size;
 
-    /* Embed token */
-    const float *embed_row = pe->embed + (size_t)token * (size_t)hidden_dim;
-    memcpy(pe->hidden, embed_row, (size_t)hidden_dim * sizeof(float));
+    /* Embed token (with optional dequantization) */
+    dequant_embed_row(pe->hidden, pe->embed, pe->embed_dtype, token, hidden_dim);
 
     /* Run through transformer layers */
     for (int l = 0; l < pe->gf.n_layers; l++) {
@@ -267,9 +396,9 @@ static void policy_forward_token(PolicyEngine *pe, int token, int pos) {
         grpo_rmsnorm(pe->hidden, residual, layer->attn_norm, hidden_dim, pe->gf.rms_eps);
 
         /* Q, K, V projections */
-        grpo_matmul_q4(pe->q_buf, pe->hidden, layer->q_weight, n_heads * head_dim, hidden_dim);
-        grpo_matmul_q4(pe->k_buf, pe->hidden, layer->k_weight, n_kv_heads * head_dim, hidden_dim);
-        grpo_matmul_q4(pe->v_buf, pe->hidden, layer->v_weight, n_kv_heads * head_dim, hidden_dim);
+        grpo_matmul_any(pe->q_buf, pe->hidden, layer->q_weight, n_heads * head_dim, hidden_dim, layer->q_dtype);
+        grpo_matmul_any(pe->k_buf, pe->hidden, layer->k_weight, n_kv_heads * head_dim, hidden_dim, layer->k_dtype);
+        grpo_matmul_any(pe->v_buf, pe->hidden, layer->v_weight, n_kv_heads * head_dim, hidden_dim, layer->v_dtype);
 
         /* RoPE on Q and K */
         grpo_rope(pe->q_buf, pe->k_buf, pos, n_heads, head_dim, pe->gf.rope_theta);
@@ -284,7 +413,7 @@ static void policy_forward_token(PolicyEngine *pe, int token, int pos) {
                           n_heads, n_kv_heads, head_dim, pos);
 
         /* Output projection */
-        grpo_matmul_q4(pe->hidden, pe->attn_out, layer->o_weight, hidden_dim, hidden_dim);
+        grpo_matmul_any(pe->hidden, pe->attn_out, layer->o_weight, hidden_dim, hidden_dim, layer->o_dtype);
 
         /* Residual connection */
         for (int i = 0; i < hidden_dim; i++)
@@ -294,8 +423,8 @@ static void policy_forward_token(PolicyEngine *pe, int token, int pos) {
         memcpy(residual, pe->hidden, (size_t)hidden_dim * sizeof(float));
         grpo_rmsnorm(pe->hidden, residual, layer->ffn_norm, hidden_dim, pe->gf.rms_eps);
 
-        grpo_matmul_q4(pe->ffn_gate, pe->hidden, layer->gate_weight, intermediate_dim, hidden_dim);
-        grpo_matmul_q4(pe->ffn_up, pe->hidden, layer->up_weight, intermediate_dim, hidden_dim);
+        grpo_matmul_any(pe->ffn_gate, pe->hidden, layer->gate_weight, intermediate_dim, hidden_dim, layer->gate_dtype);
+        grpo_matmul_any(pe->ffn_up, pe->hidden, layer->up_weight, intermediate_dim, hidden_dim, layer->up_dtype);
 
         /* SiLU activation on gate and elementwise multiply with up */
         grpo_silu(pe->ffn_gate, intermediate_dim);
@@ -303,7 +432,7 @@ static void policy_forward_token(PolicyEngine *pe, int token, int pos) {
             pe->ffn_gate[i] *= pe->ffn_up[i];
 
         /* Down projection */
-        grpo_matmul_q4(pe->ffn_out, pe->ffn_gate, layer->down_weight, hidden_dim, intermediate_dim);
+        grpo_matmul_any(pe->ffn_out, pe->ffn_gate, layer->down_weight, hidden_dim, intermediate_dim, layer->down_dtype);
 
         /* Residual */
         for (int i = 0; i < hidden_dim; i++)
@@ -315,14 +444,8 @@ static void policy_forward_token(PolicyEngine *pe, int token, int pos) {
     /* Final norm + output projection */
     grpo_rmsnorm(pe->hidden, pe->hidden, pe->output_norm, hidden_dim, pe->gf.rms_eps);
 
-    /* Check if output weight is Q4_K or F32 */
-    GgufTensor *out_tensor = gguf_find_tensor(&pe->gf, "output.weight");
-    if (out_tensor && out_tensor->dtype == GGUF_TYPE_Q4_K) {
-        grpo_matmul_q4(pe->logits, pe->hidden, pe->output_weight, vocab_size, hidden_dim);
-    } else {
-        grpo_matmul_f32(pe->logits, pe->hidden, (const float *)pe->output_weight,
-                       vocab_size, vocab_size, hidden_dim);
-    }
+    /* Output projection using dynamic dispatcher */
+    grpo_matmul_any(pe->logits, pe->hidden, pe->output_weight, vocab_size, hidden_dim, pe->output_dtype);
 }
 
 /* ─── Autoregressive Generation ─── */
