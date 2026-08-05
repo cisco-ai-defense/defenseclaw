@@ -369,7 +369,7 @@
                 },
                 {
                   "id": "C2-DNS-TUNNEL",
-                  "pattern": "(?i)\\b(?:dig|host|nslookup)\\b\\s+[^;\\n]*\\$\\((?:whoami|hostname|id(?:\\s+-u)?|cat\\s+(?:/etc/hostname|/etc/machine-id))\\)[A-Za-z0-9._-]*\\.[A-Za-z0-9-]+(?:\\.[A-Za-z0-9-]+)+",
+                  "pattern": "(?i)\\b(?:dig|host|nslookup|drill)\\b\\s+[^;\\n]*\\$\\((?:whoami|hostname|id(?:\\s+-u)?|cat\\s+(?:/etc/hostname|/etc/machine-id))\\)[A-Za-z0-9._-]*\\.[A-Za-z0-9-]+(?:\\.[A-Za-z0-9-]+)+",
                   "title": "DNS TXT query with high-entropy label (tunneling indicator)",
                   "severity": "HIGH",
                   "confidence": 0.78,
@@ -544,8 +544,8 @@
                 {
                   "id": "CMD-PIPE-CURL",
                   "tool_call_only": true,
-                  "expression": "f.commands.exists(src, src.program in ['invoke-webrequest', 'iwr', 'invoke-restmethod', 'irm'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_FETCH in src.operations && f.commands.exists(dst, dst.program in ['invoke-expression', 'iex'] && src.pipeline_id != 0 && src.pipeline_id == dst.pipeline_id)) && f.commands.exists(src, src.program in ['invoke-webrequest', 'iwr', 'invoke-restmethod', 'irm'] && f.data_flows.exists(d, d.from_command_id == src.id && d.from == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDOUT && d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDIN)) && f.commands.exists(dst, dst.program in ['invoke-expression', 'iex'] && f.data_flows.exists(d, d.to_command_id == dst.id && d.from == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDOUT && d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDIN))",
-                  "pattern": "(?i)\\bcurl\\b\\s+[^|]*\\|\\s*(?:[/\\w.-]+/)?(?:bash|zsh|sh|dash|ksh|python(?:[0-9.]*)?|perl|ruby)\\b",
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['curl', 'curl.exe', 'invoke-webrequest', 'iwr', 'invoke-restmethod', 'irm'] && (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_FETCH in c.operations || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in c.operations))",
+                  "pattern": "(?i)(?:\\bcurl\\b\\s+[^|;\\r\\n]*\\|\\s*(?:[/\\w.-]+/)?(?:bash|zsh|sh|dash|ksh|python(?:[0-9.]*)?|perl|ruby)\\b|\\b(?:invoke-webrequest|iwr|invoke-restmethod|irm)\\b[^|;\\r\\n]*\\|\\s*(?:invoke-expression|iex)\\b)",
                   "title": "curl piped to shell",
                   "severity": "CRITICAL",
                   "confidence": 0.95,
@@ -557,6 +557,7 @@
                 {
                   "id": "CMD-PIPE-WGET",
                   "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['wget', 'wget.exe'] && (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_FETCH in c.operations || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in c.operations))",
                   "pattern": "(?i)\\bwget\\b\\s+[^|]*\\|\\s*(?:[/\\w.-]+/)?(?:bash|zsh|sh|dash|ksh|python(?:[0-9.]*)?|perl|ruby)\\b",
                   "title": "wget piped to shell",
                   "severity": "CRITICAL",
@@ -569,7 +570,8 @@
                 {
                   "id": "CMD-PIPE-BASE64",
                   "tool_call_only": true,
-                  "pattern": "(?i)base64\\s+(?:-[dD]|--decode)\\s*\\|\\s*(?:[/\\w.-]+/)?(?:bash|zsh|sh|dash|ksh|python(?:[0-9.]*)?|perl|ruby)\\b",
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['base64', 'base64.exe'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DECODE in c.operations)",
+                  "pattern": "(?i:\\bbase64\\b)[^|;\\n]*\\s(?:-d+i?|--decode)\\b[^|;\\n]*\\|\\s*(?i:(?:[/\\w.-]+/)?(?:bash|zsh|sh|dash|ksh|python(?:[0-9.]*)?|perl|ruby))\\b",
                   "title": "base64 decode piped to shell",
                   "severity": "CRITICAL",
                   "confidence": 0.95,
@@ -851,6 +853,19 @@
                   ]
                 },
                 {
+                  "id": "integrity.history_tamper",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.argv_complete && (c.program == 'history' || (c.program == 'unset' && 'HISTFILE' in c.argv)))",
+                  "pattern": "(?i)(?:\\bhistory\\b[^;\\n]*\\s-[acnrw]*c[acnrw]*(?:[\\s;&|]|$)|\\bunset\\b[^;\\n]*\\bHISTFILE\\b)",
+                  "title": "Shell history clear or disable",
+                  "severity": "MEDIUM",
+                  "confidence": 0.95,
+                  "tags": [
+                    "integrity",
+                    "defense-evasion"
+                  ]
+                },
+                {
                   "id": "recon.network_sweep",
                   "tool_call_only": true,
                   "expression": "f.commands.exists(c, c.argv_complete && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_NETWORK_SCAN in c.operations && f.network.exists(n, n.command_id == c.id && n.action == defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_SCAN && n.target_kind in [defenseclaw.guardrail.semantic.v1.NetworkTargetKind.NETWORK_TARGET_KIND_MULTI_ADDRESS_CIDR, defenseclaw.guardrail.semantic.v1.NetworkTargetKind.NETWORK_TARGET_KIND_RANGE, defenseclaw.guardrail.semantic.v1.NetworkTargetKind.NETWORK_TARGET_KIND_LIST, defenseclaw.guardrail.semantic.v1.NetworkTargetKind.NETWORK_TARGET_KIND_GENERATED]))",
@@ -866,7 +881,7 @@
                 {
                   "id": "privilege.container_host_escape",
                   "tool_call_only": true,
-                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['docker', 'podman', 'nerdctl'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONTAINER_RUN in c.operations && '--privileged' in c.argv && f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE] && (p.normalized == '/' || p.resolved == '/')))",
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['docker', 'podman', 'nerdctl'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONTAINER_RUN in c.operations && c.argv.exists(a, a == '--privileged' || a.startsWith('--privileged=')) && f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE] && (p.normalized == '/' || p.resolved == '/')))",
                   "pattern": "(?i)\\b(?:docker|podman|nerdctl)\\b[^;\\n]*\\brun\\b[^;\\n]*--privileged\\b[^;\\n]*(?:-v|--volume)(?:=|\\s+)/:[^;\\s]+",
                   "title": "Privileged container with host-root bind",
                   "severity": "CRITICAL",
@@ -958,9 +973,9 @@
                 {
                   "id": "source.git_config_exec",
                   "tool_call_only": true,
-                  "expression": "f.commands.exists(c, c.argv_complete && c.program == 'git' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONFIG_CHANGE in c.operations)",
-                  "pattern": "(?i)\\bgit\\b[^;\\n]*\\bconfig\\b[^;\\n]*(?:alias\\.[A-Za-z0-9._-]+|credential\\.helper|core\\.(?:sshCommand|hooksPath))\\b[^;\\n]+",
-                  "title": "Git executable configuration change",
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program == 'git' && (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONFIG_CHANGE in c.operations || (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_WRITE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE && (p.normalized == '.git/config' || p.resolved.endsWith('/.git/config'))))))",
+                  "pattern": "(?i)\\bgit\\b[^;\\r\\n]*(?:\\bconfig\\b[^;\\r\\n]*(?:alias\\.[A-Za-z0-9._-]+|credential\\.helper|core\\.(?:sshCommand|hooksPath))\\b[^;\\r\\n]+|\\b(?:show|log|diff|whatchanged)\\b[^;\\r\\n]*--output(?:=|\\s+)[^;\\r\\n]*\\.git[/\\\\]config(?:$|[\"'\\s]))",
+                  "title": "Git executable configuration change or overwrite",
                   "severity": "MEDIUM",
                   "confidence": 0.9,
                   "tags": [
@@ -1762,7 +1777,7 @@
                   "id": "persistence.git_hook_write",
                   "tool_call_only": true,
                   "expression": "f.commands.exists(c, f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))",
-                  "pattern": "(?i)(?:^|[/\\\\])\\.git[/\\\\]hooks[/\\\\](?:applypatch-msg|commit-msg|fsmonitor-watchman|post-checkout|post-commit|post-merge|post-receive|post-rewrite|pre-applypatch|pre-commit|pre-push|pre-rebase|pre-receive|prepare-commit-msg|push-to-checkout|update)(?:$|[\"'\\s])",
+                  "pattern": "(?i)(?:(?:^|[/\\\\])\\.git[/\\\\]hooks[/\\\\]|--output(?:=|\\s+)[^;\\r\\n]*\\.git[/\\\\]hooks[/\\\\])(?:applypatch-msg|commit-msg|fsmonitor-watchman|post-checkout|post-commit|post-merge|post-receive|post-rewrite|pre-applypatch|pre-commit|pre-push|pre-rebase|pre-receive|prepare-commit-msg|push-to-checkout|update)(?:$|[\"'\\s])",
                   "title": "Active Git hook mutation",
                   "severity": "MEDIUM",
                   "confidence": 0.92,
@@ -2847,7 +2862,7 @@
                 },
                 {
                   "id": "C2-DNS-TUNNEL",
-                  "pattern": "(?i)\\b(?:dig|host|nslookup)\\b\\s+[^;\\n]*\\$\\((?:whoami|hostname|id(?:\\s+-u)?|cat\\s+(?:/etc/hostname|/etc/machine-id))\\)[A-Za-z0-9._-]*\\.[A-Za-z0-9-]+(?:\\.[A-Za-z0-9-]+)+",
+                  "pattern": "(?i)\\b(?:dig|host|nslookup|drill)\\b\\s+[^;\\n]*\\$\\((?:whoami|hostname|id(?:\\s+-u)?|cat\\s+(?:/etc/hostname|/etc/machine-id))\\)[A-Za-z0-9._-]*\\.[A-Za-z0-9-]+(?:\\.[A-Za-z0-9-]+)+",
                   "title": "DNS TXT query with high-entropy label (tunneling indicator)",
                   "severity": "HIGH",
                   "confidence": 0.78,
@@ -3022,8 +3037,8 @@
                 {
                   "id": "CMD-PIPE-CURL",
                   "tool_call_only": true,
-                  "expression": "f.commands.exists(src, src.program in ['invoke-webrequest', 'iwr', 'invoke-restmethod', 'irm'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_FETCH in src.operations && f.commands.exists(dst, dst.program in ['invoke-expression', 'iex'] && src.pipeline_id != 0 && src.pipeline_id == dst.pipeline_id)) && f.commands.exists(src, src.program in ['invoke-webrequest', 'iwr', 'invoke-restmethod', 'irm'] && f.data_flows.exists(d, d.from_command_id == src.id && d.from == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDOUT && d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDIN)) && f.commands.exists(dst, dst.program in ['invoke-expression', 'iex'] && f.data_flows.exists(d, d.to_command_id == dst.id && d.from == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDOUT && d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDIN))",
-                  "pattern": "(?i)\\bcurl\\b\\s+[^|]*\\|\\s*(?:[/\\w.-]+/)?(?:bash|zsh|sh|dash|ksh|python(?:[0-9.]*)?|perl|ruby)\\b",
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['curl', 'curl.exe', 'invoke-webrequest', 'iwr', 'invoke-restmethod', 'irm'] && (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_FETCH in c.operations || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in c.operations))",
+                  "pattern": "(?i)(?:\\bcurl\\b\\s+[^|;\\r\\n]*\\|\\s*(?:[/\\w.-]+/)?(?:bash|zsh|sh|dash|ksh|python(?:[0-9.]*)?|perl|ruby)\\b|\\b(?:invoke-webrequest|iwr|invoke-restmethod|irm)\\b[^|;\\r\\n]*\\|\\s*(?:invoke-expression|iex)\\b)",
                   "title": "curl piped to shell",
                   "severity": "CRITICAL",
                   "confidence": 0.95,
@@ -3035,6 +3050,7 @@
                 {
                   "id": "CMD-PIPE-WGET",
                   "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['wget', 'wget.exe'] && (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_FETCH in c.operations || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in c.operations))",
                   "pattern": "(?i)\\bwget\\b\\s+[^|]*\\|\\s*(?:[/\\w.-]+/)?(?:bash|zsh|sh|dash|ksh|python(?:[0-9.]*)?|perl|ruby)\\b",
                   "title": "wget piped to shell",
                   "severity": "CRITICAL",
@@ -3047,7 +3063,8 @@
                 {
                   "id": "CMD-PIPE-BASE64",
                   "tool_call_only": true,
-                  "pattern": "(?i)base64\\s+(?:-[dD]|--decode)\\s*\\|\\s*(?:[/\\w.-]+/)?(?:bash|zsh|sh|dash|ksh|python(?:[0-9.]*)?|perl|ruby)\\b",
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['base64', 'base64.exe'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DECODE in c.operations)",
+                  "pattern": "(?i:\\bbase64\\b)[^|;\\n]*\\s(?:-d+i?|--decode)\\b[^|;\\n]*\\|\\s*(?i:(?:[/\\w.-]+/)?(?:bash|zsh|sh|dash|ksh|python(?:[0-9.]*)?|perl|ruby))\\b",
                   "title": "base64 decode piped to shell",
                   "severity": "CRITICAL",
                   "confidence": 0.95,
@@ -3329,6 +3346,19 @@
                   ]
                 },
                 {
+                  "id": "integrity.history_tamper",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.argv_complete && (c.program == 'history' || (c.program == 'unset' && 'HISTFILE' in c.argv)))",
+                  "pattern": "(?i)(?:\\bhistory\\b[^;\\n]*\\s-[acnrw]*c[acnrw]*(?:[\\s;&|]|$)|\\bunset\\b[^;\\n]*\\bHISTFILE\\b)",
+                  "title": "Shell history clear or disable",
+                  "severity": "MEDIUM",
+                  "confidence": 0.95,
+                  "tags": [
+                    "integrity",
+                    "defense-evasion"
+                  ]
+                },
+                {
                   "id": "recon.network_sweep",
                   "tool_call_only": true,
                   "expression": "f.commands.exists(c, c.argv_complete && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_NETWORK_SCAN in c.operations && f.network.exists(n, n.command_id == c.id && n.action == defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_SCAN && n.target_kind in [defenseclaw.guardrail.semantic.v1.NetworkTargetKind.NETWORK_TARGET_KIND_MULTI_ADDRESS_CIDR, defenseclaw.guardrail.semantic.v1.NetworkTargetKind.NETWORK_TARGET_KIND_RANGE, defenseclaw.guardrail.semantic.v1.NetworkTargetKind.NETWORK_TARGET_KIND_LIST, defenseclaw.guardrail.semantic.v1.NetworkTargetKind.NETWORK_TARGET_KIND_GENERATED]))",
@@ -3344,7 +3374,7 @@
                 {
                   "id": "privilege.container_host_escape",
                   "tool_call_only": true,
-                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['docker', 'podman', 'nerdctl'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONTAINER_RUN in c.operations && '--privileged' in c.argv && f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE] && (p.normalized == '/' || p.resolved == '/')))",
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['docker', 'podman', 'nerdctl'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONTAINER_RUN in c.operations && c.argv.exists(a, a == '--privileged' || a.startsWith('--privileged=')) && f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE] && (p.normalized == '/' || p.resolved == '/')))",
                   "pattern": "(?i)\\b(?:docker|podman|nerdctl)\\b[^;\\n]*\\brun\\b[^;\\n]*--privileged\\b[^;\\n]*(?:-v|--volume)(?:=|\\s+)/:[^;\\s]+",
                   "title": "Privileged container with host-root bind",
                   "severity": "CRITICAL",
@@ -3436,9 +3466,9 @@
                 {
                   "id": "source.git_config_exec",
                   "tool_call_only": true,
-                  "expression": "f.commands.exists(c, c.argv_complete && c.program == 'git' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONFIG_CHANGE in c.operations)",
-                  "pattern": "(?i)\\bgit\\b[^;\\n]*\\bconfig\\b[^;\\n]*(?:alias\\.[A-Za-z0-9._-]+|credential\\.helper|core\\.(?:sshCommand|hooksPath))\\b[^;\\n]+",
-                  "title": "Git executable configuration change",
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program == 'git' && (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONFIG_CHANGE in c.operations || (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_WRITE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE && (p.normalized == '.git/config' || p.resolved.endsWith('/.git/config'))))))",
+                  "pattern": "(?i)\\bgit\\b[^;\\r\\n]*(?:\\bconfig\\b[^;\\r\\n]*(?:alias\\.[A-Za-z0-9._-]+|credential\\.helper|core\\.(?:sshCommand|hooksPath))\\b[^;\\r\\n]+|\\b(?:show|log|diff|whatchanged)\\b[^;\\r\\n]*--output(?:=|\\s+)[^;\\r\\n]*\\.git[/\\\\]config(?:$|[\"'\\s]))",
+                  "title": "Git executable configuration change or overwrite",
                   "severity": "MEDIUM",
                   "confidence": 0.9,
                   "tags": [
@@ -4234,7 +4264,7 @@
                   "id": "persistence.git_hook_write",
                   "tool_call_only": true,
                   "expression": "f.commands.exists(c, f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))",
-                  "pattern": "(?i)(?:^|[/\\\\])\\.git[/\\\\]hooks[/\\\\](?:applypatch-msg|commit-msg|fsmonitor-watchman|post-checkout|post-commit|post-merge|post-receive|post-rewrite|pre-applypatch|pre-commit|pre-push|pre-rebase|pre-receive|prepare-commit-msg|push-to-checkout|update)(?:$|[\"'\\s])",
+                  "pattern": "(?i)(?:(?:^|[/\\\\])\\.git[/\\\\]hooks[/\\\\]|--output(?:=|\\s+)[^;\\r\\n]*\\.git[/\\\\]hooks[/\\\\])(?:applypatch-msg|commit-msg|fsmonitor-watchman|post-checkout|post-commit|post-merge|post-receive|post-rewrite|pre-applypatch|pre-commit|pre-push|pre-rebase|pre-receive|prepare-commit-msg|push-to-checkout|update)(?:$|[\"'\\s])",
                   "title": "Active Git hook mutation",
                   "severity": "MEDIUM",
                   "confidence": 0.92,
@@ -5221,7 +5251,7 @@
                 },
                 {
                   "id": "C2-DNS-TUNNEL",
-                  "pattern": "(?i)\\b(?:dig|host|nslookup)\\b\\s+[^;\\n]*\\$\\((?:whoami|hostname|id(?:\\s+-u)?|cat\\s+(?:/etc/hostname|/etc/machine-id))\\)[A-Za-z0-9._-]*\\.[A-Za-z0-9-]+(?:\\.[A-Za-z0-9-]+)+",
+                  "pattern": "(?i)\\b(?:dig|host|nslookup|drill)\\b\\s+[^;\\n]*\\$\\((?:whoami|hostname|id(?:\\s+-u)?|cat\\s+(?:/etc/hostname|/etc/machine-id))\\)[A-Za-z0-9._-]*\\.[A-Za-z0-9-]+(?:\\.[A-Za-z0-9-]+)+",
                   "title": "DNS TXT query with high-entropy label (tunneling indicator)",
                   "severity": "HIGH",
                   "confidence": 0.78,
@@ -5396,8 +5426,8 @@
                 {
                   "id": "CMD-PIPE-CURL",
                   "tool_call_only": true,
-                  "expression": "f.commands.exists(src, src.program in ['invoke-webrequest', 'iwr', 'invoke-restmethod', 'irm'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_FETCH in src.operations && f.commands.exists(dst, dst.program in ['invoke-expression', 'iex'] && src.pipeline_id != 0 && src.pipeline_id == dst.pipeline_id)) && f.commands.exists(src, src.program in ['invoke-webrequest', 'iwr', 'invoke-restmethod', 'irm'] && f.data_flows.exists(d, d.from_command_id == src.id && d.from == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDOUT && d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDIN)) && f.commands.exists(dst, dst.program in ['invoke-expression', 'iex'] && f.data_flows.exists(d, d.to_command_id == dst.id && d.from == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDOUT && d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDIN))",
-                  "pattern": "(?i)\\bcurl\\b\\s+[^|]*\\|\\s*(?:[/\\w.-]+/)?(?:bash|zsh|sh|dash|ksh|python(?:[0-9.]*)?|perl|ruby)\\b",
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['curl', 'curl.exe', 'invoke-webrequest', 'iwr', 'invoke-restmethod', 'irm'] && (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_FETCH in c.operations || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in c.operations))",
+                  "pattern": "(?i)(?:\\bcurl\\b\\s+[^|;\\r\\n]*\\|\\s*(?:[/\\w.-]+/)?(?:bash|zsh|sh|dash|ksh|python(?:[0-9.]*)?|perl|ruby)\\b|\\b(?:invoke-webrequest|iwr|invoke-restmethod|irm)\\b[^|;\\r\\n]*\\|\\s*(?:invoke-expression|iex)\\b)",
                   "title": "curl piped to shell",
                   "severity": "CRITICAL",
                   "confidence": 0.95,
@@ -5409,6 +5439,7 @@
                 {
                   "id": "CMD-PIPE-WGET",
                   "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['wget', 'wget.exe'] && (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_FETCH in c.operations || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in c.operations))",
                   "pattern": "(?i)\\bwget\\b\\s+[^|]*\\|\\s*(?:[/\\w.-]+/)?(?:bash|zsh|sh|dash|ksh|python(?:[0-9.]*)?|perl|ruby)\\b",
                   "title": "wget piped to shell",
                   "severity": "CRITICAL",
@@ -5421,7 +5452,8 @@
                 {
                   "id": "CMD-PIPE-BASE64",
                   "tool_call_only": true,
-                  "pattern": "(?i)base64\\s+(?:-[dD]|--decode)\\s*\\|\\s*(?:[/\\w.-]+/)?(?:bash|zsh|sh|dash|ksh|python(?:[0-9.]*)?|perl|ruby)\\b",
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['base64', 'base64.exe'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DECODE in c.operations)",
+                  "pattern": "(?i:\\bbase64\\b)[^|;\\n]*\\s(?:-d+i?|--decode)\\b[^|;\\n]*\\|\\s*(?i:(?:[/\\w.-]+/)?(?:bash|zsh|sh|dash|ksh|python(?:[0-9.]*)?|perl|ruby))\\b",
                   "title": "base64 decode piped to shell",
                   "severity": "CRITICAL",
                   "confidence": 0.95,
@@ -5703,6 +5735,19 @@
                   ]
                 },
                 {
+                  "id": "integrity.history_tamper",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.argv_complete && (c.program == 'history' || (c.program == 'unset' && 'HISTFILE' in c.argv)))",
+                  "pattern": "(?i)(?:\\bhistory\\b[^;\\n]*\\s-[acnrw]*c[acnrw]*(?:[\\s;&|]|$)|\\bunset\\b[^;\\n]*\\bHISTFILE\\b)",
+                  "title": "Shell history clear or disable",
+                  "severity": "MEDIUM",
+                  "confidence": 0.95,
+                  "tags": [
+                    "integrity",
+                    "defense-evasion"
+                  ]
+                },
+                {
                   "id": "recon.network_sweep",
                   "tool_call_only": true,
                   "expression": "f.commands.exists(c, c.argv_complete && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_NETWORK_SCAN in c.operations && f.network.exists(n, n.command_id == c.id && n.action == defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_SCAN && n.target_kind in [defenseclaw.guardrail.semantic.v1.NetworkTargetKind.NETWORK_TARGET_KIND_MULTI_ADDRESS_CIDR, defenseclaw.guardrail.semantic.v1.NetworkTargetKind.NETWORK_TARGET_KIND_RANGE, defenseclaw.guardrail.semantic.v1.NetworkTargetKind.NETWORK_TARGET_KIND_LIST, defenseclaw.guardrail.semantic.v1.NetworkTargetKind.NETWORK_TARGET_KIND_GENERATED]))",
@@ -5718,7 +5763,7 @@
                 {
                   "id": "privilege.container_host_escape",
                   "tool_call_only": true,
-                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['docker', 'podman', 'nerdctl'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONTAINER_RUN in c.operations && '--privileged' in c.argv && f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE] && (p.normalized == '/' || p.resolved == '/')))",
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['docker', 'podman', 'nerdctl'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONTAINER_RUN in c.operations && c.argv.exists(a, a == '--privileged' || a.startsWith('--privileged=')) && f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE] && (p.normalized == '/' || p.resolved == '/')))",
                   "pattern": "(?i)\\b(?:docker|podman|nerdctl)\\b[^;\\n]*\\brun\\b[^;\\n]*--privileged\\b[^;\\n]*(?:-v|--volume)(?:=|\\s+)/:[^;\\s]+",
                   "title": "Privileged container with host-root bind",
                   "severity": "CRITICAL",
@@ -5810,9 +5855,9 @@
                 {
                   "id": "source.git_config_exec",
                   "tool_call_only": true,
-                  "expression": "f.commands.exists(c, c.argv_complete && c.program == 'git' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONFIG_CHANGE in c.operations)",
-                  "pattern": "(?i)\\bgit\\b[^;\\n]*\\bconfig\\b[^;\\n]*(?:alias\\.[A-Za-z0-9._-]+|credential\\.helper|core\\.(?:sshCommand|hooksPath))\\b[^;\\n]+",
-                  "title": "Git executable configuration change",
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program == 'git' && (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONFIG_CHANGE in c.operations || (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_WRITE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE && (p.normalized == '.git/config' || p.resolved.endsWith('/.git/config'))))))",
+                  "pattern": "(?i)\\bgit\\b[^;\\r\\n]*(?:\\bconfig\\b[^;\\r\\n]*(?:alias\\.[A-Za-z0-9._-]+|credential\\.helper|core\\.(?:sshCommand|hooksPath))\\b[^;\\r\\n]+|\\b(?:show|log|diff|whatchanged)\\b[^;\\r\\n]*--output(?:=|\\s+)[^;\\r\\n]*\\.git[/\\\\]config(?:$|[\"'\\s]))",
+                  "title": "Git executable configuration change or overwrite",
                   "severity": "MEDIUM",
                   "confidence": 0.9,
                   "tags": [
@@ -6618,7 +6663,7 @@
                   "id": "persistence.git_hook_write",
                   "tool_call_only": true,
                   "expression": "f.commands.exists(c, f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))",
-                  "pattern": "(?i)(?:^|[/\\\\])\\.git[/\\\\]hooks[/\\\\](?:applypatch-msg|commit-msg|fsmonitor-watchman|post-checkout|post-commit|post-merge|post-receive|post-rewrite|pre-applypatch|pre-commit|pre-push|pre-rebase|pre-receive|prepare-commit-msg|push-to-checkout|update)(?:$|[\"'\\s])",
+                  "pattern": "(?i)(?:(?:^|[/\\\\])\\.git[/\\\\]hooks[/\\\\]|--output(?:=|\\s+)[^;\\r\\n]*\\.git[/\\\\]hooks[/\\\\])(?:applypatch-msg|commit-msg|fsmonitor-watchman|post-checkout|post-commit|post-merge|post-receive|post-rewrite|pre-applypatch|pre-commit|pre-push|pre-rebase|pre-receive|prepare-commit-msg|push-to-checkout|update)(?:$|[\"'\\s])",
                   "title": "Active Git hook mutation",
                   "severity": "MEDIUM",
                   "confidence": 0.92,

@@ -95,6 +95,7 @@ var ruleCapabilities = map[string]ToolCapabilityClass{
 	"exec.reverse_tunnel":                       CapNetworkFetch,
 	"exec.agent_runtime_bypass_flags":           CapExecShell,
 	"integrity.git_hooks_bypass":                CapExecShell,
+	"integrity.history_tamper":                  CapExecShell,
 	"recon.network_sweep":                       CapNetworkFetch,
 	"privilege.container_host_escape":           CapExecShell,
 	"privilege.container_runtime_socket_access": CapNetworkFetch,

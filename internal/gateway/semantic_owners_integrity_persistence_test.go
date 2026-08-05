@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 )
 
 func TestSemanticIntegrityPersistenceOwnerContract(t *testing.T) {
@@ -34,6 +35,7 @@ func TestSemanticIntegrityPersistenceOwnerContract(t *testing.T) {
 		"PATH-HISTORY",
 		"PATH-SSH-DIR",
 		"integrity.git_hooks_bypass",
+		"integrity.history_tamper",
 		"persistence.git_hook_write",
 		"persistence.shell_profile_write",
 		"persistence.ssh_authorized_keys_command",
@@ -73,6 +75,22 @@ func TestSemanticIntegrityPersistenceOwnerContract(t *testing.T) {
 		"persistence.ssh_authorized_keys_command",
 	).fallbackAliasesOnMatch; !slices.Equal(got, []string{"PATH-SSH-DIR"}) {
 		t.Fatalf("integrated N23 fallback aliases = %v", got)
+	}
+	history := semanticOwnerForRule("integrity.history_tamper")
+	if slices.Contains(history.claimedIDs(true), "PATH-HISTORY") {
+		t.Fatal("command history owner claimed the filesystem history rule")
+	}
+}
+
+func TestSemanticHistoryTamperExpressionCompiles(t *testing.T) {
+	t.Parallel()
+
+	compiler, err := semantic.NewCompiler()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, code := compiler.Compile(semanticHistoryTamperExpression); code != semantic.CompileOK {
+		t.Fatalf("compile code = %q", code)
 	}
 }
 
@@ -143,17 +161,44 @@ func TestIntegrityPersistenceCommandPrerequisites(t *testing.T) {
 		{"git remote list", "git remote -v", "", "source.git_remote_tamper", false},
 		{"git executable config", "git config core.sshCommand /tmp/wrap-ssh", "", "source.git_config_exec", true},
 		{"git shell alias", "git config alias.deploy '!sh deploy.sh'", "", "source.git_config_exec", true},
+		{"git read overwrites active config", "git show --output=.git/config HEAD", "", "source.git_config_exec", true},
+		{"git read overwrites config after chdir", "git -C project show --output=.git/config HEAD", "", "source.git_config_exec", true},
+		{"git read overwrites config after joined chdir", "git -Cproject show --output=.git/config HEAD", "", "source.git_config_exec", true},
+		{"git read overwrites explicit git dir config", "git --git-dir=.git show --output=.git/config HEAD", "", "source.git_config_exec", true},
+		{"git read overwrites separate git dir config", "git --git-dir .git show --output=.git/config HEAD", "", "source.git_config_exec", true},
+		{"PowerShell git read overwrites config after chdir", `git -C project show --output=.git\config HEAD`, actionfacts.DialectPowerShell, "source.git_config_exec", true},
+		{"git read targets different git dir", "git --git-dir=other.git show --output=.git/config HEAD", "", "source.git_config_exec", false},
+		{"git bare read does not overwrite active config", "git --bare show --output=.git/config HEAD", "", "source.git_config_exec", false},
+		{"git read overwrites hook after chdir", "git -C project diff --output=.git/hooks/pre-commit HEAD^ HEAD", "", "persistence.git_hook_write", true},
+		{"PowerShell git read overwrites hook after chdir", `git -C project diff --output=.git\hooks\pre-commit HEAD^ HEAD`, actionfacts.DialectPowerShell, "persistence.git_hook_write", true},
+		{"git bare read does not overwrite active hook", "git --bare diff --output=.git/hooks/pre-commit HEAD^ HEAD", "", "persistence.git_hook_write", false},
+		{"git read writes ordinary output", "git show --output=release.txt HEAD", "", "source.git_config_exec", false},
 		{"git benign config", "git config user.email dev@example.invalid", "", "source.git_config_exec", false},
 		{"git safe credential helper", "git config credential.helper '!gh auth git-credential'", "", "source.git_config_exec", false},
+		{"history read", "history", "", "integrity.history_tamper", false},
+		{"history clear mention", "printf '%s\\n' 'history -c'", "", "integrity.history_tamper", false},
+		{"unset history file", "unset HISTFILE", "", "integrity.history_tamper", true},
+		{"unset history file with sibling", "unset HISTSIZE HISTFILE", "", "integrity.history_tamper", true},
+		{"unset history variable mode", "unset -v HISTFILE", "", "integrity.history_tamper", true},
+		{"unset history after delimiter", "unset -- HISTFILE", "", "integrity.history_tamper", true},
+		{"unset function", "unset -f HISTFILE", "", "integrity.history_tamper", false},
+		{"unset function and variable is invalid", "unset -fv HISTFILE", "", "integrity.history_tamper", false},
+		{"unset other variable", "unset HISTSIZE", "", "integrity.history_tamper", false},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
+			cwd := "/repo"
+			activeHome := "/home/alice"
+			if test.dialect == actionfacts.DialectPowerShell {
+				cwd = `C:\repo`
+				activeHome = `C:\Users\alice`
+			}
 			facts := analyzeIntegrityCommand(
 				t,
 				test.command,
 				test.dialect,
-				"/repo",
-				"/home/alice",
+				cwd,
+				activeHome,
 			)
 			owner := semanticIntegrityPersistenceOwners[test.ownerID]
 			if got := owner.prerequisite(facts); got != test.want {
@@ -200,6 +245,131 @@ func TestIntegrityPersistenceCommandPrerequisites(t *testing.T) {
 		configOwner.prerequisite(escapedConfig) ||
 		configOwner.suppressFallback(escapedConfig) {
 		t.Fatal("git config indirection did not distinguish fixture from live fallback")
+	}
+}
+
+func TestHistoryTamperBashStyleClearGrammarIsDetectionOnly(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		command string
+		want    bool
+	}{
+		{"history -c", true},
+		{"history -a -c", true},
+		{"history -ac", true},
+		{"history -w -c", true},
+		{"history -cw /dev/null", true},
+		{"history -wc /dev/null", true},
+		{"history -c | cat", false},
+	} {
+		test := test
+		t.Run(test.command, func(t *testing.T) {
+			t.Parallel()
+			facts := actionfacts.Analyze(actionfacts.Input{
+				Tool:    "shell",
+				Command: test.command,
+			})
+			if facts.Authoritative() {
+				t.Fatalf("shell-specific history grammar became authoritative: %+v", facts)
+			}
+			if got := historyTamperPrerequisite(facts); got != test.want {
+				t.Fatalf("prerequisite=%t, want %t; facts=%+v", got, test.want, facts)
+			}
+		})
+	}
+	if contract := exactFallbackContracts["integrity.history_tamper"]; !contract.detectionOnly {
+		t.Fatal("shell-specific history fallback must remain detection-only")
+	}
+}
+
+func TestIntegrityOptionParsersRejectMissingOperands(t *testing.T) {
+	t.Parallel()
+
+	if unsetHistoryFileVariable(nil) {
+		t.Fatal("empty unset argv was accepted")
+	}
+	for _, argv := range [][]string{
+		{"git", "--git-dir=", "status"},
+		{"git", "--git-dir", "", "status"},
+	} {
+		command := actionfacts.CommandFact{
+			Program:      "git",
+			Executable:   "git",
+			Argv:         argv,
+			ArgvComplete: true,
+			Effect:       actionfacts.EffectExecute,
+		}
+		if invocation, ok := parseIntegrityGitInvocation(command); ok {
+			t.Fatalf("argv=%v parsed as %+v", argv, invocation)
+		}
+	}
+}
+
+func TestHistoryTamperRejectsIsolatedShellContexts(t *testing.T) {
+	t.Parallel()
+
+	for _, command := range []string{
+		`printf '%s\n' "$(unset HISTFILE)"`,
+		`(history -c)`,
+		`(unset HISTFILE)`,
+		`history -c &`,
+	} {
+		command := command
+		t.Run(command, func(t *testing.T) {
+			t.Parallel()
+			facts := actionfacts.Analyze(actionfacts.Input{
+				Tool:       "shell",
+				Command:    command,
+				CWD:        "/repo",
+				ActiveHome: "/home/alice",
+			})
+			if facts.Authoritative() {
+				t.Fatalf("isolated shell context unexpectedly authoritative: %+v", facts)
+			}
+			if historyTamperPrerequisite(facts) {
+				t.Fatalf("isolated history mutation was owned: %+v", facts)
+			}
+		})
+	}
+}
+
+func TestHistoryTamperRejectsExecutablePaths(t *testing.T) {
+	t.Parallel()
+
+	for _, command := range []string{
+		`/usr/bin/history -c`,
+		`/usr/bin/unset HISTFILE`,
+	} {
+		command := command
+		t.Run(command, func(t *testing.T) {
+			t.Parallel()
+			facts := actionfacts.Analyze(actionfacts.Input{
+				Tool:    "shell",
+				Command: command,
+			})
+			if facts.Authoritative() {
+				t.Fatalf("shell-builtin path unexpectedly authoritative: %+v", facts)
+			}
+			if historyTamperPrerequisite(facts) {
+				t.Fatalf("shell-builtin path was owned: %+v", facts)
+			}
+		})
+	}
+}
+
+func TestHistoryTamperProvesDirectClearWithPartialSibling(t *testing.T) {
+	t.Parallel()
+
+	facts := actionfacts.Analyze(actionfacts.Input{
+		Tool:    "shell",
+		Command: "history -c; future-command --unknown-mode",
+	})
+	if facts.Authoritative() {
+		t.Fatalf("unknown sibling unexpectedly authoritative: %+v", facts)
+	}
+	if !historyTamperPrerequisite(facts) {
+		t.Fatalf("direct history clear was not proven: %+v", facts)
 	}
 }
 
@@ -255,6 +425,28 @@ func TestIntegrityPersistenceMutationPathPrecision(t *testing.T) {
 				t.Fatalf("definite safe negative retained fallback; facts=%+v", facts)
 			}
 		})
+	}
+}
+
+func TestHistoryTamperDefersToActiveHistoryPathOwner(t *testing.T) {
+	facts := actionfacts.Analyze(actionfacts.Input{
+		Tool:       "shell",
+		Command:    "history -c > /home/alice/.bash_history",
+		CWD:        "/repo",
+		ActiveHome: "/home/alice",
+	})
+	if facts.Parse.Status != actionfacts.StatusPartial || facts.Authoritative() {
+		t.Fatalf("shell-specific history grammar was not partial: %+v", facts)
+	}
+	commandOwner := semanticIntegrityPersistenceOwners["integrity.history_tamper"]
+	pathOwner := semanticIntegrityPersistenceOwners["PATH-HISTORY"]
+	if commandOwner.prerequisite(facts) || !pathOwner.prerequisite(facts) {
+		t.Fatalf(
+			"history ownership split = command:%t path:%t; facts=%+v",
+			commandOwner.prerequisite(facts),
+			pathOwner.prerequisite(facts),
+			facts,
+		)
 	}
 }
 
@@ -397,6 +589,26 @@ func TestIntegrityPersistenceEndpointPrecision(t *testing.T) {
 	)
 	if !socketOwner.prerequisite(socket) {
 		t.Fatalf("runtime socket connect was not owned: %+v", socket)
+	}
+	socketMount := analyzeIntegrityCommand(
+		t,
+		"docker run -v /var/run/docker.sock:/var/run/docker.sock alpine",
+		"",
+		"/repo",
+		"/home/alice",
+	)
+	if !socketOwner.prerequisite(socketMount) {
+		t.Fatalf("runtime socket bind was not owned: %+v", socketMount)
+	}
+	rootlessDockerMount := analyzeIntegrityCommand(
+		t,
+		"docker run -v /run/user/1000/docker.sock:/run/docker.sock alpine",
+		"",
+		"/repo",
+		"/home/alice",
+	)
+	if !socketOwner.prerequisite(rootlessDockerMount) {
+		t.Fatalf("rootless docker socket bind was not owned: %+v", rootlessDockerMount)
 	}
 	socketRead := analyzeIntegrityCommand(
 		t,

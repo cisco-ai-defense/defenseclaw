@@ -234,14 +234,20 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 			return dnsSubstitutionFallbackProof(facts)
 		},
 	},
+	"integrity.history_tamper": {
+		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return historyTamperPrerequisite(facts)
+		},
+		detectionOnly: true,
+	},
 	"CMD-PIPE-CURL": {
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
-			return stdinInterpreterPipelineFallbackProof(
-				facts,
-				actionfacts.OperationFetch,
-				"curl",
-				"curl.exe",
-			)
+			return curlDownloadExecPrerequisite(facts)
+		},
+	},
+	"CMD-WIN-IWR-IEX": {
+		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return powerShellDownloadExecPrerequisite(facts)
 		},
 	},
 	"CMD-PIPE-WGET": {
@@ -305,6 +311,16 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 			return gitHooksBypassPrerequisite(facts)
 		},
 	},
+	"source.git_config_exec": {
+		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return gitConfigExecPrerequisite(facts)
+		},
+	},
+	"persistence.git_hook_write": {
+		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return semanticIntegrityPersistenceOwners["persistence.git_hook_write"].prerequisite(facts)
+		},
+	},
 	"CMD-SUDO": {
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
 			return semanticReconImpactOwners["CMD-SUDO"].prerequisite(facts)
@@ -313,6 +329,11 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 	"privilege.host_namespace_entry": {
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
 			return hostNamespaceEntryFallbackProof(facts)
+		},
+	},
+	"privilege.container_host_escape": {
+		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return semanticReconImpactOwners["privilege.container_host_escape"].prerequisite(facts)
 		},
 	},
 	"lateral.workload_exec": {
@@ -346,16 +367,17 @@ func stdinInterpreterPipelineFallbackProof(
 	sourcePrograms ...string,
 ) bool {
 	for _, source := range facts.Commands {
-		if source.Effect != actionfacts.EffectExecute ||
-			source.PipelineID == 0 ||
+		if source.PipelineID == 0 ||
 			!oneOfFold(source.Program, sourcePrograms...) ||
-			!hasOperation(source, operation) {
+			!hasOperation(source, operation) &&
+				!(operation == actionfacts.OperationFetch &&
+					hasOperation(source, actionfacts.OperationUpload)) ||
+			!actionfacts.ProvesPOSIXPipelineInterpreterSource(source) {
 			continue
 		}
 		for _, sink := range facts.Commands {
-			if sink.Effect == actionfacts.EffectExecute &&
-				sink.PipelineID == source.PipelineID &&
-				exactStdinInterpreterSink(sink) &&
+			if sink.PipelineID == source.PipelineID &&
+				actionfacts.ProvesPOSIXStdinInterpreter(sink) &&
 				hasCommandDataFlow(
 					facts,
 					source.ID,
@@ -370,59 +392,12 @@ func stdinInterpreterPipelineFallbackProof(
 	return false
 }
 
-func exactStdinInterpreterSink(command actionfacts.CommandFact) bool {
-	if !command.ArgvComplete || len(command.Argv) == 0 {
-		return false
-	}
-	program := strings.ToLower(command.Program)
-	if oneOfFold(program, "python", "python2", "python3", "perl", "ruby") ||
-		versionedPythonProgram(program) {
-		return len(command.Argv) == 1 ||
-			len(command.Argv) == 2 && command.Argv[1] == "-"
-	}
-	if !oneOfFold(program, "sh", "bash", "zsh", "dash", "ksh") {
-		return false
-	}
-	for index := 1; index < len(command.Argv); index++ {
-		argument := command.Argv[index]
-		if argument == "-s" || argument == "--" || argument == "-" {
-			continue
-		}
-		if !strings.HasPrefix(argument, "-") &&
-			!strings.HasPrefix(argument, "+") {
-			return false
-		}
-		lower := strings.ToLower(argument)
-		if lower == "--command" || strings.HasPrefix(lower, "--command=") ||
-			strings.HasPrefix(argument, "-") &&
-				!strings.HasPrefix(argument, "--") &&
-				strings.Contains(argument[1:], "c") {
-			return false
-		}
-		// Options that take a following value can make that value a local
-		// script or command source. Leave those forms on the unsupported lane.
-		switch argument {
-		case "-O", "+O", "-o", "+o", "--rcfile", "--init-file":
-			return false
-		}
-	}
-	return true
+func exactPipelineSourceStdout(command actionfacts.CommandFact) bool {
+	return actionfacts.ProvesPOSIXPipelineInterpreterSource(command)
 }
 
-func versionedPythonProgram(program string) bool {
-	if !strings.HasPrefix(program, "python") {
-		return false
-	}
-	suffix := strings.TrimPrefix(program, "python")
-	if suffix == "" {
-		return true
-	}
-	for _, char := range suffix {
-		if (char < '0' || char > '9') && char != '.' {
-			return false
-		}
-	}
-	return true
+func exactStdinInterpreterSink(command actionfacts.CommandFact) bool {
+	return actionfacts.ProvesPOSIXStdinInterpreter(command)
 }
 
 func reverseTunnelFallbackProof(facts actionfacts.Facts) bool {
@@ -501,7 +476,7 @@ func exactReverseTunnelArgv(command actionfacts.CommandFact) bool {
 func dnsSubstitutionFallbackProof(facts actionfacts.Facts) bool {
 	for _, destination := range facts.Commands {
 		if destination.Effect == actionfacts.EffectPreview ||
-			!oneOfFold(destination.Program, "dig", "host", "nslookup") {
+			!oneOfFold(destination.Program, "dig", "host", "nslookup", "drill") {
 			continue
 		}
 		for _, source := range facts.Commands {
@@ -661,14 +636,20 @@ func filterExactFallbackFindings(
 	enforcementCapable bool,
 ) []RuleFinding {
 	suppressAuthorizedKeysPathFallback := false
+	suppressPowerShellDownloadAlias := false
 	for _, finding := range findings {
-		if finding.RuleID != "persistence.ssh_authorized_keys_command" {
-			continue
-		}
-		contract := exactFallbackContracts[finding.RuleID]
-		if contract.proves != nil && contract.proves(input, facts) {
-			suppressAuthorizedKeysPathFallback = true
-			break
+		switch finding.RuleID {
+		case "persistence.ssh_authorized_keys_command":
+			contract := exactFallbackContracts[finding.RuleID]
+			if contract.proves != nil && contract.proves(input, facts) {
+				suppressAuthorizedKeysPathFallback = true
+			}
+		case "CMD-PIPE-CURL":
+			contract := exactFallbackContracts[finding.RuleID]
+			if contract.proves != nil && contract.proves(input, facts) &&
+				powerShellDownloadExecPrerequisite(facts) {
+				suppressPowerShellDownloadAlias = true
+			}
 		}
 	}
 	filtered := findings[:0]
@@ -676,6 +657,10 @@ func filterExactFallbackFindings(
 	for _, finding := range findings {
 		if suppressAuthorizedKeysPathFallback &&
 			finding.RuleID == "PATH-SSH-DIR" {
+			continue
+		}
+		if suppressPowerShellDownloadAlias &&
+			finding.RuleID == "CMD-WIN-IWR-IEX" {
 			continue
 		}
 		contract, exact := exactFallbackContracts[finding.RuleID]

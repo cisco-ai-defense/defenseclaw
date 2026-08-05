@@ -3177,6 +3177,21 @@ func windowsClassifyGit(
 		classifyGit(builder.out, command)
 		return
 	}
+	if complete && (subcommand == "show" || subcommand == "log" ||
+		subcommand == "diff" || subcommand == "whatchanged") {
+		for _, arg := range args {
+			if arg.expands || arg.wildcard || arg.value == "" {
+				builder.out.markPartial(IssueUnknownOperandGrammar)
+				return
+			}
+		}
+		// Git's read-command --output grammar is shell-independent once the
+		// Windows parser has proved that every word is static. Reuse the exact
+		// argv owner so PowerShell and CMD preserve the same -C and --git-dir
+		// semantics as structured and POSIX invocations.
+		classifyGit(builder.out, command)
+		return
+	}
 	valid := true
 	index := 0
 	for index < len(args) {

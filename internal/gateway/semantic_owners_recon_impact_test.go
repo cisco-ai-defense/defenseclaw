@@ -352,6 +352,51 @@ func TestSemanticReconImpactPrerequisiteBoundaries(t *testing.T) {
 			want:   true,
 		},
 		{
+			name:   "privileged true root bind",
+			ruleID: "privilege.container_host_escape",
+			input:  reconImpactCommand("docker run --privileged=true -v /:/host ubuntu:24.04"),
+			want:   true,
+		},
+		{
+			name:   "privileged uppercase true root bind",
+			ruleID: "privilege.container_host_escape",
+			input:  reconImpactCommand("docker run --privileged=TRUE -v /:/host ubuntu:24.04"),
+			want:   true,
+		},
+		{
+			name:   "privileged numeric true root bind",
+			ruleID: "privilege.container_host_escape",
+			input:  reconImpactCommand("docker run --privileged=1 -v /:/host ubuntu:24.04"),
+			want:   true,
+		},
+		{
+			name:   "privileged false root bind",
+			ruleID: "privilege.container_host_escape",
+			input:  reconImpactCommand("docker run --privileged=false -v /:/host ubuntu:24.04"),
+		},
+		{
+			name:   "privileged numeric false root bind",
+			ruleID: "privilege.container_host_escape",
+			input:  reconImpactCommand("docker run --privileged=0 -v /:/host ubuntu:24.04"),
+		},
+		{
+			name:   "privileged final false root bind",
+			ruleID: "privilege.container_host_escape",
+			input:  reconImpactCommand("docker run --privileged=true --privileged=false -v /:/host ubuntu:24.04"),
+		},
+		{
+			name:   "privileged final true root bind",
+			ruleID: "privilege.container_host_escape",
+			input:  reconImpactCommand("docker run --privileged=false --privileged=t -v /:/host ubuntu:24.04"),
+			want:   true,
+		},
+		{
+			name:   "privileged invalid boolean root bind",
+			ruleID: "privilege.container_host_escape",
+			input:  reconImpactCommand("docker run --privileged=maybe -v /:/host ubuntu:24.04"),
+			status: actionfacts.StatusPartial,
+		},
+		{
 			name:   "option text after image",
 			ruleID: "privilege.container_host_escape",
 			input:  reconImpactCommand("docker run -v /:/host ubuntu:24.04 --privileged"),

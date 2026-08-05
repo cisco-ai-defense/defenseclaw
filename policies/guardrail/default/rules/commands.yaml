@@ -53,28 +53,23 @@ rules:
   - id: CMD-PIPE-CURL
     tool_call_only: true
     expression: >-
-      f.commands.exists(src, src.program in ['invoke-webrequest', 'iwr', 'invoke-restmethod', 'irm'] &&
-      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_FETCH in src.operations &&
-      f.commands.exists(dst, dst.program in ['invoke-expression', 'iex'] && src.pipeline_id != 0 &&
-      src.pipeline_id == dst.pipeline_id)) &&
-      f.commands.exists(src, src.program in ['invoke-webrequest', 'iwr', 'invoke-restmethod', 'irm'] &&
-      f.data_flows.exists(d, d.from_command_id == src.id &&
-      d.from == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDOUT &&
-      d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDIN)) &&
-      f.commands.exists(dst, dst.program in ['invoke-expression', 'iex'] &&
-      f.data_flows.exists(d, d.to_command_id == dst.id &&
-      d.from == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDOUT &&
-      d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDIN))
-    # Closes (parity with strict/rules/commands.yaml):
-    # also match absolute shell paths like `/bin/sh`, `/bin/bash`,
-    # `/usr/bin/zsh`, plus the bare `sh` / `bash` / `zsh` forms.
-    pattern: '(?i)\bcurl\b\s+[^|]*\|\s*(?:[/\w.-]+/)?(?:bash|zsh|sh|dash|ksh|python(?:[0-9.]*)?|perl|ruby)\b'
+      f.commands.exists(c, c.argv_complete &&
+      c.program in ['curl', 'curl.exe', 'invoke-webrequest', 'iwr', 'invoke-restmethod', 'irm'] &&
+      (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_FETCH in c.operations ||
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in c.operations))
+    # Candidate discovery covers POSIX curl pipelines and PowerShell web-cmdlet
+    # aliases. The exact fallback contract proves stdout-to-interpreter flow.
+    pattern: '(?i)(?:\bcurl\b\s+[^|;\r\n]*\|\s*(?:[/\w.-]+/)?(?:bash|zsh|sh|dash|ksh|python(?:[0-9.]*)?|perl|ruby)\b|\b(?:invoke-webrequest|iwr|invoke-restmethod|irm)\b[^|;\r\n]*\|\s*(?:invoke-expression|iex)\b)'
     title: "curl piped to shell"
     severity: CRITICAL
     confidence: 0.95
     tags: [execution, download-exec]
   - id: CMD-PIPE-WGET
     tool_call_only: true
+    expression: >-
+      f.commands.exists(c, c.argv_complete && c.program in ['wget', 'wget.exe'] &&
+      (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_FETCH in c.operations ||
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in c.operations))
     # Closes (parity with CMD-PIPE-CURL above).
     pattern: '(?i)\bwget\b\s+[^|]*\|\s*(?:[/\w.-]+/)?(?:bash|zsh|sh|dash|ksh|python(?:[0-9.]*)?|perl|ruby)\b'
     title: "wget piped to shell"
@@ -83,8 +78,11 @@ rules:
     tags: [execution, download-exec]
   - id: CMD-PIPE-BASE64
     tool_call_only: true
+    expression: >-
+      f.commands.exists(c, c.argv_complete && c.program in ['base64', 'base64.exe'] &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DECODE in c.operations)
     # Closes (parity with CMD-PIPE-CURL above).
-    pattern: '(?i)base64\s+(?:-[dD]|--decode)\s*\|\s*(?:[/\w.-]+/)?(?:bash|zsh|sh|dash|ksh|python(?:[0-9.]*)?|perl|ruby)\b'
+    pattern: '(?i:\bbase64\b)[^|;\n]*\s(?:-d+i?|--decode)\b[^|;\n]*\|\s*(?i:(?:[/\w.-]+/)?(?:bash|zsh|sh|dash|ksh|python(?:[0-9.]*)?|perl|ruby))\b'
     title: "base64 decode piped to shell"
     severity: CRITICAL
     confidence: 0.95
@@ -347,6 +345,17 @@ rules:
     severity: MEDIUM
     confidence: 0.90
     tags: [integrity, policy-bypass]
+  - id: integrity.history_tamper
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, c.argv_complete &&
+      (c.program == 'history' ||
+      (c.program == 'unset' && 'HISTFILE' in c.argv)))
+    pattern: '(?i)(?:\bhistory\b[^;\n]*\s-[acnrw]*c[acnrw]*(?:[\s;&|]|$)|\bunset\b[^;\n]*\bHISTFILE\b)'
+    title: "Shell history clear or disable"
+    severity: MEDIUM
+    confidence: 0.95
+    tags: [integrity, defense-evasion]
   - id: recon.network_sweep
     tool_call_only: true
     expression: >-
@@ -369,7 +378,7 @@ rules:
       f.commands.exists(c, c.argv_complete &&
       c.program in ['docker', 'podman', 'nerdctl'] &&
       defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONTAINER_RUN in c.operations &&
-      '--privileged' in c.argv &&
+      c.argv.exists(a, a == '--privileged' || a.startsWith('--privileged=')) &&
       f.paths.exists(p, p.command_id == c.id &&
       p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ,
       defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE] &&
@@ -440,9 +449,15 @@ rules:
     tool_call_only: true
     expression: >-
       f.commands.exists(c, c.argv_complete && c.program == 'git' &&
-      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONFIG_CHANGE in c.operations)
-    pattern: '(?i)\bgit\b[^;\n]*\bconfig\b[^;\n]*(?:alias\.[A-Za-z0-9._-]+|credential\.helper|core\.(?:sshCommand|hooksPath))\b[^;\n]+'
-    title: "Git executable configuration change"
+      (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONFIG_CHANGE in c.operations ||
+      (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_WRITE in c.operations &&
+      f.paths.exists(p, p.command_id == c.id &&
+      p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE &&
+      (p.normalized == '.git/config' || p.resolved.endsWith('/.git/config'))))))
+    # Candidate discovery covers executable git-config keys and read commands
+    # that target .git/config; the exact fallback contract proves the write.
+    pattern: '(?i)\bgit\b[^;\r\n]*(?:\bconfig\b[^;\r\n]*(?:alias\.[A-Za-z0-9._-]+|credential\.helper|core\.(?:sshCommand|hooksPath))\b[^;\r\n]+|\b(?:show|log|diff|whatchanged)\b[^;\r\n]*--output(?:=|\s+)[^;\r\n]*\.git[/\\]config(?:$|["''\s]))'
+    title: "Git executable configuration change or overwrite"
     severity: MEDIUM
     confidence: 0.90
     tags: [source-control, execution, tampering]

@@ -1329,7 +1329,7 @@ private-secret-name = "DefenseClaw must remain redacted"
         'packaged connector homes are disjoint, contained, existing, and non-reparse'
     Assert-True ($harnessText -match 'timeout-handling' -and $harnessText -match 'telemetry pass') 'contract records timeout and telemetry evidence'
     foreach ($rule in @(
-        'CMD-WIN-REMOVE-ITEM-RF', 'CMD-WIN-RMDIR-SQ', 'CMD-WIN-IWR-IEX', 'CMD-WIN-REG-PERSIST',
+        'CMD-WIN-REMOVE-ITEM-RF', 'CMD-WIN-RMDIR-SQ', 'CMD-PIPE-CURL', 'CMD-WIN-REG-PERSIST',
         'PATH-WIN-AWS-CREDS', 'PATH-WIN-GIT-CREDS', 'PATH-WIN-CREDENTIAL-MANAGER'
     )) {
         Assert-True ($harnessText.Contains($rule)) "required Windows dangerous-command corpus contains $rule"

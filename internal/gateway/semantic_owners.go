@@ -109,8 +109,16 @@ var semanticOwners = buildSemanticOwners(map[string]semanticOwner{
 	},
 	"CMD-PIPE-CURL": {
 		equivalentAliases: []string{"CMD-WIN-IWR-IEX"},
-		prerequisite:      powerShellDownloadExecPrerequisite,
-		suppressFallback:  powerShellDownloadExecSafeNegative,
+		prerequisite:      curlDownloadExecPrerequisite,
+		suppressFallback:  authoritativeSemanticSafeNegative,
+	},
+	"CMD-PIPE-WGET": {
+		prerequisite:     wgetDownloadExecPrerequisite,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"CMD-PIPE-BASE64": {
+		prerequisite:     base64DecodeExecPrerequisite,
+		suppressFallback: authoritativeSemanticSafeNegative,
 	},
 	"CMD-REVSHELL-BASH": {
 		equivalentAliases: []string{"CMD-REVSHELL-NC", "CMD-SOCAT-EXEC"},
@@ -188,17 +196,35 @@ func powerShellDownloadExecPrerequisite(facts actionfacts.Facts) bool {
 		if source.Dialect != actionfacts.DialectPowerShell ||
 			source.Effect != actionfacts.EffectExecute ||
 			!oneOfFold(source.Program, "invoke-webrequest", "iwr", "invoke-restmethod", "irm") ||
-			!hasOperation(source, actionfacts.OperationFetch) ||
-			source.PipelineID == 0 {
+			(!hasOperation(source, actionfacts.OperationFetch) &&
+				!hasOperation(source, actionfacts.OperationUpload)) ||
+			source.PipelineID == 0 || commandWritesPath(facts, source.ID) {
 			continue
 		}
 		for _, destination := range facts.Commands {
 			if destination.Dialect == actionfacts.DialectPowerShell &&
 				destination.Effect == actionfacts.EffectExecute &&
 				destination.PipelineID == source.PipelineID &&
-				oneOfFold(destination.Program, "invoke-expression", "iex") {
+				oneOfFold(destination.Program, "invoke-expression", "iex") &&
+				hasCommandDataFlow(
+					facts,
+					source.ID,
+					destination.ID,
+					actionfacts.DataStdout,
+					actionfacts.DataStdin,
+				) {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+func commandWritesPath(facts actionfacts.Facts, commandID int64) bool {
+	for _, candidate := range facts.Paths {
+		if candidate.CommandID == commandID &&
+			candidate.Access == actionfacts.PathAccessWrite {
+			return true
 		}
 	}
 	return false

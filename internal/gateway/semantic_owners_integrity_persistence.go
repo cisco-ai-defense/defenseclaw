@@ -22,6 +22,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 )
 
+const semanticHistoryTamperExpression = `f.commands.exists(c, c.argv_complete && (c.program == 'history' || (c.program == 'unset' && 'HISTFILE' in c.argv)))`
+
 var semanticIntegrityPersistenceOwners = map[string]semanticOwner{
 	"CMD-CRONTAB": {
 		prerequisite:     crontabInstallPrerequisite,
@@ -48,6 +50,13 @@ var semanticIntegrityPersistenceOwners = map[string]semanticOwner{
 		prerequisite:     sshAuthorizedKeysCommandPrerequisite,
 		suppressFallback: sshAuthorizedKeysCommandSafeNegative,
 	},
+	// PATH-HISTORY continues to own filesystem mutations. This owner handles
+	// exact HISTFILE unsets and supplies a detection-only proof for Bash-style
+	// history clearing, without duplicating active history-path findings.
+	"integrity.history_tamper": {
+		prerequisite:     historyTamperPrerequisite,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
 	"PATH-HISTORY": integrityMutationOwner(
 		matchesShellHistoryCandidate, matchesActiveShellHistory, nil,
 		"PATH-WIN-PS-HISTORY",
@@ -61,7 +70,7 @@ var semanticIntegrityPersistenceOwners = map[string]semanticOwner{
 	},
 	"privilege.container_runtime_socket_access": {
 		prerequisite:     containerRuntimeSocketPrerequisite,
-		suppressFallback: containerRuntimeSocketSafeNegative,
+		suppressFallback: authoritativeSemanticSafeNegative,
 	},
 	"persistence.shell_profile_write": integrityMutationOwner(
 		matchesShellProfileCandidate, matchesActiveShellProfile, nil,
@@ -116,6 +125,88 @@ func integrityMutationOwner(
 			isCandidate, isActive, isSafe,
 		),
 	}
+}
+
+func historyTamperPrerequisite(facts actionfacts.Facts) bool {
+	for _, issue := range facts.Parse.Issues {
+		if issue == actionfacts.IssueUnsupportedConstruct {
+			// Subshells and background jobs isolate shell-builtin state, but
+			// ActionFacts intentionally flattens those AST nodes. Never promote
+			// their textual history operation through the fallback lane.
+			return false
+		}
+	}
+	if activeShellHistoryMutationPresent(facts) {
+		return false
+	}
+	for _, command := range facts.Commands {
+		if !integrityExecutingOwnedCommand(command, "history", "unset") ||
+			command.Executable != command.Program ||
+			command.ParentCommandID != 0 || command.PipelineID != 0 {
+			continue
+		}
+		switch strings.ToLower(command.Program) {
+		case "history":
+			if actionfacts.ProvesPOSIXHistoryClear(command) {
+				return true
+			}
+		case "unset":
+			if unsetHistoryFileVariable(command.Argv) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func unsetHistoryFileVariable(argv []string) bool {
+	if len(argv) == 0 {
+		return false
+	}
+	options := true
+	functionMode := false
+	variableMode := false
+	found := false
+	for _, argument := range argv[1:] {
+		if options && argument == "--" {
+			options = false
+			continue
+		}
+		if options && strings.HasPrefix(argument, "-") && argument != "-" {
+			if len(argument) < 2 || argument[1] == '-' {
+				return false
+			}
+			for _, option := range argument[1:] {
+				switch option {
+				case 'f':
+					functionMode = true
+				case 'v':
+					variableMode = true
+				default:
+					return false
+				}
+			}
+			continue
+		}
+		options = false
+		found = found || argument == "HISTFILE"
+	}
+	if functionMode && variableMode {
+		return false
+	}
+	return found && !functionMode
+}
+
+func activeShellHistoryMutationPresent(facts actionfacts.Facts) bool {
+	for _, candidate := range facts.Paths {
+		command, ok := integrityCommandByID(facts, candidate.CommandID)
+		if ok &&
+			matchesActiveShellHistory(facts, candidate) &&
+			integrityCommandMutatesPath(command, candidate) {
+			return true
+		}
+	}
+	return false
 }
 
 func integrityMutationPrerequisite(
@@ -430,9 +521,12 @@ func matchesActiveSchedulerPath(
 }
 
 type integrityGitInvocation struct {
-	subcommand        string
-	subcommandIndex   int
-	configAssignments []string
+	subcommand         string
+	subcommandIndex    int
+	configAssignments  []string
+	workingDirectories []string
+	gitDir             string
+	bare               bool
 }
 
 func parseIntegrityGitInvocation(
@@ -454,16 +548,25 @@ func parseIntegrityGitInvocation(
 			invocation.subcommandIndex = index
 			return invocation, true
 		}
-		key, value, joined := strings.Cut(argument, "=")
-		if key == "-C" {
-			if !joined {
-				index++
-				if index >= len(command.Argv) {
-					return integrityGitInvocation{}, false
-				}
+		if argument == "-C" {
+			index++
+			if index >= len(command.Argv) {
+				return integrityGitInvocation{}, false
 			}
+			invocation.workingDirectories = append(
+				invocation.workingDirectories,
+				command.Argv[index],
+			)
 			continue
 		}
+		if strings.HasPrefix(argument, "-C") && len(argument) > 2 {
+			invocation.workingDirectories = append(
+				invocation.workingDirectories,
+				argument[2:],
+			)
+			continue
+		}
+		key, value, joined := strings.Cut(argument, "=")
 		switch strings.ToLower(key) {
 		case "-c":
 			if joined {
@@ -481,14 +584,31 @@ func parseIntegrityGitInvocation(
 				invocation.configAssignments,
 				command.Argv[index],
 			)
-		case "--config-env", "--exec-path", "--git-dir",
-			"--namespace", "--super-prefix", "--work-tree":
+		case "--git-dir":
+			if !joined {
+				index++
+				if index >= len(command.Argv) {
+					return integrityGitInvocation{}, false
+				}
+				value = command.Argv[index]
+			}
+			if value == "" {
+				return integrityGitInvocation{}, false
+			}
+			invocation.gitDir = value
+		case "--config-env", "--exec-path", "--namespace",
+			"--super-prefix", "--work-tree":
 			if !joined {
 				index++
 				if index >= len(command.Argv) {
 					return integrityGitInvocation{}, false
 				}
 			}
+		case "--bare":
+			if joined {
+				return integrityGitInvocation{}, false
+			}
+			invocation.bare = true
 		default:
 			if strings.HasPrefix(lower, "-") {
 				continue
@@ -609,6 +729,9 @@ func gitRemoteTamperPrerequisite(facts actionfacts.Facts) bool {
 }
 
 func gitConfigExecPrerequisite(facts actionfacts.Facts) bool {
+	if gitReadOutputConfigPrerequisite(facts) {
+		return true
+	}
 	for _, command := range facts.Commands {
 		invocation, ok := parseIntegrityGitInvocation(command)
 		if !ok || invocation.subcommand != "config" ||
@@ -624,6 +747,91 @@ func gitConfigExecPrerequisite(facts actionfacts.Facts) bool {
 		}
 	}
 	return false
+}
+
+func gitReadOutputConfigPrerequisite(facts actionfacts.Facts) bool {
+	for _, command := range facts.Commands {
+		invocation, ok := parseIntegrityGitInvocation(command)
+		if !ok || !oneOfFold(
+			invocation.subcommand,
+			"show", "log", "diff", "whatchanged",
+		) || !hasOperation(command, actionfacts.OperationWrite) {
+			continue
+		}
+		activeGitDir, ok := integrityGitDirectory(facts, invocation)
+		if !ok {
+			continue
+		}
+		activeConfig := strings.TrimRight(activeGitDir, "/") + "/config"
+		for _, candidate := range facts.Paths {
+			if candidate.CommandID == command.ID &&
+				candidate.Access == actionfacts.PathAccessWrite &&
+				canonicalSemanticPath(semanticPathValue(candidate)) == activeConfig {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func integrityGitDirectory(
+	facts actionfacts.Facts,
+	invocation integrityGitInvocation,
+) (string, bool) {
+	workingDirectory := canonicalSemanticPath(facts.CWD)
+	if !isAbsoluteSemanticPath(workingDirectory) {
+		return "", false
+	}
+	for _, directory := range invocation.workingDirectories {
+		var ok bool
+		workingDirectory, ok = resolveIntegrityGitPath(
+			workingDirectory,
+			directory,
+		)
+		if !ok {
+			return "", false
+		}
+	}
+	if invocation.gitDir != "" {
+		return resolveIntegrityGitPath(
+			workingDirectory,
+			invocation.gitDir,
+		)
+	}
+	if invocation.bare {
+		return workingDirectory, true
+	}
+	return pathJoinSemantic(workingDirectory, ".git"), true
+}
+
+func resolveIntegrityGitPath(base, value string) (string, bool) {
+	if value == "" || strings.TrimSpace(value) != value ||
+		strings.HasPrefix(value, "~") ||
+		strings.ContainsAny(value, "$%*?[]{}\x60") {
+		return "", false
+	}
+	canonical := canonicalSemanticPath(value)
+	if canonical == "" ||
+		(len(canonical) >= 2 && canonical[1] == ':' &&
+			!isAbsoluteSemanticPath(canonical)) ||
+		(strings.HasPrefix(value, `\`) &&
+			!strings.HasPrefix(value, `\\`)) {
+		return "", false
+	}
+	if isAbsoluteSemanticPath(canonical) {
+		return canonical, true
+	}
+	if !isAbsoluteSemanticPath(base) {
+		return "", false
+	}
+	return pathJoinSemantic(base, canonical), true
+}
+
+func pathJoinSemantic(base, relative string) string {
+	return canonicalSemanticPath(
+		strings.TrimRight(base, "/") + "/" +
+			strings.TrimLeft(relative, "/"),
+	)
 }
 
 func gitConfigExecSafeNegative(facts actionfacts.Facts) bool {
@@ -899,31 +1107,24 @@ func containerRuntimeSocketPrerequisite(facts actionfacts.Facts) bool {
 	return false
 }
 
-func containerRuntimeSocketSafeNegative(
-	facts actionfacts.Facts,
-) bool {
-	if !facts.Authoritative() {
-		return false
-	}
-	for _, candidate := range semanticPathCandidates(facts) {
-		if matchesContainerRuntimeSocket(semanticPathValue(candidate)) {
-			return true
-		}
-	}
-	return false
-}
-
 func matchesContainerRuntimeSocket(value string) bool {
 	value = canonicalSemanticPath(value)
 	switch value {
 	case "/var/run/docker.sock",
 		"/run/docker.sock",
 		"/run/containerd/containerd.sock",
+		"/var/run/containerd/containerd.sock",
+		"/run/crio/crio.sock",
 		"/var/run/crio/crio.sock",
-		"/run/podman/podman.sock":
+		"/run/podman/podman.sock",
+		"/var/run/podman/podman.sock":
 		return true
 	}
 	parts := strings.Split(strings.Trim(value, "/"), "/")
+	if len(parts) == 4 && parts[0] == "run" && parts[1] == "user" &&
+		integrityDecimal(parts[2]) && parts[3] == "docker.sock" {
+		return true
+	}
 	return len(parts) == 5 &&
 		parts[0] == "run" &&
 		parts[1] == "user" &&
@@ -1108,6 +1309,23 @@ func matchesActiveGitHook(
 	if matchesSafeGitHookCandidate(facts, candidate) ||
 		integrityPathHasFixtureSegment(facts.CWD) {
 		return false
+	}
+	if command, ok := integrityCommandByID(facts, candidate.CommandID); ok {
+		if invocation, parsed := parseIntegrityGitInvocation(command); parsed &&
+			oneOfFold(
+				invocation.subcommand,
+				"show", "log", "diff", "whatchanged",
+			) && hasOperation(command, actionfacts.OperationWrite) {
+			activeGitDir, contextOK := integrityGitDirectory(facts, invocation)
+			if !contextOK {
+				return false
+			}
+			value := canonicalSemanticPath(semanticPathValue(candidate))
+			return integritySingleChild(
+				value,
+				strings.TrimRight(activeGitDir, "/")+"/hooks",
+			)
+		}
 	}
 	cwd := canonicalSemanticPath(facts.CWD)
 	value := canonicalSemanticPath(semanticPathValue(candidate))

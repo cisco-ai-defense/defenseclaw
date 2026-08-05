@@ -108,7 +108,7 @@ rules:
     confidence: 0.93
     tags: [ssrf, credential]
   - id: C2-DNS-TUNNEL
-    pattern: '(?i)\b(?:dig|host|nslookup)\b\s+[^;\n]*\$\((?:whoami|hostname|id(?:\s+-u)?|cat\s+(?:/etc/hostname|/etc/machine-id))\)[A-Za-z0-9._-]*\.[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+'
+    pattern: '(?i)\b(?:dig|host|nslookup|drill)\b\s+[^;\n]*\$\((?:whoami|hostname|id(?:\s+-u)?|cat\s+(?:/etc/hostname|/etc/machine-id))\)[A-Za-z0-9._-]*\.[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+'
     title: "DNS TXT query with high-entropy label (tunneling indicator)"
     severity: HIGH
     confidence: 0.78
