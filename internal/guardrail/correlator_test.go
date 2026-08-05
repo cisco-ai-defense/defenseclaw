@@ -30,6 +30,7 @@ func TestLoadCorrelationPatterns_Defaults(t *testing.T) {
 		"TRIFECTA-WITH-FINGERPRINT-MATCH": true,
 		"ESCALATION-CHAIN":                true,
 		"DESTRUCTIVE-FLOW":                true,
+		"REPO-ARCHIVE-EXFIL":              true,
 	}
 	if len(set.Patterns) != len(want) {
 		t.Errorf("got %d patterns, want %d", len(set.Patterns), len(want))
@@ -228,6 +229,109 @@ func TestFingerprintChain_RequiresSameFingerprint(t *testing.T) {
 	}
 	if got := pattern.Match(nomatch); got != nil {
 		t.Errorf("different fingerprints should not match, got %+v", got)
+	}
+}
+
+func TestRepoArchiveExfil_FiresOnArchiveThenEgress(t *testing.T) {
+	set, _ := DefaultCorrelationPatterns()
+	pattern := mustFindPattern(t, set, "REPO-ARCHIVE-EXFIL")
+
+	window := []CorrelationFinding{
+		{ID: "f-002", RuleID: "CMD-CURL-UPLOAD", DataAxis: []DataAxis{AxisEgressExternal}, ContentFingerprint: "abc12345", Severity: "HIGH"},
+		{ID: "f-001", RuleID: "CMD-WORKSPACE-ARCHIVE", DataAxis: []DataAxis{AxisSensitiveAccess}, ContentFingerprint: "abc12345", Severity: "MEDIUM"},
+	}
+
+	contributing := pattern.Match(window)
+	if len(contributing) != 2 {
+		t.Fatalf("expected 2 contributing findings, got %d: %+v", len(contributing), contributing)
+	}
+	if contributing[0].ID != "f-001" || contributing[1].ID != "f-002" {
+		t.Errorf("expected temporal order f-001,f-002; got %+v", contributing)
+	}
+}
+
+func TestRepoArchiveExfil_FiresOnArchiveThenScpUpload(t *testing.T) {
+	set, _ := DefaultCorrelationPatterns()
+	pattern := mustFindPattern(t, set, "REPO-ARCHIVE-EXFIL")
+
+	window := []CorrelationFinding{
+		{ID: "f-002", RuleID: "CMD-SCP-UPLOAD", DataAxis: []DataAxis{AxisEgressExternal}, ContentFingerprint: "abc12345", Severity: "HIGH"},
+		{ID: "f-001", RuleID: "CMD-WORKSPACE-ARCHIVE", DataAxis: []DataAxis{AxisSensitiveAccess}, ContentFingerprint: "abc12345", Severity: "MEDIUM"},
+	}
+
+	contributing := pattern.Match(window)
+	if len(contributing) != 2 {
+		t.Fatalf("expected 2 contributing findings, got %d: %+v", len(contributing), contributing)
+	}
+}
+
+func TestRepoArchiveExfil_FiresOnArchiveThenRsyncUpload(t *testing.T) {
+	set, _ := DefaultCorrelationPatterns()
+	pattern := mustFindPattern(t, set, "REPO-ARCHIVE-EXFIL")
+
+	window := []CorrelationFinding{
+		{ID: "f-002", RuleID: "CMD-RSYNC-UPLOAD", DataAxis: []DataAxis{AxisEgressExternal}, ContentFingerprint: "abc12345", Severity: "HIGH"},
+		{ID: "f-001", RuleID: "CMD-WORKSPACE-ARCHIVE", DataAxis: []DataAxis{AxisSensitiveAccess}, ContentFingerprint: "abc12345", Severity: "MEDIUM"},
+	}
+
+	contributing := pattern.Match(window)
+	if len(contributing) != 2 {
+		t.Fatalf("expected 2 contributing findings, got %d: %+v", len(contributing), contributing)
+	}
+}
+
+func TestRepoArchiveExfil_DoesNotFireOnDowngradedAllowlistedUpload(t *testing.T) {
+	set, _ := DefaultCorrelationPatterns()
+	pattern := mustFindPattern(t, set, "REPO-ARCHIVE-EXFIL")
+
+	window := []CorrelationFinding{
+		{ID: "f-002", RuleID: "CMD-CURL-UPLOAD", DataAxis: []DataAxis{AxisEgressExternal}, ContentFingerprint: "abc12345", Severity: "MEDIUM"},
+		{ID: "f-001", RuleID: "CMD-WORKSPACE-ARCHIVE", DataAxis: []DataAxis{AxisSensitiveAccess}, ContentFingerprint: "abc12345", Severity: "MEDIUM"},
+	}
+
+	if got := pattern.Match(window); got != nil {
+		t.Errorf("downgraded MEDIUM upload should not satisfy min_severity HIGH, got %+v", got)
+	}
+}
+
+func TestRepoArchiveExfil_DoesNotFireWithoutEgress(t *testing.T) {
+	set, _ := DefaultCorrelationPatterns()
+	pattern := mustFindPattern(t, set, "REPO-ARCHIVE-EXFIL")
+
+	window := []CorrelationFinding{
+		{ID: "f-001", RuleID: "CMD-WORKSPACE-ARCHIVE", DataAxis: []DataAxis{AxisSensitiveAccess}, Severity: "MEDIUM"},
+	}
+
+	if got := pattern.Match(window); got != nil {
+		t.Errorf("expected no match without egress, got %+v", got)
+	}
+}
+
+func TestRepoArchiveExfil_DoesNotFireWithoutMatchingFingerprint(t *testing.T) {
+	set, _ := DefaultCorrelationPatterns()
+	pattern := mustFindPattern(t, set, "REPO-ARCHIVE-EXFIL")
+
+	window := []CorrelationFinding{
+		{ID: "f-002", RuleID: "CMD-CURL-UPLOAD", DataAxis: []DataAxis{AxisEgressExternal}, ContentFingerprint: "upload99", Severity: "HIGH"},
+		{ID: "f-001", RuleID: "CMD-WORKSPACE-ARCHIVE", DataAxis: []DataAxis{AxisSensitiveAccess}, ContentFingerprint: "archive1", Severity: "MEDIUM"},
+	}
+
+	if got := pattern.Match(window); got != nil {
+		t.Errorf("expected no match for mismatched fingerprints, got %+v", got)
+	}
+}
+
+func TestRepoArchiveExfil_DoesNotFireOnUnrelatedEgress(t *testing.T) {
+	set, _ := DefaultCorrelationPatterns()
+	pattern := mustFindPattern(t, set, "REPO-ARCHIVE-EXFIL")
+
+	window := []CorrelationFinding{
+		{ID: "f-002", RuleID: "SRC-FETCH", DataAxis: []DataAxis{AxisEgressExternal}, Severity: "HIGH"},
+		{ID: "f-001", RuleID: "CMD-WORKSPACE-ARCHIVE", DataAxis: []DataAxis{AxisSensitiveAccess}, Severity: "MEDIUM"},
+	}
+
+	if got := pattern.Match(window); got != nil {
+		t.Errorf("expected no match for unrelated egress, got %+v", got)
 	}
 }
 

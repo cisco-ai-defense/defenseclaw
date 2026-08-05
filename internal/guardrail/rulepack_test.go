@@ -161,7 +161,7 @@ func TestRulePack_LoadEmbeddedExfilJudge(t *testing.T) {
 	if jc.SystemPrompt == "" {
 		t.Error("embedded exfil judge has no system_prompt")
 	}
-	for _, want := range []string{"Sensitive File Access", "Exfiltration Channel"} {
+	for _, want := range []string{"Sensitive File Access", "Exfiltration Channel", "Repository Archive Exfiltration"} {
 		if _, ok := jc.Categories[want]; !ok {
 			t.Errorf("embedded exfil judge missing category %q", want)
 		}

@@ -79,8 +79,22 @@
       ]
     },
     {
+      "id": "CMD-ARCHIVE-EXFIL",
+      "axes": [
+        "sensitive_access",
+        "egress_external"
+      ]
+    },
+    {
       "id": "CMD-CURL-UPLOAD",
       "axes": [
+        "egress_external"
+      ]
+    },
+    {
+      "id": "CMD-ENCODE-EXFIL",
+      "axes": [
+        "sensitive_access",
         "egress_external"
       ]
     },
@@ -103,9 +117,27 @@
       ]
     },
     {
+      "id": "CMD-RSYNC-UPLOAD",
+      "axes": [
+        "egress_external"
+      ]
+    },
+    {
+      "id": "CMD-SCP-UPLOAD",
+      "axes": [
+        "egress_external"
+      ]
+    },
+    {
       "id": "CMD-WGET-POST",
       "axes": [
         "egress_external"
+      ]
+    },
+    {
+      "id": "CMD-WORKSPACE-ARCHIVE",
+      "axes": [
+        "sensitive_access"
       ]
     },
     {
@@ -177,6 +209,13 @@
     {
       "id": "JUDGE-EXFIL-CHANNEL",
       "axes": [
+        "egress_external"
+      ]
+    },
+    {
+      "id": "JUDGE-EXFIL-REPO",
+      "axes": [
+        "sensitive_access",
         "egress_external"
       ]
     },

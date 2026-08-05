@@ -59,3 +59,22 @@ patterns:
       - tool_capability_class: exec_shell
         min_severity: HIGH
       - axis: sensitive_access
+
+  - id: REPO-ARCHIVE-EXFIL
+    description: |
+      Workspace-scoped archive and explicit upload referencing the same
+      archive artifact (shared content_fingerprint). Catches split
+      archive/upload steps without correlating unrelated later uploads.
+    window_events: 15
+    severity_on_match: CRITICAL
+    fingerprint_chain:
+      - with_rule_match:
+          - CMD-WORKSPACE-ARCHIVE
+        min_severity: MEDIUM
+      - with_rule_match:
+          - CMD-CURL-UPLOAD
+          - CMD-WGET-POST
+          - CMD-ARCHIVE-EXFIL
+          - CMD-SCP-UPLOAD
+          - CMD-RSYNC-UPLOAD
+        min_severity: HIGH

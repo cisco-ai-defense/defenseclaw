@@ -158,6 +158,36 @@ rules:
     severity: HIGH
     confidence: 0.85
     tags: [network, exfiltration]
+  - id: CMD-SCP-UPLOAD
+    pattern: '(?i)\bscp\b\s+(?:-[^\s]+\s+)*\S+\s+\S+:'
+    title: "scp file upload"
+    severity: HIGH
+    confidence: 0.85
+    tags: [network, exfiltration]
+  - id: CMD-RSYNC-UPLOAD
+    pattern: '(?i)\brsync\b\s+(?:-[^\s]+\s+)*\S+\s+\S+:'
+    title: "rsync file upload"
+    severity: HIGH
+    confidence: 0.85
+    tags: [network, exfiltration]
+  - id: CMD-WORKSPACE-ARCHIVE
+    pattern: '(?i)(?:\bzip\b\s+(?:-[a-zA-Z]+\s+)*-[a-zA-Z]*r[a-zA-Z]*\s+\S+\s+\.|\btar\b\s+(?:(?:-[a-zA-Z]+\s+)*-[czvf]+\s+|(?:czf|czvf|cjf|c[jJ]f)\s+)\S+\s+\.|\bgit\s+bundle\s+create\b\s+\S+(?:\s+.*)?(?:--all|\ball\b))'
+    title: "Workspace-scoped archive creation"
+    severity: MEDIUM
+    confidence: 0.65
+    tags: [archive, correlation]
+  - id: CMD-ARCHIVE-EXFIL
+    pattern: '(?i)(?:\bzip\b\s+(?:-[a-zA-Z]+\s+)*-[a-zA-Z]*r[a-zA-Z]*\s+\S+\s+\.|\btar\b\s+(?:(?:-[a-zA-Z]+\s+)*-[czvf]+\s+|(?:czf|czvf|cjf|c[jJ]f)\s+)\S+\s+\.|\bgit\s+bundle\s+create\b\s+\S+(?:\s+.*)?(?:--all|\ball\b)).*(?:&&?|\|\||;).*(?:\bcurl\b\s+.*(?:--upload-file|-T\s|--data\s+@)|\bwget\b\s+.*--post-(?:data|file)|\bscp\b\s+\S+.*[:@]|\brsync\b\s+\S+.*:)'
+    title: "Workspace archive-then-upload chain"
+    severity: CRITICAL
+    confidence: 0.88
+    tags: [network, exfiltration, archive]
+  - id: CMD-ENCODE-EXFIL
+    pattern: '(?i)(?:\b(?:base64|xxd|gzip)\b[^;&|]*\|[^;&|]*)+\b(?:curl|wget)\b.*(?:--upload-file|-T\s|--post-(?:data|file)|--data\s+@|https?://)'
+    title: "Encode-then-upload exfiltration chain"
+    severity: CRITICAL
+    confidence: 0.82
+    tags: [network, exfiltration, encoding]
   - id: CMD-SOCAT-EXEC
     pattern: '(?i)\bsocat\b\s+.*\bEXEC\b'
     title: "socat with EXEC (reverse shell)"
