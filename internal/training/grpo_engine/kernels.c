@@ -6,6 +6,10 @@
 #include <float.h>
 #include <stdio.h>
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 #ifdef __ARM_NEON
 #include <arm_neon.h>
 #endif
