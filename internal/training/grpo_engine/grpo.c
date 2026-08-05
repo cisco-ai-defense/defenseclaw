@@ -228,11 +228,22 @@ int grpo_generate(GrpoCtx *ctx, const int *prompt, int prompt_len,
 
 /* ─── Policy Logprobs (Real Forward + LoRA Injection) ─── */
 
+/* Declared in policy.c */
+void policy_set_active_lora(void *lora_ref);
+
 int grpo_policy_logprobs(GrpoCtx *ctx, const int *tokens, int len, float *logprobs_out) {
     if (!ctx || !ctx->policy || !tokens || !logprobs_out) return -1;
 
-    /* Forward through policy with LoRA injected */
-    return grpo_policy_logprobs_internal(ctx->policy, tokens, len, logprobs_out);
+    /* ACTIVATE LoRA for this forward pass.
+     * This is what makes policy_logprobs DIFFERENT from old_logprobs:
+     * - old_logprobs: captured during generation WITHOUT LoRA (base model only)
+     * - policy_logprobs: computed here WITH LoRA injected
+     * The ratio exp(policy_lp - old_lp) measures how LoRA changed the distribution.
+     * Without this, ratio=1.0 always and no gradient flows. */
+    policy_set_active_lora((void *)&ctx->lora);
+    int ret = grpo_policy_logprobs_internal(ctx->policy, tokens, len, logprobs_out);
+    policy_set_active_lora(NULL);  /* Deactivate LoRA */
+    return ret;
 }
 
 /* ─── Reference Logprobs (Real Streamed Forward) ─── */
@@ -347,7 +358,13 @@ int grpo_backward(GrpoCtx *ctx, const float *advantages,
         }
     }
 
-    ctx->stats.last_loss = total_loss / (float)total_tokens;
+    /* Count actual (non-padding) tokens for loss normalization */
+    int active_tokens = 0;
+    for (int i = 0; i < total_tokens; i++) {
+        if (token_grads[i] != 0.0f || (policy_logprobs[i] != 0.0f && old_logprobs[i] != 0.0f))
+            active_tokens++;
+    }
+    ctx->stats.last_loss = active_tokens > 0 ? total_loss / (float)active_tokens : 0.0f;
 
     /* Backpropagate through LoRA adapters.
      * In a full implementation, we would backprop through the transformer layers

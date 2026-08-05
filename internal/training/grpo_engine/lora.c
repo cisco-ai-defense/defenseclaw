@@ -73,10 +73,17 @@ void lora_init(LoRAEngine *le, int n_layers, int rank, int alpha,
             a->vB = (float *)calloc(b_size, sizeof(float));
             a->x_stored = NULL; /* allocated per forward pass */
 
-            /* Kaiming init for A, zeros for B */
-            float std = sqrtf(2.0f / (float)a->in_dim);
+            /* Kaiming init for A, small random for B.
+             * Standard LoRA initializes B=0, but that creates a bootstrap problem
+             * for GRPO: ratio=1 when LoRA contribution is zero, so no gradient flows.
+             * Small random B (1e-4 scale) gives initial non-zero LoRA output,
+             * allowing the first ratio != 1.0 and breaking the circular dependency. */
+            float std_a = sqrtf(2.0f / (float)a->in_dim);
             for (int i = 0; i < a_size; i++)
-                a->A[i] = std * ((float)rand() / RAND_MAX - 0.5f) * 2.0f;
+                a->A[i] = std_a * ((float)rand() / RAND_MAX - 0.5f) * 2.0f;
+            float std_b = 0.01f;  /* Must be large enough to perturb base model output */
+            for (int i = 0; i < b_size; i++)
+                a->B[i] = std_b * ((float)rand() / RAND_MAX - 0.5f) * 2.0f;
         }
     }
 }
