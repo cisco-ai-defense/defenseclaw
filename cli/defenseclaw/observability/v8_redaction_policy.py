@@ -24,6 +24,7 @@ masked effective plans produced by that compiler.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import tempfile
 from collections.abc import Iterable, Mapping, Sequence
@@ -32,7 +33,7 @@ from pathlib import Path
 from typing import Any, Final
 
 from defenseclaw.config import CONFIG_PATH_ENV, default_data_path
-from defenseclaw.config_inspect import inspect_v8_config
+from defenseclaw.config_inspect import ConfigV8WireResult, inspect_v8_config
 from defenseclaw.file_permissions import set_file_mode
 from defenseclaw.observability.v8_config import (
     BUCKETS,
@@ -49,6 +50,7 @@ from defenseclaw.observability.v8_yaml import (
 )
 
 ASSIGNABLE_BUILT_IN_PROFILES: Final = tuple(profile for profile in BUILT_IN_PROFILES if profile != "legacy-v7")
+CUSTOM_PROFILE_BASES: Final = tuple(profile for profile in BUILT_IN_PROFILES if profile not in {"none", "legacy-v7"})
 CONTENT_SIGNALS: Final = frozenset({"logs", "traces"})
 MANAGED_DESTINATION_NAME: Final = "managed-enterprise-ai-defense"
 LOCAL_DESTINATION_NAME: Final = "local-sqlite"
@@ -161,6 +163,8 @@ def defaults_mutations(
     reset_profile: bool = False,
 ) -> tuple[V8YAMLMutation, ...]:
     mutations: list[V8YAMLMutation] = []
+    if reset_profile and profile is not None:
+        raise ValueError("reset_profile cannot be combined with an explicit profile")
     if reset_profile:
         mutations.append(V8YAMLMutation.delete(("observability", "defaults", "redaction_profile")))
     elif profile is not None:
@@ -185,6 +189,8 @@ def bucket_mutations(
 ) -> tuple[V8YAMLMutation, ...]:
     _require_bucket(bucket)
     mutations: list[V8YAMLMutation] = []
+    if inherit_profile and profile is not None:
+        raise ValueError("inherit_profile cannot be combined with an explicit profile")
     if inherit_profile:
         mutations.append(V8YAMLMutation.delete(("observability", "buckets", bucket, "redaction_profile")))
     elif profile is not None:
@@ -214,19 +220,22 @@ def profile_set_mutations(
         raise ValueError(f"custom profile {name!r} has an invalid source shape")
     result = dict(existing or {})
     if extends is not None:
-        if extends not in {"sensitive", "content", "strict"}:
-            raise ValueError("custom profiles must extend sensitive, content, or strict")
+        if extends not in CUSTOM_PROFILE_BASES:
+            raise ValueError(f"custom profiles must extend {', '.join(CUSTOM_PROFILE_BASES)}")
         result["extends"] = extends
     if "extends" not in result:
-        raise ValueError("--extends is required when creating a custom profile")
+        raise ValueError("an extends value is required when creating a custom profile")
     if detectors is not None:
+        if not detectors:
+            raise ValueError("custom profile detector list cannot be empty")
         invalid = [value for value in detectors if value not in DETECTOR_GROUPS]
         if invalid:
             raise ValueError(f"unknown detector group(s): {', '.join(invalid)}")
-        if not detectors:
-            raise ValueError("custom profile detector list cannot be empty")
         result["detectors"] = list(dict.fromkeys(detectors))
-    modes = dict(result.get("field_classes") or {})
+    existing_modes = result.get("field_classes")
+    if existing_modes is not None and not isinstance(existing_modes, Mapping):
+        raise ValueError(f"custom profile {name!r} has an invalid field_classes shape")
+    modes = dict(existing_modes or {})
     for field_class, mode in field_classes.items():
         if field_class not in FIELD_CLASSES:
             raise ValueError(f"unknown field class {field_class!r}")
@@ -363,6 +372,8 @@ def route_upsert_mutations(
         raise ValueError(f"route {name!r} already exists")
     if matches:
         existing_index = matches[0]
+        if position is not None:
+            raise ValueError(f"route {name!r} already exists; use the route move operation to reorder it")
         routes[existing_index] = dict(route)
     else:
         insert_at = len(routes) if position is None else position
@@ -413,7 +424,9 @@ def source_destination(source: Mapping[str, Any], name: str) -> tuple[int, Mappi
         for index, destination in enumerate(_source_destinations(source))
         if destination.get("name") == name
     ]
-    if len(matches) != 1:
+    if len(matches) > 1:
+        raise ValueError(f"destination {name!r} is duplicated")
+    if not matches:
         if name in {LOCAL_DESTINATION_NAME, MANAGED_DESTINATION_NAME}:
             raise ValueError(f"generated destination {name!r} is read-only")
         known = ", ".join(
@@ -539,7 +552,7 @@ def effective_legs(effective: Mapping[str, Any]) -> tuple[EffectiveLeg, ...]:
     return tuple(result)
 
 
-def _inspect_snapshot(raw: bytes, data_dir: str, label: str):
+def _inspect_snapshot(raw: bytes, data_dir: str, label: str) -> ConfigV8WireResult:
     descriptor, snapshot = tempfile.mkstemp(
         prefix=f".defenseclaw-redaction-{label}-",
         suffix=".yaml",
@@ -562,10 +575,8 @@ def _inspect_snapshot(raw: bytes, data_dir: str, label: str):
     finally:
         if descriptor >= 0:
             os.close(descriptor)
-        try:
+        with contextlib.suppress(FileNotFoundError):
             os.unlink(snapshot)
-        except FileNotFoundError:
-            pass
 
 
 def _locked_profiles(effective: Mapping[str, Any]) -> tuple[tuple[str, tuple[str, ...]], ...]:
@@ -665,6 +676,7 @@ def _display_path(path: Sequence[str | int]) -> str:
 
 __all__ = [
     "ASSIGNABLE_BUILT_IN_PROFILES",
+    "CUSTOM_PROFILE_BASES",
     "EffectiveLeg",
     "EffectiveLegChange",
     "LOCAL_DESTINATION_NAME",

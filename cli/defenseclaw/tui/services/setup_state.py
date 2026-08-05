@@ -26,6 +26,7 @@ from defenseclaw.tui.services.cli_choices import REGIONAL_PROVIDERS
 ReadinessStatus = Literal["pass", "warn", "fail"]
 ValidationSeverity = Literal["ok", "warning", "error"]
 ConfigFieldKind = Literal["string", "int", "bool", "password", "choice", "header"]
+SetupPreviewRisk = Literal["read-only", "setup"]
 
 
 @dataclass(frozen=True)
@@ -58,7 +59,7 @@ class SetupCommandIntent:
     # intents keep the read-only default and are classified from argv by the
     # preview screen; interactive redaction setup sets this to ``setup`` so the
     # TUI switches to Activity before the child asks for input.
-    risk: str = "read-only"
+    risk: SetupPreviewRisk = "read-only"
 
     @property
     def argv(self) -> tuple[str, ...]:

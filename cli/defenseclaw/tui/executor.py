@@ -21,6 +21,7 @@ from typing import Protocol
 from defenseclaw.gateway import resolve_gateway_binary
 
 _CREATE_SUSPENDED = 0x00000004
+_PIPE_FRAGMENT_FLUSH_SECONDS = 0.05
 
 
 @dataclass(frozen=True)
@@ -181,13 +182,32 @@ class CommandExecutor:
         try:
             assert process.stdout is not None
             decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+            pending = ""
             while True:
-                chunk = await process.stdout.read(4096)
+                try:
+                    chunk = await asyncio.wait_for(
+                        process.stdout.read(4096),
+                        timeout=_PIPE_FRAGMENT_FLUSH_SECONDS,
+                    )
+                except TimeoutError:
+                    # A newline-less interactive prompt must become visible
+                    # while the child is waiting for stdin. Delay only long
+                    # enough to coalesce ordinary cross-chunk line fragments.
+                    for text in _split_terminal_chunk(pending):
+                        yield CommandEvent("output", text)
+                    pending = ""
+                    continue
                 if not chunk:
                     break
-                for text in _split_terminal_chunk(decoder.decode(chunk)):
+                pending += decoder.decode(chunk)
+                complete, separator, trailing = pending.rpartition("\n")
+                if not separator:
+                    continue
+                for text in _split_terminal_chunk(complete):
                     yield CommandEvent("output", text)
-            for text in _split_terminal_chunk(decoder.decode(b"", final=True)):
+                pending = trailing
+            pending += decoder.decode(b"", final=True)
+            for text in _split_terminal_chunk(pending):
                 yield CommandEvent("output", text)
             exit_code = await process.wait()
         finally:

@@ -82,6 +82,7 @@ from defenseclaw.tui.services.setup_state import (
     CredentialSnapshot,
     RestartQueue,
     SetupCommandIntent,
+    SetupPreviewRisk,
     ValidationResult,
     apply_config_field,
     build_readiness_checks,
@@ -252,8 +253,10 @@ WIZARD_HOW_TO: tuple[str, ...] = (
     "Runs: defenseclaw setup splunk dashboards apply|destroy --yes. Requires the Splunk O11y realm + API token.",
     "Runs: defenseclaw setup trusted-paths list|add|remove. Need a directory for add/remove.",
     "Runs: defenseclaw guardrail status|enable|disable|fail-mode|hilt|block-message with optional --connector.",
-    "Runs: defenseclaw setup redaction. Quick actions are non-interactive; the guided workflow exposes every "
-    "advanced bucket, profile, destination, and ordered-route setting.",
+    (
+        "Runs: defenseclaw setup redaction. Quick actions are non-interactive; the guided workflow exposes every "
+        "advanced bucket, profile, destination, and ordered-route setting."
+    ),
 )
 
 OBSERVABILITY_PRESETS: tuple[tuple[str, str], ...] = (
@@ -1218,6 +1221,12 @@ class SetupPanelModel:
         if rebuild is None:
             return
         overrides = _field_value_overrides(self.form_fields)
+        if self.active_wizard == SetupWizard.REDACTION:
+            # Action/route-action changes rebuild this dynamic form. Never
+            # carry a prior live-write choice into the newly selected policy
+            # operation; the operator must opt out of dry-run again.
+            overrides["--dry-run"] = "yes"
+            overrides["--restart"] = "no"
         if self.active_wizard == SetupWizard.GUARDRAIL:
             scope = wizard_field_value(self.form_fields, "Scope")
             disable_label = next(
@@ -1387,6 +1396,12 @@ class SetupPanelModel:
             # slots run as follow_ups in order. The "no changes" path
             # is already short-circuited above.
             follow_up = notifications_routing_intents(self.form_fields)[1:]
+        redaction_action = wizard_field_value(self.form_fields, "Action") or "status"
+        risk: SetupPreviewRisk = (
+            "setup"
+            if self.active_wizard == SetupWizard.REDACTION and redaction_action == "interactive"
+            else "read-only"
+        )
         self.wizard_status[self.active_wizard] = "running..."
         self._wizard_run_started[self.active_wizard] = datetime.now(timezone.utc)
         self.close_wizard_form()
@@ -1400,7 +1415,7 @@ class SetupPanelModel:
                 origin="setup-wizard",
                 follow_up=follow_up,
                 secret_stdin=secret_stdin,
-                risk="setup" if self.active_wizard == SetupWizard.REDACTION else "read-only",
+                risk=risk,
             ),
         )
 
@@ -2129,9 +2144,10 @@ def _redaction_wizard_fields_for(
                 "Replace With",
                 "string",
                 "--replace-with",
-                value=overrides.get("--replace-with", "sensitive"),
-                default="sensitive",
+                value=overrides.get("--replace-with", ""),
+                default="",
                 visible_when=_redaction_action_is("profile-remove"),
+                hint="Leave blank to remove only an unreferenced profile.",
             ),
             WizardFormField("Destination / Route", "section"),
             WizardFormField(
@@ -2230,6 +2246,8 @@ def _redaction_wizard_fields_for(
                 visible_when=_redaction_action_is("route-add", "route-move"),
             ),
             WizardFormField("Execution", "section"),
+            # The CLI intentionally has no --json option on bucket list or
+            # destination show; keep this predicate aligned with Click.
             WizardFormField(
                 "JSON Output",
                 "bool",
@@ -2300,120 +2318,147 @@ def _append_redaction_mutation_flags(args: list[str], fields: Sequence[WizardFor
         args.append("--restart")
 
 
+_REDACTION_COLLECT_FLAGS: tuple[tuple[str, str, str], ...] = (
+    ("Collect Logs", "--logs", "--no-logs"),
+    ("Collect Traces", "--traces", "--no-traces"),
+    ("Collect Metrics", "--metrics", "--no-metrics"),
+)
+
+
+def _append_redaction_collect_flags(args: list[str], fields: Sequence[WizardFormField]) -> None:
+    for label, enabled, disabled in _REDACTION_COLLECT_FLAGS:
+        value = wizard_field_value(fields, label)
+        if value == "on":
+            args.append(enabled)
+        elif value == "off":
+            args.append(disabled)
+
+
+def _build_redaction_apply_args(args: list[str], action: str, fields: Sequence[WizardFormField]) -> None:
+    args.extend(
+        (
+            "apply",
+            "--scope",
+            "all-configurable" if action == "apply-all" else "defaults",
+        )
+    )
+    if profile := wizard_field_value(fields, "Profile"):
+        args.extend(("--profile", profile))
+
+
+def _build_redaction_defaults_args(args: list[str], action: str, fields: Sequence[WizardFormField]) -> None:
+    verb = action.removeprefix("defaults-")
+    args.extend(("defaults", verb))
+    if verb != "set":
+        return
+    if profile := wizard_field_value(fields, "Profile"):
+        args.extend(("--profile", profile))
+    _append_redaction_collect_flags(args, fields)
+
+
+def _build_redaction_bucket_args(args: list[str], action: str, fields: Sequence[WizardFormField]) -> None:
+    verb = action.removeprefix("bucket-")
+    args.extend(("bucket", verb))
+    if verb == "list":
+        return
+    args.append(wizard_field_value(fields, "Bucket"))
+    if verb != "set":
+        return
+    if wizard_bool_value(fields, "Inherit Bucket Profile", "no") == "yes":
+        args.append("--inherit-profile")
+    elif profile := wizard_field_value(fields, "Profile"):
+        args.extend(("--profile", profile))
+    _append_redaction_collect_flags(args, fields)
+
+
+def _build_redaction_profile_args(args: list[str], action: str, fields: Sequence[WizardFormField]) -> None:
+    verb = action.removeprefix("profile-")
+    args.extend(("profile", verb))
+    if verb == "list":
+        return
+    args.append(wizard_field_value(fields, "Custom Profile Name"))
+    if verb == "set":
+        args.extend(("--extends", wizard_field_value(fields, "Extends")))
+        _append_redaction_repeated(args, "--detector", _redaction_csv(fields, "Detector Groups (CSV)"))
+        for field_class in REDACTION_FIELD_CLASSES:
+            mode = wizard_field_value(fields, f"Field: {field_class}")
+            if mode and mode != "inherit":
+                args.extend(("--field", f"{field_class}={mode}"))
+    elif verb == "remove" and (replacement := wizard_field_value(fields, "Replace With")):
+        args.extend(("--replace-with", replacement))
+
+
+def _build_redaction_destination_args(args: list[str], action: str, fields: Sequence[WizardFormField]) -> None:
+    verb = action.removeprefix("destination-")
+    args.extend(("destination", verb, wizard_field_value(fields, "Destination")))
+    if verb != "send":
+        return
+    _append_redaction_repeated(args, "--signal", _redaction_csv(fields, "Signals (CSV)"))
+    _append_redaction_repeated(args, "--bucket", _redaction_csv(fields, "Buckets (CSV)"))
+    if profile := wizard_field_value(fields, "Profile"):
+        args.extend(("--profile", profile))
+
+
+def _append_redaction_route_selectors(args: list[str], fields: Sequence[WizardFormField]) -> None:
+    _append_redaction_repeated(args, "--signal", _redaction_csv(fields, "Signals (CSV)"))
+    _append_redaction_repeated(args, "--bucket", _redaction_csv(fields, "Buckets (CSV)"))
+    for label, flag in (
+        ("Sources (CSV)", "--source"),
+        ("Connectors (CSV)", "--connector"),
+        ("Producer Actions (CSV)", "--producer-action"),
+        ("Event Names (CSV)", "--event-name"),
+    ):
+        _append_redaction_repeated(args, flag, _redaction_csv(fields, label))
+    if severity := wizard_field_value(fields, "Minimum Severity"):
+        args.extend(("--min-severity", severity))
+
+
+def _build_redaction_route_args(args: list[str], action: str, fields: Sequence[WizardFormField]) -> None:
+    verb = action.removeprefix("route-")
+    destination = wizard_field_value(fields, "Destination")
+    args.extend(("route", verb, destination))
+    if verb == "list":
+        return
+    args.append(wizard_field_value(fields, "Route Name"))
+    if verb == "move":
+        args.extend(("--position", wizard_field_value(fields, "Position")))
+        return
+    if verb == "remove":
+        return
+    _append_redaction_route_selectors(args, fields)
+    route_action = wizard_field_value(fields, "Route Action") or "send"
+    args.extend(("--route-action", route_action))
+    profile = wizard_field_value(fields, "Profile")
+    if route_action == "send" and profile:
+        args.extend(("--profile", profile))
+    if verb == "add" and (position := wizard_field_value(fields, "Position")):
+        args.extend(("--position", position))
+
+
+_REDACTION_ARG_BUILDERS: tuple[tuple[str, Callable[[list[str], str, Sequence[WizardFormField]], None]], ...] = (
+    ("apply-", _build_redaction_apply_args),
+    ("defaults-", _build_redaction_defaults_args),
+    ("bucket-", _build_redaction_bucket_args),
+    ("profile-", _build_redaction_profile_args),
+    ("destination-", _build_redaction_destination_args),
+    ("route-", _build_redaction_route_args),
+)
+
+
 def _build_redaction_args(fields: Sequence[WizardFormField]) -> tuple[str, ...]:
     action = wizard_field_value(fields, "Action") or "status"
     if action == "interactive":
         return ("setup", "redaction")
 
     args: list[str] = ["setup", "redaction"]
-    profile = wizard_field_value(fields, "Profile")
-    bucket = wizard_field_value(fields, "Bucket")
-    custom_name = wizard_field_value(fields, "Custom Profile Name")
-    destination = wizard_field_value(fields, "Destination")
-    route_name = wizard_field_value(fields, "Route Name")
-
-    if action == "status":
-        args.append("status")
-    elif action == "remove-all":
-        args.append("remove-all")
-    elif action in {"apply-all", "apply-defaults"}:
-        args.extend(
-            (
-                "apply",
-                "--scope",
-                "all-configurable" if action == "apply-all" else "defaults",
-                "--profile",
-                profile,
-            )
-        )
-    elif action == "defaults-set":
-        args.extend(("defaults", "set"))
-        if profile:
-            args.extend(("--profile", profile))
-        for label, enabled, disabled in (
-            ("Collect Logs", "--logs", "--no-logs"),
-            ("Collect Traces", "--traces", "--no-traces"),
-            ("Collect Metrics", "--metrics", "--no-metrics"),
-        ):
-            value = wizard_field_value(fields, label)
-            if value == "on":
-                args.append(enabled)
-            elif value == "off":
-                args.append(disabled)
-    elif action == "defaults-reset":
-        args.extend(("defaults", "reset"))
-    elif action == "bucket-list":
-        args.extend(("bucket", "list"))
-    elif action == "bucket-set":
-        args.extend(("bucket", "set", bucket))
-        if wizard_bool_value(fields, "Inherit Bucket Profile", "no") == "yes":
-            args.append("--inherit-profile")
-        elif profile:
-            args.extend(("--profile", profile))
-        for label, enabled, disabled in (
-            ("Collect Logs", "--logs", "--no-logs"),
-            ("Collect Traces", "--traces", "--no-traces"),
-            ("Collect Metrics", "--metrics", "--no-metrics"),
-        ):
-            value = wizard_field_value(fields, label)
-            if value == "on":
-                args.append(enabled)
-            elif value == "off":
-                args.append(disabled)
-    elif action == "bucket-reset":
-        args.extend(("bucket", "reset", bucket))
-    elif action == "profile-list":
-        args.extend(("profile", "list"))
-    elif action == "profile-show":
-        args.extend(("profile", "show", custom_name))
-    elif action == "profile-set":
-        args.extend(("profile", "set", custom_name, "--extends", wizard_field_value(fields, "Extends")))
-        _append_redaction_repeated(args, "--detector", _redaction_csv(fields, "Detector Groups (CSV)"))
-        for field_class in REDACTION_FIELD_CLASSES:
-            mode = wizard_field_value(fields, f"Field: {field_class}")
-            if mode and mode != "inherit":
-                args.extend(("--field", f"{field_class}={mode}"))
-    elif action == "profile-remove":
-        args.extend(("profile", "remove", custom_name))
-        if replacement := wizard_field_value(fields, "Replace With"):
-            args.extend(("--replace-with", replacement))
-    elif action == "destination-show":
-        args.extend(("destination", "show", destination))
-    elif action == "destination-send":
-        args.extend(("destination", "send", destination))
-        _append_redaction_repeated(args, "--signal", _redaction_csv(fields, "Signals (CSV)"))
-        _append_redaction_repeated(args, "--bucket", _redaction_csv(fields, "Buckets (CSV)"))
-        if profile:
-            args.extend(("--profile", profile))
-    elif action == "destination-inherit":
-        args.extend(("destination", "inherit", destination))
-    elif action == "route-list":
-        args.extend(("route", "list", destination))
-    elif action in {"route-add", "route-set"}:
-        args.extend(("route", "add" if action == "route-add" else "set", destination, route_name))
-        _append_redaction_repeated(args, "--signal", _redaction_csv(fields, "Signals (CSV)"))
-        _append_redaction_repeated(args, "--bucket", _redaction_csv(fields, "Buckets (CSV)"))
-        for label, flag in (
-            ("Sources (CSV)", "--source"),
-            ("Connectors (CSV)", "--connector"),
-            ("Producer Actions (CSV)", "--producer-action"),
-            ("Event Names (CSV)", "--event-name"),
-        ):
-            _append_redaction_repeated(args, flag, _redaction_csv(fields, label))
-        if severity := wizard_field_value(fields, "Minimum Severity"):
-            args.extend(("--min-severity", severity))
-        route_action = wizard_field_value(fields, "Route Action") or "send"
-        args.extend(("--route-action", route_action))
-        if route_action == "send" and profile:
-            args.extend(("--profile", profile))
-        if action == "route-add" and (position := wizard_field_value(fields, "Position")):
-            args.extend(("--position", position))
-    elif action == "route-move":
-        args.extend(("route", "move", destination, route_name, "--position", wizard_field_value(fields, "Position")))
-    elif action == "route-remove":
-        args.extend(("route", "remove", destination, route_name))
+    simple = {"status": "status", "remove-all": "remove-all"}.get(action)
+    if simple is not None:
+        args.append(simple)
     else:
-        raise ValueError(f"unknown redaction action: {action}")
+        builder = next((value for prefix, value in _REDACTION_ARG_BUILDERS if action.startswith(prefix)), None)
+        if builder is None:
+            raise ValueError(f"unknown redaction action: {action}")
+        builder(args, action, fields)
 
     if action in {"status", "profile-list", "profile-show", "route-list"}:
         if wizard_bool_value(fields, "JSON Output", "no") == "yes":
@@ -4523,9 +4568,8 @@ def missing_required_fields(wizard: SetupWizard | int, fields: Sequence[WizardFo
             fields, "Custom Profile Name"
         ):
             missing.append("Custom Profile Name")
-        if action.startswith("destination-") or action.startswith("route-"):
-            if not wizard_field_value(fields, "Destination"):
-                missing.append("Destination")
+        if action.startswith(("destination-", "route-")) and not wizard_field_value(fields, "Destination"):
+            missing.append("Destination")
         if action in {"route-add", "route-set", "route-move", "route-remove"} and not wizard_field_value(
             fields, "Route Name"
         ):

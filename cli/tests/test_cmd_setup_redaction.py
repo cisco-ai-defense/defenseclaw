@@ -11,9 +11,12 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
+import click
 import pytest
 from click.testing import CliRunner
 from defenseclaw.commands import cmd_setup_redaction
@@ -314,7 +317,147 @@ def test_execute_mutations_binds_write_to_preview_and_verifies_plan(
     assert "newly unredacted: 14" in result.output.lower()
     assert "Managed policy remains locked" in result.output
     assert calls[0][2]["expected_before_sha256"] == preview.before_sha256
-    assert calls[0][2]["backup_path"] == (tmp_path / "backups" / "config.yaml.before-redaction")
+    backup_path = calls[0][2]["backup_path"]
+    assert backup_path.parent == tmp_path / "backups"
+    assert backup_path.name.startswith("config.yaml.before-redaction-")
+
+
+def test_execute_mutations_audits_write_and_names_backup_when_plan_verification_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    preview = RedactionPreview(
+        before_sha256="b" * 64,
+        after_sha256="c" * 64,
+        before_plan_digest="d" * 64,
+        after_plan_digest="e" * 64,
+        changed=True,
+        changes=(),
+        newly_unredacted=0,
+        no_longer_unredacted=0,
+        after_legs=(),
+        warnings=(),
+        locked_profiles=(),
+        mutation_paths=("$.observability.defaults.redaction_profile",),
+    )
+    app = _app(tmp_path)
+    app.logger = MagicMock()
+    writes: list[Path] = []
+    monkeypatch.setattr(
+        cmd_setup_redaction,
+        "preview_redaction_mutations",
+        lambda *_args, **_kwargs: preview,
+    )
+
+    def mutate(_path, _mutations, **kwargs):
+        backup_path = Path(kwargs["backup_path"])
+        writes.append(backup_path)
+        return V8PolicyWriteResult(True, preview.before_sha256, preview.after_sha256, str(backup_path))
+
+    monkeypatch.setattr(cmd_setup_redaction, "mutate_v8_config", mutate)
+    monkeypatch.setattr(
+        cmd_setup_redaction,
+        "inspect_v8_config",
+        lambda *_args, **_kwargs: SimpleNamespace(plan_digest="f" * 64),
+    )
+
+    result = CliRunner().invoke(
+        redaction,
+        ["remove-all", "--yes"],
+        obj=app,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 1
+    assert len(writes) == 1
+    assert str(writes[0]) in result.output
+    assert "restore" in result.output
+    app.logger.log_action.assert_called_once()
+
+
+def test_execute_mutations_names_backup_when_post_write_inspection_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    preview = RedactionPreview(
+        before_sha256="b" * 64,
+        after_sha256="c" * 64,
+        before_plan_digest="d" * 64,
+        after_plan_digest="e" * 64,
+        changed=True,
+        changes=(),
+        newly_unredacted=0,
+        no_longer_unredacted=0,
+        after_legs=(),
+        warnings=(),
+        locked_profiles=(),
+        mutation_paths=("$.observability.defaults.redaction_profile",),
+    )
+    app = _app(tmp_path)
+    app.logger = MagicMock()
+    monkeypatch.setattr(cmd_setup_redaction, "preview_redaction_mutations", lambda *_args, **_kwargs: preview)
+
+    def mutate(_path, _mutations, **kwargs):
+        backup_path = Path(kwargs["backup_path"])
+        return V8PolicyWriteResult(True, preview.before_sha256, preview.after_sha256, str(backup_path))
+
+    monkeypatch.setattr(cmd_setup_redaction, "mutate_v8_config", mutate)
+    monkeypatch.setattr(
+        cmd_setup_redaction,
+        "inspect_v8_config",
+        MagicMock(side_effect=cmd_setup_redaction.ConfigInspectError("verification unavailable")),
+    )
+
+    result = CliRunner().invoke(redaction, ["remove-all", "--yes"], obj=app, catch_exceptions=False)
+
+    assert result.exit_code == 1
+    assert "verification unavailable" in result.output
+    assert "restore" in result.output
+    assert "config.yaml.before-redaction-" in result.output
+    app.logger.log_action.assert_called_once()
+
+
+def test_restart_gateway_missing_binary_preserves_completed_write_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cmd_setup_redaction, "resolve_gateway_binary", lambda: None)
+
+    with pytest.raises(click.ClickException, match="configuration was written"):
+        cmd_setup_redaction._restart_gateway()
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [OSError("restart unavailable"), subprocess.TimeoutExpired("defenseclaw-gateway", 60)],
+)
+def test_restart_gateway_launch_failure_preserves_completed_write_message(
+    failure: Exception, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cmd_setup_redaction, "resolve_gateway_binary", lambda: "defenseclaw-gateway")
+    monkeypatch.setattr(cmd_setup_redaction.subprocess, "run", MagicMock(side_effect=failure))
+
+    with pytest.raises(click.ClickException, match="configuration was written"):
+        cmd_setup_redaction._restart_gateway()
+
+
+def test_restart_gateway_nonzero_exit_preserves_completed_write_message(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cmd_setup_redaction, "resolve_gateway_binary", lambda: "defenseclaw-gateway")
+    monkeypatch.setattr(
+        cmd_setup_redaction.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=1, stderr="restart denied", stdout=""),
+    )
+
+    with pytest.raises(click.ClickException, match="configuration was written") as exc_info:
+        cmd_setup_redaction._restart_gateway()
+
+    assert "restart denied" in str(exc_info.value)
+
+
+@pytest.mark.parametrize("selection", ["0", "-1", "999"])
+def test_interactive_bucket_selection_rejects_out_of_range_numbers(
+    selection: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cmd_setup_redaction.click, "prompt", lambda *_args, **_kwargs: selection)
+
+    with pytest.raises(click.ClickException, match="invalid bucket selection"):
+        cmd_setup_redaction._interactive_buckets(SimpleNamespace())
 
 
 def test_json_mutation_requires_noninteractive_confirmation(tmp_path: Path) -> None:

@@ -159,10 +159,10 @@ Run `defenseclaw setup redaction` for the guided workflow, or use subcommands
 such as `status`, `remove-all`, `bucket`, `profile`, `destination`, and `route`
 for automation. The command edits
 `observability.destinations[].routes[].selector.buckets` and
-`observability.redaction_profiles`, compiles the staged effective plan, creates
-a private backup, and verifies the installed plan. `remove-all` selects profile
-`none` for configurable projections; it cannot weaken the release-owned managed
-enterprise destination.
+`observability.redaction_profiles` and compiles the staged effective plan. A
+changed non-dry-run write creates a private timestamped backup and verifies the
+installed plan. `remove-all` selects profile `none` for configurable projections;
+it cannot weaken the release-owned managed enterprise destination.
 
 For an independent operator cross-check, run `defenseclaw config validate`,
 `defenseclaw config show --effective --section observability`, and

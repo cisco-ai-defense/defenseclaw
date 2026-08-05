@@ -171,8 +171,20 @@ def _stage_candidate(path: str, candidate: bytes) -> str:
 def _write_private_backup(config_path: str, backup_path: str, source: bytes) -> str:
     """Atomically install one private, regular-file pre-change backup."""
 
-    target = os.path.abspath(backup_path)
-    if target == config_path:
+    requested_target = os.path.abspath(backup_path)
+    try:
+        requested_metadata = os.lstat(requested_target)
+    except FileNotFoundError:
+        requested_metadata = None
+    if requested_metadata is not None and stat.S_ISLNK(requested_metadata.st_mode):
+        raise OSError("refusing to replace a symbolic-link redaction backup")
+
+    # Resolve parent aliases before comparing or writing. This prevents a
+    # symlinked parent, case alias, or existing hard link from turning the
+    # nominal backup into config.yaml itself.
+    target = os.path.realpath(requested_target)
+    canonical_config = os.path.realpath(config_path)
+    if os.path.normcase(target) == os.path.normcase(canonical_config):
         raise ValueError("redaction backup path must differ from config.yaml")
     try:
         existing = os.lstat(target)
@@ -180,12 +192,15 @@ def _write_private_backup(config_path: str, backup_path: str, source: bytes) -> 
         existing = None
     if existing is not None and (stat.S_ISLNK(existing.st_mode) or not stat.S_ISREG(existing.st_mode)):
         raise OSError("refusing to replace a non-regular redaction backup")
+    if existing is not None and os.path.samefile(canonical_config, target):
+        raise ValueError("redaction backup path must not alias config.yaml")
 
-    # This shared primitive creates/tightens an owner-private parent (0700 on
-    # POSIX; protected owner/SYSTEM DACL on Windows), protects the sibling
-    # before writing any bytes, and uses a durable atomic replacement on both
-    # platform families.
-    atomic_write_private_bytes(target, source)
+    # The shared primitive creates missing parents privately, validates an
+    # existing parent without changing its mode/DACL, protects the sibling
+    # before writing bytes, and uses a durable atomic replacement. In
+    # particular, an operator-supplied home/shared directory is never chmod'ed
+    # or assigned a new DACL as a side effect of requesting a backup.
+    atomic_write_private_bytes(target, source, protect_parent=False)
     return target
 
 

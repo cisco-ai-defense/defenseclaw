@@ -398,9 +398,9 @@ private struct DisplayLogRow: Identifiable {
     var id: String { row.id }
 }
 
-/// A compact macOS front end for the canonical v8 redaction CLI. The full
-/// interactive editor remains available in a terminal; this sheet deliberately
-/// exposes only status and broad profile application.
+/// A macOS front end for the canonical v8 redaction CLI. The primary controls
+/// cover status and broad profile application; the disclosure below exposes the
+/// complete non-interactive policy surface.
 struct RedactionPolicySheet: View {
     @Environment(AppState.self) private var appState
     @Environment(\.dismiss) private var dismiss
@@ -417,7 +417,7 @@ struct RedactionPolicySheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Redaction policy").font(.headline)
-            Text("Current global default: \(appState.config.redactionDefaultProfile)")
+            Text("Current global default: \(appState.config.redactionDefaultProfile.isEmpty ? "unset" : appState.config.redactionDefaultProfile)")
                 .font(.callout.monospaced())
             Text("Bucket, destination, and route overrides may be more specific. View status for the canonical effective policy.")
                 .font(.caption)
@@ -515,7 +515,7 @@ struct RedactionPolicySheet: View {
                 ? ["setup", "redaction", "remove-all", "--yes"]
                 : ["setup", "redaction", "apply", "--scope", "all-configurable", "--profile", profile, "--yes"]
             arguments.append(restart ? "--restart" : "--no-restart")
-            _ = await appState.runCommand(
+            let result = await appState.runCommand(
                 title: "apply redaction profile \(profile)",
                 arguments: arguments,
                 category: "setup",
@@ -528,7 +528,14 @@ struct RedactionPolicySheet: View {
                 refreshOnSuccess: true
             )
             running = false
-            dismiss()
+            if result.succeeded {
+                dismiss()
+            } else {
+                armed = false
+                statusOutput = result.output.isEmpty
+                    ? "Command failed with exit \(result.exitCode)."
+                    : result.output
+            }
         }
     }
 }
@@ -569,12 +576,28 @@ private enum RedactionAdvancedAction: String, CaseIterable, Identifiable {
 
     var supportsJSON: Bool {
         switch self {
-        case .status, .profileList, .profileShow, .routeList:
+        case .status,
+             .removeAll,
+             .applyAll,
+             .applyDefaults,
+             .defaultsSet,
+             .defaultsReset,
+             .bucketSet,
+             .bucketReset,
+             .profileList,
+             .profileShow,
+             .profileSet,
+             .profileRemove,
+             .destinationSend,
+             .destinationInherit,
+             .routeList,
+             .routeAdd,
+             .routeSet,
+             .routeMove,
+             .routeRemove:
             true
         case .bucketList, .destinationShow:
             false
-        default:
-            true
         }
     }
 }
@@ -677,12 +700,46 @@ private struct RedactionAdvancedEditor: View {
         }
         .padding(10)
         .background(.quaternary.opacity(0.35), in: RoundedRectangle(cornerRadius: 8))
-        .onChange(of: action) { _, newValue in
-            if !newValue.isMutation {
-                dryRun = true
-                restart = false
-            }
+        .onChange(of: action) { _, _ in
+            resetActionFields()
         }
+    }
+
+    private func resetActionFields() {
+        // Re-arm safe defaults and clear every action-scoped value so a prior
+        // mutation cannot silently carry into a newly selected operation.
+        selectedBucket = buckets[0]
+        policyProfile = "sensitive"
+        logs = "unchanged"
+        traces = "unchanged"
+        metrics = "unchanged"
+        customProfile = ""
+        extendsProfile = "sensitive"
+        detectors = ""
+        metadataMode = "unchanged"
+        identifierMode = "unchanged"
+        contentMode = "unchanged"
+        reasonMode = "unchanged"
+        evidenceMode = "unchanged"
+        errorMode = "unchanged"
+        pathMode = "unchanged"
+        credentialMode = "unchanged"
+        replacementProfile = ""
+        destination = ""
+        routeName = ""
+        signals = "logs,traces"
+        routeBuckets = "*"
+        sources = ""
+        connectors = ""
+        producerActions = ""
+        eventNames = ""
+        minimumSeverity = "none"
+        routeAction = "send"
+        position = ""
+        dryRun = true
+        emitJSON = false
+        restart = false
+        output = ""
     }
 
     @ViewBuilder
@@ -862,7 +919,7 @@ private struct RedactionAdvancedEditor: View {
         case .routeRemove:
             if trimmed(destination).isEmpty { return "Enter a destination name." }
             return trimmed(routeName).isEmpty ? "Enter a route name." : nil
-        default:
+        case .status, .removeAll, .defaultsReset, .bucketList, .bucketReset, .profileList:
             return nil
         }
     }
@@ -1019,7 +1076,11 @@ private struct RedactionAdvancedEditor: View {
                 successEffects: action.isMutation && !dryRun ? ["Redaction policy updated and verified"] : [],
                 refreshOnSuccess: action.isMutation && !dryRun
             )
-            output = result.output
+            output = result.output.isEmpty
+                ? (result.succeeded
+                    ? "\(action.rawValue) completed with no output."
+                    : "Command failed with exit \(result.exitCode).")
+                : result.output
             running = false
         }
     }

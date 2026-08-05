@@ -88,12 +88,14 @@ the same global defaults, 14 buckets, custom profiles, destinations, and ordered
 route selectors. Advanced mutations default to dry-run and show their exact CLI
 command before execution.
 
-Every successful mutation writes the same pre-change backup. Its default path is
-`~/.defenseclaw/backups/config.yaml.before-redaction` on macOS/Linux and
+Every changed, non-dry-run mutation writes a timestamped pre-change backup. Its
+path begins with `~/.defenseclaw/backups/config.yaml.before-redaction` on
+macOS/Linux and
 `%USERPROFILE%\.defenseclaw\backups\config.yaml.before-redaction` in the packaged
-Windows profile. The parent and file are owner-private (`0700`/`0600` on POSIX;
-a protected current-user/SYSTEM DACL on Windows), and replacement is atomic and
-durable on both platform families.
+Windows profile. Newly created parents and every backup file are owner-private
+(`0700`/`0600` on POSIX; a protected current-user/SYSTEM DACL on Windows), and
+replacement is atomic and durable on both platform families. Existing safe
+parent-directory permissions are validated without being changed.
 
 ### The simple remove-all command
 
@@ -361,7 +363,8 @@ normal log collection cannot disable this SQLite-only compliance floor.
 
 ## V7 compatibility (upgrades only)
 
-`privacy.disable_redaction` and `DEFENSECLAW_DISABLE_REDACTION` are v7 controls.
+The v7 `privacy` block's `disable_redaction` field and
+`DEFENSECLAW_DISABLE_REDACTION` are v7 controls.
 They are not v8 runtime policy knobs. During `defenseclaw upgrade`, the converter
 materializes their effective behavior into `none` or `legacy-v7` profiles before
 retiring those inputs. A v8 gateway rejects legacy observability/redaction blocks
@@ -373,13 +376,14 @@ does not alter the v8 destination route graph or a persistent-sink projection.
 ## Write and activation safety
 
 The CLI is the preferred redaction editor. Each mutation runs the strict Python
-source validator and the canonical Go compiler before writing, compares the live
-file with the preview digest, atomically replaces `config.yaml`, verifies the
-installed effective-plan digest, and records a `setup-redaction-policy` audit
-action. Before a changed write it installs a private pre-change backup at:
+source validator and the canonical Go compiler before writing. For a changed,
+non-dry-run write, it compares the live file with the preview digest, installs a
+private backup, atomically replaces `config.yaml`, verifies the installed
+effective-plan digest, and records a `setup-redaction-policy` audit action. The
+backup path is unique for each write:
 
 ```text
-<data-dir>/backups/config.yaml.before-redaction
+<data-dir>/backups/config.yaml.before-redaction-<nanosecond-timestamp>
 ```
 
 Comments and unrelated source formatting are retained outside the exact policy

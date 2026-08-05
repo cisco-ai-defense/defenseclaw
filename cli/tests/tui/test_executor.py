@@ -316,8 +316,10 @@ async def test_pipe_executor_streams_prompt_without_waiting_for_newline() -> Non
         (
             "-u",
             "-c",
-            "import sys; sys.stdout.write('Select: '); sys.stdout.flush(); "
-            "answer=sys.stdin.readline().strip(); print('picked ' + answer)",
+            (
+                "import sys; sys.stdout.write('Select: '); sys.stdout.flush(); "
+                "answer=sys.stdin.readline().strip(); print('picked ' + answer)"
+            ),
         ),
     ):
         if event.kind != "output":
@@ -328,6 +330,46 @@ async def test_pipe_executor_streams_prompt_without_waiting_for_newline() -> Non
 
     assert any("Select:" in text for text in output)
     assert any("picked 2" in text for text in output)
+    assert all(not text.endswith("\n") for text in output)
+
+
+@pytest.mark.asyncio
+async def test_pipe_executor_coalesces_fast_cross_chunk_line_fragments(monkeypatch) -> None:
+    chunks = iter((b"hel", b"lo\n", b""))
+
+    class ChunkedStdout:
+        @staticmethod
+        async def read(_limit: int) -> bytes:
+            return next(chunks)
+
+    class Process:
+        pid = 1
+        stdin = None
+        stdout = ChunkedStdout()
+        returncode = 0
+
+        @staticmethod
+        async def wait() -> int:
+            return 0
+
+    async def fake_exec(*_argv: str, **_kwargs: object) -> Process:
+        return Process()
+
+    class NoopProcessTree:
+        @staticmethod
+        async def cancel(_process, _grace: float, _force: float) -> None:
+            return None
+
+        @staticmethod
+        def close() -> None:
+            return None
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    process_tree_factory = lambda _pid: NoopProcessTree() if os.name == "nt" else None  # noqa: E731
+    executor = CommandExecutor(use_pty=False, process_tree_factory=process_tree_factory)
+    events = await _collect(executor, ("-c", "ignored"))
+
+    assert [event.text for event in events if event.kind == "output"] == ["hello"]
 
 
 @pytest.mark.asyncio

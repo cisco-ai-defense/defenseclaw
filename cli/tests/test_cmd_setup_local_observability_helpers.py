@@ -114,7 +114,7 @@ class TestV8LocalDestinationWriter(unittest.TestCase):
         )
         reload_cfg.assert_called_once_with(app)
 
-    def test_v8_redaction_summary_uses_route_policy(self):
+    def test_v8_redaction_summary_uses_destination_policy(self):
         cfg = SimpleNamespace(_source_config_version=8)
         status, label, command = redaction_status_hint(cfg)
         self.assertEqual(status, "PER DESTINATION (defaults are unredacted)")

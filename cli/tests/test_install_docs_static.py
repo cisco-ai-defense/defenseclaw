@@ -67,6 +67,9 @@ OBSERVABILITY_V8_CURRENT_AUTHORITY_FILES = (
     "docs-site/content/docs/connectors/codex.mdx",
     "docs-site/content/docs/connectors/geminicli.mdx",
     "docs-site/content/docs/setup/index.mdx",
+    "docs-site/content/docs/reference/redaction.mdx",
+    "docs-site/content/docs/reference/cli.mdx",
+    "docs-site/content/docs/observability/index.mdx",
     "bundles/local_observability_stack/prometheus/rules/alerts.yml",
     "scripts/install-dev.sh",
     "docs-site/content/docs/reference/configuration.mdx",
@@ -2037,7 +2040,7 @@ def test_current_observability_docs_do_not_advertise_retired_redaction_controls(
         for retired in retired_guidance:
             assert retired not in text, f"{rel} still advertises retired control: {retired}"
 
-    guardrail_reference = (ROOT / "docs-site/content/docs/setup/guardrail/index.mdx").read_text()
+    guardrail_reference = (ROOT / "docs-site/content/docs/setup/guardrail/index.mdx").read_text(encoding="utf-8")
     assert "Legacy v7 JSONL export" in guardrail_reference
 
 
@@ -2051,19 +2054,19 @@ def test_current_observability_guidance_explains_v8_redaction_workflow() -> None
         "defenseclaw-gateway restart",
     )
     for rel in OBSERVABILITY_V8_WORKFLOW_GUIDES:
-        text = (ROOT / rel).read_text()
+        text = (ROOT / rel).read_text(encoding="utf-8")
         for expected in required_workflow:
             assert expected in text, f"{rel} is missing v8 redaction guidance: {expected}"
 
     for rel in OBSERVABILITY_V8_CONNECTOR_GUIDES:
-        text = (ROOT / rel).read_text()
+        text = (ROOT / rel).read_text(encoding="utf-8")
         assert "observability.destinations[].routes[].selector.buckets" in text
         assert "observability.redaction_profiles" in text
 
 
 def test_current_observability_docs_describe_jsonl_as_explicit_optional_destination() -> None:
     for rel, expected_wording in OBSERVABILITY_V8_JSONL_GUIDES.items():
-        lines = [line for line in (ROOT / rel).read_text().splitlines() if "gateway.jsonl" in line]
+        lines = [line for line in (ROOT / rel).read_text(encoding="utf-8").splitlines() if "gateway.jsonl" in line]
         assert lines, f"{rel} must retain its scoped gateway.jsonl guidance"
         for line in lines:
             normalized = line.lower()
@@ -2083,7 +2086,7 @@ def test_dev_installer_only_offers_jsonl_tail_when_the_destination_exists() -> N
 
 
 def test_setup_index_separates_commands_from_policy_reference_cards() -> None:
-    text = (ROOT / "docs-site/content/docs/setup/index.mdx").read_text()
+    text = (ROOT / "docs-site/content/docs/setup/index.mdx").read_text(encoding="utf-8")
     command_start = text.index("## Auxiliary configuration commands")
     reference_start = text.index("## Deployment and policy references")
     matrix_start = text.index("## Interactive vs non-interactive")
@@ -2095,9 +2098,9 @@ def test_setup_index_separates_commands_from_policy_reference_cards() -> None:
 
 
 def test_redaction_cli_docs_cover_simple_advanced_and_scripted_workflows() -> None:
-    redaction = (ROOT / "docs-site/content/docs/reference/redaction.mdx").read_text()
-    setup = (ROOT / "docs-site/content/docs/setup/index.mdx").read_text()
-    cli = (ROOT / "docs-site/content/docs/reference/cli.mdx").read_text()
+    redaction = (ROOT / "docs-site/content/docs/reference/redaction.mdx").read_text(encoding="utf-8")
+    setup = (ROOT / "docs-site/content/docs/setup/index.mdx").read_text(encoding="utf-8")
+    cli = (ROOT / "docs-site/content/docs/reference/cli.mdx").read_text(encoding="utf-8")
 
     for text in (redaction, setup, cli):
         assert "defenseclaw setup redaction" in text
@@ -2117,11 +2120,11 @@ def test_redaction_cli_docs_cover_simple_advanced_and_scripted_workflows() -> No
 
 
 def test_redaction_workflow_documents_linux_windows_macos_and_tui_surfaces() -> None:
-    redaction = (ROOT / "docs-site/content/docs/reference/redaction.mdx").read_text()
-    setup = (ROOT / "docs-site/content/docs/setup/index.mdx").read_text()
+    redaction = (ROOT / "docs-site/content/docs/reference/redaction.mdx").read_text(encoding="utf-8")
+    setup = (ROOT / "docs-site/content/docs/setup/index.mdx").read_text(encoding="utf-8")
     windows = (
         ROOT / "docs-site/content/docs/get-started/windows/capabilities-commands.mdx"
-    ).read_text()
+    ).read_text(encoding="utf-8")
 
     for expected in (
         "macOS, Linux, and native Windows",
@@ -2143,7 +2146,7 @@ def test_redaction_workflow_documents_linux_windows_macos_and_tui_surfaces() -> 
 def test_macos_redaction_sheet_exposes_the_complete_advanced_cli_surface() -> None:
     source = (
         ROOT / "macos/DefenseClawMac/DefenseClawMac/Features/LogsView.swift"
-    ).read_text()
+    ).read_text(encoding="utf-8")
 
     assert 'DisclosureGroup("Show advanced settings"' in source
     assert source.count('case bucket') >= 3
@@ -2157,6 +2160,8 @@ def test_macos_redaction_sheet_exposes_the_complete_advanced_cli_surface() -> No
         '"--event-name"',
         '"--min-severity"',
         '"--dry-run"',
+        "if result.succeeded",
+        "resetActionFields()",
     ):
         assert expected in source
 

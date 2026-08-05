@@ -23,6 +23,7 @@ from defenseclaw.observability.v8_status import (
     V8DestinationStatus,
     V8OperatorStatus,
 )
+from defenseclaw.tui.command_line import infer_command_risk
 from defenseclaw.tui.panels.setup import (
     CONNECTORS,
     WIZARD_DESCRIPTIONS,
@@ -215,7 +216,59 @@ def test_redaction_is_first_class_setup_wizard_with_safe_quick_actions() -> None
     )
     action = model.submit_wizard_form()
     assert action.intent is not None
+    assert action.intent.risk == "read-only"
+    assert infer_command_risk(action.intent.category, action.intent.args) == "setup"
+
+
+def test_redaction_interactive_tui_action_explicitly_uses_setup_risk() -> None:
+    model = SetupPanelModel({"config_version": 8})
+    model.open_goal_menu(SetupWizard.REDACTION)
+    model.goal_cursor = next(index for index, goal in enumerate(model.goals) if goal.id == "interactive")
+    model.select_active_goal()
+
+    action = model.submit_wizard_form()
+
+    assert action.intent is not None
+    assert action.intent.args == ("setup", "redaction")
     assert action.intent.risk == "setup"
+
+
+def test_redaction_action_change_rearms_dry_run_and_disables_restart() -> None:
+    model = SetupPanelModel({"config_version": 8})
+    model.open_wizard_form(SetupWizard.REDACTION)
+    model.form_fields = list(_with_field(model.form_fields, "Action", "remove-all"))
+    model.recompute_dependent_fields()
+    assert wizard_field_value(model.form_fields, "Dry Run") == "yes"
+
+    model.form_fields = list(_with_field(model.form_fields, "Dry Run", "no"))
+    model.form_fields = list(_with_field(model.form_fields, "Restart Gateway", "yes"))
+    model.form_fields = list(_with_field(model.form_fields, "Action", "apply-all"))
+    model.recompute_dependent_fields()
+
+    assert wizard_field_value(model.form_fields, "Dry Run") == "yes"
+    assert wizard_field_value(model.form_fields, "Restart Gateway") == "no"
+
+
+def test_redaction_apply_requires_an_explicit_nonempty_profile() -> None:
+    from defenseclaw.tui.panels.setup import _redaction_wizard_fields_for
+
+    fields = _redaction_wizard_fields_for(
+        {
+            "@Action": "apply-all",
+            "--profile": "",
+        }
+    )
+
+    assert missing_required_fields(SetupWizard.REDACTION, fields) == ("Profile",)
+    assert build_wizard_args(SetupWizard.REDACTION, fields) == (
+        "setup",
+        "redaction",
+        "apply",
+        "--scope",
+        "all-configurable",
+        "--yes",
+        "--dry-run",
+    )
 
 
 def test_redaction_advanced_tui_form_covers_bucket_profile_destination_and_route_commands() -> None:
@@ -253,7 +306,7 @@ def test_redaction_advanced_tui_form_covers_bucket_profile_destination_and_route
     )
     profile_argv = build_wizard_args(SetupWizard.REDACTION, profile_fields)
     assert profile_argv[:6] == ("setup", "redaction", "profile", "set", "soc", "--extends")
-    assert ("--field", "path=hash") == tuple(profile_argv[-4:-2])
+    assert tuple(profile_argv[-4:-2]) == ("--field", "path=hash")
     assert profile_argv[-2:] == ("--yes", "--dry-run")
 
     route_fields = _redaction_wizard_fields_for(
@@ -275,7 +328,7 @@ def test_redaction_advanced_tui_form_covers_bucket_profile_destination_and_route
     assert route_argv.count("--signal") == 2
     assert route_argv.count("--bucket") == 2
     assert route_argv.count("--connector") == 2
-    assert ("--position", "2") == tuple(route_argv[-4:-2])
+    assert tuple(route_argv[-4:-2]) == ("--position", "2")
     assert route_argv[-2:] == ("--yes", "--dry-run")
 
 
@@ -283,6 +336,29 @@ def test_redaction_tui_default_form_is_read_only_status() -> None:
     fields = redaction_wizard_fields()
 
     assert build_wizard_args(SetupWizard.REDACTION, fields) == ("setup", "redaction", "status")
+
+
+def test_redaction_profile_remove_does_not_default_to_a_replacement() -> None:
+    from defenseclaw.tui.panels.setup import _redaction_wizard_fields_for
+
+    fields = _redaction_wizard_fields_for(
+        {
+            "@Action": "profile-remove",
+            "@Custom Profile Name": "soc",
+        }
+    )
+
+    argv = build_wizard_args(SetupWizard.REDACTION, fields)
+    assert argv == (
+        "setup",
+        "redaction",
+        "profile",
+        "remove",
+        "soc",
+        "--yes",
+        "--dry-run",
+    )
+    assert "--replace-with" not in argv
 
 
 def test_notifications_fields_preserve_config_editor_catalog() -> None:
@@ -2055,6 +2131,7 @@ def test_every_redaction_tui_action_maps_to_the_registered_cli_surface() -> None
     from defenseclaw.commands import cmd_setup
     from defenseclaw.tui.panels.setup import (
         _REDACTION_ACTIONS,
+        _REDACTION_MUTATION_ACTIONS,
         _redaction_wizard_fields_for,
     )
 
@@ -2071,8 +2148,13 @@ def test_every_redaction_tui_action_maps_to_the_registered_cli_surface() -> None
         fields = _redaction_wizard_fields_for({**seed, "@Action": action})
         assert missing_required_fields(SetupWizard.REDACTION, fields) == (), action
         argv = build_wizard_args(SetupWizard.REDACTION, fields)
-        result = runner.invoke(cmd_setup.setup, [*argv[1:], "--help"], catch_exceptions=True)
-        assert result.exit_code == 0, f"{action}: {result.output}\n{result.exception!r}"
+        if action == "interactive":
+            assert argv == ("setup", "redaction")
+            continue
+        if action in _REDACTION_MUTATION_ACTIONS:
+            assert "--dry-run" in argv, action
+        result = runner.invoke(cmd_setup.setup, argv[1:], catch_exceptions=True)
+        assert result.exit_code != 2, f"{action}: {result.output}\n{result.exception!r}"
 
 
 def test_model_picker_filter_and_freeform_row() -> None:

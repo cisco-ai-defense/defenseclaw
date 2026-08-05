@@ -14,7 +14,8 @@ from __future__ import annotations
 
 import json
 import subprocess
-from collections.abc import Iterable, Mapping, Sequence
+import time
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -35,6 +36,7 @@ from defenseclaw.observability.v8_config import (
     SIGNALS,
 )
 from defenseclaw.observability.v8_redaction_policy import (
+    ASSIGNABLE_BUILT_IN_PROFILES,
     apply_mutations_to_source,
     apply_profile_everywhere_mutations,
     bucket_mutations,
@@ -55,6 +57,22 @@ from defenseclaw.observability.v8_redaction_policy import (
 from defenseclaw.observability.v8_status import inspect_v8_operator_status
 from defenseclaw.observability.v8_writer import mutate_v8_config
 from defenseclaw.observability.v8_yaml import V8YAMLMutation
+
+PolicyMutationBuilder = Callable[..., tuple[V8YAMLMutation, ...]]
+
+
+def _policy_mutations(
+    builder: PolicyMutationBuilder,
+    /,
+    *args: Any,
+    **kwargs: Any,
+) -> tuple[V8YAMLMutation, ...]:
+    """Translate policy validation failures into Click usage errors."""
+
+    try:
+        return builder(*args, **kwargs)
+    except ValueError as exc:
+        raise click.UsageError(str(exc)) from exc
 
 
 @click.group("redaction", invoke_without_command=True)
@@ -129,7 +147,7 @@ def remove_all_cmd(
     """Remove redaction from every configurable log and trace projection."""
 
     _, source = _load_source(app)
-    mutations = apply_profile_everywhere_mutations(source, "none")
+    mutations = _policy_mutations(apply_profile_everywhere_mutations, source, "none")
     _execute_mutations(
         app,
         mutations,
@@ -166,9 +184,9 @@ def apply_cmd(
 
     _, source = _load_source(app)
     mutations = (
-        apply_profile_everywhere_mutations(source, profile)
+        _policy_mutations(apply_profile_everywhere_mutations, source, profile)
         if scope == "all-configurable"
-        else defaults_mutations(source, profile=profile)
+        else _policy_mutations(defaults_mutations, source, profile=profile)
     )
     _execute_mutations(
         app,
@@ -211,7 +229,8 @@ def defaults_set_cmd(
 
     _, source = _load_source(app)
     _require_any_change(profile, logs, traces, metrics)
-    mutations = defaults_mutations(
+    mutations = _policy_mutations(
+        defaults_mutations,
         source,
         profile=profile,
         collect=_specified_collection(logs=logs, traces=traces, metrics=metrics),
@@ -243,7 +262,8 @@ def defaults_reset_cmd(
     """Reset global collection and profile values to catalog defaults."""
 
     _, source = _load_source(app)
-    mutations = defaults_mutations(
+    mutations = _policy_mutations(
+        defaults_mutations,
         source,
         reset_profile=True,
         collect={signal: None for signal in SIGNALS},
@@ -305,7 +325,8 @@ def bucket_set_cmd(
     if profile is None and not inherit_profile and all(value is None for value in (logs, traces, metrics)):
         raise click.UsageError("select at least one setting to change")
     _, source = _load_source(app)
-    mutations = bucket_mutations(
+    mutations = _policy_mutations(
+        bucket_mutations,
         source,
         bucket,
         profile=profile,
@@ -341,7 +362,8 @@ def bucket_reset_cmd(
     """Reset one bucket to the global/catalog baseline."""
 
     _, source = _load_source(app)
-    mutations = bucket_mutations(
+    mutations = _policy_mutations(
+        bucket_mutations,
         source,
         bucket,
         inherit_profile=True,
@@ -432,7 +454,8 @@ def profile_set_cmd(
 
     _, source = _load_source(app)
     parsed_fields = _parse_fields(fields)
-    mutations = profile_set_mutations(
+    mutations = _policy_mutations(
+        profile_set_mutations,
         source,
         name,
         extends=extends,
@@ -470,7 +493,7 @@ def profile_remove_cmd(
     """Remove an unreferenced custom profile or replace references atomically."""
 
     _, source = _load_source(app)
-    mutations = profile_remove_mutations(source, name, replace_with=replace_with)
+    mutations = _policy_mutations(profile_remove_mutations, source, name, replace_with=replace_with)
     _execute_mutations(
         app,
         mutations,
@@ -530,7 +553,14 @@ def destination_send_cmd(
     """Replace destination routing with one concise send policy."""
 
     _, source = _load_source(app)
-    mutations = destination_send_mutations(source, name, signals=signals, buckets=buckets, profile=profile)
+    mutations = _policy_mutations(
+        destination_send_mutations,
+        source,
+        name,
+        signals=signals,
+        buckets=buckets,
+        profile=profile,
+    )
     _execute_mutations(
         app,
         mutations,
@@ -560,7 +590,7 @@ def destination_inherit_cmd(
     """Remove explicit send/routes and restore capability-default policy."""
 
     _, source = _load_source(app)
-    mutations = destination_inherit_mutations(source, name)
+    mutations = _policy_mutations(destination_inherit_mutations, source, name)
     _execute_mutations(
         app,
         mutations,
@@ -639,7 +669,8 @@ def route_add_cmd(
 
     _, source = _load_source(app)
     route = _route_from_options(name, options)
-    mutations = route_upsert_mutations(
+    mutations = _policy_mutations(
+        route_upsert_mutations,
         source,
         destination,
         route,
@@ -659,7 +690,7 @@ def route_set_cmd(app: AppContext, destination: str, name: str, **options) -> No
 
     _, source = _load_source(app)
     route = _route_from_options(name, options)
-    mutations = route_upsert_mutations(source, destination, route, must_exist=True)
+    mutations = _policy_mutations(route_upsert_mutations, source, destination, route, must_exist=True)
     _execute_route_mutations(app, mutations, destination, name, "set", options)
 
 
@@ -685,7 +716,7 @@ def route_move_cmd(
     """Move a route to a one-based first-match position."""
 
     _, source = _load_source(app)
-    mutations = route_move_mutations(source, destination, name, position=position - 1)
+    mutations = _policy_mutations(route_move_mutations, source, destination, name, position=position - 1)
     _execute_mutations(
         app,
         mutations,
@@ -717,7 +748,7 @@ def route_remove_cmd(
     """Remove one source-authored route."""
 
     _, source = _load_source(app)
-    mutations = route_remove_mutations(source, destination, name)
+    mutations = _policy_mutations(route_remove_mutations, source, destination, name)
     _execute_mutations(
         app,
         mutations,
@@ -768,10 +799,10 @@ def _interactive_wizard(app: AppContext) -> None:
     click.echo("  4. Change the global/bucket baseline")
     choice = click.prompt("\nSelect", type=click.Choice(["1", "2", "3", "4"]), default="1")
     if choice == "2":
-        draft.add(apply_profile_everywhere_mutations(draft.source, "none"))
+        draft.add(_policy_mutations(apply_profile_everywhere_mutations, draft.source, "none"))
     elif choice == "3":
         profile = _prompt_profile(draft.source)
-        draft.add(apply_profile_everywhere_mutations(draft.source, profile))
+        draft.add(_policy_mutations(apply_profile_everywhere_mutations, draft.source, profile))
     elif choice == "4":
         current_defaults = _effective_source_defaults(draft.source)
         profile = _prompt_profile(
@@ -780,7 +811,8 @@ def _interactive_wizard(app: AppContext) -> None:
             default=str(current_defaults.get("redaction_profile") or "inherit"),
         )
         draft.add(
-            defaults_mutations(
+            _policy_mutations(
+                defaults_mutations,
                 draft.source,
                 profile=None if profile == "inherit" else profile,
                 reset_profile=profile == "inherit",
@@ -854,7 +886,8 @@ def _interactive_defaults(draft: _WizardDraft) -> None:
         for signal in SIGNALS
     }
     draft.add(
-        defaults_mutations(
+        _policy_mutations(
+            defaults_mutations,
             draft.source,
             profile=None if profile == "inherit" else profile,
             reset_profile=profile == "inherit",
@@ -875,9 +908,12 @@ def _interactive_buckets(draft: _WizardDraft) -> None:
                 selected.append(normalized)
                 continue
             try:
-                selected.append(BUCKETS[int(normalized) - 1])
-            except (ValueError, IndexError):
+                position = int(normalized)
+            except ValueError:
                 raise click.ClickException(f"invalid bucket selection {token!r}") from None
+            if not 1 <= position <= len(BUCKETS):
+                raise click.ClickException(f"invalid bucket selection {token!r}")
+            selected.append(BUCKETS[position - 1])
     selected = list(dict.fromkeys(selected))
     effective = [_effective_source_bucket(draft.source, bucket) for bucket in selected]
     current_profiles = {str(item["redaction_profile"]) for item in effective}
@@ -904,7 +940,8 @@ def _interactive_buckets(draft: _WizardDraft) -> None:
         return
     for bucket in selected:
         draft.add(
-            bucket_mutations(
+            _policy_mutations(
+                bucket_mutations,
                 draft.source,
                 bucket,
                 profile=profile,
@@ -915,7 +952,8 @@ def _interactive_buckets(draft: _WizardDraft) -> None:
 
 
 def _interactive_profiles(draft: _WizardDraft) -> None:
-    custom = list(redaction_profile_names(draft.source)[4:])
+    built_in = frozenset(ASSIGNABLE_BUILT_IN_PROFILES)
+    custom = [name for name in redaction_profile_names(draft.source) if name not in built_in]
     click.echo("  1. View a profile")
     click.echo("  2. Create or edit a custom profile")
     click.echo("  3. Remove a custom profile")
@@ -933,7 +971,7 @@ def _interactive_profiles(draft: _WizardDraft) -> None:
         if references:
             click.echo(f"Profile is referenced at {len(references)} policy path(s).")
             replacement = _prompt_profile(draft.source, excluded={name})
-        draft.add(profile_remove_mutations(draft.source, name, replace_with=replacement))
+        draft.add(_policy_mutations(profile_remove_mutations, draft.source, name, replace_with=replacement))
         return
 
     name = click.prompt("Custom profile name").strip()
@@ -957,7 +995,8 @@ def _interactive_profiles(draft: _WizardDraft) -> None:
             value = click.prompt(f"  {field_class}", type=click.Choice(choices), default=default)
             fields[field_class] = None if value == "inherit" else value
     draft.add(
-        profile_set_mutations(
+        _policy_mutations(
+            profile_set_mutations,
             draft.source,
             name,
             extends=extends,
@@ -980,11 +1019,10 @@ def _interactive_destinations(draft: _WizardDraft) -> None:
     click.echo("  3. Edit ordered routes")
     action = click.prompt("Select", type=click.Choice(["1", "2", "3"]))
     if action == "1":
-        draft.add(destination_inherit_mutations(draft.source, name))
+        draft.add(_policy_mutations(destination_inherit_mutations, draft.source, name))
         return
     if action == "2":
-        kind = str(destination.get("kind") or "")
-        capabilities = ("traces",) if destination.get("preset") == "galileo" else DESTINATION_CAPABILITIES[kind]
+        capabilities = _destination_capabilities(destination)
         signals = _split_values(
             click.prompt("Signals", default=",".join(capabilities)),
             allowed=set(capabilities),
@@ -992,7 +1030,8 @@ def _interactive_destinations(draft: _WizardDraft) -> None:
         buckets = _split_values(click.prompt("Buckets", default="*"), allowed={"*", *BUCKETS})
         profile = _prompt_profile(draft.source, allow_inherit=True)
         draft.add(
-            destination_send_mutations(
+            _policy_mutations(
+                destination_send_mutations,
                 draft.source,
                 name,
                 signals=signals,
@@ -1026,7 +1065,8 @@ def _interactive_routes(draft: _WizardDraft, destination_name: str) -> None:
                 "One-based position", type=click.IntRange(1, len(routes) + 1), default=len(routes) + 1
             )
             draft.add(
-                route_upsert_mutations(
+                _policy_mutations(
+                    route_upsert_mutations,
                     draft.source,
                     destination_name,
                     route,
@@ -1043,7 +1083,8 @@ def _interactive_routes(draft: _WizardDraft, destination_name: str) -> None:
         if action == "e":
             current = next(route for route in routes if route.get("name") == route_name)
             draft.add(
-                route_upsert_mutations(
+                _policy_mutations(
+                    route_upsert_mutations,
                     draft.source,
                     destination_name,
                     _prompt_route(draft.source, destination, route_name, current),
@@ -1052,9 +1093,17 @@ def _interactive_routes(draft: _WizardDraft, destination_name: str) -> None:
             )
         elif action == "m":
             position = click.prompt("One-based position", type=click.IntRange(1, len(routes)), default=1)
-            draft.add(route_move_mutations(draft.source, destination_name, route_name, position=position - 1))
+            draft.add(
+                _policy_mutations(
+                    route_move_mutations,
+                    draft.source,
+                    destination_name,
+                    route_name,
+                    position=position - 1,
+                )
+            )
         elif click.confirm(f"Remove route {route_name!r}?", default=False):
-            draft.add(route_remove_mutations(draft.source, destination_name, route_name))
+            draft.add(_policy_mutations(route_remove_mutations, draft.source, destination_name, route_name))
 
 
 def _prompt_route(
@@ -1064,8 +1113,7 @@ def _prompt_route(
     current: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     current = current or {}
-    kind = str(destination.get("kind") or "")
-    capabilities = ("traces",) if destination.get("preset") == "galileo" else DESTINATION_CAPABILITIES[kind]
+    capabilities = _destination_capabilities(destination)
     signals = _split_values(
         click.prompt("Signals", default=",".join(current.get("signals") or capabilities)),
         allowed=set(capabilities),
@@ -1167,7 +1215,7 @@ def _execute_mutations(
         if not click.confirm(prompt, default=False):
             click.echo("Aborted.")
             return
-    backup = Path(app.cfg.data_dir) / "backups" / "config.yaml.before-redaction"
+    backup = Path(app.cfg.data_dir) / "backups" / f"config.yaml.before-redaction-{time.time_ns()}"
     try:
         result = mutate_v8_config(
             path,
@@ -1176,17 +1224,26 @@ def _execute_mutations(
             expected_before_sha256=preview.before_sha256,
             backup_path=backup,
         )
-        verified = inspect_v8_config("effective", config_path=str(path), data_dir=app.cfg.data_dir)
     except (ValueError, OSError, RuntimeError, ConfigInspectError) as exc:
         raise click.ClickException(str(exc)) from exc
-    if verified.plan_digest != preview.after_plan_digest:
-        raise click.ClickException("configuration was written but the verified effective plan differs from the preview")
     if app.logger:
         app.logger.log_action(
             ACTION_SETUP_REDACTION_POLICY,
             "redaction-policy",
             f"action={action} changed_legs={len(preview.changes)} newly_unredacted={preview.newly_unredacted}",
         )
+    try:
+        verified = inspect_v8_config("effective", config_path=str(path), data_dir=app.cfg.data_dir)
+    except (ValueError, OSError, RuntimeError, ConfigInspectError) as exc:
+        rollback_path = result.backup_path or str(backup)
+        message = f"configuration was written but effective plan verification failed: {exc}"
+        message += f"; restore {rollback_path} to roll back"
+        raise click.ClickException(message) from exc
+    if verified.plan_digest != preview.after_plan_digest:
+        message = "configuration was written but the verified effective plan differs from the preview"
+        rollback_path = result.backup_path or str(backup)
+        message += f"; restore {rollback_path} to roll back"
+        raise click.ClickException(message)
     if restart:
         _restart_gateway(quiet=emit_json)
     if not emit_json:
@@ -1426,11 +1483,24 @@ def _source_destinations(source: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     return [item for item in destinations if isinstance(item, Mapping)]
 
 
-def _source_destination_or_click(source: Mapping[str, Any], name: str):
+def _source_destination_or_click(source: Mapping[str, Any], name: str) -> tuple[int, Mapping[str, Any]]:
     try:
         return source_destination(source, name)
     except ValueError as exc:
         raise click.ClickException(str(exc)) from exc
+
+
+def _destination_capabilities(destination: Mapping[str, Any]) -> tuple[str, ...]:
+    """Resolve one configurable destination's supported signal set."""
+
+    if destination.get("preset") == "galileo":
+        return ("traces",)
+    kind = str(destination.get("kind") or "")
+    capabilities = DESTINATION_CAPABILITIES.get(kind)
+    if capabilities is None:
+        label = kind or "<missing>"
+        raise click.ClickException(f"destination kind {label!r} has no supported capability definition")
+    return capabilities
 
 
 def _require_any_change(*values: object) -> None:
@@ -1463,9 +1533,11 @@ def _restart_gateway(*, quiet: bool = False) -> None:
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise click.ClickException("configuration was written, but the gateway restart could not complete") from exc
     if completed.returncode != 0:
-        raise click.ClickException(
-            "configuration was written, but the gateway restart failed; run defenseclaw-gateway restart"
-        )
+        detail = (completed.stderr or completed.stdout or "").strip()
+        message = "configuration was written, but the gateway restart failed; run defenseclaw-gateway restart"
+        if detail:
+            message += f"\n{detail}"
+        raise click.ClickException(message)
     if not quiet:
         click.echo("Gateway restarted.")
 

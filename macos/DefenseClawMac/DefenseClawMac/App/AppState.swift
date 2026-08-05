@@ -1735,7 +1735,8 @@ final class AppState {
             return .init(label: "Agent", value: name)
         }()
 
-        let redaction = "default \(config.redactionDefaultProfile)"
+        let redactionProfile = config.redactionDefaultProfile.isEmpty ? "unset" : config.redactionDefaultProfile
+        let redaction = "default \(redactionProfile)"
         let approval = config.hiltEnabled ? "ON (min \(config.hiltMinSeverity))" : "OFF"
 
         var rows: [ConfigurationRow] = [
@@ -1773,7 +1774,8 @@ final class AppState {
         // false) outranks the global flag, exactly like connector_is_disabled.
         let guardrail = (connectorIsDisabled(name) || !config.guardrailEnabled)
             ? "disabled" : "enabled"
-        let redaction = "default \(config.redactionDefaultProfile) (global)"
+        let redactionProfile = config.redactionDefaultProfile.isEmpty ? "unset" : config.redactionDefaultProfile
+        let redaction = "default \(redactionProfile) (global)"
         let approval = config.hiltEnabled ? "ON (global min \(config.hiltMinSeverity))" : "OFF (global)"
 
         // Exactly the TUI's rows: 8 fixed + optional Environment. LLM/AI

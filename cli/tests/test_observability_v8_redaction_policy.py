@@ -11,7 +11,10 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from pathlib import Path
+from types import SimpleNamespace
 
+import defenseclaw.observability.v8_redaction_policy as policy_module
 import pytest
 from defenseclaw.observability.v8_config import BUCKETS
 from defenseclaw.observability.v8_redaction_policy import (
@@ -21,6 +24,7 @@ from defenseclaw.observability.v8_redaction_policy import (
     defaults_mutations,
     destination_inherit_mutations,
     destination_send_mutations,
+    preview_redaction_mutations,
     profile_reference_paths,
     profile_remove_mutations,
     profile_set_mutations,
@@ -29,6 +33,7 @@ from defenseclaw.observability.v8_redaction_policy import (
     route_remove_mutations,
     route_upsert_mutations,
 )
+from defenseclaw.observability.v8_yaml import V8YAMLMutation
 
 
 def _source() -> bytes:
@@ -125,6 +130,105 @@ def test_defaults_and_bucket_mutations_are_field_scoped() -> None:
     }
 
 
+def test_defaults_and_bucket_mutations_reject_conflicting_profile_operations() -> None:
+    source = _apply(_source(), ())[1]
+
+    with pytest.raises(ValueError, match="reset_profile cannot be combined"):
+        defaults_mutations(source, profile="strict", reset_profile=True)
+    with pytest.raises(ValueError, match="inherit_profile cannot be combined"):
+        bucket_mutations(source, "model.io", profile="strict", inherit_profile=True)
+
+
+def test_preview_counts_effective_content_legs_from_compiler_snapshots(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_bytes(_source())
+    before = {
+        "destinations": [
+            {
+                "name": "terminal",
+                "generated": False,
+                "routes": [
+                    {
+                        "name": "all",
+                        "action": "send",
+                        "signals": ["logs", "traces", "metrics"],
+                        "redaction_profile_by_bucket": {
+                            "model.io": "sensitive",
+                            "security.finding": "none",
+                        },
+                    }
+                ],
+            }
+        ]
+    }
+    after = {
+        "destinations": [
+            {
+                "name": "terminal",
+                "generated": False,
+                "routes": [
+                    {
+                        "name": "all",
+                        "action": "send",
+                        "signals": ["logs", "traces", "metrics"],
+                        "redaction_profile_by_bucket": {
+                            "model.io": "none",
+                            "security.finding": "strict",
+                        },
+                    }
+                ],
+            },
+            {
+                "name": "managed-enterprise-ai-defense",
+                "generated": True,
+                "routes": [
+                    {
+                        "name": "managed",
+                        "action": "send",
+                        "signals": ["logs"],
+                        "redaction_profile_by_bucket": {"model.io": "strict"},
+                    }
+                ],
+            },
+        ],
+        "warnings": [
+            {
+                "code": "managed_destination_locked",
+                "path": "$.observability.destinations[managed-enterprise-ai-defense]",
+                "summary": "managed destination policy is locked",
+            }
+        ],
+    }
+    snapshots = iter(
+        (
+            SimpleNamespace(effective=before, plan_digest="before"),
+            SimpleNamespace(effective=after, plan_digest="after"),
+        )
+    )
+    monkeypatch.setattr(policy_module, "_inspect_snapshot", lambda *_args: next(snapshots))
+
+    preview = preview_redaction_mutations(
+        path,
+        [V8YAMLMutation.set(("observability", "defaults", "redaction_profile"), "none")],
+        data_dir=str(tmp_path),
+    )
+
+    assert preview.newly_unredacted == 2
+    assert preview.no_longer_unredacted == 2
+    assert len(preview.changes) == 5
+    assert len(preview.after_legs) == 5
+    assert preview.warnings == (
+        (
+            "managed_destination_locked",
+            "$.observability.destinations[managed-enterprise-ai-defense]",
+            "managed destination policy is locked",
+        ),
+    )
+    assert preview.locked_profiles == (("managed-enterprise-ai-defense", ("strict",)),)
+
+
 def test_custom_profile_can_be_created_and_references_replaced_atomically() -> None:
     original = _source()
     source = _apply(original, ())[1]
@@ -170,6 +274,14 @@ def test_referenced_custom_profile_requires_replacement() -> None:
 
     with pytest.raises(ValueError, match="still referenced"):
         profile_remove_mutations(with_reference, "soc")
+
+
+def test_custom_profile_rejects_invalid_existing_field_classes_shape() -> None:
+    source = _apply(_source(), ())[1]
+    source["observability"]["redaction_profiles"] = {"soc": {"extends": "sensitive", "field_classes": []}}
+
+    with pytest.raises(ValueError, match="invalid field_classes shape"):
+        profile_set_mutations(source, "soc", extends=None, detectors=None, field_classes={})
 
 
 def test_destination_concise_policy_and_inheritance_are_mutually_replacing() -> None:
@@ -225,6 +337,8 @@ def test_routes_support_strict_add_edit_move_and_remove_semantics() -> None:
     ]
     with pytest.raises(ValueError, match="already exists"):
         route_upsert_mutations(added, "archive", finding_route, must_exist=False)
+    with pytest.raises(ValueError, match="route move operation"):
+        route_upsert_mutations(added, "archive", finding_route, position=0, must_exist=True)
 
     moved_bytes, moved = _apply(
         added_bytes,
@@ -249,7 +363,15 @@ def test_routes_support_strict_add_edit_move_and_remove_semantics() -> None:
 
 def test_generated_destinations_are_read_only() -> None:
     source = _apply(_source(), ())[1]
-    with pytest.raises(ValueError, match="generated destination.*read-only"):
+    with pytest.raises(ValueError, match=r"generated destination.*read-only"):
         destination_inherit_mutations(source, "managed-enterprise-ai-defense")
     with pytest.raises(ValueError, match="migration-only"):
         apply_profile_everywhere_mutations(source, "legacy-v7")
+
+
+def test_duplicate_source_destinations_are_reported_distinctly() -> None:
+    source = _apply(_source(), ())[1]
+    source["observability"]["destinations"].append(dict(_destination(source, "archive")))
+
+    with pytest.raises(ValueError, match=r"destination 'archive' is duplicated"):
+        destination_inherit_mutations(source, "archive")
