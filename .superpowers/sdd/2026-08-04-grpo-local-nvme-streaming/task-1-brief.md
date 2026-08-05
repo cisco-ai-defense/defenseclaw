@@ -1,3 +1,124 @@
+## Task 1: GGUF Parser
+
+**Files:**
+- Create: `internal/training/grpo_engine/grpo.h`
+- Create: `internal/training/grpo_engine/gguf.c`
+- Create: `internal/training/grpo_engine/Makefile`
+
+**Interfaces:**
+- Consumes: A GGUF file on disk (Q4_K_M quantized model)
+- Produces: `GgufFile` struct with tensor name → (offset, size, dtype) mapping; `gguf_open()`, `gguf_close()`, `gguf_find_tensor()`, `gguf_metadata_int()`, `gguf_metadata_str()`
+
+- [ ] **Step 1: Create `grpo.h` with all type definitions**
+
+```c
+/* internal/training/grpo_engine/grpo.h */
+#ifndef GRPO_H
+#define GRPO_H
+
+#include <stdint.h>
+#include <stddef.h>
+
+/* ─── GGUF Types ─── */
+#define GGUF_MAGIC 0x46475547  /* "GGUF" little-endian */
+
+typedef enum {
+    GGUF_TYPE_F32   = 0,
+    GGUF_TYPE_F16   = 1,
+    GGUF_TYPE_Q4_0  = 2,
+    GGUF_TYPE_Q4_1  = 3,
+    GGUF_TYPE_Q5_0  = 6,
+    GGUF_TYPE_Q5_1  = 7,
+    GGUF_TYPE_Q8_0  = 8,
+    GGUF_TYPE_Q4_K  = 12,
+    GGUF_TYPE_Q6_K  = 14,
+} GgufDtype;
+
+typedef struct {
+    char       *name;
+    int64_t     offset;    /* byte offset from data start */
+    int64_t     nbytes;    /* total bytes */
+    GgufDtype   dtype;
+    int         n_dims;
+    int64_t     dims[4];
+} GgufTensor;
+
+typedef struct {
+    int           fd;
+    int           version;
+    int64_t       n_tensors;
+    int64_t       data_offset;   /* byte offset where tensor data begins */
+    GgufTensor   *tensors;       /* array of n_tensors */
+    /* metadata cache */
+    int64_t       n_layers;
+    int64_t       hidden_dim;
+    int64_t       intermediate_dim;
+    int64_t       n_heads;
+    int64_t       n_kv_heads;
+    int64_t       head_dim;
+    int64_t       vocab_size;
+    float         rms_eps;
+    float         rope_theta;
+} GgufFile;
+
+int         gguf_open(GgufFile *gf, const char *path);
+void        gguf_close(GgufFile *gf);
+GgufTensor *gguf_find_tensor(const GgufFile *gf, const char *name);
+int64_t     gguf_metadata_int(const GgufFile *gf, const char *key);
+const char *gguf_metadata_str(const GgufFile *gf, const char *key);
+
+/* ─── Forward declarations for other modules ─── */
+typedef struct GrpoCtx GrpoCtx;
+
+typedef struct {
+    const char *policy_gguf;
+    const char *reference_gguf;
+    const char *reward_gguf;
+    int         memory_mode;       /* 0=minimal, 1=standard, 2=comfort */
+    int         lora_rank;
+    int         lora_alpha;
+    const char *lora_targets;      /* "q,k,v,o,gate,up,down" */
+    int         max_seq_len;
+    int         num_threads;
+    int         use_direct_io;
+    size_t      layer_buffer_bytes;
+} GrpoConfig;
+
+typedef struct {
+    int64_t  steps;
+    double   total_gen_seconds;
+    double   total_stream_seconds;
+    double   total_backward_seconds;
+    uint64_t bytes_streamed;
+    float    last_loss;
+    float    last_reward_mean;
+} GrpoStats;
+
+/* ─── Engine API ─── */
+GrpoCtx    *grpo_init(GrpoConfig *cfg);
+void        grpo_free(GrpoCtx *ctx);
+int         grpo_generate(GrpoCtx *ctx, const int *prompt, int prompt_len,
+                          int *output, int max_len, float *logprobs_out,
+                          float temp, float top_p);
+int         grpo_policy_logprobs(GrpoCtx *ctx, const int *tokens, int len, float *logprobs_out);
+int         grpo_ref_logprobs(GrpoCtx *ctx, const int *tokens, int len, float *logprobs_out);
+int         grpo_reward_forward(GrpoCtx *ctx, const int *tokens, int len, float *score_out);
+int         grpo_backward(GrpoCtx *ctx, const float *advantages,
+                          const float *policy_logprobs, const float *old_logprobs,
+                          const float *ref_logprobs, int G, int seq_len,
+                          float clip_eps, float kl_coef);
+int         grpo_adam_step(GrpoCtx *ctx, float lr, float beta1, float beta2, float eps, int step);
+int         grpo_save_lora(GrpoCtx *ctx, const char *path);
+int         grpo_load_lora(GrpoCtx *ctx, const char *path);
+int         grpo_export_merged_gguf(GrpoCtx *ctx, const char *output_path);
+GrpoStats   grpo_stats(GrpoCtx *ctx);
+
+#endif /* GRPO_H */
+```
+
+- [ ] **Step 2: Implement `gguf.c` — GGUF v3 parser**
+
+```c
 /* internal/training/grpo_engine/gguf.c
  *
  * Parses GGUF v3 format: header → metadata KV pairs → tensor info → tensor data.
@@ -29,15 +150,14 @@ static int read_bytes(Reader *r, void *dst, size_t n) {
     r->pos += n;
     return 0;
 }
-static uint32_t read_u32(Reader *r) { uint32_t v = 0; read_bytes(r, &v, 4); return v; }
-static uint64_t read_u64(Reader *r) { uint64_t v = 0; read_bytes(r, &v, 8); return v; }
-static int64_t  read_i64(Reader *r) { int64_t v = 0;  read_bytes(r, &v, 8); return v; }
-static float    read_f32(Reader *r) { float v = 0.0f;    read_bytes(r, &v, 4); return v; }
+static uint32_t read_u32(Reader *r) { uint32_t v; read_bytes(r, &v, 4); return v; }
+static uint64_t read_u64(Reader *r) { uint64_t v; read_bytes(r, &v, 8); return v; }
+static int64_t  read_i64(Reader *r) { int64_t v;  read_bytes(r, &v, 8); return v; }
+static float    read_f32(Reader *r) { float v;    read_bytes(r, &v, 4); return v; }
 
 static char *read_str(Reader *r) {
     uint64_t len = read_u64(r);
-    /* Guard against overflow: len could wrap r->pos beyond r->size */
-    if (len > r->size || len > r->size - r->pos) return NULL;
+    if (r->pos + len > r->size) return NULL;
     char *s = (char *)malloc(len + 1);
     if (!s) return NULL;
     memcpy(s, r->data + r->pos, len);
@@ -56,11 +176,7 @@ static void skip_value(Reader *r, uint32_t vtype) {
         case GV_ARR: {
             uint32_t atype = read_u32(r);
             uint64_t alen = read_u64(r);
-            for (uint64_t i = 0; i < alen; i++) {
-                /* Guard against buffer overrun in recursive array skip */
-                if (r->pos >= r->size) return;
-                skip_value(r, atype);
-            }
+            for (uint64_t i = 0; i < alen; i++) skip_value(r, atype);
             break;
         }
     }
@@ -110,25 +226,24 @@ int gguf_open(GgufFile *gf, const char *path) {
             if (strstr(key, "block_count"))       gf->n_layers = val;
             else if (strstr(key, "embedding_length")) gf->hidden_dim = val;
             else if (strstr(key, "feed_forward_length")) gf->intermediate_dim = val;
+            else if (strstr(key, "head_count\""))  gf->n_heads = val;
             else if (strstr(key, "head_count_kv")) gf->n_kv_heads = val;
-            else if (strstr(key, "head_count"))    gf->n_heads = val;
         } else if (key && vtype == GV_U32) {
             uint32_t val = read_u32(&r);
             if (strstr(key, "block_count"))       gf->n_layers = val;
             else if (strstr(key, "embedding_length")) gf->hidden_dim = val;
             else if (strstr(key, "feed_forward_length")) gf->intermediate_dim = val;
+            else if (strstr(key, "head_count\""))  gf->n_heads = val;
             else if (strstr(key, "head_count_kv")) gf->n_kv_heads = val;
-            else if (strstr(key, "head_count"))    gf->n_heads = val;
             else if (strstr(key, "vocab_size"))   gf->vocab_size = val;
         } else if (key && vtype == GV_F32) {
             float val = read_f32(&r);
             if (strstr(key, "rms_norm_eps"))   gf->rms_eps = val;
             else if (strstr(key, "rope.freq_base")) gf->rope_theta = val;
         } else {
-            /* Must skip value even if key read failed (NULL key) */
             skip_value(&r, vtype);
         }
-        free(key); /* free(NULL) is safe */
+        free(key);
     }
 
     if (gf->n_heads > 0 && gf->hidden_dim > 0)
@@ -141,11 +256,6 @@ int gguf_open(GgufFile *gf, const char *path) {
 
     for (int64_t i = 0; i < gf->n_tensors; i++) {
         gf->tensors[i].name = read_str(&r);
-        /* If name read fails, treat as parse error to avoid memory leak */
-        if (!gf->tensors[i].name) {
-            fprintf(stderr, "gguf: failed to read tensor name at index %lld\n", (long long)i);
-            goto bad;
-        }
         gf->tensors[i].n_dims = (int)read_u32(&r);
         for (int d = 0; d < gf->tensors[i].n_dims; d++)
             gf->tensors[i].dims[d] = (int64_t)read_u64(&r);
@@ -164,15 +274,8 @@ int gguf_open(GgufFile *gf, const char *path) {
     /* Compute nbytes per tensor from dtype and dims */
     for (int64_t i = 0; i < gf->n_tensors; i++) {
         int64_t numel = 1;
-        for (int d = 0; d < gf->tensors[i].n_dims; d++) {
-            /* Guard against integer overflow in tensor size calculation */
-            if (numel > INT64_MAX / gf->tensors[i].dims[d]) {
-                fprintf(stderr, "gguf: tensor %lld has overflowing dimensions\n", (long long)i);
-                numel = INT64_MAX / 2; /* Cap to safe value */
-                break;
-            }
+        for (int d = 0; d < gf->tensors[i].n_dims; d++)
             numel *= gf->tensors[i].dims[d];
-        }
         switch (gf->tensors[i].dtype) {
             case GGUF_TYPE_F32:  gf->tensors[i].nbytes = numel * 4; break;
             case GGUF_TYPE_F16:  gf->tensors[i].nbytes = numel * 2; break;
@@ -185,18 +288,6 @@ int gguf_open(GgufFile *gf, const char *path) {
     gf->fd = fd;
     free(buf);
     return 0;
-
-bad:
-    /* Cleanup on parse error */
-    if (gf->tensors) {
-        for (int64_t j = 0; j < gf->n_tensors; j++)
-            free(gf->tensors[j].name);
-        free(gf->tensors);
-        gf->tensors = NULL;
-    }
-    free(buf);
-    close(fd);
-    return -1;
 }
 
 void gguf_close(GgufFile *gf) {
@@ -217,15 +308,80 @@ GgufTensor *gguf_find_tensor(const GgufFile *gf, const char *name) {
             return &gf->tensors[i];
     return NULL;
 }
+```
 
-int64_t gguf_metadata_int(const GgufFile *gf, const char *key) {
-    (void)gf; (void)key;
-    /* Stub: metadata already cached in GgufFile struct during gguf_open */
-    return -1;
-}
+- [ ] **Step 3: Create Makefile**
 
-const char *gguf_metadata_str(const GgufFile *gf, const char *key) {
-    (void)gf; (void)key;
-    /* Stub: metadata already cached in GgufFile struct during gguf_open */
-    return NULL;
-}
+```makefile
+# internal/training/grpo_engine/Makefile
+CC       ?= gcc
+CFLAGS   = -O3 -std=c99 -ffp-contract=off -fPIC -Wall -Wextra
+LDFLAGS  = -lm
+
+# OpenMP: detect availability
+OPENMP_OK := $(shell echo "int main(){return 0;}" | $(CC) -x c -fopenmp - -o /dev/null 2>/dev/null && echo 1)
+ifeq ($(OPENMP_OK),1)
+  CFLAGS += -fopenmp
+  LDFLAGS += -lgomp
+endif
+
+# AVX2: detect availability
+AVX2_OK := $(shell $(CC) -mavx2 -mfma -dM -E - < /dev/null 2>/dev/null | grep -c AVX2)
+ifeq ($(AVX2_OK),1)
+  CFLAGS += -mavx2 -mfma
+endif
+
+SRCS = gguf.c kernels.c policy.c stream.c lora.c
+OBJS = $(SRCS:.c=.o)
+
+.PHONY: all clean test portable
+
+all: libgrpo_stream.a
+
+libgrpo_stream.a: $(OBJS)
+	ar rcs $@ $^
+
+%.o: %.c grpo.h
+	$(CC) $(CFLAGS) -c $< -o $@
+
+portable:
+	$(MAKE) CFLAGS="-O2 -std=c99 -ffp-contract=off -fPIC -Wall"
+
+test: libgrpo_stream.a test_kernels.c
+	$(CC) $(CFLAGS) test_kernels.c -L. -lgrpo_stream $(LDFLAGS) -o test_runner
+	./test_runner
+
+clean:
+	rm -f *.o *.a test_runner
+```
+
+- [ ] **Step 4: Build and verify it compiles (no other .c files yet — create stubs)**
+
+Create minimal stubs for the other source files so the Makefile works:
+
+```c
+/* kernels.c stub */
+#include "grpo.h"
+
+/* policy.c stub */
+#include "grpo.h"
+
+/* stream.c stub */
+#include "grpo.h"
+
+/* lora.c stub */
+#include "grpo.h"
+```
+
+Run: `make -C internal/training/grpo_engine`
+Expected: `libgrpo_stream.a` is produced with no errors.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add internal/training/grpo_engine/
+git commit -m "feat(training): add GGUF parser and C library scaffold for grpo-local"
+```
+
+---
+

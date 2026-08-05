@@ -58,14 +58,14 @@ static const void *resolve_tensor_ptr(const GgufFile *gf, void *mmap_base,
                                       const char *name, GgufDtype expected_dtype) {
     GgufTensor *t = gguf_find_tensor(gf, name);
     if (!t) return NULL;
-    if (t->dtype != expected_dtype && expected_dtype != GGUF_TYPE_F32) {
-        /* Allow F32 fallback for Q4_K */
-        if (!(expected_dtype == GGUF_TYPE_Q4_K && t->dtype == GGUF_TYPE_F32)) {
-            fprintf(stderr, "policy: tensor %s has unexpected dtype %d (expected %d)\n",
-                    name, t->dtype, expected_dtype);
-            return NULL;
-        }
+    /* Accept any quantized type for weight tensors — the matmul kernel handles
+     * dequantization based on the actual dtype stored in the tensor info.
+     * Only reject if we expected F32 (norm weights) and got something quantized. */
+    if (expected_dtype == GGUF_TYPE_F32 && t->dtype != GGUF_TYPE_F32) {
+        fprintf(stderr, "policy: tensor %s has dtype %d, expected F32\n", name, t->dtype);
+        return NULL;
     }
+    (void)expected_dtype;
     return (const uint8_t *)mmap_base + t->offset;
 }
 
@@ -81,43 +81,55 @@ static PolicyEngine *policy_init(const char *gguf_path, int max_seq_len) {
         return NULL;
     }
 
-    /* mmap the tensor data region */
+    /* mmap the tensor data region.
+     * The offset must be page-aligned for mmap(). Round down data_offset
+     * to the page boundary and adjust pointers accordingly. */
     struct stat st;
     if (fstat(pe->gf.fd, &st) != 0) {
         gguf_close(&pe->gf);
         free(pe);
         return NULL;
     }
-    pe->mmap_size = (size_t)(st.st_size - pe->gf.data_offset);
+    long page_size = sysconf(_SC_PAGESIZE);
+    int64_t aligned_offset = (pe->gf.data_offset / page_size) * page_size;
+    size_t offset_adj = (size_t)(pe->gf.data_offset - aligned_offset);
+    pe->mmap_size = (size_t)(st.st_size - aligned_offset);
     pe->mmap_base = mmap(NULL, pe->mmap_size, PROT_READ, MAP_SHARED,
-                         pe->gf.fd, pe->gf.data_offset);
+                         pe->gf.fd, aligned_offset);
     if (pe->mmap_base == MAP_FAILED) {
-        fprintf(stderr, "policy: mmap failed for %s\n", gguf_path);
+        fprintf(stderr, "policy: mmap failed for %s (offset=%lld, aligned=%lld, size=%zu)\n",
+                gguf_path, (long long)pe->gf.data_offset, (long long)aligned_offset, pe->mmap_size);
+        gguf_close(&pe->gf);
+        free(pe);
+        return NULL;
+    }
+    /* Adjust mmap_base to point at actual data start */
+    pe->mmap_base = (uint8_t *)pe->mmap_base + offset_adj;
+
+    /* Resolve global tensors.
+     * Quantized models may store embeddings in Q8_0, Q6_K, or Q4_K — not F32.
+     * Accept any dtype and handle dequantization at compute time. */
+    GgufTensor *t_embed = gguf_find_tensor(&pe->gf, "token_embd.weight");
+    GgufTensor *t_norm = gguf_find_tensor(&pe->gf, "output_norm.weight");
+    GgufTensor *t_output = gguf_find_tensor(&pe->gf, "output.weight");
+
+    /* Weight tying: if no separate output.weight, reuse token_embd.weight */
+    if (!t_output) t_output = t_embed;
+
+    if (!t_embed || !t_norm || !t_output) {
+        fprintf(stderr, "policy: missing global tensors (embed=%p, norm=%p, output=%p)\n",
+                (void*)t_embed, (void*)t_norm, (void*)t_output);
+        munmap((void*)((uint8_t*)pe->mmap_base - offset_adj), pe->mmap_size);
         gguf_close(&pe->gf);
         free(pe);
         return NULL;
     }
 
-    /* Resolve global tensors */
-    pe->embed = (const float *)resolve_tensor_ptr(&pe->gf, pe->mmap_base,
-                                                   "token_embd.weight", GGUF_TYPE_F32);
-    pe->output_norm = (const float *)resolve_tensor_ptr(&pe->gf, pe->mmap_base,
-                                                         "output_norm.weight", GGUF_TYPE_F32);
-    pe->output_weight = resolve_tensor_ptr(&pe->gf, pe->mmap_base,
-                                           "output.weight", GGUF_TYPE_Q4_K);
-    if (!pe->output_weight) {
-        /* Fallback to F32 */
-        pe->output_weight = resolve_tensor_ptr(&pe->gf, pe->mmap_base,
-                                               "output.weight", GGUF_TYPE_F32);
-    }
-
-    if (!pe->embed || !pe->output_norm || !pe->output_weight) {
-        fprintf(stderr, "policy: missing global tensors\n");
-        munmap(pe->mmap_base, pe->mmap_size);
-        gguf_close(&pe->gf);
-        free(pe);
-        return NULL;
-    }
+    pe->embed = (const float *)((const uint8_t *)pe->mmap_base + t_embed->offset);
+    pe->output_norm = (const float *)((const uint8_t *)pe->mmap_base + t_norm->offset);
+    pe->output_weight = (const void *)((const uint8_t *)pe->mmap_base + t_output->offset);
+    fprintf(stderr, "policy: tensors resolved (embed dtype=%d, norm dtype=%d, output dtype=%d, tied=%d)\n",
+            t_embed->dtype, t_norm->dtype, t_output->dtype, t_output == t_embed);
 
     /* Resolve per-layer tensors */
     pe->layers = (PolicyLayer *)calloc((size_t)pe->gf.n_layers, sizeof(PolicyLayer));
