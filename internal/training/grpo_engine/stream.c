@@ -493,48 +493,78 @@ int stream_forward_logprobs(struct StreamEngine *se, const int *tokens, int len,
     }
 
     if (ur && buf_B) {
-        /* Double-buffered io_uring path */
-        void *bufs[2] = { se->layer_buf, buf_B };
+        /*
+         * N-buffer lookahead: keep LOOKAHEAD layers in flight so compute
+         * never stalls on I/O. For typical NVMe (3.5 GB/s) and layer size
+         * (~52 MB), I/O takes ~15ms vs ~5ms compute → need 3 buffers to
+         * fully saturate compute. Memory cost: LOOKAHEAD × layer_buf_sz.
+         */
+        #ifndef GRPO_URING_LOOKAHEAD
+        #define GRPO_URING_LOOKAHEAD 3
+        #endif
 
-        /* Submit first layer read */
-        size_t read_size = (se->layer_info[0].total_size + 4095) & ~4095UL;
-        if (read_size > se->layer_buf_sz) read_size = se->layer_buf_sz;
+        const int lookahead = GRPO_URING_LOOKAHEAD < n_layers
+                            ? GRPO_URING_LOOKAHEAD : n_layers;
 
-        /* Skip io_uring if first layer read_size is 0 */
-        if (read_size == 0) {
+        /* Allocate lookahead buffers (buf[0] = se->layer_buf, rest are new) */
+        void *bufs[4] = { se->layer_buf, buf_B, NULL, NULL };
+        int alloc_ok = 1;
+        for (int i = 2; i < lookahead; i++) {
+            bufs[i] = alloc_aligned(se->layer_buf_sz, 4096);
+            if (!bufs[i]) { alloc_ok = 0; break; }
+        }
+
+        /* If extra buffer allocation failed, fall back to 2-buffer */
+        int effective_lookahead = alloc_ok ? lookahead : 2;
+
+        /* Submit initial batch of reads (up to effective_lookahead) */
+        int submitted = 0;
+        for (int i = 0; i < effective_lookahead && i < n_layers; i++) {
+            size_t rsz = (se->layer_info[i].total_size + 4095) & ~4095UL;
+            if (rsz > se->layer_buf_sz) rsz = se->layer_buf_sz;
+            if (rsz == 0) break;
+            uring_submit_read(ur, bufs[i % effective_lookahead], rsz,
+                             se->layer_info[i].file_offset);
+            submitted++;
+        }
+
+        if (submitted == 0) {
+            /* No valid layers to read — fall back to synchronous */
+            for (int i = 2; i < lookahead; i++) free(bufs[i]);
             free(buf_B);
             uring_close(ur);
             ur = NULL;
         } else {
-            uring_submit_read(ur, bufs[0], read_size, se->layer_info[0].file_offset);
-
             for (int L = 0; L < n_layers; L++) {
-                /* Wait for current layer */
+                /* Wait for layer L (submitted effective_lookahead steps ago) */
                 if (uring_wait_completion(ur) < 0) {
                     fprintf(stderr, "stream: uring_wait_completion failed for layer %d\n", L);
+                    for (int i = 2; i < lookahead; i++) free(bufs[i]);
                     free(buf_B);
                     uring_close(ur);
                     free(hidden);
                     return -1;
                 }
 
-                /* Submit next layer while we compute */
-                if (L + 1 < n_layers) {
-                    read_size = (se->layer_info[L + 1].total_size + 4095) & ~4095UL;
-                    if (read_size > se->layer_buf_sz) read_size = se->layer_buf_sz;
-                    if (read_size > 0) {
-                        uring_submit_read(ur, bufs[(L + 1) % 2], read_size,
-                                         se->layer_info[L + 1].file_offset);
+                /* Submit layer L+effective_lookahead (refill the ring) */
+                int next = L + effective_lookahead;
+                if (next < n_layers) {
+                    size_t rsz = (se->layer_info[next].total_size + 4095) & ~4095UL;
+                    if (rsz > se->layer_buf_sz) rsz = se->layer_buf_sz;
+                    if (rsz > 0) {
+                        uring_submit_read(ur, bufs[next % effective_lookahead], rsz,
+                                         se->layer_info[next].file_offset);
                     }
                 }
 
-                /* Compute on current buffer */
+                /* Compute on current buffer (guaranteed ready) */
                 void *saved = se->layer_buf;
-                se->layer_buf = bufs[L % 2];
+                se->layer_buf = bufs[L % effective_lookahead];
                 apply_stream_layer(se, hidden, len, L);
                 se->layer_buf = saved;
             }
 
+            for (int i = 2; i < lookahead; i++) free(bufs[i]);
             free(buf_B);
             uring_close(ur);
         }
