@@ -4,7 +4,7 @@
 package training
 
 /*
-#cgo CFLAGS: -I${SRCDIR}/grpo_engine -O3 -ffp-contract=off
+#cgo CFLAGS: -I${SRCDIR}/grpo_engine -O3
 #cgo linux CFLAGS: -fopenmp
 #cgo linux LDFLAGS: -L${SRCDIR}/grpo_engine -lgrpo_stream -lm -lgomp
 #cgo darwin LDFLAGS: -L${SRCDIR}/grpo_engine -lgrpo_stream -lm

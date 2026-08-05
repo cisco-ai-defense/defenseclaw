@@ -16,7 +16,7 @@ ifeq ($(AVX2_OK),1)
   CFLAGS += -mavx2 -mfma
 endif
 
-SRCS = gguf.c kernels.c policy.c stream.c lora.c
+SRCS = gguf.c kernels.c policy.c stream.c lora.c grpo.c
 OBJS = $(SRCS:.c=.o)
 
 .PHONY: all clean test portable
