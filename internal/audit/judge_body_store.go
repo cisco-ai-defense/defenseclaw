@@ -52,8 +52,9 @@ import (
 // verified cutover in judge_body_cutover.go and remain there only as a
 // read-only compatibility source until retention or authorized purge.
 type JudgeBodyStore struct {
-	db   *sql.DB
-	path string
+	db        *sql.DB
+	path      string
+	pathGuard *preparedJudgeBodyPath
 
 	// cutoverReady gates the runtime writer and compatibility reader when
 	// the store was opened by NewJudgeBodyStoreForCutover. The gateway uses
@@ -130,22 +131,23 @@ func newJudgeBodyStoreWithPathHooks(
 	if err != nil {
 		return nil, err
 	}
-	defer prepared.close()
 	dbPath = prepared.path
 	if hooks.beforeSQLiteOpen != nil {
 		if err := hooks.beforeSQLiteOpen(dbPath); err != nil {
+			prepared.close()
 			return nil, fmt.Errorf("judge_body: pre-open path check: %w", err)
 		}
 	}
 	db, err := openSQLite(dbPath)
 	if err != nil {
+		prepared.close()
 		// Strip the leading "audit:" tier that openSQLite stamps so
 		// the operator sees the correct subsystem in the wrapped
 		// error chain. openSQLite is shared across both DBs, so the
 		// tier disambiguation happens at the caller boundary.
 		return nil, fmt.Errorf("judge_body: open db %s: %w", dbPath, unwrapOpenSQLiteErr(err))
 	}
-	st := &JudgeBodyStore{db: db, path: dbPath}
+	st := &JudgeBodyStore{db: db, path: dbPath, pathGuard: prepared}
 	st.cutoverReady.Store(!requireCutover)
 	if err := st.init(); err != nil {
 		_ = st.Close()
@@ -178,7 +180,10 @@ func (s *JudgeBodyStore) Close() error {
 	if s == nil || s.db == nil {
 		return nil
 	}
-	return s.db.Close()
+	err := s.db.Close()
+	s.pathGuard.close()
+	s.pathGuard = nil
+	return err
 }
 
 // retry helpers reuse the audit-package retryBusy under the hood;
