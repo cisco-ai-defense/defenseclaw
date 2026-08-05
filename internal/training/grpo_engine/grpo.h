@@ -60,6 +60,7 @@ typedef struct {
     const char *policy_gguf;
     const char *reference_gguf;
     const char *reward_gguf;
+    const char *tokenizer_path;    /* path to tokenizer.json */
     int         memory_mode;       /* 0=minimal, 1=standard, 2=comfort */
     int         lora_rank;
     int         lora_alpha;
@@ -106,6 +107,9 @@ int         grpo_generate_continue(GrpoCtx *ctx, int *output, int max_len,
 void        grpo_save_kv_snapshot(GrpoCtx *ctx);
 void        grpo_restore_kv_snapshot(GrpoCtx *ctx);
 void        grpo_free_kv_snapshot(GrpoCtx *ctx);
+
+/* Tokenizer API */
+int         grpo_detokenize(GrpoCtx *ctx, const int *ids, int n_ids, char *buf, int buf_size);
 
 /* ─── Math Kernels ─── */
 void grpo_rmsnorm(float *y, const float *x, const float *w, int n, float eps);

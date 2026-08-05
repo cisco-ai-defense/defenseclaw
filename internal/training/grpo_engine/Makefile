@@ -29,7 +29,7 @@ ifeq ($(AVX2_OK),1)
   CFLAGS += -mavx2 -mfma
 endif
 
-SRCS = gguf.c kernels.c policy.c stream.c lora.c grpo.c
+SRCS = gguf.c kernels.c policy.c stream.c lora.c grpo.c tokenizer.c
 OBJS = $(SRCS:.c=.o)
 
 .PHONY: all clean test portable
@@ -49,5 +49,9 @@ test: libgrpo_stream.a test_kernels.c
 	$(CC) $(CFLAGS) test_kernels.c -L. -lgrpo_stream $(LDFLAGS) -o test_runner
 	./test_runner
 
+test_tokenizer: libgrpo_stream.a test_tokenizer.c
+	$(CC) $(CFLAGS) -I. test_tokenizer.c -L. -lgrpo_stream $(LDFLAGS) -o test_tokenizer
+	./test_tokenizer
+
 clean:
-	rm -f *.o *.a test_runner
+	rm -f *.o *.a test_runner test_tokenizer

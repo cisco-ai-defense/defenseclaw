@@ -27,7 +27,7 @@ func NewGrpoEngine(cfg GrpoLocalConfig) (*GrpoEngine, error) {
 	policyPath := C.CString(cfg.PolicyGGUF)
 	defer C.free(unsafe.Pointer(policyPath))
 
-	var refPath, rewPath *C.char
+	var refPath, rewPath, tokPath *C.char
 	if cfg.ReferenceGGUF != "" {
 		refPath = C.CString(cfg.ReferenceGGUF)
 		defer C.free(unsafe.Pointer(refPath))
@@ -35,6 +35,10 @@ func NewGrpoEngine(cfg GrpoLocalConfig) (*GrpoEngine, error) {
 	if cfg.RewardGGUF != "" {
 		rewPath = C.CString(cfg.RewardGGUF)
 		defer C.free(unsafe.Pointer(rewPath))
+	}
+	if cfg.TokenizerPath != "" {
+		tokPath = C.CString(cfg.TokenizerPath)
+		defer C.free(unsafe.Pointer(tokPath))
 	}
 
 	var targets *C.char
@@ -57,6 +61,7 @@ func NewGrpoEngine(cfg GrpoLocalConfig) (*GrpoEngine, error) {
 		policy_gguf:        policyPath,
 		reference_gguf:     refPath,
 		reward_gguf:        rewPath,
+		tokenizer_path:     tokPath,
 		memory_mode:        C.int(memMode),
 		lora_rank:          C.int(cfg.LoRARank),
 		lora_alpha:         C.int(cfg.LoRAAlpha),
@@ -245,6 +250,23 @@ func (e *GrpoEngine) RestoreKVSnapshot() {
 // FreeKVSnapshot frees the saved KV cache snapshot
 func (e *GrpoEngine) FreeKVSnapshot() {
 	C.grpo_free_kv_snapshot(e.ctx)
+}
+
+// Detokenize converts token IDs to UTF-8 text using the loaded tokenizer
+func (e *GrpoEngine) Detokenize(tokens []int) string {
+	if len(tokens) == 0 {
+		return ""
+	}
+	tc := make([]C.int, len(tokens))
+	for i, t := range tokens {
+		tc[i] = C.int(t)
+	}
+	buf := make([]C.char, 4096)
+	n := C.grpo_detokenize(e.ctx, &tc[0], C.int(len(tokens)), &buf[0], 4096)
+	if n <= 0 {
+		return ""
+	}
+	return C.GoStringN(&buf[0], n)
 }
 
 // GrpoEngineAvailable returns true when the C engine is compiled in.
