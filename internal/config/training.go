@@ -46,4 +46,17 @@ type TrainingCategory struct {
 	EvalPrompts     int     `mapstructure:"eval_prompts" yaml:"eval_prompts,omitempty"`
 	AutoTrigger     bool    `mapstructure:"auto_trigger" yaml:"auto_trigger,omitempty"`
 	MonitorInterval int     `mapstructure:"monitor_interval" yaml:"monitor_interval,omitempty"`
+
+	// GRPO-specific fields (only used when Backend="grpo-local")
+	GroupSize      int      `mapstructure:"group_size" yaml:"group_size,omitempty"`
+	MaxGenLength   int      `mapstructure:"max_gen_length" yaml:"max_gen_length,omitempty"`
+	ClipEpsilon    float64  `mapstructure:"clip_epsilon" yaml:"clip_epsilon,omitempty"`
+	KLCoef         float64  `mapstructure:"kl_coef" yaml:"kl_coef,omitempty"`
+	Temperature    float64  `mapstructure:"temperature" yaml:"temperature,omitempty"`
+	LoRARank       int      `mapstructure:"lora_rank" yaml:"lora_rank,omitempty"`
+	LoRATargets    string   `mapstructure:"lora_targets" yaml:"lora_targets,omitempty"`
+	MemoryMode     string   `mapstructure:"memory_mode" yaml:"memory_mode,omitempty"`
+	RewardFuncs    []string `mapstructure:"reward_funcs" yaml:"reward_funcs,omitempty"`
+	ReferenceModel string   `mapstructure:"reference_model" yaml:"reference_model,omitempty"`
+	RewardModel    string   `mapstructure:"reward_model" yaml:"reward_model,omitempty"`
 }

@@ -30,7 +30,7 @@ const (
 // PipelineConfig holds all settings for a pipeline run.
 type PipelineConfig struct {
 	Category      string
-	Backend       string // "unsloth" or "mlx-lm-lora"
+	Backend       string // "unsloth", "mlx-lm-lora", or "grpo-local"
 	Algorithm     string
 	BaseModel     string // HF or MLX repo
 	MinTraces     int
@@ -43,6 +43,20 @@ type PipelineConfig struct {
 	JudgeModel    string
 	JudgeAPIKey   string
 	TimeoutSec    int
+
+	// GRPO-specific (only used when Backend="grpo-local")
+	GroupSize      int
+	MaxGenLength   int
+	ClipEpsilon    float64
+	KLCoef         float64
+	Temperature    float64
+	LoRARank       int
+	LoRATargets    string
+	MemoryMode     string
+	RewardFuncs    []string
+	ReferenceModel string
+	RewardModel    string
+	PolicyGGUF     string
 }
 
 // PipelineResult holds the outcome of a pipeline run.
@@ -104,19 +118,54 @@ func (p *Pipeline) Run(ctx context.Context, cfg PipelineConfig) *PipelineResult 
 	outputDir := filepath.Join(cfg.DataDir, "training", "output", cfg.Category)
 	scriptsDir := filepath.Join(cfg.DataDir, "training", "scripts")
 
-	runResult, err := Run(ctx, RunConfig{
-		Backend:     cfg.Backend,
-		Algorithm:   cfg.Algorithm,
-		BaseModel:   cfg.BaseModel,
-		DatasetPath: dataset.TrainFile,
-		OutputDir:   outputDir,
-		ScriptsDir:  scriptsDir,
-		TimeoutSec:  cfg.TimeoutSec,
-	})
-	if err != nil {
-		result.State = StateFailed
-		result.Error = fmt.Errorf("pipeline: train: %w", err)
-		return result
+	var runResult *RunResult
+	if cfg.Backend == "grpo-local" {
+		// GRPO-local uses the C engine directly instead of generating a script
+		policyGGUF := cfg.PolicyGGUF
+		if policyGGUF == "" {
+			policyGGUF = filepath.Join(cfg.ModelsDir, cfg.BaseModel+".gguf")
+		}
+
+		grpoResult, err := RunGrpoLocal(ctx, GrpoLocalConfig{
+			PolicyGGUF:      policyGGUF,
+			ReferenceGGUF:   cfg.ReferenceModel,
+			RewardGGUF:      cfg.RewardModel,
+			GroupSize:       cfg.GroupSize,
+			MaxGenLength:    cfg.MaxGenLength,
+			ClipEpsilon:     cfg.ClipEpsilon,
+			KLCoef:          cfg.KLCoef,
+			Temperature:     cfg.Temperature,
+			LearningRate:    2e-4,
+			LoRARank:        cfg.LoRARank,
+			LoRATargets:     cfg.LoRATargets,
+			MemoryMode:      cfg.MemoryMode,
+			RewardFuncs:     ParseRewardFuncs(cfg.RewardFuncs),
+			DatasetPath:     dataset.TrainFile,
+			OutputDir:       outputDir,
+			CheckpointEvery: 100,
+		})
+		if err != nil {
+			result.State = StateFailed
+			result.Error = fmt.Errorf("pipeline: grpo-local: %w", err)
+			return result
+		}
+		runResult = grpoResult
+	} else {
+		// Standard SFT/DPO/ORPO path using script generation
+		runResult, err = Run(ctx, RunConfig{
+			Backend:     cfg.Backend,
+			Algorithm:   cfg.Algorithm,
+			BaseModel:   cfg.BaseModel,
+			DatasetPath: dataset.TrainFile,
+			OutputDir:   outputDir,
+			ScriptsDir:  scriptsDir,
+			TimeoutSec:  cfg.TimeoutSec,
+		})
+		if err != nil {
+			result.State = StateFailed
+			result.Error = fmt.Errorf("pipeline: train: %w", err)
+			return result
+		}
 	}
 
 	// Stage 3: Deploy (copy GGUF to models dir)
