@@ -6,7 +6,7 @@
 #include <stddef.h>
 
 /* ─── GGUF Types ─── */
-#define GGUF_MAGIC 0x46475547  /* "GGUF" little-endian */
+#define GGUF_MAGIC 0x46554747  /* 'G','G','U','F' as little-endian u32 */
 
 typedef enum {
     GGUF_TYPE_F32   = 0,
