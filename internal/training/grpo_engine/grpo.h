@@ -111,4 +111,12 @@ void grpo_gqa_attention(float *out, const float *q, const float *k_cache, const 
 int  grpo_top_p_sample(const float *logits, int vocab_size, float temp, float top_p,
                        unsigned int *rng_state);
 
+/* ─── Stream Engine (O_DIRECT layer-by-layer forward) ─── */
+/* Opaque handle - definition is in stream.c */
+struct StreamEngine;
+
+struct StreamEngine *stream_open(const char *gguf_path, int use_direct_io);
+int                  stream_forward_logprobs(struct StreamEngine *se, const int *tokens, int len, float *logprobs_out);
+void                 stream_close(struct StreamEngine *se);
+
 #endif /* GRPO_H */
