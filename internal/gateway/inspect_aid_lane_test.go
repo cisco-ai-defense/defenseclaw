@@ -61,18 +61,24 @@ func TestHookAIDInspect_GateBehavior(t *testing.T) {
 
 func TestHandleAgentHook_AIDAppliesAcrossHookProfiles(t *testing.T) {
 	cases := []struct {
-		connector string
-		path      string
-		event     string
+		connector      string
+		path           string
+		event          string
+		wantAction     string
+		wantWouldBlock bool
 	}{
-		{"codex", "/api/v1/codex/hook", "PreToolUse"},
-		{"claudecode", "/api/v1/claude-code/hook", "PreToolUse"},
-		{"cursor", "/api/v1/cursor/hook", "beforeShellExecution"},
-		{"geminicli", "/api/v1/geminicli/hook", "BeforeTool"},
-		{"hermes", "/api/v1/hermes/hook", "pre_tool_call"},
-		{"windsurf", "/api/v1/windsurf/hook", "pre_run_command"},
-		{"copilot", "/api/v1/copilot/hook", "preToolUse"},
-		{"openhands", "/api/v1/openhands/hook", "pre_tool_use"},
+		{"codex", "/api/v1/codex/hook", "PreToolUse", "block", false},
+		{"claudecode", "/api/v1/claude-code/hook", "PreToolUse", "block", false},
+		// Cursor's documented user hook accepts a native deny on this
+		// pre-action event. Higher-priority hooks may override it, but Cursor
+		// exposes no safe conflict-detection API, so the connector does not
+		// infer a conflict at this integration boundary.
+		{"cursor", "/api/v1/cursor/hook", "beforeShellExecution", "block", false},
+		{"geminicli", "/api/v1/geminicli/hook", "BeforeTool", "block", false},
+		{"hermes", "/api/v1/hermes/hook", "pre_tool_call", "block", false},
+		{"windsurf", "/api/v1/windsurf/hook", "pre_run_command", "block", false},
+		{"copilot", "/api/v1/copilot/hook", "preToolUse", "block", false},
+		{"openhands", "/api/v1/openhands/hook", "pre_tool_use", "block", false},
 	}
 
 	for _, tc := range cases {
@@ -115,6 +121,12 @@ func TestHandleAgentHook_AIDAppliesAcrossHookProfiles(t *testing.T) {
 				t.Fatalf("marshal: %v", err)
 			}
 			req := httptest.NewRequest(http.MethodPost, tc.path, bytes.NewReader(body))
+			if tc.connector == "copilot" {
+				req.Header.Set("X-DefenseClaw-Copilot-Event", tc.event)
+			}
+			if tc.connector == "codex" {
+				setTestCodexHookBinding(req, tc.event, defaultTestCodexHookContract)
+			}
 			w := httptest.NewRecorder()
 			api.handleAgentHook(tc.connector).ServeHTTP(w, req)
 			if w.Code != http.StatusOK {
@@ -127,8 +139,11 @@ func TestHandleAgentHook_AIDAppliesAcrossHookProfiles(t *testing.T) {
 			if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 				t.Fatalf("decode response: %v", err)
 			}
-			if got["action"] != "block" {
-				t.Fatalf("%s action=%v want block body=%s", tc.connector, got["action"], w.Body.String())
+			if got["action"] != tc.wantAction {
+				t.Fatalf("%s action=%v want %s body=%s", tc.connector, got["action"], tc.wantAction, w.Body.String())
+			}
+			if got["would_block"] != tc.wantWouldBlock {
+				t.Fatalf("%s would_block=%v want %v body=%s", tc.connector, got["would_block"], tc.wantWouldBlock, w.Body.String())
 			}
 			findings, _ := got["findings"].([]interface{})
 			hasAID := false

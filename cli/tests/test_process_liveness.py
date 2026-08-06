@@ -18,6 +18,7 @@
 
 import json
 import os
+import sys
 import tempfile
 import unittest
 from subprocess import CompletedProcess
@@ -39,6 +40,13 @@ class TestPidAlive(unittest.TestCase):
         # 0 and negatives are signal/process-group sentinels, never daemon PIDs.
         self.assertFalse(pid_alive(0))
         self.assertFalse(pid_alive(-1))
+
+    @unittest.skipUnless(sys.platform == "win32", "Windows process snapshot only")
+    def test_windows_parent_snapshot_reports_live_parent(self):
+        self.assertEqual(
+            process_liveness._process_parent_id_windows(os.getpid()),
+            os.getppid(),
+        )
 
 
 class TestReadPidFile(unittest.TestCase):

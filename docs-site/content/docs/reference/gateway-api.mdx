@@ -72,9 +72,13 @@ bearer to `/v1/{logs,metrics,traces}` together with
 scoped credential. Gemini CLI uses
 `/otlp/geminicli/{token}/v1/{signal}` because its exporter cannot add the
 authorization header. Once a scoped token exists for one of those sources, the
-master gateway token is rejected for that source's scoped route. Other native
-OTLP sources, including Copilot and OmniGent, currently authenticate their
-loopback `/v1/{signal}` requests with the master gateway token.
+master gateway token is rejected for that source's scoped route. Copilot CLI
+upstream documents optional OTel traces and metrics, but DefenseClaw does not
+configure, authenticate, ingest as a Copilot-native source, or certify that
+surface. Copilot connector telemetry therefore reaches this API through its
+authenticated hook route only. OmniGent's separately documented optional
+native source currently authenticates loopback `/v1/{signal}` requests with
+the master gateway token.
 
 The token is resolved from one of, in priority order:
 
@@ -193,7 +197,7 @@ register a connector hook route.
 | `POST` | `/api/v1/claude-code/hook` | Claude Code | [`internal/gateway/connector/claudecode.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/connector/claudecode.go) |
 | `POST` | `/api/v1/codex/hook` | Codex | [`internal/gateway/connector/codex.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/connector/codex.go) |
 | `POST` | `/api/v1/cursor/hook` | Cursor | [`internal/gateway/connector/hook_only.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/connector/hook_only.go) |
-| `POST` | `/api/v1/windsurf/hook` | Windsurf | same |
+| `POST` | `/api/v1/windsurf/hook` | Devin Desktop legacy Cascade | same; Devin Local unsupported |
 | `POST` | `/api/v1/geminicli/hook` | Gemini CLI | same |
 | `POST` | `/api/v1/copilot/hook` | GitHub Copilot CLI | same |
 | `POST` | `/api/v1/openhands/hook` | OpenHands | same |

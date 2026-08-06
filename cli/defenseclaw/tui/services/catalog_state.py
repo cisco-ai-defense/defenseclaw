@@ -1631,7 +1631,7 @@ def mcp_unset_target_for_connector(connector: str) -> str:
         case "cursor":
             return "./.cursor/mcp.json"
         case "windsurf":
-            return "~/.codeium/windsurf/mcp_config.json"
+            return connector_config_files("windsurf")[0]
         case "geminicli":
             return "~/.gemini/settings.json"
         case "copilot":
@@ -1642,8 +1642,11 @@ def mcp_unset_target_for_connector(connector: str) -> str:
             return "~/.gemini/config/mcp_config.json / <workspace>/.agents/mcp_config.json"
         case "amp":
             return "read-only; manage with `amp mcp add` or Amp settings"
+        case "opencode":
+            user_target = os.path.join(connector_home("opencode"), "opencode.json")
+            return f"{user_target} / <workspace>/opencode.json"
         case "omnigent":
-            return "unsupported (OmniGent manages MCP configuration)"
+            return "unsupported/unverified by the OmniGent connector"
         case _:
             return "OpenClaw config" if normalized_connector(connector) == "openclaw" else "connector MCP config"
 
@@ -1681,7 +1684,7 @@ def friendly_connector_name(connector: str) -> str:
         case "cursor":
             return "Cursor"
         case "windsurf":
-            return "Windsurf"
+            return "Devin Desktop — legacy Cascade"
         case "geminicli":
             return "Gemini CLI"
         case "copilot":
@@ -1706,10 +1709,36 @@ def connector_source_label(connector: str, category: str) -> str:
     codex_root = connector_home("codex")
     claude_config = connector_config_files("claudecode")[0]
     codex_config = connector_config_files("codex")[0]
+    opencode_plugin = connector_config_files("opencode")[0]
+    opencode_mcp_sources = [
+        "authenticated remote .well-known/opencode (mcp; provenance unverified locally)",
+        "~/.config/opencode/config.json (mcp)",
+        "~/.config/opencode/opencode.json (mcp)",
+        "~/.config/opencode/opencode.jsonc (mcp)",
+        "OPENCODE_CONFIG (mcp; explicit file)",
+        "<workspace>/opencode.json, opencode.jsonc (mcp)",
+        "<workspace>/.opencode/opencode.json, opencode.jsonc (mcp)",
+        "~/.opencode/opencode.json, opencode.jsonc (mcp; user component)",
+    ]
+    if os.environ.get("OPENCODE_CONFIG_DIR", "").strip():
+        opencode_mcp_sources.append(
+            os.path.join(connector_home("opencode"), "opencode.json") + " / opencode.jsonc (mcp; custom override)"
+        )
+    else:
+        opencode_mcp_sources.append("OPENCODE_CONFIG_DIR/opencode.json, opencode.jsonc (mcp; when set)")
+    opencode_mcp_sources.extend(
+        (
+            "OPENCODE_CONFIG_CONTENT (mcp; inline provenance, values never displayed)",
+            "ProgramData managed config (enterprise precedence excluded; unverified)",
+        )
+    )
     sources = {
         ("openclaw", "skills"): ("./skills", "~/.openclaw/skills"),
         ("claudecode", "skills"): (os.path.join(claude_root, "skills"), "./.claude/skills"),
-        ("codex", "skills"): (os.path.join(codex_root, "skills"), "./.codex/skills"),
+        ("codex", "skills"): (
+            "~/.agents/skills",
+            "./.agents/skills (active directory to repository root)",
+        ),
         ("zeptoclaw", "skills"): ("~/.zeptoclaw/skills", "./.zeptoclaw/skills"),
         ("antigravity", "skills"): (
             "~/.gemini/config/skills/<skill>/SKILL.md",
@@ -1723,10 +1752,14 @@ def connector_source_label(connector: str, category: str) -> str:
             "<workspace>/.agents/skills",
             "~/.claude/plugins/cache/.../skills (unless Claude-compatible skills are disabled)",
         ),
+        ("opencode", "skills"): ("unsupported by the OpenCode connector",),
         ("omnigent", "skills"): ("unsupported by the OmniGent connector",),
         ("openclaw", "mcps"): ("openclaw config get mcp.servers", "openclaw.json (mcp.servers)"),
         ("claudecode", "mcps"): (f"{claude_config} (mcpServers)", "./.mcp.json"),
-        ("codex", "mcps"): (f"{codex_config} ([mcp_servers])", "./.mcp.json"),
+        ("codex", "mcps"): (
+            f"{codex_config} ([mcp_servers])",
+            "./.codex/config.toml ([mcp_servers]; trusted projects only)",
+        ),
         ("zeptoclaw", "mcps"): ("~/.zeptoclaw/config.json (mcp.servers)", "./.mcp.json"),
         ("antigravity", "mcps"): (
             "~/.gemini/config/mcp_config.json",
@@ -1738,8 +1771,15 @@ def connector_source_label(connector: str, category: str) -> str:
             "<workspace>/.amp/settings.json or settings.jsonc (amp.mcpServers; read-only)",
             "<skill>/mcp.json",
         ),
-        ("omnigent", "mcps"): ("managed by OmniGent; not modified by DefenseClaw",),
+        ("opencode", "mcps"): tuple(opencode_mcp_sources),
+        ("omnigent", "mcps"): ("unsupported/unverified by the OmniGent connector",),
         ("openclaw", "plugins"): ("~/.openclaw/extensions",),
+        ("codex", "plugins"): (
+            "./.agents/plugins/marketplace.json",
+            "./.claude-plugin/marketplace.json (legacy-compatible)",
+            "~/.agents/plugins/marketplace.json",
+            os.path.join(codex_root, "plugins", "cache"),
+        ),
         ("antigravity", "plugins"): (
             "~/.gemini/config/plugins/<plugin>/ (read/write)",
             "~/.gemini/antigravity-cli/plugins/<plugin>/ (discovery-only)",
@@ -1753,8 +1793,10 @@ def connector_source_label(connector: str, category: str) -> str:
             "~/.config/amp/settings.json or settings.jsonc",
             "<workspace>/.amp/settings.json or settings.jsonc",
         ),
+        ("opencode", "plugins"): (f"{opencode_plugin} (DefenseClaw bridge only)",),
         ("omnigent", "plugins"): ("unsupported by the OmniGent connector",),
-        ("omnigent", "config"): ("$OMNIGENT_CONFIG_HOME/config.yaml or ~/.omnigent/config.yaml",),
+        ("opencode", "config"): (opencode_plugin,),
+        ("omnigent", "config"): ("$OMNIGENT_CONFIG, $OMNIGENT_CONFIG_HOME/config.yaml, or ~/.omnigent/config.yaml; CLI server requires --config",),
     }
     return ", ".join(sources.get((connector, category), ()))
 

@@ -25,7 +25,10 @@
     "service.version": {
       "type": "string",
       "description": "Binary version, e.g. '0.5.0'.",
-      "examples": ["0.5.0", "1.0.0-rc1"]
+      "examples": [
+        "0.5.0",
+        "1.0.0-rc1"
+      ]
     },
     "service.namespace": {
       "type": "string",
@@ -47,7 +50,14 @@
     },
     "deployment.mode": {
       "type": "string",
-      "enum": ["managed_enterprise", "unmanaged_byod", "ci_cd", "sandboxed", "server", "saas"],
+      "enum": [
+        "managed_enterprise",
+        "unmanaged_byod",
+        "ci_cd",
+        "sandboxed",
+        "server",
+        "saas"
+      ],
       "description": "Deployment mode when configured."
     },
     "discovery.source": {
@@ -60,22 +70,45 @@
     },
     "host.arch": {
       "type": "string",
-      "enum": ["amd64", "arm64"],
+      "enum": [
+        "amd64",
+        "arm64"
+      ],
       "description": "CPU architecture (runtime.GOARCH)."
     },
     "os.type": {
       "type": "string",
-      "enum": ["darwin", "linux"],
+      "enum": [
+        "darwin",
+        "linux"
+      ],
       "description": "Operating system (runtime.GOOS)."
     },
     "defenseclaw.claw.mode": {
       "type": "string",
-      "enum": ["openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "amp", "omnigent", "multi", ""],
+      "enum": [
+        "openclaw",
+        "zeptoclaw",
+        "claudecode",
+        "codex",
+        "hermes",
+        "cursor",
+        "windsurf",
+        "geminicli",
+        "copilot",
+        "openhands",
+        "antigravity",
+        "opencode",
+        "amp",
+        "omnigent",
+        "multi",
+        ""
+      ],
       "description": "Active agent framework connector. Matches Connector.Name() in internal/gateway/connector. Empty string is permitted while no connector has been picked yet (fresh install before `defenseclaw setup connector`). The 'multi' sentinel is emitted when a single gateway process serves more than one connector simultaneously; in that case this process-level attribute does not name an individual connector and consumers must read the per-event `connector` metric label / `defenseclaw.connector.source` span attribute for the true connector. Legacy value 'nemoclaw' was never emitted by a released gateway and has been dropped from the enum."
     },
     "defenseclaw.claw.home_dir": {
       "type": "string",
-      "description": "Resolved home directory of the active claw framework. Path layout is connector-specific: openclaw uses ~/.openclaw, zeptoclaw uses ~/.zeptoclaw, claudecode uses ~/.claude (or $CLAUDE_HOME), codex uses ~/.codex, hermes uses ~/.hermes, cursor uses ~/.cursor, windsurf uses ~/.codeium/windsurf, geminicli uses ~/.gemini, copilot uses ~/.copilot while workspace assets may live under .github/, openhands uses workspace .openhands plus ~/.openhands for MCP, opencode and amp use ~/.config/<connector>, and omnigent uses $OMNIGENT_CONFIG_HOME when set or ~/.omnigent otherwise.",
+      "description": "Resolved home directory of the active claw framework. Path layout is connector-specific: openclaw uses ~/.openclaw, zeptoclaw uses ~/.zeptoclaw, claudecode uses ~/.claude (or $CLAUDE_CONFIG_DIR), codex uses ~/.codex, hermes uses ~/.hermes, cursor uses ~/.cursor, windsurf uses ~/.codeium/windsurf, geminicli uses ~/.gemini, copilot uses ~/.copilot while workspace assets may live under .github/, openhands uses workspace .openhands plus ~/.openhands for MCP, opencode and amp use ~/.config/<connector>, and omnigent uses $OMNIGENT_CONFIG_HOME when set or ~/.omnigent otherwise.",
       "examples": [
         "/home/user/.openclaw",
         "/home/user/.zeptoclaw",
@@ -96,12 +129,16 @@
     "defenseclaw.gateway.host": {
       "type": "string",
       "description": "Gateway host from config.",
-      "examples": ["127.0.0.1"]
+      "examples": [
+        "127.0.0.1"
+      ]
     },
     "defenseclaw.gateway.port": {
       "type": "integer",
       "description": "Gateway port from config.",
-      "examples": [18789]
+      "examples": [
+        18789
+      ]
     },
     "defenseclaw.instance.id": {
       "type": "string",

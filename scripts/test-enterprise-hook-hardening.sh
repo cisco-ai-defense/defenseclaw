@@ -669,18 +669,25 @@ fi
 
 hook_stdout="${target_home}/hook.stdout"
 hook_stderr="${target_home}/hook.stderr"
+hook_completed=0
 if [ "$artifact_kind" = plugin ]; then
     if ! validate_amp_plugin_constants request >"$hook_stdout" 2>"$hook_stderr"; then
         cat "$hook_stderr" >&2
         fail "managed Amp plugin constants did not complete an allow request"
     fi
-else
-    if ! printf '%s\n' "$hook_payload" | \
+elif [ "$connector" = 'codex' ]; then
+    printf '%s\n' "$hook_payload" | \
         HOME="$target_home" DEFENSECLAW_GATEWAY_TOKEN='attacker-inherited-token' \
-        "$hook_script" >"$hook_stdout" 2>"$hook_stderr"; then
-        cat "$hook_stderr" >&2
-        fail "managed hook did not complete an allow request"
-    fi
+        "$hook_script" --event PreToolUse --hook-contract codex-hooks-v3 \
+        >"$hook_stdout" 2>"$hook_stderr" || hook_completed=$?
+else
+    printf '%s\n' "$hook_payload" | \
+        HOME="$target_home" DEFENSECLAW_GATEWAY_TOKEN='attacker-inherited-token' \
+        "$hook_script" >"$hook_stdout" 2>"$hook_stderr" || hook_completed=$?
+fi
+if [ "$hook_completed" -ne 0 ]; then
+    cat "$hook_stderr" >&2
+    fail "managed hook did not complete an allow request"
 fi
 if ! wait_for_file "$server_result"; then
     cat "$server_log" >&2 || true

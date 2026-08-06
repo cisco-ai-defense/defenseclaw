@@ -149,13 +149,14 @@
     {
       "name": "DEFENSECLAW_UPGRADE_FRESH_PROCESS",
       "category": "upgrade_internal",
-      "purpose": "Marks the isolated installed-CLI child used for an upgrade handoff so the child cannot recursively hand off again and a newly installed gateway can delegate its readiness wait to that supervising controller.",
+      "purpose": "Marks a trusted upgrade/recovery child so an installed CLI cannot recursively hand off and an exact-owned gateway can delegate its readiness wait to the supervising controller.",
       "default": "unset",
       "accepted_values": ["1", "unset"],
       "security_impact": "none",
       "surface_in_doctor": false,
       "consumers": [
         {"location": "cli/defenseclaw/commands/cmd_upgrade.py", "description": "Rejects recursive fresh-process upgrade handoffs and marks the isolated child process"},
+        {"location": "cmd/defenseclaw-setup/main.go", "description": "Scrubs ambient delegation and scopes it only to an authenticated prior-gateway launch during durable transaction recovery"},
         {"location": "internal/cli/daemon.go", "description": "Delegates gateway readiness to the supervising upgrade controller while retaining safe launch and immediate-exit checks"},
         {"location": "scripts/upgrade.sh", "description": "Scopes the marker to the immutable post-hard-cut controller continuation"}
       ],
@@ -203,6 +204,80 @@
         {"location": "cli/defenseclaw/migration_state.py", "description": "Tags atomic migration-state temporary files as owned by the current upgrade attempt"}
       ],
       "since": "0.8.4"
+    },
+    {
+      "name": "DEFENSECLAW_CURSOR_CONFIG_HOME",
+      "category": "upgrade_internal",
+      "purpose": "Carries the exact Cursor configuration home already captured and validated by the native Windows Setup transaction into its isolated connector maintenance child. The child converts it to the hidden --config-home binding; Cursor itself never reads this variable.",
+      "default": "unset",
+      "accepted_values": ["absolute normalized path selected by the Setup transaction", "unset"],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw-setup/transaction.go", "description": "Filters ambient copies and passes only the transaction-bound Cursor home to connector lifecycle children"},
+        {"location": "cmd/defenseclaw-setup/main.go", "description": "Requires one absolute normalized value and converts it to the hidden --config-home argument"}
+      ],
+      "since": "0.8.9",
+      "security_note": "Trusted Setup custody binding only. This is not a Cursor vendor environment variable and must never be used for ordinary Cursor discovery."
+    },
+    {
+      "name": "DEFENSECLAW_ANTIGRAVITY_CONFIG_HOME",
+      "category": "upgrade_internal",
+      "purpose": "Carries the exact Antigravity configuration home already captured and validated by the native Windows Setup transaction into its isolated connector maintenance child. The child converts it to the hidden --config-home binding; Antigravity itself never reads this variable.",
+      "default": "unset",
+      "accepted_values": ["absolute normalized path selected by the Setup transaction", "unset"],
+      "security_impact": "medium",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw-setup/transaction.go", "description": "Filters ambient copies and passes only the transaction-bound Antigravity home to connector lifecycle children"},
+        {"location": "cmd/defenseclaw-setup/main.go", "description": "Requires one absolute normalized value and converts it to the hidden --config-home argument"}
+      ],
+      "since": "0.8.9",
+      "security_note": "Trusted Setup custody binding only. This is not an Antigravity vendor environment variable and must never be used for ordinary Antigravity discovery."
+    },
+    {
+      "name": "DEFENSECLAW_INTERNAL_SETUP_CONNECTOR",
+      "category": "upgrade_internal",
+      "purpose": "Identifies the connector selected by the packaged Windows Setup process for its private initialization child. Setup removes inherited copies and sets the exact Antigravity value only for the paired Setup initialization.",
+      "default": "unset",
+      "accepted_values": ["antigravity", "unset"],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw-setup/main.go", "description": "Scrubs ambient copies and sets antigravity only for the packaged Setup initialization child"},
+        {"location": "cli/defenseclaw/commands/cmd_init.py", "description": "Requires the exact connector value together with the verified installed-launcher and Setup parent chain before allowing the private Antigravity initialization"}
+      ],
+      "since": "0.8.10",
+      "security_note": "Private paired Setup binding only. The value is not sufficient by itself: the child also requires DEFENSECLAW_INTERNAL_SETUP_PARENT to match the packaged Setup ancestor through the custody-bound installed launcher."
+    },
+    {
+      "name": "DEFENSECLAW_INTERNAL_SETUP_PARENT",
+      "category": "upgrade_internal",
+      "purpose": "Carries the absolute path of the running packaged Windows Setup executable into its private initialization child. Setup removes inherited copies and derives the value from its own executable; the child verifies that its immediate parent is the custody-bound installed launcher and that the launcher's parent image is that exact Setup executable.",
+      "default": "unset",
+      "accepted_values": ["absolute path to the running DefenseClawSetup-x64.exe parent", "unset"],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw-setup/main.go", "description": "Scrubs ambient copies, resolves the current Setup executable, and passes its exact path to the initialization child"},
+        {"location": "cli/defenseclaw/commands/cmd_init.py", "description": "Requires an absolute DefenseClawSetup-x64.exe path that exactly matches the installed launcher's parent process image"}
+      ],
+      "since": "0.8.10",
+      "security_note": "Private paired Setup binding only. This is not a public path override and must be accepted only when it names the packaged Setup process above the custody-bound installed launcher."
+    },
+    {
+      "name": "DEFENSECLAW_INTERNAL_HOOK_DELEGATION",
+      "category": "hook_internal",
+      "purpose": "Carries the parent-owned proof for a stable hook launcher to delegate to the exact full-hook generation it already admitted. The launcher removes inherited copies and sets the marker only for its direct child while keeping the verified full-hook image open through process creation.",
+      "default": "unset (set and overwritten by the stable hook launcher on Windows)",
+      "accepted_values": ["v2:<inherited parent handle>:<32-hex transaction id>:<64-hex hook SHA-256>", "unset"],
+      "security_impact": "high",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/hookruntime/delegation_windows.go", "description": "Binds the delegated child to its live canonical launcher parent and the exact protected runtime generation before reusing the parent-completed full-image admission"}
+      ],
+      "since": "0.8.10",
+      "security_note": "Private parent-to-child hook admission proof only. The environment value has no authority without the inherited live-process handle, canonical launcher identity, protected state, and exact transaction and digest match."
     },
     {
       "name": "DEFENSECLAW_UPGRADE_TEST_MODE",
@@ -2452,6 +2527,19 @@
         {"location": "internal/hookruntime/delegation_windows_test.go", "description": "Native Windows hook-delegation test fixture; never read by production runtime paths"}
       ],
       "since": "0.8.8"
+    },
+    {
+      "name": "DEFENSECLAW_HOOK_DELEGATED_ADMISSION_TEST_ROOT",
+      "category": "test_fixture",
+      "purpose": "Selects the isolated protected runtime root for the delegated hook-admission helper subprocess.",
+      "default": "unset",
+      "accepted_values": ["test-defined absolute directory path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/hookruntime/delegation_windows_test.go", "description": "Native Windows delegated-admission test fixture; never read by production runtime paths"}
+      ],
+      "since": "0.8.10"
     },
     {
       "name": "DEFENSECLAW_DELEGATION_ENV_SENTINEL",

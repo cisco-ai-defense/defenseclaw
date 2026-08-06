@@ -20,9 +20,18 @@ import (
 
 const gatewayStartDiagnosticMaxBytes = 4 << 10
 
+var (
+	nativePreparedHookRuntimeRevalidator = hookruntime.RevalidatePreparedGenerationForExecutable
+	nativeGatewayStartLock               = hookruntime.WithGatewayStartLock
+	nativeGatewayStartRunner             = runTrustedNativeGatewayStart
+)
+
 func trustedNativeGatewayRecovery() func(context.Context, error) error {
 	executable := nativeHookExecutable()
-	state, recognized, err := hookruntime.ReadTrustedForExecutable(executable)
+	state, recognized, err, prepared := preparedNativeHookRuntime(executable)
+	if !prepared {
+		state, recognized, err = nativeHookRuntimeReader(executable)
+	}
 	if err != nil || !recognized || !state.ColdStartCapable() {
 		return nil
 	}
@@ -32,19 +41,36 @@ func trustedNativeGatewayRecovery() func(context.Context, error) error {
 }
 
 func recoverTrustedNativeGateway(ctx context.Context, executable string) error {
-	return hookruntime.WithGatewayStartLock(ctx, func() error {
+	return nativeGatewayStartLock(ctx, func() error {
 		// Setup publishes and disables state under this same lock. Re-read only
 		// after acquisition so an invocation queued behind uninstall cannot start
 		// a removed gateway from its earlier in-memory snapshot.
-		state, recognized, err := hookruntime.ReadTrustedForExecutable(executable)
+		state, recognized, err := refreshedNativeHookRuntimeForRecovery(executable)
 		if err != nil {
 			return fmt.Errorf("revalidate protected hook runtime: %w", err)
 		}
 		if !recognized || !state.ColdStartCapable() {
 			return errors.New("protected hook runtime no longer authorizes gateway cold start")
 		}
-		return runTrustedNativeGatewayStart(ctx, state)
+		return nativeGatewayStartRunner(ctx, state)
 	})
+}
+
+func refreshedNativeHookRuntimeForRecovery(executable string) (hookruntime.State, bool, error) {
+	preparedState, preparedRecognized, preparedErr, prepared := preparedNativeHookRuntime(executable)
+	if prepared {
+		if preparedErr != nil || !preparedRecognized {
+			return preparedState, preparedRecognized, preparedErr
+		}
+		if preparedState.DelegationCapable() && preparedState.DelegatesTo(executable) {
+			current, err := nativePreparedHookRuntimeRevalidator(executable, preparedState)
+			return current, true, err
+		}
+	}
+	// Legacy full launchers and callers that did not enter through main retain
+	// the complete executable admission path. Only an already-admitted
+	// trampoline child can use the exact-generation refresh above.
+	return nativeHookRuntimeReader(executable)
 }
 
 func runTrustedNativeGatewayStart(ctx context.Context, state hookruntime.State) error {

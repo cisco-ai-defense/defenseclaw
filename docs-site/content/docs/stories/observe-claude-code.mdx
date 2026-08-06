@@ -35,9 +35,9 @@ defenseclaw setup claude-code
 
 This is the [observability-only alias](/docs/connectors/claudecode). Claude
 Code talks directly to its native upstream. DefenseClaw inspects through the
-28 registered lifecycle events—including PreToolUse, PostToolUse,
-UserPromptSubmit, Stop, and PermissionRequest—and receives native OTel logs
-and metrics.
+version-selected hook contract: 28 lifecycle events for `>=2.1.154,<2.1.219`
+or 29 for `>=2.1.219`, where `DirectoryAdded` is observational. It also
+receives native OTel logs and metrics.
 
 </Step>
 
@@ -59,11 +59,11 @@ defenseclaw-gateway audit export --connector claudecode --output - \
   | jq 'select(.connector == "claudecode")'
 ```
 
-Open Claude Code and use it normally. DefenseClaw records the 28 supported
-lifecycle events plus the native OTel logs and metrics that Claude Code emits;
-it does not claim activity outside those registered surfaces. Collect enough
-representative traffic to understand your agent before the first block
-decision.
+Open Claude Code and use it normally. DefenseClaw records the version-selected
+28 or 29 supported lifecycle events—including observational `DirectoryAdded`
+on `>=2.1.219`—plus the native OTel logs and metrics that Claude Code emits. It
+does not claim activity outside those registered surfaces. Collect enough
+representative traffic to understand your agent before the first block decision.
 
 </Step>
 

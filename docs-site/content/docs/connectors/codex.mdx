@@ -8,7 +8,14 @@ keywords:
   - Codex notify bridge
 ---
 
-The Codex connector wires DefenseClaw into [Codex's documented hooks](https://github.com/openai/codex), [native OpenTelemetry exporter](https://github.com/openai/codex/blob/main/docs/otel.md), and the notify bridge for agent-turn-complete events.
+The Codex connector wires DefenseClaw into [Codex's documented hooks](https://github.com/openai/codex), [native OpenTelemetry exporter](https://learn.chatgpt.com/docs/config-file/config-advanced#observability-and-telemetry), and the notify bridge for agent-turn-complete events.
+
+<Callout type="info" title="Native Windows support">
+The direct native Windows setup path is supported. Its validation version,
+date, and run metadata remain empty and `live=false`; static, synthetic,
+source-build, or locally installed client checks do not fabricate authentic
+official-client evidence.
+</Callout>
 
 <Callout type="info">
 The Codex connector is **hook-only**. There is no LLM-proxy data path — Codex talks directly to its native upstream (`api.openai.com` or the ChatGPT backend) and DefenseClaw observes via hooks + native OTel.
@@ -38,6 +45,10 @@ exporter configuration. The credential is separate from both the gateway
 master token and the Codex hook credential, is accepted only for matching Codex
 OTLP over loopback, and cannot call management or another connector.
 Do not print or copy the managed exporter header or its protected sidecar.
+Setup also pins Codex's documented `otel.environment` field to DefenseClaw's
+configured environment (Codex otherwise defaults it to `dev`). Doctor compares
+that on-disk value with authenticated live runtime metadata and telemetry
+health so a stale gateway or configuration drift is visible.
 
 Redaction is configured through the v8 bucket/profile policy: edit
 `observability.destinations[].routes[].selector.buckets` and
@@ -91,9 +102,76 @@ owned entries.
 
 <HookEventsList connector="codex" />
 
+Action-mode responses follow each event's official control or feedback
+contract; the events do not all have the same effect:
+
+Each native hook request must exactly match the registered event and its stdin
+`hook_event_name`. Before policy evaluation, the gateway also compares that
+event and its contract ID with the protected contract lock; mismatches or
+tampering are rejected.
+
+The lifecycle-control rows marked **v3/v4** below are contract-supported only
+for Codex `>=0.133`: v3 covers `0.133` through `0.144`, and v4 covers
+`>=0.145`. This version boundary is not release certification; native Windows
+support does not populate authentic official-client validation metadata.
+DefenseClaw does not infer or backfill these matcher/control semantics onto the
+smaller v1/v2 contracts.
+
+| Event | DefenseClaw-owned action response |
+| --- | --- |
+| `SessionStart` (v3/v4, `>=0.133`) | `continue: false` ends the turn before another model request. Its matcher includes all official sources: `startup`, `resume`, `clear`, and `compact`. |
+| `PostToolUse` | `decision: "block"` cannot undo the completed tool. In interactive use, the reason replaces the tool result fed to the next loop; in code mode, the corresponding tool promise rejects. |
+| `SubagentStop` (v3/v4, `>=0.133`) | `decision: "block"` continues the subagent flow; it does not terminate the subagent. |
+| `PreCompact` (v3/v4, `>=0.133`) | `continue: false` stops before compaction. |
+| `PostCompact` (v3/v4, `>=0.133`) | `continue: false` stops after compaction has already completed. |
+| `Stop` | `decision: "block"` prevents stopping and continues with the reason as a new continuation prompt. |
+| `SessionEnd` (0.145+) | Advisory observation only. Output cannot steer Codex or keep the thread open, and the hook has a three-second host maximum. |
+
 <Callout>
 Codex has no native ask surface here. Confirm verdicts become an alert/system message with `raw_action` preserved so operators can review the original action in audit or the TUI. That review cannot resume the hook call.
 </Callout>
+
+## Inventory surfaces
+
+DefenseClaw follows the current Codex layouts rather than Claude Code's
+`.mcp.json` convention:
+
+- Skills: `.agents/skills` at every directory from the active working
+  directory to the detected repository root, then `$HOME/.agents/skills`;
+  `/etc/codex/skills` is also included on Unix. `CODEX_HOME` does not redirect
+  personal `.agents/skills`. DefenseClaw intentionally rejects linked or
+  reparse-point skill roots, `.system` containers, children, and markers,
+  including Windows junctions. Codex may load a linked skill, but DefenseClaw
+  does not silently report it as scanned or eligible; copy it into a real
+  contained directory before relying on inventory coverage.
+- MCP: `[mcp_servers.*]` in candidate project `.codex/config.toml` layers,
+  closest layer first, followed by `$CODEX_HOME/config.toml`.
+- Custom agents: standalone `.toml` files in candidate project
+  `.codex/agents/` layers and `$CODEX_HOME/agents/`. Inventory validates the
+  required `name`, `description`, and `developer_instructions` fields without
+  copying instruction text into the AIBOM.
+- Rules: `*.rules` below `rules/` beside each candidate active config layer,
+  including project `.codex/rules/` and `$CODEX_HOME/rules/`.
+- Memories: generated local-memory state under `$CODEX_HOME/memories/`.
+  `$CODEX_HOME/history.jsonl` is a separate transcript-history file and is not
+  reported as a memory store.
+- Plugins: exact local `source.path` entries from repository and personal
+  `.agents/plugins/marketplace.json`, the repository's lower-precedence
+  legacy-compatible `.claude-plugin/marketplace.json`, plus bounded inventory
+  of installed copies in the implementation-observed
+  `$CODEX_HOME/plugins/cache/` hierarchy. Personal marketplace entries follow
+  both repository sources. DefenseClaw does not invent a fixed project plugin
+  directory. The marketplace paths, local `source.path` resolution, and
+  `.codex-plugin/plugin.json` manifest are official. Codex CLI reports an
+  `installedPath`, but its public CLI contract does not promise that the cache
+  hierarchy will remain stable. DefenseClaw therefore does not claim that
+  Git/URL/npm sources must land there; bounded inventory reports only installed
+  copies actually observed under that hierarchy.
+
+Codex activates project `.codex/` config, MCP, agent, and rule layers only for
+trusted projects. Filesystem inventory reports project entries as
+`trust_required`; it does not infer the client's private trust decision from
+the presence of a file.
 
 ## Telemetry channels at boot
 

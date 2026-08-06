@@ -233,6 +233,15 @@ _VALID_FIELDS: dict[str, set[str]] = {
     "runtime": {"", "disable", "enable"},
 }
 _SUMMARY_DETAILS_BYTES = 4096
+_ALERT_EVENT_ELIGIBILITY_SQL = """(
+    bucket IS NULL
+    OR (bucket = 'security.finding' AND event_name = 'finding.observed')
+    OR (
+        action = 'connector-hook'
+        AND COALESCE(enforced, 0) = 1
+        AND LENGTH(TRIM(COALESCE(connector, ''))) > 0
+    )
+)"""
 
 
 def _validate(field: str, value: str) -> None:
@@ -791,10 +800,10 @@ class Store:
 
     def list_alerts(self, limit: int = 100) -> list[Event]:
         cur = self.db.execute(
-            """SELECT id, timestamp, action, target, actor, details, severity, run_id, structured_json, connector
+            f"""SELECT id, timestamp, action, target, actor, details, severity, run_id, structured_json, connector
                FROM audit_events
                WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW','ERROR','INFO')
-                 AND (bucket IS NULL OR (bucket = 'security.finding' AND event_name = 'finding.observed'))
+                 AND {_ALERT_EVENT_ELIGIBILITY_SQL}
                  AND action NOT LIKE 'dismiss%'
                  AND NOT EXISTS (
                      SELECT 1 FROM alert_acknowledgement_projection AS projection
@@ -809,12 +818,12 @@ class Store:
         """List alert rows without loading large structured payloads."""
 
         cur = self.db.execute(
-            """SELECT id, timestamp, action, target, actor,
+            f"""SELECT id, timestamp, action, target, actor,
                       substr(COALESCE(details, ''), 1, ?) AS details,
                       severity, run_id, NULL AS structured_json, connector
                FROM audit_events
                WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW','ERROR','INFO')
-                 AND (bucket IS NULL OR (bucket = 'security.finding' AND event_name = 'finding.observed'))
+                 AND {_ALERT_EVENT_ELIGIBILITY_SQL}
                  AND action NOT LIKE 'dismiss%'
                  AND NOT EXISTS (
                      SELECT 1 FROM alert_acknowledgement_projection AS projection
@@ -829,12 +838,17 @@ class Store:
         """List high-signal alert rows for the default TUI view."""
 
         cur = self.db.execute(
-            """SELECT id, timestamp, action, target, actor,
+            f"""SELECT id, timestamp, action, target, actor,
                       substr(COALESCE(details, ''), 1, ?) AS details,
                       severity, run_id, NULL AS structured_json, connector
                FROM audit_events
                WHERE (
                    severity IN ('CRITICAL','HIGH','ERROR')
+                   OR (
+                       action = 'connector-hook'
+                       AND COALESCE(enforced, 0) = 1
+                       AND LENGTH(TRIM(COALESCE(connector, ''))) > 0
+                   )
                    OR (
                        action = 'connector-hook'
                        AND (
@@ -843,7 +857,7 @@ class Store:
                        )
                    )
                )
-                 AND (bucket IS NULL OR (bucket = 'security.finding' AND event_name = 'finding.observed'))
+                 AND {_ALERT_EVENT_ELIGIBILITY_SQL}
                  AND action NOT LIKE 'dismiss%'
                  AND NOT EXISTS (
                      SELECT 1 FROM alert_acknowledgement_projection AS projection
@@ -1413,7 +1427,7 @@ class Store:
             alerts=_count(
                 "SELECT COUNT(*) FROM audit_events "
                 "WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW') "
-                "AND (bucket IS NULL OR (bucket = 'security.finding' AND event_name = 'finding.observed')) "
+                f"AND {_ALERT_EVENT_ELIGIBILITY_SQL} "
                 "AND NOT EXISTS (SELECT 1 FROM alert_acknowledgement_projection AS projection "
                 "WHERE projection.alert_id = audit_events.id)"
             ),

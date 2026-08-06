@@ -19,7 +19,7 @@ HITL is opt-in and only affects **action mode**. Observe mode records findings w
 
 ## What you just saw
 
-A HIGH-risk Claude Code action paused at `PreToolUse`, where the connector can present a native approval. The Approve and Deny controls select pre-authored audit outcomes; the Codex control shows the downgraded-confirm path used when a connector can block but cannot ask natively. No action is executed in this page.
+A HIGH-risk Claude Code action paused at `PreToolUse`, where the connector can present a native approval. The Approve and Deny controls select pre-authored audit outcomes; the Codex control shows its review-only alert/system-message path, which cannot resume the hook. No action is executed in this page.
 
 ## Two runtime outcomes
 
@@ -34,12 +34,13 @@ A HIGH-risk Claude Code action paused at `PreToolUse`, where the connector can p
 | --- | --- | --- |
 | OpenClaw | `before_tool_call`; plugin/chat-origin approval | Non-ask proxy surfaces use their route-specific enforcement behaviour |
 | Claude Code | `PreToolUse` | Other hook events are demoted to a non-pausing response |
-| Cursor | `beforeShellExecution`, `beforeMCPExecution` | Alert/context fallback; `raw_action` remains auditable |
+| Cursor | None authoritative (ask-capable schemas exist at `beforeShellExecution` and `beforeMCPExecution`) | Alert/context fallback; higher-priority hooks merge above the DefenseClaw user hook and `raw_action` remains auditable |
 | Copilot CLI | `preToolUse` | Alert/context fallback; `raw_action` remains auditable |
-| Antigravity | `PreInvocation` (v2 contract, upstream-gated), `PreToolUse` (empirically verified on `agy` v1.0.1) | `Stop` advertises block but not ask; `PostToolUse` and `PostInvocation` are non-pausing. Only the `PreToolUse` verdict branch has end-to-end empirical verification. |
+| Antigravity | `PreToolUse` only | `PreInvocation` and `PostInvocation` are context-transform surfaces, `PostToolUse` is observation-only, and DefenseClaw returns allow for `Stop`. No permission-bypass override is claimed without persisted official-client evidence. |
 | Amp | `tool.call` and model-bound `tool.result` in the active foreground thread | A background thread or unavailable plugin UI rejects the call or withholds the result safely |
-| OmniGent | Pre-action `request`, `tool_call`, `llm_request` phases | Configured fallback for post-action phases |
-| ZeptoClaw, Codex, Hermes, Gemini CLI, Windsurf, OpenHands, OpenCode | None | Connector-specific alert/allow/context fallback; no pause or TUI resume |
+| OmniGent | Pre-action `request`, `tool_call`, `llm_request` phases | Post-phase confirm is audited and continues without a pause; DENY may suppress onward-visible content but cannot roll back completed work |
+| ZeptoClaw, Codex, Hermes, Gemini CLI, Devin Desktop legacy Cascade, OpenHands | None | Connector-specific alert/allow/context behavior; no pause or TUI resume. The `windsurf` alias does not cover Devin Local. |
+| OpenCode | `permission.ask` intentionally unimplemented | No native ask or context injection claim; no pause or TUI resume |
 
 For block events, fail-closed support, and the machine-readable source, see the [Capability Matrix](/docs/capability-matrix).
 

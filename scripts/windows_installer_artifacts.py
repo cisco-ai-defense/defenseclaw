@@ -728,6 +728,7 @@ def _required_payload_names(manifest: dict) -> dict[str, str]:
         "gateway_archive",
         "wheel",
         "python_embed",
+        "vc_runtime",
         "yara_compat_wheel",
         "upgrade_manifest",
         "site_packages",
@@ -976,6 +977,7 @@ def build_sbom(args: argparse.Namespace) -> dict:
         required["gateway_archive"]: ("DefenseClaw signed gateway archive", "ARCHIVE", args.version),
         required["wheel"]: ("DefenseClaw Python wheel", "LIBRARY", args.version),
         required["python_embed"]: ("CPython embeddable runtime", "APPLICATION", args.python_version),
+        required["vc_runtime"]: ("Microsoft Visual C++ app-local runtime", "LIBRARY", "14.42.34438"),
         required["yara_compat_wheel"]: ("DefenseClaw YARA Python compatibility wheel", "LIBRARY", None),
         required["site_packages"]: ("DefenseClaw embedded Python site-packages", "LIBRARY", args.version),
         required["launcher"]: ("DefenseClaw native CLI launcher", "APPLICATION", args.version),
@@ -993,6 +995,7 @@ def build_sbom(args: argparse.Namespace) -> dict:
         required["gateway_archive"]: defenseclaw_purl,
         required["wheel"]: f"pkg:pypi/defenseclaw@{urllib.parse.quote(args.version, safe='-._~')}",
         required["python_embed"]: f"pkg:generic/cpython@{urllib.parse.quote(args.python_version, safe='-._~')}",
+        required["vc_runtime"]: "pkg:generic/microsoft-visual-cpp-runtime@14.42.34438?arch=x86_64",
         required["yara_compat_wheel"]: "pkg:pypi/yara-python@4.5.4.post1",
         required["site_packages"]: defenseclaw_purl,
         required["launcher"]: defenseclaw_purl,
@@ -1004,6 +1007,7 @@ def build_sbom(args: argparse.Namespace) -> dict:
     }
     component_licenses = {name: "Apache-2.0" for name in component_paths}
     component_licenses[required["python_embed"]] = "PSF-2.0"
+    component_licenses[required["vc_runtime"]] = "NOASSERTION"
     component_packages: dict[str, str] = {}
     for name, path in sorted(component_paths.items()):
         sha256, sha1 = _file_digests(path)
@@ -1054,6 +1058,22 @@ def build_sbom(args: argparse.Namespace) -> dict:
             component_packages[required["python_embed"]],
         )
 
+    vc_runtime_name = required["vc_runtime"]
+    vc_runtime_entries = _archive_entries(
+        document,
+        payload_files[vc_runtime_name],
+        "./expanded/vc-runtime",
+        component_packages[vc_runtime_name],
+        required=("msvcp140.dll", "msvcp140_1.dll"),
+    )
+    if set(vc_runtime_entries) != {"msvcp140.dll", "msvcp140_1.dll"}:
+        raise ArtifactError("Microsoft VC++ app-local runtime archive has unexpected members")
+    document.relate(
+        component_packages[required["python_embed"]],
+        "DEPENDS_ON",
+        component_packages[vc_runtime_name],
+    )
+
     gateway_entries = _archive_entries(
         document,
         payload_files[required["gateway_archive"]],
@@ -1100,6 +1120,7 @@ def build_sbom(args: argparse.Namespace) -> dict:
         component_packages[site_name],
         site_entries,
     )
+    document.relate(component_packages[site_name], "DEPENDS_ON", component_packages[vc_runtime_name])
     go_modules = _add_go_inventory(document, args.go_inventory.resolve(strict=True), go_component_packages)
 
     # Fail closed if any exact payload digest is absent from the generated

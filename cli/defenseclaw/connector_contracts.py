@@ -20,6 +20,7 @@ outside the DefenseClaw-supported hook surface.
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from importlib import resources
@@ -37,6 +38,7 @@ _VERSION_RE = re.compile(r"(?i)(?:^|[^0-9])v?([0-9]+)(?:\.([0-9]+))?(?:\.([0-9]+
 class ConnectorContract:
     connector: str
     contract_id: str
+    exact_agent_versions: tuple[str, ...] = ()
     min_agent_version: str = ""
     max_agent_version: str = ""
     default_for_unversioned: bool = False
@@ -117,6 +119,9 @@ def _load_contracts_from_manifest(
                 ConnectorContract(
                     connector=name,
                     contract_id=str(raw_contract.get("contract_id", "")).strip(),
+                    exact_agent_versions=tuple(
+                        str(v) for v in version.get("exact", []) if v
+                    ),
                     min_agent_version=str(version.get("min_inclusive", "") or ""),
                     max_agent_version=str(version.get("max_exclusive", "") or ""),
                     default_for_unversioned=bool(
@@ -212,7 +217,7 @@ def resolve_connector_contract(connector: str, raw_version: str | None) -> Conne
             contract=None,
         )
     for contract in contracts:
-        if _version_in_range(normalized, contract.min_agent_version, contract.max_agent_version):
+        if _contract_matches_agent_version(contract, raw, normalized):
             return ConnectorCompatibility(
                 connector=name,
                 raw_version=raw,
@@ -229,6 +234,87 @@ def resolve_connector_contract(connector: str, raw_version: str | None) -> Conne
         reason="no hook contract matches normalized agent version",
         contract=None,
     )
+
+
+def connector_lock_contract_invariant(connector: str, entry: Any) -> str:
+    """Return the first incompatible protected-lock invariant, if any."""
+
+    name = normalize_connector(connector)
+    recorded_connector = entry.get("connector") if isinstance(entry, dict) else None
+    if not isinstance(recorded_connector, str) or normalize_connector(recorded_connector) != name:
+        return "contract"
+    # The Go lock writer uses ``omitempty`` for version strings, so an
+    # unversioned selection is canonically serialized without either version
+    # field.  Preserve strict rejection for an explicitly malformed value,
+    # while treating field absence as the empty version that Go resolved.
+    if "raw_agent_version" in entry:
+        raw_version = entry.get("raw_agent_version")
+        if not isinstance(raw_version, str):
+            return "version"
+    else:
+        raw_version = ""
+    compatibility = resolve_connector_contract(name, raw_version)
+    contract = compatibility.contract
+    if contract is None or not compatibility.supported:
+        return "contract"
+    if compatibility.status == STATUS_UNVERSIONED and not contract.default_for_unversioned:
+        return "version"
+    if entry.get("compatibility_status") != compatibility.status:
+        return "contract"
+    if entry.get("normalized_agent_version", "") != compatibility.normalized_version:
+        return "version"
+    if entry.get("contract_id") != contract.contract_id:
+        return "contract"
+    if entry.get("hook_script_version") != contract.hook_script_version:
+        return "version"
+    if entry.get("hook_fail_mode") not in {"open", "closed"}:
+        return "fail-mode"
+    locations = entry.get("locations")
+    if not isinstance(locations, dict):
+        return "location"
+    config_paths = locations.get("hook_config_paths")
+    runtime_paths = locations.get("hook_script_paths")
+    if not isinstance(config_paths, list) or not config_paths:
+        return "location"
+    if not isinstance(runtime_paths, list) or not runtime_paths:
+        return "location"
+    for path in (*config_paths, *runtime_paths):
+        if (
+            not isinstance(path, str)
+            or not path
+            or path.strip() != path
+            or any(char in path for char in "\x00\r\n")
+            or not os.path.isabs(path)
+            or os.path.normpath(path) != path
+        ):
+            return "location"
+    return ""
+
+
+def _contract_matches_agent_version(
+    contract: ConnectorContract,
+    raw_version: str,
+    normalized_version: str,
+) -> bool:
+    if contract.exact_agent_versions:
+        return _exact_agent_version_match(raw_version, contract.exact_agent_versions)
+    return _version_in_range(
+        normalized_version,
+        contract.min_agent_version,
+        contract.max_agent_version,
+    )
+
+
+def _exact_agent_version_match(raw: str, expected: tuple[str, ...]) -> bool:
+    fields = raw.strip().split()
+    if not fields or len(fields) > 2:
+        return False
+    token = fields[-1]
+    if len(fields) == 2 and fields[0].lower() not in {"agent", "cursor-agent"}:
+        return False
+    if token[:1].lower() == "v":
+        token = token[1:]
+    return any(token.lower() == candidate.strip().lower() for candidate in expected)
 
 
 def _version_in_range(version: str, min_version: str, max_version: str) -> bool:
@@ -256,6 +342,12 @@ def _compare_version(a: str, b: str) -> int:
     if av > bv:
         return 1
     return 0
+
+
+def compare_agent_versions(a: str, b: str) -> int:
+    """Compare two normalized semver-like agent versions."""
+
+    return _compare_version(a, b)
 
 
 def _version_tuple(value: str) -> tuple[int, int, int]:

@@ -230,10 +230,10 @@ def test_third_party_license_text_and_platform_packaging_contracts():
         "github.com/antlr4-go/antlr/v4 v4.13.1 (LICENSE)": (
             "683fcd416d83b64781e229a3c2a598462fbf55c5c9fea54be244766b22c033cf"
         ),
-        "golang.org/x/exp v0.0.0-20240823005443-9b4947da3948 (LICENSE)": (
+        "golang.org/x/exp v0.0.0-20250305212735-054e65f0b394 (LICENSE)": (
             "911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad"
         ),
-        "golang.org/x/exp v0.0.0-20240823005443-9b4947da3948 (PATENTS)": (
+        "golang.org/x/exp v0.0.0-20250305212735-054e65f0b394 (PATENTS)": (
             "96f408bfae65bf137fc2525d3ecb030271c50c1e90799f87abf8846d8dd505cc"
         ),
     }
@@ -246,9 +246,9 @@ def test_third_party_license_text_and_platform_packaging_contracts():
         "https://github.com/google/cel-go/blob/v0.30.0/LICENSE",
         "https://github.com/antlr4-go/antlr/blob/v4.13.1/LICENSE",
         "https://github.com/golang/exp/blob/"
-        "9b4947da3948bdd8d6ae728bc4ba72b93f61e841/LICENSE",
+        "054e65f0b394d1bf387a254295588fb7e5bd0516/LICENSE",
         "https://github.com/golang/exp/blob/"
-        "9b4947da3948bdd8d6ae728bc4ba72b93f61e841/PATENTS",
+        "054e65f0b394d1bf387a254295588fb7e5bd0516/PATENTS",
     )
     for provenance_url in provenance_urls:
         assert provenance_url in heading
@@ -261,7 +261,7 @@ def test_third_party_license_text_and_platform_packaging_contracts():
         "\tmvdan.cc/sh/v3 v3.13.1\n",
         "\tcel.dev/expr v0.25.1 // indirect\n",
         "\tgithub.com/antlr4-go/antlr/v4 v4.13.1 // indirect\n",
-        "\tgolang.org/x/exp v0.0.0-20240823005443-9b4947da3948 // indirect\n",
+        "\tgolang.org/x/exp v0.0.0-20250305212735-054e65f0b394 // indirect\n",
     )
     for requirement in go_mod_requirements:
         assert requirement in go_mod
@@ -272,8 +272,8 @@ def test_third_party_license_text_and_platform_packaging_contracts():
         "h1:SqQKkuVZ+zWkMMNkjy5FZe5mr5WURWnlpmOuzYWrPrQ=",
         "github.com/google/cel-go v0.30.0 "
         "h1:ll54AkzKunWkBn9wSoiUXbFZXYZTkdJGNXTBXUoolGo=",
-        "golang.org/x/exp v0.0.0-20240823005443-9b4947da3948 "
-        "h1:kx6Ds3MlpiUHKj7syVnbp57++8WpuKPcR5yjLBjvLEA=",
+        "golang.org/x/exp v0.0.0-20250305212735-054e65f0b394 "
+        "h1:nDVHiLt8aIbd/VzvPWN6kSOPE7+F/fNFDSXLVYkE/Iw=",
         "mvdan.cc/sh/v3 v3.13.1 "
         "h1:DP3TfgZhDkT7lerUdnp6PTGKyxxzz6T+cOlY/xEvfWk=",
     )

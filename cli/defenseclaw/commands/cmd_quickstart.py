@@ -219,6 +219,7 @@ def quickstart_cmd(
     report = run_first_run(
         FirstRunOptions(
             connector=connector,
+            connector_settings=[{"connector": connector}],
             profile=profile,
             scanner_mode=scanner_mode,
             with_judge=with_judge,

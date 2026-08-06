@@ -224,6 +224,45 @@ func ReadTrustedForExecutable(executable string) (state State, recognized bool, 
 	return readTrustedForExecutableAt(paths, executable)
 }
 
+// RevalidatePreparedGenerationForExecutable refreshes the protected state for
+// a full-hook process whose executable image was already admitted by
+// ReadTrustedForExecutable or ReadTrustedDelegatedForExecutable. Trampoline
+// generations validate the small canonical launcher plus byte-exact state and
+// process/image binding; they do not re-read the already mapped full-hook image.
+// This is intentionally narrower than ReadTrustedForExecutable and must never
+// be used as initial executable admission.
+func RevalidatePreparedGenerationForExecutable(executable string, prepared State) (State, error) {
+	paths, err := CurrentUserPaths()
+	if err != nil {
+		return State{}, err
+	}
+	if strings.TrimSpace(paths.Launcher) == "" {
+		return State{}, errors.New("canonical stable hook launcher path is empty")
+	}
+	return revalidatePreparedGenerationForExecutableAt(paths, executable, prepared)
+}
+
+func revalidatePreparedGenerationForExecutableAt(
+	paths Paths,
+	executable string,
+	prepared State,
+) (State, error) {
+	if !prepared.Active() || !prepared.DelegationCapable() || !prepared.DelegatesTo(executable) {
+		return State{}, errors.New("prepared hook runtime does not authorize this full-hook executable")
+	}
+	current, recognized, err := readTrustedAt(paths, paths.Launcher)
+	if err != nil {
+		return State{}, err
+	}
+	if !recognized {
+		return State{}, errors.New("canonical stable hook launcher is not recognized")
+	}
+	if current != prepared {
+		return State{}, errors.New("protected hook runtime generation changed after executable admission")
+	}
+	return current, nil
+}
+
 func readTrustedForExecutableAt(paths Paths, executable string) (state State, recognized bool, err error) {
 	if samePath(executable, paths.Launcher) {
 		return readTrustedAt(paths, executable)
@@ -445,7 +484,7 @@ func disableAt(paths Paths, transactionID string) error {
 	}
 	previous, _, _ := readTrustedAt(paths, paths.Launcher)
 	if _, err := os.Lstat(paths.Launcher); err == nil {
-		if err := safefile.ProtectFile(paths.Launcher); err != nil {
+		if err := safefile.ProtectFileWhileInUse(paths.Launcher); err != nil {
 			return fmt.Errorf("protect stable hook launcher before disable: %w", err)
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {

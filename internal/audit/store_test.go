@@ -578,12 +578,18 @@ func TestAlertAcknowledgementTargetsUseExactEligibility(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := store.db.Exec(`INSERT INTO audit_events (
-		id, timestamp, action, actor, details, severity, bucket, event_name
+		id, timestamp, action, actor, details, severity, bucket, event_name, connector, enforced
 	) VALUES
 		('v8-finding', '2026-07-07T10:00:00Z', 'scan-finding', 'scanner', 'finding',
-		 'HIGH', 'security.finding', 'finding.observed'),
+		 'HIGH', 'security.finding', 'finding.observed', NULL, NULL),
 		('v8-platform', '2026-07-07T10:00:01Z', 'sink-failure', 'system', 'degraded',
-		 'HIGH', 'platform.health', 'subsystem.degraded')`); err != nil {
+		 'HIGH', 'platform.health', 'subsystem.degraded', NULL, NULL),
+		('v8-connector-block', '2026-07-07T10:00:02Z', 'connector-hook', 'gateway', 'blocked',
+		 'HIGH', 'tool.activity', 'tool.decision', 'cursor', 1),
+		('v8-connector-observe', '2026-07-07T10:00:03Z', 'connector-hook', 'gateway', 'observed',
+		 'HIGH', 'tool.activity', 'tool.decision', 'cursor', 0),
+		('v8-unattributed-block', '2026-07-07T10:00:04Z', 'connector-hook', 'gateway', 'blocked',
+		 'HIGH', 'tool.activity', 'tool.decision', NULL, 1)`); err != nil {
 		t.Fatal(err)
 	}
 	targets, err := store.ListAlertAcknowledgementTargets(context.Background(), "all")
@@ -594,7 +600,8 @@ func TestAlertAcknowledgementTargetsUseExactEligibility(t *testing.T) {
 	for _, target := range targets {
 		targetIDs[target.AlertID] = target.ProjectionVersion == 0
 	}
-	if len(targets) != 2 || !targetIDs["eligible-alert"] || !targetIDs["v8-finding"] {
+	if len(targets) != 3 || !targetIDs["eligible-alert"] || !targetIDs["v8-finding"] ||
+		!targetIDs["v8-connector-block"] {
 		t.Fatalf("targets=%+v", targets)
 	}
 	alerts, err := store.ListAlerts(10)
@@ -605,8 +612,14 @@ func TestAlertAcknowledgementTargetsUseExactEligibility(t *testing.T) {
 	for _, alert := range alerts {
 		alertIDs[alert.ID] = true
 	}
-	if len(alerts) != 2 || !alertIDs["eligible-alert"] || !alertIDs["v8-finding"] {
+	if len(alerts) != 3 || !alertIDs["eligible-alert"] || !alertIDs["v8-finding"] ||
+		!alertIDs["v8-connector-block"] {
 		t.Fatalf("alerts=%+v", alerts)
+	}
+	for _, alert := range alerts {
+		if alert.ID == "v8-connector-block" && (alert.Connector != "cursor" || !alert.Enforced) {
+			t.Fatalf("connector block attribution=%+v", alert)
+		}
 	}
 }
 

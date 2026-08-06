@@ -1,10 +1,14 @@
-# Deterministic, fork-safe native Windows x64 certification.
+# Deterministic, fork-safe native Windows x64 acceptance regression suite.
+# A green synthetic/contract job is not connector certification evidence.
 #
 # Branch protection must require the exact aggregate check name:
 #   Windows Native Required
 #
 # Real provider-secret Codex/Claude tests remain in connector-live-e2e.yml and
 # are workflow_dispatch-only. They are regression radar, not a merge gate.
+# Hermes is included in the required deterministic connector-contract matrix
+# but remains preview/not-certified. Its packaged and official-client gates in
+# docs/research/HERMES-NATIVE-WINDOWS.md are separate and currently unfulfilled.
 
 name: Windows Native CI
 
@@ -204,7 +208,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -234,23 +238,24 @@ jobs:
           Initialize-WindowsNativeTestEnvironment $env:DC_STATE_ROOT | Out-Null
           $uv = (Get-Command uv.exe -ErrorAction Stop).Source
           Invoke-WindowsNativeProcess $uv @('run', '--frozen', 'python', '-m', 'pytest', 'cli/tests/test_local_splunk_controller.py', 'cli/tests/test_local_splunk_transaction.py', 'cli/tests/test_local_splunk_packaging.py', 'cli/tests/test_windows_local_observability_gates.py', '-q') -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT 'pytest-local-splunk.log') | Out-Null
-      - name: Run Python test shard ${{ matrix.shard }} of 4, including headless TUI tests
+      - name: Run Python test shard ${{ matrix.shard }} of 8, including headless TUI tests
         run: |
           . ./scripts/windows-native-ci.ps1 -NoRun
           Initialize-WindowsNativeTestEnvironment $env:DC_STATE_ROOT | Out-Null
           $uv = (Get-Command uv.exe -ErrorAction Stop).Source
           $testFiles = @(Get-ChildItem cli/tests -Recurse -File -Filter 'test_*.py' | Sort-Object FullName)
           $shardIndex = [int]$env:PYTHON_SHARD - 1
+          $appShellFile = @($testFiles | Where-Object { $_.Name -eq 'test_app_shell.py' })
+          if ($appShellFile.Count -ne 1) {
+            throw "Expected exactly one test_app_shell.py file, found $($appShellFile.Count)"
+          }
           $shardFiles = @(
             for ($index = 0; $index -lt $testFiles.Count; $index++) {
-              if (($index % 4) -eq $shardIndex) {
+              if (($index % 8) -eq $shardIndex -and $testFiles[$index].FullName -ne $appShellFile[0].FullName) {
                 $testFiles[$index].FullName
               }
             }
           )
-          if (-not $shardFiles) {
-            throw "Python test shard $($shardIndex + 1) selected no files"
-          }
           # These assertions exercise the POSIX-only OpenShell ownership path
           # (pwd, root-owned mkdir/chown, and Linux sandbox users). Symlink
           # capability alone is not enough to make that product path native to
@@ -264,8 +269,36 @@ jobs:
             # remains covered by the Linux suite.
             '--deselect=cli/tests/test_migrations.py::TestMigrate050PurgeLegacyFlatPolicyBundle::test_symlinked_flat_data_json_is_left_alone'
           )
-          $pytestArgs = @('run', '--frozen', 'python', '-m', 'pytest') + $shardFiles + $windowsInapplicableTests + @('-q')
-          Invoke-WindowsNativeProcess $uv $pytestArgs -TimeoutSeconds 4200 -LogPath (Join-Path $env:DC_STATE_ROOT ('pytest-shard-{0}.log' -f $env:PYTHON_SHARD)) | Out-Null
+          $appShellCollectionLog = Join-Path $env:DC_STATE_ROOT 'pytest-app-shell-collection.log'
+          $appShellCollectionArgs = @('run', '--frozen', 'python', '-m', 'pytest', $appShellFile[0].FullName, '--collect-only', '-q', '--color=no')
+          Invoke-WindowsNativeProcess $uv $appShellCollectionArgs -TimeoutSeconds 300 -LogPath $appShellCollectionLog | Out-Null
+          $appShellNodes = @(
+            Get-Content -LiteralPath $appShellCollectionLog |
+              Where-Object { $_ -match '^cli[/\\]tests[/\\]tui[/\\]test_app_shell\.py::' }
+          )
+          if (-not $appShellNodes) {
+            throw 'Collected no test_app_shell.py nodes'
+          }
+          $shardAppShellNodes = @(
+            for ($index = 0; $index -lt $appShellNodes.Count; $index++) {
+              if (($index % 8) -eq $shardIndex) {
+                $appShellNodes[$index]
+              }
+            }
+          )
+          if (-not $shardFiles) {
+            throw "Python test shard $($shardIndex + 1) selected no ordinary test files"
+          }
+          if (-not $shardAppShellNodes) {
+            throw "Python test shard $($shardIndex + 1) selected no test_app_shell.py nodes"
+          }
+          # Run the TUI subset in a fresh interpreter before the ordinary file
+          # shard so process-global state from the 40-file batch cannot reach
+          # a later Textual context-manager teardown.
+          $appShellPytestArgs = @('run', '--frozen', 'python', '-m', 'pytest') + $shardAppShellNodes + @('-vv', '--durations=25', '--color=no')
+          Invoke-WindowsNativeProcess $uv $appShellPytestArgs -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT ('pytest-shard-{0}-app-shell.log' -f $env:PYTHON_SHARD)) | Out-Null
+          $ordinaryPytestArgs = @('run', '--frozen', 'python', '-m', 'pytest') + $shardFiles + $windowsInapplicableTests + @('-q')
+          Invoke-WindowsNativeProcess $uv $ordinaryPytestArgs -TimeoutSeconds 4200 -LogPath (Join-Path $env:DC_STATE_ROOT ('pytest-shard-{0}-ordinary.log' -f $env:PYTHON_SHARD)) | Out-Null
       - name: Capture bounded diagnostics
         if: ${{ failure() || cancelled() }}
         run: ./scripts/windows-native-ci.ps1 -Operation capture -StateRoot $env:DC_STATE_ROOT -DiagnosticsRoot $env:DC_DIAGNOSTICS
@@ -291,11 +324,27 @@ jobs:
           persist-credentials: false
       - name: Initialize isolated paths
         run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf ps -DiagnosticsLeaf windows-native-diagnostics-powershell
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+          cache: true
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           version: "0.11.28"
           enable-cache: true
           cache-dependency-glob: uv.lock
+      - name: Prepare harness Python environment
+        run: |
+          uv sync --frozen
+          (Join-Path $env:GITHUB_WORKSPACE '.venv\Scripts') |
+            Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Build canonical v8 configuration helper
+        run: |
+          $helperRoot = Join-Path $env:RUNNER_TEMP 'windows-powershell-harness'
+          [IO.Directory]::CreateDirectory($helperRoot) | Out-Null
+          $gateway = Join-Path $helperRoot 'defenseclaw-gateway.exe'
+          go build -o $gateway ./cmd/defenseclaw
+          "DEFENSECLAW_GATEWAY_BIN=$gateway" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Parse every PowerShell script
         run: |
           $failures = [Collections.Generic.List[string]]::new()
@@ -329,10 +378,23 @@ jobs:
     name: Windows packaged artifact build
     runs-on: windows-latest
     timeout-minutes: 35
+    env:
+      DC_EXPECTED_SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Verify exact package source checkout
+        run: |
+          $expected = [string]$env:DC_EXPECTED_SOURCE_COMMIT
+          if ($expected -cnotmatch '^[0-9a-f]{40}$') {
+            throw "Expected package source commit is invalid: $expected"
+          }
+          $actual = (& git rev-parse --verify HEAD).Trim().ToLowerInvariant()
+          if ($LASTEXITCODE -ne 0 -or $actual -cne $expected) {
+            throw "Package checkout does not match the expected source commit: $actual != $expected"
+          }
       - name: Initialize isolated paths
         run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf pkg -DiagnosticsLeaf windows-native-diagnostics-package -ArtifactLeaf windows-native-dist
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
@@ -348,6 +410,72 @@ jobs:
         run: ./scripts/windows-native-ci.ps1 -Operation build-artifacts -StateRoot $env:DC_STATE_ROOT -ArtifactRoot $env:DC_ARTIFACT_ROOT
       - name: Build unsigned native Windows setup executable
         run: ./scripts/windows-native-ci.ps1 -Operation build-installer -StateRoot $env:DC_STATE_ROOT -ArtifactRoot $env:DC_ARTIFACT_ROOT
+      - name: Verify exact package source identity
+        run: |
+          . ./scripts/windows-native-ci.ps1 -NoRun
+          $expected = [string]$env:DC_EXPECTED_SOURCE_COMMIT
+          if ($expected -cnotmatch '^[0-9a-f]{40}$') {
+            throw "Expected package source commit is invalid: $expected"
+          }
+          $actual = (& git rev-parse --verify HEAD).Trim().ToLowerInvariant()
+          if ($LASTEXITCODE -ne 0 -or $actual -cne $expected) {
+            throw "Package checkout changed during the build: $actual != $expected"
+          }
+
+          $provenancePath = Join-Path $env:DC_ARTIFACT_ROOT 'DefenseClawSetup-x64.exe.provenance.json'
+          $sbomPath = Join-Path $env:DC_ARTIFACT_ROOT 'DefenseClawSetup-x64.exe.sbom.json'
+          foreach ($metadataPath in @($provenancePath, $sbomPath)) {
+            if (-not (Test-Path -LiteralPath $metadataPath -PathType Leaf)) {
+              throw "Package source-identity metadata is missing: $metadataPath"
+            }
+          }
+          $provenance = Get-Content -LiteralPath $provenancePath -Raw -Encoding UTF8 |
+            ConvertFrom-Json
+          if ([string]$provenance.source_commit -cne $expected) {
+            throw "Package provenance source commit does not match the expected head: $($provenance.source_commit) != $expected"
+          }
+          $sbom = Get-Content -LiteralPath $sbomPath -Raw -Encoding UTF8 | ConvertFrom-Json
+          if ([string]$sbom.comment -cne "DefenseClaw source commit: $expected") {
+            throw 'Package SBOM source commit does not match the expected head'
+          }
+
+          $wheelName = [string]$provenance.inputs.wheel
+          $archiveName = [string]$provenance.inputs.gateway_archive
+          foreach ($inputName in @($wheelName, $archiveName)) {
+            if ([IO.Path]::GetFileName($inputName) -cne $inputName) {
+              throw "Package provenance contains a non-canonical input name: $inputName"
+            }
+          }
+          $wheelPath = Join-Path $env:DC_ARTIFACT_ROOT $wheelName
+          $archivePath = Join-Path $env:DC_ARTIFACT_ROOT $archiveName
+          $wheelHash = (Get-FileHash -LiteralPath $wheelPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($wheelHash -cne [string]$provenance.inputs.wheel_sha256) {
+            throw 'Packaged CLI wheel digest does not match exact-head provenance'
+          }
+          $archiveHash = (Get-FileHash -LiteralPath $archivePath -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($archiveHash -cne [string]$provenance.inputs.gateway_archive_sha256) {
+            throw 'Packaged gateway archive digest does not match exact-head provenance'
+          }
+
+          $verificationRoot = Join-Path $env:DC_STATE_ROOT (
+            'package-source-identity-' + [guid]::NewGuid().ToString('N')
+          )
+          [IO.Directory]::CreateDirectory($verificationRoot) | Out-Null
+          Expand-Archive -LiteralPath $archivePath -DestinationPath $verificationRoot
+          foreach ($binary in @(
+            @{ File = 'defenseclaw.exe'; Name = 'defenseclaw-gateway' },
+            @{ File = 'defenseclaw-hook.exe'; Name = 'defenseclaw-hook' }
+          )) {
+            $path = Join-Path $verificationRoot $binary.File
+            $result = Invoke-WindowsNativeProcess $path @('--version-json') -TimeoutSeconds 30
+            $report = [string]$result.StdOut | ConvertFrom-Json
+            if ([int]$report.schema_version -ne 1 -or
+                [string]$report.name -cne [string]$binary.Name -or
+                [string]$report.version -cne [string]$provenance.version -or
+                [string]$report.commit -cne $expected) {
+              throw "Packaged $($binary.Name) identity does not match exact-head provenance"
+            }
+          }
       - name: Verify native setup wizard responsiveness
         run: >-
           ./scripts/invoke-windows-setup-standard-user-ci.ps1
@@ -433,7 +561,7 @@ jobs:
       # 0.8.7 predates immutable install.ps1 release assets. The compatibility
       # fallback below is review-bound to these exact repository bytes and is
       # refused for every other release/candidate identity.
-      BOOTSTRAP_LEGACY_INSTALLER_SHA256: c5f03c7559dd941ca06acdaddeac9262f37911cd8393fe98d4af1aa32b7eb20a
+      BOOTSTRAP_LEGACY_INSTALLER_SHA256: d9c6f31b3e1b39cb149eaaf5d7bfb88cb742bc59c8d2ce1b07745aa31f63c32a
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -629,18 +757,25 @@ jobs:
     needs: [powershell-static, package-artifact]
     runs-on: windows-latest
     timeout-minutes: 35
-    env:
-      CONNECTOR: ${{ matrix.connector }}
     strategy:
       fail-fast: false
       matrix:
-        connector: [codex, claudecode, amp]
+        # Contract coverage does not certify preview/not-certified connectors;
+        # promotion still requires packaged and official-client evidence.
+        connector: [codex, claudecode, amp, copilot, cursor, hermes, windsurf, antigravity, opencode]
+    env:
+      CONNECTOR: ${{ matrix.connector }}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
       - name: Initialize isolated paths
         run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf ('ct-' + $env:CONNECTOR) -DiagnosticsLeaf ('windows-native-diagnostics-' + $env:CONNECTOR) -ArtifactLeaf windows-native-dist
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        if: ${{ matrix.connector == 'opencode' }}
+        with:
+          go-version-file: go.mod
+          cache: false
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         with:
           version: "0.11.28"
@@ -675,6 +810,48 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: windows-native-contract-diagnostics-${{ matrix.connector }}
+          path: ${{ env.DC_DIAGNOSTICS }}\**
+          if-no-files-found: ignore
+          retention-days: 5
+      - name: Always clean isolated processes, listeners, and temp state
+        if: ${{ always() }}
+        run: ./scripts/windows-native-ci.ps1 -Operation cleanup -StateRoot $env:DC_STATE_ROOT
+
+  omnigent-native-degraded:
+    name: Windows x64 OmniGent native degraded
+    needs: [powershell-static, package-artifact]
+    runs-on: windows-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - name: Initialize isolated paths
+        run: ./scripts/initialize-windows-native-ci-paths.ps1 -Leaf omnigent -DiagnosticsLeaf windows-native-diagnostics-omnigent -ArtifactLeaf windows-native-dist
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          version: "0.11.28"
+          enable-cache: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: windows-native-package
+          path: ${{ env.DC_ARTIFACT_ROOT }}
+      - name: Official OmniGent 0.7.0 packaged Setup lifecycle and server/policy contract
+        run: >-
+          ./scripts/invoke-windows-setup-standard-user-ci.ps1
+          -Mode omnigent-native-degraded
+          -StateRoot $env:DC_STATE_ROOT
+          -ArtifactRoot $env:DC_ARTIFACT_ROOT
+          -DiagnosticsRoot $env:DC_DIAGNOSTICS
+          -TimeoutSeconds 1800
+      - name: Capture bounded diagnostics
+        if: ${{ failure() || cancelled() }}
+        run: ./scripts/windows-native-ci.ps1 -Operation capture -StateRoot $env:DC_STATE_ROOT -DiagnosticsRoot $env:DC_DIAGNOSTICS
+      - name: Upload advisory diagnostics
+        if: ${{ failure() || cancelled() }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: windows-native-omnigent-advisory-diagnostics
           path: ${{ env.DC_DIAGNOSTICS }}\**
           if-no-files-found: ignore
           retention-days: 5
@@ -800,17 +977,18 @@ jobs:
       - packaged-acceptance
       - public-bootstrap-acceptance
       - connector-contract
+      - omnigent-native-degraded
     runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
       REQUIRED_RESULTS: ${{ toJSON(needs) }}
     steps:
-      - name: Fail unless every deterministic Windows job succeeded
+      - name: Fail unless every deterministic Windows validation job succeeded
         run: |
           $results = $env:REQUIRED_RESULTS | ConvertFrom-Json
           $failed = @($results.PSObject.Properties | Where-Object { $_.Value.result -ne 'success' })
           if ($failed.Count) {
             $summary = $failed | ForEach-Object { "$($_.Name)=$($_.Value.result)" }
-            throw "Required Windows certification did not succeed: $($summary -join ', ')"
+            throw "Required Windows validation did not succeed: $($summary -join ', ')"
           }
-          Write-Host 'Every deterministic native Windows x64 certification job succeeded.'
+          Write-Host 'Every required deterministic native Windows x64 validation job succeeded; this does not certify preview connectors.'

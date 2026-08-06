@@ -11,10 +11,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from defenseclaw.commands.cmd_doctor import _check_connector_export_custody, _DoctorResult
+from defenseclaw.commands.cmd_status import _print_native_delivery_status
 from defenseclaw.observability.custody_status import (
     ConnectorCustodyReport,
     ConnectorCustodyStatus,
     inspect_connector_custody,
+    summarize_native_delivery,
 )
 
 NOW = datetime(2026, 7, 14, 12, 0, tzinfo=timezone.utc)
@@ -275,3 +277,100 @@ def test_doctor_reports_external_invalid_drop_only_and_managed_drift() -> None:
     assert "invalid credentials" in codex["detail"]
     assert "drop-only native stream" in codex["detail"]
     assert checks["Native OTLP credentials"]["status"] == "warn"
+
+
+def test_native_delivery_summary_covers_all_states_and_doctor_status_parity(capsys) -> None:
+    report = ConnectorCustodyReport(
+        state="available",
+        reason="",
+        observation_window_hours=24,
+        instances=(
+            ConnectorCustodyStatus(
+                connector_instance_id="019b0000-0000-7000-8000-000000000001",
+                connector="codex",
+                custody="defenseclaw",
+                profile_version="codex-v1",
+                default=True,
+                normalized_batches=2,
+                drop_only_batches=2,
+            ),
+            ConnectorCustodyStatus(
+                connector_instance_id="019b0000-0000-7000-8000-000000000002",
+                connector="claudecode",
+                custody="external",
+                profile_version="claude-v1",
+                default=True,
+                normalized_batches=3,
+                drop_only_batches=1,
+            ),
+            ConnectorCustodyStatus(
+                connector_instance_id="019b0000-0000-7000-8000-000000000003",
+                connector="opencode",
+                custody="defenseclaw",
+                profile_version="opencode-v1",
+                default=True,
+                normalized_batches=4,
+            ),
+            ConnectorCustodyStatus(
+                connector_instance_id="019b0000-0000-7000-8000-000000000004",
+                connector="copilot",
+                custody="defenseclaw",
+                profile_version="copilot-v1",
+                default=True,
+            ),
+            ConnectorCustodyStatus(
+                connector_instance_id="019b0000-0000-7000-8000-000000000005",
+                connector="cursor",
+                custody="hook_only",
+                profile_version="cursor-v1",
+                default=True,
+            ),
+        ),
+        event_rows_truncated=True,
+    )
+
+    summary = summarize_native_delivery(report)
+
+    assert summary.evidence_scope == "truncated"
+    assert [row.state for row in summary.connectors] == [
+        "all_drop_only",
+        "partial_drop_only",
+        "accepted",
+        "no_evidence",
+    ]
+    assert [row.connector for row in summary.connectors] == [
+        "codex",
+        "claudecode",
+        "opencode",
+        "copilot",
+    ]
+    serialized = json.dumps(summary.as_json(), sort_keys=True)
+    assert "019b0000" not in serialized
+    assert "profile" not in serialized
+    assert "path" not in serialized
+    assert "token" not in serialized
+
+    _print_native_delivery_status(summary)
+    status_output = capsys.readouterr().out
+    assert "collector/runtime health does not prove accepted delivery" in status_output
+    assert "bounded 24h, truncated; counts partial" in status_output
+    for label in ("all-drop-only", "partial-drop-only", "accepted", "no-evidence"):
+        assert label in status_output
+
+    result = _DoctorResult()
+    _check_connector_export_custody(report, result)
+    doctor = {item["label"]: item["detail"] for item in result.checks}
+    for row in summary.connectors:
+        assert row.detail in doctor[f"Connector OTLP: {row.connector}"]
+
+
+def test_native_delivery_missing_evidence_is_bounded_not_failed(capsys) -> None:
+    summary = summarize_native_delivery(ConnectorCustodyReport("unavailable", "database_missing", 24))
+
+    assert summary.state == "no_evidence"
+    assert summary.connectors == ()
+    _print_native_delivery_status(summary)
+    output = capsys.readouterr().out
+    assert "no evidence" in output
+    assert "database missing" in output
+    assert "fail" not in output.lower()

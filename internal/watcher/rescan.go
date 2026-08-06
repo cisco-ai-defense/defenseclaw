@@ -161,16 +161,33 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 			if !e.IsDir() || strings.HasPrefix(e.Name(), ".") {
 				continue
 			}
+			path := filepath.Join(dir, e.Name())
+			if watcherConnectorName(w.cfg) == "claudecode" &&
+				isClaudeSkillsPlugin(path) {
+				continue
+			}
 			targets = append(targets, InstallEvent{
 				Type:      InstallSkill,
 				Name:      e.Name(),
-				Path:      filepath.Join(dir, e.Name()),
+				Path:      path,
 				Timestamp: time.Now().UTC(),
 			})
 		}
 	}
 
 	for _, dir := range w.pluginDirs {
+		if watcherConnectorName(w.cfg) == "claudecode" {
+			for _, plugin := range enumerateClaudeWatcherPlugins(dir) {
+				targets = append(targets, InstallEvent{
+					Type:      InstallPlugin,
+					Name:      claudeWatcherPluginIdentity(dir, plugin),
+					Path:      plugin,
+					Connector: "claudecode",
+					Timestamp: time.Now().UTC(),
+				})
+			}
+			continue
+		}
 		entries, err := os.ReadDir(dir)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[rescan] enumerate plugins dir %s: %v\n", dir, err)
@@ -207,6 +224,123 @@ func (w *InstallWatcher) enumerateTargets() []InstallEvent {
 	}
 
 	return targets
+}
+
+func isClaudeSkillsPlugin(path string) bool {
+	info, err := os.Lstat(filepath.Join(path, ".claude-plugin", "plugin.json"))
+	return err == nil && info.Mode().IsRegular()
+}
+
+func claudeSkillsPluginIdentity(path string) string {
+	fallback := filepath.Base(path) + "@skills-dir"
+	manifestPath := filepath.Join(path, ".claude-plugin", "plugin.json")
+	info, err := os.Lstat(manifestPath)
+	if err != nil || !info.Mode().IsRegular() || info.Size() > 1_048_576 {
+		return fallback
+	}
+	data, err := os.ReadFile(manifestPath)
+	if err != nil {
+		return fallback
+	}
+	var manifest struct {
+		Name string `json:"name"`
+	}
+	if json.Unmarshal(data, &manifest) != nil {
+		return fallback
+	}
+	name := strings.TrimSpace(manifest.Name)
+	if name == "" || strings.ContainsAny(name, `/\`) || name == "." || name == ".." {
+		return fallback
+	}
+	return name + "@skills-dir"
+}
+
+func claudeWatcherPluginIdentity(root, path string) string {
+	root = filepath.Clean(root)
+	if strings.EqualFold(filepath.Base(root), "skills") {
+		return claudeSkillsPluginIdentity(path)
+	}
+	if strings.EqualFold(filepath.Base(root), "cache") {
+		relative, err := filepath.Rel(root, path)
+		if err == nil {
+			parts := strings.FieldsFunc(relative, func(r rune) bool {
+				return r == '/' || r == '\\'
+			})
+			if len(parts) == 3 {
+				return parts[1] + "@" + parts[0]
+			}
+		}
+	}
+	return filepath.Base(path)
+}
+
+func enumerateClaudeWatcherPlugins(root string) []string {
+	root = filepath.Clean(root)
+	if strings.EqualFold(filepath.Base(root), "skills") {
+		var out []string
+		entries, err := os.ReadDir(root)
+		if err != nil {
+			return nil
+		}
+		for _, entry := range entries {
+			path := filepath.Join(root, entry.Name())
+			if entry.IsDir() && !strings.HasPrefix(entry.Name(), ".") &&
+				isClaudeSkillsPlugin(path) {
+				out = append(out, path)
+			}
+		}
+		return out
+	}
+	if !strings.EqualFold(filepath.Base(root), "cache") {
+		return nil
+	}
+
+	var out []string
+	_ = filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
+		if err != nil {
+			if path == root {
+				return filepath.SkipAll
+			}
+			return filepath.SkipDir
+		}
+		if !entry.IsDir() {
+			return nil
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return filepath.SkipDir
+		}
+		relative, relErr := filepath.Rel(root, path)
+		if relErr != nil || relative == ".." ||
+			strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			return filepath.SkipDir
+		}
+		depth := 0
+		if relative != "." {
+			depth = len(strings.FieldsFunc(relative, func(r rune) bool {
+				return r == '/' || r == '\\'
+			}))
+		}
+		if depth > 3 {
+			return filepath.SkipDir
+		}
+		// Anthropic's cache boundary is
+		// <marketplace>/<plugin>/<version>; plugin.json is optional. Admit
+		// exactly that directory and never let a nested dependency manifest
+		// manufacture a second plugin identity.
+		if depth == 3 {
+			out = append(out, path)
+			return filepath.SkipDir
+		}
+		if entry.Name() != "." && strings.HasPrefix(entry.Name(), ".") {
+			return filepath.SkipDir
+		}
+		switch strings.ToLower(entry.Name()) {
+		case "node_modules", "__pycache__":
+			return filepath.SkipDir
+		}
+		return nil
+	})
+	return out
 }
 
 // rescanTarget snapshots a single target, decides whether a fresh scan is
@@ -448,7 +582,7 @@ func (w *InstallWatcher) scannerFingerprint(evt InstallEvent) string {
 			"llm_base_url="+llm.BaseURL,
 		)
 	case InstallPlugin:
-		bin := w.cfg.Scanners.PluginScanner
+		bin := scanner.NewPluginScanner(w.cfg.Scanners.PluginScanner).BinaryPath
 		llm := w.cfg.ResolveLLM("scanners.plugin")
 		parts = append(parts,
 			"binary="+bin,

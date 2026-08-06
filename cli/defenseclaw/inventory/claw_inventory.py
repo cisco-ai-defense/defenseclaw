@@ -16,7 +16,7 @@
 
 """Build a live OpenClaw bill-of-materials by querying the ``openclaw`` CLI.
 
-Indexes: Skills, Plugins, MCP servers, Agents/sub-agents, Tools, Model providers, Memory.
+Indexes: Skills, Plugins, MCP servers, Agents/sub-agents, Rules, Tools, Model providers, Memory.
 
 Commands are dispatched in parallel via ``ThreadPoolExecutor`` and deduplicated
 (e.g. ``plugins list`` is fetched once even though three categories use it).
@@ -24,19 +24,35 @@ Commands are dispatched in parallel via ``ThreadPoolExecutor`` and deduplicated
 
 from __future__ import annotations
 
+import hashlib
+import heapq
+import importlib.metadata
+import importlib.util
 import json
 import os
 import re
+import stat
 import subprocess
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from enum import Enum
+from pathlib import Path
 from typing import Any, NamedTuple, TypedDict
+
+import yaml
 
 from defenseclaw import connector_paths
 from defenseclaw.config import Config, SkillActionsConfig, _expand
+from defenseclaw.file_permissions import open_regular_file_no_follow
+
+try:
+    import tomllib
+except ModuleNotFoundError:
+    import tomli as tomllib
+
 from defenseclaw.inventory.plugin_directories import (
+    discover_exact_plugin_directory,
     discover_plugin_directories,
     read_amp_plugin_source,
 )
@@ -45,10 +61,19 @@ from defenseclaw.inventory.plugin_identity import (
     filesystem_identity_key,
 )
 from defenseclaw.models import ActionEntry, Finding, ScanResult
+from defenseclaw.safety import is_symlink
 
-INVENTORY_VERSION = 3
+# v4 adds the top-level ``rules`` category and its summary/finding/render
+# surface; consumers can distinguish it from the seven-category v3 schema.
+INVENTORY_VERSION = 4
 
-ALL_CATEGORIES: frozenset[str] = frozenset(["skills", "plugins", "mcp", "agents", "tools", "models", "memory"])
+_ANTIGRAVITY_RULE_FILE_MAX_BYTES = 1 << 20
+_ANTIGRAVITY_RULE_DIRECTORY_MAX_ENTRIES = 4096
+_ANTIGRAVITY_RULE_INVENTORY_MAX_FILES = 16_384
+
+ALL_CATEGORIES: frozenset[str] = frozenset(
+    ["skills", "plugins", "mcp", "agents", "rules", "tools", "models", "memory"]
+)
 
 _CATEGORY_ALIASES: dict[str, str] = {"model_providers": "models"}
 
@@ -84,6 +109,7 @@ class InventoryCapabilityStatus(str, Enum):
     """Machine-readable availability of an inventory surface."""
 
     UNSUPPORTED = "unsupported"
+    UNVERIFIED = "unverified"
 
 
 class InventoryLimitation(TypedDict):
@@ -158,6 +184,7 @@ def build_claw_aibom(
         "plugins": _parse_plugins(cache.get("plugins_list")) if "plugins" in cats else [],
         "mcp": _parse_mcp(cache.get("mcp_list")) if "mcp" in cats else [],
         "agents": (_parse_agents(cache.get("agents_list"), cache.get("config_agents")) if "agents" in cats else []),
+        "rules": [],
         "tools": _parse_tools(cache.get("plugins_list")) if "tools" in cats else [],
         "model_providers": (
             _parse_model_providers(
@@ -187,6 +214,7 @@ def claw_aibom_to_scan_result(inv: dict[str, Any], cfg: Config) -> ScanResult:
         ("plugins", "Plugins"),
         ("mcp", "MCP servers"),
         ("agents", "Agents / sub-agents"),
+        ("rules", "Rules"),
         ("tools", "Tools"),
         ("model_providers", "Model providers"),
         ("memory", "Memory"),
@@ -607,6 +635,7 @@ def format_claw_aibom_human(
         _render_plugins(console, inv.get("plugins", []))
         _render_mcp(console, inv.get("mcp", []))
         _render_agents(console, inv.get("agents", []))
+        _render_rules(console, inv.get("rules", []))
         _render_tools(console, inv.get("tools", []))
         _render_models(console, inv.get("model_providers", []))
         _render_memory(console, inv.get("memory", []))
@@ -655,9 +684,31 @@ def _attach_connector_paths(
     except Exception:
         out["connector_skill_dirs"] = []
     try:
-        out["connector_plugin_dirs"] = list(cfg.plugin_dirs(connector))
+        out["connector_plugin_dirs"] = (
+            connector_paths.plugin_inventory_dirs(
+                connector,
+                openclaw_home=cfg.claw.home_dir,
+                workspace_dir=cfg.connector_workspace_dir(),
+            )
+            if connector == "cursor"
+            else list(cfg.plugin_dirs(connector))
+        )
     except Exception:
         out["connector_plugin_dirs"] = []
+    try:
+        out["connector_agent_dirs"] = connector_paths.agent_dirs(
+            connector,
+            workspace_dir=cfg.connector_workspace_dir(),
+        )
+    except Exception:
+        out["connector_agent_dirs"] = []
+    try:
+        out["connector_rule_dirs"] = connector_paths.rule_dirs(
+            connector,
+            workspace_dir=cfg.connector_workspace_dir(),
+        )
+    except Exception:
+        out["connector_rule_dirs"] = []
     try:
         out["connector_mcp_files"] = list(_collect_mcp_config_files(connector, cfg))
     except Exception:
@@ -716,12 +767,14 @@ def _aibom_target_path(inv: dict[str, Any], cfg: Config) -> str:
 def _collect_mcp_config_files(connector: str, cfg: Config) -> list[str]:
     """Return the on-disk MCP config files for *connector*.
 
-    Re-uses :func:`connector_paths.connector_config_files` and filters
-    for entries that look like an MCP-aware file. We err on the side of
-    "show what could be the source" — the renderer is read-only and
-    operators benefit from seeing both the existing file and the
-    expected location.
+    Copilot's MCP surface is distinct from its settings and hooks, and spans
+    every pinned workspace ancestor. Other connectors reuse
+    :func:`connector_paths.connector_config_files` and retain the historical
+    extension filter.
     """
+    if connector_paths.normalize(connector) == "copilot":
+        return connector_paths.copilot_mcp_config_files(_connector_workspace_dir(cfg))
+
     candidates = connector_paths.connector_config_files(
         connector,
         openclaw_config=cfg.claw.config_file,
@@ -731,6 +784,8 @@ def _collect_mcp_config_files(connector: str, cfg: Config) -> list[str]:
     out: list[str] = []
     for path in candidates:
         base = os.path.basename(path).lower()
+        if connector.lower() == "codex" and base != "config.toml":
+            continue
         if (
             base.endswith(".json")
             or base.endswith(".jsonc")
@@ -760,6 +815,7 @@ def _build_summary(inv: dict[str, Any]) -> dict[str, Any]:
         "plugins": {"count": len(plugins), "loaded": n_loaded, "disabled": n_disabled},
         "mcp": {"count": len(inv.get("mcp", []))},
         "agents": {"count": len(inv.get("agents", []))},
+        "rules": {"count": len(inv.get("rules", []))},
         "tools": {"count": len(inv.get("tools", []))},
         "model_providers": {"count": len(inv.get("model_providers", []))},
         "memory": {"count": len(inv.get("memory", []))},
@@ -835,6 +891,7 @@ def _render_summary(console: Any, inv: dict[str, Any]) -> None:
         mcp_detail = mcp_detail.lstrip(" · ")
     table.add_row("MCP servers", str(data.get("mcp", {}).get("count", 0)), mcp_detail)
     table.add_row("Agents", str(data.get("agents", {}).get("count", 0)))
+    table.add_row("Rules", str(data.get("rules", {}).get("count", 0)))
     table.add_row("Tools", str(data.get("tools", {}).get("count", 0)))
     table.add_row("Model providers", str(data.get("model_providers", {}).get("count", 0)))
     table.add_row("Memory stores", str(data.get("memory", {}).get("count", 0)))
@@ -1053,6 +1110,27 @@ def _render_agents(console: Any, agents: list[dict[str, Any]]) -> None:
             a.get("model", "-"),
             "yes" if a.get("is_default") else "",
             _trunc(a.get("workspace", ""), 45),
+        )
+    console.print(table)
+    console.print()
+
+
+def _render_rules(console: Any, rules: list[dict[str, Any]]) -> None:
+    if not rules:
+        console.print("[dim]Rules: none[/dim]\n")
+        return
+
+    from rich.table import Table
+
+    table = Table(title=f"Rules ({len(rules)})")
+    table.add_column("Name", style="bold")
+    table.add_column("Scope")
+    table.add_column("Source")
+    for rule in rules:
+        table.add_row(
+            rule.get("id", ""),
+            rule.get("scope", ""),
+            _trunc(rule.get("source", ""), 70),
         )
     console.print(table)
     console.print()
@@ -1533,6 +1611,130 @@ _FILESYSTEM_ONLY_CONNECTOR_NOTES: dict[str, str] = {
     "memory": "memory backend is private to the framework",
 }
 
+_PARTIAL_CONNECTOR_NOTES: dict[tuple[str, str], str] = {
+    (
+        "windsurf",
+        "skills",
+    ): (
+        "legacy Cascade user and pinned-workspace .windsurf/skills and "
+        ".agents/skills roots are inventoried with no-follow discovery; "
+        "optional Claude-config reading plus system/ProgramData and managed "
+        "enterprise skill layers are excluded and unverified"
+    ),
+    (
+        "windsurf",
+        "rules",
+    ): (
+        "legacy Cascade user-global, preferred .devin/rules, legacy "
+        ".windsurf/rules and .windsurfrules, and recursive/ancestor AGENTS.md "
+        "sources are inventoried with bounded no-follow discovery; cloud "
+        "dashboard, MDM, ProgramData/system, and effective higher-layer "
+        "enforcement are excluded and unverified"
+    ),
+    (
+        "windsurf",
+        "mcp",
+    ): (
+        "only the legacy Cascade mcp_config.json under the persisted bound "
+        "WINDSURF_USER_HOME is inventoried; Devin Local config files, cloud, "
+        "Team/Enterprise registry, and allowlist state are unsupported and "
+        "unverified"
+    ),
+    (
+        "copilot",
+        "skills",
+    ): (
+        "documented local project, inherited, personal, and COPILOT_SKILLS_DIRS "
+        "sources are inventoried; plugin, built-in, and organization/remote "
+        "skills are not expanded from private or remote stores"
+    ),
+    (
+        "copilot",
+        "agents",
+    ): (
+        "documented local project/ancestor and personal agents plus the "
+        "reviewed Copilot CLI 1.0.77 built-in agent set are inventoried; "
+        "built-ins cannot be shadowed by local files, while plugin-contributed "
+        "agents and remote organization/enterprise agents require "
+        "official-client live-session inspection"
+    ),
+    (
+        "copilot",
+        "mcp",
+    ): (
+        "documented workspace/ancestor and personal MCP configuration is "
+        "inventoried in priority order irrespective of folder trust; effective "
+        "workspace activation requires a trusted folder (or "
+        "GITHUB_COPILOT_PROMPT_MODE_WORKSPACE_MCP=true in untrusted prompt "
+        "mode), while session flag, plugin-contributed, built-in, and remote "
+        "runtime servers require official-client live inspection"
+    ),
+    (
+        "copilot",
+        "rules",
+    ): (
+        "documented personal, repository-root, current-workspace, intermediate, "
+        "nested active-file candidates, modular, imported, and "
+        "COPILOT_CUSTOM_INSTRUCTIONS_DIRS sources are inventoried with no-follow "
+        "file/directory/size bounds and collision metadata; exact active-file "
+        "selection, path-specific applyTo, session enable/disable state, folder "
+        "trust, managed/organization policy, and remote instructions remain "
+        "unverified"
+    ),
+    (
+        "copilot",
+        "plugins",
+    ): (
+        "declared plugins are queried only through the trusted Copilot executable "
+        "with `plugins list --kind plugin --json`, the pinned workspace, and exact "
+        "COPILOT_HOME; semantic activation and managed/organization policy remain "
+        "unverified without live-session evidence"
+    ),
+}
+
+_UNVERIFIED_CONNECTOR_NOTES: dict[tuple[str, str], str] = {
+    (
+        "cursor",
+        "skills",
+    ): (
+        "local project/user Cursor, Agents, Claude, and Codex skill roots plus "
+        "nested project Cursor/Agents roots are scanned recursively and without "
+        "following aliases; multi-root, cloud, team/private, marketplace, and "
+        "dynamic plugin skill activation require official-client evidence"
+    ),
+    (
+        "cursor",
+        "plugins",
+    ): (
+        "only the documented local plugin directory is inspectable; marketplace, "
+        "team/private, cloud, and dynamically registered plugins are unverified"
+    ),
+    (
+        "cursor",
+        "mcp",
+    ): (
+        "project and user mcp.json candidates are retained without inventing a "
+        "same-name winner; extension-registered dynamic servers, cloud/team "
+        "sources, multi-root activation, and the effective runtime selection are unverified"
+    ),
+    (
+        "cursor",
+        "agents",
+    ): (
+        "project/user .cursor, .claude, and .codex subagent files are inventoried "
+        "with documented scope precedence; multi-root, cloud, team/private, "
+        "marketplace/dynamic, and runtime-only subagents are unverified"
+    ),
+    (
+        "cursor",
+        "rules",
+    ): (
+        "local .cursor/rules/**/*.mdc and root/nested AGENTS.md are inventoried; "
+        "user UI rules, team/private rules, cloud state, multi-root activation, "
+        "and effective runtime ordering are unverified"
+    ),
+}
+
 
 def _collect_filesystem_category(
     connector: str,
@@ -1574,19 +1776,31 @@ def _collect_filesystem_category(
 def _agents_for_connector(connector: str, cfg: Config) -> list[dict[str, Any]]:
     """Per-connector agent enumeration.
 
-    * claudecode — ``agents/*.md`` below the precedence-aware connector home
-    * codex      — ``agents/*`` below the precedence-aware connector home
+    * claudecode — recursive user/project Markdown agents, identified by YAML
+      frontmatter with closest-project-over-user precedence
+    * codex      — standalone TOML in candidate project and user agent layers
     * zeptoclaw  — ``~/.zeptoclaw/agents.json`` array
     * geminicli  — ``.gemini/agents`` and ``~/.gemini/agents``
-    * copilot    — ``.github/agents`` and ``~/.copilot/agents``
+    * copilot    — precedence-aware project/ancestor agents plus
+      ``$COPILOT_HOME/agents`` (default ``~/.copilot/agents``)
+    * cursor     — explicitly pinned project ``.cursor/agents`` and user ``~/.cursor/agents``
+    * antigravity — global/workspace custom agents plus plugin agent components
     * amp        — static plugin metadata and ``createAgent({name})`` calls
     """
     home = os.path.expanduser("~")
-    name = (connector or "").lower()
+    name = connector_paths.normalize(connector)
     if name == "claudecode":
-        return _agents_from_md_dir(os.path.join(connector_paths.connector_home(name), "agents"))
+        workspace = _connector_workspace_dir(cfg)
+        return _claude_agents_from_dirs(
+            connector_paths.claude_agent_dirs(workspace),
+        )
     if name == "codex":
-        return _agents_from_md_dir(os.path.join(connector_paths.connector_home(name), "agents"))
+        return _agents_from_codex_toml_dirs(
+            connector_paths.agent_dirs(
+                name,
+                workspace_dir=_connector_workspace_dir(cfg),
+            ),
+        )
     if name == "zeptoclaw":
         return _agents_from_zeptoclaw_json(
             os.path.join(home, ".zeptoclaw", "agents.json"),
@@ -1599,15 +1813,577 @@ def _agents_for_connector(connector: str, cfg: Config) -> list[dict[str, Any]]:
             ]
         )
     if name == "copilot":
-        return _agents_from_md_dirs(
-            [
-                os.path.join(os.getcwd(), ".github", "agents"),
-                os.path.join(home, ".copilot", "agents"),
-            ]
+        return _agents_from_copilot_dirs(connector_paths.copilot_agent_dirs(_connector_workspace_dir(cfg)))
+    if name == "cursor":
+        return _agents_from_cursor_dirs(
+            connector_paths.agent_dirs(
+                name,
+                workspace_dir=_connector_workspace_dir(cfg),
+            )
         )
+    if name == "antigravity":
+        return _agents_from_antigravity_dirs(_antigravity_agent_dirs(_connector_workspace_dir(cfg)))
     if name == "amp":
         return _agents_from_amp_plugins(cfg)
     return []
+
+
+def _rules_for_connector(connector: str, cfg: Config) -> list[dict[str, Any]]:
+    """Enumerate documented local rule/instruction files without evaluating them."""
+    normalized = connector_paths.normalize(connector)
+    if normalized == "hermes":
+        soul = os.path.join(connector_paths.hermes_home(), "SOUL.md")
+        try:
+            info = os.lstat(soul)
+        except OSError:
+            return []
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            return []
+        return [
+            {
+                "id": "SOUL.md",
+                "name": "SOUL.md",
+                "source": soul,
+                "kind": "identity",
+                "scope": "default-profile",
+                "activation_source": "HERMES_HOME/SOUL.md",
+                "activation_verified": False,
+            }
+        ]
+    if normalized == "antigravity":
+        return _antigravity_rules(cfg)
+    if normalized == "copilot":
+        return _copilot_instruction_rules(_connector_workspace_dir(cfg))
+    if normalized == "cursor":
+        return _cursor_rules_from_workspace(_connector_workspace_dir(cfg))
+    if normalized == "windsurf":
+        workspace = _connector_workspace_dir(cfg)
+        rows: list[dict[str, Any]] = []
+        for source in connector_paths.windsurf_rule_files(workspace):
+            folded_parts = [part.casefold() for part in Path(source).parts]
+            filename = os.path.basename(source)
+            filename_folded = filename.casefold()
+            if filename_folded == "global_rules.md":
+                kind = "global-rule"
+                source_format = "user-global"
+            elif filename_folded == "agents.md":
+                kind = "agents-md"
+                source_format = "directory-scoped"
+            elif filename_folded == ".windsurfrules":
+                kind = "legacy-rule"
+                source_format = "legacy-single-file"
+            elif ".devin" in folded_parts:
+                kind = "rule"
+                source_format = "preferred-devin"
+            elif ".windsurf" in folded_parts:
+                kind = "legacy-rule"
+                source_format = "legacy-windsurf"
+            else:
+                kind = "global-rule"
+                source_format = "user-global"
+
+            identity = source
+            if workspace:
+                try:
+                    relative = os.path.relpath(source, workspace)
+                except ValueError:
+                    relative = source
+                if relative != os.pardir and not relative.startswith(os.pardir + os.sep):
+                    identity = relative
+            rows.append(
+                {
+                    "id": identity.replace(os.sep, "/"),
+                    "name": filename,
+                    "source": source,
+                    "scope": "user" if source_format == "user-global" else "workspace",
+                    "kind": kind,
+                    "source_format": source_format,
+                    "discovery_only": True,
+                    "activation_verified": False,
+                }
+            )
+        return rows
+    if normalized != "codex":
+        return []
+
+    user_rules = os.path.normcase(
+        os.path.abspath(os.path.join(connector_paths.codex_home(), "rules"))
+    )
+    rows: list[dict[str, Any]] = []
+    for rules_dir in connector_paths.rule_dirs(
+        "codex",
+        workspace_dir=cfg.connector_workspace_dir(),
+    ):
+        entries = _safe_codex_directory_entries(rules_dir)
+        if entries is None:
+            continue
+        normalized = os.path.normcase(os.path.abspath(rules_dir))
+        if normalized == user_rules:
+            scope = "user"
+        elif normalized == os.path.normcase(os.path.abspath(os.path.join(os.sep, "etc", "codex", "rules"))):
+            scope = "system"
+        else:
+            scope = "project"
+        for entry in entries:
+            if not entry.lower().endswith(".rules"):
+                continue
+            full = os.path.join(rules_dir, entry)
+            try:
+                connector_paths.reject_reparse_path(full)
+                info = os.stat(full, follow_symlinks=False)
+            except OSError:
+                continue
+            if not stat.S_ISREG(info.st_mode):
+                continue
+            rows.append(
+                {
+                    "id": os.path.splitext(entry)[0],
+                    "name": entry,
+                    "source": full,
+                    "kind": "exec-policy",
+                    "scope": scope,
+                    "trust_required": scope == "project",
+                }
+            )
+    return rows
+
+
+_COPILOT_INSTRUCTION_FILE_LIMIT = 2048
+_COPILOT_INSTRUCTION_DIR_LIMIT = 1024
+_COPILOT_INSTRUCTION_BYTES = 1024 * 1024
+_COPILOT_IMPORT_DEPTH = 8
+_COPILOT_CUSTOM_DIR_LIMIT = 32
+
+
+def _extend_copilot_candidates(
+    target: list[tuple[str, str, str, str]],
+    additions: list[tuple[str, str, str, str]],
+) -> None:
+    remaining = _COPILOT_INSTRUCTION_FILE_LIMIT - len(target)
+    if remaining > 0:
+        target.extend(additions[:remaining])
+
+
+def _copilot_instruction_rules(workspace: str) -> list[dict[str, Any]]:
+    """Inventory Copilot's documented local instruction cascade.
+
+    Copilot combines applicable instruction files and documents no general
+    winner. Rows therefore expose collisions instead of manufacturing a
+    precedence order. Runtime trust, active-file matching, session toggles,
+    managed policy, and remote instructions remain explicitly unverified.
+    """
+
+    candidates: list[tuple[str, str, str, str]] = []
+    home = connector_paths.copilot_home()
+    candidates.append((os.path.join(home, "copilot-instructions.md"), "user", "general", home))
+    _extend_copilot_candidates(
+        candidates,
+        _copilot_recursive_instruction_candidates(
+            os.path.join(home, "instructions"),
+            suffix=".instructions.md",
+            scope="user",
+            kind="path-specific",
+        )
+    )
+
+    ancestors = connector_paths._copilot_workspace_ancestors(workspace) if workspace else []
+    if ancestors:
+        repository = ancestors[-1]
+        # General files are loaded at the repository root, current workspace,
+        # and intermediate directories. Root-to-workspace order is only for
+        # deterministic output; it does not imply semantic priority.
+        for root in reversed(ancestors):
+            for relative in (
+                os.path.join(".github", "copilot-instructions.md"),
+                "AGENTS.md",
+                "CLAUDE.md",
+                os.path.join(".claude", "CLAUDE.md"),
+                "GEMINI.md",
+            ):
+                if len(candidates) < _COPILOT_INSTRUCTION_FILE_LIMIT:
+                    candidates.append(
+                        (os.path.join(root, relative), "project", "general", repository)
+                    )
+        _extend_copilot_candidates(
+            candidates,
+            _copilot_recursive_instruction_candidates(
+                repository,
+                scope="project",
+                kind="general",
+                general_names=True,
+            )
+        )
+        modular_roots = [os.path.join(repository, ".github", "instructions")]
+        current_modular = os.path.join(ancestors[0], ".github", "instructions")
+        if os.path.normcase(current_modular) != os.path.normcase(modular_roots[0]):
+            modular_roots.append(current_modular)
+        for root in modular_roots:
+            _extend_copilot_candidates(
+                candidates,
+                _copilot_recursive_instruction_candidates(
+                    root,
+                    suffix=".instructions.md",
+                    scope="project",
+                    kind="path-specific",
+                )
+            )
+        intermediate_roots = {
+            os.path.normcase(os.path.abspath(root)) for root in ancestors[1:-1]
+        }
+        for candidate in _copilot_recursive_instruction_candidates(
+            repository,
+            suffix=".instructions.md",
+            scope="project",
+            kind="path-specific",
+        ):
+            owner = _copilot_modular_instruction_owner(candidate[0], repository)
+            if owner is None or os.path.normcase(owner) in intermediate_roots:
+                continue
+            if len(candidates) < _COPILOT_INSTRUCTION_FILE_LIMIT:
+                candidates.append(candidate)
+
+    custom_roots = os.environ.get("COPILOT_CUSTOM_INSTRUCTIONS_DIRS", "").split(",")
+    for raw in custom_roots[:_COPILOT_CUSTOM_DIR_LIMIT]:
+        custom = os.path.expanduser(_expand(raw.strip()))
+        if not custom:
+            continue
+        if not os.path.isabs(custom):
+            if not workspace:
+                continue
+            custom = os.path.join(workspace, custom)
+        custom = os.path.abspath(custom)
+        if len(candidates) < _COPILOT_INSTRUCTION_FILE_LIMIT:
+            candidates.append((os.path.join(custom, "AGENTS.md"), "custom", "general", custom))
+        _extend_copilot_candidates(
+            candidates,
+            _copilot_recursive_instruction_candidates(
+                custom,
+                suffix=".instructions.md",
+                scope="custom",
+                kind="path-specific",
+            )
+        )
+
+    rows: list[dict[str, Any]] = []
+    seen_paths: set[str] = set()
+    seen_general_content: set[str] = set()
+    pending = list(candidates)
+    import_depth: dict[str, int] = {}
+    while pending and len(rows) < _COPILOT_INSTRUCTION_FILE_LIMIT:
+        path, scope, kind, allowed_root = pending.pop(0)
+        key = os.path.normcase(os.path.abspath(path))
+        if key in seen_paths:
+            continue
+        seen_paths.add(key)
+        payload = _read_copilot_instruction(path, allowed_root)
+        if payload is None:
+            continue
+        digest = hashlib.sha256(payload).hexdigest()
+        if kind == "general":
+            if digest in seen_general_content:
+                continue
+            seen_general_content.add(digest)
+        row = {
+            "id": os.path.basename(path),
+            "name": os.path.basename(path),
+            "source": os.path.abspath(path),
+            "kind": kind,
+            "scope": scope,
+            "content_sha256": digest,
+            "precedence": "combined-no-general-precedence",
+            "activation_verified": False,
+            "activation_state": "declared-unverified",
+            "no_follow_verified": True,
+        }
+        rows.append(row)
+
+        depth = import_depth.get(key, 0)
+        import_capable = kind == "import" or os.path.basename(path).casefold() in {
+            "copilot-instructions.md",
+            "agents.md",
+            "claude.md",
+        }
+        if depth >= _COPILOT_IMPORT_DEPTH or kind == "path-specific" or not import_capable:
+            continue
+        remaining = _COPILOT_INSTRUCTION_FILE_LIMIT - len(rows) - len(pending)
+        for imported in _copilot_instruction_imports(
+            payload,
+            os.path.dirname(path),
+            limit=max(remaining, 0),
+        ):
+            imported_key = os.path.normcase(os.path.abspath(imported))
+            if imported_key not in seen_paths:
+                import_depth[imported_key] = depth + 1
+                pending.append((imported, scope, "import", allowed_root))
+
+    by_name: dict[str, int] = {}
+    for row in rows:
+        key = str(row["name"]).casefold()
+        by_name[key] = by_name.get(key, 0) + 1
+    for row in rows:
+        row["collision"] = by_name[str(row["name"]).casefold()] > 1
+    return rows
+
+
+def _copilot_recursive_instruction_candidates(
+    root: str,
+    *,
+    suffix: str = "",
+    scope: str,
+    kind: str,
+    general_names: bool = False,
+) -> list[tuple[str, str, str, str]]:
+    try:
+        connector_paths.reject_reparse_path(root)
+        root_info = os.stat(root, follow_symlinks=False)
+    except OSError:
+        return []
+    if not stat.S_ISDIR(root_info.st_mode):
+        return []
+    rows: list[tuple[str, str, str, str]] = []
+    pending = [root]
+    visited = 0
+    while pending and visited < _COPILOT_INSTRUCTION_DIR_LIMIT:
+        current = pending.pop(0)
+        visited += 1
+        directory_budget = max(
+            _COPILOT_INSTRUCTION_DIR_LIMIT - visited - len(pending),
+            0,
+        )
+        file_budget = max(_COPILOT_INSTRUCTION_FILE_LIMIT - len(rows), 0)
+        try:
+            connector_paths.reject_reparse_path(current)
+            before = os.stat(current, follow_symlinks=False)
+            if not stat.S_ISDIR(before.st_mode):
+                continue
+            with os.scandir(current) as iterator:
+                directory_entries = heapq.nsmallest(
+                    directory_budget,
+                    (entry for entry in iterator if _copilot_entry_is_directory(entry)),
+                    key=lambda item: item.name.casefold(),
+                )
+            with os.scandir(current) as iterator:
+                file_entries = heapq.nsmallest(
+                    file_budget,
+                    (
+                        entry
+                        for entry in iterator
+                        if _copilot_entry_is_instruction_file(
+                            entry,
+                            current=current,
+                            suffix=suffix,
+                            general_names=general_names,
+                        )
+                    ),
+                    key=lambda item: item.name.casefold(),
+                )
+        except OSError:
+            continue
+        child_dirs: list[str] = []
+        child_files: list[tuple[str, str, str, str]] = []
+        for entry in directory_entries:
+            if entry.name.casefold() == ".git":
+                continue
+            try:
+                info = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            if entry.is_symlink():
+                continue
+            if stat.S_ISDIR(info.st_mode):
+                child_dirs.append(entry.path)
+        for entry in file_entries:
+            try:
+                info = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            if not entry.is_symlink() and stat.S_ISREG(info.st_mode):
+                child_files.append((entry.path, scope, kind, root))
+        try:
+            connector_paths.reject_reparse_path(current)
+            after = os.stat(current, follow_symlinks=False)
+        except OSError:
+            continue
+        before_identity = (
+            before.st_dev,
+            before.st_ino,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        )
+        after_identity = (
+            after.st_dev,
+            after.st_ino,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        )
+        if before_identity != after_identity:
+            continue
+        pending.extend(child_dirs)
+        rows.extend(child_files)
+        if len(rows) >= _COPILOT_INSTRUCTION_FILE_LIMIT:
+            return rows[:_COPILOT_INSTRUCTION_FILE_LIMIT]
+    return rows
+
+
+def _copilot_entry_is_directory(entry: os.DirEntry[str]) -> bool:
+    try:
+        return (
+            entry.name.casefold() != ".git"
+            and not entry.is_symlink()
+            and stat.S_ISDIR(entry.stat(follow_symlinks=False).st_mode)
+        )
+    except OSError:
+        return False
+
+
+def _copilot_entry_is_instruction_file(
+    entry: os.DirEntry[str],
+    *,
+    current: str,
+    suffix: str,
+    general_names: bool,
+) -> bool:
+    try:
+        if entry.is_symlink() or not stat.S_ISREG(entry.stat(follow_symlinks=False).st_mode):
+            return False
+    except OSError:
+        return False
+    name = entry.name.casefold()
+    return bool(
+        (
+            general_names
+            and (
+                name in {"agents.md", "claude.md", "gemini.md"}
+                or (
+                    name == "copilot-instructions.md"
+                    and os.path.basename(current).casefold() == ".github"
+                )
+            )
+        )
+        or (suffix and name.endswith(suffix))
+    )
+
+
+def _read_copilot_instruction(path: str, allowed_root: str) -> bytes | None:
+    absolute = os.path.abspath(path)
+    root = os.path.abspath(allowed_root)
+    try:
+        if os.path.normcase(os.path.commonpath((absolute, root))) != os.path.normcase(root):
+            return None
+        real_absolute = os.path.realpath(absolute)
+        real_root = os.path.realpath(root)
+        if os.path.normcase(os.path.commonpath((real_absolute, real_root))) != os.path.normcase(
+            real_root
+        ):
+            return None
+        connector_paths.reject_reparse_path(absolute)
+        return connector_paths._read_bounded_stable_file(
+            absolute,
+            max_bytes=_COPILOT_INSTRUCTION_BYTES,
+        )
+    except (OSError, ValueError):
+        return None
+
+
+def _copilot_modular_instruction_owner(path: str, repository: str) -> str | None:
+    """Return the directory owning a ``.github/instructions`` tree."""
+
+    try:
+        relative = os.path.relpath(os.path.abspath(path), os.path.abspath(repository))
+    except ValueError:
+        return None
+    if relative == os.pardir or relative.startswith(os.pardir + os.sep):
+        return None
+    parts = relative.split(os.sep)
+    for index in range(len(parts) - 2):
+        if parts[index].casefold() == ".github" and parts[index + 1].casefold() == "instructions":
+            owner_parts = parts[:index]
+            return os.path.abspath(os.path.join(repository, *owner_parts))
+    return None
+
+
+def _copilot_instruction_imports(payload: bytes, parent: str, *, limit: int) -> list[str]:
+    try:
+        text = payload.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        return []
+    out: list[str] = []
+    if limit <= 0:
+        return out
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped.startswith("@"):
+            continue
+        raw = stripped[1:].strip().strip("'\"")
+        if not raw or "://" in raw or os.path.isabs(raw) or raw.startswith("~"):
+            continue
+        out.append(os.path.abspath(os.path.join(parent, raw)))
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _antigravity_rules(cfg: Config) -> list[dict[str, Any]]:
+    """Inventory bounded, stable Antigravity rule bytes from documented roots."""
+
+    workspace = _connector_workspace_dir(cfg)
+    rows: list[dict[str, Any]] = []
+
+    def add_file(path: str, *, scope: str, kind: str, rule_id: str | None = None) -> None:
+        if len(rows) >= _ANTIGRAVITY_RULE_INVENTORY_MAX_FILES:
+            return
+        try:
+            payload = connector_paths._read_bounded_stable_file(
+                path,
+                max_bytes=_ANTIGRAVITY_RULE_FILE_MAX_BYTES,
+            )
+        except OSError:
+            return
+        filename = os.path.basename(path)
+        rows.append(
+            {
+                "id": rule_id or os.path.splitext(filename)[0],
+                "name": filename,
+                "source": os.path.abspath(path),
+                "kind": kind,
+                "scope": scope,
+                "trust_required": scope in {"project", "plugin"},
+                "size_bytes": len(payload),
+                "sha256": hashlib.sha256(payload).hexdigest(),
+            }
+        )
+
+    add_file(
+        os.path.join(os.path.expanduser("~"), ".gemini", "GEMINI.md"),
+        scope="user",
+        kind="instruction-rule",
+        rule_id="GEMINI",
+    )
+
+    if workspace:
+        for rules_dir, kind in (
+            (os.path.join(workspace, ".agents", "rules"), "instruction-rule"),
+            (os.path.join(workspace, ".agent", "rules"), "legacy-instruction-rule"),
+        ):
+            for entry in _safe_bounded_directory_entries(rules_dir) or ():
+                if entry.lower().endswith(".md"):
+                    add_file(os.path.join(rules_dir, entry), scope="project", kind=kind)
+
+    for plugin_dir in connector_paths.plugin_dirs("antigravity", workspace_dir=workspace):
+        for plugin_name in _safe_bounded_directory_entries(plugin_dir) or ():
+            plugin_root = os.path.join(plugin_dir, plugin_name)
+            rules_dir = os.path.join(plugin_root, "rules")
+            for entry in _safe_bounded_directory_entries(rules_dir) or ():
+                if not entry.lower().endswith(".md"):
+                    continue
+                add_file(
+                    os.path.join(rules_dir, entry),
+                    scope="plugin",
+                    kind="plugin-rule",
+                    rule_id=f"{plugin_name}:{os.path.splitext(entry)[0]}",
+                )
+
+    return rows
 
 
 def _tools_for_connector(connector: str, cfg: Config) -> list[dict[str, Any]]:
@@ -1634,7 +2410,7 @@ def _tools_for_connector(connector: str, cfg: Config) -> list[dict[str, Any]]:
             os.path.join(home, ".zeptoclaw", "agents.json"),
         )
     if name == "opencode":
-        return _tools_from_opencode(cfg)
+        return []
     if name == "antigravity":
         return _tools_from_antigravity(cfg)
     return []
@@ -1679,44 +2455,105 @@ def _model_providers_for_connector(
 def _memory_for_connector(connector: str, cfg: Config) -> list[dict[str, Any]]:
     """Per-connector memory backend enumeration.
 
-    Memory backends are rarely declarative across these frameworks;
-    the conservative shape is "report the directory if present". Claude Code
-    and Codex memory/history paths are resolved below their precedence-aware
-    connector homes.
+    Memory backends are rarely declarative across these frameworks; the
+    conservative shape is "report the directory if present". Claude Code uses
+    its effective autoMemoryDirectory setting or project-derived default.
     """
     home = os.path.expanduser("~")
     name = (connector or "").lower()
     candidates: list[str] = []
+    claude_resolution: connector_paths.ClaudeAutoMemoryResolution | None = None
     if name == "claudecode":
-        candidates = [os.path.join(connector_paths.connector_home(name), "memory")]
+        claude_resolution = connector_paths.claude_auto_memory_resolution(
+            _connector_workspace_dir(cfg),
+        )
+        candidates = [claude_resolution.path] if claude_resolution.path else []
     elif name == "codex":
         connector_home = connector_paths.connector_home(name)
-        candidates = [
-            os.path.join(connector_home, "memory"),
-            os.path.join(connector_home, "history"),
-        ]
+        candidates = [os.path.join(connector_home, "memories")]
     elif name == "zeptoclaw":
         candidates = [os.path.join(home, ".zeptoclaw", "memory")]
+    elif name == "hermes":
+        hermes_home = connector_paths.hermes_home()
+        memories = os.path.join(hermes_home, "memories")
+        rows: list[dict[str, Any]] = []
+        files: list[str] = []
+        if os.path.isdir(memories) and not is_symlink(memories):
+            for filename in ("MEMORY.md", "USER.md"):
+                path = os.path.join(memories, filename)
+                try:
+                    info = os.lstat(path)
+                except OSError:
+                    continue
+                if stat.S_ISREG(info.st_mode) and not stat.S_ISLNK(info.st_mode):
+                    files.append(path)
+        rows.append(
+            {
+                "id": "builtin",
+                "name": memories,
+                "source": memories,
+                "kind": "builtin-files",
+                "files": files,
+                "entry_count": len(files),
+                "activation_source": "HERMES_HOME/memories",
+                "activation_verified": False,
+            }
+        )
+        document, _error = connector_paths._read_hermes_config_bounded()
+        memory_config = document.get("memory") if isinstance(document, dict) else None
+        provider = memory_config.get("provider") if isinstance(memory_config, dict) else None
+        if isinstance(provider, str) and provider.strip() and provider.strip().casefold() not in {"builtin", "none"}:
+            provider_name = provider.strip()
+            provider_source = ""
+            for plugin_root in connector_paths.plugin_dirs("hermes"):
+                for candidate in (
+                    os.path.join(plugin_root, "memory", provider_name),
+                    os.path.join(plugin_root, provider_name),
+                ):
+                    if os.path.isdir(candidate) and not is_symlink(candidate):
+                        provider_source = candidate
+                        break
+                if provider_source:
+                    break
+            rows.append(
+                {
+                    "id": provider_name,
+                    "name": provider_name,
+                    "source": provider_source or connector_paths.hermes_config_path(),
+                    "kind": "memory-provider",
+                    "configured": True,
+                    "activation_source": "config.yaml:memory.provider",
+                    "activation_verified": False,
+                }
+            )
+        return rows
     else:
         return []
 
     rows: list[dict[str, Any]] = []
     for path in candidates:
-        if not os.path.isdir(path):
+        if not os.path.isdir(path) or is_symlink(path):
             continue
         try:
             entry_count = sum(1 for _ in os.scandir(path))
         except OSError:
             entry_count = 0
-        rows.append(
-            {
-                "id": os.path.basename(path) or path,
-                "name": path,
-                "source": path,
-                "kind": "filesystem",
-                "entry_count": entry_count,
-            }
-        )
+        row: dict[str, Any] = {
+            "id": os.path.basename(path) or path,
+            "name": path,
+            "source": path,
+            "kind": "filesystem",
+            "entry_count": entry_count,
+        }
+        if claude_resolution is not None:
+            row.update(
+                {
+                    "settings_source": claude_resolution.source,
+                    "project_root": claude_resolution.project_root,
+                    "activation_verified": claude_resolution.activation_verified,
+                }
+            )
+        rows.append(row)
     return rows
 
 
@@ -1724,19 +2561,21 @@ def _memory_for_connector(connector: str, cfg: Config) -> list[dict[str, Any]]:
 
 
 def _agents_from_md_dir(agents_dir: str) -> list[dict[str, Any]]:
-    """Each *.md (or *.txt) file under *agents_dir* is one agent."""
-    if not os.path.isdir(agents_dir):
+    """Each documented Markdown file under *agents_dir* is one agent."""
+    entries = _safe_codex_directory_entries(agents_dir)
+    if entries is None:
         return []
     rows: list[dict[str, Any]] = []
-    try:
-        entries = sorted(os.listdir(agents_dir))
-    except OSError:
-        return []
     for entry in entries:
         full = os.path.join(agents_dir, entry)
-        if not os.path.isfile(full):
+        if not entry.lower().endswith(".md"):
             continue
-        if not entry.endswith((".md", ".txt", ".json", ".yaml", ".yml")):
+        try:
+            connector_paths.reject_reparse_path(full)
+            info = os.stat(full, follow_symlinks=False)
+        except OSError:
+            continue
+        if not stat.S_ISREG(info.st_mode):
             continue
         agent_id = os.path.splitext(entry)[0]
         rows.append(
@@ -1761,6 +2600,472 @@ def _agents_from_md_dirs(agent_dirs: list[str]) -> list[dict[str, Any]]:
             seen.add(key)
             rows.append(row)
     return rows
+
+
+def _agents_from_cursor_dirs(agent_dirs: list[str]) -> list[dict[str, Any]]:
+    """Retain Cursor subagent custody while expressing documented precedence."""
+
+    home = os.path.abspath(os.path.expanduser("~"))
+    user_roots = {
+        os.path.normcase(os.path.abspath(os.path.join(home, family, "agents")))
+        for family in (".cursor", ".claude", ".codex")
+    }
+    rows: list[dict[str, Any]] = []
+    selected: dict[str, dict[str, Any]] = {}
+    for agents_dir in agent_dirs:
+        normalized_dir = os.path.normcase(os.path.abspath(agents_dir))
+        scope = "user" if normalized_dir in user_roots else "project"
+        family = os.path.basename(os.path.dirname(os.path.normpath(agents_dir))).casefold()
+        for row in _agents_from_md_dir(agents_dir):
+            row["scope"] = scope
+            row["source_family"] = family
+            identity = os.path.normcase(str(row["id"]))
+            prior = selected.get(identity)
+            if prior is None:
+                row["selection_state"] = "documented-candidate"
+                selected[identity] = row
+            else:
+                prior_scope = str(prior.get("scope") or "")
+                prior_family = str(prior.get("source_family") or "")
+                if prior_scope == "project" and scope == "user":
+                    row["shadowed"] = True
+                    row["selection_state"] = "documented-shadowed"
+                elif prior_scope == scope and prior_family == ".cursor":
+                    row["shadowed"] = True
+                    row["selection_state"] = "documented-shadowed"
+                elif prior_scope == scope and family == ".cursor":
+                    prior["shadowed"] = True
+                    prior["selection_state"] = "documented-shadowed"
+                    row["selection_state"] = "documented-candidate"
+                    selected[identity] = row
+                else:
+                    # Cursor documents .cursor over compatibility roots, but
+                    # does not define a Claude-vs-Codex tie breaker.
+                    prior["activation_verified"] = False
+                    prior["selection_state"] = "unverified-compatibility-conflict"
+                    row["activation_verified"] = False
+                    row["selection_state"] = "unverified-compatibility-conflict"
+            rows.append(row)
+    return rows
+
+
+def _cursor_rules_from_workspace(workspace: str) -> list[dict[str, Any]]:
+    if not workspace or not connector_paths._cursor_walkable_directory(workspace):
+        return []
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    rules_root = os.path.join(workspace, ".cursor", "rules")
+    for current, _dirs, files in _bounded_cursor_walk(rules_root):
+        for name in files:
+            if not name.casefold().endswith(".mdc"):
+                continue
+            source = os.path.join(current, name)
+            if not _cursor_regular_file(source):
+                continue
+            key = os.path.normcase(os.path.abspath(source))
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(
+                {
+                    "id": os.path.relpath(source, rules_root),
+                    "name": name,
+                    "source": source,
+                    "kind": "cursor-rule",
+                    "scope": "project",
+                }
+            )
+    for current, _dirs, files in _bounded_cursor_walk(workspace):
+        for name in files:
+            if name != "AGENTS.md":
+                continue
+            source = os.path.join(current, name)
+            if not _cursor_regular_file(source):
+                continue
+            key = os.path.normcase(os.path.abspath(source))
+            if key in seen:
+                continue
+            seen.add(key)
+            rows.append(
+                {
+                    "id": os.path.relpath(source, workspace),
+                    "name": name,
+                    "source": source,
+                    "kind": "agents-instructions",
+                    "scope": "project",
+                }
+            )
+    return rows
+
+
+def _bounded_cursor_walk(root: str):
+    if not connector_paths._cursor_walkable_directory(root):
+        return
+    visited = 0
+    for current, dirs, files in os.walk(root, topdown=True, followlinks=False):
+        safe_dirs: list[str] = []
+        for name in sorted(dirs, key=str.casefold):
+            if name == ".git":
+                continue
+            candidate = os.path.join(current, name)
+            if connector_paths._cursor_walkable_directory(candidate):
+                safe_dirs.append(name)
+        dirs[:] = safe_dirs
+        visited += 1
+        if visited > connector_paths._CURSOR_DISCOVERY_DIR_LIMIT:
+            dirs[:] = []
+            break
+        yield current, dirs, sorted(files, key=str.casefold)
+
+
+def _cursor_regular_file(path: str) -> bool:
+    try:
+        connector_paths.reject_reparse_path(path)
+        info = os.stat(path, follow_symlinks=False)
+    except OSError:
+        return False
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    return (
+        stat.S_ISREG(info.st_mode)
+        and not stat.S_ISLNK(info.st_mode)
+        and not bool(getattr(info, "st_file_attributes", 0) & reparse_flag)
+    )
+
+
+_COPILOT_BUILTIN_AGENTS: tuple[str, ...] = (
+    "code-review",
+    "explore",
+    "general-purpose",
+    "research",
+    "rubber-duck",
+    "security-review",
+    "task",
+)
+
+
+def _agents_from_copilot_dirs(agent_dirs: list[str]) -> list[dict[str, Any]]:
+    """Enumerate effective Copilot agents using its exact identity contract.
+
+    Copilot accepts only ``*.md`` and ``*.agent.md`` custom-agent files.
+    The compound ``.agent.md`` suffix is the extension, so
+    ``reviewer.agent.md`` has the ID ``reviewer``. Directories arrive in
+    official precedence order; the first occurrence of an ID wins. The
+    versioned built-in set is emitted first because official documentation
+    says built-in agents are always present and cannot be overridden.
+    """
+
+    rows: list[dict[str, Any]] = [
+        {
+            "id": agent_id,
+            "name": agent_id,
+            "source": "official-contract:copilot-cli-1.0.77",
+            "kind": "built-in-agent",
+            "immutable": True,
+        }
+        for agent_id in _COPILOT_BUILTIN_AGENTS
+    ]
+    seen_ids: set[str] = {os.path.normcase(agent_id) for agent_id in _COPILOT_BUILTIN_AGENTS}
+    for agents_dir in agent_dirs:
+        entries = _safe_codex_directory_entries(agents_dir)
+        if entries is None:
+            continue
+        for entry in entries:
+            full = os.path.join(agents_dir, entry)
+            try:
+                connector_paths.reject_reparse_path(full)
+                info = os.stat(full, follow_symlinks=False)
+            except OSError:
+                continue
+            if not stat.S_ISREG(info.st_mode):
+                continue
+            lowered = entry.lower()
+            if lowered.endswith(".agent.md"):
+                agent_id = entry[: -len(".agent.md")]
+            elif lowered.endswith(".md"):
+                agent_id = entry[: -len(".md")]
+            else:
+                continue
+            if not agent_id:
+                continue
+            identity = os.path.normcase(agent_id)
+            if identity in seen_ids:
+                continue
+            seen_ids.add(identity)
+            rows.append(
+                {
+                    "id": agent_id,
+                    "name": agent_id,
+                    "source": full,
+                    "kind": "subagent",
+                }
+            )
+    return rows
+
+
+class AmbiguousClaudeAgentIdentityError(ValueError):
+    """Raised when one Claude agent scope contains duplicate identities."""
+
+
+_CLAUDE_AGENT_NAME_PATTERN = re.compile(r"[a-z]+(?:-[a-z]+)*\Z")
+_CLAUDE_AGENT_WALK_LIMIT = 32768
+_CLAUDE_AGENT_FRONTMATTER_LIMIT = 65536
+
+
+def _claude_agents_from_dirs(agent_dirs: list[str]) -> list[dict[str, Any]]:
+    """Resolve Claude agents by documented identity and scope precedence."""
+
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for agent_dir in agent_dirs:
+        scope_rows = _claude_agents_from_dir(agent_dir)
+        scope_names: set[str] = set()
+        for row in scope_rows:
+            identity = str(row["id"])
+            if identity in scope_names:
+                raise AmbiguousClaudeAgentIdentityError(
+                    f"Claude agent identity {identity!r} is duplicated under {agent_dir}",
+                )
+            scope_names.add(identity)
+        for row in scope_rows:
+            identity = str(row["id"])
+            if identity in seen:
+                continue
+            seen.add(identity)
+            rows.append(row)
+    return rows
+
+
+def _agents_from_codex_toml_dirs(
+    agent_dirs: list[str],
+) -> list[dict[str, Any]]:
+    """Inventory Codex standalone custom-agent TOML without exposing prompts.
+
+    Directories arrive highest-precedence first. Duplicate ``name`` values are
+    retained for custody/tamper visibility and lower-precedence definitions are
+    marked ``shadowed``. Project entries are candidates only: Codex activates
+    them when the project is trusted, and filesystem inventory does not infer
+    that private client decision.
+    """
+    rows: list[dict[str, Any]] = []
+    seen_names: set[str] = set()
+    user_agents = os.path.normcase(os.path.abspath(os.path.join(connector_paths.codex_home(), "agents")))
+    for agents_dir in agent_dirs:
+        entries = _safe_codex_directory_entries(agents_dir)
+        if entries is None:
+            continue
+        scope = (
+            "user"
+            if os.path.normcase(os.path.abspath(agents_dir)) == user_agents
+            else "project"
+        )
+        for entry in entries:
+            if not entry.lower().endswith(".toml"):
+                continue
+            full = os.path.join(agents_dir, entry)
+            data, parse_error = _load_codex_agent_toml(full)
+            if parse_error.startswith("unreadable agent file:"):
+                continue
+            agent_id = os.path.splitext(entry)[0]
+            if isinstance(data, dict):
+                configured_name = data.get("name")
+                if isinstance(configured_name, str) and configured_name.strip():
+                    agent_id = configured_name.strip()
+            required = ("name", "description", "developer_instructions")
+            eligible = isinstance(data, dict) and all(
+                isinstance(data.get(field), str) and data[field].strip()
+                for field in required
+            )
+            row: dict[str, Any] = {
+                "id": agent_id,
+                "name": agent_id,
+                "source": full,
+                "kind": "custom-agent",
+                "scope": scope,
+                "trust_required": scope == "project",
+                "eligible": eligible,
+                "shadowed": agent_id in seen_names,
+            }
+            if isinstance(data, dict):
+                for key in ("description", "model", "model_reasoning_effort", "sandbox_mode"):
+                    value = data.get(key)
+                    if isinstance(value, str) and value:
+                        row[key] = value
+            if parse_error:
+                row["parse_error"] = parse_error
+            seen_names.add(agent_id)
+            rows.append(row)
+    return rows
+
+
+def _claude_agents_from_dir(agents_dir: str) -> list[dict[str, Any]]:
+    if (
+        not os.path.isdir(agents_dir)
+        or is_symlink(agents_dir)
+    ):
+        return []
+    rows: list[dict[str, Any]] = []
+    visited = 0
+    for current, dirs, files in os.walk(
+        agents_dir,
+        topdown=True,
+        followlinks=False,
+    ):
+        dirs[:] = [
+            name
+            for name in sorted(dirs, key=str.casefold)
+            if not is_symlink(os.path.join(current, name))
+        ]
+        visited += 1
+        if visited > _CLAUDE_AGENT_WALK_LIMIT:
+            dirs[:] = []
+            break
+        for filename in sorted(files, key=str.casefold):
+            if not filename.lower().endswith(".md"):
+                continue
+            path = os.path.join(current, filename)
+            if is_symlink(path):
+                continue
+            metadata = _read_claude_agent_frontmatter(path)
+            if metadata is None:
+                continue
+            rows.append(
+                {
+                    "id": metadata["name"],
+                    "name": metadata["name"],
+                    "description": metadata["description"],
+                    "source": path,
+                    "kind": "subagent",
+                }
+            )
+    return rows
+
+
+def _agents_from_antigravity_dirs(agent_dirs: list[str]) -> list[dict[str, Any]]:
+    """Read Antigravity's direct ``*.md`` and ``<name>/agent.md`` forms."""
+
+    rows = _agents_from_md_dirs(agent_dirs)
+    seen = {str(row.get("source") or "") for row in rows}
+    for agents_dir in agent_dirs:
+        entries = _safe_codex_directory_entries(agents_dir)
+        if entries is None:
+            continue
+        for entry in entries:
+            nested = os.path.join(agents_dir, entry)
+            source = os.path.join(nested, "agent.md")
+            if source in seen:
+                continue
+            try:
+                connector_paths.reject_reparse_path(nested)
+                nested_info = os.stat(nested, follow_symlinks=False)
+                connector_paths.reject_reparse_path(source)
+                source_info = os.stat(source, follow_symlinks=False)
+            except OSError:
+                continue
+            if not stat.S_ISDIR(nested_info.st_mode) or not stat.S_ISREG(source_info.st_mode):
+                continue
+            seen.add(source)
+            rows.append(
+                {
+                    "id": entry,
+                    "name": entry,
+                    "source": source,
+                    "kind": "subagent",
+                }
+            )
+    return rows
+
+
+def _read_claude_agent_frontmatter(path: str) -> dict[str, str] | None:
+    try:
+        descriptor = open_regular_file_no_follow(path)
+        with os.fdopen(descriptor, "rb") as source:
+            raw = source.read(_CLAUDE_AGENT_FRONTMATTER_LIMIT + 1)
+    except (OSError, ValueError):
+        return None
+    if len(raw) > _CLAUDE_AGENT_FRONTMATTER_LIMIT:
+        raw = raw[:_CLAUDE_AGENT_FRONTMATTER_LIMIT]
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return None
+    lines = text.splitlines()
+    if not lines or lines[0].strip() != "---":
+        return None
+    try:
+        end = next(index for index, line in enumerate(lines[1:], start=1) if line.strip() == "---")
+    except StopIteration:
+        return None
+    try:
+        metadata = yaml.safe_load("\n".join(lines[1:end])) or {}
+    except yaml.YAMLError:
+        return None
+    if not isinstance(metadata, dict):
+        return None
+    name = str(metadata.get("name") or "").strip()
+    description = str(metadata.get("description") or "").strip()
+    if not _CLAUDE_AGENT_NAME_PATTERN.fullmatch(name) or not description:
+        return None
+    return {"name": name, "description": description}
+
+
+def _safe_codex_directory_entries(path: str) -> list[str] | None:
+    """List one real directory after rejecting reparse ancestors and the leaf."""
+    try:
+        connector_paths.reject_reparse_path(path)
+        before = os.stat(path, follow_symlinks=False)
+        if not stat.S_ISDIR(before.st_mode):
+            return None
+        entries = sorted(os.listdir(path))
+        connector_paths.reject_reparse_path(path)
+        after = os.stat(path, follow_symlinks=False)
+        if not stat.S_ISDIR(after.st_mode) or not os.path.samestat(before, after):
+            return None
+        return entries
+    except OSError:
+        return None
+
+
+def _safe_bounded_directory_entries(
+    path: str,
+    *,
+    max_entries: int = _ANTIGRAVITY_RULE_DIRECTORY_MAX_ENTRIES,
+) -> list[str] | None:
+    """List one stable real directory, refusing rather than truncating overflow."""
+
+    try:
+        connector_paths.reject_reparse_path(path)
+        before = os.stat(path, follow_symlinks=False)
+        if not stat.S_ISDIR(before.st_mode):
+            return None
+        entries: list[str] = []
+        with os.scandir(path) as iterator:
+            for entry in iterator:
+                entries.append(entry.name)
+                if len(entries) > max_entries:
+                    return None
+        connector_paths.reject_reparse_path(path)
+        after = os.stat(path, follow_symlinks=False)
+        if not stat.S_ISDIR(after.st_mode) or not os.path.samestat(before, after):
+            return None
+        return sorted(entries, key=str.casefold)
+    except OSError:
+        return None
+
+
+def _load_codex_agent_toml(path: str) -> tuple[dict[str, Any] | None, str]:
+    """Safely parse one custom-agent TOML file with a bounded read."""
+    try:
+        payload = connector_paths._read_bounded_stable_file(
+            path,
+            max_bytes=1024 * 1024,
+        )
+    except OSError as exc:
+        return None, f"unreadable agent file: {exc}"
+    try:
+        data = tomllib.loads(payload.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
+        return None, f"invalid TOML: {exc}"
+    return data, ""
 
 
 def _agents_from_zeptoclaw_json(path: str) -> list[dict[str, Any]]:
@@ -2324,6 +3629,18 @@ def _antigravity_command_dirs(workspace_dir: str) -> list[str]:
     )
 
 
+def _antigravity_agent_dirs(workspace_dir: str) -> list[str]:
+    home = os.path.expanduser("~")
+    plugin_dirs = connector_paths.plugin_dirs("antigravity", workspace_dir=workspace_dir)
+    return _dedup_paths(
+        [
+            os.path.join(home, ".gemini", "config", "agents"),
+            os.path.join(workspace_dir, ".agents", "agents") if workspace_dir else "",
+            *list(_plugin_component_dirs(plugin_dirs, "agents")),
+        ]
+    )
+
+
 def _plugin_component_dirs(plugin_dirs: list[str], component: str) -> list[str]:
     out: list[str] = []
     for plugin_dir in plugin_dirs:
@@ -2516,6 +3833,7 @@ def _build_aibom_from_filesystem(
         "plugins": lambda: _enumerate_plugins_filesystem(cfg, connector),
         "mcp": lambda: _enumerate_mcp_filesystem(cfg, connector),
         "agents": lambda: _agents_for_connector(connector, cfg),
+        "rules": lambda: _rules_for_connector(connector, cfg),
         "tools": lambda: _tools_for_connector(connector, cfg),
         "models": lambda: _model_providers_for_connector(connector, cfg),
         "memory": lambda: _memory_for_connector(connector, cfg),
@@ -2535,6 +3853,7 @@ def _build_aibom_from_filesystem(
     plugins = _items("plugins")
     mcps = _items("mcp")
     agents = _items("agents")
+    rules = _items("rules")
     tools = _items("tools")
     model_providers = _items("models")
     memory = _items("memory")
@@ -2543,8 +3862,8 @@ def _build_aibom_from_filesystem(
     # capability gaps, not failed commands. Keep them typed and separate so
     # automation never has to infer semantics from human-readable text.
     limitations: list[InventoryLimitation] = []
-    for cat_key, note in _FILESYSTEM_ONLY_CONNECTOR_NOTES.items():
-        if cat_key not in cats:
+    for (partial_connector, cat_key), note in _PARTIAL_CONNECTOR_NOTES.items():
+        if partial_connector != connector or cat_key not in cats:
             continue
         if connector == "amp" and cat_key == "agents":
             # Amp custom agents/modes have a supported static plugin-source
@@ -2552,7 +3871,95 @@ def _build_aibom_from_filesystem(
             # capability is unsupported.
             continue
         result = results.get(cat_key)
-        if result is None or result.items or result.error is not None:
+        if result is None or result.error is not None:
+            continue
+        partial_status = (
+            InventoryCapabilityStatus.UNVERIFIED
+            if partial_connector == "windsurf"
+            else InventoryCapabilityStatus.UNSUPPORTED
+        )
+        limitations.append(
+            {
+                "connector": connector,
+                "category": cat_key,
+                "status": partial_status,
+                "reason": note,
+            }
+        )
+    for (partial_connector, cat_key), note in _UNVERIFIED_CONNECTOR_NOTES.items():
+        if partial_connector != connector or cat_key not in cats:
+            continue
+        result = results.get(cat_key)
+        if result is None or result.error is not None:
+            continue
+        limitations.append(
+            {
+                "connector": connector,
+                "category": cat_key,
+                "status": InventoryCapabilityStatus.UNVERIFIED,
+                "reason": note,
+            }
+        )
+    if connector_paths.normalize(connector) == "claudecode" and "memory" in cats:
+        memory_resolution = connector_paths.claude_auto_memory_resolution(
+            _connector_workspace_dir(cfg),
+        )
+        if memory_resolution.limitation:
+            limitations.append(
+                {
+                    "connector": connector,
+                    "category": "memory",
+                    "status": InventoryCapabilityStatus.UNVERIFIED,
+                    "reason": memory_resolution.limitation,
+                }
+            )
+    if connector_paths.normalize(connector) == "hermes":
+        hermes_notes = {
+            "skills": (
+                "default-profile HERMES_HOME/skills and existing skills.external_dirs are inventoried; "
+                "named/multiplex profiles and session/project-conditional skill sources are unsupported or unverified"
+            ),
+            "plugins": (
+                "default-profile user, vendor bundled/Nix override, and official Hermes-venv entry-point metadata are "
+                "inventoried with config-derived activation provenance; runtime activation and project plugins "
+                "conditional on the Hermes process CWD plus HERMES_ENABLE_PROJECT_PLUGINS remain unverified"
+            ),
+            "rules": (
+                "default-profile SOUL.md is inventoried as identity; project AGENTS.md, CLAUDE.md, .hermes.md, and "
+                ".cursorrules depend on the Hermes session CWD and remain unverified"
+            ),
+            "memory": (
+                "default-profile MEMORY.md/USER.md and configured memory.provider are inventoried; provider-owned "
+                "external state requires loading the provider and remains unverified"
+            ),
+        }
+        for category, reason in hermes_notes.items():
+            if category in cats:
+                limitations.append(
+                    {
+                        "connector": connector,
+                        "category": category,
+                        "status": InventoryCapabilityStatus.UNVERIFIED,
+                        "reason": reason,
+                    }
+                )
+    for cat_key, note in _FILESYSTEM_ONLY_CONNECTOR_NOTES.items():
+        if connector == "codex" and cat_key == "agents":
+            continue
+        if cat_key not in cats:
+            continue
+        # Cursor has a documented local subagent surface. An empty directory is
+        # a successful empty inventory, not an unsupported capability.
+        if connector == "cursor" and cat_key == "agents":
+            continue
+        result = results.get(cat_key)
+        if connector_paths.normalize(connector) == "claudecode" and cat_key == "memory":
+            continue
+        if result is None or result.error is not None:
+            continue
+        if (connector, cat_key) in _PARTIAL_CONNECTOR_NOTES:
+            continue
+        if result.items:
             continue
         limitations.append(
             {
@@ -2575,17 +3982,22 @@ def _build_aibom_from_filesystem(
         # connector was last activated (e.g. shows "antigravity" for a codex
         # scan). Mirrors single-connector installs where claw.mode == connector.
         "claw_mode": connector,
-        "live": True,
+        "live": connector_paths.normalize(connector) != "hermes",
         "skills": skills,
         "plugins": plugins,
         "mcp": mcps,
         "agents": agents,
+        "rules": rules,
         "tools": tools,
         "model_providers": model_providers,
         "memory": memory,
         "errors": errors,
         "limitations": limitations,
     }
+    if connector_paths.normalize(connector) == "hermes":
+        out["support_status"] = "supported"
+        out["release_channel"] = "supported"
+        out["profile_scope"] = "default-single-profile"
     _attach_connector_paths(out, cfg, connector)
     _sync_legacy_connector_paths(out)
     out["summary"] = _build_summary(out)
@@ -2612,30 +4024,90 @@ def _enumerate_skills_filesystem(
 
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
+    resolved_connector = connector or cfg.active_connector()
+    normalized_connector = connector_paths.normalize(resolved_connector)
+    claude_workspace = (
+        cfg.connector_workspace_dir()
+        if normalized_connector in {"claude", "claudecode"}
+        else ""
+    )
     for skill_dir in cfg.skill_dirs(connector):
-        if not os.path.isdir(skill_dir):
-            continue
-        for discovered in discover_skill_directories(skill_dir, connector=connector or cfg.active_connector()):
+        for discovered in discover_skill_directories(
+            skill_dir,
+            connector=resolved_connector,
+        ):
             entry = discovered.name
             if _is_openhands_installed_container(skill_dir, entry):
                 continue
             full = discovered.path
-            if entry in seen:
-                continue
-            seen.add(entry)
+            row_id = entry
+            nested_prefix = _claude_nested_skill_prefix(
+                skill_dir,
+                claude_workspace,
+            )
+            if normalized_connector in {"claude", "claudecode"}:
+                identity = row_id
+                if identity in seen:
+                    if not nested_prefix:
+                        continue
+                    row_id = f"{nested_prefix}:{entry}"
+                    identity = row_id
+                    if identity in seen:
+                        continue
+            else:
+                identity = full if normalized_connector == "codex" else entry
+                if identity in seen:
+                    continue
+            seen.add(identity)
             row: dict[str, Any] = {
-                "id": entry,
+                "id": row_id,
                 "source": discovered.source,
                 "eligible": _skill_dir_is_eligible(full),
-                "enabled": True,
+                "enabled": not bool(nested_prefix),
+                "activation_verified": not bool(nested_prefix),
                 "bundled": discovered.bundled,
                 "path": full,
             }
+            if (
+                normalized_connector == "copilot"
+                and os.path.basename(os.path.normpath(skill_dir)).casefold() == "commands"
+            ):
+                row.update(
+                    {
+                        "kind": "command",
+                        "precedence": "after-all-agent-skills",
+                        "activation_verified": False,
+                        "activation_state": "alternative-skill-unverified",
+                    }
+                )
+            if nested_prefix:
+                row["activation_state"] = "discoverable-unverified"
             description = _read_skill_description(full)
             if description:
                 row["description"] = description
             rows.append(row)
     return rows
+
+
+def _claude_nested_skill_prefix(skill_dir: str, workspace_dir: str) -> str:
+    """Return Claude's directory qualifier for a nested project skill root."""
+
+    if not workspace_dir:
+        return ""
+    normalized = os.path.normpath(skill_dir)
+    if (
+        os.path.basename(normalized).casefold() != "skills"
+        or os.path.basename(os.path.dirname(normalized)).casefold() != ".claude"
+    ):
+        return ""
+    project_dir = os.path.dirname(os.path.dirname(normalized))
+    try:
+        relative = os.path.relpath(project_dir, workspace_dir)
+    except ValueError:
+        return ""
+    if relative in {"", "."} or relative == ".." or relative.startswith(f"..{os.sep}"):
+        return ""
+    return relative.replace(os.sep, "/")
 
 
 def _is_openhands_installed_container(skill_dir: str, entry: str) -> bool:
@@ -2647,10 +4119,15 @@ def _is_openhands_installed_container(skill_dir: str, entry: str) -> bool:
 
 
 def _skill_dir_is_eligible(path: str) -> bool:
-    for marker in ("SKILL.md", "skill.json", "README.md"):
-        if os.path.isfile(os.path.join(path, marker)):
-            return True
-    return False
+    if (
+        os.path.isfile(path)
+        and not os.path.islink(path)
+        and os.path.splitext(path)[1].casefold() == ".md"
+    ):
+        return True
+    from defenseclaw.skill_discovery import skill_dir_is_eligible
+
+    return skill_dir_is_eligible(path)
 
 
 def _read_skill_description(path: str) -> str:
@@ -2659,8 +4136,8 @@ def _read_skill_description(path: str) -> str:
     Bounded to 2 KiB so we don't accidentally slurp a multi-MB README
     into the inventory dict.
     """
-    for marker in ("SKILL.md", "README.md"):
-        marker_path = os.path.join(path, marker)
+    marker_paths = [path] if os.path.isfile(path) else []
+    for marker_path in marker_paths:
         # F-0424: a skill directory is attacker-influenced content. A
         # ``SKILL.md``/``README.md`` that is a symlink could point at an
         # arbitrary readable file (``~/.ssh/id_rsa``, ``/etc/passwd``, …)
@@ -2698,6 +4175,20 @@ def _read_skill_description(path: str) -> str:
             stripped = line.strip().lstrip("#").strip()
             if stripped:
                 return stripped[:200]
+
+    from defenseclaw.skill_discovery import read_skill_marker_text
+
+    for marker in ("SKILL.md", "README.md"):
+        text = read_skill_marker_text(path, marker, max_bytes=2048)
+        if text is None:
+            continue
+        frontmatter_description = _frontmatter_description(text)
+        if frontmatter_description:
+            return frontmatter_description[:200]
+        for line in text.splitlines():
+            stripped = line.strip().lstrip("#").strip()
+            if stripped:
+                return stripped[:200]
     return ""
 
 
@@ -2714,6 +4205,243 @@ def _frontmatter_description(text: str) -> str:
     return ""
 
 
+def _read_hermes_plugin_manifest(path: str) -> dict[str, Any] | None:
+    try:
+        info = os.lstat(path)
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_size > 256 * 1024:
+            return None
+        descriptor = open_regular_file_no_follow(path)
+        with os.fdopen(descriptor, encoding="utf-8") as handle:
+            document = yaml.safe_load(handle) or {}
+    except (OSError, yaml.YAMLError):
+        return None
+    return document if isinstance(document, dict) else None
+
+
+def _hermes_bounded_scandir(path: str, limit: int) -> list[os.DirEntry[str]]:
+    entries: list[os.DirEntry[str]] = []
+    with os.scandir(path) as iterator:
+        for entry in iterator:
+            entries.append(entry)
+            if len(entries) >= limit:
+                break
+    return entries
+
+
+def _hermes_manifest_rows(
+    root: str,
+    source: str,
+    *,
+    skip_top_level: frozenset[str] = frozenset(),
+) -> list[dict[str, Any]]:
+    if not os.path.isdir(root) or is_symlink(root):
+        return []
+    rows: list[dict[str, Any]] = []
+    visited = 0
+    try:
+        first_level = sorted(_hermes_bounded_scandir(root, 512), key=lambda item: item.name.casefold())
+    except OSError:
+        return []
+    for first in first_level:
+        if visited >= 512:
+            break
+        if first.name in skip_top_level:
+            continue
+        try:
+            if not first.is_dir(follow_symlinks=False):
+                continue
+        except OSError:
+            continue
+        visited += 1
+        direct_manifest = os.path.join(first.path, "plugin.yaml")
+        if _read_hermes_plugin_manifest(direct_manifest) is not None:
+            candidates = [(first.name, first.path)]
+        else:
+            candidates = []
+        try:
+            children = (
+                []
+                if candidates
+                else sorted(_hermes_bounded_scandir(first.path, 512 - visited), key=lambda item: item.name.casefold())
+            )
+        except OSError:
+            children = []
+        for child in children:
+            if visited >= 512:
+                break
+            try:
+                if child.is_dir(follow_symlinks=False):
+                    candidates.append((f"{first.name}/{child.name}", child.path))
+                    visited += 1
+            except OSError:
+                continue
+        for key, directory in candidates:
+            manifest_path = os.path.join(directory, "plugin.yaml")
+            manifest = _read_hermes_plugin_manifest(manifest_path)
+            if manifest is None:
+                continue
+            rows.append(
+                {
+                    "id": key,
+                    "name": str(manifest.get("name") or os.path.basename(directory)),
+                    "version": str(manifest.get("version") or ""),
+                    "description": str(manifest.get("description") or ""),
+                    "kind": str(manifest.get("kind") or "standalone"),
+                    "source_kind": source,
+                    "source": directory,
+                    "manifest": manifest_path,
+                }
+            )
+    return rows
+
+
+def _hermes_pip_entry_points() -> list[tuple[Any, str]]:
+    """Read plugin metadata from the official Hermes venv without executing it."""
+
+    install_root = os.path.join(connector_paths.hermes_home(), "hermes-agent")
+    site_packages: list[str] = []
+    for venv_name in ("venv", ".venv"):
+        venv_root = os.path.join(install_root, venv_name)
+        windows_site = os.path.join(venv_root, "Lib", "site-packages")
+        if os.path.isdir(windows_site) and not is_symlink(windows_site):
+            site_packages.append(windows_site)
+        unix_lib = os.path.join(venv_root, "lib")
+        try:
+            versions = _hermes_bounded_scandir(unix_lib, 16)
+        except OSError:
+            versions = []
+        for version in versions:
+            try:
+                if not version.name.startswith("python") or not version.is_dir(follow_symlinks=False):
+                    continue
+            except OSError:
+                continue
+            candidate = os.path.join(version.path, "site-packages")
+            if os.path.isdir(candidate) and not is_symlink(candidate):
+                site_packages.append(candidate)
+
+    rows: list[tuple[Any, str]] = []
+    if site_packages:
+        try:
+            distributions = importlib.metadata.distributions(path=list(dict.fromkeys(site_packages)))
+            for distribution_index, distribution in enumerate(distributions):
+                if distribution_index >= 2048:
+                    break
+                version = str(getattr(distribution, "version", "") or "")
+                for entry in getattr(distribution, "entry_points", ()):
+                    if getattr(entry, "group", "") == "hermes_agent.plugins":
+                        rows.append((entry, version))
+                        if len(rows) >= 512:
+                            return rows
+        except Exception:  # noqa: BLE001 - corrupt installed metadata is an inventory gap.
+            return rows
+        return rows
+
+    # Advanced -NoVenv/source installs can deliberately share the current
+    # interpreter. Only consult its metadata when hermes_cli is import-visible;
+    # DefenseClaw's unrelated environment must not be presented as Hermes.
+    try:
+        hermes_spec = importlib.util.find_spec("hermes_cli")
+    except (ImportError, AttributeError, ValueError):
+        hermes_spec = None
+    if hermes_spec is None:
+        return rows
+    try:
+        entry_points = importlib.metadata.entry_points()
+        if hasattr(entry_points, "select"):
+            selected = entry_points.select(group="hermes_agent.plugins")
+        elif isinstance(entry_points, dict):
+            selected = entry_points.get("hermes_agent.plugins", [])
+        else:
+            selected = [entry for entry in entry_points if entry.group == "hermes_agent.plugins"]
+    except Exception:  # noqa: BLE001 - metadata corruption is an inventory gap.
+        return rows
+    for entry in list(selected)[:512]:
+        distribution = getattr(entry, "dist", None)
+        rows.append((entry, str(getattr(distribution, "version", "") or "")))
+    return rows
+
+
+def _enumerate_hermes_plugins() -> list[dict[str, Any]]:
+    """Mirror v0.19's bounded default-profile plugin source and activation order."""
+
+    home = connector_paths.hermes_home()
+    user_root = os.path.join(home, "plugins")
+    roots = connector_paths.plugin_dirs("hermes")
+    bundled_roots = [root for root in roots if os.path.normcase(root) != os.path.normcase(user_root)]
+    discovered: list[dict[str, Any]] = []
+    for root in bundled_roots:
+        source = "bundled-nix" if (os.environ.get("HERMES_BUNDLED_PLUGINS") or "").strip() else "bundled"
+        discovered.extend(
+            _hermes_manifest_rows(
+                root,
+                source,
+                skip_top_level=frozenset({"memory", "context_engine", "platforms", "model-providers"}),
+            )
+        )
+        discovered.extend(_hermes_manifest_rows(os.path.join(root, "platforms"), source))
+    discovered.extend(_hermes_manifest_rows(user_root, "user"))
+
+    for entry, version in _hermes_pip_entry_points():
+        discovered.append(
+            {
+                "id": str(entry.name),
+                "name": str(entry.name),
+                "version": version,
+                "description": "",
+                "kind": "standalone",
+                "source_kind": "entrypoint",
+                "source": str(entry.value),
+                "manifest": "",
+            }
+        )
+
+    # v0.19 resolves collisions in scan order: user beats bundled and the
+    # later entry-point source beats both. Preserve the final winner by ID.
+    winners: dict[str, dict[str, Any]] = {}
+    for row in discovered:
+        winners[str(row["id"])] = row
+
+    document, _error = connector_paths._read_hermes_config_bounded()
+    plugins_config = document.get("plugins") if isinstance(document, dict) else None
+    enabled_raw = plugins_config.get("enabled") if isinstance(plugins_config, dict) else None
+    disabled_raw = plugins_config.get("disabled") if isinstance(plugins_config, dict) else None
+    enabled = {str(item) for item in enabled_raw} if isinstance(enabled_raw, list) else set()
+    disabled = {str(item) for item in disabled_raw} if isinstance(disabled_raw, list) else set()
+
+    rows: list[dict[str, Any]] = []
+    for key in sorted(winners, key=str.casefold):
+        row = winners[key]
+        name = str(row.get("name") or key)
+        kind = str(row.get("kind") or "standalone")
+        source_kind = str(row.get("source_kind") or "")
+        if key in disabled or name in disabled:
+            configured = False
+            activation_source = "config.yaml:plugins.disabled"
+        elif kind == "exclusive":
+            configured = False
+            activation_source = "provider-selection-required"
+        elif kind == "model-provider":
+            configured = True
+            activation_source = "vendor model-provider discovery"
+        elif source_kind.startswith("bundled") and kind in {"backend", "platform"}:
+            configured = True
+            activation_source = "vendor bundled auto/deferred activation"
+        else:
+            configured = key in enabled or name in enabled
+            activation_source = "config.yaml:plugins.enabled" if configured else "vendor opt-in default"
+        row.update(
+            {
+                "enabled": configured,
+                "activation_status": "configured" if configured else "inactive",
+                "activation_source": activation_source,
+                "activation_verified": False,
+            }
+        )
+        rows.append(row)
+    return rows
+
+
 def _enumerate_plugins_filesystem(
     cfg: Config,
     connector: str | None = None,
@@ -2724,20 +4452,54 @@ def _enumerate_plugins_filesystem(
     documented manifest names (matches plugin_scanner._MANIFEST_CANDIDATES
     after S2.3): package.json, manifest.json, plugin.json,
     openclaw.plugin.json, .codex-plugin/plugin.json,
-    .claude-plugin/plugin.json. Codex cache registry buckets are expanded to
-    their exact manifest roots and logical names are deduplicated using Codex's
-    active-plugin metadata. ``connector`` scopes the walk for multi-connector
-    focus (defaults to active).
+    .claude-plugin/plugin.json, .cursor-plugin/plugin.json. Codex cache
+    registry buckets are expanded to their exact manifest roots and logical
+    names are deduplicated using Codex's active-plugin metadata. ``connector``
+    scopes the walk for multi-connector focus (defaults to active).
     """
+    if connector_paths.normalize(connector or cfg.active_connector()) == "hermes":
+        return _enumerate_hermes_plugins()
     rows: list[dict[str, Any]] = []
     seen: dict[str, str] = {}
     resolved_connector = connector or cfg.active_connector()
-    for plugin_dir in cfg.plugin_dirs(connector):
-        for discovered in discover_plugin_directories(plugin_dir, connector=resolved_connector):
+    workspace_dir = _connector_workspace_dir(cfg)
+    plugin_dirs = (
+        connector_paths.plugin_inventory_dirs(
+            resolved_connector,
+            openclaw_home=cfg.claw.home_dir,
+            workspace_dir=workspace_dir,
+        )
+        if connector_paths.normalize(resolved_connector) == "cursor"
+        else cfg.plugin_dirs(connector)
+    )
+    exact_codex_sources = (
+        {
+            os.path.normcase(os.path.abspath(path))
+            for path in connector_paths.codex_marketplace_plugin_dirs(
+                workspace_dir
+            )
+        }
+        if connector_paths.normalize(resolved_connector) == "codex"
+        else set()
+    )
+    for plugin_dir in plugin_dirs:
+        normalized = os.path.normcase(os.path.abspath(plugin_dir))
+        discovered_plugins = (
+            discover_exact_plugin_directory(plugin_dir, origin="codex marketplace")
+            if normalized in exact_codex_sources
+            else discover_plugin_directories(
+                plugin_dir,
+                connector=resolved_connector,
+                workspace_dir=workspace_dir,
+            )
+        )
+        for discovered in discovered_plugins:
             entry = discovered.id
             entry_key = filesystem_identity_key(entry, plugin_dir)
             full = discovered.path
-            if entry_key in seen and os.path.realpath(seen[entry_key]) != os.path.realpath(full):
+            if entry_key in seen:
+                if os.path.realpath(seen[entry_key]) == os.path.realpath(full):
+                    continue
                 raise AmbiguousPluginIdentityError(
                     f"ambiguous plugin identity {entry!r}: {seen[entry_key]}, {full}; "
                     "remove or rename duplicate directories"
@@ -2750,7 +4512,15 @@ def _enumerate_plugins_filesystem(
                 "version": discovered.version,
                 "origin": discovered.origin or plugin_dir,
                 "enabled": discovered.enabled,
-                "status": ("loaded" if manifest and discovered.enabled else "disabled" if manifest else "no-manifest"),
+                "status": (
+                    "no-manifest"
+                    if not manifest
+                    else "loaded"
+                    if discovered.enabled
+                    else "cache-unverified"
+                    if discovered.cached and not discovered.activation_verified
+                    else "disabled"
+                ),
                 "path": full,
             }
             if manifest:
@@ -2761,6 +4531,9 @@ def _enumerate_plugins_filesystem(
                 row["registry"] = discovered.registry
             if discovered.cached:
                 row["cached"] = True
+                row["activation_verified"] = discovered.activation_verified
+            if discovered.logical_id and discovered.logical_id != discovered.id:
+                row["logical_id"] = discovered.logical_id
             rows.append(row)
     return rows
 
@@ -2772,6 +4545,7 @@ _PLUGIN_MANIFEST_FILES: tuple[str, ...] = (
     "openclaw.plugin.json",
     os.path.join(".codex-plugin", "plugin.json"),
     os.path.join(".claude-plugin", "plugin.json"),
+    os.path.join(".cursor-plugin", "plugin.json"),
 )
 
 
@@ -2795,10 +4569,16 @@ def _enumerate_mcp_filesystem(
     """
     rows: list[dict[str, Any]] = []
     resolved = connector or cfg.active_connector()
-    for entry in cfg.mcp_servers(connector):
+    entries = cfg.mcp_servers(connector)
+    cursor_names: dict[str, int] = {}
+    if connector_paths.normalize(resolved) == "cursor":
+        for entry in entries:
+            identity = os.path.normcase(entry.name)
+            cursor_names[identity] = cursor_names.get(identity, 0) + 1
+    for entry in entries:
         row: dict[str, Any] = {
             "id": entry.name,
-            "source": f"{resolved} mcp registry",
+            "source": entry.source or f"{resolved} mcp registry",
         }
         if entry.command:
             row["command"] = entry.command
@@ -2810,5 +4590,15 @@ def _enumerate_mcp_filesystem(
             row["transport"] = entry.transport
         if entry.env:
             row["env_keys"] = sorted(entry.env.keys())
+        if entry.source_scope:
+            row["scope"] = entry.source_scope
+        if entry.trust_required:
+            row["trust_required"] = True
+        if connector_paths.normalize(resolved) == "cursor":
+            row["activation_verified"] = False
+            row["activation_state"] = "unverified-dynamic-selection"
+            if cursor_names.get(os.path.normcase(entry.name), 0) > 1:
+                row["selection_conflict"] = True
+                row["activation_state"] = "unverified-same-name-scope-conflict"
         rows.append(row)
     return rows

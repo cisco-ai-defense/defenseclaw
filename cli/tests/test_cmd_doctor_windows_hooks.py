@@ -1,4 +1,4 @@
-"""Windows-native Codex/Claude Doctor hook validation regressions."""
+"""Windows-native connector Doctor hook validation regressions."""
 
 from __future__ import annotations
 
@@ -7,7 +7,9 @@ import contextlib
 import hashlib
 import io
 import json
+import ntpath
 import os
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -18,6 +20,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import defenseclaw.doctor_hooks as doctor_hooks
+import yaml
 
 try:
     import tomllib
@@ -43,6 +46,7 @@ from defenseclaw.doctor_hooks import (
     _packaged_windows_install_root,
     _read_claude_registry_policy,
     _split_windows,
+    _validate_antigravity_hook_matrix,
     _validate_codex_hook_contract,
     resolve_windows_command,
     validate_windows_hook_registration,
@@ -70,6 +74,7 @@ class WindowsHookDoctorTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
+    @unittest.skipUnless(os.name == "nt", "Windows Known Folder contract")
     def test_claude_managed_paths_use_program_files_known_folder(self) -> None:
         trusted = self.root / "Trusted Program Files"
         attacker = self.root / "Attacker Program Files"
@@ -84,6 +89,7 @@ class WindowsHookDoctorTests(unittest.TestCase):
 
         self.assertEqual(paths, (str(trusted / "ClaudeCode" / "managed-settings.json"),))
 
+    @unittest.skipUnless(os.name == "nt", "Windows Known Folder contract")
     def test_claude_managed_paths_fail_closed_without_known_folder(self) -> None:
         with patch("defenseclaw.doctor_hooks._windows_known_folder_path", return_value=""):
             with self.assertRaisesRegex(_InspectionError, "trusted Windows Program Files"):
@@ -104,6 +110,23 @@ class WindowsHookDoctorTests(unittest.TestCase):
 
         self.assertEqual(os.path.normcase(observed), os.path.normcase(expected))
 
+    @unittest.skipUnless(os.name == "nt", "Windows system directory contract")
+    def test_system_powershell_lookup_ignores_mutable_windows_environment(self) -> None:
+        expected = doctor_hooks._windows_system_powershell_path()
+        self.assertTrue(expected)
+
+        with patch.dict(
+            os.environ,
+            {
+                "SYSTEMROOT": str(self.root / "spoofed-windows"),
+                "WINDIR": str(self.root / "spoofed-windows"),
+                "PATH": str(self.root / "spoofed-path"),
+            },
+        ):
+            observed = doctor_hooks._windows_system_powershell_path()
+
+        self.assertEqual(ntpath.normcase(observed), ntpath.normcase(expected))
+
     def _runtime(self, name: str = "defenseclaw-hook.exe", body: bytes | None = None) -> Path:
         path = self.install / name
         if body is None:
@@ -113,7 +136,13 @@ class WindowsHookDoctorTests(unittest.TestCase):
 
     @staticmethod
     def _encoded_hook_command(
-        runtime: Path, connector: str = "codex", *, legacy: bool = False, unqualified: bool = False
+        runtime: Path,
+        connector: str = "codex",
+        *,
+        event: str = "",
+        contract: str = "",
+        legacy: bool = False,
+        unqualified: bool = False,
     ) -> str:
         literal = str(runtime).replace("'", "''")
         if legacy and unqualified:
@@ -126,11 +155,13 @@ class WindowsHookDoctorTests(unittest.TestCase):
             )
         else:
             start_process = "Start-Process" if unqualified else r"Microsoft.PowerShell.Management\Start-Process"
+            event_args = f",'--event','{event}'" if event else ""
+            contract_args = f",'--hook-contract','{contract}'" if contract else ""
             script = (
                 "$ErrorActionPreference='Stop'; "
                 "$env:NoDefaultCurrentDirectoryInExePath='1'; "
                 f"$hookProcess={start_process} -FilePath '{literal}' "
-                f"-ArgumentList @('hook','--connector','{connector}') "
+                f"-ArgumentList @('hook','--connector','{connector}'{event_args}{contract_args}) "
                 "-NoNewWindow -Wait -PassThru; exit $hookProcess.ExitCode"
             )
         encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
@@ -138,6 +169,299 @@ class WindowsHookDoctorTests(unittest.TestCase):
             r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe "
             f"-NoLogo -NoProfile -NonInteractive -EncodedCommand {encoded}"
         )
+
+    @staticmethod
+    def _bind_codex_fixture_command(command: str, event: str, contract: str) -> str:
+        """Bind a current fixture while preserving legacy/malformed shapes."""
+
+        value = command.strip()
+        parts = _split_windows(value)
+        lowered = [part.casefold() for part in parts]
+        if "-encodedcommand" in lowered:
+            encoded_index = lowered.index("-encodedcommand")
+            if encoded_index + 1 != len(parts) - 1:
+                return command
+            try:
+                script = base64.b64decode(parts[encoded_index + 1], validate=True).decode("utf-16-le")
+            except (ValueError, UnicodeError):
+                return command
+            needle = "@('hook','--connector','codex')"
+            if needle not in script:
+                return command
+            replacement = (
+                "@('hook','--connector','codex',"
+                f"'--event','{event}','--hook-contract','{contract}')"
+            )
+            parts[encoded_index + 1] = base64.b64encode(
+                script.replace(needle, replacement, 1).encode("utf-16-le")
+            ).decode("ascii")
+            return subprocess.list2cmdline(parts)
+
+        suffix = "hook --connector codex"
+        if value.endswith(suffix):
+            return (
+                value
+                + f" --event {event} --hook-contract {contract}"
+            )
+        return command
+
+    def test_antigravity_mixed_schema_binds_every_official_event(self) -> None:
+        runtime = self._runtime()
+        document: dict[str, object] = {}
+        for event in ("PreInvocation", "PreToolUse", "PostToolUse", "PostInvocation", "Stop"):
+            handler = {
+                "type": "command",
+                "command": self._encoded_hook_command(runtime, "antigravity", event=event),
+                "timeout": 30,
+            }
+            entries: list[object]
+            if event in {"PreToolUse", "PostToolUse"}:
+                entries = [{"matcher": "*", "hooks": [handler]}]
+            else:
+                entries = [handler]
+            document[f"defenseclaw-antigravity-{event.lower()}"] = {event: entries}
+
+        commands = _validate_antigravity_hook_matrix(document)
+        self.assertEqual(len(commands), 5)
+
+        malformed = json.loads(json.dumps(document))
+        malformed["defenseclaw-antigravity-stop"]["Stop"] = [  # type: ignore[index]
+            {"matcher": "*", "hooks": []}
+        ]
+        with self.assertRaisesRegex(_InspectionError, "direct handler"):
+            _validate_antigravity_hook_matrix(malformed)
+
+        disabled = json.loads(json.dumps(document))
+        disabled["defenseclaw-antigravity-pretooluse"]["enabled"] = False  # type: ignore[index]
+        with self.assertRaisesRegex(_InspectionError, "disabled"):
+            _validate_antigravity_hook_matrix(disabled)
+
+        extra_event = json.loads(json.dumps(document))
+        extra_event["defenseclaw-antigravity-pretooluse"]["FutureEvent"] = [  # type: ignore[index]
+            {
+                "type": "command",
+                "command": self._encoded_hook_command(
+                    runtime,
+                    "antigravity",
+                    event="PreToolUse",
+                ),
+                "timeout": 30,
+            }
+        ]
+        with self.assertRaisesRegex(_InspectionError, "unexpected Antigravity event"):
+            _validate_antigravity_hook_matrix(extra_event)
+
+        aliased = json.loads(json.dumps(document))
+        aliased["operator-copy"] = aliased["defenseclaw-antigravity-pretooluse"]
+        with self.assertRaisesRegex(_InspectionError, "operator-copy"):
+            _validate_antigravity_hook_matrix(aliased)
+
+    def test_antigravity_repair_guidance_uses_public_setup(self) -> None:
+        detail = doctor_hooks._repair_detail("antigravity", "registration drifted")
+
+        self.assertEqual(
+            detail,
+            "registration drifted; run `defenseclaw setup antigravity --yes --restart` "
+            "to repair the native registration",
+        )
+
+    def test_antigravity_rejects_non_system_outer_powershell(self) -> None:
+        runtime = self._runtime()
+        trusted = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+        command = self._encoded_hook_command(
+            runtime,
+            "antigravity",
+            event="PreToolUse",
+        )
+        with patch(
+            "defenseclaw.doctor_hooks._windows_system_powershell_path",
+            return_value=trusted,
+        ):
+            target, args, kind = doctor_hooks._command_target(command, "antigravity")
+            self.assertEqual(target, str(runtime))
+            self.assertEqual(
+                args,
+                ["hook", "--connector", "antigravity", "--event", "PreToolUse"],
+            )
+            self.assertEqual(kind, "direct")
+            for replacement in (
+                "powershell.exe",
+                "pwsh.exe",
+                r"C:\Users\Public\powershell.exe",
+            ):
+                with self.subTest(replacement=replacement):
+                    tampered = command.replace(trusted, replacement, 1)
+                    with self.assertRaisesRegex(
+                        _InspectionError,
+                        "trusted system Windows PowerShell",
+                    ):
+                        doctor_hooks._command_target(tampered, "antigravity")
+            for tampered in (
+                "& " + command,
+                "set NoDefaultCurrentDirectoryInExePath=1&& " + command,
+                command.replace(trusted, f'"{trusted}"', 1),
+            ):
+                with self.subTest(tampered=tampered[:48]):
+                    with self.assertRaisesRegex(
+                        _InspectionError,
+                        "exact native outer command form",
+                    ):
+                        doctor_hooks._command_target(tampered, "antigravity")
+
+    def test_antigravity_rejects_managed_cmd_instead_of_protected_pe(self) -> None:
+        runtime = self._runtime("defenseclaw-hook.cmd")
+        document: dict[str, object] = {}
+        for event in ("PreInvocation", "PreToolUse", "PostToolUse", "PostInvocation", "Stop"):
+            handler = {
+                "type": "command",
+                "command": self._encoded_hook_command(runtime, "antigravity", event=event),
+                "timeout": 30,
+            }
+            entries: list[object]
+            if event in {"PreToolUse", "PostToolUse"}:
+                entries = [{"matcher": "*", "hooks": [handler]}]
+            else:
+                entries = [handler]
+            document[f"defenseclaw-antigravity-{event.lower()}"] = {event: entries}
+        config = self.profile / ".gemini" / "config" / "hooks.json"
+        config.parent.mkdir(parents=True)
+        config.write_text(json.dumps(document), encoding="utf-8")
+        self._lock("antigravity", config, version="v8")
+
+        check = self._validate("antigravity", config, pathext=".EXE;.CMD")
+
+        self.assertEqual(check.state, "foreign", check.detail)
+        self.assertIn("protected native defenseclaw-hook.exe PE target", check.detail)
+
+    def test_antigravity_validates_active_stable_runtime_digests(self) -> None:
+        local_app_data = self.root / "Local AppData"
+        runtime_root = local_app_data / "DefenseClaw" / "HookRuntime"
+        launcher = runtime_root / "defenseclaw-hook.exe"
+        full_hook = self.install / "bin" / "defenseclaw-hook.exe"
+        gateway = self.install / "bin" / "defenseclaw-gateway.exe"
+        runtime_root.mkdir(parents=True)
+        full_hook.parent.mkdir(parents=True)
+        launcher_bytes = b"MZ-stable-trampoline"
+        full_hook_bytes = b"MZ-installed-full-hook"
+        gateway_bytes = b"MZ-installed-gateway"
+        launcher.write_bytes(launcher_bytes)
+        full_hook.write_bytes(full_hook_bytes)
+        gateway.write_bytes(gateway_bytes)
+
+        state_path = runtime_root / "hook-runtime-state.json"
+        state = {
+            "schema_version": 2,
+            "status": "active",
+            "runtime_root": str(runtime_root),
+            "launcher_path": str(launcher),
+            "launcher_sha256": hashlib.sha256(launcher_bytes).hexdigest(),
+            "launcher_kind": "trampoline",
+            "hook_path": str(full_hook),
+            "hook_sha256": hashlib.sha256(full_hook_bytes).hexdigest(),
+            "data_root": str(self.data),
+            "gateway_path": str(gateway),
+            "gateway_sha256": hashlib.sha256(gateway_bytes).hexdigest(),
+            "transaction_id": "0" * 32,
+        }
+        state_path.write_text(json.dumps(state), encoding="utf-8")
+
+        document: dict[str, object] = {}
+        for event in ("PreInvocation", "PreToolUse", "PostToolUse", "PostInvocation", "Stop"):
+            handler = {
+                "type": "command",
+                "command": self._encoded_hook_command(launcher, "antigravity", event=event),
+                "timeout": 30,
+            }
+            entries: list[object]
+            if event in {"PreToolUse", "PostToolUse"}:
+                entries = [{"matcher": "*", "hooks": [handler]}]
+            else:
+                entries = [handler]
+            document[f"defenseclaw-antigravity-{event.lower()}"] = {event: entries}
+        config = self.profile / ".gemini" / "config" / "hooks.json"
+        config.parent.mkdir(parents=True)
+        config.write_text(json.dumps(document), encoding="utf-8")
+        self._lock("antigravity", config, version="v8")
+
+        with (
+            patch(
+                "defenseclaw.doctor_hooks._windows_known_folder_path",
+                return_value=str(local_app_data),
+            ),
+            patch("defenseclaw.inventory.agent_discovery._windows_acl_write_error", return_value=None),
+        ):
+            healthy = self._validate("antigravity", config)
+            self.assertEqual(healthy.state, "healthy", healthy.detail)
+            self.assertIn("runtime_state=active schema=2", healthy.detail)
+
+            full_hook.write_bytes(b"MZ-tampered-full-hook")
+            tampered_hook = self._validate("antigravity", config)
+            self.assertEqual(tampered_hook.state, "stale", tampered_hook.detail)
+            self.assertIn("full hook digest", tampered_hook.detail)
+            full_hook.write_bytes(full_hook_bytes)
+
+            launcher.write_bytes(b"MZ-tampered-trampoline")
+            tampered_launcher = self._validate("antigravity", config)
+            self.assertEqual(tampered_launcher.state, "stale", tampered_launcher.detail)
+            self.assertIn("launcher digest", tampered_launcher.detail)
+            launcher.write_bytes(launcher_bytes)
+
+            state["status"] = "disabled"
+            state_path.write_text(json.dumps(state), encoding="utf-8")
+            disabled = self._validate("antigravity", config)
+            self.assertEqual(disabled.state, "stale", disabled.detail)
+            self.assertIn("not active", disabled.detail)
+
+    def test_antigravity_contract_check_fails_for_managed_cmd_runtime(self) -> None:
+        runtime = self._runtime("defenseclaw-hook.cmd")
+        document: dict[str, object] = {}
+        for event in ("PreInvocation", "PreToolUse", "PostToolUse", "PostInvocation", "Stop"):
+            handler = {
+                "type": "command",
+                "command": self._encoded_hook_command(runtime, "antigravity", event=event),
+                "timeout": 30,
+            }
+            entries: list[object]
+            if event in {"PreToolUse", "PostToolUse"}:
+                entries = [{"matcher": "*", "hooks": [handler]}]
+            else:
+                entries = [handler]
+            document[f"defenseclaw-antigravity-{event.lower()}"] = {event: entries}
+        config = self.profile / ".gemini" / "config" / "hooks.json"
+        config.parent.mkdir(parents=True)
+        config.write_text(json.dumps(document), encoding="utf-8")
+
+        result, output = self._contract_check("antigravity", config)
+
+        self.assertEqual(result.passed, 0, output)
+        self.assertEqual(result.failed, 1, output)
+        self.assertIn("protected native defenseclaw-hook.exe PE target", output)
+
+    def test_antigravity_windows_fallback_uses_official_hooks_home(self) -> None:
+        hooks_home = self.profile / ".gemini" / "config"
+        expected = hooks_home / "hooks.json"
+        sentinel = MagicMock()
+        with (
+            patch("defenseclaw.commands.cmd_doctor._hook_health_paths_from_lock", return_value=[]),
+            patch(
+                "defenseclaw.commands.cmd_doctor.connector_home",
+                return_value=str(hooks_home),
+            ),
+            patch(
+                "defenseclaw.commands.cmd_doctor.validate_windows_hook_registration",
+                return_value=sentinel,
+            ) as validator,
+        ):
+            observed = cmd_doctor._windows_native_hook_check(
+                self.cfg,
+                "antigravity",
+                install_root=str(self.install),
+                search_path="",
+                pathext=".EXE",
+            )
+
+        self.assertIs(observed, sentinel)
+        self.assertEqual(validator.call_args.kwargs["config_path"], str(expected))
 
     def _lock(
         self,
@@ -149,14 +473,24 @@ class WindowsHookDoctorTests(unittest.TestCase):
         runtime_paths: list[str] | None = None,
     ) -> None:
         if contract is None:
-            contract = "codex-hooks-v1" if connector == "codex" else "claudecode-hooks-v1"
+            contract = {
+                "antigravity": "antigravity-hooks-v2",
+                "codex": "codex-hooks-v1",
+                "claudecode": "claudecode-hooks-v1",
+                "hermes": "hermes-hooks-v1",
+                "windsurf": "windsurf-hooks-v1",
+            }[connector]
         normalized_agent_version = {
             "codex-hooks-v1": "0.124.0",
             "codex-hooks-v2": "0.129.0",
             "codex-hooks-v3": "0.133.0",
             "codex-hooks-v3-generic": "0.135.0",
             "codex-hooks-v4": "0.145.0",
-            "claudecode-hooks-v1": "2.1.152",
+            "claudecode-hooks-v1": "2.1.154",
+            "claudecode-hooks-v2": "2.1.219",
+            "windsurf-hooks-v1": "1.12.41",
+            "hermes-hooks-v1": "0.19.0",
+            "antigravity-hooks-v2": "1.1.8",
         }[contract]
         locations = {"hook_config_paths": [str(config)]}
         if runtime_paths is not None:
@@ -180,6 +514,33 @@ class WindowsHookDoctorTests(unittest.TestCase):
             encoding="utf-8",
         )
 
+    def _windsurf_config(self, *, foreign: bool = False) -> tuple[Path, Path]:
+        adapter = self.data / "hooks" / "windsurf-hook.ps1"
+        adapter.parent.mkdir(parents=True, exist_ok=True)
+        adapter.write_text(
+            "# DefenseClaw Windsurf native Windows hook adapter.\n"
+            "# defenseclaw-managed-hook v6\n",
+            encoding="utf-8",
+        )
+        command = "& '" + str(adapter).replace("'", "''") + "'"
+        events: dict[str, list[dict[str, object]]] = {}
+        for event in doctor_hooks._WINDSURF_EVENTS:
+            handlers: list[dict[str, object]] = [{"powershell": command, "show_output": True}]
+            if foreign and event == "pre_read_code":
+                handlers.insert(
+                    0,
+                    {
+                        "powershell": r"& 'C:\Vendor\windsurf-hook.ps1'",
+                        "vendor": {"keep": True},
+                    },
+                )
+            events[event] = handlers
+        config = self.profile / ".codeium" / "windsurf" / "hooks.json"
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(json.dumps({"hooks": events, "foreign_top_level": {"keep": True}}), encoding="utf-8")
+        self._lock("windsurf", config)
+        return config, adapter
+
     def _config(
         self,
         connector: str,
@@ -190,18 +551,29 @@ class WindowsHookDoctorTests(unittest.TestCase):
         codex_features: bool = True,
         codex_managed: bool = False,
         codex_contract: str = "codex-hooks-v1",
+        claude_contract: str = "claudecode-hooks-v1",
     ) -> Path:
         if connector == "codex":
             path = self.profile / ".codex" / ("managed_config.toml" if codex_managed else "config.toml")
             path.parent.mkdir(exist_ok=True)
             selected_windows = windows_command or command
             escaped_extra = extra_command.replace("\\", "\\\\").replace('"', '\\"')
-            escaped = command.replace("\\", "\\\\").replace('"', '\\"')
-            escaped_windows = selected_windows.replace("\\", "\\\\").replace('"', '\\"')
             rows: list[str] = []
             trust_rows: list[tuple[str, str]] = []
             state_source = _codex_hook_state_key_source(str(path))
             for event, (event_key, matcher, timeout) in doctor_hooks._codex_hook_specs(codex_contract).items():
+                generic_command = self._bind_codex_fixture_command(
+                    command,
+                    event,
+                    codex_contract,
+                )
+                native_command = self._bind_codex_fixture_command(
+                    selected_windows,
+                    event,
+                    codex_contract,
+                )
+                escaped = generic_command.replace("\\", "\\\\").replace('"', '\\"')
+                escaped_windows = native_command.replace("\\", "\\\\").replace('"', '\\"')
                 matcher_text = "" if matcher is None else f'matcher = "{matcher}", '
                 groups = (
                     f'{event} = [{{ {matcher_text}hooks = [{{ type = "command", '
@@ -209,8 +581,8 @@ class WindowsHookDoctorTests(unittest.TestCase):
                 )
                 managed_handler = {
                     "type": "command",
-                    "command": command,
-                    "command_windows": selected_windows,
+                    "command": generic_command,
+                    "command_windows": native_command,
                     "timeout": timeout,
                 }
                 state_key = f"{state_source}:{event_key}:0:0"
@@ -233,15 +605,76 @@ class WindowsHookDoctorTests(unittest.TestCase):
                 (("[features]\nhooks = true\n\n" if codex_features else "") + "[hooks]\n") + "\n".join(rows) + "\n",
                 encoding="utf-8",
             )
-        else:
+        elif connector == "hermes":
+            path = self.profile / "AppData" / "Local" / "hermes" / "config.yaml"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            events: dict[str, object] = {}
+            for event, matcher in doctor_hooks._HERMES_REQUIRED_HOOKS.items():
+                entry: dict[str, object] = {"command": command, "timeout": 30}
+                if matcher is not None:
+                    entry["matcher"] = matcher
+                events[event] = [entry]
+            if extra_command:
+                assert isinstance(events["post_tool_call"], list)
+                events["post_tool_call"].append({"command": extra_command, "timeout": 30, "matcher": ".*"})
+            path.write_text(
+                yaml.safe_dump({"hooks_auto_accept": False, "hooks": events}, sort_keys=False),
+                encoding="utf-8",
+            )
+            (path.parent / "shell-hooks-allowlist.json").write_text(
+                json.dumps(
+                    {
+                        "approvals": [
+                            {"event": event, "command": command}
+                            for event in doctor_hooks._HERMES_REQUIRED_HOOKS
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            state_dir = self.data / "hooks"
+            state_dir.mkdir(exist_ok=True)
+            (state_dir / "hermes-direct-native-state.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "connector": "hermes",
+                        "status": "pending_reload",
+                        "command": command,
+                        "reload_required": True,
+                        "running_host_verified": False,
+                    }
+                ),
+                encoding="utf-8",
+            )
+        elif connector == "claudecode":
             path = self.profile / ".claude" / "settings.json"
             path.parent.mkdir(exist_ok=True)
-            bare_exec = not any(token in command for token in (" hook ", "-File ", "-EncodedCommand "))
+            command_parts = _split_windows(command)
+            command_basename = Path(command_parts[0]).name.casefold() if command_parts else ""
+            exec_form = command_basename in {
+                "defenseclaw-hook.exe",
+                "defenseclaw-hook.cmd",
+                "defenseclaw-hook.bat",
+                "powershell",
+                "powershell.exe",
+                "pwsh",
+                "pwsh.exe",
+            }
+            handler_command = command_parts[0] if exec_form else command
+            handler_args = command_parts[1:] if exec_form else []
+            if exec_form and command_basename.startswith("defenseclaw-hook") and not handler_args:
+                handler_args = ["hook", "--connector", "claudecode"]
             events: dict[str, object] = {}
-            for event, (matcher, timeout) in _CLAUDE_REQUIRED_HOOKS.items():
-                handler: dict[str, object] = {"type": "command", "command": command, "timeout": timeout}
-                if bare_exec:
-                    handler["args"] = ["hook", "--connector", "claudecode"]
+            for event in doctor_hooks._CLAUDE_CONTRACT_EVENTS[claude_contract]:
+                matcher, timeout = _CLAUDE_REQUIRED_HOOKS[event]
+                handler: dict[str, object] = {
+                    "type": "command",
+                    "command": handler_command,
+                    "timeout": timeout,
+                }
+                if exec_form:
+                    handler["args"] = handler_args
                 if event == "MessageDisplay":
                     handler["async"] = True
                 entry: dict[str, object] = {"hooks": [handler]}
@@ -252,8 +685,95 @@ class WindowsHookDoctorTests(unittest.TestCase):
                 assert isinstance(events["PostToolUse"], list)
                 events["PostToolUse"].append({"hooks": [{"type": "command", "command": extra_command, "timeout": 30}]})
             path.write_text(json.dumps({"hooks": events}), encoding="utf-8")
-        self._lock(connector, path, contract=codex_contract if connector == "codex" else None)
+        else:
+            raise ValueError(f"unsupported test connector: {connector}")
+        self._lock(
+            connector,
+            path,
+            contract=(
+                codex_contract
+                if connector == "codex"
+                else claude_contract if connector == "claudecode" else None
+            ),
+            version="v6",
+        )
         return path
+
+    def test_hermes_direct_native_registration_is_pending_reload(self) -> None:
+        runtime = self._runtime()
+        command = f'"{runtime}" hook --connector hermes'
+        config = self._config("hermes", command)
+
+        check = self._validate("hermes", config)
+
+        self.assertFalse(check.healthy, check.detail)
+        self.assertEqual(check.state, "pending-reload")
+        self.assertIn("hook_entries=23", check.detail)
+        self.assertIn("allowlist_entries=23", check.detail)
+        self.assertIn("Windows-native executable", check.detail)
+        self.assertIn("live=false", check.detail)
+
+    def test_hermes_direct_command_matches_upstream_shlex_argv(self) -> None:
+        command = (
+            '"C:/Users/Kevin O\'Brien/Defense Claw $Preview/defenseclaw-hook.exe" '
+            "hook --connector hermes"
+        )
+
+        self.assertEqual(
+            shlex.split(command),
+            [
+                "C:/Users/Kevin O'Brien/Defense Claw $Preview/defenseclaw-hook.exe",
+                "hook",
+                "--connector",
+                "hermes",
+            ],
+        )
+
+    def test_hermes_rejects_shell_wrapper_and_missing_exact_allowlist_pair(self) -> None:
+        runtime = self._runtime()
+        command = f"& '{runtime}' hook --connector hermes"
+        config = self._config("hermes", command)
+
+        wrapped = self._validate("hermes", config)
+        self.assertFalse(wrapped.healthy)
+        self.assertIn("directly quoted native", wrapped.detail)
+
+        command = f'"{runtime}" hook --connector hermes'
+        config = self._config("hermes", command)
+        allowlist = config.parent / "shell-hooks-allowlist.json"
+        document = json.loads(allowlist.read_text(encoding="utf-8"))
+        document["approvals"] = document["approvals"][1:]
+        allowlist.write_text(json.dumps(document), encoding="utf-8")
+        stale = self._validate("hermes", config)
+        self.assertFalse(stale.healthy)
+        self.assertIn("missing exact DefenseClaw approvals", stale.detail)
+
+    def test_hermes_rejects_unexpected_and_inconsistent_owned_allowlist_pairs(self) -> None:
+        runtime = self._runtime()
+        command = f'"{runtime}" hook --connector hermes'
+        config = self._config("hermes", command)
+        allowlist = config.parent / "shell-hooks-allowlist.json"
+        document = json.loads(allowlist.read_text(encoding="utf-8"))
+        document["approvals"].append({"event": "future_event", "command": command})
+        allowlist.write_text(json.dumps(document), encoding="utf-8")
+
+        unexpected = self._validate("hermes", config)
+        self.assertFalse(unexpected.healthy)
+        self.assertIn("unexpected Hermes event future_event", unexpected.detail)
+
+        config = self._config("hermes", command)
+        document = json.loads(allowlist.read_text(encoding="utf-8"))
+        document["approvals"].append(
+            {
+                "event": next(iter(doctor_hooks._HERMES_REQUIRED_HOOKS)),
+                "command": '"C:\\Other\\defenseclaw-hook.exe" hook --connector hermes',
+            }
+        )
+        allowlist.write_text(json.dumps(document), encoding="utf-8")
+
+        inconsistent = self._validate("hermes", config)
+        self.assertFalse(inconsistent.healthy)
+        self.assertIn("inconsistent DefenseClaw approval", inconsistent.detail)
 
     def _validate(
         self,
@@ -326,6 +846,45 @@ class WindowsHookDoctorTests(unittest.TestCase):
         self.assertEqual(check.state, "healthy", check.detail)
         self.assertIn("Windows-native executable", check.detail)
         self.assertIn("entries=28", check.detail)
+
+    def test_healthy_windsurf_powershell_matrix_reports_exact_limitations(self) -> None:
+        config, adapter = self._windsurf_config(foreign=True)
+
+        check = self._validate("windsurf", config, pathext=".EXE;.CMD;.PS1")
+
+        self.assertEqual(check.state, "healthy", check.detail)
+        self.assertEqual(os.path.normcase(check.target), os.path.normcase(str(adapter)))
+        self.assertIn("Windows-native PowerShell", check.detail)
+        self.assertIn("entries=12", check.detail)
+        self.assertIn("exit 2 blocks only five documented pre-hooks", check.detail)
+        self.assertIn("non-2 hook errors fail open", check.detail)
+        self.assertIn("post hooks are non-blocking", check.detail)
+        self.assertIn("Restricted Mode disables hooks", check.detail)
+
+    def test_windsurf_rejects_command_fallback_and_incomplete_matrix(self) -> None:
+        for mutation, expected in (
+            (
+                lambda document: document["hooks"]["pre_run_command"][0].update(
+                    {"command": r"C:\Vendor\fallback.exe"}
+                ),
+                "command fallback",
+            ),
+            (
+                lambda document: document["hooks"].pop("post_setup_worktree"),
+                "missing post_setup_worktree",
+            ),
+        ):
+            with self.subTest(expected=expected):
+                config, _adapter = self._windsurf_config()
+                document = json.loads(config.read_text(encoding="utf-8"))
+                mutation(document)
+                config.write_text(json.dumps(document), encoding="utf-8")
+
+                check = self._validate("windsurf", config, pathext=".EXE;.CMD;.PS1")
+
+                self.assertEqual(check.state, "stale", check.detail)
+                self.assertIn(expected, check.detail)
+                self.assertIn("setup windsurf --yes --restart", check.detail)
 
     def test_native_stable_hook_runtime_is_accepted_for_codex_and_claude(self) -> None:
         local_app_data = self.root / "Local AppData"
@@ -814,6 +1373,251 @@ class WindowsHookDoctorTests(unittest.TestCase):
 
                 self.assertEqual(raised.exception.state, "stale")
 
+    def test_codex_doctor_respects_session_end_contract_boundary(self) -> None:
+        runtime = self._runtime()
+        command = f'"{runtime}" hook --connector codex'
+        for contract, expected_count, has_session_end in (
+            ("codex-hooks-v3", 10, False),
+            ("codex-hooks-v4", 11, True),
+        ):
+            with self.subTest(contract=contract):
+                config = self._config(
+                    "codex",
+                    command,
+                    codex_contract=contract,
+                )
+                document = tomllib.loads(config.read_text(encoding="utf-8"))
+                self.assertEqual("SessionEnd" in document["hooks"], has_session_end)
+                self.assertEqual(
+                    doctor_hooks._validate_codex_hook_matrix(
+                        document,
+                        str(config),
+                        contract,
+                    ),
+                    expected_count,
+                )
+                _validate_codex_hook_contract(document, contract, str(config))
+
+    def test_codex_doctor_session_start_matcher_respects_contract_boundary(self) -> None:
+        runtime = self._runtime()
+        command = f'"{runtime}" hook --connector codex'
+        legacy_matcher = "startup|resume|clear"
+        compact_matcher = legacy_matcher + "|compact"
+        for contract, expected_matcher in (
+            ("codex-hooks-v1", legacy_matcher),
+            ("codex-hooks-v2", legacy_matcher),
+            ("codex-hooks-v3", compact_matcher),
+            ("codex-hooks-v4", compact_matcher),
+        ):
+            with self.subTest(contract=contract):
+                config = self._config(
+                    "codex",
+                    command,
+                    codex_contract=contract,
+                )
+                document = tomllib.loads(config.read_text(encoding="utf-8"))
+                self.assertEqual(
+                    document["hooks"]["SessionStart"][0]["matcher"],
+                    expected_matcher,
+                )
+                doctor_hooks._validate_codex_hook_matrix(
+                    document,
+                    str(config),
+                    contract,
+                )
+
+                drifted = json.loads(json.dumps(document))
+                drifted["hooks"]["SessionStart"][0]["matcher"] = (
+                    compact_matcher
+                    if expected_matcher == legacy_matcher
+                    else legacy_matcher
+                )
+                with self.assertRaisesRegex(_InspectionError, "SessionStart matcher"):
+                    doctor_hooks._validate_codex_hook_matrix(
+                        drifted,
+                        str(config),
+                        contract,
+                    )
+
+    def test_codex_doctor_accepts_exact_event_contract_binding_for_all_tiers(self) -> None:
+        runtime = self._runtime()
+        command = self._encoded_hook_command(runtime)
+        for contract in (
+            "codex-hooks-v1",
+            "codex-hooks-v2",
+            "codex-hooks-v3",
+            "codex-hooks-v4",
+        ):
+            with self.subTest(contract=contract):
+                config = self._config(
+                    "codex",
+                    command,
+                    codex_contract=contract,
+                )
+                document = tomllib.loads(config.read_text(encoding="utf-8"))
+                targets: set[str] = set()
+                for event in doctor_hooks._codex_hook_specs(contract):
+                    handler = document["hooks"][event][0]["hooks"][0]
+                    self.assertEqual(handler["command"], handler["command_windows"])
+                    target, args, kind = doctor_hooks._command_target(
+                        handler["command"],
+                        "codex",
+                    )
+                    self.assertEqual(kind, "direct")
+                    self.assertEqual(
+                        args,
+                        [
+                            "hook",
+                            "--connector",
+                            "codex",
+                            "--event",
+                            event,
+                            "--hook-contract",
+                            contract,
+                        ],
+                    )
+                    targets.add(ntpath.normcase(ntpath.normpath(target)))
+                self.assertEqual(targets, {ntpath.normcase(ntpath.normpath(str(runtime)))})
+                doctor_hooks._validate_codex_hook_matrix(
+                    document,
+                    str(config),
+                    contract,
+                )
+                _validate_codex_hook_contract(document, contract, str(config))
+
+    def test_codex_doctor_rejects_inexact_event_contract_bindings(self) -> None:
+        runtime = self._runtime()
+        contract = "codex-hooks-v4"
+        config = self._config(
+            "codex",
+            self._encoded_hook_command(runtime),
+            codex_managed=True,
+            codex_contract=contract,
+        )
+        original = tomllib.loads(config.read_text(encoding="utf-8"))
+        cases = {
+            "wrong-event": self._encoded_hook_command(
+                runtime,
+                event="PostToolUse",
+                contract=contract,
+            ),
+            "wrong-contract": self._encoded_hook_command(
+                runtime,
+                event="PreToolUse",
+                contract="codex-hooks-v3",
+            ),
+            "missing-contract": self._encoded_hook_command(
+                runtime,
+                event="PreToolUse",
+            ),
+            "unbound": self._encoded_hook_command(runtime),
+        }
+        for name, replacement in cases.items():
+            with self.subTest(name=name):
+                document = json.loads(json.dumps(original))
+                handler = document["hooks"]["PreToolUse"][0]["hooks"][0]
+                handler["command"] = replacement
+                handler["command_windows"] = replacement
+                self.assertTrue(
+                    doctor_hooks._handler_targets_defenseclaw(handler, "codex")
+                )
+                for validator in (
+                    lambda: doctor_hooks._validate_codex_hook_matrix(
+                        document,
+                        str(config),
+                        contract,
+                    ),
+                    lambda: _validate_codex_hook_contract(
+                        document,
+                        contract,
+                        str(config),
+                    ),
+                ):
+                    with self.assertRaises(_InspectionError) as raised:
+                        validator()
+                    self.assertEqual(raised.exception.state, "stale")
+                    self.assertIn("not bound", raised.exception.detail)
+
+        second_runtime = self.install / "alternate" / "defenseclaw-hook.exe"
+        second_runtime.parent.mkdir()
+        second_runtime.write_bytes(b"MZsecond-fixture")
+        document = json.loads(json.dumps(original))
+        replacement = self._encoded_hook_command(
+            second_runtime,
+            event="PreToolUse",
+            contract=contract,
+        )
+        handler = document["hooks"]["PreToolUse"][0]["hooks"][0]
+        handler["command"] = replacement
+        handler["command_windows"] = replacement
+        for validator in (
+            lambda: doctor_hooks._validate_codex_hook_matrix(
+                document,
+                str(config),
+                contract,
+            ),
+            lambda: _validate_codex_hook_contract(
+                document,
+                contract,
+                str(config),
+            ),
+        ):
+            with self.assertRaisesRegex(_InspectionError, "inconsistent native runtimes"):
+                validator()
+
+    def test_codex_command_parser_rejects_future_binding_values(self) -> None:
+        runtime = self._runtime()
+        current = self._encoded_hook_command(
+            runtime,
+            event="PreToolUse",
+            contract="codex-hooks-v4",
+        )
+        _target, args, _kind = doctor_hooks._command_target(current, "codex")
+        self.assertEqual(args[-4:], ["--event", "PreToolUse", "--hook-contract", "codex-hooks-v4"])
+
+        legacy_event_only = self._encoded_hook_command(
+            runtime,
+            event="PreToolUse",
+        )
+        _target, args, _kind = doctor_hooks._command_target(legacy_event_only, "codex")
+        self.assertEqual(args[-2:], ["--event", "PreToolUse"])
+        _target, args, _kind = doctor_hooks._command_target(
+            self._encoded_hook_command(runtime),
+            "codex",
+        )
+        self.assertEqual(args, ["hook", "--connector", "codex"])
+
+        for name, command in (
+            (
+                "future-event",
+                self._encoded_hook_command(
+                    runtime,
+                    event="FutureEvent",
+                    contract="codex-hooks-v4",
+                ),
+            ),
+            (
+                "future-contract",
+                self._encoded_hook_command(
+                    runtime,
+                    event="PreToolUse",
+                    contract="codex-hooks-v99",
+                ),
+            ),
+            (
+                "unsupported-pair",
+                self._encoded_hook_command(
+                    runtime,
+                    event="SessionEnd",
+                    contract="codex-hooks-v3",
+                ),
+            ),
+        ):
+            with self.subTest(name=name):
+                with self.assertRaises(_InspectionError) as raised:
+                    doctor_hooks._command_target(command, "codex")
+                self.assertEqual(raised.exception.state, "malformed")
+
     def test_codex_explicitly_disabled_hooks_raise_malformed(self) -> None:
         document = {
             "features": {"hooks": False},
@@ -886,14 +1690,17 @@ class WindowsHookDoctorTests(unittest.TestCase):
         self.assertEqual(check.state, "stale", check.detail)
         self.assertIn("obsolete gateway launcher", check.detail)
 
-    def test_healthy_managed_cmd_registration(self) -> None:
-        runtime = self._runtime("defenseclaw-hook.cmd")
-        config = self._config("claudecode", f'"{runtime}" hook --connector claudecode')
-        check = self._validate("claudecode", config)
-        self.assertEqual(check.state, "healthy", check.detail)
-        self.assertIn("Windows-native CMD", check.detail)
+    def test_claude_rejects_cmd_and_bat_exec_registrations(self) -> None:
+        for extension in (".cmd", ".bat"):
+            with self.subTest(extension=extension):
+                runtime = self._runtime(f"defenseclaw-hook{extension}")
+                config = self._config("claudecode", f'"{runtime}" hook --connector claudecode')
+                check = self._validate("claudecode", config, pathext=".EXE;.CMD;.BAT")
+                self.assertEqual(check.state, "stale", check.detail)
+                self.assertIn(extension, check.detail)
+                self.assertIn("repair", check.detail)
 
-    def test_healthy_managed_powershell_registration(self) -> None:
+    def test_healthy_powershell_exec_registration(self) -> None:
         runtime = self._runtime(
             "defenseclaw-hook.ps1",
             b"# defenseclaw-managed-hook v6\n# passive wrapper fixture\n",
@@ -903,6 +1710,60 @@ class WindowsHookDoctorTests(unittest.TestCase):
         check = self._validate("claudecode", config)
         self.assertEqual(check.state, "healthy", check.detail)
         self.assertIn("Windows-native PowerShell", check.detail)
+
+    def test_claude_shell_form_requires_explicit_powershell(self) -> None:
+        runtime = self._runtime(
+            "defenseclaw-hook.ps1",
+            b"# defenseclaw-managed-hook v6\n# passive wrapper fixture\n",
+        )
+        command = f"& '{runtime}' hook --connector claudecode"
+        config = self._config("claudecode", command)
+
+        unqualified = self._validate("claudecode", config)
+        self.assertEqual(unqualified.state, "stale", unqualified.detail)
+        self.assertIn("Git Bash", unqualified.detail)
+
+        document = json.loads(config.read_text(encoding="utf-8"))
+        for entries in document["hooks"].values():
+            entries[0]["hooks"][0]["shell"] = "powershell"
+        config.write_text(json.dumps(document), encoding="utf-8")
+
+        explicit = self._validate("claudecode", config)
+        self.assertEqual(explicit.state, "healthy", explicit.detail)
+        self.assertIn("Windows-native PowerShell", explicit.detail)
+
+    def test_claude_explicit_powershell_shell_requires_call_operator(self) -> None:
+        runtime = self._runtime()
+        config = self._config("claudecode", f'"{runtime}" hook --connector claudecode')
+        document = json.loads(config.read_text(encoding="utf-8"))
+        for entries in document["hooks"].values():
+            handler = entries[0]["hooks"][0]
+            handler["command"] = f'"{runtime}" hook --connector claudecode'
+            handler.pop("args")
+            handler["shell"] = "powershell"
+        config.write_text(json.dumps(document), encoding="utf-8")
+
+        check = self._validate("claudecode", config)
+        self.assertEqual(check.state, "stale", check.detail)
+        self.assertIn("native hook runtime", check.detail)
+
+    def test_claude_rejects_unqualified_powershell_shell_form(self) -> None:
+        runtime = self._runtime(
+            "defenseclaw-hook.ps1",
+            b"# defenseclaw-managed-hook v6\n# passive wrapper fixture\n",
+        )
+        command = f'powershell.exe -NoProfile -NonInteractive -File "{runtime}" hook --connector claudecode'
+        config = self._config("claudecode", command)
+        document = json.loads(config.read_text(encoding="utf-8"))
+        for entries in document["hooks"].values():
+            handler = entries[0]["hooks"][0]
+            handler["command"] = command
+            handler.pop("args")
+        config.write_text(json.dumps(document), encoding="utf-8")
+
+        check = self._validate("claudecode", config)
+        self.assertEqual(check.state, "stale", check.detail)
+        self.assertIn("Git Bash", check.detail)
 
     def test_powershell_registration_rejects_unsafe_launcher_switches(self) -> None:
         runtime = self._runtime(
@@ -952,6 +1813,55 @@ class WindowsHookDoctorTests(unittest.TestCase):
         check = self._validate("claudecode", config)
 
         self.assertEqual(check.state, "healthy", check.detail)
+
+    def test_claude_versioned_directory_added_contracts_are_exact(self) -> None:
+        runtime = self._runtime()
+        command = f'"{runtime}" hook --connector claudecode'
+
+        v1_config = self._config(
+            "claudecode",
+            command,
+            claude_contract="claudecode-hooks-v1",
+        )
+        v1_document = json.loads(v1_config.read_text(encoding="utf-8"))
+        self.assertEqual(len(v1_document["hooks"]), 28)
+        self.assertNotIn("DirectoryAdded", v1_document["hooks"])
+        v1_check = self._validate("claudecode", v1_config)
+        self.assertEqual(v1_check.state, "healthy", v1_check.detail)
+
+        v2_config = self._config(
+            "claudecode",
+            command,
+            claude_contract="claudecode-hooks-v2",
+        )
+        v2_document = json.loads(v2_config.read_text(encoding="utf-8"))
+        self.assertEqual(len(v2_document["hooks"]), 29)
+        directory_group = v2_document["hooks"]["DirectoryAdded"][0]
+        self.assertNotIn("matcher", directory_group)
+        directory_handler = directory_group["hooks"][0]
+        self.assertEqual(directory_handler["timeout"], 30)
+        self.assertNotIn("async", directory_handler)
+        v2_check = self._validate("claudecode", v2_config)
+        self.assertEqual(v2_check.state, "healthy", v2_check.detail)
+        self.assertIn("entries=29", v2_check.detail)
+
+        v2_document["hooks"].pop("DirectoryAdded")
+        v2_config.write_text(json.dumps(v2_document), encoding="utf-8")
+        missing = self._validate("claudecode", v2_config)
+        self.assertEqual(missing.state, "stale", missing.detail)
+        self.assertIn("DirectoryAdded", missing.detail)
+
+        v1_config = self._config(
+            "claudecode",
+            command,
+            claude_contract="claudecode-hooks-v1",
+        )
+        v1_document = json.loads(v1_config.read_text(encoding="utf-8"))
+        v1_document["hooks"]["DirectoryAdded"] = [directory_group]
+        v1_config.write_text(json.dumps(v1_document), encoding="utf-8")
+        unexpected = self._validate("claudecode", v1_config)
+        self.assertEqual(unexpected.state, "stale", unexpected.detail)
+        self.assertIn("unexpected Claude Code event DirectoryAdded", unexpected.detail)
 
     def test_claude_requires_complete_broad_hook_contract_with_exact_execution_modes(self) -> None:
         runtime = self._runtime()
@@ -1011,6 +1921,30 @@ class WindowsHookDoctorTests(unittest.TestCase):
                 check = self._validate("claudecode", config)
 
                 self.assertEqual(check.state, "healthy", check.detail)
+
+    def test_claude_doctor_requires_fork_and_dynamic_file_filter(self) -> None:
+        runtime = self._runtime()
+        config = self._config("claudecode", f'"{runtime}"')
+        document = json.loads(config.read_text(encoding="utf-8"))
+        self.assertEqual(
+            document["hooks"]["SessionStart"][0]["matcher"],
+            "startup|resume|clear|compact|fork",
+        )
+        self.assertEqual(document["hooks"]["FileChanged"][0]["matcher"], ".+")
+
+        document["hooks"]["SessionStart"][0]["matcher"] = "startup|resume|clear|compact"
+        document["hooks"]["FileChanged"][0]["matcher"] = "CLAUDE.md|settings.json"
+        config.write_text(json.dumps(document), encoding="utf-8")
+
+        check = self._validate("claudecode", config)
+        self.assertEqual(check.state, "stale", check.detail)
+        self.assertIn("SessionStart matcher", check.detail)
+
+        document["hooks"]["SessionStart"][0]["matcher"] = "startup|resume|clear|compact|fork"
+        config.write_text(json.dumps(document), encoding="utf-8")
+        file_filter_check = self._validate("claudecode", config)
+        self.assertEqual(file_filter_check.state, "stale", file_filter_check.detail)
+        self.assertIn("FileChanged matcher", file_filter_check.detail)
 
     def test_claude_reports_disable_all_hooks_as_policy_blocked(self) -> None:
         runtime = self._runtime()
@@ -1195,7 +2129,7 @@ class WindowsHookDoctorTests(unittest.TestCase):
 
     def test_claude_managed_enterprise_validates_the_winning_hook_matrix(self) -> None:
         runtime = self._runtime()
-        config = self._config("claudecode", str(runtime))
+        config = self._config("claudecode", f'"{runtime}"')
         document = json.loads(config.read_text(encoding="utf-8"))
         for groups in document["hooks"].values():
             for group in groups:
@@ -1238,7 +2172,7 @@ class WindowsHookDoctorTests(unittest.TestCase):
 
     def test_claude_managed_enterprise_rejects_hkcu_hook_authority(self) -> None:
         runtime = self._runtime()
-        config = self._config("claudecode", str(runtime))
+        config = self._config("claudecode", f'"{runtime}"')
         document = json.loads(config.read_text(encoding="utf-8"))
         for groups in document["hooks"].values():
             for group in groups:
@@ -1341,6 +2275,7 @@ class WindowsHookDoctorTests(unittest.TestCase):
             "codex",
             f'"{runtime}" hook --connector codex',
             codex_managed=True,
+            codex_contract="codex-hooks-v3",
         )
         self._lock("codex", config, contract="codex-hooks-v3")
         requirements = self.root / "ProgramData" / "OpenAI" / "Codex" / "requirements.toml"
@@ -1668,6 +2603,42 @@ class WindowsHookDoctorTests(unittest.TestCase):
         )
 
         self.assertEqual(result.checks[-1]["status"], "pass", result.checks[-1])
+        self.assertNotIn("99.0.0", result.checks[-1]["detail"])
+
+    def test_windows_hermes_contract_uses_protected_executable_not_stale_discovery(self) -> None:
+        runtime = self._runtime()
+        config = self._config("hermes", f'"{runtime}" hook --connector hermes')
+        lock_path = self.data / "hook_contract_lock.json"
+        lock = json.loads(lock_path.read_text(encoding="utf-8"))
+        executable = self.install / "hermes.exe"
+        lock["connectors"]["hermes"].update(
+            {
+                "agent_executable": str(executable),
+                "agent_executable_source": "setup-selected",
+                "agent_executable_sha256": "a" * 64,
+            }
+        )
+        lock_path.write_text(json.dumps(lock), encoding="utf-8")
+        (self.data / "agent_discovery.json").write_text(
+            json.dumps({"agents": {"hermes": {"version": "Hermes Agent v99.0.0"}}}),
+            encoding="utf-8",
+        )
+        result = _DoctorResult()
+
+        _check_hook_contract_lock(
+            self.cfg,
+            "hermes",
+            result,
+            platform_name="nt",
+            config_path=str(config),
+            install_root=str(self.install),
+            search_path=str(self.install),
+            pathext=".EXE;.CMD",
+        )
+
+        self.assertEqual(result.checks[-1]["status"], "fail", result.checks[-1])
+        self.assertIn("pending-reload", result.checks[-1]["detail"])
+        self.assertIn(f"agent_executable={executable}", result.checks[-1]["detail"])
         self.assertNotIn("99.0.0", result.checks[-1]["detail"])
 
     def test_windows_contract_preserves_access_denied_classification(self) -> None:

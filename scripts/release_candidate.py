@@ -217,6 +217,16 @@ WINDOWS_PYTHON_EMBED_NAME = "python-3.13.14-embed-amd64.zip"
 WINDOWS_PYTHON_EMBED_URL = "https://www.python.org/ftp/python/3.13.14/python-3.13.14-embed-amd64.zip"
 WINDOWS_PYTHON_EMBED_SHA256 = "90b4e5b9898b72d744650524bff92377c367f44bd5fbd09e3148656c080ad907"
 WINDOWS_PYTHON_RUNTIME_REVIEW_DEADLINE = "2026-09-10T00:00:00.0000000+00:00"
+WINDOWS_VC_RUNTIME_VERSION = "14.42.34438"
+WINDOWS_VC_RUNTIME_NAME = f"microsoft-vc-runtime-{WINDOWS_VC_RUNTIME_VERSION}-x64.zip"
+WINDOWS_VC_RUNTIME_SOURCE_NAME = "Microsoft.VC.14.42.17.12.CRT.Redist.X64.base.vsix"
+WINDOWS_VC_RUNTIME_SOURCE_URL = (
+    "https://download.visualstudio.microsoft.com/download/pr/"
+    "53b2bf3d-716a-455a-bcc0-39cfb7447fe0/"
+    "49d70db282f1c74d456206501120134f021c2bc3aaabb41577fe18dea35d1454/"
+    f"{WINDOWS_VC_RUNTIME_SOURCE_NAME}"
+)
+WINDOWS_VC_RUNTIME_SOURCE_SHA256 = "49d70db282f1c74d456206501120134f021c2bc3aaabb41577fe18dea35d1454"
 WINDOWS_YARA_COMPAT_WHEEL = "yara_python-4.5.4.post1-py3-none-any.whl"
 WINDOWS_WIN_UNICODE_SOURCE_URL = (
     "https://files.pythonhosted.org/packages/89/8d/7aad74930380c8972ab282304a2ff45f3d4927108bb6693cabcc9fc6a099/"
@@ -4291,6 +4301,10 @@ def _validate_windows_setup_provenance(
             "wheel_sha256",
             "python_embed",
             "python_embed_sha256",
+            "vc_runtime",
+            "vc_runtime_sha256",
+            "vc_runtime_source",
+            "vc_runtime_source_sha256",
             "site_packages_sha256",
             "yara_compat_wheel",
             "yara_compat_wheel_sha256",
@@ -4313,6 +4327,8 @@ def _validate_windows_setup_provenance(
             "hook_launcher_sha256",
             "wheel_sha256",
             "python_embed_sha256",
+            "vc_runtime_sha256",
+            "vc_runtime_source_sha256",
             "site_packages_sha256",
             "yara_compat_wheel_sha256",
             "cosign_sha256",
@@ -4329,6 +4345,9 @@ def _validate_windows_setup_provenance(
         or inputs.get("wheel") != wheel
         or inputs.get("python_embed") != WINDOWS_PYTHON_EMBED_NAME
         or inputs.get("python_embed_sha256") != WINDOWS_PYTHON_EMBED_SHA256
+        or inputs.get("vc_runtime") != WINDOWS_VC_RUNTIME_NAME
+        or inputs.get("vc_runtime_source") != WINDOWS_VC_RUNTIME_SOURCE_NAME
+        or inputs.get("vc_runtime_source_sha256") != WINDOWS_VC_RUNTIME_SOURCE_SHA256
         or inputs.get("yara_compat_wheel") != WINDOWS_YARA_COMPAT_WHEEL
         or inputs.get("cosign_sha256") != WINDOWS_COSIGN_SHA256
         or inputs.get("product_executables_authenticode_signed") is not signed
@@ -4343,6 +4362,7 @@ def _validate_windows_setup_provenance(
             gateway_archive,
             wheel,
             WINDOWS_PYTHON_EMBED_NAME,
+            WINDOWS_VC_RUNTIME_NAME,
             WINDOWS_YARA_COMPAT_WHEEL,
             "site-packages.zip",
             "defenseclaw-hook-launcher.exe",
@@ -4363,6 +4383,7 @@ def _validate_windows_setup_provenance(
         gateway_archive: "embedded_gateway_archive_sha256",
         wheel: "wheel_sha256",
         WINDOWS_PYTHON_EMBED_NAME: "python_embed_sha256",
+        WINDOWS_VC_RUNTIME_NAME: "vc_runtime_sha256",
         WINDOWS_YARA_COMPAT_WHEEL: "yara_compat_wheel_sha256",
         "site-packages.zip": "site_packages_sha256",
         "defenseclaw-hook-launcher.exe": "hook_launcher_sha256",
@@ -4379,6 +4400,13 @@ def _validate_windows_setup_provenance(
             "python_embed_url",
             "python_embed_sha256",
             "python_runtime_review_deadline_utc",
+            "vc_runtime_version",
+            "vc_runtime_source",
+            "vc_runtime_source_url",
+            "vc_runtime_source_sha256",
+            "vc_runtime_license",
+            "vc_runtime_license_url",
+            "vc_runtime_redistribution_url",
             "yara_compat_sha256",
             "win_unicode_console_source_url",
             "win_unicode_console_source_sha256",
@@ -4397,6 +4425,14 @@ def _validate_windows_setup_provenance(
         or toolchain.get("python_embed_sha256") != WINDOWS_PYTHON_EMBED_SHA256
         or toolchain.get("python_embed_sha256") != inputs.get("python_embed_sha256")
         or toolchain.get("python_runtime_review_deadline_utc") != WINDOWS_PYTHON_RUNTIME_REVIEW_DEADLINE
+        or toolchain.get("vc_runtime_version") != WINDOWS_VC_RUNTIME_VERSION
+        or toolchain.get("vc_runtime_source") != WINDOWS_VC_RUNTIME_SOURCE_NAME
+        or toolchain.get("vc_runtime_source_url") != WINDOWS_VC_RUNTIME_SOURCE_URL
+        or toolchain.get("vc_runtime_source_sha256") != WINDOWS_VC_RUNTIME_SOURCE_SHA256
+        or toolchain.get("vc_runtime_source_sha256") != inputs.get("vc_runtime_source_sha256")
+        or toolchain.get("vc_runtime_license") != "Microsoft Visual Studio 2022 license and REDIST list"
+        or toolchain.get("vc_runtime_license_url") != "https://visualstudio.microsoft.com/license-terms/vs2022-ga-community/"
+        or toolchain.get("vc_runtime_redistribution_url") != "https://learn.microsoft.com/en-us/visualstudio/releases/2022/redistribution"
         or toolchain.get("yara_compat_sha256") != inputs.get("yara_compat_wheel_sha256")
         or toolchain.get("win_unicode_console_source_url") != WINDOWS_WIN_UNICODE_SOURCE_URL
         or toolchain.get("win_unicode_console_source_sha256") != WINDOWS_WIN_UNICODE_SOURCE_SHA256

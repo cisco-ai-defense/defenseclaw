@@ -45,38 +45,68 @@ func hookOnlyProfileMapVerdict(in HookVerdictInput) HookVerdictOutput {
 	}
 }
 
+func openCodeProfileMapVerdict(in HookVerdictInput) HookVerdictOutput {
+	status, _ := in.Payload["mcp_identity_status"].(string)
+	if canonicalHookEvent(in.Event) != "toolexecutebefore" ||
+		!strings.EqualFold(strings.TrimSpace(status), "ambiguous") {
+		return hookOnlyProfileMapVerdict(in)
+	}
+	// The bridge deliberately withholds mcp_server_name when OpenCode's
+	// sanitizer maps multiple configured servers to the same tool prefix.
+	// Reuse the normal connector mode mapping without guessing an identity:
+	// observe records a would-block, while the synchronous action hook denies.
+	if in.Mode == "action" && in.Caps.CanBlock && eventInProfile(in.Event, in.Caps.BlockEvents) {
+		return HookVerdictOutput{Action: "block", WouldBlock: false}
+	}
+	return HookVerdictOutput{Action: "allow", WouldBlock: true}
+}
+
+func hermesProfileMapVerdict(in HookVerdictInput) HookVerdictOutput {
+	raw := normalizedGuardrailAction(in.RawAction)
+	if in.Mode == "action" && raw == "block" &&
+		canonicalHookEvent(in.Event) == "preverify" {
+		// "continue" is Hermes' documented bounded verification control. It
+		// neither vetoes the operation nor upgrades pre_verify into a block
+		// event, and observe mode continues to use the shared audit-only map.
+		return HookVerdictOutput{Action: "continue", WouldBlock: false}
+	}
+	return hookOnlyProfileMapVerdict(in)
+}
+
 func hookOnlyProfileRespond(in HookRespondInput) HookRespondOutput {
 	reason := connectorReasonForProfile(in.Req.ConnectorName, in.Action, in.Req.ToolName, in.Reason)
 	var output map[string]interface{}
 	switch in.Req.ConnectorName {
 	case "hermes":
-		// Hermes shell-hook lifecycle (cli-config.yaml `hooks:` block):
+		// Hermes v0.19 shell-hook lifecycle (config.yaml `hooks:` block):
 		//
-		//	pre_llm_call     → inspect prompt; inject {"context":...}
-		//	pre_tool_call    → inspect tool args; BLOCK (only blockable event)
-		//	post_tool_call   → inspect tool output (observe)
-		//	post_llm_call    → inspect model output (observe)
-		//	on_session_*     → lifecycle telemetry (observe)
-		//	subagent_start/stop → delegate-task telemetry (observe)
+		//	pre_tool_call       → BLOCK with valid JSON (only tool veto)
+		//	pre_llm_call        → inject {"context":...}
+		//	pre_verify          → bounded {"action":"continue",...}
+		//	remaining 20 events → attributed audit from the shell lane
 		//
-		// Hermes reads a blocking stdout response only for
-		// pre_tool_call and a {"context":...} injection for
-		// pre_llm_call; it ignores the stdout of every other event, so
-		// those return a nil body. Hermes accepts both
+		// Python transform/gateway plugin hooks have response semantics that
+		// Hermes' shell JSON parser cannot express; approval/API/Kanban and
+		// ordinary lifecycle responses are ignored or undocumented. We never
+		// infer response authority from VALID_HOOKS membership. Hermes accepts both
 		// {"action":"block","message"} (its canonical shape) and
 		// {"decision":"block","reason"} (the Claude-Code style it
 		// normalizes internally); we emit the latter for wire parity
 		// with the legacy shaper (hookOutputFor) and the pinned
-		// hermes/verdict-blocked golden. Confirm verdicts fall through
-		// to the shared {"systemMessage":...} epilogue below (hermes
-		// has no native ask surface).
-		if in.Action == "block" {
+		// hermes/verdict-blocked golden. Confirm verdicts intentionally
+		// return no hook_output: Hermes has no documented ask, approve,
+		// or system-message response shape. The gateway still records and
+		// alerts the downgraded finding.
+		event := canonicalHookEvent(in.Req.HookEventName)
+		if in.Action == "block" && event == "pretoolcall" {
 			output = map[string]interface{}{"decision": "block", "reason": reason}
-		} else if canonicalHookEvent(in.Req.HookEventName) == "prellmcall" && in.AdditionalContext != "" {
+		} else if in.Action == "continue" && event == "preverify" {
+			output = map[string]interface{}{"action": "continue", "message": reason}
+		} else if event == "prellmcall" && in.AdditionalContext != "" {
 			output = map[string]interface{}{"context": in.AdditionalContext}
 		}
 	case "cursor":
-		output = cursorHookOutputForProfile(in.Req.HookEventName, in.Action, reason, in.AdditionalContext)
+		output = CursorHookOutput(in.Req.HookEventName, in.Action, reason, in.AdditionalContext)
 	case "windsurf":
 		if in.Action == "block" {
 			output = map[string]interface{}{"message": reason}
@@ -97,9 +127,10 @@ func hookOnlyProfileRespond(in HookRespondInput) HookRespondOutput {
 		}
 	case "opencode":
 		// The DefenseClaw bridge plugin reads .decision and throws on
-		// "deny"/"block" to abort the tool. opencode has no hook-driven
-		// ask or context-injection channel, so only block surfaces a
-		// body; everything else is observe-only.
+		// "deny"/"block" to abort the tool. OpenCode v1.18.10-v1.18.11 publishes
+		// permission.ask and chat/context hooks, but this focused bridge does
+		// not implement them, so only block surfaces a response body here;
+		// everything else is observe-only.
 		if in.Action == "block" {
 			output = map[string]interface{}{"decision": "deny", "reason": reason}
 		}
@@ -117,133 +148,117 @@ func hookOnlyProfileRespond(in HookRespondInput) HookRespondOutput {
 		// hook_output body is required by OmniGent's policy API.
 		return HookRespondOutput{}
 	}
-	if output == nil && in.RawAction == "confirm" && in.AdditionalContext != "" && !in.Caps.CanAskNative {
+	if output == nil && in.Req.ConnectorName != "hermes" &&
+		in.RawAction == "confirm" && in.AdditionalContext != "" && !in.Caps.CanAskNative {
 		output = map[string]interface{}{"systemMessage": in.AdditionalContext}
 	}
 	return HookRespondOutput{FieldName: "hook_output", Output: output}
 }
 
-func cursorHookOutputForProfile(event, action, reason, additional string) map[string]interface{} {
+// CursorHookOutput renders the exact event-native stdout object documented by
+// Cursor. It is shared by the profile path and the legacy gateway fallback so
+// neither path can reintroduce generic fields that an event does not accept.
+func CursorHookOutput(event, action, reason, additional string) map[string]interface{} {
 	event = canonicalHookEvent(event)
-	if event == "beforesubmitprompt" {
-		if action == "block" {
-			return map[string]interface{}{"continue": false, "user_message": reason, "agent_message": reason}
-		}
-		return map[string]interface{}{"continue": true}
-	}
-	switch action {
-	case "block":
-		return map[string]interface{}{"continue": true, "permission": "deny", "user_message": reason, "agent_message": reason}
-	case "confirm":
-		return map[string]interface{}{"continue": true, "permission": "ask", "user_message": reason, "agent_message": reason}
-	case "alert":
-		if additional != "" {
-			return map[string]interface{}{"continue": true, "permission": "allow", "agent_message": additional}
-		}
-	}
 	switch event {
-	case "pretooluse", "beforeshellexecution", "beforemcpexecution", "beforereadfile", "beforetabfileread", "stop":
-		return map[string]interface{}{"continue": true, "permission": "allow"}
-	default:
+	case "beforesubmitprompt":
+		if action == "block" {
+			return map[string]interface{}{"continue": false, "user_message": reason}
+		}
 		return map[string]interface{}{"continue": true}
+	case "stop", "subagentstop":
+		// Cursor stop/subagentStop hooks cannot veto the completed lifecycle
+		// transition. Their only documented response is followup_message,
+		// which starts a bounded follow-up turn.
+		message := additional
+		if message == "" && action != "allow" {
+			message = reason
+		}
+		if message != "" {
+			return map[string]interface{}{"followup_message": message}
+		}
+		return map[string]interface{}{}
+	case "sessionstart", "posttooluse":
+		// DefenseClaw does not mutate session environment or tool results.
+		// It can supply only the documented context field when the evaluator
+		// produced attributed context for these events.
+		if additional != "" {
+			return map[string]interface{}{"additional_context": additional}
+		}
+		return map[string]interface{}{}
+	case "precompact":
+		if additional != "" {
+			return map[string]interface{}{"user_message": additional}
+		}
+		return map[string]interface{}{}
+	case "pretooluse":
+		return cursorPermissionOutput(action, reason, false, true, true)
+	case "subagentstart", "beforereadfile":
+		return cursorPermissionOutput(action, reason, false, true, false)
+	case "beforetabfileread":
+		return cursorPermissionOutput(action, reason, false, false, false)
+	case "beforeshellexecution", "beforemcpexecution":
+		return cursorPermissionOutput(action, reason, true, true, true)
+	default:
+		// sessionEnd, postToolUseFailure, all after* observation events, and
+		// workspaceOpen have no DefenseClaw-owned event output. workspaceOpen
+		// accepts pluginPaths, but this connector does not inject plugins.
+		return map[string]interface{}{}
 	}
 }
 
-// antigravityHookOutputForProfile renders the per-event hook
-// response wire shape Antigravity (`agy`) expects per the 2.0
-// lifecycle spec. Spec source (Antigravity 2.0 hook docs):
-//
-//	Event           | DefenseClaw hook role
-//	----------------+----------------------------------------------
-//	PreInvocation   | Inspect prompt + transcript before LLM call;
-//	                | block / ask / inject context.
-//	PreToolUse      | Inspect tool call args; block / ask / alert.
-//	                | (Empirically verified on agy v1.0.1.)
-//	PostToolUse     | Inspect tool output after run; cannot block
-//	                | (tool already executed) — surface findings as
-//	                | additionalContext for next-turn ingestion.
-//	PostInvocation  | Inspect LLM response + final state; cannot
-//	                | block (response already generated) — surface
-//	                | findings as additionalContext.
-//	Stop            | Per spec: "block-terminating the agent if
-//	                | validation checks fail." Distinct from
-//	                | PreInvocation/PreToolUse "deny" verb because
-//	                | the spec phrases Stop's block as preventing
-//	                | termination, not preventing an action.
-//
-// Action → wire decision mapping:
-//
-//	block on PreInvocation/PreToolUse → {decision: "deny",  reason}
-//	block on Stop                     → {decision: "block", reason}
-//	confirm                           → {decision: "ask",   reason} (Pre* only)
-//	alert with additional context     → {systemMessage}
-//	alert on Post* events             → {additionalContext}
-//
-// PostToolUse and PostInvocation NEVER emit deny/ask: by the time
-// these events fire the inspected action has already executed at
-// the agent layer, so blocking would be ineffective theatre.
-// Findings surface as additionalContext (the Claude-Code post-event
-// idiom agy borrows verbatim), which agy ingests as model-readable
-// context for the next turn.
-//
-// Empirical confidence:
-//   - PreToolUse: verified on agy v1.0.1 — {decision: "deny"} blocks,
-//     {decision: "ask"} prompts, both bypass --dangerously-skip-permissions.
-//   - PreInvocation, PostToolUse, PostInvocation, Stop: not yet
-//     verified empirically on agy v1.0.x. The wire shapes here
-//     follow agy's Claude-Code lineage; if empirical testing reveals
-//     agy uses different verbs / fields for these events, this
-//     function is the single edit point. Tests in
-//     hook_profile_dispatch_test.go and antigravity_hook_profile_test.go
-//     pin the current contract so divergences surface in CI.
-func antigravityHookOutputForProfile(event, action, rawAction, reason, additional string) map[string]interface{} {
+func cursorPermissionOutput(action, reason string, supportsAsk, supportsUserMessage, supportsAgentMessage bool) map[string]interface{} {
+	permission := "allow"
+	if action == "block" {
+		permission = "deny"
+	} else if action == "confirm" && supportsAsk {
+		permission = "ask"
+	}
+	output := map[string]interface{}{"permission": permission}
+	if permission == "allow" {
+		return output
+	}
+	if supportsUserMessage {
+		output["user_message"] = reason
+	}
+	if supportsAgentMessage {
+		output["agent_message"] = reason
+	}
+	return output
+}
+
+// antigravityHookOutputForProfile renders only fields documented by
+// https://antigravity.google/docs/hooks. PreToolUse is the sole hard policy
+// boundary: synchronous stdout {"decision":"deny"} blocks the tool. No
+// enforcement claim relies on the hook process exit code.
+func antigravityHookOutputForProfile(event, action, _ string, reason, additional string) map[string]interface{} {
 	switch canonicalHookEvent(event) {
-	case "preinvocation", "pretooluse":
+	case "pretooluse":
 		switch action {
 		case "block":
 			return map[string]interface{}{"decision": "deny", "reason": reason}
 		case "confirm":
 			return map[string]interface{}{"decision": "ask", "reason": reason}
-		case "alert":
-			if additional != "" {
-				return map[string]interface{}{"systemMessage": additional}
-			}
+		default:
+			return map[string]interface{}{"decision": "allow"}
 		}
-	case "stop":
-		// Spec phrases Stop's block verb as "block-terminating the
-		// agent if validation checks fail" — the wire string is
-		// "block" (matching agy's Claude-Code lineage for Stop
-		// hooks), distinct from "deny" used by Pre* events. If
-		// empirical testing on agy v1.0.x reveals "block" is not
-		// honored on Stop, the safe fallback is "deny" (verified
-		// for PreToolUse on the same agy version).
-		switch action {
-		case "block":
-			return map[string]interface{}{"decision": "block", "reason": reason}
-		case "alert":
-			if additional != "" {
-				return map[string]interface{}{"systemMessage": additional}
-			}
-		}
-	case "posttooluse", "postinvocation":
-		// Post* events fire after execution — DefenseClaw cannot
-		// retroactively block the inspected action. Findings
-		// surface as additionalContext for next-turn ingestion;
-		// agy's Claude-Code-derived schema treats this field as
-		// model-readable context that gets injected into the next
-		// LLM call automatically.
+	case "preinvocation", "postinvocation":
 		if additional != "" {
-			return map[string]interface{}{"additionalContext": additional}
+			return map[string]interface{}{
+				"injectSteps": []interface{}{
+					map[string]interface{}{"ephemeralMessage": additional},
+				},
+			}
 		}
+		return map[string]interface{}{}
+	case "posttooluse":
+		return map[string]interface{}{}
+	case "stop":
+		// The documented "continue" decision re-enters the agent loop. That is
+		// not a tool-execution block and DefenseClaw does not present it as one.
+		return map[string]interface{}{"decision": "allow"}
 	}
-	// Forward-compat fallback: unknown / unrecognised events with
-	// confirm verdicts and additional context surface as
-	// systemMessage, matching the legacy hook-only fallback at the
-	// bottom of hookOnlyProfileRespond.
-	if rawAction == "confirm" && additional != "" {
-		return map[string]interface{}{"systemMessage": additional}
-	}
-	return nil
+	return map[string]interface{}{}
 }
 
 func copilotHookOutputForProfile(event, action, rawAction, reason, additional string) map[string]interface{} {
@@ -257,19 +272,23 @@ func copilotHookOutputForProfile(event, action, rawAction, reason, additional st
 		}
 	case "permissionrequest":
 		if action == "block" {
-			return map[string]interface{}{"behavior": "deny", "message": reason, "interrupt": true}
+			// interrupt=true stops the entire Copilot agent. An ordinary
+			// DefenseClaw tool denial must short-circuit only this permission
+			// request, so leave the optional interrupt field absent.
+			return map[string]interface{}{"behavior": "deny", "message": reason}
 		}
 	case "agentstop", "stop", "subagentstop":
 		if action == "block" {
 			return map[string]interface{}{"decision": "block", "reason": reason}
 		}
-	case "posttoolusefailure", "notification":
+	case "sessionstart", "subagentstart", "posttooluse", "posttoolusefailure", "notification":
 		if additional != "" {
 			return map[string]interface{}{"additionalContext": additional}
 		}
-	}
-	if rawAction == "confirm" && additional != "" {
-		return map[string]interface{}{"additionalContext": additional}
+	case "userprompttransformed":
+		// This event is mutation-only. DefenseClaw observes and audits the
+		// transformed prompt but never rewrites model-facing content.
+		return map[string]interface{}{}
 	}
 	return nil
 }

@@ -332,27 +332,40 @@ func (writer *EventHistoryWriter) AppendContext(
 		}
 	}
 	defer releaseReady()
-	tx, err := writer.store.db.BeginTx(ctx, nil)
-	if err != nil {
-		releaseReady()
-		writer.reportHealth(EventHistoryHealthWriteFailed)
-		return fmt.Errorf("audit: begin v8 event-history write: %w", err)
-	}
-	defer tx.Rollback() //nolint:errcheck
-	outcome, err := writer.appendContextTx(ctx, tx, record, projection)
+	err = retryBusyObserved(
+		ctx,
+		"v8_event_history_transaction",
+		writer.store.sqliteBusyObservabilityV8(),
+		func() error {
+			tx, beginErr := writer.store.db.BeginTx(ctx, nil)
+			if beginErr != nil {
+				return eventHistoryFailure(
+					EventHistoryHealthWriteFailed,
+					&eventHistoryWriteError{cause: beginErr},
+				)
+			}
+			outcome, appendErr := writer.appendContextTx(ctx, tx, record, projection)
+			if appendErr != nil {
+				_ = tx.Rollback()
+				return appendErr
+			}
+			if commitErr := writer.commitAppendTransaction(tx, outcome); commitErr != nil {
+				_ = tx.Rollback()
+				return eventHistoryFailure(
+					EventHistoryHealthWriteFailed,
+					&eventHistoryWriteError{cause: commitErr},
+				)
+			}
+			return nil
+		},
+	)
 	if err != nil {
 		// Health reporters may persist their own mandatory record through the
-		// same single-connection Store. End this transaction before invoking
-		// external code so failure reporting cannot self-deadlock.
-		_ = tx.Rollback()
+		// same single-connection Store. Every failed attempt has ended before
+		// invoking external code so failure reporting cannot self-deadlock.
 		releaseReady()
 		writer.reportAppendError(err)
 		return err
-	}
-	if err := writer.commitAppendTransaction(tx, outcome); err != nil {
-		releaseReady()
-		writer.flushHealth()
-		return fmt.Errorf("audit: commit v8 event-history row: %w", err)
 	}
 	releaseReady()
 	writer.flushHealth()
@@ -676,7 +689,6 @@ func (writer *EventHistoryWriter) commitAppendTransaction(
 	writer.appendCommitMu.Lock()
 	defer writer.appendCommitMu.Unlock()
 	if err := tx.Commit(); err != nil {
-		writer.enqueueHealth(EventHistoryHealthWriteFailed)
 		return err
 	}
 	writer.stageAppendOutcome(outcome)

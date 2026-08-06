@@ -1,27 +1,42 @@
 ---
 title: Connectors and enforcement
-description: Exact native Windows Codex, Claude Code, and Amp event coverage, action boundaries, fail modes, and runtime controls.
+description: Exact native Windows connector hook/policy coverage, action boundaries, fail modes, and runtime controls.
 keywords:
   - DefenseClaw Windows Codex
   - DefenseClaw Windows Claude Code
   - DefenseClaw Windows Amp
+  - DefenseClaw Windows Cursor
+  - DefenseClaw Windows legacy Cascade
+  - DefenseClaw Windows Hermes Agent
+  - DefenseClaw Windows OpenCode
+  - DefenseClaw Windows OmniGent
   - DefenseClaw Windows action mode
   - DefenseClaw Windows fail closed
   - DefenseClaw Windows hooks
 ---
 
-Native Windows enforcement is connector-native and hook/plugin-only. Codex and
-Claude Code invoke `defenseclaw-hook.exe`; Amp loads an owner-only TypeScript
-system-policy plugin. The hook or plugin authenticates to the same-user
-loopback gateway, and the gateway maps a policy verdict back into that event's
-documented response shape.
+Native Windows enforcement is connector-native and proxy-free. A supported
+agent invokes its managed native hook or awaited policy path. Codex, Claude Code,
+and Hermes invoke `defenseclaw-hook.exe`; Amp loads an owner-only TypeScript
+system-policy plugin; Cursor and legacy Cascade use managed native
+PowerShell adapters; OpenCode auto-loads the DefenseClaw JavaScript bridge;
+OmniGent imports a Python policy bridge into its selected native `uv tool`
+environment.
+The hook or plugin
+authenticates to the same-user loopback gateway, and the gateway maps a policy
+verdict back into that event's documented response shape.
 
 <Callout type="warning" title="Coverage stops at the agent surface">
-DefenseClaw does not proxy Codex, Claude Code, or Amp model traffic on Windows.
-A prompt, tool, subprocess, file change, or response that the agent does not
-emit through a registered hook, Amp plugin callback, or native telemetry
-surface is not silently intercepted by DefenseClaw.
+DefenseClaw does not proxy supported connector model traffic on
+Windows. A
+prompt, tool, subprocess, file change, or response that the agent does not emit
+through a registered hook, Amp plugin callback, or native telemetry surface is not silently
+intercepted by DefenseClaw.
 </Callout>
+
+OmniGent has a narrower native-degraded surface: DefenseClaw does not proxy its model traffic
+either, and protection is limited to events its native Windows server or SDK
+harness sends through the awaited custom-policy surface.
 
 ## Observe and action
 
@@ -36,6 +51,13 @@ Start with observe:
 defenseclaw setup codex --mode observe
 defenseclaw setup claude-code --mode observe
 defenseclaw setup amp --mode observe
+defenseclaw setup cursor --mode observe
+defenseclaw setup windsurf --mode observe
+defenseclaw setup hermes --mode observe
+defenseclaw setup opencode --mode observe
+defenseclaw setup omnigent --mode observe
+defenseclaw setup copilot --mode observe
+defenseclaw setup antigravity --mode observe
 ```
 
 After reviewing the event inventory and policy, promote one connector at a
@@ -45,12 +67,21 @@ time:
 defenseclaw setup codex --mode action
 defenseclaw setup claude-code --mode action
 defenseclaw setup amp --mode action
+# Cursor action uses event-native deny and failClosed=true; native HITL stays disabled.
+defenseclaw setup cursor --mode action --no-human-approval
+defenseclaw setup windsurf --mode action
+defenseclaw setup hermes --mode action
+defenseclaw setup opencode --mode action
+defenseclaw setup omnigent --mode action
+defenseclaw setup copilot --mode action
+defenseclaw setup antigravity --mode action
 defenseclaw guardrail status
 ```
 
 Action mode is not a promise that a post-action hook can undo a completed side
-effect. `PostToolUse` and other result surfaces can record a finding or stop a
-later agentic step, but the original tool action has already occurred.
+effect. For Codex, `PostToolUse` block feedback replaces the completed tool
+result fed to the next interactive loop; in code mode, the corresponding tool
+promise rejects. The original tool action has already occurred.
 
 ## Codex
 
@@ -59,18 +90,29 @@ On native Windows, DefenseClaw writes hook policy to
 notify fields in `%CODEX_HOME%\config.toml`. The default Codex home is
 `%USERPROFILE%\.codex`.
 
-The current hook contract registers ten events:
+Codex 0.133 through 0.144 registers ten events. Codex 0.145 and newer
+registers the same matrix plus `SessionEnd`:
+
+The lifecycle matcher/control behavior in the four rows marked **v3/v4** is
+contract-supported only for Codex `>=0.133`: v3 covers `0.133` through
+`0.144`, and v4 covers `>=0.145`. This boundary is not release certification;
+supported availability does not populate authentic packaged plus official-client
+evidence. The smaller v1/v2 contracts do not inherit these claims;
+DefenseClaw does not infer or backfill them.
 
 | Codex event | Action-mode role |
 | --- | --- |
-| `SessionStart` | Observe lifecycle. |
+| `SessionStart` (v3/v4, `>=0.133`) | DefenseClaw can return `continue: false` to end the turn before another model request. The matcher covers `startup`, `resume`, `clear`, and `compact`. |
 | `UserPromptSubmit` | Can return a block decision. |
 | `PreToolUse` | Can return a deny decision before the tool. |
 | `PermissionRequest` | Can return a deny decision in the permission flow. |
-| `PostToolUse` | Can report/block the later loop, but cannot undo the completed tool. |
-| `SubagentStart`, `SubagentStop` | Observe lifecycle; not declared block surfaces. |
-| `PreCompact`, `PostCompact` | Observe context compaction; not declared block surfaces. |
-| `Stop` | Can return a block-shaped stop decision. |
+| `PostToolUse` | `decision: "block"` cannot undo the completed tool. In interactive use, the reason replaces the result fed to the next loop; in code mode, the corresponding tool promise rejects. |
+| `SubagentStart` | Observe lifecycle. |
+| `SubagentStop` (v3/v4, `>=0.133`) | DefenseClaw can return `decision: "block"` to continue the subagent flow; this is a continuation request, not subagent termination. |
+| `PreCompact` (v3/v4, `>=0.133`) | DefenseClaw can return `continue: false` to stop before compaction. |
+| `PostCompact` (v3/v4, `>=0.133`) | DefenseClaw can return `continue: false` to stop after compaction has completed. |
+| `Stop` | `decision: "block"` prevents stopping and continues with the reason as a new continuation prompt. |
+| `SessionEnd` (0.145+) | Best-effort teardown observation with a three-second maximum; not a block or native ask surface. |
 
 Setup selects a hook contract that matches the installed Codex version; older
 supported contracts can have a smaller event set. Verify the detected contract
@@ -87,18 +129,21 @@ DefenseClaw manages its marked hook and native OTLP entries in
 `%CLAUDE_CONFIG_DIR%\settings.json`. The default Claude configuration directory
 is `%USERPROFILE%\.claude`.
 
-The current contract registers these 28 events:
+The selected contract registers 28 events for Claude Code
+`>=2.1.154,<2.1.219` and 29 events for `>=2.1.219`:
 
 | Category | Registered events |
 | --- | --- |
 | Session and prompt | `SessionStart`, `SessionEnd`, `InstructionsLoaded`, `UserPromptSubmit`, `UserPromptExpansion`, `MessageDisplay` |
 | Tool and permission | `PreToolUse`, `PermissionRequest`, `PermissionDenied`, `PostToolUse`, `PostToolUseFailure`, `PostToolBatch` |
 | Agent and task | `SubagentStart`, `SubagentStop`, `TaskCreated`, `TaskCompleted`, `TeammateIdle`, `Stop`, `StopFailure` |
-| Configuration and workspace | `ConfigChange`, `CwdChanged`, `FileChanged`, `WorktreeRemove`, `PreCompact`, `PostCompact` |
+| Configuration and workspace | `ConfigChange`, `CwdChanged`, `DirectoryAdded` (2.1.219+ only), `FileChanged`, `WorktreeRemove`, `PreCompact`, `PostCompact` |
 | Interaction | `Notification`, `Elicitation`, `ElicitationResult` |
 
 `Setup` and `WorktreeCreate` are deliberately not owned by the generic security
-hook. `MessageDisplay` is asynchronous observation. `FileChanged` is narrowed
+hook. `MessageDisplay` is asynchronous observation. `DirectoryAdded` is a
+synchronous, matcherless, 30-second observation after the directory has
+already been added; it has no block, ask, or decision authority. `FileChanged` is narrowed
 to agent, project, dependency, environment-file, and MCP configuration names
 rather than every source edit.
 
@@ -157,17 +202,236 @@ use:
 amp -x "Reply with the word ready." --plugin-ready-timeout 30
 ```
 
-The timeout is required for complete lifecycle capture and tool call/result guard
-readiness. Fail-closed behavior begins only after the managed plugin has loaded
-and can govern a `tool.call`; it cannot retroactively cover earlier host
+The timeout is required for complete lifecycle capture and tool call/result
+guard readiness. Fail-closed behavior begins only after the managed plugin has
+loaded and can govern a `tool.call`; it cannot retroactively cover earlier host
 activity. Fully exit and relaunch Amp after setup, removal, or repair so every
 new thread gets the intended plugin generation.
 
+## Cursor
+
+DefenseClaw manages its entries in `%USERPROFILE%\.cursor\hooks.json`. On
+Windows, Cursor invokes the managed `cursor-hook.ps1` adapter, which preserves
+the JSON pipeline input and waits for `defenseclaw-hook.exe` to return its
+documented synchronous verdict. Cursor spawns each command hook and
+automatically reloads `hooks.json`; if a configuration change is not observed,
+the documented fallback is to restart Cursor.
+
+The connector registers the current 21-event roster, including `subagentStart`.
+Cursor's event schemas expose native deny gates and ask on
+`beforeShellExecution` and `beforeMCPExecution`, but Cursor runs every matching
+hook and merges conflicts **Enterprise > Team > Project > User**. DefenseClaw
+owns only the user hook and does not implement Enterprise or Team hooks. Cursor
+exposes no safe API for detecting an actual higher-priority conflict, so
+DefenseClaw reports that limitation and does not infer a conflict. Action maps
+blocks to the documented event-native deny response; confirm remains an alert
+because native ask/HITL is not enabled.
+`sessionStart` and `sessionEnd` are fire-and-forget. `stop` accepts only a
+follow-up message. None of those three lifecycle surfaces is a synchronous
+enforcement gate.
+
+Cursor action writes `failClosed: true`; observe writes `failClosed: false` and
+remains nonblocking. Human approval stays disabled. Setup and repair report
+readiness only when the exact 21-event schema, current managed adapter,
+mode-matched contract lock, and full active connector roster agree.
+Fresh setup ignores ambient
+`DEFENSECLAW_CURSOR_CONFIG_HOME` and uses `%USERPROFILE%\.cursor`; only an
+authenticated persisted custody record may restore a historical path.
+
+The decoder boundedly inspects the official post/result fields and preserves
+the exact MCP URL/command plus `tool_input`. Local inventory covers recursive
+skill compatibility roots, `.cursor/rules/**/*.mdc`, root/nested `AGENTS.md`,
+local plugins, and project/user compatibility subagents. Multi-root, cloud,
+marketplace/team/private, dynamic plugin/MCP, user UI rules, and effective
+same-name selection remain unverified. The payload `cursor_version` identifies
+the Cursor application/Desktop; `agent --version` remains separate Agent CLI
+evidence. Supported availability does not fill or imply that evidence.
+
+## Legacy Cascade (`windsurf`)
+
+This connector covers only the legacy Cascade agent in Devin Desktop. Devin Local
+is the current default for new tabs and uses separate lifecycle hooks and
+configuration; Devin Local, cloud agents, and ACP are unsupported by this
+connector.
+
+DefenseClaw binds the connector to the signed-in user's Windows Profile Known
+Folder and manages only
+`<bound-profile>\.codeium\windsurf\hooks.json`. The binding is persisted for
+repair, upgrade, reconciliation, and uninstall; maintenance never guesses from
+an ambient `USERPROFILE`. Existing top-level values, events, and foreign hook
+handlers are preserved.
+
+The connector captures the managed backup for this exact file before writing.
+It then requires one native DefenseClaw handler on every documented event,
+publishes the `windsurf-hooks-v1` lock/runtime metadata, and only afterward
+publishes Windsurf as active. Failure rolls back the partial connector instead
+of leaving another connector setup to repair it. The optional bound-profile
+`mcp_config.json` is inventory only and is not a hook-health prerequisite.
+
+System/`ProgramData` and workspace hook files plus enterprise, Team,
+cloud-dashboard, and MDM policy are not managed. Their precedence and effective
+deployment remain unverified, so this per-user connector does not claim
+authoritative enforcement across those layers.
+
+Cascade's documented Windows transport runs a hook's `powershell` field via
+`powershell -Command`. DefenseClaw writes no `command` fallback. Its generated
+`windsurf-hook.ps1` adapter uses only native Windows processes, forwards the
+vendor JSON stdin and child stdout/stderr, waits for the exact packaged
+`defenseclaw-hook.exe`, and returns the child status unchanged. There is no
+Bash, Git Bash, Cygwin/MSYS, WSL, Docker, VM, or PATH-resolved executable in
+this path.
+
+The registration covers all twelve documented Cascade events:
+
+| Role | Events |
+| --- | --- |
+| Blocking pre-hooks | `pre_user_prompt`, `pre_read_code`, `pre_write_code`, `pre_run_command`, `pre_mcp_tool_use` |
+| Non-blocking post-hooks | `post_read_code`, `post_write_code`, `post_run_command`, `post_mcp_tool_use`, `post_setup_worktree` |
+| Asynchronous response hooks | `post_cascade_response`, `post_cascade_response_with_transcript` |
+
+Cascade's exit contract is exact: exit `0` proceeds, exit `2` blocks only the
+five pre-hooks and shows stderr to the agent, and every other exit proceeds.
+Post-hooks cannot block; the two Cascade response hooks run asynchronously.
+Restricted Mode disables hooks entirely, so DefenseClaw cannot claim
+enforcement while that workspace mode is active. `defenseclaw doctor` reports
+these boundaries with adapter/hash/registration drift. Because Restricted Mode
+is a workspace UI state with no documented passive local signal, Doctor marks
+that state unverified instead of inferring it from event counters. Zero
+counters do not prove activation, failure, or certification.
+
+Cascade has no native hook ask/HITL response. A `confirm` verdict uses the
+connector's configured immediate fallback and remains visible as `raw_action`
+in audit; it cannot be approved and resumed from the DefenseClaw TUI.
+
+## OpenCode
+
+DefenseClaw writes
+`%OPENCODE_CONFIG_DIR%\plugins\defenseclaw.js`, defaulting to
+`%USERPROFILE%\.config\opencode\plugins\defenseclaw.js`. OpenCode auto-loads
+that dependency-free plugin at startup. Restart OpenCode after Setup, repair,
+upgrade, fail-mode reconciliation, or teardown.
+
+Only `tool.execute.before` is an authoritative enforcement path. OpenCode
+awaits this hook before invoking the tool, and a thrown `Error` aborts
+execution:
+
+| OpenCode event | Action-mode role |
+| --- | --- |
+| `tool.execute.before` | Await the gateway decision; normal return permits and a thrown error blocks before execution. |
+| `tool.execute.after` | Best-effort observe/telemetry only. The tool has already run, and the bridge does not await delivery. |
+| Generic lifecycle `event` dispatch | Best-effort observation only because OpenCode dispatches it without awaiting the plugin Promise. |
+
+OpenCode loads global plugins before project plugins and runs hooks in order.
+Bridge v7 checks the official v1.18.10-v1.18.11 `plugin_origins` list; if a later plugin
+could mutate the shared args, action mode refuses an authoritative allow.
+Doctor also requires the bridge's config-hook load heartbeat, so a current file
+without runtime proof warns about stopped or `--pure`/external-plugin-disabled
+operation.
+
+OpenCode 1.18.10 and 1.18.11 expose permission and chat/context plugin hooks, but the
+focused DefenseClaw bridge intentionally does not implement a native ask or
+context-injection response.
+`confirm` therefore falls back to allow with audit/alerting. Its plugin
+contract is in-process: OpenCode passes hook arguments and awaits the
+`tool.execute.before` Promise. There is no hook stdin, stdout response, or exit
+code contract.
+
+The plugin carries a connector-scoped gateway token. Its Windows DACL
+restricts access to the current user, Administrators, and SYSTEM, but does not
+make the file tamper-proof against the owning user or an administrator.
+`defenseclaw doctor` compares the managed digest, and Setup
+repair/reconciliation restores the expected plugin registration.
+
+## OmniGent — native degraded
+
+OmniGent 0.7.0 documents direct native Windows execution for `omnigent server`
+and SDK-based `omnigent run` harnesses. Install it from PowerShell with its
+documented `uv` path:
+
+```powershell
+uv tool install --python 3.12 omnigent==0.7.0
+defenseclaw setup omnigent --mode observe
+omnigent server --config "$env:OMNIGENT_CONFIG_HOME\config.yaml"
+```
+
+DefenseClaw binds setup to the freshly selected `omnigent.exe`, resolves the
+matching `uv tool` environment, and writes the bridge import shim into that
+environment's `Lib\site-packages`. The server imports the bridge in-process.
+Each synchronous policy function call posts to the authenticated same-user
+loopback gateway and returns `ALLOW`, `ASK`, or `DENY`; there is no
+stdin/stdout/exit-code hook protocol or shell wrapper.
+
+The supported policy phases are `request`, `tool_call`, `tool_result`,
+`response`, `llm_request`, and `llm_response`. Native `ASK` is meaningful only
+before the action at `request`, `tool_call`, and `llm_request`; a post-action
+decision cannot undo an already-completed side effect.
+
+This is intentionally not sandbox parity. OmniGent's native Windows terminal
+wrappers are unavailable, Windows Job Objects provide process-tree/resource
+containment but not filesystem or network isolation, and the Linux/macOS L7
+egress sandbox is unavailable. Upstream v0.7.0 Windows CI is explicitly
+non-blocking while support stabilizes; supported availability does not claim
+integrated packaged or official-client validation.
+
+## Hermes Agent
+
+Hermes native Windows setup is supported. DefenseClaw manages
+the `hooks` mapping and `hooks_auto_accept: true` in
+`%HERMES_HOME%\config.yaml`; the default home is
+`%LOCALAPPDATA%\hermes`. Each managed handler uses one directly quoted absolute
+native command:
+
+```text
+"C:/Program Files/DefenseClaw/bin/defenseclaw-hook.exe" hook --connector hermes
+```
+
+The forward-slash Windows path is intentional: Hermes parses the configured
+string with Python `shlex.split`, then calls `subprocess.run(argv,
+shell=False)`. DefenseClaw does not put PowerShell, `&`, a `.ps1`, Bash, Git
+Bash, MSYS, Cygwin, WSL, Docker, or another wrapper in that command.
+
+The connector contract requires Hermes v0.19.0 or newer and registers all 23
+events in that release's `VALID_HOOKS` set. Membership does not imply
+enforcement; each event is classified from its documented callback and shell
+response semantics:
+
+| Hermes event(s) | Official host semantics | DefenseClaw shell-lane classification |
+| --- | --- | --- |
+| `pre_tool_call` with matcher `.*` | Accepts canonical block or Claude-style block JSON. | **Enforce/block:** the only tool veto. |
+| `post_tool_call` with matcher `.*` | Return ignored after the tool completes. | **Observe/audit:** cannot undo the tool. |
+| `pre_llm_call` | Accepts non-empty `{"context":"..."}`. | **Context transform:** can add context, not block. |
+| `post_llm_call` | Return ignored after the model loop. | **Observe/audit.** |
+| `pre_verify` | Accepts `{"action":"continue","message":"..."}` (or normalized stop-block form), bounded by Hermes verification nudges. | **Control/continue:** may keep verification going; it is not a tool deny, fail-closed result, or ask. |
+| `transform_terminal_output`, `transform_tool_result`, `transform_llm_output` | Python plugin hooks require a returned string to replace content. | **Audit-only / transform N/A:** the shell JSON parser cannot return the required Python string, so DefenseClaw does not claim redaction or rewriting. |
+| `pre_gateway_dispatch` | Python plugins may return `skip`, `rewrite`, or `allow`. | **Audit-only / gateway mutation N/A:** Hermes's shell response parser does not pass those shapes through. |
+| `pre_approval_request`, `post_approval_response` | Approval observers; return values are ignored. | **Audit-only:** they do not approve, deny, or answer a prompt. |
+| `pre_api_request`, `post_api_request`, `api_request_error` | Listed as valid in v0.19 source; the hook guide does not document a shell response effect. | **Partial audit-only:** no response authority is inferred. |
+| `on_session_start`, `on_session_end`, `on_session_finalize`, `on_session_reset` | Session lifecycle callbacks; returns ignored. | **Observe/audit.** |
+| `subagent_start`, `subagent_stop` | Delegation lifecycle callbacks; returns ignored. | **Observe/audit.** |
+| `kanban_task_claimed`, `kanban_task_completed`, `kanban_task_blocked` | Observers around durable task transitions; returns ignored. `blocked` names a completed transition, not a veto surface. | **Audit-only:** cannot alter the board transition. |
+
+Hermes has no native ask/approve/HITL hook response. A DefenseClaw `confirm`
+finding is recorded and alerted but cannot pause and resume the Hermes call.
+Hermes also treats a timeout, missing or rejected authentication, connection
+failure, nonzero exit, malformed output, or other invalid hook result as a
+warning and continues. Exit status is not an enforcement signal. DefenseClaw
+therefore never synthesizes a Hermes fail-closed response, including when the
+generic connector policy says `closed` or strict availability is enabled.
+
+Hermes itself installs PortableGit and uses Git Bash for its upstream terminal
+tool on Windows. That is an upstream Hermes limitation, not part of the
+DefenseClaw hook path; DefenseClaw does not locate, invoke, configure, or test
+that terminal dependency.
+
 ## Fail behavior
 
-A fresh installation defaults to `closed`; a migrated older configuration may
-retain an explicit `open` posture. The effective connector setting applies to
-both:
+A fresh Codex, Claude Code, or OpenCode installation defaults to `closed`; a
+migrated older configuration may retain an explicit `open` posture. Cursor
+retains its documented fail-open default unless closed is selected explicitly.
+Hermes is always effectively fail-open regardless of the requested generic
+policy. For a block-capable pre-action event on any other connector, the
+effective connector setting applies to both, subject to that vendor's response
+contract:
 
 - transport failures such as missing authentication, connection refusal,
   timeout, or gateway 5xx; and
@@ -175,22 +439,44 @@ both:
   decision field.
 
 `open` allows the event and records the failure. `closed` returns the
-connector's block response. `DEFENSECLAW_STRICT_AVAILABILITY=1` remains an
-additional force-closed override, but the persisted connector policy is the
-normal control:
+connector's block response. For Codex and Claude Code,
+`DEFENSECLAW_STRICT_AVAILABILITY=1` remains an additional force-closed
+override. OpenCode instead bakes the persisted `open`/`closed` setting into the
+managed plugin; an ambient process environment override is not authoritative.
+The normal control is:
 
 ```powershell
 defenseclaw guardrail fail-mode
 defenseclaw guardrail fail-mode closed --connector codex --yes
 defenseclaw guardrail fail-mode closed --connector claudecode --yes
-defenseclaw guardrail fail-mode closed --connector amp --yes
+defenseclaw guardrail fail-mode closed --connector cursor --yes
+defenseclaw guardrail fail-mode closed --connector windsurf --yes
+defenseclaw guardrail fail-mode closed --connector opencode --yes
 defenseclaw guardrail status
 ```
+
+For legacy Cascade, “closed” means DefenseClaw adapter availability or invalid
+response failures become the vendor's blocking exit `2`. It does not broaden
+Cascade's semantics: arbitrary non-`2` hook errors still fail open, only the
+five documented pre-hooks can block, and Restricted Mode still disables all
+hooks.
+
+<Callout type="warning" title="Hermes failures are always fail open">
+Hermes only honors a valid synchronous JSON response. Its official hook
+runner ignores exit status for enforcement and warns/continues on timeout,
+nonzero exit, malformed output, and other hook failures. The displayed generic
+fail-mode value is policy provenance, not a claim that DefenseClaw can make
+those Hermes failures block or ask.
+</Callout>
 
 Changing fail mode normally restarts the gateway and reconciles the native
 runtime. `--no-restart` only persists desired state; the running connector can
 remain on the prior value until restart. Status reports configured and runtime
 posture so that drift is visible.
+
+For OpenCode, `closed` is enforceable only in the awaited
+`tool.execute.before` path. It cannot turn `tool.execute.after` or generic
+lifecycle events into blocking or guaranteed delivery.
 
 One boundary is intentionally separate: if the gateway's internal evaluator
 panics, it returns allow with warning/telemetry rather than claiming a proven
@@ -202,7 +488,7 @@ See [Fail modes](/docs/reference/fail-modes) for the cross-platform reference.
 
 ## Enable, disable, and remove
 
-Connector-scoped controls preserve the other active peer:
+Connector-scoped controls preserve the other active peers:
 
 ```powershell
 defenseclaw guardrail disable --connector codex --yes
@@ -224,12 +510,12 @@ These controls are not the same as skill or plugin runtime disable.
 
 Runtime disable is proven only on exact agent events:
 
-| Asset control | Codex | Claude Code | Amp |
-| --- | --- | --- | --- |
-| Skill runtime disable | **Limited** — blocks an exact disabled skill identity at a leading `$skill` selection in `UserPromptSubmit`. | **Limited** — blocks an exact disabled skill identity at the native `UserPromptExpansion` load. | **Limited** — skills are inventoried and scanned, but Amp exposes no separate skill-load callback. `tool.call` policy still applies to tools invoked after skill guidance loads. |
-| Plugin runtime disable | **Limited** — policy is recorded, but no certified hard plugin-expansion event exists. Use quarantine for hard filesystem enforcement. | **Limited** — blocks the native slash-command/plugin expansion event. | **Limited** — Amp executes plugin top-level code while loading, before a DefenseClaw callback can govern it. Use quarantine for filesystem enforcement. |
-| Skill quarantine/restore | **Supported** — validated root, journaled provenance/content hash, copy-verify-remove, and verified restore. | **Supported** with the same DefenseClaw quarantine contract. | **Supported** with the same DefenseClaw quarantine contract for exact inventoried AgentSkills. |
-| Plugin quarantine/restore | **Limited** — validated filesystem move/restore; do not assume the stronger skill transaction/hash guarantees. | **Limited** for the same reason. | **Limited** for the same reason; relaunch Amp after a plugin move. |
+| Asset control | Codex | Claude Code | OpenCode | Hermes Agent |
+| --- | --- | --- | --- | --- |
+| Skill runtime disable | **Limited** — blocks an exact disabled skill identity at a leading `$skill` selection in `UserPromptSubmit`. | **Limited** — blocks an exact disabled skill identity at the native `UserPromptExpansion` load. | **Unsupported** — OpenCode skill inventory is not a v1 connector surface. | **Observe only** — inventory and policy records exist, but Hermes publishes no native skill-selection enforcement event. |
+| Plugin runtime disable | **Limited** — policy is recorded, but no certified hard plugin-expansion event exists. Use quarantine for hard filesystem enforcement. | **Limited** — blocks the native slash-command/plugin expansion event. | **Unsupported** — DefenseClaw manages only its own bridge registration. | **Observe only** — plugin discovery is read-only; no native expansion enforcement event is claimed. |
+| Skill quarantine/restore | **Supported** — validated root, journaled provenance/content hash, copy-verify-remove, and verified restore. | **Supported** with the same DefenseClaw quarantine contract. | **Unsupported**. | **Supported only where the discovered filesystem root satisfies the generic quarantine contract; not a Hermes hook capability.** |
+| Plugin quarantine/restore | **Limited** — validated filesystem move/restore; do not assume the stronger skill transaction/hash guarantees. | **Limited** for the same reason. | **Unsupported**. | **Limited** for the same reason; Hermes plugin inventory itself is discovery-only. |
 
 Runtime disable does not block future installation and does not move files.
 Restore removes only quarantine; a separate install block or runtime-disable
@@ -256,18 +542,23 @@ defenseclaw doctor
 Use `defenseclaw-gateway connector verify --connector <name>` only after
 teardown or removal: it verifies that DefenseClaw-owned connector state is
 absent. On an active connector, that state is expected, so use `doctor` and
-`guardrail status` instead. After setup or mode changes, fully restart Codex
-or Claude Code, or fully exit and relaunch Amp, so the agent reloads the
-managed registration.
+`guardrail status` instead. After setup or mode changes, confirm the agent
+loaded its native hook configuration. Cursor documents automatic `hooks.json`
+reload with restart as the fallback if a change is not loaded.
 
 Protection is established only when all of the following agree:
 
 1. the intended native agent and DefenseClaw run as the same Windows user;
-2. the connector appears active with the expected mode and fail mode;
+2. the connector appears active with the expected mode and truthful fail
+   posture (Hermes must report failure handling as open);
 3. the gateway reports ready and authenticated;
 4. doctor recognizes the agent version and full hook contract; and
 5. a new non-sensitive prompt produces connector-attributed local activity.
 
 For configuration details, see [Codex](/docs/connectors/codex),
-[Claude Code](/docs/connectors/claudecode), [Amp](/docs/connectors/amp), and
+[Claude Code](/docs/connectors/claudecode),
+[Cursor](/docs/connectors/cursor),
+[OpenCode](/docs/connectors/opencode),
+[OmniGent](/docs/connectors/omnigent),
+[Hermes Agent](/docs/connectors/hermes), and
 [multi-connector setup](/docs/setup/guardrail/multi-connector).

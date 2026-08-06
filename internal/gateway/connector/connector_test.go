@@ -37,6 +37,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 	"github.com/pelletier/go-toml/v2"
 )
 
@@ -609,11 +610,240 @@ func TestClaudeCode_ImplementsComponentScanner(t *testing.T) {
 		t.Error("expected SupportsComponentScanning to be true")
 	}
 	targets := c.ComponentTargets("/tmp/workspace")
-	expectedTypes := []string{"skill", "plugin", "mcp", "agent", "command", "config"}
+	expectedTypes := []string{"skill", "plugin", "mcp", "agent", "command", "memory", "config"}
 	for _, tp := range expectedTypes {
 		if _, ok := targets[tp]; !ok {
 			t.Errorf("missing component type %q", tp)
 		}
+	}
+}
+
+func TestClaudeCode_ComponentTargetsHonorMCPStateScope(t *testing.T) {
+	configDir := filepath.Join(t.TempDir(), "claude-config")
+	pluginParent := filepath.Join(t.TempDir(), "claude-plugins")
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+	t.Setenv("CLAUDE_CODE_PLUGIN_CACHE_DIR", pluginParent)
+	previous := ClaudeCodeSettingsPathOverride
+	ClaudeCodeSettingsPathOverride = ""
+	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = previous })
+
+	targets := NewClaudeCodeConnector().ComponentTargets(workspace)
+	settingsPath := filepath.Join(configDir, "settings.json")
+	mcpStatePath := filepath.Join(configDir, ".claude.json")
+	projectMCPPath := filepath.Join(workspace, ".mcp.json")
+	if !slices.Contains(targets["plugin"], filepath.Join(pluginParent, "cache")) {
+		t.Errorf("ComponentTargets(plugin) = %v, missing plugin parent override", targets["plugin"])
+	}
+	for _, commandDir := range []string{
+		filepath.Join(configDir, "commands"),
+		filepath.Join(workspace, ".claude", "commands"),
+	} {
+		if !slices.Contains(targets["skill"], commandDir) {
+			t.Errorf("ComponentTargets(skill) = %v, missing legacy command skills %q", targets["skill"], commandDir)
+		}
+	}
+
+	for _, expected := range []string{mcpStatePath, projectMCPPath} {
+		if !slices.Contains(targets["mcp"], expected) {
+			t.Errorf("ComponentTargets(mcp) = %v, missing %q", targets["mcp"], expected)
+		}
+	}
+	if slices.Contains(targets["mcp"], settingsPath) {
+		t.Errorf("ComponentTargets(mcp) = %v, settings.json is not Claude MCP state", targets["mcp"])
+	}
+	if slices.Contains(targets["config"], mcpStatePath) ||
+		slices.Contains(targets["config"], projectMCPPath) {
+		t.Errorf("ComponentTargets(config) = %v, MCP state must not be attributed as generic config", targets["config"])
+	}
+}
+
+func TestClaudeCode_FileChangedUsesDynamicMatchAllMatcher(t *testing.T) {
+	if fileChangedMatcher != ".+" {
+		t.Fatalf("fileChangedMatcher = %q, want Windows-valid dynamic-path filter .+", fileChangedMatcher)
+	}
+}
+
+func TestClaudeCode_ComponentAndWatchTargetsIncludeAncestorAndNestedSkills(t *testing.T) {
+	repository := filepath.Join(t.TempDir(), "repo")
+	launch := filepath.Join(repository, "apps", "web")
+	ancestorSkill := filepath.Join(repository, ".claude", "skills", "root-policy", "SKILL.md")
+	nestedSkill := filepath.Join(launch, "packages", "ui", ".claude", "skills", "ui-policy", "SKILL.md")
+	for _, path := range []string{
+		filepath.Join(repository, ".git", "keep"),
+		ancestorSkill,
+		nestedSkill,
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("# fixture\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	targets := NewClaudeCodeConnector().ComponentTargets(launch)
+	for _, want := range []string{
+		filepath.Dir(filepath.Dir(ancestorSkill)),
+		filepath.Dir(filepath.Dir(nestedSkill)),
+	} {
+		if !slices.Contains(targets["skill"], want) {
+			t.Errorf("ComponentTargets(skill) = %v, missing %q", targets["skill"], want)
+		}
+	}
+	watchPaths := ClaudeCodeWatchPaths(launch)
+	for _, want := range []string{ancestorSkill, nestedSkill} {
+		if !slices.Contains(watchPaths, want) {
+			t.Errorf("ClaudeCodeWatchPaths() = %v, missing %q", watchPaths, want)
+		}
+	}
+}
+
+func TestClaudeCode_ComponentAndWatchTargetsIncludeRecursiveAncestorAgents(t *testing.T) {
+	configDir := filepath.Join(t.TempDir(), "claude-home")
+	repository := filepath.Join(t.TempDir(), "repo")
+	launch := filepath.Join(repository, "apps", "web")
+	userAgent := filepath.Join(configDir, "agents", "review", "user.md")
+	ancestorAgent := filepath.Join(repository, ".claude", "agents", "security", "reviewer.md")
+	for _, path := range []string{
+		filepath.Join(repository, ".git", "keep"),
+		userAgent,
+		ancestorAgent,
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("---\nname: reviewer\ndescription: Reviews code\n---\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+
+	targets := NewClaudeCodeConnector().ComponentTargets(launch)
+	for _, want := range []string{
+		filepath.Join(launch, ".claude", "agents"),
+		filepath.Join(repository, "apps", ".claude", "agents"),
+		filepath.Join(repository, ".claude", "agents"),
+		filepath.Join(configDir, "agents"),
+	} {
+		if !slices.Contains(targets["agent"], want) {
+			t.Errorf("ComponentTargets(agent) = %v, missing %q", targets["agent"], want)
+		}
+	}
+	watchPaths := ClaudeCodeWatchPaths(launch)
+	for _, want := range []string{userAgent, ancestorAgent} {
+		if !slices.Contains(watchPaths, want) {
+			t.Errorf("ClaudeCodeWatchPaths() = %v, missing %q", watchPaths, want)
+		}
+	}
+}
+
+func TestClaudeCode_ComponentAndWatchTargetsIncludeEffectiveAutoMemory(t *testing.T) {
+	root := t.TempDir()
+	configDir := filepath.Join(root, "claude-home")
+	project := filepath.Join(root, "project")
+	memory := filepath.Join(root, "custom-memory")
+	memoryIndex := filepath.Join(memory, "MEMORY.md")
+	for _, path := range []string{
+		filepath.Join(project, ".git", "keep"),
+		memoryIndex,
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("fixture\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	settings := []byte(fmt.Sprintf(`{"autoMemoryDirectory":%q}`, memory))
+	if err := os.WriteFile(filepath.Join(configDir, "settings.json"), settings, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+
+	targets := NewClaudeCodeConnector().ComponentTargets(project)
+	if !slices.Contains(targets["memory"], memory) {
+		t.Errorf("ComponentTargets(memory) = %v, missing %q", targets["memory"], memory)
+	}
+	if watch := ClaudeCodeWatchPaths(project); !slices.Contains(watch, memoryIndex) {
+		t.Errorf("ClaudeCodeWatchPaths() = %v, missing %q", watch, memoryIndex)
+	}
+}
+
+func TestClaudeCode_ContentTelemetryGatesAreExplicitlyOffAndManaged(t *testing.T) {
+	spec := NewClaudeCodeConnector().HookProfile(SetupOpts{APIAddr: "127.0.0.1:18970"}).NativeOTLP
+	if spec == nil {
+		t.Fatal("Claude Code native OTLP specification is missing")
+	}
+	managedKeys := make(map[string]struct{}, len(claudeCodeOtelEnvKeys))
+	for _, key := range claudeCodeOtelEnvKeys {
+		managedKeys[key] = struct{}{}
+	}
+	for _, key := range []string{
+		"OTEL_LOG_USER_PROMPTS",
+		"OTEL_LOG_ASSISTANT_RESPONSES",
+		"OTEL_LOG_TOOL_DETAILS",
+		"OTEL_LOG_TOOL_CONTENT",
+		"OTEL_LOG_RAW_API_BODIES",
+	} {
+		if got := spec.ExtraEnv[key]; got != "0" {
+			t.Errorf("NativeOTLP.ExtraEnv[%q] = %q, want explicit-off value 0", key, got)
+		}
+		if _, ok := managedKeys[key]; !ok {
+			t.Errorf("%q is not in Claude Code teardown custody", key)
+		}
+	}
+}
+
+func TestClaudeCode_WatchPathsHonorConfigDirAndExistingRules(t *testing.T) {
+	configDir := filepath.Join(t.TempDir(), "claude-config")
+	workspace := filepath.Join(t.TempDir(), "workspace")
+	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+	previous := ClaudeCodeSettingsPathOverride
+	ClaudeCodeSettingsPathOverride = ""
+	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = previous })
+
+	userRule := filepath.Join(configDir, "rules", "user-rule.md")
+	projectRule := filepath.Join(workspace, ".claude", "rules", "nested", "project-rule.MD")
+	ignoredRule := filepath.Join(workspace, ".claude", "rules", "ignored.txt")
+	for _, path := range []string{userRule, projectRule, ignoredRule} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("fixture\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	got := ClaudeCodeWatchPaths(workspace)
+	for _, want := range []string{
+		filepath.Join(configDir, "settings.json"),
+		filepath.Join(configDir, ".claude.json"),
+		filepath.Join(configDir, "CLAUDE.md"),
+		filepath.Join(workspace, "CLAUDE.md"),
+		filepath.Join(workspace, "CLAUDE.local.md"),
+		filepath.Join(workspace, ".mcp.json"),
+		filepath.Join(workspace, ".env"),
+		filepath.Join(workspace, "package.json"),
+		filepath.Join(workspace, "pyproject.toml"),
+		filepath.Join(workspace, ".claude", "settings.json"),
+		filepath.Join(workspace, ".claude", "settings.local.json"),
+		filepath.Join(workspace, ".claude", "CLAUDE.md"),
+		userRule,
+		projectRule,
+	} {
+		if !slices.Contains(got, want) {
+			t.Errorf("ClaudeCodeWatchPaths() = %v, missing %q", got, want)
+		}
+		if !filepath.IsAbs(want) {
+			t.Fatalf("test fixture is not absolute: %q", want)
+		}
+	}
+	if slices.Contains(got, ignoredRule) {
+		t.Errorf("ClaudeCodeWatchPaths() = %v, included non-Markdown rule %q", got, ignoredRule)
 	}
 }
 
@@ -1346,10 +1576,11 @@ func TestClaudeCode_Setup_HonorsClaudeConfigDir(t *testing.T) {
 	}
 
 	targets := c.ComponentTargets(filepath.Join(dir, "workspace"))
+	mcpStatePath := filepath.Join(claudeConfigDir, ".claude.json")
 	for component, expected := range map[string]string{
 		"skill":   filepath.Join(claudeConfigDir, "skills"),
-		"plugin":  filepath.Join(claudeConfigDir, "plugins"),
-		"mcp":     settingsPath,
+		"plugin":  filepath.Join(claudeConfigDir, "plugins", "cache"),
+		"mcp":     mcpStatePath,
 		"agent":   filepath.Join(claudeConfigDir, "agents"),
 		"command": filepath.Join(claudeConfigDir, "commands"),
 		"config":  settingsPath,
@@ -1357,6 +1588,12 @@ func TestClaudeCode_Setup_HonorsClaudeConfigDir(t *testing.T) {
 		if !slices.Contains(targets[component], expected) {
 			t.Errorf("ComponentTargets(%q) = %v, missing CLAUDE_CONFIG_DIR path %q", component, targets[component], expected)
 		}
+	}
+	if slices.Contains(targets["mcp"], settingsPath) {
+		t.Errorf("ComponentTargets(mcp) = %v, settings.json is not Claude MCP state", targets["mcp"])
+	}
+	if slices.Contains(targets["config"], mcpStatePath) {
+		t.Errorf("ComponentTargets(config) = %v, MCP state must not be attributed as generic config", targets["config"])
 	}
 
 	if err := c.Teardown(context.Background(), opts); err != nil {
@@ -1489,6 +1726,152 @@ func claudeCodeFirstTestHookHandler(
 ) map[string]interface{} {
 	group := claudeCodeFirstTestHookGroup(hooks, eventType)
 	return group["hooks"].([]interface{})[0].(map[string]interface{})
+}
+
+func TestClaudeCodeVersionedDirectoryAddedMigrationPreservesPristineAndForeignHooks(t *testing.T) {
+	root := t.TempDir()
+	dataDir := filepath.Join(root, "data")
+	settingsDir := filepath.Join(root, "claude")
+	if err := os.MkdirAll(filepath.Join(dataDir, "hooks"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(settingsDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	settingsPath := filepath.Join(settingsDir, "settings.json")
+	pristine := []byte(`{"hooks":{"Notification":[{"matcher":"foreign","hooks":[{"type":"command","command":"vendor-hook"}]}]},"foreign":{"keep":true}}`)
+	if err := os.WriteFile(settingsPath, pristine, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previous := ClaudeCodeSettingsPathOverride
+	ClaudeCodeSettingsPathOverride = settingsPath
+	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = previous })
+
+	connector := NewClaudeCodeConnector()
+	hookScript := filepath.Join(dataDir, "hooks", "claude-code-hook.sh")
+	v1 := SetupOpts{
+		DataDir:        dataDir,
+		AgentVersion:   "Claude Code 2.1.218",
+		HookContractID: "claudecode-hooks-v1",
+	}
+	if err := connector.patchClaudeCodeHooks(v1, hookScript); err != nil {
+		t.Fatalf("patch v1: %v", err)
+	}
+	readHooks := func() (map[string]interface{}, []byte) {
+		t.Helper()
+		body, err := os.ReadFile(settingsPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		settings := map[string]interface{}{}
+		if err := json.Unmarshal(body, &settings); err != nil {
+			t.Fatal(err)
+		}
+		return settings["hooks"].(map[string]interface{}), body
+	}
+	assertForeign := func(hooks map[string]interface{}) {
+		t.Helper()
+		found := false
+		for _, rawGroup := range hooks["Notification"].([]interface{}) {
+			group := rawGroup.(map[string]interface{})
+			for _, rawHandler := range group["hooks"].([]interface{}) {
+				handler := rawHandler.(map[string]interface{})
+				found = found || handler["command"] == "vendor-hook"
+			}
+		}
+		if !found {
+			t.Fatal("foreign Notification hook was not preserved")
+		}
+	}
+
+	v1Hooks, _ := readHooks()
+	if len(v1Hooks) != 28 {
+		t.Fatalf("v1 events=%d, want 28", len(v1Hooks))
+	}
+	if _, exists := v1Hooks["DirectoryAdded"]; exists {
+		t.Fatal("v1 unexpectedly registered DirectoryAdded")
+	}
+	assertForeign(v1Hooks)
+	v1Source := &claudeCodeSettingsSource{
+		name:     "v1 fixture",
+		settings: map[string]interface{}{"hooks": v1Hooks},
+	}
+	if present, err := claudeCodeSourceHasHookContract(v1Source, v1, true); err != nil || !present {
+		t.Fatalf("v1 effective-policy guardian=(%v,%v), want present", present, err)
+	}
+
+	v2 := v1
+	v2.AgentVersion = "Claude Code 2.1.219"
+	v2.HookContractID = "claudecode-hooks-v2"
+	if err := connector.patchClaudeCodeHooks(v2, hookScript); err != nil {
+		t.Fatalf("migrate v1 to v2: %v", err)
+	}
+	v2Hooks, firstV2 := readHooks()
+	if len(v2Hooks) != 29 {
+		t.Fatalf("v2 events=%d, want 29", len(v2Hooks))
+	}
+	directoryGroup := claudeCodeFirstTestHookGroup(v2Hooks, "DirectoryAdded")
+	if _, exists := directoryGroup["matcher"]; exists {
+		t.Fatalf("DirectoryAdded matcher=%#v, want omitted", directoryGroup["matcher"])
+	}
+	directoryHandler := claudeCodeFirstTestHookHandler(v2Hooks, "DirectoryAdded")
+	if directoryHandler["timeout"] != float64(30) {
+		t.Fatalf("DirectoryAdded timeout=%#v, want 30", directoryHandler["timeout"])
+	}
+	if asynchronous, err := claudeCodeHandlerAsync(directoryHandler); err != nil || asynchronous {
+		t.Fatalf("DirectoryAdded asynchronous=%v err=%v, want synchronous", asynchronous, err)
+	}
+	assertForeign(v2Hooks)
+	v2Source := &claudeCodeSettingsSource{
+		name:     "v2 fixture",
+		settings: map[string]interface{}{"hooks": v2Hooks},
+	}
+	if present, err := claudeCodeSourceHasHookContract(v2Source, v2, true); err != nil || !present {
+		t.Fatalf("v2 effective-policy guardian=(%v,%v), want present", present, err)
+	}
+	if present, err := claudeCodeSourceHasHookContract(v2Source, v1, true); present || err == nil || !strings.Contains(err.Error(), "unexpected DefenseClaw DirectoryAdded") {
+		t.Fatalf("v1 guardian over v2 matrix=(%v,%v), want unexpected DirectoryAdded", present, err)
+	}
+
+	hookCommand, hookArgs := claudeCodeHookInvocation(v2, hookScript)
+	if err := verifyClaudeCodeHookMatrixForSetup(v2Hooks, hookCommand, hookArgs, filepath.Join(dataDir, "hooks"), v2); err != nil {
+		t.Fatalf("verify v2: %v", err)
+	}
+	if err := verifyClaudeCodeHookMatrixForSetup(v2Hooks, hookCommand, hookArgs, filepath.Join(dataDir, "hooks"), v1); err == nil || !strings.Contains(err.Error(), "unexpected event DirectoryAdded") {
+		t.Fatalf("v1 verifier error=%v, want unexpected DirectoryAdded", err)
+	}
+
+	missingHooks := make(map[string]interface{}, len(v2Hooks)-1)
+	for eventType, entries := range v2Hooks {
+		if eventType != "DirectoryAdded" {
+			missingHooks[eventType] = entries
+		}
+	}
+	missingSource := &claudeCodeSettingsSource{
+		name:     "v2 missing DirectoryAdded fixture",
+		settings: map[string]interface{}{"hooks": missingHooks},
+	}
+	if present, err := claudeCodeSourceHasHookContract(missingSource, v2, true); present || err == nil || !strings.Contains(err.Error(), "DirectoryAdded") {
+		t.Fatalf("v2 guardian without DirectoryAdded=(%v,%v), want missing DirectoryAdded", present, err)
+	}
+
+	if err := connector.patchClaudeCodeHooks(v2, hookScript); err != nil {
+		t.Fatalf("repeat v2 patch: %v", err)
+	}
+	_, secondV2 := readHooks()
+	if !bytes.Equal(firstV2, secondV2) {
+		t.Fatal("repeated v2 patch was not byte-idempotent")
+	}
+	if err := connector.restoreClaudeCodeHooks(v2); err != nil {
+		t.Fatalf("restore pristine settings: %v", err)
+	}
+	restored, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(restored, pristine) {
+		t.Fatalf("restored settings differ from pristine\n got: %s\nwant: %s", restored, pristine)
+	}
 }
 
 func TestInferPreTrackedClaudeCodeManagedCommandsRequiresExactWindowsExecMatrix(t *testing.T) {
@@ -2106,16 +2489,15 @@ func TestClaudeCode_Setup_RegistersFullEventCoverage(t *testing.T) {
 		}
 	}
 
-	// SessionStart has distinct phases — matcher selects which to
-	// observe. All four are worth inspecting for lifecycle events.
-	if m := firstMatcher(hooks["SessionStart"]); m != "startup|resume|clear|compact" {
-		t.Errorf("SessionStart matcher = %q, want startup|resume|clear|compact", m)
+	// SessionStart has distinct phases — matcher selects which to observe.
+	if m := firstMatcher(hooks["SessionStart"]); m != "startup|resume|clear|compact|fork" {
+		t.Errorf("SessionStart matcher = %q, want startup|resume|clear|compact|fork", m)
 	}
 
-	// FileChanged narrows to config files only; generic file writes
-	// are already covered by PostToolUse.
-	if m := firstMatcher(hooks["FileChanged"]); !strings.Contains(m, "CLAUDE.md") {
-		t.Errorf("FileChanged matcher = %q, want config-file matcher including CLAUDE.md", m)
+	// FileChanged's matcher also filters dynamically watched paths by basename,
+	// so it must not narrow the absolute watchPaths returned by the hook.
+	if m := firstMatcher(hooks["FileChanged"]); m != ".+" {
+		t.Errorf("FileChanged matcher = %q, want Windows-valid dynamic-path filter .+", m)
 	}
 }
 
@@ -2509,18 +2891,26 @@ func TestEveryHookOwner_TeardownLeavesTombstone(t *testing.T) {
 	hookOnlySetup := func(ext string, ctor func() *hookOnlyConnector, override *string) func(*testing.T) (Connector, SetupOpts) {
 		return func(t *testing.T) (Connector, SetupOpts) {
 			t.Helper()
+			conn := ctor()
 			dir := t.TempDir()
+			if conn.Name() == "hermes" {
+				dir = testenv.PrivateTempDir(t)
+			}
 			cfgDir := t.TempDir()
 			cfgPath := filepath.Join(cfgDir, "config"+ext)
 			prev := *override
 			*override = cfgPath
 			t.Cleanup(func() { *override = prev })
-			return ctor(), SetupOpts{
+			opts := SetupOpts{
 				DataDir:      dir,
 				APIAddr:      "127.0.0.1:18970",
 				APIToken:     "tok-test",
 				WorkspaceDir: t.TempDir(),
 			}
+			if conn.Name() == "hermes" {
+				opts = prepareHermesSetupAdmissionFixture(t, opts)
+			}
+			return conn, opts
 		}
 	}
 
@@ -2576,12 +2966,6 @@ func TestEveryHookOwner_TeardownLeavesTombstone(t *testing.T) {
 			hookScript: "hermes-hook.sh",
 			hookAPI:    "/api/v1/hermes/hook",
 			setup:      hookOnlySetup(".yaml", NewHermesConnector, &HermesConfigPathOverride),
-		},
-		{
-			name:       "cursor",
-			hookScript: "cursor-hook.sh",
-			hookAPI:    "/api/v1/cursor/hook",
-			setup:      hookOnlySetup(".json", NewCursorConnector, &CursorHooksPathOverride),
 		},
 		{
 			name:       "windsurf",
@@ -3391,10 +3775,11 @@ func readCodexHookDocumentForTest(t *testing.T, configPath string) (string, []by
 }
 
 func verifyInstalledCodexHooksForTest(hooks map[string]interface{}, configPath, hooksDir string) error {
+	opts := SetupOpts{}
 	if runtime.GOOS == "windows" {
-		return verifyManagedCodexHookMatrix(hooks, configPath, hooksDir)
+		return verifyManagedCodexHookMatrix(hooks, configPath, hooksDir, opts)
 	}
-	return verifyTrustedCodexHookMatrix(hooks, configPath, hooksDir)
+	return verifyTrustedCodexHookMatrix(hooks, configPath, hooksDir, opts)
 }
 
 // TestCodex_Setup_DoesNotRewriteProvidersToProxy verifies hook-only Setup
@@ -3498,8 +3883,8 @@ env_key = "OPENAI_API_KEY"
 }
 
 // TestCodex_Setup_RegistersHooksInline verifies the Codex connector
-// writes an inline [hooks] HookEventsToml struct into config.toml
-// covering the current Codex event matrix and pointing at the platform-native hook
+// writes an inline [hooks] HookEventsToml struct into config.toml covering the
+// version-resolved Codex event matrix and pointing at the platform-native hook
 // command. The hooks key is NOT a path to a hooks.json file —
 // that would trigger a TOML parse error at codex startup.
 func TestCodex_Setup_RegistersHooksInline(t *testing.T) {
@@ -3565,12 +3950,12 @@ func TestCodex_Setup_RegistersHooksInline(t *testing.T) {
 		matchers := hooks["PreToolUse"].([]interface{})
 		handlers := matchers[0].(map[string]interface{})["hooks"].([]interface{})
 		handler := handlers[0].(map[string]interface{})
-		wantFallback := hookInvocationCommandFor("windows", "codex", "")
+		wantFallback := windowsCodexHookCommandForEvent("PreToolUse", "codex-hooks-v4")
 		if got, _ := handler["command"].(string); got != wantFallback {
 			t.Errorf("command = %q, want hardened native fallback %q", got, wantFallback)
 		}
-		if got, _ := handler["command_windows"].(string); got != windowsCodexHookCommand() {
-			t.Errorf("command_windows = %q, want managed absolute invocation %q", got, windowsCodexHookCommand())
+		if got, _ := handler["command_windows"].(string); got != wantFallback {
+			t.Errorf("command_windows = %q, want managed absolute invocation %q", got, wantFallback)
 		}
 	}
 }
@@ -3605,9 +3990,11 @@ func TestCodex_Setup_HonorsCodexHome(t *testing.T) {
 
 	targets := c.ComponentTargets(filepath.Join(dir, "workspace"))
 	for component, expected := range map[string]string{
-		"skill":  filepath.Join(codexHome, "skills"),
-		"plugin": filepath.Join(codexHome, "plugins"),
+		"skill":  homePath(".agents", "skills"),
+		"plugin": filepath.Join(codexHome, "plugins", "cache"),
 		"mcp":    configPath,
+		"agent":  filepath.Join(codexHome, "agents"),
+		"rule":   filepath.Join(codexHome, "rules"),
 	} {
 		if !slices.Contains(targets[component], expected) {
 			t.Errorf("ComponentTargets(%q) = %v, missing CODEX_HOME path %q", component, targets[component], expected)
@@ -4242,7 +4629,10 @@ func TestRemoveOwnedCodexHookStatePreservesUserReplacementTrust(t *testing.T) {
 			"trusted_hash": "sha256:unrelated",
 		},
 	}
-	hooks := buildCodexHooksTable(configPath, hookPath)
+	hooks, err := buildCodexHooksTable(SetupOpts{}, configPath, hookPath)
+	if err != nil {
+		t.Fatalf("build Codex hooks: %v", err)
+	}
 	hooks["state"] = state
 	removed, err := removeOwnedCodexHookState(hooks, configPath, filepath.Dir(hookPath))
 	if err != nil {
@@ -4351,14 +4741,14 @@ func TestCodexSetupPreservesUnrelatedStateAndUsesMergedPositions(t *testing.T) {
 		if _, exists := managedHooks["state"]; exists {
 			t.Fatalf("managed source contains private hooks.state: %#v", managedHooks["state"])
 		}
-		if err := verifyManagedCodexHookMatrix(managedHooks, managedPath, filepath.Join(dir, "hooks")); err != nil {
+		if err := verifyManagedCodexHookMatrix(managedHooks, managedPath, filepath.Join(dir, "hooks"), opts); err != nil {
 			t.Fatalf("configured managed hooks are incomplete: %v", err)
 		}
 	} else {
 		if _, ok := state[defenseClawKey]; !ok {
 			t.Fatalf("merged position state key %q missing: %v", defenseClawKey, state)
 		}
-		if err := verifyTrustedCodexHookMatrix(hooks, configPath, filepath.Join(dir, "hooks")); err != nil {
+		if err := verifyTrustedCodexHookMatrix(hooks, configPath, filepath.Join(dir, "hooks"), opts); err != nil {
 			t.Fatalf("configured hooks are not fully trusted: %v", err)
 		}
 	}
@@ -4665,7 +5055,8 @@ func TestVerifyTrustedCodexHookMatrixRejectsIncompleteOrModifiedRegistration(t *
 	}
 	CodexConfigPathOverride = configPath
 	t.Cleanup(func() { CodexConfigPathOverride = "" })
-	if err := NewCodexConnector().Setup(context.Background(), SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}); err != nil {
+	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}
+	if err := NewCodexConnector().Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
 	registrationPath := codexHookConfigPathForTest(configPath)
@@ -4697,7 +5088,7 @@ func TestVerifyTrustedCodexHookMatrixRejectsIncompleteOrModifiedRegistration(t *
 			if _, exists := hooks["state"]; exists {
 				t.Fatalf("managed hook config contains synthesized hooks.state: %#v", hooks["state"])
 			}
-			if err := verifyManagedCodexHookMatrix(hooks, registrationPath, hooksDir); err != nil {
+			if err := verifyManagedCodexHookMatrix(hooks, registrationPath, hooksDir, opts); err != nil {
 				t.Fatalf("managed hook matrix is not source-trusted: %v", err)
 			}
 			return
@@ -4705,7 +5096,7 @@ func TestVerifyTrustedCodexHookMatrixRejectsIncompleteOrModifiedRegistration(t *
 		state := hooks["state"].(map[string]interface{})
 		key := codexHookStateKey(codexHookStateKeySource(registrationPath), "stop", 0, 0)
 		state[key].(map[string]interface{})["trusted_hash"] = "sha256:modified"
-		if err := verifyTrustedCodexHookMatrix(hooks, registrationPath, hooksDir); err == nil || !strings.Contains(err.Error(), "not trusted") {
+		if err := verifyTrustedCodexHookMatrix(hooks, registrationPath, hooksDir, opts); err == nil || !strings.Contains(err.Error(), "not trusted") {
 			t.Fatalf("verification error = %v, want modified trust rejection", err)
 		}
 	})
@@ -4773,7 +5164,7 @@ timeout = 7
 		}
 		managedPath, _, managedDocument := readCodexHookDocumentForTest(t, configPath)
 		managedHooks := managedDocument["hooks"].(map[string]interface{})
-		if err := verifyManagedCodexHookMatrix(managedHooks, managedPath, filepath.Join(dir, "hooks")); err != nil {
+		if err := verifyManagedCodexHookMatrix(managedHooks, managedPath, filepath.Join(dir, "hooks"), opts); err != nil {
 			t.Fatalf("Setup managed hooks are incomplete: %v", err)
 		}
 		if _, exists := managedHooks["state"]; exists {
@@ -4783,7 +5174,7 @@ timeout = 7
 		if len(preToolUse) != 2 {
 			t.Fatalf("Setup replaced existing PreToolUse hooks; got %d entries\n%s", len(preToolUse), raw)
 		}
-		if err := verifyTrustedCodexHookMatrix(hooks, configPath, filepath.Join(dir, "hooks")); err != nil {
+		if err := verifyTrustedCodexHookMatrix(hooks, configPath, filepath.Join(dir, "hooks"), opts); err != nil {
 			t.Fatalf("Setup hooks are not fully trusted: %v", err)
 		}
 		state := hooks["state"].(map[string]interface{})
@@ -5244,12 +5635,17 @@ func TestCodexSurgicalRestorePreservesOperatorTelemetryBackup(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		setHookBinaryOverride(t, filepath.Join(dir, "DefenseClaw", windowsHookBinaryName))
 	}
-	opts := SetupOpts{DataDir: filepath.Join(dir, "defenseclaw"), APIAddr: "127.0.0.1:18970"}
+	opts := SetupOpts{
+		DataDir:              filepath.Join(dir, "defenseclaw"),
+		CodexOtelEnvironment: "windows",
+		APIAddr:              "127.0.0.1:18970",
+	}
 	managedOtel, err := buildCodexOtelBlockWithPathToken(opts, strings.Repeat("c", 64))
 	if err != nil {
 		t.Fatalf("build managed Codex OTel block: %v", err)
 	}
 	operatorOtel := map[string]interface{}{
+		"environment":     "staging",
 		"log_user_prompt": false,
 		"operator_note":   "preserve",
 		"exporter": map[string]interface{}{
@@ -5289,6 +5685,25 @@ func TestCodexSurgicalRestorePreservesOperatorTelemetryBackup(t *testing.T) {
 	}
 	if !codexValueMatches(cfg["notify"], operatorNotify) {
 		t.Fatalf("surgical restore changed operator Codex notify config: %#v", cfg["notify"])
+	}
+}
+
+func TestCodexSurgicalRestorePreservesEditedTelemetryEnvironment(t *testing.T) {
+	opts := SetupOpts{CodexOtelEnvironment: "windows", APIAddr: "127.0.0.1:18970"}
+	managedOtel, err := buildCodexOtelBlockWithPathToken(opts, strings.Repeat("d", 64))
+	if err != nil {
+		t.Fatalf("build managed Codex OTel block: %v", err)
+	}
+	managedOtel["environment"] = "operator-edited"
+	cfg := map[string]interface{}{"otel": managedOtel}
+
+	restoreCodexOtelEntries(cfg, codexConfigBackup{}, opts)
+	restoredOtel, ok := cfg["otel"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("surgical restore removed edited Codex OTel table: %#v", cfg)
+	}
+	if len(restoredOtel) != 1 || restoredOtel["environment"] != "operator-edited" {
+		t.Fatalf("surgical restore changed operator telemetry environment: %#v", restoredOtel)
 	}
 }
 
@@ -5345,8 +5760,12 @@ func TestCodex_VerifyCleanDetectsConfigResidue(t *testing.T) {
 	if err != nil {
 		t.Fatalf("render Codex OTLP block: %v", err)
 	}
+	hooks, err := buildCodexHooksTable(SetupOpts{}, configPath, hookPath)
+	if err != nil {
+		t.Fatalf("build Codex hooks: %v", err)
+	}
 	cfg := map[string]interface{}{
-		"hooks": buildCodexHooksTable(configPath, hookPath),
+		"hooks": hooks,
 		"otel":  otelBlock,
 		"notify": []interface{}{
 			"bash",
@@ -6874,7 +7293,15 @@ func runHookAndReturnCurlArgs(t *testing.T, scriptPath string, extraEnv map[stri
 	// file so the runtime environment cannot spoof the trust decision.
 	hookPath := stubDir + ":/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 	bakeHookPathForTest(t, scriptPath, hookPath)
-	cmd := exec.Command("bash", scriptPath)
+	args := []string{scriptPath}
+	if filepath.Base(scriptPath) == "codex-hook.sh" {
+		args = append(
+			args,
+			"--event", "UserPromptSubmit",
+			"--hook-contract", "codex-hooks-v4",
+		)
+	}
+	cmd := exec.Command("bash", args...)
 	cmd.Env = append(os.Environ(),
 		"PATH="+stubDir+":"+os.Getenv("PATH"),
 		"DEFENSECLAW_HOME="+dcHome,
@@ -7043,7 +7470,15 @@ func runHookAndReturnCurlArgsWithHome(t *testing.T, scriptPath, dcHome string, e
 	if err := os.WriteFile(stub, []byte(stubSrc), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command("bash", scriptPath)
+	args := []string{scriptPath}
+	if filepath.Base(scriptPath) == "codex-hook.sh" {
+		args = append(
+			args,
+			"--event", "UserPromptSubmit",
+			"--hook-contract", "codex-hooks-v4",
+		)
+	}
+	cmd := exec.Command("bash", args...)
 	cmd.Env = append(os.Environ(),
 		"PATH="+stubDir+":"+os.Getenv("PATH"),
 		"DEFENSECLAW_HOME="+dcHome,
@@ -7657,8 +8092,16 @@ func TestClaudeCode_Setup_WritesOtelEnv(t *testing.T) {
 	if env["OTEL_LOGS_EXPORTER"] != "otlp" {
 		t.Errorf("OTEL_LOGS_EXPORTER = %v, want \"otlp\"", env["OTEL_LOGS_EXPORTER"])
 	}
-	if env["OTEL_LOG_USER_PROMPTS"] != "1" {
-		t.Errorf("OTEL_LOG_USER_PROMPTS = %v, want \"1\" for v8 source capture", env["OTEL_LOG_USER_PROMPTS"])
+	if env["OTEL_LOG_USER_PROMPTS"] != "0" {
+		t.Errorf("OTEL_LOG_USER_PROMPTS = %v, want privacy-safe default \"0\"", env["OTEL_LOG_USER_PROMPTS"])
+	}
+	if env["OTEL_LOG_ASSISTANT_RESPONSES"] != "0" {
+		t.Errorf("OTEL_LOG_ASSISTANT_RESPONSES = %v, want independent privacy-safe default \"0\"", env["OTEL_LOG_ASSISTANT_RESPONSES"])
+	}
+	for _, key := range []string{"OTEL_LOG_TOOL_DETAILS", "OTEL_LOG_TOOL_CONTENT", "OTEL_LOG_RAW_API_BODIES"} {
+		if env[key] != "0" {
+			t.Errorf("%s = %v, want privacy-safe default \"0\"", key, env[key])
+		}
 	}
 	if env["OTEL_METRICS_EXPORTER"] != "otlp" {
 		t.Errorf("OTEL_METRICS_EXPORTER = %v, want \"otlp\"", env["OTEL_METRICS_EXPORTER"])
@@ -7803,7 +8246,7 @@ func TestClaudeCodeOtelHeadersAreDefenseClawOnlyRecognizesScopedBearers(t *testi
 	}
 }
 
-func TestClaudeCode_Setup_SourceCaptureEnablesPromptLoggingAndTeardownRestores(t *testing.T) {
+func TestClaudeCode_Setup_ContentCaptureDefaultsOffAndTeardownRestores(t *testing.T) {
 
 	dir := t.TempDir()
 	settingsDir := filepath.Join(dir, "claude-settings")
@@ -7813,7 +8256,11 @@ func TestClaudeCode_Setup_SourceCaptureEnablesPromptLoggingAndTeardownRestores(t
 	settingsPath := filepath.Join(settingsDir, "settings.json")
 	pristine := `{
 		"env": {
-			"OTEL_LOG_USER_PROMPTS": "0",
+			"OTEL_LOG_USER_PROMPTS": "1",
+			"OTEL_LOG_ASSISTANT_RESPONSES": "1",
+			"OTEL_LOG_TOOL_DETAILS": "1",
+			"OTEL_LOG_TOOL_CONTENT": "1",
+			"OTEL_LOG_RAW_API_BODIES": "1",
 			"PATH": "/custom/bin:/usr/bin"
 		}
 	}`
@@ -7843,12 +8290,20 @@ func TestClaudeCode_Setup_SourceCaptureEnablesPromptLoggingAndTeardownRestores(t
 		t.Fatalf("parse patched settings: %v", err)
 	}
 	env, _ := settings["env"].(map[string]interface{})
-	if env["OTEL_LOG_USER_PROMPTS"] != "1" {
-		t.Fatalf("OTEL_LOG_USER_PROMPTS = %v, want \"1\" for v8 source capture", env["OTEL_LOG_USER_PROMPTS"])
+	if env["OTEL_LOG_USER_PROMPTS"] != "0" {
+		t.Fatalf("OTEL_LOG_USER_PROMPTS = %v, want privacy-safe default \"0\"", env["OTEL_LOG_USER_PROMPTS"])
+	}
+	if env["OTEL_LOG_ASSISTANT_RESPONSES"] != "0" {
+		t.Fatalf("OTEL_LOG_ASSISTANT_RESPONSES = %v, want privacy-safe default \"0\"", env["OTEL_LOG_ASSISTANT_RESPONSES"])
+	}
+	for _, key := range []string{"OTEL_LOG_TOOL_DETAILS", "OTEL_LOG_TOOL_CONTENT", "OTEL_LOG_RAW_API_BODIES"} {
+		if env[key] != "0" {
+			t.Fatalf("%s = %v, want privacy-safe default \"0\"", key, env[key])
+		}
 	}
 
-	// Force the backup-driven restore path. The prompt logging setting should
-	// still return to the operator's original value.
+	// Force the backup-driven restore path. Both independent content settings
+	// must return to the operator's original values.
 	discardManagedFileBackup(dir, c.Name(), "settings.json")
 	if err := c.Teardown(context.Background(), opts); err != nil {
 		t.Fatalf("Teardown: %v", err)
@@ -7863,8 +8318,16 @@ func TestClaudeCode_Setup_SourceCaptureEnablesPromptLoggingAndTeardownRestores(t
 		t.Fatalf("parse restored settings: %v", err)
 	}
 	env, _ = settings["env"].(map[string]interface{})
-	if env["OTEL_LOG_USER_PROMPTS"] != "0" {
-		t.Fatalf("OTEL_LOG_USER_PROMPTS = %v after teardown, want restored \"0\"", env["OTEL_LOG_USER_PROMPTS"])
+	if env["OTEL_LOG_USER_PROMPTS"] != "1" {
+		t.Fatalf("OTEL_LOG_USER_PROMPTS = %v after teardown, want restored \"1\"", env["OTEL_LOG_USER_PROMPTS"])
+	}
+	if env["OTEL_LOG_ASSISTANT_RESPONSES"] != "1" {
+		t.Fatalf("OTEL_LOG_ASSISTANT_RESPONSES = %v after teardown, want restored \"1\"", env["OTEL_LOG_ASSISTANT_RESPONSES"])
+	}
+	for _, key := range []string{"OTEL_LOG_TOOL_DETAILS", "OTEL_LOG_TOOL_CONTENT", "OTEL_LOG_RAW_API_BODIES"} {
+		if env[key] != "1" {
+			t.Fatalf("%s = %v after teardown, want restored \"1\"", key, env[key])
+		}
 	}
 	if env["PATH"] != "/custom/bin:/usr/bin" {
 		t.Fatalf("PATH = %v after teardown, want pristine value", env["PATH"])
@@ -8322,6 +8785,7 @@ func TestClaudeCode_Teardown_RestoresPreExistingOtelEnvKeys(t *testing.T) {
 			"OTEL_EXPORTER_OTLP_METRICS_PROTOCOL": "grpc",
 			"OTEL_EXPORTER_OTLP_TRACES_HEADERS": "Authorization=secret",
 			"OTEL_LOG_USER_PROMPTS": "1",
+			"OTEL_LOG_ASSISTANT_RESPONSES": "1",
 			"OTEL_SERVICE_NAME": "operator-claude",
 			"PATH": "/custom/bin:/usr/bin"
 		}
@@ -8400,6 +8864,7 @@ func TestClaudeCode_Teardown_RestoresPreExistingOtelEnvKeys(t *testing.T) {
 		"OTEL_EXPORTER_OTLP_METRICS_PROTOCOL": "grpc",
 		"OTEL_EXPORTER_OTLP_TRACES_HEADERS":   "Authorization=secret",
 		"OTEL_LOG_USER_PROMPTS":               "1",
+		"OTEL_LOG_ASSISTANT_RESPONSES":        "1",
 	} {
 		if env[key] != want {
 			t.Errorf("%s = %v, want pristine value %v", key, env[key], want)
@@ -9121,7 +9586,8 @@ func TestHookScript_FailOpen_Override(t *testing.T) {
 //
 // Contract:
 //   - Explicit "closed" stays closed when the connector supports it.
-//   - Empty / invalid HookFailMode normalizes to "closed".
+//   - Empty HookFailMode uses the connector default (Cursor open; otherwise
+//     closed), while invalid explicit values normalize to "closed".
 func TestSetupOpts_HookFailMode_RespectsOperatorChoice(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell scripts not supported on windows")
@@ -9160,6 +9626,27 @@ func TestSetupOpts_HookFailMode_RespectsOperatorChoice(t *testing.T) {
 			opts:         SetupOpts{APIAddr: "127.0.0.1:1", HookFailMode: "closed", CodexEnforcement: true},
 			connector:    &CodexConnector{},
 			hookFile:     "codex-hook.sh",
+			wantFailMode: "closed",
+		},
+		{
+			name:         "cursor_empty_opts_match_vendor_fail_open_default",
+			opts:         SetupOpts{APIAddr: "127.0.0.1:1"},
+			connector:    NewCursorConnector(),
+			hookFile:     "cursor-hook.sh",
+			wantFailMode: "open",
+		},
+		{
+			name:         "cursor_observe_ignores_inherited_closed",
+			opts:         SetupOpts{APIAddr: "127.0.0.1:1", GuardrailMode: "observe", HookFailMode: "closed"},
+			connector:    NewCursorConnector(),
+			hookFile:     "cursor-hook.sh",
+			wantFailMode: "open",
+		},
+		{
+			name:         "cursor_action_forces_mode_matched_closed",
+			opts:         SetupOpts{APIAddr: "127.0.0.1:1", GuardrailMode: "action", HookFailMode: "closed"},
+			connector:    NewCursorConnector(),
+			hookFile:     "cursor-hook.sh",
 			wantFailMode: "closed",
 		},
 		{
@@ -9258,6 +9745,195 @@ func TestManagedEnterpriseHookIgnoresUserControlledHomeAndDisableSentinel(t *tes
 	}
 }
 
+func TestCodexHookScriptValidatesAndForwardsBoundIdentity(t *testing.T) {
+	source, err := hookFS.ReadFile("hooks/codex-hook.sh")
+	if err != nil {
+		t.Fatalf("read embedded Codex hook: %v", err)
+	}
+	hardening, err := hookFS.ReadFile("hooks/_hardening.sh")
+	if err != nil {
+		t.Fatalf("read embedded hook hardening helper: %v", err)
+	}
+	rendered, err := renderTemplate(string(source), templateData{
+		APIAddr:     "127.0.0.1:18970",
+		FailMode:    "closed",
+		TokenFile:   ".hook-codex.token",
+		ScopedToken: true,
+	})
+	if err != nil {
+		t.Fatalf("render embedded Codex hook: %v", err)
+	}
+	for _, want := range []string{
+		`--event)`,
+		`--hook-contract)`,
+		`case "${BOUND_CONTRACT}:${BOUND_EVENT}" in`,
+		`.hook_event_name // empty`,
+		`if [ "$PAYLOAD_EVENT" != "$BOUND_EVENT" ]; then`,
+		`X-DefenseClaw-Hook-Event: ${BOUND_EVENT}`,
+		`X-DefenseClaw-Hook-Contract: ${BOUND_CONTRACT}`,
+	} {
+		if !strings.Contains(rendered, want) {
+			t.Errorf("rendered Codex hook missing binding contract %q", want)
+		}
+	}
+	if !strings.Contains(
+		string(hardening),
+		"permissionDecisionReason|hook_event_name)",
+	) {
+		t.Error("string-only JSON fallback cannot extract hook_event_name")
+	}
+}
+
+func TestCodexHookScriptRejectsMismatchedRegisteredEvent(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts are not used on Windows")
+	}
+	for _, test := range []struct {
+		failMode string
+		wantCode int
+	}{
+		{failMode: "open", wantCode: 0},
+		{failMode: "closed", wantCode: 2},
+	} {
+		t.Run(test.failMode, func(t *testing.T) {
+			dir := t.TempDir()
+			opts := SetupOpts{
+				APIAddr:      "127.0.0.1:1",
+				APIToken:     "scoped-token",
+				HookFailMode: test.failMode,
+			}
+			if err := WriteHookScriptsForConnectorObjectWithOpts(dir, opts, &CodexConnector{}); err != nil {
+				t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
+			}
+			cmd := exec.Command(
+				"bash",
+				filepath.Join(dir, "codex-hook.sh"),
+				"--event", "PreToolUse",
+				"--hook-contract", "codex-hooks-v4",
+			)
+			cmd.Stdin = strings.NewReader(`{"hook_event_name":"SessionEnd"}`)
+			cmd.Env = append(
+				os.Environ(),
+				"DEFENSECLAW_HOME="+t.TempDir(),
+			)
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+			err := cmd.Run()
+			gotCode := 0
+			if exitErr, ok := err.(*exec.ExitError); ok {
+				gotCode = exitErr.ExitCode()
+			} else if err != nil {
+				t.Fatalf("run mismatched hook: %v", err)
+			}
+			if gotCode != test.wantCode {
+				t.Fatalf(
+					"mismatch exit=%d want=%d stderr=%q",
+					gotCode,
+					test.wantCode,
+					stderr.String(),
+				)
+			}
+			if !strings.Contains(stderr.String(), "does not match the registered event") {
+				t.Fatalf("mismatch stderr=%q", stderr.String())
+			}
+		})
+	}
+}
+
+func TestCodexHookScriptBindsEventWithoutJQOrPython(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell scripts are not used on Windows")
+	}
+
+	dir := t.TempDir()
+	opts := SetupOpts{
+		APIAddr:      "127.0.0.1:18970",
+		APIToken:     "scoped-token",
+		HookFailMode: "closed",
+	}
+	if err := WriteHookScriptsForConnectorObjectWithOpts(dir, opts, &CodexConnector{}); err != nil {
+		t.Fatalf("WriteHookScriptsForConnectorObjectWithOpts: %v", err)
+	}
+
+	toolDir := t.TempDir()
+	curlArgs := filepath.Join(toolDir, "curl-args.txt")
+	curlStub := filepath.Join(toolDir, "curl")
+	curlSource := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " +
+		shellSingleQuoteForTest(curlArgs) +
+		"\nprintf '{\"action\":\"allow\"}\\n200'\n"
+	if err := os.WriteFile(curlStub, []byte(curlSource), 0o755); err != nil {
+		t.Fatalf("write curl stub: %v", err)
+	}
+	for _, name := range []string{
+		"awk", "cat", "chmod", "date", "dirname", "find", "head",
+		"mkdir", "mktemp", "rm", "sed", "tail", "tr",
+	} {
+		target, err := exec.LookPath(name)
+		if err != nil {
+			t.Skipf("minimal Unix fallback fixture requires %s: %v", name, err)
+		}
+		if err := os.Symlink(target, filepath.Join(toolDir, name)); err != nil {
+			t.Fatalf("link %s into minimal Unix fallback fixture: %v", name, err)
+		}
+	}
+	scriptPath := filepath.Join(dir, "codex-hook.sh")
+	bakeHookPathForTest(t, scriptPath, toolDir)
+	dcHome := t.TempDir()
+
+	run := func(input string) (int, string) {
+		t.Helper()
+		cmd := exec.Command(
+			"bash",
+			scriptPath,
+			"--event", "PreToolUse",
+			"--hook-contract", "codex-hooks-v4",
+		)
+		cmd.Stdin = strings.NewReader(input)
+		cmd.Env = append(
+			os.Environ(),
+			"DEFENSECLAW_HOME="+dcHome,
+			"DEFENSECLAW_FAIL_MODE=closed",
+		)
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		err := cmd.Run()
+		if err == nil {
+			return 0, stderr.String()
+		}
+		if exitErr, ok := err.(*exec.ExitError); ok {
+			return exitErr.ExitCode(), stderr.String()
+		}
+		t.Fatalf("run minimal Unix fallback hook: %v", err)
+		return -1, stderr.String()
+	}
+
+	if code, stderr := run(`{"hook_event_name":"PreToolUse"}`); code != 0 {
+		t.Fatalf("matching event exit=%d want=0 stderr=%q", code, stderr)
+	}
+	args, err := os.ReadFile(curlArgs)
+	if err != nil {
+		t.Fatalf("matching event did not reach curl: %v", err)
+	}
+	for _, want := range []string{
+		"X-DefenseClaw-Hook-Event: PreToolUse",
+		"X-DefenseClaw-Hook-Contract: codex-hooks-v4",
+	} {
+		if !strings.Contains(string(args), want) {
+			t.Errorf("curl args missing %q:\n%s", want, args)
+		}
+	}
+
+	if err := os.Remove(curlArgs); err != nil {
+		t.Fatalf("reset curl evidence: %v", err)
+	}
+	if code, stderr := run(`{"hook_event_name":"SessionEnd"}`); code != 2 {
+		t.Fatalf("mismatched event exit=%d want=2 stderr=%q", code, stderr)
+	}
+	if _, err := os.Stat(curlArgs); !os.IsNotExist(err) {
+		t.Fatalf("mismatched event reached curl; stat error=%v", err)
+	}
+}
+
 func TestManagedEnterpriseHookFailsClosedWhenTokenIsMissing(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell hooks are not used on Windows")
@@ -9279,7 +9955,12 @@ func TestManagedEnterpriseHookFailsClosedWhenTokenIsMissing(t *testing.T) {
 		t.Fatalf("remove token: %v", err)
 	}
 
-	cmd := exec.Command("bash", filepath.Join(dir, "codex-hook.sh"))
+	cmd := exec.Command(
+		"bash",
+		filepath.Join(dir, "codex-hook.sh"),
+		"--event", "PreToolUse",
+		"--hook-contract", "codex-hooks-v4",
+	)
 	cmd.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse"}`)
 	cmd.Env = append(os.Environ(), "DEFENSECLAW_STRICT_AVAILABILITY=0")
 	err = cmd.Run()
@@ -9303,7 +9984,12 @@ func TestCodexHookScript_FailClosed_DefaultForObservabilitySetup(t *testing.T) {
 	}
 
 	dcHome := t.TempDir()
-	cmd := exec.Command("bash", filepath.Join(dir, "codex-hook.sh"))
+	cmd := exec.Command(
+		"bash",
+		filepath.Join(dir, "codex-hook.sh"),
+		"--event", "PreToolUse",
+		"--hook-contract", "codex-hooks-v4",
+	)
 	cmd.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse"}`)
 	cmd.Env = append(os.Environ(),
 		"PATH="+os.Getenv("PATH"),
@@ -9364,6 +10050,12 @@ func TestCodexHookScript_StructuredBlock_ExitsZeroNotTwo(t *testing.T) {
 	// PreToolUse. The codex_output mirror is the critical bit — it's
 	// the JSON the hook script must echo to stdout.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-DefenseClaw-Hook-Event"); got != "PreToolUse" {
+			t.Errorf("bound event header=%q want PreToolUse", got)
+		}
+		if got := r.Header.Get("X-DefenseClaw-Hook-Contract"); got != "codex-hooks-v4" {
+			t.Errorf("bound contract header=%q want codex-hooks-v4", got)
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = w.Write([]byte(`{
 			"action":"block",
@@ -9392,7 +10084,12 @@ func TestCodexHookScript_StructuredBlock_ExitsZeroNotTwo(t *testing.T) {
 	}
 	dcHome := t.TempDir()
 
-	cmd := exec.Command("bash", filepath.Join(dir, "codex-hook.sh"))
+	cmd := exec.Command(
+		"bash",
+		filepath.Join(dir, "codex-hook.sh"),
+		"--event", "PreToolUse",
+		"--hook-contract", "codex-hooks-v4",
+	)
 	cmd.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":["bash","-lc","cat /etc/shadow"]}}`)
 	cmd.Env = append(os.Environ(),
 		"PATH="+os.Getenv("PATH"),
@@ -9688,7 +10385,12 @@ func TestCodexHookScript_NoStructuredOutput_EmitsInlineBlockJSON(t *testing.T) {
 	}
 	dcHome := t.TempDir()
 
-	cmd := exec.Command("bash", filepath.Join(dir, "codex-hook.sh"))
+	cmd := exec.Command(
+		"bash",
+		filepath.Join(dir, "codex-hook.sh"),
+		"--event", "PreToolUse",
+		"--hook-contract", "codex-hooks-v4",
+	)
 	cmd.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse"}`)
 	cmd.Env = append(os.Environ(),
 		"PATH="+os.Getenv("PATH"),
@@ -10045,8 +10747,10 @@ func TestConnector_AgentPaths_HookScriptsCoverAll(t *testing.T) {
 		return out
 	}
 	cursorScripts := withVendor("cursor-hook.sh")
+	windsurfScripts := withVendor("windsurf-hook.sh")
 	if runtime.GOOS == "windows" {
 		cursorScripts = append(cursorScripts, "cursor-hook.ps1")
+		windsurfScripts = append(windsurfScripts, "windsurf-hook.ps1")
 	}
 
 	cases := []struct {
@@ -10060,7 +10764,7 @@ func TestConnector_AgentPaths_HookScriptsCoverAll(t *testing.T) {
 		{func() Connector { return NewClaudeCodeConnector() }, "claudecode", withVendor("claude-code-hook.sh")},
 		{func() Connector { return NewHermesConnector() }, "hermes", withVendor("hermes-hook.sh")},
 		{func() Connector { return NewCursorConnector() }, "cursor", cursorScripts},
-		{func() Connector { return NewWindsurfConnector() }, "windsurf", withVendor("windsurf-hook.sh")},
+		{func() Connector { return NewWindsurfConnector() }, "windsurf", windsurfScripts},
 		{func() Connector { return NewGeminiCLIConnector() }, "geminicli", withVendor("geminicli-hook.sh")},
 		{func() Connector { return NewCopilotConnector() }, "copilot", withVendor("copilot-hook.sh")},
 		{func() Connector { return NewOpenHandsConnector() }, "openhands", withVendor("openhands-hook.sh")},
@@ -10360,8 +11064,10 @@ func TestOpenClaw_AgentPaths_Specifics(t *testing.T) {
 //   - zeptoclaw  owns no vendor template (config-only)
 func TestHookScriptOwner_BuiltinSurface(t *testing.T) {
 	cursorHooks := []string{"cursor-hook.sh"}
+	windsurfHooks := []string{"windsurf-hook.sh"}
 	if runtime.GOOS == "windows" {
 		cursorHooks = append(cursorHooks, "cursor-hook.ps1")
+		windsurfHooks = append(windsurfHooks, "windsurf-hook.ps1")
 	}
 	cases := []struct {
 		name string
@@ -10372,7 +11078,7 @@ func TestHookScriptOwner_BuiltinSurface(t *testing.T) {
 		{"codex", func() Connector { return NewCodexConnector() }, []string{"codex-hook.sh"}},
 		{"hermes", func() Connector { return NewHermesConnector() }, []string{"hermes-hook.sh"}},
 		{"cursor", func() Connector { return NewCursorConnector() }, cursorHooks},
-		{"windsurf", func() Connector { return NewWindsurfConnector() }, []string{"windsurf-hook.sh"}},
+		{"windsurf", func() Connector { return NewWindsurfConnector() }, windsurfHooks},
 		{"geminicli", func() Connector { return NewGeminiCLIConnector() }, []string{"geminicli-hook.sh"}},
 		{"copilot", func() Connector { return NewCopilotConnector() }, []string{"copilot-hook.sh"}},
 		{"openhands", func() Connector { return NewOpenHandsConnector() }, []string{"openhands-hook.sh"}},

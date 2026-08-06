@@ -90,6 +90,8 @@ func (engine *Engine) Project(record observability.Record, profile Profile) (Pro
 		state := projectionWalkState{
 			engine: engine, profile: profile, classes: classes,
 			report: report, budget: NewRecordMatchBudget(),
+			preserveTraceParentSpanID: record.Signal() == observability.SignalTraces &&
+				record.SchemaDerivedFieldClasses(),
 		}
 		projectedObject, walkErr := state.walkObject(object, "")
 		if walkErr != nil {
@@ -178,11 +180,12 @@ func validateMetricClasses(classes map[string]observability.FieldClass, schemaDe
 }
 
 type projectionWalkState struct {
-	engine  *Engine
-	profile Profile
-	classes map[string]observability.FieldClass
-	report  *reportBuilder
-	budget  *RecordMatchBudget
+	engine                    *Engine
+	profile                   Profile
+	classes                   map[string]observability.FieldClass
+	report                    *reportBuilder
+	budget                    *RecordMatchBudget
+	preserveTraceParentSpanID bool
 }
 
 func (state *projectionWalkState) walkObject(input map[string]any, pointer string) (map[string]any, error) {
@@ -249,6 +252,19 @@ func (state *projectionWalkState) transformLeaf(input any, pointer string) (any,
 	class, ok := state.classes[pointer]
 	if !ok {
 		return nil, false, &ProjectionError{Code: ProjectionFailureClassification}
+	}
+	// A parent span ID is structural OTLP topology, and the generated trace
+	// builder has already constrained it to one canonical 8-byte identifier.
+	// Legacy-v7 placeholders are not valid OTLP parent IDs, so preserve this
+	// one schema-derived field without granting an exception to caller-supplied
+	// class maps or to any other identifier.
+	if state.preserveTraceParentSpanID && state.profile.name == ProfileLegacyV7 &&
+		pointer == "/parent_span_id" && class == observability.FieldClassIdentifier {
+		value, ok := input.(string)
+		if !ok {
+			return nil, false, &ProjectionError{Code: ProjectionFailureSerialization}
+		}
+		return strings.Clone(value), false, nil
 	}
 	mode, ok := state.profile.Mode(class)
 	if !ok {

@@ -5,7 +5,7 @@
   "connectors": {
     "codex": {
       "version_probe": "codex --version",
-      "live": true,
+      "live": false,
       "os": {
         "linux": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
         "macos": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
@@ -14,7 +14,7 @@
     },
     "claudecode": {
       "version_probe": "claude --version",
-      "live": true,
+      "live": false,
       "os": {
         "linux": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
         "macos": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
@@ -31,8 +31,8 @@
       }
     },
     "cursor": {
-      "version_probe": "cursor-agent --version",
-      "live": "pending-validation",
+      "version_probe": "agent --version",
+      "live": false,
       "os": {
         "linux": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
         "macos": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
@@ -41,11 +41,13 @@
     },
     "copilot": {
       "version_probe": "copilot --version",
-      "live": true,
+      "live": false,
       "os": {
         "linux": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
-        "macos": { "last_validated_version": "", "last_validated_at": "", "run_url": "" }
-      }
+        "macos": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
+        "windows": { "last_validated_version": "", "last_validated_at": "", "run_url": "" }
+      },
+      "notes": "Native Windows setup is supported. Authentication, HITL, and official-client live evidence remain unverified and unclaimed; Windows validation version/date/run fields remain empty and live=false."
     },
     "openhands": {
       "version_probe": "openhands --version",
@@ -57,17 +59,28 @@
     "hermes": {
       "version_probe": "hermes --version",
       "live": false,
-      "notes": "contract-only (Layer A); only pre_tool_call is mapped"
+      "notes": "contract-only (Layer A); the identical exact 23-event shell-hook set and pre_tool_call response semantics were source-verified at official Hermes Agent tags v2026.7.20 (0.19.0), v2026.7.30 (0.19.1), and v2026.8.3 (0.20.0), bounded to <0.21.0. Packaged and real-client Windows validation remains pending."
     },
     "windsurf": {
       "version_probe": "",
       "live": false,
-      "notes": "contract-only (Layer A); no headless CLI/SDK"
+      "notes": "Supported legacy Cascade-only contract (Layer A). Devin Local (the current default), its separate lifecycle hooks, cloud, ACP, and managed/ProgramData layers are unsupported and unverified; no real-client evidence is recorded and live=false."
+    },
+    "opencode": {
+      "version_probe": "opencode --version",
+      "live": false,
+      "os": {
+        "windows": { "last_validated_version": "", "last_validated_at": "", "run_url": "" }
+      },
+      "notes": "Source-reviewed contract is pinned to OpenCode 1.18.11 (reviewed range >=1.18.10,<1.18.12); the relevant 1.18.11 plugin/runtime files are byte-identical to 1.18.10. Native Windows setup is supported, while authentic official-client validation metadata remains empty and live=false."
     },
     "antigravity": {
       "version_probe": "agy --version",
       "live": false,
-      "notes": "contract-only (Layer A); headless auth is Google Sign-In/keyring OAuth, no API key"
+      "notes": "Native Windows x64 setup is supported. The accepted protected harness pins official CLI 1.1.10 as availability metadata only, not as a validation record. No protected-client, authentication, HITL, client-provenance, or official-client live evidence is claimed; validation version/date/run fields remain empty and live=false. Enterprise/managed, Team, ProgramData, cloud-dashboard, MDM, and organization-policy surfaces remain out of scope and unverified. Real official-client E2E requires a dedicated pre-authenticated Windows runner because Google documents Windows Credential Manager/browser auth, not API-key bootstrap.",
+      "os": {
+        "windows": { "last_validated_version": "", "last_validated_at": "", "run_url": "" }
+      }
     },
     "amp": {
       "version_probe": "amp --version",
@@ -82,7 +95,10 @@
     "omnigent": {
       "version_probe": "omnigent --version",
       "live": false,
-      "notes": "contract-only (Layer A); custom Python policy bridge"
+      "os": {
+        "windows": { "last_validated_version": "", "last_validated_at": "", "run_url": "" }
+      },
+      "notes": "contract-only; the supported native Windows server/SDK policy bridge and required CI remain native-degraded; live=false, authentic live and authentication/HITL evidence remain pending and unclaimed, and the CI gate does not add a public Setup availability gate"
     }
   }
 }

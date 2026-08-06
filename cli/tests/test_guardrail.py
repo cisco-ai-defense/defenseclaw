@@ -16,6 +16,7 @@
 
 """Tests for the guardrail integration — config, utilities, and CLI command."""
 
+import hashlib
 import json
 import os
 import re
@@ -39,6 +40,7 @@ from defenseclaw.config import (
     GuardrailConfig,
     default_config,
 )
+from defenseclaw.file_permissions import atomic_write_private_bytes
 from defenseclaw.guardrail import (
     _backup,
     _derive_master_key,
@@ -1023,8 +1025,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         # Simulate scripts/install.sh --connector codex having recorded
         # the operator's choice. The CLI should pick it up without
         # requiring --connector / --agent on every subsequent setup call.
-        with open(os.path.join(self.tmp_dir, "picked_connector"), "w") as f:
-            f.write("codex\n")
+        atomic_write_private_bytes(os.path.join(self.tmp_dir, "picked_connector"), b"codex\n")
         self.app.cfg.guardrail.model = "anthropic/claude-opus-4-5"
         self.app.cfg.claw.home_dir = self.tmp_dir
         result = self.runner.invoke(
@@ -1039,8 +1040,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         """--connector wins over the install-time picked_connector hint."""
         from defenseclaw.commands.cmd_setup import setup
 
-        with open(os.path.join(self.tmp_dir, "picked_connector"), "w") as f:
-            f.write("codex\n")
+        atomic_write_private_bytes(os.path.join(self.tmp_dir, "picked_connector"), b"codex\n")
         self.app.cfg.guardrail.model = "anthropic/claude-opus-4-5"
         self.app.cfg.claw.home_dir = self.tmp_dir
         result = self.runner.invoke(
@@ -1163,8 +1163,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         """Garbage in picked_connector falls back to openclaw, not a crash."""
         from defenseclaw.commands.cmd_setup import setup
 
-        with open(os.path.join(self.tmp_dir, "picked_connector"), "w") as f:
-            f.write("not-a-connector\n")
+        atomic_write_private_bytes(os.path.join(self.tmp_dir, "picked_connector"), b"not-a-connector\n")
         self.app.cfg.guardrail.model = "anthropic/claude-opus-4-5"
         self.app.cfg.claw.home_dir = self.tmp_dir
         result = self.runner.invoke(
@@ -1179,8 +1178,7 @@ class TestSetupGuardrailCommand(unittest.TestCase):
         """If gc.connector is already a non-default value, the hint must not flip it."""
         from defenseclaw.commands.cmd_setup import setup
 
-        with open(os.path.join(self.tmp_dir, "picked_connector"), "w") as f:
-            f.write("codex\n")
+        atomic_write_private_bytes(os.path.join(self.tmp_dir, "picked_connector"), b"codex\n")
         # Operator previously ran `setup guardrail --connector claudecode`
         # and saved it. The picked_connector hint must not silently
         # downgrade their explicit choice on the next bare re-run.
@@ -1865,15 +1863,17 @@ class TestRestartDefenseGateway(unittest.TestCase):
         "defenseclaw.commands.cmd_setup._wait_for_defense_gateway_api",
         return_value=True,
     )
-    @patch("defenseclaw.commands.cmd_setup.subprocess.run")
+    @patch("defenseclaw.observability.local_stack.CommandRunner")
     def test_packaged_restart_uses_verified_sibling_from_hostile_working_directory(
         self,
-        mock_run,
+        runner_cls,
         mock_ready,
     ):
         from defenseclaw.commands.cmd_setup import _restart_defense_gateway
+        from defenseclaw.observability.local_stack import CommandResult
 
-        mock_run.return_value = MagicMock(returncode=0)
+        runner = runner_cls.return_value
+        runner.run.return_value = CommandResult(("gateway", "start"), 0, "", "")
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir, "installed")
             python = root / "runtime" / "python" / "python.exe"
@@ -1897,7 +1897,13 @@ class TestRestartDefenseGateway(unittest.TestCase):
             finally:
                 os.chdir(previous)
 
-        self.assertEqual(mock_run.call_args.args[0], [str(gateway.resolve()), "start"])
+        self.assertEqual(runner.run.call_args.args[0], [str(gateway), "start"])
+        self.assertEqual(runner.run.call_args.kwargs["timeout"], 60.0)
+        self.assertTrue(runner.run.call_args.kwargs["allow_breakaway"])
+        self.assertEqual(
+            runner.run.call_args.kwargs["env"]["PYTHONIOENCODING"],
+            "utf-8",
+        )
         mock_ready.assert_called_once_with(tmpdir)
 
     @patch(
@@ -2099,10 +2105,12 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
             )
 
     @patch("defenseclaw.commands.cmd_setup.ux.subhead")
+    @patch("defenseclaw.commands.cmd_setup._wait_for_connector_runtime", return_value=True)
     @patch("defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True)
-    def test_multi_connector_omnigent_hint_uses_neutral_surface_wording(
+    def test_multi_connector_omnigent_hint_reports_gateway_ready_policy_unverified(
         self,
         _mock_restart,
+        _mock_wait,
         mock_subhead,
     ):
         from defenseclaw.commands.cmd_setup import _restart_services
@@ -2112,12 +2120,31 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
                 tmpdir,
                 connector=None,
                 connectors=["codex", "omnigent"],
+                wait_for_connector_ready=True,
             )
 
         messages = [call.args[0] for call in mock_subhead.call_args_list]
-        self.assertTrue(any("native lifecycle surfaces" in message for message in messages))
-        self.assertTrue(all("via the hook bus" not in message for message in messages))
-        self.assertTrue(all("custom policy API" not in message for message in messages))
+        self.assertTrue(any("DefenseClaw gateway registration is ready" in message for message in messages))
+        self.assertTrue(any("loaded policy generation" in message for message in messages))
+        self.assertTrue(any("unverified pending reload/restart" in message for message in messages))
+        self.assertTrue(all("enforcement via" not in message for message in messages))
+
+    @patch("defenseclaw.commands.cmd_setup.ux.subhead")
+    @patch("defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True)
+    def test_omnigent_hint_without_readiness_gate_does_not_claim_gateway_ready(
+        self,
+        _mock_restart,
+        mock_subhead,
+    ):
+        from defenseclaw.commands.cmd_setup import _restart_services
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            _restart_services(tmpdir, connector="omnigent")
+
+        messages = [call.args[0] for call in mock_subhead.call_args_list]
+        self.assertTrue(any("gateway registration is not verified" in message for message in messages))
+        self.assertTrue(all("gateway registration is ready" not in message for message in messages))
+        self.assertTrue(all("enforcement via" not in message for message in messages))
 
     @patch("defenseclaw.commands.cmd_setup._wait_for_connector_runtime", return_value=True)
     @patch("defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True)
@@ -2127,7 +2154,14 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmpdir:
             _restart_services(tmpdir, connector="codex", wait_for_connector_ready=True)
 
-        mock_wait.assert_called_once_with(tmpdir, ["codex"], None, None)
+        mock_wait.assert_called_once_with(
+            tmpdir,
+            ["codex"],
+            None,
+            None,
+            previous_lock_publications={},
+            require_gateway_health=True,
+        )
 
     @patch("defenseclaw.commands.cmd_setup._wait_for_connector_runtime", return_value=False)
     @patch("defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True)
@@ -2139,6 +2173,374 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
                 _restart_services(tmpdir, connector="codex", wait_for_connector_ready=True)
 
         self.assertIn("connector runtime readiness", str(raised.exception))
+
+    @patch("defenseclaw.commands.cmd_setup.connector_paths.connector_config_files")
+    def test_sequential_connector_lock_progress_extends_only_the_bounded_readiness_wait(
+        self,
+        config_files,
+    ):
+        from defenseclaw.commands.cmd_setup import _restart_services
+        from defenseclaw.cursor_contract import CURSOR_HOOK_EVENTS
+
+        class Clock:
+            now = 0.0
+
+            def monotonic(self):
+                return self.now
+
+            def sleep(self, _seconds):
+                self.now += 10.0
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime_name = "cursor-hook.ps1" if os.name == "nt" else "cursor-hook.sh"
+            runtime_path = os.path.join(tmpdir, runtime_name)
+            runtime_body = "# defenseclaw-managed-hook v8\n"
+            if os.name == "nt":
+                runtime_body += (
+                    "$failClosed = $true\n--input-file\ndefenseclaw-hook.exe\n"
+                    "ProcessStartInfo\nRedirectStandardOutput\nWaitForExit\n"
+                )
+                command = "& '" + runtime_path.replace("'", "''") + "'"
+            else:
+                command = runtime_path
+            with open(runtime_path, "w", encoding="utf-8") as runtime_file:
+                runtime_file.write(runtime_body)
+            hooks_path = os.path.join(tmpdir, "cursor-hooks.json")
+            hooks = {
+                event: [
+                    {
+                        "type": "command",
+                        "command": command,
+                        "timeout": 30,
+                        "failClosed": True,
+                    }
+                ]
+                for event in CURSOR_HOOK_EVENTS
+            }
+            with open(hooks_path, "w", encoding="utf-8") as hooks_file:
+                json.dump({"version": 1, "hooks": hooks}, hooks_file)
+
+            plugin_path = os.path.join(tmpdir, "defenseclaw.js")
+            plugin_body = b"// defenseclaw-managed-plugin v7\n/api/v1/opencode/hook\n"
+            with open(plugin_path, "wb") as plugin_file:
+                plugin_file.write(plugin_body)
+            config_files.return_value = [plugin_path]
+
+            def entry(name, token):
+                value = {"connector": name, "updated_at": token}
+                if name == "cursor":
+                    value.update(
+                        {
+                            "contract_id": "cursor-hooks-v1",
+                            "compatibility_status": "known",
+                            "hook_script_version": "v8",
+                            "hook_fail_mode": "closed",
+                            "locations": {
+                                "hook_config_paths": [hooks_path],
+                                "hook_script_paths": [runtime_path],
+                            },
+                        }
+                    )
+                elif name == "opencode":
+                    value.update(
+                        {
+                            "contract_id": "opencode-hooks-v1",
+                            "compatibility_status": "known",
+                            "hook_script_version": "v7",
+                            "locations": {"hook_config_paths": [plugin_path]},
+                            "hook_script_digests": {
+                                "defenseclaw.js": "sha256:" + hashlib.sha256(plugin_body).hexdigest()
+                            },
+                        }
+                    )
+                return value
+
+            for requested in (
+                ["claudecode", "codex", "cursor", "omnigent"],
+                ["claudecode", "codex", "cursor", "omnigent", "opencode"],
+            ):
+                with self.subTest(requested=requested):
+                    clock = Clock()
+                    baseline = {name: f"old-{name}" for name in requested}
+
+                    def read_snapshot(path):
+                        fresh_count = min(len(requested), int(clock.now // 50.0))
+                        connectors = {
+                            name: entry(
+                                name,
+                                f"new-{name}" if index < fresh_count else baseline[name],
+                            )
+                            for index, name in enumerate(requested)
+                        }
+                        if path.endswith("hook_contract_lock.json"):
+                            return {"version": 2, "connectors": connectors}, 10 + fresh_count
+                        active = requested if fresh_count == len(requested) else requested[:-1]
+                        return {
+                            "version": 3,
+                            "name": active[0],
+                            "names": active,
+                            "inactive_names": [],
+                        }, 20 if fresh_count == len(requested) else 1
+
+                    with (
+                        patch("defenseclaw.commands.cmd_setup._read_stable_regular_json", side_effect=read_snapshot),
+                        patch("defenseclaw.commands.cmd_setup.time.monotonic", side_effect=clock.monotonic),
+                        patch("defenseclaw.commands.cmd_setup.time.sleep", side_effect=clock.sleep),
+                        patch("defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True) as restart,
+                        patch("defenseclaw.commands.cmd_setup._gateway_health_generation", return_value=None),
+                        patch(
+                            "defenseclaw.commands.cmd_setup._new_gateway_health_is_terminal_failure",
+                            return_value=False,
+                        ),
+                    ):
+                        with self.assertRaises(click.ClickException):
+                            _restart_services(
+                                tmpdir,
+                                connector="cursor",
+                                connectors=requested,
+                                wait_for_connector_ready=True,
+                            )
+
+                    self.assertEqual(clock.now, 60.0)
+                    restart.assert_called_once()
+
+    def test_malformed_or_mismatched_lock_churn_never_advances_readiness(self):
+        from defenseclaw.commands.cmd_setup import _wait_for_connector_runtime
+
+        class Clock:
+            now = 0.0
+
+            def monotonic(self):
+                return self.now
+
+            def sleep(self, _seconds):
+                self.now += 10.0
+
+        state = {"version": 3, "name": "codex", "names": ["codex"], "inactive_names": []}
+        for bad_entry in (
+            {"connector": "cursor", "updated_at": "new"},
+            "not-an-entry",
+            {"connector": "codex", "updated_at": "old"},
+        ):
+            with self.subTest(bad_entry=bad_entry):
+                clock = Clock()
+                reads = {"lock": 0}
+
+                def read_snapshot(path):
+                    if path.endswith("hook_contract_lock.json"):
+                        reads["lock"] += 1
+                        return {"version": 2, "connectors": {"codex": bad_entry}}, reads["lock"]
+                    return state, 1
+
+                with (
+                    patch("defenseclaw.commands.cmd_setup._read_stable_regular_json", side_effect=read_snapshot),
+                    patch("defenseclaw.commands.cmd_setup.time.monotonic", side_effect=clock.monotonic),
+                    patch("defenseclaw.commands.cmd_setup.time.sleep", side_effect=clock.sleep),
+                    patch(
+                        "defenseclaw.commands.cmd_setup._new_gateway_health_is_terminal_failure",
+                        return_value=False,
+                    ),
+                ):
+                    self.assertFalse(
+                        _wait_for_connector_runtime(
+                            "unused",
+                            ["codex"],
+                            1,
+                            1,
+                            timeout=60.0,
+                            previous_lock_publications={"codex": "old"},
+                        )
+                    )
+                self.assertEqual(clock.now, 60.0)
+                self.assertGreaterEqual(reads["lock"], 2)  # Includes the final exact boundary read.
+
+    def test_readiness_deadline_does_not_run_a_final_snapshot_validation(self):
+        from defenseclaw.commands.cmd_setup import _wait_for_connector_runtime
+
+        clock = SimpleNamespace(now=0.0)
+        reads = {"state": 0}
+
+        def monotonic():
+            return clock.now
+
+        def sleep(_seconds):
+            clock.now = 60.0
+
+        def read_snapshot(path):
+            if path.endswith("hook_contract_lock.json"):
+                return {
+                    "version": 2,
+                    "connectors": {"codex": {"connector": "codex", "updated_at": "new"}},
+                }, 2
+            reads["state"] += 1
+            fresh = reads["state"] > 1
+            return {"version": 2, "name": "codex", "names": ["codex"]}, 2 if fresh else 1
+
+        with (
+            patch("defenseclaw.commands.cmd_setup._read_stable_regular_json", side_effect=read_snapshot),
+            patch("defenseclaw.commands.cmd_setup.time.monotonic", side_effect=monotonic),
+            patch("defenseclaw.commands.cmd_setup.time.sleep", side_effect=sleep),
+            patch(
+                "defenseclaw.commands.cmd_setup._new_gateway_health_is_terminal_failure",
+                return_value=False,
+            ),
+        ):
+            self.assertFalse(
+                _wait_for_connector_runtime(
+                    "unused",
+                    ["codex"],
+                    1,
+                    1,
+                    timeout=60.0,
+                    previous_lock_publications={"codex": "old"},
+                )
+            )
+        self.assertEqual(reads["state"], 1)
+
+    def test_validated_progress_cannot_extend_past_the_strict_absolute_cap(self):
+        from defenseclaw.commands.cmd_setup import _wait_for_connector_runtime
+
+        class Clock:
+            now = 0.0
+
+            def monotonic(self):
+                return self.now
+
+            def sleep(self, _seconds):
+                self.now += 10.0
+
+        expected = ["claudecode", "codex", "cursor", "omnigent", "opencode"]
+        baseline = {name: f"old-{name}" for name in expected}
+        clock = Clock()
+
+        def entry(name, token):
+            value = {"connector": name, "updated_at": token}
+            if name == "cursor":
+                value.update(
+                    {
+                        "contract_id": "cursor-hooks-v1",
+                        "compatibility_status": "known",
+                        "hook_script_version": "v8",
+                        "hook_fail_mode": "closed",
+                        "locations": {
+                            "hook_config_paths": ["unused-cursor.json"],
+                            "hook_script_paths": ["unused-cursor.ps1"],
+                        },
+                    }
+                )
+            elif name == "opencode":
+                value.update(
+                    {
+                        "contract_id": "opencode-hooks-v1",
+                        "compatibility_status": "known",
+                        "hook_script_version": "v7",
+                        "locations": {"hook_config_paths": ["unused-opencode.js"]},
+                    }
+                )
+            return value
+
+        def read_snapshot(path):
+            fresh_count = min(len(expected), int(clock.now // 50.0))
+            if path.endswith("hook_contract_lock.json"):
+                return {
+                    "version": 2,
+                    "connectors": {
+                        name: entry(
+                            name,
+                            f"new-{name}" if index < fresh_count else baseline[name],
+                        )
+                        for index, name in enumerate(expected)
+                    },
+                }, 10 + fresh_count
+            # The prior four-connector roster never reaches the requested five.
+            return {
+                "version": 3,
+                "name": "claudecode",
+                "names": expected[:-1],
+                "inactive_names": [],
+            }, 1
+
+        with (
+            patch("defenseclaw.commands.cmd_setup._read_stable_regular_json", side_effect=read_snapshot),
+            patch("defenseclaw.commands.cmd_setup.time.monotonic", side_effect=clock.monotonic),
+            patch("defenseclaw.commands.cmd_setup.time.sleep", side_effect=clock.sleep),
+            patch(
+                "defenseclaw.commands.cmd_setup._new_gateway_health_is_terminal_failure",
+                return_value=False,
+            ),
+        ):
+            self.assertFalse(
+                _wait_for_connector_runtime(
+                    "unused",
+                    expected,
+                    1,
+                    10,
+                    timeout=60.0,
+                    previous_lock_publications=baseline,
+                )
+            )
+        self.assertEqual(clock.now, 60.0)
+
+    def test_new_generation_terminal_health_fails_but_running_health_never_satisfies(self):
+        from defenseclaw.commands.cmd_setup import _wait_for_connector_runtime
+
+        state = {"version": 2, "name": "codex", "names": ["codex"]}
+        lock = {
+            "version": 2,
+            "connectors": {"codex": {"connector": "codex", "updated_at": "new"}},
+        }
+
+        def read_snapshot(path):
+            return (lock, 2) if path.endswith("hook_contract_lock.json") else (state, 1)
+
+        for health_state, observed_generation, expected_sleep_calls in (
+            ("error", "generation-2", 0),
+            ("disabled", "generation-2", 1),
+            ("running", "generation-2", 1),
+            ("error", "generation-1", 1),
+        ):
+            with self.subTest(health_state=health_state, observed_generation=observed_generation):
+                clock = SimpleNamespace(now=0.0)
+
+                def monotonic():
+                    return clock.now
+
+                def sleep(_seconds):
+                    clock.now = 60.0
+
+                with (
+                    patch("defenseclaw.commands.cmd_setup._read_stable_regular_json", side_effect=read_snapshot),
+                    patch("defenseclaw.commands.cmd_setup.time.monotonic", side_effect=monotonic),
+                    patch("defenseclaw.commands.cmd_setup.time.sleep", side_effect=sleep) as sleep_mock,
+                    patch(
+                        "defenseclaw.commands.cmd_setup._read_gateway_health",
+                        return_value={
+                            "started_at": observed_generation,
+                            "guardrail": {"state": health_state},
+                        },
+                    ),
+                ):
+                    self.assertFalse(
+                        _wait_for_connector_runtime(
+                            "unused",
+                            ["codex"],
+                            1,
+                            1,
+                            timeout=60.0,
+                            previous_lock_publications={"codex": "old"},
+                            gateway_generation="generation-2",
+                        )
+                    )
+                self.assertEqual(sleep_mock.call_count, expected_sleep_calls)
+
+    def test_readiness_health_probe_never_falls_back_to_another_data_directory(self):
+        from defenseclaw.commands.cmd_setup import _read_gateway_health
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch("defenseclaw.commands.cmd_setup.load_config") as load_config_mock:
+                self.assertIsNone(_read_gateway_health(tmpdir))
+            load_config_mock.assert_not_called()
+
 
     def test_wait_for_connector_runtime_requires_fresh_matching_state(self):
         from defenseclaw.commands.cmd_setup import (
@@ -2167,8 +2569,31 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
             self.assertFalse(
                 _wait_for_connector_runtime(tmpdir, ["codex"], state_marker - 1, lock_marker, timeout=0.01)
             )
-            self.assertTrue(
+
+            self.assertFalse(
                 _wait_for_connector_runtime(tmpdir, ["codex"], state_marker - 1, lock_marker - 1, timeout=0.01)
+            )
+
+            with open(state_path, "w", encoding="utf-8") as state_file:
+                json.dump(
+                    {"version": 2, "name": "codex", "names": ["codex", "cursor"]},
+                    state_file,
+                )
+            with open(lock_path, "w", encoding="utf-8") as lock_file:
+                json.dump(
+                    {
+                        "version": 2,
+                        "connectors": {
+                            "codex": {"connector": "codex"},
+                            "cursor": {"connector": "cursor"},
+                        },
+                    },
+                    lock_file,
+                )
+            self.assertFalse(
+                _wait_for_connector_runtime(
+                    tmpdir, ["codex"], state_marker - 1, lock_marker - 1, timeout=0.01
+                )
             )
 
             with open(lock_path, "w", encoding="utf-8") as lock_file:
@@ -2185,6 +2610,281 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
                     timeout=0.01,
                 )
             )
+
+    def test_wait_for_connector_runtime_rejects_shallow_v3_tombstoned_lock_extras(self):
+        from defenseclaw.commands.cmd_setup import _wait_for_connector_runtime
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = os.path.join(tmpdir, "active_connector.json")
+            lock_path = os.path.join(tmpdir, "hook_contract_lock.json")
+            lock = {
+                "version": 2,
+                "connectors": {
+                    "claudecode": {"connector": "claudecode"},
+                    "codex": {"connector": "codex"},
+                },
+            }
+            with open(lock_path, "w", encoding="utf-8") as lock_file:
+                json.dump(lock, lock_file)
+
+            state = {
+                "version": 3,
+                "name": "claudecode",
+                "names": ["claudecode"],
+                "inactive_names": ["codex"],
+            }
+            with open(state_path, "w", encoding="utf-8") as state_file:
+                json.dump(state, state_file)
+            self.assertFalse(_wait_for_connector_runtime(tmpdir, ["claudecode"], None, None, timeout=0.02))
+
+            state.pop("inactive_names")
+            with open(state_path, "w", encoding="utf-8") as state_file:
+                json.dump(state, state_file)
+            self.assertFalse(
+                _wait_for_connector_runtime(tmpdir, ["claudecode"], None, None, timeout=0.02)
+            )
+
+    def test_wait_for_connector_runtime_rejects_malformed_v3_tombstones(self):
+        from defenseclaw.commands.cmd_setup import _wait_for_connector_runtime
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = os.path.join(tmpdir, "active_connector.json")
+            lock_path = os.path.join(tmpdir, "hook_contract_lock.json")
+            with open(lock_path, "w", encoding="utf-8") as lock_file:
+                json.dump(
+                    {
+                        "version": 2,
+                        "connectors": {
+                            "claudecode": {"connector": "claudecode"},
+                            "codex": {"connector": "codex"},
+                        },
+                    },
+                    lock_file,
+                )
+
+            for inactive_names in ("codex", ["codex", "codex"], ["claudecode"]):
+                with self.subTest(inactive_names=inactive_names):
+                    with open(state_path, "w", encoding="utf-8") as state_file:
+                        json.dump(
+                            {
+                                "version": 3,
+                                "name": "claudecode",
+                                "names": ["claudecode"],
+                                "inactive_names": inactive_names,
+                            },
+                            state_file,
+                        )
+                    self.assertFalse(
+                        _wait_for_connector_runtime(
+                            tmpdir,
+                            ["claudecode"],
+                            None,
+                            None,
+                            timeout=0.02,
+                        )
+                    )
+
+    def test_wait_for_connector_runtime_rejects_shallow_v2_and_legacy_lock_entries(self):
+        from defenseclaw.commands.cmd_setup import _wait_for_connector_runtime
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            state_path = os.path.join(tmpdir, "active_connector.json")
+            lock_path = os.path.join(tmpdir, "hook_contract_lock.json")
+            lock = {
+                "version": 2,
+                "connectors": {"claudecode": {"connector": "claudecode"}},
+            }
+            with open(lock_path, "w", encoding="utf-8") as lock_file:
+                json.dump(lock, lock_file)
+
+            for state in (
+                {"version": 2, "name": "claudecode", "names": ["claudecode"]},
+                {"name": "claudecode"},
+            ):
+                with self.subTest(state=state):
+                    with open(state_path, "w", encoding="utf-8") as state_file:
+                        json.dump(state, state_file)
+                    self.assertFalse(
+                        _wait_for_connector_runtime(
+                            tmpdir,
+                            ["claudecode"],
+                            None,
+                            None,
+                            timeout=0.02,
+                        )
+                    )
+
+            lock["connectors"]["codex"] = {"connector": "codex"}
+            with open(lock_path, "w", encoding="utf-8") as lock_file:
+                json.dump(lock, lock_file)
+            self.assertFalse(
+                _wait_for_connector_runtime(tmpdir, ["claudecode"], None, None, timeout=0.02)
+            )
+
+    def test_wait_for_cursor_runtime_requires_exact_persisted_registration(self):
+        from defenseclaw.commands.cmd_setup import _wait_for_connector_runtime
+        from defenseclaw.cursor_contract import CURSOR_HOOK_EVENTS
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            runtime_name = "cursor-hook.ps1" if os.name == "nt" else "cursor-hook.sh"
+            runtime_path = os.path.join(tmpdir, runtime_name)
+            runtime_body = "# defenseclaw-managed-hook v8\n"
+            if os.name == "nt":
+                runtime_body += (
+                    "$failClosed = $false\n--input-file\ndefenseclaw-hook.exe\n"
+                    "ProcessStartInfo\nRedirectStandardOutput\nWaitForExit\n"
+                )
+                command = "& '" + runtime_path.replace("'", "''") + "'"
+            else:
+                command = runtime_path
+            with open(runtime_path, "w", encoding="utf-8") as runtime_file:
+                runtime_file.write(runtime_body)
+            hooks_path = os.path.join(tmpdir, "cursor-hooks.json")
+            hooks = {
+                event: [
+                    {
+                        "type": "command",
+                        "command": command,
+                        "timeout": 30,
+                        "failClosed": False,
+                    }
+                ]
+                for event in CURSOR_HOOK_EVENTS
+            }
+            with open(hooks_path, "w", encoding="utf-8") as hooks_file:
+                json.dump({"version": 1, "hooks": hooks}, hooks_file)
+            with open(os.path.join(tmpdir, "active_connector.json"), "w", encoding="utf-8") as state_file:
+                json.dump({"version": 2, "name": "cursor", "names": ["cursor"]}, state_file)
+            lock = {
+                "version": 2,
+                "connectors": {
+                    "cursor": {
+                        "connector": "cursor",
+                        "raw_agent_version": "",
+                        "normalized_agent_version": "",
+                        "contract_id": "cursor-hooks-v1",
+                        "compatibility_status": "unversioned",
+                        "hook_script_version": "v8",
+                        "hook_fail_mode": "open",
+                        "hook_script_digests": {
+                            runtime_name: "sha256:" + hashlib.sha256(Path(runtime_path).read_bytes()).hexdigest(),
+                        },
+                        "locations": {
+                            "hook_config_paths": [hooks_path],
+                            "hook_script_paths": [runtime_path],
+                        },
+                    }
+                },
+            }
+            lock_path = os.path.join(tmpdir, "hook_contract_lock.json")
+            with open(lock_path, "w", encoding="utf-8") as lock_file:
+                json.dump(lock, lock_file)
+
+            guardrail = SimpleNamespace(
+                connectors={},
+                hook_fail_mode="open",
+                effective_mode=lambda _name: "observe",
+                effective_hook_fail_mode=lambda _name: "open",
+                effective_hilt=lambda _name: SimpleNamespace(enabled=False),
+            )
+            cfg = SimpleNamespace(
+                data_dir=tmpdir,
+                guardrail=guardrail,
+                connector_workspace_dir=lambda: "",
+            )
+            with patch("defenseclaw.commands.cmd_setup.load_config", return_value=cfg):
+                self.assertTrue(_wait_for_connector_runtime(tmpdir, ["cursor"], None, None, timeout=1.0))
+            hooks["preToolUse"][0]["timeout"] = 30000
+            with open(hooks_path, "w", encoding="utf-8") as hooks_file:
+                json.dump({"version": 1, "hooks": hooks}, hooks_file)
+            with patch("defenseclaw.commands.cmd_setup.load_config", return_value=cfg):
+                self.assertFalse(_wait_for_connector_runtime(tmpdir, ["cursor"], None, None, timeout=1.0))
+
+    def test_wait_for_opencode_runtime_requires_plugin_and_matching_lock(self):
+        from defenseclaw.commands.cmd_setup import _wait_for_connector_runtime
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            plugin_path = os.path.join(tmpdir, "defenseclaw.js")
+            plugin_body = (
+                b"// defenseclaw-managed-plugin v7\n"
+                b'const DC_FAIL_MODE = "open";\n'
+                b'const route = "/api/v1/opencode/hook";\n'
+            )
+            with open(plugin_path, "wb") as plugin_file:
+                plugin_file.write(plugin_body)
+            with open(os.path.join(tmpdir, "active_connector.json"), "w", encoding="utf-8") as state_file:
+                json.dump({"version": 2, "name": "opencode", "names": ["opencode"]}, state_file)
+            lock = {
+                "version": 2,
+                "connectors": {
+                    "opencode": {
+                        "connector": "opencode",
+                        "raw_agent_version": "1.18.10",
+                        "normalized_agent_version": "1.18.10",
+                        "contract_id": "opencode-hooks-v1",
+                        "compatibility_status": "known",
+                        "hook_script_version": "v7",
+                        "hook_fail_mode": "open",
+                        "locations": {
+                            "hook_config_paths": [plugin_path],
+                            "hook_script_paths": [plugin_path],
+                        },
+                        "hook_script_digests": {
+                            "defenseclaw.js": "sha256:" + hashlib.sha256(plugin_body).hexdigest()
+                        },
+                    }
+                },
+            }
+            lock_path = os.path.join(tmpdir, "hook_contract_lock.json")
+            with open(lock_path, "w", encoding="utf-8") as lock_file:
+                json.dump(lock, lock_file)
+
+            backup_dir = Path(tmpdir) / "connector_backups" / "opencode"
+            backup_dir.mkdir(parents=True)
+            (backup_dir / "config.json").write_text(
+                json.dumps(
+                    {
+                        "connector": "opencode",
+                        "logical_name": "config",
+                        "path": plugin_path,
+                        "post_sha256": hashlib.sha256(plugin_body).hexdigest(),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            guardrail = SimpleNamespace(
+                connectors={},
+                hook_fail_mode="open",
+                effective_mode=lambda _name: "observe",
+                effective_hook_fail_mode=lambda _name: "open",
+                effective_hilt=lambda _name: SimpleNamespace(enabled=False),
+            )
+            cfg = SimpleNamespace(
+                data_dir=tmpdir,
+                guardrail=guardrail,
+                gateway=SimpleNamespace(api_port=18970),
+                connector_workspace_dir=lambda: "",
+            )
+            with (
+                patch("defenseclaw.commands.cmd_setup.load_config", return_value=cfg),
+                patch(
+                    "defenseclaw.commands.cmd_doctor._opencode_load_heartbeat_status",
+                    return_value=("pass", "loaded"),
+                ),
+            ):
+                self.assertTrue(_wait_for_connector_runtime(tmpdir, ["opencode"], None, None, timeout=1.0))
+
+            os.remove(plugin_path)
+            with patch("defenseclaw.commands.cmd_setup.load_config", return_value=cfg):
+                self.assertFalse(_wait_for_connector_runtime(tmpdir, ["opencode"], None, None, timeout=1.0))
+            with open(plugin_path, "wb") as plugin_file:
+                plugin_file.write(plugin_body + b"// tampered\n")
+            with patch("defenseclaw.commands.cmd_setup.load_config", return_value=cfg):
+                self.assertFalse(_wait_for_connector_runtime(tmpdir, ["opencode"], None, None, timeout=1.0))
+
+            os.remove(lock_path)
+            with patch("defenseclaw.commands.cmd_setup.load_config", return_value=cfg):
+                self.assertFalse(_wait_for_connector_runtime(tmpdir, ["opencode"], None, None, timeout=1.0))
 
 
 class TestCheckOpenclawGateway(unittest.TestCase):

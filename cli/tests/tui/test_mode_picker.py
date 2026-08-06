@@ -67,6 +67,9 @@ def test_mode_picker_choices_cover_go_connectors() -> None:
     assert "synchronous TypeScript policy plugin" in preview_for_switch("openclaw", "amp")
     assert "ALLOW/ASK/DENY" in preview_for_switch("openclaw", "omnigent")
     assert "Python policy runtime" in preview_for_switch("omnigent", "omnigent")
+    cursor = choice_for_wire("cursor")
+    assert "event-scoped deny" in cursor.tagline
+    assert "no native human approval" in cursor.tagline
 
 
 @pytest.mark.asyncio

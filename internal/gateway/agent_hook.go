@@ -164,10 +164,79 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
 			return
 		}
+		registeredEvent := ""
+		if connectorName == "antigravity" {
+			// Antigravity's official stdin schemas omit the event name. Setup
+			// binds each synchronous handler to `--event`, and the bridge
+			// forwards that trusted registration value out-of-band so the raw
+			// official body remains unchanged for audit and provenance.
+			event := strings.TrimSpace(r.Header.Get("X-DefenseClaw-Antigravity-Event"))
+			if event == "" {
+				a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "missing_event", int64(len(b)))
+				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Antigravity hook event registration is required"})
+				return
+			}
+			if !validAntigravityHookEvent(event) {
+				a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "invalid_event", int64(len(b)))
+				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid Antigravity hook event"})
+				return
+			}
+			registeredEvent = event
+		}
+		if connectorName == "copilot" {
+			// Native camelCase Copilot bodies likewise omit event identity.
+			// The authenticated bridge forwards Setup's event-specific
+			// registration argument in a private header. Keep the official
+			// stdin object unchanged for audit and schema-drift evidence.
+			event := strings.TrimSpace(r.Header.Get("X-DefenseClaw-Copilot-Event"))
+			if event == "" {
+				a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "missing_event", int64(len(b)))
+				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Copilot hook event registration is required"})
+				return
+			}
+			if !connector.ValidCopilotHookEvent(event) {
+				a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "invalid_event", int64(len(b)))
+				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid Copilot hook event"})
+				return
+			}
+			registeredEvent = event
+		}
 
 		profile := a.hookProfileForConnector(connectorName)
+		if connectorName == "codex" {
+			boundEvent := strings.TrimSpace(r.Header.Get("X-DefenseClaw-Hook-Event"))
+			boundContract := strings.TrimSpace(r.Header.Get("X-DefenseClaw-Hook-Contract"))
+			stdinEvent := payloadString(payload, "hook_event_name")
+			switch {
+			case boundEvent == "":
+				a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "missing_bound_event", int64(len(b)))
+				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "installer-bound Codex hook event is required"})
+				return
+			case stdinEvent == "" || stdinEvent != boundEvent:
+				a.recordConnectorHookRejection(r.Context(), connectorName, boundEvent, "bound_event_mismatch", int64(len(b)))
+				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Codex stdin event does not match installer-bound event"})
+				return
+			case boundContract == "":
+				a.recordConnectorHookRejection(r.Context(), connectorName, boundEvent, "missing_bound_contract", int64(len(b)))
+				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "installer-bound Codex hook contract is required"})
+				return
+			case profile.ContractID == "" || boundContract != profile.ContractID:
+				a.recordConnectorHookRejection(r.Context(), connectorName, boundEvent, "bound_contract_mismatch", int64(len(b)))
+				a.writeJSON(w, http.StatusConflict, map[string]string{"error": "Codex hook contract does not match protected runtime lock"})
+				return
+			case !eventIn(boundEvent, profile.SupportedEvents):
+				a.recordConnectorHookRejection(r.Context(), connectorName, boundEvent, "event_outside_contract", int64(len(b)))
+				a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "Codex hook event is not registered by protected runtime contract"})
+				return
+			}
+		}
+		if registeredEvent != "" && !eventIn(registeredEvent, profile.SupportedEvents) {
+			a.recordConnectorHookRejection(r.Context(), connectorName, registeredEvent, "event_outside_contract", int64(len(b)))
+			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hook event is outside the active contract"})
+			return
+		}
 		runtime := hookRuntimeForProfile(profile)
-		req := normalizeAgentHookRequestWithProfile(connectorName, payload, profile)
+		req := normalizeAgentHookRequestWithProfileEvent(connectorName, payload, profile, registeredEvent)
 		if req.HookEventName == "" {
 			a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "missing_event", int64(len(b)))
 			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hook event name is required"})
@@ -405,6 +474,15 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 	}
 }
 
+func validAntigravityHookEvent(event string) bool {
+	switch event {
+	case "PreInvocation", "PreToolUse", "PostToolUse", "PostInvocation", "Stop":
+		return true
+	default:
+		return false
+	}
+}
+
 func (a *APIServer) finalizeAgentHook(
 	ctx context.Context,
 	connectorName string,
@@ -471,6 +549,12 @@ func (a *APIServer) finalizeAgentHook(
 			return
 		}
 		a.health.RecordConnectorRequestFor(connectorName)
+		if connName(connectorName) == "opencode" {
+			loadProof, _ := req.Payload["load_heartbeat"].(bool)
+			if canonicalEvent(req.HookEventName) == "defenseclawpluginloaded" || loadProof {
+				a.health.RecordConnectorLoadHeartbeatFor(connectorName)
+			}
+		}
 		if resp.Action == "block" {
 			a.health.RecordToolBlockFor(connectorName)
 		}
@@ -1288,7 +1372,7 @@ func enrichAgentHookSpan(ctx context.Context, req agentHookRequest, resp agentHo
 }
 
 func normalizeAgentHookRequest(connectorName string, payload map[string]interface{}) agentHookRequest {
-	return normalizeAgentHookRequestWithCorrelation(connectorName, payload, connector.DefaultCorrelationSpec(connectorName))
+	return normalizeAgentHookRequestWithCorrelationEvent(connectorName, payload, connector.DefaultCorrelationSpec(connectorName), "")
 }
 
 // normalizeAgentHookRequestWithCorrelation decodes content using the shared
@@ -1298,20 +1382,27 @@ func normalizeAgentHookRequest(connectorName string, payload map[string]interfac
 // execution, message, step or task identifier as a turn changes correlation
 // meaning and therefore must be explicitly connector-scoped.
 func normalizeAgentHookRequestWithCorrelation(connectorName string, payload map[string]interface{}, spec connector.CorrelationSpec) agentHookRequest {
+	return normalizeAgentHookRequestWithCorrelationEvent(connectorName, payload, spec, "")
+}
+
+func normalizeAgentHookRequestWithCorrelationEvent(connectorName string, payload map[string]interface{}, spec connector.CorrelationSpec, registeredEvent string) agentHookRequest {
 	if spec.Connector == "" || len(spec.HookBindings) == 0 {
 		spec = connector.ExplicitCanonicalCorrelationSpec(connectorName)
 	}
-	event := firstString(payload,
-		"hook_event_name",
-		"hookEventName",
-		"event_type",
-		"eventType",
-		"event_name",
-		"eventName",
-		"agent_action_name",
-	)
+	event := strings.TrimSpace(registeredEvent)
 	if event == "" {
-		event = inferAgentHookEvent(payload)
+		event = firstString(payload,
+			"hook_event_name",
+			"hookEventName",
+			"event_type",
+			"eventType",
+			"event_name",
+			"eventName",
+			"agent_action_name",
+		)
+		if event == "" {
+			event = inferAgentHookEvent(payload)
+		}
 	}
 	values := make(map[connector.CorrelationTarget]connector.CorrelationValue)
 	identifiers := spec.HookValues(payload)
@@ -1449,18 +1540,27 @@ func normalizeAgentHookRequestWithCorrelation(connectorName string, payload map[
 		argBytes = []byte(`{}`)
 	}
 
-	content := firstString(payload,
-		"prompt",
-		"user_prompt",
-		"userPrompt",
-		"message",
-		"initial_prompt",
-		"initialPrompt",
-		"task",
-		"description",
-		"custom_instructions",
-		"customInstructions",
-	)
+	content := ""
+	if canonicalEvent(event) == "userprompttransformed" {
+		// The transformed content is the mutation-only event's actual
+		// model-facing inspection surface. The original prompt remains in the
+		// raw payload and audit evidence but must not shadow it here.
+		content = firstString(payload, "transformedPrompt")
+	}
+	if content == "" {
+		content = firstString(payload,
+			"prompt",
+			"user_prompt",
+			"userPrompt",
+			"message",
+			"initial_prompt",
+			"initialPrompt",
+			"task",
+			"description",
+			"custom_instructions",
+			"customInstructions",
+		)
+	}
 	if content == "" {
 		if toolInfo := objectAt(payload, "tool_info"); toolInfo != nil {
 			content = firstString(toolInfo, "user_prompt", "content", "command_line", "command", "mcp_result", "response")
@@ -1508,11 +1608,15 @@ func normalizeAgentHookRequestWithCorrelation(connectorName string, payload map[
 }
 
 func normalizeAgentHookRequestWithProfile(connectorName string, payload map[string]interface{}, profile connector.HookProfile) agentHookRequest {
+	return normalizeAgentHookRequestWithProfileEvent(connectorName, payload, profile, "")
+}
+
+func normalizeAgentHookRequestWithProfileEvent(connectorName string, payload map[string]interface{}, profile connector.HookProfile, registeredEvent string) agentHookRequest {
 	spec := profile.Correlation
 	if spec.Connector == "" || len(spec.HookBindings) == 0 {
 		spec = connector.ExplicitCanonicalCorrelationSpec(connectorName)
 	}
-	req := normalizeAgentHookRequestWithCorrelation(connectorName, payload, spec)
+	req := normalizeAgentHookRequestWithCorrelationEvent(connectorName, payload, spec, registeredEvent)
 	req.Content = applyContentEnvelopeFallback(req.Content, payload, profile.ContentEnvelopeKey)
 	if profile.Decode == nil {
 		return req
@@ -1523,7 +1627,7 @@ func normalizeAgentHookRequestWithProfile(connectorName string, payload map[stri
 	// a decoder cannot project execution_id, stepIdx, message_id or any other
 	// convenient vendor value onto TurnID, cannot supply a semantic-event ID,
 	// and cannot override the authenticated connector namespace.
-	if decoded.HookEventName != "" {
+	if decoded.HookEventName != "" && strings.TrimSpace(registeredEvent) == "" {
 		req.HookEventName = decoded.HookEventName
 	}
 	if decoded.CWD != "" {
@@ -1532,7 +1636,14 @@ func normalizeAgentHookRequestWithProfile(connectorName string, payload map[stri
 	if decoded.ToolName != "" {
 		req.ToolName = decoded.ToolName
 	}
-	if decoded.Content != "" {
+	if len(decoded.ToolArgs) != 0 {
+		req.ToolArgs = append(json.RawMessage(nil), decoded.ToolArgs...)
+	}
+	if decoded.Content != "" || (strings.EqualFold(connectorName, "cursor") && decoded.Direction == "tool_result") {
+		// Cursor's event-specific result field is authoritative even when it
+		// is an empty string/array. Do not let a generic decoy `result` field
+		// replace an explicitly empty tool_output/error/output/result_json/
+		// edits/text/summary value.
 		req.Content = decoded.Content
 	}
 	if decoded.Direction != "" {
@@ -1540,6 +1651,17 @@ func normalizeAgentHookRequestWithProfile(connectorName string, payload map[stri
 	}
 	if decoded.Payload != nil {
 		req.Payload = decoded.Payload
+	}
+	if strings.EqualFold(connectorName, "cursor") && canonicalEvent(req.HookEventName) == "beforemcpexecution" {
+		probe := cursorMCPProbeFromPayload(req.Payload, req.ToolName)
+		if probe.Matched {
+			augmented := make(map[string]interface{}, len(req.Payload)+1)
+			for key, value := range req.Payload {
+				augmented[key] = value
+			}
+			augmented["mcp_server_name"] = probe.ServerName
+			req.Payload = augmented
+		}
 	}
 	return req
 }
@@ -1785,6 +1907,10 @@ func (a *APIServer) collectAgentHookAssetDecisions(ctx context.Context, req agen
 
 func (a *APIServer) agentHookMCPAssetDecision(ctx context.Context, req agentHookRequest) (config.AssetPolicyDecision, bool) {
 	toolInput := decodeAgentHookToolInput(req.ToolArgs)
+	if strings.EqualFold(req.ConnectorName, "cursor") && canonicalEvent(req.HookEventName) == "beforemcpexecution" {
+		probe := cursorMCPProbeFromPayload(req.Payload, req.ToolName)
+		return a.evaluateRuntimeMCPAssetPolicy(ctx, req.ConnectorName, req.HookEventName, probe)
+	}
 	probe := mcpProbeFromFields(payloadString(req.Payload, "mcp_server_name"), req.ToolName, toolInput)
 	return a.evaluateRuntimeMCPAssetPolicy(ctx, req.ConnectorName, req.HookEventName, probe)
 }
@@ -2100,23 +2226,7 @@ func hookOutputFor(req agentHookRequest, action, rawAction, reason, additional s
 			return map[string]interface{}{"context": additional}
 		}
 	case "cursor":
-		switch action {
-		case "block":
-			// beforeSubmitPrompt is continue-gated: Cursor ignores
-			// `permission` there and only blocks on {"continue":false}.
-			// See hookOnlyProfileRespond (the active path) for the full
-			// rationale; kept in sync here for the legacy shaper.
-			if req.HookEventName == "beforeSubmitPrompt" {
-				return map[string]interface{}{"continue": false, "user_message": reason, "agent_message": reason}
-			}
-			return map[string]interface{}{"continue": true, "permission": "deny", "user_message": reason, "agent_message": reason}
-		case "confirm":
-			return map[string]interface{}{"continue": true, "permission": "ask", "user_message": reason, "agent_message": reason}
-		case "alert":
-			if additional != "" {
-				return map[string]interface{}{"continue": true, "permission": "allow", "agent_message": additional}
-			}
-		}
+		return connector.CursorHookOutput(req.HookEventName, action, reason, additional)
 	case "windsurf":
 		if action == "block" {
 			return map[string]interface{}{"message": reason}
@@ -2159,23 +2269,18 @@ func copilotHookOutput(event, action, rawAction, reason, additional string) map[
 		}
 	case "permissionrequest":
 		if action == "block" {
-			return map[string]interface{}{"behavior": "deny", "message": reason, "interrupt": true}
+			return map[string]interface{}{"behavior": "deny", "message": reason}
 		}
 	case "agentstop", "stop", "subagentstop":
 		if action == "block" {
 			return map[string]interface{}{"decision": "block", "reason": reason}
 		}
-	case "posttoolusefailure":
+	case "sessionstart", "subagentstart", "posttooluse", "posttoolusefailure", "notification":
 		if additional != "" {
 			return map[string]interface{}{"additionalContext": additional}
 		}
-	case "notification":
-		if additional != "" {
-			return map[string]interface{}{"additionalContext": additional}
-		}
-	}
-	if rawAction == "confirm" && additional != "" {
-		return map[string]interface{}{"additionalContext": additional}
+	case "userprompttransformed":
+		return map[string]interface{}{}
 	}
 	return nil
 }
@@ -2315,18 +2420,8 @@ func isGenericToolInspectionEvent(event string) bool {
 
 func isPromptLikeEvent(event string) bool {
 	switch canonicalEvent(event) {
-	case "userpromptsubmit", "userpromptsubmitted", "beforesubmitprompt", "preuserprompt", "subagentstart",
-		"prellmcall", "beforeagent", "beforemodel",
-		// Amp agent.start carries the exact user prompt and stable message ID.
-		"agentstart",
-		// Antigravity 2.0 spec: PreInvocation fires just before the
-		// agent makes an invocation (call) to the LLM. Best used for
-		// dynamically injecting context, modifying system instructions,
-		// or feeding custom workspace rules to the model right before
-		// it generates a response. Routes through inspectMessageContent
-		// with direction=prompt so prompt-content rules see the user
-		// prompt and transcript before they reach Gemini.
-		"preinvocation":
+	case "userpromptsubmit", "userpromptsubmitted", "userprompttransformed", "beforesubmitprompt", "preuserprompt", "subagentstart",
+		"prellmcall", "beforeagent", "beforemodel", "agentstart":
 		return true
 	default:
 		return false
@@ -2341,27 +2436,13 @@ func isResultLikeEvent(event string) bool {
 		"afteragentresponse", "afteragentthought", "afteragent", "aftermodel",
 		// hermes post_llm_call carries the model's final response
 		// (extra.assistant_response); classifying it result-like routes
-		// it through tool_result inspection like antigravity's
-		// PostInvocation below. It stays non-blockable: it is absent
-		// from hermes BlockEvents, so verdicts demote to would_block.
+		// it through tool_result inspection. It stays non-blockable: it
+		// is absent from hermes BlockEvents, so verdicts demote to
+		// would_block.
 		"postllmcall", "postcascaderesponse", "postcascaderesponsewithtranscript",
 		// opencode plugin hook: tool.execute.after fires after a tool
 		// returns; observe-only telemetry routed as a tool_result.
-		"toolexecuteafter",
-		// Amp tool.result is terminal after tool execution, but its plugin
-		// result can replace unsafe output before model delivery. agent.end
-		// carries only projected assistant text and remains observe-only.
-		"toolresult", "agentend",
-		// Antigravity 2.0 spec: PostInvocation fires after the LLM
-		// invocation completes and all associated tool calls have
-		// finished running. Best used for post-processing outputs,
-		// executing clean-ups, or triggering follow-up agent cycles.
-		// Routes through inspectMessageContent with
-		// direction=tool_result so response-content rules see the
-		// generated text + final state. Note: PostToolUse (per-tool)
-		// is already classified above via the canonical "posttooluse"
-		// entry; PostInvocation is the per-turn equivalent.
-		"postinvocation":
+		"toolexecuteafter", "toolresult", "agentend":
 		return true
 	default:
 		return false

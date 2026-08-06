@@ -7,7 +7,7 @@ analysis:
   - mvdan.cc/sh/v3 v3.13.1
   - github.com/google/cel-go v0.30.0
   - github.com/antlr4-go/antlr/v4 v4.13.1
-  - golang.org/x/exp v0.0.0-20240823005443-9b4947da3948
+  - golang.org/x/exp v0.0.0-20250305212735-054e65f0b394
 
 It is a scoped attribution artifact for those dependency additions, not an
 exhaustive inventory of every dependency in every DefenseClaw artifact.
@@ -45,10 +45,10 @@ License-text provenance:
     683fcd416d83b64781e229a3c2a598462fbf55c5c9fea54be244766b22c033cf
 
   Module: golang.org/x/exp
-  Version: v0.0.0-20240823005443-9b4947da3948
+  Version: v0.0.0-20250305212735-054e65f0b394
   Upstream files:
-    https://github.com/golang/exp/blob/9b4947da3948bdd8d6ae728bc4ba72b93f61e841/LICENSE
-    https://github.com/golang/exp/blob/9b4947da3948bdd8d6ae728bc4ba72b93f61e841/PATENTS
+      https://github.com/golang/exp/blob/054e65f0b394d1bf387a254295588fb7e5bd0516/LICENSE
+      https://github.com/golang/exp/blob/054e65f0b394d1bf387a254295588fb7e5bd0516/PATENTS
   Upstream LICENSE SHA-256:
     911f8f5782931320f5b8d1160a76365b83aea6447ee6c04fa6d5591467db9dad
   Upstream PATENTS SHA-256:
@@ -364,7 +364,7 @@ NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
 SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-golang.org/x/exp v0.0.0-20240823005443-9b4947da3948 (LICENSE)
+golang.org/x/exp v0.0.0-20250305212735-054e65f0b394 (LICENSE)
 ==============================================================================
 
 Copyright 2009 The Go Authors.
@@ -396,7 +396,7 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 ==============================================================================
-golang.org/x/exp v0.0.0-20240823005443-9b4947da3948 (PATENTS)
+golang.org/x/exp v0.0.0-20250305212735-054e65f0b394 (PATENTS)
 ==============================================================================
 
 Additional IP Rights Grant (Patents)

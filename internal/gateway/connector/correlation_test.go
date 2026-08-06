@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -175,6 +176,25 @@ func TestCodexCorrelationProfileSupportsExactReviewedHookContracts(t *testing.T)
 	}
 }
 
+func TestClaudeCorrelationProfileSupportsExactReviewedHookContracts(t *testing.T) {
+	for _, contractID := range []string{"claudecode-hooks-v1", "claudecode-hooks-v2"} {
+		spec, ok := CorrelationSpecForConnector("claudecode", contractID)
+		if !ok {
+			t.Fatalf("reviewed Claude Code contract %q rejected", contractID)
+		}
+		if spec.HookContractID != contractID {
+			t.Fatalf("correlation contract=%q want %q", spec.HookContractID, contractID)
+		}
+		if err := spec.Validate(); err != nil {
+			t.Fatalf("Validate %q: %v", contractID, err)
+		}
+	}
+
+	if _, ok := CorrelationSpecForConnector("claudecode", "claudecode-hooks-v999"); ok {
+		t.Fatal("unreviewed future Claude Code contract accepted")
+	}
+}
+
 func TestUnknownCorrelationProfileDoesNotGuessVendorAliases(t *testing.T) {
 	spec := ExplicitCanonicalCorrelationSpec("plugin-example")
 	if !spec.AllowsReceiptTarget(CorrelationTargetSourceEvent) {
@@ -277,7 +297,7 @@ func TestNativeTelemetryRegistryIsExplicit(t *testing.T) {
 		"openclaw": NativeTelemetryNone, "zeptoclaw": NativeTelemetryNone,
 		"codex": NativeTelemetryStable, "claudecode": NativeTelemetryBeta,
 		"hermes": NativeTelemetryNone, "cursor": NativeTelemetryNone, "windsurf": NativeTelemetryNone,
-		"geminicli": NativeTelemetryStable, "copilot": NativeTelemetryStable,
+		"geminicli": NativeTelemetryStable, "copilot": NativeTelemetryNone,
 		"openhands": NativeTelemetryNone, "antigravity": NativeTelemetryNone,
 		"opencode": NativeTelemetryNone, "omnigent": NativeTelemetryExperimental,
 		"amp": NativeTelemetryNone,
@@ -492,8 +512,6 @@ func TestAllBuiltinCorrelationProfilesUseConnectorExactIDs(t *testing.T) {
 		{"openhands", map[string]interface{}{"conversation_id": "s", "message_id": "t", "event_id": "e", "tool_call_id": "tc", "llm_response_id": "rs"}, map[CorrelationTarget]string{CorrelationTargetSession: "s", CorrelationTargetTurn: "t", CorrelationTargetSourceEvent: "e", CorrelationTargetTool: "tc", CorrelationTargetModelResponse: "rs"}},
 		{"antigravity", map[string]interface{}{"conversationId": "s", "stepIdx": 4, "invocationNum": 8, "toolCall": map[string]interface{}{"id": "tc"}}, map[CorrelationTarget]string{CorrelationTargetSession: "s", CorrelationTargetStep: "4", CorrelationTargetExecution: "8", CorrelationTargetTool: "tc"}},
 		{"opencode", map[string]interface{}{"session_id": "s", "parentID": "ps", "messageId": "t", "part_id": "e", "callID": "tc"}, map[CorrelationTarget]string{CorrelationTargetSession: "s", CorrelationTargetParentSession: "ps", CorrelationTargetTurn: "t", CorrelationTargetSourceEvent: "e", CorrelationTargetTool: "tc"}},
-		{"omnigent", map[string]interface{}{"conversation_id": "s", "root_conversation_id": "rs", "response_id": "t", "item_id": "e", "call_id": "tc"}, map[CorrelationTarget]string{CorrelationTargetSession: "s", CorrelationTargetRootSession: "rs", CorrelationTargetTurn: "t", CorrelationTargetSourceEvent: "e", CorrelationTargetTool: "tc"}},
-		{"amp", map[string]interface{}{"thread_id": "th", "session_id": "s", "turn_id": "t", "message_id": "m", "source_event_id": "e", "tool_call_id": "tc"}, map[CorrelationTarget]string{CorrelationTargetThread: "th", CorrelationTargetSession: "s", CorrelationTargetTurn: "t", CorrelationTargetMessage: "m", CorrelationTargetSourceEvent: "e", CorrelationTargetTool: "tc"}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -505,6 +523,56 @@ func TestAllBuiltinCorrelationProfilesUseConnectorExactIDs(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestOmniGentOfficialPolicyEventDoesNotInventCorrelationIDs(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "omnigent-policy-event.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatal(err)
+	}
+	spec := DefaultCorrelationSpec("omnigent")
+	if got := spec.HookValues(payload); len(got) != 0 {
+		t.Fatalf("official OmniGent PolicyEvent produced unsupported correlation IDs: %+v", got)
+	}
+	if spec.Completeness.Session != CorrelationCompletenessPartial ||
+		spec.Completeness.Turn != CorrelationCompletenessAbsent ||
+		spec.Completeness.AgentLifecycle != CorrelationCompletenessAbsent ||
+		spec.Completeness.Tool != CorrelationCompletenessAbsent ||
+		spec.Completeness.Model != CorrelationCompletenessAbsent {
+		t.Fatalf("OmniGent correlation completeness is overstated: %+v", spec.Completeness)
+	}
+	if len(spec.AllowedInferenceRules) != 0 || len(spec.ReceiptTargets) != 0 ||
+		len(spec.MirrorIdentityTargets) != 0 {
+		t.Fatalf("OmniGent v0.7.0 invented correlation authority: %+v", spec)
+	}
+
+	nativeRaw, err := os.ReadFile(filepath.Join("testdata", "omnigent-otel-span.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var nativeFixture struct {
+		Attributes map[string]interface{} `json:"attributes"`
+	}
+	if err := json.Unmarshal(nativeRaw, &nativeFixture); err != nil {
+		t.Fatal(err)
+	}
+	session, ok := spec.NativeOTLPValue(nativeFixture.Attributes, CorrelationTargetSession)
+	if !ok || session.Path != "session.id" || session.Value != "conv_0123456789abcdef" {
+		t.Fatalf("OmniGent native session correlation = %+v, present=%v", session, ok)
+	}
+	for _, unsupported := range []string{
+		"gen_ai.conversation.id", "gen_ai.agent.id", "gen_ai.response.id",
+		"gen_ai.tool.call.id", "defenseclaw.turn.id",
+	} {
+		attributes := map[string]interface{}{unsupported: "invented"}
+		if got := spec.NativeOTLPValues(attributes); len(got) != 0 {
+			t.Fatalf("unsupported OmniGent native ID %q was accepted: %+v", unsupported, got)
+		}
 	}
 }
 
@@ -579,7 +647,7 @@ func TestOpenClawNativeTelemetryFailsClosedWithoutReviewedExporter(t *testing.T)
 	}
 }
 
-func TestCopilotDocumentedHookAndNativeIDsStayOnTheirRails(t *testing.T) {
+func TestCopilotDocumentedHookIDsStayOnTheirRail(t *testing.T) {
 	spec := DefaultCorrelationSpec("copilot")
 	hook := map[string]interface{}{
 		"sessionId":      "session-1",
@@ -594,16 +662,8 @@ func TestCopilotDocumentedHookAndNativeIDsStayOnTheirRails(t *testing.T) {
 			t.Errorf("undocumented Copilot hook identity populated %s: %+v", target, value)
 		}
 	}
-
-	native, ok := spec.NativeOTLPValue(map[string]interface{}{"github.copilot.interaction_id": "interaction-1"}, CorrelationTargetModelRequest)
-	if !ok || native.Value != "interaction-1" || native.IDKind != "interaction" {
-		t.Fatalf("Copilot native interaction=(%+v,%v)", native, ok)
-	}
-	if message, found := spec.NativeOTLPValue(map[string]interface{}{"github.copilot.interaction_id": "interaction-1"}, CorrelationTargetMessage); found {
-		t.Fatalf("Copilot interaction was mislabeled as a message: %+v", message)
-	}
-	if spec.NativeTelemetry.IsAuthoritative(CorrelationTargetModelRequest) {
-		t.Fatal("Copilot native interaction gained cross-rail authority without paired field proof")
+	if len(spec.NativeOTLPBindings) != 0 {
+		t.Fatalf("Copilot gained unintegrated native OTLP bindings: %v", spec.NativeOTLPBindings)
 	}
 	if len(spec.MirrorIdentityTargets) != 0 {
 		t.Fatalf("Copilot undocumented hook/native mirrors remain enabled: %v", spec.MirrorIdentityTargets)

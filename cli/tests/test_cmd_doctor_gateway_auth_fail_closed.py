@@ -9,10 +9,12 @@ from unittest.mock import patch
 
 import pytest
 from defenseclaw.commands.cmd_doctor import (
+    _authenticated_runtime_matches,
     _check_gateway_auth,
     _check_sidecar,
     _DoctorResult,
     _GatewayTrust,
+    _strict_authenticated_runtime_pid,
 )
 from defenseclaw.config import GatewayConfig
 from defenseclaw.doctor_gateway import PIDRecord, ProcessEvidence
@@ -74,8 +76,54 @@ def _healthy_document() -> str:
     )
 
 
-def _runtime_document(data_dir: str, *, pid: int = 4242) -> str:
+def _runtime_document(data_dir: str, *, pid: object = 4242) -> str:
     return json.dumps({"runtime": {"pid": pid, "data_dir": data_dir}})
+
+
+_INVALID_STATUS_PIDS = (
+    4242.9,
+    4242.0,
+    True,
+    None,
+    {},
+    [],
+    "not-a-pid",
+    0,
+    -1,
+    "4242",
+    "004242",
+    "+4242",
+    " 4242 ",
+)
+
+
+def test_strict_authenticated_runtime_pid_matches_go_status_contract() -> None:
+    assert _strict_authenticated_runtime_pid(4242) == 4242
+    for value in _INVALID_STATUS_PIDS:
+        assert _strict_authenticated_runtime_pid(value) is None
+
+
+@pytest.mark.parametrize("runtime_pid", _INVALID_STATUS_PIDS)
+def test_authenticated_runtime_matcher_rejects_noncanonical_pid(tmp_path, runtime_pid) -> None:
+    matched, detail = _authenticated_runtime_matches(
+        _cfg(str(tmp_path)),
+        4242,
+        _runtime_document(str(tmp_path), pid=runtime_pid),
+    )
+
+    assert matched is False
+    assert "runtime PID is unavailable" in detail
+
+
+def test_authenticated_runtime_matcher_accepts_exact_integer_pid(tmp_path) -> None:
+    matched, detail = _authenticated_runtime_matches(
+        _cfg(str(tmp_path)),
+        4242,
+        _runtime_document(str(tmp_path), pid=4242),
+    )
+
+    assert matched is True
+    assert detail == ""
 
 
 @pytest.mark.parametrize(

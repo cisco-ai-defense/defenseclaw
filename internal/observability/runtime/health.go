@@ -190,6 +190,18 @@ func (runtime *Runtime) DestinationHealthSnapshot(
 			row.LastFailure = source.LastFailure.UTC()
 		}
 	}
+	for index := range rows {
+		switch rows[index].CircuitState {
+		case delivery.CircuitOpen:
+			rows[index].State = delivery.HealthFailing
+			rows[index].Reason = string(delivery.HealthReasonCircuitOpen)
+		case delivery.CircuitHalfOpen:
+			if healthStateRank(rows[index].State) < healthStateRank(delivery.HealthDegraded) {
+				rows[index].State = delivery.HealthDegraded
+				rows[index].Reason = string(delivery.HealthReasonCircuitHalfOpen)
+			}
+		}
+	}
 
 	return DestinationHealthSnapshot{
 		Generation: graph.Generation(), PlanDigest: graph.Digest(), Destinations: rows,

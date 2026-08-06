@@ -12,6 +12,8 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestAMPSetupWritesManagedSystemPlugin(t *testing.T) {
@@ -126,7 +128,7 @@ func TestAMPSetupWritesManagedSystemPlugin(t *testing.T) {
 }
 
 func TestAMPTeardownRestoresPreExistingDefenseClawPluginAsClean(t *testing.T) {
-	root := t.TempDir()
+	root := testenv.PrivateTempDir(t)
 	pluginPath := filepath.Join(root, ".config", "amp", "plugins", "defenseclaw.ts")
 	if err := os.MkdirAll(filepath.Dir(pluginPath), 0o700); err != nil {
 		t.Fatal(err)
@@ -527,7 +529,7 @@ func TestAMPHookEndpointRequiresBearerOnLoopbackAndRemote(t *testing.T) {
 }
 
 func TestAMPFailModeDefaultsClosed(t *testing.T) {
-	root := t.TempDir()
+	root := testenv.PrivateTempDir(t)
 	previous := AMPPluginPathOverride
 	AMPPluginPathOverride = filepath.Join(root, "defenseclaw.ts")
 	t.Cleanup(func() { AMPPluginPathOverride = previous })

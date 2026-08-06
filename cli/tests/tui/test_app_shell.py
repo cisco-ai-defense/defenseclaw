@@ -2981,6 +2981,17 @@ async def test_setup_global_shortcuts_save_restart_clear_and_revert() -> None:
     cfg: dict = {"notifications": {"enabled": True}}
     setup = SetupPanelModel(cfg)
     app = DefenseClawTUI(config=cfg, setup_model=setup)
+    status_updates: list[str] = []
+    config_saved = asyncio.Event()
+    set_status = app._set_status  # noqa: SLF001 - observe the exact callback outcome.
+
+    def capture_status(message: str) -> None:
+        status_updates.append(message)
+        if "Config changes saved" in message:
+            config_saved.set()
+        set_status(message)
+
+    app._set_status = capture_status  # type: ignore[method-assign]  # noqa: SLF001
 
     async with app.run_test(size=(150, 40)) as pilot:
         await pilot.press("0")
@@ -3005,13 +3016,16 @@ async def test_setup_global_shortcuts_save_restart_clear_and_revert() -> None:
         await pilot.pause()
 
         assert app.screen_stack[-1].__class__.__name__ == "ConfigDiffScreen"
-        await pilot.press("enter")
-        await pilot.pause()
-        await pilot.pause()
+        # This integration owns the save callback, not pointer hit-testing.
+        # Posting Button.Pressed through the mounted widget makes event
+        # delivery deterministic even while a loaded shard is rendering other
+        # panels; pointer and keyboard activation have dedicated screen tests.
+        app.screen.query_one("#config-diff-save", Button).press()
+        await config_saved.wait()
 
         assert cfg["notifications"]["enabled"] is False
         assert setup.restart_queue.pending is True
-        assert "Config changes saved" in app.status_text
+        assert any("Config changes saved" in update for update in status_updates)
 
         await pilot.press("C")
         await pilot.pause()
@@ -6013,9 +6027,12 @@ async def test_overview_prefers_persisted_hook_totals_over_gateway_request_count
     )
     app = DefenseClawTUI(overview_model=overview, audit_model=audit, alerts_model=alerts)
     # This contract covers reuse of the grouped persisted totals within one
-    # render generation.  Do not let Textual's independent two-second refresh
-    # timer create another generation while the full suite is instrumented.
+    # render generation. Do not let Textual's independent mount polls create
+    # another generation while the full suite is instrumented.
     app._periodic_refresh = lambda: None  # type: ignore[method-assign]
+    app._schedule_health_poll = lambda: None  # type: ignore[method-assign]
+    app._schedule_ai_usage_poll = lambda: None  # type: ignore[method-assign]
+    app._schedule_config_poll = lambda: None  # type: ignore[method-assign]
 
     async with app.run_test(size=(190, 50)) as pilot:
         await pilot.pause()
@@ -6647,6 +6664,48 @@ async def test_overview_disabled_connector_marked_but_still_filterable() -> None
         assert app._connector_filter() == "codex"
 
 
+def test_cursor_disclosure_renders_for_enabled_and_disabled_rows_only() -> None:
+    from rich.console import Console
+
+    disclosure = "priority-conflict-detection=unavailable (none inferred)"
+    for disabled in (False, True):
+        cfg = OverviewConfig(
+            claw_mode="codex",
+            guardrail_connector="codex",
+            connector_modes=(("codex", "action"), ("cursor", "observe")),
+            connector_disabled=("cursor",) if disabled else (),
+        )
+        overview = OverviewPanelModel(cfg, version="test")
+        overview.set_health(
+            HealthSnapshot(
+                gateway=SubsystemHealth(state="running"),
+                connectors=(
+                    (ConnectorHealth(name="codex", state="running"),)
+                    if disabled
+                    else (
+                        ConnectorHealth(name="codex", state="running"),
+                        ConnectorHealth(name="cursor", state="running"),
+                    )
+                ),
+            )
+        )
+        app = DefenseClawTUI(overview_model=overview, audit_model=AuditPanelModel())
+        rows = {row.connector: row for row in app._overview_connector_rows()}
+        panel = app._overview_connectors_panel(list(rows.values()))
+        console = Console(file=io.StringIO(), width=170, record=True)
+        console.print(panel)
+        rich_text = console.export_text()
+        fallback_text = app._overview_connectors_text(list(rows.values()))
+
+        assert rows["cursor"].status == ("disabled" if disabled else "running")
+        assert rich_text.count(disclosure) == 1
+        assert fallback_text.count(disclosure) == 1
+        assert f"Cursor (cursor): {disclosure}" in rich_text
+        assert f"Cursor (cursor): {disclosure}" in fallback_text
+        assert f"Codex (codex): {disclosure}" not in rich_text
+        assert f"Codex (codex): {disclosure}" not in fallback_text
+
+
 @pytest.mark.asyncio
 async def test_overview_enforcement_narrows_to_selected_connector() -> None:
     """8.13: ENFORCEMENT shows global stats under "All", and narrows to the
@@ -6773,6 +6832,34 @@ async def test_overview_connector_rows_status_falls_back_to_gateway() -> None:
         assert all(row.status == "active" for row in rows)
 
 
+def test_overview_connector_rows_degrade_only_unverified_opencode_runtime() -> None:
+    now = datetime.now(timezone.utc)
+    cfg = OverviewConfig(
+        data_dir="/tmp/dc",
+        claw_mode="opencode",
+        guardrail_connector="opencode",
+        connector_modes=(("opencode", "action"), ("cursor", "observe")),
+    )
+    overview = OverviewPanelModel(cfg, version="test")
+    overview.set_health(
+        HealthSnapshot(
+            started_at=(now - timedelta(hours=1)).isoformat(),
+            gateway=SubsystemHealth(state="running"),
+            api=SubsystemHealth(state="running"),
+            connectors=(
+                ConnectorHealth(name="opencode", state="running"),
+                ConnectorHealth(name="cursor", state="running"),
+            ),
+        )
+    )
+    app = DefenseClawTUI(overview_model=overview, audit_model=AuditPanelModel())
+
+    rows = {row.connector: row for row in app._overview_connector_rows()}
+
+    assert rows["opencode"].status == "degraded"
+    assert rows["cursor"].status == "running"
+
+
 @pytest.mark.asyncio
 async def test_overview_connector_rows_empty_for_single_connector() -> None:
     """8.13 no-op: single-connector installs render no CONNECTORS table."""
@@ -6832,12 +6919,15 @@ def test_connectors_health_array_parsed() -> None:
                 {
                     "name": "codex",
                     "state": "running",
+                    "source": "manual",
                     "requests": 5,
                     "last_activity_at": "2026-07-01T14:35:00Z",
+                    "load_heartbeat_at": "2026-07-01T14:35:01Z",
                 },
                 {
                     "name": "cursor",
                     "state": "degraded",
+                    "source": 7,
                     "lastActivityAt": "2026-07-01T14:36:00Z",
                 },
                 {"state": "running"},  # nameless entry is skipped
@@ -6850,7 +6940,10 @@ def test_connectors_health_array_parsed() -> None:
     assert snap.connector is not None
     assert snap.connector.last_activity_at == "2026-07-01T14:35:00Z"
     assert snap.connectors[0].last_activity_at == "2026-07-01T14:35:00Z"
+    assert snap.connectors[0].source == "manual"
+    assert snap.connectors[0].load_heartbeat_at == "2026-07-01T14:35:01Z"
     assert snap.connectors[1].last_activity_at == "2026-07-01T14:36:00Z"
+    assert snap.connectors[1].source == ""
 
 
 # --- A2: _overview_config roster build is defensive -------------------------

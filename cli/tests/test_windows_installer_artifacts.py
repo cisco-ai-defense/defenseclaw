@@ -206,6 +206,11 @@ def _fixture(tmp_path: Path) -> argparse.Namespace:
     stdlib = _zip_bytes({"json/__init__.py": b"# stdlib\n"})
     python_name = "python-3.13.14-embed-amd64.zip"
     _write_zip(payload / python_name, {"python.exe": b"python", "python313.zip": stdlib})
+    vc_runtime_name = "microsoft-vc-runtime-14.42.34438-x64.zip"
+    _write_zip(
+        payload / vc_runtime_name,
+        {"msvcp140.dll": b"msvcp140", "msvcp140_1.dll": b"msvcp140_1"},
+    )
 
     gateway_name = f"defenseclaw_{version}_windows_amd64.zip"
     _write_zip(
@@ -266,6 +271,7 @@ def _fixture(tmp_path: Path) -> argparse.Namespace:
         "gateway_archive": gateway_name,
         "wheel": wheel_name,
         "python_embed": python_name,
+        "vc_runtime": vc_runtime_name,
         "yara_compat_wheel": compat_name,
         "upgrade_manifest": "upgrade-manifest.json",
         "site_packages": "site-packages.zip",
@@ -452,6 +458,18 @@ def test_builder_pins_a_project_supported_embedded_python_and_checks_metadata() 
     assert "dist.metadata.get('Requires-Python')" in build
     assert "SpecifierSet(requires_python).contains(platform.python_version(), prereleases=True)" in build
     assert "if not magika_result.ok or not magika_result.output.is_text:" in build
+
+
+def test_builder_pins_and_app_locally_loads_exact_microsoft_vc_runtime() -> None:
+    build = BUILD_PS1.read_text(encoding="utf-8")
+    assert "$VCRuntimeVersion = '14.42.34438'" in build
+    assert "$VCRuntimeSourceLength = 3222320L" in build
+    assert "$VCRuntimeSourceSha256 = '49D70DB282F1C74D456206501120134F021C2BC3AAABB41577FE18DEA35D1454'" in build
+    assert "$VCRuntimeClosureFiles = @('msvcp140.dll', 'msvcp140_1.dll')" in build
+    assert "Pinned VC++ runtime source retail x64 member set drifted" in build
+    assert "Pinned VC++ runtime identity or Authenticode validation failed" in build
+    assert "Windows CPython dependency probe escaped app-local VC++ runtime" in build
+    assert "vc_runtime_source_sha256 = $VCRuntimeSourceSha256.ToLowerInvariant()" in build
 
 
 def test_v8_config_sources_are_pinned_to_cross_platform_lf_bytes() -> None:
@@ -997,12 +1015,13 @@ def test_merged_spdx_covers_exact_and_expanded_windows_payload(tmp_path: Path) -
     assert document["comment"] == f"DefenseClaw source commit: {args.source_commit}"
     assert summary["python_distributions"] == 2
     assert summary["go_modules"] == 2
-    assert summary["payload_digests"] == 11
+    assert summary["payload_digests"] == 12
     assert summary["authenticode_files"] == 11
     assert {package["name"] for package in document["packages"]} >= {
         "DefenseClaw Windows Setup",
         "DefenseClaw embedded installer payload",
         "CPython embeddable runtime",
+        "Microsoft Visual C++ app-local runtime",
         "DefenseClaw gateway executable",
         "DefenseClaw hook executable",
         "DefenseClaw stable HookRuntime launcher",
@@ -1016,6 +1035,8 @@ def test_merged_spdx_covers_exact_and_expanded_windows_payload(tmp_path: Path) -
     }
     file_names = {file["fileName"] for file in document["files"]}
     assert "./expanded/python/stdlib/json/__init__.py" in file_names
+    assert "./expanded/vc-runtime/msvcp140.dll" in file_names
+    assert "./expanded/vc-runtime/msvcp140_1.dll" in file_names
     assert "./expanded/site-packages/defenseclaw/__init__.py" in file_names
     assert "./expanded/gateway/defenseclaw-hook.exe" in file_names
     assert "./payload/defenseclaw-hook-launcher.exe" in file_names
@@ -1074,6 +1095,26 @@ def test_sbom_rejects_unexpected_extra_payload_artifact(tmp_path: Path) -> None:
     args = _fixture(tmp_path)
     (args.payload_root / "unexpected-launcher.exe").write_bytes(b"unexpected")
     with pytest.raises(artifacts.ArtifactError, match="Payload digest coverage mismatch"):
+        artifacts.build_sbom(args)
+
+
+def test_sbom_rejects_unexpected_vc_runtime_member(tmp_path: Path) -> None:
+    args = _fixture(tmp_path)
+    manifest_path = args.payload_root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    runtime = args.payload_root / manifest["vc_runtime"]
+    _write_zip(
+        runtime,
+        {
+            "msvcp140.dll": b"msvcp140",
+            "msvcp140_1.dll": b"msvcp140_1",
+            "debug/msvcp140d.dll": b"debug",
+        },
+    )
+    manifest["files"][runtime.name] = _sha256(runtime)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    artifacts.deterministic_zip(args.payload_root, args.embedded_payload, args.source_epoch, include_root=True)
+    with pytest.raises(artifacts.ArtifactError, match="runtime archive has unexpected members"):
         artifacts.build_sbom(args)
 
 

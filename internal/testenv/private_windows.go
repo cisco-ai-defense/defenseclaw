@@ -8,6 +8,7 @@ package testenv
 import (
 	"os"
 	"testing"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -35,8 +36,20 @@ func PrivateTempDir(t *testing.T) string {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() {
-		if err := os.RemoveAll(dir); err != nil {
-			t.Errorf("remove private temp dir %s: %v", dir, err)
+		// Windows can retain a short-lived image-section handle after a test
+		// process exits. Retry the cleanup briefly so a just-executed fixture
+		// does not turn successful connector behavior into a teardown failure.
+		deadline := time.Now().Add(2 * time.Second)
+		var cleanupErr error
+		for {
+			cleanupErr = os.RemoveAll(dir)
+			if cleanupErr == nil || time.Now().After(deadline) {
+				break
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+		if cleanupErr != nil {
+			t.Errorf("remove private temp dir %s: %v", dir, cleanupErr)
 		}
 	})
 	// Some Windows CI images assign newly created objects to the built-in

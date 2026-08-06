@@ -18,6 +18,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -81,7 +82,7 @@ func TestSkillDirs_DispatchesViaConnector(t *testing.T) {
 		connector string
 		mustHave  string
 	}{
-		{"codex", filepath.Join(home, ".codex", "skills")},
+		{"codex", filepath.Join(home, ".agents", "skills")},
 		{"claudecode", filepath.Join(home, ".claude", "skills")},
 		{"zeptoclaw", filepath.Join(home, ".zeptoclaw", "skills")},
 	}
@@ -116,8 +117,8 @@ func TestPluginDirs_DispatchesViaConnector(t *testing.T) {
 		connector string
 		want      string
 	}{
-		{"codex", filepath.Join(home, ".codex", "plugins")},
-		{"claudecode", filepath.Join(home, ".claude", "plugins")},
+		{"codex", filepath.Join(home, ".codex", "plugins", "cache")},
+		{"claudecode", filepath.Join(home, ".claude", "plugins", "cache")},
 		{"zeptoclaw", filepath.Join(home, ".zeptoclaw", "plugins")},
 	}
 
@@ -128,11 +129,8 @@ func TestPluginDirs_DispatchesViaConnector(t *testing.T) {
 			cfg.Claw.HomeDir = "/tmp/should-be-ignored"
 
 			dirs := cfg.PluginDirs()
-			if len(dirs) != 1 {
-				t.Fatalf("PluginDirs() for %s = %v, want 1 dir", tt.connector, dirs)
-			}
-			if dirs[0] != tt.want {
-				t.Errorf("PluginDirs()[0] for %s = %q, want %q", tt.connector, dirs[0], tt.want)
+			if !containsPath(dirs, tt.want) {
+				t.Errorf("PluginDirs() for %s = %v, missing %q", tt.connector, dirs, tt.want)
 			}
 		})
 	}
@@ -156,11 +154,52 @@ func TestConnectorHomesHonorClientOverrides(t *testing.T) {
 	if got := cfg.ConnectorHomeDir("claudecode"); got != claudeHome {
 		t.Fatalf("Claude config dir = %q, want %q", got, claudeHome)
 	}
-	if got := cfg.SkillDirsForConnector("codex")[0]; got != filepath.Join(codexHome, "skills") {
-		t.Fatalf("Codex skill dir = %q", got)
+	if got := cfg.ConnectorHomeDir("claude-code"); got != claudeHome {
+		t.Fatalf("Claude alias config dir = %q, want %q", got, claudeHome)
 	}
-	if got := cfg.PluginDirsForConnector("claudecode")[0]; got != filepath.Join(claudeHome, "plugins") {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Skipf("UserHomeDir unavailable: %v", err)
+	}
+	codexSkillDir := filepath.Join(home, ".agents", "skills")
+	if got := cfg.SkillDirsForConnector("codex"); !containsPath(got, codexSkillDir) {
+		t.Fatalf("Codex skill dirs = %v, want personal path %q", got, codexSkillDir)
+	}
+	if got := cfg.PluginDirsForConnector("claudecode")[0]; got != filepath.Join(claudeHome, "plugins", "cache") {
 		t.Fatalf("Claude plugin dir = %q", got)
+	}
+	cfg.Guardrail.Connector = "claude_code"
+	if got := cfg.PluginDirs()[0]; got != filepath.Join(claudeHome, "plugins", "cache") {
+		t.Fatalf("active Claude alias plugin dir = %q", got)
+	}
+	pluginParent := filepath.Join(root, "plugin-parent")
+	t.Setenv("CLAUDE_CODE_PLUGIN_CACHE_DIR", pluginParent)
+	if got := cfg.PluginDirsForConnector("claudecode")[0]; got != filepath.Join(pluginParent, "cache") {
+		t.Fatalf("Claude plugin override dir = %q", got)
+	}
+}
+
+func TestClaudePluginDirsIncludeAncestorAndNestedSkillsRoots(t *testing.T) {
+	repository := filepath.Join(t.TempDir(), "repo")
+	launch := filepath.Join(repository, "apps", "web")
+	nested := filepath.Join(launch, "packages", "ui", ".claude", "skills")
+	if err := os.MkdirAll(filepath.Join(repository, ".git"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(nested, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &Config{}
+	cfg.Claw.WorkspaceDir = launch
+	dirs := cfg.PluginDirsForConnector("claudecode")
+	for _, want := range []string{
+		filepath.Join(repository, ".claude", "skills"),
+		nested,
+	} {
+		if !containsPath(dirs, want) {
+			t.Errorf("PluginDirsForConnector(claudecode) = %v, missing %q", dirs, want)
+		}
 	}
 }
 
@@ -234,34 +273,29 @@ func TestPluginDirsForConnector_DefaultArmDoesNotRecurse(t *testing.T) {
 	}
 }
 
-// TestReadMCPServers_DispatchesViaConnector hooks into the codex
-// branch — Codex reads <workspace>/.mcp.json and Codex only. We pin
-// claw.workspace_dir to a temp dir with a known .mcp.json and confirm
+// TestReadMCPServers_DispatchesViaConnector hooks into the Codex
+// branch. Codex reads the project .codex/config.toml [mcp_servers] table. We pin
+// claw.workspace_dir to a temp dir with a known project config and confirm
 // we get its entries back via the no-arg ReadMCPServers (i.e. the
 // dispatcher honors the configured workspace, not the daemon cwd).
 func TestReadMCPServers_DispatchesViaConnector(t *testing.T) {
 	tmp := t.TempDir()
-	mcp := map[string]any{
-		"mcpServers": map[string]any{
-			"hello": map[string]any{
-				"command": "echo",
-				"args":    []string{"hi"},
-			},
-		},
+	projectConfigDir := filepath.Join(tmp, ".codex")
+	if err := os.MkdirAll(projectConfigDir, 0o700); err != nil {
+		t.Fatalf("mkdir: %v", err)
 	}
-	data, err := json.Marshal(mcp)
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	mcpPath := filepath.Join(tmp, ".mcp.json")
-	if err := os.WriteFile(mcpPath, data, 0o600); err != nil {
+	mcpPath := filepath.Join(projectConfigDir, "config.toml")
+	if err := os.WriteFile(mcpPath, []byte(`
+[mcp_servers.hello]
+command = "echo"
+args = ["hi"]
+`), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
 
 	// Isolate HOME so the real user's ~/.codex/config.toml (which may
 	// register global MCP servers like playwright) doesn't leak into
-	// the assertion below — Codex layers the global TOML table with
-	// the project-local ./.mcp.json we wrote above.
+	// the assertion below.
 	testenv.SetHome(t, tmp)
 
 	prev, err := os.Getwd()
@@ -283,6 +317,66 @@ func TestReadMCPServers_DispatchesViaConnector(t *testing.T) {
 	}
 	if len(entries) != 1 || entries[0].Name != "hello" || entries[0].Command != "echo" {
 		t.Errorf("entries = %+v, want [{hello echo …}]", entries)
+	}
+	if entries[0].Source != mcpPath || entries[0].SourceScope != "project" || !entries[0].TrustRequired {
+		t.Errorf("project metadata = %+v, want source/project/trust-required", entries[0])
+	}
+}
+
+func TestWindsurfInventoryUsesPersistedBoundUserHome(t *testing.T) {
+	root := t.TempDir()
+	bound := filepath.Join(root, "bound-profile")
+	ambient := filepath.Join(root, "ambient-profile")
+	workspace := filepath.Join(root, "repo")
+	testenv.SetHome(t, ambient)
+	t.Setenv("WINDSURF_USER_HOME", bound)
+
+	for _, item := range []struct {
+		home string
+		name string
+	}{
+		{home: bound, name: "bound"},
+		{home: ambient, name: "ambient"},
+	} {
+		dir := filepath.Join(item.home, ".codeium", "windsurf")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		body := fmt.Sprintf(`{"mcpServers":{"%s":{"command":"%s-mcp"}}}`, item.name, item.name)
+		if err := os.WriteFile(filepath.Join(dir, "mcp_config.json"), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	guessed := filepath.Join(bound, ".codeium", "windsurf", "mcp.json")
+	if err := os.WriteFile(guessed, []byte(`{"mcpServers":{"guessed":{"command":"guessed-mcp"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &Config{Claw: ClawConfig{WorkspaceDir: workspace}}
+	if got, want := cfg.ConnectorHomeDir("windsurf"), filepath.Join(bound, ".codeium", "windsurf"); got != want {
+		t.Fatalf("ConnectorHomeDir(windsurf) = %q, want %q", got, want)
+	}
+	wantSkills := []string{
+		filepath.Join(bound, ".codeium", "windsurf", "skills"),
+		filepath.Join(bound, ".agents", "skills"),
+		filepath.Join(workspace, ".windsurf", "skills"),
+		filepath.Join(workspace, ".agents", "skills"),
+	}
+	if got := cfg.SkillDirsForConnector("windsurf"); len(got) != len(wantSkills) {
+		t.Fatalf("SkillDirsForConnector(windsurf) = %v, want %v", got, wantSkills)
+	} else {
+		for _, want := range wantSkills {
+			if !containsPath(got, want) {
+				t.Fatalf("SkillDirsForConnector(windsurf) = %v, missing %q", got, want)
+			}
+		}
+	}
+	entries, err := cfg.ReadMCPServersForConnector("windsurf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name != "bound" || entries[0].Command != "bound-mcp" {
+		t.Fatalf("Windsurf MCP entries = %+v, want only bound profile", entries)
 	}
 }
 
@@ -343,6 +437,131 @@ func TestReadMCPServers_UsesPinnedWorkspaceForProjectMCP(t *testing.T) {
 	}
 	if hasMCPEntry(entries, "daemon-cwd") {
 		t.Fatalf("entries = %+v, should not read daemon cwd MCP server", entries)
+	}
+}
+
+func TestReadMCPServersClaudeCodeLocalProjectUserPrecedence(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	workspace := filepath.Join(root, "workspace")
+	otherWorkspace := filepath.Join(root, "other")
+	for _, dir := range []string{home, workspace, otherWorkspace} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	testenv.SetHome(t, home)
+
+	state := map[string]any{
+		"projects": map[string]any{
+			filepath.Join(workspace, "."): map[string]any{
+				"mcpServers": map[string]any{
+					"shared":     map[string]any{"command": "local-command"},
+					"local-only": map[string]any{"command": "local-only-command"},
+				},
+			},
+			otherWorkspace: map[string]any{
+				"mcpServers": map[string]any{
+					"other-local": map[string]any{"command": "must-not-appear"},
+				},
+			},
+		},
+		"mcpServers": map[string]any{
+			"shared":    map[string]any{"command": "user-command"},
+			"user-only": map[string]any{"command": "user-only-command"},
+		},
+	}
+	stateData, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"), stateData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	project := map[string]any{
+		"mcpServers": map[string]any{
+			"shared":       map[string]any{"command": "project-command"},
+			"project-only": map[string]any{"command": "project-only-command"},
+		},
+	}
+	projectData, err := json.Marshal(project)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, ".mcp.json"), projectData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &Config{Claw: ClawConfig{WorkspaceDir: workspace}}
+	cfg.Guardrail.Connector = "claudecode"
+	entries, err := cfg.ReadMCPServers()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := mcpEntriesByName(entries)
+	if len(got) != 4 {
+		t.Fatalf("entries = %+v, want four local/project/user entries", entries)
+	}
+	if got["shared"].Command != "local-command" {
+		t.Fatalf("shared = %+v, want local scope to win", got["shared"])
+	}
+	for _, name := range []string{"local-only", "project-only", "user-only"} {
+		if _, ok := got[name]; !ok {
+			t.Errorf("entries = %+v, missing %q", entries, name)
+		}
+	}
+	if _, ok := got["other-local"]; ok {
+		t.Fatalf("entries = %+v, attributed a different workspace's local MCP", entries)
+	}
+}
+
+func TestReadMCPServersClaudeCodeDoesNotInferWorkspaceFromCWD(t *testing.T) {
+	t.Setenv("CLAUDE_CONFIG_DIR", "")
+	root := t.TempDir()
+	home := filepath.Join(root, "home")
+	workspace := filepath.Join(root, "workspace")
+	for _, dir := range []string{home, workspace} {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	testenv.SetHome(t, home)
+	stateData, err := json.Marshal(map[string]any{
+		"projects": map[string]any{
+			workspace: map[string]any{
+				"mcpServers": map[string]any{
+					"local-only": map[string]any{"command": "must-not-appear"},
+				},
+			},
+		},
+		"mcpServers": map[string]any{
+			"user-only": map[string]any{"command": "user-command"},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"), stateData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	previous, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(previous) })
+	if err := os.Chdir(workspace); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &Config{}
+	cfg.Guardrail.Connector = "claudecode"
+	entries, err := cfg.ReadMCPServers()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name != "user-only" {
+		t.Fatalf("entries = %+v, want only user scope", entries)
 	}
 }
 
@@ -420,6 +639,92 @@ func TestReadMCPServersForConnector_OpenCode(t *testing.T) {
 				t.Errorf("api = %+v, want url + transport=remote", e)
 			}
 		}
+	}
+}
+
+func TestReadMCPServersOpenCode_V11810PrecedenceJSONCAndDisabled(t *testing.T) {
+	home := t.TempDir()
+	testenv.SetHome(t, home)
+	t.Setenv("OPENCODE_CONFIG", "")
+	t.Setenv("OPENCODE_CONFIG_DIR", "")
+	t.Setenv("OPENCODE_CONFIG_CONTENT", "")
+	globalDir := filepath.Join(home, ".config", "opencode")
+	if err := os.MkdirAll(globalDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(globalDir, "config.json"), []byte(`{
+		// global layer
+		"mcp": {"shared": {"type": "local", "command": ["global"}},},
+	}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	explicit := filepath.Join(home, "explicit.jsonc")
+	if err := os.WriteFile(explicit, []byte(`{"mcp":{"shared":{"command":["explicit"]}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OPENCODE_CONFIG", explicit)
+	workspace := filepath.Join(home, "workspace")
+	projectDir := filepath.Join(workspace, ".opencode")
+	if err := os.MkdirAll(projectDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "opencode.json"), []byte(`{"mcp":{"shared":{"command":["project"]}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(projectDir, "opencode.jsonc"), []byte(`{"mcp":{"shared":{"command":["project-directory"]}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	homeComponent := filepath.Join(home, ".opencode")
+	if err := os.MkdirAll(homeComponent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(homeComponent, "opencode.json"), []byte(`{"mcp":{"shared":{"command":["home-directory"]}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	customDir := filepath.Join(home, "custom")
+	if err := os.MkdirAll(customDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(customDir, "opencode.json"), []byte(`{"mcp":{"shared":{"command":["custom-directory"]}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OPENCODE_CONFIG_DIR", customDir)
+	t.Setenv("OPENCODE_CONFIG_CONTENT", `{"mcp":{"shared":{"enabled":false}}}`)
+
+	entries, err := readMCPServersOpenCode(workspace)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("entries = %+v, want one merged server", entries)
+	}
+	entry := entries[0]
+	if entry.Command != "custom-directory" || !entry.Disabled {
+		t.Fatalf("entry = %+v, want custom-directory preserved and disabled", entry)
+	}
+	if entry.Source != "OPENCODE_CONFIG_CONTENT" || entry.SourceScope != "inline" {
+		t.Fatalf("provenance = (%q, %q), want inline content", entry.Source, entry.SourceScope)
+	}
+
+	resolution := resolveOpenCodeConfig(workspace)
+	positions := map[string]int{}
+	for index, layer := range resolution.Layers {
+		if _, exists := positions[layer.Scope]; !exists {
+			positions[layer.Scope] = index
+		}
+	}
+	if !(positions["project-directory"] < positions["home-directory"] &&
+		positions["home-directory"] < positions["custom-directory"] &&
+		positions["custom-directory"] < positions["inline"]) {
+		t.Fatalf("layer positions = %+v, want project < home < custom < inline", positions)
+	}
+	var remote, managed bool
+	for _, source := range resolution.Unverified {
+		remote = remote || source.Scope == "remote"
+		managed = managed || source.Scope == "managed-enterprise"
+	}
+	if !remote || !managed {
+		t.Fatalf("unverified sources = %+v, want remote and managed-enterprise", resolution.Unverified)
 	}
 }
 

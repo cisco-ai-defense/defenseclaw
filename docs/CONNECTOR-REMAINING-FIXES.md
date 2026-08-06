@@ -55,9 +55,11 @@ focuses on the connector-package review thread.
 
 **Status**: DONE in PR #284.
 
-Claude Code hook coverage is now contract/profile driven. The
-`claudecode-hooks-v1` contract covers the current documented event set
-including `PermissionRequest`, `PermissionDenied`, `UserPromptExpansion`,
+Claude Code hook coverage is now contract/profile driven. The bounded
+`claudecode-hooks-v1` contract covers the 28-event set through
+2.1.218, while `claudecode-hooks-v2` adds the documented observational
+`DirectoryAdded` event for 2.1.219 and later. The shared sets include
+`PermissionRequest`, `PermissionDenied`, `UserPromptExpansion`,
 `PostToolUseFailure`, `PostToolBatch`, task events, compact events,
 elicitation events, `ConfigChange`, `FileChanged`, and notification-style
 events. Runtime setup, dispatch, audit, and docs consume the same contract

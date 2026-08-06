@@ -377,7 +377,7 @@ func setPrivateDACL(path string, inherit bool) error {
 	if err != nil {
 		return err
 	}
-	user, err := currentWindowsUserSID()
+	user, acl, err := privateDACLForCurrentUser(inherit)
 	if err != nil {
 		return err
 	}
@@ -392,9 +392,25 @@ func setPrivateDACL(path string, inherit bool) error {
 	if owner == nil || !owner.Equals(user) {
 		return fmt.Errorf("safefile: refusing foreign-owned path: %s", path)
 	}
+	return windows.SetNamedSecurityInfo(
+		extended,
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil,
+		nil,
+		acl,
+		nil,
+	)
+}
+
+func privateDACLForCurrentUser(inherit bool) (*windows.SID, *windows.ACL, error) {
+	user, err := currentWindowsUserSID()
+	if err != nil {
+		return nil, nil, err
+	}
 	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
 	inheritance := uint32(windows.NO_INHERITANCE)
 	if inherit {
@@ -415,17 +431,9 @@ func setPrivateDACL(path string, inherit bool) error {
 	}
 	acl, err := windows.ACLFromEntries(entries, nil)
 	if err != nil {
-		return err
+		return nil, nil, err
 	}
-	return windows.SetNamedSecurityInfo(
-		extended,
-		windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
-		nil,
-		nil,
-		acl,
-		nil,
-	)
+	return user, acl, nil
 }
 
 type windowsOwnerSetter func(

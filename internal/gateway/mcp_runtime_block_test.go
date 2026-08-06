@@ -28,6 +28,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 )
@@ -190,6 +191,28 @@ func TestInspectTool_MCPServerBlock_UsesExplicitServerName(t *testing.T) {
 	}
 	if !hasFinding(v.Findings, "MCP-BLOCK") {
 		t.Errorf("findings = %v, want MCP-BLOCK", v.Findings)
+	}
+}
+
+func TestOpenCodeHook_ConnectorScopedMCPBlockUsesMappedServerIdentity(t *testing.T) {
+	store, err := audit.NewStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.Init(); err != nil {
+		t.Fatal(err)
+	}
+	policy := enforce.NewPolicyEngine(store)
+	if err := policy.BlockForConnector("mcp", "jira.prod", "opencode", "scoped"); err != nil {
+		t.Fatal(err)
+	}
+	deny, server, _ := mcpServerRuntimeBlock(policy, "jira_prod_createIssue", "opencode", "jira.prod")
+	if !deny || server != "jira.prod" {
+		t.Fatalf("opencode mapped identity: deny=%v server=%q, want scoped deny for jira.prod", deny, server)
+	}
+	if deny, _, _ := mcpServerRuntimeBlock(policy, "jira_prod_createIssue", "codex", "jira.prod"); deny {
+		t.Fatal("OpenCode-scoped mapped identity leaked to another connector")
 	}
 }
 

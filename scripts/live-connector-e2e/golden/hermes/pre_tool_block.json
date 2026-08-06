@@ -7,6 +7,6 @@
   "agent_type": "hermes-cli",
   "tool_name": "execute_command",
   "tool_input": {
-    "command": "cat /etc/shadow"
+    "command": "Get-Content -LiteralPath 'C:\\Windows\\System32\\config\\SAM'"
   }
 }

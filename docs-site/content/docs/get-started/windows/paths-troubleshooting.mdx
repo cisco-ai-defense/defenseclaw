@@ -44,6 +44,13 @@ intact when diagnosing a problem.
 | `%CODEX_HOME%\config.toml` | Codex user config plus DefenseClaw-marked OTLP/notify fields. | Other Codex settings are user-owned; use DefenseClaw teardown to remove managed fields. |
 | `%CLAUDE_CONFIG_DIR%\settings.json` | Claude Code user config plus DefenseClaw-marked hooks/OTLP environment entries. Default is `%USERPROFILE%\.claude`. | Do not remove individual managed entries by hand; use setup/remove. |
 | `%USERPROFILE%\.config\amp\plugins\defenseclaw.ts` | DefenseClaw-managed Amp TypeScript system-policy plugin with a connector-scoped credential. | **Never print, copy, or hand-edit.** Use setup/remove; operator-owned sibling plugins are separate. |
+| `%USERPROFILE%\.cursor\hooks.json` | Cursor user hooks plus DefenseClaw-managed entries. | Cursor has no documented configuration-home environment variable. Setup records this exact native path for repair, upgrade, and teardown. |
+| `%USERPROFILE%\.codeium\windsurf\hooks.json` | Legacy Cascade user hook configuration in Devin Desktop. DefenseClaw appends one PowerShell handler to each documented Cascade event and preserves foreign hooks. Devin Local uses separate hooks and is unsupported. | Do not copy this file between profiles or replace individual managed entries; use setup/remove. |
+| `%USERPROFILE%\.codeium\windsurf\mcp_config.json` | Optional read-only legacy Cascade MCP inventory. It is not hook configuration and its absence does not make the connector unhealthy. | Manage MCP servers through Devin Desktop. DefenseClaw does not create this file or use it to repair hooks. |
+| `%USERPROFILE%\.defenseclaw\connector_backups\windsurf\config.json` | Managed ownership/restore receipt for the exact bound Cascade `hooks.json`. | Do not edit or copy it; setup/teardown use it for exact lifecycle custody. |
+| `%USERPROFILE%\.defenseclaw\hook_contract_lock.json` | Versioned connector readiness metadata. An active `windsurf` entry must identify `windsurf-hooks-v1` and the same bound `hooks.json`. | If Doctor reports a missing Windsurf lock, rerun `defenseclaw setup windsurf --yes --restart`; another connector setup is not a repair path. |
+| `%OPENCODE_CONFIG_DIR%\plugins\defenseclaw.js` | OpenCode bridge plugin. Default config root is `%USERPROFILE%\.config\opencode`. | Carries a connector-scoped token. Do not edit or copy; Doctor detects digest drift and Setup reconciles it. Restart OpenCode after lifecycle changes. |
+| `%HERMES_HOME%\config.yaml` | Supported Hermes native hook configuration. Default is `%LOCALAPPDATA%\hermes`. | Do not add a shell wrapper or edit DefenseClaw-owned handlers; use setup/remove. |
 
 The installer records the exact connector homes and uses them for later repair,
 upgrade, and cleanup. Connector configuration backups are ownership records,
@@ -51,11 +58,18 @@ not a user-facing rollback directory.
 
 ## Supported path overrides
 
-`CODEX_HOME` and `CLAUDE_CONFIG_DIR` are the supported connector configuration
-overrides. Set them to absolute, normalized native Windows paths before initial
-Setup or connector setup. The installer validates and records them; reparse
-ancestors are refused. Amp has no connector-home override: its certified system
-plugin path is fixed beneath the current `%USERPROFILE%` at
+`CODEX_HOME`, `CLAUDE_CONFIG_DIR`, `COPILOT_HOME`, `OPENCODE_CONFIG_DIR`,
+`OMNIGENT_CONFIG_HOME`, and `HERMES_HOME` are the connector
+configuration overrides honored by their respective implementations. Set them
+to absolute, normalized native Windows paths before initial Setup or connector
+setup. The installer validates and records them; reparse ancestors are refused.
+Antigravity, Cursor, and legacy Cascade publish no equivalent public configuration-home
+override. Antigravity's global hook path is fixed at
+`%USERPROFILE%\.gemini\config\hooks.json`; Setup keeps any predecessor custom
+path only as internal custody needed for exact migration and restoration.
+Cursor and legacy Cascade likewise record their exact native paths internally.
+Amp has no connector-home override: its supported system plugin path is fixed
+beneath the current `%USERPROFILE%` at
 `.config\amp\plugins\defenseclaw.ts`.
 
 <Tabs items={['PowerShell', 'cmd']}>
@@ -64,6 +78,8 @@ plugin path is fixed beneath the current `%USERPROFILE%` at
 ```powershell
 $env:CODEX_HOME = "D:\Agent Profiles\Codex"
 $env:CLAUDE_CONFIG_DIR = "D:\Agent Profiles\Claude"
+$env:OPENCODE_CONFIG_DIR = "D:\Agent Profiles\OpenCode"
+$env:HERMES_HOME = "D:\Agent Profiles\Hermes"
 ```
 
   </Tab>
@@ -72,6 +88,8 @@ $env:CLAUDE_CONFIG_DIR = "D:\Agent Profiles\Claude"
 ```cmd
 set "CODEX_HOME=D:\Agent Profiles\Codex"
 set "CLAUDE_CONFIG_DIR=D:\Agent Profiles\Claude"
+set "OPENCODE_CONFIG_DIR=D:\Agent Profiles\OpenCode"
+set "HERMES_HOME=D:\Agent Profiles\Hermes"
 ```
 
   </Tab>
@@ -81,6 +99,13 @@ Changing an environment value after installation does not authorize lifecycle
 commands to abandon the recorded home. Re-run supported connector setup or
 repair deliberately; do not move the directory and edit installer state.
 
+The legacy Cascade connector has no public user-home override. Setup resolves the signed-in
+user's Windows Profile Known Folder, validates it, and persists that exact
+profile-root binding. Repair, upgrade, reconciliation, and uninstall use only
+the persisted binding or the exact target in DefenseClaw's managed backup.
+They do not inherit a maintenance process's `USERPROFILE`, infer a profile
+from the data directory, or scan other users' `.codeium` trees.
+
 The generic runtime recognizes `DEFENSECLAW_HOME`, but the native packaged
 Setup, launchers, logon helper, repair, and upgrade lifecycle deliberately pin
 the data root to the current profile's `.defenseclaw`. Relocating a packaged
@@ -89,7 +114,14 @@ override is not supported.
 
 `DEFENSECLAW_FAIL_MODE` and `DEFENSECLAW_STRICT_AVAILABILITY` are runtime
 behavior overrides, not path controls. Prefer the persisted
-`defenseclaw guardrail fail-mode` command for normal operation.
+`defenseclaw guardrail fail-mode` command for normal operation. OpenCode does
+not consume those ambient process overrides: Setup bakes its persisted fail
+mode into the managed plugin, and status/Doctor report drift.
+
+Private Windows DACLs restrict connector assets to the current user,
+Administrators, and SYSTEM. They reduce access by other standard users but are
+not tamper-proof against the owning user or administrators. Doctor's digest
+check and Setup reconciliation are the supported drift/recovery controls.
 
 ## Quoting, long paths, and case
 
@@ -105,6 +137,13 @@ In cmd, quote the executable itself:
 ```cmd
 "%LOCALAPPDATA%\DefenseClaw\InstallerCache\DefenseClawSetup-x64.exe" /verify
 ```
+
+Those examples are interactive shell syntax. The command stored in Hermes
+`config.yaml` is deliberately different: it is a directly double-quoted
+absolute `defenseclaw-hook.exe` path followed by literal argv, with forward
+slashes in the Windows path. It must not contain PowerShell's `&`, a `.ps1`,
+or any other shell wrapper because Hermes uses `shlex.split` and
+`subprocess.run(..., shell=False)`.
 
 DefenseClaw product executables are long-path-aware, and installer journal and
 process-identity tests cover paths beyond the legacy `MAX_PATH` limit. That
@@ -201,18 +240,22 @@ residue automatically.
     registration; repair Setup if it is missing. The watchdog runs only when
     `gateway.watchdog.enabled` is configured and is not a Windows service.
   </Accordion>
-  <Accordion title="Codex or Claude Code hooks, or the Amp plugin, do not appear">
-    Confirm the selected product runs natively as the same Windows user. Run
+  <Accordion title="Connector hooks, policy plugin, or enforcement do not appear">
+    Confirm the agent runs natively as the same Windows user. Run
     `defenseclaw guardrail status` and `defenseclaw doctor`, then re-run the
-    supported connector setup in observe mode. Fully restart Codex or Claude
-    Code; fully exit and relaunch Amp. For headless Amp execution, include
-    `--plugin-ready-timeout 30`. Do not copy entries between `config.toml`,
-    `managed_config.toml`, `settings.json`, and `defenseclaw.ts` by hand.
+    supported connector setup in observe mode. Fully restart the
+    agent if its documented reload behavior requires it; fully exit and
+    relaunch Amp, using `--plugin-ready-timeout 30` for headless execution. Do not
+    copy hook entries between `config.toml`, `managed_config.toml`, and
+    `settings.json` by hand, and do not edit or copy OpenCode's
+    `plugins\defenseclaw.js`, Amp's `defenseclaw.ts`, or add PowerShell/Bash syntax to Hermes
+    `config.yaml`. Hermes Doctor must report its direct native command and
+    fail-open posture.
   </Accordion>
   <Accordion title="A connector is disabled or status disagrees with configuration">
     Use `defenseclaw guardrail status` to compare desired and runtime posture.
     A prior `--no-restart` change may require `defenseclaw-gateway restart`.
-    Use connector-scoped enable/disable so other supported connectors are not
+    Use connector-scoped enable/disable so the other configured connectors are not
     changed unintentionally.
   </Accordion>
   <Accordion title="A disabled skill or plugin still behaves unexpectedly">
@@ -226,6 +269,10 @@ residue automatically.
     separate block or disable policy.
   </Accordion>
   <Accordion title="Native OTLP authentication fails">
+    Hermes publishes no official native OTLP surface; its audit records come
+    from authenticated hook events and use the generic downstream exporters.
+    Do not diagnose a missing Hermes native exporter as token drift.
+
     Run `defenseclaw doctor` and `defenseclaw-gateway status`. Reconcile the
     connector with its setup command and restart the agent. If doctor diagnoses
     master-token drift, preview `doctor --fix --dry-run`; use
@@ -271,8 +318,10 @@ Complete this without real secrets or destructive tools:
   `defenseclaw-gateway` resolve from the product `bin` directory.
 - Run `defenseclaw version`; require the CLI and gateway generation to agree.
 - Run `defenseclaw-gateway status`, `defenseclaw status`, and
-  `defenseclaw guardrail status`; require the intended Codex, Claude Code,
-  and/or Amp rows, mode, fail mode, and enabled state.
+  `defenseclaw guardrail status`; require every intended supported
+  connector row, mode, enabled state, and truthful failure posture. Hermes
+  failures must be reported open even if generic policy
+  provenance is `closed`.
 - Run `defenseclaw config validate` and `defenseclaw doctor`; resolve every
   connector registration or authentication failure.
 - Restart each configured Codex or Claude Code agent; fully exit and relaunch
@@ -283,9 +332,10 @@ Complete this without real secrets or destructive tools:
   not use customer data, credentials, or a destructive tool call.
 - Open `defenseclaw tui` or use `defenseclaw alerts` and confirm new activity is
   attributed only to the agent you exercised.
-- If multiple connectors are installed, repeat the harmless prompt once in
-  each; one connector's success does not prove another connector's hook,
-  plugin, or OTLP settings.
+- If multiple connectors are installed, repeat the harmless prompt once in each;
+  one connector's success does not prove another's hooks or telemetry.
+  Hermes manual block visibility must use a harmless matched tool request and
+  confirm only a valid synchronous JSON block, never a timeout/nonzero test.
 
 ## Post-upgrade checklist
 
@@ -297,13 +347,15 @@ Complete this without real secrets or destructive tools:
   modes, fail modes, enabled state, and optional watchdog state.
 - Confirm the command path still resolves to the installed product directory,
   not a stale checkout or copied binary.
-- Restart Codex and Claude Code, fully exit and relaunch Amp, then repeat the
-  harmless per-connector event check above.
+- Confirm each configured connector has loaded its configuration, restarting
+  the official client where documented, then repeat the harmless per-connector
+  event check above. For legacy Cascade, use an interactive native Windows desktop
+  session; a CLI, WSL, or shell substitute is not valid evidence.
 - Verify optional destinations with `defenseclaw observability plan` and the
   destination-specific test command. A destination failure does not erase the
   mandatory local audit, but it must be treated as degraded delivery.
 - Keep private receipts and backups untouched until the upgraded gateway and
-  every configured connector are healthy.
+  every configured connector is healthy.
 
 For broader context, see [CLI reference](/docs/reference/cli),
 [configuration](/docs/reference/configuration), [upgrade](/docs/get-started/upgrade),

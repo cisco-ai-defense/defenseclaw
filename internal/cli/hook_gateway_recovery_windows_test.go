@@ -6,21 +6,44 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"io"
+	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector/hookexec"
 	"github.com/defenseclaw/defenseclaw/internal/hookruntime"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"golang.org/x/sys/windows"
 )
+
+type recoveryRoundTripper struct {
+	requests int
+}
+
+func (transport *recoveryRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	transport.requests++
+	if transport.requests == 1 {
+		return nil, syscall.ECONNREFUSED
+	}
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Body: io.NopCloser(strings.NewReader(
+			`{"action":"allow","hook_output":{}}`,
+		)),
+		Header: make(http.Header),
+	}, nil
+}
 
 func TestTrustedGatewayStartCommandIsExactBoundAndWindowless(t *testing.T) {
 	dataRoot := filepath.Join(t.TempDir(), "managed data")
@@ -56,6 +79,323 @@ func TestTrustedGatewayStartCommandIsExactBoundAndWindowless(t *testing.T) {
 	if cmd.SysProcAttr == nil || !cmd.SysProcAttr.HideWindow ||
 		cmd.SysProcAttr.CreationFlags&windows.CREATE_NO_WINDOW == 0 {
 		t.Fatalf("gateway start command can allocate a console: %+v", cmd.SysProcAttr)
+	}
+}
+
+func TestTrustedNativeGatewayRecoveryReusesPreparedHookRuntimeAdmission(t *testing.T) {
+	executable := filepath.Join(t.TempDir(), hookruntime.LauncherName)
+	previousExecutable := hookExecutableOverride
+	hookExecutableOverride = executable
+	t.Cleanup(func() { hookExecutableOverride = previousExecutable })
+
+	state := hookruntime.State{
+		SchemaVersion:  hookruntime.SchemaVersion,
+		Status:         hookruntime.StatusActive,
+		DataRoot:       filepath.Clean(t.TempDir()),
+		GatewayPath:    filepath.Join(t.TempDir(), hookruntime.GatewayName),
+		GatewaySHA256:  strings.Repeat("a", 64),
+		LauncherPath:   executable,
+		LauncherSHA256: strings.Repeat("b", 64),
+	}
+	delegatedReads := 0
+	fullImageReads := 0
+	stubNativeDelegatedHookRuntimeReader(t, func(gotExecutable string) (hookruntime.State, bool, error) {
+		delegatedReads++
+		if gotExecutable != executable {
+			t.Fatalf("delegated runtime reader executable = %q, want %q", gotExecutable, executable)
+		}
+		return state, true, nil
+	})
+	stubNativeHookRuntimeReader(t, func(gotExecutable string) (hookruntime.State, bool, error) {
+		fullImageReads++
+		if gotExecutable != executable {
+			t.Fatalf("runtime reader executable = %q, want %q", gotExecutable, executable)
+		}
+		return state, true, nil
+	})
+
+	if NativeHookRuntimeNoop() {
+		t.Fatal("trusted active hook runtime was classified as a no-op")
+	}
+	if recovery := trustedNativeGatewayRecovery(); recovery == nil {
+		t.Fatal("prepared cold-start-capable runtime did not install recovery")
+	}
+	if delegatedReads != 1 || fullImageReads != 0 {
+		t.Fatalf(
+			"runtime admission reads = delegated %d, full-image %d; want one parent-bound read and no second full hash",
+			delegatedReads,
+			fullImageReads,
+		)
+	}
+}
+
+func TestTrustedNativeGatewayRecoveryRefreshesDelegatedGenerationWithoutFullImageRead(t *testing.T) {
+	executable := filepath.Join(t.TempDir(), hookruntime.LauncherName)
+	stableLauncher := filepath.Join(t.TempDir(), hookruntime.LauncherName)
+	previousExecutable := hookExecutableOverride
+	hookExecutableOverride = executable
+	t.Cleanup(func() { hookExecutableOverride = previousExecutable })
+
+	state := hookruntime.State{
+		SchemaVersion:  hookruntime.SchemaVersion,
+		Status:         hookruntime.StatusActive,
+		RuntimeRoot:    filepath.Dir(stableLauncher),
+		LauncherPath:   stableLauncher,
+		LauncherSHA256: strings.Repeat("b", 64),
+		LauncherKind:   hookruntime.LauncherKindTrampoline,
+		HookPath:       executable,
+		HookSHA256:     strings.Repeat("c", 64),
+		DataRoot:       filepath.Clean(t.TempDir()),
+		GatewayPath:    filepath.Join(t.TempDir(), hookruntime.GatewayName),
+		GatewaySHA256:  strings.Repeat("a", 64),
+		TransactionID:  strings.Repeat("d", 32),
+	}
+	stubNativeDelegatedHookRuntimeReader(t, func(string) (hookruntime.State, bool, error) {
+		return state, true, nil
+	})
+	fullImageReads := 0
+	stubNativeHookRuntimeReader(t, func(string) (hookruntime.State, bool, error) {
+		fullImageReads++
+		return state, true, nil
+	})
+	previousRevalidator := nativePreparedHookRuntimeRevalidator
+	revalidations := 0
+	nativePreparedHookRuntimeRevalidator = func(gotExecutable string, gotState hookruntime.State) (hookruntime.State, error) {
+		revalidations++
+		if gotExecutable != executable || gotState != state {
+			t.Fatalf("generation refresh input = %q, %+v", gotExecutable, gotState)
+		}
+		return state, nil
+	}
+	t.Cleanup(func() { nativePreparedHookRuntimeRevalidator = previousRevalidator })
+
+	if NativeHookRuntimeNoop() {
+		t.Fatal("trusted delegated runtime was classified as a no-op")
+	}
+	got, recognized, err := refreshedNativeHookRuntimeForRecovery(executable)
+	if err != nil || !recognized || got != state {
+		t.Fatalf("generation refresh = %+v, recognized=%t, err=%v", got, recognized, err)
+	}
+	if revalidations != 1 || fullImageReads != 0 {
+		t.Fatalf(
+			"recovery reads = generation %d, full-image %d; want one exact-generation refresh and no full-image rehash",
+			revalidations,
+			fullImageReads,
+		)
+	}
+}
+
+func TestTrustedNativeGatewayRecoveryRejectsChangedDelegatedGenerationWithoutFallback(t *testing.T) {
+	executable := filepath.Join(t.TempDir(), hookruntime.LauncherName)
+	previousExecutable := hookExecutableOverride
+	hookExecutableOverride = executable
+	t.Cleanup(func() { hookExecutableOverride = previousExecutable })
+	state := hookruntime.State{
+		SchemaVersion:  hookruntime.SchemaVersion,
+		Status:         hookruntime.StatusActive,
+		RuntimeRoot:    filepath.Clean(t.TempDir()),
+		LauncherPath:   filepath.Join(t.TempDir(), hookruntime.LauncherName),
+		LauncherSHA256: strings.Repeat("b", 64),
+		LauncherKind:   hookruntime.LauncherKindTrampoline,
+		HookPath:       executable,
+		HookSHA256:     strings.Repeat("c", 64),
+		DataRoot:       filepath.Clean(t.TempDir()),
+		GatewayPath:    filepath.Join(t.TempDir(), hookruntime.GatewayName),
+		GatewaySHA256:  strings.Repeat("a", 64),
+		TransactionID:  strings.Repeat("d", 32),
+	}
+	stubNativeDelegatedHookRuntimeReader(t, func(string) (hookruntime.State, bool, error) {
+		return state, true, nil
+	})
+	fullImageReads := 0
+	stubNativeHookRuntimeReader(t, func(string) (hookruntime.State, bool, error) {
+		fullImageReads++
+		return state, true, nil
+	})
+	previousRevalidator := nativePreparedHookRuntimeRevalidator
+	nativePreparedHookRuntimeRevalidator = func(string, hookruntime.State) (hookruntime.State, error) {
+		return hookruntime.State{}, errors.New("protected generation rotated")
+	}
+	t.Cleanup(func() { nativePreparedHookRuntimeRevalidator = previousRevalidator })
+	previousLock := nativeGatewayStartLock
+	nativeGatewayStartLock = func(_ context.Context, run func() error) error { return run() }
+	t.Cleanup(func() { nativeGatewayStartLock = previousLock })
+	previousRunner := nativeGatewayStartRunner
+	starts := 0
+	nativeGatewayStartRunner = func(context.Context, hookruntime.State) error {
+		starts++
+		return nil
+	}
+	t.Cleanup(func() { nativeGatewayStartRunner = previousRunner })
+
+	if NativeHookRuntimeNoop() {
+		t.Fatal("trusted delegated runtime was classified as a no-op")
+	}
+	recovery := trustedNativeGatewayRecovery()
+	if recovery == nil {
+		t.Fatal("prepared delegated runtime did not install recovery")
+	}
+	err := recovery(context.Background(), syscall.ECONNREFUSED)
+	if err == nil || !strings.Contains(err.Error(), "rotated") {
+		t.Fatalf("rotated generation recovery error=%v", err)
+	}
+	if fullImageReads != 0 || starts != 0 {
+		t.Fatalf(
+			"rotated prepared generation full-image reads=%d gateway starts=%d",
+			fullImageReads,
+			starts,
+		)
+	}
+}
+
+func TestCursorColdRequestUsesProductionRecoveryCallbackWithinNativeDeadline(t *testing.T) {
+	executable := filepath.Join(t.TempDir(), hookruntime.LauncherName)
+	previousExecutable := hookExecutableOverride
+	hookExecutableOverride = executable
+	t.Cleanup(func() { hookExecutableOverride = previousExecutable })
+	state := hookruntime.State{
+		SchemaVersion:  hookruntime.SchemaVersion,
+		Status:         hookruntime.StatusActive,
+		RuntimeRoot:    filepath.Clean(t.TempDir()),
+		LauncherPath:   filepath.Join(t.TempDir(), hookruntime.LauncherName),
+		LauncherSHA256: strings.Repeat("b", 64),
+		LauncherKind:   hookruntime.LauncherKindTrampoline,
+		HookPath:       executable,
+		HookSHA256:     strings.Repeat("c", 64),
+		DataRoot:       filepath.Clean(t.TempDir()),
+		GatewayPath:    filepath.Join(t.TempDir(), hookruntime.GatewayName),
+		GatewaySHA256:  strings.Repeat("a", 64),
+		TransactionID:  strings.Repeat("d", 32),
+	}
+	stubNativeDelegatedHookRuntimeReader(t, func(string) (hookruntime.State, bool, error) {
+		return state, true, nil
+	})
+	fullImageReads := 0
+	stubNativeHookRuntimeReader(t, func(string) (hookruntime.State, bool, error) {
+		fullImageReads++
+		return state, true, nil
+	})
+	previousRevalidator := nativePreparedHookRuntimeRevalidator
+	nativePreparedHookRuntimeRevalidator = func(string, hookruntime.State) (hookruntime.State, error) {
+		return state, nil
+	}
+	t.Cleanup(func() { nativePreparedHookRuntimeRevalidator = previousRevalidator })
+	previousLock := nativeGatewayStartLock
+	locks := 0
+	nativeGatewayStartLock = func(_ context.Context, run func() error) error {
+		locks++
+		return run()
+	}
+	t.Cleanup(func() { nativeGatewayStartLock = previousLock })
+	previousRunner := nativeGatewayStartRunner
+	starts := 0
+	var recoveryBudget time.Duration
+	nativeGatewayStartRunner = func(ctx context.Context, got hookruntime.State) error {
+		starts++
+		if got != state {
+			t.Fatalf("cold-start state = %+v, want prepared generation", got)
+		}
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Fatal("production recovery callback lost the hook deadline")
+		}
+		recoveryBudget = time.Until(deadline)
+		return nil
+	}
+	t.Cleanup(func() { nativeGatewayStartRunner = previousRunner })
+	if NativeHookRuntimeNoop() {
+		t.Fatal("trusted delegated runtime was classified as a no-op")
+	}
+	recovery := trustedNativeGatewayRecovery()
+	if recovery == nil {
+		t.Fatal("prepared delegated runtime did not install recovery")
+	}
+
+	transport := &recoveryRoundTripper{}
+	var stdout, stderr bytes.Buffer
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	started := time.Now()
+	code := hookexec.Run(ctx, hookexec.Options{
+		Connector:       "cursor",
+		Event:           "sessionStart",
+		APIAddr:         "127.0.0.1:1",
+		FailMode:        "open",
+		Home:            state.DataRoot,
+		HookDir:         filepath.Join(state.DataRoot, "hooks"),
+		Token:           "test-token",
+		Stdin:           strings.NewReader(`{"hook_event_name":"sessionStart"}`),
+		Stdout:          &stdout,
+		Stderr:          &stderr,
+		HTTPClient:      &http.Client{Transport: transport},
+		GatewayRecovery: recovery,
+	})
+	elapsed := time.Since(started)
+	if code != 0 || strings.TrimSpace(stdout.String()) != "{}" || stderr.Len() != 0 {
+		t.Fatalf("cold Cursor request code=%d stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if transport.requests != 2 || locks != 1 || starts != 1 || fullImageReads != 0 {
+		t.Fatalf(
+			"cold Cursor path requests=%d locks=%d starts=%d full-image=%d",
+			transport.requests,
+			locks,
+			starts,
+			fullImageReads,
+		)
+	}
+	if recoveryBudget <= 0 || recoveryBudget > 10*time.Second || elapsed >= 30*time.Second {
+		t.Fatalf("cold Cursor recovery budget=%s elapsed=%s", recoveryBudget, elapsed)
+	}
+	t.Logf(
+		"cold Cursor recovery elapsed=%s budget=%s requests=%d locks=%d starts=%d full-image-reads=%d",
+		elapsed,
+		recoveryBudget,
+		transport.requests,
+		locks,
+		starts,
+		fullImageReads,
+	)
+}
+
+func TestLegacyNativeGatewayRecoveryRetainsFullExecutableAdmission(t *testing.T) {
+	executable := filepath.Join(t.TempDir(), hookruntime.LauncherName)
+	previousExecutable := hookExecutableOverride
+	hookExecutableOverride = executable
+	t.Cleanup(func() { hookExecutableOverride = previousExecutable })
+	state := hookruntime.State{
+		SchemaVersion:  hookruntime.SchemaVersion,
+		Status:         hookruntime.StatusActive,
+		DataRoot:       filepath.Clean(t.TempDir()),
+		GatewayPath:    filepath.Join(t.TempDir(), hookruntime.GatewayName),
+		GatewaySHA256:  strings.Repeat("a", 64),
+		LauncherPath:   executable,
+		LauncherSHA256: strings.Repeat("b", 64),
+	}
+	stubNativeDelegatedHookRuntimeReader(t, func(string) (hookruntime.State, bool, error) {
+		return state, true, nil
+	})
+	fullImageReads := 0
+	stubNativeHookRuntimeReader(t, func(string) (hookruntime.State, bool, error) {
+		fullImageReads++
+		return state, true, nil
+	})
+	previousRevalidator := nativePreparedHookRuntimeRevalidator
+	revalidations := 0
+	nativePreparedHookRuntimeRevalidator = func(string, hookruntime.State) (hookruntime.State, error) {
+		revalidations++
+		return state, nil
+	}
+	t.Cleanup(func() { nativePreparedHookRuntimeRevalidator = previousRevalidator })
+
+	if NativeHookRuntimeNoop() {
+		t.Fatal("trusted legacy runtime was classified as a no-op")
+	}
+	got, recognized, err := refreshedNativeHookRuntimeForRecovery(executable)
+	if err != nil || !recognized || got != state {
+		t.Fatalf("legacy recovery admission = %+v, recognized=%t, err=%v", got, recognized, err)
+	}
+	if fullImageReads != 1 || revalidations != 0 {
+		t.Fatalf("legacy recovery full-image=%d generation=%d", fullImageReads, revalidations)
 	}
 }
 

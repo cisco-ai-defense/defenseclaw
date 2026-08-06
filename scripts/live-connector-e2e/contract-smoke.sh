@@ -86,7 +86,10 @@ if [ -f "${cfg}" ]; then
 else
   rm -f "${cfg_baseline}"
 fi
-if ! dc_setup_connector "${DC_E2E_CONNECTOR}" action; then
+# Layer A has no upstream agent/version by design. The payload assertions below
+# are its verification surface; setup readiness cannot validate an absent
+# vendor executable and would reject the intentionally unversioned lock.
+if ! dc_setup_connector "${DC_E2E_CONNECTOR}" action --no-verify; then
   rm -f "${cfg_baseline}"
   exit 1
 fi
@@ -97,7 +100,11 @@ overall_rc=0
 drive_event() {
   local label="$1" payload="$2" expect="$3"
   local before after out code native_event
-  if ! native_event="$(jq -er '.hook_event_name | select(type == "string" and length > 0)' "${payload}")"; then
+  if [ "${DC_E2E_CONNECTOR}" = "antigravity" ]; then
+    # Antigravity's official stdin schema omits the event name; setup binds
+    # each installed hook command to its trusted event out-of-band.
+    native_event="PreToolUse"
+  elif ! native_event="$(jq -er '.hook_event_name | select(type == "string" and length > 0)' "${payload}")"; then
     dc_record_result "${label}:fixture" fail "missing non-empty hook_event_name in ${payload}"
     overall_rc=1
     return
@@ -123,9 +130,9 @@ drive_event() {
 
   case "${expect}" in
     block)
-      # Verdict shaping: the entrypoint must signal block — either a
-      # non-zero (exit 2) deny or a decision JSON carrying block/deny.
-      if [ "${code}" = "2" ] || printf '%s' "${out}" | grep -Eqi '"(decision|action|permissionDecision)"\s*:\s*"(block|deny)"|\bdeny\b|\bblock\b'; then
+      # Block-capable connectors return their documented native block shape:
+      # exit 2 or decision JSON carrying block/deny.
+      if [ "${code}" = "2" ] || printf '%s' "${out}" | grep -Eqi '"(decision|action|permission|permissionDecision)"\s*:\s*"(block|deny)"|\bdeny\b|\bblock\b'; then
         dc_record_result "${label}:verdict-shape" pass "exit=${code}"
       else
         dc_record_result "${label}:verdict-shape" fail "expected block shaping, exit=${code}"

@@ -260,6 +260,16 @@ func ProtectFile(path string) error {
 	return protectFile(path, f)
 }
 
+// ProtectFileWhileInUse applies the same owner-only protection contract as
+// ProtectFile while allowing a Windows executable image to remain mapped by a
+// running process. The Windows implementation binds validation and the DACL
+// update to one non-reparse handle; other platforms use ProtectFile directly.
+// This is intentionally separate from ProtectFile so ordinary writers retain
+// the stronger read/write-open behavior they already depend on.
+func ProtectFileWhileInUse(path string) error {
+	return protectFileWhileInUse(path)
+}
+
 // ValidatePrivateDirectory verifies that path is an existing, non-link
 // directory protected for the current user and the platform's trusted system
 // principal. Unlike ProtectDirectory it never changes the path. It is intended

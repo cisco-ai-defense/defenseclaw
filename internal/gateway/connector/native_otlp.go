@@ -29,14 +29,13 @@ import (
 // gateway core.
 //
 //   - NativeOTLPEnvBlock — env vars baked into the agent's config file
-//     (claudecode's settings.json `env`, copilot's process env).
+//     (claudecode's settings.json `env`).
 //   - NativeOTLPTOMLBlock — a TOML table inserted into the agent's
 //     config file (codex's `[otel.exporter.otlp-http]` block).
 //   - NativeOTLPJSONBlock — a JSON object inserted into the agent's
 //     settings file (geminicli's `telemetry` block).
 //   - NativeOTLPFileSink — the agent writes OTLP to a local JSONL file
-//     instead of (or in addition to) the network endpoint (copilot CLI
-//     `--telemetry-file`, gemini `--outfile`).
+//     instead of (or in addition to) the network endpoint.
 type NativeOTLPKind string
 
 const (
@@ -65,8 +64,8 @@ func AllNativeOTLPSignals() []NativeOTLPSignal {
 
 // NativeOTLPSpec describes how DefenseClaw should configure a connector's
 // native OTLP exporter. The spec is intentionally generic enough to
-// accommodate the four connectors that ship native OTLP today (codex,
-// claudecode, geminicli, copilot) AND the next wave the web survey
+// accommodate the three connectors that DefenseClaw currently integrates
+// with native OTLP (codex, claudecode, geminicli) AND the next wave the survey
 // surfaced (OpenCode, Cline, Goose, HolmesGPT, Kilo Code) without
 // per-connector code in the gateway.
 //
@@ -88,7 +87,7 @@ func AllNativeOTLPSignals() []NativeOTLPSignal {
 //   - PerSignal: when true the installer emits per-signal exporter env
 //     vars (OTEL_TRACES_EXPORTER / OTEL_METRICS_EXPORTER /
 //     OTEL_LOGS_EXPORTER) and per-signal endpoint env vars. Required
-//     for Claude Code / Copilot / Goose-style agents that distinguish
+//     for Claude Code / Goose-style agents that distinguish
 //     the three signals; ignored for path-token connectors.
 //   - SignalPaths: optional, maps each signal to a URL-path suffix
 //     (e.g. {traces: "/v1/traces", metrics: "/v1/metrics"}). When unset
@@ -103,7 +102,7 @@ func AllNativeOTLPSignals() []NativeOTLPSignal {
 //   - FilePath: for NativeOTLPFileSink kinds. The local path the agent
 //     writes OTLP-JSON to. Mutually exclusive with Endpoint.
 //   - ExtraEnv: connector-specific env vars (e.g.
-//     CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1, COPILOT_OTEL_ENABLED=true)
+//     CLAUDE_CODE_ENHANCED_TELEMETRY_BETA=1)
 //     that the connector needs in addition to the standard OTEL_*
 //     family. Merged into the env block in deterministic key order.
 //   - ServiceName / ResourceAttributes: identify the source connector

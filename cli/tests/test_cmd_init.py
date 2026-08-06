@@ -16,6 +16,7 @@
 
 """Tests for 'defenseclaw init' command."""
 
+import hashlib
 import json
 import os
 import shutil
@@ -23,6 +24,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import ANY, MagicMock, patch
 
 import pytest
@@ -37,8 +39,11 @@ from defenseclaw.commands.cmd_init import init_cmd
 from defenseclaw.config import PerConnectorGuardrailConfig
 from defenseclaw.connector_paths import KNOWN_CONNECTORS
 from defenseclaw.context import AppContext
+from defenseclaw.file_permissions import atomic_write_private_bytes
 from defenseclaw.inventory import agent_discovery
 from defenseclaw.inventory.agent_discovery import AgentDiscovery, AgentSignal
+
+from tests.helpers import record_test_setup_agent_selections
 
 
 def _trusted_prefixes_from_config(data_dir: str) -> list[str]:
@@ -209,7 +214,7 @@ class TestInitFirstRunBackend(unittest.TestCase):
         self.runner = CliRunner()
         self.selection_patcher = patch(
             "defenseclaw.agent_selection.record_setup_agent_selections",
-            return_value=({}, {}),
+            side_effect=record_test_setup_agent_selections,
         )
         self.selection_mock = self.selection_patcher.start()
         self.addCleanup(self.selection_patcher.stop)
@@ -280,6 +285,7 @@ class TestInitFirstRunBackend(unittest.TestCase):
         )
 
     def test_explicit_connector_requires_protected_executable_selection(self):
+        self.selection_mock.side_effect = None
         self.selection_mock.return_value = ({}, {"codex": "untrusted executable"})
 
         with patch("defenseclaw.commands.cmd_init.platform_support.host_os", return_value="windows"):
@@ -301,8 +307,6 @@ class TestInitFirstRunBackend(unittest.TestCase):
         self.assertIn("untrusted executable", result.output)
 
     def test_non_windows_codex_init_does_not_require_windows_policy_receipt(self):
-        self.selection_mock.return_value = ({}, {"codex": "must not be consulted"})
-
         with patch("defenseclaw.commands.cmd_init.platform_support.host_os", return_value="linux"):
             result = self._invoke([
                 "--non-interactive",
@@ -321,8 +325,6 @@ class TestInitFirstRunBackend(unittest.TestCase):
         self.selection_mock.assert_not_called()
 
     def test_windows_claude_init_does_not_require_unused_codex_policy_receipt(self):
-        self.selection_mock.return_value = ({}, {"claudecode": "must not be consulted"})
-
         with patch("defenseclaw.commands.cmd_init.platform_support.host_os", return_value="windows"):
             result = self._invoke([
                 "--non-interactive",
@@ -338,7 +340,612 @@ class TestInitFirstRunBackend(unittest.TestCase):
             ])
 
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
-        self.selection_mock.assert_not_called()
+        self.selection_mock.assert_called_once_with(self.tmp_dir, ("claudecode",))
+
+    def test_windows_omnigent_init_records_required_executable_receipt(self):
+        self.selection_patcher.stop()
+        trusted = Path(self.tmp_dir) / "trusted"
+        trusted.mkdir()
+        executable = trusted / "omnigent.exe"
+        executable.write_bytes(b"native omnigent fixture")
+
+        with (
+            patch("defenseclaw.commands.cmd_init.platform_support.host_os", return_value="windows"),
+            patch(
+                "defenseclaw.agent_selection._builtin_setup_trusted_prefixes",
+                return_value=(str(trusted),),
+            ),
+            patch(
+                "defenseclaw.agent_selection.agent_discovery._binary_candidates_for_agent",
+                return_value=(),
+            ),
+            patch("defenseclaw.agent_selection.is_setup_trusted_binary", return_value=True),
+            patch(
+                "defenseclaw.agent_selection.agent_discovery._version_for_agent_binary",
+                return_value=("omnigent 0.7.0", ""),
+            ),
+        ):
+            result = self._invoke([
+                "--non-interactive",
+                "--yes",
+                "--connector",
+                "omnigent",
+                "--profile",
+                "observe",
+                "--skip-install",
+                "--no-start-gateway",
+                "--no-verify",
+                "--json-summary",
+            ])
+
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        with open(os.path.join(self.tmp_dir, "agent_selection.json"), encoding="utf-8") as fh:
+            receipt = json.load(fh)
+        selection = receipt["selections"]["omnigent"]
+        self.assertEqual(selection["connector"], "omnigent")
+        self.assertEqual(selection["source"], "setup-selected")
+        self.assertEqual(selection["executable"], str(executable.resolve()))
+        self.assertEqual(selection["raw_version"], "omnigent 0.7.0")
+        self.assertEqual(selection["normalized_version"], "0.7.0")
+        self.assertEqual(
+            selection["sha256"],
+            hashlib.sha256(executable.read_bytes()).hexdigest(),
+        )
+
+    def test_windows_copilot_is_available_through_ordinary_init(self):
+        with patch("defenseclaw.commands.cmd_init.platform_support.host_os", return_value="windows"):
+            result = self._invoke([
+                "--non-interactive",
+                "--yes",
+                "--connector",
+                "copilot",
+                "--profile",
+                "observe",
+                "--skip-install",
+                "--no-start-gateway",
+                "--no-verify",
+                "--json-summary",
+            ])
+
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        self.assertEqual(json.loads(result.output)["connector"], "copilot")
+
+    def test_noninteractive_opencode_primary_records_complete_roster_once(self):
+        from defenseclaw.bootstrap import StepResult
+        from defenseclaw.commands import cmd_init
+
+        settings = [
+            {
+                "connector": "opencode",
+                "profile": "observe",
+                "fail_mode": None,
+                "human_approval": None,
+                "hilt_min_severity": None,
+            },
+            {
+                "connector": "amp",
+                "profile": "observe",
+                "fail_mode": None,
+                "human_approval": None,
+                "hilt_min_severity": None,
+            },
+        ]
+        self.selection_mock.reset_mock()
+        with (
+            patch.object(cmd_init.platform_support, "host_os", return_value="windows"),
+            patch.object(cmd_init, "_build_noninteractive_connector_settings", return_value=settings),
+            patch.object(
+                cmd_init,
+                "_activate_additional_connectors",
+                return_value=(["opencode", "amp"], None),
+            ),
+            patch(
+                "defenseclaw.bootstrap._quiet_guardrail_setup",
+                return_value=StepResult("Guardrail", "pass", "test"),
+            ),
+        ):
+            result = self._invoke(
+                [
+                    "--non-interactive",
+                    "--yes",
+                    "--skip-install",
+                    "--no-start-gateway",
+                    "--no-verify",
+                    "--json-summary",
+                ]
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        self.selection_mock.assert_called_once_with(self.tmp_dir, ("opencode", "amp"))
+
+    def test_guided_opencode_primary_records_complete_roster_once(self):
+        from defenseclaw.bootstrap import StepResult
+        from defenseclaw.commands import cmd_init
+
+        settings = [
+            {
+                "connector": "opencode",
+                "profile": "observe",
+                "fail_mode": None,
+                "human_approval": None,
+                "hilt_min_severity": None,
+            },
+            {
+                "connector": "amp",
+                "profile": "observe",
+                "fail_mode": None,
+                "human_approval": None,
+                "hilt_min_severity": None,
+            },
+        ]
+        self.selection_mock.reset_mock()
+        with (
+            patch.object(cmd_init.platform_support, "host_os", return_value="windows"),
+            patch.object(cmd_init, "_stdin_is_tty", return_value=True),
+            patch.object(
+                cmd_init,
+                "_prompt_first_run",
+                return_value=(settings, "local", False, None, False, False),
+            ),
+            patch.object(
+                cmd_init,
+                "_activate_additional_connectors",
+                return_value=(["opencode", "amp"], None),
+            ),
+            patch(
+                "defenseclaw.bootstrap._quiet_guardrail_setup",
+                return_value=StepResult("Guardrail", "pass", "test"),
+            ),
+        ):
+            result = self._invoke([])
+
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        self.selection_mock.assert_called_once_with(self.tmp_dir, ("opencode", "amp"))
+
+    def test_windows_opencode_is_provisional_in_noninteractive_action_filter(self):
+        from defenseclaw.commands import cmd_init
+
+        disc = self._discovery({"amp", "opencode"})
+        forbidden = AssertionError("generic OpenCode 1.18.12 must not downgrade exact SST 1.18.11")
+        with (
+            patch.object(cmd_init.platform_support, "host_os", return_value="windows"),
+            patch.object(cmd_init.agent_discovery, "discover_agents", return_value=disc),
+            patch(
+                "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                side_effect=forbidden,
+            ) as generic,
+        ):
+            settings = cmd_init._build_noninteractive_connector_settings(
+                connector=None,
+                profile=None,
+                observe_all=True,
+                action_connectors="opencode",
+                fail_mode="closed",
+                human_approval=False,
+                hilt_min_severity="HIGH",
+                rescan_agents=False,
+                data_dir=self.tmp_dir,
+            )
+
+        by_name = {item["connector"]: item for item in settings}
+        self.assertEqual(by_name["opencode"]["profile"], "action")
+        generic.assert_not_called()
+
+    def test_windows_guided_opencode_action_skips_generic_filter(self):
+        from defenseclaw.commands import cmd_init
+
+        checked: list[str] = []
+
+        def generic(connector, **_kwargs):
+            checked.append(connector)
+            if connector == "opencode":
+                raise AssertionError("guided PATH/configured OpenCode cannot decide action mode")
+            return True
+
+        with (
+            patch.object(cmd_init.platform_support, "host_os", return_value="windows"),
+            patch.object(cmd_init, "_prompt_connector_selection", return_value=["amp", "opencode"]),
+            patch.object(
+                cmd_init,
+                "_prompt_checkbox_selection",
+                side_effect=[["amp", "opencode"], []],
+            ),
+            patch.object(cmd_init.click, "prompt", return_value="local"),
+            patch.object(cmd_init.click, "confirm", side_effect=[False, False]),
+            patch(
+                "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                side_effect=generic,
+            ),
+        ):
+            settings, *_rest = cmd_init._prompt_first_run(
+                connector=None,
+                profile=None,
+                scanner_mode="local",
+                with_judge=False,
+                fail_mode="open",
+                human_approval=False,
+                hilt_min_severity="HIGH",
+                start_gateway=False,
+                verify=False,
+                rescan_agents=False,
+                data_dir=self.tmp_dir,
+            )
+
+        by_name = {item["connector"]: item for item in settings}
+        self.assertEqual(by_name["opencode"]["profile"], "action")
+        self.assertEqual(checked, ["amp"])
+
+    def test_windows_explicit_opencode_roster_skips_preselection_discovery(self):
+        from defenseclaw.commands import cmd_init
+
+        forbidden = AssertionError("generic discovery must follow exact SST selection")
+        with (
+            patch.object(cmd_init.platform_support, "host_os", return_value="windows"),
+            patch.object(
+                cmd_init.agent_discovery,
+                "discover_agents",
+                side_effect=forbidden,
+            ) as discover,
+            patch.object(
+                cmd_init,
+                "_prompt_trust_discovery_prefixes",
+                side_effect=forbidden,
+            ) as trust,
+        ):
+            selected = cmd_init._prompt_connector_selection(
+                "amp,opencode",
+                False,
+                data_dir=self.tmp_dir,
+            )
+
+        self.assertEqual(selected, ["amp", "opencode"])
+        discover.assert_not_called()
+        trust.assert_not_called()
+
+    def test_windows_opencode_trust_remediation_ignores_generic_signal(self):
+        from defenseclaw.commands import cmd_init
+
+        disc = SimpleNamespace(
+            agents={
+                "opencode": SimpleNamespace(
+                    error=agent_discovery.UNTRUSTED_PREFIX_ERROR,
+                    binary_path=r"D:\decoy\opencode.exe",
+                ),
+                "amp": SimpleNamespace(
+                    error=agent_discovery.UNTRUSTED_PREFIX_ERROR,
+                    binary_path=r"D:\amp\amp.exe",
+                ),
+            }
+        )
+        with patch.object(cmd_init.platform_support, "host_os", return_value="windows"):
+            rows = cmd_init._untrusted_discovery_prefixes(disc)
+
+        self.assertEqual([name for name, _binary, _parent in rows], ["amp"])
+
+    def test_windows_opencode_extra_uses_concrete_receipt_bound_selection(self):
+        from defenseclaw import config as cfg_mod
+        from defenseclaw.commands import cmd_init
+        from defenseclaw.commands.cmd_setup import (
+            _capture_setup_config_snapshot,
+            _validate_setup_agent_selection_receipt,
+        )
+
+        primary = {
+            "connector": "amp",
+            "profile": "observe",
+            "fail_mode": None,
+            "human_approval": None,
+            "hilt_min_severity": None,
+        }
+        extras = [
+            {
+                "connector": "opencode",
+                "profile": "action",
+                "fail_mode": "closed",
+                "human_approval": False,
+                "hilt_min_severity": "HIGH",
+            }
+        ]
+        with patch.dict(os.environ, {"DEFENSECLAW_HOME": self.tmp_dir}):
+            cfg = cfg_mod.default_config()
+            cfg_mod.prepare_fresh_v8_config(cfg)
+            cfg.guardrail.connector = "amp"
+            cfg.claw.mode = "amp"
+            cfg.save()
+            setup_snapshot = _capture_setup_config_snapshot(cfg)
+            records, _errors = record_test_setup_agent_selections(
+                self.tmp_dir,
+                ("amp", "opencode"),
+            )
+            protected_selection = _validate_setup_agent_selection_receipt(
+                self.tmp_dir,
+                ("amp", "opencode"),
+                records,
+                prior_generation=setup_snapshot.agent_selection_generation,
+            )
+            with (
+                patch.object(cmd_init.platform_support, "host_os", return_value="windows"),
+                patch(
+                    "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                    side_effect=AssertionError("extra OpenCode must use the exact selection result"),
+                ) as generic,
+            ):
+                active, sidecar = cmd_init._activate_additional_connectors(
+                    primary,
+                    extras,
+                    start_gateway=False,
+                    quiet=True,
+                    protected_selection=protected_selection,
+                )
+
+            reloaded = cfg_mod.load()
+
+        self.assertIsNone(sidecar)
+        self.assertEqual(active, ["amp", "opencode"])
+        self.assertEqual(reloaded.guardrail.effective_mode("opencode"), "action")
+        generic.assert_not_called()
+
+    def test_windows_opencode_extra_reselection_failure_restores_authority(self):
+        from defenseclaw import config as cfg_mod
+        from defenseclaw.commands import cmd_init
+        from defenseclaw.commands.cmd_setup import (
+            _capture_setup_config_snapshot,
+            _validate_setup_agent_selection_receipt,
+        )
+
+        primary = {
+            "connector": "amp",
+            "profile": "observe",
+            "fail_mode": None,
+            "human_approval": None,
+            "hilt_min_severity": None,
+        }
+        extras = [
+            {
+                "connector": "opencode",
+                "profile": "action",
+                "fail_mode": "closed",
+                "human_approval": False,
+                "hilt_min_severity": "HIGH",
+            }
+        ]
+        with patch.dict(os.environ, {"DEFENSECLAW_HOME": self.tmp_dir}):
+            cfg = cfg_mod.default_config()
+            cfg_mod.prepare_fresh_v8_config(cfg)
+            cfg.guardrail.connector = "amp"
+            cfg.claw.mode = "amp"
+            cfg.save()
+            setup_snapshot = _capture_setup_config_snapshot(cfg)
+            records, _errors = record_test_setup_agent_selections(
+                self.tmp_dir,
+                ("amp", "opencode"),
+            )
+            protected_selection = _validate_setup_agent_selection_receipt(
+                self.tmp_dir,
+                ("amp", "opencode"),
+                records,
+                prior_generation=setup_snapshot.agent_selection_generation,
+            )
+            receipt = Path(self.tmp_dir, "agent_selection.json")
+            lock = Path(self.tmp_dir, "hook_contract_lock.json")
+            prior_receipt = receipt.read_bytes() + b" "
+            prior_lock = b'{"prior":"extra-lock"}\n'
+            atomic_write_private_bytes(str(receipt), prior_receipt)
+            atomic_write_private_bytes(str(lock), prior_lock)
+            config_before = Path(self.tmp_dir, "config.yaml").read_bytes()
+
+            def fail_reselection(_data_dir, connectors, **_kwargs):
+                self.assertEqual(tuple(connectors), ("amp", "opencode"))
+                atomic_write_private_bytes(str(receipt), b"failed replacement\n")
+                atomic_write_private_bytes(str(lock), b"failed lock replacement\n")
+                raise OSError("exact reselection failed")
+
+            with (
+                patch.object(cmd_init.platform_support, "host_os", return_value="windows"),
+                patch(
+                    "defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections",
+                    side_effect=fail_reselection,
+                ) as reselect,
+                self.assertRaisesRegex(OSError, "exact reselection failed"),
+            ):
+                cmd_init._activate_additional_connectors(
+                    primary,
+                    extras,
+                    start_gateway=False,
+                    quiet=True,
+                    protected_selection=protected_selection,
+                )
+
+        reselect.assert_called_once()
+        self.assertEqual(receipt.read_bytes(), prior_receipt)
+        self.assertEqual(lock.read_bytes(), prior_lock)
+        self.assertEqual(Path(self.tmp_dir, "config.yaml").read_bytes(), config_before)
+
+    def test_native_setup_copilot_bootstrap_remains_compatible(self):
+        with patch("defenseclaw.commands.cmd_init.platform_support.host_os", return_value="windows"):
+            result = self._invoke([
+                "--non-interactive",
+                "--yes",
+                "--connector",
+                "copilot",
+                "--profile",
+                "observe",
+                "--skip-install",
+                "--no-start-gateway",
+                "--no-verify",
+                "--native-setup-copilot",
+                "--json-summary",
+            ])
+
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        self.assertEqual(json.loads(result.output)["connector"], "copilot")
+
+    def test_native_setup_copilot_bootstrap_rejects_non_setup_shape(self):
+        with patch("defenseclaw.commands.cmd_init.platform_support.host_os", return_value="windows"):
+            result = self._invoke([
+                "--connector",
+                "copilot",
+                "--native-setup-copilot",
+            ])
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("reserved for the exact non-interactive native Windows Setup invocation", result.output)
+
+    def test_windows_antigravity_is_available_through_ordinary_init(self):
+        with patch("defenseclaw.commands.cmd_init.platform_support.host_os", return_value="windows"):
+            result = self._invoke([
+                "--non-interactive",
+                "--yes",
+                "--connector",
+                "antigravity",
+                "--profile",
+                "observe",
+                "--skip-install",
+                "--no-start-gateway",
+                "--no-verify",
+                "--json-summary",
+            ])
+
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        self.assertEqual(json.loads(result.output)["connector"], "antigravity")
+
+    def test_ordinary_antigravity_init_seeds_canonical_config(self):
+        with patch(
+            "defenseclaw.commands.cmd_init.platform_support.host_os",
+            return_value="windows",
+        ):
+            result = self._invoke([
+                "--non-interactive",
+                "--yes",
+                "--connector",
+                "antigravity",
+                "--profile",
+                "observe",
+                "--skip-install",
+                "--no-start-gateway",
+                "--no-verify",
+                "--json-summary",
+            ])
+
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        summary = json.loads(result.output)
+        self.assertEqual(summary["connector"], "antigravity")
+        import yaml
+
+        with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh)
+        self.assertEqual(cfg["claw"]["mode"], "antigravity")
+        self.assertEqual(cfg["guardrail"]["connector"], "antigravity")
+
+    def test_removed_antigravity_bootstrap_flag_is_rejected_even_with_setup_shape(self):
+        with patch("defenseclaw.commands.cmd_init.platform_support.host_os", return_value="windows"):
+            result = self._invoke([
+                "--non-interactive",
+                "--yes",
+                "--connector",
+                "antigravity",
+                "--profile",
+                "observe",
+                "--skip-install",
+                "--no-start-gateway",
+                "--no-verify",
+                "--native-setup-antigravity",
+            ])
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("No such option", result.output)
+        self.assertIn("--native-setup-antigravity", result.output)
+
+    def test_internal_antigravity_bootstrap_requires_actual_setup_parent(self):
+        from defenseclaw.commands import cmd_init
+
+        expected = os.path.join(self.tmp_dir, "DefenseClawSetup-x64.exe")
+        install_root = os.path.join(self.tmp_dir, "installed")
+        launcher = os.path.join(install_root, "bin", "defenseclaw.exe")
+        launcher_pid = 101
+        setup_pid = 202
+        setup_args = [
+            "--non-interactive",
+            "--yes",
+            "--connector",
+            "antigravity",
+            "--profile",
+            "observe",
+            "--skip-install",
+            "--no-start-gateway",
+            "--no-verify",
+            "--json-summary",
+        ]
+        environment = {
+            cmd_init._INTERNAL_SETUP_CONNECTOR_ENV: "antigravity",
+            cmd_init._INTERNAL_SETUP_PARENT_ENV: expected,
+            cmd_init._INSTALL_ROOT_ENV: install_root,
+        }
+        with patch.dict(os.environ, environment, clear=False), patch(
+            "defenseclaw.commands.cmd_init.os.getppid",
+            return_value=launcher_pid,
+        ), patch(
+            "defenseclaw.commands.cmd_init._process_parent_id_windows",
+            return_value=setup_pid,
+        ), patch(
+            "defenseclaw.commands.cmd_init._process_image_path_windows",
+            side_effect=lambda pid: {launcher_pid: launcher, setup_pid: expected}.get(pid),
+        ):
+            self.assertTrue(cmd_init._internal_antigravity_setup_parent_matches())
+            with patch(
+                "defenseclaw.commands.cmd_init.platform_support.host_os",
+                return_value="windows",
+            ):
+                result = self.runner.invoke(
+                    init_cmd,
+                    setup_args,
+                    obj=AppContext(),
+                    env={"DEFENSECLAW_HOME": self.tmp_dir, **environment},
+                )
+            self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+            self.assertEqual(json.loads(result.output)["connector"], "antigravity")
+
+        with patch.dict(os.environ, environment, clear=False), patch(
+            "defenseclaw.commands.cmd_init.os.getppid",
+            return_value=launcher_pid,
+        ), patch(
+            "defenseclaw.commands.cmd_init._process_parent_id_windows",
+            return_value=setup_pid,
+        ), patch(
+            "defenseclaw.commands.cmd_init._process_image_path_windows",
+            side_effect=lambda pid: {
+                launcher_pid: launcher,
+                setup_pid: os.path.join(self.tmp_dir, "powershell.exe"),
+            }.get(pid),
+        ):
+            self.assertFalse(cmd_init._internal_antigravity_setup_parent_matches())
+            with patch(
+                "defenseclaw.commands.cmd_init.platform_support.host_os",
+                return_value="windows",
+            ):
+                result = self.runner.invoke(
+                    init_cmd,
+                    setup_args,
+                    obj=AppContext(),
+                    env={"DEFENSECLAW_HOME": self.tmp_dir, **environment},
+                )
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("internal Antigravity Setup binding is invalid", result.output)
+
+        with patch.dict(os.environ, environment, clear=False), patch(
+            "defenseclaw.commands.cmd_init.os.getppid",
+            return_value=launcher_pid,
+        ), patch(
+            "defenseclaw.commands.cmd_init._process_parent_id_windows",
+            return_value=setup_pid,
+        ), patch(
+            "defenseclaw.commands.cmd_init._process_image_path_windows",
+            side_effect=lambda pid: {
+                launcher_pid: os.path.join(self.tmp_dir, "attacker", "defenseclaw.exe"),
+                setup_pid: expected,
+            }.get(pid),
+        ):
+            self.assertFalse(cmd_init._internal_antigravity_setup_parent_matches())
 
     def test_sandbox_flag_reports_explicit_scope(self):
         with patch("defenseclaw.platform_support.host_os", return_value="linux"):
@@ -422,20 +1029,20 @@ class TestInitFirstRunBackend(unittest.TestCase):
 
     @patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=True)
     def test_explicit_action_updates_existing_per_connector_mode(self, _gate):
-        Path(self.tmp_dir, "config.yaml").write_text(
-            "config_version: 8\n"
-            "observability: {}\n"
-            "claw:\n"
-            "  mode: codex\n"
-            "guardrail:\n"
-            "  enabled: true\n"
-            "  connector: codex\n"
-            "  mode: observe\n"
-            "  scanner_mode: local\n"
-            "  connectors:\n"
-            "    hermes:\n"
-            "      mode: observe\n",
-            encoding="utf-8",
+        atomic_write_private_bytes(
+            Path(self.tmp_dir, "config.yaml"),
+            b"config_version: 8\n"
+            b"observability: {}\n"
+            b"claw:\n"
+            b"  mode: codex\n"
+            b"guardrail:\n"
+            b"  enabled: true\n"
+            b"  connector: codex\n"
+            b"  mode: observe\n"
+            b"  scanner_mode: local\n"
+            b"  connectors:\n"
+            b"    hermes:\n"
+            b"      mode: observe\n",
         )
 
         result = self._invoke([
@@ -2102,7 +2709,7 @@ class TestInitFailModeFlag(unittest.TestCase):
         self.runner = CliRunner()
         self.selection_patcher = patch(
             "defenseclaw.agent_selection.record_setup_agent_selections",
-            return_value=({}, {}),
+            return_value=({"codex": object(), "hermes": object(), "omnigent": object()}, {}),
         )
         self.selection_patcher.start()
         self.addCleanup(self.selection_patcher.stop)
@@ -2234,7 +2841,7 @@ class TestInitHITLFlags(unittest.TestCase):
         self.runner = CliRunner()
         self.selection_patcher = patch(
             "defenseclaw.agent_selection.record_setup_agent_selections",
-            return_value=({}, {}),
+            return_value=({"codex": object(), "hermes": object(), "omnigent": object()}, {}),
         )
         self.selection_patcher.start()
         self.addCleanup(self.selection_patcher.stop)
@@ -2871,7 +3478,10 @@ class TestInitObserveAllActionConnectors(unittest.TestCase):
         self.runner = CliRunner()
         self.selection_patcher = patch(
             "defenseclaw.agent_selection.record_setup_agent_selections",
-            return_value=({}, {}),
+            return_value=(
+                {name: object() for name in ("amp", "claudecode", "codex", "hermes", "omnigent", "opencode")},
+                {},
+            ),
         )
         self.selection_patcher.start()
         self.addCleanup(self.selection_patcher.stop)

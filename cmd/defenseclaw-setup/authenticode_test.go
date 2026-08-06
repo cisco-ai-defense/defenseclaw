@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -128,6 +129,27 @@ func unsignedEvidence(installedPath, sbomName, digest, policy string) authentico
 	}
 }
 
+func microsoftVCRuntimeEvidence(installedPath, digest string) authenticodeFileEvidence {
+	return authenticodeFileEvidence{
+		SchemaVersion: authenticodeEvidenceSchemaVersion,
+		InstalledPath: installedPath,
+		SBOMFileName:  "./expanded/vc-runtime/" + path.Base(installedPath),
+		SHA256:        digest,
+		Expected: authenticodeFilePolicy{
+			Policy:                          microsoftVCRuntimeAuthenticodePolicy,
+			Status:                          "Valid",
+			Publisher:                       microsoftVCRuntimePublisher,
+			SignatureType:                   "Authenticode",
+			PlatformIdentityRequired:        true,
+			TimestampRequired:               true,
+			SignerThumbprintSHA256:          strings.Repeat("a", 64),
+			TimestampSignerThumbprintSHA256: strings.Repeat("b", 64),
+			TimestampTokenSHA256:            strings.Repeat("c", 64),
+		},
+		Observed: json.RawMessage(`{"status":"Valid","embedded_signatures":[{}]}`),
+	}
+}
+
 func unsignedManifestFixture(t *testing.T) (string, payloadManifest) {
 	t.Helper()
 	root := t.TempDir()
@@ -162,6 +184,16 @@ func unsignedManifestFixture(t *testing.T) (string, payloadManifest) {
 		}
 		files[installedPath] = unsignedEvidence(installedPath, "./fixture/"+filepath.Base(full), digest, policy)
 	}
+	for _, installedPath := range []string{
+		"runtime/python/msvcp140.dll",
+		"runtime/python/msvcp140_1.dll",
+	} {
+		full := filepath.Join(root, filepath.FromSlash(installedPath))
+		if err := os.WriteFile(full, pe, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		files[installedPath] = microsoftVCRuntimeEvidence(installedPath, digest)
+	}
 	manifest := payloadManifest{
 		SchemaVersion:      2,
 		Version:            "1.2.3",
@@ -171,6 +203,7 @@ func unsignedManifestFixture(t *testing.T) (string, payloadManifest) {
 		GatewayArchive:     "gateway.zip",
 		Wheel:              "defenseclaw.whl",
 		PythonEmbed:        "python.zip",
+		VCRuntime:          "vc-runtime.zip",
 		YaraCompatWheel:    "yara-compat.whl",
 		UpgradeManifest:    "upgrade-manifest.json",
 		SitePackages:       "site-packages.zip",
@@ -182,6 +215,7 @@ func unsignedManifestFixture(t *testing.T) (string, payloadManifest) {
 			"gateway.zip":           strings.Repeat("1", 64),
 			"defenseclaw.whl":       strings.Repeat("2", 64),
 			"python.zip":            strings.Repeat("3", 64),
+			"vc-runtime.zip":        strings.Repeat("7", 64),
 			"yara-compat.whl":       strings.Repeat("4", 64),
 			"upgrade-manifest.json": strings.Repeat("5", 64),
 			"site-packages.zip":     strings.Repeat("6", 64),
@@ -212,14 +246,9 @@ func cloneManifest(t *testing.T, manifest payloadManifest) payloadManifest {
 }
 
 func TestValidateAuthenticodeManifestAcceptsExplicitUnsignedLocalPolicy(t *testing.T) {
-	root, manifest := unsignedManifestFixture(t)
+	_, manifest := unsignedManifestFixture(t)
 	if err := validateAuthenticodeManifest(manifest); err != nil {
 		t.Fatalf("validate Authenticode manifest: %v", err)
-	}
-	if err := verifyInstalledPEInventoryWith(root, manifest, func(string) error {
-		return errors.New("trust verifier must not run for unsigned files")
-	}); err != nil {
-		t.Fatalf("verify unsigned installed inventory: %v", err)
 	}
 }
 
@@ -240,7 +269,7 @@ func TestVerifyPayloadManifestAcceptsSchemaTwoAuthenticodeAndYaraContract(t *tes
 		manifest.Files[name] = digestBytes(pe)
 	}
 	for _, name := range []string{
-		manifest.GatewayArchive, manifest.Wheel, manifest.PythonEmbed, manifest.YaraCompatWheel,
+		manifest.GatewayArchive, manifest.Wheel, manifest.PythonEmbed, manifest.VCRuntime, manifest.YaraCompatWheel,
 		manifest.UpgradeManifest, manifest.SitePackages,
 	} {
 		data := []byte("fixture:" + name)

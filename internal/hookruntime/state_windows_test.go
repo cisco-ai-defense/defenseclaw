@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -117,6 +118,71 @@ func TestStableRuntimePublishDisableAndReinstall(t *testing.T) {
 	launcherAfterReinstall, err := os.ReadFile(paths.Launcher)
 	if err != nil || string(launcherAfterReinstall) != "MZ-second-stable-hook" {
 		t.Fatalf("reinstall did not refresh launcher: %q err=%v", launcherAfterReinstall, err)
+	}
+}
+
+func TestStableRuntimeDisableAllowsHeldLauncherImage(t *testing.T) {
+	paths := testRuntimePaths(t)
+	systemRoot := os.Getenv("SystemRoot")
+	if systemRoot == "" {
+		t.Skip("SystemRoot is unavailable")
+	}
+	source := filepath.Join(systemRoot, "System32", "cmd.exe")
+	if _, err := os.Stat(source); err != nil {
+		t.Skipf("cmd.exe is unavailable: %v", err)
+	}
+	image, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hookPath := filepath.Join(t.TempDir(), LauncherName)
+	if err := os.WriteFile(hookPath, image, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := publishAt(
+		paths,
+		hookPath,
+		hookPath,
+		writeRuntimeGateway(t, "MZ-held-launcher-gateway"),
+		filepath.Join(t.TempDir(), "data"),
+		stableRuntimeTransactionOne,
+	); err != nil {
+		t.Fatalf("publish held launcher: %v", err)
+	}
+
+	inputReader, inputWriter, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer inputReader.Close()
+	defer inputWriter.Close()
+	process := exec.Command(paths.Launcher, "/d", "/c", "pause")
+	process.Stdin = inputReader
+	if err := process.Start(); err != nil {
+		t.Fatalf("start held launcher: %v", err)
+	}
+	waitDone := make(chan error, 1)
+	go func() { waitDone <- process.Wait() }()
+	running := true
+	defer func() {
+		if running {
+			_ = process.Process.Kill()
+			<-waitDone
+		}
+	}()
+	select {
+	case err := <-waitDone:
+		running = false
+		t.Fatalf("held launcher exited before disable: %v", err)
+	case <-time.After(200 * time.Millisecond):
+	}
+
+	if err := disableAt(paths, stableRuntimeTransactionTwo); err != nil {
+		t.Fatalf("disable held launcher: %v", err)
+	}
+	disabled, recognized, err := readTrustedAt(paths, paths.Launcher)
+	if err != nil || !recognized || disabled.Active() || disabled.Status != StatusDisabled {
+		t.Fatalf("held launcher disabled state: state=%+v recognized=%v err=%v", disabled, recognized, err)
 	}
 }
 

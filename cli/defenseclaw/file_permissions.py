@@ -1414,14 +1414,14 @@ def _windows_current_user_sid() -> str:
 
 
 def _reject_reparse_chain(path: str) -> None:
-    current = Path(os.path.abspath(path))
     if os.name != "nt":
         # POSIX systems intentionally ship symlinked system ancestors (for
         # example macOS /tmp -> /private/tmp). The caller-owned leaf must not
         # itself be a symlink, while Windows requires checking every ancestor
         # because a junction is transparent to ordinary path operations.
-        _reject_reparse_path(os.fspath(current), allow_missing=True)
+        _reject_reparse_path(os.path.abspath(path), allow_missing=True)
         return
+    current = Path(os.path.abspath(path))
     while True:
         _reject_reparse_path(os.fspath(current), allow_missing=True)
         if current.parent == current:

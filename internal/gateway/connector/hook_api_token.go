@@ -162,6 +162,38 @@ func LoadHookAPIToken(dataDir, connectorName string) (string, error) {
 	return tok, nil
 }
 
+// RemoveHookAPIToken revokes one connector-scoped hook API credential.
+// Callers must remove and verify the connector's managed hook registration
+// first so a teardown failure cannot strand a live hook with no credential.
+func RemoveHookAPIToken(dataDir, connectorName string) error {
+	if dataDir == "" {
+		return fmt.Errorf("RemoveHookAPIToken: empty dataDir")
+	}
+	hookAPITokenMu.Lock()
+	defer hookAPITokenMu.Unlock()
+
+	tokenPath, err := HookAPITokenFilePath(dataDir, connectorName)
+	if err != nil {
+		return err
+	}
+	hooksDir := filepath.Dir(tokenPath)
+	if _, err := os.Lstat(hooksDir); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("inspect hook API token directory: %w", err)
+	}
+	if err := validateHookAPITokenLocation(dataDir, tokenPath); err != nil {
+		return err
+	}
+	for _, path := range []string{tokenPath + ".tmp", tokenPath} {
+		if err := removeOwnedOTLPPathTokenFile(path); err != nil {
+			return fmt.Errorf("remove hook API token %s: %w", path, err)
+		}
+	}
+	return nil
+}
+
 // LoadHookAPITokens loads connector-scoped hook API tokens for known connector
 // names. Missing tokens are omitted.
 func LoadHookAPITokens(dataDir string, connectorNames []string) (map[string]string, error) {

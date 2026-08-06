@@ -80,8 +80,8 @@ func correlationContractSources(name string) []CorrelationContractSource {
 		return source("geminicli-source-fa975395",
 			"https://github.com/google-gemini/gemini-cli", "fa975395bcc6b609e44735e47320e54f51535d47")
 	case "copilot":
-		return source("copilot-hooks-doc-7d1b4045",
-			"https://docs.github.com/en/copilot/reference/hooks-reference", "sha256:7d1b404551d6f91bb96fce7452b22ead4505374b79d8906a49652d1fae47d224")
+		return source("copilot-hooks-doc-d39949a7",
+			"https://github.com/github/docs/blob/2f383aa194327fbe933682cbe01dd4c5625f5239/content/copilot/reference/hooks-reference.md", "sha256:d39949a728947c06d1745133aa95dfaabac72c4d45918eed20ec13cbc0fb1d67")
 	case "openhands":
 		return source("openhands-source-a55f1ded",
 			"https://github.com/All-Hands-AI/OpenHands", "a55f1ded61cac85d6e42aee9e460320ead93ae6a")
@@ -99,8 +99,31 @@ func correlationContractSources(name string) []CorrelationContractSource {
 			CheckedDate: "2026-07-29",
 		}}
 	case "omnigent":
-		return source("omnigent-source-9ee53ece",
-			"https://github.com/omnigent-ai/omnigent", "9ee53ecea9ceaab679f84c0c5f15695c8ccd0c3d")
+		return []CorrelationContractSource{{
+			ID: "omnigent-source-35519fb", URI: "https://github.com/omnigent-ai/omnigent",
+			Revision:    "35519fb04743f66b30cac8a40695d5d72fa163ea",
+			CheckedDate: "2026-07-30",
+			Fixtures: []CorrelationContractFixture{
+				{
+					ID: "omnigent-policy-event-35519fb", Surface: CorrelationSurfaceHook,
+					Path:         "internal/gateway/connector/testdata/omnigent-policy-event.json",
+					SHA256:       "sha256:8fa398a41ae73ed90777ee2e6bd7c9b66681f0f24eb7568b9ca1bf8e933fea81",
+					AgentVersion: "0.7.0", EvidenceKind: "provider-source-derived",
+				},
+				{
+					ID: "omnigent-policy-six-phase-35519fb", Surface: CorrelationSurfaceHook,
+					Path:         "internal/gateway/connector/testdata/omnigent-policy-six-phase.json",
+					SHA256:       "sha256:34739a7e016f8792c6a27af61e9def2e9676e69595e0051a9a6da3c28b9c25a4",
+					AgentVersion: "0.7.0", EvidenceKind: "provider-source-derived",
+				},
+				{
+					ID: "omnigent-otel-span-35519fb", Surface: CorrelationSurfaceNativeOTLP,
+					Path:         "internal/gateway/connector/testdata/omnigent-otel-span.json",
+					SHA256:       "sha256:4a801230dcb078821cdbde81269ac558532fc55de1525a67d29993b32e245ca7",
+					AgentVersion: "0.7.0", EvidenceKind: "provider-source-derived",
+				},
+			},
+		}}
 	default:
 		return nil
 	}

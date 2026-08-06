@@ -35,10 +35,11 @@ import (
 func fixedSetupOpts(t *testing.T) SetupOpts {
 	t.Helper()
 	return SetupOpts{
-		APIAddr:       "127.0.0.1:18970",
-		APIToken:      "tok-test",
-		OTLPPathToken: strings.Repeat("a", 64),
-		DataDir:       t.TempDir(),
+		APIAddr:              "127.0.0.1:18970",
+		APIToken:             "tok-test",
+		OTLPPathToken:        strings.Repeat("a", 64),
+		DataDir:              t.TempDir(),
+		CodexOtelEnvironment: "windows",
 	}
 }
 
@@ -65,7 +66,7 @@ func TestScopedOTLPEndpointRecognitionIsExact(t *testing.T) {
 
 // TestNativeOTLPShape_Codex pins the codex [otel] table to the
 // schema-required shape. Codex's deserializer is kebab-case and
-// rejects missing keys, so this test guards the four documented
+// rejects missing keys, so this test guards the five documented
 // top-level fields and the per-signal exporter sub-shape.
 //
 // Equally important: this test ASSERTS that we do not emit
@@ -87,10 +88,23 @@ func TestNativeOTLPShape_Codex(t *testing.T) {
 		t.Fatalf("buildCodexOtelBlockWithPathToken: %v", err)
 	}
 
-	for _, want := range []string{"log_user_prompt", "exporter", "trace_exporter", "metrics_exporter"} {
+	for _, want := range []string{"environment", "log_user_prompt", "exporter", "trace_exporter", "metrics_exporter"} {
 		if _, ok := block[want]; !ok {
 			t.Errorf("missing required codex [otel] key %q", want)
 		}
+	}
+	if got := block["environment"]; got != opts.CodexOtelEnvironment {
+		t.Errorf("codex [otel].environment = %#v; want configured environment %q", got, opts.CodexOtelEnvironment)
+	}
+	defaultBlock, err := buildCodexOtelBlockWithPathToken(
+		SetupOpts{APIAddr: opts.APIAddr},
+		pathToken,
+	)
+	if err != nil {
+		t.Fatalf("build default Codex OTel block: %v", err)
+	}
+	if got := defaultBlock["environment"]; got != "dev" {
+		t.Errorf("default codex [otel].environment = %#v; want official default %q", got, "dev")
 	}
 
 	// Guard against accidentally re-adding service_name /
@@ -154,6 +168,29 @@ func TestNativeOTLPShape_Codex(t *testing.T) {
 		if got := hdrs["authorization"]; got != "Bearer "+pathToken {
 			t.Errorf("%s.otlp-http.headers[authorization] = %q; want connector-scoped bearer", signal, got)
 		}
+	}
+}
+
+func TestCodexOtelEnvironmentFollowsSetupEnvironment(t *testing.T) {
+	t.Parallel()
+	token := strings.Repeat("e", 64)
+	for _, tc := range []struct {
+		name string
+		opts SetupOpts
+		want string
+	}{
+		{name: "configured", opts: SetupOpts{APIAddr: "127.0.0.1:18970", CodexOtelEnvironment: "windows"}, want: "windows"},
+		{name: "official default", opts: SetupOpts{APIAddr: "127.0.0.1:18970"}, want: "dev"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			block, err := buildCodexOtelBlockWithPathToken(tc.opts, token)
+			if err != nil {
+				t.Fatalf("build Codex OTel block: %v", err)
+			}
+			if got := block["environment"]; got != tc.want {
+				t.Fatalf("otel.environment = %#v; want %q", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -359,49 +396,12 @@ func TestClaudeCodeManagedSettingsProjectionIsStableAcrossGatewayMasterRotation(
 	}
 }
 
-func TestNativeOTLPShape_Copilot(t *testing.T) {
+func TestNativeOTLPShape_CopilotIsNotIntegrated(t *testing.T) {
 	t.Parallel()
 	opts := fixedSetupOpts(t)
 
-	spec := NewCopilotConnector().HookProfile(opts).NativeOTLP
-	if spec == nil {
-		t.Fatal("copilot NativeOTLP spec is nil")
-	}
-	env, err := spec.EnvBlock()
-	if err != nil {
-		t.Fatalf("copilot EnvBlock: %v", err)
-	}
-
-	for _, want := range []string{
-		"COPILOT_OTEL_ENABLED",
-		"OTEL_EXPORTER_OTLP_ENDPOINT",
-		"OTEL_EXPORTER_OTLP_HEADERS",
-		"OTEL_EXPORTER_OTLP_PROTOCOL",
-		"OTEL_RESOURCE_ATTRIBUTES",
-		"OTEL_SERVICE_NAME",
-	} {
-		if _, ok := env[want]; !ok {
-			t.Errorf("missing required copilot env var %q", want)
-		}
-	}
-	if env["COPILOT_OTEL_ENABLED"] != "true" {
-		t.Errorf("COPILOT_OTEL_ENABLED = %q; want true", env["COPILOT_OTEL_ENABLED"])
-	}
-	if env["OTEL_SERVICE_NAME"] != "copilot" {
-		t.Errorf("OTEL_SERVICE_NAME = %q; want copilot", env["OTEL_SERVICE_NAME"])
-	}
-	headers := splitOTelHeader(env["OTEL_EXPORTER_OTLP_HEADERS"])
-	wantHeaders := map[string]bool{
-		"x-defenseclaw-source=copilot":          true,
-		"x-defenseclaw-client=copilot-otel/1.0": true,
-		"x-defenseclaw-token=" + opts.APIToken:  true,
-	}
-	for _, h := range headers {
-		delete(wantHeaders, h)
-	}
-	if len(wantHeaders) != 0 {
-		t.Errorf("OTEL_EXPORTER_OTLP_HEADERS missing entries %v; got %v",
-			wantHeaders, env["OTEL_EXPORTER_OTLP_HEADERS"])
+	if spec := NewCopilotConnector().HookProfile(opts).NativeOTLP; spec != nil {
+		t.Fatalf("Copilot gained an unintegrated native OTLP spec: %+v", spec)
 	}
 }
 
@@ -430,6 +430,7 @@ func TestNativeOTLPShape_Omnigent(t *testing.T) {
 		"OTEL_TRACES_EXPORTER",
 		"OTEL_RESOURCE_ATTRIBUTES",
 		"OTEL_SERVICE_NAME",
+		"OMNIGENT_TELEMETRY_ENABLED",
 		"OMNIGENT_OTEL_CAPTURE_CONTENT",
 	} {
 		if _, ok := env[want]; !ok {
@@ -445,6 +446,9 @@ func TestNativeOTLPShape_Omnigent(t *testing.T) {
 	if env["OMNIGENT_OTEL_CAPTURE_CONTENT"] != "false" {
 		t.Errorf("OMNIGENT_OTEL_CAPTURE_CONTENT = %q; want false", env["OMNIGENT_OTEL_CAPTURE_CONTENT"])
 	}
+	if env["OMNIGENT_TELEMETRY_ENABLED"] != "true" {
+		t.Errorf("OMNIGENT_TELEMETRY_ENABLED = %q; want true", env["OMNIGENT_TELEMETRY_ENABLED"])
+	}
 	for _, signal := range []string{"LOGS", "METRICS", "TRACES"} {
 		if got := env["OTEL_"+signal+"_EXPORTER"]; got != "otlp" {
 			t.Errorf("OTEL_%s_EXPORTER = %q; want otlp", signal, got)
@@ -456,15 +460,19 @@ func TestNativeOTLPShape_Omnigent(t *testing.T) {
 	}
 	headers := splitOTelHeader(env["OTEL_EXPORTER_OTLP_HEADERS"])
 	wantHeaders := map[string]bool{
-		"x-defenseclaw-source=omnigent":          true,
-		"x-defenseclaw-client=omnigent-otel/1.0": true,
-		"x-defenseclaw-token=" + opts.APIToken:   true,
+		"x-defenseclaw-source=omnigent":              true,
+		"x-defenseclaw-client=omnigent-otel/1.0":     true,
+		"authorization=Bearer " + opts.OTLPPathToken: true,
 	}
 	for _, header := range headers {
 		delete(wantHeaders, header)
 	}
 	if len(wantHeaders) != 0 {
 		t.Errorf("OTEL_EXPORTER_OTLP_HEADERS missing entries %v; got %v", wantHeaders, env["OTEL_EXPORTER_OTLP_HEADERS"])
+	}
+	if strings.Contains(env["OTEL_EXPORTER_OTLP_HEADERS"], "x-defenseclaw-token") ||
+		strings.Contains(env["OTEL_EXPORTER_OTLP_HEADERS"], opts.APIToken) {
+		t.Errorf("OmniGent OTLP headers leaked the hook/general API token: %q", env["OTEL_EXPORTER_OTLP_HEADERS"])
 	}
 	attrs := splitOTelHeader(env["OTEL_RESOURCE_ATTRIBUTES"])
 	wantAttrs := map[string]bool{

@@ -11,7 +11,7 @@ keywords:
   - OpenHands connector
   - Antigravity connector
   - Gemini CLI connector
-  - Windsurf connector
+  - Legacy Cascade connector
   - Hermes connector
   - OpenCode connector
   - Amp connector
@@ -28,7 +28,7 @@ native telemetry, and approval support therefore vary by connector.
 
 <Cards>
   <Card title="Proxy connectors" description="OpenClaw, ZeptoClaw. Model requests routed through the DefenseClaw proxy and their responses are inspected; OpenClaw classifies recognized provider/request shapes, while ZeptoClaw rewrites configured provider api_base values." />
-  <Card title="Hook connectors" description="Claude Code, Codex, Cursor, Windsurf, Gemini CLI, GitHub Copilot CLI, OpenHands, Antigravity, Hermes, OpenCode, Amp, OmniGent. DefenseClaw wires into the agent's native lifecycle hooks or policy API; the agent talks directly to its upstream." />
+  <Card title="Hook connectors" description="Claude Code, Codex, Cursor, legacy Cascade, Gemini CLI, GitHub Copilot CLI, OpenHands, Antigravity, Hermes, OpenCode, Amp, OmniGent. DefenseClaw wires into the agent's native lifecycle hooks or policy API; the agent talks directly to its upstream. The retained windsurf alias covers Cascade only, not Devin Local, cloud, or ACP." />
   <Card title="Compatibility contracts" href="/docs/connectors/compatibility" description="Versioned hook contracts, setup-time connector version checks, and the runtime hook_contract_lock.json." />
 </Cards>
 
@@ -45,13 +45,13 @@ native telemetry, and approval support therefore vary by connector.
 | Family | Connectors | Data path | Enforcement boundary |
 | --- | --- | --- | --- |
 | Proxy | OpenClaw, ZeptoClaw | DefenseClaw receives and forwards model traffic | Request/response policy in the proxy |
-| Hook | Claude Code, Codex, Cursor, Windsurf, Gemini CLI, GitHub Copilot CLI, OpenHands, Antigravity, Hermes, OpenCode | Agent remains connected directly to its upstream | Only the blocking events declared by that connector's selected hook contract |
+| Hook | Claude Code, Codex, Cursor, legacy Cascade, Gemini CLI, GitHub Copilot CLI, OpenHands, Antigravity, Hermes, OpenCode | Agent remains connected directly to its upstream | Only the blocking events declared by that connector's selected hook contract; Cursor action uses event-native deny from its user hook |
 | Custom policy | OmniGent | Agent remains connected directly to its upstream | Six in-process policy phases mapped to `ALLOW`, `ASK`, or `DENY` |
 
-Native ask is event-specific: Claude Code (`PreToolUse`), Cursor
-(`beforeShellExecution`, `beforeMCPExecution`), Copilot CLI (`preToolUse`),
-Antigravity (`PreInvocation`, `PreToolUse`), and OmniGent's three pre-action
-phases. Other confirmation verdicts use the connector's documented fallback.
+Native ask is event-specific: Claude Code (`PreToolUse`), Copilot CLI (`preToolUse`),
+Antigravity (`PreToolUse` only), and OmniGent's three pre-action
+phases. DefenseClaw does not enable Cursor's native ask response; Cursor confirm
+verdicts remain attributed alerts. Other confirmation verdicts use the connector's documented fallback.
 For exact version ranges, supported events, and script generations, see
 [Connector Compatibility](/docs/connectors/compatibility).
 

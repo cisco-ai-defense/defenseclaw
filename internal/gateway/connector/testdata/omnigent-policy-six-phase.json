@@ -1,0 +1,51 @@
+[
+  {
+    "type": "request",
+    "target": null,
+    "data": {"user_content": "Review this change.", "attachments": []},
+    "context": {"actor": {"client_id": "client-123"}, "usage": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12, "total_cost_usd": 0.0012}, "model": "test-model", "harness": "codex-native", "labels": {"environment": "fixture"}},
+    "session_state": {},
+    "llm_client": null
+  },
+  {
+    "type": "tool_call",
+    "target": "shell",
+    "data": {"name": "shell", "arguments": {"command": "pwd"}},
+    "context": {"actor": {"client_id": "client-123"}, "usage": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12, "total_cost_usd": 0.0012}, "model": "test-model", "harness": "codex-native", "labels": {"environment": "fixture"}},
+    "session_state": {},
+    "llm_client": null
+  },
+  {
+    "type": "tool_result",
+    "target": "shell",
+    "data": {"result": {"stdout": "/workspace\n", "exit_code": 0}},
+    "request_data": {"name": "shell", "arguments": {"command": "pwd"}},
+    "context": {"actor": {"client_id": "client-123"}, "usage": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12, "total_cost_usd": 0.0012}, "model": "test-model", "harness": "codex-native", "labels": {"environment": "fixture"}},
+    "session_state": {},
+    "llm_client": null
+  },
+  {
+    "type": "response",
+    "target": null,
+    "data": "The change is ready.",
+    "context": {"actor": {"client_id": "client-123"}, "usage": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12, "total_cost_usd": 0.0012}, "model": "test-model", "harness": "codex-native", "labels": {"environment": "fixture"}},
+    "session_state": {},
+    "llm_client": null
+  },
+  {
+    "type": "llm_request",
+    "target": null,
+    "data": {"model": "test-model", "messages_count": 3, "tools_count": 1, "system_prompt_preview": "Follow the system safety policy.", "last_user_message": "Do not skip the user request."},
+    "context": {"actor": {"client_id": "client-123"}, "usage": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12, "total_cost_usd": 0.0012}, "model": "test-model", "harness": "codex-native", "labels": {"environment": "fixture"}},
+    "session_state": {},
+    "llm_client": null
+  },
+  {
+    "type": "llm_response",
+    "target": null,
+    "data": {"model": "test-model", "text_preview": "Model response preview.", "tool_calls_count": 0, "usage": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12}},
+    "context": {"actor": {"client_id": "client-123"}, "usage": {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12, "total_cost_usd": 0.0012}, "model": "test-model", "harness": "codex-native", "labels": {"environment": "fixture"}},
+    "session_state": {},
+    "llm_client": null
+  }
+]

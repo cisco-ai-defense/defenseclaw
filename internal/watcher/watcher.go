@@ -19,6 +19,7 @@ package watcher
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -176,21 +177,36 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 	defer fsw.Close()
 
 	watched := 0
-	for _, dir := range w.skillDirs {
-		if err := ensureAndWatch(fsw, dir); err != nil {
-			fmt.Fprintf(os.Stderr, "[watch] skill dir %s: %v (skipping)\n", dir, err)
-			continue
+	watchedDirs := make(map[string]struct{})
+	watchOnce := func(dir, kind string) bool {
+		absolute, absErr := filepath.Abs(dir)
+		if absErr != nil {
+			absolute = filepath.Clean(dir)
 		}
+		key := strings.ToLower(filepath.Clean(absolute))
+		if _, exists := watchedDirs[key]; exists {
+			return true
+		}
+		if err := ensureAndWatch(fsw, dir); err != nil {
+			fmt.Fprintf(os.Stderr, "[watch] %s dir %s: %v (skipping)\n", kind, dir, err)
+			return false
+		}
+		watchedDirs[key] = struct{}{}
 		watched++
-		fmt.Printf("[watch] monitoring skill dir: %s\n", dir)
+		fmt.Printf("[watch] monitoring %s dir: %s\n", kind, dir)
+		return true
+	}
+	for _, dir := range w.skillDirs {
+		watchOnce(dir, "skill")
 	}
 	for _, dir := range w.pluginDirs {
-		if err := ensureAndWatch(fsw, dir); err != nil {
-			fmt.Fprintf(os.Stderr, "[watch] plugin dir %s: %v (skipping)\n", dir, err)
+		if !watchOnce(dir, "plugin") {
 			continue
 		}
-		watched++
-		fmt.Printf("[watch] monitoring plugin dir: %s\n", dir)
+		if watcherConnectorName(w.cfg) == "claudecode" &&
+			strings.EqualFold(filepath.Base(filepath.Clean(dir)), "cache") {
+			addClaudeCacheWatches(fsw, dir, watchedDirs)
+		}
 	}
 
 	if watched == 0 {
@@ -220,6 +236,17 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			}
 			if event.Op&(fsnotify.Create|fsnotify.Rename) == 0 {
 				continue
+			}
+			if watcherConnectorName(w.cfg) == "claudecode" {
+				if depth, inside := w.claudeCacheDepth(event.Name); inside {
+					if info, statErr := os.Stat(event.Name); statErr == nil &&
+						info.IsDir() && depth < 3 {
+						addClaudeCacheWatches(fsw, event.Name, watchedDirs)
+					}
+					if depth != 3 {
+						continue
+					}
+				}
 			}
 			if !w.isDirectChildDir(event.Name) {
 				continue
@@ -276,6 +303,20 @@ func (w *InstallWatcher) processPending(ctx context.Context) {
 
 func (w *InstallWatcher) classifyEvent(path string) InstallEvent {
 	installType := InstallSkill
+	name := filepath.Base(path)
+	if watcherConnectorName(w.cfg) == "claudecode" {
+		if pluginID, isPlugin := w.claudePluginIdentity(path); isPlugin {
+			installType = InstallPlugin
+			name = pluginID
+		}
+		return InstallEvent{
+			Type:      installType,
+			Name:      name,
+			Path:      path,
+			Connector: "claudecode",
+			Timestamp: time.Now().UTC(),
+		}
+	}
 	pathAbs, _ := filepath.Abs(path)
 	for _, dir := range w.pluginDirs {
 		abs, _ := filepath.Abs(dir)
@@ -287,11 +328,40 @@ func (w *InstallWatcher) classifyEvent(path string) InstallEvent {
 
 	return InstallEvent{
 		Type:      installType,
-		Name:      filepath.Base(path),
+		Name:      name,
 		Path:      path,
 		Connector: watcherConnectorName(w.cfg),
 		Timestamp: time.Now().UTC(),
 	}
+}
+
+func (w *InstallWatcher) claudePluginIdentity(path string) (string, bool) {
+	pathAbs, err := filepath.Abs(path)
+	if err != nil {
+		return "", false
+	}
+	for _, root := range w.pluginDirs {
+		rootAbs, absErr := filepath.Abs(root)
+		if absErr != nil {
+			continue
+		}
+		relative, relErr := filepath.Rel(rootAbs, pathAbs)
+		if relErr != nil || relative == "." || relative == ".." ||
+			strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			continue
+		}
+		parts := strings.FieldsFunc(relative, func(r rune) bool {
+			return r == '/' || r == '\\'
+		})
+		switch {
+		case strings.EqualFold(filepath.Base(rootAbs), "cache") && len(parts) == 3:
+			return parts[1] + "@" + parts[0], true
+		case strings.EqualFold(filepath.Base(rootAbs), "skills") &&
+			len(parts) == 1 && isClaudeSkillsPlugin(pathAbs):
+			return claudeSkillsPluginIdentity(pathAbs), true
+		}
+	}
+	return "", false
 }
 
 // eventConnector resolves the connector that owns an install event: the
@@ -939,6 +1009,28 @@ func (w *InstallWatcher) preserveRestoredBlockedAsset(evt InstallEvent) bool {
 	return false
 }
 
+func (w *InstallWatcher) claudeCacheDepth(path string) (int, bool) {
+	pathAbs, err := filepath.Abs(path)
+	if err != nil {
+		return 0, false
+	}
+	for _, root := range w.pluginDirs {
+		rootAbs, absErr := filepath.Abs(root)
+		if absErr != nil || !strings.EqualFold(filepath.Base(rootAbs), "cache") {
+			continue
+		}
+		relative, relErr := filepath.Rel(rootAbs, pathAbs)
+		if relErr != nil || relative == "." || relative == ".." ||
+			strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			continue
+		}
+		return len(strings.FieldsFunc(relative, func(r rune) bool {
+			return r == '/' || r == '\\'
+		})), true
+	}
+	return 0, false
+}
+
 func sameWatcherPath(left, right string) bool {
 	leftAbs, leftErr := filepath.Abs(strings.TrimSpace(left))
 	rightAbs, rightErr := filepath.Abs(strings.TrimSpace(right))
@@ -1008,6 +1100,11 @@ func (w *InstallWatcher) isDirectChildDir(path string) bool {
 		dirAbs, _ := filepath.Abs(dir)
 		if parentAbs == dirAbs {
 			return true
+		}
+	}
+	if watcherConnectorName(w.cfg) == "claudecode" {
+		if depth, inside := w.claudeCacheDepth(path); inside {
+			return depth == 3
 		}
 	}
 	return false
@@ -1140,4 +1237,47 @@ func ensureAndWatch(fsw *fsnotify.Watcher, dir string) error {
 	}
 
 	return nil
+}
+
+func addClaudeCacheWatches(
+	fsw *fsnotify.Watcher,
+	root string,
+	watched map[string]struct{},
+) {
+	root = filepath.Clean(root)
+	_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			if path == root {
+				return fs.SkipAll
+			}
+			return fs.SkipDir
+		}
+		if !entry.IsDir() {
+			return nil
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return fs.SkipDir
+		}
+		relative, relErr := filepath.Rel(root, path)
+		if relErr != nil || relative == ".." ||
+			strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			return fs.SkipDir
+		}
+		depth := 0
+		if relative != "." {
+			depth = len(strings.FieldsFunc(relative, func(r rune) bool {
+				return r == '/' || r == '\\'
+			}))
+		}
+		if depth > 2 {
+			return fs.SkipDir
+		}
+		key := strings.ToLower(filepath.Clean(path))
+		if _, exists := watched[key]; !exists {
+			if addErr := fsw.Add(path); addErr == nil {
+				watched[key] = struct{}{}
+			}
+		}
+		return nil
+	})
 }

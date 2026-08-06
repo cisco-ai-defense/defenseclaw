@@ -38,26 +38,31 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
 
 const (
-	defaultStopTimeout           = 10 * time.Second
-	defaultStartReadinessTimeout = 60 * time.Second
-	defaultReadinessPollInterval = 100 * time.Millisecond
-	defaultReadinessHTTPTimeout  = time.Second
-	gracefulShutdownHTTPTimeout  = 3 * time.Second
-	gracefulShutdownResponseMax  = 4 << 10
-	restartPortReleaseTimeout    = defaultStopTimeout
-	restartPortReleaseInterval   = 25 * time.Millisecond
-	rotationTransactionFlag      = "rotation-transaction"
-	rotationCleanupFlag          = "rotation-cleanup"
-	rotationConnectorStateFlag   = "rotation-connector-state"
-	rotationConnectorStateMaxLen = 16 << 10
-	upgradeFreshProcessEnv       = "DEFENSECLAW_UPGRADE_FRESH_PROCESS"
-	upgradeWaitReadyTimeoutFlag  = "timeout"
-	upgradeWaitReadyVersionFlag  = "expected-version"
-	telemetrySnapshotUnavailable = gateway.ObservabilityV8HealthSnapshotUnavailable
+	defaultStopTimeout               = 10 * time.Second
+	defaultStartReadinessTimeout     = 60 * time.Second
+	defaultReadinessPollInterval     = 100 * time.Millisecond
+	defaultReadinessHTTPTimeout      = time.Second
+	gracefulShutdownHTTPTimeout      = 3 * time.Second
+	gracefulShutdownResponseMax      = 4 << 10
+	restartPortReleaseTimeout        = defaultStopTimeout
+	restartPortReleaseInterval       = 25 * time.Millisecond
+	rotationTransactionFlag          = "rotation-transaction"
+	rotationCleanupFlag              = "rotation-cleanup"
+	rotationConnectorStateFlag       = "rotation-connector-state"
+	rotationConnectorStateMaxLen     = 16 << 10
+	upgradeFreshProcessEnv           = "DEFENSECLAW_UPGRADE_FRESH_PROCESS"
+	upgradeWaitReadyTimeoutFlag      = "timeout"
+	upgradeWaitReadyVersionFlag      = "expected-version"
+	telemetrySnapshotUnavailable     = gateway.ObservabilityV8HealthSnapshotUnavailable
+	telemetryReadinessDetailMaxBytes = 1024
+	telemetryReadinessFailureRowsMax = 4
 )
+
+const telemetryReadinessDestinationRowsMax = config.ObservabilityV8MaxDestinations + 1
 
 var startCmd = &cobra.Command{
 	Use:   "start",
@@ -539,14 +544,21 @@ func runStop(cmd *cobra.Command, _ []string) error {
 func rotationWatchdogRunning(dataDir string) (bool, error) {
 	pidPath := filepath.Join(dataDir, watchdogPIDFile)
 	locked, info, err := watchdogIsLocked(pidPath)
+	if locked && (err != nil || !verifyWatchdogProcess(info)) {
+		info, err = watchdogOwnedRecordWait(pidPath, watchdogStartTimeout, watchdogStartInterval)
+		if err != nil {
+			return false, fmt.Errorf("rotation watchdog PID publication: %w", err)
+		}
+		return true, nil
+	}
 	if err != nil {
 		return false, fmt.Errorf("rotation watchdog ownership: %w", err)
 	}
 	if !locked {
-		if live, liveInfo := watchdogUnlockedLiveProcess(pidPath); live {
+		if watchdogUnlockedLiveProcessInfo(info) {
 			return false, fmt.Errorf(
 				"rotation watchdog PID %d is alive without the ownership lock",
-				liveInfo.PID,
+				info.PID,
 			)
 		}
 		return false, nil
@@ -1679,6 +1691,11 @@ func gatewaySnapshotReady(
 		detail := strings.TrimSpace(subsystem.health.LastError)
 		if detail == "" {
 			detail = string(subsystem.health.State)
+			if subsystem.name == "telemetry" {
+				if diagnosis := telemetryReadinessFailureDetail(subsystem.health.Details); diagnosis != "" {
+					detail += " (" + diagnosis + ")"
+				}
+			}
 		}
 		return false, fmt.Errorf(
 			"gateway %s failed during startup: %s",
@@ -1773,6 +1790,115 @@ func gatewaySnapshotReady(
 		return false, nil
 	}
 	return true, nil
+}
+
+// telemetryReadinessFailureDetail renders only closed, bounded observability
+// health tokens. Malformed input collapses to the existing generic "error"
+// diagnostic rather than echoing endpoints, paths, counters, or arbitrary text.
+func telemetryReadinessFailureDetail(details map[string]interface{}) string {
+	allowed := func(values ...string) map[string]bool {
+		result := make(map[string]bool, len(values))
+		for _, value := range values {
+			result[value] = true
+		}
+		return result
+	}
+	kinds := allowed("jsonl", "console", "prometheus", "splunk_hec", "http_jsonl", "otlp", "sqlite")
+	states := allowed("disabled", "initializing", "healthy", "degraded", "failing", "draining", "stopped")
+	fatalStates := allowed("degraded", "failing", "stopped")
+	reasons := allowed("", "activated", "queue_full", "retryable_delivery", "partial_delivery", "delivery_failed",
+		"delivery_recovered", "intake_stopped", "closed", "origin_loop", "listener_bound", "listener_failed",
+		"scrape_failed", "scrape_recovered", "server_failed", "drain_started")
+	failureCodes := allowed("", "queue_full", "retryable_delivery", "partial_delivery", "delivery_failed",
+		"origin_loop", "generation_mismatch", "pipeline_failed", "projection_failed", "route_identity_mismatch",
+		"unsupported_shape", "payload_failed", "queue_rejected", "panic_isolated", "compatibility_projection_failed")
+	retentionStates := allowed("", "waiting_for_readiness", "healthy", "degraded", "disabled", "stopped")
+	retentionFailures := allowed("", "run_failed", "scheduler_failed")
+	historyFailures := allowed("", "projection_rejected", "integrity_unsigned", "integrity_signing_failed", "sqlite_write_failed")
+	closed := func(values map[string]interface{}, key string, vocabulary map[string]bool) (string, bool) {
+		raw, exists := values[key]
+		if !exists {
+			return "", true
+		}
+		value, ok := raw.(string)
+		return value, ok && vocabulary[value]
+	}
+	generation := func(raw interface{}) (uint64, bool) {
+		value, ok := raw.(float64)
+		const maxExactJSONInteger = float64(1<<53 - 1)
+		if !ok || value < 1 || value > maxExactJSONInteger || value != float64(uint64(value)) {
+			return 0, false
+		}
+		return uint64(value), true
+	}
+	activeGeneration, ok := generation(details["generation"])
+	retentionState, retentionStateOK := closed(details, "retention_state", retentionStates)
+	retentionFailure, retentionFailureOK := closed(details, "retention_failure", retentionFailures)
+	historyFailure, historyOK := closed(details, "event_history_failure", historyFailures)
+	if !ok || !retentionStateOK || !retentionFailureOK || !historyOK ||
+		(retentionFailure != "" && retentionState != "degraded") {
+		return ""
+	}
+	type destinationFailure struct{ name, kind, state, reason, failure string }
+	failures := make([]destinationFailure, 0, telemetryReadinessFailureRowsMax)
+	if raw, exists := details["destinations"]; exists {
+		rows, ok := raw.([]interface{})
+		if !ok || len(rows) > telemetryReadinessDestinationRowsMax {
+			return ""
+		}
+		for _, rawRow := range rows {
+			row, ok := rawRow.(map[string]interface{})
+			name, nameOK := row["name"].(string)
+			kind, kindOK := row["kind"].(string)
+			enabled, enabledOK := row["enabled"].(bool)
+			rowGeneration, generationOK := generation(row["generation"])
+			state, stateOK := closed(row, "state", states)
+			reason, reasonOK := closed(row, "reason", reasons)
+			failure, failureOK := closed(row, "failure", failureCodes)
+			if !ok || !nameOK || len(name) > 64 || !observability.IsStableToken(name) || !kindOK || !kinds[kind] ||
+				!enabledOK || !generationOK || rowGeneration != activeGeneration || !stateOK || !reasonOK || !failureOK {
+				return ""
+			}
+			if enabled && (fatalStates[state] || failure != "") {
+				failures = append(failures, destinationFailure{name, kind, state, reason, failure})
+			}
+		}
+	}
+	if len(failures) == 0 && retentionState != "degraded" && historyFailure == "" {
+		return ""
+	}
+	sort.Slice(failures, func(i, j int) bool { return failures[i].name < failures[j].name })
+	parts := []string{fmt.Sprintf("generation=%d", activeGeneration)}
+	if len(failures) > 0 {
+		limit := min(len(failures), telemetryReadinessFailureRowsMax)
+		rows := make([]string, 0, limit)
+		for _, failure := range failures[:limit] {
+			fields := []string{failure.kind, failure.state}
+			if failure.reason != "" {
+				fields = append(fields, failure.reason)
+			}
+			if failure.failure != "" {
+				fields = append(fields, "failure="+failure.failure)
+			}
+			fields = append(fields, fmt.Sprintf("generation=%d", activeGeneration))
+			rows = append(rows, fmt.Sprintf("%s[%s]", failure.name, strings.Join(fields, ",")))
+		}
+		parts = append(parts, "destinations="+strings.Join(rows, ","))
+		if additional := len(failures) - limit; additional > 0 {
+			parts = append(parts, fmt.Sprintf("additional_destination_failures=%d", additional))
+		}
+	}
+	if retentionState == "degraded" {
+		parts = append(parts, "retention="+strings.TrimSuffix(retentionState+"/"+retentionFailure, "/"))
+	}
+	if historyFailure != "" {
+		parts = append(parts, "event_history="+historyFailure)
+	}
+	detail := strings.Join(parts, "; ")
+	if len(detail) > telemetryReadinessDetailMaxBytes {
+		return ""
+	}
+	return detail
 }
 
 func subsystemMatchesConfiguredState(state gateway.SubsystemState, enabled bool) bool {

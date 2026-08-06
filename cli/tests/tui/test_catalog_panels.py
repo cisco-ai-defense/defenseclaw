@@ -238,9 +238,11 @@ def test_mcp_actions_name_connector_specific_unset_targets(monkeypatch, tmp_path
     hermes_config = tmp_path / "hermes-home" / "config.yaml"
     claude_config = tmp_path / "claude-home" / "settings.json"
     codex_config = tmp_path / "codex-home" / "config.toml"
+    windsurf_profile = tmp_path / "windsurf-profile"
     monkeypatch.setenv("HERMES_HOME", str(hermes_config.parent))
     monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_config.parent))
     monkeypatch.setenv("CODEX_HOME", str(codex_config.parent))
+    monkeypatch.setenv("WINDSURF_USER_HOME", str(windsurf_profile))
     cases = {
         "openclaw": "OpenClaw config",
         "claudecode": str(claude_config),
@@ -248,7 +250,7 @@ def test_mcp_actions_name_connector_specific_unset_targets(monkeypatch, tmp_path
         "zeptoclaw": "~/.zeptoclaw/config.json",
         "hermes": str(hermes_config),
         "cursor": "./.cursor/mcp.json",
-        "windsurf": "~/.codeium/windsurf/mcp_config.json",
+        "windsurf": str(windsurf_profile / ".codeium" / "windsurf" / "mcp_config.json"),
         "geminicli": "~/.gemini/settings.json",
         "copilot": "./.github/mcp.json",
         "antigravity": "~/.gemini/config/mcp_config.json / <workspace>/.agents/mcp_config.json",
@@ -265,7 +267,10 @@ def test_mcp_actions_name_connector_specific_unset_targets(monkeypatch, tmp_path
     assert action_keys(mcp_actions("active", "openclaw")) == ["s", "i", "b", "a"]
 
 
-def test_catalog_empty_connector_stays_unowned_and_antigravity_labels_contract_paths() -> None:
+def test_catalog_empty_connector_stays_unowned_and_hook_connector_labels_contract_paths(
+    monkeypatch,
+    tmp_path,
+) -> None:
     assert friendly_connector_name("") == "No connector"
     assert PluginsPanelModel(connector="").is_visible_for_connector() is False
 
@@ -277,8 +282,40 @@ def test_catalog_empty_connector_stays_unowned_and_antigravity_labels_contract_p
     assert ".gemini/config/plugins" in antigravity_plugins
     assert "read/write" in antigravity_plugins
     assert "OMNIGENT_CONFIG_HOME" in connector_source_label("omnigent", "config")
-    assert "managed by OmniGent" in connector_source_label("omnigent", "mcps")
+    assert "OMNIGENT_CONFIG" in connector_source_label("omnigent", "config")
+    assert "--config" in connector_source_label("omnigent", "config")
+    assert "unsupported/unverified" in connector_source_label("omnigent", "mcps")
     assert "unsupported" in mcp_unset_target_for_connector("omnigent")
+
+    opencode_home = tmp_path / "opencode-config"
+    monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(opencode_home))
+    assert str(opencode_home / "plugins" / "defenseclaw.js") in connector_source_label(
+        "opencode", "config"
+    )
+    assert ".config/opencode/opencode.json" in connector_source_label("opencode", "mcps")
+    assert "~/.opencode/opencode.json" in connector_source_label("opencode", "mcps")
+    assert str(opencode_home / "opencode.json") in connector_source_label("opencode", "mcps")
+    assert "OPENCODE_CONFIG_CONTENT" in connector_source_label("opencode", "mcps")
+    assert "enterprise precedence excluded" in connector_source_label("opencode", "mcps")
+    assert str(opencode_home / "opencode.json") in mcp_unset_target_for_connector("opencode")
+    assert "<workspace>/opencode.json" in mcp_unset_target_for_connector("opencode")
+    assert "unsupported" in connector_source_label("opencode", "skills")
+
+
+def test_catalog_codex_labels_use_current_official_asset_layouts() -> None:
+    skills = connector_source_label("codex", "skills")
+    mcps = connector_source_label("codex", "mcps")
+    plugins = connector_source_label("codex", "plugins")
+
+    assert "~/.agents/skills" in skills
+    assert "./.agents/skills" in skills
+    assert ".codex/skills" not in skills
+    assert ".codex/config.toml" in mcps
+    assert "trusted projects only" in mcps
+    assert ".mcp.json" not in mcps
+    assert ".agents/plugins/marketplace.json" in plugins
+    assert ".claude-plugin/marketplace.json" in plugins
+    assert "plugins/cache" in plugins.replace("\\", "/")
 
 
 def test_plugin_parse_connector_gate_actions_and_intents() -> None:

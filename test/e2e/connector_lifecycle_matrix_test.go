@@ -14,6 +14,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -42,7 +43,7 @@ import (
 // A4 / S0.12 provider startup probe). We seed an OpenAI provider
 // for the test so Setup completes and we can prove the round-trip.
 func TestConnectorLifecycle_Matrix(t *testing.T) {
-	for _, fx := range connectorMatrix(t) {
+	for _, fx := range connectorLifecycleMatrix(t) {
 		t.Run(fx.Name, func(t *testing.T) {
 			home, dataDir := fx.Apply(t)
 			_ = home
@@ -120,6 +121,35 @@ func TestConnectorLifecycle_Matrix(t *testing.T) {
 			}
 		})
 	}
+}
+
+func connectorLifecycleMatrix(t *testing.T) []ConnectorFixture {
+	t.Helper()
+	fixtures := connectorMatrix(t)
+	if runtime.GOOS != "windows" {
+		return fixtures
+	}
+
+	// Native Windows Hermes requires current-token updater identity plus a
+	// protected setup receipt or reusable contract lock. Manufacturing those
+	// from this external package would either mutate the real Hermes profile or
+	// weaken admission. Its Windows lifecycle is exercised instead by
+	// TestHermesConnectorLifecycleWithProtectedAdmission in package connector,
+	// where the existing private resolver/probe fixture is available. Keep
+	// Hermes in connectorMatrix for non-lifecycle matrices and every other OS.
+	filtered := make([]ConnectorFixture, 0, len(fixtures)-1)
+	hermesRows := 0
+	for _, fixture := range fixtures {
+		if fixture.Name == "hermes" {
+			hermesRows++
+			continue
+		}
+		filtered = append(filtered, fixture)
+	}
+	if hermesRows != 1 {
+		t.Fatalf("Windows lifecycle routing found %d Hermes fixtures, want exactly one", hermesRows)
+	}
+	return filtered
 }
 
 // seedZeptoClawProviderConfig writes a minimal

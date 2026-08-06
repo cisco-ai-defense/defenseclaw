@@ -113,6 +113,9 @@ func TestStore_PragmasAppliedAcrossPool(t *testing.T) {
 		want   int64
 	}{
 		{"busy_timeout", 5000},
+		// Checkpoints are owned by serialized health/retention maintenance,
+		// never by SQLite's commit hook on a concurrent sidecar lifecycle.
+		{"wal_autocheckpoint", 0},
 		// synchronous: 0=OFF, 1=NORMAL, 2=FULL, 3=EXTRA
 		{"synchronous", 1},
 		// foreign_keys: bool 0/1

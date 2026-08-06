@@ -11,6 +11,7 @@
 package destinations
 
 import (
+	"bytes"
 	"context"
 	"encoding/pem"
 	"errors"
@@ -21,6 +22,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -1079,6 +1081,71 @@ func TestOTLPGenerationAssemblerUsesLocalCompatibilityProjectionInsteadOfGeneric
 	}
 	if !foundAgentAlias {
 		t.Fatal("local compatibility projection omitted the Agent360 agent-type alias")
+	}
+}
+
+func TestOTLPGenerationAssemblerDeliversLegacyV7RuntimeTraceWithoutRawInstanceIdentity(t *testing.T) {
+	capture := &otlpGenerationCapture{}
+	server := httptest.NewServer(http.HandlerFunc(capture.handler))
+	defer server.Close()
+	factory := newTestFactory(t, io.Discard, nil, nil, net.Dialer{}, nil)
+	var localFailures []localobservability.Failure
+	factory.localObserver = localobservability.ObserverFunc(func(failure localobservability.Failure) {
+		localFailures = append(localFailures, failure)
+	})
+	destination := traceSend(localobservability.DestinationName, server.URL, generationCanaryBuckets())
+	destination.Send.RedactionProfile = "legacy-v7"
+	destination.Batch.MaxExportBatchSize = 2
+	plan := compileGenerationRuntimePlan(t, t.TempDir(), destination)
+	manager := generationOTLPManager(t, factory, plan)
+	provider, lease := compositeProviderFromManager(t, manager)
+	result, err := provider.EmitV8GeneratedCanary(t.Context(), lease, localobservability.DestinationName)
+	lease.Release()
+	if err != nil || !result.Acknowledged {
+		t.Fatalf("legacy-v7 local runtime trace=%+v error=%v failures=%+v", result, err, localFailures)
+	}
+
+	requests, _, _ := capture.snapshot()
+	if len(requests) != 1 {
+		t.Fatalf("legacy-v7 local trace requests=%d want=1", len(requests))
+	}
+	spans := traceRequestSpans(requests[0])
+	if len(spans) != 2 {
+		t.Fatalf("legacy-v7 local projected spans=%d want=2", len(spans))
+	}
+	var root, child *tracepb.Span
+	for _, span := range spans {
+		if len(span.ParentSpanId) == 0 {
+			root = span
+		} else {
+			child = span
+		}
+	}
+	if root == nil || child == nil || !bytes.Equal(child.ParentSpanId, root.SpanId) ||
+		!bytes.Equal(child.TraceId, root.TraceId) {
+		t.Fatalf("legacy-v7 runtime topology root=%t child=%t", root != nil, child != nil)
+	}
+	for _, resourceSpans := range requests[0].ResourceSpans {
+		for _, key := range []string{"service.instance.id", "defenseclaw.instance.id"} {
+			value := protoAttribute(resourceSpans.Resource.Attributes, key)
+			if !strings.HasPrefix(value, "<redacted len=") ||
+				strings.Contains(value, "generation-test-instance") {
+				t.Fatalf("legacy-v7 runtime resource %s did not retain only its redacted identity", key)
+			}
+		}
+	}
+	encodedRequest, err := proto.Marshal(requests[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range []string{
+		"generation-test-instance",
+		"defenseclaw-runtime-canary",
+		localobservability.DestinationName,
+	} {
+		if bytes.Contains(encodedRequest, []byte(raw)) {
+			t.Fatalf("legacy-v7 runtime request exposed raw business/resource identifier")
+		}
 	}
 }
 

@@ -11,11 +11,11 @@ keywords:
 
 DefenseClaw tracks hook connector compatibility with a packaged JSON manifest at `cli/defenseclaw/inventory/hook_contracts.json`. The manifest maps each connector version range to the hook contract DefenseClaw knows how to install, parse, evaluate, and respond to.
 
-<Callout type="warning" title="Version compatibility is not platform certification">
-A connector can have a valid hook contract and still be unsupported or not
-certified on native Windows. The current packaged Windows release contract
-certifies Codex, Claude Code, and Amp; see the
-[native Windows connector matrix](/docs/get-started/windows#certified-connector-scope).
+<Callout type="warning" title="Version compatibility is not authentic validation evidence">
+A connector can have a valid hook contract and still be unsupported on native
+Windows. Supported Windows availability does not populate validation version,
+date, run URL, authentication, HITL, or live-client evidence. See the
+[native Windows connector matrix](/docs/get-started/windows#connector-scope).
 </Callout>
 
 <Callout type="info" title="CEL policy and tool-call state contract">
@@ -33,58 +33,45 @@ rollout holds. Existing policy defaults are unchanged.
 | --- | --- | --- | --- | --- |
 | <ConnectorLabel id="openclaw" /> | proxy, not hook-gated | not gated by hook contract | n/a | proxy request/response |
 | <ConnectorLabel id="zeptoclaw" /> | proxy, not hook-gated | not gated by hook contract | n/a | proxy request/response |
-| <ConnectorLabel id="codex" /> | hook contract | `>=0.124.0,<0.129.0` | `codex-hooks-v1` / `v6` (6 events) | prompt, tool_call, tool_result |
-| <ConnectorLabel id="codex" /> | hook contract | `>=0.129.0,<0.133.0` | `codex-hooks-v2` / `v6` (8 events) | prompt, tool_call, tool_result |
-| <ConnectorLabel id="codex" /> | hook contract | `>=0.133.0,<0.135.0` | `codex-hooks-v3` / `v6` (10 events, selective local tools) | prompt, tool_call, tool_result |
-| <ConnectorLabel id="codex" /> | hook contract | `>=0.135.0,<0.145.0` | `codex-hooks-v3-generic` / `v6` (10 events, generic local tools) | prompt, tool_call, tool_result |
+| <ConnectorLabel id="codex" /> | hook contract | `>=0.124.0, <0.129.0` | `codex-hooks-v1` / `v6` (6 events) | prompt, tool_call, tool_result |
+| <ConnectorLabel id="codex" /> | hook contract | `>=0.129.0, <0.133.0` | `codex-hooks-v2` / `v6` (8 events) | prompt, tool_call, tool_result |
+| <ConnectorLabel id="codex" /> | hook contract | `>=0.133.0, <0.135.0` | `codex-hooks-v3` / `v6` (10 events, selective local tools) | prompt, tool_call, tool_result |
+| <ConnectorLabel id="codex" /> | hook contract | `>=0.135.0, <0.145.0` | `codex-hooks-v3-generic` / `v6` (10 events, generic local tools) | prompt, tool_call, tool_result |
 | <ConnectorLabel id="codex" /> | hook contract | `>=0.145.0` | `codex-hooks-v4` / `v6` (11 events) | prompt, tool_call, tool_result |
-| <ConnectorLabel id="claudecode" /> | hook contract | `>=2.1.152` | `claudecode-hooks-v1` / `v7` | prompt, tool_call, tool_result, event_content |
-| <ConnectorLabel id="hermes" /> | hook contract | `>=0.11.0` | `hermes-hooks-v1` / `v6` | prompt, tool_call, tool_result, event_content |
-| <ConnectorLabel id="cursor" /> | hook contract | `>=1.7.0` | `cursor-hooks-v1` / `v8` | prompt, tool_call, tool_result |
-| <ConnectorLabel id="windsurf" /> | hook contract | `>=1.12.41` | `windsurf-hooks-v1` / `v6` | prompt, tool_call, tool_result |
-| <ConnectorLabel id="geminicli" /> | hook contract | `>=0.26.0` | `geminicli-hooks-v1` / `v6` | prompt, tool_call, tool_result |
-| <ConnectorLabel id="copilot" /> | hook contract | `>=1.0.18` | `copilot-hooks-v1` / `v6` | prompt, tool_call, tool_result |
+| <ConnectorLabel id="claudecode" /> | hook contract + plugin state | `>=2.1.154, <2.1.219` | `claudecode-hooks-v1` / `v7` (28 events) | prompt, tool_call, tool_result, event_content |
+| <ConnectorLabel id="claudecode" /> | hook contract + plugin state | `>=2.1.219` | `claudecode-hooks-v2` / `v7` (29 events) | prompt, tool_call, tool_result, event_content |
+| <ConnectorLabel id="hermes" /> | hook contract | `>=0.19.0` | `hermes-hooks-v1` / `v6` | prompt, tool_call, tool_result, event_content |
+| <ConnectorLabel id="cursor" /> | hook contract | `>=1.7.0` | `cursor-hooks-v1` / `v6` | prompt, tool_call, tool_result |
+| <ConnectorLabel id="windsurf" /> | hook contract | `>=1.12.41` | `windsurf-hooks-v1` / `v7` | prompt, tool_call, tool_result |
+| <ConnectorLabel id="geminicli" /> | hook contract | `>=0.26.0` (continuing enterprise/Google Cloud/paid API-key product only) | `geminicli-hooks-v1` / `v6` | prompt, tool_call, tool_result |
+| <ConnectorLabel id="copilot" /> | hook contract | `>=1.0.18, <1.0.76` | `copilot-hooks-v1` / `v7` (13 events) | prompt, tool_call, tool_result |
+| <ConnectorLabel id="copilot" /> | hook contract | `>=1.0.76` | `copilot-hooks-v2` / `v7` (14 events) | prompt, tool_call, tool_result |
 | <ConnectorLabel id="openhands" /> | hook contract | unversioned / documented hooks; tested with `OpenHands CLI 1.16.0` | `openhands-hooks-v1` / `v6` | prompt, tool_call, tool_result, event_content |
-| <ConnectorLabel id="antigravity" /> | hook contract | `>=1.1.9` | `antigravity-hooks-v2` / `v7` | prompt, tool_call, tool_result |
-| <ConnectorLabel id="opencode" /> | hook contract | unversioned / plugin API; tested with `opencode 1.16.2` | `opencode-hooks-v1` / `v7` | tool_call, tool_result |
-| <ConnectorLabel id="amp" /> | plugin contract | `>=0.0.1785334225` | `amp-plugin-v1` / `v2` | prompt, tool_call, tool_result, event_content |
-| <ConnectorLabel id="omnigent" /> | hook contract | unversioned / documented custom-policy API | `omnigent-custom-policy-v1` / `v1` | prompt, tool_call, tool_result |
+| <ConnectorLabel id="antigravity" /> | hook contract | `>=1.1.8` | `antigravity-hooks-v2` / `v8` | tool_call, event_content |
+| <ConnectorLabel id="opencode" /> | hook contract | `>=1.18.10, <1.18.12` (source-reviewed; current pin `1.18.11`) | `opencode-hooks-v1` / `v7` | tool_call, tool_result |
+| <ConnectorLabel id="amp" /> | plugin contract | `>=0.0.1785334225` | `amp-plugin-v1` / `v1` | prompt, tool_call, tool_result, event_content |
+| <ConnectorLabel id="omnigent" /> | hook contract | `>=0.7.0,<0.8.0` / pinned custom-policy API | `omnigent-custom-policy-v1` / `v1` | prompt, tool_call, tool_result |
 
 Open-ended contracts leave `max_exclusive` empty until an upstream release
 publishes a breaking hook change. Codex is the current exception: its bounded
-ranges capture both event additions and the `0.135.0` expansion from selective
-to generic local-function tool payloads.
-Installed versions and selected contracts are recorded in
-`hook_contract_lock.json` for doctor drift checks.
+ranges capture both hook-event additions and the `0.135.0` expansion from
+selective to generic local-function tool payloads. Installed versions and
+selected contracts are recorded in `hook_contract_lock.json` for doctor drift
+checks.
 
-Codex `0.124.0` starts the six-event stable contract; `0.129.0` adds
-`PreCompact` and `PostCompact`; `0.133.0` adds `SubagentStart` and
-`SubagentStop`; `0.135.0` expands hook payloads to generic local function
-tools; and `0.145.0` adds the true main-thread `SessionEnd` boundary.
-The per-turn Codex `Stop` event never closes cross-turn chain state. Gemini CLI
-`0.26.0` enabled hooks by default, Cursor `1.7.0`
-introduced beta hooks, and Hermes `0.11.0` added shell hooks. The Hermes
-contract covers ten events: four LLM/tool callbacks, session
-start/end/finalize/reset, and subagent start/stop. Windsurf `1.12.41` added
-user-prompt hooks to the Cascade pre-hook set, while Copilot CLI `1.0.18` is
-the first release containing every event in the current DefenseClaw contract.
+The floors come from upstream release notes or current vendor docs: Codex `0.124.0` is the stable-hooks release, Gemini CLI `0.26.0` enabled hooks by default, Cursor `1.7.0` introduced beta hooks, and Hermes `0.19.0` is the floor for DefenseClaw's current 23-event shell-hook contract (earlier Hermes versions exposed smaller sets). Legacy Cascade `1.12.41` added user prompt hooks to its pre-hook set. This `windsurf` version contract does not apply to Devin Local—the current default agent—or to cloud, ACP, or their separate lifecycle hooks. Copilot CLI `1.0.18` is the floor for the bounded 13-event v1 contract; `1.0.76` is the reviewed floor for the current 14-event v2 contract that adds `userPromptTransformed`. Gemini CLI consumer/free/Google AI Pro/Ultra service ended on June 18, 2026; its non-Windows version contract applies only to the continuing enterprise, Google Cloud, and paid API-key audience. OpenCode is intentionally bounded to the v1.18.10-v1.18.11 source-reviewed plugin/config/MCP contract; the relevant 1.18.11 runtime and type files are byte-identical to 1.18.10. A detected version outside that range is refused in both modes, while unversioned OpenCode retains the general observe-warning/action-fail-closed policy; neither case becomes certified by source review. OmniGent is capped at `>=0.7.0,<0.8.0`, the reviewed 0.7 custom-policy contract; earlier, unversioned, or 0.8+ installations require an explicit action-mode compatibility override. OpenHands uses the current documented `.openhands/hooks.json` contract, installs globally through `~/.openhands/hooks.json` by default, has been validated with `OpenHands CLI 1.16.0`, and is accepted as unversioned until upstream publishes a hook-version floor. Antigravity (`agy`) is pinned at `>=1.1.8`, the release that includes the documented five-event lifecycle and current Windows hook behavior. The accepted protected harness pins official CLI `1.1.10`, but no undocumented hook change or certification is inferred from that availability delta; the upper bound stays open because agy auto-updates and DefenseClaw tracks compatibility through `hook_contract_lock.json` plus doctor drift checks. Claude Code v1 is bounded to `>=2.1.154,<2.1.219`: `2.1.152` supplied its 28-event hook surface, and `2.1.154` added the plugin `defaultEnabled` semantics used by inventory. Claude Code v2 begins at `2.1.219`, whose official release and hook reference add observational `DirectoryAdded`; it is registered synchronously without a matcher or decision authority.
 
-OpenCode's plugin API, OmniGent's six-phase custom-policy API, and OpenHands'
-documented hooks are accepted as unversioned contracts. The manifest records
-validation with `opencode 1.16.2` and `OpenHands CLI 1.16.0`; those are
-validation points, not minimum versions. Amp's normalized `0.0.1785334225`
-value is DefenseClaw's pinned contract snapshot and certification floor for the
-documented five-event API used by `amp-plugin-v1`; Amp does not declare it as
-the upstream minimum. Execute mode additionally needs
-`--plugin-ready-timeout 30` so policy plugins load before the turn starts.
-Antigravity is gated at `>=1.1.9` because that release fixed PostToolUse firing
-on non-tool steps and matcher handling.
-Claude Code is gated at `>=2.1.152`, which is the 28-event surface represented
-by the current contract.
+Codex `0.133.0` through `0.134.x` use the ten-event `codex-hooks-v3` selective-local-tool contract. Codex `0.135.0` through `0.144.x` use the same event matrix under `codex-hooks-v3-generic`, reflecting the expansion to generic local function tools. The official [`0.145.0` release](https://github.com/openai/codex/releases/tag/rust-v0.145.0) added `SessionEnd`, beginning the eleven-event `codex-hooks-v4` contract. In all v3/v4 tiers, DefenseClaw preserves the [official hook response semantics](https://learn.chatgpt.com/docs/hooks): `SessionStart` `continue: false` ends the turn; `SubagentStop` `decision: "block"` continues the subagent; `PreCompact` stops before compaction; `PostCompact` stops only after compaction; `Stop` block continues with a new prompt; and `PostToolUse` block feeds/replaces the completed tool result (with the code-mode promise rejecting) rather than undoing the tool. These lifecycle-control claims are limited to v3/v4 (`>=0.133`) and are not inferred or backfilled onto the smaller v1/v2 contracts. `SessionEnd` is observation-only in DefenseClaw: it is a best-effort teardown notification with a three-second maximum timeout, not a block or native ask surface.
+
+Amp's normalized `0.0.1785334225` value is DefenseClaw's pinned contract
+snapshot and certification floor for the documented five-event API used by
+`amp-plugin-v1`; Amp does not declare it as the upstream minimum. Execute mode
+also needs `--plugin-ready-timeout 30` so policy plugins load before the turn
+starts.
 
 ## Setup-time checks
 
-Every `defenseclaw setup ...` path that chooses a connector refreshes local agent discovery, reads the installed connector version, and checks it against the manifest before writing config. Unsupported or unverified hook connector versions are allowed in observe mode with a warning, but action mode fails closed unless `DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1` is set for exploratory testing.
+Every `defenseclaw setup ...` path that chooses a connector refreshes local agent discovery, reads the installed connector version, and checks it against the manifest before writing config. Unsupported or unverified hook connector versions are allowed in observe mode with a warning, but action mode fails closed unless `DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1` is set for exploratory testing. OpenCode is the bounded exception: a detected version outside `>=1.18.10,<1.18.12` is refused before mutation in both observe and action mode because its plugin registration and contract lock must converge as one transaction.
 
 The most common reason a version can't be read is the connector binary living outside a trusted install prefix (for example a bespoke install under `~/.local`). Interactive action-mode setup detects this and offers to trust the directory (defaulting to No, persisting to `~/.defenseclaw/.env`, then re-running the full contract check — trusting a path never bypasses the version gate). Non-interactive runs print the equivalent remediation: `defenseclaw setup trusted-paths add <dir>`. See the `trusted-paths` group on the [CLI reference](/docs/reference/cli) and the trust model in [AI Discovery](/docs/ai-discovery).
 

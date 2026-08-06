@@ -17,9 +17,9 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
-    [ValidateSet('setup-acceptance', 'bootstrap-acceptance', 'wizard-smoke', 'contract')]
+    [ValidateSet('setup-acceptance', 'bootstrap-acceptance', 'wizard-smoke', 'contract', 'omnigent-native-degraded')]
     [string]$Mode,
-    [ValidateSet('codex', 'claudecode', 'amp')][string]$Connector = 'codex',
+    [ValidateSet('codex', 'claudecode', 'amp', 'copilot', 'cursor', 'hermes', 'windsurf', 'antigravity', 'opencode')][string]$Connector = 'codex',
     [Parameter(Mandatory)][string]$ArtifactRoot,
     [Parameter(Mandatory)][string]$StateRoot,
     [string]$TargetVersion = '',
@@ -256,6 +256,46 @@ function Copy-DisposableNativeSetupLog {
     )
 }
 
+function Copy-DisposableConnectorReconciliationDiagnostic {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][string]$DiagnosticsRoot,
+        [Parameter(Mandatory)][string]$SandboxRoot
+    )
+
+    $localAppData = [Environment]::GetFolderPath(
+        [Environment+SpecialFolder]::LocalApplicationData
+    )
+    if ([string]::IsNullOrWhiteSpace($localAppData)) { return }
+    $source = Join-Path $localAppData 'DefenseClaw\InstallerState\connector-reconciliation.json'
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { return }
+    $source = Assert-DisposableNoReparseAncestors -Path $source `
+        -AllowedRoot $localAppData -RequireExists
+    $sourceItem = Get-Item -LiteralPath $source -Force -ErrorAction Stop
+    if ($sourceItem.Length -gt 65536) {
+        throw 'connector reconciliation diagnostic exceeds the 64 KiB capture bound'
+    }
+    $payload = [IO.File]::ReadAllText($source, [Text.Encoding]::UTF8)
+    foreach ($name in @(
+        'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'GITHUB_TOKEN', 'GH_TOKEN',
+        'DEFENSECLAW_GATEWAY_TOKEN', 'OPENCLAW_GATEWAY_TOKEN'
+    )) {
+        $secret = [Environment]::GetEnvironmentVariable($name)
+        if (-not [string]::IsNullOrWhiteSpace($secret)) {
+            $payload = $payload.Replace($secret, '***REDACTED***')
+        }
+    }
+    $payload = $payload -replace `
+        '(?i)(api[_-]?key|access[_-]?token|secret[_-]?key|authorization)(\s*[=:]\s*)[^\s"'',;]+', `
+        '$1$2***REDACTED***'
+    $destinationRoot = Assert-DisposableNoReparseAncestors `
+        -Path $DiagnosticsRoot -AllowedRoot $SandboxRoot -RequireExists
+    $destination = Join-Path $destinationRoot 'connector-reconciliation.json'
+    $null = Assert-DisposableNoReparseAncestors -Path $destination `
+        -AllowedRoot $destinationRoot
+    [IO.File]::WriteAllText($destination, $payload, [Text.UTF8Encoding]::new($false))
+}
+
 function Invoke-ChildMode {
     $result = [IO.Path]::GetFullPath($ResultPath)
     $state = [IO.Path]::GetFullPath($StateRoot)
@@ -399,6 +439,56 @@ function Invoke-ChildMode {
                 -WorkspaceRoot (Split-Path -Parent $PSScriptRoot) `
                 -StateRoot $state -ArtifactRoot $artifacts `
                 -AllowCurrentUserSetupAcceptance
+        } elseif ($Mode -eq 'omnigent-native-degraded') {
+            $uvSource = Join-Path $PSScriptRoot 'uv.exe'
+            # OmniGent validates every uv/token ancestor against the actual
+            # standard-user identity. Transfer this writable state root to
+            # that identity while retaining cleanup only through the trusted
+            # built-in Administrators principal used by the hosted parent.
+            Set-DisposableProtectedDirectoryAcl $state $identity.User `
+                ([Security.AccessControl.FileSystemRights]::FullControl) `
+                -InheritChildRights -UseAdministratorsForCleanup
+            Assert-DisposableChildAcl $state $identity.User `
+                ([Security.AccessControl.FileSystemRights]::FullControl) `
+                -ExpectInheritance -AllowOwnershipBootstrap
+            $localAppData = [Environment]::GetFolderPath(
+                [Environment+SpecialFolder]::LocalApplicationData
+            )
+            if ([string]::IsNullOrWhiteSpace($localAppData)) {
+                throw 'disposable OmniGent user has no LocalApplicationData known folder'
+            }
+            # Keep the authenticated executable beneath the disposable user's
+            # own trusted profile ancestry. The private harness sandbox stays
+            # parent-owned so the child cannot rewrite its immutable inputs.
+            $uvRoot = Join-Path $localAppData 'DefenseClaw-CI\uv-input'
+            [IO.Directory]::CreateDirectory($uvRoot) | Out-Null
+            Set-DisposableProtectedDirectoryAcl $uvRoot $identity.User `
+                ([Security.AccessControl.FileSystemRights]::FullControl) `
+                -InheritChildRights -UseAdministratorsForCleanup
+            Assert-DisposableChildAcl $uvRoot $identity.User `
+                ([Security.AccessControl.FileSystemRights]::FullControl) `
+                -ExpectInheritance -AllowOwnershipBootstrap
+            $uvPath = Join-Path $uvRoot 'uv.exe'
+            [IO.File]::Copy($uvSource, $uvPath, $false)
+            if ((Get-FileHash -LiteralPath $uvPath -Algorithm SHA256).Hash -cne
+                (Get-FileHash -LiteralPath $uvSource -Algorithm SHA256).Hash) {
+                throw 'standard-user OmniGent uv copy does not match its authenticated input'
+            }
+            # OmniGent creates its hook API token below StateRoot. Keep that
+            # mutable product state beneath the same token-bound trusted
+            # profile ancestry as uv; the parent-owned harness sandbox remains
+            # limited to immutable inputs, diagnostics, and result handoff.
+            $omnigentState = Join-Path $localAppData 'DefenseClaw-CI\omnigent-native-degraded'
+            [IO.Directory]::CreateDirectory($omnigentState) | Out-Null
+            Set-DisposableProtectedDirectoryAcl $omnigentState $identity.User `
+                ([Security.AccessControl.FileSystemRights]::FullControl) `
+                -InheritChildRights -UseAdministratorsForCleanup
+            Assert-DisposableChildAcl $omnigentState $identity.User `
+                ([Security.AccessControl.FileSystemRights]::FullControl) `
+                -ExpectInheritance -AllowOwnershipBootstrap
+            & (Join-Path $PSScriptRoot 'test-omnigent-windows-native.ps1') `
+                -StateRoot $omnigentState -ArtifactRoot $artifacts `
+                -UvPath $uvPath
         } else {
             $setup = Join-Path $artifacts 'DefenseClawSetup-x64.exe'
             & (Join-Path $PSScriptRoot 'test-windows-setup-wizard.ps1') `
@@ -420,6 +510,21 @@ function Invoke-ChildMode {
                         $failure.Exception
                     ),
                     'DisposableNativeSetupLogPreservationFailed',
+                    [Management.Automation.ErrorCategory]::OperationStopped,
+                    $state
+                )
+            }
+            try {
+                Copy-DisposableConnectorReconciliationDiagnostic `
+                    -DiagnosticsRoot ([IO.Path]::GetFullPath($DiagnosticsRoot)) `
+                    -SandboxRoot $sandboxRoot
+            } catch {
+                $failure = [Management.Automation.ErrorRecord]::new(
+                    [InvalidOperationException]::new(
+                        "$($failure.Exception.Message); connector reconciliation diagnostic preservation failed: $($_.Exception.Message)",
+                        $failure.Exception
+                    ),
+                    'DisposableConnectorReconciliationDiagnosticPreservationFailed',
                     [Management.Automation.ErrorCategory]::OperationStopped,
                     $state
                 )
@@ -741,7 +846,7 @@ function Publish-BoundedDisposableContractResults {
         [Parameter(Mandatory)][string]$SourceRoot,
         [Parameter(Mandatory)][string]$DestinationPath,
         [Parameter(Mandatory)][string]$DestinationRoot,
-        [Parameter(Mandatory)][ValidateSet('codex', 'claudecode', 'amp')]
+        [Parameter(Mandatory)][ValidateSet('codex', 'claudecode', 'amp', 'copilot', 'cursor', 'hermes', 'windsurf', 'antigravity', 'opencode')]
         [string]$ExpectedConnector
     )
 
@@ -996,13 +1101,18 @@ try {
         $harnessFiles += @(
             'assert-gateway-jsonl.py',
             'assert-observability-v8-jsonl.py',
+            'prepare-windows-contract-v8.py',
             'live-connector-e2e\run-windows.ps1',
+            'live-connector-e2e\assert-opencode-plugin.mjs',
             'live-connector-e2e\assert-windows-evidence.py',
             'live-connector-e2e\testdata\windows-mock.ps1',
             "live-connector-e2e\golden\$Connector\pre_tool_allow.json",
-            "live-connector-e2e\golden\$Connector\pre_tool_block.json",
-            "live-connector-e2e\golden\$Connector\session_start.json"
+            "live-connector-e2e\golden\$Connector\pre_tool_block.json"
         )
+        $optionalSessionGolden = "live-connector-e2e\golden\$Connector\session_start.json"
+        if (Test-Path -LiteralPath (Join-Path $PSScriptRoot $optionalSessionGolden) -PathType Leaf) {
+            $harnessFiles += $optionalSessionGolden
+        }
         if ($Connector -eq 'amp') {
             $harnessFiles += @(
                 'live-connector-e2e\golden\amp\agent_start.json',
@@ -1015,6 +1125,8 @@ try {
         $harnessFiles += @(
             'test-fresh-install-release-windows.ps1'
         )
+    } elseif ($Mode -eq 'omnigent-native-degraded') {
+        $harnessFiles += 'test-omnigent-windows-native.ps1'
     }
     foreach ($file in $harnessFiles) {
         $source = Join-Path $PSScriptRoot $file
@@ -1025,6 +1137,20 @@ try {
             -AllowedRoot $scripts
         [IO.Directory]::CreateDirectory((Split-Path -Parent $destination)) | Out-Null
         [IO.File]::Copy($source, $destination, $false)
+    }
+    if ($Mode -eq 'omnigent-native-degraded') {
+        $uvSource = (Get-Command uv.exe -CommandType Application -ErrorAction Stop).Source
+        $uvSourceItem = Get-Item -LiteralPath $uvSource -Force -ErrorAction Stop
+        if ($uvSourceItem.PSIsContainer -or
+            ($uvSourceItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+            $uvSourceItem.Length -gt 268435456) {
+            throw 'pinned OmniGent uv input must be a bounded regular file'
+        }
+        [void][DefenseClaw.DisposableFileGuard]::CopyBoundedRegularFile(
+            $uvSource,
+            (Join-Path $scripts 'uv.exe'),
+            268435456
+        )
     }
     foreach ($resourceInputName in $resourceVerifierInputs) {
         $source = Join-Path $artifactSource $resourceInputName

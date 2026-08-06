@@ -140,7 +140,7 @@ def test_amp_is_reachable_through_contract_and_manual_live_layers() -> None:
 
     windows = workflow.split("  windows-live:", 1)[1].split("  report:", 1)[0]
     assert "github.event_name == 'workflow_dispatch'" in windows
-    assert "connector: [codex, claudecode, amp]" in windows
+    assert "connector: [codex, claudecode, amp, cursor, opencode]" in windows
     assert "AMP_API_KEY: ${{ secrets.AMP_API_KEY }}" in windows
     assert "AMP_VERSION: ${{ inputs.version }}" in windows
 
@@ -167,3 +167,15 @@ def test_amp_is_reachable_through_contract_and_manual_live_layers() -> None:
     assert 'amp -x "${prompt}" --plugin-ready-timeout 30' in driver
     assert "DC_DRIVER_SUPPORTS_BLOCK=1" in driver
     assert "DC_DRIVER_SUPPORTS_OTLP=0" in driver
+
+
+def test_copilot_contract_normalizes_fixture_event_to_native_registration() -> None:
+    fixture = json.loads(
+        (ROOT / "scripts/live-connector-e2e/golden/copilot/pre_tool_allow.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert fixture["hook_event_name"] == "preToolUse"
+
+    common = (ROOT / "scripts/live-connector-e2e/lib/common.sh").read_text(encoding="utf-8")
+    assert 'copilot:PreToolUse) bound_event="preToolUse" ;;' in common

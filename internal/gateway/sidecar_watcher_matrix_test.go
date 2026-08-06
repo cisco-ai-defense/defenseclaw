@@ -61,8 +61,8 @@ func TestRunWatcherWithoutConfiguredDirectoriesRemainsHealthy(t *testing.T) {
 //     the skill and plugin buckets — meaning the priority chain
 //     selected ComponentTargets and not cfg.SkillDirs() default.
 //  2. The skill/plugin slices contain at least one path under the
-//     connector-owned home directory (e.g. "~/.codex/skills" for
-//     codex). Path equality across $HOME is brittle — substring
+//     connector-owned personal directory (e.g. "~/.agents/skills" for
+//     Codex). Path equality across $HOME is brittle — substring
 //     check on the connector's expected home subpath is the
 //     stable assertion.
 func TestResolveWatcherDirs_PerConnectorMatrix(t *testing.T) {
@@ -93,8 +93,8 @@ func TestResolveWatcherDirs_PerConnectorMatrix(t *testing.T) {
 		{
 			name:             "codex",
 			ctor:             func() connector.Connector { return connector.NewCodexConnector() },
-			expectSkillFrag:  filepath.Join(".codex", "skills"),
-			expectPluginFrag: filepath.Join(".codex", "plugins"),
+			expectSkillFrag:  filepath.Join(".agents", "skills"),
+			expectPluginFrag: filepath.Join(".codex", "plugins", "cache"),
 		},
 	}
 
@@ -215,56 +215,66 @@ func TestResolveWatcherDirs_NilConnectorFallsBackToConfigDefault(t *testing.T) {
 // windsurf, geminicli, copilot, openhands). Two contracts differ from the
 // claudecode/codex matrix above and are pinned here:
 //
-//  1. Plugins is OpenClaw-only (G4): every hook-only connector
-//     advertises Plugins.Supported=false, so resolveWatcherDirs
-//     MUST fall back to cfg.PluginDirs() with src.Plugin=
-//     watcherDirsFromDefault. A regression that lets a hook-only
-//     connector contribute plugin paths would silently begin
-//     watching directories that the connector itself does not
-//     own — exactly the behavior we eliminated.
+//  1. Hermes exposes documented user/workspace plugins as read-only
+//     inventory, and Cursor exposes its documented local plugin cache as
+//     read-only inventory, so both contribute plugin watcher paths. The
+//     other hook-only connectors in this matrix advertise no plugin
+//     inventory and must fall back to cfg.PluginDirs(). This keeps watcher
+//     ownership aligned with each vendor surface rather than applying one
+//     connector's plugin semantics to all hook-only connectors.
 //
-//  2. Skills support varies: hermes/cursor/geminicli/copilot/openhands
+//  2. Skills support varies: hermes/cursor/windsurf/geminicli/copilot/openhands
 //     advertise their own skill paths so src.Skill must be
 //     watcherDirsFromConnector and the slice must contain a
-//     framework-owned subpath. windsurf intentionally does NOT
-//     advertise a skills surface ("Windsurf skills are not exposed
-//     as a documented local install surface."), so it falls back to
-//     watcherDirsFromDefault. This split is what justifies a
-//     dedicated matrix rather than reusing the openclaw/zeptoclaw/
-//     claudecode/codex one above.
+//     framework-owned subpath. Windsurf is limited to the documented
+//     legacy Cascade user/workspace skill roots; Devin Local remains
+//     outside this connector. This split is what justifies a dedicated
+//     matrix rather than reusing the openclaw/zeptoclaw/claudecode/codex
+//     one above.
 func TestResolveWatcherDirs_HookOnlyConnectorMatrix(t *testing.T) {
 	hermesSkillFragment := filepath.Join(".hermes", "skills")
+	hermesPluginFragment := filepath.Join(".hermes", "plugins")
 	if runtime.GOOS == "windows" {
 		hermesSkillFragment = filepath.Join("hermes", "skills")
+		hermesPluginFragment = filepath.Join("hermes", "plugins")
 	}
 	cases := []struct {
-		name            string
-		ctor            func() connector.Connector
-		expectSkillSrc  watcherDirSource
-		expectSkillFrag string // empty when expectSkillSrc != watcherDirsFromConnector
+		name             string
+		ctor             func() connector.Connector
+		expectSkillSrc   watcherDirSource
+		expectSkillFrag  string // empty when expectSkillSrc != watcherDirsFromConnector
+		expectPluginSrc  watcherDirSource
+		expectPluginFrag string // empty when expectPluginSrc != watcherDirsFromConnector
 	}{
 		{
-			name:            "hermes",
-			ctor:            func() connector.Connector { return connector.NewHermesConnector() },
-			expectSkillSrc:  watcherDirsFromConnector,
-			expectSkillFrag: hermesSkillFragment,
+			name:             "hermes",
+			ctor:             func() connector.Connector { return connector.NewHermesConnector() },
+			expectSkillSrc:   watcherDirsFromConnector,
+			expectSkillFrag:  hermesSkillFragment,
+			expectPluginSrc:  watcherDirsFromConnector,
+			expectPluginFrag: hermesPluginFragment,
 		},
 		{
-			name:            "cursor",
-			ctor:            func() connector.Connector { return connector.NewCursorConnector() },
-			expectSkillSrc:  watcherDirsFromConnector,
-			expectSkillFrag: filepath.Join(".cursor", "skills"),
+			name:             "cursor",
+			ctor:             func() connector.Connector { return connector.NewCursorConnector() },
+			expectSkillSrc:   watcherDirsFromConnector,
+			expectSkillFrag:  filepath.Join(".cursor", "skills"),
+			expectPluginSrc:  watcherDirsFromConnector,
+			expectPluginFrag: filepath.Join(".cursor", "plugins", "local"),
 		},
 		{
-			name:           "windsurf",
-			ctor:           func() connector.Connector { return connector.NewWindsurfConnector() },
-			expectSkillSrc: watcherDirsFromDefault,
+			name:            "windsurf",
+			ctor:            func() connector.Connector { return connector.NewWindsurfConnector() },
+			expectSkillSrc:  watcherDirsFromConnector,
+			expectSkillFrag: filepath.Join(".codeium", "windsurf", "skills"),
+			expectPluginSrc: watcherDirsFromDefault,
 		},
 		{
 			name:            "geminicli",
 			ctor:            func() connector.Connector { return connector.NewGeminiCLIConnector() },
 			expectSkillSrc:  watcherDirsFromConnector,
 			expectSkillFrag: filepath.Join(".gemini", "skills"),
+			expectPluginSrc: watcherDirsFromDefault,
 		},
 		{
 			// With no workspace pinned in cfg the connector
@@ -275,12 +285,14 @@ func TestResolveWatcherDirs_HookOnlyConnectorMatrix(t *testing.T) {
 			ctor:            func() connector.Connector { return connector.NewCopilotConnector() },
 			expectSkillSrc:  watcherDirsFromConnector,
 			expectSkillFrag: filepath.Join(".copilot", "skills"),
+			expectPluginSrc: watcherDirsFromDefault,
 		},
 		{
 			name:            "openhands",
 			ctor:            func() connector.Connector { return connector.NewOpenHandsConnector() },
 			expectSkillSrc:  watcherDirsFromConnector,
 			expectSkillFrag: filepath.Join(".agents", "skills"),
+			expectPluginSrc: watcherDirsFromDefault,
 		},
 	}
 
@@ -293,7 +305,7 @@ func TestResolveWatcherDirs_HookOnlyConnectorMatrix(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 			conn := tc.ctor()
-			skillDirs, _, src := resolveWatcherDirs(cfg, conn, wcfg)
+			skillDirs, pluginDirs, src := resolveWatcherDirs(cfg, conn, wcfg)
 
 			if src.Skill != tc.expectSkillSrc {
 				t.Errorf("skill source = %q, want %q", src.Skill, tc.expectSkillSrc)
@@ -303,12 +315,12 @@ func TestResolveWatcherDirs_HookOnlyConnectorMatrix(t *testing.T) {
 					skillDirs, tc.expectSkillFrag)
 			}
 
-			// Plugins are OpenClaw-only (G4). Every hook-only
-			// connector MUST fall back to the cfg default rather
-			// than contributing connector-specific plugin paths.
-			if src.Plugin != watcherDirsFromDefault {
-				t.Errorf("plugin source = %q, want %q (hook-only connectors must not contribute plugin paths)",
-					src.Plugin, watcherDirsFromDefault)
+			if src.Plugin != tc.expectPluginSrc {
+				t.Errorf("plugin source = %q, want %q", src.Plugin, tc.expectPluginSrc)
+			}
+			if tc.expectPluginFrag != "" && !anyContains(pluginDirs, tc.expectPluginFrag) {
+				t.Errorf("plugin dirs %v do not contain %q (connector ComponentTargets misrouted?)",
+					pluginDirs, tc.expectPluginFrag)
 			}
 		})
 	}

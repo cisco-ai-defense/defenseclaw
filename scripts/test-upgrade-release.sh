@@ -1167,6 +1167,7 @@ download_old_asset() {
         upgrade-manifest.json) max_bytes=4194304 ;;
     esac
     if ! curl --proto '=https' --proto-redir '=https' --tlsv1.2 -fsSL \
+        --retry 3 --retry-delay 1 --retry-all-errors \
         --max-filesize "${max_bytes}" "${url}" -o "${temporary}"; then
         rm -f "${temporary}"
         return 1

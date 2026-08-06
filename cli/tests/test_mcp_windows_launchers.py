@@ -227,8 +227,21 @@ class _RecordingScanner:
 
 def _build_python_fixture_wheel(source: Path, dist: Path) -> Path:
     dist.mkdir(parents=True)
+    build_source = dist.parent / ".src"
+    shutil.copytree(
+        source,
+        build_source,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "build", "*.egg-info"),
+    )
     subprocess.run(
-        [os.fspath(HOST_UV), "build", "--wheel", "--out-dir", os.fspath(dist), os.fspath(source)],
+        [
+            os.fspath(HOST_UV),
+            "build",
+            "--wheel",
+            "--out-dir",
+            os.fspath(dist),
+            os.fspath(build_source),
+        ],
         capture_output=True,
         text=True,
         timeout=120,

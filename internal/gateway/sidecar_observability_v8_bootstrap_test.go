@@ -597,7 +597,10 @@ func TestSidecarBootstrapLocalObservabilityCanaryReachesAgent360Projection(t *te
 			http.Error(writer, "invalid protobuf", http.StatusBadRequest)
 			return
 		}
-		requests <- decoded
+		select {
+		case requests <- decoded:
+		default:
+		}
 		response, _ := proto.Marshal(&collectortracepb.ExportTraceServiceResponse{})
 		writer.Header().Set("Content-Type", "application/x-protobuf")
 		_, _ = writer.Write(response)

@@ -23,21 +23,17 @@ import (
 )
 
 var windowsSupportedConnectorNames = []string{
-	"amp",
-	"claudecode",
-	"codex",
+	"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "hermes", "omnigent", "opencode", "windsurf",
 }
 
 var windowsPreviewConnectorNames = []string{}
 
-var windowsNotCertifiedConnectorNames = []string{
-	"antigravity", "copilot", "cursor", "geminicli", "hermes", "opencode", "windsurf",
-}
+var windowsNotCertifiedConnectorNames = []string{}
 
 var windowsUnsupportedConnectorNames = []string{
+	"geminicli",
 	"openclaw",
 	"openhands",
-	"omnigent",
 	"zeptoclaw",
 }
 
@@ -56,8 +52,8 @@ func TestWindowsConnectorSupportTaxonomy(t *testing.T) {
 	for _, name := range windowsSupportedConnectorNames {
 		want[name] = PlatformSupported
 	}
-	// Keep this loop as an executable contract for any preview connectors that
-	// are reintroduced; the certified Windows surface currently has none.
+	// Preview connectors remain selectable while certification evidence is
+	// still pending.
 	for _, name := range windowsPreviewConnectorNames {
 		want[name] = PlatformPreview
 	}
@@ -149,8 +145,10 @@ func TestConnectorSupportOnOS(t *testing.T) {
 }
 
 func TestValidateConnectorSupportedOnOS(t *testing.T) {
-	if err := validateConnectorSupportedOnOS("hermes", "windows"); err == nil || !strings.Contains(err.Error(), "not certified") {
-		t.Fatalf("not-certified connector should fail: %v", err)
+	for _, name := range []string{"copilot", "antigravity", "hermes"} {
+		if err := validateConnectorSupportedOnOS(name, "windows"); err != nil {
+			t.Fatalf("supported connector %s should remain available: %v", name, err)
+		}
 	}
 	err := validateConnectorSupportedOnOS("openhands", "windows")
 	if err == nil || !strings.Contains(err.Error(), "requires WSL") {
@@ -159,9 +157,16 @@ func TestValidateConnectorSupportedOnOS(t *testing.T) {
 }
 
 func TestCheckPlatformSupportPreservesOperatorWording(t *testing.T) {
-	warning, err := CheckPlatformSupport("hermes", "windows")
-	if warning != "" || err == nil || !strings.Contains(err.Error(), "not certified") {
-		t.Fatalf("not-certified result warning=%q err=%v", warning, err)
+	warning, err := CheckPlatformSupport("cursor", "windows")
+	if err != nil || warning != "" {
+		t.Fatalf("supported Cursor result warning=%q err=%v", warning, err)
+	}
+
+	for _, name := range []string{"copilot", "antigravity", "hermes"} {
+		warning, err = CheckPlatformSupport(name, "windows")
+		if err != nil || warning != "" {
+			t.Fatalf("supported %s result warning=%q err=%v", name, warning, err)
+		}
 	}
 
 	warning, err = CheckPlatformSupport("openhands", "windows")
@@ -174,7 +179,7 @@ func TestCheckPlatformSupportPreservesOperatorWording(t *testing.T) {
 	}
 }
 
-func TestRegistryWindowsFilterKeepsSupportedOnly(t *testing.T) {
+func TestRegistryWindowsFilterKeepsSupportedAndPreview(t *testing.T) {
 	reg := NewDefaultRegistry()
 	var got []string
 	for _, name := range reg.Names() {
@@ -184,6 +189,7 @@ func TestRegistryWindowsFilterKeepsSupportedOnly(t *testing.T) {
 	}
 	sort.Strings(got)
 	want := append([]string(nil), windowsSupportedConnectorNames...)
+	want = append(want, windowsPreviewConnectorNames...)
 	sort.Strings(want)
 	if strings.Join(got, ",") != strings.Join(want, ",") {
 		t.Fatalf("windows-filtered connectors=%v, want %v", got, want)

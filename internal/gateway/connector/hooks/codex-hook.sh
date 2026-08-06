@@ -70,6 +70,50 @@ defenseclaw_harden_env
 # stable FAIL_MODE to log against.
 FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"
 
+# Setup binds each handler to one finite vendor event and hook contract. Keep
+# those values out of environment variables so the registered command remains
+# the single command-identity source of truth.
+BOUND_EVENT=
+BOUND_CONTRACT=
+
+fail_binding() {
+  local reason="$1"
+  defenseclaw_log_hook_failure codex codex-hook "$reason" response "$FAIL_MODE"
+  echo "defenseclaw: codex hook binding error: $reason" >&2
+  if [ "$FAIL_MODE" = "open" ]; then
+    exit 0
+  fi
+  exit 2
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --event)
+      [ "$#" -ge 2 ] || fail_binding "missing value for --event"
+      [ -z "$BOUND_EVENT" ] || fail_binding "duplicate --event binding"
+      BOUND_EVENT="$2"
+      shift 2
+      ;;
+    --hook-contract)
+      [ "$#" -ge 2 ] || fail_binding "missing value for --hook-contract"
+      [ -z "$BOUND_CONTRACT" ] || fail_binding "duplicate --hook-contract binding"
+      BOUND_CONTRACT="$2"
+      shift 2
+      ;;
+    *)
+      fail_binding "unexpected registered command argument"
+      ;;
+  esac
+done
+
+case "${BOUND_CONTRACT}:${BOUND_EVENT}" in
+  codex-hooks-v1:SessionStart|codex-hooks-v1:UserPromptSubmit|codex-hooks-v1:PreToolUse|codex-hooks-v1:PermissionRequest|codex-hooks-v1:PostToolUse|codex-hooks-v1:Stop) ;;
+  codex-hooks-v2:SessionStart|codex-hooks-v2:UserPromptSubmit|codex-hooks-v2:PreToolUse|codex-hooks-v2:PermissionRequest|codex-hooks-v2:PostToolUse|codex-hooks-v2:PreCompact|codex-hooks-v2:PostCompact|codex-hooks-v2:Stop) ;;
+  codex-hooks-v3:SessionStart|codex-hooks-v3:UserPromptSubmit|codex-hooks-v3:PreToolUse|codex-hooks-v3:PermissionRequest|codex-hooks-v3:PostToolUse|codex-hooks-v3:SubagentStart|codex-hooks-v3:SubagentStop|codex-hooks-v3:PreCompact|codex-hooks-v3:PostCompact|codex-hooks-v3:Stop) ;;
+  codex-hooks-v4:SessionStart|codex-hooks-v4:UserPromptSubmit|codex-hooks-v4:PreToolUse|codex-hooks-v4:PermissionRequest|codex-hooks-v4:PostToolUse|codex-hooks-v4:SubagentStart|codex-hooks-v4:SubagentStop|codex-hooks-v4:PreCompact|codex-hooks-v4:PostCompact|codex-hooks-v4:Stop|codex-hooks-v4:SessionEnd) ;;
+  *) fail_binding "registered event is not part of the bound Codex hook contract" ;;
+esac
+
 # Bail early when neither the companion .token file nor the env var
 # carries a token: without one the gateway will reject every request
 # with 401, so the historical default is exit-0 (don't brick the
@@ -93,6 +137,17 @@ PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
   fi
   exit 0
 }
+
+PAYLOAD_EVENT="$(printf '%s' "$PAYLOAD" | _dc_jq -r '.hook_event_name // empty' 2>/dev/null)" || {
+  fail_binding "Codex hook stdin is not valid JSON"
+}
+if [ -z "$PAYLOAD_EVENT" ]; then
+  fail_binding "Codex hook stdin is missing hook_event_name"
+fi
+if [ "$PAYLOAD_EVENT" != "$BOUND_EVENT" ]; then
+  fail_binding "Codex hook stdin event does not match the registered event"
+fi
+
 API_ADDR="{{.APIAddr}}"
 
 # Source the token file written by defenseclaw setup (0o600, never baked
@@ -153,13 +208,22 @@ if command -v mapfile >/dev/null 2>&1; then
   mapfile -t TRACE_HEADER_ARGS < <(defenseclaw_extract_trace_context)
 fi
 
+HOOK_MAX_TIME=10
+if [ "$BOUND_EVENT" = "SessionEnd" ]; then
+  # Codex's host maximum is three seconds. Leave one second for response
+  # parsing and process teardown, matching the native launcher budget.
+  HOOK_MAX_TIME=2
+fi
+
 RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/codex/hook" \
   -H "Content-Type: application/json" \
   -H "X-DefenseClaw-Client: codex-hook/1.0" \
+  -H "X-DefenseClaw-Hook-Event: ${BOUND_EVENT}" \
+  -H "X-DefenseClaw-Hook-Contract: ${BOUND_CONTRACT}" \
   "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
   "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
   --connect-timeout 2 \
-  --max-time 10 \
+  --max-time "$HOOK_MAX_TIME" \
   -d "$PAYLOAD" 2>/dev/null) || {
   fail_unreachable "gateway unreachable"
 }

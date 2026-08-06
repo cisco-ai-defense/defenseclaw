@@ -34,12 +34,20 @@ Covers:
 from __future__ import annotations
 
 import contextlib
+import copy
+import json
 import os
+import stat
 import sys
+import threading
+import traceback
 import unittest
-from types import SimpleNamespace
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from types import FunctionType, SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import click
 import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -50,14 +58,108 @@ pytestmark = pytest.mark.supported_connector_host
 from defenseclaw.commands import cmd_setup
 from defenseclaw.commands.cmd_setup import setup as setup_group
 from defenseclaw.config import PerConnectorGuardrailConfig
+from defenseclaw.file_permissions import atomic_write_private_bytes
 from defenseclaw.logger import CanonicalObservabilityUnavailableError
 
-from tests.helpers import cleanup_app, make_app_context
+from tests.helpers import cleanup_app, make_app_context, record_test_setup_agent_selections
 
 
 def _invoke(args, app, catch=False):
     runner = CliRunner()
     return runner.invoke(setup_group, args, obj=app, catch_exceptions=catch)
+
+
+def _click_result_exception_diagnostics(result) -> str:
+    """Render the complete exception graph without following arbitrary objects."""
+
+    diagnostics = [result.output, repr(result.exc_info)]
+    if result.exc_info is not None:
+        diagnostics.append("".join(traceback.format_exception(*result.exc_info)))
+    pending = [result.exception]
+    seen: set[int] = set()
+    while pending:
+        exc = pending.pop()
+        if exc is None or id(exc) in seen:
+            continue
+        seen.add(id(exc))
+        diagnostics.extend((str(exc), repr(exc)))
+        pending.extend(
+            (
+                getattr(exc, "__cause__", None),
+                getattr(exc, "__context__", None),
+            )
+        )
+    return "\n".join(diagnostics)
+
+
+def _click_result_reaches_marker(result, marker: str) -> bool:
+    """Check bounded exception reachability, including traceback-owned state."""
+
+    diagnostics = [result.output, repr(result.exc_info)]
+    if result.exc_info is not None:
+        diagnostics.append("".join(traceback.format_exception(*result.exc_info)))
+    pending = [result.exception]
+    seen_exceptions: set[int] = set()
+    seen_functions: set[int] = set()
+
+    def append_repr(value) -> None:
+        try:
+            diagnostics.append(repr(value))
+        except BaseException:
+            diagnostics.append("<repr unavailable>")
+
+    def inspect_closure(function: FunctionType) -> None:
+        if id(function) in seen_functions:
+            return
+        seen_functions.add(id(function))
+        for cell in function.__closure__ or ():
+            try:
+                value = cell.cell_contents
+            except ValueError:
+                continue
+            append_repr(value)
+            if isinstance(value, FunctionType):
+                inspect_closure(value)
+
+    while pending:
+        exc = pending.pop()
+        if exc is None or id(exc) in seen_exceptions:
+            continue
+        seen_exceptions.add(id(exc))
+        diagnostics.extend((str(exc), repr(exc)))
+        pending.extend((exc.__cause__, exc.__context__))
+        current_tb = exc.__traceback__
+        while current_tb is not None:
+            for value in current_tb.tb_frame.f_locals.values():
+                append_repr(value)
+                if isinstance(value, FunctionType):
+                    inspect_closure(value)
+            current_tb = current_tb.tb_next
+    return any(marker in diagnostic for diagnostic in diagnostics)
+
+
+@pytest.mark.parametrize(
+    ("host_os", "expected_hook", "other_hook"),
+    (
+        ("windows", "windsurf-hook.ps1 on Windows", "windsurf-hook.sh"),
+        ("linux", "windsurf-hook.sh on non-Windows", "windsurf-hook.ps1"),
+    ),
+)
+def test_windsurf_mutation_notice_names_platform_hook(
+    host_os: str,
+    expected_hook: str,
+    other_hook: str,
+) -> None:
+    runner = CliRunner()
+    with (
+        patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value=host_os),
+        runner.isolation() as (stdout, _stderr, _input),
+    ):
+        cmd_setup._print_connector_mutation_notice("windsurf")
+
+    notice = stdout.getvalue().decode()
+    assert expected_hook in notice
+    assert other_hook not in notice
 
 
 @contextlib.contextmanager
@@ -76,12 +178,114 @@ def _stub_side_effects():
         yield
 
 
+@contextlib.contextmanager
+def _guardrail_judge_secret_wizard(
+    lock_path: Path,
+    env_name: str,
+    secret_value: str,
+    *,
+    abort_at: str | None = None,
+    events: list[str] | None = None,
+):
+    """Drive the real interactive judge flow using disposable marker values."""
+
+    recorded_events = events if events is not None else []
+    runtime_reads = 0
+
+    def capture_runtime(*_args, **_kwargs):
+        nonlocal runtime_reads
+        runtime_reads += 1
+        return cmd_setup._SetupAppliedRuntimeEvidence(
+            lifecycle="running",
+            generation=f"generation-{runtime_reads}",
+            invariants=(),
+        )
+
+    def select(data_dir, connectors):
+        records = record_test_setup_agent_selections(data_dir, connectors)
+        atomic_write_private_bytes(str(lock_path), b"fresh lock marker\n")
+        return records
+
+    def prompt(label, *_args, **_kwargs):
+        if "Select mode" in label:
+            return "2"
+        if "Select engine" in label:
+            return "1"
+        if "API base URL" in label:
+            return "http://127.0.0.1:1/v1"
+        if "Model (" in label:
+            return "disposable-model-marker"
+        if "API key env var name" in label:
+            return env_name
+        if env_name in label:
+            return secret_value
+        if "Fallback model" in label:
+            recorded_events.append("fallback-model")
+            if abort_at == "fallback":
+                raise click.Abort()
+            return ""
+        raise AssertionError(f"unexpected prompt: {label}")
+
+    def confirm(label, *_args, **_kwargs):
+        if "Enable guardrail?" in label:
+            return True
+        if "Configure fallback models?" in label:
+            recorded_events.append("fallback-choice")
+            return abort_at == "fallback"
+        if "shared LLM key" in label:
+            return False
+        if "Configure advanced options?" in label:
+            recorded_events.append("advanced-choice")
+            if abort_at == "advanced":
+                raise click.Abort()
+            return False
+        raise AssertionError(f"unexpected confirmation: {label}")
+
+    def enable_judge(gc, *_args, **_kwargs):
+        gc.judge.enabled = True
+        gc.judge.hook_connectors = ["opencode"]
+
+    with (
+        patch(
+            "defenseclaw.commands.cmd_setup.platform_support.host_os",
+            return_value="windows",
+        ),
+        patch(
+            "defenseclaw.commands.cmd_setup._capture_setup_applied_runtime",
+            side_effect=capture_runtime,
+        ),
+        patch(
+            "defenseclaw.agent_selection.record_setup_agent_selections",
+            side_effect=select,
+        ) as selected,
+        patch(
+            "defenseclaw.commands.cmd_setup._configure_hilt_interactive",
+            return_value=None,
+        ),
+        patch(
+            "defenseclaw.commands.cmd_setup._prompt_guardrail_judge_enablement",
+            side_effect=enable_judge,
+        ),
+        patch(
+            "defenseclaw.commands.cmd_setup.click.prompt",
+            side_effect=prompt,
+        ),
+        patch(
+            "defenseclaw.commands.cmd_setup.click.confirm",
+            side_effect=confirm,
+        ),
+    ):
+        yield selected
+
+
 class _BaseSetup(unittest.TestCase):
     def setUp(self):
         self.app, self.tmp_dir, self.db_path = make_app_context()
         self.cfg_path = os.path.join(self.tmp_dir, "config.yaml")
         # Lightweight save shim: tests assert on the in-memory config object.
-        self.app.cfg.save = lambda: open(self.cfg_path, "w").write("x\n")  # type: ignore[assignment]
+        self.app.cfg.save = lambda: atomic_write_private_bytes(  # type: ignore[assignment]
+            self.cfg_path, b"x\n"
+        )
 
     def tearDown(self):
         cleanup_app(self.app, self.db_path, self.tmp_dir)
@@ -97,6 +301,204 @@ class _BaseSetup(unittest.TestCase):
 # B3 / E4d — per-connector guardrail write-surface
 # ---------------------------------------------------------------------------
 class TestPerConnectorWriteSurface(_BaseSetup):
+    def test_amp_version_admission_precedes_rule_pack_conflict(self):
+        events: list[str] = []
+
+        def admit(*_args, **_kwargs):
+            events.append("version")
+            return True
+
+        with (
+            patch(
+                "defenseclaw.commands.cmd_setup.platform_support.host_os",
+                return_value="windows",
+            ),
+            patch(
+                "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                side_effect=admit,
+            ) as version_check,
+            patch("defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections") as protected_selection,
+        ):
+            with self.assertRaisesRegex(click.UsageError, "mutually exclusive"):
+                cmd_setup._apply_hook_connector_setup(
+                    self.app,
+                    connector="amp",
+                    restart=False,
+                    rule_pack="strict",
+                    rule_pack_dir=self.tmp_dir,
+                )
+
+        self.assertEqual(events, ["version"])
+        version_check.assert_called_once()
+        protected_selection.assert_not_called()
+
+    def test_forged_name_set_cannot_bypass_exact_opencode_selection(self):
+        receipt = os.path.join(self.tmp_dir, "agent_selection.json")
+        prior = b'{"prior":"receipt"}\n'
+        atomic_write_private_bytes(receipt, prior)
+        forbidden = AssertionError("generic discovery cannot authorize native-Windows OpenCode")
+
+        with (
+            patch(
+                "defenseclaw.commands.cmd_setup.platform_support.host_os",
+                return_value="windows",
+            ),
+            patch(
+                "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                side_effect=forbidden,
+            ) as generic,
+            patch(
+                "defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections",
+                side_effect=click.ClickException("fresh exact selection required"),
+            ) as select_exact,
+        ):
+            with self.assertRaisesRegex(click.ClickException, "fresh exact selection required"):
+                cmd_setup._apply_hook_connector_setup(
+                    self.app,
+                    connector="opencode",
+                    restart=False,
+                    _protected_selection=frozenset({"opencode"}),  # type: ignore[arg-type]
+                )
+
+        generic.assert_not_called()
+        select_exact.assert_called_once()
+        self.assertEqual(Path(receipt).read_bytes(), prior)
+
+    def test_tampered_concrete_opencode_proof_forces_fresh_selection(self):
+        with patch(
+            "defenseclaw.commands.cmd_setup.platform_support.host_os",
+            return_value="windows",
+        ):
+            snapshot = cmd_setup._capture_setup_config_snapshot(self.app.cfg)
+            records, errors = record_test_setup_agent_selections(
+                self.tmp_dir,
+                ("opencode",),
+            )
+            self.assertEqual(errors, {})
+            proof = cmd_setup._validate_setup_agent_selection_receipt(
+                self.tmp_dir,
+                ("opencode",),
+                records,
+                prior_generation=snapshot.agent_selection_generation,
+            )
+            receipt = Path(self.tmp_dir, "agent_selection.json")
+            tampered = receipt.read_bytes() + b" "
+            atomic_write_private_bytes(str(receipt), tampered)
+            with patch(
+                "defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections",
+                side_effect=click.ClickException("tampered proof requires reselection"),
+            ) as select_exact:
+                with self.assertRaisesRegex(click.ClickException, "requires reselection"):
+                    cmd_setup._apply_hook_connector_setup(
+                        self.app,
+                        connector="opencode",
+                        restart=False,
+                        _protected_selection=proof,
+                    )
+
+        select_exact.assert_called_once()
+        self.assertEqual(receipt.read_bytes(), tampered)
+
+    def test_prior_transaction_concrete_proof_cannot_authorize_single_setup(self):
+        with patch(
+            "defenseclaw.commands.cmd_setup.platform_support.host_os",
+            return_value="windows",
+        ):
+            prior_transaction = cmd_setup._capture_setup_config_snapshot(self.app.cfg)
+            records, errors = record_test_setup_agent_selections(
+                self.tmp_dir,
+                ("opencode",),
+            )
+            self.assertEqual(errors, {})
+            old_proof = cmd_setup._validate_setup_agent_selection_receipt(
+                self.tmp_dir,
+                ("opencode",),
+                records,
+                prior_generation=prior_transaction.agent_selection_generation,
+            )
+            receipt = Path(self.tmp_dir, "agent_selection.json")
+            prior_receipt = receipt.read_bytes()
+            with patch(
+                "defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections",
+                side_effect=click.ClickException("new transaction must select again"),
+            ) as select_exact:
+                with self.assertRaisesRegex(click.ClickException, "select again"):
+                    cmd_setup._apply_hook_connector_setup(
+                        self.app,
+                        connector="opencode",
+                        restart=False,
+                        _protected_selection=old_proof,
+                    )
+
+        select_exact.assert_called_once()
+        self.assertEqual(receipt.read_bytes(), prior_receipt)
+
+    def test_additive_setup_selects_complete_roster_before_first_gateway_start(self):
+        self._seed_map("amp", "claudecode", "codex", "cursor")
+
+        with (
+            patch(
+                "defenseclaw.commands.cmd_setup.platform_support.host_os",
+                return_value="windows",
+            ),
+            patch(
+                "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                return_value=True,
+            ),
+            patch(
+                "defenseclaw.commands.cmd_setup._windows_runtime_rollback",
+                return_value=False,
+            ),
+            patch(
+                "defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections",
+                side_effect=click.ClickException("selection captured"),
+            ) as selected,
+            self.assertRaisesRegex(click.ClickException, "selection captured"),
+        ):
+            cmd_setup._apply_hook_connector_setup(
+                self.app,
+                connector="codex",
+                restart=True,
+                write_mode="add",
+            )
+
+        selected.assert_called_once()
+        self.assertEqual(
+            selected.call_args.args[1],
+            ("amp", "claudecode", "codex", "cursor"),
+        )
+
+    def test_stale_concrete_opencode_receipt_is_not_transaction_proof(self):
+        with patch(
+            "defenseclaw.commands.cmd_setup.platform_support.host_os",
+            return_value="windows",
+        ):
+            records, errors = record_test_setup_agent_selections(
+                self.tmp_dir,
+                ("opencode",),
+            )
+            self.assertEqual(errors, {})
+            receipt = Path(self.tmp_dir, "agent_selection.json")
+            payload = json.loads(receipt.read_bytes())
+            selected = datetime.now(timezone.utc) - timedelta(minutes=16)
+            expires = selected + timedelta(minutes=15)
+            selected_at = selected.isoformat(timespec="seconds").replace("+00:00", "Z")
+            expires_at = expires.isoformat(timespec="seconds").replace("+00:00", "Z")
+            payload["updated_at"] = selected_at
+            payload["selections"]["opencode"]["selected_at"] = selected_at
+            payload["selections"]["opencode"]["expires_at"] = expires_at
+            atomic_write_private_bytes(
+                str(receipt),
+                (json.dumps(payload, sort_keys=True) + "\n").encode(),
+            )
+
+            with self.assertRaisesRegex(OSError, "not fresh|stale"):
+                cmd_setup._validate_setup_agent_selection_receipt(
+                    self.tmp_dir,
+                    ("opencode",),
+                    records,
+                )
+
     def test_all_fields_land_per_connector_and_peer_untouched(self):
         self._seed_map("codex", "hermes")
         with _stub_side_effects():
@@ -336,6 +738,2198 @@ class TestPerConnectorWriteSurface(_BaseSetup):
         self.assertEqual(saved_judge_states[-1], (False, [], "regex_only"))
         self.assertFalse(gc.judge.enabled)
         self.assertEqual(gc.judge.hook_connectors, [])
+
+    def test_direct_hermes_unsupported_version_downgrades_after_one_discovery(self):
+        signal = SimpleNamespace(
+            version="Hermes Agent v0.17.0",
+            installed=True,
+            error="",
+            binary_path=r"C:\Users\tester\AppData\Local\hermes\hermes-agent\venv\Scripts\hermes.exe",
+        )
+        disc = SimpleNamespace(agents={"hermes": signal})
+
+        with contextlib.ExitStack() as stack:
+            stack.enter_context(patch("defenseclaw.commands.cmd_setup._restart_services", return_value=None))
+            stack.enter_context(patch("defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True))
+            stack.enter_context(patch("defenseclaw.commands.cmd_setup._maybe_bring_up_local_stack", return_value=None))
+            discover = stack.enter_context(
+                patch("defenseclaw.commands.cmd_setup.agent_discovery.discover_agents", return_value=disc)
+            )
+            res = _invoke(
+                ["hermes", "--yes", "--no-restart", "--mode", "action"],
+                self.app,
+            )
+
+        self.assertEqual(res.exit_code, 0, msg=res.output)
+        discover.assert_called_once_with(
+            use_cache=False,
+            refresh=True,
+            data_dir=self.app.cfg.data_dir,
+            persist_cache=True,
+        )
+        self.assertEqual(res.output.count("detected-but-unsupported-version"), 1)
+        self.assertIn("installed version Hermes Agent v0.17.0", res.output)
+        self.assertIn("hermes-hooks-v1 requires >=0.19.0", res.output)
+        self.assertIn("requested action mode was refused; configuring observe mode instead", res.output)
+        self.assertNotIn("connector was not detected locally", res.output)
+        self.assertEqual(self.app.cfg.guardrail.connector, "hermes")
+        self.assertEqual(self.app.cfg.guardrail.mode, "observe")
+
+    def test_windows_omnigent_admission_scan_does_not_publish_unrelated_discovery(self):
+        signal = SimpleNamespace(
+            version="omnigent 0.7.0",
+            installed=True,
+            error="",
+            binary_path=r"C:\Users\tester\.local\bin\omnigent.exe",
+        )
+        disc = SimpleNamespace(agents={"omnigent": signal})
+
+        with (
+            patch(
+                "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
+                return_value=disc,
+            ) as discover,
+            patch(
+                "defenseclaw.commands.cmd_setup.platform_support.host_os",
+                return_value="windows",
+            ),
+        ):
+            accepted = cmd_setup._check_connector_version_supported_for_setup(
+                "omnigent",
+                mode="action",
+                emit=False,
+                data_dir=self.app.cfg.data_dir,
+            )
+
+        self.assertTrue(accepted)
+        discover.assert_called_once_with(
+            use_cache=False,
+            refresh=True,
+            data_dir=self.app.cfg.data_dir,
+            persist_cache=False,
+        )
+
+    def test_windows_opencode_admission_scan_preserves_prior_connector_discovery(self):
+        signal = SimpleNamespace(
+            version="opencode 1.18.11",
+            installed=True,
+            error="",
+            binary_path=(
+                r"D:\fixture\WinGet\Packages\SST.opencode_Microsoft.Winget.Source_8wekyb3d8bbwe"
+                r"\opencode.exe"
+            ),
+        )
+        disc = SimpleNamespace(agents={"opencode": signal})
+
+        with (
+            patch(
+                "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
+                return_value=disc,
+            ) as discover,
+            patch(
+                "defenseclaw.commands.cmd_setup.platform_support.host_os",
+                return_value="windows",
+            ),
+        ):
+            accepted = cmd_setup._check_connector_version_supported_for_setup(
+                "opencode",
+                mode="action",
+                emit=False,
+                data_dir=self.app.cfg.data_dir,
+            )
+
+        self.assertTrue(accepted)
+        discover.assert_called_once_with(
+            use_cache=False,
+            refresh=True,
+            data_dir=self.app.cfg.data_dir,
+            persist_cache=False,
+        )
+
+    def test_windows_opencode_single_setup_selects_exact_image_before_state_and_generic(self):
+        original_save = self.app.cfg.save
+        for mode in ("observe", "action"):
+            with self.subTest(mode=mode):
+                events: list[str] = []
+
+                def save():
+                    events.append("save")
+                    original_save()
+
+                self.app.cfg.save = save  # type: ignore[assignment]
+
+                def select(_data_dir, connectors):
+                    events.append("select")
+                    self.assertEqual(tuple(connectors), ("opencode",))
+                    return record_test_setup_agent_selections(_data_dir, connectors)
+
+                forbidden = AssertionError("generic OpenCode discovery cannot authorize setup")
+                with (
+                    patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="windows"),
+                    patch(
+                        "defenseclaw.agent_selection.record_setup_agent_selections",
+                        side_effect=select,
+                    ) as selected,
+                    patch(
+                        "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                        side_effect=forbidden,
+                    ) as generic,
+                    patch(
+                        "defenseclaw.commands.cmd_setup._maybe_bring_up_local_stack",
+                        return_value=None,
+                    ),
+                ):
+                    result = _invoke(
+                        ["opencode", "--yes", "--no-restart", "--mode", mode],
+                        self.app,
+                        catch=True,
+                    )
+
+                self.assertEqual(result.exit_code, 0, msg=result.output)
+                self.assertEqual(events[0], "select")
+                selected.assert_called_once()
+                generic.assert_not_called()
+
+    def test_windows_opencode_single_failure_preserves_config_receipt_lock_and_roster(self):
+        self._seed_map("codex", "hermes")
+        data_dir = self.app.cfg.data_dir
+        config_path = self.cfg_path
+        receipt_path = os.path.join(data_dir, "agent_selection.json")
+        lock_path = os.path.join(data_dir, "hook_contract_lock.json")
+        prior_config = b"prior config bytes\n"
+        prior_receipt = b'{"prior":"selection"}\n'
+        prior_lock = b'{"prior":"lock"}\n'
+        atomic_write_private_bytes(config_path, prior_config)
+        atomic_write_private_bytes(receipt_path, prior_receipt)
+        atomic_write_private_bytes(lock_path, prior_lock)
+        prior_roster = tuple(self.app.cfg.active_connectors())
+        forbidden = AssertionError("exact selection failure must precede mutation")
+        self.app.cfg.save = MagicMock(side_effect=forbidden)  # type: ignore[assignment]
+
+        with (
+            patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="windows"),
+            patch(
+                "defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections",
+                side_effect=click.ClickException(
+                    "exact SST OpenCode 1.18.12 is outside the validated contract; PATH 1.18.11 is irrelevant"
+                ),
+            ),
+            patch(
+                "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                side_effect=forbidden,
+            ) as generic,
+            patch("defenseclaw.commands.cmd_setup._add_trusted_bin_prefix", side_effect=forbidden) as trust,
+            patch("defenseclaw.commands.cmd_setup._restart_services", side_effect=forbidden) as restart,
+        ):
+            result = _invoke(
+                ["opencode", "--yes", "--no-restart", "--mode", "action"],
+                self.app,
+                catch=True,
+            )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("exact SST OpenCode 1.18.12", result.output)
+        generic.assert_not_called()
+        trust.assert_not_called()
+        restart.assert_not_called()
+        self.app.cfg.save.assert_not_called()
+        self.assertEqual(tuple(self.app.cfg.active_connectors()), prior_roster)
+        for path, payload in (
+            (config_path, prior_config),
+            (receipt_path, prior_receipt),
+            (lock_path, prior_lock),
+        ):
+            with open(path, "rb") as handle:
+                self.assertEqual(handle.read(), payload)
+
+    def test_windows_opencode_guardrail_selects_before_generic_and_config_save(self):
+        self._seed_map("opencode")
+        self.app.cfg.guardrail.enabled = True
+        events: list[str] = []
+        original_save = self.app.cfg.save
+
+        def save():
+            events.append("save")
+            original_save()
+
+        def select(_data_dir, connectors):
+            events.append("select")
+            self.assertEqual(tuple(connectors), ("opencode",))
+            return record_test_setup_agent_selections(_data_dir, connectors)
+
+        self.app.cfg.save = save  # type: ignore[assignment]
+        forbidden = AssertionError("guardrail must not consult generic OpenCode discovery")
+        with (
+            patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="windows"),
+            patch(
+                "defenseclaw.agent_selection.record_setup_agent_selections",
+                side_effect=select,
+            ) as selected,
+            patch(
+                "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                side_effect=forbidden,
+            ) as generic,
+            patch("defenseclaw.commands.cmd_setup._sync_guardrail_hilt_to_opa", return_value=None),
+        ):
+            result = _invoke(
+                [
+                    "guardrail",
+                    "--non-interactive",
+                    "--connector",
+                    "opencode",
+                    "--mode",
+                    "action",
+                    "--no-restart",
+                    "--no-verify",
+                ],
+                self.app,
+                catch=True,
+            )
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(events[0], "select")
+        selected.assert_called_once()
+        generic.assert_not_called()
+
+    def test_windows_opencode_unscoped_guardrail_selects_complete_roster_once(self):
+        pristine = copy.deepcopy(self.app.cfg)
+        for requested_mode in ("observe", "action"):
+            with self.subTest(requested_mode=requested_mode):
+                self.app.cfg = copy.deepcopy(pristine)
+                self._seed_map("amp", "opencode")
+                gc = self.app.cfg.guardrail
+                gc.enabled = True
+                gc.connectors["amp"].mode = "observe"
+                gc.connectors["opencode"].mode = "observe"
+                events: list[str] = []
+                for name in ("config.yaml", "agent_selection.json", "hook_contract_lock.json"):
+                    Path(self.tmp_dir, name).unlink(missing_ok=True)
+
+                def save():
+                    events.append("save")
+                    atomic_write_private_bytes(self.cfg_path, b"saved config marker\n")
+
+                def select(data_dir, connectors):
+                    events.append("select")
+                    self.assertEqual(tuple(connectors), ("amp", "opencode"))
+                    self.assertEqual(gc.effective_mode("amp"), "observe")
+                    self.assertEqual(gc.effective_mode("opencode"), "observe")
+                    return record_test_setup_agent_selections(data_dir, connectors)
+
+                def generic(connector, **_kwargs):
+                    events.append(f"generic:{connector}")
+                    self.assertEqual(events[0], "select")
+                    return True
+
+                def execute(*_args, **_kwargs):
+                    events.append("execute")
+                    self.app.cfg.save()
+                    return True, []
+
+                self.app.cfg.save = save  # type: ignore[assignment]
+                revalidate = cmd_setup._revalidate_setup_agent_selections
+                with (
+                    patch(
+                        "defenseclaw.commands.cmd_setup.platform_support.host_os",
+                        return_value="windows",
+                    ),
+                    patch(
+                        "defenseclaw.agent_selection.record_setup_agent_selections",
+                        side_effect=select,
+                    ) as selected,
+                    patch(
+                        "defenseclaw.commands.cmd_setup._revalidate_setup_agent_selections",
+                        wraps=revalidate,
+                    ) as proof_check,
+                    patch(
+                        "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                        side_effect=generic,
+                    ) as generic_check,
+                    patch(
+                        "defenseclaw.commands.cmd_setup.execute_guardrail_setup",
+                        side_effect=execute,
+                    ),
+                ):
+                    result = _invoke(
+                        [
+                            "guardrail",
+                            "--non-interactive",
+                            "--mode",
+                            requested_mode,
+                            "--no-restart",
+                            "--no-verify",
+                        ],
+                        self.app,
+                        catch=True,
+                    )
+
+                self.assertEqual(result.exit_code, 0, msg=result.output)
+                selected.assert_called_once()
+                proof_check.assert_called_once()
+                generic_check.assert_called_once()
+                self.assertEqual(generic_check.call_args.args[0], "amp")
+                self.assertEqual(events[0], "select")
+                self.assertLess(events.index("generic:amp"), events.index("save"))
+                self.assertEqual(gc.effective_mode("amp"), requested_mode)
+                self.assertEqual(gc.effective_mode("opencode"), requested_mode)
+
+    def test_windows_opencode_unscoped_guardrail_refusal_restores_complete_roster(self):
+        pristine = copy.deepcopy(self.app.cfg)
+        for requested_mode in ("observe", "action"):
+            with self.subTest(requested_mode=requested_mode):
+                self.app.cfg = copy.deepcopy(pristine)
+                self._seed_map("amp", "opencode")
+                gc = self.app.cfg.guardrail
+                gc.enabled = True
+                gc.connectors["amp"].mode = "observe"
+                gc.connectors["opencode"].mode = "observe"
+                prior_gc = copy.deepcopy(gc)
+                config_path = Path(self.cfg_path)
+                receipt_path = Path(self.tmp_dir, "agent_selection.json")
+                lock_path = Path(self.tmp_dir, "hook_contract_lock.json")
+                prior_config = b"complete-roster config marker\n"
+                prior_receipt = b'{"prior":"complete-roster-receipt-marker"}\n'
+                prior_lock = b'{"prior":"complete-roster-lock-marker"}\n'
+                atomic_write_private_bytes(str(config_path), prior_config)
+                atomic_write_private_bytes(str(receipt_path), prior_receipt)
+                atomic_write_private_bytes(str(lock_path), prior_lock)
+                forbidden = AssertionError("exact refusal must precede complete-roster mutation")
+                self.app.cfg.save = MagicMock(side_effect=forbidden)  # type: ignore[assignment]
+
+                def refuse(_data_dir, connectors, **_kwargs):
+                    self.assertEqual(tuple(connectors), ("amp", "opencode"))
+                    self.assertEqual(gc, prior_gc)
+                    atomic_write_private_bytes(str(receipt_path), b"partial receipt marker\n")
+                    atomic_write_private_bytes(str(lock_path), b"partial lock marker\n")
+                    raise click.ClickException("exact complete-roster OpenCode selection refused")
+
+                with (
+                    patch(
+                        "defenseclaw.commands.cmd_setup.platform_support.host_os",
+                        return_value="windows",
+                    ),
+                    patch(
+                        "defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections",
+                        side_effect=refuse,
+                    ) as selected,
+                    patch(
+                        "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                        side_effect=forbidden,
+                    ) as generic,
+                    patch(
+                        "defenseclaw.commands.cmd_setup.execute_guardrail_setup",
+                        side_effect=forbidden,
+                    ) as execute,
+                ):
+                    result = _invoke(
+                        [
+                            "guardrail",
+                            "--non-interactive",
+                            "--mode",
+                            requested_mode,
+                            "--no-restart",
+                            "--no-verify",
+                        ],
+                        self.app,
+                        catch=True,
+                    )
+
+                self.assertNotEqual(result.exit_code, 0)
+                self.assertIn("exact complete-roster OpenCode selection refused", result.output)
+                selected.assert_called_once()
+                generic.assert_not_called()
+                execute.assert_not_called()
+                self.app.cfg.save.assert_not_called()
+                self.assertEqual(self.app.cfg.guardrail, prior_gc)
+                self.assertEqual(config_path.read_bytes(), prior_config)
+                self.assertEqual(receipt_path.read_bytes(), prior_receipt)
+                self.assertEqual(lock_path.read_bytes(), prior_lock)
+
+    def test_windows_opencode_explicit_guardrail_selection_remains_scoped(self):
+        self._seed_map("amp", "opencode")
+        gc = self.app.cfg.guardrail
+        gc.enabled = True
+        selected_targets: list[tuple[str, ...]] = []
+
+        def select(data_dir, connectors):
+            selected_targets.append(tuple(connectors))
+            return record_test_setup_agent_selections(data_dir, connectors)
+
+        def execute(*_args, **_kwargs):
+            return True, []
+
+        revalidate = cmd_setup._revalidate_setup_agent_selections
+        with (
+            patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="windows"),
+            patch(
+                "defenseclaw.agent_selection.record_setup_agent_selections",
+                side_effect=select,
+            ) as selected,
+            patch(
+                "defenseclaw.commands.cmd_setup._revalidate_setup_agent_selections",
+                wraps=revalidate,
+            ) as proof_check,
+            patch(
+                "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                side_effect=AssertionError("scoped OpenCode must not use generic discovery"),
+            ) as generic,
+            patch(
+                "defenseclaw.commands.cmd_setup.execute_guardrail_setup",
+                side_effect=execute,
+            ),
+        ):
+            result = _invoke(
+                [
+                    "guardrail",
+                    "--non-interactive",
+                    "--connector",
+                    "opencode",
+                    "--mode",
+                    "action",
+                    "--no-restart",
+                    "--no-verify",
+                ],
+                self.app,
+                catch=True,
+            )
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(selected_targets, [("opencode",)])
+        selected.assert_called_once()
+        proof_check.assert_called_once()
+        generic.assert_not_called()
+
+    def test_windows_opencode_interactive_cancel_restores_selection_authority(self):
+        pristine = copy.deepcopy(self.app.cfg)
+        for cancellation in ("decline", "abort"):
+            for prior_exists in (False, True):
+                with self.subTest(cancellation=cancellation, prior_exists=prior_exists):
+                    self.app.cfg = copy.deepcopy(pristine)
+                    gc = self.app.cfg.guardrail
+                    gc.connector = "amp"
+                    gc.enabled = True
+                    gc.mode = "observe"
+                    prior_gc = copy.deepcopy(gc)
+                    receipt_path = Path(self.tmp_dir, "agent_selection.json")
+                    lock_path = Path(self.tmp_dir, "hook_contract_lock.json")
+                    secret_path = Path(self.tmp_dir, ".env")
+                    for path in (receipt_path, lock_path, secret_path):
+                        path.unlink(missing_ok=True)
+                    prior_receipt = b'{"prior":"interactive-receipt-marker"}\n'
+                    prior_lock = b'{"prior":"interactive-lock-marker"}\n'
+                    secret_marker = b"disposable secret-file marker\n"
+                    if prior_exists:
+                        atomic_write_private_bytes(str(receipt_path), prior_receipt)
+                        atomic_write_private_bytes(str(lock_path), prior_lock)
+                    atomic_write_private_bytes(str(secret_path), secret_marker)
+
+                    def select(data_dir, connectors):
+                        self.assertEqual(tuple(connectors), ("opencode",))
+                        records = record_test_setup_agent_selections(data_dir, connectors)
+                        atomic_write_private_bytes(str(lock_path), b"fresh lock marker\n")
+                        return records
+
+                    prompt_effect = (
+                        AssertionError("decline must return before later prompts")
+                        if cancellation == "decline"
+                        else click.Abort()
+                    )
+                    with (
+                        patch(
+                            "defenseclaw.commands.cmd_setup.platform_support.host_os",
+                            return_value="windows",
+                        ),
+                        patch(
+                            "defenseclaw.agent_selection.record_setup_agent_selections",
+                            side_effect=select,
+                        ) as selected,
+                        patch(
+                            "defenseclaw.commands.cmd_setup.click.confirm",
+                            return_value=cancellation != "decline",
+                        ),
+                        patch(
+                            "defenseclaw.commands.cmd_setup.click.prompt",
+                            side_effect=prompt_effect,
+                        ),
+                        patch(
+                            "defenseclaw.commands.cmd_setup._prompt_and_save_secret",
+                            side_effect=AssertionError("cancellation must not write a secret"),
+                        ) as secret_write,
+                        patch(
+                            "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                            side_effect=AssertionError("cancellation must precede version validation"),
+                        ) as generic,
+                    ):
+                        result = _invoke(
+                            [
+                                "guardrail",
+                                "--connector",
+                                "opencode",
+                                "--no-restart",
+                                "--no-verify",
+                            ],
+                            self.app,
+                            catch=True,
+                        )
+
+                    self.assertEqual(result.exit_code, 0 if cancellation == "decline" else 1)
+                    selected.assert_called_once()
+                    secret_write.assert_not_called()
+                    generic.assert_not_called()
+                    self.assertEqual(self.app.cfg.guardrail, prior_gc)
+                    self.assertEqual(secret_path.read_bytes(), secret_marker)
+                    if prior_exists:
+                        self.assertEqual(receipt_path.read_bytes(), prior_receipt)
+                        self.assertEqual(lock_path.read_bytes(), prior_lock)
+                    else:
+                        self.assertFalse(os.path.lexists(receipt_path))
+                        self.assertFalse(os.path.lexists(lock_path))
+
+    def test_windows_opencode_judge_secret_abort_never_publishes_pending_value(self):
+        pristine = copy.deepcopy(self.app.cfg)
+        env_name = "DISPOSABLE_JUDGE_ENV"
+        other_env_name = "DISPOSABLE_UNRELATED_ENV"
+        secret_value = "disposable judge marker value"
+        prior_env_value = "disposable prior process marker"
+        other_env_value = "disposable unrelated process marker"
+        for abort_at in ("fallback", "advanced"):
+            for prior_exists in (False, True):
+                with self.subTest(abort_at=abort_at, prior_exists=prior_exists):
+                    self.app.cfg = copy.deepcopy(pristine)
+                    gc = self.app.cfg.guardrail
+                    gc.connector = "amp"
+                    gc.enabled = True
+                    gc.mode = "action"
+                    gc.judge.enabled = False
+                    prior_gc = copy.deepcopy(gc)
+                    config_path = Path(self.cfg_path)
+                    hint_path = Path(self.tmp_dir, "picked_connector")
+                    receipt_path = Path(self.tmp_dir, "agent_selection.json")
+                    lock_path = Path(self.tmp_dir, "hook_contract_lock.json")
+                    dotenv_path = Path(self.tmp_dir, ".env")
+                    hilt_path = Path(self.app.cfg.policy_dir, "rego", "data.json")
+                    hilt_path.parent.mkdir(parents=True, exist_ok=True)
+                    for path in (
+                        config_path,
+                        hint_path,
+                        receipt_path,
+                        lock_path,
+                        dotenv_path,
+                        hilt_path,
+                    ):
+                        path.unlink(missing_ok=True)
+                    prior_files = {
+                        config_path: b"disposable prior config marker\n",
+                        hint_path: b"amp\n",
+                        receipt_path: b'{"prior":"judge-receipt-marker"}\n',
+                        lock_path: b'{"prior":"judge-lock-marker"}\n',
+                        hilt_path: b'{"prior":"hilt-marker"}\n',
+                    }
+                    prior_dotenv = (
+                        b"UNRELATED_MARKER=preserved\nDISPOSABLE_JUDGE_ENV=disposable prior file marker\n"
+                        if prior_exists
+                        else None
+                    )
+                    for path, body in prior_files.items():
+                        atomic_write_private_bytes(str(path), body)
+                    if prior_dotenv is not None:
+                        atomic_write_private_bytes(str(dotenv_path), prior_dotenv)
+                    save = MagicMock(side_effect=AssertionError("Abort must precede config save"))
+                    self.app.cfg.save = save  # type: ignore[assignment]
+                    log_action = MagicMock(side_effect=AssertionError("Abort must precede setup audit"))
+
+                    with patch.dict(os.environ, {}, clear=False):
+                        if prior_exists:
+                            os.environ[env_name] = prior_env_value
+                        else:
+                            os.environ.pop(env_name, None)
+                        os.environ[other_env_name] = other_env_value
+                        with (
+                            _guardrail_judge_secret_wizard(
+                                lock_path,
+                                env_name,
+                                secret_value,
+                                abort_at=abort_at,
+                            ) as selected,
+                            patch.object(self.app.logger, "log_action", log_action),
+                            patch(
+                                "defenseclaw.commands.cmd_setup._save_secret_to_dotenv",
+                                side_effect=AssertionError("a cancellable prompt remains before secret publication"),
+                            ) as secret_writer,
+                        ):
+                            result = _invoke(
+                                [
+                                    "guardrail",
+                                    "--connector",
+                                    "opencode",
+                                    "--no-restart",
+                                    "--no-verify",
+                                ],
+                                self.app,
+                                catch=True,
+                            )
+
+                        self.assertEqual(result.exit_code, 1)
+                        selected.assert_called_once()
+                        secret_writer.assert_not_called()
+                        save.assert_not_called()
+                        log_action.assert_not_called()
+                        self.assertEqual(self.app.cfg.guardrail, prior_gc)
+                        for path, body in prior_files.items():
+                            self.assertEqual(path.read_bytes(), body)
+                        if prior_dotenv is None:
+                            self.assertFalse(os.path.lexists(dotenv_path))
+                        else:
+                            self.assertEqual(dotenv_path.read_bytes(), prior_dotenv)
+                        if prior_exists:
+                            self.assertEqual(os.environ.get(env_name), prior_env_value)
+                        else:
+                            self.assertNotIn(env_name, os.environ)
+                        self.assertEqual(os.environ.get(other_env_name), other_env_value)
+                        diagnostics = _click_result_exception_diagnostics(result)
+                        self.assertNotIn(secret_value, diagnostics)
+
+    def test_windows_opencode_judge_secret_success_publishes_once_after_prompts(self):
+        env_name = "DISPOSABLE_JUDGE_ENV"
+        other_env_name = "DISPOSABLE_UNRELATED_ENV"
+        secret_value = "disposable judge marker value"
+        other_env_value = "disposable unrelated process marker"
+        gc = self.app.cfg.guardrail
+        gc.connector = "amp"
+        gc.enabled = True
+        gc.mode = "action"
+        gc.judge.enabled = False
+        lock_path = Path(self.tmp_dir, "hook_contract_lock.json")
+        dotenv_path = Path(self.tmp_dir, ".env")
+        prior_dotenv = b"UNRELATED_MARKER=preserved\n"
+        atomic_write_private_bytes(str(lock_path), b'{"prior":"lock-marker"}\n')
+        atomic_write_private_bytes(str(dotenv_path), prior_dotenv)
+        events: list[str] = []
+        save_secret_batch = cmd_setup._save_secrets_to_dotenv_locked
+        version_check = cmd_setup._check_guardrail_setup_connector_versions
+
+        def publish(*args, **kwargs):
+            events.append("publish")
+            self.assertIn("advanced-choice", events)
+            return save_secret_batch(*args, **kwargs)
+
+        def validate(*args, **kwargs):
+            events.append("validate")
+            return version_check(*args, **kwargs)
+
+        def execute(*_args, **_kwargs):
+            events.append("execute")
+            return True, []
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(env_name, None)
+            os.environ[other_env_name] = other_env_value
+            with (
+                _guardrail_judge_secret_wizard(
+                    lock_path,
+                    env_name,
+                    secret_value,
+                    events=events,
+                ) as selected,
+                patch(
+                    "defenseclaw.commands.cmd_setup._save_secrets_to_dotenv_locked",
+                    side_effect=publish,
+                ) as secret_writer,
+                patch(
+                    "defenseclaw.commands.cmd_setup._check_guardrail_setup_connector_versions",
+                    side_effect=validate,
+                ) as validated,
+                patch(
+                    "defenseclaw.commands.cmd_setup.execute_guardrail_setup",
+                    side_effect=execute,
+                ),
+                patch(
+                    "defenseclaw.commands.cmd_setup._log_setup_action",
+                    return_value=None,
+                ) as log_action,
+            ):
+                result = _invoke(
+                    [
+                        "guardrail",
+                        "--connector",
+                        "opencode",
+                        "--no-restart",
+                        "--no-verify",
+                    ],
+                    self.app,
+                    catch=True,
+                )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            selected.assert_called_once()
+            secret_writer.assert_called_once()
+            validated.assert_called_once()
+            log_action.assert_called_once()
+            self.assertLess(events.index("advanced-choice"), events.index("publish"))
+            self.assertLess(events.index("publish"), events.index("validate"))
+            self.assertLess(events.index("validate"), events.index("execute"))
+            dotenv_body = dotenv_path.read_bytes()
+            self.assertIn(prior_dotenv, dotenv_body)
+            self.assertEqual(dotenv_body.count((env_name + "=").encode()), 1)
+            self.assertEqual(os.environ.get(env_name), secret_value)
+            self.assertEqual(os.environ.get(other_env_name), other_env_value)
+            self.assertNotIn(secret_value, result.output)
+            self.assertNotIn(secret_value, repr(log_action.call_args))
+
+    def test_windows_opencode_judge_secret_late_failure_restores_exact_state(self):
+        pristine = copy.deepcopy(self.app.cfg)
+        env_name = "DISPOSABLE_JUDGE_ENV"
+        other_env_name = "DISPOSABLE_UNRELATED_ENV"
+        secret_value = "disposable judge marker value"
+        prior_env_value = "disposable prior process marker"
+        other_env_value = "disposable unrelated process marker"
+        for failure_phase in ("validation", "setup", "readiness"):
+            for prior_exists in (False, True):
+                with self.subTest(
+                    failure_phase=failure_phase,
+                    prior_exists=prior_exists,
+                ):
+                    self.app.cfg = copy.deepcopy(pristine)
+                    gc = self.app.cfg.guardrail
+                    gc.connector = "amp"
+                    gc.enabled = True
+                    gc.mode = "action"
+                    gc.judge.enabled = False
+                    prior_gc = copy.deepcopy(gc)
+                    config_path = Path(self.cfg_path)
+                    hint_path = Path(self.tmp_dir, "picked_connector")
+                    receipt_path = Path(self.tmp_dir, "agent_selection.json")
+                    lock_path = Path(self.tmp_dir, "hook_contract_lock.json")
+                    dotenv_path = Path(self.tmp_dir, ".env")
+                    hilt_path = Path(self.app.cfg.policy_dir, "rego", "data.json")
+                    for path in (
+                        config_path,
+                        hint_path,
+                        receipt_path,
+                        lock_path,
+                        dotenv_path,
+                        hilt_path,
+                    ):
+                        path.unlink(missing_ok=True)
+                    prior_files = {
+                        config_path: b"disposable prior config marker\n",
+                        hint_path: b"amp\n",
+                        receipt_path: b'{"prior":"late-receipt-marker"}\n',
+                        lock_path: b'{"prior":"late-lock-marker"}\n',
+                    }
+                    prior_dotenv = (
+                        b"UNRELATED_MARKER=preserved\nDISPOSABLE_JUDGE_ENV=disposable prior file marker\n"
+                        if prior_exists
+                        else None
+                    )
+                    for path, body in prior_files.items():
+                        atomic_write_private_bytes(str(path), body)
+                    if prior_dotenv is not None:
+                        atomic_write_private_bytes(str(dotenv_path), prior_dotenv)
+                    events: list[str] = []
+                    save_secret_batch = cmd_setup._save_secrets_to_dotenv_locked
+
+                    def publish(*args, **kwargs):
+                        events.append("publish")
+                        return save_secret_batch(*args, **kwargs)
+
+                    if failure_phase == "validation":
+                        version_kwargs = {"side_effect": RuntimeError(secret_value)}
+                        execute_kwargs = {"side_effect": AssertionError("validation failure must precede setup")}
+                        restart_kwargs = {"side_effect": AssertionError("validation failure must precede readiness")}
+                    elif failure_phase == "setup":
+                        version_kwargs = {"return_value": True}
+                        execute_kwargs = {"side_effect": RuntimeError(secret_value)}
+                        restart_kwargs = {"side_effect": AssertionError("setup failure must precede readiness")}
+                    else:
+                        version_kwargs = {"return_value": True}
+                        execute_kwargs = {"return_value": (True, [])}
+                        restart_kwargs = {
+                            "side_effect": [
+                                RuntimeError(secret_value),
+                                None,
+                            ]
+                        }
+
+                    args = [
+                        "guardrail",
+                        "--connector",
+                        "opencode",
+                        "--no-verify",
+                    ]
+                    if failure_phase != "readiness":
+                        args.append("--no-restart")
+
+                    with patch.dict(os.environ, {}, clear=False):
+                        if prior_exists:
+                            os.environ[env_name] = prior_env_value
+                        else:
+                            os.environ.pop(env_name, None)
+                        os.environ[other_env_name] = other_env_value
+                        with (
+                            _guardrail_judge_secret_wizard(
+                                lock_path,
+                                env_name,
+                                secret_value,
+                                events=events,
+                            ) as selected,
+                            patch(
+                                "defenseclaw.commands.cmd_setup._save_secrets_to_dotenv_locked",
+                                side_effect=publish,
+                            ) as secret_writer,
+                            patch(
+                                "defenseclaw.commands.cmd_setup._check_guardrail_setup_connector_versions",
+                                **version_kwargs,
+                            ),
+                            patch(
+                                "defenseclaw.commands.cmd_setup.execute_guardrail_setup",
+                                **execute_kwargs,
+                            ),
+                            patch(
+                                "defenseclaw.commands.cmd_setup._restart_services",
+                                **restart_kwargs,
+                            ),
+                            patch(
+                                "defenseclaw.commands.cmd_setup._log_setup_action",
+                                side_effect=AssertionError("failed setup must not publish an audit success"),
+                            ) as log_action,
+                        ):
+                            result = _invoke(args, self.app, catch=True)
+
+                        self.assertNotEqual(result.exit_code, 0)
+                        selected.assert_called_once()
+                        secret_writer.assert_called_once()
+                        log_action.assert_not_called()
+                        self.assertIn("publish", events)
+                        self.assertEqual(self.app.cfg.guardrail, prior_gc)
+                        for path, body in prior_files.items():
+                            self.assertEqual(path.read_bytes(), body)
+                        self.assertFalse(os.path.lexists(hilt_path))
+                        if prior_dotenv is None:
+                            self.assertFalse(os.path.lexists(dotenv_path))
+                        else:
+                            self.assertEqual(dotenv_path.read_bytes(), prior_dotenv)
+                        if prior_exists:
+                            self.assertEqual(os.environ.get(env_name), prior_env_value)
+                        else:
+                            self.assertNotIn(env_name, os.environ)
+                        self.assertEqual(os.environ.get(other_env_name), other_env_value)
+                        diagnostics = _click_result_exception_diagnostics(result)
+                        self.assertNotIn(secret_value, diagnostics)
+                        self.assertNotIn(secret_value, repr(log_action.call_args_list))
+
+    def test_guardrail_secret_holders_do_not_repr_sensitive_marker(self):
+        secret_value = "disposable judge marker value"
+        pending = cmd_setup._PendingGuardrailSecret(
+            "DISPOSABLE_JUDGE_ENV",
+            secret_value,
+        )
+        dotenv_snapshot = cmd_setup._RotateTokenDotenvSnapshot(
+            existed=True,
+            body=("DISPOSABLE_JUDGE_ENV=" + secret_value + "\n").encode(),
+            mode=0o600,
+        )
+        key_transaction = cmd_setup._GuardrailSecretKeyTransaction(
+            env_name="DISPOSABLE_JUDGE_ENV",
+            dotenv_before_existed=True,
+            dotenv_before_value=secret_value.encode(),
+            dotenv_published_value=secret_value.encode(),
+            dotenv_changed=True,
+            process_before_existed=True,
+            process_before_value=secret_value,
+            process_published_value=secret_value,
+            process_changed=True,
+        )
+        transaction = cmd_setup._GuardrailSecretTransaction(
+            dotenv_path=str(Path(self.tmp_dir, ".env")),
+            dotenv_before=dotenv_snapshot,
+            dotenv_after=dotenv_snapshot,
+            dotenv_after_sha256=cmd_setup._guardrail_dotenv_snapshot_sha256(dotenv_snapshot),
+            dotenv_after_authoritative=True,
+            keys=(key_transaction,),
+        )
+        rollback_status = cmd_setup._guardrail_secret_rollback_status("dotenv-owned-key-conflict")
+        failure = cmd_setup._GuardrailSecretFailure("disposable-safe-code")
+
+        for diagnostic in (
+            repr(pending),
+            repr(dotenv_snapshot),
+            repr(key_transaction),
+            repr(transaction),
+            repr(rollback_status),
+            repr(failure),
+        ):
+            self.assertNotIn(secret_value, diagnostic)
+
+    def test_pending_guardrail_secret_prompt_hides_input_and_defers_writer(self):
+        env_name = "DISPOSABLE_JUDGE_ENV"
+        secret_value = "disposable judge marker value"
+        pending: list[cmd_setup._PendingGuardrailSecret] = []
+        with (
+            patch.dict(os.environ, {}, clear=False),
+            patch(
+                "defenseclaw.commands.cmd_setup.click.prompt",
+                return_value=secret_value,
+            ) as prompted,
+            patch(
+                "defenseclaw.commands.cmd_setup._save_secret_to_dotenv",
+                side_effect=AssertionError("pending prompt must not publish"),
+            ) as secret_writer,
+        ):
+            os.environ.pop(env_name, None)
+            cmd_setup._prompt_and_save_secret(
+                env_name,
+                "",
+                self.tmp_dir,
+                _pending_secrets=pending,
+            )
+
+        prompted.assert_called_once()
+        self.assertTrue(prompted.call_args.kwargs["hide_input"])
+        secret_writer.assert_not_called()
+        self.assertEqual(len(pending), 1)
+        self.assertNotIn(secret_value, repr(pending))
+        cmd_setup._clear_pending_guardrail_secrets(pending)
+
+    def test_guardrail_secret_batch_blocks_unrelated_writer_until_atomic_publish(self):
+        owned_name = "DISPOSABLE_BATCH_OWNED_ENV"
+        unrelated_name = "DISPOSABLE_BATCH_UNRELATED_ENV"
+        owned_value = "disposable batch owned marker"
+        unrelated_value = "disposable batch unrelated marker"
+        dotenv_path = Path(self.tmp_dir, ".env")
+        prior_body = b"BASE_MARKER=preserved\n"
+        atomic_write_private_bytes(str(dotenv_path), prior_body)
+        render_started = threading.Event()
+        unrelated_attempted = threading.Event()
+        unrelated_finished = threading.Event()
+        thread_failures: list[str] = []
+        original_render = cmd_setup._dotenv_upsert_render
+
+        def blocking_render(snapshot, key, value):
+            if key == owned_name and not render_started.is_set():
+                render_started.set()
+                self.assertTrue(unrelated_attempted.wait(5))
+                self.assertFalse(unrelated_finished.is_set())
+            return original_render(snapshot, key, value)
+
+        def unrelated_writer():
+            if not render_started.wait(5):
+                thread_failures.append("publication did not reach the locked render")
+                return
+            unrelated_attempted.set()
+            try:
+                cmd_setup._save_secret_to_dotenv(
+                    unrelated_name,
+                    unrelated_value,
+                    self.tmp_dir,
+                )
+            except BaseException:
+                thread_failures.append("unrelated locked writer failed")
+            finally:
+                unrelated_finished.set()
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(owned_name, None)
+            os.environ.pop(unrelated_name, None)
+            writer_thread = threading.Thread(target=unrelated_writer, daemon=True)
+            writer_thread.start()
+            try:
+                with patch(
+                    "defenseclaw.commands.cmd_setup._dotenv_upsert_render",
+                    side_effect=blocking_render,
+                ):
+                    transaction = cmd_setup._publish_pending_guardrail_secrets(
+                        [
+                            cmd_setup._PendingGuardrailSecret(
+                                owned_name,
+                                owned_value,
+                            )
+                        ],
+                        self.tmp_dir,
+                    )
+            finally:
+                writer_thread.join(5)
+
+            self.assertFalse(writer_thread.is_alive())
+            self.assertEqual(thread_failures, [])
+            self.assertIsNotNone(transaction)
+            published_body = dotenv_path.read_bytes()
+            self.assertIn((owned_name + "=").encode(), published_body)
+            self.assertIn((unrelated_name + "=").encode(), published_body)
+            rollback_status = cmd_setup._restore_guardrail_secret_transaction(transaction)
+            self.assertTrue(rollback_status.complete)
+            restored_body = dotenv_path.read_bytes()
+            self.assertNotIn((owned_name + "=").encode(), restored_body)
+            self.assertIn((unrelated_name + "=").encode(), restored_body)
+            self.assertNotIn(owned_name, os.environ)
+            self.assertEqual(os.environ.get(unrelated_name), unrelated_value)
+
+    def test_guardrail_secret_failed_writer_captures_post_state_before_unlock(self):
+        owned_name = "DISPOSABLE_FAILED_WRITE_OWNED_ENV"
+        unrelated_name = "DISPOSABLE_FAILED_WRITE_UNRELATED_ENV"
+        owned_value = "disposable failed write owned marker"
+        unrelated_value = "disposable failed write unrelated marker"
+        failure_marker = "disposable failed write exception marker"
+        dotenv_path = Path(self.tmp_dir, ".env")
+        prior_body = b"BASE_MARKER=preserved\n"
+        atomic_write_private_bytes(str(dotenv_path), prior_body)
+        owned_written = threading.Event()
+        unrelated_attempted = threading.Event()
+        unrelated_finished = threading.Event()
+        thread_failures: list[str] = []
+        main_thread = threading.get_ident()
+        main_lock_entries = 0
+        original_lock = cmd_setup.locked_file_update
+        original_batch_writer = cmd_setup._save_secrets_to_dotenv_locked
+
+        @contextlib.contextmanager
+        def ordered_lock(path):
+            nonlocal main_lock_entries
+            if threading.get_ident() == main_thread:
+                main_lock_entries += 1
+                if main_lock_entries > 1 and not unrelated_finished.wait(5):
+                    raise AssertionError("unrelated writer did not finish before rollback")
+            with original_lock(path):
+                yield
+
+        def fail_after_owned_write(path, snapshot, updates):
+            original_batch_writer(path, snapshot, updates)
+            if threading.get_ident() != main_thread:
+                return
+            owned_written.set()
+            self.assertTrue(unrelated_attempted.wait(5))
+            self.assertFalse(unrelated_finished.is_set())
+            raise RuntimeError(failure_marker)
+
+        def unrelated_writer():
+            if not owned_written.wait(5):
+                thread_failures.append("owned writer did not publish")
+                return
+            unrelated_attempted.set()
+            try:
+                cmd_setup._save_secret_to_dotenv(
+                    unrelated_name,
+                    unrelated_value,
+                    self.tmp_dir,
+                )
+            except BaseException:
+                thread_failures.append("unrelated locked writer failed")
+            finally:
+                unrelated_finished.set()
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(owned_name, None)
+            os.environ.pop(unrelated_name, None)
+            writer_thread = threading.Thread(target=unrelated_writer, daemon=True)
+            writer_thread.start()
+            try:
+                with (
+                    patch(
+                        "defenseclaw.commands.cmd_setup.locked_file_update",
+                        side_effect=ordered_lock,
+                    ),
+                    patch(
+                        "defenseclaw.commands.cmd_setup._save_secrets_to_dotenv_locked",
+                        side_effect=fail_after_owned_write,
+                    ),
+                    self.assertRaises(cmd_setup._GuardrailSecretFailure) as raised,
+                ):
+                    cmd_setup._publish_pending_guardrail_secrets(
+                        [cmd_setup._PendingGuardrailSecret(owned_name, owned_value)],
+                        self.tmp_dir,
+                    )
+            finally:
+                writer_thread.join(5)
+
+            self.assertFalse(writer_thread.is_alive())
+            self.assertEqual(thread_failures, [])
+            current_body = dotenv_path.read_bytes()
+            self.assertIn(prior_body.rstrip(), current_body)
+            self.assertNotIn((owned_name + "=").encode(), current_body)
+            self.assertIn((unrelated_name + "=").encode(), current_body)
+            self.assertNotIn(owned_name, os.environ)
+            self.assertEqual(os.environ.get(unrelated_name), unrelated_value)
+            self.assertIsNone(raised.exception.__cause__)
+            self.assertIsNone(raised.exception.__context__)
+            diagnostics = "".join(
+                traceback.format_exception(
+                    type(raised.exception),
+                    raised.exception,
+                    raised.exception.__traceback__,
+                )
+            )
+            self.assertNotIn(failure_marker, diagnostics)
+            self.assertNotIn(failure_marker, repr(raised.exception))
+
+    def test_guardrail_secret_non_authoritative_post_snapshot_cannot_restore_file(self):
+        owned_name = "DISPOSABLE_NONAUTHORITATIVE_OWNED_ENV"
+        owned_value = "disposable nonauthoritative owned marker"
+        failure_marker = "disposable nonauthoritative exception marker"
+        dotenv_path = Path(self.tmp_dir, ".env")
+        prior_body = b"BASE_MARKER=preserved\n"
+        atomic_write_private_bytes(str(dotenv_path), prior_body)
+        snapshot_calls = 0
+        original_snapshot = cmd_setup._rotate_token_snapshot_locked
+        original_batch_writer = cmd_setup._save_secrets_to_dotenv_locked
+
+        def fail_authoritative_snapshot(path):
+            nonlocal snapshot_calls
+            snapshot_calls += 1
+            if snapshot_calls == 2:
+                raise RuntimeError(failure_marker)
+            return original_snapshot(path)
+
+        def fail_after_owned_write(path, snapshot, updates):
+            original_batch_writer(path, snapshot, updates)
+            raise RuntimeError(failure_marker)
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ.pop(owned_name, None)
+            with (
+                patch(
+                    "defenseclaw.commands.cmd_setup._rotate_token_snapshot_locked",
+                    side_effect=fail_authoritative_snapshot,
+                ),
+                patch(
+                    "defenseclaw.commands.cmd_setup._save_secrets_to_dotenv_locked",
+                    side_effect=fail_after_owned_write,
+                ),
+                patch(
+                    "defenseclaw.commands.cmd_setup._rotate_token_restore_locked",
+                    side_effect=AssertionError("a later snapshot cannot authorize exact restore"),
+                ) as exact_restore,
+                self.assertRaises(cmd_setup._GuardrailSecretFailure) as raised,
+            ):
+                cmd_setup._publish_pending_guardrail_secrets(
+                    [cmd_setup._PendingGuardrailSecret(owned_name, owned_value)],
+                    self.tmp_dir,
+                )
+
+            exact_restore.assert_not_called()
+            self.assertGreaterEqual(snapshot_calls, 4)
+            self.assertEqual(dotenv_path.read_bytes(), prior_body)
+            self.assertNotIn(owned_name, os.environ)
+            self.assertIsNone(raised.exception.__cause__)
+            self.assertIsNone(raised.exception.__context__)
+            diagnostics = "".join(
+                traceback.format_exception(
+                    type(raised.exception),
+                    raised.exception,
+                    raised.exception.__traceback__,
+                )
+            )
+            self.assertNotIn(failure_marker, diagnostics)
+            self.assertNotIn(failure_marker, repr(raised.exception))
+
+    def test_guardrail_secret_publication_reports_secret_and_setup_rollback_status(self):
+        pristine = copy.deepcopy(self.app.cfg)
+        env_name = "DISPOSABLE_PUBLIC_STATUS_ENV"
+        secret_value = "disposable public status marker"
+        original_snapshot = cmd_setup._rotate_token_snapshot_locked
+        original_batch_writer = cmd_setup._save_secrets_to_dotenv_locked
+        original_setup_restore = cmd_setup._restore_setup_config_snapshot
+        expected_codes = {
+            False: "publication-failed-secret-rollback-incomplete",
+            True: "publication-failed-setup-and-secret-rollback-incomplete",
+        }
+
+        for setup_rollback_fails, expected_code in expected_codes.items():
+            with self.subTest(setup_rollback_fails=setup_rollback_fails):
+                self.app.cfg = copy.deepcopy(pristine)
+                gc = self.app.cfg.guardrail
+                gc.connector = "amp"
+                gc.enabled = True
+                gc.mode = "action"
+                gc.judge.enabled = False
+                prior_gc = copy.deepcopy(gc)
+                config_path = Path(self.cfg_path)
+                receipt_path = Path(self.tmp_dir, "agent_selection.json")
+                lock_path = Path(self.tmp_dir, "hook_contract_lock.json")
+                dotenv_path = Path(self.tmp_dir, ".env")
+                for path in (config_path, receipt_path, lock_path, dotenv_path):
+                    path.unlink(missing_ok=True)
+                prior_files = {
+                    config_path: b"disposable public status prior config\n",
+                    receipt_path: b'{"prior":"public-status-receipt-marker"}\n',
+                    lock_path: b'{"prior":"public-status-lock-marker"}\n',
+                }
+                for path, body in prior_files.items():
+                    atomic_write_private_bytes(str(path), body)
+                snapshot_calls = 0
+
+                def fail_post_snapshots(path):
+                    nonlocal snapshot_calls
+                    snapshot_calls += 1
+                    if snapshot_calls > 1:
+                        raise RuntimeError(secret_value)
+                    return original_snapshot(path)
+
+                def fail_after_owned_write(path, snapshot, updates):
+                    original_batch_writer(path, snapshot, updates)
+                    raise RuntimeError(secret_value)
+
+                def restore_then_maybe_fail(*args, **kwargs):
+                    original_setup_restore(*args, **kwargs)
+                    if setup_rollback_fails:
+                        raise RuntimeError(secret_value)
+
+                with patch.dict(os.environ, {}, clear=False):
+                    os.environ.pop(env_name, None)
+                    with (
+                        _guardrail_judge_secret_wizard(
+                            lock_path,
+                            env_name,
+                            secret_value,
+                        ) as selected,
+                        patch(
+                            "defenseclaw.commands.cmd_setup._save_secrets_to_dotenv_locked",
+                            side_effect=fail_after_owned_write,
+                        ) as secret_writer,
+                        patch(
+                            "defenseclaw.commands.cmd_setup._rotate_token_snapshot_locked",
+                            side_effect=fail_post_snapshots,
+                        ),
+                        patch(
+                            "defenseclaw.commands.cmd_setup._restore_setup_config_snapshot",
+                            side_effect=restore_then_maybe_fail,
+                        ) as setup_restore,
+                        patch(
+                            "defenseclaw.commands.cmd_setup._check_guardrail_setup_connector_versions",
+                            side_effect=AssertionError("publication failure must precede validation"),
+                        ),
+                        patch(
+                            "defenseclaw.commands.cmd_setup.execute_guardrail_setup",
+                            side_effect=AssertionError("publication failure must precede setup"),
+                        ),
+                        patch(
+                            "defenseclaw.commands.cmd_setup._log_setup_action",
+                            side_effect=AssertionError("failed publication must not audit success"),
+                        ) as log_action,
+                    ):
+                        result = _invoke(
+                            [
+                                "guardrail",
+                                "--connector",
+                                "opencode",
+                                "--no-restart",
+                                "--no-verify",
+                            ],
+                            self.app,
+                            catch=True,
+                        )
+
+                    self.assertNotEqual(result.exit_code, 0)
+                    selected.assert_called_once()
+                    secret_writer.assert_called_once()
+                    setup_restore.assert_called_once()
+                    log_action.assert_not_called()
+                    self.assertEqual(snapshot_calls, 3)
+                    self.assertEqual(self.app.cfg.guardrail, prior_gc)
+                    for path, body in prior_files.items():
+                        self.assertEqual(path.read_bytes(), body)
+                    self.assertIn((env_name + "=").encode(), dotenv_path.read_bytes())
+                    self.assertNotIn(env_name, os.environ)
+                    self.assertIn(expected_code, result.output)
+                    self.assertFalse(_click_result_reaches_marker(result, secret_value))
+                    self.assertNotIn(secret_value, repr(log_action.call_args_list))
+
+    def test_guardrail_secret_rollback_preserves_unrelated_post_publish_updates(self):
+        owned_name = "DISPOSABLE_ROLLBACK_OWNED_ENV"
+        unrelated_name = "DISPOSABLE_ROLLBACK_UNRELATED_ENV"
+        prior_file_value = b"disposable prior file marker"
+        prior_process_value = "disposable prior process marker"
+        unrelated_value = "disposable unrelated update marker"
+        dotenv_path = Path(self.tmp_dir, ".env")
+        prior_body = b"BASE_MARKER=preserved\n" + owned_name.encode() + b"=" + prior_file_value + b"\n"
+        atomic_write_private_bytes(str(dotenv_path), prior_body)
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ[owned_name] = prior_process_value
+            os.environ.pop(unrelated_name, None)
+            transaction = cmd_setup._publish_pending_guardrail_secrets(
+                [
+                    cmd_setup._PendingGuardrailSecret(
+                        owned_name,
+                        "disposable published update marker",
+                    )
+                ],
+                self.tmp_dir,
+            )
+            self.assertIsNotNone(transaction)
+            cmd_setup._save_secret_to_dotenv(
+                unrelated_name,
+                unrelated_value,
+                self.tmp_dir,
+            )
+            rollback_status = cmd_setup._restore_guardrail_secret_transaction(transaction)
+
+            self.assertTrue(rollback_status.complete)
+            restored_body = dotenv_path.read_bytes()
+            self.assertIn(owned_name.encode() + b"=" + prior_file_value, restored_body)
+            self.assertIn((unrelated_name + "=").encode(), restored_body)
+            self.assertEqual(os.environ.get(owned_name), prior_process_value)
+            self.assertEqual(os.environ.get(unrelated_name), unrelated_value)
+
+    def test_guardrail_secret_partial_multi_key_publication_rolls_back_changed_keys(self):
+        first_name = "DISPOSABLE_PARTIAL_FIRST_ENV"
+        second_name = "DISPOSABLE_PARTIAL_SECOND_ENV"
+        first_prior = "disposable first prior process marker"
+        failure_marker = "disposable partial failure marker"
+        dotenv_path = Path(self.tmp_dir, ".env")
+        prior_body = b"UNRELATED_MARKER=preserved\n"
+        atomic_write_private_bytes(str(dotenv_path), prior_body)
+        prior_mode = stat.S_IMODE(dotenv_path.stat().st_mode)
+        original_setter = cmd_setup._set_guardrail_secret_process_value
+
+        def partial_setter(env_name, value):
+            if env_name == second_name:
+                raise RuntimeError(failure_marker)
+            original_setter(env_name, value)
+
+        pending = [
+            cmd_setup._PendingGuardrailSecret(
+                first_name,
+                "disposable first published marker",
+            ),
+            cmd_setup._PendingGuardrailSecret(
+                second_name,
+                "disposable second published marker",
+            ),
+        ]
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ[first_name] = first_prior
+            os.environ.pop(second_name, None)
+            with (
+                patch(
+                    "defenseclaw.commands.cmd_setup._set_guardrail_secret_process_value",
+                    side_effect=partial_setter,
+                ),
+                patch(
+                    "defenseclaw.commands.cmd_setup._save_secrets_to_dotenv_locked",
+                    wraps=cmd_setup._save_secrets_to_dotenv_locked,
+                ) as batch_writer,
+                self.assertRaises(cmd_setup._GuardrailSecretFailure) as raised,
+            ):
+                cmd_setup._publish_pending_guardrail_secrets(
+                    pending,
+                    self.tmp_dir,
+                )
+
+            batch_writer.assert_called_once()
+            self.assertEqual(pending, [])
+            self.assertEqual(dotenv_path.read_bytes(), prior_body)
+            self.assertEqual(stat.S_IMODE(dotenv_path.stat().st_mode), prior_mode)
+            self.assertEqual(os.environ.get(first_name), first_prior)
+            self.assertNotIn(second_name, os.environ)
+            self.assertIsNone(raised.exception.__cause__)
+            self.assertIsNone(raised.exception.__context__)
+            self.assertNotIn(failure_marker, repr(raised.exception))
+
+    def test_guardrail_secret_same_owned_key_conflict_is_preserved_and_reported(self):
+        env_name = "DISPOSABLE_CONFLICT_ENV"
+        prior_file_value = "disposable conflict prior file marker"
+        prior_process_value = "disposable conflict prior process marker"
+        concurrent_value = "disposable conflict concurrent marker"
+        dotenv_path = Path(self.tmp_dir, ".env")
+        atomic_write_private_bytes(
+            str(dotenv_path),
+            (f"UNRELATED_MARKER=preserved\n{env_name}={prior_file_value}\n").encode(),
+        )
+
+        with patch.dict(os.environ, {}, clear=False):
+            os.environ[env_name] = prior_process_value
+            transaction = cmd_setup._publish_pending_guardrail_secrets(
+                [
+                    cmd_setup._PendingGuardrailSecret(
+                        env_name,
+                        "disposable conflict published marker",
+                    )
+                ],
+                self.tmp_dir,
+            )
+            self.assertIsNotNone(transaction)
+            cmd_setup._save_secret_to_dotenv(
+                env_name,
+                concurrent_value,
+                self.tmp_dir,
+            )
+            rollback_status = cmd_setup._restore_guardrail_secret_transaction(transaction)
+
+            self.assertFalse(rollback_status.complete)
+            self.assertIn("dotenv-owned-key-conflict", rollback_status.codes)
+            self.assertIn("process-owned-key-conflict", rollback_status.codes)
+            current_body = dotenv_path.read_bytes()
+            self.assertIn((env_name + "=" + concurrent_value).encode(), current_body)
+            self.assertIn(b"UNRELATED_MARKER=preserved", current_body)
+            self.assertEqual(os.environ.get(env_name), concurrent_value)
+            self.assertNotIn(concurrent_value, repr(rollback_status))
+            self.assertNotIn(concurrent_value, repr(transaction))
+
+    def test_guardrail_secret_no_interleave_restores_exact_file_mode_and_process(self):
+        env_name = "DISPOSABLE_EXACT_ROLLBACK_ENV"
+        prior_process_value = "disposable exact prior process marker"
+        dotenv_path = Path(self.tmp_dir, ".env")
+        for prior_exists in (False, True):
+            with self.subTest(prior_exists=prior_exists):
+                dotenv_path.unlink(missing_ok=True)
+                prior_body = (
+                    b"UNRELATED_MARKER=preserved\nDISPOSABLE_EXACT_ROLLBACK_ENV=disposable exact prior file marker\n"
+                    if prior_exists
+                    else None
+                )
+                if prior_body is not None:
+                    atomic_write_private_bytes(str(dotenv_path), prior_body)
+                    prior_mode = stat.S_IMODE(dotenv_path.stat().st_mode)
+                else:
+                    prior_mode = None
+                with patch.dict(os.environ, {}, clear=False):
+                    if prior_exists:
+                        os.environ[env_name] = prior_process_value
+                    else:
+                        os.environ.pop(env_name, None)
+                    with patch(
+                        "defenseclaw.commands.cmd_setup._save_secrets_to_dotenv_locked",
+                        wraps=cmd_setup._save_secrets_to_dotenv_locked,
+                    ) as batch_writer:
+                        transaction = cmd_setup._publish_pending_guardrail_secrets(
+                            [
+                                cmd_setup._PendingGuardrailSecret(
+                                    env_name,
+                                    "disposable exact published marker",
+                                )
+                            ],
+                            self.tmp_dir,
+                        )
+                    batch_writer.assert_called_once()
+                    self.assertIsNotNone(transaction)
+                    self.assertEqual(
+                        transaction.dotenv_after_sha256,
+                        cmd_setup._guardrail_dotenv_snapshot_sha256(transaction.dotenv_after),
+                    )
+                    self.assertEqual(len(transaction.keys), 1)
+                    self.assertTrue(transaction.keys[0].dotenv_changed)
+                    self.assertTrue(transaction.keys[0].process_changed)
+                    rollback_status = cmd_setup._restore_guardrail_secret_transaction(transaction)
+                    self.assertTrue(rollback_status.complete)
+                    if prior_body is None:
+                        self.assertFalse(os.path.lexists(dotenv_path))
+                        self.assertNotIn(env_name, os.environ)
+                    else:
+                        self.assertEqual(dotenv_path.read_bytes(), prior_body)
+                        self.assertEqual(
+                            stat.S_IMODE(dotenv_path.stat().st_mode),
+                            prior_mode,
+                        )
+                        self.assertEqual(
+                            os.environ.get(env_name),
+                            prior_process_value,
+                        )
+
+    def test_windows_opencode_secret_exception_graph_is_redacted_for_writer_save_and_rollback(self):
+        pristine = copy.deepcopy(self.app.cfg)
+        env_name = "DISPOSABLE_CHAIN_ENV"
+        secret_value = "disposable exception chain marker"
+        prior_process_value = "disposable chain prior process marker"
+        for failure_phase in ("writer", "save", "rollback"):
+            with self.subTest(failure_phase=failure_phase):
+                self.app.cfg = copy.deepcopy(pristine)
+                gc = self.app.cfg.guardrail
+                gc.connector = "amp"
+                gc.enabled = True
+                gc.mode = "action"
+                gc.judge.enabled = False
+                prior_gc = copy.deepcopy(gc)
+                config_path = Path(self.cfg_path)
+                hint_path = Path(self.tmp_dir, "picked_connector")
+                receipt_path = Path(self.tmp_dir, "agent_selection.json")
+                lock_path = Path(self.tmp_dir, "hook_contract_lock.json")
+                dotenv_path = Path(self.tmp_dir, ".env")
+                for path in (
+                    config_path,
+                    hint_path,
+                    receipt_path,
+                    lock_path,
+                    dotenv_path,
+                ):
+                    path.unlink(missing_ok=True)
+                prior_files = {
+                    config_path: b"disposable chain prior config marker\n",
+                    hint_path: b"amp\n",
+                    receipt_path: b'{"prior":"chain-receipt-marker"}\n',
+                    lock_path: b'{"prior":"chain-lock-marker"}\n',
+                }
+                prior_dotenv = b"UNRELATED_MARKER=preserved\nDISPOSABLE_CHAIN_ENV=disposable chain prior file marker\n"
+                for path, body in prior_files.items():
+                    atomic_write_private_bytes(str(path), body)
+                atomic_write_private_bytes(str(dotenv_path), prior_dotenv)
+                original_batch_writer = cmd_setup._save_secrets_to_dotenv_locked
+                original_restore = cmd_setup._restore_setup_config_snapshot
+
+                if failure_phase == "writer":
+                    batch_effect = RuntimeError(secret_value)
+                    version_kwargs = {"side_effect": AssertionError("writer failure must precede validation")}
+                    execute_kwargs = {"side_effect": AssertionError("writer failure must precede setup")}
+                    restore_effect = original_restore
+                elif failure_phase == "save":
+                    batch_effect = original_batch_writer
+                    version_kwargs = {"return_value": True}
+
+                    def fail_during_save(*_args, **_kwargs):
+                        self.app.cfg.save()
+                        return True, []
+
+                    execute_kwargs = {"side_effect": fail_during_save}
+                    restore_effect = original_restore
+                else:
+                    batch_effect = original_batch_writer
+                    version_kwargs = {"side_effect": RuntimeError(secret_value)}
+                    execute_kwargs = {"side_effect": AssertionError("rollback test must fail during validation")}
+
+                    def restore_then_fail(*args, **kwargs):
+                        original_restore(*args, **kwargs)
+                        raise RuntimeError(secret_value)
+
+                    restore_effect = restore_then_fail
+
+                save = MagicMock(side_effect=RuntimeError(secret_value))
+                if failure_phase == "save":
+                    self.app.cfg.save = save  # type: ignore[assignment]
+                log_action = MagicMock(side_effect=AssertionError("failed setup must not audit success"))
+                with patch.dict(os.environ, {}, clear=False):
+                    os.environ[env_name] = prior_process_value
+                    with (
+                        _guardrail_judge_secret_wizard(
+                            lock_path,
+                            env_name,
+                            secret_value,
+                        ) as selected,
+                        patch(
+                            "defenseclaw.commands.cmd_setup._save_secrets_to_dotenv_locked",
+                            side_effect=batch_effect,
+                        ),
+                        patch(
+                            "defenseclaw.commands.cmd_setup._check_guardrail_setup_connector_versions",
+                            **version_kwargs,
+                        ),
+                        patch(
+                            "defenseclaw.commands.cmd_setup.execute_guardrail_setup",
+                            **execute_kwargs,
+                        ),
+                        patch(
+                            "defenseclaw.commands.cmd_setup._restore_setup_config_snapshot",
+                            side_effect=restore_effect,
+                        ),
+                        patch(
+                            "defenseclaw.commands.cmd_setup._log_setup_action",
+                            log_action,
+                        ),
+                    ):
+                        result = _invoke(
+                            [
+                                "guardrail",
+                                "--connector",
+                                "opencode",
+                                "--no-restart",
+                                "--no-verify",
+                            ],
+                            self.app,
+                            catch=True,
+                        )
+
+                    self.assertNotEqual(result.exit_code, 0)
+                    selected.assert_called_once()
+                    self.assertEqual(self.app.cfg.guardrail, prior_gc)
+                    for path, body in prior_files.items():
+                        self.assertEqual(path.read_bytes(), body)
+                    self.assertEqual(dotenv_path.read_bytes(), prior_dotenv)
+                    self.assertEqual(os.environ.get(env_name), prior_process_value)
+                    diagnostics = _click_result_exception_diagnostics(result)
+                    self.assertNotIn(secret_value, diagnostics)
+                    self.assertNotIn(secret_value, repr(log_action.call_args_list))
+                    self.assertNotIn(secret_value, repr(save.call_args_list))
+
+    def test_windows_opencode_late_failure_preserves_unrelated_concurrent_secret_state(self):
+        pristine = copy.deepcopy(self.app.cfg)
+        owned_name = "DISPOSABLE_LATE_OWNED_ENV"
+        unrelated_name = "DISPOSABLE_LATE_UNRELATED_ENV"
+        owned_value = "disposable late owned marker"
+        unrelated_value = "disposable late unrelated marker"
+        for failure_phase in ("validation", "setup", "readiness"):
+            with self.subTest(failure_phase=failure_phase):
+                self.app.cfg = copy.deepcopy(pristine)
+                gc = self.app.cfg.guardrail
+                gc.connector = "amp"
+                gc.enabled = True
+                gc.mode = "action"
+                gc.judge.enabled = False
+                prior_gc = copy.deepcopy(gc)
+                config_path = Path(self.cfg_path)
+                receipt_path = Path(self.tmp_dir, "agent_selection.json")
+                lock_path = Path(self.tmp_dir, "hook_contract_lock.json")
+                dotenv_path = Path(self.tmp_dir, ".env")
+                for path in (config_path, receipt_path, lock_path, dotenv_path):
+                    path.unlink(missing_ok=True)
+                prior_files = {
+                    config_path: b"disposable concurrent prior config marker\n",
+                    receipt_path: b'{"prior":"concurrent-receipt-marker"}\n',
+                    lock_path: b'{"prior":"concurrent-lock-marker"}\n',
+                }
+                prior_dotenv = b"BASE_MARKER=preserved\n"
+                for path, body in prior_files.items():
+                    atomic_write_private_bytes(str(path), body)
+                atomic_write_private_bytes(str(dotenv_path), prior_dotenv)
+                failure_count = 0
+
+                def inject_unrelated_update():
+                    cmd_setup._save_secret_to_dotenv(
+                        unrelated_name,
+                        unrelated_value,
+                        self.tmp_dir,
+                    )
+                    self.assertIn(
+                        (unrelated_name + "=").encode(),
+                        dotenv_path.read_bytes(),
+                    )
+
+                def fail_validation(*_args, **_kwargs):
+                    inject_unrelated_update()
+                    raise RuntimeError(owned_value)
+
+                def fail_setup(*_args, **_kwargs):
+                    inject_unrelated_update()
+                    raise RuntimeError(owned_value)
+
+                def fail_readiness(*_args, **_kwargs):
+                    nonlocal failure_count
+                    failure_count += 1
+                    if failure_count == 1:
+                        inject_unrelated_update()
+                        raise RuntimeError(owned_value)
+                    return None
+
+                version_kwargs = (
+                    {"side_effect": fail_validation} if failure_phase == "validation" else {"return_value": True}
+                )
+                execute_kwargs = (
+                    {"side_effect": fail_setup} if failure_phase == "setup" else {"return_value": (True, [])}
+                )
+                restart_kwargs = (
+                    {"side_effect": fail_readiness} if failure_phase == "readiness" else {"return_value": None}
+                )
+                original_secret_restore = cmd_setup._restore_guardrail_secret_transaction
+
+                def restore_secret_with_concurrency_assertions(transaction):
+                    self.assertIn(
+                        (unrelated_name + "=").encode(),
+                        dotenv_path.read_bytes(),
+                    )
+                    self.assertNotEqual(
+                        dotenv_path.read_bytes(),
+                        transaction.dotenv_after.body,
+                    )
+                    status = original_secret_restore(transaction)
+                    self.assertIn(
+                        (unrelated_name + "=").encode(),
+                        dotenv_path.read_bytes(),
+                    )
+                    return status
+
+                args = [
+                    "guardrail",
+                    "--connector",
+                    "opencode",
+                    "--no-verify",
+                ]
+                if failure_phase != "readiness":
+                    args.append("--no-restart")
+
+                with patch.dict(os.environ, {}, clear=False):
+                    os.environ.pop(owned_name, None)
+                    os.environ.pop(unrelated_name, None)
+                    with (
+                        _guardrail_judge_secret_wizard(
+                            lock_path,
+                            owned_name,
+                            owned_value,
+                        ) as selected,
+                        patch(
+                            "defenseclaw.commands.cmd_setup._check_guardrail_setup_connector_versions",
+                            **version_kwargs,
+                        ),
+                        patch(
+                            "defenseclaw.commands.cmd_setup.execute_guardrail_setup",
+                            **execute_kwargs,
+                        ),
+                        patch(
+                            "defenseclaw.commands.cmd_setup._restart_services",
+                            **restart_kwargs,
+                        ),
+                        patch(
+                            "defenseclaw.commands.cmd_setup._restore_guardrail_secret_transaction",
+                            side_effect=restore_secret_with_concurrency_assertions,
+                        ) as secret_restore,
+                        patch(
+                            "defenseclaw.commands.cmd_setup._log_setup_action",
+                            side_effect=AssertionError("failed setup must not audit success"),
+                        ) as log_action,
+                    ):
+                        result = _invoke(args, self.app, catch=True)
+
+                    self.assertNotEqual(result.exit_code, 0)
+                    selected.assert_called_once()
+                    secret_restore.assert_called_once()
+                    log_action.assert_not_called()
+                    self.assertEqual(self.app.cfg.guardrail, prior_gc)
+                    for path, body in prior_files.items():
+                        self.assertEqual(path.read_bytes(), body)
+                    current_body = dotenv_path.read_bytes()
+                    self.assertIn(prior_dotenv, current_body)
+                    self.assertNotIn((owned_name + "=").encode(), current_body)
+                    self.assertIn((unrelated_name + "=").encode(), current_body)
+                    self.assertNotIn(owned_name, os.environ)
+                    self.assertEqual(os.environ.get(unrelated_name), unrelated_value)
+                    diagnostics = _click_result_exception_diagnostics(result)
+                    self.assertNotIn(owned_value, diagnostics)
+                    self.assertNotIn(owned_value, repr(log_action.call_args_list))
+
+    def test_windows_opencode_guardrail_selection_observes_pristine_explicit_state(self):
+        gc = self.app.cfg.guardrail
+        gc.enabled = True
+        gc.connector = "amp"
+        gc.mode = "observe"
+        gc.scanner_mode = "both"
+        gc.hilt.enabled = False
+        gc.judge.enabled = False
+        prior_gc = copy.deepcopy(gc)
+        config_path = Path(self.cfg_path)
+        secret_path = Path(self.tmp_dir, ".env")
+        prior_config = b"disposable prior config marker\n"
+        prior_secret = b"disposable secret-file marker\n"
+        atomic_write_private_bytes(str(config_path), prior_config)
+        atomic_write_private_bytes(str(secret_path), prior_secret)
+
+        def select(data_dir, connectors):
+            self.assertEqual(tuple(connectors), ("opencode",))
+            self.assertEqual(gc, prior_gc)
+            self.assertEqual(config_path.read_bytes(), prior_config)
+            self.assertEqual(secret_path.read_bytes(), prior_secret)
+            return record_test_setup_agent_selections(data_dir, connectors)
+
+        revalidate = cmd_setup._revalidate_setup_agent_selections
+        forbidden = AssertionError("generic OpenCode discovery cannot authorize guardrail setup")
+        with (
+            patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="windows"),
+            patch(
+                "defenseclaw.agent_selection.record_setup_agent_selections",
+                side_effect=select,
+            ) as selected,
+            patch(
+                "defenseclaw.commands.cmd_setup._revalidate_setup_agent_selections",
+                wraps=revalidate,
+            ) as proof_check,
+            patch(
+                "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                side_effect=forbidden,
+            ) as generic,
+            patch("defenseclaw.commands.cmd_setup._sync_guardrail_hilt_to_opa", return_value=None),
+        ):
+            result = _invoke(
+                [
+                    "guardrail",
+                    "--non-interactive",
+                    "--connector",
+                    "opencode",
+                    "--mode",
+                    "action",
+                    "--scanner-mode",
+                    "local",
+                    "--human-approval",
+                    "--judge-model",
+                    "disposable-model-marker",
+                    "--no-restart",
+                    "--no-verify",
+                ],
+                self.app,
+                catch=True,
+            )
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        selected.assert_called_once()
+        proof_check.assert_called_once()
+        generic.assert_not_called()
+        self.assertEqual(secret_path.read_bytes(), prior_secret)
+
+    def test_windows_opencode_guardrail_refusal_preserves_explicit_configured_and_picked_state(self):
+        original_cfg = copy.deepcopy(self.app.cfg)
+        cases = ("explicit", "configured", "picked")
+        for target_case in cases:
+            for mode in ("observe", "action"):
+                with self.subTest(target_case=target_case, mode=mode):
+                    self.app.cfg = copy.deepcopy(original_cfg)
+                    gc = self.app.cfg.guardrail
+                    gc.enabled = True
+                    gc.connector = "opencode" if target_case == "configured" else "openclaw"
+                    gc.mode = "observe"
+                    gc.scanner_mode = "both"
+                    gc.hilt.enabled = False
+                    gc.judge.enabled = False
+                    prior_gc = copy.deepcopy(gc)
+                    config_path = Path(self.tmp_dir, "config.yaml")
+                    secret_path = Path(self.tmp_dir, ".env")
+                    receipt_path = Path(self.tmp_dir, "agent_selection.json")
+                    lock_path = Path(self.tmp_dir, "hook_contract_lock.json")
+                    hint_path = Path(self.tmp_dir, "picked_connector")
+                    prior_files = {
+                        config_path: b"disposable prior config marker\n",
+                        secret_path: b"disposable secret-file marker\n",
+                        receipt_path: b'{"prior":"guardrail-receipt"}\n',
+                        lock_path: b'{"prior":"guardrail-lock"}\n',
+                        hint_path: (b"opencode\n" if target_case == "picked" else b"openclaw\n"),
+                    }
+                    for path, body in prior_files.items():
+                        atomic_write_private_bytes(str(path), body)
+                    forbidden = AssertionError("selection refusal must precede guardrail mutation")
+                    save = MagicMock(side_effect=forbidden)
+                    self.app.cfg.save = save  # type: ignore[assignment]
+
+                    def refuse(_data_dir, connectors, **_kwargs):
+                        self.assertEqual(tuple(connectors), ("opencode",))
+                        self.assertEqual(gc, prior_gc)
+                        self.assertEqual(config_path.read_bytes(), prior_files[config_path])
+                        self.assertEqual(secret_path.read_bytes(), prior_files[secret_path])
+                        self.assertEqual(hint_path.read_bytes(), prior_files[hint_path])
+                        atomic_write_private_bytes(str(receipt_path), b"partial receipt\n")
+                        atomic_write_private_bytes(str(lock_path), b"partial lock\n")
+                        raise click.ClickException("exact SST image refused before mutation")
+
+                    args = [
+                        "guardrail",
+                        "--non-interactive",
+                        "--mode",
+                        mode,
+                        "--scanner-mode",
+                        "local",
+                        "--human-approval",
+                        "--judge-model",
+                        "disposable-model-marker",
+                        "--no-restart",
+                        "--no-verify",
+                    ]
+                    if target_case == "explicit":
+                        args[2:2] = ["--connector", "opencode"]
+                    with (
+                        patch(
+                            "defenseclaw.commands.cmd_setup.platform_support.host_os",
+                            return_value="windows",
+                        ),
+                        patch(
+                            "defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections",
+                            side_effect=refuse,
+                        ) as selected,
+                        patch(
+                            "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                            side_effect=forbidden,
+                        ) as generic,
+                        patch(
+                            "defenseclaw.commands.cmd_setup._prompt_and_save_secret",
+                            side_effect=forbidden,
+                        ) as secret_write,
+                        patch(
+                            "defenseclaw.commands.cmd_setup._restart_services",
+                            side_effect=forbidden,
+                        ) as restart,
+                    ):
+                        result = _invoke(args, self.app, catch=True)
+
+                    self.assertNotEqual(result.exit_code, 0)
+                    self.assertIn("exact SST image refused", result.output)
+                    selected.assert_called_once()
+                    generic.assert_not_called()
+                    secret_write.assert_not_called()
+                    restart.assert_not_called()
+                    save.assert_not_called()
+                    self.assertEqual(gc, prior_gc)
+                    for path, body in prior_files.items():
+                        self.assertEqual(path.read_bytes(), body)
+
+    def test_windows_opencode_interactive_refusal_precedes_judge_secret_path(self):
+        gc = self.app.cfg.guardrail
+        gc.enabled = False
+        gc.connector = "openclaw"
+        gc.mode = "observe"
+        gc.scanner_mode = "both"
+        gc.hilt.enabled = False
+        gc.judge.enabled = False
+        prior_gc = copy.deepcopy(gc)
+        config_path = Path(self.cfg_path)
+        secret_path = Path(self.tmp_dir, ".env")
+        receipt_path = Path(self.tmp_dir, "agent_selection.json")
+        lock_path = Path(self.tmp_dir, "hook_contract_lock.json")
+        prior_files = {
+            config_path: b"disposable prior config marker\n",
+            secret_path: b"disposable secret-file marker\n",
+            receipt_path: b'{"prior":"interactive-receipt"}\n',
+            lock_path: b'{"prior":"interactive-lock"}\n',
+        }
+        for path, body in prior_files.items():
+            atomic_write_private_bytes(str(path), body)
+        forbidden = AssertionError("exact selection refusal must precede interactive policy prompts")
+
+        def refuse(_data_dir, connectors, **_kwargs):
+            self.assertEqual(tuple(connectors), ("opencode",))
+            self.assertEqual(gc, prior_gc)
+            self.assertEqual(config_path.read_bytes(), prior_files[config_path])
+            self.assertEqual(secret_path.read_bytes(), prior_files[secret_path])
+            atomic_write_private_bytes(str(receipt_path), b"partial receipt\n")
+            atomic_write_private_bytes(str(lock_path), b"partial lock\n")
+            raise click.ClickException("interactive exact SST selection refused")
+
+        with (
+            patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="windows"),
+            patch(
+                "defenseclaw.commands.cmd_setup._select_connector_interactive",
+                return_value="opencode",
+            ) as connector_choice,
+            patch(
+                "defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections",
+                side_effect=refuse,
+            ) as selected,
+            patch("defenseclaw.commands.cmd_setup.click.confirm", side_effect=forbidden) as confirm,
+            patch(
+                "defenseclaw.commands.cmd_setup._prompt_judge_model_config",
+                side_effect=forbidden,
+            ) as judge_config,
+            patch(
+                "defenseclaw.commands.cmd_setup._prompt_and_save_secret",
+                side_effect=forbidden,
+            ) as secret_write,
+        ):
+            result = _invoke(
+                ["guardrail", "--no-restart", "--no-verify"],
+                self.app,
+                catch=True,
+            )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("interactive exact SST selection refused", result.output)
+        connector_choice.assert_called_once()
+        selected.assert_called_once()
+        confirm.assert_not_called()
+        judge_config.assert_not_called()
+        secret_write.assert_not_called()
+        self.assertEqual(self.app.cfg.guardrail, prior_gc)
+        for path, body in prior_files.items():
+            self.assertEqual(path.read_bytes(), body)
+
+    def test_windows_opencode_refusal_preserves_absent_config_and_secret_files(self):
+        gc = self.app.cfg.guardrail
+        gc.enabled = True
+        gc.connector = "opencode"
+        gc.mode = "observe"
+        prior_gc = copy.deepcopy(gc)
+        config_path = Path(self.cfg_path)
+        secret_path = Path(self.tmp_dir, ".env")
+        receipt_path = Path(self.tmp_dir, "agent_selection.json")
+        lock_path = Path(self.tmp_dir, "hook_contract_lock.json")
+        self.assertFalse(os.path.lexists(config_path))
+        self.assertFalse(os.path.lexists(secret_path))
+
+        def refuse(_data_dir, connectors, **_kwargs):
+            self.assertEqual(tuple(connectors), ("opencode",))
+            self.assertEqual(gc, prior_gc)
+            self.assertFalse(os.path.lexists(config_path))
+            self.assertFalse(os.path.lexists(secret_path))
+            atomic_write_private_bytes(str(receipt_path), b"partial receipt\n")
+            atomic_write_private_bytes(str(lock_path), b"partial lock\n")
+            raise click.ClickException("absent-file exact SST selection refused")
+
+        with (
+            patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="windows"),
+            patch(
+                "defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections",
+                side_effect=refuse,
+            ),
+        ):
+            result = _invoke(
+                [
+                    "guardrail",
+                    "--non-interactive",
+                    "--mode",
+                    "action",
+                    "--no-restart",
+                    "--no-verify",
+                ],
+                self.app,
+                catch=True,
+            )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertEqual(gc, prior_gc)
+        for path in (config_path, secret_path, receipt_path, lock_path):
+            self.assertFalse(os.path.lexists(path))
+
+    def test_windows_opencode_guardrail_tampered_proof_refuses_without_late_reselection(self):
+        gc = self.app.cfg.guardrail
+        gc.enabled = True
+        gc.connector = "opencode"
+        gc.mode = "observe"
+        prior_gc = copy.deepcopy(gc)
+        config_path = Path(self.cfg_path)
+        receipt_path = Path(self.tmp_dir, "agent_selection.json")
+        lock_path = Path(self.tmp_dir, "hook_contract_lock.json")
+        prior_files = {
+            config_path: b"disposable prior config marker\n",
+            receipt_path: b'{"prior":"guardrail-receipt"}\n',
+            lock_path: b'{"prior":"guardrail-lock"}\n',
+        }
+        for path, body in prior_files.items():
+            atomic_write_private_bytes(str(path), body)
+        apply_options = cmd_setup._apply_guardrail_extra_options
+
+        def apply_then_tamper(*args, **kwargs):
+            apply_options(*args, **kwargs)
+            atomic_write_private_bytes(
+                str(receipt_path),
+                receipt_path.read_bytes() + b" ",
+            )
+
+        forbidden = AssertionError("tampered proof must refuse before config save")
+        save = MagicMock(side_effect=forbidden)
+        self.app.cfg.save = save  # type: ignore[assignment]
+        with (
+            patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="windows"),
+            patch(
+                "defenseclaw.agent_selection.record_setup_agent_selections",
+                side_effect=record_test_setup_agent_selections,
+            ) as selected,
+            patch(
+                "defenseclaw.commands.cmd_setup._apply_guardrail_extra_options",
+                side_effect=apply_then_tamper,
+            ),
+            patch(
+                "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                side_effect=forbidden,
+            ) as generic,
+            patch("defenseclaw.commands.cmd_setup._sync_guardrail_hilt_to_opa", return_value=None),
+        ):
+            result = _invoke(
+                [
+                    "guardrail",
+                    "--non-interactive",
+                    "--mode",
+                    "action",
+                    "--no-restart",
+                    "--no-verify",
+                ],
+                self.app,
+                catch=True,
+            )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("selection changed before mutation", result.output)
+        selected.assert_called_once()
+        generic.assert_not_called()
+        save.assert_not_called()
+        self.assertEqual(self.app.cfg.guardrail, prior_gc)
+        for path, body in prior_files.items():
+            self.assertEqual(path.read_bytes(), body)
+
+    def test_windows_opencode_guardrail_failure_restores_prior_in_memory_and_files(self):
+        self._seed_map("codex", "opencode")
+        self.app.cfg.guardrail.enabled = True
+        self.app.cfg.guardrail.connectors["opencode"].mode = "observe"
+        data_dir = self.app.cfg.data_dir
+        receipt_path = os.path.join(data_dir, "agent_selection.json")
+        lock_path = os.path.join(data_dir, "hook_contract_lock.json")
+        prior_config = b"prior guardrail config\n"
+        prior_receipt = b'{"prior":"guardrail-selection"}\n'
+        prior_lock = b'{"prior":"guardrail-lock"}\n'
+        atomic_write_private_bytes(self.cfg_path, prior_config)
+        atomic_write_private_bytes(receipt_path, prior_receipt)
+        atomic_write_private_bytes(lock_path, prior_lock)
+        prior_roster = tuple(self.app.cfg.active_connectors())
+        prior_mode = self.app.cfg.guardrail.effective_mode("opencode")
+        forbidden = AssertionError("guardrail selection failure must precede mutation")
+        save = MagicMock(side_effect=forbidden)
+        self.app.cfg.save = save  # type: ignore[assignment]
+
+        with (
+            patch("defenseclaw.commands.cmd_setup.platform_support.host_os", return_value="windows"),
+            patch(
+                "defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections",
+                side_effect=click.ClickException("exact SST OpenCode image is missing"),
+            ),
+            patch(
+                "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                side_effect=forbidden,
+            ) as generic,
+            patch("defenseclaw.commands.cmd_setup._add_trusted_bin_prefix", side_effect=forbidden) as trust,
+            patch("defenseclaw.commands.cmd_setup._restart_services", side_effect=forbidden) as restart,
+        ):
+            result = _invoke(
+                [
+                    "guardrail",
+                    "--non-interactive",
+                    "--connector",
+                    "opencode",
+                    "--mode",
+                    "action",
+                    "--no-restart",
+                    "--no-verify",
+                ],
+                self.app,
+                catch=True,
+            )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("exact SST OpenCode image is missing", result.output)
+        generic.assert_not_called()
+        trust.assert_not_called()
+        restart.assert_not_called()
+        save.assert_not_called()
+        self.assertEqual(tuple(self.app.cfg.active_connectors()), prior_roster)
+        self.assertEqual(self.app.cfg.guardrail.effective_mode("opencode"), prior_mode)
+        for path, payload in (
+            (self.cfg_path, prior_config),
+            (receipt_path, prior_receipt),
+            (lock_path, prior_lock),
+        ):
+            with open(path, "rb") as handle:
+                self.assertEqual(handle.read(), payload)
+
+    def test_windows_amp_admission_scan_preserves_prior_copilot_discovery(self):
+        signal = SimpleNamespace(
+            version="0.0.1785875347-gbc402f",
+            installed=True,
+            error="",
+            binary_path=r"C:\fixture\npm\amp.exe",
+        )
+        disc = SimpleNamespace(agents={"amp": signal})
+
+        with (
+            patch(
+                "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
+                return_value=disc,
+            ) as discover,
+            patch(
+                "defenseclaw.commands.cmd_setup.platform_support.host_os",
+                return_value="windows",
+            ),
+        ):
+            accepted = cmd_setup._check_connector_version_supported_for_setup(
+                "amp",
+                mode="action",
+                emit=False,
+                data_dir=self.app.cfg.data_dir,
+            )
+
+        self.assertTrue(accepted)
+        discover.assert_called_once_with(
+            use_cache=False,
+            refresh=True,
+            data_dir=self.app.cfg.data_dir,
+            persist_cache=False,
+        )
 
     def test_guardrail_action_fallback_prunes_only_refused_connector_from_judge(self):
         self._seed_map("codex", "hermes")
@@ -694,6 +3288,13 @@ class TestHelpParity(unittest.TestCase):
         out = self._help(["codex", "--help"])
         self.assertIn("proxy", out.lower())
 
+    def test_codex_help_reports_exact_versioned_event_tiers(self):
+        out = self._help(["codex", "--help"])
+        self.assertIn("0.133-0.144", out)
+        self.assertIn("eleven from 0.145", out)
+        self.assertIn("SessionEnd", out)
+        self.assertNotIn("ten on 0.133+", out)
+
 
 # ---------------------------------------------------------------------------
 # SU-11 — bare `setup` picker + scripting flags
@@ -862,7 +3463,7 @@ class TestBareSetupBatch(_BaseSetup):
 
         self.assertEqual(res.exit_code, 0, msg=res.output)
         self.assertIn("Gemini CLI: requested action mode was refused", res.output)
-        self.assertIn("Windsurf: requested action mode was refused", res.output)
+        self.assertIn("Devin Desktop — legacy Cascade: requested action mode was refused", res.output)
         gc = self.app.cfg.guardrail
         self.assertEqual(gc.effective_mode("geminicli"), "observe")
         self.assertEqual(gc.effective_mode("windsurf"), "observe")

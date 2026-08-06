@@ -1,0 +1,12 @@
+{
+  "hook_event_name": "tool.execute.before",
+  "session_id": "dc-e2e-opencode",
+  "turn_id": "dc-e2e-turn",
+  "tool_call_id": "dc-e2e-call-block",
+  "agent_name": "opencode e2e agent",
+  "agent_type": "opencode-cli",
+  "tool_name": "bash",
+  "tool_input": {
+    "command": "Get-Content -LiteralPath 'C:\\Windows\\System32\\config\\SAM'"
+  }
+}

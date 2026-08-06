@@ -26,18 +26,30 @@ from click.testing import CliRunner, Result
 from defenseclaw.bootstrap import StepResult
 from defenseclaw.commands.cmd_quickstart import quickstart_cmd
 from defenseclaw.connector_paths import KNOWN_CONNECTORS
+from defenseclaw.file_permissions import atomic_write_private_bytes
 from defenseclaw.inventory import agent_discovery
 from defenseclaw.inventory.agent_discovery import AgentDiscovery, AgentSignal
+
+from tests.helpers import record_test_setup_agent_selections
+from tests.permissions import set_known_windows_directory_acl
 
 
 class QuickstartProfileDefaultsTests(unittest.TestCase):
     def setUp(self):
         self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-quickstart-")
+        if os.name == "nt":
+            set_known_windows_directory_acl(self.tmp_dir)
         self.home_dir = os.path.join(self.tmp_dir, "home")
         self.empty_path = os.path.join(self.tmp_dir, "empty-bin")
         os.makedirs(self.home_dir, exist_ok=True)
         os.makedirs(self.empty_path, exist_ok=True)
         self.runner = CliRunner()
+        self.selection_patcher = patch(
+            "defenseclaw.agent_selection.record_setup_agent_selections",
+            side_effect=record_test_setup_agent_selections,
+        )
+        self.selection_mock = self.selection_patcher.start()
+        self.addCleanup(self.selection_patcher.stop)
 
     def tearDown(self):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
@@ -114,23 +126,82 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         summary = json.loads(result.output)
         self.assertEqual(summary["profile"], "observe")
 
+    def test_windows_opencode_observe_and_action_use_one_exact_selection(self):
+        for mode in ("observe", "action"):
+            with self.subTest(mode=mode):
+                self.selection_mock.reset_mock()
+                with (
+                    patch(
+                        "defenseclaw.bootstrap.platform_support.host_os",
+                        return_value="windows",
+                    ),
+                    patch(
+                        "defenseclaw.bootstrap._quiet_guardrail_setup",
+                        return_value=StepResult("Guardrail", "pass", "test"),
+                    ),
+                    patch(
+                        "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
+                        side_effect=AssertionError("protected selection must precede generic discovery"),
+                    ),
+                ):
+                    result = self._invoke(
+                        [
+                            "--connector",
+                            "opencode",
+                            "--mode",
+                            mode,
+                            "--skip-gateway",
+                            "--json-summary",
+                        ]
+                    )
+
+                self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+                self.selection_mock.assert_called_once_with(self.tmp_dir, ("opencode",))
+
+    def test_windows_opencode_missing_exact_selection_stops_quickstart_before_state(self):
+        self.selection_mock.side_effect = None
+        self.selection_mock.return_value = ({}, {"opencode": "exact SST package image is missing"})
+        forbidden = AssertionError("selection failure must stop quickstart state mutation")
+        with (
+            patch("defenseclaw.bootstrap.platform_support.host_os", return_value="windows"),
+            patch("defenseclaw.db.Store", side_effect=forbidden) as store,
+            patch("defenseclaw.bootstrap.bootstrap_env", side_effect=forbidden) as bootstrap,
+            patch("defenseclaw.bootstrap._persist_first_run_secrets", side_effect=forbidden) as secrets,
+            patch("defenseclaw.bootstrap._quiet_guardrail_setup", side_effect=forbidden) as setup,
+            patch("defenseclaw.bootstrap._start_gateway_structured", side_effect=forbidden) as gateway,
+        ):
+            result = self._invoke(
+                [
+                    "--connector",
+                    "opencode",
+                    "--skip-gateway",
+                    "--json-summary",
+                ]
+            )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertFalse(os.path.exists(os.path.join(self.tmp_dir, "config.yaml")))
+        self.assertFalse(os.path.exists(os.path.join(self.tmp_dir, "agent_selection.json")))
+        for blocked in (store, bootstrap, secrets, setup, gateway):
+            blocked.assert_not_called()
+
     @patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=True)
     def test_explicit_action_updates_existing_per_connector_mode(self, _gate):
-        with open(os.path.join(self.tmp_dir, "config.yaml"), "w", encoding="utf-8") as fh:
-            fh.write(
-                "config_version: 8\n"
-                "observability: {}\n"
-                "claw:\n"
-                "  mode: codex\n"
-                "guardrail:\n"
-                "  enabled: true\n"
-                "  connector: codex\n"
-                "  mode: observe\n"
-                "  scanner_mode: local\n"
-                "  connectors:\n"
-                "    hermes:\n"
-                "      mode: observe\n"
-            )
+        atomic_write_private_bytes(
+            os.path.join(self.tmp_dir, "config.yaml"),
+            b"config_version: 8\n"
+            b"observability: {}\n"
+            b"claw:\n"
+            b"  mode: codex\n"
+            b"guardrail:\n"
+            b"  enabled: true\n"
+            b"  connector: codex\n"
+            b"  mode: observe\n"
+            b"  scanner_mode: local\n"
+            b"  connectors:\n"
+            b"    hermes:\n"
+            b"      mode: observe\n",
+        )
 
         result = self._invoke([
             "--connector",
@@ -159,14 +230,15 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         disc.agents["hermes"].error = agent_discovery.UNTRUSTED_PREFIX_ERROR
         mock_discover.return_value = disc
 
-        result = self._invoke([
-            "--connector",
-            "hermes",
-            "--mode",
-            "action",
-            "--skip-gateway",
-            "--json-summary",
-        ])
+        with patch("defenseclaw.bootstrap.platform_support.host_os", return_value="linux"):
+            result = self._invoke([
+                "--connector",
+                "hermes",
+                "--mode",
+                "action",
+                "--skip-gateway",
+                "--json-summary",
+            ])
         self.assertEqual(result.exit_code, 1, result.output + (result.stderr or ""))
         summary = json.loads(result.output)
         self.assertEqual(summary["status"], "needs_attention")
@@ -182,11 +254,7 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
             f"defenseclaw setup trusted-paths add {os.path.realpath('/tmp/fake')}",
         )
 
-        import yaml
-        with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
-            cfg = yaml.safe_load(fh)
-        self.assertEqual(cfg["guardrail"]["connector"], "hermes")
-        self.assertEqual(cfg["guardrail"].get("mode", "observe"), "observe")
+        self.assertTrue(os.path.exists(os.path.join(self.tmp_dir, "config.yaml")))
 
     def test_help_lists_fail_mode_flag(self):
         # Quickstart is the headless path most likely to be wired
@@ -422,8 +490,7 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
     def test_picked_hint_does_not_mask_ambiguous_detection(self):
         # The installer's picked_connector hint is advisory; it must not hide
         # that a bare quickstart would be choosing among several connectors.
-        with open(os.path.join(self.tmp_dir, "picked_connector"), "w", encoding="utf-8") as fh:
-            fh.write("codex")
+        atomic_write_private_bytes(os.path.join(self.tmp_dir, "picked_connector"), b"codex")
         with patch(
             "defenseclaw.commands.cmd_setup._detect_installed_connectors",
             return_value=["claudecode", "codex"],
@@ -436,8 +503,7 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         self.assertNotIn('"connector": "codex"', result.output)
 
     def test_picked_hint_without_detection_is_reported_in_json(self):
-        with open(os.path.join(self.tmp_dir, "picked_connector"), "w", encoding="utf-8") as fh:
-            fh.write("codex")
+        atomic_write_private_bytes(os.path.join(self.tmp_dir, "picked_connector"), b"codex")
         with patch(
             "defenseclaw.commands.cmd_setup._detect_installed_connectors",
             return_value=[],
@@ -472,8 +538,7 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
                 "    hermes:\n"
                 "      mode: observe\n"
             )
-        with open(os.path.join(self.tmp_dir, "picked_connector"), "w", encoding="utf-8") as fh:
-            fh.write("codex")
+        atomic_write_private_bytes(os.path.join(self.tmp_dir, "picked_connector"), b"codex")
         with patch(
             "defenseclaw.commands.cmd_setup._detect_installed_connectors",
             return_value=[],

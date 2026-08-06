@@ -120,6 +120,8 @@ const maxManagedPIDRecordBytes = 64 << 10
 const (
 	managedPIDRecordReadAttempts = 50
 	managedPIDRecordReadInterval = 10 * time.Millisecond
+	stableHookChildGracePeriod   = 750 * time.Millisecond
+	stableHookSnapshotSettle     = 10 * time.Millisecond
 )
 
 func acquireSetupLock() (func() error, error) {
@@ -269,10 +271,11 @@ func managedPIDRecordPublicationInFlight(readErr, closeErr error) bool {
 // separate Lstat/GetFileAttributes/ReadFile lookups can observe three
 // different pathname states and leak a transient not-found error into Setup
 // convergence. Delete sharing lets the publisher proceed while this handle
-// keeps the verified object stable for the reader. watchdog.pid predates the
-// atomic publisher and is rewritten in place while retaining its lifetime
-// ownership lock, so its caller enables bounded JSON-syntax retries. Gateway
-// reads and every persistently malformed identity remain fail-closed.
+// keeps the verified object stable for the reader. watchdog.pid callers retain
+// bounded JSON-syntax retries for upgrade compatibility with older watchdogs
+// that rewrote their lifetime-locked record in place. Current publishers use
+// atomic replacement. Gateway reads and every persistently malformed identity
+// remain fail-closed.
 func openManagedPIDRecord(pidPath string) (*os.File, bool, error) {
 	pathPtr, err := winpath.UTF16Ptr(pidPath)
 	if err != nil {
@@ -478,6 +481,20 @@ func defaultDataRoot() (string, error) {
 
 func defaultProfileRoot() (string, error) {
 	return winpath.CurrentUserKnownFolderPath(windows.FOLDERID_Profile)
+}
+
+func officialAntigravityConfigHomeForTransaction(_ string) (string, error) {
+	// Deliberately ignore DataRoot. Current Antigravity custody is always the
+	// vendor-documented global path under the current Profile Known Folder.
+	return defaultConnectorConfigHome(filepath.Join(".gemini", "config"))
+}
+
+func defaultHermesHome() (string, error) {
+	local, err := winpath.CurrentUserKnownFolderPath(windows.FOLDERID_LocalAppData)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(local, "hermes"), nil
 }
 
 func defaultOpenClawRoot() (string, error) {
@@ -870,6 +887,330 @@ func liveProcessWithinInstallRoot(installRoot string, ignoredImages ...string) (
 			return 0, "", fmt.Errorf("advance process snapshot: %w", err)
 		}
 	}
+}
+
+type stableHookProcessEntry struct {
+	PID       uint32
+	ParentPID uint32
+}
+
+type stableHookChildProof struct {
+	child  managedProcessProof
+	parent managedProcessProof
+}
+
+func drainOwnedStableHookProcesses(installRoot, transactionID string) error {
+	paths, err := currentUserHookRuntimePaths()
+	if err != nil {
+		return err
+	}
+	state, recognized, err := hookruntime.ReadSetupPostureAt(paths, paths.Launcher)
+	if err != nil {
+		return fmt.Errorf("read disabled stable hook posture: %w", err)
+	}
+	if !recognized {
+		return errors.New("canonical stable hook runtime was not recognized while draining children")
+	}
+	// An absent HookRuntime has no executable that could still own a child. A
+	// successful Disable otherwise publishes a complete transaction-bound
+	// disabled state, so every partial posture remains a hard failure.
+	if state.Status == "" {
+		if _, statErr := os.Lstat(paths.Root); errors.Is(statErr, os.ErrNotExist) {
+			return nil
+		}
+		if _, statErr := os.Lstat(paths.Launcher); errors.Is(statErr, os.ErrNotExist) {
+			return nil
+		}
+		return errors.New("stable hook runtime did not retain authenticated disabled state")
+	}
+	if state.Status != hookruntime.StatusDisabled || state.TransactionID != transactionID {
+		return errors.New("stable hook runtime is not disabled for the current setup transaction")
+	}
+	if !state.DelegationCapable() {
+		return nil
+	}
+	wantHookPath := filepath.Join(installRoot, "bin", hookruntime.LauncherName)
+	if !pathidentity.Same(state.HookPath, wantHookPath) {
+		return errors.New("disabled stable hook runtime does not name the current install hook")
+	}
+	candidates, err := stableHookChildCandidates(paths.Launcher, state.HookPath)
+	if err != nil {
+		return err
+	}
+	if len(candidates) == 0 {
+		time.Sleep(stableHookSnapshotSettle)
+		candidates, err = stableHookChildCandidates(paths.Launcher, state.HookPath)
+		if err != nil {
+			return err
+		}
+		if len(candidates) == 0 {
+			return nil
+		}
+	}
+	closeStableHookChildProofs(candidates)
+	// Bind process termination to the same protected path, DACL, and digest that
+	// authorized delegation. The held file handle also prevents replacement
+	// while candidate PIDs and parentage are authenticated.
+	lockedHook, err := hookruntime.LockVerifiedHook(state)
+	if err != nil {
+		// Publication can replace the fixed path after every old child drained.
+		// If the candidate exited at that boundary, no termination authorization
+		// is needed and rollback can continue against the transaction-owned tree.
+		remaining, snapshotErr := stableHookChildCandidates(paths.Launcher, state.HookPath)
+		if snapshotErr != nil {
+			return snapshotErr
+		}
+		defer closeStableHookChildProofs(remaining)
+		if len(remaining) == 0 {
+			return nil
+		}
+		return fmt.Errorf("authenticate disabled stable hook target: %w", err)
+	}
+	defer lockedHook.Close()
+	return drainStableHookChildrenAt(
+		paths.Launcher,
+		state.HookPath,
+		stableHookChildGracePeriod,
+		setupExecutableReleaseTimeout,
+	)
+}
+
+func drainStableHookChildrenAt(launcherPath, hookPath string, gracePeriod, timeout time.Duration) error {
+	if !filepath.IsAbs(launcherPath) || !filepath.IsAbs(hookPath) ||
+		pathidentity.Same(launcherPath, hookPath) {
+		return errors.New("stable hook child drain requires distinct absolute executable paths")
+	}
+	if timeout <= 0 {
+		return errors.New("stable hook child drain requires a positive timeout")
+	}
+	deadline := time.Now().Add(timeout)
+	graceDeadline := time.Now().Add(gracePeriod)
+	if graceDeadline.After(deadline) {
+		graceDeadline = deadline
+	}
+	emptySnapshots := 0
+	for {
+		proofs, err := stableHookChildCandidates(launcherPath, hookPath)
+		if err != nil {
+			return err
+		}
+		if len(proofs) == 0 {
+			emptySnapshots++
+			if emptySnapshots >= 2 {
+				return nil
+			}
+			if !time.Now().Add(stableHookSnapshotSettle).Before(deadline) {
+				return errors.New("timed out confirming stable hook child quiescence")
+			}
+			time.Sleep(stableHookSnapshotSettle)
+			continue
+		}
+		emptySnapshots = 0
+		for index := range proofs {
+			proof := &proofs[index]
+			exited, waitErr := waitForStableHookChildUntil(proof.child, graceDeadline)
+			if waitErr == nil && !exited {
+				waitErr = terminateAuthenticatedStableHookChild(*proof)
+				if waitErr == nil {
+					_, waitErr = waitForStableHookChildUntil(proof.child, deadline)
+				}
+			}
+			closeErr := errors.Join(
+				closeManagedProcessProof(proof.child),
+				closeManagedProcessProof(proof.parent),
+			)
+			proof.child.ProcessHandle = 0
+			proof.parent.ProcessHandle = 0
+			if err := errors.Join(waitErr, closeErr); err != nil {
+				for remaining := index + 1; remaining < len(proofs); remaining++ {
+					_ = closeManagedProcessProof(proofs[remaining].child)
+					_ = closeManagedProcessProof(proofs[remaining].parent)
+				}
+				return err
+			}
+		}
+		if !time.Now().Before(deadline) {
+			return errors.New("timed out draining authenticated stable hook children")
+		}
+		// Disable has already linearized against every authorized CreateProcess.
+		// A repeat snapshot catches a process that entered the first snapshot at
+		// its creation boundary; no later generation can now be authorized.
+		graceDeadline = time.Now()
+	}
+}
+
+func stableHookChildCandidates(launcherPath, hookPath string) ([]stableHookChildProof, error) {
+	entries, err := snapshotStableHookProcesses()
+	if err != nil {
+		return nil, err
+	}
+	proofs := make([]stableHookChildProof, 0)
+	for _, entry := range entries {
+		if entry.PID == 0 || entry.ParentPID == 0 {
+			continue
+		}
+		child, live, err := openStableHookProcessProof(entry.PID, false)
+		if err != nil || !live {
+			continue
+		}
+		if !pathidentity.Same(child.Executable, hookPath) {
+			_ = closeManagedProcessProof(child)
+			continue
+		}
+		parent, live, err := openStableHookProcessProof(entry.ParentPID, false)
+		if err != nil || !live || !pathidentity.Same(parent.Executable, launcherPath) ||
+			!stableHookParentPrecedesChild(parent, child) {
+			_ = closeManagedProcessProof(child)
+			_ = closeManagedProcessProof(parent)
+			continue
+		}
+		terminable, live, err := openStableHookProcessProof(entry.PID, true)
+		if err != nil || !live || !sameManagedProcessProof(child, terminable) {
+			_ = closeManagedProcessProof(child)
+			_ = closeManagedProcessProof(parent)
+			_ = closeManagedProcessProof(terminable)
+			continue
+		}
+		_ = closeManagedProcessProof(child)
+		proofs = append(proofs, stableHookChildProof{child: terminable, parent: parent})
+	}
+	return proofs, nil
+}
+
+func closeStableHookChildProofs(proofs []stableHookChildProof) {
+	for _, proof := range proofs {
+		_ = closeManagedProcessProof(proof.child)
+		_ = closeManagedProcessProof(proof.parent)
+	}
+}
+
+func snapshotStableHookProcesses() ([]stableHookProcessEntry, error) {
+	snapshot, err := windows.CreateToolhelp32Snapshot(windows.TH32CS_SNAPPROCESS, 0)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot stable hook processes: %w", err)
+	}
+	defer windows.CloseHandle(snapshot)
+	entry := windows.ProcessEntry32{Size: uint32(unsafe.Sizeof(windows.ProcessEntry32{}))}
+	if err := windows.Process32First(snapshot, &entry); err != nil {
+		if errors.Is(err, windows.ERROR_NO_MORE_FILES) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("read stable hook process snapshot: %w", err)
+	}
+	entries := make([]stableHookProcessEntry, 0)
+	for {
+		entries = append(entries, stableHookProcessEntry{
+			PID:       entry.ProcessID,
+			ParentPID: entry.ParentProcessID,
+		})
+		entry.Size = uint32(unsafe.Sizeof(windows.ProcessEntry32{}))
+		if err := windows.Process32Next(snapshot, &entry); err != nil {
+			if errors.Is(err, windows.ERROR_NO_MORE_FILES) {
+				return entries, nil
+			}
+			return nil, fmt.Errorf("advance stable hook process snapshot: %w", err)
+		}
+	}
+}
+
+func openStableHookProcessProof(pid uint32, terminable bool) (managedProcessProof, bool, error) {
+	access := uint32(windows.PROCESS_QUERY_LIMITED_INFORMATION | windows.SYNCHRONIZE)
+	if terminable {
+		access |= windows.PROCESS_TERMINATE
+	}
+	handle, err := windows.OpenProcess(access, false, pid)
+	if errors.Is(err, windows.ERROR_INVALID_PARAMETER) {
+		return managedProcessProof{}, false, nil
+	}
+	if err != nil {
+		// Failure to inspect a process never authorizes termination. Any process
+		// that still locks the install remains visible to the later rename gate.
+		return managedProcessProof{}, false, nil
+	}
+	path, identity, err := processIdentityFromHandle(handle)
+	if errors.Is(err, os.ErrProcessDone) {
+		_ = windows.CloseHandle(handle)
+		return managedProcessProof{}, false, nil
+	}
+	if err != nil {
+		_ = windows.CloseHandle(handle)
+		return managedProcessProof{}, false, nil
+	}
+	return managedProcessProof{
+		PID:           pid,
+		Executable:    path,
+		StartIdentity: identity,
+		ProcessHandle: uintptr(handle),
+	}, true, nil
+}
+
+func sameManagedProcessProof(left, right managedProcessProof) bool {
+	return left.PID != 0 && left.PID == right.PID && left.StartIdentity != "" &&
+		left.StartIdentity == right.StartIdentity && pathidentity.Same(left.Executable, right.Executable)
+}
+
+func stableHookParentPrecedesChild(parent, child managedProcessProof) bool {
+	parentStarted, parentErr := strconv.ParseInt(parent.StartIdentity, 10, 64)
+	childStarted, childErr := strconv.ParseInt(child.StartIdentity, 10, 64)
+	return parentErr == nil && childErr == nil && parentStarted <= childStarted
+}
+
+func waitForStableHookChildUntil(proof managedProcessProof, deadline time.Time) (bool, error) {
+	if proof.ProcessHandle == 0 || proof.PID == 0 || proof.StartIdentity == "" ||
+		strings.TrimSpace(proof.Executable) == "" {
+		return false, errors.New("stable hook child process proof is incomplete")
+	}
+	for {
+		waitMillis := uint32(25)
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			return false, nil
+		}
+		if remaining < 25*time.Millisecond {
+			waitMillis = uint32((remaining + time.Millisecond - 1) / time.Millisecond)
+			if waitMillis == 0 {
+				waitMillis = 1
+			}
+		}
+		result, err := windows.WaitForSingleObject(windows.Handle(proof.ProcessHandle), waitMillis)
+		if err != nil {
+			return false, err
+		}
+		switch result {
+		case uint32(windows.WAIT_OBJECT_0):
+			return true, nil
+		case uint32(windows.WAIT_TIMEOUT):
+		default:
+			return false, fmt.Errorf("unexpected stable hook child wait result %#x", result)
+		}
+	}
+}
+
+func terminateAuthenticatedStableHookChild(proof stableHookChildProof) error {
+	if proof.parent.ProcessHandle == 0 || proof.parent.PID == 0 || proof.parent.StartIdentity == "" ||
+		proof.child.ProcessHandle == 0 || proof.child.PID == 0 || proof.child.StartIdentity == "" {
+		return errors.New("stable hook parent/child proof is incomplete")
+	}
+	livePath, liveIdentity, err := processIdentityFromHandle(windows.Handle(proof.child.ProcessHandle))
+	if errors.Is(err, os.ErrProcessDone) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if !pathidentity.Same(livePath, proof.child.Executable) || liveIdentity != proof.child.StartIdentity {
+		return errors.New("stable hook child identity changed before termination")
+	}
+	// Setup has already disabled the stable runtime, whose connector contract is
+	// a successful no-op. Preserve that result for the parent launcher while
+	// ending the exact in-flight child that still owns the old image mapping.
+	if err := windows.TerminateProcess(windows.Handle(proof.child.ProcessHandle), 0); err != nil {
+		if exited, waitErr := waitForStableHookChildUntil(proof.child, time.Now().Add(time.Millisecond)); waitErr == nil && exited {
+			return nil
+		}
+		return fmt.Errorf("terminate authenticated stable hook child %d: %w", proof.child.PID, err)
+	}
+	return nil
 }
 
 func pathMatchesAny(path string, candidates []string) bool {

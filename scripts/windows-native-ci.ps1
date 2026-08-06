@@ -1,4 +1,4 @@
-﻿# Copyright 2026 Cisco Systems, Inc. and its affiliates
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
 
 <#
@@ -18,7 +18,7 @@ param(
     [string]$StateRoot = (Join-Path ([IO.Path]::GetTempPath()) 'defenseclaw-windows-native-ci'),
     [string]$ArtifactRoot = '',
     [string]$DiagnosticsRoot = '',
-    [ValidateSet('codex', 'claudecode', 'amp')][string]$Connector = 'codex',
+    [ValidateSet('codex', 'claudecode', 'amp', 'copilot', 'cursor', 'hermes', 'windsurf', 'antigravity', 'opencode')][string]$Connector = 'codex',
     [switch]$AllowCurrentUserSetupAcceptance,
     [switch]$NoRun
 )
@@ -46,7 +46,8 @@ function Get-RedactionValues {
         'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'AMP_API_KEY', 'AZURE_OPENAI_API_KEY',
         'AWS_BEARER_TOKEN_BEDROCK', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY',
         'AWS_SESSION_TOKEN', 'LLM_API_KEY', 'GH_TOKEN', 'GITHUB_TOKEN',
-        'DEFENSECLAW_GATEWAY_TOKEN', 'OPENCLAW_GATEWAY_TOKEN', 'DC_E2E_TEST_SECRET'
+        'DEFENSECLAW_GATEWAY_TOKEN', 'OPENCLAW_GATEWAY_TOKEN', 'DC_E2E_TEST_SECRET',
+        'CURSOR_API_KEY'
     )
     return @($names | ForEach-Object { [Environment]::GetEnvironmentVariable($_) } |
         Where-Object { -not [string]::IsNullOrWhiteSpace($_) -and $_.Length -ge 8 } |
@@ -423,6 +424,58 @@ function Protect-TestDirectory([string]$Path) {
     [IO.FileSystemAclExtensions]::SetAccessControl($directory, $security)
 }
 
+function New-ProductPrivateTestDirectory([string]$Path) {
+    $fullPath = Assert-NoReparseAncestors $Path
+    if ([IO.Directory]::Exists($fullPath) -or [IO.File]::Exists($fullPath)) {
+        throw "refusing to replace an existing product-private test path: $fullPath"
+    }
+    $parent = [IO.Directory]::GetParent($fullPath)
+    if ($null -eq $parent -or -not $parent.Exists) {
+        throw "product-private test directory requires an existing parent: $fullPath"
+    }
+    $null = Assert-NoReparseAncestors $parent.FullName
+
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    if ($null -eq $identity.User) { throw 'current Windows identity has no user SID' }
+    $security = [Security.AccessControl.DirectorySecurity]::new()
+    $security.SetOwner($identity.User)
+    $security.SetAccessRuleProtection($true, $false)
+    $inheritance = [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+        [Security.AccessControl.InheritanceFlags]::ObjectInherit
+    $propagation = [Security.AccessControl.PropagationFlags]::None
+    $allow = [Security.AccessControl.AccessControlType]::Allow
+    $system = [Security.Principal.SecurityIdentifier]::new('S-1-5-18')
+    foreach ($sid in @($identity.User, $system)) {
+        $rule = [Security.AccessControl.FileSystemAccessRule]::new(
+            $sid,
+            [Security.AccessControl.FileSystemRights]::FullControl,
+            $inheritance,
+            $propagation,
+            $allow
+        )
+        [void]$security.AddAccessRule($rule)
+    }
+
+    # Create with the protected descriptor in the same filesystem operation;
+    # never expose a product-managed leaf with inherited general-harness writers.
+    $directory = [IO.DirectoryInfo]::new($fullPath)
+    [IO.FileSystemAclExtensions]::Create($directory, $security)
+    $null = Assert-NoReparseAncestors $fullPath
+    $directory.Refresh()
+    if (-not $directory.Exists -or
+        ($directory.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw "product-private test path is not a regular directory: $fullPath"
+    }
+    $ownerSecurity = [IO.FileSystemAclExtensions]::GetAccessControl(
+        $directory,
+        [Security.AccessControl.AccessControlSections]::Owner
+    )
+    $owner = $ownerSecurity.GetOwner([Security.Principal.SecurityIdentifier])
+    if ($null -eq $owner -or -not $owner.Equals($identity.User)) {
+        throw 'product-private test directory is not owned by the current Windows identity'
+    }
+}
+
 function Initialize-WindowsNativeTestEnvironment([string]$Root) {
     Set-CurrentUserAsDefaultOwner
     $safeRoot = Assert-SafeStateRoot $Root
@@ -499,6 +552,165 @@ function Get-WindowsNativeJsonString([object]$Object, [string]$Name) {
     $property = $Object.PSObject.Properties[$Name]
     if ($null -eq $property) { return '' }
     return [string]$property.Value
+}
+
+function ConvertFrom-WindowsNativeDoctorJson([object]$Result, [string]$Context) {
+    if ($null -eq $Result) { throw "$Context returned no process result" }
+
+    $exitCode = Get-WindowsNativeJsonString $Result 'ExitCode'
+    $stderr = Limit-WindowsNativeText (Get-WindowsNativeJsonString $Result 'StdErr') 4096
+    if ([string]::IsNullOrWhiteSpace($stderr)) { $stderr = '(empty)' }
+    $diagnostic = "process exit code ${exitCode}; bounded stderr: $stderr"
+    $stdoutProperty = $Result.PSObject.Properties['StdOut']
+    if ($null -eq $stdoutProperty -or
+        [string]::IsNullOrWhiteSpace([string]$stdoutProperty.Value)) {
+        throw "$Context emitted no Doctor JSON on stdout; $diagnostic"
+    }
+
+    try {
+        $document = [string]$stdoutProperty.Value | ConvertFrom-Json -NoEnumerate -ErrorAction Stop
+    } catch {
+        throw "$Context emitted invalid Doctor JSON: $($_.Exception.Message); $diagnostic"
+    }
+    if ($null -eq $document -or $document -isnot [pscustomobject]) {
+        throw "$Context must emit one Doctor v2 JSON object; $diagnostic"
+    }
+
+    foreach ($name in @(
+        'schema_version', 'run_id', 'mode', 'passive', 'outcome', 'exit_code',
+        'passed', 'failed', 'warned', 'skipped', 'summary', 'checks',
+        'repair_summary', 'repairs'
+    )) {
+        if ($null -eq $document.PSObject.Properties[$name]) {
+            throw "$Context Doctor v2 JSON is missing '$name'; $diagnostic"
+        }
+    }
+    $schemaVersion = 0
+    if ($document.schema_version -is [string] -or
+        -not [int]::TryParse([string]$document.schema_version, [ref]$schemaVersion) -or
+        $schemaVersion -ne 2) {
+        throw "$Context did not emit Doctor schema_version 2; $diagnostic"
+    }
+    if ($document.summary -isnot [pscustomobject] -or
+        $document.repair_summary -isnot [pscustomobject] -or
+        $document.checks -isnot [array] -or
+        $document.repairs -isnot [array]) {
+        throw "$Context Doctor v2 JSON has invalid summary/check/repair containers; $diagnostic"
+    }
+    if (@($document.checks).Count -eq 0) {
+        throw "$Context Doctor v2 JSON contains no health checks; $diagnostic"
+    }
+
+    foreach ($name in @('passed', 'failed', 'warned', 'skipped')) {
+        $topProperty = $document.PSObject.Properties[$name]
+        $summaryProperty = $document.summary.PSObject.Properties[$name]
+        $topValue = 0
+        $summaryValue = 0
+        if ($null -eq $summaryProperty -or
+            $topProperty.Value -is [string] -or $summaryProperty.Value -is [string] -or
+            -not [int]::TryParse([string]$topProperty.Value, [ref]$topValue) -or
+            -not [int]::TryParse([string]$summaryProperty.Value, [ref]$summaryValue) -or
+            $topValue -lt 0 -or $summaryValue -lt 0 -or $topValue -ne $summaryValue) {
+            throw "$Context Doctor v2 JSON has inconsistent '$name' counters; $diagnostic"
+        }
+    }
+    foreach ($check in @($document.checks)) {
+        if ($null -eq $check -or $check -isnot [pscustomobject] -or
+            $null -eq $check.PSObject.Properties['status'] -or
+            $null -eq $check.PSObject.Properties['label'] -or
+            $null -eq $check.PSObject.Properties['detail'] -or
+            [string]::IsNullOrWhiteSpace([string]$check.label) -or
+            [string]$check.status -notin @('pass', 'fail', 'warn', 'skip')) {
+            throw "$Context Doctor v2 JSON contains an invalid health-check row; $diagnostic"
+        }
+    }
+
+    $payloadExitCode = -1
+    $processExitCode = -1
+    if ($document.exit_code -is [string] -or
+        -not [int]::TryParse([string]$document.exit_code, [ref]$payloadExitCode) -or
+        -not [int]::TryParse($exitCode, [ref]$processExitCode) -or
+        $payloadExitCode -notin @(0, 1) -or $payloadExitCode -ne $processExitCode) {
+        throw "$Context Doctor v2 exit_code disagrees with the process result; $diagnostic"
+    }
+    return $document
+}
+
+function Test-WindowsNativeDoctorJsonParser {
+    $healthyPayload = [ordered]@{
+        schema_version = 2
+        run_id = 'doctor-parser-fixture'
+        mode = 'check'
+        passive = $false
+        outcome = 'healthy'
+        exit_code = 0
+        passed = 1
+        failed = 0
+        warned = 0
+        skipped = 0
+        summary = [ordered]@{ passed = 1; failed = 0; warned = 0; skipped = 0 }
+        checks = @([ordered]@{ status = 'pass'; label = 'Fixture'; detail = 'healthy' })
+        repair_summary = [ordered]@{}
+        repairs = @()
+    }
+    $healthyResult = [pscustomobject]@{
+        ExitCode = 0
+        StdOut = $healthyPayload | ConvertTo-Json -Compress -Depth 6
+        StdErr = ''
+    }
+    $healthy = ConvertFrom-WindowsNativeDoctorJson $healthyResult 'healthy fixture'
+    if (@($healthy.checks).Count -ne 1 -or [string]$healthy.checks[0].status -ne 'pass') {
+        throw 'Doctor JSON parser did not preserve a healthy check row'
+    }
+
+    $failedPayload = [ordered]@{} + $healthyPayload
+    $failedPayload.outcome = 'failed'
+    $failedPayload.exit_code = 1
+    $failedPayload.passed = 0
+    $failedPayload.failed = 1
+    $failedPayload.summary = [ordered]@{ passed = 0; failed = 1; warned = 0; skipped = 0 }
+    $failedPayload.checks = @([ordered]@{ status = 'fail'; label = 'Fixture'; detail = 'unhealthy' })
+    $failedResult = [pscustomobject]@{
+        ExitCode = 1
+        StdOut = $failedPayload | ConvertTo-Json -Compress -Depth 6
+        StdErr = ''
+    }
+    $failed = ConvertFrom-WindowsNativeDoctorJson $failedResult 'failed fixture'
+    if ([int]$failed.failed -ne 1 -or [string]$failed.checks[0].status -ne 'fail') {
+        throw 'Doctor JSON parser did not preserve a failed check row'
+    }
+
+    $stderrMarker = 'fixture Doctor child failed before JSON'
+    $emptyFailedLoud = $false
+    try {
+        ConvertFrom-WindowsNativeDoctorJson ([pscustomobject]@{
+            ExitCode = 1
+            StdOut = ''
+            StdErr = $stderrMarker
+        }) 'empty fixture' | Out-Null
+    } catch {
+        $emptyFailedLoud = $_.Exception.Message.Contains('no Doctor JSON') -and
+            $_.Exception.Message.Contains($stderrMarker)
+    }
+    if (-not $emptyFailedLoud) {
+        throw 'Doctor JSON parser did not expose bounded stderr for empty stdout'
+    }
+
+    foreach ($stdout in @('{}', '[]', 'null')) {
+        $invalidRejected = $false
+        try {
+            ConvertFrom-WindowsNativeDoctorJson ([pscustomobject]@{
+                ExitCode = 1
+                StdOut = $stdout
+                StdErr = 'invalid fixture stderr'
+            }) 'invalid fixture' | Out-Null
+        } catch {
+            $invalidRejected = $_.Exception.Message.Contains('bounded stderr')
+        }
+        if (-not $invalidRejected) {
+            throw "Doctor JSON parser accepted an invalid top-level payload: $stdout"
+        }
+    }
 }
 
 function Get-GoTestFailureSummary(
@@ -1811,14 +2023,7 @@ function Assert-PackagedDoctorSmoke([string]$CliShim, [string]$Logs) {
     # not an artificially green result before lifecycle acceptance starts it.
     $doctor = Invoke-Installed $CliShim @('doctor', '--json-output') @(0, 1) 300 `
         (Join-Path $Logs 'doctor.json')
-    try { $report = $doctor.StdOut | ConvertFrom-Json -ErrorAction Stop }
-    catch { throw "packaged doctor did not emit valid JSON: $($_.Exception.Message)" }
-    if ($null -eq $report.checks -or @($report.checks).Count -eq 0) {
-        throw 'packaged doctor emitted no health checks'
-    }
-    if (($doctor.ExitCode -eq 0) -ne ([int]$report.failed -eq 0)) {
-        throw 'packaged doctor exit code disagrees with its failed-check count'
-    }
+    ConvertFrom-WindowsNativeDoctorJson $doctor 'packaged doctor' | Out-Null
 }
 
 function Get-ManagedProcessIdentity([string]$DataDir, [string]$PIDFileName) {
@@ -2102,6 +2307,1004 @@ print(f'packaged gateway fixture uses isolated API port {cfg.gateway.api_port}')
 '@
     Invoke-Installed $Python @('-I', '-c', $code, $apiPort) -Timeout 60 | Out-Null
     return $apiPort
+}
+
+function Start-SetupAcceptanceOtlpCollector(
+    [string]$PowerShell,
+    [string]$ReadyPath,
+    [string]$OutcomePath = ''
+) {
+    $ready = [IO.Path]::GetFullPath($ReadyPath)
+    if (Test-Path -LiteralPath $ready) {
+        throw "refusing to overwrite an existing Setup OTLP fixture ready file: $ready"
+    }
+    $readyParent = [IO.Path]::GetDirectoryName($ready)
+    if (-not (Test-Path -LiteralPath $readyParent -PathType Container)) {
+        throw "Setup OTLP fixture ready directory does not exist: $readyParent"
+    }
+    if (-not (Test-Path -LiteralPath $PowerShell -PathType Leaf)) {
+        throw "Setup OTLP fixture PowerShell does not exist: $PowerShell"
+    }
+    if ([string]::IsNullOrWhiteSpace($OutcomePath)) {
+        $OutcomePath = [IO.Path]::ChangeExtension($ready, '.requests.log')
+    }
+    $outcome = [IO.Path]::GetFullPath($OutcomePath)
+    if (Test-Path -LiteralPath $outcome) {
+        throw "refusing to overwrite an existing Setup OTLP fixture outcome ledger: $outcome"
+    }
+    $outcomeParent = [IO.Path]::GetDirectoryName($outcome)
+    if (-not (Test-Path -LiteralPath $outcomeParent -PathType Container)) {
+        throw "Setup OTLP fixture outcome directory does not exist: $outcomeParent"
+    }
+    $code = @'
+param(
+    [Parameter(Mandatory)][string]$ReadyPath,
+    [Parameter(Mandatory)][string]$OutcomePath
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+$handler = {
+    param(
+        [Parameter(Mandatory)][Net.Sockets.TcpClient]$Client,
+        [Parameter(Mandatory)][string]$OutcomePath,
+        [Parameter(Mandatory)][object]$LedgerLock,
+        [Parameter(Mandatory)][ValidateSet('preflight', 'runtime')][string]$Phase
+    )
+
+    Set-StrictMode -Version Latest
+    $ErrorActionPreference = 'Stop'
+    $signal = 'unknown'
+    $contentLength = -1L
+    $drained = 0L
+    $outcome = 'exception'
+    try {
+        $Client.ReceiveTimeout = 5000
+        $Client.SendTimeout = 5000
+        $stream = $Client.GetStream()
+        $headerBytes = [Collections.Generic.List[byte]]::new()
+        $headerComplete = $false
+        while ($headerBytes.Count -lt 65536) {
+            $next = $stream.ReadByte()
+            if ($next -lt 0) { break }
+            $headerBytes.Add([byte]$next)
+            $count = $headerBytes.Count
+            if ($count -ge 4 -and
+                $headerBytes[$count - 4] -eq 13 -and
+                $headerBytes[$count - 3] -eq 10 -and
+                $headerBytes[$count - 2] -eq 13 -and
+                $headerBytes[$count - 1] -eq 10) {
+                $headerComplete = $true
+                break
+            }
+        }
+        $header = [Text.Encoding]::ASCII.GetString($headerBytes.ToArray())
+        if ($header -match '(?m)^POST [^ ]*/v1/(logs|metrics|traces)/?(?:\?[^ ]*)? HTTP/1\.[01]\r?$') {
+            $signal = $Matches[1].ToLowerInvariant()
+        }
+        if (-not $headerComplete) {
+            $outcome = 'header_limit'
+            return
+        }
+        if ($header -notmatch '(?im)^Content-Length:\s*([0-9]+)\s*$') {
+            $outcome = 'content_length_missing'
+            return
+        }
+        $length = [uint64]$Matches[1]
+        $contentLength = [int64]$length
+        if ($length -gt 16MB) {
+            $outcome = 'body_limit'
+            return
+        }
+        if ($header -match '(?im)^Expect:\s*100-continue\s*$') {
+            $continue = [Text.Encoding]::ASCII.GetBytes("HTTP/1.1 100 Continue`r`n`r`n")
+            $stream.Write($continue, 0, $continue.Length)
+        }
+        $buffer = [byte[]]::new(65536)
+        $remaining = $length
+        while ($remaining -gt 0) {
+            $requested = [int][Math]::Min([uint64]$buffer.Length, $remaining)
+            $read = $stream.Read($buffer, 0, $requested)
+            if ($read -le 0) { throw 'Setup OTLP fixture request body ended early' }
+            $remaining -= [uint64]$read
+            $drained += [int64]$read
+        }
+        $response = [Text.Encoding]::ASCII.GetBytes(
+            "HTTP/1.1 200 OK`r`nContent-Type: application/x-protobuf`r`nContent-Length: 0`r`nConnection: close`r`n`r`n"
+        )
+        $stream.Write($response, 0, $response.Length)
+        $stream.Flush()
+        $outcome = 'http_200'
+    } catch {
+        $outcome = 'exception_' + $_.Exception.GetType().Name
+        throw
+    } finally {
+        try {
+            [Threading.Monitor]::Enter($LedgerLock)
+            try {
+                $ledger = Get-Item -LiteralPath $OutcomePath -ErrorAction Stop
+                $row = '{0}|phase={1}|signal={2}|content_length={3}|drained={4}|outcome={5}' -f @(
+                    [DateTime]::UtcNow.ToString('o'), $Phase, $signal,
+                    $contentLength, $drained, $outcome
+                )
+                $rowBytes = [Text.Encoding]::UTF8.GetBytes($row + "`n")
+                if ($ledger.Length + $rowBytes.Length -le 524288) {
+                    $append = [IO.FileStream]::new(
+                        $OutcomePath,
+                        [IO.FileMode]::Append,
+                        [IO.FileAccess]::Write,
+                        [IO.FileShare]::Read
+                    )
+                    try {
+                        $append.Write($rowBytes, 0, $rowBytes.Length)
+                        $append.Flush()
+                    } finally {
+                        $append.Dispose()
+                    }
+                }
+            } finally {
+                [Threading.Monitor]::Exit($LedgerLock)
+            }
+        } catch {
+            # Request diagnostics must never change the bounded collector's
+            # transport outcome after its writeability was proven at startup.
+        }
+        $Client.Dispose()
+    }
+}
+$runspacePool = [Management.Automation.Runspaces.RunspaceFactory]::CreateRunspacePool(1, 8)
+$workers = [Collections.Generic.List[object]]::new()
+$ledgerLock = [object]::new()
+try {
+    $ledgerStream = [IO.FileStream]::new(
+        $OutcomePath,
+        [IO.FileMode]::CreateNew,
+        [IO.FileAccess]::Write,
+        [IO.FileShare]::Read
+    )
+    try {
+        $ledgerHeader = [Text.Encoding]::ASCII.GetBytes("schema=1`n")
+        $ledgerStream.Write($ledgerHeader, 0, $ledgerHeader.Length)
+        $ledgerStream.Flush($true)
+    } finally {
+        $ledgerStream.Dispose()
+    }
+    $runspacePool.Open()
+    $listener.Start()
+    $port = ([Net.IPEndPoint]$listener.LocalEndpoint).Port
+
+    # Opening a runspace pool proves only that its minimum worker exists. Warm
+    # the complete bounded capacity before advertising the fixture so a strict
+    # gateway activation cannot be the first operation to pay for hosted-runner
+    # runspace creation. Every warmup is completed and disposed before the
+    # listener becomes externally ready.
+    $warmups = [Collections.Generic.List[object]]::new()
+    $warmupEntered = [Threading.CountdownEvent]::new(8)
+    $warmupRelease = [Threading.ManualResetEventSlim]::new($false)
+    $warmupCode = @(
+        'param([Threading.CountdownEvent]$Entered, [Threading.ManualResetEventSlim]$Release, [int]$Index);',
+        'if ($Index -lt 0 -or $Index -ge 8) { throw "invalid Setup OTLP warmup index" };',
+        '$Entered.Signal();',
+        'if (-not $Release.Wait(5000)) { throw "Setup OTLP warmup release timed out" }'
+    ) -join ' '
+    try {
+        for ($index = 0; $index -lt 8; $index++) {
+            $warmup = [Management.Automation.PowerShell]::Create()
+            try {
+                $warmup.RunspacePool = $runspacePool
+                [void]$warmup.AddScript($warmupCode).AddArgument($warmupEntered).AddArgument($warmupRelease).AddArgument($index)
+                $warmupHandle = $warmup.BeginInvoke()
+                [void]$warmups.Add([pscustomobject]@{
+                    PowerShell = $warmup
+                    Handle = $warmupHandle
+                })
+                $warmup = $null
+            } finally {
+                if ($null -ne $warmup) { $warmup.Dispose() }
+            }
+        }
+        if (-not $warmupEntered.Wait(5000)) {
+            throw 'Setup OTLP fixture did not enter all eight bounded runspaces'
+        }
+        $warmupRelease.Set()
+        foreach ($entry in $warmups) {
+            if (-not $entry.Handle.AsyncWaitHandle.WaitOne(5000)) {
+                throw 'Setup OTLP fixture runspace warmup timed out'
+            }
+            [void]$entry.PowerShell.EndInvoke($entry.Handle)
+        }
+    } finally {
+        $warmupRelease.Set()
+        foreach ($entry in $warmups) {
+            if (-not $entry.Handle.IsCompleted) {
+                try { $entry.PowerShell.Stop() } catch {}
+            }
+            try { $entry.Handle.AsyncWaitHandle.Dispose() } catch {}
+            try { $entry.PowerShell.Dispose() } catch {}
+        }
+        $warmupRelease.Dispose()
+        $warmupEntered.Dispose()
+    }
+
+    # Exercise the actual worker handler for every OTLP signal through the
+    # bound loopback socket before atomically publishing readiness. A listener
+    # that cannot accept, drain, and acknowledge a request must never become a
+    # valid migration destination.
+    $expectedResponse = "HTTP/1.1 200 OK`r`nContent-Type: application/x-protobuf`r`nContent-Length: 0`r`nConnection: close`r`n`r`n"
+    foreach ($signal in @('logs', 'metrics', 'traces')) {
+        $probeClient = [Net.Sockets.TcpClient]::new()
+        $serverClient = $null
+        $probeWorker = $null
+        $probeHandle = $null
+        try {
+            $probeClient.ReceiveTimeout = 5000
+            $probeClient.SendTimeout = 5000
+            $probeClient.Connect([Net.IPAddress]::Loopback, $port)
+            $serverClient = $listener.AcceptTcpClient()
+            $probeWorker = [Management.Automation.PowerShell]::Create()
+            $probeWorker.RunspacePool = $runspacePool
+            [void]$probeWorker.AddScript($handler.ToString()).AddArgument($serverClient).
+                AddArgument($OutcomePath).AddArgument($ledgerLock).AddArgument('preflight')
+            $probeHandle = $probeWorker.BeginInvoke()
+            $serverClient = $null
+
+            $request = [Text.Encoding]::ASCII.GetBytes(
+                "POST /v1/$signal HTTP/1.1`r`nHost: 127.0.0.1:$port`r`nContent-Type: application/x-protobuf`r`nContent-Length: 0`r`nConnection: close`r`n`r`n"
+            )
+            $probeStream = $probeClient.GetStream()
+            $probeStream.Write($request, 0, $request.Length)
+            $probeStream.Flush()
+            $responseBytes = [Collections.Generic.List[byte]]::new()
+            while ($responseBytes.Count -lt 65536) {
+                $next = $probeStream.ReadByte()
+                if ($next -lt 0) { break }
+                $responseBytes.Add([byte]$next)
+            }
+            $response = [Text.Encoding]::ASCII.GetString($responseBytes.ToArray())
+            if ($response -cne $expectedResponse) {
+                throw "Setup OTLP fixture $signal worker returned an invalid response"
+            }
+            if (-not $probeHandle.AsyncWaitHandle.WaitOne(5000)) {
+                throw "Setup OTLP fixture $signal worker did not complete"
+            }
+            [void]$probeWorker.EndInvoke($probeHandle)
+        } finally {
+            if ($null -ne $probeHandle) {
+                try { $probeHandle.AsyncWaitHandle.Dispose() } catch {}
+            }
+            if ($null -ne $probeWorker) { $probeWorker.Dispose() }
+            if ($null -ne $serverClient) { $serverClient.Dispose() }
+            $probeClient.Dispose()
+        }
+    }
+
+    $readyStream = [IO.FileStream]::new(
+        $ReadyPath,
+        [IO.FileMode]::CreateNew,
+        [IO.FileAccess]::Write,
+        [IO.FileShare]::None
+    )
+    try {
+        $readyBytes = [Text.Encoding]::ASCII.GetBytes([string]$port)
+        $readyStream.Write($readyBytes, 0, $readyBytes.Length)
+        $readyStream.Flush($true)
+    } finally {
+        $readyStream.Dispose()
+    }
+
+    while ($true) {
+        for ($index = $workers.Count - 1; $index -ge 0; $index--) {
+            $entry = $workers[$index]
+            if (-not $entry.Handle.IsCompleted) { continue }
+            try {
+                $entry.PowerShell.EndInvoke($entry.Handle)
+            } catch {
+                # A reset, timeout, or malformed request is isolated to its client.
+            } finally {
+                $entry.PowerShell.Dispose()
+                $entry.Handle.AsyncWaitHandle.Dispose()
+                $workers.RemoveAt($index)
+            }
+        }
+        if ($workers.Count -ge 8) {
+            [void]$workers[0].Handle.AsyncWaitHandle.WaitOne(100)
+            continue
+        }
+        $client = $listener.AcceptTcpClient()
+        $worker = [Management.Automation.PowerShell]::Create()
+        try {
+            $worker.RunspacePool = $runspacePool
+            [void]$worker.AddScript($handler.ToString()).AddArgument($client).
+                AddArgument($OutcomePath).AddArgument($ledgerLock).AddArgument('runtime')
+            $handle = $worker.BeginInvoke()
+            [void]$workers.Add([pscustomobject]@{
+                PowerShell = $worker
+                Handle = $handle
+            })
+            $client = $null
+            $worker = $null
+        } finally {
+            if ($null -ne $worker) { $worker.Dispose() }
+            if ($null -ne $client) {
+                $client.Dispose()
+            }
+        }
+    }
+} finally {
+    $listener.Stop()
+    foreach ($entry in $workers) {
+        try { $entry.PowerShell.Stop() } catch {}
+        try { $entry.PowerShell.Dispose() } catch {}
+        try { $entry.Handle.AsyncWaitHandle.Dispose() } catch {}
+    }
+    $runspacePool.Dispose()
+}
+'@
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = [IO.Path]::GetFullPath($PowerShell)
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.ArgumentList.Add('-NoLogo')
+    $startInfo.ArgumentList.Add('-NoProfile')
+    $startInfo.ArgumentList.Add('-NonInteractive')
+    $startInfo.ArgumentList.Add('-CommandWithArgs')
+    $startInfo.ArgumentList.Add($code)
+    $startInfo.ArgumentList.Add('-ReadyPath')
+    $startInfo.ArgumentList.Add($ready)
+    $startInfo.ArgumentList.Add('-OutcomePath')
+    $startInfo.ArgumentList.Add($outcome)
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    $started = $false
+    try {
+        $started = $process.Start()
+        if (-not $started) {
+            throw 'failed to start the Setup OTLP fixture process'
+        }
+        $deadline = [DateTime]::UtcNow.AddSeconds(10)
+        $rawPort = $null
+        while ($null -eq $rawPort) {
+            $process.Refresh()
+            if ($process.HasExited) {
+                throw "Setup OTLP fixture exited before readiness with code $($process.ExitCode)"
+            }
+            if (Test-Path -LiteralPath $ready -PathType Leaf) {
+                try {
+                    $rawPort = [IO.File]::ReadAllText($ready, [Text.Encoding]::ASCII).Trim()
+                    continue
+                } catch [IO.IOException] {
+                    # CreateNew plus FileShare.None makes publication atomic;
+                    # wait until the child has flushed and released the file.
+                }
+            }
+            if ([DateTime]::UtcNow -ge $deadline) {
+                throw 'timed out waiting for the Setup OTLP fixture ready file'
+            }
+            Start-Sleep -Milliseconds 50
+        }
+        if ($rawPort -notmatch '^[0-9]{1,5}$') {
+            throw "Setup OTLP fixture returned an invalid port: $rawPort"
+        }
+        $port = [int]$rawPort
+        if ($port -lt 1 -or $port -gt 65535) {
+            throw "Setup OTLP fixture returned an out-of-range port: $port"
+        }
+        $listeners = @()
+        do {
+            $process.Refresh()
+            if ($process.HasExited) {
+                throw "Setup OTLP fixture exited during listener verification with code $($process.ExitCode)"
+            }
+            $listeners = @(Get-NetTCPConnection -State Listen -LocalAddress '127.0.0.1' `
+                -LocalPort $port -ErrorAction SilentlyContinue)
+            if ($listeners.Count -eq 1 -and [int]$listeners[0].OwningProcess -eq $process.Id) {
+                break
+            }
+            if ([DateTime]::UtcNow -ge $deadline) {
+                $owners = @($listeners | Select-Object -ExpandProperty OwningProcess -Unique)
+                throw "Setup OTLP fixture listener ownership mismatch for port ${port}: expected PID $($process.Id), observed $($owners -join ',')"
+            }
+            Start-Sleep -Milliseconds 50
+        } while ($true)
+        return [pscustomobject]@{
+            Process = $process
+            Port = $port
+            ReadyPath = $ready
+        }
+    } catch {
+        $failure = $_
+        try {
+            if ($started) {
+                $process.Refresh()
+            }
+            if ($started -and -not $process.HasExited) {
+                $process.Kill($true)
+                $process.WaitForExit(5000) | Out-Null
+            }
+        } finally {
+            $process.Dispose()
+            Remove-Item -LiteralPath $ready -Force -ErrorAction SilentlyContinue
+        }
+        throw $failure
+    }
+}
+
+function Stop-SetupAcceptanceOtlpCollector([AllowNull()][object]$Collector) {
+    if ($null -eq $Collector) { return }
+    $process = [Diagnostics.Process]$Collector.Process
+    $ready = [string]$Collector.ReadyPath
+    try {
+        $process.Refresh()
+        if (-not $process.HasExited) {
+            $process.Kill($true)
+            if (-not $process.WaitForExit(5000)) {
+                throw "timed out stopping Setup OTLP fixture PID $($process.Id)"
+            }
+        }
+    } finally {
+        $process.Dispose()
+        Remove-Item -LiteralPath $ready -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Start-SetupAcceptanceHealthSampler(
+    [string]$PowerShell,
+    [string]$OutcomePath,
+    [string]$DataRoot,
+    [int]$ApiPort,
+    [object]$PriorGateway,
+    [string]$ExpectedGateway,
+    [string]$InstallRoot
+) {
+    $hostPowerShell = [IO.Path]::GetFullPath($PowerShell)
+    $outcome = [IO.Path]::GetFullPath($OutcomePath)
+    $data = [IO.Path]::GetFullPath($DataRoot)
+    $expected = [IO.Path]::GetFullPath($ExpectedGateway)
+    if (-not (Test-Path -LiteralPath $hostPowerShell -PathType Leaf) -or
+        (Test-PathWithinOrEqual $hostPowerShell ([IO.Path]::GetFullPath($InstallRoot)))) {
+        throw 'Setup health sampler requires host PowerShell outside the installed tree'
+    }
+    if (Test-Path -LiteralPath $outcome) {
+        throw "refusing to overwrite Setup health diagnostics: $outcome"
+    }
+    if ($ApiPort -lt 1 -or $ApiPort -gt 65535 -or
+        [int]$PriorGateway.ProcessId -le 0 -or
+        [string]::IsNullOrWhiteSpace([string]$PriorGateway.StartIdentity)) {
+        throw 'Setup health sampler requires a valid API port and exact prior gateway identity'
+    }
+    $code = @'
+param($OutcomePath, $DataRoot, $ApiPort, $PriorPID, $PriorIdentity, $ExpectedGateway)
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$utf8 = [Text.UTF8Encoding]::new($false)
+$pidPath = Join-Path $DataRoot 'gateway.pid'
+$jsonlPath = Join-Path $DataRoot 'gateway.jsonl'
+# Initialize the NetTCPIP command and its CIM provider before publishing sampler
+# readiness so their fresh-process cost cannot consume the sample deadline.
+$null = @(Get-NetTCPConnection -State Listen -LocalAddress '127.0.0.1' -LocalPort $ApiPort -ErrorAction Stop)
+$stream = [IO.FileStream]::new($OutcomePath, 'CreateNew', 'Write', 'Read')
+try {
+    $header = $utf8.GetBytes("schema=1`n")
+    $stream.Write($header, 0, $header.Length)
+    $stream.Flush($true)
+    $last = ''
+    while ($true) {
+        $stage = 'pid_file'
+        $category = 'unavailable_or_invalid'
+        try {
+            if ((Get-Item -LiteralPath $pidPath -ErrorAction Stop).Length -gt 16384) { throw 'pid bound' }
+            $identity = [IO.File]::ReadAllText($pidPath, $utf8) | ConvertFrom-Json -ErrorAction Stop
+            $stage = 'identity'
+            $category = 'invalid_or_mismatch'
+            $gatewayPID = [int]$identity.pid
+            $startIdentity = [string]$identity.start_identity
+            if ($gatewayPID -le 0 -or $startIdentity -cnotmatch '^[0-9]+$' -or
+                ($gatewayPID -eq $PriorPID -and $startIdentity -ceq $PriorIdentity) -or
+                -not ([IO.Path]::GetFullPath([string]$identity.executable)).Equals(
+                    $ExpectedGateway, [StringComparison]::OrdinalIgnoreCase)) { throw 'identity mismatch' }
+            $stage = 'process'
+            $category = 'unavailable_or_mismatch'
+            $process = Get-Process -Id $gatewayPID -ErrorAction Stop
+            if (-not ([IO.Path]::GetFullPath($process.Path)).Equals(
+                $ExpectedGateway, [StringComparison]::OrdinalIgnoreCase)) { throw 'image mismatch' }
+            $unixTicks = [long](
+                $process.StartTime.ToUniversalTime().Ticks - [DateTime]::UnixEpoch.Ticks
+            )
+            $liveStartIdentity = ([long]($unixTicks * 100)).ToString(
+                [Globalization.CultureInfo]::InvariantCulture
+            )
+            if ($liveStartIdentity -cne $startIdentity) { throw 'reused pid' }
+            $stage = 'listener'
+            $category = 'unavailable_or_mismatch'
+            $listeners = @(Get-NetTCPConnection -State Listen -LocalAddress '127.0.0.1' `
+                -LocalPort $ApiPort -ErrorAction Stop)
+            if ($listeners.Count -ne 1 -or [int]$listeners[0].OwningProcess -ne $gatewayPID) {
+                throw 'listener mismatch'
+            }
+            $stage = 'health'
+            $category = 'unavailable_or_invalid'
+            $health = Invoke-RestMethod -Uri "http://127.0.0.1:$ApiPort/health" `
+                -TimeoutSec 1 -MaximumRedirection 0
+            $startedAt = [datetime]::Parse(
+                [string]$health.started_at,
+                [Globalization.CultureInfo]::InvariantCulture,
+                [Globalization.DateTimeStyles]::RoundtripKind
+            )
+            if ($startedAt.ToUniversalTime() -lt $process.StartTime.ToUniversalTime().AddSeconds(-2)) {
+                throw 'generation mismatch'
+            }
+            $healthConfigGeneration = [int]$health.telemetry.details.generation
+            $stage = 'event_correlation'
+            $category = 'unavailable_or_mismatch'
+            $event = $null
+            foreach ($line in @(Get-Content -LiteralPath $jsonlPath -Tail 8 -Encoding UTF8)) {
+                if ($utf8.GetByteCount($line) -gt 65536) { continue }
+                try { $candidate = $line | ConvertFrom-Json -ErrorAction Stop } catch { continue }
+                if ([string]$candidate.correlation.run_id -cnotmatch '^[0-9a-f-]{36}$' -or
+                    [string]$candidate.correlation.sidecar_instance_id -cnotmatch '^[0-9a-f-]{36}$' -or
+                    [int]$candidate.provenance.config_generation -ne $healthConfigGeneration) { continue }
+                $eventTimeProperty = $candidate.PSObject.Properties['observed_at']
+                if ($null -eq $eventTimeProperty) {
+                    $eventTimeProperty = $candidate.PSObject.Properties['timestamp']
+                }
+                if ($null -eq $eventTimeProperty) { continue }
+                $eventTime = [datetime]::MinValue
+                if (-not [datetime]::TryParse(
+                    [string]$eventTimeProperty.Value,
+                    [Globalization.CultureInfo]::InvariantCulture,
+                    [Globalization.DateTimeStyles]::RoundtripKind,
+                    [ref]$eventTime
+                )) { continue }
+                # Both timestamps originate in the new process; 250 ms only
+                # accommodates serialization/scheduling order at startup.
+                if ($eventTime.ToUniversalTime() -lt $startedAt.ToUniversalTime().AddMilliseconds(-250)) { continue }
+                $event = $candidate
+            }
+            if ($null -eq $event) { throw 'run correlation unavailable' }
+            $stage = 'projection'
+            $category = 'schema_mismatch'
+            $destinations = @($health.telemetry.details.destinations | ForEach-Object {
+                $reasonProperty = $_.PSObject.Properties['reason']
+                $labels = @(
+                    [string]$_.name, [string]$_.kind, [string]$_.state,
+                    $(if ($null -eq $reasonProperty) { '' } else { [string]$reasonProperty.Value })
+                )
+                [ordered]@{
+                    name = if ($labels[0] -cmatch '^[a-z0-9_.-]{0,64}$') { $labels[0] } else { 'redacted' }
+                    kind = if ($labels[1] -cmatch '^[a-z0-9_.-]{0,64}$') { $labels[1] } else { 'redacted' }
+                    state = if ($labels[2] -cmatch '^[a-z0-9_.-]{0,64}$') { $labels[2] } else { 'redacted' }
+                    reason = if ($labels[3] -cmatch '^[a-z0-9_.-]{0,64}$') { $labels[3] } else { 'redacted' }
+                    generation = [int]$_.generation
+                }
+            })
+            $lastErrorDigest = ''
+            $lastErrorProperty = $health.telemetry.PSObject.Properties['last_error']
+            $lastError = if ($null -eq $lastErrorProperty) { '' } else { [string]$lastErrorProperty.Value }
+            if (-not [string]::IsNullOrWhiteSpace($lastError)) {
+                $bytes = $utf8.GetBytes($lastError)
+                $lastErrorDigest = '{0}:{1}' -f $bytes.Length,
+                    [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant()
+            }
+            $telemetryState = [string]$health.telemetry.state
+            $retentionState = [string]$health.telemetry.details.retention_state
+            if ($telemetryState -cnotmatch '^[a-z0-9_.-]{0,64}$') { $telemetryState = 'redacted' }
+            if ($retentionState -cnotmatch '^[a-z0-9_.-]{0,64}$') { $retentionState = 'redacted' }
+            $record = [ordered]@{
+                observed_at = [DateTime]::UtcNow.ToString('o')
+                gateway_pid = $gatewayPID
+                gateway_start_identity = $startIdentity
+                listener_pid = [int]$listeners[0].OwningProcess
+                health_started_at = $startedAt.ToUniversalTime().ToString('o')
+                run_id = [string]$event.correlation.run_id
+                sidecar_instance_id = [string]$event.correlation.sidecar_instance_id
+                event_config_generation = [int]$event.provenance.config_generation
+                health_telemetry_generation = $healthConfigGeneration
+                telemetry_state = $telemetryState
+                telemetry_last_error_digest = $lastErrorDigest
+                retention_state = $retentionState
+                destinations = $destinations
+            }
+            $stage = 'record'
+            $category = 'serialization_failed'
+            $row = $record | ConvertTo-Json -Compress -Depth 8
+            $fingerprint = @(
+                $record.gateway_pid, $record.gateway_start_identity, $record.run_id,
+                $record.event_config_generation, $record.health_telemetry_generation,
+                $record.telemetry_state, $record.telemetry_last_error_digest, $record.retention_state,
+                ($destinations | ConvertTo-Json -Compress -Depth 4)
+            ) -join '|'
+            $bytes = $utf8.GetBytes($row + "`n")
+            if ($fingerprint -cne $last -and $stream.Length + $bytes.Length -le 65536) {
+                $stream.Write($bytes, 0, $bytes.Length)
+                $stream.Flush($true)
+                $last = $fingerprint
+            }
+        } catch {
+            # Sampling is diagnostic-only. Retain only a fixed stage/category
+            # transition so schema drift cannot silently collapse the ledger to
+            # its header; never copy exception text, paths, or sampled values.
+            if ($stage -cnotin @(
+                'pid_file', 'identity', 'process', 'listener', 'health',
+                'event_correlation', 'projection', 'record'
+            )) { $stage = 'internal' }
+            if ($category -cnotin @(
+                'unavailable_or_invalid', 'invalid_or_mismatch',
+                'unavailable_or_mismatch', 'schema_mismatch',
+                'serialization_failed'
+            )) { $category = 'internal_error' }
+            $diagnostic = [ordered]@{
+                observed_at = [DateTime]::UtcNow.ToString('o')
+                kind = 'sample_error'
+                stage = $stage
+                category = $category
+            }
+            $row = $diagnostic | ConvertTo-Json -Compress
+            $fingerprint = "sample_error|$stage|$category"
+            $bytes = $utf8.GetBytes($row + "`n")
+            if ($fingerprint -cne $last -and $stream.Length + $bytes.Length -le 65536) {
+                $stream.Write($bytes, 0, $bytes.Length)
+                $stream.Flush($true)
+                $last = $fingerprint
+            }
+        }
+        Start-Sleep -Milliseconds 100
+    }
+} finally {
+    $stream.Dispose()
+}
+'@
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $hostPowerShell
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    foreach ($argument in @(
+        '-NoLogo', '-NoProfile', '-NonInteractive', '-CommandWithArgs', $code,
+        $outcome, $data, [string]$ApiPort, [string]$PriorGateway.ProcessId,
+        [string]$PriorGateway.StartIdentity, $expected
+    )) { $startInfo.ArgumentList.Add($argument) }
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $startInfo
+    $started = $false
+    try {
+        $started = $process.Start()
+        if (-not $started) { throw 'failed to start Setup health sampler' }
+        $deadline = [DateTime]::UtcNow.AddSeconds(10)
+        while (-not (Test-Path -LiteralPath $outcome -PathType Leaf)) {
+            $process.Refresh()
+            if ($process.HasExited) { throw "Setup health sampler exited with $($process.ExitCode)" }
+            if ([DateTime]::UtcNow -ge $deadline) { throw 'Setup health sampler readiness timed out' }
+            Start-Sleep -Milliseconds 50
+        }
+        return [pscustomobject]@{ Process = $process }
+    } catch {
+        if ($started -and -not $process.HasExited) {
+            $process.Kill($true)
+            $process.WaitForExit(5000) | Out-Null
+        }
+        $process.Dispose()
+        throw
+    }
+}
+
+function Stop-SetupAcceptanceHealthSampler([AllowNull()][object]$Sampler) {
+    if ($null -eq $Sampler) { return }
+    $process = [Diagnostics.Process]$Sampler.Process
+    try {
+        $process.Refresh()
+        if (-not $process.HasExited) {
+            $process.Kill($true)
+            if (-not $process.WaitForExit(5000)) { throw 'Setup health sampler cleanup timed out' }
+        }
+    } finally {
+        $process.Dispose()
+    }
+}
+
+function Test-SetupAcceptanceHealthSamplerContract([string]$Root) {
+    $fixtureRoot = Join-Path $Root 'setup-health-sampler-contract'
+    if (Test-Path -LiteralPath $fixtureRoot) {
+        Remove-SafeDisposableTree -Path $fixtureRoot -Root $Root
+    }
+    $dataRoot = Join-Path $fixtureRoot 'data'
+    $installRoot = Join-Path $fixtureRoot 'installed'
+    $readyPath = Join-Path $fixtureRoot 'health-server.ready'
+    $diagnosticOutcomePath = Join-Path $fixtureRoot 'setup-health-diagnostic.jsonl'
+    [IO.Directory]::CreateDirectory($dataRoot) | Out-Null
+    [IO.Directory]::CreateDirectory($installRoot) | Out-Null
+
+    # Exercise the sampler against an external process and the exact public
+    # HealthSnapshot shape. In particular, this fixture intentionally has no
+    # top-level provenance object; runtime generation belongs to telemetry.
+    $serverCode = @'
+param($ReadyPath)
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+$utf8 = [Text.UTF8Encoding]::new($false)
+$listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+try {
+    $listener.Start()
+    $port = ([Net.IPEndPoint]$listener.LocalEndpoint).Port
+    [IO.File]::WriteAllText($ReadyPath, [string]$port, $utf8)
+    $startedAt = [Diagnostics.Process]::GetCurrentProcess().StartTime.ToUniversalTime().ToString('o')
+    while ($true) {
+        $client = $listener.AcceptTcpClient()
+        try {
+            $network = $client.GetStream()
+            $reader = [IO.StreamReader]::new($network, [Text.Encoding]::ASCII, $false, 1024, $true)
+            try {
+                while (($line = $reader.ReadLine()) -ne $null -and $line.Length -ne 0) { }
+            } finally {
+                $reader.Dispose()
+            }
+            $running = [ordered]@{ state = 'running'; since = $startedAt }
+            $health = [ordered]@{
+                started_at = $startedAt
+                uptime_ms = 1
+                gateway = $running
+                watcher = $running
+                config = $running
+                api = $running
+                guardrail = $running
+                telemetry = [ordered]@{
+                    state = 'error'
+                    since = $startedAt
+                    details = [ordered]@{
+                        generation = 7
+                        retention_state = 'healthy'
+                        destinations = @([ordered]@{
+                            name = 'fixture'
+                            kind = 'otlp_http'
+                            state = 'error'
+                            reason = 'unavailable'
+                            generation = 7
+                        })
+                    }
+                }
+                ai_discovery = $running
+                application_protection = $running
+                connectors = @()
+            }
+            $body = $health | ConvertTo-Json -Compress -Depth 8
+            $bodyBytes = $utf8.GetBytes($body)
+            $header = "HTTP/1.1 200 OK`r`nContent-Type: application/json`r`nContent-Length: $($bodyBytes.Length)`r`nConnection: close`r`n`r`n"
+            $headerBytes = [Text.Encoding]::ASCII.GetBytes($header)
+            $network.Write($headerBytes, 0, $headerBytes.Length)
+            $network.Write($bodyBytes, 0, $bodyBytes.Length)
+            $network.Flush()
+        } finally {
+            $client.Dispose()
+        }
+    }
+} finally {
+    $listener.Stop()
+}
+'@
+    $pwsh = [IO.Path]::GetFullPath((Get-Process -Id $PID).Path)
+    $startInfo = [Diagnostics.ProcessStartInfo]::new()
+    $startInfo.FileName = $pwsh
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    foreach ($argument in @(
+        '-NoLogo', '-NoProfile', '-NonInteractive', '-CommandWithArgs', $serverCode, $readyPath
+    )) { $startInfo.ArgumentList.Add($argument) }
+    $server = [Diagnostics.Process]::new()
+    $server.StartInfo = $startInfo
+    $serverStarted = $false
+    $sampler = $null
+    try {
+        $serverStarted = $server.Start()
+        if (-not $serverStarted) { throw 'synthetic Setup health server did not start' }
+        $deadline = [DateTime]::UtcNow.AddSeconds(10)
+        while (-not (Test-Path -LiteralPath $readyPath -PathType Leaf)) {
+            $server.Refresh()
+            if ($server.HasExited) { throw "synthetic Setup health server exited with $($server.ExitCode)" }
+            if ([DateTime]::UtcNow -ge $deadline) { throw 'synthetic Setup health server readiness timed out' }
+            Start-Sleep -Milliseconds 50
+        }
+        $apiPort = [int][IO.File]::ReadAllText($readyPath)
+        if ($apiPort -lt 1 -or $apiPort -gt 65535) { throw 'synthetic Setup health server returned an invalid port' }
+        $server.Refresh()
+        $unixTicks = [long](
+            $server.StartTime.ToUniversalTime().Ticks - [DateTime]::UnixEpoch.Ticks
+        )
+        $startIdentity = ([long]($unixTicks * 100)).ToString(
+            [Globalization.CultureInfo]::InvariantCulture
+        )
+        $event = [ordered]@{
+            observed_at = [DateTime]::UtcNow.ToString('o')
+            correlation = [ordered]@{
+                run_id = '11111111-1111-4111-8111-111111111111'
+                sidecar_instance_id = '22222222-2222-4222-8222-222222222222'
+            }
+            provenance = [ordered]@{ config_generation = 7 }
+        }
+        [IO.File]::WriteAllText(
+            (Join-Path $dataRoot 'gateway.jsonl'),
+            (($event | ConvertTo-Json -Compress -Depth 5) + "`n"),
+            [Text.UTF8Encoding]::new($false)
+        )
+
+        # Start before publishing gateway.pid to prove a bounded, enumerated
+        # failure record is emitted instead of a schema-only ledger.
+        $sampler = Start-SetupAcceptanceHealthSampler $pwsh $diagnosticOutcomePath $dataRoot $apiPort `
+            ([pscustomobject]@{ ProcessId = $PID; StartIdentity = '1' }) $pwsh $installRoot
+        $deadline = [DateTime]::UtcNow.AddSeconds(10)
+        $diagnostic = $null
+        while ($null -eq $diagnostic) {
+            foreach ($line in @(Get-Content -LiteralPath $diagnosticOutcomePath -Encoding UTF8)) {
+                if ($line -eq 'schema=1') { continue }
+                try { $candidate = $line | ConvertFrom-Json -ErrorAction Stop } catch { continue }
+                if ([string]$candidate.kind -ceq 'sample_error') { $diagnostic = $candidate; break }
+            }
+            if ([DateTime]::UtcNow -ge $deadline) { throw 'Setup health sampler did not emit its bounded stage diagnostic' }
+            Start-Sleep -Milliseconds 50
+        }
+        if ([string]$diagnostic.stage -cne 'pid_file' -or
+            [string]$diagnostic.category -cne 'unavailable_or_invalid') {
+            throw 'Setup health sampler emitted an unexpected initial diagnostic category'
+        }
+
+        # End the absent-PID phase before publishing the valid identity. A
+        # fresh sampler then initializes its listener/CIM observation against
+        # that exact state instead of racing an in-flight diagnostic iteration.
+        Stop-SetupAcceptanceHealthSampler $sampler
+        $sampler = $null
+
+        $identity = [ordered]@{
+            pid = $server.Id
+            start_identity = $startIdentity
+            executable = $pwsh
+        }
+        $pidTemporary = Join-Path $dataRoot 'gateway.pid.new'
+        [IO.File]::WriteAllText(
+            $pidTemporary,
+            ($identity | ConvertTo-Json -Compress),
+            [Text.UTF8Encoding]::new($false)
+        )
+        Move-Item -LiteralPath $pidTemporary -Destination (Join-Path $dataRoot 'gateway.pid')
+
+        $deadline = [DateTime]::UtcNow.AddSeconds(15)
+        $sample = $null
+        $lastDiagnostic = $null
+        foreach ($attempt in 1..2) {
+            $sampleOutcomePath = Join-Path $fixtureRoot "setup-health-sample-$attempt.jsonl"
+            $sampler = Start-SetupAcceptanceHealthSampler $pwsh $sampleOutcomePath $dataRoot $apiPort `
+                ([pscustomobject]@{ ProcessId = $PID; StartIdentity = '1' }) $pwsh $installRoot
+            $attemptDeadline = if ($attempt -eq 1) {
+                [DateTime]::UtcNow.AddSeconds(3)
+            } else {
+                $deadline
+            }
+            while ($null -eq $sample -and [DateTime]::UtcNow -lt $attemptDeadline) {
+                foreach ($line in @(Get-Content -LiteralPath $sampleOutcomePath -Encoding UTF8)) {
+                    if ($line -eq 'schema=1') { continue }
+                    try { $candidate = $line | ConvertFrom-Json -ErrorAction Stop } catch { continue }
+                    if ($null -eq $candidate.PSObject.Properties['kind']) {
+                        $sample = $candidate
+                        break
+                    }
+                    if ([string]$candidate.kind -ceq 'sample_error') { $lastDiagnostic = $candidate }
+                }
+                if ($null -eq $sample) { Start-Sleep -Milliseconds 50 }
+            }
+            if ($null -ne $sample) { break }
+            Stop-SetupAcceptanceHealthSampler $sampler
+            $sampler = $null
+        }
+        if ($null -eq $sample) {
+            $stage = if ($null -eq $lastDiagnostic) { 'none' } else { [string]$lastDiagnostic.stage }
+            $category = if ($null -eq $lastDiagnostic) { 'none' } else { [string]$lastDiagnostic.category }
+            throw "Setup health sampler did not emit a correlated health sample (stage=$stage category=$category)"
+        }
+        if ([int]$sample.gateway_pid -ne $server.Id -or
+            [string]$sample.gateway_start_identity -cne $startIdentity -or
+            [int]$sample.listener_pid -ne $server.Id -or
+            [int]$sample.event_config_generation -ne 7 -or
+            [int]$sample.health_telemetry_generation -ne 7 -or
+            $null -ne $sample.PSObject.Properties['provenance_generation'] -or
+            [string]$sample.run_id -cne '11111111-1111-4111-8111-111111111111' -or
+            [string]$sample.sidecar_instance_id -cne '22222222-2222-4222-8222-222222222222') {
+            throw 'Setup health sampler lost exact identity, listener, generation, or run correlation'
+        }
+    } finally {
+        Stop-SetupAcceptanceHealthSampler $sampler
+        if ($serverStarted) {
+            $server.Refresh()
+            if (-not $server.HasExited) {
+                $server.Kill($true)
+                if (-not $server.WaitForExit(5000)) { throw 'synthetic Setup health server cleanup timed out' }
+            }
+        }
+        $server.Dispose()
+        if (Test-Path -LiteralPath $fixtureRoot) {
+            Remove-SafeDisposableTree -Path $fixtureRoot -Root $Root
+        }
+    }
+}
+
+function Write-SetupAcceptanceConvergenceDiagnostics(
+    [string]$Logs,
+    [string]$DataRoot,
+    [AllowNull()][object]$Collector
+) {
+    $rows = [Collections.Generic.List[string]]::new()
+    [void]$rows.Add('schema=1')
+    if ($null -eq $Collector) {
+        [void]$rows.Add('collector=absent')
+    } else {
+        $process = [Diagnostics.Process]$Collector.Process
+        $port = [int]$Collector.Port
+        $ready = [string]$Collector.ReadyPath
+        $alive = $false
+        $processError = ''
+        try {
+            $process.Refresh()
+            $alive = -not $process.HasExited
+        } catch {
+            $processError = $_.Exception.GetType().Name
+        }
+        [void]$rows.Add("collector_pid=$($process.Id)")
+        [void]$rows.Add("collector_alive=$($alive.ToString().ToLowerInvariant())")
+        [void]$rows.Add("collector_port=$port")
+        [void]$rows.Add("ready_file_present=$((Test-Path -LiteralPath $ready -PathType Leaf).ToString().ToLowerInvariant())")
+        if ($processError) { [void]$rows.Add("collector_inspection_error=$processError") }
+
+        $listeners = @()
+        try {
+            $listeners = @(Get-NetTCPConnection -State Listen -LocalAddress '127.0.0.1' `
+                -LocalPort $port -ErrorAction Stop)
+            [void]$rows.Add("loopback_listener_count=$($listeners.Count)")
+            $owners = @($listeners | Select-Object -ExpandProperty OwningProcess -Unique | Sort-Object)
+            [void]$rows.Add("loopback_listener_pids=$($owners -join ',')")
+            [void]$rows.Add("exact_listener_owned=$((
+                $alive -and $listeners.Count -eq 1 -and [int]$listeners[0].OwningProcess -eq $process.Id
+            ).ToString().ToLowerInvariant())")
+        } catch {
+            [void]$rows.Add("loopback_listener_error=$($_.Exception.GetType().Name)")
+        }
+    }
+    Write-BoundedText -Path (Join-Path $Logs 'setup-convergence-runtime.log') `
+        -Text ($rows -join "`n") -MaxBytes 16384
+
+    foreach ($source in @(
+        [pscustomobject]@{
+            Path = (Join-Path $DataRoot 'gateway.log')
+            Output = 'setup-gateway-failure.log'
+            Label = 'gateway failure log'
+        },
+        [pscustomobject]@{
+            Path = (Join-Path $DataRoot 'gateway.jsonl')
+            Output = 'setup-gateway-jsonl-failure.log'
+            Label = 'gateway JSONL failure log'
+        }
+    )) {
+        if (-not (Test-Path -LiteralPath $source.Path -PathType Leaf)) { continue }
+        try {
+            $tail = @(Get-Content -LiteralPath $source.Path -Tail 512 -Encoding UTF8 -ErrorAction Stop)
+            $safe = Protect-WindowsNativeText ($tail -join "`n")
+            # The normal redactor removes known environment credentials and common
+            # authorization fields. This extra diagnostic-only pass also removes
+            # arbitrary token/password/credential values before the bounded log is
+            # copied out of the disposable user profile.
+            $safe = [regex]::Replace(
+                $safe,
+                '(?i)(?<prefix>"(?:token|password|credential|secret)"\s*:\s*")(?<value>(?:\\.|[^"\\])*)(?<suffix>")',
+                '${prefix}***REDACTED***${suffix}'
+            )
+            $safe = [regex]::Replace(
+                $safe,
+                '(?im)(?<prefix>\b(?:token|password|credential|secret)\b\s*[:=]\s*)(?:"(?:\\.|[^"\\])*"|''(?:\\.|[^''\\])*''|\S+)',
+                '${prefix}***REDACTED***'
+            )
+            Write-BoundedText -Path (Join-Path $Logs $source.Output) `
+                -Text $safe -MaxBytes 262144
+        } catch {
+            Write-BoundedText -Path (Join-Path $Logs $source.Output) `
+                -Text "$($source.Label) capture unavailable: $($_.Exception.GetType().Name)" `
+                -MaxBytes 16384
+        }
+    }
 }
 
 function Wait-PathsAbsent([string[]]$Paths, [int]$Attempts = 150) {
@@ -2406,20 +3609,39 @@ function Invoke-Acceptance {
     Invoke-GatewayLifecycleAcceptance -Profile $profile -Root $root -Artifacts $artifacts
 }
 
-function Assert-PackagedAntigravityPlatformGate(
+function Assert-PackagedAntigravitySupportedAvailability(
     [string]$Launcher,
     [string]$UserProfile,
     [string]$LogPath
 ) {
-    $result = Invoke-Installed $Launcher @('setup', 'antigravity', '--yes', '--no-restart') `
-        @(1) 300 $LogPath
-    $combined = $result.StdOut + "`n" + $result.StdErr
-    if ($combined -notmatch "connector 'antigravity' is not_certified on windows") {
-        throw "packaged Antigravity setup did not enforce its Windows certification gate: $combined"
-    }
+    # The hosted package runner has no authenticated Antigravity installation.
+    # Use that clean absence to prove ordinary public Setup passes the platform
+    # gate and reaches the normal action-mode discovery refusal without writing
+    # user hook state. Authentic provider login and hook execution remain a
+    # separate protected-lane concern.
+    $localAppData = [Environment]::GetFolderPath(
+        [Environment+SpecialFolder]::LocalApplicationData
+    )
+    $clientPath = Join-Path $localAppData 'agy\bin\agy.exe'
     $hooksPath = Join-Path $UserProfile '.gemini\config\hooks.json'
+    foreach ($preexisting in @($clientPath, $hooksPath)) {
+        if (Test-Path -LiteralPath $preexisting) {
+            throw "Antigravity supported-availability probe requires absent state: $preexisting"
+        }
+    }
+    $result = Invoke-Installed $Launcher @(
+        'setup', 'antigravity', '--mode', 'action', '--yes', '--no-restart'
+    ) `
+        @(0) 300 $LogPath
+    $combined = $result.StdOut + "`n" + $result.StdErr
+    if ($combined -match '(?i)not_certified|preview') {
+        throw "packaged Antigravity setup emitted a stale support gate or warning: $combined"
+    }
+    if ($combined -notmatch '(?i)connector was not detected locally; refusing action-mode hook setup') {
+        throw "packaged Antigravity setup did not reach the expected discovery gate: $combined"
+    }
     if (Test-Path -LiteralPath $hooksPath) {
-        throw "not-certified Antigravity setup unexpectedly wrote hooks: $hooksPath"
+        throw "Antigravity supported-availability probe unexpectedly wrote hooks: $hooksPath"
     }
 }
 
@@ -2430,21 +3652,36 @@ function New-WizardAgentFixtures([string]$Root) {
     if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) {
         throw "Windows .NET Framework compiler is unavailable: $compiler"
     }
+    $useNativeOpenCodeFixture = $env:CONNECTOR -ceq 'opencode'
+    $goCompiler = if ($useNativeOpenCodeFixture) { @(
+            Get-Command go.exe -CommandType Application -ErrorAction SilentlyContinue |
+                Select-Object -First 1
+        ) } else { @() }
+    if ($useNativeOpenCodeFixture -and $goCompiler.Count -ne 1) {
+        throw 'the OpenCode contract requires the workflow-pinned native Go compiler'
+    }
     $localAppData = [Environment]::GetFolderPath([Environment+SpecialFolder]::LocalApplicationData)
     $userProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
     $codexTrustedRoot = Join-Path $localAppData 'OpenAI\Codex\bin'
     $codexBin = Join-Path $codexTrustedRoot ("000-defenseclaw-ci-" + [guid]::NewGuid().ToString('N'))
     $claudeBin = Join-Path $userProfile '.local\bin'
+    $hermesBin = Join-Path $localAppData 'hermes\hermes-agent\venv\Scripts'
+    $openCodeBin = Join-Path $localAppData 'Microsoft\WinGet\Packages\SST.opencode_Microsoft.Winget.Source_8wekyb3d8bbwe'
     $codexPath = Join-Path $codexBin 'codex.exe'
     $claudePath = Join-Path $claudeBin 'claude.exe'
     $ampPath = Join-Path $claudeBin 'amp.exe'
-    foreach ($fixtureTarget in @($claudePath, $ampPath)) {
-        if (Test-Path -LiteralPath $fixtureTarget) {
-            throw "refusing to replace an existing connector executable fixture target: $fixtureTarget"
+    $cursorPath = Join-Path $claudeBin 'agent.exe'
+    $hermesPath = Join-Path $hermesBin 'hermes.exe'
+    $openCodePath = Join-Path $openCodeBin 'opencode.exe'
+    foreach ($existing in @(
+        $claudePath, $ampPath, $cursorPath, $hermesPath, $openCodePath
+    )) {
+        if (Test-Path -LiteralPath $existing) {
+            throw "refusing to replace an existing connector executable fixture target: $existing"
         }
     }
     try {
-        foreach ($path in @($codexTrustedRoot, $codexBin, $claudeBin)) {
+        foreach ($path in @($codexTrustedRoot, $codexBin, $claudeBin, $hermesBin, $openCodeBin)) {
             Protect-TestDirectory $path
         }
         $fixtures = @(
@@ -2487,7 +3724,20 @@ public static class CodexVersionFixture {
 using System;
 public static class ClaudeVersionFixture {
     public static int Main(string[] arguments) {
-        Console.WriteLine("claude 2.1.152");
+        Console.WriteLine("claude 2.1.154");
+        return 0;
+    }
+}
+"@
+        },
+        [pscustomobject]@{
+            Path = $cursorPath
+            ClassName = 'CursorAgentVersionFixture'
+            Source = @"
+using System;
+public static class CursorAgentVersionFixture {
+    public static int Main(string[] arguments) {
+        Console.WriteLine("cursor-agent 2026.07.23-e383d2b");
         return 0;
     }
 }
@@ -2505,15 +3755,66 @@ public static class AmpVersionFixture {
     }
 }
 "@
+        },
+        [pscustomobject]@{
+            Path = $hermesPath
+            ClassName = 'HermesVersionFixture'
+            Source = @"
+using System;
+public static class HermesVersionFixture {
+    public static int Main(string[] arguments) {
+        Console.WriteLine("Hermes Agent v0.20.0 (2026.8.3)");
+        return 0;
+    }
+}
+"@
+        },
+        [pscustomobject]@{
+            Path = $openCodePath
+            ClassName = 'OpenCodeVersionFixture'
+            NativeGo = $useNativeOpenCodeFixture
+            Source = if ($useNativeOpenCodeFixture) { @"
+package main
+
+import "fmt"
+
+func main() {
+	fmt.Println("opencode 1.18.11")
+}
+"@
+            } else { @"
+using System;
+public static class OpenCodeVersionFixture {
+    public static int Main(string[] arguments) {
+        Console.WriteLine("opencode 1.18.11");
+        return 0;
+    }
+}
+"@ }
         }
         )
         foreach ($fixture in $fixtures) {
-            $sourcePath = Join-Path $sourceBin ($fixture.ClassName + '.cs')
+            $isNativeGo = [bool]($fixture.PSObject.Properties['NativeGo'] -and $fixture.NativeGo)
+            $sourcePath = Join-Path $sourceBin ($fixture.ClassName + $(if ($isNativeGo) { '.go' } else { '.cs' }))
             Write-BoundedText $sourcePath $fixture.Source
             try {
-                Invoke-WindowsNativeProcess $compiler @(
-                    '/nologo', '/target:exe', "/out:$($fixture.Path)", $sourcePath
-                ) -TimeoutSeconds 60 | Out-Null
+                if ($isNativeGo) {
+                    $previousCGO = $env:CGO_ENABLED
+                    try {
+                        $env:CGO_ENABLED = '0'
+                        Invoke-WindowsNativeProcess ([string]$goCompiler[0].Source) @(
+                            'build', '-trimpath', '-buildvcs=false', '-ldflags=-s -w',
+                            '-o', $fixture.Path, $sourcePath
+                        ) -TimeoutSeconds 120 | Out-Null
+                    } finally {
+                        if ($null -eq $previousCGO) { Remove-Item Env:CGO_ENABLED -ErrorAction SilentlyContinue }
+                        else { $env:CGO_ENABLED = $previousCGO }
+                    }
+                } else {
+                    Invoke-WindowsNativeProcess $compiler @(
+                        '/nologo', '/target:exe', "/out:$($fixture.Path)", $sourcePath
+                    ) -TimeoutSeconds 60 | Out-Null
+                }
             } finally {
                 Remove-Item -LiteralPath $sourcePath -Force -ErrorAction SilentlyContinue
             }
@@ -2526,12 +3827,26 @@ public static class AmpVersionFixture {
             throw "Codex fixture returned an unexpected version: $($codexVersion.StdOut)"
         }
         $claudeVersion = Invoke-WindowsNativeProcess $claudePath @('--version') -TimeoutSeconds 30
-        if ($claudeVersion.StdOut.Trim() -ne 'claude 2.1.152') {
+        if ($claudeVersion.StdOut.Trim() -ne 'claude 2.1.154') {
             throw "Claude fixture returned an unexpected version: $($claudeVersion.StdOut)"
+        }
+        $cursorVersion = Invoke-WindowsNativeProcess $cursorPath @('--version') -TimeoutSeconds 30
+        if ($cursorVersion.StdOut.Trim() -ne 'cursor-agent 2026.07.23-e383d2b') {
+            throw "Cursor Agent fixture returned an unexpected version: $($cursorVersion.StdOut)"
         }
         $ampVersion = Invoke-WindowsNativeProcess $ampPath @('--version') -TimeoutSeconds 30
         if ($ampVersion.StdOut.Trim() -ne 'amp 0.0.1785334225-g9abe75') {
             throw "Amp fixture returned an unexpected version: $($ampVersion.StdOut)"
+        }
+        $hermesVersion = Invoke-WindowsNativeProcess $hermesPath @('--version') -TimeoutSeconds 30
+        if ($hermesVersion.StdOut.Trim() -ne 'Hermes Agent v0.20.0 (2026.8.3)') {
+            throw "Hermes fixture returned an unexpected version: $($hermesVersion.StdOut)"
+        }
+        foreach ($attempt in 1..3) {
+            $openCodeVersion = Invoke-WindowsNativeProcess $openCodePath @('--version') -TimeoutSeconds 2
+            if ($openCodeVersion.StdOut.Trim() -ne 'opencode 1.18.11') {
+                throw "OpenCode fixture returned an unexpected version: $($openCodeVersion.StdOut)"
+            }
         }
         Assert-WizardCodexPolicyFixture $codexPath
         return [pscustomobject]@{
@@ -2544,10 +3859,17 @@ public static class AmpVersionFixture {
             CodexPath = $codexPath
             ClaudePath = $claudePath
             AmpPath = $ampPath
+            CursorPath = $cursorPath
+            HermesBin = $hermesBin
+            HermesPath = $hermesPath
+            OpenCodeBin = $openCodeBin
+            OpenCodePath = $openCodePath
             CodexTrustedRoot = $codexTrustedRoot
         }
     } catch {
-        foreach ($path in @($codexPath, $claudePath, $ampPath)) {
+        foreach ($path in @(
+            $codexPath, $claudePath, $ampPath, $cursorPath, $hermesPath, $openCodePath
+        )) {
             Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
         }
         if (Test-Path -LiteralPath $codexBin -PathType Container) {
@@ -2627,7 +3949,10 @@ function Remove-WizardAgentFixtures([AllowNull()][object]$Fixtures) {
     $owned = @(
         [pscustomobject]@{ Path = [string]$Fixtures.CodexPath; Root = [string]$Fixtures.CodexTrustedRoot; Name = 'codex.exe' },
         [pscustomobject]@{ Path = [string]$Fixtures.ClaudePath; Root = [string]$Fixtures.ClaudeBin; Name = 'claude.exe' },
-        [pscustomobject]@{ Path = [string]$Fixtures.AmpPath; Root = [string]$Fixtures.ClaudeBin; Name = 'amp.exe' }
+        [pscustomobject]@{ Path = [string]$Fixtures.AmpPath; Root = [string]$Fixtures.ClaudeBin; Name = 'amp.exe' },
+        [pscustomobject]@{ Path = [string]$Fixtures.CursorPath; Root = [string]$Fixtures.ClaudeBin; Name = 'agent.exe' },
+        [pscustomobject]@{ Path = [string]$Fixtures.HermesPath; Root = [string]$Fixtures.HermesBin; Name = 'hermes.exe' },
+        [pscustomobject]@{ Path = [string]$Fixtures.OpenCodePath; Root = [string]$Fixtures.OpenCodeBin; Name = 'opencode.exe' }
     )
     foreach ($entry in $owned) {
         $path = [IO.Path]::GetFullPath($entry.Path)
@@ -2661,46 +3986,60 @@ function Remove-WizardAgentFixtures([AllowNull()][object]$Fixtures) {
 }
 
 function Get-WizardConnectorSpecification([string]$ConnectorName, [string]$UserProfile) {
-    if ($ConnectorName -eq 'codex') {
-        return [pscustomobject]@{
-            Connector = 'codex'
-            OtherConnector = 'claudecode'
+    $definitions = [ordered]@{
+        codex = @{
             HookScript = 'codex-hook.sh'
-            OtherHookScript = 'claude-code-hook.sh'
             ConfigPath = Join-Path $UserProfile '.codex\managed_config.toml'
-            OtherConfigPath = Join-Path $UserProfile '.claude\settings.json'
             DoctorLabel = 'Codex hooks'
-            OtherDoctorLabel = 'Claude Code hooks'
+            DoctorRuntimePattern = 'healthy Windows-native executable registration'
         }
-    }
-    if ($ConnectorName -eq 'claudecode') {
-        return [pscustomobject]@{
-            Connector = 'claudecode'
-            OtherConnector = 'codex'
+        claudecode = @{
             HookScript = 'claude-code-hook.sh'
-            OtherHookScript = 'codex-hook.sh'
             ConfigPath = Join-Path $UserProfile '.claude\settings.json'
-            OtherConfigPath = Join-Path $UserProfile '.codex\managed_config.toml'
             DoctorLabel = 'Claude Code hooks'
-            OtherDoctorLabel = 'Codex hooks'
+            DoctorRuntimePattern = 'healthy Windows-native executable registration'
         }
-    }
-    if ($ConnectorName -eq 'amp') {
-        return [pscustomobject]@{
-            Connector = 'amp'
-            OtherConnector = @('codex', 'claudecode')
+        amp = @{
             HookScript = ''
-            OtherHookScript = @('codex-hook.sh', 'claude-code-hook.sh')
             ConfigPath = Join-Path $UserProfile '.config\amp\plugins\defenseclaw.ts'
-            OtherConfigPath = @(
-                (Join-Path $UserProfile '.codex\managed_config.toml'),
-                (Join-Path $UserProfile '.claude\settings.json')
-            )
             DoctorLabel = 'Amp policy plugin'
-            OtherDoctorLabel = @('Codex hooks', 'Claude Code hooks')
+            DoctorRuntimePattern = 'plugin-ready-timeout 30'
+        }
+        copilot = @{
+            HookScript = 'copilot-hook.sh'
+            ConfigPath = Join-Path $UserProfile '.copilot\hooks\defenseclaw.json'
+            DoctorLabel = 'Copilot hooks'
+            DoctorRuntimePattern = 'healthy Windows-native Copilot PowerShell registration'
+        }
+        cursor = @{
+            HookScript = 'cursor-hook.ps1'
+            ConfigPath = Join-Path $UserProfile '.cursor\hooks.json'
+            DoctorLabel = 'Cursor hooks'
+            DoctorRuntimePattern = 'configured runtime=.*cursor-hook\.ps1.*failClosed='
+        }
+        windsurf = @{
+            HookScript = 'windsurf-hook.ps1'
+            ConfigPath = Join-Path $UserProfile '.codeium\windsurf\hooks.json'
+            DoctorLabel = 'Legacy Cascade hooks'
+            DoctorRuntimePattern = 'healthy Windows-native PowerShell registration'
         }
     }
-    throw "unsupported wizard connector specification: $ConnectorName"
+    if (-not $definitions.Contains($ConnectorName)) {
+        throw "unsupported wizard connector specification: $ConnectorName"
+    }
+    $selected = $definitions[$ConnectorName]
+    $otherNames = @($definitions.Keys | Where-Object { $_ -cne $ConnectorName })
+    return [pscustomobject]@{
+        Connector = $ConnectorName
+        HookScript = [string]$selected.HookScript
+        OtherConnectors = $otherNames
+        OtherHookScripts = @($otherNames | ForEach-Object { [string]$definitions[$_].HookScript })
+        ConfigPath = [string]$selected.ConfigPath
+        OtherConfigPaths = @($otherNames | ForEach-Object { [string]$definitions[$_].ConfigPath })
+        DoctorLabel = [string]$selected.DoctorLabel
+        OtherDoctorLabels = @($otherNames | ForEach-Object { [string]$definitions[$_].DoctorLabel })
+        DoctorRuntimePattern = [string]$selected.DoctorRuntimePattern
+    }
 }
 
 function Assert-NoDefenseClawRegistration([string[]]$Paths) {
@@ -2736,6 +4075,20 @@ function Get-NativeConnectorBackupMarkers([string]$DataRoot, [string]$Connector)
         'amp' {
             @('connector_backups\amp\config.json')
         }
+        'copilot' {
+            @('connector_backups\copilot\config.json')
+        }
+        'cursor' {
+            @(
+                'connector_backups\cursor\hooks.json.json'
+            )
+        }
+        'windsurf' {
+            @('connector_backups\windsurf\config.json')
+        }
+        'antigravity' {
+            @('connector_backups\antigravity\hooks.json.json')
+        }
         default { throw "unsupported native connector backup marker: $Connector" }
     }
     return @($relativePaths | Where-Object {
@@ -2749,12 +4102,30 @@ function Assert-NativeConnectorCleanupAuthorityPresent(
 ) {
     $configured = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
     foreach ($name in @($ConfiguredConnectors)) {
-        if ([string]$name -notin @('codex', 'claudecode', 'amp')) {
+        if ([string]$name -notin @('antigravity', 'codex', 'claudecode', 'amp', 'copilot', 'cursor', 'windsurf')) {
             throw 'native Setup acceptance received an unsupported configured connector'
         }
         $null = $configured.Add([string]$name)
     }
-    foreach ($connector in @('codex', 'claudecode', 'amp')) {
+    $required = @('codex', 'claudecode', 'amp')
+    # Antigravity is supported on Windows, but cleanup authority is required
+    # only after this run configured it or found an owned backup marker.
+    if ($configured.Contains('antigravity') -or
+        @(Get-NativeConnectorBackupMarkers $DataRoot 'antigravity').Count -ne 0) {
+        $required += 'antigravity'
+    }
+    if ($configured.Contains('copilot') -or
+        @(Get-NativeConnectorBackupMarkers $DataRoot 'copilot').Count -ne 0) {
+        $required += 'copilot'
+    }
+    if ($configured.Contains('cursor') -or
+        @(Get-NativeConnectorBackupMarkers $DataRoot 'cursor').Count -ne 0) {
+        $required += 'cursor'
+    }
+    if (@(Get-NativeConnectorBackupMarkers $DataRoot 'windsurf').Count -ne 0) {
+        $required += 'windsurf'
+    }
+    foreach ($connector in $required) {
         # Setup intentionally classifies uninstall work from the configured
         # roster as well as active state and backup markers. Exact connector
         # restoration can consume a marker before uninstall, so the validated
@@ -2764,11 +4135,15 @@ function Assert-NativeConnectorCleanupAuthorityPresent(
             throw "native Setup acceptance lost $connector cleanup authority before uninstall"
         }
     }
+    if ($configured.Contains('windsurf') -and
+        @(Get-NativeConnectorBackupMarkers $DataRoot 'windsurf').Count -eq 0) {
+        throw 'native Setup acceptance lost windsurf cleanup authority before uninstall'
+    }
 }
 
 function Assert-NativeConnectorBackupMarkersConsumed([string]$DataRoot) {
     $remaining = [Collections.Generic.List[string]]::new()
-    foreach ($connector in @('codex', 'claudecode', 'amp')) {
+    foreach ($connector in @('antigravity', 'codex', 'claudecode', 'amp', 'copilot', 'cursor', 'windsurf')) {
         foreach ($relativePath in @(Get-NativeConnectorBackupMarkers $DataRoot $connector)) {
             $remaining.Add("$connector/$relativePath")
         }
@@ -2967,6 +4342,36 @@ function Assert-SetupInstallState(
     if ([string]$state.connector -ne $ConnectorName -or [string]$state.mode -ne $Mode) {
         throw "setup install state did not preserve wizard selections: connector=$($state.connector) mode=$($state.mode)"
     }
+    if ($ConnectorName -eq 'windsurf') {
+        $expectedProfile = [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+        if (-not [string]::Equals(
+            [IO.Path]::GetFullPath([string]$state.windsurf_user_home),
+            [IO.Path]::GetFullPath($expectedProfile),
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+            throw 'setup install state did not preserve the explicit Windsurf profile binding'
+        }
+        $expectedHooksPath = Join-Path $expectedProfile '.codeium\windsurf\hooks.json'
+        if (-not [string]::Equals(
+            [IO.Path]::GetFullPath([string]$state.windsurf_hooks_path),
+            [IO.Path]::GetFullPath($expectedHooksPath),
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+            throw 'setup install state did not preserve the exact Windsurf hooks target'
+        }
+    }
+    if ($ConnectorName -eq 'antigravity') {
+        $expectedAntigravityConfigDir = Join-Path (
+            [Environment]::GetFolderPath([Environment+SpecialFolder]::UserProfile)
+        ) '.gemini\config'
+        if (-not [string]::Equals(
+            [string]$state.antigravity_config_dir,
+            [IO.Path]::GetFullPath($expectedAntigravityConfigDir),
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+            throw "setup install state did not preserve the exact Antigravity config-home custody"
+        }
+    }
 }
 
 function Get-DefenseClawGatewayAutoStart {
@@ -3052,16 +4457,19 @@ function Assert-NoGatewayAutoStart {
 
 function Assert-WizardHookRegistration(
     [object]$Specification,
-    [string]$DataRoot
+    [string]$DataRoot,
+    [ValidateSet('observe', 'action')][string]$Mode
 ) {
     $hookDir = Join-Path $DataRoot 'hooks'
+    $expectedHook = ''
     if ($Specification.Connector -ne 'amp') {
         $expectedHook = Join-Path $hookDir $Specification.HookScript
         if (-not (Test-Path -LiteralPath $expectedHook -PathType Leaf)) {
             throw "wizard-selected connector hook is missing: $expectedHook"
         }
     }
-    foreach ($otherHookScript in @($Specification.OtherHookScript)) {
+    foreach ($otherHookScript in @($Specification.OtherHookScripts)) {
+        if ([string]::IsNullOrWhiteSpace([string]$otherHookScript)) { continue }
         $wrongHook = Join-Path $hookDir $otherHookScript
         if (Test-Path -LiteralPath $wrongHook) {
             throw "wizard configured the wrong connector hook: $wrongHook"
@@ -3072,27 +4480,134 @@ function Assert-WizardHookRegistration(
     }
     $registration = [IO.File]::ReadAllText($Specification.ConfigPath)
     if ($Specification.Connector -eq 'codex') {
-        $tomlString = [regex]::Match(
+        $tomlStrings = @([regex]::Matches(
             $registration,
             '(?m)^\s*command_windows\s*=\s*(?<literal>"(?:\\.|[^"\\])*"|''[^'']*'')\s*$'
-        )
-        if (-not $tomlString.Success) { throw 'wizard-selected Codex registration has no command_windows override' }
-        $literal = $tomlString.Groups['literal'].Value
-        if ($literal.StartsWith("'", [StringComparison]::Ordinal)) {
-            $command = $literal.Substring(1, $literal.Length - 2)
-        } else {
-            try { $command = $literal | ConvertFrom-Json -ErrorAction Stop }
-            catch { throw "wizard-selected Codex command_windows is malformed: $($_.Exception.Message)" }
+        ))
+        $codexEventsByContract = @{
+            'codex-hooks-v3' = @(
+                'SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PermissionRequest',
+                'PostToolUse', 'SubagentStart', 'SubagentStop', 'PreCompact',
+                'PostCompact', 'Stop'
+            )
+            'codex-hooks-v4' = @(
+                'SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PermissionRequest',
+                'PostToolUse', 'SubagentStart', 'SubagentStop', 'PreCompact',
+                'PostCompact', 'Stop', 'SessionEnd'
+            )
         }
-        $encoded = [regex]::Match($command, '(?i)(?:^|\s)-EncodedCommand\s+([A-Za-z0-9+/=]+)(?:\s|$)')
-        if (-not $encoded.Success) { throw 'wizard-selected Codex registration does not use EncodedCommand' }
-        try { $script = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($encoded.Groups[1].Value)) }
-        catch { throw "wizard-selected Codex command is not valid UTF-16LE Base64: $($_.Exception.Message)" }
-        $startProcessPattern = '(?i)\$hookProcess=Microsoft\.PowerShell\.Management\\Start-Process\s+-FilePath\s+''(?:''''|[^''])*defenseclaw-hook\.exe''\s+-ArgumentList\s+@\(''hook'',''--connector'',''codex''\)\s+-NoNewWindow\s+-Wait\s+-PassThru'
-        if ($script -notmatch $startProcessPattern -or
-            $script -notmatch '(?i)exit\s+\$hookProcess\.ExitCode' -or
-            $script -match '(?i)\$LASTEXITCODE') {
-            throw "wizard-selected Codex registration does not use its exact synchronous native hook command: $($Specification.ConfigPath)"
+        $registeredEvents = [Collections.Generic.List[string]]::new()
+        $registeredContract = ''
+        $startProcessPattern = '(?i)\$hookProcess=Microsoft\.PowerShell\.Management\\Start-Process\s+-FilePath\s+(?<file>''(?:''''|[^''])*'')\s+-ArgumentList\s+@\((?<arguments>''(?:''''|[^''])*''(?:\s*,\s*''(?:''''|[^''])*'')*)\)\s+-NoNewWindow\s+-Wait\s+-PassThru'
+        foreach ($tomlString in $tomlStrings) {
+            $literal = $tomlString.Groups['literal'].Value
+            if ($literal.StartsWith("'", [StringComparison]::Ordinal)) {
+                $command = $literal.Substring(1, $literal.Length - 2)
+            } else {
+                try { $command = $literal | ConvertFrom-Json -ErrorAction Stop }
+                catch { throw "wizard-selected Codex command_windows is malformed: $($_.Exception.Message)" }
+            }
+            $encoded = [regex]::Match($command, '(?i)(?:^|\s)-EncodedCommand\s+([A-Za-z0-9+/=]+)(?:\s|$)')
+            if (-not $encoded.Success) { throw 'wizard-selected Codex registration does not use EncodedCommand' }
+            try { $script = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($encoded.Groups[1].Value)) }
+            catch { throw "wizard-selected Codex command is not valid UTF-16LE Base64: $($_.Exception.Message)" }
+            $startProcess = [regex]::Match($script, $startProcessPattern)
+            $argumentLiterals = if ($startProcess.Success) {
+                @([regex]::Matches($startProcess.Groups['arguments'].Value, "'(?:''|[^'])*'"))
+            } else {
+                @()
+            }
+            $arguments = @($argumentLiterals | ForEach-Object {
+                $_.Value.Substring(1, $_.Value.Length - 2).Replace("''", "'")
+            })
+            $file = if ($startProcess.Success) {
+                $fileLiteral = $startProcess.Groups['file'].Value
+                $fileLiteral.Substring(1, $fileLiteral.Length - 2).Replace("''", "'")
+            } else {
+                ''
+            }
+            $boundEvent = if ($arguments.Count -eq 7) { $arguments[4] } else { '' }
+            $boundContract = if ($arguments.Count -eq 7) { $arguments[6] } else { '' }
+            if (-not $codexEventsByContract.ContainsKey($boundContract)) {
+                throw "wizard-selected Codex registration uses unsupported hook contract: $boundContract"
+            }
+            if ([string]::IsNullOrEmpty($registeredContract)) {
+                $registeredContract = $boundContract
+            } elseif ($registeredContract -cne $boundContract) {
+                throw "wizard-selected Codex registration mixes hook contracts: $registeredContract, $boundContract"
+            }
+            $expectedEvents = @($codexEventsByContract[$boundContract])
+            if (-not $startProcess.Success -or
+                [IO.Path]::GetFileName($file) -cne 'defenseclaw-hook.exe' -or
+                $arguments.Count -ne 7 -or
+                ($arguments -join "`0") -cne (@(
+                    'hook', '--connector', 'codex', '--event', $boundEvent,
+                    '--hook-contract', $boundContract
+                ) -join "`0") -or
+                $boundEvent -cnotin $expectedEvents -or
+                $script -notmatch '(?i)^\$ErrorActionPreference=''Stop'';\s+\$env:NoDefaultCurrentDirectoryInExePath=''1'';' -or
+                $script -notmatch '(?i)exit\s+\$hookProcess\.ExitCode' -or
+                $script -match '(?i)\$LASTEXITCODE') {
+                throw "wizard-selected Codex registration does not use its exact synchronous native hook command: $($Specification.ConfigPath)"
+            }
+            $registeredEvents.Add($boundEvent)
+        }
+        if ([string]::IsNullOrEmpty($registeredContract)) {
+            throw 'wizard-selected Codex registration contains no supported command_windows hooks'
+        }
+        $expectedEvents = @($codexEventsByContract[$registeredContract])
+        if ($tomlStrings.Count -ne $expectedEvents.Count) {
+            throw "wizard-selected Codex registration has $($tomlStrings.Count) command_windows overrides, expected the exact $registeredContract roster of $($expectedEvents.Count)"
+        }
+        if ((($registeredEvents | Sort-Object) -join "`0") -cne
+            (($expectedEvents | Sort-Object) -join "`0")) {
+            throw "wizard-selected Codex registration does not contain the exact $registeredContract event set: $($Specification.ConfigPath)"
+        }
+    } elseif ($Specification.Connector -eq 'antigravity') {
+        try { $hooks = $registration | ConvertFrom-Json -ErrorAction Stop }
+        catch { throw "wizard-selected Antigravity registration is not valid JSON: $($_.Exception.Message)" }
+        foreach ($event in @('PreInvocation', 'PreToolUse', 'PostToolUse', 'PostInvocation', 'Stop')) {
+            $key = "defenseclaw-antigravity-$($event.ToLowerInvariant())"
+            $outer = $hooks.PSObject.Properties[$key]
+            if ($null -eq $outer) { throw "wizard-selected Antigravity registration lacks $key" }
+            $eventHandlers = @($outer.Value.PSObject.Properties[$event].Value)
+            if ($eventHandlers.Count -ne 1) {
+                throw "wizard-selected Antigravity $event registration must contain exactly one handler"
+            }
+            if ($event -in @('PreToolUse', 'PostToolUse')) {
+                if ([string]$eventHandlers[0].matcher -cne '*' -or @($eventHandlers[0].hooks).Count -ne 1) {
+                    throw "wizard-selected Antigravity $event registration has an invalid matcher group"
+                }
+                $handler = @($eventHandlers[0].hooks)[0]
+            } else {
+                $handler = $eventHandlers[0]
+                if ($null -ne $handler.PSObject.Properties['matcher'] -or
+                    $null -ne $handler.PSObject.Properties['hooks']) {
+                    throw "wizard-selected Antigravity $event registration must use a direct handler"
+                }
+            }
+            if ([string]$handler.type -cne 'command' -or [int]$handler.timeout -ne 30) {
+                throw "wizard-selected Antigravity $event handler has an invalid type or timeout"
+            }
+            $encoded = [regex]::Match(
+                [string]$handler.command,
+                '(?i)(?:^|\s)-EncodedCommand\s+([A-Za-z0-9+/=]+)(?:\s|$)'
+            )
+            if (-not $encoded.Success) {
+                throw "wizard-selected Antigravity $event command does not use EncodedCommand"
+            }
+            try {
+                $script = [Text.Encoding]::Unicode.GetString(
+                    [Convert]::FromBase64String($encoded.Groups[1].Value)
+                )
+            } catch {
+                throw "wizard-selected Antigravity $event command is not valid UTF-16LE Base64"
+            }
+            $eventArgs = "'hook','--connector','antigravity','--event','" + $event + "'"
+            if ($script -notmatch '(?i)Start-Process' -or
+                $script.IndexOf($eventArgs, [StringComparison]::Ordinal) -lt 0) {
+                throw "wizard-selected Antigravity $event command is not event-bound to the native hook launcher"
+            }
         }
     } elseif ($Specification.Connector -eq 'claudecode') {
         try { $settings = $registration | ConvertFrom-Json -ErrorAction Stop }
@@ -3111,6 +4626,114 @@ function Assert-WizardHookRegistration(
         }
         if (-not $nativeHookFound) {
             throw "wizard-selected connector does not use its exact native exec-form hook command: $($Specification.ConfigPath)"
+        }
+    } elseif ($Specification.Connector -eq 'copilot') {
+        try { $hookDocument = $registration | ConvertFrom-Json -ErrorAction Stop }
+        catch { throw "wizard-selected Copilot registration is not valid JSON: $($_.Exception.Message)" }
+        $requiredEvents = @(
+            'agentStop', 'errorOccurred', 'notification', 'permissionRequest',
+            'postToolUse', 'postToolUseFailure', 'preCompact', 'preToolUse',
+            'sessionEnd', 'sessionStart', 'subagentStart', 'subagentStop',
+            'userPromptSubmitted', 'userPromptTransformed'
+        )
+        # Copilot's schema defaults an omitted disableAllHooks to false, and
+        # DefenseClaw does not add the optional field to a fresh registration.
+        # Use the property bag so StrictMode does not turn that valid omission
+        # into a harness failure. An explicit true still fails closed below.
+        $disableAllHooks = $hookDocument.PSObject.Properties['disableAllHooks']
+        if ([int]$hookDocument.version -ne 1 -or
+            ($null -ne $disableAllHooks -and [bool]$disableAllHooks.Value)) {
+            throw 'wizard-selected Copilot registration does not use enabled schema version 1'
+        }
+        $registeredEvents = @($hookDocument.hooks.PSObject.Properties.Name | Sort-Object)
+        if (($registeredEvents -join "`0") -cne (($requiredEvents | Sort-Object) -join "`0")) {
+            throw 'wizard-selected Copilot registration does not contain the exact required hook event set'
+        }
+        $commandPattern = '^\$ErrorActionPreference=''Stop''; ' +
+            '\$env:NoDefaultCurrentDirectoryInExePath=''1''; ' +
+            '\$hookProcess=Microsoft\.PowerShell\.Management\\Start-Process ' +
+            '-FilePath ''(?<path>(?:[^'']|'''')+)'' ' +
+            '-ArgumentList @\(''hook'',''--connector'',''copilot'',''--event'',''(?<event>[^'']+)''\) ' +
+            '-NoNewWindow -Wait -PassThru; exit \$hookProcess\.ExitCode$'
+        foreach ($eventName in $requiredEvents) {
+            $entries = @($hookDocument.hooks.$eventName)
+            if ($entries.Count -ne 1 -or [string]$entries[0].type -cne 'command' -or
+                [int]$entries[0].timeoutSec -ne 30) {
+                throw "wizard-selected Copilot $eventName hook does not use the required command schema"
+            }
+            $command = [string]$entries[0].powershell
+            $match = [regex]::Match($command, $commandPattern)
+            if (-not $match.Success -or
+                $match.Groups['event'].Value -cne $eventName -or
+                $command.Contains('&amp;')) {
+                throw "wizard-selected Copilot $eventName hook is not the exact synchronous PowerShell contract"
+            }
+            if ($entries[0].PSObject.Properties.Name -contains 'bash' -or
+                $entries[0].PSObject.Properties.Name -contains 'command') {
+                throw "wizard-selected Copilot $eventName hook is not PowerShell-only"
+            }
+            $runtimePath = $match.Groups['path'].Value.Replace("''", "'")
+            if (-not [IO.Path]::GetFullPath($runtimePath).Equals(
+                [IO.Path]::GetFullPath((Get-StableHookRuntimeExecutable)),
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+                throw "wizard-selected Copilot $eventName hook targets an unexpected runtime"
+            }
+        }
+    } elseif ($Specification.Connector -eq 'cursor') {
+        try { $hooksDocument = $registration | ConvertFrom-Json -ErrorAction Stop }
+        catch { throw "wizard-selected Cursor registration is not valid JSON: $($_.Exception.Message)" }
+        if ([int]$hooksDocument.version -ne 1 -or $null -eq $hooksDocument.hooks) {
+            throw 'wizard-selected Cursor registration does not use hooks schema version 1'
+        }
+        $expectedEvents = @(
+            'sessionStart', 'sessionEnd', 'preToolUse', 'postToolUse', 'postToolUseFailure',
+            'subagentStart', 'subagentStop', 'beforeShellExecution', 'beforeMCPExecution',
+            'afterShellExecution', 'afterMCPExecution', 'beforeReadFile', 'beforeTabFileRead',
+            'afterFileEdit', 'afterTabFileEdit', 'beforeSubmitPrompt', 'afterAgentResponse',
+            'afterAgentThought', 'stop', 'preCompact', 'workspaceOpen'
+        )
+        $expectedFailClosed = $Mode -eq 'action'
+        foreach ($eventName in $expectedEvents) {
+            $eventProperty = $hooksDocument.hooks.PSObject.Properties[$eventName]
+            if ($null -eq $eventProperty) {
+                throw "wizard-selected Cursor registration is missing $eventName"
+            }
+            $managedEntries = @($eventProperty.Value | Where-Object {
+                [string]$_.command -match '(?i)cursor-hook\.ps1'
+            })
+            if ($managedEntries.Count -ne 1) {
+                throw "wizard-selected Cursor registration has $($managedEntries.Count) managed $eventName entries"
+            }
+            $entry = $managedEntries[0]
+            if ([string]$entry.type -cne 'command' -or [int]$entry.timeout -ne 30 -or
+                [bool]$entry.failClosed -ne $expectedFailClosed) {
+                throw "wizard-selected Cursor $eventName entry has the wrong type, timeout, or failClosed value"
+            }
+            $commandMatch = [regex]::Match(
+                [string]$entry.command,
+                "^\s*&\s+'(?<path>(?:''|[^'])+)'\s*$"
+            )
+            if (-not $commandMatch.Success) {
+                throw "wizard-selected Cursor $eventName entry is not an exact PowerShell adapter invocation"
+            }
+            $adapterPath = $commandMatch.Groups['path'].Value.Replace("''", "'")
+            if (-not [IO.Path]::GetFullPath($adapterPath).Equals(
+                [IO.Path]::GetFullPath($expectedHook),
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+                throw "wizard-selected Cursor $eventName entry names an unexpected adapter"
+            }
+        }
+        $adapter = [IO.File]::ReadAllText($expectedHook)
+        $expectedAdapterMode = if ($expectedFailClosed) { '$failClosed = $true' } else { '$failClosed = $false' }
+        foreach ($marker in @(
+            'defenseclaw-managed-hook v8', 'defenseclaw-hook.exe', '--input-file',
+            'ProcessStartInfo', 'RedirectStandardOutput', 'WaitForExit', $expectedAdapterMode
+        )) {
+            if ($adapter.IndexOf($marker, [StringComparison]::Ordinal) -lt 0) {
+                throw "wizard-selected Cursor adapter is missing required marker $marker"
+            }
         }
     } elseif ($Specification.Connector -eq 'amp') {
         foreach ($marker in @(
@@ -3137,15 +4760,40 @@ function Assert-WizardHookRegistration(
         if ($registration -match '(?i)defenseclaw-hook(?:\.exe|\.cmd)|\bwsl\b|\bbash\b|\bchmod\b') {
             throw 'wizard-selected Amp policy plugin depends on a shell hook or compatibility layer'
         }
+    } elseif ($Specification.Connector -eq 'windsurf') {
+        try { $settings = $registration | ConvertFrom-Json -ErrorAction Stop }
+        catch { throw "wizard-selected Windsurf registration is not valid JSON: $($_.Exception.Message)" }
+        $expectedEvents = @(
+            'pre_read_code', 'post_read_code', 'pre_write_code', 'post_write_code',
+            'pre_run_command', 'post_run_command', 'pre_mcp_tool_use', 'post_mcp_tool_use',
+            'pre_user_prompt', 'post_cascade_response',
+            'post_cascade_response_with_transcript', 'post_setup_worktree'
+        )
+        $actualEvents = @($settings.hooks.PSObject.Properties.Name | Sort-Object)
+        if (($actualEvents -join "`n") -cne (@($expectedEvents | Sort-Object) -join "`n")) {
+            throw "wizard-selected Windsurf registration has an incomplete event matrix: $($actualEvents -join ', ')"
+        }
+        $expectedCommand = "& '" + $expectedHook.Replace("'", "''") + "'"
+        foreach ($event in $expectedEvents) {
+            $handlers = @($settings.hooks.PSObject.Properties[$event].Value)
+            $managedHandlers = @($handlers | Where-Object {
+                [string]$_.powershell -ceq $expectedCommand
+            })
+            if ($managedHandlers.Count -ne 1 -or
+                $managedHandlers[0].PSObject.Properties.Name -contains 'command' -or
+                [bool]$managedHandlers[0].show_output -ne $true) {
+                throw "wizard-selected Windsurf $event registration is not the exact PowerShell-only managed handler"
+            }
+        }
     } else {
-        throw "unsupported wizard connector registration: $($Specification.Connector)"
+        throw "unsupported wizard connector registration contract: $($Specification.Connector)"
     }
-    foreach ($otherConnector in @($Specification.OtherConnector)) {
+    foreach ($otherConnector in @($Specification.OtherConnectors)) {
         if ($registration -match ('(?i)--connector\s+' + [regex]::Escape($otherConnector) + '\b')) {
             throw "wizard-selected connector registration references the wrong connector"
         }
     }
-    Assert-NoDefenseClawRegistration @($Specification.OtherConfigPath)
+    Assert-NoDefenseClawRegistration @($Specification.OtherConfigPaths)
 }
 
 function Set-WizardCodexLegacyNonWaitingHook([object]$Specification) {
@@ -3163,14 +4811,21 @@ function Set-WizardCodexLegacyNonWaitingHook([object]$Specification) {
     try { $script = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String($currentEncoded)) }
     catch { throw "cannot stage legacy Codex hook: invalid encoded command: $($_.Exception.Message)" }
 
-    $startPattern = '(?i)\$hookProcess=Microsoft\.PowerShell\.Management\\Start-Process\s+-FilePath\s+(?<file>''(?:''''|[^''])*defenseclaw-hook\.exe'')\s+-ArgumentList\s+@\(''hook'',''--connector'',''codex''\)\s+-NoNewWindow\s+-Wait\s+-PassThru'
+    $startPattern = '(?i)\$hookProcess=Microsoft\.PowerShell\.Management\\Start-Process\s+-FilePath\s+(?<file>''(?:''''|[^''])*defenseclaw-hook\.exe'')\s+-ArgumentList\s+@\((?<arguments>''hook'',''--connector'',''codex''(?:,''--event'',''(?:''''|[^''])*'')?(?:,''--hook-contract'',''(?:''''|[^''])*'')?)\)\s+-NoNewWindow\s+-Wait\s+-PassThru'
     $start = [regex]::Match($script, $startPattern)
     if (-not $start.Success) {
         throw 'cannot stage legacy Codex hook: synchronous launcher expression is missing'
     }
+    $argumentLiterals = @([regex]::Matches(
+        $start.Groups['arguments'].Value,
+        "'(?:''|[^'])*'"
+    ))
+    if (($argumentLiterals.Value -join ',') -cne $start.Groups['arguments'].Value) {
+        throw 'cannot stage legacy Codex hook: launcher arguments are not exact PowerShell literals'
+    }
     $legacyScript = $script.Replace(
         $start.Value,
-        ('& ' + $start.Groups['file'].Value + ' hook --connector codex')
+        ('& ' + $start.Groups['file'].Value + ' ' + ($argumentLiterals.Value -join ' '))
     ).Replace('exit $hookProcess.ExitCode', 'exit $LASTEXITCODE')
     if ($legacyScript -ceq $script) {
         throw 'cannot stage legacy Codex hook: generated command did not change'
@@ -3211,8 +4866,7 @@ function Assert-WizardCodexLegacyLauncherNeedsRepair(
     Set-WizardCodexLegacyNonWaitingHook $Specification
     $doctorResult = Invoke-Installed $Launcher @('doctor', '--json-output') @(0, 1) 300 `
         (Join-Path $Logs 'wizard-codex-legacy-launcher-doctor.json')
-    try { $doctor = $doctorResult.StdOut | ConvertFrom-Json -ErrorAction Stop }
-    catch { throw "legacy-launcher doctor did not emit valid JSON: $($_.Exception.Message)" }
+    $doctor = ConvertFrom-WindowsNativeDoctorJson $doctorResult 'legacy-launcher doctor'
     $hookRows = @($doctor.checks | Where-Object {
         [string]::Equals([string]$_.label, $Specification.DoctorLabel, [StringComparison]::Ordinal)
     })
@@ -3245,8 +4899,7 @@ function Assert-WizardConnectorHealth(
 
     $doctorResult = Invoke-Installed $Launcher @('doctor', '--json-output') @(0, 1) 300 `
         (Join-Path $Logs "wizard-$($Specification.Connector)-$Phase-doctor.json")
-    try { $doctor = $doctorResult.StdOut | ConvertFrom-Json -ErrorAction Stop }
-    catch { throw "wizard doctor did not emit valid JSON: $($_.Exception.Message)" }
+    $doctor = ConvertFrom-WindowsNativeDoctorJson $doctorResult 'wizard doctor'
     $hookRows = @($doctor.checks | Where-Object {
         [string]::Equals([string]$_.label, $Specification.DoctorLabel, [StringComparison]::Ordinal)
     })
@@ -3256,29 +4909,25 @@ function Assert-WizardConnectorHealth(
         'healthy Windows-native executable registration'
     }
     if ($hookRows.Count -ne 1 -or [string]$hookRows[0].status -ne 'pass' -or
-        [string]$hookRows[0].detail -notmatch $healthyDetailPattern) {
+        [string]$hookRows[0].detail -notmatch [string]$Specification.DoctorRuntimePattern) {
         throw "wizard doctor did not validate the selected native hook: $($hookRows | ConvertTo-Json -Compress -Depth 5)"
     }
-    if ($Specification.Connector -eq 'amp') {
-        if (([string]$hookRows[0].detail).IndexOf(
-            [string]$Specification.ConfigPath,
-            [StringComparison]::OrdinalIgnoreCase
-        ) -lt 0) {
-            throw "wizard doctor validated an unexpected Amp policy plugin: $($hookRows[0].detail)"
-        }
+    $expectedHookTarget = if ($Specification.Connector -eq 'amp') {
+        [string]$Specification.ConfigPath
+    } elseif ($Specification.Connector -eq 'cursor') {
+        Join-Path ([Environment]::GetEnvironmentVariable('DEFENSECLAW_HOME')) 'hooks\cursor-hook.ps1'
+    } elseif ($Specification.Connector -eq 'windsurf') {
+        Join-Path $env:DEFENSECLAW_HOME 'hooks\windsurf-hook.ps1'
     } else {
-        $expectedHookExecutable = Get-StableHookRuntimeExecutable
-        if (([string]$hookRows[0].detail).IndexOf(
-            $expectedHookExecutable,
-            [StringComparison]::OrdinalIgnoreCase
-        ) -lt 0) {
-            throw "wizard doctor validated an unexpected hook executable: $($hookRows[0].detail)"
-        }
+        Get-StableHookRuntimeExecutable
     }
-    $otherDoctorLabels = @($Specification.OtherDoctorLabel)
-    $wrongRows = @($doctor.checks | Where-Object {
-        [string]$_.label -in $otherDoctorLabels
-    })
+    if (([string]$hookRows[0].detail).IndexOf(
+        $expectedHookTarget,
+        [StringComparison]::OrdinalIgnoreCase
+    ) -lt 0) {
+        throw "wizard doctor validated an unexpected hook target: $($hookRows[0].detail)"
+    }
+    $wrongRows = @($doctor.checks | Where-Object { [string]$_.label -in @($Specification.OtherDoctorLabels) })
     if ($wrongRows.Count -ne 0) {
         throw "wizard doctor reported a hook row for the unselected connector"
     }
@@ -3382,6 +5031,16 @@ function Invoke-WizardConnectorAcceptance(
     $launcher = Join-Path $InstallRoot 'bin\defenseclaw.exe'
     $gateway = Join-Path $InstallRoot 'bin\defenseclaw-gateway.exe'
     $python = Join-Path $InstallRoot 'runtime\python\python.exe'
+    $originalConfigBytes = $null
+    if ($ConnectorName -eq 'windsurf') {
+        [IO.Directory]::CreateDirectory((Split-Path -Parent $specification.ConfigPath)) | Out-Null
+        $originalConfigBytes = [Text.UTF8Encoding]::new($false).GetBytes(
+            "{`r`n  `"vendor`": {`"preserve`": true},`r`n  `"hooks`": {`r`n" +
+            "    `"pre_read_code`": [{`"powershell`": `"& 'C:\\Vendor\\audit.ps1'`", `"show_output`": false}]`r`n" +
+            "  }`r`n}`r`n"
+        )
+        [IO.File]::WriteAllBytes($specification.ConfigPath, $originalConfigBytes)
+    }
     Invoke-WizardInstall $Setup $Root $ConnectorName $Mode $true `
         (Join-Path $Logs "wizard-$ConnectorName-$Mode-install.json")
     $env:DEFENSECLAW_HOME = $DataRoot
@@ -3397,7 +5056,7 @@ function Invoke-WizardConnectorAcceptance(
     $beforeState = Get-PackagedConnectorState $python `
         (Join-Path $Logs "wizard-$ConnectorName-before-state.log")
     Assert-WizardConnectorState $beforeState $ConnectorName $Mode
-    Assert-WizardHookRegistration $specification $DataRoot
+    Assert-WizardHookRegistration $specification $DataRoot $Mode
 
     Invoke-Installed $gateway @('status') -Timeout 30 `
         -Log (Join-Path $Logs "wizard-$ConnectorName-gateway-status.log") | Out-Null
@@ -3434,7 +5093,7 @@ function Invoke-WizardConnectorAcceptance(
     }
     Assert-SetupInstallState $InstallRoot $ConnectorName $Mode
     Assert-GatewayAutoStart $gateway
-    Assert-WizardHookRegistration $specification $DataRoot
+    Assert-WizardHookRegistration $specification $DataRoot $Mode
     Assert-WizardConnectorHealth $launcher $specification $Mode $Logs 'after-repair'
     if (-not (Test-Path -LiteralPath $preserved -PathType Leaf)) {
         throw "setup repair did not preserve $ConnectorName user data"
@@ -3468,10 +5127,16 @@ function Invoke-WizardConnectorAcceptance(
     if (Test-Path -LiteralPath $ARPKey) {
         throw "wizard $ConnectorName uninstall left Installed Apps registration behind"
     }
-    Assert-NoDefenseClawRegistration @(
-        $specification.ConfigPath,
-        $specification.OtherConfigPath
+    Assert-NoDefenseClawRegistration (
+        @($specification.ConfigPath) + @($specification.OtherConfigPaths)
     )
+    if ($null -ne $originalConfigBytes) {
+        if (-not (Test-Path -LiteralPath $specification.ConfigPath -PathType Leaf) -or
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($specification.ConfigPath)) -cne
+                [Convert]::ToBase64String($originalConfigBytes)) {
+            throw 'wizard Windsurf uninstall did not restore the unrelated config bytes exactly'
+        }
+    }
     Assert-NoGatewayAutoStart
     Assert-NoInstalledGatewayProcess $gateway
     Assert-UserPathRegistrySnapshot $UserPathBefore `
@@ -3516,10 +5181,14 @@ function Invoke-SetupAcceptance {
     $transactionJournalPath = Join-Path $installerStateRoot 'setup-transaction.json'
     $arpKey = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\DefenseClaw'
     $connectorConfigPaths = @(
+        (Join-Path $userProfile '.gemini\config\hooks.json'),
         (Join-Path $userProfile '.codex\config.toml'),
         (Join-Path $userProfile '.codex\managed_config.toml'),
         (Join-Path $userProfile '.claude\settings.json'),
-        (Join-Path $userProfile '.config\amp\plugins\defenseclaw.ts')
+        (Join-Path $userProfile '.config\amp\plugins\defenseclaw.ts'),
+        (Join-Path $userProfile '.copilot\hooks\defenseclaw.json'),
+        (Join-Path $userProfile '.cursor\hooks.json'),
+        (Join-Path $userProfile '.codeium\windsurf\hooks.json')
     )
     if (Test-Path -LiteralPath $installRoot) { throw "refusing to overwrite an existing current-user install: $installRoot" }
     if (Test-Path -LiteralPath $dataRoot) { throw "refusing to overwrite existing current-user data: $dataRoot" }
@@ -3558,6 +5227,8 @@ function Invoke-SetupAcceptance {
         $env:PATH = "$fixtureSearchPath;$processPathBefore"
     }
     $acceptanceFailure = $null
+    $setupOtlpCollector = $null
+    $setupHealthSampler = $null
     try {
         if ($disposableGithubRunner) {
             Invoke-WizardConfigureLaterAcceptance `
@@ -3582,6 +5253,15 @@ function Invoke-SetupAcceptance {
                 $setup $root $logs $installRoot $dataRoot $arpKey $userProfile `
                 $fixtureSearchPath $userPathBefore 'amp' 'action'
             Remove-Item Env:DEFENSECLAW_HOME -ErrorAction SilentlyContinue
+            $env:PATH = "$fixtureSearchPath;$processPathBefore"
+
+            foreach ($wizardConnector in @('copilot', 'cursor', 'windsurf')) {
+                Invoke-WizardConnectorAcceptance `
+                    $setup $root $logs $installRoot $dataRoot $arpKey $userProfile `
+                    $fixtureSearchPath $userPathBefore $wizardConnector 'observe'
+                Remove-Item Env:DEFENSECLAW_HOME -ErrorAction SilentlyContinue
+                $env:PATH = "$fixtureSearchPath;$processPathBefore"
+            }
             $env:PATH = $processPathBefore
         }
 
@@ -3660,7 +5340,7 @@ function Invoke-SetupAcceptance {
             '--profile', 'observe', '--no-start-gateway', '--no-verify'
         ) -Timeout 300 -Log (Join-Path $logs 'setup-init-codex.log') | Out-Null
         # ``init`` is intentionally a first-run/replacement workflow. Add a
-        # second hook connector through the documented additive setup path so
+        # the remaining hook connectors through the documented additive setup path so
         # the acceptance test verifies roster preservation instead of asking a
         # second first-run invocation to retain stale peers.
         Invoke-Installed $launcher @(
@@ -3669,6 +5349,9 @@ function Invoke-SetupAcceptance {
         Invoke-Installed $launcher @(
             'setup', 'amp', '--yes', '--no-restart'
         ) -Timeout 300 -Log (Join-Path $logs 'setup-add-amp.log') | Out-Null
+        Invoke-Installed $launcher @(
+            'setup', 'cursor', '--yes', '--no-restart'
+        ) -Timeout 300 -Log (Join-Path $logs 'setup-add-cursor.log') | Out-Null
 
         # Windows searches the working directory before PATH for a bare
         # executable name. Prove the packaged Python CLI always restarts the
@@ -3691,10 +5374,10 @@ function Invoke-SetupAcceptance {
         # The enclosing finally block remains the failure-path cleanup authority.
         # The packaged Go suite separately executes the hardened absolute-path
         # Antigravity hook command from an untrusted working directory. The
-        # installer acceptance must preserve the product's current support
-        # contract: Antigravity is not yet certified on native Windows and may
-        # not be configured merely because the dormant writer is hardened.
-        Assert-PackagedAntigravityPlatformGate $launcher $userProfile `
+        # installer acceptance additionally proves ordinary Setup is supported
+        # and reaches the normal absent-client discovery gate without claiming
+        # provider-authenticated or live validation evidence.
+        Assert-PackagedAntigravitySupportedAvailability $launcher $userProfile `
             (Join-Path $logs 'setup-antigravity.log')
 
         $rosterProbe = 'import json; from defenseclaw.config import load; print("DC_ROSTER=" + json.dumps(load().active_connectors()))'
@@ -3706,7 +5389,7 @@ function Invoke-SetupAcceptance {
         }
         $rosterLine = $rosterLines[0]
         $roster = @($rosterLine.Substring('DC_ROSTER='.Length) | ConvertFrom-Json)
-        foreach ($expectedConnector in @('codex', 'claudecode', 'amp')) {
+        foreach ($expectedConnector in @('codex', 'claudecode', 'amp', 'cursor')) {
             if ($expectedConnector -notin $roster) {
                 throw "packaged connector setup collapsed the existing roster; missing $expectedConnector"
             }
@@ -3730,8 +5413,16 @@ function Invoke-SetupAcceptance {
         $installedState.version = '0.8.0'
         $installedState | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $statePath -Encoding UTF8
         $configPath = Join-Path $dataRoot 'config.yaml'
+        $setupGatewayApiPort = Get-PackagedGatewayApiPort $python $dataRoot
         [IO.Directory]::CreateDirectory((Join-Path $dataRoot 'state')) | Out-Null
         $yamlDataRoot = $dataRoot.Replace("'", "''")
+        # Preserve enabled v7 telemetry while making the seeded upgrade
+        # deterministic: strict committed activation must reach a real local
+        # destination instead of relying on an absent developer collector.
+        $setupOtlpCollector = Start-SetupAcceptanceOtlpCollector (Join-Path $PSHOME 'pwsh.exe') `
+            (Join-Path $root 'setup-otlp-collector.port') `
+            (Join-Path $logs 'setup-otlp-requests.log')
+        $setupOtlpPort = [int]$setupOtlpCollector.Port
         $v7Fixture = @"
 # native Setup 0.8.0 observability migration acceptance fixture
 config_version: 7
@@ -3746,6 +5437,7 @@ guardrail:
     amp: {}
     codex: {}
     claudecode: {}
+    cursor: {}
 gateway:
   fleet_mode: disabled
   watcher:
@@ -3753,16 +5445,27 @@ gateway:
 otel:
   enabled: true
   protocol: http
-  endpoint: http://127.0.0.1:4318
+  endpoint: http://127.0.0.1:$setupOtlpPort
   traces:
     enabled: true
+    # Pin each signal explicitly so hosted-runner ambient OTLP variables
+    # cannot redirect the migrated acceptance traffic away from this exact
+    # PID-owned loopback collector.
+    endpoint: http://127.0.0.1:$setupOtlpPort
+    protocol: http
     sampler: always_on
   metrics:
     enabled: true
-    export_interval_s: 60
+    endpoint: http://127.0.0.1:$setupOtlpPort
+    protocol: http
+    # Keep the fixture's first export strictly inside the gateway's fixed
+    # 60-second startup-readiness deadline so acceptance cannot race timeout.
+    export_interval_s: 5
     temporality: delta
   logs:
     enabled: true
+    endpoint: http://127.0.0.1:$setupOtlpPort
+    protocol: http
 "@.Replace("`r`n", "`n")
         [IO.File]::WriteAllText($configPath, $v7Fixture, [Text.UTF8Encoding]::new($false))
         $seedCursor = @'
@@ -3782,10 +5485,41 @@ migration_state.save(sys.argv[1], state)
         $v7Hash = (Get-FileHash -LiteralPath $configPath -Algorithm SHA256).Hash
         $gatewayBeforeSeededUpgrade = Get-GatewayIdentity $dataRoot
         $watchdogBeforeSeededUpgrade = Get-WatchdogIdentity $dataRoot
-        Invoke-WindowsSetupStandardUserProcess $setup @(
-            '/upgrade', '/quiet', '/norestart', 'INSTALLSCOPE=user',
-            'FROMVERSION=0.8.0'
-        ) -TimeoutSeconds 1200 -LogPath (Join-Path $logs 'setup-seeded-upgrade.log') | Out-Null
+        $setupHealthSampler = Start-SetupAcceptanceHealthSampler `
+            (Join-Path $PSHOME 'pwsh.exe') `
+            (Join-Path $logs 'setup-seeded-health.jsonl') `
+            $dataRoot $setupGatewayApiPort $gatewayBeforeSeededUpgrade $gateway $installRoot
+        $seededUpgradeFailure = $null
+        try {
+            Invoke-WindowsSetupStandardUserProcess $setup @(
+                '/upgrade', '/quiet', '/norestart', 'INSTALLSCOPE=user',
+                'FROMVERSION=0.8.0'
+            ) -TimeoutSeconds 1200 -LogPath (Join-Path $logs 'setup-seeded-upgrade.log') | Out-Null
+        } catch {
+            $seededUpgradeFailure = $_
+        } finally {
+            try {
+                Stop-SetupAcceptanceHealthSampler $setupHealthSampler
+                $setupHealthSampler = $null
+            } catch {
+                if ($null -eq $seededUpgradeFailure) { throw }
+                Write-Warning "Setup health sampler cleanup failed after seeded upgrade failure: $($_.Exception.Message)"
+            }
+        }
+        if ($null -ne $seededUpgradeFailure) {
+            Write-SetupAcceptanceConvergenceDiagnostics $logs $dataRoot $setupOtlpCollector
+            if (Test-Path -LiteralPath $gateway -PathType Leaf) {
+                try {
+                    Invoke-Installed $gateway @('status') @(0, 1) 30 `
+                        (Join-Path $logs 'setup-failure-gateway-status.log') | Out-Null
+                } catch {
+                    Write-BoundedText -Path (Join-Path $logs 'setup-failure-gateway-status.log') `
+                        -Text "gateway failure status unavailable: $($_.Exception.GetType().Name)" `
+                        -MaxBytes 16384
+                }
+            }
+            throw $seededUpgradeFailure
+        }
         $upgradedState = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json
         if ([string]$upgradedState.version -ne $targetVersion) {
             throw "seeded setup upgrade version mismatch: $($upgradedState.version), expected $targetVersion"
@@ -3808,12 +5542,16 @@ otlp = next(
     for destination in observability.get("destinations", [])
     if destination.get("kind") == "otlp"
 )
+expected_endpoint = f"http://127.0.0.1:{int(sys.argv[2])}"
+assert otlp.get("endpoint") == expected_endpoint
+assert otlp.get("protocol") == "http/protobuf"
+assert not otlp.get("signal_overrides")
 assert (otlp.get("tls") or {}).get("insecure") is True
 assert (otlp.get("network_safety") or {}).get("allow_private_networks") is True
 assert (document.get("guardrail") or {}).get("retain_judge_bodies") is True
-assert set(((document.get("guardrail") or {}).get("connectors") or {})) == {"amp", "codex", "claudecode"}
+assert set(((document.get("guardrail") or {}).get("connectors") or {})) == {"amp", "codex", "claudecode", "cursor"}
 '@
-        Invoke-Installed $python @('-I', '-c', $assertMigratedConfig, $configPath) -Timeout 120 `
+        Invoke-Installed $python @('-I', '-c', $assertMigratedConfig, $configPath, $setupOtlpPort) -Timeout 120 `
             -Log (Join-Path $logs 'setup-seeded-v8-contract.log') | Out-Null
         $migrationCursor = Get-Content -LiteralPath (Join-Path $dataRoot '.migration_state.json') `
             -Raw -Encoding UTF8 | ConvertFrom-Json
@@ -3913,17 +5651,35 @@ assert set(((document.get("guardrail") or {}).get("connectors") or {})) == {"amp
         # was launched with the prior port.
         Invoke-Installed $gateway @('stop') @(0, 1) 90 `
             (Join-Path $logs 'setup-before-minimal-config-stop.log') | Out-Null
+        Stop-SetupAcceptanceOtlpCollector $setupOtlpCollector
+        $setupOtlpCollector = $null
         $gatewayAcceptancePort = Set-MinimalGatewayAcceptanceConfig $python
         Invoke-Installed $startup @() -Timeout 90 -Log (Join-Path $logs 'setup-gateway-startup.log') | Out-Null
         Invoke-Installed $gateway @('watchdog', 'start') -Timeout 90 -Log (Join-Path $logs 'setup-watchdog-start.log') | Out-Null
         Invoke-Installed $gateway @('status') -Timeout 30 | Out-Null
         Invoke-Installed $gateway @('watchdog', 'status') -Timeout 30 | Out-Null
+        $rosterBeforeRepairResult = Invoke-Installed $python @('-I', '-c', $rosterProbe) -Timeout 120 `
+            -Log (Join-Path $logs 'setup-connector-roster-before-repair.log')
+        $rosterBeforeRepairLines = @($rosterBeforeRepairResult.StdOut -split "`r?`n" | Where-Object {
+            $_.StartsWith('DC_ROSTER=')
+        })
+        if ($rosterBeforeRepairLines.Count -ne 1) {
+            throw "packaged connector roster pre-repair probe returned $($rosterBeforeRepairLines.Count) structured results; expected one"
+        }
+        $rosterBeforeRepair = @($rosterBeforeRepairLines[0].Substring('DC_ROSTER='.Length) | ConvertFrom-Json)
+        $expectedRosterBeforeRepair = @('amp', 'claudecode', 'codex', 'cursor')
+        if ((@($rosterBeforeRepair | Sort-Object) -join "`0") -cne
+            (@($expectedRosterBeforeRepair | Sort-Object) -join "`0")) {
+            throw "seeded setup upgrade produced an unexpected pre-repair connector roster: $($rosterBeforeRepair -join ', ')"
+        }
+        $configHashBeforeRepair = (Get-FileHash -LiteralPath $configPath -Algorithm SHA256).Hash
         $beforeRepair = Get-GatewayIdentity $dataRoot
         $preserved = Join-Path $dataRoot 'installer-preservation.txt'
         Set-Content -LiteralPath $preserved -Value 'preserve' -Encoding ascii
 
         Invoke-WindowsSetupStandardUserProcess $setup @('/repair', '/quiet', '/norestart', 'INSTALLSCOPE=user') `
             -TimeoutSeconds 1200 -LogPath (Join-Path $logs 'setup-repair.log') | Out-Null
+        $configHashAfterRepair = (Get-FileHash -LiteralPath $configPath -Algorithm SHA256).Hash
         $repairedRosterResult = Invoke-Installed $python @('-I', '-c', $rosterProbe) -Timeout 120 `
             -Log (Join-Path $logs 'setup-connector-roster-after-repair.log')
         $repairedRosterLines = @($repairedRosterResult.StdOut -split "`r?`n" | Where-Object {
@@ -3933,7 +5689,11 @@ assert set(((document.get("guardrail") or {}).get("connectors") or {})) == {"amp
             throw "packaged connector roster repair probe returned $($repairedRosterLines.Count) structured results; expected one"
         }
         $repairedRoster = @($repairedRosterLines[0].Substring('DC_ROSTER='.Length) | ConvertFrom-Json)
-        if ((@($repairedRoster | Sort-Object) -join "`0") -cne (@($roster | Sort-Object) -join "`0")) {
+        if ($configHashAfterRepair -cne $configHashBeforeRepair) {
+            throw 'setup repair changed the user-configured config bytes'
+        }
+        if ((@($repairedRoster | Sort-Object) -join "`0") -cne
+            (@($rosterBeforeRepair | Sort-Object) -join "`0")) {
             throw "setup repair changed the user-configured connector roster: $($repairedRoster -join ', ')"
         }
         $afterRepair = Get-GatewayIdentity $dataRoot
@@ -4134,7 +5894,7 @@ assert set(((document.get("guardrail") or {}).get("connectors") or {})) == {"amp
             catch { Write-Warning "setup acceptance watchdog cleanup failed: $($_.Exception.Message)" }
             try { Invoke-Installed $gateway @('stop') @(0, 1) 60 | Out-Null }
             catch { Write-Warning "setup acceptance gateway cleanup failed: $($_.Exception.Message)" }
-            foreach ($configuredConnector in @('codex', 'claudecode', 'amp')) {
+            foreach ($configuredConnector in @('codex', 'claudecode', 'amp', 'copilot', 'cursor', 'windsurf', 'antigravity')) {
                 try {
                     Invoke-Installed $gateway @('connector', 'teardown', '--connector', $configuredConnector) `
                         @(0, 1) 120 | Out-Null
@@ -4142,6 +5902,17 @@ assert set(((document.get("guardrail") or {}).get("connectors") or {})) == {"amp
                     Write-Warning "setup acceptance $configuredConnector teardown cleanup failed: $($_.Exception.Message)"
                 }
             }
+        }
+        try {
+            Stop-SetupAcceptanceHealthSampler $setupHealthSampler
+            $setupHealthSampler = $null
+        } catch {
+            Write-Warning "setup acceptance health sampler cleanup failed: $($_.Exception.Message)"
+        }
+        try {
+            Stop-SetupAcceptanceOtlpCollector $setupOtlpCollector
+        } catch {
+            Write-Warning "setup acceptance OTLP fixture cleanup failed: $($_.Exception.Message)"
         }
         if (Test-Path -LiteralPath $installRoot) {
             try {
@@ -4201,6 +5972,13 @@ function Get-WindowsReleaseClientSpecifications {
             Package = '@ampcode/cli'
             Manifest = 'node_modules\@ampcode\cli\package.json'
             Command = 'amp.cmd'
+        },
+        [pscustomobject]@{
+            Connector = 'opencode'
+            Version = '1.18.11'
+            Package = 'opencode-ai'
+            Manifest = 'node_modules\opencode-ai\package.json'
+            Command = 'opencode.cmd'
         }
     )
 }
@@ -4485,7 +6263,7 @@ function Assert-WindowsReleaseRealClientResults([string]$ResultsPath) {
         'install', 'doctor:windows-hook-registration', 'lifecycle:fires', 'tool-allow:fires',
         'tool-block:enforced', 'audit-correlation', 'telemetry', 'teardown'
     )
-    foreach ($connectorName in @('codex', 'claudecode', 'amp')) {
+    foreach ($connectorName in @('codex', 'claudecode', 'amp', 'opencode')) {
         foreach ($eventName in $requiredEvents) {
             $matches = @($rows | Where-Object {
                 $_.connector -eq $connectorName -and
@@ -4573,23 +6351,27 @@ function Assert-WindowsReleaseDoctorRows(
 ) {
     $doctor = Invoke-WindowsNativeProcess $Launcher @('doctor', '--json-output') `
         -TimeoutSeconds 300 -LogPath (Join-Path $Logs 'release-doctor-after-maintenance.json')
-    try { $report = $doctor.StdOut | ConvertFrom-Json -ErrorAction Stop }
-    catch { throw "installed Doctor returned invalid JSON after repair/upgrade: $($_.Exception.Message)" }
+    $report = ConvertFrom-WindowsNativeDoctorJson $doctor 'installed Doctor after repair/upgrade'
     foreach ($expectation in @(
         [pscustomobject]@{
             Label = 'Codex hooks'
-            Detail = 'healthy Windows-native executable registration'
+            Detail = 'healthy Windows-native'
             Target = ''
         },
         [pscustomobject]@{
             Label = 'Claude Code hooks'
-            Detail = 'healthy Windows-native executable registration'
+            Detail = 'healthy Windows-native'
             Target = ''
         },
         [pscustomobject]@{
             Label = 'Amp policy plugin'
             Detail = 'plugin-ready-timeout 30'
             Target = $AmpPluginPath
+        },
+        [pscustomobject]@{
+            Label = 'OpenCode hooks'
+            Detail = 'managed plugin digest current'
+            Target = ''
         }
     )) {
         $label = [string]$expectation.Label
@@ -4742,12 +6524,14 @@ function Invoke-WindowsReleaseCertification {
     $ampPluginPath = Join-Path $ampPluginRoot 'defenseclaw.ts'
     $ampOperatorPluginPath = Join-Path $ampPluginRoot 'operator.ts'
     $ampSettingsPath = Join-Path $ampConfigRoot 'settings.json'
+    $openCodePluginPath = Join-Path $userProfile '.config\opencode\plugins\defenseclaw.js'
     $connectorConfigs = @(
         $codexConfigPath,
         $codexManagedConfigPath,
         $codexHooksPath,
         $claudeConfigPath,
-        $ampPluginPath
+        $ampPluginPath,
+        $openCodePluginPath
     )
     foreach ($path in @(
         $installRoot,
@@ -4799,7 +6583,7 @@ function Invoke-WindowsReleaseCertification {
     $originalEnvironment = @{}
     foreach ($name in @(
         'PATH', 'HOME', 'USERPROFILE', 'DEFENSECLAW_HOME',
-        'CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'NPM_CONFIG_CACHE'
+        'CODEX_HOME', 'CLAUDE_CONFIG_DIR', 'OPENCODE_CONFIG_DIR', 'NPM_CONFIG_CACHE'
     )) {
         $originalEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
     }
@@ -4826,6 +6610,7 @@ function Invoke-WindowsReleaseCertification {
         $env:DEFENSECLAW_HOME = $dataRoot
         $env:CODEX_HOME = Join-Path $userProfile '.codex'
         $env:CLAUDE_CONFIG_DIR = Join-Path $userProfile '.claude'
+        $env:OPENCODE_CONFIG_DIR = Join-Path $userProfile '.config\opencode'
 
         Invoke-WindowsNativeProcess $setup @(
             '/quiet', '/norestart', 'INSTALLSCOPE=user', 'CONNECTOR=codex',
@@ -4885,7 +6670,7 @@ function Invoke-WindowsReleaseCertification {
         Assert-PackagedV8ResourceContract $python (Join-Path $installRoot 'runtime\python')
         $env:PATH = "$bin;$(@($toolBins) -join ';');$($originalEnvironment['PATH'])"
 
-        foreach ($connectorName in @('codex', 'claudecode', 'amp')) {
+        foreach ($connectorName in @('codex', 'claudecode', 'amp', 'opencode')) {
             $client = $clients[$connectorName]
             Invoke-WindowsReleaseRealConnector `
                 $client.Specification $client.Path $client.Root $results $diagnostics
@@ -4906,6 +6691,9 @@ function Invoke-WindowsReleaseCertification {
             $ampOperatorPluginPath $unrelatedAmpPlugin 'Amp plugin'
         Assert-WindowsReleasePreservedFile `
             $ampSettingsPath $unrelatedAmpSettings 'Amp settings'
+        Invoke-WindowsNativeProcess $launcher @(
+            'setup', 'opencode', '--yes', '--mode', 'action', '--restart'
+        ) -TimeoutSeconds 300 -LogPath (Join-Path $logs 'release-reconfigure-opencode.log') | Out-Null
 
         Invoke-WindowsNativeProcess $setup @(
             '/repair', '/quiet', '/norestart', 'INSTALLSCOPE=user'
@@ -4971,11 +6759,12 @@ function Invoke-WindowsReleaseCertification {
                 codex = [string]$clients['codex'].Specification.Version
                 claudecode = [string]$clients['claudecode'].Specification.Version
                 amp = [string]$clients['amp'].Specification.Version
+                opencode = [string]$clients['opencode'].Specification.Version
             }
-            connectors = @('codex', 'claudecode', 'amp')
+            connectors = @('codex', 'claudecode', 'amp', 'opencode')
             requirements = @(
                 'automatic-codex-trust', 'lifecycle', 'tool-allow', 'tool-block',
-                'gateway-jsonl', 'audit-correlation', 'gateway-generated-connector-telemetry',
+                'gateway-jsonl', 'audit-correlation', 'connector-telemetry',
                 'repair', 'upgrade', 'uninstall'
             )
             source_commit = $env:GITHUB_SHA
@@ -4988,7 +6777,7 @@ function Invoke-WindowsReleaseCertification {
             ($evidence | ConvertTo-Json -Depth 8),
             [Text.UTF8Encoding]::new($false)
         )
-        Write-Host 'Exact signed Windows installer passed all three real-client release certifications.'
+        Write-Host 'Exact signed Windows installer passed all four real-client release certifications.'
         $completed = $true
     } finally {
         if ($installed -and (Test-Path -LiteralPath $setup -PathType Leaf)) {
@@ -5391,6 +7180,28 @@ function Assert-PackagedRotationActionClosedPosture([object[]]$Posture) {
     }
 }
 
+function Assert-CursorCompatibilitySkillHomes([string[]]$Homes) {
+    foreach ($compatibilityHome in $Homes) {
+        if (-not (Test-Path -LiteralPath $compatibilityHome)) { continue }
+        $homeItem = Get-Item -LiteralPath $compatibilityHome -Force
+        $skills = [IO.Path]::GetFullPath((Join-Path $compatibilityHome 'skills'))
+        $children = @(Get-ChildItem -LiteralPath $compatibilityHome -Force)
+        if (-not $homeItem.PSIsContainer -or
+            ($homeItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+            $children.Count -ne 1 -or
+            -not $children[0].PSIsContainer -or
+            ($children[0].Attributes -band [IO.FileAttributes]::ReparsePoint) -or
+            -not [string]::Equals(
+                [IO.Path]::GetFullPath($children[0].FullName),
+                $skills,
+                [StringComparison]::OrdinalIgnoreCase
+            ) -or
+            @(Get-ChildItem -LiteralPath $skills -Force).Count -ne 0) {
+            throw "Cursor contract wrote outside its empty documented compatibility skill root: $compatibilityHome"
+        }
+    }
+}
+
 function Assert-PackagedClaudeTokenRotation(
     [string]$Launcher,
     [string]$Python,
@@ -5557,20 +7368,32 @@ function Invoke-Contract {
     $contractHome = [IO.Path]::GetFullPath((Join-Path $contractProfileRoot 'home')).TrimEnd('\')
     $codexHome = [IO.Path]::GetFullPath((Join-Path $contractProfileRoot 'codex-home')).TrimEnd('\')
     $claudeHome = [IO.Path]::GetFullPath((Join-Path $contractProfileRoot 'claude-home')).TrimEnd('\')
+    $copilotHome = [IO.Path]::GetFullPath((Join-Path $contractProfileRoot 'copilot-home')).TrimEnd('\')
     $ampHome = [IO.Path]::GetFullPath((Join-Path $contractHome '.config\amp')).TrimEnd('\')
     $ampPluginDir = Join-Path $ampHome 'plugins'
-    $ampPluginPath = Join-Path $ampPluginDir 'defenseclaw.ts'
-    $ampSiblingPath = Join-Path $ampPluginDir 'operator.ts'
-    $ampOriginalPlugin = [Text.UTF8Encoding]::new($false).GetBytes(
-        "export default function operatorOwnedDefensePlugin() { return {} }`n"
+    # Amp and Cursor publish no configuration-home override. Exercise their
+    # profile-relative contracts under this disposable profile instead of
+    # treating DefenseClaw's internal custody binding as a vendor selector.
+    $cursorHome = [IO.Path]::GetFullPath((Join-Path $contractHome '.cursor')).TrimEnd('\')
+    $hermesHome = [IO.Path]::GetFullPath((Join-Path $contractProfileRoot 'hermes-home')).TrimEnd('\')
+    $openCodeHome = [IO.Path]::GetFullPath((Join-Path $contractProfileRoot 'opencode-home')).TrimEnd('\')
+    $openCodePluginDir = Join-Path $openCodeHome 'plugins'
+    $null = Assert-WindowsNativePathsDisjoint @(
+        $contractHome, $codexHome, $claudeHome, $copilotHome, $hermesHome, $openCodeHome
     )
-    $ampSiblingPlugin = [Text.UTF8Encoding]::new($false).GetBytes(
-        "export default function unrelatedOperatorPlugin() { return {} }`n"
-    )
-    $null = Assert-WindowsNativePathsDisjoint @($contractHome, $codexHome, $claudeHome)
     $defaultCodexHome = Join-Path $contractHome '.codex'
     $defaultClaudeHome = Join-Path $contractHome '.claude'
+    $unrelatedGeminiSettings = Join-Path $contractHome '.gemini\settings.json'
+    $defaultCursorHome = Join-Path $contractHome '.cursor'
+    $defaultHermesHome = Join-Path $contractHome 'AppData\Local\hermes'
+    # Native Setup binds Cascade-only Windsurf custody to FOLDERID_Profile;
+    # changing process USERPROFILE below must not redirect that vendor path.
+    $officialWindsurfConfig = Join-Path $realProfile '.codeium\windsurf\hooks.json'
+    $defaultOpenCodeHome = Join-Path $contractHome '.config\opencode'
     try {
+        if ($disposableGithubRunner) {
+            Set-CurrentUserAsDefaultOwner
+        }
         foreach ($path in @(
             $contractHome,
             (Join-Path $contractHome 'AppData\Roaming'),
@@ -5578,30 +7401,35 @@ function Invoke-Contract {
             (Join-Path $contractRoot 'temp'),
             $codexHome,
             $claudeHome,
+            $copilotHome,
             $ampHome,
-            $ampPluginDir
+            $cursorHome,
+            $hermesHome,
+            $openCodeHome
         )) {
             [IO.Directory]::CreateDirectory($path) | Out-Null
             Protect-TestDirectory $path
+        }
+        foreach ($path in @($ampPluginDir, $openCodePluginDir)) {
+            New-ProductPrivateTestDirectory $path
         }
         # Setup records the trusted connector homes in installed state. The
         # launcher intentionally rejects later ambient overrides.
         $env:CODEX_HOME = $codexHome
         $env:CLAUDE_CONFIG_DIR = $claudeHome
-        # Stage both operator-owned Amp fixtures for every connector cell.
-        # Codex and Claude must preserve them byte-for-byte, while Amp must
-        # restore both the pre-existing managed target and unrelated sibling.
-        [IO.File]::WriteAllBytes($ampPluginPath, $ampOriginalPlugin)
-        [IO.File]::WriteAllBytes($ampSiblingPath, $ampSiblingPlugin)
+        $env:COPILOT_HOME = $copilotHome
+        $env:DEFENSECLAW_CURSOR_CONFIG_HOME = $cursorHome
+        $env:HERMES_HOME = $hermesHome
+        $env:OPENCODE_CONFIG_DIR = $openCodeHome
         foreach ($name in @(
             'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'AZURE_OPENAI_API_KEY',
             'AWS_BEARER_TOKEN_BEDROCK', 'AWS_ACCESS_KEY_ID', 'AWS_SECRET_ACCESS_KEY',
-            'AWS_SESSION_TOKEN', 'LLM_API_KEY', 'AMP_API_KEY'
+            'AWS_SESSION_TOKEN', 'GEMINI_API_KEY', 'GOOGLE_API_KEY', 'LLM_API_KEY',
+            'CURSOR_API_KEY'
         )) {
             Remove-Item "Env:$name" -ErrorAction SilentlyContinue
         }
         if ($disposableGithubRunner) {
-            Set-CurrentUserAsDefaultOwner
             $agentFixtures = New-WizardAgentFixtures $root
             $fixtureSearchPath = [string]$agentFixtures.SearchPath
         }
@@ -5624,7 +7452,11 @@ function Invoke-Contract {
         Assert-ManagedDistributionIntegrity (Join-Path $managedPython 'python.exe') $managedPython
 
         if ((Test-Path -LiteralPath $defaultCodexHome) -or
-            (Test-Path -LiteralPath $defaultClaudeHome)) {
+            (Test-Path -LiteralPath $defaultClaudeHome) -or
+            (Test-Path -LiteralPath (Join-Path $defaultCursorHome 'hooks.json')) -or
+            (Test-Path -LiteralPath $defaultHermesHome) -or
+            (Test-Path -LiteralPath $officialWindsurfConfig) -or
+            (Test-Path -LiteralPath $defaultOpenCodeHome)) {
             throw 'contract installation touched a default connector home before connector setup'
         }
 
@@ -5646,65 +7478,65 @@ function Invoke-Contract {
             -AllowNativeDataRoot -ResultsPath (Join-Path $root 'results.jsonl') `
             -ArtifactPath (Join-Path $root 'contract-diagnostics')
 
-        if ($Connector -eq 'amp') {
-            foreach ($preservedPlugin in @(
-                [pscustomobject]@{ Path = $ampPluginPath; Bytes = $ampOriginalPlugin; Label = 'pre-existing target' },
-                [pscustomobject]@{ Path = $ampSiblingPath; Bytes = $ampSiblingPlugin; Label = 'unrelated sibling' }
+        $defaultConnectorHomes = @(
+            $defaultCodexHome,
+            $defaultClaudeHome,
+            (Join-Path $defaultCursorHome 'hooks.json'),
+            $defaultHermesHome,
+            $officialWindsurfConfig,
+            $defaultOpenCodeHome
+        )
+        if ($Connector -eq 'cursor') {
+            # Cursor documents user .claude/.codex skill compatibility roots.
+            # The gateway watcher creates those exact empty directories before
+            # monitoring them; that is discovery custody, not connector-config
+            # fallback. Reject every other child and every reparse boundary.
+            Assert-CursorCompatibilitySkillHomes @($defaultCodexHome, $defaultClaudeHome)
+            $defaultConnectorHomes = @($defaultConnectorHomes | Where-Object {
+                $_ -cne (Join-Path $defaultCursorHome 'hooks.json') -and
+                $_ -cne $defaultCodexHome -and
+                $_ -cne $defaultClaudeHome
+            })
+            foreach ($defaultConfig in @(
+                (Join-Path $defaultCodexHome 'config.toml'),
+                (Join-Path $defaultCodexHome 'managed_config.toml'),
+                (Join-Path $defaultClaudeHome 'settings.json')
             )) {
-                if (-not (Test-Path -LiteralPath $preservedPlugin.Path -PathType Leaf) -or
-                    -not (Test-WindowsNativeByteArraysEqual `
-                        ([byte[]]$preservedPlugin.Bytes) `
-                        ([IO.File]::ReadAllBytes([string]$preservedPlugin.Path)))) {
-                    throw "Amp connector lifecycle did not preserve the $($preservedPlugin.Label) plugin byte-for-byte"
+                if (Test-Path -LiteralPath $defaultConfig) {
+                    throw "Cursor contract wrote to a default compatibility agent config: $defaultConfig"
                 }
             }
         }
-
-        foreach ($defaultHome in @($defaultCodexHome, $defaultClaudeHome)) {
+        if ($Connector -eq 'windsurf') {
+            $defaultConnectorHomes = @($defaultConnectorHomes | Where-Object { $_ -cne $officialWindsurfConfig })
+        }
+        foreach ($defaultHome in $defaultConnectorHomes) {
             if (Test-Path -LiteralPath $defaultHome) {
                 throw "connector contract wrote to the default agent home: $defaultHome"
             }
         }
-        $unrelatedConfigs = switch ($Connector) {
-            'codex' {
-                @(
-                    (Join-Path $claudeHome 'settings.json'),
-                    $ampPluginPath,
-                    $ampSiblingPath
-                )
-            }
-            'claudecode' {
-                @(
-                    (Join-Path $codexHome 'managed_config.toml'),
-                    $ampPluginPath,
-                    $ampSiblingPath
-                )
-            }
-            'amp' {
-                @(
-                    (Join-Path $codexHome 'managed_config.toml'),
-                    (Join-Path $claudeHome 'settings.json')
-                )
+        $connectorConfigTargets = [ordered]@{
+            codex = Join-Path $codexHome 'config.toml'
+            claudecode = Join-Path $claudeHome 'settings.json'
+            copilot = Join-Path $copilotHome 'hooks\defenseclaw.json'
+            cursor = Join-Path $cursorHome 'hooks.json'
+            hermes = Join-Path $hermesHome 'config.yaml'
+            windsurf = $officialWindsurfConfig
+            antigravity = Join-Path $contractHome '.gemini\config\hooks.json'
+            opencode = Join-Path $openCodeHome 'plugins\defenseclaw.js'
+        }
+        $unrelatedConfigs = @(
+            $connectorConfigTargets.Keys |
+                Where-Object { $_ -cne $Connector } |
+                ForEach-Object { [string]$connectorConfigTargets[$_] }
+        )
+        foreach ($unrelatedConfig in $unrelatedConfigs) {
+            if (Test-Path -LiteralPath $unrelatedConfig) {
+                throw "connector contract wrote to the unrelated agent home: $unrelatedConfig"
             }
         }
-        foreach ($unrelatedConfig in @($unrelatedConfigs)) {
-            if (Test-Path -LiteralPath $unrelatedConfig) {
-                if ($Connector -eq 'amp' -or
-                    ($unrelatedConfig -ne $ampPluginPath -and $unrelatedConfig -ne $ampSiblingPath)) {
-                    throw "connector contract wrote to the unrelated agent home: $unrelatedConfig"
-                }
-                # Codex/Claude may encounter the deliberately staged Amp
-                # operator plugins; both must remain byte-identical and unmanaged.
-                $expectedAmpBytes = if ($unrelatedConfig -eq $ampPluginPath) {
-                    $ampOriginalPlugin
-                } else {
-                    $ampSiblingPlugin
-                }
-                if (-not (Test-WindowsNativeByteArraysEqual `
-                    $expectedAmpBytes ([IO.File]::ReadAllBytes($unrelatedConfig)))) {
-                    throw "connector contract modified the unrelated Amp plugin: $unrelatedConfig"
-                }
-            }
+        if (Test-Path -LiteralPath $unrelatedGeminiSettings) {
+            throw "connector contract wrote to excluded Gemini settings: $unrelatedGeminiSettings"
         }
         if ($Connector -eq 'claudecode') {
             Assert-PackagedClaudeTokenRotation `
@@ -5813,12 +7645,15 @@ function Get-WindowsNativeCaptureFiles([string]$Root) {
     return @(
         Get-ChildItem -LiteralPath $Root -Recurse -File -ErrorAction SilentlyContinue |
             Where-Object {
-                $_.Name -match '^(gateway|watchdog|results|doctor|.*\.log)' -and
+                ($_.Name -match '^(?:gateway|watchdog|results|doctor).*\.(?:json|jsonl|txt|log)$' -or
+                    $_.Name -match '\.log$' -or
+                    $_.Name -ceq 'setup-seeded-health.jsonl') -and
                     $_.Length -le 1048576
             } |
             Sort-Object @{
                 Expression = {
-                    if ($_.Name -eq 'wizard-driver.log') { 0 }
+                    if ($_.Name -ceq 'setup-seeded-health.jsonl') { -1 }
+                    elseif ($_.Name -eq 'wizard-driver.log') { 0 }
                     elseif ($_.Name -in @('go-test-failure-summary.log', 'go-test.log')) { 1 }
                     else { 2 }
                 }
@@ -5871,6 +7706,7 @@ function Invoke-Cleanup {
 
 function Invoke-SelfTest {
     Assert-NativeWindowsX64
+    Test-WindowsNativeDoctorJsonParser
     $root = Assert-SafeStateRoot $StateRoot
     $env:DC_WINDOWS_NATIVE_BASE_ROOT = $root
     $originalProfile = $env:USERPROFILE
@@ -6076,6 +7912,10 @@ function Invoke-SelfTest {
         }
         $goTestSummaryPath = Join-Path $captureFixture 'go-test-failure-summary.log'
         Write-BoundedText $goTestSummaryPath $goTestSummary 262144
+        $setupHealthPath = Join-Path $captureFixture 'setup-seeded-health.jsonl'
+        $setupHealthNearMatch = Join-Path $captureFixture 'setup-seeded-health-extra.jsonl'
+        Write-BoundedText $setupHealthPath '{"schema":1,"telemetry_state":"error"}' 65536
+        Write-BoundedText $setupHealthNearMatch 'must-not-capture' 65536
         foreach ($index in 0..30) {
             Write-BoundedText (Join-Path $captureFixture ("00-before-go-test-{0:D2}.log" -f $index)) 'decoy'
         }
@@ -6098,6 +7938,13 @@ function Invoke-SelfTest {
             $_.FullName.Equals($goTestSummaryPath, [StringComparison]::OrdinalIgnoreCase)
         })) {
             throw 'bounded Go failure summary was not prioritized into native capture'
+        }
+        if (-not ($captureFiles | Where-Object {
+            $_.FullName.Equals($setupHealthPath, [StringComparison]::OrdinalIgnoreCase)
+        }) -or ($captureFiles | Where-Object {
+            $_.FullName.Equals($setupHealthNearMatch, [StringComparison]::OrdinalIgnoreCase)
+        })) {
+            throw 'exact Setup transition health diagnostic capture contract failed'
         }
         if ($captureFiles | Where-Object {
             $_.FullName.Equals($oversizedPath, [StringComparison]::OrdinalIgnoreCase)
@@ -6168,6 +8015,7 @@ function Invoke-SelfTest {
         $unrelated.Dispose()
     }
 
+    Test-SetupAcceptanceHealthSamplerContract $root
     Test-WindowsSetupStandardUserLauncher $root
 
     $junctionTarget = Join-Path $root 'junction-target'

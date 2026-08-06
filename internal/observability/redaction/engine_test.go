@@ -564,6 +564,58 @@ func TestEngineLegacyV7ClassAdaptersArePureAndKeyless(t *testing.T) {
 	}
 }
 
+func TestEngineLegacyV7DoesNotTrustCallerClassMapForTraceParentIdentity(t *testing.T) {
+	const parent = "0123456789abcdef"
+	body := map[string]any{
+		"parent_span_id": parent,
+		"business_id":    "business-identifier",
+	}
+	classes := map[string]observability.FieldClass{
+		"/parent_span_id": observability.FieldClassIdentifier,
+		"/business_id":    observability.FieldClassIdentifier,
+	}
+	profile, ok := BuiltInProfile(ProfileLegacyV7)
+	if !ok {
+		t.Fatal("legacy-v7 profile is missing")
+	}
+	engine, err := NewEngine(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	traceProjection, _, err := engine.Project(
+		newTestRecord(t, observability.SignalTraces, body, classes),
+		profile,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	traceBody, err := traceProjection.Payload().Object()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if traceBody["parent_span_id"] != legacyredaction.LegacyV7Entity(parent) ||
+		traceBody["business_id"] != legacyredaction.LegacyV7Entity("business-identifier") {
+		t.Fatalf("legacy-v7 untrusted trace identifiers=%#v", traceBody)
+	}
+
+	logProjection, _, err := engine.Project(
+		newTestRecord(t, observability.SignalLogs, body, classes),
+		profile,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logBody, err := logProjection.Payload().Object()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if logBody["parent_span_id"] != legacyredaction.LegacyV7Entity(parent) ||
+		logBody["business_id"] != legacyredaction.LegacyV7Entity("business-identifier") {
+		t.Fatalf("legacy-v7 non-trace identifier projection=%#v", logBody)
+	}
+}
+
 func TestEngineMaximumPayloadAndExpansionLimit(t *testing.T) {
 	const emptyObjectEncoding = len(`{"x":""}`)
 	value := strings.Repeat("a", observability.MaxCanonicalValueBytes-emptyObjectEncoding)

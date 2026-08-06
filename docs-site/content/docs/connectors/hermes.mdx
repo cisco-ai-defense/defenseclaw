@@ -1,13 +1,27 @@
 ---
 title: Hermes
-description: Hermes connector wires config.yaml hooks for the Hermes agent runtime, with discovery for MCP, skills, and plugins.
+description: Hermes connector stages default-profile hooks and exact approvals for the Hermes agent runtime, with bounded inventory and an explicit reload boundary.
 keywords:
   - DefenseClaw Hermes connector
   - Hermes hooks
   - Hermes agent runtime
 ---
 
-The Hermes connector wires DefenseClaw into the Hermes agent runtime via `~/.hermes/config.yaml` hooks and discovery surfaces for MCP servers, skills, and plugins.
+The Hermes connector wires DefenseClaw into the Hermes agent runtime through
+the effective default-profile `HERMES_HOME/config.yaml`
+(`%LOCALAPPDATA%\hermes\config.yaml` on native Windows when `HERMES_HOME` is
+unset) and exact approvals in `shell-hooks-allowlist.json`. Native Windows
+setup is **supported** on native Windows. Running-client state remains pending
+reload, validation metadata remains empty, and `live: false`.
+
+<Callout type="warning" title="Hermes terminal commands still use Git Bash on Windows">
+Hermes itself officially runs its terminal tool through installer-managed
+PortableGit/Git Bash. DefenseClaw does not install, find, configure, invoke, or
+test that dependency. Its Windows hook is a separately registered, directly
+quoted absolute `defenseclaw-hook.exe` argv launched by Hermes with
+`shell=False`; there is no DefenseClaw PowerShell, Bash, WSL, Docker, VM, MSYS,
+or Cygwin bridge.
+</Callout>
 
 <Video
   src="hermes"
@@ -20,17 +34,43 @@ The Hermes connector wires DefenseClaw into the Hermes agent runtime via `~/.her
 defenseclaw setup hermes
 ```
 
-<Callout type="warning">
-Hermes setup is supported on macOS and Linux. The DefenseClaw connector is not
-certified on native Windows x64, so setup rejects it there.
+`setup hermes` is shorthand for `setup guardrail --connector hermes`: it stages
+hooks in the resolved default-profile `config.yaml`, adds only the exact 23
+DefenseClaw `(event, command)` approval entries, and inventories the bounded
+default-profile sources. It preserves the operator's `hooks_auto_accept` value
+and third-party approval entries. **There is no proxy-enforcement path** for
+Hermes — blocking happens hook-side only when a valid synchronous
+`pre_tool_call` stdout response requests block. Hermes has no documented native
+human-approval or system-message response shape, so confirm verdicts remain
+audit/alert-only with `raw_action` preserved for audit.
+
+Discovery keeps installation and contract compatibility distinct. A healthy
+older client such as v0.17.0 is reported as
+`detected-but-unsupported-version`, never as absent. If action mode is
+requested, Setup prints the exact installed version and the
+`hermes-hooks-v1 >=0.19.0` requirement, then saves Hermes in observe mode with
+upgrade guidance. The latest official release rechecked on 2026-08-04 is
+v0.20.0 (`v2026.8.3`); its source retains the identical reviewed 23-event
+shell-hook contract, but that source review is not packaged or real-client
+certification.
+
+<Callout type="warning" title="Reload Hermes before treating setup or disable as live">
+Hermes registers shell callbacks in each running process. DefenseClaw has no
+vendor-proven command that reloads all Hermes CLI, gateway, desktop, and service
+hosts, so Setup and Doctor report `pending_reload` and `live: false`. Reload or
+restart every affected Hermes host after Setup and after Disable. Restarting
+`defenseclaw-gateway` does not reload Hermes. On Windows, Disable first writes
+an exact direct-native disabled tombstone so stale cached callbacks safely
+no-op while revocation is pending.
 </Callout>
 
-`setup hermes` is the dedicated Hermes alias. It uses the shared guardrail
-setup backend, wires the effective Hermes config (`$HERMES_HOME/config.yaml`
-or `~/.hermes/config.yaml`), and discovers existing MCP servers, skills, and
-plugins. **There is no proxy-enforcement path** — only `pre_tool_call` can
-block. Hermes has no native human-approval surface, so confirm verdicts use an
-immediate system-message fallback with `raw_action` preserved for audit.
+<Callout type="warning" title="One default profile only">
+The connector rejects named-profile homes, a non-default `active_profile`, and
+multiplex gateways because one `HERMES_HOME` cannot cover them. Project plugins
+and other launch-directory-conditional sources remain unverified. Enterprise,
+managed, Team, ProgramData, cloud-dashboard, and MDM surfaces are outside this
+connector contract.
+</Callout>
 
 #### What `setup hermes` actually does
 
@@ -44,7 +84,7 @@ and judge-provider configuration.
 | Flag | Default | What it does |
 | --- | --- | --- |
 | `--yes / -y` | off | Skip the confirmation prompt. |
-| `--restart / --no-restart` | `--restart` | Bounce `defenseclaw-gateway` after applying changes so the new hooks wire in. |
+| `--restart / --no-restart` | `--restart` | Bounce `defenseclaw-gateway` after applying changes. This does not reload Hermes; reload each Hermes host separately. |
 | `--with-local-stack / --no-local-stack` | `--no-local-stack` | Also run `setup local-observability up`; follow the command's printed gateway-restart step after it writes the export destination. |
 
 The alias defaults Hermes to observe mode and can join an existing hook-connector roster when you choose **Add**. To tune Hermes after install, keep using [`defenseclaw setup guardrail --connector hermes`](/docs/setup/guardrail) — see the variations below.
@@ -59,7 +99,12 @@ The alias defaults Hermes to observe mode and can join an existing hook-connecto
 defenseclaw setup hermes
 ```
 
-Confirms once, wires the hooks block in `~/.hermes/config.yaml`, and restarts the gateway. Findings flow to mandatory SQLite event history and the TUI; configured v8 destinations receive only the buckets/signals their routes select. No traffic is intercepted and no requests are blocked. Pass `--yes` to skip the confirmation in CI.
+Confirms once, stages the hooks block and exact allowlist approvals, and restarts
+the DefenseClaw gateway. Reload each Hermes host before expecting the callbacks
+to be live. Findings flow to mandatory SQLite event history and the TUI;
+configured v8 destinations receive only the buckets/signals their routes
+select. No traffic is intercepted and no requests are blocked. Pass `--yes` to
+skip the confirmation in CI.
 
 </Tab>
 
@@ -98,14 +143,23 @@ The alias selects Hermes; the follow-up `setup guardrail --connector hermes` swa
 
 Hermes has no proxy enforcement, but its pre-tool hook can enforce directly:
 
-```bash
-defenseclaw setup hermes --mode action
+```yaml
+connector_hooks:
+  hermes:
+    enabled: true
+    mode: action          # observe (default) | action
+    fail_mode: open       # Hermes is always fail-open at the host boundary
 ```
 
-With `mode=action`, `pre_tool_call` blocks when policy returns `block`. A
-`confirm` result falls back to a system message because Hermes has no native
-ask surface. Hermes does not provide a fail-closed hook transport surface, so
-`--fail-mode closed` cannot make an unavailable hook block the agent.
+Then `defenseclaw setup guardrail --restart` to re-wire. With `mode: action`,
+Hermes's pre-tool-call hook blocks only when DefenseClaw returns valid
+synchronous Hermes block JSON. A `confirm` result is recorded and alerted but
+returns no hook output because Hermes has no native ask/approve or general
+message response; the TUI can review the audit event but cannot resume the
+call. A requested global/per-connector
+`fail_mode: closed`, strict availability, timeout, nonzero exit, malformed
+output, auth failure, or gateway outage cannot create Hermes enforcement and
+remains fail-open.
 
 </Tab>
 
@@ -114,8 +168,8 @@ ask surface. Hermes does not provide a fail-closed hook transport surface, so
 #### Decision aids — should I turn this on?
 
 <Cards>
-  <Card href="/docs/hitl" title="Human-in-the-loop (HITL)" description="Per-connector ask matrix. Hermes has no native ask; confirm uses a system-message fallback preserved in audit." />
-  <Card href="/docs/setup/guardrail#every-flag" title="Full setup guardrail flag reference" description="The complete flag surface for `setup guardrail --connector hermes`." />
+  <Card href="/docs/hitl" title="Human-in-the-loop (HITL)" description="Per-connector ask matrix. Hermes has no native ask/approve response; confirm is audit/alert-only and returns no hook output." />
+  <Card href="/docs/setup/guardrail#every-flag" title="Full setup guardrail flag reference" description="All ~20 flags you can pass via `setup guardrail --connector hermes` when tuning Hermes." />
   <Card href="/docs/defaults" title="Defaults & rule packs" description="What permissive / default / strict actually ship, and which one matches your risk tolerance." />
   <Card href="/docs/setup/guardrail#watch-the-interactive-flow" title="Interactive wizard" description="Animated terminal demo of the prompt-by-prompt setup flow — the safest path the first time." />
 </Cards>
@@ -127,26 +181,50 @@ Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [int
 ## Files DefenseClaw will modify
 
 <Files>
-  <Folder name="~/.hermes" defaultOpen>
+  <Folder name="$HERMES_HOME (or the platform default)" defaultOpen>
     <File name="config.yaml (hooks block)" />
+    <File name="shell-hooks-allowlist.json (exact owned event/command approvals)" />
   </Folder>
   <Folder name="~/.defenseclaw" defaultOpen>
-    <Folder name="hooks">
-      <File name="hermes-hook.sh" />
-    </Folder>
+    <Folder name="hooks"><File name="hermes-hook.sh (macOS/Linux portable asset)" /></Folder>
+    <Folder name="Windows HookRuntime"><File name="defenseclaw-hook.exe (native Windows configured runtime)" /></Folder>
+    <Folder name="managed connector data"><File name="hermes-direct-native-state.json (pending/disabled reload state)" /></Folder>
   </Folder>
 </Files>
+
+Inventory is read-only and bounded to the resolved default profile: configured
+MCP, local skills and existing `skills.external_dirs`, `SOUL.md`, built-in
+`memories/MEMORY.md` and `memories/USER.md`, `memory.provider` provenance, and
+bundled/Nix, user, and pip `hermes_agent.plugins` plugins with activation
+provenance. Project plugins depend on launch cwd/environment and are reported
+unverified; named-profile conditional sources are unsupported.
 
 ## Hook capabilities
 
 <HookEventsList connector="hermes" />
 
 <Callout>
-Hermes can block supported hook events but has no native human-approval surface. Confirm verdicts use a system-message fallback with `raw_action` preserved; audit and the TUI are review-only.
+Hermes can block only `pre_tool_call` through valid synchronous JSON, inject
+context at `pre_llm_call`, and continue its bounded verification loop at
+`pre_verify`. DefenseClaw registers all 23 Hermes v0.19 shell-hook-valid events,
+but transform, API, gateway, approval, Kanban, and ordinary lifecycle events
+remain attributed audit unless the official shell response parser documents a
+compatible effect. Hermes does not enforce exit status, timeout, nonzero,
+malformed, auth, or network failures and has no DefenseClaw ask surface.
+Confirm verdicts are audit/alert-only, with no synthesized hook output.
+Registration is not claimed live until Hermes reload evidence exists; Doctor
+reports the staged state as unhealthy/pending reload.
 </Callout>
+
+The official-source record and full cross-surface matrix are in
+[`docs/research/HERMES-NATIVE-WINDOWS.md`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/research/HERMES-NATIVE-WINDOWS.md).
 
 ## Disable
 
 ```bash
 defenseclaw guardrail disable --connector hermes --yes
 ```
+
+Then reload or restart every affected Hermes host. Until that happens, the
+Windows native tombstone keeps any cached exact DefenseClaw callback disabled;
+DefenseClaw does not manage Hermes's PortableGit terminal behavior.

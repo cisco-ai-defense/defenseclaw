@@ -58,6 +58,7 @@ class AlertEvent:
     trace_id: str = ""
     request_id: str = ""
     session_id: str = ""
+    connector: str = ""
 
 
 @dataclass(frozen=True)
@@ -220,6 +221,7 @@ def _v8_alert_event(row: V8EventHistoryRow) -> AlertEvent:
         trace_id=row.trace_id,
         request_id=row.request_id,
         session_id=row.session_id,
+        connector=row.connector,
     )
 
 
@@ -432,7 +434,7 @@ class AlertsPanelModel:
                 continue
             if not self.severity_filter and not self.show_all_severities and _is_low_signal_alert(row):
                 continue
-            ev_connector = parse_kv_details(event.details).get("connector", "").lower()
+            ev_connector = _alert_connector(event)
             # 8.13: the shared connector filter (from the chip) is ANDed with
             # the typed ``connector:`` token so both narrow the same way.
             if self.connector_filter and self.connector_filter not in ev_connector:
@@ -749,7 +751,7 @@ class AlertsPanelModel:
             target_cell = _alert_target_label(event)
             details_cell = _alert_details_label(event)
             if self.show_connector_column:
-                connector_cell = parse_kv_details(event.details).get("connector", "").strip() or "—"
+                connector_cell = _alert_connector(event) or "—"
                 cells = (
                     marker,
                     severity_cell,
@@ -1073,6 +1075,13 @@ def _event_severity_bucket(event: AlertEvent) -> str:
     return bucket
 
 
+def _alert_connector(event: AlertEvent) -> str:
+    connector = (event.connector or "").strip().lower()
+    if connector:
+        return connector
+    return parse_kv_details(event.details).get("connector", "").strip().lower()
+
+
 def _event_display_severity(event: AlertEvent) -> str:
     bucket = _event_severity_bucket(event)
     return bucket or event.severity
@@ -1184,6 +1193,7 @@ def _coerce_alert_event(event: object) -> AlertEvent:
         trace_id=str(_event_attr(event, "trace_id", "traceID") or ""),
         request_id=str(_event_attr(event, "request_id", "requestID") or ""),
         session_id=str(_event_attr(event, "session_id", "sessionID") or ""),
+        connector=str(_event_attr(event, "connector") or ""),
     )
 
 

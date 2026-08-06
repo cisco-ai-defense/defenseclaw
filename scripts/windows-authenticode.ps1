@@ -447,7 +447,8 @@ function Get-DefenseClawAuthenticodeEvidence(
     }
 
     if ($Policy -notin @(
-        'defenseclaw-product-publisher', 'pinned-input-observation', 'digest-only-upstream'
+        'defenseclaw-product-publisher', 'pinned-input-observation',
+        'pinned-microsoft-vc-runtime', 'digest-only-upstream'
     )) {
         throw "Authenticode policy is unsupported: $Policy"
     }
@@ -570,6 +571,12 @@ function Get-DefenseClawAuthenticodeEvidence(
     } elseif ($Policy -eq 'pinned-input-observation') {
         if ($status -eq 'Valid' -and $embeddedSignatures.Count -eq 0) {
             throw "Signed pinned input has no portable embedded signature: $Path"
+        }
+    } elseif ($Policy -eq 'pinned-microsoft-vc-runtime') {
+        if ($status -ne 'Valid' -or
+            $publisher -ne 'Microsoft Windows Software Compatibility Publisher' -or
+            $signatureType -ne 'Authenticode' -or $embeddedSignatures.Count -ne 2) {
+            throw "Pinned Microsoft VC++ runtime requires the exact dual portable Microsoft signatures: $Path"
         }
     } elseif ($status -ne 'NotSigned' -or $signatureType -ne 'None' -or $embeddedSignatures.Count -ne 0) {
         throw "Digest-only upstream policy requires an unsigned portable executable: $Path"

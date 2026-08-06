@@ -101,7 +101,7 @@ boundary.
   MCP reads/writes `~/.gemini/config/mcp_config.json` and
   `<workspace>/.agents/mcp_config.json`; hooks remain global-only at
   `~/.gemini/config/hooks.json`; AgentSkills folder form is supported
-  while rules/plugin-contained agents remain discovery-only. Antigravity
+  while rules and global/workspace/plugin-contained agents remain discovery-only. Antigravity
   plugins now install to Google's documented global/workspace plugin paths;
   the Antigravity CLI staging directory remains an additional discovery path.
 - **W3C trace propagation is enabled for trusted hook routes**

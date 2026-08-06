@@ -75,19 +75,28 @@ def make_claudecode_settings(
     home: str,
     *,
     hooks: list[dict[str, Any]] | None = None,
-    mcp_servers: dict[str, Any] | None = None,
 ) -> str:
     """Write a minimal ``<home>/.claude/settings.json``."""
     cd = os.path.join(home, ".claude")
     os.makedirs(cd, exist_ok=True)
-    body = {
-        "hooks": hooks or [],
-        "mcpServers": mcp_servers or {},
-    }
+    body = {"hooks": hooks or []}
     settings_path = os.path.join(cd, "settings.json")
     with open(settings_path, "w") as fh:
         json.dump(body, fh, indent=2)
     return settings_path
+
+
+def make_claudecode_mcp_state(
+    home: str,
+    *,
+    mcp_servers: dict[str, Any] | None = None,
+) -> str:
+    """Write a minimal ``<home>/.claude.json`` user MCP state file."""
+    os.makedirs(home, exist_ok=True)
+    state_path = os.path.join(home, ".claude.json")
+    with open(state_path, "w") as fh:
+        json.dump({"mcpServers": mcp_servers or {}}, fh, indent=2)
+    return state_path
 
 
 def make_codex_config(

@@ -16,16 +16,24 @@
       ],
       "config_paths": [
         "~/.codex/config.toml",
-        "~/.codex/skills",
-        "~/.codex/plugins",
-        ".codex/skills",
-        ".mcp.json",
+        "~/.agents/skills",
+        "~/.agents/plugins/marketplace.json",
+        "~/.codex/plugins/cache",
+        "~/.codex/agents",
+        "~/.codex/rules",
+        "/etc/codex/skills",
+        ".agents/skills",
+        ".agents/plugins/marketplace.json",
+        ".claude-plugin/marketplace.json",
+        ".codex/config.toml",
+        ".codex/agents",
+        ".codex/rules",
         "AGENTS.md"
       ],
       "extension_ids": [],
       "mcp_paths": [
         "~/.codex/config.toml",
-        ".mcp.json"
+        ".codex/config.toml"
       ],
       "package_names": [
         "@openai/codex"
@@ -76,19 +84,21 @@
       "config_paths": [
         "~/.claude/settings.json",
         "~/.claude",
-        "~/.claude/settings.local.json",
-        "~/.claude.json",
         ".claude/settings.json",
         ".claude/settings.local.json",
-        ".mcp.json",
         "CLAUDE.md",
         ".claude/CLAUDE.md",
+        "~/.claude/skills",
+        "~/.claude/commands",
+        "~/.claude/agents",
+        "~/.claude/plugins/cache",
         ".claude/skills",
-        ".claude/plugins"
+        ".claude/commands",
+        ".claude/agents"
       ],
       "extension_ids": [],
       "mcp_paths": [
-        "~/.claude/settings.json",
+        "~/.claude.json",
         ".mcp.json"
       ],
       "package_names": [
@@ -96,6 +106,9 @@
       ],
       "env_var_names": [
         "ANTHROPIC_API_KEY",
+        "CLAUDE_CONFIG_DIR",
+        "CLAUDE_CODE_PLUGIN_CACHE_DIR",
+        "CLAUDE_CODE_USE_POWERSHELL_TOOL",
         "CLAUDE_CODE_ENABLE_TELEMETRY"
       ],
       "domain_patterns": [
@@ -243,6 +256,8 @@
       "confidence": 0.95,
       "supported_connector": "cursor",
       "binary_names": [
+        "agent",
+        "cursor-agent",
         "cursor"
       ],
       "process_names": [
@@ -289,39 +304,48 @@
     },
     {
       "id": "windsurf",
-      "name": "Windsurf",
-      "vendor": "Codeium",
+      "name": "Devin Desktop (legacy Cascade)",
+      "vendor": "Cognition",
       "category": "supported_connector",
       "confidence": 0.95,
       "supported_connector": "windsurf",
       "binary_names": [
+        "Devin.exe",
+        "devin-desktop",
         "windsurf"
       ],
       "process_names": [
+        "Devin",
+        "Devin.exe",
+        "devin-desktop",
+        "Devin Desktop",
         "windsurf",
         "Windsurf"
       ],
       "config_paths": [
         "~/.codeium/windsurf/hooks.json",
         "~/.codeium/windsurf/mcp_config.json",
-        "~/.codeium/windsurf/mcp.json",
+        "~/.codeium/windsurf/memories/global_rules.md",
+        "~/.codeium/windsurf/skills",
+        "~/.agents/skills",
+        ".devin/rules",
         ".windsurf/rules",
-        ".codeium/windsurf/rules",
-        ".windsurfrules"
+        ".windsurf/skills",
+        ".agents/skills",
+        ".windsurfrules",
+        "AGENTS.md"
       ],
       "extension_ids": [
         "codeium.codeium",
         "windsurf"
       ],
       "mcp_paths": [
-        "~/.codeium/windsurf/mcp_config.json",
-        "~/.codeium/windsurf/mcp.json"
+        "~/.codeium/windsurf/mcp_config.json"
       ],
       "package_names": [],
-      "env_var_names": [
-        "CODEIUM_API_KEY"
-      ],
+      "env_var_names": [],
       "domain_patterns": [
+        "devin.ai",
         "codeium.com",
         "windsurf.com"
       ],
@@ -330,6 +354,7 @@
         "codeium"
       ],
       "application_names": [
+        "Devin Desktop",
         "Windsurf.app",
         "Windsurf"
       ],
@@ -430,9 +455,7 @@
       "package_names": [
         "@github/copilot"
       ],
-      "env_var_names": [
-        "COPILOT_OTEL_ENABLED"
-      ],
+      "env_var_names": [],
       "domain_patterns": [
         "api.githubcopilot.com",
         "copilot-proxy.githubusercontent.com"
@@ -479,6 +502,7 @@
       "package_names": [],
       "env_var_names": [],
       "domain_patterns": [
+        "antigravity.google",
         "antigravity.google.com",
         "antigravity.dev"
       ],
@@ -746,6 +770,7 @@
         "omni"
       ],
       "config_paths": [
+        "$OMNIGENT_CONFIG",
         "$OMNIGENT_CONFIG_HOME/config.yaml",
         "$OMNIGENT_CONFIG_HOME",
         "~/.omnigent/config.yaml",
@@ -757,6 +782,7 @@
         "omnigent"
       ],
       "env_var_names": [
+        "OMNIGENT_CONFIG",
         "OMNIGENT_CONFIG_HOME",
         "OMNIGENT_DATA_DIR"
       ],
@@ -1148,50 +1174,270 @@
       "application_names": [],
       "local_endpoints": [],
       "components": [
-        {"ecosystem": "pypi", "name": "openai", "framework": "OpenAI Python SDK", "vendor": "OpenAI"},
-        {"ecosystem": "pypi", "name": "anthropic", "framework": "Anthropic Python SDK", "vendor": "Anthropic"},
-        {"ecosystem": "pypi", "name": "google-genai", "framework": "Google GenAI SDK (Python)", "vendor": "Google"},
-        {"ecosystem": "pypi", "name": "google-generativeai", "framework": "Google Generative AI (Python)", "vendor": "Google"},
-        {"ecosystem": "pypi", "name": "langchain", "framework": "LangChain", "vendor": "LangChain"},
-        {"ecosystem": "pypi", "name": "langchain-openai", "framework": "LangChain OpenAI integration", "vendor": "LangChain"},
-        {"ecosystem": "pypi", "name": "llama-index", "framework": "LlamaIndex", "vendor": "LlamaIndex"},
-        {"ecosystem": "pypi", "name": "llama-index-core", "framework": "LlamaIndex (core)", "vendor": "LlamaIndex"},
-        {"ecosystem": "pypi", "name": "crewai", "framework": "CrewAI", "vendor": "CrewAI"},
-        {"ecosystem": "pypi", "name": "pyautogen", "framework": "Microsoft AutoGen (legacy)", "vendor": "Microsoft"},
-        {"ecosystem": "pypi", "name": "autogen-agentchat", "framework": "Microsoft AutoGen (agentchat)", "vendor": "Microsoft"},
-        {"ecosystem": "pypi", "name": "microsoft-autogen", "framework": "Microsoft AutoGen", "vendor": "Microsoft"},
-        {"ecosystem": "pypi", "name": "semantic-kernel", "framework": "Microsoft Semantic Kernel", "vendor": "Microsoft"},
-        {"ecosystem": "pypi", "name": "haystack-ai", "framework": "Haystack", "vendor": "deepset"},
-        {"ecosystem": "pypi", "name": "dspy-ai", "framework": "DSPy", "vendor": "Stanford"},
-        {"ecosystem": "pypi", "name": "instructor", "framework": "Instructor", "vendor": "Instructor"},
-        {"ecosystem": "pypi", "name": "litellm", "framework": "LiteLLM", "vendor": "LiteLLM"},
-        {"ecosystem": "pypi", "name": "openai-agents", "framework": "OpenAI Agents SDK (Python)", "vendor": "OpenAI"},
-        {"ecosystem": "pypi", "name": "transformers", "framework": "HuggingFace Transformers", "vendor": "HuggingFace"},
-        {"ecosystem": "pypi", "name": "sentence-transformers", "framework": "Sentence Transformers", "vendor": "HuggingFace"},
-        {"ecosystem": "pypi", "name": "vllm", "framework": "vLLM", "vendor": "vLLM"},
-        {"ecosystem": "pypi", "name": "llama-cpp-python", "framework": "llama.cpp (Python)", "vendor": "llama.cpp"},
-        {"ecosystem": "npm", "name": "openai", "framework": "OpenAI TypeScript SDK", "vendor": "OpenAI"},
-        {"ecosystem": "npm", "name": "@anthropic-ai/sdk", "framework": "Anthropic TypeScript SDK", "vendor": "Anthropic"},
-        {"ecosystem": "npm", "name": "@google/genai", "framework": "Google GenAI SDK (TypeScript)", "vendor": "Google"},
-        {"ecosystem": "npm", "name": "langchain", "framework": "LangChain.js", "vendor": "LangChain"},
-        {"ecosystem": "npm", "name": "@langchain/core", "framework": "LangChain.js core", "vendor": "LangChain"},
-        {"ecosystem": "npm", "name": "@langchain/openai", "framework": "LangChain.js OpenAI integration", "vendor": "LangChain"},
-        {"ecosystem": "npm", "name": "ai", "framework": "Vercel AI SDK", "vendor": "Vercel"},
-        {"ecosystem": "npm", "name": "vercel-ai", "framework": "Vercel AI SDK", "vendor": "Vercel"},
-        {"ecosystem": "npm", "name": "@ai-sdk/openai", "framework": "Vercel AI SDK (OpenAI provider)", "vendor": "Vercel"},
-        {"ecosystem": "npm", "name": "@ai-sdk/anthropic", "framework": "Vercel AI SDK (Anthropic provider)", "vendor": "Vercel"},
-        {"ecosystem": "npm", "name": "@ai-sdk/google", "framework": "Vercel AI SDK (Google provider)", "vendor": "Vercel"},
-        {"ecosystem": "npm", "name": "@ai-sdk/openai-compatible", "framework": "Vercel AI SDK (OpenAI-compatible provider)", "vendor": "Vercel"},
-        {"ecosystem": "npm", "name": "@openai/agents", "framework": "OpenAI Agents SDK (TypeScript)", "vendor": "OpenAI"},
-        {"ecosystem": "go", "name": "github.com/openai/openai-go", "framework": "OpenAI Go SDK", "vendor": "OpenAI"},
-        {"ecosystem": "go", "name": "github.com/anthropics/anthropic-sdk-go", "framework": "Anthropic Go SDK", "vendor": "Anthropic"},
-        {"ecosystem": "go", "name": "github.com/google/generative-ai-go", "framework": "Google Generative AI Go SDK", "vendor": "Google"},
-        {"ecosystem": "go", "name": "github.com/tmc/langchaingo", "framework": "LangChain Go", "vendor": "LangChain"},
-        {"ecosystem": "maven", "name": "dev.langchain4j", "framework": "LangChain4j", "vendor": "LangChain"},
-        {"ecosystem": "maven", "name": "com.openai:openai-java", "framework": "OpenAI Java SDK", "vendor": "OpenAI"},
-        {"ecosystem": "maven", "name": "com.azure:azure-ai-openai", "framework": "Azure OpenAI Java SDK", "vendor": "Microsoft"},
-        {"ecosystem": "cargo", "name": "async-openai", "framework": "async-openai (Rust)", "vendor": "OpenAI community"},
-        {"ecosystem": "cargo", "name": "rig-core", "framework": "Rig (Rust)", "vendor": "Rig"}
+        {
+          "ecosystem": "pypi",
+          "name": "openai",
+          "framework": "OpenAI Python SDK",
+          "vendor": "OpenAI"
+        },
+        {
+          "ecosystem": "pypi",
+          "name": "anthropic",
+          "framework": "Anthropic Python SDK",
+          "vendor": "Anthropic"
+        },
+        {
+          "ecosystem": "pypi",
+          "name": "google-genai",
+          "framework": "Google GenAI SDK (Python)",
+          "vendor": "Google"
+        },
+        {
+          "ecosystem": "pypi",
+          "name": "google-generativeai",
+          "framework": "Google Generative AI (Python)",
+          "vendor": "Google"
+        },
+        {
+          "ecosystem": "pypi",
+          "name": "langchain",
+          "framework": "LangChain",
+          "vendor": "LangChain"
+        },
+        {
+          "ecosystem": "pypi",
+          "name": "langchain-openai",
+          "framework": "LangChain OpenAI integration",
+          "vendor": "LangChain"
+        },
+        {
+          "ecosystem": "pypi",
+          "name": "llama-index",
+          "framework": "LlamaIndex",
+          "vendor": "LlamaIndex"
+        },
+        {
+          "ecosystem": "pypi",
+          "name": "llama-index-core",
+          "framework": "LlamaIndex (core)",
+          "vendor": "LlamaIndex"
+        },
+        {
+          "ecosystem": "pypi",
+          "name": "crewai",
+          "framework": "CrewAI",
+          "vendor": "CrewAI"
+        },
+        {
+          "ecosystem": "pypi",
+          "name": "pyautogen",
+          "framework": "Microsoft AutoGen (legacy)",
+          "vendor": "Microsoft"
+        },
+        {
+          "ecosystem": "pypi",
+          "name": "autogen-agentchat",
+          "framework": "Microsoft AutoGen (agentchat)",
+          "vendor": "Microsoft"
+        },
+        {
+          "ecosystem": "pypi",
+          "name": "microsoft-autogen",
+          "framework": "Microsoft AutoGen",
+          "vendor": "Microsoft"
+        },
+        {
+          "ecosystem": "pypi",
+          "name": "semantic-kernel",
+          "framework": "Microsoft Semantic Kernel",
+          "vendor": "Microsoft"
+        },
+        {
+          "ecosystem": "pypi",
+          "name": "haystack-ai",
+          "framework": "Haystack",
+          "vendor": "deepset"
+        },
+        {
+          "ecosystem": "pypi",
+          "name": "dspy-ai",
+          "framework": "DSPy",
+          "vendor": "Stanford"
+        },
+        {
+          "ecosystem": "pypi",
+          "name": "instructor",
+          "framework": "Instructor",
+          "vendor": "Instructor"
+        },
+        {
+          "ecosystem": "pypi",
+          "name": "litellm",
+          "framework": "LiteLLM",
+          "vendor": "LiteLLM"
+        },
+        {
+          "ecosystem": "pypi",
+          "name": "openai-agents",
+          "framework": "OpenAI Agents SDK (Python)",
+          "vendor": "OpenAI"
+        },
+        {
+          "ecosystem": "pypi",
+          "name": "transformers",
+          "framework": "HuggingFace Transformers",
+          "vendor": "HuggingFace"
+        },
+        {
+          "ecosystem": "pypi",
+          "name": "sentence-transformers",
+          "framework": "Sentence Transformers",
+          "vendor": "HuggingFace"
+        },
+        {
+          "ecosystem": "pypi",
+          "name": "vllm",
+          "framework": "vLLM",
+          "vendor": "vLLM"
+        },
+        {
+          "ecosystem": "pypi",
+          "name": "llama-cpp-python",
+          "framework": "llama.cpp (Python)",
+          "vendor": "llama.cpp"
+        },
+        {
+          "ecosystem": "npm",
+          "name": "openai",
+          "framework": "OpenAI TypeScript SDK",
+          "vendor": "OpenAI"
+        },
+        {
+          "ecosystem": "npm",
+          "name": "@anthropic-ai/sdk",
+          "framework": "Anthropic TypeScript SDK",
+          "vendor": "Anthropic"
+        },
+        {
+          "ecosystem": "npm",
+          "name": "@google/genai",
+          "framework": "Google GenAI SDK (TypeScript)",
+          "vendor": "Google"
+        },
+        {
+          "ecosystem": "npm",
+          "name": "langchain",
+          "framework": "LangChain.js",
+          "vendor": "LangChain"
+        },
+        {
+          "ecosystem": "npm",
+          "name": "@langchain/core",
+          "framework": "LangChain.js core",
+          "vendor": "LangChain"
+        },
+        {
+          "ecosystem": "npm",
+          "name": "@langchain/openai",
+          "framework": "LangChain.js OpenAI integration",
+          "vendor": "LangChain"
+        },
+        {
+          "ecosystem": "npm",
+          "name": "ai",
+          "framework": "Vercel AI SDK",
+          "vendor": "Vercel"
+        },
+        {
+          "ecosystem": "npm",
+          "name": "vercel-ai",
+          "framework": "Vercel AI SDK",
+          "vendor": "Vercel"
+        },
+        {
+          "ecosystem": "npm",
+          "name": "@ai-sdk/openai",
+          "framework": "Vercel AI SDK (OpenAI provider)",
+          "vendor": "Vercel"
+        },
+        {
+          "ecosystem": "npm",
+          "name": "@ai-sdk/anthropic",
+          "framework": "Vercel AI SDK (Anthropic provider)",
+          "vendor": "Vercel"
+        },
+        {
+          "ecosystem": "npm",
+          "name": "@ai-sdk/google",
+          "framework": "Vercel AI SDK (Google provider)",
+          "vendor": "Vercel"
+        },
+        {
+          "ecosystem": "npm",
+          "name": "@ai-sdk/openai-compatible",
+          "framework": "Vercel AI SDK (OpenAI-compatible provider)",
+          "vendor": "Vercel"
+        },
+        {
+          "ecosystem": "npm",
+          "name": "@openai/agents",
+          "framework": "OpenAI Agents SDK (TypeScript)",
+          "vendor": "OpenAI"
+        },
+        {
+          "ecosystem": "go",
+          "name": "github.com/openai/openai-go",
+          "framework": "OpenAI Go SDK",
+          "vendor": "OpenAI"
+        },
+        {
+          "ecosystem": "go",
+          "name": "github.com/anthropics/anthropic-sdk-go",
+          "framework": "Anthropic Go SDK",
+          "vendor": "Anthropic"
+        },
+        {
+          "ecosystem": "go",
+          "name": "github.com/google/generative-ai-go",
+          "framework": "Google Generative AI Go SDK",
+          "vendor": "Google"
+        },
+        {
+          "ecosystem": "go",
+          "name": "github.com/tmc/langchaingo",
+          "framework": "LangChain Go",
+          "vendor": "LangChain"
+        },
+        {
+          "ecosystem": "maven",
+          "name": "dev.langchain4j",
+          "framework": "LangChain4j",
+          "vendor": "LangChain"
+        },
+        {
+          "ecosystem": "maven",
+          "name": "com.openai:openai-java",
+          "framework": "OpenAI Java SDK",
+          "vendor": "OpenAI"
+        },
+        {
+          "ecosystem": "maven",
+          "name": "com.azure:azure-ai-openai",
+          "framework": "Azure OpenAI Java SDK",
+          "vendor": "Microsoft"
+        },
+        {
+          "ecosystem": "cargo",
+          "name": "async-openai",
+          "framework": "async-openai (Rust)",
+          "vendor": "OpenAI community"
+        },
+        {
+          "ecosystem": "cargo",
+          "name": "rig-core",
+          "framework": "Rig (Rust)",
+          "vendor": "Rig"
+        }
       ]
     },
     {
@@ -1755,7 +2001,9 @@
       "confidence": 0.72,
       "specificity": 0.65,
       "supported_connector": "",
-      "application_names": ["Notion.app"]
+      "application_names": [
+        "Notion.app"
+      ]
     },
     {
       "id": "perplexity-comet",
@@ -1765,7 +2013,9 @@
       "confidence": 0.88,
       "specificity": 0.82,
       "supported_connector": "",
-      "application_names": ["Comet.app"]
+      "application_names": [
+        "Comet.app"
+      ]
     },
     {
       "id": "zed",
@@ -1775,9 +2025,21 @@
       "confidence": 0.9,
       "specificity": 0.9,
       "supported_connector": "",
-      "binary_names": ["zed", "zeditor", "zed.exe"],
-      "application_names": ["Zed.app"],
-      "config_paths": ["~/.config/zed/settings.json", "~/Library/Application Support/Zed", "~/.local/share/zed", "$APPDATA/Zed/settings.json", "$LOCALAPPDATA/Zed"]
+      "binary_names": [
+        "zed",
+        "zeditor",
+        "zed.exe"
+      ],
+      "application_names": [
+        "Zed.app"
+      ],
+      "config_paths": [
+        "~/.config/zed/settings.json",
+        "~/Library/Application Support/Zed",
+        "~/.local/share/zed",
+        "$APPDATA/Zed/settings.json",
+        "$LOCALAPPDATA/Zed"
+      ]
     },
     {
       "id": "warp",
@@ -1787,8 +2049,17 @@
       "confidence": 0.86,
       "specificity": 0.82,
       "supported_connector": "",
-      "application_names": ["Warp.app"],
-      "config_paths": ["~/.warp", "~/.config/warp-terminal", "~/.local/state/warp-terminal", "~/.local/share/warp-terminal", "$APPDATA/warp/Warp", "$LOCALAPPDATA/warp/Warp"]
+      "application_names": [
+        "Warp.app"
+      ],
+      "config_paths": [
+        "~/.warp",
+        "~/.config/warp-terminal",
+        "~/.local/state/warp-terminal",
+        "~/.local/share/warp-terminal",
+        "$APPDATA/warp/Warp",
+        "$LOCALAPPDATA/warp/Warp"
+      ]
     },
     {
       "id": "raycast",
@@ -1798,7 +2069,9 @@
       "confidence": 0.78,
       "specificity": 0.75,
       "supported_connector": "",
-      "application_names": ["Raycast.app"]
+      "application_names": [
+        "Raycast.app"
+      ]
     },
     {
       "id": "gpt4all",
@@ -1808,11 +2081,23 @@
       "confidence": 0.9,
       "specificity": 0.95,
       "supported_connector": "",
-      "process_names": ["GPT4All"],
-      "application_names": ["GPT4All.app"],
-      "config_paths": ["~/Library/Application Support/nomic.ai/GPT4All", "~/.local/share/nomic.ai/GPT4All", "$LOCALAPPDATA/nomic.ai/GPT4All"],
-      "package_names": ["gpt4all"],
-      "domain_patterns": ["gpt4all.io"]
+      "process_names": [
+        "GPT4All"
+      ],
+      "application_names": [
+        "GPT4All.app"
+      ],
+      "config_paths": [
+        "~/Library/Application Support/nomic.ai/GPT4All",
+        "~/.local/share/nomic.ai/GPT4All",
+        "$LOCALAPPDATA/nomic.ai/GPT4All"
+      ],
+      "package_names": [
+        "gpt4all"
+      ],
+      "domain_patterns": [
+        "gpt4all.io"
+      ]
     },
     {
       "id": "devin",
@@ -1822,9 +2107,16 @@
       "confidence": 0.84,
       "specificity": 0.94,
       "supported_connector": "",
-      "binary_names": ["devin"],
-      "process_names": ["devin"],
-      "env_var_names": ["DEVIN_API_KEY", "DEVIN_ORG_ID"]
+      "binary_names": [
+        "devin"
+      ],
+      "process_names": [
+        "devin"
+      ],
+      "env_var_names": [
+        "DEVIN_API_KEY",
+        "DEVIN_ORG_ID"
+      ]
     },
     {
       "id": "anythingllm",
@@ -1834,10 +2126,20 @@
       "confidence": 0.9,
       "specificity": 0.94,
       "supported_connector": "",
-      "process_names": ["anythingllm-desktop"],
-      "application_names": ["AnythingLLM.app"],
-      "config_paths": ["~/Library/Application Support/anythingllm-desktop/storage", "~/.config/anythingllm-desktop/storage", "$APPDATA/anythingllm-desktop/storage"],
-      "package_names": ["mintplexlabs/anythingllm"]
+      "process_names": [
+        "anythingllm-desktop"
+      ],
+      "application_names": [
+        "AnythingLLM.app"
+      ],
+      "config_paths": [
+        "~/Library/Application Support/anythingllm-desktop/storage",
+        "~/.config/anythingllm-desktop/storage",
+        "$APPDATA/anythingllm-desktop/storage"
+      ],
+      "package_names": [
+        "mintplexlabs/anythingllm"
+      ]
     },
     {
       "id": "lobechat",
@@ -1847,10 +2149,21 @@
       "confidence": 0.86,
       "specificity": 0.92,
       "supported_connector": "",
-      "package_names": ["lobehub/lobehub", "lobehub/lobe-chat"],
-      "env_var_names": ["LOBE_PORT"],
-      "domain_patterns": ["lobehub.com", "lobe.chat"],
-      "history_patterns": ["lobehub/lobehub", "lobehub/lobe-chat"]
+      "package_names": [
+        "lobehub/lobehub",
+        "lobehub/lobe-chat"
+      ],
+      "env_var_names": [
+        "LOBE_PORT"
+      ],
+      "domain_patterns": [
+        "lobehub.com",
+        "lobe.chat"
+      ],
+      "history_patterns": [
+        "lobehub/lobehub",
+        "lobehub/lobe-chat"
+      ]
     },
     {
       "id": "trae",
@@ -1860,7 +2173,10 @@
       "confidence": 0.86,
       "specificity": 0.88,
       "supported_connector": "",
-      "application_names": ["TRAE.app", "Trae.app"]
+      "application_names": [
+        "TRAE.app",
+        "Trae.app"
+      ]
     },
     {
       "id": "pieces",
@@ -1870,8 +2186,15 @@
       "confidence": 0.88,
       "specificity": 0.9,
       "supported_connector": "",
-      "binary_names": ["pieces", "pieces-os"],
-      "config_paths": ["~/Library/com.pieces.os", "~/.local/share/com.pieces.os", "$LOCALAPPDATA/Mesh Intelligent Technologies, Inc/Pieces OS/com.pieces.os/production"]
+      "binary_names": [
+        "pieces",
+        "pieces-os"
+      ],
+      "config_paths": [
+        "~/Library/com.pieces.os",
+        "~/.local/share/com.pieces.os",
+        "$LOCALAPPDATA/Mesh Intelligent Technologies, Inc/Pieces OS/com.pieces.os/production"
+      ]
     },
     {
       "id": "void",
@@ -1881,9 +2204,16 @@
       "confidence": 0.82,
       "specificity": 0.76,
       "supported_connector": "",
-      "binary_names": ["void"],
-      "application_names": ["Void.app"],
-      "config_paths": ["~/.void-editor", "~/.void-server"]
+      "binary_names": [
+        "void"
+      ],
+      "application_names": [
+        "Void.app"
+      ],
+      "config_paths": [
+        "~/.void-editor",
+        "~/.void-server"
+      ]
     },
     {
       "id": "kiro",
@@ -1893,9 +2223,21 @@
       "confidence": 0.9,
       "specificity": 0.95,
       "supported_connector": "",
-      "binary_names": ["kiro-cli", "kiro-cli.appimage"],
-      "config_paths": ["~/.kiro/settings/cli.json", "~/.kiro/settings/mcp.json", "~/.kiro/agents", ".kiro/settings/mcp.json", ".kiro/agents"],
-      "mcp_paths": ["~/.kiro/settings/mcp.json", ".kiro/settings/mcp.json"]
+      "binary_names": [
+        "kiro-cli",
+        "kiro-cli.appimage"
+      ],
+      "config_paths": [
+        "~/.kiro/settings/cli.json",
+        "~/.kiro/settings/mcp.json",
+        "~/.kiro/agents",
+        ".kiro/settings/mcp.json",
+        ".kiro/agents"
+      ],
+      "mcp_paths": [
+        "~/.kiro/settings/mcp.json",
+        ".kiro/settings/mcp.json"
+      ]
     },
     {
       "id": "auggie",
@@ -1905,8 +2247,15 @@
       "confidence": 0.9,
       "specificity": 0.96,
       "supported_connector": "",
-      "binary_names": ["auggie"],
-      "config_paths": ["~/.augment/settings.json", "~/.augment/session.json", ".augment/settings.json", ".augment/settings.local.json"]
+      "binary_names": [
+        "auggie"
+      ],
+      "config_paths": [
+        "~/.augment/settings.json",
+        "~/.augment/session.json",
+        ".augment/settings.json",
+        ".augment/settings.local.json"
+      ]
     },
     {
       "id": "plandex",
@@ -1916,8 +2265,13 @@
       "confidence": 0.88,
       "specificity": 0.9,
       "supported_connector": "",
-      "binary_names": ["plandex", "pdx"],
-      "config_paths": [".plandex"]
+      "binary_names": [
+        "plandex",
+        "pdx"
+      ],
+      "config_paths": [
+        ".plandex"
+      ]
     },
     {
       "id": "swe-agent",
@@ -1927,8 +2281,12 @@
       "confidence": 0.86,
       "specificity": 0.92,
       "supported_connector": "",
-      "binary_names": ["sweagent"],
-      "package_names": ["sweagent"]
+      "binary_names": [
+        "sweagent"
+      ],
+      "package_names": [
+        "sweagent"
+      ]
     },
     {
       "id": "koboldcpp",
@@ -1938,10 +2296,28 @@
       "confidence": 0.9,
       "specificity": 0.94,
       "supported_connector": "",
-      "binary_names": ["koboldcpp", "koboldcpp.exe", "koboldcpp-linux-x64", "koboldcpp-linux-x64-oldpc", "koboldcpp-mac-arm64"],
-      "process_names": ["koboldcpp", "koboldcpp.exe", "koboldcpp-linux-x64", "koboldcpp-mac-arm64"],
-      "package_names": ["koboldai/koboldcpp"],
-      "history_patterns": ["koboldcpp.py", "koboldcpp.sh", "koboldcpp-mac-arm64", "koboldcpp-linux-x64"]
+      "binary_names": [
+        "koboldcpp",
+        "koboldcpp.exe",
+        "koboldcpp-linux-x64",
+        "koboldcpp-linux-x64-oldpc",
+        "koboldcpp-mac-arm64"
+      ],
+      "process_names": [
+        "koboldcpp",
+        "koboldcpp.exe",
+        "koboldcpp-linux-x64",
+        "koboldcpp-mac-arm64"
+      ],
+      "package_names": [
+        "koboldai/koboldcpp"
+      ],
+      "history_patterns": [
+        "koboldcpp.py",
+        "koboldcpp.sh",
+        "koboldcpp-mac-arm64",
+        "koboldcpp-linux-x64"
+      ]
     },
     {
       "id": "pinokio",
@@ -1951,9 +2327,17 @@
       "confidence": 0.9,
       "specificity": 0.92,
       "supported_connector": "",
-      "process_names": ["Pinokio"],
-      "application_names": ["Pinokio.app"],
-      "config_paths": ["~/pinokio", "~/pinokio/api", "~/pinokio/bin"]
+      "process_names": [
+        "Pinokio"
+      ],
+      "application_names": [
+        "Pinokio.app"
+      ],
+      "config_paths": [
+        "~/pinokio",
+        "~/pinokio/api",
+        "~/pinokio/bin"
+      ]
     },
     {
       "id": "mistral-vibe",
@@ -1963,8 +2347,15 @@
       "confidence": 0.84,
       "specificity": 0.74,
       "supported_connector": "",
-      "binary_names": ["vibe", "vibe-acp"],
-      "config_paths": ["~/.vibe/config.toml", ".vibe/config.toml", "~/.vibe/trusted_folders.toml"]
+      "binary_names": [
+        "vibe",
+        "vibe-acp"
+      ],
+      "config_paths": [
+        "~/.vibe/config.toml",
+        ".vibe/config.toml",
+        "~/.vibe/trusted_folders.toml"
+      ]
     },
     {
       "id": "crush",
@@ -1974,8 +2365,16 @@
       "confidence": 0.82,
       "specificity": 0.76,
       "supported_connector": "",
-      "binary_names": ["crush"],
-      "config_paths": ["~/.config/crush/crush.json", ".crush.json", "crush.json", "~/.local/share/crush/crush.json", "$LOCALAPPDATA/crush/crush.json"]
+      "binary_names": [
+        "crush"
+      ],
+      "config_paths": [
+        "~/.config/crush/crush.json",
+        ".crush.json",
+        "crush.json",
+        "~/.local/share/crush/crush.json",
+        "$LOCALAPPDATA/crush/crush.json"
+      ]
     },
     {
       "id": "gptscript",
@@ -1985,8 +2384,12 @@
       "confidence": 0.88,
       "specificity": 0.94,
       "supported_connector": "",
-      "binary_names": ["gptscript"],
-      "process_names": ["gptscript"]
+      "binary_names": [
+        "gptscript"
+      ],
+      "process_names": [
+        "gptscript"
+      ]
     },
     {
       "id": "docker-agent",
@@ -1996,8 +2399,14 @@
       "confidence": 0.9,
       "specificity": 0.86,
       "supported_connector": "",
-      "binary_names": ["docker-agent", "cagent"],
-      "config_paths": ["~/.docker/cli-plugins/docker-agent", "~/.cagent/session.db"]
+      "binary_names": [
+        "docker-agent",
+        "cagent"
+      ],
+      "config_paths": [
+        "~/.docker/cli-plugins/docker-agent",
+        "~/.cagent/session.db"
+      ]
     },
     {
       "id": "msty",
@@ -2007,10 +2416,21 @@
       "confidence": 0.88,
       "specificity": 0.9,
       "supported_connector": "",
-      "binary_names": ["msty"],
-      "process_names": ["Msty", "msty-local"],
-      "application_names": ["Msty.app"],
-      "config_paths": ["~/Library/Application Support/Msty", "~/.config/Msty", "$APPDATA/Msty"]
+      "binary_names": [
+        "msty"
+      ],
+      "process_names": [
+        "Msty",
+        "msty-local"
+      ],
+      "application_names": [
+        "Msty.app"
+      ],
+      "config_paths": [
+        "~/Library/Application Support/Msty",
+        "~/.config/Msty",
+        "$APPDATA/Msty"
+      ]
     },
     {
       "id": "boltai",
@@ -2020,8 +2440,12 @@
       "confidence": 0.9,
       "specificity": 0.92,
       "supported_connector": "",
-      "process_names": ["BoltAI"],
-      "application_names": ["BoltAI.app"]
+      "process_names": [
+        "BoltAI"
+      ],
+      "application_names": [
+        "BoltAI.app"
+      ]
     },
     {
       "id": "uipath-assistant",
@@ -2031,7 +2455,9 @@
       "confidence": 0.88,
       "specificity": 0.9,
       "supported_connector": "",
-      "application_names": ["UiPath Assistant.app"]
+      "application_names": [
+        "UiPath Assistant.app"
+      ]
     },
     {
       "id": "wave-terminal",
@@ -2041,10 +2467,23 @@
       "confidence": 0.9,
       "specificity": 0.92,
       "supported_connector": "",
-      "binary_names": ["wsh", "waveterm"],
-      "process_names": ["waveterm"],
-      "application_names": ["Wave.app", "Wave Terminal.app"],
-      "config_paths": ["~/.config/waveterm", "~/.config/waveterm/settings.json", "~/.config/waveterm/waveai.json", "$APPDATA/waveterm"]
+      "binary_names": [
+        "wsh",
+        "waveterm"
+      ],
+      "process_names": [
+        "waveterm"
+      ],
+      "application_names": [
+        "Wave.app",
+        "Wave Terminal.app"
+      ],
+      "config_paths": [
+        "~/.config/waveterm",
+        "~/.config/waveterm/settings.json",
+        "~/.config/waveterm/waveai.json",
+        "$APPDATA/waveterm"
+      ]
     },
     {
       "id": "tabby-terminal",
@@ -2054,9 +2493,16 @@
       "confidence": 0.84,
       "specificity": 0.96,
       "supported_connector": "",
-      "config_paths": ["~/Library/Application Support/tabby/plugins/node_modules/tabby-mcp"],
-      "package_names": ["tabby-mcp"],
-      "history_patterns": ["tabby-mcp-server", "tabby-mcp"]
+      "config_paths": [
+        "~/Library/Application Support/tabby/plugins/node_modules/tabby-mcp"
+      ],
+      "package_names": [
+        "tabby-mcp"
+      ],
+      "history_patterns": [
+        "tabby-mcp-server",
+        "tabby-mcp"
+      ]
     },
     {
       "id": "ui-tars-desktop",
@@ -2066,9 +2512,16 @@
       "confidence": 0.9,
       "specificity": 0.94,
       "supported_connector": "",
-      "binary_names": ["UI-TARS"],
-      "process_names": ["UI-TARS"],
-      "application_names": ["UI TARS.app", "UI-TARS.app"]
+      "binary_names": [
+        "UI-TARS"
+      ],
+      "process_names": [
+        "UI-TARS"
+      ],
+      "application_names": [
+        "UI TARS.app",
+        "UI-TARS.app"
+      ]
     },
     {
       "id": "backyard-ai",
@@ -2078,8 +2531,12 @@
       "confidence": 0.84,
       "specificity": 0.9,
       "supported_connector": "",
-      "process_names": ["Backyard AI"],
-      "application_names": ["Backyard AI.app"]
+      "process_names": [
+        "Backyard AI"
+      ],
+      "application_names": [
+        "Backyard AI.app"
+      ]
     },
     {
       "id": "dia-browser",
@@ -2089,7 +2546,9 @@
       "confidence": 0.88,
       "specificity": 0.82,
       "supported_connector": "",
-      "application_names": ["Dia.app"]
+      "application_names": [
+        "Dia.app"
+      ]
     },
     {
       "id": "browseros",
@@ -2099,9 +2558,17 @@
       "confidence": 0.92,
       "specificity": 0.96,
       "supported_connector": "",
-      "binary_names": ["browseros-cli"],
-      "process_names": ["BrowserOS", "BrowserOS Dev"],
-      "application_names": ["BrowserOS.app", "BrowserOS Dev.app"]
+      "binary_names": [
+        "browseros-cli"
+      ],
+      "process_names": [
+        "BrowserOS",
+        "BrowserOS Dev"
+      ],
+      "application_names": [
+        "BrowserOS.app",
+        "BrowserOS Dev.app"
+      ]
     },
     {
       "id": "chat2db",
@@ -2111,11 +2578,22 @@
       "confidence": 0.9,
       "specificity": 0.94,
       "supported_connector": "",
-      "binary_names": ["chat2db"],
-      "process_names": ["Chat2DB", "chat2db"],
-      "application_names": ["Chat2DB.app"],
-      "config_paths": ["~/.chat2db-docker"],
-      "package_names": ["chat2db/chat2db"]
+      "binary_names": [
+        "chat2db"
+      ],
+      "process_names": [
+        "Chat2DB",
+        "chat2db"
+      ],
+      "application_names": [
+        "Chat2DB.app"
+      ],
+      "config_paths": [
+        "~/.chat2db-docker"
+      ],
+      "package_names": [
+        "chat2db/chat2db"
+      ]
     },
     {
       "id": "monday-desktop",
@@ -2125,7 +2603,9 @@
       "confidence": 0.7,
       "specificity": 0.68,
       "supported_connector": "",
-      "application_names": ["monday.com.app"]
+      "application_names": [
+        "monday.com.app"
+      ]
     },
     {
       "id": "eigent",
@@ -2135,8 +2615,12 @@
       "confidence": 0.9,
       "specificity": 0.94,
       "supported_connector": "",
-      "process_names": ["Eigent"],
-      "application_names": ["Eigent.app"]
+      "process_names": [
+        "Eigent"
+      ],
+      "application_names": [
+        "Eigent.app"
+      ]
     },
     {
       "id": "melty",
@@ -2146,10 +2630,19 @@
       "confidence": 0.82,
       "specificity": 0.84,
       "supported_connector": "",
-      "binary_names": ["meltycode"],
-      "process_names": ["meltycode"],
-      "application_names": ["meltycode.app"],
-      "config_paths": ["~/.meltycode", "~/.meltycode-server"]
+      "binary_names": [
+        "meltycode"
+      ],
+      "process_names": [
+        "meltycode"
+      ],
+      "application_names": [
+        "meltycode.app"
+      ],
+      "config_paths": [
+        "~/.meltycode",
+        "~/.meltycode-server"
+      ]
     },
     {
       "id": "bloop",
@@ -2159,8 +2652,15 @@
       "confidence": 0.86,
       "specificity": 0.88,
       "supported_connector": "",
-      "application_names": ["bloop.app", "Bloop.app"],
-      "config_paths": ["~/Library/Application Support/ai.bloop.bloop/bleep", "~/.local/share/bloop/bleep", "$APPDATA/bloop/bleep"]
+      "application_names": [
+        "bloop.app",
+        "Bloop.app"
+      ],
+      "config_paths": [
+        "~/Library/Application Support/ai.bloop.bloop/bleep",
+        "~/.local/share/bloop/bleep",
+        "$APPDATA/bloop/bleep"
+      ]
     },
     {
       "id": "forge",
@@ -2170,7 +2670,9 @@
       "confidence": 0.92,
       "specificity": 0.98,
       "supported_connector": "",
-      "package_names": ["@forge-agents/forge"]
+      "package_names": [
+        "@forge-agents/forge"
+      ]
     },
     {
       "id": "sculptor",
@@ -2180,7 +2682,9 @@
       "confidence": 0.88,
       "specificity": 0.88,
       "supported_connector": "",
-      "application_names": ["Sculptor.app"]
+      "application_names": [
+        "Sculptor.app"
+      ]
     },
     {
       "id": "crab-code",
@@ -2190,9 +2694,17 @@
       "confidence": 0.9,
       "specificity": 0.98,
       "supported_connector": "",
-      "binary_names": ["crab-code", "crabcode"],
-      "process_names": ["crab-code", "crabcode"],
-      "package_names": ["crabcode"]
+      "binary_names": [
+        "crab-code",
+        "crabcode"
+      ],
+      "process_names": [
+        "crab-code",
+        "crabcode"
+      ],
+      "package_names": [
+        "crabcode"
+      ]
     },
     {
       "id": "cmux",
@@ -2202,9 +2714,18 @@
       "confidence": 0.9,
       "specificity": 0.94,
       "supported_connector": "",
-      "application_names": ["cmux.app"],
-      "config_paths": ["~/.config/cmux/cmux.json", "~/Library/Application Support/cmux", "~/.cmuxterm"],
-      "history_patterns": ["brew install --cask cmux", "cmux hooks setup --agent"]
+      "application_names": [
+        "cmux.app"
+      ],
+      "config_paths": [
+        "~/.config/cmux/cmux.json",
+        "~/Library/Application Support/cmux",
+        "~/.cmuxterm"
+      ],
+      "history_patterns": [
+        "brew install --cask cmux",
+        "cmux hooks setup --agent"
+      ]
     },
     {
       "id": "opcode",
@@ -2214,9 +2735,16 @@
       "confidence": 0.88,
       "specificity": 0.88,
       "supported_connector": "",
-      "binary_names": ["opcode"],
-      "process_names": ["opcode"],
-      "application_names": ["Opcode.app", "opcode.app"]
+      "binary_names": [
+        "opcode"
+      ],
+      "process_names": [
+        "opcode"
+      ],
+      "application_names": [
+        "Opcode.app",
+        "opcode.app"
+      ]
     },
     {
       "id": "smelt",
@@ -2226,7 +2754,9 @@
       "confidence": 0.86,
       "specificity": 0.98,
       "supported_connector": "",
-      "package_names": ["smeltworkflow"]
+      "package_names": [
+        "smeltworkflow"
+      ]
     },
     {
       "id": "klaw",
@@ -2236,8 +2766,13 @@
       "confidence": 0.86,
       "specificity": 0.92,
       "supported_connector": "",
-      "config_paths": ["~/.klaw/agents", "~/.klaw/workspace"],
-      "history_patterns": ["klaw create agent"]
+      "config_paths": [
+        "~/.klaw/agents",
+        "~/.klaw/workspace"
+      ],
+      "history_patterns": [
+        "klaw create agent"
+      ]
     },
     {
       "id": "agent-deck",
@@ -2247,9 +2782,16 @@
       "confidence": 0.86,
       "specificity": 0.92,
       "supported_connector": "",
-      "binary_names": ["agent-deck"],
-      "process_names": ["agent-deck"],
-      "config_paths": ["~/.agent-deck/config.toml", "~/.agent-deck"]
+      "binary_names": [
+        "agent-deck"
+      ],
+      "process_names": [
+        "agent-deck"
+      ],
+      "config_paths": [
+        "~/.agent-deck/config.toml",
+        "~/.agent-deck"
+      ]
     },
     {
       "id": "agent-of-empires",
@@ -2259,8 +2801,12 @@
       "confidence": 0.78,
       "specificity": 0.7,
       "supported_connector": "",
-      "binary_names": ["aoe"],
-      "history_patterns": ["brew install aoe"]
+      "binary_names": [
+        "aoe"
+      ],
+      "history_patterns": [
+        "brew install aoe"
+      ]
     },
     {
       "id": "agent-macos",
@@ -2270,7 +2816,9 @@
       "confidence": 0.9,
       "specificity": 0.94,
       "supported_connector": "",
-      "application_names": ["Agent!.app"]
+      "application_names": [
+        "Agent!.app"
+      ]
     },
     {
       "id": "betterbot",
@@ -2280,8 +2828,12 @@
       "confidence": 0.88,
       "specificity": 0.94,
       "supported_connector": "",
-      "process_names": ["BetterBot"],
-      "application_names": ["BetterBot.app"]
+      "process_names": [
+        "BetterBot"
+      ],
+      "application_names": [
+        "BetterBot.app"
+      ]
     },
     {
       "id": "cyclop-one",
@@ -2291,9 +2843,17 @@
       "confidence": 0.9,
       "specificity": 0.94,
       "supported_connector": "",
-      "process_names": ["CyclopOne"],
-      "application_names": ["Cyclop One.app", "CyclopOne.app"],
-      "config_paths": ["~/.cyclopone/skills", "~/.cyclopone"]
+      "process_names": [
+        "CyclopOne"
+      ],
+      "application_names": [
+        "Cyclop One.app",
+        "CyclopOne.app"
+      ],
+      "config_paths": [
+        "~/.cyclopone/skills",
+        "~/.cyclopone"
+      ]
     },
     {
       "id": "fazm",
@@ -2303,9 +2863,16 @@
       "confidence": 0.88,
       "specificity": 0.94,
       "supported_connector": "",
-      "binary_names": ["fazm"],
-      "process_names": ["fazm", "Fazm"],
-      "application_names": ["Fazm.app"]
+      "binary_names": [
+        "fazm"
+      ],
+      "process_names": [
+        "fazm",
+        "Fazm"
+      ],
+      "application_names": [
+        "Fazm.app"
+      ]
     },
     {
       "id": "zia-search",
@@ -2315,7 +2882,15 @@
       "confidence": 0.94,
       "specificity": 1.0,
       "supported_connector": "",
-      "config_paths": ["~/Library/Application Support/Google/Chrome/Default/Extensions/jebapbhanimlfnddnammimbopafiddkd", "~/Library/Application Support/Microsoft Edge/Default/Extensions/jebapbhanimlfnddnammimbopafiddkd", "~/Library/Application Support/BraveSoftware/Brave-Browser/Default/Extensions/jebapbhanimlfnddnammimbopafiddkd", "~/.config/google-chrome/Default/Extensions/jebapbhanimlfnddnammimbopafiddkd", "~/.config/chromium/Default/Extensions/jebapbhanimlfnddnammimbopafiddkd", "$LOCALAPPDATA/Google/Chrome/User Data/Default/Extensions/jebapbhanimlfnddnammimbopafiddkd", "$LOCALAPPDATA/Microsoft/Edge/User Data/Default/Extensions/jebapbhanimlfnddnammimbopafiddkd"]
+      "config_paths": [
+        "~/Library/Application Support/Google/Chrome/Default/Extensions/jebapbhanimlfnddnammimbopafiddkd",
+        "~/Library/Application Support/Microsoft Edge/Default/Extensions/jebapbhanimlfnddnammimbopafiddkd",
+        "~/Library/Application Support/BraveSoftware/Brave-Browser/Default/Extensions/jebapbhanimlfnddnammimbopafiddkd",
+        "~/.config/google-chrome/Default/Extensions/jebapbhanimlfnddnammimbopafiddkd",
+        "~/.config/chromium/Default/Extensions/jebapbhanimlfnddnammimbopafiddkd",
+        "$LOCALAPPDATA/Google/Chrome/User Data/Default/Extensions/jebapbhanimlfnddnammimbopafiddkd",
+        "$LOCALAPPDATA/Microsoft/Edge/User Data/Default/Extensions/jebapbhanimlfnddnammimbopafiddkd"
+      ]
     }
   ]
 }

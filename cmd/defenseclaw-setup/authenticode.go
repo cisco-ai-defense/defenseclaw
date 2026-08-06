@@ -24,15 +24,17 @@ import (
 )
 
 const (
-	authenticodeInventorySchemaVersion = 1
-	authenticodeEvidenceSchemaVersion  = 1
-	productAuthenticodePolicy          = "defenseclaw-product-publisher"
-	pinnedInputAuthenticodePolicy      = "pinned-input-observation"
-	digestOnlyAuthenticodePolicy       = "digest-only-upstream"
-	hookLauncherPayloadName            = hookruntime.HookLauncherName
-	hookLauncherInstalledPath          = "bin/" + hookLauncherPayloadName
-	maxEmbeddedCertificateTableSize    = 16 << 20
-	imageFileMachineAMD64              = 0x8664
+	authenticodeInventorySchemaVersion   = 1
+	authenticodeEvidenceSchemaVersion    = 1
+	productAuthenticodePolicy            = "defenseclaw-product-publisher"
+	pinnedInputAuthenticodePolicy        = "pinned-input-observation"
+	digestOnlyAuthenticodePolicy         = "digest-only-upstream"
+	microsoftVCRuntimeAuthenticodePolicy = "pinned-microsoft-vc-runtime"
+	microsoftVCRuntimePublisher          = "Microsoft Windows Software Compatibility Publisher"
+	hookLauncherPayloadName              = hookruntime.HookLauncherName
+	hookLauncherInstalledPath            = "bin/" + hookLauncherPayloadName
+	maxEmbeddedCertificateTableSize      = 16 << 20
+	imageFileMachineAMD64                = 0x8664
 )
 
 var (
@@ -104,6 +106,10 @@ func validateAuthenticodeManifest(manifest payloadManifest) error {
 	}
 	seenFolded := make(map[string]string, len(inventory.Files))
 	pythonPEs := 0
+	vcRuntimeRequired := map[string]bool{
+		"runtime/python/msvcp140.dll":   false,
+		"runtime/python/msvcp140_1.dll": false,
+	}
 	cosignSeen := false
 	productSigner := ""
 	for key, evidence := range inventory.Files {
@@ -171,6 +177,19 @@ func validateAuthenticodeManifest(manifest payloadManifest) error {
 				return fmt.Errorf("invalid pinned Python Authenticode policy for %s", key)
 			}
 			pythonPEs++
+		case microsoftVCRuntimeAuthenticodePolicy:
+			if _, required := vcRuntimeRequired[key]; !required {
+				return fmt.Errorf("unexpected Microsoft VC++ runtime Authenticode path %s", key)
+			}
+			if evidence.SBOMFileName != "./expanded/vc-runtime/"+path.Base(key) ||
+				policy.Status != "Valid" || policy.SignatureType != "Authenticode" ||
+				!policy.PlatformIdentityRequired || policy.Publisher != microsoftVCRuntimePublisher ||
+				!policy.TimestampRequired || !validLowerSHA256(policy.SignerThumbprintSHA256) ||
+				!validLowerSHA256(policy.TimestampSignerThumbprintSHA256) ||
+				!validLowerSHA256(policy.TimestampTokenSHA256) {
+				return fmt.Errorf("invalid Microsoft VC++ runtime Authenticode policy for %s", key)
+			}
+			vcRuntimeRequired[key] = true
 		case digestOnlyAuthenticodePolicy:
 			if key != "runtime/tools/cosign.exe" || policy.Status != "NotSigned" ||
 				policy.SignatureType != "None" || !policy.PlatformIdentityRequired {
@@ -191,6 +210,11 @@ func validateAuthenticodeManifest(manifest payloadManifest) error {
 	}
 	if pythonPEs == 0 {
 		return errors.New("AuthentiCode inventory contains no managed Python portable executables")
+	}
+	for name, present := range vcRuntimeRequired {
+		if !present {
+			return fmt.Errorf("AuthentiCode inventory is missing Microsoft VC++ runtime %s", name)
+		}
 	}
 	if !cosignSeen {
 		return errors.New("AuthentiCode inventory is missing the managed Cosign executable")

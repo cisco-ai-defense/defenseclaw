@@ -12,6 +12,7 @@ package gateway
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"path/filepath"
@@ -27,8 +28,10 @@ import (
 type mcpRuntimeProbe struct {
 	ServerName string
 	ToolName   string
+	URL        string
 	Command    string
 	Args       []string
+	Transport  string
 	Surface    string
 	Matched    bool
 }
@@ -229,8 +232,10 @@ func (a *APIServer) evaluateRuntimeMCPAssetPolicy(ctx context.Context, connector
 		TargetType:     "mcp",
 		Name:           probe.ServerName,
 		Connector:      connector,
+		URL:            probe.URL,
 		Command:        probe.Command,
 		Args:           probe.Args,
+		Transport:      probe.Transport,
 		RuntimeSurface: coalesceRuntimeSurface(probe.Surface, "hook"),
 	})
 	// when MCP.Default is "deny" and the asset
@@ -609,6 +614,46 @@ func mcpProbeFromFields(serverName, toolName string, toolInput map[string]interf
 		}
 	}
 	return mcpRuntimeProbe{ToolName: toolName}
+}
+
+// cursorMCPProbeFromPayload preserves Cursor's authoritative beforeMCPExecution
+// endpoint/command fields and derives a collision-resistant local identity.
+// Cursor does not supply a vendor/server name, so the identity deliberately
+// describes only the source kind and digest rather than inventing one.
+func cursorMCPProbeFromPayload(payload map[string]interface{}, toolName string) mcpRuntimeProbe {
+	url := strings.TrimSpace(payloadString(payload, "url"))
+	commandLine := strings.TrimSpace(payloadString(payload, "command"))
+	if url == "" && commandLine == "" {
+		return mcpRuntimeProbe{ToolName: strings.TrimSpace(toolName)}
+	}
+
+	kind := "endpoint"
+	transport := "http"
+	if url == "" {
+		kind = "command"
+		transport = "stdio"
+	} else if commandLine != "" {
+		kind = "endpoint-command"
+		transport = "mixed"
+	}
+	// JSON string lengths/escaping provide unambiguous framing even if an
+	// attacker places NULs or field-label text inside an endpoint/command.
+	identityMaterial, _ := json.Marshal(struct {
+		URL     string `json:"url"`
+		Command string `json:"command"`
+	}{URL: url, Command: commandLine})
+	digest := sha256.Sum256(identityMaterial)
+	command, args := splitCommandLine(commandLine)
+	return mcpRuntimeProbe{
+		ServerName: fmt.Sprintf("%s-sha256:%x", kind, digest),
+		ToolName:   strings.TrimSpace(toolName),
+		URL:        url,
+		Command:    command,
+		Args:       args,
+		Transport:  transport,
+		Surface:    "hook",
+		Matched:    true,
+	}
 }
 
 func slashCommandAssetType(commandSource string) string {

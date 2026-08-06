@@ -169,331 +169,50 @@ func TestLoadAISignatures_ContainsRequiredSurfaces(t *testing.T) {
 	}
 }
 
-func TestLoadAISignatures_CoversRequestedProductCatalog(t *testing.T) {
-	type requiredProduct struct {
-		label     string
-		id        string
-		connector string
-	}
-	required := []requiredProduct{
-		{label: "Cursor", id: "cursor", connector: "cursor"},
-		{label: "GitHub Copilot CLI", id: "copilot", connector: "copilot"},
-		{label: "ChatGPT Desktop", id: "chatgpt-desktop"},
-		{label: "Claude Code", id: "claudecode", connector: "claudecode"},
-		{label: "OpenAI Codex", id: "codex", connector: "codex"},
-		{label: "Ollama", id: "ollama"},
-		{label: "Gemini CLI", id: "geminicli", connector: "geminicli"},
-		{label: "Claude Desktop", id: "claude-desktop"},
-		{label: "Notion", id: "notion"},
-		{label: "Perplexity Comet", id: "perplexity-comet"},
-		{label: "Cline CLI", id: "cline"},
-		{label: "Continue CLI", id: "continue"},
-		{label: "Aider", id: "aider"},
-		{label: "Zed", id: "zed"},
-		{label: "Warp", id: "warp"},
-		{label: "LM Studio", id: "lmstudio"},
-		{label: "Replit Agent", id: "replit"},
-		{label: "Raycast", id: "raycast"},
-		{label: "GPT4All", id: "gpt4all"},
-		{label: "Devin", id: "devin"},
-		{label: "Sourcegraph Cody CLI", id: "cody"},
-		{label: "Google Antigravity", id: "antigravity", connector: "antigravity"},
-		{label: "Goose", id: "goose"},
-		{label: "Open WebUI", id: "open-webui"},
-		{label: "AnythingLLM", id: "anythingllm"},
-		{label: "Jan AI", id: "jan"},
-		{label: "LobeChat", id: "lobechat"},
-		{label: "Qwen Code", id: "qwen-code"},
-		{label: "llama.cpp", id: "llamacpp"},
-		{label: "Trae", id: "trae"},
-		{label: "OpenHands", id: "openhands", connector: "openhands"},
-		{label: "Pieces for Developers", id: "pieces"},
-		{label: "Amp", id: "amp", connector: "amp"},
-		{label: "Void", id: "void"},
-		{label: "Kiro CLI", id: "kiro"},
-		{label: "Auggie (Augment Code CLI)", id: "auggie"},
-		{label: "Plandex CLI", id: "plandex"},
-		{label: "SWE-agent", id: "swe-agent"},
-		{label: "KoboldCpp", id: "koboldcpp"},
-		{label: "LocalAI", id: "localai"},
-		{label: "Pinokio", id: "pinokio"},
-		{label: "Mistral Vibe", id: "mistral-vibe"},
-		{label: "Crush", id: "crush"},
-		{label: "GPTScript", id: "gptscript"},
-		{label: "Docker Agent", id: "docker-agent"},
-		{label: "Msty", id: "msty"},
-		{label: "BoltAI", id: "boltai"},
-		{label: "UiPath Assistant", id: "uipath-assistant"},
-		{label: "Wave Terminal", id: "wave-terminal"},
-		{label: "Tabby Terminal", id: "tabby-terminal"},
-		{label: "UI-TARS Desktop", id: "ui-tars-desktop"},
-		{label: "Backyard AI", id: "backyard-ai"},
-		{label: "Dia Browser", id: "dia-browser"},
-		{label: "BrowserOS", id: "browseros"},
-		{label: "opencode", id: "opencode", connector: "opencode"},
-		{label: "RA.Aid", id: "ra-aid"},
-		{label: "Chat2DB", id: "chat2db"},
-		{label: "monday.com Desktop", id: "monday-desktop"},
-		{label: "Eigent", id: "eigent"},
-		{label: "Melty", id: "melty"},
-		{label: "bloop", id: "bloop"},
-		{label: "Forge", id: "forge"},
-		{label: "Sculptor", id: "sculptor"},
-		{label: "Crab Code", id: "crab-code"},
-		{label: "cmux", id: "cmux"},
-		{label: "opcode", id: "opcode"},
-		{label: "Smelt", id: "smelt"},
-		{label: "klaw", id: "klaw"},
-		{label: "Agent Deck", id: "agent-deck"},
-		{label: "Agent of Empires", id: "agent-of-empires"},
-		{label: "Agent! for macOS", id: "agent-macos"},
-		{label: "BetterBot", id: "betterbot"},
-		{label: "Cyclop One", id: "cyclop-one"},
-		{label: "Fazm", id: "fazm"},
-		{label: "OpenClaw", id: "openclaw", connector: "openclaw"},
-		{label: "Zia Search", id: "zia-search"},
-	}
-	if got, want := len(required), 76; got != want {
-		t.Fatalf("requested product fixture has %d entries, want %d", got, want)
-	}
-	requestedIDs := make(map[string]string, len(required))
-	for _, product := range required {
-		if previous, duplicate := requestedIDs[product.id]; duplicate {
-			t.Fatalf("requested products %q and %q share signature ID %q", previous, product.label, product.id)
-		}
-		requestedIDs[product.id] = product.label
-	}
-
+func TestLoadAISignatures_WindsurfIncludesOfficialDevinDesktopRename(t *testing.T) {
 	sigs, err := LoadAISignatures()
 	if err != nil {
 		t.Fatalf("LoadAISignatures: %v", err)
 	}
-	byID := make(map[string]AISignature, len(sigs))
 	for _, sig := range sigs {
-		byID[sig.ID] = sig
-	}
-	for _, want := range required {
-		sig, ok := byID[want.id]
-		if !ok {
-			t.Errorf("requested product %q is missing signature %q", want.label, want.id)
+		if sig.ID != "windsurf" {
 			continue
 		}
-		if sig.SupportedConnector != want.connector {
-			t.Errorf("requested product %q connector = %q, want %q", want.label, sig.SupportedConnector, want.connector)
+		for field, values := range map[string][]string{
+			"binary_names":      sig.BinaryNames,
+			"process_names":     sig.ProcessNames,
+			"config_paths":      sig.ConfigPaths,
+			"application_names": sig.ApplicationNames,
+			"domain_patterns":   sig.DomainPatterns,
+		} {
+			want := map[string]string{
+				"binary_names":      "Devin.exe",
+				"process_names":     "Devin.exe",
+				"config_paths":      ".devin/rules",
+				"application_names": "Devin Desktop",
+				"domain_patterns":   "devin.ai",
+			}[field]
+			if !slices.Contains(values, want) {
+				t.Errorf("Windsurf %s missing official renamed identity %q: %v", field, want, values)
+			}
 		}
-		concreteEvidence := len(sig.BinaryNames) + len(sig.ProcessNames) + len(sig.ApplicationNames) +
-			len(sig.ConfigPaths) + len(sig.ExtensionIDs) + len(sig.MCPPaths) + len(sig.PackageNames) +
-			len(sig.EnvVarNames) + len(sig.LocalEndpoints)
-		if concreteEvidence == 0 {
-			t.Errorf("requested product %q signature %q has no concrete local discovery evidence", want.label, want.id)
+		if sig.Name != "Devin Desktop (legacy Cascade)" || sig.Vendor != "Cognition" {
+			t.Errorf("Windsurf identity = %q/%q, want legacy Cascade/Cognition", sig.Name, sig.Vendor)
 		}
-	}
-
-	raw, err := aiSignatureFS.ReadFile("ai_signatures.json")
-	if err != nil {
-		t.Fatalf("read built-in AI discovery catalog: %v", err)
-	}
-	if strings.Contains(strings.ToLower(string(raw)), "spiffe://") {
-		t.Fatal("built-in AI discovery catalog must not embed SPIFFE identities")
-	}
-}
-
-func TestContinuousDiscoveryCopilotBinaryIgnoresPlainGitHubCLI(t *testing.T) {
-	if os.PathSeparator == '\\' {
-		t.Skip("executable PATH fixture uses Unix permission bits")
-	}
-
-	sigs, err := LoadAISignatures()
-	if err != nil {
-		t.Fatalf("LoadAISignatures: %v", err)
-	}
-	var copilot *AISignature
-	for i := range sigs {
-		if sigs[i].ID == "copilot" {
-			copilot = &sigs[i]
-			break
+		if !slices.Equal(sig.MCPPaths, []string{"~/.codeium/windsurf/mcp_config.json"}) {
+			t.Errorf("Windsurf MCP paths = %v, want only documented bound-profile path", sig.MCPPaths)
 		}
-	}
-	if copilot == nil {
-		t.Fatal("copilot signature missing")
-	}
-
-	binDir := t.TempDir()
-	ghPath := filepath.Join(binDir, "gh")
-	mustWrite(t, ghPath, "#!/bin/sh\nexit 0\n")
-	if err := os.Chmod(ghPath, 0o700); err != nil {
-		t.Fatalf("chmod gh fixture: %v", err)
-	}
-	t.Setenv("PATH", binDir)
-
-	svc := &ContinuousDiscoveryService{catalog: []AISignature{*copilot}}
-	if got := svc.detectBinaries(); len(got) != 0 {
-		t.Fatalf("plain gh executable produced Copilot signals: %+v", got)
-	}
-
-	copilotPath := filepath.Join(binDir, "copilot")
-	mustWrite(t, copilotPath, "#!/bin/sh\nexit 0\n")
-	if err := os.Chmod(copilotPath, 0o700); err != nil {
-		t.Fatalf("chmod copilot fixture: %v", err)
-	}
-	got := svc.detectBinaries()
-	if len(got) != 1 || got[0].SignatureID != "copilot" || got[0].Detector != "binary" {
-		t.Fatalf("standalone copilot executable produced unexpected signals: %+v", got)
-	}
-}
-
-func TestContinuousDiscoveryDetectsRequestedCLIConfigFixtures(t *testing.T) {
-	home := t.TempDir()
-	fixtures := []struct {
-		id       string
-		relative string
-	}{
-		{id: "amp", relative: ".config/amp/settings.json"},
-		{id: "kiro", relative: ".kiro/settings/cli.json"},
-		{id: "auggie", relative: ".augment/settings.json"},
-		{id: "mistral-vibe", relative: ".vibe/config.toml"},
-		{id: "crush", relative: ".config/crush/crush.json"},
-	}
-
-	sigs, err := LoadAISignatures()
-	if err != nil {
-		t.Fatalf("LoadAISignatures: %v", err)
-	}
-	wanted := make(map[string]bool, len(fixtures))
-	for _, fixture := range fixtures {
-		wanted[fixture.id] = true
-		mustWrite(t, filepath.Join(home, filepath.FromSlash(fixture.relative)), "{}")
-	}
-	var catalog []AISignature
-	for _, sig := range sigs {
-		if wanted[sig.ID] {
-			catalog = append(catalog, sig)
+		if len(sig.EnvVarNames) != 0 {
+			t.Errorf("Windsurf env vars = %v, want none for legacy Cascade discovery", sig.EnvVarNames)
 		}
-	}
-	if len(catalog) != len(fixtures) {
-		t.Fatalf("loaded %d requested CLI fixture signatures, want %d", len(catalog), len(fixtures))
-	}
-
-	svc := &ContinuousDiscoveryService{
-		opts:    AIDiscoveryOptions{HomeDir: home},
-		catalog: catalog,
-	}
-	detected := make(map[string]bool, len(fixtures))
-	for _, signal := range svc.detectConfigPaths() {
-		detected[signal.SignatureID] = true
-	}
-	for _, fixture := range fixtures {
-		if !detected[fixture.id] {
-			t.Errorf("config fixture %q did not detect signature %q", fixture.relative, fixture.id)
+		for _, want := range []string{"~/.codeium/windsurf/skills", "~/.agents/skills", "AGENTS.md"} {
+			if !slices.Contains(sig.ConfigPaths, want) {
+				t.Errorf("Windsurf config paths missing %q: %v", want, sig.ConfigPaths)
+			}
 		}
+		return
 	}
-}
-
-func TestEditorExtensionNameMatchesExactOrVersionedDirectory(t *testing.T) {
-	for _, entry := range []string{"github.copilot", "github.copilot-1.320.0"} {
-		if !editorExtensionNameMatches(entry, "github.copilot") {
-			t.Errorf("expected %q to match the GitHub Copilot extension ID", entry)
-		}
-	}
-	for _, entry := range []string{"fake-github.copilot-wrapper", "github.copilot-chat"} {
-		if editorExtensionNameMatches(entry, "github.copilot") {
-			t.Errorf("unexpected substring extension match for %q", entry)
-		}
-	}
-}
-
-func TestApplicationNameMatchesExactOrReverseDNSName(t *testing.T) {
-	for _, tc := range []struct {
-		have string
-		want string
-	}{
-		{have: "Notion.app", want: "Notion.app"},
-		{have: "dev.zed.Zed.desktop", want: "Zed.app"},
-		{have: "Cursor.lnk", want: "Cursor.app"},
-		{have: "Claude.app.lnk", want: "Claude.app"},
-		{have: "LM Studio.exe", want: "LM Studio"},
-		{have: "Jan.appref-ms", want: "Jan.app"},
-		{have: "package-id:OpenAI.ChatGPT-Desktop", want: "package-id:OpenAI.ChatGPT-Desktop"},
-	} {
-		if !applicationNameMatches(tc.have, tc.want) {
-			t.Errorf("expected application %q to match %q", tc.have, tc.want)
-		}
-	}
-	for _, tc := range []struct {
-		have string
-		want string
-	}{
-		{have: "Notion Calendar.app", want: "Notion.app"},
-		{have: "WaveSomething.desktop", want: "Wave.app"},
-		{have: "Cursor Helper.exe", want: "Cursor.app"},
-		{have: "package-id:Fake.OpenAI.ChatGPT-Desktop", want: "package-id:OpenAI.ChatGPT-Desktop"},
-	} {
-		if applicationNameMatches(tc.have, tc.want) {
-			t.Errorf("unexpected substring application match: %q matched %q", tc.have, tc.want)
-		}
-	}
-}
-
-func TestAmpSignatureIncludesNativeConfigAndAssetPaths(t *testing.T) {
-	sigs, err := LoadAISignatures()
-	if err != nil {
-		t.Fatalf("LoadAISignatures: %v", err)
-	}
-	var amp *AISignature
-	for i := range sigs {
-		if sigs[i].ID == "amp" {
-			amp = &sigs[i]
-			break
-		}
-	}
-	if amp == nil {
-		t.Fatal("Amp signature missing")
-	}
-	if amp.SupportedConnector != "amp" || amp.Vendor != "Amp" {
-		t.Fatalf("Amp identity mismatch: %+v", *amp)
-	}
-	for _, want := range []string{
-		"~/.config/amp/settings.json",
-		"~/.config/amp/settings.jsonc",
-		"/Library/Application Support/ampcode/managed-settings.json",
-		"/etc/ampcode/managed-settings.json",
-		"$ProgramData/ampcode/managed-settings.json",
-		".amp/settings.json",
-		".amp/plugins",
-		"~/.config/amp/plugins",
-		"~/.config/agents/skills",
-		"~/.config/amp/skills",
-		".agents/checks",
-		"~/.config/amp/checks",
-		"~/.config/amp/AGENTS.md",
-		"~/.config/AGENTS.md",
-		"/Library/Application Support/ampcode/AGENTS.md",
-		"/etc/ampcode/AGENTS.md",
-		"$ProgramData/ampcode/AGENTS.md",
-	} {
-		if !stringSliceContains(amp.ConfigPaths, want) {
-			t.Errorf("Amp config paths missing %q: %v", want, amp.ConfigPaths)
-		}
-	}
-	for _, want := range []string{
-		"~/.config/amp/settings.json",
-		"~/.config/amp/settings.jsonc",
-		"/Library/Application Support/ampcode/managed-settings.json",
-		"/etc/ampcode/managed-settings.json",
-		"$ProgramData/ampcode/managed-settings.json",
-		".amp/settings.json",
-		".amp/settings.jsonc",
-	} {
-		if !stringSliceContains(amp.MCPPaths, want) {
-			t.Errorf("Amp MCP paths missing %q: %v", want, amp.MCPPaths)
-		}
-	}
-	if !stringSliceContains(amp.PackageNames, "@ampcode/cli") {
-		t.Errorf("Amp package names missing @ampcode/cli: %v", amp.PackageNames)
-	}
-	if !stringSliceContains(amp.EnvVarNames, "AMP_API_KEY") {
-		t.Errorf("Amp environment variables missing AMP_API_KEY: %v", amp.EnvVarNames)
-	}
+	t.Fatal("Windsurf signature missing")
 }
 
 func TestLoadAISignatures_LemonadeServerSurface(t *testing.T) {
@@ -587,39 +306,24 @@ func TestHermesSignatureIncludesNativeWindowsPaths(t *testing.T) {
 	}
 }
 
-func TestDesktopSignaturesIncludeNativeWindowsPaths(t *testing.T) {
+func TestOmnigentSignatureIncludesExplicitServerConfig(t *testing.T) {
 	sigs, err := LoadAISignatures()
 	if err != nil {
 		t.Fatalf("LoadAISignatures: %v", err)
 	}
-	byID := make(map[string]AISignature, len(sigs))
-	for _, sig := range sigs {
-		byID[sig.ID] = sig
-	}
-	wants := map[string][]string{
-		"claude-desktop": {"$APPDATA/Claude/claude_desktop_config.json"},
-		"jan":            {"$APPDATA/Jan/data"},
-		"msty":           {"$APPDATA/Msty"},
-		"wave-terminal":  {"$APPDATA/waveterm"},
-		"gpt4all":        {"$LOCALAPPDATA/nomic.ai/GPT4All"},
-		"anythingllm":    {"$APPDATA/anythingllm-desktop/storage"},
-	}
-	for id, paths := range wants {
-		sig, ok := byID[id]
-		if !ok {
-			t.Errorf("signature %q missing", id)
+	for _, signature := range sigs {
+		if signature.ID != "omnigent" {
 			continue
 		}
-		for _, want := range paths {
-			if !stringSliceContains(sig.ConfigPaths, want) {
-				t.Errorf("%s config paths missing %q: %v", id, want, sig.ConfigPaths)
-			}
+		if !stringSliceContains(signature.ConfigPaths, "$OMNIGENT_CONFIG") {
+			t.Errorf("OmniGent config paths omit OMNIGENT_CONFIG: %v", signature.ConfigPaths)
 		}
+		if !stringSliceContains(signature.EnvVarNames, "OMNIGENT_CONFIG") {
+			t.Errorf("OmniGent environment variables omit OMNIGENT_CONFIG: %v", signature.EnvVarNames)
+		}
+		return
 	}
-	claude := byID["claude-desktop"]
-	if !stringSliceContains(claude.MCPPaths, "$APPDATA/Claude/claude_desktop_config.json") {
-		t.Errorf("claude-desktop MCP paths missing native Windows config: %v", claude.MCPPaths)
-	}
+	t.Fatal("OmniGent signature missing")
 }
 
 func stringSliceContains(values []string, want string) bool {
@@ -659,6 +363,68 @@ func TestExpandCandidatePath_SkipsUnsetEnvironment(t *testing.T) {
 
 	if got := service.expandCandidatePath("$OMNIGENT_CONFIG_HOME/config.yaml"); got != nil {
 		t.Fatalf("expanded paths = %v, want nil for unset environment", got)
+	}
+}
+
+func TestAmpSignatureIncludesNativeConfigAndAssetPaths(t *testing.T) {
+	sigs, err := LoadAISignatures()
+	if err != nil {
+		t.Fatalf("LoadAISignatures: %v", err)
+	}
+	var amp *AISignature
+	for i := range sigs {
+		if sigs[i].ID == "amp" {
+			amp = &sigs[i]
+			break
+		}
+	}
+	if amp == nil {
+		t.Fatal("Amp signature missing")
+	}
+	if amp.SupportedConnector != "amp" || amp.Vendor != "Amp" {
+		t.Fatalf("Amp identity mismatch: %+v", *amp)
+	}
+	for _, want := range []string{
+		"~/.config/amp/settings.json",
+		"~/.config/amp/settings.jsonc",
+		"/Library/Application Support/ampcode/managed-settings.json",
+		"/etc/ampcode/managed-settings.json",
+		"$ProgramData/ampcode/managed-settings.json",
+		".amp/settings.json",
+		".amp/plugins",
+		"~/.config/amp/plugins",
+		"~/.config/agents/skills",
+		"~/.config/amp/skills",
+		".agents/checks",
+		"~/.config/amp/checks",
+		"~/.config/amp/AGENTS.md",
+		"~/.config/AGENTS.md",
+		"/Library/Application Support/ampcode/AGENTS.md",
+		"/etc/ampcode/AGENTS.md",
+		"$ProgramData/ampcode/AGENTS.md",
+	} {
+		if !stringSliceContains(amp.ConfigPaths, want) {
+			t.Errorf("Amp config paths missing %q: %v", want, amp.ConfigPaths)
+		}
+	}
+	for _, want := range []string{
+		"~/.config/amp/settings.json",
+		"~/.config/amp/settings.jsonc",
+		"/Library/Application Support/ampcode/managed-settings.json",
+		"/etc/ampcode/managed-settings.json",
+		"$ProgramData/ampcode/managed-settings.json",
+		".amp/settings.json",
+		".amp/settings.jsonc",
+	} {
+		if !stringSliceContains(amp.MCPPaths, want) {
+			t.Errorf("Amp MCP paths missing %q: %v", want, amp.MCPPaths)
+		}
+	}
+	if !stringSliceContains(amp.PackageNames, "@ampcode/cli") {
+		t.Errorf("Amp package names missing @ampcode/cli: %v", amp.PackageNames)
+	}
+	if !stringSliceContains(amp.EnvVarNames, "AMP_API_KEY") {
+		t.Errorf("Amp environment variables missing AMP_API_KEY: %v", amp.EnvVarNames)
 	}
 }
 

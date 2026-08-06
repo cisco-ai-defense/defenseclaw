@@ -22,6 +22,11 @@ from defenseclaw.connector_paths import (
     connector_home,
     hermes_config_path,
     hermes_home,
+    windsurf_hook_config_path,
+)
+from defenseclaw.observability.custody_status import (
+    NativeDeliveryStatus,
+    NativeDeliverySummary,
 )
 from defenseclaw.observability.display import redact_endpoint_for_display
 from defenseclaw.observability.v8_status import (
@@ -36,6 +41,7 @@ NoticeLevel = Literal["info", "warn", "error"]
 STALENESS_WINDOW = timedelta(minutes=15)
 DOCTOR_CLOCK_SKEW_TOLERANCE = timedelta(minutes=5)
 MAX_AI_DISCOVERY_OVERVIEW_ROWS = 8
+_CURSOR_PRIORITY_CONFLICT_DISCLOSURE = "priority-conflict-detection=unavailable (none inferred)"
 
 
 @dataclass(frozen=True)
@@ -50,8 +56,10 @@ class SubsystemHealth:
 class ConnectorHealth:
     name: str = ""
     state: str = ""
+    source: str = ""
     since: str = ""
     last_activity_at: str = ""
+    load_heartbeat_at: str = ""
     tool_inspection_mode: str = ""
     subprocess_policy: str = ""
     requests: int = 0
@@ -520,6 +528,7 @@ class OverviewPanelModel:
         self.skill_scanner_available = True
         self.observability_status: V8OperatorStatus | None = None
         self.observability_status_error = ""
+        self.native_delivery_summary: NativeDeliverySummary | None = None
 
     def set_cfg(self, cfg: OverviewConfig | None) -> None:
         """Hot-swap the cached config snapshot (e.g. after ``setup``).
@@ -579,6 +588,14 @@ class OverviewPanelModel:
 
         self.observability_status = status
         self.observability_status_error = error.strip()
+
+    def set_native_delivery_summary(
+        self,
+        summary: NativeDeliverySummary | None,
+    ) -> None:
+        """Install bounded native OTLP evidence without treating absence as failure."""
+
+        self.native_delivery_summary = summary
 
     def action_intent(self, key: str) -> OverviewCommandIntent | None:
         if key == "m":
@@ -894,7 +911,7 @@ class OverviewPanelModel:
                     return self._aggregate_connector_state()
                 if self.health.connector is None:
                     return "unknown"
-                return self.health.connector.state or "unknown"
+                return self._effective_connector_runtime(self.health.connector)[0]
             case "watcher":
                 return self.health.watcher.state
             case "guardrail":
@@ -1017,6 +1034,12 @@ class OverviewPanelModel:
             return ""
         return format_scanner_overrides_summary(self.cfg.scanner_overrides)
 
+    @staticmethod
+    def connector_priority_conflict_disclosure(connector: str) -> str:
+        if connector.strip().lower() == "cursor":
+            return _CURSOR_PRIORITY_CONFLICT_DISCLOSURE
+        return ""
+
     def multi_connector_rows(self) -> list[tuple[str, str]]:
         """Per-connector ``(label, detail)`` rows for the Overview.
 
@@ -1047,10 +1070,33 @@ class OverviewPanelModel:
             pack = (packs.get(connector) or "").strip()
             if pack:
                 detail += f", {pack}"
+            disclosure = self.connector_priority_conflict_disclosure(connector)
+            if disclosure:
+                detail += f", {disclosure}"
             rows.append(("", detail))
         return rows
 
     _RUNNING_STATES = frozenset({"running", "active", "enabled"})
+
+    def _effective_connector_runtime(self, connector: ConnectorHealth) -> tuple[str, str]:
+        state = (connector.state or "").strip().lower() or "unknown"
+        if connector.name.strip().lower() != "opencode":
+            return state, ""
+
+        from defenseclaw.commands.cmd_status import _opencode_runtime_truth
+
+        health = self.health
+        availability = self.gateway_availability().state.strip().lower()
+        return _opencode_runtime_truth(
+            {
+                "name": connector.name,
+                "state": connector.state,
+                "source": connector.source,
+                "load_heartbeat_at": connector.load_heartbeat_at,
+            },
+            gateway_started_at=health.started_at if health is not None else "",
+            gateway_available=availability == "running",
+        )
 
     def _is_multi_connector(self) -> bool:
         return self.cfg is not None and len([c for c, _m in self.cfg.connector_modes if c]) > 1
@@ -1071,7 +1117,9 @@ class OverviewPanelModel:
         ``unknown``). Mirrors how an operator reads the CONNECTORS table.
         """
 
-        states = [(conn.state or "").strip().lower() for conn in (self.health.connectors if self.health else ())]
+        states = [
+            self._effective_connector_runtime(conn)[0] for conn in (self.health.connectors if self.health else ())
+        ]
         if not states:
             # No live connectors. If every rostered connector is disabled,
             # say so explicitly instead of the generic "unknown".
@@ -1100,7 +1148,7 @@ class OverviewPanelModel:
             disabled_n = sum(1 for c, _m in self.cfg.connector_modes if c and self.cfg.connector_is_disabled(c))
             enabled_total = max(total - disabled_n, 0)
             live = self.health.connectors if self.health else ()
-            running = sum(1 for conn in live if (conn.state or "").strip().lower() in self._RUNNING_STATES)
+            running = sum(1 for conn in live if self._effective_connector_runtime(conn)[0] in self._RUNNING_STATES)
             if not disabled_n:
                 # No kill switches → original phrasing, unchanged.
                 if not live:
@@ -1118,9 +1166,17 @@ class OverviewPanelModel:
         if self.health is None or self.health.connector is None:
             if not configured:
                 return ""
-            return f"{friendly_connector_name(configured)} (configured, not connected)"
+            parts = [f"{friendly_connector_name(configured)} (configured, not connected)"]
+            if disclosure := self.connector_priority_conflict_disclosure(configured):
+                parts.append(disclosure)
+            return " - ".join(parts)
         connector = self.health.connector
         parts = [friendly_connector_name(connector.name)]
+        if disclosure := self.connector_priority_conflict_disclosure(connector.name):
+            parts.append(disclosure)
+        _runtime_state, runtime_detail = self._effective_connector_runtime(connector)
+        if runtime_detail:
+            parts.append(runtime_detail)
         if connector.tool_inspection_mode:
             parts.append(connector.tool_inspection_mode)
         if connector.requests:
@@ -1184,6 +1240,13 @@ class OverviewPanelModel:
         """Return the canonical v8 destination inventory."""
 
         return self._v8_observability_destination_rows()
+
+    def native_delivery_rows(self) -> tuple[NativeDeliveryStatus, ...]:
+        """Return redacted per-connector delivery truth for Overview."""
+
+        if self.native_delivery_summary is None:
+            return ()
+        return self.native_delivery_summary.connectors
 
     def _v8_observability_destination_rows(self) -> tuple[ObservabilityDestinationRow, ...]:
         """Merge canonical v8 policy with only positively observed live health."""
@@ -1377,7 +1440,7 @@ def friendly_connector_name(connector: str) -> str:
         case "cursor":
             return "Cursor"
         case "windsurf":
-            return "Windsurf"
+            return "Devin Desktop — legacy Cascade"
         case "geminicli":
             return "Gemini CLI"
         case "copilot":
@@ -1404,14 +1467,47 @@ def connector_source_label(connector: str, category: str) -> str:
     codex_root = connector_home("codex")
     claude_config = connector_config_files("claudecode")[0]
     codex_config = connector_config_files("codex")[0]
+    opencode_plugin = connector_config_files("opencode")[0]
+    opencode_mcp_sources = [
+        "authenticated remote .well-known/opencode (mcp; provenance unverified locally)",
+        "~/.config/opencode/config.json (mcp)",
+        "~/.config/opencode/opencode.json (mcp)",
+        "~/.config/opencode/opencode.jsonc (mcp)",
+        "OPENCODE_CONFIG (mcp; explicit file)",
+        "<workspace>/opencode.json, opencode.jsonc (mcp)",
+        "<workspace>/.opencode/opencode.json, opencode.jsonc (mcp)",
+        "~/.opencode/opencode.json, opencode.jsonc (mcp; user component)",
+    ]
+    if os.environ.get("OPENCODE_CONFIG_DIR", "").strip():
+        opencode_mcp_sources.append(
+            os.path.join(connector_home("opencode"), "opencode.json") + " / opencode.jsonc (mcp; custom override)"
+        )
+    else:
+        opencode_mcp_sources.append("OPENCODE_CONFIG_DIR/opencode.json, opencode.jsonc (mcp; when set)")
+    opencode_mcp_sources.extend(
+        (
+            "OPENCODE_CONFIG_CONTENT (mcp; inline provenance, values never displayed)",
+            "ProgramData managed config (enterprise precedence excluded; unverified)",
+        )
+    )
+    windsurf_configs = connector_config_files("windsurf") if connector == "windsurf" else []
+    windsurf_hooks = windsurf_hook_config_path() if connector == "windsurf" else ""
     sources = {
         ("openclaw", "skills"): ("./skills", "~/.openclaw/skills"),
         ("claudecode", "skills"): (os.path.join(claude_root, "skills"), "./.claude/skills"),
-        ("codex", "skills"): (os.path.join(codex_root, "skills"), "./.codex/skills"),
+        ("codex", "skills"): (
+            "~/.agents/skills",
+            "./.agents/skills (active directory to repository root)",
+        ),
         ("zeptoclaw", "skills"): ("~/.zeptoclaw/skills", "./.zeptoclaw/skills"),
         ("hermes", "skills"): (os.path.join(hermes_root, "skills"),),
         ("cursor", "skills"): ("./.cursor/skills", "./.agents/skills", "~/.cursor/skills", "~/.agents/skills"),
-        ("windsurf", "skills"): ("unsupported/documented paths only",),
+        ("windsurf", "skills"): (
+            "~/.codeium/windsurf/skills",
+            "~/.agents/skills",
+            "./.windsurf/skills",
+            "./.agents/skills",
+        ),
         ("geminicli", "skills"): ("./.gemini/skills", "./.agents/skills"),
         ("copilot", "skills"): ("./.github/skills", "./.agents/skills", "~/.copilot/skills"),
         ("openhands", "skills"): ("~/.openhands/skills", "~/.openhands/microagents", "~/.agents/skills"),
@@ -1431,11 +1527,14 @@ def connector_source_label(connector: str, category: str) -> str:
         ("omnigent", "skills"): ("unsupported by the OmniGent connector",),
         ("openclaw", "mcps"): ("openclaw config get mcp.servers", "openclaw.json (mcp.servers)"),
         ("claudecode", "mcps"): (f"{claude_config} (mcpServers)", "./.mcp.json"),
-        ("codex", "mcps"): (f"{codex_config} ([mcp_servers])", "./.mcp.json"),
+        ("codex", "mcps"): (
+            f"{codex_config} ([mcp_servers])",
+            "./.codex/config.toml ([mcp_servers]; trusted projects only)",
+        ),
         ("zeptoclaw", "mcps"): ("~/.zeptoclaw/config.json (mcp.servers)", "./.mcp.json"),
         ("hermes", "mcps"): (f"{hermes_config} (mcp.servers)",),
         ("cursor", "mcps"): ("./.cursor/mcp.json", "~/.cursor/mcp.json"),
-        ("windsurf", "mcps"): ("~/.codeium/windsurf/mcp_config.json", "~/.codeium/windsurf/mcp.json"),
+        ("windsurf", "mcps"): tuple(windsurf_configs),
         ("geminicli", "mcps"): ("~/.gemini/settings.json (mcpServers)", "./.mcp.json"),
         ("copilot", "mcps"): ("~/.copilot/mcp-config.json", "./.github/mcp.json", "./.mcp.json"),
         ("openhands", "mcps"): ("~/.openhands/mcp.json",),
@@ -1444,16 +1543,21 @@ def connector_source_label(connector: str, category: str) -> str:
             "<workspace>/.agents/mcp_config.json",
             "<plugin>/mcp_config.json (discovery-only)",
         ),
-        ("opencode", "mcps"): ("~/.config/opencode/opencode.json (mcp)", "./opencode.json (mcp)"),
+        ("opencode", "mcps"): tuple(opencode_mcp_sources),
         ("amp", "mcps"): (
             "~/.config/amp/settings.json or settings.jsonc (amp.mcpServers; read-only)",
             "<workspace>/.amp/settings.json or settings.jsonc (amp.mcpServers; read-only)",
             "<skill>/mcp.json",
         ),
-        ("omnigent", "mcps"): ("managed by OmniGent; not modified by DefenseClaw",),
+        ("omnigent", "mcps"): ("unsupported/unverified by the OmniGent connector",),
         ("openclaw", "plugins"): ("~/.openclaw/extensions",),
         ("claudecode", "plugins"): (os.path.join(claude_root, "plugins"),),
-        ("codex", "plugins"): (os.path.join(codex_root, "plugins"),),
+        ("codex", "plugins"): (
+            "./.agents/plugins/marketplace.json",
+            "./.claude-plugin/marketplace.json (legacy-compatible)",
+            "~/.agents/plugins/marketplace.json",
+            os.path.join(codex_root, "plugins", "cache"),
+        ),
         ("zeptoclaw", "plugins"): ("~/.zeptoclaw/plugins",),
         ("hermes", "plugins"): (
             os.path.join(hermes_root, "plugins"),
@@ -1462,14 +1566,14 @@ def connector_source_label(connector: str, category: str) -> str:
         ("cursor", "plugins"): ("unsupported",),
         ("windsurf", "plugins"): ("unsupported",),
         ("geminicli", "plugins"): ("./.gemini/extensions",),
-        ("copilot", "plugins"): ("copilot plugin list",),
+        ("copilot", "plugins"): ("copilot plugins list --kind plugin --json",),
         ("openhands", "plugins"): ("unsupported",),
         ("antigravity", "plugins"): (
             "~/.gemini/config/plugins/<plugin>/ (read/write)",
             "~/.gemini/antigravity-cli/plugins/<plugin>/ (discovery-only)",
             "<workspace>/.agents/plugins/<plugin>/ (read/write)",
         ),
-        ("opencode", "plugins"): ("~/.config/opencode/plugins/defenseclaw.js (DefenseClaw bridge)",),
+        ("opencode", "plugins"): (f"{opencode_plugin} (DefenseClaw bridge only)",),
         ("amp", "plugins"): (
             "~/.config/amp/plugins/defenseclaw.ts (DefenseClaw policy plugin)",
             "<workspace>/.amp/plugins",
@@ -1481,18 +1585,18 @@ def connector_source_label(connector: str, category: str) -> str:
         ("zeptoclaw", "config"): ("~/.zeptoclaw/config.json",),
         ("hermes", "config"): (hermes_config,),
         ("cursor", "config"): ("~/.cursor/hooks.json",),
-        ("windsurf", "config"): ("~/.codeium/windsurf/hooks.json",),
+        ("windsurf", "config"): (windsurf_hooks,),
         ("geminicli", "config"): ("~/.gemini/settings.json",),
         ("copilot", "config"): ("./.github/hooks/*.json",),
         ("openhands", "config"): ("~/.openhands/hooks.json",),
         ("antigravity", "config"): ("~/.gemini/config/hooks.json",),
-        ("opencode", "config"): ("~/.config/opencode/plugins/defenseclaw.js",),
+        ("opencode", "config"): (opencode_plugin,),
         ("amp", "config"): (
             "~/.config/amp/plugins/defenseclaw.ts",
             "~/.config/amp/settings.json or settings.jsonc",
             "<workspace>/.amp/settings.json or settings.jsonc",
         ),
-        ("omnigent", "config"): ("$OMNIGENT_CONFIG_HOME/config.yaml or ~/.omnigent/config.yaml",),
+        ("omnigent", "config"): ("$OMNIGENT_CONFIG, $OMNIGENT_CONFIG_HOME/config.yaml, or ~/.omnigent/config.yaml; CLI server requires --config",),
     }
     return ", ".join(sources.get((connector, category), ()))
 

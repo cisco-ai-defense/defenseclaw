@@ -49,11 +49,11 @@ The animation below replays a real `defenseclaw setup guardrail` session — con
     { type: 'spacer' },
     { type: 'dim', text: '    1. OpenClaw       — fetch interceptor + before_tool_call plugin' },
     { type: 'dim', text: '    2. ZeptoClaw      — api_base redirect + proxy response-scan' },
-    { type: 'dim', text: '    3. Claude Code    — env var + PreToolUse hook script *' },
+    { type: 'dim', text: '    3. Claude Code    — native owned hook matrix + OTLP env *' },
     { type: 'dim', text: '    4. Codex          — env var + hook script + response-scan' },
     { type: 'dim', text: '    5. Hermes         — config.yaml hooks + MCP/skills/plugins' },
     { type: 'dim', text: '    6. Cursor         — hooks.json + MCP/skills/rules surfaces' },
-    { type: 'dim', text: '    7. Windsurf       — Cascade hooks + local config discovery' },
+    { type: 'dim', text: '    7. Devin Desktop  — legacy Cascade hooks only (preview)' },
     { type: 'dim', text: '    8. Gemini CLI     — settings.json hooks + native OTLP' },
     { type: 'dim', text: '    9. GitHub Copilot CLI — global ~/.copilot/hooks command hooks' },
     { type: 'dim', text: '   10. OpenHands      — global ~/.openhands/hooks.json command hooks' },
@@ -90,7 +90,7 @@ The animation below replays a real `defenseclaw setup guardrail` session — con
     { type: 'prompt', text: '  Configure advanced options? [y/N]: ', reply: '', pauseMs: 800 },
     { type: 'spacer' },
     { type: 'ok', text: '  ✓ Wrote ~/.defenseclaw/config.yaml' },
-    { type: 'ok', text: '  ✓ Installed Claude Code PreToolUse hook' },
+    { type: 'ok', text: '  ✓ Installed Claude Code owned hook matrix' },
     { type: 'ok', text: '  ✓ Gateway restarted on 127.0.0.1:18970' },
     { type: 'ok', text: '  ✓ Guardrail engaged: claudecode | observe | local | no-judge' },
     { type: 'spacer' },
@@ -126,7 +126,7 @@ Each row corresponds to one prompt in the animation. **Default** shows what pres
 | Prompt (default) | Flag equivalent | Note |
 | --- | --- | --- |
 | **Which agent framework?** *(default: previous selection or auto-detected)* | `--connector` / `--agent` | Explicitly selects the connector being configured. Accepts `claudecode`, `codex`, `cursor`, `windsurf`, `geminicli`, `copilot`, `hermes`, `openhands`, `antigravity`, `opencode`, `amp`, `omnigent`, `openclaw`, `zeptoclaw`. |
-| **Direct-to-upstream quick setup** *(default: observe)* | `defenseclaw setup <connector> --mode observe\|action` | Claude Code, Codex, Cursor, Windsurf, Gemini CLI, Copilot CLI, Hermes, OpenHands, Antigravity, OpenCode, Amp, and OmniGent all have one-line hook or policy setup aliases. |
+| **Direct-to-upstream quick setup** *(default: observe)* | `defenseclaw setup <connector> --mode observe\|action` | Claude Code, Codex, Cursor, Devin Desktop legacy Cascade, Gemini CLI, Copilot CLI, Hermes, OpenHands, Antigravity, OpenCode, Amp, and OmniGent all have one-line hook or policy setup aliases. The `windsurf` alias does not cover Devin Local/cloud/ACP. |
 | **Enable guardrail?** *(default: Y)* | implicit when `--connector` is set | Pass `--disable` to roll the guardrail back. |
 | **Select mode** *(default: observe)* | `--mode observe\|action` | `observe` logs; `action` enforces. |
 | **Select hook fail mode** *(default: current config; closed on a fresh install)* | **interactive-only here** | Change later with `defenseclaw guardrail fail-mode <open\|closed>`. Only asked on first setup or when `--mode` changes. |
@@ -469,7 +469,8 @@ The matrix below is the source of truth. ✓ means "supported"; ✗ means "not s
 | `defenseclaw setup guardrail` | ✓ default | ✓ `--non-interactive` + flags | Two prompts have **no flag** — see callout above. |
 | [`defenseclaw setup claude-code`](/docs/connectors/claudecode) | ✓ confirm prompt | ✓ `--yes`, `--mode`, `--restart/--no-restart`, policy flags | Direct-to-upstream wrapper; observe by default, action returns supported lifecycle verdicts. |
 | [`defenseclaw setup codex`](/docs/connectors/codex) | ✓ confirm prompt | ✓ `--yes`, `--mode`, `--restart/--no-restart`, policy flags | Same shape as `setup claude-code`. |
-| `defenseclaw setup cursor` / `setup windsurf` / `setup geminicli` / `setup copilot` / `setup openhands` / `setup antigravity` / `setup hermes` / `setup opencode` / `setup amp` / `setup omnigent` | ✓ confirm prompt | ✓ `--yes`, `--mode`, `--restart/--no-restart`, connector policy flags | Generated wrappers; observe by default, action uses the connector's native hook or policy decision surface. |
+| [`defenseclaw setup cursor`](/docs/connectors/cursor) | ✓ confirm prompt | ✓ `--yes`, `--mode`, `--restart/--no-restart`, connector policy flags | Preview user-hook wrapper; observe is fail-open/nonblocking, action uses event-native deny and `failClosed: true`, and native HITL remains disabled. |
+| `setup windsurf` / `setup geminicli` / `setup copilot` / `setup openhands` / `setup antigravity` / `setup hermes` / `setup opencode` / `setup amp` / `setup omnigent` | ✓ confirm prompt | ✓ `--yes`, `--mode`, `--restart/--no-restart`, connector policy flags | Generated wrappers; observe by default, action uses the connector's native hook or policy decision surface. Gemini CLI applies only to its continuing enterprise/Google Cloud/paid API-key audience; consumer/free/Google AI Pro/Ultra service ended June 18, 2026. |
 | `defenseclaw setup openclaw` / `setup zeptoclaw` | ✓ confirm prompt | ✓ `--yes` | Confirm is skippable; the **full** guardrail wizard is **not** available here — pass `setup guardrail` flags after the confirm. |
 | [`defenseclaw setup splunk`](/docs/observability/splunk) | ✓ wizard when no mode flag | ✓ `--non-interactive` + `--logs` / `--enterprise` / `--o11y` | |
 | [`defenseclaw setup local-observability`](/docs/observability/local-observability) | ✗ no prompts | ✓ flags only | Compose-style up/down/logs subcommands; never asks. |

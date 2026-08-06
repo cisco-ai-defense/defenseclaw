@@ -16,10 +16,12 @@ Authoritative source for any flag is `defenseclaw <command> --help`. These group
 
 <Callout title="Command availability is platform-specific">
 A registered command or connector alias is not, by itself, a native Windows
-support claim. Native Windows certifies Codex, Claude Code, and Amp, and some
+support claim. Native Windows supports Amp plus Codex, Claude Code, Cursor,
+Windsurf, GitHub Copilot CLI, Antigravity, OpenCode, Hermes, and OmniGent.
+Gemini CLI, OpenHands, OpenClaw, and ZeptoClaw remain unavailable there. Some
 commands require optional configuration or are unavailable there. Use the
 [native Windows command matrix](/docs/get-started/windows/capabilities-commands)
-for the certified Windows classification and safe examples.
+for the Windows classification and safe examples.
 </Callout>
 
 DefenseClaw ships **two** binaries:
@@ -89,18 +91,18 @@ Hook setup aliases (`setup codex`, `setup claude-code`, `setup hermes`, and the 
 | `defenseclaw setup provider add\|list\|show\|remove` | Manage the `~/.defenseclaw/custom-providers.json` overlay used to route LLM traffic through internal or self-hosted endpoints. `add` accepts `--base-url`, `--domain` (repeatable; required alongside `--base-url` so the gateway can match inbound URLs back to this overlay entry — `defenseclaw doctor` warns when the `base_url` host is not covered), `--base-provider-type`, `--env-key`, `--allowed-request`, `--available-model`, `--request-path-override`, TLS knobs (`--ca-cert-file`, `--insecure-skip-verify`), and provider-typed regional flags: Bedrock — `--bedrock-region`, `--bedrock-auth-mode`, `--bedrock-access-key-env`, `--bedrock-secret-key-env`, `--bedrock-session-token-env`, `--bedrock-profile-name`, `--bedrock-inference-profile`, `--bedrock-deployment alias=model-id` (repeatable); Vertex AI — `--vertex-project-id`, `--vertex-region`, `--vertex-auth-mode`, `--vertex-service-account-json-env`; Azure OpenAI — `--azure-endpoint`, `--azure-api-version`, `--azure-auth-mode`, `--azure-deployment-alias model=deployment` (repeatable). Each family is rejected against a mismatched `--base-provider-type`. Omit `--name` interactively for the wizard. |
 | `defenseclaw setup claude-code` | Hook setup alias for Claude Code; defaults to observe, pass `--mode action` to block hook-side. |
 | `defenseclaw setup codex` | Hook setup alias for Codex; defaults to observe, pass `--mode action` to block hook-side. |
-| `defenseclaw setup cursor` | Hook setup alias for Cursor; defaults to observe, pass `--mode action` to block hook-side. |
-| `defenseclaw setup windsurf` | Hook setup alias for Windsurf; defaults to observe, pass `--mode action` to block hook-side. |
-| `defenseclaw setup geminicli` | Hook setup alias for Gemini CLI; defaults to observe, pass `--mode action` to block hook-side. |
+| `defenseclaw setup cursor` | Native Windows user-hook alias for Cursor; defaults to observe, while `--mode action` uses event-native deny with `failClosed: true`. Native human approval is not enabled. |
+| `defenseclaw setup windsurf` | Native Windows compatibility alias for Devin Desktop legacy Cascade; Devin Local/cloud/ACP are unsupported. Defaults to observe; pass `--mode action` to block only on supported Cascade pre-hooks. |
+| `defenseclaw setup geminicli` | Hook setup alias for the continuing enterprise/Google Cloud/paid API-key Gemini CLI product on supported non-Windows platforms; it is excluded from the native Windows release. Defaults to observe, pass `--mode action` to block hook-side. Consumer/free/Google AI Pro/Ultra service ended June 18, 2026. |
 | `defenseclaw setup copilot` | Hook setup alias for GitHub Copilot CLI; defaults to observe, pass `--mode action` to block hook-side. |
 | `defenseclaw setup hermes` | Hook setup alias for Hermes; defaults to observe, pass `--mode action` to block hook-side. |
-| `defenseclaw setup openhands` | Hook setup alias for OpenHands; defaults to observe, pass `--mode action` to block hook-side. |
-| `defenseclaw setup antigravity` | Hook setup alias for Antigravity (`agy`); defaults to observe, pass `--mode action` to block hook-side. Returning `decision=ask` from the hook overrides agy's `--dangerously-skip-permissions` flag. |
+| `defenseclaw setup openhands` | Hook setup alias for OpenHands on supported non-Windows platforms; it is unsupported in the native Windows release. Defaults to observe, pass `--mode action` to block hook-side. |
+| `defenseclaw setup antigravity` | Hook setup alias for Antigravity (`agy`); defaults to observe, pass `--mode action` to block hook-side. Native ask and deny are documented only for `PreToolUse`; no permission-bypass override is claimed. |
 | `defenseclaw setup opencode` | Hook setup alias for OpenCode; writes the auto-loaded bridge plugin. Defaults to observe, pass `--mode action` to block hook-side. |
 | `defenseclaw setup amp` | Direct-to-upstream system-policy setup for Amp; writes the TypeScript plugin. Defaults to observe; pass `--mode action` for synchronous `tool.call` execution gating and model-bound `tool.result` output gating. Native confirmation is available only in the active foreground thread; background confirmation falls back to safe rejection or withholding. |
 | `defenseclaw setup omnigent` | Hook setup alias for OmniGent; installs the custom Python policy bridge. Defaults to observe, pass `--mode action` for ALLOW/ASK/DENY enforcement. |
-| `defenseclaw setup openclaw` | Full guardrail alias for OpenClaw (proxy connector). |
-| `defenseclaw setup zeptoclaw` | Full guardrail alias for ZeptoClaw (proxy connector). |
+| `defenseclaw setup openclaw` | Full guardrail alias for OpenClaw (proxy connector); unsupported in the native Windows release. |
+| `defenseclaw setup zeptoclaw` | Full guardrail alias for ZeptoClaw (proxy connector); unsupported in the native Windows release. |
 | `defenseclaw setup local-observability up\|down` | Bring up the bundled Prom/Loki/Tempo/Grafana stack. |
 | `defenseclaw setup galileo [status\|test\|enable\|disable\|remove]` | Configure and verify Galileo Cloud or self-hosted OTLP traces. |
 | `defenseclaw setup splunk` | Configure local Splunk in Docker, Splunk Enterprise HEC, or Splunk Observability Cloud. |

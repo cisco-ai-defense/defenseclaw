@@ -18,7 +18,7 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
     import tomli as tomllib
 
-from defenseclaw.platform_support import supported_connectors
+from defenseclaw.platform_support import UNSUPPORTED, WINDOWS_CONNECTOR_SUPPORT
 from defenseclaw.tui.panels.first_run import CONNECTOR_CHOICES
 from packaging.requirements import Requirement
 from packaging.specifiers import SpecifierSet
@@ -102,11 +102,24 @@ def test_windows_native_workflow_builds_exact_setup_before_lifecycle_acceptance(
     package = package_match.group(0)
     acceptance = acceptance_match.group(0)
 
+    checkout = package.index("name: Verify exact package source checkout")
     artifacts = package.index("-Operation build-artifacts")
     installer = package.index("-Operation build-installer")
+    identity = package.index("name: Verify exact package source identity")
     wizard = package.index("-Mode wizard-smoke")
     upload = package.index("name: windows-native-package")
-    assert artifacts < installer < wizard < upload
+    assert checkout < artifacts < installer < identity < wizard < upload
+    assert (
+        "DC_EXPECTED_SOURCE_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}"
+        in package
+    )
+    assert "ref: ${{ github.event.pull_request.head.sha || github.sha }}" in package
+    assert "provenance.source_commit -cne $expected" in package
+    assert '"DefenseClaw source commit: $expected"' in package
+    assert "Packaged CLI wheel digest does not match exact-head provenance" in package
+    assert "Packaged gateway archive digest does not match exact-head provenance" in package
+    assert "@('--version-json')" in package
+    assert "[string]$report.commit -cne $expected" in package
     assert "installer smoke stub" not in package
     assert "needs: package-artifact" in acceptance
     assert "name: windows-native-package" in acceptance
@@ -149,8 +162,14 @@ def test_release_installers_track_known_connector_choices() -> None:
 
     assert shell_choices == (*CONNECTOR_CHOICES, "none")
 
-    windows_choices = tuple(supported_connectors(CONNECTOR_CHOICES, "windows"))
-    assert ps_choices == (*windows_choices, "none")
+    expected_windows_choices = {
+        name
+        for name, support in WINDOWS_CONNECTOR_SUPPORT.items()
+        if support.status != UNSUPPORTED
+    }
+    assert ps_choices[-1] == "none"
+    assert len(ps_choices) == len(set(ps_choices))
+    assert set(ps_choices[:-1]) == expected_windows_choices
     assert hook_choices == ()
 
 

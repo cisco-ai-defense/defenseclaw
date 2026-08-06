@@ -9,6 +9,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -19,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pelletier/go-toml/v2"
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -289,10 +291,83 @@ func runConnectorCmd(t *testing.T, args ...string) (stdout, stderr string, exitC
 	return out.String(), errb.String(), exitCode
 }
 
+func assertConnectorReconcileStderr(t *testing.T, name, stderr string) {
+	t.Helper()
+	warning, err := connector.CheckPlatformSupport(name, runtime.GOOS)
+	if err != nil {
+		t.Fatalf("platform support for %s: %v", name, err)
+	}
+	expected := ""
+	if warning != "" {
+		expected = fmt.Sprintf("connector reconcile %s: warning: %s\n", name, warning)
+	}
+	if stderr != expected {
+		t.Fatalf("%s reconcile stderr = %q, want %q", name, stderr, expected)
+	}
+}
+
+func TestConnectorReconcileCompatibilityDriftLeavesClaudeSettingsByteExact(t *testing.T) {
+	dataDir := testenv.PrivateTempDir(t)
+	home := testenv.PrivateTempDir(t)
+	settingsPath := filepath.Join(home, "settings.json")
+	before := []byte(`{"operator":{"sentinel":"private-fixture"},"hooks":{"Stop":[]}}`)
+	if err := os.WriteFile(settingsPath, before, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	originalPath := connector.ClaudeCodeSettingsPathOverride
+	connector.ClaudeCodeSettingsPathOverride = settingsPath
+	t.Cleanup(func() { connector.ClaudeCodeSettingsPathOverride = originalPath })
+
+	lock := testHookContractLock{
+		Version: 1,
+		Connectors: map[string]connector.HookContractLockEntry{
+			"claudecode": {
+				Connector:              "claudecode",
+				RawAgentVersion:        "Claude Code 2.1.218",
+				NormalizedAgentVersion: "2.1.218",
+				ContractID:             "claudecode-hooks-v1",
+			},
+		},
+	}
+	lockBody, err := json.Marshal(lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "hook_contract_lock.json"), lockBody, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	discovery := []byte(`{"agents":{"claudecode":{"version":"Claude Code 2.1.219"}}}`)
+	if err := os.WriteFile(filepath.Join(dataDir, "agent_discovery.json"), discovery, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	defer withConnectorState(t, dataDir, "claudecode")()
+	connectorFlagConfigHome = home
+	cfg.Guardrail.Enabled = true
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+		"claudecode": {Mode: "action"},
+	}
+
+	_, stderr, _ := runConnectorCmd(t, "reconcile", "--connector", "claudecode", "--data-dir", dataDir, "--config-home", home)
+	if !strings.Contains(stderr, "hook contract compatibility drift") {
+		t.Fatalf("reconcile stderr = %q, want compatibility drift", stderr)
+	}
+	after, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeHash := sha256.Sum256(before)
+	afterHash := sha256.Sum256(after)
+	if beforeHash != afterHash || !bytes.Equal(before, after) {
+		t.Fatalf("failed reconcile changed protected fixture: before=%x after=%x", beforeHash, afterHash)
+	}
+}
+
 func TestConnectorReconcileRefreshesOnlySelectedRegistration(t *testing.T) {
 	dataDir := testenv.PrivateTempDir(t)
 	seedCodexSelectionForTest(t, dataDir)
-	home := t.TempDir()
+	home := testenv.PrivateTempDir(t)
 	codexPath := filepath.Join(home, ".codex", "config.toml")
 	if err := os.MkdirAll(filepath.Dir(codexPath), 0o700); err != nil {
 		t.Fatal(err)
@@ -315,6 +390,7 @@ func TestConnectorReconcileRefreshesOnlySelectedRegistration(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg.Gateway.Token = "master-token-must-not-be-registered"
+	cfg.Environment = "windows"
 	cfg.Guardrail.Enabled = true
 	cfg.Guardrail.HookFailMode = "open"
 	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
@@ -322,9 +398,7 @@ func TestConnectorReconcileRefreshesOnlySelectedRegistration(t *testing.T) {
 		"claudecode": {HookFailMode: "open"},
 	}
 	stdout, stderr, _ := runConnectorCmd(t, "reconcile", "--connector", "codex", "--json")
-	if stderr != "" {
-		t.Fatalf("reconcile stderr: %s", stderr)
-	}
+	assertConnectorReconcileStderr(t, "codex", stderr)
 	if !strings.Contains(stdout, `"fail_mode":"closed"`) {
 		t.Fatalf("reconcile output = %s", stdout)
 	}
@@ -340,6 +414,14 @@ func TestConnectorReconcileRefreshesOnlySelectedRegistration(t *testing.T) {
 	}
 	if bytes.Contains(codexRegistration, []byte(hookToken)) {
 		t.Fatal("selected registration exposes the connector-scoped hook token")
+	}
+	var codexConfig map[string]interface{}
+	if err := toml.Unmarshal(codexRegistration, &codexConfig); err != nil {
+		t.Fatalf("parse reconciled Codex config: %v", err)
+	}
+	otel, ok := codexConfig["otel"].(map[string]interface{})
+	if !ok || otel["environment"] != cfg.Environment {
+		t.Fatalf("reconciled Codex OTel environment = %#v; want %q", otel["environment"], cfg.Environment)
 	}
 	otlpToken, err := connector.LoadOTLPPathToken(dataDir, connector.OTLPScopeCodex)
 	if err != nil || otlpToken == "" {
@@ -361,10 +443,427 @@ func TestConnectorReconcileRefreshesOnlySelectedRegistration(t *testing.T) {
 	}
 }
 
+func TestConnectorReconcilePreservesClaudeCustodyAcrossPeerSetupAndRosterRefresh(t *testing.T) {
+	dataDir := testenv.PrivateTempDir(t)
+	seedCodexSelectionForTest(t, dataDir)
+	home := testenv.PrivateTempDir(t)
+	testenv.SetHome(t, home)
+	claudePath := filepath.Join(home, ".claude", "settings.json")
+	codexPath := filepath.Join(home, ".codex", "config.toml")
+	for _, path := range []string{claudePath, codexPath} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(
+		claudePath,
+		[]byte(`{"env":{"OPERATOR_SENTINEL":"preserve"}}`),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	launcher := filepath.Join(home, ".local", "bin", "defenseclaw-hook.exe")
+	if runtime.GOOS == "windows" {
+		if err := os.MkdirAll(filepath.Dir(launcher), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(launcher, []byte("MZ-native-hook-fixture"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	previousClaudePath := connector.ClaudeCodeSettingsPathOverride
+	previousCodexPath := connector.CodexConfigPathOverride
+	connector.ClaudeCodeSettingsPathOverride = claudePath
+	connector.CodexConfigPathOverride = codexPath
+	t.Cleanup(func() {
+		connector.ClaudeCodeSettingsPathOverride = previousClaudePath
+		connector.CodexConfigPathOverride = previousCodexPath
+	})
+	defer withConnectorState(t, dataDir, "claudecode")()
+	cfg.Guardrail.Enabled = true
+	cfg.Guardrail.HookFailMode = "open"
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+		"claudecode": {HookFailMode: "open"},
+		"codex":      {HookFailMode: "open"},
+	}
+	for _, name := range []string{"claudecode", "codex"} {
+		if _, err := connector.EnsureHookAPIToken(dataDir, name); err != nil {
+			t.Fatalf("ensure %s token: %v", name, err)
+		}
+	}
+	if err := connector.SaveActiveConnectors(dataDir, []string{"claudecode", "codex"}); err != nil {
+		t.Fatalf("save active connector roster: %v", err)
+	}
+
+	_, stderr, _ := runConnectorCmd(t, "reconcile", "--connector", "claudecode", "--json")
+	assertConnectorReconcileStderr(t, "claudecode", stderr)
+
+	claudeFiles := []string{
+		claudePath,
+		filepath.Join(dataDir, "connector_backups", "claudecode", "settings.json.json"),
+		filepath.Join(dataDir, "claudecode_backup.json"),
+		filepath.Join(dataDir, "hooks", ".hookcfg.claudecode"),
+		filepath.Join(dataDir, "active_connector.json"),
+	}
+	claudeBefore := make(map[string][]byte, len(claudeFiles))
+	for _, path := range claudeFiles {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read Claude custody file %s: %v", path, err)
+		}
+		claudeBefore[path] = body
+	}
+	lockBefore := readTestHookContractLock(t, dataDir).Connectors["claudecode"]
+	if lockBefore.Connector != "claudecode" {
+		t.Fatalf("Claude lock entry missing before peer setup: %+v", lockBefore)
+	}
+	cloneDigests := func(source map[string]string) map[string]string {
+		cloned := make(map[string]string, len(source))
+		for name, digest := range source {
+			cloned[name] = digest
+		}
+		return cloned
+	}
+
+	assertClaudeCustody := func(stage string) {
+		t.Helper()
+		for path, before := range claudeBefore {
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatalf("%s removed Claude custody file %s: %v", stage, path, err)
+			}
+			if !bytes.Equal(after, before) {
+				t.Fatalf("%s changed Claude custody file %s", stage, path)
+			}
+		}
+		lockAfter := readTestHookContractLock(t, dataDir).Connectors["claudecode"]
+		beforeOwned := lockBefore
+		afterOwned := lockAfter
+		beforeOwned.HookScriptDigests = cloneDigests(lockBefore.HookScriptDigests)
+		afterOwned.HookScriptDigests = cloneDigests(lockAfter.HookScriptDigests)
+		// The native launcher is shared. A peer Setup may legitimately replace
+		// it and atomically advance every connector's digest; all Claude-owned
+		// contract fields and its private artifacts must remain unchanged.
+		delete(beforeOwned.HookScriptDigests, "defenseclaw-hook.exe")
+		delete(afterOwned.HookScriptDigests, "defenseclaw-hook.exe")
+		if !reflect.DeepEqual(afterOwned, beforeOwned) {
+			t.Fatalf("%s changed Claude lock ownership: before=%+v after=%+v", stage, lockBefore, lockAfter)
+		}
+		if got := connector.LoadActiveConnectors(dataDir); !reflect.DeepEqual(got, []string{"claudecode", "codex"}) {
+			t.Fatalf("%s changed active connector roster: %v", stage, got)
+		}
+
+		settingsBody, err := os.ReadFile(claudePath)
+		if err != nil {
+			t.Fatalf("%s read Claude settings: %v", stage, err)
+		}
+		var settings map[string]interface{}
+		if err := json.Unmarshal(settingsBody, &settings); err != nil {
+			t.Fatalf("%s parse Claude settings: %v", stage, err)
+		}
+		env, ok := settings["env"].(map[string]interface{})
+		if !ok || env["OPERATOR_SENTINEL"] != "preserve" || env["CLAUDE_CODE_ENABLE_TELEMETRY"] != "1" {
+			t.Fatalf("%s lost Claude operator or managed environment state", stage)
+		}
+		if hooks, ok := settings["hooks"].(map[string]interface{}); !ok || len(hooks) == 0 {
+			t.Fatalf("%s lost Claude hook registration", stage)
+		}
+
+		var runtimeState struct {
+			Version   int               `json:"version"`
+			FailModes map[string]string `json:"fail_modes"`
+		}
+		runtimeBody, err := os.ReadFile(filepath.Join(dataDir, "hooks", ".hookcfg"))
+		if err != nil {
+			t.Fatalf("%s read shared runtime state: %v", stage, err)
+		}
+		if err := json.Unmarshal(runtimeBody, &runtimeState); err != nil {
+			t.Fatalf("%s parse shared runtime state: %v", stage, err)
+		}
+		if runtimeState.Version != 2 ||
+			runtimeState.FailModes["claudecode"] != "open" ||
+			runtimeState.FailModes["codex"] != "open" {
+			t.Fatalf("%s lost Claude runtime state: %+v", stage, runtimeState)
+		}
+		assertMixedHookContractsCurrent(t, dataDir, home)
+	}
+
+	_, stderr, _ = runConnectorCmd(t, "reconcile", "--connector", "codex", "--json")
+	assertConnectorReconcileStderr(t, "codex", stderr)
+	assertClaudeCustody("unrelated Codex setup")
+
+	// Shared restart maintenance walks the preserved roster through the same
+	// selected reconciliation primitive. Exercise the complete roster and keep
+	// Claude's configuration, recovery metadata, and runtime ownership exact.
+	for _, name := range connector.LoadActiveConnectors(dataDir) {
+		_, stderr, _ = runConnectorCmd(t, "reconcile", "--connector", name, "--json")
+		assertConnectorReconcileStderr(t, name, stderr)
+	}
+	assertClaudeCustody("preserved roster reconciliation")
+}
+
+func TestConnectorReconcileOpenCodePublishesCompleteActivation(t *testing.T) {
+	dataDir := testenv.PrivateTempDir(t)
+	home := testenv.PrivateTempDir(t)
+	t.Setenv("OPENCODE_CONFIG_DIR", home)
+	defer withConnectorState(t, dataDir, "opencode")()
+	connectorFlagConfigHome = home
+	cfg.Guardrail.Enabled = true
+	cfg.Guardrail.HookFailMode = "closed"
+
+	stdout, stderr, _ := runConnectorCmd(t, "reconcile", "--connector", "opencode", "--json")
+	assertConnectorReconcileStderr(t, "opencode", stderr)
+	if !strings.Contains(stdout, `"connector":"opencode"`) {
+		t.Fatalf("OpenCode reconcile output = %q", stdout)
+	}
+	pluginPath := filepath.Join(home, "plugins", "defenseclaw.js")
+	if _, err := os.Stat(pluginPath); err != nil {
+		t.Fatalf("OpenCode plugin missing after reconcile: %v", err)
+	}
+	backupPath := filepath.Join(dataDir, "connector_backups", "opencode", "config.json")
+	if _, err := os.Stat(backupPath); err != nil {
+		t.Fatalf("OpenCode custody receipt missing after reconcile: %v", err)
+	}
+	lock := connector.LoadHookContractLockEntry(dataDir, "opencode")
+	if lock.Connector != "opencode" || lock.ContractID != "opencode-hooks-v1" {
+		t.Fatalf("OpenCode contract lock = %+v", lock)
+	}
+	if got := connector.LoadActiveConnector(dataDir); got != "opencode" {
+		t.Fatalf("active connector = %q, want opencode", got)
+	}
+	token, err := connector.LoadHookAPIToken(dataDir, "opencode")
+	if err != nil || token == "" {
+		t.Fatalf("OpenCode scoped token = %q, %v", token, err)
+	}
+	current, err := connector.OpenCodeRegistrationCurrent(connector.SetupOpts{
+		DataDir:      dataDir,
+		APIAddr:      "127.0.0.1:18970",
+		APIToken:     token,
+		HookFailMode: "closed",
+	})
+	if err != nil || !current {
+		t.Fatalf("OpenCode registration current = %v, %v", current, err)
+	}
+}
+
+func TestConnectorReconcileOpenCodeRollsBackAllStateWhenActivationPublishFails(t *testing.T) {
+	dataDir := testenv.PrivateTempDir(t)
+	home := testenv.PrivateTempDir(t)
+	defer withConnectorState(t, dataDir, "opencode")()
+	connectorFlagConfigHome = home
+	cfg.Guardrail.Enabled = true
+	cfg.Guardrail.HookFailMode = "closed"
+
+	previousSave := connectorSaveOpenCodeActive
+	connectorSaveOpenCodeActive = func(dataDir string, names []string) error {
+		if err := previousSave(dataDir, names); err != nil {
+			return err
+		}
+		return errors.New("injected active-state publication failure")
+	}
+	t.Cleanup(func() { connectorSaveOpenCodeActive = previousSave })
+
+	_, stderr, _ := runConnectorCmd(t, "reconcile", "--connector", "opencode", "--json")
+	if !strings.Contains(stderr, "injected active-state publication failure") {
+		t.Fatalf("OpenCode reconcile stderr = %q, want injected publication failure", stderr)
+	}
+	pluginPath := filepath.Join(home, "plugins", "defenseclaw.js")
+	if _, err := os.Stat(pluginPath); !os.IsNotExist(err) {
+		t.Fatalf("failed reconcile left OpenCode plugin: %v", err)
+	}
+	backupPath := filepath.Join(dataDir, "connector_backups", "opencode", "config.json")
+	if _, err := os.Stat(backupPath); !os.IsNotExist(err) {
+		t.Fatalf("failed reconcile left OpenCode custody receipt: %v", err)
+	}
+	if lock := connector.LoadHookContractLockEntry(dataDir, "opencode"); lock.Connector != "" {
+		t.Fatalf("failed reconcile left OpenCode contract lock: %+v", lock)
+	}
+	if token, err := connector.LoadHookAPIToken(dataDir, "opencode"); err != nil || token != "" {
+		t.Fatalf("failed reconcile left OpenCode scoped token = %q, %v", token, err)
+	}
+	if got := connector.LoadActiveConnector(dataDir); got != "" {
+		t.Fatalf("failed reconcile left active connector %q", got)
+	}
+}
+
+func TestConnectorReconcileOpenCodeRemovesAmbiguouslyPublishedNewToken(t *testing.T) {
+	dataDir := testenv.PrivateTempDir(t)
+	home := testenv.PrivateTempDir(t)
+	defer withConnectorState(t, dataDir, "opencode")()
+	connectorFlagConfigHome = home
+	cfg.Guardrail.Enabled = true
+
+	previousEnsure := connectorEnsureHookAPIToken
+	connectorEnsureHookAPIToken = func(dataDir, name string) (string, error) {
+		if _, err := previousEnsure(dataDir, name); err != nil {
+			return "", err
+		}
+		return "", errors.New("injected late token publication failure")
+	}
+	t.Cleanup(func() { connectorEnsureHookAPIToken = previousEnsure })
+
+	_, stderr, _ := runConnectorCmd(t, "reconcile", "--connector", "opencode", "--json")
+	if !strings.Contains(stderr, "injected late token publication failure") {
+		t.Fatalf("OpenCode reconcile stderr = %q, want late token failure", stderr)
+	}
+	if token, err := connector.LoadHookAPIToken(dataDir, "opencode"); err != nil || token != "" {
+		t.Fatalf("failed token publication left scoped token = %q, %v", token, err)
+	}
+	if _, err := os.Stat(filepath.Join(home, "plugins", "defenseclaw.js")); !os.IsNotExist(err) {
+		t.Fatalf("token failure reached plugin publication: %v", err)
+	}
+}
+
+func TestConnectorReconcileOpenCodeRollsBackLateContractLockFailure(t *testing.T) {
+	dataDir := testenv.PrivateTempDir(t)
+	home := testenv.PrivateTempDir(t)
+	defer withConnectorState(t, dataDir, "opencode")()
+	connectorFlagConfigHome = home
+	cfg.Guardrail.Enabled = true
+	cfg.Guardrail.HookFailMode = "closed"
+
+	previousSave := connectorSaveOpenCodeLock
+	connectorSaveOpenCodeLock = func(dataDir string, entry connector.HookContractLockEntry) error {
+		if err := previousSave(dataDir, entry); err != nil {
+			return err
+		}
+		return errors.New("injected late contract-lock publication failure")
+	}
+	t.Cleanup(func() { connectorSaveOpenCodeLock = previousSave })
+
+	_, stderr, _ := runConnectorCmd(t, "reconcile", "--connector", "opencode", "--json")
+	if !strings.Contains(stderr, "injected late contract-lock publication failure") {
+		t.Fatalf("OpenCode reconcile stderr = %q, want late lock failure", stderr)
+	}
+	if lock := connector.LoadHookContractLockEntry(dataDir, "opencode"); lock.Connector != "" {
+		t.Fatalf("late lock failure left OpenCode contract lock: %+v", lock)
+	}
+	if token, err := connector.LoadHookAPIToken(dataDir, "opencode"); err != nil || token != "" {
+		t.Fatalf("late lock failure left scoped token = %q, %v", token, err)
+	}
+	if got := connector.LoadActiveConnector(dataDir); got != "" {
+		t.Fatalf("late lock failure left active connector %q", got)
+	}
+	for _, path := range []string{
+		filepath.Join(home, "plugins", "defenseclaw.js"),
+		filepath.Join(dataDir, "connector_backups", "opencode", "config.json"),
+	} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("late lock failure left publication %s: %v", path, err)
+		}
+	}
+}
+
+func TestConnectorReconcileOpenCodeRollbackPreservesExistingRegistration(t *testing.T) {
+	dataDir := testenv.PrivateTempDir(t)
+	home := testenv.PrivateTempDir(t)
+	t.Setenv("OPENCODE_CONFIG_DIR", home)
+	defer withConnectorState(t, dataDir, "opencode")()
+	connectorFlagConfigHome = home
+	cfg.Guardrail.Enabled = true
+	cfg.Guardrail.HookFailMode = "open"
+
+	_, stderr, _ := runConnectorCmd(t, "reconcile", "--connector", "opencode", "--json")
+	assertConnectorReconcileStderr(t, "opencode", stderr)
+	pluginPath := filepath.Join(home, "plugins", "defenseclaw.js")
+	backupPath := filepath.Join(dataDir, "connector_backups", "opencode", "config.json")
+	pluginBefore, err := os.ReadFile(pluginPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backupBefore, err := os.ReadFile(backupPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lockBefore := connector.LoadHookContractLockEntry(dataDir, "opencode")
+	tokenBefore, err := connector.LoadHookAPIToken(dataDir, "opencode")
+	if err != nil || tokenBefore == "" {
+		t.Fatalf("initial scoped token = %q, %v", tokenBefore, err)
+	}
+
+	cfg.Guardrail.HookFailMode = "closed"
+	previousSave := connectorSaveOpenCodeActive
+	connectorSaveOpenCodeActive = func(string, []string) error {
+		return errors.New("injected refresh publication failure")
+	}
+	t.Cleanup(func() { connectorSaveOpenCodeActive = previousSave })
+	_, stderr, _ = runConnectorCmd(t, "reconcile", "--connector", "opencode", "--json")
+	if !strings.Contains(stderr, "injected refresh publication failure") {
+		t.Fatalf("OpenCode refresh stderr = %q, want injected failure", stderr)
+	}
+
+	pluginAfter, err := os.ReadFile(pluginPath)
+	if err != nil || !bytes.Equal(pluginAfter, pluginBefore) {
+		t.Fatalf("plugin was not restored byte-for-byte: equal=%v err=%v", bytes.Equal(pluginAfter, pluginBefore), err)
+	}
+	backupAfter, err := os.ReadFile(backupPath)
+	if err != nil || !bytes.Equal(backupAfter, backupBefore) {
+		t.Fatalf("custody receipt was not restored byte-for-byte: equal=%v err=%v", bytes.Equal(backupAfter, backupBefore), err)
+	}
+	lockAfter := connector.LoadHookContractLockEntry(dataDir, "opencode")
+	// Re-publishing the previous entry refreshes only its evidence timestamp;
+	// every contract and location field must remain identical.
+	lockAfter.UpdatedAt = lockBefore.UpdatedAt
+	if !reflect.DeepEqual(lockAfter, lockBefore) {
+		t.Fatalf("contract lock was not semantically restored: before=%+v after=%+v", lockBefore, lockAfter)
+	}
+	if got := connector.LoadActiveConnector(dataDir); got != "opencode" {
+		t.Fatalf("active connector after rollback = %q, want opencode", got)
+	}
+	if tokenAfter, err := connector.LoadHookAPIToken(dataDir, "opencode"); err != nil || tokenAfter != tokenBefore {
+		t.Fatalf("scoped token after rollback = %q, %v; want existing token", tokenAfter, err)
+	}
+	current, err := connector.OpenCodeRegistrationCurrent(connector.SetupOpts{
+		DataDir:      dataDir,
+		APIAddr:      "127.0.0.1:18970",
+		APIToken:     tokenBefore,
+		HookFailMode: "open",
+	})
+	if err != nil || !current {
+		t.Fatalf("existing OpenCode registration after rollback = %v, %v", current, err)
+	}
+}
+
+func TestConnectorReconcileCopilotSupportsOrdinaryPath(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("native Windows Setup maintenance contract")
+	}
+	dataDir := testenv.PrivateTempDir(t)
+	home := filepath.Join(testenv.PrivateTempDir(t), ".copilot")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	defer withConnectorState(t, dataDir, "copilot")()
+	connectorFlagConfigHome = home
+	cfg.Guardrail.Enabled = true
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+		"copilot": {HookFailMode: "open"},
+	}
+
+	stdout, stderr, exitCode := runConnectorCmd(t, "reconcile", "--connector", "copilot", "--json")
+	if stderr != "" || exitCode != 0 || !strings.Contains(stdout, `"connector":"copilot"`) {
+		t.Fatalf("ordinary Copilot reconcile failed: exit=%d stdout=%q stderr=%q", exitCode, stdout, stderr)
+	}
+	hookConfig := filepath.Join(home, "hooks", "defenseclaw.json")
+	if _, err := os.Stat(hookConfig); err != nil {
+		t.Fatalf("bound Copilot reconcile did not publish hook config: %v", err)
+	}
+
+	_, stderr, exitCode = runConnectorCmd(t, "teardown", "--connector", "copilot")
+	if stderr != "" || exitCode != 0 {
+		t.Fatalf("Copilot teardown failed: exit=%d stderr=%q", exitCode, stderr)
+	}
+	_, stderr, exitCode = runConnectorCmd(t, "verify", "--connector", "copilot", "--json")
+	if stderr != "" || exitCode != 0 {
+		t.Fatalf("Copilot verify failed: exit=%d stderr=%q", exitCode, stderr)
+	}
+}
+
 func TestConnectorReconcileMixedModesKeepsBothContractsCurrent(t *testing.T) {
 	dataDir := testenv.PrivateTempDir(t)
 	seedCodexSelectionForTest(t, dataDir)
-	home := t.TempDir()
+	home := testenv.PrivateTempDir(t)
 	testenv.SetHome(t, home)
 	claudePath := filepath.Join(home, ".claude", "settings.json")
 	codexPath := filepath.Join(home, ".codex", "config.toml")
@@ -403,9 +902,7 @@ func TestConnectorReconcileMixedModesKeepsBothContractsCurrent(t *testing.T) {
 			t.Fatalf("ensure %s token: %v", name, err)
 		}
 		_, stderr, _ := runConnectorCmd(t, "reconcile", "--connector", name, "--json")
-		if stderr != "" {
-			t.Fatalf("initial %s reconcile: %s", name, stderr)
-		}
+		assertConnectorReconcileStderr(t, name, stderr)
 	}
 	initial := assertMixedHookContractsCurrent(t, dataDir, home)
 	codexBefore, err := os.ReadFile(codexPath)
@@ -418,9 +915,7 @@ func TestConnectorReconcileMixedModesKeepsBothContractsCurrent(t *testing.T) {
 	claudeMode.HookFailMode = "closed"
 	cfg.Guardrail.Connectors["claudecode"] = claudeMode
 	_, stderr, _ := runConnectorCmd(t, "reconcile", "--connector", "claudecode", "--json")
-	if stderr != "" {
-		t.Fatalf("Claude close reconcile: %s", stderr)
-	}
+	assertConnectorReconcileStderr(t, "claudecode", stderr)
 	closed := assertMixedHookContractsCurrent(t, dataDir, home)
 	if closed.Connectors["claudecode"].HookFailMode != "closed" || closed.Connectors["codex"].HookFailMode != "open" {
 		t.Fatalf("mixed lock modes are wrong: Claude=%q Codex=%q", closed.Connectors["claudecode"].HookFailMode, closed.Connectors["codex"].HookFailMode)
@@ -468,9 +963,7 @@ func TestConnectorReconcileMixedModesKeepsBothContractsCurrent(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, stderr, _ = runConnectorCmd(t, "reconcile", "--connector", "claudecode", "--json")
-	if stderr != "" {
-		t.Fatalf("legacy migration reconcile: %s", stderr)
-	}
+	assertConnectorReconcileStderr(t, "claudecode", stderr)
 	assertMixedHookContractsCurrent(t, dataDir, home)
 
 	// Reverse the mixed state and repeatedly switch one connector.  Every
@@ -479,16 +972,12 @@ func TestConnectorReconcileMixedModesKeepsBothContractsCurrent(t *testing.T) {
 	claudeMode.HookFailMode = "open"
 	cfg.Guardrail.Connectors["claudecode"] = claudeMode
 	_, stderr, _ = runConnectorCmd(t, "reconcile", "--connector", "claudecode", "--json")
-	if stderr != "" {
-		t.Fatalf("Claude reopen reconcile: %s", stderr)
-	}
+	assertConnectorReconcileStderr(t, "claudecode", stderr)
 	codexMode := cfg.Guardrail.Connectors["codex"]
 	codexMode.HookFailMode = "closed"
 	cfg.Guardrail.Connectors["codex"] = codexMode
 	_, stderr, _ = runConnectorCmd(t, "reconcile", "--connector", "codex", "--json")
-	if stderr != "" {
-		t.Fatalf("Codex close reconcile: %s", stderr)
-	}
+	assertConnectorReconcileStderr(t, "codex", stderr)
 	reverse := assertMixedHookContractsCurrent(t, dataDir, home)
 	if reverse.Connectors["claudecode"].HookFailMode != "open" || reverse.Connectors["codex"].HookFailMode != "closed" {
 		t.Fatalf("reverse mixed modes are wrong: %+v", reverse.Connectors)
@@ -498,9 +987,7 @@ func TestConnectorReconcileMixedModesKeepsBothContractsCurrent(t *testing.T) {
 		claudeMode.HookFailMode = mode
 		cfg.Guardrail.Connectors["claudecode"] = claudeMode
 		_, stderr, _ = runConnectorCmd(t, "reconcile", "--connector", "claudecode", "--json")
-		if stderr != "" {
-			t.Fatalf("repeated Claude %s reconcile: %s", mode, stderr)
-		}
+		assertConnectorReconcileStderr(t, "claudecode", stderr)
 		assertMixedHookContractsCurrent(t, dataDir, home)
 	}
 }
@@ -515,7 +1002,7 @@ func TestResolveActiveConnectorName_FlagWins(t *testing.T) {
 }
 
 func TestResolveActiveConnectorName_StateFileFallback(t *testing.T) {
-	dir := t.TempDir()
+	dir := testenv.PrivateTempDir(t)
 	defer withConnectorState(t, dir, "")()
 	if err := connector.SaveActiveConnector(dir, "claudecode"); err != nil {
 		t.Fatal(err)
@@ -698,10 +1185,10 @@ func TestConnectorTeardown_UnknownConnector(t *testing.T) {
 }
 
 func TestConnectorTeardownMarksConnectorInactiveBeforeRemoval(t *testing.T) {
-	dir := t.TempDir()
+	dir := testenv.PrivateTempDir(t)
 	defer withConnectorState(t, dir, "cursor")()
 
-	cfgPath := filepath.Join(t.TempDir(), "hooks.json")
+	cfgPath := filepath.Join(testenv.PrivateTempDir(t), "hooks.json")
 	previous := connector.CursorHooksPathOverride
 	connector.CursorHooksPathOverride = cfgPath
 	t.Cleanup(func() { connector.CursorHooksPathOverride = previous })
@@ -731,10 +1218,10 @@ func TestConnectorTeardownMarksConnectorInactiveBeforeRemoval(t *testing.T) {
 }
 
 func TestConnectorTeardownFailureRestoresActiveState(t *testing.T) {
-	dir := t.TempDir()
+	dir := testenv.PrivateTempDir(t)
 	defer withConnectorState(t, dir, "cursor")()
 
-	cfgPath := filepath.Join(t.TempDir(), "hooks.json")
+	cfgPath := filepath.Join(testenv.PrivateTempDir(t), "hooks.json")
 	previous := connector.CursorHooksPathOverride
 	connector.CursorHooksPathOverride = cfgPath
 	t.Cleanup(func() { connector.CursorHooksPathOverride = previous })

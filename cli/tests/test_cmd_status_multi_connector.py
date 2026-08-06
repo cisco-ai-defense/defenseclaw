@@ -32,6 +32,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -144,7 +145,13 @@ def _render_live(cfg, health: dict) -> str:
 
 
 @contextlib.contextmanager
-def _owned_status_endpoint(runtime_data_dir: str, health: dict, expected_token: str):
+def _owned_status_endpoint(
+    runtime_data_dir: str,
+    health: dict,
+    expected_token: str,
+    *,
+    runtime_pid: object = 4242,
+):
     """Serve a disposable loopback status/health endpoint owned by this test."""
     seen_paths: list[str] = []
 
@@ -153,7 +160,10 @@ def _owned_status_endpoint(runtime_data_dir: str, health: dict, expected_token: 
             seen_paths.append(self.path)
             if self.path == "/status":
                 if self.headers.get("Authorization") == f"Bearer {expected_token}":
-                    payload = {"runtime": {"data_dir": runtime_data_dir}, "health": health}
+                    payload = {
+                        "runtime": {"pid": runtime_pid, "data_dir": runtime_data_dir},
+                        "health": health,
+                    }
                     status = 200
                 else:
                     payload = {"error": "unauthorized"}
@@ -188,6 +198,34 @@ def _owned_status_endpoint(runtime_data_dir: str, health: dict, expected_token: 
 class TestPrintAgentsLiveCounters(unittest.TestCase):
     """With bound ``connectors[]`` health present, every active agent renders its
     own live counters — there is no privileged "primary" tally."""
+
+    def test_cursor_disclosure_has_enabled_disabled_and_config_live_parity(self):
+        disclosure = "priority-conflict-detection=unavailable (none inferred)"
+        live_health = {
+            "connectors": [
+                {"name": "codex", "state": "running"},
+                {"name": "cursor", "state": "running"},
+            ]
+        }
+
+        for enabled in (True, False):
+            for health in (None, live_health):
+                with self.subTest(enabled=enabled, live=health is not None):
+                    disabled = set() if enabled else {"cursor"}
+                    cfg = _cfg(["codex", "cursor"], disabled=disabled)
+                    out = _render(cfg) if health is None else _render_live(cfg, health)
+                    cursor_row = next(line for line in out.splitlines() if "Cursor (cursor)" in line)
+                    codex_row = next(line for line in out.splitlines() if "Codex (codex)" in line)
+
+                    self.assertIn(disclosure, cursor_row)
+                    self.assertNotIn("priority-conflict-detection", codex_row)
+                    if enabled:
+                        self.assertNotIn("DISABLED", cursor_row)
+                        if health is not None:
+                            self.assertIn("RUNNING", cursor_row)
+                    else:
+                        self.assertIn("DISABLED", cursor_row)
+                        self.assertNotIn("RUNNING", cursor_row)
 
     def test_each_connector_renders_its_own_counters(self):
         health = {
@@ -232,6 +270,338 @@ class TestPrintAgentsLiveCounters(unittest.TestCase):
         self.assertIn("Codex (codex)", out)
         self.assertIn("source=automatic", out)
         self.assertIn("requests: 2", out)
+
+    def test_omnigent_running_adapter_is_degraded_when_effective_policy_is_unverified(self):
+        health = {"connectors": [{"name": "omnigent", "state": "running", "requests": 0}]}
+        cfg = _cfg(["omnigent"], modes={"omnigent": "action"})
+        with patch(
+            "defenseclaw.commands.cmd_doctor._omnigent_runtime_readiness",
+            return_value=("warn", "server record is stale; effective policy config is unverified"),
+        ):
+            out = _render_live(cfg, health)
+
+        self.assertIn("DEGRADED", out)
+        self.assertNotIn("RUNNING", out)
+        self.assertIn("effective policy config is unverified", out)
+
+    def test_omnigent_verified_native_degraded_policy_remains_running(self):
+        health = {"connectors": [{"name": "omnigent", "state": "running", "requests": 0}]}
+        cfg = _cfg(["omnigent"], modes={"omnigent": "action"})
+        with patch(
+            "defenseclaw.commands.cmd_doctor._omnigent_runtime_readiness",
+            return_value=("pass", "live effective config verified through --config"),
+        ):
+            out = _render_live(cfg, health)
+
+        self.assertIn("RUNNING", out)
+        self.assertNotIn("DEGRADED", out)
+        self.assertIn("live effective config verified", out)
+
+    def test_opencode_running_requires_fresh_current_generation_heartbeat(self):
+        now = datetime.now(timezone.utc)
+        health = {
+            "started_at": (now - timedelta(hours=1)).isoformat(),
+            "connectors": [
+                {
+                    "name": "opencode",
+                    "state": "running",
+                    "source": "manual",
+                    "load_heartbeat_at": (now - timedelta(minutes=1)).isoformat(),
+                }
+            ],
+        }
+        out = _render_live(_cfg(["opencode"]), health)
+
+        self.assertIn("RUNNING", out)
+        self.assertIn("authenticated load heartbeat is fresh", out)
+
+    def test_opencode_stale_heartbeat_is_degraded_without_guessing_pure(self):
+        now = datetime.now(timezone.utc)
+        health = {
+            "started_at": (now - timedelta(hours=1)).isoformat(),
+            "connectors": [
+                {
+                    "name": "opencode",
+                    "state": "running",
+                    "source": "manual",
+                    "load_heartbeat_at": (now - timedelta(minutes=16)).isoformat(),
+                }
+            ],
+        }
+        out = _render_live(_cfg(["opencode"]), health)
+
+        self.assertIn("DEGRADED", out)
+        self.assertNotIn("RUNNING", out)
+        self.assertIn("stale", out)
+        self.assertNotIn("--pure", out)
+
+    def test_opencode_noncanonical_registration_sources_are_degraded(self):
+        now = datetime.now(timezone.utc)
+        for source in ("MANUAL", "Automatic", " manual", "automatic ", 7):
+            health = {
+                "started_at": (now - timedelta(hours=1)).isoformat(),
+                "connectors": [
+                    {
+                        "name": "opencode",
+                        "state": "running",
+                        "source": source,
+                        "load_heartbeat_at": (now - timedelta(minutes=1)).isoformat(),
+                    }
+                ],
+            }
+            with self.subTest(source=source):
+                out = _render_live(_cfg(["opencode"]), health)
+                self.assertIn("DEGRADED", out)
+                self.assertNotIn("RUNNING", out)
+                self.assertIn("manual or automatic OpenCode registration", out)
+
+    def test_opencode_gateway_unavailable_is_explicitly_degraded(self):
+        out = _render(_cfg(["opencode"]))
+
+        self.assertIn("DEGRADED", out)
+        self.assertIn("authenticated gateway status is unavailable", out)
+        self.assertNotIn("--pure", out)
+
+
+class TestOpenCodeRuntimeTruth(unittest.TestCase):
+    def setUp(self) -> None:
+        self.now = datetime(2026, 8, 4, 12, 0, tzinfo=timezone.utc)
+        self.started = self.now - timedelta(hours=1)
+
+    def _state(
+        self,
+        heartbeat: object,
+        *,
+        state: str = "running",
+        source: object = "manual",
+    ) -> tuple[str, str]:
+        return cmd_status._opencode_runtime_truth(
+            {
+                "name": "opencode",
+                "state": state,
+                "source": source,
+                "load_heartbeat_at": heartbeat,
+            },
+            gateway_started_at=self.started.isoformat(),
+            now=self.now,
+        )
+
+    def test_manual_and_automatic_registration_with_fresh_heartbeat_are_healthy(self):
+        for source in ("manual", "automatic"):
+            with self.subTest(source=source):
+                state, detail = self._state(self.now.isoformat(), source=source)
+                self.assertEqual(state, "running")
+                self.assertIn("authenticated load heartbeat is fresh", detail)
+
+    def test_source_must_be_an_exact_gateway_registration_literal(self):
+        for source in (
+            "",
+            "discovered",
+            "operator",
+            "MANUAL",
+            "Automatic",
+            " manual",
+            "manual ",
+            "\tautomatic",
+            "automatic\n",
+            7,
+            None,
+        ):
+            with self.subTest(source=source):
+                state, detail = self._state(self.now.isoformat(), source=source)
+                self.assertEqual(state, "degraded")
+                self.assertIn("manual or automatic OpenCode registration", detail)
+
+    def test_missing_malformed_and_stale_are_unverified(self):
+        for heartbeat, reason in (
+            ("", "no authenticated load heartbeat"),
+            ("not-a-timestamp", "malformed"),
+            ((self.now - timedelta(minutes=16)).isoformat(), "stale"),
+        ):
+            with self.subTest(heartbeat=heartbeat):
+                state, detail = self._state(heartbeat)
+                self.assertEqual(state, "degraded")
+                self.assertIn(reason, detail)
+                self.assertNotIn("pure", detail.lower())
+
+    def test_heartbeat_must_belong_to_current_gateway_generation(self):
+        state, detail = self._state((self.started - timedelta(seconds=1)).isoformat())
+
+        self.assertEqual(state, "degraded")
+        self.assertIn("predates the current gateway generation", detail)
+
+    def test_heartbeat_freshness_and_clock_skew_boundaries_are_inclusive(self):
+        # The plugin has no periodic timer: after exactly fifteen idle minutes
+        # the last authenticated load remains within the operator-evidence
+        # window, then becomes unverified immediately beyond that boundary.
+        state, _detail = self._state((self.now - timedelta(minutes=15)).isoformat())
+        self.assertEqual(state, "running")
+        state, detail = self._state((self.now - timedelta(minutes=15, microseconds=1)).isoformat())
+        self.assertEqual(state, "degraded")
+        self.assertIn("stale", detail)
+
+        state, _detail = self._state((self.now + timedelta(minutes=5)).isoformat())
+        self.assertEqual(state, "running")
+        state, detail = self._state((self.now + timedelta(minutes=5, microseconds=1)).isoformat())
+        self.assertEqual(state, "degraded")
+        self.assertIn("ahead of the local clock", detail)
+
+    def test_terminal_client_states_remain_terminal_not_pure_or_drifted(self):
+        for terminal in ("stopped", "offline", "down", "disabled"):
+            with self.subTest(state=terminal):
+                state, detail = self._state("", state=terminal, source="")
+                self.assertEqual(state, terminal)
+                self.assertIn(f"reports {terminal}", detail)
+                self.assertNotIn("pure", detail.lower())
+                self.assertNotIn("drift", detail.lower())
+
+    def test_gateway_unavailable_overrides_cached_running_state(self):
+        state, detail = cmd_status._opencode_runtime_truth(
+            {
+                "name": "opencode",
+                "state": "running",
+                "source": "manual",
+                "load_heartbeat_at": self.now.isoformat(),
+            },
+            gateway_started_at=self.started.isoformat(),
+            gateway_available=False,
+            now=self.now,
+        )
+
+        self.assertEqual(state, "degraded")
+        self.assertIn("gateway status is unavailable", detail)
+
+
+class TestOmnigentJsonReadinessParity(unittest.TestCase):
+    def test_manual_plural_roster_degrades_stale_pid_and_preserves_opencode_truth(self):
+        now = datetime.now(timezone.utc)
+        health = {
+            "started_at": (now - timedelta(hours=1)).isoformat(),
+            "connectors": [
+                {"name": "omnigent", "state": "running", "source": "manual"},
+                {
+                    "name": "opencode",
+                    "state": "running",
+                    "source": "manual",
+                    "load_heartbeat_at": now.isoformat(),
+                },
+            ],
+        }
+        cfg = _cfg(["omnigent", "opencode"])
+        detail = "server record is stale; effective policy config is unverified"
+        with patch(
+            "defenseclaw.commands.cmd_doctor._omnigent_runtime_readiness",
+            return_value=("warn", detail),
+        ) as readiness:
+            rows = cmd_status._connector_roster(cfg, health=health)
+
+        by_name = {row["name"]: row for row in rows}
+        self.assertEqual(by_name["omnigent"]["state"], "degraded")
+        self.assertEqual(by_name["omnigent"]["readiness_detail"], detail)
+        self.assertEqual(by_name["omnigent"]["source"], "manual")
+        self.assertEqual(by_name["opencode"]["state"], "running")
+        self.assertIn("authenticated load heartbeat is fresh", by_name["opencode"]["runtime_detail"])
+        readiness.assert_called_once_with(cfg)
+
+    def test_automatic_singular_roster_degrades_live_config_mismatch(self):
+        health = {
+            "connector": {
+                "name": "omnigent",
+                "state": "running",
+                "source": "automatic",
+            }
+        }
+        cfg = _cfg([])
+        detail = "live --config selects C:\\other\\config.yaml, not managed C:\\managed\\config.yaml"
+        with patch(
+            "defenseclaw.commands.cmd_doctor._omnigent_runtime_readiness",
+            return_value=("fail", detail),
+        ):
+            rows = cmd_status._connector_roster(cfg, health=health)
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["name"], "omnigent")
+        self.assertEqual(rows[0]["source"], "automatic")
+        self.assertEqual(rows[0]["state"], "degraded")
+        self.assertEqual(rows[0]["readiness_detail"], detail)
+
+    def test_verified_runtime_remains_running_in_json_roster(self):
+        health = {"connectors": [{"name": "omnigent", "state": "running"}]}
+        cfg = _cfg(["omnigent"])
+        detail = "live effective config verified through --config"
+        with patch(
+            "defenseclaw.commands.cmd_doctor._omnigent_runtime_readiness",
+            return_value=("pass", detail),
+        ):
+            rows = cmd_status._connector_roster(cfg, health=health)
+
+        self.assertEqual(rows[0]["state"], "running")
+        self.assertEqual(rows[0]["readiness_detail"], detail)
+
+    def test_unavailable_readiness_is_degraded_without_failing_status(self):
+        with patch(
+            "defenseclaw.commands.cmd_doctor._omnigent_runtime_readiness",
+            side_effect=OSError("evidence unavailable"),
+        ):
+            state, detail = cmd_status._omnigent_effective_runtime_state(
+                _cfg(["omnigent"]),
+                "running",
+            )
+
+        self.assertEqual(state, "degraded")
+        self.assertIn("policy readiness unavailable", detail)
+
+
+class TestStatusRuntimeProcessIdentity(unittest.TestCase):
+    def setUp(self) -> None:
+        self.cfg = MagicMock()
+        self.cfg.data_dir = os.path.abspath("D:/status-runtime-fixture")
+
+    def _fetch(self, runtime_pid: object, *, trusted_pid: int = 4242) -> dict | None:
+        health = {"started_at": "2026-08-04T11:00:00Z", "connectors": []}
+        client = MagicMock()
+        client.status.return_value = {
+            "runtime": {"pid": runtime_pid, "data_dir": self.cfg.data_dir},
+            "health": health,
+        }
+        with patch(
+            "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
+            return_value=MagicMock(trusted=True, pid=trusted_pid, detail=""),
+        ):
+            return cmd_status._fetch_runtime_bound_health(client, self.cfg)
+
+    def test_correct_verified_listener_pid_accepts_authenticated_health(self):
+        self.assertIsNotNone(self._fetch(4242))
+
+    def test_noncanonical_wrong_and_foreign_same_home_pid_are_unavailable(self):
+        for runtime_pid in (
+            4242.9,
+            4242.0,
+            True,
+            None,
+            {},
+            [],
+            "not-a-pid",
+            0,
+            -1,
+            "4242",
+            "004242",
+            "+4242",
+            " 4242 ",
+            4241,
+            9999,
+        ):
+            with self.subTest(runtime_pid=runtime_pid):
+                self.assertIsNone(self._fetch(runtime_pid))
+
+    def test_unverified_listener_is_rejected_before_authenticated_request(self):
+        client = MagicMock()
+        with patch(
+            "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
+            return_value=MagicMock(trusted=False, pid=0, detail="foreign listener"),
+        ):
+            self.assertIsNone(cmd_status._fetch_runtime_bound_health(client, self.cfg))
+        client.status.assert_not_called()
 
 
 class TestApplicationProtectionStatus(unittest.TestCase):
@@ -411,13 +781,24 @@ class TestStatusJson(unittest.TestCase):
             result = self._invoke_json()
         self.assertEqual(result.exit_code, 0, msg=result.output)
         doc = json.loads(result.output)
-        for key in ("environment", "scanners", "enforcement", "activity", "connectors", "sidecar"):
+        for key in (
+            "environment",
+            "scanners",
+            "enforcement",
+            "activity",
+            "connectors",
+            "sidecar",
+            "native_otlp_delivery",
+        ):
             self.assertIn(key, doc)
         self.assertFalse(doc["sidecar"]["running"])
         self.assertEqual(doc["application_protection"]["guardrail_mode"], "observe")
         self.assertFalse(doc["application_protection"]["require_trusted_binary_paths"])
         self.assertEqual(doc["deployment_mode"], "managed_enterprise")
         self.assertEqual(doc["config"], managed_config)
+        delivery = json.dumps(doc["native_otlp_delivery"], sort_keys=True)
+        self.assertNotIn(self.tmp_dir, delivery)
+        self.assertNotIn("token", delivery.lower())
 
     def test_json_roster_has_per_connector_mode(self):
         result = self._invoke_json()
@@ -426,6 +807,28 @@ class TestStatusJson(unittest.TestCase):
         self.assertEqual(by_name["codex"]["mode"], "action")
         self.assertEqual(by_name["hermes"]["mode"], "observe")
         self.assertTrue(by_name["codex"]["enabled"])
+
+    def test_json_cursor_disclosure_has_enabled_disabled_parity(self):
+        from defenseclaw.config import PerConnectorGuardrailConfig
+
+        expected = {
+            "status": "unavailable",
+            "conflict_inferred": False,
+        }
+        for enabled in (True, False):
+            with self.subTest(enabled=enabled):
+                self.app.cfg.guardrail.connectors["cursor"] = PerConnectorGuardrailConfig(
+                    mode="action",
+                    enabled=enabled,
+                )
+                result = self._invoke_json()
+                self.assertEqual(result.exit_code, 0, msg=result.output)
+                by_name = {row["name"]: row for row in json.loads(result.output)["connectors"]}
+
+                self.assertEqual(by_name["cursor"]["enabled"], enabled)
+                self.assertEqual(by_name["cursor"]["priority_conflict_detection"], expected)
+                self.assertNotIn("priority_conflict_detection", by_name["codex"])
+                self.assertNotIn("priority_conflict_detection", by_name["hermes"])
 
     def test_json_roster_reports_canonical_fail_mode_projection(self):
         report = {
@@ -485,6 +888,11 @@ class TestStatusProfileIdentity(unittest.TestCase):
                 },
             }
 
+            listener_patch = patch(
+                "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
+                return_value=MagicMock(trusted=True, pid=4242, detail=""),
+            )
+            listener_patch.start()
             try:
                 with _owned_status_endpoint(str(ambient_home), foreign_health, owned_token) as (port, seen):
                     app.cfg.gateway.api_port = port
@@ -528,6 +936,7 @@ class TestStatusProfileIdentity(unittest.TestCase):
                 self.assertTrue(doc["sidecar"]["running"])
                 self.assertIn(matching_marker, json.dumps(doc))
             finally:
+                listener_patch.stop()
                 cleanup_app(app, db_path, app_tmp)
 
 

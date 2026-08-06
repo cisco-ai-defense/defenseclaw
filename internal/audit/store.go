@@ -204,8 +204,9 @@ type ActionEntry struct {
 }
 
 type Store struct {
-	db     *sql.DB
-	dbPath string
+	db        *sql.DB
+	dbPath    string
+	dbPathPin *preparedAuditDatabasePath
 
 	// lifecycleMu serializes initialization/close and lets mandatory v8
 	// event-history transactions pin a ready store until commit or rollback.
@@ -260,6 +261,11 @@ func (s *Store) sqliteBusyObservabilityV8() SQLiteBusyObservabilityV8 {
 //   - busy_timeout=5000         SQLite waits up to 5 seconds before
 //     returning SQLITE_BUSY, absorbing the
 //     vast majority of write contention.
+//   - wal_autocheckpoint=0      disables SQLite's connection-local commit
+//     hook. DefenseClaw checkpoints through the serialized Store connection
+//     in health and retention maintenance; running a second checkpoint from
+//     inside a commit can race a retiring sidecar process over the shared WAL
+//     mapping and terminate the gateway with SIGBUS.
 //   - synchronous=NORMAL        the sweet spot for WAL: durable
 //     across crashes (loses only the last
 //     transaction on power loss) while ~3x
@@ -284,6 +290,7 @@ type auditIntegerPragma struct {
 
 var auditMandatoryIntegerPragmas = [...]auditIntegerPragma{
 	{name: "busy_timeout", dsnValue: "5000", want: 5000},
+	{name: "wal_autocheckpoint", dsnValue: "0", want: 0},
 	{name: "synchronous", dsnValue: "NORMAL", want: 1},
 	{name: "cache_size", dsnValue: "-20000", want: -20000},
 	{name: "temp_store", dsnValue: "MEMORY", want: 2},
@@ -328,11 +335,11 @@ func openSQLite(dbPath string) (*sql.DB, error) {
 }
 
 func NewStore(dbPath string) (*Store, error) {
-	db, identity, err := openHardenedAuditSQLiteWithIdentity(dbPath, auditDBPathHooks{})
+	db, identity, pin, err := openPinnedHardenedAuditSQLiteWithIdentity(dbPath, auditDBPathHooks{})
 	if err != nil {
 		return nil, err
 	}
-	return &Store{db: db, dbPath: identity}, nil
+	return &Store{db: db, dbPath: identity, dbPathPin: pin}, nil
 }
 
 // sqliteCoded is the structural interface implemented by the
@@ -1853,7 +1860,11 @@ func (s *Store) Init() error {
 	if err := s.proveDurableWrite(context.Background()); err != nil {
 		return err
 	}
-	if err := revalidateHardenedAuditSQLite(s.dbPath, auditDBPathHooks{}); err != nil {
+	if s.dbPathPin != nil {
+		if err := s.dbPathPin.validateWhileSQLiteOpen(); err != nil {
+			return fmt.Errorf("audit: revalidate database paths after initialization: %w", err)
+		}
+	} else if err := revalidateHardenedAuditSQLite(s.dbPath, auditDBPathHooks{}); err != nil {
 		return fmt.Errorf("audit: revalidate database paths after initialization: %w", err)
 	}
 
@@ -3363,6 +3374,8 @@ func (s *Store) SelectAlertAcknowledgementTargets(
 		WHERE projection.alert_id IS NULL
 		  AND (
 		      (event.bucket = ? AND event.event_name = 'finding.observed')
+		      OR (event.action = 'connector-hook' AND COALESCE(event.enforced, 0) = 1
+		          AND LENGTH(TRIM(COALESCE(event.connector, ''))) > 0)
 		      OR (event.bucket IS NULL AND event.action IN (`
 	legacyActions := legacyAlertEligibleActions()
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(legacyActions)), ",")
@@ -3421,6 +3434,8 @@ func (s *Store) selectExactAlertAcknowledgementTargets(
 		              WHERE alert_id = requested.alert_id)
 		   OR (event.id IS NOT NULL AND (
 		       (event.bucket = ? AND event.event_name = 'finding.observed')
+		       OR (event.action = 'connector-hook' AND COALESCE(event.enforced, 0) = 1
+		           AND LENGTH(TRIM(COALESCE(event.connector, ''))) > 0)
 		       OR (event.bucket IS NULL AND event.action IN (` + actionPlaceholders + `)
 		           AND UPPER(COALESCE(event.severity,'')) IN
 		               ('CRITICAL','HIGH','MEDIUM','LOW','ERROR','INFO'))
@@ -3478,10 +3493,12 @@ func (s *Store) ListAlerts(limit int) ([]Event, error) {
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(legacyActions)), ",")
 	query := `SELECT event.id, event.timestamp, event.action, event.target, event.actor,
 			event.details, event.structured_json, event.severity, event.run_id,
-			event.trace_id, event.request_id
+			event.trace_id, event.request_id, event.connector, event.enforced
 		 FROM audit_events AS event
 		 WHERE (
 			(event.bucket = ? AND event.event_name = 'finding.observed')
+			OR (event.action = 'connector-hook' AND COALESCE(event.enforced, 0) = 1
+			    AND LENGTH(TRIM(COALESCE(event.connector, ''))) > 0)
 			OR (event.bucket IS NULL AND event.action IN (` + placeholders + `))
 		 )
 		 AND event.severity IN ('CRITICAL','HIGH','MEDIUM','LOW','ERROR','INFO')
@@ -3504,8 +3521,12 @@ func (s *Store) ListAlerts(limit int) ([]Event, error) {
 	var events []Event
 	for rows.Next() {
 		var e Event
-		var target, details, structuredJSON, severity, runID, traceID, requestID sql.NullString
-		if err := rows.Scan(&e.ID, &e.Timestamp, &e.Action, &target, &e.Actor, &details, &structuredJSON, &severity, &runID, &traceID, &requestID); err != nil {
+		var target, details, structuredJSON, severity, runID, traceID, requestID, connector sql.NullString
+		var enforced sql.NullBool
+		if err := rows.Scan(
+			&e.ID, &e.Timestamp, &e.Action, &target, &e.Actor, &details, &structuredJSON,
+			&severity, &runID, &traceID, &requestID, &connector, &enforced,
+		); err != nil {
 			return nil, fmt.Errorf("audit: scan alert row: %w", err)
 		}
 		e.Target = target.String
@@ -3519,6 +3540,8 @@ func (s *Store) ListAlerts(limit int) ([]Event, error) {
 		e.RunID = runID.String
 		e.TraceID = traceID.String
 		e.RequestID = requestID.String
+		e.Connector = connector.String
+		e.Enforced = enforced.Bool
 		events = append(events, e)
 	}
 	return events, rows.Err()
@@ -4039,7 +4062,12 @@ func (s *Store) Close() error {
 	// transactions to release the lifecycle read lock.
 	s.ready.Store(false)
 	s.closed = true
-	return s.db.Close()
+	err := s.db.Close()
+	if s.dbPathPin != nil {
+		s.dbPathPin.close()
+		s.dbPathPin = nil
+	}
+	return err
 }
 
 // currentRunID resolves the per-process run id used to stamp audit

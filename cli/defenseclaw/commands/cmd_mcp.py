@@ -225,7 +225,7 @@ def _mcp_source_hint(connector: str) -> str:
         "zeptoclaw": "ZeptoClaw config and workspace MCP config",
         "hermes": "Hermes config",
         "cursor": "Cursor MCP config",
-        "windsurf": "Windsurf MCP config",
+        "windsurf": "legacy Cascade MCP config",
         "geminicli": "Gemini CLI settings",
         "copilot": "Copilot hook MCP config",
         "openhands": "OpenHands MCP config",

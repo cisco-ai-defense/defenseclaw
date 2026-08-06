@@ -437,24 +437,64 @@ class ModelsDbTests(unittest.TestCase):
         now = datetime.now(timezone.utc).isoformat()
         self.store.db.executemany(
             """INSERT INTO audit_events (
-                   id, timestamp, action, actor, details, severity, bucket, event_name
-               ) VALUES (?, ?, ?, 'defenseclaw', ?, 'HIGH', ?, ?)""",
+                   id, timestamp, action, actor, details, severity, bucket, event_name,
+                   connector, enforced
+               ) VALUES (?, ?, ?, 'defenseclaw', ?, ?, ?, ?, ?, ?)""",
             [
                 (
                     "v8-finding",
                     now,
                     "scan-finding",
                     "source-backed finding",
+                    "HIGH",
                     "security.finding",
                     "finding.observed",
+                    None,
+                    None,
                 ),
                 (
                     "v8-platform-health",
                     now,
                     "sink-failure",
                     "exporter degraded",
+                    "HIGH",
                     "platform.health",
                     "subsystem.degraded",
+                    None,
+                    None,
+                ),
+                (
+                    "v8-connector-block",
+                    now,
+                    "connector-hook",
+                    "authentic blocked decision",
+                    "INFO",
+                    "tool.activity",
+                    "tool.decision",
+                    "cursor",
+                    1,
+                ),
+                (
+                    "v8-connector-observe",
+                    now,
+                    "connector-hook",
+                    "observe-only decision",
+                    "HIGH",
+                    "tool.activity",
+                    "tool.decision",
+                    "cursor",
+                    0,
+                ),
+                (
+                    "v8-unattributed-block",
+                    now,
+                    "connector-hook",
+                    "block missing connector provenance",
+                    "HIGH",
+                    "tool.activity",
+                    "tool.decision",
+                    None,
+                    1,
                 ),
             ],
         )
@@ -467,9 +507,16 @@ class ModelsDbTests(unittest.TestCase):
         self.assertIn("v8-finding", alert_ids)
         self.assertIn("v8-finding", summary_ids)
         self.assertIn("v8-finding", actionable_ids)
+        self.assertIn("v8-connector-block", alert_ids)
+        self.assertIn("v8-connector-block", summary_ids)
+        self.assertIn("v8-connector-block", actionable_ids)
         self.assertNotIn("v8-platform-health", alert_ids)
         self.assertNotIn("v8-platform-health", summary_ids)
         self.assertNotIn("v8-platform-health", actionable_ids)
+        self.assertNotIn("v8-connector-observe", alert_ids)
+        self.assertNotIn("v8-unattributed-block", alert_ids)
+        block = next(event for event in self.store.list_alerts(10) if event.id == "v8-connector-block")
+        self.assertEqual(block.connector, "cursor")
 
     # -- SK-4: per-connector actions column migration --
 

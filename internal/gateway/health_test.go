@@ -131,6 +131,24 @@ func TestConnectorLastActivityNeverRegresses(t *testing.T) {
 	}
 }
 
+func TestConnectorLoadHeartbeatIsSeparateFromOrdinaryActivity(t *testing.T) {
+	h := NewSidecarHealth()
+	h.SetConnector("opencode", "", "")
+	h.RecordConnectorRequestFor("opencode")
+	before := connByName(h.Snapshot().Connectors)["opencode"]
+	if before.LastLoadHeartbeatAt != nil {
+		t.Fatalf("ordinary request set load heartbeat: %v", before.LastLoadHeartbeatAt)
+	}
+
+	start := time.Now().UTC()
+	h.RecordConnectorLoadHeartbeatFor("opencode")
+	end := time.Now().UTC()
+	after := connByName(h.Snapshot().Connectors)["opencode"]
+	if after.LastLoadHeartbeatAt == nil || after.LastLoadHeartbeatAt.Before(start) || after.LastLoadHeartbeatAt.After(end) {
+		t.Fatalf("load heartbeat = %v, want timestamp in [%s, %s]", after.LastLoadHeartbeatAt, start, end)
+	}
+}
+
 // TestConnectorCountersAreIsolated verifies that each connector accumulates its
 // own counters — the core multi-connector parity guarantee. A tool block on
 // codex must never show up under cursor.

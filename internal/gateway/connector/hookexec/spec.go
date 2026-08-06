@@ -16,7 +16,10 @@
 
 package hookexec
 
-import "sort"
+import (
+	"sort"
+	"strings"
+)
 
 // decisionStyle selects how a connector shapes a 2xx gateway response into
 // agent-native stdout + exit code. Each value corresponds to one of the
@@ -47,8 +50,9 @@ const (
 // failResult is a fail-closed outcome: an optional connector-native JSON body
 // printed to stdout and the exit code to return.
 type failResult struct {
-	body string
-	exit int
+	body   string
+	exit   int
+	closed bool
 }
 
 // spec is the immutable per-connector contract mirrored from the .sh hooks.
@@ -60,6 +64,11 @@ type spec struct {
 	endpoint    string // gateway path ("/api/v1/claude-code/hook")
 	outputField string // response field echoed to stdout ("claude_code_output")
 	style       decisionStyle
+	// failOpenOnly is set when the upstream host has no exit-status or
+	// fail-closed hook contract. Runtime, authentication, transport, timeout,
+	// and malformed-response failures must then remain an empty exit-0 allow;
+	// only a valid connector-native response may request a block.
+	failOpenOnly bool
 
 	defaultBlockReason string // used when action=block but reason is empty
 
@@ -108,18 +117,19 @@ var specs = map[string]spec{
 		connector: "cursor", hookName: "cursor-hook", errLabel: "cursor",
 		subject: "cursor tool", endpoint: "/api/v1/cursor/hook",
 		outputField: "hook_output", style: styleHookEcho,
-		openAllow:         failResult{body: cursorAllow(), exit: 0},
-		oversizedClosed:   failResult{body: cursorDeny(tooLarge), exit: blockExit},
-		unreachableStrict: failResult{body: cursorDeny(failedClosed), exit: blockExit},
-		responseClosed:    failResult{body: cursorDeny(failedClosed), exit: 0},
+		defaultBlockReason: "Blocked by DefenseClaw Cursor policy.",
+		// Cursor fallback bodies are rendered from Options.Event at emission
+		// time. The body here is only the failure reason; no event accepts the
+		// old generic continue+permission+message object.
+		openAllow:         failResult{},
+		oversizedClosed:   failResult{body: tooLarge, exit: blockExit, closed: true},
+		unreachableStrict: failResult{body: failedClosed, exit: blockExit, closed: true},
+		responseClosed:    failResult{body: failedClosed, closed: true},
 	},
 	"copilot": {
 		connector: "copilot", hookName: "copilot-hook", errLabel: "copilot",
 		subject: "copilot tool", endpoint: "/api/v1/copilot/hook",
-		outputField: "hook_output", style: styleHookEcho,
-		oversizedClosed:   failResult{exit: blockExit},
-		unreachableStrict: failResult{body: `{"permissionDecision":"deny","permissionDecisionReason":"` + failedClosed + `"}`, exit: blockExit},
-		responseClosed:    failResult{body: `{"permissionDecision":"deny","permissionDecisionReason":"` + failedClosed + `"}`, exit: 0},
+		outputField: "hook_output", style: styleHookEcho, failOpenOnly: true,
 	},
 	"geminicli": {
 		connector: "geminicli", hookName: "geminicli-hook", errLabel: "geminicli",
@@ -129,11 +139,9 @@ var specs = map[string]spec{
 		unreachableStrict: failResult{exit: blockExit},
 		responseClosed:    failResult{exit: blockExit},
 	},
-	// antigravity-hook.sh is "Modelled on geminicli-hook.sh": the gateway
-	// encodes the verdict in hook_output, the hook echoes it and exits 0, and
-	// every failure path is a bare exit 2 with no connector-native body. Without
-	// this entry the native Windows runner returns "unknown hook connector" and
-	// fails every antigravity hook closed (exit 2) before reaching the gateway.
+	// Antigravity consumes per-event JSON on stdout. PreToolUse decision=deny is
+	// the only documented hard block; hookexec converts generic failure results
+	// into exact event-native bodies and does not rely on process exit status.
 	"antigravity": {
 		connector: "antigravity", hookName: "antigravity-hook", errLabel: "antigravity",
 		subject: "antigravity tool", endpoint: "/api/v1/antigravity/hook",
@@ -145,10 +153,7 @@ var specs = map[string]spec{
 	"hermes": {
 		connector: "hermes", hookName: "hermes-hook", errLabel: "hermes",
 		subject: "hermes tool", endpoint: "/api/v1/hermes/hook",
-		outputField: "hook_output", style: styleHookEcho,
-		oversizedClosed:   failResult{exit: blockExit},
-		unreachableStrict: failResult{body: `{"action":"block","message":"` + failedClosed + `"}`, exit: blockExit},
-		responseClosed:    failResult{body: `{"action":"block","message":"` + failedClosed + `"}`, exit: 0},
+		outputField: "hook_output", style: styleHookEcho, failOpenOnly: true,
 	},
 	"windsurf": {
 		connector: "windsurf", hookName: "windsurf-hook", errLabel: "windsurf",
@@ -169,12 +174,52 @@ var specs = map[string]spec{
 	},
 }
 
-func cursorDeny(msg string) string {
-	return `{"continue":false,"permission":"deny","user_message":"` + msg + `","agent_message":"` + msg + `"}`
+func cursorFallbackOutput(event string, closed bool, reason string) string {
+	if closed {
+		return cursorActionOutput(event, "block", reason)
+	}
+	return cursorActionOutput(event, "allow", reason)
 }
 
-func cursorAllow() string {
-	return `{"continue":true}`
+func cursorActionOutput(event, action, reason string) string {
+	event = strings.ToLower(strings.TrimSpace(event))
+	if action != "block" {
+		if action == "confirm" {
+			switch event {
+			case "beforeshellexecution", "beforemcpexecution":
+				message := mustJSONString(reason)
+				return `{"permission":"ask","user_message":` + message + `,"agent_message":` + message + `}`
+			}
+		}
+		switch event {
+		case "beforesubmitprompt":
+			return `{"continue":true}`
+		case "pretooluse", "subagentstart", "beforereadfile", "beforetabfileread",
+			"beforeshellexecution", "beforemcpexecution":
+			return `{"permission":"allow"}`
+		default:
+			return `{}`
+		}
+	}
+
+	message := mustJSONString(reason)
+	switch event {
+	case "beforesubmitprompt":
+		return `{"continue":false,"user_message":` + message + `}`
+	case "pretooluse", "beforeshellexecution", "beforemcpexecution":
+		return `{"permission":"deny","user_message":` + message + `,"agent_message":` + message + `}`
+	case "subagentstart", "beforereadfile":
+		return `{"permission":"deny","user_message":` + message + `}`
+	case "beforetabfileread":
+		return `{"permission":"deny"}`
+	case "stop", "subagentstop":
+		return `{"followup_message":` + message + `}`
+	default:
+		// Cursor documents no response fields for lifecycle and after-events.
+		// If a strict local failure occurs before the event can be decoded,
+		// exit 2 remains Cursor's documented generic block signal.
+		return `{}`
+	}
 }
 
 func specFor(connector string) (spec, bool) {

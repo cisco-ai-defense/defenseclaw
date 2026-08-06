@@ -1,6 +1,6 @@
 ---
 title: Gemini CLI
-description: Gemini CLI connector wires eleven settings.json lifecycle hooks; five are block-capable, and the native logs/metrics/traces exporter points at the gateway.
+description: Gemini CLI connector for the continuing enterprise, Google Cloud, and paid API-key product wires settings.json lifecycle hooks plus native OTLP.
 keywords:
   - DefenseClaw Gemini CLI connector
   - Gemini CLI hooks
@@ -9,9 +9,26 @@ keywords:
 ---
 
 The Gemini CLI connector wires DefenseClaw into
-[Google's Gemini CLI hooks](https://github.com/google-gemini/gemini-cli) and
-points the agent's native OTLP exporter at the gateway so traces, metrics, and
-logs land in one place.
+[Google's Gemini CLI hooks](https://geminicli.com/docs/hooks/) and points the
+agent's native OTLP exporter at the gateway so traces, metrics, and logs land
+in one place.
+
+<Callout type="warning" title="Continuing paid and enterprise product only">
+Google ended Gemini CLI service for consumer/free/Google AI Pro/Ultra users on
+June 18, 2026 and directs that audience to Antigravity CLI. This connector is
+only for the officially continuing Gemini Code Assist Standard/Enterprise,
+Google Cloud, and paid Gemini API or Gemini Enterprise Agent Platform API-key
+paths. It does not restore consumer Gemini CLI access. See
+[Google's transition announcement](https://developers.googleblog.com/an-important-update-transitioning-gemini-cli-to-antigravity-cli/)
+and the [Antigravity migration guide](https://antigravity.google/docs/cli/gcli-migration).
+</Callout>
+
+<Callout type="warning" title="Native Windows is excluded">
+DefenseClaw does not include Gemini CLI in its native Windows connector roster,
+Setup wizard, lifecycle custody, Doctor checks, or Windows validation jobs.
+Existing Gemini CLI support is limited to supported non-Windows hosts. Do not
+use WSL, Git Bash, Docker, or another compatibility layer as a workaround.
+</Callout>
 
 ## Setup
 
@@ -19,18 +36,14 @@ logs land in one place.
 defenseclaw setup geminicli
 ```
 
-<Callout type="warning">
-Gemini CLI setup is supported on macOS and Linux. The DefenseClaw connector is
-not certified on native Windows x64, so setup rejects it there.
-</Callout>
-
-`setup geminicli` is the dedicated Gemini CLI alias. It uses the shared
-guardrail setup backend, wires hooks against `~/.gemini/settings.json`, and
+`setup geminicli` is shorthand for `setup guardrail --connector geminicli`: it
+adds or reconfigures the continuing paid/enterprise Gemini CLI product, wires
+all 11 documented lifecycle events against `~/.gemini/settings.json`, and
 points Gemini's native OTLP exporter at the gateway. **There is no
-proxy-enforcement path** — blocking happens hook-side via `BeforeAgent`,
-`BeforeModel`, `BeforeTool`, `AfterTool`, and `AfterAgent`. Gemini CLI has no
-native ask surface, so confirm verdicts use an immediate alert/context
-fallback with `raw_action` preserved for audit.
+proxy-enforcement path** for Gemini CLI — blocking happens hook-side on
+`BeforeAgent`, `BeforeModel`, `BeforeTool`, `AfterTool`, and `AfterAgent`.
+Gemini CLI has no native ask surface, so confirm verdicts use an immediate
+alert/context fallback with `raw_action` preserved for audit.
 
 #### What `setup geminicli` actually does
 
@@ -134,7 +147,8 @@ Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [int
   </Folder>
   <Folder name="~/.defenseclaw" defaultOpen>
     <Folder name="hooks">
-      <File name="geminicli-hook.sh" />
+      <File name="geminicli-hook.sh (POSIX runtime)" />
+      <File name=".otlp-geminicli.token (connector-scoped OTLP credential)" />
     </Folder>
   </Folder>
 </Files>
@@ -155,7 +169,7 @@ Gemini CLI has no native human-approval surface. Confirm verdicts fall back to a
   caption="Hooks cover the lifecycle; native OTLP delivers logs, metrics, and traces out-of-band."
 >
   <Node id="gemini" kind="agent">Gemini CLI</Node>
-  <Node id="hooks" kind="connector">{`11 lifecycle hooks\n(5 block-capable)`}</Node>
+  <Node id="hooks" kind="connector">{`11 lifecycle hooks\n5 declared block surfaces`}</Node>
   <Node id="otlp" kind="connector">Native OTLP exporter</Node>
   <Node id="gateway" kind="gateway">defenseclaw-gateway</Node>
   <Edge from="gemini" to="hooks" />

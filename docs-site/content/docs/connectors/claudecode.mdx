@@ -8,7 +8,7 @@ keywords:
   - Claude Code observability
 ---
 
-The Claude Code connector wires DefenseClaw into [Anthropic's documented hook surfaces](https://docs.anthropic.com/) without inserting a proxy in the data path. Claude Code talks directly to its native upstream; DefenseClaw inspects via hooks + native OTel.
+The Claude Code connector wires DefenseClaw into [Anthropic's documented hook surfaces](https://code.claude.com/docs/en/hooks) without inserting a proxy in the data path. Claude Code talks directly to its native upstream; DefenseClaw inspects via hooks + native OTel.
 
 <Callout type="info">
 The Claude Code connector is **hook-only**. There is no LLM-proxy data path — Claude Code talks directly to `api.anthropic.com` and DefenseClaw observes via hooks + native OTel.
@@ -30,10 +30,24 @@ setup backend as `setup guardrail`, adds or reconfigures `claudecode`, wires
 hooks + native OTel, and can join an existing hook-connector roster when you
 choose **Add**. No proxy listener binds in either mode.
 
+On native Windows, install and run Claude Code directly from PowerShell or CMD
+using Anthropic's [native setup](https://code.claude.com/docs/en/setup).
+DefenseClaw registers a native executable with Claude Code's `args` exec form;
+Git for Windows is optional and is not part of the connector contract. WSL,
+Git Bash, Cygwin, MSYS, containers, and virtual machines are not certification
+paths for this connector.
+
+Claude Code native Windows setup is supported. The hook and lifecycle contract
+is implemented, while official-client validation metadata remains empty and
+`live=false`; support availability is not a certification claim.
+
 Native OTLP uses managed loopback exporter settings with a Claude-scoped
 Authorization bearer. Logs and metrics are enabled; traces are explicitly
-disabled. The scoped credential cannot authenticate management or another
-connector and must never be printed or copied.
+disabled. Prompt and assistant-response content logging are independent
+vendor opt-ins and DefenseClaw explicitly defaults both off; downstream
+redaction settings do not silently authorize source capture. The scoped
+credential cannot authenticate management or another connector and must never
+be printed or copied.
 
 Redaction is configured through the v8 bucket/profile policy: edit
 `observability.destinations[].routes[].selector.buckets` and
@@ -82,6 +96,32 @@ DefenseClaw stores a hash-checked backup of `settings.json` before edits.
 Teardown restores it byte-for-byte when the identity still matches; if the file
 drifted, only DefenseClaw-owned entries are removed.
 
+Claude Code keeps user/local MCP registration state in `~/.claude.json`
+(`%CLAUDE_CONFIG_DIR%\.claude.json` when that override is set) and project MCP
+state in `<workspace>/.mcp.json`; these are inventory surfaces, not hook setup
+files. See Anthropic's [MCP scope reference](https://code.claude.com/docs/en/mcp).
+The current connector inventories those local, project, and user manual scopes.
+Plugin-provided MCP and claude.ai connector MCP are not attributed from these
+files. Marketplace plugin cache artifacts honor
+`CLAUDE_CODE_PLUGIN_CACHE_DIR`; retained versions are not presented as active
+without semantic client evidence. Managed `enabledPlugins` takes precedence
+over user, project, and local preferences; a dynamic `policyHelper` is reported
+as unverified instead of guessed. Skill inventory covers the launch directory,
+every parent through the repository root, and existing nested
+`.claude/skills` roots that Claude can lazily activate after file activity.
+Nested skills remain discoverable-unverified until session activity proves
+activation; true skills take precedence over legacy commands, and documented
+skill-directory symlinks are canonicalized and de-duplicated. Recursive
+user/project agents use required frontmatter identity and closest-project
+precedence. Managed/plugin agents and session `--agents` remain unverified.
+Auto-memory resolves file-based `autoMemoryDirectory` precedence or the shared
+repository/worktree default under `~/.claude/projects/<project>/memory`; it is
+marked unverified when session `--settings`, remote settings, or native policy
+could change the active path.
+Runtime `/add-dir` roots remain outside persistent passive inventory.
+Claude Code 2.1.219+ emits `DirectoryAdded`, so DefenseClaw records the added
+path and source without treating the observation as durable discovery authority.
+
 ## Hook capabilities
 
 <HookEventsList connector="claudecode" />
@@ -90,15 +130,23 @@ drifted, only DefenseClaw-owned entries are removed.
 Claude Code is one of the few connectors that supports native PreToolUse ask. HITL approvals surface inside the agent UI itself, so the operator never has to leave Claude Code to decide.
 </Callout>
 
+`Setup` is observation-only and is not registered. `WorktreeCreate` is not
+registered because a handler replaces Claude Code's default worktree creation
+and must return the new path. The exact version-selected contract registers 28
+events for Claude Code `>=2.1.154,<2.1.219` and 29 for `>=2.1.219`.
+The added `DirectoryAdded` hook is synchronous, matcherless, bounded to 30
+seconds, and observation-only: it runs after the directory is added and has no
+block, ask, or decision authority.
+
 ## Telemetry channels at boot
 
 <Flow
   direction="LR"
   compact
-  caption="Two telemetry channels: hooks for per-tool-call decisions and native OTel for raw model/token telemetry."
+  caption="Two telemetry channels: hooks for per-tool-call decisions and native OTel for model/token metrics plus privacy-gated events."
 >
   <Node id="cc" kind="agent">Claude Code</Node>
-  <Node id="hooks" kind="connector">{`Current 28-event\nhook contract`}</Node>
+  <Node id="hooks" kind="connector">{`Version-selected 28/29-event\nhook contract`}</Node>
   <Node id="otel" kind="connector">{`Native OTel exporter\n(env-driven)`}</Node>
   <Node id="gateway" kind="gateway">defenseclaw-gateway</Node>
   <Edge from="cc" to="hooks" />

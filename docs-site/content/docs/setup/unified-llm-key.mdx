@@ -263,7 +263,7 @@ unified key actually pays for:
 
 | Connector class | Examples | What the LLM does |
 | --- | --- | --- |
-| Hook-based | Codex, Claude Code, Hermes, Cursor, Windsurf, Copilot CLI, Gemini CLI, OpenHands, Antigravity, OpenCode, Amp, OmniGent | The agent talks to its own LLM directly. DefenseClaw runs as a *judge only*: it inspects prompts/responses and emits verdicts. The unified key is only needed when `guardrail.judge.enabled: true`. |
+| Hook-based | Codex, Claude Code, Hermes, Cursor, Devin Desktop legacy Cascade, Copilot CLI, Gemini CLI, OpenHands, Antigravity, OpenCode, Amp, OmniGent | The agent talks to its own LLM directly. DefenseClaw runs as a *judge only*: it inspects prompts/responses and emits verdicts. The unified key is only needed when `guardrail.judge.enabled: true`. The `windsurf` alias does not cover Devin Local. |
 | Proxy-based | OpenClaw, ZeptoClaw | Outbound LLM traffic is routed through the gateway proxy. The gateway uses the unified key for *both* the upstream LLM (the agent's model) and the optional judge. |
 
 The wizard records the intent on `guardrail.llm_role`:
@@ -318,7 +318,7 @@ agent** versus **judge/aux only** depends entirely on the connector class:
 | Connector class | A bound custom provider… |
 | --- | --- |
 | Proxy (OpenClaw, ZeptoClaw) | **Is enforced.** The agent's model traffic routes through DefenseClaw, so the custom provider can serve the agent's upstream model, the judge, or both. |
-| Hook (Hermes, Cursor, Codex, OpenCode, Amp, OmniGent, Claude Code, Windsurf, Gemini CLI, Copilot, OpenHands, Antigravity) | **Configures DefenseClaw's judge/aux model only.** The agent talks to its own model directly — those calls are never routed through or inspected by DefenseClaw, so a custom provider cannot change the agent's model. |
+| Hook (Hermes, Cursor, Codex, OpenCode, Amp, OmniGent, Claude Code, Devin Desktop legacy Cascade, Gemini CLI, Copilot, OpenHands, Antigravity) | **Configures DefenseClaw's judge/aux model only.** The agent talks to its own model directly — those calls are never routed through or inspected by DefenseClaw, so a custom provider cannot change the agent's model. The legacy Cascade entry does not apply to Devin Local. |
 
 <Callout type="warn" title="Hook connectors: a custom provider is judge-only">
 This is the easiest thing to get wrong: attaching a custom provider while

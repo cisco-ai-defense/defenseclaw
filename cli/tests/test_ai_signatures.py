@@ -50,6 +50,33 @@ def test_ai_signature_catalog_contains_supported_and_shadow_agents():
         assert expected in ids
 
 
+def test_windsurf_signature_tracks_official_devin_desktop_rename():
+    signatures = {sig.id: sig for sig in load_ai_signatures()}
+    windsurf = signatures["windsurf"]
+
+    assert {"Devin.exe", "devin-desktop", "windsurf"} <= set(windsurf.binary_names)
+    assert {"Devin", "Devin.exe", "Devin Desktop", "Windsurf"} <= set(windsurf.process_names)
+    assert {
+        "~/.codeium/windsurf/mcp_config.json",
+        "~/.codeium/windsurf/memories/global_rules.md",
+        "~/.codeium/windsurf/skills",
+        "~/.agents/skills",
+        ".devin/rules",
+        ".windsurf/rules",
+        "AGENTS.md",
+        ".windsurf/skills",
+        ".agents/skills",
+    } <= set(windsurf.config_paths)
+    assert ".codeium/windsurf/rules" not in windsurf.config_paths
+    assert "~/.codeium/windsurf/mcp.json" not in windsurf.config_paths
+    assert windsurf.mcp_paths == ("~/.codeium/windsurf/mcp_config.json",)
+    assert windsurf.name == "Devin Desktop (legacy Cascade)"
+    assert windsurf.vendor == "Cognition"
+    assert windsurf.env_var_names == ()
+    assert "Devin Desktop" in windsurf.application_names
+    assert "devin.ai" in windsurf.domain_patterns
+
+
 def test_lemonade_signature_tracks_server_surface():
     signatures = {sig.id: sig for sig in load_ai_signatures()}
     lemonade = signatures["lemonade"]
@@ -98,6 +125,22 @@ def test_packaged_catalog_is_byte_identical_to_go_authority():
     assert {"perplexity-comet", "zed", "zia-search"} <= ids
 
 
+def test_claude_signature_separates_settings_mcp_and_plugin_surfaces():
+    signatures = {sig.id: sig for sig in load_ai_signatures()}
+    claude = signatures["claudecode"]
+
+    assert "~/.claude/settings.json" in claude.config_paths
+    assert "~/.claude/settings.local.json" not in claude.config_paths
+    assert "~/.claude.json" not in claude.config_paths
+    assert ".mcp.json" not in claude.config_paths
+    assert "~/.claude.json" in claude.mcp_paths
+    assert ".mcp.json" in claude.mcp_paths
+    assert "~/.claude/plugins/cache" in claude.config_paths
+    assert ".claude/plugins" not in claude.config_paths
+    assert "CLAUDE_CONFIG_DIR" in claude.env_var_names
+    assert "CLAUDE_CODE_PLUGIN_CACHE_DIR" in claude.env_var_names
+
+
 def test_antigravity_signature_tracks_mcp_and_customization_paths():
     signatures = {sig.id: sig for sig in load_ai_signatures()}
     antigravity = signatures["antigravity"]
@@ -110,6 +153,28 @@ def test_antigravity_signature_tracks_mcp_and_customization_paths():
     assert "~/.gemini/config/skills" in antigravity.config_paths
     assert ".agents/rules" in antigravity.config_paths
     assert "~/.gemini/config/plugins" in antigravity.config_paths
+    assert "antigravity.google" in antigravity.domain_patterns
+
+
+def test_codex_signature_tracks_current_official_asset_layouts():
+    signatures = {sig.id: sig for sig in load_ai_signatures()}
+    codex = signatures["codex"]
+
+    assert {
+        "~/.agents/skills",
+        "~/.agents/plugins/marketplace.json",
+        "~/.codex/plugins/cache",
+        "~/.codex/agents",
+        "~/.codex/rules",
+        ".agents/skills",
+        ".agents/plugins/marketplace.json",
+        ".claude-plugin/marketplace.json",
+        ".codex/config.toml",
+        ".codex/agents",
+        ".codex/rules",
+    } <= set(codex.config_paths)
+    assert {".mcp.json", "~/.codex/skills", ".codex/skills"}.isdisjoint(codex.config_paths)
+    assert set(codex.mcp_paths) == {"~/.codex/config.toml", ".codex/config.toml"}
 
 
 def test_custom_signature_pack_loads_from_managed_dir(tmp_path):

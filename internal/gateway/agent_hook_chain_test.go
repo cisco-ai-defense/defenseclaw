@@ -56,7 +56,7 @@ func TestProjectAgentHookToolChainsRejectsUnverifiedTransitions(t *testing.T) {
 func TestPermissionDeniedChainEvidenceRequiresReviewedReportedInvocation(t *testing.T) {
 	claude := connector.ResolveHookContract(
 		"claudecode",
-		"2.1.152",
+		"2.1.154",
 	).Contract.ToolCallLifecycle
 	req := agentHookRequest{
 		HookEventName:    "PermissionDenied",

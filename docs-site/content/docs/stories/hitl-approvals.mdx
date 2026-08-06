@@ -95,7 +95,9 @@ rm -rf /tmp/defenseclaw-hilt-demo
 
 ## Connectors without native ask
 
-[ZeptoClaw](/docs/connectors/zeptoclaw), [Codex](/docs/connectors/codex), [Hermes](/docs/connectors/hermes), [Gemini CLI](/docs/connectors/geminicli), [Windsurf](/docs/connectors/windsurf), [OpenHands](/docs/connectors/openhands), and [OpenCode](/docs/connectors/opencode) cannot pause for a DefenseClaw approval on their documented hook surfaces. Their integrations apply an explicit connector-specific fallback—typically alert, allow, or injected context—and keep `raw_action: "confirm"` available for audit.
+[ZeptoClaw](/docs/connectors/zeptoclaw), [Codex](/docs/connectors/codex), [Hermes](/docs/connectors/hermes), [Gemini CLI](/docs/connectors/geminicli), [Devin Desktop legacy Cascade](/docs/connectors/windsurf), and [OpenHands](/docs/connectors/openhands) cannot pause for a DefenseClaw approval on their documented hook surfaces. The `windsurf` alias covers legacy Cascade only, not Devin Local. These integrations apply explicit connector-specific alert, allow, or injected-context behavior and keep `raw_action: "confirm"` available for audit.
+
+[OpenCode](/docs/connectors/opencode) also cannot pause, but for a narrower reason: OpenCode v1.18.10-v1.18.11 publishes `permission.ask` and chat/context hooks, while DefenseClaw intentionally does not implement or claim those surfaces. The preview connector makes no native-ask, context-injection, or TUI-resume claim.
 
 ```bash
 defenseclaw tui

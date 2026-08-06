@@ -53,6 +53,7 @@ const (
 	OTLPScopeGeminiCLI OTLPPathTokenScope = "geminicli"
 	OTLPScopeCodex     OTLPPathTokenScope = "codex"
 	OTLPScopeClaude    OTLPPathTokenScope = "claudecode"
+	OTLPScopeOmnigent  OTLPPathTokenScope = "omnigent"
 )
 
 // OTLPPathTokenScopes returns the closed allow-list of scopes that
@@ -61,7 +62,7 @@ const (
 // guaranteeing that a new scope can never be added in one half of
 // the codebase without the other.
 func OTLPPathTokenScopes() []OTLPPathTokenScope {
-	return []OTLPPathTokenScope{OTLPScopeGeminiCLI, OTLPScopeCodex, OTLPScopeClaude}
+	return []OTLPPathTokenScope{OTLPScopeGeminiCLI, OTLPScopeCodex, OTLPScopeClaude, OTLPScopeOmnigent}
 }
 
 // OTLPPathTokenScopeForConnector returns the path-token namespace owned by a
@@ -75,6 +76,8 @@ func OTLPPathTokenScopeForConnector(connectorName string) (OTLPPathTokenScope, b
 		return OTLPScopeCodex, true
 	case "claudecode":
 		return OTLPScopeClaude, true
+	case "omnigent":
+		return OTLPScopeOmnigent, true
 	default:
 		return "", false
 	}

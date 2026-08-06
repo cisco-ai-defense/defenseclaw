@@ -802,7 +802,7 @@ func hermesToolCallLifecycle() ToolCallLifecycleContract {
 		},
 		Limitations: []string{
 			"Only pre_tool_call can block, and hook subprocess errors, timeouts, or malformed output fail open upstream.",
-			"A post_tool_call commits success only when extra.status is ok; error and blocked statuses must not advance state.",
+			"A post_tool_call commits success only when its documented top-level status is ok; error and blocked statuses must not advance state.",
 		},
 	}
 }
@@ -976,7 +976,7 @@ func antigravityToolCallLifecycle() ToolCallLifecycleContract {
 			"https://github.com/google-antigravity/antigravity-cli/blob/21f650e7bb852f58562425ddd0c7d203c80e3d0e/CHANGELOG.md",
 		},
 		Limitations: []string{
-			"conversationId plus stepIdx is a sequence rather than an opaque call ID, so it remains detection-only; CLI 1.1.9 or newer is required because it fixed spurious PostToolUse events and matcher handling.",
+			"conversationId plus stepIdx is a sequence rather than an opaque call ID, so it remains detection-only; the accepted protected harness pins official CLI 1.1.10 without inferring a higher compatibility floor than the documented 1.1.8 contract.",
 			"PreInvocation can inject context but cannot block or ask; Stop only supports continue, MCP hook matcher coverage is undocumented, and skill expansion has no dedicated event.",
 		},
 	}

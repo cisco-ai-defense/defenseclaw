@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -65,6 +66,18 @@ func TestMapHookAction_ObserveAndUnsupportedBlock(t *testing.T) {
 	}
 }
 
+func TestCursorProfileEmptyOfficialResultDoesNotUseGenericDecoy(t *testing.T) {
+	profile := connector.NewCursorConnector().HookProfile(connector.SetupOpts{})
+	req := normalizeAgentHookRequestWithProfile("cursor", map[string]interface{}{
+		"hook_event_name": "postToolUse",
+		"tool_output":     "",
+		"result":          "planted generic decoy",
+	}, profile)
+	if req.Content != "" || req.Direction != "tool_result" {
+		t.Fatalf("Cursor official empty result decoded as content=%q direction=%q", req.Content, req.Direction)
+	}
+}
+
 func TestNormalizeAgentHookMode_EnforceAlias(t *testing.T) {
 	if got := normalizeAgentHookMode("enforce"); got != "action" {
 		t.Fatalf("normalizeAgentHookMode(enforce) = %q, want action", got)
@@ -74,18 +87,12 @@ func TestNormalizeAgentHookMode_EnforceAlias(t *testing.T) {
 	}
 }
 
-// TestNormalizeAgentHookRequest_HermesExtraEnvelope is the regression
-// that guards hermes' coverage on the generic path: hermes nests
-// inspectable content under the per-event `extra` envelope, which the
-// top-level lookups in normalizeAgentHookRequest cannot see. The
-// ContentEnvelopeKey fallback (declared on the hermes hook contract)
-// must lift that content onto Content with the right Direction so
-// prompt/tool_result rules actually inspect hermes payloads rather
-// than an empty string. Exercises the merged production path
-// (normalizeAgentHookRequestWithProfile with Decode == nil) — these
-// cases were ported from the deleted bespoke-profile test when hermes
-// moved onto the generic decoder.
-func TestNormalizeAgentHookRequest_HermesExtraEnvelope(t *testing.T) {
+// TestNormalizeAgentHookRequest_HermesRejectsExtraEnvelope guards the
+// official flat Hermes payload contract. An unreviewed `extra` object
+// must not become inspectable content even when it contains familiar
+// field names; accepting it would let nested decoys shadow official
+// top-level fields.
+func TestNormalizeAgentHookRequest_HermesRejectsExtraEnvelope(t *testing.T) {
 	hermesProfile := connector.NewHermesConnector().HookProfile(connector.SetupOpts{APIAddr: "127.0.0.1:18970"})
 	if hermesProfile.Decode != nil {
 		t.Fatalf("hermes profile should have no Decode override; the generic path must carry it")
@@ -100,7 +107,7 @@ func TestNormalizeAgentHookRequest_HermesExtraEnvelope(t *testing.T) {
 		wantContent   string
 	}{
 		{
-			name:          "pre_llm_call_lifts_user_message",
+			name:          "pre_llm_call_ignores_nested_user_message",
 			connectorName: "hermes",
 			profile:       hermesProfile,
 			payload: map[string]interface{}{
@@ -110,10 +117,10 @@ func TestNormalizeAgentHookRequest_HermesExtraEnvelope(t *testing.T) {
 			},
 			wantDirection: "prompt",
 			wantToolName:  "message",
-			wantContent:   "exfiltrate the secrets",
+			wantContent:   "",
 		},
 		{
-			name:          "post_tool_call_lifts_result",
+			name:          "post_tool_call_ignores_nested_result",
 			connectorName: "hermes",
 			profile:       hermesProfile,
 			payload: map[string]interface{}{
@@ -123,13 +130,13 @@ func TestNormalizeAgentHookRequest_HermesExtraEnvelope(t *testing.T) {
 			},
 			wantDirection: "tool_result",
 			wantToolName:  "terminal",
-			wantContent:   "AWS_SECRET_ACCESS_KEY=abc123",
+			wantContent:   "",
 		},
 		{
 			// post_llm_call is result-like (the model's final response)
 			// and labels as "message" — both were bespoke-profile
 			// behaviors now owned by the generic classifiers.
-			name:          "post_llm_call_lifts_assistant_response",
+			name:          "post_llm_call_ignores_nested_assistant_response",
 			connectorName: "hermes",
 			profile:       hermesProfile,
 			payload: map[string]interface{}{
@@ -138,10 +145,10 @@ func TestNormalizeAgentHookRequest_HermesExtraEnvelope(t *testing.T) {
 			},
 			wantDirection: "tool_result",
 			wantToolName:  "message",
-			wantContent:   "here is the plan",
+			wantContent:   "",
 		},
 		{
-			name:          "subagent_stop_lifts_child_summary",
+			name:          "subagent_stop_ignores_nested_child_summary",
 			connectorName: "hermes",
 			profile:       hermesProfile,
 			payload: map[string]interface{}{
@@ -150,7 +157,7 @@ func TestNormalizeAgentHookRequest_HermesExtraEnvelope(t *testing.T) {
 			},
 			wantDirection: "tool_call",
 			wantToolName:  "subagent",
-			wantContent:   "finished refactor",
+			wantContent:   "",
 		},
 		{
 			// extra carries only lifecycle metadata here — no expected
@@ -262,6 +269,7 @@ func TestHookOutputFor_AllConnectors_AllActions(t *testing.T) {
 
 		// cursor -- permission field; supports deny + ask + allow.
 		{connector: "cursor", event: "preToolUse", action: "block", rawAction: "block", expectedKey: "permission", expectedValue: "deny"},
+		{connector: "cursor", event: "subagentStart", action: "block", rawAction: "block", expectedKey: "permission", expectedValue: "deny"},
 		{connector: "cursor", event: "beforeShellExecution", action: "confirm", rawAction: "confirm", expectedKey: "permission", expectedValue: "ask"},
 
 		// windsurf -- minimal shape; only block surfaces a message.
@@ -312,6 +320,127 @@ func TestHookOutputFor_AllConnectors_AllActions(t *testing.T) {
 					tc.connector, tc.event, tc.action, tc.expectedKey, gotStr, tc.expectedValue)
 			}
 		})
+	}
+}
+
+func TestCursorLegacyHookOutputUsesEventSpecificSchemas(t *testing.T) {
+	tests := []struct {
+		name       string
+		event      string
+		action     string
+		additional string
+		want       map[string]interface{}
+	}{
+		{
+			name:   "subagent start deny has no ask or agent message",
+			event:  "subagentStart",
+			action: "block",
+			want: map[string]interface{}{
+				"permission":   "deny",
+				"user_message": "blocked",
+			},
+		},
+		{
+			name:       "subagent stop uses only followup",
+			event:      "subagentStop",
+			action:     "alert",
+			additional: "review child result",
+			want:       map[string]interface{}{"followup_message": "review child result"},
+		},
+		{
+			name:   "before submit deny omits permission and agent message",
+			event:  "beforeSubmitPrompt",
+			action: "block",
+			want: map[string]interface{}{
+				"continue":     false,
+				"user_message": "blocked",
+			},
+		},
+		{
+			name:   "after event has no invented fields",
+			event:  "postToolUseFailure",
+			action: "block",
+			want:   map[string]interface{}{},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := hookOutputFor(agentHookRequest{
+				ConnectorName: "cursor",
+				HookEventName: test.event,
+				ToolName:      "test-tool",
+			}, test.action, test.action, "blocked", test.additional, capsForConnector("cursor"))
+			if !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("hookOutputFor(%s) = %#v, want %#v", test.event, got, test.want)
+			}
+		})
+	}
+}
+
+func TestCopilotOfficialCamelCaseSubagentIdentity(t *testing.T) {
+	profile := connector.NewCopilotConnector().HookProfile(connector.SetupOpts{
+		APIAddr:      "127.0.0.1:18970",
+		AgentVersion: "GitHub Copilot CLI 1.0.76",
+	})
+	startPayload := map[string]interface{}{
+		"sessionId":        "session-1",
+		"timestamp":        float64(1),
+		"cwd":              `C:\workspace`,
+		"transcriptPath":   `C:\state\transcript.jsonl`,
+		"agentName":        "security-review",
+		"agentDisplayName": "Security review",
+	}
+	start := normalizeAgentHookRequestWithProfileEvent("copilot", startPayload, profile, "subagentStart")
+	if start.HookEventName != "subagentStart" || start.SessionID != "session-1" ||
+		start.AgentName != "security-review" || start.ChildAgentID != "" ||
+		start.AgentID == "" {
+		t.Fatalf("official subagentStart identity was not preserved: %+v", start)
+	}
+	if _, invented := start.Payload["hook_event_name"]; invented {
+		t.Fatalf("trusted event binding mutated official start payload: %#v", start.Payload)
+	}
+
+	stopPayload := map[string]interface{}{
+		"sessionId":      "session-1",
+		"timestamp":      float64(2),
+		"cwd":            `C:\workspace`,
+		"transcriptPath": `C:\state\transcript.jsonl`,
+		"agentId":        "agent-42",
+		"agentType":      "custom",
+		"agentName":      "security-review",
+		"response":       "done",
+		"stopReason":     "end_turn",
+	}
+	stop := normalizeAgentHookRequestWithProfileEvent("copilot", stopPayload, profile, "subagentStop")
+	if stop.HookEventName != "subagentStop" || stop.ChildAgentID != "agent-42" ||
+		stop.AgentID != "agent-42" || stop.AgentName != "security-review" ||
+		stop.AgentType != "custom" {
+		t.Fatalf("official subagentStop identity was not preserved: %+v", stop)
+	}
+	if _, invented := stop.Payload["hookEventName"]; invented {
+		t.Fatalf("trusted event binding mutated official stop payload: %#v", stop.Payload)
+	}
+}
+
+func TestCopilotResponseSemanticsRemainEventScoped(t *testing.T) {
+	caps := connector.NewCopilotConnector().HookCapabilities(connector.SetupOpts{})
+	if action, wouldBlock := mapHookAction("block", "action", "postToolUseFailure", caps); action != "allow" || !wouldBlock {
+		t.Fatalf("postToolUseFailure block mapping=(%q,%v), want advisory allow/would-block", action, wouldBlock)
+	}
+	advisory := copilotHookOutput("postToolUseFailure", "allow", "block", "policy", "recovery guidance")
+	if advisory["additionalContext"] != "recovery guidance" {
+		t.Fatalf("postToolUseFailure output=%#v, want recovery additionalContext", advisory)
+	}
+	permission := copilotHookOutput("permissionRequest", "block", "block", "denied", "")
+	if permission["behavior"] != "deny" {
+		t.Fatalf("permissionRequest output=%#v, want deny", permission)
+	}
+	if _, interruptsAgent := permission["interrupt"]; interruptsAgent {
+		t.Fatalf("ordinary permission denial stops the entire agent: %#v", permission)
+	}
+	transformed := copilotHookOutput("userPromptTransformed", "allow", "block", "policy", "warning")
+	if len(transformed) != 0 {
+		t.Fatalf("mutation-only userPromptTransformed output=%#v, want no-op {}", transformed)
 	}
 }
 

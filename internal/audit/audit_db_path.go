@@ -70,37 +70,52 @@ func openHardenedAuditSQLiteWithIdentity(
 	dbPath string,
 	hooks auditDBPathHooks,
 ) (*sql.DB, string, error) {
+	db, identity, prepared, err := openPinnedHardenedAuditSQLiteWithIdentity(dbPath, hooks)
+	if prepared != nil {
+		prepared.close()
+	}
+	return db, identity, err
+}
+
+func openPinnedHardenedAuditSQLiteWithIdentity(
+	dbPath string,
+	hooks auditDBPathHooks,
+) (*sql.DB, string, *preparedAuditDatabasePath, error) {
 	prepared, err := prepareAuditDatabasePath(dbPath, hooks)
 	if err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
-	defer prepared.close()
 
 	if prepared.inMemory {
 		db, err := openSQLite(prepared.path)
-		return db, prepared.path, err
+		prepared.close()
+		return db, prepared.path, nil, err
 	}
 	if hooks.beforeSQLiteOpen != nil {
 		if err := hooks.beforeSQLiteOpen(prepared.path); err != nil {
-			return nil, "", fmt.Errorf("audit: pre-open path check: %w", err)
+			prepared.close()
+			return nil, "", nil, fmt.Errorf("audit: pre-open path check: %w", err)
 		}
 	}
 	db, err := openSQLite(prepared.path)
 	if err != nil {
-		return nil, "", err
+		prepared.close()
+		return nil, "", nil, err
 	}
 	// sql.Open is lazy. Ping forces SQLite's DSN pragmas and filesystem open
 	// while the validated leaf remains pinned, making permission/open errors a
 	// constructor failure instead of a later write-path surprise.
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
-		return nil, "", fmt.Errorf("audit: verify database open %s: %w", prepared.path, err)
+		prepared.close()
+		return nil, "", nil, fmt.Errorf("audit: verify database open %s: %w", prepared.path, err)
 	}
-	if err := prepared.validateAfterOpen(); err != nil {
+	if err := prepared.validateWhileSQLiteOpen(); err != nil {
 		_ = db.Close()
-		return nil, "", err
+		prepared.close()
+		return nil, "", nil, err
 	}
-	return db, prepared.path, nil
+	return db, prepared.path, prepared, nil
 }
 
 // revalidateHardenedAuditSQLite repeats the filesystem trust checks after
@@ -452,6 +467,47 @@ func (prepared *preparedAuditDatabasePath) validateAfterOpen() error {
 		return errors.New("audit: database file permissions changed during secure open")
 	}
 	return secureAuditDBSQLiteSidecars(prepared.path, prepared.hooks)
+}
+
+// validateWhileSQLiteOpen never opens and closes another descriptor for the
+// database or its WAL/SHM files. On POSIX, closing any descriptor for an inode
+// drops all process-owned record locks for that inode, including SQLite's
+// locks held by a different descriptor. Keep the original database pin for
+// the Store lifetime and validate active sidecars by trusted pathname only.
+func (prepared *preparedAuditDatabasePath) validateWhileSQLiteOpen() error {
+	if prepared == nil || prepared.pinned == nil {
+		return errors.New("audit: secure database path handle is unavailable")
+	}
+	if err := ensureTrustedAuditDBParents(filepath.Dir(prepared.path), prepared.hooks, false); err != nil {
+		return err
+	}
+	if err := validatePinnedAuditDBLeaf(prepared.path, prepared.pinned); err != nil {
+		return err
+	}
+	info, err := prepared.pinned.Stat()
+	if err != nil {
+		return fmt.Errorf("audit: inspect database file after open: %w", err)
+	}
+	if !auditDBModeMatches(info, prepared.securedMode) {
+		return errors.New("audit: database file permissions changed during secure open")
+	}
+	for _, suffix := range auditDBSQLiteSidecarSuffixes {
+		path := prepared.path + suffix
+		info, err := os.Lstat(path)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("audit: inspect active SQLite sidecar %s: %w", suffix, err)
+		}
+		if err := validateAuditDBLeaf(path, info); err != nil {
+			return fmt.Errorf("audit: unsafe active SQLite sidecar %s: %w", suffix, err)
+		}
+		if !auditDBModeMatches(info, tightenedAuditDBFileMode(info.Mode().Perm())) {
+			return fmt.Errorf("audit: active SQLite sidecar %s permissions are unsafe", suffix)
+		}
+	}
+	return nil
 }
 
 func tightenedAuditDBFileMode(mode os.FileMode) os.FileMode {

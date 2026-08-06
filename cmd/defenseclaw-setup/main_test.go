@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,6 +33,13 @@ func TestHookLauncherPayloadInterfaceIsCanonicalAndRequired(t *testing.T) {
 	if err := verifyPayloadManifest(t.TempDir(), complete); err == nil ||
 		!strings.Contains(err.Error(), hookruntime.HookLauncherName) {
 		t.Fatalf("verifyPayloadManifest missing-launcher error = %v", err)
+	}
+}
+
+func TestVCRuntimePayloadIsRequired(t *testing.T) {
+	manifest := payloadManifest{VCRuntime: "vc-runtime.zip", Files: map[string]string{}}
+	if !slices.Contains(requiredPayloadFiles(manifest), manifest.VCRuntime) {
+		t.Fatal("app-local Microsoft VC++ runtime payload is not required")
 	}
 }
 
@@ -180,6 +188,18 @@ func TestParseArgsSilentInstallProperties(t *testing.T) {
 	}
 }
 
+func TestParseArgsNormalizesCursorAgentAliases(t *testing.T) {
+	for _, alias := range []string{"cursor", "cursor-agent", "cursoragent"} {
+		opts, err := parseArgs([]string{"/quiet", "CONNECTOR=" + alias})
+		if err != nil {
+			t.Fatalf("parseArgs(%q): %v", alias, err)
+		}
+		if opts.Connector != "cursor" || !opts.ConnectorSet {
+			t.Fatalf("parseArgs(%q) connector = %q, set=%t", alias, opts.Connector, opts.ConnectorSet)
+		}
+	}
+}
+
 func TestParseArgsVerifyAction(t *testing.T) {
 	opts, err := parseArgs([]string{"/verify"})
 	if err != nil {
@@ -222,7 +242,7 @@ func TestParseArgsDeferredCleanupQuietRestartContract(t *testing.T) {
 }
 
 func TestParseArgsQuietPropertyMatrix(t *testing.T) {
-	for _, connector := range []string{"none", "codex", "claudecode", "amp"} {
+	for _, connector := range []string{"none", "amp", "claudecode", "codex", "copilot", "cursor", "hermes", "omnigent", "opencode", "windsurf"} {
 		for _, mode := range []string{"observe", "action"} {
 			for _, start := range []string{"0", "1"} {
 				t.Run(connector+"/"+mode+"/start-"+start, func(t *testing.T) {
@@ -297,7 +317,7 @@ func TestNoRestartStillRestartsPreviouslyRunningOwnedServices(t *testing.T) {
 }
 
 func TestConfiguredConnectorRequiresPersistentGateway(t *testing.T) {
-	for _, connectorName := range []string{"codex", "claudecode", "amp"} {
+	for _, connectorName := range []string{"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "hermes", "omnigent", "opencode", "windsurf"} {
 		wanted := requestedServices(options{Connector: connectorName}, serviceState{})
 		if !wanted.Gateway {
 			t.Fatalf("connector %s did not require gateway startup", connectorName)
@@ -305,6 +325,115 @@ func TestConfiguredConnectorRequiresPersistentGateway(t *testing.T) {
 	}
 	if wanted := requestedServices(options{Connector: "none"}, serviceState{}); wanted.Gateway {
 		t.Fatal("CLI-only install unexpectedly required gateway startup")
+	}
+}
+
+func TestConfiguredSetupWatchdogEnabledDefaultsAndOverride(t *testing.T) {
+	dataRoot := t.TempDir()
+	enabled, err := configuredSetupWatchdogEnabled(dataRoot)
+	if err != nil || !enabled {
+		t.Fatalf("missing canonical config watchdog enabled = %v, error = %v", enabled, err)
+	}
+
+	configPath := filepath.Join(dataRoot, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("gateway:\n  watchdog:\n    enabled: false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	enabled, err = configuredSetupWatchdogEnabled(dataRoot)
+	if err != nil || enabled {
+		t.Fatalf("explicitly disabled watchdog enabled = %v, error = %v", enabled, err)
+	}
+
+	if err := os.WriteFile(configPath, []byte("gateway:\n  watchdog: {}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	enabled, err = configuredSetupWatchdogEnabled(dataRoot)
+	if err != nil || !enabled {
+		t.Fatalf("defaulted watchdog enabled = %v, error = %v", enabled, err)
+	}
+}
+
+func TestConfiguredSetupWatchdogEnabledRejectsUnsafeStructureWithoutValueLeak(t *testing.T) {
+	privateValue := "private-synthetic-watchdog-value"
+	for _, test := range []struct {
+		name        string
+		config      string
+		wantMessage string
+	}{
+		{
+			name:        "malformed",
+			config:      "private_field: " + privateValue + "\ngateway: [\n",
+			wantMessage: "invalid YAML",
+		},
+		{
+			name: "multiple documents",
+			config: "private_field: " + privateValue + "\ngateway: {}\n---\n" +
+				"gateway:\n  watchdog:\n    enabled: false\n",
+			wantMessage: "document count",
+		},
+		{
+			name: "alias",
+			config: "private_field: " + privateValue + "\ndefault_enabled: &default_enabled false\n" +
+				"gateway:\n  watchdog:\n    enabled: *default_enabled\n",
+			wantMessage: "must not use an alias",
+		},
+		{
+			name: "duplicate",
+			config: "private_field: " + privateValue + "\ngateway:\n  watchdog:\n" +
+				"    enabled: true\n    enabled: false\n",
+			wantMessage: "duplicate enabled field",
+		},
+		{
+			name:        "non boolean",
+			config:      "gateway:\n  watchdog:\n    enabled: " + privateValue + "\n",
+			wantMessage: "not a boolean",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dataRoot := t.TempDir()
+			configPath := filepath.Join(dataRoot, "config.yaml")
+			if err := os.WriteFile(configPath, []byte(test.config), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := configuredSetupWatchdogEnabled(dataRoot)
+			if err == nil || !strings.Contains(err.Error(), test.wantMessage) {
+				t.Fatalf("unsafe watchdog configuration error = %v", err)
+			}
+			if strings.Contains(err.Error(), privateValue) {
+				t.Fatal("watchdog configuration error leaked a configuration value")
+			}
+		})
+	}
+}
+
+func TestConfiguredInstallServicesRequiresEnabledWatchdog(t *testing.T) {
+	dataRoot := t.TempDir()
+	wanted, err := configuredInstallServices(
+		serviceState{Gateway: true},
+		dataRoot,
+	)
+	if err != nil || !wanted.Gateway || !wanted.Watchdog {
+		t.Fatalf("fresh Copilot services = %+v, error = %v", wanted, err)
+	}
+
+	configPath := filepath.Join(dataRoot, "config.yaml")
+	if err := os.WriteFile(configPath, []byte("gateway:\n  watchdog:\n    enabled: false\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	wanted, err = configuredInstallServices(
+		serviceState{Gateway: true},
+		dataRoot,
+	)
+	if err != nil || !wanted.Gateway || wanted.Watchdog {
+		t.Fatalf("watchdog-disabled Copilot services = %+v, error = %v", wanted, err)
+	}
+
+	wanted, err = configuredInstallServices(
+		serviceState{Gateway: true, Watchdog: true},
+		dataRoot,
+	)
+	if err != nil || !wanted.Watchdog {
+		t.Fatalf("previously running watchdog was not preserved: %+v, error = %v", wanted, err)
 	}
 }
 
@@ -318,6 +447,222 @@ func TestCanonicalInitializationUsesExplicitNoConnectorAuthority(t *testing.T) {
 	}
 	if !slices.Equal(args, want) {
 		t.Fatalf("canonical initialization args = %v, want %v", args, want)
+	}
+}
+
+func TestCursorInitializationPreservesAction(t *testing.T) {
+	args := initialConfigurationArgs(options{Connector: "cursor", Mode: "action"})
+	want := []string{
+		"init", "--skip-install", "--non-interactive", "--yes",
+		"--connector", "cursor",
+		"--profile", "action",
+		"--no-start-gateway", "--no-verify",
+	}
+	if !slices.Equal(args, want) {
+		t.Fatalf("Cursor initialization args = %v, want %v", args, want)
+	}
+}
+
+func TestCursorActionTransactionStagesNormalizedOwnership(t *testing.T) {
+	requested := options{Connector: "cursor", Mode: "action"}
+	connector, mode := setupTransactionTarget("install", requested)
+	if otherConnector, otherMode := setupTransactionTarget(
+		"install",
+		options{Connector: "codex", Mode: "action"},
+	); otherConnector != "codex" || otherMode != "action" {
+		t.Fatalf("non-Cursor transaction target = %s/%s, want codex/action", otherConnector, otherMode)
+	}
+	if uninstallConnector, uninstallMode := setupTransactionTarget(
+		"uninstall",
+		requested,
+	); uninstallConnector != "none" || uninstallMode != "action" {
+		t.Fatalf("uninstall transaction target = %s/%s, want none/action", uninstallConnector, uninstallMode)
+	}
+	transaction := setupTransaction{
+		ID:              "0123456789abcdef0123456789abcdef",
+		TargetConnector: connector,
+		TargetMode:      mode,
+	}
+	state := installState{Connector: requested.Connector, Mode: requested.Mode}
+	bindStagedInstallStateOwnership(&state, transaction)
+
+	if transaction.TargetConnector != "cursor" || transaction.TargetMode != "action" {
+		t.Fatalf(
+			"Cursor action transaction target = %s/%s, want cursor/action",
+			transaction.TargetConnector,
+			transaction.TargetMode,
+		)
+	}
+	if state.TransactionID != transaction.ID ||
+		state.Connector != transaction.TargetConnector ||
+		state.Mode != transaction.TargetMode {
+		t.Fatalf(
+			"staged install ownership = txn %q %s/%s, want txn %q %s/%s",
+			state.TransactionID,
+			state.Connector,
+			state.Mode,
+			transaction.ID,
+			transaction.TargetConnector,
+			transaction.TargetMode,
+		)
+	}
+}
+
+func TestCopilotInitializationRetainsNarrowNativeSetupBootstrap(t *testing.T) {
+	args := initialConfigurationArgs(options{Connector: "copilot", Mode: "action"})
+	want := []string{
+		"init", "--skip-install", "--non-interactive", "--yes",
+		"--connector", "copilot",
+		"--profile", "action",
+		"--no-start-gateway", "--no-verify",
+		"--native-setup-copilot",
+	}
+	if !slices.Equal(args, want) {
+		t.Fatalf("Copilot initialization args = %v, want %v", args, want)
+	}
+}
+
+func TestAntigravityInitializationHasNoPublicBootstrapFlag(t *testing.T) {
+	args := initialConfigurationArgs(options{Connector: "antigravity", Mode: "action"})
+	want := []string{
+		"init", "--skip-install", "--non-interactive", "--yes",
+		"--connector", "antigravity",
+		"--profile", "action",
+		"--no-start-gateway", "--no-verify",
+	}
+	if !slices.Equal(args, want) {
+		t.Fatalf("Antigravity initialization args = %v, want %v", args, want)
+	}
+}
+
+func TestAntigravityInitializationEnvironmentBindsVerifiedSetupParent(t *testing.T) {
+	setupPath := filepath.Join(`C:\Program Files\DefenseClaw`, setupArtifactName)
+	env := initialConfigurationEnv(
+		[]string{
+			"SAFE_SETTING=kept",
+			internalSetupConnectorEnv + "=attacker-value",
+			internalSetupParentEnv + `=C:\attacker.exe`,
+		},
+		"antigravity",
+		setupPath,
+	)
+	if got := envValue(env, "SAFE_SETTING"); got != "kept" {
+		t.Fatalf("safe environment value = %q, want kept", got)
+	}
+	if got := envValue(env, internalSetupConnectorEnv); got != "antigravity" {
+		t.Fatalf("internal connector binding = %q, want antigravity", got)
+	}
+	if got := envValue(env, internalSetupParentEnv); got != setupPath {
+		t.Fatalf("internal parent binding = %q, want %q", got, setupPath)
+	}
+
+	publicEnv := initialConfigurationEnv(env, "none", "")
+	if got := envValue(publicEnv, internalSetupConnectorEnv); got != "" {
+		t.Fatalf("public initialization retained internal connector binding %q", got)
+	}
+	if got := envValue(publicEnv, internalSetupParentEnv); got != "" {
+		t.Fatalf("public initialization retained internal parent binding %q", got)
+	}
+}
+
+func TestDeferredUninstallConnectorVerifyArgsBindExactCleanupAuthority(t *testing.T) {
+	transactionID := "0123456789abcdef0123456789abcdef"
+	root := t.TempDir()
+	setupPath := filepath.Join(root, "DefenseClaw", "InstallerCache", setupArtifactName)
+	dataRoot := filepath.Join(root, "profile", ".defenseclaw")
+	configHome := filepath.Join(root, "profile", ".claude")
+	recordPath := filepath.Join(root, "DefenseClaw", "InstallerState", "uninstall-cleanup.json")
+	transaction := setupTransaction{
+		ID:              transactionID,
+		Action:          "uninstall",
+		DataRoot:        dataRoot,
+		MaintenancePath: setupPath,
+	}
+	args, err := deferredUninstallConnectorVerifyCommandArgs(
+		transaction,
+		setupPath,
+		recordPath,
+		"claudecode",
+		[]string{"CLAUDE_CONFIG_DIR=" + configHome},
+	)
+	if err != nil {
+		t.Fatalf("deferred verify args: %v", err)
+	}
+	want := []string{
+		"connector", "verify",
+		"--connector", "claudecode",
+		"--data-dir", dataRoot,
+		"--config-home", configHome,
+		"--json",
+		"--internal-setup-parent", setupPath,
+		"--internal-deferred-cleanup-record", recordPath,
+		"--internal-deferred-cleanup-transaction", transactionID,
+	}
+	if !slices.Equal(args, want) {
+		t.Fatalf("deferred verify args = %v, want %v", args, want)
+	}
+
+	foreign := transaction
+	foreign.ID = "invalid"
+	if _, err := deferredUninstallConnectorVerifyCommandArgs(
+		foreign,
+		setupPath,
+		recordPath,
+		"claudecode",
+		[]string{"CLAUDE_CONFIG_DIR=" + configHome},
+	); err == nil {
+		t.Fatal("invalid cleanup transaction was accepted")
+	}
+}
+
+func TestParseArgsAllowsPublicAntigravitySetupSelection(t *testing.T) {
+	for _, args := range [][]string{
+		{"/quiet", "CONNECTOR=antigravity"},
+		{"/repair", "/quiet", "CONNECTOR=antigravity"},
+		{"/upgrade", "/quiet", "CONNECTOR=antigravity"},
+	} {
+		got, err := parseArgs(args)
+		if err != nil {
+			t.Fatalf("parseArgs(%q): %v", args, err)
+		}
+		if got.Connector != "antigravity" || !got.ConnectorSet {
+			t.Fatalf("parseArgs(%q) connector = %q set=%v", args, got.Connector, got.ConnectorSet)
+		}
+	}
+}
+
+func TestParseArgsAllowsRecordedAntigravityMaintenanceWithoutOverride(t *testing.T) {
+	for _, action := range []string{"/repair", "/upgrade"} {
+		opts, err := parseArgs([]string{action, "/quiet"})
+		if err != nil {
+			t.Fatalf("parseArgs(%q): %v", action, err)
+		}
+		if opts.ConnectorSet || opts.Connector != "none" {
+			t.Fatalf("parseArgs(%q) introduced connector authority: %+v", action, opts)
+		}
+	}
+}
+
+func TestPrintUsageAdvertisesPublicAntigravitySelection(t *testing.T) {
+	readEnd, writeEnd, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer readEnd.Close()
+	previous := os.Stdout
+	os.Stdout = writeEnd
+	defer func() { os.Stdout = previous }()
+
+	printUsage()
+	if err := writeEnd.Close(); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := io.ReadAll(readEnd)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(payload), "CONNECTOR=amp|antigravity|") {
+		t.Fatalf("public Setup usage omits Antigravity selection: %s", payload)
 	}
 }
 
@@ -523,7 +868,7 @@ func TestConnectorsForNativeUninstallUsesDurableBackups(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []string{"codex", "claudecode"}
-	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+	if !slices.Equal(got, want) {
 		t.Fatalf("connectors = %v, want %v", got, want)
 	}
 }
@@ -531,9 +876,16 @@ func TestConnectorsForNativeUninstallUsesDurableBackups(t *testing.T) {
 func TestConnectorsForNativeUninstallUsesStructuredBackupMarkers(t *testing.T) {
 	dataRoot := t.TempDir()
 	markers := []string{
+		filepath.Join("connector_backups", "antigravity", "hooks.json.json"),
+		filepath.Join("connector_backups", "amp", "config.json"),
 		filepath.Join("connector_backups", "codex", "config.toml.json"),
 		filepath.Join("connector_backups", "claudecode", "settings.json.json"),
-		filepath.Join("connector_backups", "amp", "config.json"),
+		filepath.Join("connector_backups", "copilot", "config.json"),
+		filepath.Join("connector_backups", "cursor", "hooks.json.json"),
+		filepath.Join("connector_backups", "windsurf", "config.json"),
+		filepath.Join("connector_backups", "opencode", "config.json"),
+		filepath.Join("connector_backups", "omnigent", "config.json"),
+		filepath.Join("connector_backups", "hermes", "config.yaml.json"),
 	}
 	for _, marker := range markers {
 		path := filepath.Join(dataRoot, marker)
@@ -549,7 +901,7 @@ func TestConnectorsForNativeUninstallUsesStructuredBackupMarkers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"codex", "claudecode", "amp"}
+	want := []string{"codex", "claudecode", "amp", "copilot", "cursor", "windsurf", "antigravity", "opencode", "omnigent", "hermes"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("connectors = %v, want %v", got, want)
 	}
@@ -557,7 +909,7 @@ func TestConnectorsForNativeUninstallUsesStructuredBackupMarkers(t *testing.T) {
 
 func TestConnectorsForNativeUninstallUsesActiveConnectorRoster(t *testing.T) {
 	dataRoot := t.TempDir()
-	state := []byte(`{"version":3,"names":["claudecode","codex"],"name":"claudecode"}`)
+	state := []byte(`{"version":3,"names":["claudecode","codex","copilot","cursor","opencode"],"name":"claudecode"}`)
 	if err := os.WriteFile(filepath.Join(dataRoot, "active_connector.json"), state, 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -566,8 +918,8 @@ func TestConnectorsForNativeUninstallUsesActiveConnectorRoster(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"claudecode", "codex"}
-	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+	want := []string{"claudecode", "codex", "copilot", "cursor", "opencode"}
+	if !slices.Equal(got, want) {
 		t.Fatalf("connectors = %v, want %v", got, want)
 	}
 }
@@ -582,9 +934,16 @@ guardrail:
   connectors:
     amp:
       mode: action
+    antigravity:
+      mode: observe
     claudecode:
       mode: action
     codex:
+      mode: observe
+    copilot:
+      mode: observe
+    cursor:
+    opencode:
       mode: observe
 gateway:
   token: private-synthetic-value-must-not-appear
@@ -599,7 +958,7 @@ observability:
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"amp", "claudecode", "codex"}
+	want := []string{"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "opencode"}
 	if !slices.Equal(got, want) {
 		t.Fatalf("connectors = %v, want %v", got, want)
 	}
@@ -861,6 +1220,7 @@ func TestManagedChildEnvPinsDataRoot(t *testing.T) {
 	t.Setenv("DEFENSECLAW_HOME", `C:\untrusted`)
 	t.Setenv("PYTHONUTF8", "0")
 	t.Setenv("PYTHONIOENCODING", "cp1252")
+	t.Setenv(upgradeFreshProcessEnv, "1")
 	env := managedChildEnv(`C:\Users\test\.defenseclaw`)
 	counts := map[string]int{}
 	for _, entry := range env {
@@ -869,6 +1229,9 @@ func TestManagedChildEnvPinsDataRoot(t *testing.T) {
 		}
 		if entry == "PYTHONUTF8=0" || entry == "PYTHONIOENCODING=cp1252" {
 			t.Fatalf("ambient Python encoding survived managedChildEnv: %q", entry)
+		}
+		if strings.HasPrefix(strings.ToUpper(entry), upgradeFreshProcessEnv+"=") {
+			t.Fatalf("ambient upgrade readiness delegation survived managedChildEnv: %q", entry)
 		}
 		counts[entry]++
 	}
@@ -880,6 +1243,25 @@ func TestManagedChildEnvPinsDataRoot(t *testing.T) {
 		if counts[want] != 1 {
 			t.Fatalf("managed environment count for %q = %d, want 1", want, counts[want])
 		}
+	}
+}
+
+func TestFreshRollbackRecoveryEnvBypassesOnlyStaleClaudeReadiness(t *testing.T) {
+	t.Setenv(upgradeFreshProcessEnv, "untrusted")
+	env := managedRecoveryChildEnv(`C:\Users\test\.defenseclaw`)
+	count := 0
+	for _, entry := range env {
+		name, value, ok := strings.Cut(entry, "=")
+		if !ok || !strings.EqualFold(name, upgradeFreshProcessEnv) {
+			continue
+		}
+		count++
+		if value != "1" {
+			t.Fatalf("recovery readiness marker = %q, want 1", value)
+		}
+	}
+	if count != 1 {
+		t.Fatalf("recovery readiness marker count = %d, want 1", count)
 	}
 }
 
@@ -1423,6 +1805,7 @@ func TestVerifyPayloadManifestRejectsMissingRequiredHash(t *testing.T) {
 		GatewayArchive:     "gateway.zip",
 		Wheel:              "defenseclaw.whl",
 		PythonEmbed:        "python.zip",
+		VCRuntime:          "vc-runtime.zip",
 		YaraCompatWheel:    "yara-python.whl",
 		SitePackages:       "site-packages.zip",
 		Launcher:           "launcher.exe",

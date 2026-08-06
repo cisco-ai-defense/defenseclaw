@@ -176,7 +176,7 @@ def test_alerts_connector_column_and_shared_filter() -> None:
     model.set_events(
         [
             AlertEvent(id="a1", severity="HIGH", action="connector-hook",
-                       target="preToolUse", details="connector=codex action=block"),
+                       target="preToolUse", connector="codex", details="action=block"),
             AlertEvent(id="a2", severity="MEDIUM", action="connector-hook",
                        target="preToolUse", details="connector=cursor action=alert"),
         ]

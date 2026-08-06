@@ -11,6 +11,7 @@
 package connector
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -48,6 +49,91 @@ func managedFileBackupPath(dataDir, connectorName, logicalName string) string {
 		name = "config"
 	}
 	return filepath.Join(dataDir, "connector_backups", connectorName, name+".json")
+}
+
+// migrateManagedFileBackupLogicalName moves one connector-owned backup record
+// to its canonical logical name without recapturing the vendor file. This
+// preserves the original bytes and post-write hash used for exact restoration.
+// A duplicate legacy record is discarded only when its custody metadata is
+// identical; conflicting records fail closed.
+func migrateManagedFileBackupLogicalName(
+	dataDir, connectorName, legacyLogicalName, canonicalLogicalName string,
+) error {
+	if legacyLogicalName == canonicalLogicalName {
+		return nil
+	}
+	legacyPath := managedFileBackupPath(dataDir, connectorName, legacyLogicalName)
+	canonicalPath := managedFileBackupPath(dataDir, connectorName, canonicalLogicalName)
+
+	legacy, legacyErr := loadManagedFileBackupPath(legacyPath)
+	if legacyErr != nil && !os.IsNotExist(legacyErr) {
+		return fmt.Errorf("load legacy managed backup: %w", legacyErr)
+	}
+	canonical, canonicalErr := loadManagedFileBackupPath(canonicalPath)
+	if canonicalErr != nil && !os.IsNotExist(canonicalErr) {
+		return fmt.Errorf("load canonical managed backup: %w", canonicalErr)
+	}
+	if os.IsNotExist(legacyErr) {
+		return nil
+	}
+	legacyTarget, err := validateManagedFileBackupTarget(
+		legacy, connectorName, legacyLogicalName, legacy.Path,
+	)
+	if err != nil {
+		return fmt.Errorf("validate legacy managed backup: %w", err)
+	}
+
+	if canonicalErr == nil {
+		canonicalTarget, err := validateManagedFileBackupTarget(
+			canonical, connectorName, canonicalLogicalName, canonical.Path,
+		)
+		if err != nil {
+			return fmt.Errorf("validate canonical managed backup: %w", err)
+		}
+		if !sameManagedBackupCustody(&legacy, legacyTarget, &canonical, canonicalTarget) {
+			return fmt.Errorf(
+				"%s has conflicting %s and %s managed backup custody",
+				connectorName, legacyLogicalName, canonicalLogicalName,
+			)
+		}
+		return removeManagedBackupFile(legacyPath)
+	}
+
+	migrated := legacy
+	migrated.LogicalName = canonicalLogicalName
+	if err := writeManagedFileBackup(canonicalPath, migrated); err != nil {
+		return fmt.Errorf("write canonical managed backup: %w", err)
+	}
+	return removeManagedBackupFile(legacyPath)
+}
+
+func sameManagedBackupCustody(
+	left *managedFileBackup,
+	leftTarget string,
+	right *managedFileBackup,
+	rightTarget string,
+) bool {
+	return left.Version == right.Version &&
+		sameManagedTargetPath(leftTarget, rightTarget) &&
+		left.Existed == right.Existed &&
+		left.Mode == right.Mode &&
+		left.PristineSHA256 == right.PristineSHA256 &&
+		left.PostSHA256 == right.PostSHA256 &&
+		bytes.Equal(left.PristineBytes, right.PristineBytes)
+}
+
+func sameManagedTargetPath(left, right string) bool {
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(filepath.Clean(left), filepath.Clean(right))
+	}
+	return filepath.Clean(left) == filepath.Clean(right)
+}
+
+func removeManagedBackupFile(path string) error {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove legacy managed backup: %w", err)
+	}
+	return nil
 }
 
 func managedFileBackupTargetPath(dataDir, connectorName, logicalName, fallback string) string {

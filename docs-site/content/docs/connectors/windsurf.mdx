@@ -1,13 +1,21 @@
 ---
-title: Windsurf
-description: Windsurf connector wires Cascade hooks across pre_user_prompt, pre_read_code, pre_write_code, pre_run_command, and pre_mcp_tool_use.
+title: Devin Desktop — legacy Cascade
+description: Supported connector for the legacy Cascade hook surface in Devin Desktop; Devin Local, cloud, and ACP are unsupported.
 keywords:
   - DefenseClaw Windsurf connector
   - Windsurf Cascade hooks
   - Windsurf observability
 ---
 
-The Windsurf connector wires DefenseClaw into [Codeium's Cascade hooks](https://codeium.com/) so every prompt, code read, code write, command run, and MCP tool call is scored before it lands.
+The `windsurf` connector is a **supported legacy Cascade-only integration**. It wires
+DefenseClaw into the official
+[Cascade hooks](https://docs.devin.ai/desktop/cascade/hooks) surface in Devin
+Desktop so supported prompts, code reads, code writes, command runs, and MCP
+tool calls can be scored before they land. It does not integrate with
+[Devin Local](https://docs.devin.ai/desktop/devin-local), the current default
+agent for new tabs, or with Devin cloud, ACP, or their separate lifecycle
+hooks. Those agents are unsupported and must not be treated as protected by
+this connector.
 
 ## Setup
 
@@ -16,18 +24,84 @@ defenseclaw setup windsurf
 ```
 
 <Callout type="warning">
-Windsurf setup is supported on macOS and Linux. The DefenseClaw connector is
-not certified on native Windows x64, so setup rejects it there.
+This connector covers legacy Cascade only. Native Windows x64 setup is
+supported, while validation metadata remains empty and `live=false`. Devin Local, cloud agents, ACP, Restricted Mode,
+and managed/system hook layers are outside this connector's enforcement
+boundary.
 </Callout>
 
-`setup windsurf` is the dedicated Windsurf alias. It uses the shared guardrail
-setup backend and wires hooks against `~/.codeium/windsurf/hooks.json`.
-DefenseClaw discovers existing MCP and rules surfaces but never auto-creates
-workspace configuration. **There is no proxy-enforcement path** — blocking
-happens hook-side via Cascade's `pre_user_prompt`, `pre_read_code`,
-`pre_write_code`, `pre_run_command`, and `pre_mcp_tool_use`. Windsurf has no
+`setup windsurf` is the retained alias for this legacy Cascade connector. It
+uses the shared guardrail setup backend and manages only the user hook file at
+`~/.codeium/windsurf/hooks.json`. Read-only inventory uses the persisted,
+bound user profile and an explicitly pinned workspace to discover:
+
+- Cascade MCP servers in `~/.codeium/windsurf/mcp_config.json`;
+- the user global rule, preferred `.devin/rules`, legacy `.windsurf/rules`
+  and `.windsurfrules`, and recursive or ancestor `AGENTS.md` files through the
+  repository root; and
+- user and workspace `.windsurf/skills` and `.agents/skills` roots.
+
+Directory traversal is bounded and does not follow links or reparse points.
+DefenseClaw never auto-creates these customization files. System installation
+roots, `ProgramData`, enterprise rules and skills, Team settings,
+cloud-dashboard policy, MDM policy, and optional Claude-compatibility skill
+loading are not inventoried or enforced. Their precedence and applicability
+remain unverified, so this connector does not claim authoritative enforcement
+over higher layers. Devin Local also uses different MCP, rule, skill, and
+lifecycle configuration and is not silently included.
+
+**There is no proxy-enforcement path** — blocking happens hook-side via
+Cascade's
+`pre_user_prompt`, `pre_read_code`,
+`pre_write_code`, `pre_run_command`, and `pre_mcp_tool_use`. Cascade has no
 native ask surface, so confirm verdicts use its non-pausing fallback with
 `raw_action` preserved for audit.
+
+### Native Windows x64 support
+
+The legacy Cascade native Windows implementation is supported.
+With the official [Devin Desktop Windows x64 build](https://devin.ai/download)
+installed for the same signed-in user, run this from PowerShell or cmd:
+
+```powershell
+defenseclaw setup windsurf --mode observe
+defenseclaw doctor
+```
+
+Setup binds the Windows Profile Known Folder explicitly and manages only
+`<bound-profile>\.codeium\windsurf\hooks.json`. That exact profile root is
+persisted for repair, upgrade, reconciliation, and uninstall. DefenseClaw does
+not inherit a maintenance process's `USERPROFILE`, guess from the data
+directory, or inspect another user's configuration.
+
+Hook setup is one connector-owned readiness transaction. It captures the
+managed backup for that exact `hooks.json`, writes one DefenseClaw handler to
+each of the twelve Cascade events, verifies the exact event matrix and native
+adapter command, publishes the `windsurf-hooks-v1` contract lock/runtime
+metadata, and only then publishes Windsurf as active. A failure in verification
+or metadata publication rolls the partial setup back. No peer connector setup
+is needed to create or repair these assets.
+
+`mcp_config.json` is optional, read-only Cascade inventory. Its absence does
+not make hook setup unhealthy and does not trigger hook repair. Doctor reports
+an absent or empty file as skipped inventory; a missing Windsurf contract lock
+for an active connector is a setup failure and points back to `setup windsurf`.
+
+Legacy Cascade runs the documented `powershell` hook field through
+`powershell -Command`. DefenseClaw writes no `command` fallback. The generated
+native PowerShell adapter forwards JSON stdin and stdout/stderr, waits for the
+exact packaged `defenseclaw-hook.exe`, and propagates its exit status,
+including blocking exit `2`. This path uses no Bash, Git Bash, Cygwin/MSYS,
+WSL, Docker, or VM.
+
+Packaged Windows and interactive official-client validation remain release
+gates. No live-client evidence is asserted here. Do not treat supported
+availability as certification or as coverage for Devin Local, cloud, or ACP.
+Doctor can validate the twelve persisted registrations but cannot passively
+read the workspace's Restricted Mode UI state; it therefore warns explicitly
+that Restricted Mode disables all Cascade hooks. No authentic event was
+observed for this correction. A zero event counter is inconclusive and is not
+activation or certification evidence.
 
 #### What `setup windsurf` actually does
 
@@ -44,7 +118,7 @@ and judge-provider configuration.
 | `--restart / --no-restart` | `--restart` | Bounce `defenseclaw-gateway` after applying changes so the new hooks wire in. |
 | `--with-local-stack / --no-local-stack` | `--no-local-stack` | Also run `setup local-observability up`; follow the command's printed gateway-restart step after it writes the export destination. |
 
-The alias defaults Windsurf to observe mode and can join an existing hook-connector roster when you choose **Add**. To tune Windsurf after install, keep using [`defenseclaw setup guardrail --connector windsurf`](/docs/setup/guardrail) — see the variations below.
+The alias defaults legacy Cascade to observe mode and can join an existing hook-connector roster when you choose **Add**. To tune it after install, keep using [`defenseclaw setup guardrail --connector windsurf`](/docs/setup/guardrail) — see the variations below.
 
 #### Common variations — pick the recipe that fits your phase
 
@@ -87,13 +161,13 @@ defenseclaw setup guardrail \
   --restart
 ```
 
-The alias selects Windsurf; the follow-up `setup guardrail --connector windsurf` swaps in the strict rule pack, keeps scanning local, and turns the LLM judge on as a second-pass adjudicator on regex-flagged events. Configure the remote scanner separately through [full guardrail setup](/docs/setup/guardrail), which validates its endpoint and API-key environment variable.
+The alias selects the supported Devin Desktop legacy Cascade connector; the follow-up `setup guardrail --connector windsurf` swaps in the strict rule pack, keeps scanning local, and turns the LLM judge on as a second-pass adjudicator on regex-flagged events. It does not enable Devin Local, cloud agents, or ACP. Configure the remote scanner separately through [full guardrail setup](/docs/setup/guardrail), which validates its endpoint and API-key environment variable.
 
 </Tab>
 
 <Tab value="Hook-side enforcement">
 
-Windsurf has no proxy enforcement, but its pre-action hooks can enforce
+Legacy Cascade has no proxy enforcement, but its pre-action hooks can enforce
 directly:
 
 ```bash
@@ -101,10 +175,16 @@ defenseclaw setup windsurf --mode action
 ```
 
 With `mode=action`, the five declared pre-hooks block when policy returns
-`block`. A `confirm` verdict uses Windsurf's non-pausing fallback because the
-agent has no native ask surface. Windsurf does not provide a fail-closed hook
-transport surface, so `--fail-mode closed` cannot make an unavailable hook
-block the agent.
+`block`. A `confirm` verdict uses Cascade's non-pausing fallback because the
+agent has no native ask surface.
+
+The vendor hook transport has no generic fail-closed error: exit `2` is the
+only blocking status and applies only to the five documented pre-hooks; every
+other exit proceeds. DefenseClaw's `fail_mode: closed` deliberately maps its
+own adapter availability failures to that vendor-defined exit `2` on those
+five pre-hooks. It cannot make any post-hook block. Of the post-hooks, only
+`post_cascade_response` and `post_cascade_response_with_transcript` run
+asynchronously. Restricted Mode disables hooks entirely.
 
 </Tab>
 
@@ -113,7 +193,7 @@ block the agent.
 #### Decision aids — should I turn this on?
 
 <Cards>
-  <Card href="/docs/hitl" title="Human-in-the-loop (HITL)" description="Per-connector ask matrix. Windsurf has no native ask; confirm uses an immediate fallback preserved in audit." />
+  <Card href="/docs/hitl" title="Human-in-the-loop (HITL)" description="Per-connector ask matrix. Legacy Cascade has no native ask; confirm uses the existing immediate continuation behavior preserved in audit." />
   <Card href="/docs/setup/guardrail#every-flag" title="Full setup guardrail flag reference" description="The complete flag surface for `setup guardrail --connector windsurf`." />
   <Card href="/docs/defaults" title="Defaults & rule packs" description="What permissive / default / strict actually ship, and which one matches your risk tolerance." />
   <Card href="/docs/setup/guardrail#watch-the-interactive-flow" title="Interactive wizard" description="Animated terminal demo of the prompt-by-prompt setup flow — the safest path the first time." />
@@ -131,7 +211,8 @@ Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [int
   </Folder>
   <Folder name="~/.defenseclaw" defaultOpen>
     <Folder name="hooks">
-      <File name="windsurf-hook.sh" />
+      <File name="windsurf-hook.sh (macOS/Linux)" />
+      <File name="windsurf-hook.ps1 (native Windows)" />
     </Folder>
   </Folder>
 </Files>
@@ -141,12 +222,20 @@ Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [int
 <HookEventsList connector="windsurf" />
 
 <Callout>
-Windsurf has no native human-approval surface. Confirm verdicts use an immediate fallback with `raw_action` preserved; operators can review them in the TUI or audit log, but cannot approve and resume them there.
+Cascade has no native human-approval surface. Confirm verdicts use an immediate fallback with `raw_action` preserved; operators can review them in the TUI or audit log, but cannot approve and resume them there.
+</Callout>
+
+<Callout type="warning" title="Know the vendor enforcement limits">
+Only `pre_user_prompt`, `pre_read_code`, `pre_write_code`,
+`pre_run_command`, and `pre_mcp_tool_use` can block, and only with exit `2`.
+Every other exit proceeds. Post-hooks cannot block; only
+`post_cascade_response` and `post_cascade_response_with_transcript` run
+asynchronously. Restricted Mode disables all hooks.
 </Callout>
 
 ## Subprocess policy
 
-`none` — Windsurf executes commands inside its own runtime; DefenseClaw observes via the `pre_run_command` hook rather than the openshell sandbox.
+`none` — Cascade executes commands inside its own runtime; DefenseClaw observes via the `pre_run_command` hook rather than the openshell sandbox.
 
 ## Disable
 

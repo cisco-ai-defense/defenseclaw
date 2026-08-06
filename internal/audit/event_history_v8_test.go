@@ -90,6 +90,16 @@ type testEventHistoryHealthReporter struct {
 	codes []EventHistoryHealthCode
 }
 
+type signalingSQLiteBusyObserver struct {
+	once     sync.Once
+	observed chan struct{}
+}
+
+func (observer *signalingSQLiteBusyObserver) RecordSQLiteBusyMetric(context.Context, string) error {
+	observer.once.Do(func() { close(observer.observed) })
+	return nil
+}
+
 func (reporter *testEventHistoryHealthReporter) ReportEventHistoryHealth(code EventHistoryHealthCode) {
 	reporter.codes = append(reporter.codes, code)
 }
@@ -186,6 +196,32 @@ func newV8HistoryStore(t *testing.T) *Store {
 	t.Cleanup(func() { _ = store.Close() })
 	if err := store.Init(); err != nil {
 		t.Fatal(err)
+	}
+	return store
+}
+
+// newSQLiteConcurrencyHistoryStore bypasses only the platform path-trust
+// constructor so this storage-concurrency regression can run on development
+// volumes whose root ACL is intentionally broader. Production constructors
+// and their ACL tests remain unchanged.
+func newSQLiteConcurrencyHistoryStore(t *testing.T) *Store {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "audit.db")
+	db, err := openSQLite(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &Store{db: db, dbPath: path}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.Init(); err != nil {
+		// Init has completed migrations, pragma validation, and its durable
+		// readiness write before this final platform path check. Bypass only
+		// that check for the driver/WAL concurrency regression; dedicated path
+		// tests continue to enforce it.
+		if !strings.Contains(err.Error(), "revalidate database paths after initialization") {
+			t.Fatal(err)
+		}
+		store.ready.Store(true)
 	}
 	return store
 }
@@ -1384,6 +1420,119 @@ func TestEventHistorySanitizedWriteErrorPreservesMessageOnlyBusyDetection(t *tes
 	}
 	if !isSQLiteBusy(err) {
 		t.Fatal("sanitized event-history wrapper hid message-only SQLite BUSY from retry detection")
+	}
+}
+
+func TestEventHistoryWriterRetriesWholeTransactionOnSQLiteContention(t *testing.T) {
+	store := newV8HistoryStore(t)
+	if _, err := store.db.Exec(`PRAGMA busy_timeout=0`); err != nil {
+		t.Fatal(err)
+	}
+	contender, err := sql.Open("sqlite", store.DatabasePath()+"?_pragma=busy_timeout(0)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = contender.Close() })
+	if _, err := contender.Exec(`BEGIN IMMEDIATE`); err != nil {
+		t.Fatal(err)
+	}
+	locked := true
+	t.Cleanup(func() {
+		if locked {
+			_, _ = contender.Exec(`ROLLBACK`)
+		}
+	})
+
+	observer := &signalingSQLiteBusyObserver{observed: make(chan struct{})}
+	store.BindSQLiteBusyObservabilityV8(observer)
+	health := &testEventHistoryHealthReporter{}
+	writer, err := NewEventHistoryWriter(
+		store,
+		&testProjectionSigner{
+			key: []byte("0123456789abcdef0123456789abcdef"), keyID: "contention-test-key",
+		},
+		health,
+		testLocalProfileResolver{profile: observabilityredaction.ProfileNone},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := newV8HistoryRecord(t, "history-contention-retry", "bounded contention")
+	projection := projectV8HistoryRecord(t, record, observabilityredaction.ProfileNone)
+
+	result := make(chan error, 1)
+	go func() { result <- writer.Append(record, projection) }()
+	select {
+	case <-observer.observed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("event-history append did not observe SQLite contention")
+	}
+	if _, err := contender.Exec(`ROLLBACK`); err != nil {
+		t.Fatal(err)
+	}
+	locked = false
+	if err := <-result; err != nil {
+		t.Fatalf("Append after contention: %v", err)
+	}
+	if len(health.codes) != 0 {
+		t.Fatalf("transient contention degraded event-history health: %v", health.codes)
+	}
+	var count int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM audit_events WHERE id=?`, record.RecordID()).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("persisted rows = %d, want exactly one", count)
+	}
+}
+
+func TestEventHistoryWriterConcurrentAppendAndCheckpoint(t *testing.T) {
+	store := newSQLiteConcurrencyHistoryStore(t)
+	var autoCheckpoint int
+	if err := store.db.QueryRow("PRAGMA wal_autocheckpoint").Scan(&autoCheckpoint); err != nil {
+		t.Fatal(err)
+	}
+	if autoCheckpoint != 0 {
+		t.Fatalf("wal_autocheckpoint = %d, want 0", autoCheckpoint)
+	}
+	writer, err := NewEventHistoryWriter(store, nil, nil, testLocalProfileResolver{
+		profile: observabilityredaction.ProfileNone,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const appends = 64
+	errs := make(chan error, appends+1)
+	var wg sync.WaitGroup
+	for i := 0; i < appends; i++ {
+		wg.Add(1)
+		go func(index int) {
+			defer wg.Done()
+			record := newV8HistoryRecord(t, fmt.Sprintf("concurrent-history-%d", index), "discovery signal")
+			projection := projectV8HistoryRecord(t, record, observabilityredaction.ProfileNone)
+			errs <- writer.Append(record, projection)
+		}(i)
+	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, checkpointErr := store.CollectSQLiteHealth(t.Context())
+		errs <- checkpointErr
+	}()
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	var count int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM audit_events WHERE id LIKE 'concurrent-history-%'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != appends {
+		t.Fatalf("persisted rows = %d, want %d", count, appends)
 	}
 }
 

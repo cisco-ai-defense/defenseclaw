@@ -964,6 +964,10 @@ def test_posix_target_controller_handoff_verifier_executes_exact_custody_contrac
 def test_real_target_controller_enters_upgrade_command_with_bridge_v7_config(
     tmp_path: Path,
 ) -> None:
+    source_identity = json.loads(
+        (ROOT / "release/source-install-identity.json").read_text(encoding="utf-8")
+    )
+    target_version = str(source_identity["source_release"])
     home = tmp_path / "home"
     recovery_home = home / ".defenseclaw"
     staged = tmp_path / "bridge-handoff"
@@ -981,7 +985,7 @@ def test_real_target_controller_enters_upgrade_command_with_bridge_v7_config(
             "DEFENSECLAW_STAGED_UPGRADE": "1",
             "DEFENSECLAW_STAGED_BRIDGE_VERSION": "0.8.4",
             "DEFENSECLAW_STAGED_BRIDGE_ARTIFACT_DIR": str(staged),
-            "DEFENSECLAW_STAGED_TARGET_CONTROLLER_VERSION": "0.8.6",
+            "DEFENSECLAW_STAGED_TARGET_CONTROLLER_VERSION": target_version,
             "PYTHONDONTWRITEBYTECODE": "1",
             "NO_COLOR": "1",
         }
@@ -994,7 +998,7 @@ def test_real_target_controller_enters_upgrade_command_with_bridge_v7_config(
             "upgrade",
             "--yes",
             "--version",
-            "0.8.6",
+            target_version,
         ],
         cwd=ROOT,
         env=environment,
@@ -1008,7 +1012,7 @@ def test_real_target_controller_enters_upgrade_command_with_bridge_v7_config(
     assert completed.returncode != 0
     assert "DefenseClaw Upgrade" in output
     assert "Installed version" in output and "0.8.4" in output
-    assert "Target version" in output and "0.8.6" in output
+    assert "Target version" in output and target_version in output
     assert "Failed to load config" not in output
     assert "release-owned target controller did not receive one complete, exact bridge handoff" in output
 

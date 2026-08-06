@@ -228,7 +228,8 @@ owned Windows-DACL journal advances atomically and with write-through ordering
 through `intent`, `committed`, `converged`, and `complete`. The journal contains
 a random operation identity; every destructive application/cache path is
 derived from Windows Known Folders. It also records the explicitly selected
-Codex and Claude configuration homes and the observed user PATH. Recovery
+Codex, Claude Code, and GitHub Copilot CLI configuration homes and the observed
+user PATH. Recovery
 rejects an altered destructive path, an unrelated install-state identity, an
 untrusted journal ACL, or a reparse point in a transaction-owned root. Agent
 configuration symlinks remain supported by the connector's target-aware writer.
@@ -247,9 +248,10 @@ The forward-commit boundary is crossed before packaged migrations, connector
 configuration, PATH, Apps registration, gateway auto-start, or hook teardown.
 Those changes are replayed idempotently toward the requested target after a
 crash; old binaries are never restored against already-migrated configuration.
-The journal records the source/target versions and effective `CODEX_HOME` and
-`CLAUDE_CONFIG_DIR`, and convergence reruns migrations/configuration, validates
-the installed and maintenance executables, requires atomic durable connector
+The journal records the source/target versions and effective `CODEX_HOME`,
+`CLAUDE_CONFIG_DIR`, and `COPILOT_HOME`, and convergence reruns
+migrations/configuration, validates the installed and maintenance executables,
+requires atomic durable connector
 writes, flushes mutated Registry keys, and verifies selected services before
 advancing to `converged`. Backup,
 trash, user-data, and installer-cache cleanup happens only afterwards. When an

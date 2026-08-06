@@ -745,6 +745,65 @@ def test_setup_acceptance_validates_packaged_resources_before_first_run() -> Non
     assert acceptance.index(probe) < acceptance.index("'init', '--skip-install'")
 
 
+def test_seeded_setup_upgrade_captures_bounded_external_health() -> None:
+    start = _function("Start-SetupAcceptanceHealthSampler")
+    stop = _function("Stop-SetupAcceptanceHealthSampler")
+    contract = _function("Test-SetupAcceptanceHealthSamplerContract")
+    self_test = _function("Invoke-SelfTest")
+    acceptance = _function("Invoke-SetupAcceptance")
+
+    assert "host PowerShell outside the installed tree" in start
+    assert "Get-NetTCPConnection -State Listen -LocalAddress '127.0.0.1'" in start
+    assert "gateway_start_identity" in start
+    assert "[DateTime]::UnixEpoch.Ticks" in start
+    assert "$liveStartIdentity -cne $startIdentity" in start
+    assert "sidecar_instance_id" in start
+    assert "event_config_generation" in start
+    assert "health_telemetry_generation" in start
+    assert "health_config_generation" not in start
+    assert "$health.provenance.generation" not in start
+    assert "provenance_generation" not in start
+    assert "[int]$candidate.provenance.config_generation -ne $healthConfigGeneration" in start
+    assert "$candidate.PSObject.Properties['observed_at']" in start
+    assert "$candidate.PSObject.Properties['timestamp']" in start
+    assert "AddMilliseconds(-250)" in start
+    assert "telemetry_last_error_digest" in start
+    assert "$stream.Length + $bytes.Length -le 65536" in start
+    assert "kind = 'sample_error'" in start
+    assert "stage = $stage" in start
+    assert "category = $category" in start
+    assert "event_correlation" in start
+    assert "$_.Exception" not in start
+    assert "runtime\\python" not in start
+    assert "$process.Kill($true)" in stop
+    assert "started_at = $startedAt" in contract
+    assert "uptime_ms = 1" in contract
+    assert "application_protection = $running" in contract
+    assert "telemetry = [ordered]@{" in contract
+    assert "generation = 7" in contract
+    assert "provenance_generation" in contract
+    assert "$null -ne $sample.PSObject.Properties['provenance_generation']" in contract
+    assert "Setup health sampler did not emit its bounded stage diagnostic" in contract
+    assert "Setup health sampler did not emit a correlated health sample" in contract
+    assert "Test-SetupAcceptanceHealthSamplerContract $root" in self_test
+    assert "(Join-Path $PSHOME 'pwsh.exe')" in acceptance
+    assert acceptance.index("Start-SetupAcceptanceHealthSampler") < acceptance.index(
+        "Invoke-WindowsSetupStandardUserProcess $setup @(",
+        acceptance.index("$gatewayBeforeSeededUpgrade"),
+    )
+    assert "Stop-SetupAcceptanceHealthSampler $setupHealthSampler" in acceptance
+
+
+def test_setup_transition_health_diagnostic_is_exactly_captured() -> None:
+    capture = _function("Get-WindowsNativeCaptureFiles")
+    self_test = _function("Invoke-SelfTest")
+
+    assert "$_.Name -ceq 'setup-seeded-health.jsonl'" in capture
+    assert "if ($_.Name -ceq 'setup-seeded-health.jsonl') { -1 }" in capture
+    assert "setup-seeded-health-extra.jsonl" in self_test
+    assert "exact Setup transition health diagnostic capture contract failed" in self_test
+
+
 def test_setup_uninstall_acceptance_retains_connector_cleanup_authority() -> None:
     acceptance = _function("Invoke-SetupAcceptance")
     authority = _function("Assert-NativeConnectorCleanupAuthorityPresent")
@@ -783,8 +842,11 @@ def test_amp_native_windows_coverage_is_separate_from_the_release_channel() -> N
     for secret in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "AMP_API_KEY"):
         assert secret not in release
 
-    assert "connector: [codex, claudecode, amp]" in windows_native
-    assert "connector: [codex, claudecode, amp]" in connector_live
+    assert (
+        "connector: [codex, claudecode, amp, copilot, cursor, hermes, "
+        "windsurf, antigravity, opencode]"
+    ) in windows_native
+    assert "connector: [codex, claudecode, amp, cursor, opencode]" in connector_live
     assert "AMP_API_KEY: ${{ secrets.AMP_API_KEY }}" in connector_live
     assert "AMP_VERSION: ${{ inputs.version }}" in connector_live
     assert "-Layer live" in connector_live

@@ -1112,6 +1112,13 @@ class GatewayWatcherConfig:
 
 
 @dataclass
+class GatewayWatchdogConfig:
+    enabled: bool = True
+    interval: int = 30
+    debounce: int = 2
+
+
+@dataclass
 class GatewayConfigReloadConfig:
     mode: str = "hot"
 
@@ -1132,6 +1139,7 @@ class GatewayConfig:
     api_port: int = 18970
     config_reload: GatewayConfigReloadConfig = field(default_factory=GatewayConfigReloadConfig)
     watcher: GatewayWatcherConfig = field(default_factory=GatewayWatcherConfig)
+    watchdog: GatewayWatchdogConfig = field(default_factory=GatewayWatchdogConfig)
 
     def resolved_token(self) -> str:
         """Return the gateway auth token, walking the precedence ladder.
@@ -2398,7 +2406,8 @@ class Config:
         """Return skill directories for a connector.
 
         Polymorphic — when ``guardrail.connector`` is set, the
-        connector-specific layout (e.g. ``~/.codex/skills``) is
+        connector-specific layout (for Codex, project and personal
+        ``.agents/skills`` layers) is
         returned; otherwise falls back to OpenClaw paths derived
         from ``claw.home_dir`` and ``claw.config_file``.
 
@@ -4309,6 +4318,16 @@ def _merge_gateway_watcher(raw: dict[str, Any] | None) -> GatewayWatcherConfig:
     )
 
 
+def _merge_gateway_watchdog(raw: dict[str, Any] | None) -> GatewayWatchdogConfig:
+    if not raw:
+        return GatewayWatchdogConfig()
+    return GatewayWatchdogConfig(
+        enabled=_coerce_bool(raw.get("enabled", True), default=True),
+        interval=raw.get("interval", 30),
+        debounce=raw.get("debounce", 2),
+    )
+
+
 def _merge_gateway_config_reload(raw: dict[str, Any] | None) -> GatewayConfigReloadConfig:
     if not raw:
         return GatewayConfigReloadConfig()
@@ -4624,6 +4643,7 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
             api_port=gw_raw.get("api_port", 18970),
             config_reload=_merge_gateway_config_reload(gw_raw.get("config_reload")),
             watcher=_merge_gateway_watcher(gw_raw.get("watcher")),
+            watchdog=_merge_gateway_watchdog(gw_raw.get("watchdog")),
         ),
         skill_actions=_merge_skill_actions(raw.get("skill_actions")),
         mcp_actions=_merge_mcp_actions(raw.get("mcp_actions")),

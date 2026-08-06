@@ -22,6 +22,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -48,6 +49,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func testStoreAndLogger(t *testing.T) (*audit.Store, *audit.Logger) {
@@ -889,9 +891,12 @@ func (h *fakeHookOwner) Setup(_ context.Context, _ connector.SetupOpts) error {
 	return nil
 }
 
-func TestRecordAndRollbackFailedConnectorSetup_PersistsPartialState(t *testing.T) {
-	dir := t.TempDir()
-	conn := &rollbackConnector{stubConnector: stubConnector{name: "codex"}}
+func TestRecordAndRollbackFailedConnectorSetup_DoesNotPublishFailedConnector(t *testing.T) {
+	dir := testenv.PrivateTempDir(t)
+	if err := connector.SaveActiveConnectors(dir, []string{"codex", "cursor"}); err != nil {
+		t.Fatal(err)
+	}
+	conn := &rollbackConnector{stubConnector: stubConnector{name: "opencode"}}
 
 	recordAndRollbackFailedConnectorSetup(conn, connector.SetupOpts{DataDir: dir}, context.Background())
 
@@ -901,8 +906,8 @@ func TestRecordAndRollbackFailedConnectorSetup_PersistsPartialState(t *testing.T
 	if !conn.verifyCalled {
 		t.Fatal("rollback did not call connector VerifyClean")
 	}
-	if got := connector.LoadActiveConnector(dir); got != "codex" {
-		t.Fatalf("active connector = %q, want codex so future mode switches can retry teardown", got)
+	if got := connector.LoadActiveConnectors(dir); !reflect.DeepEqual(got, []string{"codex", "cursor"}) {
+		t.Fatalf("active connectors = %v, want exact prior roster [codex cursor]", got)
 	}
 }
 
@@ -910,9 +915,8 @@ func TestRecordAndRollbackFailedConnectorSetup_PersistsPartialState(t *testing.T
 // sidecar fail-loud contract: both the conn.Setup() error branch and
 // the verifyHookScriptsOrRetry error branch in runGuardrail funnel
 // through failGuardrailWithRollback, which MUST (a) run Teardown +
-// VerifyClean via recordAndRollbackFailedConnectorSetup, (b) persist
-// the partially-installed connector name so the next boot can finish
-// cleaning up, (c) flip Guardrail health to StateError with the
+// VerifyClean via recordAndRollbackFailedConnectorSetup, (b) never publish
+// the partially-installed connector as active, (c) flip Guardrail health to StateError with the
 // wrapped error message visible to operators, and (d) return the
 // wrapped error so the sidecar errCh propagates it. A future refactor
 // that drops any of these steps fails this test loudly.
@@ -932,8 +936,8 @@ func TestFailGuardrailWithRollback_ChainsHealthAndTeardown(t *testing.T) {
 	if !conn.verifyCalled {
 		t.Fatal("failGuardrailWithRollback did not chain into connector VerifyClean")
 	}
-	if got := connector.LoadActiveConnector(dir); got != "codex" {
-		t.Fatalf("active connector state = %q, want codex (operator must see what failed on next boot)", got)
+	if got := connector.LoadActiveConnector(dir); got != "" {
+		t.Fatalf("active connector state = %q, want no failed connector publication", got)
 	}
 	snap := s.health.Snapshot()
 	if snap.Guardrail.State != StateError {
@@ -961,11 +965,136 @@ func TestSaveSingleConnectorReadyState_LockFailureRollsBack(t *testing.T) {
 	if !conn.teardownCalled || !conn.verifyCalled {
 		t.Fatal("lock-save failure did not roll the connector back")
 	}
-	if got := connector.LoadActiveConnector(dir); got != "codex" {
-		t.Fatalf("active connector = %q, want rollback marker codex", got)
+	if got := connector.LoadActiveConnector(dir); got != "" {
+		t.Fatalf("active connector = %q, want lock failure never published active", got)
 	}
 	if got := s.health.Snapshot().Guardrail.State; got != StateError {
 		t.Fatalf("guardrail state = %q, want %q", got, StateError)
+	}
+}
+
+func TestWindsurfReadyState_LockFailureNeverPublishesActiveConnector(t *testing.T) {
+	dir := t.TempDir()
+	conn := &rollbackConnector{stubConnector: stubConnector{name: "windsurf"}}
+	s := &Sidecar{health: NewSidecarHealth()}
+	previousPublish := publishWindsurfReadyEvidence
+	previousSave := saveWindsurfReadyActiveState
+	previousInactive := markWindsurfReadyInactive
+	activeSaveCalled := false
+	activeClearCalled := false
+	publishWindsurfReadyEvidence = func(connector.SetupOpts, connector.Connector) error {
+		return errors.New("forced Windsurf lock failure")
+	}
+	saveWindsurfReadyActiveState = func(string, string) error {
+		activeSaveCalled = true
+		return nil
+	}
+	markWindsurfReadyInactive = func(_ string, name string) (func() error, error) {
+		if name != "windsurf" {
+			t.Fatalf("cleared peer connector %q", name)
+		}
+		activeClearCalled = true
+		return func() error { return nil }, nil
+	}
+	t.Cleanup(func() {
+		publishWindsurfReadyEvidence = previousPublish
+		saveWindsurfReadyActiveState = previousSave
+		markWindsurfReadyInactive = previousInactive
+	})
+
+	err := s.saveSingleConnectorReadyState(
+		context.Background(), connector.SetupOpts{DataDir: dir}, conn,
+	)
+	if err == nil || !strings.Contains(err.Error(), "hook contract lock save failed") {
+		t.Fatalf("saveSingleConnectorReadyState error = %v, want lock-save failure", err)
+	}
+	if !conn.teardownCalled || !conn.verifyCalled {
+		t.Fatal("Windsurf lock-save failure did not roll setup back")
+	}
+	if activeSaveCalled {
+		t.Fatal("Windsurf active state was attempted before the hook lock succeeded")
+	}
+	if !activeClearCalled {
+		t.Fatal("Windsurf failure did not clear any pre-existing active readiness")
+	}
+	if got := connector.LoadActiveConnector(dir); got != "" {
+		t.Fatalf("active connector = %q, want no published Windsurf readiness", got)
+	}
+	if got := s.health.Snapshot().Guardrail.State; got != StateError {
+		t.Fatalf("guardrail state = %q, want %q", got, StateError)
+	}
+}
+
+func TestWindsurfReadyState_PublishesLockBeforeActiveWithoutPeerConnector(t *testing.T) {
+	dataDir := t.TempDir()
+	conn := &rollbackConnector{stubConnector: stubConnector{name: "windsurf"}}
+	opts := connector.SetupOpts{DataDir: dataDir}
+	previousPublish := publishWindsurfReadyEvidence
+	previousSave := saveWindsurfReadyActiveState
+	var order []string
+	publishWindsurfReadyEvidence = func(_ connector.SetupOpts, got connector.Connector) error {
+		if got.Name() != "windsurf" {
+			t.Fatalf("published peer connector %q", got.Name())
+		}
+		order = append(order, "lock")
+		return nil
+	}
+	saveWindsurfReadyActiveState = func(_ string, name string) error {
+		if name != "windsurf" {
+			t.Fatalf("saved peer connector %q", name)
+		}
+		order = append(order, "active")
+		return nil
+	}
+	t.Cleanup(func() {
+		publishWindsurfReadyEvidence = previousPublish
+		saveWindsurfReadyActiveState = previousSave
+	})
+	s := &Sidecar{health: NewSidecarHealth()}
+	if err := s.saveSingleConnectorReadyState(context.Background(), opts, conn); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(order, ","); got != "lock,active" {
+		t.Fatalf("Windsurf readiness publication order = %q, want lock,active", got)
+	}
+}
+
+func TestWindsurfReadyState_ActiveFailureClearsPublishedEvidence(t *testing.T) {
+	dataDir := t.TempDir()
+	conn := &rollbackConnector{stubConnector: stubConnector{name: "windsurf"}}
+	opts := connector.SetupOpts{DataDir: dataDir}
+	previousPublish := publishWindsurfReadyEvidence
+	previousSave := saveWindsurfReadyActiveState
+	previousInactive := markWindsurfReadyInactive
+	publishWindsurfReadyEvidence = func(_ connector.SetupOpts, _ connector.Connector) error {
+		return connector.SaveHookContractLockEntry(dataDir, connector.HookContractLockEntry{
+			Connector:  "windsurf",
+			ContractID: "windsurf-hooks-v1",
+		})
+	}
+	saveWindsurfReadyActiveState = func(string, string) error {
+		return errors.New("forced active-state failure")
+	}
+	markWindsurfReadyInactive = connector.MarkConnectorInactive
+	t.Cleanup(func() {
+		publishWindsurfReadyEvidence = previousPublish
+		saveWindsurfReadyActiveState = previousSave
+		markWindsurfReadyInactive = previousInactive
+	})
+
+	s := &Sidecar{health: NewSidecarHealth()}
+	err := s.saveSingleConnectorReadyState(context.Background(), opts, conn)
+	if err == nil || !strings.Contains(err.Error(), "active state save failed") {
+		t.Fatalf("saveSingleConnectorReadyState error = %v, want active-state failure", err)
+	}
+	if got := connector.LoadHookContractLockEntry(dataDir, "windsurf"); got.Connector != "" {
+		t.Fatalf("Windsurf lock survived failed active publication: %+v", got)
+	}
+	if got := connector.LoadActiveConnector(dataDir); got != "" {
+		t.Fatalf("active connector = %q, want explicit inactive state", got)
+	}
+	if !conn.teardownCalled || !conn.verifyCalled {
+		t.Fatal("Windsurf active-state failure did not roll setup back")
 	}
 }
 
@@ -2599,7 +2728,11 @@ func TestAPIHealthHandlerRejectsPut(t *testing.T) {
 
 func TestAPIStatusHandler(t *testing.T) {
 	health := NewSidecarHealth()
-	api := &APIServer{health: health, client: nil}
+	api := &APIServer{
+		health:     health,
+		client:     nil,
+		scannerCfg: &config.Config{DataDir: t.TempDir(), Environment: "windows"},
+	}
 
 	req := httptest.NewRequest(http.MethodGet, "/status", nil)
 	w := httptest.NewRecorder()
@@ -2617,6 +2750,13 @@ func TestAPIStatusHandler(t *testing.T) {
 	}
 	if result["gateway_hello"] != nil {
 		t.Error("gateway_hello should be absent when client is nil")
+	}
+	runtimeStatus, ok := result["runtime"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("response runtime = %#v; want object", result["runtime"])
+	}
+	if got := runtimeStatus["environment"]; got != "windows" {
+		t.Errorf("runtime environment = %#v; want %q", got, "windows")
 	}
 }
 
@@ -2709,11 +2849,11 @@ func TestAPIStatusEmitsConnectorMode(t *testing.T) {
 			wantTelemetryAll: []string{"hooks", "otel"},
 		},
 		{
-			name:             "copilot_observability_hooks_and_otel",
+			name:             "copilot_observability_hooks_only",
 			connector:        "copilot",
 			wantMode:         "observability",
 			wantIntercept:    false,
-			wantTelemetryAll: []string{"hooks", "otel"},
+			wantTelemetryAll: []string{"hooks"},
 		},
 		{
 			name:             "openhands_observability_hooks",

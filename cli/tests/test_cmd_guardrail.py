@@ -139,6 +139,16 @@ class StatusCommandTests(unittest.TestCase):
         self.assertIn("Fail", result.output)
         self.assertIn("closed", result.output)
 
+    def test_status_hermes_reports_upstream_fail_open_not_configured_closed(self):
+        runner = CliRunner()
+        app = make_ctx(enabled=True, connector="hermes", hook_fail_mode="closed")
+        result = runner.invoke(cmd_guardrail.status_cmd, [], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("Hermes", result.output)
+        self.assertIn("open", result.output)
+        self.assertIn("upstream-enforced fail-open", result.output)
+        self.assertIn("configured provenance: closed", result.output)
+
     def test_status_single_connector_uses_uniform_per_connector_block(self):
         # A single-connector install renders the SAME per-connector block
         # layout as a fan-out install: one connector roster table, no
@@ -242,6 +252,15 @@ class FailModeCommandTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("guardrail.hook_fail_mode: closed", result.output)
         self.assertIn("BLOCK", result.output)
+
+    def test_show_hermes_closed_provenance_reports_effective_open(self):
+        runner = CliRunner()
+        app = make_ctx(enabled=True, connector="hermes", hook_fail_mode="closed")
+        result = runner.invoke(cmd_guardrail.fail_mode_cmd, [], obj=app)
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("guardrail.hook_fail_mode: closed", result.output)
+        self.assertIn("Hermes (hermes): open (Hermes upstream", result.output)
+        self.assertIn("Hermes remains fail-open", result.output)
 
     def test_set_open_to_closed_persists_and_restarts(self):
         runner = CliRunner()
@@ -766,6 +785,33 @@ class PerConnectorFailModeTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("inherited", result.output)
         app.cfg.save.assert_not_called()
+
+    def test_show_hermes_value_reports_upstream_fail_open(self):
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "hermes": None})
+        app.cfg.guardrail.connectors["hermes"].hook_fail_mode = "closed"
+        result = runner.invoke(
+            cmd_guardrail.fail_mode_cmd, ["--connector", "hermes"], obj=app
+        )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("open (Hermes upstream; failures cannot be made fail-closed)", result.output)
+        self.assertIn("per-connector override", result.output)
+
+    def test_set_hermes_closed_warns_that_runtime_remains_open(self):
+        runner = CliRunner()
+        app = make_multi_ctx({"codex": None, "hermes": None})
+        with patch(
+            "defenseclaw.commands.cmd_guardrail.reconcile_connector_registration"
+        ):
+            result = runner.invoke(
+                cmd_guardrail.fail_mode_cmd,
+                ["closed", "--connector", "hermes", "--yes"],
+                obj=app,
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(app.cfg.guardrail.connectors["hermes"].hook_fail_mode, "closed")
+        self.assertIn("Hermes will remain fail-open", result.output)
+        self.assertNotIn("will now BLOCK Hermes", result.output)
 
     def test_connector_flag_rejected_on_single_connector_install(self):
         runner = CliRunner()

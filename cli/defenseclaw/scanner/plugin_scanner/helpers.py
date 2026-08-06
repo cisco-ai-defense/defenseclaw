@@ -163,6 +163,7 @@ STANDARD_MANIFEST_DIRS: frozenset[str] = frozenset(
     {
         ".claude-plugin",
         ".codex-plugin",
+        ".cursor-plugin",
     }
 )
 

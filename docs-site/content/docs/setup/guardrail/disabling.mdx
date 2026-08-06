@@ -31,7 +31,7 @@ defenseclaw guardrail enable  --connector codex
 | Claude Code | `~/.claude/settings.json` (hooks + `OTEL_*` env) | DefenseClaw hook entries only |
 | Codex | `~/.codex/config.toml` (hooks, otel, notify) | DefenseClaw blocks only |
 | Cursor | `~/.cursor/hooks.json` | DefenseClaw hook entries only |
-| Windsurf | `~/.codeium/windsurf/hooks.json` | DefenseClaw hook entries only |
+| Devin Desktop legacy Cascade (`windsurf`) | `~/.codeium/windsurf/hooks.json` | DefenseClaw Cascade hook entries only; Devin Local is separate and unsupported |
 | Gemini CLI | `~/.gemini/settings.json` | DefenseClaw hook entries + native OTLP block |
 | GitHub Copilot CLI | `~/.copilot/hooks/defenseclaw.json` or pinned `<workspace>/.github/hooks/defenseclaw.json` | DefenseClaw hook entries |
 | OpenHands | `~/.openhands/hooks.json` or pinned `<workspace>/.openhands/hooks.json` | DefenseClaw hook entries |
@@ -39,7 +39,7 @@ defenseclaw guardrail enable  --connector codex
 | Hermes | `~/.hermes/config.yaml` | DefenseClaw hook entries |
 | OpenCode | `~/.config/opencode/plugins/defenseclaw.js` | Managed bridge plugin (file removed) |
 | Amp | `~/.config/amp/plugins/defenseclaw.ts` or native Windows equivalent | Unchanged managed system plugin is removed; a prior file is restored |
-| OmniGent | `$OMNIGENT_CONFIG_HOME/config.yaml` when set (otherwise `~/.omnigent/config.yaml`), managed policy module, Python `.pth` file | DefenseClaw policy entries; unchanged managed files are restored/removed |
+| OmniGent | `$OMNIGENT_CONFIG` when set, then `$OMNIGENT_CONFIG_HOME/config.yaml` or `~/.omnigent/config.yaml`; managed policy module; Python `.pth` file | DefenseClaw policy entries; unchanged managed files are restored/removed |
 | OpenClaw | `~/.openclaw/openclaw.json` | Plugin allow/load entries |
 | ZeptoClaw | `~/.zeptoclaw/config.json` (api_base, safety) | DefenseClaw rewrites |
 

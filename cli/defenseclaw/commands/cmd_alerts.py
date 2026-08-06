@@ -138,11 +138,19 @@ _CONNECTOR_SCAN_POOL = 2000
 
 
 def _event_connector(event) -> str:
-    """Connector attributed to an alert, from its ``connector=`` kv field.
+    """Connector attributed to an alert from its persisted provenance.
 
-    Mirrors the TUI Alerts panel (``parse_kv_details(...).get("connector")``)
-    so CLI and TUI agree on attribution. Gateway-global alerts (e.g.
-    ``sink-failure``) carry no connector and return ""."""
+    First-class audit and structured fields take precedence; the legacy
+    ``connector=`` detail token remains readable for historical rows.
+    Gateway-global alerts carry no connector and return ""."""
+    connector = str(getattr(event, "connector", "") or "").strip().lower()
+    if connector:
+        return connector
+    structured = getattr(event, "structured", None)
+    if isinstance(structured, dict):
+        connector = str(structured.get("connector") or "").strip().lower()
+        if connector:
+            return connector
     return _kv(event.details or "").get("connector", "").lower()
 
 

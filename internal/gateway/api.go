@@ -1141,6 +1141,10 @@ func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	snap := a.health.Snapshot()
+	runtimeEnvironment := ""
+	if cfg := a.runtimeConfigSnapshot(); cfg != nil {
+		runtimeEnvironment = cfg.Environment
+	}
 
 	status := map[string]interface{}{
 		"health":     snap,
@@ -1151,8 +1155,9 @@ func (a *APIServer) handleStatus(w http.ResponseWriter, r *http.Request) {
 		// process's memory or environment. Never add authentication material to
 		// this object.
 		"runtime": map[string]interface{}{
-			"pid":      os.Getpid(),
-			"data_dir": a.configDataDir(),
+			"pid":         os.Getpid(),
+			"data_dir":    a.configDataDir(),
+			"environment": runtimeEnvironment,
 		},
 		// connector_mode reports which guardrail surface the active
 		// connector is running. The TUI uses this to render the
@@ -1347,7 +1352,7 @@ func connectorModeFor(name, policyMode string) map[string]interface{} {
 		intercept = false
 		surface = "agent_lifecycle_hooks"
 		telemetry = []string{"hooks"}
-		if name == "geminicli" || name == "copilot" {
+		if name == "geminicli" {
 			telemetry = append(telemetry, "otel")
 		}
 	case "omnigent":

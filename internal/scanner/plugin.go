@@ -39,6 +39,7 @@ func NewPluginScanner(binaryPath string) *PluginScanner {
 	if binaryPath == "" {
 		binaryPath = "defenseclaw"
 	}
+	binaryPath = resolveDefaultPluginScanner(binaryPath)
 	return &PluginScanner{BinaryPath: binaryPath}
 }
 

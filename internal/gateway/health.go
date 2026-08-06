@@ -69,18 +69,19 @@ type SubsystemHealth struct {
 
 // ConnectorHealth reports a connector's identity, mode, and live counters.
 type ConnectorHealth struct {
-	Name               string                       `json:"name"`
-	State              SubsystemState               `json:"state"`
-	Source             string                       `json:"source,omitempty"`
-	Since              time.Time                    `json:"since"`
-	LastActivityAt     *time.Time                   `json:"last_activity_at,omitempty"`
-	ToolInspectionMode connector.ToolInspectionMode `json:"tool_inspection_mode"`
-	SubprocessPolicy   connector.SubprocessPolicy   `json:"subprocess_policy"`
-	Requests           int64                        `json:"requests"`
-	Errors             int64                        `json:"errors"`
-	ToolInspections    int64                        `json:"tool_inspections"`
-	ToolBlocks         int64                        `json:"tool_blocks"`
-	SubprocessBlocks   int64                        `json:"subprocess_blocks"`
+	Name                string                       `json:"name"`
+	State               SubsystemState               `json:"state"`
+	Source              string                       `json:"source,omitempty"`
+	Since               time.Time                    `json:"since"`
+	LastActivityAt      *time.Time                   `json:"last_activity_at,omitempty"`
+	LastLoadHeartbeatAt *time.Time                   `json:"load_heartbeat_at,omitempty"`
+	ToolInspectionMode  connector.ToolInspectionMode `json:"tool_inspection_mode"`
+	SubprocessPolicy    connector.SubprocessPolicy   `json:"subprocess_policy"`
+	Requests            int64                        `json:"requests"`
+	Errors              int64                        `json:"errors"`
+	ToolInspections     int64                        `json:"tool_inspections"`
+	ToolBlocks          int64                        `json:"tool_blocks"`
+	SubprocessBlocks    int64                        `json:"subprocess_blocks"`
 }
 
 type HealthSnapshot struct {
@@ -158,12 +159,13 @@ type connectorStats struct {
 	toolInspectionMode connector.ToolInspectionMode
 	subprocessPolicy   connector.SubprocessPolicy
 
-	requests         atomic.Int64
-	lastActivityAt   atomic.Int64
-	errors           atomic.Int64
-	toolInspections  atomic.Int64
-	toolBlocks       atomic.Int64
-	subprocessBlocks atomic.Int64
+	requests            atomic.Int64
+	lastActivityAt      atomic.Int64
+	lastLoadHeartbeatAt atomic.Int64
+	errors              atomic.Int64
+	toolInspections     atomic.Int64
+	toolBlocks          atomic.Int64
+	subprocessBlocks    atomic.Int64
 }
 
 func (s *connectorStats) snapshot() ConnectorHealth {
@@ -176,19 +178,25 @@ func (s *connectorStats) snapshot() ConnectorHealth {
 		activityAt := time.Unix(0, unixNanos).UTC()
 		lastActivityAt = &activityAt
 	}
+	var lastLoadHeartbeatAt *time.Time
+	if unixNanos := s.lastLoadHeartbeatAt.Load(); unixNanos > 0 {
+		heartbeatAt := time.Unix(0, unixNanos).UTC()
+		lastLoadHeartbeatAt = &heartbeatAt
+	}
 	return ConnectorHealth{
-		Name:               s.name,
-		State:              s.state,
-		Source:             s.source,
-		Since:              s.since,
-		LastActivityAt:     lastActivityAt,
-		ToolInspectionMode: s.toolInspectionMode,
-		SubprocessPolicy:   s.subprocessPolicy,
-		Requests:           requests,
-		Errors:             s.errors.Load(),
-		ToolInspections:    s.toolInspections.Load(),
-		ToolBlocks:         s.toolBlocks.Load(),
-		SubprocessBlocks:   s.subprocessBlocks.Load(),
+		Name:                s.name,
+		State:               s.state,
+		Source:              s.source,
+		Since:               s.since,
+		LastActivityAt:      lastActivityAt,
+		LastLoadHeartbeatAt: lastLoadHeartbeatAt,
+		ToolInspectionMode:  s.toolInspectionMode,
+		SubprocessPolicy:    s.subprocessPolicy,
+		Requests:            requests,
+		Errors:              s.errors.Load(),
+		ToolInspections:     s.toolInspections.Load(),
+		ToolBlocks:          s.toolBlocks.Load(),
+		SubprocessBlocks:    s.subprocessBlocks.Load(),
 	}
 }
 
@@ -200,6 +208,19 @@ func (s *connectorStats) recordActivity(at time.Time) {
 			return
 		}
 		if s.lastActivityAt.CompareAndSwap(current, candidate) {
+			return
+		}
+	}
+}
+
+func recordLatestTimestamp(target *atomic.Int64, at time.Time) {
+	candidate := at.UnixNano()
+	for {
+		current := target.Load()
+		if candidate <= current {
+			return
+		}
+		if target.CompareAndSwap(current, candidate) {
 			return
 		}
 	}
@@ -652,6 +673,13 @@ func (h *SidecarHealth) RecordConnectorRequestFor(name string) {
 	stats := h.statsFor(name)
 	stats.recordActivity(time.Now())
 	stats.requests.Add(1)
+}
+
+// RecordConnectorLoadHeartbeatFor records proof that a connector's managed
+// bridge actually loaded. File presence alone cannot distinguish a live
+// OpenCode plugin from --pure/external-plugin-disabled operation.
+func (h *SidecarHealth) RecordConnectorLoadHeartbeatFor(name string) {
+	recordLatestTimestamp(&h.statsFor(name).lastLoadHeartbeatAt, time.Now())
 }
 
 // RecordConnectorErrorFor increments the error counter for a connector.

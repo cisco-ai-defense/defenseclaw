@@ -59,6 +59,7 @@ EvidenceStatus = Literal[
     "ambiguous",
     "unavailable",
 ]
+WatchdogOwnershipStatus = Literal["held", "unlocked", "missing", "unsafe", "denied", "unavailable"]
 GATEWAY_PROCESS_NAMES = frozenset({"defenseclaw-gateway", "defenseclaw-gateway.exe"})
 MAX_PLATFORM_PID = 2_147_483_647
 _MAX_PID_RECORD_BYTES = 16 * 1024
@@ -89,6 +90,20 @@ class ProcessEvidence:
 class ListenerEvidence:
     status: EvidenceStatus
     pid: int = 0
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class WatchdogStateEvidence:
+    status: EvidenceStatus
+    state: str = ""
+    reason: str = ""
+
+
+@dataclass(frozen=True)
+class WatchdogOwnershipEvidence:
+    status: WatchdogOwnershipStatus
+    source: str = ""
     reason: str = ""
 
 
@@ -348,6 +363,264 @@ def parse_pid_record_bytes(raw_bytes: bytes) -> PIDRecord:
     )
 
 
+def read_watchdog_pid_record(path: str, *, platform_name: str | None = None) -> PIDRecord:
+    """Read watchdog.pid from one private, identity-bound Windows handle.
+
+    Gateway PID diagnostics retain their established reader. This stricter
+    reader is watchdog-specific because a held lifetime lock is meaningful
+    only when the replaceable canonical publication has private custody too.
+    """
+    if (platform_name or sys.platform) != "win32":
+        return read_pid_record(path)
+
+    from defenseclaw.windows_acl import (
+        WindowsAclError,
+        assert_not_broadly_readable,
+        assert_not_broadly_writable,
+        assert_trusted_owner,
+        capture_fd,
+        open_regular_read_fd_shared_delete,
+    )
+
+    try:
+        if is_symlink(path):
+            return PIDRecord("malformed", reason="watchdog PID file is a symbolic link or reparse point")
+        named_info = os.lstat(path)
+        reparse_point = 0x400
+        if getattr(named_info, "st_file_attributes", 0) & reparse_point:
+            return PIDRecord("malformed", reason="watchdog PID file is a symbolic link or reparse point")
+        if not stat.S_ISREG(named_info.st_mode):
+            return PIDRecord("malformed", reason="watchdog PID file is not a regular file")
+        fd = open_regular_read_fd_shared_delete(path)
+        try:
+            opened_info = os.fstat(fd)
+            if not os.path.samestat(named_info, opened_info):
+                return PIDRecord("unavailable", reason="watchdog PID file changed while it was inspected")
+            security = capture_fd(fd)
+            assert_trusted_owner(security)
+            assert_not_broadly_readable(security)
+            assert_not_broadly_writable(security)
+            os.lseek(fd, 0, os.SEEK_SET)
+            data = os.read(fd, 16_385)
+        finally:
+            os.close(fd)
+    except FileNotFoundError:
+        return PIDRecord("missing", reason="watchdog PID file is missing")
+    except PermissionError:
+        return PIDRecord("denied", reason="watchdog PID file access denied")
+    except WindowsAclError as exc:
+        code = getattr(exc, "winerror", None) or getattr(exc, "errno", None)
+        if code in {2, 3}:
+            return PIDRecord("missing", reason="watchdog PID file is missing")
+        if code == 5:
+            return PIDRecord("denied", reason="watchdog PID custody inspection access denied")
+        message = str(exc).lower()
+        if any(marker in message for marker in ("regular file", "reparse")):
+            return PIDRecord("malformed", reason="watchdog PID file is not a private regular non-reparse file")
+        if code is not None:
+            return PIDRecord("unavailable", reason="watchdog PID file could not be inspected safely")
+        return PIDRecord("malformed", reason="watchdog PID file owner or DACL is not private")
+    except OSError:
+        return PIDRecord("unavailable", reason="watchdog PID file could not be inspected safely")
+
+    if len(data) > 16_384:
+        return PIDRecord("malformed", reason="watchdog PID file exceeds the inspection limit")
+    return parse_pid_record_bytes(data)
+
+
+def read_watchdog_state(path: str) -> WatchdogStateEvidence:
+    """Read the bounded, non-link last-known watchdog health state."""
+    try:
+        if is_symlink(path):
+            return WatchdogStateEvidence("malformed", reason="state file is a symbolic link or reparse point")
+        info = os.lstat(path)
+        reparse_point = 0x400
+        if getattr(info, "st_file_attributes", 0) & reparse_point:
+            return WatchdogStateEvidence("malformed", reason="state file is a symbolic link or reparse point")
+        if not stat.S_ISREG(info.st_mode):
+            return WatchdogStateEvidence("malformed", reason="state file is not a regular file")
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags)
+        try:
+            opened_info = os.fstat(fd)
+            if not os.path.samestat(info, opened_info):
+                return WatchdogStateEvidence("unavailable", reason="state file changed while it was inspected")
+            handle = os.fdopen(fd, encoding="utf-8")
+            fd = -1
+            with handle:
+                raw = handle.read(65)
+        finally:
+            if fd >= 0:
+                os.close(fd)
+    except FileNotFoundError:
+        return WatchdogStateEvidence("missing", reason="last-known state is missing")
+    except PermissionError:
+        return WatchdogStateEvidence("denied", reason="last-known state access denied")
+    except (OSError, UnicodeError):
+        return WatchdogStateEvidence("unavailable", reason="last-known state could not be inspected")
+
+    if len(raw) > 64:
+        return WatchdogStateEvidence("malformed", reason="last-known state exceeds the inspection limit")
+    state = raw.strip().lower()
+    if state not in {"healthy", "degraded", "down"}:
+        return WatchdogStateEvidence("malformed", reason="last-known state is invalid")
+    return WatchdogStateEvidence("ok", state=state)
+
+
+def inspect_watchdog_ownership(
+    stable_path: str,
+    legacy_pid_path: str,
+    *,
+    platform_name: str | None = None,
+) -> WatchdogOwnershipEvidence:
+    """Probe the stable Windows ownership lock with bounded legacy fallback.
+
+    The probe never writes file content. It attempts the exact lifetime byte
+    lock and immediately releases it when available. A held stable lock is
+    authoritative for current watchdogs; a held canonical PID lock is accepted
+    only as compatibility evidence for an older watchdog publisher.
+    """
+    if (platform_name or sys.platform) != "win32":
+        return WatchdogOwnershipEvidence(
+            "unavailable",
+            reason="native Windows watchdog ownership inspection is unavailable",
+        )
+
+    stable = _windows_watchdog_file_lock_evidence(stable_path, source="stable")
+    if stable.status == "held":
+        return stable
+    if stable.status in {"unsafe", "denied", "unavailable"}:
+        return stable
+
+    legacy = _windows_watchdog_file_lock_evidence(legacy_pid_path, source="legacy")
+    if legacy.status == "held":
+        return legacy
+    if legacy.status in {"unsafe", "denied", "unavailable"}:
+        return legacy
+    if stable.status == "unlocked":
+        return stable
+    if legacy.status == "unlocked":
+        return legacy
+    return WatchdogOwnershipEvidence("missing", reason="no watchdog ownership object exists")
+
+
+def _windows_watchdog_file_lock_evidence(path: str, *, source: str) -> WatchdogOwnershipEvidence:
+    """Inspect one private regular Windows lifecycle file and its lock byte."""
+    import msvcrt
+    from ctypes import wintypes
+
+    from defenseclaw.windows_acl import (
+        WindowsAclError,
+        assert_not_broadly_readable,
+        assert_not_broadly_writable,
+        assert_trusted_owner,
+        capture_fd,
+        open_regular_read_fd_shared_delete,
+    )
+
+    try:
+        fd = open_regular_read_fd_shared_delete(path)
+    except WindowsAclError as exc:
+        code = getattr(exc, "winerror", None) or getattr(exc, "errno", None)
+        if code in {2, 3}:
+            return WatchdogOwnershipEvidence("missing", source=source, reason="ownership file is missing")
+        if code == 5:
+            return WatchdogOwnershipEvidence("denied", source=source, reason="ownership file access denied")
+        message = str(exc).lower()
+        if any(marker in message for marker in ("regular file", "reparse", "owner", "dacl", "broad")):
+            return WatchdogOwnershipEvidence("unsafe", source=source, reason="ownership file is unsafe")
+        return WatchdogOwnershipEvidence(
+            "unavailable",
+            source=source,
+            reason="ownership file could not be opened safely",
+        )
+
+    try:
+        try:
+            security = capture_fd(fd)
+            assert_trusted_owner(security)
+            assert_not_broadly_readable(security)
+            assert_not_broadly_writable(security)
+        except WindowsAclError as exc:
+            code = getattr(exc, "winerror", None) or getattr(exc, "errno", None)
+            if code == 5:
+                return WatchdogOwnershipEvidence(
+                    "denied",
+                    source=source,
+                    reason="ownership security inspection access denied",
+                )
+            return WatchdogOwnershipEvidence(
+                "unsafe",
+                source=source,
+                reason="ownership file owner or DACL is not private",
+            )
+
+        class OVERLAPPED(ctypes.Structure):
+            _fields_ = [
+                ("Internal", ctypes.c_size_t),
+                ("InternalHigh", ctypes.c_size_t),
+                ("Offset", wintypes.DWORD),
+                ("OffsetHigh", wintypes.DWORD),
+                ("hEvent", wintypes.HANDLE),
+            ]
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        lock_file = kernel32.LockFileEx
+        lock_file.argtypes = (
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.POINTER(OVERLAPPED),
+        )
+        lock_file.restype = wintypes.BOOL
+        unlock_file = kernel32.UnlockFileEx
+        unlock_file.argtypes = (
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            wintypes.DWORD,
+            ctypes.POINTER(OVERLAPPED),
+        )
+        unlock_file.restype = wintypes.BOOL
+
+        overlapped = OVERLAPPED(OffsetHigh=0x4000_0000)
+        handle = wintypes.HANDLE(msvcrt.get_osfhandle(fd))
+        lock_exclusive = 0x00000002
+        lock_fail_immediately = 0x00000001
+        if not lock_file(
+            handle,
+            lock_exclusive | lock_fail_immediately,
+            0,
+            1,
+            0,
+            ctypes.byref(overlapped),
+        ):
+            error = ctypes.get_last_error()
+            if error == 33:  # ERROR_LOCK_VIOLATION
+                return WatchdogOwnershipEvidence("held", source=source, reason="ownership lock is held")
+            if error == 5:  # ERROR_ACCESS_DENIED
+                return WatchdogOwnershipEvidence(
+                    "denied",
+                    source=source,
+                    reason="ownership lock access denied",
+                )
+            return WatchdogOwnershipEvidence(
+                "unavailable",
+                source=source,
+                reason="ownership lock state could not be inspected",
+            )
+        if not unlock_file(handle, 0, 1, 0, ctypes.byref(overlapped)):
+            return WatchdogOwnershipEvidence(
+                "unavailable",
+                source=source,
+                reason="ownership probe lock could not be released",
+            )
+        return WatchdogOwnershipEvidence("unlocked", source=source, reason="ownership lock is not held")
+    finally:
+        os.close(fd)
+
 def pid_file_fingerprint_from_fd(fd: int) -> tuple[int, int, int, int, bytes] | None:
     """Fingerprint the exact regular PID-file object bound to ``fd``.
 
@@ -424,6 +697,9 @@ class GatewayEvidence:
     def pid_record(self, path: str) -> PIDRecord:
         return read_pid_record(path)
 
+    def watchdog_pid_record(self, path: str) -> PIDRecord:
+        return read_watchdog_pid_record(path, platform_name=self.platform_name)
+
     def process(self, pid: int) -> ProcessEvidence:
         if self.platform_name == "win32":
             return _windows_process_evidence(pid)
@@ -441,6 +717,16 @@ class GatewayEvidence:
         if self.platform_name != "win32":
             return ListenerEvidence("unavailable", reason="native Windows listener inspection is unavailable")
         return _windows_listener_evidence(port, host=host)
+
+    def watchdog_state(self, path: str) -> WatchdogStateEvidence:
+        return read_watchdog_state(path)
+
+    def watchdog_ownership(self, stable_path: str, legacy_pid_path: str) -> WatchdogOwnershipEvidence:
+        return inspect_watchdog_ownership(
+            stable_path,
+            legacy_pid_path,
+            platform_name=self.platform_name,
+        )
 
 
 def _linux_process_evidence(
@@ -573,7 +859,6 @@ def _darwin_process_evidence(pid: int) -> ProcessEvidence:
         executable=executable,
         start_identity=start_identity,
     )
-
 
 def _windows_process_evidence(pid: int) -> ProcessEvidence:  # pragma: no cover - native Windows only
     from ctypes import wintypes

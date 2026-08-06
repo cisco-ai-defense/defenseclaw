@@ -12,6 +12,7 @@ package gateway
 
 import (
 	"context"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -25,6 +26,62 @@ func enableSkillRuntimeDetection(cfg *config.Config) {
 
 func enablePluginRuntimeDetection(cfg *config.Config) {
 	cfg.AssetPolicy.Plugin.RuntimeDetection.Enabled = true
+}
+
+func TestCursorMCPProbePreservesEndpointAndAvoidsToolNameCollisions(t *testing.T) {
+	first := cursorMCPProbeFromPayload(map[string]interface{}{
+		"url": "https://alpha.example.test/mcp",
+	}, "lookup")
+	second := cursorMCPProbeFromPayload(map[string]interface{}{
+		"url": "https://beta.example.test/mcp",
+	}, "lookup")
+	if !first.Matched || !second.Matched || first.ServerName == second.ServerName {
+		t.Fatalf("endpoint identities collided: first=%+v second=%+v", first, second)
+	}
+	framed := cursorMCPProbeFromPayload(map[string]interface{}{
+		"url":     "a",
+		"command": "b",
+	}, "lookup")
+	injectedDelimiter := cursorMCPProbeFromPayload(map[string]interface{}{
+		"url": "a\x00command\x00b",
+	}, "lookup")
+	if framed.ServerName == injectedDelimiter.ServerName {
+		t.Fatalf("framing collision: both=%+v injected=%+v", framed, injectedDelimiter)
+	}
+	if first.URL != "https://alpha.example.test/mcp" || first.Transport != "http" {
+		t.Fatalf("endpoint probe lost authoritative fields: %+v", first)
+	}
+	command := cursorMCPProbeFromPayload(map[string]interface{}{
+		"command": `node server.js --tenant alpha`,
+	}, "lookup")
+	if command.Command != "node" || !reflect.DeepEqual(command.Args, []string{"server.js", "--tenant", "alpha"}) || command.Transport != "stdio" {
+		t.Fatalf("command probe=%+v", command)
+	}
+}
+
+func TestCursorMCPProbeFeedsEndpointAwareAssetPolicy(t *testing.T) {
+	cfg := &config.Config{AssetPolicy: config.DefaultAssetPolicy()}
+	cfg.AssetPolicy.Enabled = true
+	cfg.AssetPolicy.Mode = "action"
+	cfg.AssetPolicy.MCP.Denied = []config.AssetPolicyRule{{
+		Connector: "cursor",
+		URL:       "https://blocked.example.test/mcp",
+		Transport: "http",
+	}}
+	api := &APIServer{scannerCfg: cfg}
+	blocked := cursorMCPProbeFromPayload(map[string]interface{}{
+		"url": "https://blocked.example.test/mcp",
+	}, "lookup")
+	decision, matched := api.evaluateRuntimeMCPAssetPolicy(context.Background(), "cursor", "beforeMCPExecution", blocked)
+	if !matched || decision.RawAction != "block" || decision.TargetName != blocked.ServerName {
+		t.Fatalf("endpoint policy decision=%+v matched=%v probe=%+v", decision, matched, blocked)
+	}
+	allowed := cursorMCPProbeFromPayload(map[string]interface{}{
+		"url": "https://allowed.example.test/mcp",
+	}, "lookup")
+	if decision, matched := api.evaluateRuntimeMCPAssetPolicy(context.Background(), "cursor", "beforeMCPExecution", allowed); matched {
+		t.Fatalf("collision fixture matched wrong endpoint: %+v", decision)
+	}
 }
 
 func TestEvaluateRuntimeSkillAssetPolicyRespectsRuntimeDetectionDisabled(t *testing.T) {

@@ -108,7 +108,7 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 		{
 			connector:      "copilot",
 			event:          "preToolUse",
-			toolName:       "shell",
+			toolName:       "powershell",
 			topLevelOutput: "hook_output",
 			expectAction:   "block",
 		},
@@ -162,7 +162,7 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 			health := NewSidecarHealth()
 			api := &APIServer{scannerCfg: cfg, health: health}
 			handler := inboundTraceContextMiddleware(http.HandlerFunc(api.handleAgentHook(sh.connector)))
-			body, err := json.Marshal(map[string]interface{}{
+			payload := map[string]interface{}{
 				"hook_event_name": sh.event,
 				"session_id":      "session-" + sh.connector,
 				"turn_id":         "turn-" + sh.connector,
@@ -173,7 +173,33 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 				"tool_input": map[string]interface{}{
 					"command": "rm -rf /",
 				},
-			})
+			}
+			if sh.connector == "antigravity" {
+				payload = map[string]interface{}{
+					"conversationId": "session-antigravity",
+					"stepIdx":        1,
+					"workspacePaths": []string{"/workspace"},
+					"toolCall": map[string]interface{}{
+						"name": sh.toolName,
+						"args": map[string]interface{}{
+							"Cwd":         `C:\workspace`,
+							"CommandLine": `Get-Content -LiteralPath C:\Windows\System32\config\SAM`,
+						},
+					},
+				}
+			}
+			if sh.connector == "copilot" {
+				// Exact native camelCase body: event identity is intentionally
+				// absent and comes only from the trusted registration header.
+				payload = map[string]interface{}{
+					"sessionId": "session-copilot",
+					"timestamp": float64(1),
+					"cwd":       `C:\workspace`,
+					"toolName":  sh.toolName,
+					"toolArgs":  map[string]interface{}{"command": "rm -rf /"},
+				}
+			}
+			body, err := json.Marshal(payload)
 			if err != nil {
 				t.Fatalf("marshal request: %v", err)
 			}
@@ -183,6 +209,15 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 				bytes.NewReader(body),
 			)
 			req.Header.Set("Content-Type", "application/json")
+			if sh.connector == "antigravity" {
+				req.Header.Set("X-DefenseClaw-Antigravity-Event", sh.event)
+			}
+			if sh.connector == "copilot" {
+				req.Header.Set("X-DefenseClaw-Copilot-Event", sh.event)
+			}
+			if sh.connector == "codex" {
+				setTestCodexHookBinding(req, sh.event, defaultTestCodexHookContract)
+			}
 			w := httptest.NewRecorder()
 			handler.ServeHTTP(w, req)
 
@@ -217,6 +252,27 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 			if action, _ := parsed["action"].(string); action != sh.expectAction {
 				t.Errorf("dangerous request action=%q, want %q\nbody=%s", action, sh.expectAction, w.Body.String())
 			}
+			if sh.connector == "cursor" {
+				if rawAction, _ := parsed["raw_action"].(string); rawAction != "block" {
+					t.Errorf("Cursor raw_action=%q, want block\nbody=%s", rawAction, w.Body.String())
+				}
+				if wouldBlock, _ := parsed["would_block"].(bool); wouldBlock {
+					t.Errorf("Cursor would_block=true, want false in action mode\nbody=%s", w.Body.String())
+				}
+				output, ok := parsed["hook_output"].(map[string]interface{})
+				if !ok || output["permission"] != "deny" {
+					t.Errorf("Cursor action hook_output=%#v, want permission=deny\nbody=%s", parsed["hook_output"], w.Body.String())
+				}
+			}
+			if sh.connector == "antigravity" {
+				output, ok := parsed["hook_output"].(map[string]interface{})
+				if !ok {
+					t.Fatalf("Antigravity hook_output is not an object: %T\nbody=%s", parsed["hook_output"], w.Body.String())
+				}
+				if decision, _ := output["decision"].(string); decision != "deny" {
+					t.Fatalf("Antigravity decision=%q, want deny\nbody=%s", decision, w.Body.String())
+				}
+			}
 
 			connectorHealth := connByName(health.Snapshot().Connectors)[sh.connector]
 			if connectorHealth.Requests != 1 {
@@ -245,6 +301,257 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 		if !covered[name] {
 			t.Errorf("connector %q has a registered hook handler but no row in TestHandleAgentHook_FullChain_PerConnector; add it.", name)
 		}
+	}
+}
+
+func TestHandleAgentHook_OpenCodeLoadHeartbeat(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body string
+	}{
+		{
+			name: "dedicated load event",
+			body: `{"hook_event_name":"defenseclaw.plugin.loaded","load_heartbeat":true}`,
+		},
+		{
+			name: "ordinary hook carries recovery proof",
+			body: `{"hook_event_name":"tool.execute.before","load_heartbeat":true,"tool_name":"read"}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Guardrail.Connector = "opencode"
+			health := NewSidecarHealth()
+			api := &APIServer{scannerCfg: cfg, health: health}
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/opencode/hook", strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			recorder := httptest.NewRecorder()
+			api.handleAgentHook("opencode").ServeHTTP(recorder, req)
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+			row := connByName(health.Snapshot().Connectors)["opencode"]
+			if row.LastLoadHeartbeatAt == nil {
+				t.Fatal("OpenCode load proof did not record a connector load heartbeat")
+			}
+		})
+	}
+}
+
+func TestHandleAgentHook_OpenCodeAmbiguousMCPIdentityUsesConnectorMode(t *testing.T) {
+	for _, tc := range []struct {
+		mode           string
+		wantAction     string
+		wantWouldBlock bool
+		wantDecision   string
+	}{
+		{mode: "observe", wantAction: "allow", wantWouldBlock: true},
+		{mode: "action", wantAction: "block", wantWouldBlock: false, wantDecision: "deny"},
+	} {
+		t.Run(tc.mode, func(t *testing.T) {
+			cfg := &config.Config{}
+			cfg.Guardrail.Mode = tc.mode
+			cfg.Guardrail.Connector = "opencode"
+			api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
+			request := httptest.NewRequest(
+				http.MethodPost,
+				"/api/v1/opencode/hook",
+				strings.NewReader(`{
+					"hook_event_name":"tool.execute.before",
+					"tool_name":"alpha_beta_list",
+					"tool_input":{"value":"fixture input"},
+					"mcp_identity_status":"ambiguous"
+				}`),
+			)
+			request.Header.Set("Content-Type", "application/json")
+			recorder := httptest.NewRecorder()
+
+			api.handleAgentHook("opencode").ServeHTTP(recorder, request)
+
+			if recorder.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+			var response struct {
+				Action     string `json:"action"`
+				Mode       string `json:"mode"`
+				WouldBlock bool   `json:"would_block"`
+				HookOutput struct {
+					Decision string `json:"decision"`
+				} `json:"hook_output"`
+			}
+			if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
+				t.Fatalf("response not valid JSON: %v body=%s", err, recorder.Body.String())
+			}
+			if response.Action != tc.wantAction || response.Mode != tc.mode ||
+				response.WouldBlock != tc.wantWouldBlock || response.HookOutput.Decision != tc.wantDecision {
+				t.Fatalf(
+					"response=%+v, want action=%q mode=%q would_block=%v decision=%q body=%s",
+					response, tc.wantAction, tc.mode, tc.wantWouldBlock, tc.wantDecision, recorder.Body.String(),
+				)
+			}
+		})
+	}
+}
+
+func TestHandleAgentHook_AntigravityRequiresRegisteredEvent(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "antigravity"
+	api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
+
+	for _, tc := range []struct {
+		name   string
+		header string
+		want   string
+	}{
+		{name: "missing", want: "Antigravity hook event registration is required"},
+		{name: "invalid", header: "pretooluse", want: "invalid Antigravity hook event"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(
+				http.MethodPost,
+				"/api/v1/antigravity/hook",
+				strings.NewReader(`{"hook_event_name":"PreToolUse","event":"PreToolUse"}`),
+			)
+			req.Header.Set("Content-Type", "application/json")
+			if tc.header != "" {
+				req.Header.Set("X-DefenseClaw-Antigravity-Event", tc.header)
+			}
+			recorder := httptest.NewRecorder()
+
+			api.handleAgentHook("antigravity").ServeHTTP(recorder, req)
+
+			if recorder.Code != http.StatusBadRequest || !strings.Contains(recorder.Body.String(), tc.want) {
+				t.Fatalf("status=%d body=%q, want 400 containing %q", recorder.Code, recorder.Body.String(), tc.want)
+			}
+		})
+	}
+}
+
+func TestHandleAgentHook_AntigravityBlocksForcedSingleFileDeletion(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "antigravity"
+	api := &APIServer{scannerCfg: cfg, health: NewSidecarHealth()}
+	payload := map[string]interface{}{
+		"conversationId": "synthetic-antigravity-single-file-delete",
+		"stepIdx":        1,
+		"workspacePaths": []string{`D:\DefenseClaw-Synthetic`},
+		"toolCall": map[string]interface{}{
+			"name": "run_command",
+			"args": map[string]interface{}{
+				"Cwd":         `D:\DefenseClaw-Synthetic`,
+				"CommandLine": `Remove-Item -LiteralPath 'D:\DefenseClaw-Synthetic\blocked-target.txt' -Force`,
+			},
+		},
+	}
+	body, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/antigravity/hook", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-DefenseClaw-Antigravity-Event", "PreToolUse")
+	w := httptest.NewRecorder()
+
+	api.handleAgentHook("antigravity").ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var parsed struct {
+		Action     string `json:"action"`
+		RawAction  string `json:"raw_action"`
+		HookOutput struct {
+			Decision string `json:"decision"`
+		} `json:"hook_output"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &parsed); err != nil {
+		t.Fatalf("response not valid JSON: %v body=%s", err, w.Body.String())
+	}
+	if parsed.Action != "block" || parsed.RawAction != "block" || parsed.HookOutput.Decision != "deny" {
+		t.Fatalf("forced file deletion was not denied: %+v body=%s", parsed, w.Body.String())
+	}
+}
+
+func TestHandleAgentHook_AntigravityInvocationEventsDoNotScanInventedContent(t *testing.T) {
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "antigravity"
+	api := &APIServer{scannerCfg: cfg}
+	handler := http.HandlerFunc(api.handleAgentHook("antigravity"))
+
+	for _, event := range []string{"PreInvocation", "PostInvocation"} {
+		t.Run(event, func(t *testing.T) {
+			payload := map[string]interface{}{
+				"conversationId":        "session-antigravity-invocation",
+				"workspacePaths":        []string{"/workspace"},
+				"transcriptPath":        "/workspace/transcript.json",
+				"artifactDirectoryPath": "/workspace/artifacts",
+				"invocationNum":         2,
+				"initialNumSteps":       1,
+				// These dangerous decoys are not part of Google's invocation
+				// schemas. They must not cause generic prompt/result scans.
+				"prompt":      "rm -rf /",
+				"tool_result": "rm -rf /",
+			}
+			body, err := json.Marshal(payload)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req := httptest.NewRequest(
+				http.MethodPost,
+				"/api/v1/antigravity/hook",
+				bytes.NewReader(body),
+			)
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-DefenseClaw-Antigravity-Event", event)
+			w := httptest.NewRecorder()
+
+			handler.ServeHTTP(w, req)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+			}
+			var parsed map[string]interface{}
+			if err := json.Unmarshal(w.Body.Bytes(), &parsed); err != nil {
+				t.Fatalf("response not valid JSON: %v body=%s", err, w.Body.String())
+			}
+			if action, _ := parsed["action"].(string); action != "allow" {
+				t.Fatalf("%s invented content scan action=%q, want allow; body=%s", event, action, w.Body.String())
+			}
+			if isPromptLikeEvent(event) || isResultLikeEvent(event) || isGenericToolInspectionEvent(event) {
+				t.Fatalf("%s is still classified as an inspectable content/tool event", event)
+			}
+		})
+	}
+}
+
+func TestCopilotHookRejectsMissingOrInvalidTrustedEvent(t *testing.T) {
+	api := &APIServer{}
+	handler := http.HandlerFunc(api.handleAgentHook("copilot"))
+	body := `{"sessionId":"s","timestamp":1,"cwd":"C:\\work","eventName":"preToolUse","toolName":"powershell","toolArgs":{"command":"Get-ChildItem"}}`
+
+	for _, tc := range []struct {
+		name   string
+		header string
+	}{
+		{name: "missing"},
+		{name: "wrong case", header: "PreToolUse"},
+		{name: "unknown", header: "futureEvent"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/copilot/hook", strings.NewReader(body))
+			req.Header.Set("Content-Type", "application/json")
+			if tc.header != "" {
+				req.Header.Set("X-DefenseClaw-Copilot-Event", tc.header)
+			}
+			recorder := httptest.NewRecorder()
+			handler.ServeHTTP(recorder, req)
+			if recorder.Code != http.StatusBadRequest {
+				t.Fatalf("status=%d, want 400; body=%s", recorder.Code, recorder.Body.String())
+			}
+		})
 	}
 }
 

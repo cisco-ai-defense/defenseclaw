@@ -94,6 +94,14 @@ class TestCheckSchemasResourceEnum(unittest.TestCase):
         self.assertNotIn("nemoclaw", enum)
         self.assertIn("opencode", enum)
 
+    def test_claudecode_home_description_uses_official_config_override(self) -> None:
+        """The resource contract must name Claude Code's documented override."""
+        doc = json.loads(RESOURCE_SCHEMA.read_text(encoding="utf-8"))
+        description = doc["properties"]["defenseclaw.claw.home_dir"]["description"]
+
+        self.assertIn("$CLAUDE_CONFIG_DIR", description)
+        self.assertNotIn("$CLAUDE_HOME", description)
+
 
 class TestUnicode13RepertoireDrift(unittest.TestCase):
     def test_offline_generator_check_passes_and_detects_tampering(self) -> None:

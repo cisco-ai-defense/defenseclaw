@@ -25,13 +25,24 @@ documented paths.
 from __future__ import annotations
 
 import json
+import ntpath
 import os
 import sys
 from pathlib import Path
 
 import pytest
+import yaml
 from defenseclaw import connector_paths
 from defenseclaw.connector_paths import MCPServerEntry
+
+
+def _pin_claude_home(monkeypatch, home: Path) -> None:
+    """Bind both platform home selectors, then disable Claude's override."""
+
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+
 
 # ---------------------------------------------------------------------------
 # normalize / is_known
@@ -49,6 +60,9 @@ class TestNormalize:
             ("OpenClaw", "openclaw"),
             ("  CODEX  ", "codex"),
             ("Claudecode", "claudecode"),
+            ("claude-code", "claudecode"),
+            ("claude_code", "claudecode"),
+            ("gemini-cli", "geminicli"),
             ("zeptoclaw", "zeptoclaw"),
             ("future-connector", "future-connector"),
         ],
@@ -75,6 +89,51 @@ class TestIsKnown:
         assert connector_paths.is_known(None)
 
 
+def test_windsurf_paths_use_explicit_profile_binding_not_ambient_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bound = tmp_path / "bound-profile"
+    ambient = tmp_path / "ambient-profile"
+    monkeypatch.setenv("WINDSURF_USER_HOME", str(bound))
+    monkeypatch.setattr(Path, "home", lambda: ambient)
+
+    assert connector_paths.connector_home("windsurf") == str(
+        bound / ".codeium" / "windsurf"
+    )
+    assert connector_paths.windsurf_hook_config_path() == str(
+        bound / ".codeium" / "windsurf" / "hooks.json"
+    )
+    assert connector_paths.connector_config_files("windsurf") == [
+        str(bound / ".codeium" / "windsurf" / "mcp_config.json"),
+    ]
+
+
+def test_windsurf_profile_binding_rejects_non_normalized_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(
+        "WINDSURF_USER_HOME",
+        str(tmp_path / "profile" / ".." / "redirected"),
+    )
+
+    with pytest.raises(ValueError, match="absolute normalized"):
+        connector_paths.windsurf_hook_config_path()
+
+
+def test_windsurf_hook_binding_must_match_bound_profile(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bound = tmp_path / "bound-profile"
+    monkeypatch.setenv("WINDSURF_USER_HOME", str(bound))
+    monkeypatch.setenv(
+        "WINDSURF_HOOK_CONFIG_PATH",
+        str(tmp_path / "ambient-profile" / ".codeium" / "windsurf" / "hooks.json"),
+    )
+
+    with pytest.raises(ValueError, match="does not match"):
+        connector_paths.windsurf_hook_config_path()
+
+
 # ---------------------------------------------------------------------------
 # skill_dirs
 # ---------------------------------------------------------------------------
@@ -90,11 +149,163 @@ class TestSkillDirs:
         workspace_dirs = connector_paths.skill_dirs("claudecode", workspace_dir=str(tmp_path))
         assert os.path.join(str(tmp_path), ".claude", "skills") in workspace_dirs
 
+    def test_claudecode_includes_launch_ancestors_and_lazy_nested_skill_roots(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        repository = tmp_path / "repo"
+        launch = repository / "apps" / "web"
+        nested = launch / "packages" / "ui" / ".claude" / "skills"
+        (repository / ".git").mkdir(parents=True)
+        nested.mkdir(parents=True)
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-home"))
+
+        dirs = connector_paths.skill_dirs(
+            "claudecode",
+            workspace_dir=str(launch),
+        )
+
+        for expected in (
+            launch / ".claude" / "skills",
+            repository / "apps" / ".claude" / "skills",
+            repository / ".claude" / "skills",
+            nested,
+        ):
+            assert str(expected) in dirs
+
+        user_skills = os.path.join(str(tmp_path / "claude-home"), "skills")
+        user_commands = os.path.join(str(tmp_path / "claude-home"), "commands")
+        assert dirs.index(user_skills) < dirs.index(str(repository / ".claude" / "skills"))
+        assert dirs.index(str(repository / ".claude" / "skills")) < dirs.index(user_commands)
+
     def test_codex(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         dirs = connector_paths.skill_dirs("codex")
         home = str(Path.home())
-        assert os.path.join(home, ".codex", "skills") in dirs
+        assert os.path.join(home, ".agents", "skills") in dirs
+        assert os.path.join(home, ".codex", "skills") not in dirs
+
+    def test_codex_scans_skill_layers_from_active_dir_to_repo_root(self, tmp_path, monkeypatch):
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setenv("HOME", str(fake_home))
+        repo = tmp_path / "repo"
+        active = repo / "services" / "api"
+        active.mkdir(parents=True)
+        (repo / ".git").mkdir()
+
+        dirs = connector_paths.skill_dirs("codex", workspace_dir=str(active))
+
+        assert dirs[:3] == [
+            str(active / ".agents" / "skills"),
+            str(active.parent / ".agents" / "skills"),
+            str(repo / ".agents" / "skills"),
+        ]
+        assert str(fake_home / ".agents" / "skills") in dirs
+
+
+class TestClaudeAgentDirs:
+    def test_closest_first_launch_ancestors_then_user(self, tmp_path, monkeypatch):
+        repository = tmp_path / "repo"
+        launch = repository / "apps" / "web"
+        (repository / ".git").mkdir(parents=True)
+        launch.mkdir(parents=True)
+        config_dir = tmp_path / "claude-home"
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+
+        assert connector_paths.claude_agent_dirs(str(launch)) == [
+            str(launch / ".claude" / "agents"),
+            str(repository / "apps" / ".claude" / "agents"),
+            str(repository / ".claude" / "agents"),
+            str(config_dir / "agents"),
+        ]
+
+
+class TestClaudeAutoMemory:
+    def test_default_uses_shared_linked_worktree_project_root(self, tmp_path, monkeypatch):
+        main = tmp_path / "main"
+        git_dir = main / ".git"
+        worktree = tmp_path / "worktree"
+        worktree_git = git_dir / "worktrees" / "feature"
+        worktree.mkdir(parents=True)
+        worktree_git.mkdir(parents=True)
+        (worktree / ".git").write_text(
+            f"gitdir: {worktree_git}\n",
+            encoding="utf-8",
+        )
+        (worktree_git / "commondir").write_text("../..\n", encoding="utf-8")
+        config_dir = tmp_path / "claude-home"
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+
+        resolution = connector_paths.claude_auto_memory_resolution(
+            str(worktree),
+            managed_settings_paths=[],
+        )
+
+        assert resolution.project_root == str(main)
+        assert resolution.path == os.path.join(
+            str(config_dir),
+            "projects",
+            connector_paths._claude_project_storage_key(str(main)),
+            "memory",
+        )
+        assert resolution.source == "derived-project-default"
+        assert resolution.activation_verified is False
+        assert "--settings" in resolution.limitation
+
+    def test_file_settings_precedence_and_tilde_override(self, tmp_path, monkeypatch):
+        project = tmp_path / "project"
+        (project / ".git").mkdir(parents=True)
+        config_dir = tmp_path / "claude-home"
+        managed = tmp_path / "managed-settings.json"
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+        for path, value in (
+            (config_dir / "settings.json", str(tmp_path / "user-memory")),
+            (project / ".claude" / "settings.json", str(tmp_path / "project-memory")),
+            (project / ".claude" / "settings.local.json", str(tmp_path / "local-memory")),
+            (managed, "~/managed-memory"),
+        ):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps({"autoMemoryDirectory": value}),
+                encoding="utf-8",
+            )
+
+        resolution = connector_paths.claude_auto_memory_resolution(
+            str(project),
+            managed_settings_paths=[str(managed)],
+        )
+
+        assert resolution.path == os.path.join(str(Path.home()), "managed-memory")
+        assert resolution.source == str(managed)
+
+    def test_memory_files_are_bounded_to_regular_markdown(self, tmp_path, monkeypatch):
+        project = tmp_path / "project"
+        (project / ".git").mkdir(parents=True)
+        memory = tmp_path / "memory"
+        (memory / "topics").mkdir(parents=True)
+        (memory / "MEMORY.md").write_text("index\n", encoding="utf-8")
+        (memory / "topics" / "debugging.md").write_text("topic\n", encoding="utf-8")
+        (memory / "ignored.txt").write_text("ignored\n", encoding="utf-8")
+        config_dir = tmp_path / "claude-home"
+        config_dir.mkdir()
+        (config_dir / "settings.json").write_text(
+            json.dumps({"autoMemoryDirectory": str(memory)}),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+
+        resolution, files = connector_paths.claude_auto_memory_files(
+            str(project),
+            managed_settings_paths=[],
+        )
+
+        assert resolution.path == str(memory)
+        assert files == [
+            str(memory / "MEMORY.md"),
+            str(memory / "topics" / "debugging.md"),
+        ]
 
     def test_amp_honors_documented_precedence_and_custom_settings(self, tmp_path, monkeypatch):
         fake_home = tmp_path / "home"
@@ -257,6 +468,7 @@ class TestSkillDirs:
         monkeypatch.setenv("HOME", str(tmp_path / "home"))
         monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home" / ".hermes"))
         monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(tmp_path / "opencode-custom"))
+        monkeypatch.setenv("WINDSURF_USER_HOME", str(tmp_path / "windsurf-profile"))
         assert connector_paths.skill_dirs("hermes") == [
             os.path.join(str(tmp_path / "home"), ".hermes", "skills"),
         ]
@@ -265,21 +477,43 @@ class TestSkillDirs:
             "cursor",
             workspace_dir=str(tmp_path),
         )
-        assert connector_paths.skill_dirs("windsurf") == []
+        for family in (".cursor", ".agents", ".claude", ".codex"):
+            assert os.path.join(str(tmp_path / "home"), family, "skills") in connector_paths.skill_dirs(
+                "cursor",
+                workspace_dir=str(tmp_path),
+            )
+            assert os.path.join(str(tmp_path), family, "skills") in connector_paths.skill_dirs(
+                "cursor",
+                workspace_dir=str(tmp_path),
+            )
+        assert connector_paths.skill_dirs("windsurf") == [
+            os.path.join(
+                str(tmp_path / "windsurf-profile"),
+                ".codeium",
+                "windsurf",
+                "skills",
+            ),
+            os.path.join(str(tmp_path / "windsurf-profile"), ".agents", "skills"),
+        ]
+        assert connector_paths.skill_dirs("windsurf", workspace_dir=str(tmp_path)) == [
+            os.path.join(
+                str(tmp_path / "windsurf-profile"),
+                ".codeium",
+                "windsurf",
+                "skills",
+            ),
+            os.path.join(str(tmp_path / "windsurf-profile"), ".agents", "skills"),
+            os.path.join(str(tmp_path), ".windsurf", "skills"),
+            os.path.join(str(tmp_path), ".agents", "skills"),
+        ]
         antigravity = connector_paths.skill_dirs("antigravity", workspace_dir=str(tmp_path))
+        assert os.path.join(str(tmp_path / "home"), ".gemini", "config", "skills") in antigravity
         assert os.path.join(str(tmp_path), ".agents", "skills") in antigravity
-        assert os.path.join(str(tmp_path), "_agents", "skills") in antigravity
+        assert os.path.join(str(tmp_path), ".agent", "skills") in antigravity
         assert os.path.join(str(tmp_path / "home"), ".gemini", "antigravity-cli", "skills") in antigravity
-        assert os.path.join(str(tmp_path / "home"), ".gemini", "skills") in antigravity
-        assert os.path.join(str(tmp_path / "home"), ".agents", "skills") in antigravity
-        opencode = connector_paths.skill_dirs("opencode", workspace_dir=str(tmp_path))
-        assert os.path.join(str(tmp_path), ".opencode", "skills") in opencode
-        assert os.path.join(str(tmp_path), ".claude", "skills") in opencode
-        assert os.path.join(str(tmp_path), ".agents", "skills") in opencode
-        assert os.path.join(str(tmp_path / "home"), ".config", "opencode", "skills") in opencode
-        assert os.path.join(str(tmp_path / "home"), ".claude", "skills") in opencode
-        assert os.path.join(str(tmp_path / "home"), ".agents", "skills") in opencode
-        assert os.path.join(str(tmp_path), "opencode-custom", "skills") in opencode
+        assert os.path.join(str(tmp_path / "home"), ".gemini", "skills") not in antigravity
+        assert os.path.join(str(tmp_path / "home"), ".agents", "skills") not in antigravity
+        assert connector_paths.skill_dirs("opencode", workspace_dir=str(tmp_path)) == []
         assert os.path.join(str(tmp_path / "home"), ".gemini", "skills") in connector_paths.skill_dirs("geminicli")
         assert os.path.join(str(tmp_path), ".gemini", "skills") in connector_paths.skill_dirs(
             "geminicli",
@@ -290,6 +524,26 @@ class TestSkillDirs:
             "copilot",
             workspace_dir=str(tmp_path),
         )
+
+    def test_cursor_skill_dirs_include_nested_documented_roots_without_aliases(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        workspace = tmp_path / "repo"
+        nested = workspace / "apps" / "web" / ".agents" / "skills"
+        nested.mkdir(parents=True)
+        rejected = workspace / "linked" / ".cursor" / "skills"
+        rejected.mkdir(parents=True)
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setattr(
+            connector_paths,
+            "_cursor_walkable_directory",
+            lambda path: os.path.normcase(os.path.abspath(path))
+            != os.path.normcase(os.path.abspath(str(workspace / "linked"))),
+        )
+
+        roots = connector_paths.skill_dirs("cursor", workspace_dir=str(workspace))
+
+        assert str(nested) in roots
+        assert str(rejected) not in roots
         openhands = connector_paths.skill_dirs("openhands")
         assert os.path.join(str(tmp_path / "home"), ".agents", "skills") in openhands
         assert os.path.join(str(tmp_path / "home"), ".openhands", "skills") in openhands
@@ -299,6 +553,171 @@ class TestSkillDirs:
             os.path.join(str(tmp_path / "home"), ".openhands", "cache", "skills", "public-skills", "skills")
             in openhands
         )
+
+    def test_hermes_skill_dirs_include_existing_external_dirs(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / "hermes"
+        external = tmp_path / "shared-skills"
+        relative = hermes_home / "relative-skills"
+        external.mkdir()
+        relative.mkdir(parents=True)
+        hermes_home.mkdir(exist_ok=True)
+        (hermes_home / "config.yaml").write_text(
+            yaml.safe_dump(
+                {
+                    "skills": {
+                        "external_dirs": [str(external), "relative-skills", str(tmp_path / "missing")]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        assert connector_paths.skill_dirs("hermes") == [
+            str(hermes_home / "skills"),
+            str(external),
+            str(relative),
+        ]
+
+    @pytest.mark.parametrize(
+        ("fixture", "needle"),
+        [
+            ("named_home", "named profiles"),
+            ("profile_directory", "named profile"),
+            ("active_profile", "active named profile"),
+            ("multiplex_config", "multiplex profiles"),
+            ("multiplex_env", "multiplex profiles"),
+        ],
+    )
+    def test_hermes_profile_topology_is_rejected(self, fixture, needle, tmp_path, monkeypatch):
+        home = tmp_path / "hermes"
+        home.mkdir()
+        config = home / "config.yaml"
+        if fixture == "named_home":
+            config = home / "profiles" / "coder" / "config.yaml"
+        elif fixture == "profile_directory":
+            (home / "profiles" / "coder").mkdir(parents=True)
+        elif fixture == "active_profile":
+            (home / "active_profile").write_text("coder\n", encoding="utf-8")
+        elif fixture == "multiplex_config":
+            config.write_text("gateway:\n  multiplex_profiles: true\n", encoding="utf-8")
+        elif fixture == "multiplex_env":
+            monkeypatch.setenv("GATEWAY_MULTIPLEX_PROFILES", "on")
+        monkeypatch.setenv("HERMES_HOME", str(config.parent))
+
+        reason = connector_paths.hermes_profile_unsupported_reason(str(config))
+
+        assert needle in reason
+
+    def test_copilot_skill_and_agent_dirs_follow_official_precedence(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        copilot_home = home / "custom-copilot"
+        repo = tmp_path / "repo"
+        package = repo / "packages" / "service"
+        package.mkdir(parents=True)
+        (repo / ".git").mkdir()
+        custom = tmp_path / "custom-skills"
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("USERPROFILE", str(home))
+        monkeypatch.setenv("COPILOT_HOME", str(copilot_home))
+        monkeypatch.setenv("COPILOT_SKILLS_DIRS", f"{custom},relative-skills")
+
+        skills = connector_paths.skill_dirs("copilot", workspace_dir=str(package))
+        assert skills == [
+            str(package / ".github" / "skills"),
+            str(package / ".agents" / "skills"),
+            str(package / ".claude" / "skills"),
+            str(package.parent / ".github" / "skills"),
+            str(repo / ".github" / "skills"),
+            str(copilot_home / "skills"),
+            str(home / ".agents" / "skills"),
+            str(custom),
+            str(package / "relative-skills"),
+            str(package / ".claude" / "commands"),
+        ]
+        assert connector_paths.copilot_agent_dirs(str(package)) == [
+            str(package / ".github" / "agents"),
+            str(package / ".claude" / "agents"),
+            str(package.parent / ".github" / "agents"),
+            str(package.parent / ".claude" / "agents"),
+            str(repo / ".github" / "agents"),
+            str(repo / ".claude" / "agents"),
+            str(copilot_home / "agents"),
+        ]
+        assert connector_paths.copilot_mcp_config_files(str(package)) == [
+            str(package / ".mcp.json"),
+            str(package / ".github" / "mcp.json"),
+            str(package.parent / ".mcp.json"),
+            str(package.parent / ".github" / "mcp.json"),
+            str(repo / ".mcp.json"),
+            str(repo / ".github" / "mcp.json"),
+            str(copilot_home / "mcp-config.json"),
+        ]
+
+    def test_copilot_settings_cascade_uses_bound_home_and_repository_layers(
+        self, tmp_path, monkeypatch
+    ):
+        home = tmp_path / "copilot-home"
+        repo = tmp_path / "repo"
+        workspace = repo / "package"
+        workspace.mkdir(parents=True)
+        (repo / ".git").mkdir()
+        (home).mkdir()
+        monkeypatch.setenv("COPILOT_HOME", str(home))
+        (home / "config.json").write_text('{"disableAllHooks": true}')
+        (home / "settings.json").write_text('{// operator\n"disableAllHooks": false,}')
+        claude = repo / ".claude"
+        claude.mkdir()
+        (claude / "settings.json").write_text('{"disableAllHooks": false}')
+        (claude / "settings.local.json").write_text('{"disableAllHooks": true}')
+        native = repo / ".github" / "copilot"
+        native.mkdir(parents=True)
+        (native / "settings.json").write_text('{"disableAllHooks": true}')
+        (native / "settings.local.json").write_text('{"disableAllHooks": false}')
+
+        resolution = connector_paths.copilot_settings_resolution(str(workspace))
+
+        assert resolution.verified is True
+        assert resolution.disable_all_hooks is False
+        assert resolution.source == str(native / "settings.local.json")
+        assert resolution.managed_policy_verified is False
+        assert resolution.inspected == tuple(
+            connector_paths.copilot_settings_paths(str(workspace))
+        )
+        assert str(claude / "settings.json") in resolution.inspected
+        assert str(claude / "settings.local.json") in resolution.inspected
+        instruction_paths = connector_paths.rule_dirs(
+            "copilot", workspace_dir=str(workspace)
+        )
+        assert str(home / "copilot-instructions.md") in instruction_paths
+        assert str(repo / "AGENTS.md") in instruction_paths
+        assert str(repo / ".github" / "instructions") in instruction_paths
+        assert str(repo) in instruction_paths
+        configs = connector_paths.connector_config_files(
+            "copilot", workspace_dir=str(workspace)
+        )
+        assert str(home / "settings.json") in configs
+        assert str(home / "config.json") not in configs
+        assert str(workspace / ".github" / "copilot.json") not in configs
+
+    @pytest.mark.parametrize("binding", [" relative-home ", ""])
+    def test_copilot_home_rejects_non_exact_lifecycle_binding(self, monkeypatch, binding):
+        monkeypatch.setenv("COPILOT_HOME", binding)
+
+        with pytest.raises(ValueError, match="absolute normalized"):
+            connector_paths.copilot_home()
+        resolution = connector_paths.copilot_settings_resolution()
+        assert resolution.verified is False
+        assert resolution.errors == ("COPILOT_HOME is not an absolute normalized path",)
+
+    def test_copilot_non_repository_workspace_does_not_scan_filesystem_ancestors(self, tmp_path):
+        workspace = tmp_path / "not-a-repo" / "package"
+        workspace.mkdir(parents=True)
+
+        agents = connector_paths.copilot_agent_dirs(str(workspace))
+
+        assert str(workspace / ".github" / "agents") in agents
+        assert str(workspace.parent / ".github" / "agents") not in agents
 
     def test_openhands_skill_dirs_honor_workspace_override(self, tmp_path, monkeypatch):
         outside = tmp_path / "outside"
@@ -366,13 +785,184 @@ class TestPluginDirs:
         monkeypatch.chdir(tmp_path)
         dirs = connector_paths.plugin_dirs("claudecode")
         home = str(Path.home())
-        assert os.path.join(home, ".claude", "plugins") in dirs
+        assert os.path.join(home, ".claude", "plugins", "cache") in dirs
+        assert os.path.join(home, ".claude", "skills") in dirs
+        assert os.path.join(str(tmp_path), ".claude", "plugins") not in dirs
+
+    def test_claudecode_includes_only_official_workspace_skills_plugin_root(
+        self,
+        tmp_path,
+    ):
+        dirs = connector_paths.plugin_dirs(
+            "claudecode",
+            workspace_dir=str(tmp_path),
+        )
+        assert os.path.join(str(tmp_path), ".claude", "skills") in dirs
+        assert os.path.join(str(tmp_path), ".claude", "plugins") not in dirs
+
+    def test_claudecode_plugins_include_ancestor_and_nested_skills_roots(
+        self,
+        tmp_path,
+    ):
+        repository = tmp_path / "repo"
+        launch = repository / "apps" / "web"
+        nested = launch / "packages" / "ui" / ".claude" / "skills"
+        (repository / ".git").mkdir(parents=True)
+        nested.mkdir(parents=True)
+
+        dirs = connector_paths.plugin_dirs(
+            "claudecode",
+            workspace_dir=str(launch),
+        )
+
+        assert str(repository / ".claude" / "skills") in dirs
+        assert str(nested) in dirs
+
+    def test_claudecode_honors_plugin_parent_override(self, tmp_path, monkeypatch):
+        plugin_parent = tmp_path / "claude-plugin-parent"
+        monkeypatch.setenv("CLAUDE_CODE_PLUGIN_CACHE_DIR", str(plugin_parent))
+
+        dirs = connector_paths.plugin_dirs("claudecode")
+
+        assert str(plugin_parent / "cache") in dirs
+        assert os.path.join(str(Path.home()), ".claude", "plugins", "cache") not in dirs
 
     def test_codex(self):
         dirs = connector_paths.plugin_dirs("codex")
         home = str(Path.home())
-        # Codex plugins live at ~/.codex/plugins (with cache subdir)
-        assert os.path.join(home, ".codex", "plugins") in dirs
+        # Installed Codex plugins live only below the canonical cache.
+        assert os.path.join(home, ".codex", "plugins", "cache") in dirs
+        assert os.path.join(home, ".codex", "plugins") not in dirs
+
+    def test_codex_resolves_local_marketplaces_without_inventing_repo_plugin_root(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        custom_codex_home = tmp_path / "codex-state"
+        monkeypatch.setattr("defenseclaw.connector_paths.Path.home", lambda: fake_home)
+        monkeypatch.setenv("CODEX_HOME", str(custom_codex_home))
+
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / ".git").mkdir()
+        repo_plugin = repo / "packages" / "repo-plugin"
+        repo_plugin.mkdir(parents=True)
+        legacy_plugin = repo / "packages" / "legacy-plugin"
+        legacy_plugin.mkdir(parents=True)
+        personal_plugin = fake_home / "personal-plugins" / "personal-plugin"
+        personal_plugin.mkdir(parents=True)
+
+        repo_marketplace = repo / ".agents" / "plugins" / "marketplace.json"
+        repo_marketplace.parent.mkdir(parents=True)
+        repo_marketplace.write_text(
+            json.dumps(
+                {
+                    "plugins": [
+                        {"name": "repo", "source": {"source": "local", "path": "./packages/repo-plugin"}},
+                        {"name": "remote", "source": {"source": "url", "url": "https://example.com/plugin.git"}},
+                        {"name": "escape", "source": {"source": "local", "path": "./../outside"}},
+                    ]
+                }
+            )
+        )
+        legacy_marketplace = repo / ".claude-plugin" / "marketplace.json"
+        legacy_marketplace.parent.mkdir(parents=True)
+        legacy_marketplace.write_text(
+            json.dumps(
+                {
+                    "plugins": [
+                        {
+                            "name": "legacy",
+                            "source": {
+                                "source": "local",
+                                "path": "./packages/legacy-plugin",
+                            },
+                        },
+                    ]
+                }
+            )
+        )
+        personal_marketplace = fake_home / ".agents" / "plugins" / "marketplace.json"
+        personal_marketplace.parent.mkdir(parents=True)
+        personal_marketplace.write_text(
+            json.dumps(
+                {
+                    "plugins": [
+                        {"name": "personal", "source": "./personal-plugins/personal-plugin"},
+                    ]
+                }
+            )
+        )
+
+        dirs = connector_paths.plugin_dirs("codex", workspace_dir=str(repo))
+
+        assert dirs[:3] == [str(repo_plugin), str(legacy_plugin), str(personal_plugin)]
+        assert str(custom_codex_home / "plugins" / "cache") in dirs
+        assert str(custom_codex_home / "plugins") not in dirs
+        assert str(repo / "plugins") not in dirs
+        assert all("outside" not in path for path in dirs)
+
+    def test_codex_marketplace_rejects_reparse_source_and_oversized_catalog(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setattr("defenseclaw.connector_paths.Path.home", lambda: fake_home)
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        (repo / ".git").mkdir()
+        plugin = repo / "packages" / "plugin"
+        plugin.mkdir(parents=True)
+        marketplace = repo / ".agents" / "plugins" / "marketplace.json"
+        marketplace.parent.mkdir(parents=True)
+        marketplace.write_text(
+            json.dumps({"plugins": [{"name": "p", "source": "./packages/plugin"}]})
+        )
+
+        real_reject = connector_paths.reject_reparse_path
+
+        def reject_candidate(path):
+            if os.path.normcase(os.path.abspath(path)) == os.path.normcase(str(plugin)):
+                raise OSError("mocked Windows reparse point")
+            return real_reject(path)
+
+        monkeypatch.setattr(connector_paths, "reject_reparse_path", reject_candidate)
+        assert str(plugin) not in connector_paths.plugin_dirs(
+            "codex",
+            workspace_dir=str(repo),
+        )
+
+        monkeypatch.setattr(connector_paths, "reject_reparse_path", real_reject)
+        marketplace.write_bytes(b" " * (1024 * 1024 + 1))
+        assert str(plugin) not in connector_paths.plugin_dirs(
+            "codex",
+            workspace_dir=str(repo),
+        )
+
+    def test_codex_marketplace_rejects_catalog_replaced_during_read(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        marketplace = tmp_path / "marketplace.json"
+        marketplace.write_text('{"plugins":[]}')
+        monkeypatch.setattr(
+            connector_paths,
+            "_read_bounded_stable_file",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                OSError("file was replaced while it was being inventoried")
+            ),
+        )
+
+        assert connector_paths._read_codex_local_marketplace_paths(
+            str(marketplace),
+            str(tmp_path),
+        ) == []
 
     def test_amp_project_and_system_plugin_dirs(self, tmp_path, monkeypatch):
         fake_home = tmp_path / "home"
@@ -400,7 +990,12 @@ class TestPluginDirs:
         monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home" / ".hermes"))
         monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(tmp_path / "opencode-custom"))
         assert os.path.join(str(tmp_path / "home"), ".hermes", "plugins") in connector_paths.plugin_dirs("hermes")
+        # Cursor local plugins are inventory-only. The write/install path API
+        # intentionally remains empty so DefenseClaw cannot claim custody.
         assert connector_paths.plugin_dirs("cursor") == []
+        assert connector_paths.plugin_inventory_dirs("cursor") == [
+            os.path.join(str(tmp_path / "home"), ".cursor", "plugins", "local"),
+        ]
         assert connector_paths.plugin_dirs("windsurf") == []
         assert os.path.join(str(tmp_path / "home"), ".gemini", "extensions") in connector_paths.plugin_dirs("geminicli")
         assert os.path.join(str(tmp_path), ".gemini", "extensions") in connector_paths.plugin_dirs(
@@ -414,10 +1009,7 @@ class TestPluginDirs:
         assert os.path.join(str(tmp_path), "_agents", "plugins") in antigravity
         assert os.path.join(str(tmp_path / "home"), ".gemini", "config", "plugins") in antigravity
         assert os.path.join(str(tmp_path / "home"), ".gemini", "antigravity-cli", "plugins") in antigravity
-        opencode = connector_paths.plugin_dirs("opencode", workspace_dir=str(tmp_path))
-        assert os.path.join(str(tmp_path), ".opencode", "plugins") in opencode
-        assert os.path.join(str(tmp_path / "home"), ".config", "opencode", "plugins") in opencode
-        assert os.path.join(str(tmp_path), "opencode-custom", "plugins") in opencode
+        assert connector_paths.plugin_dirs("opencode", workspace_dir=str(tmp_path)) == []
 
     def test_no_overlap_between_connectors(self, tmp_path, monkeypatch):
         """Switching connectors must change the path set — pins the
@@ -432,6 +1024,80 @@ class TestPluginDirs:
 
 
 # ---------------------------------------------------------------------------
+# agent_dirs / rule_dirs
+# ---------------------------------------------------------------------------
+
+
+class TestCodexAssetDirs:
+    def test_agent_and_rule_layers_follow_project_precedence(self, tmp_path, monkeypatch):
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setenv("HOME", str(fake_home))
+        repo = tmp_path / "repo"
+        active = repo / "nested"
+        active.mkdir(parents=True)
+        (repo / ".git").mkdir()
+
+        agents = connector_paths.agent_dirs("codex", workspace_dir=str(active))
+        rules = connector_paths.rule_dirs("codex", workspace_dir=str(active))
+
+        assert agents[:2] == [
+            str(active / ".codex" / "agents"),
+            str(repo / ".codex" / "agents"),
+        ]
+        assert agents[-1] == str(fake_home / ".codex" / "agents")
+        assert rules[:2] == [
+            str(active / ".codex" / "rules"),
+            str(repo / ".codex" / "rules"),
+        ]
+        assert str(fake_home / ".codex" / "rules") in rules
+
+    def test_custom_project_root_markers_bound_ancestor_scan(self, tmp_path, monkeypatch):
+        fake_home = tmp_path / "home"
+        codex_home = fake_home / ".codex"
+        codex_home.mkdir(parents=True)
+        (codex_home / "config.toml").write_text('project_root_markers = [".sl"]\n')
+        monkeypatch.setenv("HOME", str(fake_home))
+        repo = tmp_path / "repo"
+        active = repo / "nested"
+        active.mkdir(parents=True)
+        (repo / ".sl").mkdir()
+
+        dirs = connector_paths.agent_dirs("codex", workspace_dir=str(active))
+
+        assert dirs[:2] == [
+            str(active / ".codex" / "agents"),
+            str(repo / ".codex" / "agents"),
+        ]
+        assert not any(str(tmp_path / ".codex" / "agents") == path for path in dirs)
+
+    def test_unsafe_project_marker_config_falls_back_to_git(self, tmp_path, monkeypatch):
+        fake_home = tmp_path / "home"
+        codex_home = fake_home / ".codex"
+        codex_home.mkdir(parents=True)
+        (codex_home / "config.toml").write_text('project_root_markers = [".sl"]\n')
+        monkeypatch.setenv("HOME", str(fake_home))
+        repo = tmp_path / "repo"
+        active = repo / "nested"
+        active.mkdir(parents=True)
+        (repo / ".git").mkdir()
+        monkeypatch.setattr(
+            connector_paths,
+            "_read_bounded_stable_file",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                OSError("mocked Windows reparse point")
+            ),
+        )
+
+        dirs = connector_paths.agent_dirs("codex", workspace_dir=str(active))
+
+        assert dirs[:2] == [
+            str(active / ".codex" / "agents"),
+            str(repo / ".codex" / "agents"),
+        ]
+
+
+# ---------------------------------------------------------------------------
 # mcp_servers
 # ---------------------------------------------------------------------------
 
@@ -442,14 +1108,29 @@ class TestMCPServers:
         path.write_text(json.dumps({"mcpServers": servers}))
         return path
 
-    def test_codex_reads_dotmcp(self, tmp_path, monkeypatch):
+    def _write_codex_config(self, directory: Path, servers: dict[str, dict]) -> Path:
+        path = directory / ".codex" / "config.toml"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        blocks = []
+        for name, server in servers.items():
+            blocks.append(f'[mcp_servers."{name}"]')
+            if server.get("command"):
+                blocks.append(f'command = "{server["command"]}"')
+            if server.get("args") is not None:
+                args = ", ".join(json.dumps(arg) for arg in server["args"])
+                blocks.append(f"args = [{args}]")
+            blocks.append("")
+        path.write_text("\n".join(blocks))
+        return path
+
+    def test_codex_reads_project_config_toml(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         # Isolate $HOME so the test doesn't accidentally pick up a
         # real ~/.codex/config.toml on the developer's machine.
         fake_home = tmp_path / "home"
         fake_home.mkdir()
         monkeypatch.setenv("HOME", str(fake_home))
-        self._write_mcp_json(
+        self._write_codex_config(
             tmp_path,
             {
                 "github": {"command": "gh", "args": ["mcp"]},
@@ -460,7 +1141,7 @@ class TestMCPServers:
         assert entries[0].command == "gh"
         assert entries[0].args == ["mcp"]
 
-    def test_codex_no_dotmcp_returns_empty(self, tmp_path, monkeypatch):
+    def test_codex_without_config_toml_returns_empty(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         fake_home = tmp_path / "home"
         fake_home.mkdir()
@@ -727,6 +1408,192 @@ class TestMCPServers:
         openhands.write_text(json.dumps({"mcpServers": {"o": {"command": "openhands-mcp"}}}))
         assert connector_paths.mcp_servers("openhands")[0].command == "openhands-mcp"
 
+    def test_hermes_mcp_yaml_uses_bounded_utf8_decoding(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / "hermes"
+        hermes_home.mkdir()
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        config = hermes_home / "config.yaml"
+        config.write_bytes(
+            "mcp:\n  servers:\n    display\u200f:\n      command: hermes-mcp\n".encode()
+        )
+
+        entries = connector_paths.mcp_servers("hermes")
+
+        assert [(entry.name, entry.command) for entry in entries] == [
+            ("display\u200f", "hermes-mcp")
+        ]
+
+        config.write_bytes(b"x" * (connector_paths._MCP_CONFIG_MAX_BYTES + 1))
+        assert connector_paths.mcp_servers("hermes") == []
+
+    def test_cursor_mcp_preserves_same_name_scope_candidates(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        workspace = tmp_path / "repo"
+        monkeypatch.setenv("HOME", str(home))
+        for path, command in (
+            (workspace / ".cursor" / "mcp.json", "project-server"),
+            (home / ".cursor" / "mcp.json", "user-server"),
+        ):
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"mcpServers": {"shared": {"command": command}}}))
+
+        entries = connector_paths.mcp_servers("cursor", workspace_dir=str(workspace))
+
+        assert [(entry.name, entry.command, entry.source_scope) for entry in entries] == [
+            ("shared", "project-server", "project"),
+            ("shared", "user-server", "user"),
+        ]
+
+    def test_cursor_agent_and_rule_roots_cover_compatibility_paths(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        workspace = tmp_path / "repo"
+        monkeypatch.setenv("HOME", str(home))
+
+        assert connector_paths.agent_dirs("cursor", workspace_dir=str(workspace)) == [
+            str(workspace / ".cursor" / "agents"),
+            str(workspace / ".claude" / "agents"),
+            str(workspace / ".codex" / "agents"),
+            str(home / ".cursor" / "agents"),
+            str(home / ".claude" / "agents"),
+            str(home / ".codex" / "agents"),
+        ]
+        assert connector_paths.rule_dirs("cursor", workspace_dir=str(workspace)) == [
+            str(workspace / ".cursor" / "rules"),
+        ]
+
+    def test_windsurf_mcp_reads_only_persisted_bound_profile(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        bound = tmp_path / "bound-profile"
+        ambient = tmp_path / "ambient-profile"
+        monkeypatch.setenv("WINDSURF_USER_HOME", str(bound))
+        monkeypatch.setattr(Path, "home", lambda: ambient)
+
+        for profile, name in ((bound, "bound"), (ambient, "ambient")):
+            mcp = profile / ".codeium" / "windsurf" / "mcp_config.json"
+            mcp.parent.mkdir(parents=True)
+            mcp.write_text(
+                json.dumps({"mcpServers": {name: {"command": f"{name}-mcp"}}}),
+                encoding="utf-8",
+            )
+        guessed = bound / ".codeium" / "windsurf" / "mcp.json"
+        guessed.write_text(
+            json.dumps({"mcpServers": {"guessed": {"command": "guessed-mcp"}}}),
+            encoding="utf-8",
+        )
+
+        entries = connector_paths.mcp_servers("windsurf")
+
+        assert [(entry.name, entry.command) for entry in entries] == [
+            ("bound", "bound-mcp")
+        ]
+
+    def test_windsurf_rule_discovery_covers_non_enterprise_cascade_sources(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        bound = tmp_path / "bound-profile"
+        repo = tmp_path / "repo"
+        workspace = repo / "packages" / "app"
+        nested = workspace / "src" / "feature"
+        (repo / ".git").mkdir(parents=True)
+        nested.mkdir(parents=True)
+        monkeypatch.setenv("WINDSURF_USER_HOME", str(bound))
+
+        expected = [
+            bound / ".codeium" / "windsurf" / "memories" / "global_rules.md",
+            repo / "AGENTS.md",
+            repo / ".devin" / "rules" / "preferred.md",
+            workspace / ".windsurfrules",
+            workspace / ".windsurf" / "rules" / "legacy.md",
+            nested / "AgEnTs.Md",
+            nested / ".devin" / "rules" / "nested.md",
+        ]
+        for path in expected:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("rule\n", encoding="utf-8")
+
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        (outside / "AGENTS.md").write_text("outside\n", encoding="utf-8")
+        linked = workspace / "linked"
+        try:
+            linked.symlink_to(outside, target_is_directory=True)
+        except OSError:
+            linked = None
+
+        discovered = connector_paths.windsurf_rule_files(str(workspace))
+
+        assert set(discovered) == {str(path) for path in expected}
+        if linked is not None:
+            assert str(outside / "AGENTS.md") not in discovered
+        assert all("ProgramData" not in path for path in discovered)
+
+    def test_windsurf_rule_discovery_requires_an_explicit_workspace(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        bound = tmp_path / "bound-profile"
+        ambient_workspace = tmp_path / "ambient-workspace"
+        ambient_workspace.mkdir()
+        (ambient_workspace / "AGENTS.md").write_text("ambient\n", encoding="utf-8")
+        monkeypatch.setenv("WINDSURF_USER_HOME", str(bound))
+        monkeypatch.chdir(ambient_workspace)
+
+        assert connector_paths.windsurf_rule_files() == []
+
+    def test_copilot_mcp_reads_ancestors_and_deduplicates_by_priority(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        home = tmp_path / "home"
+        copilot_home = home / "copilot"
+        repo = tmp_path / "repo"
+        package = repo / "packages" / "service"
+        package.mkdir(parents=True)
+        (repo / ".git").mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("USERPROFILE", str(home))
+        monkeypatch.setenv("COPILOT_HOME", str(copilot_home))
+
+        sources = (
+            (
+                package / ".mcp.json",
+                {
+                    "shared": {"command": "package"},
+                    "package-only": {"command": "package-only"},
+                },
+            ),
+            (
+                repo / ".github" / "mcp.json",
+                {
+                    "shared": {"command": "repo"},
+                    "repo-only": {"command": "repo-only"},
+                },
+            ),
+            (
+                copilot_home / "mcp-config.json",
+                {
+                    "shared": {"command": "user"},
+                    "user-only": {"command": "user-only"},
+                },
+            ),
+        )
+        for path, servers in sources:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"mcpServers": servers}))
+
+        entries = connector_paths.mcp_servers("copilot", workspace_dir=str(package))
+        by_name = {entry.name: entry for entry in entries}
+
+        assert set(by_name) == {"shared", "package-only", "repo-only", "user-only"}
+        assert by_name["shared"].command == "package"
+
     def test_antigravity_reads_global_and_workspace_mcp_config(
         self,
         tmp_path,
@@ -814,10 +1681,6 @@ class TestMCPServers:
         assert connector_paths.mcp_servers("antigravity") == []
 
     def test_codex_reads_global_config_toml(self, tmp_path, monkeypatch):
-        """Bug fix regression: pre-S5.x ``defenseclaw mcp list`` only
-        consulted ``./.mcp.json`` for Codex, dropping every server
-        registered globally in ``~/.codex/config.toml``. We now read
-        both."""
         fake_home = tmp_path / "home"
         codex_dir = fake_home / ".codex"
         codex_dir.mkdir(parents=True)
@@ -840,7 +1703,7 @@ class TestMCPServers:
         assert entries[0].args == ["/opt/fs.js"]
         assert entries[0].env == {"TOKEN": "redacted"}
 
-    def test_codex_merges_global_toml_and_local_dotmcp(
+    def test_codex_merges_user_and_project_config_toml(
         self,
         tmp_path,
         monkeypatch,
@@ -853,7 +1716,7 @@ class TestMCPServers:
 
         cwd = tmp_path / "project"
         cwd.mkdir()
-        self._write_mcp_json(
+        self._write_codex_config(
             cwd,
             {
                 "local-search": {"command": "search-mcp"},
@@ -865,7 +1728,7 @@ class TestMCPServers:
         names = sorted(e.name for e in entries)
         assert names == ["global-fs", "local-search"]
 
-    def test_codex_malformed_config_toml_falls_back_to_dotmcp(
+    def test_codex_malformed_user_config_does_not_hide_project_config(
         self,
         tmp_path,
         monkeypatch,
@@ -878,7 +1741,7 @@ class TestMCPServers:
 
         cwd = tmp_path / "project"
         cwd.mkdir()
-        self._write_mcp_json(
+        self._write_codex_config(
             cwd,
             {
                 "local-search": {"command": "search-mcp"},
@@ -886,47 +1749,192 @@ class TestMCPServers:
         )
         monkeypatch.chdir(cwd)
 
-        # Malformed TOML must NOT raise — we soft-fall-back to the
-        # project-local file. This keeps `defenseclaw mcp list`
-        # usable when an operator hand-edits config.toml and breaks
-        # it; the next save will fix it without us crashing.
+        # Malformed user TOML must not hide a valid higher-precedence
+        # project layer.
         entries = connector_paths.mcp_servers("codex", workspace_dir=str(cwd))
         assert [e.name for e in entries] == ["local-search"]
 
-    def test_claudecode_merges_settings_and_dotmcp(
+    def test_codex_unsafe_project_config_continues_to_user_layer(
         self,
         tmp_path,
         monkeypatch,
     ):
-        # Override $HOME so we can write a fake .claude/settings.json
+        fake_home = tmp_path / "home"
+        codex_dir = fake_home / ".codex"
+        codex_dir.mkdir(parents=True)
+        user_config = codex_dir / "config.toml"
+        user_config.write_text('[mcp_servers.user]\ncommand = "user-mcp"\n')
+        monkeypatch.setenv("HOME", str(fake_home))
+        project = tmp_path / "project"
+        project.mkdir()
+        project_config = self._write_codex_config(
+            project,
+            {"unsafe": {"command": "unsafe-mcp"}},
+        )
+        real_read = connector_paths._read_bounded_stable_file
+
+        def reject_project(path, *, max_bytes):
+            if os.path.normcase(os.path.abspath(path)) == os.path.normcase(str(project_config)):
+                raise OSError("mocked Windows reparse/replacement race")
+            return real_read(path, max_bytes=max_bytes)
+
+        monkeypatch.setattr(connector_paths, "_read_bounded_stable_file", reject_project)
+
+        entries = connector_paths.mcp_servers("codex", workspace_dir=str(project))
+
+        assert [entry.name for entry in entries] == ["user"]
+
+    def test_codex_project_mcp_layers_use_closest_first_precedence(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
         fake_home = tmp_path / "home"
         fake_home.mkdir()
-        (fake_home / ".claude").mkdir()
-        (fake_home / ".claude" / "settings.json").write_text(
+        (fake_home / ".codex").mkdir()
+        (fake_home / ".codex" / "config.toml").write_text(
+            '[mcp_servers.shared]\ncommand = "user"\n'
+        )
+        monkeypatch.setenv("HOME", str(fake_home))
+
+        repo = tmp_path / "repo"
+        active = repo / "services" / "api"
+        active.mkdir(parents=True)
+        (repo / ".git").mkdir()
+        self._write_codex_config(repo, {"shared": {"command": "root"}, "root-only": {"command": "root"}})
+        self._write_codex_config(active, {"shared": {"command": "closest"}})
+
+        entries = connector_paths.mcp_servers("codex", workspace_dir=str(active))
+
+        assert [entry.name for entry in entries] == ["shared", "root-only"]
+        assert entries[0].command == "closest"
+        assert entries[0].source == str(active / ".codex" / "config.toml")
+        assert entries[0].source_scope == "project"
+        assert entries[0].trust_required is True
+
+    def test_claudecode_merges_user_state_and_dotmcp_without_duplicates(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        _pin_claude_home(monkeypatch, fake_home)
+        (fake_home / ".claude.json").write_text(
             json.dumps(
                 {
                     "mcpServers": {
-                        "from-settings": {"command": "x"},
+                        "shared": {"command": "user-command"},
+                        "from-user-state": {"command": "x"},
                     },
                 }
             )
         )
-        monkeypatch.setenv("HOME", str(fake_home))
 
         cwd = tmp_path / "project"
         cwd.mkdir()
         self._write_mcp_json(
             cwd,
             {
+                "shared": {"command": "project-command"},
                 "from-mcp-json": {"command": "y"},
             },
         )
         monkeypatch.chdir(cwd)
 
         entries = connector_paths.mcp_servers("claudecode", workspace_dir=str(cwd))
-        names = [e.name for e in entries]
-        assert "from-settings" in names
-        assert "from-mcp-json" in names
+        names = [entry.name for entry in entries]
+        assert names == ["shared", "from-mcp-json", "from-user-state"]
+        assert next(entry for entry in entries if entry.name == "shared").command == "project-command"
+
+    def test_claudecode_local_project_user_precedence_and_workspace_attribution(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        _pin_claude_home(monkeypatch, fake_home)
+        workspace = tmp_path / "project" / ".." / "project"
+        workspace.resolve().mkdir(parents=True)
+        other_workspace = tmp_path / "other-project"
+        other_workspace.mkdir()
+        state_workspace_key = os.path.join(str(tmp_path), "project", ".")
+
+        (fake_home / ".claude.json").write_text(
+            json.dumps(
+                {
+                    "projects": {
+                        state_workspace_key: {
+                            "mcpServers": {
+                                "shared": {"command": "local-command"},
+                                "local-only": {"command": "local-only-command"},
+                            }
+                        },
+                        str(other_workspace): {
+                            "mcpServers": {
+                                "other-local": {"command": "must-not-appear"},
+                            }
+                        },
+                    },
+                    "mcpServers": {
+                        "shared": {"command": "user-command"},
+                        "user-only": {"command": "user-only-command"},
+                    },
+                }
+            )
+        )
+        self._write_mcp_json(
+            workspace.resolve(),
+            {
+                "shared": {"command": "project-command"},
+                "project-only": {"command": "project-only-command"},
+            },
+        )
+
+        entries = connector_paths.mcp_servers(
+            "claudecode",
+            workspace_dir=str(workspace),
+        )
+        assert [entry.name for entry in entries] == [
+            "shared",
+            "local-only",
+            "project-only",
+            "user-only",
+        ]
+        assert entries[0].command == "local-command"
+        assert all(entry.name != "other-local" for entry in entries)
+
+    def test_claudecode_does_not_infer_local_scope_from_process_cwd(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        _pin_claude_home(monkeypatch, fake_home)
+        workspace = tmp_path / "project"
+        workspace.mkdir()
+        monkeypatch.chdir(workspace)
+        (fake_home / ".claude.json").write_text(
+            json.dumps(
+                {
+                    "projects": {
+                        str(workspace): {
+                            "mcpServers": {
+                                "local-only": {"command": "must-not-appear"},
+                            }
+                        }
+                    },
+                    "mcpServers": {
+                        "user-only": {"command": "user-command"},
+                    },
+                }
+            )
+        )
+
+        entries = connector_paths.mcp_servers("claudecode")
+        assert [entry.name for entry in entries] == ["user-only"]
 
     def test_zeptoclaw_reads_config_json(self, tmp_path, monkeypatch):
         fake_home = tmp_path / "home"
@@ -1093,6 +2101,115 @@ class TestOpenCodeMCPReader:
         names = {e.name for e in connector_paths.mcp_servers("opencode", workspace_dir=str(workspace))}
         assert names == {"g", "p"}
 
+    def test_custom_config_layers_last_and_overrides_same_name(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        self._write_global(
+            home,
+            {
+                "shared": {"type": "local", "command": ["global-command"]},
+                "global-only": {"type": "local", "command": ["global-only-command"]},
+            },
+        )
+        workspace = tmp_path / "ws"
+        workspace.mkdir()
+        (workspace / "opencode.json").write_text(
+            json.dumps({"mcp": {"shared": {"type": "local", "command": ["project-command"]}}})
+        )
+        custom = tmp_path / "custom-opencode"
+        custom.mkdir()
+        (custom / "opencode.jsonc").write_text(
+            json.dumps({"mcp": {"shared": {"type": "local", "command": ["custom-command"]}}})
+        )
+        monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(custom))
+
+        entries = {
+            entry.name: entry
+            for entry in connector_paths.mcp_servers("opencode", workspace_dir=str(workspace))
+        }
+
+        assert set(entries) == {"shared", "global-only"}
+        assert entries["shared"].command == "custom-command"
+
+    def test_v11810_precedence_content_disabled_and_provenance(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        global_dir = home / ".config" / "opencode"
+        global_dir.mkdir(parents=True)
+        (global_dir / "config.json").write_text(
+            json.dumps({"mcp": {"shared": {"type": "local", "command": ["global"]}}}),
+        )
+        explicit = tmp_path / "explicit.jsonc"
+        explicit.write_text(
+            '// exact OPENCODE_CONFIG layer\n{"mcp":{"shared":{"command":["explicit"]}}}',
+        )
+        monkeypatch.setenv("OPENCODE_CONFIG", str(explicit))
+        workspace = tmp_path / "workspace"
+        (workspace / ".opencode").mkdir(parents=True)
+        (workspace / "opencode.json").write_text(
+            json.dumps({"mcp": {"shared": {"command": ["project"]}}}),
+        )
+        (workspace / ".opencode" / "opencode.jsonc").write_text(
+            json.dumps({"mcp": {"shared": {"command": ["project-directory"]}}}),
+        )
+        home_component = home / ".opencode"
+        home_component.mkdir()
+        (home_component / "opencode.json").write_text(
+            json.dumps({"mcp": {"shared": {"command": ["home-directory"]}}}),
+        )
+        custom = tmp_path / "custom"
+        custom.mkdir()
+        (custom / "opencode.json").write_text(
+            json.dumps({"mcp": {"shared": {"command": ["custom-directory"]}}}),
+        )
+        monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(custom))
+        monkeypatch.setenv(
+            "OPENCODE_CONFIG_CONTENT",
+            json.dumps({"mcp": {"shared": {"enabled": False}}}),
+        )
+
+        entries = connector_paths.mcp_servers("opencode", workspace_dir=str(workspace))
+
+        assert len(entries) == 1
+        assert entries[0].command == "custom-directory"
+        assert entries[0].disabled is True
+        assert entries[0].source == "OPENCODE_CONFIG_CONTENT"
+        assert entries[0].source_scope == "inline"
+
+        resolution = connector_paths._resolve_opencode_config(str(workspace))
+        first_scope = {}
+        for index, layer in enumerate(resolution.layers):
+            first_scope.setdefault(layer.source_scope, index)
+        assert first_scope["project-directory"] < first_scope["home-directory"]
+        assert first_scope["home-directory"] < first_scope["custom-directory"]
+        assert first_scope["custom-directory"] < first_scope["inline"]
+
+    def test_resolver_types_remote_and_programdata_as_unverified(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+
+        resolution = connector_paths._resolve_opencode_config()
+
+        unverified = {(item.source_scope, item.source) for item in resolution.unverified}
+        assert ("remote", "authenticated .well-known/opencode") in unverified
+        assert ("managed-enterprise", "Windows ProgramData managed config") in unverified
+        assert all("ProgramData" not in layer.path for layer in resolution.layers)
+
+    def test_inline_content_refuses_non_authoritative_write(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        home.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("OPENCODE_CONFIG_CONTENT", '{"mcp":{}}')
+
+        with pytest.raises(connector_paths.MCPWriteUnsupportedError, match="inline"):
+            connector_paths._set_opencode_mcp_server(
+                "demo",
+                {"command": "demo"},
+            )
+
     def test_no_config_returns_empty(self, tmp_path, monkeypatch):
         home = tmp_path / "home"
         home.mkdir()
@@ -1111,9 +2228,10 @@ class TestConnectorHome:
         [
             ("codex", "CODEX_HOME", "custom-codex", "config.toml"),
             ("claudecode", "CLAUDE_CONFIG_DIR", "custom-claude", "settings.json"),
+            ("copilot", "COPILOT_HOME", "custom-copilot", "settings.json"),
         ],
     )
-    def test_codex_and_claude_honor_client_home_overrides(
+    def test_clients_honor_client_home_overrides(
         self,
         connector,
         variable,
@@ -1141,15 +2259,60 @@ class TestConnectorHome:
 
         assert connector_paths.connector_home(connector) == str(tmp_path / directory)
 
+    def test_claude_mcp_state_honors_config_override(self, monkeypatch, tmp_path):
+        configured = tmp_path / "custom-claude"
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(configured))
+
+        assert connector_paths.claude_mcp_state_path() == str(configured / ".claude.json")
+        assert str(configured / ".claude.json") in connector_paths.connector_config_files("claudecode")
+
+    def test_claude_paths_default_to_platform_home_without_override(self, monkeypatch, tmp_path):
+        home = tmp_path / "claude-home"
+        _pin_claude_home(monkeypatch, home)
+
+        assert connector_paths.claude_config_dir() == str(home / ".claude")
+        assert connector_paths.claude_mcp_state_path() == str(home / ".claude.json")
+
+    def test_claude_settings_paths_are_separate_and_scope_ordered(self, monkeypatch, tmp_path):
+        home = tmp_path / "claude-home"
+        workspace = tmp_path / "workspace"
+        _pin_claude_home(monkeypatch, home)
+
+        assert connector_paths.claude_settings_paths(str(workspace)) == [
+            str(home / ".claude" / "settings.json"),
+            str(workspace / ".claude" / "settings.json"),
+            str(workspace / ".claude" / "settings.local.json"),
+        ]
+
     def test_opencode_home_is_xdg_config(self, monkeypatch, tmp_path):
         monkeypatch.setenv("HOME", str(tmp_path))
         assert connector_paths.connector_home("opencode") == os.path.join(str(tmp_path), ".config", "opencode")
 
+    def test_opencode_home_and_managed_plugin_honor_config_override(self, monkeypatch, tmp_path):
+        configured = tmp_path / "custom-opencode"
+        monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(configured))
+
+        assert connector_paths.connector_home("opencode") == str(configured)
+        assert connector_paths.connector_config_files("opencode") == [str(configured / "plugins" / "defenseclaw.js")]
+
     def test_antigravity_home(self, monkeypatch, tmp_path):
         monkeypatch.setenv("HOME", str(tmp_path))
         assert connector_paths.connector_home("antigravity") == os.path.join(
-            str(tmp_path), ".gemini", "antigravity-cli"
+            str(tmp_path), ".gemini", "config"
         )
+
+    def test_antigravity_home_ignores_undocumented_config_overrides(self, monkeypatch, tmp_path):
+        configured = tmp_path / "custom-antigravity"
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("ANTIGRAVITY_CONFIG_DIR", str(configured))
+        monkeypatch.setenv("GEMINI_CONFIG_DIR", str(configured / "gemini"))
+
+        official = tmp_path / ".gemini" / "config"
+        assert connector_paths.connector_home("antigravity") == str(official)
+        assert connector_paths.connector_config_files("antigravity") == [
+            str(official / "mcp_config.json"),
+            str(official / "hooks.json"),
+        ]
 
     def test_opencode_home_is_not_openclaw(self, monkeypatch, tmp_path):
         monkeypatch.setenv("HOME", str(tmp_path))
@@ -1168,16 +2331,50 @@ class TestHermesPathResolution:
 
     def test_windows_defaults_to_local_app_data(self, tmp_path):
         home = tmp_path / "home"
-        local_app_data = tmp_path / "local-app-data"
+        local_app_data = r"C:\Users\kevin\AppData\Local"
 
         resolved = connector_paths._resolve_hermes_home(
             platform_name="nt",
             user_home=str(home),
-            local_app_data=str(local_app_data),
+            local_app_data=local_app_data,
             override="",
         )
 
-        assert resolved == str(local_app_data / "hermes")
+        assert resolved == ntpath.join(local_app_data, "hermes")
+
+    def test_windows_explicit_absolute_hermes_home_remains_supported(self, tmp_path):
+        configured = r"C:\Users\kevin\Hermes Current"
+
+        resolved = connector_paths._resolve_hermes_home(
+            platform_name="nt",
+            user_home=str(tmp_path / "legacy-home"),
+            local_app_data=r"C:\Users\kevin\AppData\Local",
+            override=configured,
+        )
+
+        assert resolved == configured
+
+    @pytest.mark.parametrize(
+        "override,local_app_data,error",
+        [
+            ("relative-hermes", r"C:\Users\kevin\AppData\Local", "HERMES_HOME"),
+            ("", "relative-local-app-data", "LocalAppData"),
+        ],
+    )
+    def test_windows_rejects_relative_hermes_roots(
+        self,
+        tmp_path,
+        override,
+        local_app_data,
+        error,
+    ):
+        with pytest.raises(ValueError, match=error):
+            connector_paths._resolve_hermes_home(
+                platform_name="nt",
+                user_home=str(tmp_path / "legacy-home"),
+                local_app_data=local_app_data,
+                override=override,
+            )
 
     def test_non_windows_preserves_dot_hermes_default(self, tmp_path):
         home = tmp_path / "home"
@@ -1191,24 +2388,25 @@ class TestHermesPathResolution:
 
         assert resolved == str(home / ".hermes")
 
-    def test_windows_without_local_app_data_falls_back_to_user_home(self, tmp_path):
+    def test_windows_without_token_local_app_data_never_falls_back_to_legacy_home(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
         home = tmp_path / "home"
-
-        resolved = connector_paths._resolve_hermes_home(
-            platform_name="nt",
-            user_home=str(home),
-            local_app_data="",
-            override="",
+        monkeypatch.setattr(
+            connector_paths.os.path,
+            "abspath",
+            lambda _path: pytest.fail("Windows resolver consulted a cwd-derived path"),
         )
 
-        assert resolved == str(home / ".hermes")
-
-    def test_legacy_config_path_is_read_only_migration_candidate(self, monkeypatch, tmp_path):
-        home = tmp_path / "home"
-        monkeypatch.setattr("defenseclaw.connector_paths.Path.home", lambda: home)
-
-        assert connector_paths.hermes_legacy_config_path() == str(home / ".hermes" / "config.yaml")
-
+        with pytest.raises(ValueError, match="LocalAppData"):
+            connector_paths._resolve_hermes_home(
+                platform_name="nt",
+                user_home=str(home),
+                local_app_data="",
+                override="",
+            )
 
 # ---------------------------------------------------------------------------
 # Round-trip via Config.skill_dirs / plugin_dirs / mcp_servers
@@ -1218,6 +2416,27 @@ class TestHermesPathResolution:
 class TestConnectorConfigFiles:
     """N2 — ``connector_config_files`` must point at the file the connector
     actually writes, not a phantom path."""
+
+    def test_codex_lists_every_project_config_layer_not_dotmcp(self, tmp_path, monkeypatch):
+        fake_home = tmp_path / "home"
+        fake_home.mkdir()
+        monkeypatch.setenv("HOME", str(fake_home))
+        repo = tmp_path / "repo"
+        active = repo / "nested"
+        active.mkdir(parents=True)
+        (repo / ".git").mkdir()
+
+        files = connector_paths.connector_config_files("codex", workspace_dir=str(active))
+
+        assert files == [
+            str(fake_home / ".codex" / "config.toml"),
+            str(active / ".codex" / "config.toml"),
+            str(repo / ".codex" / "config.toml"),
+            str(repo / ".agents" / "plugins" / "marketplace.json"),
+            str(repo / ".claude-plugin" / "marketplace.json"),
+            str(fake_home / ".agents" / "plugins" / "marketplace.json"),
+        ]
+        assert not any(path.endswith(".mcp.json") for path in files)
 
     def test_hermes_lists_yaml_not_json(self, tmp_path, monkeypatch):
         fake_home = tmp_path / "home"
@@ -1250,9 +2469,12 @@ class TestConnectorConfigFiles:
         )
         assert os.path.join(str(fake_home), ".gemini", "config", "mcp_config.json") in files
         assert os.path.join(str(tmp_path), ".agents", "mcp_config.json") in files
+        assert os.path.join(str(fake_home), ".gemini", "config", "hooks.json") in files
+        assert not any("antigravity-cli" in path for path in files)
 
     def test_omnigent_honors_config_home(self, tmp_path, monkeypatch):
         config_home = tmp_path / "isolated-omnigent"
+        monkeypatch.delenv("OMNIGENT_CONFIG", raising=False)
         monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(config_home))
 
         assert connector_paths.omnigent_config_path() == str(config_home / "config.yaml")
@@ -1261,17 +2483,26 @@ class TestConnectorConfigFiles:
 
     def test_omnigent_relative_config_home_is_resolved_consistently(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv("OMNIGENT_CONFIG", raising=False)
         monkeypatch.setenv("OMNIGENT_CONFIG_HOME", "relative-omnigent")
         config_home = tmp_path / "relative-omnigent"
 
         assert connector_paths.omnigent_config_path() == str(config_home / "config.yaml")
         assert connector_paths.connector_home("omnigent") == str(config_home)
 
+    def test_omnigent_explicit_config_path_takes_precedence(self, tmp_path, monkeypatch):
+        config_path = tmp_path / "explicit" / "server.yaml"
+        monkeypatch.setenv("OMNIGENT_CONFIG", str(config_path))
+        monkeypatch.setenv("OMNIGENT_CONFIG_HOME", str(tmp_path / "ignored-home"))
+
+        assert connector_paths.omnigent_config_path() == str(config_path)
+        assert connector_paths.connector_config_files("omnigent") == [str(config_path)]
+
     @pytest.mark.parametrize(
         ("connector", "variable", "directory", "file_name"),
         [
             ("codex", "CODEX_HOME", "codex-home", "config.toml"),
-            ("claudecode", "CLAUDE_CONFIG_DIR", "claude-home", "settings.json"),
+            ("claudecode", "CLAUDE_CONFIG_DIR", "claude-home", ".claude.json"),
         ],
     )
     def test_config_reads_and_writes_use_effective_client_home(
@@ -1313,7 +2544,7 @@ class TestConfigDispatch:
         cfg.guardrail.connector = "codex"
         dirs = cfg.skill_dirs()
         home = str(Path.home())
-        assert os.path.join(home, ".codex", "skills") in dirs
+        assert os.path.join(home, ".agents", "skills") in dirs
 
     def test_config_plugin_dirs_uses_active_connector(self):
         from defenseclaw import config
@@ -1322,7 +2553,8 @@ class TestConfigDispatch:
         cfg.guardrail.connector = "claudecode"
         dirs = cfg.plugin_dirs()
         home = str(Path.home())
-        assert os.path.join(home, ".claude", "plugins") in dirs
+        assert os.path.join(home, ".claude", "plugins", "cache") in dirs
+        assert os.path.join(home, ".claude", "skills") in dirs
 
     def test_config_active_connector_precedence(self):
         from defenseclaw import config

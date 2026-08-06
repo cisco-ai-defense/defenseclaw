@@ -7,8 +7,13 @@ import (
 	"bytes"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hookruntime"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 const ownedCodexOTLPFixture = `[otel.exporter.otlp-http]
@@ -37,6 +42,209 @@ func TestBindConnectorLifecycleConfigHomeOverridesAmbientAndRestoresIt(t *testin
 	restore()
 	if got := os.Getenv("CODEX_HOME"); got != ambient {
 		t.Fatalf("restored CODEX_HOME = %q, want %q", got, ambient)
+	}
+}
+
+func TestBindWindsurfLifecycleProfileOverridesAmbientAndRestoresIt(t *testing.T) {
+	root := t.TempDir()
+	ambient := filepath.Join(root, "ambient-profile")
+	bound := filepath.Join(root, "bound-profile")
+	for _, path := range []string{ambient, bound} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	homeEnv := "HOME"
+	switch runtime.GOOS {
+	case "windows":
+		homeEnv = "USERPROFILE"
+	case "plan9":
+		homeEnv = "home"
+	}
+	t.Setenv(homeEnv, ambient)
+	connectorFlagConfigHome = bound
+	t.Cleanup(func() { connectorFlagConfigHome = "" })
+
+	restore, err := bindConnectorLifecycleConfigHome("windsurf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantBound := filepath.Join(bound, ".codeium", "windsurf", "hooks.json")
+	if got := connector.NewWindsurfConnector().Capabilities(
+		connector.SetupOpts{},
+	).Hooks.ConfigPath; filepath.Clean(got) != filepath.Clean(wantBound) {
+		t.Fatalf("bound Windsurf hooks path = %q, want %q", got, wantBound)
+	}
+	restore()
+	wantAmbient := filepath.Join(ambient, ".codeium", "windsurf", "hooks.json")
+	if got := connector.NewWindsurfConnector().Capabilities(
+		connector.SetupOpts{},
+	).Hooks.ConfigPath; filepath.Clean(got) != filepath.Clean(wantAmbient) {
+		t.Fatalf("restored Windsurf hooks path = %q, want ambient %q", got, wantAmbient)
+	}
+}
+
+func TestBindAntigravityLifecycleConfigHomeUsesHiddenOptsWithoutVendorEnv(t *testing.T) {
+	root := t.TempDir()
+	ambient := filepath.Join(root, "ambient")
+	bound := filepath.Join(root, ".gemini", "config")
+	t.Setenv("ANTIGRAVITY_CONFIG_DIR", ambient)
+	t.Setenv("GEMINI_CONFIG_DIR", filepath.Join(root, "gemini-ambient"))
+	connectorFlagConfigHome = bound
+	t.Cleanup(func() { connectorFlagConfigHome = "" })
+
+	restore, err := bindConnectorLifecycleConfigHome("antigravity")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := os.Getenv("ANTIGRAVITY_CONFIG_DIR"); got != ambient {
+		t.Fatalf("ANTIGRAVITY_CONFIG_DIR was mutated to %q", got)
+	}
+	opts := resolveConnectorOpts("")
+	if got := connector.NewAntigravityConnector().Capabilities(opts).Hooks.ConfigPath; got != filepath.Join(bound, "hooks.json") {
+		t.Fatalf("hidden Antigravity config home resolved to %q", got)
+	}
+	restore()
+	if got := os.Getenv("ANTIGRAVITY_CONFIG_DIR"); got != ambient {
+		t.Fatalf("restored ANTIGRAVITY_CONFIG_DIR = %q, want %q", got, ambient)
+	}
+}
+
+func TestBindOpenCodeLifecycleConfigHomeOverridesAmbientAndRestoresIt(t *testing.T) {
+	ambient := filepath.Join(t.TempDir(), "ambient-opencode")
+	bound := filepath.Join(t.TempDir(), "bound-opencode")
+	t.Setenv("OPENCODE_CONFIG_DIR", ambient)
+	connectorFlagConfigHome = bound
+	t.Cleanup(func() { connectorFlagConfigHome = "" })
+
+	restore, err := bindConnectorLifecycleConfigHome("opencode")
+	if err != nil {
+		t.Fatalf("bind OpenCode config home: %v", err)
+	}
+	if got := os.Getenv("OPENCODE_CONFIG_DIR"); got != bound {
+		t.Fatalf("OPENCODE_CONFIG_DIR = %q, want %q", got, bound)
+	}
+	restore()
+	if got := os.Getenv("OPENCODE_CONFIG_DIR"); got != ambient {
+		t.Fatalf("restored OPENCODE_CONFIG_DIR = %q, want %q", got, ambient)
+	}
+}
+
+func TestBindOmnigentLifecycleConfigHomeOverridesAmbientAndRestoresIt(t *testing.T) {
+	root := t.TempDir()
+	ambient := filepath.Join(root, "ambient-omnigent")
+	bound := filepath.Join(root, "bound-omnigent")
+	t.Setenv("OMNIGENT_CONFIG_HOME", ambient)
+	connectorFlagConfigHome = bound
+	t.Cleanup(func() { connectorFlagConfigHome = "" })
+
+	restore, err := bindConnectorLifecycleConfigHome("omnigent")
+	if err != nil {
+		t.Fatalf("bind OmniGent config home: %v", err)
+	}
+	if got := os.Getenv("OMNIGENT_CONFIG_HOME"); got != bound {
+		t.Fatalf("OMNIGENT_CONFIG_HOME = %q, want %q", got, bound)
+	}
+	if got := connector.NewOmnigentConnector().Capabilities(resolveConnectorOpts("")).Hooks.ConfigPath; !strings.HasPrefix(filepath.Clean(got), filepath.Clean(bound)+string(filepath.Separator)) {
+		t.Fatalf("OmniGent config path = %q, want beneath %q", got, bound)
+	}
+	restore()
+	if got := os.Getenv("OMNIGENT_CONFIG_HOME"); got != ambient {
+		t.Fatalf("restored OMNIGENT_CONFIG_HOME = %q, want %q", got, ambient)
+	}
+}
+
+func TestOmnigentVerifyAcceptsExactHiddenConfigHomeAndRestoresAmbient(t *testing.T) {
+	root := t.TempDir()
+	dataDir := testenv.PrivateTempDir(t)
+	ambient := filepath.Join(root, "ambient-omnigent")
+	bound := filepath.Join(root, "bound-omnigent")
+	if err := os.MkdirAll(bound, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("OMNIGENT_CONFIG_HOME", ambient)
+	defer withConnectorState(t, dataDir, "omnigent")()
+
+	stdout, stderr, exitCode := runConnectorCmd(
+		t,
+		"verify",
+		"--connector", "omnigent",
+		"--data-dir", dataDir,
+		"--config-home", bound,
+		"--json",
+	)
+	if exitCode != 0 || stderr != "" || !strings.Contains(stdout, `"connector":"omnigent"`) || !strings.Contains(stdout, `"clean":true`) {
+		t.Fatalf("OmniGent explicit-home verify: exit=%d stdout=%q stderr=%q", exitCode, stdout, stderr)
+	}
+	if got := os.Getenv("OMNIGENT_CONFIG_HOME"); got != ambient {
+		t.Fatalf("OMNIGENT_CONFIG_HOME after verify = %q, want %q", got, ambient)
+	}
+}
+
+func TestBindHermesLifecycleConfigHomeOverridesAmbientAndRestoresIt(t *testing.T) {
+	root := t.TempDir()
+	ambient := filepath.Join(root, "ambient-hermes")
+	bound := filepath.Join(root, "bound-hermes")
+	t.Setenv("HERMES_HOME", ambient)
+	connectorFlagConfigHome = bound
+	connectorFlagHookExe = filepath.Join(root, "HookRuntime", "defenseclaw-hook.exe")
+	previousPaths := connectorHookRuntimePaths
+	connectorHookRuntimePaths = func() (hookruntime.Paths, error) {
+		return hookruntime.Paths{Launcher: connectorFlagHookExe}, nil
+	}
+	t.Cleanup(func() {
+		connectorFlagConfigHome = ""
+		connectorFlagHookExe = ""
+		connectorHookRuntimePaths = previousPaths
+	})
+
+	restore, err := bindConnectorLifecycleConfigHome("hermes")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := os.Getenv("HERMES_HOME"); got != bound {
+		t.Fatalf("bound HERMES_HOME = %q, want %q", got, bound)
+	}
+	restore()
+	if got := os.Getenv("HERMES_HOME"); got != ambient {
+		t.Fatalf("restored HERMES_HOME = %q, want %q", got, ambient)
+	}
+}
+
+func TestHermesLifecycleHookExecutableBindingRequiresExactNativePath(t *testing.T) {
+	root := t.TempDir()
+	home := filepath.Join(root, "hermes")
+	valid := filepath.Join(root, "HookRuntime", "defenseclaw-hook.exe")
+	previousPaths := connectorHookRuntimePaths
+	connectorHookRuntimePaths = func() (hookruntime.Paths, error) {
+		return hookruntime.Paths{Launcher: valid}, nil
+	}
+	t.Cleanup(func() { connectorHookRuntimePaths = previousPaths })
+	for name, executable := range map[string]string{
+		"missing":        "",
+		"relative":       filepath.Join("HookRuntime", "defenseclaw-hook.exe"),
+		"wrong basename": filepath.Join(root, "HookRuntime", "defenseclaw-gateway.exe"),
+		"foreign path":   filepath.Join(root, "OtherRuntime", "defenseclaw-hook.exe"),
+		"quoted":         `"` + valid + `"`,
+		"newline":        valid + "\nother.exe",
+	} {
+		t.Run(name, func(t *testing.T) {
+			connectorFlagHookExe = executable
+			t.Cleanup(func() { connectorFlagHookExe = "" })
+			if err := validateConnectorLifecycleHookExecutable("hermes", home); err == nil {
+				t.Fatalf("unsafe Hermes maintenance hook executable %q was accepted", executable)
+			}
+		})
+	}
+
+	connectorFlagHookExe = valid
+	t.Cleanup(func() { connectorFlagHookExe = "" })
+	if err := validateConnectorLifecycleHookExecutable("hermes", home); err != nil {
+		t.Fatalf("valid Hermes maintenance hook executable rejected: %v", err)
+	}
+	opts := resolveConnectorOpts(filepath.Join(root, "data"))
+	if opts.HookExecutable != valid {
+		t.Fatalf("resolved HookExecutable = %q, want exact %q", opts.HookExecutable, valid)
 	}
 }
 
@@ -135,10 +343,103 @@ func TestConnectorVerifyUsesExplicitConfigHomeWithoutMutation(t *testing.T) {
 	}
 }
 
+func TestCursorVerifyUsesExplicitConfigHomeWithoutVendorEnvironmentOverride(t *testing.T) {
+	root := t.TempDir()
+	dataDir := testenv.PrivateTempDir(t)
+	bound := filepath.Join(root, "cursor")
+	if err := os.MkdirAll(bound, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	adapter := filepath.Join(dataDir, "hooks", "cursor-hook.ps1")
+	config := []byte(`{"version":1,"hooks":{"preToolUse":[{"type":"command","command":"` +
+		`& '` + strings.ReplaceAll(adapter, `\`, `\\`) + `'` +
+		`","timeout":30,"failClosed":false}]}}`)
+	configPath := filepath.Join(bound, "hooks.json")
+	if err := os.WriteFile(configPath, config, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	defer withConnectorState(t, dataDir, "cursor")()
+
+	stdout, stderr, exitCode := runConnectorCmd(
+		t,
+		"verify",
+		"--connector", "cursor",
+		"--data-dir", dataDir,
+		"--config-home", bound,
+		"--json",
+	)
+	if exitCode != 1 || stderr != "" ||
+		!strings.Contains(stdout, `"clean":false`) ||
+		!strings.Contains(stdout, "cursor-hook") {
+		t.Fatalf("Cursor explicit-home verify: exit=%d stdout=%q stderr=%q", exitCode, stdout, stderr)
+	}
+	gotConfig, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(gotConfig, config) {
+		t.Fatal("Cursor explicit-home verification mutated hooks.json")
+	}
+	if _, exists := os.LookupEnv("CURSOR_HOME"); exists {
+		t.Fatal("Cursor maintenance invented a vendor CURSOR_HOME environment override")
+	}
+}
+
+func TestCursorReconcileWritesOnlyExplicitConfigHome(t *testing.T) {
+	root := t.TempDir()
+	dataDir := testenv.PrivateTempDir(t)
+	bound := filepath.Join(root, "cursor")
+	for _, path := range []string{bound} {
+		if err := os.MkdirAll(path, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := validateConnectorLifecycleConfigHomePath(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	defer withConnectorState(t, dataDir, "cursor")()
+	if _, err := connector.EnsureHookAPIToken(dataDir, "cursor"); err != nil {
+		t.Fatal(err)
+	}
+
+	stdout, stderr, _ := runConnectorCmd(
+		t,
+		"reconcile",
+		"--connector", "cursor",
+		"--data-dir", dataDir,
+		"--config-home", bound,
+		"--json",
+	)
+	if !strings.Contains(stdout, `"connector":"cursor"`) ||
+		!strings.Contains(stdout, `"fail_mode":"open"`) ||
+		stderr != "" {
+		t.Fatalf("Cursor reconcile: stdout=%q stderr=%q", stdout, stderr)
+	}
+	hooksPath := filepath.Join(bound, "hooks.json")
+	hooks, err := os.ReadFile(hooksPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(hooks, []byte(`"failClosed": false`)) ||
+		!bytes.Contains(hooks, []byte(`"preToolUse"`)) {
+		t.Fatalf("Cursor reconcile wrote an incomplete registration: %s", hooks)
+	}
+	if lock := connector.LoadHookContractLockEntry(dataDir, "cursor"); lock.HookFailMode != "open" {
+		t.Fatalf("Cursor observe lock fail mode = %q, want open", lock.HookFailMode)
+	}
+}
+
 func TestConnectorConfigHomeFlagIsMaintenanceOnly(t *testing.T) {
 	flag := connectorCmd.PersistentFlags().Lookup("config-home")
 	if flag == nil || !flag.Hidden {
 		t.Fatal("config-home flag must remain hidden from the operator surface")
+	}
+}
+
+func TestConnectorHookExecutableFlagIsMaintenanceOnly(t *testing.T) {
+	flag := connectorCmd.PersistentFlags().Lookup("hook-executable")
+	if flag == nil || !flag.Hidden {
+		t.Fatal("hook-executable flag must remain hidden from the operator surface")
 	}
 }
 

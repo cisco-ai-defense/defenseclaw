@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import click
@@ -53,6 +54,122 @@ from defenseclaw.scanner_binary import resolve_scanner_binary
 # matching unchanged.
 
 _STATUS_LABEL_WIDTH = 14  # "Environment:  " — locks legacy alignment
+
+# Reuse the established operator-evidence staleness semantics from the TUI's
+# Doctor cache.  This is a presentation freshness bound, not a transport or
+# readiness timeout: an idle/stopped OpenCode client simply becomes
+# unverified, and is never guessed to be running with ``--pure``.
+_OPENCODE_HEARTBEAT_FRESHNESS = timedelta(minutes=15)
+_OPENCODE_CLOCK_SKEW_TOLERANCE = timedelta(minutes=5)
+_OPENCODE_REGISTRATION_SOURCES = frozenset({"manual", "automatic"})
+_RUNTIME_HEALTHY_STATES = frozenset({"running", "active", "ready", "up", "healthy", "ok"})
+
+
+def _opencode_registration_source_valid(value: object) -> bool:
+    """Accept only an exact source emitted by gateway registration."""
+
+    return isinstance(value, str) and value in _OPENCODE_REGISTRATION_SOURCES
+
+
+def _runtime_timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    text = value.strip()
+    if text.endswith(("Z", "z")):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def _opencode_runtime_truth(
+    row: dict | None,
+    *,
+    gateway_started_at: object = "",
+    gateway_available: bool = True,
+    now: datetime | None = None,
+) -> tuple[str, str]:
+    """Return the bounded OpenCode runtime state and operator detail.
+
+    The connector row is accepted only from the authenticated, profile-bound
+    status document at each caller.  A heartbeat proves that the managed
+    plugin loaded in the current gateway generation; freshness prevents an
+    old client session from leaving the configured adapter green forever.
+    OpenCode exposes no authenticated ``--pure`` signal, so this helper never
+    infers that reason from absent runtime evidence.
+    """
+
+    if not gateway_available:
+        return "degraded", "runtime load unverified: authenticated gateway status is unavailable"
+    if not isinstance(row, dict):
+        return "degraded", "runtime load unverified: authenticated status has no OpenCode connector row"
+
+    raw_state = str(row.get("state") or "").strip().lower() or "unknown"
+    if raw_state in {"stopped", "offline", "down", "disabled"}:
+        return raw_state, f"OpenCode runtime reports {raw_state}; managed bridge load is not asserted"
+
+    if not _opencode_registration_source_valid(row.get("source")):
+        return (
+            "degraded",
+            "runtime load unverified: authenticated status does not prove a current "
+            "manual or automatic OpenCode registration",
+        )
+
+    heartbeat_raw = row.get("load_heartbeat_at")
+    if not isinstance(heartbeat_raw, str) or not heartbeat_raw.strip():
+        return (
+            "degraded",
+            "runtime load unverified: no authenticated load heartbeat; OpenCode may be stopped or idle",
+        )
+    heartbeat = _runtime_timestamp(heartbeat_raw)
+    if heartbeat is None:
+        return "degraded", "runtime load unverified: authenticated load heartbeat is malformed"
+
+    gateway_started = _runtime_timestamp(gateway_started_at)
+    if gateway_started is None:
+        return "degraded", "runtime load unverified: gateway generation timestamp is missing or malformed"
+    if heartbeat < gateway_started:
+        return "degraded", "runtime load unverified: load heartbeat predates the current gateway generation"
+
+    current = now or datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    else:
+        current = current.astimezone(timezone.utc)
+    age = current - heartbeat
+    if age < -_OPENCODE_CLOCK_SKEW_TOLERANCE:
+        return "degraded", "runtime load unverified: authenticated load heartbeat is ahead of the local clock"
+    if age > _OPENCODE_HEARTBEAT_FRESHNESS:
+        return (
+            "degraded",
+            "runtime load unverified: authenticated load heartbeat is stale "
+            f"(last received at {heartbeat_raw.strip()}); "
+            "OpenCode may be stopped or idle",
+        )
+    if raw_state not in _RUNTIME_HEALTHY_STATES:
+        return raw_state, f"OpenCode runtime reports {raw_state}; authenticated load heartbeat is fresh"
+    return raw_state, f"managed bridge authenticated load heartbeat is fresh (received at {heartbeat_raw.strip()})"
+
+
+def _omnigent_effective_runtime_state(cfg, state: str) -> tuple[str, str]:
+    """Project adapter liveness through passive OmniGent policy readiness."""
+
+    raw_state = str(state or "")
+    if raw_state.strip().lower() not in {"running", "active", "ready", "up"}:
+        return raw_state, ""
+    try:
+        from defenseclaw.commands.cmd_doctor import _omnigent_runtime_readiness
+
+        readiness, detail = _omnigent_runtime_readiness(cfg)
+    except Exception as exc:  # noqa: BLE001 - presentation must remain available.
+        readiness, detail = "warn", f"policy readiness unavailable: {exc}"
+    if readiness != "pass":
+        return "degraded", detail
+    return raw_state, detail
 
 
 def _label(text: str) -> str:
@@ -262,7 +379,7 @@ _FRIENDLY_CONNECTOR_NAMES = {
     "codex": "Codex",
     "hermes": "Hermes",
     "cursor": "Cursor",
-    "windsurf": "Windsurf",
+    "windsurf": "Devin Desktop — legacy Cascade",
     "geminicli": "Gemini CLI",
     "copilot": "GitHub Copilot CLI",
     "openhands": "OpenHands",
@@ -271,6 +388,7 @@ _FRIENDLY_CONNECTOR_NAMES = {
     "amp": "Amp",
     "omnigent": "OmniGent",
 }
+_CURSOR_PRIORITY_CONFLICT_DISCLOSURE = "priority-conflict-detection=unavailable (none inferred)"
 
 
 def _friendly_connector_name(name: str | None) -> str:
@@ -285,6 +403,12 @@ def _friendly_connector_name(name: str | None) -> str:
     if name in _FRIENDLY_CONNECTOR_NAMES:
         return _FRIENDLY_CONNECTOR_NAMES[name]
     return name[:1].upper() + name[1:]
+
+
+def _cursor_priority_conflict_disclosure(name: str) -> str:
+    if name.strip().lower() == "cursor":
+        return _CURSOR_PRIORITY_CONFLICT_DISCLOSURE
+    return ""
 
 
 def _connector_scope_text(cfg) -> str:
@@ -377,26 +501,53 @@ def _print_agents(
         fail_mode = _effective_status_fail_mode(cfg, conn)
         fail_mode_suffix = f" fail-mode={fail_mode['effective']} provenance={fail_mode['provenance']}"
         friendly = _friendly_connector_name(conn)
+        disclosure = _cursor_priority_conflict_disclosure(conn)
+        disclosure_suffix = f" {disclosure}" if disclosure else ""
         if not _is_enabled(conn):
             # Operator-disabled: hooks were torn down, so there is no live
             # health entry. Mark it explicitly rather than letting it fall to
             # the dim "not reporting" branch, which is indistinguishable from a
             # connector the sidecar simply hasn't surfaced yet.
             disabled_label = ux._style("DISABLED", fg="yellow")
-            disabled_text = ux.dim(f"{friendly} ({conn}) — mode={mode or '?'}{fail_mode_suffix}")
+            disabled_text = ux.dim(f"{friendly} ({conn}) — mode={mode or '?'}{fail_mode_suffix}{disclosure_suffix}")
             ux.echo(f"                {disabled_text} — {disabled_label}")
             continue
         hc = health_map.get(conn.strip().lower())
         source_suffix = f" source={source}"
         if hc:
-            suffix = _connector_state_verb(str(hc.get("state") or ""))
+            runtime_detail = ""
+            runtime_state = str(hc.get("state") or "")
+            if conn == "opencode":
+                runtime_state, runtime_detail = _opencode_runtime_truth(
+                    hc,
+                    gateway_started_at=health.get("started_at") if isinstance(health, dict) else "",
+                    gateway_available=isinstance(health, dict),
+                )
+            elif conn == "omnigent":
+                runtime_state, runtime_detail = _omnigent_effective_runtime_state(cfg, runtime_state)
+            suffix = _connector_state_verb(runtime_state)
+            if runtime_detail:
+                suffix += ux.dim(f" ({runtime_detail})")
             ux.echo(
-                f"                {friendly} ({conn}) — mode={mode or '?'}{fail_mode_suffix}{source_suffix}{suffix}"
+                f"                {friendly} ({conn}) — mode={mode or '?'}"
+                f"{fail_mode_suffix}{source_suffix}{disclosure_suffix}{suffix}"
             )
             _print_agent_counters(hc, indent="                  ")
         else:
-            dim_text = ux.dim(f"{friendly} ({conn}) — mode={mode or '?'}{fail_mode_suffix}{source_suffix}")
-            ux.echo(f"                {dim_text}")
+            dim_text = ux.dim(
+                f"{friendly} ({conn}) — mode={mode or '?'}{fail_mode_suffix}{source_suffix}{disclosure_suffix}"
+            )
+            if conn == "opencode":
+                runtime_state, runtime_detail = _opencode_runtime_truth(
+                    None,
+                    gateway_started_at=health.get("started_at") if isinstance(health, dict) else "",
+                    gateway_available=isinstance(health, dict),
+                )
+                suffix = _connector_state_verb(runtime_state)
+                suffix += ux.dim(f" ({runtime_detail})")
+                ux.echo(f"                {dim_text}{suffix}")
+            else:
+                ux.echo(f"                {dim_text}")
 
 
 def _canonical_data_dir(value) -> str | None:
@@ -414,28 +565,45 @@ def _canonical_data_dir(value) -> str | None:
 
 
 def _fetch_runtime_bound_health(client, cfg) -> dict | None:
-    """Fetch health only from the sidecar owned by the resolved data dir.
+    """Fetch health only from the verified managed sidecar listener.
 
     ``/health`` is intentionally unauthenticated and a different profile may
     already own the configured loopback port. The authenticated ``/status``
-    response includes both the health snapshot and ``runtime.data_dir``. Treat
-    missing, malformed, or mismatched identity as unavailable so status never
-    splices another profile's connectors or application-protection paths into
-    this profile's output.
+    response is accepted only when Doctor's existing process/listener trust
+    proves the endpoint and its runtime PID plus canonical data directory bind
+    back to that exact listener. Treat missing, malformed, or mismatched
+    identity as unavailable so status never splices another process or
+    profile's connector evidence into this profile's output.
     """
+    try:
+        from defenseclaw.commands.cmd_doctor import (
+            _authenticated_runtime_matches,
+            _trusted_gateway_listener,
+        )
+
+        trust = _trusted_gateway_listener(cfg)
+    except Exception:
+        return None
+    if not trust.trusted:
+        return None
     try:
         document = client.status()
     except Exception:
         return None
     if not isinstance(document, dict):
         return None
-    runtime = document.get("runtime")
-    health = document.get("health")
-    if not isinstance(runtime, dict) or not isinstance(health, dict):
+    try:
+        runtime_ok, _runtime_detail = _authenticated_runtime_matches(
+            cfg,
+            trust.pid,
+            json.dumps(document),
+        )
+    except (TypeError, ValueError):
         return None
-    expected = _canonical_data_dir(getattr(cfg, "data_dir", None))
-    actual = _canonical_data_dir(runtime.get("data_dir"))
-    if expected is None or actual is None or expected != actual:
+    if not runtime_ok:
+        return None
+    health = document.get("health")
+    if not isinstance(health, dict):
         return None
     return health
 
@@ -765,6 +933,7 @@ def _print_observability_status(cfg) -> None:
         status = inspect_v8_operator_status(config_path_for_data_dir(cfg.data_dir))
     except Exception as exc:  # noqa: BLE001 - status remains useful when the sidecar is stopped.
         ux.echo("    " + ux._style(f"canonical v8 plan unavailable: {exc}", fg="yellow"))
+        _print_native_delivery_status(_native_delivery_summary(cfg))
         return
 
     retention = "unbounded" if status.unbounded_retention else f"{status.retention_days} days"
@@ -779,6 +948,53 @@ def _print_observability_status(cfg) -> None:
         )
         if destination.endpoint:
             ux.echo(f"      {ux.dim('target:')} {destination.endpoint}")
+    _print_native_delivery_status(_native_delivery_summary(cfg, audit_db=status.local_path))
+
+
+def _native_delivery_summary(cfg, *, audit_db: str = ""):
+    """Return the shared bounded, path-free native OTLP evidence summary."""
+
+    from defenseclaw.observability.custody_status import (
+        inspect_connector_custody,
+        summarize_native_delivery,
+    )
+
+    data_dir = str(getattr(cfg, "data_dir", "") or "")
+    database = audit_db
+    if not database:
+        try:
+            from defenseclaw.config import config_path_for_data_dir
+            from defenseclaw.observability.v8_status import inspect_v8_operator_status
+
+            database = inspect_v8_operator_status(config_path_for_data_dir(data_dir)).local_path
+        except Exception:  # noqa: BLE001 - fall back to the configured audit ledger.
+            database = ""
+    database = database or str(getattr(cfg, "audit_db", "") or "")
+    if not database:
+        database = os.path.join(data_dir, "audit.db")
+    return summarize_native_delivery(inspect_connector_custody(database, data_dir))
+
+
+def _print_native_delivery_status(summary) -> None:
+    """Render delivery truth separately from collector/runtime health."""
+
+    hours = summary.observation_window_hours
+    scope = f"bounded {hours}h"
+    if summary.event_rows_truncated:
+        scope += ", truncated; counts partial"
+    delivery_context = f"native OTLP delivery ({scope}; collector/runtime health does not prove accepted delivery):"
+    ux.echo("    " + ux.dim(delivery_context))
+    if not summary.connectors:
+        reason = f"; {summary.reason.replace('_', ' ')}" if summary.reason else ""
+        ux.echo(f"      {ux.dim(f'no evidence ({scope}{reason})')}")
+        return
+    for item in summary.connectors:
+        instance = "" if item.default else " (additional instance)"
+        state = item.state.replace("_", "-")
+        color = "green" if item.state == "accepted" else "yellow"
+        if item.state == "no_evidence":
+            color = "bright_black"
+        ux.echo(f"      {ux.bold(item.connector + instance)}  {ux._style(state, fg=color)} — {item.detail}")
 
 
 def _scanner_overrides_summary(cfg) -> str:
@@ -906,6 +1122,29 @@ def _connector_roster(cfg, health: dict | None = None) -> list[dict]:
                 "source": "automatic",
             },
         )
+    health_map = _fetch_health_connectors(health=health)
+    if "opencode" in rows:
+        runtime_state, runtime_detail = _opencode_runtime_truth(
+            health_map.get("opencode"),
+            gateway_started_at=health.get("started_at") if isinstance(health, dict) else "",
+            gateway_available=isinstance(health, dict),
+        )
+        rows["opencode"]["state"] = runtime_state
+        rows["opencode"]["runtime_detail"] = runtime_detail
+    if "omnigent" in rows and (omnigent_health := health_map.get("omnigent")) is not None:
+        runtime_state, readiness_detail = _omnigent_effective_runtime_state(
+            cfg,
+            str(omnigent_health.get("state") or ""),
+        )
+        rows["omnigent"]["state"] = runtime_state
+        if readiness_detail:
+            rows["omnigent"]["readiness_detail"] = readiness_detail
+    cursor = rows.get("cursor")
+    if cursor is not None:
+        cursor["priority_conflict_detection"] = {
+            "status": "unavailable",
+            "conflict_inferred": False,
+        }
     return [rows[name] for name in sorted(rows)]
 
 
@@ -971,5 +1210,6 @@ def _status_payload(app) -> dict:
     payload["connectors"] = _connector_roster(cfg, health=health)
     payload["application_protection"] = _application_protection_status(cfg, health=health)
     payload["hook_guardian"] = _hook_guardian_status(cfg)
+    payload["native_otlp_delivery"] = _native_delivery_summary(cfg).as_json()
 
     return payload

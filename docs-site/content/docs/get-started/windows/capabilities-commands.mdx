@@ -16,9 +16,17 @@ the release actually qualifies.
 
 | Capability | Status | Native Windows boundary |
 | --- | --- | --- |
-| Codex, Claude Code, and Amp connector setup | **Supported** | Same-user native agent, native hook or owner-only Amp system plugin, authenticated loopback gateway. |
-| Cursor, Windsurf, Gemini CLI, Copilot CLI, Antigravity, OpenCode, and Hermes setup | **Not certified** | Cross-platform setup code exists, but the native Windows release does not qualify it. |
-| OpenHands, OmniGent, OpenClaw, and ZeptoClaw setup | **Unsupported** | Their required WSL, terminal/sandbox, or proxy topology is not hosted by native Windows DefenseClaw. |
+| Claude Code connector setup | **Supported** | Same-user native agent, native hook executable, and authenticated loopback gateway. Authentic official-client validation metadata remains empty and `live=false`. |
+| Codex connector setup | **Supported** | The same native architecture is implemented; authentic official-client validation metadata remains empty and `live=false`. |
+| Amp connector setup | **Supported** | Same-user native agent, owner-only TypeScript system-policy plugin, and authenticated loopback gateway. |
+| Cursor connector setup | **Supported** | Same-user native Cursor Agent, managed PowerShell adapter, native hook executable, and authenticated loopback gateway; validation metadata remains empty and `live=false`. |
+| Devin Desktop legacy Cascade connector setup (`windsurf`) | **Supported** | Native PowerShell transport and per-user Setup lifecycle cover legacy Cascade only. Devin Local (the current default), cloud, ACP, and managed layers are unsupported or unverified; `live=false`. |
+| OpenCode connector setup | **Supported** | Same-user native OpenCode process and auto-loaded JavaScript plugin; validation metadata remains empty and `live=false`. |
+| OmniGent 0.7.0 connector setup | **Supported — native degraded** | Same-user native `uv tool` environment and awaited Python policy calls from server/SDK harnesses. Terminal wrappers and filesystem/network/L7 sandboxing remain unavailable; `live=false`. |
+| Hermes connector setup | **Supported** | Same-user Tier-1 native Hermes, direct absolute forward-slash `defenseclaw-hook.exe` argv, and authenticated loopback gateway. Running-client state remains pending reload and `live=false`. |
+| Copilot CLI and Antigravity setup | **Supported** | Ordinary Setup is available. Provider authentication remains required; HITL and official-client live evidence are unverified and unclaimed, validation metadata remains empty, and `live=false`. |
+| Gemini CLI setup | **Excluded** | Native Windows support is intentionally excluded; existing non-Windows behavior is unchanged. |
+| OpenHands, OpenClaw, and ZeptoClaw setup | **Unsupported** | Their required WSL or proxy topology is not hosted by native Windows DefenseClaw. |
 | Python CLI | **Supported** | Packaged launcher and embedded runtime; PowerShell and cmd. Individual optional/network subcommands retain their caveats below. |
 | TUI | **Supported** | Native console input, UTF-8 output, clipboard support, managed process cancellation, and safe fallback when redraw is unavailable. |
 | AI Discovery and model provenance | **Supported** | Native process enumeration covers unique exact executable aliases across the full discovery catalog and fails closed on shared aliases. Classic installed-app metadata and current-user Store/MSIX/UWP registrations from the supported AppsFolder Shell API, PowerShell history, AppData editor-extension stores, and common local-model roots use bounded native discovery. The TUI keeps models in a separate table with ISO country code/flag, publisher, root/base, and derivation. Public Hugging Face enrichment is off by default and requires explicit opt-in. |
@@ -26,9 +34,9 @@ the release actually qualifies.
 | Logon startup | **Supported** | Installer-owned HKCU Run value and no-console startup helper when a connector is configured. |
 | Watchdog | **Limited** | Config-enabled detached process with protected identity. Not a service or Scheduled Task. |
 | Observe and action modes | **Supported** | Action applies only to declared connector/event response surfaces. |
-| Fail open/fail closed | **Supported** | Effective connector setting covers transport and invalid response failures. Internal evaluator panic remains a reported fail-open boundary. |
-| Native hooks and policy plugin | **Supported** | Codex and Claude Code use `defenseclaw-hook.exe`; Amp loads `%USERPROFILE%\.config\amp\plugins\defenseclaw.ts` directly. No Bash, cmd wrapper, `jq`, WSL, or proxy is required. |
-| Native OTLP ingress | **Supported** | Codex logs/metrics/traces; Claude Code logs/metrics with traces disabled. Observation only. Amp has no documented native-OTLP channel and uses hook-generated telemetry. |
+| Fail open/fail closed | **Connector-specific** | Effective connector setting covers transport and invalid-response failures only where the vendor contract supports them. Hermes is forced fail-open; OpenCode fail-closed is authoritative only for awaited `tool.execute.before`, while internal evaluator panic remains a reported fail-open boundary. |
+| Native hook/policy lanes | **Supported** | Codex/Claude Code/Hermes use `defenseclaw-hook.exe`; Amp loads `%USERPROFILE%\.config\amp\plugins\defenseclaw.ts` directly; Cursor and legacy Cascade use managed PowerShell adapters; OpenCode and OmniGent load in-process bridges. Hermes uses a direct argv. No DefenseClaw Bash, cmd wrapper, `jq`, compatibility fallback, or proxy is required. |
+| Native OTLP ingress | **Supported where officially exposed** | Codex logs/metrics/traces and Claude Code logs/metrics with traces disabled. Amp has no documented native-OTLP channel and uses hook-generated telemetry. Other connectors rely on hook/policy-derived audit unless their official native telemetry contract is separately established. Observation only. |
 | Mandatory local audit | **Supported** | SQLite persists locally even without an outbound destination. |
 | Remote telemetry destinations | **Limited** | Supported when explicitly configured and reachable; credentials, network policy, and destination capabilities remain operator responsibilities. |
 | Skills, plugins, MCPs, agents, and command discovery | **Supported** | Scans the supported connectors' documented native roots. Discovery is not proof an asset is safe. |
@@ -49,8 +57,8 @@ the release actually qualifies.
 | Offline install/servicing | **Limited** | Self-contained Setup after authenticated staging; remote registries/providers/destinations are not offline features. |
 | Local observability and Local Splunk | **Limited** | Optional Hyper-V Docker Desktop/Linux-container path on x64 Pro/Enterprise/Education only. |
 | OpenShell sandbox | **Unsupported** | Linux-only lifecycle. |
-| Model proxy/rerouting for supported connectors | **Not applicable** | Codex, Claude Code, and Amp keep their direct upstream path; Windows enforcement is hook/plugin-native. |
-| POSIX services and hook shells | **Not applicable** | Windows uses native processes, HKCU startup, and the native hook runner. |
+| Model proxy/rerouting for supported connectors | **Not applicable** | Codex, Claude Code, Amp, Cursor, legacy Cascade, Hermes, OpenCode, OmniGent, Copilot, and Antigravity keep their direct upstream path; Windows enforcement uses native hook or policy lanes. |
+| POSIX services and hook shells | **Not applicable** | Windows uses native processes, HKCU startup, native hook/adapter runners, or in-process policy bridges. |
 
 ## Public `defenseclaw` command inventory
 
@@ -67,10 +75,10 @@ or an advanced operation; it does not mean every listed subcommand is broken.
 | `codeguard` | `install`, `install-skill`, `status` | **Limited** explicit opt-in; agent/network requirements apply. |
 | `config` | `path`, `reference`, `show`, `validate` | **Supported**. Configuration v8 rejects `config show --reveal`; effective and source views remain masked. |
 | `doctor` | no subcommands | **Supported**. Use `--fix --dry-run` before approving fixes. |
-| `guardrail` | `block-message`, `disable`, `enable`, `fail-mode`, `hilt`; `judge add/list/remove`; `list-packs`; `status` | **Supported** for Codex, Claude Code, and Amp; event limits still apply. |
+| `guardrail` | `block-message`, `disable`, `enable`, `fail-mode`, `hilt`; `judge add/list/remove`; `list-packs`; `status` | **Supported** for all supported native connectors; connector-specific event and HITL limits still apply. |
 | `init` | no subcommands | **Limited** to supported native connector choices; sandbox setup is unsupported. |
 | `keys` | `check`, `fill-missing`, `list`, `set` | **Supported**, but secret values must not be pasted into support output. |
-| `mcp` | `allow`, `block`, `list`, `scan`, `set`, `unblock`, `unset` | **Supported** for certified connector roots; remote scans are optional network operations. |
+| `mcp` | `allow`, `block`, `list`, `scan`, `set`, `unblock`, `unset` | **Supported** for documented connector roots; remote scans are optional network operations. |
 | `migrations` | `reset`, `status`, `unmark` | **Limited** advanced recovery/upgrade surface; do not change markers without a diagnosed reason. |
 | `observability` | `destination test`, `plan` | **Limited** to configured destinations and their network/credential contract. |
 | `plugin` | `allow`, `block`, `disable`, `enable`, `info`, `install`, `list`, `quarantine`, `remove`, `restore`, `scan`, `unblock` | **Limited** by connector runtime-disable and quarantine guarantees. |
@@ -80,7 +88,7 @@ or an advanced operation; it does not mean every listed subcommand is broken.
 | `reset` | no subcommands | **Supported** but destructive and confirmation-gated. It is not uninstall. |
 | `sandbox` | `init`, `setup` | **Unsupported** on native Windows. |
 | `settings` | `save` | **Supported**. |
-| `setup` | See the complete setup inventory below. | **Limited**: only the explicitly supported connector and optional-feature paths apply on Windows. |
+| `setup` | See the complete setup inventory below. | **Limited**: supported connectors and documented optional-feature paths apply on Windows; excluded and unsupported connectors remain rejected. |
 | `skill` | `allow`, `block`, `disable`, `enable`, `info`, `install`, `list`, `quarantine`, `restore`, `scan`, `search`, `unblock` | **Supported**, with the runtime-disable limits in the capability matrix. |
 | `status` | no subcommands | **Supported**; `--json` includes per-connector runtime posture. |
 | `tool` | `allow`, `block`, `list`, `status`, `unblock` | **Supported** local policy state. |
@@ -110,11 +118,15 @@ The public tree contains:
 - Splunk: the `splunk` setup surface plus
   `splunk dashboards apply/destroy/plan`.
 
-On native Windows, `codex`, `claude-code`, and `amp` are supported connector
-aliases. The other aliases remain visible because this is one cross-platform
-CLI; their presence does not override the platform gate. Local observability,
-Splunk, providers, webhooks, Galileo, registries, and remote destinations are
-optional and retain their own prerequisites.
+On native Windows, `amp`, `claude-code`, `codex`, `cursor`, `windsurf`, `hermes`,
+`opencode`, `omnigent`, `copilot`, and `antigravity` are supported and selectable
+through ordinary CLI/TUI setup. Copilot and Antigravity retain their normal provider
+authentication requirements; their HITL and official-client live evidence remain
+unverified and unclaimed, validation metadata remains empty, and `live=false`. Other aliases may remain
+visible because this is one cross-platform CLI; their presence does not override
+the platform gate. Gemini CLI is excluded from native Windows. Local
+observability, Splunk, providers, webhooks, Galileo, registries, and remote
+destinations are optional and retain their own prerequisites.
 
 ## Public `defenseclaw-gateway` command inventory
 
@@ -123,7 +135,7 @@ optional and retain their own prerequisites.
 | `start`, `status`, `restart`, `stop` | no child commands | **Supported** current-user daemon lifecycle. |
 | `watchdog` | `start`, `status`, `stop` | **Limited** config-enabled detached monitor, not an OS service. |
 | `audit` | `export` | **Supported**. Exported content can be sensitive; handle it as audit data. |
-| `connector` | `list-backups`, `reconcile`, `teardown`, `verify` | **Supported** for Codex, Claude Code, and Amp; low-level operator/recovery surface. |
+| `connector` | `list-backups`, `reconcile`, `teardown`, `verify` | **Supported** for all supported native connectors; low-level operator/recovery surface. |
 | `policy` | `domains`, `evaluate`, `evaluate-firewall`, `reload`, `show`, `validate` | **Supported**. |
 | `provenance` | `show` | **Supported**. |
 | `scan` | `code` | **Supported** CodeGuard/ClawShield source scan. |

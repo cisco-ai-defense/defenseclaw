@@ -10,6 +10,13 @@ keywords:
 
 The OmniGent connector uses OmniGent's documented custom Python policy API. It does not proxy OmniGent's model traffic. A small in-process policy bridge sends each policy event to the local DefenseClaw gateway, then maps the result back to OmniGent `ALLOW`, `ASK`, or `DENY`.
 
+On Windows this is **supported with native-degraded limitations** for the reviewed OmniGent
+0.7.x range (`>=0.7.0,<0.8.0`).
+Only `omnigent server` and SDK-based harnesses are in scope. Native
+tmux/PTY terminal wrappers, filesystem/network sandboxing, and the L7 egress
+proxy are unavailable; DefenseClaw does not emulate them with WSL or a shell
+compatibility layer.
+
 ## Setup
 
 ```bash
@@ -18,11 +25,14 @@ defenseclaw setup omnigent --mode action  # enforce ALLOW / ASK / DENY
 omnigent server --config ~/.omnigent/config.yaml
 ```
 
-<Callout type="warning">
-OmniGent connector setup is supported on macOS and Linux. OmniGent has no
-supported native Windows terminal/sandbox path for this connector, so native
-Windows setup is unsupported.
-</Callout>
+Native Windows PowerShell:
+
+```powershell
+uv tool install --python 3.12 omnigent==0.7.0
+$env:OMNIGENT_CONFIG_HOME = Join-Path $HOME '.omnigent'
+defenseclaw setup omnigent --mode action
+omnigent server --config (Join-Path $env:OMNIGENT_CONFIG_HOME 'config.yaml')
+```
 
 Restart OmniGent after setup so it reloads the policy registry. DefenseClaw:
 
@@ -36,14 +46,33 @@ Restart OmniGent after setup so it reloads the policy registry. DefenseClaw:
 options and [full guardrail setup](/docs/setup/guardrail) for advanced scanner
 and judge configuration.
 
-When `OMNIGENT_CONFIG_HOME` is set, DefenseClaw and OmniGent both use
-`$OMNIGENT_CONFIG_HOME/config.yaml`; otherwise they use
-`~/.omnigent/config.yaml`.
+DefenseClaw patches the explicit `OMNIGENT_CONFIG` path when set, then
+`$OMNIGENT_CONFIG_HOME/config.yaml`, and finally `~/.omnigent/config.yaml`.
+OmniGent's CLI server loads an empty configuration when `--config` is omitted,
+so always pass the same patched file to `omnigent server --config`. Hosted
+server entrypoints can instead consume `OMNIGENT_CONFIG`. Doctor reports PASS
+only when the recorded live server process proves the same effective path via
+`--config` or readable process-environment evidence; a valid file without that
+binding is reported as unverified rather than healthy.
 
 The connector must write the `.pth` file into the Python environment that owns
 the `omnigent` executable. Use an isolated environment that your user can
 write; setup stops with a clear error instead of attempting a privileged
-system-Python install.
+system-Python install. Native Windows setup requires the official `uv tool`
+layout and a fresh protected executable selection; discovery, setup, repair,
+and later reconciliation bind the exact `omnigent.exe` digest to the connector
+lock. Direct `uv.exe` and tool-Python metadata probes have connector-owned
+deadlines; setup does not fall back to a shell or an unbounded child process.
+
+The native Windows Setup executable accepts the explicit
+`CONNECTOR=omnigent` selection. Its transaction ledger records the
+exact previous and current `OMNIGENT_CONFIG_HOME`, carries that binding through
+repair and upgrade, reconciles all three managed backup identities, and retains
+failed teardown evidence for retry or deferred uninstall. This implemented
+lifecycle remains supported while validation metadata stays empty and
+`live=false`. Connector setup and teardown share a
+process-local plus owned cross-process lifecycle lock; scoped credentials are
+refreshed inside that transaction and revoked only after clean teardown.
 
 All three managed files are backed up. Teardown restores unchanged files byte-for-byte and removes only DefenseClaw-owned YAML entries when the operator has edited the config.
 
@@ -53,35 +82,77 @@ All three managed files are backed up. Teardown restores unchanged files byte-fo
 | --- | --- | --- |
 | `request` | `UserPromptSubmit` | ALLOW, native ASK, or DENY |
 | `tool_call` | `PreToolUse` | ALLOW, native ASK, or DENY before execution |
-| `tool_result` | `PostToolUse` | scan and block/replace; ASK falls back because execution already occurred |
-| `response` | `AfterAgentResponse` | scan and block/replace; ASK falls back |
+| `tool_result` | `PostToolUse` | DENY suppresses the downstream result with OmniGent's denial text; execution is not rolled back |
+| `response` | `AfterAgentResponse` | DENY persists OmniGent's sentinel response; completed model work is not rolled back |
 | `llm_request` | `BeforeModel` | ALLOW, native ASK, or DENY |
-| `llm_response` | `AfterModel` | scan and block/replace; ASK falls back |
+| `llm_response` | `AfterModel` | DENY can suppress onward-visible content; completed model work is not rolled back |
 
-OmniGent parks only its pre-action `request`, `tool_call`, and `llm_request` phases for approval. DefenseClaw therefore advertises native human approval only for those events. The bridge also honors fail-open or fail-closed behavior when the gateway is unavailable.
+OmniGent parks only its pre-action `request`, `tool_call`, and `llm_request`
+phases for approval. DefenseClaw therefore advertises native human approval
+only for those events. A post-phase confirm finding is audited and continues
+without an approval pause. A post-phase DENY uses OmniGent's built-in
+denial/sentinel behavior; the bridge does not supply custom replacement data
+and cannot undo a tool call or model request that already completed. The bridge
+also honors fail-open or fail-closed behavior when the gateway is unavailable.
+Request events use OmniGent 0.7.0's official structured
+`{user_content, attachments}` shape. DefenseClaw forwards the typed prompt and
+a bounded list of attachment filename, content type, and decoded text fields;
+it retains the documented bare-string and content-block compatibility shapes.
+All ordinary normalization, trace propagation, serialization, transport, read,
+and response-parse exceptions pass through the configured bridge fail mode.
+The bridge connects directly to the configured gateway with ambient
+HTTP(S)/Windows proxies disabled and rejects redirects so its scoped credential
+and inspected content stay on that origin.
+
+For `llm_request`, the bridge inspects both separately labeled
+`system_prompt_preview` and `last_user_message` fields within fixed bounds.
+It also forwards bounded cumulative token usage and cost, model, harness,
+actor client ID, and label metadata. Oversized or invalid label projections are
+marked partial. OmniGent v0.7 policy callbacks expose no session identifier, so
+the bridge records that field as unavailable rather than inventing correlation.
+
+The official extension is an awaited in-process Python function. It does not
+read policy events from stdin, write verdicts to stdout, or communicate an
+enforcement result through a process exit code. A bridge exception is
+fail-closed by OmniGent's policy engine; DefenseClaw's configured fail mode
+governs transport and invalid-response handling inside the bridge.
 
 ## Telemetry
 
 Policy evaluations always produce DefenseClaw hook logs, counters, and spans. When OmniGent has an active OpenTelemetry span, the bridge forwards its W3C `traceparent`; otherwise the gateway starts a new trace.
 
-OmniGent also supports native OTLP through standard process environment variables. This channel is **not active after setup**: DefenseClaw does not edit shell startup files or the OmniGent launcher. Export the variables in the process that starts OmniGent. Load the generated gateway token from DefenseClaw's mode-`0600` dotenv file without printing it:
+OmniGent also supports native OTLP through standard process environment
+variables. This channel is **not active after setup**: DefenseClaw does not
+edit shell startup files or the OmniGent launcher. Export the variables in the
+process that starts OmniGent. Native OTLP uses its own connector-scoped token;
+it does not reuse the policy-hook token or the gateway master credential.
+Setup creates the owner-only token and successful teardown revokes it.
 
-```bash
-set -a
-. ~/.defenseclaw/.env
-set +a
-
-export OTEL_EXPORTER_OTLP_ENDPOINT="http://127.0.0.1:18970"
-export OTEL_EXPORTER_OTLP_PROTOCOL="http/protobuf"
-export OTEL_EXPORTER_OTLP_HEADERS="x-defenseclaw-source=omnigent,x-defenseclaw-client=omnigent-otel/1.0,x-defenseclaw-token=${DEFENSECLAW_GATEWAY_TOKEN}"
-export OTEL_LOGS_EXPORTER="otlp"
-export OTEL_METRICS_EXPORTER="otlp"
-export OTEL_TRACES_EXPORTER="otlp"
-export OMNIGENT_OTEL_CAPTURE_CONTENT="false"
-omnigent server --config ~/.omnigent/config.yaml
+```powershell
+$tokenPath = Join-Path $env:USERPROFILE '.defenseclaw\hooks\.otlp-omnigent.token'
+$otlpToken = [IO.File]::ReadAllText($tokenPath).Trim()
+$env:OMNIGENT_TELEMETRY_ENABLED = 'true'
+$env:OTEL_EXPORTER_OTLP_ENDPOINT = 'http://127.0.0.1:18970'
+$env:OTEL_EXPORTER_OTLP_PROTOCOL = 'http/protobuf'
+$env:OTEL_EXPORTER_OTLP_HEADERS = "authorization=Bearer%20$otlpToken,x-defenseclaw-source=omnigent,x-defenseclaw-client=omnigent-otel%2F1.0"
+$env:OTEL_LOGS_EXPORTER = 'otlp'
+$env:OTEL_METRICS_EXPORTER = 'otlp'
+$env:OTEL_TRACES_EXPORTER = 'otlp'
+$env:OMNIGENT_OTEL_CAPTURE_CONTENT = 'false'
+omnigent server --config (Join-Path $env:OMNIGENT_CONFIG_HOME 'config.yaml')
 ```
 
-Logs and metrics work with OmniGent's base dependencies; native traces require its optional `tracing` extra. The status API reports only channels configured by DefenseClaw, so it continues to show `hooks`; native OTLP remains a separately documented capability because setup cannot verify another process's environment.
+Logs, metrics, and traces use OpenTelemetry packages present in OmniGent's
+base/default dependency set; no separate tracing extra is required. The status
+API reports only channels configured by DefenseClaw, so it continues to show
+`hooks`; native OTLP remains a separately documented capability because setup
+cannot verify another process's environment.
+
+OmniGent 0.7.0 policy events do not publish stable session, turn, tool-call, or
+model-request IDs. Native spans can carry OmniGent's `session.id`, but there is
+no source-proven field that joins that native session to a policy event.
+DefenseClaw therefore labels policy-event session correlation unavailable and
+does not infer missing cross-rail identities.
 
 ## Local surfaces
 
@@ -94,7 +165,10 @@ Logs and metrics work with OmniGent's base dependencies; native traces require i
   </Folder>
 </Files>
 
-DefenseClaw v1 does not modify OmniGent MCP, skill, rule, plugin, or agent-bundle configuration.
+Official OmniGent agent YAML can declare local functions, MCP tools, and
+subagents. DefenseClaw v1 neither modifies nor scans those sources, so MCP,
+function, subagent, skill, rule, plugin, and agent-bundle inventory remains
+unsupported and unverified instead of appearing as an empty live inventory.
 
 ## Hook capabilities
 

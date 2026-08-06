@@ -29,6 +29,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -1822,8 +1823,9 @@ func (s *Sidecar) bindHookRuntimePolicyResolver(guard *HookConfigGuard) {
 			return hookRuntimePolicy{}, nil, false
 		}
 		return hookRuntimePolicy{
-			hookFailMode: cfg.EffectiveHookFailModeForConnector(connectorName),
-			hiltEnabled:  cfg.EffectiveHILTForConnector(connectorName).Enabled,
+			hookFailMode:  cfg.EffectiveHookFailModeForConnector(connectorName),
+			guardrailMode: cfg.EffectiveGuardrailModeForConnector(connectorName),
+			hiltEnabled:   cfg.EffectiveHILTForConnector(connectorName).Enabled,
 		}, sync.OnceFunc(s.hookPolicyMu.RUnlock), true
 	})
 }
@@ -2799,9 +2801,10 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	agentExecutable := connector.LoadCachedAgentExecutable(s.currentConfig().DataDir, conn.Name())
 	contractResolution := connector.ResolveHookContract(conn.Name(), agentVersion)
 	setupOpts := connector.SetupOpts{
-		DataDir:   s.currentConfig().DataDir,
-		ProxyAddr: proxyAddr,
-		APIAddr:   apiAddr,
+		DataDir:              s.currentConfig().DataDir,
+		CodexOtelEnvironment: s.currentConfig().Environment,
+		ProxyAddr:            proxyAddr,
+		APIAddr:              apiAddr,
 		// Bake the gateway token into hook scripts so claude-code-hook.sh
 		// and codex-hook.sh can authenticate against the API server's
 		// auth middleware. ResolvedToken checks env vars first, then
@@ -2813,12 +2816,12 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		HookAPITokenScoped: setupTokens.hookTokenScoped,
 		WorkspaceDir:       workspaceDir,
 		// HookFailMode controls delivery, authentication, and invalid-response
-		// failures for generated hooks (see GuardrailConfig.HookFailMode).
-		// This single-connector path uses the persisted global value, whose
-		// secure fallback is "closed"; the multi-connector path below uses the
-		// connector-aware effective resolver.
-		HookFailMode:     s.currentConfig().Guardrail.EffectiveHookFailMode(),
-		HILTEnabled:      s.currentConfig().Guardrail.HILT.Enabled,
+		// failures for generated hooks. Use the same connector-aware effective
+		// posture as multi-connector setup so Cursor receives failClosed only
+		// for an explicit action+closed combination.
+		HookFailMode:     s.currentConfig().EffectiveHookFailModeForConnector(conn.Name()),
+		GuardrailMode:    s.currentConfig().EffectiveGuardrailModeForConnector(conn.Name()),
+		HILTEnabled:      s.currentConfig().EffectiveHILTForConnector(conn.Name()).Enabled,
 		InstallCodeGuard: false,
 		AgentVersion:     agentVersion,
 		AgentExecutable:  agentExecutable,
@@ -2829,11 +2832,20 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		fmt.Fprintf(os.Stderr, "[guardrail] managed_enterprise: connector lifecycle for %s is owned by the enterprise hook guardian; gateway will not write user hook files\n", conn.Name())
 	}
 	actionMode := strings.EqualFold(s.currentConfig().EffectiveGuardrailModeForConnector(conn.Name()), "action")
-	if !guardianManagedLifecycle && connector.HookContractNeedsActionOverride(contractResolution) && actionMode && os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
+	if !guardianManagedLifecycle && contractResolution.Status == connector.HookCompatibilityUnknown && os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
+		return fmt.Errorf("connector %s agent version %q is not covered by a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", conn.Name(), agentVersion, contractResolution.Reason)
+	}
+	if !guardianManagedLifecycle && contractResolution.Status == connector.HookCompatibilityUnversioned && actionMode && os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
 		return fmt.Errorf("connector %s agent version %q is not verified against a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", conn.Name(), agentVersion, contractResolution.Reason)
 	}
+	// Compatibility checks intentionally use the filtered read below, so a
+	// fresh protected Windows Codex repair receipt can supersede the old lock.
+	// Rollback authority is captured separately from the raw lock bytes before
+	// Setup mutates registration posture.
+	previousLock := connector.LoadHookContractLockEntry(s.currentConfig().DataDir, conn.Name())
+	singleRollback := multiConnectorSetupTransaction{}
 	if !guardianManagedLifecycle {
-		if previous := connector.LoadHookContractLockEntry(s.currentConfig().DataDir, conn.Name()); previous.Connector != "" {
+		if previous := previousLock; previous.Connector != "" {
 			current := connector.NewHookContractLockEntry(setupOpts, conn, version.Current().BinaryVersion)
 			// Generated hook drift is repairable by Setup below and must not block
 			// an explicit setup/restart from refreshing an existing connector.
@@ -2891,8 +2903,16 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		if support.Status == connector.PlatformPreview {
 			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s is preview on %s: %s\n", conn.Name(), runtime.GOOS, support.Reason)
 		}
-		if err := teardownPreviousConnector(registry, conn.Name(), setupOpts, ctx); err != nil {
-			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: proceeding with %s setup despite stale state from previous connector\n", conn.Name())
+		singleRollback, err = s.prepareSingleConnectorSetupTransaction(
+			ctx, registry, setupOpts, conn, apiToken, proxyAddr, apiAddr, masterKey,
+		)
+		if err != nil {
+			s.health.SetGuardrail(StateError, err.Error(), nil)
+			return err
+		}
+		failSetup := func(surface string, cause error) error {
+			failed := s.failGuardrailWithRollback(ctx, setupOpts, conn, surface, cause)
+			return restoreSingleConnectorSetupPoint(ctx, singleRollback, failed)
 		}
 		// Both branches below treat any failure to reach a verified
 		// post-Setup state as fail-loud: rollback, surface
@@ -2905,7 +2925,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		// guardrail goroutine with the wrapped error via the shared
 		// failGuardrailWithRollback helper.
 		if err := conn.Setup(ctx, setupOpts); err != nil {
-			return s.failGuardrailWithRollback(ctx, setupOpts, conn, "setup", fmt.Errorf("connector %s setup failed: %w", conn.Name(), err))
+			return failSetup("setup", fmt.Errorf("connector %s setup failed: %w", conn.Name(), err))
 		}
 		// Post-Setup verification: every owned hook script the
 		// connector said it would write MUST exist on disk before
@@ -2920,12 +2940,12 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		// retry so the operator either sees the error or gets a
 		// self-healing install.
 		if err := verifyHookScriptsOrRetry(ctx, setupOpts, conn); err != nil {
-			return s.failGuardrailWithRollback(ctx, setupOpts, conn, "hook verification", err)
+			return failSetup("hook verification", err)
 		}
 		if err := verifyEffectiveHookRegistration(setupOpts, conn); err != nil {
-			return s.failGuardrailWithRollback(ctx, setupOpts, conn, "registration verification", err)
+			return failSetup("registration verification", err)
 		}
-		if err := s.saveSingleConnectorReadyState(ctx, setupOpts, conn); err != nil {
+		if err := s.saveSingleConnectorReadyState(ctx, setupOpts, conn, singleRollback); err != nil {
 			return err
 		}
 
@@ -3314,12 +3334,56 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 		return s.runManagedEnterpriseMultiHookGuardrail(ctx, registry, conns, apiToken, proxyAddr, apiAddr, masterKey)
 	}
 
+	// A pre-transaction runtime may contain an old lock-only registration that
+	// is absent from both the authoritative active roster and current config.
+	// Reconcile that orphan before capturing the requested setup transaction:
+	// otherwise every later exact-lock readiness check fails while the stale
+	// host hook remains live. This recovery commits only after the connector's
+	// normal teardown and VerifyClean paths prove the recorded location clean.
+	if err := reconcileOrphanedConnectorRegistrations(
+		ctx,
+		registry,
+		s.currentConfig().DataDir,
+		names,
+		orphanConnectorReconcileOps{
+			resolveOpts: func(conn connector.Connector) (connector.SetupOpts, error) {
+				return s.connectorSetupOptsChecked(conn, apiToken, proxyAddr, apiAddr)
+			},
+			clearLock: connector.ClearHookContractLockEntry,
+		},
+	); err != nil {
+		reconcileErr := fmt.Errorf("reconcile orphaned connector registration: %w", err)
+		s.health.SetGuardrail(StateError, reconcileErr.Error(), nil)
+		return reconcileErr
+	}
+
 	// Set-difference teardown: any connector active on a previous boot but
 	// absent from the current set is torn down once, before setup. Uses a
 	// base opts carrying just the fields Teardown needs.
 	baseOpts := connector.SetupOpts{DataDir: s.currentConfig().DataDir, ProxyAddr: proxyAddr, APIAddr: apiAddr}
 	previous := connector.LoadActiveConnectors(s.currentConfig().DataDir)
-	failedRemoved := teardownRemovedConnectors(registry, previous, names, baseOpts, ctx)
+	var failedRemoved []string
+	setupSeed := multiConnectorSetupTransaction{}
+	if s.currentConfig().Guardrail.Enabled {
+		activeState, err := connector.CaptureActiveConnectorStateSnapshot(s.currentConfig().DataDir)
+		if err != nil {
+			return fmt.Errorf("capture pre-removal active connector state: %w", err)
+		}
+		hookLockState, err := connector.CaptureHookContractLockSnapshot(s.currentConfig().DataDir)
+		if err != nil {
+			return fmt.Errorf("capture pre-removal hook contract lock: %w", err)
+		}
+		setupSeed.activeState = activeState
+		setupSeed.hookLockState = hookLockState
+		candidates, unavailable := s.removedConnectorRollbackCandidates(
+			registry, previous, names, apiToken, proxyAddr, apiAddr, masterKey, hookLockState,
+		)
+		removed, teardownFailed := teardownRemovedConnectorCandidates(candidates, ctx)
+		setupSeed.removed = removed
+		failedRemoved = append(unavailable, teardownFailed...)
+	} else {
+		failedRemoved = teardownRemovedConnectors(registry, previous, names, baseOpts, ctx)
+	}
 
 	// Disabled short-circuit: tear every configured connector down, clear
 	// persisted state, and idle until shutdown.
@@ -3378,6 +3442,9 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 				strings.Join(failedRemoved, ", "),
 				err,
 			)
+			if rollbackErr := rollbackMultiConnectorPublication(ctx, setupSeed); rollbackErr != nil {
+				persistErr = fmt.Errorf("%w; removed-connector rollback incomplete: %v", persistErr, rollbackErr)
+			}
 			s.health.SetGuardrail(StateError, persistErr.Error(), nil)
 			return persistErr
 		}
@@ -3396,26 +3463,25 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 	// rule pack is loaded/validated through the shared cache so connectors
 	// sharing a profile read disk once.
 	cache := guardrail.NewRulePackCache()
-	succeeded, setupErr := s.setupConnectorsIsolated(ctx, conns, apiToken, proxyAddr, apiAddr, masterKey, cache)
+	setupTransaction, setupErr := s.setupConnectorsIsolatedTransaction(
+		ctx, conns, apiToken, proxyAddr, apiAddr, masterKey, cache, setupSeed,
+	)
 	if setupErr != nil {
+		if len(setupTransaction.removed) > 0 {
+			if rollbackErr := rollbackMultiConnectorPublication(ctx, setupTransaction); rollbackErr != nil {
+				setupErr = fmt.Errorf("%w; removed-connector rollback incomplete: %v", setupErr, rollbackErr)
+			}
+		}
 		s.health.SetGuardrail(StateError, setupErr.Error(), nil)
 		return setupErr
 	}
+	succeeded := setupTransaction.succeeded
 
 	// Persist the set that actually came up so the next boot's
 	// set-difference teardown is accurate.
 	persisted := append(append([]string(nil), succeeded...), failedRemoved...)
-	if err := connector.SaveActiveConnectors(s.currentConfig().DataDir, persisted); err != nil {
-		persistErr := fmt.Errorf("save active connector set: %w", err)
-		if len(failedRemoved) > 0 {
-			persistErr = fmt.Errorf(
-				"save active connector set with teardown retry state (%s): %w",
-				strings.Join(failedRemoved, ", "),
-				err,
-			)
-		}
-		s.health.SetGuardrail(StateError, persistErr.Error(), nil)
-		return persistErr
+	if err := s.publishMultiConnectorReadyState(ctx, setupTransaction, persisted, failedRemoved); err != nil {
+		return err
 	}
 
 	// Every connector failing is a real boot failure — surface it loudly
@@ -3713,33 +3779,464 @@ func (s *Sidecar) notifyHookHealed(connectorName string, paths []string) {
 // connector before setup mutates state; after that, a connector whose setup
 // fails is logged and skipped while remaining connectors continue. The order
 // of the returned slice matches the input order (sorted by the caller).
+type multiConnectorSetupRollbackPoint struct {
+	conn             connector.Connector
+	opts             connector.SetupOpts
+	previouslyActive bool
+	previousLock     connector.HookContractLockEntry
+	openCodeSnapshot *connector.OpenCodeRegistrationSnapshot
+}
+
+type multiConnectorSetupTransaction struct {
+	succeeded     []string
+	applied       []multiConnectorSetupRollbackPoint
+	removed       []multiConnectorSetupRollbackPoint
+	activeState   *connector.ActiveConnectorStateSnapshot
+	hookLockState *connector.HookContractLockSnapshot
+}
+
+func captureSingleConnectorRollbackAuthority(
+	opts connector.SetupOpts,
+	conn connector.Connector,
+) (multiConnectorSetupTransaction, error) {
+	transaction := multiConnectorSetupTransaction{}
+	if conn == nil {
+		return transaction, errors.New("connector is nil")
+	}
+	activeState, err := connector.CaptureActiveConnectorStateSnapshot(opts.DataDir)
+	if err != nil {
+		return transaction, err
+	}
+	hookLockState, err := connector.CaptureHookContractLockSnapshot(opts.DataDir)
+	if err != nil {
+		return transaction, err
+	}
+	previouslyActive := false
+	for _, activeName := range connector.LoadActiveConnectors(opts.DataDir) {
+		if strings.EqualFold(strings.TrimSpace(activeName), strings.TrimSpace(conn.Name())) {
+			previouslyActive = true
+			break
+		}
+	}
+	transaction.hookLockState = hookLockState
+	transaction.activeState = activeState
+	transaction.applied = []multiConnectorSetupRollbackPoint{{
+		conn:             conn,
+		opts:             opts,
+		previouslyActive: previouslyActive,
+		previousLock:     hookLockState.RawEntry(conn.Name()),
+	}}
+	return transaction, nil
+}
+
+func (s *Sidecar) prepareSingleConnectorSetupTransaction(
+	ctx context.Context,
+	registry *connector.Registry,
+	opts connector.SetupOpts,
+	requested connector.Connector,
+	apiToken, proxyAddr, apiAddr, masterKey string,
+) (multiConnectorSetupTransaction, error) {
+	transaction, err := captureSingleConnectorRollbackAuthority(opts, requested)
+	if err != nil {
+		return transaction, fmt.Errorf("capture connector %s pre-setup rollback authority: %w", requested.Name(), err)
+	}
+	// The requested OpenCode registration is itself protected rollback
+	// authority. Capture and validate it before removing a different active
+	// connector: an unsafe plugin/receipt path must leave that connector's
+	// registration, lock, and active roster completely untouched.
+	if strings.EqualFold(strings.TrimSpace(requested.Name()), "opencode") {
+		openCodeSnapshot, snapshotErr := connector.CaptureOpenCodeRegistrationSnapshot(opts)
+		if snapshotErr != nil {
+			return transaction, fmt.Errorf("connector opencode rollback snapshot failed before setup: %w", snapshotErr)
+		}
+		transaction.applied[0].openCodeSnapshot = openCodeSnapshot
+	}
+	if err := s.teardownPreviousConnectorTransaction(
+		ctx, registry, requested, apiToken, proxyAddr, apiAddr, masterKey, &transaction,
+	); err != nil {
+		return transaction, fmt.Errorf("connector switch rollback boundary: %w", err)
+	}
+	return transaction, nil
+}
+
+func (s *Sidecar) teardownPreviousConnectorTransaction(
+	ctx context.Context,
+	registry *connector.Registry,
+	requested connector.Connector,
+	apiToken, proxyAddr, apiAddr, masterKey string,
+	transaction *multiConnectorSetupTransaction,
+) error {
+	if requested == nil {
+		return errors.New("requested connector is nil")
+	}
+	if transaction == nil || transaction.hookLockState == nil {
+		return errors.New("single-connector switch requires captured rollback authority")
+	}
+	previousName := connector.LoadActiveConnector(s.currentConfig().DataDir)
+	if strings.TrimSpace(previousName) == "" ||
+		strings.EqualFold(strings.TrimSpace(previousName), strings.TrimSpace(requested.Name())) {
+		return nil
+	}
+	candidates, unavailable := s.removedConnectorRollbackCandidates(
+		registry,
+		[]string{previousName},
+		[]string{requested.Name()},
+		apiToken,
+		proxyAddr,
+		apiAddr,
+		masterKey,
+		transaction.hookLockState,
+	)
+	if len(unavailable) > 0 || len(candidates) != 1 {
+		return fmt.Errorf(
+			"refuse connector switch %s to %s without complete prior-registration rollback authority",
+			previousName,
+			requested.Name(),
+		)
+	}
+	removed, failed := teardownRemovedConnectorCandidates(candidates, ctx)
+	if len(failed) > 0 || len(removed) != 1 {
+		// Teardown may have partially changed the old registration. Reapply the
+		// captured candidate before returning, without touching the requested
+		// connector because its Setup has not run yet.
+		restore := *transaction
+		restore.applied = nil
+		restore.removed = candidates
+		rollbackErr := rollbackMultiConnectorPublication(ctx, restore)
+		if rollbackErr != nil {
+			return fmt.Errorf(
+				"connector switch %s to %s teardown failed; prior-registration rollback incomplete: %w",
+				previousName,
+				requested.Name(),
+				rollbackErr,
+			)
+		}
+		return fmt.Errorf(
+			"connector switch %s to %s teardown failed; restored the prior connector registration",
+			previousName,
+			requested.Name(),
+		)
+	}
+	transaction.removed = removed
+	return nil
+}
+
 func (s *Sidecar) setupConnectorsIsolated(ctx context.Context, conns []connector.Connector, apiToken, proxyAddr, apiAddr, masterKey string, cache *guardrail.RulePackCache) ([]string, error) {
+	transaction, err := s.setupConnectorsIsolatedTransaction(
+		ctx, conns, apiToken, proxyAddr, apiAddr, masterKey, cache,
+	)
+	return transaction.succeeded, err
+}
+
+func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns []connector.Connector, apiToken, proxyAddr, apiAddr, masterKey string, cache *guardrail.RulePackCache, seed ...multiConnectorSetupTransaction) (multiConnectorSetupTransaction, error) {
 	type connectorRegistration struct {
 		conn connector.Connector
 		opts connector.SetupOpts
+	}
+	transaction := multiConnectorSetupTransaction{}
+	if len(seed) > 0 {
+		transaction = seed[0]
+		transaction.succeeded = nil
+		transaction.applied = nil
 	}
 	registrations := make([]connectorRegistration, 0, len(conns))
 	for _, conn := range conns {
 		opts, err := s.connectorSetupOptsChecked(conn, apiToken, proxyAddr, apiAddr)
 		if err != nil {
-			return nil, fmt.Errorf("connector %s scoped hook token: %w", conn.Name(), err)
+			return transaction, fmt.Errorf("connector %s scoped hook token: %w", conn.Name(), err)
 		}
 		registrations = append(registrations, connectorRegistration{conn: conn, opts: opts})
 	}
+	if len(registrations) == 0 {
+		return transaction, nil
+	}
 
-	succeeded := make([]string, 0, len(registrations))
+	dataDir := registrations[0].opts.DataDir
+	if transaction.activeState == nil {
+		activeState, err := connector.CaptureActiveConnectorStateSnapshot(dataDir)
+		if err != nil {
+			return transaction, fmt.Errorf("capture pre-setup active connector state: %w", err)
+		}
+		transaction.activeState = activeState
+	}
+	if transaction.hookLockState == nil {
+		hookLockState, err := connector.CaptureHookContractLockSnapshot(dataDir)
+		if err != nil {
+			return transaction, fmt.Errorf("capture pre-setup hook contract lock: %w", err)
+		}
+		transaction.hookLockState = hookLockState
+	}
+	previouslyActive := connector.LoadActiveConnectors(dataDir)
+
+	transaction.succeeded = make([]string, 0, len(registrations))
+	transaction.applied = make([]multiConnectorSetupRollbackPoint, 0, len(registrations))
 	for _, registration := range registrations {
+		previousLock := transaction.hookLockState.RawEntry(registration.conn.Name())
+		var openCodeSnapshot *connector.OpenCodeRegistrationSnapshot
+		if strings.EqualFold(strings.TrimSpace(registration.conn.Name()), "opencode") {
+			var err error
+			openCodeSnapshot, err = connector.CaptureOpenCodeRegistrationSnapshot(registration.opts)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s rollback snapshot failed, skipping before setup (other connectors unaffected): %v\n", registration.conn.Name(), err)
+				continue
+			}
+		}
 		if err := s.setupOneConnector(ctx, registration.conn, registration.opts, masterKey, cache); err != nil {
 			// Isolate: roll back this connector's partial state, log, leave
 			// the other connectors untouched, continue.
-			recordAndRollbackFailedConnectorSetup(registration.conn, registration.opts, ctx)
+			var rollbackErrors []error
+			if cleanupErr := rollbackFailedConnectorSetup(registration.conn, registration.opts, ctx); cleanupErr != nil {
+				rollbackErrors = append(rollbackErrors, fmt.Errorf("clean partial connector setup: %w", cleanupErr))
+			}
+			if openCodeSnapshot != nil {
+				if restoreErr := openCodeSnapshot.Restore(); restoreErr != nil {
+					rollbackErrors = append(rollbackErrors, fmt.Errorf("restore prior OpenCode registration: %w", restoreErr))
+				}
+			}
+			if restoreErr := restoreFailedConnectorLock(registration.opts.DataDir, registration.conn.Name(), previousLock); restoreErr != nil {
+				rollbackErrors = append(rollbackErrors, fmt.Errorf("restore prior %s hook contract lock: %w", registration.conn.Name(), restoreErr))
+			}
+			if len(rollbackErrors) > 0 {
+				if appliedErr := rollbackMultiConnectorPublication(ctx, transaction); appliedErr != nil {
+					rollbackErrors = append(rollbackErrors, fmt.Errorf("restore earlier applied connectors: %w", appliedErr))
+				}
+				// The transaction has been aborted: do not return earlier setup
+				// successes as publishable survivors after their rollback ran.
+				transaction.succeeded = nil
+				transaction.applied = nil
+				transaction.removed = nil
+				transaction.activeState = nil
+				transaction.hookLockState = nil
+				return transaction, fmt.Errorf(
+					"connector %s setup failed (%v); per-connector rollback incomplete: %w",
+					registration.conn.Name(), err, errors.Join(rollbackErrors...),
+				)
+			}
 			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s setup failed, skipping (other connectors unaffected): %v\n", registration.conn.Name(), err)
 			continue
 		}
-		succeeded = append(succeeded, registration.conn.Name())
+		wasActive := false
+		for _, activeName := range previouslyActive {
+			if strings.EqualFold(strings.TrimSpace(activeName), strings.TrimSpace(registration.conn.Name())) {
+				wasActive = true
+				break
+			}
+		}
+		transaction.succeeded = append(transaction.succeeded, registration.conn.Name())
+		transaction.applied = append(transaction.applied, multiConnectorSetupRollbackPoint{
+			conn:             registration.conn,
+			opts:             registration.opts,
+			previouslyActive: wasActive,
+			previousLock:     previousLock,
+			openCodeSnapshot: openCodeSnapshot,
+		})
 		fmt.Fprintf(os.Stderr, "[guardrail] connector ready: %s (%s)\n", registration.conn.Name(), registration.conn.Description())
 	}
-	return succeeded, nil
+	return transaction, nil
+}
+
+func rollbackMultiConnectorPublication(ctx context.Context, transaction multiConnectorSetupTransaction) error {
+	var rollbackErrors []error
+	for i := len(transaction.applied) - 1; i >= 0; i-- {
+		applied := transaction.applied[i]
+		name := "unknown"
+		if applied.conn != nil {
+			name = applied.conn.Name()
+		}
+		// Newly added connectors must be torn down. OpenCode is always restored
+		// from its byte-exact plugin/receipt snapshot. A previously-active
+		// non-OpenCode connector may have changed delivery posture during Setup,
+		// so it must be re-applied from its prior lock rather than left paired
+		// with lock metadata that no longer describes the live registration.
+		if applied.conn != nil && applied.previouslyActive && applied.openCodeSnapshot == nil {
+			if err := reapplyPreviouslyActiveConnectorRegistration(ctx, applied); err != nil {
+				rollbackErrors = append(rollbackErrors, fmt.Errorf("restore prior connector %s registration: %w", name, err))
+			}
+		} else if applied.conn != nil {
+			if err := applied.conn.Teardown(ctx, applied.opts); err != nil {
+				rollbackErrors = append(rollbackErrors, fmt.Errorf("connector %s teardown: %w", name, err))
+			}
+		}
+		if applied.openCodeSnapshot != nil {
+			if err := applied.openCodeSnapshot.Restore(); err != nil {
+				rollbackErrors = append(rollbackErrors, fmt.Errorf("restore prior OpenCode registration: %w", err))
+			}
+		}
+		// Teardown returning nil is not sufficient proof that a newly applied
+		// connector left no residue. Verify the clean boundary after any exact
+		// OpenCode restoration; an OpenCode snapshot that was already populated
+		// intentionally restores that prior registration and is therefore not a
+		// clean-state rollback point.
+		verifyClean := applied.conn != nil && !applied.previouslyActive
+		if applied.openCodeSnapshot != nil && !applied.openCodeSnapshot.InitiallyEmpty() {
+			verifyClean = false
+		}
+		if verifyClean {
+			if err := applied.conn.VerifyClean(applied.opts); err != nil {
+				rollbackErrors = append(rollbackErrors, fmt.Errorf("verify connector %s rollback: %w", name, err))
+			}
+		}
+	}
+	// Successfully removed connectors were torn down before the surviving
+	// connector setup loop. If final roster publication fails, restore those
+	// registrations as part of the same transaction so the exact old active
+	// roster can never be paired with missing hooks or lock evidence.
+	for i := len(transaction.removed) - 1; i >= 0; i-- {
+		removed := transaction.removed[i]
+		name := "unknown"
+		if removed.conn != nil {
+			name = removed.conn.Name()
+		}
+		if removed.openCodeSnapshot != nil {
+			if err := removed.openCodeSnapshot.Restore(); err != nil {
+				rollbackErrors = append(rollbackErrors, fmt.Errorf("restore removed OpenCode registration: %w", err))
+			}
+			continue
+		}
+		if err := reapplyPreviouslyActiveConnectorRegistration(ctx, removed); err != nil {
+			rollbackErrors = append(rollbackErrors, fmt.Errorf("restore removed connector %s registration: %w", name, err))
+		}
+	}
+	if transaction.hookLockState != nil {
+		if err := transaction.hookLockState.Restore(); err != nil {
+			rollbackErrors = append(rollbackErrors, fmt.Errorf("restore prior hook contract lock: %w", err))
+		}
+	}
+	for _, applied := range transaction.applied {
+		if applied.conn == nil || !applied.previouslyActive || applied.openCodeSnapshot != nil {
+			continue
+		}
+		if err := verifyPreviouslyActiveConnectorRollback(applied); err != nil {
+			rollbackErrors = append(rollbackErrors, fmt.Errorf("verify prior connector %s registration: %w", applied.conn.Name(), err))
+		}
+	}
+	for _, removed := range transaction.removed {
+		if removed.conn == nil {
+			continue
+		}
+		if err := verifyPreviouslyActiveConnectorRollback(removed); err != nil {
+			rollbackErrors = append(rollbackErrors, fmt.Errorf("verify removed connector %s registration: %w", removed.conn.Name(), err))
+		}
+	}
+	if transaction.activeState != nil {
+		if err := transaction.activeState.Restore(); err != nil {
+			rollbackErrors = append(rollbackErrors, fmt.Errorf("restore prior active connector state: %w", err))
+		}
+	}
+	return errors.Join(rollbackErrors...)
+}
+
+func priorConnectorSetupOpts(applied multiConnectorSetupRollbackPoint) (connector.SetupOpts, error) {
+	if applied.conn == nil {
+		return connector.SetupOpts{}, errors.New("connector is nil")
+	}
+	if strings.TrimSpace(applied.previousLock.Connector) == "" {
+		return connector.SetupOpts{}, errors.New("prior active connector has no hook contract lock")
+	}
+	if !strings.EqualFold(strings.TrimSpace(applied.previousLock.Connector), strings.TrimSpace(applied.conn.Name())) {
+		return connector.SetupOpts{}, fmt.Errorf(
+			"prior hook contract lock belongs to %q",
+			applied.previousLock.Connector,
+		)
+	}
+	prior := applied.opts
+	prior.HookFailMode = applied.previousLock.HookFailMode
+	prior.AgentVersion = applied.previousLock.RawAgentVersion
+	prior.AgentExecutable = applied.previousLock.AgentExecutable
+	prior.HookContractID = applied.previousLock.ContractID
+	posture := applied.previousLock.RegistrationPosture
+	if posture == nil {
+		return connector.SetupOpts{}, errors.New("prior active connector lock has no complete registration posture")
+	}
+	prior.CodexOtelEnvironment = posture.CodexOtelEnvironment
+	prior.ConfigHome = posture.ConfigHome
+	prior.ManagedEnterprise = posture.ManagedEnterprise
+	prior.WorkspaceDir = posture.WorkspaceDir
+	prior.GuardrailMode = posture.GuardrailMode
+	prior.HILTEnabled = posture.HILTEnabled
+	prior.InstallCodeGuard = posture.InstallCodeGuard
+	prior.HookExecutable = posture.HookExecutable
+	prior.CodexEnforcement = posture.CodexEnforcement
+	prior.ClaudeCodeEnforcement = posture.ClaudeCodeEnforcement
+	return prior, nil
+}
+
+func reapplyPreviouslyActiveConnectorRegistration(ctx context.Context, applied multiConnectorSetupRollbackPoint) error {
+	prior, err := priorConnectorSetupOpts(applied)
+	if err != nil {
+		return err
+	}
+	if err := applied.conn.Setup(ctx, prior); err != nil {
+		return fmt.Errorf("reapply prior posture: %w", err)
+	}
+	if err := verifyHookScriptsOrRetry(ctx, prior, applied.conn); err != nil {
+		return fmt.Errorf("verify prior hook artifacts: %w", err)
+	}
+	if err := verifyEffectiveHookRegistration(prior, applied.conn); err != nil {
+		return fmt.Errorf("verify prior effective registration: %w", err)
+	}
+	return nil
+}
+
+func verifyPreviouslyActiveConnectorRollback(applied multiConnectorSetupRollbackPoint) error {
+	prior, err := priorConnectorSetupOpts(applied)
+	if err != nil {
+		return err
+	}
+	if err := verifyEffectiveHookRegistration(prior, applied.conn); err != nil {
+		return err
+	}
+	defenseClawVersion := applied.previousLock.DefenseClawVersion
+	if strings.TrimSpace(defenseClawVersion) == "" {
+		defenseClawVersion = version.Current().BinaryVersion
+	}
+	current, err := connector.HookRuntimeRegistrationCurrent(prior, applied.conn, defenseClawVersion)
+	if err != nil {
+		return err
+	}
+	if !current {
+		return errors.New("restored runtime registration does not match the prior hook contract lock")
+	}
+	return nil
+}
+
+func (s *Sidecar) publishMultiConnectorReadyState(
+	ctx context.Context,
+	transaction multiConnectorSetupTransaction,
+	persisted []string,
+	failedRemoved []string,
+) error {
+	dataDir := ""
+	if s != nil && s.currentConfig() != nil {
+		dataDir = s.currentConfig().DataDir
+	}
+	var saveErr error
+	if strings.TrimSpace(dataDir) == "" || !filepath.IsAbs(dataDir) {
+		saveErr = errors.New("active connector publication requires an absolute data directory")
+	} else {
+		saveErr = connector.SaveActiveConnectors(dataDir, persisted)
+	}
+	if saveErr != nil {
+		err := saveErr
+		persistErr := fmt.Errorf("save active connector set: %w", err)
+		if len(failedRemoved) > 0 {
+			persistErr = fmt.Errorf(
+				"save active connector set with teardown retry state (%s): %w",
+				strings.Join(failedRemoved, ", "),
+				err,
+			)
+		}
+		if rollbackErr := rollbackMultiConnectorPublication(ctx, transaction); rollbackErr != nil {
+			persistErr = fmt.Errorf("%w; multi-connector publication rollback incomplete: %v", persistErr, rollbackErr)
+		} else {
+			persistErr = fmt.Errorf("%w; restored applied connectors to their pre-setup state", persistErr)
+		}
+		if s != nil && s.health != nil {
+			s.health.SetGuardrail(StateError, persistErr.Error(), nil)
+		}
+		return persistErr
+	}
+	return nil
 }
 
 func (s *Sidecar) connectorSetupOptsChecked(conn connector.Connector, apiToken, proxyAddr, apiAddr string) (connector.SetupOpts, error) {
@@ -3751,19 +4248,21 @@ func (s *Sidecar) connectorSetupOptsChecked(conn connector.Connector, apiToken, 
 		return connector.SetupOpts{}, err
 	}
 	return connector.SetupOpts{
-		DataDir:            s.currentConfig().DataDir,
-		ProxyAddr:          proxyAddr,
-		APIAddr:            apiAddr,
-		APIToken:           setupTokens.connectorToken,
-		HookAPIToken:       setupTokens.hookToken,
-		HookAPITokenScoped: setupTokens.hookTokenScoped,
-		WorkspaceDir:       s.currentConfig().ConnectorWorkspaceDir(),
-		HookFailMode:       s.currentConfig().EffectiveHookFailModeForConnector(conn.Name()),
-		HILTEnabled:        s.currentConfig().EffectiveHILTForConnector(conn.Name()).Enabled,
-		InstallCodeGuard:   false,
-		AgentVersion:       agentVersion,
-		AgentExecutable:    agentExecutable,
-		HookContractID:     contractResolution.Contract.ContractID,
+		DataDir:              s.currentConfig().DataDir,
+		CodexOtelEnvironment: s.currentConfig().Environment,
+		ProxyAddr:            proxyAddr,
+		APIAddr:              apiAddr,
+		APIToken:             setupTokens.connectorToken,
+		HookAPIToken:         setupTokens.hookToken,
+		HookAPITokenScoped:   setupTokens.hookTokenScoped,
+		WorkspaceDir:         s.currentConfig().ConnectorWorkspaceDir(),
+		HookFailMode:         s.currentConfig().EffectiveHookFailModeForConnector(conn.Name()),
+		GuardrailMode:        s.currentConfig().EffectiveGuardrailModeForConnector(conn.Name()),
+		HILTEnabled:          s.currentConfig().EffectiveHILTForConnector(conn.Name()).Enabled,
+		InstallCodeGuard:     false,
+		AgentVersion:         agentVersion,
+		AgentExecutable:      agentExecutable,
+		HookContractID:       contractResolution.Contract.ContractID,
 	}, nil
 }
 
@@ -3851,7 +4350,18 @@ func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connecto
 	// shipping an unverified enforcing hook.
 	contractResolution := connector.ResolveHookContract(conn.Name(), opts.AgentVersion)
 	actionMode := strings.EqualFold(s.currentConfig().EffectiveGuardrailModeForConnector(conn.Name()), "action")
-	if connector.HookContractNeedsActionOverride(contractResolution) &&
+	strictUnknownVersion := strings.EqualFold(strings.TrimSpace(conn.Name()), "opencode")
+	if contractResolution.Status == connector.HookCompatibilityUnknown &&
+		(actionMode || strictUnknownVersion) &&
+		os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
+		return fmt.Errorf("connector %s agent version %q is not covered by a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", conn.Name(), opts.AgentVersion, contractResolution.Reason)
+	}
+	if contractResolution.Status == connector.HookCompatibilityUnknown &&
+		!actionMode && !strictUnknownVersion &&
+		os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
+		fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s agent version %q is not covered by a known hook contract; continuing in observe mode: %s\n", conn.Name(), opts.AgentVersion, contractResolution.Reason)
+	}
+	if contractResolution.Status == connector.HookCompatibilityUnversioned &&
 		actionMode &&
 		os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
 		return fmt.Errorf("connector %s agent version %q is not verified against a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", conn.Name(), opts.AgentVersion, contractResolution.Reason)
@@ -4265,6 +4775,283 @@ func teardownRemovedConnectors(registry *connector.Registry, previous, current [
 	return failed
 }
 
+type orphanConnectorOptsResolver func(connector.Connector) (connector.SetupOpts, error)
+
+type orphanConnectorReconcileOps struct {
+	resolveOpts orphanConnectorOptsResolver
+	clearLock   func(dataDir, connectorName string) error
+}
+
+// reconcileOrphanedConnectorRegistrations removes protected lock evidence and
+// host hooks that are absent from both the last published active roster and the
+// requested configuration. These entries can be left by pre-transactional
+// connector switches. Treating them as readiness-irrelevant would weaken the
+// full-lock gate, while restoring them into the active roster would invent
+// configuration. Cleanup therefore runs as a bounded recovery transaction
+// before the requested setup snapshot is captured.
+func reconcileOrphanedConnectorRegistrations(
+	ctx context.Context,
+	registry *connector.Registry,
+	dataDir string,
+	desired []string,
+	ops orphanConnectorReconcileOps,
+) error {
+	if registry == nil || ops.resolveOpts == nil || ops.clearLock == nil {
+		return errors.New("orphaned connector reconciliation owner is unavailable")
+	}
+	entries, err := connector.LoadProtectedHookContractLockEntries(dataDir)
+	if err != nil {
+		return fmt.Errorf("load protected hook contract roster: %w", err)
+	}
+	desiredSet := make(map[string]struct{}, len(desired))
+	for _, rawName := range desired {
+		if name := strings.ToLower(strings.TrimSpace(rawName)); name != "" {
+			desiredSet[name] = struct{}{}
+		}
+	}
+	needsAuthority := false
+	for name := range entries {
+		if _, requested := desiredSet[name]; !requested {
+			needsAuthority = true
+			break
+		}
+	}
+	if !needsAuthority {
+		return nil
+	}
+	previous, err := connector.LoadProtectedActiveConnectors(dataDir)
+	if err != nil {
+		return fmt.Errorf("load protected active connector roster: %w", err)
+	}
+	retained := make(map[string]struct{}, len(desiredSet)+len(previous))
+	for name := range desiredSet {
+		retained[name] = struct{}{}
+	}
+	for _, name := range previous {
+		retained[name] = struct{}{}
+	}
+	orphans := make([]string, 0)
+	for name := range entries {
+		if _, keep := retained[name]; !keep {
+			orphans = append(orphans, name)
+		}
+	}
+	sort.Strings(orphans)
+
+	for _, name := range orphans {
+		entry := entries[name]
+		conn, ok := registry.Get(name)
+		if !ok {
+			return fmt.Errorf("protected lock-only connector %q is not registered", name)
+		}
+		opts, err := ops.resolveOpts(conn)
+		if err != nil {
+			return fmt.Errorf("resolve lock-only connector %s teardown scope: %w", name, err)
+		}
+		point := multiConnectorSetupRollbackPoint{
+			conn:         conn,
+			opts:         opts,
+			previousLock: entry,
+		}
+		if entry.RegistrationPosture != nil {
+			opts, err = priorConnectorSetupOpts(point)
+			if err != nil {
+				return fmt.Errorf("resolve lock-only connector %s recorded posture: %w", name, err)
+			}
+		} else {
+			// Older entries predate registration_posture. They are recoverable
+			// only when the connector's current canonical config locations are
+			// exactly the protected locations recorded in the lock.
+			if err := requireExactOrphanHookLocations(opts, conn, entry); err != nil {
+				return fmt.Errorf("validate lock-only connector %s teardown scope: %w", name, err)
+			}
+			opts.HookFailMode = entry.HookFailMode
+			opts.AgentVersion = entry.RawAgentVersion
+			opts.AgentExecutable = entry.AgentExecutable
+			opts.HookContractID = entry.ContractID
+		}
+		restoreActiveState, err := connector.MarkConnectorInactive(dataDir, name)
+		if err != nil {
+			return fmt.Errorf("mark lock-only connector %s inactive: %w", name, err)
+		}
+		if err := conn.Teardown(ctx, opts); err != nil {
+			return restoreOrphanActiveStateAfterFailure(
+				restoreActiveState,
+				fmt.Errorf("teardown lock-only connector %s: %w", name, err),
+			)
+		}
+		if err := conn.VerifyClean(opts); err != nil {
+			return restoreOrphanActiveStateAfterFailure(
+				restoreActiveState,
+				fmt.Errorf("verify lock-only connector %s cleanup: %w", name, err),
+			)
+		}
+		if err := ops.clearLock(dataDir, name); err != nil {
+			return restoreOrphanActiveStateAfterFailure(
+				restoreActiveState,
+				fmt.Errorf("clear lock-only connector %s contract evidence: %w", name, err),
+			)
+		}
+		fmt.Fprintf(os.Stderr, "[guardrail] reconciled orphaned connector registration: %s\n", name)
+	}
+	return nil
+}
+
+func restoreOrphanActiveStateAfterFailure(restore func() error, stageErr error) error {
+	if restore == nil {
+		return errors.Join(stageErr, errors.New("restore prior active connector state: restore authority is unavailable"))
+	}
+	if err := restore(); err != nil {
+		return errors.Join(stageErr, fmt.Errorf("restore prior active connector state: %w", err))
+	}
+	return stageErr
+}
+
+func requireExactOrphanHookLocations(
+	opts connector.SetupOpts,
+	conn connector.Connector,
+	entry connector.HookContractLockEntry,
+) error {
+	recorded, err := canonicalConnectorPathSet(entry.Locations.HookConfigPaths)
+	if err != nil {
+		return fmt.Errorf("recorded hook config paths: %w", err)
+	}
+	resolved, err := canonicalConnectorPathSet(connector.ResolvedConnectorLocations(opts, conn).HookConfigPaths)
+	if err != nil {
+		return fmt.Errorf("resolved hook config paths: %w", err)
+	}
+	if len(recorded) == 0 || !reflect.DeepEqual(recorded, resolved) {
+		return fmt.Errorf("protected hook config locations do not match the current canonical teardown scope")
+	}
+	return nil
+}
+
+func canonicalConnectorPathSet(paths []string) (map[string]struct{}, error) {
+	set := make(map[string]struct{}, len(paths))
+	for _, rawPath := range paths {
+		path := strings.TrimSpace(rawPath)
+		if path == "" || path != rawPath || strings.ContainsAny(path, "\x00\r\n") || !filepath.IsAbs(path) {
+			return nil, fmt.Errorf("non-canonical absolute path %q", rawPath)
+		}
+		clean := filepath.Clean(path)
+		if clean != path {
+			return nil, fmt.Errorf("non-canonical absolute path %q", rawPath)
+		}
+		if runtime.GOOS == "windows" {
+			clean = strings.ToLower(clean)
+		}
+		if _, duplicate := set[clean]; duplicate {
+			return nil, fmt.Errorf("duplicate path %q", rawPath)
+		}
+		set[clean] = struct{}{}
+	}
+	return set, nil
+}
+
+// removedConnectorRollbackCandidates captures enough unfiltered authority to
+// restore every connector which can be safely removed during an enabled
+// multi-connector boot. A candidate without a complete prior lock/posture is
+// retained in failedRemoved and is not torn down: removing it without rollback
+// authority could make a later active-roster publication failure incoherent.
+func (s *Sidecar) removedConnectorRollbackCandidates(
+	registry *connector.Registry,
+	previous, current []string,
+	apiToken, proxyAddr, apiAddr, masterKey string,
+	lockState *connector.HookContractLockSnapshot,
+) ([]multiConnectorSetupRollbackPoint, []string) {
+	if registry == nil || len(previous) == 0 {
+		return nil, nil
+	}
+	keep := make(map[string]struct{}, len(current))
+	for _, name := range current {
+		if trimmed := strings.TrimSpace(name); trimmed != "" {
+			keep[strings.ToLower(trimmed)] = struct{}{}
+		}
+	}
+	var candidates []multiConnectorSetupRollbackPoint
+	var failed []string
+	for _, previousName := range previous {
+		name := strings.TrimSpace(previousName)
+		if name == "" {
+			continue
+		}
+		if _, stillActive := keep[strings.ToLower(name)]; stillActive {
+			continue
+		}
+		conn, ok := registry.Get(name)
+		if !ok {
+			fmt.Fprintf(os.Stderr, "[guardrail] removed connector %q not in registry — retaining for teardown retry\n", name)
+			failed = append(failed, name)
+			continue
+		}
+		opts, err := s.connectorSetupOptsChecked(conn, apiToken, proxyAddr, apiAddr)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] removed connector %s rollback authority unavailable — retaining for teardown retry: %v\n", name, err)
+			failed = append(failed, name)
+			continue
+		}
+		conn.SetCredentials(opts.APIToken, masterKey)
+		point := multiConnectorSetupRollbackPoint{
+			conn:             conn,
+			opts:             opts,
+			previouslyActive: true,
+			previousLock:     lockState.RawEntry(name),
+		}
+		priorOpts, err := priorConnectorSetupOpts(point)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] removed connector %s has incomplete rollback evidence — retaining for teardown retry: %v\n", name, err)
+			failed = append(failed, name)
+			continue
+		}
+		if strings.EqualFold(name, "opencode") {
+			point.openCodeSnapshot, err = connector.CaptureOpenCodeRegistrationSnapshot(priorOpts)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "[guardrail] removed OpenCode rollback snapshot failed — retaining for teardown retry: %v\n", err)
+				failed = append(failed, name)
+				continue
+			}
+		}
+		candidates = append(candidates, point)
+	}
+	return candidates, failed
+}
+
+// teardownRemovedConnectorCandidates removes only connectors for which the
+// caller already holds exact roster/lock/registration rollback authority.
+func teardownRemovedConnectorCandidates(
+	candidates []multiConnectorSetupRollbackPoint,
+	ctx context.Context,
+) ([]multiConnectorSetupRollbackPoint, []string) {
+	removed := make([]multiConnectorSetupRollbackPoint, 0, len(candidates))
+	var failed []string
+	for _, candidate := range candidates {
+		name := candidate.conn.Name()
+		priorOpts, err := priorConnectorSetupOpts(candidate)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] removed connector %s rollback evidence became invalid — retaining for teardown retry: %v\n", name, err)
+			failed = append(failed, name)
+			continue
+		}
+		fmt.Fprintf(os.Stderr, "[guardrail] connector %s no longer active — tearing down transactionally\n", name)
+		if err := candidate.conn.Teardown(ctx, priorOpts); err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] teardown of removed connector %s: %v\n", name, err)
+		}
+		if err := candidate.conn.VerifyClean(priorOpts); err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: removed connector %s left stale state: %v\n", name, err)
+			failed = append(failed, name)
+			continue
+		}
+		if err := connector.ClearHookContractLockEntry(priorOpts.DataDir, name); err != nil {
+			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: clear hook contract lock for removed connector %s: %v\n", name, err)
+			failed = append(failed, name)
+			continue
+		}
+		removed = append(removed, candidate)
+		fmt.Fprintf(os.Stderr, "[guardrail] removed connector %s teardown verified clean with rollback authority retained\n", name)
+	}
+	return removed, failed
+}
+
 // failGuardrailWithRollback is the shared fail-loud path for connector
 // boot errors. It logs the failure with a stable surface label so
 // operators can grep for the originating phase, rolls the partial
@@ -4288,15 +5075,95 @@ func (s *Sidecar) failGuardrailWithRollback(ctx context.Context, opts connector.
 	return err
 }
 
-func (s *Sidecar) saveSingleConnectorReadyState(ctx context.Context, opts connector.SetupOpts, conn connector.Connector) error {
-	if err := connector.SaveActiveConnector(opts.DataDir, conn.Name()); err != nil {
-		fmt.Fprintf(os.Stderr, "[guardrail] save active connector state: %v\n", err)
+func (s *Sidecar) saveSingleConnectorReadyState(
+	ctx context.Context,
+	opts connector.SetupOpts,
+	conn connector.Connector,
+	rollbackAuthority ...multiConnectorSetupTransaction,
+) error {
+	if conn.Name() == "windsurf" {
+		// Publish the verified Cascade contract before making the connector
+		// active. Doctor must never observe active Windsurf state without the
+		// matching lock/runtime metadata. A failed publication is rolled back
+		// to an explicit inactive tombstone so stale or partially published
+		// readiness cannot survive the DCWIN-012 recovery path.
+		if err := publishWindsurfReadyEvidence(opts, conn); err != nil {
+			lockErr := fmt.Errorf("connector %s hook contract lock save failed: %w", conn.Name(), err)
+			return s.failWindsurfReadyStatePublication(ctx, opts, conn, lockErr)
+		}
+		if err := saveWindsurfReadyActiveState(opts.DataDir, conn.Name()); err != nil {
+			stateErr := fmt.Errorf("connector %s active state save failed after hook contract publication: %w", conn.Name(), err)
+			return s.failWindsurfReadyStatePublication(ctx, opts, conn, stateErr)
+		}
+		return nil
+	}
+	transaction := multiConnectorSetupTransaction{}
+	hasTransaction := false
+	if len(rollbackAuthority) > 0 {
+		transaction = rollbackAuthority[0]
+		hasTransaction = transaction.hookLockState != nil
+	}
+	previousLock := connector.HookContractLockEntry{}
+	if !hasTransaction {
+		// Compatibility-only direct callers retain the historical fallback.
+		// Production setup always supplies the unfiltered snapshot authority.
+		previousLock = connector.LoadHookContractLockEntry(opts.DataDir, conn.Name())
+	}
+	failAndRestoreLock := func(surface string, cause error) error {
+		failed := s.failGuardrailWithRollback(ctx, opts, conn, surface, cause)
+		var restoreErr error
+		if hasTransaction {
+			restoreErr = rollbackMultiConnectorPublication(ctx, transaction)
+		} else {
+			restoreErr = restoreFailedConnectorLock(opts.DataDir, conn.Name(), previousLock)
+		}
+		if restoreErr != nil {
+			failed = fmt.Errorf("%w; restore prior hook contract lock: %v", failed, restoreErr)
+			if s != nil && s.health != nil {
+				s.health.SetGuardrail(StateError, failed.Error(), nil)
+			}
+		}
+		return failed
 	}
 	if err := publishFreshHookRegistrationEvidence(opts, conn); err != nil {
 		lockErr := fmt.Errorf("connector %s hook contract lock save failed: %w", conn.Name(), err)
-		return s.failGuardrailWithRollback(ctx, opts, conn, "hook contract lock", lockErr)
+		return failAndRestoreLock("hook contract lock", lockErr)
+	}
+	if err := connector.SaveActiveConnector(opts.DataDir, conn.Name()); err != nil {
+		stateErr := fmt.Errorf("connector %s active state save failed after hook contract publication: %w", conn.Name(), err)
+		return failAndRestoreLock("active state", stateErr)
 	}
 	return nil
+}
+
+var (
+	publishWindsurfReadyEvidence = publishFreshHookRegistrationEvidence
+	saveWindsurfReadyActiveState = connector.SaveActiveConnector
+	markWindsurfReadyInactive    = connector.MarkConnectorInactive
+)
+
+func (s *Sidecar) failWindsurfReadyStatePublication(ctx context.Context, opts connector.SetupOpts, conn connector.Connector, cause error) error {
+	fmt.Fprintf(os.Stderr, "[guardrail] connector windsurf atomic readiness publication failed: %v\n", cause)
+	var cleanupErrors []string
+	if _, err := markWindsurfReadyInactive(opts.DataDir, "windsurf"); err != nil {
+		cleanupErrors = append(cleanupErrors, fmt.Sprintf("clear active connector readiness: %v", err))
+	}
+	if err := connector.ClearHookContractLockEntry(opts.DataDir, "windsurf"); err != nil {
+		cleanupErrors = append(cleanupErrors, fmt.Sprintf("clear hook contract metadata: %v", err))
+	}
+	if err := conn.Teardown(ctx, opts); err != nil {
+		cleanupErrors = append(cleanupErrors, fmt.Sprintf("rollback teardown: %v", err))
+	}
+	if err := conn.VerifyClean(opts); err != nil {
+		cleanupErrors = append(cleanupErrors, fmt.Sprintf("verify rollback: %v", err))
+	}
+	if len(cleanupErrors) > 0 {
+		cause = fmt.Errorf("%w; cleanup: %s", cause, strings.Join(cleanupErrors, "; "))
+	}
+	if s != nil && s.health != nil {
+		s.health.SetGuardrail(StateError, cause.Error(), nil)
+	}
+	return cause
 }
 
 func publishFreshHookRegistrationEvidence(opts connector.SetupOpts, conn connector.Connector) error {
@@ -4319,21 +5186,47 @@ func publishFreshHookRegistrationEvidence(opts connector.SetupOpts, conn connect
 }
 
 func recordAndRollbackFailedConnectorSetup(conn connector.Connector, opts connector.SetupOpts, ctx context.Context) {
-	if conn == nil {
-		return
+	if err := rollbackFailedConnectorSetup(conn, opts, ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "[guardrail] WARNING: partial connector setup rollback incomplete: %v\n", err)
 	}
-	if err := connector.SaveActiveConnector(opts.DataDir, conn.Name()); err != nil {
-		fmt.Fprintf(os.Stderr, "[guardrail] save partial connector state for %s: %v\n", conn.Name(), err)
+}
+
+func rollbackFailedConnectorSetup(conn connector.Connector, opts connector.SetupOpts, ctx context.Context) error {
+	if conn == nil {
+		return nil
 	}
 	fmt.Fprintf(os.Stderr, "[guardrail] rolling back partial %s setup\n", conn.Name())
+	var rollbackErrors []error
 	if err := conn.Teardown(ctx, opts); err != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] rollback teardown of %s: %v\n", conn.Name(), err)
+		rollbackErrors = append(rollbackErrors, fmt.Errorf("connector %s teardown: %w", conn.Name(), err))
 	}
 	if err := conn.VerifyClean(opts); err != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] WARNING: partial %s setup left stale state and will be retried on next connector switch: %v\n", conn.Name(), err)
-		return
+		rollbackErrors = append(rollbackErrors, fmt.Errorf("verify connector %s cleanup: %w", conn.Name(), err))
+		return errors.Join(rollbackErrors...)
 	}
 	fmt.Fprintf(os.Stderr, "[guardrail] partial %s setup rolled back cleanly\n", conn.Name())
+	return errors.Join(rollbackErrors...)
+}
+
+func restoreFailedConnectorLock(dataDir, connectorName string, previous connector.HookContractLockEntry) error {
+	if strings.TrimSpace(previous.Connector) == "" {
+		return connector.ClearHookContractLockEntry(dataDir, connectorName)
+	}
+	return connector.SaveHookContractLockEntry(dataDir, previous)
+}
+
+func restoreSingleConnectorSetupPoint(
+	ctx context.Context,
+	transaction multiConnectorSetupTransaction,
+	cause error,
+) error {
+	rollbackErr := rollbackMultiConnectorPublication(ctx, transaction)
+	if rollbackErr == nil {
+		return cause
+	}
+	return fmt.Errorf("%w; connector setup rollback incomplete: %v", cause, rollbackErr)
 }
 
 // runAIDiscovery starts continuous shadow-AI visibility when enabled.

@@ -13,7 +13,7 @@ import subprocess
 import time
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from time import monotonic
@@ -1740,12 +1740,15 @@ class DefenseClawTUI(App[None]):
             self.set_interval(CONFIG_POLL_INTERVAL_SECONDS, self._schedule_config_poll)
             self._schedule_config_poll()
         self.set_interval(30.0, self._schedule_ai_usage_poll)
-        # Mirror Go TUI: poll /health every 3s so the Overview SERVICES
+        # Poll authenticated /status every 3s so the Overview SERVICES
         # box reflects the actual sidecar state instead of "unknown".
         # Run once immediately so the first render isn't blank, then
         # let the interval keep it fresh.
         self.set_interval(3.0, self._schedule_health_poll)
         self._schedule_health_poll()
+        # Native delivery evidence changes while the TUI is open; refresh the
+        # same bounded snapshot periodically without coupling it to 3s health.
+        self.set_interval(30.0, self._schedule_observability_status_load)
         self._schedule_observability_status_load()
         self._schedule_ai_usage_poll()
         # Mirror Go's loadCredentialsCmd dispatched from Init(): load
@@ -6683,9 +6686,11 @@ class DefenseClawTUI(App[None]):
         if health is not None:
             for conn in health.connectors:
                 if conn.name:
-                    out[conn.name.strip().lower()] = (conn.state or "").strip()
+                    out[conn.name.strip().lower()] = self.overview_model._effective_connector_runtime(conn)[0]
             if not out and health.connector is not None and health.connector.name:
-                out[health.connector.name.strip().lower()] = (health.connector.state or "").strip()
+                out[health.connector.name.strip().lower()] = self.overview_model._effective_connector_runtime(
+                    health.connector
+                )[0]
         return out
 
     def _connector_last_activity(
@@ -6760,6 +6765,12 @@ class DefenseClawTUI(App[None]):
             # look active.
             if cfg.connector_is_disabled(connector):
                 status = "disabled"
+            elif connector.strip().lower() == "opencode" and connector.strip().lower() not in status_map:
+                # A running gateway is not proof that OpenCode loaded its
+                # managed plugin. Older/malformed health without an OpenCode
+                # row therefore stays unverified instead of inheriting the
+                # process-wide green state.
+                status = "degraded"
             else:
                 status = status_map.get(connector.strip().lower(), fallback_status) or "unknown"
             rows.append(
@@ -8063,6 +8074,7 @@ class DefenseClawTUI(App[None]):
             Text("STATUS", style=header_style),
         )
         selected = self._connector_filter()
+        disclosure_lines: list[Text] = []
         for row in rows:
             normalized = row.status.strip().lower() or "unknown"
             color_dot = state_color(normalized)
@@ -8079,6 +8091,9 @@ class DefenseClawTUI(App[None]):
             )
             color_blocks = TOKENS.accent_red if row.blocks else TOKENS.text_muted
             color_alerts = TOKENS.accent_amber if row.alerts else TOKENS.text_muted
+            disclosure = self.overview_model.connector_priority_conflict_disclosure(row.connector)
+            if disclosure:
+                disclosure_lines.append(Text(f"{name} ({row.connector}): {disclosure}", style=TOKENS.text_muted))
             table.add_row(
                 Text(f"{name} ({row.connector})", style=name_style),
                 Text(row.mode or "?", style=TOKENS.text_secondary),
@@ -8094,12 +8109,53 @@ class DefenseClawTUI(App[None]):
             style=f"italic {TOKENS.text_muted}",
         )
         return Panel(
-            Group(table, hint),
+            Group(table, *disclosure_lines, hint),
             title=Text("CONNECTORS", style=f"bold {TOKENS.accent_green}"),
             title_align="left",
             border_style=TOKENS.accent_green,
             padding=(0, 1),
         )
+
+    def _overview_native_delivery_renderables(self) -> list[RenderableType]:
+        """Render bounded native acceptance separately from runtime health."""
+
+        summary = self.overview_model.native_delivery_summary
+        if summary is None:
+            return [
+                Text(
+                    "Native connector OTLP delivery · bounded evidence loading · "
+                    "collector/runtime health does not prove accepted delivery",
+                    style=TOKENS.text_muted,
+                )
+            ]
+        scope = f"bounded {summary.observation_window_hours}h"
+        if summary.event_rows_truncated:
+            scope += ", truncated; counts partial"
+        lines: list[RenderableType] = [
+            Text(
+                f"Native connector OTLP delivery · {scope} · collector/runtime health does not prove accepted delivery",
+                style=TOKENS.text_secondary,
+            )
+        ]
+        if not summary.connectors:
+            reason = f" · {summary.reason.replace('_', ' ')}" if summary.reason else ""
+            lines.append(Text(f"  no evidence{reason}", style=TOKENS.text_muted))
+            return lines
+        for item in summary.connectors:
+            instance = "" if item.default else " · additional instance"
+            style = {
+                "all_drop_only": TOKENS.accent_red,
+                "partial_drop_only": TOKENS.accent_amber,
+                "accepted": TOKENS.accent_green,
+            }.get(item.state, TOKENS.text_muted)
+            lines.append(
+                Text(
+                    f"  {friendly_connector_name(item.connector)} ({item.connector}){instance}: "
+                    f"{item.state.replace('_', '-')} · {item.detail}",
+                    style=style,
+                )
+            )
+        return lines
 
     def _overview_observability_panel(self) -> RenderableType:
         """Full-width inventory of runtime-loaded telemetry destinations."""
@@ -8201,6 +8257,7 @@ class DefenseClawTUI(App[None]):
                 )
             body: RenderableType = Group(
                 *prefix,
+                *self._overview_native_delivery_renderables(),
                 table,
                 Text(
                     "Names are identities: a new name adds a route; the same name updates it. "
@@ -8215,7 +8272,10 @@ class DefenseClawTUI(App[None]):
                 else "No runtime-loaded destinations. Configure one in 0 Setup → "
                 "Observability / Galileo, then restart the gateway."
             )
-            body = Text(message, style=TOKENS.text_secondary)
+            body = Group(
+                *self._overview_native_delivery_renderables(),
+                Text(message, style=TOKENS.text_secondary),
+            )
         return Panel(
             body,
             title=Text(
@@ -8252,6 +8312,9 @@ class DefenseClawTUI(App[None]):
                 f"[{color_alerts}]{row.alerts:>8}[/]"
                 f"  [{color_dot}]{dot} {row.status or 'unknown'}[/]"
             )
+            disclosure = self.overview_model.connector_priority_conflict_disclosure(row.connector)
+            if disclosure:
+                lines.append(f"  [{TOKENS.text_muted}]{name}: {disclosure}[/]")
         body = "\n".join(lines)
         return f"[bold {TOKENS.accent_green}]CONNECTORS[/]\n{body}\n\n"
 
@@ -8260,6 +8323,31 @@ class DefenseClawTUI(App[None]):
 
         rows = self.overview_model.observability_destination_rows()
         storage = self.overview_model.observability_storage_status()
+        summary = self.overview_model.native_delivery_summary
+        delivery_lines: list[str] = []
+        if summary is None:
+            delivery_lines.append(
+                "  Native connector OTLP delivery · bounded evidence loading · "
+                "collector/runtime health does not prove accepted delivery"
+            )
+        else:
+            scope = f"bounded {summary.observation_window_hours}h"
+            if summary.event_rows_truncated:
+                scope += ", truncated; counts partial"
+            delivery_lines.append(
+                f"  Native connector OTLP delivery · {scope} · "
+                "collector/runtime health does not prove accepted delivery"
+            )
+            if not summary.connectors:
+                reason = f" · {summary.reason.replace('_', ' ')}" if summary.reason else ""
+                delivery_lines.append(f"    no evidence{reason}")
+            for item in summary.connectors:
+                instance = "" if item.default else " · additional instance"
+                delivery_lines.append(
+                    f"    {friendly_connector_name(item.connector)} ({item.connector}){instance}: "
+                    f"{item.state.replace('_', '-')} · {item.detail}"
+                )
+        delivery_text = "\n".join(delivery_lines)
         if not rows:
             message = (
                 f"Canonical observability status unavailable: "
@@ -8269,8 +8357,7 @@ class DefenseClawTUI(App[None]):
                 "Observability / Galileo, then restart the gateway."
             )
             return (
-                f"[bold {TOKENS.accent_cyan}]OBSERVABILITY DESTINATIONS · RUNTIME[/]\n"
-                f"  {message}\n\n"
+                f"[bold {TOKENS.accent_cyan}]OBSERVABILITY DESTINATIONS · RUNTIME[/]\n{delivery_text}\n  {message}\n\n"
             )
         if storage is not None:
             retention_health = storage.retention_health or "unavailable"
@@ -8305,6 +8392,8 @@ class DefenseClawTUI(App[None]):
             )
             return (
                 f"[bold {TOKENS.accent_cyan}]OBSERVABILITY DESTINATIONS · RUNTIME[/]\n"
+                + delivery_text
+                + "\n"
                 + "\n".join(lines)
                 + "\n\n"
             )
@@ -8332,6 +8421,8 @@ class DefenseClawTUI(App[None]):
         )
         return (
             f"[bold {TOKENS.accent_cyan}]OBSERVABILITY DESTINATIONS · RUNTIME[/]\n"
+            + delivery_text
+            + "\n"
             + "\n".join(lines)
             + "\n\n"
         )
@@ -10654,6 +10745,7 @@ class DefenseClawTUI(App[None]):
         self._sync_catalog_connector_filters()
         self._sync_setup_readiness()
         self.overview_model.set_observability_status(None)
+        self.overview_model.set_native_delivery_summary(None)
         self._schedule_observability_status_load()
 
         if self.first_run_model.active and new_cfg is not None:
@@ -11637,7 +11729,7 @@ class DefenseClawTUI(App[None]):
             self._write_activity(f"[#FBBF24]mutations unavailable:[/] {exc}")
 
     def _schedule_health_poll(self) -> None:
-        """Kick off a non-blocking ``/health`` fetch.
+        """Kick off a non-blocking authenticated ``/status`` fetch.
 
         The Go TUI runs ``fetchHealth`` on a ticker (see
         ``internal/tui/health.go`` + ``app.go`` ``pollHealth``) and
@@ -11712,8 +11804,15 @@ class DefenseClawTUI(App[None]):
                 self.config,
                 self.data_dir,
             )
+            delivery_summary = await asyncio.to_thread(
+                _fetch_native_delivery_summary,
+                self.config,
+                self.data_dir,
+                status,
+            )
             if not self._observability_status_reload_pending:
                 self.overview_model.set_observability_status(status, error=error)
+                self.overview_model.set_native_delivery_summary(delivery_summary)
                 self.setup_model.set_observability_status(status, error=error)
                 if self.active_panel in {"overview", "setup"} and not self.help_open:
                     if self.active_panel == "overview":
@@ -12107,8 +12206,36 @@ def _gateway_snapshot_detail(snapshot: HealthSnapshot, state: str) -> str:
     return ""
 
 
+def _project_omnigent_effective_readiness(
+    config: object,
+    snapshot: HealthSnapshot,
+) -> HealthSnapshot:
+    """Apply Status's passive OmniGent readiness to TUI presentation state."""
+
+    from defenseclaw.commands.cmd_status import _omnigent_effective_runtime_state
+
+    projected: dict[str, str] = {}
+
+    def _project(connector: ConnectorHealth | None) -> ConnectorHealth | None:
+        if connector is None or connector.name.strip().lower() != "omnigent":
+            return connector
+        if connector.state not in projected:
+            projected[connector.state], _detail = _omnigent_effective_runtime_state(
+                config,
+                connector.state,
+            )
+        state = projected[connector.state]
+        return connector if state == connector.state else replace(connector, state=state)
+
+    return replace(
+        snapshot,
+        connector=_project(snapshot.connector),
+        connectors=tuple(_project(connector) for connector in snapshot.connectors),
+    )
+
+
 def _fetch_gateway_health(config: object | None) -> GatewayHealthResult:
-    """Probe the configured authenticated sidecar API without using proxy state.
+    """Probe the configured authenticated sidecar status without using proxy state.
 
     ``gateway.api_bind`` / ``api_port`` identify the REST listener;
     ``gateway.host`` / ``port`` identify the optional fleet uplink and must not
@@ -12139,7 +12266,19 @@ def _fetch_gateway_health(config: object | None) -> GatewayHealthResult:
         return GatewayHealthResult("error", "sidecar API client configuration is invalid")
 
     try:
-        payload = client.health()
+        from defenseclaw.commands.cmd_doctor import (
+            _authenticated_runtime_matches,
+            _trusted_gateway_listener,
+        )
+
+        trust = _trusted_gateway_listener(config)
+    except Exception:  # noqa: BLE001 - trust discovery failures remain probe errors.
+        return GatewayHealthResult("error", "managed sidecar listener identity is unavailable")
+    if not trust.trusted:
+        return GatewayHealthResult("error", f"managed sidecar listener identity is unverified: {trust.detail}")
+
+    try:
+        document = client.status()
     except requests.HTTPError as exc:
         status = exc.response.status_code if exc.response is not None else 0
         if status in {401, 403}:
@@ -12148,17 +12287,34 @@ def _fetch_gateway_health(config: object | None) -> GatewayHealthResult:
                 f"authentication error: sidecar rejected the configured token (HTTP {status})",
             )
         label = f"HTTP {status}" if status else "HTTP error"
-        return GatewayHealthResult("error", f"sidecar health request failed ({label})")
+        return GatewayHealthResult("error", f"sidecar status request failed ({label})")
     except (requests.ConnectionError, requests.Timeout, OSError):
         return GatewayHealthResult("offline", "sidecar API is unreachable")
     except (requests.RequestException, ValueError):
-        return GatewayHealthResult("error", "sidecar health response is invalid")
+        return GatewayHealthResult("error", "sidecar status response is invalid")
     except Exception:  # noqa: BLE001 - unexpected probe failures are errors, not outages.
-        return GatewayHealthResult("error", "sidecar health probe failed")
+        return GatewayHealthResult("error", "sidecar status probe failed")
+
+    if not isinstance(document, dict):
+        return GatewayHealthResult("error", "authenticated sidecar status is invalid")
+    payload = document.get("health")
+    if not isinstance(payload, dict):
+        return GatewayHealthResult("error", "authenticated sidecar status is invalid")
+    try:
+        runtime_ok, runtime_detail = _authenticated_runtime_matches(
+            config,
+            trust.pid,
+            json.dumps(document),
+        )
+    except (TypeError, ValueError):
+        runtime_ok, runtime_detail = False, "authenticated runtime metadata is malformed"
+    if not runtime_ok:
+        return GatewayHealthResult("error", runtime_detail)
 
     snapshot = _health_snapshot_from_mapping(payload)
     if snapshot is None:
-        return GatewayHealthResult("error", "sidecar health response is invalid")
+        return GatewayHealthResult("error", "authenticated sidecar health is invalid")
+    snapshot = _project_omnigent_effective_readiness(config, snapshot)
     state = _gateway_state_from_snapshot(snapshot)
     return GatewayHealthResult(state, _gateway_snapshot_detail(snapshot, state), snapshot)
 
@@ -12198,6 +12354,33 @@ def _fetch_v8_operator_status(
             safe_keyword = re.sub(r"[^A-Za-z0-9_.-]", "?", keyword)[:64]
             return None, f"invalid v8 configuration at {safe_path} ({safe_keyword})"
         return None, "canonical v8 status could not be loaded; run defenseclaw observability validate"
+
+
+def _fetch_native_delivery_summary(
+    config: object | None,
+    data_dir: str | Path | None,
+    status: object | None = None,
+):
+    """Return the same bounded, redacted native-delivery truth as Doctor."""
+
+    from defenseclaw.observability.custody_status import (
+        NativeDeliverySummary,
+        inspect_connector_custody,
+        summarize_native_delivery,
+    )
+
+    if config is None:
+        return NativeDeliverySummary("no_evidence", "config_unavailable", 24)
+    root = str(data_dir or getattr(config, "data_dir", "") or "")
+    database = str(getattr(status, "local_path", "") or "")
+    if not database:
+        database = str(getattr(config, "audit_db", "") or "")
+    if not database:
+        database = str(Path(root) / "audit.db")
+    try:
+        return summarize_native_delivery(inspect_connector_custody(database, root))
+    except Exception:  # noqa: BLE001 - TUI absence is bounded evidence, never a failure.
+        return NativeDeliverySummary("no_evidence", "evidence_unavailable", 24)
 
 
 def _fetch_ai_usage(config: object | None) -> AIUsageSnapshot | None:
@@ -12951,10 +13134,12 @@ def _connector_from_mapping(raw: Any) -> ConnectorHealth | None:
     return ConnectorHealth(
         name=_coerce_str(raw.get("name")),
         state=_coerce_str(raw.get("state")),
+        source=raw.get("source") if isinstance(raw.get("source"), str) else "",
         since=_coerce_str(raw.get("since")),
         last_activity_at=_coerce_str(
             raw.get("last_activity_at") or raw.get("lastActivityAt")
         ),
+        load_heartbeat_at=_coerce_str(raw.get("load_heartbeat_at") or raw.get("loadHeartbeatAt")),
         tool_inspection_mode=_coerce_str(
             raw.get("tool_inspection_mode") or raw.get("toolInspectionMode")
         ),
@@ -12974,7 +13159,7 @@ def _connector_from_mapping(raw: Any) -> ConnectorHealth | None:
 
 
 def _connectors_from_mapping(raw: Any) -> tuple[ConnectorHealth, ...]:
-    """Parse ``/health``'s ``connectors[]`` array into per-connector health.
+    """Parse the status health ``connectors[]`` array into per-connector health.
 
     The gateway emits one entry per active connector with its own live
     counters (``internal/gateway/health.go``). Tolerant of a missing/null
@@ -12993,7 +13178,7 @@ def _connectors_from_mapping(raw: Any) -> tuple[ConnectorHealth, ...]:
 
 
 def _health_snapshot_from_mapping(raw: Any) -> HealthSnapshot | None:
-    """Convert a ``/health`` JSON payload into a ``HealthSnapshot``.
+    """Convert a status health payload into a ``HealthSnapshot``.
 
     Returns ``None`` when the response is unusable. The mapper is
     deliberately tolerant of missing / camelCased fields so a gateway

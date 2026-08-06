@@ -61,11 +61,15 @@ const (
 	nativeConnectorStateLimit  = int64(64 << 10)
 	nativeConfigRosterLimit    = int64(4 << 20)
 	maxRunCommandUTF16Units    = 260
+	internalSetupConnectorEnv  = "DEFENSECLAW_INTERNAL_SETUP_CONNECTOR"
+	internalSetupParentEnv     = "DEFENSECLAW_INTERNAL_SETUP_PARENT"
+	upgradeFreshProcessEnv     = "DEFENSECLAW_UPGRADE_FRESH_PROCESS"
 )
 
 var (
-	errInstalledProcessRunning = errors.New("an installed DefenseClaw process is still running")
-	errSetupCancelled          = errors.New("setup cancelled by user")
+	errInstalledProcessRunning  = errors.New("an installed DefenseClaw process is still running")
+	errSetupCancelled           = errors.New("setup cancelled by user")
+	currentUserHookRuntimePaths = hookruntime.CurrentUserPaths
 )
 
 func checkSetupContext(ctx context.Context) error {
@@ -160,22 +164,29 @@ func validateRunCommand(command string) error {
 }
 
 type options struct {
-	Action             string
-	Quiet              bool
-	NoRestart          bool // Standard installer property; setup never initiates an OS reboot.
-	InstallScope       string
-	Connector          string
-	Mode               string
-	StartGateway       bool
-	DeleteUserData     bool
-	ConnectorSet       bool
-	ModeSet            bool
-	StartGatewaySet    bool
-	WaitPID            uint32
-	FromVersion        string
-	CleanupTransaction string
-	CodexHome          string
-	ClaudeConfigDir    string
+	Action               string
+	Quiet                bool
+	NoRestart            bool // Standard installer property; setup never initiates an OS reboot.
+	InstallScope         string
+	Connector            string
+	Mode                 string
+	StartGateway         bool
+	DeleteUserData       bool
+	ConnectorSet         bool
+	ModeSet              bool
+	StartGatewaySet      bool
+	WaitPID              uint32
+	FromVersion          string
+	CleanupTransaction   string
+	CodexHome            string
+	ClaudeConfigDir      string
+	CopilotHome          string
+	CursorHome           string
+	WindsurfUserHome     string
+	AntigravityConfigDir string
+	OpenCodeConfigDir    string
+	OmnigentConfigHome   string
+	HermesHome           string
 	// PreserveConnectorConfiguration is internal transaction intent, never a
 	// command-line property. Servicing an existing install without an explicit
 	// connector or mode selection must refresh its owned registrations in place
@@ -192,6 +203,7 @@ type payloadManifest struct {
 	GatewayArchive     string                `json:"gateway_archive"`
 	Wheel              string                `json:"wheel"`
 	PythonEmbed        string                `json:"python_embed"`
+	VCRuntime          string                `json:"vc_runtime"`
 	YaraCompatWheel    string                `json:"yara_compat_wheel"`
 	UpgradeManifest    string                `json:"upgrade_manifest"`
 	SitePackages       string                `json:"site_packages"`
@@ -249,6 +261,14 @@ type installState struct {
 	Mode                   string            `json:"mode"`
 	CodexHome              string            `json:"codex_home,omitempty"`
 	ClaudeConfigDir        string            `json:"claude_config_dir,omitempty"`
+	CopilotHome            string            `json:"copilot_home,omitempty"`
+	CursorHome             string            `json:"cursor_home,omitempty"`
+	WindsurfUserHome       string            `json:"windsurf_user_home,omitempty"`
+	WindsurfHooksPath      string            `json:"windsurf_hooks_path,omitempty"`
+	AntigravityConfigDir   string            `json:"antigravity_config_dir,omitempty"`
+	OpenCodeConfigDir      string            `json:"opencode_config_dir,omitempty"`
+	OmnigentConfigHome     string            `json:"omnigent_config_home,omitempty"`
+	HermesHome             string            `json:"hermes_home,omitempty"`
 	UnsignedLocalArtifact  bool              `json:"unsigned_local_artifact"`
 	ReleaseSigningRequired bool              `json:"release_signing_required"`
 	Toolchain              map[string]string `json:"toolchain"`
@@ -276,6 +296,11 @@ func main() {
 	}
 
 	code, err := run(opts)
+	if opts.Quiet && err != nil && opts.Action != "help" && opts.Action != "verify" {
+		if _, logErr := writeQuietSetupLog(opts.Action, code, err); logErr != nil {
+			fmt.Fprintf(os.Stderr, "DefenseClaw setup log failed: %v\n", logErr)
+		}
+	}
 	if err != nil {
 		// Silent mode suppresses interactive UI, not diagnostics. Automation and
 		// enterprise deployment tools need the concrete failure on their captured
@@ -487,6 +512,13 @@ func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot 
 	// must never depend on a later process inheriting the same environment.
 	opts.CodexHome = transaction.CodexHome
 	opts.ClaudeConfigDir = transaction.ClaudeConfigDir
+	opts.CopilotHome = transaction.CopilotHome
+	opts.CursorHome = transaction.CursorHome
+	opts.WindsurfUserHome = transaction.WindsurfUserHome
+	opts.AntigravityConfigDir = transaction.AntigravityConfigDir
+	opts.OpenCodeConfigDir = transaction.OpenCodeConfigDir
+	opts.OmnigentConfigHome = transaction.OmnigentConfigHome
+	opts.HermesHome = transaction.HermesHome
 	if err := beginSetupTransaction(transaction); err != nil {
 		return retryRequiredCode, err
 	}
@@ -503,7 +535,7 @@ func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot 
 		installRoot,
 		dataRoot,
 		maintenancePath,
-		transaction.ID,
+		transaction,
 		pathEntryOwned,
 		pathSeparatorReused,
 		pathValueCreated,
@@ -546,6 +578,7 @@ func runInstallContext(ctx context.Context, opts options, installRoot, dataRoot 
 		gatewayPath,
 		dataRoot,
 		disableStableHookRuntime,
+		drainOwnedStableHookProcesses,
 		func(path, root string) (serviceState, error) {
 			return stopOwnedServicesContext(ctx, path, root)
 		},
@@ -794,6 +827,7 @@ func runUninstallContext(ctx context.Context, opts options, installRoot, dataRoo
 		gatewayPath,
 		dataRoot,
 		disableStableHookRuntime,
+		drainOwnedStableHookProcesses,
 		func(path, root string) (serviceState, error) {
 			return stopOwnedServicesContext(ctx, path, root)
 		},
@@ -887,11 +921,77 @@ func requestedServices(opts options, previous serviceState) serviceState {
 	}
 }
 
+func configuredSetupWatchdogEnabled(dataRoot string) (bool, error) {
+	data, exists, err := readBoundedNativeStateFile(
+		filepath.Join(dataRoot, "config.yaml"),
+		nativeConfigRosterLimit,
+	)
+	if err != nil {
+		return false, err
+	}
+	if !exists {
+		// Canonical initialization creates a schema-v8 configuration with the
+		// watchdog enabled by default. Record that service in the transaction
+		// before publication so a failed gateway auto-start cannot be mistaken
+		// for successful runtime convergence.
+		return true, nil
+	}
+
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	var document yaml.Node
+	if err := decoder.Decode(&document); err != nil {
+		return false, fmt.Errorf("parse watchdog configuration: invalid YAML")
+	}
+	var extra yaml.Node
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return false, fmt.Errorf("parse watchdog configuration: invalid YAML document count")
+	}
+	root, err := nativeYAMLMappingRoot(&document)
+	if err != nil {
+		return false, err
+	}
+	gateway, err := nativeYAMLMappingChild(root, "gateway")
+	if err != nil || gateway == nil {
+		return true, err
+	}
+	watchdog, err := nativeYAMLMappingChild(gateway, "watchdog")
+	if err != nil || watchdog == nil {
+		return true, err
+	}
+	enabledNode, err := nativeYAMLChild(watchdog, "enabled")
+	if err != nil || enabledNode == nil {
+		return true, err
+	}
+	if enabledNode.Kind == yaml.AliasNode || enabledNode.Alias != nil {
+		return false, fmt.Errorf("watchdog enabled field must not use an alias")
+	}
+	if enabledNode.Kind != yaml.ScalarNode || enabledNode.Tag != "!!bool" {
+		return false, fmt.Errorf("watchdog enabled field is not a boolean")
+	}
+	var enabled bool
+	if err := enabledNode.Decode(&enabled); err != nil {
+		return false, fmt.Errorf("watchdog enabled field is not a boolean")
+	}
+	return enabled, nil
+}
+
+func configuredInstallServices(wanted serviceState, dataRoot string) (serviceState, error) {
+	if !wanted.Gateway {
+		return wanted, nil
+	}
+	watchdogEnabled, err := configuredSetupWatchdogEnabled(dataRoot)
+	if err != nil {
+		return serviceState{}, fmt.Errorf("read configured watchdog service target: %w", err)
+	}
+	wanted.Watchdog = wanted.Watchdog || watchdogEnabled
+	return wanted, nil
+}
+
 func connectorsForNativeUninstall(state *installState, dataRoot string) ([]string, error) {
 	seen := map[string]bool{}
-	connectors := make([]string, 0, 3)
+	connectors := make([]string, 0, len(nativeLifecycleConnectorNames))
 	add := func(name string) {
-		if (name == "codex" || name == "claudecode" || name == "amp") && !seen[name] {
+		if validConnector(name) && name != "none" && !seen[name] {
 			seen[name] = true
 			connectors = append(connectors, name)
 		}
@@ -924,6 +1024,31 @@ func connectorsForNativeUninstall(state *installState, dataRoot string) ([]strin
 	}
 	if pathExists(filepath.Join(dataRoot, "connector_backups", "amp", "config.json")) {
 		add("amp")
+	}
+	if pathExists(filepath.Join(dataRoot, "connector_backups", "copilot", "config.json")) {
+		add("copilot")
+	}
+	if pathExists(filepath.Join(dataRoot, "connector_backups", "cursor", "hooks.json.json")) {
+		add("cursor")
+	}
+	if pathExists(filepath.Join(dataRoot, "connector_backups", "windsurf", "config.json")) {
+		add("windsurf")
+	}
+	if pathExists(filepath.Join(dataRoot, "connector_backups", "antigravity", "hooks.json.json")) ||
+		pathExists(filepath.Join(dataRoot, "connector_backups", "antigravity", "config.json")) {
+		add("antigravity")
+	}
+	if pathExists(filepath.Join(dataRoot, "connector_backups", "opencode", "config.json")) {
+		add("opencode")
+	}
+	for _, logicalName := range []string{"config", "module", "pth"} {
+		if pathExists(filepath.Join(dataRoot, "connector_backups", "omnigent", logicalName+".json")) {
+			add("omnigent")
+			break
+		}
+	}
+	if pathExists(filepath.Join(dataRoot, "connector_backups", "hermes", "config.yaml.json")) {
+		add("hermes")
 	}
 	return connectors, nil
 }
@@ -988,7 +1113,7 @@ func readNativeConfiguredConnectors(dataRoot string) ([]string, error) {
 	seen := map[string]bool{}
 	add := func(value string) {
 		name := normalizeConnector(strings.TrimSpace(value))
-		if name == "codex" || name == "claudecode" || name == "amp" {
+		if name != "none" && validConnector(name) {
 			seen[name] = true
 		}
 	}
@@ -1166,18 +1291,111 @@ func runConnectorLifecycleWithEnv(gatewayPath, dataRoot, connectorName, action s
 	return nil
 }
 
+func runDeferredUninstallConnectorVerifyWithEnv(
+	transaction setupTransaction,
+	gatewayPath, connectorName string,
+	env []string,
+) error {
+	if transaction.Action != "uninstall" || !validSetupTransactionID(transaction.ID) {
+		return errors.New("deferred connector verification requires an exact uninstall transaction")
+	}
+	if !pathExists(gatewayPath) {
+		return fmt.Errorf("connector %s verify requires the selected trusted gateway binary", connectorName)
+	}
+	setupExecutable, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("resolve deferred cleanup Setup parent: %w", err)
+	}
+	setupExecutable, err = filepath.Abs(setupExecutable)
+	if err != nil || !samePath(setupExecutable, transaction.MaintenancePath) ||
+		!strings.EqualFold(filepath.Base(setupExecutable), setupArtifactName) {
+		return errors.New("deferred connector verification is not running from the transaction-owned Setup executable")
+	}
+	transactionRoot, err := defaultTransactionRoot()
+	if err != nil {
+		return fmt.Errorf("resolve deferred cleanup transaction root: %w", err)
+	}
+	recordPath := deferredUninstallCleanupPath(transactionRoot)
+	args, err := deferredUninstallConnectorVerifyCommandArgs(
+		transaction,
+		setupExecutable,
+		recordPath,
+		connectorName,
+		env,
+	)
+	if err != nil {
+		return err
+	}
+	output, err := runCapturedSetupCommand(
+		setupControlCommandTimeout,
+		env,
+		gatewayPath,
+		args...,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"connector %s verify failed: %w: %s",
+			connectorName,
+			err,
+			strings.TrimSpace(string(output)),
+		)
+	}
+	return nil
+}
+
+func deferredUninstallConnectorVerifyCommandArgs(
+	transaction setupTransaction,
+	setupExecutable, recordPath, connectorName string,
+	env []string,
+) ([]string, error) {
+	if transaction.Action != "uninstall" || !validSetupTransactionID(transaction.ID) ||
+		!samePath(setupExecutable, transaction.MaintenancePath) {
+		return nil, errors.New("deferred connector verification arguments are not bound to the uninstall transaction")
+	}
+	args, err := connectorLifecycleCommandArgs(
+		transaction.DataRoot,
+		connectorName,
+		"verify",
+		env,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("connector %s verify config home: %w", connectorName, err)
+	}
+	args = append(
+		args,
+		"--internal-setup-parent", setupExecutable,
+		"--internal-deferred-cleanup-record", recordPath,
+		"--internal-deferred-cleanup-transaction", transaction.ID,
+	)
+	return args, nil
+}
+
 func connectorLifecycleCommandArgs(dataRoot, connectorName, action string, env []string) ([]string, error) {
 	configHome, err := connectorLifecycleConfigHome(env, connectorName)
 	if err != nil {
 		return nil, err
 	}
-	return []string{
+	args := []string{
 		"connector", action,
 		"--connector", connectorName,
 		"--data-dir", dataRoot,
 		"--config-home", configHome,
-		"--json",
-	}, nil
+	}
+	if connectorName == "hermes" {
+		paths, err := currentUserHookRuntimePaths()
+		if err != nil {
+			return nil, fmt.Errorf("resolve stable Hermes hook launcher: %w", err)
+		}
+		hookExecutable := strings.TrimSpace(paths.Launcher)
+		if hookExecutable == "" ||
+			!filepath.IsAbs(hookExecutable) ||
+			filepath.Clean(hookExecutable) != hookExecutable ||
+			!strings.EqualFold(filepath.Base(hookExecutable), hookruntime.LauncherName) {
+			return nil, errors.New("stable Hermes hook launcher is not an absolute normalized DefenseClaw launcher path")
+		}
+		args = append(args, "--hook-executable", hookExecutable)
+	}
+	return append(args, "--json"), nil
 }
 
 func connectorLifecycleConfigHome(env []string, connectorName string) (string, error) {
@@ -1190,10 +1408,26 @@ func connectorLifecycleConfigHome(env []string, connectorName string) (string, e
 		variable = "CLAUDE_CONFIG_DIR"
 	case "amp":
 		// Amp has no config-home override. Bind its documented native Windows
-		// home beneath the current token's USERPROFILE and pass that exact
-		// path through --config-home to the gateway lifecycle command.
+		// home beneath the current token's USERPROFILE.
 		variable = "USERPROFILE"
 		suffix = []string{".config", "amp"}
+	case "copilot":
+		variable = "COPILOT_HOME"
+	case "cursor":
+		variable = "DEFENSECLAW_CURSOR_CONFIG_HOME"
+	case "windsurf":
+		variable = "WINDSURF_USER_HOME"
+	case "antigravity":
+		// DefenseClaw-internal custody binding used to construct the hidden
+		// --config-home argument. Google publishes no Antigravity config-home
+		// environment override.
+		variable = "DEFENSECLAW_ANTIGRAVITY_CONFIG_HOME"
+	case "opencode":
+		variable = "OPENCODE_CONFIG_DIR"
+	case "omnigent":
+		variable = "OMNIGENT_CONFIG_HOME"
+	case "hermes":
+		variable = "HERMES_HOME"
 	default:
 		return "", fmt.Errorf("unsupported native connector %q", connectorName)
 	}
@@ -1237,7 +1471,24 @@ func samePath(a, b string) bool {
 }
 
 func validConnector(value string) bool {
-	return value == "none" || value == "codex" || value == "claudecode" || value == "amp"
+	return value == "none" || isNativeLifecycleConnector(value)
+}
+
+var nativeLifecycleConnectorNames = []string{
+	"amp",
+	"antigravity",
+	"claudecode",
+	"codex",
+	"copilot",
+	"cursor",
+	"hermes",
+	"omnigent",
+	"opencode",
+	"windsurf",
+}
+
+func isNativeLifecycleConnector(value string) bool {
+	return slices.Contains(nativeLifecycleConnectorNames, value)
 }
 
 func validMode(value string) bool {
@@ -1427,7 +1678,7 @@ func publishMaintenanceCopyForTransaction(transaction setupTransaction, unsigned
 	return nil
 }
 
-func stageInstallTree(payload loadedPayload, staging, installRoot, dataRoot, maintenancePath, transactionID string, pathEntryOwned, pathSeparatorReused, pathValueCreated bool, opts options) error {
+func stageInstallTree(payload loadedPayload, staging, installRoot, dataRoot, maintenancePath string, transaction setupTransaction, pathEntryOwned, pathSeparatorReused, pathValueCreated bool, opts options) error {
 	if err := createExclusiveStagingRoot(staging); err != nil {
 		return err
 	}
@@ -1443,6 +1694,9 @@ func stageInstallTree(payload loadedPayload, staging, installRoot, dataRoot, mai
 	}
 	if err := extractZipFile(filepath.Join(payload.Root, payload.Manifest.PythonEmbed), filepath.Join(staging, "runtime", "python")); err != nil {
 		return fmt.Errorf("extract embedded Python: %w", err)
+	}
+	if err := extractZipFile(filepath.Join(payload.Root, payload.Manifest.VCRuntime), filepath.Join(staging, "runtime", "python")); err != nil {
+		return fmt.Errorf("extract app-local Microsoft VC++ runtime: %w", err)
 	}
 	if err := configurePythonPTH(filepath.Join(staging, "runtime", "python")); err != nil {
 		return err
@@ -1490,6 +1744,10 @@ func stageInstallTree(payload loadedPayload, staging, installRoot, dataRoot, mai
 	if err := writeJSON(filepath.Join(staging, "installer", "payload-manifest.json"), payload.Manifest); err != nil {
 		return err
 	}
+	windsurfHooksPath := ""
+	if opts.WindsurfUserHome != "" {
+		windsurfHooksPath = filepath.Join(opts.WindsurfUserHome, ".codeium", "windsurf", "hooks.json")
+	}
 	state := installState{
 		SchemaVersion:          1,
 		Version:                payload.Manifest.Version,
@@ -1505,16 +1763,22 @@ func stageInstallTree(payload loadedPayload, staging, installRoot, dataRoot, mai
 		PathEntryOwned:         pathEntryOwned,
 		PathSeparatorReused:    pathSeparatorReused,
 		PathValueCreated:       pathValueCreated,
-		Connector:              opts.Connector,
-		Mode:                   opts.Mode,
 		CodexHome:              opts.CodexHome,
 		ClaudeConfigDir:        opts.ClaudeConfigDir,
+		CopilotHome:            opts.CopilotHome,
+		CursorHome:             opts.CursorHome,
+		WindsurfUserHome:       opts.WindsurfUserHome,
+		WindsurfHooksPath:      windsurfHooksPath,
+		AntigravityConfigDir:   opts.AntigravityConfigDir,
+		OpenCodeConfigDir:      opts.OpenCodeConfigDir,
+		OmnigentConfigHome:     opts.OmnigentConfigHome,
+		HermesHome:             opts.HermesHome,
 		UnsignedLocalArtifact:  payload.Manifest.Unsigned,
 		ReleaseSigningRequired: true,
 		Toolchain:              payload.Manifest.Toolchain,
 		InstalledAtUTC:         time.Now().UTC().Format(time.RFC3339),
-		TransactionID:          transactionID,
 	}
+	bindStagedInstallStateOwnership(&state, transaction)
 	if err := writeJSON(filepath.Join(staging, "installer", "install-state.json"), state); err != nil {
 		return err
 	}
@@ -1537,6 +1801,12 @@ func stageInstallTree(payload loadedPayload, staging, installRoot, dataRoot, mai
 		}
 	}
 	return nil
+}
+
+func bindStagedInstallStateOwnership(state *installState, transaction setupTransaction) {
+	state.TransactionID = transaction.ID
+	state.Connector = transaction.TargetConnector
+	state.Mode = transaction.TargetMode
 }
 
 func prepareStagedInstallerRoot(staging string) (string, error) {
@@ -1692,9 +1962,20 @@ func validateMachineVersion(output []byte, expectedName, expectedVersion, expect
 
 func runInitialConfigurationWithEnv(root, dataRoot string, opts options, env []string) error {
 	args := initialConfigurationArgs(opts)
+	setupExecutable := ""
+	if opts.Connector == "antigravity" {
+		var err error
+		setupExecutable, err = os.Executable()
+		if err != nil {
+			return fmt.Errorf("resolve internal Setup parent: %w", err)
+		}
+		if !strings.EqualFold(filepath.Base(setupExecutable), setupArtifactName) {
+			return fmt.Errorf("internal Antigravity bootstrap requires %s parent", setupArtifactName)
+		}
+	}
 	output, err := runCapturedSetupCommand(
 		setupConfigurationTimeout,
-		env,
+		initialConfigurationEnv(env, opts.Connector, setupExecutable),
 		filepath.Join(root, "bin", "defenseclaw.exe"),
 		args...,
 	)
@@ -1705,12 +1986,39 @@ func runInitialConfigurationWithEnv(root, dataRoot string, opts options, env []s
 }
 
 func initialConfigurationArgs(opts options) []string {
-	return []string{
+	profile := opts.Mode
+	args := []string{
 		"init", "--skip-install", "--non-interactive", "--yes",
 		"--connector", opts.Connector,
-		"--profile", opts.Mode,
+		"--profile", profile,
 		"--no-start-gateway", "--no-verify",
 	}
+	if opts.Connector == "copilot" {
+		// Retain the exact installer-shaped bootstrap for compatibility while
+		// ordinary public Copilot initialization is also supported.
+		args = append(args, "--native-setup-copilot")
+	}
+	return args
+}
+
+func initialConfigurationEnv(input []string, connector, setupExecutable string) []string {
+	filtered := make([]string, 0, len(input)+2)
+	for _, entry := range input {
+		name, _, ok := strings.Cut(entry, "=")
+		if ok && (strings.EqualFold(name, internalSetupConnectorEnv) ||
+			strings.EqualFold(name, internalSetupParentEnv)) {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	if connector != "antigravity" || setupExecutable == "" {
+		return filtered
+	}
+	return append(
+		filtered,
+		internalSetupConnectorEnv+"=antigravity",
+		internalSetupParentEnv+"="+setupExecutable,
+	)
 }
 
 func runCanonicalInitializationWithEnv(root, dataRoot string, env []string) error {
@@ -2006,7 +2314,11 @@ func packagedTargetRuntimeEnv(input []string, root, dataRoot string) []string {
 }
 
 func startGateway(gatewayPath, dataRoot string) error {
-	output, err := runCapturedManagedServiceCommand(setupControlCommandTimeout, managedChildEnv(dataRoot), gatewayPath, "start")
+	return startGatewayWithEnv(gatewayPath, managedChildEnv(dataRoot))
+}
+
+func startGatewayWithEnv(gatewayPath string, env []string) error {
+	output, err := runCapturedManagedServiceCommand(setupControlCommandTimeout, env, gatewayPath, "start")
 	if err != nil {
 		return fmt.Errorf("start gateway: %w: %s", err, strings.TrimSpace(string(output)))
 	}
@@ -2014,7 +2326,11 @@ func startGateway(gatewayPath, dataRoot string) error {
 }
 
 func startWatchdog(gatewayPath, dataRoot string) error {
-	output, err := runCapturedManagedServiceCommand(setupControlCommandTimeout, managedChildEnv(dataRoot), gatewayPath, "watchdog", "start")
+	return startWatchdogWithEnv(gatewayPath, managedChildEnv(dataRoot))
+}
+
+func startWatchdogWithEnv(gatewayPath string, env []string) error {
+	output, err := runCapturedManagedServiceCommand(setupControlCommandTimeout, env, gatewayPath, "watchdog", "start")
 	if err != nil {
 		return fmt.Errorf("start watchdog: %w: %s", err, strings.TrimSpace(string(output)))
 	}
@@ -2070,15 +2386,19 @@ func stopOwnedServicesContext(ctx context.Context, gatewayPath, dataRoot string)
 }
 
 func startSelectedServices(gatewayPath, dataRoot string, wanted serviceState) (serviceState, error) {
+	return startSelectedServicesWithEnv(gatewayPath, dataRoot, wanted, managedChildEnv(dataRoot))
+}
+
+func startSelectedServicesWithEnv(gatewayPath, dataRoot string, wanted serviceState, env []string) (serviceState, error) {
 	started := serviceState{}
 	if wanted.Gateway {
-		if err := startGateway(gatewayPath, dataRoot); err != nil {
+		if err := startGatewayWithEnv(gatewayPath, env); err != nil {
 			return started, err
 		}
 		started.Gateway = true
 	}
 	if wanted.Watchdog {
-		if err := startWatchdog(gatewayPath, dataRoot); err != nil {
+		if err := startWatchdogWithEnv(gatewayPath, env); err != nil {
 			if started.Gateway {
 				_, _ = stopOwnedServices(gatewayPath, dataRoot)
 			}
@@ -2228,6 +2548,7 @@ func requiredPayloadFiles(manifest payloadManifest) []string {
 		manifest.GatewayArchive,
 		manifest.Wheel,
 		manifest.PythonEmbed,
+		manifest.VCRuntime,
 		manifest.YaraCompatWheel,
 		manifest.SitePackages,
 		manifest.Launcher,
@@ -2497,7 +2818,7 @@ func parseArgs(args []string) (options, error) {
 		return opts, errors.New("only per-user INSTALLSCOPE=user is supported by this installer")
 	}
 	if !validConnector(opts.Connector) {
-		return opts, fmt.Errorf("invalid CONNECTOR %q; expected codex, claudecode, amp, or none", opts.Connector)
+		return opts, fmt.Errorf("invalid CONNECTOR %q; expected amp, antigravity, codex, claudecode, copilot, cursor, hermes, omnigent, opencode, windsurf, or none", opts.Connector)
 	}
 	if opts.Mode != "observe" && opts.Mode != "action" {
 		return opts, fmt.Errorf("invalid MODE %q; expected observe or action", opts.Mode)
@@ -2544,13 +2865,25 @@ func normalizeConnector(value string) string {
 		return "claudecode"
 	case "amp", "ampcode":
 		return "amp"
+	case "copilot", "githubcopilot", "github-copilot":
+		return "copilot"
+	case "cursor", "cursoragent", "cursor-agent":
+		return "cursor"
+	case "windsurf":
+		return "windsurf"
+	case "antigravity", "agy":
+		return "antigravity"
+	case "opencode", "open-code":
+		return "opencode"
+	case "omnigent":
+		return "omnigent"
 	default:
 		return strings.ToLower(value)
 	}
 }
 
 func printUsage() {
-	fmt.Println("DefenseClawSetup-x64.exe [/quiet] [/norestart] [INSTALLSCOPE=user] [CONNECTOR=codex|claudecode|amp|none] [MODE=observe|action] [STARTGATEWAY=1] | /verify")
+	fmt.Println("DefenseClawSetup-x64.exe [/quiet] [/norestart] [INSTALLSCOPE=user] [CONNECTOR=amp|antigravity|codex|claudecode|copilot|cursor|hermes|omnigent|opencode|windsurf|none] [MODE=observe|action] [STARTGATEWAY=1] | /verify")
 	fmt.Println("Maintenance: DefenseClawSetup-x64.exe /repair | /upgrade | /uninstall [DELETEUSERDATA=1]")
 }
 
@@ -2627,7 +2960,7 @@ func managedChildEnv(dataRoot string) []string {
 		name, _, ok := strings.Cut(entry, "=")
 		if ok {
 			switch strings.ToUpper(name) {
-			case "DEFENSECLAW_HOME", "PYTHONIOENCODING", "PYTHONUTF8":
+			case "DEFENSECLAW_HOME", "PYTHONIOENCODING", "PYTHONUTF8", upgradeFreshProcessEnv:
 				continue
 			case "USERPROFILE":
 				if profile != "" {
@@ -2649,6 +2982,10 @@ func managedChildEnv(dataRoot string) []string {
 		filtered = append(filtered, "USERPROFILE="+profile)
 	}
 	return filtered
+}
+
+func managedRecoveryChildEnv(dataRoot string) []string {
+	return append(managedChildEnv(dataRoot), upgradeFreshProcessEnv+"=1")
 }
 
 func copyFile(source, target string) error {
