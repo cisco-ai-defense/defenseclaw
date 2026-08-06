@@ -257,6 +257,20 @@ def test_custom_profile_can_be_created_and_references_replaced_atomically() -> N
     assert "soc" not in removed["observability"].get("redaction_profiles", {})
 
 
+@pytest.mark.parametrize("name", ["", "   "])
+def test_custom_profile_requires_nonempty_name(name: str) -> None:
+    source = _apply(_source(), ())[1]
+
+    with pytest.raises(ValueError, match="custom profile name is required"):
+        profile_set_mutations(
+            source,
+            name,
+            extends="sensitive",
+            detectors=("pii",),
+            field_classes={},
+        )
+
+
 def test_referenced_custom_profile_requires_replacement() -> None:
     original = _source()
     source = _apply(original, ())[1]

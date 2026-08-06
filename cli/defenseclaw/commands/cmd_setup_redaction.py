@@ -37,6 +37,7 @@ from defenseclaw.observability.v8_config import (
 )
 from defenseclaw.observability.v8_redaction_policy import (
     ASSIGNABLE_BUILT_IN_PROFILES,
+    CUSTOM_PROFILE_BASES,
     apply_mutations_to_source,
     apply_profile_everywhere_mutations,
     bucket_mutations,
@@ -431,7 +432,7 @@ def profile_show_cmd(app: AppContext, name: str, emit_json: bool) -> None:
 
 @profile_group.command("set")
 @click.argument("name")
-@click.option("--extends", type=click.Choice(["sensitive", "content", "strict"]), default=None)
+@click.option("--extends", type=click.Choice(CUSTOM_PROFILE_BASES), default=None)
 @click.option("--detector", "detectors", multiple=True, type=click.Choice(DETECTOR_GROUPS))
 @click.option("--field", "fields", multiple=True, metavar="CLASS=MODE")
 @click.option("--yes", is_flag=True)
@@ -981,7 +982,7 @@ def _interactive_profiles(draft: _WizardDraft) -> None:
     current = _custom_profile(draft.source, name)
     extends = click.prompt(
         "Extends",
-        type=click.Choice(["sensitive", "content", "strict"]),
+        type=click.Choice(CUSTOM_PROFILE_BASES),
         default=str(current.get("extends") or "sensitive"),
     )
     detectors_default = ",".join(current.get("detectors") or DETECTOR_GROUPS)

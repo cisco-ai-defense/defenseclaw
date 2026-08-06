@@ -347,22 +347,31 @@ async def test_pipe_executor_streams_prompt_without_waiting_for_newline() -> Non
     executor = CommandExecutor(use_pty=False)
     output: list[str] = []
 
-    async for event in executor.run(
-        sys.executable,
-        (
-            "-u",
-            "-c",
+    async def interact() -> None:
+        async for event in executor.run(
+            sys.executable,
             (
-                "import sys; sys.stdout.write('Select: '); sys.stdout.flush(); "
-                "answer=sys.stdin.readline().strip(); print('picked ' + answer)"
+                "-u",
+                "-c",
+                (
+                    "import sys; sys.stdout.write('Select: '); sys.stdout.flush(); "
+                    "answer=sys.stdin.readline().strip(); print('picked ' + answer)"
+                ),
             ),
-        ),
-    ):
-        if event.kind != "output":
-            continue
-        output.append(event.text)
-        if "Select:" in event.text:
-            executor.write_stdin("2\n")
+        ):
+            if event.kind != "output":
+                continue
+            output.append(event.text)
+            if "Select:" in event.text:
+                executor.write_stdin("2\n")
+
+    interaction = asyncio.create_task(interact())
+    try:
+        await asyncio.wait_for(asyncio.shield(interaction), timeout=30)
+    except TimeoutError:
+        await executor.cancel()
+        await interaction
+        raise
 
     assert any("Select:" in text for text in output)
     assert any("picked 2" in text for text in output)

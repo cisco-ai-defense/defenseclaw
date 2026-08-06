@@ -211,6 +211,8 @@ def profile_set_mutations(
     detectors: Sequence[str] | None,
     field_classes: Mapping[str, str | None],
 ) -> tuple[V8YAMLMutation, ...]:
+    if not name.strip():
+        raise ValueError("custom profile name is required")
     if name in BUILT_IN_PROFILES:
         raise ValueError(f"built-in profile {name!r} cannot be edited")
     observability = _observability(source)

@@ -281,7 +281,7 @@ def test_mutate_v8_config_does_not_tighten_existing_backup_parent(tmp_path: Path
     path.write_text(_source())
     backup_parent = tmp_path / "operator-selected"
     backup_parent.mkdir(mode=0o755)
-    os.chmod(backup_parent, 0o755)
+    os.chmod(backup_parent, 0o755)  # noqa: S103 - test asserts this operator-selected mode
 
     mutate_v8_config(
         path,
@@ -300,7 +300,7 @@ def test_mutate_v8_config_rejects_backup_hard_linked_to_source(tmp_path: Path) -
     backup = tmp_path / "config.yaml.before-redaction"
     os.link(path, backup)
 
-    with pytest.raises(ValueError, match="must not alias config.yaml"):
+    with pytest.raises(ValueError, match=r"must not alias config\.yaml"):
         mutate_v8_config(
             path,
             [V8YAMLMutation.set(("observability", "local", "retention_days"), 30)],
@@ -309,6 +309,27 @@ def test_mutate_v8_config_rejects_backup_hard_linked_to_source(tmp_path: Path) -
         )
 
     assert path.read_text() == _source()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink semantics differ on Windows")
+def test_mutate_v8_config_reports_requested_path_through_symlinked_parent(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(_source())
+    actual_parent = tmp_path / "actual-backups"
+    actual_parent.mkdir()
+    requested_parent = tmp_path / "requested-backups"
+    requested_parent.symlink_to(actual_parent, target_is_directory=True)
+    requested_backup = requested_parent / "config.yaml.before-redaction"
+
+    result = mutate_v8_config(
+        path,
+        [V8YAMLMutation.set(("observability", "local", "retention_days"), 30)],
+        backup_path=requested_backup,
+        validator=lambda *_: None,
+    )
+
+    assert result.backup_path == str(requested_backup.absolute())
+    assert (actual_parent / requested_backup.name).read_text() == _source()
 
 
 @pytest.mark.skipif(os.name == "nt", reason="symlink semantics differ on Windows")

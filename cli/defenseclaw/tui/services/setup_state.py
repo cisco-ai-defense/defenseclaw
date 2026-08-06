@@ -55,10 +55,12 @@ class SetupCommandIntent:
     # environment rather than passed as ``--env KEY=secret`` on the command
     # line. Empty mapping means "no overrides".
     env_overrides: tuple[tuple[str, str], ...] = ()
-    # Explicit command risk used by the preview dispatcher. Most legacy setup
-    # intents keep the read-only default and are classified from argv by the
-    # preview screen; interactive redaction setup sets this to ``setup`` so the
-    # TUI switches to Activity before the child asks for input.
+    # Minimum command risk used by the preview dispatcher. This is a floor, not
+    # the effective risk: most setup intents keep the read-only default and the
+    # preview screen raises the classification from argv. Interactive redaction
+    # setup sets this to ``setup`` so the TUI switches to Activity before the
+    # child asks for input. Never read this field alone to decide whether a
+    # command needs confirmation.
     risk: SetupPreviewRisk = "read-only"
 
     @property

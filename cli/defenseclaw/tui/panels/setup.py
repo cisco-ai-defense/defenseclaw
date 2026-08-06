@@ -38,6 +38,9 @@ from defenseclaw.observability.v8_config import (
 from defenseclaw.observability.v8_config import (
     SEVERITIES as REDACTION_SEVERITIES,
 )
+from defenseclaw.observability.v8_redaction_policy import (
+    CUSTOM_PROFILE_BASES as REDACTION_CUSTOM_PROFILE_BASES,
+)
 from defenseclaw.observability.v8_status import V8OperatorStatus
 from defenseclaw.platform_support import (
     LOCAL_OBSERVABILITY_UNSUPPORTED_REASON,
@@ -2119,7 +2122,7 @@ def _redaction_wizard_fields_for(
             "--extends",
             value=overrides.get("--extends", "sensitive"),
             default="sensitive",
-            options=("sensitive", "content", "strict"),
+            options=REDACTION_CUSTOM_PROFILE_BASES,
             visible_when=_redaction_action_is("profile-set"),
         ),
         WizardFormField(
@@ -2648,7 +2651,7 @@ _DEPENDENT_FIELD_REBUILDERS: dict[SetupWizard, Any] = {
     SetupWizard.GUARDRAIL: lambda overrides, cfg: _guardrail_wizard_fields_for(overrides, cfg),
     SetupWizard.GUARDRAIL_ACTIONS: lambda overrides, cfg: _guardrail_actions_wizard_fields(overrides, cfg),
     SetupWizard.CUSTOM_PROVIDERS: lambda overrides, cfg: _custom_providers_fields_for(overrides),
-    SetupWizard.REDACTION: lambda overrides, cfg: _redaction_wizard_fields_for(overrides),
+    SetupWizard.REDACTION: lambda overrides, _cfg: _redaction_wizard_fields_for(overrides),
 }
 
 

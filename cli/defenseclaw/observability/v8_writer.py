@@ -201,7 +201,7 @@ def _write_private_backup(config_path: str, backup_path: str, source: bytes) -> 
     # particular, an operator-supplied home/shared directory is never chmod'ed
     # or assigned a new DACL as a side effect of requesting a backup.
     atomic_write_private_bytes(target, source, protect_parent=False)
-    return target
+    return requested_target
 
 
 def _candidate_snapshot(path: str) -> tuple[_CandidateIdentity, str]:
