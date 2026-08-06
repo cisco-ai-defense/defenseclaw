@@ -108,22 +108,33 @@ func TestMetricCircuitAuthenticationAndUnsafeFailuresOpenImmediately(t *testing.
 	start := time.Date(2026, time.July, 30, 16, 0, 0, 0, time.UTC)
 	metrics := testMetricData("defenseclaw.metric.circuit")
 	tests := []struct {
-		name      string
-		outcome   error
-		class     delivery.FailureClass
-		errorCode ErrorCode
-		prepare   func(*dialOutcomeTracker) func(uint64)
+		name         string
+		outcome      error
+		class        delivery.FailureClass
+		errorCode    ErrorCode
+		prepare      func(*dialOutcomeTracker) func(uint64)
+		minOpenFor   time.Duration
+		maxOpenFor   time.Duration
 	}{
 		{
+			// Authentication failures use a bounded few-minute cool-down --
+			// long enough to let the identity-service recover, short enough
+			// that a single failed token mint doesn't suppress the
+			// destination for a full day. The delivery package owns the
+			// exact constant; the test only asserts the bound band.
 			name: "authentication", outcome: status.Error(codes.Unauthenticated, "denied"),
 			class: delivery.FailureClassAuthentication, errorCode: ErrorExport,
+			minOpenFor: time.Minute, maxOpenFor: time.Hour,
 		},
 		{
+			// Unsafe-endpoint failures retain the 24-hour trap because a
+			// broken endpoint is not expected to self-heal within a session.
 			name: "unsafe-endpoint", outcome: errors.New("unsafe"),
 			class: delivery.FailureClassUnsafeEndpoint, errorCode: ErrorUnsafeEndpoint,
 			prepare: func(tracker *dialOutcomeTracker) func(uint64) {
 				return func(uint64) { tracker.record(netguard.ErrV8AddressProhibited) }
 			},
+			minOpenFor: 24 * time.Hour, maxOpenFor: 24 * time.Hour,
 		},
 	}
 	for _, test := range tests {
@@ -138,13 +149,14 @@ func TestMetricCircuitAuthenticationAndUnsafeFailuresOpenImmediately(t *testing.
 				t.Fatalf("first export error=%v", err)
 			}
 			snapshot := exporter.deliveryHealthSnapshot()
+			cooldown := snapshot.CircuitOpenUntil.Sub(start)
 			if snapshot.State != delivery.HealthFailing ||
 				snapshot.Reason != string(delivery.HealthReasonCircuitOpen) ||
 				snapshot.CircuitState != delivery.CircuitOpen ||
 				snapshot.ConsecutiveFailures != 1 ||
 				snapshot.LastFailureClass != test.class ||
-				!snapshot.CircuitOpenUntil.Equal(start.Add(24*time.Hour)) {
-				t.Fatalf("open metric circuit=%+v", snapshot)
+				cooldown < test.minOpenFor || cooldown > test.maxOpenFor {
+				t.Fatalf("open metric circuit=%+v cooldown=%s", snapshot, cooldown)
 			}
 			if counters := exporter.Counters(); counters.Accepted != 1 ||
 				counters.Failed != 1 || counters.RejectedOversize != 0 {

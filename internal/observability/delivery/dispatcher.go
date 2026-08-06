@@ -529,7 +529,7 @@ func (dispatcher *Dispatcher) recordCircuitFailure(class FailureClass, at time.T
 	dispatcher.circuitState = CircuitOpen
 	openDuration := dispatcher.config.Circuit.OpenDuration
 	if immediateFailure {
-		openDuration = immediateCircuitOpenDuration
+		openDuration = immediateCircuitOpenDurationFor(class)
 	}
 	dispatcher.circuitOpenUntil = at.UTC().Add(openDuration)
 	return true
