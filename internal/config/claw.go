@@ -418,6 +418,14 @@ func ReadMCPFromClaudeSettings(path string) ([]MCPServerEntry, error) {
 	return readMCPFromClaudeSettings(path)
 }
 
+// ReadMCPFromClaudeJSONProjects is the exported wrapper around the
+// per-project local-scope Claude Code MCP reader; input is a path to
+// ~/.claude.json, and the returned entries flatten every
+// projects.<path>.mcpServers subtree.
+func ReadMCPFromClaudeJSONProjects(path string) ([]MCPServerEntry, error) {
+	return readMCPFromClaudeJSONProjects(path)
+}
+
 // ReadMCPFromCodexConfigTOML is the exported wrapper around the
 // Codex `~/.codex/config.toml` reader for callers that need to
 // enumerate mcp_servers entries out of a TOML file.
@@ -803,9 +811,33 @@ func readMCPServersClaudeCode(workspaceDir string) ([]MCPServerEntry, error) {
 
 	var entries []MCPServerEntry
 
-	settingsPath := filepath.Join(connectorEnvHome("CLAUDE_CONFIG_DIR", ".claude"), "settings.json")
+	// user-scope: ~/.claude/settings.json — top-level mcpServers
+	claudeHome := connectorEnvHome("CLAUDE_CONFIG_DIR", ".claude")
+	settingsPath := filepath.Join(claudeHome, "settings.json")
 	if e, err := readMCPFromClaudeSettings(settingsPath); err == nil {
 		entries = append(entries, e...)
+	}
+
+	// user-scope: ~/.claude.json — top-level mcpServers (the Claude Code CLI's
+	// user-scope registry, distinct from settings.json; also holds per-project
+	// local-scope entries under projects.<path>.mcpServers). Location is the
+	// parent of the resolved CLAUDE_CONFIG_DIR (~/) unless the env var is set.
+	// Skip if CLAUDE_CONFIG_DIR is explicitly set (then only the settings dir
+	// is authoritative).
+	claudeJSONPath := ""
+	if _, hasEnv := os.LookupEnv("CLAUDE_CONFIG_DIR"); !hasEnv {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			claudeJSONPath = filepath.Join(home, ".claude.json")
+		}
+	}
+	if claudeJSONPath != "" {
+		if e, err := readMCPFromClaudeSettings(claudeJSONPath); err == nil {
+			entries = append(entries, e...)
+		}
+		// local-scope: projects.<path>.mcpServers
+		if e, err := readMCPFromClaudeJSONProjects(claudeJSONPath); err == nil {
+			entries = append(entries, e...)
+		}
 	}
 
 	if cwd != "" {
@@ -816,6 +848,45 @@ func readMCPServersClaudeCode(workspaceDir string) ([]MCPServerEntry, error) {
 	}
 
 	return dedupMCPEntries(entries), nil
+}
+
+// readMCPFromClaudeJSONProjects extracts per-project local-scope MCP servers
+// from the projects.<path>.mcpServers subtrees of ~/.claude.json. Each
+// project's servers ship as a single flat list — the parent-path prefix is
+// intentionally not appended so downstream de-dup by name works across scopes.
+func readMCPFromClaudeJSONProjects(path string) ([]MCPServerEntry, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var doc struct {
+		Projects map[string]struct {
+			MCPServers map[string]struct {
+				Command string            `json:"command"`
+				Args    []string          `json:"args"`
+				Env     map[string]string `json:"env"`
+				URL     string            `json:"url"`
+				Type    string            `json:"type"`
+			} `json:"mcpServers"`
+		} `json:"projects"`
+	}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, err
+	}
+	var entries []MCPServerEntry
+	for _, project := range doc.Projects {
+		for name, s := range project.MCPServers {
+			entries = append(entries, MCPServerEntry{
+				Name:      name,
+				Command:   s.Command,
+				Args:      s.Args,
+				Env:       s.Env,
+				URL:       s.URL,
+				Transport: s.Type,
+			})
+		}
+	}
+	return entries, nil
 }
 
 func readMCPServersCodex(workspaceDir string) ([]MCPServerEntry, error) {
@@ -1458,6 +1529,8 @@ func readMCPFromClaudeSettings(path string) ([]MCPServerEntry, error) {
 			Command string            `json:"command"`
 			Args    []string          `json:"args"`
 			Env     map[string]string `json:"env"`
+			URL     string            `json:"url"`
+			Type    string            `json:"type"`
 		} `json:"mcpServers"`
 	}
 	if err := json.Unmarshal(data, &settings); err != nil {
@@ -1467,10 +1540,12 @@ func readMCPFromClaudeSettings(path string) ([]MCPServerEntry, error) {
 	entries := make([]MCPServerEntry, 0, len(settings.MCPServers))
 	for name, s := range settings.MCPServers {
 		entries = append(entries, MCPServerEntry{
-			Name:    name,
-			Command: s.Command,
-			Args:    s.Args,
-			Env:     s.Env,
+			Name:      name,
+			Command:   s.Command,
+			Args:      s.Args,
+			Env:       s.Env,
+			URL:       s.URL,
+			Transport: s.Type,
 		})
 	}
 	return entries, nil
