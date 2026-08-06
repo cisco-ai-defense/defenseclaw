@@ -1271,7 +1271,16 @@ def _execute_mutations(
         message += f"; restore {rollback_path} to roll back"
         raise click.ClickException(message)
     if restart:
-        _restart_gateway(quiet=emit_json)
+        try:
+            _restart_gateway(quiet=emit_json)
+        except click.ClickException:
+            if audit_after_restart:
+                click.echo(
+                    "  ⚠ Change saved, but the canonical setup audit event was not recorded because the "
+                    "gateway restart failed. Start defenseclaw-gateway before the next change.",
+                    err=True,
+                )
+            raise
         if audit_after_restart and app.logger:
             try:
                 app.logger.log_action(

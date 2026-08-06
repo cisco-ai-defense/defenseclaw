@@ -472,6 +472,21 @@ def test_execute_mutations_allows_explicit_offline_staging_when_audit_runtime_is
     assert app.logger.log_action.call_count == 2
     assert mark_restart_handled.call_count == 2
 
+    restart_gateway = MagicMock(side_effect=click.ClickException("gateway restart failed"))
+    monkeypatch.setattr(cmd_setup_redaction, "_restart_gateway", restart_gateway)
+    restart_result = CliRunner().invoke(
+        redaction,
+        ["remove-all", "--yes", "--restart"],
+        obj=app,
+        catch_exceptions=False,
+    )
+    assert restart_result.exit_code == 1
+    assert "canonical setup audit event was not recorded because the gateway restart failed" in restart_result.output
+    assert "Error: gateway restart failed" in restart_result.output
+    assert app.logger.log_action.call_count == 3
+    assert mark_restart_handled.call_count == 3
+    restart_gateway.assert_called_once_with(quiet=False)
+
 
 def test_execute_mutations_names_backup_when_post_write_inspection_raises(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -400,7 +400,7 @@ async def test_pipe_executor_flushes_unterminated_fragment_on_controlled_timeout
     executor = _mock_pipe_executor(monkeypatch, (b"Select: ", b""))
     wait_calls = 0
 
-    async def controlled_wait_for(awaitable, *, timeout: float):
+    async def controlled_wait_for(awaitable, *, timeout: float) -> bytes:
         nonlocal wait_calls
         assert timeout > 0
         wait_calls += 1
