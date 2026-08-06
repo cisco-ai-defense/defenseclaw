@@ -2,6 +2,7 @@
   "title": "Policies",
   "pages": [
     "index",
+    "cel",
     "rulepack-validation",
     "creator",
     "verify-locally",
