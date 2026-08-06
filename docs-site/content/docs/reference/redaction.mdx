@@ -176,6 +176,20 @@ The exact marker and correlation token formats are generated protocol contracts;
 consumers should treat them as opaque strings and use the companion content-state
 fields when present.
 
+### Credential-bearing URL queries
+
+URL detectors normalize query-key case and bounded percent-encoding before
+classifying the associated value. Partially encoded keys such as `tok%65n` and
+`api%5Fkey` therefore receive the same protection as `token` and `api_key`.
+Duplicate parameters are handled independently, while safe parameters, paths,
+hosts, and fragments remain available for diagnostics.
+
+Malformed or excessively encoded query keys are never treated as proof that the
+value is safe. Diagnostic URL scrubbers replace the entire ambiguous query item
+with a redacted placeholder, or replace an unparseable URL with a safe placeholder.
+These transformations apply only to logs, telemetry, and audit projections; they
+do not rewrite an upstream request.
+
 ## Multiple destinations
 
 Redaction is resolved independently for each matching destination. It never mutates

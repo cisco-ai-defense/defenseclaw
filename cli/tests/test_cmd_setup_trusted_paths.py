@@ -168,6 +168,69 @@ class AddTrustedBinPrefixTests(unittest.TestCase):
             with open(target, encoding="utf-8") as fh:
                 self.assertEqual(fh.read(), "ORIGINAL=1\n")
 
+    def test_secret_writer_preserves_unrelated_bytes_order_and_crlf(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            dotenv = os.path.join(tmp, ".env")
+            original = (
+                b"# retain this comment\r\n"
+                b"FIRST = keep spacing  \r\n"
+                b"DEFENSECLAW_FIXTURE_SECRET=old\r\n"
+                b"LAST=unchanged\r\n"
+            )
+            with open(dotenv, "wb") as fh:
+                fh.write(original)
+
+            with patch.dict(os.environ, {}, clear=False):
+                cmd_setup._save_secret_to_dotenv(
+                    "DEFENSECLAW_FIXTURE_SECRET",
+                    "replacement",
+                    tmp,
+                )
+
+            with open(dotenv, "rb") as fh:
+                body = fh.read()
+            self.assertEqual(
+                body,
+                b"# retain this comment\r\n"
+                b"FIRST = keep spacing  \r\n"
+                b"DEFENSECLAW_FIXTURE_SECRET=replacement\r\n"
+                b"LAST=unchanged\r\n",
+            )
+
+    def test_secret_writer_refuses_symlink_target(self):
+        from defenseclaw.safety import SafetyError
+
+        with tempfile.TemporaryDirectory() as tmp:
+            target = os.path.join(tmp, "target")
+            dotenv = os.path.join(tmp, ".env")
+            with open(target, "wb") as fh:
+                fh.write(b"ORIGINAL=1\n")
+            try:
+                os.symlink(target, dotenv)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symlink unavailable: {exc}")
+
+            with self.assertRaises(SafetyError):
+                cmd_setup._save_secret_to_dotenv("DEFENSECLAW_FIXTURE_SECRET", "value", tmp)
+
+            with open(target, "rb") as fh:
+                self.assertEqual(fh.read(), b"ORIGINAL=1\n")
+
+    def test_secret_writer_rejects_invalid_key_without_modifying_dotenv(self):
+        from defenseclaw.safety import DotenvValueError
+
+        with tempfile.TemporaryDirectory() as tmp:
+            dotenv = os.path.join(tmp, ".env")
+            original = b"ORIGINAL=1\n"
+            with open(dotenv, "wb") as fh:
+                fh.write(original)
+
+            with self.assertRaises(DotenvValueError):
+                cmd_setup._save_secret_to_dotenv("BAD\nINJECTED", "value", tmp)
+
+            with open(dotenv, "rb") as fh:
+                self.assertEqual(fh.read(), original)
+
 
 class CaskroomDefaultTests(unittest.TestCase):
     @unittest.skipIf(os.name == "nt", "POSIX Homebrew default")

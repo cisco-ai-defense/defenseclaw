@@ -84,6 +84,7 @@ def _default_admission_policy() -> AdmissionPolicyData:
                     ".zeptoclaw/extensions/defenseclaw",
                     ".claude/extensions/defenseclaw",
                     ".codex/extensions/defenseclaw",
+                    ".config/amp/plugins/defenseclaw.ts",
                 ],
             ),
             ("skill", "codeguard"): (
@@ -696,6 +697,30 @@ _DEFENSECLAW_HOME_COMPONENTS = frozenset(
         ".codex",
     }
 )
+_AMP_HOME_PREFIX = (".config", "amp")
+
+
+def _matches_amp_user_home(
+    source_path: str,
+    constraint_parts: list[str],
+) -> bool:
+    """Match an Amp first-party marker only at the resolved user-home path."""
+
+    if tuple(constraint_parts[: len(_AMP_HOME_PREFIX)]) != _AMP_HOME_PREFIX:
+        return False
+    expanded_home = os.path.expanduser("~")
+    if expanded_home == "~":
+        return False
+    resolved_home = os.path.realpath(expanded_home)
+    resolved_source = os.path.realpath(os.path.expanduser(source_path))
+    expected_source = os.path.realpath(os.path.join(resolved_home, *constraint_parts))
+    try:
+        common_path = os.path.commonpath((resolved_home, resolved_source))
+    except ValueError:
+        return False
+    if os.path.normcase(common_path) != os.path.normcase(resolved_home):
+        return False
+    return os.path.normcase(resolved_source) == os.path.normcase(expected_source)
 
 
 def _matches_provenance(constraints: list[str], source_path: str) -> bool:
@@ -743,6 +768,12 @@ def _matches_provenance(constraints: list[str], source_path: str) -> bool:
             # directly above the matched run is one. Otherwise an attacker
             # parent (``/tmp/attacker/extensions/defenseclaw``) would match.
             if constraint_parts[0] in _DEFENSECLAW_HOME_COMPONENTS:
+                return True
+            # Amp's config home does not have a unique top-level component:
+            # trusting the suffix ``.config/amp`` would bless the same marker
+            # under an attacker path. Require its exact canonical location
+            # beneath the current user's resolved home.
+            if _matches_amp_user_home(source_path, constraint_parts):
                 return True
             if i > 0 and components[i - 1] in _DEFENSECLAW_HOME_COMPONENTS:
                 return True

@@ -1,0 +1,19 @@
+{
+  "hook_event_name": "tool.result",
+  "session_id": "dc-e2e-amp",
+  "thread_id": "dc-e2e-amp",
+  "turn_id": "dc-e2e-turn",
+  "message_id": "dc-e2e-turn",
+  "source_event_id": "tool.result:dc-e2e-amp:dc-e2e-amp-tool-allow:windows-contract:3",
+  "source_sequence": "3",
+  "agent_name": "amp",
+  "agent_type": "amp",
+  "tool_call_id": "dc-e2e-amp-tool-allow",
+  "tool_name": "shell",
+  "tool_input": {
+    "command": "echo dc-contract-allow"
+  },
+  "tool_response": "dc-contract-allow",
+  "status": "completed",
+  "error": ""
+}

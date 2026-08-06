@@ -121,6 +121,7 @@ import click
             "openhands",
             "antigravity",
             "opencode",
+            "amp",
             "omnigent",
         ],
         case_sensitive=False,

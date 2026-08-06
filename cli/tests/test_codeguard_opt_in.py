@@ -124,6 +124,35 @@ def test_codeguard_skill_install_is_idempotent(tmp_path, monkeypatch):
     assert second.startswith("already installed at ")
 
 
+def test_amp_codeguard_skill_uses_pinned_workspace_write_scope(tmp_path, monkeypatch):
+    fake_home = tmp_path / "home"
+    workspace = tmp_path / "repo"
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("USERPROFILE", str(fake_home))
+    cfg = _cfg("amp", tmp_path)
+    cfg.claw.workspace_dir = str(workspace)
+
+    message = install_codeguard_asset(cfg, connector="amp", target="skill")
+
+    target = workspace / ".agents" / "skills" / "codeguard"
+    assert message.startswith(f"installed to {target}")
+    assert target.is_dir()
+    assert not (fake_home / ".config" / "agents" / "skills" / "codeguard").exists()
+
+
+def test_amp_codeguard_skill_without_workspace_is_user_global(tmp_path, monkeypatch):
+    fake_home = tmp_path / "home"
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("USERPROFILE", str(fake_home))
+    cfg = _cfg("amp", tmp_path)
+
+    message = install_codeguard_asset(cfg, connector="amp", target="skill")
+
+    target = fake_home / ".config" / "agents" / "skills" / "codeguard"
+    assert message.startswith(f"installed to {target}")
+    assert target.is_dir()
+
+
 def test_codeguard_rule_install_conflict_requires_replace(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     cfg = _cfg("cursor", tmp_path)

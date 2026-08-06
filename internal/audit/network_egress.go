@@ -124,13 +124,19 @@ func (e *NetworkEgressEvent) effectiveSeverity() string {
 
 // toRow converts the event to the store's persisted shape.
 func (e *NetworkEgressEvent) toRow() NetworkEgressRow {
-	url := netguard.ScrubURLString(e.URL)
-	if strings.TrimSpace(e.URL) == "" {
+	rawURL := e.URL
+	url := netguard.ScrubURLString(rawURL)
+	if strings.TrimSpace(rawURL) == "" {
 		url = ""
 	}
 	if len(url) > 512 {
 		url = truncateUTF8(url, 512)
 	}
+	details := e.Details
+	if details != "" && strings.TrimSpace(rawURL) != "" && url != rawURL {
+		details = strings.ReplaceAll(details, rawURL, url)
+	}
+	details = netguard.ScrubURLsInText(details)
 	return NetworkEgressRow{
 		Timestamp:        e.Timestamp,
 		SessionID:        e.SessionID,
@@ -151,7 +157,7 @@ func (e *NetworkEgressEvent) toRow() NetworkEgressRow {
 		DecisionCode:     e.DecisionCode,
 		Blocked:          e.Blocked,
 		Severity:         e.effectiveSeverity(),
-		Details:          e.Details,
+		Details:          details,
 	}
 }
 

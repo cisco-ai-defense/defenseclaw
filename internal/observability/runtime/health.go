@@ -27,17 +27,21 @@ import (
 // is the exact sum of only non-nil source queues and remains nil for a
 // destination with no DefenseClaw-owned queue.
 type DestinationHealth struct {
-	Name        string
-	Kind        config.ObservabilityV8DestinationKind
-	Enabled     bool
-	Signals     []observability.Signal
-	State       delivery.HealthState
-	Reason      string
-	Queue       *delivery.QueueSnapshot
-	Counters    delivery.Counters
-	LastSuccess time.Time
-	LastFailure time.Time
-	Sources     []delivery.HealthSnapshot
+	Name                string
+	Kind                config.ObservabilityV8DestinationKind
+	Enabled             bool
+	Signals             []observability.Signal
+	State               delivery.HealthState
+	Reason              string
+	CircuitState        delivery.CircuitState
+	ConsecutiveFailures uint64
+	CircuitOpenUntil    time.Time
+	LastFailureClass    delivery.FailureClass
+	Queue               *delivery.QueueSnapshot
+	Counters            delivery.Counters
+	LastSuccess         time.Time
+	LastFailure         time.Time
+	Sources             []delivery.HealthSnapshot
 }
 
 // DestinationHealthSnapshot is pinned to exactly one active graph generation.
@@ -85,7 +89,7 @@ func (runtime *Runtime) DestinationHealthSnapshot(
 		signals := append([]observability.Signal(nil), destination.SelectedSignals...)
 		row := DestinationHealth{
 			Name: destination.Name, Kind: destination.Kind, Enabled: destination.Enabled,
-			Signals: signals,
+			Signals: signals, CircuitState: delivery.CircuitClosed,
 		}
 		if !destination.Enabled {
 			row.State = delivery.HealthDisabled
@@ -98,6 +102,7 @@ func (runtime *Runtime) DestinationHealthSnapshot(
 		byName[destination.Name] = len(rows)
 		rows = append(rows, row)
 	}
+	circuitFailureTimes := make([]time.Time, len(rows))
 
 	sources := make([]delivery.HealthSnapshot, 0, len(rows)*2)
 	if value, ok := lease.Component(DestinationDispatchComponentName); ok {
@@ -123,7 +128,9 @@ func (runtime *Runtime) DestinationHealthSnapshot(
 		index, exists := byName[source.Destination]
 		if !exists || source.Generation != graph.Generation() ||
 			!validDeliveryHealthState(source.State) ||
-			!validDeliveryHealthReason(source.Reason) {
+			!validDeliveryHealthReason(source.Reason) ||
+			!validCircuitState(source.CircuitState) ||
+			!validFailureClass(source.LastFailureClass) {
 			continue
 		}
 		row := &rows[index]
@@ -136,6 +143,10 @@ func (runtime *Runtime) DestinationHealthSnapshot(
 			continue
 		}
 		seen[identity] = struct{}{}
+		if source.CircuitState == "" {
+			source.CircuitState = delivery.CircuitClosed
+		}
+		source.CircuitOpenUntil = source.CircuitOpenUntil.UTC()
 		if source.Queue != nil {
 			if !validQueueSnapshot(*source.Queue) {
 				continue
@@ -149,6 +160,28 @@ func (runtime *Runtime) DestinationHealthSnapshot(
 		if healthStateRank(source.State) > healthStateRank(row.State) {
 			row.State = source.State
 			row.Reason = source.Reason
+		}
+		sourceCircuitRank := circuitStateRank(source.CircuitState)
+		rowCircuitRank := circuitStateRank(row.CircuitState)
+		if sourceCircuitRank > rowCircuitRank {
+			row.CircuitState = source.CircuitState
+			row.ConsecutiveFailures = source.ConsecutiveFailures
+			row.CircuitOpenUntil = source.CircuitOpenUntil
+			row.LastFailureClass = ""
+			circuitFailureTimes[index] = time.Time{}
+			rowCircuitRank = sourceCircuitRank
+		} else if sourceCircuitRank == rowCircuitRank {
+			if source.ConsecutiveFailures > row.ConsecutiveFailures {
+				row.ConsecutiveFailures = source.ConsecutiveFailures
+			}
+			if source.CircuitOpenUntil.After(row.CircuitOpenUntil) {
+				row.CircuitOpenUntil = source.CircuitOpenUntil
+			}
+		}
+		if sourceCircuitRank == rowCircuitRank && source.LastFailureClass != "" &&
+			(row.LastFailureClass == "" || source.LastFailure.After(circuitFailureTimes[index])) {
+			row.LastFailureClass = source.LastFailureClass
+			circuitFailureTimes[index] = source.LastFailure
 		}
 		if source.LastSuccess.After(row.LastSuccess) {
 			row.LastSuccess = source.LastSuccess.UTC()
@@ -169,9 +202,42 @@ func validDeliveryHealthReason(reason string) bool {
 		string(delivery.HealthReasonRetryable), string(delivery.HealthReasonPartial),
 		string(delivery.HealthReasonDeliveryFailed), string(delivery.HealthReasonRecovered),
 		string(delivery.HealthReasonIntakeStopped), string(delivery.HealthReasonClosed),
-		string(delivery.HealthReasonOriginLoop),
+		string(delivery.HealthReasonOriginLoop), string(delivery.HealthReasonCircuitOpen),
+		string(delivery.HealthReasonCircuitHalfOpen),
 		"listener_bound", "listener_failed", "scrape_failed", "scrape_recovered",
 		"server_failed", "drain_started":
+		return true
+	default:
+		return false
+	}
+}
+
+func validCircuitState(state delivery.CircuitState) bool {
+	switch state {
+	case "", delivery.CircuitClosed, delivery.CircuitOpen, delivery.CircuitHalfOpen:
+		return true
+	default:
+		return false
+	}
+}
+
+func circuitStateRank(state delivery.CircuitState) int {
+	switch state {
+	case delivery.CircuitOpen:
+		return 3
+	case delivery.CircuitHalfOpen:
+		return 2
+	case delivery.CircuitClosed:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func validFailureClass(class delivery.FailureClass) bool {
+	switch class {
+	case "", delivery.FailureClassTransient, delivery.FailureClassAuthentication,
+		delivery.FailureClassPermanentPayload, delivery.FailureClassUnsafeEndpoint:
 		return true
 	default:
 		return false

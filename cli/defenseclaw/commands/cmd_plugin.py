@@ -27,7 +27,7 @@ import os
 import re
 import shutil
 import subprocess
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import click
 
@@ -47,6 +47,9 @@ from defenseclaw.inventory.plugin_identity import (
     resolve_plugin_identity,
     validate_plugin_id,
 )
+
+if TYPE_CHECKING:
+    from defenseclaw.scanner.rulepack import RulePackOverlayCache
 
 
 def _api_bind_host(app: AppContext) -> str:
@@ -191,9 +194,6 @@ def scan(
     # ``scanners.plugin.llm:`` overrides) into the wrapper. The
     # wrapper layers per-call CLI flags on top before dispatching.
     scanner = PluginScannerWrapper(llm=app.cfg.resolve_llm("scanners.plugin"))
-    # R4: overlay the configured guardrail rule pack over the plugin source.
-    # No-op when no rule_pack_dir is set.
-    scanner = maybe_wrap(scanner, app.cfg)
 
     matches: list[tuple[str, str]] = []
     if _looks_like_explicit_path(name_or_path):
@@ -231,6 +231,7 @@ def scan(
         click.echo("  Provide a path, a DefenseClaw plugin name, or a connector plugin name.", err=True)
         raise SystemExit(1)
 
+    pack_cache: RulePackOverlayCache = {}
     for idx, (connector, scan_dir) in enumerate(matches):
         if len(matches) > 1 and not as_json:
             if idx:
@@ -238,7 +239,12 @@ def scan(
             click.echo(ux._style(f"── connector: {connector} ──", fg="cyan"))
         _scan_one_plugin_dir(
             app,
-            scanner,
+            maybe_wrap(
+                scanner,
+                app.cfg,
+                connector,
+                pack_cache=pack_cache,
+            ),
             scan_dir=scan_dir,
             connector=connector,
             as_json=as_json,
@@ -310,7 +316,10 @@ def _scan_one_plugin_dir(
         return
 
     try:
-        target_name, _manifest = canonical_plugin_id(scan_dir)
+        if connector == "amp" and os.path.isfile(scan_dir) and scan_dir.casefold().endswith(".ts"):
+            target_name = validate_plugin_id(os.path.basename(scan_dir)[:-3])
+        else:
+            target_name, _manifest = canonical_plugin_id(scan_dir)
     except PluginIdentityError as exc:
         raise click.ClickException(f"invalid plugin identity at {scan_dir}: {exc}") from exc
     if result.is_clean():
@@ -555,17 +564,23 @@ def _scan_all_plugins(
         lenient,
     )
     scanner = PluginScannerWrapper(llm=app.cfg.resolve_llm("scanners.plugin"))
-    scanner = maybe_wrap(scanner, app.cfg)
+    pack_cache: RulePackOverlayCache = {}
 
     json_groups: list[dict[str, Any]] = []
     for connector in connectors:
+        connector_scanner = maybe_wrap(
+            scanner,
+            app.cfg,
+            connector,
+            pack_cache=pack_cache,
+        )
         if len(connectors) > 1 and not as_json:
             click.echo(ux._style(f"\n── connector: {connector} ──", fg="cyan"))
 
         plugins = _merge_all_plugins(app.cfg.plugin_dir, connector, cfg=app.cfg)
-        # Resolve each plugin id to a directory on disk (managed dir or the
-        # connector's own dirs). Skip phantom (scan-history / enforcement-only)
-        # rows that have no files to scan.
+        # Resolve each plugin id to a scannable artifact on disk (managed dir,
+        # connector-owned dir, or Amp's documented direct ``*.ts`` file).
+        # Skip phantom (scan-history / enforcement-only) rows with no artifact.
         host_dirs = _host_plugin_dirs(app, connector)
         targets: list[tuple[str, str]] = []
         for p in plugins:
@@ -573,7 +588,13 @@ def _scan_all_plugins(
             if not pid:
                 continue
             scan_dir = str(p.get("host_path") or "")
-            if not os.path.isdir(scan_dir):
+            direct_amp_plugin = (
+                connector == "amp"
+                and os.path.isfile(scan_dir)
+                and scan_dir.casefold().endswith(".ts")
+                and not is_link_or_reparse(scan_dir)
+            )
+            if not os.path.isdir(scan_dir) and not direct_amp_plugin:
                 scan_dir = _resolve_plugin_dir(pid, app.cfg.plugin_dir, connector, host_dirs) or ""
             if scan_dir:
                 targets.append((pid, scan_dir))
@@ -597,7 +618,7 @@ def _scan_all_plugins(
         group_results: list[dict[str, Any]] = []
         for pid, scan_dir in targets:
             try:
-                result = scanner.scan(scan_dir, **scan_options)
+                result = connector_scanner.scan(scan_dir, **scan_options)
             except Exception as exc:  # noqa: BLE001 — surface, keep sweeping.
                 errored += 1
                 if not as_json:
@@ -838,13 +859,19 @@ def install(app: AppContext, name_or_path: str, force: bool, take_action: bool, 
                 )
 
         scanner = PluginScannerWrapper(llm=app.cfg.resolve_llm("scanners.plugin"))
-        scanner = maybe_wrap(scanner, app.cfg)
+        pack_cache: RulePackOverlayCache = {}
         scan_results: dict[str, Any] = {}
         try:
             for connector, _install_root in targets:
                 if pre_decisions[connector].verdict != "allowed":
                     plugin_path = installed_by_connector[connector]
-                    scan_results[connector] = scanner.scan(plugin_path)
+                    connector_scanner = maybe_wrap(
+                        scanner,
+                        app.cfg,
+                        connector,
+                        pack_cache=pack_cache,
+                    )
+                    scan_results[connector] = connector_scanner.scan(plugin_path)
         except Exception as exc:
             transaction.rollback()
             click.echo(f"error: scan failed for connector={connector}: {exc}", err=True)
@@ -1811,11 +1838,11 @@ def _resolve_plugin_dir(
     connector: str = "",
     search_dirs: list[str] | None = None,
 ) -> str | None:
-    """Resolve a plugin name or path to a directory on disk.
+    """Resolve a plugin name or path to a scannable artifact on disk.
 
     Resolution order:
-      1. Literal path (already a directory) — only when the input
-         clearly looks like a path (absolute, or contains a path
+      1. Literal path (a directory or direct Amp ``.ts`` plugin) — only
+         when the input clearly looks like a path (absolute, or contains a path
          separator). A bare token like ``my-plugin`` is intentionally
          NOT treated as a relative path here, even if a directory of
          that name happens to exist in the current working directory:
@@ -1832,7 +1859,15 @@ def _resolve_plugin_dir(
          mirrors ``info()`` so list/scan/info agree across peers.
       4. Connector plugin by name (openclaw CLI or filesystem)
     """
-    if _looks_like_explicit_path(name_or_path) and os.path.isdir(name_or_path):
+    if _looks_like_explicit_path(name_or_path) and (
+        os.path.isdir(name_or_path)
+        or (
+            connector == "amp"
+            and os.path.isfile(name_or_path)
+            and name_or_path.casefold().endswith(".ts")
+            and not is_link_or_reparse(name_or_path)
+        )
+    ):
         return name_or_path
     if _looks_like_explicit_path(name_or_path):
         return None

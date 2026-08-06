@@ -137,9 +137,11 @@ type Event struct {
 	Enforced    bool   `json:"enforced,omitempty"`
 	RulePackDir string `json:"rule_pack_dir,omitempty"`
 
-	// Structured carries sanitized machine-readable data for sink fanout.
-	// It is intentionally not persisted in SQLite audit_events; callers that
-	// need durable structured records should use their native table/log path.
+	// Structured carries sanitized machine-readable data for sink fanout
+	// AND is persisted verbatim in the SQLite audit_events.structured_json
+	// column (see migration 14). Downstream queries — the Alerts counter
+	// via connector-hook severity, the alert-acknowledgement projection —
+	// key off this durable column.
 	Structured map[string]any `json:"structured,omitempty"`
 
 	// RedactionEnabled carries the cloud-controlled per-inspection
@@ -202,8 +204,9 @@ type ActionEntry struct {
 }
 
 type Store struct {
-	db     *sql.DB
-	dbPath string
+	db          *sql.DB
+	dbPath      string
+	dbPathGuard *preparedAuditDatabasePath
 
 	// lifecycleMu serializes initialization/close and lets mandatory v8
 	// event-history transactions pin a ready store until commit or rollback.
@@ -326,11 +329,11 @@ func openSQLite(dbPath string) (*sql.DB, error) {
 }
 
 func NewStore(dbPath string) (*Store, error) {
-	db, identity, err := openHardenedAuditSQLiteWithIdentity(dbPath, auditDBPathHooks{})
+	db, identity, pathGuard, err := openHardenedAuditSQLiteWithIdentity(dbPath, auditDBPathHooks{})
 	if err != nil {
 		return nil, err
 	}
-	return &Store{db: db, dbPath: identity}, nil
+	return &Store{db: db, dbPath: identity, dbPathGuard: pathGuard}, nil
 }
 
 // sqliteCoded is the structural interface implemented by the
@@ -1714,6 +1717,14 @@ var migrations = []migration{
 		description: "runtime assets: add durable connector session provenance state",
 		apply:       migrateRuntimeAssetState,
 	},
+	{
+		description: "guardrails: add bounded durable tool-call chain state",
+		apply:       migrateToolChainState,
+	},
+	{
+		description: "guardrails: add pending tool-call predecessor lifecycle",
+		apply:       migrateToolChainPendingState,
+	},
 }
 
 // tableExists reports whether the given SQLite table is present.
@@ -1821,6 +1832,13 @@ func (s *Store) Init() error {
 		"correlation_pending_operations",
 		"correlation_receipts",
 		"correlation_identity_claims",
+		"guardrail_chain_partitions",
+		"guardrail_chain_events",
+		"guardrail_chain_deny_receipts",
+		"guardrail_chain_pending_actions",
+		"guardrail_chain_pending_boundaries",
+		"guardrail_chain_terminal_resets",
+		"guardrail_chain_cutoff_barriers",
 	} {
 		present, err := tableExists(s.db, table)
 		if err != nil {
@@ -1836,7 +1854,7 @@ func (s *Store) Init() error {
 	if err := s.proveDurableWrite(context.Background()); err != nil {
 		return err
 	}
-	if err := revalidateHardenedAuditSQLite(s.dbPath, auditDBPathHooks{}); err != nil {
+	if err := revalidateHardenedAuditSQLite(s.dbPathGuard); err != nil {
 		return fmt.Errorf("audit: revalidate database paths after initialization: %w", err)
 	}
 
@@ -2034,6 +2052,14 @@ var knownTables = map[string]bool{
 	"correlation_pending_operations":    true,
 	"correlation_receipts":              true,
 	"correlation_identity_claims":       true,
+	// Bounded, content-free state for the six fixed tool-call chains.
+	"guardrail_chain_partitions":         true,
+	"guardrail_chain_events":             true,
+	"guardrail_chain_deny_receipts":      true,
+	"guardrail_chain_pending_actions":    true,
+	"guardrail_chain_pending_boundaries": true,
+	"guardrail_chain_terminal_resets":    true,
+	"guardrail_chain_cutoff_barriers":    true,
 	// Connector/session selection and load provenance (WIN-AUD-070/071).
 	"runtime_asset_state": true,
 }
@@ -3611,7 +3637,22 @@ func (s *Store) GetCounts() (Counts, error) {
 		{`SELECT COUNT(*) FROM actions WHERE target_type = 'skill' AND json_extract(actions_json, '$.install') = 'allow'`, &c.AllowedSkills},
 		{`SELECT COUNT(*) FROM actions WHERE target_type = 'mcp' AND json_extract(actions_json, '$.install') = 'block'`, &c.BlockedMCPs},
 		{`SELECT COUNT(*) FROM actions WHERE target_type = 'mcp' AND json_extract(actions_json, '$.install') = 'allow'`, &c.AllowedMCPs},
-		{`SELECT COUNT(*) FROM audit_events WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW')`, &c.Alerts},
+		// Alerts feeds the IPC GetStatsSnapshot ActiveAlerts field. The
+		// severity column is the primary source, but connector-hook rows
+		// are hardcoded to INFO on the column (see
+		// gateway.logConnectorHookAuditEnvelope — a deliberate
+		// noise-reduction choice because every tool call produces a row).
+		// The real verdict severity for those rows lives on the
+		// structured_json envelope, so we OR in a JSON-extract branch
+		// scoped to action='connector-hook' to pick up enforced blocks /
+		// high-severity findings that would otherwise be invisible on the
+		// IPC stat (the managed_enterprise deployment mode's sole
+		// enforcement path is hooks, which is where this used to pin at 0).
+		// The two branches are disjoint by column value, so no double-count.
+		{`SELECT COUNT(*) FROM audit_events
+			 WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW')
+			    OR (action = 'connector-hook'
+			        AND json_extract(structured_json, '$.severity') IN ('CRITICAL','HIGH','MEDIUM','LOW'))`, &c.Alerts},
 		{`SELECT COUNT(*) FROM scan_results`, &c.TotalScans},
 		{`SELECT COUNT(*) FROM network_egress_events WHERE blocked = 1`, &c.BlockedEgressCalls},
 	}
@@ -3804,6 +3845,7 @@ func (s *Store) InsertNetworkEgressEvent(e NetworkEgressRow) error {
 			e.Details = strings.ReplaceAll(e.Details, rawURL, e.URL)
 		}
 	}
+	e.Details = netguard.ScrubURLsInText(e.Details)
 	if e.ID == "" {
 		e.ID = uuid.New().String()
 	}
@@ -3998,7 +4040,10 @@ func (s *Store) Close() error {
 	// transactions to release the lifecycle read lock.
 	s.ready.Store(false)
 	s.closed = true
-	return s.db.Close()
+	err := s.db.Close()
+	s.dbPathGuard.close()
+	s.dbPathGuard = nil
+	return err
 }
 
 // currentRunID resolves the per-process run id used to stamp audit

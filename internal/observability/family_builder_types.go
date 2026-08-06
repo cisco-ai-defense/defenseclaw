@@ -225,24 +225,25 @@ type familyStructuredLimits struct {
 }
 
 type familyFieldConstraints struct {
-	maxUTF8Bytes int
-	minItems     int
-	maxItems     int
-	pattern      string
-	enum         []string
-	hasIntMin    bool
-	intMin       int64
-	hasIntMax    bool
-	intMax       int64
-	hasUintMin   bool
-	uintMin      uint64
-	hasUintMax   bool
-	uintMax      uint64
-	hasFloatMin  bool
-	floatMin     float64
-	hasFloatMax  bool
-	floatMax     float64
-	structured   familyStructuredLimits
+	maxUTF8Bytes     int
+	maxItemUTF8Bytes int
+	minItems         int
+	maxItems         int
+	pattern          string
+	enum             []string
+	hasIntMin        bool
+	intMin           int64
+	hasIntMax        bool
+	intMax           int64
+	hasUintMin       bool
+	uintMin          uint64
+	hasUintMax       bool
+	uintMax          uint64
+	hasFloatMin      bool
+	floatMin         float64
+	hasFloatMax      bool
+	floatMax         float64
+	structured       familyStructuredLimits
 }
 
 type familyFieldDescriptor struct {

@@ -245,6 +245,15 @@ func TestConnectionStringEverySchemeAndForm(t *testing.T) {
 	for _, key := range queryKeys {
 		assertDetectorExact(t, "credentials.connection_string", "POSTGRES://example.test/db?"+key+"=reserved%2Dquery", "reserved%2Dquery")
 	}
+	assertDetectorExact(t, "credentials.connection_string",
+		"postgres://example.test/db?%25252574oken=reserved-query", "%25252574oken=reserved-query")
+	assertDetectorExact(t, "credentials.connection_string",
+		"postgres://example.test/db?token%3Dreserved-query", "token%3Dreserved-query")
+	assertDetectorExact(t, "credentials.connection_string",
+		"postgres://example.test/db?token%3Dreserved-query=x", "token%3Dreserved-query=x")
+	assertDetectorAbsent(t, "credentials.connection_string", "postgres://example.test/%zz?token")
+	assertDetectorAbsent(t, "credentials.connection_string", "postgres://example.test/%zz?%74oken")
+	assertDetectorAbsent(t, "credentials.connection_string", "postgres://example.test/%zz?token=")
 	keys := []string{"password", "passwd", "pwd", "pass", "secret", "client_secret", "api_key", "apikey", "access_token", "refresh_token", "token", "signature", "credential"}
 	for _, key := range keys {
 		assertDetectorExact(t, "credentials.connection_string", "host=example.test;"+key+`="reserved\nvalue"`, `reserved\nvalue`)
@@ -339,6 +348,38 @@ func TestURLQueryEveryKeyEncodedOffsetsAndMalformedInput(t *testing.T) {
 	repeated := "https://example.test/?token=first&safe=ok;token=second#fragment"
 	assertDetectorExact(t, "secrets.url_query", repeated, "first")
 	assertDetectorExact(t, "secrets.url_query", repeated, "second")
+	for _, encodedKey := range []string{
+		"tok%65n", "%74oken", "api%5Fkey", "x-amz%2Dsignature",
+		"%2574oken",
+	} {
+		uri := "https://example.test/path?safe=ok&" + encodedKey + "=reserved%2Dvalue"
+		assertDetectorExact(t, "secrets.url_query", uri, "reserved%2Dvalue")
+	}
+	assertDetectorExact(t, "secrets.url_query",
+		"https://example.test/path?token%3Dreserved-value", "token%3Dreserved-value")
+	assertDetectorExact(t, "secrets.url_query",
+		"https://example.test/path?token%3Dreserved-value=x", "token%3Dreserved-value=x")
+	assertDetectorExact(t, "secrets.url_query",
+		"https://example.test/path?token%3Dreserved-value%26safe%3Dok", "token%3Dreserved-value%26safe%3Dok")
+	assertDetectorAbsent(t, "secrets.url_query", "https://example.test/path?token")
+	assertDetectorAbsent(t, "secrets.url_query", "https://example.test/path?%74oken")
+	assertDetectorAbsent(t, "secrets.url_query", "https://example.test/%zz?token")
+	assertDetectorAbsent(t, "secrets.url_query", "https://example.test/%zz?%74oken")
+	assertDetectorAbsent(t, "secrets.url_query", "https://example.test/%zz?token=")
+	assertDetectorExact(t, "secrets.url_query",
+		"https://example.test/path?safe%C2%80=reserved-value", "safe%C2%80=reserved-value")
+	invalidUTF8Key := "https://example.test/path?safe" + string([]byte{0xff}) + "=reserved-value"
+	if _, err := recognize("secrets.url_query", invalidUTF8Key, observability.FieldClassContent, nil); err == nil {
+		t.Fatal("invalid UTF-8 query key did not fail closed")
+	}
+	for _, uri := range []string{
+		"https://example.test/path?token=%FF",
+		"https://example.test/path?token=%C0%80",
+	} {
+		if _, err := recognize("secrets.url_query", uri, observability.FieldClassContent, nil); !IsDetectorError(err, FailureValidator) {
+			t.Fatalf("invalid UTF-8 sensitive query value %q did not fail closed: %v", uri, err)
+		}
+	}
 	for _, value := range []string{
 		"https://example.test/?safe=value",
 		"https://example.test/?token=",
@@ -355,6 +396,13 @@ func TestURLQueryEveryKeyEncodedOffsetsAndMalformedInput(t *testing.T) {
 		if err != nil || acceptedCandidates("secrets.url_query", value, candidates) != 0 {
 			t.Fatalf("unexpected query match for %q: %+v, %v", value, candidates, err)
 		}
+	}
+	for _, key := range []string{
+		"auth", "authorization", "client_token", "id_token",
+		"routing_key", "webhook_token", "x-amz-credential", "x-amz-security-token",
+	} {
+		assertDetectorAbsent(t, "secrets.url_query",
+			"https://example.test/path?"+key+"=reserved-value")
 	}
 }
 

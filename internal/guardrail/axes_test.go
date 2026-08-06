@@ -29,6 +29,7 @@ func TestAxesForRuleID_KnownMappings(t *testing.T) {
 		{"CRED-AWS-FILE", []DataAxis{AxisSensitiveAccess}},
 		{"C2-WEBHOOK-SITE", []DataAxis{AxisEgressExternal}},
 		{"INJ-IGNORE-ALL", []DataAxis{AxisIngressUntrusted}},
+		{"OBFUSC-UNICODE-ZWSP", []DataAxis{AxisIngressUntrusted}},
 		{"SEC-SLACK-WEBHOOK", []DataAxis{AxisSensitiveAccess, AxisEgressExternal}},
 		{"SSRF-AWS-META", []DataAxis{AxisSensitiveAccess, AxisEgressExternal}},
 	}
@@ -99,9 +100,21 @@ func TestAxesForRuleID_CoversRealScannerRules(t *testing.T) {
 		"JUDGE-EXFIL-CHANNEL":  {AxisEgressExternal},
 		"JUDGE-INJ-INSTRUCT":   {AxisIngressUntrusted},
 		"JUDGE-TOOL-INJ-EXFIL": {AxisSensitiveAccess, AxisEgressExternal},
+		"OBFUSC-UNICODE-ZWSP":  {AxisIngressUntrusted},
 		// Command rules that open an egress channel
 		"CMD-CURL-UPLOAD": {AxisEgressExternal},
-		"CMD-ENV-DUMP":    {AxisSensitiveAccess},
+		"CMD-ENV-DUMP":    {AxisSensitiveAccess, AxisEgressExternal},
+		// Structured semantic tool-call rules
+		"secrets.cloud_credential_read":         {AxisSensitiveAccess},
+		"secrets.browser_session_store_read":    {AxisSensitiveAccess},
+		"secrets.cloud_secret_manager_read":     {AxisSensitiveAccess},
+		"secrets.workload_identity_token_read":  {AxisSensitiveAccess},
+		"exfil.secret_read_and_egress_oneliner": {AxisSensitiveAccess, AxisEgressExternal},
+		"exec.reverse_tunnel":                   {AxisEgressExternal},
+		"exec.agent_runtime_bypass_flags":       nil,
+		"recon.network_sweep":                   {AxisEgressExternal},
+		"source.git_remote_tamper":              nil,
+		"chain.secret_read_then_egress":         {AxisSensitiveAccess, AxisEgressExternal},
 		// Cloud metadata C2 endpoints (dual axis)
 		"C2-METADATA-AWS": {AxisSensitiveAccess, AxisEgressExternal},
 		// SRC-* network members
@@ -166,13 +179,32 @@ func TestCapabilityForRuleID_ProducerCoverage(t *testing.T) {
 		"SRC-EVAL":          CapExecShell,
 		// Network fetch
 		"CMD-CURL-UPLOAD": CapNetworkFetch,
+		"CMD-ENV-DUMP":    CapNetworkFetch,
 		"SRC-FETCH":       CapNetworkFetch,
 		// Filesystem write
 		"SRC-FS-WRITE": CapWriteFS,
+		// Structured semantic tool-call rules
+		"secrets.cloud_credential_read":         CapReadFS,
+		"secrets.browser_session_store_read":    CapReadFS,
+		"secrets.cloud_secret_manager_read":     CapReadFS,
+		"secrets.workload_identity_token_read":  CapReadFS,
+		"exfil.secret_read_and_egress_oneliner": CapNetworkFetch,
+		"exec.reverse_tunnel":                   CapNetworkFetch,
+		"exec.agent_runtime_bypass_flags":       CapExecShell,
+		"integrity.history_tamper":              CapExecShell,
+		"recon.network_sweep":                   CapNetworkFetch,
+		"privilege.host_namespace_entry":        CapExecShell,
+		"lateral.workload_exec":                 CapExecShell,
+		"impact.mass_process_termination":       CapExecShell,
+		"tamper.detector_state_write":           CapWriteFS,
+		"persistence.shell_profile_write":       CapWriteFS,
+		"persistence.privileged_account_change": CapExecShell,
 		// No capability for a bare secret / injection finding
-		"SEC-AWS-KEY":    CapUnknown,
-		"INJ-IGNORE-ALL": CapUnknown,
-		"COG-SOUL":       CapUnknown,
+		"SEC-AWS-KEY":              CapUnknown,
+		"INJ-IGNORE-ALL":           CapUnknown,
+		"source.git_config_exec":   CapUnknown,
+		"source.git_remote_tamper": CapUnknown,
+		"COG-SOUL":                 CapUnknown,
 	}
 	for ruleID, want := range cases {
 		if got := CapabilityForRuleID(ruleID); got != want {

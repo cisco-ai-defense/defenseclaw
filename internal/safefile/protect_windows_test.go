@@ -124,11 +124,84 @@ func TestPrivateSecurityDescriptorRejectsForeignOwner(t *testing.T) {
 	}
 }
 
-func ownWindowsTestPath(t *testing.T, path string) {
-	t.Helper()
+func TestProtectFileWindowsDoesNotRequireWriteOwner(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "owner-no-write-owner.json")
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil || user == nil || user.User.Sid == nil {
 		t.Fatalf("current token user: %v", err)
+	}
+	descriptor, err := windows.SecurityDescriptorFromString(
+		"O:" + user.User.Sid.String() +
+			"D:P(A;;GRGWRCWD;;;" + user.User.Sid.String() + ")(A;;GA;;;SY)",
+	)
+	if err != nil {
+		t.Fatalf("private test descriptor: %v", err)
+	}
+	attributes := windows.SecurityAttributes{
+		Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
+		SecurityDescriptor: descriptor,
+	}
+	pathPtr, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := windows.CreateFile(
+		pathPtr,
+		windows.GENERIC_READ|windows.GENERIC_WRITE,
+		windows.FILE_SHARE_READ,
+		&attributes,
+		windows.CREATE_NEW,
+		windows.FILE_ATTRIBUTE_NORMAL,
+		0,
+	)
+	if err != nil {
+		t.Fatalf("create current-user-owned test file: %v", err)
+	}
+	if err := windows.CloseHandle(handle); err != nil {
+		t.Fatalf("close current-user-owned test file: %v", err)
+	}
+	if mask := windowsAllowMaskForSID(t, path, user.User.Sid); mask&windows.WRITE_OWNER != 0 {
+		t.Fatalf("test precondition failed: owner ACE grants WRITE_OWNER (mask 0x%x)", uint32(mask))
+	}
+
+	if err := ProtectFile(path); err != nil {
+		t.Fatalf("ProtectFile should not require WRITE_OWNER for an already-owned file: %v", err)
+	}
+	owner, err := windowsPathOwner(path)
+	if err != nil {
+		t.Fatalf("inspect protected owner: %v", err)
+	}
+	if owner == nil || !owner.Equals(user.User.Sid) {
+		t.Fatalf("ProtectFile changed owner: got %v, want %s", owner, user.User.Sid)
+	}
+	safe, err := privateDACLIsSafe(path)
+	if err != nil {
+		t.Fatalf("inspect protected DACL: %v", err)
+	}
+	if !safe {
+		t.Fatal("ProtectFile did not install a protected current-user/SYSTEM DACL")
+	}
+}
+
+func ownWindowsTestPath(t *testing.T, path string) {
+	t.Helper()
+	owned, err := windowsPathOwnedByCurrentUser(path)
+	if err != nil {
+		t.Fatalf("inspect test path owner %s: %v", path, err)
+	}
+	if owned {
+		return
+	}
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil || user == nil || user.User.Sid == nil {
+		t.Fatalf("current token user: %v", err)
+	}
+	owner, err := windowsPathOwner(path)
+	if err != nil {
+		t.Fatalf("inspect test path owner %s: %v", path, err)
+	}
+	if owner != nil && owner.Equals(user.User.Sid) {
+		return
 	}
 	if err := windows.SetNamedSecurityInfo(
 		path,
@@ -140,6 +213,92 @@ func ownWindowsTestPath(t *testing.T, path string) {
 		nil,
 	); err != nil {
 		t.Fatalf("own test path %s: %v", path, err)
+	}
+}
+
+func TestSetPrivateDACLWindowsCurrentOwnerDoesNotRequireWriteOwner(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "modify-owned.json")
+	if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ownWindowsTestPath(t, path)
+
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil || user == nil || user.User.Sid == nil {
+		t.Fatalf("current token user: %v", err)
+	}
+	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	modifyWithoutOwner := windows.ACCESS_MASK(
+		windows.GENERIC_READ |
+			windows.GENERIC_WRITE |
+			windows.GENERIC_EXECUTE |
+			windows.DELETE,
+	)
+	acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{
+		windowsAccessEntry(user.User.Sid, modifyWithoutOwner),
+		windowsAccessEntry(system, windows.GENERIC_ALL),
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil,
+		nil,
+		acl,
+		nil,
+	); err != nil {
+		t.Fatalf("install Modify-only owner fixture: %v", err)
+	}
+	if mask := windowsAllowMaskForSID(t, path, user.User.Sid); mask&windows.WRITE_OWNER != 0 {
+		t.Fatalf("fixture unexpectedly grants WRITE_OWNER: 0x%x", uint32(mask))
+	}
+
+	if err := setPrivateDACL(path, false); err != nil {
+		t.Fatalf("protect current-user-owned file without WRITE_OWNER: %v", err)
+	}
+	safe, err := privateDACLIsSafe(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !safe {
+		t.Fatal("setPrivateDACL did not produce current-user-owned private protection")
+	}
+}
+
+func TestSetWindowsOwnerIfDifferentSkipsMatchingOwner(t *testing.T) {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil || user == nil || user.User.Sid == nil {
+		t.Fatalf("current token user: %v", err)
+	}
+	calls := 0
+	err = setWindowsOwnerIfDifferent(
+		"unused",
+		user.User.Sid,
+		user.User.Sid,
+		func(
+			_ string,
+			_ windows.SE_OBJECT_TYPE,
+			_ windows.SECURITY_INFORMATION,
+			_ *windows.SID,
+			_ *windows.SID,
+			_ *windows.ACL,
+			_ *windows.ACL,
+		) error {
+			calls++
+			return windows.ERROR_ACCESS_DENIED
+		},
+	)
+	if err != nil {
+		t.Fatalf("matching owner unexpectedly invoked setter: %v", err)
+	}
+	if calls != 0 {
+		t.Fatalf("matching owner invoked setter %d times, want 0", calls)
 	}
 }
 

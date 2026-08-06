@@ -34,6 +34,7 @@ from defenseclaw.tui.services.ai_discovery_state import AIUsageSignal, AIUsageSn
 
 NoticeLevel = Literal["info", "warn", "error"]
 STALENESS_WINDOW = timedelta(minutes=15)
+DOCTOR_CLOCK_SKEW_TOLERANCE = timedelta(minutes=5)
 MAX_AI_DISCOVERY_OVERVIEW_ROWS = 8
 
 
@@ -187,6 +188,20 @@ class DoctorCheck:
 
 
 @dataclass(frozen=True)
+class DoctorRepairSummary:
+    """Schema-v2 repair counts kept separate from health-check counts."""
+
+    planned: int = 0
+    applied: int = 0
+    failed: int = 0
+    blocked: int = 0
+    manual: int = 0
+    noop: int = 0
+    declined: int = 0
+    requires_confirmation: int = 0
+
+
+@dataclass(frozen=True)
 class DoctorCache:
     captured_at: datetime | None = None
     passed: int = 0
@@ -194,6 +209,13 @@ class DoctorCache:
     warned: int = 0
     skipped: int = 0
     checks: tuple[DoctorCheck, ...] = ()
+    schema_version: int = 1
+    mode: str = ""
+    outcome: str = ""
+    exit_code: int = 0
+    repair_summary: DoctorRepairSummary = field(default_factory=DoctorRepairSummary)
+    repair_states: tuple[str, ...] = ()
+    cache_valid: bool = True
 
     def is_empty(self) -> bool:
         return (
@@ -203,6 +225,10 @@ class DoctorCache:
             and self.warned == 0
             and self.skipped == 0
             and not self.checks
+            and not self.outcome
+            and self.exit_code == 0
+            and not self.repair_summary_parts()
+            and self.cache_valid
         )
 
     def age(self, *, now: datetime | None = None) -> timedelta:
@@ -214,7 +240,8 @@ class DoctorCache:
     def is_stale(self, *, now: datetime | None = None) -> bool:
         if self.captured_at is None:
             return True
-        return self.age(now=now) > STALENESS_WINDOW
+        age = self.age(now=now)
+        return age < -DOCTOR_CLOCK_SKEW_TOLERANCE or age > STALENESS_WINDOW
 
     def top_failures(self, limit: int) -> tuple[DoctorCheck, ...]:
         if limit <= 0:
@@ -249,6 +276,92 @@ class DoctorCache:
         if self.skipped:
             parts.append(f"{self.skipped} skip")
         return ", ".join(parts) if parts else "no data"
+
+    def repair_count(self, state: str) -> int:
+        """Return a defensive count from both summary and detail records."""
+
+        attribute = {
+            "applicable": "planned",
+            "applied": "applied",
+            "failed": "failed",
+            "blocked": "blocked",
+            "manual": "manual",
+            "noop": "noop",
+            "declined": "declined",
+            "requires_confirmation": "requires_confirmation",
+        }.get(state)
+        if attribute is None:
+            return 0
+        summary_count = getattr(self.repair_summary, attribute)
+        detail_count = sum(1 for repair_state in self.repair_states if repair_state == state)
+        return max(summary_count, detail_count)
+
+    def repair_summary_parts(self) -> tuple[str, ...]:
+        parts: list[str] = []
+        for state, label in (
+            ("applied", "applied"),
+            ("failed", "failed"),
+            ("blocked", "blocked"),
+            ("manual", "manual"),
+            ("requires_confirmation", "awaiting approval"),
+            ("declined", "declined"),
+            ("applicable", "planned"),
+            ("noop", "no-op"),
+        ):
+            count = self.repair_count(state)
+            if count:
+                parts.append(f"{count} {label}")
+        return tuple(parts)
+
+    def outcome_state(self, *, now: datetime | None = None) -> str:
+        """Return the fail-closed overall state without folding it into health."""
+
+        check_states = {check.status.strip().lower() for check in self.checks}
+        if (
+            self.exit_code != 0
+            or self.failed
+            or "fail" in check_states
+            or self.repair_count("failed")
+            or self.repair_count("blocked")
+        ):
+            return "failed"
+
+        outcome = self.outcome.strip().lower()
+        if outcome == "failed":
+            return "failed"
+        known_repair_states = {
+            "applicable",
+            "applied",
+            "failed",
+            "blocked",
+            "manual",
+            "noop",
+            "declined",
+            "requires_confirmation",
+        }
+        if (
+            not self.cache_valid
+            or self.age(now=now) < -DOCTOR_CLOCK_SKEW_TOLERANCE
+            or any(state not in known_repair_states for state in self.repair_states)
+            or any(state not in {"pass", "fail", "warn", "skip"} for state in check_states)
+        ):
+            return "warning"
+        if (
+            outcome == "warning"
+            or self.warned
+            or "warn" in check_states
+            or any(self.repair_count(state) for state in ("applicable", "manual", "requires_confirmation", "declined"))
+        ):
+            return "warning"
+        if outcome == "healthy":
+            # A future cache schema must be understood explicitly before it
+            # can restore the green state.
+            return "healthy" if self.schema_version in {1, 2} else "warning"
+        if self.schema_version >= 2:
+            # Schema v2 requires an explicit aggregate outcome. Missing or
+            # unknown values are not proof that the run succeeded.
+            return "warning"
+        return ""
 
 
 @dataclass(frozen=True)
@@ -320,6 +433,8 @@ class RenderedDoctorCheck:
 class DoctorBoxState:
     empty: bool
     summary_parts: tuple[str, ...] = ()
+    repair_summary_parts: tuple[str, ...] = ()
+    run_outcome: str = ""
     age_label: str = ""
     stale: bool = False
     recovered: bool = False
@@ -552,6 +667,37 @@ class OverviewPanelModel:
             elif self.doctor.is_stale(now=now):
                 notices.append(OverviewNotice("info", "Doctor cache is stale - press [d] on Overview to re-probe"))
 
+            repair_failed = self.doctor.repair_count("failed")
+            repair_blocked = self.doctor.repair_count("blocked")
+            if repair_failed or repair_blocked:
+                parts = []
+                if repair_failed:
+                    parts.append(f"{repair_failed} failed")
+                if repair_blocked:
+                    parts.append(f"{repair_blocked} blocked")
+                notices.append(
+                    OverviewNotice(
+                        "error",
+                        f"Doctor repairs need attention ({', '.join(parts)}) - "
+                        "see the DOCTOR panel or rerun the selected repair",
+                    )
+                )
+            elif self.doctor.outcome_state(now=now) == "failed" and effective_failed == 0:
+                notices.append(
+                    OverviewNotice(
+                        "error",
+                        "The last Doctor run ended with a failed outcome - "
+                        "see the DOCTOR panel or rerun: defenseclaw doctor",
+                    )
+                )
+            elif self.doctor.outcome_state(now=now) == "warning" and self.doctor.warned == 0:
+                notices.append(
+                    OverviewNotice(
+                        "warn",
+                        "The last Doctor run needs operator attention - see the DOCTOR panel",
+                    )
+                )
+
             missing = self.doctor.missing_required_credentials()
             if missing:
                 preview = missing[:2]
@@ -646,25 +792,30 @@ class OverviewPanelModel:
             detail = f"{check.detail} (live state OK)" if stale and check.detail else check.detail
             rendered.append(RenderedDoctorCheck(badge=badge, label=check.label, detail=detail, stale=stale))
 
+        outcome = self.doctor.outcome_state(now=now)
         return DoctorBoxState(
             empty=False,
             summary_parts=tuple(parts),
+            repair_summary_parts=self.doctor.repair_summary_parts(),
+            run_outcome=outcome,
             age_label=format_age(self.doctor.age(now=now)),
             stale=self.doctor.is_stale(now=now),
             recovered=stale_count > 0,
             checks=tuple(rendered),
-            all_green=not rendered,
+            all_green=not rendered and outcome in {"", "healthy"},
         )
 
     def keys_status(self) -> KeysStatus:
         if self.doctor is None or self.doctor.is_empty():
             return KeysStatus(False)
         missing = self.doctor.missing_required_credentials()
-        if not missing:
-            return KeysStatus(True, label="all required set")
-        preview = missing[:2]
-        label = f"{len(missing)} missing: {', '.join(preview)}{keys_overflow_suffix(len(missing), len(preview))}"
-        return KeysStatus(True, missing=missing, label=label)
+        if missing:
+            preview = missing[:2]
+            label = f"{len(missing)} missing: {', '.join(preview)}{keys_overflow_suffix(len(missing), len(preview))}"
+            return KeysStatus(True, missing=missing, label=label)
+        if not self.doctor.cache_valid:
+            return KeysStatus(False)
+        return KeysStatus(True, label="all required set")
 
     def ai_discovery_box(self, *, now: datetime | None = None) -> OverviewAIDiscoveryBoxState:
         now = now or datetime.now(timezone.utc)
@@ -704,9 +855,7 @@ class OverviewPanelModel:
                 summary_parts=tuple(parts),
             )
 
-        rows = unique_ai_discovery_signals_for_overview(
-            sort_ai_discovery_signals_for_overview(agent_signals)
-        )
+        rows = unique_ai_discovery_signals_for_overview(sort_ai_discovery_signals_for_overview(agent_signals))
         overflow = max(len(rows) - MAX_AI_DISCOVERY_OVERVIEW_ROWS, 0)
         rendered = tuple(
             OverviewAIDiscoveryRow(
@@ -1026,11 +1175,7 @@ class OverviewPanelModel:
         if self.observability_status is None:
             return "canonical destination plan loading"
         rows = self._v8_observability_destination_rows()
-        labels = [
-            f"{row.name} ({row.state})"
-            for row in rows
-            if row.policy_state == "enabled"
-        ]
+        labels = [f"{row.name} ({row.state})" for row in rows if row.policy_state == "enabled"]
         count = len(labels)
         suffix = f": {', '.join(labels)}" if labels else ""
         return f"{count} destination{'s' if count != 1 else ''}{suffix}"
@@ -1039,7 +1184,6 @@ class OverviewPanelModel:
         """Return the canonical v8 destination inventory."""
 
         return self._v8_observability_destination_rows()
-
 
     def _v8_observability_destination_rows(self) -> tuple[ObservabilityDestinationRow, ...]:
         """Merge canonical v8 policy with only positively observed live health."""
@@ -1206,7 +1350,7 @@ def zero_connector_requests_notice(connector_name: str, uptime: timedelta) -> st
                 f"{name} connector has seen 0 policy events after {formatted} - "
                 "normal until OmniGent emits a supported policy callback; verify OmniGent policy setup if this persists"
             )
-        case "hermes" | "cursor" | "windsurf" | "geminicli" | "copilot" | "openhands" | "antigravity" | "opencode":
+        case "hermes" | "cursor" | "windsurf" | "geminicli" | "copilot" | "openhands" | "antigravity" | "opencode" | "amp":
             return (
                 f"{name} connector has seen 0 hook events after {formatted} - "
                 "normal until the agent emits a supported hook; verify connector hook setup if this persists"
@@ -1244,6 +1388,8 @@ def friendly_connector_name(connector: str) -> str:
             return "Antigravity"
         case "opencode":
             return "OpenCode"
+        case "amp":
+            return "Amp"
         case "omnigent":
             return "OmniGent"
         case value:
@@ -1275,6 +1421,13 @@ def connector_source_label(connector: str, category: str) -> str:
             "~/.gemini/antigravity-cli/skills/*.md (discovery-only)",
         ),
         ("opencode", "skills"): ("unsupported/hooks-only surface",),
+        ("amp", "skills"): (
+            "~/.config/agents/skills",
+            "~/.agents/skills",
+            "~/.config/amp/skills",
+            "<workspace>/.agents/skills",
+            "~/.claude/plugins/cache/.../skills (unless Claude-compatible skills are disabled)",
+        ),
         ("omnigent", "skills"): ("unsupported by the OmniGent connector",),
         ("openclaw", "mcps"): ("openclaw config get mcp.servers", "openclaw.json (mcp.servers)"),
         ("claudecode", "mcps"): (f"{claude_config} (mcpServers)", "./.mcp.json"),
@@ -1292,6 +1445,11 @@ def connector_source_label(connector: str, category: str) -> str:
             "<plugin>/mcp_config.json (discovery-only)",
         ),
         ("opencode", "mcps"): ("~/.config/opencode/opencode.json (mcp)", "./opencode.json (mcp)"),
+        ("amp", "mcps"): (
+            "~/.config/amp/settings.json or settings.jsonc (amp.mcpServers; read-only)",
+            "<workspace>/.amp/settings.json or settings.jsonc (amp.mcpServers; read-only)",
+            "<skill>/mcp.json",
+        ),
         ("omnigent", "mcps"): ("managed by OmniGent; not modified by DefenseClaw",),
         ("openclaw", "plugins"): ("~/.openclaw/extensions",),
         ("claudecode", "plugins"): (os.path.join(claude_root, "plugins"),),
@@ -1312,6 +1470,10 @@ def connector_source_label(connector: str, category: str) -> str:
             "<workspace>/.agents/plugins/<plugin>/ (read/write)",
         ),
         ("opencode", "plugins"): ("~/.config/opencode/plugins/defenseclaw.js (DefenseClaw bridge)",),
+        ("amp", "plugins"): (
+            "~/.config/amp/plugins/defenseclaw.ts (DefenseClaw policy plugin)",
+            "<workspace>/.amp/plugins",
+        ),
         ("omnigent", "plugins"): ("unsupported by the OmniGent connector",),
         ("openclaw", "config"): ("~/.openclaw/openclaw.json",),
         ("claudecode", "config"): (claude_config,),
@@ -1325,6 +1487,11 @@ def connector_source_label(connector: str, category: str) -> str:
         ("openhands", "config"): ("~/.openhands/hooks.json",),
         ("antigravity", "config"): ("~/.gemini/config/hooks.json",),
         ("opencode", "config"): ("~/.config/opencode/plugins/defenseclaw.js",),
+        ("amp", "config"): (
+            "~/.config/amp/plugins/defenseclaw.ts",
+            "~/.config/amp/settings.json or settings.jsonc",
+            "<workspace>/.amp/settings.json or settings.jsonc",
+        ),
         ("omnigent", "config"): ("$OMNIGENT_CONFIG_HOME/config.yaml or ~/.omnigent/config.yaml",),
     }
     return ", ".join(sources.get((connector, category), ()))
@@ -1514,6 +1681,7 @@ __all__ = [
     "DoctorBoxState",
     "DoctorCache",
     "DoctorCheck",
+    "DoctorRepairSummary",
     "EnforcementCounts",
     "HealthSnapshot",
     "KeysStatus",

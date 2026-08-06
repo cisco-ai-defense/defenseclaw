@@ -69,6 +69,16 @@
       "live": false,
       "notes": "contract-only (Layer A); headless auth is Google Sign-In/keyring OAuth, no API key"
     },
+    "amp": {
+      "version_probe": "amp --version",
+      "live": "pending-validation",
+      "os": {
+        "linux": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
+        "macos": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
+        "windows": { "last_validated_version": "", "last_validated_at": "", "run_url": "" }
+      },
+      "notes": "plugin contract validated against Amp 0.0.1785334225; live policy-cell certification pending"
+    },
     "omnigent": {
       "version_probe": "omnigent --version",
       "live": false,

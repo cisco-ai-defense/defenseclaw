@@ -23,19 +23,32 @@ import (
 
 const encodedEnvelopeAllowance = 65_536
 
-// ExportCounters are content-free, monotonic per-signal counters.
+// ExportCounters are content-free, monotonic per-signal counters. Fields count
+// records except CircuitRejectedBatches, which deliberately counts exporter
+// batch attempts because open-circuit admission runs before inspecting content.
+//
+// CircuitRejectedRecords is the record-level companion to that batch counter.
+// An open circuit returns success to the SDK so a rejected route cannot drive
+// an unbounded global-error-handler loop, which means the batch counter alone
+// leaves silent data loss unquantified: "12 batches rejected" could be twelve
+// records or twelve million. The record count is derived from cheap O(1)
+// length and count reads only, and never triggers the adapter or
+// size-estimation work that admission exists to avoid.
 type ExportCounters struct {
-	Accepted         uint64
-	Exported         uint64
-	Retried          uint64
-	RejectedPartial  uint64
-	RejectedOversize uint64
-	Failed           uint64
-	DroppedQueueFull uint64
+	Accepted               uint64
+	Exported               uint64
+	Retried                uint64
+	RejectedPartial        uint64
+	RejectedOversize       uint64
+	Failed                 uint64
+	DroppedQueueFull       uint64
+	CircuitRejectedBatches uint64
+	CircuitRejectedRecords uint64
 }
 
 type mutableCounters struct {
-	accepted, exported, retried, rejectedPartial, rejectedOversize, failed, droppedQueueFull atomic.Uint64
+	accepted, exported, retried, rejectedPartial, rejectedOversize, failed,
+	droppedQueueFull, circuitRejectedBatches, circuitRejectedRecords atomic.Uint64
 }
 
 func (c *mutableCounters) snapshot() ExportCounters {
@@ -47,7 +60,9 @@ func (c *mutableCounters) snapshot() ExportCounters {
 		Retried:          c.retried.Load(),
 		RejectedPartial:  c.rejectedPartial.Load(),
 		RejectedOversize: c.rejectedOversize.Load(), Failed: c.failed.Load(),
-		DroppedQueueFull: c.droppedQueueFull.Load(),
+		DroppedQueueFull:       c.droppedQueueFull.Load(),
+		CircuitRejectedBatches: c.circuitRejectedBatches.Load(),
+		CircuitRejectedRecords: c.circuitRejectedRecords.Load(),
 	}
 }
 

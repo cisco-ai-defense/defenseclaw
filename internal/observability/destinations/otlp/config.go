@@ -373,7 +373,7 @@ func newHTTPClient(config signalConfig) (*http.Client, *http.Transport) {
 		ExpectContinueTimeout: time.Second,
 		TLSClientConfig:       cloneTLS(config.tls),
 	}
-	clientTransport := observedRoundTripper{inner: transport}
+	clientTransport := observedRoundTripper{inner: transport, tracker: config.tracker}
 	return &http.Client{Transport: clientTransport, Timeout: config.timeout, CheckRedirect: netguard.BlockV8Redirects}, transport
 }
 

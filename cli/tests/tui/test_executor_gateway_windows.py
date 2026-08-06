@@ -32,6 +32,7 @@ from ctypes import wintypes
 from pathlib import Path
 
 import pytest
+from defenseclaw.bootstrap import BootstrapReport, _seed_guardrail_profiles
 from defenseclaw.tui.executor import CommandEvent, CommandExecutor
 
 pytestmark = [
@@ -143,6 +144,12 @@ async def test_tui_gateway_and_watchdog_survive_parent_exit_and_restart(
 
     data_dir = tmp_path / "home"
     data_dir.mkdir()
+    seed_report = BootstrapReport()
+    _seed_guardrail_profiles(str(data_dir / "policies"), seed_report)
+    assert not seed_report.errors
+    assert "default" in (
+        seed_report.guardrail_profiles_seeded + seed_report.guardrail_profiles_preserved
+    )
     port = _reserve_port()
     (data_dir / "config.yaml").write_text(
         f"""config_version: 8

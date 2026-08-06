@@ -2,199 +2,329 @@
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-//
 // SPDX-License-Identifier: Apache-2.0
 
 package guardrail
 
 import (
+	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
-// countingLoader returns a loader that hands back a fresh *RulePack per call
-// and records how many times each directory was actually loaded. Pointer
-// identity lets tests distinguish a cache hit (same pointer) from a reload
-// (new pointer).
-func countingLoader() (func(string) *RulePack, *sync.Map) {
+func countingRulePackLoader() (func(string) (*RulePack, error), *sync.Map) {
 	counts := &sync.Map{}
-	loader := func(dir string) *RulePack {
-		v, _ := counts.LoadOrStore(dir, new(int64))
-		atomic.AddInt64(v.(*int64), 1)
-		return &RulePack{JudgeConfigs: make(map[string]*JudgeYAML)}
+	loader := func(dir string) (*RulePack, error) {
+		value, _ := counts.LoadOrStore(dir, new(int64))
+		atomic.AddInt64(value.(*int64), 1)
+		return &RulePack{JudgeConfigs: make(map[string]*JudgeYAML)}, nil
 	}
 	return loader, counts
 }
 
-func loadCount(t *testing.T, counts *sync.Map, dir string) int64 {
-	t.Helper()
-	v, ok := counts.Load(dir)
+func rulePackLoadCount(counts *sync.Map, dir string) int64 {
+	value, ok := counts.Load(dir)
 	if !ok {
 		return 0
 	}
-	return atomic.LoadInt64(v.(*int64))
+	return atomic.LoadInt64(value.(*int64))
 }
 
-func TestRulePackCache_DeDupesSameDir(t *testing.T) {
-	loader, counts := countingLoader()
-	c := newRulePackCacheWithLoader(loader)
+func mustCacheLoad(t *testing.T, cache *RulePackCache, dir string) *RulePack {
+	t.Helper()
+	pack, err := cache.Load(dir)
+	if err != nil {
+		t.Fatalf("cache.Load(%q): %v", dir, err)
+	}
+	if pack == nil {
+		t.Fatalf("cache.Load(%q) returned nil without error", dir)
+	}
+	return pack
+}
 
-	first := c.Load("/policies/strict")
-	for i := 0; i < 10; i++ {
-		got := c.Load("/policies/strict")
-		if got != first {
-			t.Fatalf("call %d returned a different *RulePack; cache did not de-dup", i)
+func TestRulePackCacheCachesSuccessByNormalizedDirectory(t *testing.T) {
+	loader, counts := countingRulePackLoader()
+	cache := newRulePackCacheWithLoader(loader)
+
+	first := mustCacheLoad(t, cache, "/policies/strict")
+	for _, equivalent := range []string{
+		"/policies/strict",
+		"/policies/strict/",
+		"/policies/./strict",
+	} {
+		if got := mustCacheLoad(t, cache, equivalent); got != first {
+			t.Fatalf("%q returned a different cached pointer", equivalent)
 		}
 	}
-	if n := loadCount(t, counts, "/policies/strict"); n != 1 {
-		t.Errorf("loader called %d times for one dir, want 1", n)
-	}
-}
-
-func TestRulePackCache_DistinctDirsLoadSeparately(t *testing.T) {
-	loader, counts := countingLoader()
-	c := newRulePackCacheWithLoader(loader)
-
-	a := c.Load("/policies/strict")
-	b := c.Load("/policies/permissive")
-	if a == b {
-		t.Fatal("distinct dirs returned the same *RulePack")
-	}
-	if n := loadCount(t, counts, "/policies/strict"); n != 1 {
-		t.Errorf("strict loaded %d times, want 1", n)
-	}
-	if n := loadCount(t, counts, "/policies/permissive"); n != 1 {
-		t.Errorf("permissive loaded %d times, want 1", n)
-	}
-}
-
-func TestRulePackCache_NormalizesEquivalentPaths(t *testing.T) {
-	loader, counts := countingLoader()
-	c := newRulePackCacheWithLoader(loader)
-
-	clean := c.Load("/policies/strict")
-	trailing := c.Load("/policies/strict/")
-	dotted := c.Load("/policies/./strict")
-	if clean != trailing || clean != dotted {
-		t.Fatal("equivalent path spellings returned different *RulePack instances")
-	}
-	// The loader is invoked with the first spelling seen; the cache key is
-	// normalized so only one load happens regardless of spelling.
-	total := loadCount(t, counts, "/policies/strict") +
-		loadCount(t, counts, "/policies/strict/") +
-		loadCount(t, counts, "/policies/./strict")
+	total := rulePackLoadCount(counts, "/policies/strict") +
+		rulePackLoadCount(counts, "/policies/strict/") +
+		rulePackLoadCount(counts, "/policies/./strict")
 	if total != 1 {
-		t.Errorf("equivalent spellings triggered %d loads, want 1", total)
+		t.Fatalf("equivalent paths triggered %d loads, want 1", total)
+	}
+
+	second := mustCacheLoad(t, cache, "/policies/permissive")
+	if second == first {
+		t.Fatal("distinct directories returned one cached pointer")
+	}
+	if got := rulePackLoadCount(counts, "/policies/permissive"); got != 1 {
+		t.Fatalf("permissive loads = %d, want 1", got)
 	}
 }
 
-func TestRulePackCache_EmptyDirKey(t *testing.T) {
-	loader, counts := countingLoader()
-	c := newRulePackCacheWithLoader(loader)
-
-	first := c.Load("")
-	second := c.Load("")
+func TestRulePackCacheEmptyDirectoryUsesEmbeddedDefaults(t *testing.T) {
+	cache := NewRulePackCache()
+	first := mustCacheLoad(t, cache, "")
+	second := mustCacheLoad(t, cache, "")
 	if first != second {
-		t.Fatal("empty-dir key did not de-dup")
+		t.Fatal("embedded defaults were not cached")
 	}
-	if n := loadCount(t, counts, ""); n != 1 {
-		t.Errorf("empty dir loaded %d times, want 1", n)
+	if first.ExfilJudge() == nil || first.Suppressions == nil || first.SensitiveTools == nil {
+		t.Fatal("cached embedded defaults are incomplete")
 	}
 }
 
-func TestRulePackCache_Concurrent_SameDir(t *testing.T) {
-	var loads int64
-	loader := func(dir string) *RulePack {
-		atomic.AddInt64(&loads, 1)
-		// Widen the race window so a broken double-check would load twice.
-		time.Sleep(2 * time.Millisecond)
-		return &RulePack{JudgeConfigs: make(map[string]*JudgeYAML)}
+func TestRulePackCacheDoesNotCacheFailuresAndLoadsRepair(t *testing.T) {
+	var calls atomic.Int64
+	repaired := atomic.Bool{}
+	expected := &RulePack{JudgeConfigs: make(map[string]*JudgeYAML)}
+	loader := func(string) (*RulePack, error) {
+		calls.Add(1)
+		if !repaired.Load() {
+			return nil, &RulePackError{Path: "rules/custom.yaml", Code: "yaml_invalid", Reason: "invalid YAML"}
+		}
+		return expected, nil
 	}
-	c := newRulePackCacheWithLoader(loader)
+	cache := newRulePackCacheWithLoader(loader)
+
+	if pack, err := cache.Load("/pack"); err == nil || pack != nil {
+		t.Fatalf("failed load = (%v, %v), want (nil, error)", pack, err)
+	}
+	repaired.Store(true)
+	if got := mustCacheLoad(t, cache, "/pack"); got != expected {
+		t.Fatal("repaired pack was not loaded")
+	}
+	if got := mustCacheLoad(t, cache, "/pack"); got != expected {
+		t.Fatal("successful repair was not cached")
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("loader calls = %d, want failed attempt + repair", got)
+	}
+}
+
+func TestRulePackCacheConcurrentSameDirectorySharesSuccess(t *testing.T) {
+	var calls atomic.Int64
+	expected := &RulePack{JudgeConfigs: make(map[string]*JudgeYAML)}
+	loader := func(string) (*RulePack, error) {
+		calls.Add(1)
+		time.Sleep(5 * time.Millisecond)
+		return expected, nil
+	}
+	cache := newRulePackCacheWithLoader(loader)
 
 	const goroutines = 64
-	var wg sync.WaitGroup
 	results := make([]*RulePack, goroutines)
-	wg.Add(goroutines)
-	for i := 0; i < goroutines; i++ {
-		go func(idx int) {
-			defer wg.Done()
-			results[idx] = c.Load("/policies/strict")
-		}(i)
+	errs := make([]error, goroutines)
+	var wait sync.WaitGroup
+	wait.Add(goroutines)
+	for index := 0; index < goroutines; index++ {
+		go func(index int) {
+			defer wait.Done()
+			results[index], errs[index] = cache.Load("/pack")
+		}(index)
 	}
-	wg.Wait()
-
-	if got := atomic.LoadInt64(&loads); got != 1 {
-		t.Fatalf("concurrent loads of one dir triggered %d loads, want 1", got)
+	wait.Wait()
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("concurrent success triggered %d loads, want 1", got)
 	}
-	for i := 1; i < goroutines; i++ {
-		if results[i] != results[0] {
-			t.Fatalf("goroutine %d got a different *RulePack than goroutine 0", i)
+	for index := range results {
+		if errs[index] != nil || results[index] != expected {
+			t.Fatalf("result %d = (%p, %v), want (%p, nil)", index, results[index], errs[index], expected)
 		}
 	}
 }
 
-func TestRulePackCache_Concurrent_DistinctDirs(t *testing.T) {
-	loader, counts := countingLoader()
-	c := newRulePackCacheWithLoader(loader)
+func TestRulePackCacheConcurrentSameDirectorySharesAttemptButNotFailureCache(t *testing.T) {
+	var calls atomic.Int64
+	start := make(chan struct{})
+	release := make(chan struct{})
+	loadErr := errors.New("temporary load failure")
+	loader := func(string) (*RulePack, error) {
+		if calls.Add(1) == 1 {
+			close(start)
+		}
+		<-release
+		return nil, loadErr
+	}
+	cache := newRulePackCacheWithLoader(loader)
 
-	const dirs = 8
-	const perDir = 16
-	var wg sync.WaitGroup
-	wg.Add(dirs * perDir)
-	for d := 0; d < dirs; d++ {
-		dir := fmt.Sprintf("/policies/p%d", d)
-		for r := 0; r < perDir; r++ {
-			go func(dir string) {
-				defer wg.Done()
-				c.Load(dir)
-			}(dir)
+	const goroutines = 32
+	errs := make([]error, goroutines)
+	var wait sync.WaitGroup
+	wait.Add(goroutines)
+	go func() {
+		defer wait.Done()
+		_, errs[0] = cache.Load("/pack")
+	}()
+	<-start
+
+	for index := 1; index < goroutines; index++ {
+		go func(index int) {
+			defer wait.Done()
+			_, errs[index] = cache.Load("/pack")
+		}(index)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		cache.mu.Lock()
+		pending := cache.inflight[normalizeRulePackDir("/pack")]
+		followers := 0
+		if pending != nil {
+			followers = pending.followers
+		}
+		cache.mu.Unlock()
+		if followers == goroutines-1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("only %d/%d callers joined the in-flight attempt", followers, goroutines-1)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	close(release)
+	wait.Wait()
+	if got := calls.Load(); got != 1 {
+		t.Fatalf("concurrent failed attempt triggered %d loads, want 1", got)
+	}
+	for index, err := range errs {
+		if !errors.Is(err, loadErr) {
+			t.Fatalf("error %d = %v, want shared failure", index, err)
 		}
 	}
-	wg.Wait()
 
-	for d := 0; d < dirs; d++ {
-		dir := fmt.Sprintf("/policies/p%d", d)
-		if n := loadCount(t, counts, dir); n != 1 {
-			t.Errorf("%s loaded %d times, want 1", dir, n)
-		}
+	if _, err := cache.Load("/pack"); !errors.Is(err, loadErr) {
+		t.Fatalf("retry error = %v, want loader failure", err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("failure remained cached; calls = %d, want 2", got)
 	}
 }
 
-// TestRulePackCache_FallbackMatchesLoadRulePack verifies the real-loader path:
-// an empty dir yields the embedded defaults (non-nil suppressions/judges),
-// exactly as a direct LoadRulePack("") would, so going through the cache does
-// not change graceful-fallback behavior.
-func TestRulePackCache_FallbackMatchesLoadRulePack(t *testing.T) {
-	c := NewRulePackCache()
+func TestRulePackCacheDistinctDirectoriesLoadInParallel(t *testing.T) {
+	const directories = 8
+	entered := make(chan struct{}, directories)
+	release := make(chan struct{})
+	loader := func(string) (*RulePack, error) {
+		entered <- struct{}{}
+		<-release
+		return &RulePack{JudgeConfigs: make(map[string]*JudgeYAML)}, nil
+	}
+	cache := newRulePackCacheWithLoader(loader)
 
-	rp := c.Load("")
-	if rp == nil {
-		t.Fatal("cache returned nil for embedded defaults")
+	var wait sync.WaitGroup
+	wait.Add(directories)
+	for index := 0; index < directories; index++ {
+		go func(index int) {
+			defer wait.Done()
+			_, _ = cache.Load(fmt.Sprintf("/pack/%d", index))
+		}(index)
 	}
-	if rp.Suppressions == nil {
-		t.Error("embedded defaults missing suppressions via cache")
+	for index := 0; index < directories; index++ {
+		select {
+		case <-entered:
+		case <-time.After(time.Second):
+			t.Fatal("distinct-directory loads serialized behind the cache mutex")
+		}
 	}
-	if rp.PIIJudge() == nil {
-		t.Error("embedded defaults missing pii judge via cache")
+	close(release)
+	wait.Wait()
+}
+
+func TestRulePackCacheLoaderPanicReleasesWaitersAndAllowsRetry(t *testing.T) {
+	var calls atomic.Int64
+	started := make(chan struct{})
+	release := make(chan struct{})
+	const privatePanicValue = "private loader panic value"
+	expected := &RulePack{JudgeConfigs: make(map[string]*JudgeYAML)}
+	loader := func(string) (*RulePack, error) {
+		if calls.Add(1) == 1 {
+			close(started)
+			<-release
+			panic(privatePanicValue)
+		}
+		return expected, nil
+	}
+	cache := newRulePackCacheWithLoader(loader)
+
+	ownerResult := make(chan error, 1)
+	go func() {
+		_, err := cache.Load("/pack")
+		ownerResult <- err
+	}()
+	<-started
+
+	cache.mu.Lock()
+	pending := cache.inflight[normalizeRulePackDir("/pack")]
+	cache.mu.Unlock()
+	if pending == nil {
+		t.Fatal("panicking load was not registered as in-flight")
 	}
 
-	// A nonexistent directory must still fall back to embedded defaults
-	// (LoadRulePack never returns nil), not panic or return nil.
-	missing := c.Load("/nonexistent/policies/dir")
-	if missing == nil {
-		t.Fatal("cache returned nil for a nonexistent dir; expected embedded fallback")
+	waiterResult := make(chan error, 1)
+	go func() {
+		<-pending.ready
+		waiterResult <- pending.err
+	}()
+	close(release)
+
+	select {
+	case err := <-ownerResult:
+		requireRulePackError(t, err, "loader_panic")
+		if strings.Contains(err.Error(), privatePanicValue) {
+			t.Fatalf("loader panic error leaked panic value: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("triggering caller was not released after loader panic")
 	}
+	select {
+	case err := <-waiterResult:
+		requireRulePackError(t, err, "loader_panic")
+		if strings.Contains(err.Error(), privatePanicValue) {
+			t.Fatalf("waiter error leaked panic value: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("in-flight waiter was not released after loader panic")
+	}
+
+	cache.mu.Lock()
+	_, stillInflight := cache.inflight[normalizeRulePackDir("/pack")]
+	_, cached := cache.packs[normalizeRulePackDir("/pack")]
+	cache.mu.Unlock()
+	if stillInflight || cached {
+		t.Fatalf("panicked load poisoned cache state: inflight=%v cached=%v", stillInflight, cached)
+	}
+	if got := mustCacheLoad(t, cache, "/pack"); got != expected {
+		t.Fatal("retry after loader panic returned an unexpected pack")
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("loader calls = %d, want panic + retry", got)
+	}
+}
+
+func TestRulePackCacheNilLoaderAndNilResult(t *testing.T) {
+	if cache := newRulePackCacheWithLoader(nil); cache.loader == nil {
+		t.Fatal("nil loader did not select LoadRulePack")
+	}
+	cache := newRulePackCacheWithLoader(func(string) (*RulePack, error) { return nil, nil })
+	pack, err := cache.Load("/pack")
+	if pack != nil {
+		t.Fatalf("nil loader result produced pack %p", pack)
+	}
+	requireRulePackError(t, err, "loader_nil")
 }

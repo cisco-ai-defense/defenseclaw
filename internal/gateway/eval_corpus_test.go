@@ -22,7 +22,6 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
-	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
 // evalItem mirrors the corpus schema emitted by
@@ -429,7 +428,7 @@ func mustBuildEvalJudge(t *testing.T, judge string) *LLMJudge {
 		model = "us.anthropic.claude-sonnet-4-6"
 	}
 	llm := config.LLMConfig{Model: model, APIKeyEnv: "DEFENSECLAW_LLM_KEY"}
-	rp := guardrail.LoadRulePack("")
+	rp := mustLoadRulePack(t, "")
 	j := NewLLMJudge(cfg, llm, "", rp, nil)
 	if j == nil {
 		t.Skipf("eval judge %q failed to init; check DEFENSECLAW_LLM_KEY and model %q", judge, model)

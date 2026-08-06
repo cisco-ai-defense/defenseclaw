@@ -1513,7 +1513,7 @@ final class AppState {
             return "\(name) connector has seen 0 hook events after \(formatted) - normal until Claude Code emits a hook event; verify Claude Code hooks if this persists"
         case "omnigent":
             return "\(name) connector has seen 0 policy events after \(formatted) - normal until OmniGent emits a supported policy callback; verify OmniGent policy setup if this persists"
-        case "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode":
+        case "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "amp":
             return "\(name) connector has seen 0 hook events after \(formatted) - verify connector hook setup if this persists"
         default:
             return "\(name) connector has seen 0 requests after \(formatted) - verify your agent is dialing the gateway port (gateway.port)"
@@ -1968,7 +1968,7 @@ final class AppState {
     /// Connectors-table fallback roster.
     static let knownConnectors = ["openclaw", "zeptoclaw", "codex", "claudecode", "hermes",
                                   "cursor", "windsurf", "geminicli", "copilot", "openhands",
-                                  "antigravity", "opencode", "omnigent"]
+                                  "antigravity", "opencode", "amp", "omnigent"]
 
     func configuredConnectors() -> [String] {
         let fromHealth = health.connectors.map(\.name)

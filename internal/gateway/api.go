@@ -543,11 +543,18 @@ func (a *APIServer) hookTokenScopeForPath(path string) (string, bool) {
 		}
 		return "", false
 	}
-	switch path {
-	case "/api/v1/codex/hook":
-		return "codex", true
-	case "/api/v1/claude-code/hook":
-		return "claudecode", true
+	// Legacy/test boot still registers every built-in HookEndpoint. Resolve
+	// authentication from that same reviewed built-in roster so a newly added
+	// connector route cannot silently accept only the master token.
+	registry := sharedDefaultRegistry()
+	for _, name := range registry.Names() {
+		conn, ok := registry.Get(name)
+		if !ok {
+			continue
+		}
+		if endpoint, ok := conn.(connector.HookEndpoint); ok && endpoint.HookAPIPath() == path {
+			return strings.ToLower(name), true
+		}
 	}
 	return "", false
 }
@@ -675,7 +682,7 @@ func (a *APIServer) registerConnectorHookRoutes(mux *http.ServeMux, wrap ...func
 		if f, ok := connectorHookHandlerByName["codex"]; ok {
 			register("/api/v1/codex/hook", http.HandlerFunc(f(a)))
 		}
-		for _, name := range []string{"hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent"} {
+		for _, name := range []string{"hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "amp", "omnigent"} {
 			if f, ok := connectorHookHandlerByName[name]; ok {
 				register("/api/v1/"+name+"/hook", http.HandlerFunc(f(a)))
 			}
@@ -1336,7 +1343,7 @@ func connectorModeFor(name, policyMode string) map[string]interface{} {
 		// Claude Code uses hooks + the OTel env-block; no notify
 		// equivalent (Anthropic doesn't ship a turn-complete shim).
 		telemetry = []string{"hooks", "otel"}
-	case "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode":
+	case "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "amp":
 		mode = "observability"
 		intercept = false
 		surface = "agent_lifecycle_hooks"
@@ -3054,6 +3061,21 @@ func (sw *statusWriter) Flush() {
 	}
 }
 
+type authenticatedInspectConnectorKey struct{}
+
+func withAuthenticatedInspectConnector(ctx context.Context, connectorName string) context.Context {
+	connectorName = canonicalConnectorRulePackKey(connectorName)
+	if connectorName == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, authenticatedInspectConnectorKey{}, connectorName)
+}
+
+func authenticatedInspectConnector(ctx context.Context) string {
+	connectorName, _ := ctx.Value(authenticatedInspectConnectorKey{}).(string)
+	return canonicalConnectorRulePackKey(connectorName)
+}
+
 // tokenAuth wraps a handler with Bearer token authentication. Management
 // clients may use Authorization, X-DefenseClaw-Token, or the proxy-compatible
 // X-DC-Auth header; all are compared against the same gateway token.
@@ -3169,6 +3191,10 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 				_, registered = a.connectorRegistry.Get(hookScope)
 			}
 			if registered && a.hookAPITokenMatches(hookScope, token) {
+				r = r.WithContext(withAuthenticatedInspectConnector(
+					PromoteSessionIfAuthenticated(r.Context()),
+					hookScope,
+				))
 				next.ServeHTTP(w, r)
 				return
 			}

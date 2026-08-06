@@ -367,6 +367,7 @@ func TestWizardChoiceMappings(t *testing.T) {
 		{Label: "Configure later", Value: "none"},
 		{Label: "Codex CLI", Value: "codex"},
 		{Label: "Claude Code", Value: "claudecode"},
+		{Label: "Amp", Value: "amp"},
 	}
 	modes := []wizardChoice{
 		{Label: "Observe", Value: "observe"},
@@ -496,6 +497,7 @@ func TestWizardCompletionDescriptionMatchesConfiguredConnector(t *testing.T) {
 	}{
 		{connector: "codex", want: "trusted automatically", reject: "open /hooks"},
 		{connector: "claudecode", want: "Claude Code is configured", reject: "defenseclaw init"},
+		{connector: "amp", want: "--plugin-ready-timeout 30", reject: "defenseclaw init"},
 		{connector: "none", want: "defenseclaw init", reject: "open /hooks"},
 	} {
 		t.Run(tc.connector, func(t *testing.T) {

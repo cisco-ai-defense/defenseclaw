@@ -6,7 +6,7 @@
 # staged tmpdirs / bundle files — no host-agent leakage possible.
 . "${PKG_DIR}/lib/installer_lib.sh"
 
-# Wrapper that masks any host `claude` / `codex` CLI on PATH. We used
+# Wrapper that masks any host `amp` / `claude` / `codex` CLI on PATH. We used
 # to need this because the lib exec'd those binaries; keeping it around
 # guards against a regression where a future CLI probe reintroduces the
 # code-exec surface.
@@ -14,7 +14,7 @@ without_host_agent_bins() {
   local fakebin
   fakebin="$(mktest_tmp)"
   local bin
-  for bin in claude codex; do
+  for bin in amp claude codex; do
     cat > "${fakebin}/${bin}" <<'SH'
 #!/usr/bin/env bash
 exit 127
@@ -22,6 +22,42 @@ SH
     chmod 0700 "${fakebin}/${bin}"
   done
   PATH="${fakebin}:${PATH}" "$@"
+}
+
+t_amp_from_user_npm_metadata_without_executing_cli() {
+  local home; home="$(mktest_tmp)"
+  local pkg_dir="${home}/.npm-global/lib/node_modules/@ampcode/cli"
+  mkdir -p "${pkg_dir}"
+  cat > "${pkg_dir}/package.json" <<'JSON'
+{ "name": "@ampcode/cli", "version": "0.0.1777777777-gabc123" }
+JSON
+  local got
+  got="$(without_host_agent_bins discover_agent_version amp "${home}")"
+  assert_eq "${got}" "0.0.1777777777-gabc123" "amp version from trusted package metadata"
+}
+
+t_amp_metadata_requires_package_identity() {
+  local home; home="$(mktest_tmp)"
+  local pkg="${home}/package.json"
+  cat > "${pkg}" <<'JSON'
+{ "name": "@attacker/not-amp", "version": "9.9.9" }
+JSON
+  local got
+  got="$(_read_json_version "${pkg}" "@ampcode/cli")"
+  assert_eq "${got}" "" "mismatched Amp npm package identity rejected"
+}
+
+t_amp_missing_metadata_may_be_unversioned() {
+  # Stub the safe metadata reader to make every known package path look absent.
+  # discover_agent_version must return empty and must not fall through to
+  # executing a PATH-resolved Amp binary.
+  _read_json_version() { :; }
+  local home got
+  home="$(mktest_tmp)"
+  got="$(without_host_agent_bins discover_agent_version amp "${home}" 2>/dev/null || true)"
+  assert_eq "${got}" "" "amp without trusted metadata remains unversioned"
+  # Restore the library definition for later cases in this sourced test file.
+  . "${PKG_DIR}/lib/installer_lib.sh"
 }
 
 t_claudecode_via_cursor_extension() {
@@ -154,6 +190,9 @@ t_unknown_connector() {
   assert_eq "${got}" "" "unknown connector returns empty string"
 }
 
+run_case "amp from trusted user npm metadata" t_amp_from_user_npm_metadata_without_executing_cli
+run_case "amp package metadata identity"      t_amp_metadata_requires_package_identity
+run_case "amp without metadata is unversioned" t_amp_missing_metadata_may_be_unversioned
 run_case "claudecode via Cursor extension"   t_claudecode_via_cursor_extension
 run_case "claudecode via VS Code extension"  t_claudecode_via_vscode_extension
 run_case "claudecode without install"        t_claudecode_no_install_returns_empty

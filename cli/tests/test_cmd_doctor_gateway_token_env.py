@@ -109,6 +109,20 @@ class CheckTests(unittest.TestCase):
         self.assertIn("MY_CUSTOM_TOKEN", warn_msg)
         self.assertIn("OPENCLAW_GATEWAY_TOKEN", warn_msg)
 
+    def test_warns_without_false_fix_hint_for_custom_env_with_canonical_fallback(self):
+        cfg = _make_cfg(token_env="MY_CUSTOM_TOKEN")
+        env = _clean_env(DEFENSECLAW_GATEWAY_TOKEN="canonical-fallback")
+        r = _DoctorResult()
+        with patch.dict(os.environ, env, clear=True):
+            _check_gateway_token_env_alignment(cfg, r)
+
+        self.assertEqual(r.warned, 1)
+        msg = next(c for c in r.checks if c["status"] == "warn")["detail"]
+        self.assertIn("MY_CUSTOM_TOKEN", msg)
+        self.assertIn("canonical fallback", msg)
+        self.assertIn("preserves custom providers", msg)
+        self.assertNotIn("doctor --fix", msg)
+
     def test_warn_when_no_token_is_reachable_anywhere(self):
         """All env vars empty — surface the local config state so
         the operator can correlate with sidecar /health failure.
@@ -181,7 +195,9 @@ class ConnectorAwareCheckTests(unittest.TestCase):
             _check_gateway_token_env_alignment(cfg, r)
         self.assertEqual(r.warned, 1)
         msg = next(c for c in r.checks if c["status"] == "warn")["detail"]
-        self.assertIn("defenseclaw keys set", msg)
+        self.assertIn("MY_CUSTOM_TOKEN", msg)
+        self.assertIn("preserves custom providers", msg)
+        self.assertNotIn("doctor --fix", msg)
 
 
 class FixerTests(unittest.TestCase):
@@ -248,14 +264,13 @@ class FixerTests(unittest.TestCase):
             tag, detail = _fix_gateway_token_env(cfg, assume_yes=True)
         self.assertEqual(tag, "fail")
         self.assertIn("disk full", detail)
+        self.assertEqual(cfg.gateway.token_env, "OPENCLAW_GATEWAY_TOKEN")
 
     def test_respects_user_decline_when_not_assume_yes(self):
         """Without --yes, the fixer prompts; declining yields a skip."""
         cfg = _make_cfg(token_env="OPENCLAW_GATEWAY_TOKEN")
         env = _clean_env(DEFENSECLAW_GATEWAY_TOKEN="abc123")
-        with patch.dict(os.environ, env, clear=True), patch(
-            "click.confirm", return_value=False
-        ):
+        with patch.dict(os.environ, env, clear=True), patch("click.confirm", return_value=False):
             tag, detail = _fix_gateway_token_env(cfg, assume_yes=False)
         self.assertEqual(tag, "skip")
         self.assertIn("declined by user", detail)

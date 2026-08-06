@@ -1,0 +1,161 @@
+---
+title: CEL engine
+description: Understand DefenseClaw's typed ActionFacts projection, CEL admission rules, bounded evaluation, semantic ownership, and fallback behavior.
+keywords:
+  - DefenseClaw CEL engine
+  - CEL runtime limits
+  - ActionFacts engine
+  - semantic rule owners
+  - CEL regex fallback
+---
+
+DefenseClaw embeds CEL as a bounded semantic matcher, not as a general-purpose
+policy runtime. The server establishes a trusted tool-action boundary,
+normalizes the action into typed `ActionFacts`, and evaluates one immutable
+Boolean program per semantic rule owner.
+
+Use [Authoring CEL rules](/docs/policies/cel/authoring) for the rule schema,
+field reference, enums, and examples. This page defines what the compiler and
+runtime accept and how a match becomes detection or enforcement evidence.
+
+## Evaluation pipeline
+
+<Flow
+  direction="TB"
+  caption="Only authoritative facts enter CEL. Full facts detect the security intent; an execute-only projection determines whether that evidence can support synchronous enforcement."
+>
+  <Node id="boundary" kind="connector">Server-established trusted action boundary</Node>
+  <Node id="analyze" kind="gateway">Parse and normalize tool arguments</Node>
+  <Node id="facts" kind="policy">Authoritative full ActionFacts</Node>
+  <Node id="full" kind="policy">Evaluate owner on full facts</Node>
+  <Node id="execute" kind="policy">Evaluate execute-only projection</Node>
+  <Node id="fallback" kind="policy">Owner-local regex fallback</Node>
+  <Node id="detect" kind="decision">Detection-only finding</Node>
+  <Node id="enforce" kind="decision">Enforcement-eligible finding</Node>
+  <Node id="none" kind="decision">No owner finding</Node>
+  <Node id="action" kind="decision">Policy profile resolves action</Node>
+  <Edge from="boundary" to="analyze" />
+  <Edge from="analyze" to="facts" label="authoritative" />
+  <Edge from="analyze" to="fallback" label="unsupported or ambiguous" variant="dashed" />
+  <Edge from="facts" to="full" />
+  <Edge from="full" to="none" label="false" />
+  <Edge from="full" to="fallback" label="error or budget" variant="dashed" />
+  <Edge from="full" to="execute" label="true" />
+  <Edge from="execute" to="enforce" label="true + eligible surface" />
+  <Edge from="execute" to="detect" label="false or ineligible surface" />
+  <Edge from="fallback" to="detect" label="pattern matched" />
+  <Edge from="fallback" to="none" label="no match" />
+  <Edge from="detect" to="action" />
+  <Edge from="enforce" to="action" />
+</Flow>
+
+`ActionFacts` and raw tool arguments stay private to the in-process analysis
+path. They are not exposed as a public CEL endpoint, logged as CEL input, or
+written to the durable ordered-state ledger.
+
+## Admission and activation
+
+The rule-pack loader compiles every supplied `expression`, including disabled
+rules. Each expression must be Boolean, contain no surrounding whitespace, and
+use only the admitted surface below. Its rule must also contain a valid bounded
+`pattern` fallback.
+
+Catalog categories merge before compilation:
+
+- A unique custom category adds to the compiled baseline.
+- A category with the same name as a bundled category replaces that entire
+  category.
+- Any schema, regex, type, admission, enum, or cost failure rejects the complete
+  candidate generation.
+
+A rejected candidate is not published. If the gateway already has an active
+in-process generation, that generation remains unchanged; offline validation
+simply reports the candidate failure.
+
+## Supported CEL subset
+
+DefenseClaw admits a small, reviewable CEL surface.
+
+| Supported | Examples and constraints |
+| --- | --- |
+| Boolean logic | `&&`, `||`, `!` |
+| Scalar comparison | `==`, `!=`, and `in` for bounded Boolean, integer, and string values |
+| Collection predicates | Boolean `exists` comprehensions; nesting is limited to two levels |
+| String predicates | `startsWith`, `endsWith`, `contains`, and member-form `matches` |
+| Literals | Boolean, integer, string, and scalar lists |
+| Field selection | Typed fields reachable from `f` using protobuf snake-case names |
+
+Arithmetic, ordering comparisons, indexing, ternaries, maps, `has`, null,
+floating-point/unsigned/byte literals, arbitrary functions, message equality,
+and list equality are rejected. DefenseClaw adds no custom CEL helper
+functions. `matches` must use a literal Go/RE2 pattern of at most 512 bytes;
+dynamic regexes and global-form `matches(value, pattern)` are rejected.
+
+## Resource limits
+
+| Limit | Maximum |
+| --- | --- |
+| Expression size | 16 KiB in bytes and runes |
+| Checked AST | 4,096 nodes; depth 64 |
+| Comprehension nesting | 2 |
+| CEL regex literal | 512 bytes |
+| Fallback regex | 2,048 bytes |
+| Static cost per rule | 6,000,000 |
+| Runtime cost per rule | 1,250,000 |
+| Semantic rules per effective catalog | 256 |
+| Enabled catalog static cost | 32,000,000 |
+| Trusted dispatch budget | 50 ms and 24,000,000 total cost |
+
+These bounds apply before connector action mapping. Exceeding an admission
+limit rejects the candidate; exceeding a runtime limit takes that owner to its
+fallback without stopping unrelated rules.
+
+## Runtime results
+
+| Result | Owner behavior |
+| --- | --- |
+| Compile or admission failure | Reject the candidate generation; do not publish it. |
+| Projection is unsupported, partial, ambiguous, invalid, or uncertain | Run this owner's required regex fallback. |
+| CEL evaluates `false` | Produce no owner finding and suppress only this owner's claimed fallback IDs on the structured route. |
+| CEL matches full facts but not the execute-only projection | Create detection-only evidence; preview behavior cannot synchronously block. |
+| CEL matches both projections on an enforcement-eligible, synchronous surface | Create an enforcement-eligible finding from the YAML metadata. |
+| CEL matches but the connector surface is not block-capable or enforcement-eligible | Create detection-only evidence. |
+| CEL errors, times out, or exceeds runtime cost | Run this owner's regex fallback; unrelated rules continue. |
+
+Custom rules own their own rule ID. DefenseClaw may define internal alias,
+prerequisite, and safe-negative contracts for bundled owners, but those maps
+are not configurable through CEL or YAML. A fallback match and authoritative
+CEL result never produce duplicate findings for the same owner.
+
+The [stateful connector lifecycle](/docs/policies/cel/tool-call-state)
+determines which native events are synchronous, block-capable, outcome-paired,
+or eligible to advance durable ordered state.
+
+## Single-call CEL and ordered state
+
+Single-call CEL findings can run on trusted inspect calls and authenticated
+native pre-tool hooks. Durable chains are narrower: only authenticated native
+connector hook events with the required session and invocation identity can
+advance the SQLite state ledger. Inspect, proxy, router, and OTLP traffic never
+advance a chain.
+
+The six ordered chains are a fixed compiled catalog. Adding a CEL/YAML rule
+does not define a new sequence; custom CEL rules remain single-action matchers.
+See [Stateful connector lifecycle](/docs/policies/cel/tool-call-state) for the
+pending-to-success contract and connector matrix.
+
+## Test engine behavior
+
+`defenseclaw guardrail validate-pack` is the public authority for schema,
+regex, CEL typing and admission, and aggregate-cost checks. It does not inject
+synthetic facts or prove that a connector projects the fields an expression
+expects.
+
+Repository contributors should add focused Go fixtures and run:
+
+```bash
+go test ./internal/guardrail/semantic ./internal/guardrail ./internal/gateway
+```
+
+When the compiled default catalog changes, also run
+`make generate-guardrail-catalog` and `make check-guardrail-catalog`.

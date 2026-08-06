@@ -2905,6 +2905,22 @@
       "since": "0.8.8"
     },
     {
+      "name": "DEFENSECLAW_SHIM_CAPTURE",
+      "category": "test_fixture",
+      "purpose": "Carries the output path used by the isolated PATH-shim argv fidelity fixture.",
+      "default": "unset",
+      "accepted_values": ["test-defined absolute path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/connector_test.go",
+          "description": "Captures the fake curl request body so the test can verify exact shim argv forwarding; never read by production runtime paths"
+        }
+      ],
+      "since": "0.9.0"
+    },
+    {
       "name": "DEFENSECLAW_GATEWAY_URL",
       "category": "test_fixture",
       "purpose": "Base URL of an external gateway for the security-suite e2e tier (TestSecuritySuiteE2E). When set, the test posts to that gateway's /api/v1/inspect/* endpoints; when unset, the tier runs against an in-process inspect server.",
@@ -2916,6 +2932,36 @@
         {"location": "internal/gateway/security_suite_test.go", "description": "TestSecuritySuiteE2E reads this to locate the gateway; uses an in-process server when unset"}
       ],
       "since": "0.7.0"
+    },
+    {
+      "name": "DEFENSECLAW_ENV_CONFIG_SKIP_TRUST",
+      "category": "test_fixture",
+      "purpose": "Skip the uid==0 + not-group/world-writable trust check that LoadEnvConfigEndpoint enforces on the AVC-authored env_config.json. Set only in unit tests that need to exercise the JSON parse / URL validation branches with a fixture the test user can write.",
+      "default": "unset (trust check enforced)",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "medium",
+      "surface_in_doctor": true,
+      "consumers": [
+        {"location": "internal/config/env_config.go", "description": "trustEnvConfigFile short-circuits when set — production installs must leave this unset so a non-root-authored / group-writable env_config.json is refused"}
+      ],
+      "since": "0.8.11",
+      "security_note": "Bypassing the env_config file trust check lets a group-writable file at the canonical path retarget bearer-authenticated inspection POSTs. Test-only."
+    },
+    {
+      "name": "DEFENSECLAW_AUDIT_DB_LOCK_HELPER_PATH",
+      "category": "test_fixture",
+      "purpose": "Passes the temporary audit database path to isolated subprocesses that verify SQLite kernel-lock and WAL lifecycle behavior.",
+      "default": "unset",
+      "accepted_values": ["absolute temporary database path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/audit/audit_db_lock_unix_test.go",
+          "description": "Peer-process lock and SQLite-close fixtures; never read by production runtime paths"
+        }
+      ],
+      "since": "0.8.11"
     }
   ]
 }

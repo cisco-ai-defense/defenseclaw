@@ -51,7 +51,7 @@ func defaultFallbackProfile() *FallbackProfile {
 		FirstPartyAllow: map[string]firstPartyEntry{
 			firstPartyKey("plugin", "defenseclaw"): {
 				Reason:             "first-party DefenseClaw plugin",
-				SourcePathContains: []string{".defenseclaw", "extensions/defenseclaw"},
+				SourcePathContains: []string{".defenseclaw", "extensions/defenseclaw", ".config/amp/plugins/defenseclaw.ts"},
 			},
 			firstPartyKey("skill", "codeguard"): {
 				Reason:             "first-party DefenseClaw skill",

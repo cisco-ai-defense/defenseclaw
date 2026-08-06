@@ -1,5 +1,5 @@
 import { source } from '@/lib/source';
-import { site, siteUrl } from '@/lib/site';
+import { canonicalUrl, site } from '@/lib/site';
 import { getLLMText } from '@/lib/get-llm-text';
 
 // Concatenated post-processed Markdown corpus of every documentation
@@ -20,7 +20,7 @@ export async function GET() {
     '',
     `> ${site.description}`,
     '',
-    `> Live site: ${siteUrl}`,
+    `> Live site: ${canonicalUrl()}`,
     '',
   ].join('\n');
 

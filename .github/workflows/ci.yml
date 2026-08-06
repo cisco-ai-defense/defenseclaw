@@ -162,8 +162,12 @@ jobs:
         with:
           node-version: "24"
           cache: npm
-          cache-dependency-path: extensions/defenseclaw/package-lock.json
+          cache-dependency-path: |
+            extensions/defenseclaw/package-lock.json
+            scripts/amp-plugin-typecheck/package-lock.json
       - run: make plugin
+      - name: Type-check Amp policy plugin against official API
+        run: make amp-plugin-typecheck
       - run: make go-lint
 
   go-test-gateway:
@@ -452,13 +456,13 @@ jobs:
               ),
           }
           security_floors = {
-              "cryptography": ">=48.0.1,<49",
+              "cryptography": ">=50.0.0,<51",
               "python-dotenv": ">=1.2.2",
               "python-multipart": ">=0.0.31",
               "urllib3": ">=2.7.0",
               "idna": ">=3.15",
               "pydantic-settings": ">=2.14.2",
-              "aiohttp": ">=3.14.1,<4",
+              "aiohttp": ">=3.14.3,<4",
               "pyjwt": ">=2.13.0",
               "starlette": ">=1.3.1,<1.4",
               "fastapi": ">=0.137.1,<0.138",
@@ -860,7 +864,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        connector: [codex, claudecode]
+        connector: [codex, claudecode, amp]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:

@@ -184,7 +184,7 @@ func TestHasSensitiveFileContext(t *testing.T) {
 // TestInjectionToVerdictCtx_SingleCategoryIsHigh: a single injection
 // category maps to HIGH regardless of the sensitive-context signal.
 func TestInjectionToVerdictCtx_SingleCategoryIsHigh(t *testing.T) {
-	j := testJudge()
+	j := testJudge(t)
 	data := map[string]interface{}{
 		"Instruction Manipulation": map[string]interface{}{
 			"reasoning": "attempts to read restricted system file",
@@ -207,7 +207,7 @@ func TestInjectionToVerdictCtx_SingleCategoryIsHigh(t *testing.T) {
 // TestInjectionToVerdict_SingleCategoryIsHigh covers the parameterless
 // variant.
 func TestInjectionToVerdict_SingleCategoryIsHigh(t *testing.T) {
-	j := testJudge()
+	j := testJudge(t)
 	data := map[string]interface{}{
 		"Instruction Manipulation": map[string]interface{}{"reasoning": "override", "label": true},
 		"Context Manipulation":     map[string]interface{}{"reasoning": "clean", "label": false},

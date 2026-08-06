@@ -93,17 +93,17 @@ endef
 
 .PHONY: help all path doctor uninstall quickstart llm-setup \
         build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
-        plugin plugin-install maybe-openclaw-plugin-install extensions test cli-test cli-test-cov cli-test-snap tui-test gateway-test go-test-cov \
+        plugin plugin-install amp-plugin-typecheck maybe-openclaw-plugin-install extensions test cli-test cli-test-cov cli-test-snap tui-test gateway-test go-test-cov \
         packaging-macos-test packaging-macos-bundle macos-app-license-check macos-app-upstream-check macos-app-build macos-app-test macos-app-release macos-app-release-verify \
         security-suite-test security-suite-eval \
         connector-matrix-test go-connector-matrix-test py-connector-matrix-test \
         test-verbose test-file lint py-lint go-lint ts-test rego-test clean \
-        check check-audit-actions check-error-codes check-schemas telemetry-generate telemetry-check check-grafana-dashboards check-observability-v8-hard-cut check-v7 check-provider-coverage check-llm-catalog check-version-sync check-upgrade-manifest \
+        check check-audit-actions check-error-codes check-schemas telemetry-generate telemetry-check generate-guardrail-catalog check-guardrail-catalog check-grafana-dashboards check-observability-v8-hard-cut check-v7 check-provider-coverage check-llm-catalog check-version-sync check-upgrade-manifest \
         upgrade-smoke upgrade-smoke-matrix upgrade-refusal-contract-matrix upgrade-developer-activation \
         upgrade-legacy-smoke upgrade-legacy-smoke-matrix upgrade-signed-protocol upgrade-signed-protocol-matrix \
         set-version \
         _bundle-data _source-install-preflight _source-install-dev-preflight _source-dev-install \
-        proto proto-tools \
+        proto proto-check proto-tools \
         grpo-engine \
         dist dist-cli dist-gateway dist-plugin dist-sandbox dist-test dist-upgrade-manifest dist-checksums dist-clean
 
@@ -381,7 +381,7 @@ dev-pycli: pycli
 # Protobuf regeneration
 # ---------------------------------------------------------------------------
 # `proto` regenerates the Go stubs for the DefenseClaw ↔ AVC (Secure
-# Client) contract at proto/defenseclaw/secureclient/v1/*.proto.
+# Client) contract and the private semantic guardrail facts.
 # Tool binaries are installed under .tools/bin so contributors do not
 # need protoc-gen-go in their global $GOPATH/bin, and the versions
 # are pinned to what the generated files were produced against.
@@ -390,7 +390,7 @@ dev-pycli: pycli
 # changes.
 PROTO_TOOLS_DIR := $(CURDIR)/.tools
 PROTO_TOOLS_BIN := $(PROTO_TOOLS_DIR)/bin
-PROTOC_GEN_GO_VERSION      := v1.36.5
+PROTOC_GEN_GO_VERSION      := v1.36.6
 PROTOC_GEN_GO_GRPC_VERSION := v1.5.1
 
 proto-tools:
@@ -404,7 +404,20 @@ proto: proto-tools
 		--go_out=. --go_opt=paths=source_relative \
 		--go-grpc_out=. --go-grpc_opt=paths=source_relative \
 		secureclient.proto
-	@echo "Regenerated proto/defenseclaw/secureclient/v1/*.pb.go"
+	@cd internal/guardrail/semanticpb && PATH="$(PROTO_TOOLS_BIN):$$PATH" protoc \
+		--go_out=. --go_opt=paths=source_relative \
+		facts.proto
+	@echo "Regenerated committed Go protobuf stubs"
+
+proto-check: proto
+	@git ls-files --error-unmatch -- \
+		proto/defenseclaw/secureclient/v1/secureclient.pb.go \
+		proto/defenseclaw/secureclient/v1/secureclient_grpc.pb.go \
+		internal/guardrail/semanticpb/facts.pb.go >/dev/null
+	@git diff --exit-code -- \
+		proto/defenseclaw/secureclient/v1/secureclient.pb.go \
+		proto/defenseclaw/secureclient/v1/secureclient_grpc.pb.go \
+		internal/guardrail/semanticpb/facts.pb.go
 
 gateway: sync-openclaw-extension
 	go build $(GOFLAGS) -o $(GATEWAY)$(EXE) ./cmd/defenseclaw
@@ -517,6 +530,10 @@ plugin:
 	@echo ""
 	@echo "Built OpenClaw plugin → $(PLUGIN_DIR)/dist/"
 	@echo "  Install with: make plugin-install"
+
+amp-plugin-typecheck:
+	cd scripts/amp-plugin-typecheck && npm ci --ignore-scripts --no-audit --no-fund
+	cd scripts/amp-plugin-typecheck && npm test
 
 # ---------------------------------------------------------------------------
 # Individual install targets
@@ -790,6 +807,7 @@ macos-app-build: macos-app-license-check
 macos-app-test:
 	macos/DefenseClawMac/script/test_connector_onboarding.sh
 	macos/DefenseClawMac/script/test_first_run_connector_selection.sh
+	macos/DefenseClawMac/script/test_ai_discovery_models.sh
 	macos/DefenseClawMac/script/test_numeric_safety.sh
 	macos/DefenseClawMac/script/test_output_safety.sh
 	macos/DefenseClawMac/script/test_secret_file_safety.sh
@@ -809,11 +827,11 @@ macos-app-release-verify:
 	scripts/verify-macos-app-release.sh "$(VERSION)" "$(DIST_DIR)"
 
 # security-suite-test runs the deterministic security + PII coverage suite
-# (regex layer + stubbed LLM-judge layer) plus the regex severity benchmark.
+# (structured tool calls + regex + stubbed LLM judge) and severity benchmark.
 # No LLM key or running gateway required; this is the CI-safe tier and is
 # also covered by `make gateway-test`.
 security-suite-test:
-	go test ./internal/gateway/ -run 'TestSecuritySuiteRegex|TestSecuritySuiteJudge|TestSeverityBenchmark' -count=1 -v
+	go test ./internal/gateway/ -run 'TestSecuritySuiteToolCall|TestSecuritySuiteRegex|TestSecuritySuiteJudge|TestSeverityBenchmark' -count=1 -v
 
 # security-suite-eval scores the judge corpus against a live model and runs
 # the full eval corpus. Requires DEFENSECLAW_LLM_KEY. Not run in CI.
@@ -870,7 +888,7 @@ test-file:
 # too and will fail the build on drift.
 # ---------------------------------------------------------------------------
 
-check: check-v7 check-observability-v8-hard-cut check-grafana-dashboards check-provider-coverage check-llm-catalog check-upgrade-manifest
+check: check-v7 check-observability-v8-hard-cut check-grafana-dashboards check-provider-coverage check-llm-catalog check-upgrade-manifest check-guardrail-catalog
 
 check-v7: check-audit-actions check-audit-no-raw-literals check-error-codes check-schemas
 	@echo "check-v7: all parity gates passed."
@@ -892,6 +910,12 @@ telemetry-generate:
 
 telemetry-check:
 	@$(VENV_BIN)/python$(EXE) scripts/generate_telemetry_registry.py --check
+
+generate-guardrail-catalog:
+	@go run ./cmd/generate-guardrail-catalog
+
+check-guardrail-catalog:
+	@go run ./cmd/generate-guardrail-catalog --check
 
 # Semantic hard-cut gate: v7 may remain only inside the explicit
 # upgrade/recovery boundaries. It checks forbidden ownership paths and

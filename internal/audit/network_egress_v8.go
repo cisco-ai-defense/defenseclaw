@@ -195,7 +195,7 @@ func networkEgressFamilyInput(
 		UserID:           optionalNetworkText(event.UserID), ToolCallID: optionalNetworkText(event.ToolID),
 		TargetRef: event.Hostname, PolicyOutcome: optionalNetworkText(event.PolicyOutcome),
 		DecisionCode:  optionalNetworkIdentifier(event.DecisionCode),
-		Reason:        optionalNetworkText(event.Details),
+		Reason:        optionalNetworkText(row.Details),
 		ServerAddress: optionalNetworkText(event.Hostname),
 	}
 	if event.Blocked {

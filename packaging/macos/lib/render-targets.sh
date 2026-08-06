@@ -60,6 +60,7 @@ extract_connectors() {
   #   guardrail:
   #     connector: <primary>              <-- the single-scalar form
   #     connectors:                       <-- the multi-connector map
+  #       amp:
   #       codex:
   #       claudecode:
   #       cursor:

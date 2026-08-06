@@ -39,6 +39,7 @@ CONNECTORS = (
     "openhands",
     "antigravity",
     "opencode",
+    "amp",
     "omnigent",
 )
 

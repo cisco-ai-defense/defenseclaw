@@ -17,6 +17,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
 type retentionTestReporter struct {
@@ -191,6 +193,59 @@ func TestRetentionReapsEveryHistoryClassAtStrictUTCBoundaryAndPreservesState(t *
 	reports := reporter.snapshot()
 	if len(reports) != 2 || !reports[0].Success || !reports[1].Success {
 		t.Fatalf("retention reports=%#v", reports)
+	}
+}
+
+func TestRetentionPreservesCorrelationAnchorUntilChainReceiptExpires(t *testing.T) {
+	store, judge := newRetentionStores(t)
+	now := time.Date(2026, 7, 30, 12, 0, 0, 0, time.UTC)
+	correl, err := store.CorrelationRepository()
+	if err != nil {
+		t.Fatal(err)
+	}
+	chain, err := store.ToolChainRepository()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture := &toolChainFixture{
+		store: store, chain: chain, correl: correl,
+		instance: mustCorrelationInstance(t, correl, "retention-chain",
+			ConnectorCustodyHookOnly),
+		now: now.Add(-2 * 24 * time.Hour),
+	}
+	chain.now = func() time.Time { return fixture.now }
+	chainID := guardrail.ToolChainGuardrailsOffThenEgress
+	first := fixture.seed(t, "retention-live-receipt", correlationDigest("retention-live-first"))
+	first.Projection = toolChainProjection(t, []string{chainID}, 1, true)
+	if _, err := chain.Observe(t.Context(), first); err != nil {
+		t.Fatal(err)
+	}
+	fixture.now = fixture.now.Add(time.Second)
+	final := fixture.seed(t, "retention-live-receipt", correlationDigest("retention-live-final"))
+	final.Projection = toolChainProjection(t, []string{chainID}, 2, true)
+	final.DenyEligible = true
+	if result, err := chain.Observe(t.Context(), final); err != nil || result.DeniedMask == 0 {
+		t.Fatalf("chain deny=%#v err=%v", result, err)
+	}
+
+	reaper := newRetentionReaperAt(t, store, judge, 1, now, RetentionOptions{}, retentionHooks{})
+	if _, err := reaper.Run(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if countRetentionRows(t, store.db, "guardrail_chain_deny_receipts") != 1 ||
+		countRetentionRows(t, store.db, "guardrail_chain_events") != 0 ||
+		countRetentionRows(t, store.db, "correlation_events") != 2 {
+		t.Fatal("live deny receipt did not preserve its correlation anchors")
+	}
+
+	afterExpiry := now.Add(6 * 24 * time.Hour)
+	reaper = newRetentionReaperAt(t, store, judge, 1, afterExpiry, RetentionOptions{}, retentionHooks{})
+	if _, err := reaper.Run(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if countRetentionRows(t, store.db, "guardrail_chain_deny_receipts") != 0 ||
+		countRetentionRows(t, store.db, "correlation_events") != 0 {
+		t.Fatal("expired deny receipt or its released correlation anchors survived")
 	}
 }
 
@@ -1225,6 +1280,46 @@ func seedRetentionCorrelationHistory(t *testing.T, store *Store, old time.Time) 
 		t.Fatal(err)
 	}
 	instance := mustCorrelationInstance(t, repo, "retention", ConnectorCustodyHookOnly)
+	chainEvent, _ := seedCorrelationEvent(t, repo, instance, correlationSeedOptions{receivedAt: old})
+	sessionDigest := correlationDigest("retention-chain-session")
+	inputFingerprint := correlationDigest("retention-chain-input")
+	rulesetFingerprint := correlationDigest("retention-chain-ruleset")
+	chainFingerprint := correlationDigest("retention-chain-definition")
+	stableActionID := "gca_" + stringsOf("a", 64)
+	receiptID := "gcr_" + stringsOf("b", 64)
+	if _, err := store.db.Exec(`INSERT INTO guardrail_chain_partitions (
+		connector_instance_id, session_value_digest, active_ruleset_fingerprint,
+		next_sequence, updated_time_unix_nano) VALUES (?, ?, ?, 66, ?)`,
+		string(instance.ConnectorInstanceID), sessionDigest, rulesetFingerprint,
+		unixNano(old)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`INSERT INTO guardrail_chain_events (
+		semantic_event_id, connector_instance_id, session_value_digest, sequence,
+		received_time_unix_nano, input_fingerprint, projection_fingerprint,
+		ruleset_fingerprint, parse_status, detection_step_mask, enforcement_step_mask,
+		detected_chain_mask, enforcement_safe_chain_mask, denied_chain_mask, stable_action_id
+	) VALUES (?, ?, ?, 1, ?, ?, ?, ?, 'complete', 3, 3, 1, 1, 1, ?)`,
+		string(chainEvent.SemanticEventID), string(instance.ConnectorInstanceID), sessionDigest,
+		unixNano(old), inputFingerprint, correlationDigest("retention-chain-projection"),
+		rulesetFingerprint, stableActionID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`INSERT INTO guardrail_chain_deny_receipts (
+		receipt_id, final_semantic_event_id, predecessor_semantic_event_id,
+		connector_instance_id, session_value_digest, input_fingerprint,
+		ruleset_fingerprint, chain_fingerprint, chain_id, chain_version,
+		detected_chain_mask, enforcement_safe_chain_mask, denied_chain_mask,
+		stable_action_id, severity, delivery_count, first_observed_time_unix_nano,
+		last_observed_time_unix_nano, expires_time_unix_nano
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'chain.guardrails_off_then_egress',
+		'1.4', 1, 1, 1, ?, 'HIGH', 1, ?, ?, ?)`,
+		receiptID, string(chainEvent.SemanticEventID), string(chainEvent.SemanticEventID),
+		string(instance.ConnectorInstanceID), sessionDigest, inputFingerprint,
+		rulesetFingerprint, chainFingerprint, stableActionID, unixNano(old),
+		unixNano(old), unixNano(old.Add(time.Nanosecond))); err != nil {
+		t.Fatal(err)
+	}
 	seedCorrelationEvent(t, repo, instance, correlationSeedOptions{
 		receivedAt: old,
 		receipt: &CorrelationReceiptClaim{
@@ -1360,7 +1455,8 @@ func assertRetentionBoundaryRows(t *testing.T, store *Store, judge *JudgeBodySto
 	if baseline != 1 || projection != 1 {
 		t.Fatalf("legacy ACK baseline=%d projection=%d want 1,1", baseline, projection)
 	}
-	for _, table := range []string{"correlation_receipts", "correlation_cursors",
+	for _, table := range []string{"guardrail_chain_deny_receipts", "guardrail_chain_events",
+		"guardrail_chain_partitions", "correlation_receipts", "correlation_cursors",
 		"correlation_pending_operations", "correlation_relationships", "correlation_events"} {
 		if countRetentionRows(t, store.db, table) != 0 {
 			t.Errorf("old correlation table %s was not fully reaped", table)

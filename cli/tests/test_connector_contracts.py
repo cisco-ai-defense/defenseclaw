@@ -13,9 +13,11 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sys
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
@@ -41,6 +43,8 @@ from defenseclaw.connector_paths import KNOWN_CONNECTORS
 
 from tests.helpers import cleanup_app, make_app_context
 
+REPO_ROOT = Path(__file__).resolve().parents[2]
+
 
 def _discovery(connector: str, *, installed: bool, version: str, error: str = ""):
     return SimpleNamespace(
@@ -63,6 +67,29 @@ class TestConnectorContractManifest(unittest.TestCase):
             set(HOOK_CONTRACT_MANIFEST["connectors"]),
             set(KNOWN_CONNECTORS),
         )
+
+    def test_live_e2e_pretool_goldens_follow_exact_default_contract(self) -> None:
+        golden_root = REPO_ROOT / "scripts" / "live-connector-e2e" / "golden"
+        for connector_dir in sorted(golden_root.iterdir()):
+            manifest = HOOK_CONTRACT_MANIFEST["connectors"].get(connector_dir.name)
+            if manifest is None:
+                continue
+            contracts = manifest.get("contracts", ())
+            contract = next(
+                (item for item in contracts if item.get("default_for_unversioned")),
+                contracts[0],
+            )
+            structured = set(contract["tool_call_lifecycle"]["routing"]["structured_action_events"])
+            blocked = set(contract["capabilities"]["block_events"])
+            for fixture_name in ("pre_tool_allow.json", "pre_tool_block.json"):
+                fixture = connector_dir / fixture_name
+                if not fixture.is_file():
+                    continue
+                event = json.loads(fixture.read_text(encoding="utf-8"))["hook_event_name"]
+                with self.subTest(connector=connector_dir.name, fixture=fixture_name):
+                    self.assertIn(event, structured)
+                    if fixture_name == "pre_tool_block.json":
+                        self.assertIn(event, blocked)
 
     def test_proxy_connectors_are_not_hook_gated(self) -> None:
         self.assertEqual(PROXY_CONNECTORS, frozenset({"openclaw", "zeptoclaw"}))
@@ -141,6 +168,71 @@ class TestConnectorContractManifest(unittest.TestCase):
                     "Stop",
                 ),
             ),
+            (
+                "0.134.99",
+                "codex-hooks-v3",
+                (
+                    "SessionStart",
+                    "UserPromptSubmit",
+                    "PreToolUse",
+                    "PermissionRequest",
+                    "PostToolUse",
+                    "SubagentStart",
+                    "SubagentStop",
+                    "PreCompact",
+                    "PostCompact",
+                    "Stop",
+                ),
+            ),
+            (
+                "0.135.0",
+                "codex-hooks-v3-generic",
+                (
+                    "SessionStart",
+                    "UserPromptSubmit",
+                    "PreToolUse",
+                    "PermissionRequest",
+                    "PostToolUse",
+                    "SubagentStart",
+                    "SubagentStop",
+                    "PreCompact",
+                    "PostCompact",
+                    "Stop",
+                ),
+            ),
+            (
+                "0.144.99",
+                "codex-hooks-v3-generic",
+                (
+                    "SessionStart",
+                    "UserPromptSubmit",
+                    "PreToolUse",
+                    "PermissionRequest",
+                    "PostToolUse",
+                    "SubagentStart",
+                    "SubagentStop",
+                    "PreCompact",
+                    "PostCompact",
+                    "Stop",
+                ),
+            ),
+            (
+                "0.145.0",
+                "codex-hooks-v4",
+                (
+                    "SessionStart",
+                    "UserPromptSubmit",
+                    "PreToolUse",
+                    "PermissionRequest",
+                    "PostToolUse",
+                    "SubagentStart",
+                    "SubagentStop",
+                    "PreCompact",
+                    "PostCompact",
+                    "Stop",
+                    "SessionEnd",
+                ),
+            ),
         )
         for version, contract_id, events in expected:
             with self.subTest(version=version):
@@ -155,7 +247,7 @@ class TestConnectorContractManifest(unittest.TestCase):
 
         unversioned = resolve_connector_contract("codex", "")
         self.assertEqual(unversioned.status, STATUS_UNVERSIONED)
-        self.assertEqual(unversioned.contract.contract_id, "codex-hooks-v3")
+        self.assertEqual(unversioned.contract.contract_id, "codex-hooks-v4")
         self.assertTrue(unversioned.contract.default_for_unversioned)
         self.assertTrue(unversioned.contract.native_otlp)
         self.assertEqual(unversioned.contract.native_otlp_auth, "header-token")
@@ -288,10 +380,13 @@ class TestSetupConnectorVersionGate(unittest.TestCase):
         cleanup_app(self.app, self.db_path, self.tmp_dir)
 
     def test_action_mode_blocks_unsupported_installed_version_before_save(self) -> None:
-        with patch(
-            "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
-            return_value=_discovery("codex", installed=True, version="codex 0.123.0"),
-        ), patch.dict(os.environ, {"DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT": "0"}):
+        with (
+            patch(
+                "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
+                return_value=_discovery("codex", installed=True, version="codex 0.123.0"),
+            ),
+            patch.dict(os.environ, {"DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT": "0"}),
+        ):
             ok = _apply_hook_connector_setup(
                 self.app,
                 connector="codex",
@@ -305,10 +400,13 @@ class TestSetupConnectorVersionGate(unittest.TestCase):
         self.assertEqual(self.app.cfg.guardrail.connector, "openclaw")
 
     def test_observe_mode_warns_but_allows_unsupported_installed_version(self) -> None:
-        with patch(
-            "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
-            return_value=_discovery("codex", installed=True, version="codex 0.123.0"),
-        ), patch("defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections"):
+        with (
+            patch(
+                "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
+                return_value=_discovery("codex", installed=True, version="codex 0.123.0"),
+            ),
+            patch("defenseclaw.commands.cmd_setup._record_windows_setup_agent_selections"),
+        ):
             ok = _apply_hook_connector_setup(
                 self.app,
                 connector="codex",
@@ -363,15 +461,18 @@ class TestSetupConnectorVersionGate(unittest.TestCase):
         sync_hilt.assert_called_once_with(self.app.cfg.policy_dir, self.app.cfg.guardrail)
 
     def test_action_mode_blocks_unversioned_installed_connector(self) -> None:
-        with patch(
-            "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
-            return_value=_discovery(
-                "geminicli",
-                installed=True,
-                version="",
-                error="version probe timed out",
+        with (
+            patch(
+                "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
+                return_value=_discovery(
+                    "geminicli",
+                    installed=True,
+                    version="",
+                    error="version probe timed out",
+                ),
             ),
-        ), patch.dict(os.environ, {"DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT": "0"}):
+            patch.dict(os.environ, {"DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT": "0"}),
+        ):
             ok = _check_connector_version_supported_for_setup(
                 "gemini-cli",
                 mode="action",
@@ -381,10 +482,13 @@ class TestSetupConnectorVersionGate(unittest.TestCase):
         self.assertFalse(ok)
 
     def test_action_mode_allows_unversioned_installed_connector_with_drift_override(self) -> None:
-        with patch(
-            "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
-            return_value=_discovery("geminicli", installed=True, version=""),
-        ), patch.dict(os.environ, {"DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT": "1"}):
+        with (
+            patch(
+                "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
+                return_value=_discovery("geminicli", installed=True, version=""),
+            ),
+            patch.dict(os.environ, {"DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT": "1"}),
+        ):
             ok = _check_connector_version_supported_for_setup(
                 "gemini-cli",
                 mode="action",
@@ -394,10 +498,13 @@ class TestSetupConnectorVersionGate(unittest.TestCase):
         self.assertTrue(ok)
 
     def test_action_mode_fails_closed_when_hook_discovery_errors(self) -> None:
-        with patch(
-            "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
-            side_effect=RuntimeError("boom"),
-        ), patch.dict(os.environ, {"DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT": "0"}):
+        with (
+            patch(
+                "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
+                side_effect=RuntimeError("boom"),
+            ),
+            patch.dict(os.environ, {"DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT": "0"}),
+        ):
             ok = _check_connector_version_supported_for_setup(
                 "codex",
                 mode="action",

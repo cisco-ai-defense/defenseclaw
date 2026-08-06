@@ -54,6 +54,7 @@ type modelFileAggregate struct {
 	id            string
 	format        string
 	provider      string
+	provenance    modelProvenanceHints
 	sizeBytes     int64
 	evidence      []AIEvidence
 	artifactKeys  map[string]struct{}
@@ -110,6 +111,7 @@ func (s *ContinuousDiscoveryService) detectModelFilesWithOutcome(ctx context.Con
 	if len(roots) == 0 {
 		return nil, 0, outcome, nil
 	}
+	delegatedRoots := nestedModelScanRoots(roots)
 	if len(roots) > 1 {
 		start := int((s.modelFileRootCursor.Add(1) - 1) % uint64(len(roots)))
 		if start > 0 {
@@ -196,6 +198,13 @@ func (s *ContinuousDiscoveryService) detectModelFilesWithOutcome(ctx context.Con
 				return filepath.SkipAll
 			}
 			if d.IsDir() {
+				if path != root.path && modelPathInSet(path, delegatedRoots[root.path]) {
+					// A more specific configured root owns this subtree. Skipping it
+					// here keeps provider/evidence identity stable even when the
+					// fairness cursor rotates the root traversal order.
+					lastCompleted = path
+					return filepath.SkipDir
+				}
 				macOSHomeLibrary := runtime.GOOS == "darwin" && !root.specialized &&
 					filepath.Clean(path) == filepath.Join(filepath.Clean(s.opts.HomeDir), "Library")
 				if path != root.path && (shouldSkipModelDirectory(d.Name(), root.specialized) || macOSHomeLibrary) {
@@ -454,6 +463,7 @@ func mergeModelFileAggregateMetadata(existing, candidate *modelFileAggregate) {
 	if existing.provider == "" {
 		existing.provider = candidate.provider
 	}
+	existing.provenance = mergeModelProvenanceHints(existing.provenance, candidate.provenance)
 	if candidate.sizeBytes > 0 && existing.sizeBytes <= math.MaxInt64-candidate.sizeBytes {
 		existing.sizeBytes += candidate.sizeBytes
 	}
@@ -629,13 +639,76 @@ func (s *ContinuousDiscoveryService) modelFileScanRoots() []modelScanRoot {
 			add(filepath.Join(home, "Library", "Caches", "mlx"), "mlx", true)
 		}
 	}
+	for _, root := range platformModelScanRoots(home) {
+		add(root.path, root.provider, root.specialized)
+	}
 	for _, dir := range s.lemonadeConfiguredModelDirs() {
 		add(dir, "lemonade", true)
 	}
 	for _, root := range s.scanRoots() {
 		add(root, "filesystem", false)
 	}
-	return roots
+	return normalizeModelScanRoots(roots)
+}
+
+// normalizeModelScanRoots removes a broad root that is fully contained by a
+// specialized store. The specialized root retains provider semantics and
+// independently participates in the fairness rotation, so keeping the broad
+// duplicate would only make artifact ownership order-dependent.
+func normalizeModelScanRoots(roots []modelScanRoot) []modelScanRoot {
+	out := make([]modelScanRoot, 0, len(roots))
+	for i, root := range roots {
+		drop := false
+		if !root.specialized {
+			for j, owner := range roots {
+				if i != j && owner.specialized && modelPathWithin(root.path, owner.path) {
+					drop = true
+					break
+				}
+			}
+		}
+		if !drop {
+			out = append(out, root)
+		}
+	}
+	return out
+}
+
+// nestedModelScanRoots delegates each nested subtree to its more specific
+// root. This prevents an ancestor from claiming the same model first when the
+// root fairness cursor rotates, while still allowing every retained root to
+// make bounded progress.
+func nestedModelScanRoots(roots []modelScanRoot) map[string][]string {
+	out := make(map[string][]string)
+	for i, parent := range roots {
+		for j, child := range roots {
+			if i == j || !modelPathWithin(child.path, parent.path) {
+				continue
+			}
+			out[parent.path] = append(out[parent.path], child.path)
+		}
+		sort.Strings(out[parent.path])
+	}
+	return out
+}
+
+func modelPathWithin(path, parent string) bool {
+	relative, err := filepath.Rel(filepath.Clean(parent), filepath.Clean(path))
+	if err != nil || relative == "." || relative == ".." {
+		return false
+	}
+	return !strings.HasPrefix(relative, ".."+string(os.PathSeparator))
+}
+
+func modelPathInSet(path string, candidates []string) bool {
+	path = filepath.Clean(path)
+	for _, candidate := range candidates {
+		candidate = filepath.Clean(candidate)
+		if path == candidate || (runtime.GOOS == "windows" && strings.EqualFold(path, candidate)) {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *ContinuousDiscoveryService) lemonadeConfiguredModelDirs() []string {
@@ -775,7 +848,9 @@ func isOllamaStorePath(path string, root modelScanRoot) bool {
 }
 
 func (s *ContinuousDiscoveryService) modelArtifactCandidate(path string, root modelScanRoot, format string, directory bool, explicitID string) (modelFileAggregate, bool) {
-	info, err := os.Stat(path) // follows cache snapshot symlinks; content is never opened
+	// Follows cache snapshot symlinks. Weight tensors are never read; a bounded
+	// metadata prefix may be opened for self-describing containers such as GGUF.
+	info, err := os.Stat(path)
 	if err != nil || (directory && !info.IsDir()) || (!directory && !info.Mode().IsRegular()) {
 		return modelFileAggregate{}, false
 	}
@@ -784,8 +859,12 @@ func (s *ContinuousDiscoveryService) modelArtifactCandidate(path string, root mo
 	if resolved, err := filepath.EvalSymlinks(path); err == nil {
 		artifactKey = filepath.Clean(resolved)
 	}
+	provenance := modelProvenanceHints{}
 	if hfDir, hfID, ok := huggingFaceModelIdentity(path); ok {
 		id, key, provider = hfID, "huggingface:"+hfDir, "huggingface"
+		provenance.References = []string{hfID}
+		provenance.HuggingFaceRepoIDs = []string{hfID}
+		provenance.Source = "hf_cache"
 		if strings.HasPrefix(strings.ToLower(hfID), "mlx-community/") {
 			format, provider = "mlx", "mlx"
 		}
@@ -819,6 +898,9 @@ func (s *ContinuousDiscoveryService) modelArtifactCandidate(path string, root mo
 	if id == "" {
 		return modelFileAggregate{}, false
 	}
+	if !directory {
+		provenance = mergeModelProvenanceHints(provenance, modelArtifactProvenanceHints(path, format))
+	}
 	workspaceHash := hashPath(root.path)
 	metadata := fmt.Sprintf("%s|%d|%d", format, info.Size(), info.ModTime().UTC().UnixNano())
 	evidence := AIEvidence{
@@ -838,7 +920,7 @@ func (s *ContinuousDiscoveryService) modelArtifactCandidate(path string, root mo
 		sizeBytes = 0
 	}
 	return modelFileAggregate{
-		key: key, id: id, format: format, provider: provider,
+		key: key, id: id, format: format, provider: provider, provenance: provenance,
 		sizeBytes: sizeBytes,
 		evidence:  []AIEvidence{evidence}, artifactKey: artifactKey,
 	}, true
@@ -1025,6 +1107,11 @@ func modelAggregatesToSignals(s *ContinuousDiscoveryService, aggregates map[stri
 			ID: candidate.id, Status: "installed", Format: candidate.format,
 			Provider: candidate.provider, SizeBytes: candidate.sizeBytes,
 		}
+		enrichLocalModelProvenance(signal.Model, candidate.provenance)
+		if signal.Model.Provenance != nil {
+			provenanceJSON, _ := json.Marshal(signal.Model.Provenance)
+			signal.EvidenceHash = hashValue(signal.EvidenceHash + "|provenance:" + string(provenanceJSON))
+		}
 		out = append(out, signal)
 	}
 	sortAISignals(out)
@@ -1049,6 +1136,12 @@ func localModelArtifactProduct(provider string) (string, string) {
 		return "LM Studio", "LM Studio"
 	case "llamacpp":
 		return "llama.cpp", "ggml.ai"
+	case "jan":
+		return "Jan", "Jan"
+	case "gpt4all":
+		return "GPT4All", "Nomic AI"
+	case "anythingllm":
+		return "AnythingLLM", "Mintplex Labs"
 	default:
 		return "Local Model Artifact", "Local"
 	}

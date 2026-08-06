@@ -30,13 +30,16 @@ import subprocess
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import click
 
 from defenseclaw import ux
 from defenseclaw.commands import compute_verdict as _compute_verdict
 from defenseclaw.context import AppContext, pass_ctx
+
+if TYPE_CHECKING:
+    from defenseclaw.scanner.rulepack import RulePackOverlayCache
 
 _WINDOWS_LAUNCHER_EXTENSIONS = (".com", ".exe", ".bat", ".cmd")
 _CLAWHUB_OUTPUT_LIMIT = 16 * 1024
@@ -1280,7 +1283,13 @@ def _print_skill_list_table(
 # skill scan
 # ---------------------------------------------------------------------------
 
-def _build_skill_scanner(app: AppContext, use_llm: bool | None = None):
+def _build_skill_scanner(
+    app: AppContext,
+    use_llm: bool | None = None,
+    *,
+    connector: str | None = None,
+    pack_cache: RulePackOverlayCache | None = None,
+):
     """Construct a :class:`SkillScannerWrapper` with the unified LLM lane
     defaulted on whenever a model resolves (SK-6).
 
@@ -1317,7 +1326,12 @@ def _build_skill_scanner(app: AppContext, use_llm: bool | None = None):
     )
     # R4: overlay the configured guardrail rule pack so `skill scan` flags what
     # the gateway's rule lanes would catch. No-op when no rule_pack_dir is set.
-    return maybe_wrap(scanner, app.cfg)
+    return maybe_wrap(
+        scanner,
+        app.cfg,
+        connector,
+        pack_cache=pack_cache,
+    )
 
 
 def _skill_scan_findings_verdict(result: Any, *, blocked: bool = False) -> str:
@@ -1453,8 +1467,6 @@ def scan(
     if not target and not scan_path:
         scan_all = True
 
-    scanner = _build_skill_scanner(app, use_llm)
-
     if scan_all or target == "all":
         # Resolve which connector(s) `--all` should fan out across — for BOTH
         # the local and --remote paths. An explicit --connector targets exactly
@@ -1471,6 +1483,7 @@ def scan(
             connectors = [None]
         json_rows: list[dict[str, Any]] = []
         enforcement_failed = False
+        pack_cache: RulePackOverlayCache = {}
         for c in connectors:
             if len(connectors) > 1 and not as_json:
                 click.echo(ux._style(f"\n── connector: {c} ──", fg="cyan"))
@@ -1478,7 +1491,19 @@ def scan(
                 rows = _scan_all_remote(app, as_json, connector=c)
             else:
                 try:
-                    rows = _scan_all(app, scanner, as_json, enforce=action, connector=c)
+                    scanner = _build_skill_scanner(
+                        app,
+                        use_llm,
+                        connector=c,
+                        pack_cache=pack_cache,
+                    )
+                    rows = _scan_all(
+                        app,
+                        scanner,
+                        as_json,
+                        enforce=action,
+                        connector=c,
+                    )
                 except SystemExit as exc:
                     if not action or exc.code in (None, 0):
                         raise
@@ -1505,6 +1530,7 @@ def scan(
             matches = _skill_match_dir_scopes(app, target)
             if len(matches) > 1:
                 json_rows: list[dict[str, Any]] = []
+                pack_cache: RulePackOverlayCache = {}
                 if remote:
                     for match_connector, match_dir in matches:
                         if not as_json:
@@ -1525,7 +1551,12 @@ def scan(
                         click.echo(ux._style(f"\n── connector: {match_connector} ──", fg="cyan"))
                     _scan_one_local_skill(
                         app,
-                        scanner,
+                        _build_skill_scanner(
+                            app,
+                            use_llm,
+                            connector=match_connector,
+                            pack_cache=pack_cache,
+                        ),
                         scan_dir=match_dir,
                         as_json=as_json,
                         action=action,
@@ -1553,6 +1584,7 @@ def scan(
             matches = _skill_match_dir_scopes(app, target, connector_flag)
             if len(matches) > 1:
                 json_rows: list[dict[str, Any]] = []
+                pack_cache: RulePackOverlayCache = {}
                 if remote:
                     for match_connector, match_dir in matches:
                         if not as_json:
@@ -1573,7 +1605,12 @@ def scan(
                         click.echo(ux._style(f"\n── connector: {match_connector} ──", fg="cyan"))
                     _scan_one_local_skill(
                         app,
-                        scanner,
+                        _build_skill_scanner(
+                            app,
+                            use_llm,
+                            connector=match_connector,
+                            pack_cache=pack_cache,
+                        ),
                         scan_dir=match_dir,
                         as_json=as_json,
                         action=action,
@@ -1637,7 +1674,7 @@ def scan(
     connector = scan_connector or resolve_list_connector(app, connector_flag)
     _scan_one_local_skill(
         app,
-        scanner,
+        _build_skill_scanner(app, use_llm, connector=connector),
         scan_dir=scan_dir,
         as_json=as_json,
         action=action,
@@ -4352,7 +4389,12 @@ def _skill_install_targets(
     targets: list[tuple[str, str]] = []
     skipped: list[str] = []
     for connector in connectors:
-        dirs = [d for d in app.cfg.skill_dirs(connector) if d]
+        resolver = (
+            getattr(app.cfg, "skill_write_dirs", app.cfg.skill_dirs)
+            if _normalize_runtime_connector(connector) == "amp"
+            else app.cfg.skill_dirs
+        )
+        dirs = [d for d in resolver(connector) if d]
         if not dirs:
             skipped.append(connector)
             continue
@@ -4794,7 +4836,7 @@ def install(app: AppContext, name: str, force: bool, take_action: bool, connecto
                 f"(connector={connector})"
             )
 
-    scanner = _build_skill_scanner(app)
+    pack_cache: RulePackOverlayCache = {}
     for connector, _install_root in targets:
         skill_path = installed_by_connector[connector]
         pre_decision = pre_decisions[connector]
@@ -4821,7 +4863,11 @@ def install(app: AppContext, name: str, force: bool, take_action: bool, connecto
         _scan_installed_skill_for_connector(
             app,
             pe,
-            scanner,
+            _build_skill_scanner(
+                app,
+                connector=connector,
+                pack_cache=pack_cache,
+            ),
             skill_name,
             skill_path,
             connector=connector,

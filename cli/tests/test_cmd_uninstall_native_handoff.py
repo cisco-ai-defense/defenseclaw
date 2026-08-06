@@ -635,6 +635,31 @@ def test_prepare_refuses_unsupported_marker_identity(tmp_path: Path) -> None:
         _prepare_from_tree(local_app_data, profile)
 
 
+@pytest.mark.parametrize("connector", ["codex", "claudecode", "amp", "none"])
+def test_prepare_accepts_every_native_installer_connector(
+    tmp_path: Path,
+    connector: str,
+) -> None:
+    local_app_data, profile = _native_tree(tmp_path)
+    state_path = local_app_data / "Programs" / "DefenseClaw" / "installer" / "install-state.json"
+    state = _install_state(local_app_data, profile)
+    state["connector"] = connector
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    assert _prepare_from_tree(local_app_data, profile) is not None
+
+
+def test_prepare_refuses_unknown_native_installer_connector(tmp_path: Path) -> None:
+    local_app_data, profile = _native_tree(tmp_path)
+    state_path = local_app_data / "Programs" / "DefenseClaw" / "installer" / "install-state.json"
+    state = _install_state(local_app_data, profile)
+    state["connector"] = "not-a-connector"
+    state_path.write_text(json.dumps(state), encoding="utf-8")
+
+    with pytest.raises(native.NativeWindowsUninstallRefusal, match="signed user installation"):
+        _prepare_from_tree(local_app_data, profile)
+
+
 @pytest.mark.parametrize("transaction_id", [False, 0, "", [], {}])
 def test_prepare_refuses_non_string_or_empty_transaction_identity(
     tmp_path: Path,

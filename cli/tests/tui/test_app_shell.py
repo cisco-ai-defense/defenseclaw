@@ -47,6 +47,7 @@ from defenseclaw.tui.app import (
 from defenseclaw.tui.executor import CommandEvent
 from defenseclaw.tui.panels.ai_discovery import (
     AIDiscoveryPanelModel,
+    AIUsageModel,
     AIUsageSignal,
     AIUsageSnapshot,
     AIUsageSummary,
@@ -58,6 +59,8 @@ from defenseclaw.tui.panels.logs import FILTER_HOOKS, LogsPanelModel
 from defenseclaw.tui.panels.mcps import MCPRow, MCPsPanelModel
 from defenseclaw.tui.panels.overview import (
     ConnectorHealth,
+    DoctorCache,
+    DoctorRepairSummary,
     EnforcementCounts,
     HealthSnapshot,
     OverviewConfig,
@@ -69,6 +72,7 @@ from defenseclaw.tui.panels.setup import WIZARD_NAMES, SetupPanelModel
 from defenseclaw.tui.panels.skills import SkillRow, SkillsPanelModel
 from defenseclaw.tui.panels.tools import ToolsPanelModel
 from defenseclaw.tui.screens.mode_picker import ModePickerScreen
+from defenseclaw.tui.services.ai_discovery_state import AIUsageModelProvenance
 from defenseclaw.tui.services.gateway_log_views import GatewayLogRow
 from defenseclaw.tui.services.setup_state import ConfigField, ConfigSection, CredentialRow
 from defenseclaw.tui.services.tui_state import STATE_FILENAME
@@ -2103,6 +2107,362 @@ async def test_periodic_refresh_reloads_logs_and_doctor_cache(tmp_path) -> None:
         assert app.overview_model.doctor.failed == 1
 
 
+def test_load_doctor_cache_schema_v2_preserves_health_and_repairs(tmp_path) -> None:
+    (tmp_path / "doctor_cache.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "captured_at": "2026-05-21T02:31:22Z",
+                "mode": "repair",
+                "outcome": "failed",
+                "exit_code": 1,
+                "passed": 99,
+                "failed": 99,
+                "summary": {
+                    "passed": 7,
+                    "failed": 0,
+                    "warned": 0,
+                    "skipped": 1,
+                },
+                "checks": [{"status": "pass", "label": "Config", "detail": "valid"}],
+                "repair_summary": {
+                    "planned": 0,
+                    "applied": 1,
+                    "failed": 0,
+                    "blocked": 1,
+                    "manual": 0,
+                    "noop": 0,
+                    "declined": 0,
+                    "requires_confirmation": 0,
+                },
+                # The detail record independently prevents a false green even
+                # if a stale or partially written summary understates failures.
+                "repairs": [
+                    {"state": "applied", "label": "protect dotenv"},
+                    {"state": "failed", "label": "restart gateway"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    app = DefenseClawTUI(data_dir=tmp_path)
+
+    app._load_doctor_cache()  # noqa: SLF001 - exercise the disk consumer.
+
+    cache = app.overview_model.doctor
+    assert cache is not None
+    assert (cache.passed, cache.failed, cache.warned, cache.skipped) == (7, 0, 0, 1)
+    assert cache.repair_count("applied") == 1
+    assert cache.repair_count("failed") == 1
+    assert cache.repair_count("blocked") == 1
+    box = app.overview_model.doctor_box(now=datetime(2026, 5, 21, 2, 31, 22, tzinfo=timezone.utc))
+    assert box.summary_parts == ("7 pass", "1 skip")
+    assert box.repair_summary_parts == ("1 applied", "1 failed", "1 blocked")
+    assert box.run_outcome == "failed"
+    assert box.all_green is False
+
+
+def test_overview_renders_schema_v2_outcome_and_repairs_in_both_layouts() -> None:
+    from rich.console import Console
+
+    overview = OverviewPanelModel(OverviewConfig(), version="test")
+    overview.set_doctor_cache(
+        DoctorCache(
+            captured_at=datetime.now(timezone.utc),
+            passed=7,
+            schema_version=2,
+            mode="repair",
+            outcome="failed",
+            exit_code=1,
+            repair_summary=DoctorRepairSummary(applied=1, failed=1, blocked=1),
+            repair_states=("applied", "failed", "blocked"),
+        )
+    )
+    app = DefenseClawTUI(overview_model=overview)
+
+    compact = app._overview_body_text(overview.service_cards())  # noqa: SLF001
+    console = Console(file=io.StringIO(), width=220, height=100, record=True)
+    console.print(app._overview_renderable())  # noqa: SLF001
+    wide = console.export_text()
+
+    assert "outcome=failed" in compact
+    assert "Repairs  1 applied  1 failed  1 blocked" in compact
+    assert "Outcome  FAILED" in wide
+    assert "Repairs  1 applied  1 failed  1 blocked" in wide
+
+
+def test_load_doctor_cache_rejects_incomplete_schema_v2_as_healthy(tmp_path) -> None:
+    (tmp_path / "doctor_cache.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "captured_at": "2026-05-21T02:31:22Z",
+                "mode": "repair",
+                "outcome": "healthy",
+                # Missing exit_code and repair_summary: this may be truncated
+                # or written by an incompatible producer, so it cannot restore
+                # a green state even though its aggregate claims success.
+                "summary": {"passed": 1, "failed": 0, "warned": 0, "skipped": 0},
+                "checks": [{"status": "pass", "label": "Config", "detail": "valid"}],
+                "repairs": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    app = DefenseClawTUI(data_dir=tmp_path)
+
+    app._load_doctor_cache()  # noqa: SLF001 - exercise the disk consumer.
+
+    cache = app.overview_model.doctor
+    assert cache is not None
+    assert cache.cache_valid is False
+    assert cache.outcome_state() == "warning"
+    box = app.overview_model.doctor_box(now=datetime(2026, 5, 21, 2, 31, 22, tzinfo=timezone.utc))
+    assert box.run_outcome == "warning"
+    assert box.all_green is False
+
+
+@pytest.mark.parametrize(
+    "payload",
+    (
+        {
+            "captured_at": "2026-05-21T02:31:22Z",
+            "passed": "1",
+            "failed": 0,
+            "warned": 0,
+            "skipped": 0,
+            "checks": [],
+        },
+        {
+            "schema_version": 2,
+            "mode": "check",
+            "outcome": "healthy",
+            "exit_code": 0,
+            "summary": {"passed": 1, "failed": 0, "warned": 0, "skipped": 0},
+            "checks": [],
+            "repair_summary": {
+                "planned": 0,
+                "applied": 0,
+                "failed": 0,
+                "blocked": 0,
+                "manual": 0,
+                "noop": 0,
+                "declined": 0,
+                "requires_confirmation": 0,
+            },
+            "repairs": [],
+        },
+    ),
+)
+def test_load_doctor_cache_rejects_malformed_or_undated_green_payload(
+    tmp_path, payload
+) -> None:
+    (tmp_path / "doctor_cache.json").write_text(json.dumps(payload), encoding="utf-8")
+    app = DefenseClawTUI(data_dir=tmp_path)
+
+    app._load_doctor_cache()  # noqa: SLF001 - exercise the disk consumer.
+
+    cache = app.overview_model.doctor
+    assert cache is not None
+    assert cache.cache_valid is False
+    assert cache.outcome_state(
+        now=datetime(2026, 5, 21, 2, 31, 22, tzinfo=timezone.utc)
+    ) == "warning"
+    assert app.overview_model.doctor_box(
+        now=datetime(2026, 5, 21, 2, 31, 22, tzinfo=timezone.utc)
+    ).all_green is False
+
+
+@pytest.mark.parametrize("repair", ({}, {"state": ""}))
+def test_load_doctor_cache_rejects_blank_repair_state_as_healthy(tmp_path, repair) -> None:
+    (tmp_path / "doctor_cache.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "captured_at": "2026-05-21T02:31:22Z",
+                "mode": "repair",
+                "outcome": "healthy",
+                "exit_code": 0,
+                "summary": {"passed": 1, "failed": 0, "warned": 0, "skipped": 0},
+                "checks": [{"status": "pass", "label": "Config", "detail": "valid"}],
+                "repair_summary": {
+                    "planned": 0,
+                    "applied": 0,
+                    "failed": 0,
+                    "blocked": 0,
+                    "manual": 0,
+                    "noop": 0,
+                    "declined": 0,
+                    "requires_confirmation": 0,
+                },
+                "repairs": [repair],
+            }
+        ),
+        encoding="utf-8",
+    )
+    app = DefenseClawTUI(data_dir=tmp_path)
+
+    app._load_doctor_cache()  # noqa: SLF001 - exercise the disk consumer.
+
+    cache = app.overview_model.doctor
+    assert cache is not None
+    assert cache.cache_valid is False
+    assert cache.repair_states == ("",)
+    assert cache.outcome_state() == "warning"
+    box = app.overview_model.doctor_box(now=datetime(2026, 5, 21, 2, 31, 22, tzinfo=timezone.utc))
+    assert box.run_outcome == "warning"
+    assert box.all_green is False
+
+
+def test_load_doctor_cache_replaces_prior_green_when_refresh_is_malformed(
+    tmp_path, monkeypatch
+) -> None:
+    path = tmp_path / "doctor_cache.json"
+    path.write_text(
+        json.dumps(
+            {
+                "captured_at": "2026-05-21T02:31:22Z",
+                "passed": 1,
+                "failed": 0,
+                "warned": 0,
+                "skipped": 0,
+                "checks": [{"status": "pass", "label": "Config", "detail": "valid"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    app = DefenseClawTUI(data_dir=tmp_path)
+    readiness_syncs: list[None] = []
+    monkeypatch.setattr(app, "_sync_setup_readiness", lambda: readiness_syncs.append(None))
+
+    app._load_doctor_cache()  # noqa: SLF001 - exercise the disk consumer.
+    assert app.overview_model.doctor is not None
+    assert app.overview_model.doctor_box(
+        now=datetime(2026, 5, 21, 2, 31, 22, tzinfo=timezone.utc)
+    ).all_green
+
+    path.write_text("{", encoding="utf-8")
+    app._load_doctor_cache()  # noqa: SLF001 - malformed refresh must replace green state.
+
+    cache = app.overview_model.doctor
+    assert cache is not None
+    assert cache.cache_valid is False
+    assert cache.warned == 1
+    assert cache.outcome_state() == "warning"
+    assert len(cache.checks) == 1
+    assert cache.checks[0].status == "warn"
+    assert cache.checks[0].label == "Doctor cache"
+    assert "malformed JSON" in cache.checks[0].detail
+    assert readiness_syncs == [None, None]
+
+
+def test_load_doctor_cache_replaces_prior_green_when_cache_disappears(
+    tmp_path, monkeypatch
+) -> None:
+    path = tmp_path / "doctor_cache.json"
+    path.write_text(
+        json.dumps(
+            {
+                "captured_at": "2026-05-21T02:31:22Z",
+                "passed": 1,
+                "failed": 0,
+                "warned": 0,
+                "skipped": 0,
+                "checks": [{"status": "pass", "label": "Config", "detail": "valid"}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    app = DefenseClawTUI(data_dir=tmp_path)
+    readiness_syncs: list[None] = []
+    monkeypatch.setattr(app, "_sync_setup_readiness", lambda: readiness_syncs.append(None))
+
+    app._load_doctor_cache()  # noqa: SLF001 - exercise the disk consumer.
+    assert app.overview_model.doctor_box(
+        now=datetime(2026, 5, 21, 2, 31, 22, tzinfo=timezone.utc)
+    ).all_green
+
+    path.unlink()
+    app._load_doctor_cache()  # noqa: SLF001 - a deleted refresh must replace green state.
+
+    cache = app.overview_model.doctor
+    assert cache is not None
+    assert cache.cache_valid is False
+    assert cache.warned == 1
+    assert cache.outcome_state() == "warning"
+    assert cache.checks[0].status == "warn"
+    assert "no longer exists" in cache.checks[0].detail
+    assert app.overview_model.keys_status().available is False
+    assert readiness_syncs == [None, None]
+
+
+def test_load_doctor_cache_fails_closed_on_invalid_utf8(tmp_path) -> None:
+    (tmp_path / "doctor_cache.json").write_bytes(b"\xff\xfe\x00")
+    app = DefenseClawTUI(data_dir=tmp_path)
+    app.overview_model.set_doctor_cache(
+        DoctorCache(
+            captured_at=datetime.now(timezone.utc),
+            passed=1,
+            outcome="healthy",
+        )
+    )
+
+    app._load_doctor_cache()  # noqa: SLF001 - invalid bytes must replace green state.
+
+    cache = app.overview_model.doctor
+    assert cache is not None
+    assert cache.cache_valid is False
+    assert cache.outcome_state() == "warning"
+    assert cache.checks[0].status == "warn"
+    assert "not valid UTF-8 JSON" in cache.checks[0].detail
+
+
+def test_load_doctor_cache_fails_closed_when_existing_cache_cannot_be_read(
+    tmp_path, monkeypatch
+) -> None:
+    path = tmp_path / "doctor_cache.json"
+    path.write_text("{}", encoding="utf-8")
+    app = DefenseClawTUI(data_dir=tmp_path)
+    readiness_syncs: list[None] = []
+    monkeypatch.setattr(app, "_sync_setup_readiness", lambda: readiness_syncs.append(None))
+    original_read_text = Path.read_text
+
+    def _raise_for_doctor_cache(candidate: Path, *args, **kwargs):
+        if candidate == path:
+            raise OSError("permission denied")
+        return original_read_text(candidate, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _raise_for_doctor_cache)
+
+    app._load_doctor_cache()  # noqa: SLF001 - exercise the disk consumer.
+
+    cache = app.overview_model.doctor
+    assert cache is not None
+    assert cache.cache_valid is False
+    assert cache.outcome_state() == "warning"
+    assert "could not be read" in cache.checks[0].detail
+    assert readiness_syncs == [None]
+
+
+@pytest.mark.parametrize("payload", ([], "healthy", 1, None))
+def test_load_doctor_cache_fails_closed_on_non_object_payload(
+    tmp_path, monkeypatch, payload
+) -> None:
+    (tmp_path / "doctor_cache.json").write_text(json.dumps(payload), encoding="utf-8")
+    app = DefenseClawTUI(data_dir=tmp_path)
+    readiness_syncs: list[None] = []
+    monkeypatch.setattr(app, "_sync_setup_readiness", lambda: readiness_syncs.append(None))
+
+    app._load_doctor_cache()  # noqa: SLF001 - exercise the disk consumer.
+
+    cache = app.overview_model.doctor
+    assert cache is not None
+    assert cache.cache_valid is False
+    assert cache.outcome_state() == "warning"
+    assert "JSON object" in cache.checks[0].detail
+    assert readiness_syncs == [None]
+
+
 @pytest.mark.asyncio
 async def test_raw_process_log_tail_is_read_off_the_textual_thread(tmp_path, monkeypatch) -> None:
     from defenseclaw.tui.panels import logs as logs_module
@@ -2172,6 +2532,7 @@ async def test_audit_clickable_filter_controls() -> None:
         assert app.query_one("#panel-table", DataTable).row_count == 1
 
         await pilot.click("#audit-filter-all")
+        await pilot.pause()
         await pilot.click("#audit-filter-target")
         await pilot.pause()
 
@@ -3318,6 +3679,164 @@ async def test_ai_discovery_open_detail_toggles_when_row_selected() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ai_discovery_renders_models_in_separate_table_with_detail() -> None:
+    provenance = AIUsageModelProvenance(
+        publisher="Alibaba Cloud",
+        country_code="CN",
+        root_model="Qwen/Qwen3",
+        quantized=True,
+        quantization="Q4_K_M",
+        derivation="quantized",
+        source="catalog_exact",
+        confidence="high",
+    )
+    ai_model = AIDiscoveryPanelModel()
+    ai_model.set_snapshot(
+        AIUsageSnapshot(
+            enabled=True,
+            signals=(
+                AIUsageSignal(state="seen", product="Codex", vendor="OpenAI"),
+                AIUsageSignal(
+                    state="seen",
+                    category="local_model",
+                    product="Local Model Artifact",
+                    detector="model_file",
+                    model=AIUsageModel(
+                        id="Qwen3-Q4_K_M",
+                        status="installed",
+                        format="gguf",
+                        provenance=provenance,
+                    ),
+                ),
+            ),
+        )
+    )
+    app = DefenseClawTUI(ai_discovery_model=ai_model)
+
+    async with app.run_test(size=(180, 50)) as pilot:
+        await pilot.press("V")
+        await pilot.pause()
+
+        product_table = app.query_one("#panel-table", DataTable)
+        model_table = app.query_one("#ai-model-table", DataTable)
+        await _wait_for_background(
+            lambda: product_table.row_count == 1 and model_table.row_count == 1
+        )
+        assert product_table.row_count == 1
+        assert model_table.row_count == 1
+        assert "Codex" in str(product_table.get_cell_at((0, 2)))
+        assert "Qwen3-Q4_K_M" in str(model_table.get_cell_at((0, 1)))
+        assert "CN 🇨🇳" in str(model_table.get_cell_at((0, 2)))
+        assert app.query_one("#ai-model-table-label", Static).has_class("hidden") is False
+
+        ai_model.set_model_cursor(0)
+        model_table.focus()
+        await pilot.press("enter")
+        await pilot.pause()
+        assert ai_model.detail_open is True
+        assert "publisher=Alibaba Cloud" in app.detail_text
+        assert "root=Qwen/Qwen3" in app.detail_text
+
+
+@pytest.mark.asyncio
+async def test_ai_discovery_keyboard_focus_selects_the_matching_table() -> None:
+    ai_model = AIDiscoveryPanelModel()
+    ai_model.set_snapshot(
+        AIUsageSnapshot(
+            enabled=True,
+            signals=(
+                AIUsageSignal(signal_id="agent-a", state="seen", product="Claude"),
+                AIUsageSignal(signal_id="agent-b", state="seen", product="Codex"),
+                AIUsageSignal(
+                    signal_id="model-a",
+                    state="seen",
+                    category="local_model",
+                    model=AIUsageModel(id="Model-A"),
+                ),
+                AIUsageSignal(
+                    signal_id="model-b",
+                    state="seen",
+                    category="local_model",
+                    model=AIUsageModel(id="Model-B"),
+                ),
+            ),
+        )
+    )
+    app = DefenseClawTUI(ai_discovery_model=ai_model)
+
+    async with app.run_test(size=(180, 50)) as pilot:
+        await pilot.press("V")
+        await pilot.pause()
+
+        product_table = app.query_one("#panel-table", DataTable)
+        model_table = app.query_one("#ai-model-table", DataTable)
+
+        assert ai_model.active_table == "agents"
+        product_cursor = ai_model.cursor
+
+        await pilot.press("t")
+        await pilot.pause()
+        assert ai_model.active_table == "models"
+        assert app.focused is model_table
+        await pilot.press("down")
+        await pilot.pause()
+        assert ai_model.model_cursor == 1
+        assert ai_model.cursor == product_cursor
+
+        # Change both row sets so neither table can take its idempotent render
+        # fast path. Late product focus/highlight events from the redraw must
+        # not steal the model viewport that visibly owns keyboard focus.
+        previous_product_signature = app._last_table_signature
+        previous_model_signature = app._last_ai_model_table_signature
+        ai_model.set_snapshot(
+            AIUsageSnapshot(
+                enabled=True,
+                signals=(
+                    AIUsageSignal(
+                        signal_id="agent-a", state="changed", product="Claude"
+                    ),
+                    AIUsageSignal(signal_id="agent-b", state="seen", product="Codex"),
+                    AIUsageSignal(
+                        signal_id="model-a",
+                        state="seen",
+                        category="local_model",
+                        model=AIUsageModel(id="Model-A"),
+                    ),
+                    AIUsageSignal(
+                        signal_id="model-b",
+                        state="seen",
+                        category="local_model",
+                        model=AIUsageModel(id="Model-B", status="loaded"),
+                    ),
+                ),
+            )
+        )
+        app._render_chrome()
+        await pilot.pause()
+        assert app._last_table_signature != previous_product_signature
+        assert app._last_ai_model_table_signature != previous_model_signature
+        assert ai_model.active_table == "models"
+        assert app.focused is model_table
+        assert ai_model.model_cursor == 1
+
+        await pilot.press("enter")
+        await pilot.pause()
+        assert ai_model.detail_open is True
+        assert "Model-B" in ai_model.detail_header()
+
+        await pilot.press("enter")
+        await pilot.press("t")
+        await pilot.pause()
+        assert ai_model.active_table == "agents"
+        assert app.focused is product_table
+        await pilot.press("enter")
+        await pilot.pause()
+        assert ai_model.detail_open is True
+        assert ai_model.selected_agent() is not None
+        assert ai_model.selected_agent().product in ai_model.detail_header()
+
+
+@pytest.mark.asyncio
 async def test_ai_discovery_enter_toggles_detail_exactly_once_per_press() -> None:
     """Each ``enter`` press flips the detail panel exactly once.
 
@@ -3388,7 +3907,25 @@ async def test_ai_discovery_export_button_writes_snapshot(tmp_path) -> None:
         enabled=True,
         summary=AIUsageSummary(scan_id="scan-1", total_signals=1),
         signals=(
-            AIUsageSignal(name="openai-agent", vendor="OpenAI", category="chat"),
+            AIUsageSignal(
+                name="local-model",
+                vendor="Local",
+                category="local_model",
+                model=AIUsageModel(
+                    id="Qwen3",
+                    status="installed",
+                    provenance=AIUsageModelProvenance(
+                        publisher="Alibaba Cloud",
+                        country_code="CN",
+                        root_model="Qwen/Qwen3",
+                        quantized=False,
+                        distilled=False,
+                        derivation="base",
+                        source="catalog_exact",
+                        confidence="high",
+                    ),
+                ),
+            ),
         ),
     )
     ai_model = AIDiscoveryPanelModel()
@@ -3404,10 +3941,18 @@ async def test_ai_discovery_export_button_writes_snapshot(tmp_path) -> None:
         matches = list(tmp_path.glob("defenseclaw-ai-usage-*.json"))
         assert len(matches) == 1, f"expected exactly one export, got {matches}"
         target = matches[0]
+        _assert_sensitive_export_is_owner_only(target)
         body = json.loads(target.read_text(encoding="utf-8"))
         assert body["enabled"] is True
         assert body["summary"]["scan_id"] == "scan-1"
-        assert body["signals"][0]["name"] == "openai-agent"
+        assert body["signals"][0]["name"] == "local-model"
+        provenance = body["signals"][0]["model"]["provenance"]
+        assert provenance["country_code"] == "CN"
+        assert provenance["quantized"] is False
+        assert provenance["distilled"] is False
+        assert provenance["derivation"] == "base"
+        assert provenance["source"] == "catalog_exact"
+        assert provenance["confidence"] == "high"
 
 
 def test_safe_body_renderable_falls_back_on_invalid_style() -> None:

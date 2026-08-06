@@ -7,10 +7,11 @@
   "scripts": {
     "dev": "next dev --turbopack",
     "build": "next build",
-    "postbuild": "tsx ./scripts/build-page-markdown.ts && tsx ./scripts/check-diagram-widths.ts",
+    "postbuild": "tsx ./scripts/build-page-markdown.ts && tsx ./scripts/check-diagram-widths.ts && npm run validate-seo",
     "start": "next start",
     "lint": "next lint",
     "validate-links": "tsx ./scripts/validate-links.ts",
+    "validate-seo": "tsx ./scripts/validate-seo-output.ts",
     "validate-snippets": "tsx ./scripts/validate-shell-snippets.ts",
     "check-diagram-widths": "tsx ./scripts/check-diagram-widths.ts",
     "build:connector-icons": "tsx ./scripts/sync-connector-icons.ts",

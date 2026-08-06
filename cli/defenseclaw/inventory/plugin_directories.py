@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 from dataclasses import dataclass
 from typing import Any
 
@@ -40,6 +41,7 @@ from defenseclaw.safety import is_symlink, is_within_roots
 _CODEX_MANIFEST = ".codex-plugin/plugin.json"
 _MAX_MANIFEST_BYTES = 1_048_576
 _MAX_CONFIG_BYTES = 2_097_152
+_MAX_AMP_PLUGIN_BYTES = 2_097_152
 
 
 @dataclass(frozen=True)
@@ -73,6 +75,62 @@ def _child_directories(root: str) -> list[tuple[str, str]]:
             continue
         children.append((entry.name, entry.path))
     return children
+
+
+def _amp_plugin_files(root: str, connector: str) -> list[tuple[str, str]]:
+    """Return bounded direct ``*.ts`` Amp plugins without following links."""
+
+    if (connector or "").casefold().replace("-", "") != "amp":
+        return []
+    try:
+        entries = sorted(os.scandir(root), key=lambda entry: entry.name.casefold())
+    except OSError:
+        return []
+    plugins: list[tuple[str, str]] = []
+    for entry in entries:
+        if entry.name.startswith(".") or not entry.name.casefold().endswith(".ts"):
+            continue
+        try:
+            if entry.is_symlink() or not entry.is_file(follow_symlinks=False):
+                continue
+            if entry.stat(follow_symlinks=False).st_size > _MAX_AMP_PLUGIN_BYTES:
+                continue
+        except OSError:
+            continue
+        if not is_within_roots(entry.path, root):
+            continue
+        plugin_id = entry.name[:-3].strip()
+        if plugin_id:
+            plugins.append((plugin_id, entry.path))
+    return plugins
+
+
+def read_amp_plugin_source(path: str) -> str:
+    """Read one Amp plugin as bounded UTF-8 without following symlinks."""
+
+    if is_symlink(path):
+        return ""
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError:
+        return ""
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode) or opened.st_size > _MAX_AMP_PLUGIN_BYTES:
+            return ""
+        with os.fdopen(fd, "rb", closefd=False) as handle:
+            raw = handle.read(_MAX_AMP_PLUGIN_BYTES + 1)
+        if len(raw) > _MAX_AMP_PLUGIN_BYTES:
+            return ""
+    except OSError:
+        return ""
+    finally:
+        os.close(fd)
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return ""
 
 
 def _read_bounded_json(path: str) -> dict[str, Any] | None:
@@ -253,7 +311,26 @@ def discover_plugin_directories(
                 manifest=manifest,
             )
         )
-    return plugins
+    for plugin_id, path in _amp_plugin_files(root, connector):
+        key = filesystem_identity_key(plugin_id, root)
+        if key in claimed:
+            raise AmbiguousPluginIdentityError(
+                f"ambiguous plugin identity {plugin_id!r}: {claimed[key]}, {path}; "
+                "remove or rename duplicate plugins"
+            )
+        claimed[key] = path
+        plugins.append(
+            PluginDirectory(
+                id=plugin_id,
+                name=plugin_id,
+                path=path,
+                origin=root,
+                # Amp's source file is the plugin artifact; there is no
+                # separate manifest requirement for direct TypeScript plugins.
+                manifest=os.path.basename(path),
+            )
+        )
+    return sorted(plugins, key=lambda entry: entry.id.casefold())
 
 
 def plugin_directory_entries(

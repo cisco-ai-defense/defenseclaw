@@ -1,5 +1,5 @@
 import { source } from '@/lib/source';
-import { siteUrl, site, defaultKeywords } from '@/lib/site';
+import { canonicalUrl, site, defaultKeywords } from '@/lib/site';
 import { DocsPage, DocsBody, DocsTitle, DocsDescription } from 'fumadocs-ui/page';
 import { notFound } from 'next/navigation';
 import type { Metadata } from 'next';
@@ -20,7 +20,7 @@ export default async function Page({ params }: PageParams) {
   if (!page) notFound();
 
   const MDX = page.data.body;
-  const url = `${siteUrl}${page.url}`;
+  const url = canonicalUrl(page.url);
 
   // Breadcrumb segments are derived from the page tree, not the URL,
   // so dynamic intermediate folders (e.g. "stories") still surface
@@ -55,7 +55,7 @@ export default async function Page({ params }: PageParams) {
         title={page.data.title}
         description={page.data.description ?? site.description}
         url={url}
-        datePublished={page.data.updatedAt}
+        dateModified={page.data.updatedAt}
       />
       <DocsTitle>
         {connectorId ? (
@@ -84,8 +84,10 @@ export async function generateMetadata({ params }: PageParams): Promise<Metadata
   const page = source.getPage(slug);
   if (!page) return {};
 
-  const url = page.url;
-  const ogPath = `/docs-og${url.endsWith('/') ? url.slice(0, -1) : url}.png`;
+  const canonical = canonicalUrl(page.url);
+  const ogPath = `/docs-og${
+    page.url.endsWith('/') ? page.url.slice(0, -1) : page.url
+  }.png`;
 
   // Per-page canonical URL keeps the indexed surface stable across
   // basePath swaps (project pages → custom domain). The OG image
@@ -96,13 +98,13 @@ export async function generateMetadata({ params }: PageParams): Promise<Metadata
     title: page.data.title,
     description: page.data.description ?? site.description,
     keywords: page.data.keywords ?? defaultKeywords,
-    alternates: { canonical: url },
+    alternates: { canonical },
     authors: page.data.authors ?? [{ name: 'Cisco', url: site.organization.url }],
     openGraph: {
       type: 'article',
       title: page.data.title,
       description: page.data.description ?? site.description,
-      url,
+      url: canonical,
       siteName: `Cisco · ${site.name}`,
       images: [
         {
@@ -131,8 +133,11 @@ function buildBreadcrumbs(slug: string[]): { name: string; url: string }[] {
   for (const seg of slug) {
     acc += `/${seg}`;
     const page = source.getPage(acc.replace(/^\/docs\/?/, '').split('/').filter(Boolean));
+    // Folder labels can exist in Fumadocs meta without a corresponding
+    // landing page. Do not advertise those 404 routes in breadcrumb JSON-LD.
+    if (!page) continue;
     out.push({
-      name: page?.data.title ?? seg.replace(/-/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()),
+      name: page.data.title,
       url: acc,
     });
   }

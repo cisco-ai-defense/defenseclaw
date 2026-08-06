@@ -1,6 +1,6 @@
 ---
 title: Policies
-description: How DefenseClaw decides — repo policies (OPA/Rego), guardrail rule packs (regex + LLM judge), scanner policies, and the suppression layer that keeps your alert volume sane.
+description: How DefenseClaw decides — OPA/Rego policy, structured tool-call rules, regex and judge detection, scanner policy, and noise suppression.
 keywords:
   - DefenseClaw policies
   - LLM judge
@@ -20,6 +20,11 @@ DefenseClaw records a normalized runtime action—`allow`, `alert`, `confirm`, o
 The guided trace normalizes a connector event, matches a deterministic rule, checks suppressions, skips the optional judge when it is disabled, assigns severity, and resolves the active runtime action. Runtime guardrail actions are separate from the `skill_actions` and `mcp_actions` admission mappings used by scanners.
 
 <Cards>
+  <Card
+    title="CEL tool-call policies"
+    href="/docs/policies/cel"
+    description="Author bounded CEL rules against trusted ActionFacts, understand the engine and regex fallback, and review connector lifecycle guarantees."
+  />
   <Card
     title="Policy creator"
     href="/docs/policies/creator"
@@ -70,7 +75,18 @@ The guided trace normalizes a connector event, matches a deterministic rule, che
   <Edge from="corr" to="synthetic" label="pattern matched" />
 </Flow>
 
-Plain local rules cover many secrets and explicit prompt-injection patterns. The optional judge handles ambiguous and semantic cases. Suppressions remove known noise before the verdict is aggregated. The session correlator independently watches persisted findings for cross-event patterns such as the lethal trifecta. OPA/Rego also powers admission, firewall, sandbox, audit, and direct guardrail-policy evaluation.
+Structured tool calls first produce normalized operations, arguments, paths,
+endpoints, and data-flow facts for precise CEL rules. Plain local rules cover
+unstructured secrets and explicit prompt-injection patterns, while bounded
+regex remains the fail-closed fallback when a tool action cannot be modeled
+authoritatively. The optional judge handles ambiguous content cases.
+Suppressions remove known noise before the verdict is aggregated. The legacy
+session correlator independently watches persisted findings for post-event
+patterns such as the lethal trifecta. Separately, fixed ordered tool-call
+chains join exact authenticated hook events before the verdict; only an
+enforcement-safe synchronous pre-tool final step can deny, and only when the
+active profile maps the chain's severity to `block`. OPA/Rego continues to
+power admission, firewall, sandbox, audit, and direct guardrail-policy evaluation.
 
 ## Layer 1 — Repo policies (OPA / Rego)
 
@@ -140,7 +156,9 @@ Guardrail scanner and hook events separately preserve matching rule IDs, evaluat
 
 ## Layer 2 — Guardrail rule packs
 
-The guardrail rule pack is the *content* the gateway evaluates against — the actual regex patterns, judge prompts, and category taxonomies. Three packs ship out of the box:
+The guardrail rule pack is the *content* the gateway evaluates against — the
+[tool-call CEL expressions](/docs/policies/cel/authoring) and bounded regex fallbacks,
+judge prompts, and category taxonomies. Three packs ship out of the box:
 
 <Cards>
   <Card title="permissive" href="/docs/defaults" description="Permissive runtime posture: CRITICAL blocks, HIGH alerts, and lower severities allow. Pair with observe mode for a non-enforcing pilot." />
@@ -421,7 +439,13 @@ Ways to act on correlations without changing the gateway runtime:
 
 ## Authoring custom rule packs
 
-The path of least resistance is to extend rather than replace. Custom rule packs live on disk and are pointed at via the `guardrail.rule_pack_dir` config key — there is no built-in linter or fixture-runner today, so the workflow is git-driven.
+The path of least resistance is to extend rather than replace. Custom rule
+packs live on disk and are selected through `guardrail.rule_pack_dir`. Before
+switching the gateway, run the built-in offline validator: it uses the same Go
+loader as the gateway, compiles every CEL expression, and rejects the complete
+candidate on any invalid component. See [Validate rule packs](/docs/policies/rulepack-validation)
+for the command contract and [CEL rule authoring](/docs/policies/cel/authoring) for
+the expression schema and authoring examples.
 
 <Steps>
   <Step>
@@ -440,32 +464,39 @@ The path of least resistance is to extend rather than replace. Custom rule packs
     ```
   </Step>
   <Step>
-    **Add a rules file alongside `local-patterns.yaml`.** Keep your custom rules in their own file so updates to the bundled patterns don't conflict.
+    **Add a rules file alongside `local-patterns.yaml`.** Keep custom rules in
+    their own file so updates to bundled patterns do not conflict. A CEL rule
+    still carries its bounded regex fallback; follow the
+    [CEL authoring guide](/docs/policies/cel/authoring) for the full rule shape.
   </Step>
   <Step>
-    **Validate the surrounding config.** There is no rule-pack-specific CLI linter today. `defenseclaw config validate` checks `config.yaml` itself (including the `rule_pack_dir` value), but it does not parse every YAML file inside that directory:
+    **Validate the complete candidate pack.** This is an offline preflight and
+    does not modify the active gateway:
 
     ```bash
-    defenseclaw config validate
+    defenseclaw guardrail validate-pack \
+      ~/.defenseclaw/policies/guardrail/my-org
     ```
+
+    Exit `0` means the same authoritative loader accepted the pack. Use
+    `--json` in CI; exits `1` and `2` distinguish an invalid pack from an
+    unavailable validator.
   </Step>
   <Step>
-    **Point the gateway at the new directory.** Edit `~/.defenseclaw/config.yaml` and set:
-
-    ```yaml
-    guardrail:
-      rule_pack_dir: ~/.defenseclaw/policies/guardrail/my-org
-    ```
-
-    Then restart the gateway so it rebuilds the local rule set and judge from the new directory:
+    **Apply the validated directory and verify the effective connector packs.**
+    The setup command writes `rule_pack_dir` and restarts the gateway so it
+    rebuilds the local rules and judge:
 
     ```bash
-    defenseclaw-gateway restart
+    defenseclaw setup guardrail \
+      --rule-pack-dir ~/.defenseclaw/policies/guardrail/my-org \
+      --restart
+    defenseclaw doctor
     ```
 
-    `defenseclaw-gateway policy reload` is narrower: it recompiles the OPA modules under `policy_dir`; it is not the rule-pack reload command.
-
-    `defenseclaw setup guardrail --rule-pack <name>` is for switching between the three bundled packs (`default`, `strict`, `permissive`); custom directories go through `rule_pack_dir`.
+    DefenseClaw does not watch rule-pack files for live changes.
+    `defenseclaw-gateway policy reload` recompiles OPA modules under
+    `policy_dir`; it does not reload guardrail rule packs.
   </Step>
 </Steps>
 

@@ -60,13 +60,19 @@ func TestHookContractResolution(t *testing.T) {
 		{"codex_six_event_upper_boundary", "codex", "codex 0.128.99", HookCompatibilityKnown, "codex-hooks-v1", "0.128.99"},
 		{"codex_eight_event_minimum", "codex", "codex 0.129.0", HookCompatibilityKnown, "codex-hooks-v2", "0.129.0"},
 		{"codex_eight_event_upper_boundary", "codex", "codex 0.132.99", HookCompatibilityKnown, "codex-hooks-v2", "0.132.99"},
-		{"codex_ten_event_minimum", "codex", "codex 0.133.0", HookCompatibilityKnown, "codex-hooks-v3", "0.133.0"},
-		{"codex_current", "codex", "codex 0.144.3", HookCompatibilityKnown, "codex-hooks-v3", "0.144.3"},
-		{"codex_unversioned_uses_full_default", "codex", "", HookCompatibilityUnversioned, "codex-hooks-v3", ""},
+		{"codex_ten_event_selective_minimum", "codex", "codex 0.133.0", HookCompatibilityKnown, "codex-hooks-v3", "0.133.0"},
+		{"codex_ten_event_selective_upper_boundary", "codex", "codex 0.134.99", HookCompatibilityKnown, "codex-hooks-v3", "0.134.99"},
+		{"codex_generic_function_minimum", "codex", "codex 0.135.0", HookCompatibilityKnown, "codex-hooks-v3-generic", "0.135.0"},
+		{"codex_generic_function_upper_boundary", "codex", "codex 0.144.99", HookCompatibilityKnown, "codex-hooks-v3-generic", "0.144.99"},
+		{"codex_session_end_minimum", "codex", "codex 0.145.0", HookCompatibilityKnown, "codex-hooks-v4", "0.145.0"},
+		{"codex_current", "codex", "codex 0.146.0", HookCompatibilityKnown, "codex-hooks-v4", "0.146.0"},
+		{"codex_unversioned_uses_full_default", "codex", "", HookCompatibilityUnversioned, "codex-hooks-v4", ""},
 		{"codex_unknown_before_stable", "codex", "codex 0.123.0", HookCompatibilityUnknown, "", "0.123.0"},
 		{"claude_before_message_display", "claude-code", "Claude Code v2.1.151", HookCompatibilityUnknown, "", "2.1.151"},
 		{"claude_alias_known", "claude-code", "Claude Code v2.1.152", HookCompatibilityKnown, "claudecode-hooks-v1", "2.1.152"},
 		{"openhands_alias_known", "open-hands", "OpenHands 1.0.0", HookCompatibilityKnown, "openhands-hooks-v1", "1.0.0"},
+		{"antigravity_before_reliable_post", "antigravity", "Antigravity CLI v1.1.8", HookCompatibilityUnknown, "", "1.1.8"},
+		{"antigravity_reliable_post_minimum", "antigravity", "Antigravity CLI v1.1.9", HookCompatibilityKnown, "antigravity-hooks-v2", "1.1.9"},
 		{"unversioned_uses_default", "cursor", "", HookCompatibilityUnversioned, "cursor-hooks-v1", ""},
 		{"openclaw_proxy_not_gated", "openclaw", "", HookCompatibilityNotGated, "", ""},
 		{"zeptoclaw_proxy_not_gated", "zeptoclaw", "zeptoclaw 0.5.0", HookCompatibilityNotGated, "", "0.5.0"},
@@ -120,6 +126,25 @@ func TestCodexHookContractVersionedEventMatrix(t *testing.T) {
 				"SubagentStop", "PreCompact", "PostCompact", "Stop",
 			},
 		},
+		{
+			version: "0.135.0",
+			wantID:  "codex-hooks-v3-generic",
+			events: []string{
+				"SessionStart", "UserPromptSubmit", "PreToolUse",
+				"PermissionRequest", "PostToolUse", "SubagentStart",
+				"SubagentStop", "PreCompact", "PostCompact", "Stop",
+			},
+		},
+		{
+			version: "0.145.0",
+			wantID:  "codex-hooks-v4",
+			events: []string{
+				"SessionStart", "UserPromptSubmit", "PreToolUse",
+				"PermissionRequest", "PostToolUse", "SubagentStart",
+				"SubagentStop", "PreCompact", "PostCompact", "Stop",
+				"SessionEnd",
+			},
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.version, func(t *testing.T) {
@@ -132,6 +157,42 @@ func TestCodexHookContractVersionedEventMatrix(t *testing.T) {
 			}
 			if !reflect.DeepEqual(resolution.Contract.Events, test.events) {
 				t.Fatalf("events = %#v, want %#v", resolution.Contract.Events, test.events)
+			}
+		})
+	}
+}
+
+func TestCodexHookContractToolSurfaceBands(t *testing.T) {
+	selective := []ToolSurface{
+		ToolSurfaceShell, ToolSurfaceFileWrite, ToolSurfaceFileEdit, ToolSurfaceMCP,
+	}
+	generic := []ToolSurface{
+		ToolSurfaceGeneric, ToolSurfaceShell, ToolSurfaceFileWrite, ToolSurfaceFileEdit, ToolSurfaceMCP,
+	}
+	for _, tc := range []struct {
+		version string
+		want    []ToolSurface
+	}{
+		{version: "0.124.0", want: selective},
+		{version: "0.129.0", want: selective},
+		{version: "0.133.0", want: selective},
+		{version: "0.135.0", want: generic},
+		{version: "0.145.0", want: generic},
+	} {
+		t.Run(tc.version, func(t *testing.T) {
+			lifecycle := ResolveHookContract("codex", tc.version).Contract.ToolCallLifecycle
+			if !reflect.DeepEqual(lifecycle.CoveredToolSurfaces, tc.want) {
+				t.Fatalf("covered surfaces = %v, want %v", lifecycle.CoveredToolSurfaces, tc.want)
+			}
+			if lifecycle.OutcomeAuthority != ToolOutcomeSurfaceSpecific {
+				t.Fatalf("outcome authority = %q, want %q", lifecycle.OutcomeAuthority, ToolOutcomeSurfaceSpecific)
+			}
+			if !reflect.DeepEqual(lifecycle.PreProposalEvents, []string{"PreToolUse"}) {
+				t.Fatalf("pre-proposal events = %v, want only PreToolUse", lifecycle.PreProposalEvents)
+			}
+			if lifecycle.RouteForEvent("PermissionRequest") != ToolEventRouteStructuredAction ||
+				lifecycle.IsPreProposalEvent("PermissionRequest") {
+				t.Fatal("PermissionRequest must remain a direct structured-action event without proposal authority")
 			}
 		})
 	}
@@ -159,7 +220,7 @@ func TestHookContractNeedsActionOverride(t *testing.T) {
 
 func TestHookContractsCoverHookEndpoints(t *testing.T) {
 	reg := NewDefaultRegistry()
-	for _, name := range []string{"codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent"} {
+	for _, name := range []string{"codex", "claudecode", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent", "amp"} {
 		conn, ok := reg.Get(name)
 		if !ok {
 			t.Fatalf("registry missing %s", name)
@@ -181,11 +242,15 @@ func TestHookContractsCoverHookEndpoints(t *testing.T) {
 			if len(contract.AIDSurfaces) == 0 {
 				t.Fatalf("%s contract %s missing AID surfaces", name, contract.ContractID)
 			}
-			if contract.ResponseFieldName == "" && name != "omnigent" {
+			directResponse := name == "omnigent" || name == "amp"
+			if contract.ResponseFieldName == "" && !directResponse {
 				t.Fatalf("%s contract %s missing response field", name, contract.ContractID)
 			}
-			if name == "omnigent" && contract.ResponseFieldName != "" {
+			if directResponse && contract.ResponseFieldName != "" {
 				t.Fatalf("%s contract %s must return its policy verdict directly, not through %q", name, contract.ContractID, contract.ResponseFieldName)
+			}
+			if err := ValidateToolCallLifecycleContract(contract.ToolCallLifecycle, contract.Events); err != nil {
+				t.Fatalf("%s contract %s has invalid tool-call lifecycle: %v", name, contract.ContractID, err)
 			}
 		}
 	}
@@ -226,15 +291,16 @@ func TestHookContractsManifestMatchesRuntime(t *testing.T) {
 			MinInclusive string `json:"min_inclusive"`
 			MaxExclusive string `json:"max_exclusive"`
 		} `json:"agent_version"`
-		DefaultForUnversioned   bool     `json:"default_for_unversioned"`
-		HookScriptVersion       string   `json:"hook_script_version"`
-		HookConfigPathTemplates []string `json:"hook_config_path_templates"`
-		ResponseField           string   `json:"response_field"`
-		Events                  []string `json:"events"`
-		AIDSurfaces             []string `json:"aid_surfaces"`
-		SupportsTraceparent     bool     `json:"supports_traceparent"`
-		NativeOTLP              bool     `json:"native_otlp"`
-		ContentEnvelopeKey      string   `json:"content_envelope_key"`
+		DefaultForUnversioned   bool                      `json:"default_for_unversioned"`
+		HookScriptVersion       string                    `json:"hook_script_version"`
+		HookConfigPathTemplates []string                  `json:"hook_config_path_templates"`
+		ResponseField           string                    `json:"response_field"`
+		Events                  []string                  `json:"events"`
+		AIDSurfaces             []string                  `json:"aid_surfaces"`
+		SupportsTraceparent     bool                      `json:"supports_traceparent"`
+		NativeOTLP              bool                      `json:"native_otlp"`
+		ContentEnvelopeKey      string                    `json:"content_envelope_key"`
+		ToolCallLifecycle       ToolCallLifecycleContract `json:"tool_call_lifecycle"`
 		Capabilities            struct {
 			CanBlock           bool     `json:"can_block"`
 			CanAskNative       bool     `json:"can_ask_native"`
@@ -336,6 +402,9 @@ func TestHookContractsManifestMatchesRuntime(t *testing.T) {
 			if manifestContract.ContentEnvelopeKey != runtime.ContentEnvelopeKey {
 				t.Fatalf("%s content_envelope_key=%q want %q", runtime.ContractID, manifestContract.ContentEnvelopeKey, runtime.ContentEnvelopeKey)
 			}
+			if !reflect.DeepEqual(manifestContract.ToolCallLifecycle, runtime.ToolCallLifecycle) {
+				t.Fatalf("%s tool_call_lifecycle manifest/runtime drift:\nmanifest=%+v\nruntime=%+v", runtime.ContractID, manifestContract.ToolCallLifecycle, runtime.ToolCallLifecycle)
+			}
 			if manifestContract.Capabilities.CanBlock != runtime.Capabilities.CanBlock {
 				t.Fatalf("%s can_block=%v want %v", runtime.ContractID, manifestContract.Capabilities.CanBlock, runtime.Capabilities.CanBlock)
 			}
@@ -426,6 +495,428 @@ func TestApplyHookContractPinsProfileCapabilities(t *testing.T) {
 	if !HookProfileAIDSurfaceEnabled(profile, "tool_call") {
 		t.Fatalf("AID tool_call surface not enabled: %+v", profile.AIDSurfaces)
 	}
+	if profile.ToolCallLifecycle.Version != ToolCallLifecycleContractVersion || !profile.ToolCallLifecycle.SupportsExactInvocationJoin() {
+		t.Fatalf("Claude Code lifecycle contract was not resolved: %+v", profile.ToolCallLifecycle)
+	}
+	profile.ToolCallLifecycle.PreProposalEvents[0] = "mutated"
+	resolved := ResolveHookContract("claudecode", "2.1.152")
+	if resolved.Contract.ToolCallLifecycle.PreProposalEvents[0] != "PreToolUse" {
+		t.Fatal("resolved HookProfile aliases the built-in lifecycle contract")
+	}
+}
+
+func TestToolCallLifecycleRuntimeHelpers(t *testing.T) {
+	claude := ResolveHookContract("claudecode", "2.1.152").Contract.ToolCallLifecycle
+	if got := claude.RouteForEvent("PreToolUse"); got != ToolEventRouteStructuredAction {
+		t.Fatalf("Claude PreToolUse route=%q", got)
+	}
+	if got := claude.RouteForEvent("PostToolUseFailure"); got != ToolEventRouteResultContent {
+		t.Fatalf("Claude PostToolUseFailure route=%q", got)
+	}
+	if got := claude.RouteForEvent("ConfigChange"); got != ToolEventRouteUnknown {
+		t.Fatalf("Claude ConfigChange route=%q want unknown", got)
+	}
+	if got := claude.RouteForEvent("UserPromptSubmit"); got != ToolEventRouteUnknown {
+		t.Fatalf("Claude prompt route=%q want unknown", got)
+	}
+	if claude.IsStateTransitionEvent("ConfigChange") || claude.IsPreProposalEvent("ConfigChange") {
+		t.Fatal("Claude ConfigChange must not claim tool or typed-state authority")
+	}
+	if claude.IsAuthoritativeTerminalEvent("SubagentStop") {
+		t.Fatal("session-scoped pending state treated child stop as session terminal")
+	}
+	if !claude.IsPreProposalEvent("PreToolUse") || !claude.ExactInvocationJoinEligible("PostToolUse") {
+		t.Fatal("Claude exact proposal/result lifecycle is not join eligible")
+	}
+	if claude.IsPreProposalEvent("PermissionRequest") ||
+		claude.RouteForEvent("PermissionRequest") != ToolEventRouteStructuredAction {
+		t.Fatal("Claude PermissionRequest must remain direct-only without proposal authority")
+	}
+	if got := claude.ClassifyTerminalOutcome("claudecode", "PermissionDenied", nil); got != ToolLifecycleOutcomeDenied {
+		t.Fatalf("Claude denial outcome=%q", got)
+	}
+	copilot := ResolveHookContract("copilot", "1.0.18").Contract.ToolCallLifecycle
+	if copilot.IsAuthoritativeTerminalEvent("subagentStop") {
+		t.Fatal("Copilot subagent stop must not clear session-wide pending state")
+	}
+
+	cases := []struct {
+		name      string
+		connector string
+		version   string
+		event     string
+		payload   map[string]interface{}
+		want      ToolLifecycleOutcome
+	}{
+		{
+			name:      "hermes_success_status",
+			connector: "hermes", event: "post_tool_call",
+			payload: map[string]interface{}{"extra": map[string]interface{}{"status": "ok"}},
+			want:    ToolLifecycleOutcomeSuccess,
+		},
+		{
+			name:      "hermes_blocked_status",
+			connector: "hermes", event: "post_tool_call",
+			payload: map[string]interface{}{"extra": map[string]interface{}{"status": "blocked"}},
+			want:    ToolLifecycleOutcomeDenied,
+		},
+		{
+			name:      "gemini_error",
+			connector: "geminicli", event: "AfterTool",
+			payload: map[string]interface{}{"tool_response": map[string]interface{}{"error": "command failed"}},
+			want:    ToolLifecycleOutcomeFailure,
+		},
+		{
+			name:      "gemini_missing_response_is_unknown",
+			connector: "geminicli", event: "AfterTool",
+			payload: map[string]interface{}{},
+			want:    ToolLifecycleOutcomeUnknown,
+		},
+		{
+			name:      "openhands_explicit_success",
+			connector: "openhands", event: "post_tool_use",
+			payload: map[string]interface{}{"tool_response": map[string]interface{}{"is_error": false}},
+			want:    ToolLifecycleOutcomeSuccess,
+		},
+		{
+			name:      "antigravity_requires_step",
+			connector: "antigravity", event: "PostToolUse",
+			payload: map[string]interface{}{},
+			want:    ToolLifecycleOutcomeUnknown,
+		},
+		{
+			name:      "codex_shell_scalar_response_is_unknown",
+			connector: "codex", version: "0.135.0", event: "PostToolUse",
+			payload: map[string]interface{}{
+				"tool_name":     "shell",
+				"tool_input":    map[string]interface{}{"command": "exit 7"},
+				"tool_response": "Chunk ID: 5d7f2a\nProcess exited with code 7\nFinal output:\n",
+			},
+			want: ToolLifecycleOutcomeUnknown,
+		},
+		{
+			name:      "codex_generic_status_object_is_unknown",
+			connector: "codex", version: "0.135.0", event: "PostToolUse",
+			payload: map[string]interface{}{
+				"tool_name":     "custom_function",
+				"tool_input":    map[string]interface{}{"value": "test"},
+				"tool_response": map[string]interface{}{"status": "completed", "success": true},
+			},
+			want: ToolLifecycleOutcomeUnknown,
+		},
+		{
+			name:      "codex_apply_patch_scalar_response_is_success",
+			connector: "codex", version: "0.135.0", event: "PostToolUse",
+			payload: map[string]interface{}{
+				"tool_name": "apply_patch",
+				"tool_input": map[string]interface{}{
+					"command": "*** Begin Patch\n*** Add File: hello.txt\n+hello\n*** End Patch",
+				},
+				"tool_response": "Success. Updated files.",
+			},
+			want: ToolLifecycleOutcomeSuccess,
+		},
+		{
+			name:      "codex_mcp_call_tool_result_without_error_is_success",
+			connector: "codex", version: "0.135.0", event: "PostToolUse",
+			payload: map[string]interface{}{
+				"tool_name":  "mcp__github__get_issue",
+				"tool_input": map[string]interface{}{"owner": "example", "repo": "project", "issue_number": float64(1)},
+				"tool_response": map[string]interface{}{
+					"content": []interface{}{map[string]interface{}{"type": "text", "text": "issue"}},
+				},
+			},
+			want: ToolLifecycleOutcomeSuccess,
+		},
+		{
+			name:      "codex_mcp_call_tool_result_error_is_failure",
+			connector: "codex", version: "0.135.0", event: "PostToolUse",
+			payload: map[string]interface{}{
+				"tool_name":  "mcp__github__get_issue",
+				"tool_input": map[string]interface{}{"owner": "example", "repo": "project", "issue_number": float64(1)},
+				"tool_response": map[string]interface{}{
+					"content": []interface{}{map[string]interface{}{"type": "text", "text": "not found"}},
+					"isError": true,
+				},
+			},
+			want: ToolLifecycleOutcomeFailure,
+		},
+		{
+			name:      "codex_mcp_call_tool_result_false_error_is_success",
+			connector: "codex", version: "0.135.0", event: "PostToolUse",
+			payload: map[string]interface{}{
+				"tool_name":  "mcp__github__get_issue",
+				"tool_input": map[string]interface{}{},
+				"tool_response": map[string]interface{}{
+					"content": []interface{}{},
+					"isError": false,
+				},
+			},
+			want: ToolLifecycleOutcomeSuccess,
+		},
+		{
+			name:      "codex_mcp_response_without_input_is_unknown",
+			connector: "codex", version: "0.135.0", event: "PostToolUse",
+			payload: map[string]interface{}{
+				"tool_name": "mcp__github__get_issue",
+				"tool_response": map[string]interface{}{
+					"content": []interface{}{},
+				},
+			},
+			want: ToolLifecycleOutcomeUnknown,
+		},
+		{
+			name:      "codex_mcp_response_without_content_is_unknown",
+			connector: "codex", version: "0.135.0", event: "PostToolUse",
+			payload: map[string]interface{}{
+				"tool_name":     "mcp__github__get_issue",
+				"tool_input":    map[string]interface{}{"owner": "example", "repo": "project", "issue_number": float64(1)},
+				"tool_response": map[string]interface{}{"isError": false},
+			},
+			want: ToolLifecycleOutcomeUnknown,
+		},
+		{
+			name:      "opencode_missing_result",
+			connector: "opencode", event: "tool.execute.after",
+			payload: map[string]interface{}{},
+			want:    ToolLifecycleOutcomeUnknown,
+		},
+		{
+			name:      "opencode_empty_result_object",
+			connector: "opencode", event: "tool.execute.after",
+			payload: map[string]interface{}{"tool_response": map[string]interface{}{}},
+			want:    ToolLifecycleOutcomeUnknown,
+		},
+		{
+			name:      "opencode_result_requires_string_output",
+			connector: "opencode", event: "tool.execute.after",
+			payload: map[string]interface{}{
+				"tool_response": map[string]interface{}{"output": map[string]interface{}{}},
+			},
+			want: ToolLifecycleOutcomeUnknown,
+		},
+		{
+			name:      "opencode_empty_string_result_is_success",
+			connector: "opencode", event: "tool.execute.after",
+			payload: map[string]interface{}{
+				"tool_response": map[string]interface{}{"output": ""},
+			},
+			want: ToolLifecycleOutcomeSuccess,
+		},
+		{
+			name:      "opencode_bash_zero_exit_is_success",
+			connector: "opencode", event: "tool.execute.after",
+			payload: map[string]interface{}{
+				"tool_name": "bash",
+				"tool_response": map[string]interface{}{
+					"output": "", "metadata": map[string]interface{}{"exit": float64(0)},
+				},
+			},
+			want: ToolLifecycleOutcomeSuccess,
+		},
+		{
+			name:      "opencode_bash_nonzero_exit_is_failure",
+			connector: "opencode", event: "tool.execute.after",
+			payload: map[string]interface{}{
+				"tool_name": "bash",
+				"tool_response": map[string]interface{}{
+					"output": "failed", "metadata": map[string]interface{}{"exit": float64(7)},
+				},
+			},
+			want: ToolLifecycleOutcomeFailure,
+		},
+		{
+			name:      "opencode_bash_null_exit_is_unknown",
+			connector: "opencode", event: "tool.execute.after",
+			payload: map[string]interface{}{
+				"tool_name": "bash",
+				"tool_response": map[string]interface{}{
+					"output": "timeout", "metadata": map[string]interface{}{"exit": nil},
+				},
+			},
+			want: ToolLifecycleOutcomeUnknown,
+		},
+		{
+			name:      "opencode_bash_missing_exit_is_unknown",
+			connector: "opencode", event: "tool.execute.after",
+			payload: map[string]interface{}{
+				"tool_name": "bash",
+				"tool_response": map[string]interface{}{
+					"output": "", "metadata": map[string]interface{}{},
+				},
+			},
+			want: ToolLifecycleOutcomeUnknown,
+		},
+		{
+			name:      "amp_done_is_success",
+			connector: "amp", event: "tool.result",
+			payload: map[string]interface{}{
+				"status": "done",
+			},
+			want: ToolLifecycleOutcomeSuccess,
+		},
+		{
+			name:      "amp_error_is_failure",
+			connector: "amp", event: "tool.result",
+			payload: map[string]interface{}{
+				"status": "error", "error": "command failed",
+			},
+			want: ToolLifecycleOutcomeFailure,
+		},
+		{
+			name:      "amp_cancelled_is_cancelled",
+			connector: "amp", event: "tool.result",
+			payload: map[string]interface{}{
+				"status": "cancelled",
+			},
+			want: ToolLifecycleOutcomeCancelled,
+		},
+		{
+			name:      "amp_done_with_error_is_unknown",
+			connector: "amp", event: "tool.result",
+			payload: map[string]interface{}{
+				"status": "done", "error": "contradictory",
+			},
+			want: ToolLifecycleOutcomeUnknown,
+		},
+		{
+			name:      "amp_missing_status_is_unknown",
+			connector: "amp", event: "tool.result",
+			payload: map[string]interface{}{},
+			want:    ToolLifecycleOutcomeUnknown,
+		},
+		{
+			name:      "amp_uppercase_status_is_unknown",
+			connector: "amp", event: "tool.result",
+			payload: map[string]interface{}{"status": "DONE"},
+			want:    ToolLifecycleOutcomeUnknown,
+		},
+		{
+			name:      "amp_padded_status_is_unknown",
+			connector: "amp", event: "tool.result",
+			payload: map[string]interface{}{"status": " done "},
+			want:    ToolLifecycleOutcomeUnknown,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			contract := ResolveHookContract(tc.connector, tc.version).Contract.ToolCallLifecycle
+			if got := contract.ClassifyTerminalOutcome(tc.connector, tc.event, tc.payload); got != tc.want {
+				t.Fatalf("outcome=%q want %q", got, tc.want)
+			}
+		})
+	}
+
+	for _, connectorName := range []string{"windsurf", "geminicli", "copilot", "openhands", "omnigent"} {
+		contract := ResolveHookContract(connectorName, "").Contract.ToolCallLifecycle
+		if contract.SupportsExactInvocationJoin() {
+			t.Fatalf("%s must not claim exact invocation joins", connectorName)
+		}
+	}
+	antigravity := ResolveHookContract("antigravity", "1.1.9").Contract
+	antigravity.ToolCallLifecycle.StatefulEnforcementLevel = StatefulToolPairedOutcomes
+	if err := ValidateToolCallLifecycleContract(antigravity.ToolCallLifecycle, antigravity.Events); err == nil {
+		t.Fatal("paired sequence must not be promoted to exact paired-outcome enforcement")
+	}
+	amp := ResolveHookContract("amp", "0.0.1785334225").Contract.ToolCallLifecycle
+	if !amp.SupportsExactInvocationJoin() || !amp.IsPreProposalEvent("tool.call") ||
+		!amp.ExactInvocationJoinEligible("tool.result") ||
+		!amp.IsAuthoritativePendingDiscardEvent("agent.end") {
+		t.Fatal("Amp exact proposal/result lifecycle is incomplete")
+	}
+}
+
+func TestToolCallLifecycleTerminalResetEventsAreSessionScoped(t *testing.T) {
+	for _, tc := range []struct {
+		connector      string
+		version        string
+		event          string
+		terminal       bool
+		discardPending bool
+	}{
+		{connector: "codex", version: "0.146.0", event: "Stop", discardPending: true},
+		{connector: "codex", version: "0.146.0", event: "SessionEnd", terminal: true},
+		{connector: "claudecode", version: "2.1.152", event: "Stop", discardPending: true},
+		{connector: "claudecode", version: "2.1.152", event: "StopFailure", discardPending: true},
+		{connector: "claudecode", version: "2.1.152", event: "SessionEnd", terminal: true},
+		{connector: "hermes", event: "subagent_stop"},
+		{connector: "hermes", event: "on_session_end", terminal: true},
+		{connector: "hermes", event: "on_session_finalize", terminal: true},
+		{connector: "hermes", event: "on_session_reset", terminal: true},
+		{connector: "cursor", event: "stop", discardPending: true},
+		{connector: "cursor", event: "sessionEnd", terminal: true},
+		{connector: "windsurf", event: "post_cascade_response", discardPending: true},
+		{connector: "windsurf", event: "post_cascade_response_with_transcript", discardPending: true},
+		{connector: "geminicli", event: "AfterAgent", discardPending: true},
+		{connector: "geminicli", event: "SessionEnd", terminal: true},
+		{connector: "copilot", event: "agentStop", discardPending: true},
+		{connector: "copilot", event: "sessionEnd", terminal: true},
+		{connector: "openhands", event: "stop", discardPending: true},
+		{connector: "openhands", event: "session_end", terminal: true},
+		{connector: "antigravity", version: "1.1.9", event: "Stop", discardPending: true},
+		{connector: "opencode", event: "session.idle", discardPending: true},
+		{connector: "opencode", event: "session.deleted", terminal: true},
+		{connector: "amp", event: "session.start"},
+		{connector: "amp", event: "agent.end", discardPending: true},
+		{connector: "omnigent", event: "AfterAgentResponse", discardPending: true},
+	} {
+		t.Run(tc.connector+"/"+tc.event, func(t *testing.T) {
+			contract := ResolveHookContract(tc.connector, tc.version).Contract
+			if !containsExact(contract.Events, tc.event) {
+				t.Fatalf("reviewed event %q is not declared by %s", tc.event, contract.ContractID)
+			}
+			if got := contract.ToolCallLifecycle.IsAuthoritativeTerminalEvent(tc.event); got != tc.terminal {
+				t.Fatalf("terminal=%t want %t", got, tc.terminal)
+			}
+			if got := contract.ToolCallLifecycle.IsAuthoritativePendingDiscardEvent(tc.event); got != tc.discardPending {
+				t.Fatalf("pending discard=%t want %t", got, tc.discardPending)
+			}
+		})
+	}
+
+	for _, version := range []string{"0.124.0", "0.129.0", "0.133.0", "0.135.0", "0.144.0"} {
+		contract := ResolveHookContract("codex", version).Contract
+		if got := contract.ToolCallLifecycle.AuthoritativeTerminalEvents; len(got) != 0 {
+			t.Fatalf("Codex %s terminal reset events=%v before SessionEnd support", version, got)
+		}
+	}
+}
+
+func TestToolCallLifecycleStateTransitionRouteIsReservedAndEmpty(t *testing.T) {
+	for connectorName, contracts := range builtinHookContracts {
+		for _, contract := range contracts {
+			transitions := contract.ToolCallLifecycle.Routing.StateTransitionEvents
+			if len(transitions) != 0 {
+				t.Fatalf("unsupported state-transition route for %s/%s: %v", connectorName, contract.ContractID, transitions)
+			}
+		}
+	}
+
+	synthetic := ResolveHookContract("claudecode", "2.1.152").Contract
+	synthetic.ToolCallLifecycle.Routing.StateTransitionEvents = []string{"ConfigChange"}
+	if got := synthetic.ToolCallLifecycle.RouteForEvent("ConfigChange"); got != ToolEventRouteStateTransition {
+		t.Fatalf("reserved state-transition route=%q", got)
+	}
+	if !synthetic.ToolCallLifecycle.IsStateTransitionEvent("ConfigChange") || synthetic.ToolCallLifecycle.IsPreProposalEvent("ConfigChange") {
+		t.Fatal("reserved state transition was treated as a tool proposal")
+	}
+	if err := ValidateToolCallLifecycleContract(synthetic.ToolCallLifecycle, synthetic.Events); err != nil {
+		t.Fatalf("valid reserved state-transition route rejected: %v", err)
+	}
+
+	cloned := cloneToolCallLifecycleContract(synthetic.ToolCallLifecycle)
+	cloned.Routing.StateTransitionEvents[0] = "mutated"
+	if synthetic.ToolCallLifecycle.Routing.StateTransitionEvents[0] != "ConfigChange" {
+		t.Fatal("state-transition route aliases its clone")
+	}
+
+	synthetic.ToolCallLifecycle.Routing.StructuredActionEvents = append(
+		synthetic.ToolCallLifecycle.Routing.StructuredActionEvents,
+		"ConfigChange",
+	)
+	if err := ValidateToolCallLifecycleContract(synthetic.ToolCallLifecycle, synthetic.Events); err == nil {
+		t.Fatal("state-transition event shared with a tool route must be rejected")
+	}
 }
 
 func TestApplyHookContractUsesPinnedContractForUnknownVersion(t *testing.T) {
@@ -445,6 +936,15 @@ func TestApplyHookContractUsesPinnedContractForUnknownVersion(t *testing.T) {
 	}
 	if !profile.Capabilities.CanBlock || len(profile.SupportedEvents) == 0 {
 		t.Fatalf("pinned contract did not populate capabilities/events: %+v", profile)
+	}
+	if profile.ExperimentalToolLifecycleEligible() {
+		t.Fatal("known version mismatch retained experimental lifecycle authority")
+	}
+	unversioned := NewCodexConnector().HookProfile(SetupOpts{
+		APIAddr: "127.0.0.1:18970",
+	})
+	if !unversioned.ExperimentalToolLifecycleEligible() {
+		t.Fatal("reviewed unversioned default lost experimental lifecycle authority")
 	}
 }
 
@@ -878,6 +1378,39 @@ func TestHookContractDriftExcludesGeneratedArtifactChanges(t *testing.T) {
 	if !HookContractLockDrifted(previous, current) {
 		t.Fatal("agent version changes must remain lock drift")
 	}
+
+	t.Run("Amp relative release age is presentation-only", func(t *testing.T) {
+		previous := HookContractLockEntry{
+			Connector:              "amp",
+			RawAgentVersion:        "0.0.1785342457-g1011d5 (released 2026-07-29T16:27:37.000Z, 2h ago)",
+			NormalizedAgentVersion: "0.0.1785342457",
+			ContractID:             "amp-plugin-v1",
+		}
+		current := previous
+		current.RawAgentVersion = "0.0.1785342457-g1011d5 (released 2026-07-29T16:27:37.000Z, 3h ago)"
+		if HookContractCompatibilityDrifted(previous, current) {
+			t.Fatal("Amp's changing relative release-age annotation must not cause contract drift")
+		}
+
+		current.RawAgentVersion = "0.0.1785342457-gdifferent (released 2026-07-29T16:27:37.000Z, 3h ago)"
+		if !HookContractCompatibilityDrifted(previous, current) {
+			t.Fatal("Amp's stable version+commit identity change must remain contract drift")
+		}
+	})
+
+	t.Run("other raw prerelease identities remain significant", func(t *testing.T) {
+		previous := HookContractLockEntry{
+			Connector:              "codex",
+			RawAgentVersion:        "codex-cli 0.144.0-alpha.4",
+			NormalizedAgentVersion: "0.144.0",
+			ContractID:             "codex-hooks-v1",
+		}
+		current := previous
+		current.RawAgentVersion = "codex-cli 0.144.0-alpha.5"
+		if !HookContractCompatibilityDrifted(previous, current) {
+			t.Fatal("non-Amp raw prerelease identity changes must remain contract drift")
+		}
+	})
 }
 
 func TestHookContractLockEntryIncludesResolvedLocations(t *testing.T) {
@@ -1112,7 +1645,7 @@ func TestFreshCodexSetupSelectionRepairsLegacyLockAndBecomesAuthoritative(t *tes
 		Connector:              "codex",
 		RawAgentVersion:        "codex-cli 0.144.0-alpha.4",
 		NormalizedAgentVersion: "0.144.0",
-		ContractID:             "codex-hooks-v3",
+		ContractID:             "codex-hooks-v3-generic",
 		CompatibilityStatus:    HookCompatibilityKnown,
 	}, now.Add(-time.Minute))
 	selection := writeCodexSetupSelectionForTest(
@@ -1288,7 +1821,7 @@ func TestInvalidCodexSetupSelectionsDoNotRepairLegacyLock(t *testing.T) {
 				Connector:              "codex",
 				RawAgentVersion:        "codex-cli 0.144.0-alpha.4",
 				NormalizedAgentVersion: "0.144.0",
-				ContractID:             "codex-hooks-v3",
+				ContractID:             "codex-hooks-v3-generic",
 				CompatibilityStatus:    HookCompatibilityKnown,
 			}, now.Add(-time.Minute))
 			test.write(t, dir, executable, now)
@@ -1320,7 +1853,7 @@ func TestExistingCodexLockWithoutExecutableEvidenceFailsClosed(t *testing.T) {
 				Connector:              "codex",
 				RawAgentVersion:        "codex 0.144.3",
 				NormalizedAgentVersion: "0.144.3",
-				ContractID:             "codex-hooks-v3",
+				ContractID:             "codex-hooks-v3-generic",
 				CompatibilityStatus:    HookCompatibilityKnown,
 				UpdatedAt:              now,
 			},

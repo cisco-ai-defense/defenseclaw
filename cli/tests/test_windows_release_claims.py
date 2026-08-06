@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 
 def test_windows_release_metadata_is_exact() -> None:
-    assert WINDOWS_SUPPORTED_CONNECTORS == {"codex", "claudecode"}
+    assert WINDOWS_SUPPORTED_CONNECTORS == {"codex", "claudecode", "amp"}
     assert WINDOWS_NOT_CERTIFIED_CONNECTORS == {
         "cursor",
         "windsurf",
@@ -114,7 +114,7 @@ def test_release_runtime_custody_splits_certified_x64_from_compatibility_arm64()
 
     installer = (ROOT / "scripts/install.ps1").read_text(encoding="utf-8")
     assert '"ARM64" { Die "Windows ARM64 is not certified' in installer
-    assert '"codex",\n    "claudecode",\n    "none"' in installer
+    assert '"codex",\n    "claudecode",\n    "amp",\n    "none"' in installer
 
 
 def test_connector_matrix_delegates_current_support_to_the_website() -> None:
@@ -135,6 +135,7 @@ def test_connector_matrix_delegates_current_support_to_the_website() -> None:
         "copilot",
         "antigravity",
         "opencode",
+        "amp",
         "hermes",
         "openhands",
         "omnigent",

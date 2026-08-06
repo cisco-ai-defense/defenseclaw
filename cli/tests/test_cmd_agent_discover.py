@@ -174,6 +174,12 @@ class TestAgentDiscoverCommand(unittest.TestCase):
         self.assertEqual(report["source"], "cli")
         self.assertEqual(report["agents"]["codex"]["config_basename"], "config.toml")
         self.assertTrue(report["agents"]["codex"]["config_path_hash"].startswith("sha256:"))
+        # ``configured``, ``active``, and ``mode`` are local presentation
+        # fields.  The strict gateway discovery schema does not accept them;
+        # including them makes every real telemetry POST fail with HTTP 400.
+        self.assertNotIn("configured", report["agents"]["codex"])
+        self.assertNotIn("active", report["agents"]["codex"])
+        self.assertNotIn("mode", report["agents"]["codex"])
         rendered = json.dumps(report, sort_keys=True)
         self.assertNotIn("/Users/alice", rendered)
         self.assertNotIn("/opt/homebrew", rendered)

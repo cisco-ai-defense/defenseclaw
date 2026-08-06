@@ -308,6 +308,78 @@ func TestEngineDetectorValidatorFailureProtectsWholeField(t *testing.T) {
 	}
 }
 
+func TestEngineCredentialsOnlyProfileFailsClosedOnAmbiguousQueryKey(t *testing.T) {
+	const sentinel = "credentials-only-secret"
+	input := "postgres://db.example.test/app?%25252574oken=" + sentinel
+	record := newTestRecord(t, observability.SignalLogs,
+		map[string]any{"message": input},
+		map[string]observability.FieldClass{"/message": observability.FieldClassContent},
+	)
+	profile, err := NewCustomProfile(
+		"credentials.only",
+		ProfileSensitive,
+		[]DetectorGroup{DetectorGroupCredentials},
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projection, _, err := newTestEngine(t).Project(record, profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	object, err := projection.Payload().Object()
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, _ := object["message"].(string)
+	if strings.Contains(message, sentinel) ||
+		!strings.Contains(message, "<redacted type=credentials.connection_string") {
+		t.Fatalf("credentials-only projection leaked ambiguous query value: %q", message)
+	}
+}
+
+func TestEngineOversizeURLQueryCandidateFailsClosed(t *testing.T) {
+	const sentinel = "oversize-query-secret"
+	profile, err := NewCustomProfile(
+		"credentials.oversize",
+		ProfileSensitive,
+		[]DetectorGroup{DetectorGroupCredentials},
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, input := range []string{
+		"postgres://db.example.test/app?%25252574oken=" +
+			strings.Repeat("a", maxURLQueryCandidateBytes) + sentinel,
+		"postgres://db.example.test/app?token%3D" +
+			strings.Repeat("a", maxURLQueryCandidateBytes) + "=" + sentinel,
+	} {
+		record := newTestRecord(t, observability.SignalLogs,
+			map[string]any{"message": input},
+			map[string]observability.FieldClass{"/message": observability.FieldClassContent},
+		)
+		projection, report, err := newTestEngine(t).Project(record, profile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		object, err := projection.Payload().Object()
+		if err != nil {
+			t.Fatal(err)
+		}
+		message, _ := object["message"].(string)
+		if strings.Contains(message, sentinel) ||
+			message != "<redacted type=failed_closed v=1 code=validator_failed>" {
+			t.Fatalf("oversize URL query candidate did not fail closed: %q", message)
+		}
+		if projection.Metadata().State != ProjectionStateFailedClosed ||
+			len(report.Entries()) != 1 || report.Entries()[0].Code != "validator_failed" {
+			t.Fatalf("oversize failure metadata = %#v / %#v", projection.Metadata(), report.Entries())
+		}
+	}
+}
+
 func TestEngineOversizeAndSafeReportBound(t *testing.T) {
 	oversize := strings.Repeat("a", MaxScannedStringBytes+1)
 	record := newTestRecord(t, observability.SignalLogs,

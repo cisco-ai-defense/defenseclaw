@@ -98,6 +98,10 @@ WINDOWS_CONNECTOR_SUPPORT: dict[str, ConnectorPlatformSupport] = {
         NOT_CERTIFIED,
         "The DefenseClaw OpenCode integration has not completed native Windows x64 certification.",
     ),
+    "amp": ConnectorPlatformSupport(
+        SUPPORTED,
+        "Amp and the DefenseClaw system policy plugin are supported on native Windows x64.",
+    ),
     "hermes": ConnectorPlatformSupport(
         NOT_CERTIFIED,
         "The DefenseClaw Hermes integration has not completed native Windows x64 certification.",

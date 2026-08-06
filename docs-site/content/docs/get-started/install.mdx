@@ -242,7 +242,44 @@ defenseclaw --version
 defenseclaw doctor
 ```
 
-`doctor` runs a full health check: it walks the config, pings the gateway, reports each active connector (one per-connector block on a multi-connector install), surfaces missing API keys, and prints a remediation hint for every red row.
+Doctor verifies:
+
+| Check | What it verifies |
+| --- | --- |
+| Configuration | The canonical config exists, loads, and validates. |
+| Audit and identity state | File custody, SQLite integrity and required schema, storage capacity, device-key custody, and HMAC-bound provenance. |
+| Components and connectors | CLI/gateway/plugin alignment and active connector versions against registered compatibility contracts. |
+| Gateway | Managed process and listener identity, public health, and authenticated `/status` using the locally resolved token. |
+| Guardrail, scanners, and credentials | Enabled service reachability, required scanner binaries, and configured credential availability without printing secret values. |
+| Observability | Effective destination routes, queue/delivery health, and each destination/signal circuit while mandatory local SQLite remains available. |
+
+Useful modes:
+
+```bash
+# Avoid billable, content-submitting, and synthetic probes
+defenseclaw doctor --passive
+
+# Machine-readable schema v2
+defenseclaw doctor --json-output
+
+# Preview eligible repairs without mutation
+defenseclaw doctor --fix --dry-run
+
+# Apply eligible safe and disruptive repairs
+defenseclaw doctor --fix --yes
+
+# Select one repair and its declared dependencies
+defenseclaw doctor --fix --fix-id doctor.state.audit-db.initialize
+
+# Identity recovery is always attended; do not add --yes
+defenseclaw doctor --fix --fix-id doctor.identity.device-key.initialize
+```
+
+`--fix` applies selected repairs before the health pass, so its summary
+describes post-repair state. A failed health check or failed or blocked repair
+exits 1. See the [Doctor CLI reference](/docs/reference/cli#doctor) for the
+machine contract and [Reporting and diagnosis](/docs/reference/fail-modes#reporting-and-diagnosis)
+for token, recovery, compatibility, and approval boundaries.
 
 ## Uninstall
 

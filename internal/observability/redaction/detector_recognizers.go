@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/sensitivequery"
 )
 
 var (
@@ -36,6 +37,28 @@ var (
 	telephoneRE     = regexp.MustCompile(`(?:\+1[ .-])?(?:\([2-9][0-9]{2}\)|[2-9][0-9]{2})[ .-][2-9][0-9]{2}[ .-][0-9]{4}`)
 	nationalIDRE    = regexp.MustCompile(`[0-9]{3}-[0-9]{2}-[0-9]{4}`)
 )
+
+var eligibleURLQueryKeys = map[string]struct{}{
+	"access_token":     {},
+	"api_key":          {},
+	"apikey":           {},
+	"client_secret":    {},
+	"code":             {},
+	"credential":       {},
+	"key":              {},
+	"passwd":           {},
+	"password":         {},
+	"pwd":              {},
+	"refresh_token":    {},
+	"secret":           {},
+	"sig":              {},
+	"signature":        {},
+	"token":            {},
+	"x-amz-signature":  {},
+	"x-goog-signature": {},
+}
+
+const maxURLQueryCandidateBytes = 8192
 
 func recognize(
 	id DetectorID,
@@ -438,7 +461,11 @@ func recognizeConnectionStrings(input string) ([]candidate, error) {
 		if parsed.passwordStart >= 0 && parsed.passwordEnd > parsed.passwordStart {
 			result = append(result, candidate{start: uri[0] + parsed.passwordStart, end: uri[0] + parsed.passwordEnd, accepted: true})
 		}
-		result = append(result, queryCandidates(input[uri[0]:uri[1]], uri[0], parsed, true)...)
+		queryMatches, err := queryCandidates(input[uri[0]:uri[1]], uri[0], parsed)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, queryMatches...)
 	}
 	for _, item := range scanKeyValues(input, dsnKeyRE, true) {
 		if !overlapsAnyRange(item.start, item.end, uriRanges) {
@@ -650,7 +677,11 @@ func recognizeURLQueries(input string) ([]candidate, error) {
 		if !ok {
 			continue
 		}
-		result = append(result, queryCandidates(uriValue, uri[0], parsed, false)...)
+		queryMatches, err := queryCandidates(uriValue, uri[0], parsed)
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, queryMatches...)
 	}
 	return result, nil
 }
@@ -665,16 +696,22 @@ func containsEligibleRawQuery(value string) bool {
 		query = query[:hash]
 	}
 	for _, item := range strings.FieldsFunc(query, func(r rune) bool { return r == '&' || r == ';' }) {
-		if equals := strings.IndexByte(item, '='); equals >= 0 && eligibleQueryKey(item[:equals]) {
+		key := item
+		equals := strings.IndexByte(item, '=')
+		if equals >= 0 {
+			key = item[:equals]
+		}
+		sensitive, valid := classifyEligibleQueryKey(key)
+		if !valid || equals >= 0 && equals+1 < len(item) && sensitive {
 			return true
 		}
 	}
 	return false
 }
 
-func queryCandidates(uri string, offset int, parsed parsedURI, connectionOnly bool) []candidate {
+func queryCandidates(uri string, offset int, parsed parsedURI) ([]candidate, error) {
 	if parsed.queryStart < 0 {
-		return nil
+		return nil, nil
 	}
 	end := parsed.queryEnd
 	position := parsed.queryStart
@@ -684,20 +721,37 @@ func queryCandidates(uri string, offset int, parsed parsedURI, connectionOnly bo
 		for itemEnd < end && uri[itemEnd] != '&' && uri[itemEnd] != ';' {
 			itemEnd++
 		}
-		equals := strings.IndexByte(uri[position:itemEnd], '=')
+		item := uri[position:itemEnd]
+		equals := strings.IndexByte(item, '=')
 		if equals >= 0 {
 			equals += position
 			key := uri[position:equals]
 			valueStart := equals + 1
 			valueEnd := itemEnd
-			eligible := eligibleQueryKey(key)
+			eligible, keyValid := classifyEligibleQueryKey(key)
 			decoded, valid := percentDecodeUTF8(uri[valueStart:valueEnd])
-			accepted := eligible && valid && decoded != ""
-			if connectionOnly {
-				accepted = accepted && eligibleConnectionQueryKey(key)
+			if eligible && !valid {
+				return nil, detectorError(FailureValidator)
 			}
-			if eligible {
-				result = append(result, candidate{start: offset + valueStart, end: offset + valueEnd, accepted: accepted})
+			accepted := eligible && valid && decoded != ""
+			candidateStart := valueStart
+			if eligible || !keyValid {
+				if !keyValid {
+					candidateStart = position
+					accepted = valueEnd > candidateStart
+				}
+				if valueEnd-candidateStart > maxURLQueryCandidateBytes {
+					return nil, detectorError(FailureValidator)
+				}
+				result = append(result, candidate{start: offset + candidateStart, end: offset + valueEnd, accepted: accepted})
+			}
+		} else if item != "" {
+			_, keyValid := classifyEligibleQueryKey(item)
+			if !keyValid {
+				if len(item) > maxURLQueryCandidateBytes {
+					return nil, detectorError(FailureValidator)
+				}
+				result = append(result, candidate{start: offset + position, end: offset + itemEnd, accepted: true})
 			}
 		}
 		if itemEnd == end {
@@ -705,7 +759,7 @@ func queryCandidates(uri string, offset int, parsed parsedURI, connectionOnly bo
 		}
 		position = itemEnd + 1
 	}
-	return result
+	return result, nil
 }
 
 func recognizeCloudIdentifiers(input string) []candidate {
@@ -957,16 +1011,14 @@ func supportedConnectionScheme(scheme string) bool {
 	}
 }
 
-func eligibleQueryKey(key string) bool {
-	switch strings.ToLower(key) {
-	case "token", "access_token", "refresh_token", "api_key", "apikey", "key", "secret", "client_secret", "password", "passwd", "pwd", "signature", "sig", "x-amz-signature", "x-goog-signature", "code", "credential":
-		return true
-	default:
-		return false
+func classifyEligibleQueryKey(key string) (eligible, valid bool) {
+	canonical, valid := sensitivequery.Canonical(key)
+	if !valid {
+		return false, false
 	}
+	_, eligible = eligibleURLQueryKeys[canonical]
+	return eligible, true
 }
-
-func eligibleConnectionQueryKey(key string) bool { return eligibleQueryKey(key) }
 
 func percentDecodeUTF8(value string) (string, bool) {
 	decoded := make([]byte, 0, len(value))

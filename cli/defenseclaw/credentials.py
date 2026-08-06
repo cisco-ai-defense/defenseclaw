@@ -221,6 +221,7 @@ _HOOK_POLICY_ONLY_CONNECTORS = frozenset(
         "openhands",
         "antigravity",
         "opencode",
+        "amp",
         "omnigent",
     }
 )

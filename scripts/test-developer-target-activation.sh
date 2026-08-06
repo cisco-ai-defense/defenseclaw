@@ -266,8 +266,10 @@ run_developer_direct_activation() {
                 "${FROM_VERSION}" "${TARGET_VERSION}" \
                 "${SMOKE_HOME}/.openclaw" "${data_dir}" \
                 >>"${log_file}" 2>&1 <<'PY'
+from pathlib import Path
 import sys
 
+from defenseclaw.bootstrap import BootstrapReport, _seed_guardrail_profiles
 from defenseclaw.migrations import run_migrations
 
 count = run_migrations(
@@ -278,7 +280,18 @@ count = run_migrations(
     upgrade_handles_local_bundle=True,
     controller_owns_local_bundle_transaction=True,
 )
+report = BootstrapReport()
+_seed_guardrail_profiles(str(Path(sys.argv[4]) / "policies"), report)
+if report.errors:
+    raise SystemExit(
+        "target guardrail profile seeding failed: " + "; ".join(report.errors)
+    )
+available_profiles = set(report.guardrail_profiles_seeded)
+available_profiles.update(report.guardrail_profiles_preserved)
+if "default" not in available_profiles:
+    raise SystemExit("target package did not seed its default guardrail profile")
 print(f"developer_target_migrations={count}")
+print("developer_target_guardrail_profiles=ready")
 PY
     then
         tail_v8_upgrade_log_secret_safe "${log_file}"

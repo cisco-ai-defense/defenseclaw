@@ -20,7 +20,7 @@
 import { mkdir, writeFile, readFile, readdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
-import { siteUrl } from '../lib/site';
+import { canonicalUrl } from '../lib/site';
 
 const CONTENT_ROOT = resolve(process.cwd(), 'content/docs');
 
@@ -143,8 +143,8 @@ async function run() {
     const target = urlToOutPath(outDir, url);
     const raw = await readFile(page.absolutePath, 'utf-8');
     const header = page.description
-      ? `# ${page.title}\n\nURL: ${siteUrl}${url}\n\n> ${page.description}\n\n`
-      : `# ${page.title}\n\nURL: ${siteUrl}${url}\n\n`;
+      ? `# ${page.title}\n\nURL: ${canonicalUrl(url)}\n\n> ${page.description}\n\n`
+      : `# ${page.title}\n\nURL: ${canonicalUrl(url)}\n\n`;
     await mkdir(dirname(target), { recursive: true });
     await writeFile(target, header + raw, 'utf-8');
     written++;

@@ -380,6 +380,38 @@ func TestPrintConnectorModes_SingleEntry(t *testing.T) {
 	}
 }
 
+func TestFriendlyConnectorNameAmp(t *testing.T) {
+	if got := friendlyConnectorName("amp"); got != "Amp" {
+		t.Fatalf("friendlyConnectorName(amp) = %q, want Amp", got)
+	}
+}
+
+func TestPrintConnectorModes_AmpUsesHookPolicyWithoutProxy(t *testing.T) {
+	modes := []connectorModeSummary{{
+		Connector:          "amp",
+		Mode:               "observability",
+		PolicyMode:         "action",
+		EnforcementSurface: "agent_lifecycle_hooks",
+		Telemetry:          []string{"hooks"},
+		ProxyIntercept:     false,
+		GuardrailMode:      "action",
+		HookEnforcement:    true,
+	}}
+
+	out := captureStdout(t, func() { printConnectorModes(modes) })
+	for _, want := range []string{
+		"Amp (amp)",
+		"direct-to-upstream",
+		"agent lifecycle hooks",
+		"yes (action-mode hooks can block)",
+		"no (traffic flows directly to upstream)",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("Amp Connector Mode output missing %q:\n%s", want, out)
+		}
+	}
+}
+
 func TestPrintConnectorModes_OmnigentPolicySurface(t *testing.T) {
 	modes := []connectorModeSummary{{
 		Connector:          "omnigent",

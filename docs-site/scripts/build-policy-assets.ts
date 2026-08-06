@@ -320,6 +320,33 @@ function buildRecipes(strict: PresetBundle): Recipe[] {
       examples: ['https://hooks.slack.com/services/T0000/B0000/abcdefg12345'],
       counterexamples: ['https://hooks.slack.com/wrongpath', 'https://example.com'],
     },
+    'OBFUSC-UNICODE-ZWSP': {
+      examples: [
+        'a' +
+          '\u200B' +
+          'b' +
+          '\u200C' +
+          'c' +
+          '\u200D' +
+          'd' +
+          '\uFEFF' +
+          'e' +
+          '\u200B' +
+          'f' +
+          '\u200C' +
+          'g' +
+          '\u200D' +
+          'h' +
+          '\uFEFF' +
+          'i' +
+          '\u200B' +
+          'j' +
+          '\u200C',
+      ],
+      counterexamples: ['copy' + '\u200B' + 'paste', '👩' + '\u200D' + '💻'],
+      why:
+        'Requires ten zero-width characters immediately after ASCII alphanumerics, avoiding isolated formatting artifacts and emoji ZWJ sequences.',
+    },
   };
 
   for (const [filename, file] of Object.entries(strict.guardrail.rules)) {
@@ -476,11 +503,22 @@ function buildScenarios(): Scenario[] {
       input: {
         target_type: 'plugin',
         target_name: 'defenseclaw',
-        path: '/Users/op/.defenseclaw/plugins/defenseclaw',
+        path: '/Users/op/.config/amp/plugins/defenseclaw.ts',
         block_list: [],
         allow_list: [
-          { target_type: 'plugin', target_name: 'defenseclaw', reason: 'first-party DefenseClaw plugin' },
+          {
+            target_type: 'plugin',
+            target_name: 'defenseclaw',
+            reason: 'first-party DefenseClaw plugin',
+            source_path_contains: ['.config/amp/plugins/defenseclaw.ts'],
+          },
         ],
+        scan_result: {
+          max_severity: 'CRITICAL',
+          total_findings: 1,
+          scanner_name: 'mcp-scanner',
+          findings: [{ severity: 'CRITICAL', scanner: 'mcp-scanner', title: 'Allow-list precedence fixture' }],
+        },
       },
     },
     {

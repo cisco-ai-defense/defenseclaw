@@ -278,6 +278,14 @@ func TestDispatcherRejectsInvalidCapacityBeforeStartingWorker(t *testing.T) {
 			config.Retry.InitialBackoff = 2 * time.Second
 			config.Retry.MaxBackoff = time.Second
 		},
+		func(config *delivery.Config) {
+			config.Circuit.TransientFailureThreshold = 1
+			config.Circuit.OpenDuration = 0
+		},
+		func(config *delivery.Config) {
+			config.Circuit.TransientFailureThreshold = 33
+			config.Circuit.OpenDuration = time.Second
+		},
 		func(config *delivery.Config) { config.ObserverInterval = -1 },
 	}
 	for index, mutate := range mutations {
@@ -913,7 +921,7 @@ func TestCloseCancellationReleasesInflightAndPendingCharges(t *testing.T) {
 func TestHealthTransitionsRecoveryAndCoalescing(t *testing.T) {
 	var mu sync.Mutex
 	var transitions []delivery.HealthTransition
-	healthyObserved := make(chan struct{})
+	healthyObserved := make(chan struct{}, 1)
 	observer := delivery.ObserverFunc(func(transition delivery.HealthTransition) {
 		mu.Lock()
 		transitions = append(transitions, transition)
@@ -939,7 +947,10 @@ func TestHealthTransitionsRecoveryAndCoalescing(t *testing.T) {
 	dispatcher.Activate()
 	<-healthyObserved
 	dispatcher.Enqueue(payload(t, "record", "value"))
-	waitFor(t, func() bool { return dispatcher.Counters().Delivered == 1 })
+	waitFor(t, func() bool {
+		return dispatcher.Counters().Delivered == 1 &&
+			dispatcher.Health() == delivery.HealthHealthy
+	})
 	if dispatcher.Health() != delivery.HealthHealthy {
 		t.Fatalf("recovered health=%s", dispatcher.Health())
 	}

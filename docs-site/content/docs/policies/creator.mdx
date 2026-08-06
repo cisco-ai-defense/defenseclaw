@@ -132,7 +132,7 @@ defenseclaw policy activate my-policy
 | Severity matrix  | `skill_actions.<sev>` (runtime/file/install) plus per-scanner `scanner_overrides.<scanner>.<sev>`.                                     |
 | Admission        | `admission.scan_on_install`, `admission.allow_list_bypass_scan`, and `first_party_allow_list` entries.                                 |
 | Guardrail        | `guardrail.block_threshold` / `alert_threshold`, `guardrail.hilt`, `guardrail.patterns`, `severity_mappings`, Cisco trust level.       |
-| Rule pack        | Per-file regex rules (`policies/guardrail/<pack>/rules/<filename>.yaml`).                                                              |
+| Rule pack        | Per-file CEL expressions with required regex fallback, plus regex-only rules (`policies/guardrail/<pack>/rules/<filename>.yaml`).       |
 | Suppressions     | The three layers: `pre_judge_strips`, `finding_suppressions`, `tool_suppressions`.                                                     |
 | Sensitive tools  | `sensitive_tools` array — per-tool result inspection and judge-result toggles.                                                         |
 | LLM judges       | `judges.<name>` (pii / injection / tool-injection / exfil) — system prompts and category mappings.                                     |

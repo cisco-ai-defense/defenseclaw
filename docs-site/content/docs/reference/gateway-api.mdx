@@ -200,6 +200,7 @@ register a connector hook route.
 | `POST` | `/api/v1/antigravity/hook` | Antigravity | same |
 | `POST` | `/api/v1/hermes/hook` | Hermes | same |
 | `POST` | `/api/v1/opencode/hook` | OpenCode | same |
+| `POST` | `/api/v1/amp/hook` | Amp | [`internal/gateway/connector/amp.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/connector/amp.go) |
 | `POST` | `/api/v1/omnigent/hook` | OmniGent | [`internal/gateway/connector/omnigent.go`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/connector/omnigent.go) |
 
 All hook endpoints share a per-IP rate limiter (20 RPS, burst 40 — see `hookLimiter` in api.go). Loopback callers (the on-host hook scripts) are exempt; the limit only applies to remote callers.
@@ -214,6 +215,41 @@ The `/api/v1/inspect/*` family is the hot path that connector hooks and the Open
 | `POST` | `/api/v1/inspect/request` | Shared hook script | Inspect an outbound LLM request (prompt). |
 | `POST` | `/api/v1/inspect/response` | Shared hook script | Inspect a model response. |
 | `POST` | `/api/v1/inspect/tool-response` | Shared hook script | Inspect a tool's output before it returns to the agent. |
+
+`/api/v1/inspect/tool` is the existing trusted tool-call entry point; there is
+no client-supplied `is_tool_call` switch and no additional semantic endpoint.
+The authenticated route and its server-side connector identity establish the
+boundary. A request with `tool: "message"` stays in the message lane and is not
+eligible for [structured tool-call CEL rules](/docs/policies/cel/engine).
+
+Single-call semantic findings are available on this inspect route and on
+native pre-tool hooks. Ordered tool chains are stricter: they use durable
+SQLite state only on authenticated `/api/v1/{connector}/hook` events with
+canonical connector and session correlation. Inspect, proxy, router, and OTLP
+traffic never advance a chain. Only a matching authoritative successful result
+can promote an existing pending proposal into a durable successful predecessor.
+A chain can deny only its final step on an enforcement-safe synchronous
+pre-tool event. Post-tool and tool-result events never make the final blocking
+decision.
+See the [stateful connector lifecycle](/docs/policies/cel/tool-call-state) for
+the pairing, state-level, and cutoff contracts.
+Chain matches are `HIGH` severity and retain the connector's effective action
+matrix: default and permissive profiles alert, strict blocks, and eligible
+human-in-the-loop configurations confirm. A durable deny receipt is created
+only when that effective action is `block`.
+
+| Ordered chain | Wall-clock window | Event horizon |
+| --- | ---: | ---: |
+| Guardrails disabled → external egress | 30 minutes | 64 events |
+| Permission denied → runtime bypass | 5 minutes | 16 events |
+| Privilege discovery → elevation | 15 minutes | 32 events |
+| Secret-manager read → external egress | 30 minutes | 64 events |
+| Sensitive secret read → external egress | 30 minutes | 64 events |
+| Workload identity access → lateral execution | 15 minutes | 32 events |
+
+Chain state contains bounded masks and fingerprints rather than raw commands,
+arguments, paths, endpoints, or tool payloads. Durable deny receipts replay
+the same final decision without duplicating finding telemetry.
 
 ### Code & network scanning
 

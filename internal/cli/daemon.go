@@ -114,6 +114,10 @@ type managedProcessIdentity interface {
 	HasManagedProcessIdentity(int) bool
 }
 
+type authenticatedMigrationProcessIdentity interface {
+	HasAuthenticatedMigrationProcessIdentity(int) bool
+}
+
 type managedProcessGeneration interface {
 	ManagedProcessStartedAt(int) (time.Time, bool)
 }
@@ -961,8 +965,23 @@ func inspectConfiguredListener(d daemonState, cfg *config.Config, client *http.C
 	if !running || managedPID != ownerPID {
 		return false, 0, fmt.Errorf("configured gateway port %d is occupied by foreign process PID %d", cfg.Gateway.APIPort, ownerPID)
 	}
+	authenticatedMigration := false
 	if identity, ok := d.(managedProcessIdentity); ok && !identity.HasManagedProcessIdentity(managedPID) {
-		return false, 0, fmt.Errorf("managed gateway PID %d lacks matching executable and process start identity", managedPID)
+		migration, migrationOK := d.(authenticatedMigrationProcessIdentity)
+		if !migrationOK || !migration.HasAuthenticatedMigrationProcessIdentity(managedPID) {
+			return false, 0, fmt.Errorf("managed gateway PID %d lacks matching executable and process start identity", managedPID)
+		}
+		authenticatedMigration = true
+	}
+	if authenticatedMigration {
+		clientHost := strings.Trim(strings.TrimSpace(gatewayClientHost(cfg)), "[]")
+		clientIP := net.ParseIP(clientHost)
+		if !strings.EqualFold(clientHost, "localhost") && (clientIP == nil || !clientIP.IsLoopback()) {
+			return false, 0, fmt.Errorf(
+				"refusing to send gateway token to non-loopback migration status host %q",
+				clientHost,
+			)
+		}
 	}
 	status, err := fetchSidecarStatus(client, sidecarStatusURL(cfg), daemonGatewayToken(cfg))
 	if err != nil {
@@ -1009,7 +1028,14 @@ func fetchSidecarStatus(client *http.Client, addr, token string) (gatewayStatusE
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("X-DefenseClaw-Token", token)
-	resp, err := client.Do(req)
+	if client == nil {
+		client = &http.Client{Timeout: defaultReadinessHTTPTimeout}
+	}
+	requestClient := *client
+	requestClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	resp, err := requestClient.Do(req)
 	if err != nil {
 		return status, err
 	}

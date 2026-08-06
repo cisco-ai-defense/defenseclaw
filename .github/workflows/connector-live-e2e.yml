@@ -5,13 +5,14 @@
 # OpenClaw stack gate. It has two layers:
 #
 #   contract-matrix (Layer A) — deterministic, no LLM, no secrets, Unix.
-#     Builds DefenseClaw, then feeds golden stdin payloads into the *installed*
-#     hook entrypoint for every registry connector and asserts the gateway
-#     received the event, the verdict was shaped correctly, and teardown is
-#     clean. Fork-safe; runs on pull requests as well — one always-on macOS
-#     cell (codex / macOS, intended as a required check) plus the full
-#     Linux + macOS matrix when connector code changes. Deterministic native
-#     Windows x64 certification lives in windows-native.yml.
+#     Builds DefenseClaw, then feeds golden stdin payloads into each connector's
+#     canonical contract entrypoint (installed shell hook for most connectors,
+#     gateway hook dispatcher for Amp's TypeScript plugin) and asserts the
+#     gateway received the event, the verdict was shaped correctly, and
+#     teardown is clean. Fork-safe; runs on pull requests as well — one
+#     always-on macOS cell (codex / macOS, intended as a required check) plus
+#     the full Linux + macOS matrix when connector code changes. Deterministic
+#     native Windows x64 certification lives in windows-native.yml.
 #
 #   live-matrix (Layer B) — installs the real upstream agent at its latest
 #     version, wires it with `defenseclaw setup`, and drives lifecycle + forced
@@ -32,8 +33,8 @@
 #     approved version (that stays a deliberate human edit of
 #     cli/defenseclaw/inventory/validated_versions.json).
 #
-# Native Windows x64 certification is intentionally limited to Codex and
-# Claude Code. Unsupported Windows connectors are not scheduled as green cells.
+# Native Windows x64 certification is intentionally limited to Codex, Claude
+# Code, and Amp. Unsupported Windows connectors are not scheduled as green cells.
 
 name: Connector Live E2E
 
@@ -59,6 +60,7 @@ on:
           - all
           - codex
           - claudecode
+          - amp
           - geminicli
           - cursor
           - copilot
@@ -108,7 +110,7 @@ jobs:
   # ---------------------------------------------------------------------------
   # Gate — decide which contract cells to run for this event.
   #
-  #   schedule / workflow_dispatch → full 2-OS x 9 Unix matrix.
+  #   schedule / workflow_dispatch → full 2-OS x 10 Unix matrix.
   #   pull_request                 → just the always-on macOS smoke cell,
   #                                  unless the PR touches connector / hook /
   #                                  registry / contract-script / workflow
@@ -134,7 +136,7 @@ jobs:
           set -euo pipefail
           # The Unix harness retains the full supported connector matrix.
           # Native Windows certification is a separate, explicit x64 matrix.
-          full='{"os":["ubuntu-latest","macos-latest"],"connector":["codex","claudecode","geminicli","cursor","copilot","openhands","hermes","windsurf","antigravity"]}'
+          full='{"os":["ubuntu-latest","macos-latest"],"connector":["codex","claudecode","amp","geminicli","cursor","copilot","openhands","hermes","windsurf","antigravity"]}'
           # Always-on PR smoke: one connector on one cross-platform OS. macOS is
           # chosen because windows-native.yml separately certifies the native
           # Windows hook path on every PR. This adds the missing native macOS
@@ -277,9 +279,10 @@ jobs:
           go test -count=1 ./test/e2e/ \
             -run "TestConnectorLifecycle_Matrix/${{ matrix.connector }}|TestV7Observability_DestinationAppPerConnector/${{ matrix.connector }}|TestConnectorVerifyCleanOnFreshDataDir/${{ matrix.connector }}|TestGoldenPerConnectorLayout"
 
-      # Golden-payload entrypoint smoke: feed each registry event into the
-      # installed Unix hook entrypoint and assert fire + verdict shaping +
-      # clean teardown. Native Windows uses the dedicated windows-native.yml.
+      # Golden-payload entrypoint smoke: feed each registry event into its Unix
+      # contract entrypoint and assert fire + verdict shaping + clean teardown.
+      # Amp uses the canonical gateway hook dispatcher because the installed
+      # agent entrypoint is TypeScript. Native Windows uses windows-native.yml.
       - name: Contract entrypoint smoke
         if: steps.select.outputs.run == 'true'
         # Layer A runs agent-less, so the cached agent version is empty and the
@@ -330,18 +333,20 @@ jobs:
         # The reality matrix: which agents have a headless CLI that fires hooks
         # on which OS. Contract-only connectors (hermes, windsurf, antigravity)
         # are absent here — they are covered by Layer A only. Native Windows
-        # Codex/Claude certification is handled by windows-live below.
+        # Codex/Claude/Amp certification is handled by windows-live below.
         #
         # Currently scoped to the connectors we can authenticate with Azure
-        # OpenAI / Amazon Bedrock (Codex, Claude Code, OpenHands). Gemini CLI,
-        # Cursor, and Copilot are deferred until their native keys exist — add
-        # their cells back here when GOOGLE_API_KEY / CURSOR_API_KEY /
-        # COPILOT_CLI_TOKEN are configured.
+        # OpenAI / Amazon Bedrock (Codex, Claude Code, OpenHands) or Amp's
+        # native API key. Gemini CLI, Cursor, and Copilot are deferred until
+        # their native keys exist — add their cells back here when
+        # GOOGLE_API_KEY / CURSOR_API_KEY / COPILOT_CLI_TOKEN are configured.
         include:
           - { connector: codex,      os: ubuntu-latest,  dcos: linux }
           - { connector: codex,      os: macos-latest,   dcos: macos }
           - { connector: claudecode, os: ubuntu-latest,  dcos: linux }
           - { connector: claudecode, os: macos-latest,   dcos: macos }
+          - { connector: amp,        os: ubuntu-latest,  dcos: linux }
+          - { connector: amp,        os: macos-latest,   dcos: macos }
           # OpenHands needs the Docker runtime, so it is Linux-only.
           - { connector: openhands,  os: ubuntu-latest,  dcos: linux }
     runs-on: ${{ matrix.os }}
@@ -354,12 +359,14 @@ jobs:
       DC_E2E_RESULTS: ${{ github.workspace }}/connector-live-e2e-results.jsonl
       DC_DRIVER_MODE: ${{ github.event_name == 'workflow_dispatch' && inputs.mode || 'action' }}
       DC_E2E_AGENT_VERSION_REQUEST: ${{ github.event_name == 'workflow_dispatch' && inputs.version || 'latest' }}
+      AMP_VERSION: ${{ github.event_name == 'workflow_dispatch' && inputs.version || 'latest' }}
       # Provider keys are read directly by the agent CLIs (e.g. codex, claude)
       # from the process environment. They are also written into
       # ~/.defenseclaw/.env below so the gateway can reach them when needed.
       # Empty secrets simply skip writing that key (see the seed step).
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      AMP_API_KEY: ${{ secrets.AMP_API_KEY }}
       GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
       GEMINI_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
       CURSOR_API_KEY: ${{ secrets.CURSOR_API_KEY }}
@@ -423,8 +430,8 @@ jobs:
       - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
         if: steps.select.outputs.run == 'true'
 
-      # Most live agents (codex, claude, gemini, copilot, cursor) ship as npm
-      # packages; OpenHands installs via pipx. Node + uv cover both.
+      # Most live agents (codex, claude, amp, gemini, copilot, cursor) ship as
+      # npm packages; OpenHands installs via pipx. Node + uv cover both.
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         if: steps.select.outputs.run == 'true'
         with:
@@ -464,6 +471,7 @@ jobs:
           }
           write_key OPENAI_API_KEY    "${OPENAI_API_KEY:-}"
           write_key ANTHROPIC_API_KEY "${ANTHROPIC_API_KEY:-}"
+          write_key AMP_API_KEY       "${AMP_API_KEY:-}"
           write_key GOOGLE_API_KEY    "${GOOGLE_API_KEY:-}"
           write_key GEMINI_API_KEY    "${GEMINI_API_KEY:-}"
           write_key CURSOR_API_KEY    "${CURSOR_API_KEY:-}"
@@ -517,15 +525,17 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        connector: [codex, claudecode]
+        connector: [codex, claudecode, amp]
     env:
       DC_WINDOWS_STATE: ${{ github.workspace }}/.dc-e2e-${{ matrix.connector }}-live
       DC_E2E_RESULTS: ${{ github.workspace }}/connector-live-e2e-results.jsonl
       OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
       ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      AMP_API_KEY: ${{ secrets.AMP_API_KEY }}
       LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
       CODEX_VERSION: ${{ inputs.version }}
       CLAUDE_VERSION: ${{ inputs.version }}
+      AMP_VERSION: ${{ inputs.version }}
     steps:
       - name: Select requested Windows connector
         id: select

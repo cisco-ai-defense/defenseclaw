@@ -43,7 +43,19 @@ export const site = {
 // (canonical, OG, JSON-LD) without leaking deploy-target details
 // into the source tree.
 export const siteUrl =
-  process.env.NEXT_PUBLIC_SITE_URL ?? 'https://cisco-ai-defense.github.io/defenseclaw';
+  process.env.NEXT_PUBLIC_SITE_URL ??
+  process.env.SITE_URL ??
+  'https://cisco-ai-defense.github.io/defenseclaw';
+
+// GitHub Pages serves this static export with `trailingSlash: true`, so the
+// slash form is the only URL that returns 200 without a redirect. Keep that
+// canonical convention in one place for sitemaps, metadata, JSON-LD, and
+// machine-readable documentation indexes.
+export function canonicalUrl(pathname = '/'): string {
+  const root = siteUrl.replace(/\/+$/, '');
+  const path = pathname.replace(/^\/+|\/+$/g, '');
+  return path.length === 0 ? `${root}/` : `${root}/${path}/`;
+}
 
 // basePath without the trailing slash. Used by sitemap + canonical
 // URL composition. Handles both '' (custom domain at root) and a

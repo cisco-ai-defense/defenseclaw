@@ -177,7 +177,8 @@ func (a *APIServer) hookModelV8Observation(
 	response string,
 ) hookModelV8Observation {
 	usage := a.takeHookLLMSpanUsage(meta)
-	provider := firstNonEmpty(meta.Provider, snapshot.meta.Provider, meta.Source, snapshot.meta.Source, "unknown")
+	provider := firstNonEmpty(meta.Provider, snapshot.meta.Provider)
+	provider = hookProviderOrConnector(provider, firstNonEmpty(meta.Source, snapshot.meta.Source))
 	reportedModel := firstNonEmpty(snapshot.meta.Model, meta.Model, usage.model)
 	model := reportedModel
 	if !hookModelV8Identifier(model) {

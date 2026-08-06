@@ -613,13 +613,8 @@ func NewHookContractLockEntry(opts SetupOpts, conn Connector, defenseClawVersion
 	if conn != nil {
 		name = conn.Name()
 	}
-	resolution := ResolveHookContract(name, opts.AgentVersion)
+	resolution := resolveHookContractForOptions(name, opts)
 	contract := resolution.Contract
-	if opts.HookContractID != "" {
-		if pinned, ok := hookContractByID(name, opts.HookContractID); ok {
-			contract = pinned
-		}
-	}
 	entry := HookContractLockEntry{
 		Connector:              normalizeConnectorName(name),
 		RawAgentVersion:        resolution.RawVersion,
@@ -641,9 +636,6 @@ func NewHookContractLockEntry(opts SetupOpts, conn Connector, defenseClawVersion
 			entry.AgentExecutableSource = "setup-selected"
 			entry.AgentExecutableSHA256 = digest
 		}
-	}
-	if opts.HookContractID != "" {
-		entry.ContractID = opts.HookContractID
 	}
 	return entry
 }
@@ -888,7 +880,9 @@ func HookContractCompatibilityDrifted(previous, current HookContractLockEntry) b
 	if strings.TrimSpace(previous.Connector) == "" {
 		return false
 	}
-	if previous.RawAgentVersion != "" && current.RawAgentVersion != "" && previous.RawAgentVersion != current.RawAgentVersion {
+	previousRaw := stableRawAgentVersionForContract(previous)
+	currentRaw := stableRawAgentVersionForContract(current)
+	if previousRaw != "" && currentRaw != "" && previousRaw != currentRaw {
 		return true
 	}
 	if previous.NormalizedAgentVersion != "" && current.NormalizedAgentVersion != "" && previous.NormalizedAgentVersion != current.NormalizedAgentVersion {
@@ -901,6 +895,30 @@ func HookContractCompatibilityDrifted(previous, current HookContractLockEntry) b
 	// changed script bytes are the thing setup/guardian repair is supposed to
 	// overwrite. Treat only agent/contract identity changes as contract drift.
 	return false
+}
+
+// stableRawAgentVersionForContract removes only upstream presentation text
+// known to change without a binary change. Amp appends a relative release-age
+// annotation to `amp --version` (for example, "..., 2h ago"), so persisting the
+// complete raw output as evidence and comparing it byte-for-byte makes an
+// unchanged installation look like contract drift as time passes. Keep the
+// full RawAgentVersion in the lock, but compare Amp's version+commit prefix.
+//
+// This is deliberately connector-specific. Other CLIs can carry compatibility
+// significance in raw prerelease/build suffixes that the normalized semver
+// intentionally drops, so a global "normalized versions match" shortcut would
+// weaken their fail-closed upgrade gate.
+func stableRawAgentVersionForContract(entry HookContractLockEntry) string {
+	raw := strings.TrimSpace(entry.RawAgentVersion)
+	if normalizeConnectorName(entry.Connector) != "amp" {
+		return raw
+	}
+	const releasedMarker = " (released "
+	marker := strings.Index(raw, releasedMarker)
+	if marker <= 0 || !strings.HasSuffix(raw, ")") {
+		return raw
+	}
+	return strings.TrimSpace(raw[:marker])
 }
 
 func HookScriptDigests(opts SetupOpts, conn Connector) map[string]string {
