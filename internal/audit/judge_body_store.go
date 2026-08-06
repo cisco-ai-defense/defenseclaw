@@ -55,6 +55,8 @@ type JudgeBodyStore struct {
 	db        *sql.DB
 	path      string
 	pathGuard *preparedJudgeBodyPath
+	closeMu   sync.Mutex
+	closed    bool
 
 	// cutoverReady gates the runtime writer and compatibility reader when
 	// the store was opened by NewJudgeBodyStoreForCutover. The gateway uses
@@ -177,12 +179,24 @@ func unwrapOpenSQLiteErr(err error) error {
 
 // Close releases the underlying connection pool. Idempotent.
 func (s *JudgeBodyStore) Close() error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil
 	}
-	err := s.db.Close()
-	s.pathGuard.close()
+	s.closeMu.Lock()
+	defer s.closeMu.Unlock()
+	if s.closed {
+		return nil
+	}
+	s.closed = true
+	db := s.db
+	s.db = nil
+	pathGuard := s.pathGuard
 	s.pathGuard = nil
+	var err error
+	if db != nil {
+		err = db.Close()
+	}
+	pathGuard.close()
 	return err
 }
 
