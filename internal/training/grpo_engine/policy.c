@@ -611,13 +611,15 @@ static void policy_forward_token(PolicyEngine *pe, int token, int pos) {
 
         /* Q, K, V projections + LoRA injection */
         if (l == 0 && pos == 0) {
-            fprintf(stderr, "policy: first matmul — q_weight=%p, dtype=%d, rows=%d, in_dim=%d, entering...\n",
+            fprintf(stderr, "policy: embed done, hidden[0..3]=%.6f,%.6f,%.6f,%.6f\n",
+                    pe->hidden[0], pe->hidden[1], pe->hidden[2], pe->hidden[3]);
+            fprintf(stderr, "policy: residual[0..3]=%.6f,%.6f,%.6f,%.6f\n",
+                    residual[0], residual[1], residual[2], residual[3]);
+            fprintf(stderr, "policy: attn_norm=%p, dtype=%d\n", (void*)layer->attn_norm, layer->attn_norm_dtype);
+            fprintf(stderr, "policy: after rmsnorm, hidden[0..3]=%.6f,%.6f,%.6f,%.6f\n",
+                    pe->hidden[0], pe->hidden[1], pe->hidden[2], pe->hidden[3]);
+            fprintf(stderr, "policy: q_weight=%p, dtype=%d, rows=%d, in_dim=%d\n",
                     (void*)layer->q_weight, layer->q_dtype, n_heads * head_dim, hidden_dim);
-            fflush(stderr);
-            /* Test: read first byte to verify mmap page is accessible */
-            volatile uint8_t test = *((const uint8_t*)layer->q_weight);
-            (void)test;
-            fprintf(stderr, "policy: mmap page accessible, calling matmul...\n");
             fflush(stderr);
         }
         grpo_matmul_any(pe->q_buf, pe->hidden, layer->q_weight, n_heads * head_dim, hidden_dim, layer->q_dtype);
