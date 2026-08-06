@@ -285,6 +285,17 @@ func projectManagedCompatibility(
 			return managedCompatibilityProjection{}, false, false
 		}
 	default:
+		// v8 discovery / inventory records without a v7 legacy wrapper
+		// (skill / plugin per-item inventories, and the AI-Discovery scan
+		// summary action=ai_discovery) are candidates by identity but not
+		// by legacy shape. Let them flow through as ordinary OTLP log
+		// records without any legacy projection. Every other action --
+		// including diagnostic actions like local_inventory_diagnostic --
+		// remains fail-closed so an unknown record shape cannot silently
+		// leak past the compatibility projector.
+		if wire.Bucket == "ai.discovery" && isV8PassThroughAction(wire.Action) {
+			return managedCompatibilityProjection{}, false, true
+		}
 		return managedCompatibilityProjection{}, false, false
 	}
 
@@ -302,6 +313,22 @@ func projectManagedCompatibility(
 		managedStringAttribute("host.name", hostname),
 	)
 	return projection, true, true
+}
+
+// isV8PassThroughAction reports whether the given routing action names a v8
+// discovery/inventory record that has no v7 legacy wrapper and should flow
+// through the managed AID adapter unprojected. Skill and plugin per-item
+// inventories, plus the AI-Discovery scan summary (action=ai_discovery), fall
+// into this category; every other action -- including diagnostic actions --
+// stays fail-closed so unknown record shapes cannot silently pass.
+func isV8PassThroughAction(action string) bool {
+	switch action {
+	case string(config.ObservabilityV8ManagedSkillInventoryAction),
+		string(config.ObservabilityV8ManagedPluginInventoryAction),
+		"ai_discovery":
+		return true
+	}
+	return false
 }
 
 func managedCompatibilityCandidate(identity delivery.RoutingIdentity) bool {
@@ -592,8 +619,17 @@ func managedIntAttribute(key string, value int64) *commonpb.KeyValue {
 }
 
 func managedAuthoritativeInventorySummary(body map[string]any, max int) (int, int, bool) {
-	if body == nil || max < 0 || managedString(body, "defenseclaw.ai.discovery.result", 64) != "completed" ||
+	if body == nil || max < 0 ||
 		managedString(body, "defenseclaw.ai.discovery.source", 256) == "" {
+		return 0, 0, false
+	}
+	// The scan emitter uses "ok" for a clean scan and "partial" for a
+	// scan that hit detector errors; the compatibility projector was
+	// wired to accept only "completed", which the emitter never sends.
+	// Accept the emitter's canonical values (fix keeps the empty-string
+	// / other-values rejection unchanged).
+	result := managedString(body, "defenseclaw.ai.discovery.result", 64)
+	if result != "ok" && result != "completed" {
 		return 0, 0, false
 	}
 	count, ok := managedNonnegativeInt(body, "defenseclaw.ai.discovery.signals_total")

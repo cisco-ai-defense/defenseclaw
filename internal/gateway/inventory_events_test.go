@@ -1162,7 +1162,7 @@ func TestEndpointPluginDiscoveryFailureIsPartialAndKeepsBuiltins(t *testing.T) {
 	}
 	cfg := &config.Config{PluginDir: pluginRoot}
 	capture := &endpointInventoryCapture{}
-	makeEndpointInventoryEmitter(cfg, capture)(t.Context())
+	makeEndpointInventoryEmitter(cfg, capture, nil)(t.Context())
 
 	wantBuiltins := len(connector.NewDefaultRegistry().Available())
 	connectorRows := 0

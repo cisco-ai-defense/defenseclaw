@@ -43,6 +43,14 @@ const (
 	// endpoint-inventory collections to the same managed-only optional route.
 	ObservabilityV8ManagedConnectorInventoryAction observability.ProducerKey = "managed_connector_inventory"
 	ObservabilityV8ManagedMCPInventoryAction       observability.ProducerKey = "managed_mcp_inventory"
+	// ObservabilityV8ManagedSkillInventoryAction and
+	// ObservabilityV8ManagedPluginInventoryAction reserve routing identities
+	// for the per-entry skill / plugin inventories the sidecar derives from
+	// each AI-Discovery scan. Each entry ships as its own
+	// ai_component.observed record with agent_connector set so downstream can
+	// correlate skills / plugins with their parent agent (e.g. codex, claudecode).
+	ObservabilityV8ManagedSkillInventoryAction  observability.ProducerKey = "managed_skill_inventory"
+	ObservabilityV8ManagedPluginInventoryAction observability.ProducerKey = "managed_plugin_inventory"
 	// ObservabilityV8LocalInventoryDiagnosticAction carries incomplete,
 	// overflowed, or otherwise non-authoritative scans to local SQLite only.
 	// It can never be projected as a managed inventory snapshot.
@@ -146,10 +154,20 @@ func WithObservabilityV8ManagedAIDDestination(
 				Signals: []observability.Signal{observability.SignalLogs},
 				Selector: ObservabilityV8EffectiveSelector{
 					Buckets: []observability.Bucket{observability.BucketAIDiscovery},
+					// The drop route only covers legacy-compat inventories
+					// (agent / connector). Those records go through the
+					// managedaid compatibility projector which wraps them in v7
+					// envelopes; the drop route prevents them from also shipping
+					// as raw ai_component.observed records on operator
+					// destinations. Skill / plugin / MCP per-item inventories
+					// don't have a v7 wrapper for the item fields (the v7 MCP
+					// envelope only carries a count rollup) — they must NOT be
+					// dropped here, or Route 2 (send-all) never gets a chance to
+					// forward the per-item detail with agent_connector
+					// correlation.
 					Actions: []observability.ProducerKey{
 						ObservabilityV8ManagedAgentInventoryAction,
 						ObservabilityV8ManagedConnectorInventoryAction,
-						ObservabilityV8ManagedMCPInventoryAction,
 					},
 					EventNames: []observability.EventName{"ai_component.observed"},
 				},
