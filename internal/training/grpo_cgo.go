@@ -14,6 +14,7 @@ package training
 import "C"
 import (
 	"fmt"
+	"runtime"
 	"unsafe"
 )
 
@@ -80,6 +81,12 @@ func NewGrpoEngine(cfg GrpoLocalConfig) (*GrpoEngine, error) {
 }
 
 func (e *GrpoEngine) Generate(prompt []int, maxLen int, temp, topP float32) (tokens []int, logprobs []float32, err error) {
+	// Lock this goroutine to its OS thread for the duration of the long C call.
+	// Without this, Go's scheduler may never reschedule us after the C function
+	// blocks for seconds/minutes on large model matmuls.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
 	output := make([]C.int, maxLen)
 	lp := make([]C.float, maxLen)
 	promptC := make([]C.int, len(prompt))
