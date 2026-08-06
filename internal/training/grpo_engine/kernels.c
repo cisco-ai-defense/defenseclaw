@@ -145,19 +145,33 @@ static inline float dequant_q4k_element(const uint8_t *block, int idx) {
 
 void grpo_matmul_q4(float *out, const float *x, const void *W_packed,
                     int rows, int in_dim) {
-    /* out[rows] = x[in_dim] @ W_packed[rows × in_dim, Q4_K format] */
+    /* out[rows] = x[in_dim] @ W_packed[rows × in_dim, Q4_K format]
+     * Q4_K: 256 elements per super-block, 144 bytes:
+     *   half d (2B) + half dmin (2B) + scales[12] + qs[128]
+     * Optimized: read d/dmin once per block, not per element. */
     const int blocks_per_row = in_dim / Q4K_BLOCK_SIZE;
     const uint8_t *W = (const uint8_t *)W_packed;
 
     #pragma omp parallel for
     for (int r = 0; r < rows; r++) {
         double acc = 0.0;
-        const uint8_t *row_data = W + (size_t)r * blocks_per_row * Q4K_BLOCK_BYTES;
+        const uint8_t *row_data = W + (size_t)r * (size_t)blocks_per_row * Q4K_BLOCK_BYTES;
         for (int b = 0; b < blocks_per_row; b++) {
-            const uint8_t *block = row_data + b * Q4K_BLOCK_BYTES;
-            for (int j = 0; j < Q4K_BLOCK_SIZE; j++) {
-                float w = dequant_q4k_element(block, j);
-                acc += (double)x[b * Q4K_BLOCK_SIZE + j] * (double)w;
+            const uint8_t *block = row_data + (size_t)b * Q4K_BLOCK_BYTES;
+            /* Read d and dmin ONCE per 256-element block */
+            uint16_t d_bits, dmin_bits;
+            memcpy(&d_bits, block, 2);
+            memcpy(&dmin_bits, block + 2, 2);
+            float d = fp16_to_fp32(d_bits);
+            float dmin = fp16_to_fp32(dmin_bits);
+            const uint8_t *qs = block + 16;  /* after d(2) + dmin(2) + scales(12) */
+
+            /* Process 256 elements (128 bytes of packed 4-bit values) */
+            int base = b * Q4K_BLOCK_SIZE;
+            for (int j = 0; j < Q4K_BLOCK_SIZE && (base + j) < in_dim; j++) {
+                uint8_t q4 = (j % 2 == 0) ? (qs[j / 2] & 0x0F) : (qs[j / 2] >> 4);
+                float w = d * (float)q4 - dmin;
+                acc += (double)x[base + j] * (double)w;
             }
         }
         out[r] = (float)acc;
