@@ -1,8 +1,8 @@
 # DefenseClaw Lite: IoT Agent Architecture Proposal
 
-**Document Version:** 1.0  
-**Date:** 2026-07-27  
-**Status:** DRAFT — Pending Architecture Review  
+**Document Version:** 1.2  
+**Date:** 2026-08-06  
+**Status:** DRAFT — Full Architecture/Security/Operational Review Incorporated  
 **Authors:** Nikhil Ghodki  
 **Classification:** Cisco Confidential
 
@@ -528,6 +528,62 @@ Connection Hierarchy:
 └─────────────────────────────────────────────────────────────────┘
 ```
 
+### 5.4 Edge Gateway High Availability
+
+The edge gateway is a single point of failure per site. The following HA options address this:
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│               EDGE GATEWAY HA OPTIONS                              │
+├──────────────────────────────────────────────────────────────────┤
+│                                                                    │
+│  Option 1: VRRP Active-Passive (Recommended for industrial)      │
+│  ─────────────────────────────────────────────────────────────── │
+│                                                                    │
+│     ┌─────────────────┐      ┌─────────────────┐                │
+│     │  Edge Primary   │◄────►│  Edge Secondary │                │
+│     │  (IR1101-A)     │ VRRP │  (IR1101-B)     │                │
+│     │                 │  +   │                 │                │
+│     │ • MQTT broker   │Redis │ • MQTT broker   │                │
+│     │ • Verdict cache │ sync │ • Verdict cache │                │
+│     │ • VIP: active   │      │ • VIP: standby  │                │
+│     └────────┬────────┘      └────────┬────────┘                │
+│              └────────────┬────────────┘                         │
+│                           │                                       │
+│              Devices connect to VIP                               │
+│              Failover: <3 seconds (VRRP)                         │
+│                                                                    │
+│  Option 2: MQTT 5.0 Shared Subscriptions (Active-Active)         │
+│  ─────────────────────────────────────────────────────────────── │
+│                                                                    │
+│     Both edges subscribe to shared topic group:                   │
+│     $share/edge-site-alpha/defenseclaw/fleet/+/verdict/req       │
+│     MQTT 5.0 distributes messages across group members.          │
+│     Failover: 0s (no failover needed, both are active).          │
+│     Requires: shared verdict cache (Redis) between edges.        │
+│                                                                    │
+│  Option 3: Cloud Fallback (Single Edge, Budget-Constrained)      │
+│  ─────────────────────────────────────────────────────────────── │
+│                                                                    │
+│     Device broker priority list (tried in order on disconnect):  │
+│       1. mqtts://edge-vip.site-alpha.local:8883  (primary edge)  │
+│       2. mqtts://edge-b.site-alpha.local:8883    (secondary edge)│
+│       3. mqtts://fleet.defenseclaw.cloud:8883    (cloud direct)  │
+│     Failover: 5s (MQTT reconnect to next in list).               │
+│     No additional hardware required.                             │
+│                                                                    │
+│  Selection Criteria:                                              │
+│  ┌──────────────────┬──────────────┬─────────┬────────────────┐  │
+│  │ Approach         │ Failover     │ Cost    │ Complexity     │  │
+│  ├──────────────────┼──────────────┼─────────┼────────────────┤  │
+│  │ VRRP + Redis     │ <3s          │ 2× HW  │ Low            │  │
+│  │ Shared sub (A/A) │ 0s           │ 2× HW  │ Medium         │  │
+│  │ Cloud fallback   │ 5s           │ 1× HW  │ Low            │  │
+│  └──────────────────┴──────────────┴─────────┴────────────────┘  │
+│                                                                    │
+└──────────────────────────────────────────────────────────────────┘
+```
+
 ---
 
 ## 6. Component Specifications
@@ -652,6 +708,74 @@ config DCLAW_BLOOM_FILTER
     default n if !DCLAW_PROFILE_EDGE
     default y if DCLAW_PROFILE_EDGE
 
+config DCLAW_BLOOM_OFFLINE_ACTION
+    int "Bloom hit action when offline (1=BLOCK, 2=WARN)"
+    default 2
+    depends on DCLAW_BLOOM_FILTER
+    help
+      When cloud is unreachable and bloom filter reports a hit (which
+      may be a false positive at 0.1% rate), use WARN (2) for operational
+      continuity or BLOCK (1) for high-security deployments.
+
+config DCLAW_SPECULATIVE_EXECUTION
+    bool "Enable speculative execution for non-safety capabilities"
+    default n if DCLAW_PROFILE_MINIMAL
+    default y
+    help
+      When cloud escalation is needed for non-safety capabilities
+      (sensor_read, net_fetch), allow tool to proceed speculatively
+      while awaiting verdict. Retroactive BLOCK kills in-flight tool.
+      Safety-critical caps (actuate, exec_shell) always block synchronously.
+
+config DCLAW_AUDIT_RAM_BUFFER_SIZE
+    int "Audit write-coalescing buffer size (entries)"
+    default 4 if DCLAW_PROFILE_MINIMAL
+    default 16 if DCLAW_PROFILE_STANDARD
+    default 32 if DCLAW_PROFILE_EDGE
+    help
+      Number of audit entries buffered in RAM before batch-flushing to
+      flash. Reduces flash write cycles by this factor. BLOCK events
+      always flush immediately regardless of buffer state.
+
+config DCLAW_CANARY_WINDOW_SEC
+    int "Policy OTA canary health-check window (seconds)"
+    default 0 if DCLAW_PROFILE_MINIMAL
+    default 600 if DCLAW_PROFILE_STANDARD
+    default 600 if DCLAW_PROFILE_EDGE
+    help
+      After applying a new policy, monitor block rate vs. baseline for
+      this duration. Auto-rollback if spike detected. 0 = disabled.
+
+choice DCLAW_SE_FAILURE_MODE
+    prompt "Secure element failure behavior"
+    default DCLAW_SE_STRICT
+
+config DCLAW_SE_STRICT
+    bool "Lockdown on SE failure (recommended)"
+    help
+      Device enters lockdown if secure element fails.
+      No communications possible. Requires re-provisioning.
+
+config DCLAW_SE_DEGRADED
+    bool "Degraded mode on SE failure"
+    help
+      Fall back to software key with restrictions: halved TTLs,
+      SE_DEGRADED heartbeat flag, auto-lockdown after 72h.
+      Cloud flags device for physical inspection.
+
+config DCLAW_SE_DISABLED
+    bool "No secure element required (dev/test only)"
+endchoice
+
+config DCLAW_BROKER_FALLBACK_LIST_SIZE
+    int "Number of broker fallback endpoints"
+    default 1 if DCLAW_PROFILE_MINIMAL
+    default 3 if DCLAW_PROFILE_STANDARD
+    default 3 if DCLAW_PROFILE_EDGE
+    help
+      Device tries brokers in priority order on disconnect.
+      Typical: primary edge, secondary edge, cloud direct.
+
 endmenu
 ```
 
@@ -707,17 +831,39 @@ typedef enum {
     DCLAW_REASON_CLOUD_TIMEOUT  = 0x07,
     DCLAW_REASON_PII_DETECTED   = 0x08,
     DCLAW_REASON_BLOOM_HIT      = 0x09,
+    DCLAW_REASON_INVALID_INPUT  = 0x0A,
+    DCLAW_REASON_RETROACTIVE    = 0x0B,
 } dclaw_reason_t;
 
 /* --- Core structures --- */
 
 typedef struct {
-    uint32_t device_id;
+    uint16_t tenant_id;        /* multi-tenant isolation */
+    uint16_t fleet_id;         /* fleet within tenant */
+    uint32_t device_id;        /* unique within fleet */
     uint16_t policy_version;
     uint16_t fw_version;
     uint8_t  hw_profile;       /* enum: MCU, RTOS, LINUX_SBC, GATEWAY */
     uint8_t  capabilities;     /* bitmask of supported features */
 } dclaw_device_info_t;
+
+/* Composite 64-bit device identity for cross-fleet lookups */
+#define DCLAW_FULL_ID(t, f, d) \
+    (((uint64_t)(t) << 48) | ((uint64_t)(f) << 32) | (uint64_t)(d))
+
+/* --- Clock Synchronization --- */
+
+typedef struct {
+    uint32_t cloud_epoch;      /* last known cloud timestamp (from MQTT CONNACK) */
+    uint32_t local_ticks;      /* monotonic tick counter since boot */
+    uint32_t ticks_at_sync;    /* local_ticks when cloud_epoch was received */
+    bool     time_trusted;     /* true if synced within last 24h */
+} dclaw_clock_t;
+
+/* Approximate wall time: cloud_epoch + (local_ticks - ticks_at_sync) / TICK_HZ
+ * TTL check: if !time_trusted, treat all TTLs as expired (forces re-escalation)
+ * Certificate validation: skip notBefore/notAfter if !time_trusted,
+ * rely on OCSP stapling from broker */
 
 typedef struct {
     char     tool_name[64];
@@ -727,12 +873,19 @@ typedef struct {
     uint16_t session_id;       /* correlator session tracking */
 } dclaw_tool_request_t;
 
+typedef enum {
+    DCLAW_VERDICT_SYNC,              /* local decision, immediate */
+    DCLAW_VERDICT_PENDING,           /* cloud asked, agent may proceed with restrictions */
+    DCLAW_VERDICT_RETROACTIVE_BLOCK, /* cloud said BLOCK after agent started */
+} dclaw_verdict_mode_t;
+
 typedef struct {
-    dclaw_action_t  action;
-    dclaw_reason_t  reason;
+    dclaw_action_t   action;
+    dclaw_reason_t   reason;
     dclaw_severity_t severity;
-    uint16_t        ttl_minutes;  /* 0 = no cache (local decision) */
-    bool            from_cache;
+    dclaw_verdict_mode_t mode;     /* sync vs speculative execution */
+    uint16_t         ttl_minutes;  /* 0 = no cache (local decision) */
+    bool             from_cache;
 } dclaw_verdict_t;
 
 typedef struct {
@@ -744,6 +897,100 @@ typedef struct {
     uint8_t  hmac[8];         /* truncated HMAC-SHA256, chains to prev */
     uint8_t  _pad[2];         /* alignment to 16 bytes */
 } dclaw_audit_entry_t;       /* exactly 16 bytes */
+
+/* --- Audit Write Coalescing (flash wear mitigation) --- */
+
+#define DCLAW_AUDIT_RAM_BUFFER 16    /* buffer entries in RAM before flash write */
+#define DCLAW_AUDIT_FLUSH_SEC  60    /* flush to flash every 60s or when full */
+
+typedef struct {
+    dclaw_audit_entry_t buffer[DCLAW_AUDIT_RAM_BUFFER];
+    uint8_t  count;                  /* entries in RAM buffer */
+    uint32_t last_flush_tick;
+    uint32_t total_flash_writes;     /* lifetime counter for wear tracking */
+} dclaw_audit_writer_t;
+
+/* INVARIANT: BLOCK audit entries are NEVER buffered.
+ * When action == DCLAW_ACTION_BLOCK, the entry bypasses the coalescing buffer
+ * and writes directly to flash. This ensures BLOCK events survive unexpected
+ * power loss. Only WARN and sampled ALLOW entries use the coalescing buffer.
+ *
+ * Flush triggers (for buffered entries):
+ *   1. buffer[count] reaches DCLAW_AUDIT_RAM_BUFFER (full)
+ *   2. DCLAW_AUDIT_FLUSH_SEC elapsed since last flush
+ *   3. BLOCK event triggers immediate flush of entire buffer + the BLOCK entry
+ *
+ * Flash wear budget: 60 tool calls/min, ~5% BLOCK rate = 3 immediate writes/min.
+ * Remaining 57 entries buffered 16-deep = ~3.6 batch writes/min.
+ * Total: ~6.6 writes/min. Ring with 64 sectors: each sector written 1.5/day.
+ * At 100K flash endurance cycles: >180 years per sector. */
+
+/* --- Speculative Execution Lifecycle --- */
+
+/* Tool execution has defined cancellation points. Speculative mode is only
+ * valid for capabilities where the harmful action is the USE of the result,
+ * not the COLLECTION of it. Capabilities are classified as:
+ *
+ *   NEVER SPECULATIVE (sync_block):
+ *     - DCLAW_CAP_ACTUATE   — physical action is irreversible once fired
+ *     - DCLAW_CAP_EXEC_SHELL — process creation may have side effects
+ *     - DCLAW_CAP_WRITE_FS  — filesystem mutation is irreversible
+ *
+ *   SPECULATIVE ALLOWED:
+ *     - DCLAW_CAP_NET_FETCH  — abort connection before response committed
+ *     - DCLAW_CAP_SENSOR_READ — discard buffer before transmission
+ *     - DCLAW_CAP_READ_FS   — file read ok, block transmission of contents
+ *     - DCLAW_CAP_SEND_MSG  — queue message, don't transmit until verdict
+ */
+
+typedef enum {
+    DCLAW_EXEC_STAGE_QUEUED,     /* tool call received, not yet started */
+    DCLAW_EXEC_STAGE_STARTED,    /* execution begun, cancellation possible */
+    DCLAW_EXEC_STAGE_COMMITTED,  /* point of no return passed */
+    DCLAW_EXEC_STAGE_COMPLETE,   /* execution finished */
+} dclaw_exec_stage_t;
+
+typedef struct {
+    uint16_t session_id;
+    uint16_t request_id;
+    uint8_t  cap_flags;              /* capability being executed */
+    dclaw_exec_stage_t stage;        /* current execution stage */
+    bool     verdict_received;       /* cloud has responded */
+    dclaw_action_t cloud_verdict;    /* ALLOW/BLOCK from cloud (if received) */
+} dclaw_speculative_slot_t;
+
+#define DCLAW_SPECULATIVE_SLOTS 4    /* max concurrent speculative executions */
+
+/* Escalation mode lookup table (compiled from policy YAML escalation_mode).
+ * Maps dclaw_capability_t bitmask to execution mode at decision time. */
+typedef struct {
+    uint8_t  cap_flag;             /* single capability bit */
+    uint8_t  mode;                 /* 0=sync_block, 1=speculative */
+} dclaw_escalation_entry_t;
+
+/* Generated from policy YAML by policy_compiler.py:
+ *   static const dclaw_escalation_entry_t escalation_table[] = {
+ *       { DCLAW_CAP_ACTUATE,     0 },  // sync_block (from policy)
+ *       { DCLAW_CAP_EXEC_SHELL,  0 },  // sync_block
+ *       { DCLAW_CAP_WRITE_FS,    0 },  // sync_block
+ *       { DCLAW_CAP_NET_FETCH,   1 },  // speculative
+ *       { DCLAW_CAP_SENSOR_READ, 1 },  // speculative
+ *       { DCLAW_CAP_READ_FS,     1 },  // speculative
+ *       { DCLAW_CAP_SEND_MSG,    1 },  // speculative
+ *   };
+ * If cap_flags has multiple bits set, the MOST RESTRICTIVE mode wins
+ * (any sync_block cap in the request → entire request is sync_block). */
+
+/* Retroactive block behavior per capability:
+ *
+ * NET_FETCH:   Cancel TCP connection → RST sent → no response data returned
+ * SENSOR_READ: Zero out read buffer → agent receives empty/error
+ * READ_FS:     Allow read to complete, BLOCK outbound use of the data
+ *              (correlator tags session, next SEND_MSG with this data = BLOCK)
+ * SEND_MSG:    Dequeue unsent message → agent sees delivery failure
+ *
+ * The retroactive_block_fn callback is invoked AFTER cancellation action
+ * is taken, informing the agent runtime that the tool result is invalid. */
 
 /* --- Session State (Correlator) --- */
 
@@ -760,14 +1007,104 @@ typedef struct {
     uint8_t  risk_score;       /* 0-255, accumulated risk */
 } dclaw_session_t;
 
+/* --- Pending Verdict Deduplication (QoS 1 at-least-once safety) --- */
+
+#define DCLAW_PENDING_SLOTS 8  /* max in-flight verdict requests */
+
+typedef struct {
+    uint16_t request_id;
+    bool     resolved;         /* true once first response applied */
+    uint32_t resolved_at;      /* tick when resolved */
+} dclaw_pending_verdict_t;
+
+/* --- IPC Peer Verification (PID-recycle resistant) --- */
+
+typedef struct {
+    uid_t   expected_uid;      /* from SO_PEERCRED */
+    gid_t   expected_gid;      /* from SO_PEERCRED */
+    uint8_t reg_token[16];     /* one-time registration nonce */
+    pid_t   registered_pid;    /* locked after first verify */
+    uint64_t start_time;       /* /proc/{pid}/stat start time (immune to PID recycle) */
+} dclaw_ipc_peer_t;
+
+/* --- Secure Element Failure Mode --- */
+
+typedef enum {
+    DCLAW_SE_MODE_STRICT,      /* SE failure → lockdown, no comms (default) */
+    DCLAW_SE_MODE_DEGRADED,    /* SE failure → software key, notify cloud, reduced TTLs */
+    DCLAW_SE_MODE_DISABLED,    /* no SE required (dev/test only) */
+} dclaw_se_failure_mode_t;
+
+/* --- Rate Limiter (Token Bucket) --- */
+
+typedef struct {
+    uint16_t tokens;               /* current tokens available */
+    uint16_t bucket_size;          /* max tokens (from policy rate_limits) */
+    uint16_t refill_rate;          /* tokens added per minute */
+    uint32_t last_refill_tick;     /* tick when tokens last refilled */
+} dclaw_rate_limiter_t;
+
+#define DCLAW_RATE_LIMITERS 3      /* global, per-network, per-actuate */
+/* Rate limiters are configured from policy YAML rate_limits section:
+ *   limiter[0]: tool_calls_per_minute (global)
+ *   limiter[1]: network_requests_per_minute (NET_FETCH + SEND_MSG)
+ *   limiter[2]: actuations_per_minute (ACTUATE only)
+ * Token bucket: allows burst up to bucket_size, sustained rate = refill_rate */
+
+/* --- Policy OTA Canary State --- */
+
+#define DCLAW_CANARY_WINDOW_SEC   600  /* 10 minutes */
+#define DCLAW_CANARY_SPIKE_MULT   5    /* 5× baseline = spike */
+#define DCLAW_CANARY_SPIKE_CONSEC 3    /* 3 consecutive spike minutes */
+
+typedef struct {
+    uint16_t baseline_blocks_per_min;  /* computed pre-update OR from policy blob */
+    uint16_t canary_blocks[10];        /* per-minute counters during window */
+    uint8_t  canary_minute;            /* current minute in window */
+    uint8_t  spike_streak;             /* consecutive spike minutes */
+    bool     canary_active;
+    uint32_t canary_started_at;
+} dclaw_canary_state_t;
+
+/* Canary baseline source priority:
+ * 1. Device's own last-1-hour block rate (if available, i.e. not first boot)
+ * 2. Policy blob's expected_baseline_blocks_per_min field (compiled by cloud
+ *    from fleet-wide averages; always present in signed policy)
+ * 3. Fallback: DCLAW_CANARY_SPIKE_MULT effectively disabled if baseline=0
+ *    (first boot + no cloud-provided baseline = canary runs in observe-only) */
+
+/* --- Emergency Sequence Gap Recovery --- */
+
+typedef struct {
+    uint32_t last_seen_seq;        /* highest emergency sequence processed */
+    uint32_t gap_start;            /* first missed sequence (0 = no gap) */
+    bool     replay_requested;     /* true if gap replay request sent */
+} dclaw_emergency_state_t;
+
+/* On reconnect: if current cloud emergency_seq > last_seen_seq + 1,
+ * device requests replay via POST /f/{d}/cmd with command "emergency_replay".
+ * Cloud replays missed emergency commands in sequence order.
+ * Device processes each, advancing last_seen_seq.
+ * Until replay completes: device operates in conservative mode
+ * (all bloom hits treated as BLOCK, not WARN). */
+
 /* --- API Functions --- */
 
 /* Initialize the agent. Must be called before any other function. */
 int dclaw_init(const dclaw_device_info_t *info);
 
-/* Evaluate a tool call. Returns verdict synchronously. 
- * May block for up to DCLAW_VERDICT_TIMEOUT_MS if cloud escalation needed. */
+/* Evaluate a tool call with speculative execution support.
+ * For safety-critical capabilities (ACTUATE, EXEC_SHELL): blocks synchronously
+ * up to DCLAW_VERDICT_TIMEOUT_MS waiting for cloud verdict.
+ * For non-safety capabilities: may return PENDING verdict allowing speculative
+ * execution, with retroactive BLOCK delivered via callback if cloud denies. */
 dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req);
+
+/* Register callback for retroactive blocks (speculative execution mode).
+ * Called when cloud returns BLOCK for a tool that was speculatively allowed. */
+typedef void (*dclaw_retroactive_block_fn)(uint16_t session_id,
+                                           const char *tool_name);
+void dclaw_register_retroactive_callback(dclaw_retroactive_block_fn cb);
 
 /* Check if a destination IP/hostname is allowed. */
 dclaw_action_t dclaw_check_destination(const char *host, uint16_t port);
@@ -779,9 +1116,20 @@ void dclaw_report_result(uint16_t session_id, const char *tool_name,
 /* Force sync audit ring to cloud (if MQTT enabled). */
 int dclaw_flush_audit(void);
 
-/* Apply a new policy blob (from OTA). Returns 0 on success. */
+/* Apply a new policy blob (from OTA). Returns 0 on success.
+ * Uses A/B partition: writes to inactive partition, verifies signature,
+ * enters canary window. Auto-rollback if block rate spikes 5× baseline
+ * within DCLAW_CANARY_WINDOW_SEC. */
 int dclaw_apply_policy(const uint8_t *blob, uint32_t blob_len,
                        const uint8_t *signature);
+
+/* Verify and apply an emergency broadcast command.
+ * Validates Ed25519 signature and monotonic sequence to prevent replay. */
+int dclaw_apply_emergency(const uint8_t *msg, uint32_t msg_len);
+
+/* Verify IPC peer identity (PID-recycle resistant).
+ * Uses SO_PEERCRED + /proc start_time + one-time registration token. */
+int dclaw_ipc_verify_peer(int client_fd, dclaw_ipc_peer_t *peer);
 
 /* Get current health status for heartbeat. */
 void dclaw_get_health(uint8_t *out_heartbeat, uint8_t *out_len);
@@ -946,7 +1294,34 @@ void dclaw_shutdown(void);
 │  │  │    • Hash content    │                                   │   │
 │  │  │    • Sign with CA    │                                   │   │
 │  │  │    • Embed version   │                                   │   │
+│  │  └────────┬─────────────┘                                   │   │
+│  │           │                                                 │   │
+│  │           ▼                                                 │   │
+│  │  ┌─────────────────────┐                                   │   │
+│  │  │ 5. Size Validation   │                                   │   │
+│  │  │    • Report sizes    │                                   │   │
+│  │  │    • Check vs target │                                   │   │
+│  │  │      profile limits  │                                   │   │
+│  │  │    • Fail if exceeds │                                   │   │
+│  │  │      partition size  │                                   │   │
 │  │  └─────────────────────┘                                   │   │
+│  └────────────────────────────────────────────────────────────┘   │
+│                                                                    │
+│  Size validation output (example):                                │
+│  ┌────────────────────────────────────────────────────────────┐   │
+│  │  Policy compilation report:                                 │   │
+│  │    severity_rules:    3 entries ×  4B =     12 B            │   │
+│  │    sequence_rules:    4 entries × 12B =     48 B            │   │
+│  │    dest_allowlist:   32 entries × 68B =  2,176 B            │   │
+│  │    deny_hashes:      64 entries × 32B =  2,048 B            │   │
+│  │    rate_limits:       3 entries ×  8B =     24 B            │   │
+│  │    canary_baseline:                          2 B            │   │
+│  │    header + signature:                     100 B            │   │
+│  │    ──────────────────────────────────────────────           │   │
+│  │    TOTAL:                                4,410 B            │   │
+│  │    Target partition (STANDARD):          4,096 B ← EXCEEDS! │   │
+│  │    ERROR: Policy too large for target profile.              │   │
+│  │    Reduce dest_allowlist or increase partition size.        │   │
 │  └────────────────────────────────────────────────────────────┘   │
 │                                                                    │
 │  Example output (policy_tables.h):                                │
@@ -975,39 +1350,57 @@ void dclaw_shutdown(void);
 
 ### 7.1 MQTT Topic Schema
 
+Topic hierarchy uses composite identity: `{tenant_id}/{fleet_id}/{device_id}`.
+On-device, tenant_id and fleet_id are encoded in the device certificate OU field
+and validated by the broker ACL — the device only needs its own device_id to
+construct topics. Broker enforces topic isolation between tenants.
+
 ```
 defenseclaw/
-├── fleet/
-│   ├── {device_id}/
-│   │   ├── heartbeat          # Device → Cloud/Edge (QoS 0, periodic)
-│   │   ├── register           # Device → Cloud/Edge (QoS 1, on boot)
-│   │   ├── verdict/
-│   │   │   ├── req            # Device → Cloud/Edge (QoS 1, on demand)
-│   │   │   └── resp           # Cloud/Edge → Device (QoS 1, response)
-│   │   ├── audit/
-│   │   │   └── sync           # Device → Cloud/Edge (QoS 1, periodic)
-│   │   ├── ota/
-│   │   │   ├── policy         # Cloud/Edge → Device (QoS 1, on change)
-│   │   │   ├── firmware       # Cloud/Edge → Device (QoS 1, on demand)
-│   │   │   └── ack            # Device → Cloud/Edge (QoS 1, confirm)
-│   │   └── cmd/
-│   │       ├── request        # Cloud/Edge → Device (QoS 1, operator cmds)
-│   │       └── response       # Device → Cloud/Edge (QoS 1, cmd result)
-│   ├── broadcast/
-│   │   ├── emergency-block    # Cloud → ALL devices (QoS 1, kill switch)
-│   │   └── policy-update      # Cloud → ALL devices (QoS 0, notification)
-│   └── edge/
-│       ├── {edge_id}/
-│       │   ├── status         # Edge → Cloud (QoS 1, edge health)
-│       │   └── sync           # Edge ↔ Cloud (QoS 1, bidirectional)
-│       └── announce           # Edge → Cloud (QoS 1, edge registration)
+├── {tenant_id}/
+│   ├── {fleet_id}/
+│   │   ├── {device_id}/
+│   │   │   ├── heartbeat          # Device → Cloud/Edge (QoS 0, periodic)
+│   │   │   ├── register           # Device → Cloud/Edge (QoS 1, on boot)
+│   │   │   ├── verdict/
+│   │   │   │   ├── req            # Device → Cloud/Edge (QoS 1, on demand)
+│   │   │   │   └── resp           # Cloud/Edge → Device (QoS 1, response)
+│   │   │   ├── audit/
+│   │   │   │   └── sync           # Device → Cloud/Edge (QoS 1, periodic)
+│   │   │   ├── ota/
+│   │   │   │   ├── policy         # Cloud/Edge → Device (QoS 1, on change)
+│   │   │   │   ├── firmware       # Cloud/Edge → Device (QoS 1, on demand)
+│   │   │   │   └── ack            # Device → Cloud/Edge (QoS 1, confirm)
+│   │   │   └── cmd/
+│   │   │       ├── request        # Cloud/Edge → Device (QoS 1, operator cmds)
+│   │   │       └── response       # Device → Cloud/Edge (QoS 1, cmd result)
+│   │   └── broadcast/
+│   │       ├── emergency-block    # Cloud → fleet devices (QoS 1, Ed25519-signed)
+│   │       └── policy-update      # Cloud → fleet devices (QoS 0, notification)
+│   └── broadcast/
+│       └── emergency-global       # Cloud → ALL tenant devices (QoS 1, Ed25519-signed)
+├── edge/
+│   ├── {edge_id}/
+│   │   ├── status                 # Edge → Cloud (QoS 1, edge health)
+│   │   └── sync                   # Edge ↔ Cloud (QoS 1, bidirectional)
+│   └── announce                   # Edge → Cloud (QoS 1, edge registration)
 ```
+
+Broker ACL rules (per device certificate):
+- Device `(T=1, F=5, D=42)` can publish/subscribe to `defenseclaw/1/5/42/#`
+- Device can subscribe to `defenseclaw/1/5/broadcast/#` (fleet broadcasts)
+- Device can subscribe to `defenseclaw/1/broadcast/#` (tenant broadcasts)
+- No cross-tenant or cross-fleet access permitted
 
 ### 7.2 Message Formats (CBOR)
 
 All messages use CBOR encoding (RFC 8949) for compact binary representation.
 
 #### Heartbeat (32 bytes)
+
+Note: tenant_id and fleet_id are NOT in the heartbeat wire format.
+They are implicit from the MQTT topic path / CoAP URI / DTLS session.
+The device_id field is unique within its fleet.
 
 ```
 ┌──────────────────────────────────────────────────────┐
@@ -1038,7 +1431,7 @@ Flags byte:
   bit 4: CERT_EXPIRING    - device cert expires within 30 days
   bit 5: OFFLINE_MODE     - no cloud connectivity
   bit 6: BOOT_FRESH       - first heartbeat after reboot
-  bit 7: RESERVED
+  bit 7: SE_DEGRADED      - secure element failed, using software key fallback
 ```
 
 #### Verdict Request (74 bytes max)
@@ -1060,7 +1453,7 @@ Flags byte:
 └──────────────────────────────────────────────────────┘
 ```
 
-#### Verdict Response (8 bytes)
+#### Verdict Response (16 bytes)
 
 ```
 ┌──────────────────────────────────────────────────────┐
@@ -1072,14 +1465,96 @@ Flags byte:
 │ ttl_minutes        │ uint16   │ 2     │ Cache dur     │
 │ reason_code        │ uint8    │ 1     │ For audit     │
 │ flags              │ uint8    │ 1     │ See below     │
+│ server_ts          │ uint32   │ 4     │ Cloud time    │
+│ hmac_tag           │ bytes[4] │ 4     │ Anti-replay   │
 ├──────────────────────────────────────────────────────┤
-│ Total                         │ 8     │               │
+│ Total                         │ 16    │               │
 └──────────────────────────────────────────────────────┘
 
 Flags:
   bit 0: REVOKE_PRIOR   - invalidate any prior ALLOW for this hash
   bit 1: URGENT_SYNC    - device should sync audit immediately
   bit 2: POLICY_PUSH    - new policy available, fetch via OTA topic
+
+server_ts: Cloud timestamp at verdict issuance. Used for device clock
+  synchronization (device updates dclaw_clock_t on receipt).
+
+hmac_tag: Truncated HMAC-SHA256(session_key, request_id || action || tool_hash).
+  session_key = HKDF(device_key, mqtt_session_id). Derived fresh on each
+  MQTT connection — replay across sessions is impossible. Within a session:
+  monotonic request_id + HMAC prevents verdict injection.
+  4-byte tag gives 2^32 forgery resistance — at 60 tool calls/min,
+  brute-force would take ~136 years.
+
+Deduplication: Device maintains DCLAW_PENDING_SLOTS (8) in-flight requests.
+  Duplicate responses (QoS 1 at-least-once) are silently discarded if
+  the slot is already marked resolved.
+```
+
+#### Emergency Broadcast Message (80 bytes, Ed25519-signed)
+
+```
+┌──────────────────────────────────────────────────────┐
+│ Field              │ Type       │ Bytes │ Description │
+├──────────────────────────────────────────────────────┤
+│ sequence           │ uint32     │ 4     │ Monotonic   │
+│ timestamp          │ uint32     │ 4     │ Cloud time  │
+│ command            │ uint8      │ 1     │ See below   │
+│ scope              │ uint8      │ 1     │ See below   │
+│ payload            │ bytes[32]  │ 32    │ Cmd-specific│
+│ _reserved          │ bytes[2]   │ 2     │ Alignment   │
+│ signature          │ bytes[64]  │ 64    │ Ed25519     │
+├──────────────────────────────────────────────────────┤
+│ Total                           │ 108   │             │
+└──────────────────────────────────────────────────────┘
+
+Commands:
+  0x01: BLOCK_ALL         - block all tool calls fleet-wide
+  0x02: REVOKE_HASH       - revoke ALLOW for specific hash (in payload)
+  0x03: FORCE_SYNC        - all devices sync audit immediately
+  0x04: ENTER_LOCKDOWN    - targeted lockdown (scope determines targets)
+
+Scope:
+  0x00: ALL_DEVICES       - entire fleet
+  0x01: FLEET             - specific fleet_id (in payload bytes 0-1)
+  0x02: SITE              - specific site/edge (in payload bytes 0-3)
+  0x03: DEVICE            - specific device_id (in payload bytes 0-3)
+
+Verification on device:
+  1. Ed25519 signature verified using pinned OTA CA public key
+  2. sequence > last_seen_emergency_seq (anti-replay)
+  3. Reject if sequence delta > 1000 (possible jump attack)
+  4. Apply command, update last_seen_emergency_seq in flash
+
+The OTA Signing CA public key is already pinned in firmware — emergency
+signatures reuse it at zero additional flash cost.
+```
+
+#### Bloom Filter Specification
+
+```
+Sizing for known-bad hash detection:
+  n = 10,000 known-bad hashes (target set size)
+  p = 0.001 (0.1% false positive rate target)
+  m = -n × ln(p) / (ln2)² = ~144,000 bits = 18 KB
+  k = (m/n) × ln2 = ~10 hash functions
+
+Behavior when cloud is reachable:
+  Bloom HIT → ESCALATE to cloud with 2s timeout (fast-path priority)
+  Bloom MISS → continue with normal evaluation
+
+Behavior when cloud is unreachable (offline mode):
+  Bloom HIT → configurable action (default: WARN, not hard BLOCK)
+  This avoids false-positive blocks during offline operation.
+  Policy controls offline bloom behavior:
+
+  iot_extensions:
+    bloom_offline_action: warn   # or "block" for high-security deployments
+
+Rationale: At 0.1% FP rate with 1000 tool calls/day, a device would see
+~1 false bloom hit/day. In online mode this is harmless (cloud resolves it).
+In offline mode, WARN is preferable to BLOCK for operational continuity.
+High-security deployments can override to BLOCK.
 ```
 
 ### 7.3 Protocol State Machine
@@ -1128,6 +1603,210 @@ Flags:
 │                                                                        │
 │  Key Invariant: Enforcement NEVER stops regardless of comm state.      │
 │  OFFLINE and RECONNECTING still evaluate all tool calls locally.       │
+│                                                                        │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+### 7.4 CoAP/DTLS Transport (Tier 1 MCU Devices)
+
+For ultra-constrained Tier 1 devices that cannot support full MQTT/TLS, CoAP over DTLS provides an equivalent protocol with significantly lower overhead.
+
+#### URI Mapping (MQTT Topic → CoAP Path)
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│  MQTT Topic                              │ CoAP URI      │ Method    │
+├──────────────────────────────────────────┼───────────────┼───────────┤
+│  {t}/{f}/{d}/heartbeat                   │ /f/{d}/hb     │ POST (NON)│
+│  {t}/{f}/{d}/register                    │ /f/{d}/reg    │ POST (CON)│
+│  {t}/{f}/{d}/verdict/req + resp          │ /f/{d}/v      │ POST (CON)│
+│  (response = CoAP 2.05 Content)          │               │           │
+│  {t}/{f}/{d}/audit/sync                  │ /f/{d}/a      │ POST (CON)│
+│  {t}/{f}/{d}/ota/policy                  │ /f/{d}/ota/p  │ GET+Observe│
+│  {t}/{f}/{d}/ota/firmware                │ /f/{d}/ota/fw │ GET+Block2│
+│  {t}/{f}/{d}/ota/ack                     │ /f/{d}/ota/ak │ POST (CON)│
+│  {t}/{f}/{d}/cmd/request                 │ /f/{d}/cmd    │ Observe   │
+│  {t}/{f}/{d}/cmd/response                │ /f/{d}/cmd    │ POST (CON)│
+│  broadcast/emergency-block               │ /f/bc/emg     │ Observe   │
+└──────────────────────────────────────────┴───────────────┴───────────┘
+
+Notes:
+  • tenant_id and fleet_id are encoded in the DTLS PSK identity, not the URI
+  • Device only needs its own device_id to construct paths
+  • CoAP server (edge/cloud) validates tenant/fleet from DTLS session context
+```
+
+#### CoAP-Specific Protocol Differences
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│  MQTT Concept              │ CoAP Equivalent                          │
+├────────────────────────────┼──────────────────────────────────────────┤
+│  Subscribe                 │ Observe (RFC 7641) — register interest,  │
+│                            │ server pushes notifications               │
+├────────────────────────────┼──────────────────────────────────────────┤
+│  QoS 0 (fire-and-forget)  │ NON (Non-confirmable message)            │
+├────────────────────────────┼──────────────────────────────────────────┤
+│  QoS 1 (at-least-once)    │ CON (Confirmable) + ACK                  │
+├────────────────────────────┼──────────────────────────────────────────┤
+│  Persistent session        │ DTLS session ticket (resumption)         │
+├────────────────────────────┼──────────────────────────────────────────┤
+│  Topic ACL                 │ URI path ACL at CoAP server + DTLS       │
+│                            │ identity validation                       │
+├────────────────────────────┼──────────────────────────────────────────┤
+│  Message expiry            │ CoAP Max-Age option                      │
+└────────────────────────────┴──────────────────────────────────────────┘
+```
+
+#### Block-wise Transfer for OTA (RFC 7959)
+
+```
+Policy OTA via CoAP Block2 (device-initiated):
+
+  Device                         CoAP Server (Edge/Cloud)
+    │                                │
+    │ GET /f/{d}/ota/p               │
+    │ Block2: 0/0/1024               │  (request block 0, size 1024B)
+    │───────────────────────────────►│
+    │                                │
+    │ 2.05 Content                   │
+    │ Block2: 0/1/1024               │  (block 0, more=true, 1024B)
+    │ Payload: [first 1024 bytes]    │
+    │◄───────────────────────────────│
+    │                                │
+    │ GET /f/{d}/ota/p               │
+    │ Block2: 1/0/1024               │  (request block 1)
+    │───────────────────────────────►│
+    │                                │
+    │ ... repeat until more=false ... │
+    │                                │
+    │ 2.05 Content                   │
+    │ Block2: N/0/1024               │  (last block, more=false)
+    │ Payload: [final bytes + sig]   │
+    │◄───────────────────────────────│
+    │                                │
+    │ Device verifies Ed25519 sig    │
+    │ over reassembled blob          │
+    │                                │
+
+  • Max PDU: 1024 bytes (fits single radio frame on most PHYs)
+  • Typical policy blob: 2-8 KB = 2-8 block transfers
+  • Firmware image: 30-80 KB = 30-80 block transfers
+  • Integrity: Ed25519 signature verified AFTER all blocks received
+  • Failure: any block loss → device re-requests (CON+ACK per block)
+```
+
+#### Observe Pattern for Push Notifications
+
+```
+Emergency Broadcast via CoAP Observe:
+
+  Device                         CoAP Server
+    │                                │
+    │ GET /f/bc/emg                  │
+    │ Observe: 0 (register)          │
+    │───────────────────────────────►│
+    │                                │
+    │ 2.05 Content                   │
+    │ Observe: 1                     │  (current state, may be empty)
+    │◄───────────────────────────────│
+    │                                │
+    │  ... time passes ...           │
+    │                                │
+    │ 2.05 Content (notification)    │
+    │ Observe: 2                     │  (new emergency!)
+    │ Payload: [signed emergency msg]│
+    │◄───────────────────────────────│
+    │                                │
+    │ Device verifies Ed25519 sig    │
+    │ Device applies emergency cmd   │
+
+  • Observe reduces polling to zero — server pushes on state change
+  • Max-Age option controls how long notification is valid
+  • If device misses notification: periodic re-registration (every 24h)
+```
+
+#### DTLS 1.2 Configuration
+
+```
+Cipher suite:  TLS_PSK_WITH_AES_128_CCM_8
+  • AES-128 encryption (symmetric)
+  • CCM mode with 8-byte authentication tag (smallest valid)
+  • Pre-Shared Key authentication (no certificate overhead)
+
+PSK identity:  4-byte device_id (binary, big-endian)
+PSK value:     HKDF-SHA256(fleet_master_key, device_serial, "dtls-psk", 16)
+  • 16-byte PSK (128-bit security)
+  • fleet_master_key stored in cloud KMS (HSM-backed)
+  • Key rotation: new fleet_master_key generates new PSKs for all devices
+  • Rotation procedure: push new PSK via existing secure channel before
+    revoking old key. Device stores both during transition window.
+
+Session resumption:
+  • DTLS session ticket (RFC 5077 equivalent) avoids full handshake
+  • Ticket lifetime: 24 hours (then full handshake required)
+  • Reduces reconnection overhead from ~2KB to ~200 bytes
+
+Forward secrecy limitation:
+  • Plain PSK does NOT provide forward secrecy
+  • Compromise of fleet_master_key exposes all past sessions
+  • Mitigation: ECDHE-PSK (TLS_ECDHE_PSK_WITH_AES_128_CCM_8) available
+    for Tier 1 devices with sufficient flash (~8KB additional code)
+  • Decision: plain PSK for MINIMAL profile, ECDHE-PSK for STANDARD+ on MCU
+```
+
+#### CoAP State Machine
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│              CoAP DEVICE COMMUNICATION STATE MACHINE                    │
+├──────────────────────────────────────────────────────────────────────┤
+│                                                                        │
+│                       ┌──────────┐                                     │
+│                       │  BOOT    │                                     │
+│                       └────┬─────┘                                     │
+│                            │                                           │
+│                 Load PSK, init DTLS                                    │
+│                            │                                           │
+│                       ┌────▼─────┐                                     │
+│                  ┌────│HANDSHAKE │────┐                                 │
+│                  │    └────┬─────┘    │                                 │
+│                  │         │          │                                 │
+│            Timeout/fail    │Success   │                                 │
+│                  │         │          │                                 │
+│                  ▼         ▼          │                                 │
+│           ┌──────────┐ ┌──────────┐  │                                 │
+│           │ OFFLINE  │ │ REGISTER │  │                                 │
+│           │          │ └────┬─────┘  │                                 │
+│           │ Local-only│      │        │                                 │
+│           │ enforce   │  2.01 ACK     │                                 │
+│           │          │      │        │                                 │
+│           │          │ ┌────▼─────┐  │                                 │
+│           │          │ │  ACTIVE  │  │                                 │
+│           │          │ │          │  │                                 │
+│           │          │ │• HB POST │  │                                 │
+│           │          │ │• Verdict │  │                                 │
+│           │          │ │  POST    │  │                                 │
+│           │          │ │• Observe │  │                                 │
+│           │          │ │  OTA+Emg │  │                                 │
+│           │          │ └────┬─────┘  │                                 │
+│           │          │      │        │                                 │
+│           │          │  DTLS close/  │                                 │
+│           │          │  timeout      │                                 │
+│           │          │      │        │                                 │
+│           │    ┌─────▼──────▼───┐    │                                 │
+│           └───►│  RECONNECTING  │────┘                                 │
+│                │                │                                       │
+│                │ Exp. backoff:  │                                       │
+│                │ 5,10,20..600s  │  (CoAP is UDP — longer backoff)      │
+│                └────────────────┘                                       │
+│                                                                        │
+│  Verdict flow (synchronous, no separate topic):                       │
+│    Device POST /f/{d}/v → CoAP server returns 2.05 with verdict       │
+│    Timeout: 5s → empty ACK + retry once → BLOCK on second timeout     │
+│                                                                        │
+│  Key difference from MQTT: verdict is request/response (not pub/sub). │
+│  No separate req/resp topics. Simpler implementation on MCU.          │
 │                                                                        │
 └──────────────────────────────────────────────────────────────────────┘
 ```
@@ -1197,15 +1876,18 @@ Flags:
 | Threat | Mitigation | Layer |
 |--------|-----------|-------|
 | Compromised cloud pushes malicious policy | Ed25519 signature verification on all OTA payloads. Device rejects unsigned or incorrectly signed updates. | Device |
-| Attacker replays old MQTT messages | MQTT 5.0 message expiry + monotonic sequence numbers in verdict responses. Device rejects stale/replayed verdicts. | Protocol |
-| Physical device tampering (flash read) | Private keys in secure element (hardware). Audit chain HMAC key derived from hardware-unique ID. | Hardware |
+| Attacker replays old MQTT messages | MQTT 5.0 message expiry + session-scoped HMAC tags on verdict responses + monotonic sequence numbers. Device rejects stale/replayed/forged verdicts. | Protocol |
+| Physical device tampering (flash read) | Private keys in secure element (hardware). Audit chain HMAC key derived from hardware-unique ID. SE failure triggers configurable degradation (strict=lockdown, degraded=software key with reduced TTLs and auto-lockdown after 72h). | Hardware |
 | Rogue device impersonation | mTLS — only devices with valid certificates can connect. Certificate pinning prevents CA compromise. | Transport |
 | Cloud unavailable during attack | Fail-closed policy. Unknown tools BLOCKED locally. Attacker gains nothing by disconnecting cloud. | Architecture |
 | Verdict cache poisoning (attacker gets ALLOW cached) | BLOCK verdicts have 7-day TTL, ALLOW has 24h. Threat intel push can instantly revoke any ALLOW. REVOKE_PRIOR flag in response. | Cache |
 | Lateral movement between IoT devices | Each device's MQTT ACL limits publish/subscribe to its own topic tree. No device-to-device direct communication. | Broker |
-| Firmware downgrade attack | Firmware includes monotonic version counter. Device rejects any OTA with version ≤ current. Anti-rollback fuse on supported hardware. | Device |
+| Firmware downgrade attack | Firmware includes monotonic version counter. Device rejects any OTA with version ≤ current. Anti-rollback fuse on supported hardware. For devices WITHOUT fuse support: software anti-rollback via dedicated flash sector with wear-leveled monotonic counter; counter increment requires cloud-signed authorization; boot ROM checks counter before jumping to firmware. | Device |
 | Audit log tampering | HMAC chain — each entry's HMAC covers the previous entry. Breaking the chain is detectable by cloud. Hardware-bound HMAC key. | Persistence |
 | Denial-of-service (flood MQTT broker) | Per-device rate limits at broker. QoS 1 (not 2) to limit state. Topic ACLs prevent publishing to other devices' topics. | Infrastructure |
+| Emergency broadcast spoofing | All emergency commands carry Ed25519 signature over (sequence ‖ timestamp ‖ command ‖ scope ‖ payload). Device verifies using pinned OTA CA public key. Monotonic sequence counter prevents replay. | Protocol |
+| IPC hook bypass (PID recycling) | SO_PEERCRED UID/GID check + /proc/{pid}/stat start_time verification + one-time registration nonce. On RTOS: hardware MPU isolation of IPC buffer. | Device |
+| Policy OTA causes false blocks | Canary health-check window (10 min). If block rate spikes 5× baseline for 3 consecutive minutes, device auto-rollbacks to previous policy partition. Cloud pauses rollout if >5% of batch rolls back. | OTA |
 
 ### 8.3 Secure Boot Chain
 
@@ -1237,6 +1919,63 @@ Flags:
 │  The AI agent is untrusted — it is the thing being secured.    │
 │                                                                 │
 └───────────────────────────────────────────────────────────────┘
+```
+
+### 8.4 Input Validation and Memory Safety
+
+**Invariant: All IPC input is untrusted and bounds-checked before processing.**
+
+The AI agent runtime is an untrusted entity. Any data it sends to DefenseClaw Lite
+via the IPC hook must be treated as potentially malicious. The following validation
+rules apply to all incoming tool request payloads:
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│                  IPC INPUT VALIDATION RULES                            │
+├──────────────────────────────────────────────────────────────────────┤
+│                                                                        │
+│  1. Message Size Gate                                                 │
+│     • Max IPC payload: 512 bytes (reject anything larger at read())  │
+│     • Prevents buffer exhaustion and oversized allocations            │
+│                                                                        │
+│  2. String Field Validation                                           │
+│     • tool_name[64]: strict strncpy + forced NUL at position 63      │
+│     • destination[128]: strict strncpy + forced NUL at position 127  │
+│     • Only printable ASCII allowed (0x20-0x7E), reject others        │
+│     • No format string characters (%n, %s, %x) in tool_name         │
+│                                                                        │
+│  3. CBOR Decoder Safety                                               │
+│     • Reject any CBOR text string exceeding declared field maximum   │
+│     • Reject nested depth > 2 (flat messages only)                   │
+│     • Reject indefinite-length arrays/maps (fixed schema)            │
+│     • Reject duplicate map keys                                       │
+│                                                                        │
+│  4. Numeric Range Checks                                              │
+│     • session_id: 0 < id <= DCLAW_MAX_SESSIONS                       │
+│     • cap_flags: only defined bits (0x01-0x7F), reject 0x80+         │
+│     • request_id: monotonically increasing within session            │
+│                                                                        │
+│  5. Hash Validation                                                   │
+│     • tool_hash[32]: exactly 32 bytes, reject short/long             │
+│     • All-zeros hash treated as "hash not provided" (escalate)       │
+│                                                                        │
+│  6. Rate Limiting at IPC Level                                        │
+│     • Max 100 requests/second from IPC socket                        │
+│     • Burst > 100: drop messages, log RATE_LIMIT                     │
+│     • Protects decision engine from CPU exhaustion attack             │
+│                                                                        │
+│  Failure behavior: Invalid input → silent drop + audit log entry     │
+│  with reason DCLAW_REASON_INVALID_INPUT (new reason code 0x0A).      │
+│  No error message returned to agent (prevents oracle attacks).       │
+│                                                                        │
+│  Implementation mandates:                                             │
+│  • No use of strcpy, sprintf, sscanf in codebase (banned functions)  │
+│  • All memory operations use explicit length: memcpy(d,s,n)          │
+│  • Stack buffer overflow protection: -fstack-protector-strong        │
+│  • Static analysis: Coverity or cppcheck in CI pipeline              │
+│  • Fuzz testing: AFL++ on IPC parser (minimum 1M iterations/release) │
+│                                                                        │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 ---
@@ -1329,8 +2068,16 @@ Flags:
 │      │                   │                    │                  │            │
 │                                                                                │
 │  Total latency: 100-500ms (dominated by network RTT)                         │
-│  Device blocked during wait: YES (tool call is synchronous)                  │
-│  Timeout: 5 seconds → automatic BLOCK                                        │
+│                                                                                │
+│  Speculative Execution Mode (non-safety capabilities):                        │
+│  • For caps marked "speculative" in policy (e.g., sensor_read, net_fetch):   │
+│    - Step 10 returns PENDING immediately (0 latency to agent)                │
+│    - Agent proceeds with tool execution speculatively                        │
+│    - If cloud returns BLOCK: retroactive callback fires → agent kills tool   │
+│  • For caps marked "sync_block" (e.g., actuate, exec_shell):                 │
+│    - Agent blocks synchronously (original behavior, safety-critical)         │
+│  • Timeout: 5 seconds → automatic BLOCK for sync_block caps                 │
+│  • Timeout: no timeout for speculative caps (BLOCK arrives async)            │
 │                                                                                │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -1391,6 +2138,16 @@ Flags:
 │                                                                                │
 │  Rollback: If self-test fails at step 8, device reverts to previous           │
 │  policy partition and reports POLICY_STALE flag in heartbeat.                  │
+│                                                                                │
+│  Canary health-check window (after step 8 passes):                            │
+│  • Device enters 10-minute canary window after applying new policy            │
+│  • Monitors block_rate vs. pre-update baseline (last 1h)                      │
+│  • If block_rate > 5× baseline for 3 consecutive minutes → AUTO-ROLLBACK     │
+│  • Device reverts to partition A, reports POLICY_ROLLBACK flag                │
+│  • Cloud aggregates canary results across batch:                              │
+│    - If rollback_count / batch_size > 5% → PAUSE ROLLOUT                     │
+│    - If ok after 10 min → proceed to next batch (staged: 10/20/30/40%)       │
+│  • Human approval required to resume after pause                              │
 │                                                                                │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -1510,9 +2267,10 @@ Flags:
 │  │                     │ times            │ only. Unknown tools BLOCKED. │   │
 │  │                     │                  │ Set OFFLINE flag in state.    │   │
 │  ├─────────────────────┼──────────────────┼──────────────────────────────┤   │
-│  │ Edge gateway down   │ Same as above    │ Option B: try direct cloud   │   │
-│  │ (Option B)          │ (edge MQTT)      │ fallback if configured.      │   │
-│  │                     │                  │ Otherwise: full offline mode. │   │
+│  │ Edge gateway down   │ Same as above    │ Option B: try broker fallback│   │
+│  │ (Option B)          │ (edge MQTT)      │ list (secondary edge, then   │   │
+│  │                     │                  │ direct cloud). Otherwise:    │   │
+│  │                     │                  │ full offline mode.           │   │
 │  ├─────────────────────┼──────────────────┼──────────────────────────────┤   │
 │  │ Verdict timeout     │ 5-second timer   │ BLOCK the tool call. Log     │   │
 │  │ (cloud too slow)    │ on pending req   │ CLOUD_TIMEOUT. Increment     │   │
@@ -1522,6 +2280,13 @@ Flags:
 │  │ (cert expired)      │ code             │ expired: set CERT_EXPIRING   │   │
 │  │                     │                  │ flag. Request renewal via     │   │
 │  │                     │                  │ out-of-band channel.          │   │
+│  ├─────────────────────┼──────────────────┼──────────────────────────────┤   │
+│  │ Redis failure       │ Edge HA: Redis   │ Primary continues serving    │   │
+│  │ (edge HA mode)      │ replication      │ with local cache. Secondary  │   │
+│  │                     │ timeout          │ has cold cache on failover — │   │
+│  │                     │                  │ refills from pipeline (cache  │   │
+│  │                     │                  │ miss rate spikes temporarily).│   │
+│  │                     │                  │ Alert: edge_redis_down.       │   │
 │  └─────────────────────┴──────────────────┴──────────────────────────────┘   │
 │                                                                                │
 │  CATEGORY 2: DEVICE FAILURES                                                  │
@@ -1534,17 +2299,22 @@ Flags:
 │  │ policy OTA write    │ CRC of policy    │ from last-known-good if      │   │
 │  │                     │ partition fails  │ active partition corrupted.   │   │
 │  ├─────────────────────┼──────────────────┼──────────────────────────────┤   │
-│  │ Flash wear-out      │ Write failure    │ Audit ring reduces write     │   │
-│  │ (audit writes)      │ error code       │ frequency. Mark sector bad.  │   │
+│  │ Flash wear-out      │ Write failure    │ Audit write-coalescing buffer│   │
+│  │ (audit writes)      │ error code       │ (16 entries in RAM, batch    │   │
+│  │                     │                  │ flush every 60s). Reduces    │   │
+│  │                     │                  │ writes 16×. Mark sector bad. │   │
 │  │                     │                  │ Migrate to spare sector.     │   │
 │  ├─────────────────────┼──────────────────┼──────────────────────────────┤   │
 │  │ Watchdog reset      │ Boot counter     │ If boot_count > 3 in 10min: │   │
 │  │ (agent crash loop)  │ increment        │ enter safe mode (BLOCK ALL   │   │
 │  │                     │                  │ tool calls, report to cloud) │   │
 │  ├─────────────────────┼──────────────────┼──────────────────────────────┤   │
-│  │ Secure element      │ Key operation    │ Fall back to software key    │   │
-│  │ failure             │ returns error    │ (if allowed by policy). Or   │   │
-│  │                     │                  │ enter lockdown: no comms.    │   │
+│  │ Secure element      │ Key operation    │ Policy-controlled:           │   │
+│  │ failure             │ returns error    │ STRICT (default): lockdown.  │   │
+│  │                     │                  │ DEGRADED: software key, set  │   │
+│  │                     │                  │ SE_DEGRADED flag, halve TTLs,│   │
+│  │                     │                  │ auto-lockdown after 72h.     │   │
+│  │                     │                  │ Cloud flags for inspection.  │   │
 │  ├─────────────────────┼──────────────────┼──────────────────────────────┤   │
 │  │ Audit chain         │ HMAC verify on   │ Set TAMPER_DETECT flag.      │   │
 │  │ corruption          │ boot fails       │ Report immediately. Enter    │   │
@@ -1563,9 +2333,11 @@ Flags:
 │  │ Flood of tool calls │ Rate limiter     │ DROP excess (token bucket).  │   │
 │  │ (DoS on decision)   │ (token bucket)   │ Log RATE_LIMIT reason.       │   │
 │  ├─────────────────────┼──────────────────┼──────────────────────────────┤   │
-│  │ Agent tries to      │ IPC hook         │ BLOCK direct access. Only    │   │
-│  │ bypass IPC hook     │ validates PIDs   │ registered agent PIDs can    │   │
-│  │                     │                  │ submit tool calls.           │   │
+│  │ Agent tries to      │ IPC hook uses    │ BLOCK direct access. Verify  │   │
+│  │ bypass IPC hook     │ SO_PEERCRED +    │ UID/GID + /proc start_time  │   │
+│  │                     │ start_time +     │ + registration nonce. On     │   │
+│  │                     │ reg token        │ RTOS: hardware MPU isolates  │   │
+│  │                     │                  │ IPC buffer (privileged-only).│   │
 │  ├─────────────────────┼──────────────────┼──────────────────────────────┤   │
 │  │ Attacker floods     │ MQTT broker rate │ Broker drops excess msgs.    │   │
 │  │ MQTT with fake HBs  │ limit + mTLS     │ mTLS prevents unauthd msgs. │   │
@@ -1705,9 +2477,11 @@ FULL OPERATION ─────────────────────�
 │                                                                                │
 │  Bandwidth comparison (100K devices):                                        │
 │  • Option A: 100K × 32B × (1/30) = ~107 KB/s constant (heartbeats alone)   │
+│    + verdict: 100K × 0.1/s × 0.05 miss × (42B req + 16B resp) = ~29 KB/s   │
+│    Total sustained: ~136 KB/s to cloud                                       │
 │  • Option B: 10 edges × 1KB/5min = ~0.03 KB/s to cloud                      │
 │                                                                                │
-│  That's a 3,500× bandwidth reduction at the cloud tier.                      │
+│  That's a 4,500× bandwidth reduction at the cloud tier.                      │
 │                                                                                │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -1924,6 +2698,80 @@ Response: 200 OK
   },
   "alerts_active": 3
 }
+
+────────────────────────────────────────────────────────────────────────────────
+POST /devices/decommission-batch
+────────────────────────────────────────────────────────────────────────────────
+Description: Bulk decommission devices (revoke certs, archive audit, remove)
+Auth: Bearer token (admin)
+
+Request:
+{
+  "filter": {"site_id": "site-alpha"} | {"device_ids": [1,2,3]},
+  "options": {
+    "revoke_certificates": true,
+    "purge_audit_after_days": 90,
+    "notify_edge_gateways": true
+  }
+}
+
+Response: 202 Accepted
+{
+  "batch_id": "uuid",
+  "affected_devices": 3200,
+  "status": "in_progress"
+}
+
+────────────────────────────────────────────────────────────────────────────────
+POST /policy/simulate
+────────────────────────────────────────────────────────────────────────────────
+Description: Dry-run a policy change against recent fleet traffic
+Auth: Bearer token (admin)
+
+Request:
+{
+  "policy_yaml": "string",
+  "target_profile": "minimal|standard|edge",
+  "test_against": {
+    "recent_tool_hashes": true,
+    "device_ids": [42, 43]
+  }
+}
+
+Response: 200 OK
+{
+  "verdicts_tested": 15420,
+  "verdicts_changed": 23,
+  "new_blocks": 18,
+  "new_allows": 5,
+  "size_bytes": 4200,
+  "fits_target_profile": true,
+  "changes": [...]
+}
+
+────────────────────────────────────────────────────────────────────────────────
+GET /devices/{device_id}/traces
+────────────────────────────────────────────────────────────────────────────────
+Description: Query distributed trace entries for a device
+Auth: Bearer token (admin)
+
+Query params: ?tool_name=bash&action=BLOCK&since=ISO8601&limit=100
+
+Response: 200 OK
+{
+  "traces": [
+    {
+      "trace_id": "a1b2c3d4e5f6a7b8",
+      "timestamp": "ISO8601",
+      "tool_name": "bash",
+      "local_decision": "ESCALATE",
+      "cache_hit": false,
+      "pipeline_stages": ["regex:pass", "yara:pass", "opa:block"],
+      "final_verdict": "BLOCK",
+      "latency_ms": 142
+    }
+  ]
+}
 ```
 
 ### 13.2 Edge-to-Cloud Sync API (gRPC)
@@ -2025,6 +2873,19 @@ defenseclaw_edge_mqtt_messages_total{direction="in|out"} counter
 defenseclaw_edge_inspection_duration_seconds histogram
 defenseclaw_edge_audit_buffer_entries gauge
 defenseclaw_edge_cloud_sync_last_success_timestamp gauge
+defenseclaw_edge_redis_replication_status gauge
+defenseclaw_edge_verdict_cache_evictions_total counter
+defenseclaw_edge_verdict_cache_size gauge
+
+# Per-device metrics (exposed via fleet manager, sampled)
+
+defenseclaw_fleet_device_decision_latency_us{device_id, type="local|escalated"} histogram
+defenseclaw_fleet_device_flash_writes_total{device_id} counter
+defenseclaw_fleet_device_cert_expiry_days{device_id} gauge
+defenseclaw_fleet_device_se_degraded{device_id} gauge
+defenseclaw_fleet_policy_rollback_total{device_id} counter
+defenseclaw_fleet_emergency_seq_gap{device_id} gauge
+defenseclaw_fleet_speculative_retroactive_blocks_total counter
 ```
 
 ### 14.2 Alerting Rules
@@ -2072,6 +2933,50 @@ groups:
           severity: warning
         annotations:
           summary: "Edge {{ $labels.edge_id }} hasn't synced with cloud for >10 minutes"
+
+      - alert: PolicyCanaryRollback
+        expr: increase(defenseclaw_fleet_policy_rollback_total[10m]) > 0
+        labels:
+          severity: high
+        annotations:
+          summary: "Device {{ $labels.device_id }} rolled back policy — canary triggered"
+
+      - alert: SecureElementDegraded
+        expr: defenseclaw_fleet_device_se_degraded > 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Device {{ $labels.device_id }} running in SE-degraded mode — schedule inspection"
+
+      - alert: FlashWearWarning
+        expr: defenseclaw_fleet_device_flash_writes_total > 80000
+        labels:
+          severity: warning
+        annotations:
+          summary: "Device {{ $labels.device_id }} approaching flash endurance limit (80% of 100K cycles)"
+
+      - alert: EmergencySequenceGap
+        expr: defenseclaw_fleet_emergency_seq_gap > 1
+        labels:
+          severity: high
+        annotations:
+          summary: "Device {{ $labels.device_id }} missed {{ $value }} emergency broadcasts"
+
+      - alert: EdgeRedisDown
+        expr: defenseclaw_edge_redis_replication_status != 1
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Edge {{ $labels.edge_id }} Redis replication failed — HA cache sync degraded"
+
+      - alert: CertificateExpiryFleet
+        expr: count(defenseclaw_fleet_device_cert_expiry_days < 30) > 100
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value }} devices have certificates expiring within 30 days"
 ```
 
 ### 14.3 Dashboard Layout (Grafana)
@@ -2112,6 +3017,205 @@ groups:
 │  └──────────────────────────┘ └────────────────────────────────────┘│
 │                                                                      │
 └────────────────────────────────────────────────────────────────────┘
+```
+
+### 14.4 Operational Procedures
+
+#### Device Decommissioning
+
+```
+POST /api/v1/fleet/devices/decommission-batch
+Auth: Bearer token (admin)
+
+Request:
+{
+  "filter": {"site_id": "site-alpha"} | {"device_ids": [1,2,3]} | {"hw_profile": "mcu"},
+  "options": {
+    "revoke_certificates": true,
+    "purge_audit_after_days": 90,
+    "notify_edge_gateways": true
+  }
+}
+
+Response: 202 Accepted
+{
+  "batch_id": "uuid",
+  "affected_devices": 3200,
+  "steps": [
+    {"step": "revoke_certs", "status": "pending"},
+    {"step": "send_lockdown_cmd", "status": "pending"},
+    {"step": "purge_mqtt_sessions", "status": "pending"},
+    {"step": "archive_audit_data", "status": "pending"},
+    {"step": "remove_from_registry", "status": "pending"}
+  ]
+}
+
+Procedure:
+  1. Send lockdown command to all target devices (via MQTT/CoAP cmd)
+  2. Revoke device certificates (add to CRL, distribute to edges)
+  3. Purge MQTT persistent sessions at broker
+  4. Archive audit data to cold storage (retain per compliance policy)
+  5. Remove devices from fleet registry
+  6. Update edge gateway ACLs (reject connections from revoked certs)
+```
+
+#### Certificate Lifecycle Management
+
+```
+┌──────────────────────────────────────────────────────────────────────┐
+│                  CERTIFICATE ROTATION LIFECYCLE                         │
+├──────────────────────────────────────────────────────────────────────┤
+│                                                                        │
+│  Timeline (365-day certificate):                                      │
+│                                                                        │
+│  Day 0         Day 292        Day 335        Day 365    Day 395       │
+│  │ Issue       │ Begin        │ Grace        │ Expire   │ Hard        │
+│  │             │ rotation     │ period       │          │ lockdown    │
+│  │             │ window       │ starts       │          │             │
+│  ▼             ▼              ▼              ▼          ▼             │
+│  ├─────────────┼──────────────┼──────────────┼──────────┤             │
+│  │  NORMAL     │ ROTATION     │ GRACE PERIOD │ EXPIRED  │             │
+│  │  OPERATION  │ ELIGIBLE     │ (renew-only) │ (lockdown│             │
+│  │             │              │              │  pending)│             │
+│                                                                        │
+│  Thundering herd mitigation:                                          │
+│  • Rotation day = (device_id mod 73) + day 292                        │
+│  • Spreads 365-day certs across 73 days (5% of fleet per day max)    │
+│  • Edge batches CSR forwarding to cloud (max 100 CSRs per 5-min sync)│
+│                                                                        │
+│  Offline device handling:                                             │
+│  • Device checks cert expiry on every heartbeat                       │
+│  • CERT_EXPIRING flag set at day 335                                  │
+│  • Cloud alert at day 335 if device hasn't rotated                    │
+│  • Grace period (days 365-395): device can still connect for          │
+│    renewal-only operation (no verdict requests, no audit sync)         │
+│  • Day 395: hard lockdown, requires manual re-provisioning            │
+│                                                                        │
+│  Rotation protocol:                                                   │
+│  1. Cloud sends cmd/request: {command: "rotate_cert"}                 │
+│  2. Device generates new key pair in secure element                   │
+│  3. Device creates CSR, sends via cmd/response                        │
+│  4. Cloud signs CSR with Device CA, sends new cert via cmd/request    │
+│  5. Device stores new cert, ACKs, begins using on next MQTT reconnect│
+│  6. Old cert added to short-lived revocation list (48h validity)      │
+│                                                                        │
+└──────────────────────────────────────────────────────────────────────┘
+```
+
+#### Distributed Tracing
+
+For debugging individual device verdict issues across the device→edge→cloud path:
+
+```
+Trace ID construction:
+  trace_id = SHA256(device_id || request_id || session_boot_counter)[0:8]
+  • 8 bytes (64 bits) — unique enough for operational debugging
+  • Deterministic: same inputs produce same trace_id (reproducible)
+  • session_boot_counter: increments on each device reboot (prevents collision)
+
+Propagation:
+  • Device includes trace_id in verdict request CBOR payload (8 bytes)
+  • Edge/Cloud logs trace_id alongside pipeline decisions
+  • Cloud stores last 10K trace entries per device (24h rolling window)
+  • Fleet API: GET /devices/{device_id}/traces?tool_name=bash&action=BLOCK
+
+Trace entry (stored in cloud):
+{
+  "trace_id": "a1b2c3d4e5f6a7b8",
+  "device_id": 42,
+  "timestamp": "2026-08-06T14:30:00Z",
+  "tool_name": "bash",
+  "tool_hash": "sha256:...",
+  "local_decision": "ESCALATE",
+  "cache_hit": false,
+  "pipeline_stages": ["regex:pass", "yara:pass", "opa:block"],
+  "final_verdict": "BLOCK",
+  "latency_ms": 142
+}
+```
+
+#### Policy Simulation (Dry-Run)
+
+```
+POST /api/v1/fleet/policy/simulate
+Auth: Bearer token (admin)
+
+Request:
+{
+  "policy_yaml": "string (new policy content)",
+  "target_profile": "standard",
+  "test_against": {
+    "recent_tool_hashes": true,    // use last 24h of tool hashes from fleet
+    "device_ids": [42, 43, 44],    // specific devices to simulate
+    "synthetic_sequences": [       // manual test cases
+      {"tools": ["net_fetch", "exec_shell"], "expected": "BLOCK"}
+    ]
+  }
+}
+
+Response: 200 OK
+{
+  "summary": {
+    "total_verdicts_tested": 15420,
+    "verdicts_changed": 23,
+    "new_blocks": 18,
+    "new_allows": 5,
+    "size_bytes": 4200,
+    "fits_target_profile": true
+  },
+  "changes": [
+    {
+      "tool_hash": "sha256:abc...",
+      "tool_name": "custom-sensor-v2",
+      "current_verdict": "ALLOW",
+      "new_verdict": "BLOCK",
+      "reason": "new sequence rule: [sensor_read, net_fetch] → block",
+      "affected_devices": 342
+    }
+  ],
+  "warnings": [
+    "New policy blocks 18 tools that were allowed in last 24h — review before deploy"
+  ]
+}
+```
+
+#### Edge Gateway Lifecycle
+
+```
+Edge gateway runs as a container (Docker/K3s) or systemd service.
+Update path depends on deployment mode:
+
+┌──────────────────────────────────────────────────────────────────────┐
+│  Mode              │ Update Method       │ Downtime    │ Rollback     │
+├────────────────────┼─────────────────────┼─────────────┼──────────────┤
+│  K3s/Kubernetes    │ Rolling deployment  │ 0s (HA pod) │ kubectl      │
+│                    │ (2-replica minimum) │             │ rollout undo │
+├────────────────────┼─────────────────────┼─────────────┼──────────────┤
+│  Docker Compose    │ Blue-green restart  │ <5s         │ docker       │
+│                    │ (stop old, start    │ (devices    │ compose down │
+│                    │  new on same VIP)   │ reconnect)  │ + up old tag │
+├────────────────────┼─────────────────────┼─────────────┼──────────────┤
+│  Systemd (bare)    │ Package update +    │ <10s        │ apt/yum      │
+│                    │ systemctl restart   │ (graceful   │ downgrade +  │
+│                    │                     │ drain first)│ restart      │
+├────────────────────┼─────────────────────┼─────────────┼──────────────┤
+│  Cisco IOS-XE      │ App hosting update  │ <30s        │ IOS app      │
+│  (IR1101)          │ via IOx             │             │ rollback cmd │
+└────────────────────┴─────────────────────┴─────────────┴──────────────┘
+
+During edge restart:
+  • MQTT broker briefly unavailable — devices enter RECONNECTING state
+  • In-flight verdict requests timeout → BLOCK (fail-closed preserved)
+  • Devices reconnect via broker fallback list (secondary edge or cloud)
+  • Verdict cache: persisted to disk, reloaded on startup (no cold cache)
+  • Active MQTT sessions: broker resumes persistent sessions on reconnect
+
+Graceful drain procedure (before restart):
+  1. Stop accepting new device connections
+  2. Wait for in-flight verdict requests to complete (max 5s)
+  3. Publish "edge_restarting" notification to connected devices
+  4. Devices proactively switch to fallback broker
+  5. Shutdown edge services
 ```
 
 ---
@@ -2214,6 +3318,45 @@ iot_extensions:
     tool_calls_per_minute: 60
     network_requests_per_minute: 30
     actuations_per_minute: 10
+
+  # Speculative execution: non-safety caps proceed without waiting for cloud
+  escalation_mode:
+    actuate: sync_block       # always wait for cloud verdict (safety-critical)
+    exec_shell: sync_block    # always wait for cloud verdict (safety-critical)
+    sensor_read: speculative  # allow pending, retroactive block if cloud denies
+    net_fetch: speculative    # allow pending, retroactive block if cloud denies
+    read_fs: speculative
+    write_fs: sync_block
+    send_msg: speculative
+
+  # Bloom filter behavior when cloud is unreachable
+  bloom_offline_action: warn  # "block" for high-security deployments
+
+  # Secure element failure behavior
+  secure_element:
+    failure_mode: strict         # strict | degraded | disabled
+    degraded_max_hours: 72       # auto-lockdown after this in degraded mode
+    degraded_ttl_divisor: 2      # halve all verdict cache TTLs
+
+  # Audit write persistence strategy (flash wear mitigation)
+  audit_persistence:
+    block_events: immediate_flush    # safety-critical, always persist to flash
+    warn_events: buffered            # batch flush, tolerate loss on power fail
+    allow_events: sample_10pct       # only log 10% of allows (reduce volume)
+
+  # Policy OTA canary health-check
+  canary:
+    enabled: true
+    window_minutes: 10
+    spike_multiplier: 5              # 5× baseline = spike detected
+    spike_consecutive_minutes: 3     # auto-rollback after 3 consecutive spikes
+    rollout_pause_threshold_pct: 5   # pause rollout if >5% of batch rolls back
+
+  # Broker connection fallback list (tried in priority order on disconnect)
+  broker_fallback:
+    - "mqtts://edge-vip.site-alpha.local:8883"    # primary edge
+    - "mqtts://edge-b.site-alpha.local:8883"      # secondary edge
+    - "mqtts://fleet.defenseclaw.cloud:8883"      # cloud direct
 ```
 
 ---
@@ -2228,22 +3371,29 @@ iot_extensions:
 - DefenseClaw Lite C agent (STANDARD profile)
   - Policy table enforcement
   - Capability correlator (session FSM)
-  - IPC hook (Unix socket, JSON-RPC intercept)
-  - Audit ring buffer with HMAC chain
-  - MQTT 5.0 client with mTLS
-  - Heartbeat reporting
+  - IPC hook (Unix socket, JSON-RPC intercept) with SO_PEERCRED + start_time verification
+  - Audit ring buffer with HMAC chain + RAM write-coalescing (16-entry batch flush)
+  - MQTT 5.0 client with mTLS + broker fallback list
+  - Heartbeat reporting with clock synchronization (server_ts in verdict responses)
+  - Speculative execution mode for non-safety capabilities
+  - Verdict response HMAC tag verification (anti-replay)
+  - Pending verdict deduplication (QoS 1 safety)
 - Policy compiler (Python tool, YAML → C headers + binary)
 - Cloud fleet manager (device registration, heartbeat processing)
-- Verdict request/response protocol
+- Verdict request/response protocol (with session-scoped HMAC)
 - Integration with existing inspection pipeline for verdict evaluation
+- Emergency broadcast with Ed25519 signature verification
 
 **Target hardware:** Raspberry Pi 4, NVIDIA Jetson Nano
 
 **Exit criteria:**
 - Agent blocks dangerous capability sequences locally in <5us
 - Verdict requests return from cloud in <500ms P95
+- Speculative execution returns PENDING in <10us for non-safety caps
 - Heartbeats aggregate correctly in fleet dashboard
 - Audit chain verifiable end-to-end
+- HMAC tag rejects forged/replayed verdict responses
+- Flash write rate <4 writes/min under 60 tool calls/min load
 
 ---
 
@@ -2253,12 +3403,14 @@ iot_extensions:
 
 **Deliverables:**
 - Edge gateway mode (full DefenseClaw + MQTT broker + verdict cache)
+- Edge gateway HA (VRRP active-passive or shared subscription active-active)
 - Edge-to-cloud gRPC sync protocol
-- Staged OTA rollout (policy + firmware)
-- Bloom filter distribution for known-bad detection
+- Staged OTA rollout with canary health-check window (10-min auto-rollback)
+- Bloom filter distribution with configurable offline action (warn/block)
 - PII redaction module (outbound regex)
 - Firewall rule generation (nftables integration)
 - Device certificate rotation protocol
+- Secure element degradation mode (SE_DEGRADED flag, TTL halving, 72h auto-lockdown)
 - Grafana dashboards + alerting rules
 - Failure mode testing (chaos engineering)
 
@@ -2266,9 +3418,12 @@ iot_extensions:
 
 **Exit criteria:**
 - Edge gateway serves verdicts in <10ms P95
+- Edge HA failover completes in <3s (VRRP) or 0s (shared subscription)
 - Fleet operates normally during 1-hour WAN outage
 - Policy rollout to 10K devices completes in <15 minutes
+- Canary auto-rollback triggers within 3 minutes of 5× block spike
 - Zero audit entries lost during edge↔cloud sync
+- Bloom FP rate measured at <0.1% on production tool catalog
 
 ---
 
@@ -2278,13 +3433,20 @@ iot_extensions:
 
 **Deliverables:**
 - MINIMAL profile C agent (30KB, Zephyr/FreeRTOS)
-- CoAP/DTLS transport (for ultra-constrained devices)
+- CoAP/DTLS transport with full protocol specification:
+  - URI mapping (MQTT topic → CoAP path: /f/{id}/hb, /f/{id}/v, etc.)
+  - Block2 block-wise transfer for policy OTA (1024-byte blocks)
+  - Observe pattern for push notifications (OTA, emergency)
+  - DTLS 1.2 with TLS_PSK_WITH_AES_128_CCM_8 (8-byte tag, minimal overhead)
+  - PSK derivation: HKDF-SHA256(fleet_master_key, device_serial, "dtls-psk", 16)
+  - Session resumption via DTLS session ticket
 - Secure element integration (ATECC608B, Infineon OPTIGA)
+- Hardware MPU isolation for IPC buffer on RTOS (Cortex-M privileged mode)
 - Anti-rollback enforcement (hardware fuse support)
 - Secure boot chain integration (MCUboot)
 - Scale testing: 100K simulated devices
 - Fleet correlator (cross-device campaign detection)
-- Emergency broadcast (fleet-wide kill switch)
+- Emergency broadcast (fleet-wide kill switch, Ed25519-signed)
 - Compliance documentation (NIST AI RMF mapping)
 
 **Target hardware:** ESP32-S3, STM32H7, nRF5340
@@ -2322,16 +3484,24 @@ iot_extensions:
 
 | # | Decision | Rationale | Alternatives Considered |
 |---|----------|-----------|------------------------|
-| D1 | C language for IoT agent | Deterministic memory, no GC pauses, runs on bare metal. Critical for sub-microsecond enforcement. | Rust (excellent safety but larger runtime, less MCU toolchain support), Go (too large for MCU), MicroPython (too slow) |
+| D1 | C language for IoT agent | Deterministic memory, no GC pauses, runs on bare metal. Critical for sub-microsecond enforcement. Existing team C expertise + direct compatibility with Zephyr/FreeRTOS BSPs without FFI overhead. | Rust (excellent memory safety via embassy-rs/esp-hal — viable alternative with mature MCU support as of 2026, but team upskilling cost + BSP compatibility gaps for industrial targets), Go (too large for MCU), MicroPython (too slow) |
 | D2 | MQTT 5.0 as primary IoT protocol | Lightweight, well-supported on constrained devices, QoS levels, topic-based routing, session persistence. MQTT 5.0 adds message expiry and shared subscriptions. | CoAP (used as fallback for Tier 1), AMQP (too heavy), gRPC (requires HTTP/2, too heavy for MCU) |
 | D3 | mTLS for device authentication | Strongest identity model. Each device has unique cert from manufacturing. Prevents impersonation and enables zero-trust. | PSK (simpler but key rotation is hard, no individual revocation), JWT (stateless but requires clock sync on constrained devices) |
 | D4 | Fail-closed on unknowns | Security invariant: a disconnected device that encounters unknown tools should not allow them. Availability is secondary to security for AI agent governance. | Fail-open (dangerous for safety-critical IoT), Fail-warn (useless without cloud to receive warning) |
 | D5 | Compiled policy tables (not embedded Rego) | OPA/Rego requires a VM that won't fit on MCU (OPA Go binary alone is ~20MB). Compiled tables give O(1) lookup in <1us. Trade-off: no hot-reload, requires OTA for policy changes. | Embedded Rego (too large), Lua VM (possible but adds 100KB+), custom DSL interpreter (maintenance burden) |
-| D6 | Ed25519 for OTA signatures | Small keys (32 bytes), fast verification (even on MCU), no patent issues, quantum-resistant roadmap (can migrate to Ed448). | RSA-2048 (keys too large for constrained devices), ECDSA-P256 (patent concerns in some jurisdictions, slower verify) |
+| D6 | Ed25519 for OTA signatures | Small keys (32 bytes), fast verification (even on MCU), no patent issues. Post-quantum migration path: ML-DSA (NIST FIPS 204) when standardized for constrained devices. | RSA-2048 (keys too large for constrained devices), ECDSA-P256 (patent concerns in some jurisdictions, slower verify), Ed448 (larger keys, not quantum-resistant) |
 | D7 | CBOR encoding for messages | Binary, schema-less, compact (~30% smaller than JSON), first-class IETF standard, wide IoT adoption (LwM2M, COSE, SUIT). | Protobuf (excellent but requires codegen tooling per platform), MessagePack (less standardized), FlatBuffers (zero-copy but complex) |
 | D8 | A/B partition for policy OTA | Atomic updates: either the new policy is fully applied or the old one remains. Protects against power-loss during write. | Single partition + journal (complex recovery), copy-on-write (requires more flash) |
 | D9 | Edge gateway is full DefenseClaw | Reuses 100% of existing inspection pipeline. No new scanning code needed. Edge just runs the gateway binary with an additional MQTT module. | Custom edge binary (maintenance burden), Cloud functions at edge (latency variability) |
 | D10 | 16-byte audit entries (fixed size) | Flash-friendly (aligned), predictable ring size, no fragmentation. HMAC chain computed over fixed-size blocks. | Variable-size entries (more flexible but complex ring management), structured log (requires parser on device) |
+| D11 | Speculative execution for non-safety caps | Prevents 5s stall for tool calls that aren't safety-critical. Agent proceeds immediately; retroactive kill if cloud denies. Safety caps (actuate, exec_shell) always block synchronously. | Always-sync (simpler but stalls agent UX), always-async (dangerous for actuators), configurable timeout per cap (complex) |
+| D12 | Monotonic-tick clock + cloud-relative time | MCUs lack RTC. Tick counter avoids wall-clock dependency; cloud timestamps in verdict responses provide sync. If never synced, all cached TTLs treated as expired (preserves fail-closed). | NTP (requires UDP, many MCUs lack stack), GPS time (hardware cost), trust-on-first-use (vulnerable to time manipulation) |
+| D13 | Session-scoped HMAC on verdict responses | Prevents replay/injection of verdicts. 4-byte truncated HMAC gives 2^32 forgery resistance at zero flash cost (key derived per session). | Full 32-byte HMAC (wastes bandwidth), sequence-only (wraps at 65535, vulnerable after 65K requests), challenge-response (adds RTT) |
+| D14 | Canary health-check window for policy OTA | Self-test at apply time only catches syntax errors. Canary catches semantic errors (overly broad rules causing false blocks). 10-min window with 5× spike threshold balances detection speed vs. noise tolerance. | Immediate rollback on any block increase (too sensitive), cloud-only rollback detection (requires connectivity), no canary (silent deployment failures) |
+| D15 | SO_PEERCRED + start_time for IPC verification | PIDs recycle on Linux; start_time from /proc is monotonically unique per process lifetime. Combined with registration nonce, prevents all known PID-reuse attacks. On RTOS: hardware MPU provides stronger isolation. | PID-only (vulnerable to recycling), file-based tokens (race conditions), SELinux labels (not available on all targets) |
+| D16 | Ed25519-signed emergency broadcasts | Emergency kill-switch bypasses normal verdict flow — must be tamper-proof. Reuses existing OTA CA key (zero additional flash). Monotonic sequence prevents replay. | Unsigned (any broker access could kill fleet), HMAC-only (shared secret harder to rotate), full cert chain (too large for broadcast message) |
+| D17 | Verdict cache TTL asymmetry (ALLOW=24h, BLOCK=7d, WARN=4h) | Conservative: BLOCKs persist longer to prevent attackers from waiting out a cache expiry to retry. ALLOWs expire sooner so revocations take effect within 24h. WARNs expire fastest because they need frequent re-evaluation as context changes. Trade-off: a false BLOCK persists 7 days (availability impact) — mitigated by threat intel REVOKE_PRIOR which can instantly invalidate any cached verdict regardless of TTL. | Symmetric TTLs (simpler but weaker security), No caching (too many cloud round-trips), Infinite BLOCK TTL (no self-healing) |
+| D18 | IPC input validation as security boundary | The agent runtime is untrusted. All IPC payloads are bounds-checked, ASCII-validated, and rate-limited at 100 req/s before touching decision engine state. Prevents buffer overflow, format string, and CPU exhaustion attacks from a compromised agent. | Trust agent input (dangerous — agent is the thing being secured), Validate only at cloud (too late — local decisions use local data), Sandboxed VM for parsing (too heavy for MCU) |
 
 ---
 
@@ -2354,6 +3524,11 @@ iot_extensions:
 | **Bloom Filter** | Probabilistic set for known-bad hash pre-screening |
 | **Heartbeat** | Periodic 32-byte status packet from device to cloud/edge |
 | **Fail-closed** | Unknown tools are BLOCKED when cloud is unreachable |
+| **Speculative Execution** | Non-safety tool calls proceed without waiting for cloud verdict; retroactive BLOCK kills in-flight tool |
+| **Canary Window** | Post-OTA health-check period; auto-rollback if block rate spikes above baseline |
+| **Write Coalescing** | Buffering audit entries in RAM and batch-flushing to flash to reduce wear |
+| **Broker Fallback List** | Priority-ordered MQTT endpoints tried on disconnect (edge → secondary → cloud) |
+| **SE Degradation** | Controlled fallback to software keys with restricted operation when secure element fails |
 
 ### B. Related Documents
 
@@ -2367,13 +3542,15 @@ iot_extensions:
 
 ### C. Open Questions
 
-| # | Question | Impact | Owner |
-|---|----------|--------|-------|
-| Q1 | Should IoT-specific capability classes (ACTUATE, SENSOR_READ) be added to the full gateway's guardrail correlator as well? | Policy portability | Architecture team |
-| Q2 | What is the minimum LLM Judge inspection that could run on a Tier 3 gateway device (Cisco IR1101 with 1GB RAM)? | Edge intelligence depth | ML team |
-| Q3 | Should the fleet manager be a separate microservice or embedded in the existing gateway binary? | Deployment complexity vs. resource sharing | Platform team |
-| Q4 | What secure element should be the reference implementation? ATECC608B vs. Infineon OPTIGA vs. ARM TrustZone? | Hardware partnership, supply chain | Hardware team |
-| Q5 | Is MQTT 5.0 shared subscription sufficient for load-balanced edge gateways, or do we need a dedicated message bus? | Edge HA architecture | Infrastructure team |
+| # | Question | Impact | Owner | Status |
+|---|----------|--------|-------|--------|
+| Q1 | Should IoT-specific capability classes (ACTUATE, SENSOR_READ) be added to the full gateway's guardrail correlator as well? | Policy portability | Architecture team | Open |
+| Q2 | What is the minimum LLM Judge inspection that could run on a Tier 3 gateway device (Cisco IR1101 with 1GB RAM)? Recommendation: quantized models (Q4 GGUF, 1-3B params) give 5-15s latency — too slow for inline verdict. Keep LLM judge cloud-only; edge runs regex/pattern checks. | Edge intelligence depth | ML team | Recommendation provided |
+| Q3 | Should the fleet manager be a separate microservice or embedded in the existing gateway binary? Recommendation: embedded with feature flag — avoids deployment complexity given gateway binary is already 50MB. | Deployment complexity vs. resource sharing | Platform team | Recommendation provided |
+| Q4 | What secure element should be the reference implementation? ATECC608B vs. Infineon OPTIGA vs. ARM TrustZone? | Hardware partnership, supply chain | Hardware team | Open |
+| Q5 | Is MQTT 5.0 shared subscription sufficient for load-balanced edge gateways, or do we need a dedicated message bus? **Resolved:** Yes, MQTT 5.0 shared subscriptions ($share/group/topic) are sufficient for active-active edge pairs. See Section 5.4. | Edge HA architecture | Infrastructure team | **Resolved** |
+| Q6 | Should Tier 1 MCU devices use ECDHE-PSK (forward secrecy) instead of plain PSK? **Resolved:** Section 7.4 specifies plain PSK for MINIMAL profile (flash too tight for ECDHE) and ECDHE-PSK for STANDARD+ on MCU (~8KB additional code). Forward secrecy is a deployment-time choice. | Crypto strength vs. flash budget | Security team | **Resolved** |
+| Q7 | Should COSE payload encryption be added for broker-compromised scenarios? Recommendation: Phase 4 enhancement. Current HMAC-tagged verdicts prevent injection/replay; encryption would add confidentiality. Not a security blocker since tool names/destinations aren't high-value secrets for most deployments. | Data confidentiality at broker | Security team | Phase 4 |
 
 ### D. References
 
@@ -2387,6 +3564,138 @@ iot_extensions:
 8. Zephyr Project - RTOS for constrained devices
 9. EMQX - Scalable MQTT broker
 10. DefenseClaw Internal Architecture Documentation
+
+### E. Resource Budget (STANDARD Profile, All Fixes Included)
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│              RAM BUDGET — STANDARD PROFILE (80KB binary)           │
+├──────────────────────────────────────────────────────────────────┤
+│                                                                    │
+│  Component                          │ RAM (bytes) │ Notes         │
+│  ───────────────────────────────────┼─────────────┼───────────── │
+│  Policy tables (compiled, const)    │      0*     │ Flash only    │
+│  Correlator (16 sessions)           │    320      │ 20B × 16     │
+│  Verdict cache (64 entries)         │  2,560      │ 40B × 64     │
+│  Audit ring (256 entries, flash)    │      0*     │ Flash only    │
+│  Audit RAM buffer (16 entries)      │    256      │ 16B × 16     │
+│  MQTT client state                  │  1,024      │ buffers+state │
+│  TLS session (mbedTLS)              │ 16,384      │ handshake buf │
+│  IPC peer verification              │     48      │ 1 peer struct │
+│  Pending verdict dedup              │     64      │ 8 slots × 8B │
+│  Speculative exec slots             │     48      │ 4 × 12B      │
+│  Canary state                       │     32      │ 1 struct      │
+│  Clock sync state                   │     16      │ 1 struct      │
+│  Rate limiters                      │     24      │ 3 × 8B       │
+│  Emergency state                    │     12      │ seq+gap+flag  │
+│  Bloom filter (if enabled)          │ 18,432      │ 144Kbit       │
+│  Broker fallback list               │    384      │ 3 × 128B URLs │
+│  Trace ID scratch                   │      8      │ per-request   │
+│  Heartbeat buffer                   │     32      │ outgoing pkt  │
+│  Stack                              │  4,096      │ main + ISR    │
+│  ───────────────────────────────────┼─────────────┼───────────── │
+│  TOTAL (without bloom)              │ ~25 KB      │              │
+│  TOTAL (with bloom)                 │ ~43 KB      │              │
+│                                                                    │
+│  * Const/flash data not counted in RAM budget                     │
+│                                                                    │
+│  Additional RAM from all fixes:     │   ~450 B    │              │
+│  (dedup + canary + clock + peer + seq + broker list)              │
+│                                                                    │
+└──────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────┐
+│              FLASH BUDGET — STANDARD PROFILE                       │
+├──────────────────────────────────────────────────────────────────┤
+│                                                                    │
+│  Component                          │ Flash (KB)  │ Notes         │
+│  ───────────────────────────────────┼─────────────┼───────────── │
+│  Core enforcement (decision + IPC)  │    12       │ .text         │
+│  Correlator + policy table          │     8       │ .text + .rodata│
+│  MQTT + CBOR codec                  │    14       │ .text         │
+│  TLS library (mbedTLS minimal)      │    30       │ .text         │
+│  Audit + flash_safe                 │     4       │ .text         │
+│  OTA receiver + Ed25519 verify      │     6       │ .text         │
+│  Platform HAL                       │     2       │ .text         │
+│  Emergency broadcast handler        │     1       │ .text         │
+│  Speculative execution logic        │     1       │ .text         │
+│  Canary health-check                │     1       │ .text         │
+│  IPC peer verification              │     1       │ .text         │
+│  ───────────────────────────────────┼─────────────┼───────────── │
+│  TOTAL .text + .rodata (BINARY)    │   ~80 KB    │ ← "80KB target"│
+│                                                                    │
+│  The "80KB binary" target refers to .text + .rodata sections only. │
+│  Data partitions below are in SEPARATE flash regions:              │
+│                                                                    │
+│  Policy tables (A/B partition)      │   2 × 4 KB  │ Separate flash│
+│  Audit ring (256 × 16B)            │     4 KB    │ Wear-leveled  │
+│  Device cert + CA keys              │     2 KB    │ Protected     │
+│  Config store (broker list, etc.)   │     1 KB    │ Protected     │
+│  ───────────────────────────────────┼─────────────┼───────────── │
+│  TOTAL flash (binary + data)       │   ~95 KB    │              │
+│  Minimum device flash required     │  128 KB     │ (with margin) │
+│                                                                    │
+└──────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────┐
+│              FLASH BUDGET — MINIMAL PROFILE (32KB target)          │
+├──────────────────────────────────────────────────────────────────┤
+│                                                                    │
+│  Component                          │ Flash (KB)  │ Notes         │
+│  ───────────────────────────────────┼─────────────┼───────────── │
+│  Core enforcement (decision + IPC)  │    10       │ .text (no net)│
+│  Correlator + policy table          │     6       │ .text + .rodata│
+│  Audit + flash_safe                 │     3       │ .text         │
+│  Platform HAL                       │     2       │ .text         │
+│  Rate limiter                       │     1       │ .text         │
+│  ───────────────────────────────────┼─────────────┼───────────── │
+│  TOTAL .text + .rodata (BINARY)    │   ~22 KB    │ ← Fits 32KB  │
+│                                                                    │
+│  Policy tables (single partition)   │     2 KB    │ No A/B on MCU │
+│  Audit ring (64 × 16B)            │     1 KB    │ Wear-leveled  │
+│  ───────────────────────────────────┼─────────────┼───────────── │
+│  TOTAL flash (binary + data)       │   ~25 KB    │              │
+│  Minimum device flash required     │   32 KB     │              │
+│                                                                    │
+│  RAM: ~8 KB (no TLS, no MQTT, no bloom, 4 sessions, stack=2KB)  │
+│                                                                    │
+└──────────────────────────────────────────────────────────────────┘
+
+┌──────────────────────────────────────────────────────────────────┐
+│              FLASH BUDGET — EDGE PROFILE (150KB target)            │
+├──────────────────────────────────────────────────────────────────┤
+│                                                                    │
+│  Component                          │ Flash (KB)  │ Notes         │
+│  ───────────────────────────────────┼─────────────┼───────────── │
+│  Core enforcement (decision + IPC)  │    14       │ .text         │
+│  Correlator + policy table          │    10       │ .text + .rodata│
+│  MQTT + CBOR codec                  │    14       │ .text         │
+│  TLS library (wolfSSL full)         │    45       │ .text         │
+│  Audit + flash_safe                 │     5       │ .text         │
+│  OTA receiver + Ed25519 verify      │     6       │ .text         │
+│  Platform HAL                       │     3       │ .text         │
+│  Bloom filter logic                 │     2       │ .text         │
+│  Emergency + speculative + canary   │     4       │ .text         │
+│  PII redaction (regex engine)       │    12       │ .text         │
+│  Netfilter rule generation          │     8       │ .text         │
+│  Mesh verdict sharing (Tier 3)      │     6       │ .text         │
+│  IPC peer + input validation        │     2       │ .text         │
+│  ───────────────────────────────────┼─────────────┼───────────── │
+│  TOTAL .text + .rodata (BINARY)    │  ~131 KB    │ ← Fits 150KB │
+│                                                                    │
+│  Policy tables (A/B partition)      │   2 × 8 KB  │ Larger rules  │
+│  Audit ring (1024 × 16B)          │    16 KB    │ Wear-leveled  │
+│  Bloom filter data                  │    18 KB    │ Generated     │
+│  Device cert + CA keys              │     2 KB    │ Protected     │
+│  Config store                       │     2 KB    │ Protected     │
+│  ───────────────────────────────────┼─────────────┼───────────── │
+│  TOTAL flash (binary + data)       │  ~185 KB    │              │
+│  Minimum device flash required     │  256 KB     │ (with margin) │
+│                                                                    │
+│  RAM: ~64 KB (full TLS, 64 sessions, 256 verdict cache, bloom)  │
+│                                                                    │
+└──────────────────────────────────────────────────────────────────┘
+```
 
 ---
 

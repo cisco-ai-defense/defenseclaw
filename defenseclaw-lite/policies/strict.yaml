@@ -1,0 +1,62 @@
+name: strict
+description: Strict security for production IoT deployments
+
+admission:
+  scan_on_install: true
+  allow_list_bypass_scan: false
+
+skill_actions:
+  critical:
+    file: quarantine
+    runtime: disable
+    install: block
+  high:
+    file: quarantine
+    runtime: disable
+    install: block
+  medium:
+    file: none
+    runtime: warn
+    install: none
+
+iot_extensions:
+  capability_sequences:
+    - sequence: [net_fetch, exec_shell]
+      action: block
+    - sequence: [read_fs, send_msg]
+      action: warn
+    - sequence: [net_fetch, actuate]
+      action: block
+    - sequence: [sensor_read, net_fetch]
+      action: warn
+
+  destination_allowlist:
+    - "api.openai.com"
+    - "api.anthropic.com"
+    - "*.cisco.com"
+
+  rate_limits:
+    tool_calls_per_minute: 60
+    network_requests_per_minute: 30
+    actuations_per_minute: 10
+
+  escalation_mode:
+    actuate: sync_block
+    exec_shell: sync_block
+    write_fs: sync_block
+    sensor_read: speculative
+    net_fetch: speculative
+    read_fs: speculative
+    send_msg: speculative
+
+  canary:
+    enabled: true
+    window_minutes: 10
+    spike_multiplier: 5
+    spike_consecutive_minutes: 3
+    baseline_blocks_per_min: 5
+
+  broker_fallback:
+    - "mqtts://edge-vip.site-alpha.local:8883"
+    - "mqtts://edge-b.site-alpha.local:8883"
+    - "mqtts://fleet.defenseclaw.cloud:8883"
