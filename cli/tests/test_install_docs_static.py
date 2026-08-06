@@ -2125,6 +2125,9 @@ def test_redaction_workflow_documents_linux_windows_macos_and_tui_surfaces() -> 
     windows = (
         ROOT / "docs-site/content/docs/get-started/windows/capabilities-commands.mdx"
     ).read_text(encoding="utf-8")
+    windows_paths = (
+        ROOT / "docs-site/content/docs/get-started/windows/paths-troubleshooting.mdx"
+    ).read_text(encoding="utf-8")
 
     for expected in (
         "macOS, Linux, and native Windows",
@@ -2137,6 +2140,7 @@ def test_redaction_workflow_documents_linux_windows_macos_and_tui_surfaces() -> 
     assert "TUI → Setup → Redaction Policy" in setup
     assert "Logs → Redaction policy…" in setup
     assert "Redaction policy CLI and TUI" in windows
+    assert "config.yaml.before-redaction-*" in windows_paths
     assert (
         "redaction status/remove-all/apply/defaults/bucket/profile/destination/route"
         in windows
@@ -2149,10 +2153,24 @@ def test_macos_redaction_sheet_exposes_the_complete_advanced_cli_surface() -> No
     ).read_text(encoding="utf-8")
 
     assert 'DisclosureGroup("Show advanced settings"' in source
-    assert source.count('case bucket') >= 3
-    assert source.count('case profile') >= 4
-    assert source.count('case destination') >= 3
-    assert source.count('case route') >= 5
+    for action in (
+        "case bucketList",
+        "case bucketSet",
+        "case bucketReset",
+        "case profileList",
+        "case profileShow",
+        "case profileSet",
+        "case profileRemove",
+        "case destinationShow",
+        "case destinationSend",
+        "case destinationInherit",
+        "case routeList",
+        "case routeAdd",
+        "case routeSet",
+        "case routeMove",
+        "case routeRemove",
+    ):
+        assert action in source
     for expected in (
         '"compliance.activity"',
         '"diagnostic"',
@@ -2164,6 +2182,13 @@ def test_macos_redaction_sheet_exposes_the_complete_advanced_cli_surface() -> No
         "resetActionFields()",
     ):
         assert expected in source
+    assert '"setup", "redaction", "apply"' in source
+    assert '"--profile", profile' in source
+    assert 'routeBuckets = action == .destinationSend ? "*" : ""' in source
+    assert (
+        "if result.succeeded, action.isMutation, !dryRun {\n                resetActionFields()\n            }"
+        in source
+    )
 
 
 def test_zeptoclaw_calls_out_local_history_retention_and_trust_boundary() -> None:

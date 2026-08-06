@@ -22,6 +22,7 @@ from defenseclaw.gateway import resolve_gateway_binary
 
 _CREATE_SUSPENDED = 0x00000004
 _PIPE_FRAGMENT_FLUSH_SECONDS = 0.05
+_PIPE_FRAGMENT_MAX_CHARS = 64 * 1024
 
 
 @dataclass(frozen=True)
@@ -202,6 +203,13 @@ class CommandExecutor:
                 pending += decoder.decode(chunk)
                 complete, separator, trailing = pending.rpartition("\n")
                 if not separator:
+                    while len(pending) >= _PIPE_FRAGMENT_MAX_CHARS:
+                        bounded, pending = (
+                            pending[:_PIPE_FRAGMENT_MAX_CHARS],
+                            pending[_PIPE_FRAGMENT_MAX_CHARS:],
+                        )
+                        for text in _split_terminal_chunk(bounded):
+                            yield CommandEvent("output", text)
                     continue
                 for text in _split_terminal_chunk(complete):
                     yield CommandEvent("output", text)

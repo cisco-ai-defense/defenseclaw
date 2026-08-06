@@ -18,6 +18,7 @@ from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
+from defenseclaw.observability.v8_config import BUCKETS
 from defenseclaw.observability.v8_status import (
     V8BucketStatus,
     V8DestinationStatus,
@@ -203,6 +204,9 @@ def test_redaction_is_first_class_setup_wizard_with_safe_quick_actions() -> None
         "Open the complete guided workflow",
         "Advanced — show all settings",
     ]
+    assert wizard_goals(SetupWizard.REDACTION, model.config)[0].summary == (
+        f"Show compiler-owned destination and {len(BUCKETS)}-bucket policy."
+    )
 
     model.open_goal_menu(SetupWizard.REDACTION)
     model.goal_cursor = next(index for index, goal in enumerate(model.goals) if goal.id == "remove-all")
@@ -330,6 +334,30 @@ def test_redaction_advanced_tui_form_covers_bucket_profile_destination_and_route
     assert route_argv.count("--connector") == 2
     assert tuple(route_argv[-4:-2]) == ("--position", "2")
     assert route_argv[-2:] == ("--yes", "--dry-run")
+
+
+def test_redaction_drop_route_hides_and_omits_profile() -> None:
+    from defenseclaw.tui.panels.setup import _redaction_wizard_fields_for
+
+    fields = _redaction_wizard_fields_for(
+        {
+            "@Action": "route-add",
+            "@Destination": "collector",
+            "@Route Name": "discard",
+            "--signal": "logs",
+            "--route-action": "drop",
+            "--profile": "strict",
+            "--position": "1",
+        }
+    )
+
+    assert "Profile" not in {field.label for field in fields}
+    argv = build_wizard_args(SetupWizard.REDACTION, fields)
+    assert "--profile" not in argv
+    assert tuple(argv[argv.index("--route-action") : argv.index("--route-action") + 2]) == (
+        "--route-action",
+        "drop",
+    )
 
 
 def test_redaction_tui_default_form_is_read_only_status() -> None:
@@ -2144,17 +2172,26 @@ def test_every_redaction_tui_action_maps_to_the_registered_cli_surface() -> None
         "--bucket": "*",
         "--position": "1",
     }
-    for action in _REDACTION_ACTIONS:
-        fields = _redaction_wizard_fields_for({**seed, "@Action": action})
-        assert missing_required_fields(SetupWizard.REDACTION, fields) == (), action
-        argv = build_wizard_args(SetupWizard.REDACTION, fields)
-        if action == "interactive":
-            assert argv == ("setup", "redaction")
-            continue
-        if action in _REDACTION_MUTATION_ACTIONS:
-            assert "--dry-run" in argv, action
-        result = runner.invoke(cmd_setup.setup, argv[1:], catch_exceptions=True)
-        assert result.exit_code != 2, f"{action}: {result.output}\n{result.exception!r}"
+    with runner.isolated_filesystem() as isolated_dir:
+        for action in _REDACTION_ACTIONS:
+            fields = _redaction_wizard_fields_for({**seed, "@Action": action})
+            assert missing_required_fields(SetupWizard.REDACTION, fields) == (), action
+            argv = build_wizard_args(SetupWizard.REDACTION, fields)
+            if action == "interactive":
+                assert argv == ("setup", "redaction")
+                continue
+            if action in _REDACTION_MUTATION_ACTIONS:
+                assert "--dry-run" in argv, action
+            result = runner.invoke(
+                cmd_setup.setup,
+                argv[1:],
+                catch_exceptions=True,
+                env={"DEFENSECLAW_HOME": isolated_dir},
+            )
+            assert result.exit_code != 2, f"{action}: {result.output}\n{result.exception!r}"
+            assert result.exception is None or isinstance(result.exception, SystemExit), (
+                f"{action}: {result.output}\n{result.exception!r}"
+            )
 
 
 def test_model_picker_filter_and_freeform_row() -> None:

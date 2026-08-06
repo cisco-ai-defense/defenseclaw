@@ -391,9 +391,12 @@ def route_remove_mutations(
 ) -> tuple[V8YAMLMutation, ...]:
     index, destination = source_destination(source, destination_name)
     routes = [dict(item) for item in _routes(destination)]
-    remaining = [item for item in routes if item.get("name") != route_name]
-    if len(remaining) == len(routes):
+    matches = [item for item in routes if item.get("name") == route_name]
+    if not matches:
         raise ValueError(f"route {route_name!r} does not exist")
+    if len(matches) > 1:
+        raise ValueError(f"route {route_name!r} is duplicated")
+    remaining = [item for item in routes if item.get("name") != route_name]
     path = ("observability", "destinations", index, "routes")
     return (V8YAMLMutation.set(path, remaining) if remaining else V8YAMLMutation.delete(path),)
 

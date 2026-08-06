@@ -2035,6 +2035,12 @@ def _redaction_wizard_fields_for(
         "route-add",
         "route-set",
     )
+
+    def profile_visible(values: Mapping[str, str]) -> bool:
+        if not profile_actions(values):
+            return False
+        return not (values.get("action") in {"route-add", "route-set"} and values.get("route_action", "send") == "drop")
+
     candidates: list[WizardFormField] = [
         WizardFormField(
             "Action",
@@ -2051,7 +2057,7 @@ def _redaction_wizard_fields_for(
             "--profile",
             value=overrides.get("--profile", "sensitive"),
             default="sensitive",
-            visible_when=profile_actions,
+            visible_when=profile_visible,
             hint="Built-in (none, sensitive, content, strict) or custom profile name.",
         ),
         WizardFormField(
@@ -3577,7 +3583,7 @@ def _redaction_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal
         WizardGoal(
             "status",
             "Inspect effective redaction",
-            summary="Show compiler-owned destination and 14-bucket policy.",
+            summary=f"Show compiler-owned destination and {len(REDACTION_BUCKETS)}-bucket policy.",
             presets={"@Action": "status"},
             fields=("Action", "JSON Output"),
         ),

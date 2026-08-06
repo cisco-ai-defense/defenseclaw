@@ -229,6 +229,7 @@ def test_status_json_is_machine_readable_and_labels_effective_policy(
         catch_exceptions=False,
     )
 
+    assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert payload["plan_digest"] == "a" * 64
     assert payload["destinations"][0]["redaction"] == "redacted: sensitive"
@@ -266,6 +267,7 @@ def test_profile_show_reads_compiler_owned_redaction_profile_catalog(
         catch_exceptions=False,
     )
 
+    assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
     assert payload["name"] == "sensitive"
     assert payload["field_classes"]["content"] == "detect"
@@ -320,6 +322,35 @@ def test_execute_mutations_binds_write_to_preview_and_verifies_plan(
     backup_path = calls[0][2]["backup_path"]
     assert backup_path.parent == tmp_path / "backups"
     assert backup_path.name.startswith("config.yaml.before-redaction-")
+
+    json_result = CliRunner().invoke(
+        redaction,
+        ["remove-all", "--yes", "--json"],
+        obj=_app(tmp_path),
+        catch_exceptions=False,
+    )
+    assert json_result.exit_code == 0, json_result.output
+    payload = json.loads(json_result.output)
+    assert payload["dry_run"] is False
+    assert payload["applied"] is True
+    assert payload["backup_path"] == str(calls[1][2]["backup_path"])
+    assert payload["verified_plan_digest"] == preview.after_plan_digest
+    assert payload["restarted"] is False
+
+    dry_run_result = CliRunner().invoke(
+        redaction,
+        ["remove-all", "--dry-run", "--json"],
+        obj=_app(tmp_path),
+        catch_exceptions=False,
+    )
+    assert dry_run_result.exit_code == 0, dry_run_result.output
+    dry_run_payload = json.loads(dry_run_result.output)
+    assert dry_run_payload["dry_run"] is True
+    assert dry_run_payload["applied"] is False
+    assert dry_run_payload["backup_path"] is None
+    assert dry_run_payload["verified_plan_digest"] is None
+    assert dry_run_payload["restarted"] is False
+    assert len(calls) == 2
 
 
 def test_execute_mutations_audits_write_and_names_backup_when_plan_verification_fails(
@@ -458,6 +489,25 @@ def test_interactive_bucket_selection_rejects_out_of_range_numbers(
 
     with pytest.raises(click.ClickException, match="invalid bucket selection"):
         cmd_setup_redaction._interactive_buckets(SimpleNamespace())
+
+
+@pytest.mark.parametrize("selection", ["2", "3", "4"])
+def test_interactive_simple_choices_map_staging_errors_to_click_failures(
+    selection: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(cmd_setup_redaction, "_operator_status", lambda _app: _status(tmp_path))
+    monkeypatch.setattr(cmd_setup_redaction.click, "prompt", lambda *_args, **_kwargs: selection)
+    monkeypatch.setattr(cmd_setup_redaction, "_prompt_profile", lambda *_args, **_kwargs: "sensitive")
+    monkeypatch.setattr(
+        cmd_setup_redaction,
+        "apply_mutations_to_source",
+        MagicMock(side_effect=RuntimeError("compiler unavailable")),
+    )
+
+    result = CliRunner().invoke(redaction, [], obj=_app(tmp_path), catch_exceptions=False)
+
+    assert result.exit_code == 1
+    assert "compiler unavailable" in result.output
 
 
 def test_json_mutation_requires_noninteractive_confirmation(tmp_path: Path) -> None:

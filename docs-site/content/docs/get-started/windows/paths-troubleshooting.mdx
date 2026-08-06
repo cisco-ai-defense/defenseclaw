@@ -35,7 +35,7 @@ intact when diagnosing a problem.
 | `%USERPROFILE%\.defenseclaw\gateway.log` | Appended detached-gateway stdout/stderr. | Read locally; review for sensitive content before sharing excerpts. No size-rotation guarantee is documented. |
 | `%USERPROFILE%\.defenseclaw\logs\hook-failures.jsonl` | Hook delivery/response failure records when produced. | Treat as sensitive operational data. |
 | `%USERPROFILE%\.defenseclaw\hooks\` | Generated hook assets, runtime state, and connector-scoped credential sidecars. | **Never edit, print, or copy credentials.** Reconcile with setup/doctor. |
-| `%USERPROFILE%\.defenseclaw\backups\` | Managed connector/upgrade recovery material and the latest `config.yaml.before-redaction` pre-change policy backup. | Do not restore or delete manually; it may contain credential-bearing or unredacted policy state. |
+| `%USERPROFILE%\.defenseclaw\backups\` | Managed connector/upgrade recovery material and timestamped `config.yaml.before-redaction-*` pre-change policy backups. | Do not restore or delete manually; they may contain credential-bearing or unredacted policy state. |
 | `%USERPROFILE%\.defenseclaw\quarantine\` | DefenseClaw-owned quarantined skills/plugins and provenance. | Use `skill restore` or `plugin restore`; do not drag files back. |
 | `%USERPROFILE%\.defenseclaw\.upgrade-receipts\` | Private automatic-upgrade admission/recovery receipts when used. | Inspect metadata only; do not edit receipt JSON. |
 | `%USERPROFILE%\.defenseclaw\gateway.pid`, `watchdog.pid` | Protected process identity records, not bare kill instructions. | Do not delete while a process may be running. |

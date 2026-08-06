@@ -511,20 +511,19 @@ struct RedactionPolicySheet: View {
         }
         running = true
         Task {
-            var arguments = profile == "none"
-                ? ["setup", "redaction", "remove-all", "--yes"]
-                : ["setup", "redaction", "apply", "--scope", "all-configurable", "--profile", profile, "--yes"]
+            var arguments = [
+                "setup", "redaction", "apply",
+                "--scope", "all-configurable",
+                "--profile", profile,
+                "--yes",
+            ]
             arguments.append(restart ? "--restart" : "--no-restart")
             let result = await appState.runCommand(
                 title: "apply redaction profile \(profile)",
                 arguments: arguments,
                 category: "setup",
                 origin: "Logs",
-                successEffects: [
-                    profile == "none"
-                        ? "Redaction removed from configurable projections"
-                        : "Redaction profile \(profile) applied to configurable projections"
-                ],
+                successEffects: ["Redaction profile \(profile) applied to configurable projections"],
                 refreshOnSuccess: true
             )
             running = false
@@ -631,7 +630,7 @@ private struct RedactionAdvancedEditor: View {
     @State private var destination = ""
     @State private var routeName = ""
     @State private var signals = "logs,traces"
-    @State private var routeBuckets = "*"
+    @State private var routeBuckets = ""
     @State private var sources = ""
     @State private var connectors = ""
     @State private var producerActions = ""
@@ -728,7 +727,7 @@ private struct RedactionAdvancedEditor: View {
         destination = ""
         routeName = ""
         signals = "logs,traces"
-        routeBuckets = "*"
+        routeBuckets = action == .destinationSend ? "*" : ""
         sources = ""
         connectors = ""
         producerActions = ""
@@ -1076,11 +1075,15 @@ private struct RedactionAdvancedEditor: View {
                 successEffects: action.isMutation && !dryRun ? ["Redaction policy updated and verified"] : [],
                 refreshOnSuccess: action.isMutation && !dryRun
             )
-            output = result.output.isEmpty
+            let resultOutput = result.output.isEmpty
                 ? (result.succeeded
                     ? "\(action.rawValue) completed with no output."
                     : "Command failed with exit \(result.exitCode).")
                 : result.output
+            if result.succeeded, action.isMutation, !dryRun {
+                resetActionFields()
+            }
+            output = resultOutput
             running = false
         }
     }

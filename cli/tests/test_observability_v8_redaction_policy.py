@@ -339,6 +339,10 @@ def test_routes_support_strict_add_edit_move_and_remove_semantics() -> None:
         route_upsert_mutations(added, "archive", finding_route, must_exist=False)
     with pytest.raises(ValueError, match="route move operation"):
         route_upsert_mutations(added, "archive", finding_route, position=0, must_exist=True)
+    duplicated = _apply(added_bytes, ())[1]
+    _destination(duplicated, "archive")["routes"].append(dict(finding_route))
+    with pytest.raises(ValueError, match=r"route 'finding' is duplicated"):
+        route_remove_mutations(duplicated, "archive", "finding")
 
     moved_bytes, moved = _apply(
         added_bytes,
@@ -359,6 +363,25 @@ def test_routes_support_strict_add_edit_move_and_remove_semantics() -> None:
         route_remove_mutations(edited_source, "archive", "finding"),
     )
     assert [route["name"] for route in _destination(removed, "archive")["routes"]] == ["model"]
+
+
+def test_route_bucket_selector_accepts_explicit_wildcard() -> None:
+    original = _source()
+    source = _apply(original, ())[1]
+    wildcard_route = {
+        "name": "all-buckets",
+        "signals": ["logs"],
+        "selector": {"buckets": ["*"]},
+        "action": "send",
+        "redaction_profile": "sensitive",
+    }
+
+    _, parsed = _apply(
+        original,
+        route_upsert_mutations(source, "archive", wildcard_route, must_exist=False),
+    )
+
+    assert _destination(parsed, "archive")["routes"][-1]["selector"] == {"buckets": ["*"]}
 
 
 def test_generated_destinations_are_read_only() -> None:

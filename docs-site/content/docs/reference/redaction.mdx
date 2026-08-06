@@ -164,7 +164,9 @@ defenseclaw setup redaction route remove splunk-production critical-findings --y
 Mutation commands accept `--dry-run`, `--json`, and `--restart/--no-restart`.
 Machine-readable mutations require either `--dry-run` or `--yes`. An omitted flag
 means “leave that field unchanged”; reset/inherit verbs remove the corresponding
-source override explicitly.
+source override explicitly. JSON dry-runs report `applied: false`; confirmed
+writes emit their result only after verification and include `backup_path`,
+`verified_plan_digest`, and `restarted`.
 
 ## Built-in profiles
 

@@ -798,26 +798,29 @@ def _interactive_wizard(app: AppContext) -> None:
     click.echo("  3. Apply one profile to all configurable projections")
     click.echo("  4. Change the global/bucket baseline")
     choice = click.prompt("\nSelect", type=click.Choice(["1", "2", "3", "4"]), default="1")
-    if choice == "2":
-        draft.add(_policy_mutations(apply_profile_everywhere_mutations, draft.source, "none"))
-    elif choice == "3":
-        profile = _prompt_profile(draft.source)
-        draft.add(_policy_mutations(apply_profile_everywhere_mutations, draft.source, profile))
-    elif choice == "4":
-        current_defaults = _effective_source_defaults(draft.source)
-        profile = _prompt_profile(
-            draft.source,
-            allow_inherit=True,
-            default=str(current_defaults.get("redaction_profile") or "inherit"),
-        )
-        draft.add(
-            _policy_mutations(
-                defaults_mutations,
+    try:
+        if choice == "2":
+            draft.add(_policy_mutations(apply_profile_everywhere_mutations, draft.source, "none"))
+        elif choice == "3":
+            profile = _prompt_profile(draft.source)
+            draft.add(_policy_mutations(apply_profile_everywhere_mutations, draft.source, profile))
+        elif choice == "4":
+            current_defaults = _effective_source_defaults(draft.source)
+            profile = _prompt_profile(
                 draft.source,
-                profile=None if profile == "inherit" else profile,
-                reset_profile=profile == "inherit",
+                allow_inherit=True,
+                default=str(current_defaults.get("redaction_profile") or "inherit"),
             )
-        )
+            draft.add(
+                _policy_mutations(
+                    defaults_mutations,
+                    draft.source,
+                    profile=None if profile == "inherit" else profile,
+                    reset_profile=profile == "inherit",
+                )
+            )
+    except (ValueError, OSError, RuntimeError) as exc:
+        raise click.ClickException(str(exc)) from exc
 
     if click.confirm("\nShow advanced settings?", default=False):
         _interactive_advanced(app, draft)
@@ -1196,15 +1199,17 @@ def _execute_mutations(
         preview = preview_redaction_mutations(path, mutation_tuple, data_dir=app.cfg.data_dir)
     except (ValueError, OSError, RuntimeError, ConfigInspectError) as exc:
         raise click.ClickException(str(exc)) from exc
-    if emit_json:
-        click.echo(json.dumps(_preview_json(preview, dry_run=dry_run), indent=2, sort_keys=True))
-    else:
+    if not emit_json:
         _render_preview(preview)
     if not preview.changed:
-        if not emit_json:
+        if emit_json:
+            click.echo(json.dumps(_preview_json(preview, dry_run=dry_run), indent=2, sort_keys=True))
+        else:
             click.echo("No configuration change is required.")
         return
     if dry_run:
+        if emit_json:
+            click.echo(json.dumps(_preview_json(preview, dry_run=True), indent=2, sort_keys=True))
         return
     if not yes:
         prompt = (
@@ -1246,7 +1251,22 @@ def _execute_mutations(
         raise click.ClickException(message)
     if restart:
         _restart_gateway(quiet=emit_json)
-    if not emit_json:
+    if emit_json:
+        click.echo(
+            json.dumps(
+                _preview_json(
+                    preview,
+                    dry_run=False,
+                    applied=result.changed,
+                    backup_path=result.backup_path,
+                    verified_plan_digest=verified.plan_digest,
+                    restarted=restart,
+                ),
+                indent=2,
+                sort_keys=True,
+            )
+        )
+    else:
         click.echo("Configuration updated and verified.")
         if result.backup_path:
             click.echo(f"Backup: {result.backup_path}")
@@ -1298,9 +1318,21 @@ def _render_preview(preview) -> None:
         click.echo(f"  warning: {code}: {path}: {summary}", err=True)
 
 
-def _preview_json(preview, *, dry_run: bool) -> dict[str, Any]:
+def _preview_json(
+    preview,
+    *,
+    dry_run: bool,
+    applied: bool = False,
+    backup_path: str | None = None,
+    verified_plan_digest: str | None = None,
+    restarted: bool = False,
+) -> dict[str, Any]:
     return {
         "dry_run": dry_run,
+        "applied": applied,
+        "backup_path": backup_path,
+        "verified_plan_digest": verified_plan_digest,
+        "restarted": restarted,
         "changed": preview.changed,
         "before_plan_digest": preview.before_plan_digest,
         "after_plan_digest": preview.after_plan_digest,

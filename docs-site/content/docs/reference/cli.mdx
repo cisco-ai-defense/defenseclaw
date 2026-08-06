@@ -119,6 +119,14 @@ The quickest way to remove every configurable redaction override is:
 
 ```bash
 defenseclaw setup redaction remove-all --dry-run
+```
+
+<Callout type="warn" title="Profile none permits governed content without redaction">
+`remove-all` can expose governed content to configured destinations. Confirm that
+each affected destination has an approved trust boundary before using `--yes`.
+</Callout>
+
+```bash
 defenseclaw setup redaction remove-all --yes
 ```
 
