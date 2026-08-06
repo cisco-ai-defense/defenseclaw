@@ -894,7 +894,11 @@ render_config() {
     shift
     local _idx
     for (( _idx = 0; _idx < home_dirs_count; _idx++ )); do
-      home_dirs+=("$1")
+      # Stop early if the caller's declared count exceeds the number of
+      # remaining positional args; a missing path would otherwise inject an
+      # empty entry that violates the config schema's minLength:1 constraint.
+      (( $# > 0 )) || break
+      [[ -n "$1" ]] && home_dirs+=("$1")
       shift
     done
     unset _idx

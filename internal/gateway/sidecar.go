@@ -613,11 +613,12 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	// retain the same callback for each managed discovery scan.
 	if managed.IsManagedEnterprise(s.currentConfig().DeploymentMode) {
 		var snapshotFn func() inventory.AIDiscoveryReport
-		if discovery := s.aiDiscoverySnapshot(); discovery != nil {
+		discovery := s.aiDiscoverySnapshot()
+		if discovery != nil {
 			snapshotFn = discovery.Snapshot
 		}
 		inventoryEmit := makeEndpointInventoryEmitter(s.currentConfig(), s.observabilityV8Emitter(), snapshotFn)
-		if discovery := s.aiDiscoverySnapshot(); discovery != nil {
+		if discovery != nil {
 			discovery.SetManagedInventoryEmitHook(inventoryEmit)
 		}
 		inventoryEmit(runCtx)
@@ -1637,11 +1638,12 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	// for the next scan tick.
 	if nextManagedEnterprise {
 		var snapshotFn func() inventory.AIDiscoveryReport
-		if svc := s.aiDiscoverySnapshot(); svc != nil {
+		svc := s.aiDiscoverySnapshot()
+		if svc != nil {
 			snapshotFn = svc.Snapshot
 		}
 		inventoryEmit := makeEndpointInventoryEmitter(s.currentConfig(), s.observabilityV8Emitter(), snapshotFn)
-		if svc := s.aiDiscoverySnapshot(); svc != nil {
+		if svc != nil {
 			svc.SetManagedInventoryEmitHook(inventoryEmit)
 		}
 		inventoryEmit(ctx)

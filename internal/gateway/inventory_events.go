@@ -302,7 +302,14 @@ func perConnectorMCPEntries(cfg *config.Config, reg *connector.Registry) []endpo
 		}
 	}
 	// Pass 1 — daemon's own HOME (covers zero-HomeDirs installs and dev runs).
+	// ReadMCPServersForConnector's default case reads the OpenClaw registry, so
+	// any unrecognized connector slug would spuriously duplicate OpenClaw
+	// servers under a foreign agent label. Restrict this pass to the slugs
+	// with a native MCP reader (mirrors the switch in ReadMCPServersForConnector).
 	for _, connectorName := range connectors {
+		if !hasNativeMCPReader(connectorName) {
+			continue
+		}
 		if servers, err := cfg.ReadMCPServersForConnector(connectorName); err == nil {
 			appendServers(connectorName, servers)
 		}
@@ -320,6 +327,31 @@ func perConnectorMCPEntries(cfg *config.Config, reg *connector.Registry) []endpo
 		}
 	}
 	return components
+}
+
+// hasNativeMCPReader reports whether the given connector slug has a native
+// MCP-config reader on *Config. Unknown slugs fall through to the OpenClaw
+// registry default in ReadMCPServersForConnector, which would spuriously
+// duplicate OpenClaw servers under a foreign agent label — inventory Pass 1
+// gates on this helper so only genuinely-supported slugs are consulted.
+func hasNativeMCPReader(connectorName string) bool {
+	switch strings.ToLower(strings.TrimSpace(connectorName)) {
+	case "openclaw",
+		"claudecode",
+		"codex",
+		"zeptoclaw",
+		"hermes",
+		"cursor",
+		"windsurf",
+		"geminicli",
+		"copilot",
+		"openhands",
+		"opencode",
+		"amp",
+		"antigravity":
+		return true
+	}
+	return false
 }
 
 // readMCPServersUnderHome reads all MCP-server entries for a given connector
@@ -342,10 +374,11 @@ func readMCPServersUnderHome(connectorName, home string) [][]config.MCPServerEnt
 		tryFile(config.ReadMCPFromCodexConfigTOML, ".codex/config.toml")
 	case "claudecode":
 		tryFile(config.ReadMCPFromClaudeSettings, ".claude/settings.json")
-		// User-scope registry (top-level `mcpServers` in ~/.claude.json)
-		tryFile(config.ReadMCPFromClaudeSettings, ".claude.json")
-		// Local (per-project) scope — flatten projects.*.mcpServers
-		tryFile(config.ReadMCPFromClaudeJSONProjects, ".claude.json")
+		// ~/.claude.json holds both user-scope (top-level `mcpServers`) and
+		// per-project local-scope (`projects.<path>.mcpServers`) entries.
+		// Read the file once and take the union instead of decoding the
+		// (often multi-megabyte) conversation-state file twice.
+		tryFile(config.ReadMCPFromClaudeJSONBothScopes, ".claude.json")
 		tryFile(config.ReadMCPFromDotMCPJSON, ".mcp.json")
 	case "cursor":
 		tryFile(config.ReadMCPFromDotMCPJSON, ".cursor/mcp.json")
@@ -356,9 +389,7 @@ func readMCPServersUnderHome(connectorName, home string) [][]config.MCPServerEnt
 	case "geminicli":
 		tryFile(config.ReadMCPFromDotMCPJSON, ".gemini/settings.json")
 	case "openhands":
-		tryFile(func(p string) ([]config.MCPServerEntry, error) {
-			return config.ReadMCPFromYAMLPath(p)
-		}, ".openhands/mcp.yaml")
+		tryFile(config.ReadMCPFromDotMCPJSON, ".openhands/mcp.json")
 	case "zeptoclaw":
 		tryFile(config.ReadMCPFromDotMCPJSON, ".zeptoclaw/mcp.json")
 	case "hermes":

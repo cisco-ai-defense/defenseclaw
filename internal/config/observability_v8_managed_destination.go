@@ -275,6 +275,12 @@ func reserveObservabilityV8ManagedInventory(effective *ObservabilityV8EffectiveP
 					ObservabilityV8ManagedAgentInventoryAction,
 					ObservabilityV8ManagedConnectorInventoryAction,
 					ObservabilityV8ManagedMCPInventoryAction,
+					// Per-item skill / plugin records are release-owned managed
+					// inventory too — they carry endpoint identity that must
+					// only reach the release-owned Cisco AI Defense destination,
+					// never an operator-configured exporter.
+					ObservabilityV8ManagedSkillInventoryAction,
+					ObservabilityV8ManagedPluginInventoryAction,
 					ObservabilityV8LocalInventoryDiagnosticAction,
 				},
 			},

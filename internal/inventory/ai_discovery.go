@@ -1661,7 +1661,13 @@ func parseMCPConfigForNames(path string) ([]config.MCPServerEntry, error) {
 		return config.ReadMCPFromCodexConfigTOML(path)
 	case strings.HasSuffix(lower, ".yaml") || strings.HasSuffix(lower, ".yml"):
 		return config.ReadMCPFromYAMLPath(path, []string{"mcp", "servers"}, []string{"mcpServers"})
-	case base == "settings.json" || base == "settings.local.json" || base == ".claude.json":
+	case base == ".claude.json":
+		// ~/.claude.json holds user-scope (top-level `mcpServers`) *and*
+		// per-project local-scope (`projects.<path>.mcpServers`) entries.
+		// Prefer the union reader so we only decode the (often multi-MB)
+		// conversation-state file once and basenames covers both scopes.
+		return config.ReadMCPFromClaudeJSONBothScopes(path)
+	case base == "settings.json" || base == "settings.local.json":
 		return config.ReadMCPFromClaudeSettings(path)
 	default:
 		return config.ReadMCPFromDotMCPJSON(path)

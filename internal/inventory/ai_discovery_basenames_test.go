@@ -288,6 +288,9 @@ func TestSanitizeBasenameValue(t *testing.T) {
 		{"Thumbs.db", ""},
 		{"desktop.ini", ""},
 		{strings.Repeat("x", 300), ""},
+		{"skill\nnewline", ""},
+		{"skill\x00null", ""},
+		{"skill\x1bescape", ""},
 		{"legit-name-with_underscores.and.dots", "legit-name-with_underscores.and.dots"},
 	}
 	for _, tc := range cases {

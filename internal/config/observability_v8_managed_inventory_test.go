@@ -56,6 +56,8 @@ func TestManagedAgentInventoryIsForceCollectedAndReservedToManagedDestination(t 
 			ObservabilityV8ManagedAgentInventoryAction,
 			ObservabilityV8ManagedConnectorInventoryAction,
 			ObservabilityV8ManagedMCPInventoryAction,
+			ObservabilityV8ManagedSkillInventoryAction,
+			ObservabilityV8ManagedPluginInventoryAction,
 			ObservabilityV8LocalInventoryDiagnosticAction,
 		}) {
 		t.Fatalf("reserved operator drop route=%+v", drop)

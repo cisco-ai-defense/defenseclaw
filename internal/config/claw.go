@@ -831,11 +831,10 @@ func readMCPServersClaudeCode(workspaceDir string) ([]MCPServerEntry, error) {
 		}
 	}
 	if claudeJSONPath != "" {
-		if e, err := readMCPFromClaudeSettings(claudeJSONPath); err == nil {
-			entries = append(entries, e...)
-		}
-		// local-scope: projects.<path>.mcpServers
-		if e, err := readMCPFromClaudeJSONProjects(claudeJSONPath); err == nil {
+		// Both user-scope (top-level mcpServers) and local-scope
+		// (projects.<path>.mcpServers) come from the same multi-MB
+		// conversation-state file; read it once and split.
+		if e, err := ReadMCPFromClaudeJSONBothScopes(claudeJSONPath); err == nil {
 			entries = append(entries, e...)
 		}
 	}
@@ -859,24 +858,56 @@ func readMCPFromClaudeJSONProjects(path string) ([]MCPServerEntry, error) {
 	if err != nil {
 		return nil, err
 	}
-	var doc struct {
-		Projects map[string]struct {
-			MCPServers map[string]struct {
-				Command string            `json:"command"`
-				Args    []string          `json:"args"`
-				Env     map[string]string `json:"env"`
-				URL     string            `json:"url"`
-				Type    string            `json:"type"`
-			} `json:"mcpServers"`
-		} `json:"projects"`
-	}
-	if err := json.Unmarshal(data, &doc); err != nil {
+	_, projectEntries, err := parseClaudeJSONScopes(data)
+	if err != nil {
 		return nil, err
 	}
-	var entries []MCPServerEntry
+	return projectEntries, nil
+}
+
+// claudeJSONScopes is the union shape of ~/.claude.json we care about: the
+// user-scope `mcpServers` block and the per-project local-scope
+// `projects.<path>.mcpServers` blocks. Split out so one read+unmarshal of the
+// (often multi-megabyte) file is enough to cover both scopes.
+type claudeJSONMCPServer struct {
+	Command string            `json:"command"`
+	Args    []string          `json:"args"`
+	Env     map[string]string `json:"env"`
+	URL     string            `json:"url"`
+	Type    string            `json:"type"`
+}
+
+type claudeJSONScopes struct {
+	MCPServers map[string]claudeJSONMCPServer `json:"mcpServers"`
+	Projects   map[string]struct {
+		MCPServers map[string]claudeJSONMCPServer `json:"mcpServers"`
+	} `json:"projects"`
+}
+
+// parseClaudeJSONScopes unmarshals ~/.claude.json once and splits the two
+// MCP-server scopes out. `user` is the top-level mcpServers map (user scope);
+// `projects` is the flattened union of every projects.<path>.mcpServers block
+// (local scope). Callers that already have the raw bytes should prefer this
+// helper to the pair of ReadMCPFromClaudeSettings + ReadMCPFromClaudeJSONProjects
+// wrappers, which each open and decode the file independently.
+func parseClaudeJSONScopes(data []byte) (user, projects []MCPServerEntry, err error) {
+	var doc claudeJSONScopes
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, nil, err
+	}
+	for name, s := range doc.MCPServers {
+		user = append(user, MCPServerEntry{
+			Name:      name,
+			Command:   s.Command,
+			Args:      s.Args,
+			Env:       s.Env,
+			URL:       s.URL,
+			Transport: s.Type,
+		})
+	}
 	for _, project := range doc.Projects {
 		for name, s := range project.MCPServers {
-			entries = append(entries, MCPServerEntry{
+			projects = append(projects, MCPServerEntry{
 				Name:      name,
 				Command:   s.Command,
 				Args:      s.Args,
@@ -886,7 +917,25 @@ func readMCPFromClaudeJSONProjects(path string) ([]MCPServerEntry, error) {
 			})
 		}
 	}
-	return entries, nil
+	return user, projects, nil
+}
+
+// ReadMCPFromClaudeJSONBothScopes is the exported single-read helper: it
+// opens ~/.claude.json once and returns the union of user-scope
+// (top-level mcpServers) and local-scope (projects.<path>.mcpServers)
+// entries. Callers that need both scopes should prefer this over pairing
+// ReadMCPFromClaudeSettings + ReadMCPFromClaudeJSONProjects, which would
+// each read and decode the (often multi-megabyte) conversation-state file.
+func ReadMCPFromClaudeJSONBothScopes(path string) ([]MCPServerEntry, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	user, projects, err := parseClaudeJSONScopes(data)
+	if err != nil {
+		return nil, err
+	}
+	return append(user, projects...), nil
 }
 
 func readMCPServersCodex(workspaceDir string) ([]MCPServerEntry, error) {

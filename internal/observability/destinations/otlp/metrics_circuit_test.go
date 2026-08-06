@@ -108,13 +108,13 @@ func TestMetricCircuitAuthenticationAndUnsafeFailuresOpenImmediately(t *testing.
 	start := time.Date(2026, time.July, 30, 16, 0, 0, 0, time.UTC)
 	metrics := testMetricData("defenseclaw.metric.circuit")
 	tests := []struct {
-		name         string
-		outcome      error
-		class        delivery.FailureClass
-		errorCode    ErrorCode
-		prepare      func(*dialOutcomeTracker) func(uint64)
-		minOpenFor   time.Duration
-		maxOpenFor   time.Duration
+		name       string
+		outcome    error
+		class      delivery.FailureClass
+		errorCode  ErrorCode
+		prepare    func(*dialOutcomeTracker) func(uint64)
+		minOpenFor time.Duration
+		maxOpenFor time.Duration
 	}{
 		{
 			// Authentication failures use a bounded few-minute cool-down --
@@ -124,7 +124,7 @@ func TestMetricCircuitAuthenticationAndUnsafeFailuresOpenImmediately(t *testing.
 			// exact constant; the test only asserts the bound band.
 			name: "authentication", outcome: status.Error(codes.Unauthenticated, "denied"),
 			class: delivery.FailureClassAuthentication, errorCode: ErrorExport,
-			minOpenFor: time.Minute, maxOpenFor: time.Hour,
+			minOpenFor: 5 * time.Minute, maxOpenFor: 5 * time.Minute,
 		},
 		{
 			// Unsafe-endpoint failures retain the 24-hour trap because a

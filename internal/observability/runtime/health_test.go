@@ -145,12 +145,15 @@ func TestDestinationHealthSnapshotAggregatesCircuitDiagnostics(t *testing.T) {
 		// 24-hour unsafe-endpoint trap) so a single failed token mint does
 		// not suppress the destination for a full day. Assert the observed
 		// cool-down falls within the auth window rather than the unsafe one.
+		// The circuit records LastFailure a beat before CircuitOpenUntil is
+		// stamped, so the observed delta can be a hair under the exact
+		// 5-minute constant. Assert a tight ±1s band around it.
 		cooldown := row.CircuitOpenUntil.Sub(row.LastFailure)
 		if row.State != delivery.HealthFailing ||
 			row.Reason != string(delivery.HealthReasonCircuitOpen) ||
 			row.ConsecutiveFailures != 1 ||
 			row.CircuitOpenUntil.IsZero() ||
-			cooldown < time.Minute || cooldown > time.Hour ||
+			cooldown < 5*time.Minute-time.Second || cooldown > 5*time.Minute+time.Second ||
 			row.LastFailureClass != delivery.FailureClassAuthentication ||
 			len(row.Sources) != 1 ||
 			row.Sources[0].CircuitState != delivery.CircuitOpen ||
