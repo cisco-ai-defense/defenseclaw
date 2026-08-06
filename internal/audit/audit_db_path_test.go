@@ -346,9 +346,6 @@ func TestHardenedAuditSQLiteCreatesOwnerOnlyWALAndSHM(t *testing.T) {
 	if _, err := db.Exec(`INSERT INTO sidecar_probe(value) VALUES ('confidential')`); err != nil {
 		t.Fatal(err)
 	}
-	if err := secureAuditDBSQLiteSidecars(path, auditDBPathHooks{}); err != nil {
-		t.Fatal(err)
-	}
 	for _, suffix := range []string{"-wal", "-shm"} {
 		info, err := os.Stat(path + suffix)
 		if os.IsNotExist(err) {
