@@ -149,76 +149,88 @@ void grpo_matmul_q4(float *out, const float *x, const void *W_packed,
      * Q4_K: 256 elements per super-block, 144 bytes:
      *   half d (2B) + half dmin (2B) + scales[12] + qs[128]
      *
-     * NEON strategy: scalar-read mmap'd weight bytes (avoids SIGBUS from
-     * clang's auto-vectorized aligned loads on mmap'd pages on macOS ARM),
-     * then NEON-accumulate with heap-allocated x vector (always aligned). */
+     * On macOS ARM, clang auto-vectorizes mmap reads into aligned NEON loads
+     * that SIGBUS on page boundaries. Fix: copy each row to heap before NEON. */
     const int blocks_per_row = in_dim / Q4K_BLOCK_SIZE;
+    const size_t row_bytes = (size_t)blocks_per_row * Q4K_BLOCK_BYTES;
     const uint8_t *W = (const uint8_t *)W_packed;
 
-    #pragma omp parallel for
-    for (int r = 0; r < rows; r++) {
-        const uint8_t *row_data = W + (size_t)r * (size_t)blocks_per_row * Q4K_BLOCK_BYTES;
+#ifdef __ARM_NEON
+    #pragma omp parallel
+    {
+        uint8_t *row_buf = (uint8_t *)aligned_alloc(64, row_bytes);
 
-#if defined(__ARM_NEON) && defined(GRPO_Q4K_NEON)
-        /* Hand-written NEON: dequantize 8 weights at a time using scalar byte reads
-         * from mmap'd memory, then use vfmaq_f32 with x (heap, always aligned). */
-        float32x4_t vacc0 = vdupq_n_f32(0);
-        float32x4_t vacc1 = vdupq_n_f32(0);
+        #pragma omp for
+        for (int r = 0; r < rows; r++) {
+            memcpy(row_buf, W + (size_t)r * row_bytes, row_bytes);
 
-        for (int b = 0; b < blocks_per_row; b++) {
-            const uint8_t *block = row_data + (size_t)b * Q4K_BLOCK_BYTES;
+            float32x4_t vacc0 = vdupq_n_f32(0);
+            float32x4_t vacc1 = vdupq_n_f32(0);
+            float32x4_t vacc2 = vdupq_n_f32(0);
+            float32x4_t vacc3 = vdupq_n_f32(0);
 
-            /* Scalar read of scale factors from mmap'd memory (safe, no NEON load) */
-            uint16_t d_bits, dmin_bits;
-            memcpy(&d_bits, block, 2);
-            memcpy(&dmin_bits, block + 2, 2);
-            float d = fp16_to_fp32(d_bits);
-            float dmin = fp16_to_fp32(dmin_bits);
+            for (int b = 0; b < blocks_per_row; b++) {
+                const uint8_t *block = row_buf + (size_t)b * Q4K_BLOCK_BYTES;
 
-            const uint8_t *qs = block + 16;
-            int base = b * Q4K_BLOCK_SIZE;
-            float32x4_t vd = vdupq_n_f32(d);
-            float32x4_t vdmin = vdupq_n_f32(dmin);
+                uint16_t d_bits, dmin_bits;
+                memcpy(&d_bits, block, 2);
+                memcpy(&dmin_bits, block + 2, 2);
+                float d = fp16_to_fp32(d_bits);
+                float dmin = fp16_to_fp32(dmin_bits);
 
-            /* Process 256 elements: 128 bytes, 8 elements per iteration (4 bytes) */
-            for (int j = 0; j < 128; j += 4) {
-                /* Scalar byte reads from mmap (safe — no vectorized load on mmap) */
-                uint8_t qb0 = qs[j];
-                uint8_t qb1 = qs[j + 1];
-                uint8_t qb2 = qs[j + 2];
-                uint8_t qb3 = qs[j + 3];
+                float32x4_t vd = vdupq_n_f32(d);
+                float32x4_t neg_vdmin = vdupq_n_f32(-dmin);
 
-                /* Unpack 4 bytes → 8 weights (dequantized to float on stack) */
-                float w_arr[8];
-                w_arr[0] = d * (float)(qb0 & 0x0F) - dmin;
-                w_arr[1] = d * (float)(qb0 >> 4) - dmin;
-                w_arr[2] = d * (float)(qb1 & 0x0F) - dmin;
-                w_arr[3] = d * (float)(qb1 >> 4) - dmin;
-                w_arr[4] = d * (float)(qb2 & 0x0F) - dmin;
-                w_arr[5] = d * (float)(qb2 >> 4) - dmin;
-                w_arr[6] = d * (float)(qb3 & 0x0F) - dmin;
-                w_arr[7] = d * (float)(qb3 >> 4) - dmin;
+                const uint8_t *qs = block + 16;
+                int base = b * Q4K_BLOCK_SIZE;
 
-                /* NEON: load x from heap (aligned, safe for vld1q_f32) */
-                int idx = base + j * 2;
-                float32x4_t xv0 = vld1q_f32(x + idx);
-                float32x4_t xv1 = vld1q_f32(x + idx + 4);
+                for (int j = 0; j < 128; j += 8) {
+                    uint8x8_t packed = vld1_u8(qs + j);
 
-                /* NEON: load dequantized weights from stack (aligned) */
-                float32x4_t wv0 = vld1q_f32(w_arr);
-                float32x4_t wv1 = vld1q_f32(w_arr + 4);
+                    uint8x8_t lo = vand_u8(packed, vdup_n_u8(0x0F));
+                    uint8x8_t hi = vshr_n_u8(packed, 4);
 
-                /* FMA accumulate */
-                vacc0 = vfmaq_f32(vacc0, xv0, wv0);
-                vacc1 = vfmaq_f32(vacc1, xv1, wv1);
+                    uint8x8x2_t zipped = vzip_u8(lo, hi);
+                    uint8x16_t unpacked = vcombine_u8(zipped.val[0], zipped.val[1]);
+
+                    uint16x8_t u16_lo = vmovl_u8(vget_low_u8(unpacked));
+                    uint16x8_t u16_hi = vmovl_u8(vget_high_u8(unpacked));
+
+                    float32x4_t f0 = vcvtq_f32_u32(vmovl_u16(vget_low_u16(u16_lo)));
+                    float32x4_t f1 = vcvtq_f32_u32(vmovl_u16(vget_high_u16(u16_lo)));
+                    float32x4_t f2 = vcvtq_f32_u32(vmovl_u16(vget_low_u16(u16_hi)));
+                    float32x4_t f3 = vcvtq_f32_u32(vmovl_u16(vget_high_u16(u16_hi)));
+
+                    float32x4_t w0 = vfmaq_f32(neg_vdmin, f0, vd);
+                    float32x4_t w1 = vfmaq_f32(neg_vdmin, f1, vd);
+                    float32x4_t w2 = vfmaq_f32(neg_vdmin, f2, vd);
+                    float32x4_t w3 = vfmaq_f32(neg_vdmin, f3, vd);
+
+                    int idx = base + j * 2;
+                    float32x4_t xv0 = vld1q_f32(x + idx);
+                    float32x4_t xv1 = vld1q_f32(x + idx + 4);
+                    float32x4_t xv2 = vld1q_f32(x + idx + 8);
+                    float32x4_t xv3 = vld1q_f32(x + idx + 12);
+
+                    vacc0 = vfmaq_f32(vacc0, xv0, w0);
+                    vacc1 = vfmaq_f32(vacc1, xv1, w1);
+                    vacc2 = vfmaq_f32(vacc2, xv2, w2);
+                    vacc3 = vfmaq_f32(vacc3, xv3, w3);
+                }
             }
+
+            float32x4_t sum01 = vaddq_f32(vacc0, vacc1);
+            float32x4_t sum23 = vaddq_f32(vacc2, vacc3);
+            float32x4_t sum = vaddq_f32(sum01, sum23);
+            out[r] = vaddvq_f32(sum);
         }
 
-        /* Horizontal reduction */
-        float32x4_t vsum = vaddq_f32(vacc0, vacc1);
-        out[r] = vaddvq_f32(vsum);
+        free(row_buf);
+    }
 #else
-        /* Scalar fallback */
+    #pragma omp parallel for
+    for (int r = 0; r < rows; r++) {
+        const uint8_t *row_data = W + (size_t)r * row_bytes;
         double acc = 0.0;
         for (int b = 0; b < blocks_per_row; b++) {
             const uint8_t *block = row_data + (size_t)b * Q4K_BLOCK_BYTES;
@@ -237,8 +249,8 @@ void grpo_matmul_q4(float *out, const float *x, const void *W_packed,
             }
         }
         out[r] = (float)acc;
-#endif
     }
+#endif
 }
 
 /* ─── Q8_0 Dequantization ─── */
@@ -680,26 +692,37 @@ void grpo_softmax(float *x, int n) {
 }
 
 /* ─── Top-p Sampling ─── */
+
+#ifdef __APPLE__
+static int cmp_idx_desc(void *ctx, const void *a, const void *b) {
+#else
+static int cmp_idx_desc(const void *a, const void *b, void *ctx) {
+#endif
+    const float *probs = (const float *)ctx;
+    float pa = probs[*(const int *)a];
+    float pb = probs[*(const int *)b];
+    return (pb > pa) - (pb < pa);
+}
+
+
 int grpo_top_p_sample(const float *logits, int vocab_size, float temp, float top_p,
                       unsigned int *rng_state) {
-    /* Temperature scaling + softmax */
     float *probs = (float *)malloc(vocab_size * sizeof(float));
     for (int i = 0; i < vocab_size; i++) probs[i] = logits[i] / temp;
     grpo_softmax(probs, vocab_size);
 
-    /* Sort indices by probability descending */
     int *indices = (int *)malloc(vocab_size * sizeof(int));
     for (int i = 0; i < vocab_size; i++) indices[i] = i;
-    /* Simple insertion sort — vocab is ~32-128K, called once per token */
-    for (int i = 1; i < vocab_size; i++) {
-        int j = i;
-        while (j > 0 && probs[indices[j]] > probs[indices[j-1]]) {
-            int tmp = indices[j]; indices[j] = indices[j-1]; indices[j-1] = tmp;
-            j--;
-        }
-    }
 
-    /* Accumulate until top_p, then sample uniformly from the nucleus */
+    /* Full sort with qsort_r (O(n log n) — fast for 150K elements) */
+#ifdef __APPLE__
+    qsort_r(indices, vocab_size, sizeof(int), probs, cmp_idx_desc);
+#else
+    /* GNU qsort_r has different parameter order */
+    qsort_r(indices, vocab_size, sizeof(int), cmp_idx_desc, probs);
+#endif
+
+    /* Accumulate until top_p */
     float cumsum = 0.0f;
     int nucleus_size = 0;
     for (int i = 0; i < vocab_size; i++) {
@@ -709,10 +732,10 @@ int grpo_top_p_sample(const float *logits, int vocab_size, float temp, float top
     }
 
     /* Sample from nucleus */
-    *rng_state = *rng_state * 1664525u + 1013904223u; /* LCG */
+    *rng_state = *rng_state * 1664525u + 1013904223u;
     float u = (float)(*rng_state) / 4294967296.0f;
     float running = 0.0f;
-    float norm = cumsum; /* renormalize within nucleus */
+    float norm = cumsum;
     int token = indices[0];
     for (int i = 0; i < nucleus_size; i++) {
         running += probs[indices[i]] / norm;

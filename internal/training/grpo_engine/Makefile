@@ -53,11 +53,9 @@ libgrpo_stream.a: $(OBJS)
 %.o: %.c grpo.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
-# kernels.c at -O0: Any optimization (-O1+) on macOS ARM causes SIGBUS when
-# auto-vectorized code accesses mmap'd GGUF tensor data. Compile at -O0 and
-# rely on explicit NEON intrinsics (in q8_0, q5_0, f32 paths) for speed.
+# kernels.c: Q4_K copies mmap'd rows to heap before NEON access, so -O3 is safe.
 kernels.o: kernels.c grpo.h
-	$(CC) -O0 -std=c99 -ffp-contract=off -fPIC -Wall -Wextra -c $< -o $@
+	$(CC) $(CFLAGS) -c $< -o $@
 
 portable:
 	$(MAKE) CFLAGS="-O2 -std=c99 -ffp-contract=off -fPIC -Wall"

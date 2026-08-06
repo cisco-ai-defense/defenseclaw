@@ -110,6 +110,8 @@ func (e *GrpoEngine) Generate(prompt []int, maxLen int, temp, topP float32) (tok
 }
 
 func (e *GrpoEngine) PolicyLogprobs(tokens []int) ([]float32, error) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	tc := make([]C.int, len(tokens))
 	for i, t := range tokens {
 		tc[i] = C.int(t)
@@ -127,6 +129,8 @@ func (e *GrpoEngine) PolicyLogprobs(tokens []int) ([]float32, error) {
 }
 
 func (e *GrpoEngine) RefLogprobs(tokens []int) ([]float32, error) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	tc := make([]C.int, len(tokens))
 	for i, t := range tokens {
 		tc[i] = C.int(t)
@@ -144,6 +148,8 @@ func (e *GrpoEngine) RefLogprobs(tokens []int) ([]float32, error) {
 }
 
 func (e *GrpoEngine) Backward(advantages, policyLP, oldLP, refLP []float32, G, seqLen int, clipEps, klCoef float32) error {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	ret := C.grpo_backward(e.ctx,
 		(*C.float)(unsafe.Pointer(&advantages[0])),
 		(*C.float)(unsafe.Pointer(&policyLP[0])),
@@ -157,6 +163,8 @@ func (e *GrpoEngine) Backward(advantages, policyLP, oldLP, refLP []float32, G, s
 }
 
 func (e *GrpoEngine) AdamStep(lr, beta1, beta2, eps float32, step int) error {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	ret := C.grpo_adam_step(e.ctx, C.float(lr), C.float(beta1), C.float(beta2), C.float(eps), C.int(step))
 	if ret != 0 {
 		return fmt.Errorf("adam step failed")
@@ -213,6 +221,8 @@ func (e *GrpoEngine) Close() {
 
 // Prefill runs the prompt through the model and saves KV cache state
 func (e *GrpoEngine) Prefill(prompt []int) error {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	promptC := make([]C.int, len(prompt))
 	for i, t := range prompt {
 		promptC[i] = C.int(t)
@@ -226,6 +236,8 @@ func (e *GrpoEngine) Prefill(prompt []int) error {
 
 // GenerateContinue continues generation from current KV cache position
 func (e *GrpoEngine) GenerateContinue(maxLen int, temp, topP float32) (tokens []int, logprobs []float32, err error) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	output := make([]C.int, maxLen)
 	lp := make([]C.float, maxLen)
 

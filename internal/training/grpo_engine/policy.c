@@ -1,5 +1,9 @@
 /* policy.c — mmap'd policy forward pass and autoregressive generation */
 #define _POSIX_C_SOURCE 200809L
+#ifdef __APPLE__
+#define _DARWIN_C_SOURCE
+#include <sys/sysctl.h>
+#endif
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -156,6 +160,7 @@ typedef struct {
     void        *mmap_base;         /* Adjusted pointer to data start */
     void        *mmap_base_actual;  /* Original mmap pointer for munmap */
     size_t       mmap_size;         /* Original mmap size for munmap */
+    void        *heap_weights;      /* If non-NULL, weights preloaded to heap */
     PolicyLayer *layers;
     const void  *embed;        /* token embedding table (may be quantized) */
     int          embed_dtype;  /* dtype of embedding table */
@@ -237,6 +242,37 @@ static PolicyEngine *policy_init(const char *gguf_path, int max_seq_len) {
     }
     /* Adjust mmap_base to point at actual data start */
     pe->mmap_base = (uint8_t *)pe->mmap_base_actual + offset_adj;
+
+    /* Preload weights to heap if system has enough free memory.
+     * This eliminates mmap page-fault overhead during NEON matmuls.
+     * Heuristic: preload if model size < 60% of physical RAM. */
+    size_t data_size = (size_t)(st.st_size - pe->gf.data_offset);
+#ifdef __APPLE__
+    {
+        int mib[2] = {CTL_HW, HW_MEMSIZE};
+        uint64_t phys_mem = 0;
+        size_t len = sizeof(phys_mem);
+        sysctl(mib, 2, &phys_mem, &len, NULL, 0);
+        if (data_size < (size_t)(phys_mem * 6 / 10)) {
+            pe->heap_weights = malloc(data_size);
+            if (pe->heap_weights) {
+                memcpy(pe->heap_weights, pe->mmap_base, data_size);
+                pe->mmap_base = pe->heap_weights;
+                fprintf(stderr, "policy: preloaded %.1f MB weights to heap\n",
+                        (double)data_size / (1024*1024));
+            }
+        } else {
+            madvise(pe->mmap_base_actual, pe->mmap_size, MADV_WILLNEED);
+            madvise(pe->mmap_base_actual, pe->mmap_size, MADV_RANDOM);
+            fprintf(stderr, "policy: using mmap (model %.1f MB, RAM %.1f GB)\n",
+                    (double)data_size / (1024*1024), (double)phys_mem / (1024*1024*1024));
+        }
+    }
+#else
+    madvise(pe->mmap_base_actual, pe->mmap_size, MADV_WILLNEED);
+    madvise(pe->mmap_base_actual, pe->mmap_size, MADV_RANDOM);
+    (void)data_size;
+#endif
 
     /* Resolve global tensors.
      * Quantized models may store embeddings in Q8_0, Q6_K, or Q4_K — not F32.
@@ -384,6 +420,7 @@ static void policy_free(PolicyEngine *pe) {
     free(pe->ffn_out);
     free(pe->logits);
     free(pe->layers);
+    free(pe->heap_weights);
     if (pe->mmap_base_actual != MAP_FAILED)
         munmap(pe->mmap_base_actual, pe->mmap_size);
     gguf_close(&pe->gf);
