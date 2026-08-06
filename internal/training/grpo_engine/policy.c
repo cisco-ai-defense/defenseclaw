@@ -15,6 +15,10 @@
 
 #include "grpo.h"
 
+#ifdef _OPENMP
+#include <omp.h>
+#endif
+
 /* ─── LoRA Injection Hook ─── */
 /* Global pointer to active LoRA engine for injection during forward pass.
  * Set by grpo.c before calling policy_logprobs (where LoRA must be active)
@@ -614,16 +618,28 @@ static void policy_forward_token(PolicyEngine *pe, int token, int pos) {
             int base_idx = b * (pe->embed_dtype == 14 || pe->embed_dtype == 12 ? 256 : 32);
             int elems = (pe->embed_dtype == 14 || pe->embed_dtype == 12) ? 256 : 32;
 
-            if (pe->embed_dtype == 12) { /* Q4_K */
+            if (pe->embed_dtype == 12) { /* Q4_K — full sub-block scale dequant */
                 uint16_t d_bits, dmin_bits;
                 memcpy(&d_bits, block, 2);
                 memcpy(&dmin_bits, block + 2, 2);
-                float d = fp16_to_fp32(d_bits);
-                float dmin = fp16_to_fp32(dmin_bits);
-                const uint8_t *qs = block + 16; /* skip d(2)+dmin(2)+scales(12) */
-                for (int j = 0; j < elems && (base_idx + j) < hidden_dim; j++) {
-                    uint8_t q4 = (j % 2 == 0) ? (qs[j/2] & 0x0F) : (qs[j/2] >> 4);
-                    pe->hidden[base_idx + j] = d * (float)q4 - dmin;
+                float dall = fp16_to_fp32(d_bits);
+                float dm = fp16_to_fp32(dmin_bits);
+                const uint8_t *sc = block + 4;
+                const uint8_t *qs = block + 16;
+                for (int g = 0; g < 4; g++) {
+                    /* Sub-block scales for low and high nibbles */
+                    uint8_t sc0, m0, sc1, m1;
+                    int sj0 = 2*g, sj1 = 2*g+1;
+                    if (sj0 < 4) { sc0 = sc[sj0]&63; m0 = sc[sj0+4]&63; }
+                    else { sc0 = (sc[sj0+4]&0xF)|((sc[sj0-4]>>6)<<4); m0 = (sc[sj0+4]>>4)|((sc[sj0]>>6)<<4); }
+                    if (sj1 < 4) { sc1 = sc[sj1]&63; m1 = sc[sj1+4]&63; }
+                    else { sc1 = (sc[sj1+4]&0xF)|((sc[sj1-4]>>6)<<4); m1 = (sc[sj1+4]>>4)|((sc[sj1]>>6)<<4); }
+                    float d1 = dall * (float)sc0, neg_m1 = dm * (float)m0;
+                    float d2 = dall * (float)sc1, neg_m2 = dm * (float)m1;
+                    for (int l = 0; l < 32 && (base_idx + g*64 + l) < hidden_dim; l++) {
+                        pe->hidden[base_idx + g*64 + l]      = d1 * (float)(qs[g*32+l] & 0x0F) - neg_m1;
+                        pe->hidden[base_idx + g*64 + l + 32] = d2 * (float)(qs[g*32+l] >> 4) - neg_m2;
+                    }
                 }
             } else if (pe->embed_dtype == 8) { /* Q8_0 */
                 uint16_t d_bits;
@@ -816,8 +832,8 @@ static int policy_generate_continue(PolicyEngine *pe, int *output, int max_len,
 
         free(probs);
 
-        /* Stop on EOS */
-        if (token == 2) break; /* Common EOS token ID */
+        /* Stop on EOS (Qwen3: 151645, Llama: 2) */
+        if (token == 151645 || token == 2 || token == 151643) break;
         total_gen++;
 
         /* Feed token back */
@@ -908,4 +924,279 @@ void grpo_policy_restore_kv_internal(PolicyEngine *pe) {
 
 void grpo_policy_free_kv_snapshot_internal(void) {
     policy_free_kv_snapshot();
+}
+
+/* ─── Parallel Multi-Completion Generation ─── */
+
+#include <pthread.h>
+
+typedef struct {
+    /* Shared read-only (weights + model config) */
+    const PolicyEngine *pe;
+
+    /* Per-thread mutable state */
+    float       *k_cache;
+    float       *v_cache;
+    float       *hidden;
+    float       *q_buf;
+    float       *k_buf;
+    float       *v_buf;
+    float       *attn_out;
+    float       *ffn_gate;
+    float       *ffn_up;
+    float       *ffn_out;
+    float       *logits;
+    float       *residual;
+    int          seq_pos;
+    unsigned int rng_state;
+
+    /* Generation params */
+    int    max_len;
+    float  temp;
+    float  top_p;
+    int    omp_threads;
+
+    /* Output */
+    int   *out_tokens;
+    float *out_logprobs;
+    int    out_len;
+} GenThreadCtx;
+
+static void thread_forward_token(const PolicyEngine *pe, GenThreadCtx *tc, int token, int pos) {
+    const int hidden_dim = (int)pe->gf.hidden_dim;
+    const int intermediate_dim = (int)pe->gf.intermediate_dim;
+    const int n_heads = (int)pe->gf.n_heads;
+    const int n_kv_heads = (int)pe->gf.n_kv_heads;
+    const int head_dim = (int)pe->gf.head_dim;
+    const int vocab_size = (int)pe->gf.vocab_size;
+
+    /* Embed token (same logic as policy_forward_token but using tc->hidden) */
+    if (token < 0 || token >= vocab_size) {
+        memset(tc->hidden, 0, (size_t)hidden_dim * sizeof(float));
+        return;
+    }
+    if (pe->embed_dtype == 0) {
+        const float *embed_f32 = (const float *)pe->embed;
+        memcpy(tc->hidden, embed_f32 + (size_t)token * hidden_dim,
+               (size_t)hidden_dim * sizeof(float));
+    } else {
+        int blocks_per_row, block_bytes;
+        switch (pe->embed_dtype) {
+            case 12: blocks_per_row = hidden_dim / 256; block_bytes = 144; break;
+            case 8:  blocks_per_row = hidden_dim / 32;  block_bytes = 34; break;
+            case 6:  blocks_per_row = hidden_dim / 32;  block_bytes = 18; break;
+            case 14: blocks_per_row = hidden_dim / 256; block_bytes = 210; break;
+            default: memset(tc->hidden, 0, (size_t)hidden_dim * sizeof(float)); return;
+        }
+        const uint8_t *row_ptr = (const uint8_t *)pe->embed
+                                 + (size_t)token * (size_t)blocks_per_row * (size_t)block_bytes;
+        for (int b = 0; b < blocks_per_row; b++) {
+            const uint8_t *block = row_ptr + (size_t)b * block_bytes;
+            int base_idx = b * (pe->embed_dtype == 14 || pe->embed_dtype == 12 ? 256 : 32);
+            if (pe->embed_dtype == 12) {
+                uint16_t d_bits, dmin_bits;
+                memcpy(&d_bits, block, 2);
+                memcpy(&dmin_bits, block + 2, 2);
+                float dall = fp16_to_fp32(d_bits);
+                float dm = fp16_to_fp32(dmin_bits);
+                const uint8_t *sc = block + 4;
+                const uint8_t *qs = block + 16;
+                for (int g = 0; g < 4; g++) {
+                    uint8_t sc0, m0, sc1, m1;
+                    int sj0 = 2*g, sj1 = 2*g+1;
+                    if (sj0 < 4) { sc0 = sc[sj0]&63; m0 = sc[sj0+4]&63; }
+                    else { sc0 = (sc[sj0+4]&0xF)|((sc[sj0-4]>>6)<<4); m0 = (sc[sj0+4]>>4)|((sc[sj0]>>6)<<4); }
+                    if (sj1 < 4) { sc1 = sc[sj1]&63; m1 = sc[sj1+4]&63; }
+                    else { sc1 = (sc[sj1+4]&0xF)|((sc[sj1-4]>>6)<<4); m1 = (sc[sj1+4]>>4)|((sc[sj1]>>6)<<4); }
+                    float d1 = dall * (float)sc0, neg_m1 = dm * (float)m0;
+                    float d2 = dall * (float)sc1, neg_m2 = dm * (float)m1;
+                    for (int l = 0; l < 32 && (base_idx + g*64 + l) < hidden_dim; l++) {
+                        tc->hidden[base_idx + g*64 + l]      = d1 * (float)(qs[g*32+l] & 0x0F) - neg_m1;
+                        tc->hidden[base_idx + g*64 + l + 32] = d2 * (float)(qs[g*32+l] >> 4) - neg_m2;
+                    }
+                }
+            } else if (pe->embed_dtype == 8) {
+                uint16_t d_bits;
+                memcpy(&d_bits, block, 2);
+                float d = fp16_to_fp32(d_bits);
+                const int8_t *qs = (const int8_t *)(block + 2);
+                int elems = 32;
+                for (int j = 0; j < elems && (base_idx + j) < hidden_dim; j++)
+                    tc->hidden[base_idx + j] = (float)qs[j] * d;
+            }
+        }
+    }
+
+    /* Transformer layers */
+    for (int l = 0; l < pe->gf.n_layers; l++) {
+        const PolicyLayer *layer = &pe->layers[l];
+        memcpy(tc->residual, tc->hidden, (size_t)hidden_dim * sizeof(float));
+
+        rmsnorm_any(tc->hidden, tc->residual, layer->attn_norm, layer->attn_norm_dtype, hidden_dim, pe->gf.rms_eps);
+
+        grpo_matmul_any(tc->q_buf, tc->hidden, layer->q_weight, n_heads * head_dim, hidden_dim, layer->q_dtype);
+        grpo_matmul_any(tc->k_buf, tc->hidden, layer->k_weight, n_kv_heads * head_dim, hidden_dim, layer->k_dtype);
+        grpo_matmul_any(tc->v_buf, tc->hidden, layer->v_weight, n_kv_heads * head_dim, hidden_dim, layer->v_dtype);
+
+        grpo_rope(tc->q_buf, tc->k_buf, pos, n_heads, head_dim, pe->gf.rope_theta);
+
+        size_t kv_offset = (size_t)pos * (size_t)n_kv_heads * (size_t)head_dim;
+        memcpy(tc->k_cache + kv_offset, tc->k_buf, (size_t)n_kv_heads * (size_t)head_dim * sizeof(float));
+        memcpy(tc->v_cache + kv_offset, tc->v_buf, (size_t)n_kv_heads * (size_t)head_dim * sizeof(float));
+
+        grpo_gqa_attention(tc->attn_out, tc->q_buf, tc->k_cache, tc->v_cache,
+                          n_heads, n_kv_heads, head_dim, pos);
+
+        grpo_matmul_any(tc->hidden, tc->attn_out, layer->o_weight, hidden_dim, hidden_dim, layer->o_dtype);
+
+        for (int i = 0; i < hidden_dim; i++)
+            tc->hidden[i] += tc->residual[i];
+
+        memcpy(tc->residual, tc->hidden, (size_t)hidden_dim * sizeof(float));
+        rmsnorm_any(tc->hidden, tc->residual, layer->ffn_norm, layer->ffn_norm_dtype, hidden_dim, pe->gf.rms_eps);
+
+        grpo_matmul_any(tc->ffn_gate, tc->hidden, layer->gate_weight, intermediate_dim, hidden_dim, layer->gate_dtype);
+        grpo_matmul_any(tc->ffn_up, tc->hidden, layer->up_weight, intermediate_dim, hidden_dim, layer->up_dtype);
+
+        grpo_silu(tc->ffn_gate, intermediate_dim);
+        for (int i = 0; i < intermediate_dim; i++)
+            tc->ffn_gate[i] *= tc->ffn_up[i];
+
+        grpo_matmul_any(tc->ffn_out, tc->ffn_gate, layer->down_weight, hidden_dim, intermediate_dim, layer->down_dtype);
+
+        for (int i = 0; i < hidden_dim; i++)
+            tc->hidden[i] = tc->residual[i] + tc->ffn_out[i];
+    }
+
+    rmsnorm_any(tc->hidden, tc->hidden, pe->output_norm, 0, hidden_dim, pe->gf.rms_eps);
+    grpo_matmul_any(tc->logits, tc->hidden, pe->output_weight, vocab_size, hidden_dim, pe->output_dtype);
+}
+
+static void *gen_thread_fn(void *arg) {
+    GenThreadCtx *tc = (GenThreadCtx *)arg;
+    const PolicyEngine *pe = tc->pe;
+
+#ifdef _OPENMP
+    omp_set_num_threads(tc->omp_threads);
+#endif
+
+    tc->out_len = 0;
+    for (int i = 0; i < tc->max_len; i++) {
+        int token = grpo_top_p_sample(tc->logits, (int)pe->gf.vocab_size,
+                                      tc->temp, tc->top_p, &tc->rng_state);
+        tc->out_tokens[i] = token;
+
+        /* Capture logprob */
+        if (tc->out_logprobs) {
+            float *probs = (float *)malloc((size_t)pe->gf.vocab_size * sizeof(float));
+            if (probs) {
+                memcpy(probs, tc->logits, (size_t)pe->gf.vocab_size * sizeof(float));
+                for (int j = 0; j < (int)pe->gf.vocab_size; j++) probs[j] /= tc->temp;
+                grpo_softmax(probs, (int)pe->gf.vocab_size);
+                tc->out_logprobs[i] = logf(probs[token] + 1e-10f);
+                free(probs);
+            }
+        }
+
+        if (token == 151645 || token == 151643 || token == 2) break; /* EOS */
+        tc->out_len++;
+
+        thread_forward_token(pe, tc, token, tc->seq_pos);
+        tc->seq_pos++;
+        if (tc->seq_pos >= pe->max_seq_len) break;
+    }
+    return NULL;
+}
+
+int grpo_policy_generate_parallel_internal(PolicyEngine *pe, int G, int max_len,
+                                           float temp, float top_p,
+                                           unsigned int base_rng,
+                                           GrpoCompletion *results) {
+    const int hidden_dim = (int)pe->gf.hidden_dim;
+    const int intermediate_dim = (int)pe->gf.intermediate_dim;
+    const int n_kv_heads = (int)pe->gf.n_kv_heads;
+    const int head_dim = (int)pe->gf.head_dim;
+    const int vocab_size = (int)pe->gf.vocab_size;
+    size_t kv_bytes = (size_t)pe->seq_pos * (size_t)n_kv_heads * (size_t)head_dim * sizeof(float);
+    size_t full_kv = (size_t)pe->max_seq_len * (size_t)n_kv_heads * (size_t)head_dim * sizeof(float);
+
+#ifdef _OPENMP
+    int total_threads = omp_get_max_threads();
+    int omp_per_gen = total_threads / G;
+    if (omp_per_gen < 1) omp_per_gen = 1;
+#else
+    int omp_per_gen = 1;
+#endif
+
+    /* Allocate per-thread contexts */
+    GenThreadCtx *tcs = (GenThreadCtx *)calloc((size_t)G, sizeof(GenThreadCtx));
+    if (!tcs) return -1;
+
+    for (int g = 0; g < G; g++) {
+        tcs[g].pe = pe;
+        tcs[g].k_cache = (float *)malloc(full_kv);
+        tcs[g].v_cache = (float *)malloc(full_kv);
+        memcpy(tcs[g].k_cache, pe->k_cache, kv_bytes);
+        memcpy(tcs[g].v_cache, pe->v_cache, kv_bytes);
+        tcs[g].seq_pos = pe->seq_pos;
+
+        tcs[g].hidden   = (float *)calloc((size_t)hidden_dim, sizeof(float));
+        tcs[g].q_buf    = (float *)calloc((size_t)pe->gf.n_heads * (size_t)head_dim, sizeof(float));
+        tcs[g].k_buf    = (float *)calloc((size_t)n_kv_heads * (size_t)head_dim, sizeof(float));
+        tcs[g].v_buf    = (float *)calloc((size_t)n_kv_heads * (size_t)head_dim, sizeof(float));
+        tcs[g].attn_out = (float *)calloc((size_t)hidden_dim, sizeof(float));
+        tcs[g].ffn_gate = (float *)calloc((size_t)intermediate_dim, sizeof(float));
+        tcs[g].ffn_up   = (float *)calloc((size_t)intermediate_dim, sizeof(float));
+        tcs[g].ffn_out  = (float *)calloc((size_t)hidden_dim, sizeof(float));
+        tcs[g].logits   = (float *)malloc((size_t)vocab_size * sizeof(float));
+        tcs[g].residual = (float *)malloc((size_t)hidden_dim * sizeof(float));
+
+        memcpy(tcs[g].logits, pe->logits, (size_t)vocab_size * sizeof(float));
+        tcs[g].rng_state = base_rng ^ ((unsigned int)(g + 1) * 2654435761u);
+
+        tcs[g].max_len = max_len;
+        tcs[g].temp = temp;
+        tcs[g].top_p = top_p;
+        tcs[g].omp_threads = omp_per_gen;
+        tcs[g].out_tokens = results[g].tokens;
+        tcs[g].out_logprobs = results[g].logprobs;
+        tcs[g].out_len = 0;
+    }
+
+    /* Spawn threads */
+    pthread_t *threads = (pthread_t *)malloc((size_t)G * sizeof(pthread_t));
+    for (int g = 0; g < G; g++)
+        pthread_create(&threads[g], NULL, gen_thread_fn, &tcs[g]);
+
+    for (int g = 0; g < G; g++)
+        pthread_join(threads[g], NULL);
+
+    /* Collect results */
+    for (int g = 0; g < G; g++)
+        results[g].len = tcs[g].out_len;
+
+    /* Restore OMP threads */
+#ifdef _OPENMP
+    omp_set_num_threads(total_threads);
+#endif
+
+    /* Cleanup */
+    for (int g = 0; g < G; g++) {
+        free(tcs[g].k_cache);
+        free(tcs[g].v_cache);
+        free(tcs[g].hidden);
+        free(tcs[g].q_buf);
+        free(tcs[g].k_buf);
+        free(tcs[g].v_buf);
+        free(tcs[g].attn_out);
+        free(tcs[g].ffn_gate);
+        free(tcs[g].ffn_up);
+        free(tcs[g].ffn_out);
+        free(tcs[g].logits);
+        free(tcs[g].residual);
+    }
+    free(tcs);
+    free(threads);
+
+    return 0;
 }

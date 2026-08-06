@@ -145,6 +145,15 @@ func rewardExec(completion string, params map[string]string) float64 {
 		lang = "python"
 	}
 
+	// Quick-reject: skip subprocess if completion is clearly not code
+	trimmed := strings.TrimSpace(completion)
+	if lang == "python" && len(trimmed) < 5 {
+		return 0.0
+	}
+	if lang == "python" && !strings.ContainsAny(trimmed, "=:()+*-/[]{}") {
+		return 0.0
+	}
+
 	var cmd *exec.Cmd
 	switch lang {
 	case "python":

@@ -122,7 +122,7 @@ int gguf_open(GgufFile *gf, const char *path) {
             else if (strstr(key, "vocab_size"))   gf->vocab_size = val;
         } else if (key && vtype == GV_F32) {
             float val = read_f32(&r);
-            if (strstr(key, "rms_norm_eps"))   gf->rms_eps = val;
+            if (strstr(key, "rms_norm_eps") || strstr(key, "rms_epsilon"))   gf->rms_eps = val;
             else if (strstr(key, "rope.freq_base")) gf->rope_theta = val;
         } else {
             /* Must skip value even if key read failed (NULL key) */
@@ -134,6 +134,8 @@ int gguf_open(GgufFile *gf, const char *path) {
     if (gf->n_heads > 0 && gf->hidden_dim > 0)
         gf->head_dim = gf->hidden_dim / gf->n_heads;
     if (gf->n_kv_heads == 0) gf->n_kv_heads = gf->n_heads;
+
+    fprintf(stderr, "gguf: rope_theta=%.1f, rms_eps=%.2e\n", gf->rope_theta, gf->rms_eps);
 
     /* Parse tensor info */
     gf->tensors = (GgufTensor *)calloc((size_t)gf->n_tensors, sizeof(GgufTensor));

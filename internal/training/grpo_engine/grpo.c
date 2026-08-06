@@ -34,6 +34,10 @@ int grpo_policy_generate_continue_internal(PolicyEngine *pe, int *output, int ma
 void grpo_policy_save_kv_internal(PolicyEngine *pe);
 void grpo_policy_restore_kv_internal(PolicyEngine *pe);
 void grpo_policy_free_kv_snapshot_internal(void);
+int grpo_policy_generate_parallel_internal(PolicyEngine *pe, int G, int max_len,
+                                           float temp, float top_p,
+                                           unsigned int base_rng,
+                                           GrpoCompletion *results);
 
 /* stream.c */
 struct StreamEngine;
@@ -180,12 +184,14 @@ GrpoCtx *grpo_init(GrpoConfig *cfg) {
               ctx->hidden_dim, ctx->intermediate_dim,
               ctx->n_heads, ctx->n_kv_heads, ctx->head_dim);
 
-    /* Load tokenizer (if provided) */
+    /* Load tokenizer: prefer explicit path, fall back to GGUF-embedded vocab */
     if (cfg->tokenizer_path && cfg->tokenizer_path[0] != '\0') {
         ctx->tokenizer = grpo_tokenizer_load(cfg->tokenizer_path);
-        if (!ctx->tokenizer) {
+        if (!ctx->tokenizer)
             fprintf(stderr, "grpo_init: warning — failed to load tokenizer from %s\n", cfg->tokenizer_path);
-        }
+    }
+    if (!ctx->tokenizer && cfg->policy_gguf) {
+        ctx->tokenizer = grpo_tokenizer_load_gguf(cfg->policy_gguf);
     }
 
     /* Set OpenMP thread count to use all performance cores */
@@ -461,6 +467,27 @@ void grpo_restore_kv_snapshot(GrpoCtx *ctx) {
 void grpo_free_kv_snapshot(GrpoCtx *ctx) {
     if (!ctx) return;
     grpo_policy_free_kv_snapshot_internal();
+}
+
+/* ─── Parallel Generation ─── */
+
+int grpo_generate_parallel(GrpoCtx *ctx, const int *prompt, int prompt_len,
+                           int G, int max_gen_len,
+                           float temp, float top_p,
+                           GrpoCompletion *results) {
+    if (!ctx || !ctx->policy || !prompt || !results) return -1;
+
+    /* Prefill prompt (uses all OMP threads) */
+    int ret = grpo_policy_prefill_internal(ctx->policy, prompt, prompt_len);
+    if (ret < 0) return -1;
+
+    /* Run G completions in parallel threads */
+    ret = grpo_policy_generate_parallel_internal(ctx->policy, G, max_gen_len,
+                                                  temp, top_p,
+                                                  ctx->rng_state, results);
+    /* Advance RNG state so next call gets different seeds */
+    ctx->rng_state = ctx->rng_state * 1664525u + 1013904223u;
+    return ret;
 }
 
 /* ─── Tokenizer API ─── */

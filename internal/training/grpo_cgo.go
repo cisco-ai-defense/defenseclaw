@@ -271,11 +271,61 @@ func (e *GrpoEngine) FreeKVSnapshot() {
 	C.grpo_free_kv_snapshot(e.ctx)
 }
 
+// GenerateParallel prefills the prompt once then generates G completions in parallel threads.
+func (e *GrpoEngine) GenerateParallel(prompt []int, G, maxGenLen int, temp, topP float32) ([][]int, [][]float32, error) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	promptC := make([]C.int, len(prompt))
+	for i, t := range prompt {
+		promptC[i] = C.int(t)
+	}
+
+	// Allocate result buffers
+	type cCompletion struct {
+		tokens   []C.int
+		logprobs []C.float
+	}
+	completions := make([]cCompletion, G)
+	cResults := make([]C.GrpoCompletion, G)
+	for g := 0; g < G; g++ {
+		completions[g].tokens = make([]C.int, maxGenLen)
+		completions[g].logprobs = make([]C.float, maxGenLen)
+		cResults[g].tokens = &completions[g].tokens[0]
+		cResults[g].logprobs = &completions[g].logprobs[0]
+		cResults[g].len = 0
+	}
+
+	ret := C.grpo_generate_parallel(e.ctx, &promptC[0], C.int(len(prompt)),
+		C.int(G), C.int(maxGenLen),
+		C.float(temp), C.float(topP),
+		&cResults[0])
+	if ret != 0 {
+		return nil, nil, fmt.Errorf("parallel generation failed")
+	}
+
+	// Convert results
+	allTokens := make([][]int, G)
+	allLogprobs := make([][]float32, G)
+	for g := 0; g < G; g++ {
+		n := int(cResults[g].len)
+		allTokens[g] = make([]int, n)
+		allLogprobs[g] = make([]float32, n)
+		for i := 0; i < n; i++ {
+			allTokens[g][i] = int(completions[g].tokens[i])
+			allLogprobs[g][i] = float32(completions[g].logprobs[i])
+		}
+	}
+	return allTokens, allLogprobs, nil
+}
+
 // Detokenize converts token IDs to UTF-8 text using the loaded tokenizer
 func (e *GrpoEngine) Detokenize(tokens []int) string {
 	if len(tokens) == 0 {
 		return ""
 	}
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	tc := make([]C.int, len(tokens))
 	for i, t := range tokens {
 		tc[i] = C.int(t)

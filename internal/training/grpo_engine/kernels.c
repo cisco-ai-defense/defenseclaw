@@ -119,38 +119,56 @@ static inline float fp16_to_fp32(uint16_t h) {
 }
 
 /* ─── Q4_K Dequantization ─── */
-/* Real Q4_K super-block (144 bytes for 256 elements):
+
+/* Extract sub-block scale and min from the 12-byte packed scales array (GGML Q4_K format) */
+static inline void get_scale_min_k4(int j, const uint8_t *scales, uint8_t *sc, uint8_t *m) {
+    if (j < 4) {
+        *sc = scales[j] & 63;
+        *m  = scales[j + 4] & 63;
+    } else {
+        *sc = (scales[j + 4] & 0x0F) | ((scales[j - 4] >> 6) << 4);
+        *m  = (scales[j + 4] >> 4)   | ((scales[j]     >> 6) << 4);
+    }
+}
+
+/* Q4_K super-block (144 bytes for 256 elements):
  *   half d (2B) + half dmin (2B) + uint8 scales[12] + uint8 qs[128]
- * The 128 bytes of qs hold 256 4-bit values (2 per byte).
- * The 12 bytes of scales encode per-sub-block (16 sub-blocks of 16 elements) scale factors.
- * Simplified: use global d/dmin without sub-block scales (lossy but functional). */
+ * Layout: 4 groups of 64 elements. Each group uses 32 bytes of qs:
+ *   low nibbles → first 32 elements (sub-block 2j), high nibbles → next 32 (sub-block 2j+1).
+ * Each sub-block has a 6-bit scale and min packed in scales[12]. */
 static inline float dequant_q4k_element(const uint8_t *block, int idx) {
     uint16_t d_bits, dmin_bits;
     memcpy(&d_bits, block, 2);
     memcpy(&dmin_bits, block + 2, 2);
 
-    float d = fp16_to_fp32(d_bits);
+    float dall = fp16_to_fp32(d_bits);
     float dmin = fp16_to_fp32(dmin_bits);
 
-    /* qs starts at byte 16 (after d=2 + dmin=2 + scales=12) */
+    const uint8_t *scales = block + 4;
     const uint8_t *qs = block + 16;
-    uint8_t q;
-    if (idx % 2 == 0)
-        q = qs[idx / 2] & 0x0F;
-    else
-        q = qs[idx / 2] >> 4;
 
-    return d * (float)q - dmin;
+    int group = idx / 64;
+    int within = idx - group * 64;
+    int is_high = (within >= 32);
+    int byte_idx = group * 32 + (within & 31);
+
+    uint8_t nibble = is_high ? (qs[byte_idx] >> 4) : (qs[byte_idx] & 0x0F);
+
+    uint8_t sc, m;
+    get_scale_min_k4(2 * group + is_high, scales, &sc, &m);
+
+    return dall * (float)sc * (float)nibble - dmin * (float)m;
 }
 
 void grpo_matmul_q4(float *out, const float *x, const void *W_packed,
                     int rows, int in_dim) {
-    /* out[rows] = x[in_dim] @ W_packed[rows × in_dim, Q4_K format]
-     * Q4_K: 256 elements per super-block, 144 bytes:
-     *   half d (2B) + half dmin (2B) + scales[12] + qs[128]
-     *
-     * On macOS ARM, clang auto-vectorizes mmap reads into aligned NEON loads
-     * that SIGBUS on page boundaries. Fix: copy each row to heap before NEON. */
+    /* Q4_K super-block (144 bytes, 256 elements):
+     *   d (fp16, 2B) + dmin (fp16, 2B) + scales[12] + qs[128]
+     * 8 sub-blocks of 32 elements each. For each pair of sub-blocks (64 elements):
+     *   low nibbles of 32 bytes → first 32 elements (sub-block 2j)
+     *   high nibbles of same 32 bytes → next 32 elements (sub-block 2j+1)
+     * Each sub-block has its own 6-bit scale and min packed in scales[12].
+     * Dequant: y[i] = d * sc * nibble - dmin * m */
     const int blocks_per_row = in_dim / Q4K_BLOCK_SIZE;
     const size_t row_bytes = (size_t)blocks_per_row * Q4K_BLOCK_BYTES;
     const uint8_t *W = (const uint8_t *)W_packed;
@@ -175,47 +193,63 @@ void grpo_matmul_q4(float *out, const float *x, const void *W_packed,
                 uint16_t d_bits, dmin_bits;
                 memcpy(&d_bits, block, 2);
                 memcpy(&dmin_bits, block + 2, 2);
-                float d = fp16_to_fp32(d_bits);
+                float dall = fp16_to_fp32(d_bits);
                 float dmin = fp16_to_fp32(dmin_bits);
 
-                float32x4_t vd = vdupq_n_f32(d);
-                float32x4_t neg_vdmin = vdupq_n_f32(-dmin);
-
+                const uint8_t *scales = block + 4;
                 const uint8_t *qs = block + 16;
                 int base = b * Q4K_BLOCK_SIZE;
 
-                for (int j = 0; j < 128; j += 8) {
-                    uint8x8_t packed = vld1_u8(qs + j);
+                /* 4 iterations × 64 elements = 256 elements per block */
+                for (int j = 0; j < 4; j++) {
+                    uint8_t sc0, m0, sc1, m1;
+                    get_scale_min_k4(2 * j, scales, &sc0, &m0);
+                    get_scale_min_k4(2 * j + 1, scales, &sc1, &m1);
 
-                    uint8x8_t lo = vand_u8(packed, vdup_n_u8(0x0F));
-                    uint8x8_t hi = vshr_n_u8(packed, 4);
+                    float d1 = dall * (float)sc0;
+                    float neg_m1 = -(dmin * (float)m0);
+                    float d2 = dall * (float)sc1;
+                    float neg_m2 = -(dmin * (float)m1);
 
-                    uint8x8x2_t zipped = vzip_u8(lo, hi);
-                    uint8x16_t unpacked = vcombine_u8(zipped.val[0], zipped.val[1]);
+                    float32x4_t vd1 = vdupq_n_f32(d1);
+                    float32x4_t vm1 = vdupq_n_f32(neg_m1);
+                    float32x4_t vd2 = vdupq_n_f32(d2);
+                    float32x4_t vm2 = vdupq_n_f32(neg_m2);
 
-                    uint16x8_t u16_lo = vmovl_u8(vget_low_u8(unpacked));
-                    uint16x8_t u16_hi = vmovl_u8(vget_high_u8(unpacked));
+                    /* Process 32 bytes → 64 elements (low nibbles=first 32, high=next 32) */
+                    const uint8_t *qptr = qs + j * 32;
+                    int idx_lo = base + j * 64;
+                    int idx_hi = idx_lo + 32;
 
-                    float32x4_t f0 = vcvtq_f32_u32(vmovl_u16(vget_low_u16(u16_lo)));
-                    float32x4_t f1 = vcvtq_f32_u32(vmovl_u16(vget_high_u16(u16_lo)));
-                    float32x4_t f2 = vcvtq_f32_u32(vmovl_u16(vget_low_u16(u16_hi)));
-                    float32x4_t f3 = vcvtq_f32_u32(vmovl_u16(vget_high_u16(u16_hi)));
+                    for (int k = 0; k < 32; k += 8) {
+                        uint8x8_t raw = vld1_u8(qptr + k);
+                        uint8x8_t lo = vand_u8(raw, vdup_n_u8(0x0F));
+                        uint8x8_t hi = vshr_n_u8(raw, 4);
 
-                    float32x4_t w0 = vfmaq_f32(neg_vdmin, f0, vd);
-                    float32x4_t w1 = vfmaq_f32(neg_vdmin, f1, vd);
-                    float32x4_t w2 = vfmaq_f32(neg_vdmin, f2, vd);
-                    float32x4_t w3 = vfmaq_f32(neg_vdmin, f3, vd);
+                        /* Low nibbles → elements [idx_lo+k .. idx_lo+k+7] */
+                        uint16x8_t lo16 = vmovl_u8(lo);
+                        float32x4_t f_lo0 = vcvtq_f32_u32(vmovl_u16(vget_low_u16(lo16)));
+                        float32x4_t f_lo1 = vcvtq_f32_u32(vmovl_u16(vget_high_u16(lo16)));
+                        float32x4_t w_lo0 = vfmaq_f32(vm1, f_lo0, vd1);
+                        float32x4_t w_lo1 = vfmaq_f32(vm1, f_lo1, vd1);
 
-                    int idx = base + j * 2;
-                    float32x4_t xv0 = vld1q_f32(x + idx);
-                    float32x4_t xv1 = vld1q_f32(x + idx + 4);
-                    float32x4_t xv2 = vld1q_f32(x + idx + 8);
-                    float32x4_t xv3 = vld1q_f32(x + idx + 12);
+                        float32x4_t xv0 = vld1q_f32(x + idx_lo + k);
+                        float32x4_t xv1 = vld1q_f32(x + idx_lo + k + 4);
+                        vacc0 = vfmaq_f32(vacc0, xv0, w_lo0);
+                        vacc1 = vfmaq_f32(vacc1, xv1, w_lo1);
 
-                    vacc0 = vfmaq_f32(vacc0, xv0, w0);
-                    vacc1 = vfmaq_f32(vacc1, xv1, w1);
-                    vacc2 = vfmaq_f32(vacc2, xv2, w2);
-                    vacc3 = vfmaq_f32(vacc3, xv3, w3);
+                        /* High nibbles → elements [idx_hi+k .. idx_hi+k+7] */
+                        uint16x8_t hi16 = vmovl_u8(hi);
+                        float32x4_t f_hi0 = vcvtq_f32_u32(vmovl_u16(vget_low_u16(hi16)));
+                        float32x4_t f_hi1 = vcvtq_f32_u32(vmovl_u16(vget_high_u16(hi16)));
+                        float32x4_t w_hi0 = vfmaq_f32(vm2, f_hi0, vd2);
+                        float32x4_t w_hi1 = vfmaq_f32(vm2, f_hi1, vd2);
+
+                        float32x4_t xv2 = vld1q_f32(x + idx_hi + k);
+                        float32x4_t xv3 = vld1q_f32(x + idx_hi + k + 4);
+                        vacc2 = vfmaq_f32(vacc2, xv2, w_hi0);
+                        vacc3 = vfmaq_f32(vacc3, xv3, w_hi1);
+                    }
                 }
             }
 
@@ -237,15 +271,26 @@ void grpo_matmul_q4(float *out, const float *x, const void *W_packed,
             uint16_t d_bits, dmin_bits;
             memcpy(&d_bits, block, 2);
             memcpy(&dmin_bits, block + 2, 2);
-            float d = fp16_to_fp32(d_bits);
+            float dall = fp16_to_fp32(d_bits);
             float dmin = fp16_to_fp32(dmin_bits);
+            const uint8_t *scales = block + 4;
             const uint8_t *qs = block + 16;
 
             int base = b * Q4K_BLOCK_SIZE;
-            for (int j = 0; j < Q4K_BLOCK_SIZE && (base + j) < in_dim; j++) {
-                uint8_t q4 = (j % 2 == 0) ? (qs[j / 2] & 0x0F) : (qs[j / 2] >> 4);
-                float w = d * (float)q4 - dmin;
-                acc += (double)x[base + j] * (double)w;
+            for (int j = 0; j < 4; j++) {
+                uint8_t sc0, m0, sc1, m1;
+                get_scale_min_k4(2 * j, scales, &sc0, &m0);
+                get_scale_min_k4(2 * j + 1, scales, &sc1, &m1);
+                float d1 = dall * (float)sc0;
+                float neg_m1 = dmin * (float)m0;
+                float d2 = dall * (float)sc1;
+                float neg_m2 = dmin * (float)m1;
+                for (int l = 0; l < 32; l++) {
+                    float w_lo = d1 * (float)(qs[j * 32 + l] & 0x0F) - neg_m1;
+                    float w_hi = d2 * (float)(qs[j * 32 + l] >> 4) - neg_m2;
+                    acc += (double)x[base + j * 64 + l] * (double)w_lo;
+                    acc += (double)x[base + j * 64 + l + 32] * (double)w_hi;
+                }
             }
         }
         out[r] = (float)acc;

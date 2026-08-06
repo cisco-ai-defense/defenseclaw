@@ -9,6 +9,10 @@ typedef struct GrpoTokenizer GrpoTokenizer;
 /* Load a HuggingFace tokenizer.json file. Returns NULL on failure. */
 GrpoTokenizer *grpo_tokenizer_load(const char *path);
 
+/* Load tokenizer vocabulary from a GGUF file's metadata (tokenizer.ggml.tokens).
+ * This is the preferred method for GGUF models that embed their vocab. */
+GrpoTokenizer *grpo_tokenizer_load_gguf(const char *gguf_path);
+
 /* Free tokenizer resources. */
 void grpo_tokenizer_free(GrpoTokenizer *tok);
 

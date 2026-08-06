@@ -108,6 +108,18 @@ void        grpo_save_kv_snapshot(GrpoCtx *ctx);
 void        grpo_restore_kv_snapshot(GrpoCtx *ctx);
 void        grpo_free_kv_snapshot(GrpoCtx *ctx);
 
+/* Parallel multi-completion generation */
+typedef struct {
+    int   *tokens;       /* caller-allocated output buffer [max_len] */
+    float *logprobs;     /* caller-allocated output buffer [max_len] */
+    int    len;          /* actual tokens generated (filled by engine) */
+} GrpoCompletion;
+
+int grpo_generate_parallel(GrpoCtx *ctx, const int *prompt, int prompt_len,
+                           int G, int max_gen_len,
+                           float temp, float top_p,
+                           GrpoCompletion *results);
+
 /* Tokenizer API */
 int         grpo_detokenize(GrpoCtx *ctx, const int *ids, int n_ids, char *buf, int buf_size);
 

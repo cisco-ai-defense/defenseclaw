@@ -4,6 +4,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <stdint.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/stat.h>
 
 /* ─── Internal Structures ─── */
 
@@ -505,4 +509,160 @@ int grpo_tokenizer_decode(const GrpoTokenizer *tok, const int *ids, int n_ids,
     }
     if (pos < buf_size) output_buf[pos] = '\0';
     return pos;
+}
+
+/* ─── Load Tokenizer from GGUF Metadata ─── */
+
+static uint32_t gguf_read_u32(const uint8_t *p) { uint32_t v; memcpy(&v, p, 4); return v; }
+static uint64_t gguf_read_u64(const uint8_t *p) { uint64_t v; memcpy(&v, p, 8); return v; }
+
+GrpoTokenizer *grpo_tokenizer_load_gguf(const char *gguf_path) {
+    int fd = open(gguf_path, O_RDONLY);
+    if (fd < 0) return NULL;
+
+    struct stat st;
+    if (fstat(fd, &st) != 0) { close(fd); return NULL; }
+
+    /* Read header — need enough for metadata (tokens array can be large).
+     * Qwen3-8B has ~151K tokens averaging ~6 bytes each = ~1 MB of token strings.
+     * Read up to 128 MB to be safe. */
+    size_t budget = (size_t)st.st_size;
+    if (budget > 128 * 1024 * 1024) budget = 128 * 1024 * 1024;
+    uint8_t *buf = (uint8_t *)malloc(budget);
+    if (!buf) { close(fd); return NULL; }
+    ssize_t rd = pread(fd, buf, budget, 0);
+    close(fd);
+    if (rd < 28) { free(buf); return NULL; }
+
+    /* Parse GGUF header */
+    size_t pos = 0;
+    uint32_t magic = gguf_read_u32(buf + pos); pos += 4;
+    if (magic != 0x46554747) { free(buf); return NULL; } /* 'GGUF' */
+    pos += 4; /* version */
+    pos += 8; /* n_tensors */
+    uint64_t n_kv = gguf_read_u64(buf + pos); pos += 8;
+
+    /* Scan metadata for tokenizer arrays */
+    char **tokens_arr = NULL;
+    int *tokens_len_arr = NULL;
+    int64_t n_tokens = 0;
+    int eos_id = -1, bos_id = -1, pad_id = -1;
+
+    for (uint64_t i = 0; i < n_kv && pos < (size_t)rd - 4; i++) {
+        /* Read key string */
+        if (pos + 8 > (size_t)rd) break;
+        uint64_t key_len = gguf_read_u64(buf + pos); pos += 8;
+        if (pos + key_len > (size_t)rd) break;
+        const char *key = (const char *)(buf + pos);
+        pos += key_len;
+
+        /* Read value type */
+        if (pos + 4 > (size_t)rd) break;
+        uint32_t vtype = gguf_read_u32(buf + pos); pos += 4;
+
+        int is_tokens = (key_len == 21 && memcmp(key, "tokenizer.ggml.tokens", 21) == 0);
+        int is_eos = (key_len >= 20 && key_len < 64 && memmem(key, key_len, "eos_token_id", 12) != NULL);
+        int is_bos = (key_len >= 20 && key_len < 64 && memmem(key, key_len, "bos_token_id", 12) != NULL);
+        int is_pad = (key_len >= 20 && key_len < 64 && memmem(key, key_len, "padding_token_id", 16) != NULL);
+
+        if (is_eos && vtype == 4) { /* u32 */
+            if (pos + 4 > (size_t)rd) break;
+            eos_id = (int)gguf_read_u32(buf + pos); pos += 4;
+        } else if (is_bos && vtype == 4) {
+            if (pos + 4 > (size_t)rd) break;
+            bos_id = (int)gguf_read_u32(buf + pos); pos += 4;
+        } else if (is_pad && vtype == 4) {
+            if (pos + 4 > (size_t)rd) break;
+            pad_id = (int)gguf_read_u32(buf + pos); pos += 4;
+        } else if (is_tokens && vtype == 9) { /* array */
+            if (pos + 12 > (size_t)rd) break;
+            uint32_t arr_type = gguf_read_u32(buf + pos); pos += 4;
+            uint64_t arr_len = gguf_read_u64(buf + pos); pos += 8;
+            if (arr_type != 8) { /* must be string array */
+                /* Skip non-string array */
+                for (uint64_t j = 0; j < arr_len && pos < (size_t)rd; j++) {
+                    if (arr_type <= 1 || arr_type == 7) pos += 1;
+                    else if (arr_type <= 3) pos += 2;
+                    else if (arr_type <= 6) pos += 4;
+                    else pos += 8;
+                }
+                continue;
+            }
+            n_tokens = (int64_t)arr_len;
+            tokens_arr = (char **)calloc((size_t)n_tokens, sizeof(char *));
+            tokens_len_arr = (int *)calloc((size_t)n_tokens, sizeof(int));
+            if (!tokens_arr || !tokens_len_arr) break;
+
+            for (int64_t j = 0; j < n_tokens && pos + 8 <= (size_t)rd; j++) {
+                uint64_t slen = gguf_read_u64(buf + pos); pos += 8;
+                if (pos + slen > (size_t)rd) { n_tokens = j; break; }
+                tokens_arr[j] = (char *)malloc(slen + 1);
+                if (tokens_arr[j]) {
+                    memcpy(tokens_arr[j], buf + pos, slen);
+                    tokens_arr[j][slen] = '\0';
+                    tokens_len_arr[j] = (int)slen;
+                }
+                pos += slen;
+            }
+        } else {
+            /* Skip other value types */
+            switch (vtype) {
+                case 0: case 1: case 7: pos += 1; break;
+                case 2: case 3: pos += 2; break;
+                case 4: case 5: case 6: pos += 4; break;
+                case 10: case 11: case 12: pos += 8; break;
+                case 8: { /* string */
+                    if (pos + 8 > (size_t)rd) goto done;
+                    uint64_t slen = gguf_read_u64(buf + pos); pos += 8;
+                    pos += slen;
+                    break;
+                }
+                case 9: { /* array */
+                    if (pos + 12 > (size_t)rd) goto done;
+                    uint32_t at = gguf_read_u32(buf + pos); pos += 4;
+                    uint64_t al = gguf_read_u64(buf + pos); pos += 8;
+                    for (uint64_t j = 0; j < al && pos < (size_t)rd; j++) {
+                        if (at == 8) {
+                            if (pos + 8 > (size_t)rd) goto done;
+                            uint64_t sl = gguf_read_u64(buf + pos); pos += 8;
+                            pos += sl;
+                        } else if (at <= 1 || at == 7) pos += 1;
+                        else if (at <= 3) pos += 2;
+                        else if (at <= 6) pos += 4;
+                        else pos += 8;
+                    }
+                    break;
+                }
+                default: goto done;
+            }
+        }
+    }
+done:
+    free(buf);
+
+    if (!tokens_arr || n_tokens == 0) {
+        free(tokens_arr);
+        free(tokens_len_arr);
+        return NULL;
+    }
+
+    /* Build tokenizer from extracted vocab */
+    GrpoTokenizer *tok = (GrpoTokenizer *)calloc(1, sizeof(GrpoTokenizer));
+    tok->vocab_size = (int)n_tokens;
+    tok->vocab = tokens_arr;
+    tok->vocab_len = tokens_len_arr;
+    tok->bos_id = bos_id;
+    tok->eos_id = eos_id;
+    tok->pad_id = pad_id;
+    tok->hash_capacity = (int)n_tokens * 2;
+    tok->hash_table = (struct TokenHashEntry **)calloc((size_t)tok->hash_capacity,
+                                                       sizeof(struct TokenHashEntry *));
+    for (int i = 0; i < tok->vocab_size; i++) {
+        if (tok->vocab[i])
+            hash_insert(tok, tok->vocab[i], tok->vocab_len[i], i);
+    }
+
+    fprintf(stderr, "tokenizer: loaded %d tokens from GGUF (eos=%d, bos=%d)\n",
+            tok->vocab_size, tok->eos_id, tok->bos_id);
+    return tok;
 }
