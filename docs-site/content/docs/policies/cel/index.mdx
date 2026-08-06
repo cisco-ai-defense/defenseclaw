@@ -1,0 +1,145 @@
+---
+title: CEL policies
+description: Match authenticated, structured tool calls with bounded CEL expressions and turn matches into DefenseClaw findings.
+keywords:
+  - DefenseClaw CEL
+  - CEL policy
+  - ActionFacts
+  - guardrail rule packs
+  - structured tool calls
+---
+
+DefenseClaw uses a deliberately narrow CEL engine to match authenticated,
+structured tool calls. CEL sees normalized command, path, network, and data-flow
+facts—not raw connector payloads—and returns a Boolean match. The rule supplies
+the finding metadata, while the active policy profile maps that finding to
+`allow`, `alert`, `confirm`, or `block`.
+
+<Callout type="info" title="CEL complements OPA/Rego">
+CEL performs semantic matching inside a trusted tool-call boundary. OPA/Rego
+continues to own admission, firewall, sandbox, audit, and policy-domain
+decisions. CEL does not scan prompts or ordinary tool-result text and does not
+expose a separate policy endpoint.
+</Callout>
+
+<Cards>
+  <Card
+    title="Author CEL rules"
+    href="/docs/policies/cel/authoring"
+    description="Learn the rule schema, ActionFacts model, enum constants, portable predicates, and validation workflow."
+  />
+  <Card
+    title="Understand the CEL engine"
+    href="/docs/policies/cel/engine"
+    description="Review the admitted language subset, compiler and runtime limits, ownership, fallback, and evaluation behavior."
+  />
+  <Card
+    title="Stateful connector lifecycle"
+    href="/docs/policies/cel/tool-call-state"
+    description="See connector outcome guarantees, ordered-state behavior, tool-surface matrices, and rollout holds."
+  />
+  <Card
+    title="Validate rule packs"
+    href="/docs/policies/rulepack-validation"
+    description="Use the authoritative loader locally or in CI before activating a candidate pack."
+  />
+</Cards>
+
+## Where CEL fits
+
+<Flow
+  direction="TB"
+  caption="The connector contract establishes trust. CEL never trusts a payload to declare itself structured, and an uncertain projection stays on that rule owner's regex fallback."
+>
+  <Node id="hook" kind="connector">Authenticated tool-action route</Node>
+  <Node id="contract" kind="gateway">Server-resolved action contract</Node>
+  <Node id="analyze" kind="gateway">Analyze tool arguments</Node>
+  <Node id="facts" kind="policy">Bounded ActionFacts</Node>
+  <Node id="cel" kind="policy">CEL Boolean owner</Node>
+  <Node id="fallback" kind="policy">Owner-local regex fallback</Node>
+  <Node id="finding" kind="decision">Finding metadata</Node>
+  <Node id="action" kind="decision">allow / alert / confirm / block</Node>
+  <Node id="reply" kind="connector">Caller or connector response</Node>
+  <Edge from="hook" to="contract" />
+  <Edge from="contract" to="analyze" />
+  <Edge from="analyze" to="facts" label="authoritative" />
+  <Edge from="analyze" to="fallback" label="unsupported or ambiguous" variant="dashed" />
+  <Edge from="facts" to="cel" />
+  <Edge from="cel" to="fallback" label="evaluation error" variant="dashed" />
+  <Edge from="cel" to="finding" label="true" />
+  <Edge from="fallback" to="finding" label="pattern matched" />
+  <Edge from="finding" to="action" />
+  <Edge from="action" to="reply" />
+</Flow>
+
+The authenticated route and its server-resolved action contract establish the
+tool-call boundary. This includes trusted single-call inspection and supported
+native pre-tool hooks; only the latter can participate in durable ordered
+state. DefenseClaw normalizes the action into private `ActionFacts` and exposes
+one typed variable, `f`, to CEL. A semantic rule owner takes exactly one route:
+authoritative facts plus CEL, or that same owner's compatible regex fallback.
+
+## Start with a complete rule
+
+Add organization rules in a file with a unique `category`. This example finds
+a command that reads a protected directory and joins the command to its path by
+ID so facts from different commands cannot accidentally satisfy the rule.
+
+```yaml title="rules/my-org.yaml"
+version: 1
+category: my-org
+rules:
+  - id: ORG-PAYMENTS-SECRETS
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c,
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations &&
+      f.paths.exists(p, p.command_id == c.id &&
+      p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ &&
+      (p.resolved == '/srv/payments/secrets' ||
+      p.resolved.startsWith('/srv/payments/secrets/'))))
+    pattern: '(?i)(?:^|\s)/srv/payments/secrets(?:/|\s|$)'
+    title: "Payments secret directory read"
+    severity: CRITICAL
+    confidence: 0.95
+    tags: [credential, payments, file-sensitive]
+```
+
+The expression only decides whether the action matches. A `true` result creates
+the YAML-defined finding; connector mode, severity thresholds, HITL, and
+enforcement evidence determine the runtime action. The required `pattern`
+preserves compatible detection when structured facts are not authoritative.
+
+Continue with [Authoring CEL rules](/docs/policies/cel/authoring) to adapt this
+rule to command, path, network, and data-flow cases.
+
+## Validate and activate
+
+Compile the candidate with the same Go loader used by the gateway, then restart
+with the exact directory. Rule-pack files are not live-watched.
+
+```bash
+defenseclaw guardrail validate-pack \
+  ~/.defenseclaw/policies/guardrail/my-org
+
+defenseclaw setup guardrail \
+  --rule-pack-dir ~/.defenseclaw/policies/guardrail/my-org \
+  --restart
+
+defenseclaw doctor
+```
+
+Exit `0` means the candidate is valid, `1` means it is invalid, and `2` means
+the authoritative validator was unavailable. Validation proves that the pack
+is admissible; exercise representative positive and negative calls in observe
+mode before enabling action mode. See [Validate rule packs](/docs/policies/rulepack-validation)
+for CI output and partial-pack behavior.
+
+## Choose the next page
+
+| If you need to… | Continue with… |
+| --- | --- |
+| Write or review expressions | [Authoring CEL rules](/docs/policies/cel/authoring) |
+| Understand admission, limits, fallback, or enforcement evidence | [CEL engine](/docs/policies/cel/engine) |
+| Check connector pairing, ordered chains, or artifact promotion | [Stateful connector lifecycle](/docs/policies/cel/tool-call-state) |
+| Validate a complete pack locally or in CI | [Validate rule packs](/docs/policies/rulepack-validation) |

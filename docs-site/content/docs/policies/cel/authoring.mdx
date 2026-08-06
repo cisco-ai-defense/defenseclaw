@@ -1,0 +1,253 @@
+---
+title: Authoring CEL rules
+description: Write portable DefenseClaw CEL expressions against typed ActionFacts, validate them, and test their connector coverage safely.
+keywords:
+  - CEL authoring
+  - DefenseClaw ActionFacts
+  - CEL rule examples
+  - guardrail rule packs
+  - validate-pack
+---
+
+CEL rules are Boolean matchers inside guardrail rule packs. A rule combines a
+typed `expression` for authoritative tool-call facts with a required Go/RE2
+`pattern` for compatible fallback detection.
+
+Start with the [complete rule on the CEL overview](/docs/policies/cel#start-with-a-complete-rule),
+then use this page to adapt it to your command, path, network, or data-flow
+case. The [CEL engine reference](/docs/policies/cel/engine) is normative for
+field types, admitted syntax, costs, and runtime behavior.
+
+## Rule-file contract
+
+Put additive organization rules in a file with a unique `category`. A category
+that matches a bundled category replaces that entire category; a unique name
+adds rules without shadowing shipped groups such as `command` or
+`sensitive-path`.
+
+Every field has a distinct job:
+
+| Field | Contract |
+| --- | --- |
+| `version` | Rule-file schema version. Use `1`. |
+| `category` | File-level catalog group. Use a unique organization category unless replacing a complete bundled category intentionally. |
+| `id` | Stable finding and semantic-owner ID. Custom rules claim their own ID; keep IDs unique. |
+| `expression` | Boolean CEL expression with no surrounding whitespace. It is compiled even when the rule is disabled. |
+| `pattern` | Required Go/RE2 fallback. It preserves detection when the connector cannot supply authoritative structured facts. |
+| `tool_call_only` | Restricts the regex fallback to trusted tool calls. CEL is always tool-call-only whether this is `true` or omitted. |
+| `title`, `severity`, `confidence`, `tags` | Finding metadata. Severity is `LOW`, `MEDIUM`, `HIGH`, or `CRITICAL`; confidence is from `0` to `1`; tags must be non-empty. |
+
+CEL returns only `true` or `false`; it does not return a verdict. A `true`
+result creates the YAML-defined finding. Connector mode, severity thresholds,
+HITL, and enforcement evidence determine the resulting action.
+
+For fallback-pattern design and counterexamples, use the
+[RE2 regex cookbook](/docs/policies/regex-cookbook).
+
+## Authoring patterns
+
+Prefer semantic operations and joined facts over connector-specific tool
+names. Use `c.program` for normalized program identity; `c.executable` preserves
+the invocation token or path. `f.tool` can vary across connectors.
+
+<Tabs items={['Command', 'Path', 'Network', 'Data flow']}>
+
+<Tab value="Command">
+
+Require a complete argument vector before making an argument-sensitive claim:
+
+```text title="CEL expression"
+f.commands.exists(c,
+  c.argv_complete &&
+  c.program in ['curl', 'curl.exe', 'wget', 'wget.exe'] &&
+  defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_FETCH
+    in c.operations)
+```
+
+</Tab>
+
+<Tab value="Path">
+
+Join the path to its command and use a boundary-safe directory check:
+
+```text title="CEL expression"
+f.commands.exists(c,
+  f.paths.exists(p,
+    p.command_id == c.id &&
+    p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE &&
+    (p.resolved == '/etc/systemd/system' ||
+     p.resolved.startsWith('/etc/systemd/system/'))))
+```
+
+`resolved` and `active_home` may be empty when the connector cannot prove host
+context. Use `normalized` or `absolute` deliberately when resolution is not a
+requirement; never assume an empty value means a safe value.
+
+</Tab>
+
+<Tab value="Network">
+
+Match an upload to a public or unresolved hostname:
+
+```text title="CEL expression"
+f.commands.exists(c,
+  defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD
+    in c.operations &&
+  f.network.exists(n,
+    n.command_id == c.id &&
+    n.action == defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_UPLOAD &&
+    n.scope in [
+      defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_PUBLIC,
+      defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_UNKNOWN
+    ]))
+```
+
+DefenseClaw does not perform DNS resolution while building facts. A hostname
+can therefore remain `UNKNOWN`; include that scope when the rule should cover
+external hostnames that are not literal public IP addresses.
+
+</Tab>
+
+<Tab value="Data flow">
+
+Join the command to both edges of a file-to-network flow:
+
+```text title="CEL expression"
+f.commands.exists(c,
+  f.data_flows.exists(read,
+    read.to_command_id == c.id &&
+    read.from == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_FILE &&
+    read.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_PROCESS) &&
+  f.data_flows.exists(send,
+    send.from_command_id == c.id &&
+    send.from == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_PROCESS &&
+    send.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_NETWORK))
+```
+
+The classifier models the file read and network send as separate edges through
+the process. Joining both edges to `c.id` avoids combining unrelated commands.
+
+</Tab>
+
+</Tabs>
+
+## ActionFacts authoring reference
+
+The only CEL variable is `f`, typed as
+`defenseclaw.guardrail.semantic.v1.Facts`. Field names use protobuf snake case;
+for example, write `f.active_home`, not `f.activeHome`.
+
+| Value | Type | Important fields and use |
+| --- | --- | --- |
+| `f.tool` | `string` | Connector-reported tool identity. Prefer semantic facts when a rule should be portable. |
+| `f.cwd` | `string` | Trusted invocation working directory when known. |
+| `f.active_home` | `string` | Trusted same-host active home when known; never accepted from an untrusted payload claim. |
+| `f.parse` | `ParseResult` | `status`, `dialect`, and bounded `issues`. CEL runs only after an authoritative complete parse, so partial or ambiguous inputs take the regex fallback before evaluation. |
+| `f.commands` | `list<CommandFact>` | IDs, parent/pipeline links, program identity, argv, operations, redirects, wrappers, dialect, effect, and completeness. |
+| `f.paths` | `list<PathFact>` | `command_id`, access, flavor, raw `value`, lexical `normalized`, `absolute`, and context-resolved `resolved`. |
+| `f.network` | `list<NetworkFact>` | `command_id`, action, scheme, host, port, normalized host, scope, target kind, and prefix length. |
+| `f.data_flows` | `list<DataFlowFact>` | Source and destination command IDs plus typed `from` and `to` data kinds. An endpoint ID of `0` represents a non-command file or network boundary. |
+
+### Command facts
+
+| Field | Meaning |
+| --- | --- |
+| `id`, `parent_command_id`, `pipeline_id` | Deterministic links between commands, nested wrappers, pipelines, and other fact collections. |
+| `kind` | Process or shell redirect. |
+| `dialect` | Argv, POSIX, PowerShell, `cmd.exe`, mixed, or none. |
+| `effect` | Execute, preview, or uncertain. Uncertain analysis takes fallback before CEL; preview facts can support detection but not enforcement evidence. |
+| `executable` | Original executable token or path. |
+| `program` | Normalized lowercase program identity; prefer this for portable command matching. |
+| `argv`, `arguments`, `argv_complete` | Parsed vector plus quote/expansion metadata and a proof that the vector is complete. |
+| `operations` | Typed behaviors such as read, write, delete, upload, privilege change, or container execution. |
+| `redirects`, `wrappers` | File-descriptor targets and wrapper executable/argv chains. |
+
+### Common enum families
+
+Use fully qualified constants. Numeric enum comparisons and comparisons across
+different enum families are rejected.
+
+| Family | Values available to rules |
+| --- | --- |
+| `OperationKind` | `EXECUTE`, `READ`, `WRITE`, `APPEND`, `DELETE`, `COPY`, `MOVE`, `LIST`, `SEARCH`, `FETCH`, `UPLOAD`, `CONNECT`, `LISTEN`, `TUNNEL`, `NETWORK_SCAN`, `DECODE`, `PROCESS_KILL`, `DISK_WRITE`, `PRIVILEGE`, `PERMISSION_CHANGE`, `CONFIG_CHANGE`, `ACCOUNT_CHANGE`, `SCHEDULE`, `CONTAINER_RUN`, `WORKLOAD_EXEC`, `NAMESPACE_ENTER`, `ROOT_CHANGE`, `ENVIRONMENT_READ`, `CREDENTIAL_READ`, `POLICY_BYPASS` |
+| `PathAccess` | `READ`, `WRITE`, `APPEND`, `DELETE`, `EXECUTE`, `LIST`, `METADATA`, `CONNECT` |
+| `PathFlavor` | `UNKNOWN`, `POSIX`, `WINDOWS`, `DEVICE`, `REGISTRY` |
+| `NetworkAction` | `CONNECT`, `LISTEN`, `DOWNLOAD`, `UPLOAD`, `DNS`, `TUNNEL`, `SCAN` |
+| `NetworkScope` | `UNKNOWN`, `LOOPBACK`, `LINK_LOCAL`, `PRIVATE`, `PUBLIC` |
+| `NetworkTargetKind` | `UNKNOWN`, `SINGLE_HOST`, `SINGLE_ADDRESS_CIDR`, `MULTI_ADDRESS_CIDR`, `RANGE`, `LIST`, `GENERATED` |
+| `DataKind` | `STDIN`, `STDOUT`, `FILE`, `NETWORK`, `PROCESS` |
+| `CommandEffect` | `EXECUTE`, `PREVIEW`, `UNCERTAIN` |
+| `ParseStatus` | `COMPLETE`, `PARTIAL`, `UNSUPPORTED`, `INVALID`, `LIMIT_EXCEEDED`, `AMBIGUOUS`, `NOT_APPLICABLE` |
+
+Prefix each value with its generated enum name, for example:
+
+```text title="CEL enum constant"
+defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE
+```
+
+The authoritative schema is
+[`internal/guardrail/semanticpb/facts.proto`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/guardrail/semanticpb/facts.proto).
+
+## Validate what you author
+
+<Steps>
+
+<Step>
+
+**Keep additions isolated.** Store organization rules in a uniquely named
+category so omitted bundled components continue to inherit the compiled
+baseline.
+
+```text
+~/.defenseclaw/policies/guardrail/my-org/
+  rules/
+    my-org.yaml
+```
+
+</Step>
+
+<Step>
+
+**Compile the complete candidate.** The authoritative loader checks schema,
+required metadata, regex fallback, CEL typing and admission, and cost limits.
+
+```bash
+defenseclaw guardrail validate-pack \
+  ~/.defenseclaw/policies/guardrail/my-org
+```
+
+See [Validate rule packs](/docs/policies/rulepack-validation) for JSON output,
+exit semantics, partial-pack inheritance, and activation.
+
+</Step>
+
+<Step>
+
+**Exercise representative calls in observe mode.** Compilation does not prove
+that every connector projects the facts your expression expects. Run positive
+and negative cases through each target connector, inspect the finding ID, and
+check the [tool-surface matrix](/docs/policies/cel/tool-call-state#tool-surface-matrix)
+before enabling action mode.
+
+</Step>
+
+</Steps>
+
+<Callout type="info" title="Validation is not a CEL fixture runner">
+There is no public CLI that injects synthetic `ActionFacts` into one CEL
+expression. Repository contributors should add focused Go fixtures and run
+`go test ./internal/guardrail/semantic ./internal/guardrail ./internal/gateway`.
+When the compiled default catalog changes, also run `make generate-guardrail-catalog` and
+`make check-guardrail-catalog`.
+</Callout>
+
+## Authoring checklist
+
+- Use a unique category unless replacing a whole bundled category deliberately.
+- Use a unique rule ID and treat it as stable finding metadata.
+- Join related facts with command IDs; never rely on list position.
+- Prefer `c.program` and typed operations over connector-specific tool names.
+- Treat empty context-derived fields as unknown, not safe.
+- Keep the required fallback scoped to the same security intent as the CEL rule.
+- Validate the complete pack, then test both matches and near misses per connector.
+- Review [CEL engine behavior](/docs/policies/cel/engine) before relying on detection or enforcement semantics.

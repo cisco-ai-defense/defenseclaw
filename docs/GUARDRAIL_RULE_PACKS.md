@@ -1,7 +1,10 @@
 # Guardrail rule-pack engineering contract
 
-Operator recipes, suppressions, and verification steps are maintained in the
-published [policies documentation](https://cisco-ai-defense.github.io/defenseclaw/docs/policies/).
+Operator CEL authoring and engine behavior are maintained in the published
+[CEL authoring guide](https://cisco-ai-defense.github.io/defenseclaw/docs/policies/cel/authoring/)
+and [CEL engine reference](https://cisco-ai-defense.github.io/defenseclaw/docs/policies/cel/engine/).
+Recipes, suppressions, and verification steps remain in the broader
+[policies documentation](https://cisco-ai-defense.github.io/defenseclaw/docs/policies/).
 
 ## Two policy layers
 

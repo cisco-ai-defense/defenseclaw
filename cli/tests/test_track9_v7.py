@@ -310,7 +310,11 @@ class TestGoScanCodeJSONSchema(unittest.TestCase):
                 cwd=str(ROOT),
                 capture_output=True,
                 text=True,
-                timeout=180,
+                # The hosted Windows Python shard cold-compiles the complete
+                # Go CLI without the setup-go cache used by the Go matrix.
+                # Keep the tighter local/POSIX bound while allowing runner
+                # image and scheduling variance on Windows.
+                timeout=300 if os.name == "nt" else 180,
                 env={
                     **os.environ,
                     "HOME": str(isolated_home),

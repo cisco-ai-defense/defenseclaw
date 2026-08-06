@@ -1,13 +1,31 @@
 ---
-title: Experimental Tool-Call State Contract
-description: How DefenseClaw routes structured tool calls, proves successful execution, and correlates dangerous actions across turns without broadening false-positive behavior.
+title: Stateful connector lifecycle
+description: How authenticated connector hooks prove outcomes, commit ordered tool-call state, and preserve conservative enforcement guarantees.
 keywords:
-  - DefenseClaw ActionFacts
-  - DefenseClaw CEL
+  - DefenseClaw connector lifecycle
   - stateful tool-call guardrails
   - dangerous tool-call chains
   - connector hook outcomes
+  - tool-call state
 ---
+
+This page defines the experimental connector contract behind ordered tool-call
+state. For single-call matching, rule fields, and runtime fallback, start with
+[CEL policies](/docs/policies/cel), [Authoring CEL rules](/docs/policies/cel/authoring),
+and the [CEL engine](/docs/policies/cel/engine).
+
+<Cards>
+  <Card
+    title="CEL engine"
+    href="/docs/policies/cel/engine"
+    description="Understand ActionFacts, semantic ownership, fallback, and detection-versus-enforcement behavior."
+  />
+  <Card
+    title="Author CEL rules"
+    href="/docs/policies/cel/authoring"
+    description="Write portable single-action matchers and validate their connector coverage."
+  />
+</Cards>
 
 <Callout type="warning" title="Experimental contract">
 This is the rollout contract for experimental stateful tool-call protection.
@@ -40,12 +58,11 @@ flag.
 | Prompt, model, stop, session, and subagent lifecycle | Existing prompt/result or audit route | Preserve the current connector behavior; these events are neither tool proposals nor typed state transitions. |
 | Unsupported, partial, ambiguous, or malformed action schema | Owner-local regex fallback | Preserve compatible detection without granting the payload semantic authority it did not prove. |
 
-This is exclusive at the semantic-rule-owner boundary: a CEL-owned rule and its
-legacy regex do not both produce decisions for the same action. CEL owns a rule
-when the connector supplied a trusted tool boundary and `ActionFacts` produced
-an authoritative projection. The regex fallback owns that rule when the parser
-or schema cannot do so. Unrelated legacy rules can still run from the same
-immutable rule-pack generation.
+Structured action routing uses the [CEL engine's exclusive semantic-owner
+contract](/docs/policies/cel/engine#runtime-results). Authoritative facts use
+CEL; unsupported or ambiguous projection and evaluation errors use that
+owner's compatible regex fallback. The two routes do not produce duplicate
+owner findings, and unrelated rules continue normally.
 
 The state-transition route is a closed, versioned extension point, and its list
 is currently empty for every connector. It can be populated only when an
@@ -84,6 +101,28 @@ proposal on a connector with authoritative pairing, it stores a bounded,
 content-free pending marker or predecessor projection keyed by the connector
 instance, authenticated session, and strongest invocation identity.
 
+<Sequence
+  caption="Intent becomes durable history only after the same connector contract proves identity and success. Failure, cancellation, ambiguity, expiry, and turn cutoffs discard the pending proposal."
+  participants={[
+    { id: 'agent', label: 'Agent runtime', kind: 'agent' },
+    { id: 'hook', label: 'Connector hooks', kind: 'connector' },
+    { id: 'gateway', label: 'DefenseClaw gateway', kind: 'gateway' },
+    { id: 'ledger', label: 'State ledger', kind: 'datastore' },
+  ]}
+>
+  <Message from="agent" to="hook" label="tool proposal" />
+  <Message from="hook" to="gateway" label="authenticated pre-tool event + call ID" />
+  <Message from="gateway" to="ledger" label="store content-free pending marker" />
+  <Message from="gateway" to="hook" kind="return" label="allow / alert / confirm / block" />
+  <Message from="agent" to="hook" label="tool outcome" />
+  <Message from="hook" to="gateway" label="matching authoritative result" />
+  <Message from="gateway" to="ledger" label="commit successful predecessor" />
+</Sequence>
+
+Only authenticated native `/api/v1/{connector}/hook` events can advance this
+ledger. Inspect, proxy, router, and OTLP traffic may produce single-call
+findings but never create or commit ordered state.
+
 ```text
 pre-tool proposal -> standalone/chain decision -> pending
 pending + matching successful post-tool result -> durable successful step
@@ -97,6 +136,9 @@ window, mismatched session, conflicting ID, or ambiguous join cannot promote
 the proposal. Successful steps and deduplication receipts live in DefenseClaw's
 SQLite store so reviewed chains can span turns and gateway restarts while still
 respecting wall-clock and event-count windows.
+
+The six ordered chains are a fixed compiled catalog; CEL/YAML rule authoring
+does not define new sequences. Custom CEL rules remain single-action matchers.
 
 The fixed catalog contains six ordered chain definitions: guardrails-off then
 egress, permission denial then bypass, privilege discovery then elevation,
@@ -184,6 +226,11 @@ is available on Windows. DefenseClaw enables and tests only the connectors in
 the [native Windows connector matrix](/docs/get-started/windows#certified-connector-scope)
 and does not create hook integrations for clients that are not installed or
 supported there.
+
+A `yes` in this matrix means the connector emits a reviewed event for that
+surface. It does not guarantee paired outcome identity, every `ActionFacts`
+field, or enforcement eligibility; use the outcome matrix above for those
+claims.
 
 | Connector | Generic | Shell | File read | File write/edit | MCP | Skills | Mail / SaaS |
 | --- | --- | --- | --- | --- | --- | --- | --- |
