@@ -1192,7 +1192,7 @@ if [[ "${SKIP_CONNECTOR}" != "true" ]]; then
   # green while enforcing nothing.
   MANIFEST_TARGETS="$(grep -c '^  - user:' "${MANIFEST_TMP}" || true)"
   if [[ "${MANIFEST_TARGETS}" == "0" ]] && [[ -n "${USER_LINES}" ]] && [[ "${ALLOW_EMPTY_USERS}" != "true" ]]; then
-    die "rendered hook-guardian manifest has zero targets despite ${USER_COUNT} eligible user(s) and connectors=${CONNECTOR} — every connector may be unsupported (only codex/claudecode/cursor auto-wire today). Fix --connector or pass --allow-empty-users to proceed anyway."
+    die "rendered hook-guardian manifest has zero targets despite ${USER_COUNT} eligible user(s) and connectors=${CONNECTOR}. Either every requested connector is unsupported (only codex/claudecode/cursor auto-wire today), or none of the requested connectors are installed for any eligible user (install the CLI/app first, or narrow --connector to what is on this box). Pass --allow-empty-users to proceed anyway."
   fi
   chown root:wheel "${MANIFEST_TMP}"
   chmod 0640 "${MANIFEST_TMP}"

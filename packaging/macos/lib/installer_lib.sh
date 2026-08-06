@@ -613,7 +613,7 @@ discover_agent_version() {
         [[ -n "${v}" ]] && versions+=("${v}")
       done < <(_collect_node_manager_pkg_versions "${home}" "@openai" "codex")
 
-      _pick_highest_supported "${MIN_CODEX_VERSION}" "${versions[@]}"
+      _pick_highest_supported "${MIN_CODEX_VERSION}" ${versions[@]+"${versions[@]}"}
       ;;
     claudecode)
       # Claude Code ships through five channels:
@@ -678,7 +678,7 @@ discover_agent_version() {
         [[ -n "${v}" ]] && versions+=("${v}")
       done < <(_collect_node_manager_pkg_versions "${home}" "@anthropic-ai" "claude-code")
 
-      _pick_highest_supported "${MIN_CLAUDECODE_VERSION}" "${versions[@]}"
+      _pick_highest_supported "${MIN_CLAUDECODE_VERSION}" ${versions[@]+"${versions[@]}"}
       ;;
     cursor)
       # Cursor.app is a signed macOS bundle. Two metadata sources:
@@ -698,7 +698,7 @@ discover_agent_version() {
       v="$(_emit_pkg_version_if_exists /Applications/Cursor.app/Contents/Resources/app/package.json)"
       [[ -n "${v}" ]] && versions+=("${v}")
 
-      _pick_highest_supported "${MIN_CURSOR_VERSION}" "${versions[@]}"
+      _pick_highest_supported "${MIN_CURSOR_VERSION}" ${versions[@]+"${versions[@]}"}
       ;;
   esac
 }
@@ -872,12 +872,14 @@ enumerate_local_users() {
 #   USER_LINES     newline-separated user:uid:gid:home lines (as produced by
 #                  enumerate_local_users)
 #
-# One `- ` block per (user × supported connector). Unsupported connectors
-# are skipped (they have no per-user setup path in the CLI). Agent version
-# is discovered per (user, connector) via discover_agent_version; an empty
-# version is rendered as an empty string — the guardian's reconcile will
-# emit a per-target failure surfaced in hook_guardian_state.json without
-# affecting other targets in the manifest.
+# One `- ` block per (user × supported-and-installed connector).
+# Unsupported connectors (not in is_supported_connector) are skipped: they
+# have no per-user setup path in the CLI. Connectors the caller asked for
+# but which discover_agent_version could not locate on THIS user's home
+# ARE ALSO skipped — no CLI/app/extension present means there is nothing
+# to hook, and emitting the row would just churn the guardian with a
+# permanent "agent_version empty" failure per tick. Users who install the
+# connector later are picked up by the hook-enumerator's next re-render.
 yaml_double_quoted_scalar() {
   local value="$1"
   case "${value}" in
@@ -928,6 +930,7 @@ render_targets_manifest() {
       is_supported_connector "${c}" || continue
       q_connector="$(yaml_double_quoted_scalar "${c}")" || continue
       ver="$(DC_INSTALLER_TARGET_USER="${name}" discover_agent_version "${c}" "${home}" 2>/dev/null || true)"
+      [[ -n "${ver}" ]] || continue
       q_ver="$(yaml_double_quoted_scalar "${ver}")" || q_ver='""'
       # data_dir is intentionally omitted from each target block: the
       # guardian's validateUserDataDir requires the data_dir to be inside

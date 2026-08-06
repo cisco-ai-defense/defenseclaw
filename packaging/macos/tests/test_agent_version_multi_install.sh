@@ -31,6 +31,46 @@ t_pick_highest_supported_empty_returns_empty() {
   assert_eq "${out}" "" "no candidates yields empty string"
 }
 
+t_discover_agent_version_no_install_survives_set_eu() {
+  # Regression: bash 3.2 on macOS treats "${arr[@]}" on an EMPTY array
+  # under `set -u` as an "unbound variable" error and aborts the shell.
+  # Previously discover_agent_version passed "${versions[@]}" straight
+  # into _pick_highest_supported at three call sites; when no install
+  # of the connector was on the box (empty `versions` array), the
+  # caller's `$(... 2>/dev/null || true)` couldn't rescue the abort
+  # because the shell died before the || branch was reached. install.sh
+  # under set -euo pipefail then jumped to the EXIT trap and the whole
+  # install ended mid-render_targets_manifest.
+  #
+  # Real reproduction: grep every _pick_highest_supported call site in
+  # the library and confirm each guards the array expansion with the
+  # bash-3.2-safe idiom `${arr[@]+"${arr[@]}"}`. A future edit that
+  # drops the guard (or a new call site that forgets it) trips this
+  # assertion before it can escape into an installer regression.
+  local lib="${PKG_DIR}/lib/installer_lib.sh"
+  assert_file_exists "${lib}"
+  local unguarded
+  unguarded="$(grep -nE '_pick_highest_supported[[:space:]]+"[^"]*"[[:space:]]+"\$\{versions\[@\]\}"[[:space:]]*$' "${lib}" || true)"
+  assert_eq "${unguarded}" "" \
+    "every _pick_highest_supported call must use \${versions[@]+\"\${versions[@]}\"} for bash 3.2 set -eu safety; unguarded call site(s): ${unguarded}"
+
+  # And exercise the runtime path once so the property is proven end-to-
+  # end for the picker itself: an empty caller array must not abort the
+  # shell under set -eu.
+  set +u
+  local rc got
+  got="$(
+    set -eu
+    declare -a versions=()
+    _pick_highest_supported "2.1.144" ${versions[@]+"${versions[@]}"}
+    printf 'RC=%d' "$?"
+  )"
+  rc="${got##*RC=}"
+  set -u
+  assert_eq "${rc}" "0" \
+    "empty versions[@] under set -eu must expand cleanly at _pick_highest_supported call sites"
+}
+
 t_pick_highest_supported_ignores_empty_arg() {
   local out
   out="$(_pick_highest_supported "1.0.0" "" "2.0.0" "")"
@@ -183,6 +223,7 @@ for c in doc["connectors"][target]["contracts"]:
 run_case "_pick_highest_supported prefers meeting minimum"     t_pick_highest_supported_prefers_meeting_minimum
 run_case "_pick_highest_supported falls back to highest"       t_pick_highest_supported_falls_back_to_highest_overall
 run_case "_pick_highest_supported empty returns empty"         t_pick_highest_supported_empty_returns_empty
+run_case "discover_agent_version safe with no install (bash 3.2 set -eu)" t_discover_agent_version_no_install_survives_set_eu
 run_case "_pick_highest_supported ignores empty arg"           t_pick_highest_supported_ignores_empty_arg
 run_case "_version_ge handles semver ordering"                 t_version_ge_handles_semver_ordering
 run_case "claudecode probe picks NVM over stale npm-global"    t_claudecode_probe_picks_nvm_over_stale_homebrew
