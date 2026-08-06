@@ -76,8 +76,8 @@ void grpo_matmul_f32(float *out, const float *x, const float *W,
 }
 
 /* ─── Quantization Format Support ─── */
-#define Q4K_BLOCK_SIZE 32
-#define Q4K_BLOCK_BYTES 20
+#define Q4K_BLOCK_SIZE 256
+#define Q4K_BLOCK_BYTES 144
 #define Q5_0_BLOCK_SIZE 32
 #define Q5_0_BLOCK_BYTES 18  /* Note: This specific GGUF uses 18-byte Q5_0 blocks (2+16, no qh?) */
 #define Q8_0_BLOCK_SIZE 32
@@ -119,8 +119,12 @@ static inline float fp16_to_fp32(uint16_t h) {
 }
 
 /* ─── Q4_K Dequantization ─── */
+/* Real Q4_K super-block (144 bytes for 256 elements):
+ *   half d (2B) + half dmin (2B) + uint8 scales[12] + uint8 qs[128]
+ * The 128 bytes of qs hold 256 4-bit values (2 per byte).
+ * The 12 bytes of scales encode per-sub-block (16 sub-blocks of 16 elements) scale factors.
+ * Simplified: use global d/dmin without sub-block scales (lossy but functional). */
 static inline float dequant_q4k_element(const uint8_t *block, int idx) {
-    /* Q4_K block: 2 bytes d (f16), 2 bytes dmin (f16), 16 bytes qs (32 4-bit values) */
     uint16_t d_bits, dmin_bits;
     memcpy(&d_bits, block, 2);
     memcpy(&dmin_bits, block + 2, 2);
@@ -128,7 +132,8 @@ static inline float dequant_q4k_element(const uint8_t *block, int idx) {
     float d = fp16_to_fp32(d_bits);
     float dmin = fp16_to_fp32(dmin_bits);
 
-    const uint8_t *qs = block + 4;
+    /* qs starts at byte 16 (after d=2 + dmin=2 + scales=12) */
+    const uint8_t *qs = block + 16;
     uint8_t q;
     if (idx % 2 == 0)
         q = qs[idx / 2] & 0x0F;

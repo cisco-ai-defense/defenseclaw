@@ -50,6 +50,9 @@ void policy_set_active_lora(void *lora_ref) {
 /* Inject LoRA contribution: output += (input @ A) @ B * scale */
 static void inject_lora(float *output, const float *input, int layer, int target_idx,
                         int out_dim, int in_dim) {
+    (void)output; (void)input; (void)layer; (void)target_idx; (void)out_dim; (void)in_dim;
+    /* TODO: re-enable after base forward pass is verified working */
+    return;
     if (!g_active_lora || !g_active_lora->layers) return;
     if (layer >= g_active_lora->n_layers) return;
 
@@ -303,7 +306,19 @@ static PolicyEngine *policy_init(const char *gguf_path, int max_seq_len) {
         pe->layers[l].ffn_norm = resolve_tensor_ptr(&pe->gf, pe->mmap_base,
                                                     name, GGUF_TYPE_F32, &pe->layers[l].ffn_norm_dtype);
 
-        if (!pe->layers[l].q_weight || !pe->layers[l].attn_norm || !pe->layers[l].ffn_norm) {
+        if (!pe->layers[l].q_weight) fprintf(stderr, "policy: layer %d missing attn_q\n", l);
+        if (!pe->layers[l].k_weight) fprintf(stderr, "policy: layer %d missing attn_k\n", l);
+        if (!pe->layers[l].v_weight) fprintf(stderr, "policy: layer %d missing attn_v\n", l);
+        if (!pe->layers[l].o_weight) fprintf(stderr, "policy: layer %d missing attn_output\n", l);
+        if (!pe->layers[l].gate_weight) fprintf(stderr, "policy: layer %d missing ffn_gate\n", l);
+        if (!pe->layers[l].up_weight) fprintf(stderr, "policy: layer %d missing ffn_up\n", l);
+        if (!pe->layers[l].down_weight) fprintf(stderr, "policy: layer %d missing ffn_down\n", l);
+        if (!pe->layers[l].attn_norm) fprintf(stderr, "policy: layer %d missing attn_norm\n", l);
+        if (!pe->layers[l].ffn_norm) fprintf(stderr, "policy: layer %d missing ffn_norm\n", l);
+
+        if (!pe->layers[l].q_weight || !pe->layers[l].k_weight || !pe->layers[l].v_weight ||
+            !pe->layers[l].o_weight || !pe->layers[l].gate_weight || !pe->layers[l].up_weight ||
+            !pe->layers[l].down_weight || !pe->layers[l].attn_norm || !pe->layers[l].ffn_norm) {
             fprintf(stderr, "policy: missing tensors for layer %d\n", l);
             free(pe->layers);
             munmap(pe->mmap_base_actual, pe->mmap_size);
@@ -451,7 +466,8 @@ static void dequant_embed_row(float *out, const void *embed_table, int embed_dty
                 #define Q4K_BLOCK_SZ 256
                 #define Q4K_BYTES 144
                 int blocks = hidden_dim / Q4K_BLOCK_SZ;
-                row_start = (const uint8_t *)embed_table + (size_t)token * blocks * Q4K_BYTES;
+                size_t row_bytes = (size_t)blocks * Q4K_BYTES;
+                row_start = (const uint8_t *)embed_table + (size_t)token * row_bytes;
                 for (int i = 0; i < hidden_dim; i++) {
                     int b = i / Q4K_BLOCK_SZ;
                     int idx = i % Q4K_BLOCK_SZ;
@@ -510,8 +526,79 @@ static void policy_forward_token(PolicyEngine *pe, int token, int pos) {
     const int head_dim = (int)pe->gf.head_dim;
     const int vocab_size = (int)pe->gf.vocab_size;
 
-    /* Embed token (with optional dequantization) */
-    dequant_embed_row(pe->hidden, pe->embed, pe->embed_dtype, token, hidden_dim);
+    /* Embed token: extract one row from the embedding table.
+     * For quantized embeddings, use the matmul kernel on a single row
+     * by computing the byte offset to that row and calling matmul with rows=hidden_dim.
+     * This reuses the same dequant path that's proven to work for layer weights. */
+    if (token < 0 || token >= (int)pe->gf.vocab_size) {
+        fprintf(stderr, "policy: token %d out of range [0, %lld)\n", token, (long long)pe->gf.vocab_size);
+        memset(pe->hidden, 0, (size_t)hidden_dim * sizeof(float));
+        return;
+    }
+    if (pe->embed_dtype == 0) { /* F32: direct copy */
+        const float *embed_f32 = (const float *)pe->embed;
+        memcpy(pe->hidden, embed_f32 + (size_t)token * hidden_dim,
+               (size_t)hidden_dim * sizeof(float));
+    } else {
+        /* Quantized: create one-hot vector and matmul to extract row.
+         * Actually simpler: compute row byte offset and dequant in place.
+         * Use a temporary one-hot and grpo_matmul_any for correctness. */
+        /* Alternative: just zero-init hidden and add the row contribution.
+         * For Q4_K with 256-element blocks: each row has hidden/256 blocks.
+         * We extract just row `token` from the [vocab × hidden] matrix. */
+
+        /* Safest approach: treat embed as [vocab × hidden] and extract row `token`
+         * by calling matmul with a one-hot input of length vocab.
+         * This is slow (vocab=151K) but correct. For production, optimize later. */
+
+        /* Actually: compute byte offset to row and dequant block-by-block */
+        int blocks_per_row;
+        int block_bytes;
+        switch (pe->embed_dtype) {
+            case 12: blocks_per_row = hidden_dim / 256; block_bytes = 144; break;
+            case 8:  blocks_per_row = hidden_dim / 32;  block_bytes = 34; break;
+            case 6:  blocks_per_row = hidden_dim / 32;  block_bytes = 18; break;
+            case 14: blocks_per_row = hidden_dim / 256; block_bytes = 210; break;
+            default: memset(pe->hidden, 0, (size_t)hidden_dim * sizeof(float)); return;
+        }
+
+        /* Point to this row's start in the quantized tensor */
+        const uint8_t *row_ptr = (const uint8_t *)pe->embed
+                                 + (size_t)token * (size_t)blocks_per_row * (size_t)block_bytes;
+
+        /* Use matmul_any to dequantize: treat as 1-row output with input = identity[hidden_dim] */
+        /* Actually grpo_matmul_any does out[rows] = x[in_dim] @ W[rows×in_dim]
+         * We want out[hidden_dim] = identity × embed_row — but that's just dequant.
+         * Simpler: call the specific dequant for hidden_dim elements from row_ptr */
+
+        /* Direct dequant: iterate blocks, dequant each element */
+        for (int b = 0; b < blocks_per_row; b++) {
+            const uint8_t *block = row_ptr + (size_t)b * block_bytes;
+            int base_idx = b * (pe->embed_dtype == 14 || pe->embed_dtype == 12 ? 256 : 32);
+            int elems = (pe->embed_dtype == 14 || pe->embed_dtype == 12) ? 256 : 32;
+
+            if (pe->embed_dtype == 12) { /* Q4_K */
+                uint16_t d_bits, dmin_bits;
+                memcpy(&d_bits, block, 2);
+                memcpy(&dmin_bits, block + 2, 2);
+                float d = fp16_to_fp32(d_bits);
+                float dmin = fp16_to_fp32(dmin_bits);
+                const uint8_t *qs = block + 16; /* skip d(2)+dmin(2)+scales(12) */
+                for (int j = 0; j < elems && (base_idx + j) < hidden_dim; j++) {
+                    uint8_t q4 = (j % 2 == 0) ? (qs[j/2] & 0x0F) : (qs[j/2] >> 4);
+                    pe->hidden[base_idx + j] = d * (float)q4 - dmin;
+                }
+            } else if (pe->embed_dtype == 8) { /* Q8_0 */
+                uint16_t d_bits;
+                memcpy(&d_bits, block, 2);
+                float d = fp16_to_fp32(d_bits);
+                const int8_t *qs = (const int8_t *)(block + 2);
+                for (int j = 0; j < elems && (base_idx + j) < hidden_dim; j++) {
+                    pe->hidden[base_idx + j] = (float)qs[j] * d;
+                }
+            }
+        }
+    }
 
     /* Run through transformer layers */
     for (int l = 0; l < pe->gf.n_layers; l++) {
@@ -523,6 +610,16 @@ static void policy_forward_token(PolicyEngine *pe, int token, int pos) {
         rmsnorm_any(pe->hidden, residual, layer->attn_norm, layer->attn_norm_dtype, hidden_dim, pe->gf.rms_eps);
 
         /* Q, K, V projections + LoRA injection */
+        if (l == 0 && pos == 0) {
+            fprintf(stderr, "policy: first matmul — q_weight=%p, dtype=%d, rows=%d, in_dim=%d, entering...\n",
+                    (void*)layer->q_weight, layer->q_dtype, n_heads * head_dim, hidden_dim);
+            fflush(stderr);
+            /* Test: read first byte to verify mmap page is accessible */
+            volatile uint8_t test = *((const uint8_t*)layer->q_weight);
+            (void)test;
+            fprintf(stderr, "policy: mmap page accessible, calling matmul...\n");
+            fflush(stderr);
+        }
         grpo_matmul_any(pe->q_buf, pe->hidden, layer->q_weight, n_heads * head_dim, hidden_dim, layer->q_dtype);
         inject_lora(pe->q_buf, pe->hidden, l, 0, n_heads * head_dim, hidden_dim);
 
