@@ -182,6 +182,17 @@ int gguf_open(GgufFile *gf, const char *path) {
         }
     }
 
+    /* Infer vocab_size from token_embd.weight if not in metadata */
+    if (gf->vocab_size == 0) {
+        for (int64_t i = 0; i < gf->n_tensors; i++) {
+            if (gf->tensors[i].name && strcmp(gf->tensors[i].name, "token_embd.weight") == 0) {
+                if (gf->tensors[i].n_dims >= 2)
+                    gf->vocab_size = gf->tensors[i].dims[1]; /* [hidden, vocab] */
+                break;
+            }
+        }
+    }
+
     gf->fd = fd;
     free(buf);
     return 0;

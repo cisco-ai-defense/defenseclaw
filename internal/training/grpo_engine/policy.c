@@ -140,8 +140,9 @@ typedef struct {
     const void *gate_weight;
     const void *up_weight;
     const void *down_weight;
-    const float *attn_norm; /* f32 norm weights */
-    const float *ffn_norm;
+    const void *attn_norm; /* f32 or f16 norm weights */
+    const void *ffn_norm;
+    int attn_norm_dtype, ffn_norm_dtype;
     /* Dtypes for dynamic dispatch */
     int q_dtype, k_dtype, v_dtype, o_dtype;
     int gate_dtype, up_dtype, down_dtype;
@@ -182,11 +183,10 @@ static const void *resolve_tensor_ptr(const GgufFile *gf, void *mmap_base,
                                       const char *name, GgufDtype expected_dtype, int *dtype_out) {
     GgufTensor *t = gguf_find_tensor(gf, name);
     if (!t) return NULL;
-    /* Accept any quantized type for weight tensors — the matmul kernel handles
-     * dequantization based on the actual dtype stored in the tensor info.
-     * Only reject if we expected F32 (norm weights) and got something quantized. */
-    if (expected_dtype == GGUF_TYPE_F32 && t->dtype != GGUF_TYPE_F32) {
-        fprintf(stderr, "policy: tensor %s has dtype %d, expected F32\n", name, t->dtype);
+    /* Accept F32 or F16 for norm weights (F16 will be widened at use time).
+     * Accept any quantized type for projection weights. */
+    if (expected_dtype == GGUF_TYPE_F32 && t->dtype != GGUF_TYPE_F32 && t->dtype != GGUF_TYPE_F16) {
+        fprintf(stderr, "policy: tensor %s has dtype %d, expected F32 or F16\n", name, t->dtype);
         return NULL;
     }
     (void)expected_dtype;
@@ -296,12 +296,12 @@ static PolicyEngine *policy_init(const char *gguf_path, int max_seq_len) {
         pe->layers[l].down_weight = resolve_tensor_ptr(&pe->gf, pe->mmap_base, name, GGUF_TYPE_Q4_K, &pe->layers[l].down_dtype);
 
         snprintf(name, sizeof(name), "blk.%d.attn_norm.weight", l);
-        pe->layers[l].attn_norm = (const float *)resolve_tensor_ptr(&pe->gf, pe->mmap_base,
-                                                                     name, GGUF_TYPE_F32, NULL);
+        pe->layers[l].attn_norm = resolve_tensor_ptr(&pe->gf, pe->mmap_base,
+                                                     name, GGUF_TYPE_F32, &pe->layers[l].attn_norm_dtype);
 
         snprintf(name, sizeof(name), "blk.%d.ffn_norm.weight", l);
-        pe->layers[l].ffn_norm = (const float *)resolve_tensor_ptr(&pe->gf, pe->mmap_base,
-                                                                    name, GGUF_TYPE_F32, NULL);
+        pe->layers[l].ffn_norm = resolve_tensor_ptr(&pe->gf, pe->mmap_base,
+                                                    name, GGUF_TYPE_F32, &pe->layers[l].ffn_norm_dtype);
 
         if (!pe->layers[l].q_weight || !pe->layers[l].attn_norm || !pe->layers[l].ffn_norm) {
             fprintf(stderr, "policy: missing tensors for layer %d\n", l);
@@ -447,11 +447,57 @@ static void dequant_embed_row(float *out, const void *embed_table, int embed_dty
                 }
                 break;
             }
+            case 12: { /* Q4_K — 256-element super-blocks, 144 bytes each */
+                #define Q4K_BLOCK_SZ 256
+                #define Q4K_BYTES 144
+                int blocks = hidden_dim / Q4K_BLOCK_SZ;
+                row_start = (const uint8_t *)embed_table + (size_t)token * blocks * Q4K_BYTES;
+                for (int i = 0; i < hidden_dim; i++) {
+                    int b = i / Q4K_BLOCK_SZ;
+                    int idx = i % Q4K_BLOCK_SZ;
+                    const uint8_t *block = row_start + b * Q4K_BYTES;
+                    /* Q4_K super-block: 2B d + 2B dmin + 12B scales + 128B quantized */
+                    uint16_t d_bits, dmin_bits;
+                    memcpy(&d_bits, block, 2);
+                    memcpy(&dmin_bits, block + 2, 2);
+                    float d = fp16_to_fp32(d_bits);
+                    float dmin = fp16_to_fp32(dmin_bits);
+                    const uint8_t *qs = block + 16; /* after d(2)+dmin(2)+scales(12) */
+                    uint8_t q4;
+                    if (idx % 2 == 0)
+                        q4 = qs[idx / 2] & 0x0F;
+                    else
+                        q4 = qs[idx / 2] >> 4;
+                    out[i] = d * (float)q4 - dmin;
+                }
+                #undef Q4K_BLOCK_SZ
+                #undef Q4K_BYTES
+                break;
+            }
             default:
                 fprintf(stderr, "dequant_embed_row: unsupported dtype %d\n", embed_dtype);
                 memset(out, 0, (size_t)hidden_dim * sizeof(float));
         }
         free(identity);
+    }
+}
+
+/* ─── F16 Norm Helper ─── */
+/* RMSNorm that accepts F16 or F32 weight pointers. If norm_dtype=1 (F16),
+ * converts on the fly. Most norms are F32, so the hot path is a direct call. */
+static void rmsnorm_any(float *y, const float *x, const void *w, int w_dtype, int n, float eps) {
+    if (w_dtype == 0) { /* F32 — direct */
+        grpo_rmsnorm(y, x, (const float *)w, n, eps);
+    } else if (w_dtype == 1) { /* F16 — convert inline */
+        float *w_f32 = (float *)malloc((size_t)n * sizeof(float));
+        const uint16_t *w_f16 = (const uint16_t *)w;
+        for (int i = 0; i < n; i++)
+            w_f32[i] = fp16_to_fp32(w_f16[i]);
+        grpo_rmsnorm(y, x, w_f32, n, eps);
+        free(w_f32);
+    } else {
+        /* Fallback: treat as ones */
+        grpo_rmsnorm(y, x, x, n, eps); /* identity — wrong but won't crash */
     }
 }
 
@@ -474,7 +520,7 @@ static void policy_forward_token(PolicyEngine *pe, int token, int pos) {
         memcpy(residual, pe->hidden, (size_t)hidden_dim * sizeof(float));
 
         /* Attention norm */
-        grpo_rmsnorm(pe->hidden, residual, layer->attn_norm, hidden_dim, pe->gf.rms_eps);
+        rmsnorm_any(pe->hidden, residual, layer->attn_norm, layer->attn_norm_dtype, hidden_dim, pe->gf.rms_eps);
 
         /* Q, K, V projections + LoRA injection */
         grpo_matmul_any(pe->q_buf, pe->hidden, layer->q_weight, n_heads * head_dim, hidden_dim, layer->q_dtype);
@@ -508,7 +554,7 @@ static void policy_forward_token(PolicyEngine *pe, int token, int pos) {
 
         /* FFN */
         memcpy(residual, pe->hidden, (size_t)hidden_dim * sizeof(float));
-        grpo_rmsnorm(pe->hidden, residual, layer->ffn_norm, hidden_dim, pe->gf.rms_eps);
+        rmsnorm_any(pe->hidden, residual, layer->ffn_norm, layer->ffn_norm_dtype, hidden_dim, pe->gf.rms_eps);
 
         /* Gate + Up projections + LoRA */
         grpo_matmul_any(pe->ffn_gate, pe->hidden, layer->gate_weight, intermediate_dim, hidden_dim, layer->gate_dtype);
@@ -534,7 +580,7 @@ static void policy_forward_token(PolicyEngine *pe, int token, int pos) {
     }
 
     /* Final norm + output projection */
-    grpo_rmsnorm(pe->hidden, pe->hidden, pe->output_norm, hidden_dim, pe->gf.rms_eps);
+    rmsnorm_any(pe->hidden, pe->hidden, pe->output_norm, 0 /* output_norm is always F32 */, hidden_dim, pe->gf.rms_eps);
 
     /* Output projection using dynamic dispatcher */
     grpo_matmul_any(pe->logits, pe->hidden, pe->output_weight, vocab_size, hidden_dim, pe->output_dtype);

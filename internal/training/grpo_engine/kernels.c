@@ -527,6 +527,32 @@ int grpo_matmul_any(float *out, const float *x, const void *W_packed,
         case 0:  /* F32 */
             grpo_matmul_f32(out, x, (const float *)W_packed, rows, rows, in_dim);
             return 0;
+        case 1: { /* F16 — dequantize to F32 and matmul */
+            const uint16_t *W_f16 = (const uint16_t *)W_packed;
+            #pragma omp parallel for
+            for (int r = 0; r < rows; r++) {
+                double acc = 0.0;
+                for (int c = 0; c < in_dim; c++) {
+                    uint16_t h = W_f16[r * in_dim + c];
+                    /* Inline F16→F32 for performance */
+                    uint32_t sign = (h >> 15) & 1;
+                    uint32_t exp2 = (h >> 10) & 0x1F;
+                    uint32_t mant = h & 0x3FF;
+                    float w;
+                    if (exp2 == 0) {
+                        w = (sign ? -1.0f : 1.0f) * ((float)mant / 1024.0f) * (1.0f / 16384.0f);
+                    } else if (exp2 == 0x1F) {
+                        w = 0.0f; /* treat inf/nan as 0 for safety */
+                    } else {
+                        uint32_t f = (sign << 31) | ((exp2 + 112) << 23) | (mant << 13);
+                        memcpy(&w, &f, 4);
+                    }
+                    acc += (double)x[c] * (double)w;
+                }
+                out[r] = (float)acc;
+            }
+            return 0;
+        }
         default:
             fprintf(stderr, "grpo_matmul_any: unsupported dtype %d\n", dtype);
             return -1;
