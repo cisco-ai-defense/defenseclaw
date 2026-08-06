@@ -392,6 +392,12 @@ Comments and unrelated source formatting are retained outside the exact policy
 span being edited. `--restart` restarts the gateway after verification; without
 it, the gateway uses its configured hot-reload behavior.
 
+When `--no-restart` explicitly stages a change while the gateway is unavailable,
+the CLI still verifies the installed effective-plan digest but warns on stderr
+that the canonical setup audit event could not be recorded. Start the gateway
+before the next policy change when canonical audit admission is required. JSON
+mutation output remains machine-readable on stdout.
+
 For manual changes outside the CLI-owned redaction surface, edit only
 `~/.defenseclaw/config.yaml` and stop before restart if validation fails:
 

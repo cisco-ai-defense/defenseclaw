@@ -22,6 +22,7 @@ from click.testing import CliRunner
 from defenseclaw.commands import cmd_setup_redaction
 from defenseclaw.commands.cmd_setup_redaction import redaction
 from defenseclaw.context import AppContext
+from defenseclaw.logger import CanonicalObservabilityUnavailableError
 from defenseclaw.observability.v8_redaction_policy import RedactionPreview
 from defenseclaw.observability.v8_status import (
     V8BucketStatus,
@@ -403,6 +404,73 @@ def test_execute_mutations_audits_write_and_names_backup_when_plan_verification_
     assert str(writes[0]) in result.output
     assert "restore" in result.output
     app.logger.log_action.assert_called_once()
+
+
+def test_execute_mutations_allows_explicit_offline_staging_when_audit_runtime_is_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    preview = RedactionPreview(
+        before_sha256="b" * 64,
+        after_sha256="c" * 64,
+        before_plan_digest="d" * 64,
+        after_plan_digest="e" * 64,
+        changed=True,
+        changes=(),
+        newly_unredacted=14,
+        no_longer_unredacted=0,
+        after_legs=(),
+        warnings=(),
+        locked_profiles=(),
+        mutation_paths=("$.observability.defaults.redaction_profile",),
+    )
+    app = _app(tmp_path)
+    app.logger = MagicMock()
+    app.logger.log_action.side_effect = CanonicalObservabilityUnavailableError("gateway unavailable")
+    mark_restart_handled = MagicMock()
+    monkeypatch.setattr(cmd_setup_redaction, "mark_setup_restart_handled", mark_restart_handled)
+    monkeypatch.setattr(cmd_setup_redaction, "preview_redaction_mutations", lambda *_args, **_kwargs: preview)
+    monkeypatch.setattr(
+        cmd_setup_redaction,
+        "mutate_v8_config",
+        lambda _path, _mutations, **kwargs: V8PolicyWriteResult(
+            True,
+            preview.before_sha256,
+            preview.after_sha256,
+            str(kwargs["backup_path"]),
+        ),
+    )
+    monkeypatch.setattr(
+        cmd_setup_redaction,
+        "inspect_v8_config",
+        lambda *_args, **_kwargs: SimpleNamespace(plan_digest=preview.after_plan_digest),
+    )
+
+    result = CliRunner().invoke(
+        redaction,
+        ["remove-all", "--yes"],
+        obj=app,
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Configuration updated and verified." in result.output
+    assert "canonical setup audit event was not recorded" in result.output
+    app.logger.log_action.assert_called_once()
+    mark_restart_handled.assert_called_once_with()
+
+    json_result = CliRunner().invoke(
+        redaction,
+        ["remove-all", "--yes", "--json"],
+        obj=app,
+        catch_exceptions=False,
+    )
+    payload = json.loads(json_result.stdout)
+    assert json_result.exit_code == 0, json_result.output
+    assert payload["applied"] is True
+    assert payload["verified_plan_digest"] == preview.after_plan_digest
+    assert "canonical setup audit event was not recorded" in json_result.stderr
+    assert app.logger.log_action.call_count == 2
+    assert mark_restart_handled.call_count == 2
 
 
 def test_execute_mutations_names_backup_when_post_write_inspection_raises(

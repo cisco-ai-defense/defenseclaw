@@ -24,8 +24,9 @@ import click
 from defenseclaw.audit_actions import ACTION_SETUP_REDACTION_POLICY
 from defenseclaw.config import config_path_for_data_dir
 from defenseclaw.config_inspect import ConfigInspectError, inspect_v8_config
-from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.context import AppContext, mark_setup_restart_handled, pass_ctx
 from defenseclaw.gateway import resolve_gateway_binary
+from defenseclaw.logger import CanonicalObservabilityUnavailableError
 from defenseclaw.observability.v8_config import (
     BUCKETS,
     DESTINATION_CAPABILITIES,
@@ -1232,12 +1233,31 @@ def _execute_mutations(
         )
     except (ValueError, OSError, RuntimeError, ConfigInspectError) as exc:
         raise click.ClickException(str(exc)) from exc
+    # This command owns its explicit --restart/--no-restart contract. Claim the
+    # lifecycle before any post-write operation can fail so the setup group's
+    # generic result hook never restarts an unverified policy or appends text to
+    # machine-readable JSON output.
+    mark_setup_restart_handled()
+    audit_details = (
+        f"action={action} changed_legs={len(preview.changes)} "
+        f"newly_unredacted={preview.newly_unredacted}"
+    )
+    audit_after_restart = False
     if app.logger:
-        app.logger.log_action(
-            ACTION_SETUP_REDACTION_POLICY,
-            "redaction-policy",
-            f"action={action} changed_legs={len(preview.changes)} newly_unredacted={preview.newly_unredacted}",
-        )
+        try:
+            app.logger.log_action(
+                ACTION_SETUP_REDACTION_POLICY,
+                "redaction-policy",
+                audit_details,
+            )
+        except CanonicalObservabilityUnavailableError:
+            audit_after_restart = restart
+            if not restart:
+                click.echo(
+                    "  ⚠ Change saved, but the gateway runtime is unavailable; the canonical setup audit "
+                    "event was not recorded. Start defenseclaw-gateway before the next change.",
+                    err=True,
+                )
     try:
         verified = inspect_v8_config("effective", config_path=str(path), data_dir=app.cfg.data_dir)
     except (ValueError, OSError, RuntimeError, ConfigInspectError) as exc:
@@ -1252,6 +1272,19 @@ def _execute_mutations(
         raise click.ClickException(message)
     if restart:
         _restart_gateway(quiet=emit_json)
+        if audit_after_restart and app.logger:
+            try:
+                app.logger.log_action(
+                    ACTION_SETUP_REDACTION_POLICY,
+                    "redaction-policy",
+                    audit_details,
+                )
+            except CanonicalObservabilityUnavailableError as exc:
+                rollback_path = result.backup_path or str(backup)
+                raise click.ClickException(
+                    "configuration was written and verified, but the canonical setup audit event "
+                    f"could not be recorded after restart: {exc}; restore {rollback_path} to roll back"
+                ) from exc
     if emit_json:
         click.echo(
             json.dumps(

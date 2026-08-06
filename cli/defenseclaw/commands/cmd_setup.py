@@ -80,7 +80,7 @@ from defenseclaw.connector_contracts import (
     normalize_connector,
     resolve_connector_contract,
 )
-from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.context import SETUP_RESTART_HANDLED_META_KEY, AppContext, pass_ctx
 from defenseclaw.file_permissions import (
     MAX_DOTENV_BYTES,
     atomic_write_private_bytes,
@@ -113,7 +113,7 @@ _SETUP_CFG_MTIME_KEY = "defenseclaw._setup_config_mtime_before"
 # already restarted the sidecar explicitly (e.g.
 # ``setup guardrail --restart``); the auto-restart result callback
 # below honors this flag and becomes a no-op to avoid a double bounce.
-_SETUP_RESTART_HANDLED_KEY = "defenseclaw._setup_restart_handled"
+_SETUP_RESTART_HANDLED_KEY = SETUP_RESTART_HANDLED_META_KEY
 # Set only by the bare connector batch after it has staged every selected
 # target. The result callback consumes this exact roster to make that batch's
 # default restart a synchronous readiness gate, without changing restart
