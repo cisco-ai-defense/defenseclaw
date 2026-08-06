@@ -53,10 +53,11 @@ libgrpo_stream.a: $(OBJS)
 %.o: %.c grpo.h
 	$(CC) $(CFLAGS) -c $< -o $@
 
-# kernels.c at -O1: clang's -O2+ auto-vectorizer generates unaligned NEON loads
-# on mmap'd Q4_K data causing SIGBUS on macOS ARM. Force -O1 for this file only.
+# kernels.c at -O0: Any optimization (-O1+) on macOS ARM causes SIGBUS when
+# auto-vectorized code accesses mmap'd GGUF tensor data. Compile at -O0 and
+# rely on explicit NEON intrinsics (in q8_0, q5_0, f32 paths) for speed.
 kernels.o: kernels.c grpo.h
-	$(CC) -O1 -std=c99 -ffp-contract=off -fPIC -Wall -Wextra -c $< -o $@
+	$(CC) -O0 -std=c99 -ffp-contract=off -fPIC -Wall -Wextra -c $< -o $@
 
 portable:
 	$(MAKE) CFLAGS="-O2 -std=c99 -ffp-contract=off -fPIC -Wall"

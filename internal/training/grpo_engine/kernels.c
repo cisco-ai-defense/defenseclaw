@@ -148,25 +148,87 @@ void grpo_matmul_q4(float *out, const float *x, const void *W_packed,
     /* out[rows] = x[in_dim] @ W_packed[rows × in_dim, Q4_K format]
      * Q4_K: 256 elements per super-block, 144 bytes:
      *   half d (2B) + half dmin (2B) + scales[12] + qs[128]
-     * Optimized: read d/dmin once per block, not per element. */
+     *
+     * NEON strategy: scalar-read mmap'd weight bytes (avoids SIGBUS from
+     * clang's auto-vectorized aligned loads on mmap'd pages on macOS ARM),
+     * then NEON-accumulate with heap-allocated x vector (always aligned). */
     const int blocks_per_row = in_dim / Q4K_BLOCK_SIZE;
     const uint8_t *W = (const uint8_t *)W_packed;
 
     #pragma omp parallel for
     for (int r = 0; r < rows; r++) {
-        double acc = 0.0;
         const uint8_t *row_data = W + (size_t)r * (size_t)blocks_per_row * Q4K_BLOCK_BYTES;
+
+#if defined(__ARM_NEON) && defined(GRPO_Q4K_NEON)
+        /* Hand-written NEON: dequantize 8 weights at a time using scalar byte reads
+         * from mmap'd memory, then use vfmaq_f32 with x (heap, always aligned). */
+        float32x4_t vacc0 = vdupq_n_f32(0);
+        float32x4_t vacc1 = vdupq_n_f32(0);
+
         for (int b = 0; b < blocks_per_row; b++) {
             const uint8_t *block = row_data + (size_t)b * Q4K_BLOCK_BYTES;
-            /* Read d and dmin ONCE per 256-element block */
+
+            /* Scalar read of scale factors from mmap'd memory (safe, no NEON load) */
             uint16_t d_bits, dmin_bits;
             memcpy(&d_bits, block, 2);
             memcpy(&dmin_bits, block + 2, 2);
             float d = fp16_to_fp32(d_bits);
             float dmin = fp16_to_fp32(dmin_bits);
-            const uint8_t *qs = block + 16;  /* after d(2) + dmin(2) + scales(12) */
 
-            /* Process 256 elements (128 bytes of packed 4-bit values) */
+            const uint8_t *qs = block + 16;
+            int base = b * Q4K_BLOCK_SIZE;
+            float32x4_t vd = vdupq_n_f32(d);
+            float32x4_t vdmin = vdupq_n_f32(dmin);
+
+            /* Process 256 elements: 128 bytes, 8 elements per iteration (4 bytes) */
+            for (int j = 0; j < 128; j += 4) {
+                /* Scalar byte reads from mmap (safe — no vectorized load on mmap) */
+                uint8_t qb0 = qs[j];
+                uint8_t qb1 = qs[j + 1];
+                uint8_t qb2 = qs[j + 2];
+                uint8_t qb3 = qs[j + 3];
+
+                /* Unpack 4 bytes → 8 weights (dequantized to float on stack) */
+                float w_arr[8];
+                w_arr[0] = d * (float)(qb0 & 0x0F) - dmin;
+                w_arr[1] = d * (float)(qb0 >> 4) - dmin;
+                w_arr[2] = d * (float)(qb1 & 0x0F) - dmin;
+                w_arr[3] = d * (float)(qb1 >> 4) - dmin;
+                w_arr[4] = d * (float)(qb2 & 0x0F) - dmin;
+                w_arr[5] = d * (float)(qb2 >> 4) - dmin;
+                w_arr[6] = d * (float)(qb3 & 0x0F) - dmin;
+                w_arr[7] = d * (float)(qb3 >> 4) - dmin;
+
+                /* NEON: load x from heap (aligned, safe for vld1q_f32) */
+                int idx = base + j * 2;
+                float32x4_t xv0 = vld1q_f32(x + idx);
+                float32x4_t xv1 = vld1q_f32(x + idx + 4);
+
+                /* NEON: load dequantized weights from stack (aligned) */
+                float32x4_t wv0 = vld1q_f32(w_arr);
+                float32x4_t wv1 = vld1q_f32(w_arr + 4);
+
+                /* FMA accumulate */
+                vacc0 = vfmaq_f32(vacc0, xv0, wv0);
+                vacc1 = vfmaq_f32(vacc1, xv1, wv1);
+            }
+        }
+
+        /* Horizontal reduction */
+        float32x4_t vsum = vaddq_f32(vacc0, vacc1);
+        out[r] = vaddvq_f32(vsum);
+#else
+        /* Scalar fallback */
+        double acc = 0.0;
+        for (int b = 0; b < blocks_per_row; b++) {
+            const uint8_t *block = row_data + (size_t)b * Q4K_BLOCK_BYTES;
+            uint16_t d_bits, dmin_bits;
+            memcpy(&d_bits, block, 2);
+            memcpy(&dmin_bits, block + 2, 2);
+            float d = fp16_to_fp32(d_bits);
+            float dmin = fp16_to_fp32(dmin_bits);
+            const uint8_t *qs = block + 16;
+
             int base = b * Q4K_BLOCK_SIZE;
             for (int j = 0; j < Q4K_BLOCK_SIZE && (base + j) < in_dim; j++) {
                 uint8_t q4 = (j % 2 == 0) ? (qs[j / 2] & 0x0F) : (qs[j / 2] >> 4);
@@ -175,6 +237,7 @@ void grpo_matmul_q4(float *out, const float *x, const void *W_packed,
             }
         }
         out[r] = (float)acc;
+#endif
     }
 }
 
