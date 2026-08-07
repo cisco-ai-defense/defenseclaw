@@ -772,6 +772,21 @@ class TestBareSetupBatch(_BaseSetup):
         self.assertEqual(gc.scanner_mode, "both")
         self.assertEqual(ai_discovery, ai_discovery_before)
 
+    def test_add_detected_preserves_primary_when_new_connector_sorts_first(self):
+        self._seed_map("hermes")
+        gc = self.app.cfg.guardrail
+
+        with _stub_side_effects(), patch(
+            "defenseclaw.commands.cmd_setup._detect_installed_connectors",
+            return_value=["codex"],
+        ):
+            res = _invoke(["--add-detected", "--yes", "--no-restart"], self.app)
+
+        self.assertEqual(res.exit_code, 0, msg=res.output)
+        self.assertEqual(set(gc.connectors), {"codex", "hermes"})
+        self.assertEqual(gc.connector, "hermes")
+        self.assertEqual(self.app.cfg.claw.mode, "hermes")
+
     def test_add_detected_restarting_batch_audits_after_gateway_is_ready(self):
         self._seed_map("codex")
         gateway_ready = False

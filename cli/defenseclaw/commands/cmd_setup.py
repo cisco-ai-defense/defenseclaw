@@ -5042,7 +5042,13 @@ def _prompt_add_replace_cancel(connector: str, others: list[str]) -> str | None:
     return {"a": "add", "r": "replace", "c": None}[choice]
 
 
-def _write_connector_identity(cfg, connector: str, write_mode: str) -> None:
+def _write_connector_identity(
+    cfg,
+    connector: str,
+    write_mode: str,
+    *,
+    preserve_primary: bool = False,
+) -> None:
     """Persist the active-connector identity honoring the WU7 write mode.
 
     ``replace`` (default, legacy behavior): this connector becomes the sole
@@ -5051,12 +5057,15 @@ def _write_connector_identity(cfg, connector: str, write_mode: str) -> None:
 
     ``add`` (WU7 D2=A): merge this connector into ``guardrail.connectors``
     alongside the existing one(s). On the first add the existing singular
-    connector is seeded into the map so BOTH are represented. The singular
-    ``guardrail.connector`` and ``claw.mode`` fields are kept pointing at the
-    primary (sorted-first) connector so backward-compat readers — older Go
-    binaries and the Python single-connector paths — keep working.
+    connector is seeded into the map so BOTH are represented. By default the
+    singular ``guardrail.connector`` and ``claw.mode`` fields point at the
+    sorted-first connector for backward compatibility. ``preserve_primary``
+    retains an already active primary for non-destructive additive discovery.
     """
     gc = cfg.guardrail
+    existing_primary = normalize_connector(
+        (getattr(gc, "connector", "") or getattr(cfg.claw, "mode", "") or "").strip()
+    )
     if write_mode == "add":
         if not getattr(gc, "connectors", None):
             gc.connectors = {}
@@ -5075,7 +5084,11 @@ def _write_connector_identity(cfg, connector: str, write_mode: str) -> None:
             )
         if connector not in gc.connectors:
             gc.connectors[connector] = PerConnectorGuardrailConfig()
-        primary = sorted(gc.connectors)[0]
+        primary = (
+            existing_primary
+            if preserve_primary and existing_primary in gc.connectors
+            else sorted(gc.connectors)[0]
+        )
         gc.connector = primary
         cfg.claw.mode = primary
     else:  # replace
@@ -5280,7 +5293,12 @@ def _apply_hook_connector_setup(
     # connector (legacy behavior); "add" merges it into guardrail.connectors
     # alongside the existing one(s) while keeping the singular field as a
     # backward-compatible primary mirror.
-    _write_connector_identity(cfg, connector, write_mode)
+    _write_connector_identity(
+        cfg,
+        connector,
+        write_mode,
+        preserve_primary=preserve_global_settings,
+    )
     # Per-connector rule pack (parity with single-connector --rule-pack).
     # Each connector scans against its own EffectiveRulePackDir at boot, so
     # this lets one connector run strict while a peer runs permissive.
