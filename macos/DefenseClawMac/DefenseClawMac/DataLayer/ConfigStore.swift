@@ -49,7 +49,9 @@ struct DefenseClawConfig: Sendable {
     var guardrailPort: Int?
     var guardrailRulePack: String = "default"
     // Global posture surfaced in the Overview CONFIGURATION box.
-    var redactionEnabled = true              // privacy.disable_redaction (inverted)
+    // Empty means the source key is absent. It must stay distinct from the
+    // valid, deliberately permissive profile named "none".
+    var redactionDefaultProfile = ""         // observability.defaults.redaction_profile
     var hiltEnabled = false                  // hilt.enabled (human-in-the-loop approval)
     var hiltMinSeverity = "HIGH"             // hilt.min_severity
     var environment: String?                 // environment
@@ -488,8 +490,9 @@ actor ConfigStore {
         if let packDir = root["guardrail.rule_pack_dir"]?.string, !packDir.isEmpty {
             c.guardrailRulePack = (packDir as NSString).lastPathComponent
         }
-        // Global posture for the Overview CONFIGURATION box.
-        c.redactionEnabled = !(root["privacy.disable_redaction"]?.bool ?? false)
+        // Source baseline only. Bucket and route overrides are intentionally
+        // summarized by the canonical `setup redaction status` command.
+        c.redactionDefaultProfile = root["observability.defaults.redaction_profile"]?.string ?? ""
         c.hiltEnabled = root["hilt.enabled"]?.bool ?? false
         c.hiltMinSeverity = root["hilt.min_severity"]?.string ?? "HIGH"
         c.environment = root["environment"]?.string

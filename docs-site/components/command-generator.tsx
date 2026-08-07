@@ -918,10 +918,12 @@ export function CommandGenerator() {
               />
               <div className="rounded-lg border border-fd-border bg-fd-background/60 p-3 text-xs text-fd-muted-foreground sm:col-span-2">
                 <p>
-                  Redaction is v8 policy, not a setup flag. Edit{' '}
+                  Redaction has a separate v8 policy editor. Run{' '}
+                  <code>defenseclaw setup redaction</code> for its guided flow. Its
+                  scripted bucket, profile, destination, and route commands own{' '}
                   <code>observability.destinations[].routes[].selector.buckets</code>{' '}
-                  and <code>observability.redaction_profiles</code>, then validate,
-                  inspect, plan, and restart:
+                  and <code>observability.redaction_profiles</code>. Independently
+                  validate, inspect, plan, and restart with:
                 </p>
                 <pre className="mt-2 overflow-x-auto whitespace-pre-wrap font-mono text-[11px] leading-5 text-fd-foreground">
                   {`defenseclaw config validate

@@ -23,6 +23,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import defenseclaw.tui.app as app_module
+import defenseclaw.tui.executor as executor_module
 import defenseclaw.tui.windows_process as windows_process
 import pytest
 from defenseclaw.tui.executor import (
@@ -201,7 +202,7 @@ async def test_executor_launches_self_cli_with_resolved_argv(monkeypatch) -> Non
 
     class EmptyStdout:
         @staticmethod
-        async def readline() -> bytes:
+        async def read(_limit: int) -> bytes:
             return b""
 
     class Process:
@@ -254,6 +255,41 @@ async def _collect(executor: CommandExecutor, args: tuple[str, ...]):
     return [event async for event in executor.run(sys.executable, args)]
 
 
+def _mock_pipe_executor(monkeypatch: pytest.MonkeyPatch, chunks: tuple[bytes, ...]) -> CommandExecutor:
+    reads = iter(chunks)
+
+    class ChunkedStdout:
+        @staticmethod
+        async def read(_limit: int) -> bytes:
+            return next(reads)
+
+    class Process:
+        pid = 1
+        stdin = None
+        stdout = ChunkedStdout()
+        returncode = 0
+
+        @staticmethod
+        async def wait() -> int:
+            return 0
+
+    async def fake_exec(*_argv: str, **_kwargs: object) -> Process:
+        return Process()
+
+    class NoopProcessTree:
+        @staticmethod
+        async def cancel(_process, _grace: float, _force: float) -> None:
+            return None
+
+        @staticmethod
+        def close() -> None:
+            return None
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+    process_tree_factory = lambda _pid: NoopProcessTree() if os.name == "nt" else None  # noqa: E731
+    return CommandExecutor(use_pty=False, process_tree_factory=process_tree_factory)
+
+
 async def _wait_until_running(executor: CommandExecutor) -> None:
     for _ in range(200):
         if executor.is_running:
@@ -304,6 +340,102 @@ async def test_redirected_subprocess_output_is_decoded_as_utf8() -> None:
 
     assert [event.text for event in events if event.kind == "output"] == [payload]
     assert events[-1].exit_code == 0
+
+
+@pytest.mark.asyncio
+async def test_pipe_executor_streams_prompt_without_waiting_for_newline() -> None:
+    executor = CommandExecutor(use_pty=False)
+    output: list[str] = []
+
+    async def interact() -> None:
+        async for event in executor.run(
+            sys.executable,
+            (
+                "-u",
+                "-c",
+                (
+                    "import sys; sys.stdout.write('Select: '); sys.stdout.flush(); "
+                    "answer=sys.stdin.readline().strip(); print('picked ' + answer)"
+                ),
+            ),
+        ):
+            if event.kind != "output":
+                continue
+            output.append(event.text)
+            if "Select:" in event.text:
+                executor.write_stdin("2\n")
+
+    interaction = asyncio.create_task(interact())
+    try:
+        await asyncio.wait_for(asyncio.shield(interaction), timeout=30)
+    except TimeoutError:
+        await executor.cancel()
+        await interaction
+        raise
+
+    assert any("Select:" in text for text in output)
+    assert any("picked 2" in text for text in output)
+    assert all(not text.endswith("\n") for text in output)
+
+
+@pytest.mark.asyncio
+async def test_pipe_executor_coalesces_fast_cross_chunk_line_fragments(monkeypatch) -> None:
+    executor = _mock_pipe_executor(monkeypatch, (b"hel", b"lo\n", b""))
+    events = await _collect(executor, ("-c", "ignored"))
+
+    assert [event.text for event in events if event.kind == "output"] == ["hello"]
+
+
+@pytest.mark.asyncio
+async def test_pipe_executor_decodes_multibyte_utf8_split_across_reads(monkeypatch) -> None:
+    executor = _mock_pipe_executor(monkeypatch, (b"\xe2", b"\x82", b"\xac\n", b""))
+
+    events = await _collect(executor, ("-c", "ignored"))
+
+    assert [event.text for event in events if event.kind == "output"] == ["€"]
+
+
+@pytest.mark.asyncio
+async def test_pipe_executor_flushes_unterminated_fragment_on_controlled_timeout(monkeypatch) -> None:
+    executor = _mock_pipe_executor(monkeypatch, (b"Select: ", b""))
+    wait_calls = 0
+
+    async def controlled_wait_for(awaitable, *, timeout: float) -> bytes:
+        nonlocal wait_calls
+        assert timeout > 0
+        wait_calls += 1
+        if wait_calls == 2:
+            awaitable.close()
+            raise TimeoutError
+        return await awaitable
+
+    monkeypatch.setattr(asyncio, "wait_for", controlled_wait_for)
+
+    events = await _collect(executor, ("-c", "ignored"))
+
+    assert wait_calls == 3
+    assert [event.text for event in events if event.kind == "output"] == ["Select: "]
+    assert [event.kind for event in events] == ["start", "output", "done"]
+
+
+@pytest.mark.asyncio
+async def test_pipe_executor_delivers_final_unterminated_fragment_at_eof(monkeypatch) -> None:
+    executor = _mock_pipe_executor(monkeypatch, (b"final fragment", b""))
+
+    events = await _collect(executor, ("-c", "ignored"))
+
+    assert [event.text for event in events if event.kind == "output"] == ["final fragment"]
+    assert events[-1].kind == "done"
+
+
+@pytest.mark.asyncio
+async def test_pipe_executor_bounds_newline_free_pending_output(monkeypatch) -> None:
+    monkeypatch.setattr(executor_module, "_PIPE_FRAGMENT_MAX_CHARS", 4)
+    executor = _mock_pipe_executor(monkeypatch, (b"abcdef", b""))
+
+    events = await _collect(executor, ("-c", "ignored"))
+
+    assert [event.text for event in events if event.kind == "output"] == ["abcd", "ef"]
 
 
 @pytest.mark.asyncio

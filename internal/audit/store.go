@@ -204,8 +204,9 @@ type ActionEntry struct {
 }
 
 type Store struct {
-	db     *sql.DB
-	dbPath string
+	db          *sql.DB
+	dbPath      string
+	dbPathGuard *preparedAuditDatabasePath
 
 	// lifecycleMu serializes initialization/close and lets mandatory v8
 	// event-history transactions pin a ready store until commit or rollback.
@@ -328,11 +329,11 @@ func openSQLite(dbPath string) (*sql.DB, error) {
 }
 
 func NewStore(dbPath string) (*Store, error) {
-	db, identity, err := openHardenedAuditSQLiteWithIdentity(dbPath, auditDBPathHooks{})
+	db, identity, pathGuard, err := openHardenedAuditSQLiteWithIdentity(dbPath, auditDBPathHooks{})
 	if err != nil {
 		return nil, err
 	}
-	return &Store{db: db, dbPath: identity}, nil
+	return &Store{db: db, dbPath: identity, dbPathGuard: pathGuard}, nil
 }
 
 // sqliteCoded is the structural interface implemented by the
@@ -1853,7 +1854,7 @@ func (s *Store) Init() error {
 	if err := s.proveDurableWrite(context.Background()); err != nil {
 		return err
 	}
-	if err := revalidateHardenedAuditSQLite(s.dbPath, auditDBPathHooks{}); err != nil {
+	if err := revalidateHardenedAuditSQLite(s.dbPathGuard); err != nil {
 		return fmt.Errorf("audit: revalidate database paths after initialization: %w", err)
 	}
 
@@ -4039,7 +4040,10 @@ func (s *Store) Close() error {
 	// transactions to release the lifecycle read lock.
 	s.ready.Store(false)
 	s.closed = true
-	return s.db.Close()
+	err := s.db.Close()
+	s.dbPathGuard.close()
+	s.dbPathGuard = nil
+	return err
 }
 
 // currentRunID resolves the per-process run id used to stamp audit

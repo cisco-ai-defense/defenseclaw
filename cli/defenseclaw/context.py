@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import click
 
+SETUP_RESTART_HANDLED_META_KEY = "defenseclaw._setup_restart_handled"
+
 
 class AppContext:
     """Shared application context passed through Click."""
@@ -34,3 +36,14 @@ pass_ctx = click.make_pass_decorator(AppContext, ensure=True)
 
 # Alias for command modules that import `pass_context`.
 pass_context = pass_ctx
+
+
+def mark_setup_restart_handled() -> None:
+    """Prevent the setup group's generic result hook from restarting again."""
+
+    try:
+        ctx = click.get_current_context(silent=True)
+    except RuntimeError:
+        ctx = None
+    if ctx is not None:
+        ctx.meta[SETUP_RESTART_HANDLED_META_KEY] = True

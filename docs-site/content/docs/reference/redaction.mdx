@@ -32,6 +32,142 @@ from every bucket, with profile `none`. Run `defenseclaw observability plan` and
 `defenseclaw doctor` to find unredacted legs.
 </Callout>
 
+## Guided CLI workflow
+
+Run the redaction command without a subcommand for the guided workflow:
+
+```bash
+defenseclaw setup redaction
+```
+
+It first prints the compiler-owned effective destination and bucket policy, then
+offers four simple choices: keep the current policy, remove redaction, apply one
+profile everywhere, or change the global baseline. The next prompt is **Show
+advanced settings?**. Choose it to work with:
+
+1. global collection and profile defaults;
+2. any of the 14 catalog buckets, selected by number, name, comma list, or `all`;
+3. built-in and custom profiles, detector groups, field classes, and modes;
+4. destination `send` policy and ordered first-match routes, including every
+   route selector;
+5. related raw-data controls and immutable policy boundaries;
+6. a staged effective-policy review, or a reset of all staged changes.
+
+The wizard does not write while you move between advanced screens. At the end it
+compiles the complete staged candidate, shows effective destination/route/bucket/
+signal changes, calls out newly unredacted legs, and asks for confirmation.
+
+### macOS, Linux, and native Windows
+
+The command surface and policy semantics are the same on macOS, Linux, and the
+native Windows x64 package. On macOS/Linux, run it from a POSIX shell:
+
+```bash
+defenseclaw setup redaction status
+defenseclaw setup redaction remove-all --dry-run
+defenseclaw setup redaction
+```
+
+On Windows, run the same commands in PowerShell, cmd, or the packaged TUI:
+
+```powershell
+defenseclaw setup redaction status
+defenseclaw setup redaction remove-all --dry-run
+defenseclaw setup redaction
+```
+
+In the TUI, open **Setup → Redaction Policy**. Quick actions default mutations
+to dry-run. **Show advanced settings** exposes every scripted bucket, collection,
+custom-profile, destination, selector, and ordered-route action; **Open the
+complete guided workflow** runs the prompt-driven editor in Activity. The TUI
+streams prompts and accepts stdin on both POSIX terminals and native Windows.
+
+In the macOS app, open **Logs → Redaction policy…**. The sheet provides effective
+status, one-click broad profiles, and a **Show advanced settings** disclosure for
+the same global defaults, 14 buckets, custom profiles, destinations, and ordered
+route selectors. Advanced mutations default to dry-run and show their exact CLI
+command before execution.
+
+Every changed, non-dry-run mutation writes a timestamped pre-change backup. Its
+path begins with `~/.defenseclaw/backups/config.yaml.before-redaction` on
+macOS/Linux and
+`%USERPROFILE%\.defenseclaw\backups\config.yaml.before-redaction` in the packaged
+Windows profile. Newly created parents and every backup file are owner-private
+(`0700`/`0600` on POSIX; a protected current-user/SYSTEM DACL on Windows), and
+replacement is atomic and durable on both platform families. Existing safe
+parent-directory permissions are validated without being changed.
+
+### The simple remove-all command
+
+To select profile `none` for every configurable log and trace projection:
+
+```bash
+defenseclaw setup redaction remove-all --dry-run
+defenseclaw setup redaction remove-all --yes
+```
+
+This sets the global baseline to `none` and removes more-specific bucket,
+destination `send`, and route profile overrides. It deliberately leaves
+collection and routing unchanged. The generated local SQLite projection inherits
+`none`; the managed enterprise destination remains release-owned and locked to
+its managed profile. Existing stored or exported records are not rewritten.
+
+<Callout type="warn" title="remove-all permits raw governed content">
+`remove-all` can expose prompts, responses, tool arguments/results, evidence,
+paths, and identifiers to every configurable destination. Use it only when local
+history and every downstream sink share an approved trust boundary.
+</Callout>
+
+### Scripted policy commands
+
+The same policy surface is available without prompts:
+
+```bash
+# Inspect effective policy
+defenseclaw setup redaction status
+defenseclaw setup redaction status --json
+
+# Broad baselines
+defenseclaw setup redaction apply --scope all-configurable --profile strict --dry-run
+defenseclaw setup redaction apply --scope defaults --profile sensitive --yes
+defenseclaw setup redaction defaults set --profile content --no-traces --yes
+
+# Bucket overrides
+defenseclaw setup redaction bucket list
+defenseclaw setup redaction bucket set model.io --profile content --no-logs --yes
+defenseclaw setup redaction bucket reset model.io --yes
+
+# Custom profiles
+defenseclaw setup redaction profile set soc \
+  --extends sensitive \
+  --detector pii --detector credentials --detector secrets \
+  --field content=detect --field evidence=detect \
+  --field path=hash --field credential=remove --yes
+defenseclaw setup redaction profile show soc
+defenseclaw setup redaction profile remove soc --replace-with sensitive --yes
+
+# Concise destination policy
+defenseclaw setup redaction destination send splunk-production \
+  --signal logs --bucket security.finding --bucket enforcement.action \
+  --profile sensitive --yes
+defenseclaw setup redaction destination inherit splunk-production --yes
+
+# Ordered advanced routes
+defenseclaw setup redaction route add splunk-production critical-findings \
+  --position 1 --signal logs --bucket security.finding \
+  --min-severity HIGH --route-action send --profile strict --yes
+defenseclaw setup redaction route move splunk-production critical-findings \
+  --position 2 --yes
+defenseclaw setup redaction route remove splunk-production critical-findings --yes
+```
+
+Mutation commands accept `--dry-run`, `--json`, and `--restart/--no-restart`.
+Machine-readable mutations require either `--dry-run` or `--yes`. An omitted flag
+means “leave that field unchanged”; reset/inherit verbs remove the corresponding
+source override explicitly. JSON dry-runs report `applied: false`; confirmed
+writes emit their result only after verification and include `backup_path`,
+`verified_plan_digest`, and `restarted`.
+
 ## Built-in profiles
 
 | Profile | Behavior | Typical use |
@@ -229,7 +365,8 @@ normal log collection cannot disable this SQLite-only compliance floor.
 
 ## V7 compatibility (upgrades only)
 
-`privacy.disable_redaction` and `DEFENSECLAW_DISABLE_REDACTION` are v7 controls.
+The v7 `privacy` block's `disable_redaction` field and
+`DEFENSECLAW_DISABLE_REDACTION` are v7 controls.
 They are not v8 runtime policy knobs. During `defenseclaw upgrade`, the converter
 materializes their effective behavior into `none` or `legacy-v7` profiles before
 retiring those inputs. A v8 gateway rejects legacy observability/redaction blocks
@@ -238,10 +375,31 @@ with an actionable upgrade message.
 `DEFENSECLAW_REVEAL_PII` remains an operator-display concern where supported; it
 does not alter the v8 destination route graph or a persistent-sink projection.
 
-## Edit and activate safely
+## Write and activation safety
 
-Back up the source with private permissions, edit only
-`~/.defenseclaw/config.yaml`, and stop before restart if validation fails:
+The CLI is the preferred redaction editor. Each mutation runs the strict Python
+source validator and the canonical Go compiler before writing. For a changed,
+non-dry-run write, it compares the live file with the preview digest, installs a
+private backup, atomically replaces `config.yaml`, verifies the installed
+effective-plan digest, and records a `setup-redaction-policy` audit action. The
+backup path is unique for each write:
+
+```text
+<data-dir>/backups/config.yaml.before-redaction-<nanosecond-timestamp>
+```
+
+Comments and unrelated source formatting are retained outside the exact policy
+span being edited. `--restart` restarts the gateway after verification; without
+it, the gateway uses its configured hot-reload behavior.
+
+When `--no-restart` explicitly stages a change while the gateway is unavailable,
+the CLI still verifies the installed effective-plan digest but warns on stderr
+that the canonical setup audit event could not be recorded. Start the gateway
+before the next policy change when canonical audit admission is required. JSON
+mutation output remains machine-readable on stdout.
+
+For manual changes outside the CLI-owned redaction surface, edit only
+`~/.defenseclaw/config.yaml` and stop before restart if validation fails:
 
 ```bash
 umask 077
@@ -257,8 +415,8 @@ defenseclaw doctor
 
 Do not edit the generated reference or a compiled/effective view. Restore the
 backup or correct the source when validation fails. A global or bucket profile
-also affects local SQLite; use a destination `send`/route profile when only that
-remote trust boundary should be redacted.
+also affects local SQLite; use `destination send` or a route profile when only
+that remote trust boundary should be redacted.
 
 ## Verify policy
 

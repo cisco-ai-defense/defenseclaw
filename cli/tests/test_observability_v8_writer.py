@@ -207,6 +207,131 @@ def test_mutate_v8_config_detects_uncooperative_source_change(tmp_path: Path) ->
     assert "retention_days: 45" in path.read_text()
 
 
+def test_mutate_v8_config_rejects_stale_preview_digest(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(_source())
+    backup = tmp_path / "backups" / "config.yaml.before-redaction"
+
+    with pytest.raises(RuntimeError, match=r"changed after.*preview"):
+        mutate_v8_config(
+            path,
+            [V8YAMLMutation.set(("observability", "local", "retention_days"), 30)],
+            expected_before_sha256="0" * 64,
+            backup_path=backup,
+            validator=lambda *_: pytest.fail("a stale preview must fail before validation"),
+        )
+
+    assert path.read_text() == _source()
+    assert not backup.exists()
+
+
+def test_mutate_v8_config_installs_private_prechange_backup(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(_source())
+    os.chmod(path, 0o640)
+    backup = tmp_path / "backups" / "config.yaml.before-redaction"
+
+    result = mutate_v8_config(
+        path,
+        [V8YAMLMutation.set(("observability", "local", "retention_days"), 30)],
+        backup_path=backup,
+        validator=lambda *_: None,
+    )
+
+    assert result.backup_path == str(backup.absolute())
+    assert backup.read_text() == _source()
+    assert "retention_days: 30" in path.read_text()
+    if os.name == "posix":
+        assert stat.S_IMODE(backup.stat().st_mode) == 0o600
+        assert stat.S_IMODE(backup.parent.stat().st_mode) == 0o700
+    else:
+        from defenseclaw.file_permissions import (
+            windows_acl_confidentiality_error,
+            windows_acl_write_error,
+        )
+
+        assert windows_acl_write_error(backup.parent) is None
+        assert windows_acl_confidentiality_error(backup) is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink semantics differ on Windows")
+def test_mutate_v8_config_rejects_symlink_backup(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(_source())
+    backup_target = tmp_path / "outside.yaml"
+    backup_target.write_text("do not replace")
+    backup = tmp_path / "config.yaml.before-redaction"
+    backup.symlink_to(backup_target)
+
+    with pytest.raises(OSError, match="symbolic-link redaction backup"):
+        mutate_v8_config(
+            path,
+            [V8YAMLMutation.set(("observability", "local", "retention_days"), 30)],
+            backup_path=backup,
+            validator=lambda *_: None,
+        )
+
+    assert path.read_text() == _source()
+    assert backup_target.read_text() == "do not replace"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX mode contract")
+def test_mutate_v8_config_does_not_tighten_existing_backup_parent(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(_source())
+    backup_parent = tmp_path / "operator-selected"
+    backup_parent.mkdir(mode=0o755)
+    os.chmod(backup_parent, 0o755)  # noqa: S103 - test asserts this operator-selected mode
+
+    mutate_v8_config(
+        path,
+        [V8YAMLMutation.set(("observability", "local", "retention_days"), 30)],
+        backup_path=backup_parent / "config.yaml.before-redaction",
+        validator=lambda *_: None,
+    )
+
+    assert stat.S_IMODE(backup_parent.stat().st_mode) == 0o755
+
+
+@pytest.mark.skipif(os.name == "nt", reason="hard-link semantics differ on Windows")
+def test_mutate_v8_config_rejects_backup_hard_linked_to_source(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(_source())
+    backup = tmp_path / "config.yaml.before-redaction"
+    os.link(path, backup)
+
+    with pytest.raises(ValueError, match=r"must not alias config\.yaml"):
+        mutate_v8_config(
+            path,
+            [V8YAMLMutation.set(("observability", "local", "retention_days"), 30)],
+            backup_path=backup,
+            validator=lambda *_: None,
+        )
+
+    assert path.read_text() == _source()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symlink semantics differ on Windows")
+def test_mutate_v8_config_reports_requested_path_through_symlinked_parent(tmp_path: Path) -> None:
+    path = tmp_path / "config.yaml"
+    path.write_text(_source())
+    actual_parent = tmp_path / "actual-backups"
+    actual_parent.mkdir()
+    requested_parent = tmp_path / "requested-backups"
+    requested_parent.symlink_to(actual_parent, target_is_directory=True)
+    requested_backup = requested_parent / "config.yaml.before-redaction"
+
+    result = mutate_v8_config(
+        path,
+        [V8YAMLMutation.set(("observability", "local", "retention_days"), 30)],
+        backup_path=requested_backup,
+        validator=lambda *_: None,
+    )
+
+    assert result.backup_path == str(requested_backup.absolute())
+    assert (actual_parent / requested_backup.name).read_text() == _source()
+
+
 @pytest.mark.skipif(os.name == "nt", reason="symlink semantics differ on Windows")
 def test_mutate_v8_config_rejects_symlink_target(tmp_path: Path) -> None:
     real = tmp_path / "real.yaml"

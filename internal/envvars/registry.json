@@ -2946,6 +2946,22 @@
       ],
       "since": "0.8.11",
       "security_note": "Bypassing the env_config file trust check lets a group-writable file at the canonical path retarget bearer-authenticated inspection POSTs. Test-only."
+    },
+    {
+      "name": "DEFENSECLAW_AUDIT_DB_LOCK_HELPER_PATH",
+      "category": "test_fixture",
+      "purpose": "Passes the temporary audit database path to isolated subprocesses that verify SQLite kernel-lock and WAL lifecycle behavior.",
+      "default": "unset",
+      "accepted_values": ["absolute temporary database path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/audit/audit_db_lock_unix_test.go",
+          "description": "Peer-process lock and SQLite-close fixtures; never read by production runtime paths"
+        }
+      ],
+      "since": "0.8.11"
     }
   ]
 }

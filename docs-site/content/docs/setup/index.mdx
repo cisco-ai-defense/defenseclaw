@@ -95,6 +95,11 @@ which ones are interactive and which ones are designed for scripts.
     description="Bring up the bundled OTLP collector + Grafana stack so you can see decisions live without leaving your laptop."
   />
   <Card
+    title="setup redaction"
+    href="/docs/reference/redaction"
+    description="Guided v8 policy editor with a simple remove-all choice plus advanced global, bucket, profile, destination, and ordered-route settings."
+  />
+  <Card
     title="setup skill-scanner"
     href="/docs/setup/skill-scanner"
     description="Wire the cisco-ai-skill-scanner SDK into admission. Optional VirusTotal + LLM second-opinion."
@@ -113,8 +118,8 @@ which ones are interactive and which ones are designed for scripts.
 
 ## Deployment and policy references
 
-These pages explain operator policy and deployment architecture; they are not
-additional `defenseclaw setup` verbs.
+These pages explain operator policy and deployment architecture in more depth
+than the command cards above.
 
 <Cards>
   <Card
@@ -145,17 +150,30 @@ below is the canonical mapping for their interactive and scripted forms.
 | `registry sync` / `entries` / `approve` / `reject` | n/a | flags only | Designed for cron / scripts. |
 | `setup splunk` | yes | `--non-interactive` + flags | HEC token comes from `--hec-token <value>` or, if omitted, the `DEFENSECLAW_SPLUNK_HEC_TOKEN` env var. |
 | `setup local-observability` | yes | flags + `--non-interactive` | One-shot bring-up; `--down` tears the stack back down. |
+| `setup redaction` | yes (bare command) | subcommands + flags | Simple choices lead into **Show advanced settings?** for all 14 buckets, custom profiles, destinations, and ordered routes. Mutations support `--dry-run`, `--json`, `--yes`, and optional restart. |
 | `setup skill-scanner` / `setup mcp-scanner` | yes | `--non-interactive` + flags | Per-feature toggles; the underlying `cisco-ai-skill-scanner` / `cisco-ai-mcp-scanner` SDKs ship as hard dependencies of `defenseclaw`. |
 | `sandbox init` / `sandbox setup` | yes | `sandbox setup --non-interactive` | Experimental top-level Linux/OpenClaw group. `init` creates prerequisites and then runs setup; the current generated endpoint wiring must pass the documented acceptance gate. |
 
-<Callout title="Redaction is configured directly as v8 policy">
-There is no `setup` toggle for redaction. Edit
+<Callout title="Redaction is a v8 policy editor, not an on/off toggle">
+Run `defenseclaw setup redaction` for the guided workflow, or use subcommands
+such as `status`, `remove-all`, `bucket`, `profile`, `destination`, and `route`
+for automation. The command edits
 `observability.destinations[].routes[].selector.buckets` and
-`observability.redaction_profiles`, then run `defenseclaw config validate`,
+`observability.redaction_profiles` and compiles the staged effective plan. A
+changed non-dry-run write creates a private timestamped backup and verifies the
+installed plan. `remove-all` selects profile `none` for configurable projections;
+it cannot weaken the release-owned managed enterprise destination.
+
+For an independent operator cross-check, run `defenseclaw config validate`,
 `defenseclaw config show --effective --section observability`, and
-`defenseclaw observability plan`. Apply the reviewed policy with
-`defenseclaw-gateway restart`.
+`defenseclaw observability plan`; use `defenseclaw-gateway restart` when your
+deployment requires an explicit activation restart.
 </Callout>
+
+The same workflow is available in **TUI → Setup → Redaction Policy** on macOS,
+Linux, and native Windows. The macOS app's **Logs → Redaction policy…** sheet
+exposes effective status, broad profile actions, and **Show advanced settings**
+for the full bucket/profile/destination/route command surface.
 
 <Callout title="See it for yourself">
 The interactive flow for the central command is replayed end-to-end on the [Setup guardrail](/docs/setup/guardrail) page. Interactive auxiliary commands follow the same prompt-or-flag rhythm; use the matrix above for script-only commands.

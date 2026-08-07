@@ -144,14 +144,17 @@ Each row corresponds to one prompt in the animation. **Default** shows what pres
 | **Guardrail proxy port** *(default: 4000)* | `--port` | — |
 | **Custom block message?** *(action mode only)* | `--block-message` | — |
 
-<Callout title="Redaction is v8 policy, not a guardrail setup flag">
-Edit `observability.destinations[].routes[].selector.buckets` and
-`observability.redaction_profiles` in `config.yaml`. Then run
+<Callout title="Redaction has its own v8 policy workflow">
+Run `defenseclaw setup redaction` after guardrail setup. Its simple flow can
+keep policy, remove redaction, or apply one profile; **Show advanced settings?**
+opens all 14 buckets, custom profiles, destinations, and ordered routes. Those
+settings own `observability.destinations[].routes[].selector.buckets` and
+`observability.redaction_profiles`. You can independently verify them with
 `defenseclaw config validate`,
 `defenseclaw config show --effective --section observability`, and
-`defenseclaw observability plan`; apply the reviewed policy with
+`defenseclaw observability plan`; apply an explicit restart with
 `defenseclaw-gateway restart`. See [Redaction](/docs/reference/redaction) for
-resolution order and profile examples.
+the full interactive and scripted workflow.
 </Callout>
 
 On a multi-connector install, `--connector <name>` scopes this setup run to that connector. When `--block-message` is supplied without `--connector`, setup treats it as broad operator intent: it updates the shared block message and reconciles active connector overrides so one connector does not keep stale block text.

@@ -31,6 +31,7 @@ the release actually qualifies.
 | Native OTLP ingress | **Supported** | Codex logs/metrics/traces; Claude Code logs/metrics with traces disabled. Observation only. Amp has no documented native-OTLP channel and uses hook-generated telemetry. |
 | Mandatory local audit | **Supported** | SQLite persists locally even without an outbound destination. |
 | Remote telemetry destinations | **Limited** | Supported when explicitly configured and reachable; credentials, network policy, and destination capabilities remain operator responsibilities. |
+| Redaction policy CLI and TUI | **Supported** | `setup redaction` uses the canonical v8 compiler for status, dry-run, and writes. The TUI provides safe quick actions plus all bucket/profile/destination/route commands; the guided workflow accepts prompt input in Activity. Backups use a protected current-user/SYSTEM DACL and durable atomic replacement. |
 | Skills, plugins, MCPs, agents, and command discovery | **Supported** | Scans the supported connectors' documented native roots. Discovery is not proof an asset is safe. |
 | Skill and MCP scanning | **Supported** | Packaged scanners are included. Remote URL/registry scans require optional network access. |
 | CodeGuard | **Limited** | Explicit opt-in; Codex/Amp AgentSkill and Claude Code plugin installation may need the agent/network. It is never silently installed. |
@@ -101,7 +102,8 @@ The public tree contains:
   `openhands`, `windsurf`, `zeptoclaw`.
 - Core setup: `gateway`, `guardrail`, `llm`, `mcp-scanner`, `migrate-llm`,
   `notifications`, `notifications-set`, `registry`, `remove`, `rotate-token`,
-  `skill-scanner`, `trusted-paths add/list/remove`.
+  `skill-scanner`, `trusted-paths add/list/remove`, and
+  `redaction status/remove-all/apply/defaults/bucket/profile/destination/route`.
 - Providers and routes: `provider add/list/remove/show`,
   `observability add/disable/enable/list/remove/test`, and
   `webhook add/disable/enable/list/remove/show/test`.
@@ -150,6 +152,8 @@ defenseclaw doctor
 defenseclaw config validate
 defenseclaw policy validate
 defenseclaw observability plan
+defenseclaw setup redaction status
+defenseclaw setup redaction remove-all --dry-run
 
 # Local inventory and scans
 defenseclaw skill list

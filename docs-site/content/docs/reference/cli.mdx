@@ -106,6 +106,7 @@ Hook setup aliases (`setup codex`, `setup claude-code`, `setup hermes`, and the 
 | `defenseclaw setup splunk` | Configure local Splunk in Docker, Splunk Enterprise HEC, or Splunk Observability Cloud. |
 | `defenseclaw setup webhook` | Configure Slack / PagerDuty / Webex / generic notifier webhooks (chat + incident routing). |
 | `defenseclaw setup observability add\|list\|enable\|disable\|remove\|test` | Manage config-v8 destinations across OTLP, Galileo, Splunk HEC, JSONL, HTTP JSONL, console, and Prometheus capabilities. Omitted destination policy means all supported signals/buckets, unredacted. Distinct from `setup webhook`, which manages notifier webhooks. |
+| `defenseclaw setup redaction [status\|remove-all\|apply\|defaults\|bucket\|profile\|destination\|route]` | Configure v8 redaction interactively or with scriptable subcommands. Bare invocation offers a simple baseline choice followed by **Show advanced settings?** for all buckets, profiles, destination policy, and ordered routes. Mutations preview the canonical effective diff; changed non-dry-run writes create a timestamped backup and verify the installed plan. |
 | `defenseclaw observability plan` | Print the masked effective v8 graph: generated local SQLite policy, collection, destination capabilities, routes, profiles, retention, and warnings. |
 
 For observability destinations, `name` is the stable identity: a new name adds,
@@ -113,6 +114,27 @@ and an existing name updates only that destination. Run `list --json` for the
 complete target/kind/signal inventory and `add ... --dry-run` for a safe preview.
 The TUI mirrors the runtime-loaded inventory in **Overview → Observability
 Destinations** and exposes the wizard at **0 Setup → Observability / Galileo**.
+
+The quickest way to remove every configurable redaction override is:
+
+```bash
+defenseclaw setup redaction remove-all --dry-run
+```
+
+<Callout type="warn" title="Profile none permits governed content without redaction">
+`remove-all` can expose governed content to configured destinations. Confirm that
+each affected destination has an approved trust boundary before using `--yes`.
+</Callout>
+
+```bash
+defenseclaw setup redaction remove-all --yes
+```
+
+This selects profile `none` for configurable log and trace projections without
+changing collection or routing. It affects generated local SQLite, but never
+weakens the release-owned managed enterprise destination. See
+[Redaction](/docs/reference/redaction) for the full interactive walkthrough and
+advanced command examples.
 
 | Command | Use it for |
 | --- | --- |

@@ -52,8 +52,11 @@ import (
 // verified cutover in judge_body_cutover.go and remain there only as a
 // read-only compatibility source until retention or authorized purge.
 type JudgeBodyStore struct {
-	db   *sql.DB
-	path string
+	db        *sql.DB
+	path      string
+	pathGuard *preparedJudgeBodyPath
+	closeMu   sync.Mutex
+	closed    bool
 
 	// cutoverReady gates the runtime writer and compatibility reader when
 	// the store was opened by NewJudgeBodyStoreForCutover. The gateway uses
@@ -130,22 +133,23 @@ func newJudgeBodyStoreWithPathHooks(
 	if err != nil {
 		return nil, err
 	}
-	defer prepared.close()
 	dbPath = prepared.path
 	if hooks.beforeSQLiteOpen != nil {
 		if err := hooks.beforeSQLiteOpen(dbPath); err != nil {
+			prepared.close()
 			return nil, fmt.Errorf("judge_body: pre-open path check: %w", err)
 		}
 	}
 	db, err := openSQLite(dbPath)
 	if err != nil {
+		prepared.close()
 		// Strip the leading "audit:" tier that openSQLite stamps so
 		// the operator sees the correct subsystem in the wrapped
 		// error chain. openSQLite is shared across both DBs, so the
 		// tier disambiguation happens at the caller boundary.
 		return nil, fmt.Errorf("judge_body: open db %s: %w", dbPath, unwrapOpenSQLiteErr(err))
 	}
-	st := &JudgeBodyStore{db: db, path: dbPath}
+	st := &JudgeBodyStore{db: db, path: dbPath, pathGuard: prepared}
 	st.cutoverReady.Store(!requireCutover)
 	if err := st.init(); err != nil {
 		_ = st.Close()
@@ -175,10 +179,25 @@ func unwrapOpenSQLiteErr(err error) error {
 
 // Close releases the underlying connection pool. Idempotent.
 func (s *JudgeBodyStore) Close() error {
-	if s == nil || s.db == nil {
+	if s == nil {
 		return nil
 	}
-	return s.db.Close()
+	s.closeMu.Lock()
+	defer s.closeMu.Unlock()
+	if s.closed {
+		return nil
+	}
+	s.closed = true
+	db := s.db
+	s.db = nil
+	pathGuard := s.pathGuard
+	s.pathGuard = nil
+	var err error
+	if db != nil {
+		err = db.Close()
+	}
+	pathGuard.close()
+	return err
 }
 
 // retry helpers reuse the audit-package retryBusy under the hood;
