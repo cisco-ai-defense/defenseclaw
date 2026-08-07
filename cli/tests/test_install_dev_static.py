@@ -33,7 +33,7 @@ def _make_target_prerequisites(text: str, target: str) -> list[str]:
     prerequisites: list[str] = []
     matched = False
     for line in logical_lines:
-        if line.startswith("\t"):
+        if line.startswith("\t") or line.lstrip().startswith("#"):
             continue
         declaration = line.split(";", 1)[0]
         target_expression, separator, prerequisite_expression = declaration.partition(":")
@@ -45,6 +45,22 @@ def _make_target_prerequisites(text: str, target: str) -> list[str]:
 
     assert matched, f"missing Make target: {target}"
     return prerequisites
+
+
+def test_make_target_prerequisites_handle_complete_rule_syntax() -> None:
+    text = (
+        "# sample: ignored\n"
+        "sample: pycli \\\n"
+        "  extra\n"
+        "sample: repeated | order-only\n"
+    )
+
+    assert _make_target_prerequisites(text, "sample") == [
+        "pycli",
+        "extra",
+        "repeated",
+        "order-only",
+    ]
 
 
 def test_dev_install_syncs_openclaw_embed_before_go_build() -> None:
