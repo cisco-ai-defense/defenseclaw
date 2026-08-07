@@ -170,8 +170,14 @@ func TestCircuitAuthenticationFailureOpensImmediately(t *testing.T) {
 	if admission := circuit.Admit(base.Add(authenticationCircuitOpenDuration / 2)); admission != CircuitAdmissionBlocked {
 		t.Fatalf("admission mid-cooldown = %v, want blocked", admission)
 	}
-	// After the auth cool-down the circuit grants exactly one probe.
-	if admission := circuit.Admit(base.Add(authenticationCircuitOpenDuration + time.Second)); admission != CircuitAdmissionProbe {
+	// After the auth cool-down the circuit grants exactly one probe. A
+	// second Admit at the same instant must be blocked so a regression that
+	// double-admits (or forgets to move to half-open) can't slip through.
+	postCooldown := base.Add(authenticationCircuitOpenDuration + time.Second)
+	if admission := circuit.Admit(postCooldown); admission != CircuitAdmissionProbe {
 		t.Fatalf("admission post-cooldown = %v, want probe", admission)
+	}
+	if admission := circuit.Admit(postCooldown); admission != CircuitAdmissionBlocked {
+		t.Fatalf("second post-cooldown admission = %v, want blocked", admission)
 	}
 }

@@ -998,8 +998,14 @@ EOF
   if (( ${#home_dirs[@]} > 0 )); then
     echo "  home_dirs:"
     local h
+    local quoted_home
     for h in "${home_dirs[@]}"; do
-      echo "    - \"${h}\""
+      # yaml_double_quoted_scalar performs the same escaping the rest of
+      # this file relies on for user-supplied strings — inserting `h` raw
+      # inside `"..."` would let a `\` or `"` in a legitimate home path
+      # produce invalid YAML or a subtly different path.
+      quoted_home="$(yaml_double_quoted_scalar "${h}")" || return 1
+      printf '    - %s\n' "${quoted_home}"
     done
   fi
 

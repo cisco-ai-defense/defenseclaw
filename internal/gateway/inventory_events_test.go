@@ -739,24 +739,23 @@ func TestManagedEndpointInventorySurvivesSourceDisabledAIDiscoveryLogs(t *testin
 			"endpoint_per_connector_mcp_inventory": {},
 		},
 	}
-	// Drain deliveries until every expected summary has landed. Per-item
-	// ai_component.observed records also flow through the same adapter (one
-	// per connector row and one per MCP entry); we ignore them here and only
-	// tally the ai.discovery.completed summaries against wantSources.
-	seenSummaries := map[string]int{}
+	// Drain deliveries until every expected DISTINCT (action, source) pair
+	// has landed. Per-item ai_component.observed records also flow through
+	// the same adapter (one per connector row and one per MCP entry); we
+	// ignore them here. Tracking by (action, source) rather than by count
+	// catches a regression where the same summary ships three times while
+	// another one is silently dropped.
+	seenPairs := map[string]struct{}{}
+	expectedPairs := map[string]struct{}{
+		string(config.ObservabilityV8ManagedConnectorInventoryAction) + "\x00" + endpointConnectorInventorySource: {},
+		string(config.ObservabilityV8ManagedMCPInventoryAction) + "\x00" + endpointMCPInventorySource:             {},
+		string(config.ObservabilityV8ManagedMCPInventoryAction) + "\x00" + "endpoint_per_connector_mcp_inventory": {},
+	}
 	deadline := time.After(15 * time.Second)
-	expectedSummaries := 3
 drain:
 	for {
-		haveAll := len(seenSummaries) == 0
-		if !haveAll {
-			total := 0
-			for _, count := range seenSummaries {
-				total += count
-			}
-			if total >= expectedSummaries {
-				break drain
-			}
+		if len(seenPairs) == len(expectedPairs) {
+			break drain
 		}
 		select {
 		case item := <-adapter.delivered:
@@ -791,9 +790,13 @@ drain:
 			} else if len(canonicalObjectArray(t, body[observability.TelemetryAttributeDefenseClawInventoryMcpIdentifiers])) < 1 {
 				t.Fatalf("managed MCP atomic carrier=%#v", body)
 			}
-			seenSummaries[gotSource]++
+			key := action + "\x00" + gotSource
+			if _, expected := expectedPairs[key]; !expected {
+				t.Fatalf("unexpected managed inventory (action, source)=(%q, %q)", action, gotSource)
+			}
+			seenPairs[key] = struct{}{}
 		case <-deadline:
-			t.Fatalf("timed out; seen summaries=%v", seenSummaries)
+			t.Fatalf("timed out; seen pairs=%v want=%v", seenPairs, expectedPairs)
 		}
 	}
 
