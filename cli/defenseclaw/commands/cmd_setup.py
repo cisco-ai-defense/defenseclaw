@@ -119,6 +119,11 @@ _SETUP_RESTART_HANDLED_KEY = SETUP_RESTART_HANDLED_META_KEY
 # default restart a synchronous readiness gate, without changing restart
 # policy for unrelated setup subcommands that merely share the same config.
 _SETUP_BATCH_READINESS_KEY = "defenseclaw._setup_batch_readiness_connectors"
+# Deferred per-connector audit records for a restarting bare batch. The result
+# callback emits these only after the gateway is healthy, so a fresh quickstart
+# can retain fail-closed canonical admission without trying to audit through a
+# sidecar that ``init --no-start-gateway`` deliberately left stopped.
+_SETUP_BATCH_AUDIT_KEY = "defenseclaw._setup_batch_audits"
 _CONNECTOR_RUNTIME_READY_TIMEOUT_SECONDS = 60.0
 _GATEWAY_API_READY_TIMEOUT_SECONDS = 45.0
 _DEFENSE_GATEWAY_LIFECYCLE_TIMEOUT_SECONDS = 60
@@ -5187,8 +5192,10 @@ def _apply_hook_connector_setup(
     mode: str = "observe",
     restart: bool,
     allow_offline_audit: bool = False,
+    defer_audit: bool = False,
     workspace_dir: str | None = None,
     write_mode: str = "replace",
+    preserve_global_settings: bool = False,
     rule_pack: str | None = None,
     rule_pack_dir: str | None = None,
     block_message: str | None = None,
@@ -5364,7 +5371,8 @@ def _apply_hook_connector_setup(
     # a stale gate on disk that the restarted gateway immediately reloads.
     _prune_judge_gate_to_action_scope(gc, [connector])
 
-    gc.scanner_mode = "local"
+    if not preserve_global_settings:
+        gc.scanner_mode = "local"
     gc.port = gc.port or 4000
     # SU-02/J1/J2: preserve the operator's detection strategy + judge state
     # across re-runs. setup used to unconditionally re-pin detection_strategy =
@@ -5379,12 +5387,13 @@ def _apply_hook_connector_setup(
         gc.detection_strategy = "regex_only"
     if not gc.detection_strategy_completion:
         gc.detection_strategy_completion = "regex_only"
-    cfg.ai_discovery.enabled = True
-    cfg.ai_discovery.mode = cfg.ai_discovery.mode or "enhanced"
-    cfg.ai_discovery.include_shell_history = True
-    cfg.ai_discovery.include_package_manifests = True
-    cfg.ai_discovery.include_env_var_names = True
-    cfg.ai_discovery.include_network_domains = True
+    if not preserve_global_settings:
+        cfg.ai_discovery.enabled = True
+        cfg.ai_discovery.mode = cfg.ai_discovery.mode or "enhanced"
+        cfg.ai_discovery.include_shell_history = True
+        cfg.ai_discovery.include_package_manifests = True
+        cfg.ai_discovery.include_env_var_names = True
+        cfg.ai_discovery.include_network_domains = True
 
     try:
         cfg.save()
@@ -5422,12 +5431,13 @@ def _apply_hook_connector_setup(
         )
         click.echo(f"  ✓ {_CONNECTOR_META[connector]['label']} connector setup complete")
 
-    _log_setup_action(
-        app,
-        ACTION_SETUP_HOOK_CONNECTOR,
-        f"connector={connector} mode={desired_mode} surface=hook",
-        allow_offline=allow_offline_audit,
-    )
+    if not defer_audit:
+        _log_setup_action(
+            app,
+            ACTION_SETUP_HOOK_CONNECTOR,
+            f"connector={connector} mode={desired_mode} surface=hook",
+            allow_offline=allow_offline_audit,
+        )
 
     return True
 
@@ -6363,6 +6373,7 @@ def _apply_setup_batch(
     restart: bool,
     prompt_per_connector: bool,
     connector_modes: dict[str, str] | None = None,
+    preserve_global_settings: bool = False,
     allow_trusted_path_prompt: bool = True,
     trusted_prompt_cache: dict[str, bool] | None = None,
 ) -> None:
@@ -6380,12 +6391,14 @@ def _apply_setup_batch(
     click.echo(f"  Configuring {len(connectors)} connector(s): {', '.join(connectors)}")
 
     applied: list[str] = []
+    deferred_audits: list[tuple[str, str]] = []
     if allow_trusted_path_prompt:
         trusted_prompt_cache = trusted_prompt_cache if trusted_prompt_cache is not None else {}
     else:
         trusted_prompt_cache = None
     for c in connectors:
         connector_mode = (connector_modes or {}).get(c, default_mode)
+        applied_mode = "action" if (connector_mode or "").strip().lower() == "action" else "observe"
         enable_judge: bool | None = None
         if prompt_per_connector:
             connector_mode = _prompt_connector_mode(c, default_mode=connector_mode)
@@ -6397,7 +6410,9 @@ def _apply_setup_batch(
             mode=connector_mode,
             restart=False,
             allow_offline_audit=not restart,
+            defer_audit=restart,
             write_mode="add",
+            preserve_global_settings=preserve_global_settings,
             enable_judge=enable_judge,
             judge_hook_connectors=None,
             allow_trusted_path_prompt=allow_trusted_path_prompt,
@@ -6406,20 +6421,26 @@ def _apply_setup_batch(
         if not ok and (connector_mode or "").strip().lower() == "action":
             label = _CONNECTOR_META.get(c, {}).get("label", c)
             ux.warn(f"{label}: requested action mode was refused; configuring observe mode instead.")
+            applied_mode = "observe"
             ok = _apply_hook_connector_setup(
                 app,
                 connector=c,
                 mode="observe",
                 restart=False,
                 allow_offline_audit=not restart,
+                defer_audit=restart,
                 write_mode="add",
+                preserve_global_settings=preserve_global_settings,
                 enable_judge=enable_judge,
                 judge_hook_connectors=None,
                 allow_trusted_path_prompt=allow_trusted_path_prompt,
                 trusted_prompt_cache=trusted_prompt_cache,
             )
         if ok:
-            applied.append(c)
+            normalized = normalize_connector(c)
+            applied.append(normalized)
+            if restart:
+                deferred_audits.append((normalized, applied_mode))
 
     if not applied:
         raise click.ClickException("no connectors were configured — see errors above")
@@ -6432,7 +6453,8 @@ def _apply_setup_batch(
     # selected target, even when the gateway was stopped or the config bytes
     # were already current. Unrelated setup subcommands never set this marker.
     if restart:
-        ctx.meta[_SETUP_BATCH_READINESS_KEY] = tuple(sorted({normalize_connector(name) for name in connectors if name}))
+        ctx.meta[_SETUP_BATCH_READINESS_KEY] = tuple(sorted(set(applied)))
+        ctx.meta[_SETUP_BATCH_AUDIT_KEY] = tuple(sorted(deferred_audits))
     else:
         ctx.meta[_SETUP_RESTART_HANDLED_KEY] = True
         click.echo("  --no-restart: config updated; restart defenseclaw-gateway to wire the connector hooks.")
@@ -6458,13 +6480,13 @@ def _dispatch_bare_setup(
     it falls back to printing the group help — preserving the pre-SU-11
     bare-``setup`` behavior in CI / pipelines so nothing hangs on stdin.
     """
-    if app is None or getattr(app, "cfg", None) is None:
-        click.echo(ctx.get_help())
-        return
     if add_detected and (connectors or detected or all_connectors):
         raise click.UsageError(
             "--add-detected cannot be combined with --connector, --detected, or --all"
         )
+    if app is None or getattr(app, "cfg", None) is None:
+        click.echo(ctx.get_help())
+        return
 
     targets: list[str] = []
 
@@ -6560,6 +6582,7 @@ def _dispatch_bare_setup(
         restart=restart,
         prompt_per_connector=False,
         connector_modes=connector_modes,
+        preserve_global_settings=add_detected,
         allow_trusted_path_prompt=prompt_batch,
         trusted_prompt_cache=trusted_prompt_cache,
     )
@@ -9448,6 +9471,17 @@ def _auto_restart_sidecar_after_setup(ctx: click.Context, *_args, **_kwargs) -> 
         if isinstance(batch_targets_raw, (list, tuple))
         else []
     )
+    batch_audits_raw = ctx.meta.get(_SETUP_BATCH_AUDIT_KEY)
+    batch_audits = (
+        [
+            (normalize_connector(connector), mode)
+            for connector, mode in batch_audits_raw
+            if isinstance(connector, str) and connector and mode in ("observe", "action")
+        ]
+        if isinstance(batch_audits_raw, (list, tuple))
+        and all(isinstance(item, (list, tuple)) and len(item) == 2 for item in batch_audits_raw)
+        else []
+    )
     if not batch_targets and (cfg_path is None or after is None or before == after):
         return
 
@@ -9469,6 +9503,13 @@ def _auto_restart_sidecar_after_setup(ctx: click.Context, *_args, **_kwargs) -> 
             wait_for_connector_ready=True,
             start_if_stopped=True,
         )
+        for connector, audit_mode in batch_audits:
+            _log_setup_action(
+                app,
+                ACTION_SETUP_HOOK_CONNECTOR,
+                f"connector={connector} mode={audit_mode} surface=hook",
+                allow_offline=False,
+            )
         return
 
     pid_file = os.path.join(data_dir, "gateway.pid")

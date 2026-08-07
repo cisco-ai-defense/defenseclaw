@@ -92,8 +92,17 @@ def test_make_python_recipes_use_cross_platform_venv_path() -> None:
 def test_noninteractive_quickstart_adds_newly_detected_connectors_safely() -> None:
     text = MAKEFILE.read_text(encoding="utf-8")
     quickstart = text[text.index("\nquickstart:") : text.index("\n# Post-install interactive prompt")]
+    init_command = '"$$dc_bin" init --non-interactive --yes'
+    setup_guard = 'if ! "$$dc_bin" setup --add-detected --yes --restart; then'
 
-    assert '"$$dc_bin" setup --add-detected --yes --restart' in quickstart
+    first_init = quickstart.index(init_command)
+    no_tty_init = quickstart.index(init_command, first_init + len(init_command))
+    assert no_tty_init < quickstart.index(setup_guard)
+    setup_failure = quickstart[
+        quickstart.index(setup_guard) : quickstart.index("\n\t\t\tfi; \\", quickstart.index(setup_guard))
+    ]
+    assert "Could not add newly detected connectors" in setup_failure
+    assert "exit 1;" in setup_failure
 
 
 def test_local_make_workflow_uses_one_test_ready_python_environment() -> None:

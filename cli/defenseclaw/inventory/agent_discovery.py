@@ -35,6 +35,7 @@ from functools import lru_cache
 from io import StringIO
 from pathlib import Path
 from typing import Any, NamedTuple
+from xml.parsers.expat import ExpatError
 
 import yaml
 
@@ -1709,7 +1710,7 @@ def _macos_app_version_for_binary(binary_path: str) -> tuple[str, str]:
     try:
         with info_path.open("rb") as stream:
             info = plistlib.load(stream)
-    except (OSError, plistlib.InvalidFileException, ValueError) as exc:
+    except (OSError, plistlib.InvalidFileException, ExpatError, ValueError) as exc:
         return "", f"application metadata probe failed: {exc}"
     if not isinstance(info, dict):
         return "", "application metadata is invalid"
@@ -1860,7 +1861,7 @@ def _binary_candidates_for_agent(name: str, spec: _AgentSpec) -> tuple[str, ...]
             candidates.append(path)
     if not _is_windows_host() and _is_macos_host():
         for candidate in _macos_binary_candidates(name):
-            if os.path.isfile(candidate):
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
                 candidates.append(os.path.abspath(candidate))
     if not _is_windows_host():
         return _deduplicate_paths(candidates)
@@ -1934,14 +1935,26 @@ def _macos_app_bundle_for_binary(binary_path: str) -> Path | None:
     if not _is_macos_host() or not binary_path:
         return None
     try:
-        candidate = Path(binary_path).absolute()
+        candidate = os.path.realpath(os.path.abspath(binary_path))
     except (OSError, ValueError):
         return None
-    for root in _macos_application_roots():
-        bundle = (root / "Cursor.app").absolute()
-        expected = bundle / "Contents" / "Resources" / "app" / "bin" / "cursor"
-        if _path_key(os.fspath(candidate)) == _path_key(os.fspath(expected)):
-            return bundle
+    for application_root in _macos_application_roots():
+        try:
+            root = os.path.realpath(os.path.abspath(os.fspath(application_root)))
+            bundle = os.path.realpath(os.path.join(root, "Cursor.app"))
+            expected = os.path.realpath(
+                os.path.join(bundle, "Contents", "Resources", "app", "bin", "cursor")
+            )
+        except (OSError, ValueError):
+            continue
+        # A symlinked bundle or embedded CLI must remain inside the resolved
+        # application root. This is the bundle equivalent of trusted-prefix
+        # validation and prevents passive metadata from blessing an app that
+        # escapes to an attacker-controlled location.
+        if not _path_is_within(bundle, root) or not _path_is_within(expected, bundle):
+            continue
+        if _path_key(candidate) == _path_key(expected):
+            return Path(bundle)
     return None
 
 
