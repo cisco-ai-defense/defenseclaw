@@ -1,0 +1,806 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>DefenseClaw Continuous Model Improvement Pipeline — Technical Specification v1.0</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            line-height: 1.6;
+            color: #1a1a2e;
+            background: #f8f9fa;
+            padding: 0;
+        }
+
+        .container {
+            max-width: 1100px;
+            margin: 0 auto;
+            padding: 40px 60px;
+            background: white;
+            min-height: 100vh;
+            box-shadow: 0 0 30px rgba(0,0,0,0.08);
+        }
+
+        /* Header */
+        .doc-header {
+            border-bottom: 3px solid #2d3748;
+            padding-bottom: 30px;
+            margin-bottom: 40px;
+        }
+
+        .doc-header h1 {
+            font-size: 28px;
+            font-weight: 700;
+            color: #1a1a2e;
+            margin-bottom: 8px;
+        }
+
+        .doc-header .subtitle {
+            font-size: 18px;
+            color: #4a5568;
+            font-weight: 400;
+        }
+
+        .doc-meta {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 16px;
+            margin-top: 20px;
+            padding: 16px;
+            background: #f7fafc;
+            border-radius: 8px;
+            font-size: 13px;
+        }
+
+        .doc-meta dt { font-weight: 600; color: #4a5568; }
+        .doc-meta dd { color: #2d3748; margin-top: 2px; }
+
+        /* TOC */
+        .toc {
+            background: #f7fafc;
+            border: 1px solid #e2e8f0;
+            border-radius: 8px;
+            padding: 24px 32px;
+            margin-bottom: 40px;
+        }
+
+        .toc h2 { font-size: 16px; margin-bottom: 12px; color: #2d3748; }
+        .toc ol { padding-left: 20px; }
+        .toc li { margin: 6px 0; }
+        .toc a { color: #3182ce; text-decoration: none; }
+        .toc a:hover { text-decoration: underline; }
+
+        /* Sections */
+        h2 {
+            font-size: 22px;
+            font-weight: 700;
+            color: #1a1a2e;
+            margin-top: 50px;
+            margin-bottom: 16px;
+            padding-bottom: 8px;
+            border-bottom: 2px solid #e2e8f0;
+        }
+
+        h3 {
+            font-size: 17px;
+            font-weight: 600;
+            color: #2d3748;
+            margin-top: 32px;
+            margin-bottom: 12px;
+        }
+
+        h4 {
+            font-size: 14px;
+            font-weight: 600;
+            color: #4a5568;
+            margin-top: 20px;
+            margin-bottom: 8px;
+        }
+
+        p { margin-bottom: 12px; color: #2d3748; }
+
+        /* Tables */
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 16px 0 24px;
+            font-size: 13px;
+        }
+
+        th {
+            background: #2d3748;
+            color: white;
+            padding: 10px 14px;
+            text-align: left;
+            font-weight: 600;
+        }
+
+        td {
+            padding: 10px 14px;
+            border-bottom: 1px solid #e2e8f0;
+            vertical-align: top;
+        }
+
+        tr:nth-child(even) { background: #f7fafc; }
+        tr:hover { background: #edf2f7; }
+
+        /* Code / Diagrams */
+        pre {
+            background: #1a202c;
+            color: #e2e8f0;
+            padding: 20px 24px;
+            border-radius: 8px;
+            overflow-x: auto;
+            font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', Menlo, monospace;
+            font-size: 12px;
+            line-height: 1.5;
+            margin: 16px 0 24px;
+        }
+
+        code {
+            font-family: 'JetBrains Mono', 'Fira Code', 'SF Mono', Menlo, monospace;
+            font-size: 12px;
+            background: #edf2f7;
+            padding: 2px 6px;
+            border-radius: 4px;
+            color: #c53030;
+        }
+
+        pre code {
+            background: none;
+            padding: 0;
+            color: #e2e8f0;
+        }
+
+        /* Callouts */
+        .callout {
+            padding: 16px 20px;
+            border-radius: 8px;
+            margin: 16px 0;
+            border-left: 4px solid;
+        }
+
+        .callout-info { background: #ebf8ff; border-color: #3182ce; }
+        .callout-warn { background: #fffbeb; border-color: #d69e2e; }
+        .callout-success { background: #f0fff4; border-color: #38a169; }
+
+        /* Lists */
+        ul, ol { margin: 8px 0 16px 24px; }
+        li { margin: 4px 0; }
+
+        /* Diagram containers */
+        .diagram {
+            background: #1a202c;
+            border-radius: 8px;
+            padding: 24px;
+            margin: 20px 0;
+            overflow-x: auto;
+        }
+
+        .diagram pre {
+            margin: 0;
+            padding: 0;
+            background: none;
+        }
+
+        /* Section numbers */
+        .section-num {
+            color: #3182ce;
+            font-weight: 700;
+            margin-right: 8px;
+        }
+
+        /* Page break hints for PDF */
+        .page-break { page-break-before: always; }
+
+        /* Print styles */
+        @media print {
+            body { background: white; }
+            .container { box-shadow: none; padding: 20px 40px; }
+            pre { font-size: 10px; }
+            table { font-size: 11px; }
+        }
+
+        /* Editable indicator */
+        [contenteditable="true"]:focus {
+            outline: 2px solid #3182ce;
+            outline-offset: 2px;
+            border-radius: 4px;
+        }
+
+        [contenteditable="true"]:hover {
+            background: #fffff0;
+        }
+    </style>
+</head>
+<body>
+    <div class="container" contenteditable="true">
+
+        <div class="doc-header">
+            <h1>DefenseClaw Continuous Model Improvement Pipeline</h1>
+            <div class="subtitle">Technical Specification v1.0</div>
+            <dl class="doc-meta">
+                <div><dt>Version</dt><dd>1.0</dd></div>
+                <div><dt>Date</dt><dd>2026-07-09</dd></div>
+                <div><dt>Author</dt><dd>DefenseClaw Engineering</dd></div>
+                <div><dt>Status</dt><dd>Draft</dd></div>
+            </dl>
+        </div>
+
+        <!-- TABLE OF CONTENTS -->
+        <div class="toc">
+            <h2>Table of Contents</h2>
+            <ol>
+                <li><a href="#exec-summary">Executive Summary</a></li>
+                <li><a href="#architecture">System Architecture</a></li>
+                <li><a href="#data-flows">Data Flow Diagrams</a></li>
+                <li><a href="#components">Component Specifications</a></li>
+                <li><a href="#tools">Tool Reference</a></li>
+                <li><a href="#config">Configuration Reference</a></li>
+                <li><a href="#cli">CLI Reference</a></li>
+                <li><a href="#errors">Error Handling</a></li>
+                <li><a href="#state">State Machine</a></li>
+                <li><a href="#files">File Layout</a></li>
+                <li><a href="#modules">Implementation Modules</a></li>
+                <li><a href="#effort">Estimated Effort</a></li>
+            </ol>
+        </div>
+
+        <!-- 1. EXECUTIVE SUMMARY -->
+        <h2 id="exec-summary"><span class="section-num">1.</span> Executive Summary</h2>
+
+        <h3>1.1 Purpose</h3>
+        <p>DefenseClaw manages an automated pipeline that continuously improves local LLM models by learning from production traffic. User queries are classified by the semantic router, stored as training data, used to fine-tune local models, and promoted to serve traffic when they match frontier model quality — all orchestrated by DefenseClaw with zero manual intervention after initial setup.</p>
+
+        <h3>1.2 Goals</h3>
+        <table>
+            <thead><tr><th>#</th><th>Goal</th><th>Metric</th></tr></thead>
+            <tbody>
+                <tr><td>G1</td><td>Replace expensive frontier API calls with local models</td><td>Cost reduction per category</td></tr>
+                <tr><td>G2</td><td>Maintain quality parity with frontier</td><td>≥90% of frontier score (LLM-as-judge)</td></tr>
+                <tr><td>G3</td><td>Zero manual intervention after setup</td><td>Auto-trigger, train, promote, rollback</td></tr>
+                <tr><td>G4</td><td>Single source of truth</td><td>All config in <code>~/.defenseclaw/config.yaml</code></td></tr>
+                <tr><td>G5</td><td>Graceful degradation</td><td>Pipeline failure never impacts user requests</td></tr>
+            </tbody>
+        </table>
+
+        <h3>1.3 Key Decisions</h3>
+        <table>
+            <thead><tr><th>Decision</th><th>Choice</th><th>Rationale</th></tr></thead>
+            <tbody>
+                <tr><td>Training trigger</td><td>Auto (threshold) + manual CLI</td><td>Hands-off by default, override when needed</td></tr>
+                <tr><td>Trace storage</td><td>Tempo (viz) + SQLite (training)</td><td>Best of both: dashboards + fast extraction</td></tr>
+                <tr><td>Training backend</td><td>User selects: Unsloth or mlx-lm-lora</td><td>Unsloth for CUDA GPUs, mlx-lm-lora for Mac</td></tr>
+                <tr><td>Algorithm</td><td>User selects per category</td><td>Different categories need different approaches</td></tr>
+                <tr><td>Base models</td><td>Curated list (Qwen, Llama, Phi, Gemma)</td><td>Tested + reliable</td></tr>
+                <tr><td>Model hosting</td><td>llama-server, always running, lazy-load</td><td>Instant inference on promotion</td></tr>
+                <tr><td>Evaluation</td><td>LLM-as-judge</td><td>Most accurate for open-ended quality</td></tr>
+                <tr><td>Promotion</td><td>Automatic if ratio ≥ threshold</td><td>Removes human bottleneck</td></tr>
+                <tr><td>Rollback</td><td>Auto (quality drop) + manual CLI</td><td>Safety net for production</td></tr>
+            </tbody>
+        </table>
+
+        <!-- 2. ARCHITECTURE -->
+        <h2 id="architecture" class="page-break"><span class="section-num">2.</span> System Architecture</h2>
+
+        <h3>2.1 High-Level Block Diagram</h3>
+        <div class="diagram"><pre>
+┌──────────────────────────────────────────────────────────────────────────────────┐
+│                          DEFENSECLAW PLATFORM                                     │
+│                                                                                   │
+│  ╔═══════════════════════════════════════════════════════════════════════════════╗ │
+│  ║  RUNTIME LAYER (per request, &lt;200ms)                                        ║ │
+│  ║                                                                              ║ │
+│  ║  ┌────────┐  ┌────────────┐  ┌────────┐  ┌─────────┐  ┌────────────────┐   ║ │
+│  ║  │ USER / │─▶│ GUARDRAILS │─▶│  SR    │─▶│ BIFROST │─▶│ MODEL          │   ║ │
+│  ║  │ AGENT  │  │            │  │classify│  │  route  │  │ (local/frontier)│   ║ │
+│  ║  └────────┘  └────────────┘  └───┬────┘  └────┬────┘  └────────────────┘   ║ │
+│  ║                                   │            │                             ║ │
+│  ║                                   │       ┌────┴──────────────┐              ║ │
+│  ║                                   │       │IF promoted:       │              ║ │
+│  ║                                   │       │  llama-server:8090│              ║ │
+│  ║                                   │       │ELSE:              │              ║ │
+│  ║                                   │       │  Frontier API     │              ║ │
+│  ║                                   │       └───────────────────┘              ║ │
+│  ║                                   ▼                                          ║ │
+│  ║                            ┌─────────────┐                                   ║ │
+│  ║                            │TRACE CAPTURE│ (async)                            ║ │
+│  ║                            └──────┬──────┘                                   ║ │
+│  ╚═══════════════════════════════════╪══════════════════════════════════════════╝ │
+│                                      │                                            │
+│  ╔═══════════════════════════════════╪══════════════════════════════════════════╗ │
+│  ║  STORAGE LAYER                    ▼                                          ║ │
+│  ║                                                                              ║ │
+│  ║  ┌─────────────────────┐      ┌──────────────────────────────────┐          ║ │
+│  ║  │ training-store.db   │      │ Grafana Tempo + Prometheus       │          ║ │
+│  ║  │ (SQLite)            │      │ (OTel visualization)             │          ║ │
+│  ║  │                     │      │                                   │          ║ │
+│  ║  │ • prompt, response  │      │ • Full request traces             │          ║ │
+│  ║  │ • category          │      │ • Routing decisions dashboard     │          ║ │
+│  ║  │ • model_used        │      │ • Latency + cost metrics          │          ║ │
+│  ║  └─────────┬───────────┘      └──────────────────────────────────┘          ║ │
+│  ╚════════════╪═════════════════════════════════════════════════════════════════╝ │
+│               │                                                                   │
+│               │ threshold OR manual trigger                                       │
+│               ▼                                                                   │
+│  ╔════════════════════════════════════════════════════════════════════════════════╗ │
+│  ║  TRAINING PIPELINE LAYER (periodic/triggered)                                 ║ │
+│  ║                                                                               ║ │
+│  ║  ┌────────┐  ┌────────┐  ┌────────┐  ┌────────┐  ┌────────┐  ┌──────────┐  ║ │
+│  ║  │EXTRACT │─▶│DATASET │─▶│ TRAIN  │─▶│EXPORT  │─▶│DEPLOY  │─▶│ EVALUATE │  ║ │
+│  ║  │        │  │ BUILD  │  │        │  │        │  │        │  │          │  ║ │
+│  ║  │SQLite  │  │Unsloth │  │Unsloth │  │→ GGUF  │  │llama-  │  │LLM Judge │  ║ │
+│  ║  │query   │  │  OR    │  │  OR    │  │q4_k_m  │  │server  │  │local vs  │  ║ │
+│  ║  │        │  │Direct  │  │mlx-lm- │  │        │  │        │  │frontier  │  ║ │
+│  ║  │        │  │JSONL   │  │lora    │  │        │  │        │  │          │  ║ │
+│  ║  └────────┘  └────────┘  └────────┘  └────────┘  └────────┘  └────┬─────┘  ║ │
+│  ║                                                                     │        ║ │
+│  ║                                                                ┌────┴────┐   ║ │
+│  ║                                                           pass ▼    fail ▼   ║ │
+│  ║                                                         ┌────────┐┌───────┐  ║ │
+│  ║                                                         │PROMOTE ││FAILED │  ║ │
+│  ║                                                         │SR+Bfst ││→ IDLE │  ║ │
+│  ║                                                         └────────┘└───────┘  ║ │
+│  ╚════════════════════════════════════════════════════════════════════════════════╝ │
+└──────────────────────────────────────────────────────────────────────────────────────┘</pre></div>
+
+        <h3>2.2 Component Inventory</h3>
+        <table>
+            <thead><tr><th>Component</th><th>Type</th><th>Port</th><th>Language</th><th>Lifecycle</th></tr></thead>
+            <tbody>
+                <tr><td>DefenseClaw Gateway</td><td>Native binary</td><td>18970</td><td>Go</td><td>Always running</td></tr>
+                <tr><td>Semantic Router</td><td>Docker container</td><td>8888</td><td>Go (vLLM SR)</td><td>Always running</td></tr>
+                <tr><td>llama-server</td><td>Native binary</td><td>8090</td><td>C++</td><td>Always running, lazy-load</td></tr>
+                <tr><td>Training subprocess</td><td>Temporary process</td><td>—</td><td>Python</td><td>During training only</td></tr>
+                <tr><td>Grafana</td><td>Docker container</td><td>3000</td><td>TypeScript</td><td>Always running</td></tr>
+                <tr><td>Tempo</td><td>Docker container</td><td>3200/4318</td><td>Go</td><td>Always running</td></tr>
+                <tr><td>Prometheus</td><td>Docker container</td><td>9090</td><td>Go</td><td>Always running</td></tr>
+                <tr><td>training-store.db</td><td>Embedded</td><td>—</td><td>SQLite</td><td>Part of gateway</td></tr>
+            </tbody>
+        </table>
+
+        <!-- 3. DATA FLOWS -->
+        <h2 id="data-flows" class="page-break"><span class="section-num">3.</span> Data Flow Diagrams</h2>
+
+        <h3>3.1 Runtime Data Flow (Every Request)</h3>
+        <div class="diagram"><pre>
+  REQUEST PATH (synchronous, &lt;200ms total)
+
+  User ─────▶ DefenseClaw Gateway
+              │
+              ├─▶ [1] Pre-call Guardrails (regex + judge + policy)
+              │       IF blocked → return error
+              │       IF passed ↓
+              │
+              ├─▶ [2] SR classify/intent (POST :8888/api/v1/classify/intent)
+              │       Returns: {category, recommended_model, matched_signals}
+              │
+              ├─▶ [3] Model Selection (Bifrost)
+              │       IF category promoted → llama-server (:8090)
+              │       ELSE → frontier API (Anthropic/OpenAI/Bedrock)
+              │
+              ├─▶ [4] Post-call Guardrails (response inspection)
+              │
+              └─▶ [5] Return response to user
+
+  ───────────────────────────────────────────────────────────
+
+  TRACE PATH (asynchronous, non-blocking, after step 5)
+
+  ├─▶ [A] Write to training-store.db (SQLite)
+  │       {category, prompt, response, model_used, latency, tokens}
+  │
+  └─▶ [B] Export OTel span to Tempo
+          {dc.routing.category, dc.routing.decision, ...}</pre></div>
+
+        <h3>3.2 Training Pipeline Flow</h3>
+        <div class="diagram"><pre>
+  TRIGGER
+  ───────
+  Auto: trace count ≥ min_traces (checked every 60s)
+  Manual: defenseclaw training run --category &lt;name&gt;
+                          │
+                          ▼
+  ┌─────────────────────────────────────────────────┐
+  │  STAGE 1: EXTRACT                                │
+  │                                                  │
+  │  SELECT prompt, response FROM training_traces    │
+  │  WHERE category = 'code'                         │
+  │    AND used_for_training = FALSE                 │
+  │  LIMIT 1000                                      │
+  │                                                  │
+  │  Output: code_raw.jsonl                          │
+  │  Hold-out: 10% → code_eval.jsonl                 │
+  └──────────────────────┬──────────────────────────┘
+                         ▼
+  ┌─────────────────────────────────────────────────┐
+  │  STAGE 2: BUILD DATASET                          │
+  │                                                  │
+  │  IF backend = unsloth:                           │
+  │    Call data-designer Python API                 │
+  │    • Generate rejected via local model           │
+  │    • Score with LLM Judge                        │
+  │    • Format as DPO/SFT                           │
+  │                                                  │
+  │  IF backend = mlx-lm-lora:                       │
+  │    Direct JSONL conversion (Go code)             │
+  └──────────────────────┬──────────────────────────┘
+                         ▼
+  ┌─────────────────────────────────────────────────┐
+  │  STAGE 3: TRAIN                                  │
+  │                                                  │
+  │  Execute Python subprocess:                      │
+  │  • Unsloth: FastLanguageModel + DPOTrainer       │
+  │  • mlx-lm-lora: CLI --train-mode dpo            │
+  │                                                  │
+  │  Duration: 2-6 hours (DPO) / 24-36 hours (GRPO) │
+  └──────────────────────┬──────────────────────────┘
+                         ▼
+  ┌─────────────────────────────────────────────────┐
+  │  STAGE 4: EXPORT → GGUF (q4_k_m, ~2.5 GB)       │
+  └──────────────────────┬──────────────────────────┘
+                         ▼
+  ┌─────────────────────────────────────────────────┐
+  │  STAGE 5: DEPLOY to llama-server models/         │
+  └──────────────────────┬──────────────────────────┘
+                         ▼
+  ┌─────────────────────────────────────────────────┐
+  │  STAGE 6: EVALUATE (LLM-as-Judge)                │
+  │                                                  │
+  │  50 test prompts:                                │
+  │    local_score = avg(judge scores for local)     │
+  │    frontier_score = avg(judge scores for fntier) │
+  │    ratio = local_score / frontier_score          │
+  └──────────────────────┬──────────────────────────┘
+                    ┌────┴────┐
+               pass ▼    fail ▼
+          ┌──────────┐  ┌──────────┐
+          │ PROMOTE  │  │  FAILED  │
+          │          │  │          │
+          │ Update   │  │ Keep on  │
+          │ SR +     │  │ frontier │
+          │ Bifrost  │  │ Wait for │
+          │ routing  │  │ more data│
+          └──────────┘  └──────────┘</pre></div>
+
+        <h3>3.3 Sequence Diagram</h3>
+        <div class="diagram"><pre>
+    User          DefenseClaw        SR Router       Bifrost      Model Host     Training
+     │                │                │               │              │             │
+     │── prompt ─────▶│                │               │              │             │
+     │                │── classify ───▶│               │              │             │
+     │                │◀── category ───│               │              │             │
+     │                │                │               │              │             │
+     │                │── forward(model) ────────────▶│              │             │
+     │                │                │               │── request ──▶│             │
+     │                │                │               │◀── response ─│             │
+     │                │◀────────────────────────────── │              │             │
+     │◀── response ───│                │               │              │             │
+     │                │                │               │              │             │
+     │                │── trace(async) ─────────────────────────────────────────────▶│
+     │                │                │               │              │             │
+     │                │                │               │              │  (later,    │
+     │                │                │               │              │   threshold │
+     │                │                │               │              │   reached)  │
+     │                │                │               │              │             │
+     │                │◀──── train complete, GGUF ready ────────────────────────────│
+     │                │                │               │              │             │
+     │                │── deploy GGUF ───────────────────────────────▶│             │
+     │                │── update SR ──▶│               │              │             │
+     │                │── update route ────────────────▶              │             │
+     │                │                │               │              │             │
+     │  (next request for same category now goes to local model)      │             │
+     │── prompt ─────▶│                │               │              │             │
+     │                │── classify ───▶│               │              │             │
+     │                │◀── code-local ─│               │              │             │
+     │                │── forward ─────────────────────────────────▶ │             │
+     │                │◀── local response ────────────────────────── │             │
+     │◀── response ───│                │               │              │             │</pre></div>
+
+        <!-- 4. COMPONENTS -->
+        <h2 id="components" class="page-break"><span class="section-num">4.</span> Component Specifications</h2>
+
+        <h3>4.1 Trace Capture</h3>
+        <p><strong>Purpose:</strong> Store every LLM request + SR classification for future training.</p>
+        <p><strong>Implementation:</strong> Buffered channel (100 entries) + single writer goroutine. Never blocks response path.</p>
+        <div class="callout callout-info">
+            <strong>Design choice:</strong> SQLite for training extraction (fast, indexed, no network). Tempo for visualization (dashboards, TraceQL queries). Both written in parallel.
+        </div>
+
+        <h4>SQLite Schema</h4>
+        <pre><code>CREATE TABLE training_traces (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp TEXT NOT NULL DEFAULT (datetime('now')),
+    category TEXT NOT NULL,
+    recommended_model TEXT,
+    matched_signals TEXT,
+    prompt TEXT NOT NULL,
+    response TEXT NOT NULL,
+    model_used TEXT NOT NULL,
+    is_promoted_model BOOLEAN DEFAULT FALSE,
+    latency_ms INTEGER,
+    tokens_in INTEGER,
+    tokens_out INTEGER,
+    used_for_training BOOLEAN DEFAULT FALSE,
+    training_run_id TEXT
+);
+
+CREATE INDEX idx_category_unused ON training_traces(category, used_for_training);
+CREATE INDEX idx_category_time ON training_traces(category, timestamp);</code></pre>
+
+        <h3>4.2 Auto-Trigger</h3>
+        <p><strong>Mechanism:</strong> Single goroutine, checks trace counts per category every 60 seconds. Fires pipeline when <code>count ≥ min_traces</code> and no training in progress.</p>
+
+        <h3>4.3 Dataset Builder</h3>
+        <table>
+            <thead><tr><th>Backend</th><th>Method</th><th>Output</th></tr></thead>
+            <tbody>
+                <tr><td><code>unsloth</code></td><td>data-designer Python API (LLM generation + judging)</td><td>Rich DPO/SFT dataset with quality scores</td></tr>
+                <tr><td><code>mlx-lm-lora</code></td><td>Direct JSONL conversion (Go code)</td><td>Simple format mapping</td></tr>
+            </tbody>
+        </table>
+
+        <h3>4.4 Training Runner</h3>
+        <p>Generates a Python training script, executes as subprocess, monitors stdout for progress, handles 12-hour timeout.</p>
+
+        <h3>4.5 Evaluator (LLM-as-Judge)</h3>
+        <p>For each held-out prompt: get local response, look up frontier response, send both to judge model with scoring rubric. Compute ratio.</p>
+        <pre><code>Judge Prompt:
+"Rate Response A vs B on accuracy, helpfulness, completeness (1-10).
+Return JSON: {"score_a": N, "score_b": N}"
+
+Scoring:
+  ratio = avg(score_a across 50 prompts) / avg(score_b)
+  IF ratio ≥ 0.90 → PROMOTE</code></pre>
+
+        <!-- 5. TOOLS -->
+        <h2 id="tools" class="page-break"><span class="section-num">5.</span> Tool Reference</h2>
+
+        <table>
+            <thead><tr><th>Tool</th><th>Purpose</th><th>Port</th><th>Install</th><th>License</th></tr></thead>
+            <tbody>
+                <tr><td><strong>vLLM Semantic Router</strong></td><td>Classify queries into categories</td><td>8888</td><td>Docker (managed by DC)</td><td>Apache 2.0</td></tr>
+                <tr><td><strong>Unsloth</strong></td><td>Dataset creation + training + export</td><td>—</td><td><code>pip install unsloth data-designer</code></td><td>Apache 2.0</td></tr>
+                <tr><td><strong>mlx-lm-lora</strong></td><td>Mac-native training (12 algorithms)</td><td>—</td><td><code>pip install mlx-lm-lora</code></td><td>MIT</td></tr>
+                <tr><td><strong>llama.cpp</strong></td><td>Host GGUF models (inference)</td><td>8090</td><td><code>brew install llama.cpp</code></td><td>MIT</td></tr>
+                <tr><td><strong>Grafana Tempo</strong></td><td>Trace storage + visualization</td><td>3200</td><td><code>defenseclaw setup local-observability</code></td><td>AGPL-3.0</td></tr>
+                <tr><td><strong>data-designer</strong></td><td>Programmatic dataset building</td><td>—</td><td><code>pip install data-designer</code></td><td>Apache 2.0</td></tr>
+                <tr><td><strong>Bifrost</strong></td><td>Multi-provider format translation</td><td>—</td><td>Built into DefenseClaw</td><td>—</td></tr>
+            </tbody>
+        </table>
+
+        <h3>5.1 Training Backend Comparison</h3>
+        <table>
+            <thead><tr><th>Property</th><th>Unsloth</th><th>mlx-lm-lora</th></tr></thead>
+            <tbody>
+                <tr><td>Platform</td><td>NVIDIA GPU (CUDA)</td><td>Apple Silicon (M1-M4)</td></tr>
+                <tr><td>Algorithms</td><td>SFT, DPO, GRPO, ORPO, PPO</td><td>SFT, DPO, ORPO, CPO, GRPO, Dr.GRPO, DAPO, PPO, +4 more</td></tr>
+                <tr><td>DPO speed (4B)</td><td>~2-3 hours (A100)</td><td>~4-6 hours (M2 Max)</td></tr>
+                <tr><td>GRPO speed (4B)</td><td>~3-5 hours (A100)</td><td>~24-36 hours (M2 Max)</td></tr>
+                <tr><td>Memory (4B DPO)</td><td>~10 GB VRAM</td><td>~8-10 GB unified</td></tr>
+                <tr><td>Dataset builder</td><td>Built-in (data-designer)</td><td>Needs external JSONL</td></tr>
+                <tr><td>GGUF export</td><td>One-line API</td><td>CLI command</td></tr>
+            </tbody>
+        </table>
+
+        <h3>5.2 Curated Base Models</h3>
+        <table>
+            <thead><tr><th>Model ID</th><th>Size</th><th>Best for</th><th>HuggingFace Repo</th></tr></thead>
+            <tbody>
+                <tr><td>Qwen3.5-4B</td><td>4B</td><td>Code, reasoning</td><td>unsloth/Qwen3.5-4B</td></tr>
+                <tr><td>Qwen3.5-1.5B</td><td>1.5B</td><td>Simple QA, fast inference</td><td>unsloth/Qwen3.5-1.5B</td></tr>
+                <tr><td>Llama-3.2-3B</td><td>3B</td><td>General purpose</td><td>unsloth/Llama-3.2-3B</td></tr>
+                <tr><td>Phi-4-mini</td><td>3.8B</td><td>Reasoning, structured output</td><td>unsloth/Phi-4-mini</td></tr>
+                <tr><td>Gemma-3-4B</td><td>4B</td><td>Multilingual, creative</td><td>unsloth/Gemma-3-4B</td></tr>
+            </tbody>
+        </table>
+
+        <!-- 6. CONFIG -->
+        <h2 id="config" class="page-break"><span class="section-num">6.</span> Configuration Reference</h2>
+        <pre><code>training:
+  enabled: true
+  backend: unsloth                    # unsloth | mlx-lm-lora
+  models_dir: ~/.defenseclaw/models
+  llama_server_port: 8090
+  training_timeout_hours: 12
+  trace_retention_days: 90
+
+  base_models:
+    - id: Qwen3.5-4B
+      hf_repo: unsloth/Qwen3.5-4B
+      mlx_repo: mlx-community/Qwen3.5-4B-4bit
+      size: 4B
+    - id: Qwen3.5-1.5B
+      hf_repo: unsloth/Qwen3.5-1.5B
+      mlx_repo: mlx-community/Qwen3.5-1.5B-4bit
+      size: 1.5B
+    # ... (Llama, Phi, Gemma)
+
+  categories:
+    - name: code
+      base_model: Qwen3.5-4B
+      algorithm: dpo                  # sft | dpo | grpo | sft+dpo | orpo
+      min_traces: 500
+      eval_threshold: 0.90
+      eval_prompts: 50
+      auto_trigger: true
+      monitor_interval: 100
+
+    - name: reasoning
+      base_model: Qwen3.5-4B
+      algorithm: sft+dpo
+      min_traces: 1000
+      eval_threshold: 0.92
+      auto_trigger: false
+
+    - name: simple-qa
+      base_model: Qwen3.5-1.5B
+      algorithm: sft
+      min_traces: 300
+      eval_threshold: 0.85
+      auto_trigger: true</code></pre>
+
+        <!-- 7. CLI -->
+        <h2 id="cli"><span class="section-num">7.</span> CLI Reference</h2>
+        <table>
+            <thead><tr><th>Command</th><th>Description</th></tr></thead>
+            <tbody>
+                <tr><td><code>defenseclaw training enable</code></td><td>Interactive setup wizard (backend, categories, models)</td></tr>
+                <tr><td><code>defenseclaw training disable</code></td><td>Stop pipeline, keep data and models</td></tr>
+                <tr><td><code>defenseclaw training status</code></td><td>Overview of all categories + states</td></tr>
+                <tr><td><code>defenseclaw training run --category &lt;name&gt;</code></td><td>Trigger training now</td></tr>
+                <tr><td><code>defenseclaw training run --dry-run</code></td><td>Show plan without executing</td></tr>
+                <tr><td><code>defenseclaw training eval --category &lt;name&gt;</code></td><td>Run evaluation only</td></tr>
+                <tr><td><code>defenseclaw training promote --category &lt;name&gt;</code></td><td>Force-promote a version</td></tr>
+                <tr><td><code>defenseclaw training rollback --category &lt;name&gt;</code></td><td>Revert to frontier</td></tr>
+                <tr><td><code>defenseclaw training models</code></td><td>List all model versions</td></tr>
+                <tr><td><code>defenseclaw training traces --category &lt;name&gt;</code></td><td>Show trace statistics</td></tr>
+            </tbody>
+        </table>
+
+        <!-- 8. ERRORS -->
+        <h2 id="errors"><span class="section-num">8.</span> Error Handling</h2>
+        <table>
+            <thead><tr><th>Stage</th><th>Error</th><th>Behavior</th><th>Recovery</th></tr></thead>
+            <tbody>
+                <tr><td>Trace capture</td><td>SQLite write fails</td><td>Log warning, don't block</td><td>Retry next request</td></tr>
+                <tr><td>Auto-trigger</td><td>Training running</td><td>Skip silently</td><td>Wait for completion</td></tr>
+                <tr><td>Extraction</td><td>Not enough traces</td><td>Abort, log count</td><td>Wait for more data</td></tr>
+                <tr><td>Dataset build</td><td>Subprocess fails</td><td>Log stderr, mark failed</td><td>Alert user</td></tr>
+                <tr><td>Training</td><td>OOM</td><td>Kill, log error</td><td>Suggest smaller config</td></tr>
+                <tr><td>Training</td><td>Timeout (&gt;12h)</td><td>Kill subprocess</td><td>Alert user</td></tr>
+                <tr><td>Export</td><td>GGUF fails</td><td>Log, mark failed</td><td>Debug manually</td></tr>
+                <tr><td>Deploy</td><td>Load fails</td><td>Don't promote</td><td>Restart llama-server</td></tr>
+                <tr><td>Eval</td><td>Judge unavailable</td><td>Retry 3x</td><td>Abort if all fail</td></tr>
+                <tr><td>Eval</td><td>Below threshold</td><td>Don't promote</td><td>Normal — wait for next cycle</td></tr>
+                <tr><td>Post-promotion</td><td>Quality drops</td><td>Auto-rollback</td><td>Alert + retrain</td></tr>
+                <tr><td>llama-server</td><td>Crashes</td><td>Watchdog restart</td><td>During downtime → frontier</td></tr>
+            </tbody>
+        </table>
+
+        <!-- 9. STATE MACHINE -->
+        <h2 id="state" class="page-break"><span class="section-num">9.</span> State Machine</h2>
+        <div class="diagram"><pre>
+  Per-Category State Diagram:
+
+                    ┌─────────────┐
+           ┌──────▶│    IDLE     │◀──────────────────────────────┐
+           │       └──────┬──────┘                               │
+           │              │ threshold / manual                    │
+           │              ▼                                       │
+           │       ┌──────────────┐                              │
+           │       │  EXTRACTING  │                              │
+           │       └──────┬───────┘                              │
+           │              ▼                                       │
+           │       ┌──────────────────┐                          │
+           │       │ BUILDING_DATASET │                          │
+           │       └──────┬───────────┘                          │
+           │              ▼                                       │
+           │       ┌──────────────┐                              │
+           │       │   TRAINING   │─── timeout/crash ────────────┤
+           │       └──────┬───────┘                              │
+           │              ▼                                       │
+           │       ┌──────────────┐                              │
+           │       │  EXPORTING   │─── fail ─────────────────────┤
+           │       └──────┬───────┘                              │
+           │              ▼                                       │
+           │       ┌──────────────┐                              │
+           │       │  DEPLOYING   │                              │
+           │       └──────┬───────┘                              │
+           │              ▼                                       │
+           │       ┌──────────────┐                              │
+           │       │  EVALUATING  │                              │
+           │       └──────┬───────┘                              │
+           │         ┌────┴────┐                                 │
+           │    pass ▼    fail ▼                                 │
+           │  ┌──────────┐  ┌────────┐                          │
+           │  │ PROMOTED │  │ FAILED │──────────────────────────┘
+           │  └────┬─────┘  └────────┘
+           │       │ quality drops
+           │       ▼
+           │  ┌──────────────┐
+           └──│ ROLLED_BACK  │
+              └──────────────┘
+
+  Rules:
+  • One state per category at a time (mutex-protected)
+  • Multiple categories can train concurrently
+  • State persisted in registry.json (survives restarts)</pre></div>
+
+        <!-- 10. FILES -->
+        <h2 id="files"><span class="section-num">10.</span> File Layout</h2>
+        <pre><code>~/.defenseclaw/
+├── config.yaml                     # Single source of truth
+├── training-store.db               # SQLite (traces)
+│
+├── models/                         # GGUF files
+│   ├── registry.json               # Version metadata + state
+│   ├── code-v1.gguf
+│   ├── code-v2.gguf
+│   └── simple-qa-v1.gguf
+│
+├── training/                       # Pipeline workspace
+│   ├── datasets/                   # Generated JSONL
+│   ├── scripts/                    # Generated Python scripts
+│   ├── output/                     # Training checkpoints
+│   └── logs/                       # Subprocess stdout/stderr
+│
+├── semantic-router/                # SR config
+│   └── config.yaml
+│
+└── bin/                            # Managed binaries
+    └── llama-server</code></pre>
+
+        <!-- 11. MODULES -->
+        <h2 id="modules"><span class="section-num">11.</span> Implementation Modules</h2>
+        <table>
+            <thead><tr><th>Module</th><th>Language</th><th>File</th><th>Responsibility</th></tr></thead>
+            <tbody>
+                <tr><td>TraceCapture</td><td>Go</td><td><code>internal/training/capture.go</code></td><td>Async SQLite write</td></tr>
+                <tr><td>AutoTrigger</td><td>Go</td><td><code>internal/training/trigger.go</code></td><td>Monitor counts, fire pipeline</td></tr>
+                <tr><td>DataExtractor</td><td>Go</td><td><code>internal/training/extractor.go</code></td><td>Query SQLite, export JSONL</td></tr>
+                <tr><td>DatasetBuilder</td><td>Go</td><td><code>internal/training/dataset.go</code></td><td>Call data-designer or build JSONL</td></tr>
+                <tr><td>TrainRunner</td><td>Go</td><td><code>internal/training/runner.go</code></td><td>Generate script, exec subprocess</td></tr>
+                <tr><td>Deployer</td><td>Go</td><td><code>internal/training/deployer.go</code></td><td>Copy GGUF, manage llama-server</td></tr>
+                <tr><td>Evaluator</td><td>Go</td><td><code>internal/training/evaluator.go</code></td><td>LLM-as-judge scoring</td></tr>
+                <tr><td>Promoter</td><td>Go</td><td><code>internal/training/promoter.go</code></td><td>Update SR + Bifrost routing</td></tr>
+                <tr><td>QualityMonitor</td><td>Go</td><td><code>internal/training/monitor.go</code></td><td>Post-promotion spot-checks</td></tr>
+                <tr><td>ModelRegistry</td><td>Go</td><td><code>internal/training/registry.go</code></td><td>CRUD on registry.json</td></tr>
+                <tr><td>LlamaLifecycle</td><td>Go</td><td><code>internal/training/llama.go</code></td><td>Start/stop/health</td></tr>
+                <tr><td>Pipeline</td><td>Go</td><td><code>internal/training/pipeline.go</code></td><td>Orchestrate stages</td></tr>
+                <tr><td>Config</td><td>Go</td><td><code>internal/config/training.go</code></td><td>TrainingConfig struct</td></tr>
+                <tr><td>CLI</td><td>Python</td><td><code>cli/commands/cmd_training.py</code></td><td>User-facing commands</td></tr>
+            </tbody>
+        </table>
+
+        <!-- 12. EFFORT -->
+        <h2 id="effort"><span class="section-num">12.</span> Estimated Effort</h2>
+        <table>
+            <thead><tr><th>Phase</th><th>Description</th><th>Time</th></tr></thead>
+            <tbody>
+                <tr><td>1</td><td>Trace capture + SQLite store</td><td>2 days</td></tr>
+                <tr><td>2</td><td>Auto-trigger + state machine</td><td>1 day</td></tr>
+                <tr><td>3</td><td>Dataset extraction + builder</td><td>2 days</td></tr>
+                <tr><td>4</td><td>Training subprocess runner</td><td>2 days</td></tr>
+                <tr><td>5</td><td>llama-server lifecycle</td><td>1 day</td></tr>
+                <tr><td>6</td><td>Evaluator (LLM-as-judge)</td><td>2 days</td></tr>
+                <tr><td>7</td><td>Promoter + rollback + monitor</td><td>2 days</td></tr>
+                <tr><td>8</td><td>Model registry</td><td>0.5 day</td></tr>
+                <tr><td>9</td><td>CLI commands</td><td>1.5 days</td></tr>
+                <tr><td>10</td><td>Config types + integration</td><td>1 day</td></tr>
+                <tr><td>11</td><td>End-to-end testing</td><td>2 days</td></tr>
+                <tr><td colspan="2"><strong>Total</strong></td><td><strong>~17 days</strong></td></tr>
+            </tbody>
+        </table>
+
+        <div class="callout callout-success" style="margin-top: 40px;">
+            <strong>End of Technical Specification</strong><br>
+            This document is editable — click anywhere to modify. Use Ctrl+P / Cmd+P to print or save as PDF.
+        </div>
+
+    </div>
+</body>
+</html>

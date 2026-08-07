@@ -1,0 +1,58 @@
+{
+  "dashboard": {
+    "title": "DefenseClaw IoT Fleet",
+    "uid": "dclaw-fleet-001",
+    "panels": [
+      {
+        "title": "Devices Online",
+        "type": "stat",
+        "targets": [{"expr": "defenseclaw_fleet_devices_total{status=\"online\"}"}],
+        "gridPos": {"x": 0, "y": 0, "w": 6, "h": 4}
+      },
+      {
+        "title": "Devices Offline",
+        "type": "stat",
+        "targets": [{"expr": "defenseclaw_fleet_devices_total{status=\"offline\"}"}],
+        "gridPos": {"x": 6, "y": 0, "w": 6, "h": 4}
+      },
+      {
+        "title": "Active Alerts",
+        "type": "stat",
+        "targets": [{"expr": "defenseclaw_fleet_audit_chain_breaks_total + defenseclaw_fleet_emergency_seq_gaps_total"}],
+        "gridPos": {"x": 12, "y": 0, "w": 6, "h": 4}
+      },
+      {
+        "title": "Block Rate",
+        "type": "stat",
+        "targets": [{"expr": "rate(defenseclaw_fleet_blocks_total[5m])"}],
+        "gridPos": {"x": 18, "y": 0, "w": 6, "h": 4}
+      },
+      {
+        "title": "Block Rate Over Time (24h)",
+        "type": "graph",
+        "targets": [{"expr": "rate(defenseclaw_fleet_blocks_total[5m])"}],
+        "gridPos": {"x": 0, "y": 4, "w": 24, "h": 8}
+      },
+      {
+        "title": "Verdict Cache Hit Rate",
+        "type": "gauge",
+        "targets": [{"expr": "defenseclaw_fleet_verdict_cache_hits_total / (defenseclaw_fleet_verdict_cache_hits_total + defenseclaw_fleet_verdict_cache_misses_total)"}],
+        "gridPos": {"x": 0, "y": 12, "w": 8, "h": 6}
+      },
+      {
+        "title": "Policy Version Distribution",
+        "type": "piechart",
+        "targets": [{"expr": "defenseclaw_fleet_devices_total by (policy_version)"}],
+        "gridPos": {"x": 8, "y": 12, "w": 8, "h": 6}
+      },
+      {
+        "title": "Policy Rollbacks",
+        "type": "stat",
+        "targets": [{"expr": "defenseclaw_fleet_policy_rollback_total"}],
+        "gridPos": {"x": 16, "y": 12, "w": 8, "h": 6}
+      }
+    ],
+    "time": {"from": "now-24h", "to": "now"},
+    "refresh": "30s"
+  }
+}
