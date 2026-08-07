@@ -43,6 +43,35 @@ def test_make_python_recipes_use_cross_platform_venv_path() -> None:
     assert "$(VENV_BIN)/python$(EXE) -m pytest cli/tests -q" in text
 
 
+def test_local_make_workflow_uses_one_test_ready_python_environment() -> None:
+    text = MAKEFILE.read_text(encoding="utf-8")
+    pycli = text[text.index("\npycli:") : text.index("\ndev-pycli:")]
+
+    assert "uv sync --frozen --python 3.12" in pycli
+    assert "--no-dev" not in pycli
+    assert "dev-pycli: pycli" in text
+
+    for target in (
+        "cli-test",
+        "cli-test-cov",
+        "cli-test-snap",
+        "py-connector-matrix-test",
+        "test-verbose",
+        "test-file",
+        "check-audit-actions",
+        "check-audit-no-raw-literals",
+        "check-error-codes",
+        "check-schemas",
+        "telemetry-generate",
+        "telemetry-check",
+        "check-observability-v8-hard-cut",
+        "check-grafana-dashboards",
+        "check-llm-catalog",
+        "py-lint",
+    ):
+        assert f"{target}: pycli" in text
+
+
 def test_skip_install_never_publishes_unclaimed_shared_cli() -> None:
     text = INSTALL_DEV.read_text(encoding="utf-8")
     install_cli = text[

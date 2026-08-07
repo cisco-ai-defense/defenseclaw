@@ -36,7 +36,9 @@ make lint
 `make ts-test` and `make rego-test` are separate. `make check` runs schema,
 generated-artifact, provider, dashboard, and release-manifest parity gates.
 Use focused tests while iterating, then run the checks relevant to every area
-you changed.
+you changed. Local source targets use one locked, test-ready `.venv`; the
+`make build`, `make all`, `make test`, `make check`, and `make py-lint` targets
+do not require choosing between production and development Python environments.
 
 Source activation is different from release installation. `make build` does not
 install or mutate managed state. `make all` deliberately activates the current

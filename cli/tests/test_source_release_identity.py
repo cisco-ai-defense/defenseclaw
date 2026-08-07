@@ -355,6 +355,59 @@ def test_make_all_dev_reclaim_admits_exact_markerless_source_checkout(
 
 
 @pytest.mark.skipif(os.name == "nt", reason="source ownership uses POSIX symlinks")
+def test_make_all_dev_reclaim_adopts_state_when_executable_paths_are_empty(
+    tmp_path: Path,
+) -> None:
+    repo = _copy_source_fixture(tmp_path)
+    install_dir = tmp_path / "home/.local/bin"
+    _write_executable(repo / ".venv/bin/defenseclaw", b"source cli\n")
+    _write_executable(repo / "defenseclaw-gateway", b"source gateway\n")
+    (tmp_path / "home/.defenseclaw").mkdir(parents=True)
+
+    strict = _preflight(tmp_path, repo, install_dir, "check")
+    assert strict.returncode != 0
+    assert "existing managed state" in strict.stdout + strict.stderr
+
+    developer = _preflight(
+        tmp_path,
+        repo,
+        install_dir,
+        "check",
+        dev_reclaim=True,
+    )
+    assert developer.returncode == 0, developer.stdout + developer.stderr
+    assert not install_dir.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="source ownership uses POSIX symlinks")
+def test_make_all_dev_reclaim_refuses_symlinked_state(
+    tmp_path: Path,
+) -> None:
+    repo = _copy_source_fixture(tmp_path)
+    install_dir = tmp_path / "home/.local/bin"
+    _write_executable(repo / ".venv/bin/defenseclaw", b"source cli\n")
+    _write_executable(repo / "defenseclaw-gateway", b"source gateway\n")
+    state_target = tmp_path / "state-target"
+    state_target.mkdir()
+    managed_home = tmp_path / "home/.defenseclaw"
+    managed_home.parent.mkdir(parents=True)
+    managed_home.symlink_to(state_target, target_is_directory=True)
+
+    completed = _preflight(
+        tmp_path,
+        repo,
+        install_dir,
+        "check",
+        dev_reclaim=True,
+    )
+
+    assert completed.returncode != 0
+    assert "developer state must be a real directory" in completed.stdout + completed.stderr
+    assert managed_home.is_symlink()
+    assert not install_dir.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="source ownership uses POSIX symlinks")
 def test_make_all_dev_reclaim_replaces_prior_release_marker_and_gateway(
     tmp_path: Path,
 ) -> None:

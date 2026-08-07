@@ -19,7 +19,8 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 
 import click
 
@@ -130,6 +131,49 @@ def _render_non_redraw_status(
     return len(status)
 
 
+@contextmanager
+def _preserve_terminal_input_mode() -> Iterator[None]:
+    """Restore the POSIX TTY mode after Click's raw key reader exits.
+
+    ``click.getchar`` temporarily switches the terminal to raw mode for every
+    checkbox keystroke. Some pseudoterminals can fail to restore one of the
+    input flags on that raw-to-cooked transition, most visibly ``ICRNL``. The
+    next line-oriented prompt then echoes Enter as ``^M`` instead of accepting
+    it. Snapshotting the mode around the complete picker gives us a second,
+    immediate restore at the boundary back to ordinary Click prompts.
+
+    Windows does not expose ``termios`` and already uses Click's console input
+    implementation, so the guard intentionally becomes a no-op there.
+    """
+
+    snapshot: tuple[object, int, list[object]] | None = None
+    if os.name != "nt":
+        try:
+            import termios
+
+            stdin = click.get_text_stream("stdin")
+            fd = stdin.fileno()
+            if os.isatty(fd):
+                snapshot = (termios, fd, termios.tcgetattr(fd))
+        except (AttributeError, ImportError, OSError, ValueError):
+            # The picker still works with Click's own fallback when stdin is
+            # wrapped or /dev/tty is unavailable; there is simply no mode we
+            # can preserve independently in that case.
+            snapshot = None
+
+    try:
+        yield
+    finally:
+        if snapshot is not None:
+            termios, fd, attributes = snapshot
+            try:
+                termios.tcsetattr(fd, termios.TCSANOW, attributes)
+            except (AttributeError, OSError, ValueError):
+                # Do not mask the user's selection (or a Ctrl-C) merely
+                # because a terminal disappeared while the prompt was open.
+                pass
+
+
 def prompt_checkbox_selection(
     options: list[str],
     *,
@@ -173,39 +217,40 @@ def prompt_checkbox_selection(
             status_width,
         )
 
-    while True:
-        if redraw:
-            render_checkbox_menu(options, selected, cursor, redraw=rendered)
-            rendered = True
+    with _preserve_terminal_input_mode():
+        while True:
+            if redraw:
+                render_checkbox_menu(options, selected, cursor, redraw=rendered)
+                rendered = True
 
-        key = checkbox_key_name(read_key())
-        if key == "enter":
-            if selected or empty_ok:
+            key = checkbox_key_name(read_key())
+            if key == "enter":
+                if selected or empty_ok:
+                    if not redraw:
+                        click.echo()
+                    return [name for name in options if name in selected]
                 if not redraw:
                     click.echo()
-                return [name for name in options if name in selected]
-            if not redraw:
-                click.echo()
-            ux.warn("Select at least one connector.", indent="  ")
-        elif key == "toggle":
-            name = options[cursor]
-            if name in selected:
-                selected.remove(name)
-            else:
-                selected.add(name)
-        elif key == "up":
-            cursor = (cursor - 1) % len(options)
-        elif key == "down":
-            cursor = (cursor + 1) % len(options)
-        elif key == "all":
-            selected = set(options)
-        elif key == "none":
-            selected.clear()
+                ux.warn("Select at least one connector.", indent="  ")
+            elif key == "toggle":
+                name = options[cursor]
+                if name in selected:
+                    selected.remove(name)
+                else:
+                    selected.add(name)
+            elif key == "up":
+                cursor = (cursor - 1) % len(options)
+            elif key == "down":
+                cursor = (cursor + 1) % len(options)
+            elif key == "all":
+                selected = set(options)
+            elif key == "none":
+                selected.clear()
 
-        if not redraw:
-            status_width = _render_non_redraw_status(
-                options,
-                selected,
-                cursor,
-                status_width,
-            )
+            if not redraw:
+                status_width = _render_non_redraw_status(
+                    options,
+                    selected,
+                    cursor,
+                    status_width,
+                )
