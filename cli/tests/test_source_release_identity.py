@@ -407,6 +407,34 @@ def test_make_all_dev_reclaim_refuses_symlinked_state(
     assert not install_dir.exists()
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="source ownership uses POSIX filesystem semantics",
+)
+def test_make_all_dev_reclaim_refuses_non_directory_state(tmp_path: Path) -> None:
+    repo = _copy_source_fixture(tmp_path)
+    install_dir = tmp_path / "home/.local/bin"
+    _write_executable(repo / ".venv/bin/defenseclaw", b"source cli\n")
+    _write_executable(repo / "defenseclaw-gateway", b"source gateway\n")
+    managed_home = tmp_path / "home/.defenseclaw"
+    managed_home.parent.mkdir(parents=True)
+    managed_home.write_text("not a directory\n", encoding="utf-8")
+
+    completed = _preflight(
+        tmp_path,
+        repo,
+        install_dir,
+        "check",
+        dev_reclaim=True,
+    )
+
+    assert completed.returncode != 0
+    assert "developer state must be a real directory" in completed.stdout + completed.stderr
+    assert managed_home.is_file()
+    assert managed_home.read_text(encoding="utf-8") == "not a directory\n"
+    assert not install_dir.exists()
+
+
 @pytest.mark.skipif(os.name == "nt", reason="source ownership uses POSIX symlinks")
 def test_make_all_dev_reclaim_replaces_prior_release_marker_and_gateway(
     tmp_path: Path,

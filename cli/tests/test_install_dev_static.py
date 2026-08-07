@@ -17,6 +17,16 @@ INSTALL_DEV = ROOT / "scripts" / "install-dev.sh"
 MAKEFILE = ROOT / "Makefile"
 
 
+def _make_target_prerequisites(text: str, target: str) -> list[str]:
+    prefix = f"{target}:"
+    declaration = next(
+        (line for line in text.splitlines() if line.startswith(prefix)),
+        None,
+    )
+    assert declaration is not None, f"missing Make target: {target}"
+    return declaration.removeprefix(prefix).split()
+
+
 def test_dev_install_syncs_openclaw_embed_before_go_build() -> None:
     text = INSTALL_DEV.read_text(encoding="utf-8")
     sync = 'make -C "${REPO_ROOT}" sync-openclaw-extension'
@@ -49,7 +59,7 @@ def test_local_make_workflow_uses_one_test_ready_python_environment() -> None:
 
     assert "uv sync --frozen --python 3.12" in pycli
     assert "--no-dev" not in pycli
-    assert "dev-pycli: pycli" in text
+    assert "pycli" in _make_target_prerequisites(text, "dev-pycli")
 
     for target in (
         "cli-test",
@@ -69,7 +79,7 @@ def test_local_make_workflow_uses_one_test_ready_python_environment() -> None:
         "check-llm-catalog",
         "py-lint",
     ):
-        assert f"{target}: pycli" in text
+        assert "pycli" in _make_target_prerequisites(text, target)
 
 
 def test_skip_install_never_publishes_unclaimed_shared_cli() -> None:
