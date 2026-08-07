@@ -735,7 +735,7 @@ func TestManagedEndpointInventorySurvivesSourceDisabledAIDiscoveryLogs(t *testin
 	wantSources := map[string]map[string]struct{}{
 		string(config.ObservabilityV8ManagedConnectorInventoryAction): {endpointConnectorInventorySource: {}},
 		string(config.ObservabilityV8ManagedMCPInventoryAction): {
-			endpointMCPInventorySource:              {},
+			endpointMCPInventorySource:             {},
 			"endpoint_per_connector_mcp_inventory": {},
 		},
 	}
