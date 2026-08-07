@@ -882,6 +882,27 @@ render_config() {
   local support_dir="$4"
   local aid_endpoint="$5"
   shift 5
+  # Positional arg 6 is the number of home_dirs entries to consume next
+  # (the new managed-inventory shape). The remaining args are connector
+  # names. Legacy callers omit the count and pass connector names
+  # directly; those still work because a non-numeric first-remaining
+  # arg leaves home_dirs empty and treats every arg as a connector.
+  local home_dirs_count=0
+  local -a home_dirs=()
+  if [[ "${1:-}" =~ ^[0-9]+$ ]]; then
+    home_dirs_count="$1"
+    shift
+    local _idx
+    for (( _idx = 0; _idx < home_dirs_count; _idx++ )); do
+      # Stop early if the caller's declared count exceeds the number of
+      # remaining positional args; a missing path would otherwise inject an
+      # empty entry that violates the config schema's minLength:1 constraint.
+      (( $# > 0 )) || break
+      [[ -n "$1" ]] && home_dirs+=("$1")
+      shift
+    done
+    unset _idx
+  fi
   local -a connectors=("$@")
   local runtime_dir="${support_dir}/runtime"
 
@@ -965,8 +986,30 @@ cisco_ai_defense:
 # restored. Other ai_discovery.* keys keep their built-in defaults (mode
 # enhanced, scan intervals). The scanner is a no-op unless enabled, so this
 # block is required for endpoint inventory to flow.
+#
+# home_dirs is populated from the same enumerate_local_users filter that
+# renders targets.yaml so per-user detectors (~/.claude/skills, ~/.codex/*,
+# etc.) resolve to every eligible local user's home — not just the daemon's
+# HOME (/var/root under root, which has no operator agent state).
 ai_discovery:
   enabled: true
+EOF
+
+  if (( ${#home_dirs[@]} > 0 )); then
+    echo "  home_dirs:"
+    local h
+    local quoted_home
+    for h in "${home_dirs[@]}"; do
+      # yaml_double_quoted_scalar performs the same escaping the rest of
+      # this file relies on for user-supplied strings — inserting `h` raw
+      # inside `"..."` would let a `\` or `"` in a legitimate home path
+      # produce invalid YAML or a subtly different path.
+      quoted_home="$(yaml_double_quoted_scalar "${h}")" || return 1
+      printf '    - %s\n' "${quoted_home}"
+    done
+  fi
+
+  cat <<EOF
 
 # asset_policy is intentionally disabled in this managed_enterprise
 # rollout. The AID cloud is the single authoritative source of block

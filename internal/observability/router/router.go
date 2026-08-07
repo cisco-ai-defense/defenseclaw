@@ -465,7 +465,6 @@ func validManagedFallbackDestination(
 		[]observability.ProducerKey{
 			config.ObservabilityV8ManagedAgentInventoryAction,
 			config.ObservabilityV8ManagedConnectorInventoryAction,
-			config.ObservabilityV8ManagedMCPInventoryAction,
 		},
 		[]observability.EventName{"ai_component.observed"},
 	) || send.Index != 2 || send.Name != "all-collected-logs" || !send.Generated ||

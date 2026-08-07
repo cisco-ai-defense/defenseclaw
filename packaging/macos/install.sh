@@ -680,11 +680,31 @@ CONFIG_PATH="${CONFIG_DIR}/config.yaml"
 [[ ! -e "${CONFIG_PATH}" && ! -L "${CONFIG_PATH}" ]] \
   || die "managed config appeared after fresh-host preflight and was preserved: ${CONFIG_PATH}"
 
-log "writing config (mode=${MODE} connectors=${CONNECTORS[*]} port=${API_PORT} env=${AID_ENV} redaction_profile=sensitive)"
+# Enumerate eligible local user homes so the sidecar's per-user AI-discovery
+# detectors (skills / rules / plugins / MCP under ~/.claude, ~/.codex, …) can
+# scan every real user rather than just the launchd-daemon HOME (/var/root
+# under root, where no operator has any real agent state). We pass the list
+# to render_config which writes it as `ai_discovery.home_dirs` in the
+# managed config so the daemon's `~/.claude/skills`-style expansions resolve
+# to each user's actual home. Uses the same enumerate_local_users filter
+# that populates targets.yaml so per-user detection and per-user hook
+# wiring stay in lockstep.
+HOME_DIRS=()
+if _user_lines_for_home_dirs="$(enumerate_local_users 2>/dev/null || true)"; then
+  while IFS=: read -r _u _uid _gid _home; do
+    [[ -z "${_home}" ]] && continue
+    HOME_DIRS+=("${_home}")
+  done <<< "${_user_lines_for_home_dirs}"
+  unset _u _uid _gid _home _user_lines_for_home_dirs
+fi
+
+log "writing config (mode=${MODE} connectors=${CONNECTORS[*]} port=${API_PORT} env=${AID_ENV} redaction_profile=sensitive home_dirs=${#HOME_DIRS[@]})"
 CONFIG_TMP="$(mktemp "${CONFIG_PATH}.new.XXXXXX")" \
   || die "could not reserve a private managed-config staging file"
 INSTALL_TEMP_FILES+=("${CONFIG_TMP}")
-render_config "${MODE}" "${PRIMARY_CONNECTOR}" "${API_PORT}" "${SUPPORT_DIR}" "${AID_ENDPOINT}" "${CONNECTORS[@]}" > "${CONFIG_TMP}"
+render_config "${MODE}" "${PRIMARY_CONNECTOR}" "${API_PORT}" "${SUPPORT_DIR}" "${AID_ENDPOINT}" \
+  "${#HOME_DIRS[@]}" "${HOME_DIRS[@]+"${HOME_DIRS[@]}"}" \
+  "${CONNECTORS[@]}" > "${CONFIG_TMP}"
 chown root:wheel "${CONFIG_TMP}"
 chmod 0640 "${CONFIG_TMP}"
 ln "${CONFIG_TMP}" "${CONFIG_PATH}" \

@@ -684,10 +684,9 @@ func validManagedAIDRoutes(routes []config.ObservabilityV8EffectiveRoute) bool {
 	if components.Name != "drop-managed-inventory-components" ||
 		components.Action != config.ObservabilityV8RouteDrop || components.Selector.BucketWildcard ||
 		len(components.Selector.Buckets) != 1 || components.Selector.Buckets[0] != observability.BucketAIDiscovery ||
-		len(components.Selector.Actions) != 3 ||
+		len(components.Selector.Actions) != 2 ||
 		components.Selector.Actions[0] != config.ObservabilityV8ManagedAgentInventoryAction ||
 		components.Selector.Actions[1] != config.ObservabilityV8ManagedConnectorInventoryAction ||
-		components.Selector.Actions[2] != config.ObservabilityV8ManagedMCPInventoryAction ||
 		len(components.Selector.EventNames) != 1 || components.Selector.EventNames[0] != "ai_component.observed" ||
 		len(components.RedactionProfileByBucket) != 0 {
 		return false
