@@ -214,6 +214,7 @@ _DYNAMIC_ENVVAR_PREFIX_PATHS: dict[str, frozenset[str]] = {
         }
     ),
     "DEFENSECLAW_TEST_LLM_KEY_": frozenset({"internal/gateway/passthrough_hydration_test.go"}),
+    "DEFENSECLAW_TEST_POWERSHELL_ARG_": frozenset({"cli/tests/test_sgw_module_runtime.py"}),
 }
 
 

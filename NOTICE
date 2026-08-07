@@ -61,3 +61,12 @@ Unicode Character Database 13.0 `DerivedAge.txt` file.
 Copyright © 1991-2020 Unicode, Inc. All rights reserved.
 Distributed under the Unicode Data Files and Software License; see
 https://www.unicode.org/copyright.html.
+
+This product includes s-gw, Copyright 2026 Barry Yuan, licensed under the
+Apache License, Version 2.0. The pinned source and its complete attribution
+notices are distributed under third_party/s-gw/upstream/.
+
+The separately maintained proprietary s-gw execution core is not part of the
+Apache-licensed source tree. DefenseClaw source distributions do not include
+that binary. A release may include it only after the separate redistribution,
+signature, provenance, and target gates in release/s-gw-runners.json pass.

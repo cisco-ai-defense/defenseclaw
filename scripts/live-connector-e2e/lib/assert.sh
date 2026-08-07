@@ -203,7 +203,15 @@ for action, event_name, enforced, body in rows:
             values.add(str(verdict.get("result", "")).lower())
         elif verdict is not None:
             values.add(str(verdict).lower())
-        for key in ("action", "raw_action", "outcome", "result", "decision"):
+        for key in (
+            "action",
+            "raw_action",
+            "outcome",
+            "result",
+            "decision",
+            "defenseclaw.guardrail.effective_action",
+            "defenseclaw.scan.verdict",
+        ):
             values.add(str(payload.get(key, "")).lower())
         if values & blocking:
             raise SystemExit(0)

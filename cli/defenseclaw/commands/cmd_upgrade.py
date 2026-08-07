@@ -750,6 +750,7 @@ def upgrade(
             ux.banner("Creating Backup")
             backup_dir = _create_backup(app.cfg, data_dir=data_dir)
             ux.ok(f"Backup saved to: {backup_dir}")
+            _offer_credential_protection(app.cfg)
             _handoff_windows_setup_upgrade(
                 setup_path,
                 setup_name,
@@ -1451,6 +1452,7 @@ def upgrade(
     # through OpenClaw, a stale plugin against a fresh gateway is the #1
     # source of "guardrail not enforcing" reports.
     _check_post_upgrade_drift(target_version)
+    _offer_credential_protection(app.cfg)
     click.echo()
 
 
@@ -1666,6 +1668,7 @@ def _start_and_verify_services(
             data_dir,
             config_path=config_path,
         )
+        _service_enabled_credential_protection(post_migration_cfg)
     else:
         _refresh_target_dotenv_environment(rollback_plan)
         post_migration_cfg = None
@@ -2852,10 +2855,7 @@ def _native_windows_install_state(
         "maintenance path": (state.get("maintenance_path"), setup),
     }
     for label, (recorded, expected) in expected_paths.items():
-        if (
-            not isinstance(recorded, str)
-            or os.path.normcase(os.path.realpath(recorded)) != os.path.normcase(expected)
-        ):
+        if not isinstance(recorded, str) or os.path.normcase(os.path.realpath(recorded)) != os.path.normcase(expected):
             ux.err(f"Native installer state has an unexpected {label}.", indent="  ")
             raise SystemExit(1)
     gateway_path = _trusted_child_path(command_dir, _installed_gateway_filename(os_name))
@@ -3192,17 +3192,13 @@ def _preflight_installed_source_coherence(
             _fail_installed_source_coherence(
                 f"Installed DefenseClaw {current_version} native installer state has no canonical gateway."
             )
-        legacy_gateway = os.path.expanduser(
-            os.path.join("~/.local/bin", _installed_gateway_filename(os_name))
-        )
+        legacy_gateway = os.path.expanduser(os.path.join("~/.local/bin", _installed_gateway_filename(os_name)))
         if os.path.lexists(legacy_gateway):
             _fail_installed_source_coherence(
                 f"Installed DefenseClaw {current_version} has a shadow gateway outside native installer custody."
             )
     else:
-        gateway_path = os.path.expanduser(
-            os.path.join("~/.local/bin", _installed_gateway_filename(os_name))
-        )
+        gateway_path = os.path.expanduser(os.path.join("~/.local/bin", _installed_gateway_filename(os_name)))
     try:
         gateway_stat = os.lstat(gateway_path)
     except OSError:
@@ -3267,8 +3263,7 @@ def _preflight_installed_source_coherence(
         if (
             stat.S_ISLNK(gateway_after.st_mode)
             or not stat.S_ISREG(gateway_after.st_mode)
-            or (gateway_stat.st_dev, gateway_stat.st_ino)
-            != (gateway_after.st_dev, gateway_after.st_ino)
+            or (gateway_stat.st_dev, gateway_stat.st_ino) != (gateway_after.st_dev, gateway_after.st_ino)
         ):
             _fail_installed_source_coherence(
                 f"Installed DefenseClaw {current_version} gateway changed during validation."
@@ -6012,6 +6007,46 @@ def _check_post_upgrade_drift(target_version: str) -> None:
         f"{target_version} release tarball.",
         indent="    ",
     )
+
+
+def _offer_credential_protection(cfg) -> None:
+    """Offer the new optional broker without changing an upgraded config."""
+    enabled = bool(getattr(getattr(cfg, "credential_protection", None), "enabled", False))
+    if enabled:
+        return
+    ux.subhead(
+        "Credential protection remains disabled. Enable it when ready with "
+        "`defenseclaw setup credential-protection --yes`.",
+        indent="  ",
+    )
+
+
+def _service_enabled_credential_protection(cfg) -> None:
+    enabled = bool(getattr(getattr(cfg, "credential_protection", None), "enabled", False))
+    if not enabled:
+        return
+
+    from defenseclaw.bootstrap import _setup_credential_protection_structured
+
+    result = _setup_credential_protection_structured(cfg)
+    if result.status == "pass":
+        ux.ok(f"Credential protection serviced: {result.detail}")
+        return
+    if result.status == "warn":
+        ux.warn(f"Credential protection serviced with limitations: {result.detail}", indent="  ")
+        ux.subhead(
+            result.next_command or "defenseclaw credential-protection status",
+            indent="    ",
+        )
+        return
+
+    ux.err("Credential protection could not be serviced; the upgraded gateway was not started.")
+    ux.subhead(result.detail, indent="    ")
+    ux.subhead(
+        "Recover with: defenseclaw setup credential-protection --yes",
+        indent="    ",
+    )
+    raise SystemExit(1)
 
 
 def _managed_venv_path() -> str:

@@ -1,0 +1,323 @@
+From e1314a8ea6a00d886f4984dbb66ac94f1f4f838e Mon Sep 17 00:00:00 2001
+From: sgateway <299698546+sgateway@users.noreply.github.com>
+Date: Tue, 4 Aug 2026 14:49:39 -0700
+Subject: [PATCH 2/6] Harden DefenseClaw native authorization boundary
+
+---
+ src/cli.ts                        | 89 ++++++-------------------------
+ tests/defenseclaw-runtime.test.ts | 71 +++++++++++++++++++++++-
+ tests/mcp-e2e.test.ts             | 25 +++++++--
+ 3 files changed, 109 insertions(+), 76 deletions(-)
+
+diff --git a/src/cli.ts b/src/cli.ts
+index bc76f68..08f6f72 100644
+--- a/src/cli.ts
++++ b/src/cli.ts
+@@ -100,12 +100,13 @@ async function main(): Promise<void> {
+     return;
+   }
+ 
++  rejectDefenseClawAuthorizationMutation(first, second, third, parsed.flags);
++
+   if (first === "mcp") {
+     await import("./mcp-server.js");
+     return;
+   }
+ 
+-  rejectDefenseClawAuthorizationMutation(first, second, third);
+   const store = new SecretStore();
+ 
+   if (first === "init") {
+@@ -1029,16 +1030,6 @@ async function handleSetupCommand(
+   store: SecretStore,
+   flags: Record<string, string | boolean | string[]>
+ ): Promise<void> {
+-  if (process.platform === "win32" && hasFlag(flags, "no-service") && !hasFlag(flags, "no-menubar")) {
+-    throw new Error("--no-service requires --no-menubar on Windows because the tray helper requires its matching console.");
+-  }
+-
+-  if (process.platform === "darwin") {
+-    const layout = getPackageLayout();
+-    assertMacRuntimeForManagedSurfaces(layout);
+-  }
+-
+-  const port = numericFlag(flags, "port", 8718);
+   const keychainHelper = process.platform === "darwin" ? installPersistentKeychainHelper() : undefined;
+   const keychainCompatibility = process.platform === "darwin" ? pinPackagedKeychainHelper() : undefined;
+   const beforeUnlock = unlockStatus();
+@@ -1089,68 +1080,17 @@ async function handleSetupCommand(
+   const secretKeychainRepair = process.platform === "darwin"
+     ? await store.repairKeychainAccess()
+     : undefined;
+-  const consoleUrl = `http://127.0.0.1:${port}/`;
+-  let service: unknown = process.platform === "linux"
+-    ? systemdUserServiceStatus()
+-    : launchAgentStatus("console");
+-  let menuBar = launchAgentStatus("menubar");
+-  let windowsConsole: unknown;
+-  let windowsHelper: unknown;
+-  const appInstall = process.platform === "darwin" ? installMacAppBundle() : undefined;
+-
+-  if (process.platform === "darwin" && !hasFlag(flags, "no-service")) {
+-    service = await installConsoleLaunchAgent({ port, start: true });
+-  } else if (process.platform === "linux" && !hasFlag(flags, "no-service")) {
+-    service = await installSystemdUserService({ port, start: true });
+-  } else if (process.platform === "win32" && !hasFlag(flags, "no-service")) {
+-    const windowsService = await installWindowsLoginService({
+-      port,
+-      start: true,
+-      tray: !hasFlag(flags, "no-menubar")
+-    });
+-    service = windowsService;
+-    windowsConsole = windowsService.active
+-      ? { consoleUrl: windowsService.consoleUrl, pid: windowsService.consolePid }
+-      : undefined;
+-    windowsHelper = windowsService.helperActive
+-      ? { consoleUrl: windowsService.consoleUrl }
+-      : undefined;
+-  }
+-
+-  if (process.platform === "darwin" && !hasFlag(flags, "no-menubar")) {
+-    menuBar = await installMenuBarLaunchAgent({
+-      port,
+-      start: true,
+-      notify: !hasFlag(flags, "no-notify"),
+-      countMode: normalizeMenuBarCountMode(getFlag(flags, "menubar-count"))
+-    });
+-  }
+-
+-  const opened = shouldOpenUi(flags) && !(process.platform === "win32" && hasFlag(flags, "no-service"))
+-    ? await openPreferredUi(port, consoleUrl)
+-    : undefined;
+-  const agents = hasFlag(flags, "no-agents")
+-    ? { skipped: true, results: [] }
+-    : { skipped: false, results: installAgentIntegrations() };
+-
+   printJson({
+     ok: !secretKeychainRepair || secretKeychainRepair.failed.length === 0,
+     unlock: unlockAction,
+     storePath: store.storePath,
+-    consoleUrl,
+-    opened,
+-    service,
+-    menuBar,
+-    windowsConsole,
+-    windowsHelper,
+     keychainHelper,
+     keychainCompatibility,
+     keychainRepair: {
+       master: masterKeychainRepair,
+       secrets: secretKeychainRepair
+     },
+-    appInstall,
+-    agents,
++    agents: { skipped: true, results: [] },
+     nextSteps: [
+       "Open the approval console with `defenseclaw credential-protection open`.",
+       "Run `s-gw agent status` to review detected agent connections or resolve any reported conflicts.",
+@@ -2310,8 +2250,13 @@ const approvalPolicyMutations = new Set([
+ function rejectDefenseClawAuthorizationMutation(
+   first: string,
+   second: string | undefined,
+-  third: string | undefined
++  third: string | undefined,
++  flags: Record<string, string | boolean | string[]>
+ ): void {
++  if (Object.prototype.hasOwnProperty.call(flags, "allow-command")) {
++    throw nativeAuthorizationGuidance();
++  }
++
+   if (first === "approve" || first === "deny") {
+     throw nativeAuthorizationGuidance();
+   }
+@@ -2365,7 +2310,7 @@ function printHelp(): void {
+ 
+ Commands:
+   s-gw init
+-  s-gw setup [--port 8718] [--passphrase-stdin] [--menubar-count pending|credentials|none] [--no-open-app] [--no-service] [--no-menubar] [--no-agents]
++  s-gw setup --no-open-console --no-service --no-menubar --no-agents
+   s-gw status
+   s-gw start [--port 8718] [--no-open-app] [--no-service] [--no-menubar]
+   s-gw stop
+@@ -2381,8 +2326,8 @@ Commands:
+   s-gw app refresh-services [--no-agents]
+   s-gw app refresh-agents [--lock-timeout-ms 35000]
+   s-gw guard status
+-  s-gw guard run AGENT [--dry-run] [--command CMD] [--env KEY=VALUE] [--allow-command CMD] [--] [agent args...]
+-  s-gw run AGENT [--dry-run] [--command CMD] [--env KEY=VALUE] [--allow-command CMD] [--] [agent args...]
++  s-gw guard run AGENT [--dry-run] [--command CMD] [--env KEY=VALUE] [--] [agent args...]
++  s-gw run AGENT [--dry-run] [--command CMD] [--env KEY=VALUE] [--] [agent args...]
+   s-gw run env-command HANDLE --command CMD --inject-env ENV [--with-env ENV=HANDLE] [--arg VALUE] [--raw]
+   s-gw service install [--port 8718] [--start] [--menubar]
+   s-gw service start|stop|status|uninstall
+@@ -2392,14 +2337,14 @@ Commands:
+   s-gw menubar start|stop|status|uninstall
+   s-gw helper open
+   s-gw unlock status
+-  s-gw secret add --name NAME --type api-token --value-stdin --inject-env ENV --allow-command CMD
+-  s-gw secret add-keychain --name NAME --type api-token --value-stdin --inject-env ENV --allow-command CMD [--service SERVICE]
+-  s-gw secret add-1password --name NAME --type api-token --ref op://vault/item/field --inject-env ENV --allow-command CMD [--verify]
++  s-gw secret add --name NAME --type api-token --value-stdin --inject-env ENV
++  s-gw secret add-keychain --name NAME --type api-token --value-stdin --inject-env ENV [--service SERVICE]
++  s-gw secret add-1password --name NAME --type api-token --ref op://vault/item/field --inject-env ENV [--verify]
+   s-gw secret list
+   s-gw secret delete HANDLE
+   s-gw onepassword status
+-  s-gw onepassword import [--vault Dev] [--dry-run] [--include-companions] [--allow-command CMD]
+-  s-gw onepassword capture --text-stdin [--vault Dev] [--name NAME] [--inject-env ENV] [--allow-command CMD]
++  s-gw onepassword import [--vault Dev] [--dry-run] [--include-companions]
++  s-gw onepassword capture --text-stdin [--vault Dev] [--name NAME] [--inject-env ENV]
+   s-gw aws plan|request|run [--wrapper CMD] [--timeout-ms 0] [--raw] -- AWS_ARGS...
+   s-gw ssh request HANDLE --target user@host [--port 22] [--arg VALUE]
+   s-gw ssh run HANDLE --target user@host [--port 22] [--] [remote command...]
+diff --git a/tests/defenseclaw-runtime.test.ts b/tests/defenseclaw-runtime.test.ts
+index 336d567..6deaf1d 100644
+--- a/tests/defenseclaw-runtime.test.ts
++++ b/tests/defenseclaw-runtime.test.ts
+@@ -41,15 +41,37 @@ describe("DefenseClaw local console launch", () => {
+     expect(cli).not.toContain("startConsoleServer");
+     expect(cli).not.toContain("function openBrowser");
+     expect(cli).toContain("DefenseClaw owns the authenticated approval console");
+-    expect(cli.indexOf("rejectDefenseClawAuthorizationMutation(first, second, third)")).toBeLessThan(
++    expect(cli).toContain('Object.prototype.hasOwnProperty.call(flags, "allow-command")');
++    expect(cli.indexOf("rejectDefenseClawAuthorizationMutation(first, second, third, parsed.flags)")).toBeLessThan(
+       cli.indexOf("const store = new SecretStore()")
+     );
++    expect(cli.indexOf("rejectDefenseClawAuthorizationMutation(first, second, third, parsed.flags)")).toBeLessThan(
++      cli.indexOf('if (first === "mcp")')
++    );
+     expect(cli).not.toContain("  s-gw approve REQUEST_ID");
+     expect(cli).not.toContain("  s-gw deny REQUEST_ID");
+     expect(cli).not.toContain("  s-gw secret allow-command HANDLE");
+     expect(cli).not.toContain("  s-gw secret set-inject-env HANDLE");
+     expect(cli).not.toContain("  s-gw approval policy add");
+     expect(cli).not.toContain("  s-gw unlock keychain set");
++    expect(cli).not.toMatch(/^\s+s-gw (?:guard run|run|secret add|secret add-keychain|secret add-1password|onepassword import|onepassword capture).*--allow-command/m);
++    expect(cli).not.toContain("const appInstall = process.platform");
++    expect(cli).not.toContain("    appInstall,");
++    const setupHandler = cli.slice(
++      cli.indexOf("async function handleSetupCommand("),
++      cli.indexOf("async function handleStartCommand(")
++    );
++    for (const forbidden of [
++      "installMacAppBundle(",
++      "installConsoleLaunchAgent(",
++      "installMenuBarLaunchAgent(",
++      "openMacApp(",
++      "openPreferredUi(",
++      "openWindowsClient(",
++      "openWindowsHelper("
++    ]) {
++      expect(setupHandler).not.toContain(forbidden);
++    }
+     expect(sourceText.join("\n")).not.toContain("s-gw approve");
+     expect(tsconfig).toContain('"src/console-server.ts"');
+   });
+@@ -105,6 +127,52 @@ describe("DefenseClaw local console launch", () => {
+     }
+   }, 45_000);
+ 
++  it("rejects command authorization on every enrollment alias before creating store state", async () => {
++    const rejectedRoutes = [
++      ["secret", "add", "--allow-command", "/usr/bin/env"],
++      ["secret", "add-keychain", "--allow-command=/usr/bin/env"],
++      ["secret", "add-kc", "--allow-command", "/usr/bin/env"],
++      ["secret", "add-1password", "--allow-command=/usr/bin/env"],
++      ["secret", "add-op", "--allow-command", "/usr/bin/env"],
++      ["onepassword", "import", "--allow-command=/usr/bin/env"],
++      ["onepassword", "capture", "--allow-command", "/usr/bin/env"],
++      ["guard", "run", "Codex", "--allow-command=/usr/bin/env"],
++      ["run", "Codex", "--allow-command", "/usr/bin/env"],
++      ["secret", "add", "--allow-command"]
++    ];
++
++    for (const [index, route] of rejectedRoutes.entries()) {
++      const tmpDir = await mkdtemp(path.join(os.tmpdir(), `sgw-native-command-auth-${index}-`));
++      const home = path.join(tmpDir, "home");
++      const recoveryHome = path.join(tmpDir, "recovery");
++
++      try {
++        const result = spawnSync(tsxBin, [path.join(repoRoot, "src", "cli.ts"), ...route], {
++          cwd: repoRoot,
++          encoding: "utf8",
++          env: {
++            ...process.env,
++            SGW_DISABLE_KEYCHAIN: "1",
++            SGW_DISABLE_ONEPASSWORD_BACKUP: "1",
++            SGW_DISABLE_UPDATE_CHECK: "1",
++            SGW_HOME: home,
++            SGW_RECOVERY_HOME: recoveryHome,
++            SGW_TEST_HOME_ROOT: tmpDir,
++            SGW_TEST_MODE: "1"
++          },
++          timeout: 10_000
++        });
++
++        expect(result.status, route.join(" ")).not.toBe(0);
++        expect(result.stderr, route.join(" ")).toContain("DefenseClaw owns authenticated approval and authorization changes");
++        await expect(access(home), route.join(" ")).rejects.toThrow();
++        await expect(access(recoveryHome), route.join(" ")).rejects.toThrow();
++      } finally {
++        await rm(tmpDir, { recursive: true, force: true });
++      }
++    }
++  }, 30_000);
++
+   it("stores a generated Linux unlock key through the Secret Service helper", async () => {
+     const tmpDir = await mkdtemp(path.join(os.tmpdir(), "sgw-linux-setup-"));
+     const helperPath = path.join(tmpDir, "s-gw-secret-service-helper");
+@@ -152,6 +220,7 @@ describe("DefenseClaw local console launch", () => {
+       const stored = await readFile(database, "utf8");
+ 
+       expect(setup).toMatchObject({ ok: true, unlock: "generated-keychain-passphrase" });
++      expect(setup).not.toHaveProperty("appInstall");
+       expect(setup.nextSteps[0]).toBe("Open the approval console with `defenseclaw credential-protection open`.");
+       expect(stored.trim().length).toBeGreaterThanOrEqual(8);
+       expect(output).not.toContain(stored);
+diff --git a/tests/mcp-e2e.test.ts b/tests/mcp-e2e.test.ts
+index 2d80a18..6534fe4 100644
+--- a/tests/mcp-e2e.test.ts
++++ b/tests/mcp-e2e.test.ts
+@@ -65,13 +65,12 @@ describe("MCP end-to-end flow", () => {
+           "api-token",
+           "--value-stdin",
+           "--inject-env",
+-          "SGW_E2E_TOKEN",
+-          "--allow-command",
+-          process.execPath
++          "SGW_E2E_TOKEN"
+         ],
+         "mcp-e2e-secret-value-1234567890"
+       )
+     );
++    await allowCommandAsNativeFixture(addPayload.handle, process.execPath);
+ 
+     const transport = new StdioClientTransport({
+       command: process.execPath,
+@@ -165,3 +164,23 @@ async function approveAsNativeFixture(requestId: string): Promise<void> {
+     }
+   }
+ }
++
++async function allowCommandAsNativeFixture(handle: string, command: string): Promise<void> {
++  const names = ["SGW_HOME", "SGW_RECOVERY_HOME", "SGW_MASTER_PASSPHRASE", "SGW_DISABLE_KEYCHAIN"];
++  const previous = new Map(names.map((name) => [name, process.env[name]]));
++
++  try {
++    for (const name of names) {
++      process.env[name] = testEnv[name];
++    }
++    await new SecretStore(tmpHome).allowCommand(handle, command);
++  } finally {
++    for (const [name, value] of previous) {
++      if (value === undefined) {
++        delete process.env[name];
++      } else {
++        process.env[name] = value;
++      }
++    }
++  }
++}
+-- 
+2.50.1 (Apple Git-155)
+

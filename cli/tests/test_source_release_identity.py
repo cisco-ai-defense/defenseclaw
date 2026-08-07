@@ -109,6 +109,44 @@ def _marker_payload(repo: Path, gateway: Path) -> dict[str, object]:
     }
 
 
+@pytest.mark.parametrize("encoding", ("utf-16", "utf-32"))
+def test_validate_marker_requires_strict_utf8(tmp_path: Path, encoding: str) -> None:
+    repo = tmp_path / "checkout"
+    gateway = tmp_path / "defenseclaw-gateway"
+    marker = tmp_path / ".defenseclaw-source-root"
+    repo.mkdir()
+    gateway.write_bytes(b"gateway\n")
+    marker.write_bytes(json.dumps(_marker_payload(repo, gateway)).encode(encoding))
+
+    with pytest.raises(source_release_identity.SourceIdentityError, match="not valid UTF-8 JSON"):
+        source_release_identity.validate_marker(
+            marker,
+            checkout_root=repo,
+            source_release="0.8.6",
+            compatibility_epoch=2,
+            runtime_version=8,
+        )
+
+
+def test_validate_marker_rejects_duplicate_fields(tmp_path: Path) -> None:
+    repo = tmp_path / "checkout"
+    gateway = tmp_path / "defenseclaw-gateway"
+    marker = tmp_path / ".defenseclaw-source-root"
+    repo.mkdir()
+    gateway.write_bytes(b"gateway\n")
+    raw = json.dumps(_marker_payload(repo, gateway)).encode("utf-8")
+    marker.write_bytes(b'{"schema_version":2,' + raw.removeprefix(b"{"))
+
+    with pytest.raises(source_release_identity.SourceIdentityError, match="duplicate field 'schema_version'"):
+        source_release_identity.validate_marker(
+            marker,
+            checkout_root=repo,
+            source_release="0.8.6",
+            compatibility_epoch=2,
+            runtime_version=8,
+        )
+
+
 def test_reviewed_source_identity_binds_every_canonical_version_source() -> None:
     identity = source_release_identity.validate_source_tree(
         ROOT,

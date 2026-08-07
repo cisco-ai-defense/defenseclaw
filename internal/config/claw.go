@@ -774,9 +774,11 @@ func readMCPServersClaudeCode(workspaceDir string) ([]MCPServerEntry, error) {
 
 	var entries []MCPServerEntry
 
-	settingsPath := filepath.Join(connectorEnvHome("CLAUDE_CONFIG_DIR", ".claude"), "settings.json")
-	if e, err := readMCPFromClaudeSettings(settingsPath); err == nil {
-		entries = append(entries, e...)
+	if home, err := os.UserHomeDir(); err == nil && filepath.IsAbs(home) {
+		userMCPPath := filepath.Join(home, ".claude.json")
+		if e, readErr := readMCPFromClaudeSettings(userMCPPath); readErr == nil {
+			entries = append(entries, e...)
+		}
 	}
 
 	if cwd != "" {

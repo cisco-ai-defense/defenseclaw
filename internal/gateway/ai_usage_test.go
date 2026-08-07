@@ -19,6 +19,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -214,8 +215,11 @@ func TestHandleAIUsageRedactsStoredRawPaths(t *testing.T) {
 	}
 	cancel()
 	select {
-	case <-done:
-	case <-time.After(time.Second):
+	case runErr := <-done:
+		if !errors.Is(runErr, context.Canceled) {
+			t.Fatalf("discovery service Run error = %v, want context.Canceled", runErr)
+		}
+	case <-time.After(5 * time.Second):
 		t.Fatal("discovery service did not stop")
 	}
 	var sawRaw bool

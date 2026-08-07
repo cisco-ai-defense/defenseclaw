@@ -27,6 +27,7 @@ param(
     [string]$BootstrapUninstallContract = 'deferred',
     [string]$DiagnosticsRoot = '',
     [ValidateRange(60, 7200)][int]$TimeoutSeconds = 4500,
+    [switch]$NoCredentialProtection,
     [switch]$Child,
     [switch]$ExerciseWmiEscape,
     [string]$ExpectedSetupSha256 = '',
@@ -36,6 +37,10 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+
+if ($NoCredentialProtection -and $Mode -notin @('setup-acceptance', 'contract')) {
+    throw '-NoCredentialProtection is restricted to source-only Setup acceptance and connector contracts'
+}
 
 function Write-ChildProgress([string]$Path, [string]$Phase) {
     try {
@@ -386,6 +391,7 @@ function Invoke-ChildMode {
             & $nativeHarness -Operation setup-acceptance `
                 -WorkspaceRoot (Split-Path -Parent $PSScriptRoot) `
                 -StateRoot $state -ArtifactRoot $artifacts `
+                -NoCredentialProtection:$NoCredentialProtection `
                 -AllowCurrentUserSetupAcceptance
         } elseif ($Mode -eq 'bootstrap-acceptance') {
             & (Join-Path $PSScriptRoot 'test-fresh-install-release-windows.ps1') `
@@ -398,6 +404,7 @@ function Invoke-ChildMode {
             & $nativeHarness -Operation contract -Connector $Connector `
                 -WorkspaceRoot (Split-Path -Parent $PSScriptRoot) `
                 -StateRoot $state -ArtifactRoot $artifacts `
+                -NoCredentialProtection:$NoCredentialProtection `
                 -AllowCurrentUserSetupAcceptance
         } else {
             $setup = Join-Path $artifacts 'DefenseClawSetup-x64.exe'
@@ -813,6 +820,12 @@ $setupSourceItem = Get-Item -LiteralPath $setupSource -Force -ErrorAction Stop
 if ($setupSourceItem.Attributes -band [IO.FileAttributes]::ReparsePoint) {
     throw 'native setup input must be a regular file, not a reparse point'
 }
+if ($NoCredentialProtection) {
+    $setupSignature = Get-AuthenticodeSignature -LiteralPath $setupSource
+    if ([string]$setupSignature.Status -ne 'NotSigned') {
+        throw '-NoCredentialProtection is restricted to an unsigned source-only Setup artifact'
+    }
+}
 $resourceVerifierInputs = if ($Mode -eq 'bootstrap-acceptance') {
     @()
 } else {
@@ -1157,6 +1170,9 @@ try {
     }
     if ($Mode -eq 'setup-acceptance') {
         $arguments += '-ExerciseWmiEscape'
+    }
+    if ($NoCredentialProtection) {
+        $arguments += '-NoCredentialProtection'
     }
     $arguments += @('-ExpectedSetupSha256', $expectedSetupHash)
     # Refresh immediately before the untrusted logon. Only exact PID and

@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -283,6 +284,123 @@ func TestReadMCPServers_DispatchesViaConnector(t *testing.T) {
 	}
 	if len(entries) != 1 || entries[0].Name != "hello" || entries[0].Command != "echo" {
 		t.Errorf("entries = %+v, want [{hello echo …}]", entries)
+	}
+}
+
+func TestReadMCPServersForConnector_ClaudeCodeUsesDedicatedMCPFiles(t *testing.T) {
+	home := t.TempDir()
+	workspace := t.TempDir()
+	testenv.SetHome(t, home)
+
+	if err := os.MkdirAll(filepath.Join(home, ".claude"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(home, ".claude.json"),
+		[]byte(`{"mcpServers":{"user":{"command":"user-mcp"}}}`),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(home, ".claude", "settings.json"),
+		[]byte(`{"mcpServers":{"wrong-file":{"command":"ignored"}}}`),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(workspace, ".mcp.json"),
+		[]byte(`{"mcpServers":{"workspace":{"command":"workspace-mcp"}}}`),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &Config{Claw: ClawConfig{WorkspaceDir: workspace}}
+	entries, err := cfg.ReadMCPServersForConnector("claudecode")
+	if err != nil {
+		t.Fatalf("ReadMCPServersForConnector(claudecode): %v", err)
+	}
+	names := entryNames(entries)
+	sort.Strings(names)
+	want := []string{"user", "workspace"}
+	if len(names) != len(want) {
+		t.Fatalf("entry names = %v, want %v", names, want)
+	}
+	for i := range want {
+		if names[i] != want[i] {
+			t.Fatalf("entry names = %v, want %v", names, want)
+		}
+	}
+}
+
+func TestReadMCPServersForConnector_ClaudeCodeDoesNotFallBackToWorkingDirectory(t *testing.T) {
+	working := t.TempDir()
+	t.Chdir(working)
+	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
+	t.Setenv("HOMEDRIVE", "")
+	t.Setenv("HOMEPATH", "")
+
+	if err := os.WriteFile(
+		filepath.Join(working, ".claude.json"),
+		[]byte(`{"mcpServers":{"untrusted":{"command":"cwd-mcp"}}}`),
+		0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := (&Config{}).ReadMCPServersForConnector("claudecode")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("entries = %#v, want no working-directory MCP entries", entries)
+	}
+}
+
+func TestReadMCPServersForConnectorPreservesExactSGWAgentCommand(t *testing.T) {
+	home := t.TempDir()
+	testenv.SetHome(t, home)
+	node := filepath.Join(home, "modules", "s-gw", "node")
+	mcp := filepath.Join(home, "modules", "s-gw", "dist", "mcp-server.js")
+	document := map[string]any{
+		"mcpServers": map[string]any{
+			"s-gw": map[string]any{
+				"command": node,
+				"args":    []string{mcp},
+				"env": map[string]string{
+					"SGW_AGENT_NAME":           "DefenseClaw",
+					"SGW_DISABLE_UPDATE_CHECK": "1",
+					"SGW_EXECUTION_ENGINE":     "rust",
+				},
+			},
+		},
+	}
+	raw, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".claude.json"), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, err := (&Config{}).ReadMCPServersForConnector("claudecode")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("entries = %#v", entries)
+	}
+	entry := entries[0]
+	if entry.Name != "s-gw" || entry.Command != node ||
+		strings.Join(entry.Args, "\x00") != mcp {
+		t.Fatalf("s-gw entry = %#v", entry)
+	}
+	if len(entry.Env) != 3 || entry.Env["SGW_AGENT_NAME"] != "DefenseClaw" ||
+		entry.Env["SGW_DISABLE_UPDATE_CHECK"] != "1" || entry.Env["SGW_EXECUTION_ENGINE"] != "rust" {
+		t.Fatalf("s-gw environment = %#v", entry.Env)
 	}
 }
 

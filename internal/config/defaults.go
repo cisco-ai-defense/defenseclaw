@@ -189,6 +189,7 @@ func DefaultConfig() *Config {
 			TrustedBinaryPrefixes:     []string{},
 		},
 		ApplicationProtection: DefaultApplicationProtectionConfig(),
+		CredentialProtection:  CredentialProtectionConfig{},
 		Firewall: FirewallConfig{
 			ConfigFile: filepath.Join(dataDir, "firewall.yaml"),
 			RulesFile:  filepath.Join(dataDir, "firewall.pf.conf"),

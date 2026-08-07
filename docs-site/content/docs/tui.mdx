@@ -47,7 +47,7 @@ Switch panels with the number/letter key shown, or cycle with `Tab` /
 | `A` | Activity | Live output from commands you run |
 | `V` | AI Discovery | Discovered AI agents, components, and local models, including model status and format |
 | `R` | Registries | Configured registries |
-| `0` | Setup | Connector and gateway setup |
+| `0` | Setup | Connector, gateway, and credential-protection setup |
 
 The Overview panel's **AI Agents** metric intentionally excludes `local_model`
 rows so a large model cache cannot hide agent activity. Open **AI Discovery**
@@ -69,6 +69,15 @@ pressing `D` runs Doctor in the background to refresh the view. Failed
 credential checks also feed the bounded missing-credential notice without
 exposing values. See the [Doctor cache reference](/docs/reference/configuration#doctor-cache)
 for the on-disk format.
+
+### Credential protection
+
+Setup's **Credential Protection** config section shows the current
+`credential_protection.enabled` state and explains whether the active connector
+has a prompt-tokenization path through the DefenseClaw proxy. Use the command
+palette actions to set up s-gw, check its safe status, open its authenticated approval console, or
+disable the integration; those commands keep module verification and connector
+registration in the same operation.
 
 ## Handy keys
 

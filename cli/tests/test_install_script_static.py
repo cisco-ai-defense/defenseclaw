@@ -78,10 +78,7 @@ def test_existing_install_refusal_names_authenticated_latest_mode_resolver() -> 
     assert posix.count("authenticated release-owned upgrade resolver from the target release in latest mode") == 2
     assert "bash defenseclaw-upgrade.sh --yes" in posix
     assert "Do not pass --version" in posix
-    assert (
-        "https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/upgrade/"
-        in posix
-    )
+    assert "https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/upgrade/" in posix
     assert "blob/main/docs/CLI.md#upgrade" not in posix
 
     # Windows servicing is owned by the authenticated native Setup executable;
@@ -117,6 +114,15 @@ def test_sandbox_installer_fallback_uses_selected_release() -> None:
     text = INSTALL_SH.read_text(encoding="utf-8")
     assert "raw.githubusercontent.com/${REPO}/main/scripts/install-openshell-sandbox.sh" not in text
     assert "raw.githubusercontent.com/${REPO}/${RELEASE_VERSION}/scripts/install-openshell-sandbox.sh" in text
+
+
+def test_posix_quickstart_defaults_to_credential_protection_with_explicit_opt_out() -> None:
+    text = INSTALL_SH.read_text(encoding="utf-8")
+
+    assert "Fresh credential protection" in text
+    assert "--no-credential-protection) NO_CREDENTIAL_PROTECTION=true" in text
+    assert "args+=(--no-credential-protection)" in text
+    assert "--no-credential-protection applies only to --quickstart" in text
 
 
 def test_release_installers_track_known_connector_choices() -> None:

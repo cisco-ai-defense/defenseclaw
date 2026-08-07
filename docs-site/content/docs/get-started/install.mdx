@@ -66,7 +66,7 @@ Installing as `root` is supported but discouraged — DefenseClaw is per-user by
 | Git | Required to clone and identify a source checkout |
 | GNU Make and a POSIX shell | Required by the documented source workflow |
 | `uv` | Required by `make all` / the `pycli` target |
-| Node.js and npm | Required only when a source build selects the OpenClaw plugin; use the runtime version required by that OpenClaw release |
+| Node.js and npm | Node.js 20+ is required for credential protection. Source builds may also need the runtime version required by a selected OpenClaw plugin. |
 | Docker | Optional, for local observability and Splunk bundles |
 
 Cosign is not a macOS/Linux prerequisite for the `0.8.4+` release installer.
@@ -75,11 +75,11 @@ Cosign `2.6.3` into its owner-only staging directory, validates a hard-coded
 platform SHA-256 before executing it, verifies the DefenseClaw release, and
 retires the temporary verifier. Nothing is installed globally.
 
-The current native Windows Setup bundles its managed runtime. A packaged Windows
-install does not require Python, `uv`, Go, Node.js, Git, or a PowerShell
-installation command after the authenticated Setup artifact is downloaded. This does
-not remove an upstream agent prerequisite such as Claude Code's Git for Windows
-requirement.
+The current native Windows Setup bundles the base DefenseClaw runtime. A packaged
+Windows install does not require Python, `uv`, Go, Git, or a PowerShell installation
+command after the authenticated Setup artifact is downloaded. Credential protection
+still requires Node.js 20 or newer. This does not remove an upstream agent
+prerequisite such as Claude Code's Git for Windows requirement.
 
 ## What's bundled (LLM backends)
 
@@ -125,8 +125,11 @@ session, pass properties directly:
 
 Use `CONNECTOR=claudecode` for Claude Code or `CONNECTOR=none` to configure
 later. The setup executable contains the offline payload required for install;
-after download it does not require Python, `uv`, Go, Node.js, Git, or a
-PowerShell installation command.
+after download the base payload does not require Python, `uv`, Go, Git, or a
+PowerShell installation command. Fresh installs enable credential protection
+by default, which requires Node.js 20 or newer. Pass
+`CREDENTIALPROTECTION=0` to opt out of quiet Setup and configure it later. In
+the graphical wizard, clear **Enable credential protection with s-gw**.
 
 Quiet mode does not authorize service, SYSTEM, session-zero, elevated, or
 background/batch installation. A configured Codex or Claude Code connector
@@ -160,15 +163,21 @@ must not be represented as the published `0.8.10` artifact.
 git clone https://github.com/cisco-ai-defense/defenseclaw.git
 cd defenseclaw
 make all CONNECTOR=none
-defenseclaw init
+defenseclaw init --no-credential-protection
 ```
 
 `make all` installs the editable Python CLI, builds and installs the Go gateway,
 updates your PATH, and normally runs quickstart. The example sets
 `CONNECTOR=none` to skip that automatic first-run configuration, then invokes
-`defenseclaw init` explicitly. Omit `CONNECTOR=none` when you want `make all`
-to run quickstart itself. The OpenClaw plugin is installed when
+`defenseclaw init` explicitly with the source-build credential broker opt-out.
+Omit `CONNECTOR=none` when you want `make all` to run quickstart itself; source
+quickstart also passes `--no-credential-protection` because the checkout does
+not contain the authenticated platform runner. The OpenClaw plugin is installed when
 `CONNECTOR=openclaw` is selected.
+
+Only a release-authorized development payload with approved staged s-gw runtime
+artifacts may opt in with `make all SOURCE_CREDENTIAL_PROTECTION=1`. Ordinary
+source checkouts must leave the default at `0`.
 
 Source builds are development tooling, not a packaged upgrade path. `make all`
 is the explicit developer reinstall workflow: it may reclaim markerless or

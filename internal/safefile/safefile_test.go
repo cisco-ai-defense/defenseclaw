@@ -109,6 +109,18 @@ func TestProtectFileRefusesSymlink(t *testing.T) {
 	if err := os.WriteFile(target, []byte("real"), 0o644); err != nil {
 		t.Fatalf("seed target: %v", err)
 	}
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(target, 0o644); err != nil {
+			t.Fatalf("chmod target: %v", err)
+		}
+		info, err := os.Lstat(target)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if mode := info.Mode().Perm(); mode != 0o644 {
+			t.Fatalf("target fixture has mode %o, want 644", mode)
+		}
+	}
 	link := filepath.Join(dir, "link")
 	if err := os.Symlink(target, link); err != nil {
 		t.Skipf("symlink unsupported: %v", err)

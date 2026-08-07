@@ -570,13 +570,11 @@ func TestAllConnectors_ImplementInterface(t *testing.T) {
 // it exists on disk.
 func TestOpenClaw_ExtensionAvailable_OnFullBuild(t *testing.T) {
 	t.Parallel()
-	// embed.FS always uses forward-slash paths; filepath.Join would emit
-	// backslashes on Windows and never match the embedded entry, so the
-	// skip would not fire and the test would spuriously fail on a Windows
-	// placeholder build. Use path.Join (and the shared constant) to mirror
-	// openClawExtensionAvailable.
-	if _, err := openClawExtensionFS.ReadFile(path.Join(openClawPluginRoot, openClawPlaceholderName)); err == nil {
-		t.Skip("gateway built without OpenClaw extension (placeholder present) — full-build assertion does not apply here")
+	// The tracked placeholder now remains beside a real bundle so source
+	// builds stay clean. package.json distinguishes that bundle from a fresh
+	// placeholder-only checkout.
+	if _, err := openClawExtensionFS.ReadFile(path.Join(openClawPluginRoot, "package.json")); err != nil {
+		t.Skip("gateway built without OpenClaw extension package — full-build assertion does not apply here")
 	}
 	if !openClawExtensionAvailable() {
 		t.Fatal("openClawExtensionAvailable() = false on a non-placeholder build — sync-openclaw-extension is broken")
@@ -1346,10 +1344,14 @@ func TestClaudeCode_Setup_HonorsClaudeConfigDir(t *testing.T) {
 	}
 
 	targets := c.ComponentTargets(filepath.Join(dir, "workspace"))
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatalf("user home: %v", err)
+	}
 	for component, expected := range map[string]string{
 		"skill":   filepath.Join(claudeConfigDir, "skills"),
 		"plugin":  filepath.Join(claudeConfigDir, "plugins"),
-		"mcp":     settingsPath,
+		"mcp":     filepath.Join(home, ".claude.json"),
 		"agent":   filepath.Join(claudeConfigDir, "agents"),
 		"command": filepath.Join(claudeConfigDir, "commands"),
 		"config":  settingsPath,
@@ -1367,6 +1369,22 @@ func TestClaudeCode_Setup_HonorsClaudeConfigDir(t *testing.T) {
 	}
 	if _, err := os.Stat(settingsPath); !os.IsNotExist(err) {
 		t.Fatalf("CLAUDE_CONFIG_DIR settings remained after teardown: %v", err)
+	}
+}
+
+func TestClaudeCode_ComponentTargetsDoesNotUseWorkingDirectoryAsHome(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(dir, "claude-config"))
+	t.Setenv("HOME", "")
+	t.Setenv("USERPROFILE", "")
+	t.Setenv("HOMEDRIVE", "")
+	t.Setenv("HOMEPATH", "")
+
+	workspace := filepath.Join(dir, "workspace")
+	targets := NewClaudeCodeConnector().ComponentTargets(workspace)
+	want := filepath.Join(workspace, ".mcp.json")
+	if len(targets["mcp"]) != 1 || targets["mcp"][0] != want {
+		t.Fatalf("ComponentTargets(mcp) = %v, want [%q]", targets["mcp"], want)
 	}
 }
 

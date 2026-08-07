@@ -138,6 +138,15 @@ import click
     is_flag=True,
     help="Do not start the sidecar at the end of quickstart.",
 )
+@click.option(
+    "--credential-protection/--no-credential-protection",
+    default=None,
+    show_default="when bundled",
+    help=(
+        "Enable the bundled s-gw credential broker on a fresh install. "
+        "Existing installations are never changed implicitly."
+    ),
+)
 @click.option("--json-summary", is_flag=True, help="Emit the first-run summary as JSON.")
 def quickstart_cmd(
     mode: str | None,
@@ -151,6 +160,7 @@ def quickstart_cmd(
     force: bool,
     agent_name: str | None,
     skip_gateway: bool,
+    credential_protection: bool | None,
     json_summary: bool,
 ) -> None:
     """Zero-prompt end-to-end setup with safe defaults.
@@ -235,6 +245,7 @@ def quickstart_cmd(
             # it via ``defenseclaw setup guardrail`` last week.
             human_approval=human_approval,
             hilt_min_severity=hilt_min_severity or "",
+            credential_protection=credential_protection,
         )
     )
     _require_operational_success(
@@ -248,9 +259,7 @@ def quickstart_cmd(
         click.echo(json.dumps(payload, indent=2))
     else:
         if connector_source:
-            click.echo(
-                f"  Using picked connector hint: {connector} from {connector_source['path']}"
-            )
+            click.echo(f"  Using picked connector hint: {connector} from {connector_source['path']}")
         _render_first_run_report(report, CLIRenderer())
     if report.status == "needs_attention":
         sys.exit(1)

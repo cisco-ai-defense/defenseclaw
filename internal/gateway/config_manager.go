@@ -919,6 +919,7 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 	add("observability", oldCfg.Observability, newCfg.Observability)
 	add("ai_discovery", oldCfg.AIDiscovery, newCfg.AIDiscovery)
 	add("application_protection", oldCfg.ApplicationProtection, newCfg.ApplicationProtection)
+	add("credential_protection", oldCfg.CredentialProtection, newCfg.CredentialProtection)
 	add("notifications", oldCfg.Notifications, newCfg.Notifications)
 	add("environment", oldCfg.Environment, newCfg.Environment)
 	add("tenant_id", oldCfg.TenantID, newCfg.TenantID)

@@ -1860,6 +1860,52 @@ class TestIsPidAlive(unittest.TestCase):
 
 
 class TestRestartDefenseGateway(unittest.TestCase):
+    @patch(
+        "defenseclaw.commands.cmd_setup._gateway_lifecycle_executable",
+        return_value="/opt/defenseclaw-gateway",
+    )
+    @patch(
+        "defenseclaw.commands.cmd_setup._gateway_pid_file_identifies_gateway",
+        return_value=True,
+    )
+    @patch(
+        "defenseclaw.commands.cmd_setup._is_pid_alive",
+        side_effect=[True, False, False],
+    )
+    @patch("defenseclaw.commands.cmd_setup.subprocess.run")
+    def test_quiesces_owned_unverified_replacement(
+        self,
+        mock_run,
+        _mock_alive,
+        _mock_identity,
+        _mock_executable,
+    ):
+        from defenseclaw.commands.cmd_setup import _quiesce_unverified_defense_gateway
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self.assertTrue(_quiesce_unverified_defense_gateway(tmpdir))
+
+        mock_run.assert_called_once_with(
+            ["/opt/defenseclaw-gateway", "stop"],
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+    @patch(
+        "defenseclaw.commands.cmd_setup._gateway_pid_file_identifies_gateway",
+        return_value=False,
+    )
+    @patch("defenseclaw.commands.cmd_setup._is_pid_alive", return_value=True)
+    @patch("defenseclaw.commands.cmd_setup.subprocess.run")
+    def test_quiesce_refuses_unverified_pid(self, mock_run, _mock_alive, _mock_identity):
+        from defenseclaw.commands.cmd_setup import _quiesce_unverified_defense_gateway
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self.assertFalse(_quiesce_unverified_defense_gateway(tmpdir))
+
+        mock_run.assert_not_called()
+
     @unittest.skipUnless(os.name == "nt", "native Windows package contract")
     @patch(
         "defenseclaw.commands.cmd_setup._wait_for_defense_gateway_api",

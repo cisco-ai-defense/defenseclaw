@@ -442,6 +442,37 @@ func TestOptionsFromWizardSelectionsMatrix(t *testing.T) {
 	}
 }
 
+func TestWizardCredentialProtectionChoiceIsFreshInstallOnly(t *testing.T) {
+	opts := options{Action: "install"}
+	unchanged := applyWizardCredentialProtectionChoice(opts, false, true)
+	if unchanged.CredentialProtectionSet || unchanged.CredentialProtection {
+		t.Fatalf("hidden credential choice changed install intent: %+v", unchanged)
+	}
+
+	enabled := applyWizardCredentialProtectionChoice(opts, true, true)
+	if !enabled.CredentialProtectionSet || !enabled.CredentialProtection {
+		t.Fatalf("checked credential choice was not recorded: %+v", enabled)
+	}
+	disabled := applyWizardCredentialProtectionChoice(opts, true, false)
+	if !disabled.CredentialProtectionSet || disabled.CredentialProtection {
+		t.Fatalf("cleared credential choice was not recorded: %+v", disabled)
+	}
+}
+
+func TestWizardOffersCredentialProtectionOnlyWithoutInstallOrConfig(t *testing.T) {
+	installRoot := filepath.Join(t.TempDir(), "DefenseClaw")
+	dataRoot := t.TempDir()
+	if !shouldOfferCredentialProtection(installRoot, dataRoot) {
+		t.Fatal("fresh wizard did not offer credential protection")
+	}
+	if err := os.WriteFile(filepath.Join(dataRoot, "config.yaml"), []byte("config_version: 8\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if shouldOfferCredentialProtection(installRoot, dataRoot) {
+		t.Fatal("wizard offered credential protection over an existing config")
+	}
+}
+
 func TestInteractiveInstallDefaultsPreserveExistingSelections(t *testing.T) {
 	state := &installState{Connector: "claudecode", Mode: "action"}
 	opts := applyInteractiveInstallDefaults(options{Action: "install"}, state, true, true)

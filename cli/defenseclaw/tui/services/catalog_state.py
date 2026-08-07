@@ -24,6 +24,7 @@ from defenseclaw.connector_paths import (
     connector_config_files,
     connector_home,
     hermes_config_path,
+    mcp_write_target,
 )
 from defenseclaw.tui.panels.registries import registry_badge
 from defenseclaw.tui.services import connector_filter as connector_filter_svc
@@ -1620,10 +1621,8 @@ def tool_action_intent(key: str, row: ToolRow, *, origin: str, connector: str = 
 
 def mcp_unset_target_for_connector(connector: str) -> str:
     match normalized_connector(connector):
-        case "claudecode":
-            return connector_config_files("claudecode")[0]
-        case "codex":
-            return connector_config_files("codex")[0]
+        case "claudecode" | "codex" as connector_name:
+            return mcp_write_target(connector_name) or "unsupported"
         case "zeptoclaw":
             return "~/.zeptoclaw/config.json"
         case "hermes":

@@ -66,6 +66,12 @@ before locating or editing Windows state.
         <File name="<logical-name>.json" />
       </Folder>
     </Folder>
+    <Folder name="modules">
+      <Folder name="s-gw">
+        <File name="receipt.json" />
+        <Folder name="<version-target>" />
+      </Folder>
+    </Folder>
   </Folder>
 </Files>
 
@@ -142,6 +148,11 @@ gateway:
   api_bind: ""                 # REST API bind override; normally 127.0.0.1 when empty
   config_reload:
     mode: hot                  # hot | restart; omitted means hot
+
+# Fresh init enables this by default. Existing configurations are never
+# changed implicitly. The shared credential store remains under ~/.s-gw.
+credential_protection:
+  enabled: true
 
 # One observability graph owns collection, local history, routing, redaction,
 # sampling, metrics policy, and every optional destination. Defaults collect
@@ -420,6 +431,13 @@ change:
 Live reload rejects storage identity changes such as `data_dir`, audit DB path,
 judge bodies DB path, and `gateway.device_key_file` unless restart mode is
 enabled or the operator restarts the gateway manually.
+
+Changing `credential_protection.enabled` also requires a gateway restart because
+the s-gw tokenization service is verified and started with the gateway. Use
+`defenseclaw setup credential-protection` for installation and MCP
+registration rather than enabling the field by hand. See
+[Credential protection](/docs/setup/credential-protection) for coverage and
+prerequisites.
 
 The full LLM configuration story — picking a role, binding a custom-provider instance, configuring regional Bedrock / Vertex / Azure backends, and how `defenseclaw doctor` validates each — lives on [Setup → Unified LLM key](/docs/setup/unified-llm-key). The schema above is the on-disk shape; the page is the operator-facing how-to.
 

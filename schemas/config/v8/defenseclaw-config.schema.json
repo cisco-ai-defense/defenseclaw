@@ -157,6 +157,9 @@
     "application_protection": {
       "$ref": "#/$defs/applicationProtection"
     },
+    "credential_protection": {
+      "$ref": "#/$defs/credentialProtection"
+    },
     "notifications": {
       "$ref": "#/$defs/notifications"
     },
@@ -766,6 +769,16 @@
           "maxProperties": 256,
           "propertyNames": { "$ref": "#/$defs/connectorName" },
           "additionalProperties": { "$ref": "#/$defs/applicationProtectionConnector" }
+        }
+      }
+    },
+    "credentialProtection": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
         }
       }
     },

@@ -328,6 +328,10 @@ from defenseclaw.commands.cmd_setup_observability import observability  # noqa: 
 
 setup.add_command(observability)
 
+from defenseclaw.commands.cmd_credential_protection import setup_credential_protection  # noqa: E402
+
+setup.add_command(setup_credential_protection)
+
 # Register the first-class Galileo cloud/self-hosted setup workflow. It writes
 # a named OTLP destination through the shared observability writer, so Galileo
 # can coexist with local-observability and every other OTLP backend.
@@ -5161,6 +5165,39 @@ def _apply_judge_enablement(
             gc.judge.hook_connectors = gate
 
 
+def _reconcile_credential_connector_roster(
+    app: AppContext,
+    *,
+    removed_connectors: list[str] | tuple[str, ...] = (),
+) -> list[dict]:
+    enabled = bool(
+        getattr(
+            getattr(app.cfg, "credential_protection", None),
+            "enabled",
+            False,
+        )
+    )
+    if not enabled:
+        return []
+
+    from defenseclaw.credential_protection import (
+        CredentialProtectionError,
+        reconcile_mcp_connector_roster,
+    )
+
+    try:
+        return reconcile_mcp_connector_roster(
+            app.cfg,
+            removed_connectors=removed_connectors,
+        )
+    except CredentialProtectionError as exc:
+        raise click.ClickException(
+            "Connector configuration was saved, but credential-broker MCP "
+            f"reconciliation failed: {exc}. Repair with "
+            "`defenseclaw setup credential-protection --yes`."
+        ) from exc
+
+
 def _apply_hook_connector_setup(
     app: AppContext,
     *,
@@ -5242,6 +5279,7 @@ def _apply_hook_connector_setup(
 
     cfg = app.cfg
     gc = cfg.guardrail
+    before_connectors = {normalize_connector(name) for name in _configured_connector_set(gc) if name}
 
     # R1: resolve the rule-pack selection up front so an invalid combination
     # (--rule-pack + --rule-pack-dir are mutually exclusive) fails fast via a
@@ -5374,6 +5412,12 @@ def _apply_hook_connector_setup(
         click.echo(f"  ✗ Failed to save config: {exc}", err=True)
         return False
 
+    active_connectors = {normalize_connector(name) for name in cfg.active_connectors() if name}
+    _reconcile_credential_connector_roster(
+        app,
+        removed_connectors=sorted(before_connectors - active_connectors),
+    )
+
     _sync_guardrail_hilt_to_opa(cfg.policy_dir, gc)
     _write_picked_connector_hint(getattr(cfg, "data_dir", None), connector)
     _actives = list(cfg.active_connectors()) if hasattr(cfg, "active_connectors") else [connector]
@@ -5485,9 +5529,7 @@ def _print_connector_observability_banner(connector: str, *, mode: str = "observ
                 "    • Native OTel — optional; inactive until OTEL_* variables are exported for the OmniGent process"
             )
         elif connector == "codex":
-            click.echo(
-                "    • Native OTel — logs, metrics, and traces → scoped bearer + source header on /v1/<signal>"
-            )
+            click.echo("    • Native OTel — logs, metrics, and traces → scoped bearer + source header on /v1/<signal>")
         else:
             click.echo("    • Native OTel — documented agent telemetry → /v1/logs, /v1/metrics, and/or /v1/traces")
     if connector == "codex":
@@ -6503,7 +6545,7 @@ def _dispatch_bare_setup(
             if configure_model:
                 _prompt_judge_model_config(app, gc)
 
-    _reconcile_batch_active_connectors(app.cfg, targets)
+    removed_connectors = _reconcile_batch_active_connectors(app.cfg, targets)
     _apply_setup_batch(
         ctx,
         app,
@@ -6514,6 +6556,10 @@ def _dispatch_bare_setup(
         connector_modes=connector_modes,
         allow_trusted_path_prompt=prompt_batch,
         trusted_prompt_cache=trusted_prompt_cache,
+    )
+    _reconcile_credential_connector_roster(
+        app,
+        removed_connectors=removed_connectors,
     )
     if prompt_batch:
         _prune_judge_gate_to_action_scope(app.cfg.guardrail, targets)
@@ -6998,6 +7044,11 @@ def _remove_connector(
     except OSError as exc:
         click.echo(f"  ✗ Failed to save config: {exc}", err=True)
         return False
+
+    _reconcile_credential_connector_roster(
+        app,
+        removed_connectors=[match],
+    )
 
     click.echo(f"  ✓ Removed connector {match!r}")
     if remaining:
@@ -7918,6 +7969,7 @@ def execute_guardrail_setup(
     *,
     save_config: bool = True,
     workspace_dir: str | None = None,
+    reconcile_credentials: bool = True,
 ) -> tuple[bool, list[str]]:
     """Run guardrail setup steps.
 
@@ -7928,8 +7980,29 @@ def execute_guardrail_setup(
     All connector-specific setup (plugin install, config patching, hook
     scripts, subprocess shims/sandbox) is handled by the Go gateway's
     ``Connector.Setup()`` at sidecar startup. This function only persists
-    the Python-side config; config.yaml is the sole runtime source.
+    the Python-side config; config.yaml is the sole runtime source. Bootstrap
+    disables the local credential reconcile because its broker transaction
+    reconciles the final connector roster after this step.
     """
+
+    def _active_names(cfg) -> set[str]:
+        if hasattr(cfg, "active_connectors"):
+            names = cfg.active_connectors()
+        else:
+            names = [getattr(getattr(cfg, "guardrail", None), "connector", "")]
+        return {normalize_connector(name) for name in names if name}
+
+    before_connectors = _active_names(app.cfg)
+    if save_config:
+        persisted_path = config_path_for_data_dir(app.cfg.data_dir)
+        if os.path.lexists(persisted_path):
+            try:
+                persisted = load_config(data_dir=app.cfg.data_dir)
+            except Exception:  # noqa: BLE001 - saving retains its existing error surface.
+                pass
+            else:
+                before_connectors = _active_names(persisted)
+
     gc = app.cfg.guardrail
     warnings: list[str] = []
     connector_name = gc.connector or "openclaw"
@@ -7977,6 +8050,13 @@ def execute_guardrail_setup(
         except OSError as exc:
             ux.err(f"Failed to save config: {exc}")
             warnings.append("Config not saved — settings will be lost on next run")
+        else:
+            active_connectors = _active_names(app.cfg)
+            if reconcile_credentials:
+                _reconcile_credential_connector_roster(
+                    app,
+                    removed_connectors=sorted(before_connectors - active_connectors),
+                )
 
     # --- Mirror HILT into the OPA Rego data file ---
     # The prompt-side guardrail verdict is computed by Rego, which reads
@@ -9356,6 +9436,36 @@ def _cleanup_timed_out_gateway_start(
         return
 
 
+def _quiesce_unverified_defense_gateway(data_dir: str) -> bool:
+    """Stop an owned gateway generation that failed readiness verification."""
+    pid_file = os.path.join(data_dir, "gateway.pid")
+    if _is_pid_alive(pid_file) and not _gateway_pid_file_identifies_gateway(pid_file):
+        click.echo("  defenseclaw-gateway: refusing to stop an unverified PID file target.")
+        return False
+
+    executable = _gateway_lifecycle_executable()
+    if not executable:
+        return not _is_pid_alive(pid_file)
+
+    click.echo("  defenseclaw-gateway: stopping unverified replacement...", nl=False)
+    try:
+        subprocess.run(
+            [executable, "stop"],
+            capture_output=True,
+            text=True,
+            timeout=_DEFENSE_GATEWAY_STOP_TIMEOUT_SECONDS,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        pass
+
+    deadline = time.monotonic() + _DEFENSE_GATEWAY_STOP_TIMEOUT_SECONDS
+    while _is_pid_alive(pid_file) and time.monotonic() < deadline:
+        time.sleep(0.1)
+    stopped = not _is_pid_alive(pid_file)
+    click.echo(" ✓" if stopped else " ✗")
+    return stopped
+
+
 @setup.result_callback()
 @click.pass_context
 def _auto_restart_sidecar_after_setup(ctx: click.Context, *_args, **_kwargs) -> None:
@@ -9432,7 +9542,48 @@ def _auto_restart_sidecar_after_setup(ctx: click.Context, *_args, **_kwargs) -> 
 
     click.echo("")
     click.echo("  Auto-restarting defenseclaw-gateway to apply config changes…")
-    _restart_defense_gateway(data_dir, start_if_stopped=False)
+    if _restart_defense_gateway(data_dir, start_if_stopped=False):
+        return
+
+    if ctx.invoked_subcommand != "credential-protection":
+        return
+
+    from defenseclaw.commands.cmd_credential_protection import (
+        _RESTART_TRANSACTION_KEY,
+        rollback_after_gateway_restart_failure,
+    )
+
+    transaction = ctx.meta.pop(_RESTART_TRANSACTION_KEY, None)
+    if not _quiesce_unverified_defense_gateway(data_dir):
+        raise click.ClickException(
+            "Credential-protection setup could not restart the running gateway. "
+            "The unverified replacement could not be stopped safely, so the "
+            "credential-protection change was left intact to avoid runtime/disk drift. "
+            "Stop the owned gateway, then rerun the setup command."
+        )
+
+    rolled_back, rollback_detail = rollback_after_gateway_restart_failure(app.cfg, transaction)
+    if rolled_back and _restart_defense_gateway(data_dir):
+        raise click.ClickException(
+            "Credential-protection setup could not restart the running gateway. "
+            f"{rollback_detail} The prior configuration was restarted and verified; "
+            "the requested change was not applied."
+        )
+
+    stopped = _quiesce_unverified_defense_gateway(data_dir)
+    recovery = (
+        "The owned gateway remains stopped. Inspect "
+        "`defenseclaw credential-protection status`, correct the gateway error, "
+        "then run `defenseclaw-gateway start`."
+        if stopped
+        else (
+            "The gateway could not be confirmed stopped. Resolve its owned process "
+            "before relying on credential protection."
+        )
+    )
+    raise click.ClickException(
+        f"Credential-protection setup could not restart the running gateway. {rollback_detail} {recovery}"
+    )
 
 
 def _openclaw_gateway_healthy(host: str, port: int, timeout: float = 5.0) -> bool:

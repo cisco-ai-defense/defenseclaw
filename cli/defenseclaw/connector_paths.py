@@ -302,6 +302,12 @@ def claude_config_dir() -> str:
     return _connector_env_home("CLAUDE_CONFIG_DIR", ".claude")
 
 
+def claude_user_mcp_path() -> str:
+    """Return Claude Code's user-level MCP registry path."""
+
+    return os.path.join(os.path.abspath(str(Path.home())), ".claude.json")
+
+
 def codex_home() -> str:
     """Return Codex's effective home directory."""
 
@@ -537,6 +543,8 @@ def connector_config_files(
     if name == "claudecode":
         paths = [
             os.path.join(claude_config_dir(), "settings.json"),
+            claude_user_mcp_path(),
+            _workspace_path(workspace_dir, ".mcp.json"),
             _workspace_path(workspace_dir, ".claude", "settings.json"),
         ]
     elif name == "codex":
@@ -943,6 +951,344 @@ def mcp_servers(
         openclaw_bin_resolver=openclaw_bin_resolver,
         openclaw_cmd_prefix=openclaw_cmd_prefix,
     )
+
+
+def mcp_write_target(
+    connector: str | None,
+    *,
+    openclaw_config: str | None = None,
+    workspace_dir: str | None = None,
+) -> str | None:
+    """Return the exact file mutated by the connector MCP writer."""
+    name = normalize(connector)
+    workspace = _workspace_dir(workspace_dir)
+    if name == "openclaw":
+        return os.path.abspath(_expand(openclaw_config or "~/.openclaw/openclaw.json"))
+    if name == "claudecode":
+        return claude_user_mcp_path()
+    if name == "codex":
+        return os.path.join(workspace, ".mcp.json") if workspace else _codex_config_toml_path()
+    if name == "hermes":
+        return hermes_config_path()
+    if name == "cursor":
+        return (
+            os.path.join(workspace, ".cursor", "mcp.json")
+            if workspace
+            else os.path.join(str(Path.home()), ".cursor", "mcp.json")
+        )
+    if name == "geminicli":
+        return os.path.join(str(Path.home()), ".gemini", "settings.json")
+    if name == "copilot":
+        return (
+            os.path.join(workspace, ".github", "mcp.json")
+            if workspace
+            else os.path.join(str(Path.home()), ".copilot", "mcp-config.json")
+        )
+    if name == "openhands":
+        return os.path.join(str(Path.home()), ".openhands", "mcp.json")
+    if name == "antigravity":
+        return _antigravity_mcp_write_path(workspace_dir)
+    if name == "opencode":
+        return _opencode_write_path(workspace_dir)
+    return None
+
+
+def mcp_servers_at_target(connector: str, target: str) -> list[MCPServerEntry]:
+    """Read one previously bound MCP target without current-home discovery."""
+    name = normalize(connector)
+    path = os.path.abspath(target)
+    if name == "openclaw":
+        return _read_mcp_servers_from_openclaw_json(path)
+    if name == "claudecode":
+        return _read_mcp_settings_block(path, keys=("mcpServers",))
+    if name == "codex":
+        if os.path.basename(path).lower() == "config.toml":
+            return _read_codex_config_toml(path)
+        return _read_dotmcp_json(path)
+    if name == "hermes":
+        return _read_yaml_mcp_servers(path, key_paths=(("mcp", "servers"), ("mcpServers",)))
+    if name in {"cursor", "geminicli", "copilot", "openhands"}:
+        return _read_mcp_settings_block(path, keys=("mcpServers",))
+    if name == "antigravity":
+        return _read_antigravity_mcp_config(path)
+    if name == "opencode":
+        return _read_opencode_mcp(path)
+    raise MCPWriteUnsupportedError(f"connector {name!r} has no bound MCP target surface")
+
+
+def mcp_servers_at_target_strict(connector: str, target: str) -> list[MCPServerEntry]:
+    """Strictly parse one owned target; malformed content is an error."""
+    path = os.path.abspath(target)
+    raw = _read_regular_bytes_if_present(path)
+    _document, entries = _load_mcp_target_document(connector, path, raw)
+    return entries
+
+
+def set_mcp_server_at_target(
+    connector: str,
+    target: str,
+    name: str,
+    entry: dict[str, Any],
+) -> None:
+    """Set one server in an exact target recorded by DefenseClaw."""
+    connector_name = normalize(connector)
+    path = os.path.abspath(target)
+    if connector_name == "openclaw":
+        _atomic_json_merge(path, ("mcp", "servers", name), entry)
+        return
+    if connector_name == "claudecode":
+        _set_claudecode_mcp_server(path, name, entry)
+        return
+    if connector_name == "codex":
+        if os.path.basename(path).lower() == "config.toml":
+            _set_codex_mcp_server_at(path, name, entry)
+        else:
+            _atomic_json_merge(path, ("mcpServers", name), entry)
+        return
+    if connector_name == "hermes":
+        _atomic_yaml_merge(path, ("mcp", "servers", name), entry)
+        return
+    if connector_name in {"cursor", "geminicli", "copilot", "openhands"}:
+        _atomic_json_merge(path, ("mcpServers", name), entry)
+        return
+    if connector_name == "antigravity":
+        _set_antigravity_mcp_server_at(path, name, entry)
+        return
+    if connector_name == "opencode":
+        _set_opencode_mcp_server_at(path, name, entry)
+        return
+    raise MCPWriteUnsupportedError(f"connector {connector_name!r} has no bound MCP target surface")
+
+
+def unset_mcp_server_at_target(connector: str, target: str, name: str) -> None:
+    """Remove one server from an exact target recorded by DefenseClaw."""
+    connector_name = normalize(connector)
+    path = os.path.abspath(target)
+    if connector_name == "openclaw":
+        _atomic_json_delete(path, ("mcp", "servers", name))
+        return
+    if connector_name == "claudecode":
+        _unset_claudecode_mcp_server(path, name)
+        return
+    if connector_name == "codex":
+        if os.path.basename(path).lower() == "config.toml":
+            _unset_codex_mcp_server_at(path, name)
+        else:
+            _atomic_json_delete(path, ("mcpServers", name))
+        return
+    if connector_name == "hermes":
+        _atomic_yaml_delete(path, ("mcp", "servers", name))
+        return
+    if connector_name in {"cursor", "geminicli", "copilot", "openhands"}:
+        _atomic_json_delete(path, ("mcpServers", name))
+        return
+    if connector_name == "antigravity":
+        _unset_antigravity_mcp_server_at(path, name)
+        return
+    if connector_name == "opencode":
+        _unset_opencode_mcp_server_at(path, name)
+        return
+    raise MCPWriteUnsupportedError(f"connector {connector_name!r} has no bound MCP target surface")
+
+
+def _mcp_entry_as_mapping(entry: MCPServerEntry) -> dict[str, Any]:
+    return {
+        "command": entry.command,
+        "args": list(entry.args),
+        "env": dict(entry.env),
+        "cwd": entry.cwd,
+        "url": entry.url,
+        "disabled": entry.disabled,
+    }
+
+
+def _mcp_target_entry_matches(entry: MCPServerEntry, expected: dict[str, Any]) -> bool:
+    actual = _mcp_entry_as_mapping(entry)
+    return all(actual.get(key) == value for key, value in expected.items())
+
+
+def _load_mcp_target_document(
+    connector: str,
+    path: str,
+    raw: bytes | None,
+) -> tuple[dict[str, Any], list[MCPServerEntry]]:
+    name = normalize(connector)
+    if raw is None or not raw.strip():
+        return {}, []
+    if len(raw) > 16 * 1024 * 1024:
+        raise MCPWriteUnsupportedError("refusing MCP mutation: target file is too large")
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise MCPWriteUnsupportedError("refusing MCP mutation: target is not UTF-8") from exc
+
+    if name == "codex" and os.path.basename(path).lower() == "config.toml":
+        try:
+            document = tomllib.loads(text)
+        except tomllib.TOMLDecodeError as exc:
+            raise MCPWriteUnsupportedError("refusing MCP mutation: Codex target is invalid TOML") from exc
+        servers = document.get("mcp_servers")
+        entries: list[MCPServerEntry] = []
+        if isinstance(servers, dict):
+            for server_name, value in servers.items():
+                if not isinstance(value, dict):
+                    continue
+                entries.append(
+                    MCPServerEntry(
+                        name=str(server_name),
+                        command=str(value.get("command", "") or ""),
+                        args=[str(item) for item in (value.get("args", []) or [])],
+                        env={str(key): str(item) for key, item in (value.get("env", {}) or {}).items()},
+                        url=str(value.get("url", "") or ""),
+                    )
+                )
+        return {"_text": text}, entries
+
+    if name == "hermes":
+        try:
+            loaded = yaml.safe_load(text) or {}
+        except yaml.YAMLError as exc:
+            raise MCPWriteUnsupportedError("refusing MCP mutation: Hermes target is invalid YAML") from exc
+        if not isinstance(loaded, dict):
+            raise MCPWriteUnsupportedError("refusing MCP mutation: Hermes target is not an object")
+        servers = loaded.get("mcp", {}).get("servers") if isinstance(loaded.get("mcp"), dict) else None
+        if not isinstance(servers, dict):
+            servers = loaded.get("mcpServers")
+        return loaded, _parse_mcp_servers_dict(servers) if isinstance(servers, dict) else []
+
+    try:
+        loaded = json.loads(text)
+    except json.JSONDecodeError:
+        try:
+            import json5  # type: ignore[import-untyped]
+
+            loaded = json5.loads(text)
+        except Exception as exc:
+            raise MCPWriteUnsupportedError("refusing MCP mutation: target is invalid JSON") from exc
+    if not isinstance(loaded, dict):
+        raise MCPWriteUnsupportedError("refusing MCP mutation: target is not an object")
+    if name == "opencode":
+        servers = loaded.get("mcp")
+        entries = []
+        if isinstance(servers, dict):
+            entries = [
+                _opencode_entry_to_mcp(str(server_name), value)
+                for server_name, value in servers.items()
+                if isinstance(value, dict)
+            ]
+        return loaded, entries
+    if name == "openclaw":
+        mcp = loaded.get("mcp")
+        servers = mcp.get("servers") if isinstance(mcp, dict) else None
+    else:
+        servers = loaded.get("mcpServers")
+    return loaded, _parse_mcp_servers_dict(servers) if isinstance(servers, dict) else []
+
+
+def _render_mcp_target_document(
+    connector: str,
+    path: str,
+    document: dict[str, Any],
+    server_name: str,
+    entry: dict[str, Any] | None,
+) -> bytes:
+    name = normalize(connector)
+    if name == "codex" and os.path.basename(path).lower() == "config.toml":
+        text = str(document.get("_text", ""))
+        updated = _strip_codex_mcp_block(text, server_name)
+        if entry is not None:
+            if updated and not updated.endswith("\n\n"):
+                updated = updated.rstrip() + "\n\n"
+            updated += _codex_mcp_block(server_name, entry)
+        return updated.encode("utf-8")
+
+    if name == "hermes":
+        mcp = document.get("mcp")
+        if not isinstance(mcp, dict):
+            mcp = {}
+            document["mcp"] = mcp
+        servers = mcp.get("servers")
+        if not isinstance(servers, dict):
+            servers = {}
+            mcp["servers"] = servers
+        if entry is None:
+            servers.pop(server_name, None)
+        else:
+            servers[server_name] = entry
+        return yaml.safe_dump(document, default_flow_style=False, sort_keys=False).encode("utf-8")
+
+    key = "mcp" if name == "opencode" else "mcpServers"
+    container = document
+    if name == "openclaw":
+        mcp = document.get("mcp")
+        if not isinstance(mcp, dict):
+            mcp = {}
+            document["mcp"] = mcp
+        container = mcp
+        key = "servers"
+    servers = container.get(key)
+    if not isinstance(servers, dict):
+        servers = {}
+        container[key] = servers
+    if entry is None:
+        servers.pop(server_name, None)
+    elif name == "opencode":
+        servers[server_name] = _opencode_mcp_entry_from_generic(entry)
+    elif name == "antigravity":
+        previous = servers.get(server_name)
+        servers[server_name] = _antigravity_mcp_entry_from_generic(
+            entry,
+            existing=previous if isinstance(previous, dict) else None,
+        )
+    else:
+        servers[server_name] = entry
+    return _render_json_bytes(document)
+
+
+def compare_and_swap_mcp_server_at_target(
+    connector: str,
+    target: str,
+    server_name: str,
+    *,
+    expected: dict[str, Any] | None,
+    replacement: dict[str, Any] | None,
+) -> None:
+    """CAS one named MCP entry under the shared per-target writer lock."""
+    connector_name = normalize(connector)
+    path = os.path.abspath(target)
+    if connector_name == "claudecode":
+        if replacement is None:
+            _unset_claudecode_mcp_server(
+                path,
+                server_name,
+                cas_expected=expected,
+            )
+        else:
+            _set_claudecode_mcp_server(
+                path,
+                server_name,
+                replacement,
+                cas_expected=expected,
+            )
+        return
+    with _locked_claude_mcp_mutation(path):
+        raw = _read_regular_bytes_if_present(path)
+        document, entries = _load_mcp_target_document(connector_name, path, raw)
+        found = [entry for entry in entries if entry.name == server_name]
+        if expected is None:
+            matches = not found
+        else:
+            matches = len(found) == 1 and _mcp_target_entry_matches(found[0], expected)
+        if not matches:
+            raise MCPWriteUnsupportedError("refusing MCP mutation: expected entry changed")
+        replacement_bytes = _render_mcp_target_document(
+            connector_name,
+            path,
+            document,
+            server_name,
+            replacement,
+        )
+        _publish_claude_config_if_unchanged(path, raw, replacement_bytes)
 
 
 # ---------------------------------------------------------------------------
@@ -1463,7 +1809,7 @@ def _claudecode_mcp_servers(workspace_dir: str | None = None) -> list[MCPServerE
     entries: list[MCPServerEntry] = []
     entries.extend(
         _read_mcp_settings_block(
-            os.path.join(claude_config_dir(), "settings.json"),
+            claude_user_mcp_path(),
             keys=("mcpServers",),
         )
     )
@@ -2160,7 +2506,7 @@ def set_mcp_server(
                      ``(path, json_value_str)``). Caller injects this
                      so we can keep subprocess access out of this
                      module.
-    * Claude Code  — ``$HOME/.claude/settings.json[mcpServers][name]``
+    * Claude Code  — ``$HOME/.claude.json[mcpServers][name]``
                      via :func:`_atomic_json_merge`.
     * Codex        — ``~/.codex/config.toml[mcp_servers][name]``
                      by default, or ``<workspace>/.mcp.json`` when
@@ -2188,7 +2534,7 @@ def set_mcp_server(
         openclaw_config_setter(f"mcp.servers.{name}", json.dumps(entry))
         return
     if name_n == "claudecode":
-        path = os.path.join(claude_config_dir(), "settings.json")
+        path = claude_user_mcp_path()
         try:
             _set_claudecode_mcp_server(path, name, entry)
         except UnsafePathError as exc:
@@ -2294,7 +2640,7 @@ def unset_mcp_server(
         openclaw_config_unsetter(f"mcp.servers.{name}")
         return
     if name_n == "claudecode":
-        path = os.path.join(claude_config_dir(), "settings.json")
+        path = claude_user_mcp_path()
         try:
             _unset_claudecode_mcp_server(path, name)
         except UnsafePathError as exc:
@@ -2436,7 +2782,10 @@ def _strip_codex_mcp_block(text: str, name: str) -> str:
 
 
 def _set_codex_global_mcp_server(name: str, entry: dict[str, Any]) -> None:
-    path = _codex_config_toml_path()
+    _set_codex_mcp_server_at(_codex_config_toml_path(), name, entry)
+
+
+def _set_codex_mcp_server_at(path: str, name: str, entry: dict[str, Any]) -> None:
     try:
         with open(path, encoding="utf-8") as f:
             text = f.read()
@@ -2451,7 +2800,10 @@ def _set_codex_global_mcp_server(name: str, entry: dict[str, Any]) -> None:
 
 
 def _unset_codex_global_mcp_server(name: str) -> bool:
-    path = _codex_config_toml_path()
+    return _unset_codex_mcp_server_at(_codex_config_toml_path(), name)
+
+
+def _unset_codex_mcp_server_at(path: str, name: str) -> bool:
     try:
         with open(path, encoding="utf-8") as f:
             text = f.read()
@@ -2597,7 +2949,10 @@ def _set_antigravity_mcp_server(
     *,
     workspace_dir: str | None = None,
 ) -> None:
-    path = _antigravity_mcp_write_path(workspace_dir)
+    _set_antigravity_mcp_server_at(_antigravity_mcp_write_path(workspace_dir), name, entry)
+
+
+def _set_antigravity_mcp_server_at(path: str, name: str, entry: dict[str, Any]) -> None:
     _reject_symlink_config(path)
     parent = os.path.dirname(path)
     if parent and not os.path.exists(parent):
@@ -2621,7 +2976,10 @@ def _unset_antigravity_mcp_server(
     *,
     workspace_dir: str | None = None,
 ) -> bool:
-    path = _antigravity_mcp_write_path(workspace_dir)
+    return _unset_antigravity_mcp_server_at(_antigravity_mcp_write_path(workspace_dir), name)
+
+
+def _unset_antigravity_mcp_server_at(path: str, name: str) -> bool:
     if not os.path.lexists(path):
         return False
     _reject_symlink_config(path)
@@ -2730,7 +3088,10 @@ def _set_opencode_mcp_server(
     *,
     workspace_dir: str | None = None,
 ) -> None:
-    path = _opencode_write_path(workspace_dir)
+    _set_opencode_mcp_server_at(_opencode_write_path(workspace_dir), name, entry)
+
+
+def _set_opencode_mcp_server_at(path: str, name: str, entry: dict[str, Any]) -> None:
     _reject_symlink_config(path)
     data = _read_opencode_doc_for_write(path)
     mcp = data.get("mcp")
@@ -2750,7 +3111,10 @@ def _unset_opencode_mcp_server(
     *,
     workspace_dir: str | None = None,
 ) -> bool:
-    path = _opencode_write_path(workspace_dir)
+    return _unset_opencode_mcp_server_at(_opencode_write_path(workspace_dir), name)
+
+
+def _unset_opencode_mcp_server_at(path: str, name: str) -> bool:
     if not os.path.lexists(path):
         return False
     _reject_symlink_config(path)
@@ -2777,6 +3141,7 @@ def _unset_opencode_mcp_server(
 
 
 _CLAUDE_MCP_OWNERSHIP_SCHEMA = 3
+_CLAUDE_CAS_UNCHECKED = object()
 _CLAUDE_MUTATION_GUARD: ContextVar[dict[str, Any] | None] = ContextVar(
     "claude_mcp_mutation_guard",
     default=None,
@@ -2821,6 +3186,50 @@ def _parse_claude_settings(path: str, raw: bytes | None) -> dict[str, Any]:
             f"refusing to write Claude MCP settings {path}: existing mcpServers property must be a JSON object",
         )
     return loaded
+
+
+def _claude_mcp_entry_matches(
+    data: dict[str, Any],
+    name: str,
+    expected: dict[str, Any] | None,
+) -> bool:
+    servers = data.get("mcpServers")
+    if expected is None:
+        return not isinstance(servers, dict) or name not in servers
+    if not isinstance(servers, dict) or not isinstance(servers.get(name), dict):
+        return False
+    try:
+        entries = _parse_mcp_servers_dict({name: servers[name]})
+    except (TypeError, ValueError):
+        return False
+    return len(entries) == 1 and _mcp_target_entry_matches(entries[0], expected)
+
+
+def _require_claude_mcp_entry(
+    data: dict[str, Any],
+    name: str,
+    expected: dict[str, Any] | None,
+    *,
+    stage: str,
+) -> None:
+    if not _claude_mcp_entry_matches(data, name, expected):
+        raise MCPWriteUnsupportedError(f"refusing Claude MCP mutation: {stage} entry changed")
+
+
+def _verify_claude_mcp_publication(
+    path: str,
+    name: str,
+    replacement: dict[str, Any] | None,
+) -> None:
+    _assert_claude_mutation_guard()
+    raw = _read_regular_bytes_if_present(path)
+    data = _parse_claude_settings(path, raw)
+    _require_claude_mcp_entry(
+        data,
+        name,
+        replacement,
+        stage="published",
+    )
 
 
 def _render_json_bytes(data: dict[str, Any]) -> bytes:
@@ -4805,6 +5214,8 @@ def _set_claudecode_mcp_server(
     path: str,
     name: str,
     entry: dict[str, Any],
+    *,
+    cas_expected: dict[str, Any] | None | object = _CLAUDE_CAS_UNCHECKED,
 ) -> None:
     with _locked_claude_mcp_mutation(path):
         state, released = _recover_claude_mcp_transaction(
@@ -4813,6 +5224,13 @@ def _set_claudecode_mcp_server(
         )
         raw = _read_regular_bytes_if_present(path)
         data = _parse_claude_settings(path, raw)
+        if cas_expected is not _CLAUDE_CAS_UNCHECKED:
+            _require_claude_mcp_entry(
+                data,
+                name,
+                cas_expected,
+                stage="expected",
+            )
 
         if state is not None:
             postimage = _required_bytes_from_b64(
@@ -4876,6 +5294,8 @@ def _set_claudecode_mcp_server(
             released=released,
             next_released=next_released,
         )
+        if cas_expected is not _CLAUDE_CAS_UNCHECKED:
+            _verify_claude_mcp_publication(path, name, entry)
 
 
 def _restore_claude_server_prior(
@@ -4931,7 +5351,12 @@ def _unset_claude_without_state(
     return True
 
 
-def _unset_claudecode_mcp_server(path: str, name: str) -> bool:
+def _unset_claudecode_mcp_server(
+    path: str,
+    name: str,
+    *,
+    cas_expected: dict[str, Any] | None | object = _CLAUDE_CAS_UNCHECKED,
+) -> bool:
     with _locked_claude_mcp_mutation(path):
         state, released = _recover_claude_mcp_transaction(
             path,
@@ -4939,10 +5364,23 @@ def _unset_claudecode_mcp_server(path: str, name: str) -> bool:
         )
         raw = _read_regular_bytes_if_present(path)
         data = _parse_claude_settings(path, raw)
+        if cas_expected is not _CLAUDE_CAS_UNCHECKED:
+            _require_claude_mcp_entry(
+                data,
+                name,
+                cas_expected,
+                stage="expected",
+            )
+
+        def finish(result: bool) -> bool:
+            if cas_expected is not _CLAUDE_CAS_UNCHECKED:
+                _verify_claude_mcp_publication(path, name, None)
+            return result
+
         if name in released:
-            return False
+            return finish(False)
         if state is None:
-            return _unset_claude_without_state(path, name, raw, data, released)
+            return finish(_unset_claude_without_state(path, name, raw, data, released))
 
         postimage = _required_bytes_from_b64(
             state["postimage_b64"],
@@ -4965,14 +5403,22 @@ def _unset_claudecode_mcp_server(path: str, name: str) -> bool:
         if not state["managed"]:
             _finish_claude_mcp_episode(path, None, released)
             if target_was_owned or name in released:
-                return False
-            return _unset_claude_without_state(path, name, raw, data, released)
+                return finish(False)
+            return finish(_unset_claude_without_state(path, name, raw, data, released))
 
         if raw is None:
             raise MCPWriteUnsupportedError("Claude MCP ownership state has no settings file")
         state["postimage_b64"] = _bytes_to_b64(raw)
         committed = copy.deepcopy(state)
         record = state["managed"].get(name)
+        if (
+            cas_expected is not _CLAUDE_CAS_UNCHECKED
+            and isinstance(record, dict)
+            and record.get("prior_present") is True
+        ):
+            raise MCPWriteUnsupportedError(
+                "refusing Claude MCP CAS removal: an operator entry must be restored",
+            )
         if record is not None and bytes_match and state["exact_restore"] and len(state["managed"]) == 1:
             next_released = set(released)
             if record["prior_present"]:
@@ -4994,7 +5440,7 @@ def _unset_claudecode_mcp_server(path: str, name: str) -> bool:
                 released=released,
                 next_released=next_released,
             )
-            return True
+            return finish(True)
 
         next_state = copy.deepcopy(state)
         next_released = set(released)
@@ -5016,7 +5462,7 @@ def _unset_claudecode_mcp_server(path: str, name: str) -> bool:
 
         if not changed:
             _commit_claude_state_without_config(path, next_state, raw, released)
-            return False
+            return finish(False)
 
         if not next_state["managed"]:
             _cleanup_claude_owned_container(data, next_state)
@@ -5036,7 +5482,7 @@ def _unset_claudecode_mcp_server(path: str, name: str) -> bool:
             released=released,
             next_released=next_released,
         )
-        return True
+        return finish(True)
 
 
 def _reject_symlink_config(path: str) -> None:

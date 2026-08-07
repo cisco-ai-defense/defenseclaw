@@ -1,0 +1,52 @@
+From a69ca8aec43f166193eb8b71b3debf2de6a03cc3 Mon Sep 17 00:00:00 2001
+From: sgateway <299698546+sgateway@users.noreply.github.com>
+Date: Tue, 4 Aug 2026 14:53:42 -0700
+Subject: [PATCH 4/6] Adapt Windows launch trust to current upstream
+
+---
+ tests/defenseclaw-runtime.test.ts | 8 ++++----
+ 1 file changed, 4 insertions(+), 4 deletions(-)
+
+diff --git a/tests/defenseclaw-runtime.test.ts b/tests/defenseclaw-runtime.test.ts
+index bfe3444..5dc8301 100644
+--- a/tests/defenseclaw-runtime.test.ts
++++ b/tests/defenseclaw-runtime.test.ts
+@@ -6,7 +6,7 @@ import { pathToFileURL } from "node:url";
+ import { describe, expect, it } from "vitest";
+ 
+ const repoRoot = process.cwd();
+-const tsxBin = path.join(repoRoot, "node_modules", ".bin", process.platform === "win32" ? "tsx.cmd" : "tsx");
++const tsxCli = path.join(repoRoot, "node_modules", "tsx", "dist", "cli.mjs");
+ 
+ describe("DefenseClaw local console launch", () => {
+   it("admits only the host-resolved PowerShell path on Windows", async () => {
+@@ -160,7 +160,7 @@ describe("DefenseClaw local console launch", () => {
+       const recoveryHome = path.join(tmpDir, "recovery");
+ 
+       try {
+-        const result = spawnSync(tsxBin, [path.join(repoRoot, "src", "cli.ts"), ...route], {
++        const result = spawnSync(process.execPath, [tsxCli, path.join(repoRoot, "src", "cli.ts"), ...route], {
+           cwd: repoRoot,
+           encoding: "utf8",
+           env: {
+@@ -206,7 +206,7 @@ describe("DefenseClaw local console launch", () => {
+       const recoveryHome = path.join(tmpDir, "recovery");
+ 
+       try {
+-        const result = spawnSync(tsxBin, [path.join(repoRoot, "src", "cli.ts"), ...route], {
++        const result = spawnSync(process.execPath, [tsxCli, path.join(repoRoot, "src", "cli.ts"), ...route], {
+           cwd: repoRoot,
+           encoding: "utf8",
+           env: {
+@@ -255,7 +255,7 @@ describe("DefenseClaw local console launch", () => {
+       await writeFile(helperPath, helper, { mode: 0o700 });
+       await chmod(helperPath, 0o700);
+       await writeFile(wrapper, wrapperSource);
+-      const output = execFileSync(tsxBin, [wrapper], {
++      const output = execFileSync(process.execPath, [tsxCli, wrapper], {
+         cwd: repoRoot,
+         encoding: "utf8",
+         env: {
+-- 
+2.50.1 (Apple Git-155)
+

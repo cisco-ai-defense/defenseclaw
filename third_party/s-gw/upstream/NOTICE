@@ -1,0 +1,11 @@
+s-gw
+Copyright 2026 Barry Yuan
+
+This product includes software and artwork developed by third parties. Their
+licenses and attribution notices are listed in docs/ui/THIRD_PARTY_NOTICES.md.
+Third-party product names and marks are used for identification only and are
+not licensed under the Apache License, Version 2.0.
+
+Distributed packages may include the separately maintained proprietary
+s-gw Rust execution core. That binary is not licensed under the Apache
+License, Version 2.0.

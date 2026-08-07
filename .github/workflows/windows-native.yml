@@ -400,6 +400,7 @@ jobs:
           -StateRoot $env:DC_STATE_ROOT
           -ArtifactRoot $env:DC_ARTIFACT_ROOT
           -DiagnosticsRoot $env:DC_DIAGNOSTICS
+          -NoCredentialProtection
           -TimeoutSeconds 4200
       - name: Capture bounded redacted diagnostics
         if: ${{ failure() || cancelled() }}
@@ -433,7 +434,7 @@ jobs:
       # 0.8.7 predates immutable install.ps1 release assets. The compatibility
       # fallback below is review-bound to these exact repository bytes and is
       # refused for every other release/candidate identity.
-      BOOTSTRAP_LEGACY_INSTALLER_SHA256: c5f03c7559dd941ca06acdaddeac9262f37911cd8393fe98d4af1aa32b7eb20a
+      BOOTSTRAP_LEGACY_INSTALLER_SHA256: d79fd18d931a9a41a91935b822f49ed64a4938acc301ba42a370afc4e5f9460a
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -658,6 +659,7 @@ jobs:
           -StateRoot $env:DC_STATE_ROOT
           -ArtifactRoot $env:DC_ARTIFACT_ROOT
           -DiagnosticsRoot $env:DC_DIAGNOSTICS
+          -NoCredentialProtection
           -TimeoutSeconds 1800
       - name: Upload deterministic contract results
         if: ${{ always() }}

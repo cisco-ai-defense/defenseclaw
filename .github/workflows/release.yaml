@@ -138,6 +138,29 @@ jobs:
         # product release fail after its PR checks have already passed.
         run: python3 scripts/check-macos-upstream.py --offline
 
+      - name: Pin the reviewed s-gw audit toolchain
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "24.18.1"
+          cache: npm
+          cache-dependency-path: third_party/s-gw/upstream/package-lock.json
+
+      - name: Audit the effective s-gw production dependencies
+        run: make sgw-module-audit
+
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.13"
+
+      - name: Install locked s-gw verification dependencies
+        run: uv sync --locked --no-dev
+
+      - name: Require complete s-gw production runtime
+        run: |
+          .venv/bin/python scripts/build_sgw_module.py \
+            --target all \
+            --check-production-components
+
       - name: Resolve and validate target version
         id: tag
         env:
@@ -291,6 +314,9 @@ jobs:
         with:
           python-version: "3.13"
 
+      - name: Install locked runtime build dependencies
+        run: uv sync --locked --no-dev
+
       - uses: anchore/sbom-action/download-syft@f325610c9f50a54015d37c8d16cb3b0e2c8f4de0 # v0.18.0
 
       - name: Create local release tag
@@ -354,13 +380,59 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
 
+      - name: Pin the reviewed s-gw build toolchain
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "24.18.1"
+          cache: npm
+          cache-dependency-path: third_party/s-gw/upstream/package-lock.json
+
       - name: Build stamped CLI, plugin, and upgrade policy
         env:
           RELEASE_TAG: ${{ needs.release-preflight.outputs.tag }}
+          RELEASE_COMMIT: ${{ needs.release-preflight.outputs.commit }}
         run: |
           set -euo pipefail
           scripts/stamp-version.sh "$RELEASE_TAG"
+          SGW_ARTIFACT_DIR="$RUNNER_TEMP/defenseclaw-s-gw-modules"
+          mkdir -p "$SGW_ARTIFACT_DIR"
+          first_target=1
+          for target in darwin-x64 darwin-arm64 linux-x64 linux-arm64 win32-x64 win32-arm64; do
+            test_args=()
+            if [[ "$first_target" == "1" ]]; then
+              test_args+=(--verify-reproducible)
+            else
+              test_args+=(--skip-tests)
+            fi
+            .venv/bin/python scripts/build_sgw_module.py \
+              --target "$target" \
+              --output-dir "$SGW_ARTIFACT_DIR" \
+              "${test_args[@]}"
+            first_target=0
+          done
+          export DEFENSECLAW_SGW_ARTIFACT_DIR="$SGW_ARTIFACT_DIR"
+          export DEFENSECLAW_SGW_RUNTIME_MANIFEST="$GITHUB_WORKSPACE/release/s-gw-runners.json"
+          export DEFENSECLAW_REQUIRE_SGW_MODULES=1
+          export SGW_ARTIFACT_DIR
+          export SGW_RUNTIME_MANIFEST="$GITHUB_WORKSPACE/release/s-gw-runners.json"
+          export SGW_REQUIRE_MODULES=1
           make dist-cli
+          .venv/bin/python scripts/stage_sgw_modules.py verify-wheel \
+            --wheel "dist/defenseclaw-$RELEASE_TAG-py3-none-any.whl"
+          SOURCE_EPOCH="$(git show -s --format=%ct "$RELEASE_COMMIT")"
+          SGW_SBOM="dist/defenseclaw-$RELEASE_TAG-py3-none-any.whl.sbom.json"
+          .venv/bin/python scripts/stage_sgw_modules.py generate-sbom \
+            --wheel "dist/defenseclaw-$RELEASE_TAG-py3-none-any.whl" \
+            --output "$SGW_SBOM" \
+            --version "$RELEASE_TAG" \
+            --source-commit "$RELEASE_COMMIT" \
+            --source-epoch "$SOURCE_EPOCH"
+          .venv/bin/python scripts/stage_sgw_modules.py verify-sbom \
+            --wheel "dist/defenseclaw-$RELEASE_TAG-py3-none-any.whl" \
+            --sbom "$SGW_SBOM" \
+            --version "$RELEASE_TAG" \
+            --source-commit "$RELEASE_COMMIT" \
+            --authenticate
           make dist-plugin
           make dist-upgrade-manifest
           python3 scripts/release_candidate.py prepare-runtime \

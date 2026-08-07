@@ -893,23 +893,26 @@ class TestMCPServers:
         entries = connector_paths.mcp_servers("codex", workspace_dir=str(cwd))
         assert [e.name for e in entries] == ["local-search"]
 
-    def test_claudecode_merges_settings_and_dotmcp(
+    def test_claudecode_merges_user_and_workspace_mcp(
         self,
         tmp_path,
         monkeypatch,
     ):
-        # Override $HOME so we can write a fake .claude/settings.json
+        # Claude Code keeps user MCP registrations separate from hooks.
         fake_home = tmp_path / "home"
         fake_home.mkdir()
         (fake_home / ".claude").mkdir()
-        (fake_home / ".claude" / "settings.json").write_text(
+        (fake_home / ".claude.json").write_text(
             json.dumps(
                 {
                     "mcpServers": {
-                        "from-settings": {"command": "x"},
+                        "from-user-config": {"command": "x"},
                     },
                 }
             )
+        )
+        (fake_home / ".claude" / "settings.json").write_text(
+            json.dumps({"mcpServers": {"wrong-file": {"command": "no"}}})
         )
         monkeypatch.setenv("HOME", str(fake_home))
 
@@ -925,8 +928,9 @@ class TestMCPServers:
 
         entries = connector_paths.mcp_servers("claudecode", workspace_dir=str(cwd))
         names = [e.name for e in entries]
-        assert "from-settings" in names
+        assert "from-user-config" in names
         assert "from-mcp-json" in names
+        assert "wrong-file" not in names
 
     def test_zeptoclaw_reads_config_json(self, tmp_path, monkeypatch):
         fake_home = tmp_path / "home"
@@ -1110,7 +1114,6 @@ class TestConnectorHome:
         ("connector", "variable", "directory", "config_name"),
         [
             ("codex", "CODEX_HOME", "custom-codex", "config.toml"),
-            ("claudecode", "CLAUDE_CONFIG_DIR", "custom-claude", "settings.json"),
         ],
     )
     def test_codex_and_claude_honor_client_home_overrides(
@@ -1127,6 +1130,16 @@ class TestConnectorHome:
 
         assert connector_paths.connector_home(connector) == str(configured)
         assert connector_paths.connector_config_files(connector)[0] == str(configured / config_name)
+
+    def test_claude_separates_user_mcp_from_settings(self, monkeypatch, tmp_path):
+        home = tmp_path / "home"
+        config_dir = tmp_path / "custom-claude"
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+
+        files = connector_paths.connector_config_files("claudecode")
+        assert files[0] == str(config_dir / "settings.json")
+        assert str(home / ".claude.json") in files
 
     @pytest.mark.parametrize(
         ("connector", "variable", "directory"),
@@ -1271,7 +1284,6 @@ class TestConnectorConfigFiles:
         ("connector", "variable", "directory", "file_name"),
         [
             ("codex", "CODEX_HOME", "codex-home", "config.toml"),
-            ("claudecode", "CLAUDE_CONFIG_DIR", "claude-home", "settings.json"),
         ],
     )
     def test_config_reads_and_writes_use_effective_client_home(
@@ -1303,6 +1315,26 @@ class TestConnectorConfigFiles:
         assert "added" in config_path.read_text(encoding="utf-8")
         connector_paths.unset_mcp_server(connector, "added")
         assert "added" not in config_path.read_text(encoding="utf-8")
+
+    def test_claude_mcp_reads_and_writes_home_config(self, tmp_path, monkeypatch):
+        home = tmp_path / "home"
+        config_dir = tmp_path / "claude-config"
+        home.mkdir()
+        config_dir.mkdir()
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+        mcp_path = home / ".claude.json"
+        mcp_path.write_text(
+            json.dumps({"mcpServers": {"existing": {"command": "one"}}}),
+            encoding="utf-8",
+        )
+
+        assert {entry.name for entry in connector_paths.mcp_servers("claudecode")} == {"existing"}
+        connector_paths.set_mcp_server("claudecode", "added", {"command": "two"})
+        assert "added" in mcp_path.read_text(encoding="utf-8")
+        connector_paths.unset_mcp_server("claudecode", "added")
+        assert "added" not in mcp_path.read_text(encoding="utf-8")
+        assert not (config_dir / "settings.json").exists()
 
 
 class TestConfigDispatch:

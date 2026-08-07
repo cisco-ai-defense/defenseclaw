@@ -3,9 +3,9 @@ GATEWAY     := defenseclaw-gateway
 HOOK_LAUNCHER := defenseclaw-hook
 VERSION     := 0.8.6
 .DEFAULT_GOAL := help
-GOFLAGS     := -ldflags "-X main.version=$(VERSION)"
+GO_BUILD_ARGS := -ldflags "-X main.version=$(VERSION)"
 VENV        := .venv
-GOBIN       := $(shell go env GOPATH)/bin
+GOBIN       ?= $(shell go env GOPATH)/bin
 PLUGIN_DIR  := extensions/defenseclaw
 RUFF        := $(shell if [ -x "$(VENV)/bin/ruff" ]; then printf '%s' "$(VENV)/bin/ruff"; elif command -v ruff >/dev/null 2>&1; then command -v ruff; else printf '%s' "$(VENV)/bin/ruff"; fi)
 SOURCE_PLUGIN_INSTALL_TARGET = $(if $(filter openclaw,$(CONNECTOR)),plugin-install,maybe-openclaw-plugin-install)
@@ -15,6 +15,14 @@ GO_TEST_TIMEOUT ?= 60m
 
 DIST_DIR    := dist
 UPGRADE_SMOKE_FROM ?=
+SOURCE_CREDENTIAL_PROTECTION ?= 0
+SGW_ARTIFACT_DIR := $(or $(SGW_ARTIFACT_DIR),$(DEFENSECLAW_SGW_ARTIFACT_DIR),dist/sgw)
+SGW_RUNTIME_MANIFEST := $(or $(SGW_RUNTIME_MANIFEST),$(DEFENSECLAW_SGW_RUNTIME_MANIFEST),release/s-gw-runners.json)
+override SGW_REQUIRE_MODULES_EFFECTIVE := $(if $(filter 1,$(SOURCE_CREDENTIAL_PROTECTION)),1,$(or $(SGW_REQUIRE_MODULES),$(DEFENSECLAW_REQUIRE_SGW_MODULES),0))
+export DEFENSECLAW_SGW_ARTIFACT_DIR := $(SGW_ARTIFACT_DIR)
+export DEFENSECLAW_SGW_RUNTIME_MANIFEST := $(SGW_RUNTIME_MANIFEST)
+override DEFENSECLAW_REQUIRE_SGW_MODULES := $(SGW_REQUIRE_MODULES_EFFECTIVE)
+export DEFENSECLAW_REQUIRE_SGW_MODULES
 
 # Cross-platform virtualenv / executable layout. Windows Python venvs expose
 # console entry points under Scripts/ (not bin/) and binaries carry a .exe
@@ -97,12 +105,12 @@ endef
         packaging-macos-test packaging-macos-bundle macos-app-license-check macos-app-upstream-check macos-app-build macos-app-test macos-app-release macos-app-release-verify \
         security-suite-test security-suite-eval \
         connector-matrix-test go-connector-matrix-test py-connector-matrix-test \
-        test-verbose test-file lint py-lint go-lint ts-test rego-test clean \
+        test-verbose test-file lint py-lint go-lint ts-test rego-test sgw-vendor-check sgw-module-audit sgw-module-check clean \
         check check-audit-actions check-error-codes check-schemas telemetry-generate telemetry-check generate-guardrail-catalog check-guardrail-catalog check-grafana-dashboards check-observability-v8-hard-cut check-v7 check-provider-coverage check-llm-catalog check-version-sync check-upgrade-manifest \
         upgrade-smoke upgrade-smoke-matrix upgrade-refusal-contract-matrix upgrade-developer-activation \
         upgrade-legacy-smoke upgrade-legacy-smoke-matrix upgrade-signed-protocol upgrade-signed-protocol-matrix \
         set-version \
-        _bundle-data _source-install-preflight _source-install-dev-preflight _source-dev-install \
+        _bundle-data _source-credential-protection-preflight _source-install-preflight _source-install-dev-preflight _source-dev-install \
         proto proto-check proto-tools \
         dist dist-cli dist-gateway dist-plugin dist-sandbox dist-test dist-upgrade-manifest dist-checksums dist-clean
 
@@ -125,6 +133,8 @@ help:
 	@echo "Common developer options:"
 	@echo "  make all NO_QUICKSTART=1   rebuild/install without first-run setup"
 	@echo "  make all CONNECTOR=none    rebuild/install without connector setup"
+	@echo "  make all SOURCE_CREDENTIAL_PROTECTION=1"
+	@echo "                              enable s-gw only with approved staged runtime artifacts"
 
 # ---------------------------------------------------------------------------
 # Version stamping
@@ -204,11 +214,16 @@ path: _source-install-preflight
 # The CLI handles its own idempotence, so repeated `make all` is safe.
 quickstart: _source-install-preflight
 	@profile="$${PROFILE:-observe}"; \
+	case "$(SOURCE_CREDENTIAL_PROTECTION)" in \
+		0) credential_flag="--no-credential-protection" ;; \
+		1) credential_flag="--credential-protection" ;; \
+		*) echo "SOURCE_CREDENTIAL_PROTECTION must be 0 or 1" >&2; exit 64 ;; \
+	esac; \
 	if [ "$${NO_QUICKSTART:-0}" = "1" ]; then \
 		echo "NO_QUICKSTART=1 set — skipping quickstart"; \
 	elif [ "$${CONNECTOR:-}" = "none" ]; then \
 		echo "CONNECTOR=none set — skipping first-run setup"; \
-		echo "  Run later: defenseclaw init"; \
+		echo "  Run later from a source checkout: defenseclaw init --no-credential-protection"; \
 	else \
 		if [ -x "$(INSTALL_DIR)/defenseclaw" ]; then \
 			dc_bin="$(INSTALL_DIR)/defenseclaw"; \
@@ -224,6 +239,7 @@ quickstart: _source-install-preflight
 				--connector "$${CONNECTOR}" \
 				--profile "$$profile" \
 				--scanner-mode "$${SCANNER_MODE:-local}" \
+				"$$credential_flag" \
 				--no-start-gateway --verify; then \
 				echo "  Quickstart reported errors — run 'defenseclaw doctor' to investigate"; \
 				exit 1; \
@@ -231,6 +247,7 @@ quickstart: _source-install-preflight
 		elif [ -t 0 ] && [ -t 1 ] && [ "$${CI:-}" != "true" ]; then \
 			if ! "$$dc_bin" init \
 				--scanner-mode "$${SCANNER_MODE:-local}" \
+				"$$credential_flag" \
 				--no-start-gateway --verify; then \
 				echo "  Quickstart reported errors — run 'defenseclaw doctor' to investigate"; \
 				exit 1; \
@@ -239,6 +256,7 @@ quickstart: _source-install-preflight
 			if ! "$$dc_bin" init --non-interactive --yes \
 				--profile "$$profile" \
 				--scanner-mode "$${SCANNER_MODE:-local}" \
+				"$$credential_flag" \
 				--no-start-gateway --verify; then \
 				echo "  Quickstart reported errors — run 'defenseclaw doctor' to investigate"; \
 				exit 1; \
@@ -422,7 +440,7 @@ proto-check: proto
 		internal/guardrail/semanticpb/facts.pb.go
 
 gateway: sync-openclaw-extension
-	go build $(GOFLAGS) -o $(GATEWAY)$(EXE) ./cmd/defenseclaw
+	go build $(GO_BUILD_ARGS) -o $(GATEWAY)$(EXE) ./cmd/defenseclaw
 	$(if $(filter Windows_NT,$(OS)),go run ./internal/tools/windowsresources -target windows_amd64 -executable $(GATEWAY)$(EXE) -component gateway -version $(VERSION) -icon "$(CURDIR)/macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png",)
 	@echo "Built $(GATEWAY)$(EXE)"
 	@echo "  Run with: ./$(GATEWAY)$(EXE)"
@@ -446,22 +464,21 @@ endif
 # Best-effort: a fresh clone has no extensions/defenseclaw/dist/ until
 # `make plugin` runs. Forcing every gateway build to first run npm
 # would block non-OpenClaw operators (zeptoclaw, codex, claude code)
-# who don't need the plugin at all. Instead we drop a placeholder file
-# so //go:embed has at least one entry, and the OpenClaw connector
-# detects the placeholder at runtime and returns a clear error when
-# `Setup` is called for OpenClaw without a built plugin. Operators who
-# actually want OpenClaw run `make extensions` (or `make plugin`) first.
+# who don't need the plugin at all. The tracked placeholder keeps the
+# //go:embed directory valid in a fresh checkout and remains beside generated
+# bundles so the source tree stays clean. The connector uses package.json,
+# not the marker, to decide whether the plugin is available. Operators who
+# want OpenClaw run `make extensions` (or `make plugin`) first.
 sync-openclaw-extension:
 	@set -e; \
 	embed_dir=internal/gateway/connector/openclaw_extension; \
 	plugin_dist=$(PLUGIN_DIR)/dist; \
+	placeholder_text='This tracked marker keeps the OpenClaw embed directory available to go:embed.'; \
 	if [ ! -d "$$plugin_dist" ] || [ -z "$$(ls -A "$$plugin_dist" 2>/dev/null)" ]; then \
 	  if [ -f "$$embed_dir/.placeholder" ] || [ ! -d "$$embed_dir" ] \
 	      || [ -z "$$(ls -A "$$embed_dir" 2>/dev/null | grep -v '^\.placeholder$$' || true)" ]; then \
 	    mkdir -p "$$embed_dir"; \
-	    printf '%s\n' "OpenClaw extension not built." \
-	      "Run 'make extensions' (or 'make plugin') to populate the embedded tree." \
-	      > "$$embed_dir/.placeholder"; \
+	    printf '%s\n' "$$placeholder_text" > "$$embed_dir/.placeholder"; \
 	    echo "  • OpenClaw extension dist/ missing — embedded a placeholder (run 'make extensions' to enable OpenClaw)"; \
 	  else \
 	    echo "  • OpenClaw extension dist/ missing — keeping the previously synced tree under $$embed_dir/"; \
@@ -470,6 +487,7 @@ sync-openclaw-extension:
 	fi; \
 	rm -rf "$$embed_dir"; \
 	mkdir -p "$$embed_dir/node_modules"; \
+	printf '%s\n' "$$placeholder_text" > "$$embed_dir/.placeholder"; \
 	cp $(PLUGIN_DIR)/package.json "$$embed_dir/"; \
 	cp $(PLUGIN_DIR)/openclaw.plugin.json "$$embed_dir/"; \
 	if command -v rsync >/dev/null 2>&1; then \
@@ -505,7 +523,7 @@ gateway-cross: sync-openclaw-extension
 	@if [ "$(GOOS)" = "windows" ] && [ "$(GOARCH)" != "amd64" ]; then \
 		echo "native Windows release resources currently certify only GOARCH=amd64" >&2; exit 1; \
 	fi
-	GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(GOFLAGS) -o $(BINARY)-$(GOOS)-$(GOARCH) ./cmd/defenseclaw
+	GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(GO_BUILD_ARGS) -o $(BINARY)-$(GOOS)-$(GOARCH) ./cmd/defenseclaw
 	@if [ "$(GOOS)" = "windows" ]; then \
 		go run ./internal/tools/windowsresources -target windows_$(GOARCH) \
 			-executable $(BINARY)-$(GOOS)-$(GOARCH) -component gateway -version $(VERSION) \
@@ -550,6 +568,12 @@ _source-install-preflight:
 	@./scripts/source-install-preflight.sh check \
 		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
 		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
+
+_source-credential-protection-preflight:
+	@case "$(SOURCE_CREDENTIAL_PROTECTION)" in \
+		0|1) ;; \
+		*) echo "SOURCE_CREDENTIAL_PROTECTION must be 0 or 1" >&2; exit 64 ;; \
+	esac
 
 # `make all` is the explicit developer-machine activation workflow. It may
 # adopt existing user state when the shared executable paths are empty, and it
@@ -874,6 +898,38 @@ ts-test:
 		fi && \
 		npx --no-install vitest run
 
+sgw-vendor-check:
+	$(BOOTSTRAP_PYTHON) scripts/sync_sgw_vendor.py verify
+
+sgw-module-audit: sgw-vendor-check
+	$(BOOTSTRAP_PYTHON) scripts/build_sgw_module.py --target linux-x64 --audit-dependencies
+
+sgw-module-check: sgw-vendor-check
+	@set -eu; \
+		output_dir="$$(mktemp -d "$${TMPDIR:-/tmp}/defenseclaw-sgw-check.XXXXXX")"; \
+		cleanup() { rm -rf "$$output_dir"; }; \
+		trap cleanup EXIT HUP INT TERM; \
+		$(BOOTSTRAP_PYTHON) scripts/build_sgw_module.py \
+			--target linux-x64 \
+			--allow-incomplete-components \
+			--verify-reproducible \
+			--output-dir "$$output_dir"; \
+		test -f "$$output_dir/defenseclaw-s-gw-module-0.2.0-linux-x64-source-only.tar.gz"; \
+		$(BOOTSTRAP_PYTHON) scripts/stage_sgw_modules.py stage \
+			--root . --artifact-dir "$$output_dir" --destination "$$output_dir/staged"; \
+		test ! -e "$$output_dir/staged/modules"; \
+		if $(BOOTSTRAP_PYTHON) scripts/stage_sgw_modules.py stage \
+			--root . --artifact-dir "$$output_dir" --destination "$$output_dir/required" --require-all; then \
+			echo "s-gw source-only staging unexpectedly satisfied production delivery" >&2; \
+			exit 1; \
+		fi; \
+		if $(BOOTSTRAP_PYTHON) scripts/build_sgw_module.py \
+			--target linux-x64 \
+			--output-dir "$$output_dir/production"; then \
+			echo "s-gw production build unexpectedly passed without approved runtime components" >&2; \
+			exit 1; \
+		fi
+
 rego-test:
 	PATH="$(GOBIN):$(PATH)" opa test policies/rego/ -v
 
@@ -1049,7 +1105,7 @@ dist-cli: _bundle-data
 	@find cli/ -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 	uv build --wheel --out-dir $(DIST_DIR)
 
-_bundle-data:
+_bundle-data: _source-credential-protection-preflight
 	@mkdir -p cli/defenseclaw/_data/policies/rego
 	@mkdir -p cli/defenseclaw/_data/policies/openshell
 	@mkdir -p cli/defenseclaw/_data/policies/guardrail
@@ -1088,6 +1144,11 @@ _bundle-data:
 	cp schemas/config/v8/defenseclaw-config.schema.json cli/defenseclaw/_data/config/v8/
 	cp schemas/config/v8/reference/observability.yaml cli/defenseclaw/_data/config/v8/
 	cp schemas/config/v8/reference/observability.md cli/defenseclaw/_data/config/v8/
+	DEFENSECLAW_SGW_ARTIFACT_DIR="$(SGW_ARTIFACT_DIR)" \
+		DEFENSECLAW_SGW_RUNTIME_MANIFEST="$(SGW_RUNTIME_MANIFEST)" \
+		DEFENSECLAW_REQUIRE_SGW_MODULES="$(SGW_REQUIRE_MODULES_EFFECTIVE)" \
+		"$(BOOTSTRAP_PYTHON)" scripts/stage_sgw_modules.py stage \
+			--root . --destination cli/defenseclaw/_data/sgw
 	@# Git stores the reproducible telemetry runtime artifacts as deterministic
 	@# gzip members. Wheels keep the stable public contract: exact raw JSON under
 	@# the same six resource names used by installed CLI code.

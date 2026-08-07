@@ -31,37 +31,6 @@ function Get-DefenseClawCertificateEvidence(
     }
 }
 
-function Get-DefenseClawCertificateChainEvidence(
-    [Security.Cryptography.X509Certificates.X509Certificate2]$Certificate
-) {
-    if ($null -eq $Certificate) { return $null }
-    $chain = [Security.Cryptography.X509Certificates.X509Chain]::new()
-    try {
-        # Get-AuthenticodeSignature performs the platform trust decision. This
-        # second build records a deterministic offline chain identity without a
-        # release depending on transient revocation-network availability.
-        $chain.ChainPolicy.RevocationMode = [Security.Cryptography.X509Certificates.X509RevocationMode]::NoCheck
-        $chain.ChainPolicy.VerificationFlags = [Security.Cryptography.X509Certificates.X509VerificationFlags]::NoFlag
-        $disableDownloads = $chain.ChainPolicy.PSObject.Properties['DisableCertificateDownloads']
-        if ($null -eq $disableDownloads) {
-            throw 'Offline Authenticode chain evidence requires a runtime with cache-only certificate-chain support.'
-        }
-        $chain.ChainPolicy.DisableCertificateDownloads = $true
-        $built = $chain.Build($Certificate)
-        $statuses = @($chain.ChainStatus | ForEach-Object { [string]$_.Status } | Sort-Object -Unique)
-        $certificates = @($chain.ChainElements | ForEach-Object {
-            Get-DefenseClawCertificateEvidence $_.Certificate
-        })
-        return [ordered]@{
-            build_succeeded = [bool]$built
-            statuses = $statuses
-            certificates = $certificates
-        }
-    } finally {
-        $chain.Dispose()
-    }
-}
-
 function Test-DefenseClawPortableExecutable([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
     $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
@@ -347,7 +316,6 @@ function Get-DefenseClawTimestampEvidence(
         message_imprint = [string]$verified.MessageImprintHex
         serial_number = [string]$verified.SerialNumberHex
         certificate = Get-DefenseClawCertificateEvidence $tokenCertificate
-        chain = Get-DefenseClawCertificateChainEvidence $tokenCertificate
     }
 }
 
@@ -383,7 +351,6 @@ function Get-DefenseClawEmbeddedSignatureEvidence(
             digest_algorithm_oid = [string]$signer.DigestAlgorithm.Value
             signature_algorithm_oid = [string]$signer.SignatureAlgorithm.Value
             signer = Get-DefenseClawCertificateEvidence $signer.Certificate
-            chain = Get-DefenseClawCertificateChainEvidence $signer.Certificate
             timestamp = if ($null -ne $timestamp) { $timestamp } else {
                 [ordered]@{
                     present = $false
@@ -395,7 +362,6 @@ function Get-DefenseClawEmbeddedSignatureEvidence(
                     message_imprint = ''
                     serial_number = ''
                     certificate = $null
-                    chain = $null
                 }
             }
         }
@@ -493,8 +459,8 @@ function Get-DefenseClawAuthenticodeEvidence(
         $selectedTimestamp
     } elseif ($timestampPresent) {
         # Catalog signatures are external to the shipped PE. Record the
-        # platform-selected certificate/chain separately; embedded signatures
-        # (including dual signatures) remain fully inventoried below.
+        # platform-selected leaf separately; embedded signatures (including
+        # dual signatures) remain fully inventoried below.
         [ordered]@{
             present = $true
             format = "platform-$($signatureType.ToLowerInvariant())"
@@ -505,7 +471,6 @@ function Get-DefenseClawAuthenticodeEvidence(
             message_imprint = ''
             serial_number = ''
             certificate = Get-DefenseClawCertificateEvidence $signature.TimeStamperCertificate
-            chain = Get-DefenseClawCertificateChainEvidence $signature.TimeStamperCertificate
         }
     } else {
         [ordered]@{
@@ -518,7 +483,6 @@ function Get-DefenseClawAuthenticodeEvidence(
             message_imprint = ''
             serial_number = ''
             certificate = $null
-            chain = $null
         }
     }
 
@@ -602,6 +566,17 @@ function Get-DefenseClawAuthenticodeEvidence(
         }
     }
 
+    $observed = [ordered]@{
+        status = $status
+    }
+    if ($pinPlatformIdentity) {
+        $observed['publisher'] = $publisher
+        $observed['signature_type'] = $signatureType
+        $observed['signer'] = $signerEvidence
+        $observed['timestamp'] = $timestampEvidence
+    }
+    $observed['embedded_signatures'] = $embeddedSignatures
+
     return [ordered]@{
         schema_version = 1
         installed_path = $InstalledPath
@@ -618,15 +593,7 @@ function Get-DefenseClawAuthenticodeEvidence(
             timestamp_signer_thumbprint_sha256 = $ExpectedTimestampSignerThumbprintSha256
             timestamp_token_sha256 = $ExpectedTimestampTokenSha256
         }
-        observed = [ordered]@{
-            status = $status
-            publisher = $publisher
-            signature_type = $signatureType
-            signer = $signerEvidence
-            chain = Get-DefenseClawCertificateChainEvidence $signature.SignerCertificate
-            timestamp = $timestampEvidence
-            embedded_signatures = $embeddedSignatures
-        }
+        observed = $observed
     }
 }
 
@@ -709,11 +676,9 @@ function Assert-DefenseClawAuthenticodeEvidence([string]$Path, [object]$Expected
             (Get-DefenseClawEvidenceCertificateIdentity $ExpectedEvidence.observed.signer)) {
         throw "Authenticode signer certificate mismatch for $Path"
     }
-    # Full chains are retained for provenance, but are deliberately not an
-    # equality key: path building can select a different root/intermediate as
-    # the Windows root store evolves. Get-AuthenticodeSignature above is the
-    # current platform trust decision; stable leaf and RFC3161 identities are
-    # compared exactly.
+    # Get-AuthenticodeSignature above is the current platform trust decision;
+    # stable leaf and RFC3161 identities are compared exactly. Machine-selected
+    # chain paths are deliberately not serialized into release artifacts.
     if ($platformIdentityRequired) {
         foreach ($field in @(
             'present', 'format', 'token_sha256', 'signing_time_utc', 'policy_oid',

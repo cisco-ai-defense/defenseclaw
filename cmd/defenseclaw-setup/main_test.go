@@ -165,17 +165,18 @@ func TestParseArgsSilentInstallProperties(t *testing.T) {
 		"CONNECTOR=codex",
 		"MODE=action",
 		"STARTGATEWAY=1",
+		"CREDENTIALPROTECTION=0",
 	})
 	if err != nil {
 		t.Fatalf("parseArgs returned error: %v", err)
 	}
-	if !opts.Quiet || !opts.NoRestart || !opts.StartGateway {
+	if !opts.Quiet || !opts.NoRestart || !opts.StartGateway || opts.CredentialProtection {
 		t.Fatalf("flags not parsed: %+v", opts)
 	}
 	if opts.InstallScope != "user" || opts.Connector != "codex" || opts.Mode != "action" {
 		t.Fatalf("properties not parsed: %+v", opts)
 	}
-	if !opts.ConnectorSet || !opts.ModeSet || !opts.StartGatewaySet {
+	if !opts.ConnectorSet || !opts.ModeSet || !opts.StartGatewaySet || !opts.CredentialProtectionSet {
 		t.Fatalf("explicit property markers not parsed: %+v", opts)
 	}
 }
@@ -308,16 +309,47 @@ func TestConfiguredConnectorRequiresPersistentGateway(t *testing.T) {
 	}
 }
 
-func TestCanonicalInitializationUsesExplicitNoConnectorAuthority(t *testing.T) {
-	args := initialConfigurationArgs(options{Connector: "none", Mode: "observe"})
+func TestCanonicalInitializationStartsWithCredentialProtectionDisabled(t *testing.T) {
+	args := initialConfigurationArgs(canonicalInitializationOptions())
 	want := []string{
 		"init", "--skip-install", "--non-interactive", "--yes",
 		"--connector", "none",
 		"--profile", "observe",
 		"--no-start-gateway", "--no-verify",
+		"--no-credential-protection",
 	}
 	if !slices.Equal(args, want) {
 		t.Fatalf("canonical initialization args = %v, want %v", args, want)
+	}
+}
+
+func TestCredentialProtectionSetupArgs(t *testing.T) {
+	tests := []struct {
+		name    string
+		enabled bool
+		want    []string
+	}{
+		{name: "enable", enabled: true, want: []string{"setup", "credential-protection", "--yes"}},
+		{name: "opt out", want: []string{"setup", "credential-protection", "--disable", "--yes"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := credentialProtectionSetupArgs(test.enabled); !slices.Equal(got, test.want) {
+				t.Fatalf("credential protection setup args = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+func TestInitialConfigurationPassesCredentialProtectionOptOut(t *testing.T) {
+	args := initialConfigurationArgs(options{
+		Connector:               "codex",
+		Mode:                    "observe",
+		CredentialProtection:    false,
+		CredentialProtectionSet: true,
+	})
+	if !slices.Contains(args, "--no-credential-protection") {
+		t.Fatalf("initial configuration args = %v", args)
 	}
 }
 
@@ -621,6 +653,49 @@ func TestConnectorsForNativeUninstallUsesLegacyConfiguredConnector(t *testing.T)
 	}
 }
 
+func TestReadNativeCredentialProtectionEnabled(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		config  string
+		enabled bool
+	}{
+		{name: "missing section", config: "config_version: 8\n"},
+		{name: "disabled", config: "credential_protection:\n  enabled: false\n"},
+		{name: "enabled", config: "credential_protection:\n  enabled: true\n", enabled: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dataRoot := t.TempDir()
+			if err := os.WriteFile(filepath.Join(dataRoot, "config.yaml"), []byte(test.config), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			enabled, err := readNativeCredentialProtectionEnabled(dataRoot)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if enabled != test.enabled {
+				t.Fatalf("enabled = %t, want %t", enabled, test.enabled)
+			}
+		})
+	}
+}
+
+func TestReadNativeCredentialProtectionRejectsNonBooleanWithoutLeakingConfig(t *testing.T) {
+	dataRoot := t.TempDir()
+	privateValue := "private-synthetic-config-value"
+	config := "gateway:\n  token: " + privateValue + "\ncredential_protection:\n  enabled: yes-please\n"
+	if err := os.WriteFile(filepath.Join(dataRoot, "config.yaml"), []byte(config), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := readNativeCredentialProtectionEnabled(dataRoot)
+	if err == nil || !strings.Contains(err.Error(), "not a boolean") {
+		t.Fatalf("invalid credential protection error = %v", err)
+	}
+	if strings.Contains(err.Error(), privateValue) {
+		t.Fatal("credential protection parse error leaked a configuration value")
+	}
+}
+
 func TestConnectorsForNativeUninstallUsesConfiguredClawMode(t *testing.T) {
 	dataRoot := t.TempDir()
 	config := []byte("config_version: 8\nclaw:\n  mode: codex\n")
@@ -777,7 +852,7 @@ func TestParseArgsRejectsMachineScope(t *testing.T) {
 }
 
 func TestParseArgsRejectsInvalidBooleanProperties(t *testing.T) {
-	for _, property := range []string{"STARTGATEWAY=maybe", "DELETEUSERDATA=enabled"} {
+	for _, property := range []string{"STARTGATEWAY=maybe", "CREDENTIALPROTECTION=maybe", "DELETEUSERDATA=enabled"} {
 		if _, err := parseArgs([]string{property}); err == nil {
 			t.Fatalf("parseArgs accepted invalid boolean property %q", property)
 		}

@@ -1,0 +1,342 @@
+{
+  "schema_version": 1,
+  "component": "s-gw production runtime",
+  "license": "LicenseRef-s-gw-Core",
+  "redistribution_status": "not_approved",
+  "required_for_production": true,
+  "signature_policy": {
+    "algorithm": "ed25519-sha256-v1",
+    "public_key": null,
+    "public_key_sha256": null
+  },
+  "runner_contract": {
+    "schema_version": 1,
+    "runtime_contract": "defenseclaw.s-gw.native-runtime.v1",
+    "protocol": "mcp-stdio-jsonrpc-2.0",
+    "mcp_arguments": ["mcp", "--profile", "defenseclaw-tokenizer", "--protocol-version", "1"],
+    "server_info": {"name": "s-gw-core", "version": "0.2.0"},
+    "tools": ["sgw_prepare_proxy_tokenization"],
+    "console_arguments": ["console", "open", "--protocol-version", "1"],
+    "console_status": {
+      "schema": "defenseclaw.s-gw.console-status.v1",
+      "fields": ["schema_version", "status"],
+      "statuses": ["opened", "already_open"]
+    },
+    "console_ui_binding": "runner-verified-signed-inventory-snapshot-v1",
+    "console_browser_handoff": "native-os-api-or-absolute-system-launcher-v1",
+    "approval_mutations": "native-authenticated-user-presence-only",
+    "capabilities": [
+      "defenseclaw.native-tokenizer-mcp.v1",
+      "defenseclaw.approval-console-session.v1",
+      "defenseclaw.pending-enrollment.v1"
+    ]
+  },
+  "targets": {
+    "darwin-x64": {
+      "components": {
+        "runner": {
+          "filename": "s-gw-core",
+          "path": null,
+          "sha256": null,
+          "installed_sha256": null,
+          "signature": null,
+          "destination": "dist/native/darwin-x64/s-gw-core",
+          "format": "file",
+          "executable": true
+        },
+        "credential_helper": {
+          "filename": "s-gw-keychain-helper",
+          "path": null,
+          "sha256": null,
+          "installed_sha256": null,
+          "signature": null,
+          "destination": "dist/native/darwin-x64/s-gw-keychain-helper",
+          "format": "file",
+          "executable": true
+        },
+        "approval_ui": {
+          "filename": "s-gw-console-ui.tar.gz",
+          "path": null,
+          "sha256": null,
+          "installed_sha256": null,
+          "signature": null,
+          "destination": "dist/console-ui",
+          "format": "tar.gz",
+          "archive_root": "console-ui",
+          "required_files": ["index.html", "capabilities.json"],
+          "required_directories": ["assets"],
+          "capability_manifest": "capabilities.json",
+          "required_capabilities": ["defenseclaw.pending-enrollment.v1", "defenseclaw.approval-console-session.v1"]
+        },
+        "license_bundle": {
+          "filename": "THIRD_PARTY_LICENSES.txt",
+          "path": null,
+          "sha256": null,
+          "installed_sha256": null,
+          "signature": null,
+          "destination": "THIRD_PARTY_LICENSES.txt",
+          "format": "file",
+          "executable": false
+        }
+      },
+      "runner_launch_admission": null,
+      "module_installed_sha256": null,
+      "module_signature": null
+    },
+    "darwin-arm64": {
+      "components": {
+        "runner": {
+          "filename": "s-gw-core",
+          "path": null,
+          "sha256": null,
+          "installed_sha256": null,
+          "signature": null,
+          "destination": "dist/native/darwin-arm64/s-gw-core",
+          "format": "file",
+          "executable": true
+        },
+        "credential_helper": {
+          "filename": "s-gw-keychain-helper",
+          "path": null,
+          "sha256": null,
+          "installed_sha256": null,
+          "signature": null,
+          "destination": "dist/native/darwin-arm64/s-gw-keychain-helper",
+          "format": "file",
+          "executable": true
+        },
+        "approval_ui": {
+          "filename": "s-gw-console-ui.tar.gz",
+          "path": null,
+          "sha256": null,
+          "installed_sha256": null,
+          "signature": null,
+          "destination": "dist/console-ui",
+          "format": "tar.gz",
+          "archive_root": "console-ui",
+          "required_files": ["index.html", "capabilities.json"],
+          "required_directories": ["assets"],
+          "capability_manifest": "capabilities.json",
+          "required_capabilities": ["defenseclaw.pending-enrollment.v1", "defenseclaw.approval-console-session.v1"]
+        },
+        "license_bundle": {
+          "filename": "THIRD_PARTY_LICENSES.txt",
+          "path": null,
+          "sha256": null,
+          "installed_sha256": null,
+          "signature": null,
+          "destination": "THIRD_PARTY_LICENSES.txt",
+          "format": "file",
+          "executable": false
+        }
+      },
+      "runner_launch_admission": null,
+      "module_installed_sha256": null,
+      "module_signature": null
+    },
+    "linux-x64": {
+      "components": {
+        "runner": {
+          "filename": "s-gw-core",
+          "path": null,
+          "sha256": null,
+          "installed_sha256": null,
+          "signature": null,
+          "destination": "dist/native/linux-x64/s-gw-core",
+          "format": "file",
+          "executable": true
+        },
+        "credential_helper": {
+          "filename": "s-gw-secret-service-helper",
+          "path": null,
+          "sha256": null,
+          "installed_sha256": null,
+          "signature": null,
+          "destination": "dist/native/linux-x64/s-gw-secret-service-helper",
+          "format": "file",
+          "executable": true
+        },
+        "approval_ui": {
+          "filename": "s-gw-console-ui.tar.gz",
+          "path": null,
+          "sha256": null,
+          "installed_sha256": null,
+          "signature": null,
+          "destination": "dist/console-ui",
+          "format": "tar.gz",
+          "archive_root": "console-ui",
+          "required_files": ["index.html", "capabilities.json"],
+          "required_directories": ["assets"],
+          "capability_manifest": "capabilities.json",
+          "required_capabilities": ["defenseclaw.pending-enrollment.v1", "defenseclaw.approval-console-session.v1"]
+        },
+        "license_bundle": {
+          "filename": "THIRD_PARTY_LICENSES.txt",
+          "path": null,
+          "sha256": null,
+          "installed_sha256": null,
+          "signature": null,
+          "destination": "THIRD_PARTY_LICENSES.txt",
+          "format": "file",
+          "executable": false
+        }
+      },
+      "runner_launch_admission": null,
+      "module_installed_sha256": null,
+      "module_signature": null
+    },
+    "linux-arm64": {
+      "components": {
+        "runner": {
+          "filename": "s-gw-core",
+          "path": null,
+          "sha256": null,
+          "installed_sha256": null,
+          "signature": null,
+          "destination": "dist/native/linux-arm64/s-gw-core",
+          "format": "file",
+          "executable": true
+        },
+        "credential_helper": {
+          "filename": "s-gw-secret-service-helper",
+          "path": null,
+          "sha256": null,
+          "installed_sha256": null,
+          "signature": null,
+          "destination": "dist/native/linux-arm64/s-gw-secret-service-helper",
+          "format": "file",
+          "executable": true
+        },
+        "approval_ui": {
+          "filename": "s-gw-console-ui.tar.gz",
+          "path": null,
+          "sha256": null,
+          "installed_sha256": null,
+          "signature": null,
+          "destination": "dist/console-ui",
+          "format": "tar.gz",
+          "archive_root": "console-ui",
+          "required_files": ["index.html", "capabilities.json"],
+          "required_directories": ["assets"],
+          "capability_manifest": "capabilities.json",
+          "required_capabilities": ["defenseclaw.pending-enrollment.v1", "defenseclaw.approval-console-session.v1"]
+        },
+        "license_bundle": {
+          "filename": "THIRD_PARTY_LICENSES.txt",
+          "path": null,
+          "sha256": null,
+          "installed_sha256": null,
+          "signature": null,
+          "destination": "THIRD_PARTY_LICENSES.txt",
+          "format": "file",
+          "executable": false
+        }
+      },
+      "runner_launch_admission": null,
+      "module_installed_sha256": null,
+      "module_signature": null
+    },
+    "win32-x64": {
+      "components": {
+        "runner": {
+          "filename": "s-gw-core.exe",
+          "path": null,
+          "sha256": null,
+          "installed_sha256": null,
+          "signature": null,
+          "destination": "dist/native/win32-x64/s-gw-core.exe",
+          "format": "file",
+          "executable": true
+        },
+        "credential_helper": {
+          "filename": "s-gw-credential.ps1",
+          "path": null,
+          "sha256": null,
+          "installed_sha256": null,
+          "signature": null,
+          "destination": "dist/windows/s-gw-credential.ps1",
+          "format": "file",
+          "executable": false
+        },
+        "approval_ui": {
+          "filename": "s-gw-console-ui.tar.gz",
+          "path": null,
+          "sha256": null,
+          "installed_sha256": null,
+          "signature": null,
+          "destination": "dist/console-ui",
+          "format": "tar.gz",
+          "archive_root": "console-ui",
+          "required_files": ["index.html", "capabilities.json"],
+          "required_directories": ["assets"],
+          "capability_manifest": "capabilities.json",
+          "required_capabilities": ["defenseclaw.pending-enrollment.v1", "defenseclaw.approval-console-session.v1"]
+        },
+        "license_bundle": {
+          "filename": "THIRD_PARTY_LICENSES.txt",
+          "path": null,
+          "sha256": null,
+          "installed_sha256": null,
+          "signature": null,
+          "destination": "THIRD_PARTY_LICENSES.txt",
+          "format": "file",
+          "executable": false
+        }
+      },
+      "runner_launch_admission": null,
+      "module_installed_sha256": null,
+      "module_signature": null
+    },
+    "win32-arm64": {
+      "components": {
+        "runner": {
+          "filename": "s-gw-core.exe",
+          "path": null,
+          "sha256": null,
+          "installed_sha256": null,
+          "signature": null,
+          "destination": "dist/native/win32-arm64/s-gw-core.exe",
+          "format": "file",
+          "executable": true
+        },
+        "credential_helper": {
+          "filename": "s-gw-credential.ps1",
+          "path": null,
+          "sha256": null,
+          "installed_sha256": null,
+          "signature": null,
+          "destination": "dist/windows/s-gw-credential.ps1",
+          "format": "file",
+          "executable": false
+        },
+        "approval_ui": {
+          "filename": "s-gw-console-ui.tar.gz",
+          "path": null,
+          "sha256": null,
+          "installed_sha256": null,
+          "signature": null,
+          "destination": "dist/console-ui",
+          "format": "tar.gz",
+          "archive_root": "console-ui",
+          "required_files": ["index.html", "capabilities.json"],
+          "required_directories": ["assets"],
+          "capability_manifest": "capabilities.json",
+          "required_capabilities": ["defenseclaw.pending-enrollment.v1", "defenseclaw.approval-console-session.v1"]
+        },
+        "license_bundle": {
+          "filename": "THIRD_PARTY_LICENSES.txt",
+          "path": null,
+          "sha256": null,
+          "installed_sha256": null,
+          "signature": null,
+          "destination": "THIRD_PARTY_LICENSES.txt",
+          "format": "file",
+          "executable": false
+        }
+      },
+      "runner_launch_admission": null,
+      "module_installed_sha256": null,
+      "module_signature": null
+    }
+  }
+}

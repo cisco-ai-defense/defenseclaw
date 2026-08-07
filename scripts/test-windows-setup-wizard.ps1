@@ -27,6 +27,7 @@ param(
     [ValidateSet('observe', 'action')]
     [string]$Mode = 'observe',
     [switch]$StartGateway,
+    [switch]$NoCredentialProtection,
     [switch]$ActivateInstall,
     [switch]$InteropSelfTestOnly,
     [ValidateRange(30, 1800)]
@@ -265,12 +266,12 @@ function Set-AndAssertComboSelection([IntPtr]$Control, [int]$Index, [string]$Lab
     }
 }
 
-function Set-AndAssertCheckState([IntPtr]$Control, [bool]$Checked) {
+function Set-AndAssertCheckState([IntPtr]$Control, [bool]$Checked, [string]$Label) {
     $expected = if ($Checked) { 1 } else { 0 }
     $null = Invoke-BoundedWindowMessage -Window $Control -Message 0x00F1 -WParam ([UIntPtr]$expected)
     $observed = Invoke-BoundedWindowMessage -Window $Control -Message 0x00F0
     if ($observed -ne $expected) {
-        throw "Start-gateway control reported state $observed; expected $expected."
+        throw "$Label control reported state $observed; expected $expected."
     }
 }
 
@@ -393,6 +394,7 @@ Write-WizardTrace 'driver-start' ([ordered]@{
     connector      = $Connector
     mode           = $Mode
     start_gateway  = $StartGateway.IsPresent
+    credential_protection = -not $NoCredentialProtection.IsPresent
     timeout_seconds = $(if ($ActivateInstall) { $InstallTimeoutSeconds } else { $TimeoutSeconds })
 })
 $unicodeInterop = [Diagnostics.Stopwatch]::StartNew()
@@ -444,6 +446,7 @@ try {
     $connectorControl = Get-WizardControl $window 1001 'connector'
     $modeControl = Get-WizardControl $window 1002 'mode'
     $startControl = Get-WizardControl $window 1003 'start-gateway'
+    $credentialControl = Get-WizardControl $window 1005 'credential-protection'
     # The wizard intentionally uses the standard Win32 IDOK/IDCANCEL IDs so
     # Enter, Escape, WM_CLOSE, accessibility tools, and automation agree on
     # the primary and cancel semantics.
@@ -458,16 +461,20 @@ try {
     foreach ($index in 0..1) {
         Set-AndAssertComboSelection $modeControl $index 'Mode'
     }
-    Set-AndAssertCheckState $startControl $false
-    Set-AndAssertCheckState $startControl $true
+    Set-AndAssertCheckState $startControl $false 'Start-gateway'
+    Set-AndAssertCheckState $startControl $true 'Start-gateway'
+    Set-AndAssertCheckState $credentialControl $false 'Credential-protection'
+    Set-AndAssertCheckState $credentialControl $true 'Credential-protection'
     Set-AndAssertComboSelection $connectorControl $connectorIndices[$Connector] 'Connector'
     Set-AndAssertComboSelection $modeControl $modeIndices[$Mode] 'Mode'
-    Set-AndAssertCheckState $startControl $StartGateway.IsPresent
+    Set-AndAssertCheckState $startControl $StartGateway.IsPresent 'Start-gateway'
+    Set-AndAssertCheckState $credentialControl (-not $NoCredentialProtection.IsPresent) 'Credential-protection'
     $control.Stop()
     Write-WizardTrace 'controls-selected' ([ordered]@{
         connector_index = $connectorIndices[$Connector]
         mode_index      = $modeIndices[$Mode]
         start_gateway   = $StartGateway.IsPresent
+        credential_protection = -not $NoCredentialProtection.IsPresent
     })
 
     $completion = $null
@@ -547,6 +554,7 @@ try {
         connector        = $Connector
         mode             = $Mode
         start_gateway    = $StartGateway.IsPresent
+        credential_protection = -not $NoCredentialProtection.IsPresent
         unicode_interop_ms = [Math]::Round($unicodeInterop.Elapsed.TotalMilliseconds, 1)
         input_idle_ms    = [Math]::Round($inputIdle.Elapsed.TotalMilliseconds, 1)
         window_ready_ms  = [Math]::Round($windowReady.Elapsed.TotalMilliseconds, 1)

@@ -614,18 +614,26 @@ func TestHookConfigGuard_DoesNotReportRepairWhenClaudePolicyStillDisablesHooks(t
 	// before the debounce fires. The effective-policy resolver must diagnose
 	// the explicit disabling source without trying to fight administrator/user
 	// policy by rewriting hooks underneath it.
-	if err := os.Remove(settingsPath); err != nil {
-		t.Fatalf("remove Claude settings: %v", err)
-	}
-	if err := os.RemoveAll(settingsDir); err != nil {
-		t.Fatalf("remove watched Claude directory: %v", err)
-	}
-	if err := os.MkdirAll(settingsDir, 0o700); err != nil {
-		t.Fatalf("recreate Claude directory: %v", err)
-	}
-	if err := os.WriteFile(settingsPath, []byte("{\"disableAllHooks\":true}\n"), 0o600); err != nil {
-		t.Fatalf("restore disabled Claude settings: %v", err)
-	}
+	// A debounce duration is not a scheduler barrier on a loaded Windows
+	// runner. Hold both guard locks so this test preserves that ordering.
+	func() {
+		guard.repairMu.Lock()
+		defer guard.repairMu.Unlock()
+		guard.mu.Lock()
+		defer guard.mu.Unlock()
+		if err := os.Remove(settingsPath); err != nil {
+			t.Fatalf("remove Claude settings: %v", err)
+		}
+		if err := os.RemoveAll(settingsDir); err != nil {
+			t.Fatalf("remove watched Claude directory: %v", err)
+		}
+		if err := os.MkdirAll(settingsDir, 0o700); err != nil {
+			t.Fatalf("recreate Claude directory: %v", err)
+		}
+		if err := os.WriteFile(settingsPath, []byte("{\"disableAllHooks\":true}\n"), 0o600); err != nil {
+			t.Fatalf("restore disabled Claude settings: %v", err)
+		}
+	}()
 
 	deadline := time.Now().Add(3 * time.Second)
 	for {

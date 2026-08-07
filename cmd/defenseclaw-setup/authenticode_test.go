@@ -118,13 +118,22 @@ func unsignedEvidence(installedPath, sbomName, digest, policy string) authentico
 	if policy != pinnedInputAuthenticodePolicy {
 		expected.SignatureType = "None"
 	}
+	observed := json.RawMessage(`{"status":"NotSigned","embedded_signatures":[]}`)
+	if policy != pinnedInputAuthenticodePolicy {
+		observed = json.RawMessage(
+			`{"status":"NotSigned","publisher":"","signature_type":"None","signer":null,` +
+				`"timestamp":{"present":false,"format":"","token_sha256":"","signing_time_utc":"",` +
+				`"policy_oid":"","message_imprint_algorithm_oid":"","message_imprint":"",` +
+				`"serial_number":"","certificate":null},"embedded_signatures":[]}`,
+		)
+	}
 	return authenticodeFileEvidence{
 		SchemaVersion: authenticodeEvidenceSchemaVersion,
 		InstalledPath: installedPath,
 		SBOMFileName:  sbomName,
 		SHA256:        digest,
 		Expected:      expected,
-		Observed:      json.RawMessage(`{"status":"NotSigned","embedded_signatures":null}`),
+		Observed:      observed,
 	}
 }
 
@@ -220,6 +229,75 @@ func TestValidateAuthenticodeManifestAcceptsExplicitUnsignedLocalPolicy(t *testi
 		return errors.New("trust verifier must not run for unsigned files")
 	}); err != nil {
 		t.Fatalf("verify unsigned installed inventory: %v", err)
+	}
+}
+
+func TestValidateAuthenticodeManifestRejectsMachineSpecificCertificateChain(t *testing.T) {
+	_, manifest := unsignedManifestFixture(t)
+	evidence := manifest.Authenticode.Files["runtime/python/python.exe"]
+	evidence.Observed = json.RawMessage(
+		`{"status":"Valid","embedded_signatures":[{"timestamp":{"chain":{"build_succeeded":true}}}]}`,
+	)
+	manifest.Authenticode.Files[evidence.InstalledPath] = evidence
+
+	err := validateAuthenticodeManifest(manifest)
+	if err == nil || !strings.Contains(err.Error(), "machine-specific certificate chain") {
+		t.Fatalf("validateAuthenticodeManifest chain error = %v", err)
+	}
+}
+
+func TestValidateAuthenticodeManifestRejectsPinnedHostSelectedObservation(t *testing.T) {
+	_, manifest := unsignedManifestFixture(t)
+	evidence := manifest.Authenticode.Files["runtime/python/python.exe"]
+	evidence.Observed = json.RawMessage(
+		`{"status":"NotSigned","publisher":"host-selected","embedded_signatures":[]}`,
+	)
+	manifest.Authenticode.Files[evidence.InstalledPath] = evidence
+
+	err := validateAuthenticodeManifest(manifest)
+	if err == nil || !strings.Contains(err.Error(), "pinned input observation contains host-selected fields") {
+		t.Fatalf("validateAuthenticodeManifest pinned observation error = %v", err)
+	}
+}
+
+func TestValidateAuthenticodeManifestRejectsNullEmbeddedSignatureInventory(t *testing.T) {
+	_, manifest := unsignedManifestFixture(t)
+	evidence := manifest.Authenticode.Files["runtime/python/python.exe"]
+	evidence.Observed = json.RawMessage(`{"status":"NotSigned","embedded_signatures":null}`)
+	manifest.Authenticode.Files[evidence.InstalledPath] = evidence
+
+	err := validateAuthenticodeManifest(manifest)
+	if err == nil || !strings.Contains(err.Error(), "embedded Authenticode signature inventory is invalid") {
+		t.Fatalf("validateAuthenticodeManifest null embedded inventory error = %v", err)
+	}
+}
+
+func TestValidateAuthenticodeManifestRequiresPlatformEnforcementObservationFields(t *testing.T) {
+	tests := map[string]string{
+		"product": "bin/defenseclaw.exe",
+		"digest":  "runtime/tools/cosign.exe",
+	}
+	for name, installedPath := range tests {
+		t.Run(name, func(t *testing.T) {
+			_, manifest := unsignedManifestFixture(t)
+			evidence := manifest.Authenticode.Files[installedPath]
+			var observed map[string]any
+			if err := json.Unmarshal(evidence.Observed, &observed); err != nil {
+				t.Fatal(err)
+			}
+			delete(observed, "signer")
+			payload, err := json.Marshal(observed)
+			if err != nil {
+				t.Fatal(err)
+			}
+			evidence.Observed = payload
+			manifest.Authenticode.Files[installedPath] = evidence
+
+			err = validateAuthenticodeManifest(manifest)
+			if err == nil || !strings.Contains(err.Error(), "omits enforced fields") {
+				t.Fatalf("validateAuthenticodeManifest %s observation error = %v", name, err)
+			}
+		})
 	}
 }
 
@@ -370,13 +448,26 @@ func TestValidateAuthenticodeManifestRejectsInconsistentHookLauncherSigner(t *te
 	manifest.Unsigned = false
 	for _, installedPath := range requiredProductPEPaths {
 		evidence := manifest.Authenticode.Files[installedPath]
+		signer := strings.Repeat("a", 64)
 		evidence.Expected.Status = "Valid"
 		evidence.Expected.SignatureType = "Authenticode"
 		evidence.Expected.Publisher = defaultPublisher
 		evidence.Expected.TimestampRequired = true
-		evidence.Expected.SignerThumbprintSHA256 = strings.Repeat("a", 64)
+		evidence.Expected.SignerThumbprintSHA256 = signer
 		evidence.Expected.TimestampSignerThumbprintSHA256 = strings.Repeat("b", 64)
 		evidence.Expected.TimestampTokenSHA256 = strings.Repeat("c", 64)
+		observed, err := json.Marshal(map[string]any{
+			"status":              "Valid",
+			"publisher":           defaultPublisher,
+			"signature_type":      "Authenticode",
+			"signer":              map[string]any{"thumbprint_sha256": signer},
+			"timestamp":           map[string]any{"present": true},
+			"embedded_signatures": []any{},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		evidence.Observed = observed
 		manifest.Authenticode.Files[installedPath] = evidence
 	}
 	evidence := manifest.Authenticode.Files[hookLauncherInstalledPath]

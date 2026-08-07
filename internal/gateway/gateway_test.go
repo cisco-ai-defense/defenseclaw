@@ -4933,6 +4933,18 @@ func TestPatchGuardrailConfigFile_RestoresInvalidPatch(t *testing.T) {
 	if err := os.WriteFile(path, original, 0o640); err != nil {
 		t.Fatalf("write config: %v", err)
 	}
+	if runtime.GOOS != "windows" {
+		if err := os.Chmod(path, 0o640); err != nil {
+			t.Fatalf("chmod config: %v", err)
+		}
+		info, err := os.Lstat(path)
+		if err != nil {
+			t.Fatalf("stat config fixture: %v", err)
+		}
+		if mode := info.Mode().Perm(); mode != 0o640 {
+			t.Fatalf("config fixture has mode %o, want 640", mode)
+		}
+	}
 
 	api := &APIServer{}
 	if err := api.patchGuardrailConfigFile(path, map[string]any{"deployment_mode": "invalid"}); err == nil {

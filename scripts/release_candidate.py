@@ -63,6 +63,11 @@ try:
 except ModuleNotFoundError:  # Direct ``python scripts/release_candidate.py`` execution.
     from telemetry_runtime_assets import RuntimeAssetError, read_logical_asset
 
+try:
+    from scripts import stage_sgw_modules
+except ModuleNotFoundError:  # Direct ``python scripts/release_candidate.py`` execution.
+    import stage_sgw_modules  # type: ignore[no-redef]
+
 SCHEMA_VERSION = 2
 RUNTIME_ATTESTATION_FILENAME = "runtime-candidate-checksums.txt"
 RELEASE_SOURCE_MAP_FILENAME = "release-source-map.json"
@@ -188,6 +193,7 @@ EFFECTIVE_UPGRADE_BASELINES_FILENAME = "effective-upgrade-baselines.json"
 STRICT_BASE64_RE = re.compile(rb"(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?")
 MACOS_VERIFICATION_STATUSES = ("notarized", "unverified")
 WINDOWS_SETUP_START_VERSION = (0, 8, 6)
+SGW_SBOM_START_VERSION = (0, 8, 11)
 WINDOWS_SETUP_ASSET = "DefenseClawSetup-x64.exe"
 WINDOWS_SETUP_PUBLISHER = "Cisco Systems, Inc."
 WINDOWS_SETUP_CLIENTS = {
@@ -941,7 +947,15 @@ def _validate_commit(commit: str) -> None:
         raise CandidateError(f"commit must be a full lowercase SHA-1, got {commit!r}")
 
 
-def runtime_asset_names(version: str) -> tuple[str, ...]:
+def sgw_sbom_asset_name(version: str) -> str | None:
+    _validate_version(version)
+    if tuple(map(int, version.split("."))) < SGW_SBOM_START_VERSION:
+        return None
+    wheel = _expected_release_artifacts(version)["wheel"]
+    return f"{wheel}.sbom.json"
+
+
+def runtime_asset_names(version: str, *, source_only_sgw: bool = False) -> tuple[str, ...]:
     _validate_version(version)
     canonical_archives = (
         f"defenseclaw_{version}_darwin_amd64.tar.gz",
@@ -967,6 +981,7 @@ def runtime_asset_names(version: str) -> tuple[str, ...]:
             *canonical_archives,
             f"defenseclaw-{version}-py3-none-any.whl",
         )
+    sgw_sbom = None if source_only_sgw else sgw_sbom_asset_name(version)
     return tuple(
         sorted(
             (
@@ -974,6 +989,7 @@ def runtime_asset_names(version: str) -> tuple[str, ...]:
                 *(f"{name}.sbom.json" for name in archives),
                 *refusal_assets,
                 wheel,
+                *((sgw_sbom,) if sgw_sbom else ()),
                 f"defenseclaw-plugin-{version}.tar.gz",
                 "upgrade-manifest.json",
             )
@@ -3738,7 +3754,60 @@ def _validate_legacy_refusal_envelopes(directory: Path, version: str) -> None:
         raise CandidateError("legacy wheel refusal envelope is installable")
 
 
-def prepare_runtime(directory: Path, version: str) -> None:
+def _validate_sgw_runtime_sbom(
+    directory: Path,
+    version: str,
+    *,
+    canonical_wheel: bool = False,
+    source_only_sgw: bool = False,
+) -> None:
+    sbom_name = sgw_sbom_asset_name(version)
+    if sbom_name is None and not source_only_sgw:
+        return
+    artifacts = _expected_release_artifacts(version)
+    canonical_sbom_name = f"defenseclaw-{version}-py3-none-any.whl.sbom.json"
+    sbom_path = directory / (canonical_sbom_name if canonical_wheel else str(sbom_name))
+    wheel_path = directory / (f"defenseclaw-{version}-py3-none-any.whl" if canonical_wheel else artifacts["wheel"])
+    temporary: Path | None = None
+    try:
+        if source_only_sgw:
+            for name in (canonical_sbom_name, sbom_name):
+                if name is None:
+                    continue
+                candidate = directory / name
+                if candidate.exists() or candidate.is_symlink():
+                    raise CandidateError(f"source-only s-gw runtime profile forbids {name}")
+        if canonical_wheel:
+            plain_wheel = wheel_path
+        else:
+            payload = _protected_payload(wheel_path)
+            descriptor, raw_path = tempfile.mkstemp(prefix="defenseclaw-sgw-wheel-", suffix=".whl")
+            temporary = Path(raw_path)
+            with os.fdopen(descriptor, "wb") as output:
+                output.write(payload)
+                output.flush()
+                os.fsync(output.fileno())
+            plain_wheel = temporary
+        if source_only_sgw:
+            stage_sgw_modules.validate_source_only_wheel(plain_wheel, version=version)
+        else:
+            stage_sgw_modules.validate_sgw_sbom(
+                plain_wheel,
+                sbom_path,
+                version=version,
+                authenticate=False,
+            )
+    except CandidateError:
+        raise
+    except (OSError, ValueError, stage_sgw_modules.DeliveryError) as exc:
+        label = "source-only s-gw runtime profile" if source_only_sgw else "s-gw runtime SBOM"
+        raise CandidateError(f"{label} is invalid: {exc}") from exc
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+
+
+def prepare_runtime(directory: Path, version: str, *, source_only_sgw: bool = False) -> None:
     """Replace canonical modern artifacts with deterministic refusal envelopes."""
 
     _validate_version(version)
@@ -3746,6 +3815,12 @@ def prepare_runtime(directory: Path, version: str) -> None:
         raise CandidateError("protected runtime preparation requires a schema-2 release")
     _validate_upgrade_manifest(directory / "upgrade-manifest.json", version)
     protected = _expected_release_artifacts(version)
+    _validate_sgw_runtime_sbom(
+        directory,
+        version,
+        canonical_wheel=True,
+        source_only_sgw=source_only_sgw,
+    )
 
     payload_moves: list[tuple[Path, Path]] = []
     metadata_moves: list[tuple[Path, Path]] = []
@@ -3764,6 +3839,13 @@ def prepare_runtime(directory: Path, version: str) -> None:
     canonical_wheel = directory / f"defenseclaw-{version}-py3-none-any.whl"
     protected_wheel = directory / protected["wheel"]
     payload_moves.append((canonical_wheel, protected_wheel))
+    if sgw_sbom_asset_name(version) and not source_only_sgw:
+        metadata_moves.append(
+            (
+                directory / f"{canonical_wheel.name}.sbom.json",
+                directory / f"{protected_wheel.name}.sbom.json",
+            )
+        )
 
     for source, destination in (*payload_moves, *metadata_moves):
         if source.is_symlink() or not source.is_file():
@@ -3783,24 +3865,29 @@ def prepare_runtime(directory: Path, version: str) -> None:
         (directory / f"defenseclaw_{version}_windows_{arch}.zip").write_bytes(plain_payload)
     canonical_wheel.write_bytes(plain_payload)
     _validate_legacy_refusal_envelopes(directory, version)
-    checksum_lines = [f"{_sha256(directory / name)}  {name}" for name in runtime_asset_names(version)]
+    checksum_lines = [
+        f"{_sha256(directory / name)}  {name}" for name in runtime_asset_names(version, source_only_sgw=source_only_sgw)
+    ]
     (directory / RUNTIME_ATTESTATION_FILENAME).write_text(
         "\n".join(checksum_lines) + "\n",
         encoding="utf-8",
     )
 
 
-def verify_runtime(directory: Path, version: str) -> None:
-    names = runtime_asset_names(version)
+def verify_runtime(directory: Path, version: str, *, source_only_sgw: bool = False) -> None:
+    names = runtime_asset_names(version, source_only_sgw=source_only_sgw)
     _require_regular_files(directory, names, "runtime artifact")
     _validate_upgrade_manifest(directory / "upgrade-manifest.json", version)
     artifacts = _expected_release_artifacts(version)
     _validate_wheel(directory / artifacts["wheel"], version)
+    _validate_sgw_runtime_sbom(directory, version, source_only_sgw=source_only_sgw)
     _validate_gateway_archives(directory, version)
     if tuple(map(int, version.split("."))) >= (0, 8, 4):
         _validate_legacy_refusal_envelopes(directory, version)
         runtime_checksums = _parse_checksums(directory / RUNTIME_ATTESTATION_FILENAME)
-        expected_runtime_checksums = {name: _sha256(directory / name) for name in runtime_asset_names(version)}
+        expected_runtime_checksums = {
+            name: _sha256(directory / name) for name in runtime_asset_names(version, source_only_sgw=source_only_sgw)
+        }
         if runtime_checksums != expected_runtime_checksums:
             raise CandidateError("runtime checksums do not cover the exact protected candidate")
     for name in names:
@@ -3929,6 +4016,20 @@ def extract_windows_installer_inputs(
     wheel_payload = protected_payload(protected_wheel_name)
     gateway_name = f"defenseclaw_{version}_windows_amd64.zip"
     wheel_name = f"defenseclaw-{version}-py3-none-any.whl"
+    sgw_sbom_name = sgw_sbom_asset_name(version)
+    sgw_sbom_payload: bytes | None = None
+    if sgw_sbom_name:
+        sgw_sbom_source = release_dir / sgw_sbom_name
+        sbom_before = _sha256(sgw_sbom_source)
+        if attestation.get(sgw_sbom_name) != sbom_before:
+            raise CandidateError("runtime attestation changed before extracting the s-gw SBOM")
+        sgw_sbom_payload = _read_bounded_regular_file(
+            sgw_sbom_source,
+            label="s-gw runtime SBOM",
+            max_bytes=stage_sgw_modules.MAX_SGW_SBOM_BYTES,
+        )
+        if _sha256(sgw_sbom_source) != sbom_before:
+            raise CandidateError("s-gw runtime SBOM changed while it was extracted")
     created: list[Path] = []
     try:
         try:
@@ -3936,17 +4037,19 @@ def extract_windows_installer_inputs(
             output_dir.chmod(0o700)
         except OSError as exc:
             raise CandidateError(f"could not create private Windows installer input directory: {exc}") from exc
-        for name, payload in (
+        inputs = [
             (gateway_name, gateway_payload),
             (wheel_name, wheel_payload),
             ("upgrade-manifest.json", manifest_payload),
-        ):
+        ]
+        if sgw_sbom_payload is not None:
+            inputs.append((f"{wheel_name}.sbom.json", sgw_sbom_payload))
+        for name, payload in inputs:
             destination = output_dir / name
             _write_exclusive_file(destination, payload)
             created.append(destination)
-        if _strict_file_names(output_dir, "Windows installer input") != tuple(
-            sorted((gateway_name, wheel_name, "upgrade-manifest.json"))
-        ):
+        expected_inputs = tuple(sorted(name for name, _payload in inputs))
+        if _strict_file_names(output_dir, "Windows installer input") != expected_inputs:
             raise CandidateError("Windows installer input contains an unexpected file set")
         _validate_upgrade_manifest(output_dir / "upgrade-manifest.json", version)
         _validate_windows_gateway_zip_payload(
@@ -3957,6 +4060,16 @@ def extract_windows_installer_inputs(
             archive_name=gateway_name,
         )
         _validate_wheel(output_dir / wheel_name, version)
+        if sgw_sbom_payload is not None:
+            try:
+                stage_sgw_modules.validate_sgw_sbom(
+                    output_dir / wheel_name,
+                    output_dir / f"{wheel_name}.sbom.json",
+                    version=version,
+                    authenticate=False,
+                )
+            except stage_sgw_modules.DeliveryError as exc:
+                raise CandidateError(f"extracted s-gw SBOM is invalid: {exc}") from exc
     except Exception:
         for path in reversed(created):
             try:
@@ -4207,6 +4320,44 @@ def _require_object_fields(
     return value
 
 
+def _contains_mapping_key(value: object, key: str) -> bool:
+    if isinstance(value, dict):
+        return key in value or any(_contains_mapping_key(item, key) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_mapping_key(item, key) for item in value)
+    return False
+
+
+def _validate_windows_authenticode_observation(evidence: object, installed_path: object) -> None:
+    if not isinstance(evidence, dict):
+        raise CandidateError(f"Windows Setup Authenticode evidence is invalid for {installed_path!r}")
+    expected = evidence.get("expected")
+    observed = evidence.get("observed")
+    if not isinstance(expected, dict) or not isinstance(observed, dict):
+        raise CandidateError(f"Windows Setup Authenticode policy evidence is incomplete for {installed_path!r}")
+    policy = expected.get("policy")
+    if policy == "pinned-input-observation":
+        fields = {"status", "embedded_signatures"}
+        mismatch = "Pinned Windows Authenticode observation contains host-selected fields"
+    elif policy in {"defenseclaw-product-publisher", "digest-only-upstream"}:
+        fields = {"status", "publisher", "signature_type", "signer", "timestamp", "embedded_signatures"}
+        mismatch = "Platform Windows Authenticode observation is not canonical"
+    else:
+        raise CandidateError(f"Windows Setup Authenticode observation policy is unsupported for {installed_path!r}")
+    if set(observed) != fields:
+        raise CandidateError(f"{mismatch}: {installed_path!r}")
+    if observed.get("status") != expected.get("status"):
+        raise CandidateError(f"Windows Setup observed Authenticode status differs from policy for {installed_path!r}")
+    if not isinstance(observed.get("embedded_signatures"), list):
+        raise CandidateError(f"Windows Setup embedded Authenticode inventory is invalid for {installed_path!r}")
+    if policy != "pinned-input-observation" and (
+        observed.get("publisher") != expected.get("publisher")
+        or observed.get("signature_type") != expected.get("signature_type")
+        or not isinstance(observed.get("timestamp"), dict)
+    ):
+        raise CandidateError(f"Windows Setup observed Authenticode identity differs from policy for {installed_path!r}")
+
+
 def _read_windows_setup_json(path: Path, label: str) -> dict[str, Any]:
     try:
         info = path.lstat()
@@ -4278,48 +4429,55 @@ def _validate_windows_setup_provenance(
     built_at = document.get("built_at_utc")
     if not isinstance(built_at, str) or re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9:.]+Z", built_at) is None:
         raise CandidateError("Windows Setup provenance build timestamp is invalid")
+    sgw_sbom_required = tuple(map(int, version.split("."))) >= SGW_SBOM_START_VERSION
+    expected_input_fields = {
+        "gateway_archive",
+        "gateway_archive_sha256",
+        "embedded_gateway_archive_sha256",
+        "embedded_payload_sha256",
+        "hook_launcher_sha256",
+        "product_executables_authenticode_signed",
+        "wheel",
+        "wheel_sha256",
+        "python_embed",
+        "python_embed_sha256",
+        "site_packages_sha256",
+        "yara_compat_wheel",
+        "yara_compat_wheel_sha256",
+        "cosign_sha256",
+        "payload_manifest_sha256",
+        "go_component_inventory_sha256",
+        "payload_files",
+        "windows_resource_policy",
+        "windows_resource_icon",
+        "windows_resource_icon_sha256",
+    }
+    if sgw_sbom_required:
+        expected_input_fields.update({"sgw_sbom", "sgw_sbom_sha256"})
     inputs = _require_object_fields(
         document.get("inputs"),
-        {
-            "gateway_archive",
-            "gateway_archive_sha256",
-            "embedded_gateway_archive_sha256",
-            "embedded_payload_sha256",
-            "hook_launcher_sha256",
-            "product_executables_authenticode_signed",
-            "wheel",
-            "wheel_sha256",
-            "python_embed",
-            "python_embed_sha256",
-            "site_packages_sha256",
-            "yara_compat_wheel",
-            "yara_compat_wheel_sha256",
-            "cosign_sha256",
-            "payload_manifest_sha256",
-            "go_component_inventory_sha256",
-            "payload_files",
-            "windows_resource_policy",
-            "windows_resource_icon",
-            "windows_resource_icon_sha256",
-        },
+        expected_input_fields,
         "Windows Setup provenance inputs",
     )
+    digest_fields = [
+        "gateway_archive_sha256",
+        "embedded_gateway_archive_sha256",
+        "embedded_payload_sha256",
+        "hook_launcher_sha256",
+        "wheel_sha256",
+        "python_embed_sha256",
+        "site_packages_sha256",
+        "yara_compat_wheel_sha256",
+        "cosign_sha256",
+        "payload_manifest_sha256",
+        "go_component_inventory_sha256",
+        "windows_resource_icon_sha256",
+    ]
+    if sgw_sbom_required:
+        digest_fields.append("sgw_sbom_sha256")
     _require_sha256_fields(
         inputs,
-        (
-            "gateway_archive_sha256",
-            "embedded_gateway_archive_sha256",
-            "embedded_payload_sha256",
-            "hook_launcher_sha256",
-            "wheel_sha256",
-            "python_embed_sha256",
-            "site_packages_sha256",
-            "yara_compat_wheel_sha256",
-            "cosign_sha256",
-            "payload_manifest_sha256",
-            "go_component_inventory_sha256",
-            "windows_resource_icon_sha256",
-        ),
+        tuple(digest_fields),
         "Windows Setup provenance input",
     )
     gateway_archive = f"defenseclaw_{version}_windows_amd64.zip"
@@ -4327,6 +4485,7 @@ def _validate_windows_setup_provenance(
     if (
         inputs.get("gateway_archive") != gateway_archive
         or inputs.get("wheel") != wheel
+        or (sgw_sbom_required and inputs.get("sgw_sbom") != f"{wheel}.sbom.json")
         or inputs.get("python_embed") != WINDOWS_PYTHON_EMBED_NAME
         or inputs.get("python_embed_sha256") != WINDOWS_PYTHON_EMBED_SHA256
         or inputs.get("yara_compat_wheel") != WINDOWS_YARA_COMPAT_WHEEL
@@ -4415,6 +4574,10 @@ def _validate_windows_setup_provenance(
     files = authenticode.get("files")
     if authenticode.get("schema_version") != 1 or not isinstance(files, dict):
         raise CandidateError("Windows Setup Authenticode inventory is invalid")
+    if _contains_mapping_key(files, "chain"):
+        raise CandidateError("Windows Setup Authenticode evidence contains a machine-specific certificate chain")
+    for installed_path, file_evidence in files.items():
+        _validate_windows_authenticode_observation(file_evidence, installed_path)
     evidence = _require_object_fields(
         files.get(WINDOWS_SETUP_ASSET),
         {
@@ -4486,7 +4649,6 @@ def _validate_windows_setup_provenance(
             "publisher",
             "signature_type",
             "signer",
-            "chain",
             "timestamp",
             "embedded_signatures",
         },
@@ -4539,7 +4701,6 @@ def _validate_windows_setup_provenance(
         or observed.get("publisher") != ""
         or observed.get("signature_type") != "None"
         or signer is not None
-        or observed.get("chain") not in (None, [])
         or not isinstance(timestamp, dict)
         or timestamp.get("present") is not False
         or timestamp.get("format") != ""
@@ -4576,6 +4737,14 @@ def _validate_windows_setup_runtime_inputs(
         or manifest_sha256 != inputs["payload_files"]["upgrade-manifest.json"]
     ):
         raise CandidateError("Windows Setup provenance does not bind the exact runtime candidate")
+    sgw_sbom_name = sgw_sbom_asset_name(version)
+    if sgw_sbom_name:
+        try:
+            sgw_sbom_sha256 = _sha256(runtime_directory / sgw_sbom_name)
+        except OSError as exc:
+            raise CandidateError(f"could not bind Windows Setup to the s-gw runtime SBOM: {exc}") from exc
+        if sgw_sbom_sha256 != inputs.get("sgw_sbom_sha256"):
+            raise CandidateError("Windows Setup provenance does not bind the exact s-gw runtime SBOM")
 
 
 def _spdx_sha256(element: dict[str, Any], label: str) -> str:
@@ -4599,21 +4768,25 @@ def _validate_windows_setup_sbom(
     provenance: dict[str, Any],
 ) -> None:
     document = _read_windows_setup_json(path, "Windows Setup SBOM")
+    sgw_sbom_required = tuple(map(int, version.split("."))) >= SGW_SBOM_START_VERSION
+    expected_document_fields = {
+        "spdxVersion",
+        "dataLicense",
+        "SPDXID",
+        "name",
+        "documentNamespace",
+        "comment",
+        "creationInfo",
+        "documentDescribes",
+        "packages",
+        "files",
+        "relationships",
+    }
+    if sgw_sbom_required:
+        expected_document_fields.update({"externalDocumentRefs", "hasExtractedLicensingInfos"})
     _require_object_fields(
         document,
-        {
-            "spdxVersion",
-            "dataLicense",
-            "SPDXID",
-            "name",
-            "documentNamespace",
-            "comment",
-            "creationInfo",
-            "documentDescribes",
-            "packages",
-            "files",
-            "relationships",
-        },
+        expected_document_fields,
         "Windows Setup SBOM",
     )
     expected_namespace = f"https://github.com/cisco-ai-defense/defenseclaw/spdx/windows/{version}/{setup_sha256}"
@@ -4694,6 +4867,8 @@ def _validate_windows_setup_sbom(
         raise CandidateError("Windows Setup SBOM package identity is invalid")
     if _spdx_sha256(package, "Windows Setup SBOM package") != setup_sha256:
         raise CandidateError("Windows Setup SBOM package digest is invalid")
+    if sgw_sbom_required and package.get("licenseDeclared") != stage_sgw_modules.SGW_MIXED_LICENSE:
+        raise CandidateError("Windows Setup SBOM does not declare its mixed s-gw licensing")
     expected_purl = f"pkg:github/cisco-ai-defense/defenseclaw@{version}"
     refs = package.get("externalRefs")
     if (
@@ -4741,6 +4916,8 @@ def _validate_windows_setup_sbom(
         or _spdx_sha256(embedded_package, "Windows Setup embedded payload package") != embedded_sha256
     ):
         raise CandidateError("Windows Setup SBOM embedded payload package is invalid")
+    if sgw_sbom_required and embedded_package.get("licenseDeclared") != stage_sgw_modules.SGW_MIXED_LICENSE:
+        raise CandidateError("Windows Setup SBOM embedded payload omits s-gw licensing")
     embedded_files = [
         item for item in files if isinstance(item, dict) and item.get("fileName") == "./embedded/installer-payload.zip"
     ]
@@ -4788,6 +4965,161 @@ def _validate_windows_setup_sbom(
                 (embedded_package_id, "CONTAINS", component_package_id),
             }
         )
+    if sgw_sbom_required:
+        extracted = document.get("hasExtractedLicensingInfos")
+        if (
+            not isinstance(extracted, list)
+            or len(extracted) != 1
+            or not isinstance(extracted[0], dict)
+            or set(extracted[0]) != {"licenseId", "name", "extractedText"}
+            or extracted[0].get("licenseId") != stage_sgw_modules.SGW_CORE_LICENSE
+            or extracted[0].get("name") != "s-gw Core runtime license"
+        ):
+            raise CandidateError("Windows Setup SBOM s-gw license declaration is invalid")
+        try:
+            stage_sgw_modules.validated_core_license_text(extracted[0].get("extractedText"))
+        except stage_sgw_modules.DeliveryError as exc:
+            raise CandidateError(f"Windows Setup SBOM s-gw license text is invalid: {exc}") from exc
+        external = document.get("externalDocumentRefs")
+        expected_sgw_namespace = (
+            f"https://github.com/cisco-ai-defense/defenseclaw/spdx/sgw/{version}/{provenance['inputs']['wheel_sha256']}"
+        )
+        if external != [
+            {
+                "externalDocumentId": "DocumentRef-s-gw-runtime",
+                "spdxDocument": expected_sgw_namespace,
+                "checksum": {
+                    "algorithm": "SHA256",
+                    "checksumValue": provenance["inputs"]["sgw_sbom_sha256"],
+                },
+            }
+        ]:
+            raise CandidateError("Windows Setup SBOM does not bind the exact s-gw source document")
+
+        wheel_name = provenance["inputs"]["wheel"]
+        wheel_packages = [item for item in packages if item.get("packageFileName") == wheel_name]
+        if len(wheel_packages) != 1 or wheel_packages[0].get("licenseDeclared") != stage_sgw_modules.SGW_MIXED_LICENSE:
+            raise CandidateError("Windows Setup SBOM wheel licensing is invalid")
+        wheel_package_id = wheel_packages[0]["SPDXID"]
+        mixed_payload_names = {wheel_name, "site-packages.zip"}
+        for payload_name in mixed_payload_names:
+            rows = [item for item in packages if item.get("packageFileName") == payload_name]
+            if len(rows) != 1 or rows[0].get("licenseDeclared") != stage_sgw_modules.SGW_MIXED_LICENSE:
+                raise CandidateError(f"Windows Setup SBOM mixed license is missing for {payload_name}")
+        defenseclaw_distributions = [
+            item
+            for item in packages
+            if item.get("name") == "defenseclaw"
+            and any(
+                isinstance(ref, dict) and ref.get("referenceLocator") == f"pkg:pypi/defenseclaw@{version}"
+                for ref in item.get("externalRefs") or []
+            )
+        ]
+        if (
+            len(defenseclaw_distributions) != 1
+            or defenseclaw_distributions[0].get("licenseDeclared") != stage_sgw_modules.SGW_MIXED_LICENSE
+        ):
+            raise CandidateError("Windows Setup SBOM installed DefenseClaw package omits s-gw licensing")
+
+        module_rows: dict[str, dict[str, Any]] = {}
+        native_rows: dict[tuple[str, str], dict[str, Any]] = {}
+        npm_roots: dict[str, dict[str, Any]] = {}
+        npm_dependencies: dict[str, int] = {target: 0 for target in stage_sgw_modules.TARGETS}
+        for item in packages:
+            comment = item.get("comment")
+            if not isinstance(comment, str):
+                continue
+            module_match = re.fullmatch(
+                r"DefenseClaw s-gw inventory role=module-archive; target=([a-z0-9-]+)",
+                comment,
+            )
+            native_match = re.fullmatch(
+                r"DefenseClaw s-gw inventory role=native-component; target=([a-z0-9-]+); "
+                r"component=([a-z_]+); installed_sha256=([0-9a-f]{64})",
+                comment,
+            )
+            root_match = re.fullmatch(
+                r"DefenseClaw s-gw inventory role=npm-root; target=([a-z0-9-]+); path=\.",
+                comment,
+            )
+            dependency_match = re.fullmatch(
+                r"DefenseClaw s-gw inventory role=npm-dependency; target=([a-z0-9-]+); path=(.+)",
+                comment,
+            )
+            if module_match:
+                target = module_match.group(1)
+                if target in module_rows:
+                    raise CandidateError(f"Windows Setup SBOM duplicates s-gw module {target}")
+                module_rows[target] = item
+            elif native_match:
+                key = (native_match.group(1), native_match.group(2))
+                if key in native_rows:
+                    raise CandidateError(f"Windows Setup SBOM duplicates s-gw component {key}")
+                native_rows[key] = item
+            elif root_match:
+                target = root_match.group(1)
+                if target in npm_roots:
+                    raise CandidateError(f"Windows Setup SBOM duplicates s-gw npm root {target}")
+                npm_roots[target] = item
+            elif dependency_match:
+                target = dependency_match.group(1)
+                if target not in npm_dependencies:
+                    raise CandidateError("Windows Setup SBOM contains an unknown s-gw npm target")
+                npm_dependencies[target] += 1
+
+        targets = set(stage_sgw_modules.TARGETS)
+        components = {"runner", "credential_helper", "approval_ui", "license_bundle"}
+        if (
+            set(module_rows) != targets
+            or set(npm_roots) != targets
+            or any(npm_dependencies[target] < 1 for target in targets)
+        ):
+            raise CandidateError("Windows Setup SBOM s-gw module or npm inventory is incomplete")
+        if set(native_rows) != {(target, component) for target in targets for component in components}:
+            raise CandidateError("Windows Setup SBOM s-gw native component inventory is incomplete")
+        component_licenses = {
+            "runner": stage_sgw_modules.SGW_CORE_LICENSE,
+            "credential_helper": stage_sgw_modules.SGW_CORE_LICENSE,
+            "approval_ui": "Apache-2.0",
+            "license_bundle": "NOASSERTION",
+        }
+        for (target, component), row in native_rows.items():
+            if row.get("licenseDeclared") != component_licenses[component] or not str(row.get("SPDXID", "")).startswith(
+                "SPDXRef-ImportedSgw-"
+            ):
+                raise CandidateError(f"Windows Setup SBOM s-gw component license is invalid for {target}")
+            _spdx_sha256(row, f"Windows Setup SBOM s-gw component {target}/{component}")
+        for target, row in npm_roots.items():
+            if row.get("licenseDeclared") != "Apache-2.0":
+                raise CandidateError(f"Windows Setup SBOM s-gw npm root license is invalid for {target}")
+        file_names = {item.get("fileName") for item in files}
+        for target, module_row in module_rows.items():
+            if (
+                module_row.get("packageFileName") != f"modules/{target}/s-gw-module.tar.gz"
+                or module_row.get("licenseDeclared") != stage_sgw_modules.SGW_MIXED_LICENSE
+                or (wheel_package_id, "CONTAINS", module_row["SPDXID"]) not in relationship_rows
+            ):
+                raise CandidateError(f"Windows Setup SBOM s-gw module identity is invalid for {target}")
+            _spdx_sha256(module_row, f"Windows Setup SBOM s-gw module {target}")
+            required_files = {
+                f"./sgw/{target}/package.json",
+                f"./sgw/{target}/package-lock.json",
+                f"./sgw/{target}/defenseclaw-module.json",
+                f"./sgw/{target}/dist/cli.js",
+                f"./sgw/{target}/dist/mcp-server.js",
+            }
+            if not required_files.issubset(file_names) or not any(
+                isinstance(name, str) and name.startswith(f"./sgw/{target}/node_modules/") for name in file_names
+            ):
+                raise CandidateError(f"Windows Setup SBOM s-gw file inventory is incomplete for {target}")
+            module_id = module_row["SPDXID"]
+            related = {row[2] for row in relationship_rows if row[0] == module_id and row[1] == "CONTAINS"}
+            required_packages = {
+                npm_roots[target]["SPDXID"],
+                *(native_rows[(target, component)]["SPDXID"] for component in components),
+            }
+            if not required_packages.issubset(related):
+                raise CandidateError(f"Windows Setup SBOM s-gw relationships are incomplete for {target}")
     if not required_relationships.issubset(relationship_rows):
         raise CandidateError("Windows Setup SBOM custody relationships are incomplete")
 
@@ -5432,10 +5764,12 @@ def _parser() -> argparse.ArgumentParser:
     verify_runtime_parser = subparsers.add_parser("verify-runtime")
     verify_runtime_parser.add_argument("--release-dir", type=Path, required=True)
     verify_runtime_parser.add_argument("--version", required=True)
+    verify_runtime_parser.add_argument("--source-only-sgw", action="store_true")
 
     prepare_runtime_parser = subparsers.add_parser("prepare-runtime")
     prepare_runtime_parser.add_argument("--release-dir", type=Path, required=True)
     prepare_runtime_parser.add_argument("--version", required=True)
+    prepare_runtime_parser.add_argument("--source-only-sgw", action="store_true")
 
     stage_runtime_parser = subparsers.add_parser("stage-runtime")
     stage_runtime_parser.add_argument("--release-dir", type=Path, required=True)
@@ -5532,10 +5866,10 @@ def main(argv: list[str] | None = None) -> int:
                 f"release progression verified: target={args.target} reviewed_max={reviewed} published_max={published}"
             )
         elif args.command == "verify-runtime":
-            verify_runtime(args.release_dir, args.version)
+            verify_runtime(args.release_dir, args.version, source_only_sgw=args.source_only_sgw)
             print(f"runtime candidate verified: {args.version}")
         elif args.command == "prepare-runtime":
-            prepare_runtime(args.release_dir, args.version)
+            prepare_runtime(args.release_dir, args.version, source_only_sgw=args.source_only_sgw)
             print(f"protected runtime artifacts prepared: {args.version}")
         elif args.command == "stage-runtime":
             stage_runtime(args.release_dir, args.output_dir, args.version)

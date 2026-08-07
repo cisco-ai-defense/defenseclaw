@@ -298,6 +298,7 @@ func TestDefenseClawConfigV8SchemaIdentityAndClosure(t *testing.T) {
 		"privacy",
 		"ai_discovery",
 		"application_protection",
+		"credential_protection",
 		"notifications",
 		"managed",
 	}
@@ -800,7 +801,7 @@ notifications:
 	for _, section := range []string{
 		"llm", "inspect_llm", "cisco_ai_defense", "scanners", "openshell", "watch", "firewall",
 		"guardrail", "gateway", "skill_actions", "mcp_actions", "plugin_actions", "asset_policy",
-		"registries", "application_protection", "notifications",
+		"registries", "application_protection", "credential_protection", "notifications",
 	} {
 		defaultsCompatible[section] = map[string]any{}
 	}
@@ -825,6 +826,7 @@ func TestDefenseClawConfigV8RejectsUnknownNestedCurrentFields(t *testing.T) {
 		{"asset policy", map[string]any{"config_version": 8, "asset_policy": map[string]any{"mcp": map[string]any{"mystery": true}}}},
 		{"registry", map[string]any{"config_version": 8, "registries": map[string]any{"sources": []any{map[string]any{"mystery": true}}}}},
 		{"application protection", map[string]any{"config_version": 8, "application_protection": map[string]any{"connectors": map[string]any{"codex": map[string]any{"mystery": true}}}}},
+		{"credential protection", map[string]any{"config_version": 8, "credential_protection": map[string]any{"mystery": true}}},
 		{"notifications", map[string]any{"config_version": 8, "notifications": map[string]any{"sources": map[string]any{"mystery": true}}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

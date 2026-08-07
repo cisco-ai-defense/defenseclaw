@@ -584,8 +584,7 @@ class SetupPanelModel:
         )
         existing = {section.name: section for section in self.sections}
         self.sections = tuple(
-            section if section.name == "Observability" else existing.get(section.name, section)
-            for section in rebuilt
+            section if section.name == "Observability" else existing.get(section.name, section) for section in rebuilt
         )
         if active_name:
             self.active_section = next(
@@ -1204,12 +1203,8 @@ class SetupPanelModel:
                 (field.label for field in self.form_fields if field.flag == "--disable"),
                 "",
             )
-            scope_changed = (
-                scope == _GUARDRAIL_SCOPE_GLOBAL
-                and disable_label == "Disable Selected Connector"
-            ) or (
-                scope == _GUARDRAIL_SCOPE_CONNECTOR
-                and disable_label == "Disable Guardrail Globally"
+            scope_changed = (scope == _GUARDRAIL_SCOPE_GLOBAL and disable_label == "Disable Selected Connector") or (
+                scope == _GUARDRAIL_SCOPE_CONNECTOR and disable_label == "Disable Guardrail Globally"
             )
             if scope_changed:
                 # The connector and global toggles intentionally share the
@@ -1560,6 +1555,24 @@ def build_setup_sections(
                 _field(cfg, "Device Key File", "gateway.device_key_file", hint="Path to per-machine private key."),
             ),
             "Sidecar WebSocket gateway: connection settings, TLS/auth, API bind, reconnect tuning.",
+        ),
+        ConfigSection(
+            "Credential Protection",
+            (
+                ConfigField(
+                    "Enabled (managed by setup command)",
+                    "credential_protection.enabled",
+                    "header",
+                    _value(cfg, "credential_protection.enabled"),
+                    _value(cfg, "credential_protection.enabled"),
+                    hint=(
+                        "Use setup credential-protection to enable or disable s-gw safely. Prompt "
+                        "tokenization applies only when a connector sends LLM traffic through the DefenseClaw proxy."
+                    ),
+                ),
+            ),
+            "Local s-gw broker status. Approval and secret handling stay in s-gw.",
+            "Use setup credential-protection so module verification, connector registration, and the config change complete together.",
         ),
         _guardrail_section(cfg),
         _scanners_section(cfg),
@@ -4650,6 +4663,7 @@ def _guardrail_wizard_fields_for(
         if connector_policy and connector
         else str(get_config_value(cfg, "guardrail.block_message", "") or "")
     )
+
     def connector_scope(dv: Mapping[str, str]) -> bool:
         return dv.get("scope") == _GUARDRAIL_SCOPE_CONNECTOR
 
@@ -6382,7 +6396,10 @@ def _v8_observability_fields(
         "press E to manage destinations; collection, routes, redaction, and retention live in config.yaml",
     )
     if status is None:
-        return (_header("Status", "observability.status", error.strip() or "loading canonical effective plan..."), how_to)
+        return (
+            _header("Status", "observability.status", error.strip() or "loading canonical effective plan..."),
+            how_to,
+        )
 
     retention = "unbounded" if status.unbounded_retention else f"{status.retention_days} days"
     fields: list[ConfigField] = [

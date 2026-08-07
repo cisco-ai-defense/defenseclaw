@@ -1,5 +1,7 @@
 # Release-candidate gates compare these reviewed sources byte-for-byte across
 # Linux, macOS, and Windows runners. Keep their checkout representation stable.
+LICENSE text eol=lf
+NOTICE text eol=lf
 scripts/upgrade.sh text eol=lf
 scripts/upgrade.ps1 text eol=lf
 scripts/defenseclaw-rescue.sh text eol=lf
@@ -15,3 +17,11 @@ schemas/config/v8/reference/observability.md text eol=lf
 # bytes. Disable checkout-time newline conversion so Windows materializes the
 # same payload that the dependency lock reviewed.
 schemas/telemetry/v8/upstream/** -text
+
+# The s-gw mirror is verified byte-for-byte against its pinned upstream tree.
+# Do not let platform checkout settings rewrite scripts or fixture files.
+third_party/s-gw/upstream/** -text
+
+# Unified diff context markers are part of the patch payload. Git must see the
+# same bytes on Windows when it applies these patches to the pinned mirror.
+third_party/s-gw/patches/*.patch -text -whitespace

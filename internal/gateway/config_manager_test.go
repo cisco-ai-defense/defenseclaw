@@ -77,6 +77,54 @@ func TestConfigManagerReloadAppliesAndPublishesSnapshot(t *testing.T) {
 	}
 }
 
+func TestConfigManagerReloadAppliesCredentialProtectionChange(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, config.DefaultConfigName)
+	initialRaw := []byte("config_version: 8\ndata_dir: " + dir + "\ncredential_protection:\n  enabled: false\nobservability: {}\n")
+	if err := os.WriteFile(path, initialRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := config.LoadRuntimeV8File(path)
+	if err != nil {
+		t.Fatalf("initial load: %v", err)
+	}
+
+	applied := false
+	mgr := newConfigManagerWithSnapshot(
+		path, initial, nil, nil, "",
+		func(_ context.Context, oldCfg, newCfg *config.Config, diff ConfigDiff, _ configReloadSource) error {
+			applied = true
+			if oldCfg.CredentialProtection.Enabled || !newCfg.CredentialProtection.Enabled {
+				t.Fatalf("apply saw credential protection %t -> %t", oldCfg.CredentialProtection.Enabled, newCfg.CredentialProtection.Enabled)
+			}
+			if !slices.Contains(diff.Changed, "credential_protection") {
+				t.Fatalf("changed = %v, missing credential_protection", diff.Changed)
+			}
+			if !slices.Contains(diff.RestartRequired, "credential_protection") {
+				t.Fatalf("restart_required = %v, missing credential_protection", diff.RestartRequired)
+			}
+			return nil
+		},
+	)
+
+	nextRaw := []byte("config_version: 8\ndata_dir: " + dir + "\ncredential_protection:\n  enabled: true\nobservability: {}\n")
+	if err := os.WriteFile(path, nextRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Reload(context.Background(), "credential protection test"); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if !applied {
+		t.Fatal("apply callback was not called")
+	}
+	if !mgr.Current().CredentialProtection.Enabled {
+		t.Fatal("published snapshot did not enable credential protection")
+	}
+	if mgr.gen.Load() != 1 {
+		t.Fatalf("generation = %d, want 1", mgr.gen.Load())
+	}
+}
+
 func TestConfigManagerReloadRejectsInvalidAndKeepsSnapshot(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, config.DefaultConfigName)

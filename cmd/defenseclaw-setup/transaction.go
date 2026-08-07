@@ -52,6 +52,7 @@ type durableValueWriter func(string, any, bool) error
 type durableRenameFunc func(string, string) error
 type connectorLifecycleRunner func(string, string, string, string, []string) error
 type stableHookRuntimeSnapshotter func(string, string) (bool, error)
+type credentialProtectionRunner func(string, string, bool, []string) error
 
 type userPathSnapshot struct {
 	Existed   bool   `json:"existed"`
@@ -85,6 +86,8 @@ type setupTransaction struct {
 	TargetConnector                string                   `json:"target_connector"`
 	TargetMode                     string                   `json:"target_mode"`
 	TargetServices                 serviceState             `json:"target_services"`
+	TargetCredentialProtection     bool                     `json:"target_credential_protection,omitempty"`
+	TargetCredentialProtectionSet  bool                     `json:"target_credential_protection_set,omitempty"`
 	FromVersion                    string                   `json:"from_version,omitempty"`
 	TargetVersion                  string                   `json:"target_version,omitempty"`
 	PreviousCodexHome              string                   `json:"previous_codex_home,omitempty"`
@@ -244,6 +247,24 @@ func newSetupTransaction(action, installRoot, dataRoot, maintenancePath, fromVer
 		return setupTransaction{}, err
 	}
 	previousConnectors = normalizeStringSlice(previousConnectors)
+	_, configExists, err := readBoundedNativeStateFile(
+		filepath.Join(dataRoot, "config.yaml"),
+		nativeConfigRosterLimit,
+	)
+	if err != nil {
+		return setupTransaction{}, fmt.Errorf("inspect canonical configuration: %w", err)
+	}
+	existingCredentialProtection, err := readNativeCredentialProtectionEnabled(dataRoot)
+	if err != nil {
+		return setupTransaction{}, fmt.Errorf("inspect credential-protection setting: %w", err)
+	}
+	targetCredentialProtection, targetCredentialProtectionSet := credentialProtectionTransactionIntent(
+		action,
+		oldState != nil,
+		configExists,
+		existingCredentialProtection,
+		opts,
+	)
 	preserveConnectorConfiguration := action == "install" && opts.PreserveConnectorConfiguration
 	targetConnector := opts.Connector
 	targetServices := requestedServices(opts, previousServices)
@@ -353,6 +374,8 @@ func newSetupTransaction(action, installRoot, dataRoot, maintenancePath, fromVer
 		TargetConnector:                targetConnector,
 		TargetMode:                     opts.Mode,
 		TargetServices:                 targetServices,
+		TargetCredentialProtection:     targetCredentialProtection,
+		TargetCredentialProtectionSet:  targetCredentialProtectionSet,
 		FromVersion:                    fromVersion,
 		TargetVersion:                  targetVersion,
 		PreviousCodexHome:              previousCodexHome,
@@ -365,6 +388,23 @@ func newSetupTransaction(action, installRoot, dataRoot, maintenancePath, fromVer
 		UninstallPathSeparatorReused:   uninstallPathSeparatorReused,
 		UninstallPathValueCreated:      uninstallPathValueCreated,
 	}, nil
+}
+
+func credentialProtectionTransactionIntent(
+	action string,
+	hadInstall, configExists, existingEnabled bool,
+	opts options,
+) (enabled, set bool) {
+	if action != "install" {
+		return false, false
+	}
+	if hadInstall || configExists {
+		return existingEnabled, existingEnabled
+	}
+	if opts.CredentialProtectionSet {
+		return opts.CredentialProtection, true
+	}
+	return true, true
 }
 
 func newUninstallHandoffTransaction(source setupTransaction, oldState *installState, opts options) (setupTransaction, error) {
@@ -763,6 +803,16 @@ func validateSetupTransaction(transaction setupTransaction, expected setupTransa
 	}
 	if !validConnector(transaction.TargetConnector) || !validMode(transaction.TargetMode) {
 		return errors.New("setup transaction has an invalid target connector or mode")
+	}
+	if transaction.TargetCredentialProtection && !transaction.TargetCredentialProtectionSet {
+		return errors.New("setup transaction enables credential protection without recording an explicit target")
+	}
+	if transaction.TargetCredentialProtectionSet && transaction.Action != "install" {
+		return errors.New("non-install transaction changes credential protection")
+	}
+	if transaction.HadInstall && transaction.TargetCredentialProtectionSet &&
+		!transaction.TargetCredentialProtection {
+		return errors.New("upgrade transaction disables credential protection")
 	}
 	if transaction.Action == "install" {
 		if !validPayloadVersion(transaction.TargetVersion) {
@@ -2429,6 +2479,9 @@ func convergeCommittedSetupTransaction(transaction setupTransaction) error {
 		if err := reconciliation.persist(); err != nil {
 			return fmt.Errorf("persist connector reconciliation residue: %w", err)
 		}
+		if err := cleanupCredentialProtectionForUninstall(transaction); err != nil {
+			return fmt.Errorf("remove managed s-gw MCP registrations: %w", err)
+		}
 		if _, _, err := configureGatewayAutoStart(publishedGateway, false); err != nil {
 			return err
 		}
@@ -2519,7 +2572,13 @@ func convergeCommittedSetupTransaction(transaction setupTransaction) error {
 			})
 		}
 		if transaction.TargetConnector != "none" {
-			opts := options{Connector: transaction.TargetConnector, Mode: transaction.TargetMode, Quiet: true}
+			opts := options{
+				Connector:               transaction.TargetConnector,
+				Mode:                    transaction.TargetMode,
+				Quiet:                   true,
+				CredentialProtection:    false,
+				CredentialProtectionSet: transaction.TargetCredentialProtectionSet,
+			}
 			configHome := connectorConfigHome(transaction, transaction.TargetConnector, false)
 			if reconciliation.run(transaction.ID, transaction.TargetConnector, configHome, "configure", func() error {
 				return runInitialConfigurationWithEnv(transaction.InstallRoot, transaction.DataRoot, opts, childEnv)
@@ -2559,6 +2618,13 @@ func convergeCommittedSetupTransaction(transaction setupTransaction) error {
 		nativeInstallRuntimeConvergenceOps(),
 	)
 	if err != nil {
+		return err
+	}
+	if err := applyCommittedCredentialProtection(
+		transaction,
+		childEnv,
+		runCredentialProtectionSetupWithEnv,
+	); err != nil {
 		return err
 	}
 	pathAdded, reusedSeparator, valueCreated, pathMutationErr := addUserPath(
@@ -2613,6 +2679,31 @@ func convergeCommittedSetupTransaction(transaction setupTransaction) error {
 		transaction.TargetServices,
 		nativeInstallRuntimeConvergenceOps(),
 	)
+}
+
+func applyCommittedCredentialProtection(
+	transaction setupTransaction,
+	env []string,
+	run credentialProtectionRunner,
+) error {
+	if !transaction.TargetCredentialProtectionSet {
+		return nil
+	}
+	// A fresh opt-out is declarative. Upgrade transactions set this intent only
+	// when the existing configuration was already enabled, so the target wheel
+	// repairs the broker without turning it on for another installation.
+	if !transaction.TargetCredentialProtection {
+		return nil
+	}
+	if err := run(
+		transaction.InstallRoot,
+		transaction.DataRoot,
+		transaction.TargetCredentialProtection,
+		env,
+	); err != nil {
+		return fmt.Errorf("apply credential protection intent: %w", err)
+	}
+	return nil
 }
 
 func initializeCanonicalReleaseState(

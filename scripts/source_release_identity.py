@@ -29,30 +29,25 @@ from pathlib import Path
 from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "cli"))
+
+from defenseclaw import install_publish  # noqa: E402
+
 IDENTITY_RELATIVE_PATH = Path("release/source-install-identity.json")
 COMPATIBILITY_CONFIG_RELATIVE_PATH = Path("internal/config/config.go")
-OBSERVABILITY_V8_CONFIG_RELATIVE_PATH = Path(
-    "internal/config/observability_v8_types.go"
-)
+OBSERVABILITY_V8_CONFIG_RELATIVE_PATH = Path("internal/config/observability_v8_types.go")
 IDENTITY_SCHEMA_VERSION = 1
-MARKER_SCHEMA_VERSION = 2
+MARKER_SCHEMA_VERSION = install_publish.SOURCE_MARKER_SCHEMA_VERSION
 SEMVER_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
-SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
-MAX_MARKER_BYTES = 16 * 1024
+SHA256_RE = install_publish.SHA256_RE
+MAX_MARKER_BYTES = install_publish.SOURCE_MARKER_MAX_BYTES
 IDENTITY_KEYS = {
     "schema_version",
     "source_release",
     "source_install_compatibility_epoch",
     "runtime_config_version",
 }
-MARKER_KEYS = {
-    "schema_version",
-    "checkout_root",
-    "source_release",
-    "source_install_compatibility_epoch",
-    "runtime_config_version",
-    "gateway_sha256",
-}
+MARKER_KEYS = install_publish.SOURCE_MARKER_KEYS
 
 
 class SourceIdentityError(RuntimeError):
@@ -167,9 +162,7 @@ def _go_config_version_literal(root: Path, relative_path: Path, name: str) -> in
         re.MULTILINE,
     )
     if len(matches) != 1:
-        raise SourceIdentityError(
-            f"gateway source must declare exactly one literal {name}"
-        )
+        raise SourceIdentityError(f"gateway source must declare exactly one literal {name}")
     value = int(matches[0])
     if value < 1:
         raise SourceIdentityError(f"gateway {name} must be positive")
@@ -210,9 +203,7 @@ def runtime_config_version(
         )
         candidate = payload.get("source_release")
         if not isinstance(candidate, str):
-            raise SourceIdentityError(
-                "source-install identity source_release must be a string"
-            )
+            raise SourceIdentityError("source-install identity source_release must be a string")
         source_release = candidate
     release_key = _version_tuple(source_release)
     if release_key >= (0, 8, 5):
@@ -241,9 +232,7 @@ def _validate_identity_payload(payload: dict[str, Any]) -> dict[str, int | str]:
     if release_key == (0, 8, 4) and (epoch != 1 or runtime != 7):
         raise SourceIdentityError("release 0.8.4 must use source-install compatibility epoch 1 and runtime config 7")
     if release_key == (0, 8, 5) and (epoch != 2 or runtime != 8):
-        raise SourceIdentityError(
-            "release 0.8.5 must use source-install compatibility epoch 2 and runtime config 8"
-        )
+        raise SourceIdentityError("release 0.8.5 must use source-install compatibility epoch 2 and runtime config 8")
     if release_key > (0, 8, 5) and (epoch < 2 or runtime < 8):
         raise SourceIdentityError("release 0.8.5+ cannot reuse the 0.8.4 bridge source-install identity")
     return {
@@ -377,63 +366,22 @@ def validate_marker(
 
     raw, digest = _read_opened_marker(path)
     try:
-        payload = json.loads(raw)
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        payload = install_publish.parse_source_marker(
+            raw,
+            source_release=source_release,
+            compatibility_epoch=compatibility_epoch,
+            runtime_version=runtime_version,
+            allow_source_transition=allow_source_transition,
+        )
+    except install_publish.SourceMarkerError as exc:
         if _looks_like_legacy_marker(raw):
             raise LegacySourceMarkerError("legacy source-install marker has no release-bound identity") from exc
-        raise SourceIdentityError("source-install marker is not valid v2 JSON") from exc
-    if not isinstance(payload, dict) or set(payload) != MARKER_KEYS:
-        raise SourceIdentityError(f"source-install marker must contain exactly the v2 fields {sorted(MARKER_KEYS)}")
-    if payload.get("schema_version") != MARKER_SCHEMA_VERSION:
-        raise SourceIdentityError(f"source-install marker schema must be {MARKER_SCHEMA_VERSION}")
-    marker_release = payload.get("source_release")
-    marker_epoch = payload.get("source_install_compatibility_epoch")
-    marker_runtime = payload.get("runtime_config_version")
-    if not isinstance(marker_release, str):
-        raise SourceIdentityError("source-install marker source_release must be a string")
-    _version_tuple(marker_release)
-    for label, value in (
-        ("source_install_compatibility_epoch", marker_epoch),
-        ("runtime_config_version", marker_runtime),
-    ):
-        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
-            raise SourceIdentityError(f"source-install marker {label} must be a positive integer")
+        raise SourceIdentityError(str(exc)) from exc
     expected_root = str(checkout_root.resolve())
-    marker_root = payload.get("checkout_root")
-    if (
-        not isinstance(marker_root, str)
-        or not os.path.isabs(marker_root)
-        or any(character in marker_root for character in ("\n", "\r", "\t"))
-        or marker_root != expected_root
-    ):
+    marker_root = str(payload["checkout_root"])
+    if marker_root != expected_root:
         raise SourceIdentityError(f"source-install marker belongs to a different checkout ({marker_root!r})")
-    if allow_source_transition:
-        future_fields: list[str] = []
-        if _version_tuple(marker_release) > _version_tuple(source_release):
-            future_fields.append(f"source_release={marker_release!r}")
-        if marker_epoch > compatibility_epoch:
-            future_fields.append(f"source_install_compatibility_epoch={marker_epoch!r}")
-        if marker_runtime > runtime_version:
-            future_fields.append(f"runtime_config_version={marker_runtime!r}")
-        if future_fields:
-            raise SourceIdentityError(
-                "source-install marker is newer than this checkout (" + ", ".join(future_fields) + ")"
-            )
-    else:
-        expected_scalars = {
-            "source_release": source_release,
-            "source_install_compatibility_epoch": compatibility_epoch,
-            "runtime_config_version": runtime_version,
-        }
-        for key, expected in expected_scalars.items():
-            if payload.get(key) != expected:
-                raise SourceIdentityError(
-                    f"source-install marker {key}={payload.get(key)!r} does not match checkout {expected!r}"
-                )
-    gateway_digest = payload.get("gateway_sha256")
-    if not isinstance(gateway_digest, str) or SHA256_RE.fullmatch(gateway_digest) is None:
-        raise SourceIdentityError("source-install marker gateway_sha256 is invalid")
-    return digest, gateway_digest
+    return digest, str(payload["gateway_sha256"])
 
 
 def render_marker(
@@ -467,7 +415,17 @@ def render_marker(
         "runtime_config_version": runtime_version,
         "gateway_sha256": gateway_sha256,
     }
-    return (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    rendered = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
+    try:
+        install_publish.parse_source_marker(
+            rendered,
+            source_release=source_release,
+            compatibility_epoch=compatibility_epoch,
+            runtime_version=runtime_version,
+        )
+    except install_publish.SourceMarkerError as exc:
+        raise SourceIdentityError(str(exc)) from exc
+    return rendered
 
 
 def _parser() -> argparse.ArgumentParser:

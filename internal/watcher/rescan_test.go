@@ -521,26 +521,22 @@ func TestRescan_FromZeptoClawConfig(t *testing.T) {
 	}
 }
 
-// TestRescan_FromClaudeSettingsJSON — plan E1 / item 5. Drives
+// TestRescan_FromClaudeMCPJSON — plan E1 / item 5. Drives
 // enumerateTargets through the claudecode arm: ReadMCPServers reads
-// from $HOME/.claude/settings.json's `mcpServers` section.
-func TestRescan_FromClaudeSettingsJSON(t *testing.T) {
+// from $HOME/.claude.json's `mcpServers` section.
+func TestRescan_FromClaudeMCPJSON(t *testing.T) {
 	cfg, store, logger, skillDir := setupTestEnv(t)
 	t.Setenv("PATH", "")
 	tmpHome := t.TempDir()
 	testenv.SetHome(t, tmpHome)
 
-	ccDir := filepath.Join(tmpHome, ".claude")
-	if err := os.MkdirAll(ccDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
 	ccSettings := `{
 		"mcpServers": {
 			"cc-stdio":  {"command": "node", "args": ["mcp.js"]},
 			"cc-remote": {"command": "uvx", "args": ["mcp-remote"]}
 		}
 	}`
-	if err := os.WriteFile(filepath.Join(ccDir, "settings.json"), []byte(ccSettings), 0o600); err != nil {
+	if err := os.WriteFile(filepath.Join(tmpHome, ".claude.json"), []byte(ccSettings), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cfg.Guardrail.Connector = "claudecode"

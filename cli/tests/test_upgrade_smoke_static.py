@@ -200,6 +200,7 @@ def test_future_release_smoke_builds_from_isolated_version_stamped_source() -> N
     assert '"${build_root}/scripts/generate-upgrade-manifest.py"' in build
     assert '"${build_root}/scripts/release_candidate.py" prepare-runtime' in build
     assert '"${build_root}/scripts/release_candidate.py" verify-runtime' in build
+    assert build.count("--source-only-sgw") == 2
     assert '"${build_root}/scripts/release_candidate.py" stage-resolvers' in build
     assert '"${build_root}/scripts/release_candidate.py" stage-installers' in build
     assert "for fixture_os in darwin linux windows; do" in build
@@ -1059,21 +1060,13 @@ def test_cursorless_field_gate_keeps_the_requested_target_contract() -> None:
     assert "configure_release" not in field_gate
     assert "authenticated-source-" not in field_gate
 
-    caller_start = resolver.rindex(
-        'if [[ -n "${HARD_CUT_CURSOR_RECOVERY_SOURCE_VERSION}" ]]; then'
-    )
+    caller_start = resolver.rindex('if [[ -n "${HARD_CUT_CURSOR_RECOVERY_SOURCE_VERSION}" ]]; then')
     caller_end = resolver.index(
         'FINAL_RELEASE_PROVENANCE_BRIDGE_CHECKSUMS_SHA256="',
         caller_start,
     )
     caller = resolver[caller_start:caller_end]
-    assert (
-        "then\n"
-        "    authorize_cursorless_field_recovery\n"
-        "else\n"
-        "    prepare_release_contract\n"
-        "fi\n"
-    ) in caller
+    assert ("then\n    authorize_cursorless_field_recovery\nelse\n    prepare_release_contract\nfi\n") in caller
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX phase-two recovery")
@@ -1140,7 +1133,7 @@ def test_interrupted_phase_two_downloads_pinned_uv_under_clean_path(
     uv_payload = (
         "#!/bin/sh\n"
         f"printf executed > {str(pinned_marker)!r}\n"
-        f"if [ \"$#\" -eq 1 ] && [ \"$1\" = \"--version\" ]; then "
+        f'if [ "$#" -eq 1 ] && [ "$1" = "--version" ]; then '
         f"printf 'uv {version_match.group(1)}\\n'; exit 0; fi\n"
         'printf \'%s|%s\\n\' "$0" "$*" >> "${UV_LOG:?}"\n'
         "exit 0\n"
@@ -1167,9 +1160,7 @@ def test_interrupted_phase_two_downloads_pinned_uv_under_clean_path(
         recovery_start,
     ) + len("\n}\n")
     recovery_function = resolver[recovery_start:recovery_end]
-    parser_start = recovery_function.index(
-        '    recovery_fields="$(python3 - "${journal}" "${DEFENSECLAW_HOME}"'
-    )
+    parser_start = recovery_function.index('    recovery_fields="$(python3 - "${journal}" "${DEFENSECLAW_HOME}"')
     parser_end = recovery_function.index(
         '    wheel="$(printf',
         parser_start,
@@ -1189,14 +1180,7 @@ def test_interrupted_phase_two_downloads_pinned_uv_under_clean_path(
     recovery.mkdir(parents=True)
     recovery.chmod(0o700)
     venv_python.parent.mkdir(parents=True)
-    (
-        controller_home
-        / ".venv"
-        / "lib"
-        / "python3.12"
-        / "site-packages"
-        / "defenseclaw"
-    ).mkdir(parents=True)
+    (controller_home / ".venv" / "lib" / "python3.12" / "site-packages" / "defenseclaw").mkdir(parents=True)
     known_uv.parent.mkdir(parents=True)
     journal = recovery / "phase-two-active.json"
     journal.write_text("{}\n", encoding="utf-8")
@@ -1213,16 +1197,12 @@ def test_interrupted_phase_two_downloads_pinned_uv_under_clean_path(
     recovery_log = tmp_path / "recovery-python.log"
     known_marker = tmp_path / "known-uv-executed"
     known_uv.write_text(
-        "#!/bin/sh\n"
-        f"printf executed > {str(known_marker)!r}\n"
-        f"printf '%s\\n' 'uv {version_match.group(1)}'\n",
+        f"#!/bin/sh\nprintf executed > {str(known_marker)!r}\nprintf '%s\\n' 'uv {version_match.group(1)}'\n",
         encoding="utf-8",
     )
     known_uv.chmod(0o755)
     venv_python.write_text(
-        "#!/bin/sh\n"
-        'printf \'%s\\n\' "$*" >> "${RECOVERY_PYTHON_LOG:?}"\n'
-        "exit 0\n",
+        '#!/bin/sh\nprintf \'%s\\n\' "$*" >> "${RECOVERY_PYTHON_LOG:?}"\nexit 0\n',
         encoding="utf-8",
     )
     venv_python.chmod(0o755)
@@ -1235,11 +1215,11 @@ def test_interrupted_phase_two_downloads_pinned_uv_under_clean_path(
         'CONTROLLER_HOME="${DEFENSECLAW_HOME}"\n'
         'DEFENSECLAW_VENV="${DEFENSECLAW_HOME}/.venv"\n'
         "PLAN_ONLY=0\n"
-        "STAGING_DIR=\"\"\n"
-        "UV_BIN=\"\"\n"
+        'STAGING_DIR=""\n'
+        'UV_BIN=""\n'
         f'UV_BOOTSTRAP_VERSION="{version_match.group(1)}"\n'
         f'UV_BOOTSTRAP_MAX_BYTES="{maximum_match.group(1)}"\n'
-        "RED=\"\"; GREEN=\"\"; YELLOW=\"\"; BLUE=\"\"; CYAN=\"\"; BOLD=\"\"; DIM=\"\"; NC=\"\"\n"
+        'RED=""; GREEN=""; YELLOW=""; BLUE=""; CYAN=""; BOLD=""; DIM=""; NC=""\n'
         'die() { printf "die: %s\\n" "$*" >&2; exit 1; }\n'
         'ok() { printf "ok: %s\\n" "$*"; }\n'
         'warn() { printf "warn: %s\\n" "$*" >&2; }\n'
@@ -1252,7 +1232,7 @@ def test_interrupted_phase_two_downloads_pinned_uv_under_clean_path(
         '    previous="${arg}"\n'
         "  done\n"
         '  [[ -n "${output}" ]] || return 94\n'
-        f"  cp {str(uv_archive)!r} \"${{output}}\"\n"
+        f'  cp {str(uv_archive)!r} "${{output}}"\n'
         "}\n"
         + staging_functions
         + resolve_function

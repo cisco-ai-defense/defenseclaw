@@ -62,6 +62,7 @@ func newDirectProviderProxy(t *testing.T, prov LLMProvider, insp ContentInspecto
 		mode:            "action",
 		skipAuthForTest: true,
 	}
+	allowRawForwardPrivateTargets(p)
 	p.resolveProviderFn = func(_ *ChatRequest) LLMProvider { return prov }
 
 	// The upstream URL host must pass isKnownProviderDomain, otherwise

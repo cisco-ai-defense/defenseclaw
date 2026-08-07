@@ -85,6 +85,7 @@ def test_ordinary_ci_is_deterministic_and_selective_not_full_certification() -> 
         "cli/defenseclaw/upgrade_receipt.py",
         "cli/defenseclaw/observability/v8_activation.py",
         "cli/defenseclaw/observability/v8_config.py",
+        "cmd/defenseclaw-setup/**",
         "internal/config/**",
         "internal/cli/**",
         "internal/daemon/**",
@@ -140,6 +141,10 @@ def test_ordinary_ci_is_deterministic_and_selective_not_full_certification() -> 
     )
     assert release_certification._is_sensitive(
         ["internal/daemon/daemon.go"],
+        list(sensitive),
+    )
+    assert release_certification._is_sensitive(
+        ["cmd/defenseclaw-setup/transaction.go"],
         list(sensitive),
     )
 

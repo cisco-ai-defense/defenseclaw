@@ -55,6 +55,7 @@ func TestPassthroughThreeBranch(t *testing.T) {
 
 	t.Run("branch_known_forwards", func(t *testing.T) {
 		proxy := newTestProxy(t, prov, insp, "action")
+		allowRawForwardPrivateTargets(proxy)
 		// Temporarily register the upstream's host in providerDomains so
 		// the known-provider allowlist matches.
 		origDomains := providerDomains

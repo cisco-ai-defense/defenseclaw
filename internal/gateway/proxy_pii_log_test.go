@@ -17,7 +17,10 @@
 package gateway
 
 import (
+	"bytes"
 	"io"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"sync"
@@ -163,6 +166,29 @@ func TestLogRequestBodyMetadata_OmitsBodyEvenWhenRevealEnabled(t *testing.T) {
 	}
 	if !strings.Contains(out, "raw body: 70 bytes (content omitted)") {
 		t.Fatalf("request log dropped safe body metadata: %s", out)
+	}
+}
+
+func TestBlockedPassthroughTargetDoesNotLogURLCredentials(t *testing.T) {
+	proxy := newTestProxy(t, &mockProvider{}, newMockInspector(), "action")
+	request := httptest.NewRequest(http.MethodPost, "/not-an-llm-request", bytes.NewReader([]byte(`{"value":1}`)))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-DC-Target-URL", "https://log-user:log-password@unknown.example.test/path?request_id=query-secret#fragment-secret")
+	recorder := httptest.NewRecorder()
+
+	out := captureStderr(t, func() {
+		proxy.handlePassthrough(recorder, request)
+	})
+	if recorder.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want %d: %s", recorder.Code, http.StatusForbidden, recorder.Body.String())
+	}
+	for _, secret := range []string{"log-user", "log-password", "query-secret", "fragment-secret"} {
+		if strings.Contains(out, secret) {
+			t.Fatalf("passthrough target log leaked %q: %s", secret, out)
+		}
+	}
+	if !strings.Contains(out, "https://unknown.example.test/path") {
+		t.Fatalf("passthrough target log dropped safe URL routing data: %s", out)
 	}
 }
 

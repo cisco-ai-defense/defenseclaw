@@ -425,11 +425,15 @@ func (c *ClaudeCodeConnector) SupportsComponentScanning() bool { return true }
 func (c *ClaudeCodeConnector) ComponentTargets(cwd string) map[string][]string {
 	userDir := claudeCodeConfigDir()
 	workspaceDir := filepath.Join(cwd, ".claude")
+	mcpTargets := []string{filepath.Join(cwd, ".mcp.json")}
+	if home, err := os.UserHomeDir(); err == nil && filepath.IsAbs(home) {
+		mcpTargets = append([]string{filepath.Join(home, ".claude.json")}, mcpTargets...)
+	}
 
 	targets := map[string][]string{
 		"skill":   {filepath.Join(userDir, "skills"), filepath.Join(workspaceDir, "skills")},
 		"plugin":  {filepath.Join(userDir, "plugins"), filepath.Join(workspaceDir, "plugins")},
-		"mcp":     {filepath.Join(userDir, "settings.json"), filepath.Join(cwd, ".mcp.json")},
+		"mcp":     mcpTargets,
 		"agent":   {filepath.Join(userDir, "agents"), filepath.Join(workspaceDir, "agents")},
 		"command": {filepath.Join(userDir, "commands"), filepath.Join(workspaceDir, "commands")},
 		"config": {

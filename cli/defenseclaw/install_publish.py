@@ -13,9 +13,12 @@ import hashlib
 import json
 import ntpath
 import os
+import re
 import stat
 import struct
 import sys
+import time
+import unicodedata
 import uuid
 from collections.abc import Iterator
 from contextlib import ExitStack, contextmanager
@@ -26,11 +29,157 @@ class PublishError(RuntimeError):
     pass
 
 
+class SourceMarkerError(ValueError):
+    pass
+
+
 BasicIdentity = tuple[int, int]
 StrongIdentity = tuple[int, int, int, int]
 ObjectIdentity = tuple[int, ...]
 MAX_CUSTODY_ENTRIES = 128
 CUSTODY_MARKER = b"DefenseClaw deterministic retirement custody v1\n"
+CUSTODY_MARKER_NAME = ".defenseclaw-custody-v1"
+CUSTODY_DISCARD_MARKER = ".defenseclaw-custody-discard-v1"
+CUSTODY_DISCARD_MARKER_CONTENT = b"DefenseClaw retirement custody discard v1\n"
+CUSTODY_CLOSE_SUFFIX = ".discard-close-v1"
+CUSTODY_LOCK_PREFIX = ".defenseclaw-custody-lock-"
+CUSTODY_LOCK_TIMEOUT_SECONDS = 10.0
+CUSTODY_LOCK_POLL_SECONDS = 0.025
+SOURCE_MARKER_SCHEMA_VERSION = 2
+SOURCE_MARKER_MAX_BYTES = 16 * 1024
+SOURCE_MARKER_KEYS = frozenset(
+    {
+        "schema_version",
+        "checkout_root",
+        "source_release",
+        "source_install_compatibility_epoch",
+        "runtime_config_version",
+        "gateway_sha256",
+    }
+)
+SOURCE_RELEASE_RE = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _source_release_tuple(value: str) -> tuple[int, int, int]:
+    if SOURCE_RELEASE_RE.fullmatch(value) is None:
+        raise SourceMarkerError(f"source-install marker source_release must be canonical X.Y.Z, got {value!r}")
+    try:
+        return tuple(int(part) for part in value.split("."))  # type: ignore[return-value]
+    except ValueError as exc:
+        raise SourceMarkerError("source-install marker source_release is too large") from exc
+
+
+def _has_control_character(value: str) -> bool:
+    return any(unicodedata.category(character) == "Cc" for character in value)
+
+
+def parse_source_marker(
+    raw: bytes,
+    *,
+    source_release: str,
+    compatibility_epoch: int,
+    runtime_version: int,
+    allow_source_transition: bool = False,
+) -> dict[str, int | str]:
+    """Parse the closed source-install marker and enforce caller compatibility."""
+
+    if not 0 < len(raw) <= SOURCE_MARKER_MAX_BYTES:
+        raise SourceMarkerError("source-install marker must be bounded and nonempty")
+    try:
+        text = raw.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as exc:
+        raise SourceMarkerError("source-install marker is not valid UTF-8 JSON") from exc
+
+    def reject_duplicates(pairs):
+        document = {}
+        for key, value in pairs:
+            if key in document:
+                raise SourceMarkerError(f"source-install marker contains duplicate field {key!r}")
+            document[key] = value
+        return document
+
+    try:
+        payload = json.loads(text, object_pairs_hook=reject_duplicates)
+    except SourceMarkerError:
+        raise
+    except (json.JSONDecodeError, ValueError) as exc:
+        raise SourceMarkerError("source-install marker is not valid UTF-8 JSON") from exc
+    if not isinstance(payload, dict) or set(payload) != SOURCE_MARKER_KEYS:
+        raise SourceMarkerError(
+            f"source-install marker must contain exactly the v2 fields {sorted(SOURCE_MARKER_KEYS)}"
+        )
+    schema_version = payload.get("schema_version")
+    if (
+        not isinstance(schema_version, int)
+        or isinstance(schema_version, bool)
+        or schema_version != SOURCE_MARKER_SCHEMA_VERSION
+    ):
+        raise SourceMarkerError(f"source-install marker schema must be {SOURCE_MARKER_SCHEMA_VERSION}")
+
+    marker_release = payload.get("source_release")
+    marker_epoch = payload.get("source_install_compatibility_epoch")
+    marker_runtime = payload.get("runtime_config_version")
+    if not isinstance(marker_release, str):
+        raise SourceMarkerError("source-install marker source_release must be a string")
+    marker_release_key = _source_release_tuple(marker_release)
+    for label, value in (
+        ("source_install_compatibility_epoch", marker_epoch),
+        ("runtime_config_version", marker_runtime),
+    ):
+        if not isinstance(value, int) or isinstance(value, bool) or value < 1:
+            raise SourceMarkerError(f"source-install marker {label} must be a positive integer")
+
+    checkout_root = payload.get("checkout_root")
+    if (
+        not isinstance(checkout_root, str)
+        or _has_control_character(checkout_root)
+        or not os.path.isabs(checkout_root)
+        or os.path.normpath(checkout_root) != checkout_root
+        or checkout_root == str(Path(checkout_root).anchor)
+    ):
+        raise SourceMarkerError("source-install marker checkout_root must be a canonical non-root absolute path")
+
+    gateway_sha256 = payload.get("gateway_sha256")
+    if not isinstance(gateway_sha256, str) or SHA256_RE.fullmatch(gateway_sha256) is None:
+        raise SourceMarkerError("source-install marker gateway_sha256 is invalid")
+
+    if (
+        not isinstance(source_release, str)
+        or not isinstance(compatibility_epoch, int)
+        or isinstance(compatibility_epoch, bool)
+        or compatibility_epoch < 1
+        or not isinstance(runtime_version, int)
+        or isinstance(runtime_version, bool)
+        or runtime_version < 1
+    ):
+        raise SourceMarkerError("source-install marker compatibility values are invalid")
+    source_release_key = _source_release_tuple(source_release)
+    if allow_source_transition:
+        future_fields: list[str] = []
+        if marker_release_key > source_release_key:
+            future_fields.append(f"source_release={marker_release!r}")
+        if marker_epoch > compatibility_epoch:
+            future_fields.append(f"source_install_compatibility_epoch={marker_epoch!r}")
+        if marker_runtime > runtime_version:
+            future_fields.append(f"runtime_config_version={marker_runtime!r}")
+        if future_fields:
+            raise SourceMarkerError(
+                "source-install marker is newer than this checkout (" + ", ".join(future_fields) + ")"
+            )
+    else:
+        expected = {
+            "source_release": source_release,
+            "source_install_compatibility_epoch": compatibility_epoch,
+            "runtime_config_version": runtime_version,
+        }
+        for field, value in expected.items():
+            if payload[field] != value:
+                raise SourceMarkerError(
+                    f"source-install marker {field}={payload[field]!r} does not match checkout {value!r}"
+                )
+
+    return payload
 
 
 # Win32 source installs use exact regular-file copies instead of symlinks.
@@ -242,14 +391,7 @@ class _WindowsPublicationAPI:
 
     @staticmethod
     def _validate_leaf(leaf: str) -> None:
-        if (
-            not leaf
-            or leaf in {".", ".."}
-            or "\\" in leaf
-            or "/" in leaf
-            or "\x00" in leaf
-            or ":" in leaf
-        ):
+        if not leaf or leaf in {".", ".."} or "\\" in leaf or "/" in leaf or "\x00" in leaf or ":" in leaf:
             raise PublishError(f"managed entry has an unsafe Windows leaf: {leaf!r}")
 
     def _open_relative(
@@ -322,11 +464,7 @@ class _WindowsPublicationAPI:
     def open_directory(self, path: Path) -> int:
         handle = self._open(
             path,
-            access=(
-                _WINDOWS_FILE_LIST_DIRECTORY
-                | _WINDOWS_FILE_TRAVERSE
-                | _WINDOWS_FILE_READ_ATTRIBUTES
-            ),
+            access=(_WINDOWS_FILE_LIST_DIRECTORY | _WINDOWS_FILE_TRAVERSE | _WINDOWS_FILE_READ_ATTRIBUTES),
             # Pin the root pathname while all descendant opens are resolved
             # relative to its exact handle. Reparse mutation no longer
             # redirects children because no child lookup re-enters this path.
@@ -361,9 +499,7 @@ class _WindowsPublicationAPI:
             share=_WINDOWS_FILE_SHARE_READ | _WINDOWS_FILE_SHARE_WRITE,
             disposition=disposition,
             options=(
-                _WINDOWS_FILE_DIRECTORY_FILE
-                | _WINDOWS_FILE_SYNCHRONOUS_IO_NONALERT
-                | _WINDOWS_FILE_OPEN_REPARSE_POINT
+                _WINDOWS_FILE_DIRECTORY_FILE | _WINDOWS_FILE_SYNCHRONOUS_IO_NONALERT | _WINDOWS_FILE_OPEN_REPARSE_POINT
             ),
         )
         try:
@@ -396,11 +532,7 @@ class _WindowsPublicationAPI:
         handle = self._open_relative(
             parent_handle,
             leaf,
-            access=(
-                _WINDOWS_SYNCHRONIZE
-                | _WINDOWS_FILE_READ_DATA
-                | _WINDOWS_FILE_READ_ATTRIBUTES
-            ),
+            access=(_WINDOWS_SYNCHRONIZE | _WINDOWS_FILE_READ_DATA | _WINDOWS_FILE_READ_ATTRIBUTES),
             share=_WINDOWS_FILE_SHARE_READ,
             disposition=_WINDOWS_NT_FILE_OPEN,
             options=(
@@ -450,12 +582,7 @@ class _WindowsPublicationAPI:
         handle = self._open_relative(
             parent_handle,
             leaf,
-            access=(
-                _WINDOWS_SYNCHRONIZE
-                | _WINDOWS_FILE_READ_DATA
-                | _WINDOWS_FILE_READ_ATTRIBUTES
-                | _WINDOWS_DELETE
-            ),
+            access=(_WINDOWS_SYNCHRONIZE | _WINDOWS_FILE_READ_DATA | _WINDOWS_FILE_READ_ATTRIBUTES | _WINDOWS_DELETE),
             share=_WINDOWS_FILE_SHARE_READ,
             disposition=_WINDOWS_NT_FILE_OPEN,
             options=(
@@ -689,9 +816,7 @@ def _windows_publish_regular(
     api = _windows_api()
     with ExitStack() as held:
         source_chain = held.enter_context(_hold_windows_directory_chain(source.parent, create=False))
-        destination_chain = held.enter_context(
-            _hold_windows_directory_chain(destination.parent, create=False)
-        )
+        destination_chain = held.enter_context(_hold_windows_directory_chain(destination.parent, create=False))
         _validate_windows_directory_chain(source_chain)
         _validate_windows_directory_chain(destination_chain)
         source_handle = api.open_regular_at(source_chain[-1][0], source.name)
@@ -742,13 +867,9 @@ def _windows_publish_regular(
                 )
                 publication_owned = False
                 try:
-                    publication_owned = (
-                        api.identity(api.information(publication_handle)) == stage_identity
-                    )
+                    publication_owned = api.identity(api.information(publication_handle)) == stage_identity
                     if not publication_owned:
-                        raise PublishError(
-                            f"source-install staging identity changed and was preserved: {destination}"
-                        )
+                        raise PublishError(f"source-install staging identity changed and was preserved: {destination}")
                     if api.digest(publication_handle) != source_digest:
                         raise PublishError(f"source-install staging changed before publication: {destination}")
                     _validate_windows_directory_chain(source_chain)
@@ -986,6 +1107,7 @@ def _open_directory(path: Path, *, create: bool) -> int:
     if not path.is_absolute():
         raise PublishError(f"managed path must be absolute: {path}")
     descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+    current_path = Path("/")
     try:
         for component in path.parts[1:]:
             if not component or component in {".", ".."}:
@@ -1026,7 +1148,12 @@ def _open_directory(path: Path, *, create: bool) -> int:
                         os.close(staged_descriptor)
                     if mkdir_succeeded and created_identity is not None:
                         try:
-                            _rmdir_exact_at(descriptor, staged, created_identity)
+                            _rmdir_exact_at(
+                                descriptor,
+                                staged,
+                                created_identity,
+                                canonical=str(current_path / staged),
+                            )
                         except (OSError, PublishError):
                             pass
                     raise PublishError(f"managed directory appeared concurrently and was preserved: {path}") from None
@@ -1038,6 +1165,7 @@ def _open_directory(path: Path, *, create: bool) -> int:
                 raise PublishError(f"managed directory is not a real directory: {path}") from exc
             os.close(descriptor)
             descriptor = child
+            current_path /= component
         return descriptor
     except Exception:
         os.close(descriptor)
@@ -1228,7 +1356,12 @@ def fresh_directory(path: Path) -> StrongIdentity:
             os.close(staged_fd)
         if not activated and staged_claim is not None:
             try:
-                _rmdir_exact_at(parent_fd, staged, staged_claim)
+                _rmdir_exact_at(
+                    parent_fd,
+                    staged,
+                    staged_claim,
+                    canonical=str(path.parent / staged),
+                )
             except (OSError, PublishError):
                 pass
         os.close(parent_fd)
@@ -1238,15 +1371,24 @@ def _retirement_document(
     canonical: str,
     expected: ObjectIdentity,
     kind: str,
+    symlink_targets: tuple[str, ...] | None = None,
 ) -> bytes:
+    document: dict[str, object] = {
+        "canonical": canonical,
+        "identity": list(expected),
+        "kind": kind,
+        "schema_version": 1,
+    }
+    if kind == "symlink":
+        if not symlink_targets:
+            raise PublishError("symlink retirement requires an allowed target")
+        document["schema_version"] = 2
+        document["symlink_targets"] = list(symlink_targets)
+    elif symlink_targets is not None:
+        raise PublishError("symlink targets are invalid for this retirement kind")
     return (
         json.dumps(
-            {
-                "canonical": canonical,
-                "identity": list(expected),
-                "kind": kind,
-                "schema_version": 1,
-            },
+            document,
             separators=(",", ":"),
             sort_keys=True,
         )
@@ -1254,9 +1396,20 @@ def _retirement_document(
     ).encode()
 
 
-def _retirement_names(canonical: str, expected: ObjectIdentity, kind: str) -> tuple[str, str]:
-    digest = hashlib.sha256(_retirement_document(canonical, expected, kind)).hexdigest()
+def _retirement_names(
+    canonical: str,
+    expected: ObjectIdentity,
+    kind: str,
+    symlink_targets: tuple[str, ...] | None = None,
+) -> tuple[str, str]:
+    digest = hashlib.sha256(_retirement_document(canonical, expected, kind, symlink_targets)).hexdigest()
     return f"intent-{digest}.json", f"retired-{digest}"
+
+
+def _retirement_duplicate_name(retired: str) -> str:
+    if not retired.startswith("retired-"):
+        raise PublishError("deterministic retired name is invalid")
+    return f"duplicate-{retired.removeprefix('retired-')}"
 
 
 def _read_regular_at(parent_fd: int, leaf: str, *, missing_ok: bool) -> bytes | None:
@@ -1293,41 +1446,37 @@ def _ensure_retirement_intent(
     document: bytes,
     *,
     allow_create: bool,
+    allow_discard_recovery: bool = False,
 ) -> bool:
+    discard_marker = _read_regular_at(custody_fd, CUSTODY_DISCARD_MARKER, missing_ok=True)
+    if discard_marker is not None and discard_marker != CUSTODY_DISCARD_MARKER_CONTENT:
+        raise PublishError("retirement custody discard marker is invalid")
+    if discard_marker is not None and (allow_create or not allow_discard_recovery):
+        raise PublishError("retirement custody discard is already in progress")
     existing = _read_regular_at(custody_fd, intent, missing_ok=True)
     if existing is not None:
         if existing != document:
             raise PublishError("deterministic retirement intent collided and was preserved")
+        _publish_private_regular_at(
+            custody_fd,
+            intent,
+            document,
+            label="deterministic retirement intent",
+        )
         return False
     if not allow_create:
         return False
     with os.scandir(custody_fd) as entries:
-        # A completed claim owns one durable intent and one retired name.
-        # Reserve both slots before creating either so the advertised bound is
-        # never exceeded by the normal second (rename) phase.
-        if sum(1 for _entry in entries) + 2 > MAX_CUSTODY_ENTRIES:
+        # Keep one shared slot available for deterministic duplicate-name
+        # convergence after a destination-first cross-directory rename.
+        if sum(1 for _entry in entries) + 3 > MAX_CUSTODY_ENTRIES:
             raise PublishError("retirement custody reached its bounded entry limit")
-    try:
-        descriptor = os.open(
-            intent,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
-            0o600,
-            dir_fd=custody_fd,
-        )
-    except FileExistsError:
-        existing = _read_regular_at(custody_fd, intent, missing_ok=False)
-        if existing != document:
-            raise PublishError("deterministic retirement intent collided and was preserved")
-        return False
-    try:
-        view = memoryview(document)
-        while view:
-            written = os.write(descriptor, view)
-            view = view[written:]
-        os.fsync(descriptor)
-    finally:
-        os.close(descriptor)
-    os.fsync(custody_fd)
+    _publish_private_regular_at(
+        custody_fd,
+        intent,
+        document,
+        label="deterministic retirement intent",
+    )
     return True
 
 
@@ -1335,33 +1484,29 @@ def _bind_custody_fd(descriptor: int, *, create: bool, label: str) -> None:
     metadata = os.fstat(descriptor)
     if metadata.st_uid != os.geteuid() or metadata.st_mode & 0o077:
         raise PublishError(f"retirement custody is not private and caller-owned: {label}")
-    marker = ".defenseclaw-custody-v1"
-    existing = _read_regular_at(descriptor, marker, missing_ok=True)
+    existing = _read_regular_at(descriptor, CUSTODY_MARKER_NAME, missing_ok=True)
     if existing is None:
         if not create:
             raise PublishError("retirement custody has no durable binding marker")
+        staged = f"{CUSTODY_MARKER_NAME}.stage"
         with os.scandir(descriptor) as entries:
-            if next(entries, None) is not None:
+            if {entry.name for entry in entries} - {staged}:
                 raise PublishError("pre-existing retirement custody was not empty and was preserved")
-        marker_fd = os.open(
-            marker,
-            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
-            0o600,
-            dir_fd=descriptor,
+        _publish_private_regular_at(
+            descriptor,
+            CUSTODY_MARKER_NAME,
+            CUSTODY_MARKER,
+            label="retirement custody binding marker",
         )
-        try:
-            remaining = memoryview(CUSTODY_MARKER)
-            while remaining:
-                written = os.write(marker_fd, remaining)
-                if written <= 0:
-                    raise PublishError("retirement custody marker write did not progress")
-                remaining = remaining[written:]
-            os.fsync(marker_fd)
-        finally:
-            os.close(marker_fd)
-        os.fsync(descriptor)
     elif existing != CUSTODY_MARKER:
         raise PublishError("retirement custody binding marker is invalid")
+    elif create:
+        _publish_private_regular_at(
+            descriptor,
+            CUSTODY_MARKER_NAME,
+            CUSTODY_MARKER,
+            label="retirement custody binding marker",
+        )
 
 
 def _open_custody_root(path: Path, *, create: bool) -> int:
@@ -1374,23 +1519,203 @@ def _open_custody_root(path: Path, *, create: bool) -> int:
     return descriptor
 
 
+def _open_custody_leaf_at(
+    parent_fd: int,
+    leaf: str,
+    *,
+    create: bool,
+    label: str,
+) -> int:
+    if create:
+        try:
+            os.mkdir(leaf, mode=0o700, dir_fd=parent_fd)
+            os.fsync(parent_fd)
+        except FileExistsError:
+            pass
+    try:
+        descriptor = os.open(
+            leaf,
+            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=parent_fd,
+        )
+    except FileNotFoundError:
+        raise PublishError(f"managed directory is missing: {label}") from None
+    try:
+        _bind_custody_fd(descriptor, create=create, label=label)
+    except Exception:
+        os.close(descriptor)
+        raise
+    return descriptor
+
+
+def _open_custody_root_at(
+    parent_fd: int,
+    custody_root: Path,
+    *,
+    create: bool,
+) -> int:
+    if not custody_root.is_absolute() or not custody_root.name or custody_root.name in {".", ".."}:
+        raise PublishError(f"retirement custody path is unsafe: {custody_root}")
+    return _open_custody_leaf_at(
+        parent_fd,
+        custody_root.name,
+        create=create,
+        label=str(custody_root),
+    )
+
+
+def _custody_lock_name(custody_root: Path) -> str:
+    digest = hashlib.sha256(os.fsencode(custody_root)).hexdigest()[:32]
+    return f"{CUSTODY_LOCK_PREFIX}{digest}"
+
+
+def _validate_custody_lifecycle_parent(parent_fd: int, custody_root: Path) -> None:
+    metadata = os.fstat(parent_fd)
+    mode = stat.S_IMODE(metadata.st_mode)
+    private_parent = metadata.st_uid == os.geteuid() and not mode & 0o022
+    sticky_shared_parent = metadata.st_uid in {0, os.geteuid()} and bool(mode & stat.S_ISVTX) and bool(mode & 0o022)
+    if not private_parent and not sticky_shared_parent:
+        raise PublishError(
+            f"retirement custody parent is not private caller-owned or sticky shared: {custody_root.parent}"
+        )
+
+
+def _validate_custody_lock_fd(parent_fd: int, lock_fd: int, lock_name: str) -> None:
+    metadata = os.fstat(lock_fd)
+    if (
+        not stat.S_ISREG(metadata.st_mode)
+        or metadata.st_uid != os.geteuid()
+        or stat.S_IMODE(metadata.st_mode) != 0o600
+        or metadata.st_nlink != 1
+        or metadata.st_size != 0
+        or _entry_strong_identity(parent_fd, lock_name) != _strong_identity(lock_fd)
+    ):
+        raise PublishError("retirement custody lifecycle lock is unsafe or changed")
+
+
+def _custody_lock_entry_matches(parent_fd: int, lock_fd: int, lock_name: str) -> bool:
+    metadata = os.fstat(lock_fd)
+    return metadata.st_nlink == 1 and _entry_strong_identity(parent_fd, lock_name) == _strong_identity(lock_fd)
+
+
+def _open_custody_lock_at(parent_fd: int, lock_name: str) -> int:
+    flags = os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC
+    while True:
+        created = False
+        try:
+            descriptor = os.open(
+                lock_name,
+                flags | os.O_CREAT | os.O_EXCL,
+                0o600,
+                dir_fd=parent_fd,
+            )
+            created = True
+        except FileExistsError:
+            try:
+                descriptor = os.open(lock_name, flags, dir_fd=parent_fd)
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                raise PublishError(f"could not open retirement custody lifecycle lock: errno {exc.errno}") from exc
+        except OSError as exc:
+            raise PublishError(f"could not create retirement custody lifecycle lock: errno {exc.errno}") from exc
+        try:
+            if created:
+                os.fchmod(descriptor, 0o600)
+                os.fsync(descriptor)
+                os.fsync(parent_fd)
+            _validate_custody_lock_fd(parent_fd, descriptor, lock_name)
+            return descriptor
+        except Exception:
+            os.close(descriptor)
+            raise
+
+
+@contextmanager
+def _hold_custody_parent_lock(parent_fd: int, custody_root: Path) -> Iterator[None]:
+    """Serialize one custody root without trusting a shared parent lock."""
+
+    if os.name == "nt":
+        raise PublishError("retirement custody locking is unsupported on Windows")
+    if not custody_root.is_absolute() or not custody_root.name or custody_root.name in {".", ".."}:
+        raise PublishError(f"retirement custody path is unsafe: {custody_root}")
+    _validate_custody_lifecycle_parent(parent_fd, custody_root)
+    import fcntl
+
+    lock_name = _custody_lock_name(custody_root)
+    deadline = time.monotonic() + CUSTODY_LOCK_TIMEOUT_SECONDS
+    while True:
+        if time.monotonic() >= deadline:
+            raise PublishError("timed out retrying retirement custody lifecycle lock")
+        lock_fd = _open_custody_lock_at(parent_fd, lock_name)
+        acquired = False
+        retry = False
+        try:
+            while True:
+                try:
+                    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    acquired = True
+                    break
+                except OSError as exc:
+                    if exc.errno not in {errno.EACCES, errno.EAGAIN}:
+                        raise PublishError(f"could not lock retirement custody lifecycle: errno {exc.errno}") from exc
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise PublishError("timed out waiting for retirement custody lifecycle lock") from exc
+                    time.sleep(min(CUSTODY_LOCK_POLL_SECONDS, remaining))
+
+            if not _custody_lock_entry_matches(parent_fd, lock_fd, lock_name):
+                retry = True
+            if retry:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise PublishError("timed out retrying retirement custody lifecycle lock")
+                time.sleep(min(CUSTODY_LOCK_POLL_SECONDS, remaining))
+                continue
+            _validate_custody_lock_fd(parent_fd, lock_fd, lock_name)
+            current_fd = _open_directory(custody_root.parent, create=False)
+            try:
+                if _strong_identity(current_fd) != _strong_identity(parent_fd):
+                    raise PublishError("retirement custody parent changed while waiting for its lock")
+            finally:
+                os.close(current_fd)
+
+            try:
+                yield
+            finally:
+                _validate_custody_lock_fd(parent_fd, lock_fd, lock_name)
+                os.unlink(lock_name, dir_fd=parent_fd)
+                os.fsync(parent_fd)
+            return
+        finally:
+            if acquired:
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+            os.close(lock_fd)
+
+
 def _default_custody_root(path: Path) -> Path:
     return path.parent / ".defenseclaw-install-custody"
+
+
+def _reconcile_custody_locked(custody_root: Path, parent_fd: int) -> None:
+    if _custody_cleanup_phase(custody_root) in {"discarding", "closing"}:
+        _discard_custody_locked(custody_root, parent_fd)
 
 
 def prepare_custody(custody_root: Path, managed_parent: Path) -> None:
     """Bind private custody to the exact mount that will hold managed names."""
 
-    managed_fd = _open_directory(managed_parent, create=False)
-    try:
-        custody_fd = _open_custody_root(custody_root, create=True)
-        try:
+    with ExitStack() as leases:
+        managed_fd = _open_directory(managed_parent, create=False)
+        leases.callback(os.close, managed_fd)
+        custody_parent_fd = _open_directory(custody_root.parent, create=False)
+        leases.callback(os.close, custody_parent_fd)
+        with _hold_custody_parent_lock(custody_parent_fd, custody_root):
+            _reconcile_custody_locked(custody_root, custody_parent_fd)
+            custody_fd = _open_custody_root_at(custody_parent_fd, custody_root, create=True)
+            leases.callback(os.close, custody_fd)
             if _mount_identity(custody_fd) != _mount_identity(managed_fd):
                 raise PublishError("retirement custody must share the managed object's mount before publication")
-        finally:
-            os.close(custody_fd)
-    finally:
-        os.close(managed_fd)
 
 
 def _directory_is_empty_at(parent_fd: int, leaf: str, expected: ObjectIdentity) -> bool:
@@ -1413,7 +1738,36 @@ def _kind_matches(metadata: os.stat_result, kind: str) -> bool:
         return stat.S_ISDIR(metadata.st_mode)
     if kind == "entry":
         return not stat.S_ISDIR(metadata.st_mode)
+    if kind == "symlink":
+        return stat.S_ISLNK(metadata.st_mode)
     raise PublishError("retirement kind is invalid")
+
+
+def _normalized_symlink_targets(targets: tuple[str, ...]) -> tuple[str, ...]:
+    if not targets:
+        raise PublishError("symlink retirement requires an allowed target")
+    normalized: set[str] = set()
+    for target in targets:
+        if not isinstance(target, str) or not os.path.isabs(target):
+            raise PublishError("symlink retirement targets must be absolute")
+        normalized.add(os.path.normcase(os.path.abspath(target)))
+    return tuple(sorted(normalized))
+
+
+def _symlink_target_validator(canonical: str, targets: tuple[str, ...]):
+    canonical_parent = os.path.dirname(canonical)
+    allowed = frozenset(targets)
+
+    def validate(parent_fd: int, leaf: str, _expected: ObjectIdentity) -> bool:
+        try:
+            target = os.readlink(leaf, dir_fd=parent_fd)
+        except OSError:
+            return False
+        if not os.path.isabs(target):
+            target = os.path.join(canonical_parent, target)
+        return os.path.normcase(os.path.abspath(target)) in allowed
+
+    return validate
 
 
 def _retire_exact_at(
@@ -1425,16 +1779,27 @@ def _retire_exact_at(
     kind: str,
     *,
     validator=None,
+    symlink_targets: tuple[str, ...] | None = None,
     recover_only: bool = False,
+    discard_recovery: bool = False,
 ) -> bool:
     if os.fstat(parent_fd).st_dev != os.fstat(custody_fd).st_dev:
         raise PublishError("retirement custody must be on the managed object's filesystem")
-    intent, retired = _retirement_names(canonical, expected, kind)
-    document = _retirement_document(canonical, expected, kind)
+    if kind == "symlink":
+        if validator is not None or symlink_targets is None:
+            raise PublishError("symlink retirement proof is invalid")
+        symlink_targets = _normalized_symlink_targets(symlink_targets)
+        validator = _symlink_target_validator(canonical, symlink_targets)
+    elif symlink_targets is not None:
+        raise PublishError("symlink targets are invalid for this retirement kind")
+    intent, retired = _retirement_names(canonical, expected, kind, symlink_targets)
+    duplicate = _retirement_duplicate_name(retired)
+    document = _retirement_document(canonical, expected, kind, symlink_targets)
 
     for _attempt in range(8):
         intent_exists = _read_regular_at(custody_fd, intent, missing_ok=True) is not None
         retired_info = _entry_stat(custody_fd, retired)
+        duplicate_info = _entry_stat(custody_fd, duplicate)
         current = _entry_stat(parent_fd, leaf)
 
         if not intent_exists:
@@ -1444,11 +1809,41 @@ def _retire_exact_at(
                 # missing journal entry and missing canonical name prove
                 # nothing about where that object went.
                 return False
-            if retired_info is not None:
+            if retired_info is not None or duplicate_info is not None:
                 return False
             _ensure_retirement_intent(custody_fd, intent, document, allow_create=True)
             continue
-        _ensure_retirement_intent(custody_fd, intent, document, allow_create=False)
+        _ensure_retirement_intent(
+            custody_fd,
+            intent,
+            document,
+            allow_create=False,
+            allow_discard_recovery=discard_recovery,
+        )
+
+        if retired_info is None and duplicate_info is not None:
+            duplicate_matches = _kind_matches(duplicate_info, kind) and _entry_claim_matches(
+                custody_fd,
+                duplicate,
+                expected,
+            )
+            if duplicate_matches and validator is not None:
+                duplicate_matches = validator(custody_fd, duplicate, expected)
+            if duplicate_matches:
+                try:
+                    _rename_no_replace_between(custody_fd, duplicate, custody_fd, retired)
+                except (FileExistsError, FileNotFoundError):
+                    continue
+                os.fsync(custody_fd)
+                continue
+            if current is None:
+                try:
+                    _rename_no_replace_between(custody_fd, duplicate, parent_fd, leaf)
+                except (FileExistsError, FileNotFoundError):
+                    continue
+                os.fsync(parent_fd)
+                os.fsync(custody_fd)
+            return False
 
         if retired_info is not None:
             retired_matches = _kind_matches(retired_info, kind) and _entry_claim_matches(custody_fd, retired, expected)
@@ -1462,8 +1857,8 @@ def _retire_exact_at(
                         _rename_no_replace_between(custody_fd, retired, parent_fd, leaf)
                     except (FileExistsError, FileNotFoundError):
                         continue
-                    os.fsync(custody_fd)
                     os.fsync(parent_fd)
+                    os.fsync(custody_fd)
                 return False
 
             if validator is not None and not validator(custody_fd, retired, expected):
@@ -1472,28 +1867,58 @@ def _retire_exact_at(
                         _rename_no_replace_between(custody_fd, retired, parent_fd, leaf)
                     except (FileExistsError, FileNotFoundError):
                         continue
-                    os.fsync(custody_fd)
                     os.fsync(parent_fd)
+                    os.fsync(custody_fd)
                 return False
+
+            if duplicate_info is not None:
+                duplicate_matches = _kind_matches(duplicate_info, kind) and _entry_claim_matches(
+                    custody_fd,
+                    duplicate,
+                    expected,
+                )
+                if duplicate_matches and validator is not None:
+                    duplicate_matches = validator(custody_fd, duplicate, expected)
+                if not duplicate_matches:
+                    if current is None:
+                        try:
+                            _rename_no_replace_between(custody_fd, duplicate, parent_fd, leaf)
+                        except (FileExistsError, FileNotFoundError):
+                            continue
+                        os.fsync(parent_fd)
+                        os.fsync(custody_fd)
+                    return False
+                if kind in {"directory", "tree"}:
+                    return False
+                os.unlink(duplicate, dir_fd=custody_fd)
+                os.fsync(custody_fd)
+                continue
 
             if current is None:
                 os.fsync(custody_fd)
                 os.fsync(parent_fd)
                 return True
             if _entry_claim_matches(parent_fd, leaf, expected):
-                return False
+                if kind in {"directory", "tree"}:
+                    return False
+                try:
+                    _rename_no_replace_between(parent_fd, leaf, custody_fd, duplicate)
+                except (FileExistsError, FileNotFoundError):
+                    continue
+                os.fsync(custody_fd)
+                os.fsync(parent_fd)
+                continue
             # The exact object is durably retired and a foreign canonical
             # replacement is preserved in place.
             return True
 
         if current is None:
-            # A durable intent records only the plan.  The claimed object may
-            # have been moved elsewhere between snapshots or immediately
-            # before rename.  Without its exact deterministic retired entry,
-            # completion is unproven and must fail closed.
-            return False
+            # Before discard, an intent alone proves only a plan.  Once the
+            # authenticated discard marker is durable, an absent retired name
+            # is the expected crash-recovery state after its deletion.
+            return discard_recovery
         if not _kind_matches(current, kind) or not _entry_claim_matches(parent_fd, leaf, expected):
-            return False
+            return discard_recovery
         if validator is not None and not validator(parent_fd, leaf, expected):
             return False
         if recover_only or intent_exists:
@@ -1501,8 +1926,8 @@ def _retire_exact_at(
                 _rename_no_replace_between(parent_fd, leaf, custody_fd, retired)
             except (FileExistsError, FileNotFoundError):
                 continue
-            os.fsync(parent_fd)
             os.fsync(custody_fd)
+            os.fsync(parent_fd)
             continue
     raise PublishError("deterministic retirement did not reach a stable state")
 
@@ -1515,40 +1940,41 @@ def _rmdir_exact_at(
     custody_fd: int | None = None,
     canonical: str | None = None,
 ) -> bool:
-    owned_custody = -1
     if custody_fd is None:
         custody_name = ".defenseclaw-install-custody"
-        try:
-            os.mkdir(custody_name, mode=0o700, dir_fd=parent_fd)
-            os.fsync(parent_fd)
-        except FileExistsError:
-            pass
-        owned_custody = os.open(
-            custody_name,
-            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
-            dir_fd=parent_fd,
-        )
-        try:
-            _bind_custody_fd(owned_custody, create=True, label=custody_name)
-        except Exception:
-            os.close(owned_custody)
-            owned_custody = -1
-            raise
-        custody_fd = owned_custody
-    try:
-        key = canonical or leaf
-        return _retire_exact_at(
-            parent_fd,
-            leaf,
-            expected,
-            custody_fd,
-            key,
-            "directory",
-            validator=_directory_is_empty_at,
-        )
-    finally:
-        if owned_custody >= 0:
-            os.close(owned_custody)
+        canonical_path = Path(canonical or "")
+        if not canonical_path.is_absolute():
+            raise PublishError("internal directory retirement requires an absolute canonical path")
+        retirement_root = _default_custody_root(canonical_path)
+        with _hold_custody_parent_lock(parent_fd, retirement_root):
+            _reconcile_custody_locked(retirement_root, parent_fd)
+            owned_custody = _open_custody_leaf_at(
+                parent_fd,
+                custody_name,
+                create=True,
+                label=custody_name,
+            )
+            try:
+                return _retire_exact_at(
+                    parent_fd,
+                    leaf,
+                    expected,
+                    owned_custody,
+                    canonical or leaf,
+                    "directory",
+                    validator=_directory_is_empty_at,
+                )
+            finally:
+                os.close(owned_custody)
+    return _retire_exact_at(
+        parent_fd,
+        leaf,
+        expected,
+        custody_fd,
+        canonical or leaf,
+        "directory",
+        validator=_directory_is_empty_at,
+    )
 
 
 def rmdir_exact(
@@ -1561,19 +1987,23 @@ def rmdir_exact(
 
     if not path.is_absolute() or not path.name or path.name in {".", ".."}:
         raise PublishError(f"fresh-install directory path is unsafe: {path}")
-    parent_fd = _open_directory(path.parent, create=False)
-    custody_fd = _open_custody_root(custody_root or _default_custody_root(path), create=True)
-    try:
-        return _rmdir_exact_at(
-            parent_fd,
-            path.name,
-            expected,
-            custody_fd=custody_fd,
-            canonical=str(path),
-        )
-    finally:
-        os.close(custody_fd)
-        os.close(parent_fd)
+    retirement_root = custody_root or _default_custody_root(path)
+    with ExitStack() as leases:
+        parent_fd = _open_directory(path.parent, create=False)
+        leases.callback(os.close, parent_fd)
+        custody_parent_fd = _open_directory(retirement_root.parent, create=False)
+        leases.callback(os.close, custody_parent_fd)
+        with _hold_custody_parent_lock(custody_parent_fd, retirement_root):
+            _reconcile_custody_locked(retirement_root, custody_parent_fd)
+            custody_fd = _open_custody_root_at(custody_parent_fd, retirement_root, create=True)
+            leases.callback(os.close, custody_fd)
+            return _rmdir_exact_at(
+                parent_fd,
+                path.name,
+                expected,
+                custody_fd=custody_fd,
+                canonical=str(path),
+            )
 
 
 MAX_REMOVE_TREE_NODES = 500_000
@@ -1688,21 +2118,25 @@ def remove_tree_exact(
 
     if not path.is_absolute() or not path.name or path.name in {".", ".."}:
         raise PublishError(f"fresh-install directory path is unsafe: {path}")
-    parent_fd = _open_directory(path.parent, create=False)
-    custody_fd = _open_custody_root(custody_root or _default_custody_root(path), create=True)
-    try:
-        return _retire_exact_at(
-            parent_fd,
-            path.name,
-            expected,
-            custody_fd,
-            str(path),
-            "tree",
-            validator=_tree_has_safe_mounts_at,
-        )
-    finally:
-        os.close(custody_fd)
-        os.close(parent_fd)
+    retirement_root = custody_root or _default_custody_root(path)
+    with ExitStack() as leases:
+        parent_fd = _open_directory(path.parent, create=False)
+        leases.callback(os.close, parent_fd)
+        custody_parent_fd = _open_directory(retirement_root.parent, create=False)
+        leases.callback(os.close, custody_parent_fd)
+        with _hold_custody_parent_lock(custody_parent_fd, retirement_root):
+            _reconcile_custody_locked(retirement_root, custody_parent_fd)
+            custody_fd = _open_custody_root_at(custody_parent_fd, retirement_root, create=True)
+            leases.callback(os.close, custody_fd)
+            return _retire_exact_at(
+                parent_fd,
+                path.name,
+                expected,
+                custody_fd,
+                str(path),
+                "tree",
+                validator=_tree_has_safe_mounts_at,
+            )
 
 
 def publish_symlink(
@@ -1852,39 +2286,43 @@ def _unlink_exact_at(
     *,
     custody_fd: int | None = None,
     canonical: str | None = None,
+    symlink_targets: tuple[str, ...] | None = None,
 ) -> bool:
-    owned_custody = -1
     if custody_fd is None:
         custody_name = ".defenseclaw-install-custody"
-        try:
-            os.mkdir(custody_name, mode=0o700, dir_fd=parent_fd)
-            os.fsync(parent_fd)
-        except FileExistsError:
-            pass
-        owned_custody = os.open(
-            custody_name,
-            os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
-            dir_fd=parent_fd,
-        )
-        try:
-            _bind_custody_fd(owned_custody, create=True, label=custody_name)
-        except Exception:
-            os.close(owned_custody)
-            owned_custody = -1
-            raise
-        custody_fd = owned_custody
-    try:
-        return _retire_exact_at(
-            parent_fd,
-            leaf,
-            expected,
-            custody_fd,
-            canonical or leaf,
-            "entry",
-        )
-    finally:
-        if owned_custody >= 0:
-            os.close(owned_custody)
+        canonical_path = Path(canonical or "")
+        if not canonical_path.is_absolute():
+            raise PublishError("internal entry retirement requires an absolute canonical path")
+        retirement_root = _default_custody_root(canonical_path)
+        with _hold_custody_parent_lock(parent_fd, retirement_root):
+            _reconcile_custody_locked(retirement_root, parent_fd)
+            owned_custody = _open_custody_leaf_at(
+                parent_fd,
+                custody_name,
+                create=True,
+                label=custody_name,
+            )
+            try:
+                return _retire_exact_at(
+                    parent_fd,
+                    leaf,
+                    expected,
+                    owned_custody,
+                    canonical or leaf,
+                    "symlink" if symlink_targets is not None else "entry",
+                    symlink_targets=symlink_targets,
+                )
+            finally:
+                os.close(owned_custody)
+    return _retire_exact_at(
+        parent_fd,
+        leaf,
+        expected,
+        custody_fd,
+        canonical or leaf,
+        "symlink" if symlink_targets is not None else "entry",
+        symlink_targets=symlink_targets,
+    )
 
 
 def unlink_exact(
@@ -1895,19 +2333,55 @@ def unlink_exact(
 ) -> bool:
     """Durably retire only the exact claimed object and preserve replacements."""
 
-    parent_fd = _open_directory(destination.parent, create=False)
-    custody_fd = _open_custody_root(custody_root or _default_custody_root(destination), create=True)
-    try:
-        return _unlink_exact_at(
-            parent_fd,
-            destination.name,
-            expected,
-            custody_fd=custody_fd,
-            canonical=str(destination),
-        )
-    finally:
-        os.close(custody_fd)
-        os.close(parent_fd)
+    retirement_root = custody_root or _default_custody_root(destination)
+    with ExitStack() as leases:
+        parent_fd = _open_directory(destination.parent, create=False)
+        leases.callback(os.close, parent_fd)
+        custody_parent_fd = _open_directory(retirement_root.parent, create=False)
+        leases.callback(os.close, custody_parent_fd)
+        with _hold_custody_parent_lock(custody_parent_fd, retirement_root):
+            _reconcile_custody_locked(retirement_root, custody_parent_fd)
+            custody_fd = _open_custody_root_at(custody_parent_fd, retirement_root, create=True)
+            leases.callback(os.close, custody_fd)
+            return _unlink_exact_at(
+                parent_fd,
+                destination.name,
+                expected,
+                custody_fd=custody_fd,
+                canonical=str(destination),
+            )
+
+
+def unlink_exact_symlink(
+    destination: Path,
+    expected: ObjectIdentity,
+    expected_targets: tuple[str, ...],
+    *,
+    custody_root: Path | None = None,
+) -> bool:
+    """Retire an exact symlink only when its retired target is installer-owned."""
+
+    if not destination.is_absolute() or not destination.name or destination.name in {".", ".."}:
+        raise PublishError(f"symlink retirement path is unsafe: {destination}")
+    targets = _normalized_symlink_targets(expected_targets)
+    retirement_root = custody_root or _default_custody_root(destination)
+    with ExitStack() as leases:
+        parent_fd = _open_directory(destination.parent, create=False)
+        leases.callback(os.close, parent_fd)
+        custody_parent_fd = _open_directory(retirement_root.parent, create=False)
+        leases.callback(os.close, custody_parent_fd)
+        with _hold_custody_parent_lock(custody_parent_fd, retirement_root):
+            _reconcile_custody_locked(retirement_root, custody_parent_fd)
+            custody_fd = _open_custody_root_at(custody_parent_fd, retirement_root, create=True)
+            leases.callback(os.close, custody_fd)
+            return _unlink_exact_at(
+                parent_fd,
+                destination.name,
+                expected,
+                custody_fd=custody_fd,
+                canonical=str(destination),
+                symlink_targets=targets,
+            )
 
 
 def publish_regular(
@@ -2070,57 +2544,438 @@ def rollback_token(value: str) -> None:
         raise PublishError("fresh-install rollback token changed and was preserved")
 
 
-def recover_custody(custody_root: Path) -> None:
-    """Converge durable retirement intents from an interrupted installer."""
+def _read_retirement_intents(
+    custody_fd: int,
+) -> list[tuple[Path, ObjectIdentity, str, str, str, tuple[str, ...] | None]]:
+    documents: list[tuple[Path, ObjectIdentity, str, str, str, tuple[str, ...] | None]] = []
+    with os.scandir(custody_fd) as entries:
+        names = sorted(entry.name for entry in entries if entry.name.startswith("intent-"))
+    for name in names:
+        raw = _read_regular_at(custody_fd, name, missing_ok=False)
+        assert raw is not None
+        try:
+            document = json.loads(raw)
+            if not isinstance(document, dict):
+                raise ValueError
+            schema_version = document.get("schema_version")
+            expected_fields = {"canonical", "identity", "kind", "schema_version"}
+            if schema_version == 2:
+                expected_fields.add("symlink_targets")
+            if set(document) != expected_fields:
+                raise ValueError
+            canonical = Path(document["canonical"])
+            identity = tuple(document["identity"])
+            kind = document["kind"]
+            symlink_targets = None
+            if schema_version == 2:
+                raw_targets = document["symlink_targets"]
+                if not isinstance(raw_targets, list):
+                    raise ValueError
+                symlink_targets = tuple(raw_targets)
+                if symlink_targets != _normalized_symlink_targets(symlink_targets):
+                    raise ValueError
+            intent, retired = _retirement_names(str(canonical), identity, kind, symlink_targets)
+            if (
+                schema_version not in {1, 2}
+                or not canonical.is_absolute()
+                or len(identity) not in {2, 4}
+                or any(not isinstance(value, int) or isinstance(value, bool) for value in identity)
+                or any(value <= 0 for value in identity[:3])
+                or (len(identity) == 4 and not 0 <= identity[3] < 1_000_000_000)
+                or (schema_version == 1 and kind not in {"entry", "directory", "tree"})
+                or (schema_version == 2 and kind != "symlink")
+                or intent != name
+                or raw != _retirement_document(str(canonical), identity, kind, symlink_targets)
+            ):
+                raise ValueError
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise PublishError("retirement custody contains an invalid intent") from exc
+        documents.append((canonical, identity, kind, name, retired, symlink_targets))
+    return documents
 
-    if not custody_root.is_absolute():
-        raise PublishError("retirement custody path must be absolute")
+
+def _recover_retirement_documents(
+    custody_fd: int,
+    documents: list[tuple[Path, ObjectIdentity, str, str, str, tuple[str, ...] | None]],
+    *,
+    discard_recovery: bool = False,
+) -> None:
+    for canonical, identity, kind, _intent, _retired, symlink_targets in sorted(
+        documents,
+        key=lambda item: len(item[0].parts),
+        reverse=True,
+    ):
+        try:
+            parent_fd = _open_directory(canonical.parent, create=False)
+        except PublishError as exc:
+            if "managed directory is missing" in str(exc):
+                duplicate = _retirement_duplicate_name(_retired)
+                duplicate_info = _entry_stat(custody_fd, duplicate)
+                if duplicate_info is None:
+                    continue
+                duplicate_matches = _kind_matches(duplicate_info, kind) and _entry_claim_matches(
+                    custody_fd,
+                    duplicate,
+                    identity,
+                )
+                if duplicate_matches and kind == "symlink":
+                    assert symlink_targets is not None
+                    duplicate_matches = _symlink_target_validator(str(canonical), symlink_targets)(
+                        custody_fd,
+                        duplicate,
+                        identity,
+                    )
+                retired_info = _entry_stat(custody_fd, _retired)
+                retired_matches = (
+                    retired_info is not None
+                    and _kind_matches(
+                        retired_info,
+                        kind,
+                    )
+                    and _entry_claim_matches(custody_fd, _retired, identity)
+                )
+                if duplicate_matches and retired_info is None:
+                    _rename_no_replace_between(custody_fd, duplicate, custody_fd, _retired)
+                    os.fsync(custody_fd)
+                    continue
+                if duplicate_matches and retired_matches and kind not in {"directory", "tree"}:
+                    os.unlink(duplicate, dir_fd=custody_fd)
+                    os.fsync(custody_fd)
+                    continue
+                raise PublishError(f"retirement recovery preserved unresolved state: {canonical}") from exc
+            raise
+        try:
+            validator = None
+            if kind == "directory":
+                validator = _directory_is_empty_at
+            elif kind == "tree":
+                validator = _tree_has_safe_mounts_at
+            if not _retire_exact_at(
+                parent_fd,
+                canonical.name,
+                identity,
+                custody_fd,
+                str(canonical),
+                kind,
+                validator=validator,
+                symlink_targets=symlink_targets,
+                recover_only=True,
+                discard_recovery=discard_recovery,
+            ):
+                raise PublishError(f"retirement recovery preserved unresolved state: {canonical}")
+        finally:
+            os.close(parent_fd)
+
+
+def _read_private_regular_at(
+    parent_fd: int,
+    leaf: str,
+    *,
+    label: str,
+    missing_ok: bool,
+    max_bytes: int = 4096,
+) -> bytes | None:
     try:
-        custody_fd = _open_custody_root(custody_root, create=False)
-    except PublishError as exc:
-        if "managed directory is missing" in str(exc):
-            return
+        descriptor = os.open(
+            leaf,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC,
+            dir_fd=parent_fd,
+        )
+    except FileNotFoundError:
+        if missing_ok:
+            return None
         raise
     try:
-        documents: list[tuple[Path, ObjectIdentity, str, str]] = []
-        with os.scandir(custody_fd) as entries:
-            names = sorted(entry.name for entry in entries if entry.name.startswith("intent-"))
-        for name in names:
-            raw = _read_regular_at(custody_fd, name, missing_ok=False)
-            assert raw is not None
-            try:
-                document = json.loads(raw)
-                if set(document) != {"canonical", "identity", "kind", "schema_version"}:
-                    raise ValueError
-                canonical = Path(document["canonical"])
-                identity = tuple(document["identity"])
-                kind = document["kind"]
-                if (
-                    document["schema_version"] != 1
-                    or not canonical.is_absolute()
-                    or len(identity) not in {2, 4}
-                    or any(not isinstance(value, int) or value <= 0 for value in identity[:3])
-                    or (len(identity) == 4 and not 0 <= identity[3] < 1_000_000_000)
-                    or kind not in {"entry", "directory", "tree"}
-                    or _retirement_names(str(canonical), identity, kind)[0] != name
-                ):
-                    raise ValueError
-            except (TypeError, ValueError, json.JSONDecodeError) as exc:
-                raise PublishError("retirement custody contains an invalid intent") from exc
-            documents.append((canonical, identity, kind, name))
-
-        for canonical, identity, kind, _name in sorted(
-            documents,
-            key=lambda item: len(item[0].parts),
-            reverse=True,
+        metadata = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(metadata.st_mode)
+            or metadata.st_uid != os.geteuid()
+            or stat.S_IMODE(metadata.st_mode) != 0o600
+            or metadata.st_nlink != 1
+            or metadata.st_size > max_bytes
         ):
-            try:
-                parent_fd = _open_directory(canonical.parent, create=False)
-            except PublishError as exc:
-                if "managed directory is missing" in str(exc):
-                    continue
+            raise PublishError(f"{label} is not a private caller-owned regular file")
+        raw = b""
+        while len(raw) < metadata.st_size:
+            chunk = os.read(descriptor, metadata.st_size - len(raw))
+            if not chunk:
+                raise PublishError(f"{label} changed while reading")
+            raw += chunk
+        current = os.fstat(descriptor)
+        if not os.path.samestat(metadata, current) or current.st_size != metadata.st_size:
+            raise PublishError(f"{label} changed while reading")
+        return raw
+    finally:
+        os.close(descriptor)
+
+
+def _publish_private_regular_at(
+    parent_fd: int,
+    leaf: str,
+    content: bytes,
+    *,
+    label: str,
+) -> None:
+    staged = f"{leaf}.stage"
+    existing = _read_private_regular_at(
+        parent_fd,
+        leaf,
+        label=label,
+        missing_ok=True,
+        max_bytes=len(content),
+    )
+    if existing is not None:
+        if existing != content:
+            raise PublishError(f"{label} is invalid")
+        staged_raw = _read_private_regular_at(
+            parent_fd,
+            staged,
+            label=f"{label} staging file",
+            missing_ok=True,
+            max_bytes=len(content),
+        )
+        if staged_raw is not None:
+            os.unlink(staged, dir_fd=parent_fd)
+        os.fsync(parent_fd)
+        return
+
+    staged_raw = _read_private_regular_at(
+        parent_fd,
+        staged,
+        label=f"{label} staging file",
+        missing_ok=True,
+        max_bytes=len(content),
+    )
+    if staged_raw is not None:
+        os.unlink(staged, dir_fd=parent_fd)
+        os.fsync(parent_fd)
+
+    descriptor = os.open(
+        staged,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC,
+        0o600,
+        dir_fd=parent_fd,
+    )
+    try:
+        os.fchmod(descriptor, 0o600)
+        remaining = memoryview(content)
+        while remaining:
+            written = os.write(descriptor, remaining)
+            if written <= 0:
+                raise PublishError(f"{label} write did not progress")
+            remaining = remaining[written:]
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    try:
+        _rename_no_replace_between(parent_fd, staged, parent_fd, leaf)
+    except FileExistsError:
+        existing = _read_private_regular_at(
+            parent_fd,
+            leaf,
+            label=label,
+            missing_ok=False,
+            max_bytes=len(content),
+        )
+        if existing != content:
+            raise PublishError(f"{label} collision was preserved") from None
+        staged_raw = _read_private_regular_at(
+            parent_fd,
+            staged,
+            label=f"{label} staging file",
+            missing_ok=True,
+            max_bytes=len(content),
+        )
+        if staged_raw is not None:
+            os.unlink(staged, dir_fd=parent_fd)
+    os.fsync(parent_fd)
+
+
+def _clear_private_regular_stage_at(parent_fd: int, leaf: str, *, label: str, max_bytes: int) -> None:
+    staged = f"{leaf}.stage"
+    staged_raw = _read_private_regular_at(
+        parent_fd,
+        staged,
+        label=f"{label} staging file",
+        missing_ok=True,
+        max_bytes=max_bytes,
+    )
+    if staged_raw is None:
+        return
+    os.unlink(staged, dir_fd=parent_fd)
+    os.fsync(parent_fd)
+
+
+def _clear_retirement_intent_stages(custody_fd: int) -> None:
+    with os.scandir(custody_fd) as entries:
+        names = sorted(
+            entry.name for entry in entries if entry.name.startswith("intent-") and entry.name.endswith(".json.stage")
+        )
+    for name in names:
+        staged = _read_private_regular_at(
+            custody_fd,
+            name,
+            label="deterministic retirement intent staging file",
+            missing_ok=False,
+            max_bytes=64 * 1024,
+        )
+        assert staged is not None
+        os.unlink(name, dir_fd=custody_fd)
+    if names:
+        os.fsync(custody_fd)
+
+
+def _custody_discard_started(custody_fd: int) -> bool:
+    raw = _read_regular_at(custody_fd, CUSTODY_DISCARD_MARKER, missing_ok=True)
+    if raw is None:
+        return False
+    if raw != CUSTODY_DISCARD_MARKER_CONTENT:
+        raise PublishError("retirement custody discard marker is invalid")
+    return True
+
+
+def _start_custody_discard(custody_fd: int) -> None:
+    _publish_private_regular_at(
+        custody_fd,
+        CUSTODY_DISCARD_MARKER,
+        CUSTODY_DISCARD_MARKER_CONTENT,
+        label="retirement custody discard marker",
+    )
+
+
+def _validate_retired_for_discard(
+    custody_fd: int,
+    canonical: Path,
+    identity: ObjectIdentity,
+    kind: str,
+    retired: str,
+    symlink_targets: tuple[str, ...] | None,
+) -> None:
+    if kind == "tree":
+        raise PublishError("retirement custody contains a directory tree and was preserved")
+    metadata = _entry_stat(custody_fd, retired)
+    if metadata is None:
+        raise PublishError("retirement custody is incomplete and was preserved")
+    if not _kind_matches(metadata, kind) or not _entry_claim_matches(custody_fd, retired, identity):
+        raise PublishError("retirement custody entry changed and was preserved")
+    if kind == "directory" and not _directory_is_empty_at(custody_fd, retired, identity):
+        raise PublishError("retirement custody directory became nonempty and was preserved")
+    if kind == "symlink":
+        assert symlink_targets is not None
+        validator = _symlink_target_validator(str(canonical), symlink_targets)
+        if not validator(custody_fd, retired, identity):
+            raise PublishError("retirement custody symlink target changed and was preserved")
+
+
+def _validate_custody_for_discard(
+    custody_fd: int,
+    *,
+    discard_started: bool,
+) -> list[tuple[Path, ObjectIdentity, str, str, str, tuple[str, ...] | None]]:
+    documents = _read_retirement_intents(custody_fd)
+    members = set(os.listdir(custody_fd))
+    expected = {CUSTODY_MARKER_NAME}
+    if discard_started:
+        expected.add(CUSTODY_DISCARD_MARKER)
+    allowed = set(expected)
+
+    for canonical, identity, kind, intent, retired, symlink_targets in documents:
+        if kind == "tree":
+            raise PublishError("retirement custody contains a directory tree and was preserved")
+        duplicate = _retirement_duplicate_name(retired)
+        expected.add(intent)
+        allowed.add(intent)
+        allowed.add(retired)
+        allowed.add(duplicate)
+        if retired in members:
+            _validate_retired_for_discard(
+                custody_fd,
+                canonical,
+                identity,
+                kind,
+                retired,
+                symlink_targets,
+            )
+        elif not discard_started:
+            raise PublishError("retirement custody is incomplete and was preserved")
+        if duplicate in members:
+            _validate_retired_for_discard(
+                custody_fd,
+                canonical,
+                identity,
+                kind,
+                duplicate,
+                symlink_targets,
+            )
+            raise PublishError("retirement custody contains duplicate-name staging and requires recovery")
+
+    if expected - members or members - allowed:
+        raise PublishError("retirement custody contains unexpected or incomplete state and was preserved")
+    return documents
+
+
+def _converge_discard_duplicates(
+    custody_fd: int,
+    documents: list[tuple[Path, ObjectIdentity, str, str, str, tuple[str, ...] | None]],
+    *,
+    discard_started: bool,
+) -> None:
+    for canonical, identity, kind, _intent, retired, symlink_targets in documents:
+        duplicate = _retirement_duplicate_name(retired)
+        retired_info = _entry_stat(custody_fd, retired)
+        duplicate_info = _entry_stat(custody_fd, duplicate)
+        if retired_info is not None:
+            _validate_retired_for_discard(
+                custody_fd,
+                canonical,
+                identity,
+                kind,
+                retired,
+                symlink_targets,
+            )
+        if duplicate_info is not None:
+            _validate_retired_for_discard(
+                custody_fd,
+                canonical,
+                identity,
+                kind,
+                duplicate,
+                symlink_targets,
+            )
+        if retired_info is None and duplicate_info is not None:
+            _rename_no_replace_between(custody_fd, duplicate, custody_fd, retired)
+            os.fsync(custody_fd)
+            retired_info = _entry_stat(custody_fd, retired)
+            duplicate_info = None
+
+        try:
+            parent_fd = _open_directory(canonical.parent, create=False)
+        except PublishError as exc:
+            if "managed directory is missing" not in str(exc):
                 raise
-            try:
+            if retired_info is not None and duplicate_info is not None:
+                if kind in {"directory", "tree"}:
+                    raise PublishError(f"retirement recovery preserved unresolved state: {canonical}") from exc
+                os.unlink(duplicate, dir_fd=custody_fd)
+                os.fsync(custody_fd)
+            continue
+
+        try:
+            current = _entry_stat(parent_fd, canonical.name)
+            if retired_info is None and duplicate_info is None:
+                current_matches = (
+                    current is not None
+                    and _kind_matches(current, kind)
+                    and _entry_claim_matches(
+                        parent_fd,
+                        canonical.name,
+                        identity,
+                    )
+                )
+                if discard_started and not current_matches:
+                    continue
+                if not current_matches:
+                    raise PublishError(f"retirement recovery preserved unresolved state: {canonical}")
                 validator = None
                 if kind == "directory":
                     validator = _directory_is_empty_at
@@ -2134,13 +2989,457 @@ def recover_custody(custody_root: Path) -> None:
                     str(canonical),
                     kind,
                     validator=validator,
+                    symlink_targets=symlink_targets,
                     recover_only=True,
+                    discard_recovery=discard_started,
                 ):
                     raise PublishError(f"retirement recovery preserved unresolved state: {canonical}")
-            finally:
-                os.close(parent_fd)
+                continue
+            current_matches = (
+                current is not None
+                and _kind_matches(current, kind)
+                and _entry_claim_matches(
+                    parent_fd,
+                    canonical.name,
+                    identity,
+                )
+            )
+            if duplicate_info is None and not current_matches:
+                continue
+            validator = None
+            if kind == "directory":
+                validator = _directory_is_empty_at
+            elif kind == "tree":
+                validator = _tree_has_safe_mounts_at
+            if not _retire_exact_at(
+                parent_fd,
+                canonical.name,
+                identity,
+                custody_fd,
+                str(canonical),
+                kind,
+                validator=validator,
+                symlink_targets=symlink_targets,
+                recover_only=True,
+                discard_recovery=discard_started,
+            ):
+                raise PublishError(f"retirement recovery preserved unresolved state: {canonical}")
+        finally:
+            os.close(parent_fd)
+
+
+def _discard_custody_contents(custody_fd: int) -> None:
+    _clear_private_regular_stage_at(
+        custody_fd,
+        CUSTODY_MARKER_NAME,
+        label="retirement custody binding marker",
+        max_bytes=len(CUSTODY_MARKER),
+    )
+    _clear_retirement_intent_stages(custody_fd)
+    _clear_private_regular_stage_at(
+        custody_fd,
+        CUSTODY_DISCARD_MARKER,
+        label="retirement custody discard marker",
+        max_bytes=len(CUSTODY_DISCARD_MARKER_CONTENT),
+    )
+    discard_started = _custody_discard_started(custody_fd)
+    documents = _read_retirement_intents(custody_fd)
+    _converge_discard_duplicates(
+        custody_fd,
+        documents,
+        discard_started=discard_started,
+    )
+    documents = _validate_custody_for_discard(custody_fd, discard_started=discard_started)
+    if not discard_started:
+        _start_custody_discard(custody_fd)
+        documents = _validate_custody_for_discard(custody_fd, discard_started=True)
+    os.fsync(custody_fd)
+
+    for canonical, identity, kind, _intent, retired, symlink_targets in documents:
+        if _entry_stat(custody_fd, retired) is None:
+            continue
+        _validate_retired_for_discard(
+            custody_fd,
+            canonical,
+            identity,
+            kind,
+            retired,
+            symlink_targets,
+        )
+        # POSIX cannot unlink conditionally by inode.  The mode-0700 custody
+        # boundary and durable discard marker exclude every supported writer
+        # before final deletion; arbitrary same-euid mutation is not a
+        # privilege boundary.
+        if kind == "directory":
+            os.rmdir(retired, dir_fd=custody_fd)
+        else:
+            os.unlink(retired, dir_fd=custody_fd)
+    os.fsync(custody_fd)
+
+    documents = _validate_custody_for_discard(custody_fd, discard_started=True)
+    if any(_entry_stat(custody_fd, document[4]) is not None for document in documents):
+        raise PublishError("retirement custody changed while discarding and was preserved")
+    for canonical, identity, kind, intent, _retired, symlink_targets in documents:
+        expected = _retirement_document(str(canonical), identity, kind, symlink_targets)
+        if _read_regular_at(custody_fd, intent, missing_ok=False) != expected:
+            raise PublishError("retirement custody intent changed and was preserved")
+        os.unlink(intent, dir_fd=custody_fd)
+    os.fsync(custody_fd)
+
+    remaining = set(os.listdir(custody_fd))
+    if remaining != {CUSTODY_MARKER_NAME, CUSTODY_DISCARD_MARKER}:
+        raise PublishError("retirement custody changed while discarding and was preserved")
+    if not _custody_discard_started(custody_fd):
+        raise PublishError("retirement custody discard marker disappeared")
+    binding = _read_regular_at(custody_fd, CUSTODY_MARKER_NAME, missing_ok=False)
+    if binding != CUSTODY_MARKER:
+        raise PublishError("retirement custody binding marker changed and was preserved")
+
+
+def _custody_close_name(custody_root: Path) -> str:
+    return f"{custody_root.name}{CUSTODY_CLOSE_SUFFIX}"
+
+
+def _custody_close_document(custody_root: Path, root_identity: StrongIdentity) -> bytes:
+    return (
+        json.dumps(
+            {
+                "custody": str(custody_root),
+                "identity": list(root_identity),
+                "schema_version": 1,
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode()
+
+
+def _validate_custody_close_parent(parent_fd: int, custody_root: Path) -> None:
+    _validate_custody_lifecycle_parent(parent_fd, custody_root)
+
+
+def _read_custody_close_intent(parent_fd: int, custody_root: Path) -> StrongIdentity | None:
+    raw = _read_private_regular_at(
+        parent_fd,
+        _custody_close_name(custody_root),
+        label="retirement custody close intent",
+        missing_ok=True,
+    )
+    if raw is None:
+        return None
+    try:
+        document = json.loads(raw)
+        if not isinstance(document, dict) or set(document) != {"custody", "identity", "schema_version"}:
+            raise ValueError
+        identity = tuple(document["identity"])
+        if (
+            document["schema_version"] != 1
+            or document["custody"] != str(custody_root)
+            or len(identity) != 4
+            or any(not isinstance(value, int) or isinstance(value, bool) for value in identity)
+            or any(value <= 0 for value in identity[:3])
+            or not 0 <= identity[3] < 1_000_000_000
+            or raw != _custody_close_document(custody_root, identity)
+        ):
+            raise ValueError
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        raise PublishError("retirement custody close intent is invalid") from exc
+    return identity
+
+
+def _ensure_custody_close_intent(
+    parent_fd: int,
+    custody_root: Path,
+    root_identity: StrongIdentity,
+) -> None:
+    document = _custody_close_document(custody_root, root_identity)
+    _publish_private_regular_at(
+        parent_fd,
+        _custody_close_name(custody_root),
+        document,
+        label="retirement custody close intent",
+    )
+    if _read_custody_close_intent(parent_fd, custody_root) != root_identity:
+        raise PublishError("retirement custody close intent changed after publication")
+
+
+def _remove_custody_close_intent(
+    parent_fd: int,
+    custody_root: Path,
+    root_identity: StrongIdentity,
+) -> None:
+    if _read_custody_close_intent(parent_fd, custody_root) != root_identity:
+        raise PublishError("retirement custody close intent changed and was preserved")
+    os.unlink(_custody_close_name(custody_root), dir_fd=parent_fd)
+    os.fsync(parent_fd)
+
+
+def _finish_custody_close(
+    parent_fd: int,
+    custody_fd: int,
+    custody_root: Path,
+    root_identity: StrongIdentity,
+) -> None:
+    members = set(os.listdir(custody_fd))
+    allowed = {CUSTODY_MARKER_NAME, CUSTODY_DISCARD_MARKER}
+    if members - allowed:
+        raise PublishError("retirement custody changed while closing and was preserved")
+    if CUSTODY_DISCARD_MARKER in members and not _custody_discard_started(custody_fd):
+        raise PublishError("retirement custody discard marker changed and was preserved")
+    if CUSTODY_MARKER_NAME in members:
+        binding = _read_regular_at(custody_fd, CUSTODY_MARKER_NAME, missing_ok=False)
+        if binding != CUSTODY_MARKER:
+            raise PublishError("retirement custody binding marker changed and was preserved")
+    if CUSTODY_MARKER_NAME in members:
+        os.unlink(CUSTODY_MARKER_NAME, dir_fd=custody_fd)
+    os.fsync(custody_fd)
+    if CUSTODY_DISCARD_MARKER in members:
+        os.unlink(CUSTODY_DISCARD_MARKER, dir_fd=custody_fd)
+    os.fsync(custody_fd)
+    if os.listdir(custody_fd) or _entry_strong_identity(parent_fd, custody_root.name) != root_identity:
+        raise PublishError("retirement custody root changed while closing and was preserved")
+    os.rmdir(custody_root.name, dir_fd=parent_fd)
+    os.fsync(parent_fd)
+
+
+def arm_custody_discard(custody_root: Path, managed_parent: Path) -> None:
+    """Durably bind cleanup provenance before retiring the first managed name."""
+
+    prepare_custody(custody_root, managed_parent)
+    parent_fd = _open_directory(custody_root.parent, create=False)
+    custody_fd = -1
+    try:
+        _validate_custody_close_parent(parent_fd, custody_root)
+        with _hold_custody_parent_lock(parent_fd, custody_root):
+            _reconcile_custody_locked(custody_root, parent_fd)
+            custody_fd = _open_custody_root_at(parent_fd, custody_root, create=True)
+            root_identity = _strong_identity(custody_fd)
+            _ensure_custody_close_intent(parent_fd, custody_root, root_identity)
+    finally:
+        if custody_fd >= 0:
+            os.close(custody_fd)
+        os.close(parent_fd)
+
+
+def _discard_custody_locked(custody_root: Path, parent_fd: int) -> None:
+    custody_fd = -1
+    try:
+        _validate_custody_close_parent(parent_fd, custody_root)
+        try:
+            custody_fd = os.open(
+                custody_root.name,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=parent_fd,
+            )
+        except FileNotFoundError:
+            closing_identity = _read_custody_close_intent(parent_fd, custody_root)
+            if closing_identity is not None:
+                _remove_custody_close_intent(parent_fd, custody_root, closing_identity)
+            return
+        root_identity = _strong_identity(custody_fd)
+        metadata = os.fstat(custody_fd)
+        if (
+            metadata.st_uid != os.geteuid()
+            or metadata.st_mode & 0o077
+            or _entry_strong_identity(parent_fd, custody_root.name) != root_identity
+        ):
+            raise PublishError(f"retirement custody is not private and caller-owned: {custody_root}")
+        closing_identity = _read_custody_close_intent(parent_fd, custody_root)
+        if closing_identity is not None:
+            _ensure_custody_close_intent(parent_fd, custody_root, closing_identity)
+        if closing_identity is not None and closing_identity != root_identity:
+            raise PublishError("retirement custody root changed while opening and was preserved")
+        members = set(os.listdir(custody_fd))
+        if CUSTODY_MARKER_NAME in members:
+            _bind_custody_fd(custody_fd, create=False, label=str(custody_root))
+            if closing_identity is None:
+                _ensure_custody_close_intent(parent_fd, custody_root, root_identity)
+            _discard_custody_contents(custody_fd)
+        elif closing_identity is None:
+            raise PublishError("retirement custody has no durable binding or close intent")
+        _finish_custody_close(parent_fd, custody_fd, custody_root, root_identity)
+        _remove_custody_close_intent(parent_fd, custody_root, root_identity)
+    finally:
+        if custody_fd >= 0:
+            os.close(custody_fd)
+
+
+def discard_custody(custody_root: Path) -> None:
+    """Delete only closed, exact retirement records from private custody."""
+
+    if os.name == "nt":
+        raise PublishError("retirement custody discard is unsupported on Windows")
+    if not custody_root.is_absolute() or not custody_root.name or custody_root.name in {".", ".."}:
+        raise PublishError(f"retirement custody path is unsafe: {custody_root}")
+    try:
+        parent_fd = _open_directory(custody_root.parent, create=False)
+    except PublishError as exc:
+        if "managed directory is missing" in str(exc):
+            return
+        raise
+    try:
+        with _hold_custody_parent_lock(parent_fd, custody_root):
+            _discard_custody_locked(custody_root, parent_fd)
+    finally:
+        os.close(parent_fd)
+
+
+def _custody_cleanup_phase(custody_root: Path) -> str | None:
+    if os.name == "nt" or not custody_root.is_absolute() or not custody_root.name:
+        return None
+    try:
+        parent_fd = _open_directory(custody_root.parent, create=False)
+    except PublishError as exc:
+        if "managed directory is missing" in str(exc):
+            return None
+        raise
+    custody_fd = -1
+    try:
+        closing_identity = _read_custody_close_intent(parent_fd, custody_root)
+        try:
+            custody_fd = os.open(
+                custody_root.name,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                dir_fd=parent_fd,
+            )
+        except FileNotFoundError:
+            if closing_identity is None:
+                return None
+            _validate_custody_close_parent(parent_fd, custody_root)
+            return "closing"
+        binding = _read_regular_at(custody_fd, CUSTODY_MARKER_NAME, missing_ok=True)
+        if binding is None and closing_identity is None:
+            return None
+        metadata = os.fstat(custody_fd)
+        root_identity = _strong_identity(custody_fd)
+        if (
+            metadata.st_uid != os.geteuid()
+            or metadata.st_mode & 0o077
+            or _entry_strong_identity(parent_fd, custody_root.name) != root_identity
+            or (closing_identity is not None and closing_identity != root_identity)
+        ):
+            raise PublishError("retirement custody cleanup identity changed and was preserved")
+        if binding is None:
+            _validate_custody_close_parent(parent_fd, custody_root)
+            return "closing"
+        _bind_custody_fd(custody_fd, create=False, label=str(custody_root))
+        members = set(os.listdir(custody_fd))
+        discard_started = CUSTODY_DISCARD_MARKER in members
+        if not discard_started and closing_identity is None:
+            return None
+        _validate_custody_close_parent(parent_fd, custody_root)
+        if discard_started:
+            if not _custody_discard_started(custody_fd):
+                raise PublishError("retirement custody discard marker is invalid")
+            return "discarding"
+        return "armed"
+    finally:
+        if custody_fd >= 0:
+            os.close(custody_fd)
+        os.close(parent_fd)
+
+
+def inspect_custody_cleanup(custody_root: Path) -> str | None:
+    """Return authenticated cleanup state and surface malformed candidates."""
+
+    if os.name == "nt" or not custody_root.is_absolute() or not custody_root.name:
+        return None
+    try:
+        parent_fd = _open_directory(custody_root.parent, create=False)
+    except PublishError as exc:
+        if "managed directory is missing" in str(exc):
+            return None
+        raise
+    try:
+        with _hold_custody_parent_lock(parent_fd, custody_root):
+            return _custody_cleanup_phase(custody_root)
+    finally:
+        os.close(parent_fd)
+
+
+def custody_cleanup_armed(custody_root: Path) -> bool:
+    try:
+        return _custody_cleanup_phase(custody_root) == "armed"
+    except (OSError, PublishError):
+        return False
+
+
+def custody_discard_pending(custody_root: Path) -> bool:
+    """Return true for an authenticated discard or root-close phase."""
+
+    try:
+        return _custody_cleanup_phase(custody_root) in {"discarding", "closing"}
+    except (OSError, PublishError):
+        return False
+
+
+def custody_discardable(custody_root: Path) -> bool:
+    """Return true when every current custody member has exact deletion proof."""
+
+    try:
+        custody_fd = _open_custody_root(custody_root, create=False)
+    except (OSError, PublishError):
+        return False
+    try:
+        discard_started = _custody_discard_started(custody_fd)
+        _validate_custody_for_discard(custody_fd, discard_started=discard_started)
+        return True
+    except (OSError, PublishError):
+        return False
     finally:
         os.close(custody_fd)
+
+
+def custody_is_bound(custody_root: Path) -> bool:
+    """Return true only for a private custody root with our durable marker."""
+
+    try:
+        custody_fd = _open_custody_root(custody_root, create=False)
+    except (OSError, PublishError):
+        return False
+    os.close(custody_fd)
+    return True
+
+
+def recover_custody(custody_root: Path) -> None:
+    """Converge durable retirement intents from an interrupted installer."""
+
+    if not custody_root.is_absolute():
+        raise PublishError("retirement custody path must be absolute")
+    try:
+        custody_parent_fd = _open_directory(custody_root.parent, create=False)
+    except PublishError as exc:
+        if "managed directory is missing" in str(exc):
+            return
+        raise
+    try:
+        with _hold_custody_parent_lock(custody_parent_fd, custody_root):
+            phase = _custody_cleanup_phase(custody_root)
+            if phase in {"discarding", "closing"}:
+                _discard_custody_locked(custody_root, custody_parent_fd)
+                return
+            try:
+                custody_fd = _open_custody_root_at(custody_parent_fd, custody_root, create=False)
+            except PublishError as exc:
+                if "managed directory is missing" in str(exc):
+                    return
+                raise
+            try:
+                _clear_private_regular_stage_at(
+                    custody_fd,
+                    CUSTODY_MARKER_NAME,
+                    label="retirement custody binding marker",
+                    max_bytes=len(CUSTODY_MARKER),
+                )
+                _clear_retirement_intent_stages(custody_fd)
+                documents = _read_retirement_intents(custody_fd)
+
+                _recover_retirement_documents(custody_fd, documents)
+            finally:
+                os.close(custody_fd)
+    finally:
+        os.close(custody_parent_fd)
 
 
 def _parse_strong_identity(value: str) -> StrongIdentity:

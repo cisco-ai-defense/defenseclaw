@@ -5606,6 +5606,49 @@ def _record_doctor_action(app: AppContext, cfg, r: _DoctorResult, mode: str) -> 
         return
 
 
+def _check_credential_protection(cfg, r: _DoctorResult) -> None:
+    from defenseclaw.credential_protection import (
+        mcp_connector_status,
+        mcp_reconciliation_failed,
+        remediation,
+        safe_status,
+    )
+
+    enabled = bool(getattr(getattr(cfg, "credential_protection", None), "enabled", False))
+    if not enabled:
+        _emit(
+            "skip",
+            "Credential broker",
+            "disabled; enable with 'defenseclaw setup credential-protection --yes'",
+            r=r,
+        )
+        return
+
+    status = safe_status(cfg.data_dir, enabled=True)
+    if status["ready"]:
+        version = f"s-gw {status['version']}" if status.get("version") else "s-gw ready"
+        registrations = mcp_connector_status(cfg)
+        failed = mcp_reconciliation_failed(registrations) or any(
+            item.get("mcp_registration") == "missing" for item in registrations
+        )
+        detail = ", ".join(f"{item['connector']}={item['mcp_registration']}" for item in registrations)
+        if failed:
+            _emit(
+                "fail",
+                "Credential broker",
+                f"{version}; MCP {detail}; run 'defenseclaw setup credential-protection --yes'",
+                r=r,
+            )
+            return
+        if any(item.get("mcp_registration") in {"manual", "unsupported"} for item in registrations):
+            _emit("warn", "Credential broker", f"{version}; MCP {detail}", r=r)
+            return
+        _emit("pass", "Credential broker", f"{version}; MCP {detail}" if detail else version, r=r)
+        return
+
+    reason = str(status.get("error_code") or status.get("state") or "unavailable").replace("_", " ")
+    _emit("fail", "Credential broker", f"{reason}; {remediation(status)}", r=r)
+
 @click.command()
 @click.option(
     "--json-output",
@@ -5893,6 +5936,7 @@ def doctor(
     if not json_out:
         _doctor_subsection("Credentials")
     r.set_section("credentials")
+    _check_credential_protection(cfg, r)
     _check_llm_api_key(cfg, r)
     _check_llm_reachable(cfg, r)
     _check_regional_provider_config(cfg, r)

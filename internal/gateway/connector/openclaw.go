@@ -45,22 +45,16 @@ var openClawExtensionFS embed.FS
 // openClawPluginRoot names the root directory inside openClawExtensionFS.
 const openClawPluginRoot = "openclaw_extension"
 
-// openClawPlaceholderName is the marker file the Makefile drops into
-// openclaw_extension/ when extensions/defenseclaw/dist is missing at
-// build time. Its presence means this gateway binary was built without
-// the OpenClaw plugin (e.g. because the operator never ran
-// `make extensions`/`make plugin`), and so OpenClaw setup must fail
-// with a clear error rather than installing a non-functional shell.
-// Other connectors (zeptoclaw, codex, claudecode) don't touch this
-// embed at all and remain fully usable.
+// openClawPlaceholderName is the tracked marker that keeps the embedded
+// directory present in a fresh checkout. Generated bundles retain it so a
+// build does not delete a tracked file; package.json is the availability
+// signal. Other connectors don't use this embed.
 const openClawPlaceholderName = ".placeholder"
 
 // openClawExtensionAvailable returns true when the embedded OpenClaw
-// extension contains the runtime files (package.json, dist/, etc.) and
-// false when it only contains the build-time placeholder marker. This
-// lets the gateway boot cleanly for non-OpenClaw operators while still
-// failing loudly when someone tries to switch to OpenClaw without
-// having built the plugin.
+// extension contains its package manifest. A source checkout with only the
+// tracked placeholder returns false, so the gateway boots for non-OpenClaw
+// operators but refuses to install a missing plugin.
 func openClawExtensionAvailable() bool {
 	// embed.FS always uses forward-slash paths; filepath.Join would emit
 	// backslashes on Windows and never match the embedded entries, so use

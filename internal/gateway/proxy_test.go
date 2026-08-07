@@ -1633,6 +1633,7 @@ func TestHandlePassthrough_AuthRejection(t *testing.T) {
 	prov := &mockProvider{}
 	insp := newMockInspector()
 	proxy := newTestProxy(t, prov, insp, "action")
+	allowRawForwardPrivateTargets(proxy)
 	proxy.gatewayToken = "secret-token"
 	proxy.skipAuthForTest = false
 
@@ -1857,6 +1858,7 @@ func TestHandlePassthrough_NonStreamingForward(t *testing.T) {
 	prov := &mockProvider{}
 	insp := newMockInspector()
 	proxy := newTestProxy(t, prov, insp, "observe")
+	allowRawForwardPrivateTargets(proxy)
 
 	body := mustJSON(t, map[string]interface{}{
 		"model":    "claude-opus-4-5",
@@ -1918,6 +1920,7 @@ func TestHandlePassthrough_ResponseBlock(t *testing.T) {
 		Reason:   "dangerous content",
 	})
 	proxy := newTestProxy(t, prov, insp, "action")
+	allowRawForwardPrivateTargets(proxy)
 
 	origDomains := providerDomains
 	providerDomains = append(providerDomains, struct {
@@ -2081,7 +2084,14 @@ func TestScrubURLSecrets(t *testing.T) {
 		{"token param", "https://example.com?token=abc123", "https://example.com?token=%3Credacted%3E"},
 		{"encoded token param", "https://example.com?tok%65n=abc123", "https://example.com?tok%65n=%3Credacted%3E"},
 		{"no sensitive params", "https://api.openai.com?model=gpt-4", "https://api.openai.com?model=gpt-4"},
+		{"userinfo", "https://user:password@example.com/path", "https://example.com/path"},
+		{"case-insensitive token", "https://example.com?TOKEN=abc123", "https://example.com?TOKEN=%3Credacted%3E"},
+		{"fragment", "https://example.com/path#access_token=fragment-secret", "https://example.com/path"},
+		{"trailing query marker", "https://example.com/path?", "https://example.com/path"},
+		{"userinfo query fragment", "https://user:password@example.com:8443/a%2Fb?request_id=query-secret#fragment-secret", "https://example.com:8443/a%2Fb?request_id=%3Credacted%3E"},
+		{"empty", "", ""},
 		{"invalid url", "://bad?token=secret", "<unparseable-url>"},
+		{"relative credential-like value", "token=topsecret", "<unparseable-url>"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2378,6 +2388,7 @@ func TestStreamBufferingPassthrough(t *testing.T) {
 	prov := &mockProvider{}
 	insp := newMockInspector()
 	proxy := newTestProxy(t, prov, insp, "action")
+	allowRawForwardPrivateTargets(proxy)
 	proxy.cfg.StreamBufferBytes = 2
 
 	body := mustJSON(t, map[string]interface{}{
@@ -2438,6 +2449,7 @@ func TestStreamBufferingBlock(t *testing.T) {
 		Reason:   "unsafe completion",
 	})
 	proxy := newTestProxy(t, prov, insp, "action")
+	allowRawForwardPrivateTargets(proxy)
 	proxy.cfg.StreamBufferBytes = 4
 
 	body := mustJSON(t, map[string]interface{}{
@@ -2487,6 +2499,7 @@ func TestStreamBufferingPassthroughFlushesBufferedEOF(t *testing.T) {
 	prov := &mockProvider{}
 	insp := newMockInspector()
 	proxy := newTestProxy(t, prov, insp, "action")
+	allowRawForwardPrivateTargets(proxy)
 	proxy.cfg.StreamBufferBytes = 1024
 
 	body := mustJSON(t, map[string]interface{}{

@@ -40,6 +40,22 @@ jobs:
       # check does not pin or preselect the next release number.
       - run: make check-version-sync
 
+  sgw-module:
+    name: s-gw Module Contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: third_party/s-gw/upstream/package-lock.json
+      - run: make sgw-module-audit
+      - run: make sgw-module-check
+
   upgrade-manifest:
     name: Upgrade Manifest Check
     runs-on: ubuntu-latest

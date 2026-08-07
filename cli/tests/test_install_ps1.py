@@ -237,6 +237,18 @@ if ($LASTEXITCODE -ne 0) {{ throw "help exited $LASTEXITCODE" }}
                 "STARTGATEWAY=0",
             ],
         ),
+        (
+            "-Connector codex -Yes -Quickstart -NoCredentialProtection",
+            [
+                "/quiet",
+                "/norestart",
+                "INSTALLSCOPE=user",
+                "CONNECTOR=codex",
+                "MODE=observe",
+                "STARTGATEWAY=1",
+                "CREDENTIALPROTECTION=0",
+            ],
+        ),
         ("", ["/norestart", "INSTALLSCOPE=user"]),
     ],
 )
