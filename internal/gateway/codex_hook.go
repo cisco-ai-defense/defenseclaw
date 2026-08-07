@@ -292,8 +292,9 @@ func (a *APIServer) dispatchCodexHookNotification(req codexHookRequest, action, 
 	}
 	// Honor the cloud-controlled per-inspection redaction policy
 	// (all-sinks scope, managed_enterprise only) when a caller passes
-	// one; otherwise default to the historical ForSinkReason behavior.
-	safeReason := redaction.ReasonForSink(reason, notificationSinkPolicy(policy))
+	// one; otherwise keep compatibility redaction while allowing exact
+	// compiled-in rule metadata through for operator triage.
+	safeReason := notificationDisplayReason(reason, notificationSinkPolicy(policy))
 	base := notifier.BlockEvent{
 		Source:       notifier.SourceHook,
 		Target:       target,
@@ -385,7 +386,7 @@ func codexResponseFor(event, action, rawAction, severity, reason string, finding
 	if rawAction == "" {
 		rawAction = action
 	}
-	safeReason := redaction.ReasonForAgent(reason)
+	safeReason := agentDisplayReason(reason)
 	additional := codexAdditionalContext(rawAction, severity, safeReason, wouldBlock)
 	resp := codexHookResponse{
 		Action:            action,

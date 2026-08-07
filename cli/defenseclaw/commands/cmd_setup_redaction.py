@@ -1346,6 +1346,8 @@ def _render_buckets(buckets) -> None:
 
 def _render_preview(preview) -> None:
     click.echo("\nRedaction policy preview")
+    click.echo("  Scope: configurable observability log/trace projections only")
+    click.echo("  OS notifications and agent hook responses retain separate safety redaction")
     click.echo(f"  Effective legs changed: {len(preview.changes)}")
     click.echo(f"  Newly unredacted: {preview.newly_unredacted}")
     click.echo(f"  No longer unredacted: {preview.no_longer_unredacted}")
