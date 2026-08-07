@@ -232,6 +232,15 @@ def _safe_mtime(path: str | None) -> float | None:
     help="(no subcommand) Add every locally-detected hook connector to the batch.",
 )
 @click.option(
+    "--add-detected",
+    "batch_add_detected",
+    is_flag=True,
+    help=(
+        "(no subcommand) Add newly detected hook connectors without removing or "
+        "changing existing connectors. New connectors use --mode."
+    ),
+)
+@click.option(
     "--all",
     "batch_all",
     is_flag=True,
@@ -264,6 +273,7 @@ def setup(
     ctx: click.Context,
     batch_connectors: tuple[str, ...],
     batch_detected: bool,
+    batch_add_detected: bool,
     batch_all: bool,
     batch_mode: str,
     batch_restart: bool,
@@ -288,6 +298,8 @@ def setup(
       batch mode / optional judge connector pickers. For scripting, select
       connectors with repeatable '-c/--connector', '--detected', and/or
       '--all' (e.g. 'defenseclaw setup -c hermes -c codex --mode action').
+      Use '--add-detected --yes' to add newly installed connectors in observe
+      mode without changing the existing active roster or its modes.
     """
     # Snapshot config.yaml's mtime before the subcommand runs. The
     # result callback below (``_auto_restart_sidecar_after_setup``)
@@ -299,9 +311,9 @@ def setup(
     if ctx.invoked_subcommand is not None:
         # A subcommand (setup codex, setup guardrail, …) will run; the
         # group-level batch flags only apply to the bare `setup` form.
-        if batch_connectors or batch_detected or batch_all:
+        if batch_connectors or batch_detected or batch_add_detected or batch_all:
             click.echo(
-                "  ⚠ --connector/--detected/--all are ignored when a setup "
+                "  ⚠ --connector/--detected/--add-detected/--all are ignored when a setup "
                 "subcommand is given; use them with bare `defenseclaw setup`.",
                 err=True,
             )
@@ -314,6 +326,7 @@ def setup(
         ctx.find_object(AppContext),
         connectors=list(batch_connectors),
         detected=batch_detected,
+        add_detected=batch_add_detected,
         all_connectors=batch_all,
         mode=batch_mode,
         restart=batch_restart,
@@ -6431,6 +6444,7 @@ def _dispatch_bare_setup(
     *,
     connectors: list[str],
     detected: bool,
+    add_detected: bool,
     all_connectors: bool,
     mode: str,
     restart: bool,
@@ -6438,15 +6452,19 @@ def _dispatch_bare_setup(
 ) -> None:
     """Resolve and apply the bare-``setup`` target set (SU-11, Hybrid C).
 
-    Scripting flags (``-c/--connector``, ``--detected``, ``--all``) select the
-    batch non-interactively; with no flags and a TTY this launches the
-    interactive picker. With no flags on a non-interactive stream it falls back
-    to printing the group help — preserving the pre-SU-11 bare-``setup``
-    behavior in CI / pipelines so nothing hangs on stdin.
+    Scripting flags (``-c/--connector``, ``--detected``, ``--add-detected``,
+    ``--all``) select the batch non-interactively; with no flags and a TTY this
+    launches the interactive picker. With no flags on a non-interactive stream
+    it falls back to printing the group help — preserving the pre-SU-11
+    bare-``setup`` behavior in CI / pipelines so nothing hangs on stdin.
     """
     if app is None or getattr(app, "cfg", None) is None:
         click.echo(ctx.get_help())
         return
+    if add_detected and (connectors or detected or all_connectors):
+        raise click.UsageError(
+            "--add-detected cannot be combined with --connector, --detected, or --all"
+        )
 
     targets: list[str] = []
 
@@ -6468,6 +6486,29 @@ def _dispatch_bare_setup(
 
     for raw in connectors:
         _add(raw)
+    if add_detected:
+        active = {
+            normalize_connector(str(name))
+            for name in app.cfg.active_connectors()
+            if str(name).strip()
+        }
+        for c in _detect_installed_connectors():
+            if (
+                c not in active
+                and c in _HOOK_ENFORCED_CONNECTORS
+                and platform_support.connector_supported_on_os(c)
+            ):
+                _add(c)
+        if not targets:
+            click.echo("  No newly detected hook connectors to add.")
+            return
+        active_proxies = sorted(name for name in active if platform_support.is_proxy_connector(name))
+        if active_proxies:
+            click.echo(
+                "  Detected hook connectors were not added because the active proxy connector "
+                f"({', '.join(active_proxies)}) cannot share the multi-connector hook path."
+            )
+            return
     if detected:
         for c in _detect_installed_connectors():
             if c in _HOOK_ENFORCED_CONNECTORS and platform_support.connector_supported_on_os(c):
@@ -6509,7 +6550,8 @@ def _dispatch_bare_setup(
             if configure_model:
                 _prompt_judge_model_config(app, gc)
 
-    _reconcile_batch_active_connectors(app.cfg, targets)
+    if not add_detected:
+        _reconcile_batch_active_connectors(app.cfg, targets)
     _apply_setup_batch(
         ctx,
         app,

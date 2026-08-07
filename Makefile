@@ -202,6 +202,9 @@ path: _source-install-preflight
 # Run the freshly-installed CLI binary directly so a stale shell PATH
 # doesn't invoke an older `defenseclaw` still sitting earlier in PATH.
 # The CLI handles its own idempotence, so repeated `make all` is safe.
+# When no TTY is available, the follow-up additive setup observes only newly
+# detected hook connectors, preserves existing modes, and restarts the gateway
+# only when it actually adds a connector.
 quickstart: _source-install-preflight
 	@profile="$${PROFILE:-observe}"; \
 	if [ "$${NO_QUICKSTART:-0}" = "1" ]; then \
@@ -241,6 +244,10 @@ quickstart: _source-install-preflight
 				--scanner-mode "$${SCANNER_MODE:-local}" \
 				--no-start-gateway --verify; then \
 				echo "  Quickstart reported errors — run 'defenseclaw doctor' to investigate"; \
+				exit 1; \
+			fi; \
+			if ! "$$dc_bin" setup --add-detected --yes --restart; then \
+				echo "  Could not add newly detected connectors — run 'defenseclaw agent discover --refresh' to investigate"; \
 				exit 1; \
 			fi; \
 		fi; \

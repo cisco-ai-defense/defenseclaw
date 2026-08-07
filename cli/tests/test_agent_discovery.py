@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import plistlib
 import stat
 import subprocess
 import sys
@@ -63,6 +64,20 @@ def _pin_home(monkeypatch, tmp_path: Path) -> None:
 def windows_host_no_path(monkeypatch) -> None:
     monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
     monkeypatch.setattr(ad, "_is_windows_host", lambda: True)
+
+
+@pytest.fixture
+def macos_host_no_path(monkeypatch, isolate_macos_application_discovery) -> None:
+    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(ad, "_is_macos_host", lambda: True)
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: False)
+
+
+@pytest.fixture(autouse=True)
+def isolate_macos_application_discovery(monkeypatch) -> None:
+    """Keep unit scans independent of applications installed on the test Mac."""
+
+    monkeypatch.setattr(ad, "_is_macos_host", lambda: False)
 
 
 @pytest.fixture(autouse=True)
@@ -480,6 +495,66 @@ def test_antigravity_gui_fallback_reads_metadata_without_launch(
     assert signal.binary_path == str(gui)
     assert signal.config_path == ""
     assert signal.version == "2.2.1"
+
+
+def test_cursor_macos_app_fallback_reads_metadata_without_launch(
+    monkeypatch,
+    tmp_path,
+    macos_host_no_path,
+):
+    _pin_home(monkeypatch, tmp_path)
+    applications = tmp_path / "Applications"
+    bundle = applications / "Cursor.app"
+    binary = bundle / "Contents" / "Resources" / "app" / "bin" / "cursor"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"test executable")
+    info_path = bundle / "Contents" / "Info.plist"
+    with info_path.open("wb") as stream:
+        plistlib.dump(
+            {
+                "CFBundleName": "Cursor",
+                "CFBundleShortVersionString": "3.13.25",
+            },
+            stream,
+        )
+    monkeypatch.setattr(ad, "_macos_application_roots", lambda: (applications,))
+    monkeypatch.setattr(
+        ad.subprocess,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("Cursor was launched")),
+    )
+
+    signal = ad._scan_agent("cursor", require_trusted_binary_paths=True)
+
+    assert signal.installed is True
+    assert signal.binary_path == str(binary)
+    assert signal.version == "3.13.25"
+    assert signal.error == ""
+
+
+def test_cursor_standalone_agent_alias_is_detected(monkeypatch, tmp_path):
+    _pin_home(monkeypatch, tmp_path)
+    binary = tmp_path / "bin" / "cursor-agent"
+    binary.parent.mkdir()
+    binary.write_bytes(b"test executable")
+    monkeypatch.setattr(
+        ad.shutil,
+        "which",
+        lambda name: str(binary) if name == "cursor-agent" else None,
+    )
+    monkeypatch.setattr(
+        ad,
+        "_version_for_agent_binary",
+        lambda name, path, _args, **_kwargs: (
+            ("3.13.25", "") if name == "cursor" and path == str(binary) else ("", "bad")
+        ),
+    )
+
+    signal = ad._scan_agent("cursor")
+
+    assert signal.installed is True
+    assert signal.binary_path == str(binary)
+    assert signal.version == "3.13.25"
 
 
 def test_antigravity_windows_roots_are_narrow_trusted_prefixes(monkeypatch, tmp_path):

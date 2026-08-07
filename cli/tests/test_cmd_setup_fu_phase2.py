@@ -741,6 +741,64 @@ class TestBareSetupBatch(_BaseSetup):
         self.assertEqual(res.exit_code, 0, msg=res.output)
         self.assertEqual(set(self.app.cfg.guardrail.connectors), {"hermes"})
 
+    def test_add_detected_preserves_existing_roster_and_modes(self):
+        self._seed_map("codex", "hermes")
+        gc = self.app.cfg.guardrail
+        gc.connectors["codex"].mode = "action"
+        gc.connectors["hermes"].mode = "observe"
+
+        with _stub_side_effects(), patch(
+            "defenseclaw.commands.cmd_setup._detect_installed_connectors",
+            return_value=["codex", "cursor"],
+        ):
+            res = _invoke(["--add-detected", "--yes", "--no-restart"], self.app)
+
+        self.assertEqual(res.exit_code, 0, msg=res.output)
+        self.assertEqual(set(gc.connectors), {"codex", "cursor", "hermes"})
+        self.assertEqual(gc.connectors["codex"].mode, "action")
+        self.assertEqual(gc.connectors["hermes"].mode, "observe")
+        self.assertEqual(gc.connectors["cursor"].mode, "observe")
+
+    def test_add_detected_is_a_noop_when_every_detected_connector_is_active(self):
+        self._seed_map("codex")
+
+        with patch(
+            "defenseclaw.commands.cmd_setup._detect_installed_connectors",
+            return_value=["codex"],
+        ), patch("defenseclaw.commands.cmd_setup._apply_setup_batch") as apply_batch:
+            res = _invoke(["--add-detected", "--yes", "--no-restart"], self.app)
+
+        self.assertEqual(res.exit_code, 0, msg=res.output)
+        self.assertIn("No newly detected hook connectors", res.output)
+        apply_batch.assert_not_called()
+
+    def test_add_detected_rejects_exact_batch_flags(self):
+        res = _invoke(
+            ["--add-detected", "--detected", "--yes", "--no-restart"],
+            self.app,
+            catch=True,
+        )
+
+        self.assertNotEqual(res.exit_code, 0)
+        self.assertIn("cannot be combined", res.output)
+
+    def test_add_detected_preserves_an_active_proxy_connector(self):
+        gc = self.app.cfg.guardrail
+        gc.connectors = {}
+        gc.connector = "openclaw"
+        self.app.cfg.claw.mode = "openclaw"
+
+        with patch(
+            "defenseclaw.commands.cmd_setup._detect_installed_connectors",
+            return_value=["cursor"],
+        ), patch("defenseclaw.commands.cmd_setup._apply_setup_batch") as apply_batch:
+            res = _invoke(["--add-detected", "--yes", "--no-restart"], self.app)
+
+        self.assertEqual(res.exit_code, 0, msg=res.output)
+        self.assertIn("active proxy connector", res.output)
+        self.assertEqual(self.app.cfg.active_connectors(), ["openclaw"])
+        apply_batch.assert_not_called()
+
     def test_all_selects_every_hook_connector(self):
         with _stub_side_effects():
             res = _invoke(["--all", "--no-restart"], self.app)

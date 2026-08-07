@@ -89,6 +89,13 @@ def test_make_python_recipes_use_cross_platform_venv_path() -> None:
     assert "$(VENV_BIN)/python$(EXE) -m pytest cli/tests -q" in text
 
 
+def test_noninteractive_quickstart_adds_newly_detected_connectors_safely() -> None:
+    text = MAKEFILE.read_text(encoding="utf-8")
+    quickstart = text[text.index("\nquickstart:") : text.index("\n# Post-install interactive prompt")]
+
+    assert '"$$dc_bin" setup --add-detected --yes --restart' in quickstart
+
+
 def test_local_make_workflow_uses_one_test_ready_python_environment() -> None:
     text = MAKEFILE.read_text(encoding="utf-8")
     pycli = text[text.index("\npycli:") : text.index("\ndev-pycli:")]
