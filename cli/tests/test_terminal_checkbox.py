@@ -25,6 +25,7 @@ from defenseclaw import terminal_checkbox
 
 termios = pytest.importorskip("termios", reason="POSIX terminal-mode regression")
 
+
 def test_picker_restores_terminal_mode_before_following_line_prompt() -> None:
     """A raw-key reader must not leave Enter echoing as literal ``^M``."""
 
@@ -66,4 +67,45 @@ def test_picker_restores_terminal_mode_before_following_line_prompt() -> None:
         )
 
     assert selected == ["codex"]
+    assert current_mode == original_mode
+
+
+def test_picker_restores_terminal_mode_when_interrupted() -> None:
+    original_mode: list[object] = ["canonical-with-icrnl"]
+    current_mode = list(original_mode)
+
+    def fake_tcgetattr(fd: int) -> list[object]:
+        assert fd == 42
+        return list(current_mode)
+
+    def fake_tcsetattr(fd: int, when: int, attributes: list[object]) -> None:
+        assert fd == 42
+        assert when == termios.TCSANOW
+        current_mode[:] = attributes
+
+    def interrupted_getchar() -> str:
+        current_mode[:] = ["raw-without-icrnl"]
+        raise KeyboardInterrupt
+
+    class FakeStdin:
+        @staticmethod
+        def fileno() -> int:
+            return 42
+
+    with (
+        patch.object(terminal_checkbox.click, "get_text_stream", return_value=FakeStdin()),
+        patch.object(terminal_checkbox.os, "isatty", return_value=True),
+        patch.object(termios, "tcgetattr", side_effect=fake_tcgetattr),
+        patch.object(termios, "tcsetattr", side_effect=fake_tcsetattr),
+        pytest.raises(KeyboardInterrupt),
+    ):
+        terminal_checkbox.prompt_checkbox_selection(
+            ["codex"],
+            default_selected=["codex"],
+            title="Select connectors",
+            empty_ok=False,
+            redraw=False,
+            getchar=interrupted_getchar,
+        )
+
     assert current_mode == original_mode

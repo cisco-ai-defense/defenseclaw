@@ -362,11 +362,15 @@ def test_make_all_dev_reclaim_adopts_state_when_executable_paths_are_empty(
     install_dir = tmp_path / "home/.local/bin"
     _write_executable(repo / ".venv/bin/defenseclaw", b"source cli\n")
     _write_executable(repo / "defenseclaw-gateway", b"source gateway\n")
-    (tmp_path / "home/.defenseclaw").mkdir(parents=True)
+    managed_home = tmp_path / "home/.defenseclaw"
+    managed_home.mkdir(parents=True)
 
     strict = _preflight(tmp_path, repo, install_dir, "check")
     assert strict.returncode != 0
     assert "existing managed state" in strict.stdout + strict.stderr
+    assert managed_home.is_dir()
+    assert not managed_home.is_symlink()
+    assert not any(managed_home.iterdir())
 
     developer = _preflight(
         tmp_path,
@@ -376,6 +380,9 @@ def test_make_all_dev_reclaim_adopts_state_when_executable_paths_are_empty(
         dev_reclaim=True,
     )
     assert developer.returncode == 0, developer.stdout + developer.stderr
+    assert managed_home.is_dir()
+    assert not managed_home.is_symlink()
+    assert not any(managed_home.iterdir())
     assert not install_dir.exists()
 
 
@@ -389,6 +396,8 @@ def test_make_all_dev_reclaim_refuses_symlinked_state(
     _write_executable(repo / "defenseclaw-gateway", b"source gateway\n")
     state_target = tmp_path / "state-target"
     state_target.mkdir()
+    sentinel = state_target / "sentinel"
+    sentinel.write_text("untouched\n", encoding="utf-8")
     managed_home = tmp_path / "home/.defenseclaw"
     managed_home.parent.mkdir(parents=True)
     managed_home.symlink_to(state_target, target_is_directory=True)
@@ -404,6 +413,8 @@ def test_make_all_dev_reclaim_refuses_symlinked_state(
     assert completed.returncode != 0
     assert "developer state must be a real directory" in completed.stdout + completed.stderr
     assert managed_home.is_symlink()
+    assert state_target.is_dir()
+    assert sentinel.read_text(encoding="utf-8") == "untouched\n"
     assert not install_dir.exists()
 
 

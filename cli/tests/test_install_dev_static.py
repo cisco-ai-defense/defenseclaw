@@ -18,13 +18,33 @@ MAKEFILE = ROOT / "Makefile"
 
 
 def _make_target_prerequisites(text: str, target: str) -> list[str]:
-    prefix = f"{target}:"
-    declaration = next(
-        (line for line in text.splitlines() if line.startswith(prefix)),
-        None,
-    )
-    assert declaration is not None, f"missing Make target: {target}"
-    return declaration.removeprefix(prefix).split()
+    logical_lines: list[str] = []
+    pending = ""
+    for physical_line in text.splitlines():
+        line = physical_line.rstrip()
+        if line.endswith("\\"):
+            pending += line[:-1] + " "
+            continue
+        logical_lines.append(pending + line.lstrip() if pending else line)
+        pending = ""
+    if pending:
+        logical_lines.append(pending.rstrip())
+
+    prerequisites: list[str] = []
+    matched = False
+    for line in logical_lines:
+        if line.startswith("\t"):
+            continue
+        declaration = line.split(";", 1)[0]
+        target_expression, separator, prerequisite_expression = declaration.partition(":")
+        if separator and target in target_expression.split():
+            matched = True
+            prerequisites.extend(
+                token for token in prerequisite_expression.split() if token != "|"
+            )
+
+    assert matched, f"missing Make target: {target}"
+    return prerequisites
 
 
 def test_dev_install_syncs_openclaw_embed_before_go_build() -> None:
