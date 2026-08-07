@@ -318,6 +318,8 @@ def test_execute_mutations_binds_write_to_preview_and_verifies_plan(
 
     assert result.exit_code == 0, result.output
     assert "newly unredacted: 14" in result.output.lower()
+    assert "configurable observability log/trace projections only" in result.output
+    assert "OS notifications and agent hook responses" in result.output
     assert "Managed policy remains locked" in result.output
     assert calls[0][2]["expected_before_sha256"] == preview.before_sha256
     backup_path = calls[0][2]["backup_path"]
