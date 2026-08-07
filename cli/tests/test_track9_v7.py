@@ -4,9 +4,8 @@
 
 """Track 9 — CLI contracts for schemas, settings, and alert review.
 
-Pure-``unittest`` (no pytest dependency) so that ``make test`` works
-against the production venv created by ``make install`` / ``make pycli``
-without needing the ``[dependency-groups] dev`` packages.
+The cases remain pure ``unittest`` so they can also run in minimal packaged
+runtime environments; local Make targets use the shared test-ready venv.
 """
 
 from __future__ import annotations

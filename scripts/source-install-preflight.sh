@@ -272,8 +272,20 @@ check_owner() {
         if [[ -e "${GATEWAY_PATH}" || -L "${GATEWAY_PATH}" ]]; then
             refuse "an unowned gateway already exists at ${GATEWAY_PATH}"
         fi
+        # `make all` is the explicit developer takeover surface. Existing
+        # user state alone is not evidence of a conflicting executable and is
+        # safe to reuse; the dev publication modes still refuse foreign CLI,
+        # gateway, and ownership-marker paths above. Direct source-install
+        # targets remain fail-closed for the same state-only layout.
         if [[ -e "${MANAGED_HOME}" || -L "${MANAGED_HOME}" ]]; then
-            refuse "existing managed state was found at ${MANAGED_HOME}"
+            if [[ "${DEV_RECLAIM_SOURCE}" -eq 1 \
+               && -d "${MANAGED_HOME}" && ! -L "${MANAGED_HOME}" ]]; then
+                : # A real state directory is reusable by explicit developer activation.
+            elif [[ "${DEV_RECLAIM_SOURCE}" -eq 1 ]]; then
+                refuse "developer state must be a real directory, not a symlink or non-directory path (${MANAGED_HOME})"
+            else
+                refuse "existing managed state was found at ${MANAGED_HOME}"
+            fi
         fi
     fi
 }
