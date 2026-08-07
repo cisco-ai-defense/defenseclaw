@@ -24,6 +24,7 @@ import (
 	"io/fs"
 	"math"
 	"net/url"
+	"os"
 	"path"
 	"path/filepath"
 	"regexp"
@@ -373,12 +374,21 @@ func readMCPServersUnderHome(connectorName, home string) [][]config.MCPServerEnt
 	case "codex":
 		tryFile(config.ReadMCPFromCodexConfigTOML, ".codex/config.toml")
 	case "claudecode":
-		tryFile(config.ReadMCPFromClaudeSettings, ".claude/settings.json")
-		// ~/.claude.json holds both user-scope (top-level `mcpServers`) and
-		// per-project local-scope (`projects.<path>.mcpServers`) entries.
-		// Read the file once and take the union instead of decoding the
-		// (often multi-megabyte) conversation-state file twice.
-		tryFile(config.ReadMCPFromClaudeJSONBothScopes, ".claude.json")
+		// Honor CLAUDE_CONFIG_DIR the same way readMCPServersClaudeCode does:
+		// when the operator has redirected Claude Code to a custom directory,
+		// the default `~/.claude/settings.json` and `~/.claude.json` files may
+		// be stale or ignored by the CLI, so managed inventory must not emit
+		// their servers. `.mcp.json` at the project root is unaffected because
+		// it's the workspace-scope file the CLI reads regardless.
+		if _, hasEnv := os.LookupEnv("CLAUDE_CONFIG_DIR"); !hasEnv {
+			tryFile(config.ReadMCPFromClaudeSettings, ".claude/settings.json")
+			// ~/.claude.json holds both user-scope (top-level `mcpServers`)
+			// and per-project local-scope (`projects.<path>.mcpServers`)
+			// entries. Read the file once and take the union instead of
+			// decoding the (often multi-megabyte) conversation-state file
+			// twice.
+			tryFile(config.ReadMCPFromClaudeJSONBothScopes, ".claude.json")
+		}
 		tryFile(config.ReadMCPFromDotMCPJSON, ".mcp.json")
 	case "cursor":
 		tryFile(config.ReadMCPFromDotMCPJSON, ".cursor/mcp.json")

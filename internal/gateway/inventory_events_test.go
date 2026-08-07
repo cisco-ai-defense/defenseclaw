@@ -1255,3 +1255,54 @@ func TestEndpointInventoryHelpersRejectRawPathAndURLMaterial(t *testing.T) {
 
 var _ sidecarRuntimeEmitter = (*endpointInventoryCapture)(nil)
 var _ aiDiscoveryV8Runtime = (*endpointInventoryCapture)(nil)
+
+// TestReadMCPServersUnderHomeHonorsClaudeConfigDirOverride pins the fix for
+// the reported bug: when CLAUDE_CONFIG_DIR is explicitly set the Claude Code
+// CLI ignores the default `~/.claude/settings.json` and `~/.claude.json`
+// files, so managed inventory must not report their servers. This test
+// asserts the per-home reader skips both default files under the override
+// and, when the override is cleared, picks them back up.
+func TestReadMCPServersUnderHomeHonorsClaudeConfigDirOverride(t *testing.T) {
+	tmp := t.TempDir()
+	settingsPath := filepath.Join(tmp, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath, []byte(`{"mcpServers":{"stale-settings":{"command":"/usr/bin/x"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	claudeJSONPath := filepath.Join(tmp, ".claude.json")
+	if err := os.WriteFile(claudeJSONPath, []byte(`{"mcpServers":{"stale-claudejson":{"command":"/usr/bin/y"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// With CLAUDE_CONFIG_DIR set, both default files must be skipped.
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(tmp, "custom-claude"))
+	if got := readMCPServersUnderHome("claudecode", tmp); len(got) != 0 {
+		t.Fatalf("with CLAUDE_CONFIG_DIR set, got servers=%+v want none", got)
+	}
+
+	// Without the override, both default files should surface.
+	if err := os.Unsetenv("CLAUDE_CONFIG_DIR"); err != nil {
+		t.Fatal(err)
+	}
+	got := readMCPServersUnderHome("claudecode", tmp)
+	var names []string
+	for _, group := range got {
+		for _, entry := range group {
+			names = append(names, entry.Name)
+		}
+	}
+	var haveSettings, haveClaudeJSON bool
+	for _, name := range names {
+		if name == "stale-settings" {
+			haveSettings = true
+		}
+		if name == "stale-claudejson" {
+			haveClaudeJSON = true
+		}
+	}
+	if !haveSettings || !haveClaudeJSON {
+		t.Fatalf("no-override read must surface both defaults, got names=%v", names)
+	}
+}
