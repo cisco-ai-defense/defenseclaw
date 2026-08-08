@@ -44,7 +44,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/inventory/lockparse"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
-	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
 
@@ -3184,7 +3183,9 @@ func (s *AIStateStore) Save(state aiStateFile) error {
 		return err
 	}
 	payload = append(payload, '\n')
-	return safefile.WritePrivate(s.path, payload)
+	return managed.WriteServiceRuntimeFile(
+		managed.PinnedDeploymentMode(), s.path, "ai discovery state", payload,
+	)
 }
 
 // processNames is kept for backward compatibility with existing

@@ -1363,8 +1363,9 @@ func validateWindowsCodexMachineLayout(opts WindowsCodexMachineRequirementsOptio
 		!strings.EqualFold(filepath.Base(filepath.Dir(opts.OwnershipPath)), "install") {
 		return fmt.Errorf("refusing noncanonical Codex requirements ownership path %s", opts.OwnershipPath)
 	}
+	// Leaf-checked paths only. ProgramData is reached as an ancestor by the walk
+	// up from the Codex directory, which is the rule that applies to it.
 	for _, path := range []string{
-		programData,
 		filepath.Dir(opts.RequirementsPath),
 		opts.ManagedDir,
 		filepath.Dir(opts.OwnershipPath),

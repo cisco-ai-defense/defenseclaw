@@ -340,11 +340,15 @@ Create an administrator-approved `config.yaml`. Use forward slashes or quoted
 backslashes in YAML:
 
 ```yaml
-config_version: 7
+config_version: 8
 deployment_mode: managed_enterprise
 data_dir: 'C:\ProgramData\Cisco\DefenseClaw\runtime'
-audit_db: 'C:\ProgramData\Cisco\DefenseClaw\runtime\audit.db'
-judge_bodies_db: 'C:\ProgramData\Cisco\DefenseClaw\runtime\judge_bodies.db'
+observability:
+  local:
+    path: 'C:\ProgramData\Cisco\DefenseClaw\runtime\audit.db'
+    judge_bodies_path: 'C:\ProgramData\Cisco\DefenseClaw\runtime\judge_bodies.db'
+  defaults:
+    redaction_profile: sensitive
 plugin_dir: 'C:\ProgramData\Cisco\DefenseClaw\runtime\plugins'
 policy_dir: 'C:\ProgramData\Cisco\DefenseClaw\runtime\policies'
 gateway:

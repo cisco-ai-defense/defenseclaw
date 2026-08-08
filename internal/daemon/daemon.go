@@ -28,8 +28,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
-	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 const (
@@ -107,8 +107,9 @@ func (d *Daemon) LogFile() string { return d.logFile }
 // approach (re-wrapping in lumberjack) is what caused the EPIPE regression,
 // so rotation needs a SIGUSR1-reopen or supervised sidecar instead.
 func (d *Daemon) openLogFileForChild() (*os.File, error) {
+	mode := managed.PinnedDeploymentMode()
 	if _, err := os.Lstat(d.logFile); err == nil {
-		if err := safefile.ProtectFile(d.logFile); err != nil {
+		if err := managed.PrepareServiceRuntimeFile(mode, d.logFile, "gateway log file"); err != nil {
 			return nil, err
 		}
 	} else if !os.IsNotExist(err) {
@@ -118,7 +119,7 @@ func (d *Daemon) openLogFileForChild() (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := safefile.ProtectFile(d.logFile); err != nil {
+	if err := managed.PrepareServiceRuntimeFile(mode, d.logFile, "gateway log file"); err != nil {
 		_ = f.Close()
 		return nil, err
 	}
@@ -350,7 +351,11 @@ func (d *Daemon) Start(args []string) (int, error) {
 		return 0, fmt.Errorf("daemon: refusing to start: %w", err)
 	}
 
-	if err := safefile.ProtectDirectory(d.dataDir); err != nil {
+	if err := managed.PrepareServiceRuntimeDir(
+		managed.PinnedDeploymentMode(),
+		d.dataDir,
+		"data dir",
+	); err != nil {
 		return 0, fmt.Errorf("daemon: create data dir: %w", err)
 	}
 
@@ -873,7 +878,9 @@ func (d *Daemon) writePIDInfoAt(pid int, executable string, startIdentity string
 	if err != nil {
 		return err
 	}
-	return safefile.WritePrivate(d.pidFile, data)
+	return managed.WriteServiceRuntimeFile(
+		managed.PinnedDeploymentMode(), d.pidFile, "gateway pid file", data,
+	)
 }
 
 func IsDaemonChild() bool {

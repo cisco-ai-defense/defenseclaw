@@ -231,7 +231,7 @@ func rejectUntrustedWindowsWriteACEsWithWriter(
 		}
 		writeLike := windowsWriteLikeAccess(ace.Mask)
 		if ancestor {
-			writeLike = windowsAncestorReplaceAccess(ace.Mask)
+			writeLike = WindowsAncestorReplaceAccess(ace.Mask)
 		}
 		if !writeLike {
 			continue
@@ -244,16 +244,11 @@ func rejectUntrustedWindowsWriteACEsWithWriter(
 	return nil
 }
 
-// windowsAncestorReplaceAccess is intentionally narrower than leaf/subtree
-// write detection. Windows grants BUILTIN\Users limited FILE_ADD_FILE and
-// FILE_ADD_SUBDIRECTORY rights on fixed roots such as C:\ProgramData. Those
-// rights can create unrelated children but cannot replace an already
-// protected DefenseClaw child. An ancestor becomes untrusted when an
-// unprivileged principal can delete that child, rewrite the ancestor DACL or
-// owner, or receives an unresolved generic write/all grant. Write attributes
-// and EA rights on the already-existing ancestor are not replacement rights;
-// every ancestor is independently reparse-checked on every load.
-func windowsAncestorReplaceAccess(mask windows.ACCESS_MASK) bool {
+// WindowsAncestorReplaceAccess reports whether mask lets a principal replace a
+// protected child. Narrower than the leaf rule: stock Windows grants Users
+// add-file and write-EA/attributes on roots like C:\ProgramData, none of which
+// can replace an existing child.
+func WindowsAncestorReplaceAccess(mask windows.ACCESS_MASK) bool {
 	const fileDeleteChild windows.ACCESS_MASK = 0x00000040
 	dangerous := windows.ACCESS_MASK(
 		windows.GENERIC_ALL |

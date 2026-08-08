@@ -29,6 +29,7 @@ $expected = [ordered]@{
     StateDirectory = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;$serviceSID)"
     AdminDirectory = 'O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'
     AdminFile = 'O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)'
+    ConfigDirectory = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;$serviceSID)"
     ConfigFile = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;$serviceSID)"
     MachinePolicyFile = 'O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FR;;;BU)'
     RuntimeDirectory = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;$serviceSID)"
@@ -43,6 +44,7 @@ $directoryKinds = @(
     'ServiceInstallDirectory',
     'StateDirectory',
     'AdminDirectory',
+    'ConfigDirectory',
     'RuntimeDirectory',
     'AuthorizationDirectory',
     'LogDirectory',
@@ -113,6 +115,174 @@ foreach ($row in $adminRows) {
     }
 }
 
+# The installer writes canonical ACLs from one table and the deployment
+# verifier re-asserts them from another. They are only correct together, so
+# every pairing must agree on what the gateway service is granted.
+$pairings = [ordered]@{
+    InstallDirectory = 'Install'
+    InstallFile = 'Install'
+    ServiceInstallDirectory = 'ServiceInstall'
+    ServiceInstallFile = 'ServiceInstall'
+    StateDirectory = 'State'
+    AdminDirectory = 'Admin'
+    AdminFile = 'Admin'
+    ConfigDirectory = 'ConfigDirectory'
+    ConfigFile = 'Config'
+    MachinePolicyFile = 'MachinePolicy'
+    RuntimeDirectory = 'Runtime'
+    RuntimeFile = 'Runtime'
+    AuthorizationDirectory = 'AuthorizationDirectory'
+    AuthorizationFile = 'AuthorizationFile'
+    LogDirectory = 'Admin'
+    GatewayLogDirectory = 'Runtime'
+}
+if ($pairings.Count -ne $expected.Count) {
+    throw 'installer/verifier pairing table does not cover every managed path kind'
+}
+$pairingsChecked = & $module {
+    param($Pairings, $Directories, $GatewaySID)
+    $checked = 0
+    foreach ($entry in $Pairings.GetEnumerator()) {
+        $aclKind = [string]$entry.Key
+        $rightsKind = [string]$entry.Value
+        $security = New-DefenseClawCanonicalPathAcl `
+            -IsDirectory ($aclKind -in $Directories) `
+            -Kind $aclKind `
+            -GatewayServiceSID $GatewaySID
+        $granted = [Security.AccessControl.FileSystemRights]0
+        foreach ($rule in $security.GetAccessRules(
+            $true,
+            $false,
+            [Security.Principal.SecurityIdentifier]
+        )) {
+            if ([string]$rule.IdentityReference.Value -eq $GatewaySID -and
+                $rule.AccessControlType -eq
+                    [Security.AccessControl.AccessControlType]::Allow) {
+                $granted = $granted -bor $rule.FileSystemRights
+            }
+        }
+        $required = New-DefenseClawRequiredRights `
+            -Kind $rightsKind `
+            -GatewayServiceSID $GatewaySID
+        $expectedRights = if ($required.ContainsKey($GatewaySID)) {
+            [Security.AccessControl.FileSystemRights]$required[$GatewaySID]
+        }
+        else {
+            [Security.AccessControl.FileSystemRights]0
+        }
+        if (($granted -band $expectedRights) -ne $expectedRights) {
+            throw (
+                "installer ACL kind {0} grants the gateway service {1}, " +
+                "short of the {2} required by verifier rights kind {3}"
+            ) -f $aclKind, $granted, $expectedRights, $rightsKind
+        }
+        # The reverse direction: a grant the verifier does not model is read by
+        # its administrator-only reader allow-list as an untrusted principal.
+        if ($expectedRights -eq 0 -and $granted -ne 0) {
+            throw (
+                "installer ACL kind {0} grants the gateway service {1}, " +
+                "but verifier rights kind {2} is administrator-only"
+            ) -f $aclKind, $granted, $rightsKind
+        }
+        $checked++
+    }
+    return $checked
+} $pairings $directoryKinds $serviceSID
+if ($pairingsChecked -ne $pairings.Count) {
+    throw 'installer/verifier pairing check did not exercise every pairing'
+}
+
+# The builder declares the ACL kinds and the applier accepts them. Both sets
+# must be identical and exactly what this smoke covers; a kind in only one of
+# them fails at install time on parameter validation.
+$kindSetsAgree = & $module {
+    param($Cases)
+    $validValues = {
+        param($CommandName)
+        $command = Microsoft.PowerShell.Core\Get-Command -Name $CommandName
+        $sets = @(
+            $command.Parameters['Kind'].Attributes |
+                Microsoft.PowerShell.Core\Where-Object {
+                    $_ -is [Management.Automation.ValidateSetAttribute]
+                }
+        )
+        if ($sets.Count -ne 1) {
+            throw "$CommandName does not declare exactly one Kind validate set"
+        }
+        return @($sets[0].ValidValues | Microsoft.PowerShell.Utility\Sort-Object)
+    }
+    $builder = & $validValues 'New-DefenseClawCanonicalPathAcl'
+    $applier = & $validValues 'Set-DefenseClawPathAcl'
+    $covered = @([string[]]$Cases.Keys | Microsoft.PowerShell.Utility\Sort-Object)
+    if (($builder -join "`n") -cne ($applier -join "`n")) {
+        throw (
+            'canonical ACL kinds diverge between builder and applier: ' +
+            "builder=$($builder -join ',') applier=$($applier -join ',')"
+        )
+    }
+    if (($builder -join "`n") -cne ($covered -join "`n")) {
+        throw (
+            'canonical ACL smoke does not cover every declared kind: ' +
+            "declared=$($builder -join ',') covered=$($covered -join ',')"
+        )
+    }
+    return $true
+} $expected
+if (-not $kindSetsAgree) {
+    throw 'canonical ACL kind parity check did not run'
+}
+
+# A state-root ancestor such as C:\ProgramData\Cisco is a shared vendor
+# directory another product may depend on, so the traverse grant is additive:
+# it must not take the owner or drop an ACE it did not add.
+$ancestorCases = & $module {
+    param($GatewaySID)
+    $vendorDirectory = {
+        param($SDDL)
+        $security = [Security.AccessControl.DirectorySecurity]::new()
+        $security.SetSecurityDescriptorSddlForm($SDDL)
+        return $security
+    }
+    $sddlOf = {
+        param($Security)
+        return $Security.GetSecurityDescriptorSddlForm(
+            [Security.AccessControl.AccessControlSections]::All
+        )
+    }
+    # Administrators-owned, with a second product's ACE on it.
+    $shared = 'O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1200a9;;;BU)'
+    $granted = & $sddlOf (Add-DefenseClawStateAncestorTraverseRule `
+        -Security (& $vendorDirectory $shared) `
+        -GatewayServiceSID $GatewaySID)
+
+    $twice = & $sddlOf (Add-DefenseClawStateAncestorTraverseRule `
+        -Security (Add-DefenseClawStateAncestorTraverseRule `
+            -Security (& $vendorDirectory $shared) `
+            -GatewayServiceSID $GatewaySID) `
+        -GatewayServiceSID $GatewaySID)
+
+    # An inheritable grant collapses to the non-inherited one.
+    $widened = & $sddlOf (Add-DefenseClawStateAncestorTraverseRule `
+        -Security (& $vendorDirectory (
+            $shared + "(A;OICI;FA;;;$GatewaySID)"
+        )) `
+        -GatewayServiceSID $GatewaySID)
+
+    [pscustomobject]@{
+        foreign_vendor_ace_preserved = $granted -match [regex]::Escape('(A;OICI;0x1200a9;;;BU)')
+        owner_preserved = $granted.StartsWith('O:BAG:BA')
+        traverse_ace_not_inherited = $granted -match [regex]::Escape("(A;;0x1200a9;;;$GatewaySID)")
+        tree_not_seized = -not ($granted -match [regex]::Escape("(A;OICI;0x1200a9;;;$GatewaySID)"))
+        repeat_grant_is_idempotent = $twice -ceq $granted
+        widened_prior_grant_collapsed = $widened -ceq $granted
+    }
+} $serviceSID
+foreach ($property in $ancestorCases.psobject.Properties) {
+    if (-not [bool]$property.Value) {
+        throw "state-root ancestor traverse grant regression failed: $($property.Name)"
+    }
+}
+
 $comparisonCases = & $module {
     $expectedRaw = [Security.AccessControl.RawSecurityDescriptor]::new(
         'O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)'
@@ -167,4 +337,7 @@ if ($null -eq $nativeDescriptor.DiscretionaryAcl) {
     ace_mismatches_rejected = $true
     native_raw_acl_query_checked = $true
     split_explicit_aces_rejected = $true
+    installer_verifier_pairings_checked = $pairingsChecked
+    acl_kind_sets_agree = [bool]$kindSetsAgree
+    state_ancestor_grant_is_additive = $true
 } | Microsoft.PowerShell.Utility\ConvertTo-Json -Compress

@@ -516,9 +516,17 @@ func validateWindowsClaudeManagedPolicyTeardownOptions(
 	if err := connector.ValidateWindowsManagedGatewayServiceName(opts.GatewayServiceName); err != nil {
 		return nil, err
 	}
-	targets, err := canonicalWindowsClaudeTargetSIDs(opts.TargetSIDs)
-	if err != nil {
-		return nil, err
+	// A deployment with no Claude connector rows tears down an empty target
+	// set, which reaches only the absent-policy branch. Every other caller
+	// canonicalizes the metadata of a policy that exists, where empty means
+	// that metadata is corrupt.
+	var targets []string
+	if len(opts.TargetSIDs) != 0 {
+		canonical, err := canonicalWindowsClaudeTargetSIDs(opts.TargetSIDs)
+		if err != nil {
+			return nil, err
+		}
+		targets = canonical
 	}
 	if !equalWindowsClaudeTargetSIDs(opts.TargetSIDs, targets) {
 		return nil, errors.New("enterprise hooks: Claude teardown target SIDs are not canonical")

@@ -986,6 +986,11 @@ function Test-DefenseClawReplacementRights {
 
 function Assert-DefenseClawTrustedAncestor {
     param([Parameter(Mandatory)][string]$Path)
+    # 'C:' is drive-relative and resolves to the current directory on that drive.
+    # Callers trim the trailing separator, so restore it before touching disk.
+    if ($Path -match '^[A-Za-z]:$') {
+        $Path = $Path + '\'
+    }
     Assert-DefenseClawNoReparsePath -Path $Path
     $acl = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path
     $accessSDDL = $acl.GetSecurityDescriptorSddlForm(
@@ -1186,8 +1191,8 @@ function Assert-DefenseClawUnsignedCertificationScope {
         [string]$CertificationCodexHome
     )
     $prefix = '-AllowUnsigned is restricted to exact disposable DefenseClaw certification scope'
-    if ($Action -notin @('Install', 'Upgrade', 'Repair')) {
-        throw "$prefix; action must be Install, Upgrade, or Repair"
+    if ($Action -notin @('Install', 'Upgrade', 'Repair', 'Uninstall')) {
+        throw "$prefix; action must be Install, Upgrade, Repair, or Uninstall"
     }
     if ($GatewayServiceName -cnotmatch '^DefenseClawCertGateway_([a-f0-9]{10})$') {
         throw "$prefix; gateway service name is outside the certification namespace"
@@ -1482,7 +1487,7 @@ function New-DefenseClawCanonicalPathAcl {
     param(
         [Parameter(Mandatory)][bool]$IsDirectory,
         [Parameter(Mandatory)]
-        [ValidateSet('InstallDirectory', 'InstallFile', 'ServiceInstallDirectory', 'ServiceInstallFile', 'StateDirectory', 'AdminDirectory', 'AdminFile', 'ConfigFile', 'MachinePolicyFile', 'RuntimeDirectory', 'RuntimeFile', 'AuthorizationDirectory', 'AuthorizationFile', 'LogDirectory', 'GatewayLogDirectory')]
+        [ValidateSet('InstallDirectory', 'InstallFile', 'ServiceInstallDirectory', 'ServiceInstallFile', 'StateDirectory', 'AdminDirectory', 'AdminFile', 'ConfigDirectory', 'ConfigFile', 'MachinePolicyFile', 'RuntimeDirectory', 'RuntimeFile', 'AuthorizationDirectory', 'AuthorizationFile', 'LogDirectory', 'GatewayLogDirectory')]
         [string]$Kind,
         [Parameter(Mandatory)][string]$GatewayServiceSID
     )
@@ -1492,6 +1497,7 @@ function New-DefenseClawCanonicalPathAcl {
         'ServiceInstallDirectory',
         'StateDirectory',
         'AdminDirectory',
+        'ConfigDirectory',
         'RuntimeDirectory',
         'AuthorizationDirectory',
         'LogDirectory',
@@ -1560,6 +1566,13 @@ function New-DefenseClawCanonicalPathAcl {
             })
         }
         'StateDirectory' {
+            $entries.Add([pscustomobject]@{
+                sid = $GatewayServiceSID
+                rights = [Security.AccessControl.FileSystemRights]::ReadAndExecute
+            })
+        }
+        'ConfigDirectory' {
+            # Traverse only; the service cannot open ConfigFile without it.
             $entries.Add([pscustomobject]@{
                 sid = $GatewayServiceSID
                 rights = [Security.AccessControl.FileSystemRights]::ReadAndExecute
@@ -1730,7 +1743,7 @@ function Set-DefenseClawPathAcl {
     param(
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)]
-        [ValidateSet('InstallDirectory', 'InstallFile', 'ServiceInstallDirectory', 'ServiceInstallFile', 'StateDirectory', 'AdminDirectory', 'AdminFile', 'ConfigFile', 'MachinePolicyFile', 'RuntimeDirectory', 'RuntimeFile', 'AuthorizationDirectory', 'AuthorizationFile', 'LogDirectory', 'GatewayLogDirectory')]
+        [ValidateSet('InstallDirectory', 'InstallFile', 'ServiceInstallDirectory', 'ServiceInstallFile', 'StateDirectory', 'AdminDirectory', 'AdminFile', 'ConfigDirectory', 'ConfigFile', 'MachinePolicyFile', 'RuntimeDirectory', 'RuntimeFile', 'AuthorizationDirectory', 'AuthorizationFile', 'LogDirectory', 'GatewayLogDirectory')]
         [string]$Kind,
         [Parameter(Mandatory)][string]$GatewayServiceSID
     )
@@ -1798,6 +1811,113 @@ function New-DefenseClawProtectedDirectory {
         -AllowedWriterSIDs @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID) `
         -AllowUsersRead:$AllowUsersRead
     return [bool]$created
+}
+
+# Directories strictly between the required base and a managed root. The base
+# is an OS directory and the root carries its own canonical DACL, so neither is
+# returned.
+function Get-DefenseClawManagedRootAncestors {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$RequiredBase
+    )
+    $base = [IO.Path]::GetFullPath($RequiredBase).TrimEnd('\')
+    $full = [IO.Path]::GetFullPath($Root).TrimEnd('\')
+    if (-not $full.StartsWith($base + '\', [StringComparison]::OrdinalIgnoreCase)) {
+        throw "managed root is outside its required ancestor base: $full"
+    }
+    $relative = $full.Substring($base.Length).TrimStart('\')
+    $components = @($relative.Split('\') |
+        Microsoft.PowerShell.Core\Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    $ancestors = [Collections.Generic.List[string]]::new()
+    $current = $base
+    for ($index = 0; $index -lt $components.Count - 1; $index++) {
+        $current = Microsoft.PowerShell.Management\Join-Path $current $components[$index]
+        [void]$ancestors.Add($current)
+    }
+    return @($ancestors)
+}
+
+# Execute to traverse the ancestor, read-control to read the descriptor the
+# gateway's own ancestor trust check inspects.
+$script:StateAncestorTraverseRights =
+    [Security.AccessControl.FileSystemRights]::ReadAndExecute
+
+# A state-root ancestor is a shared vendor directory this installer does not
+# own, so the owner and every other ACE are preserved and one ACE is added.
+# The ACE is not inherited, keeping the grant off sibling trees.
+function Add-DefenseClawStateAncestorTraverseRule {
+    param(
+        [Parameter(Mandatory)][Security.AccessControl.DirectorySecurity]$Security,
+        [Parameter(Mandatory)][string]$GatewayServiceSID
+    )
+    $identity = [Security.Principal.SecurityIdentifier]::new($GatewayServiceSID)
+    # Repeated installs converge on exactly one ACE for this SID.
+    [void]$Security.PurgeAccessRules($identity)
+    [void]$Security.AddAccessRule(
+        [Security.AccessControl.FileSystemAccessRule]::new(
+            $identity,
+            $script:StateAncestorTraverseRights,
+            [Security.AccessControl.InheritanceFlags]::None,
+            [Security.AccessControl.PropagationFlags]::None,
+            [Security.AccessControl.AccessControlType]::Allow
+        )
+    )
+    return $Security
+}
+
+function Grant-DefenseClawStateAncestorTraverse {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$GatewayServiceSID
+    )
+    Assert-DefenseClawNoReparsePath -Path $Path
+    Assert-DefenseClawTrustedAncestor -Path $Path
+    $security = Add-DefenseClawStateAncestorTraverseRule `
+        -Security (Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path) `
+        -GatewayServiceSID $GatewayServiceSID
+    Microsoft.PowerShell.Security\Set-Acl `
+        -LiteralPath $Path `
+        -AclObject $security `
+        -ErrorAction Stop
+    Assert-DefenseClawStateAncestorTraverse `
+        -Path $Path `
+        -GatewayServiceSID $GatewayServiceSID
+}
+
+function Assert-DefenseClawStateAncestorTraverse {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$GatewayServiceSID
+    )
+    # No untrusted principal may own the ancestor or hold rights that would let
+    # it replace what sits underneath.
+    Assert-DefenseClawTrustedAncestor -Path $Path
+    $required = $script:StateAncestorTraverseRights
+    $granted = [Security.AccessControl.FileSystemRights]0
+    $acl = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path
+    foreach ($rule in $acl.Access) {
+        if ($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
+            (($rule.PropagationFlags -band [Security.AccessControl.PropagationFlags]::InheritOnly) -ne 0)) {
+            continue
+        }
+        if ((ConvertTo-DefenseClawSID -Identity $rule.IdentityReference) -ne $GatewayServiceSID) {
+            continue
+        }
+        if ($rule.InheritanceFlags -ne [Security.AccessControl.InheritanceFlags]::None) {
+            throw (
+                'gateway traverse grant on a shared managed ancestor must not ' +
+                "be inheritable: $Path"
+            )
+        }
+        $granted = $granted -bor $rule.FileSystemRights
+    }
+    if (($granted -band $required) -ne $required) {
+        throw (
+            "gateway service $GatewayServiceSID cannot traverse an ancestor of " +
+            "its own state root: $Path"
+        )
+    }
 }
 
 function Initialize-DefenseClawManagedRoot {
@@ -2255,7 +2375,26 @@ function Set-DefenseClawServiceRegistryAcl {
             [Security.AccessControl.AccessControlSections]::Access
         )
     )
-    Microsoft.PowerShell.Security\Set-Acl -LiteralPath $serviceKey -AclObject $security
+    # The registry provider mishandles -LiteralPath (Get-Acl on 5.1, Set-Acl on
+    # 7). Key names cannot contain wildcards, so -Path is safe here.
+    Microsoft.PowerShell.Security\Set-Acl -Path $serviceKey -AclObject $security
+    Reset-DefenseClawServiceSecuritySubkeyInheritance -Path "$serviceKey\Security"
+}
+
+function Reset-DefenseClawServiceSecuritySubkeyInheritance {
+    # sc.exe sdset leaves the Security subkey with a protected DACL and explicit
+    # ACEs. Restore inheritance so the subkey derives its rights from the managed
+    # parent key. The Security value itself is left alone.
+    param([Parameter(Mandatory)][string]$Path)
+    if (-not (Microsoft.PowerShell.Management\Test-Path -Path $Path)) {
+        return
+    }
+    $acl = Microsoft.PowerShell.Security\Get-Acl -Path $Path
+    foreach ($rule in @($acl.Access | Microsoft.PowerShell.Core\Where-Object { -not $_.IsInherited })) {
+        [void]$acl.RemoveAccessRuleSpecific($rule)
+    }
+    $acl.SetAccessRuleProtection($false, $false)
+    Microsoft.PowerShell.Security\Set-Acl -Path $Path -AclObject $acl
 }
 
 function Assert-DefenseClawServiceSecurityRegistrySubkey {
@@ -2307,7 +2446,7 @@ function Assert-DefenseClawServiceSecurityRegistrySubkey {
         throw "service $Name SCM Security registry value is not a valid security descriptor: $($_.Exception.Message)"
     }
 
-    $acl = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path
+    $acl = Microsoft.PowerShell.Security\Get-Acl -Path $Path
     $accessSDDL = $acl.GetSecurityDescriptorSddlForm(
         [Security.AccessControl.AccessControlSections]::Access
     )
@@ -2432,7 +2571,7 @@ function Assert-DefenseClawServiceRegistryAcl {
             -Path ([string]$securitySubkeys[0].PSPath)
     }
 
-    $acl = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $serviceKey
+    $acl = Microsoft.PowerShell.Security\Get-Acl -Path $serviceKey
     $accessSDDL = $acl.GetSecurityDescriptorSddlForm(
         [Security.AccessControl.AccessControlSections]::Access
     )
@@ -2686,6 +2825,29 @@ function ConvertFrom-DefenseClawServiceQuiescenceTimestamp {
     return $timestamp
 }
 
+function Get-DefenseClawGuardianGeneration {
+    # Returns state.updated_at, or $null when the report carries no state.
+    # StrictMode throws on a missing property, so absence is probed on the
+    # property set. PowerShell 7 materializes the ISO string as a DateTime, whose
+    # [string] form is local-culture and drops the UTC designator.
+    param($Report)
+    if ($null -eq $Report -or $null -eq $Report.PSObject.Properties['state']) {
+        return $null
+    }
+    $state = $Report.state
+    if ($null -eq $state -or $null -eq $state.PSObject.Properties['updated_at']) {
+        return $null
+    }
+    $value = $state.updated_at
+    if ($null -eq $value) {
+        return $null
+    }
+    if ($value -is [DateTime]) {
+        return ([DateTime]$value).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+    }
+    return [string]$value
+}
+
 function Wait-DefenseClawServiceFailureRestartQuiescence {
     param(
         [Parameter(Mandatory)][string]$ServicesQuiescedAt,
@@ -2915,8 +3077,11 @@ function Set-DefenseClawManagedAcls {
             -GatewayServiceSID $gatewaySID
     }
 
+    foreach ($ancestor in @($Layout.StateRootAncestors)) {
+        Grant-DefenseClawStateAncestorTraverse -Path $ancestor -GatewayServiceSID $gatewaySID
+    }
     Set-DefenseClawPathAcl -Path $Layout.StateRoot -Kind StateDirectory -GatewayServiceSID $gatewaySID
-    Set-DefenseClawPathAcl -Path $Layout.ConfigDirectory -Kind AdminDirectory -GatewayServiceSID $gatewaySID
+    Set-DefenseClawPathAcl -Path $Layout.ConfigDirectory -Kind ConfigDirectory -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.GuardianDirectory -Kind AdminDirectory -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.InstallStateDirectory -Kind AdminDirectory -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.ConfigPath -Kind ConfigFile -GatewayServiceSID $gatewaySID
@@ -3140,6 +3305,9 @@ function Get-DefenseClawLayout {
     return @{
         InstallRoot = $InstallRoot
         StateRoot = $StateRoot
+        StateRootAncestors = (Get-DefenseClawManagedRootAncestors `
+            -Root $fullStateRoot `
+            -RequiredBase $script:ProgramData)
         BinDirectory = $bin
         AgentDirectory = $agentDirectory
         LibexecDirectory = $libexec
@@ -3181,6 +3349,7 @@ function Get-DefenseClawLayout {
         CodexMachinePolicyPath = (Microsoft.PowerShell.Management\Join-Path $codexMachinePolicyDirectory 'requirements.toml')
         CodexManagedHooksDirectory = $bin
         CodexManagedHooksStatePath = (Microsoft.PowerShell.Management\Join-Path $codexMachinePolicyDirectory '.defenseclaw-managed-hooks.state')
+        CodexManagedHooksLockPath = (Microsoft.PowerShell.Management\Join-Path $codexMachinePolicyDirectory '.defenseclaw-managed-hooks.lock')
         CodexRequirementsOwnershipPath = (Microsoft.PowerShell.Management\Join-Path $installState 'codex-requirements-ownership.json')
         CodexRequirementsAclBackupPath = (Microsoft.PowerShell.Management\Join-Path $installState 'codex-requirements-acl-backup.json')
         CodexTrustedShellAttestationPath = (Microsoft.PowerShell.Management\Join-Path $installState 'agent-application-control-attestation.json')
@@ -3698,7 +3867,7 @@ function New-DefenseClawTransaction {
                         [StringComparison]::OrdinalIgnoreCase
                     )
                 } |
-                Microsoft.PowerShell.Core\Select-Object -First 1
+                Microsoft.PowerShell.Utility\Select-Object -First 1
             if ($null -ne $service -and [bool]$service.existed) {
                 Set-DefenseClawServiceStartMode -Name $name -StartMode 4
             }
@@ -3912,7 +4081,7 @@ function New-DefenseClawTransaction {
                                 [StringComparison]::OrdinalIgnoreCase
                             )
                         } |
-                        Microsoft.PowerShell.Core\Select-Object -First 1
+                        Microsoft.PowerShell.Utility\Select-Object -First 1
                     if ($null -ne $service -and [bool]$service.existed) {
                         Set-DefenseClawServiceStartMode `
                             -Name $name `
@@ -4733,11 +4902,19 @@ function Get-DefenseClawCodexTrustedShellAttestation {
         throw 'agent application-control attestation contains an invalid administrator SID'
     }
     try {
-        $attestedAt = [DateTime]::Parse(
-            [string]$attestation.attested_at,
-            [Globalization.CultureInfo]::InvariantCulture,
-            [Globalization.DateTimeStyles]::RoundtripKind
-        )
+        # PowerShell 7 materializes this as a DateTime, whose [string] form is
+        # local-culture and drops the UTC designator.
+        $attestedAtValue = $attestation.attested_at
+        $attestedAt = if ($attestedAtValue -is [DateTime]) {
+            [DateTime]$attestedAtValue
+        }
+        else {
+            [DateTime]::Parse(
+                [string]$attestedAtValue,
+                [Globalization.CultureInfo]::InvariantCulture,
+                [Globalization.DateTimeStyles]::RoundtripKind
+            )
+        }
         if ($attestedAt.Kind -eq [DateTimeKind]::Unspecified) {
             throw 'timestamp has no timezone'
         }
@@ -4849,6 +5026,50 @@ function Initialize-DefenseClawCodexMachinePolicyParent {
     }
 }
 
+# The Codex policy serialization lock outlives the policy files it guards, so
+# the emptiness check below would read DefenseClaw's own bookkeeping as foreign
+# content and strand a directory this transaction created. Only the exact lock
+# path is removed, and only as a protected regular file in the directory being
+# cleared; anything else still fails closed.
+function Remove-DefenseClawCodexPolicySerializationLock {
+    param(
+        [Parameter(Mandatory)][string]$Directory,
+        [Parameter(Mandatory)][hashtable]$Layout
+    )
+    if (-not $Layout.ContainsKey('CodexManagedHooksLockPath')) {
+        return
+    }
+    $lockPath = [string]$Layout.CodexManagedHooksLockPath
+    if ([string]::IsNullOrWhiteSpace($lockPath)) {
+        return
+    }
+    $lockPath = [IO.Path]::GetFullPath($lockPath)
+    if (-not [string]::Equals(
+            [IO.Path]::GetDirectoryName($lockPath).TrimEnd('\'),
+            $Directory,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        return
+    }
+    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $lockPath)) {
+        return
+    }
+    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $lockPath -PathType Leaf)) {
+        throw "Codex policy serialization lock is not a regular file: $lockPath"
+    }
+    Assert-DefenseClawNoReparsePath -Path $lockPath
+    Assert-DefenseClawPathAcl `
+        -Path $lockPath `
+        -AllowedWriterSIDs @(
+            $script:SystemSID,
+            $script:AdministratorsSID,
+            $script:TrustedInstallerSID
+        ) `
+        -AllowUsersRead `
+        -AllowInheritance
+    Microsoft.PowerShell.Management\Remove-Item -LiteralPath $lockPath -Force
+}
+
 function Remove-DefenseClawTransactionCreatedSharedDirectories {
     param(
         [Parameter(Mandatory)]$Snapshot,
@@ -4871,6 +5092,9 @@ function Remove-DefenseClawTransactionCreatedSharedDirectories {
             throw "refusing rollback through a replaced Codex machine-policy directory: $directory"
         }
         Assert-DefenseClawCodexMachinePolicyDirectory -Path $directory
+        Remove-DefenseClawCodexPolicySerializationLock `
+            -Directory $directory `
+            -Layout $Layout
         $child = Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $directory -Force | Microsoft.PowerShell.Utility\Select-Object -First 1
         if ($null -ne $child) {
             throw "refusing to remove non-empty transaction-created shared directory: $directory"
@@ -6206,7 +6430,15 @@ function Invoke-DefenseClawManagedHooksTeardownCommand {
         if ($null -eq $okProperty -or
             $okProperty.Value -isnot [bool] -or
             -not [bool]$okProperty.Value) {
-            throw "managed-hook teardown did not complete target $($row.connector)@$($row.sid)"
+            # The per-target cause is the only description of this failure; the
+            # report-level error below is not set for it. Control characters are
+            # folded so one row cannot restructure the message.
+            $rowError = [string]$row.error
+            $rowDetail = ''
+            if (-not [string]::IsNullOrWhiteSpace($rowError)) {
+                $rowDetail = ': ' + ($rowError -replace '[\x00-\x1f\x7f]', ' ')
+            }
+            throw "managed-hook teardown did not complete target $($row.connector)@$($row.sid)$rowDetail"
         }
     }
     if ([int]$probe.exit_code -ne 0 -or -not [bool]$report.ok) {
@@ -6378,7 +6610,7 @@ function Assert-DefenseClawServiceConfiguration {
         [Parameter(Mandatory)][string[]]$ExpectedPrivileges,
         [Parameter(Mandatory)][string[]]$ExpectedEnvironment,
         [ValidateSet(2, 3, 4)]
-        [int]$ExpectedStartMode = 2
+        [int[]]$ExpectedStartMode = @(2)
     )
     if (-not (Test-DefenseClawServiceExists -Name $Name)) {
         throw "required Windows service is missing: $Name"
@@ -6400,8 +6632,8 @@ function Assert-DefenseClawServiceConfiguration {
     if ([int]$properties.Type -ne 0x10) {
         throw "service $Name is not a Win32 own-process service: Type=$($properties.Type)"
     }
-    if ([int]$properties.Start -ne $ExpectedStartMode) {
-        throw "service $Name startup mode drift: $($properties.Start), expected $ExpectedStartMode"
+    if ([int]$properties.Start -notin $ExpectedStartMode) {
+        throw "service $Name startup mode drift: $($properties.Start), expected $($ExpectedStartMode -join ' or ')"
     }
     if ([int]$properties.ErrorControl -ne 1) {
         throw "service $Name ErrorControl drift: $($properties.ErrorControl)"
@@ -6446,8 +6678,12 @@ function Assert-DefenseClawServiceConfiguration {
         throw "service $Name has no readable SCM security descriptor"
     }
     $actualSDDL = ([string]$sddlLine).Trim()
-    if (-not [string]::Equals($actualSDDL, $script:ServiceSDDL, [StringComparison]::OrdinalIgnoreCase)) {
-        throw "service $Name DACL drift: $actualSDDL"
+    # sdshow returns the whole descriptor including the SCM-maintained audit
+    # section. ServiceSDDL is a DACL, so only the DACL portion is comparable.
+    $saclIndex = $actualSDDL.IndexOf('S:', [StringComparison]::OrdinalIgnoreCase)
+    $actualDACL = if ($saclIndex -ge 0) { $actualSDDL.Substring(0, $saclIndex) } else { $actualSDDL }
+    if (-not [string]::Equals($actualDACL, $script:ServiceSDDL, [StringComparison]::OrdinalIgnoreCase)) {
+        throw "service $Name DACL drift: $actualDACL"
     }
 }
 
@@ -6457,19 +6693,30 @@ function Assert-DefenseClawManagedServiceConfigurations {
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)][string]$GuardianServiceName,
         [switch]$PendingTransaction,
-        [switch]$ServicingTransaction
+        [switch]$ServicingTransaction,
+        [switch]$AnyStartMode
     )
     if ($PendingTransaction -and $ServicingTransaction) {
         throw 'service configuration assertion cannot be both pending-live and servicing'
     }
+    if ($AnyStartMode -and ($PendingTransaction -or $ServicingTransaction)) {
+        throw 'service configuration assertion cannot accept any start mode inside a transaction'
+    }
+    # Boot policy is not part of the authorization contract; ImagePath, account,
+    # SID type, privileges, environment, and the ACL surfaces are. Teardown
+    # accepts any supported mode so a disabled or manually started deployment
+    # stays removable.
     $expectedStartMode = if ($ServicingTransaction) {
-        4
+        @(4)
     }
     elseif ($PendingTransaction) {
-        3
+        @(3)
+    }
+    elseif ($AnyStartMode) {
+        @(2, 3, 4)
     }
     else {
-        2
+        @(2)
     }
     $gatewayEnvironment = [string[]]@(
         Get-DefenseClawServiceEnvironmentValues `
@@ -6524,7 +6771,7 @@ function Assert-DefenseClawManagedServiceConfigurations {
 function New-DefenseClawRequiredRights {
     param(
         [Parameter(Mandatory)]
-        [ValidateSet('Admin', 'Install', 'ServiceInstall', 'State', 'Config', 'MachinePolicy', 'AuthorizationDirectory', 'AuthorizationFile', 'Runtime')]
+        [ValidateSet('Admin', 'Install', 'ServiceInstall', 'State', 'ConfigDirectory', 'Config', 'MachinePolicy', 'AuthorizationDirectory', 'AuthorizationFile', 'Runtime')]
         [string]$Kind,
         [string]$GatewayServiceSID
     )
@@ -6540,6 +6787,9 @@ function New-DefenseClawRequiredRights {
             $required[$GatewayServiceSID] = [Security.AccessControl.FileSystemRights]::ReadAndExecute
         }
         'State' {
+            $required[$GatewayServiceSID] = [Security.AccessControl.FileSystemRights]::ReadAndExecute
+        }
+        'ConfigDirectory' {
             $required[$GatewayServiceSID] = [Security.AccessControl.FileSystemRights]::ReadAndExecute
         }
         'Config' {
@@ -6876,6 +7126,9 @@ function Assert-DefenseClawEnterpriseDeployment {
         -Kind ServiceInstall `
         -GatewayServiceSID $gatewaySID
     $stateRights = New-DefenseClawRequiredRights -Kind State -GatewayServiceSID $gatewaySID
+    $configDirectoryRights = New-DefenseClawRequiredRights `
+        -Kind ConfigDirectory `
+        -GatewayServiceSID $gatewaySID
     $configRights = New-DefenseClawRequiredRights -Kind Config -GatewayServiceSID $gatewaySID
     $authorizationDirectoryRights = New-DefenseClawRequiredRights `
         -Kind AuthorizationDirectory `
@@ -6930,7 +7183,6 @@ function Assert-DefenseClawEnterpriseDeployment {
     }
     $adminOnlyPaths = [Collections.Generic.List[string]]::new()
     foreach ($path in @(
-        $Layout.ConfigDirectory,
         $Layout.GuardianDirectory,
         $Layout.InstallStateDirectory,
         $Layout.ManifestPath,
@@ -6963,11 +7215,22 @@ function Assert-DefenseClawEnterpriseDeployment {
             -RequiredRights $adminRights `
             -RejectUntrustedRead
     }
+    foreach ($ancestor in @($Layout.StateRootAncestors)) {
+        Assert-DefenseClawStateAncestorTraverse `
+            -Path $ancestor `
+            -GatewayServiceSID $gatewaySID
+    }
     Assert-DefenseClawPathAcl `
         -Path $Layout.StateRoot `
         -AllowedWriterSIDs $adminWriters `
         -AllowedReaderSIDs $gatewayReaders `
         -RequiredRights $stateRights `
+        -RejectUntrustedRead
+    Assert-DefenseClawPathAcl `
+        -Path $Layout.ConfigDirectory `
+        -AllowedWriterSIDs $adminWriters `
+        -AllowedReaderSIDs $gatewayReaders `
+        -RequiredRights $configDirectoryRights `
         -RejectUntrustedRead
     Assert-DefenseClawPathAcl `
         -Path $Layout.ConfigPath `
@@ -7024,10 +7287,12 @@ function Assert-DefenseClawEnterpriseDeployment {
         throw 'deployment metadata is missing the installed CLI artifact hash'
     }
     foreach ($property in $metadata.hashes.PSObject.Properties) {
+        # Must cover every key the hash writer emits.
         $path = switch ($property.Name) {
             'gateway' { $Layout.GatewayPath }
             'hook' { $Layout.HookPath }
             'cli' { $Layout.CLIPath }
+            'codex_launcher' { $Layout.CodexTrustedHookLauncherPath }
             'installer' { $Layout.InstallerPath }
             'module' { $Layout.ModulePath }
             default { $null }
@@ -7369,9 +7634,7 @@ function Get-DefenseClawLifecycleStatus {
             $guardianReport = Get-DefenseClawGuardianStatusReport `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName
-            if ($null -ne $guardianReport -and $null -ne $guardianReport.state) {
-                $generation = [string]$guardianReport.state.updated_at
-            }
+            $generation = Get-DefenseClawGuardianGeneration -Report $guardianReport
         }
         catch {
             $errors.Add($_.Exception.Message)
@@ -7484,12 +7747,7 @@ function Wait-DefenseClawFreshGuardianReconcile {
     $priorReport = Get-DefenseClawGuardianStatusReport `
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName
-    $priorGeneration = if ($null -ne $priorReport -and $null -ne $priorReport.state) {
-        [string]$priorReport.state.updated_at
-    }
-    else {
-        ''
-    }
+    $priorGeneration = [string](Get-DefenseClawGuardianGeneration -Report $priorReport)
     # Guardian generation timestamps have one-second precision. Avoid
     # restarting in the same encoded second, which would make a genuinely new
     # LocalSystem reconcile look stale.
@@ -7509,8 +7767,11 @@ function Wait-DefenseClawFreshGuardianReconcile {
         $report = Get-DefenseClawGuardianStatusReport `
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName
-        if ($null -ne $report -and [bool]$report.ok -and $null -ne $report.state) {
-            $generation = [string]$report.state.updated_at
+        $reportOK = $null -ne $report -and
+            $null -ne $report.PSObject.Properties['ok'] -and
+            [bool]$report.ok
+        $generation = if ($reportOK) { Get-DefenseClawGuardianGeneration -Report $report } else { $null }
+        if ($null -ne $generation) {
             try {
                 $generationTime = [DateTime]::Parse(
                     $generation,
@@ -10270,7 +10531,8 @@ function Invoke-DefenseClawUninstallLifecycle {
     Assert-DefenseClawManagedServiceConfigurations `
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName `
-        -GuardianServiceName $GuardianServiceName
+        -GuardianServiceName $GuardianServiceName `
+        -AnyStartMode
     Assert-DefenseClawManagedInstallTree -Layout $Layout
     Assert-DefenseClawRecordedArtifactHashes `
         -Metadata $metadata `
@@ -10675,8 +10937,8 @@ function Invoke-DefenseClawEnterpriseLifecycle {
     if ($NoStart -and $Action -notin @('Install', 'Upgrade', 'Repair')) {
         throw '-NoStart is valid only with Install, Upgrade, or Repair'
     }
-    if ($AllowUnsigned -and $Action -notin @('Install', 'Upgrade', 'Repair')) {
-        throw '-AllowUnsigned is valid only with Install, Upgrade, or Repair'
+    if ($AllowUnsigned -and $Action -notin @('Install', 'Upgrade', 'Repair', 'Uninstall')) {
+        throw '-AllowUnsigned is valid only with Install, Upgrade, Repair, or Uninstall'
     }
     if ($CoreHardeningCertification -and
         $Action -notin @('Install', 'Upgrade', 'Repair')) {

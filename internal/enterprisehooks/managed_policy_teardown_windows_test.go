@@ -7,6 +7,55 @@ package enterprisehooks
 
 import "testing"
 
+// A Codex-only deployment tears down an empty Claude target set, and this gate
+// runs before the transaction opens.
+func TestValidateWindowsClaudeManagedPolicyTeardownOptionsAcceptsNoTargets(t *testing.T) {
+	original := windowsEnterpriseHookTrustCheck
+	windowsEnterpriseHookTrustCheck = func(string) error { return nil }
+	t.Cleanup(func() { windowsEnterpriseHookTrustCheck = original })
+
+	base := WindowsClaudeManagedPolicyTeardownOptions{
+		HookExecutable:     `C:\Program Files\DefenseClaw\bin\defenseclaw-hook.exe`,
+		GatewayAddr:        "127.0.0.1:18970",
+		GatewayServiceName: "DefenseClawGateway",
+	}
+	for name, empty := range map[string][]string{"nil": nil, "empty": {}} {
+		t.Run(name, func(t *testing.T) {
+			opts := base
+			opts.TargetSIDs = empty
+			targets, err := validateWindowsClaudeManagedPolicyTeardownOptions(opts)
+			if err != nil {
+				t.Fatalf("teardown with no Claude targets was rejected: %v", err)
+			}
+			if len(targets) != 0 {
+				t.Fatalf("expected no Claude targets, got %v", targets)
+			}
+		})
+	}
+
+	t.Run("invalid sid still rejected", func(t *testing.T) {
+		opts := base
+		opts.TargetSIDs = []string{"not-a-sid"}
+		if _, err := validateWindowsClaudeManagedPolicyTeardownOptions(opts); err == nil {
+			t.Fatal("an unparseable target SID was accepted")
+		}
+	})
+
+	// An empty set must not tear down a policy that exists.
+	t.Run("enrolled policy still requires its targets", func(t *testing.T) {
+		enrolled := windowsClaudeManagedPolicyState{
+			SchemaVersion:      2,
+			HookExecutable:     base.HookExecutable,
+			GatewayAddr:        base.GatewayAddr,
+			GatewayServiceName: base.GatewayServiceName,
+			TargetSIDs:         []string{"S-1-5-21-111-222-333-1001"},
+		}
+		if err := validateWindowsClaudeManagedPolicyTeardownState(enrolled, base, nil); err == nil {
+			t.Fatal("an enrolled Claude policy was accepted against an empty target set")
+		}
+	})
+}
+
 func TestValidateWindowsClaudeManagedPolicyTeardownStateExactIdentity(t *testing.T) {
 	targets := []string{"S-1-5-21-111-222-333-1001"}
 	opts := WindowsClaudeManagedPolicyTeardownOptions{

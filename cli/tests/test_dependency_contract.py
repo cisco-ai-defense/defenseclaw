@@ -47,13 +47,13 @@ RUNTIME_CONTRACT = {
 }
 
 WHEEL_SECURITY_FLOOR_CONTRACT = {
-    "cryptography": (">=48.0.1,<49", None),
+    "cryptography": (">=50.0.0,<51", None),
     "python-dotenv": (">=1.2.2", None),
     "python-multipart": (">=0.0.31", None),
     "urllib3": (">=2.7.0", None),
     "idna": (">=3.15", None),
     "pydantic-settings": (">=2.14.2", None),
-    "aiohttp": (">=3.14.1,<4", None),
+    "aiohttp": (">=3.14.3,<4", None),
     "pyjwt": (">=2.13.0", None),
     "starlette": (">=1.3.1,<1.4", None),
     "fastapi": (">=0.137.1,<0.138", None),

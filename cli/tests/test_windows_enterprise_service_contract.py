@@ -180,7 +180,32 @@ def test_packaging_defaults_to_protected_scm_identities_and_roots() -> None:
     assert "Assert-DefenseClawBootstrapModuleTrust" in installer
     assert "DefenseClaw enterprise installer rejected its module before import" in installer
     assert "AllowUnsigned = [bool](" in installer
-    assert "$AllowUnsigned -and $Action -in @('Install', 'Upgrade', 'Repair')" in installer
+    assert (
+        "$AllowUnsigned -and $Action -in @('Install', 'Upgrade', 'Repair', 'Uninstall')"
+        in installer
+    )
+    # The config directory carries a gateway-service read ACE, so the verifier
+    # must assert it against the gateway reader set. Listing it as
+    # administrator-only rejects the ACE the installer just wrote.
+    assert "-RequiredRights $configDirectoryRights" in module
+    assert (
+        "        -Path $Layout.ConfigDirectory `\n"
+        "        -AllowedWriterSIDs $adminWriters `\n"
+        "        -AllowedReaderSIDs $gatewayReaders `\n"
+        "        -RequiredRights $configDirectoryRights `\n"
+        "        -RejectUntrustedRead" in module
+    )
+    assert (
+        "    foreach ($path in @(\n"
+        "        $Layout.GuardianDirectory,\n"
+        "        $Layout.InstallStateDirectory,\n"
+        "        $Layout.ManifestPath,\n"
+        "        $Layout.LogDirectory,\n"
+        "        $Layout.GuardianLogDirectory,\n"
+        "        $Layout.MetadataPath,\n"
+        "        $Layout.CodexTrustedShellAttestationPath\n"
+        "    )) {" in module
+    )
     assert "Initialize-DefenseClawCodexMachinePolicyParent" in module
     assert "Invoke-DefenseClawCodexRequirementsCommand" in module
     assert "codex-requirements-ownership.json" in module
@@ -756,6 +781,7 @@ def test_certification_exercises_bounded_sparse_runtime_recovery() -> None:
                 "recovery_cases",
                 "quiescing_cases",
                 "uninstall_cases",
+                "shared_directory_cases",
             ),
         ),
         (
@@ -867,6 +893,16 @@ def test_windows_packaging_smokes_run_on_every_available_engine(
         assert report["recovery_cases"]
         assert report["quiescing_cases"]
         assert report["uninstall_cases"]
+        shared_directory_cases = {
+            case["name"]: case for case in report["shared_directory_cases"]
+        }
+        # Rollback must clear a directory holding only the transaction's own
+        # serialization lock, and must still refuse one holding anything else.
+        assert shared_directory_cases["empty"]["removed"] is True
+        assert shared_directory_cases["serialization-lock-only"]["removed"] is True
+        retained = shared_directory_cases["foreign-content-retained"]
+        assert retained["removed"] is False
+        assert "non-empty transaction-created shared directory" in retained["failure"]
     if script == BOOTSTRAP_SMOKE:
         assert report["raw_dos_device_medium_user"] is True
         assert [case["name"] for case in report["raw_dos_device_cases"]] == [
