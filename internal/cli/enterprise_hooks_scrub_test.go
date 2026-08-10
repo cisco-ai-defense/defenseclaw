@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -549,6 +550,29 @@ func TestExitCodeFor_HandlesAllContracts(t *testing.T) {
 		if rc := exitCodeFor(wrapped); rc != want {
 			t.Errorf("exitCodeFor(<wrapped rc %d>) = %d, want %d", want, rc, want)
 		}
+	}
+
+	// Concrete-type guard: unrelated types that happen to satisfy
+	// `interface{ ExitCode() int }` — most importantly
+	// *os/exec.ExitError from a spawned subprocess — MUST collapse
+	// to rc 1. A generic interface-based match would silently
+	// propagate the subprocess exit code as OUR exit code, which
+	// collides with our own well-defined statuses. Verified by
+	// running `/bin/sh -c 'exit 42'` and asserting exitCodeFor of
+	// the returned error stays at rc 1.
+	subprocErr := exec.Command("/bin/sh", "-c", "exit 42").Run()
+	if subprocErr == nil {
+		t.Fatalf("subprocess sanity check: expected non-nil error from `exit 42`")
+	}
+	// Sanity: subprocErr does implement ExitCode() int via
+	// *exec.ExitError, so this test would fail against the older
+	// generic-interface match. Confirm via a direct type assertion
+	// that this is the case we care about.
+	if _, ok := subprocErr.(*exec.ExitError); !ok {
+		t.Fatalf("subprocess sanity check: expected *exec.ExitError, got %T", subprocErr)
+	}
+	if rc := exitCodeFor(subprocErr); rc != 1 {
+		t.Errorf("exitCodeFor(*exec.ExitError rc 42) = %d, want 1 (subprocess exit codes must not leak into our contract)", rc)
 	}
 }
 

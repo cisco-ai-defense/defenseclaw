@@ -1452,6 +1452,37 @@ apply_ai_discovery_home_dirs() {
     return 1
   fi
 
+  # Resolve chained symlinks up-front so every downstream mktemp /
+  # atomic rename lands in the CONCRETE target's directory (not the
+  # link's parent dir on a different filesystem). rename(2) is atomic
+  # only within a single filesystem; a temp file in ~/.dotfiles/…
+  # renamed over a target under /Volumes/other-fs/… would fail with
+  # EXDEV. Resolving the whole chain before we create the temp files
+  # keeps the swap on the same fs as the concrete target.
+  #
+  # Bounded loop (max 16 hops, matching Linux MAXSYMLINKS) guards
+  # against symlink cycles. On a resolution error or cycle we fall
+  # back to the last resolvable path, and downstream mv will surface
+  # a concrete errno the operator can act on.
+  local target="${config_path}"
+  local __hop
+  for __hop in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16; do
+    [[ -L "${target}" ]] || break
+    local __link
+    __link="$(readlink -- "${target}" 2>/dev/null || true)"
+    if [[ -z "${__link}" ]]; then break; fi
+    case "${__link}" in
+      /*) target="${__link}" ;;
+      *)  target="$(dirname -- "${target}")/${__link}" ;;
+    esac
+  done
+  # If the resolved target is missing (broken symlink) fail loudly —
+  # we cannot safely mint a temp beside a path that doesn't exist.
+  if [[ ! -e "${target}" ]]; then
+    printf 'apply_ai_discovery_home_dirs: config path %s resolves to missing target: %s\n' "${config_path}" "${target}" >&2
+    return 1
+  fi
+
   # Collect homes from user_lines. Skip empty rows so the newline at
   # end of a heredoc-produced list doesn't produce a phantom entry.
   local -a homes=()
@@ -1479,8 +1510,10 @@ apply_ai_discovery_home_dirs() {
     done
   fi
 
+  # All tempfiles below live in the concrete target's directory so
+  # the final rename(2) is a same-filesystem atomic swap.
   local tmp
-  tmp="$(mktemp "${config_path}.hd.XXXXXX")" || return 1
+  tmp="$(mktemp "${target}.hd.XXXXXX")" || return 1
   # Rewrite the ai_discovery block with awk (no external runtime dep):
   #   - find `ai_discovery:` line
   #   - keep `enabled: true` and any other scalar children
@@ -1592,7 +1625,7 @@ apply_ai_discovery_home_dirs() {
       # with a distinct exit code the caller maps to a loud error.
       if (!seen_ai) exit 3
     }
-  ' "${config_path}" > "${tmp}"
+  ' "${target}" > "${tmp}"
   local rc=$?
   if (( rc == 3 )); then
     rm -f -- "${tmp}"
@@ -1611,9 +1644,9 @@ apply_ai_discovery_home_dirs() {
   # both the sed-escaping problem and the "awk -v cannot hold embedded
   # newlines" BSD limitation.
   local block_file tmp2
-  block_file="$(mktemp "${config_path}.hd-block.XXXXXX")" || { rm -f -- "${tmp}"; return 1; }
+  block_file="$(mktemp "${target}.hd-block.XXXXXX")" || { rm -f -- "${tmp}"; return 1; }
   printf '%s' "${block}" > "${block_file}"
-  tmp2="$(mktemp "${config_path}.hd2.XXXXXX")" || { rm -f -- "${tmp}" "${block_file}"; return 1; }
+  tmp2="$(mktemp "${target}.hd2.XXXXXX")" || { rm -f -- "${tmp}" "${block_file}"; return 1; }
   awk -v MARKER="${marker}" -v BLOCK_FILE="${block_file}" '
     BEGIN {
       block = ""
@@ -1633,45 +1666,47 @@ apply_ai_discovery_home_dirs() {
   fi
   tmp="${tmp2}"
 
-  # Symlink handling: if config_path is a symlink, resolve it and
-  # rename over the CONCRETE target so the symlink itself survives.
-  # Motivation: install.sh refuses symlinks under root-owned managed
-  # paths, so config.yaml is normally a regular file — but the
-  # enumerator daemon calls this helper on every tick and defense-
-  # in-depth against a hand-created symlink (bad admin, misapplied
-  # config-management, mid-migration state) is cheap. Renaming a
-  # temp file over a symlink would replace the link with a regular
-  # file, silently breaking whatever setup put the link there.
-  # macOS `readlink` returns the direct target only (no -f); resolve
-  # relative targets against the parent dir of the symlink.
-  local target="${config_path}"
-  if [[ -L "${config_path}" ]]; then
-    local link_target
-    link_target="$(readlink -- "${config_path}" 2>/dev/null || true)"
-    if [[ -n "${link_target}" ]]; then
-      case "${link_target}" in
-        /*) target="${link_target}" ;;
-        *)  target="$(dirname -- "${config_path}")/${link_target}" ;;
-      esac
-    fi
-  fi
-
   # Preserve mode + ownership from the existing target, then atomic-swap
   # only when the content actually changed so downstream reload
   # heuristics that watch mtime aren't triggered on a no-op tick.
   # `--reference` is a GNU coreutils extension not available on macOS
   # `chown`/`chmod`; the fallback uses `stat -f` to read the target's
   # existing owner/mode and re-apply them via the string form.
-  chown --reference="${target}" "${tmp}" 2>/dev/null || \
-    chown "$(stat -f '%Su:%Sg' "${target}")" "${tmp}"
-  chmod --reference="${target}" "${tmp}" 2>/dev/null || \
-    chmod "$(stat -f '%A' "${target}")" "${tmp}"
+  #
+  # Both fallbacks are gated on `[[ -e target ]]` so a target that
+  # vanished between the resolve step and this block (rare, but a
+  # concurrent unlink race is possible on shared home dirs) does not
+  # abort under `set -e` when `stat -f` returns an empty string that
+  # chown/chmod would then choke on. The `chown --reference` /
+  # `chmod --reference` GNU variants short-circuit the fallback via
+  # ||, so on Linux we never reach the guarded branch.
+  if ! chown --reference="${target}" "${tmp}" 2>/dev/null; then
+    if [[ -e "${target}" ]]; then
+      chown "$(stat -f '%Su:%Sg' "${target}")" "${tmp}"
+    fi
+  fi
+  if ! chmod --reference="${target}" "${tmp}" 2>/dev/null; then
+    if [[ -e "${target}" ]]; then
+      chmod "$(stat -f '%A' "${target}")" "${tmp}"
+    fi
+  fi
 
   if cmp -s "${tmp}" "${target}"; then
     rm -f -- "${tmp}"
     return 0
   fi
-  /bin/mv -f -- "${tmp}" "${target}"
+  # Check /bin/mv exit status so a rename failure (permissions,
+  # cross-fs EXDEV — should not happen given the upfront symlink
+  # resolution, but defense-in-depth — or a concurrent unlink) never
+  # silently reports success. On failure remove the temp and return
+  # non-zero. The explicit `return 0` after sync stops the function
+  # from returning `sync`'s exit status as its own; `sync` is
+  # best-effort and its rc must not decide the swap's outcome.
+  if ! /bin/mv -f -- "${tmp}" "${target}"; then
+    printf 'apply_ai_discovery_home_dirs: rename %s -> %s failed (%s)\n' "${tmp}" "${target}" "$?" >&2
+    rm -f -- "${tmp}"
+    return 1
+  fi
   # Endpoint-durability: flush pending disk writes so the rename
   # survives a kernel panic / laptop-lid-close / power-drop
   # immediately after. Without this, a mid-boot crash between the
@@ -1682,6 +1717,7 @@ apply_ai_discovery_home_dirs() {
   # but always available. Best-effort — never causes the rewrite to
   # fail.
   sync 2>/dev/null || true
+  return 0
 }
 
 # ---- legacy path relocation --------------------------------------------

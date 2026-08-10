@@ -164,23 +164,36 @@ func Execute() int {
 //
 // Contract:
 //
-//   - err == nil                        -> rc 0
-//   - err implements `ExitCode() int`   -> that code (walks wrap chain
-//     via errors.As so `fmt.Errorf("...: %w", exitErr)` still lands
-//     the right rc — a bare type assertion would collapse wrapped
-//     exit-coded errors to rc 1 and silently break shell callers that
-//     branch on specific statuses)
-//   - anything else                     -> rc 1
+//   - err == nil                       -> rc 0
+//   - err chain contains a
+//     *scrubExitError                  -> that specific exit code
+//   - anything else                    -> rc 1
 //
-// Shell callers key off exact codes (uninstall.sh: rc 2 = missing
-// file, rc 3 = unknown connector, rc 4 = parse failure), so this
-// mapping is load-bearing — hence the helper + dedicated test.
+// Matched against the CONCRETE type (*scrubExitError) rather than a
+// generic `interface{ ExitCode() int }` on purpose. Go's stdlib
+// exposes several unrelated error types that satisfy the same
+// interface — most importantly *os/exec.ExitError (returned when a
+// spawned subprocess exits non-zero). If a future RunE calls out to
+// a helper binary and returns the resulting *exec.ExitError up the
+// chain, an interface-based match would silently propagate that
+// subprocess's exit code as OUR exit code (e.g. rc 127 = "command
+// not found" from a broken PATH, rc 2 from unrelated tools) —
+// meaningless in DefenseClaw's contract and prone to colliding with
+// our own well-defined codes (uninstall.sh: rc 2 = missing file, rc
+// 3 = unknown connector, rc 4 = parse failure). Anchoring on the
+// concrete type keeps the contract auditable: exit-code propagation
+// requires an explicit scrubExitError construction, never a
+// coincidental interface satisfaction.
+//
+// errors.As still walks the wrap chain so
+// `fmt.Errorf("context: %w", scrubExitErr)` continues to propagate
+// correctly — the concrete-type constraint only affects what
+// counts as a "carrier".
 func exitCodeFor(err error) int {
 	if err == nil {
 		return 0
 	}
-	type exitCoded interface{ ExitCode() int }
-	var ec exitCoded
+	var ec *scrubExitError
 	if errors.As(err, &ec) {
 		return ec.ExitCode()
 	}

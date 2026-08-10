@@ -348,6 +348,32 @@ _scrub_bin_trusted() {
     warn "${label} must be owned by root (got: ${_own}): ${path}; ignoring"
     return 1
   fi
+  # Strict tier: validate the containing directory too. A binary
+  # can be root-owned + 0755 and still be swap-hijackable if the
+  # DIRECTORY it lives in is writable by a non-root user — that
+  # user can `mv the-file another; touch the-file` and replace the
+  # trusted binary at will. The bundle-fixture tier stays exempt
+  # because its extraction directory inherits the operator's uid
+  # (documented in the installer's PLIST_SRC two-tier policy).
+  if [[ "${allow_non_root_owner}" != "true" ]]; then
+    local _dir _dir_own_mode _dir_own _dir_mode
+    _dir="$(dirname -- "${path}")"
+    _dir_own_mode="$(stat -f '%Su %Lp' "${_dir}" 2>/dev/null || echo '')"
+    if [[ -z "${_dir_own_mode}" ]]; then
+      warn "${label} containing dir cannot be stat'd: ${_dir}; ignoring"
+      return 1
+    fi
+    _dir_own="${_dir_own_mode%% *}"
+    _dir_mode="${_dir_own_mode##* }"
+    if [[ "${_dir_own}" != "root" ]]; then
+      warn "${label} containing dir must be owned by root (got: ${_dir_own}): ${_dir}; ignoring"
+      return 1
+    fi
+    if (( (8#${_dir_mode} & 8#022) != 0 )); then
+      warn "${label} containing dir is group/other writable (mode ${_dir_mode}): ${_dir}; ignoring"
+      return 1
+    fi
+  fi
   printf '%s' "${path}"
   return 0
 }
