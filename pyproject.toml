@@ -143,8 +143,9 @@ default-groups = ["dev"]
 # cisco-ai-skill-scanner 2.0.6 pins rich==14.2.0 but also pins
 override-dependencies = [
     "rich>=13.7.1,<14.0.0",
-    # CVE-2026-39892 fixed in 46.0.7; GHSA-537c-gmf6-5ccf fixed in 48.0.1.
-    "cryptography>=48.0.1,<49",
+    # CVE-2026-39892 fixed in 46.0.7; GHSA-537c-gmf6-5ccf fixed in 48.0.1;
+    # PYSEC-2026-3552 / -3553 / -3554 fixed in 50.0.0.
+    "cryptography>=50.0.0,<51",
     # CVE-2026-40217 fixed in 1.83.10; CVE-2026-49468 fixed in 1.84.0.
     # LiteLLM 1.92.0 has no portable wheel, so keep supported installers on
     # the reviewed wheel line until upstream restores Windows/macOS artifacts.
@@ -169,7 +170,7 @@ override-dependencies = [
     # CVE-2026-34513..34520, CVE-2026-34525); 3.14.0 additionally fixes
     # CVE-2026-34993 and CVE-2026-47265; 3.14.1 fixes CVE-2026-54273..54280.
     # LiteLLM's transitive pin floats aiohttp downward without this override.
-    "aiohttp>=3.14.1,<4",
+    "aiohttp>=3.14.3,<4",
     # pyjwt 2.13.0 fixes PYSEC-2026-175, PYSEC-2026-177, PYSEC-2026-178 and
     # PYSEC-2026-179. Pulled in transitively; pin it forward so the audit
     # stays clean.
