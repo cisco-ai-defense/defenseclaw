@@ -18,6 +18,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -159,10 +160,17 @@ Run without arguments to start the sidecar daemon.`,
 // for the pattern) — those are propagated verbatim so shell callers can
 // key off exact statuses (e.g. uninstall.sh treats scrub rc 2 = missing
 // file, rc 3 = unknown connector). Anything else stays at rc 1.
+//
+// Uses `errors.As` rather than a direct type assertion so a future
+// wrapper (`fmt.Errorf("scrub: %w", err)` for context) still lands the
+// right numeric code. A bare type assertion would collapse a wrapped
+// exit-coded error to rc 1 and silently break shell callers that
+// branch on the specific rc.
 func Execute() int {
 	if err := rootCmd.Execute(); err != nil {
 		type exitCoded interface{ ExitCode() int }
-		if ec, ok := err.(exitCoded); ok {
+		var ec exitCoded
+		if errors.As(err, &ec) {
 			return ec.ExitCode()
 		}
 		return 1

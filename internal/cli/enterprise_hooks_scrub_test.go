@@ -7,6 +7,7 @@ package cli
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -505,6 +506,29 @@ func TestScrubReturnsRC4OnBrokenJSON(t *testing.T) {
 	}
 	if exitErr.ExitCode() != 4 {
 		t.Errorf("exit code = %d, want 4", exitErr.ExitCode())
+	}
+}
+
+// TestExitCodedErrorSurvivesWrapping guards the contract that
+// `cli.Execute` uses `errors.As` to unwrap `scrubExitError` from
+// arbitrary wrapping chains. A direct type assertion would collapse
+// a `fmt.Errorf("context: %w", exitErr)` back to rc 1 and silently
+// break shell callers (uninstall.sh) that branch on the specific
+// numeric code. This test constructs a wrapped error chain and
+// asserts the exit code is still recoverable via `errors.As`.
+func TestExitCodedErrorSurvivesWrapping(t *testing.T) {
+	inner := &scrubExitError{code: 2, msg: "missing file"}
+	// Two levels of wrapping — mirror any future
+	// fmt.Errorf("context: %w", err) sites that could appear on the
+	// return path from a RunE without breaking exit-code propagation.
+	wrapped := fmt.Errorf("outer: %w", fmt.Errorf("inner: %w", inner))
+	type exitCoded interface{ ExitCode() int }
+	var ec exitCoded
+	if !errors.As(wrapped, &ec) {
+		t.Fatalf("errors.As failed to unwrap scrubExitError through two %%w layers: %v", wrapped)
+	}
+	if ec.ExitCode() != 2 {
+		t.Errorf("wrapped exit code = %d, want 2", ec.ExitCode())
 	}
 }
 
