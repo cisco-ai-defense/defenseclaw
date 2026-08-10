@@ -24,9 +24,10 @@
 //   - All three endpoints are gated by tokenAuth + apiCSRFProtect
 //     (the same chain as /api/v1/codex/hook). Unauthenticated POSTs
 //     are rejected upstream of this handler.
-//   - Body size is capped by maxBodyMiddleware (1 MiB). The OTLP
-//     spec recommends batching; one MiB covers roughly 50-100 log
-//     records or 500-1000 metric data points per batch.
+//   - Body size is capped by apiBodyLimitMiddleware (64 MiB), following the
+//     OTLP-HTTP receiver recommendation and matching the observability
+//     pipeline's supported maximum export batch size. The rest of the
+//     state-changing API retains its 1 MiB request limit.
 //   - Payload parsing failures emit content-free mandatory v8 health evidence
 //     and still return OTLP success; retrying the same bad batch would only
 //     create gateway load and noisier telemetry.
