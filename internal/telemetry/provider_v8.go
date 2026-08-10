@@ -630,7 +630,7 @@ func newProviderV8Inactive(
 		}
 	}
 	var composite *v8CompositeSpanProcessor
-	if len(pipelines.SpanPipelines) > 0 {
+	if len(traceCollect) > 0 {
 		var compositeErr error
 		composite, compositeErr = newV8CompositeSpanProcessor(
 			generation, v8DefaultCanonicalSpanHandoffCapacity, pipelines.SpanPipelines,

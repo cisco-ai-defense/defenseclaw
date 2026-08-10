@@ -470,13 +470,14 @@ func newV8CompositeSpanProcessor(
 	capacity int,
 	pipelines []V8GenerationSpanPipeline,
 ) (*v8CompositeSpanProcessor, error) {
-	if len(pipelines) == 0 {
-		return nil, errors.New("telemetry: empty v8 span pipelines")
-	}
 	cloned := append([]V8GenerationSpanPipeline(nil), pipelines...)
 	if !validV8SpanPipelines(cloned) {
 		return nil, errors.New("telemetry: invalid v8 span pipelines")
 	}
+	// Collection and destination selection are independent. Keep the canonical
+	// handoff processor even when no trace destination is selected so a sampled,
+	// locally collected span can finish without pretending that the provider is
+	// unavailable. OnEnd consumes the handoff and the empty fan-out is a no-op.
 	return &v8CompositeSpanProcessor{
 		pipelines: cloned,
 		handoff:   newV8SpanHandoff(generation, capacity, v8DefaultCanonicalSpanHandoffBytes),
