@@ -552,7 +552,24 @@ function Test-CanonicalConnectorRecord([AllowNull()][object]$Record, [string]$Na
         [string]::Equals($connector, $Name, [StringComparison]::OrdinalIgnoreCase)
 }
 
-function Test-ConnectorEvent([string]$Path, [string]$Name, [int]$Since) {
+function Test-ConnectorEvent(
+    [string]$Path,
+    [string]$Name,
+    [int]$Since,
+    [string]$SessionID = '',
+    [string]$HookEvent = '',
+    [string]$RequestID = ''
+) {
+    if (-not [string]::IsNullOrWhiteSpace($SessionID) -or
+        -not [string]::IsNullOrWhiteSpace($HookEvent) -or
+        -not [string]::IsNullOrWhiteSpace($RequestID)) {
+        $decision = Get-LatestHookDecision `
+            -Path $Path -Name $Name -Since $Since `
+            -SessionID $SessionID -HookEvent $HookEvent
+        if ($null -eq $decision) { return $false }
+        return [string]::IsNullOrWhiteSpace($RequestID) -or
+            [string]$decision.request_id -ceq $RequestID
+    }
     $lines = @(Get-EventLines $Path)
     if ($Since -ge $lines.Count) { return $false }
     foreach ($line in $lines[$Since..($lines.Count - 1)]) {
@@ -563,13 +580,28 @@ function Test-ConnectorEvent([string]$Path, [string]$Name, [int]$Since) {
     return $false
 }
 
-function Test-BlockVerdict([string]$Path, [int]$Since) {
+function Test-BlockVerdict(
+    [string]$Path,
+    [int]$Since,
+    [string]$Name = '',
+    [string]$RequestID = ''
+) {
     $lines = @(Get-EventLines $Path)
     if ($Since -ge $lines.Count) { return $false }
     foreach ($line in $lines[$Since..($lines.Count - 1)]) {
         try {
             $eventRecord = $line | ConvertFrom-Json
             if ((Get-JsonPropertyValue $eventRecord 'schema_version') -ne 1) { continue }
+            if (-not [string]::IsNullOrWhiteSpace($Name) -and
+                -not (Test-CanonicalConnectorRecord $eventRecord $Name)) {
+                continue
+            }
+            if (-not [string]::IsNullOrWhiteSpace($RequestID)) {
+                $correlation = Get-JsonPropertyValue $eventRecord 'correlation'
+                if ([string](Get-JsonPropertyValue $correlation 'request_id') -cne $RequestID) {
+                    continue
+                }
+            }
             $eventName = [string](Get-JsonPropertyValue $eventRecord 'event_name')
             $bucket = [string](Get-JsonPropertyValue $eventRecord 'bucket')
             $body = Get-JsonPropertyValue $eventRecord 'body'
@@ -596,14 +628,46 @@ function Wait-GatewayEvidenceAfter(
     [string]$Name,
     [int]$Since,
     [bool]$RequireBlock,
-    [int]$TimeoutMilliseconds = 5000
+    [int]$TimeoutMilliseconds = 5000,
+    [string]$SessionID = '',
+    [string]$HookEvent = ''
 ) {
     $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
     $connectorEvent = $false
     $blockVerdict = $false
+    $requestID = ''
+    $hasHookIdentity = -not [string]::IsNullOrWhiteSpace($SessionID) -or
+        -not [string]::IsNullOrWhiteSpace($HookEvent)
     do {
-        $connectorEvent = Test-ConnectorEvent $Path $Name $Since
-        $blockVerdict = Test-BlockVerdict $Path $Since
+        $decision = $null
+        if ($hasHookIdentity) {
+            $decision = Get-LatestHookDecision `
+                -Path $Path -Name $Name -Since $Since `
+                -SessionID $SessionID -HookEvent $HookEvent
+            if ($null -ne $decision) {
+                $requestID = [string]$decision.request_id
+                $connectorEvent = Test-ConnectorEvent `
+                    -Path $Path -Name $Name -Since $Since `
+                    -SessionID $SessionID -HookEvent $HookEvent -RequestID $requestID
+            } else {
+                $connectorEvent = $false
+            }
+        } else {
+            $connectorEvent = Test-ConnectorEvent -Path $Path -Name $Name -Since $Since
+        }
+        if ($RequireBlock) {
+            if ($hasHookIdentity) {
+                if ($null -ne $decision -and
+                    [string]$decision.raw_action -cin @('block', 'deny') -and
+                    ([bool]$decision.enforced -or [bool]$decision.would_block) -and
+                    -not [string]::IsNullOrWhiteSpace($requestID)) {
+                    $blockVerdict = Test-BlockVerdict `
+                        -Path $Path -Since $Since -Name $Name -RequestID $requestID
+                }
+            } else {
+                $blockVerdict = Test-BlockVerdict -Path $Path -Since $Since -Name $Name
+            }
+        }
         if ($connectorEvent -and (-not $RequireBlock -or $blockVerdict)) { break }
         if ([DateTime]::UtcNow -ge $deadline) { break }
         Start-Sleep -Milliseconds 100
@@ -612,6 +676,7 @@ function Wait-GatewayEvidenceAfter(
     return [pscustomobject][ordered]@{
         ConnectorEvent = $connectorEvent
         BlockVerdict = $blockVerdict
+        RequestID = $requestID
     }
 }
 
@@ -1214,9 +1279,15 @@ function Invoke-Teardown {
 
 function Invoke-Hook([string]$EventName, [string]$Payload, [ValidateSet('allow', 'block')][string]$Expected, [bool]$RequireGatewayBlock = $false) {
     $before = @(Get-EventLines $script:GatewayJsonl).Count
+    $payloadObject = [IO.File]::ReadAllText($Payload) | ConvertFrom-Json -ErrorAction Stop
+    $sessionID = [string](Get-JsonPropertyValue $payloadObject 'session_id')
+    $hookEvent = [string](Get-JsonPropertyValue $payloadObject 'hook_event_name')
+    if ([string]::IsNullOrWhiteSpace($hookEvent)) { $hookEvent = $EventName }
     $result = Invoke-Tool (Resolve-ContractHookTool) @('hook', '--connector', $Connector, '--event', $EventName) @(0, 2) -InputPath $Payload
     $requireBlockEvidence = $Expected -eq 'block' -or $RequireGatewayBlock
-    $evidence = Wait-GatewayEvidenceAfter $script:GatewayJsonl $Connector $before $requireBlockEvidence
+    $evidence = Wait-GatewayEvidenceAfter `
+        -Path $script:GatewayJsonl -Name $Connector -Since $before `
+        -RequireBlock $requireBlockEvidence -SessionID $sessionID -HookEvent $hookEvent
     if (-not $evidence.ConnectorEvent) { throw "$EventName did not reach the gateway" }
     if ($Expected -eq 'allow' -and $result.ExitCode -ne 0) { throw "$EventName should allow but exited $($result.ExitCode)" }
     if ($Expected -eq 'block' -and $result.ExitCode -ne 2 -and $result.StdOut -notmatch '(?i)block|deny') { throw "$EventName did not shape a block decision" }

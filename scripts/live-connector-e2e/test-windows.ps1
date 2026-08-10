@@ -820,6 +820,8 @@ private-secret-name = "DefenseClaw must remain redacted"
     $jsonl = Join-Path $temp 'gateway.jsonl'
     $database = Join-Path $temp 'audit.db'
     $requestId = [guid]::NewGuid().ToString()
+    $sessionId = 'windows-contract-session'
+    $hookEvent = 'PreToolUse'
     $observedAt = [DateTime]::UtcNow.ToString('o')
     $provenance = [ordered]@{
         producer = 'defenseclaw'
@@ -832,7 +834,7 @@ private-secret-name = "DefenseClaw must remain redacted"
             schema_version = 1; bucket_catalog_version = 1; timestamp = $observedAt
             record_id = 'windows-contract-verdict'; bucket = 'asset.scan'; signal = 'logs'
             event_name = 'scan.completed'; source = 'scanner'; connector = 'codex'
-            correlation = @{ request_id = $requestId }; provenance = $provenance; field_classes = @{}
+            correlation = @{ request_id = $requestId; session_id = $sessionId }; provenance = $provenance; field_classes = @{}
             mandatory = $false
             body = @{
                 'defenseclaw.scan.verdict' = 'block'
@@ -842,7 +844,7 @@ private-secret-name = "DefenseClaw must remain redacted"
             schema_version = 1; bucket_catalog_version = 1; timestamp = $observedAt
             record_id = 'windows-contract-hook-decision'; bucket = 'guardrail.evaluation'; signal = 'logs'
             event_name = 'hook_decision'; source = 'connector'; connector = 'codex'
-            correlation = @{ request_id = $requestId }; provenance = $provenance; field_classes = @{}
+            correlation = @{ request_id = $requestId; session_id = $sessionId }; provenance = $provenance; field_classes = @{}
             mandatory = $false
             body = @{
                 'defenseclaw.guardrail.effective_action' = 'allow'
@@ -851,13 +853,14 @@ private-secret-name = "DefenseClaw must remain redacted"
                 'defenseclaw.guardrail.would_block' = $true
                 'defenseclaw.guardrail.enforced' = $false
                 'defenseclaw.guardrail.rule_ids' = @('CMD-WIN-REMOVE-ITEM-RF')
+                'defenseclaw.hook.event' = $hookEvent
             }
         },
         [ordered]@{
             schema_version = 1; bucket_catalog_version = 1; timestamp = $observedAt
             record_id = 'windows-contract-tool'; bucket = 'tool.activity'; signal = 'logs'
             event_name = 'tool.invocation.requested'; source = 'connector'; connector = 'codex'
-            correlation = @{ request_id = $requestId }; provenance = $provenance; field_classes = @{}
+            correlation = @{ request_id = $requestId; session_id = $sessionId }; provenance = $provenance; field_classes = @{}
             mandatory = $false; body = @{}
         },
         [ordered]@{
@@ -894,23 +897,61 @@ private-secret-name = "DefenseClaw must remain redacted"
     Assert-True ($LASTEXITCODE -eq 0) 'mock audit correlation'
     Assert-True (Test-ConnectorEvent $jsonl 'codex' 0) 'connector event seam'
     Assert-True (-not (Test-ConnectorEvent $jsonl 'claudecode' 0)) 'connector event seam ignores body-text false positives'
+    Assert-True (Test-ConnectorEvent `
+        -Path $jsonl -Name 'codex' -Since 0 -SessionID $sessionId -HookEvent $hookEvent) `
+        'connector event seam accepts the matching hook identity'
+    Assert-True (-not (Test-ConnectorEvent `
+        -Path $jsonl -Name 'codex' -Since 0 -SessionID 'unrelated-session' -HookEvent $hookEvent)) `
+        'connector event seam rejects an unrelated hook identity'
+    Assert-True (-not (Test-ConnectorEvent `
+        -Path $jsonl -Name 'codex' -Since 0 -SessionID $sessionId -HookEvent $hookEvent `
+        -RequestID 'unrelated-request')) `
+        'connector event seam rejects an unrelated request identity'
     Assert-True (Test-BlockVerdict $jsonl 0) 'block verdict seam'
     Assert-True (-not (Test-BlockVerdict $jsonl 1)) 'block verdict seam rejects hook decisions and non-canonical scan deny values'
+    Assert-True (Test-BlockVerdict `
+        -Path $jsonl -Since 0 -Name 'codex' -RequestID $requestId) `
+        'block verdict seam accepts the matching request identity'
+    Assert-True (-not (Test-BlockVerdict `
+        -Path $jsonl -Since 0 -Name 'codex' -RequestID 'unrelated-request')) `
+        'block verdict seam rejects an unrelated request identity'
     $delayedJsonl = Join-Path $temp 'delayed-gateway-evidence.jsonl'
     [IO.File]::WriteAllText($delayedJsonl, '')
-    $delayedWriter = Start-Job -ArgumentList $delayedJsonl, $fixtureEvents[2], $fixtureEvents[0] -ScriptBlock {
-        param($Path, $ConnectorEvent, $BlockVerdict)
+    $unrelatedDecision = $fixtureEvents[1] | ConvertFrom-Json -ErrorAction Stop
+    $unrelatedDecision.record_id = 'windows-contract-unrelated-hook-decision'
+    $unrelatedDecision.correlation.request_id = 'unrelated-request'
+    $unrelatedDecision.correlation.session_id = 'unrelated-session'
+    $unrelatedVerdict = $fixtureEvents[0] | ConvertFrom-Json -ErrorAction Stop
+    $unrelatedVerdict.record_id = 'windows-contract-unrelated-verdict'
+    $unrelatedVerdict.correlation.request_id = 'unrelated-request'
+    $unrelatedVerdict.correlation.session_id = 'unrelated-session'
+    $delayedWriter = Start-Job -ArgumentList @(
+        $delayedJsonl,
+        ($unrelatedDecision | ConvertTo-Json -Depth 8 -Compress),
+        ($unrelatedVerdict | ConvertTo-Json -Depth 8 -Compress),
+        $fixtureEvents[1],
+        $fixtureEvents[0]
+    ) -ScriptBlock {
+        param($Path, $UnrelatedDecision, $UnrelatedVerdict, $CurrentDecision, $CurrentVerdict)
         Start-Sleep -Milliseconds 100
-        [IO.File]::AppendAllText($Path, $ConnectorEvent + [Environment]::NewLine)
+        [IO.File]::AppendAllText($Path, $UnrelatedDecision + [Environment]::NewLine)
+        [IO.File]::AppendAllText($Path, $UnrelatedVerdict + [Environment]::NewLine)
         Start-Sleep -Milliseconds 1000
-        [IO.File]::AppendAllText($Path, $BlockVerdict + [Environment]::NewLine)
+        [IO.File]::AppendAllText($Path, $CurrentDecision + [Environment]::NewLine)
+        Start-Sleep -Milliseconds 100
+        [IO.File]::AppendAllText($Path, $CurrentVerdict + [Environment]::NewLine)
     }
     try {
-        $delayedEvidence = Wait-GatewayEvidenceAfter $delayedJsonl 'codex' 0 $true 5000
-        Wait-Job $delayedWriter | Out-Null
+        $delayedEvidence = Wait-GatewayEvidenceAfter `
+            -Path $delayedJsonl -Name 'codex' -Since 0 -RequireBlock $true `
+            -TimeoutMilliseconds 5000 -SessionID $sessionId -HookEvent $hookEvent
+        Wait-Job -Job $delayedWriter -Timeout 10 | Out-Null
+        Assert-True ($delayedWriter.State -eq 'Completed') `
+            'delayed gateway evidence writer completed within the bounded wait'
         Receive-Job $delayedWriter -ErrorAction Stop | Out-Null
-        Assert-True ($delayedEvidence.ConnectorEvent -and $delayedEvidence.BlockVerdict) `
-            'gateway evidence polling tolerates a block verdict delayed beyond the former fixed wait'
+        Assert-True ($delayedEvidence.ConnectorEvent -and $delayedEvidence.BlockVerdict -and
+            [string]$delayedEvidence.RequestID -ceq $requestId) `
+            'gateway evidence polling ignores delayed unrelated records and waits for the matching hook request'
     } finally {
         Stop-Job $delayedWriter -ErrorAction SilentlyContinue
         Remove-Job $delayedWriter -Force -ErrorAction SilentlyContinue
@@ -1040,8 +1081,10 @@ private-secret-name = "DefenseClaw must remain redacted"
         '(?s)function Invoke-Hook\b.*?(?=\r?\nfunction )'
     ).Value
     Assert-True ($invokeHookFunction -match 'Wait-GatewayEvidenceAfter' -and
+        $invokeHookFunction -match '-SessionID \$sessionID' -and
+        $invokeHookFunction -match '-HookEvent \$hookEvent' -and
         $invokeHookFunction -notmatch 'Start-Sleep -Milliseconds 800') `
-        'hook evidence uses bounded polling instead of a fixed 800ms delay'
+        'hook evidence uses identity-scoped bounded polling instead of a fixed 800ms delay'
     Assert-True ($nativeWorkflowText -match '(?s)connector-contract:.*?connector: \[codex, claudecode, amp\].*?windows-native-required:') `
         'required Windows contract matrix contains Codex, Claude Code, and Amp'
     Assert-True ($nativeWorkflowText -match '(?m)^\s+name: Windows Native Required\s*$') 'stable aggregate check name exists'

@@ -54,7 +54,7 @@ def test_ci_shards_python_once_and_does_not_repeat_unified_corpus() -> None:
 
 def test_ci_preserves_make_test_context_without_repeating_test_work() -> None:
     workflow_text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
-    jobs = yaml.load(workflow_text, Loader=yaml.BaseLoader)["jobs"]
+    jobs = yaml.safe_load(workflow_text)["jobs"]
 
     aggregate = jobs["make-test"]
     assert aggregate["name"] == "make test (unified)"
@@ -62,14 +62,26 @@ def test_ci_preserves_make_test_context_without_repeating_test_work() -> None:
     assert aggregate["if"] == "${{ always() }}"
     assert aggregate["runs-on"] == "ubuntu-latest"
     assert len(aggregate["steps"]) == 1
-    assert not any("uses" in step for step in aggregate["steps"])
+    step = aggregate["steps"][0]
+    assert set(step) == {"name", "env", "run"}
+    assert step["name"] == "Require unified Go and Python test gates"
+    assert step["env"] == {
+        "GO_TEST_RESULT": "${{ needs.go-test.result }}",
+        "PYTHON_TEST_RESULT": "${{ needs.python-lint-test.result }}",
+    }
+    assert step["run"].splitlines() == [
+        "set -euo pipefail",
+        'test "$GO_TEST_RESULT" = success',
+        'test "$PYTHON_TEST_RESULT" = success',
+    ]
 
-    rendered = str(aggregate)
-    assert "needs.go-test.result" in rendered
-    assert "needs.python-lint-test.result" in rendered
-    assert 'test "$GO_TEST_RESULT" = success' in rendered
-    assert 'test "$PYTHON_TEST_RESULT" = success' in rendered
-    assert "run: make test" not in workflow_text
+    run_steps = [
+        step["run"]
+        for job in jobs.values()
+        for step in job.get("steps", [])
+        if "run" in step
+    ]
+    assert all("make test" not in run for run in run_steps)
 
 
 def test_ci_shards_slow_gateway_package_and_combines_go_coverage() -> None:
