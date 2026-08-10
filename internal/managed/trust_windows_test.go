@@ -229,6 +229,40 @@ func TestWindowsAncestorAllowsCreateOnlyButRejectsReplacementRights(t *testing.T
 	}
 }
 
+// Stock system roots grant these rights to BUILTIN\Users and Authenticated
+// Users, so both keep the relaxed ancestor rule. Everyone answers to the leaf rule.
+func TestWindowsAncestorHoldsEveryoneToTheLeafRule(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		trustee string
+		wantErr bool
+	}{
+		{name: "builtin users create only", trustee: "S-1-5-32-545"},
+		{name: "authenticated users create only", trustee: "S-1-5-11"},
+		{name: "everyone create only", trustee: "S-1-1-0", wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			descriptor, err := windows.SecurityDescriptorFromString(
+				"D:P(A;;0x00000003;;;" + test.trustee + ")(A;;GA;;;BA)",
+			)
+			if err != nil {
+				t.Fatalf("SecurityDescriptorFromString: %v", err)
+			}
+			dacl, _, err := descriptor.DACL()
+			if err != nil {
+				t.Fatalf("DACL: %v", err)
+			}
+			err = rejectUntrustedWindowsWriteACEsWithWriter("ancestor", dacl, nil, true)
+			if test.wantErr && err == nil {
+				t.Fatal("world-wide ancestor write grant accepted")
+			}
+			if !test.wantErr && err != nil {
+				t.Fatalf("stock BUILTIN\\Users ancestor grant rejected: %v", err)
+			}
+		})
+	}
+}
+
 func TestWindowsDefaultKnownFolderAncestorsAreTrusted(t *testing.T) {
 	for _, envName := range []string{"ProgramFiles", "ProgramData"} {
 		path := os.Getenv(envName)

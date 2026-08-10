@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -133,7 +134,9 @@ func setEnterpriseWindowsRuntimeProtection(path string, owner, serviceSID *windo
 		windows.GENERIC_WRITE |
 		windows.GENERIC_EXECUTE |
 		windows.DELETE
-	return setEnterpriseWindowsManagedProtection(path, owner, serviceSID, serviceModify, directory)
+	return enterprisehooks.RunWithWindowsOwnerRestorePrivilege(func() error {
+		return setEnterpriseWindowsManagedProtection(path, owner, serviceSID, serviceModify, directory)
+	})
 }
 
 func setEnterpriseWindowsManagedProtection(

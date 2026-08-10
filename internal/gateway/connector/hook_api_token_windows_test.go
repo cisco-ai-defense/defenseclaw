@@ -24,19 +24,31 @@ func TestHookAPIWindowsTrustUsesEffectiveImpersonatedUserSID(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	previous := hookAPIWindowsEffectiveUserSID
-	hookAPIWindowsEffectiveUserSID = func() (*windows.SID, error) {
-		return targetSID, nil
-	}
-	t.Cleanup(func() { hookAPIWindowsEffectiveUserSID = previous })
+	pinWindowsEffectiveUserSIDForTest(t, targetSID)
 	if !hookAPIWindowsTrustedPrincipal(targetSID) {
 		t.Fatal("effective impersonated user SID was not trusted")
 	}
-	hookAPIWindowsEffectiveUserSID = func() (*windows.SID, error) {
+	previous := windowsEffectiveUserSID
+	windowsEffectiveUserSID = func() (*windows.SID, error) {
 		return nil, errors.New("thread token unavailable")
 	}
+	t.Cleanup(func() { windowsEffectiveUserSID = previous })
 	if hookAPIWindowsTrustedPrincipal(targetSID) {
 		t.Fatal("effective-token lookup failure trusted a non-system target SID")
+	}
+}
+
+// A thread token can be installed outside managed mode, so trust follows the
+// effective user rather than the deployment mode.
+func TestHookAPIWindowsTrustUsesEffectiveUserSIDOutsideManagedMode(t *testing.T) {
+	t.Setenv(managed.DeploymentModeEnv, "")
+	targetSID, err := windows.StringToSid("S-1-5-21-111-222-333-1002")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pinWindowsEffectiveUserSIDForTest(t, targetSID)
+	if !hookAPIWindowsTrustedPrincipal(targetSID) {
+		t.Fatal("effective user SID was not trusted outside managed mode")
 	}
 }
 

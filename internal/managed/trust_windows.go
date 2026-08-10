@@ -229,14 +229,14 @@ func rejectUntrustedWindowsWriteACEsWithWriter(
 		default:
 			continue
 		}
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 		writeLike := windowsWriteLikeAccess(ace.Mask)
-		if ancestor {
-			writeLike = windowsAncestorReplaceAccess(ace.Mask)
+		if ancestor && !windowsWorldSID(sid) {
+			writeLike = WindowsAncestorReplaceAccess(ace.Mask)
 		}
 		if !writeLike {
 			continue
 		}
-		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 		if !windowsTrustedOwner(sid) && !sameWindowsSID(sid, allowedWriter) {
 			return fmt.Errorf("%s: untrusted Windows principal %s has write-like access mask 0x%x", path, sidString(sid), uint32(ace.Mask))
 		}
@@ -244,16 +244,11 @@ func rejectUntrustedWindowsWriteACEsWithWriter(
 	return nil
 }
 
-// windowsAncestorReplaceAccess is intentionally narrower than leaf/subtree
-// write detection. Windows grants BUILTIN\Users limited FILE_ADD_FILE and
-// FILE_ADD_SUBDIRECTORY rights on fixed roots such as C:\ProgramData. Those
-// rights can create unrelated children but cannot replace an already
-// protected DefenseClaw child. An ancestor becomes untrusted when an
-// unprivileged principal can delete that child, rewrite the ancestor DACL or
-// owner, or receives an unresolved generic write/all grant. Write attributes
-// and EA rights on the already-existing ancestor are not replacement rights;
-// every ancestor is independently reparse-checked on every load.
-func windowsAncestorReplaceAccess(mask windows.ACCESS_MASK) bool {
+// WindowsAncestorReplaceAccess reports whether mask lets a principal replace a
+// protected child. Narrower than the leaf rule: stock Windows grants Users
+// add-file and write-EA/attributes on roots like C:\ProgramData, none of which
+// can replace an existing child.
+func WindowsAncestorReplaceAccess(mask windows.ACCESS_MASK) bool {
 	const fileDeleteChild windows.ACCESS_MASK = 0x00000040
 	dangerous := windows.ACCESS_MASK(
 		windows.GENERIC_ALL |
@@ -342,6 +337,14 @@ func windowsWriteLikeAccess(mask windows.ACCESS_MASK) bool {
 			windows.FILE_WRITE_ATTRIBUTES,
 	)
 	return mask&(writeLike|fileDeleteChild) != 0
+}
+
+// windowsWorldSID reports whether sid is Everyone. The relaxed ancestor rule
+// covers what stock Windows grants on roots like C:\ProgramData, which goes to
+// BUILTIN\Users and Authenticated Users. Everyone gets nothing there, so a write
+// right for it is deliberate and answers to the leaf rule.
+func windowsWorldSID(sid *windows.SID) bool {
+	return sid != nil && sid.IsWellKnown(windows.WinWorldSid)
 }
 
 func windowsTrustedOwner(sid *windows.SID) bool {

@@ -65,15 +65,17 @@ func validateObservabilityV8FilePaths(source *ObservabilityV8Source, configuredF
 		if err != nil {
 			return fmt.Errorf("%s: cannot normalize configured path", role.name)
 		}
+		// Both failures below describe the filesystem, not the document, so the
+		// cause is kept rather than reported as a semantic error.
 		resolved, err := observabilityV8ResolveExistingPathPrefix(absolute)
 		if err != nil {
-			return fmt.Errorf("%s: cannot resolve configured path safely", role.name)
+			return newV8ConfigPathError(role.name, absolute, err)
 		}
 		var info os.FileInfo
 		if candidate, err := os.Stat(resolved); err == nil {
 			info = candidate
 		} else if !os.IsNotExist(err) {
-			return fmt.Errorf("%s: cannot inspect configured path safely", role.name)
+			return newV8ConfigPathError(role.name, resolved, err)
 		}
 		normalized = append(normalized, normalizedRole{observabilityV8FileRole: role, normalized: resolved, info: info})
 	}

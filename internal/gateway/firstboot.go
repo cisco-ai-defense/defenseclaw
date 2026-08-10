@@ -24,7 +24,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // firstBootMu serializes EnsureGatewayToken so two goroutines (e.g. proxy
@@ -130,5 +130,10 @@ func appendEnvLine(path, key, value string) error {
 	}
 	lines = append(lines, fmt.Sprintf("%s=%s", key, value), "")
 
-	return safefile.WritePrivate(path, []byte(strings.Join(lines, "\n")))
+	return managed.WriteServiceRuntimeFile(
+		managed.PinnedDeploymentMode(),
+		path,
+		"gateway dotenv",
+		[]byte(strings.Join(lines, "\n")),
+	)
 }

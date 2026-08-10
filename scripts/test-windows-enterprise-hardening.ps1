@@ -5248,7 +5248,7 @@ function Test-NormalModePreinstallNoOp {
     $configPath = Join-Path $script:FixtureRoot 'normal-mode-unmanaged-config.yaml'
     $dataYAML = $dataRoot.Replace("'", "''")
     $config = @"
-config_version: 7
+config_version: 8
 deployment_mode: unmanaged_byod
 data_dir: '$dataYAML'
 guardrail:
@@ -6055,7 +6055,7 @@ function Test-CandidateCodexHomeResolverContract {
     Write-ProtectedManifest `
         $configPath `
         @"
-config_version: 7
+config_version: 8
 deployment_mode: unmanaged_byod
 data_dir: '$dataYAML'
 guardrail:
@@ -17832,11 +17832,15 @@ try {
     $proxyPort = Get-FreeLoopbackPort
     $stateYAML = $script:StateRoot.Replace("'", "''")
     $config = @"
-config_version: 7
+config_version: 8
 deployment_mode: managed_enterprise
 data_dir: '$stateYAML\runtime'
-audit_db: '$stateYAML\runtime\audit.db'
-judge_bodies_db: '$stateYAML\runtime\judge_bodies.db'
+observability:
+  local:
+    path: '$stateYAML\runtime\audit.db'
+    judge_bodies_path: '$stateYAML\runtime\judge_bodies.db'
+  defaults:
+    redaction_profile: sensitive
 plugin_dir: '$stateYAML\runtime\plugins'
 policy_dir: '$stateYAML\runtime\policies'
 gateway:

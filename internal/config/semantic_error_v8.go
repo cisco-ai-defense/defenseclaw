@@ -71,6 +71,40 @@ func (e *V8SemanticError) Unwrap() error {
 	return e.cause
 }
 
+// V8ConfigPathError reports a filesystem failure while inspecting a configured
+// path. The value itself is well formed; only the object it names could not be
+// reached, so the error carries no source position.
+type V8ConfigPathError struct {
+	Path  string
+	File  string
+	cause error
+}
+
+func (e *V8ConfigPathError) Error() string {
+	if e == nil {
+		return ""
+	}
+	message := e.Path + ": cannot inspect configured path"
+	if e.File != "" {
+		message += " " + e.File
+	}
+	if e.cause != nil {
+		message += ": " + e.cause.Error()
+	}
+	return message
+}
+
+func (e *V8ConfigPathError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+func newV8ConfigPathError(path, file string, cause error) error {
+	return &V8ConfigPathError{Path: path, File: file, cause: cause}
+}
+
 func annotateObservabilityV8SemanticError(document *V8YAMLDocument, err error) error {
 	if err == nil {
 		return nil
@@ -78,7 +112,9 @@ func annotateObservabilityV8SemanticError(document *V8YAMLDocument, err error) e
 	var schemaError *V8SchemaError
 	var yamlError *V8YAMLError
 	var semanticError *V8SemanticError
-	if errors.As(err, &schemaError) || errors.As(err, &yamlError) || errors.As(err, &semanticError) {
+	var pathError *V8ConfigPathError
+	if errors.As(err, &schemaError) || errors.As(err, &yamlError) ||
+		errors.As(err, &semanticError) || errors.As(err, &pathError) {
 		return err
 	}
 	path := observabilityV8SemanticErrorPath(err)

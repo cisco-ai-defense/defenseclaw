@@ -180,6 +180,56 @@ func TestHookConfigSidecarWriteRejectsMalformedPeerState(t *testing.T) {
 	}
 }
 
+// The hooks directory is writable by the target user by design, so a managed
+// sidecar has to converge on modification and not only on deletion.
+func TestManagedHookConfigSidecarConvergesOnUnreadableState(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		tampered string
+	}{
+		{name: "unparseable", tampered: "Tampered by a standard user\n"},
+		{name: "unsupported version", tampered: `{"version":0,"gateway_addr":"127.0.0.1:18970"}`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			dataDir, jsonPath, _ := seedManagedHookRuntimeForValidation(t, "codex")
+			if err := os.WriteFile(jsonPath, []byte(test.tampered), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := ValidateManagedNativeHookRuntime(dataDir, "127.0.0.1:18970", "codex"); err == nil {
+				t.Fatal("tampered managed sidecar passed validation")
+			}
+			if err := ReconcileManagedNativeHookRuntime(
+				dataDir,
+				"127.0.0.1:18970",
+				"codex",
+				"scoped-test-token",
+			); err != nil {
+				t.Fatalf("reconcile tampered managed sidecar: %v", err)
+			}
+			if err := ValidateManagedNativeHookRuntime(dataDir, "127.0.0.1:18970", "codex"); err != nil {
+				t.Fatalf("managed runtime did not converge: %v", err)
+			}
+
+			// An unmanaged sidecar is the operator's only record of peer fail
+			// modes, so the same content is refused rather than replaced.
+			unmanagedDir := t.TempDir()
+			unmanagedPath := filepath.Join(unmanagedDir, hookConfigSidecarName)
+			if err := os.WriteFile(unmanagedPath, []byte(test.tampered), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := writeHookConfigSidecar(
+				unmanagedDir,
+				"127.0.0.1:18970",
+				"codex",
+				"closed",
+				false,
+			); err == nil {
+				t.Fatal("unmanaged write replaced unreadable peer state")
+			}
+		})
+	}
+}
+
 func TestHookConfigSidecarSecondWriteFailureRollsBackBothFiles(t *testing.T) {
 	dir := t.TempDir()
 	if err := writeHookConfigSidecar(dir, "127.0.0.1:18970", "claudecode", "open", false); err != nil {

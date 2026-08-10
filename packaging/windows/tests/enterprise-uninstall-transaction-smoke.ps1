@@ -114,6 +114,12 @@ try {
             $transactions = Microsoft.PowerShell.Management\Join-Path `
                 $installState `
                 'transactions'
+            $codexVendorDirectory = Microsoft.PowerShell.Management\Join-Path `
+                $Root `
+                'shared\OpenAI'
+            $codexMachinePolicyDirectory = Microsoft.PowerShell.Management\Join-Path `
+                $codexVendorDirectory `
+                'Codex'
             foreach ($directory in @(
                 $installRoot,
                 $stateRoot,
@@ -129,6 +135,8 @@ try {
             return @{
                 InstallRoot = $installRoot
                 StateRoot = $stateRoot
+                # Harness roots sit directly under a temporary directory.
+                StateRootAncestors = @()
                 BinDirectory = $binDirectory
                 AgentDirectory = $agentDirectory
                 LibexecDirectory = $libexecDirectory
@@ -211,6 +219,13 @@ try {
                     Microsoft.PowerShell.Management\Join-Path `
                         $installState `
                         'agent-application-control.json'
+                )
+                CodexVendorDirectory = $codexVendorDirectory
+                CodexMachinePolicyDirectory = $codexMachinePolicyDirectory
+                CodexManagedHooksLockPath = (
+                    Microsoft.PowerShell.Management\Join-Path `
+                        $codexMachinePolicyDirectory `
+                        '.defenseclaw-managed-hooks.lock'
                 )
                 CodexTargetEnabled = $false
                 ClaudeTargetEnabled = $true
@@ -311,6 +326,7 @@ try {
                 [string[]]$AllowedReaderSIDs,
                 [hashtable]$RequiredRights,
                 [switch]$AllowInheritance,
+                [switch]$AllowUsersRead,
                 [switch]$RejectUntrustedRead
             )
             if ($script:HarnessState.ContainsKey('purge_acl_invalid') -and
@@ -726,25 +742,29 @@ try {
                 [Parameter(Mandatory)][string]$GatewayServiceName,
                 [Parameter(Mandatory)][string]$GuardianServiceName,
                 [switch]$PendingTransaction,
-                [switch]$ServicingTransaction
+                [switch]$ServicingTransaction,
+                [switch]$AnyStartMode
             )
             $script:HarnessState.service_contract_checks++
             $script:HarnessState.events.Add(
                 "service-contract:$($script:HarnessState.service_contract_checks)"
             )
-            $expectedMode = if ($ServicingTransaction) {
-                4
+            $expectedModes = if ($ServicingTransaction) {
+                @(4)
             }
             elseif ($PendingTransaction) {
-                3
+                @(3)
+            }
+            elseif ($AnyStartMode) {
+                @(2, 3, 4)
             }
             else {
-                2
+                @(2)
             }
             foreach ($name in @($GatewayServiceName, $GuardianServiceName)) {
-                if ($script:HarnessState.service_start_modes[$name] -ne
-                    $expectedMode) {
-                    throw "service $name mode is $($script:HarnessState.service_start_modes[$name]), expected $expectedMode"
+                if ($script:HarnessState.service_start_modes[$name] -notin
+                    $expectedModes) {
+                    throw "service $name mode is $($script:HarnessState.service_start_modes[$name]), expected $($expectedModes -join ' or ')"
                 }
             }
             if ($script:HarnessState.crash_at -eq 'service-drift-preflight' -and
@@ -763,7 +783,9 @@ try {
         function script:Assert-DefenseClawRecordedArtifactHashes {
             param(
                 [Parameter(Mandatory)]$Metadata,
-                [Parameter(Mandatory)][hashtable]$Layout
+                [Parameter(Mandatory)][hashtable]$Layout,
+                [string[]]$ReplacedArtifacts = @(),
+                [string]$Action = 'this action'
             )
         }
         function script:Get-DefenseClawServiceSID {
@@ -2820,6 +2842,7 @@ targets:
         # that cannot be represented by the in-process uninstall mocks above.
         $selfUninstallRecoveryResults =
             [Collections.Generic.List[object]]::new()
+        $sharedDirectoryResults = [Collections.Generic.List[object]]::new()
         function script:Get-DefenseClawSelfUninstallReceipt {
             param(
                 [Parameter(Mandatory)][hashtable]$Layout,
@@ -2966,6 +2989,88 @@ targets:
                 action = $Action.ToLowerInvariant()
                 installed = $false
             }
+        }
+
+        # A transaction that created the Codex shared directories must be able to
+        # unwind them. Its own serialization lock outlives the policy files it
+        # guards, so the emptiness gate has to look past that one path and no
+        # further.
+        function Invoke-HarnessSharedDirectoryRollbackCase {
+            param(
+                [Parameter(Mandatory)][string]$Name,
+                [bool]$WithLock = $false,
+                [string]$ForeignFile = '',
+                [bool]$ExpectFailure = $false
+            )
+            $root = Microsoft.PowerShell.Management\Join-Path `
+                $TestRoot `
+                ('shared-rollback-' + $Name)
+            $layout = New-HarnessLayout -Root $root
+            foreach ($directory in @(
+                $layout.CodexVendorDirectory,
+                $layout.CodexMachinePolicyDirectory
+            )) {
+                Microsoft.PowerShell.Management\New-Item `
+                    -ItemType Directory `
+                    -Path $directory `
+                    -Force | Microsoft.PowerShell.Core\Out-Null
+            }
+            if ($WithLock) {
+                [IO.File]::WriteAllBytes(
+                    $layout.CodexManagedHooksLockPath,
+                    [byte[]]@()
+                )
+            }
+            if (-not [string]::IsNullOrWhiteSpace($ForeignFile)) {
+                [IO.File]::WriteAllText(
+                    (
+                        Microsoft.PowerShell.Management\Join-Path `
+                            $layout.CodexMachinePolicyDirectory `
+                            $ForeignFile
+                    ),
+                    'foreign'
+                )
+            }
+            $snapshot = [pscustomobject]@{
+                created_shared_directories = @(
+                    $layout.CodexVendorDirectory,
+                    $layout.CodexMachinePolicyDirectory
+                )
+            }
+            $failure = ''
+            try {
+                Remove-DefenseClawTransactionCreatedSharedDirectories `
+                    -Snapshot $snapshot `
+                    -Layout $layout
+            }
+            catch {
+                $failure = [string]$_.Exception.Message
+            }
+            if ($ExpectFailure -and [string]::IsNullOrWhiteSpace($failure)) {
+                throw "shared directory rollback case $Name removed a directory holding foreign content"
+            }
+            if (-not $ExpectFailure -and -not [string]::IsNullOrWhiteSpace($failure)) {
+                throw "shared directory rollback case $Name failed: $failure"
+            }
+            $vendorRemains = Microsoft.PowerShell.Management\Test-Path `
+                -LiteralPath $layout.CodexVendorDirectory
+            $policyRemains = Microsoft.PowerShell.Management\Test-Path `
+                -LiteralPath $layout.CodexMachinePolicyDirectory
+            if (-not $ExpectFailure -and ($vendorRemains -or $policyRemains)) {
+                throw "shared directory rollback case $Name left a transaction-created directory behind"
+            }
+            if ($ExpectFailure -and -not $policyRemains) {
+                throw "shared directory rollback case $Name removed a directory it refused to clear"
+            }
+            $sharedDirectoryResults.Add([ordered]@{
+                    name = $Name
+                    lock_present = $WithLock
+                    foreign_content = (
+                        -not [string]::IsNullOrWhiteSpace($ForeignFile)
+                    )
+                    removed = (-not $vendorRemains -and -not $policyRemains)
+                    failure = $failure
+                }) | Microsoft.PowerShell.Core\Out-Null
         }
 
         function Invoke-HarnessSelfUninstallRecoveryCase {
@@ -3248,9 +3353,20 @@ targets:
                 'remove-evidence'
             )
 
+        Invoke-HarnessSharedDirectoryRollbackCase -Name 'empty'
+        Invoke-HarnessSharedDirectoryRollbackCase `
+            -Name 'serialization-lock-only' `
+            -WithLock:$true
+        Invoke-HarnessSharedDirectoryRollbackCase `
+            -Name 'foreign-content-retained' `
+            -WithLock:$true `
+            -ForeignFile 'requirements.toml' `
+            -ExpectFailure:$true
+
         return [pscustomobject]@{
             schema_version = 1
             ok = $true
+            shared_directory_cases = @($sharedDirectoryResults)
             recovery_cases = @($recoveryResults)
             quiescing_cases = @($quiescingResults)
             uninstall_cases = @($uninstallResults)

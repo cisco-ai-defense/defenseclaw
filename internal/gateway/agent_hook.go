@@ -2130,14 +2130,17 @@ func genericHookAdditionalContext(connectorName, rawAction, severity, reason str
 	if rawAction == "allow" || rawAction == "" {
 		return ""
 	}
-	prefix := "DefenseClaw observed"
+	lead := "DefenseClaw observed"
+	finding := fmt.Sprintf("a %s %s hook finding", severity, connectorName)
 	if wouldBlock {
-		prefix = "DefenseClaw would block this in action mode"
+		// A full clause cannot take the article that follows "observed".
+		lead = "DefenseClaw would block this in action mode:"
+		finding = fmt.Sprintf("%s %s hook finding", severity, connectorName)
 	}
 	if reason == "" {
-		return fmt.Sprintf("%s a %s %s hook finding.", prefix, severity, connectorName)
+		return fmt.Sprintf("%s %s.", lead, finding)
 	}
-	return fmt.Sprintf("%s a %s %s hook finding: %s", prefix, severity, connectorName, reason)
+	return fmt.Sprintf("%s %s: %s", lead, finding, reason)
 }
 
 // connectorReason renders the user-facing reason string surfaced by

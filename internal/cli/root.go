@@ -31,7 +31,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
-	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -104,11 +104,11 @@ func rootPersistentPreRunE(cmd *cobra.Command, _ []string) error {
 	var err error
 	cfg, activeObservabilityV8Startup, err = loadGatewayConfigV8(config.ConfigPath())
 	if err != nil {
-		return fmt.Errorf("failed to load v8 config — run 'defenseclaw upgrade' first: %w", err)
+		return fmt.Errorf("failed to load config: %w", err)
 	}
 	version.SetBinaryVersion(appVersion)
 	if auditDir := filepath.Dir(cfg.AuditDB); auditDir != "." {
-		if err := safefile.ProtectDirectory(auditDir); err != nil {
+		if err := managed.PrepareServiceRuntimeDir(cfg.DeploymentMode, auditDir, "audit store directory"); err != nil {
 			return fmt.Errorf("failed to prepare audit store directory: %w", err)
 		}
 	}
@@ -172,7 +172,7 @@ func loadGatewayCommandConfigOnly() error {
 	var err error
 	cfg, activeObservabilityV8Startup, err = loadGatewayConfigV8(config.ConfigPath())
 	if err != nil {
-		return fmt.Errorf("failed to load v8 config — run 'defenseclaw upgrade' first: %w", err)
+		return fmt.Errorf("failed to load config: %w", err)
 	}
 	version.SetBinaryVersion(appVersion)
 

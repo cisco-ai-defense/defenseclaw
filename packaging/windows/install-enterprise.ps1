@@ -59,11 +59,13 @@ $trustedSystem32 = [IO.Path]::Combine($trustedWindows, 'System32')
 [Environment]::SetEnvironmentVariable('windir', $trustedWindows, 'Process')
 [Environment]::SetEnvironmentVariable('ProgramFiles', $trustedProgramFiles, 'Process')
 [Environment]::SetEnvironmentVariable('ProgramData', $trustedProgramData, 'Process')
-[Environment]::SetEnvironmentVariable(
-    'PSModulePath',
-    ([IO.Path]::Combine($trustedSystem32, 'WindowsPowerShell\v1.0\Modules')),
-    'Process'
-)
+# Pin module resolution to the running engine's own module directory so an
+# ambient PSModulePath cannot inject a substitute module.
+$trustedEngineModules = [IO.Path]::Combine($PSHOME, 'Modules')
+if (-not [IO.Directory]::Exists($trustedEngineModules)) {
+    throw "trusted engine module directory is missing: $trustedEngineModules"
+}
+[Environment]::SetEnvironmentVariable('PSModulePath', $trustedEngineModules, 'Process')
 [Environment]::SetEnvironmentVariable(
     'PATH',
     (@(
@@ -321,8 +323,8 @@ function Assert-DefenseClawBootstrapUnsignedCertificationScope {
         [string]$RequestedCertificationCodexHome
     )
     $prefix = '-AllowUnsigned is restricted to exact disposable DefenseClaw certification scope'
-    if ($LifecycleAction -notin @('Install', 'Upgrade', 'Repair')) {
-        throw "$prefix; action must be Install, Upgrade, or Repair"
+    if ($LifecycleAction -notin @('Install', 'Upgrade', 'Repair', 'Uninstall')) {
+        throw "$prefix; action must be Install, Upgrade, Repair, or Uninstall"
     }
     if ($RequestedGatewayServiceName -cnotmatch '^DefenseClawCertGateway_([a-f0-9]{10})$') {
         throw "$prefix; gateway service name is outside the certification namespace"
@@ -825,6 +827,36 @@ function Assert-DefenseClawBootstrapCleanupEntry {
     return $full
 }
 
+function Test-DefenseClawBootstrapMissingPathError {
+    # A .NET method failure reaches PowerShell wrapped in a
+    # MethodInvocationException, so match on the inner chain, not the outer type.
+    param([Parameter(Mandatory)]$Exception)
+    $current = $Exception
+    while ($null -ne $current) {
+        if ($current -is [IO.FileNotFoundException] -or
+            $current -is [IO.DirectoryNotFoundException]) {
+            return $true
+        }
+        $current = $current.InnerException
+    }
+    return $false
+}
+
+function Get-DefenseClawBootstrapEntryAttributes {
+    # Returns $null when the entry is already gone. TEMP is redirected into the
+    # bootstrap tree, so entries can vanish between enumeration and inspection.
+    param([Parameter(Mandatory)][string]$Path)
+    try {
+        return [IO.File]::GetAttributes($Path)
+    }
+    catch {
+        if (Test-DefenseClawBootstrapMissingPathError -Exception $_.Exception) {
+            return $null
+        }
+        throw
+    }
+}
+
 function Remove-DefenseClawBootstrapEnvironment {
     param([Parameter(Mandatory)]$Context)
     $root = Assert-DefenseClawBootstrapOneShotRoot `
@@ -849,7 +881,10 @@ function Remove-DefenseClawBootstrapEnvironment {
         try {
             while ($enumerator.MoveNext()) {
                 $entry = [IO.Path]::GetFullPath([string]$enumerator.Current)
-                $attributes = [IO.File]::GetAttributes($entry)
+                $attributes = Get-DefenseClawBootstrapEntryAttributes -Path $entry
+                if ($null -eq $attributes) {
+                    continue
+                }
                 if (($attributes -band [IO.FileAttributes]::ReparsePoint) -ne
                     0) {
                     throw "refusing bootstrap cleanup through a reparse point: $entry"
@@ -882,7 +917,14 @@ function Remove-DefenseClawBootstrapEnvironment {
         } -Descending
     )
     foreach ($directory in $orderedDirectories) {
-        [IO.Directory]::Delete($directory, $false)
+        try {
+            [IO.Directory]::Delete($directory, $false)
+        }
+        catch {
+            if (-not (Test-DefenseClawBootstrapMissingPathError -Exception $_.Exception)) {
+                throw
+            }
+        }
     }
     if (Test-DefenseClawBootstrapPathExists -Path $root) {
         throw "bootstrap environment remains after exact cleanup: $root"
@@ -1291,7 +1333,7 @@ try {
         # in certification builds. The lifecycle module accepts that
         # relaxation only while installing/replacing artifacts.
         AllowUnsigned = [bool](
-            $AllowUnsigned -and $Action -in @('Install', 'Upgrade', 'Repair')
+            $AllowUnsigned -and $Action -in @('Install', 'Upgrade', 'Repair', 'Uninstall')
         )
         InstallerSource = $PSCommandPath
         ModuleSource = $modulePath
@@ -1329,12 +1371,14 @@ finally {
         if ($cleanupFailures.Count -gt 0) {
             $cleanupDetail = $cleanupFailures -join '; '
             if ([string]::IsNullOrWhiteSpace($failureMessage)) {
-                $failureMessage = $cleanupDetail
+                # Leave the action's own exit code alone: tidying our temp tree
+                # is not part of its outcome, and ok:false already set the code.
+                Microsoft.PowerShell.Utility\Write-Warning -Message $cleanupDetail
             }
             else {
                 $failureMessage += "; $cleanupDetail"
+                $exitCode = 1
             }
-            $exitCode = 1
         }
     }
 }

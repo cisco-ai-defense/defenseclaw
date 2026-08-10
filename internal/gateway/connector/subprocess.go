@@ -731,6 +731,23 @@ func restoreHookRuntimeFiles(snapshots []hookRuntimeFileSnapshot) error {
 	return nil
 }
 
+// carryableHookConfigSidecar returns the peer state a rewrite should preserve,
+// accepting the v2 map form and the legacy scalar form.
+func carryableHookConfigSidecar(data []byte) (hookConfigSidecar, error) {
+	var prior hookConfigSidecar
+	if err := json.Unmarshal(data, &prior); err != nil {
+		legacyMode := legacyHookConfigValue(data, "DEFENSECLAW_FAIL_MODE")
+		if legacyMode != "open" && legacyMode != "closed" {
+			return hookConfigSidecar{}, fmt.Errorf("parse hook config sidecar: %w", err)
+		}
+		return hookConfigSidecar{LegacyMode: legacyMode}, nil
+	}
+	if prior.Version != 2 {
+		return hookConfigSidecar{}, fmt.Errorf("unsupported hook config sidecar version %d", prior.Version)
+	}
+	return prior, nil
+}
+
 func writeHookConfigSidecarUsing(
 	hookDir, apiAddr, connectorName, failMode string,
 	managed bool,
@@ -756,21 +773,20 @@ func writeHookConfigSidecarUsing(
 
 		state := hookConfigSidecar{Version: 2, GatewayAddr: apiAddr, FailModes: map[string]string{}, Managed: managed}
 		if jsonSnapshot.existed {
-			var prior hookConfigSidecar
-			if err := json.Unmarshal(jsonSnapshot.data, &prior); err == nil {
-				if prior.Version != 2 {
-					return fmt.Errorf("unsupported hook config sidecar version %d", prior.Version)
-				}
+			prior, err := carryableHookConfigSidecar(jsonSnapshot.data)
+			// A managed sidecar is guardian-owned and every connector reconciles
+			// on its own schedule, so unreadable content is replaced outright and
+			// at most one peer entry waits for its own pass. An unmanaged sidecar
+			// is the operator's only record of peer fail modes, so it is kept and
+			// the write refused instead.
+			if err != nil && !managed {
+				return err
+			}
+			if err == nil {
 				if prior.FailModes != nil {
 					state.FailModes = prior.FailModes
 				}
 				state.LegacyMode = prior.LegacyMode
-			} else {
-				legacyMode := legacyHookConfigValue(jsonSnapshot.data, "DEFENSECLAW_FAIL_MODE")
-				if legacyMode != "open" && legacyMode != "closed" {
-					return fmt.Errorf("parse hook config sidecar: %w", err)
-				}
-				state.LegacyMode = legacyMode
 			}
 		}
 		if name != "" {

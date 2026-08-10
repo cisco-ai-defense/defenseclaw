@@ -7,7 +7,6 @@
 package connector
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,8 +16,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
-
-var hookAPIWindowsEffectiveUserSID = defaultHookAPIWindowsEffectiveUserSID
 
 func hookAPIValidateOwner(path string, _ os.FileInfo) error {
 	return hookAPIValidateWindowsPathElement(path, false, true)
@@ -140,6 +137,9 @@ func hookAPIRejectUntrustedWindowsWriteACEs(path string, dacl *windows.ACL, want
 		if inheritOnly && hookAPIWindowsCreatorOwnerTemplate(sid) {
 			continue
 		}
+		if !protectChildren && hookAPIWindowsStockAncestorGrant(ace.Mask, sid) {
+			continue
+		}
 		if !hookAPIWindowsTrustedPrincipal(sid) {
 			return fmt.Errorf("untrusted Windows principal %s has write-like access mask 0x%x on %s", hookAPIWindowsSIDString(sid), uint32(ace.Mask), path)
 		}
@@ -179,6 +179,17 @@ func hookAPIWindowsWriteLikeAccess(mask windows.ACCESS_MASK, protectChildren boo
 	return mask&(unsafe|fileDeleteChild) != 0
 }
 
+// hookAPIWindowsStockAncestorGrant reports whether mask is the grant Windows
+// makes to BUILTIN\Users on roots like C:\ProgramData: add-file and
+// write-EA/attributes, none of which can replace an existing child. Limited to
+// that principal so an ancestor opened up to Everyone is still rejected.
+func hookAPIWindowsStockAncestorGrant(mask windows.ACCESS_MASK, sid *windows.SID) bool {
+	if sid == nil || !sid.IsWellKnown(windows.WinBuiltinUsersSid) {
+		return false
+	}
+	return !managed.WindowsAncestorReplaceAccess(mask)
+}
+
 func hookAPIWindowsTrustedPrincipal(sid *windows.SID) bool {
 	if sid == nil {
 		return false
@@ -197,55 +208,12 @@ func hookAPIWindowsTrustedPrincipal(sid *windows.SID) bool {
 			return true
 		}
 	}
-	if managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) {
-		// The LocalSystem guardian mutates per-user paths under an exact
-		// impersonated thread token. Only managed mode consults that effective
-		// identity; otherwise preserve the ordinary current-user behavior.
-		currentSID, err := hookAPIWindowsEffectiveUserSID()
-		if err == nil && currentSID != nil && sid.Equals(currentSID) {
-			return true
-		}
-	} else {
-		currentUser, err := windows.GetCurrentProcessToken().GetTokenUser()
-		if err == nil && currentUser != nil && currentUser.User.Sid != nil && sid.Equals(currentUser.User.Sid) {
-			return true
-		}
+	currentSID, err := windowsEffectiveUserSID()
+	if err == nil && currentSID != nil && sid.Equals(currentSID) {
+		return true
 	}
 	trustedInstaller, err := windows.StringToSid("S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464")
 	return err == nil && sid.Equals(trustedInstaller)
-}
-
-// defaultHookAPIWindowsEffectiveUserSID returns the impersonated thread user
-// when one exists. Enterprise guardian mutations run in a LocalSystem process
-// under an exact non-elevated target-user thread token; consulting only the
-// process token would incorrectly reject the target-owned profile and tempt
-// callers to weaken its DACL. Normal non-impersonated callers fall back to the
-// process token.
-func defaultHookAPIWindowsEffectiveUserSID() (*windows.SID, error) {
-	var token windows.Token
-	err := windows.OpenThreadToken(windows.CurrentThread(), windows.TOKEN_QUERY, true, &token)
-	if err == nil {
-		defer token.Close()
-		user, userErr := token.GetTokenUser()
-		if userErr != nil {
-			return nil, userErr
-		}
-		if user == nil || user.User.Sid == nil {
-			return nil, fmt.Errorf("effective Windows thread token has no user SID")
-		}
-		return user.User.Sid.Copy()
-	}
-	if !errors.Is(err, windows.ERROR_NO_TOKEN) {
-		return nil, err
-	}
-	user, err := windows.GetCurrentProcessToken().GetTokenUser()
-	if err != nil {
-		return nil, err
-	}
-	if user == nil || user.User.Sid == nil {
-		return nil, fmt.Errorf("Windows process token has no user SID")
-	}
-	return user.User.Sid.Copy()
 }
 
 func hookAPIWindowsSIDString(sid *windows.SID) string {

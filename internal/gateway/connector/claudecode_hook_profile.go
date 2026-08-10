@@ -191,14 +191,17 @@ func claudeCodeAdditionalContextForProfile(rawAction, severity, reason string, w
 	if rawAction == "allow" || rawAction == "" {
 		return ""
 	}
-	prefix := "DefenseClaw observed"
+	lead := "DefenseClaw observed"
+	finding := fmt.Sprintf("a %s Claude Code hook finding", severity)
 	if wouldBlock {
-		prefix = "DefenseClaw would block this in action mode"
+		// A full clause cannot take the article that follows "observed".
+		lead = "DefenseClaw would block this in action mode:"
+		finding = fmt.Sprintf("%s Claude Code hook finding", severity)
 	}
 	if reason == "" {
-		return fmt.Sprintf("%s a %s Claude Code hook finding.", prefix, severity)
+		return fmt.Sprintf("%s %s.", lead, finding)
 	}
-	return fmt.Sprintf("%s a %s Claude Code hook finding: %s", prefix, severity, reason)
+	return fmt.Sprintf("%s %s: %s", lead, finding, reason)
 }
 
 // claudeCodeCanEnforceProfile mirrors claudeCodeCanEnforce() in

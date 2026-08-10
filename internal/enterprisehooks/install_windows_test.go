@@ -289,6 +289,45 @@ func newWindowsGenericCodexFixture(t *testing.T) windowsGenericCodexFixture {
 	return newWindowsGenericCodexFixtureBeforeProtection(t, nil)
 }
 
+// newWindowsTrustedHookExecutableFixture writes a launcher standing in for the
+// administrator-owned sibling an enterprise install ships beside the gateway.
+func newWindowsTrustedHookExecutableFixture(t *testing.T, targetSID *windows.SID) string {
+	t.Helper()
+	dir := filepath.Join(t.TempDir(), "bin")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "defenseclaw-hook.exe")
+	if err := os.WriteFile(path, []byte("MZ test native hook"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := setWindowsUserPathProtection(dir, targetSID, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := setWindowsUserPathProtection(path, targetSID, false); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+func TestInstallWindowsGenericRejectsConnectorResolvingForeignHookExecutable(t *testing.T) {
+	fixture := newWindowsGenericCodexFixture(t)
+	foreign := newWindowsTrustedHookExecutableFixture(t, fixture.targetSID)
+	restore := connector.PinNativeHookExecutableForTest(foreign)
+	defer restore()
+
+	_, _, err := platformInstall(context.Background(), fixture.opts)
+	if err == nil {
+		t.Fatal("install succeeded while the connector resolved a launcher the guardian never trusted")
+	}
+	if !strings.Contains(err.Error(), "non-authoritative hook executable") {
+		t.Fatalf("error = %v, want non-authoritative hook executable rejection", err)
+	}
+	if !strings.Contains(err.Error(), foreign) {
+		t.Fatalf("error = %v, want the connector-resolved path %s reported", err, foreign)
+	}
+}
+
 func newWindowsGenericCodexFixtureBeforeProtection(
 	t *testing.T,
 	beforeProtection func(configPath string),
@@ -316,6 +355,11 @@ func newWindowsGenericCodexFixtureBeforeProtection(
 		}
 	}
 
+	// The guardian side and the connector side are pinned from separate sources
+	// so the authoritative-launcher comparison stays falsifiable.
+	trustedHookExe := newWindowsTrustedHookExecutableFixture(t, targetSID)
+	restoreRenderedHook := connector.PinNativeHookExecutableForTest(trustedHookExe)
+
 	originalAdmin := windowsEnterpriseAdministratorCheck
 	originalIdentity := windowsEnterpriseMutationIdentityCheck
 	originalImpersonation := windowsEnterpriseTargetImpersonation
@@ -326,13 +370,14 @@ func newWindowsGenericCodexFixtureBeforeProtection(
 	windowsEnterpriseAdministratorCheck = func() error { return nil }
 	windowsEnterpriseMutationIdentityCheck = func() error { return nil }
 	windowsEnterpriseTargetImpersonation = func(_ *windows.SID, _ string, fn func() error) error {
-		return runWindowsTestThreadImpersonated(fn)
+		return runWindowsTestThreadImpersonatedAsSelf(fn)
 	}
-	windowsEnterpriseHookExecutable = func() (string, error) { return connector.NativeHookExecutable(), nil }
+	windowsEnterpriseHookExecutable = func() (string, error) { return trustedHookExe, nil }
 	windowsEnterpriseHookTrustCheck = func(string) error { return nil }
 	windowsEnterpriseConnectorCertification = func(string, connector.Connector) error { return nil }
 	windowsEnterpriseGuardianDACLRepair = repairWindowsTargetOwnedPathDACLNoFollow
 	t.Cleanup(func() {
+		restoreRenderedHook()
 		windowsEnterpriseAdministratorCheck = originalAdmin
 		windowsEnterpriseMutationIdentityCheck = originalIdentity
 		windowsEnterpriseTargetImpersonation = originalImpersonation
@@ -410,7 +455,7 @@ func newWindowsManagedInstallFixtureWithHomeSetup(
 	windowsEnterpriseAdministratorCheck = func() error { return nil }
 	windowsEnterpriseMutationIdentityCheck = func() error { return nil }
 	windowsEnterpriseTargetImpersonation = func(_ *windows.SID, _ string, fn func() error) error {
-		return runWindowsTestThreadImpersonated(fn)
+		return runWindowsTestThreadImpersonatedAsSelf(fn)
 	}
 	windowsClaudeHigherPolicyCheck = func() error { return nil }
 	windowsManagedPolicyOwnerSID = func() (*windows.SID, error) { return targetSID, nil }
@@ -1980,7 +2025,9 @@ func stubWindowsAuthorizedRepairIdentityChecks(t *testing.T) {
 	})
 }
 
-func runWindowsTestThreadImpersonated(fn func() error) (result error) {
+// ImpersonateSelf names the process user, so both token accessors agree here.
+// The connector package covers them disagreeing.
+func runWindowsTestThreadImpersonatedAsSelf(fn func() error) (result error) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	if err := windows.ImpersonateSelf(windows.SecurityImpersonation); err != nil {
