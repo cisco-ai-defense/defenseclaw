@@ -79,6 +79,13 @@ func processSnapshot() ([]processInfo, error) {
 
 var processSnapshotSource = platformProcessSnapshot
 
+func processNamePSColumn(goos string) string {
+	if goos == "darwin" {
+		return "ucomm="
+	}
+	return "comm="
+}
+
 // classifyWindowsProcesses uses executable basenames only. Exact aliases are
 // intentionally narrow; an unrelated command whose arguments mention an AI
 // product is never visible to this classifier. Ambiguous catalog aliases fail

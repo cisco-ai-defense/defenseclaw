@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -404,6 +405,49 @@ func TestDetectModelFilesDefersUnreadableOllamaManifestRoot(t *testing.T) {
 	}
 }
 
+func TestDetectModelFilesProgressesPastRecurringErrorInBroadRoot(t *testing.T) {
+	root := filepath.Join(t.TempDir(), ".ollama", "models")
+	manifest := filepath.Join(root, "manifests", "registry.ollama.ai", "library", "llama3", "latest")
+	writeModelTestFile(t, manifest, strings.Repeat("x", int(maxOllamaManifestBytes)+1))
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatalf("mkdir broad root: %v", err)
+	}
+	for i := 0; i < minModelFileVisitsPerRoot+80; i++ {
+		path := filepath.Join(root, fmt.Sprintf("n%04d.txt", i))
+		if err := os.WriteFile(path, []byte("noise"), 0o600); err != nil {
+			t.Fatalf("write filler %d: %v", i, err)
+		}
+	}
+	writeModelTestFile(t, filepath.Join(root, "z-later.gguf"), "later")
+
+	svc := newModelFileTestService(t, t.TempDir(), root, 1, false)
+	resolvedRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatalf("resolve root: %v", err)
+	}
+	resolvedRoot = filepath.Clean(resolvedRoot)
+	first, _, firstOutcome, firstErr := svc.detectModelFilesWithOutcome(context.Background())
+	if firstErr == nil {
+		t.Fatal("first page did not report its oversized manifest")
+	}
+	if len(first) != 0 || svc.modelFileCursor(resolvedRoot) == "" {
+		t.Fatalf("first page did not preserve forward progress: signals=%+v cursor=%q", first, svc.modelFileCursor(resolvedRoot))
+	}
+
+	second, _, secondOutcome, secondErr := svc.detectModelFilesWithOutcome(context.Background())
+	if secondErr == nil {
+		t.Fatal("tainted resumed cycle was reported as complete")
+	}
+	findLocalModelSignal(t, second, "z-later")
+	rootKey := hashPath(resolvedRoot)
+	if !firstOutcome.deferred[rootKey] || !secondOutcome.deferred[rootKey] || secondOutcome.conclusive[rootKey] {
+		t.Fatalf("errored broad-root outcomes were not deferred: first=%+v second=%+v", firstOutcome, secondOutcome)
+	}
+	if cursor := svc.modelFileCursor(resolvedRoot); cursor != "" {
+		t.Fatalf("completed tainted cycle did not reset cursor: %q", cursor)
+	}
+}
+
 func TestDetectModelFilesRotatesRootsUnderGlobalMatchCap(t *testing.T) {
 	firstRoot := t.TempDir()
 	secondRoot := t.TempDir()
@@ -607,6 +651,376 @@ func TestModelFileLifecycleUsesCycleWideShardAggregate(t *testing.T) {
 	if got := findLocalModelSignal(t, sixth.Signals, "sharded"); got.State != AIStateChanged {
 		t.Fatalf("completed changed shard cycle state = %q, want changed", got.State)
 	}
+}
+
+func TestEnhancedModelDiscoveryFindsUnknownMacOSApplicationModels(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS application scopes are only assigned on darwin")
+	}
+	home := t.TempDir()
+	writeModelTestFile(t, filepath.Join(
+		home, "Library", "Application Support", "superwhisper", "models", "whisper-large-v3.onnx",
+	), "speech")
+	writeModelTestFile(t, filepath.Join(
+		home, "Library", "Application Support", "superwhisper", "models", "silero_vad.onnx",
+	), "vad")
+	writeModelTestFile(t, filepath.Join(
+		home, "Library", "Application Support", "com.meetily.ai", "models", "Qwen3.5-4B-Q4_K_M.gguf",
+	), "qwen")
+	writeModelTestFile(t, filepath.Join(
+		home, "Library", "Application Support", "com.meetily.ai", "models", "parakeet-tdt-0.6b-v3-int8.onnx",
+	), "parakeet")
+	writeModelTestFile(t, filepath.Join(
+		home, "Library", "Containers", "app.cotypist.Cotypist", "Data", "Library", "Application Support",
+		"Models", "gemma-3-4b-it-Q4_K_M.gguf",
+	), "gemma")
+
+	svc := newModelFileModeTestService(t, "enhanced", home, []string{home}, 100)
+	signals, _, err := svc.detectModelFiles(context.Background())
+	if err != nil {
+		t.Fatalf("detectModelFiles: %v", err)
+	}
+
+	whisper := findLocalModelSignal(t, signals, "whisper-large-v3")
+	if whisper.Model.OwnerApplication != "Superwhisper" || whisper.Model.Modality != localModelModalitySpeech ||
+		whisper.Model.Relevance != localModelRelevanceSupporting {
+		t.Fatalf("Superwhisper classification = %+v", whisper.Model)
+	}
+	vad := findLocalModelSignal(t, signals, "silero_vad")
+	if vad.Model.OwnerApplication != "Superwhisper" || vad.Model.Modality != localModelModalityAudio {
+		t.Fatalf("Superwhisper VAD classification = %+v", vad.Model)
+	}
+	qwen := findLocalModelSignal(t, signals, "Qwen3.5-4B-Q4_K_M")
+	if qwen.Model.OwnerApplication != "Meetily" || qwen.Model.Modality != localModelModalityGenerative ||
+		qwen.Model.Relevance != localModelRelevancePrimary || qwen.Model.DiscoveryConfidence == nil ||
+		*qwen.Model.DiscoveryConfidence < 0.9 {
+		t.Fatalf("Meetily Qwen classification = %+v", qwen.Model)
+	}
+	parakeet := findLocalModelSignal(t, signals, "parakeet-tdt-0.6b-v3-int8")
+	if parakeet.Model.OwnerApplication != "Meetily" || parakeet.Model.Modality != localModelModalitySpeech {
+		t.Fatalf("Meetily Parakeet classification = %+v", parakeet.Model)
+	}
+	gemma := findLocalModelSignal(t, signals, "gemma-3-4b-it-Q4_K_M")
+	if gemma.Model.OwnerApplication != "Cotypist" || gemma.Model.Modality != localModelModalityGenerative ||
+		gemma.Model.Relevance != localModelRelevancePrimary {
+		t.Fatalf("Cotypist classification = %+v", gemma.Model)
+	}
+}
+
+func TestPassiveModelDiscoverySkipsBroadHomeButKeepsKnownStores(t *testing.T) {
+	home := t.TempDir()
+	unknownPath := filepath.Join(home, "Library", "Application Support", "unknown.app", "models", "private.gguf")
+	writeModelTestFile(t, unknownPath, "unknown")
+	knownStore := filepath.Join(home, "explicit-hf-cache")
+	writeModelTestFile(t, filepath.Join(
+		knownStore, "models--org--known", "snapshots", "revision", "model.safetensors",
+	), "known")
+	t.Setenv("HF_HUB_CACHE", knownStore)
+	for _, name := range []string{"HF_HOME", "OLLAMA_MODELS", "LM_STUDIO_HOME", "FLM_MODEL_PATH"} {
+		t.Setenv(name, "")
+	}
+	t.Setenv("LEMONADE_CACHE_DIR", filepath.Join(t.TempDir(), "empty-lemonade-cache"))
+
+	passive := newModelFileModeTestServiceWithoutEnvReset(t, "passive", home, []string{home}, 100)
+	passiveSignals, _, err := passive.detectModelFiles(context.Background())
+	if err != nil {
+		t.Fatalf("passive detectModelFiles: %v", err)
+	}
+	findLocalModelSignal(t, passiveSignals, "org/known")
+	for _, signal := range passiveSignals {
+		if signal.Model != nil && signal.Model.ID == "private" {
+			t.Fatalf("passive broad-home scan found unknown app model: %+v", signal.Model)
+		}
+	}
+	narrowPassive := newModelFileModeTestServiceWithoutEnvReset(
+		t, "passive", home, []string{filepath.Dir(filepath.Dir(unknownPath))}, 100,
+	)
+	narrowSignals, _, err := narrowPassive.detectModelFiles(context.Background())
+	if err != nil {
+		t.Fatalf("passive narrow-root detectModelFiles: %v", err)
+	}
+	findLocalModelSignal(t, narrowSignals, "private")
+
+	enhanced := newModelFileModeTestServiceWithoutEnvReset(t, "enhanced", home, []string{home}, 100)
+	enhancedSignals, _, err := enhanced.detectModelFiles(context.Background())
+	if err != nil {
+		t.Fatalf("enhanced detectModelFiles: %v", err)
+	}
+	findLocalModelSignal(t, enhancedSignals, "private")
+}
+
+func TestModelArtifactFormatsRequireContextForAmbiguousContainers(t *testing.T) {
+	root := t.TempDir()
+	writeModelTestFile(t, filepath.Join(root, "standalone.gguf"), "gguf")
+	writeModelTestFile(t, filepath.Join(root, "standalone.safetensors"), "safe")
+	writeModelTestFile(t, filepath.Join(root, "random.onnx"), "onnx")
+	writeModelTestFile(t, filepath.Join(root, "random.tflite"), "tflite")
+	writeModelTestFile(t, filepath.Join(root, "random.bin"), "bin")
+	writeModelTestFile(t, filepath.Join(root, "models", "encoder.onnx"), "encoder")
+	writeModelTestFile(t, filepath.Join(root, "runtime", "model.tflite"), "model")
+	writeModelTestFile(t, filepath.Join(root, "metadata-backed", "artifact.onnx"), "artifact")
+	writeModelTestFile(t, filepath.Join(root, "metadata-backed", "config.json"), `{}`)
+
+	svc := newModelFileTestService(t, t.TempDir(), root, 100, false)
+	signals, _, err := svc.detectModelFiles(context.Background())
+	if err != nil {
+		t.Fatalf("detectModelFiles: %v", err)
+	}
+	for _, id := range []string{"standalone", "encoder", "runtime", "artifact"} {
+		findLocalModelSignal(t, signals, id)
+	}
+	for _, signal := range signals {
+		if signal.Model == nil {
+			continue
+		}
+		switch signal.Model.ID {
+		case "random":
+			t.Fatalf("ambiguous artifact without context was detected: %+v", signal.Model)
+		}
+	}
+	if got := findLocalModelSignal(t, signals, "encoder"); got.Evidence[0].MatchKind != MatchKindHeuristic ||
+		got.Model.DiscoveryConfidence == nil ||
+		findLocalModelSignal(t, signals, "standalone").Model.DiscoveryConfidence == nil ||
+		*got.Model.DiscoveryConfidence >= *findLocalModelSignal(t, signals, "standalone").Model.DiscoveryConfidence {
+		t.Fatalf("ambiguous evidence was not downgraded: %+v", got)
+	}
+}
+
+func TestModelMetadataSidecarLookupIsMemoizedPerRootAndDirectory(t *testing.T) {
+	rootPath := t.TempDir()
+	dir := filepath.Join(rootPath, "models", "metadata-backed")
+	writeModelTestFile(t, filepath.Join(dir, "config.json"), `{}`)
+	root := modelScanRoot{path: rootPath, metadataSidecars: make(map[string]bool)}
+	for _, name := range []string{"encoder.onnx", "decoder.onnx"} {
+		if !hasModelMetadataSidecar(filepath.Join(dir, name), root) {
+			t.Fatalf("metadata sidecar was not found for %s", name)
+		}
+	}
+	if got := len(root.metadataSidecars); got != 1 {
+		t.Fatalf("metadata sidecar cache entries = %d, want 1", got)
+	}
+}
+
+func TestEnhancedModelDiscoveryRetainsEmbeddedChromeAndWebexModels(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("macOS application scopes are only assigned on darwin")
+	}
+	home := t.TempDir()
+	writeModelTestFile(t, filepath.Join(
+		home, "Library", "Caches", "com.google.Chrome", "OptimizationGuidePredictionModels", "123", "model.tflite",
+	), "chrome")
+	writeModelTestFile(t, filepath.Join(
+		home, "Library", "Application Support", "Cisco", "Webex", "models", "speech_encoder.onnx",
+	), "webex")
+	writeModelTestFile(t, filepath.Join(
+		home, "Library", "Caches", "com.google.Chrome", "Code Cache", "models", "noise.onnx",
+	), "noise")
+
+	svc := newModelFileModeTestService(t, "enhanced", home, []string{home}, 100)
+	signals, _, err := svc.detectModelFiles(context.Background())
+	if err != nil {
+		t.Fatalf("detectModelFiles: %v", err)
+	}
+	chrome := findLocalModelSignal(t, signals, "123")
+	if chrome.Model.OwnerApplication != "Chrome" || chrome.Model.Relevance != localModelRelevanceEmbedded {
+		t.Fatalf("Chrome embedded classification = %+v", chrome.Model)
+	}
+	webex := findLocalModelSignal(t, signals, "speech_encoder")
+	if webex.Model.OwnerApplication != "Webex" || webex.Model.Modality != localModelModalitySpeech ||
+		webex.Model.Relevance != localModelRelevanceEmbedded {
+		t.Fatalf("Webex embedded classification = %+v", webex.Model)
+	}
+	for _, signal := range signals {
+		if signal.Model != nil && signal.Model.ID == "noise" {
+			t.Fatalf("known cache noise directory was traversed: %+v", signal.Model)
+		}
+	}
+}
+
+func TestEnhancedMacOSRootsBoundAppResourcesAndClassifyBundles(t *testing.T) {
+	home := t.TempDir()
+	for i := 0; i < maxMacOSAppResourceRoots+3; i++ {
+		if err := os.MkdirAll(filepath.Join(home, "Applications", fmt.Sprintf("App%03d.app", i)), 0o700); err != nil {
+			t.Fatalf("mkdir app bundle: %v", err)
+		}
+	}
+	roots := enhancedMacOSModelScanRoots(home, false, maxMacOSAppResourceRoots)
+	if len(roots) != 4+maxMacOSAppResourceRoots {
+		t.Fatalf("enhanced macOS roots = %d, want %d", len(roots), 4+maxMacOSAppResourceRoots)
+	}
+	if limited := enhancedMacOSModelScanRoots(home, false, 3); len(limited) != 7 {
+		t.Fatalf("enhanced macOS roots with three-app budget = %d, want 7", len(limited))
+	}
+	if limited := macOSApplicationResourceScanRoots(home, false, 3); len(limited) != 3 {
+		t.Fatalf("bounded app-resource roots = %d, want 3", len(limited))
+	}
+	for _, root := range roots {
+		if strings.HasPrefix(root.path, "/System/Applications") {
+			t.Fatalf("system application resources were admitted: %+v", root)
+		}
+	}
+	resourceRoot := roots[4]
+	modelPath := filepath.Join(resourceRoot.path, "Models", "vision_encoder.mlmodel")
+	writeModelTestFile(t, modelPath, "coreml")
+	svc := newModelFileModeTestService(t, "enhanced", home, []string{home}, 100)
+	candidate, ok := svc.modelArtifactCandidate(modelPath, resourceRoot, "coreml", false, "")
+	if !ok || candidate.owner != "App000" || candidate.modality != localModelModalityVision ||
+		candidate.relevance != localModelRelevanceEmbedded {
+		t.Fatalf("app resource classification = %+v, ok=%v", candidate, ok)
+	}
+}
+
+func TestModelRootRotationDistributesLargeRootSets(t *testing.T) {
+	const (
+		roots         = 516
+		priorityRoots = 7
+	)
+	genericRoots := roots - priorityRoots
+	seen := make(map[int]bool, roots)
+	seenGeneric := make(map[int]bool, genericRoots)
+	lastPrioritySequence := int64(-1)
+	for sequence := uint64(0); sequence < uint64(2*genericRoots); sequence++ {
+		start := modelRootRotationStart(sequence, roots, priorityRoots)
+		if start < 0 || start >= roots {
+			t.Fatalf("rotation start %d outside 0..%d", start, roots-1)
+		}
+		seen[start] = true
+		if sequence%2 == 0 {
+			want := int((sequence / 2) % priorityRoots)
+			if start != want {
+				t.Fatalf("priority sequence %d started at %d, want %d", sequence, start, want)
+			}
+			if lastPrioritySequence >= 0 && int64(sequence)-lastPrioritySequence > 2 {
+				t.Fatalf("priority root start gap exceeded two scans: last=%d current=%d", lastPrioritySequence, sequence)
+			}
+			lastPrioritySequence = int64(sequence)
+		} else {
+			if start < priorityRoots {
+				t.Fatalf("generic sequence %d started at priority root %d", sequence, start)
+			}
+			seenGeneric[start] = true
+		}
+	}
+	if len(seen) != roots {
+		t.Fatalf("rotation visited %d/%d roots", len(seen), roots)
+	}
+	if len(seenGeneric) != genericRoots {
+		t.Fatalf("rotation visited %d/%d generic roots", len(seenGeneric), genericRoots)
+	}
+	if modelRootRotationStart(0, roots, priorityRoots) != 0 {
+		t.Fatal("first scan did not preserve known-store-first ordering")
+	}
+
+	ordered, priorityCount := prioritizeModelScanRoots([]modelScanRoot{
+		{path: "enhanced-a"}, {path: "known-a", specialized: true},
+		{path: "enhanced-b"}, {path: "known-b", specialized: true},
+	})
+	if priorityCount != 2 || ordered[0].path != "known-a" || ordered[1].path != "known-b" {
+		t.Fatalf("specialized roots were not stably prioritized: count=%d roots=%+v", priorityCount, ordered)
+	}
+	if got := modelRootVisitLimit(modelScanRoot{scope: modelScanScopeApplicationSupport}, 4000, 64_000); got != 16_000 {
+		t.Fatalf("application-support visit limit = %d, want 16000", got)
+	}
+	if got := modelRootVisitLimit(modelScanRoot{scope: modelScanScopeCache}, 4000, 64_000); got != 4000 {
+		t.Fatalf("cache visit limit = %d, want 4000", got)
+	}
+	if got := modelRootVisitLimit(modelScanRoot{scope: modelScanScopeContainer}, 4000, 6000); got != 6000 {
+		t.Fatalf("container visit limit ignored global cap: %d", got)
+	}
+}
+
+func TestModelFileErrorsReachBoundedPrivacySafeDiagnostics(t *testing.T) {
+	home := t.TempDir()
+	manifest := filepath.Join(home, ".ollama", "models", "manifests", "registry.ollama.ai", "library", "llama3", "latest")
+	writeModelTestFile(t, manifest, strings.Repeat("x", int(maxOllamaManifestBytes)+1))
+	for _, name := range []string{"HF_HUB_CACHE", "HF_HOME", "OLLAMA_MODELS", "LM_STUDIO_HOME", "FLM_MODEL_PATH"} {
+		t.Setenv(name, "")
+	}
+	t.Setenv("LEMONADE_CACHE_DIR", filepath.Join(t.TempDir(), "empty-lemonade-cache"))
+	svc := NewContinuousDiscoveryServiceWithOptions(AIDiscoveryOptions{
+		Enabled: true, Mode: "enhanced", HomeDir: home, ScanRoots: []string{home},
+		DataDir: t.TempDir(), MaxFilesPerScan: 100, MaxFileBytes: 64 << 10,
+	}, nil)
+	cleanupPreparedDiscoveryService(t, svc)
+	report, err := svc.runScan(context.Background(), true, "test")
+	if err != nil {
+		t.Fatalf("runScan: %v", err)
+	}
+	if report.Summary.Result != "partial" || report.Summary.DetectorErrors["model_file"] == "" {
+		t.Fatalf("model-file error not surfaced: %+v", report.Summary)
+	}
+	perRoot := 0
+	for key, detail := range report.Summary.DetectorErrors {
+		if strings.HasPrefix(key, "model_file:") {
+			perRoot++
+		}
+		if strings.Contains(key, home) || strings.Contains(detail, home) || strings.Contains(detail, manifest) {
+			t.Fatalf("diagnostic leaked raw path: %q=%q", key, detail)
+		}
+	}
+	if perRoot == 0 {
+		t.Fatalf("per-root model-file diagnostic missing: %+v", report.Summary.DetectorErrors)
+	}
+
+	many := make(map[string]string)
+	for i := 0; i < maxModelRootDiagnostics+7; i++ {
+		many[hashValue(fmt.Sprintf("root-%03d", i))] = modelRootAccessErrorDetail(
+			modelScanRoot{scope: modelScanScopeContainer}, os.ErrPermission,
+		)
+	}
+	bounded := boundedModelRootDiagnostics(many)
+	if len(bounded) != maxModelRootDiagnostics+1 || bounded["additional_roots"] == "" {
+		t.Fatalf("bounded diagnostics = %+v", bounded)
+	}
+}
+
+func TestValidateModelFileClassificationMetadata(t *testing.T) {
+	valid := AIDiscoveryReport{
+		Summary: AIDiscoverySummary{ScanID: "model-classification"},
+		Signals: []AISignal{{
+			Category: SignalLocalModel,
+			Model: &LocalModelInfo{
+				ID: "private", Status: "installed", OwnerApplication: "Meetily",
+				Modality: localModelModalityGenerative, Relevance: localModelRelevancePrimary,
+				DiscoveryConfidence: modelDiscoveryConfidence(0.95),
+			},
+		}},
+	}
+	if err := ValidateSanitizedAIDiscoveryReport(valid); err != nil {
+		t.Fatalf("valid classification rejected: %v", err)
+	}
+	badOwner := cloneAIDiscoveryReport(valid)
+	badOwner.Signals[0].Model.OwnerApplication = "/Users/private/Meetily"
+	if err := ValidateSanitizedAIDiscoveryReport(badOwner); err == nil {
+		t.Fatal("path-shaped owner_application accepted")
+	}
+	badRelevance := cloneAIDiscoveryReport(valid)
+	badRelevance.Signals[0].Model.Relevance = "noise"
+	if err := ValidateSanitizedAIDiscoveryReport(badRelevance); err == nil {
+		t.Fatal("unsupported relevance accepted")
+	}
+	badConfidence := cloneAIDiscoveryReport(valid)
+	badConfidence.Signals[0].Model.DiscoveryConfidence = modelDiscoveryConfidence(1.1)
+	if err := ValidateSanitizedAIDiscoveryReport(badConfidence); err == nil {
+		t.Fatal("out-of-range discovery confidence accepted")
+	}
+}
+
+func newModelFileModeTestService(t *testing.T, mode, home string, roots []string, limit int) *ContinuousDiscoveryService {
+	t.Helper()
+	for _, name := range []string{"HF_HUB_CACHE", "HF_HOME", "OLLAMA_MODELS", "LM_STUDIO_HOME", "FLM_MODEL_PATH"} {
+		t.Setenv(name, "")
+	}
+	t.Setenv("LEMONADE_CACHE_DIR", filepath.Join(t.TempDir(), "empty-lemonade-cache"))
+	return newModelFileModeTestServiceWithoutEnvReset(t, mode, home, roots, limit)
+}
+
+func newModelFileModeTestServiceWithoutEnvReset(t *testing.T, mode, home string, roots []string, limit int) *ContinuousDiscoveryService {
+	t.Helper()
+	return &ContinuousDiscoveryService{opts: normalizeAIDiscoveryOptions(AIDiscoveryOptions{
+		Enabled: true, Mode: mode, HomeDir: home, ScanRoots: roots,
+		DataDir: t.TempDir(), MaxFilesPerScan: limit, MaxFileBytes: 64 << 10,
+	})}
 }
 
 func newModelFileTestService(t *testing.T, home, root string, limit int, rawPaths bool) *ContinuousDiscoveryService {

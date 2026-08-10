@@ -532,6 +532,10 @@ actor GatewayClient {
         snap.changedSignals = (summary["changed_signals"] as? Int) ?? 0
         snap.goneSignals = (summary["gone_signals"] as? Int) ?? 0
         snap.privacyMode = (summary["privacy_mode"] as? String) ?? (summary["mode"] as? String) ?? ""
+        let diagnostics = AIDiscoveryDiagnostics.fromMapping(summary)
+        snap.result = diagnostics.result
+        snap.errors = diagnostics.errors
+        snap.detectorErrors = diagnostics.detectorErrors
         snap.lastScan = DCDates.parse(summary["scanned_at"] ?? summary["last_scan"] ?? summary["lastScan"])
         let signalPayload = dict["signals"] ?? dict["components"]
         let signals = AISignalDecoding.signalMappings(from: signalPayload)

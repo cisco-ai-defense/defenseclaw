@@ -23,6 +23,7 @@ import (
 	"context"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -32,7 +33,12 @@ import (
 func platformProcessSnapshot() ([]processInfo, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, "ps", "-axo", "pid=,ppid=,user=,comm=,etime=")
+	// Darwin's comm column is formatted to a narrow default width and can turn
+	// app executables such as "superwhisper" into "/Applications/su". ucomm is
+	// the kernel process name, does not expose command-line arguments, and keeps
+	// the executable aliases used by the signature catalog intact.
+	commandColumn := processNamePSColumn(runtime.GOOS)
+	cmd := exec.CommandContext(ctx, "ps", "-axo", "pid=,ppid=,user=,"+commandColumn+",etime=")
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	if err := cmd.Run(); err != nil {

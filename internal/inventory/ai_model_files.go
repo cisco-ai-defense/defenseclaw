@@ -31,6 +31,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"unicode"
 )
 
 const (
@@ -41,12 +42,41 @@ const (
 	maxModelFileVisitedEntries = 200_000
 	minModelFileVisitsPerRoot  = 1024
 	maxModelFileVisitsPerRoot  = 50_000
+	maxMacOSAppResourceRoots   = 512
+	maxModelRootDiagnostics    = 16
+)
+
+const (
+	modelScanScopeKnownStore         = "known_store"
+	modelScanScopeConfigured         = "configured"
+	modelScanScopeApplicationSupport = "application_support"
+	modelScanScopeContainer          = "container"
+	modelScanScopeGroupContainer     = "group_container"
+	modelScanScopeCache              = "cache"
+	modelScanScopeAppResources       = "app_resources"
+)
+
+const (
+	localModelModalityGenerative = "generative"
+	localModelModalitySpeech     = "speech"
+	localModelModalityVision     = "vision"
+	localModelModalityEmbedding  = "embedding"
+	localModelModalityAudio      = "audio"
+	localModelModalityUnknown    = "unknown"
+
+	localModelRelevancePrimary    = "primary"
+	localModelRelevanceSupporting = "supporting"
+	localModelRelevanceEmbedded   = "embedded"
+	localModelRelevanceUnknown    = "unknown"
 )
 
 type modelScanRoot struct {
-	path        string
-	provider    string
-	specialized bool
+	path             string
+	provider         string
+	specialized      bool
+	scope            string
+	owner            string
+	metadataSidecars map[string]bool
 }
 
 type modelFileAggregate struct {
@@ -61,12 +91,17 @@ type modelFileAggregate struct {
 	artifactKey   string
 	aggregateHash string
 	artifactCount int
+	owner         string
+	modality      string
+	relevance     string
+	confidence    float64
 }
 
 type modelFileScanOutcome struct {
 	conclusive map[string]bool
 	attempted  map[string]bool
 	deferred   map[string]bool
+	rootErrors map[string]string
 }
 
 // modelFileCycle accumulates bounded pages for one root until its cursor
@@ -79,16 +114,17 @@ type modelFileCycle struct {
 	order        []string
 	artifactKeys int
 	overflow     bool
+	incomplete   bool
 }
 
 var modelWeightShardPattern = regexp.MustCompile(`(?i)-[0-9]{1,6}-of-[0-9]{1,6}(?:\.|$)`)
 
 // detectModelFiles inventories local model artifacts without reading model
-// binary contents. Specialized model caches are scanned first so the global
-// entry budget cannot be consumed by an unrelated part of a broad home-dir
-// scan before Hugging Face, Ollama, MLX, LM Studio, or Lemonade caches are
-// reached. The returned count is the number of matching artifact entries
-// inspected (not every directory entry visited).
+// binary contents. Specialized stores receive bounded recurring starts while
+// generic roots rotate independently, so neither known runtimes nor unknown
+// application stores can be starved by a saturated global budget. The returned
+// count is the number of matching artifact entries inspected (not every
+// directory entry visited).
 func (s *ContinuousDiscoveryService) detectModelFiles(ctx context.Context) ([]AISignal, int, error) {
 	out, files, _, err := s.detectModelFilesWithOutcome(ctx)
 	return out, files, err
@@ -99,6 +135,7 @@ func (s *ContinuousDiscoveryService) detectModelFilesWithOutcome(ctx context.Con
 		conclusive: make(map[string]bool),
 		attempted:  make(map[string]bool),
 		deferred:   make(map[string]bool),
+		rootErrors: make(map[string]string),
 	}
 	if s == nil {
 		return nil, 0, outcome, nil
@@ -107,13 +144,28 @@ func (s *ContinuousDiscoveryService) detectModelFilesWithOutcome(ctx context.Con
 		return nil, 0, outcome, err
 	}
 
-	roots := s.modelFileScanRoots()
+	roots, rootDiscoveryErrors := s.modelFileScanRootsWithErrors()
+	for rootKey, detail := range rootDiscoveryErrors {
+		outcome.rootErrors[rootKey] = detail
+		outcome.attempted[rootKey] = true
+		outcome.deferred[rootKey] = true
+	}
 	if len(roots) == 0 {
+		if len(rootDiscoveryErrors) > 0 {
+			outcome.rootErrors = boundedModelRootDiagnostics(outcome.rootErrors)
+			return nil, 0, outcome, fmt.Errorf("model file scan incomplete for %d roots", len(rootDiscoveryErrors))
+		}
 		return nil, 0, outcome, nil
+	}
+	roots, priorityRootCount := prioritizeModelScanRoots(roots)
+	metadataSidecars := make(map[string]bool)
+	for i := range roots {
+		roots[i].metadataSidecars = metadataSidecars
 	}
 	delegatedRoots := nestedModelScanRoots(roots)
 	if len(roots) > 1 {
-		start := int((s.modelFileRootCursor.Add(1) - 1) % uint64(len(roots)))
+		sequence := s.modelFileRootCursor.Add(1) - 1
+		start := modelRootRotationStart(sequence, len(roots), priorityRootCount)
 		if start > 0 {
 			rotated := make([]modelScanRoot, 0, len(roots))
 			rotated = append(rotated, roots[start:]...)
@@ -132,7 +184,14 @@ func (s *ContinuousDiscoveryService) detectModelFilesWithOutcome(ctx context.Con
 	if visitLimit > maxModelFileVisitedEntries {
 		visitLimit = maxModelFileVisitedEntries
 	}
-	perRootVisitLimit := visitLimit / 4
+	rootDivisor := len(roots)
+	if rootDivisor < 4 {
+		rootDivisor = 4
+	}
+	if rootDivisor > 16 {
+		rootDivisor = 16
+	}
+	perRootVisitLimit := visitLimit / rootDivisor
 	if perRootVisitLimit < minModelFileVisitsPerRoot {
 		perRootVisitLimit = minModelFileVisitsPerRoot
 	}
@@ -142,7 +201,7 @@ func (s *ContinuousDiscoveryService) detectModelFilesWithOutcome(ctx context.Con
 
 	var out []AISignal
 	seenPaths := make(map[string]struct{})
-	visited, matched, walkErrors := 0, 0, 0
+	visited, matched, walkErrors := 0, 0, len(rootDiscoveryErrors)
 	budgetExhausted := false
 
 	deferredFrom := -1
@@ -159,14 +218,26 @@ func (s *ContinuousDiscoveryService) detectModelFilesWithOutcome(ctx context.Con
 		pageAggregates := make(map[string]*modelFileAggregate)
 		pageOrder := make([]string, 0)
 		rootVisited := 0
+		rootVisitLimit := modelRootVisitLimit(root, perRootVisitLimit, visitLimit)
 		rootIncomplete := false
 		rootHadErrors := false
+		rootErrorCount := 0
 		walkErr := filepath.WalkDir(root.path, func(path string, d fs.DirEntry, walkErr error) error {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
+			// A cursor represents a lexical prefix already attempted during this
+			// logical traversal. Do not let the same protected/vanished entry in
+			// that completed prefix poison every resumed page forever.
+			if resumed && path != root.path && path <= resumeAfter && walkErr != nil {
+				if d != nil && d.IsDir() {
+					return filepath.SkipDir
+				}
+				return nil
+			}
 			if walkErr != nil {
 				walkErrors++
+				rootErrorCount++
 				rootIncomplete = true
 				rootHadErrors = true
 				if d != nil && d.IsDir() {
@@ -193,7 +264,7 @@ func (s *ContinuousDiscoveryService) detectModelFilesWithOutcome(ctx context.Con
 				rootIncomplete = true
 				return filepath.SkipAll
 			}
-			if rootVisited > perRootVisitLimit {
+			if rootVisited > rootVisitLimit {
 				rootIncomplete = true
 				return filepath.SkipAll
 			}
@@ -206,8 +277,8 @@ func (s *ContinuousDiscoveryService) detectModelFilesWithOutcome(ctx context.Con
 					return filepath.SkipDir
 				}
 				macOSHomeLibrary := runtime.GOOS == "darwin" && !root.specialized &&
-					filepath.Clean(path) == filepath.Join(filepath.Clean(s.opts.HomeDir), "Library")
-				if path != root.path && (shouldSkipModelDirectory(d.Name(), root.specialized) || macOSHomeLibrary) {
+					isMacOSHomeLibrary(path, s.homesToScan())
+				if path != root.path && (shouldSkipModelDirectoryForRoot(d.Name(), root) || macOSHomeLibrary) {
 					lastCompleted = path
 					return filepath.SkipDir
 				}
@@ -293,6 +364,7 @@ func (s *ContinuousDiscoveryService) detectModelFilesWithOutcome(ctx context.Con
 					rootIncomplete = true
 					rootHadErrors = true
 					walkErrors++
+					rootErrorCount++
 					return nil
 				}
 				candidate, candidateOK := s.modelArtifactCandidate(path, root, "ollama", false, modelID)
@@ -306,6 +378,7 @@ func (s *ContinuousDiscoveryService) detectModelFilesWithOutcome(ctx context.Con
 					rootIncomplete = true
 					rootHadErrors = true
 					walkErrors++
+					rootErrorCount++
 				}
 				return nil
 			}
@@ -325,37 +398,62 @@ func (s *ContinuousDiscoveryService) detectModelFilesWithOutcome(ctx context.Con
 				}
 				out = append(out, modelAggregatesToSignals(s, pageAggregates, pageOrder)...)
 				sortAISignals(out)
+				outcome.rootErrors = boundedModelRootDiagnostics(outcome.rootErrors)
 				return out, matched, outcome, err
 			}
 			walkErrors++
+			rootErrorCount++
 			rootIncomplete = true
 			rootHadErrors = true
 		}
+		if rootHadErrors {
+			outcome.rootErrors[rootKey] = modelRootErrorDetail(root, rootErrorCount)
+		}
 		emitAggregates, emitOrder := pageAggregates, pageOrder
 		if rootHadErrors {
-			// A page with an unreadable/vanished subtree cannot participate in
-			// a complete traversal. Restart the cycle next time and keep this
-			// page deferred; it may still contain useful positive discoveries.
-			s.resetModelFileCycle(root.path)
-			s.setModelFileCursor(root.path, "")
+			// Broad roots can contain a permanently protected subtree. Preserve
+			// bounded forward progress for those roots, while tainting the logical
+			// cycle so it can emit positive discoveries but never assert removals.
+			if !root.specialized && lastCompleted != "" {
+				s.setModelFileCursor(root.path, lastCompleted)
+				s.mergeModelFileCycle(
+					root.path, pageAggregates, pageOrder,
+					fileCycleAggregateLimit(matchLimit), false, true,
+				)
+			} else {
+				s.resetModelFileCycle(root.path)
+				s.setModelFileCursor(root.path, "")
+			}
 			outcome.deferred[rootKey] = true
 		} else if rootIncomplete {
 			if lastCompleted != "" {
 				s.setModelFileCursor(root.path, lastCompleted)
 			}
-			s.mergeModelFileCycle(root.path, pageAggregates, pageOrder, fileCycleAggregateLimit(matchLimit), false)
+			_, _, _, cycleIncomplete := s.mergeModelFileCycle(
+				root.path, pageAggregates, pageOrder,
+				fileCycleAggregateLimit(matchLimit), false, false,
+			)
+			if cycleIncomplete {
+				outcome.rootErrors[rootKey] = modelRootDeferredErrorDetail(root)
+				walkErrors++
+			}
 			outcome.deferred[rootKey] = true
 		} else if resumed {
 			// Reaching EOF after a resumed suffix completes the logical root
 			// traversal. Emit the bounded cycle-wide aggregate so shards and
 			// removals are reconciled against a consistent snapshot.
-			cycleAggregates, cycleOrder, cycleOverflow := s.mergeModelFileCycle(
-				root.path, pageAggregates, pageOrder, fileCycleAggregateLimit(matchLimit), true,
+			cycleAggregates, cycleOrder, cycleOverflow, cycleIncomplete := s.mergeModelFileCycle(
+				root.path, pageAggregates, pageOrder,
+				fileCycleAggregateLimit(matchLimit), true, false,
 			)
 			emitAggregates, emitOrder = cycleAggregates, cycleOrder
 			s.setModelFileCursor(root.path, "")
 			if cycleOverflow {
 				emitAggregates, emitOrder = pageAggregates, pageOrder
+				outcome.deferred[rootKey] = true
+			} else if cycleIncomplete {
+				outcome.rootErrors[rootKey] = modelRootDeferredErrorDetail(root)
+				walkErrors++
 				outcome.deferred[rootKey] = true
 			} else {
 				outcome.conclusive[rootKey] = true
@@ -378,9 +476,125 @@ func (s *ContinuousDiscoveryService) detectModelFilesWithOutcome(ctx context.Con
 
 	sortAISignals(out)
 	if walkErrors > 0 {
-		return out, matched, outcome, fmt.Errorf("model file walk encountered %d errors (permission / vanished entries)", walkErrors)
+		erroredRoots := len(outcome.rootErrors)
+		outcome.rootErrors = boundedModelRootDiagnostics(outcome.rootErrors)
+		return out, matched, outcome, fmt.Errorf(
+			"model file scan incomplete: %d filesystem errors across %d roots",
+			walkErrors, erroredRoots,
+		)
 	}
+	outcome.rootErrors = boundedModelRootDiagnostics(outcome.rootErrors)
 	return out, matched, outcome, nil
+}
+
+func prioritizeModelScanRoots(roots []modelScanRoot) ([]modelScanRoot, int) {
+	prioritized := make([]modelScanRoot, 0, len(roots))
+	for _, root := range roots {
+		if root.specialized {
+			prioritized = append(prioritized, root)
+		}
+	}
+	priorityCount := len(prioritized)
+	for _, root := range roots {
+		if !root.specialized {
+			prioritized = append(prioritized, root)
+		}
+	}
+	return prioritized, priorityCount
+}
+
+func modelRootVisitLimit(root modelScanRoot, baseLimit, globalLimit int) int {
+	limit := baseLimit
+	switch root.scope {
+	case modelScanScopeApplicationSupport, modelScanScopeContainer, modelScanScopeGroupContainer:
+		// These are the highest-yield catalog-independent macOS roots. Give
+		// each selected page enough depth to move through a large app store in
+		// a few scans, while retaining the global cap and root rotation.
+		if limit <= maxModelFileVisitsPerRoot/4 {
+			limit *= 4
+		} else {
+			limit = maxModelFileVisitsPerRoot
+		}
+		if limit < 8*minModelFileVisitsPerRoot {
+			limit = 8 * minModelFileVisitsPerRoot
+		}
+	}
+	if limit > maxModelFileVisitsPerRoot {
+		limit = maxModelFileVisitsPerRoot
+	}
+	if globalLimit > 0 && limit > globalLimit {
+		limit = globalLimit
+	}
+	if limit < 1 {
+		return 1
+	}
+	return limit
+}
+
+func modelRootRotationStart(sequence uint64, rootCount, priorityRootCount int) int {
+	if rootCount <= 1 {
+		return 0
+	}
+	if priorityRootCount < 0 {
+		priorityRootCount = 0
+	} else if priorityRootCount > rootCount {
+		priorityRootCount = rootCount
+	}
+	remaining := rootCount - priorityRootCount
+	if priorityRootCount == rootCount {
+		return int(sequence % uint64(rootCount))
+	}
+	if priorityRootCount > 0 && sequence%2 == 0 {
+		return int((sequence / 2) % uint64(priorityRootCount))
+	}
+	genericSequence := sequence
+	if priorityRootCount > 0 {
+		genericSequence = sequence / 2
+	}
+	if remaining <= 1 {
+		return priorityRootCount
+	}
+	return priorityRootCount + distributedModelRootIndex(genericSequence, remaining)
+}
+
+func distributedModelRootIndex(sequence uint64, rootCount int) int {
+	if rootCount <= 1 {
+		return 0
+	}
+	stride := int(math.Sqrt(float64(rootCount)))
+	if stride < 1 {
+		stride = 1
+	}
+	for greatestCommonDivisor(stride, rootCount) != 1 {
+		stride++
+	}
+	return int((sequence * uint64(stride)) % uint64(rootCount))
+}
+
+func greatestCommonDivisor(left, right int) int {
+	for right != 0 {
+		left, right = right, left%right
+	}
+	return left
+}
+
+func boundedModelRootDiagnostics(in map[string]string) map[string]string {
+	if len(in) <= maxModelRootDiagnostics {
+		return in
+	}
+	keys := make([]string, 0, len(in))
+	for key := range in {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	out := make(map[string]string, maxModelRootDiagnostics+1)
+	for _, key := range keys[:maxModelRootDiagnostics] {
+		out[key] = in[key]
+	}
+	out["additional_roots"] = fmt.Sprintf(
+		"%d additional model roots had errors; details omitted", len(in)-maxModelRootDiagnostics,
+	)
+	return out
 }
 
 func (s *ContinuousDiscoveryService) modelFileCursor(root string) string {
@@ -429,6 +643,18 @@ func addModelFileAggregate(aggregates map[string]*modelFileAggregate, order *[]s
 	}
 	candidate.format = boundedLocalModelField(candidate.format, maxLocalModelFormatBytes)
 	candidate.provider = boundedLocalModelField(candidate.provider, maxLocalModelProviderBytes)
+	candidate.owner = boundedModelOwner(candidate.owner)
+	if !validLocalModelModality(candidate.modality) {
+		candidate.modality = localModelModalityUnknown
+	}
+	if !validLocalModelRelevance(candidate.relevance) {
+		candidate.relevance = localModelRelevanceUnknown
+	}
+	if candidate.confidence < 0 {
+		candidate.confidence = 0
+	} else if candidate.confidence > 1 {
+		candidate.confidence = 1
+	}
 	existing := aggregates[candidate.key]
 	if existing == nil {
 		copyCandidate := candidate
@@ -462,6 +688,18 @@ func mergeModelFileAggregateMetadata(existing, candidate *modelFileAggregate) {
 	}
 	if existing.provider == "" {
 		existing.provider = candidate.provider
+	}
+	if existing.owner == "" || (candidate.owner != "" && candidate.owner < existing.owner) {
+		existing.owner = candidate.owner
+	}
+	if modelModalityPriority(candidate.modality) > modelModalityPriority(existing.modality) {
+		existing.modality = candidate.modality
+	}
+	if modelRelevancePriority(candidate.relevance) > modelRelevancePriority(existing.relevance) {
+		existing.relevance = candidate.relevance
+	}
+	if candidate.confidence > existing.confidence {
+		existing.confidence = candidate.confidence
 	}
 	existing.provenance = mergeModelProvenanceHints(existing.provenance, candidate.provenance)
 	if candidate.sizeBytes > 0 && existing.sizeBytes <= math.MaxInt64-candidate.sizeBytes {
@@ -499,7 +737,8 @@ func (s *ContinuousDiscoveryService) mergeModelFileCycle(
 	pageOrder []string,
 	limit int,
 	finish bool,
-) (map[string]*modelFileAggregate, []string, bool) {
+	markIncomplete bool,
+) (map[string]*modelFileAggregate, []string, bool, bool) {
 	s.modelFileCycleMu.Lock()
 	defer s.modelFileCycleMu.Unlock()
 	if s.modelFileCycles == nil {
@@ -510,6 +749,7 @@ func (s *ContinuousDiscoveryService) mergeModelFileCycle(
 		cycle = &modelFileCycle{aggregates: make(map[string]*modelFileAggregate)}
 		s.modelFileCycles[root] = cycle
 	}
+	cycle.incomplete = cycle.incomplete || markIncomplete
 	for _, key := range pageOrder {
 		candidate := page[key]
 		if candidate == nil {
@@ -567,10 +807,10 @@ func (s *ContinuousDiscoveryService) mergeModelFileCycle(
 		mergeModelFileAggregateMetadata(existing, candidate)
 	}
 	if !finish {
-		return nil, nil, cycle.overflow
+		return nil, nil, cycle.overflow, cycle.incomplete
 	}
 	delete(s.modelFileCycles, root)
-	return cycle.aggregates, cycle.order, cycle.overflow
+	return cycle.aggregates, cycle.order, cycle.overflow, cycle.incomplete
 }
 
 func (s *ContinuousDiscoveryService) resetModelFileCycle(root string) {
@@ -583,10 +823,16 @@ func (s *ContinuousDiscoveryService) resetModelFileCycle(root string) {
 }
 
 func (s *ContinuousDiscoveryService) modelFileScanRoots() []modelScanRoot {
+	roots, _ := s.modelFileScanRootsWithErrors()
+	return roots
+}
+
+func (s *ContinuousDiscoveryService) modelFileScanRootsWithErrors() ([]modelScanRoot, map[string]string) {
 	var roots []modelScanRoot
 	seen := map[string]struct{}{}
-	add := func(path, provider string, specialized bool) {
-		path = strings.TrimSpace(path)
+	rootErrors := make(map[string]string)
+	add := func(root modelScanRoot) {
+		path := strings.TrimSpace(root.path)
 		if path == "" {
 			return
 		}
@@ -599,6 +845,9 @@ func (s *ContinuousDiscoveryService) modelFileScanRoots() []modelScanRoot {
 		path = filepath.Clean(path)
 		resolved, err := filepath.EvalSymlinks(path)
 		if err != nil {
+			if !os.IsNotExist(err) {
+				rootErrors[hashPath(path)] = modelRootAccessErrorDetail(root, err)
+			}
 			return
 		}
 		path = filepath.Clean(resolved)
@@ -606,49 +855,210 @@ func (s *ContinuousDiscoveryService) modelFileScanRoots() []modelScanRoot {
 			return
 		}
 		info, err := os.Stat(path)
-		if err != nil || !info.IsDir() {
+		if err != nil {
+			if !os.IsNotExist(err) {
+				rootErrors[hashPath(path)] = modelRootAccessErrorDetail(root, err)
+			}
+			return
+		}
+		if !info.IsDir() {
 			return
 		}
 		seen[path] = struct{}{}
-		roots = append(roots, modelScanRoot{path: path, provider: provider, specialized: specialized})
+		root.path = path
+		if root.provider == "" {
+			root.provider = "filesystem"
+		}
+		if root.scope == "" {
+			root.scope = modelScanScopeConfigured
+		}
+		root.owner = boundedModelOwner(root.owner)
+		roots = append(roots, root)
+	}
+	known := func(path, provider string) {
+		add(modelScanRoot{
+			path: path, provider: provider, specialized: true, scope: modelScanScopeKnownStore,
+		})
 	}
 
 	// Environment-selected stores take precedence over conventional paths.
-	add(os.Getenv("HF_HUB_CACHE"), "huggingface", true)
+	known(os.Getenv("HF_HUB_CACHE"), "huggingface")
 	if hfHome := strings.TrimSpace(os.Getenv("HF_HOME")); hfHome != "" {
-		add(filepath.Join(hfHome, "hub"), "huggingface", true)
+		known(filepath.Join(hfHome, "hub"), "huggingface")
 	}
-	add(os.Getenv("OLLAMA_MODELS"), "ollama", true)
+	known(os.Getenv("OLLAMA_MODELS"), "ollama")
 	if lmHome := strings.TrimSpace(os.Getenv("LM_STUDIO_HOME")); lmHome != "" {
-		add(lmHome, "lmstudio", true)
-		add(filepath.Join(lmHome, "models"), "lmstudio", true)
+		known(lmHome, "lmstudio")
+		known(filepath.Join(lmHome, "models"), "lmstudio")
 	}
-	add(os.Getenv("FLM_MODEL_PATH"), "flm", true)
+	known(os.Getenv("FLM_MODEL_PATH"), "flm")
 
-	home := filepath.Clean(s.opts.HomeDir)
-	if home != "" && home != "." {
-		add(filepath.Join(home, ".cache", "huggingface", "hub"), "huggingface", true)
-		add(filepath.Join(home, ".ollama", "models"), "ollama", true)
-		add(filepath.Join(home, ".lmstudio", "models"), "lmstudio", true)
-		add(filepath.Join(home, ".cache", "lm-studio", "models"), "lmstudio", true)
-		add(filepath.Join(home, ".cache", "llama.cpp"), "llamacpp", true)
-		add(filepath.Join(home, ".cache", "mlx"), "mlx", true)
-		add(filepath.Join(home, ".mlx", "models"), "mlx", true)
+	homes := s.homesToScan()
+	if len(homes) == 0 && strings.TrimSpace(s.opts.HomeDir) != "" {
+		homes = []string{s.opts.HomeDir}
+	}
+	macOSAppResourceRoots := 0
+	for _, candidateHome := range homes {
+		home := filepath.Clean(candidateHome)
+		if home == "" || home == "." {
+			continue
+		}
+		known(filepath.Join(home, ".cache", "huggingface", "hub"), "huggingface")
+		known(filepath.Join(home, ".ollama", "models"), "ollama")
+		known(filepath.Join(home, ".lmstudio", "models"), "lmstudio")
+		known(filepath.Join(home, ".cache", "lm-studio", "models"), "lmstudio")
+		known(filepath.Join(home, ".cache", "llama.cpp"), "llamacpp")
+		known(filepath.Join(home, ".cache", "mlx"), "mlx")
+		known(filepath.Join(home, ".mlx", "models"), "mlx")
 		if runtime.GOOS == "darwin" {
-			add(filepath.Join(home, "Library", "Application Support", "LM Studio", "models"), "lmstudio", true)
-			add(filepath.Join(home, "Library", "Caches", "mlx"), "mlx", true)
+			known(filepath.Join(home, "Library", "Application Support", "LM Studio", "models"), "lmstudio")
+			known(filepath.Join(home, "Library", "Caches", "mlx"), "mlx")
+			if strings.EqualFold(s.opts.Mode, "enhanced") {
+				actualHome, _ := os.UserHomeDir()
+				includeGlobalApplications := filepath.Clean(actualHome) == home
+				remainingAppRoots := maxMacOSAppResourceRoots - macOSAppResourceRoots
+				for _, root := range enhancedMacOSModelScanRoots(home, includeGlobalApplications, remainingAppRoots) {
+					before := len(roots)
+					add(root)
+					if root.scope == modelScanScopeAppResources && len(roots) > before {
+						macOSAppResourceRoots++
+					}
+				}
+			}
 		}
 	}
-	for _, root := range platformModelScanRoots(home) {
-		add(root.path, root.provider, root.specialized)
+	for _, root := range platformModelScanRoots(filepath.Clean(s.opts.HomeDir)) {
+		if root.scope == "" {
+			root.scope = modelScanScopeKnownStore
+		}
+		add(root)
 	}
 	for _, dir := range s.lemonadeConfiguredModelDirs() {
-		add(dir, "lemonade", true)
+		known(dir, "lemonade")
 	}
-	for _, root := range s.scanRoots() {
-		add(root, "filesystem", false)
+	configured := make([]string, 0, len(s.opts.ScanRoots))
+	for _, candidate := range s.opts.ScanRoots {
+		configured = append(configured, s.expandCandidatePath(candidate)...)
 	}
-	return normalizeModelScanRoots(roots)
+	if len(configured) == 0 {
+		configured = append(configured, homes...)
+	}
+	for _, path := range configured {
+		if strings.EqualFold(s.opts.Mode, "passive") && isBroadModelHomeRoot(path, homes) {
+			continue
+		}
+		add(modelScanRoot{path: path, provider: "filesystem", scope: modelScanScopeConfigured})
+	}
+	return normalizeModelScanRoots(roots), rootErrors
+}
+
+// enhancedMacOSModelScanRoots keeps the privacy boundary around a broad home
+// scan: ~/Library is still skipped by that walk, while the four areas where
+// sandboxed and desktop applications commonly store models each receive an
+// independent traversal budget and cursor. App bundle resources are admitted
+// as per-application roots, capped to bound root-list memory and scan latency.
+func enhancedMacOSModelScanRoots(home string, includeGlobalApplications bool, appResourceLimit int) []modelScanRoot {
+	roots := macOSLibraryModelScanRoots(home)
+	if len(roots) == 0 {
+		return nil
+	}
+	return append(roots, macOSApplicationResourceScanRoots(home, includeGlobalApplications, appResourceLimit)...)
+}
+
+func macOSApplicationResourceScanRoots(home string, includeGlobalApplications bool, limit int) []modelScanRoot {
+	if limit <= 0 {
+		return nil
+	}
+	home = filepath.Clean(strings.TrimSpace(home))
+
+	applicationParents := []string{filepath.Join(home, "Applications")}
+	if includeGlobalApplications {
+		applicationParents = append(applicationParents, "/Applications")
+	}
+	var roots []modelScanRoot
+	for _, parent := range applicationParents {
+		children, err := os.ReadDir(parent)
+		if err != nil {
+			continue
+		}
+		for _, child := range children {
+			if len(roots) >= limit {
+				return roots
+			}
+			name := strings.TrimSpace(child.Name())
+			if !strings.HasSuffix(strings.ToLower(name), ".app") {
+				continue
+			}
+			roots = append(roots, modelScanRoot{
+				path:     filepath.Join(parent, name, "Contents", "Resources"),
+				provider: "filesystem", scope: modelScanScopeAppResources,
+				owner: humanizeApplicationIdentifier(strings.TrimSuffix(name, filepath.Ext(name))),
+			})
+		}
+	}
+	return roots
+}
+
+func macOSLibraryModelScanRoots(home string) []modelScanRoot {
+	home = filepath.Clean(strings.TrimSpace(home))
+	if home == "" || home == "." {
+		return nil
+	}
+	library := filepath.Join(home, "Library")
+	return []modelScanRoot{
+		{path: filepath.Join(library, "Application Support"), provider: "filesystem", scope: modelScanScopeApplicationSupport},
+		{path: filepath.Join(library, "Containers"), provider: "filesystem", scope: modelScanScopeContainer},
+		{path: filepath.Join(library, "Group Containers"), provider: "filesystem", scope: modelScanScopeGroupContainer},
+		{path: filepath.Join(library, "Caches"), provider: "filesystem", scope: modelScanScopeCache},
+	}
+}
+
+func isBroadModelHomeRoot(path string, homes []string) bool {
+	path = filepath.Clean(path)
+	for _, home := range homes {
+		if path == filepath.Clean(home) {
+			return true
+		}
+	}
+	return false
+}
+
+func modelRootAccessErrorDetail(root modelScanRoot, err error) string {
+	reason := "unavailable"
+	if os.IsPermission(err) {
+		reason = "permission denied"
+	}
+	return fmt.Sprintf("%s root %s", modelRootDiagnosticLabel(root), reason)
+}
+
+func modelRootErrorDetail(root modelScanRoot, count int) string {
+	if count < 1 {
+		count = 1
+	}
+	return fmt.Sprintf("%s root incomplete (%d unreadable or changed entries)", modelRootDiagnosticLabel(root), count)
+}
+
+func modelRootDeferredErrorDetail(root modelScanRoot) string {
+	return fmt.Sprintf("%s root remains incomplete after an unreadable or changed entry", modelRootDiagnosticLabel(root))
+}
+
+func modelRootDiagnosticLabel(root modelScanRoot) string {
+	switch root.scope {
+	case modelScanScopeApplicationSupport:
+		return "application-support"
+	case modelScanScopeContainer:
+		return "application-container"
+	case modelScanScopeGroupContainer:
+		return "group-container"
+	case modelScanScopeCache:
+		return "application-cache"
+	case modelScanScopeAppResources:
+		return "application-resources"
+	case modelScanScopeKnownStore:
+		return "known-model-store"
+	default:
+		return "configured-filesystem"
+	}
 }
 
 // normalizeModelScanRoots removes a broad root that is fully contained by a
@@ -779,9 +1189,51 @@ func shouldSkipModelDirectory(name string, specialized bool) bool {
 	}
 }
 
+func shouldSkipModelDirectoryForRoot(name string, root modelScanRoot) bool {
+	if !isMacOSApplicationModelScope(root.scope) {
+		return shouldSkipModelDirectory(name, root.specialized)
+	}
+	lower := strings.ToLower(strings.TrimSpace(name))
+	switch lower {
+	case ".git", "node_modules", "vendor", ".venv", "venv", "__pycache__", "target":
+		return true
+	case "logs", "log", "crashpad", "crash reports", "crashreporter", "code cache",
+		"gpucache", "shadercache", "dawncache", "httpstorages", "webkit", "webstorage",
+		"indexeddb", "service worker", "saved application state", "cookies", "preferences",
+		"local storage":
+		return true
+	}
+	if root.scope == modelScanScopeAppResources {
+		return strings.HasSuffix(lower, ".lproj") || lower == "locales" || lower == "translations" ||
+			lower == "help" || lower == "documentation" || lower == "fonts" || lower == "icons" || lower == "images"
+	}
+	return false
+}
+
+func isMacOSApplicationModelScope(scope string) bool {
+	switch scope {
+	case modelScanScopeApplicationSupport, modelScanScopeContainer, modelScanScopeGroupContainer,
+		modelScanScopeCache, modelScanScopeAppResources:
+		return true
+	default:
+		return false
+	}
+}
+
+func isMacOSHomeLibrary(path string, homes []string) bool {
+	path = filepath.Clean(path)
+	for _, home := range homes {
+		if path == filepath.Join(filepath.Clean(home), "Library") {
+			return true
+		}
+	}
+	return false
+}
+
 func modelArtifactFormat(path string, root modelScanRoot) (string, bool) {
 	ext := strings.ToLower(filepath.Ext(path))
 	var format string
+	ambiguous := false
 	switch ext {
 	case ".gguf":
 		format = "gguf"
@@ -791,20 +1243,24 @@ func modelArtifactFormat(path string, root modelScanRoot) (string, bool) {
 		format = "safetensors"
 	case ".onnx":
 		format = "onnx"
+		ambiguous = true
 	case ".ort":
 		format = "ort"
+		ambiguous = true
 	case ".tflite":
 		format = "tflite"
+		ambiguous = true
 	case ".mlmodel":
 		format = "coreml"
 	case ".q4nx":
 		format = "q4nx"
 	case ".pt", ".pth", ".ckpt", ".bin":
-		if !strongModelFileContext(path, root) {
-			return "", false
-		}
 		format = strings.TrimPrefix(ext, ".")
+		ambiguous = true
 	default:
+		return "", false
+	}
+	if ambiguous && !strongModelFileContext(path, root) && !semanticModelArtifactName(path) && !hasModelMetadataSidecar(path, root) {
 		return "", false
 	}
 	if format == "safetensors" && isMLXPath(path, root) {
@@ -817,11 +1273,75 @@ func strongModelFileContext(path string, root modelScanRoot) bool {
 	if root.specialized {
 		return true
 	}
-	lower := strings.ToLower(filepath.ToSlash(path))
-	for _, segment := range []string{"/models/", "/model/", "/weights/", "/checkpoints/", "/huggingface/", "/mlx/", "/.ollama/", "/lm studio/", "/llama.cpp/"} {
-		if strings.Contains(lower, segment) {
+	dir := filepath.Dir(filepath.Clean(path))
+	for {
+		segment := strings.ToLower(strings.TrimSpace(filepath.Base(dir)))
+		switch segment {
+		case "models", "model", "weights", "weight", "checkpoints", "checkpoint", "huggingface",
+			"mlx", ".mlx", ".ollama", "lm studio", "llama.cpp", "onnx", "ort", "tflite",
+			"coreml", "mlmodels", "modelstore", "model_store", "model-cache", "model_cache",
+			"ai-models", "ai_models", "optimizationguidepredictionmodels":
 			return true
 		}
+		if strings.HasPrefix(segment, "models--") || strings.HasSuffix(segment, "-models") ||
+			strings.HasSuffix(segment, "_models") || strings.HasSuffix(segment, " model") ||
+			strings.HasSuffix(segment, " models") {
+			return true
+		}
+		if dir == root.path {
+			break
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir || !modelPathWithin(dir, root.path) {
+			break
+		}
+		dir = parent
+	}
+	return false
+}
+
+func semanticModelArtifactName(path string) bool {
+	stem := strings.ToLower(strings.TrimSuffix(filepath.Base(path), filepath.Ext(path)))
+	for _, token := range []string{
+		"model", "weight", "checkpoint", "encoder", "decoder", "whisper", "parakeet", "speech",
+		"transcrib", "diar", "speaker", "vad", "silero", "moonshine", "sensevoice", "embedding",
+		"rerank", "sentence-transform", "vision", "image", "yolo", "classifier", "detector", "segment",
+		"depth", "ocr", "wav2vec", "encodec",
+	} {
+		if strings.Contains(stem, token) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasModelMetadataSidecar(path string, root modelScanRoot) (found bool) {
+	dir := filepath.Dir(filepath.Clean(path))
+	cleanRoot := filepath.Clean(root.path)
+	cacheKey := cleanRoot + "\x00" + dir
+	if root.metadataSidecars != nil {
+		if cached, ok := root.metadataSidecars[cacheKey]; ok {
+			return cached
+		}
+		defer func() {
+			root.metadataSidecars[cacheKey] = found
+		}()
+	}
+	for level := 0; level < 2; level++ {
+		for _, name := range []string{
+			"config.json", "model_config.json", "generation_config.json", "tokenizer.json",
+			"tokenizer_config.json", "preprocessor_config.json", "processor_config.json",
+			"model_index.json", "vocab.json",
+		} {
+			if info, err := os.Stat(filepath.Join(dir, name)); err == nil && info.Mode().IsRegular() {
+				return true
+			}
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir || dir == cleanRoot || (parent != cleanRoot && !modelPathWithin(parent, cleanRoot)) {
+			break
+		}
+		dir = parent
 	}
 	return false
 }
@@ -845,6 +1365,286 @@ func isOllamaStorePath(path string, root modelScanRoot) bool {
 	}
 	lower := strings.ToLower(filepath.ToSlash(path))
 	return strings.Contains(lower, "/.ollama/models/")
+}
+
+func (s *ContinuousDiscoveryService) modelArtifactOwner(path string, root modelScanRoot) string {
+	if owner := boundedModelOwner(root.owner); owner != "" {
+		return owner
+	}
+	switch strings.ToLower(strings.TrimSpace(root.provider)) {
+	case "ollama":
+		return "Ollama"
+	case "lmstudio":
+		return "LM Studio"
+	case "lemonade":
+		return "Lemonade"
+	case "jan":
+		return "Jan"
+	case "gpt4all":
+		return "GPT4All"
+	case "anythingllm":
+		return "AnythingLLM"
+	}
+	if owner := ownerFromMacOSModelScope(path, root.path, root.scope); owner != "" {
+		return owner
+	}
+	for _, home := range s.homesToScan() {
+		for _, scopedRoot := range macOSLibraryModelScanRoots(home) {
+			if owner := ownerFromMacOSModelScope(path, scopedRoot.path, scopedRoot.scope); owner != "" {
+				return owner
+			}
+		}
+	}
+	return ownerFromApplicationBundlePath(path)
+}
+
+func ownerFromMacOSModelScope(path, rootPath, scope string) string {
+	if !isMacOSApplicationModelScope(scope) || scope == modelScanScopeAppResources {
+		return ""
+	}
+	relative, err := filepath.Rel(filepath.Clean(rootPath), filepath.Clean(path))
+	if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(os.PathSeparator)) {
+		return ""
+	}
+	parts := strings.Split(relative, string(os.PathSeparator))
+	if len(parts) == 0 {
+		return ""
+	}
+	ownerPart := parts[0]
+	if len(parts) > 1 {
+		switch strings.ToLower(ownerPart) {
+		case "adobe", "cisco", "google", "microsoft":
+			ownerPart = parts[1]
+		}
+	}
+	return humanizeApplicationIdentifier(ownerPart)
+}
+
+func ownerFromApplicationBundlePath(path string) string {
+	for _, part := range strings.Split(filepath.ToSlash(filepath.Clean(path)), "/") {
+		if strings.HasSuffix(strings.ToLower(part), ".app") {
+			return humanizeApplicationIdentifier(strings.TrimSuffix(part, filepath.Ext(part)))
+		}
+	}
+	return ""
+}
+
+func humanizeApplicationIdentifier(value string) string {
+	value = strings.TrimSpace(value)
+	if strings.HasSuffix(strings.ToLower(value), ".app") {
+		value = strings.TrimSuffix(value, filepath.Ext(value))
+	}
+	if value == "" {
+		return ""
+	}
+	selected := value
+	if strings.Contains(value, ".") {
+		generic := map[string]bool{
+			"ai": true, "app": true, "application": true, "cache": true, "caches": true,
+			"com": true, "container": true, "desktop": true, "group": true, "helper": true,
+			"mac": true, "macos": true, "net": true, "org": true, "shared": true,
+		}
+		parts := strings.Split(value, ".")
+		for i := len(parts) - 1; i >= 0; i-- {
+			part := strings.TrimSpace(parts[i])
+			if part != "" && !generic[strings.ToLower(part)] {
+				selected = part
+				break
+			}
+		}
+	}
+	selected = strings.Join(strings.Fields(strings.NewReplacer("_", " ", "-", " ").Replace(selected)), " ")
+	runes := []rune(selected)
+	if len(runes) > 0 {
+		runes[0] = unicode.ToUpper(runes[0])
+	}
+	return boundedModelOwner(string(runes))
+}
+
+func boundedModelOwner(value string) string {
+	value = strings.NewReplacer("/", " ", "\\", " ").Replace(value)
+	value = strings.Join(strings.Fields(boundedLocalModelField(value, maxLocalModelProviderBytes)), " ")
+	if value == "." || value == ".." {
+		return ""
+	}
+	return value
+}
+
+func inferModelArtifactModality(path string, root modelScanRoot, id, format string) string {
+	primary := strings.ToLower(id + " " + filepath.Base(path))
+	if modality := modelModalityFromSemanticText(primary); modality != localModelModalityUnknown {
+		return modality
+	}
+	relative := path
+	if value, err := filepath.Rel(root.path, path); err == nil {
+		relative = value
+	}
+	if modality := modelModalityFromSemanticText(strings.ToLower(relative)); modality != localModelModalityUnknown {
+		return modality
+	}
+	switch format {
+	case "gguf", "ggml", "mlx", "q4nx", "ollama":
+		return localModelModalityGenerative
+	default:
+		return localModelModalityUnknown
+	}
+}
+
+func modelModalityFromSemanticText(value string) string {
+	containsAny := func(tokens ...string) bool {
+		for _, token := range tokens {
+			if strings.Contains(value, token) {
+				return true
+			}
+		}
+		return false
+	}
+	if containsAny("whisper", "parakeet", "speech", "transcrib", "asr", "diar", "speaker", "moonshine", "sensevoice") {
+		return localModelModalitySpeech
+	}
+	if containsAny("embedding", "sentence-transform", "rerank", "text-encoder", "text_encoder", "bge-", "e5-", "clip") {
+		return localModelModalityEmbedding
+	}
+	if containsAny("vision", "image", "yolo", "object-detect", "object_detect", "segment", "depth", "ocr", "face-detect", "face_detect") {
+		return localModelModalityVision
+	}
+	if containsAny("vad", "silero", "wav2vec", "encodec", "audio", "voice-activity", "voice_activity", "music") {
+		return localModelModalityAudio
+	}
+	if containsAny("llama", "qwen", "mistral", "gemma", "deepseek", "phi-", "phi_", "instruct", "chat", "text-generation", "text_generation", "language-model", "language_model") {
+		return localModelModalityGenerative
+	}
+	return localModelModalityUnknown
+}
+
+func inferModelArtifactRelevance(path string, root modelScanRoot, owner, modality string) string {
+	if root.scope == modelScanScopeAppResources || root.scope == modelScanScopeCache ||
+		embeddedModelOwner(owner) || embeddedModelArtifactPath(path, root) {
+		return localModelRelevanceEmbedded
+	}
+	if modality == localModelModalityGenerative {
+		return localModelRelevancePrimary
+	}
+	if modality != "" && modality != localModelModalityUnknown {
+		return localModelRelevanceSupporting
+	}
+	if root.specialized && strongModelFileContext(path, root) {
+		return localModelRelevancePrimary
+	}
+	return localModelRelevanceUnknown
+}
+
+func embeddedModelArtifactPath(path string, root modelScanRoot) bool {
+	relative := path
+	if value, err := filepath.Rel(root.path, path); err == nil {
+		relative = value
+	}
+	lower := strings.ToLower(filepath.ToSlash(relative))
+	for _, token := range []string{"/chrome/", "/chromium/", "/edge/", "/firefox/", "/safari/", "/webex/", "/zoom/", "/teams/", "/slack/", "/discord/"} {
+		if strings.Contains("/"+lower+"/", token) {
+			return true
+		}
+	}
+	return false
+}
+
+func embeddedModelOwner(owner string) bool {
+	lower := strings.ToLower(owner)
+	for _, token := range []string{"chrome", "chromium", "edge", "firefox", "safari", "webex", "zoom", "teams", "slack", "discord"} {
+		if strings.Contains(lower, token) {
+			return true
+		}
+	}
+	return false
+}
+
+func modelArtifactDiscoveryConfidence(path string, root modelScanRoot, format string) float64 {
+	if root.specialized {
+		return 0.98
+	}
+	if isHighSignalModelFormat(format) {
+		if strongModelFileContext(path, root) || semanticModelArtifactName(path) || hasModelMetadataSidecar(path, root) {
+			return 0.95
+		}
+		return 0.9
+	}
+	if hasModelMetadataSidecar(path, root) {
+		return 0.88
+	}
+	if strongModelFileContext(path, root) {
+		return 0.84
+	}
+	return 0.8
+}
+
+func isHighSignalModelFormat(format string) bool {
+	switch format {
+	case "gguf", "ggml", "safetensors", "mlx", "coreml", "q4nx", "ollama":
+		return true
+	default:
+		return false
+	}
+}
+
+func modelArtifactMatchKind(format string) string {
+	if isHighSignalModelFormat(format) {
+		return MatchKindExact
+	}
+	return MatchKindHeuristic
+}
+
+func validLocalModelModality(value string) bool {
+	switch value {
+	case localModelModalityGenerative, localModelModalitySpeech, localModelModalityVision,
+		localModelModalityEmbedding, localModelModalityAudio, localModelModalityUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+func validLocalModelRelevance(value string) bool {
+	switch value {
+	case localModelRelevancePrimary, localModelRelevanceSupporting, localModelRelevanceEmbedded,
+		localModelRelevanceUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+func modelModalityPriority(value string) int {
+	switch value {
+	case localModelModalityGenerative:
+		return 6
+	case localModelModalitySpeech:
+		return 5
+	case localModelModalityAudio:
+		return 4
+	case localModelModalityVision:
+		return 3
+	case localModelModalityEmbedding:
+		return 2
+	case localModelModalityUnknown:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func modelRelevancePriority(value string) int {
+	switch value {
+	case localModelRelevanceEmbedded:
+		return 4
+	case localModelRelevancePrimary:
+		return 3
+	case localModelRelevanceSupporting:
+		return 2
+	case localModelRelevanceUnknown:
+		return 1
+	default:
+		return 0
+	}
 }
 
 func (s *ContinuousDiscoveryService) modelArtifactCandidate(path string, root modelScanRoot, format string, directory bool, explicitID string) (modelFileAggregate, bool) {
@@ -901,6 +1701,12 @@ func (s *ContinuousDiscoveryService) modelArtifactCandidate(path string, root mo
 	if !directory {
 		provenance = mergeModelProvenanceHints(provenance, modelArtifactProvenanceHints(path, format))
 	}
+	ownerRoot := root
+	ownerRoot.provider = provider
+	owner := s.modelArtifactOwner(path, ownerRoot)
+	modality := inferModelArtifactModality(path, root, id, format)
+	relevance := inferModelArtifactRelevance(path, root, owner, modality)
+	discoveryConfidence := modelArtifactDiscoveryConfidence(path, root, format)
 	workspaceHash := hashPath(root.path)
 	metadata := fmt.Sprintf("%s|%d|%d", format, info.Size(), info.ModTime().UTC().UnixNano())
 	evidence := AIEvidence{
@@ -909,8 +1715,8 @@ func (s *ContinuousDiscoveryService) modelArtifactCandidate(path string, root mo
 		PathHash:      hashPath(path),
 		ValueHash:     hashValue(metadata),
 		WorkspaceHash: workspaceHash,
-		Quality:       1,
-		MatchKind:     MatchKindExact,
+		Quality:       discoveryConfidence,
+		MatchKind:     modelArtifactMatchKind(format),
 	}
 	if s.opts.StoreRawLocalPaths {
 		evidence.RawPath = path
@@ -923,6 +1729,7 @@ func (s *ContinuousDiscoveryService) modelArtifactCandidate(path string, root mo
 		key: key, id: id, format: format, provider: provider, provenance: provenance,
 		sizeBytes: sizeBytes,
 		evidence:  []AIEvidence{evidence}, artifactKey: artifactKey,
+		owner: owner, modality: modality, relevance: relevance, confidence: discoveryConfidence,
 	}, true
 }
 
@@ -956,7 +1763,8 @@ func (s *ContinuousDiscoveryService) ollamaBlobCacheAggregate(path string, root 
 	}
 	return modelFileAggregate{
 		key: "ollama-blobs:" + path, id: "Ollama blob cache", format: "ollama-blob",
-		provider: "ollama", evidence: []AIEvidence{evidence},
+		provider: "ollama", evidence: []AIEvidence{evidence}, owner: "Ollama",
+		modality: localModelModalityUnknown, relevance: localModelRelevanceUnknown, confidence: 0.8,
 	}, true
 }
 
@@ -1106,6 +1914,8 @@ func modelAggregatesToSignals(s *ContinuousDiscoveryService, aggregates map[stri
 		signal.Model = &LocalModelInfo{
 			ID: candidate.id, Status: "installed", Format: candidate.format,
 			Provider: candidate.provider, SizeBytes: candidate.sizeBytes,
+			OwnerApplication: candidate.owner, Modality: candidate.modality,
+			Relevance: candidate.relevance, DiscoveryConfidence: modelDiscoveryConfidence(candidate.confidence),
 		}
 		enrichLocalModelProvenance(signal.Model, candidate.provenance)
 		if signal.Model.Provenance != nil {
@@ -1118,8 +1928,15 @@ func modelAggregatesToSignals(s *ContinuousDiscoveryService, aggregates map[stri
 	return out
 }
 
+func modelDiscoveryConfidence(value float64) *float64 {
+	return &value
+}
+
 func modelArtifactAggregateEntryHash(candidate modelFileAggregate) string {
-	parts := []string{candidate.artifactKey, candidate.format}
+	parts := []string{
+		candidate.artifactKey, candidate.format, candidate.owner, candidate.modality,
+		candidate.relevance, fmt.Sprintf("%.4f", candidate.confidence),
+	}
 	for _, evidence := range candidate.evidence {
 		parts = append(parts, evidence.PathHash, evidence.ValueHash)
 	}

@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
@@ -80,6 +81,22 @@ def _coerce_optional_bool(value: Any) -> bool | None:
         if normalized in {"false", "0", "no", "off"}:
             return False
     return None
+
+
+def _coerce_optional_unit_float(value: Any) -> float | None:
+    """Decode an optional 0..1 score without inventing a value for old gateways."""
+
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if not math.isfinite(parsed):
+        return None
+    if parsed > 1:
+        parsed /= 100
+    return min(1.0, max(0.0, parsed))
 
 
 def _normalize_country_code(value: Any) -> str:
@@ -236,6 +253,9 @@ class AIUsageModel:
     size_bytes: int = 0
     pinned: bool = False
     provenance: AIUsageModelProvenance | None = None
+    owner_application: str = ""
+    relevance: str = ""
+    discovery_confidence: float | None = None
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any] | None) -> AIUsageModel | None:
@@ -254,6 +274,11 @@ class AIUsageModel:
             pinned=_coerce_bool(raw.get("pinned")),
             provenance=AIUsageModelProvenance.from_mapping(
                 provenance_raw if isinstance(provenance_raw, Mapping) else None
+            ),
+            owner_application=str(raw.get("owner_application") or ""),
+            relevance=str(raw.get("relevance") or ""),
+            discovery_confidence=_coerce_optional_unit_float(
+                raw.get("discovery_confidence")
             ),
         )
 
@@ -333,11 +358,28 @@ class AIUsageSummary:
     changed_signals: int = 0
     gone_signals: int = 0
     files_scanned: int = 0
+    errors: int = 0
+    detector_errors: tuple[tuple[str, str], ...] = ()
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any] | None) -> AIUsageSummary:
         if not raw:
             return cls()
+        detector_errors_raw = raw.get("detector_errors")
+        detector_errors = (
+            tuple(
+                sorted(
+                    (str(detector), str(message))
+                    for detector, message in detector_errors_raw.items()
+                    if detector is not None
+                    and message is not None
+                    and str(detector).strip()
+                    and str(message).strip()
+                )
+            )
+            if isinstance(detector_errors_raw, Mapping)
+            else ()
+        )
         return cls(
             scan_id=str(raw.get("scan_id") or ""),
             scanned_at=_parse_datetime(raw.get("scanned_at")),
@@ -349,6 +391,8 @@ class AIUsageSummary:
             changed_signals=int(raw.get("changed_signals") or 0),
             gone_signals=int(raw.get("gone_signals") or 0),
             files_scanned=int(raw.get("files_scanned") or 0),
+            errors=_coerce_nonnegative_int(raw.get("errors")),
+            detector_errors=detector_errors,
         )
 
 
@@ -702,6 +746,13 @@ class AIDiscoveryPanelModel:
         if summary.gone_signals:
             parts.append(f"gone={summary.gone_signals}")
         parts.append(f"files={summary.files_scanned}")
+        result = summary.result.strip().lower()
+        if result and result not in {"ok", "success", "complete"}:
+            parts.append(f"scan={result}")
+        if summary.errors:
+            parts.append(f"errors={summary.errors}")
+        elif summary.detector_errors:
+            parts.append(f"errors={len(summary.detector_errors)}")
         lookup_state = (
             "online" if self.snapshot.lookup_model_provenance_online else "offline"
         )
@@ -764,6 +815,8 @@ class AIDiscoveryPanelModel:
                     ("provider", model.provider),
                     ("recipe", model.recipe),
                     ("modality", model.modality),
+                    ("relevance", model.relevance),
+                    ("owner", model.owner_application),
                     ("device", model.device),
                 ):
                     if value:
@@ -772,6 +825,10 @@ class AIDiscoveryPanelModel:
                     parts.append(f"size_bytes={model.size_bytes}")
                 if model.pinned:
                     parts.append("pinned=true")
+                if model.discovery_confidence is not None:
+                    parts.append(
+                        f"discovery_confidence={model.discovery_confidence:.0%}"
+                    )
                 lines.append(" ".join(parts))
             if signal.runtime and signal.runtime.pid > 0:
                 parts = [f"runtime: pid={signal.runtime.pid}"]
@@ -963,6 +1020,18 @@ class AIDiscoveryPanelModel:
                             provenance.confidence,
                         )
                     )
+                for signal in row.signals:
+                    if signal.model:
+                        parts.extend(
+                            (
+                                signal.model.owner_application,
+                                signal.model.modality,
+                                signal.model.relevance,
+                                ""
+                                if signal.model.discovery_confidence is None
+                                else str(signal.model.discovery_confidence),
+                            )
+                        )
                 return query in " ".join(parts).lower()
 
             self.filtered = tuple(row for row in self.rows if matches(row))

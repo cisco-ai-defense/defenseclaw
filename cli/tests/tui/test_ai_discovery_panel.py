@@ -380,6 +380,9 @@ def test_ai_usage_model_metadata_is_safely_coerced() -> None:
                 "status": "installed",
                 "size_bytes": "not-a-number",
                 "pinned": "false",
+                "owner_application": "Meetily",
+                "relevance": "primary",
+                "discovery_confidence": "82",
                 "provenance": {
                     "publisher": "Acme AI",
                     "country_code": "us",
@@ -397,6 +400,9 @@ def test_ai_usage_model_metadata_is_safely_coerced() -> None:
     assert signal.model is not None
     assert signal.model.size_bytes == 0
     assert signal.model.pinned is False
+    assert signal.model.owner_application == "Meetily"
+    assert signal.model.relevance == "primary"
+    assert signal.model.discovery_confidence == 0.82
     assert signal.model.provenance is not None
     assert signal.model.provenance.country_code == "US"
     assert signal.model.provenance.base_models == ("acme/base-a", "acme/base-b")
@@ -499,6 +505,36 @@ def test_ai_discovery_header_churn_rules() -> None:
         "files=2103",
         "model-lookup=offline",
     )
+
+    panel.set_snapshot(
+        AIUsageSnapshot.from_mapping(
+            {
+                "enabled": True,
+                "summary": {
+                    "active_signals": 4,
+                    "files_scanned": 99,
+                    "result": "partial",
+                    "errors": 2,
+                    "detector_errors": {
+                        "model_file:application_support": "permission denied",
+                        None: "missing detector",
+                        "missing-message": None,
+                    },
+                },
+            }
+        )
+    )
+    assert panel.header_parts() == (
+        "active=4",
+        "files=99",
+        "scan=partial",
+        "errors=2",
+        "model-lookup=offline",
+    )
+    assert panel.snapshot is not None
+    assert dict(panel.snapshot.summary.detector_errors) == {
+        "model_file:application_support": "permission denied"
+    }
 
     panel.set_snapshot(
         AIUsageSnapshot(

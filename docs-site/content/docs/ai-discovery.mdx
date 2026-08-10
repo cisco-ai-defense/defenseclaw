@@ -110,6 +110,47 @@ The local snapshot uses `state ∈ {new, seen, changed, gone}` with `last_seen` 
 
 Full continuous scans inventory local models through two metadata-only paths. The filesystem path does **not** require an inference engine to be installed or running: a standalone GGUF, MLX, safetensors, ONNX, or other recognized model artifact can produce a `local_model` row on its own.
 
+#### Passive and enhanced modes
+
+The discovery mode controls which model directories DefenseClaw adds automatically. It does not change the redaction policy or enable inference.
+
+| Mode | Automatic filesystem coverage |
+| --- | --- |
+| `passive` | Known model stores, plus narrower roots the operator explicitly lists in `scan_roots`. An exact user-home/`~` root is not traversed for model files, and unknown macOS application storage is not added automatically. |
+| `enhanced` | Everything in `passive`, plus the configured broad home traversal and bounded high-yield macOS application-storage and app-resource roots for models downloaded by applications that are not yet in the signature catalog. |
+
+Use enhanced mode for shadow-model discovery:
+
+```yaml
+ai_discovery:
+  mode: enhanced
+```
+
+On macOS, enhanced mode keeps the broad `~` walk from descending into all of `~/Library`. Instead, it adds `~/Library/Application Support`, `~/Library/Containers`, `~/Library/Group Containers`, and `~/Library/Caches` as direct, separately budgeted roots. Installed application `Resources` directories are covered with their own bounds. This reaches model stores used by ordinary, sandboxed, shared-container, and self-contained applications without letting one large Library subtree consume the whole scan.
+
+Narrow configured roots are honored in both modes. Select `passive` when an organization wants known stores and explicitly approved paths only; select `enhanced` when finding models owned by previously unknown applications is the priority.
+
+This is not an unrestricted content crawl. The scanner:
+
+- considers recognized model artifacts and model-directory metadata, not arbitrary documents, messages, images, or audio;
+- accepts high-signal GGUF/GGML, safetensors, Core ML, and Q4NX artifacts on format evidence, while ONNX/ORT, TFLite, PyTorch/checkpoint, and generic binary formats require a model/weights/checkpoint/format directory, a semantic model filename, or a nearby bounded metadata sidecar;
+- skips common source, dependency, build, browser-noise, and runtime-noise trees while allowing application-scoped caches to participate;
+- applies global and per-root traversal limits, rotates roots, and resumes incomplete roots on later scans; and
+- reads only bounded metadata such as a GGUF header prefix or a small adjacent manifest/configuration file, never tensor payloads.
+
+#### Ownership, modality, and relevance
+
+Enhanced discovery does not require DefenseClaw to know the application in advance. When path structure provides reliable context, each `local_model` can carry these bounded fields:
+
+| Field | Meaning |
+| --- | --- |
+| `owner_application` | Display label inferred from the top-level app, container, or bundle name. It stays empty when ownership cannot be established; the macOS app renders the owner as unknown rather than guessing. |
+| `modality` | `generative`, `speech`, `vision`, `embedding`, `audio`, or `unknown`. |
+| `relevance` | `primary` for a primary model/weights/checkpoint artifact, `supporting` for components such as speech, vision, embedding, or VAD models, `embedded` for models shipped inside an application or browser/conferencing-style cache, or `unknown`. |
+| `discovery_confidence` | A `0..1` score for the filesystem/context evidence behind this model classification. It is separate from product identity confidence. |
+
+Speech, vision, embedding, and embedded models are inventory evidence, not discarded as noise. The macOS Models view filters the initial presentation rather than deleting those signals: by default it shows entries with at least 80% discovery confidence whose modality is `generative` or `unknown` and whose relevance is `primary` or `unknown`. A `model_api` row without model-specific `discovery_confidence` remains visible so an installed runtime model is not hidden merely because its gateway cannot classify it; the modality and relevance rules still apply. The **Model Filters** menu provides **Show All Models**, modality, and relevance controls for exposing the complete inventory. This keeps large application caches readable while preserving the broader evidence.
+
 **Vetted loopback APIs.** Presence checks prefer `HEAD`; model inventory uses bounded, read-only `GET` requests only for explicitly allow-listed metadata routes.
 
 | Runtime | Installed / reported models | Loaded models |
@@ -127,7 +168,7 @@ For [Lemonade Server](https://lemonade-server.ai/models.html), the built-in sign
 
 **Bounded filesystem metadata.** The scanner recognizes GGUF/GGML, safetensors, ONNX/ORT, Core ML, TFLite, Q4NX, MLX, Hugging Face cache layouts, and Ollama manifests/blob stores. It groups sharded weights and model-cache directories into model rows instead of reporting every shard or blob. Generic PyTorch extensions such as `.pt`, `.pth`, `.ckpt`, and `.bin` count only inside a strong model context. The scan emits at most `max_files_per_scan` matching artifacts and also enforces separate global and per-root traversal budgets. It never reads tensor payloads: provenance extraction is limited to a regular-file-checked GGUF header prefix and small adjacent JSON configuration/Ollama manifests, each with explicit byte, count, string, and array bounds.
 
-Known model stores are automatic and additive. The scanner checks environment-selected roots (`HF_HUB_CACHE`, `HF_HOME`, `OLLAMA_MODELS`, `LM_STUDIO_HOME`, and `FLM_MODEL_PATH`), conventional Hugging Face, Ollama, LM Studio, llama.cpp, and MLX caches, Lemonade-configured model directories, and then the operator's `scan_roots`. On native Windows it additionally prioritizes the documented [GPT4All LocalAppData store](https://docs.gpt4all.io/gpt4all_desktop/settings.html), the [Jan RoamingAppData model store](https://jan.ai/docs/data-folder), and the catalogued AnythingLLM model directory, so a bounded home scan does not need several cursor cycles to reach them. Setting `--scan-roots` adds broad roots; it does not disable the specialized stores.
+Known model stores are automatic and additive. The scanner checks environment-selected roots (`HF_HUB_CACHE`, `HF_HOME`, `OLLAMA_MODELS`, `LM_STUDIO_HOME`, and `FLM_MODEL_PATH`), conventional Hugging Face, Ollama, LM Studio, llama.cpp, and MLX caches, Lemonade-configured model directories, and then eligible operator `scan_roots`. On native Windows it additionally prioritizes the documented [GPT4All LocalAppData store](https://docs.gpt4all.io/gpt4all_desktop/settings.html), the [Jan RoamingAppData model store](https://jan.ai/docs/data-folder), and the catalogued AnythingLLM model directory, so a bounded home scan does not need several cursor cycles to reach them. Setting `--scan-roots` does not disable specialized stores. Passive mode honors narrower configured roots but suppresses a root equal to a user home; enhanced mode also honors that broad home root.
 
 Windows discovery uses token-bound Known Folders rather than trusting process overrides for Profile, AppData, ProgramData, or Program Files. It inventories unique exact executable aliases across the full signature catalog and fails closed when a basename is shared by multiple products. Installed applications come from Start Menu/Programs roots, uninstall display names, and the current user's supported virtual AppsFolder, including launchable Store/MSIX/UWP registrations; discovery also covers both Windows PowerShell and PowerShell 7 history plus AppData-backed VS Code-family and JetBrains extension stores. Application display names and bounded, path-free package identity names are reduced to hashed evidence before they leave the detector, just like the existing macOS and Linux application inventory.
 
@@ -220,7 +261,8 @@ Stops the scanner and clears the `ai_discovery.*` block. Existing audit events a
 
 | Knob | Purpose |
 | --- | --- |
-| `--scan-roots` | Additional comma-separated filesystem roots to walk. Defaults inherit from `ai_discovery.scan_roots` (typically `~`); known model stores are still added automatically. |
+| `--mode passive\|enhanced` | Keep model discovery to known stores and narrower configured roots (`passive`), or also honor a broad home root and scan bounded high-yield macOS application storage and app resources (`enhanced`). |
+| `--scan-roots` | Additional comma-separated filesystem roots to walk. Defaults inherit from `ai_discovery.scan_roots` (typically `~`); known model stores are still added automatically. For model files, passive mode suppresses an exact user-home root but honors narrower roots. |
 | `--include-shell-history` / `--no-include-shell-history` | Read `~/.bash_history`, `~/.zsh_history` for AI invocations. |
 | `--include-package-manifests` / `--no-include-package-manifests` | Look at `package.json`, `pyproject.toml`, `requirements.txt`. |
 | `--include-env-var-names` / `--no-include-env-var-names` | Enumerate process env *names* (values are never read). |
@@ -321,7 +363,9 @@ Package-dependency view: every AI-adjacent npm/pip/cargo dep across your workspa
 
 ### TUI and macOS behavior
 
-The full `AI Discovery` panel groups local models case-insensitively by model ID in a separate compact table with state, model, country/flag, publisher, root, derivation, status, and format. Everything else remains in the existing agent/tool table. Press `t` to move keyboard focus between the product and model tables; arrow keys and Enter then operate on the visible selection. Model detail shows base models, quantization/distillation, recipe, modality, device, `size_bytes`, pinned state, and provenance source/confidence. The macOS app decodes the same wire shape and presents the same model/non-model split and detail fields. The separate Overview tile remains an **AI Agents** summary: it excludes `local_model` rows from its count and row cap so a large model inventory cannot hide agent rows.
+The full TUI `AI Discovery` panel groups local models case-insensitively by model ID in a separate compact table with state, model, country/flag, publisher, root, derivation, status, and format. Everything else remains in the existing agent/tool table. Press `t` to move keyboard focus between the product and model tables; arrow keys and Enter then operate on the visible selection. Model detail shows owner application, modality, relevance, discovery confidence, base models, quantization/distillation, recipe, device, `size_bytes`, pinned state, and provenance source/confidence.
+
+The macOS app decodes the same wire shape and presents the same model/non-model split. Its inspector also shows owner application, modality, relevance, and discovery confidence. Under **Model Filters**, **Show All Models** removes the default confidence and classification exclusions. The modality picker offers Generative, Speech, Vision, Embedding, Audio, and Unknown; the relevance picker offers Primary, Supporting, Embedded, and Unknown. Selecting either classification explicitly removes both implicit recommended classification exclusions while retaining the 80% confidence threshold, so choosing Speech also reveals high-confidence supporting speech models. The separate Overview tile remains an **AI Agents** summary: it excludes `local_model` rows from its count and row cap so a large model inventory cannot hide agent rows.
 
 ### `agent confidence`
 
@@ -429,7 +473,7 @@ Discovery touches the most sensitive parts of the host filesystem. DefenseClaw i
     **No raw values by default.** Env var *names* are recorded, never values. File paths are hashed (`config_path_hash`, `binary_path_hash`) and only basenames are kept in the default redacted output.
   </Step>
   <Step>
-    **Metadata-only model discovery.** Model binaries are never opened, and API discovery never calls inference or model-control routes. API discovery caps each decoded response at 1 MiB, emits at most 256 model items, considers at most 24 endpoints, and has both per-request and whole-pass time budgets. Per-source cursors and rotating origins give later models/providers a bounded turn on subsequent passes. Authenticated Lemonade discovery uses only the least-privileged `LEMONADE_API_KEY`—never `LEMONADE_ADMIN_API_KEY`—and sends it only when the loopback origin came from explicit `LEMONADE_HOST`/`LEMONADE_PORT` settings or Lemonade's config and its credential-free `/live` check succeeds. The value is never stored in a signal, log, or event.
+    **Metadata-only model discovery.** Filesystem discovery never reads tensor payloads; it reads only bounded headers and small adjacent metadata needed to identify and group model artifacts. API discovery never calls inference or model-control routes. API discovery caps each decoded response at 1 MiB, emits at most 256 model items, considers at most 24 endpoints, and has both per-request and whole-pass time budgets. Per-source cursors and rotating origins give later models/providers a bounded turn on subsequent passes. Authenticated Lemonade discovery uses only the least-privileged `LEMONADE_API_KEY`—never `LEMONADE_ADMIN_API_KEY`—and sends it only when the loopback origin came from explicit `LEMONADE_HOST`/`LEMONADE_PORT` settings or Lemonade's config and its credential-free `/live` check succeeds. The value is never stored in a signal, log, or event.
   </Step>
   <Step>
     **Optional trusted-prefix binary probing.** The on-demand connector
@@ -454,6 +498,8 @@ Discovery touches the most sensitive parts of the host filesystem. DefenseClaw i
     **Scoped controls for broader surfaces.** Provider-domain and vetted loopback API checks follow `include_network_domains`; shell-history and environment-name collection have their own settings. Process discovery matches executable names without reading argv. Review these controls with your privacy team and disable any surface your deployment does not need.
   </Step>
 </Steps>
+
+On macOS, enhanced discovery respects the operating system's Transparency, Consent, and Control (TCC) and filesystem permissions. DefenseClaw does not bypass protected folders or trigger access through another application. If one or more roots cannot be read, successful detections are retained but the scan summary reports `result: partial`, increments `errors`, and includes sanitized detector information in `detector_errors`. The macOS app shows a prominent **Partial scan** banner with the error count and detector details; it shows **Scan complete** only when the result is complete. An incomplete root is not treated as proof that a previously observed model was removed. Grant Full Disk Access only when your organization's policy permits that broader local inventory, then restart the gateway and run a fresh scan.
 
 The local `GET /api/v1/ai-usage` response—and therefore `defenseclaw agent usage`—retains the dedicated `model` block so the operator can see what is installed or loaded. Local scan history retains the same block in `inventory.db`. Outbound canonical records follow each v8 destination's field-class redaction profile. Normal discovery sanitization omits extended model metadata plus model basenames/path hashes, and lifecycle correlation uses an installation-scoped HMAC pseudonym rather than a dictionary-testable model ID. Raw filesystem paths require both `ai_discovery.store_raw_local_paths: true` and a selected projection that preserves the `path` field class. The retired v7 `privacy.disable_redaction` control is not a runtime bypass.
 
@@ -483,7 +529,7 @@ A common production pattern:
 
 <Accordions>
   <Accordion title="Audit shadow AI on a developer laptop">
-    `defenseclaw agent discover --json | jq '[.[] | select(.installed)]'` inventories connectors without a gateway. To include standalone model files and model-server inventories, enable continuous discovery and run `defenseclaw agent usage --refresh --category local_model --detail`.
+    `defenseclaw agent discover --json | jq '[.[] | select(.installed)]'` inventories connectors without a gateway. To include standalone models downloaded by known and unknown macOS applications, enable continuous discovery in `enhanced` mode and run `defenseclaw agent usage --refresh --category local_model --detail`.
   </Accordion>
   <Accordion title="Trigger a fresh scan after onboarding a tool">
     `defenseclaw agent discovery scan`. Faster than waiting for the next scheduled rescan, and fires `ai_discovery` events for the new artifacts so your dashboards reflect the install immediately.
@@ -498,7 +544,7 @@ A common production pattern:
     Two options: (1) author a custom signature pack and `defenseclaw agent signatures install ./my-pack` so continuous discovery learns it, or (2) run `defenseclaw agent confidence policy validate ./policy.yaml` and adjust the weights so the existing detectors score it correctly.
   </Accordion>
   <Accordion title="Discovery is too noisy on this host">
-    Reduce broad workspace traversal: `defenseclaw agent discovery enable --scan-roots ~/work --no-include-shell-history --no-include-network-domains`. Known model stores remain additive to `scan_roots`; on shared dev hosts you may also want to disable package-manifest discovery with `--no-include-package-manifests`.
+    Switch automatic model coverage to `passive`, or reduce broad workspace traversal: `defenseclaw agent discovery enable --mode passive --scan-roots ~/work --no-include-shell-history --no-include-network-domains`. Known model stores remain additive to `scan_roots`; on shared dev hosts you may also want to disable package-manifest discovery with `--no-include-package-manifests`.
   </Accordion>
 </Accordions>
 

@@ -23,8 +23,11 @@ struct AIDiscoveryModelTests {
     static func main() {
         parsesCanonicalModelProvenance()
         preservesUnknownLineageBooleansAndRejectsInvalidCountries()
+        decodesDiscoveryDiagnosticsAndModelRelevanceMetadata()
+        formatsPartialScanWithoutSyntheticZeroError()
         partitionsModelsFromProductsAndAggregatesSources()
         searchesModelLineageMetadata()
+        appliesFocusedAndExplicitModelFilters()
         guard failureCount == 0 else {
             fputs("AI discovery model provenance tests failed: \(failureCount)\n", stderr)
             exit(1)
@@ -122,6 +125,89 @@ struct AIDiscoveryModelTests {
         ])
         expect(invalid?.sizeBytes == 0, "fractional size is rejected consistently")
         expect(invalid?.pinned == false, "invalid pinned value is rejected")
+    }
+
+    private static func decodesDiscoveryDiagnosticsAndModelRelevanceMetadata() {
+        let diagnostics = AIDiscoveryDiagnostics.fromMapping([
+            "result": "partial",
+            "errors": NSNumber(value: 2),
+            "detector_errors": [
+                "process": "process enumeration denied",
+                "model_files": "Application Support was not readable",
+                "empty": "",
+                "invalid": 42,
+            ] as [String: Any],
+        ])
+        expect(diagnostics.result == "partial", "summary result parses")
+        expect(diagnostics.errors == 2, "summary error count parses")
+        expect(
+            diagnostics.detectorErrors == [
+                "process": "process enumeration denied",
+                "model_files": "Application Support was not readable",
+            ],
+            "detector errors parse independently and discard malformed values"
+        )
+        var snapshot = AIUsageSnapshot()
+        snapshot.result = "ok"
+        snapshot.detectorErrors = diagnostics.detectorErrors
+        expect(snapshot.isPartial, "detector failures make the snapshot partial even with a stale ok result")
+
+        let model = AIUsageModel.fromMapping([
+            "id": "unknown-app/model",
+            "owner_application": "Meetily",
+            "relevance": "primary",
+            "modality": "generative",
+            "discovery_confidence": 0.92,
+        ])
+        expect(model?.ownerApplication == "Meetily", "owner application parses")
+        expect(model?.relevance == "primary", "relevance parses")
+        expect(model?.modality == "generative", "canonical modality parses")
+        expect(model?.discoveryConfidence == 0.92, "discovery confidence parses")
+
+        let legacyPercent = AIUsageModel.fromMapping([
+            "id": "compatible",
+            "discovery_confidence": 86,
+        ])
+        expect(legacyPercent?.discoveryConfidence == 0.86, "percentage confidence normalizes")
+        let invalid = AIUsageModel.fromMapping([
+            "id": "invalid",
+            "discovery_confidence": true,
+        ])
+        expect(invalid?.discoveryConfidence == nil, "boolean confidence is rejected")
+        expect(
+            AIConfidence.optionalNormalized(NSNumber(value: false)) == nil,
+            "NSNumber false is rejected as a boolean confidence"
+        )
+        expect(
+            AIConfidence.optionalNormalized(NSNumber(value: true)) == nil,
+            "NSNumber true is rejected as a boolean confidence"
+        )
+        expect(
+            AIConfidence.optionalNormalized(NSNumber(value: 0)) == 0,
+            "NSNumber numeric zero remains an explicit confidence"
+        )
+        expect(
+            AIConfidence.optionalNormalized(NSNumber(value: 1)) == 1,
+            "NSNumber numeric one remains an explicit confidence"
+        )
+    }
+
+    private static func formatsPartialScanWithoutSyntheticZeroError() {
+        var snapshot = AIUsageSnapshot()
+        snapshot.result = "partial"
+        expect(snapshot.reportedDiscoveryErrorCount == 0, "partial scan can omit a numeric error count")
+        expect(snapshot.discoveryIssueLabel == "Scan did not complete", "partial scan avoids a zero-error label")
+        expect(
+            snapshot.partialDiscoveryDescription == "The scan did not complete, so results may be incomplete.",
+            "partial scan explains incomplete results when no detector error is reported"
+        )
+
+        snapshot.detectorErrors = ["model_files": "permission denied"]
+        expect(snapshot.discoveryIssueLabel == "1 error", "detector failures produce a compact error count")
+        expect(
+            snapshot.partialDiscoveryDescription == "1 error occurred during discovery.",
+            "detector failures produce a counted banner description"
+        )
     }
 
     private static func partitionsModelsFromProductsAndAggregatesSources() {
@@ -241,6 +327,135 @@ struct AIDiscoveryModelTests {
         expect(row.matches("filesystem"), "provider is searchable")
         expect(row.matches("FILESYSTEM"), "provider search is case-insensitive")
         expect(!row.matches("Anthropic"), "unrelated provenance does not match")
+    }
+
+    private static func appliesFocusedAndExplicitModelFilters() {
+        let primaryGenerative = modelRow(
+            id: "primary-generative", modality: "generative", relevance: "primary", confidence: 0.93
+        )
+        let unknownHighConfidence = modelRow(
+            id: "unknown-high", modality: "unknown", relevance: "unknown", confidence: 0.88
+        )
+        let supporting = modelRow(
+            id: "supporting", modality: "generative", relevance: "supporting", confidence: 0.91
+        )
+        let embedded = modelRow(
+            id: "embedded", modality: "generative", relevance: "embedded", confidence: 0.96
+        )
+        let speech = modelRow(
+            id: "speech", modality: "speech", relevance: "primary", confidence: 0.94
+        )
+        let supportingSpeech = modelRow(
+            id: "supporting-speech", modality: "speech", relevance: "supporting", confidence: 0.92
+        )
+        let lowConfidence = modelRow(
+            id: "low", modality: "generative", relevance: "primary", confidence: 0.79
+        )
+        let confidenceBoundary = modelRow(
+            id: "boundary", modality: "generative", relevance: "primary", confidence: 0.8
+        )
+        let explicitZeroConfidence = modelRow(
+            id: "explicit-zero", modality: "generative", relevance: "primary", confidence: 0
+        )
+        let localAPIMissingConfidence = modelRow(
+            id: "local-api-missing", modality: "generative", relevance: "primary", confidence: nil,
+            signalConfidence: 0.2, detector: "model_api"
+        )
+        let localAPISupporting = modelRow(
+            id: "local-api-supporting", modality: "generative", relevance: "supporting", confidence: nil,
+            signalConfidence: 0.2, detector: "model_api"
+        )
+        let localAPISpeech = modelRow(
+            id: "local-api-speech", modality: "speech", relevance: "primary", confidence: nil,
+            signalConfidence: 0.2, detector: "model_api"
+        )
+        let legacy = modelRow(
+            id: "legacy", modality: "", relevance: "", confidence: nil, signalConfidence: 0.9
+        )
+
+        let focused = AIModelDiscoveryFilter()
+        expect(focused.includes(primaryGenerative), "focused filter includes primary generative model")
+        expect(focused.includes(unknownHighConfidence), "focused filter includes high-confidence unknown model")
+        expect(focused.includes(legacy), "focused filter remains useful with older gateway metadata")
+        expect(!focused.includes(supporting), "focused filter hides supporting model")
+        expect(!focused.includes(embedded), "focused filter hides embedded model")
+        expect(!focused.includes(speech), "focused filter hides clearly non-generative model")
+        expect(!focused.includes(lowConfidence), "focused filter hides low-confidence model")
+        expect(focused.includes(confidenceBoundary), "focused filter includes the 80-percent boundary")
+        expect(
+            !focused.includes(explicitZeroConfidence),
+            "an explicitly reported zero remains below the confidence threshold"
+        )
+        expect(
+            focused.includes(localAPIMissingConfidence),
+            "local API models are not hidden when model-specific confidence is absent"
+        )
+        expect(
+            !focused.includes(localAPISupporting),
+            "missing confidence does not bypass the recommended relevance filter"
+        )
+        expect(
+            !focused.includes(localAPISpeech),
+            "missing confidence does not bypass the recommended modality filter"
+        )
+
+        let speechFilter = AIModelDiscoveryFilter(modality: .speech)
+        expect(speechFilter.includes(speech), "explicit modality overrides the default modality scope")
+        expect(
+            speechFilter.includes(supportingSpeech),
+            "explicit speech modality does not retain the recommended relevance exclusion"
+        )
+        expect(
+            speechFilter.includes(localAPISpeech),
+            "explicit speech includes a local API model without model-specific confidence"
+        )
+        expect(!speechFilter.includes(primaryGenerative), "explicit modality excludes other modalities")
+
+        let supportingFilter = AIModelDiscoveryFilter(relevance: .supporting)
+        expect(supportingFilter.includes(supporting), "explicit relevance overrides default relevance scope")
+        expect(
+            supportingFilter.includes(supportingSpeech),
+            "explicit supporting relevance does not retain the recommended modality exclusion"
+        )
+
+        let allModels = AIModelDiscoveryFilter(showAllModels: true)
+        expect(allModels.includes(lowConfidence), "show all includes low-confidence models")
+        expect(allModels.includes(embedded), "show all includes embedded models")
+
+        let allSpeech = AIModelDiscoveryFilter(showAllModels: true, modality: .speech)
+        expect(allSpeech.includes(speech), "show all can still be narrowed by modality")
+        expect(!allSpeech.includes(embedded), "show all modality filter remains effective")
+        expect(primaryGenerative.matches("Meetily"), "owner application participates in search")
+        expect(primaryGenerative.matches("generative"), "modality participates in search")
+        expect(primaryGenerative.matches("primary"), "relevance participates in search")
+    }
+
+    private static func modelRow(
+        id: String,
+        modality: String,
+        relevance: String,
+        confidence: Double?,
+        signalConfidence: Double = 0.9,
+        detector: String = "model_file"
+    ) -> AIModelDiscoveryRow {
+        var signal = makeSignal(
+            product: "Meetily",
+            vendor: "Local",
+            category: "local_model",
+            detector: detector,
+            model: AIUsageModel(
+                id: id,
+                modality: modality,
+                ownerApplication: modality.isEmpty && relevance.isEmpty && confidence == nil ? "" : "Meetily",
+                relevance: relevance,
+                discoveryConfidence: confidence
+            )
+        )
+        signal.confidence = signalConfidence
+        guard let row = AIDiscoveryGrouping.modelRows(from: [signal]).first else {
+            fatalError("test model row should exist")
+        }
+        return row
     }
 
     private static func makeSignal(

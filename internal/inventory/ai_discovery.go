@@ -236,16 +236,19 @@ type ProcessRuntime struct {
 // unbounded. Keeping the identity in this dedicated block makes it available
 // to local API/CLI/TUI consumers without creating a high-cardinality metric.
 type LocalModelInfo struct {
-	ID         string                `json:"id"`
-	Status     string                `json:"status"` // installed | loaded
-	Format     string                `json:"format,omitempty"`
-	Provider   string                `json:"provider,omitempty"`
-	Recipe     string                `json:"recipe,omitempty"`
-	Modality   string                `json:"modality,omitempty"`
-	Device     string                `json:"device,omitempty"`
-	SizeBytes  int64                 `json:"size_bytes,omitempty"`
-	Pinned     bool                  `json:"pinned,omitempty"`
-	Provenance *LocalModelProvenance `json:"provenance,omitempty"`
+	ID                  string                `json:"id"`
+	Status              string                `json:"status"` // installed | loaded
+	Format              string                `json:"format,omitempty"`
+	Provider            string                `json:"provider,omitempty"`
+	Recipe              string                `json:"recipe,omitempty"`
+	Modality            string                `json:"modality,omitempty"`
+	Device              string                `json:"device,omitempty"`
+	SizeBytes           int64                 `json:"size_bytes,omitempty"`
+	Pinned              bool                  `json:"pinned,omitempty"`
+	OwnerApplication    string                `json:"owner_application,omitempty"`
+	Relevance           string                `json:"relevance,omitempty"`
+	DiscoveryConfidence *float64              `json:"discovery_confidence,omitempty"`
+	Provenance          *LocalModelProvenance `json:"provenance,omitempty"`
 	// huggingFaceRepoIDs contains repository identifiers copied directly from
 	// trusted local metadata surfaces (for example a Hugging Face cache path or
 	// an embedded GGUF base-model record). It is deliberately never serialized:
@@ -1163,7 +1166,7 @@ func (s *ContinuousDiscoveryService) scanSignals(
 		out, files, err := fn()
 		if err != nil {
 			stats.Errors++
-			if name == "process" {
+			if name == "process" || name == "model_file" {
 				stats.DetectorErrors[name] = err.Error()
 			}
 		}
@@ -1210,6 +1213,9 @@ func (s *ContinuousDiscoveryService) scanSignals(
 		stats.ModelFileConclusive = outcome.conclusive
 		stats.ModelFileAttempted = outcome.attempted
 		stats.ModelFileDeferred = outcome.deferred
+		for rootKey, detail := range outcome.rootErrors {
+			stats.DetectorErrors["model_file:"+rootKey] = detail
+		}
 		return out, files, err
 	})
 	if s.opts.IncludeEnvVarNames {
@@ -3305,7 +3311,7 @@ func ValidateSanitizedAIDiscoveryReport(report AIDiscoveryReport) error {
 			}{
 				"format": {model.Format, 64}, "provider": {model.Provider, 96},
 				"recipe": {model.Recipe, 128}, "modality": {model.Modality, 64},
-				"device": {model.Device, 128},
+				"device": {model.Device, 128}, "owner_application": {model.OwnerApplication, 96},
 			} {
 				if len(rule.value) > rule.max || containsUnicodeControl(rule.value) {
 					return fmt.Errorf("model %s must be at most %d printable characters", field, rule.max)
@@ -3313,6 +3319,20 @@ func ValidateSanitizedAIDiscoveryReport(report AIDiscoveryReport) error {
 			}
 			if model.SizeBytes < 0 {
 				return errors.New("model size_bytes must be non-negative")
+			}
+			if strings.ContainsAny(model.OwnerApplication, `/\\`) {
+				return errors.New("model owner_application must not contain path separators")
+			}
+			switch model.Relevance {
+			case "", "primary", "supporting", "embedded", "unknown":
+			default:
+				return fmt.Errorf("unsupported model relevance %q", model.Relevance)
+			}
+			if model.DiscoveryConfidence != nil {
+				confidence := *model.DiscoveryConfidence
+				if confidence != confidence || confidence < 0 || confidence > 1 {
+					return errors.New("model discovery_confidence must be between 0 and 1")
+				}
 			}
 			if err := validateLocalModelProvenance(model.Provenance); err != nil {
 				return err
