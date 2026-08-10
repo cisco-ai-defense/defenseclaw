@@ -53,9 +53,14 @@ WiX/Burn was evaluated. A custom native setup is smaller for the current
 per-user-only product because it reuses the repository's existing Go process
 identity checks, Python package, and upgrade transaction without privileged MSI
 custom actions. The tradeoff is explicit: this implementation does not produce
-an MSI or support `INSTALLSCOPE=machine`. A future enterprise MSI must consume
-the same versioned payload and state contract; it must not add a second product
-layout or compete with the self-updater.
+an MSI or support `INSTALLSCOPE=machine`. The enterprise per-machine surface is
+delivered separately by the [Windows machine-level bundle](../packaging/windows/PACKAGING.md),
+which ships `defenseclaw-mgr.exe` — a silent lifecycle CLI wrapped by Cisco
+Secure Client AnyConnect's WiX MSI. That bundle consumes the same versioned
+payload and state contract as the per-user Setup and coexists with it (per-user
+for direct-download consumers, machine-level for AVC-bundled fleets); it does
+not add a second self-updater or a second install layout for the per-user
+product.
 
 ## Offline payload and provenance
 

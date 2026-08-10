@@ -609,6 +609,49 @@ jobs:
           compression-level: 0
 
 
+  windows-bundle:
+    name: Build machine-level Windows bundle (AVC)
+    needs: [release-preflight, build-runtime-candidate]
+    runs-on: windows-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    outputs:
+      artifact_id: ${{ steps.windows-bundle-artifact.outputs.artifact-id }}
+      artifact_digest: ${{ steps.windows-bundle-artifact.outputs.artifact-digest }}
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ needs.release-preflight.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+
+      - name: Assemble the machine-level bundle
+        env:
+          RELEASE_TAG: ${{ needs.release-preflight.outputs.tag }}
+        run: |
+          make packaging-windows-bundle VERSION=$env:RELEASE_TAG WIN_BUNDLE_GOARCH=amd64
+
+      - name: Upload machine-level Windows bundle
+        id: windows-bundle-artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release-windows-bundle-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            dist/defenseclaw-windows-*.zip
+            dist/defenseclaw-windows-*.zip.sha256
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0
+
+
   assemble-release-candidate:
     name: Seal exact release candidate
     needs: [release-preflight, build-runtime-candidate, macos-app, windows-installer]

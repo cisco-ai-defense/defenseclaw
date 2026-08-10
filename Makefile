@@ -94,7 +94,7 @@ endef
 .PHONY: help all path doctor uninstall quickstart llm-setup \
         build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
         plugin plugin-install amp-plugin-typecheck maybe-openclaw-plugin-install extensions test cli-test cli-test-cov cli-test-snap tui-test gateway-test go-test-cov \
-        packaging-macos-test packaging-macos-bundle macos-app-license-check macos-app-upstream-check macos-app-build macos-app-test macos-app-release macos-app-release-verify \
+        packaging-macos-test packaging-macos-bundle packaging-windows-bundle macos-app-license-check macos-app-upstream-check macos-app-build macos-app-test macos-app-release macos-app-release-verify \
         security-suite-test security-suite-eval \
         connector-matrix-test go-connector-matrix-test py-connector-matrix-test \
         test-verbose test-file lint py-lint go-lint ts-test rego-test clean \
@@ -780,6 +780,33 @@ packaging-macos-bundle:
 	    "$(BUNDLE_TAGS)" \
 	    "$(CMID_OVERLAY)" \
 	    "$(CMID_VERSION)"
+
+# packaging-windows-bundle assembles the machine-level bundle that AVC's
+# WiX MSI wraps: gateway + hook + hook-launcher + defenseclaw-mgr, plus
+# config / targets templates. Layout and contract live in
+# packaging/windows/PACKAGING.md. The recipe is a thin wrapper around
+# scripts/build-windows-bundle.ps1 so per-repo Make-recipe size limits stay
+# satisfied.
+#
+# BUNDLE_GOARCH accepts amd64 (default) or arm64. On arm64 the hook +
+# hook-launcher + mgr still ship as amd64 (documented in the plan and
+# PACKAGING.md); only the gateway varies with BUNDLE_GOARCH.
+WIN_BUNDLE_GOARCH ?= amd64
+WIN_BUNDLE_NAME   := defenseclaw-windows-$(VERSION)-$(WIN_BUNDLE_GOARCH)
+WIN_BUNDLE_DIR    := $(DIST_DIR)/$(WIN_BUNDLE_NAME)
+
+packaging-windows-bundle:
+	@pwsh -NoProfile -File scripts/build-windows-bundle.ps1 \
+	    -BundleGoos windows \
+	    -BundleGoarch $(WIN_BUNDLE_GOARCH) \
+	    -BundleName $(WIN_BUNDLE_NAME) \
+	    -BundleDir $(WIN_BUNDLE_DIR) \
+	    -DistDir $(DIST_DIR) \
+	    -Version $(VERSION) \
+	    -Ldflags "$(BUNDLE_LDFLAGS)" \
+	    -Tags "$(BUNDLE_TAGS)" \
+	    -CmidOverlay "$(CMID_OVERLAY)" \
+	    -CmidVersion "$(CMID_VERSION)"
 
 # Native SwiftUI companion-app checks and release packaging. The release target
 # builds a runtime-bearing drag-to-Applications DMG plus an app-only self-update
