@@ -509,26 +509,46 @@ func TestScrubReturnsRC4OnBrokenJSON(t *testing.T) {
 	}
 }
 
-// TestExitCodedErrorSurvivesWrapping guards the contract that
-// `cli.Execute` uses `errors.As` to unwrap `scrubExitError` from
-// arbitrary wrapping chains. A direct type assertion would collapse
-// a `fmt.Errorf("context: %w", exitErr)` back to rc 1 and silently
-// break shell callers (uninstall.sh) that branch on the specific
-// numeric code. This test constructs a wrapped error chain and
-// asserts the exit code is still recoverable via `errors.As`.
-func TestExitCodedErrorSurvivesWrapping(t *testing.T) {
-	inner := &scrubExitError{code: 2, msg: "missing file"}
-	// Two levels of wrapping — mirror any future
-	// fmt.Errorf("context: %w", err) sites that could appear on the
-	// return path from a RunE without breaking exit-code propagation.
-	wrapped := fmt.Errorf("outer: %w", fmt.Errorf("inner: %w", inner))
-	type exitCoded interface{ ExitCode() int }
-	var ec exitCoded
-	if !errors.As(wrapped, &ec) {
-		t.Fatalf("errors.As failed to unwrap scrubExitError through two %%w layers: %v", wrapped)
+// TestExitCodeFor_HandlesAllContracts drives the pure
+// error-to-int mapping cli.Execute delegates to. All three branches
+// of the contract must hold:
+//
+//   - nil                      -> 0
+//   - wrapped ExitCode() err   -> that code (via errors.As, not a
+//     bare type assertion — a wrapped exit-coded error would
+//     otherwise collapse to rc 1 and break uninstall.sh's branching
+//     on rc 2/3/4)
+//   - any other non-nil err    -> 1
+//
+// Testing exitCodeFor directly (rather than errors.As independently)
+// locks the shell-callable contract into a single named entry point
+// that Execute delegates to.
+func TestExitCodeFor_HandlesAllContracts(t *testing.T) {
+	if rc := exitCodeFor(nil); rc != 0 {
+		t.Errorf("exitCodeFor(nil) = %d, want 0", rc)
 	}
-	if ec.ExitCode() != 2 {
-		t.Errorf("wrapped exit code = %d, want 2", ec.ExitCode())
+	if rc := exitCodeFor(errors.New("random failure")); rc != 1 {
+		t.Errorf("exitCodeFor(<plain error>) = %d, want 1", rc)
+	}
+
+	// The critical case: wrapped scrubExitError. Two levels of
+	// wrapping mirrors any future fmt.Errorf("context: %w", err)
+	// site that could appear along the return path from a RunE
+	// without breaking exit-code propagation.
+	inner := &scrubExitError{code: 2, msg: "missing file"}
+	wrapped := fmt.Errorf("outer: %w", fmt.Errorf("inner: %w", inner))
+	if rc := exitCodeFor(wrapped); rc != 2 {
+		t.Errorf("exitCodeFor(<double-wrapped rc 2>) = %d, want 2 — errors.As must unwrap through %%w layers", rc)
+	}
+
+	// rc 3 and rc 4 too so the guard catches a hypothetical
+	// regression where exitCodeFor accidentally masks to a single
+	// value.
+	for _, want := range []int{3, 4} {
+		wrapped := fmt.Errorf("wrap: %w", &scrubExitError{code: want, msg: "x"})
+		if rc := exitCodeFor(wrapped); rc != want {
+			t.Errorf("exitCodeFor(<wrapped rc %d>) = %d, want %d", want, rc, want)
+		}
 	}
 }
 
@@ -635,6 +655,56 @@ func TestScrubCursor_ThroughSymlinkPreservesLink(t *testing.T) {
 	}
 	if !strings.Contains(out, "keep-me.sh") {
 		t.Errorf("user entry lost during scrub through symlink:\n%s", out)
+	}
+}
+
+// TestScrubCursor_ChainedSymlinksResolveToConcreteTarget guards the
+// bounded-loop symlink resolution. Dotfiles workflows sometimes stack
+// links (chezmoi manages a source dir that itself is a symlink into a
+// worktree, for example). A single-hop resolver would land on the
+// intermediate link and rewrite THAT with a regular file, breaking
+// the outer indirection. Assert the scrub walks the chain to the
+// concrete target.
+func TestScrubCursor_ChainedSymlinksResolveToConcreteTarget(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "final-target.json")
+	mid := filepath.Join(dir, "mid.json")
+	link := filepath.Join(dir, "hooks.json")
+	writeFile(t, target, `{
+  "hooks": {
+    "preToolUse": [
+      {"type":"command","command":"/Users/u/.defenseclaw/hooks/cursor-hook.sh"},
+      {"type":"command","command":"/Users/u/.local/bin/keep-me.sh"}
+    ]
+  }
+}
+`)
+	if err := os.Symlink(target, mid); err != nil {
+		t.Fatalf("symlink mid: %v", err)
+	}
+	if err := os.Symlink(mid, link); err != nil {
+		t.Fatalf("symlink link: %v", err)
+	}
+	if _, err := scrubCursorFile(link, scrubDefaultMarkers); err != nil {
+		t.Fatalf("scrubCursorFile through chained symlinks: %v", err)
+	}
+	// Both symlinks must survive.
+	for _, p := range []string{link, mid} {
+		info, err := os.Lstat(p)
+		if err != nil {
+			t.Fatalf("lstat %s after scrub: %v", p, err)
+		}
+		if info.Mode()&os.ModeSymlink == 0 {
+			t.Errorf("chained-symlink hop %s was replaced with a regular file", p)
+		}
+	}
+	// Concrete target has the scrubbed content.
+	out := readFile(t, target)
+	if strings.Contains(out, "defenseclaw") {
+		t.Errorf("DC entry survived scrub through chained symlinks:\n%s", out)
+	}
+	if !strings.Contains(out, "keep-me.sh") {
+		t.Errorf("user entry lost during scrub through chained symlinks:\n%s", out)
 	}
 }
 

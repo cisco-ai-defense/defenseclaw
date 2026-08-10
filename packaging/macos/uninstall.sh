@@ -266,78 +266,128 @@ stop_daemon "${LEGACY_GUARDIAN_LAUNCHD_LABEL}" "${LEGACY_GUARDIAN_PLIST_DST}"
 # absolute path; bundle-fixture / dev-tree tests can override via
 # DEFENSECLAW_SCRUB_BIN so they don't need the managed layout present.
 #
-# The override branch runs the equivalent trust checks the installer
-# applies to DEFENSECLAW_PLIST_SRC (PACKAGING.md:104-111). uninstall.sh
-# runs under `sudo`, so the referenced binary is executed as root;
-# an operator-supplied path is treated as untrusted input and must
-# satisfy every check below before it takes effect:
+# _scrub_bin_trusted PATH LABEL [--allow-non-root-owner]
+#   Validates a candidate scrub-binary path. Returns 0 on success,
+#   printing the path to stdout; returns 1 on any check failure,
+#   emitting a WARN so the operator sees which check tripped. All
+#   check failures write to stderr and never abort the shell — the
+#   caller decides whether to fall through to the next candidate.
 #
-#   1. absolute path (relative could be rerooted by PWD)
-#   2. exists as a regular file (not a directory, not a device, not a
-#      symlink — a symlink swap is the exact race that motivates this)
-#   3. is executable
-#   4. owned by uid 0 (matches the installer's "root-owned trusted
-#      input" pattern for --plist)
-#   5. mode & 0022 == 0 (no group/other write bits — a compromised
-#      umask cannot slip a writable binary through)
+#   uninstall.sh runs under `sudo`, so the referenced binary is
+#   executed as root; every candidate is treated as untrusted input
+#   and must satisfy the checks below before it takes effect:
 #
-# On any failure we print a WARN and fall through to auto-discovery so
-# the operator gets a fixable diagnostic rather than a silent scrub
-# skip. DC_UNINSTALL_SKIP_SCRUB_BIN_TRUST=1 is a test-side seam that
-# lets bundle-fixture tests drive uninstall.sh against a non-root-owned
-# binary in a tmpdir (parallel to DC_INSTALLER_SKIP_ROOT_CHECK on the
-# install side).
+#     1. absolute path (relative could be rerooted by PWD)
+#     2. exists as a regular file (not a directory, not a device,
+#        not a symlink — a symlink swap is the exact race that
+#        motivates this)
+#     3. is executable
+#     4. mode & 0022 == 0 (no group/other write bits — a compromised
+#        umask cannot slip a writable binary through)
+#     5. owned by uid 0 (matches the installer's "root-owned trusted
+#        input" pattern for --plist)
+#
+#   `--allow-non-root-owner` skips check (5). The bundle-fixture /
+#   dev-tree candidates under SCRIPT_DIR inherit the extracting
+#   user's uid — that's expected for a `tar xzf` extraction and
+#   matches the installer's two-tier PLIST_SRC policy where the
+#   bundle default is accepted regardless of owner (its content came
+#   from the trusted tarball). Managed-install candidates under
+#   INSTALL_PREFIX must always be root-owned; the flag isn't used
+#   there.
+#
+#   DC_UNINSTALL_SKIP_SCRUB_BIN_TRUST=1 is a test-side seam that
+#   skips checks 4 & 5 entirely so bundle-fixture tests can drive
+#   uninstall.sh against a non-root-owned binary in a tmpdir
+#   (parallel to DC_INSTALLER_SKIP_ROOT_CHECK on the install side).
+_scrub_bin_trusted() {
+  local path="$1"
+  local label="$2"
+  local allow_non_root_owner="false"
+  case "${3:-}" in
+    --allow-non-root-owner) allow_non_root_owner="true" ;;
+    "") ;;
+    *) warn "${label} internal error: unknown flag ${3}"; return 1 ;;
+  esac
+  case "${path}" in
+    /*) ;;
+    *)
+      warn "${label} must be an absolute path (got: ${path}); ignoring"
+      return 1
+      ;;
+  esac
+  if [[ -L "${path}" ]]; then
+    warn "${label} is a symlink; refusing to follow (${path}); ignoring"
+    return 1
+  fi
+  if [[ ! -f "${path}" ]]; then
+    warn "${label} is not a regular file: ${path}; ignoring"
+    return 1
+  fi
+  if [[ ! -x "${path}" ]]; then
+    warn "${label} is not executable: ${path}; ignoring"
+    return 1
+  fi
+  if [[ "${DC_UNINSTALL_SKIP_SCRUB_BIN_TRUST:-}" == "1" ]]; then
+    printf '%s' "${path}"
+    return 0
+  fi
+  local _own_mode _own _mode
+  _own_mode="$(stat -f '%Su %Lp' "${path}" 2>/dev/null || echo '')"
+  if [[ -z "${_own_mode}" ]]; then
+    warn "${label} cannot be stat'd: ${path}; ignoring"
+    return 1
+  fi
+  _own="${_own_mode%% *}"
+  _mode="${_own_mode##* }"
+  if (( (8#${_mode} & 8#022) != 0 )); then
+    warn "${label} is group/other writable (mode ${_mode}): ${path}; ignoring"
+    return 1
+  fi
+  if [[ "${allow_non_root_owner}" != "true" && "${_own}" != "root" ]]; then
+    warn "${label} must be owned by root (got: ${_own}): ${path}; ignoring"
+    return 1
+  fi
+  printf '%s' "${path}"
+  return 0
+}
+
+# _scrub_bin resolves the scrub-binary path by trying, in order:
+#   1. DEFENSECLAW_SCRUB_BIN (operator override — strict trust)
+#   2. INSTALL_PREFIX/bin/defenseclaw-gateway (managed install — strict trust)
+#   3. SCRIPT_DIR/defenseclaw           (bundle default — relaxed owner tier)
+#   4. SCRIPT_DIR/defenseclaw-gateway   (bundle/dev — relaxed owner tier)
+#
+# Any candidate that fails the trust check prints a WARN and is
+# skipped; discovery falls through to the next candidate.
 _scrub_bin() {
+  local resolved=""
   if [[ -n "${DEFENSECLAW_SCRUB_BIN:-}" ]]; then
-    local override="${DEFENSECLAW_SCRUB_BIN}"
-    case "${override}" in
-      /*) ;;
-      *)
-        warn "DEFENSECLAW_SCRUB_BIN must be an absolute path (got: ${override}); ignoring override"
-        override=""
-        ;;
-    esac
-    if [[ -n "${override}" && -L "${override}" ]]; then
-      warn "DEFENSECLAW_SCRUB_BIN is a symlink; refusing to follow (${override}); ignoring override"
-      override=""
-    fi
-    if [[ -n "${override}" && ! -f "${override}" ]]; then
-      warn "DEFENSECLAW_SCRUB_BIN is not a regular file: ${override}; ignoring override"
-      override=""
-    fi
-    if [[ -n "${override}" && ! -x "${override}" ]]; then
-      warn "DEFENSECLAW_SCRUB_BIN is not executable: ${override}; ignoring override"
-      override=""
-    fi
-    if [[ -n "${override}" && "${DC_UNINSTALL_SKIP_SCRUB_BIN_TRUST:-}" != "1" ]]; then
-      local _own_mode
-      _own_mode="$(stat -f '%Su %Lp' "${override}" 2>/dev/null || echo '')"
-      if [[ -z "${_own_mode}" ]]; then
-        warn "DEFENSECLAW_SCRUB_BIN cannot be stat'd: ${override}; ignoring override"
-        override=""
-      else
-        local _own="${_own_mode%% *}" _mode="${_own_mode##* }"
-        if [[ "${_own}" != "root" ]]; then
-          warn "DEFENSECLAW_SCRUB_BIN must be owned by root (got: ${_own}); ignoring override"
-          override=""
-        elif (( (8#${_mode} & 8#022) != 0 )); then
-          warn "DEFENSECLAW_SCRUB_BIN is group/other writable (mode ${_mode}); ignoring override"
-          override=""
-        fi
-      fi
-    fi
-    if [[ -n "${override}" ]]; then
-      printf '%s' "${override}"
+    resolved="$(_scrub_bin_trusted "${DEFENSECLAW_SCRUB_BIN}" "DEFENSECLAW_SCRUB_BIN" || true)"
+    if [[ -n "${resolved}" ]]; then
+      printf '%s' "${resolved}"
       return
     fi
-    # Fall through to auto-discovery when the override didn't pass.
+    # Fall through: warn already printed by helper.
   fi
+  # Managed-install location: strict trust (root-owned + mode
+  # tightened). If someone dropped an untrusted binary here they've
+  # already compromised the managed tree, but we still don't want
+  # uninstall.sh to launch it as root.
+  resolved="$(_scrub_bin_trusted "${INSTALL_PREFIX}/bin/defenseclaw-gateway" "managed install gateway binary" || true)"
+  if [[ -n "${resolved}" ]]; then
+    printf '%s' "${resolved}"
+    return
+  fi
+  # Bundle-fixture / dev-tree fallbacks: relaxed owner tier because
+  # the bundle unpacks under the caller's uid. Mode + symlink checks
+  # still apply.
   for cand in \
-    "${INSTALL_PREFIX}/bin/defenseclaw-gateway" \
     "${SCRIPT_DIR}/defenseclaw" \
     "${SCRIPT_DIR}/defenseclaw-gateway"; do
-    if [[ -x "${cand}" ]]; then
-      printf '%s' "${cand}"
+    resolved="$(_scrub_bin_trusted "${cand}" "bundle scrub binary" --allow-non-root-owner || true)"
+    if [[ -n "${resolved}" ]]; then
+      printf '%s' "${resolved}"
       return
     fi
   done

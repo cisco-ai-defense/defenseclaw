@@ -1593,8 +1593,8 @@
       "consumers": [
         {"location": "packaging/macos/uninstall.sh:268", "description": "_scrub_bin() prefers this override before falling back to the managed install path"}
       ],
-      "since": "26.7.3",
-      "security_note": "Uninstaller-only executable override — uninstall.sh runs under sudo, so the referenced binary is exec'd as root. _scrub_bin() validates every override before use: must be an absolute path, must be a regular file (not a symlink or directory), must be executable, must be root-owned, must not be group/other writable. Any check failing prints a WARN and falls through to auto-discovery. Intended for bundle-fixture and dev-tree tests; production installs should never set this."
+      "since": "0.8.5",
+      "security_note": "Uninstaller-only executable override — uninstall.sh runs under sudo, so the referenced binary is exec'd as root. _scrub_bin() validates every override before use via the shared _scrub_bin_trusted helper: must be an absolute path, must be a regular file (not a symlink or directory), must be executable, must be root-owned, must not be group/other writable. Any check failing prints a WARN and falls through to auto-discovery. Intended for bundle-fixture and dev-tree tests; production installs should never set this. First shipped in the macOS 26.7.3 Cisco Secure Client bundle (DefenseClaw 0.8.5)."
     },
     {
       "name": "DEFENSECLAW_BAKED_HOOK_PATH",

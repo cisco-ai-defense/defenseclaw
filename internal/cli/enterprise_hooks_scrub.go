@@ -383,28 +383,39 @@ func writeSortedJSON(path string, cfg any, original []byte) (bool, error) {
 // on the scrub path — callers Stat first — but robust if this helper
 // is reused).
 func writeConfigAtomic(path string, payload []byte) error {
-	// Resolve one level of symlink so a chezmoi-style dotfiles setup
-	// (~/.cursor/hooks.json -> ~/.dotfiles/cursor/hooks.json) has the
-	// scrub land on the concrete target file rather than clobber the
-	// link itself. Deliberately one hop only: if the target is itself
-	// a symlink we walk again inside os.Readlink → os.Stat, and the
-	// atomic-rename below is confined to the concrete target's dir.
+	// Resolve chained symlinks so a chezmoi-style dotfiles setup
+	// (~/.cursor/hooks.json -> ~/.dotfiles/cursor/hooks.json ->
+	// ~/dev/dotfiles/cursor/hooks.json) has the scrub land on the
+	// concrete target file rather than clobber the link.
 	//
-	// Rationale for single-hop rather than filepath.EvalSymlinks:
-	// EvalSymlinks fails if any component along the path does not
-	// exist; we want the scrub to work even when the parent dir of
-	// the resolved target is missing (rare, but the scrub is
-	// best-effort and a missing sibling should not abort).
+	// Bounded loop (maxSymlinkHops = 16) guards against symlink
+	// cycles — a user with a self-referential link would otherwise
+	// spin forever. 16 matches the Linux kernel's default
+	// MAXSYMLINKS and is generous enough for any legitimate dotfiles
+	// chain. On a cycle detection or readlink/stat error we fall
+	// back to the last resolvable path, and the downstream Rename
+	// will report a concrete errno the operator can act on.
+	//
+	// Deliberately NOT using filepath.EvalSymlinks: it fails if any
+	// intermediate component does not exist, so a chain whose final
+	// resolved target's parent directory is temporarily missing
+	// (rare, but possible during a chezmoi apply in-flight) would
+	// abort the scrub. Manual per-hop resolution degrades gracefully.
 	resolved := path
-	if lstat, err := os.Lstat(path); err == nil {
-		if lstat.Mode()&os.ModeSymlink != 0 {
-			if target, err := os.Readlink(path); err == nil {
-				if !filepath.IsAbs(target) {
-					target = filepath.Join(filepath.Dir(path), target)
-				}
-				resolved = target
-			}
+	const maxSymlinkHops = 16
+	for hop := 0; hop < maxSymlinkHops; hop++ {
+		lstat, err := os.Lstat(resolved)
+		if err != nil || lstat.Mode()&os.ModeSymlink == 0 {
+			break
 		}
+		target, err := os.Readlink(resolved)
+		if err != nil {
+			break
+		}
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(filepath.Dir(resolved), target)
+		}
+		resolved = target
 	}
 	var (
 		mode     os.FileMode = 0o600

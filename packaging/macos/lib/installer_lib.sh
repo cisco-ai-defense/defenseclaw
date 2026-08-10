@@ -250,11 +250,30 @@ _read_json_field() {
       # nested containers to reach the next comma or closing brace.
       # The inner-container walk below uses its own local nest_depth
       # counter, so no top-level depth counter is needed here.
+      #
+      # We defer printing the matched value until AFTER the whole
+      # object has been validated as well-formed. Emitting on match
+      # would silently accept truncated inputs like
+      # `{"version":"1",` — the field-then-comma-then-EOF shape a
+      # crashed writer leaves behind. `found` records whether the
+      # match happened; `val` holds the value; the print at the END
+      # of a clean parse commits it.
+      found = 0
+      val = ""
       while (pos <= buflen) {
         skip_ws()
         if (pos > buflen) exit 0
         c = substr(buf, pos, 1)
-        if (c == "}") { pos++; exit 0 }
+        if (c == "}") {
+          # Closing brace — object end. Validate that only
+          # whitespace follows (no trailing garbage) before
+          # emitting.
+          pos++
+          skip_ws()
+          if (pos <= buflen) exit 0
+          if (found) print val
+          exit 0
+        }
         if (c == ",") { pos++; continue }
         if (c != "\"") exit 0
         # Read the top-level key.
@@ -270,8 +289,13 @@ _read_json_field() {
         if (key_is_target && c == "\"") {
           v = read_string()
           if (err) exit 0
-          print v
-          exit 0
+          # Remember the last string value seen for FIELD. JSON
+          # semantics: duplicate top-level keys are permitted but
+          # ill-defined; most parsers keep the LAST one. Follow
+          # that convention rather than the first-wins short-circuit.
+          val = v
+          found = 1
+          continue
         }
         # Not the sought field (or non-string value) — skip the value
         # so we can reach the next key. Value can be string, number,
@@ -279,6 +303,11 @@ _read_json_field() {
         if (c == "\"") {
           skip_string()
           if (err) exit 0
+          # A non-target string value invalidates a previously-found
+          # match with the SAME key iff it was actually the same key;
+          # we do not track that here because the key path above
+          # already recorded the target hit. Non-target keys never
+          # touch `found`/`val`.
         } else if (c == "{" || c == "[") {
           nest_depth = 1
           pos++
@@ -297,14 +326,21 @@ _read_json_field() {
         } else {
           # scalar: number / true / false / null — consume until we
           # hit a delimiter (comma, closing brace, whitespace).
+          # Empty run (no scalar bytes at all) means the buffer ended
+          # mid-value, e.g. `{"version":`. Treat that as malformed.
+          start_pos = pos
           while (pos <= buflen) {
             c = substr(buf, pos, 1)
             if (c == "," || c == "}" || c == " " || c == "\t" ||
                 c == "\n" || c == "\r") break
             pos++
           }
+          if (pos == start_pos) exit 0
         }
       }
+      # Ran off the end of the buffer without a closing brace: object
+      # was truncated. Discard any found value.
+      exit 0
     }
   ' "${path}" 2>/dev/null
 }
@@ -1468,7 +1504,19 @@ apply_ai_discovery_home_dirs() {
       return n
     }
     function strip(s) { sub(/^[ \t]+/, "", s); sub(/[ \t\r]+$/, "", s); return s }
-    BEGIN { in_ai = 0; seen_ai = 0; consuming_home = 0; home_indent_len = 0 }
+    BEGIN {
+      in_ai = 0
+      seen_ai = 0
+      consuming_home = 0
+      home_indent_len = 0
+      # direct_child_indent records the indentation depth of the FIRST
+      # direct child of `ai_discovery:` we see; this is the level a
+      # legitimate `home_dirs:` key lives at. A `home_dirs:` deeper
+      # than direct_child_indent (say `ai_discovery.source.home_dirs`)
+      # is an operator-added nested sub-map, not our top-level list —
+      # preserve it verbatim. Zero means we have not seen a child yet.
+      direct_child_indent = 0
+    }
     {
       line = $0
       if (!in_ai) {
@@ -1481,6 +1529,7 @@ apply_ai_discovery_home_dirs() {
           # This detour avoids passing multi-line data through
           # `awk -v` — BSD awk rejects embedded newlines in -v args.
           print MARKER
+          direct_child_indent = 0
           next
         }
         print line
@@ -1503,19 +1552,33 @@ apply_ai_discovery_home_dirs() {
         print line
         next
       }
-      # home_dirs child: drop entirely. `home_dirs:` alone means a
+      this_indent = leading_ws_len(line)
+      # Record the direct-child indent from the first child line we
+      # see. render_config emits two-space YAML, so this is normally
+      # 2 — but honor whatever the actual file uses so hand-edited
+      # configs with a different indent still work.
+      if (direct_child_indent == 0) direct_child_indent = this_indent
+      # home_dirs child: drop entirely BUT ONLY at the direct-child
+      # indent. A deeper `home_dirs:` under an operator-added subkey
+      # (`ai_discovery.source.home_dirs`, `ai_discovery.overrides.
+      # home_dirs`, …) belongs to that nested map and MUST be
+      # preserved. Matching `home_dirs:` at any depth would silently
+      # eat that user state on every reconcile tick.
+      #
+      # `home_dirs:` at direct-child indent with an empty tail means a
       # possibly-multi-line list follows — enter consuming_home mode
       # to swallow every deeper-indented line until the next same- or
       # lesser-indented sibling. BSD awk (macOS) does not support
       # gawk-style match(..., array); use a regex-then-substr split.
-      if (line ~ /^[ \t]+home_dirs:[ \t]*/) {
-        home_indent_len = leading_ws_len(line)
+      if (this_indent == direct_child_indent && line ~ /^[ \t]+home_dirs:[ \t]*/) {
+        home_indent_len = this_indent
         colon_pos = index(line, ":")
         tail = strip(substr(line, colon_pos + 1))
         if (tail == "") consuming_home = 1
         next
       }
-      # Any other ai_discovery child: preserve verbatim.
+      # Any other ai_discovery child (including a nested `home_dirs:`
+      # under a deeper sub-map): preserve verbatim.
       print line
     }
     END {
@@ -1570,19 +1633,45 @@ apply_ai_discovery_home_dirs() {
   fi
   tmp="${tmp2}"
 
-  # Preserve mode + ownership from the existing config, then atomic-swap
+  # Symlink handling: if config_path is a symlink, resolve it and
+  # rename over the CONCRETE target so the symlink itself survives.
+  # Motivation: install.sh refuses symlinks under root-owned managed
+  # paths, so config.yaml is normally a regular file — but the
+  # enumerator daemon calls this helper on every tick and defense-
+  # in-depth against a hand-created symlink (bad admin, misapplied
+  # config-management, mid-migration state) is cheap. Renaming a
+  # temp file over a symlink would replace the link with a regular
+  # file, silently breaking whatever setup put the link there.
+  # macOS `readlink` returns the direct target only (no -f); resolve
+  # relative targets against the parent dir of the symlink.
+  local target="${config_path}"
+  if [[ -L "${config_path}" ]]; then
+    local link_target
+    link_target="$(readlink -- "${config_path}" 2>/dev/null || true)"
+    if [[ -n "${link_target}" ]]; then
+      case "${link_target}" in
+        /*) target="${link_target}" ;;
+        *)  target="$(dirname -- "${config_path}")/${link_target}" ;;
+      esac
+    fi
+  fi
+
+  # Preserve mode + ownership from the existing target, then atomic-swap
   # only when the content actually changed so downstream reload
   # heuristics that watch mtime aren't triggered on a no-op tick.
-  chown --reference="${config_path}" "${tmp}" 2>/dev/null || \
-    chown "$(stat -f '%Su:%Sg' "${config_path}")" "${tmp}"
-  chmod --reference="${config_path}" "${tmp}" 2>/dev/null || \
-    chmod "$(stat -f '%A' "${config_path}")" "${tmp}"
+  # `--reference` is a GNU coreutils extension not available on macOS
+  # `chown`/`chmod`; the fallback uses `stat -f` to read the target's
+  # existing owner/mode and re-apply them via the string form.
+  chown --reference="${target}" "${tmp}" 2>/dev/null || \
+    chown "$(stat -f '%Su:%Sg' "${target}")" "${tmp}"
+  chmod --reference="${target}" "${tmp}" 2>/dev/null || \
+    chmod "$(stat -f '%A' "${target}")" "${tmp}"
 
-  if cmp -s "${tmp}" "${config_path}"; then
+  if cmp -s "${tmp}" "${target}"; then
     rm -f -- "${tmp}"
     return 0
   fi
-  /bin/mv -f -- "${tmp}" "${config_path}"
+  /bin/mv -f -- "${tmp}" "${target}"
   # Endpoint-durability: flush pending disk writes so the rename
   # survives a kernel panic / laptop-lid-close / power-drop
   # immediately after. Without this, a mid-boot crash between the

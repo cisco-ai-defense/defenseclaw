@@ -154,28 +154,37 @@ Run without arguments to start the sidecar daemon.`,
 // Execute runs the root command and returns the exit code. The actual
 // os.Exit call belongs in main() so deferred cleanup (PersistentPostRun)
 // always executes.
-//
-// A command's RunE may signal a specific numeric exit code by returning
-// a value whose type implements `ExitCode() int` (see enterprise_hooks_scrub.go
-// for the pattern) — those are propagated verbatim so shell callers can
-// key off exact statuses (e.g. uninstall.sh treats scrub rc 2 = missing
-// file, rc 3 = unknown connector). Anything else stays at rc 1.
-//
-// Uses `errors.As` rather than a direct type assertion so a future
-// wrapper (`fmt.Errorf("scrub: %w", err)` for context) still lands the
-// right numeric code. A bare type assertion would collapse a wrapped
-// exit-coded error to rc 1 and silently break shell callers that
-// branch on the specific rc.
 func Execute() int {
-	if err := rootCmd.Execute(); err != nil {
-		type exitCoded interface{ ExitCode() int }
-		var ec exitCoded
-		if errors.As(err, &ec) {
-			return ec.ExitCode()
-		}
-		return 1
+	return exitCodeFor(rootCmd.Execute())
+}
+
+// exitCodeFor is the pure error-to-int mapping Execute delegates to.
+// Kept split so tests can drive it directly without spinning up the
+// root Cobra command.
+//
+// Contract:
+//
+//   - err == nil                        -> rc 0
+//   - err implements `ExitCode() int`   -> that code (walks wrap chain
+//     via errors.As so `fmt.Errorf("...: %w", exitErr)` still lands
+//     the right rc — a bare type assertion would collapse wrapped
+//     exit-coded errors to rc 1 and silently break shell callers that
+//     branch on specific statuses)
+//   - anything else                     -> rc 1
+//
+// Shell callers key off exact codes (uninstall.sh: rc 2 = missing
+// file, rc 3 = unknown connector, rc 4 = parse failure), so this
+// mapping is load-bearing — hence the helper + dedicated test.
+func exitCodeFor(err error) int {
+	if err == nil {
+		return 0
 	}
-	return 0
+	type exitCoded interface{ ExitCode() int }
+	var ec exitCoded
+	if errors.As(err, &ec) {
+		return ec.ExitCode()
+	}
+	return 1
 }
 
 // applyPrivacyConfig honours the persisted Privacy.DisableRedaction
