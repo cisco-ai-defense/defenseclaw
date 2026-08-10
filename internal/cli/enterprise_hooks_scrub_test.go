@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -557,12 +558,21 @@ func TestExitCodeFor_HandlesAllContracts(t *testing.T) {
 	// *os/exec.ExitError from a spawned subprocess — MUST collapse
 	// to rc 1. A generic interface-based match would silently
 	// propagate the subprocess exit code as OUR exit code, which
-	// collides with our own well-defined statuses. Verified by
-	// running `/bin/sh -c 'exit 42'` and asserting exitCodeFor of
-	// the returned error stays at rc 1.
-	subprocErr := exec.Command("/bin/sh", "-c", "exit 42").Run()
+	// collides with our own well-defined statuses.
+	//
+	// Rather than shelling out to /bin/sh (missing/renamed on
+	// Windows CI runners, on certain container images, and inside
+	// hermetic sandboxes), re-execute the test binary itself with an
+	// environment flag that trips the exit-42 side branch in
+	// TestMain. This is the same self-exec helper-process pattern
+	// used across the Go stdlib. Portable, and it exercises
+	// *os/exec.ExitError with the exact wire shape a real subprocess
+	// call would produce.
+	helper := exec.Command(os.Args[0], "-test.run=^$")
+	helper.Env = append(os.Environ(), scrubExitHelperEnv+"=42")
+	subprocErr := helper.Run()
 	if subprocErr == nil {
-		t.Fatalf("subprocess sanity check: expected non-nil error from `exit 42`")
+		t.Fatalf("subprocess sanity check: expected non-nil error from `exit 42` helper")
 	}
 	// Sanity: subprocErr does implement ExitCode() int via
 	// *exec.ExitError, so this test would fail against the older
@@ -574,6 +584,32 @@ func TestExitCodeFor_HandlesAllContracts(t *testing.T) {
 	if rc := exitCodeFor(subprocErr); rc != 1 {
 		t.Errorf("exitCodeFor(*exec.ExitError rc 42) = %d, want 1 (subprocess exit codes must not leak into our contract)", rc)
 	}
+}
+
+// scrubExitHelperEnv names an env-var flag that, when set during test
+// binary startup, causes TestMain to os.Exit with the flag's numeric
+// value BEFORE any test cases run. Consumed by
+// TestExitCodeFor_HandlesAllContracts's self-exec helper-process
+// path — see the exec.Command call there for the pairing.
+const scrubExitHelperEnv = "DC_SCRUB_TEST_EXIT"
+
+// TestMain intercepts the helper-process re-exec. When
+// scrubExitHelperEnv is set to a numeric string, exit immediately
+// with that status. When unset, forward to the standard test runner
+// so all other tests execute normally.
+func TestMain(m *testing.M) {
+	if raw, ok := os.LookupEnv(scrubExitHelperEnv); ok {
+		code, err := strconv.Atoi(strings.TrimSpace(raw))
+		if err != nil {
+			// Malformed helper request — surface via a distinct
+			// non-zero code so the parent test sees the mismatch
+			// rather than a matching-by-accident rc 1.
+			fmt.Fprintf(os.Stderr, "scrub test helper: bad %s=%q: %v\n", scrubExitHelperEnv, raw, err)
+			os.Exit(120)
+		}
+		os.Exit(code)
+	}
+	os.Exit(m.Run())
 }
 
 // TestScrubClaudeCode_PreservesHTMLBytesInStringValues guards

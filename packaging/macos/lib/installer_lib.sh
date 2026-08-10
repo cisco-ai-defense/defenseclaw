@@ -1702,8 +1702,16 @@ apply_ai_discovery_home_dirs() {
   # non-zero. The explicit `return 0` after sync stops the function
   # from returning `sync`'s exit status as its own; `sync` is
   # best-effort and its rc must not decide the swap's outcome.
-  if ! /bin/mv -f -- "${tmp}" "${target}"; then
-    printf 'apply_ai_discovery_home_dirs: rename %s -> %s failed (%s)\n' "${tmp}" "${target}" "$?" >&2
+  #
+  # Capture `mv`'s exit status BEFORE using it in the printf: an
+  # `if ! /bin/mv …; then … $? …` chain resolves `$?` to the negated
+  # test's status (always 0 in the taken branch) — the original
+  # non-zero code from mv would be lost. Store it in `mv_rc` at the
+  # invocation site so the diagnostic reports the real errno bucket.
+  local mv_rc=0
+  /bin/mv -f -- "${tmp}" "${target}" || mv_rc=$?
+  if (( mv_rc != 0 )); then
+    printf 'apply_ai_discovery_home_dirs: rename %s -> %s failed (rc=%d)\n' "${tmp}" "${target}" "${mv_rc}" >&2
     rm -f -- "${tmp}"
     return 1
   fi
