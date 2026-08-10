@@ -348,6 +348,19 @@ struct AIDiscoveryModelTests {
         let supportingSpeech = modelRow(
             id: "supporting-speech", modality: "speech", relevance: "supporting", confidence: 0.92
         )
+        let ownerlessSupportingSpeech = modelRow(
+            id: "ownerless-supporting-speech", modality: "speech", relevance: "supporting",
+            confidence: 0.92, ownerApplication: ""
+        )
+        let supportingAudio = modelRow(
+            id: "supporting-audio", modality: "audio", relevance: "supporting", confidence: 0.8
+        )
+        let supportingVision = modelRow(
+            id: "supporting-vision", modality: "vision", relevance: "supporting", confidence: 0.9
+        )
+        let supportingEmbedding = modelRow(
+            id: "supporting-embedding", modality: "embedding", relevance: "supporting", confidence: 0.9
+        )
         let lowConfidence = modelRow(
             id: "low", modality: "generative", relevance: "primary", confidence: 0.79
         )
@@ -355,7 +368,8 @@ struct AIDiscoveryModelTests {
             id: "boundary", modality: "generative", relevance: "primary", confidence: 0.8
         )
         let explicitZeroConfidence = modelRow(
-            id: "explicit-zero", modality: "generative", relevance: "primary", confidence: 0
+            id: "explicit-zero", modality: "generative", relevance: "primary", confidence: 0,
+            signalConfidence: 0.2, detector: "model_api"
         )
         let localAPIMissingConfidence = modelRow(
             id: "local-api-missing", modality: "generative", relevance: "primary", confidence: nil,
@@ -372,14 +386,58 @@ struct AIDiscoveryModelTests {
         let legacy = modelRow(
             id: "legacy", modality: "", relevance: "", confidence: nil, signalConfidence: 0.9
         )
+        let legacyModalityOnly = modelRow(
+            id: "legacy-modality", modality: "text", relevance: "", confidence: nil,
+            signalConfidence: 0.9, ownerApplication: ""
+        )
+        var mixedAPISignal = makeSignal(
+            product: "Meetily", vendor: "Local", category: "local_model", detector: "model_api",
+            model: AIUsageModel(id: "mixed-api-low")
+        )
+        mixedAPISignal.confidence = 0.2
+        var mixedFileSignal = makeSignal(
+            product: "Meetily", vendor: "Local", category: "local_model", detector: "model_file",
+            model: AIUsageModel(
+                id: "mixed-api-low", modality: "unknown", ownerApplication: "Chrome",
+                relevance: "embedded", discoveryConfidence: 0.79
+            )
+        )
+        mixedFileSignal.confidence = 0.79
+        guard let mixedLocalAPIRow = AIDiscoveryGrouping.modelRows(
+            from: [mixedAPISignal, mixedFileSignal]
+        ).first else {
+            fatalError("mixed local API row should exist")
+        }
 
         let focused = AIModelDiscoveryFilter()
         expect(focused.includes(primaryGenerative), "focused filter includes primary generative model")
-        expect(focused.includes(unknownHighConfidence), "focused filter includes high-confidence unknown model")
-        expect(focused.includes(legacy), "focused filter remains useful with older gateway metadata")
-        expect(!focused.includes(supporting), "focused filter hides supporting model")
+        expect(!focused.includes(unknownHighConfidence), "focused filter hides unknown-classification artifacts")
+        let legacySnapshotFilter = focused.preservingLegacySnapshot([legacy])
+        expect(
+            legacySnapshotFilter.includes(legacy),
+            "an entirely legacy snapshot preserves the historical all-model view"
+        )
+        let legacyModalitySnapshotFilter = focused.preservingLegacySnapshot([legacyModalityOnly])
+        expect(
+            legacyModalitySnapshotFilter.includes(legacyModalityOnly),
+            "the pre-existing modality field alone preserves legacy snapshot compatibility"
+        )
+        let classifiedSnapshotFilter = focused.preservingLegacySnapshot([legacy, primaryGenerative])
+        expect(
+            !classifiedSnapshotFilter.includes(legacy),
+            "legacy rows do not weaken a snapshot that contains classification metadata"
+        )
+        expect(!focused.includes(supporting), "focused filter hides supporting generative artifacts")
         expect(!focused.includes(embedded), "focused filter hides embedded model")
-        expect(!focused.includes(speech), "focused filter hides clearly non-generative model")
+        expect(focused.includes(speech), "focused filter includes a high-confidence primary speech model")
+        expect(focused.includes(supportingSpeech), "focused filter includes owner-attributed supporting speech")
+        expect(focused.includes(supportingAudio), "focused filter includes owner-attributed supporting audio")
+        expect(focused.includes(supportingVision), "focused filter includes owner-attributed supporting vision")
+        expect(focused.includes(supportingEmbedding), "focused filter includes owner-attributed supporting embedding")
+        expect(
+            !focused.includes(ownerlessSupportingSpeech),
+            "focused filter hides ownerless supporting artifacts"
+        )
         expect(!focused.includes(lowConfidence), "focused filter hides low-confidence model")
         expect(focused.includes(confidenceBoundary), "focused filter includes the 80-percent boundary")
         expect(
@@ -391,12 +449,28 @@ struct AIDiscoveryModelTests {
             "local API models are not hidden when model-specific confidence is absent"
         )
         expect(
-            !focused.includes(localAPISupporting),
-            "missing confidence does not bypass the recommended relevance filter"
+            focused.includes(localAPISupporting),
+            "unclassified local API rows remain visible without model-specific confidence"
         )
         expect(
-            !focused.includes(localAPISpeech),
-            "missing confidence does not bypass the recommended modality filter"
+            focused.includes(localAPISpeech),
+            "primary local API speech remains visible without model-specific confidence"
+        )
+        expect(
+            mixedLocalAPIRow.reportedDiscoveryConfidence == 0.79,
+            "mixed local API row retains the file detector confidence"
+        )
+        expect(
+            mixedLocalAPIRow.hasLocalModelAPISignalWithoutDiscoveryConfidence,
+            "mixed local API row detects missing confidence on the API signal"
+        )
+        expect(
+            mixedLocalAPIRow.effectiveRelevance == .embedded,
+            "mixed local API row retains the file detector classification"
+        )
+        expect(
+            focused.includes(mixedLocalAPIRow),
+            "missing API confidence bypasses grouped low-confidence embedded classification"
         )
 
         let speechFilter = AIModelDiscoveryFilter(modality: .speech)
@@ -409,7 +483,15 @@ struct AIDiscoveryModelTests {
             speechFilter.includes(localAPISpeech),
             "explicit speech includes a local API model without model-specific confidence"
         )
+        expect(
+            speechFilter.includes(ownerlessSupportingSpeech),
+            "explicit speech can reveal an ownerless supporting artifact"
+        )
         expect(!speechFilter.includes(primaryGenerative), "explicit modality excludes other modalities")
+        expect(
+            !speechFilter.includes(mixedLocalAPIRow),
+            "explicit modality still filters an unqualified mixed local API row"
+        )
 
         let supportingFilter = AIModelDiscoveryFilter(relevance: .supporting)
         expect(supportingFilter.includes(supporting), "explicit relevance overrides default relevance scope")
@@ -417,10 +499,17 @@ struct AIDiscoveryModelTests {
             supportingFilter.includes(supportingSpeech),
             "explicit supporting relevance does not retain the recommended modality exclusion"
         )
+        let embeddedFilter = AIModelDiscoveryFilter(relevance: .embedded)
+        expect(
+            embeddedFilter.includes(mixedLocalAPIRow),
+            "explicit relevance can select an unqualified mixed local API row"
+        )
 
         let allModels = AIModelDiscoveryFilter(showAllModels: true)
         expect(allModels.includes(lowConfidence), "show all includes low-confidence models")
         expect(allModels.includes(embedded), "show all includes embedded models")
+        expect(allModels.includes(unknownHighConfidence), "show all includes unknown models")
+        expect(allModels.includes(legacy), "show all includes legacy unclassified models")
 
         let allSpeech = AIModelDiscoveryFilter(showAllModels: true, modality: .speech)
         expect(allSpeech.includes(speech), "show all can still be narrowed by modality")
@@ -436,8 +525,11 @@ struct AIDiscoveryModelTests {
         relevance: String,
         confidence: Double?,
         signalConfidence: Double = 0.9,
-        detector: String = "model_file"
+        detector: String = "model_file",
+        ownerApplication: String? = nil
     ) -> AIModelDiscoveryRow {
+        let resolvedOwner = ownerApplication
+            ?? (modality.isEmpty && relevance.isEmpty && confidence == nil ? "" : "Meetily")
         var signal = makeSignal(
             product: "Meetily",
             vendor: "Local",
@@ -446,7 +538,7 @@ struct AIDiscoveryModelTests {
             model: AIUsageModel(
                 id: id,
                 modality: modality,
-                ownerApplication: modality.isEmpty && relevance.isEmpty && confidence == nil ? "" : "Meetily",
+                ownerApplication: resolvedOwner,
                 relevance: relevance,
                 discoveryConfidence: confidence
             )

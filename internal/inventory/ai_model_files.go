@@ -71,12 +71,13 @@ const (
 )
 
 type modelScanRoot struct {
-	path             string
-	provider         string
-	specialized      bool
-	scope            string
-	owner            string
-	metadataSidecars map[string]bool
+	path                string
+	provider            string
+	specialized         bool
+	scope               string
+	owner               string
+	metadataSidecars    map[string]bool
+	macOSOwnershipRoots []modelScanRoot
 }
 
 type modelFileAggregate struct {
@@ -158,9 +159,12 @@ func (s *ContinuousDiscoveryService) detectModelFilesWithOutcome(ctx context.Con
 		return nil, 0, outcome, nil
 	}
 	roots, priorityRootCount := prioritizeModelScanRoots(roots)
+	homes := s.homesToScan()
+	macOSOwnershipRoots := macOSLibraryModelScanRootsForHomes(homes)
 	metadataSidecars := make(map[string]bool)
 	for i := range roots {
 		roots[i].metadataSidecars = metadataSidecars
+		roots[i].macOSOwnershipRoots = macOSOwnershipRoots
 	}
 	delegatedRoots := nestedModelScanRoots(roots)
 	if len(roots) > 1 {
@@ -277,7 +281,7 @@ func (s *ContinuousDiscoveryService) detectModelFilesWithOutcome(ctx context.Con
 					return filepath.SkipDir
 				}
 				macOSHomeLibrary := runtime.GOOS == "darwin" && !root.specialized &&
-					isMacOSHomeLibrary(path, s.homesToScan())
+					isMacOSHomeLibrary(path, homes)
 				if path != root.path && (shouldSkipModelDirectoryForRoot(d.Name(), root) || macOSHomeLibrary) {
 					lastCompleted = path
 					return filepath.SkipDir
@@ -1013,6 +1017,14 @@ func macOSLibraryModelScanRoots(home string) []modelScanRoot {
 	}
 }
 
+func macOSLibraryModelScanRootsForHomes(homes []string) []modelScanRoot {
+	roots := make([]modelScanRoot, 0, len(homes)*4)
+	for _, home := range homes {
+		roots = append(roots, macOSLibraryModelScanRoots(home)...)
+	}
+	return roots
+}
+
 func isBroadModelHomeRoot(path string, homes []string) bool {
 	path = filepath.Clean(path)
 	for _, home := range homes {
@@ -1260,13 +1272,138 @@ func modelArtifactFormat(path string, root modelScanRoot) (string, bool) {
 	default:
 		return "", false
 	}
-	if ambiguous && !strongModelFileContext(path, root) && !semanticModelArtifactName(path) && !hasModelMetadataSidecar(path, root) {
+	if ambiguous && !admitAmbiguousModelArtifact(path, root, format) {
 		return "", false
 	}
 	if format == "safetensors" && isMLXPath(path, root) {
 		format = "mlx"
 	}
 	return format, true
+}
+
+// admitAmbiguousModelArtifact requires two independent signals outside known
+// model stores: an explicit model context and a meaningful artifact identity.
+// This keeps generic runtime payloads such as model.tflite and weights.bin from
+// being promoted to model rows merely because their basename contains "model"
+// or "weights". Specialized stores retain their established behavior because
+// the store itself supplies both ownership and model context.
+func admitAmbiguousModelArtifact(path string, root modelScanRoot, format string) bool {
+	if root.specialized {
+		return true
+	}
+	if knownEmbeddedModelPayloadPath(path) {
+		return false
+	}
+
+	explicitContext := strongModelFileContext(path, root) || hasModelMetadataSidecar(path, root)
+	if !explicitContext && scopedApplicationSemanticContext(root, path) {
+		explicitContext = true
+	}
+	if !explicitContext {
+		return false
+	}
+	identity, ok := deriveModelArtifactIdentity(path, root, format, false, "")
+	if !ok {
+		return false
+	}
+	return identity.trusted || modelLikeArtifactIdentity(identity.id)
+}
+
+// scopedApplicationSemanticContext allows a clearly named artifact directly
+// inside an application's support/container/resources tree. A cache root is
+// deliberately excluded: semantic filenames are common in browser and app
+// caches and do not establish that a user-manageable model is installed.
+func scopedApplicationSemanticContext(root modelScanRoot, path string) bool {
+	switch root.scope {
+	case modelScanScopeApplicationSupport, modelScanScopeContainer,
+		modelScanScopeGroupContainer, modelScanScopeAppResources:
+		return semanticModelArtifactName(path)
+	default:
+		return false
+	}
+}
+
+// knownEmbeddedModelPayloadPath identifies browser optimization-guide stores
+// observed to use opaque hash/version directory names for internal classifier
+// and on-device payloads. High-signal formats are unaffected because this
+// predicate is consulted only for ambiguous containers.
+func knownEmbeddedModelPayloadPath(path string) bool {
+	for _, part := range strings.Split(strings.ToLower(filepath.ToSlash(filepath.Clean(path))), "/") {
+		switch part {
+		case "optimization_guide_model_store", "optimizationguidepredictionmodels",
+			"optguideondevicemodel", "optguideondeviceclassifiermodel":
+			return true
+		}
+	}
+	return false
+}
+
+func modelLikeArtifactIdentity(value string) bool {
+	value = strings.TrimSpace(value)
+	if value == "" || genericModelArtifactStem(value) || genericModelDirectoryName(value) {
+		return false
+	}
+	if versionOnlyModelArtifactIdentity(value) {
+		return false
+	}
+	switch strings.ToLower(value) {
+	case "artifact", "blob", "cache", "data", "default", "payload", "resource", "resources", "runtime", "unknown":
+		return false
+	}
+
+	hasLetter := false
+	hexDigits := 0
+	opaqueHex := true
+	for _, r := range value {
+		if unicode.IsLetter(r) {
+			hasLetter = true
+		}
+		switch {
+		case r >= '0' && r <= '9', r >= 'a' && r <= 'f', r >= 'A' && r <= 'F':
+			hexDigits++
+		case r == '-', r == '_':
+			// Hashes and UUID-shaped cache keys commonly include separators.
+		default:
+			opaqueHex = false
+		}
+	}
+	if !hasLetter || (opaqueHex && hexDigits >= 12) {
+		return false
+	}
+	return true
+}
+
+// versionOnlyModelArtifactIdentity rejects cache/version directory names while
+// deliberately leaving ordinary versioned model names (for example,
+// whisper-v3 or qwen2.5) alone. Only a leading v/version prefix followed
+// exclusively by numeric components and separators qualifies.
+func versionOnlyModelArtifactIdentity(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var remainder string
+	switch {
+	case strings.HasPrefix(value, "version"):
+		remainder = strings.TrimPrefix(value, "version")
+	case len(value) > 1 && value[0] == 'v' &&
+		((value[1] >= '0' && value[1] <= '9') || strings.ContainsRune("-_. ", rune(value[1]))):
+		remainder = value[1:]
+	default:
+		return false
+	}
+	remainder = strings.TrimLeft(remainder, "-_. ")
+	if remainder == "" {
+		return false
+	}
+	hasDigit := false
+	for _, r := range remainder {
+		switch {
+		case unicode.IsDigit(r):
+			hasDigit = true
+		case strings.ContainsRune("-_. ", r):
+		default:
+			return false
+		}
+	}
+	return hasDigit
 }
 
 func strongModelFileContext(path string, root modelScanRoot) bool {
@@ -1388,11 +1525,15 @@ func (s *ContinuousDiscoveryService) modelArtifactOwner(path string, root modelS
 	if owner := ownerFromMacOSModelScope(path, root.path, root.scope); owner != "" {
 		return owner
 	}
-	for _, home := range s.homesToScan() {
-		for _, scopedRoot := range macOSLibraryModelScanRoots(home) {
-			if owner := ownerFromMacOSModelScope(path, scopedRoot.path, scopedRoot.scope); owner != "" {
-				return owner
-			}
+	ownershipRoots := root.macOSOwnershipRoots
+	if ownershipRoots == nil {
+		// Direct candidate callers do not pass through scan setup. Preserve their
+		// owner inference without rebuilding these roots on the scan hot path.
+		ownershipRoots = macOSLibraryModelScanRootsForHomes(s.homesToScan())
+	}
+	for _, scopedRoot := range ownershipRoots {
+		if owner := ownerFromMacOSModelScope(path, scopedRoot.path, scopedRoot.scope); owner != "" {
+			return owner
 		}
 	}
 	return ownerFromApplicationBundlePath(path)
@@ -1549,9 +1690,11 @@ func embeddedModelArtifactPath(path string, root modelScanRoot) bool {
 }
 
 func embeddedModelOwner(owner string) bool {
-	lower := strings.ToLower(owner)
-	for _, token := range []string{"chrome", "chromium", "edge", "firefox", "safari", "webex", "zoom", "teams", "slack", "discord"} {
-		if strings.Contains(lower, token) {
+	for _, word := range strings.FieldsFunc(strings.ToLower(owner), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsNumber(r)
+	}) {
+		switch word {
+		case "chrome", "chromium", "edge", "firefox", "safari", "webex", "zoom", "teams", "slack", "discord":
 			return true
 		}
 	}
@@ -1647,6 +1790,70 @@ func modelRelevancePriority(value string) int {
 	}
 }
 
+type modelArtifactIdentity struct {
+	id          string
+	key         string
+	provider    string
+	format      string
+	hfDirectory string
+	trusted     bool
+}
+
+// deriveModelArtifactIdentity is the single identity policy used by both
+// ambiguous-format admission and emitted candidates. The branch order is
+// significant: a configured (non-specialized) Hugging Face cache must retain
+// its repository identity instead of being reduced to a snapshot revision or
+// generic model basename.
+func deriveModelArtifactIdentity(
+	path string,
+	root modelScanRoot,
+	format string,
+	directory bool,
+	explicitID string,
+) (modelArtifactIdentity, bool) {
+	identity := modelArtifactIdentity{
+		id: explicitID, provider: root.provider, format: format,
+	}
+	if hfDir, hfID, ok := huggingFaceModelIdentity(path); ok {
+		identity.id = hfID
+		identity.key = "huggingface:" + hfDir
+		identity.provider = "huggingface"
+		identity.hfDirectory = hfDir
+		identity.trusted = true
+		if strings.HasPrefix(strings.ToLower(hfID), "mlx-community/") {
+			identity.format = "mlx"
+			identity.provider = "mlx"
+		}
+	} else if explicitID != "" {
+		identity.key = "ollama-manifest:" + path
+		identity.provider = "ollama"
+	} else if format == "mlx" || shouldAggregateWeightShards(path) {
+		identity.id = filepath.Base(filepath.Dir(path))
+		identity.key = "model-dir:" + filepath.Dir(path) + ":" + format
+		if format == "mlx" {
+			identity.provider = "mlx"
+		}
+	} else if genericModelArtifactStem(path) {
+		parentDir := filepath.Dir(path)
+		parent := filepath.Base(parentDir)
+		if filepath.Clean(parentDir) != filepath.Clean(root.path) && !genericModelDirectoryName(parent) {
+			identity.id = parent
+			identity.key = "model-dir:" + parentDir + ":" + format
+		} else {
+			identity.id = strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+			identity.key = "model-file:" + path
+		}
+	} else {
+		identity.id = strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+		identity.key = "model-file:" + path
+	}
+	if directory {
+		identity.id = strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
+		identity.key = "model-dir:" + path + ":" + identity.format
+	}
+	return identity, identity.id != ""
+}
+
 func (s *ContinuousDiscoveryService) modelArtifactCandidate(path string, root modelScanRoot, format string, directory bool, explicitID string) (modelFileAggregate, bool) {
 	// Follows cache snapshot symlinks. Weight tensors are never read; a bounded
 	// metadata prefix may be opened for self-describing containers such as GGUF.
@@ -1654,49 +1861,21 @@ func (s *ContinuousDiscoveryService) modelArtifactCandidate(path string, root mo
 	if err != nil || (directory && !info.IsDir()) || (!directory && !info.Mode().IsRegular()) {
 		return modelFileAggregate{}, false
 	}
-	id, key, provider := explicitID, "", root.provider
 	artifactKey := filepath.Clean(path)
 	if resolved, err := filepath.EvalSymlinks(path); err == nil {
 		artifactKey = filepath.Clean(resolved)
 	}
-	provenance := modelProvenanceHints{}
-	if hfDir, hfID, ok := huggingFaceModelIdentity(path); ok {
-		id, key, provider = hfID, "huggingface:"+hfDir, "huggingface"
-		provenance.References = []string{hfID}
-		provenance.HuggingFaceRepoIDs = []string{hfID}
-		provenance.Source = "hf_cache"
-		if strings.HasPrefix(strings.ToLower(hfID), "mlx-community/") {
-			format, provider = "mlx", "mlx"
-		}
-	} else if explicitID != "" {
-		key = "ollama-manifest:" + path
-		provider = "ollama"
-	} else if format == "mlx" || shouldAggregateWeightShards(path) {
-		id = filepath.Base(filepath.Dir(path))
-		key = "model-dir:" + filepath.Dir(path) + ":" + format
-		if format == "mlx" {
-			provider = "mlx"
-		}
-	} else if genericModelArtifactStem(path) {
-		parentDir := filepath.Dir(path)
-		parent := filepath.Base(parentDir)
-		if filepath.Clean(parentDir) != filepath.Clean(root.path) && !genericModelDirectoryName(parent) {
-			id = parent
-			key = "model-dir:" + parentDir + ":" + format
-		} else {
-			id = strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
-			key = "model-file:" + path
-		}
-	} else {
-		id = strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
-		key = "model-file:" + path
-	}
-	if directory {
-		id = strings.TrimSuffix(filepath.Base(path), filepath.Ext(path))
-		key = "model-dir:" + path + ":" + format
-	}
-	if id == "" {
+	identity, ok := deriveModelArtifactIdentity(path, root, format, directory, explicitID)
+	if !ok {
 		return modelFileAggregate{}, false
+	}
+	id, key, provider := identity.id, identity.key, identity.provider
+	format = identity.format
+	provenance := modelProvenanceHints{}
+	if identity.hfDirectory != "" {
+		provenance.References = []string{id}
+		provenance.HuggingFaceRepoIDs = []string{id}
+		provenance.Source = "hf_cache"
 	}
 	if !directory {
 		provenance = mergeModelProvenanceHints(provenance, modelArtifactProvenanceHints(path, format))

@@ -1293,6 +1293,23 @@ struct AIModelDiscoveryRow: Identifiable, Sendable, Hashable {
         }
     }
 
+    var hasLocalModelAPISignalWithoutDiscoveryConfidence: Bool {
+        signals.contains { signal in
+            signal.detector.trimmingCharacters(in: .whitespacesAndNewlines)
+                .caseInsensitiveCompare("model_api") == .orderedSame
+                && signal.model?.discoveryConfidence == nil
+        }
+    }
+
+    var hasModelClassificationMetadata: Bool {
+        signals.contains { signal in
+            guard let model = signal.model else { return false }
+            return model.discoveryConfidence != nil
+                || !model.ownerApplication.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || !model.relevance.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+    }
+
     /// New gateways report model-specific confidence. For display and older
     /// gateway compatibility, fall back to the strongest signal score.
     var effectiveDiscoveryConfidence: Double {
@@ -1349,27 +1366,49 @@ struct AIModelDiscoveryFilter: Sendable, Hashable {
     var modality: AIModelModalityFilter = .all
     var relevance: AIModelRelevanceFilter = .all
 
+    /// Older gateways do not provide enough metadata to separate primary
+    /// models from embedded artifacts. Match the TUI by preserving the
+    /// historical all-model scope only when the entire snapshot is legacy.
+    /// Explicit modality/relevance choices remain active because `includes`
+    /// applies them even when `showAllModels` is true.
+    func preservingLegacySnapshot(_ rows: [AIModelDiscoveryRow]) -> Self {
+        guard !rows.isEmpty,
+              !rows.contains(where: \.hasModelClassificationMetadata)
+        else { return self }
+        var compatible = self
+        compatible.showAllModels = true
+        return compatible
+    }
+
     func includes(_ row: AIModelDiscoveryRow) -> Bool {
         if !showAllModels {
-            if let reportedConfidence = row.reportedDiscoveryConfidence {
-                guard reportedConfidence >= Self.focusedMinimumConfidence else { return false }
-            } else if !row.hasLocalModelAPISignal {
-                guard row.maxConfidence >= Self.focusedMinimumConfidence else { return false }
-            }
-            // The recommended classification scope applies only while neither
-            // picker expresses user intent. Once either picker is explicit,
-            // its `.all` peer means unrestricted, so choosing Speech alone can
-            // reveal supporting speech models such as Superwhisper.
-            if modality == .all, relevance == .all {
-                let effectiveModality = row.effectiveModality
-                if effectiveModality != .generative,
-                   effectiveModality != .unknown {
-                    return false
+            let unqualifiedLocalAPI = row.hasLocalModelAPISignalWithoutDiscoveryConfidence
+            if !unqualifiedLocalAPI {
+                if let reportedConfidence = row.reportedDiscoveryConfidence {
+                    guard reportedConfidence >= Self.focusedMinimumConfidence else { return false }
+                } else if !row.hasLocalModelAPISignal {
+                    guard row.maxConfidence >= Self.focusedMinimumConfidence else { return false }
                 }
-                let effectiveRelevance = row.effectiveRelevance
-                if effectiveRelevance != .primary,
-                   effectiveRelevance != .unknown {
-                    return false
+
+                // The recommended classification scope applies only while neither
+                // picker expresses user intent. Once either picker is explicit,
+                // its `.all` peer means unrestricted, so choosing Speech alone can
+                // reveal supporting speech models such as Superwhisper.
+                if modality == .all, relevance == .all {
+                    switch row.effectiveRelevance {
+                    case .primary:
+                        break
+                    case .supporting:
+                        let ownerAttributed = !row.ownerApplications.isEmpty
+                        let supportingModalities: Set<AIModelModality> = [
+                            .speech, .audio, .vision, .embedding,
+                        ]
+                        guard ownerAttributed,
+                              supportingModalities.contains(row.effectiveModality)
+                        else { return false }
+                    case .embedded, .unknown:
+                        return false
+                    }
                 }
             }
         }

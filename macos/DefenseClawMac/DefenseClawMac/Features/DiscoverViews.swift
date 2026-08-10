@@ -485,7 +485,7 @@ struct AIDiscoveryView: View {
             showAllModels: showAllModels,
             modality: modelModality,
             relevance: modelRelevance
-        )
+        ).preservingLegacySnapshot(snapshot.modelRows)
     }
 
     private var searchMatchedModels: [AIModelDiscoveryRow] {
@@ -725,7 +725,7 @@ struct AIDiscoveryView: View {
                 modelRelevanceRaw = AIModelRelevanceFilter.all.rawValue
             }
             .buttonStyle(.borderless)
-            .accessibilityHint("Shows low-confidence, supporting, embedded, and non-generative models")
+            .accessibilityHint("Shows embedded, unknown, low-confidence, and other non-recommended models")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 7)

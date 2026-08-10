@@ -21,6 +21,49 @@ from typing import Any, Literal
 
 AIDiscoveryState = Literal["new", "changed", "active", "seen", "gone"]
 
+AI_MODEL_RECOMMENDED_MIN_CONFIDENCE = 0.8
+_SUPPORTING_MODEL_MODALITIES = frozenset({"speech", "audio", "vision", "embedding"})
+
+
+def _classify_model_modality(value: str) -> str:
+    normalized = value.strip().lower().replace("-", "_")
+    aliases = {
+        "text": "generative",
+        "chat": "generative",
+        "language": "generative",
+        "llm": "generative",
+        "speech_to_text": "speech",
+        "stt": "speech",
+        "transcription": "speech",
+        "image": "vision",
+        "computer_vision": "vision",
+        "embeddings": "embedding",
+    }
+    normalized = aliases.get(normalized, normalized)
+    if normalized in {"generative", "speech", "vision", "embedding", "audio"}:
+        return normalized
+    return "unknown"
+
+
+def _classify_model_relevance(value: str) -> str:
+    normalized = value.strip().lower()
+    if normalized in {"primary", "supporting", "embedded"}:
+        return normalized
+    return "unknown"
+
+
+def _unique_model_values(values: Sequence[str]) -> tuple[str, ...]:
+    seen: set[str] = set()
+    result: list[str] = []
+    for value in values:
+        cleaned = value.strip()
+        key = cleaned.casefold()
+        if not cleaned or key in seen:
+            continue
+        seen.add(key)
+        result.append(cleaned)
+    return tuple(result)
+
 
 def _parse_datetime(value: Any) -> datetime | None:
     if isinstance(value, datetime):
@@ -493,6 +536,142 @@ class AIDiscoveryRow:
             return ""
         return self.model_provenance.derivation_label
 
+    @property
+    def model_owners(self) -> tuple[str, ...]:
+        return _unique_model_values(
+            tuple(
+                signal.model.owner_application
+                for signal in self.signals
+                if signal.model is not None
+            )
+        )
+
+    @property
+    def model_modalities(self) -> tuple[str, ...]:
+        classified = _unique_model_values(
+            tuple(
+                _classify_model_modality(signal.model.modality)
+                for signal in self.signals
+                if signal.model is not None
+            )
+        )
+        known = tuple(value for value in classified if value != "unknown")
+        return known or ("unknown",)
+
+    @property
+    def model_relevances(self) -> tuple[str, ...]:
+        classified = _unique_model_values(
+            tuple(
+                _classify_model_relevance(signal.model.relevance)
+                for signal in self.signals
+                if signal.model is not None
+            )
+        )
+        known = tuple(value for value in classified if value != "unknown")
+        return known or ("unknown",)
+
+    @property
+    def effective_model_modality(self) -> str:
+        preference = ("generative", "speech", "vision", "embedding", "audio", "unknown")
+        return next(
+            (value for value in preference if value in self.model_modalities),
+            "unknown",
+        )
+
+    @property
+    def effective_model_relevance(self) -> str:
+        preference = ("primary", "supporting", "embedded", "unknown")
+        return next(
+            (value for value in preference if value in self.model_relevances),
+            "unknown",
+        )
+
+    @property
+    def reported_model_discovery_confidence(self) -> float | None:
+        reported = tuple(
+            signal.model.discovery_confidence
+            for signal in self.signals
+            if signal.model is not None
+            and signal.model.discovery_confidence is not None
+        )
+        return max(reported) if reported else None
+
+    @property
+    def max_signal_confidence(self) -> float:
+        return max((signal.confidence for signal in self.signals), default=0.0)
+
+    @property
+    def has_local_model_api_signal(self) -> bool:
+        return any(signal.detector.strip().casefold() == "model_api" for signal in self.signals)
+
+    @property
+    def has_local_model_api_signal_without_discovery_confidence(self) -> bool:
+        return any(
+            signal.detector.strip().casefold() == "model_api"
+            and signal.model is not None
+            and signal.model.discovery_confidence is None
+            for signal in self.signals
+        )
+
+    @property
+    def has_model_classification_metadata(self) -> bool:
+        return any(
+            signal.model is not None
+            and (
+                signal.model.discovery_confidence is not None
+                or bool(signal.model.owner_application.strip())
+                or bool(signal.model.relevance.strip())
+            )
+            for signal in self.signals
+        )
+
+    @property
+    def is_recommended_model(self) -> bool:
+        # Direct API enumeration is actionable even when another detector
+        # groups a low-confidence or embedded artifact under the same ID.
+        # The API signal itself must omit model-specific confidence; an
+        # explicit zero remains subject to the normal confidence gate.
+        if self.has_local_model_api_signal_without_discovery_confidence:
+            return True
+
+        reported = self.reported_model_discovery_confidence
+        if reported is not None:
+            if reported < AI_MODEL_RECOMMENDED_MIN_CONFIDENCE:
+                return False
+        elif not self.has_local_model_api_signal:
+            if self.max_signal_confidence < AI_MODEL_RECOMMENDED_MIN_CONFIDENCE:
+                return False
+
+        relevance = self.effective_model_relevance
+        if relevance == "primary":
+            return True
+        return (
+            relevance == "supporting"
+            and bool(self.model_owners)
+            and self.effective_model_modality in _SUPPORTING_MODEL_MODALITIES
+        )
+
+    @property
+    def model_owner_label(self) -> str:
+        return format_csv_truncated(self.model_owners, 2) or "—"
+
+    @property
+    def model_modality_label(self) -> str:
+        return format_csv_truncated(tuple(value.title() for value in self.model_modalities), 2)
+
+    @property
+    def model_relevance_label(self) -> str:
+        return format_csv_truncated(tuple(value.title() for value in self.model_relevances), 2)
+
+    @property
+    def model_confidence_label(self) -> str:
+        reported = self.reported_model_discovery_confidence
+        if reported is not None:
+            return f"{reported:.0%}"
+        if self.has_local_model_api_signal:
+            return "API"
+        return f"{self.max_signal_confidence:.0%} signal"
+
 
 @dataclass(frozen=True)
 class AIDiscoveryCommandIntent:
@@ -533,6 +712,7 @@ class AIDiscoveryPanelModel:
         self.height = 0
         self.filter_text = ""
         self.filtering = False
+        self.show_all_models = False
         self.detail_open = False
         self.detail_row: AIDiscoveryRow | None = None
         self.message = ""
@@ -559,6 +739,40 @@ class AIDiscoveryPanelModel:
         self.filter_text = ""
         self.filtering = False
         self._apply_filter()
+
+    def recommended_model_rows(self) -> tuple[AIDiscoveryRow, ...]:
+        # Compatible gateways did not report classification metadata. Preserve
+        # their historical behavior rather than hiding every model because the
+        # TUI cannot distinguish a primary model from an embedded artifact.
+        if not any(row.has_model_classification_metadata for row in self.model_rows):
+            return self.model_rows
+        return tuple(row for row in self.model_rows if row.is_recommended_model)
+
+    @property
+    def hidden_model_count(self) -> int:
+        return max(len(self.model_rows) - len(self.recommended_model_rows()), 0)
+
+    def model_scope_label(self) -> str:
+        if self.show_all_models:
+            scope = "ALL"
+            hidden = ""
+        else:
+            scope = "RECOMMENDED"
+            hidden_count = self.hidden_model_count
+            hidden = f", {hidden_count} hidden" if hidden_count else ""
+        filtered = f"{len(self.filtered_models)} of {len(self.model_rows)}"
+        return f"LOCAL MODELS — {scope} ({filtered}{hidden})"
+
+    def toggle_model_scope(self) -> bool:
+        previous_table = self.active_table
+        self.show_all_models = not self.show_all_models
+        self._apply_filter()
+        if self.detail_row is not None and self.detail_row.model:
+            visible_ids = {row.model.casefold() for row in self.filtered_models}
+            if self.detail_row.model.casefold() not in visible_ids:
+                self.detail_open = False
+                self.detail_row = None
+        return self.active_table != previous_table
 
     def selected(self) -> AIDiscoveryRow | None:
         if self.active_table == "models":
@@ -680,6 +894,20 @@ class AIDiscoveryPanelModel:
                 hint=f"{selected} table selected.",
                 table_changed=changed,
             )
+        if key == "a":
+            table_changed = self.toggle_model_scope()
+            if self.show_all_models:
+                hint = f"Showing all {len(self.model_rows)} local models."
+            else:
+                hint = (
+                    f"Showing {len(self.filtered_models)} recommended local models; "
+                    f"{self.hidden_model_count} hidden."
+                )
+            return AIDiscoveryPanelAction(
+                True,
+                hint=hint,
+                table_changed=table_changed,
+            )
         if key == "esc" and self.detail_open:
             self.toggle_detail()
             return AIDiscoveryPanelAction(True, detail_closed=True)
@@ -732,6 +960,17 @@ class AIDiscoveryPanelModel:
             return "No matching signals."
         if not self.rows and not self.model_rows:
             return "No AI usage detected yet. Run: defenseclaw agent discovery scan"
+        if (
+            not self.rows
+            and self.model_rows
+            and not self.filtered_models
+            and not self.show_all_models
+        ):
+            return (
+                "No recommended local models. "
+                f"{self.hidden_model_count} non-recommended local models are hidden; "
+                "press a or click Show all models to review them."
+            )
         return ""
 
     def header_parts(self) -> tuple[str, ...]:
@@ -881,10 +1120,10 @@ class AIDiscoveryPanelModel:
         return (
             "State",
             "Model",
-            "Country",
-            "Publisher",
-            "Root",
-            "Derivation",
+            "Owner",
+            "Modality",
+            "Relevance",
+            "Confidence",
             "Status",
             "Format",
         )
@@ -894,10 +1133,10 @@ class AIDiscoveryPanelModel:
             (
                 row.state,
                 row.model,
-                row.model_country_label,
-                row.model_publisher,
-                row.model_root,
-                row.model_derivation,
+                row.model_owner_label,
+                row.model_modality_label,
+                row.model_relevance_label,
+                row.model_confidence_label,
                 format_csv_truncated(row.model_statuses, 2),
                 format_csv_truncated(row.model_formats, 2),
             )
@@ -982,9 +1221,17 @@ class AIDiscoveryPanelModel:
         self._apply_filter()
 
     def _apply_filter(self) -> None:
+        selected_model_id = (
+            self.selected_model().model.casefold()
+            if self.selected_model() is not None
+            else ""
+        )
+        visible_models = (
+            self.model_rows if self.show_all_models else self.recommended_model_rows()
+        )
         if not self.filter_text:
             self.filtered = self.rows
-            self.filtered_models = self.model_rows
+            self.filtered_models = visible_models
         else:
             query = self.filter_text.lower()
 
@@ -1035,12 +1282,23 @@ class AIDiscoveryPanelModel:
                 return query in " ".join(parts).lower()
 
             self.filtered = tuple(row for row in self.rows if matches(row))
-            self.filtered_models = tuple(row for row in self.model_rows if matches(row))
+            self.filtered_models = tuple(row for row in visible_models if matches(row))
         self.cursor = max(0, min(self.cursor, max(len(self.filtered) - 1, 0)))
-        self.model_cursor = max(
-            0,
-            min(self.model_cursor, max(len(self.filtered_models) - 1, 0)),
+        selected_model_index = next(
+            (
+                index
+                for index, row in enumerate(self.filtered_models)
+                if row.model.casefold() == selected_model_id
+            ),
+            None,
         )
+        if selected_model_index is not None:
+            self.model_cursor = selected_model_index
+        else:
+            self.model_cursor = max(
+                0,
+                min(self.model_cursor, max(len(self.filtered_models) - 1, 0)),
+            )
         if self.active_table == "models" and not self.filtered_models and self.filtered:
             self.active_table = "agents"
         elif self.active_table == "agents" and not self.filtered and self.filtered_models:

@@ -209,6 +209,8 @@ These list/inventory verbs read across the full active roster:
 continuous scanner is a separate sidecar surface and is the one that inventories
 local model APIs, known model caches, and standalone model files.
 
+Enhanced mode expands the bounded roots searched for models; it does not relax what qualifies as a model. Outside recognized model stores, ambiguous ONNX/ORT, TFLite, PyTorch/checkpoint, and generic binary artifacts require explicit model context plus a meaningful, non-opaque identity. Known Chrome Optimization Guide cache payloads and opaque hash/version identities are suppressed, while high-signal formats and recognized model stores retain their established behavior.
+
 | Command | Use it for |
 | --- | --- |
 | `defenseclaw agent discover [--refresh] [--no-cache] [--json] [--emit-otel/--no-emit-otel]` | Inspect known connector configs and binaries without requiring the gateway. This does not run the continuous local-model scan. |

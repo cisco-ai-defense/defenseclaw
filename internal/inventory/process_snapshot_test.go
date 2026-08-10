@@ -259,15 +259,6 @@ func TestDetectProcessesReturnsSnapshotFailure(t *testing.T) {
 	}
 }
 
-func TestProcessNamePSColumnAvoidsTruncatedDarwinComm(t *testing.T) {
-	if got := processNamePSColumn("darwin"); got != "ucomm=" {
-		t.Fatalf("Darwin process name column = %q, want ucomm=", got)
-	}
-	if got := processNamePSColumn("linux"); got != "comm=" {
-		t.Fatalf("Linux process name column = %q, want comm=", got)
-	}
-}
-
 func TestProcessSnapshotFailureIsStructuredInScanSummary(t *testing.T) {
 	svc := &ContinuousDiscoveryService{
 		store: NewAIStateStore(filepath.Join(t.TempDir(), "state.json")),

@@ -277,19 +277,16 @@ def test_ai_discovery_groups_and_details_local_models() -> None:
     assert panel.model_table_columns() == (
         "State",
         "Model",
-        "Country",
-        "Publisher",
-        "Root",
-        "Derivation",
+        "Owner",
+        "Modality",
+        "Relevance",
+        "Confidence",
         "Status",
         "Format",
     )
     model_cells = panel.model_table_rows()[0]
     assert model_cells[1] == "Qwen3-0.6B-GGUF"
-    assert model_cells[2] == "CN 🇨🇳"
-    assert model_cells[3] == "Alibaba Cloud"
-    assert model_cells[4] == "Qwen/Qwen3-0.6B"
-    assert model_cells[5] == "quantized · Q4_K_M"
+    assert model_cells[2:6] == ("—", "Unknown", "Unknown", "API")
 
     panel.set_filter("qwen3")
     assert panel.filtered == ()
@@ -304,6 +301,249 @@ def test_ai_discovery_groups_and_details_local_models() -> None:
     assert "status=loaded" in detail
     assert "recipe=llamacpp" in detail
     assert "runtime: pid=4321" in detail
+
+
+def test_ai_discovery_recommends_actionable_models_and_can_show_all_artifacts() -> None:
+    def model_signal(
+        model_id: str,
+        *,
+        owner: str = "",
+        modality: str = "",
+        relevance: str = "",
+        confidence: float | None = None,
+        detector: str = "model_file",
+        signal_confidence: float = 0.9,
+        model_format: str = "",
+    ) -> AIUsageSignal:
+        return AIUsageSignal(
+            signal_id=model_id,
+            state="seen",
+            category="local_model",
+            product="Local Model Artifact",
+            detector=detector,
+            confidence=signal_confidence,
+            model=AIUsageModel(
+                id=model_id,
+                owner_application=owner,
+                modality=modality,
+                relevance=relevance,
+                discovery_confidence=confidence,
+                format=model_format,
+            ),
+        )
+
+    panel = AIDiscoveryPanelModel()
+    panel.set_snapshot(
+        AIUsageSnapshot(
+            enabled=True,
+            signals=(
+                model_signal(
+                    "Qwen3.5-4B-Q4_K_M",
+                    owner="Meetily",
+                    modality="generative",
+                    relevance="primary",
+                    confidence=0.95,
+                    model_format="gguf",
+                ),
+                model_signal(
+                    "SpeakerEmbedder",
+                    owner="Superwhisper",
+                    modality="speech",
+                    relevance="supporting",
+                    confidence=0.95,
+                    model_format="coreml",
+                ),
+                model_signal(
+                    "vad-v2",
+                    owner="Superwhisper",
+                    modality="audio",
+                    relevance="supporting",
+                    confidence=0.8,
+                    model_format="onnx",
+                ),
+                model_signal(
+                    "ownerless-speech",
+                    modality="speech",
+                    relevance="supporting",
+                    confidence=0.95,
+                ),
+                model_signal(
+                    "39D6225B0612C5CC",
+                    owner="Chrome",
+                    modality="unknown",
+                    relevance="embedded",
+                    confidence=0.8,
+                    model_format="tflite",
+                ),
+                model_signal(
+                    "2026.2.12.1554",
+                    owner="Chrome",
+                    modality="unknown",
+                    relevance="embedded",
+                    confidence=0.8,
+                    model_format="bin",
+                ),
+                model_signal(
+                    "unknown-helper",
+                    owner="Cisco Spark",
+                    modality="unknown",
+                    relevance="unknown",
+                    confidence=0.9,
+                ),
+                model_signal(
+                    "low-primary",
+                    owner="Meetily",
+                    modality="generative",
+                    relevance="primary",
+                    confidence=0.79,
+                ),
+                model_signal(
+                    "api-explicit-zero",
+                    owner="Meetily",
+                    modality="generative",
+                    relevance="primary",
+                    confidence=0,
+                    detector="model_api",
+                    signal_confidence=0.2,
+                ),
+                model_signal(
+                    "qwen3.5:9b-mlx",
+                    detector="model_api",
+                    signal_confidence=0.2,
+                    model_format="safetensors",
+                ),
+                model_signal(
+                    "mixed-api-low",
+                    detector="model_api",
+                    signal_confidence=0.2,
+                ),
+                model_signal(
+                    "mixed-api-low",
+                    owner="Chrome",
+                    modality="unknown",
+                    relevance="embedded",
+                    confidence=0.79,
+                    detector="model_file",
+                    signal_confidence=0.79,
+                ),
+            ),
+        )
+    )
+
+    recommended_ids = {row.model for row in panel.filtered_models}
+    assert recommended_ids == {
+        "Qwen3.5-4B-Q4_K_M",
+        "SpeakerEmbedder",
+        "vad-v2",
+        "qwen3.5:9b-mlx",
+        "mixed-api-low",
+    }
+    assert panel.hidden_model_count == 6
+    assert panel.model_scope_label() == "LOCAL MODELS — RECOMMENDED (5 of 11, 6 hidden)"
+
+    mixed_row = next(row for row in panel.filtered_models if row.model == "mixed-api-low")
+    assert mixed_row.reported_model_discovery_confidence == 0.79
+    assert mixed_row.has_local_model_api_signal_without_discovery_confidence is True
+    assert mixed_row.effective_model_relevance == "embedded"
+
+    speech_row = next(row for row in panel.filtered_models if row.model == "SpeakerEmbedder")
+    assert speech_row.model_owner_label == "Superwhisper"
+    assert speech_row.model_modality_label == "Speech"
+    assert speech_row.model_relevance_label == "Supporting"
+    assert speech_row.model_confidence_label == "95%"
+
+    panel.set_model_cursor(panel.filtered_models.index(speech_row))
+    action = panel.handle_key("a")
+    assert action.handled is True
+    assert panel.show_all_models is True
+    assert len(panel.filtered_models) == 11
+    assert panel.selected_model() is not None
+    assert panel.selected_model().model == "SpeakerEmbedder"
+    assert panel.model_scope_label() == "LOCAL MODELS — ALL (11 of 11)"
+
+    panel.set_filter("chrome")
+    assert {row.model for row in panel.filtered_models} == {
+        "39D6225B0612C5CC",
+        "2026.2.12.1554",
+        "mixed-api-low",
+    }
+    panel.set_model_cursor(0)
+    panel.toggle_detail()
+    assert "relevance=embedded" in "\n".join(panel.detail_lines())
+
+    panel.clear_filter()
+    action = panel.handle_key("a")
+    assert action.handled is True
+    assert panel.show_all_models is False
+    assert {row.model for row in panel.filtered_models} == recommended_ids
+
+
+def test_ai_discovery_empty_recommended_scope_uses_neutral_hidden_copy() -> None:
+    panel = AIDiscoveryPanelModel()
+    panel.set_snapshot(
+        AIUsageSnapshot(
+            enabled=True,
+            signals=(
+                AIUsageSignal(
+                    signal_id="embedded",
+                    state="seen",
+                    category="local_model",
+                    detector="model_file",
+                    confidence=0.9,
+                    model=AIUsageModel(
+                        id="39D6225B0612C5CC",
+                        owner_application="Chrome",
+                        modality="unknown",
+                        relevance="embedded",
+                        discovery_confidence=0.8,
+                    ),
+                ),
+                AIUsageSignal(
+                    signal_id="unknown",
+                    state="seen",
+                    category="local_model",
+                    detector="model_file",
+                    confidence=0.9,
+                    model=AIUsageModel(
+                        id="2026.2.12.1554",
+                        owner_application="Chrome",
+                        modality="unknown",
+                        relevance="unknown",
+                        discovery_confidence=0.8,
+                    ),
+                ),
+            ),
+        )
+    )
+
+    assert panel.filtered_models == ()
+    assert panel.empty_state() == (
+        "No recommended local models. "
+        "2 non-recommended local models are hidden; "
+        "press a or click Show all models to review them."
+    )
+
+
+def test_ai_discovery_legacy_modality_only_snapshot_remains_compatible() -> None:
+    panel = AIDiscoveryPanelModel()
+    panel.set_snapshot(
+        AIUsageSnapshot(
+            enabled=True,
+            signals=(
+                AIUsageSignal(
+                    signal_id="legacy-model",
+                    state="seen",
+                    category="local_model",
+                    detector="model_file",
+                    confidence=0.9,
+                    model=AIUsageModel(id="legacy-llm", modality="text"),
+                ),
+            ),
+        )
+    )
+
+    assert [row.model for row in panel.filtered_models] == ["legacy-llm"]
+    assert panel.hidden_model_count == 0
 
 
 def test_ai_discovery_detail_renders_ambiguous_multi_base_root_label() -> None:
