@@ -5279,7 +5279,9 @@ class DefenseClawTUI(App[None]):
             self._submit_command_text("defenseclaw agent usage --json")
             return
         if button_id == "ai-model-scope":
-            self._apply_ai_discovery_action(self.ai_discovery_model.handle_key("a"))
+            self._apply_ai_discovery_action(
+                self.ai_discovery_model.toggle_model_scope_action()
+            )
             return
         if button_id == "ai-open-detail":
             if self.ai_discovery_model.selected() is None:

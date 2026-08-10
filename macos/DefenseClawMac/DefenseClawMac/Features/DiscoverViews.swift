@@ -885,14 +885,10 @@ struct AIDiscoveryView: View {
             }
             .width(82)
             TableColumn("Confidence") { (row: AIModelDiscoveryRow) in
-                let percent = AIConfidence.percent(
-                    row.effectiveDiscoveryConfidence,
-                    roundingRule: .toNearestOrAwayFromZero
-                )
-                Text("\(percent)%")
+                Text(row.confidenceDisplayLabel)
                     .font(.caption.monospacedDigit())
                     .foregroundStyle(.secondary)
-                    .accessibilityLabel("Discovery confidence \(percent) percent")
+                    .accessibilityLabel(row.confidenceAccessibilityLabel)
             }
             .width(84)
             TableColumn("Status") { (row: AIModelDiscoveryRow) in
@@ -967,10 +963,6 @@ struct AIDiscoveryView: View {
     private func modelInspector(_ row: AIModelDiscoveryRow) -> some View {
         let provenance = row.provenance
         let country = provenance?.countryDisplay ?? ""
-        let discoveryConfidence = AIConfidence.percent(
-            row.effectiveDiscoveryConfidence,
-            roundingRule: .toNearestOrAwayFromZero
-        )
         let provenancePairs: [(String, String)]
         if let provenance {
             provenancePairs = [
@@ -997,7 +989,7 @@ struct AIDiscoveryView: View {
             ("Owner application", row.ownerApplications.joined(separator: ", ").nonEmpty ?? "Unknown"),
             ("Modality", row.modalities.map(\.displayName).joined(separator: ", ")),
             ("Relevance", row.relevances.map(\.displayName).joined(separator: ", ")),
-            ("Discovery confidence", "\(discoveryConfidence)%"),
+            ("Confidence", row.confidenceDisplayLabel),
             ("Status", row.statuses.joined(separator: ", ")),
             ("Format", row.formats.joined(separator: ", ")),
             ("Runtime / provider", row.providers.joined(separator: ", ")),

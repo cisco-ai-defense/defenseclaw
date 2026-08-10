@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from defenseclaw.tui.panels.ai_discovery import (
     AIDiscoveryPanelModel,
     AIUsageComponent,
@@ -544,6 +545,40 @@ def test_ai_discovery_legacy_modality_only_snapshot_remains_compatible() -> None
 
     assert [row.model for row in panel.filtered_models] == ["legacy-llm"]
     assert panel.hidden_model_count == 0
+
+
+@pytest.mark.parametrize(
+    ("raw_modality", "expected"),
+    (
+        ("speech_to_text", "speech"),
+        (" speech-to-text ", "speech"),
+        ("computer_vision", "vision"),
+        ("computer-vision", "vision"),
+        ("speech-to_text", "unknown"),
+    ),
+)
+def test_ai_discovery_modality_aliases_match_macos_classifier(
+    raw_modality: str,
+    expected: str,
+) -> None:
+    panel = AIDiscoveryPanelModel()
+    panel.set_snapshot(
+        AIUsageSnapshot(
+            enabled=True,
+            signals=(
+                AIUsageSignal(
+                    signal_id="alias",
+                    state="seen",
+                    category="local_model",
+                    detector="model_file",
+                    confidence=0.9,
+                    model=AIUsageModel(id="alias-model", modality=raw_modality),
+                ),
+            ),
+        )
+    )
+
+    assert panel.model_rows[0].effective_model_modality == expected
 
 
 def test_ai_discovery_detail_renders_ambiguous_multi_base_root_label() -> None:

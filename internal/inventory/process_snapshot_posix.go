@@ -283,6 +283,10 @@ func darwinExecutableBasename(ctx context.Context, commandLine string, executabl
 	if commandLine == "" {
 		return ""
 	}
+	commandLine = stripMatchingDarwinCommandParentheses(commandLine)
+	if commandLine == "" {
+		return ""
+	}
 	if quoted, ok := quotedFirstCommandArgument(commandLine); ok {
 		if ctx.Err() != nil {
 			return ""
@@ -307,6 +311,31 @@ func darwinExecutableBasename(ctx context.Context, commandLine string, executabl
 		return ""
 	}
 	return normalizedExecutableBasename(firstCommandToken(commandLine))
+}
+
+func stripMatchingDarwinCommandParentheses(commandLine string) string {
+	if len(commandLine) < 2 || commandLine[0] != '(' {
+		return commandLine
+	}
+	depth := 0
+	for offset := 0; offset < len(commandLine); offset++ {
+		switch commandLine[offset] {
+		case '(':
+			depth++
+		case ')':
+			depth--
+			if depth == 0 {
+				if offset+1 < len(commandLine) && !isPSWhitespace(commandLine[offset+1]) {
+					return commandLine
+				}
+				return strings.TrimSpace(commandLine[1:offset] + commandLine[offset+1:])
+			}
+			if depth < 0 {
+				return commandLine
+			}
+		}
+	}
+	return commandLine
 }
 
 func firstExecutableCommandPrefix(ctx context.Context, commandLine string, executable func(string) bool) string {

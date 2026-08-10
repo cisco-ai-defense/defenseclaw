@@ -26,17 +26,19 @@ _SUPPORTING_MODEL_MODALITIES = frozenset({"speech", "audio", "vision", "embeddin
 
 
 def _classify_model_modality(value: str) -> str:
-    normalized = value.strip().lower().replace("-", "_")
+    normalized = value.strip().lower()
     aliases = {
         "text": "generative",
         "chat": "generative",
         "language": "generative",
         "llm": "generative",
         "speech_to_text": "speech",
+        "speech-to-text": "speech",
         "stt": "speech",
         "transcription": "speech",
         "image": "vision",
         "computer_vision": "vision",
+        "computer-vision": "vision",
         "embeddings": "embedding",
     }
     normalized = aliases.get(normalized, normalized)
@@ -635,12 +637,17 @@ class AIDiscoveryRow:
             return True
 
         reported = self.reported_model_discovery_confidence
-        if reported is not None:
-            if reported < AI_MODEL_RECOMMENDED_MIN_CONFIDENCE:
-                return False
-        elif not self.has_local_model_api_signal:
-            if self.max_signal_confidence < AI_MODEL_RECOMMENDED_MIN_CONFIDENCE:
-                return False
+        if (
+            reported is not None
+            and reported < AI_MODEL_RECOMMENDED_MIN_CONFIDENCE
+        ):
+            return False
+        if (
+            reported is None
+            and not self.has_local_model_api_signal
+            and self.max_signal_confidence < AI_MODEL_RECOMMENDED_MIN_CONFIDENCE
+        ):
+            return False
 
         relevance = self.effective_model_relevance
         if relevance == "primary":
@@ -895,19 +902,7 @@ class AIDiscoveryPanelModel:
                 table_changed=changed,
             )
         if key == "a":
-            table_changed = self.toggle_model_scope()
-            if self.show_all_models:
-                hint = f"Showing all {len(self.model_rows)} local models."
-            else:
-                hint = (
-                    f"Showing {len(self.filtered_models)} recommended local models; "
-                    f"{self.hidden_model_count} hidden."
-                )
-            return AIDiscoveryPanelAction(
-                True,
-                hint=hint,
-                table_changed=table_changed,
-            )
+            return self.toggle_model_scope_action()
         if key == "esc" and self.detail_open:
             self.toggle_detail()
             return AIDiscoveryPanelAction(True, detail_closed=True)
@@ -932,6 +927,23 @@ class AIDiscoveryPanelModel:
                 hint="Type to filter products and models. Enter applies; Esc clears.",
             )
         return AIDiscoveryPanelAction(False)
+
+    def toggle_model_scope_action(self) -> AIDiscoveryPanelAction:
+        """Toggle model scope independently of keyboard filter input."""
+
+        table_changed = self.toggle_model_scope()
+        if self.show_all_models:
+            hint = f"Showing all {len(self.model_rows)} local models."
+        else:
+            hint = (
+                f"Showing {len(self.filtered_models)} recommended local models; "
+                f"{self.hidden_model_count} hidden."
+            )
+        return AIDiscoveryPanelAction(
+            True,
+            hint=hint,
+            table_changed=table_changed,
+        )
 
     def _handle_filter_key(self, key: str) -> AIDiscoveryPanelAction:
         if key == "enter":

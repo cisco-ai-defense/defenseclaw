@@ -323,7 +323,7 @@ func (s *ContinuousDiscoveryService) detectModelFilesWithOutcome(ctx context.Con
 							return filepath.SkipAll
 						}
 						seenPaths[path] = struct{}{}
-						if candidate, ok := s.modelArtifactCandidate(path, root, "coreml", true, ""); ok {
+						if candidate, ok := s.modelArtifactCandidate(path, root, "coreml", true, "", nil); ok {
 							addModelFileAggregate(pageAggregates, &pageOrder, candidate)
 							matched++
 						}
@@ -347,9 +347,10 @@ func (s *ContinuousDiscoveryService) detectModelFilesWithOutcome(ctx context.Con
 			modelID, isManifest := ollamaManifestModelID(path)
 			isManifest = isManifest && isOllamaStorePath(path, root)
 			format := ""
+			var admittedIdentity *modelArtifactIdentity
 			if !isManifest {
 				var formatOK bool
-				format, formatOK = modelArtifactFormat(path, root)
+				format, admittedIdentity, formatOK = modelArtifactFormat(path, root)
 				if !formatOK {
 					return nil
 				}
@@ -371,7 +372,7 @@ func (s *ContinuousDiscoveryService) detectModelFilesWithOutcome(ctx context.Con
 					rootErrorCount++
 					return nil
 				}
-				candidate, candidateOK := s.modelArtifactCandidate(path, root, "ollama", false, modelID)
+				candidate, candidateOK := s.modelArtifactCandidate(path, root, "ollama", false, modelID, nil)
 				if candidateOK && manifestOK {
 					candidate.evidence[0].ValueHash = manifestHash
 					candidate.provider = "ollama"
@@ -387,7 +388,7 @@ func (s *ContinuousDiscoveryService) detectModelFilesWithOutcome(ctx context.Con
 				return nil
 			}
 
-			candidate, ok := s.modelArtifactCandidate(path, root, format, false, "")
+			candidate, ok := s.modelArtifactCandidate(path, root, format, false, "", admittedIdentity)
 			if ok {
 				addModelFileAggregate(pageAggregates, &pageOrder, candidate)
 				matched++
@@ -1242,9 +1243,10 @@ func isMacOSHomeLibrary(path string, homes []string) bool {
 	return false
 }
 
-func modelArtifactFormat(path string, root modelScanRoot) (string, bool) {
+func modelArtifactFormat(path string, root modelScanRoot) (string, *modelArtifactIdentity, bool) {
 	ext := strings.ToLower(filepath.Ext(path))
 	var format string
+	var admittedIdentity *modelArtifactIdentity
 	ambiguous := false
 	switch ext {
 	case ".gguf":
@@ -1270,15 +1272,19 @@ func modelArtifactFormat(path string, root modelScanRoot) (string, bool) {
 		format = strings.TrimPrefix(ext, ".")
 		ambiguous = true
 	default:
-		return "", false
+		return "", nil, false
 	}
-	if ambiguous && !admitAmbiguousModelArtifact(path, root, format) {
-		return "", false
+	if ambiguous {
+		var admitted bool
+		admittedIdentity, admitted = admitAmbiguousModelArtifact(path, root, format)
+		if !admitted {
+			return "", nil, false
+		}
 	}
 	if format == "safetensors" && isMLXPath(path, root) {
 		format = "mlx"
 	}
-	return format, true
+	return format, admittedIdentity, true
 }
 
 // admitAmbiguousModelArtifact requires two independent signals outside known
@@ -1287,12 +1293,12 @@ func modelArtifactFormat(path string, root modelScanRoot) (string, bool) {
 // being promoted to model rows merely because their basename contains "model"
 // or "weights". Specialized stores retain their established behavior because
 // the store itself supplies both ownership and model context.
-func admitAmbiguousModelArtifact(path string, root modelScanRoot, format string) bool {
+func admitAmbiguousModelArtifact(path string, root modelScanRoot, format string) (*modelArtifactIdentity, bool) {
 	if root.specialized {
-		return true
+		return nil, true
 	}
 	if knownEmbeddedModelPayloadPath(path) {
-		return false
+		return nil, false
 	}
 
 	explicitContext := strongModelFileContext(path, root) || hasModelMetadataSidecar(path, root)
@@ -1300,13 +1306,16 @@ func admitAmbiguousModelArtifact(path string, root modelScanRoot, format string)
 		explicitContext = true
 	}
 	if !explicitContext {
-		return false
+		return nil, false
 	}
 	identity, ok := deriveModelArtifactIdentity(path, root, format, false, "")
 	if !ok {
-		return false
+		return nil, false
 	}
-	return identity.trusted || modelLikeArtifactIdentity(identity.id)
+	if !identity.trusted && !modelLikeArtifactIdentity(identity.id) {
+		return nil, false
+	}
+	return &identity, true
 }
 
 // scopedApplicationSemanticContext allows a clearly named artifact directly
@@ -1854,7 +1863,14 @@ func deriveModelArtifactIdentity(
 	return identity, identity.id != ""
 }
 
-func (s *ContinuousDiscoveryService) modelArtifactCandidate(path string, root modelScanRoot, format string, directory bool, explicitID string) (modelFileAggregate, bool) {
+func (s *ContinuousDiscoveryService) modelArtifactCandidate(
+	path string,
+	root modelScanRoot,
+	format string,
+	directory bool,
+	explicitID string,
+	admittedIdentity *modelArtifactIdentity,
+) (modelFileAggregate, bool) {
 	// Follows cache snapshot symlinks. Weight tensors are never read; a bounded
 	// metadata prefix may be opened for self-describing containers such as GGUF.
 	info, err := os.Stat(path)
@@ -1865,9 +1881,15 @@ func (s *ContinuousDiscoveryService) modelArtifactCandidate(path string, root mo
 	if resolved, err := filepath.EvalSymlinks(path); err == nil {
 		artifactKey = filepath.Clean(resolved)
 	}
-	identity, ok := deriveModelArtifactIdentity(path, root, format, directory, explicitID)
-	if !ok {
-		return modelFileAggregate{}, false
+	identity := modelArtifactIdentity{}
+	if admittedIdentity != nil {
+		identity = *admittedIdentity
+	} else {
+		var ok bool
+		identity, ok = deriveModelArtifactIdentity(path, root, format, directory, explicitID)
+		if !ok {
+			return modelFileAggregate{}, false
+		}
 	}
 	id, key, provider := identity.id, identity.key, identity.provider
 	format = identity.format

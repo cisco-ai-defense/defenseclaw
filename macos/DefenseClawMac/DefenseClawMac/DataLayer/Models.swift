@@ -1316,6 +1316,23 @@ struct AIModelDiscoveryRow: Identifiable, Sendable, Hashable {
         reportedDiscoveryConfidence ?? maxConfidence
     }
 
+    var confidenceDisplayLabel: String {
+        let percent = AIConfidence.percent(
+            effectiveDiscoveryConfidence,
+            roundingRule: .toNearestOrAwayFromZero
+        )
+        return reportedDiscoveryConfidence == nil ? "\(percent)% signal" : "\(percent)%"
+    }
+
+    var confidenceAccessibilityLabel: String {
+        let percent = AIConfidence.percent(
+            effectiveDiscoveryConfidence,
+            roundingRule: .toNearestOrAwayFromZero
+        )
+        let source = reportedDiscoveryConfidence == nil ? "Signal" : "Discovery"
+        return "\(source) confidence \(percent) percent"
+    }
+
     func matches(_ query: String) -> Bool {
         guard !query.isEmpty else { return true }
         let provenanceParts = provenance.map {

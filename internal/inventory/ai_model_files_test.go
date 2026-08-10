@@ -152,15 +152,12 @@ func TestConfiguredHuggingFaceAmbiguousArtifactsUseRepositoryIdentity(t *testing
 		if signal.Model.Provider != "huggingface" {
 			t.Fatalf("configured Hugging Face model %q provider = %q", id, signal.Model.Provider)
 		}
-		format, ok := modelArtifactFormat(path, modelScanRoot{path: root, provider: "filesystem"})
+		_, admittedIdentity, ok := modelArtifactFormat(path, modelScanRoot{path: root, provider: "filesystem"})
 		if !ok {
 			t.Fatalf("configured Hugging Face artifact %q was rejected", id)
 		}
-		identity, ok := deriveModelArtifactIdentity(
-			path, modelScanRoot{path: root, provider: "filesystem"}, format, false, "",
-		)
-		if !ok || identity.id != signal.Model.ID || !identity.trusted {
-			t.Fatalf("shared identity for %q = %+v, ok=%t, emitted=%q", id, identity, ok, signal.Model.ID)
+		if admittedIdentity == nil || admittedIdentity.id != signal.Model.ID || !admittedIdentity.trusted {
+			t.Fatalf("shared identity for %q = %+v, emitted=%q", id, admittedIdentity, signal.Model.ID)
 		}
 	}
 	if modelLikeArtifactIdentity("acme/model") {
@@ -928,7 +925,7 @@ func TestAmbiguousModelAdmissionSuppressesObservedChromePayloadIDs(t *testing.T)
 	}
 
 	for id, relative := range observed {
-		format, ok := modelArtifactFormat(
+		format, _, ok := modelArtifactFormat(
 			filepath.Join(root, relative), modelScanRoot{path: root, specialized: true},
 		)
 		if !ok || (format != "tflite" && format != "bin") {
@@ -1068,11 +1065,15 @@ func TestEnhancedMacOSRootsBoundAppResourcesAndClassifyBundles(t *testing.T) {
 		t.Fatalf("app-resource root missing from %+v", roots)
 	}
 	if runtime.GOOS == "darwin" {
+		expectedOwner := resourceRoot.owner
+		if expectedOwner == "" {
+			t.Fatalf("app-resource root has no owner: %+v", resourceRoot)
+		}
 		modelPath := filepath.Join(resourceRoot.path, "Models", "vision_encoder.mlmodel")
 		writeModelTestFile(t, modelPath, "coreml")
 		svc := newModelFileModeTestService(t, "enhanced", home, []string{home}, 100)
-		candidate, ok := svc.modelArtifactCandidate(modelPath, resourceRoot, "coreml", false, "")
-		if !ok || candidate.owner != "App000" || candidate.modality != localModelModalityVision ||
+		candidate, ok := svc.modelArtifactCandidate(modelPath, resourceRoot, "coreml", false, "", nil)
+		if !ok || candidate.owner != expectedOwner || candidate.modality != localModelModalityVision ||
 			candidate.relevance != localModelRelevanceEmbedded {
 			t.Fatalf("app resource classification = %+v, ok=%v", candidate, ok)
 		}

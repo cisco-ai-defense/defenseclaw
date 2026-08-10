@@ -3785,6 +3785,7 @@ async def test_ai_discovery_model_scope_button_reveals_hidden_artifacts() -> Non
             ),
         )
     )
+    ai_model.start_filter()
     app = DefenseClawTUI(ai_discovery_model=ai_model)
 
     async with app.run_test(size=(180, 50)) as pilot:
@@ -3797,16 +3798,22 @@ async def test_ai_discovery_model_scope_button_reveals_hidden_artifacts() -> Non
 
         assert str(scope_button.label) == "Show all models"
         assert "1 hidden" in str(model_label.render())
+        assert ai_model.filtering is True
+        assert ai_model.filter_text == ""
 
         scope_button.press()
         await _wait_for_background(lambda: model_table.row_count == 2)
         assert ai_model.show_all_models is True
+        assert ai_model.filtering is True
+        assert ai_model.filter_text == ""
         assert str(scope_button.label) == "Recommended models"
         assert "ALL" in str(model_label.render())
 
         scope_button.press()
         await _wait_for_background(lambda: model_table.row_count == 1)
         assert ai_model.show_all_models is False
+        assert ai_model.filtering is True
+        assert ai_model.filter_text == ""
         assert "RECOMMENDED" in str(model_label.render())
 
 

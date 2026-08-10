@@ -33,18 +33,27 @@ func TestParseDarwinPSProcessLinePreservesLongExecutableAliases(t *testing.T) {
 		line           string
 		executablePath string
 		wantComm       string
+		wantUser       string
 	}{
 		{
 			name:           "AnythingLLM app bundle and model argument contain spaces",
 			line:           `101 1 alice 01:02:03 /Applications/AnythingLLM Desktop.app/Contents/MacOS/anythingllm-desktop --model "/Users/alice/AI Models/model.gguf"`,
 			executablePath: "/Applications/AnythingLLM Desktop.app/Contents/MacOS/anythingllm-desktop",
 			wantComm:       "anythingllm-desktop",
+			wantUser:       "alice",
 		},
 		{
 			name:           "KoboldCpp path and arguments contain spaces",
 			line:           `102 101 alice 00:00:05 /Users/alice/AI Tools/koboldcpp-mac-arm64 --model /Users/alice/My Models/story.gguf`,
 			executablePath: "/Users/alice/AI Tools/koboldcpp-mac-arm64",
 			wantComm:       "koboldcpp-mac-arm64",
+			wantUser:       "alice",
+		},
+		{
+			name:     "parenthesized kernel process name",
+			line:     "301 1 root 00:10 (mdworker)",
+			wantComm: "mdworker",
+			wantUser: "root",
 		},
 	}
 	for _, test := range tests {
@@ -58,7 +67,7 @@ func TestParseDarwinPSProcessLinePreservesLongExecutableAliases(t *testing.T) {
 			if info.Comm != test.wantComm {
 				t.Fatalf("executable basename = %q, want %q", info.Comm, test.wantComm)
 			}
-			if info.PID <= 0 || info.User != "alice" {
+			if info.PID <= 0 || info.User != test.wantUser {
 				t.Fatalf("process metadata not preserved: %+v", info)
 			}
 		})
@@ -138,10 +147,15 @@ func TestParseDarwinPSProcessLineRejectsMalformedRows(t *testing.T) {
 
 func TestParseDarwinPSOutputBoundsLongLinesAndPreservesFraming(t *testing.T) {
 	now := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
-	longArguments := strings.Repeat(" --argument value", 128)
+	longArguments := " --payload=" + strings.Repeat("x", darwinProcessReadBufferBytes+256)
+	firstRow := "101 1 alice 00:01 anythingllm-desktop" + longArguments
+	if len(firstRow) <= darwinProcessReadBufferBytes {
+		t.Fatalf("long Darwin process row = %d bytes, want more than %d", len(firstRow), darwinProcessReadBufferBytes)
+	}
 	input := strings.Join([]string{
-		"101 1 alice 00:01 anythingllm-desktop" + longArguments,
+		firstRow,
 		"102 1 alice 00:02 superwhisper --background",
+		"103 1 alice 00:03 /opt/homebrew/bin/llama-server --serve",
 		"",
 	}, "\n")
 	infos, err := parseDarwinPSOutputWithLimits(
@@ -151,7 +165,8 @@ func TestParseDarwinPSOutputBoundsLongLinesAndPreservesFraming(t *testing.T) {
 	if err != nil {
 		t.Fatalf("parse bounded Darwin output: %v", err)
 	}
-	if len(infos) != 2 || infos[0].Comm != "anythingllm-desktop" || infos[1].Comm != "superwhisper" {
+	if len(infos) != 3 || infos[0].Comm != "anythingllm-desktop" || infos[1].Comm != "superwhisper" ||
+		infos[2].Comm != "llama-server" {
 		t.Fatalf("bounded Darwin output lost row framing: %+v", infos)
 	}
 }

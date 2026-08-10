@@ -449,6 +449,22 @@ struct AIDiscoveryModelTests {
             "local API models are not hidden when model-specific confidence is absent"
         )
         expect(
+            primaryGenerative.confidenceDisplayLabel == "93%",
+            "reported discovery confidence has an unqualified percent label"
+        )
+        expect(
+            primaryGenerative.confidenceAccessibilityLabel == "Discovery confidence 93 percent",
+            "reported discovery confidence is identified for accessibility"
+        )
+        expect(
+            localAPIMissingConfidence.confidenceDisplayLabel == "20% signal",
+            "fallback confidence visibly identifies the signal score"
+        )
+        expect(
+            localAPIMissingConfidence.confidenceAccessibilityLabel == "Signal confidence 20 percent",
+            "fallback confidence identifies the signal source for accessibility"
+        )
+        expect(
             focused.includes(localAPISupporting),
             "unclassified local API rows remain visible without model-specific confidence"
         )
