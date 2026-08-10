@@ -63,6 +63,17 @@ and exposes a local REST API for the Python CLI.
 
 Run without arguments to start the sidecar daemon.`,
 	PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
+		// Skip the full-daemon bootstrap (config load + audit store +
+		// telemetry) for lifecycle utilities that operate on operator-
+		// supplied paths and do not touch DefenseClaw state. These
+		// subcommands must run on hosts where the daemon has NOT been
+		// installed yet (e.g. inside macOS uninstall's --purge path,
+		// which runs on hosts that may be halfway through a partial
+		// install with no config.yaml). Opting-in via the shared
+		// annotation keeps the exemption discoverable in one place.
+		if cmd != nil && cmd.Annotations["defenseclaw.skip-daemon-bootstrap"] == "true" {
+			return nil
+		}
 		// Load the data-dir .env BEFORE config.Load() so that
 		// token_env-style references in audit_sinks (e.g.
 		// SplunkHECSinkConfig.TokenEnv → os.Getenv) can resolve against
@@ -142,8 +153,18 @@ Run without arguments to start the sidecar daemon.`,
 // Execute runs the root command and returns the exit code. The actual
 // os.Exit call belongs in main() so deferred cleanup (PersistentPostRun)
 // always executes.
+//
+// A command's RunE may signal a specific numeric exit code by returning
+// a value whose type implements `ExitCode() int` (see enterprise_hooks_scrub.go
+// for the pattern) — those are propagated verbatim so shell callers can
+// key off exact statuses (e.g. uninstall.sh treats scrub rc 2 = missing
+// file, rc 3 = unknown connector). Anything else stays at rc 1.
 func Execute() int {
 	if err := rootCmd.Execute(); err != nil {
+		type exitCoded interface{ ExitCode() int }
+		if ec, ok := err.(exitCoded); ok {
+			return ec.ExitCode()
+		}
 		return 1
 	}
 	return 0

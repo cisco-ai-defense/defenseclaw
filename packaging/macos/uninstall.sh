@@ -30,7 +30,6 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SCRUB_PY="${SCRIPT_DIR}/lib/scrub_agent_configs.py"
 
 INSTALL_PREFIX="/opt/cisco/secureclient/defenseclaw"
 SUPPORT_DIR="${INSTALL_PREFIX}"
@@ -256,8 +255,34 @@ stop_daemon "${LEGACY_GUARDIAN_LAUNCHD_LABEL}" "${LEGACY_GUARDIAN_PLIST_DST}"
 # start hitting "command not found" + fail-close every tool call the moment
 # we delete ~/.defenseclaw/hooks/*-hook.sh. The scrub runs as the target
 # user (drop privileges via sudo -u) so file ownership is preserved.
+#
+# The scrub logic is baked into the DefenseClaw binary as
+# `defenseclaw enterprise hooks scrub`; the previous Python helper
+# crashed on stock macOS hosts where /usr/bin/python3 is a Xcode CLT
+# stub that fails to launch without developer tools installed. Using
+# our own Go binary sidesteps that dependency entirely.
 
-PY="$(command -v python3 || printf '/usr/bin/python3')"
+# Discover the gateway binary. Managed installs land it at a known
+# absolute path; bundle-fixture / dev-tree tests can override via
+# DEFENSECLAW_SCRUB_BIN so they don't need the managed layout present.
+_scrub_bin() {
+  if [[ -n "${DEFENSECLAW_SCRUB_BIN:-}" ]]; then
+    printf '%s' "${DEFENSECLAW_SCRUB_BIN}"
+    return
+  fi
+  for cand in \
+    "${INSTALL_PREFIX}/bin/defenseclaw-gateway" \
+    "${SCRIPT_DIR}/defenseclaw" \
+    "${SCRIPT_DIR}/defenseclaw-gateway"; do
+    if [[ -x "${cand}" ]]; then
+      printf '%s' "${cand}"
+      return
+    fi
+  done
+  printf ''
+}
+
+SCRUB_BIN="$(_scrub_bin)"
 
 scrub_agent_config() {
   local connector="$1"
@@ -266,21 +291,26 @@ scrub_agent_config() {
   if [[ ! -f "${cfg}" ]]; then
     return 0
   fi
-  if [[ ! -f "${SCRUB_PY}" ]]; then
-    warn "scrub helper missing: ${SCRUB_PY}; skipping ${cfg}"
+  if [[ -z "${SCRUB_BIN}" ]]; then
+    warn "defenseclaw binary not found; skipping scrub of ${cfg}"
     SCRUB_FAILED="true"
     return 0
   fi
   log "  scrubbing ${connector} entries from ${cfg}"
   local rc=0
+  # --quiet-missing lets rc=2 (file missing) still count as success:
+  # the outer if-guard already handled the "file doesn't exist" case,
+  # but between that check and the scrub call the file could vanish
+  # (rare, but possible), and treating it as clean is the right move.
   if [[ -n "${run_as_user}" && $(id -u "${run_as_user}" 2>/dev/null) != "0" ]]; then
-    sudo -u "${run_as_user}" "${PY}" "${SCRUB_PY}" "${connector}" "${cfg}" || rc=$?
+    sudo -u "${run_as_user}" "${SCRUB_BIN}" enterprise hooks scrub \
+      --connector "${connector}" --file "${cfg}" --quiet-missing || rc=$?
   else
-    "${PY}" "${SCRUB_PY}" "${connector}" "${cfg}" || rc=$?
+    "${SCRUB_BIN}" enterprise hooks scrub \
+      --connector "${connector}" --file "${cfg}" --quiet-missing || rc=$?
   fi
   case "${rc}" in
     0) ;;
-    2) ;;  # file missing — fine
     *)
       warn "  scrub exited ${rc} for ${cfg} (left unmodified)"
       SCRUB_FAILED="true"

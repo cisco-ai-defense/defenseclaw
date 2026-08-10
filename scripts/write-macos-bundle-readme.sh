@@ -25,7 +25,7 @@ ships in this folder.
 | \`uninstall.sh\`                  | Bootout daemon + scrub agent hook configs           |
 | \`com.cisco.secureclient.defenseclaw.plist\` | LaunchDaemon plist                                  |
 | \`lib/installer_lib.sh\`          | Pure helpers (sourced by install.sh)                |
-| \`lib/scrub_agent_configs.py\`    | Agent hook config scrubber (stdlib Python)          |
+| \`lib/render-targets.sh\`         | Manifest renderer for the hook-guardian daemon      |
 
 ## Install
 
@@ -76,7 +76,10 @@ sudo ./uninstall.sh --purge -y
 
 ## Requirements
 
-- macOS with \`launchctl\` and \`/usr/bin/python3\` (stdlib only).
+- macOS with \`launchctl\` (base image; no Xcode Command Line Tools or
+  Python runtime required — the installer scripts and the hook-config
+  scrubber are shell-only or delegate to the bundled DefenseClaw
+  binary).
 - Root privileges (\`sudo\`).
 - Target user's home directory must not be group/other-writable
   (installer will refuse with an exact \`chmod\` fix).

@@ -207,14 +207,6 @@ t_uninstall_sh_is_executable() {
   fi
 }
 
-t_scrub_py_exists_and_executable() {
-  assert_file_exists "${PKG_DIR}/lib/scrub_agent_configs.py"
-  if [[ ! -x "${PKG_DIR}/lib/scrub_agent_configs.py" ]]; then
-    _fail "scrub_agent_configs.py missing +x"
-    return 1
-  fi
-}
-
 t_install_does_not_create_service_user() {
   # The service-user creation machinery (ensure_service_user,
   # dscl_ensure_prop, dseditgroup, sysadminctl invocations, and the
@@ -288,12 +280,6 @@ ${bad}"
 ${hints}"
     return 1
   fi
-}
-
-t_scrub_py_syntax() {
-  local rc=0
-  /usr/bin/python3 -c "import ast; ast.parse(open('${PKG_DIR}/lib/scrub_agent_configs.py').read())" 2>&1 || rc=$?
-  assert_status "${rc}" 0 "scrub_agent_configs.py parses"
 }
 
 # _setup_bundle_fixture WITH_BINARY
@@ -669,8 +655,6 @@ run_case "install.sh syntax"          t_install_sh_syntax
 run_case "uninstall.sh syntax"        t_uninstall_sh_syntax
 run_case "install.sh executable"      t_install_sh_is_executable
 run_case "uninstall.sh executable"    t_uninstall_sh_is_executable
-run_case "scrub_agent_configs.py present and +x" t_scrub_py_exists_and_executable
-run_case "scrub_agent_configs.py syntax"          t_scrub_py_syntax
 run_case "install.sh does NOT create a service user (root-mode daemon)" t_install_does_not_create_service_user
 run_case "install.sh passes DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR on every hooks-install call" \
   t_install_passes_guardian_auth_dir_to_cli
