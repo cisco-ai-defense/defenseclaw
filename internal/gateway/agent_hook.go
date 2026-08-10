@@ -1749,7 +1749,10 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	// original verdict reason, so telemetry retains the "why" while the agent
 	// shows the operator's message. Resolved per connector.
 	responseReason := resolveHookBlockReasonForConfig(a.scannerCfg, req.ConnectorName, action, reason)
-	resp := agentHookResponseForProfile(profile, req, action, rawAction, severity, responseReason, findings, mode, wouldBlock, caps)
+	resp := agentHookResponseForProfile(
+		profile, req, action, rawAction, severity, responseReason, findings, mode, wouldBlock, caps,
+		sinkPolicyFor(ctx, verdict.RedactionEnabled),
+	)
 	// Stamp the unified-pipeline correlation keys so the HTTP
 	// response, the audit envelope (HookAuditEnvelope.EvaluationID
 	// / RuleIDs), and the scan_finding events all join on the same
@@ -2020,11 +2023,11 @@ func mapHookActionForProfile(rawAction, mode, event string, caps connector.HookC
 	}
 }
 
-func agentHookResponseFor(req agentHookRequest, action, rawAction, severity, reason string, findings []string, mode string, wouldBlock bool, caps connector.HookCapability) agentHookResponse {
-	return agentHookResponseForProfile(connector.HookProfile{}, req, action, rawAction, severity, reason, findings, mode, wouldBlock, caps)
+func agentHookResponseFor(req agentHookRequest, action, rawAction, severity, reason string, findings []string, mode string, wouldBlock bool, caps connector.HookCapability, policy ...redaction.SinkPolicy) agentHookResponse {
+	return agentHookResponseForProfile(connector.HookProfile{}, req, action, rawAction, severity, reason, findings, mode, wouldBlock, caps, policy...)
 }
 
-func agentHookResponseForProfile(profile connector.HookProfile, req agentHookRequest, action, rawAction, severity, reason string, findings []string, mode string, wouldBlock bool, caps connector.HookCapability) agentHookResponse {
+func agentHookResponseForProfile(profile connector.HookProfile, req agentHookRequest, action, rawAction, severity, reason string, findings []string, mode string, wouldBlock bool, caps connector.HookCapability, policy ...redaction.SinkPolicy) agentHookResponse {
 	if severity == "" {
 		severity = "NONE"
 	}
@@ -2034,7 +2037,7 @@ func agentHookResponseForProfile(profile connector.HookProfile, req agentHookReq
 	if rawAction == "" {
 		rawAction = action
 	}
-	safeReason := agentDisplayReason(reason)
+	safeReason := agentDisplayReason(reason, notificationSinkPolicy(policy))
 	additional := genericHookAdditionalContext(req.ConnectorName, rawAction, severity, safeReason, wouldBlock)
 	resp := agentHookResponse{
 		Action:            action,

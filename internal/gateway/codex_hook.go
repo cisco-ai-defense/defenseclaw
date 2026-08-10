@@ -269,7 +269,10 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 		a.dispatchCodexHookNotification(req, action, rawAction, verdict.Severity, verdict.Reason, wouldBlock, evalCtx,
 			sinkPolicyFor(ctx, verdict.RedactionEnabled))
 	}
-	resp := codexResponseFor(req.HookEventName, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings, mode, wouldBlock)
+	resp := codexResponseFor(
+		req.HookEventName, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings, mode, wouldBlock,
+		sinkPolicyFor(ctx, verdict.RedactionEnabled),
+	)
 	resp.EvaluationID = evalCtx.EvaluationID
 	resp.RuleIDs = evalCtx.RuleIDs
 	resp.RedactionEnabled = verdict.RedactionEnabled
@@ -376,7 +379,7 @@ func (a *APIServer) codexMode() string {
 	return normalizeAgentHookMode(mode)
 }
 
-func codexResponseFor(event, action, rawAction, severity, reason string, findings []string, mode string, wouldBlock bool) codexHookResponse {
+func codexResponseFor(event, action, rawAction, severity, reason string, findings []string, mode string, wouldBlock bool, policy ...redaction.SinkPolicy) codexHookResponse {
 	if severity == "" {
 		severity = "NONE"
 	}
@@ -386,7 +389,7 @@ func codexResponseFor(event, action, rawAction, severity, reason string, finding
 	if rawAction == "" {
 		rawAction = action
 	}
-	safeReason := agentDisplayReason(reason)
+	safeReason := agentDisplayReason(reason, notificationSinkPolicy(policy))
 	additional := codexAdditionalContext(rawAction, severity, safeReason, wouldBlock)
 	resp := codexHookResponse{
 		Action:            action,

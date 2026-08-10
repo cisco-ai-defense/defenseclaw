@@ -58,9 +58,13 @@ func trustedBuiltInFindingLabel(label string) bool {
 }
 
 // agentDisplayReason keeps exact, ship-authored catalog metadata readable on
-// agent surfaces while retaining the existing scrub for every free-form or
-// scanner-authored reason.
-func agentDisplayReason(reason string) string {
+// agent surfaces under the default compatibility policy while retaining the
+// existing scrub for every free-form or scanner-authored reason. Explicit
+// managed policies remain authoritative in both directions.
+func agentDisplayReason(reason string, policy redaction.SinkPolicy) string {
+	if policy != redaction.SinkPolicyDefault {
+		return redaction.ReasonForSink(reason, policy)
+	}
 	if trustedBuiltInMatchReason(reason) {
 		return reason
 	}
@@ -77,11 +81,11 @@ func notificationDisplayReason(reason string, policy redaction.SinkPolicy) strin
 	return redaction.ReasonForSink(reason, policy)
 }
 
-// defaultSinkDisplayReason is used by compatibility response bodies that do
-// not carry a request-scoped managed policy.
-func defaultSinkDisplayReason(reason string) string {
-	if trustedBuiltInMatchReason(reason) {
+// defaultSinkDisplayReason applies the catalog carve-out to compatibility
+// response bodies only when no managed override is active.
+func defaultSinkDisplayReason(reason string, policy redaction.SinkPolicy) string {
+	if policy == redaction.SinkPolicyDefault && trustedBuiltInMatchReason(reason) {
 		return reason
 	}
-	return redaction.ForSinkReason(reason)
+	return redaction.ReasonForSink(reason, policy)
 }

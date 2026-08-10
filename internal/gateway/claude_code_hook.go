@@ -235,7 +235,10 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		a.dispatchClaudeCodeHookNotification(req, action, rawAction, verdict.Severity, verdict.Reason, wouldBlock, evalCtx,
 			sinkPolicyFor(ctx, verdict.RedactionEnabled))
 	}
-	resp := claudeCodeResponseFor(req, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings, mode, wouldBlock)
+	resp := claudeCodeResponseFor(
+		req, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings, mode, wouldBlock,
+		sinkPolicyFor(ctx, verdict.RedactionEnabled),
+	)
 	// Stamp the unified-pipeline correlation keys so the agent-hook
 	// dispatch wrapper (claudeCodeResponseToAgentHookResponse) and
 	// the audit envelope (HookAuditEnvelope.EvaluationID / RuleIDs)
@@ -364,7 +367,7 @@ func (a *APIServer) claudeCodeMode() string {
 	return normalizeAgentHookMode(mode)
 }
 
-func claudeCodeResponseFor(req claudeCodeHookRequest, action, rawAction, severity, reason string, findings []string, mode string, wouldBlock bool) claudeCodeHookResponse {
+func claudeCodeResponseFor(req claudeCodeHookRequest, action, rawAction, severity, reason string, findings []string, mode string, wouldBlock bool, policy ...redaction.SinkPolicy) claudeCodeHookResponse {
 	if severity == "" {
 		severity = "NONE"
 	}
@@ -374,7 +377,7 @@ func claudeCodeResponseFor(req claudeCodeHookRequest, action, rawAction, severit
 	if rawAction == "" {
 		rawAction = action
 	}
-	safeReason := agentDisplayReason(reason)
+	safeReason := agentDisplayReason(reason, notificationSinkPolicy(policy))
 	additional := claudeCodeAdditionalContext(rawAction, severity, safeReason, wouldBlock)
 	resp := claudeCodeHookResponse{
 		Action:            action,

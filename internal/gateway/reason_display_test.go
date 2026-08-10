@@ -17,9 +17,11 @@
 package gateway
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
@@ -97,18 +99,97 @@ func TestAgentAndDefaultSinkDisplayReasonUseTrustedMetadataCarveOut(t *testing.T
 	t.Cleanup(func() { redaction.SetAgentReasonRedactionDisabled(false) })
 
 	trusted := "matched: TRUST-SAFETY-OVERRIDE:Safety override attempt"
-	if got := agentDisplayReason(trusted); got != trusted {
+	if got := agentDisplayReason(trusted, redaction.SinkPolicyDefault); got != trusted {
 		t.Fatalf("agent display reason = %q, want trusted metadata", got)
 	}
-	if got := defaultSinkDisplayReason(trusted); got != trusted {
+	if got := defaultSinkDisplayReason(trusted, redaction.SinkPolicyDefault); got != trusted {
 		t.Fatalf("default sink display reason = %q, want trusted metadata", got)
+	}
+	for name, got := range map[string]string{
+		"agent":   agentDisplayReason(trusted, redaction.SinkPolicyRedact),
+		"default": defaultSinkDisplayReason(trusted, redaction.SinkPolicyRedact),
+	} {
+		if got == trusted || !strings.Contains(got, "<redacted") {
+			t.Fatalf("forced-redact %s reason = %q, want trusted title redacted", name, got)
+		}
 	}
 
 	untrusted := "matched: TRUST-SAFETY-OVERRIDE:scanner supplied value"
-	if got := agentDisplayReason(untrusted); got == untrusted || !strings.Contains(got, "<redacted") {
+	if got := agentDisplayReason(untrusted, redaction.SinkPolicyDefault); got == untrusted || !strings.Contains(got, "<redacted") {
 		t.Fatalf("agent display reason = %q, want scanner title redacted", got)
 	}
-	if got := defaultSinkDisplayReason(untrusted); got == untrusted || !strings.Contains(got, "<redacted") {
+	if got := defaultSinkDisplayReason(untrusted, redaction.SinkPolicyDefault); got == untrusted || !strings.Contains(got, "<redacted") {
 		t.Fatalf("default sink display reason = %q, want scanner title redacted", got)
+	}
+	if got := agentDisplayReason(untrusted, redaction.SinkPolicyRaw); got != untrusted {
+		t.Fatalf("raw agent display reason = %q, want %q", got, untrusted)
+	}
+	if got := defaultSinkDisplayReason(untrusted, redaction.SinkPolicyRaw); got != untrusted {
+		t.Fatalf("raw default sink display reason = %q, want %q", got, untrusted)
+	}
+}
+
+func TestHookResponseDisplayReasonHonorsManagedRedactionPolicy(t *testing.T) {
+	trusted := "matched: TRUST-SAFETY-OVERRIDE:Safety override attempt"
+	generic := agentHookResponseFor(
+		agentHookRequest{ConnectorName: "cursor", HookEventName: "PreToolUse"},
+		"block", "block", "HIGH", trusted, nil, "action", false,
+		connector.HookCapability{}, redaction.SinkPolicyRedact,
+	)
+	codex := codexResponseFor(
+		"PreToolUse", "block", "block", "HIGH", trusted, nil, "action", false,
+		redaction.SinkPolicyRedact,
+	)
+	claude := claudeCodeResponseFor(
+		claudeCodeHookRequest{HookEventName: "PreToolUse"},
+		"block", "block", "HIGH", trusted, nil, "action", false,
+		redaction.SinkPolicyRedact,
+	)
+
+	tests := []struct {
+		name   string
+		reason string
+		wire   interface{}
+	}{
+		{name: "generic", reason: generic.Reason, wire: generic},
+		{name: "codex", reason: codex.Reason, wire: codex},
+		{name: "claude-code", reason: claude.Reason, wire: claude},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if !strings.Contains(test.reason, "<redacted") {
+				t.Fatalf("managed-redact response reason = %q, want redacted title", test.reason)
+			}
+			payload, err := json.Marshal(test.wire)
+			if err != nil {
+				t.Fatalf("marshal response: %v", err)
+			}
+			if strings.Contains(string(payload), "Safety override attempt") {
+				t.Fatalf("managed-redact response leaked trusted title: %s", payload)
+			}
+		})
+	}
+}
+
+func TestSanitizeForResponseHonorsManagedRedactionDirective(t *testing.T) {
+	previous := ManagedEnterpriseActive()
+	SetManagedEnterpriseActive(true)
+	t.Cleanup(func() { SetManagedEnterpriseActive(previous) })
+
+	trusted := "matched: TRUST-SAFETY-OVERRIDE:Safety override attempt"
+	redact := true
+	verdict := &ToolInspectVerdict{Reason: trusted, RedactionEnabled: &redact}
+	for _, reveal := range []bool{false, true} {
+		got := verdict.sanitizeForResponse(reveal)
+		if got.Reason == trusted || !strings.Contains(got.Reason, "<redacted") {
+			t.Fatalf("sanitizeForResponse(reveal=%t) reason = %q, want managed redaction", reveal, got.Reason)
+		}
+	}
+
+	untrusted := "matched: TRUST-SAFETY-OVERRIDE:scanner supplied value"
+	raw := false
+	got := (&ToolInspectVerdict{Reason: untrusted, RedactionEnabled: &raw}).sanitizeForResponse(false)
+	if got.Reason != untrusted {
+		t.Fatalf("managed-raw response reason = %q, want %q", got.Reason, untrusted)
 	}
 }

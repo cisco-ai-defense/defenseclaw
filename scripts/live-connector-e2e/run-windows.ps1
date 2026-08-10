@@ -591,6 +591,30 @@ function Test-BlockVerdict([string]$Path, [int]$Since) {
     return $false
 }
 
+function Wait-GatewayEvidenceAfter(
+    [string]$Path,
+    [string]$Name,
+    [int]$Since,
+    [bool]$RequireBlock,
+    [int]$TimeoutMilliseconds = 5000
+) {
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
+    $connectorEvent = $false
+    $blockVerdict = $false
+    do {
+        $connectorEvent = Test-ConnectorEvent $Path $Name $Since
+        $blockVerdict = Test-BlockVerdict $Path $Since
+        if ($connectorEvent -and (-not $RequireBlock -or $blockVerdict)) { break }
+        if ([DateTime]::UtcNow -ge $deadline) { break }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $deadline)
+
+    return [pscustomobject][ordered]@{
+        ConnectorEvent = $connectorEvent
+        BlockVerdict = $blockVerdict
+    }
+}
+
 function Read-SharedText([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return '' }
     for ($attempt = 1; $attempt -le 20; $attempt++) {
@@ -1191,12 +1215,13 @@ function Invoke-Teardown {
 function Invoke-Hook([string]$EventName, [string]$Payload, [ValidateSet('allow', 'block')][string]$Expected, [bool]$RequireGatewayBlock = $false) {
     $before = @(Get-EventLines $script:GatewayJsonl).Count
     $result = Invoke-Tool (Resolve-ContractHookTool) @('hook', '--connector', $Connector, '--event', $EventName) @(0, 2) -InputPath $Payload
-    Start-Sleep -Milliseconds 800
-    if (-not (Test-ConnectorEvent $script:GatewayJsonl $Connector $before)) { throw "$EventName did not reach the gateway" }
+    $requireBlockEvidence = $Expected -eq 'block' -or $RequireGatewayBlock
+    $evidence = Wait-GatewayEvidenceAfter $script:GatewayJsonl $Connector $before $requireBlockEvidence
+    if (-not $evidence.ConnectorEvent) { throw "$EventName did not reach the gateway" }
     if ($Expected -eq 'allow' -and $result.ExitCode -ne 0) { throw "$EventName should allow but exited $($result.ExitCode)" }
     if ($Expected -eq 'block' -and $result.ExitCode -ne 2 -and $result.StdOut -notmatch '(?i)block|deny') { throw "$EventName did not shape a block decision" }
-    if ($Expected -eq 'block' -and -not (Test-BlockVerdict $script:GatewayJsonl $before)) { throw "$EventName has no gateway block verdict" }
-    if ($RequireGatewayBlock -and -not (Test-BlockVerdict $script:GatewayJsonl $before)) { throw "$EventName has no observe-mode would-block verdict" }
+    if ($Expected -eq 'block' -and -not $evidence.BlockVerdict) { throw "$EventName has no gateway block verdict" }
+    if ($RequireGatewayBlock -and -not $evidence.BlockVerdict) { throw "$EventName has no observe-mode would-block verdict" }
     Write-Result "$EventName`:fires" pass "jsonl line $before"
     Write-Result "$EventName`:verdict" pass "exit=$($result.ExitCode) expected=$Expected"
 }

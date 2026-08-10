@@ -404,6 +404,23 @@ jobs:
           name: python-coverage
           path: coverage-py.xml
 
+  make-test:
+    # Preserve the legacy required-check context without rerunning the corpus.
+    # The Go and Python aggregate jobs already require every underlying shard.
+    name: make test (unified)
+    needs: [go-test, python-lint-test]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require unified Go and Python test gates
+        env:
+          GO_TEST_RESULT: ${{ needs.go-test.result }}
+          PYTHON_TEST_RESULT: ${{ needs.python-lint-test.result }}
+        run: |
+          set -euo pipefail
+          test "$GO_TEST_RESULT" = success
+          test "$PYTHON_TEST_RESULT" = success
+
   python-wheel-install:
     name: Python Wheel Security Contract (${{ matrix.python-version }})
     runs-on: ubuntu-latest

@@ -56,7 +56,9 @@ const revealHeader = "X-DefenseClaw-Reveal-PII"
 // Destination projection is unaffected: canonical telemetry keeps the source
 // facts and the unified v8 router applies each destination's selected redaction
 // profile independently. The response header changes only this HTTP response;
-// it cannot make a configured destination more or less restrictive.
+// it cannot make a configured destination more or less restrictive. An
+// explicit managed-enterprise redact directive remains authoritative over the
+// response header.
 func wantsReveal(r *http.Request) bool {
 	return r.Header.Get(revealHeader) == "1"
 }
@@ -1195,18 +1197,20 @@ func appendVerdictReason(reason, suffix string) string {
 // "<redacted-evidence len=... sha=...>" placeholder AND Reason is
 // routed through ForSinkReason. The composed reason is normally
 // shaped as "matched: <rule-id>:<title>, …". Exact compiled-in pairs pass
-// through via defaultSinkDisplayReason; if a scanner embeds a matched literal
-// in f.Title, the sink barrier still scrubs it.
+// through via defaultSinkDisplayReason only when no managed override is
+// active; if a scanner embeds a matched literal in f.Title, the sink barrier
+// still scrubs it.
 //
 // The original verdict is left untouched so canonical observability producers
 // retain the full source data. The unified runtime applies the selected
 // redaction profile independently for each destination after routing.
 func (v *ToolInspectVerdict) sanitizeForResponse(reveal bool) *ToolInspectVerdict {
-	if reveal {
+	policy := sinkPolicyFor(context.Background(), v.RedactionEnabled)
+	if reveal && policy != redaction.SinkPolicyRedact {
 		return v
 	}
 	cp := *v
-	cp.Reason = defaultSinkDisplayReason(v.Reason)
+	cp.Reason = defaultSinkDisplayReason(v.Reason, policy)
 	if len(v.DetailedFindings) == 0 {
 		return &cp
 	}

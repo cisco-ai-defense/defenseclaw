@@ -896,6 +896,25 @@ private-secret-name = "DefenseClaw must remain redacted"
     Assert-True (-not (Test-ConnectorEvent $jsonl 'claudecode' 0)) 'connector event seam ignores body-text false positives'
     Assert-True (Test-BlockVerdict $jsonl 0) 'block verdict seam'
     Assert-True (-not (Test-BlockVerdict $jsonl 1)) 'block verdict seam rejects hook decisions and non-canonical scan deny values'
+    $delayedJsonl = Join-Path $temp 'delayed-gateway-evidence.jsonl'
+    [IO.File]::WriteAllText($delayedJsonl, '')
+    $delayedWriter = Start-Job -ArgumentList $delayedJsonl, $fixtureEvents[2], $fixtureEvents[0] -ScriptBlock {
+        param($Path, $ConnectorEvent, $BlockVerdict)
+        Start-Sleep -Milliseconds 100
+        [IO.File]::AppendAllText($Path, $ConnectorEvent + [Environment]::NewLine)
+        Start-Sleep -Milliseconds 1000
+        [IO.File]::AppendAllText($Path, $BlockVerdict + [Environment]::NewLine)
+    }
+    try {
+        $delayedEvidence = Wait-GatewayEvidenceAfter $delayedJsonl 'codex' 0 $true 5000
+        Wait-Job $delayedWriter | Out-Null
+        Receive-Job $delayedWriter -ErrorAction Stop | Out-Null
+        Assert-True ($delayedEvidence.ConnectorEvent -and $delayedEvidence.BlockVerdict) `
+            'gateway evidence polling tolerates a block verdict delayed beyond the former fixed wait'
+    } finally {
+        Stop-Job $delayedWriter -ErrorAction SilentlyContinue
+        Remove-Job $delayedWriter -Force -ErrorAction SilentlyContinue
+    }
     $hookDecision = Get-LatestHookDecision $jsonl 'codex' 0
     Assert-True ($null -ne $hookDecision -and $hookDecision.action -eq 'allow' -and
         $hookDecision.raw_action -eq 'block' -and $hookDecision.mode -eq 'observe' -and
@@ -1016,6 +1035,13 @@ private-secret-name = "DefenseClaw must remain redacted"
         $nativeHarnessText,
         '(?s)function Add-WindowsNativeDiagnosticTail\b.*?(?=\r?\nfunction )'
     ).Value
+    $invokeHookFunction = [regex]::Match(
+        $harnessText,
+        '(?s)function Invoke-Hook\b.*?(?=\r?\nfunction )'
+    ).Value
+    Assert-True ($invokeHookFunction -match 'Wait-GatewayEvidenceAfter' -and
+        $invokeHookFunction -notmatch 'Start-Sleep -Milliseconds 800') `
+        'hook evidence uses bounded polling instead of a fixed 800ms delay'
     Assert-True ($nativeWorkflowText -match '(?s)connector-contract:.*?connector: \[codex, claudecode, amp\].*?windows-native-required:') `
         'required Windows contract matrix contains Codex, Claude Code, and Amp'
     Assert-True ($nativeWorkflowText -match '(?m)^\s+name: Windows Native Required\s*$') 'stable aggregate check name exists'
