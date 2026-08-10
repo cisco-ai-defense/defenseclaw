@@ -1585,7 +1585,7 @@
     {
       "name": "DEFENSECLAW_SCRUB_BIN",
       "category": "runtime_path",
-      "purpose": "Override the DefenseClaw gateway binary used by the macOS uninstaller for the per-user agent-config scrub step (`defenseclaw enterprise hooks scrub`). Discovery order without this env var: /opt/cisco/secureclient/defenseclaw/bin/defenseclaw-gateway, then a `defenseclaw` or `defenseclaw-gateway` executable next to the uninstall.sh script. Bundle-fixture and dev-tree tests set this so they can drive uninstall.sh against a stub binary without needing the managed install tree present.",
+      "purpose": "Override the DefenseClaw gateway binary used by the macOS uninstaller for the per-user agent-config scrub step (`defenseclaw-gateway enterprise hooks scrub`). Discovery order without this env var: /opt/cisco/secureclient/defenseclaw/bin/defenseclaw-gateway, then a `defenseclaw` or `defenseclaw-gateway` executable next to the uninstall.sh script. Bundle-fixture and dev-tree tests set this so they can drive uninstall.sh against a stub binary without needing the managed install tree present.",
       "default": "unset (auto-discover via the paths described above)",
       "accepted_values": ["any-absolute-path-to-executable", "unset"],
       "security_impact": "none",
