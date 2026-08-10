@@ -120,13 +120,17 @@ _read_json_field() {
   local path="$1"
   local field="$2"
   [[ -f "${path}" ]] || return 0
-  # Awk parser: matches top-level `"<field>": "<value>"` at depth 1
-  # (immediately inside the outer object). Depth tracking respects
-  # strings so a `{` inside a JSON string doesn't inflate the depth
-  # counter. Escape sequences \" \\ \/ \n \r \t \b \f are decoded;
-  # \uXXXX (BMP + surrogate pairs) are decoded to UTF-8. On any
-  # tokenization error the parser bails and prints nothing, matching
-  # the pre-existing "malformed → empty" contract callers gate on.
+  # Awk parser: matches the top-level `"<field>": "<value>"` pair
+  # (immediately inside the outer object). Only the outer object's
+  # members are iterated, so we don't need a general depth counter —
+  # non-string, non-container values are skipped by scanning to the
+  # next delimiter, and nested objects/arrays are consumed by a local
+  # nest_depth counter that respects strings (a `{` inside a JSON
+  # string doesn't inflate it). Escape sequences \" \\ \/ \n \r \t
+  # \b \f are decoded; \uXXXX (BMP + surrogate pairs) are decoded to
+  # UTF-8. On any tokenization error the parser bails and prints
+  # nothing, matching the pre-existing "malformed → empty" contract
+  # callers gate on.
   awk -v FIELD="${field}" '
     function utf8(cp,    b0, b1, b2, b3) {
       if (cp < 0)         return ""
@@ -236,16 +240,16 @@ _read_json_field() {
     END {
       buflen = length(buf)
       pos = 1
-      depth = 0
       err = 0
       skip_ws()
       if (substr(buf, pos, 1) != "{") exit 0
       pos++
-      depth = 1
-      # State machine at depth 1: expect key, then colon, then value.
-      # For values that are not the sought field, skip strings /
-      # numbers / literals / nested containers to reach the next
-      # comma or closing brace. Nested containers push/pop depth.
+      # State machine: only the OUTER object members are iterated,
+      # so keys are always at logical depth 1. For values that are
+      # not the sought field, skip strings / numbers / literals /
+      # nested containers to reach the next comma or closing brace.
+      # The inner-container walk below uses its own local nest_depth
+      # counter, so no top-level depth counter is needed here.
       while (pos <= buflen) {
         skip_ws()
         if (pos > buflen) exit 0
@@ -253,16 +257,11 @@ _read_json_field() {
         if (c == "}") { pos++; exit 0 }
         if (c == ",") { pos++; continue }
         if (c != "\"") exit 0
-        # Read key at depth 1
+        # Read the top-level key.
         key_is_target = 0
-        if (depth == 1) {
-          key = read_string()
-          if (err) exit 0
-          if (key == FIELD) key_is_target = 1
-        } else {
-          skip_string()
-          if (err) exit 0
-        }
+        key = read_string()
+        if (err) exit 0
+        if (key == FIELD) key_is_target = 1
         skip_ws()
         if (substr(buf, pos, 1) != ":") exit 0
         pos++
@@ -1469,13 +1468,14 @@ apply_ai_discovery_home_dirs() {
       return n
     }
     function strip(s) { sub(/^[ \t]+/, "", s); sub(/[ \t\r]+$/, "", s); return s }
-    BEGIN { in_ai = 0; consuming_home = 0; home_indent_len = 0 }
+    BEGIN { in_ai = 0; seen_ai = 0; consuming_home = 0; home_indent_len = 0 }
     {
       line = $0
       if (!in_ai) {
         if (line ~ /^ai_discovery:[ \t]*$/) {
           print line
           in_ai = 1
+          seen_ai = 1
           # Emit a one-line marker after the header; a follow-up sed
           # pass replaces the marker with the freshly-rendered block.
           # This detour avoids passing multi-line data through
@@ -1518,8 +1518,24 @@ apply_ai_discovery_home_dirs() {
       # Any other ai_discovery child: preserve verbatim.
       print line
     }
+    END {
+      # A config.yaml without an `ai_discovery:` block is a real
+      # anomaly on managed_enterprise: render_config always emits one
+      # (see the ai_discovery: header render further up). Missing it
+      # implies (a) an operator hand-edited the file and removed the
+      # block, or (b) the config predates the block. In either case
+      # the reconcile call silently returning "unchanged" would leave
+      # the daemon blind to per-user home dirs — surface the anomaly
+      # with a distinct exit code the caller maps to a loud error.
+      if (!seen_ai) exit 3
+    }
   ' "${config_path}" > "${tmp}"
   local rc=$?
+  if (( rc == 3 )); then
+    rm -f -- "${tmp}"
+    printf 'apply_ai_discovery_home_dirs: no ai_discovery: block in %s (config predates ai_discovery or was hand-edited); refusing to silently succeed\n' "${config_path}" >&2
+    return 1
+  fi
   if (( rc != 0 )); then
     rm -f -- "${tmp}"
     return "${rc}"
@@ -1567,6 +1583,16 @@ apply_ai_discovery_home_dirs() {
     return 0
   fi
   /bin/mv -f -- "${tmp}" "${config_path}"
+  # Endpoint-durability: flush pending disk writes so the rename
+  # survives a kernel panic / laptop-lid-close / power-drop
+  # immediately after. Without this, a mid-boot crash between the
+  # rename and the eventual buffer flush can lose the swap and leave
+  # config.yaml empty on next boot — a hard-to-diagnose "daemon did
+  # not come up after upgrade" bug. macOS `sync(1)` is a no-argument
+  # wrapper around `sync(2)` (global buffer flush); over-inclusive
+  # but always available. Best-effort — never causes the rewrite to
+  # fail.
+  sync 2>/dev/null || true
 }
 
 # ---- legacy path relocation --------------------------------------------

@@ -265,10 +265,72 @@ stop_daemon "${LEGACY_GUARDIAN_LAUNCHD_LABEL}" "${LEGACY_GUARDIAN_PLIST_DST}"
 # Discover the gateway binary. Managed installs land it at a known
 # absolute path; bundle-fixture / dev-tree tests can override via
 # DEFENSECLAW_SCRUB_BIN so they don't need the managed layout present.
+#
+# The override branch runs the equivalent trust checks the installer
+# applies to DEFENSECLAW_PLIST_SRC (PACKAGING.md:104-111). uninstall.sh
+# runs under `sudo`, so the referenced binary is executed as root;
+# an operator-supplied path is treated as untrusted input and must
+# satisfy every check below before it takes effect:
+#
+#   1. absolute path (relative could be rerooted by PWD)
+#   2. exists as a regular file (not a directory, not a device, not a
+#      symlink — a symlink swap is the exact race that motivates this)
+#   3. is executable
+#   4. owned by uid 0 (matches the installer's "root-owned trusted
+#      input" pattern for --plist)
+#   5. mode & 0022 == 0 (no group/other write bits — a compromised
+#      umask cannot slip a writable binary through)
+#
+# On any failure we print a WARN and fall through to auto-discovery so
+# the operator gets a fixable diagnostic rather than a silent scrub
+# skip. DC_UNINSTALL_SKIP_SCRUB_BIN_TRUST=1 is a test-side seam that
+# lets bundle-fixture tests drive uninstall.sh against a non-root-owned
+# binary in a tmpdir (parallel to DC_INSTALLER_SKIP_ROOT_CHECK on the
+# install side).
 _scrub_bin() {
   if [[ -n "${DEFENSECLAW_SCRUB_BIN:-}" ]]; then
-    printf '%s' "${DEFENSECLAW_SCRUB_BIN}"
-    return
+    local override="${DEFENSECLAW_SCRUB_BIN}"
+    case "${override}" in
+      /*) ;;
+      *)
+        warn "DEFENSECLAW_SCRUB_BIN must be an absolute path (got: ${override}); ignoring override"
+        override=""
+        ;;
+    esac
+    if [[ -n "${override}" && -L "${override}" ]]; then
+      warn "DEFENSECLAW_SCRUB_BIN is a symlink; refusing to follow (${override}); ignoring override"
+      override=""
+    fi
+    if [[ -n "${override}" && ! -f "${override}" ]]; then
+      warn "DEFENSECLAW_SCRUB_BIN is not a regular file: ${override}; ignoring override"
+      override=""
+    fi
+    if [[ -n "${override}" && ! -x "${override}" ]]; then
+      warn "DEFENSECLAW_SCRUB_BIN is not executable: ${override}; ignoring override"
+      override=""
+    fi
+    if [[ -n "${override}" && "${DC_UNINSTALL_SKIP_SCRUB_BIN_TRUST:-}" != "1" ]]; then
+      local _own_mode
+      _own_mode="$(stat -f '%Su %Lp' "${override}" 2>/dev/null || echo '')"
+      if [[ -z "${_own_mode}" ]]; then
+        warn "DEFENSECLAW_SCRUB_BIN cannot be stat'd: ${override}; ignoring override"
+        override=""
+      else
+        local _own="${_own_mode%% *}" _mode="${_own_mode##* }"
+        if [[ "${_own}" != "root" ]]; then
+          warn "DEFENSECLAW_SCRUB_BIN must be owned by root (got: ${_own}); ignoring override"
+          override=""
+        elif (( (8#${_mode} & 8#022) != 0 )); then
+          warn "DEFENSECLAW_SCRUB_BIN is group/other writable (mode ${_mode}); ignoring override"
+          override=""
+        fi
+      fi
+    fi
+    if [[ -n "${override}" ]]; then
+      printf '%s' "${override}"
+      return
+    fi
+    # Fall through to auto-discovery when the override didn't pass.
   fi
   for cand in \
     "${INSTALL_PREFIX}/bin/defenseclaw-gateway" \

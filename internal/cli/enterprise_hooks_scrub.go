@@ -9,10 +9,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 
+	"github.com/pelletier/go-toml/v2"
 	"github.com/spf13/cobra"
 )
 
@@ -36,15 +38,29 @@ var scrubDefaultMarkers = []string{
 	"notify-bridge.sh",
 }
 
-// Additional markers that identify a Codex [otel] block as DefenseClaw-managed
-// when the block body itself doesn't carry a hook script path. DefenseClaw
-// configures Codex to send OTLP to a loopback DefenseClaw gateway, so an
-// endpoint value pointing at 127.0.0.1 (or localhost) is a strong signal.
-// We deliberately do NOT match on "otlp_endpoint" alone — a user with their
-// own vendor OTel setup would then get their block scrubbed too.
+// Additional markers that identify a Codex [otel] block as
+// DefenseClaw-managed when the block body itself doesn't carry a hook
+// script path.
+//
+// DefenseClaw configures Codex to send OTLP to a loopback DefenseClaw
+// gateway with headers that name the connector explicitly
+// (`x-defenseclaw-source`, `x-defenseclaw-client`,
+// `x-defenseclaw-token`) — see internal/gateway/connector/codex.go
+// HookProfile. Keying on those header names is unambiguous and does
+// not false-positive against a developer's own local OTel collector
+// running at http://localhost:4318 with no DefenseClaw involvement.
+//
+// The prior list included "127.0.0.1" and "localhost", which would
+// wipe any local-collector [otel] block on uninstall. Endpoint-
+// software users who run their own OTel stack (a common shape on
+// developer laptops) would have silently lost that config with
+// no error surface. Restricting the markers to DC-owned header
+// substrings closes that hole.
 var scrubCodexOtelMarkers = []string{
-	"127.0.0.1",
-	"localhost",
+	"x-defenseclaw-source",
+	"x-defenseclaw-client",
+	"x-defenseclaw-token",
+	"defenseclaw-managed-hook",
 	"defenseclaw",
 }
 
@@ -110,6 +126,20 @@ func init() {
 		"Emit machine-readable JSON summary")
 	enterpriseHooksScrubCmd.Flags().BoolVar(&scrubMissingIsSilent, "quiet-missing", false,
 		"Return 0 (silent) instead of 2 when the target file does not exist")
+	// Both flags are required. Marking them here lets Cobra emit its
+	// standard "required flag(s) --file, --connector not set" usage
+	// error BEFORE RunE runs, so shell callers see a documented
+	// non-zero exit rather than the ad-hoc rc 64 the RunE fallback
+	// used to return. Errors marking flags required are fatal at init
+	// time, not per-call, so a panic here is a build bug — not a
+	// runtime failure — and matches the pattern the rest of the CLI
+	// uses for required flags.
+	if err := enterpriseHooksScrubCmd.MarkFlagRequired("connector"); err != nil {
+		panic("enterprise hooks scrub: MarkFlagRequired connector: " + err.Error())
+	}
+	if err := enterpriseHooksScrubCmd.MarkFlagRequired("file"); err != nil {
+		panic("enterprise hooks scrub: MarkFlagRequired file: " + err.Error())
+	}
 	enterpriseHooksCmd.AddCommand(enterpriseHooksScrubCmd)
 }
 
@@ -128,8 +158,12 @@ func (e *scrubExitError) ExitCode() int { return e.code }
 func runEnterpriseHooksScrub(cmd *cobra.Command, _ []string) error {
 	connector := strings.ToLower(strings.TrimSpace(scrubConnectorFlag))
 	path := strings.TrimSpace(scrubFileFlag)
+	// --connector and --file are MarkFlagRequired in init(); Cobra
+	// rejects the invocation with its standard usage error before
+	// RunE gets called. Belt-and-suspenders: if a caller bypasses
+	// Cobra (test harness, future refactor) we still guard here.
 	if path == "" {
-		return &scrubExitError{code: 64, msg: "enterprise hooks scrub: --file is required"}
+		return &scrubExitError{code: 3, msg: "enterprise hooks scrub: --file is required"}
 	}
 	handler, ok := map[string]func(string, []string) (bool, error){
 		"cursor":     scrubCursorFile,
@@ -312,10 +346,117 @@ func writeSortedJSON(path string, cfg any, original []byte) (bool, error) {
 	if bytes.Equal(buf, original) {
 		return false, nil
 	}
-	if err := os.WriteFile(path, buf, 0o600); err != nil {
+	if err := writeConfigAtomic(path, buf); err != nil {
 		return false, err
 	}
 	return true, nil
+}
+
+// writeConfigAtomic writes payload to path via a same-directory temp
+// file + rename, so an interrupted scrub can never leave a truncated
+// user config. Preserves the target file's existing mode (0644 vs 0600
+// vary across agents) and — when running as root under `sudo` — the
+// existing owner uid/gid too, matching the "scrub only edits, never
+// re-perms" contract the uninstaller documents.
+//
+// Symlink handling: dotfiles workflows (chezmoi, GNU stow, homeshick,
+// vcsh, ...) routinely publish agent configs as symlinks pointing
+// into ~/.dotfiles/… . Refusing to scrub through a symlink would fail
+// uninstall on those setups; renaming a fresh file over the symlink
+// would replace the symlink with a regular file and break the
+// dotfiles indirection. The right move is to resolve the symlink and
+// write to the concrete target file, so the user's dotfiles link
+// survives and the scrub still lands on the file the agent actually
+// reads.
+//
+// A symlink-swap privesc surface exists only when the writer runs at
+// a HIGHER privilege than the entity that controls the link target
+// path. This scrubber runs via `sudo -u <target-user>` in
+// uninstall.sh, so the effective uid at write time is the target
+// user's — a symlink they control can only redirect the write to a
+// path they could already write to themselves. The check that
+// remains is: no writing through symlinks whose eventual target is
+// outside the caller's uid boundary, which the kernel enforces via
+// the standard file-permissions gate.
+//
+// Falls back to 0600 mode when the target did not exist (dead code
+// on the scrub path — callers Stat first — but robust if this helper
+// is reused).
+func writeConfigAtomic(path string, payload []byte) error {
+	// Resolve one level of symlink so a chezmoi-style dotfiles setup
+	// (~/.cursor/hooks.json -> ~/.dotfiles/cursor/hooks.json) has the
+	// scrub land on the concrete target file rather than clobber the
+	// link itself. Deliberately one hop only: if the target is itself
+	// a symlink we walk again inside os.Readlink → os.Stat, and the
+	// atomic-rename below is confined to the concrete target's dir.
+	//
+	// Rationale for single-hop rather than filepath.EvalSymlinks:
+	// EvalSymlinks fails if any component along the path does not
+	// exist; we want the scrub to work even when the parent dir of
+	// the resolved target is missing (rare, but the scrub is
+	// best-effort and a missing sibling should not abort).
+	resolved := path
+	if lstat, err := os.Lstat(path); err == nil {
+		if lstat.Mode()&os.ModeSymlink != 0 {
+			if target, err := os.Readlink(path); err == nil {
+				if !filepath.IsAbs(target) {
+					target = filepath.Join(filepath.Dir(path), target)
+				}
+				resolved = target
+			}
+		}
+	}
+	var (
+		mode     os.FileMode = 0o600
+		uid, gid             = -1, -1
+	)
+	if st, err := os.Stat(resolved); err == nil {
+		mode = st.Mode().Perm()
+		uid, gid = fileOwner(st)
+	}
+	dir := filepath.Dir(resolved)
+	tmp, err := os.CreateTemp(dir, ".scrub-*")
+	if err != nil {
+		return fmt.Errorf("create temp: %w", err)
+	}
+	tmpName := tmp.Name()
+	// Best-effort cleanup: after a successful rename Remove() is a no-op;
+	// on any error before the rename it wipes the temp so nothing dangles.
+	defer func() { _ = os.Remove(tmpName) }()
+	if _, err := tmp.Write(payload); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("write temp: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("fsync temp: %w", err)
+	}
+	if err := tmp.Chmod(mode); err != nil {
+		_ = tmp.Close()
+		return fmt.Errorf("chmod temp: %w", err)
+	}
+	if uid >= 0 && gid >= 0 {
+		// Failure here is not fatal: on unprivileged scrubs Chown will
+		// EPERM against a foreign uid, and we'd rather keep the caller's
+		// uid on the swapped-in file than abort. On a root uninstall
+		// (the primary caller) it succeeds and preserves the user's
+		// ownership across the atomic swap.
+		_ = os.Chown(tmpName, uid, gid)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp: %w", err)
+	}
+	if err := os.Rename(tmpName, resolved); err != nil {
+		return fmt.Errorf("rename temp -> target: %w", err)
+	}
+	// Best-effort parent fsync so the rename survives a crash immediately
+	// after this call returns. Endpoint-shipping constraint: laptop lids
+	// close, kernel panics happen, the swap must be durable.
+	if d, err := os.Open(dir); err == nil {
+		_ = d.Sync()
+		_ = d.Close()
+	}
+	return nil
 }
 
 // marshalSortedIndent is a Go equivalent of json.dumps(sort_keys=True,
@@ -332,7 +473,44 @@ func marshalSortedIndent(v any, indent string) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
+// writeSortedJSONValue emits `v` in the exact byte shape Python
+// `json.dumps(sort_keys=True, indent=2)` would produce, so that a
+// scrub over a file the Python variant previously wrote is idempotent
+// (no `bytes.Equal(buf, original)` mismatch). Two Go-specific defaults
+// we deliberately override:
+//
+//   - json.Marshal HTML-escapes `<`, `>`, `&` to `<` / `>` /
+//     `&`. Python's json.dumps does not. A settings.json emitted
+//     by the old Python scrubber that contains URL query strings, HTML
+//     snippets in env values, or ampersands in labels would otherwise
+//     always fail the equality check and force a rewrite (mtime bump,
+//     file watchers wake, and a doc claim would silently drift).
+//   - json.Marshal's default `<` / `>` / `&` treatment is meant for
+//     `<script>` embedding, which does not apply here.
+//
+// The equivalent to Python's ensure_ascii=False (letting non-ASCII
+// bytes through un-\uXXXX-encoded) is emitting the raw UTF-8. Python
+// defaults to ensure_ascii=True (escapes), which matches Go's
+// json.Marshal behaviour for non-ASCII bytes, so no adjustment is
+// needed there.
 func writeSortedJSONValue(buf *bytes.Buffer, v any, prefix, indent string) error {
+	// jsonNoHTMLEscape marshals a value with SetEscapeHTML(false) so
+	// `<`, `>`, `&` survive verbatim.
+	jsonNoHTMLEscape := func(x any) ([]byte, error) {
+		var b bytes.Buffer
+		enc := json.NewEncoder(&b)
+		enc.SetEscapeHTML(false)
+		if err := enc.Encode(x); err != nil {
+			return nil, err
+		}
+		out := b.Bytes()
+		// enc.Encode appends a trailing newline; strip it so the
+		// caller controls line separators.
+		if len(out) > 0 && out[len(out)-1] == '\n' {
+			out = out[:len(out)-1]
+		}
+		return out, nil
+	}
 	switch val := v.(type) {
 	case nil:
 		buf.WriteString("null")
@@ -343,13 +521,13 @@ func writeSortedJSONValue(buf *bytes.Buffer, v any, prefix, indent string) error
 			buf.WriteString("false")
 		}
 	case string:
-		encoded, err := json.Marshal(val)
+		encoded, err := jsonNoHTMLEscape(val)
 		if err != nil {
 			return err
 		}
 		buf.Write(encoded)
 	case float64:
-		encoded, err := json.Marshal(val)
+		encoded, err := jsonNoHTMLEscape(val)
 		if err != nil {
 			return err
 		}
@@ -389,7 +567,7 @@ func writeSortedJSONValue(buf *bytes.Buffer, v any, prefix, indent string) error
 		buf.WriteString("{\n")
 		for i, k := range keys {
 			buf.WriteString(inner)
-			keyBytes, err := json.Marshal(k)
+			keyBytes, err := jsonNoHTMLEscape(k)
 			if err != nil {
 				return err
 			}
@@ -406,10 +584,11 @@ func writeSortedJSONValue(buf *bytes.Buffer, v any, prefix, indent string) error
 		buf.WriteString(prefix)
 		buf.WriteString("}")
 	default:
-		// Fall back to encoding/json for anything unexpected — matches
-		// the Python variant's "we don't touch unknown value types"
-		// behaviour by round-tripping the payload unchanged.
-		encoded, err := json.Marshal(v)
+		// Fall back to encoding/json (with HTML escaping disabled so
+		// the round-trip stays byte-idempotent with Python's json.dumps
+		// output) for anything unexpected — matches the Python variant's
+		// "we do not touch unknown value types" behaviour.
+		encoded, err := jsonNoHTMLEscape(v)
 		if err != nil {
 			return err
 		}
@@ -437,6 +616,17 @@ var (
 	tomlTopLevelRE   = regexp.MustCompile(`^\[([^\[\]\.\s]+)\]\s*$`)
 	tomlTableHeader  = regexp.MustCompile(`^\s*\[\[?[^\[\]]+\]\]?\s*$`)
 	codexNotifyStart = regexp.MustCompile(`^\s*notify\s*=`)
+	// tomlOtelSectionRE matches every table header rooted at the `otel`
+	// key: bare `[otel]`, dotted `[otel.exporter]`,
+	// `[otel.exporter.otlp-http]`, `[otel.exporter.otlp-http.headers]`,
+	// `[otel.trace_exporter.otlp-http.headers]`, etc. The Codex TOML
+	// marshaller emits the DC config across multiple sub-tables and
+	// the DC-identifying `x-defenseclaw-*` header keys land in the
+	// leaf table, not in the bare `[otel]` section, so a scrubber
+	// that stops at the first sub-table would miss them. This regex
+	// lets the section-scan walk every `otel.*` subsection as one
+	// logical block.
+	tomlOtelSectionRE = regexp.MustCompile(`^\s*\[otel(?:\.[^\[\]]+)?\]\s*$`)
 )
 
 func scrubCodexFile(path string, markers []string) (bool, error) {
@@ -452,8 +642,30 @@ func scrubCodexFile(path string, markers []string) (bool, error) {
 	i := 0
 	n := len(lines)
 	changed := false
+	// inTopLevel tracks whether the scanner is still before the first
+	// table header. The `notify` array is a DefenseClaw-owned top-level
+	// key ONLY when it appears above every `[section]` line — inside a
+	// user-owned table (say [projects."/x"] with its own `notify =` for
+	// per-project alerting), TOML scopes the key to that table and a
+	// blanket scrub would delete user state. Flag flips false on the
+	// first table header we see and stays false for the rest of the
+	// file. The `[hooks]` / `[otel]` branch consumes its own section, so
+	// the section-scoped headers there never reach the flip point.
+	inTopLevel := true
 
-	sectionReferencesDC := func(start int, extra []string) (bool, int) {
+	// sectionReferencesDC walks forward from `start` (the line right
+	// after a `[section]` header) until either (a) EOF, or (b) a
+	// table header that fails `stayInSection` is seen. Returns
+	// (matched, end) where `end` is the line index of the first line
+	// NOT consumed. Any line whose text contains a `combined`
+	// marker sets matched=true. `combined = markers + extra`.
+	//
+	// `stayInSection` decides whether an intervening table header
+	// keeps the scan going (for the `[otel]` hierarchy where the
+	// DC-identifying content lives under a nested sub-table, so the
+	// scan must span sub-tables to see the markers) or terminates
+	// the scan (for `[hooks]` where all DC content lives inline).
+	sectionReferencesDC := func(start int, extra []string, stayInSection func(hdr string) bool) (bool, int) {
 		combined := append([]string{}, markers...)
 		combined = append(combined, extra...)
 		j := start
@@ -462,7 +674,9 @@ func scrubCodexFile(path string, markers []string) (bool, error) {
 			line := lines[j]
 			trimmed := strings.TrimSpace(line)
 			if tomlTableHeader.MatchString(trimmed) {
-				break
+				if stayInSection == nil || !stayInSection(trimmed) {
+					break
+				}
 			}
 			if containsAnyMarker(line, combined) {
 				matched = true
@@ -472,16 +686,36 @@ func scrubCodexFile(path string, markers []string) (bool, error) {
 		return matched, j
 	}
 
+	// stayInOtelHierarchy accepts any `[otel]` or `[otel.<subpath>]`
+	// header so the section-scan spans the whole DC-emitted OTel
+	// TOML shape:
+	//
+	//   [otel]
+	//   log_user_prompt = false
+	//   [otel.exporter.otlp-http]
+	//   endpoint = "http://127.0.0.1:18970/v1/logs"
+	//   [otel.exporter.otlp-http.headers]
+	//   x-defenseclaw-token = "..."   <-- DC-identifying marker lives here
+	//
+	// A scan that stopped at the first sub-table header would never
+	// reach the identifying header substrings and mis-classify the
+	// block as user-owned.
+	stayInOtelHierarchy := func(hdr string) bool {
+		return tomlOtelSectionRE.MatchString(hdr)
+	}
+
 	for i < n {
 		line := lines[i]
 		trimmed := strings.TrimSpace(line)
 
 		if m := tomlTopLevelRE.FindStringSubmatch(trimmed); m != nil && (m[1] == "hooks" || m[1] == "otel") {
 			var extra []string
+			var stayIn func(string) bool
 			if m[1] == "otel" {
 				extra = scrubCodexOtelMarkers
+				stayIn = stayInOtelHierarchy
 			}
-			matched, end := sectionReferencesDC(i+1, extra)
+			matched, end := sectionReferencesDC(i+1, extra, stayIn)
 			if matched {
 				changed = true
 				i = end
@@ -491,12 +725,25 @@ func scrubCodexFile(path string, markers []string) (bool, error) {
 				}
 				continue
 			}
+			// Kept user's [hooks] or [otel] block: we are now inside a
+			// user table, so a later `notify = …` no longer refers to
+			// the top-level DC-owned notify array. Same policy as any
+			// other table header below.
+			inTopLevel = false
 			out = append(out, line)
 			i++
 			continue
 		}
 
-		if codexNotifyStart.MatchString(line) {
+		// Any non-DC-owned table header ends the top-level region for
+		// the rest of the file. Uses the broader tomlTableHeader regex
+		// so simple `[foo]`, dotted `[projects."x"]`, and array-of-tables
+		// `[[some.array]]` all count.
+		if tomlTableHeader.MatchString(trimmed) {
+			inTopLevel = false
+		}
+
+		if inTopLevel && codexNotifyStart.MatchString(line) {
 			if strings.Contains(line, "]") {
 				if containsAnyMarker(line, markers) {
 					changed = true
@@ -536,7 +783,27 @@ func scrubCodexFile(path string, markers []string) (bool, error) {
 		return false, nil
 	}
 	joined := strings.Join(out, "")
-	if err := os.WriteFile(path, []byte(joined), 0o600); err != nil {
+	// Round-trip sanity check: the line scanner deliberately walks a
+	// surface subset of TOML (top-level [hooks]/[otel] tables + the
+	// pre-table `notify = [...]` array) and cannot guarantee the
+	// output is well-formed for every possible input shape. Endpoint
+	// software: shipping a broken config.toml would brick Codex on
+	// the user's next launch, which is worse than leaving DC entries
+	// behind and letting the guardian re-repair. Parse the post-scrub
+	// bytes and, if TOML rejects them, refuse the write with a
+	// distinct error so the uninstall path falls through to the
+	// "one or more agent-config scrubs failed" die() at
+	// packaging/macos/uninstall.sh — the operator sees a clear
+	// diagnostic and the file stays intact for hand-editing.
+	//
+	// A nested TOML validation would need a full parser; go-toml is
+	// already imported by other parts of the tree, so the cost of
+	// this guard is one Unmarshal call per successful scrub.
+	var parsed map[string]any
+	if err := toml.Unmarshal([]byte(joined), &parsed); err != nil {
+		return false, fmt.Errorf("post-scrub TOML would not re-parse (%s left unchanged): %w", path, err)
+	}
+	if err := writeConfigAtomic(path, []byte(joined)); err != nil {
 		return false, err
 	}
 	return true, nil

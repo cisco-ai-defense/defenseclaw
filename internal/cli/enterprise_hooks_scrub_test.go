@@ -9,6 +9,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -301,6 +302,109 @@ trust_level = "trusted"
 	}
 }
 
+// TestScrubCodex_PreservesNotifyInsideUserTable is a regression guard for
+// the top-level-only scoping of the `notify =` scrub. DefenseClaw owns the
+// FILE-LEVEL notify array (invoked before any [table] header). If a user
+// puts a `notify = [...]` inside a table they own (e.g. per-project
+// alerting under [projects."/Users/u/dev"]) and its value happens to
+// contain one of our markers as a substring, the earlier scanner would
+// still delete it — a real risk when markers include short strings like
+// "notify-bridge.sh". Assert the top-level flag flips at the first table
+// header and gates the notify branch.
+func TestScrubCodex_PreservesNotifyInsideUserTable(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	writeFile(t, path, `model = "gpt-5"
+
+[projects."/Users/u/dev"]
+trust_level = "trusted"
+notify = ["bash", "/tmp/notify-bridge.sh"]
+
+[projects."/Users/u/otherdir"]
+trust_level = "trusted"
+`)
+	if _, err := scrubCodexFile(path, scrubDefaultMarkers); err != nil {
+		t.Fatalf("scrubCodexFile: %v", err)
+	}
+	out := readFile(t, path)
+	if !strings.Contains(out, `notify = ["bash", "/tmp/notify-bridge.sh"]`) {
+		t.Errorf("in-table notify was scrubbed; DC-owned scrub must only affect the top-level array:\n%s", out)
+	}
+	if !strings.Contains(out, `[projects."/Users/u/dev"]`) {
+		t.Errorf("user projects table lost:\n%s", out)
+	}
+	if !strings.Contains(out, `[projects."/Users/u/otherdir"]`) {
+		t.Errorf("second user projects table lost:\n%s", out)
+	}
+}
+
+// TestScrubCodex_PreservesUserLocalOtelCollector is a regression guard
+// for a real endpoint-software failure mode: developers commonly run
+// their own OTel collector on loopback (jaeger-all-in-one, Grafana
+// Alloy, otel-desktop-viewer, etc.) at http://localhost:4318 or
+// http://127.0.0.1:4318. The prior scrub keyed on `127.0.0.1` /
+// `localhost` as sufficient markers, which would wipe those user
+// blocks on uninstall. Behaviour after tightening: the block is
+// only classified as DefenseClaw-managed when it carries a
+// DC-authored header substring, so a plain user block survives.
+func TestScrubCodex_PreservesUserLocalOtelCollector(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	writeFile(t, path, `model = "gpt-5"
+
+[otel]
+log_user_prompt = false
+[otel.exporter.otlp-http]
+endpoint = "http://127.0.0.1:4318"
+protocol = "grpc"
+`)
+	if _, err := scrubCodexFile(path, scrubDefaultMarkers); err != nil {
+		t.Fatalf("scrubCodexFile: %v", err)
+	}
+	out := readFile(t, path)
+	if !strings.Contains(out, "[otel]") {
+		t.Errorf("user local OTel [otel] block was scrubbed:\n%s", out)
+	}
+	if !strings.Contains(out, "127.0.0.1:4318") {
+		t.Errorf("user local OTel endpoint was scrubbed:\n%s", out)
+	}
+}
+
+// TestScrubCodex_StillScrubsDefenseClawOtelBlock complements the
+// user-collector guard: the DC-authored [otel] block (which contains
+// the x-defenseclaw-* header substrings that the codex connector
+// emits) MUST still be scrubbed. Guards against over-tightening the
+// marker set to the point where the DC block itself no longer matches.
+func TestScrubCodex_StillScrubsDefenseClawOtelBlock(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	writeFile(t, path, `model = "gpt-5"
+
+[otel]
+log_user_prompt = false
+[otel.exporter.otlp-http]
+endpoint = "http://127.0.0.1:18970"
+protocol = "json"
+[otel.exporter.otlp-http.headers]
+x-defenseclaw-source = "codex"
+x-defenseclaw-client = "codex-otel/1.0"
+x-defenseclaw-token = "abc"
+`)
+	if _, err := scrubCodexFile(path, scrubDefaultMarkers); err != nil {
+		t.Fatalf("scrubCodexFile: %v", err)
+	}
+	out := readFile(t, path)
+	if strings.Contains(out, "[otel]") {
+		t.Errorf("DC-owned [otel] block survived scrub:\n%s", out)
+	}
+	if strings.Contains(out, "x-defenseclaw") {
+		t.Errorf("DC header substrings survived scrub:\n%s", out)
+	}
+	if !strings.Contains(out, `model = "gpt-5"`) {
+		t.Errorf("model preference was lost:\n%s", out)
+	}
+}
+
 // TestScrubCodex_LeavesUnrelatedBlocksAlone guards the "if the user has
 // their own [otel] block that does NOT reference DefenseClaw, leave it
 // alone" invariant. This was a real regression risk in the earlier
@@ -332,16 +436,25 @@ PreToolUse = "/Users/u/my-own-hook.sh"
 	}
 }
 
+// setScrubFlags atomically swaps the package-level flag vars for the
+// duration of one test and restores the previous values via
+// t.Cleanup. Kept as a shared helper so the exit-code tests can't
+// leak flag state into anything a future `t.Parallel()` call adds —
+// or a new test that reads these vars without assigning them.
+func setScrubFlags(t *testing.T, connector, file string, quietMissing bool) {
+	t.Helper()
+	prevConn, prevFile, prevQuiet := scrubConnectorFlag, scrubFileFlag, scrubMissingIsSilent
+	t.Cleanup(func() {
+		scrubConnectorFlag, scrubFileFlag, scrubMissingIsSilent = prevConn, prevFile, prevQuiet
+	})
+	scrubConnectorFlag, scrubFileFlag, scrubMissingIsSilent = connector, file, quietMissing
+}
+
 // TestScrubReturnsRC2OnMissingFile covers the file-not-found exit code
 // callers (uninstall.sh) key off. Delivered via the ExitCode() error
 // surface, not a naked os.Exit.
 func TestScrubReturnsRC2OnMissingFile(t *testing.T) {
-	prev := scrubMissingIsSilent
-	defer func() { scrubMissingIsSilent = prev }()
-	scrubMissingIsSilent = false
-
-	scrubConnectorFlag = "cursor"
-	scrubFileFlag = filepath.Join(t.TempDir(), "does-not-exist.json")
+	setScrubFlags(t, "cursor", filepath.Join(t.TempDir(), "does-not-exist.json"), false)
 	err := runEnterpriseHooksScrub(enterpriseHooksScrubCmd, nil)
 	if err == nil {
 		t.Fatalf("expected error for missing file")
@@ -358,9 +471,9 @@ func TestScrubReturnsRC2OnMissingFile(t *testing.T) {
 // TestScrubReturnsRC3OnUnsupportedConnector guards the "geminicli
 // returns rc 3" contract from the previous shell test suite.
 func TestScrubReturnsRC3OnUnsupportedConnector(t *testing.T) {
-	scrubConnectorFlag = "geminicli"
-	scrubFileFlag = filepath.Join(t.TempDir(), "x.json")
-	writeFile(t, scrubFileFlag, "{}")
+	filePath := filepath.Join(t.TempDir(), "x.json")
+	writeFile(t, filePath, "{}")
+	setScrubFlags(t, "geminicli", filePath, false)
 	err := runEnterpriseHooksScrub(enterpriseHooksScrubCmd, nil)
 	if err == nil {
 		t.Fatalf("expected error for unsupported connector")
@@ -379,9 +492,9 @@ func TestScrubReturnsRC3OnUnsupportedConnector(t *testing.T) {
 // scrub bails and reports rc 4 so operators can decide whether to
 // discard the file or edit it by hand.
 func TestScrubReturnsRC4OnBrokenJSON(t *testing.T) {
-	scrubConnectorFlag = "cursor"
-	scrubFileFlag = filepath.Join(t.TempDir(), "broken.json")
-	writeFile(t, scrubFileFlag, "this is not json\n")
+	filePath := filepath.Join(t.TempDir(), "broken.json")
+	writeFile(t, filePath, "this is not json\n")
+	setScrubFlags(t, "cursor", filePath, false)
 	err := runEnterpriseHooksScrub(enterpriseHooksScrubCmd, nil)
 	if err == nil {
 		t.Fatalf("expected error for garbage JSON")
@@ -392,6 +505,112 @@ func TestScrubReturnsRC4OnBrokenJSON(t *testing.T) {
 	}
 	if exitErr.ExitCode() != 4 {
 		t.Errorf("exit code = %d, want 4", exitErr.ExitCode())
+	}
+}
+
+// TestScrubClaudeCode_PreservesHTMLBytesInStringValues guards
+// byte-idempotency across the Python -> Go rewrite. Python's
+// `json.dumps(sort_keys=True, indent=2)` (the shape the previous
+// scrubber wrote) does NOT HTML-escape `<`, `>`, `&`. Go's
+// `json.Marshal` DOES by default. A settings.json that was previously
+// scrubbed by the Python variant and contains e.g. an env value with
+// an ampersand or an angle bracket would fail the `bytes.Equal(buf,
+// original)` early-return in writeSortedJSON, forcing an unnecessary
+// rewrite every scrub run (mtime bump, file-watcher wakeups) even
+// when no DC content is present. Assert `&`, `<`, `>` survive
+// verbatim in a no-op scrub.
+func TestScrubClaudeCode_PreservesHTMLBytesInStringValues(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "settings.json")
+	// Content shaped like `json.dumps(sort_keys=True, indent=2)` with
+	// no HTML escaping — this is the exact byte shape the old Python
+	// scrubber would leave a user's file in.
+	original := `{
+  "env": {
+    "MY_QS": "https://example.com/?x=1&y=2",
+    "MY_LIT": "<template>foo</template>"
+  },
+  "theme": "dark"
+}
+`
+	writeFile(t, path, original)
+	if _, err := scrubClaudeCodeFile(path, scrubDefaultMarkers); err != nil {
+		t.Fatalf("scrubClaudeCodeFile: %v", err)
+	}
+	out := readFile(t, path)
+	// Positive check: the raw HTML-bearing bytes survive verbatim.
+	for _, want := range []string{
+		`"https://example.com/?x=1&y=2"`,
+		`"<template>foo</template>"`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("HTML byte(s) were escaped or dropped: expected verbatim %q\n---output---\n%s", want, out)
+		}
+	}
+	// Negative check: Go's default SetEscapeHTML=true would emit
+	// the `<`, `>`, `&` byte sequences in place of
+	// `<`, `>`, `&`. Those escape SEQUENCES MUST NOT appear in the
+	// output. Use \u-escape literals here so the source text
+	// matches the exact 6-character on-disk shape the JSON encoder
+	// would have produced.
+	for _, bad := range []string{"\\u003c", "\\u003e", "\\u0026"} {
+		if strings.Contains(out, bad) {
+			t.Errorf("output contains JSON \\uXXXX escape %q — SetEscapeHTML=false must preserve the raw byte to stay Python-idempotent\n%s", bad, out)
+		}
+	}
+}
+
+// TestScrubCursor_ThroughSymlinkPreservesLink is a regression guard
+// for chezmoi / GNU stow / homeshick / vcsh users whose agent config
+// lives symlinked into a ~/.dotfiles/... tree. The scrub must:
+//
+//  1. Resolve the symlink and rewrite the concrete target file
+//     (so the agent sees the scrubbed content when it re-reads).
+//  2. Leave the symlink itself intact (so `stow --restow` doesn't
+//     re-link, and the user's dotfiles workflow keeps working).
+//
+// Behaviour before this fix: writeConfigAtomic refused symlinks
+// entirely with rc 4 → uninstall.sh set SCRUB_FAILED → refused to
+// delete ~/.defenseclaw → uninstall exited 1 on every chezmoi user.
+func TestScrubCursor_ThroughSymlinkPreservesLink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "dotfiles-cursor-hooks.json")
+	link := filepath.Join(dir, "hooks.json")
+	writeFile(t, target, `{
+  "version": 1,
+  "hooks": {
+    "preToolUse": [
+      {"type":"command","command":"/Users/u/.defenseclaw/hooks/cursor-hook.sh"},
+      {"type":"command","command":"/Users/u/.local/bin/keep-me.sh"}
+    ]
+  }
+}
+`)
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	if _, err := scrubCursorFile(link, scrubDefaultMarkers); err != nil {
+		t.Fatalf("scrubCursorFile through symlink: %v", err)
+	}
+	// The symlink itself must survive.
+	linkInfo, err := os.Lstat(link)
+	if err != nil {
+		t.Fatalf("lstat symlink after scrub: %v", err)
+	}
+	if linkInfo.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("symlink was replaced with a regular file — dotfiles workflow broken")
+	}
+	// And it must still point at the same target.
+	if p, err := os.Readlink(link); err != nil || p != target {
+		t.Errorf("symlink target changed: got %q want %q (err=%v)", p, target, err)
+	}
+	// The scrubbed content must land in the concrete target file.
+	out := readFile(t, target)
+	if strings.Contains(out, "defenseclaw") {
+		t.Errorf("DC entry survived scrub through symlink:\n%s", out)
+	}
+	if !strings.Contains(out, "keep-me.sh") {
+		t.Errorf("user entry lost during scrub through symlink:\n%s", out)
 	}
 }
 
@@ -410,26 +629,94 @@ func TestScrubEmptyObjectSafe(t *testing.T) {
 }
 
 // TestScrubManagedEnvKeysMatchClaudeCodeConnector is a sync guard: the
-// managed-env-key set the scrub knows about MUST match
-// claudeCodeOtelEnvKeys in internal/gateway/connector/claudecode.go.
-// A key added on the connector side without a matching entry here
-// would leave DefenseClaw's telemetry env vars in a user's
-// settings.json after uninstall.
+// managed-env-key set the scrub knows about MUST equal (both
+// directions) the OTel keys listed in claudeCodeOtelEnvKeys inside
+// internal/gateway/connector/claudecode.go.
+//
+// Both directions matter:
+//
+//   - scrub → connector: a scrub-known key that the connector doesn't
+//     write anymore is dead code, but it also means we're documenting
+//     a policy that no longer matches the code path — the two must
+//     agree so an uninstall doesn't strip a name the connector never
+//     wrote.
+//   - connector → scrub: a connector-newly-added key that the scrub
+//     doesn't know about survives the uninstall, leaves stale
+//     telemetry env vars in a user's settings.json, and (worse) can
+//     silently redirect Claude Code's OTLP traffic to
+//     http://127.0.0.1:18970 with no gateway listening. That's the
+//     load-bearing regression this test guards against.
+//
+// Failing loudly on a connector-source read failure (rather than
+// t.Skipf'ing) matches the "fail loudly if the guard is broken" goal:
+// a rename, refactor, or file-tree reshuffle that hides
+// claudecode.go from the test would silently drop this coverage.
 func TestScrubManagedEnvKeysMatchClaudeCodeConnector(t *testing.T) {
 	// This test intentionally lives in a package outside connector/
 	// (import cycle avoidance), so the check runs on the raw source
-	// via a simple substring scan. If the file layout changes the
-	// test will fail loudly rather than pass silently — that's fine.
-	data, err := os.ReadFile("../gateway/connector/claudecode.go")
+	// via a simple substring scan.
+	connectorPath := "../gateway/connector/claudecode.go"
+	data, err := os.ReadFile(connectorPath)
 	if err != nil {
-		t.Skipf("connector source not available at expected path: %v", err)
+		t.Fatalf("cannot read connector source at %s: %v — this is the sync-guard's data source; if the file moved, update the path here so the guard keeps running", connectorPath, err)
 	}
 	src := string(data)
+
+	// Forward direction: every scrub-known key must appear as a string
+	// literal in the connector source.
 	for key := range claudeManagedEnvKeys {
 		if !strings.Contains(src, `"`+key+`"`) {
-			t.Errorf("scrub knows managed env key %q but the Claude Code connector source no longer references it — the two lists have drifted", key)
+			t.Errorf("scrub knows managed env key %q but the Claude Code connector source no longer references it — the two lists have drifted (drop the key from claudeManagedEnvKeys if the connector no longer writes it)", key)
 		}
 	}
+
+	// Reverse direction: every key literally listed in claudeCodeOtelEnvKeys
+	// must be present in claudeManagedEnvKeys. Parse the connector's
+	// literal block by name so we don't false-positive on unrelated
+	// string literals scattered elsewhere in the file. If the block
+	// literal isn't found we fail hard — same "fail loudly" rationale
+	// as the file-read guard above.
+	block := extractGoStringSliceLiteral(t, src, "claudeCodeOtelEnvKeys")
+	if len(block) == 0 {
+		t.Fatalf("could not locate claudeCodeOtelEnvKeys literal in %s — the guard needs to enumerate it to check reverse coverage; if the variable was renamed or restructured update this test", connectorPath)
+	}
+	for _, key := range block {
+		if _, ok := claudeManagedEnvKeys[key]; !ok {
+			t.Errorf("Claude Code connector writes managed env key %q but scrub's claudeManagedEnvKeys does not include it — add it to internal/cli/enterprise_hooks_scrub.go so `defenseclaw enterprise hooks scrub --connector claudecode` strips it on uninstall", key)
+		}
+	}
+}
+
+// extractGoStringSliceLiteral pulls the string entries out of a `var
+// NAME = []string{ "A", "B", ... }` declaration. Deliberately minimal
+// — this guard only needs to enumerate the Claude Code OTel key list,
+// which is a flat literal on one line-per-entry shape. Anything more
+// intricate (multi-line initialisers, referenced constants) belongs in
+// a proper go/parser + type-check pipeline; we don't need that here
+// because the connector source is a single well-known file whose
+// shape we control.
+func extractGoStringSliceLiteral(t *testing.T, src, name string) []string {
+	t.Helper()
+	// Anchor on `<name> = []string{` (allowing var/const in front) and
+	// capture through the balancing `}`. Nested braces inside string
+	// literals are impossible here (keys are simple identifiers), so a
+	// non-greedy match against the first `}` is sufficient.
+	re := regexp.MustCompile(`(?s)\b` + regexp.QuoteMeta(name) + `\s*=\s*\[\]string\s*\{(.*?)\}`)
+	m := re.FindStringSubmatch(src)
+	if len(m) < 2 {
+		return nil
+	}
+	body := m[1]
+	// Pull every `"quoted-string"` inside the body. Comments in Go
+	// source can technically hide a `"..."` we shouldn't count, but
+	// that's not a real-world concern for this specific block.
+	strRE := regexp.MustCompile(`"([^"\\]*)"`)
+	matches := strRE.FindAllStringSubmatch(body, -1)
+	out := make([]string, 0, len(matches))
+	for _, s := range matches {
+		out = append(out, s[1])
+	}
+	return out
 }
 
 // -----------------------------------------------------------------------

@@ -1588,12 +1588,13 @@
       "purpose": "Override the DefenseClaw gateway binary used by the macOS uninstaller for the per-user agent-config scrub step (`defenseclaw-gateway enterprise hooks scrub`). Discovery order without this env var: /opt/cisco/secureclient/defenseclaw/bin/defenseclaw-gateway, then a `defenseclaw` or `defenseclaw-gateway` executable next to the uninstall.sh script. Bundle-fixture and dev-tree tests set this so they can drive uninstall.sh against a stub binary without needing the managed install tree present.",
       "default": "unset (auto-discover via the paths described above)",
       "accepted_values": ["any-absolute-path-to-executable", "unset"],
-      "security_impact": "none",
+      "security_impact": "low",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "packaging/macos/uninstall.sh:267", "description": "_scrub_bin() prefers this override before falling back to the managed install path"}
+        {"location": "packaging/macos/uninstall.sh:268", "description": "_scrub_bin() prefers this override before falling back to the managed install path"}
       ],
-      "since": "26.7.3"
+      "since": "26.7.3",
+      "security_note": "Uninstaller-only executable override — uninstall.sh runs under sudo, so the referenced binary is exec'd as root. _scrub_bin() validates every override before use: must be an absolute path, must be a regular file (not a symlink or directory), must be executable, must be root-owned, must not be group/other writable. Any check failing prints a WARN and falls through to auto-discovery. Intended for bundle-fixture and dev-tree tests; production installs should never set this."
     },
     {
       "name": "DEFENSECLAW_BAKED_HOOK_PATH",
