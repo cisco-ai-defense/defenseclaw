@@ -1266,7 +1266,9 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	// path returns above and deliberately records nothing because installed
 	// hooks fail closed on an unreachable gateway.
 	if verdict.Action == "allow" {
-		a.recordManagedAIDFailOpenVerdict(r.Context(), verdict)
+		metricCtx, cancelMetric := context.WithTimeout(context.WithoutCancel(r.Context()), time.Second)
+		a.recordManagedAIDFailOpenVerdict(metricCtx, verdict)
+		cancelMetric()
 	}
 	a.writeJSON(w, http.StatusOK, responseVerdict)
 }

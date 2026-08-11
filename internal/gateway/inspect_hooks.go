@@ -125,7 +125,8 @@ func (a *APIServer) handleInspectRequest(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	req.Content = truncateInspectContent(req.Content, maxInspectContentLen)
-	if req.Content == "" {
+	managedAIDOnly := a.managedAIDOnly()
+	if req.Content == "" && !managedAIDOnly {
 		a.writeJSON(w, http.StatusOK, &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}})
 		return
 	}
@@ -135,17 +136,22 @@ func (a *APIServer) handleInspectRequest(w http.ResponseWriter, r *http.Request)
 
 	t0 := time.Now()
 
-	ruleFindings, err := scanWithTimeout(r.Context(), req.Content, "user-request", inspectScanTimeout)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[inspect] pre-request scan timeout after %s\n", time.Since(t0))
-		a.writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "scan timeout"})
-		return
+	var verdict *ToolInspectVerdict
+	if managedAIDOnly {
+		verdict = a.inspectManagedAIDOnly(r.Context(), "message", req.Content)
+	} else {
+		ruleFindings, err := scanWithTimeout(r.Context(), req.Content, "user-request", inspectScanTimeout)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[inspect] pre-request scan timeout after %s\n", time.Since(t0))
+			a.writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "scan timeout"})
+			return
+		}
+		verdict = a.buildVerdict(ruleFindings, "prompt", false)
+		// Apply the prompt-surface UX contract before mode handling so
+		// "action" mode operators see alert (instead of block) and "observe"
+		// mode operators see the same audit reason explaining the demotion.
+		clampPromptDirectionToolVerdict(verdict, "prompt")
 	}
-	verdict := a.buildVerdict(ruleFindings, "prompt", false)
-	// Apply the prompt-surface UX contract before mode handling so
-	// "action" mode operators see alert (instead of block) and "observe"
-	// mode operators see the same audit reason explaining the demotion.
-	clampPromptDirectionToolVerdict(verdict, "prompt")
 	verdict.applyMode(inspectMode(a.scannerCfg))
 
 	elapsed := time.Since(t0)
@@ -199,7 +205,8 @@ func (a *APIServer) handleInspectResponse(w http.ResponseWriter, r *http.Request
 		return
 	}
 	req.Content = truncateInspectContent(req.Content, maxInspectContentLen)
-	if req.Content == "" {
+	managedAIDOnly := a.managedAIDOnly()
+	if req.Content == "" && !managedAIDOnly {
 		a.writeJSON(w, http.StatusOK, &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}})
 		return
 	}
@@ -209,13 +216,18 @@ func (a *APIServer) handleInspectResponse(w http.ResponseWriter, r *http.Request
 
 	t0 := time.Now()
 
-	ruleFindings, err := scanWithTimeout(r.Context(), req.Content, "llm-response", inspectScanTimeout)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[inspect] post-response scan timeout after %s\n", time.Since(t0))
-		a.writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "scan timeout"})
-		return
+	var verdict *ToolInspectVerdict
+	if managedAIDOnly {
+		verdict = a.inspectManagedAIDOnly(r.Context(), "message", req.Content)
+	} else {
+		ruleFindings, err := scanWithTimeout(r.Context(), req.Content, "llm-response", inspectScanTimeout)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[inspect] post-response scan timeout after %s\n", time.Since(t0))
+			a.writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "scan timeout"})
+			return
+		}
+		verdict = a.buildVerdict(ruleFindings, "completion", false)
 	}
-	verdict := a.buildVerdict(ruleFindings, "completion", false)
 	verdict.applyMode(inspectMode(a.scannerCfg))
 
 	elapsed := time.Since(t0)
@@ -273,35 +285,48 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	outputStr := truncateInspectContent(string(req.Output), maxInspectContentLen)
+	managedAIDOnly := a.managedAIDOnly()
+	outputStr := string(req.Output)
+	if managedAIDOnly {
+		var semanticOutput string
+		if err := json.Unmarshal(req.Output, &semanticOutput); err == nil {
+			outputStr = semanticOutput
+		}
+	}
+	outputStr = truncateInspectContent(outputStr, maxInspectContentLen)
 
 	fmt.Fprintf(os.Stderr, "[inspect] >>> post-tool tool=%q output_len=%d exit_code=%d\n",
 		req.Tool, len(outputStr), req.ExitCode)
 
 	t0 := time.Now()
 
-	ruleFindings, err := scanWithTimeout(r.Context(), outputStr, req.Tool+"-response", inspectScanTimeout)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "[inspect] post-tool scan timeout after %s\n", time.Since(t0))
-		a.writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "scan timeout"})
-		return
-	}
-	verdict := a.buildVerdict(ruleFindings, "tool_response", false)
+	var verdict *ToolInspectVerdict
+	if managedAIDOnly {
+		verdict = a.inspectManagedAIDOnly(r.Context(), "message", outputStr)
+	} else {
+		ruleFindings, err := scanWithTimeout(r.Context(), outputStr, req.Tool+"-response", inspectScanTimeout)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[inspect] post-tool scan timeout after %s\n", time.Since(t0))
+			a.writeJSON(w, http.StatusGatewayTimeout, map[string]string{"error": "scan timeout"})
+			return
+		}
+		verdict = a.buildVerdict(ruleFindings, "tool_response", false)
 
-	// Judge lane (J3-3c/J3-3d): the generic /inspect/tool-response
-	// endpoint was regex-only. Forward the tool output to the LLM judge
-	// for connectors opted into the completion direction via
-	// guardrail.judge.hook_connectors + EffectiveStrategy("completion").
-	// Tool output is completion-shaped (matches the proxy lane's
-	// inspectToolResult). This is the J3-3c timeout split: the regex
-	// scan above keeps the 200ms inspectScanTimeout cap, while the judge
-	// runs on a deadline-free context.Background() bounded only by its
-	// own HookTimeout. The shipped default (regex_only) ⇒ no judge call.
-	// ToolResponseInspectRequest carries no connector field, so the gate
-	// resolves the process connector via connectorName().
-	if jv := a.runHookJudge(context.Background(), "completion", "completion",
-		a.connectorName(), outputStr, req.Tool, verdict); jv != nil {
-		verdict = mergeWithJudgeVerdict(verdict, jv)
+		// Judge lane (J3-3c/J3-3d): the generic /inspect/tool-response
+		// endpoint was regex-only. Forward the tool output to the LLM judge
+		// for connectors opted into the completion direction via
+		// guardrail.judge.hook_connectors + EffectiveStrategy("completion").
+		// Tool output is completion-shaped (matches the proxy lane's
+		// inspectToolResult). This is the J3-3c timeout split: the regex
+		// scan above keeps the 200ms inspectScanTimeout cap, while the judge
+		// runs on a deadline-free context.Background() bounded only by its
+		// own HookTimeout. The shipped default (regex_only) ⇒ no judge call.
+		// ToolResponseInspectRequest carries no connector field, so the gate
+		// resolves the process connector via connectorName().
+		if jv := a.runHookJudge(context.Background(), "completion", "completion",
+			a.connectorName(), outputStr, req.Tool, verdict); jv != nil {
+			verdict = mergeWithJudgeVerdict(verdict, jv)
+		}
 	}
 
 	verdict.applyMode(inspectMode(a.scannerCfg))
