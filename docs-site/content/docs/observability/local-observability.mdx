@@ -273,7 +273,7 @@ The bundled `DefenseClawManagedAIDFailOpenSustained` rule uses a positive
 availability-reason allowlist, so `no_content` and `unknown` cannot accidentally
 become paging conditions:
 
-```promql
+```text
 sum by (reason) (
   rate(defenseclaw_managed_aid_fail_open_decisions_total{reason=~"inspector_unwired|aid_unavailable"}[5m])
 ) > 0
