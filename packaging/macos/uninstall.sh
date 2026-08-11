@@ -33,6 +33,15 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Path to the Python scrubber for the `amp` connector. Amp's plugin
+# lives at ~/.config/amp/plugins/defenseclaw.ts and is signed-backup-
+# managed by scrub_agent_configs.py — restoring the pre-install
+# plugin content on uninstall requires SHA-256 verification against a
+# manifest under ~/.defenseclaw/connector_backups/amp/config.json.
+# The codex/claudecode/cursor connectors are scrubbed by the Go
+# `defenseclaw-gateway enterprise hooks scrub` subcommand (no python3
+# runtime dependency). See scrub_agent_config() below for the split.
 SCRUB_PY="${SCRIPT_DIR}/lib/scrub_agent_configs.py"
 
 INSTALL_PREFIX="/opt/cisco/secureclient/defenseclaw"
@@ -264,7 +273,181 @@ stop_daemon "${LEGACY_GUARDIAN_LAUNCHD_LABEL}" "${LEGACY_GUARDIAN_PLIST_DST}"
 # start hitting "command not found" + fail-close every tool call the moment
 # we delete ~/.defenseclaw/hooks/*-hook.sh. The scrub runs as the target
 # user (drop privileges via sudo -u) so file ownership is preserved.
+#
+# The scrub logic is baked into the DefenseClaw binary as
+# `defenseclaw enterprise hooks scrub`; the previous Python helper
+# crashed on stock macOS hosts where /usr/bin/python3 is a Xcode CLT
+# stub that fails to launch without developer tools installed. Using
+# our own Go binary sidesteps that dependency entirely.
 
+# Discover the gateway binary. Managed installs land it at a known
+# absolute path; bundle-fixture / dev-tree tests can override via
+# DEFENSECLAW_SCRUB_BIN so they don't need the managed layout present.
+#
+# _scrub_bin_trusted PATH LABEL [--allow-non-root-owner]
+#   Validates a candidate scrub-binary path. Returns 0 on success,
+#   printing the path to stdout; returns 1 on any check failure,
+#   emitting a WARN so the operator sees which check tripped. All
+#   check failures write to stderr and never abort the shell — the
+#   caller decides whether to fall through to the next candidate.
+#
+#   uninstall.sh runs under `sudo`, so the referenced binary is
+#   executed as root; every candidate is treated as untrusted input
+#   and must satisfy the checks below before it takes effect:
+#
+#     1. absolute path (relative could be rerooted by PWD)
+#     2. exists as a regular file (not a directory, not a device,
+#        not a symlink — a symlink swap is the exact race that
+#        motivates this)
+#     3. is executable
+#     4. mode & 0022 == 0 (no group/other write bits — a compromised
+#        umask cannot slip a writable binary through)
+#     5. owned by uid 0 (matches the installer's "root-owned trusted
+#        input" pattern for --plist)
+#
+#   `--allow-non-root-owner` skips check (5). The bundle-fixture /
+#   dev-tree candidates under SCRIPT_DIR inherit the extracting
+#   user's uid — that's expected for a `tar xzf` extraction and
+#   matches the installer's two-tier PLIST_SRC policy where the
+#   bundle default is accepted regardless of owner (its content came
+#   from the trusted tarball). Managed-install candidates under
+#   INSTALL_PREFIX must always be root-owned; the flag isn't used
+#   there.
+#
+#   DC_UNINSTALL_SKIP_SCRUB_BIN_TRUST=1 is a test-side seam that
+#   skips checks 4 & 5 entirely so bundle-fixture tests can drive
+#   uninstall.sh against a non-root-owned binary in a tmpdir
+#   (parallel to DC_INSTALLER_SKIP_ROOT_CHECK on the install side).
+_scrub_bin_trusted() {
+  local path="$1"
+  local label="$2"
+  local allow_non_root_owner="false"
+  case "${3:-}" in
+    --allow-non-root-owner) allow_non_root_owner="true" ;;
+    "") ;;
+    *) warn "${label} internal error: unknown flag ${3}"; return 1 ;;
+  esac
+  case "${path}" in
+    /*) ;;
+    *)
+      warn "${label} must be an absolute path (got: ${path}); ignoring"
+      return 1
+      ;;
+  esac
+  if [[ -L "${path}" ]]; then
+    warn "${label} is a symlink; refusing to follow (${path}); ignoring"
+    return 1
+  fi
+  if [[ ! -f "${path}" ]]; then
+    warn "${label} is not a regular file: ${path}; ignoring"
+    return 1
+  fi
+  if [[ ! -x "${path}" ]]; then
+    warn "${label} is not executable: ${path}; ignoring"
+    return 1
+  fi
+  if [[ "${DC_UNINSTALL_SKIP_SCRUB_BIN_TRUST:-}" == "1" ]]; then
+    printf '%s' "${path}"
+    return 0
+  fi
+  local _own_mode _own _mode
+  _own_mode="$(stat -f '%Su %Lp' "${path}" 2>/dev/null || echo '')"
+  if [[ -z "${_own_mode}" ]]; then
+    warn "${label} cannot be stat'd: ${path}; ignoring"
+    return 1
+  fi
+  _own="${_own_mode%% *}"
+  _mode="${_own_mode##* }"
+  if (( (8#${_mode} & 8#022) != 0 )); then
+    warn "${label} is group/other writable (mode ${_mode}): ${path}; ignoring"
+    return 1
+  fi
+  if [[ "${allow_non_root_owner}" != "true" && "${_own}" != "root" ]]; then
+    warn "${label} must be owned by root (got: ${_own}): ${path}; ignoring"
+    return 1
+  fi
+  # Strict tier: validate the containing directory too. A binary
+  # can be root-owned + 0755 and still be swap-hijackable if the
+  # DIRECTORY it lives in is writable by a non-root user — that
+  # user can `mv the-file another; touch the-file` and replace the
+  # trusted binary at will. The bundle-fixture tier stays exempt
+  # because its extraction directory inherits the operator's uid
+  # (documented in the installer's PLIST_SRC two-tier policy).
+  if [[ "${allow_non_root_owner}" != "true" ]]; then
+    local _dir _dir_own_mode _dir_own _dir_mode
+    _dir="$(dirname -- "${path}")"
+    _dir_own_mode="$(stat -f '%Su %Lp' "${_dir}" 2>/dev/null || echo '')"
+    if [[ -z "${_dir_own_mode}" ]]; then
+      warn "${label} containing dir cannot be stat'd: ${_dir}; ignoring"
+      return 1
+    fi
+    _dir_own="${_dir_own_mode%% *}"
+    _dir_mode="${_dir_own_mode##* }"
+    if [[ "${_dir_own}" != "root" ]]; then
+      warn "${label} containing dir must be owned by root (got: ${_dir_own}): ${_dir}; ignoring"
+      return 1
+    fi
+    if (( (8#${_dir_mode} & 8#022) != 0 )); then
+      warn "${label} containing dir is group/other writable (mode ${_dir_mode}): ${_dir}; ignoring"
+      return 1
+    fi
+  fi
+  printf '%s' "${path}"
+  return 0
+}
+
+# _scrub_bin resolves the scrub-binary path by trying, in order:
+#   1. DEFENSECLAW_SCRUB_BIN (operator override — strict trust)
+#   2. INSTALL_PREFIX/bin/defenseclaw-gateway (managed install — strict trust)
+#   3. SCRIPT_DIR/defenseclaw           (bundle default — relaxed owner tier)
+#   4. SCRIPT_DIR/defenseclaw-gateway   (bundle/dev — relaxed owner tier)
+#
+# Any candidate that fails the trust check prints a WARN and is
+# skipped; discovery falls through to the next candidate.
+_scrub_bin() {
+  local resolved=""
+  if [[ -n "${DEFENSECLAW_SCRUB_BIN:-}" ]]; then
+    resolved="$(_scrub_bin_trusted "${DEFENSECLAW_SCRUB_BIN}" "DEFENSECLAW_SCRUB_BIN" || true)"
+    if [[ -n "${resolved}" ]]; then
+      printf '%s' "${resolved}"
+      return
+    fi
+    # Fall through: warn already printed by helper.
+  fi
+  # Managed-install location: strict trust (root-owned + mode
+  # tightened). If someone dropped an untrusted binary here they've
+  # already compromised the managed tree, but we still don't want
+  # uninstall.sh to launch it as root.
+  resolved="$(_scrub_bin_trusted "${INSTALL_PREFIX}/bin/defenseclaw-gateway" "managed install gateway binary" || true)"
+  if [[ -n "${resolved}" ]]; then
+    printf '%s' "${resolved}"
+    return
+  fi
+  # Bundle-fixture / dev-tree fallbacks: relaxed owner tier because
+  # the bundle unpacks under the caller's uid. Mode + symlink checks
+  # still apply.
+  for cand in \
+    "${SCRIPT_DIR}/defenseclaw" \
+    "${SCRIPT_DIR}/defenseclaw-gateway"; do
+    resolved="$(_scrub_bin_trusted "${cand}" "bundle scrub binary" --allow-non-root-owner || true)"
+    if [[ -n "${resolved}" ]]; then
+      printf '%s' "${resolved}"
+      return
+    fi
+  done
+  printf ''
+}
+
+SCRUB_BIN="$(_scrub_bin)"
+
+# python3 resolver — used only by the `amp` connector's scrub path.
+# The other three connectors (codex / claudecode / cursor) route
+# through the Go binary at ${SCRUB_BIN} and do not need python3.
+# `amp` needs SHA-256 verification against a signed manifest to
+# restore its plugin file safely, which the Go scrubber doesn't
+# implement today; keeping python3 gated to this one connector
+# preserves the QA rip-out for the common case without regressing
+# Amp uninstall.
 PY="$(command -v python3 || printf '/usr/bin/python3')"
 
 scrub_agent_config() {
@@ -279,29 +462,54 @@ scrub_agent_config() {
   elif [[ ! -f "${cfg}" ]]; then
       return 0
   fi
-  if [[ ! -f "${SCRUB_PY}" ]]; then
-    warn "scrub helper missing: ${SCRUB_PY}; skipping ${cfg}"
-    SCRUB_FAILED="true"
-    return 0
-  fi
   log "  scrubbing ${connector} entries from ${cfg}"
   local rc=0
-  if [[ -n "${run_as_user}" && $(id -u "${run_as_user}" 2>/dev/null) != "0" ]]; then
-    if [[ -n "${authority}" ]]; then
-      sudo -u "${run_as_user}" "${PY}" "${SCRUB_PY}" "${connector}" "${cfg}" "${authority}" || rc=$?
+
+  # Split-route: `amp` uses the Python scrubber (signed-backup
+  # restore of ~/.config/amp/plugins/defenseclaw.ts requires SHA-256
+  # verification against the manifest under
+  # ~/.defenseclaw/connector_backups/amp/config.json — logic that
+  # lives in scrub_agent_configs.py). Everything else uses the Go
+  # binary, which is python3-free per the QA rip-out.
+  if [[ "${connector}" == "amp" ]]; then
+    if [[ ! -f "${SCRUB_PY}" ]]; then
+      warn "python scrub helper missing: ${SCRUB_PY}; skipping ${cfg}"
+      SCRUB_FAILED="true"
+      return 0
+    fi
+    if [[ -n "${run_as_user}" && $(id -u "${run_as_user}" 2>/dev/null) != "0" ]]; then
+      if [[ -n "${authority}" ]]; then
+        sudo -u "${run_as_user}" "${PY}" "${SCRUB_PY}" "${connector}" "${cfg}" "${authority}" || rc=$?
+      else
+        sudo -u "${run_as_user}" "${PY}" "${SCRUB_PY}" "${connector}" "${cfg}" || rc=$?
+      fi
     else
-      sudo -u "${run_as_user}" "${PY}" "${SCRUB_PY}" "${connector}" "${cfg}" || rc=$?
+      if [[ -n "${authority}" ]]; then
+        "${PY}" "${SCRUB_PY}" "${connector}" "${cfg}" "${authority}" || rc=$?
+      else
+        "${PY}" "${SCRUB_PY}" "${connector}" "${cfg}" || rc=$?
+      fi
     fi
   else
-    if [[ -n "${authority}" ]]; then
-      "${PY}" "${SCRUB_PY}" "${connector}" "${cfg}" "${authority}" || rc=$?
+    if [[ -z "${SCRUB_BIN}" ]]; then
+      warn "defenseclaw binary not found; skipping scrub of ${cfg}"
+      SCRUB_FAILED="true"
+      return 0
+    fi
+    # --quiet-missing lets rc=2 (file missing) still count as success:
+    # the outer if-guard already handled the "file doesn't exist" case,
+    # but between that check and the scrub call the file could vanish
+    # (rare, but possible), and treating it as clean is the right move.
+    if [[ -n "${run_as_user}" && $(id -u "${run_as_user}" 2>/dev/null) != "0" ]]; then
+      sudo -u "${run_as_user}" "${SCRUB_BIN}" enterprise hooks scrub \
+        --connector "${connector}" --file "${cfg}" --quiet-missing || rc=$?
     else
-      "${PY}" "${SCRUB_PY}" "${connector}" "${cfg}" || rc=$?
+      "${SCRUB_BIN}" enterprise hooks scrub \
+        --connector "${connector}" --file "${cfg}" --quiet-missing || rc=$?
     fi
   fi
   case "${rc}" in
     0) ;;
-    2) ;;  # file missing — fine
     *)
       warn "  scrub exited ${rc} for ${cfg} (left unmodified)"
       SCRUB_FAILED="true"

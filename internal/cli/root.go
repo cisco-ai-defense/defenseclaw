@@ -18,6 +18,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -87,6 +88,17 @@ func writeMachineVersion(w io.Writer) error {
 
 func rootPersistentPreRunE(cmd *cobra.Command, _ []string) error {
 	if versionJSON {
+		return nil
+	}
+	// Skip the full-daemon bootstrap (config load + audit store + PID
+	// registration + telemetry) for lifecycle utilities that operate on
+	// operator-supplied paths and do not touch DefenseClaw state. These
+	// subcommands must run on hosts where the daemon has NOT been
+	// installed yet (e.g. inside macOS uninstall.sh's --purge path,
+	// which runs on hosts that may be halfway through a partial
+	// install with no v8 config). Opting-in via the shared annotation
+	// keeps the exemption discoverable in one place.
+	if cmd != nil && cmd.Annotations["defenseclaw.skip-daemon-bootstrap"] == "true" {
 		return nil
 	}
 	// Enterprise hook commands also use this initializer so they receive the
@@ -254,10 +266,49 @@ func init() {
 // os.Exit call belongs in main() so deferred cleanup (PersistentPostRun)
 // always executes.
 func Execute() int {
-	if err := rootCmd.Execute(); err != nil {
-		return 1
+	return exitCodeFor(rootCmd.Execute())
+}
+
+// exitCodeFor is the pure error-to-int mapping Execute delegates to.
+// Kept split so tests can drive it directly without spinning up the
+// root Cobra command.
+//
+// Contract:
+//
+//   - err == nil                       -> rc 0
+//   - err chain contains a
+//     *scrubExitError                  -> that specific exit code
+//   - anything else                    -> rc 1
+//
+// Matched against the CONCRETE type (*scrubExitError) rather than a
+// generic `interface{ ExitCode() int }` on purpose. Go's stdlib
+// exposes several unrelated error types that satisfy the same
+// interface — most importantly *os/exec.ExitError (returned when a
+// spawned subprocess exits non-zero). If a future RunE calls out to
+// a helper binary and returns the resulting *exec.ExitError up the
+// chain, an interface-based match would silently propagate that
+// subprocess's exit code as OUR exit code (e.g. rc 127 = "command
+// not found" from a broken PATH, rc 2 from unrelated tools) —
+// meaningless in DefenseClaw's contract and prone to colliding with
+// our own well-defined codes (uninstall.sh: rc 2 = missing file, rc
+// 3 = unknown connector, rc 4 = parse failure). Anchoring on the
+// concrete type keeps the contract auditable: exit-code propagation
+// requires an explicit scrubExitError construction, never a
+// coincidental interface satisfaction.
+//
+// errors.As still walks the wrap chain so
+// `fmt.Errorf("context: %w", scrubExitErr)` continues to propagate
+// correctly — the concrete-type constraint only affects what
+// counts as a "carrier".
+func exitCodeFor(err error) int {
+	if err == nil {
+		return 0
 	}
-	return 0
+	var ec *scrubExitError
+	if errors.As(err, &ec) {
+		return ec.ExitCode()
+	}
+	return 1
 }
 
 // loadDotEnvIntoOS reads KEY=VALUE pairs from path and sets them as

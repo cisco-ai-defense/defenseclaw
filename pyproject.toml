@@ -196,7 +196,8 @@ default-groups = ["dev"]
 override-dependencies = [
     "rich>=14.2,<15",
     # CVE-2026-39892 fixed in 46.0.7; GHSA-537c-gmf6-5ccf fixed in 48.0.1;
-    # CVE-2026-69248/69249 fixed in 49.0.0; CVE-2026-69247 fixed in 50.0.0.
+    # CVE-2026-69248/69249 fixed in 49.0.0; CVE-2026-69247 fixed in 50.0.0;
+    # PYSEC-2026-3552 / -3553 / -3554 fixed in 50.0.0.
     "cryptography>=50.0.0,<51",
     # CVE-2026-40217 fixed in 1.83.10; CVE-2026-49468 fixed in 1.84.0.
     "litellm>=1.84.0,<1.92.0",
