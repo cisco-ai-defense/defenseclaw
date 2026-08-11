@@ -457,12 +457,21 @@ struct AIDiscoveryModelTests {
             "reported discovery confidence is identified for accessibility"
         )
         expect(
-            localAPIMissingConfidence.confidenceDisplayLabel == "20% signal",
-            "fallback confidence visibly identifies the signal score"
+            localAPIMissingConfidence.confidenceDisplayLabel == "API",
+            "local API rows without model confidence match the TUI label"
         )
         expect(
-            localAPIMissingConfidence.confidenceAccessibilityLabel == "Signal confidence 20 percent",
-            "fallback confidence identifies the signal source for accessibility"
+            localAPIMissingConfidence.confidenceAccessibilityLabel
+                == "Local model API; discovery confidence not reported",
+            "local API accessibility text does not imply a model confidence score"
+        )
+        expect(
+            legacy.confidenceDisplayLabel == "90% signal",
+            "non-API fallback confidence remains visibly qualified as a signal score"
+        )
+        expect(
+            legacy.confidenceAccessibilityLabel == "Signal confidence 90 percent",
+            "non-API fallback confidence identifies the signal source for accessibility"
         )
         expect(
             focused.includes(localAPISupporting),

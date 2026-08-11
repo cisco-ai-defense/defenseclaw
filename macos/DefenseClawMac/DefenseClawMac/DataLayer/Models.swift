@@ -1317,6 +1317,9 @@ struct AIModelDiscoveryRow: Identifiable, Sendable, Hashable {
     }
 
     var confidenceDisplayLabel: String {
+        if reportedDiscoveryConfidence == nil, hasLocalModelAPISignal {
+            return "API"
+        }
         let percent = AIConfidence.percent(
             effectiveDiscoveryConfidence,
             roundingRule: .toNearestOrAwayFromZero
@@ -1325,6 +1328,9 @@ struct AIModelDiscoveryRow: Identifiable, Sendable, Hashable {
     }
 
     var confidenceAccessibilityLabel: String {
+        if reportedDiscoveryConfidence == nil, hasLocalModelAPISignal {
+            return "Local model API; discovery confidence not reported"
+        }
         let percent = AIConfidence.percent(
             effectiveDiscoveryConfidence,
             roundingRule: .toNearestOrAwayFromZero

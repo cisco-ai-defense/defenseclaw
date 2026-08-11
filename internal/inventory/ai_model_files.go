@@ -323,7 +323,13 @@ func (s *ContinuousDiscoveryService) detectModelFilesWithOutcome(ctx context.Con
 							return filepath.SkipAll
 						}
 						seenPaths[path] = struct{}{}
-						if candidate, ok := s.modelArtifactCandidate(path, root, "coreml", true, "", nil); ok {
+						candidate, ok, candidateErr := s.modelArtifactCandidate(path, root, "coreml", true, "", nil)
+						if candidateErr != nil {
+							rootIncomplete = true
+							rootHadErrors = true
+							walkErrors++
+							rootErrorCount++
+						} else if ok {
 							addModelFileAggregate(pageAggregates, &pageOrder, candidate)
 							matched++
 						}
@@ -372,24 +378,31 @@ func (s *ContinuousDiscoveryService) detectModelFilesWithOutcome(ctx context.Con
 					rootErrorCount++
 					return nil
 				}
-				candidate, candidateOK := s.modelArtifactCandidate(path, root, "ollama", false, modelID, nil)
+				candidate, candidateOK, candidateErr := s.modelArtifactCandidate(path, root, "ollama", false, modelID, nil)
+				if candidateErr != nil {
+					rootIncomplete = true
+					rootHadErrors = true
+					walkErrors++
+					rootErrorCount++
+					return nil
+				}
 				if candidateOK && manifestOK {
 					candidate.evidence[0].ValueHash = manifestHash
 					candidate.provider = "ollama"
 					candidate.sizeBytes = 0 // manifest bytes are not model bytes
 					addModelFileAggregate(pageAggregates, &pageOrder, candidate)
 					matched++
-				} else if manifestOK {
-					rootIncomplete = true
-					rootHadErrors = true
-					walkErrors++
-					rootErrorCount++
 				}
 				return nil
 			}
 
-			candidate, ok := s.modelArtifactCandidate(path, root, format, false, "", admittedIdentity)
-			if ok {
+			candidate, ok, candidateErr := s.modelArtifactCandidate(path, root, format, false, "", admittedIdentity)
+			if candidateErr != nil {
+				rootIncomplete = true
+				rootHadErrors = true
+				walkErrors++
+				rootErrorCount++
+			} else if ok {
 				addModelFileAggregate(pageAggregates, &pageOrder, candidate)
 				matched++
 			}
@@ -1870,12 +1883,15 @@ func (s *ContinuousDiscoveryService) modelArtifactCandidate(
 	directory bool,
 	explicitID string,
 	admittedIdentity *modelArtifactIdentity,
-) (modelFileAggregate, bool) {
+) (modelFileAggregate, bool, error) {
 	// Follows cache snapshot symlinks. Weight tensors are never read; a bounded
 	// metadata prefix may be opened for self-describing containers such as GGUF.
 	info, err := os.Stat(path)
-	if err != nil || (directory && !info.IsDir()) || (!directory && !info.Mode().IsRegular()) {
-		return modelFileAggregate{}, false
+	if err != nil {
+		return modelFileAggregate{}, false, err
+	}
+	if (directory && !info.IsDir()) || (!directory && !info.Mode().IsRegular()) {
+		return modelFileAggregate{}, false, nil
 	}
 	artifactKey := filepath.Clean(path)
 	if resolved, err := filepath.EvalSymlinks(path); err == nil {
@@ -1888,7 +1904,7 @@ func (s *ContinuousDiscoveryService) modelArtifactCandidate(
 		var ok bool
 		identity, ok = deriveModelArtifactIdentity(path, root, format, directory, explicitID)
 		if !ok {
-			return modelFileAggregate{}, false
+			return modelFileAggregate{}, false, nil
 		}
 	}
 	id, key, provider := identity.id, identity.key, identity.provider
@@ -1931,7 +1947,7 @@ func (s *ContinuousDiscoveryService) modelArtifactCandidate(
 		sizeBytes: sizeBytes,
 		evidence:  []AIEvidence{evidence}, artifactKey: artifactKey,
 		owner: owner, modality: modality, relevance: relevance, confidence: discoveryConfidence,
-	}, true
+	}, true, nil
 }
 
 func (s *ContinuousDiscoveryService) ollamaBlobCacheAggregate(path string, root modelScanRoot) (modelFileAggregate, bool) {

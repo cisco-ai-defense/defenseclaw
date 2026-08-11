@@ -983,6 +983,49 @@ func TestSuppressedAmbiguousModelTransitionsPriorRowToGone(t *testing.T) {
 	}
 }
 
+func TestModelArtifactOperationalFailureDefersGoneTransition(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("dangling symlink fixture requires POSIX symlink semantics")
+	}
+	root := t.TempDir()
+	home := t.TempDir()
+	modelPath := filepath.Join(root, "models", "tracked-model.gguf")
+	writeModelTestFile(t, modelPath, "tracked")
+	svc := newModelFileModeTestService(t, "passive", home, []string{root}, 100)
+
+	first, err := svc.runScan(context.Background(), true, "test")
+	if err != nil {
+		t.Fatalf("seed scan: %v", err)
+	}
+	seed := findLocalModelSignal(t, first.Signals, "tracked-model")
+	if seed.State != AIStateNew || seed.WorkspaceHash == "" {
+		t.Fatalf("seed model = %+v, want new with root identity", seed)
+	}
+
+	if err := os.Remove(modelPath); err != nil {
+		t.Fatalf("remove tracked model: %v", err)
+	}
+	if err := os.Symlink(filepath.Join(root, "missing-model.gguf"), modelPath); err != nil {
+		t.Fatalf("replace tracked model with dangling symlink: %v", err)
+	}
+	second, err := svc.runScan(context.Background(), true, "test")
+	if err != nil {
+		t.Fatalf("operational-failure scan: %v", err)
+	}
+	if second.Summary.Result != "partial" || second.Summary.DetectorErrors["model_file"] == "" {
+		t.Fatalf("candidate failure was not surfaced as partial: %+v", second.Summary)
+	}
+	if second.Summary.DetectorErrors["model_file:"+seed.WorkspaceHash] == "" {
+		t.Fatalf("candidate failure did not identify the deferred root: %+v", second.Summary.DetectorErrors)
+	}
+	if second.Summary.GoneSignals != 0 {
+		t.Fatalf("candidate failure emitted %d gone signals", second.Summary.GoneSignals)
+	}
+	if got := findLocalModelSignal(t, second.Signals, "tracked-model"); got.State != AIStateSeen {
+		t.Fatalf("tracked model state = %q, want seen", got.State)
+	}
+}
+
 func TestModelMetadataSidecarLookupIsMemoizedPerRootAndDirectory(t *testing.T) {
 	rootPath := t.TempDir()
 	dir := filepath.Join(rootPath, "models", "metadata-backed")
@@ -1072,10 +1115,10 @@ func TestEnhancedMacOSRootsBoundAppResourcesAndClassifyBundles(t *testing.T) {
 		modelPath := filepath.Join(resourceRoot.path, "Models", "vision_encoder.mlmodel")
 		writeModelTestFile(t, modelPath, "coreml")
 		svc := newModelFileModeTestService(t, "enhanced", home, []string{home}, 100)
-		candidate, ok := svc.modelArtifactCandidate(modelPath, resourceRoot, "coreml", false, "", nil)
-		if !ok || candidate.owner != expectedOwner || candidate.modality != localModelModalityVision ||
+		candidate, ok, candidateErr := svc.modelArtifactCandidate(modelPath, resourceRoot, "coreml", false, "", nil)
+		if candidateErr != nil || !ok || candidate.owner != expectedOwner || candidate.modality != localModelModalityVision ||
 			candidate.relevance != localModelRelevanceEmbedded {
-			t.Fatalf("app resource classification = %+v, ok=%v", candidate, ok)
+			t.Fatalf("app resource classification = %+v, ok=%v, err=%v", candidate, ok, candidateErr)
 		}
 	}
 }

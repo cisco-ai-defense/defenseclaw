@@ -447,6 +447,9 @@ def test_ai_discovery_recommends_actionable_models_and_can_show_all_artifacts() 
     assert mixed_row.has_local_model_api_signal_without_discovery_confidence is True
     assert mixed_row.effective_model_relevance == "embedded"
 
+    api_row = next(row for row in panel.filtered_models if row.model == "qwen3.5:9b-mlx")
+    assert api_row.model_confidence_label == "API"
+
     speech_row = next(row for row in panel.filtered_models if row.model == "SpeakerEmbedder")
     assert speech_row.model_owner_label == "Superwhisper"
     assert speech_row.model_modality_label == "Speech"
