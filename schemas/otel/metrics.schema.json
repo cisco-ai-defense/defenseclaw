@@ -443,12 +443,6 @@
       "description": "LiteLLM bridge call latency (Python subprocess)"
     },
     {
-      "name": "defenseclaw.managed_aid.fail_open.decisions",
-      "type": "counter",
-      "unit": "{decision}",
-      "description": "Managed AI Defense inspections that allowed because inspection was unwired, unavailable, or had no content"
-    },
-    {
       "name": "defenseclaw.openshell.exit",
       "type": "counter",
       "unit": "{exit}",
