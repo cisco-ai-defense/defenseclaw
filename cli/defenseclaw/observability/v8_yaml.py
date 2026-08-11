@@ -1079,7 +1079,7 @@ def _supported_destination_path(path: YAMLPath) -> bool:
         return True
     field_name = path[3]
     if len(path) == 4:
-        return field_name in _DESTINATION_SCALARS or field_name == "send"
+        return field_name in _DESTINATION_SCALARS or field_name in {"send", "routes"}
     if len(path) == 5 and field_name in _DESTINATION_NESTED:
         return path[4] in _DESTINATION_NESTED[field_name]
     if len(path) == 5 and field_name == "headers":

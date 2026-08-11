@@ -244,15 +244,6 @@ enum ConfigEditorCatalog {
         ))
 
         sections.append(ConfigEditorSection(
-            name: "Privacy",
-            summary: "Redaction and privacy controls for audit DB, OTel, Splunk, webhooks, and terminal logs.",
-            fields: [
-                .init(label: "Disable Redaction", key: "privacy.disable_redaction", kind: .bool,
-                      hint: "true stores raw content in all sinks."),
-            ]
-        ))
-
-        sections.append(ConfigEditorSection(
             name: "Notifications",
             summary: "User-session desktop toasts for blocks, would-blocks, and HITL approvals.",
             help: "Restart the gateway after editing; the dispatcher snapshots config at boot.",

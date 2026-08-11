@@ -105,7 +105,10 @@ non-local browser origin.
 
 All ordinary mutations also reject a non-local `Origin`; cross-site requests
 are rejected when `Sec-Fetch-Site` identifies them. A shared middleware caps
-POST, PUT, and PATCH bodies at 1 MiB.
+ordinary POST, PUT, and PATCH bodies at 1 MiB. Exact authenticated OTLP-HTTP
+ingest routes use a separate 64 MiB receiver limit so exporter batches can
+follow the protocol's recommended bound without increasing the limit for the
+rest of the API.
 
 ```
 X-DefenseClaw-Client: cli
@@ -408,7 +411,9 @@ supports bounded cursor pagination.
 
 The gateway accepts OTLP-HTTP from configured connectors. Both OTLP JSON and
 protobuf content types are accepted; decoding is implemented in
-`internal/gateway/otel_ingest.go`.
+`internal/gateway/otel_ingest.go`. Request bodies are bounded at 64 MiB; larger
+batches receive HTTP 413 and are recorded as content-free `body_too_large`
+rejections.
 
 | Method | Path | Purpose |
 | --- | --- | --- |

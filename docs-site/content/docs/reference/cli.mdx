@@ -106,6 +106,7 @@ Hook setup aliases (`setup codex`, `setup claude-code`, `setup hermes`, and the 
 | `defenseclaw setup splunk` | Configure local Splunk in Docker, Splunk Enterprise HEC, or Splunk Observability Cloud. |
 | `defenseclaw setup webhook` | Configure Slack / PagerDuty / Webex / generic notifier webhooks (chat + incident routing). |
 | `defenseclaw setup observability add\|list\|enable\|disable\|remove\|test` | Manage config-v8 destinations across OTLP, Galileo, Splunk HEC, JSONL, HTTP JSONL, console, and Prometheus capabilities. Omitted destination policy means all supported signals/buckets, unredacted. Distinct from `setup webhook`, which manages notifier webhooks. |
+| `defenseclaw setup redaction [status\|remove-all\|apply\|defaults\|bucket\|profile\|destination\|route]` | Configure v8 redaction interactively or with scriptable subcommands. Bare invocation offers a simple baseline choice followed by **Show advanced settings?** for all buckets, profiles, destination policy, and ordered routes. Mutations preview the canonical effective diff; changed non-dry-run writes create a timestamped backup and verify the installed plan. |
 | `defenseclaw observability plan` | Print the masked effective v8 graph: generated local SQLite policy, collection, destination capabilities, routes, profiles, retention, and warnings. |
 
 For observability destinations, `name` is the stable identity: a new name adds,
@@ -113,6 +114,27 @@ and an existing name updates only that destination. Run `list --json` for the
 complete target/kind/signal inventory and `add ... --dry-run` for a safe preview.
 The TUI mirrors the runtime-loaded inventory in **Overview → Observability
 Destinations** and exposes the wizard at **0 Setup → Observability / Galileo**.
+
+The quickest way to remove every configurable redaction override is:
+
+```bash
+defenseclaw setup redaction remove-all --dry-run
+```
+
+<Callout type="warn" title="Profile none permits governed content without redaction">
+`remove-all` can expose governed content to configured destinations. Confirm that
+each affected destination has an approved trust boundary before using `--yes`.
+</Callout>
+
+```bash
+defenseclaw setup redaction remove-all --yes
+```
+
+This selects profile `none` for configurable log and trace projections without
+changing collection or routing. It affects generated local SQLite, but never
+weakens the release-owned managed enterprise destination. See
+[Redaction](/docs/reference/redaction) for the full interactive walkthrough and
+advanced command examples.
 
 | Command | Use it for |
 | --- | --- |
@@ -187,10 +209,12 @@ These list/inventory verbs read across the full active roster:
 continuous scanner is a separate sidecar surface and is the one that inventories
 local model APIs, known model caches, and standalone model files.
 
+Enhanced mode expands the bounded roots searched for models; it does not relax what qualifies as a model. Outside recognized model stores, ambiguous ONNX/ORT, TFLite, PyTorch/checkpoint, and generic binary artifacts require explicit model context plus a meaningful, non-opaque identity. Known Chrome Optimization Guide cache payloads and opaque hash/version identities are suppressed, while high-signal formats and recognized model stores retain their established behavior.
+
 | Command | Use it for |
 | --- | --- |
 | `defenseclaw agent discover [--refresh] [--no-cache] [--json] [--emit-otel/--no-emit-otel]` | Inspect known connector configs and binaries without requiring the gateway. This does not run the continuous local-model scan. |
-| `defenseclaw agent discovery enable [--scan-roots ROOTS] [--include-network-domains/--no-include-network-domains] [--lookup-model-provenance-online/--no-lookup-model-provenance-online] [--restart/--no-restart] [--scan/--no-scan]` | Enable and tune the sidecar scanner. Vetted loopback model API reads follow `include_network_domains`; filesystem model discovery runs independently. Public Hugging Face lineage lookup is a separate opt-in because it transmits recovered model repository IDs. |
+| `defenseclaw agent discovery enable [--mode passive\|enhanced] [--scan-roots ROOTS] [--include-network-domains/--no-include-network-domains] [--lookup-model-provenance-online/--no-lookup-model-provenance-online] [--restart/--no-restart] [--scan/--no-scan]` | Enable and tune the sidecar scanner. `passive` limits model-file coverage to known stores plus narrower configured roots and suppresses an exact user-home/`~` root; `enhanced` also honors the broad home root and adds bounded macOS application-storage and app-resource roots for unknown applications. Vetted loopback model API reads follow `include_network_domains`; filesystem model discovery runs independently. Public Hugging Face lineage lookup is a separate opt-in because it transmits recovered model repository IDs. |
 | `defenseclaw agent discovery setup\|status\|scan\|disable` | Configure discovery interactively, inspect on-disk/live state, trigger a full scan, or disable the service. |
 | `defenseclaw agent usage [--refresh] [--detail] [--state STATE] [--category CAT] [--product NAME] [--component NAME] [--show-gone] [--by-detector] [--json]` | Read the sidecar snapshot. Local-model rows show model ID, `installed`/`loaded` status, and format; `--component` also matches model IDs. `active` remains an alias for the steady `seen` lifecycle state. JSON output is the unfiltered API payload. |
 | `defenseclaw agent processes [--refresh] [--json] [--limit N]` | List live AI process signals with PID, user, command name, and uptime. |

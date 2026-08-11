@@ -674,6 +674,40 @@ class AiUsageRendererTests(unittest.TestCase):
         self.assertEqual(len(detail_fields), 12, detail)
         self.assertEqual(detail_fields[:3], ["seen", "ai_cli", "Codex"])
 
+    def test_partial_scan_diagnostics_are_visible_and_bounded(self):
+        from defenseclaw.commands import cmd_agent
+
+        payload = {
+            "summary": {
+                "result": "partial",
+                "errors": 2,
+                "detector_errors": {
+                    "model_file:application_support": (
+                        "permission denied " + "x" * 300 + " sensitive-tail"
+                    ),
+                    "model_file:containers": "root disappeared",
+                    "process": "process enumeration denied",
+                    "runtime": "socket closed",
+                    "shell_history": "history unavailable",
+                },
+            },
+            "signals": [],
+        }
+        rich = cmd_agent._render_ai_usage_table(payload)
+        plain = cmd_agent._render_ai_usage_plain(payload)
+        for rendered in (rich, plain):
+            normalized = " ".join(rendered.split())
+            self.assertIn("Scan partial", normalized)
+            self.assertIn("5 detector errors", normalized)
+            self.assertIn("model_file:application_support: permission denied", normalized)
+            self.assertIn("model_file:containers: root disappeared", normalized)
+            self.assertIn("process: process enumeration denied", normalized)
+            self.assertIn("+2 more", normalized)
+            self.assertIn("...", normalized)
+            self.assertNotIn("sensitive-tail", normalized)
+            self.assertNotIn("runtime: socket closed", normalized)
+            self.assertNotIn("shell_history: history unavailable", normalized)
+
     def test_malformed_structured_blocks_do_not_crash_usage_rendering(self):
         from defenseclaw.commands import cmd_agent
 

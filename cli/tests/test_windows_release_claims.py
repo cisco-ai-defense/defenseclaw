@@ -58,6 +58,9 @@ def test_windows_guide_has_unambiguous_claims_and_powershell_examples() -> None:
     assert "Hyper-V backend" in text
     assert "per-user Docker Desktop" in text
     assert "WSL2 engines" in text
+    assert "Redaction policy CLI and TUI" in text
+    assert "redaction status/remove-all/apply/defaults/bucket/profile/destination/route" in text
+    assert "defenseclaw setup redaction remove-all --dry-run" in text
     assert "Hermes remains preview" not in text
     assert "```bash" not in text and "```sh" not in text
     assert text.count("```powershell") >= 8

@@ -98,6 +98,7 @@ setup-mcp-scanner
 setup-notifications-set
 setup-notifications-toggle
 setup-observability
+setup-redaction-policy
 setup-redaction-toggle
 setup-skill-scanner
 setup-splunk

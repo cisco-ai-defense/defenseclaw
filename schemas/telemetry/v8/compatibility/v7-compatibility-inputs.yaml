@@ -167,6 +167,7 @@ classes:
       ActionSetupHookConnector: "setup-hook-connector"
       ActionSetupConnectorMode: "setup-connector-mode"
       ActionSetupRedactionToggle: "setup-redaction-toggle"
+      ActionSetupRedactionPolicy: "setup-redaction-policy"
       ActionSetupNotificationsToggle: "setup-notifications-toggle"
       ActionSetupNotificationsSet: "setup-notifications-set"
       ActionSetupSplunk: "setup-splunk"

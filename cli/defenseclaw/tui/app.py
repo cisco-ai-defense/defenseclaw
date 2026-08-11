@@ -1014,6 +1014,7 @@ class DefenseClawTUI(App[None]):
         self._rendered_table_row_keys: list[Any] = []
         self._next_table_row_key = 0
         self._last_ai_model_table_signature: tuple[object, ...] | None = None
+        self._last_ai_model_scope_label: str | None = None
         # Overview renders ask for the same recent hook-event window several
         # times (header metrics, Enforcement, CONNECTORS rows). Cache it for a
         # single frame so keypresses don't wait behind repeated SQLite reads.
@@ -1335,6 +1336,12 @@ class DefenseClawTUI(App[None]):
                         id="ai-refresh",
                         compact=True,
                         tooltip="Reload the AI usage snapshot (`agent usage --json`)",
+                    )
+                    yield Button(
+                        "Show all models",
+                        id="ai-model-scope",
+                        compact=True,
+                        tooltip="Show every model, including embedded, unknown, and low-confidence artifacts (a)",
                     )
                     yield Button(
                         "Open details",
@@ -3940,6 +3947,7 @@ class DefenseClawTUI(App[None]):
             "ai": [
                 ("j/k or Up/Down", "Navigate the selected table"),
                 ("t", "Switch product / model table"),
+                ("a", "Show all / recommended models"),
                 ("r", "Refresh discovery"),
                 ("e", "Export snapshot"),
             ],
@@ -4071,7 +4079,8 @@ class DefenseClawTUI(App[None]):
             suffix = f"\n\n{detail}" if detail else f"\n\n{empty}" if empty else ""
             self.body_text = (
                 f"[bold #22D3EE]AI Discovery[/]  {header}\n"
-                "Keys: r refresh usage, s scan, t switch table, Enter detail, / filter. "
+                "Keys: r refresh usage, s scan, t switch table, a all/recommended models, "
+                "Enter detail, / filter. "
                 "Click either table to select a row."
                 f"{filter_prompt}"
                 f"{suffix}"
@@ -4138,8 +4147,14 @@ class DefenseClawTUI(App[None]):
         columns = self.ai_discovery_model.model_table_columns()
         rows = self.ai_discovery_model.model_table_rows()
         model_visible = ai_visible and bool(rows)
+        model_label_visible = ai_visible and bool(self.ai_discovery_model.model_rows)
         product_label.set_class(not ai_visible, "hidden")
-        model_label.set_class(not model_visible, "hidden")
+        model_label.set_class(not model_label_visible, "hidden")
+        if model_label_visible:
+            scope_label = self.ai_discovery_model.model_scope_label()
+            if scope_label != self._last_ai_model_scope_label:
+                model_label.update(scope_label)
+                self._last_ai_model_scope_label = scope_label
         table.set_class(not model_visible, "hidden")
 
         if not model_visible:
@@ -4149,6 +4164,8 @@ class DefenseClawTUI(App[None]):
                 with self._programmatic_table_update():
                     table.clear(columns=True)
             self._last_ai_model_table_signature = None
+            if not model_label_visible:
+                self._last_ai_model_scope_label = None
             return
 
         cursor_row = max(0, min(self.ai_discovery_model.model_cursor, len(rows) - 1))
@@ -4504,6 +4521,16 @@ class DefenseClawTUI(App[None]):
         # the daemon to be running, otherwise the CLI errors out.
         self._set_button_visible("#ai-scan", enabled)
         self.query_one("#ai-refresh", Button).disabled = False
+        model_scope = self.query_one("#ai-model-scope", Button)
+        model_scope.disabled = not bool(self.ai_discovery_model.model_rows)
+        if self.ai_discovery_model.show_all_models:
+            model_scope.label = "Recommended models"
+            model_scope.tooltip = "Return to recommended local models (a)"
+        else:
+            model_scope.label = "Show all models"
+            model_scope.tooltip = (
+                "Show every model, including embedded, unknown, and low-confidence artifacts (a)"
+            )
         # Open agent details requires a highlighted row.
         self.query_one("#ai-open-detail", Button).disabled = self.ai_discovery_model.selected() is None
         # Export needs an actual snapshot.
@@ -5250,6 +5277,11 @@ class DefenseClawTUI(App[None]):
             return
         if button_id == "ai-refresh":
             self._submit_command_text("defenseclaw agent usage --json")
+            return
+        if button_id == "ai-model-scope":
+            self._apply_ai_discovery_action(
+                self.ai_discovery_model.toggle_model_scope_action()
+            )
             return
         if button_id == "ai-open-detail":
             if self.ai_discovery_model.selected() is None:

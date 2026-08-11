@@ -56,7 +56,9 @@ const revealHeader = "X-DefenseClaw-Reveal-PII"
 // Destination projection is unaffected: canonical telemetry keeps the source
 // facts and the unified v8 router applies each destination's selected redaction
 // profile independently. The response header changes only this HTTP response;
-// it cannot make a configured destination more or less restrictive.
+// it cannot make a configured destination more or less restrictive. An
+// explicit managed-enterprise redact directive remains authoritative over the
+// response header.
 func wantsReveal(r *http.Request) bool {
 	return r.Header.Get(revealHeader) == "1"
 }
@@ -1040,12 +1042,10 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 
 	elapsed := time.Since(t0)
 
-	// verdict.Reason is composed as "matched: <rule-id>:<title>"
-	// which is PII-safe by construction (rule metadata only).
-	// redaction.Reason is a no-op on it because every token passes
-	// the rule-id allow-list — we still route through the helper
-	// so any future reason-building logic that embeds literals
-	// picks up the scrub automatically.
+	// verdict.Reason is normally composed as "matched: <rule-id>:<title>".
+	// Exact compiled-in ID/title pairs are safe metadata, while titles from
+	// external scanners can contain matched literals. Display boundaries use
+	// the catalog-aware helpers in reason_display.go to distinguish the two.
 	safeFindings := make([]string, len(verdict.Findings))
 	for i, finding := range verdict.Findings {
 		safeFindings[i] = redaction.Reason(finding)
@@ -1196,19 +1196,21 @@ func appendVerdictReason(reason, suffix string) string {
 // field in DetailedFindings is replaced with the
 // "<redacted-evidence len=... sha=...>" placeholder AND Reason is
 // routed through ForSinkReason. The composed reason is normally
-// shaped as "matched: <rule-id>:<title>, …" — ForSinkReason is a
-// no-op on that metadata-only shape, but if a scanner ever embeds
-// a matched literal in f.Title the sink barrier scrubs it.
+// shaped as "matched: <rule-id>:<title>, …". Exact compiled-in pairs pass
+// through via defaultSinkDisplayReason only when no managed override is
+// active; if a scanner embeds a matched literal in f.Title, the sink barrier
+// still scrubs it.
 //
 // The original verdict is left untouched so canonical observability producers
 // retain the full source data. The unified runtime applies the selected
 // redaction profile independently for each destination after routing.
 func (v *ToolInspectVerdict) sanitizeForResponse(reveal bool) *ToolInspectVerdict {
-	if reveal {
+	policy := sinkPolicyFor(context.Background(), v.RedactionEnabled)
+	if reveal && policy != redaction.SinkPolicyRedact {
 		return v
 	}
 	cp := *v
-	cp.Reason = redaction.ForSinkReason(v.Reason)
+	cp.Reason = defaultSinkDisplayReason(v.Reason, policy)
 	if len(v.DetailedFindings) == 0 {
 		return &cp
 	}
