@@ -1752,6 +1752,8 @@ async def smoke():
             signal_id='model', state='seen', category='local_model',
             model=AIUsageModel(
                 id='Qwen/Qwen3-4B-GGUF', status='installed', format='gguf',
+                owner_application='Meetily', modality='generative',
+                relevance='primary', discovery_confidence=0.95,
                 provenance=AIUsageModelProvenance(
                     publisher='Alibaba Cloud', country_code='CN',
                     root_model='Qwen/Qwen3-4B', quantized=True,
@@ -1786,8 +1788,9 @@ async def smoke():
         model_cells = tuple(str(cell) for cell in models.get_row_at(0))
         if not any('Qwen/Qwen3-4B-GGUF' in cell for cell in model_cells):
             raise RuntimeError(f'packaged model row missing model ID: {model_cells}')
-        if not any('CN' in cell for cell in model_cells):
-            raise RuntimeError(f'packaged model row missing accessible country code: {model_cells}')
+        expected_cells = ('seen', 'Qwen/Qwen3-4B-GGUF', 'Meetily', 'Generative', 'Primary', '95%', 'installed', 'gguf')
+        if model_cells != expected_cells:
+            raise RuntimeError(f'packaged model row has unexpected compact columns: {model_cells}')
         await pilot.press('t')
         focus_deadline = loop.time() + 5
         while loop.time() < focus_deadline:
@@ -1797,6 +1800,10 @@ async def smoke():
             await asyncio.sleep(0.025)
         else:
             raise RuntimeError('packaged keyboard could not focus the local-model table')
+        await pilot.press('enter')
+        await pilot.pause()
+        if not discovery.detail_open or 'country=CN' not in app.detail_text:
+            raise RuntimeError(f'packaged model detail missing country provenance: {app.detail_text}')
 
 asyncio.run(asyncio.wait_for(smoke(), timeout=20))
 print('headless TUI rendered separate AI product/model tables with provenance')
