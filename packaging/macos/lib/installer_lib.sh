@@ -79,6 +79,50 @@ is_supported_connector() {
   esac
 }
 
+# classify_zero_target_reason CONNECTORS_CSV -> echoes classification token.
+#
+# Called by install.sh when render_targets_manifest produced zero rows
+# despite a non-empty user set (AIFW-31486). Distinguishes the two
+# operationally-different zero-target modes so an operator reading
+# install.log can act on the right cause:
+#
+#   all-unsupported  Every requested connector is outside the auto-wire
+#                    allow-list (codex|claudecode|cursor). The
+#                    hook-enumerator's tick will NOT fix this by itself
+#                    — the operator has to rerun with --connector picking
+#                    a supported entry.
+#
+#   none-installed   At least one requested connector IS supported, but
+#                    no eligible user has any of them installed yet.
+#                    This is the AIFW-31486 default customer case:
+#                    the enumerator's 5-min tick picks it up
+#                    automatically as connectors appear.
+#
+# Known preexisting cross-layer gap (not addressed by this helper):
+# discover_agent_version swallows real metadata errors (unreadable file,
+# malformed JSON) into an empty version, so a "not installed" result
+# from that helper can also mean "installed but version discovery
+# failed". Threading a real status through
+# discover_agent_version → render_targets_manifest → install.sh is a
+# larger refactor and is out of scope for the AIFW-31486 release fix.
+classify_zero_target_reason() {
+  local raw="$1"
+  local c
+  local any_supported="false"
+  while IFS= read -r c; do
+    [[ -z "${c}" ]] && continue
+    if is_supported_connector "${c}"; then
+      any_supported="true"
+      break
+    fi
+  done < <(parse_connectors "${raw}" 2>/dev/null || true)
+  if [[ "${any_supported}" == "true" ]]; then
+    printf 'none-installed\n'
+  else
+    printf 'all-unsupported\n'
+  fi
+}
+
 # ---- home perms ---------------------------------------------------------
 
 # home_perms_ok PATH -> exit 0 iff path has no group/other write bits.

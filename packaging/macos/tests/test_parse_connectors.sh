@@ -70,6 +70,45 @@ t_is_supported() {
   assert_status "${rc}" 1 "geminicli not auto-wired"
 }
 
+t_classify_zero_target_none_installed() {
+  # AIFW-31486 customer case: connector list contains at least one
+  # auto-wireable name, but no eligible user has the CLI installed yet.
+  # Rerun of the installer won't help — the enumerator's tick will pick
+  # it up as soon as the user installs Codex/ClaudeCode/Cursor.
+  local got
+  got="$(classify_zero_target_reason "codex,claudecode,cursor")"
+  assert_eq "${got}" "none-installed" "all-supported list -> none-installed"
+  got="$(classify_zero_target_reason "codex")"
+  assert_eq "${got}" "none-installed" "single-supported list -> none-installed"
+  got="$(classify_zero_target_reason "codex,geminicli")"
+  assert_eq "${got}" "none-installed" "mixed supported+unsupported -> none-installed (supported wins)"
+}
+
+t_classify_zero_target_all_unsupported() {
+  # No amount of end-user installs will fix this — every requested
+  # connector is outside the auto-wire allow-list, so operator has to
+  # rerun with --connector picking a supported entry. install.sh keys
+  # its warn text off this to point the operator at the right action.
+  local got
+  got="$(classify_zero_target_reason "geminicli")"
+  assert_eq "${got}" "all-unsupported" "unknown single connector -> all-unsupported"
+  got="$(classify_zero_target_reason "geminicli,copilot")"
+  assert_eq "${got}" "all-unsupported" "unknown multi-connector -> all-unsupported"
+}
+
+t_classify_zero_target_bad_csv() {
+  # If parse_connectors rejects the CSV entirely (e.g. leading comma
+  # from a bug in the caller), classify_zero_target_reason falls back
+  # to all-unsupported: zero parseable entries means "nothing here to
+  # help." install.sh has already validated CONNECTOR by the time we
+  # get here, so this is a belt-and-suspenders path.
+  local got
+  got="$(classify_zero_target_reason ",codex")"
+  assert_eq "${got}" "all-unsupported" "malformed CSV -> all-unsupported fallback"
+  got="$(classify_zero_target_reason "")"
+  assert_eq "${got}" "all-unsupported" "empty CSV -> all-unsupported fallback"
+}
+
 run_case "single connector" t_single
 run_case "multi-connector preserves order" t_multi
 run_case "whitespace + case normalization" t_whitespace_and_case
@@ -79,3 +118,6 @@ run_case "leading comma rejected" t_leading_comma_rejected
 run_case "unsafe connector token rejected" t_unsafe_token_rejected
 run_case "empty arg rejected" t_empty_string_rejected
 run_case "is_supported_connector allow-list" t_is_supported
+run_case "classify_zero_target_reason: none-installed" t_classify_zero_target_none_installed
+run_case "classify_zero_target_reason: all-unsupported" t_classify_zero_target_all_unsupported
+run_case "classify_zero_target_reason: malformed CSV falls back" t_classify_zero_target_bad_csv

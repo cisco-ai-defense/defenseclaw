@@ -1197,10 +1197,25 @@ if [[ "${SKIP_CONNECTOR}" != "true" ]]; then
   # installs a supported connector the guardian picks it up and wires
   # hooks without any operator action. Failing the install would leave
   # the customer with no reconciler running at all.
+  #
+  # classify_zero_target_reason distinguishes the two modes above so an
+  # operator scanning install.log knows whether to (a) rerun with a
+  # supported --connector value or (b) just wait for the enumerator's
+  # tick to pick up the connector once someone installs it.
   MANIFEST_TARGETS="$(grep -c '^  - user:' "${MANIFEST_TMP}" || true)"
   if [[ "${MANIFEST_TARGETS}" == "0" ]] && [[ -n "${USER_LINES}" ]]; then
-    warn "hook-guardian manifest has zero targets (users=${USER_COUNT}, connectors=${CONNECTOR}); no supported connector (codex|claudecode|cursor) is installed for any eligible user yet"
-    warn "  proceeding anyway — the hook-enumerator's 5-min tick will re-render targets.yaml and the hook-guardian will wire hooks automatically once a connector appears"
+    ZERO_TARGET_REASON="$(classify_zero_target_reason "${CONNECTOR}")"
+    case "${ZERO_TARGET_REASON}" in
+      all-unsupported)
+        warn "hook-guardian manifest has zero targets: no requested connector is auto-wireable (supported today: codex|claudecode|cursor; got connectors=${CONNECTOR})"
+        warn "  proceeding anyway — the hook-enumerator's tick will NOT fix this on its own; rerun the installer with --connector picking a supported entry"
+        ;;
+      *)
+        warn "hook-guardian manifest has zero targets (users=${USER_COUNT}, connectors=${CONNECTOR}); no supported connector CLI is installed for any eligible user yet"
+        warn "  proceeding anyway — the hook-enumerator's 5-min tick will re-render targets.yaml and the hook-guardian will wire hooks automatically once a connector appears"
+        ;;
+    esac
+    unset ZERO_TARGET_REASON
   fi
   chown root:wheel "${MANIFEST_TMP}"
   chmod 0640 "${MANIFEST_TMP}"
