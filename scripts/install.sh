@@ -71,6 +71,7 @@ readonly MIN_PYTHON_VERSION="3.10"
 readonly MAX_PYTHON_VERSION_EXCLUSIVE="3.14"
 readonly COSIGN_BOOTSTRAP_VERSION="2.6.3"
 readonly COSIGN_BOOTSTRAP_MAX_BYTES="209715200"
+readonly SANDBOX_INSTALLER_ASSET_START_VERSION="0.8.11"
 VERIFIED_CHECKSUM=""
 COSIGN_BIN=""
 
@@ -1339,6 +1340,30 @@ verify_checksum() {
     VERIFIED_CHECKSUM="${actual}"
 }
 
+install_openshell_sandbox() {
+    step "Installing openshell-sandbox"
+    [[ "${MODERN_RELEASE:-false}" == true ]] \
+        || die "Sandbox installation requires a signed DefenseClaw release bundle; no sandbox installer was executed"
+    version_gte "${RELEASE_VERSION}" "${SANDBOX_INSTALLER_ASSET_START_VERSION}" \
+        || die "DefenseClaw ${RELEASE_VERSION} does not publish an authenticated sandbox installer; use ${SANDBOX_INSTALLER_ASSET_START_VERSION} or newer"
+
+    local asset_name="install-openshell-sandbox.sh"
+    local sandbox_installer="${POLICY_DIR}/${asset_name}"
+    local verified_sha256=""
+    info "Downloading the signed release sandbox installer..."
+    fetch_artifact "$(artifact_path "${asset_name}")" "${sandbox_installer}"
+    verify_checksum "${sandbox_installer}" "${asset_name}"
+    verified_sha256="${VERIFIED_CHECKSUM}"
+    [[ "${verified_sha256}" =~ ^[0-9A-Fa-f]{64}$ ]] \
+        || die "Signed checksums do not authenticate the sandbox installer; no sandbox installer was executed"
+    chmod 500 "${sandbox_installer}" \
+        || die "Could not protect the authenticated sandbox installer; no sandbox installer was executed"
+    [[ "$(sha256_file "${sandbox_installer}")" == "${verified_sha256}" ]] \
+        || die "Authenticated sandbox installer changed before execution; no sandbox installer was executed"
+    bash "${sandbox_installer}" \
+        || die "OpenShell sandbox installation failed"
+}
+
 # ── Install: Gateway binary ──────────────────────────────────────────────────
 
 install_gateway() {
@@ -1970,18 +1995,7 @@ if [[ "${INSTALL_SANDBOX}" == true ]]; then
     elif [[ "${OS}" != "linux" ]]; then
         warn "Sandbox mode requires Linux — skipping openshell-sandbox"
     else
-        local script_dir
-        script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-        local sandbox_installer="${script_dir}/install-openshell-sandbox.sh"
-        if [[ -f "${sandbox_installer}" ]]; then
-            bash "${sandbox_installer}"
-        else
-            step "Installing openshell-sandbox"
-            info "Downloading installer..."
-            curl -fsSL \
-                "https://raw.githubusercontent.com/${REPO}/${RELEASE_VERSION}/scripts/install-openshell-sandbox.sh" \
-                | bash
-        fi
+        install_openshell_sandbox
     fi
 fi
 

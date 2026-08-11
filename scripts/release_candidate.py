@@ -170,9 +170,14 @@ RESOLVER_ASSETS = {
     ),
 }
 RELEASE_CHANNEL_BOOTSTRAP_START_VERSION = (0, 8, 8)
+SANDBOX_INSTALLER_ASSET_START_VERSION = (0, 8, 11)
 MAX_RESOLVER_BYTES = 4 * 1024 * 1024
 MAX_INSTALLER_BYTES = 4 * 1024 * 1024
 INSTALLER_ASSETS = {
+    "install-openshell-sandbox.sh": ReviewedScriptAsset(
+        ROOT / "scripts" / "install-openshell-sandbox.sh",
+        b"# DefenseClaw OpenShell sandbox installer complete v1",
+    ),
     "install.sh": ReviewedScriptAsset(
         ROOT / "scripts" / "install.sh",
         b"# DefenseClaw POSIX installer complete v1",
@@ -1013,12 +1018,16 @@ def resolver_asset_names(version: str) -> tuple[str, ...]:
 
 
 def installer_asset_names(version: str) -> tuple[str, ...]:
-    """Return reviewed public installers shipped as immutable 0.8.8+ assets."""
+    """Return reviewed public installers shipped for one immutable release."""
 
     _validate_version(version)
-    if tuple(map(int, version.split("."))) < RELEASE_CHANNEL_BOOTSTRAP_START_VERSION:
+    version_key = tuple(map(int, version.split(".")))
+    if version_key < RELEASE_CHANNEL_BOOTSTRAP_START_VERSION:
         return ()
-    return tuple(sorted(INSTALLER_ASSETS))
+    names = set(INSTALLER_ASSETS)
+    if version_key < SANDBOX_INSTALLER_ASSET_START_VERSION:
+        names.remove("install-openshell-sandbox.sh")
+    return tuple(sorted(names))
 
 
 def release_identity_asset_names(version: str) -> tuple[str, ...]:

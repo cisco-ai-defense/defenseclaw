@@ -1405,15 +1405,24 @@ def test_public_installers_are_immutable_checksummed_assets_from_088_forward(
         "install.ps1",
         "install.sh",
     )
-    payload = set(release_candidate.payload_asset_names("0.8.8", "unverified"))
-    published = set(release_candidate.published_asset_names("0.8.8", "unverified"))
-    assert {"install.sh", "install.ps1"} <= payload <= published
+    assert release_candidate.installer_asset_names("0.8.10") == (
+        "install.ps1",
+        "install.sh",
+    )
+    assert release_candidate.installer_asset_names("0.8.11") == (
+        "install-openshell-sandbox.sh",
+        "install.ps1",
+        "install.sh",
+    )
+    payload = set(release_candidate.payload_asset_names("0.8.11", "unverified"))
+    published = set(release_candidate.published_asset_names("0.8.11", "unverified"))
+    assert {"install.sh", "install.ps1", "install-openshell-sandbox.sh"} <= payload <= published
 
     staged = tmp_path / "installers"
     staged.mkdir()
-    release_candidate._copy_installer_assets(staged, "0.8.8")
-    release_candidate._validate_installer_assets(staged, "0.8.8")
-    for name in release_candidate.installer_asset_names("0.8.8"):
+    release_candidate._copy_installer_assets(staged, "0.8.11")
+    release_candidate._validate_installer_assets(staged, "0.8.11")
+    for name in release_candidate.installer_asset_names("0.8.11"):
         assert (staged / name).read_bytes() == release_candidate.INSTALLER_ASSETS[name].source.read_bytes()
 
     if os.name == "posix":
@@ -1422,14 +1431,14 @@ def test_public_installers_are_immutable_checksummed_assets_from_088_forward(
             release_candidate.CandidateError,
             match="installer mode differs from reviewed source",
         ):
-            release_candidate._validate_installer_assets(staged, "0.8.8")
+            release_candidate._validate_installer_assets(staged, "0.8.11")
         (staged / "install.sh").chmod(
             stat.S_IMODE(release_candidate.INSTALLER_ASSETS["install.sh"].source.stat().st_mode)
         )
 
     (staged / "install.sh").write_bytes(b"#!/bin/sh\nexit 0\n")
     with pytest.raises(release_candidate.CandidateError, match="differs from reviewed source"):
-        release_candidate._validate_installer_assets(staged, "0.8.8")
+        release_candidate._validate_installer_assets(staged, "0.8.11")
 
 
 def test_windows_setup_custody_starts_at_086_and_survives_legacy_omission() -> None:
@@ -2459,6 +2468,7 @@ def test_exact_reviewed_release_sources_have_cross_platform_lf_attributes() -> N
     reviewed = (
         "scripts/defenseclaw-rescue.sh",
         "scripts/defenseclaw-rescue.ps1",
+        "scripts/install-openshell-sandbox.sh",
         "scripts/install.sh",
         "scripts/install.ps1",
         "scripts/upgrade.sh",

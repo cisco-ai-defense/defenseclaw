@@ -4,6 +4,7 @@ scripts/upgrade.sh text eol=lf
 scripts/upgrade.ps1 text eol=lf
 scripts/defenseclaw-rescue.sh text eol=lf
 scripts/defenseclaw-rescue.ps1 text eol=lf
+scripts/install-openshell-sandbox.sh text eol=lf
 scripts/install.sh text eol=lf
 scripts/install.ps1 text eol=lf
 cli/defenseclaw/install_publish.py text eol=lf
