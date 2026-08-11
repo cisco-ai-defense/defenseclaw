@@ -32,6 +32,13 @@ const (
 	SeverityInfo     Severity = "INFO"
 )
 
+// FindingTagDetectionOnly is the persisted provenance marker for a finding
+// that is useful as low-level detection telemetry but must not contribute to
+// enforcement or multi-step correlation. Observe mode is intentionally
+// independent: an enforcement-eligible finding observed without blocking does
+// not carry this tag.
+const FindingTagDetectionOnly = "detection-only"
+
 var severityRank = map[Severity]int{
 	SeverityCritical: 5,
 	SeverityHigh:     4,
@@ -83,10 +90,11 @@ type Finding struct {
 	// capability sequences across arbitrary MCP servers.
 	ToolCapabilityClass string `json:"tool_capability_class,omitempty"`
 
-	// ContentFingerprint is sha256(redacted_value)[:8] — a short hash of
-	// the sensitive value so we can match "same value appeared in
-	// sensitive_access AND egress_external" across turns without
-	// persisting the cleartext itself.
+	// ContentFingerprint is the first 8 lowercase hex characters of the
+	// installation-keyed hash-v1 evidence HMAC. The audit Logger replaces any
+	// producer value at its persistence boundary so the correlator can match the
+	// same value across sensitive_access and egress_external findings without an
+	// offline-enumerable cleartext hash.
 	ContentFingerprint string `json:"content_fingerprint,omitempty"`
 
 	// ExternalEndpoint is the host/URL for any network-touching finding.

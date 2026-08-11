@@ -77,6 +77,13 @@ type ToolInspectRequest struct {
 	// selects the connector generation; a mismatched assertion is rejected.
 	Connector     string `json:"connector,omitempty"`
 	MCPServerName string `json:"mcp_server_name,omitempty"`
+	// contentScope is set only after a connector adapter derives content
+	// provenance from its typed hook payload. It is deliberately not accepted
+	// from the public inspect wire, where a caller could otherwise promote its
+	// own content into the trust-exploit enforcement lane. The zero value keeps
+	// the legacy public inspect API; native adapters opt in after establishing a
+	// prompt or tool-result boundary.
+	contentScope ruleContentScope
 }
 
 // ToolInspectVerdict is the response from the inspect endpoint.
@@ -539,7 +546,7 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 			}
 		}
 
-		runtimeAction := "alert"
+		runtimeAction := guardrailActionAllow
 		if enforceableSeverity != "NONE" {
 			runtimeAction = guardrailRuntimeActionForConnector(
 				a.scannerCfg,
@@ -767,13 +774,27 @@ func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectR
 	// Skip the connector regex packs and the judge lane; AID inspects the
 	// message content directly and a nil AID verdict fails open.
 	if a.managedAIDOnly() {
-		return a.inspectManagedAIDOnly(ctx, "message", content)
+		verdict := a.inspectManagedAIDOnly(ctx, "message", content)
+		if req.contentScope == ruleContentScopeSource {
+			clampSourceScopeVerdict(verdict)
+		}
+		return verdict
 	}
 
 	// Outbound messages get the full scan — tool name "message" for context.
 	// Routed through the request's connector so each connector scans against
 	// its own rule pack (empty ⇒ process-global default set).
-	ruleFindings := ScanAllRulesForConnector(req.Connector, content, "message")
+	var ruleFindings []RuleFinding
+	if req.contentScope != ruleContentScopeAll {
+		ruleFindings = scanContentRulesForConnector(
+			req.Connector,
+			content,
+			"message",
+			req.contentScope,
+		)
+	} else {
+		ruleFindings = ScanAllRulesForConnector(req.Connector, content, "message")
+	}
 
 	var verdict *ToolInspectVerdict
 	if len(ruleFindings) == 0 {
@@ -788,7 +809,15 @@ func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectR
 		severity := HighestSeverity(ruleFindings)
 		confidence := HighestConfidence(ruleFindings, severity)
 
-		action := guardrailRuntimeActionForConnector(a.scannerCfg, req.Connector, severity, strings.EqualFold(req.Direction, "outbound"))
+		action := guardrailActionAllow
+		if enforceable := enforceableRuleFindings(ruleFindings); len(enforceable) > 0 {
+			action = guardrailRuntimeActionForConnector(
+				a.scannerCfg,
+				req.Connector,
+				HighestSeverity(enforceable),
+				strings.EqualFold(req.Direction, "outbound"),
+			)
+		}
 
 		reasons := make([]string, 0, minInt(len(ruleFindings), 5))
 		for i, f := range ruleFindings {
@@ -823,7 +852,37 @@ func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectR
 	if jv := a.hookJudgeInspect(ctx, req, content, verdict); jv != nil {
 		verdict = mergeWithJudgeVerdict(verdict, jv)
 	}
+	if req.contentScope == ruleContentScopeSource {
+		clampSourceScopeVerdict(verdict)
+	}
 	return verdict
+}
+
+// clampSourceScopeVerdict keeps physically verified detector/test source
+// matches visible without letting any local, AID, judge, or managed-AID lane
+// turn source review into a hook action. Source content is still useful
+// telemetry, so findings are retained and uniformly marked LOW and
+// detection-only rather than suppressed.
+func clampSourceScopeVerdict(verdict *ToolInspectVerdict) {
+	if verdict == nil {
+		return
+	}
+	detected := guardrailSeverityRank(verdict.Severity) > severityNone ||
+		len(verdict.Findings) > 0 || len(verdict.DetailedFindings) > 0 ||
+		!strings.EqualFold(strings.TrimSpace(verdict.Action), guardrailActionAllow)
+	verdict.Action = guardrailActionAllow
+	verdict.RawAction = ""
+	verdict.WouldBlock = false
+	verdict.ApprovalTimeoutMS = 0
+	if detected {
+		verdict.Severity = "LOW"
+	} else {
+		verdict.Severity = "NONE"
+	}
+	for i := range verdict.DetailedFindings {
+		verdict.DetailedFindings[i].Severity = "LOW"
+		verdict.DetailedFindings[i].enforcement = findingEnforcementDetectionOnly
+	}
 }
 
 // maxConcurrentHookJudges bounds concurrent hook-lane judge executions

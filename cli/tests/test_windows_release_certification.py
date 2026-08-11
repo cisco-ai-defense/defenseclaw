@@ -897,6 +897,14 @@ def test_packaged_rotation_probes_only_owned_gateway_without_secret_output() -> 
     assert "[credential-bearing process output intentionally suppressed]" in process
     assert 'if ($SuppressOutput) { throw "$FilePath $reason" }' in process
     assert rotation.count("-SuppressOutput") == 5
+    for operation in (
+        "setup-codex",
+        "setup-claudecode",
+        "status-before",
+        "rotate-token",
+        "status-after",
+    ):
+        assert f"packaged token rotation {operation} failed:" in rotation
     assert "'setup', 'codex', '--yes', '--mode', 'action', '--fail-mode', 'closed', '--restart'" in rotation
     assert "'setup', 'claude-code', '--yes', '--mode', 'action', '--fail-mode', 'closed', '--restart'" in rotation
     assert "Get-PackagedRotationConnectorPosture $statusBefore" in rotation

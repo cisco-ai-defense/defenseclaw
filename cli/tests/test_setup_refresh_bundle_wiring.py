@@ -188,7 +188,13 @@ class TestSetupSplunkRefreshWiring(unittest.TestCase):
 
         self.assertEqual(result.exit_code, 0, result.output)
         env_file = _bridge_env_file(self.tmp_dir)
-        mock_refresh.assert_called_once_with(self.tmp_dir, env_file=env_file)
+        mock_refresh.assert_called_once()
+        refresh_call = mock_refresh.call_args
+        self.assertEqual(refresh_call.args, (self.tmp_dir,))
+        self.assertEqual(refresh_call.kwargs["env_file"], env_file)
+        child_env = refresh_call.kwargs["child_env"]
+        self.assertNotIn("DEFENSECLAW_GATEWAY_TOKEN", child_env)
+        self.assertNotIn("OPENCLAW_GATEWAY_TOKEN", child_env)
         self.assertEqual(
             _bridge_up_args(mock_run),
             ["/tmp/fake-splunk-claw-bridge", "up", "--env-file", env_file, "--output", "json"],
@@ -311,7 +317,18 @@ class TestRefreshAndMaybeRestartSplunkBridge(unittest.TestCase):
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
 
         env_file = "/data/splunk-bridge/env/.env"
-        result = _refresh_and_maybe_restart_splunk_bridge("/data", env_file=env_file)
+        with patch.dict(
+            os.environ,
+            {
+                "DEFENSECLAW_GATEWAY_TOKEN": "gateway-sentinel",
+                "OPENCLAW_GATEWAY_TOKEN": "legacy-sentinel",
+            },
+        ):
+            result = _refresh_and_maybe_restart_splunk_bridge(
+                "/data",
+                env_file=env_file,
+                child_env=os.environ.copy(),
+            )
 
         self.assertTrue(result.was_running)
         self.assertTrue(result.stopped)
@@ -321,6 +338,21 @@ class TestRefreshAndMaybeRestartSplunkBridge(unittest.TestCase):
             call.args[0] == ["/fake/bin/splunk-claw-bridge", "down", "--env-file", env_file]
             for call in mock_run.call_args_list
         ))
+        down_call = next(
+            call
+            for call in mock_run.call_args_list
+            if call.args[0] == [
+                "/fake/bin/splunk-claw-bridge",
+                "down",
+                "--env-file",
+                env_file,
+            ]
+        )
+        self.assertNotIn("DEFENSECLAW_GATEWAY_TOKEN", down_call.kwargs["env"])
+        self.assertNotIn("OPENCLAW_GATEWAY_TOKEN", down_call.kwargs["env"])
+        running_env = _running.call_args.kwargs["environment"]
+        self.assertNotIn("DEFENSECLAW_GATEWAY_TOKEN", running_env)
+        self.assertNotIn("OPENCLAW_GATEWAY_TOKEN", running_env)
         mock_refresh.assert_called_once_with("/data")
 
     @patch(
@@ -355,6 +387,67 @@ class TestRefreshAndMaybeRestartSplunkBridge(unittest.TestCase):
         self.assertFalse(result.stopped)
         mock_run.assert_not_called()
         mock_refresh.assert_called_once_with("/data")
+
+
+class TestStopSplunkBridgeEnvironment(unittest.TestCase):
+    @patch("defenseclaw.commands.cmd_setup.local_shell_stacks_supported", return_value=True)
+    @patch("defenseclaw.commands.cmd_setup._native_windows_local_splunk", return_value=True)
+    @patch(
+        "defenseclaw.observability.local_splunk.stop_native_local_splunk",
+        return_value=True,
+    )
+    def test_native_disable_does_not_inherit_gateway_tokens(
+        self,
+        native_stop: MagicMock,
+        _native_windows: MagicMock,
+        _supported: MagicMock,
+    ) -> None:
+        from defenseclaw.commands.cmd_setup import _stop_bridge
+
+        with patch.dict(
+            os.environ,
+            {
+                "DEFENSECLAW_GATEWAY_TOKEN": "gateway-sentinel",
+                "OPENCLAW_GATEWAY_TOKEN": "legacy-sentinel",
+            },
+        ):
+            _stop_bridge("/data")
+
+        native_stop.assert_called_once()
+        environment = native_stop.call_args.kwargs["environment"]
+        self.assertNotIn("DEFENSECLAW_GATEWAY_TOKEN", environment)
+        self.assertNotIn("OPENCLAW_GATEWAY_TOKEN", environment)
+
+    @patch("defenseclaw.commands.cmd_setup.local_shell_stacks_supported", return_value=True)
+    @patch("defenseclaw.commands.cmd_setup._native_windows_local_splunk", return_value=False)
+    @patch(
+        "defenseclaw.commands.cmd_setup._resolve_bridge_bin",
+        return_value="/fake/bin/splunk-claw-bridge",
+    )
+    @patch("defenseclaw.commands.cmd_setup.subprocess.run")
+    def test_disable_down_does_not_inherit_gateway_tokens(
+        self,
+        mock_run: MagicMock,
+        _resolve: MagicMock,
+        _native_windows: MagicMock,
+        _supported: MagicMock,
+    ) -> None:
+        from defenseclaw.commands.cmd_setup import _stop_bridge
+
+        with patch.dict(
+            os.environ,
+            {
+                "DEFENSECLAW_GATEWAY_TOKEN": "gateway-sentinel",
+                "OPENCLAW_GATEWAY_TOKEN": "legacy-sentinel",
+            },
+        ):
+            _stop_bridge("/data")
+
+        mock_run.assert_called_once()
+        call = mock_run.call_args
+        self.assertEqual(call.args[0], ["/fake/bin/splunk-claw-bridge", "down"])
+        self.assertNotIn("DEFENSECLAW_GATEWAY_TOKEN", call.kwargs["env"])
+        self.assertNotIn("OPENCLAW_GATEWAY_TOKEN", call.kwargs["env"])
 
 
 class TestSetupLocalObservabilityRefreshWiring(unittest.TestCase):

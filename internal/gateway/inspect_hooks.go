@@ -367,7 +367,7 @@ func buildVerdictWithConfig(ruleFindings []RuleFinding, direction string, cfg *c
 	confidence := HighestConfidence(ruleFindings, severity)
 
 	enforceable := enforceableRuleFindings(ruleFindings)
-	action := "alert"
+	action := guardrailActionAllow
 	if len(enforceable) > 0 {
 		action = guardrailRuntimeAction(
 			cfg,

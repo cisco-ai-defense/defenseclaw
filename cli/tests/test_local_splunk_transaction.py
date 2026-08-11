@@ -85,7 +85,11 @@ def _app(tmp_path: Path) -> AppContext:
 def _invoke_native_transaction(app: AppContext, events: list[str], *, restart_ok: bool) -> None:
     transaction = FakeTransaction(events)
 
-    def start(*_args, **_kwargs):
+    def start(*_args, **kwargs):
+        environment = kwargs.get("environment")
+        assert environment is not None
+        assert "DEFENSECLAW_GATEWAY_TOKEN" not in environment
+        assert "OPENCLAW_GATEWAY_TOKEN" not in environment
         events.append("runtime-ready")
         return transaction
 

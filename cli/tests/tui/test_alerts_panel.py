@@ -14,7 +14,167 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from defenseclaw.tui.panels.alerts import AlertEvent, AlertFinding, AlertsPanelModel, humanize_alert_details
+import defenseclaw.tui.panels.alerts as alerts_panel
+from defenseclaw.tui.panels.alerts import (
+    AlertEvent,
+    AlertFinding,
+    AlertsPanelModel,
+    alerts_from_v8_history,
+    humanize_alert_details,
+)
+from defenseclaw.tui.services.v8_event_history import V8EventHistoryRow
+
+
+def _v8_alert_row(
+    row_id: str,
+    *,
+    bucket: str,
+    event_name: str,
+    severity: str = "INFO",
+    action: str = "",
+    payload: dict[str, object] | None = None,
+    finding_tags: tuple[str, ...] = (),
+    payload_truncated: bool = False,
+) -> V8EventHistoryRow:
+    return V8EventHistoryRow(
+        id=row_id,
+        timestamp=datetime(2026, 8, 10, 22, 14, tzinfo=timezone.utc),
+        bucket=bucket,
+        event_name=event_name,
+        source="gateway",
+        severity=severity,
+        action=action,
+        actor="gateway",
+        details="",
+        connector="codex",
+        redaction_profile="default",
+        payload=payload or {},
+        finding_tags=finding_tags,
+        payload_truncated=payload_truncated,
+    )
+
+
+def test_v8_alert_projection_excludes_clean_hook_and_scan_telemetry() -> None:
+    rows = (
+        _v8_alert_row("clean-scan", bucket="asset.scan", event_name="scan.completed", action="scan"),
+        _v8_alert_row(
+            "allowed-hook",
+            bucket="guardrail.evaluation",
+            event_name="hook_decision",
+            action="hook_decision",
+        ),
+        _v8_alert_row(
+            "legacy-hook",
+            bucket="guardrail.evaluation",
+            event_name="legacy.audit.connector.hook",
+            action="connector-hook",
+        ),
+        _v8_alert_row(
+            "finding",
+            bucket="security.finding",
+            event_name="finding.observed",
+            severity="HIGH",
+            action="scan-finding",
+        ),
+        _v8_alert_row(
+            "finding-summary",
+            bucket="guardrail.evaluation",
+            event_name="hook_decision",
+            severity="CRITICAL",
+            action="block",
+        ),
+        _v8_alert_row(
+            "detection-only",
+            bucket="security.finding",
+            event_name="finding.observed",
+            severity="HIGH",
+            action="scan-finding",
+            payload={"defenseclaw.finding.tags": ["secret", "detection-only"]},
+        ),
+        _v8_alert_row(
+            "truncated-detection-only",
+            bucket="security.finding",
+            event_name="finding.observed",
+            severity="HIGH",
+            action="scan-finding",
+            finding_tags=("secret", "detection-only"),
+            payload_truncated=True,
+        ),
+    )
+
+    alerts = alerts_from_v8_history(rows)
+
+    assert [alert.id for alert in alerts] == ["finding"]
+
+
+def test_v8_alert_projection_keeps_explicit_enforcement_egress_and_health_failures() -> None:
+    rows = (
+        _v8_alert_row(
+            "blocked-egress",
+            bucket="network.egress",
+            event_name="egress.decided",
+            action="egress",
+            payload={"defenseclaw.network.decision": "block"},
+        ),
+        _v8_alert_row(
+            "allowed-egress",
+            bucket="network.egress",
+            event_name="egress.decided",
+            action="egress",
+            payload={"defenseclaw.network.decision": "allow"},
+        ),
+        _v8_alert_row(
+            "enforced",
+            bucket="enforcement.action",
+            event_name="action.applied",
+            action="enforcement",
+            payload={"defenseclaw.enforcement.effective_action": "deny"},
+        ),
+        _v8_alert_row("healthy", bucket="platform.health", event_name="health.ready"),
+        _v8_alert_row(
+            "unhealthy",
+            bucket="platform.health",
+            event_name="health.failed",
+            severity="ERROR",
+        ),
+    )
+
+    alerts = alerts_from_v8_history(rows)
+
+    assert [alert.id for alert in alerts] == ["blocked-egress", "enforced", "unhealthy"]
+    assert [alert.severity for alert in alerts] == ["WARNING", "HIGH", "ERROR"]
+
+
+def test_alert_detail_hydration_preserves_visible_non_info_promotion() -> None:
+    projected = alerts_from_v8_history(
+        (
+            _v8_alert_row(
+                "legacy-info-block",
+                bucket="enforcement.action",
+                event_name="action.applied",
+                action="enforcement",
+                payload={"defenseclaw.enforcement.effective_action": "block"},
+            ),
+        )
+    )[0]
+
+    class Store:
+        @staticmethod
+        def get_event(_event_id: str) -> AlertEvent:
+            return AlertEvent(
+                id=projected.id,
+                severity="INFO",
+                action=projected.action,
+                target=projected.target,
+            )
+
+    model = AlertsPanelModel(store=Store())
+    model.set_events([projected])
+
+    detail = model.get_detail_info()
+
+    assert detail is not None
+    assert detail.event.severity == "HIGH"
 
 
 def test_humanize_alert_details_fast_paths_and_host_port() -> None:
@@ -131,14 +291,139 @@ def test_alerts_default_hides_low_signal_rows_until_all_opt_in() -> None:
             AlertEvent(id="a1", severity="HIGH", action="scan", target="skill://one"),
             AlertEvent(id="a2", severity="MEDIUM", action="proxy", target="gateway"),
             AlertEvent(id="a3", severity="INFO", action="connector-hook", target="preToolUse"),
+            AlertEvent(id="a4", severity="MEDIUM", action="block", target="gateway"),
         ]
     )
 
-    assert [row.event.id for row in model.filtered] == ["a1"]
+    assert {row.event.id for row in model.filtered} == {"a1", "a4"}
+    assert model.active_scope_key() == "actionable"
+    assert model.active_filter_label() == "Actionable"
+    assert model.actionable_count() == 2
+    assert "Actionable 2" in model.summary_text()
+    assert "In scope 4" in model.summary_text()
     assert "No actionable" not in model.empty_state()
 
     assert model.handle_key("1").handled is True
-    assert {row.event.id for row in model.filtered} == {"a1", "a2", "a3"}
+    assert model.active_scope_key() == "all"
+    assert model.active_filter_label() == "All severities"
+    assert {row.event.id for row in model.filtered} == {"a1", "a2", "a3", "a4"}
+
+    model.set_actionable_scope()
+    assert model.active_scope_key() == "actionable"
+    assert {row.event.id for row in model.filtered} == {"a1", "a4"}
+
+
+def test_alerts_summary_collects_scope_metrics_in_one_pass(monkeypatch) -> None:
+    model = AlertsPanelModel()
+    model.set_events(
+        [
+            AlertEvent(
+                id="a1",
+                severity="HIGH",
+                action="scan",
+                target="skill://one",
+                details="connector=codex result=block",
+            ),
+            AlertEvent(
+                id="a2",
+                severity="INFO",
+                action="connector-hook",
+                target="preToolUse",
+                details="connector=codex action=allow severity=LOW",
+            ),
+            AlertEvent(
+                id="a3",
+                severity="HIGH",
+                action="connector-hook",
+                target="preToolUse",
+                details="connector=cursor action=block severity=LOW",
+            ),
+        ]
+    )
+    flat_rows_calls = 0
+    parse_details_calls = 0
+    original_flat_rows = model.flat_rows
+    original_parse_details = alerts_panel.parse_kv_details
+
+    def counted_flat_rows() -> list[alerts_panel.AlertRow]:
+        nonlocal flat_rows_calls
+        flat_rows_calls += 1
+        return original_flat_rows()
+
+    def counted_parse_details(value: str) -> dict[str, str]:
+        nonlocal parse_details_calls
+        parse_details_calls += 1
+        return original_parse_details(value)
+
+    monkeypatch.setattr(model, "flat_rows", counted_flat_rows)
+    monkeypatch.setattr(alerts_panel, "parse_kv_details", counted_parse_details)
+
+    summary = model.summary_text()
+
+    assert "Actionable 2" in summary
+    assert "In scope 3" in summary
+    assert "High 2" in summary
+    assert "Low 1" in summary
+    assert flat_rows_calls == 1
+    assert parse_details_calls == 1
+
+    flat_rows_calls = 0
+    parse_details_calls = 0
+    model.filter_text = "block"
+    summary = model.summary_text()
+
+    assert "In scope 2" in summary
+    assert flat_rows_calls == 1
+    assert parse_details_calls == 1
+
+    flat_rows_calls = 0
+    parse_details_calls = 0
+    model.filter_text = "connector:codex"
+    summary = model.summary_text()
+
+    assert "In scope 2" in summary
+    assert flat_rows_calls == 1
+    assert parse_details_calls == 3
+
+
+def test_alerts_apply_filter_parses_details_only_when_required(monkeypatch) -> None:
+    model = AlertsPanelModel()
+    parse_details_calls = 0
+    original_parse_details = alerts_panel.parse_kv_details
+
+    def counted_parse_details(value: str) -> dict[str, str]:
+        nonlocal parse_details_calls
+        parse_details_calls += 1
+        return original_parse_details(value)
+
+    monkeypatch.setattr(alerts_panel, "parse_kv_details", counted_parse_details)
+    model.set_events(
+        [
+            AlertEvent(
+                id="hook",
+                severity="INFO",
+                action="connector-hook",
+                target="preToolUse",
+                details="connector=codex action=block severity=HIGH",
+            ),
+            AlertEvent(
+                id="scan",
+                severity="HIGH",
+                action="scan",
+                target="skill://one",
+                details="connector=codex action=block",
+            ),
+        ]
+    )
+
+    assert {row.event.id for row in model.filtered} == {"hook", "scan"}
+    assert parse_details_calls == 1
+
+    parse_details_calls = 0
+    model.set_filter("block")
+
+    assert {row.event.id for row in model.filtered} == {"hook", "scan"}
+    assert parse_details_calls == 1
 
 
 def test_alerts_slash_search_and_exact_severity_filter() -> None:
@@ -155,7 +440,9 @@ def test_alerts_slash_search_and_exact_severity_filter() -> None:
     for char in "token":
         model.handle_key(char)
     assert [row.event.id for row in model.filtered] == ["a1"]
-    assert model.active_filter_label() == "search 'token'"
+    assert model.scope_total_count() == 1
+    assert "In scope 1" in model.summary_text()
+    assert model.active_filter_label() == "All severities, search 'token'"
 
     assert model.handle_key("enter").handled is True
     assert model.filtering is False
@@ -175,10 +462,20 @@ def test_alerts_connector_column_and_shared_filter() -> None:
     model.show_all_severities = True
     model.set_events(
         [
-            AlertEvent(id="a1", severity="HIGH", action="connector-hook",
-                       target="preToolUse", details="connector=codex action=block"),
-            AlertEvent(id="a2", severity="MEDIUM", action="connector-hook",
-                       target="preToolUse", details="connector=cursor action=alert"),
+            AlertEvent(
+                id="a1",
+                severity="HIGH",
+                action="connector-hook",
+                target="preToolUse",
+                details="connector=codex action=block",
+            ),
+            AlertEvent(
+                id="a2",
+                severity="MEDIUM",
+                action="connector-hook",
+                target="preToolUse",
+                details="connector=cursor action=alert",
+            ),
         ]
     )
 
@@ -186,15 +483,15 @@ def test_alerts_connector_column_and_shared_filter() -> None:
     assert model.data_table_columns() == ("Sel", "Severity", "Time", "Action", "Target", "Details")
 
     model.show_connector_column = True
-    assert model.data_table_columns() == (
-        "Sel", "Severity", "Time", "Action", "Connector", "Target", "Details"
-    )
+    assert model.data_table_columns() == ("Sel", "Severity", "Time", "Action", "Connector", "Target", "Details")
     # Connector cell is index 4 (after Action).
     connectors = {row[4] for row in model.data_table_rows()}
     assert connectors == {"codex", "cursor"}
 
     model.set_connector_filter("codex")
     assert [row.event.id for row in model.filtered] == ["a1"]
+    assert model.scope_severity_counts() == {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 0, "LOW": 0}
+    assert "In scope 1" in model.summary_text()
     model.set_connector_filter("")
     assert {row.event.id for row in model.filtered} == {"a1", "a2"}
 
@@ -268,18 +565,6 @@ def test_alerts_connector_token_filters_by_connector() -> None:
     assert model.filtered == []
 
 
-
-
-
-
-
-
-
-
-
-
-
-
 def test_alerts_detail_pairs_copy_text_and_store_enrichment() -> None:
     selected = AlertEvent(
         id="a1",
@@ -337,8 +622,6 @@ def test_alerts_detail_pairs_copy_text_and_store_enrichment() -> None:
     assert "Request ID: req-1" in copied.copy_text
 
 
-
-
 def test_alerts_connector_hook_row_surfaces_connector_and_decision() -> None:
     """Hook rows should encode connector + decision in the table cells."""
 
@@ -347,10 +630,7 @@ def test_alerts_connector_hook_row_surfaces_connector_and_decision() -> None:
         severity="LOW",
         action="connector-hook",
         target="preToolUse",
-        details=(
-            "connector=claudecode action=allow severity=LOW mode=observe "
-            "elapsed=320ms tool=Bash audit_id=abc123"
-        ),
+        details=("connector=claudecode action=allow severity=LOW mode=observe elapsed=320ms tool=Bash audit_id=abc123"),
     )
     plain_event = AlertEvent(
         id="p1",
@@ -451,10 +731,7 @@ def test_alerts_connector_hook_copy_text_uses_structured_rows() -> None:
         severity="LOW",
         action="connector-hook",
         target="preToolUse",
-        details=(
-            "connector=claudecode action=allow severity=LOW mode=observe "
-            "elapsed=99ms tool=Read"
-        ),
+        details=("connector=claudecode action=allow severity=LOW mode=observe elapsed=99ms tool=Read"),
     )
 
     model = AlertsPanelModel()

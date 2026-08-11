@@ -167,9 +167,7 @@ class TUIReadRepository:
             return self._failed_result("database", exc)
 
         slow_components_due = (
-            force
-            or self._snapshot is None
-            or now - self._slow_components_loaded_at >= _SLOW_COMPONENT_TTL_SECONDS
+            force or self._snapshot is None or now - self._slow_components_loaded_at >= _SLOW_COMPONENT_TTL_SECONDS
         )
         if (
             not force
@@ -183,20 +181,22 @@ class TUIReadRepository:
         previous = self._snapshot
         errors: list[str] = []
 
-        history = self._component(
+        history_error_count = len(errors)
+        history, alert_history = self._component(
             "history",
-            lambda: self._history_reader.load(_HISTORY_LIMIT) if self._history_reader else (),
-            previous.history if previous else (),
+            lambda: self._history_reader.load_views(_HISTORY_LIMIT, _PANEL_LIMIT) if self._history_reader else ((), ()),
+            (previous.history if previous else (), ()),
             errors,
         )
-        if errors and previous is not None and history is previous.history:
+        history_failed = len(errors) != history_error_count
+        if history_failed and previous is not None and history is previous.history:
             alert_events = previous.alert_events
             log_views = previous.log_views
             egress_events = previous.egress_events
             mutations = previous.mutations
         else:
             panel_history = history[:_PANEL_LIMIT]
-            alert_events = alerts_from_v8_history(panel_history)
+            alert_events = alerts_from_v8_history(alert_history)
             log_views = project_v8_log_views(history)
             egress_events = project_v8_egress_events(panel_history)
             mutations = activity_mutations_from_v8_history(panel_history)
@@ -228,11 +228,7 @@ class TUIReadRepository:
             enforcement_counts = previous.enforcement_counts if previous else Counts()
         if scan_since is None:
             session_scan_count = enforcement_counts.total_scans
-        elif (
-            slow_components_due
-            or previous is None
-            or previous.session_scan_since != scan_since
-        ):
+        elif slow_components_due or previous is None or previous.session_scan_since != scan_since:
             prior_session_scan_count = (
                 previous.session_scan_count
                 if previous is not None and previous.session_scan_since == scan_since

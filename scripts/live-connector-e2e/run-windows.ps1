@@ -1245,13 +1245,13 @@ function Assert-DoctorHookRegistration {
             'ctx.ui.confirm',
             'amp.activeThread.current',
             'isPluginUINotAvailableError',
-            'action: "reject-and-continue"',
-            'Authorization = `Bearer ${DC_API_TOKEN}`'
+            'action: "reject-and-continue"'
         )) {
             if ($registration.IndexOf($marker, [StringComparison]::Ordinal) -lt 0) {
                 throw "setup-created Amp policy plugin is missing required marker: $marker"
             }
         }
+        Assert-AmpScopedTokenPluginContract $registration 'setup-created Amp policy plugin'
         if ($registration -match '(?i)defenseclaw-hook(?:\.exe|\.cmd)|\bwsl\b|\bbash\b|\bchmod\b') {
             throw 'setup-created Amp policy plugin depends on a shell hook or compatibility layer'
         }
@@ -1264,6 +1264,61 @@ function Assert-DoctorHookRegistration {
     Write-Result doctor-hooks pass "$label accepted the setup-created native registration"
     if ($Connector -eq 'amp') {
         Write-Result 'amp:plugin-contract' pass 'five callbacks, scoped bearer auth, foreground confirmation, background/headless safe rejection, and no shell dependency'
+    }
+}
+
+function Assert-AmpScopedTokenPluginContract([string]$Registration, [string]$Context) {
+    foreach ($marker in @(
+        'const DC_TOKEN_FILE = "',
+        '.hook-amp.token',
+        'const DC_TOKEN_PATTERN = /^[0-9a-f]{64}$/',
+        'const DC_MAX_TOKEN_FILE_BYTES = 4096',
+        'runtime.file(DC_TOKEN_FILE).slice(0, DC_MAX_TOKEN_FILE_BYTES + 1).text()',
+        'if (!DC_TOKEN_PATTERN.test(token))',
+        'headers.Authorization = `Bearer ${token}`'
+    )) {
+        if ($Registration.IndexOf($marker, [StringComparison]::Ordinal) -lt 0) {
+            throw "$Context is missing scoped-token marker: $marker"
+        }
+    }
+    if ($Registration.IndexOf('const DC_API_TOKEN =', [StringComparison]::Ordinal) -ge 0) {
+        throw "$Context retains the obsolete embedded-token constant"
+    }
+
+    $tokenPath = Join-Path (Join-Path $env:DEFENSECLAW_HOME 'hooks') '.hook-amp.token'
+    $tokenPathMatch = [regex]::Match(
+        $Registration,
+        '(?m)^const DC_TOKEN_FILE\s*=\s*(?<literal>"(?:\\.|[^"\\])*")\s*$'
+    )
+    if (-not $tokenPathMatch.Success) {
+        throw "$Context does not contain one canonical scoped-token path declaration"
+    }
+    try {
+        $renderedTokenPath = $tokenPathMatch.Groups['literal'].Value |
+            ConvertFrom-Json -ErrorAction Stop
+        $expectedFullTokenPath = [IO.Path]::GetFullPath($tokenPath)
+        $renderedFullTokenPath = [IO.Path]::GetFullPath([string]$renderedTokenPath)
+    } catch {
+        throw "$Context contains an invalid scoped-token path declaration"
+    }
+    if (-not [string]::Equals(
+        $renderedFullTokenPath,
+        $expectedFullTokenPath,
+        [StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw "$Context references the wrong connector-scoped token sidecar"
+    }
+    if (-not (Test-Path -LiteralPath $tokenPath -PathType Leaf)) {
+        throw "$Context is missing its connector-scoped token sidecar"
+    }
+    $scopedToken = [IO.File]::ReadAllText($tokenPath).Trim()
+    if ($scopedToken -cnotmatch '^[0-9a-f]{64}$') {
+        throw "$Context has a malformed connector-scoped token sidecar"
+    }
+    $encodedToken = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($scopedToken))
+    if ($Registration.IndexOf($scopedToken, [StringComparison]::Ordinal) -ge 0 -or
+        $Registration.IndexOf($encodedToken, [StringComparison]::Ordinal) -ge 0) {
+        throw "$Context embeds raw or encoded connector-scoped token material"
     }
 }
 
@@ -1680,6 +1735,7 @@ function Assert-DoctorWindowsHookRegistration {
                 throw "Amp policy plugin is missing its fail-safe contract marker: $marker"
             }
         }
+        Assert-AmpScopedTokenPluginContract $config 'Amp policy plugin'
         Assert-AmpPluginPrivateACL $configPath
     }
 

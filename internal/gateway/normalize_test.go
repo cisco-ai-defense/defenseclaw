@@ -17,6 +17,7 @@
 package gateway
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -107,6 +108,49 @@ func TestNormalizeScanVerdict_SourceFallback(t *testing.T) {
 	}
 	if nfs[0].Source != "local-pattern+ai-defense" {
 		t.Errorf("expected concatenated source, got %q", nfs[0].Source)
+	}
+}
+
+func TestActiveLocalPatternRuleIdentityUsesPublishedIndex(t *testing.T) {
+	if !activeLocalPatternRuleIdentity(" sec-aws-key ", " AWS access key ") {
+		t.Fatal("published catalog identity was not found through the normalized index")
+	}
+	if activeLocalPatternRuleIdentity("SEC-AWS-KEY", "different title") {
+		t.Fatal("rule ID alone accepted a mismatched producer-controlled title")
+	}
+	if activeLocalPatternRuleIdentity("", "AWS access key") ||
+		activeLocalPatternRuleIdentity("SEC-AWS-KEY", "") {
+		t.Fatal("empty catalog identity component was accepted")
+	}
+}
+
+func TestNormalizeUntrustedLocalPatternFindingNeverBuildsIdentityFromSource(t *testing.T) {
+	raw := "ordinary-match-" + strings.Repeat("source", 8)
+	got := normalizeUntrustedLocalPatternFinding(raw, raw, "local-pattern", "LOW")
+	if got.CanonicalID != "LP-MATCH" || got.OriginalID != "LP-MATCH" ||
+		got.Title != "Local pattern match" || got.Evidence != raw {
+		t.Fatalf("untrusted local finding was not separated from identity: %#v", got)
+	}
+	for _, identity := range []string{got.CanonicalID, got.OriginalID, got.Title} {
+		if strings.Contains(identity, raw) {
+			t.Fatalf("untrusted source bytes reached normalized identity %q", identity)
+		}
+	}
+}
+
+func TestNormalizeSensitiveLocalPatternFindingUsesStableSecretDetectorID(t *testing.T) {
+	tests := []struct {
+		raw  string
+		want string
+	}{
+		{raw: "api_key=q7V2m9X4k8P6r3T1w5Y0n8C4", want: "LP-SECRET-ASSIGNMENT"},
+		{raw: "Bearer eyJhbGciOiJIUzI1NiJ9.q7V2m9X4k8P6r3T1w5Y0.n8C4x6Z2", want: "LP-SECRET-BEARER"},
+	}
+	for _, test := range tests {
+		got, ok := normalizeSensitiveLocalPatternFinding(test.raw, "local-pattern", "HIGH")
+		if !ok || got.CanonicalID != test.want || got.OriginalID != test.want {
+			t.Errorf("normalizeSensitiveLocalPatternFinding(%q) = %#v, %v; want %s", test.raw, got, ok, test.want)
+		}
 	}
 }
 

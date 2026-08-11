@@ -221,8 +221,10 @@ func normalizedFindingsToInspect(nfs []NormalizedFinding, fallbackSeverity strin
 			RuleID:     nf.CanonicalID,
 			Title:      title,
 			Severity:   scanner.Severity(sev),
+			Category:   nf.Category,
 			Confidence: nf.Confidence,
 			Tags:       tags,
+			Evidence:   nf.Evidence,
 		})
 	}
 	return out
@@ -525,17 +527,30 @@ func ruleFindingsToInspect(in []RuleFinding) []scanner.InspectFinding {
 	}
 	out := make([]scanner.InspectFinding, 0, len(in))
 	for _, f := range in {
+		tags := append([]string(nil), f.Tags...)
+		if f.enforcement == findingEnforcementDetectionOnly && !hasStableFindingTag(tags, scanner.FindingTagDetectionOnly) {
+			tags = append(tags, scanner.FindingTagDetectionOnly)
+		}
 		out = append(out, scanner.InspectFinding{
 			RuleID:              f.RuleID,
 			Title:               f.Title,
 			Severity:            scanner.Severity(f.Severity),
 			Confidence:          f.Confidence,
 			Evidence:            f.Evidence,
-			Tags:                f.Tags,
+			Tags:                tags,
 			ToolCapabilityClass: f.ToolCapabilityClass,
 		})
 	}
 	return out
+}
+
+func hasStableFindingTag(tags []string, want string) bool {
+	for _, tag := range tags {
+		if tag == want {
+			return true
+		}
+	}
+	return false
 }
 
 // appendHookEvaluationDetails appends `evaluation_id=<uuid>` and

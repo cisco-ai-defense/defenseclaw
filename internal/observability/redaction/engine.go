@@ -383,6 +383,28 @@ func (engine *Engine) keyBytes() []byte {
 	return append([]byte(nil), engine.key[:]...)
 }
 
+// CorrelationFingerprintV1 returns the schema-sized lowercase-hex prefix of
+// the hash-v1 HMAC for a value and field class. The Engine retains custody of
+// the installation correlation key; callers receive only the irreversible
+// compact token used to link matching evidence. Keyless engines fail closed.
+func (engine *Engine) CorrelationFingerprintV1(
+	value string,
+	fieldClass observability.FieldClass,
+) (string, error) {
+	key := engine.keyBytes()
+	if len(key) != hashV1KeySize {
+		return "", hashV1Error(HashV1ErrorInvalidKey)
+	}
+	digest, err := hashV1Digest(value, fieldClass, key)
+	for index := range key {
+		key[index] = 0
+	}
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", digest[:4]), nil
+}
+
 func fieldFailureCode(err error) string {
 	for _, code := range []FailureCode{
 		FailureInvalidUTF8, FailureKeyUnavailable, FailureCandidateLimit,

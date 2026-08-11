@@ -151,6 +151,10 @@ func OwnedHooksPresent(conn Connector, opts SetupOpts) (bool, error) {
 	if inspector, ok := conn.(ownedHookContractInspector); ok {
 		return inspector.ownedHookContractPresent(opts)
 	}
+	return ownedHooksPresentInConfig(conn, opts)
+}
+
+func ownedHooksPresentInConfig(conn Connector, opts SetupOpts) (bool, error) {
 	paths := HookConfigPathsForConnector(conn, opts)
 	if len(paths) == 0 {
 		return true, nil

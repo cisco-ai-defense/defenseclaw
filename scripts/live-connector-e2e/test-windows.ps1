@@ -1784,6 +1784,10 @@ private-secret-name = "DefenseClaw must remain redacted"
         'Codex certification never bypasses hook trust'
     $doctorContract = [regex]::Match($harnessText, '(?s)function Assert-DoctorWindowsHookRegistration\b.*?\n\}').Value
     $doctorSetupContract = [regex]::Match($harnessText, '(?s)function Assert-DoctorHookRegistration\b.*?\n\}').Value
+    $ampScopedTokenContract = [regex]::Match(
+        $harnessText,
+        '(?s)function Assert-AmpScopedTokenPluginContract\b.*?(?=\r?\nfunction )'
+    ).Value
     $wizardHookContract = [regex]::Match(
         $nativeHarnessText,
         '(?s)function Assert-WizardHookRegistration\b.*?(?=\r?\nfunction )'
@@ -1797,13 +1801,37 @@ private-secret-name = "DefenseClaw must remain redacted"
         'ctx.ui.confirm',
         'amp.activeThread.current',
         'isPluginUINotAvailableError',
-        'action: "reject-and-continue"',
-        'Authorization = `Bearer ${DC_API_TOKEN}`'
+        'action: "reject-and-continue"'
     )) {
         Assert-True ($doctorSetupContract.Contains($marker) -and
             $wizardHookContract.Contains($marker)) `
             "Windows setup and wizard contracts require the Amp plugin marker: $marker"
     }
+    foreach ($marker in @(
+        'const DC_TOKEN_FILE = "',
+        '.hook-amp.token',
+        'const DC_TOKEN_PATTERN = /^[0-9a-f]{64}$/',
+        'const DC_MAX_TOKEN_FILE_BYTES = 4096',
+        'runtime.file(DC_TOKEN_FILE).slice(0, DC_MAX_TOKEN_FILE_BYTES + 1).text()',
+        'if (!DC_TOKEN_PATTERN.test(token))',
+        'headers.Authorization = `Bearer ${token}`',
+        'ToBase64String',
+        'const DC_API_TOKEN =',
+        'ConvertFrom-Json',
+        'GetFullPath',
+        'OrdinalIgnoreCase'
+    )) {
+        Assert-True ($ampScopedTokenContract.Contains($marker) -and
+            $wizardHookContract.Contains($marker)) `
+            "Windows setup and wizard contracts validate the Amp scoped-token boundary: $marker"
+    }
+    Assert-True ($wizardHookContract.Contains(
+        '$tokenPath = Join-Path $hookDir ''.hook-amp.token'''
+    ) -and $wizardHookContract -notmatch '\$env:DEFENSECLAW_HOME') `
+        'wizard Amp scoped-token validation derives its sidecar from the selected data root'
+    Assert-True ($doctorSetupContract.Contains('Assert-AmpScopedTokenPluginContract') -and
+        $doctorContract.Contains('Assert-AmpScopedTokenPluginContract')) `
+        'both Windows doctor contracts invoke the Amp scoped-token boundary validator'
     foreach ($marker in @(
         'const DC_FAIL_MODE: string = "closed"',
         'const DC_TIMEOUT_MS = 10000',

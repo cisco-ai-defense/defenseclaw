@@ -30,7 +30,7 @@ def _decoded(value: str) -> str:
 
 
 _API_ADDR = _decoded("{{API_ADDR_B64}}")
-_API_TOKEN = _decoded("{{API_TOKEN_B64}}")
+_TOKEN_FILE = _decoded("{{TOKEN_FILE_B64}}")
 _FAIL_MODE = _decoded("{{FAIL_MODE_B64}}")
 _ENDPOINT = f"http://{_API_ADDR}/api/v1/omnigent/hook"
 _TIMEOUT_SECONDS = 10
@@ -113,6 +113,10 @@ def _failure(reason: str) -> dict[str, str]:
     return {"result": "ALLOW"}
 
 
+def _credential_failure() -> dict[str, str]:
+    return {"result": "DENY", "reason": "DefenseClaw policy credential is unavailable."}
+
+
 def _trace_headers() -> dict[str, str]:
     """Best-effort propagation from OmniGent's active OpenTelemetry span."""
     try:
@@ -125,8 +129,28 @@ def _trace_headers() -> dict[str, str]:
         return {}
 
 
+def _scoped_hook_token() -> str:
+    """Load one strict credential without exposing path, bytes, or read errors."""
+    with open(_TOKEN_FILE, "rb") as stream:
+        raw = stream.read(4097)
+    if len(raw) > 4096:
+        raise ValueError("oversized scoped hook credential")
+    token = raw.decode("ascii").strip()
+    if len(token) != 64 or any(character not in "0123456789abcdef" for character in token):
+        raise ValueError("malformed scoped hook credential")
+    return token
+
+
 def defenseclaw_policy(event: dict[str, Any]) -> dict[str, str]:
     """Evaluate one OmniGent policy event through DefenseClaw."""
+    if not _TOKEN_FILE:
+        return _credential_failure()
+    try:
+        token = _scoped_hook_token()
+    except (OSError, UnicodeDecodeError, ValueError):
+        # Credential failures are categorically unsafe at a policy boundary,
+        # regardless of the operator's transport fail mode.
+        return _credential_failure()
     body = json.dumps(
         _payload(event),
         allow_nan=False,
@@ -137,8 +161,7 @@ def defenseclaw_policy(event: dict[str, Any]) -> dict[str, str]:
         "Content-Type": "application/json",
         "X-DefenseClaw-Client": "omnigent-policy/1.0",
     })
-    if _API_TOKEN:
-        headers["Authorization"] = f"Bearer {_API_TOKEN}"
+    headers["Authorization"] = f"Bearer {token}"
     try:
         if not _API_ADDR:
             return _failure("bridge is not configured")

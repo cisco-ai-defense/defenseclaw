@@ -1850,6 +1850,23 @@ For each flagged pattern, respond with a JSON object:
   "severity": "NONE"|"LOW"|"MEDIUM"|"HIGH"|"CRITICAL"
 }`
 
+const defaultAdjudicationSecretPrompt = `You are a credential-leak adjudicator. A regex-based scanner flagged potential secrets or credentials in this %s.
+Determine which are REAL credentials and which are FALSE POSITIVES.
+
+FLAGGED PATTERNS:
+%s
+
+IMPORTANT — Treat placeholders, documentation examples, variable names, and redacted values as false positives. Treat a concrete API key, access token, password assignment, bearer token, or cloud credential as a true positive even when embedded in otherwise benign output.
+
+For each flagged pattern, respond with a JSON object:
+{
+  "findings": [
+    {"pattern": "<the pattern>", "verdict": "true_positive"|"false_positive", "reasoning": "..."}
+  ],
+  "overall_threat": true|false,
+  "severity": "NONE"|"LOW"|"MEDIUM"|"HIGH"|"CRITICAL"
+}`
+
 // defaultAdjudicationExfilPrompt is the dedicated regex-judge
 // adjudication prompt for exfiltration signals. It exists because the
 // generic injection adjudicator (which exfil signals were previously
@@ -1901,6 +1918,7 @@ func (j *LLMJudge) AdjudicateFindings(ctx context.Context, direction, content st
 	// please" as a false positive.
 	injSignals := make([]TriageSignal, 0)
 	piiSignals := make([]TriageSignal, 0)
+	secretSignals := make([]TriageSignal, 0)
 	exfilSignals := make([]TriageSignal, 0)
 	for _, s := range signals {
 		switch s.Category {
@@ -1908,8 +1926,10 @@ func (j *LLMJudge) AdjudicateFindings(ctx context.Context, direction, content st
 			injSignals = append(injSignals, s)
 		case "exfil":
 			exfilSignals = append(exfilSignals, s)
-		case "pii", "secret":
+		case "pii":
 			piiSignals = append(piiSignals, s)
+		case "secret":
+			secretSignals = append(secretSignals, s)
 		default:
 			injSignals = append(injSignals, s)
 		}
@@ -1920,7 +1940,7 @@ func (j *LLMJudge) AdjudicateFindings(ctx context.Context, direction, content st
 	}
 
 	var wg sync.WaitGroup
-	results := make(chan adjResult, 3)
+	results := make(chan adjResult, 4)
 
 	if len(injSignals) > 0 {
 		wg.Add(1)
@@ -1935,6 +1955,14 @@ func (j *LLMJudge) AdjudicateFindings(ctx context.Context, direction, content st
 		go func() {
 			defer wg.Done()
 			v := j.adjudicateCategory(ctx, direction, content, piiSignals, "pii")
+			results <- adjResult{verdict: v}
+		}()
+	}
+	if len(secretSignals) > 0 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			v := j.adjudicateCategory(ctx, direction, content, secretSignals, "secret")
 			results <- adjResult{verdict: v}
 		}()
 	}
@@ -1975,6 +2003,8 @@ func (j *LLMJudge) adjudicateCategory(ctx context.Context, direction, content st
 		if jc := j.rp.PIIJudge(); jc != nil && jc.AdjudicationPrompt != "" {
 			promptTemplate = jc.AdjudicationPrompt
 		}
+	case "secret":
+		promptTemplate = defaultAdjudicationSecretPrompt
 	case "exfil":
 		promptTemplate = defaultAdjudicationExfilPrompt
 		if jc := j.rp.ExfilJudge(); jc != nil && jc.AdjudicationPrompt != "" {
@@ -2037,6 +2067,8 @@ func judgeAdjudicationKind(category string) string {
 	switch category {
 	case "pii":
 		return "adjudicate_pii"
+	case "secret":
+		return "adjudicate_secret"
 	case "exfil":
 		return "adjudicate_exfil"
 	default:
@@ -2093,20 +2125,18 @@ func parseAdjudicationResponse(raw, category string) *ScanVerdict {
 		return allowVerdict("llm-judge-adjudicate")
 	}
 
-	var findings []string
-	var reasons []string
+	confirmed := false
 	for _, f := range result.Findings {
 		if f.Verdict == "true_positive" {
-			findings = append(findings, fmt.Sprintf("JUDGE-ADJ-%s:%s", strings.ToUpper(category), f.Pattern))
-			if f.Reasoning != "" {
-				reasons = append(reasons, f.Reasoning)
-			}
+			confirmed = true
+			break
 		}
 	}
 
-	if len(findings) == 0 {
+	if !confirmed {
 		return allowVerdict("llm-judge-adjudicate")
 	}
+	findingID, reason := stableAdjudicationFindingIdentity(category)
 
 	severity := result.Severity
 	if severity == "" || severity == "NONE" {
@@ -2121,9 +2151,25 @@ func parseAdjudicationResponse(raw, category string) *ScanVerdict {
 	return &ScanVerdict{
 		Action:   action,
 		Severity: severity,
-		Reason:   "judge-adjudicate-" + category + ": " + strings.Join(reasons, "; "),
-		Findings: findings,
+		Reason:   reason,
+		Findings: []string{findingID},
 		Scanner:  "llm-judge-adjudicate",
+	}
+}
+
+func stableAdjudicationFindingIdentity(category string) (findingID, reason string) {
+	switch strings.ToLower(strings.TrimSpace(category)) {
+	case "pii":
+		return "JUDGE-ADJ-PII", "judge-adjudicate-pii"
+	case "secret":
+		return "JUDGE-ADJ-SECRET", "judge-adjudicate-secret"
+	case "exfil":
+		return "JUDGE-ADJ-EXFIL", "judge-adjudicate-exfil"
+	default:
+		// The only other supported adjudication lane is injection. A static
+		// fallback prevents an unexpected caller value from entering an emitted
+		// finding identity or live hook reason.
+		return "JUDGE-ADJ-INJECTION", "judge-adjudicate-injection"
 	}
 }
 

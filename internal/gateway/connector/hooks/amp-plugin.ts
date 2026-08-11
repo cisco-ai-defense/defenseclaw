@@ -10,16 +10,19 @@
 // DefenseClaw may allow, reject, or ask through Amp's native confirmation UI.
 // Amp does not define ordering across sibling plugin handlers.
 //
-// The file is rendered at setup time and written 0600 because it contains a
-// connector-scoped bearer token. It deliberately does not read secrets or
-// policy from process environment variables.
+// The file is rendered at setup time with a stable scoped-token sidecar path.
+// It loads and validates the credential for every request, so rotation never
+// leaves a replacement credential in this longer-lived plugin. It deliberately
+// does not read secrets or policy from process environment variables.
 
 import type { Agent, PluginAPI, ThreadMessage, ToolCallResult, ToolResultResult } from '@ampcode/plugin'
 
 const DC_API_ADDR = "{{.APIAddr}}"
-const DC_API_TOKEN = "{{.APIToken}}"
+const DC_TOKEN_FILE = "{{.TokenFileJS}}"
 const DC_FAIL_MODE: string = "{{.FailMode}}" // "open" or "closed"
 const DC_TIMEOUT_MS = 10000
+const DC_TOKEN_PATTERN = /^[0-9a-f]{64}$/
+const DC_MAX_TOKEN_FILE_BYTES = 4096
 // Gateway maxBodyMiddleware accepts 1 MiB. Leave headroom for UTF-8 encoding
 // differences and future envelope fields.
 const DC_MAX_BODY_BYTES = 900 * 1024
@@ -47,6 +50,10 @@ type AgentFacts = {
 	model?: string
 }
 
+type BunFileRuntime = {
+	file(path: string): { slice(start?: number, end?: number): { text(): Promise<string> } }
+}
+
 function stringID(value: unknown): string {
 	return value === undefined || value === null ? "" : String(value)
 }
@@ -58,6 +65,16 @@ function utf8Bytes(value: string): number {
 function safeError(error: unknown): string {
 	if (error instanceof Error && error.message) return error.message
 	return String(error)
+}
+
+async function scopedHookToken(): Promise<string> {
+	const runtime = (globalThis as typeof globalThis & { Bun?: BunFileRuntime }).Bun
+	if (!runtime) throw new Error("scoped hook credential reader unavailable")
+	const raw = await runtime.file(DC_TOKEN_FILE).slice(0, DC_MAX_TOKEN_FILE_BYTES + 1).text()
+	if (utf8Bytes(raw) > DC_MAX_TOKEN_FILE_BYTES) throw new Error("oversized scoped hook credential")
+	const token = raw.trim()
+	if (!DC_TOKEN_PATTERN.test(token)) throw new Error("invalid scoped hook credential")
+	return token
 }
 
 // agent.end includes the user prompt plus the turn transcript. Project only
@@ -211,13 +228,25 @@ export default function defenseclawAmpPlugin(amp: PluginAPI) {
 			body = JSON.stringify(reduced)
 		}
 
+		let token: string
+		try {
+			token = await scopedHookToken()
+		} catch {
+			// Credential failures are categorically unsafe at the two Amp policy
+			// boundaries, regardless of the operator's transport fail mode.
+			if (actionable) {
+				return { action: "block", reason: "DefenseClaw hook credential is unavailable." }
+			}
+			return { action: "allow" }
+		}
+
 		const controller = new AbortController()
 		const timer = setTimeout(() => controller.abort(), DC_TIMEOUT_MS)
 		const headers: Record<string, string> = {
 			"Content-Type": "application/json",
 			"X-DefenseClaw-Client": "amp-plugin/1.0",
 		}
-		if (DC_API_TOKEN) headers.Authorization = `Bearer ${DC_API_TOKEN}`
+		headers.Authorization = `Bearer ${token}`
 
 		try {
 			const response = await fetch(`http://${DC_API_ADDR}/api/v1/amp/hook`, {

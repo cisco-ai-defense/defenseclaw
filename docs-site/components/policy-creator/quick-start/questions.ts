@@ -229,26 +229,6 @@ export const BLOCK_CARDS: BlockCard[] = [
     correlatorPatternIds: ['LETHAL-TRIFECTA', 'TRIFECTA-WITH-FINGERPRINT-MATCH'],
     cookbookHref: '/docs/policies#layer-5--session-correlator',
   },
-  {
-    id: 'escalation_chain',
-    category: 'multi_step',
-    title: 'Escalation chain across turns',
-    description:
-      'MEDIUM → HIGH → HIGH severity progression inside the same session — attacker iterating on a prompt to get past a guardrail. Promoted to CRITICAL when the chain completes.',
-    ruleIds: [],
-    correlatorPatternIds: ['ESCALATION-CHAIN'],
-    cookbookHref: '/docs/policies#layer-5--session-correlator',
-  },
-  {
-    id: 'destructive_flow',
-    category: 'multi_step',
-    title: 'Destructive shell after sensitive read',
-    description:
-      'rm -rf / mkfs / dd-if invoked in the same session as a prior sensitive-access finding (~/.ssh, ~/.aws, /etc/shadow). Indicates active exploitation rather than reconnaissance.',
-    ruleIds: [],
-    correlatorPatternIds: ['DESTRUCTIVE-FLOW'],
-    cookbookHref: '/docs/policies#layer-5--session-correlator',
-  },
 ];
 
 // --- Q3: what to allow (multi select + free-form) --------------------------

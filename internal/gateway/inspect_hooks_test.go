@@ -223,7 +223,7 @@ func TestInspectToolResponse_SafeOutput(t *testing.T) {
 func TestInspectToolResponse_SensitiveOutput(t *testing.T) {
 	api := testAPIServerWithConfig(t, "action")
 	_, verdict := postInspectToolResponse(t, api,
-		`{"tool":"shell","output":"AWS_SECRET_ACCESS_KEY=AKIAIOSFODNN7EXAMPLE","exit_code":0}`)
+		`{"tool":"shell","output":"AWS_SECRET_ACCESS_KEY=AKIA7G4N2K9Q6M8R3T5V","exit_code":0}`)
 
 	if verdict.Action == "allow" && len(verdict.Findings) == 0 {
 		t.Error("expected findings for leaked secrets in tool output")
@@ -389,7 +389,7 @@ func TestInspectResponse_ObserveDoesNotBlock(t *testing.T) {
 func TestInspectToolResponse_ObserveDoesNotBlock(t *testing.T) {
 	api := testAPIServerWithConfig(t, "observe")
 	_, verdict := postInspectToolResponse(t, api,
-		`{"tool":"shell","output":"AWS_SECRET_ACCESS_KEY=AKIAIOSFODNN7EXAMPLE","exit_code":0}`)
+		`{"tool":"shell","output":"AWS_SECRET_ACCESS_KEY=AKIA7G4N2K9Q6M8R3T5V","exit_code":0}`)
 
 	if verdict.Action != "allow" {
 		t.Errorf("action = %q, want allow (observe mode must not exit hook script)", verdict.Action)
