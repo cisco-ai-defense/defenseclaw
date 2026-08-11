@@ -7,13 +7,48 @@
 package gateway
 
 import (
+	"encoding/csv"
+	"io"
 	"math"
 	"regexp"
 	"strings"
 	"unicode"
+
+	"github.com/defenseclaw/defenseclaw/internal/secretshape"
 )
 
 var ssnListCandidatePattern = regexp.MustCompile(`\b(?:\d{3}-\d{2}-\d{4}|\d{9})\b`)
+
+// ibanLengthsByCountry mirrors the fixed national lengths in the SWIFT ISO
+// 13616 IBAN Registry (release 102, June 2026). A MOD97-valid string is not an
+// IBAN unless its country participates in the registry and its length matches
+// that country's registered format.
+var ibanLengthsByCountry = map[string]int{
+	"AD": 24, "AE": 23, "AL": 28, "AT": 20, "AZ": 28,
+	"BA": 20, "BE": 16, "BG": 22, "BH": 22, "BI": 27, "BR": 29, "BY": 28,
+	"CH": 21, "CR": 22, "CY": 28, "CZ": 24,
+	"DE": 22, "DJ": 27, "DK": 18, "DO": 28,
+	"EE": 20, "EG": 29, "ES": 24,
+	"FI": 18, "FK": 18, "FO": 18, "FR": 27,
+	"GB": 22, "GE": 22, "GI": 23, "GL": 18, "GR": 27, "GT": 28,
+	"HN": 28, "HR": 21, "HU": 28,
+	"IE": 22, "IL": 23, "IQ": 23, "IS": 26, "IT": 27,
+	"JO": 30,
+	"KW": 30, "KZ": 20,
+	"LB": 28, "LC": 32, "LI": 21, "LT": 20, "LU": 20, "LV": 21, "LY": 25,
+	"MC": 27, "MD": 24, "ME": 22, "MK": 19, "MN": 20, "MR": 27, "MT": 31, "MU": 30,
+	"NI": 28, "NL": 18, "NO": 15,
+	"OM": 23,
+	"PK": 24, "PL": 28, "PS": 29, "PT": 25,
+	"QA": 29,
+	"RO": 24, "RS": 22, "RU": 33,
+	"SA": 24, "SC": 31, "SD": 18, "SE": 24, "SI": 19, "SK": 24, "SM": 27, "SO": 23, "ST": 25, "SV": 28,
+	"TL": 23, "TN": 24, "TR": 26,
+	"UA": 29,
+	"VA": 22, "VG": 24,
+	"XK": 20,
+	"YE": 30,
+}
 
 // firstAcceptedRuleMatch returns the first regex match that also satisfies the
 // rule's structural validator. Regexes are intentionally used as a cheap
@@ -111,8 +146,13 @@ func acceptedRuleMatchAt(ruleID, text, match string, start, end int) bool {
 	if !acceptedRuleMatch(ruleID, match) {
 		return false
 	}
-	if ruleID == "ENT-BULK-SSN" || ruleID == "ENT-BULK-SSN-NOHYPHEN" {
+	switch ruleID {
+	case "ENT-BULK-SSN", "ENT-BULK-SSN-NOHYPHEN":
 		return credibleSSNContext(text, start, end)
+	case "ENT-BULK-CSV-PII":
+		return credibleBulkCSVContext(text, start, end)
+	case "SEC-PRIVKEY":
+		return secretshape.ValidPrivateKeyPEMAt(text, start)
 	}
 	return true
 }
@@ -123,6 +163,8 @@ func acceptedRuleMatch(ruleID, match string) bool {
 		return validUSSSN(match)
 	case "ENT-CC-VISA", "ENT-CC-MC", "ENT-CC-AMEX", "ENT-CC-DISCOVER":
 		return validPaymentCardCandidate(match)
+	case "ENT-IBAN":
+		return validIBAN(match)
 	}
 	if strings.HasPrefix(ruleID, "SEC-") {
 		return acceptedCredentialMatch(ruleID, match)
@@ -352,6 +394,153 @@ func ssnImmediateLabelTail(value string) bool {
 	}
 }
 
+func validIBAN(candidate string) bool {
+	compact := make([]byte, 0, len(candidate))
+	for _, character := range []byte(candidate) {
+		if character == ' ' {
+			continue
+		}
+		if !((character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9')) {
+			return false
+		}
+		compact = append(compact, character)
+	}
+	if len(compact) < 15 || len(compact) > 34 ||
+		compact[0] < 'A' || compact[0] > 'Z' ||
+		compact[1] < 'A' || compact[1] > 'Z' ||
+		compact[2] < '0' || compact[2] > '9' ||
+		compact[3] < '0' || compact[3] > '9' {
+		return false
+	}
+	expectedLength, registered := ibanLengthsByCountry[string(compact[:2])]
+	if !registered || len(compact) != expectedLength {
+		return false
+	}
+
+	remainder := 0
+	for index := 0; index < len(compact); index++ {
+		character := compact[(index+4)%len(compact)]
+		if character >= '0' && character <= '9' {
+			remainder = (remainder*10 + int(character-'0')) % 97
+			continue
+		}
+		remainder = (remainder*100 + int(character-'A') + 10) % 97
+	}
+	return remainder == 1
+}
+
+func credibleBulkCSVContext(text string, start, end int) bool {
+	if start < 0 || end > len(text) || start >= end {
+		return false
+	}
+	candidate := strings.TrimPrefix(text[start:end], "\n")
+	candidate = strings.TrimPrefix(candidate, "\r")
+	headerEnd := strings.IndexByte(candidate, '\n')
+	if headerEnd < 0 {
+		return false
+	}
+	headerLine := strings.TrimSuffix(candidate[:headerEnd], "\r")
+	firstDataLine := strings.TrimSuffix(candidate[headerEnd+1:], "\r")
+	delimiter, header, strongPII, ok := bulkCSVHeader(headerLine)
+	if !ok {
+		return false
+	}
+	firstData, ok := parseDelimitedRow(firstDataLine, delimiter)
+	if !ok || len(firstData) != len(header) || !hasDelimitedData(firstData) {
+		return false
+	}
+	if strongPII {
+		return true
+	}
+
+	// A single first/last-name row is a weak bulk-data signal. Require a
+	// second well-formed record while preserving one-row recall for stronger
+	// SSN, payment-card, and account-number headers.
+	nextLine, ok := nextDelimitedDataLine(text[end:])
+	if !ok {
+		return false
+	}
+	secondData, ok := parseDelimitedRow(nextLine, delimiter)
+	return ok && len(secondData) == len(header) && hasDelimitedData(secondData)
+}
+
+func bulkCSVHeader(line string) (rune, []string, bool, bool) {
+	for _, delimiter := range []rune{',', '\t'} {
+		fields, ok := parseDelimitedRow(line, delimiter)
+		if !ok || len(fields) < 2 {
+			continue
+		}
+		piiColumns := 0
+		strongPII := false
+		for _, field := range fields {
+			name := normalizedCSVColumnName(field)
+			switch {
+			case strings.HasSuffix(name, "firstname"), strings.HasSuffix(name, "lastname"):
+				piiColumns++
+			case strings.HasSuffix(name, "ssn"),
+				strings.HasSuffix(name, "socialsecurity"),
+				strings.HasSuffix(name, "creditcard"),
+				strings.HasSuffix(name, "cardnumber"),
+				strings.HasSuffix(name, "accountnumber"):
+				piiColumns++
+				strongPII = true
+			}
+		}
+		if piiColumns >= 2 {
+			return delimiter, fields, strongPII, true
+		}
+	}
+	return 0, nil, false, false
+}
+
+func normalizedCSVColumnName(value string) string {
+	return strings.Map(func(character rune) rune {
+		if unicode.IsLetter(character) || unicode.IsDigit(character) {
+			return unicode.ToLower(character)
+		}
+		return -1
+	}, strings.TrimSpace(value))
+}
+
+func parseDelimitedRow(line string, delimiter rune) ([]string, bool) {
+	reader := csv.NewReader(strings.NewReader(line))
+	reader.Comma = delimiter
+	reader.FieldsPerRecord = -1
+	reader.TrimLeadingSpace = true
+	fields, err := reader.Read()
+	if err != nil || len(fields) == 0 {
+		return nil, false
+	}
+	if _, err := reader.Read(); err != io.EOF {
+		return nil, false
+	}
+	return fields, true
+}
+
+func hasDelimitedData(fields []string) bool {
+	for _, field := range fields {
+		if strings.TrimSpace(field) != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func nextDelimitedDataLine(remainder string) (string, bool) {
+	if strings.HasPrefix(remainder, "\r\n") {
+		remainder = remainder[2:]
+	} else if strings.HasPrefix(remainder, "\n") {
+		remainder = remainder[1:]
+	} else {
+		return "", false
+	}
+	if lineEnd := strings.IndexByte(remainder, '\n'); lineEnd >= 0 {
+		remainder = remainder[:lineEnd]
+	}
+	remainder = strings.TrimSuffix(remainder, "\r")
+	return remainder, remainder != ""
+}
+
 func acceptedLocalSecretMatch(kind localSecretDetectorKind, match string) bool {
 	candidate := assignmentValue(match)
 	if kind == localSecretDetectorBearer {
@@ -386,9 +575,9 @@ func normalizedPIIEvidenceKey(evidence string) string {
 }
 
 func acceptedCredentialMatch(ruleID, match string) bool {
-	// A complete private-key block is structural evidence on its own. Other
-	// credential formats below expose a compact candidate value that can be
-	// checked for public examples and placeholder entropy.
+	// Private-key candidates are validated against the complete source text in
+	// acceptedRuleMatchAt. Other credential formats expose a compact value that
+	// can be checked for public examples and placeholder entropy here.
 	if ruleID == "SEC-PRIVKEY" {
 		return true
 	}

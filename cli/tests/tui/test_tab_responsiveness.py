@@ -24,6 +24,7 @@ from time import perf_counter, sleep
 from typing import Any
 
 import defenseclaw.tui.app as app_module
+import defenseclaw.tui.panels.alerts as alerts_panel
 import pytest
 from defenseclaw.db import Store
 from defenseclaw.tui.app import DefenseClawTUI
@@ -240,7 +241,7 @@ async def test_alerts_pending_generation_finishes_with_fresh_rows(
         await _wait_for_panel(app, "alerts")
 
         assert calls == 2
-        assert "All 2" in app.body_text
+        assert "In scope 2" in app.body_text
         assert {event.id for event in alerts.audit_events} == {"new-1", "new-2"}
 
 
@@ -410,6 +411,36 @@ def test_overview_snapshot_queries_each_source_once() -> None:
     assert store.stats_queries == 1
     assert store.event_queries == 1
     assert store.scan_queries == 1
+
+
+def test_high_volume_alert_summary_skips_unneeded_detail_parsing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    alerts = AlertsPanelModel()
+    parse_details_calls = 0
+    original_parse_details = alerts_panel.parse_kv_details
+
+    def counted_parse_details(value: str) -> dict[str, str]:
+        nonlocal parse_details_calls
+        parse_details_calls += 1
+        return original_parse_details(value)
+
+    monkeypatch.setattr(alerts_panel, "parse_kv_details", counted_parse_details)
+    alerts.set_events(
+        [
+            AlertEvent(
+                id=f"alert-{index}",
+                severity="HIGH",
+                action="connector-hook",
+                target="preToolUse",
+                details="connector=claudecode decision=block",
+            )
+            for index in range(7_000)
+        ]
+    )
+
+    assert "In scope 7000" in alerts.summary_text()
+    assert parse_details_calls == 0
 
 
 def _seed_responsiveness_store(path: Path, *, event_count: int = 7_000) -> Store:

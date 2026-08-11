@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -31,6 +32,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semanticpb"
 	"mvdan.cc/sh/v3/expand"
+	"mvdan.cc/sh/v3/pattern"
 	"mvdan.cc/sh/v3/syntax"
 )
 
@@ -424,6 +426,14 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 			return sshAuthorizedKeysCommandPrerequisite(facts)
 		},
 	},
+}
+
+// trustedLegacyProvenCommandDetectionOnly is deliberately code-owned instead
+// of rule-pack metadata: policy data must not be able to opt an arbitrary
+// command owner out of enforcement. These entries apply only after
+// ActionFacts proves the command owner, never to literal/raw fallback.
+var trustedLegacyProvenCommandDetectionOnly = map[string]struct{}{
+	"CMD-PYTHON-C": {},
 }
 
 func stdinInterpreterPipelineFallbackProof(
@@ -1105,7 +1115,7 @@ func filterTrustedLegacyActionContext(
 			}
 		case "command":
 			if _, ok := commandMatches[finding.RuleID]; ok {
-				filtered = append(filtered, finding)
+				filtered = append(filtered, trustedLegacyProvenCommandFinding(finding))
 			}
 		case "c2":
 			if _, ok := networkMatches[finding.RuleID]; ok {
@@ -1123,7 +1133,7 @@ func filterTrustedLegacyActionContext(
 				}
 			case strings.HasPrefix(finding.RuleID, "CMD-"):
 				if _, ok := commandMatches[finding.RuleID]; ok {
-					filtered = append(filtered, finding)
+					filtered = append(filtered, trustedLegacyProvenCommandFinding(finding))
 				}
 			case strings.HasPrefix(finding.RuleID, "C2-"):
 				if _, ok := networkMatches[finding.RuleID]; ok {
@@ -1135,6 +1145,20 @@ func filterTrustedLegacyActionContext(
 		}
 	}
 	return filtered
+}
+
+func trustedLegacyProvenCommandFinding(finding RuleFinding) RuleFinding {
+	// CMD-PYTHON-C is a generic interpreter-shape owner. Once ActionFacts
+	// proves that Python -c is the command being executed, retain the LOW match
+	// as audit telemetry without letting the generic shape alert or block.
+	// Specific semantic owners (for example reverse shells and destructive
+	// commands) remain independently enforcement-capable. Unstructured and
+	// malformed literal fallback never reaches this proven-owner branch and
+	// keeps its existing conservative contract.
+	if _, ok := trustedLegacyProvenCommandDetectionOnly[finding.RuleID]; ok {
+		finding.enforcement = findingEnforcementDetectionOnly
+	}
+	return finding
 }
 
 func trustedReadOnlyArgumentDataFinding(category string, finding RuleFinding) bool {
@@ -1458,8 +1482,9 @@ func trustedBashFallbackActions(
 				return false
 			}
 			var (
-				executable syntax.Node
-				call       *syntax.CallExpr
+				executable       syntax.Node
+				call             *syntax.CallExpr
+				unresolvedAction bool
 			)
 			switch node := node.(type) {
 			case *syntax.Stmt:
@@ -1467,6 +1492,10 @@ func trustedBashFallbackActions(
 					return true
 				}
 				executable = node
+				if assignment, ok := node.Cmd.(*syntax.CallExpr); ok &&
+					len(assignment.Args) == 0 && len(node.Redirs) != 0 {
+					unresolvedAction = true
+				}
 			case *syntax.CallExpr:
 				executable = node
 				call = node
@@ -1479,6 +1508,14 @@ func trustedBashFallbackActions(
 			}
 			body := strings.TrimSpace(rendered.String())
 			if call != nil {
+				// Static field rendering can preserve glob syntax as a literal
+				// argv value even though Bash will select the executable at
+				// runtime. Keep that useful projection, but also retain the raw
+				// detection-only uncertainty lane for the unresolved command
+				// identity.
+				if trustedBashCallHasDynamicExecutable(call) {
+					unresolvedExecution = true
+				}
 				if fields, ok := trustedBashStaticFields(call); ok {
 					body = serializeArgvForLegacyScan(fields)
 				} else if trustedBashCallNeedsProjection(call) {
@@ -1509,7 +1546,13 @@ func trustedBashFallbackActions(
 			}
 			nestedFacts := actionfacts.Analyze(nestedInput)
 			if len(nestedFacts.Commands) == 0 {
-				if call != nil {
+				// Assignment-only CallExpr nodes do not execute an external
+				// command. In particular, a static Bash array declaration must
+				// not create parser-uncertainty telemetry merely because the
+				// POSIX projection cannot represent it. Any command substitutions
+				// in the assignment are walked and projected independently, while
+				// statement-level redirections remain unresolved actions.
+				if unresolvedAction || (call != nil && len(call.Args) != 0) {
 					unresolvedExecution = true
 				}
 				return true
@@ -1611,12 +1654,311 @@ func trustedBashCallNeedsProjection(call *syntax.CallExpr) bool {
 	if call == nil {
 		return false
 	}
+	if trustedBashCallHasDynamicExecutable(call) {
+		return true
+	}
 	for _, word := range call.Args {
 		if trustedBashWordNeedsProjection(word) {
 			return true
 		}
 	}
 	return false
+}
+
+// trustedBashCallHasDynamicExecutable identifies a runtime expansion in the
+// command word. Expansions in later argv positions do not make the executable
+// identity uncertain and therefore must not create generic parser telemetry.
+//
+// Deliberately do not resolve parameter or array values from earlier shell
+// assignments here. Doing that soundly requires control-flow, scope, quoting,
+// and mutation semantics that the bounded projection does not currently own;
+// the existing raw fallback instead records the uncertainty without allowing
+// it to drive enforcement.
+func trustedBashCallHasDynamicExecutable(call *syntax.CallExpr) bool {
+	if call == nil || len(call.Args) == 0 || call.Args[0] == nil {
+		return false
+	}
+	index := 0
+	const maxTransparentWrappers = 4
+	for depth := 0; depth <= maxTransparentWrappers; depth++ {
+		if index >= len(call.Args) || call.Args[index] == nil {
+			return false
+		}
+		word := call.Args[index]
+		if trustedBashWordHasDynamicExecutable(word) {
+			return true
+		}
+		program, ok := trustedBashStaticWordValue(word)
+		if !ok {
+			return false
+		}
+		program = path.Base(program)
+		next, ok := trustedBashTransparentWrapperExecutable(call.Args, index, program)
+		if next == trustedBashUnresolvedWrapperExecutable {
+			return true
+		}
+		if !ok {
+			return false
+		}
+		index = next
+	}
+	return true
+}
+
+func trustedBashWordHasDynamicExecutable(word *syntax.Word) bool {
+	if word == nil {
+		return false
+	}
+	var shellPattern strings.Builder
+	if trustedBashAppendExecutablePattern(&shellPattern, word.Parts, false) {
+		return true
+	}
+	candidate := shellPattern.String()
+	if !pattern.HasMeta(candidate, 0) {
+		return false
+	}
+	// An unmatched bracket is a literal command name under ordinary Bash glob
+	// semantics (for example the standard `[` command). Validate the complete
+	// quote-aware word because a bracket expression may cross AST parts, as in
+	// /bin/r['m']; validating each literal fragment would miss that expansion.
+	_, err := pattern.Regexp(candidate, pattern.Filenames|pattern.EntireString)
+	return err == nil
+}
+
+// trustedBashAppendExecutablePattern reconstructs one shell pattern while
+// quoting metacharacters contributed by quoted AST parts. It returns true for
+// value-producing expansions whose result can select the executable directly.
+func trustedBashAppendExecutablePattern(
+	destination *strings.Builder,
+	parts []syntax.WordPart,
+	quoted bool,
+) bool {
+	for _, part := range parts {
+		switch part := part.(type) {
+		case *syntax.ParamExp, *syntax.CmdSubst, *syntax.ArithmExp,
+			*syntax.ProcSubst:
+			return true
+		case *syntax.ExtGlob:
+			if !quoted {
+				return true
+			}
+		case *syntax.Lit:
+			value := part.Value
+			if quoted {
+				value = pattern.QuoteMeta(value, 0)
+			}
+			destination.WriteString(value)
+		case *syntax.SglQuoted:
+			destination.WriteString(pattern.QuoteMeta(part.Value, 0))
+		case *syntax.DblQuoted:
+			// Parameter and command expansion still occur inside double
+			// quotes, but pathname expansion does not.
+			if trustedBashAppendExecutablePattern(destination, part.Parts, true) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func trustedBashStaticWordValue(word *syntax.Word) (string, bool) {
+	if word == nil || trustedBashWordMayExpandHome(word) {
+		return "", false
+	}
+	fields, err := expand.Fields(&expand.Config{}, word)
+	if err != nil || len(fields) != 1 || strings.TrimSpace(fields[0]) != fields[0] {
+		return "", false
+	}
+	return fields[0], fields[0] != ""
+}
+
+const trustedBashUnresolvedWrapperExecutable = -1
+
+func trustedBashTransparentWrapperExecutable(
+	args []*syntax.Word,
+	wrapperIndex int,
+	program string,
+) (int, bool) {
+	switch program {
+	case "command":
+		for index := wrapperIndex + 1; index < len(args); index++ {
+			argument, static := trustedBashStaticWordValue(args[index])
+			if !static {
+				return index, true
+			}
+			switch argument {
+			case "--":
+				return index + 1, index+1 < len(args)
+			case "-p":
+				continue
+			case "-v", "-V":
+				return 0, false
+			}
+			if strings.HasPrefix(argument, "-") {
+				return trustedBashUnresolvedWrapperExecutable, false
+			}
+			return index, true
+		}
+
+	case "exec":
+		for index := wrapperIndex + 1; index < len(args); index++ {
+			argument, static := trustedBashStaticWordValue(args[index])
+			if !static {
+				return index, true
+			}
+			switch argument {
+			case "--":
+				return index + 1, index+1 < len(args)
+			case "-c", "-l", "-cl", "-lc":
+				continue
+			case "-a":
+				index++
+				if index >= len(args) {
+					return 0, false
+				}
+				continue
+			}
+			if strings.HasPrefix(argument, "-") {
+				return trustedBashUnresolvedWrapperExecutable, false
+			}
+			return index, true
+		}
+
+	case "env":
+		for index := wrapperIndex + 1; index < len(args); index++ {
+			if trustedBashEnvironmentAssignmentWord(args[index]) {
+				continue
+			}
+			argument, static := trustedBashStaticWordValue(args[index])
+			if !static {
+				return index, true
+			}
+			switch argument {
+			case "--":
+				for index++; index < len(args); index++ {
+					if trustedBashEnvironmentAssignmentWord(args[index]) {
+						continue
+					}
+					value, ok := trustedBashStaticWordValue(args[index])
+					if !ok || !trustedBashEnvironmentAssignment(value) {
+						return index, true
+					}
+				}
+				return 0, false
+			case "--help", "--version":
+				return 0, false
+			case "-S", "--split-string":
+				return trustedBashUnresolvedWrapperExecutable, false
+			case "-u", "--unset", "-C", "--chdir":
+				index++
+				if index >= len(args) {
+					return 0, false
+				}
+				continue
+			case "-i", "--ignore-environment", "-0", "--null", "-v", "--debug":
+				continue
+			}
+			if strings.HasPrefix(argument, "--unset=") ||
+				strings.HasPrefix(argument, "--chdir=") ||
+				len(argument) > 2 && strings.HasPrefix(argument, "-C") {
+				continue
+			}
+			if strings.HasPrefix(argument, "--split-string=") ||
+				strings.HasPrefix(argument, "-") {
+				return trustedBashUnresolvedWrapperExecutable, false
+			}
+			if trustedBashEnvironmentAssignment(argument) {
+				continue
+			}
+			return index, true
+		}
+
+	case "sudo":
+		for index := wrapperIndex + 1; index < len(args); index++ {
+			if trustedBashEnvironmentAssignmentWord(args[index]) {
+				continue
+			}
+			argument, static := trustedBashStaticWordValue(args[index])
+			if !static {
+				return index, true
+			}
+			if argument == "--" {
+				for index++; index < len(args); index++ {
+					if trustedBashEnvironmentAssignmentWord(args[index]) {
+						continue
+					}
+					value, ok := trustedBashStaticWordValue(args[index])
+					if !ok || !trustedBashEnvironmentAssignment(value) {
+						return index, true
+					}
+				}
+				return 0, false
+			}
+			switch argument {
+			case "-i", "--login", "-s", "--shell":
+				if index+1 < len(args) {
+					return trustedBashUnresolvedWrapperExecutable, false
+				}
+				return 0, false
+			case "-l", "-ll", "--list", "-e", "--edit", "-v", "--validate",
+				"-V", "--version", "--help":
+				return 0, false
+			case "-u", "--user", "-g", "--group", "-h", "--host", "-p", "--prompt",
+				"-C", "--close-from", "-T", "--command-timeout", "-r", "--role", "-t", "--type",
+				"-D", "--chdir", "-R", "--chroot":
+				index++
+				if index >= len(args) {
+					return 0, false
+				}
+				continue
+			case "-n", "--non-interactive", "-E", "--preserve-env", "-H", "--set-home",
+				"-S", "--stdin", "-k", "--reset-timestamp", "-K", "--remove-timestamp",
+				"-b", "--background":
+				continue
+			}
+			if trustedBashSudoAttachedOption(argument) {
+				continue
+			}
+			if strings.HasPrefix(argument, "-") {
+				return trustedBashUnresolvedWrapperExecutable, false
+			}
+			if trustedBashEnvironmentAssignment(argument) {
+				continue
+			}
+			return index, true
+		}
+	}
+	return 0, false
+}
+
+func trustedBashEnvironmentAssignment(argument string) bool {
+	name, _, ok := strings.Cut(argument, "=")
+	return ok && name != ""
+}
+
+func trustedBashEnvironmentAssignmentWord(word *syntax.Word) bool {
+	if word == nil || len(word.Parts) == 0 {
+		return false
+	}
+	literal, ok := word.Parts[0].(*syntax.Lit)
+	if !ok {
+		return false
+	}
+	name, _, ok := strings.Cut(literal.Value, "=")
+	return ok && name != "" && !strings.HasPrefix(name, "-")
+}
+
+func trustedBashSudoAttachedOption(argument string) bool {
+	for _, prefix := range []string{
+		"--user=", "--group=", "--host=", "--prompt=", "--close-from=",
+		"--command-timeout=", "--role=", "--type=", "--chdir=", "--chroot=",
+	} {
+		if strings.HasPrefix(argument, prefix) && len(argument) > len(prefix) {
+			return true
+		}
+	}
+	return strings.HasPrefix(argument, "--preserve-env=") &&
+		len(argument) > len("--preserve-env=")
 }
 
 func trustedBashWordNeedsProjection(word *syntax.Word) bool {

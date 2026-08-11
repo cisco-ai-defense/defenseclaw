@@ -208,6 +208,14 @@ type HookEndpoint interface {
 	HookAPIPath() string
 }
 
+// NotifyEndpoint is implemented by connectors that install an auxiliary
+// notification bridge alongside their primary lifecycle hook. Keeping the
+// path on the connector contract lets rotation readiness verify every scoped
+// route without hard-coding connector identities in the CLI.
+type NotifyEndpoint interface {
+	NotifyAPIPath() string
+}
+
 // HookConfigStub describes the bytes + mode a connector wants written
 // when its native hook config file is absent on a fresh target (the
 // agent binary was never launched by this user, so its default config
@@ -786,10 +794,10 @@ type HookConfigReferenceOwner interface {
 	HookConfigReferenceNeedles(opts SetupOpts) []string
 }
 
-// ScopedHookTokenRequirement is implemented by connector runtimes that place
-// a bearer credential in a host-agent auto-loaded artifact. Such connectors
-// must fail setup if a least-privilege hook token cannot be established; they
-// may never fall back to embedding the gateway master token.
+// ScopedHookTokenRequirement is implemented by connector runtimes that depend
+// on a connector-scoped bearer credential. Such connectors must fail setup if
+// the least-privilege sidecar cannot be established; they may never fall back
+// to exposing the gateway master token to a host-agent runtime.
 type ScopedHookTokenRequirement interface {
 	RequiresScopedHookToken() bool
 }
@@ -797,8 +805,8 @@ type ScopedHookTokenRequirement interface {
 // ManagedPluginArtifactOwner identifies connector-managed plugin files that
 // host agents auto-load directly. Unlike shell hooks, these artifacts are
 // owner-readable policy/config files: they may be absent before first install,
-// must remain mode 0600 when they embed a scoped token, and are exclusively
-// written by DefenseClaw.
+// remain mode 0600 as DefenseClaw-owned policy bridges, and are exclusively
+// written by DefenseClaw. Scoped credentials live in separate sidecars.
 type ManagedPluginArtifactOwner interface {
 	ManagedPluginArtifacts(opts SetupOpts) []string
 }

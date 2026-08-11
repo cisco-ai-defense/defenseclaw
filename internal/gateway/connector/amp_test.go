@@ -56,10 +56,23 @@ func TestAMPSetupWritesManagedSystemPlugin(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(data)
+	tokenPath, err := HookAPITokenFilePath(opts.DataDir, "amp")
+	if err != nil {
+		t.Fatalf("HookAPITokenFilePath: %v", err)
+	}
+	tokenPath, err = filepath.Abs(tokenPath)
+	if err != nil {
+		t.Fatalf("absolute hook token path: %v", err)
+	}
 	for _, want := range []string{
 		"127.0.0.1:18970",
-		"amp-scoped-token",
+		javaScriptStringContent(tokenPath),
 		`const DC_FAIL_MODE: string = "closed"`,
+		`const DC_MAX_TOKEN_FILE_BYTES = 4096`,
+		`runtime.file(DC_TOKEN_FILE).slice(0, DC_MAX_TOKEN_FILE_BYTES + 1).text()`,
+		`if (utf8Bytes(raw) > DC_MAX_TOKEN_FILE_BYTES)`,
+		`const DC_TOKEN_PATTERN = /^[0-9a-f]{64}$/`,
+		`return { action: "block", reason: "DefenseClaw hook credential is unavailable." }`,
 		"/api/v1/amp/hook",
 		`amp.on("session.start"`,
 		`amp.on("agent.start"`,
@@ -90,6 +103,9 @@ func TestAMPSetupWritesManagedSystemPlugin(t *testing.T) {
 	}
 	if strings.Contains(text, "{{.") {
 		t.Fatal("rendered plugin retains template placeholders")
+	}
+	if strings.Contains(text, opts.APIToken) {
+		t.Fatal("rendered plugin embeds the connector-scoped credential instead of loading its sidecar")
 	}
 	agentEnd := text[strings.Index(text, `amp.on("agent.end"`):]
 	if strings.Contains(agentEnd, "messages: event.messages") || strings.Contains(agentEnd, "message: event.message") {

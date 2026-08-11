@@ -590,7 +590,13 @@ func TestAlertAcknowledgementTargetsUseExactEligibility(t *testing.T) {
 		 '{"defenseclaw.enforcement.effective_action":"block"}'),
 		('v8-detection-only', '2026-07-07T10:00:03Z', 'scan-finding', 'scanner', 'source telemetry',
 		 'HIGH', 'security.finding', 'finding.observed',
-		 '{"defenseclaw.finding.tags":["detection-only"]}')`); err != nil {
+		 '{"defenseclaw.finding.tags":["detection-only"]}'),
+		('v8-detection-only-padded-array', '2026-07-07T10:00:04Z', 'scan-finding', 'scanner', 'source telemetry',
+		 'HIGH', 'security.finding', 'finding.observed',
+		 '{"defenseclaw.finding.tags":[" Detection-Only "]}'),
+		('v8-detection-only-padded-scalar', '2026-07-07T10:00:05Z', 'scan-finding', 'scanner', 'source telemetry',
+		 'HIGH', 'security.finding', 'finding.observed',
+		 '{"defenseclaw.finding.tags":" \tDETECTION-ONLY\r\n"}')`); err != nil {
 		t.Fatal(err)
 	}
 	targets, err := store.ListAlertAcknowledgementTargets(context.Background(), "all")
@@ -603,7 +609,8 @@ func TestAlertAcknowledgementTargetsUseExactEligibility(t *testing.T) {
 	}
 	if len(targets) != 4 || !targetIDs["eligible-alert"] || !targetIDs["v8-finding"] ||
 		!targetIDs["v8-platform"] || !targetIDs["v8-enforcement"] ||
-		targetIDs["v8-detection-only"] {
+		targetIDs["v8-detection-only"] || targetIDs["v8-detection-only-padded-array"] ||
+		targetIDs["v8-detection-only-padded-scalar"] {
 		t.Fatalf("targets=%+v", targets)
 	}
 	alerts, err := store.ListAlerts(10)
@@ -618,7 +625,8 @@ func TestAlertAcknowledgementTargetsUseExactEligibility(t *testing.T) {
 	}
 	if len(alerts) != 4 || !alertIDs["eligible-alert"] || !alertIDs["v8-finding"] ||
 		!alertIDs["v8-platform"] || !alertIDs["v8-enforcement"] ||
-		alertIDs["v8-detection-only"] || alertSeverities["v8-enforcement"] != "HIGH" {
+		alertIDs["v8-detection-only"] || alertIDs["v8-detection-only-padded-array"] ||
+		alertIDs["v8-detection-only-padded-scalar"] || alertSeverities["v8-enforcement"] != "HIGH" {
 		t.Fatalf("alerts=%+v", alerts)
 	}
 	counts, err := store.GetCounts()

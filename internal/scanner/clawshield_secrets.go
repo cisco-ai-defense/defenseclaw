@@ -21,7 +21,10 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/secretshape"
 )
 
 // ClawShieldSecretsScanner detects leaked credentials and API keys across 13+ providers.
@@ -137,6 +140,9 @@ func csSecretsScanContent(content []byte, path string) []Finding {
 	for _, rule := range csSecretRules {
 		matches := rule.pattern.FindAllStringIndex(text, -1)
 		for _, loc := range matches {
+			if strings.HasPrefix(rule.id, "CS-SEC-KEY-") && !secretshape.ValidPrivateKeyPEMAt(text, loc[0]) {
+				continue
+			}
 			match := text[loc[0]:loc[1]]
 			findings = append(findings, Finding{
 				ID:          rule.id,

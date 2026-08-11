@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import defenseclaw.tui.panels.alerts as alerts_panel
 from defenseclaw.tui.panels.alerts import (
     AlertEvent,
     AlertFinding,
@@ -290,14 +291,139 @@ def test_alerts_default_hides_low_signal_rows_until_all_opt_in() -> None:
             AlertEvent(id="a1", severity="HIGH", action="scan", target="skill://one"),
             AlertEvent(id="a2", severity="MEDIUM", action="proxy", target="gateway"),
             AlertEvent(id="a3", severity="INFO", action="connector-hook", target="preToolUse"),
+            AlertEvent(id="a4", severity="MEDIUM", action="block", target="gateway"),
         ]
     )
 
-    assert [row.event.id for row in model.filtered] == ["a1"]
+    assert {row.event.id for row in model.filtered} == {"a1", "a4"}
+    assert model.active_scope_key() == "actionable"
+    assert model.active_filter_label() == "Actionable"
+    assert model.actionable_count() == 2
+    assert "Actionable 2" in model.summary_text()
+    assert "In scope 4" in model.summary_text()
     assert "No actionable" not in model.empty_state()
 
     assert model.handle_key("1").handled is True
-    assert {row.event.id for row in model.filtered} == {"a1", "a2", "a3"}
+    assert model.active_scope_key() == "all"
+    assert model.active_filter_label() == "All severities"
+    assert {row.event.id for row in model.filtered} == {"a1", "a2", "a3", "a4"}
+
+    model.set_actionable_scope()
+    assert model.active_scope_key() == "actionable"
+    assert {row.event.id for row in model.filtered} == {"a1", "a4"}
+
+
+def test_alerts_summary_collects_scope_metrics_in_one_pass(monkeypatch) -> None:
+    model = AlertsPanelModel()
+    model.set_events(
+        [
+            AlertEvent(
+                id="a1",
+                severity="HIGH",
+                action="scan",
+                target="skill://one",
+                details="connector=codex result=block",
+            ),
+            AlertEvent(
+                id="a2",
+                severity="INFO",
+                action="connector-hook",
+                target="preToolUse",
+                details="connector=codex action=allow severity=LOW",
+            ),
+            AlertEvent(
+                id="a3",
+                severity="HIGH",
+                action="connector-hook",
+                target="preToolUse",
+                details="connector=cursor action=block severity=LOW",
+            ),
+        ]
+    )
+    flat_rows_calls = 0
+    parse_details_calls = 0
+    original_flat_rows = model.flat_rows
+    original_parse_details = alerts_panel.parse_kv_details
+
+    def counted_flat_rows() -> list[alerts_panel.AlertRow]:
+        nonlocal flat_rows_calls
+        flat_rows_calls += 1
+        return original_flat_rows()
+
+    def counted_parse_details(value: str) -> dict[str, str]:
+        nonlocal parse_details_calls
+        parse_details_calls += 1
+        return original_parse_details(value)
+
+    monkeypatch.setattr(model, "flat_rows", counted_flat_rows)
+    monkeypatch.setattr(alerts_panel, "parse_kv_details", counted_parse_details)
+
+    summary = model.summary_text()
+
+    assert "Actionable 2" in summary
+    assert "In scope 3" in summary
+    assert "High 2" in summary
+    assert "Low 1" in summary
+    assert flat_rows_calls == 1
+    assert parse_details_calls == 1
+
+    flat_rows_calls = 0
+    parse_details_calls = 0
+    model.filter_text = "block"
+    summary = model.summary_text()
+
+    assert "In scope 2" in summary
+    assert flat_rows_calls == 1
+    assert parse_details_calls == 1
+
+    flat_rows_calls = 0
+    parse_details_calls = 0
+    model.filter_text = "connector:codex"
+    summary = model.summary_text()
+
+    assert "In scope 2" in summary
+    assert flat_rows_calls == 1
+    assert parse_details_calls == 3
+
+
+def test_alerts_apply_filter_parses_details_only_when_required(monkeypatch) -> None:
+    model = AlertsPanelModel()
+    parse_details_calls = 0
+    original_parse_details = alerts_panel.parse_kv_details
+
+    def counted_parse_details(value: str) -> dict[str, str]:
+        nonlocal parse_details_calls
+        parse_details_calls += 1
+        return original_parse_details(value)
+
+    monkeypatch.setattr(alerts_panel, "parse_kv_details", counted_parse_details)
+    model.set_events(
+        [
+            AlertEvent(
+                id="hook",
+                severity="INFO",
+                action="connector-hook",
+                target="preToolUse",
+                details="connector=codex action=block severity=HIGH",
+            ),
+            AlertEvent(
+                id="scan",
+                severity="HIGH",
+                action="scan",
+                target="skill://one",
+                details="connector=codex action=block",
+            ),
+        ]
+    )
+
+    assert {row.event.id for row in model.filtered} == {"hook", "scan"}
+    assert parse_details_calls == 1
+
+    parse_details_calls = 0
+    model.set_filter("block")
+
+    assert {row.event.id for row in model.filtered} == {"hook", "scan"}
+    assert parse_details_calls == 1
 
 
 def test_alerts_slash_search_and_exact_severity_filter() -> None:
@@ -314,7 +440,9 @@ def test_alerts_slash_search_and_exact_severity_filter() -> None:
     for char in "token":
         model.handle_key(char)
     assert [row.event.id for row in model.filtered] == ["a1"]
-    assert model.active_filter_label() == "search 'token'"
+    assert model.scope_total_count() == 1
+    assert "In scope 1" in model.summary_text()
+    assert model.active_filter_label() == "All severities, search 'token'"
 
     assert model.handle_key("enter").handled is True
     assert model.filtering is False
@@ -362,6 +490,8 @@ def test_alerts_connector_column_and_shared_filter() -> None:
 
     model.set_connector_filter("codex")
     assert [row.event.id for row in model.filtered] == ["a1"]
+    assert model.scope_severity_counts() == {"CRITICAL": 0, "HIGH": 1, "MEDIUM": 0, "LOW": 0}
+    assert "In scope 1" in model.summary_text()
     model.set_connector_filter("")
     assert {row.event.id for row in model.filtered} == {"a1", "a2"}
 

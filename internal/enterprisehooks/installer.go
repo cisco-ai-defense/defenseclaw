@@ -18,6 +18,7 @@ package enterprisehooks
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -64,6 +65,8 @@ type InstallOptions struct {
 	// profiles from scratch.
 	AllowMissingHookConfigRepair bool
 }
+
+var publishEnterpriseHookAPIToken = connector.PublishHookAPIToken
 
 type InstallResult struct {
 	Connector       string   `json:"connector"`
@@ -153,6 +156,14 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 		AgentVersion:      strings.TrimSpace(opts.AgentVersion),
 		HookContractID:    strings.TrimSpace(opts.HookContractID),
 	}
+	requiresScopedHookToken := connector.RequiresScopedHookToken(conn)
+	if requiresScopedHookToken {
+		if !validEnterpriseScopedHookToken(setupOpts.APIToken) {
+			return InstallResult{}, fmt.Errorf("enterprise hooks: connector-scoped hook token is required")
+		}
+		setupOpts.HookAPIToken = setupOpts.APIToken
+		setupOpts.HookAPITokenScoped = true
+	}
 	if setupOpts.AgentVersion == "" {
 		setupOpts.AgentVersion = connector.LoadCachedAgentVersion(dataDir, conn.Name())
 	}
@@ -213,22 +224,40 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 
 		return withOwnerCredentials(uid, gid, func() error {
 			conn.SetCredentials(setupOpts.APIToken, opts.MasterKey)
+			previousLockEntry := connector.LoadHookContractLockEntry(dataDir, conn.Name())
+			lockWriteAttempted := false
+			rollback := func(cause error) error {
+				failures := []error{cause}
+				if lockWriteAttempted {
+					var lockErr error
+					if strings.TrimSpace(previousLockEntry.Connector) == "" {
+						lockErr = connector.ClearHookContractLockEntry(dataDir, conn.Name())
+					} else {
+						lockErr = connector.SaveHookContractLockEntry(dataDir, previousLockEntry)
+					}
+					if lockErr != nil {
+						failures = append(failures, fmt.Errorf("enterprise hooks: restore previous hook contract lock: %w", lockErr))
+					}
+				}
+				if teardownErr := conn.Teardown(ctx, setupOpts); teardownErr != nil {
+					failures = append(failures, fmt.Errorf("enterprise hooks: connector %s rollback failed: %w", conn.Name(), teardownErr))
+				}
+				return errors.Join(failures...)
+			}
 			if err := conn.Setup(ctx, setupOpts); err != nil {
 				return fmt.Errorf("enterprise hooks: connector %s setup failed: %w", conn.Name(), err)
 			}
 			present, err := connector.OwnedHooksPresent(conn, setupOpts)
 			if err != nil {
-				_ = conn.Teardown(ctx, setupOpts)
-				return fmt.Errorf("enterprise hooks: connector %s hook verification failed: %w", conn.Name(), err)
+				return rollback(fmt.Errorf("enterprise hooks: connector %s hook verification failed: %w", conn.Name(), err))
 			}
 			if !present {
-				_ = conn.Teardown(ctx, setupOpts)
-				return fmt.Errorf("enterprise hooks: connector %s hook verification failed: owned hook command not present", conn.Name())
+				return rollback(fmt.Errorf("enterprise hooks: connector %s hook verification failed: owned hook command not present", conn.Name()))
 			}
 			lockEntry := connector.NewHookContractLockEntry(setupOpts, conn, version.Current().BinaryVersion)
+			lockWriteAttempted = true
 			if err := connector.SaveHookContractLockEntry(dataDir, lockEntry); err != nil {
-				_ = conn.Teardown(ctx, setupOpts)
-				return fmt.Errorf("enterprise hooks: save hook contract lock: %w", err)
+				return rollback(fmt.Errorf("enterprise hooks: save hook contract lock: %w", err))
 			}
 
 			if err := hardenInstallFootprint(
@@ -241,8 +270,17 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 				paths,
 				pluginArtifacts,
 			); err != nil {
-				_ = conn.Teardown(ctx, setupOpts)
-				return err
+				return rollback(err)
+			}
+			// Plugin/policy runtimes load their scoped bearer from the target
+			// user's stable sidecar at event time. Publish only after every other
+			// fallible setup and hardening step has succeeded, so an earlier
+			// failure cannot strand a replacement credential beside a rolled-back
+			// runtime artifact.
+			if requiresScopedHookToken {
+				if err := publishEnterpriseHookAPIToken(dataDir, conn.Name(), setupOpts.HookAPIToken); err != nil {
+					return rollback(fmt.Errorf("enterprise hooks: publish connector-scoped hook token: %w", err))
+				}
 			}
 			result = InstallResult{
 				Connector:       conn.Name(),
@@ -262,6 +300,19 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 		return InstallResult{}, err
 	}
 	return result, nil
+}
+
+func validEnterpriseScopedHookToken(token string) bool {
+	token = strings.TrimSpace(token)
+	if len(token) != 64 {
+		return false
+	}
+	for _, character := range token {
+		if character < '0' || (character > '9' && character < 'a') || character > 'f' {
+			return false
+		}
+	}
+	return true
 }
 
 func validateUserHome(raw string) (string, error) {

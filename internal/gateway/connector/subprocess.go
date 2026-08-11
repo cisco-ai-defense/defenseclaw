@@ -46,6 +46,7 @@ var shimBinaries = []string{"curl", "wget", "ssh", "nc", "pip", "npm"}
 type templateData struct {
 	APIAddr       string
 	APIToken      string // gateway bearer token; empty when unconfigured (loopback-allow)
+	TokenFileJS   string // absolute token path, escaped for a JavaScript double-quoted string
 	FailMode      string // "closed" blocks response/transport failures; "open" allows with a warning; strict availability always blocks
 	Managed       bool
 	TokenFile     string

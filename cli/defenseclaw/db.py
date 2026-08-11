@@ -934,14 +934,22 @@ class Store:
                             ELSE '[]'
                         END
                     ) AS finding_tag
-                    WHERE LOWER(CAST(finding_tag.value AS TEXT)) = 'detection-only'
+                    WHERE LOWER(TRIM(
+                        CAST(finding_tag.value AS TEXT),
+                        CHAR(9, 10, 11, 12, 13, 32)
+                    )) = 'detection-only'
                 )"""
             )
             safe_text_tags = self._safe_json_extract(
                 "payload_json",
                 '$."defenseclaw.finding.tags"',
             )
-            predicates.append(f"LOWER(COALESCE({safe_text_tags}, '')) <> 'detection-only'")
+            predicates.append(
+                f"""LOWER(TRIM(
+                    COALESCE({safe_text_tags}, ''),
+                    CHAR(9, 10, 11, 12, 13, 32)
+                )) <> 'detection-only'"""
+            )
         if "alert_acknowledgement_projection" in tables:
             predicates.append(
                 """NOT EXISTS (
