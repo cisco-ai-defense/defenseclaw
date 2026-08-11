@@ -13,8 +13,12 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+import shlex
+import shutil
 import subprocess
 from pathlib import Path
+
+import pytest
 
 try:
     import tomllib
@@ -133,6 +137,9 @@ def test_sandbox_installer_rejects_tampered_bytes_and_executes_authenticated_byt
     tmp_path: Path,
 ) -> None:
     text = INSTALL_SH.read_text(encoding="utf-8")
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("Bash is unavailable on this platform")
 
     def shell_function(name: str) -> str:
         match = re.search(rf"(?ms)^{re.escape(name)}\(\) \{{\n.*?^\}}\n", text)
@@ -174,16 +181,16 @@ die() {{ printf '%s\\n' "$*" >&2; exit 71; }}
 MODERN_RELEASE=true
 RELEASE_VERSION=0.8.11
 SANDBOX_INSTALLER_ASSET_START_VERSION=0.8.11
-LOCAL_DIR={release}
-POLICY_DIR={policy}
-CHECKSUMS_FILE={checksums}
+LOCAL_DIR={shlex.quote(release.as_posix())}
+POLICY_DIR={shlex.quote(policy.as_posix())}
+CHECKSUMS_FILE={shlex.quote(checksums.as_posix())}
 VERIFIED_CHECKSUM=''
 install_openshell_sandbox
 """
         environment = os.environ.copy()
-        environment["SANDBOX_EXECUTION_MARKER"] = str(marker)
+        environment["SANDBOX_EXECUTION_MARKER"] = marker.as_posix()
         completed = subprocess.run(
-            ["/bin/bash", "-c", program],
+            [bash, "-c", program],
             env=environment,
             text=True,
             capture_output=True,
