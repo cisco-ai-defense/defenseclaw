@@ -42,9 +42,15 @@ def _render(value: object) -> str:
     return str(value)
 
 
-def _pull_request_paths() -> set[str]:
-    pull_request = _workflow(EXHAUSTIVE_PATH)["on"]["pull_request"]
-    return set(pull_request["paths"])
+def _internal_diff_pathspecs() -> set[str]:
+    text = EXHAUSTIVE_PATH.read_text(encoding="utf-8")
+    match = re.search(r"^\s+telemetry_paths=\(\n(?P<body>.*?)^\s+\)$", text, re.MULTILINE | re.DOTALL)
+    assert match is not None
+    return {
+        line.strip().strip("'\"")
+        for line in match.group("body").splitlines()
+        if line.strip()
+    }
 
 
 def _matches_any(path: Path, patterns: set[str]) -> bool:
@@ -78,13 +84,14 @@ def test_ordinary_ci_always_checks_real_registry_without_exhaustive_mutation_sui
     assert "python-coverage-part-telemetry" not in CI_PATH.read_text(encoding="utf-8")
 
 
-def test_exhaustive_registry_workflow_is_path_filtered_nightly_and_manual() -> None:
+def test_exhaustive_registry_workflow_always_reports_and_runs_selectively() -> None:
     workflow = _workflow(EXHAUSTIVE_PATH)
     triggers = workflow["on"]
     jobs = workflow["jobs"]
     text = EXHAUSTIVE_PATH.read_text(encoding="utf-8")
 
     assert set(triggers) == {"pull_request", "schedule", "workflow_dispatch"}
+    assert triggers["pull_request"] == {}
     assert triggers["schedule"] == [{"cron": "47 3 * * *"}]
     assert workflow["permissions"] == {"contents": "read"}
     assert workflow["concurrency"] == {
@@ -92,7 +99,19 @@ def test_exhaustive_registry_workflow_is_path_filtered_nightly_and_manual() -> N
         "cancel-in-progress": "${{ github.event_name == 'pull_request' }}",
     }
 
+    changes = jobs["changes"]
+    assert changes["outputs"] == {"telemetry": "${{ steps.detect.outputs.telemetry }}"}
+    checkout = changes["steps"][0]
+    assert checkout["if"] == "${{ github.event_name == 'pull_request' }}"
+    assert checkout["with"] == {"fetch-depth": "0", "persist-credentials": "false"}
+    rendered_changes = _render(changes)
+    assert 'git diff --quiet "$BASE_SHA" "$HEAD_SHA" -- "${telemetry_paths[@]}"' in rendered_changes
+    assert 'echo "telemetry=true" >> "$GITHUB_OUTPUT"' in rendered_changes
+    assert 'echo "telemetry=false" >> "$GITHUB_OUTPUT"' in rendered_changes
+
     exhaustive = jobs["exhaustive"]
+    assert exhaustive["needs"] == "changes"
+    assert exhaustive["if"] == "${{ needs.changes.outputs.telemetry == 'true' }}"
     cases = exhaustive["strategy"]["matrix"]["include"]
     assert {case["test_file"] for case in cases} == EXHAUSTIVE_TESTS
     assert exhaustive["timeout-minutes"] == "50"
@@ -103,32 +122,37 @@ def test_exhaustive_registry_workflow_is_path_filtered_nightly_and_manual() -> N
     assert "upload-artifact" not in text
 
     complete = jobs["complete"]
-    assert complete["needs"] == "exhaustive"
+    assert complete["needs"] == ["changes", "exhaustive"]
     assert complete["if"] == "${{ always() }}"
-    assert 'test "$EXHAUSTIVE_RESULT" = success' in _render(complete)
+    rendered_complete = _render(complete)
+    assert 'test "$CHANGES_RESULT" = success' in rendered_complete
+    assert 'test "$EXHAUSTIVE_RESULT" = success' in rendered_complete
+    assert 'test "$EXHAUSTIVE_RESULT" = skipped' in rendered_complete
 
 
-def test_exhaustive_path_filter_covers_every_registry_input_and_test_dependency() -> None:
-    patterns = _pull_request_paths()
-    required_patterns = {
-        "schemas/telemetry/**",
+def test_exhaustive_internal_filter_covers_every_registry_input_and_test_dependency() -> None:
+    pathspecs = _internal_diff_pathspecs()
+    required_pathspecs = {
+        ":(glob)schemas/telemetry/**",
         "scripts/generate_telemetry_registry.py",
         "scripts/update_telemetry_registry_upstream.py",
-        "scripts/render_telemetry_*.py",
-        "scripts/telemetry_*.py",
+        ":(glob)scripts/render_telemetry_*.py",
+        ":(glob)scripts/telemetry_*.py",
         "cli/tests/conftest.py",
         "cli/tests/test_telemetry_ci_strategy.py",
-        "cli/tests/test_telemetry_registry_*.py",
+        ":(glob)cli/tests/test_telemetry_registry_*.py",
         "cli/tests/support/telemetry_registry_manifest_driver.py",
         "schemas/telemetry/v8/compatibility/v7-compatibility-inputs.yaml",
-        "internal/observability/zz_generated_telemetry_*.go",
+        ":(glob)internal/observability/zz_generated_telemetry_*.go",
         "Makefile",
         "pyproject.toml",
         "uv.lock",
         ".github/workflows/ci.yml",
         ".github/workflows/telemetry-registry.yml",
     }
-    assert patterns == required_patterns
+    assert pathspecs == required_pathspecs
+
+    patterns = {pathspec.removeprefix(":(glob)") for pathspec in pathspecs}
 
     concrete_inputs = {
         ROOT / "scripts/generate_telemetry_registry.py",
