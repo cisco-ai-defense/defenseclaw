@@ -113,7 +113,9 @@ Exit codes:
   0   file scrubbed (or already clean)
   2   file missing (nothing to do)
   3   unsupported connector
-  4   file unreadable / parse failure (left untouched)`,
+  4   file unreadable / parse failure (left untouched)
+  5   required flag missing at RunE entry (Cobra's MarkFlagRequired
+      catches this earlier; belt-and-suspenders for direct callers)`,
 	Annotations: map[string]string{
 		// Uninstall runs this on hosts where config.yaml may be gone or
 		// never existed; skip the daemon-state bootstrap in root.go's
@@ -172,8 +174,14 @@ func runEnterpriseHooksScrub(cmd *cobra.Command, _ []string) error {
 	// rejects the invocation with its standard usage error before
 	// RunE gets called. Belt-and-suspenders: if a caller bypasses
 	// Cobra (test harness, future refactor) we still guard here.
+	//
+	// Exit code 5 (not 3) distinguishes a missing required argument
+	// from an unsupported connector. Shell callers branching on rc
+	// otherwise conflate "operator forgot --file" with "operator
+	// asked for an unknown connector" — different classes of error
+	// with different remediation.
 	if path == "" {
-		return &scrubExitError{code: 3, msg: "enterprise hooks scrub: --file is required"}
+		return &scrubExitError{code: 5, msg: "enterprise hooks scrub: --file is required"}
 	}
 	handler, ok := map[string]func(string, []string) (bool, error){
 		"cursor":     scrubCursorFile,

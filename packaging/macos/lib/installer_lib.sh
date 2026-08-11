@@ -98,7 +98,16 @@ home_perms_ok() {
 _read_codex_version_as_user() {
   local user="$1"
   local out_file rc=0
-  out_file="$(mktemp -t defenseclaw-codex-version.XXXXXX 2>/dev/null || echo "/tmp/defenseclaw-codex-version.$$")"
+  # Fail closed on mktemp failure. The prior fallback
+  # `/tmp/defenseclaw-codex-version.$$` was predictable — a
+  # colocated user could pre-create a symlink at that path and
+  # have `> "${out_file}"` write elsewhere, or race the
+  # subsequent `head -n 1` read. Since this helper runs during
+  # install (as root under launchd or `sudo`), that's a real
+  # privesc surface. If mktemp fails, print nothing and return
+  # non-zero so the caller falls through to alternative version
+  # discovery paths.
+  out_file="$(mktemp -t defenseclaw-codex-version.XXXXXX 2>/dev/null)" || return 1
   # Best-effort cleanup on any exit path.
   # shellcheck disable=SC2064
   trap "rm -f -- '${out_file}'" RETURN
@@ -169,7 +178,15 @@ _read_json_field() {
   # UTF-8. On any tokenization error the parser bails and prints
   # nothing, matching the pre-existing "malformed → empty" contract
   # callers gate on.
-  awk -v FIELD="${field}" '
+  #
+  # LC_ALL=C pins the locale for `sprintf("%c", cp)` and `substr` so
+  # bytes emitted by utf8() are treated as raw octets. Under a UTF-8
+  # locale, `%c` on a value ≥ 128 emits a UTF-8-encoded multi-byte
+  # sequence for that codepoint (double-encoding what we're already
+  # building) and `substr` iterates on characters not bytes. The C
+  # locale keeps both operating on octets, which is what the parser
+  # assumes end-to-end.
+  LC_ALL=C awk -v FIELD="${field}" '
     function utf8(cp,    b0, b1, b2, b3) {
       if (cp < 0)         return ""
       if (cp < 128)       return sprintf("%c", cp)

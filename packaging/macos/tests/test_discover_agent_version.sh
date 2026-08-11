@@ -190,6 +190,47 @@ t_unknown_connector() {
   assert_eq "${got}" "" "unknown connector returns empty string"
 }
 
+t_read_json_field_decodes_unicode_escape_bytes() {
+  # Regression guard for the LC_ALL=C pin on the pure-awk JSON reader.
+  # A UTF-8 locale would have `sprintf("%c", cp)` emit the multi-byte
+  # UTF-8 sequence for the codepoint, DOUBLE-encoding what utf8()
+  # already assembled. Then a subsequent `substr()` iterates on
+  # characters not octets, mis-slicing our raw-byte buffer. Pinning
+  # to C keeps every op on octets.
+  #
+  # Fixtures cover: ASCII \u0041 (== "A"), BMP-mid \u00e9 (== "é"
+  # → 0xC3 0xA9), and a surrogate pair for U+1F600 (grinning face
+  # → 0xF0 0x9F 0x98 0x80). All three must round-trip verbatim
+  # regardless of the invoking shell's LC_ALL setting.
+  local dir cfg got
+  dir="$(mktest_tmp)"
+  cfg="${dir}/uni.json"
+
+  # ASCII escape
+  printf '{"v":"\\u0041"}\n' > "${cfg}"
+  got="$(LC_ALL=en_US.UTF-8 _read_json_field "${cfg}" v)"
+  assert_eq "${got}" "A" "\\u0041 decodes to ASCII 'A' under en_US.UTF-8"
+
+  # BMP-mid \u00e9 = é (UTF-8: 0xC3 0xA9)
+  printf '{"v":"\\u00e9"}\n' > "${cfg}"
+  got="$(LC_ALL=en_US.UTF-8 _read_json_field "${cfg}" v)"
+  local want_e_acute
+  want_e_acute="$(printf '\xc3\xa9')"
+  assert_eq "${got}" "${want_e_acute}" "\\u00e9 decodes to UTF-8 'é' bytes under en_US.UTF-8"
+
+  # Surrogate pair for U+1F600 grinning face → \uD83D\uDE00 (UTF-8: F0 9F 98 80)
+  printf '{"v":"\\uD83D\\uDE00"}\n' > "${cfg}"
+  got="$(LC_ALL=en_US.UTF-8 _read_json_field "${cfg}" v)"
+  local want_grin
+  want_grin="$(printf '\xf0\x9f\x98\x80')"
+  assert_eq "${got}" "${want_grin}" "surrogate pair decodes to U+1F600 UTF-8 bytes under en_US.UTF-8"
+
+  # And once more under C locale to confirm the pin isn't a workaround
+  # that only works when the *caller* runs under C.
+  got="$(LC_ALL=C _read_json_field "${cfg}" v)"
+  assert_eq "${got}" "${want_grin}" "surrogate pair decodes correctly under LC_ALL=C too"
+}
+
 run_case "amp from trusted user npm metadata" t_amp_from_user_npm_metadata_without_executing_cli
 run_case "amp package metadata identity"      t_amp_metadata_requires_package_identity
 run_case "amp without metadata is unversioned" t_amp_missing_metadata_may_be_unversioned
@@ -200,3 +241,4 @@ run_case "codex without home metadata"       t_codex_no_home_metadata_uses_syste
 run_case "codex from user npm metadata"      t_codex_from_user_npm_metadata
 run_case "codex ChatGPT.app-bundled wins over stale npm" t_codex_chatgpt_app_bundled_wins_over_npm
 run_case "unknown connector returns empty"   t_unknown_connector
+run_case "_read_json_field decodes \\uXXXX under UTF-8 locale" t_read_json_field_decodes_unicode_escape_bytes
