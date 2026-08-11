@@ -36,6 +36,33 @@ jobs:
   changes:
     name: Detect macOS app changes
     runs-on: ubuntu-latest
+    env:
+      MACOS_PATHS: >-
+        :(glob)macos/**
+        scripts/build-macos-app-release.sh
+        scripts/check-macos-upstream.py
+        scripts/export-uv-overrides.py
+        scripts/generate-upgrade-manifest.py
+        scripts/macos_license_headers.py
+        scripts/release_candidate.py
+        scripts/source_release_identity.py
+        scripts/stamp-version.sh
+        scripts/test-upgrade-protocol-release.sh
+        scripts/test-upgrade-release.sh
+        scripts/update-macos-app.sh
+        scripts/verify-macos-app-release.sh
+        release/source-install-identity.json
+        release/upgrade-baselines.json
+        Makefile
+        pyproject.toml
+        :(glob)cli/**
+        go.mod
+        go.sum
+        :(glob)cmd/**
+        :(glob)internal/**
+        :(glob)extensions/defenseclaw/**
+        .github/workflows/macos-app.yml
+        .github/workflows/release-candidate-smoke.yml
     outputs:
       macos: ${{ steps.detect.outputs.macos }}
     steps:
@@ -80,38 +107,16 @@ jobs:
             exit 1
           fi
 
-          macos_paths=(
-            ':(glob)macos/**'
-            'scripts/build-macos-app-release.sh'
-            'scripts/check-macos-upstream.py'
-            'scripts/export-uv-overrides.py'
-            'scripts/generate-upgrade-manifest.py'
-            'scripts/macos_license_headers.py'
-            'scripts/release_candidate.py'
-            'scripts/source_release_identity.py'
-            'scripts/stamp-version.sh'
-            'scripts/test-upgrade-protocol-release.sh'
-            'scripts/test-upgrade-release.sh'
-            'scripts/update-macos-app.sh'
-            'scripts/verify-macos-app-release.sh'
-            'release/source-install-identity.json'
-            'release/upgrade-baselines.json'
-            'Makefile'
-            'pyproject.toml'
-            ':(glob)cli/**'
-            'go.mod'
-            'go.sum'
-            ':(glob)cmd/**'
-            ':(glob)internal/**'
-            ':(glob)extensions/defenseclaw/**'
-            '.github/workflows/macos-app.yml'
-            '.github/workflows/release-candidate-smoke.yml'
-          )
+          read -r -a macos_paths <<< "$MACOS_PATHS"
+          if ((${#macos_paths[@]} == 0)); then
+            echo "::error::macOS app path contract is empty"
+            exit 1
+          fi
 
           git cat-file -e "${BASE_SHA}^{commit}"
           git cat-file -e "${HEAD_SHA}^{commit}"
           set +e
-          git diff --quiet --no-renames "$BASE_SHA" "$HEAD_SHA" -- "${macos_paths[@]}"
+          git diff --quiet --no-renames "$BASE_SHA...$HEAD_SHA" -- "${macos_paths[@]}"
           diff_status=$?
           set -e
 

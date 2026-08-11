@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import hashlib
 import os
-import re
 import subprocess
 import textwrap
 from pathlib import Path
@@ -32,18 +31,11 @@ def _source() -> str:
 
 
 def _internal_macos_pathspecs() -> set[str]:
-    text = MACOS_CI_WORKFLOW.read_text(encoding="utf-8")
-    match = re.search(
-        r"^\s+macos_paths=\(\n(?P<body>.*?)^\s+\)$",
-        text,
-        re.MULTILINE | re.DOTALL,
+    workflow = yaml.load(
+        MACOS_CI_WORKFLOW.read_text(encoding="utf-8"),
+        Loader=yaml.BaseLoader,
     )
-    assert match is not None
-    return {
-        line.strip().strip("'\"")
-        for line in match.group("body").splitlines()
-        if line.strip()
-    }
+    return set(workflow["jobs"]["changes"]["env"]["MACOS_PATHS"].split())
 
 
 def test_bundled_runtime_installer_is_fresh_install_only_before_mutation() -> None:
@@ -311,7 +303,7 @@ def test_macos_package_ci_always_reports_and_runs_expensive_work_selectively() -
     assert detection.count("=~ ^[0-9a-f]{40}$") == 2
     assert '[[ "$BASE_SHA" == "$HEAD_SHA" ]]' in detection
     assert (
-        'git diff --quiet --no-renames "$BASE_SHA" "$HEAD_SHA" -- "${macos_paths[@]}"'
+        'git diff --quiet --no-renames "$BASE_SHA...$HEAD_SHA" -- "${macos_paths[@]}"'
         in detection
     )
     assert 'echo "macos=false" >> "$GITHUB_OUTPUT"' in detection
