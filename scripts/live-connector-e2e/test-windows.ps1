@@ -1501,6 +1501,27 @@ private-secret-name = "DefenseClaw must remain redacted"
         $standardUserFileGuardText -match 'NumberOfLinks != 1' -and
         $standardUserFileGuardText -match 'FileMode\.CreateNew') `
         'diagnostic/result handoff validates and consumes one no-follow, single-link regular-file handle'
+    $captureSelectionFunction = [regex]::Match(
+        $nativeHarnessText,
+        '(?s)function Get-WindowsNativeCaptureFiles\b.*?(?=\r?\nfunction )'
+    ).Value
+    $captureFunction = [regex]::Match(
+        $nativeHarnessText,
+        '(?s)function Invoke-Capture\b.*?(?=\r?\nfunction )'
+    ).Value
+    Assert-True ($captureSelectionFunction -match 'SortedDictionary\[string, IO\.FileInfo\]' -and
+        $captureSelectionFunction -match '\$selectionLimit = 30' -and
+        $captureSelectionFunction -notmatch '\$matches\b' -and
+        $captureSelectionFunction -notmatch '\$visited\b' -and
+        $captureFunction -match 'DisposableFileGuard\]::OpenRootedReader\(\$root\)' -and
+        $captureFunction -match 'ReadBoundedUtf8\(\$file\.FullName, 1048576\)' -and
+        $captureFunction -notmatch 'ReadAllText\(\$file\.FullName\)' -and
+        $standardUserFileGuardText -match 'sealed class RootedReader' -and
+        $standardUserFileGuardText -match 'GetFinalPathNameByHandleW' -and
+        $standardUserFileGuardText -match 'guarded file resolved outside its retained root' -and
+        $nativeHarnessText -match 'leaf replaced by a reparse point after enumeration' -and
+        $nativeHarnessText -match 'replaced ancestor outside its retained root') `
+        'native capture exhaustively selects priority logs and reads only retained-root no-follow handles'
     Assert-True ($standardUserSafetyText -match 'function Grant-DisposableAncestorReadLease' -and
         $standardUserSafetyText -match 'function Restore-DisposableAncestorReadLease' -and
         $standardUserSafetyText -match '(?s)Grant-DisposableAncestorReadLease.*?FileSystemRights\]::ReadAndExecute.*?InheritanceFlags\]::None.*?PropagationFlags\]::None' -and

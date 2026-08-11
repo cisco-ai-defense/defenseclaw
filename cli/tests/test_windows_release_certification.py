@@ -28,6 +28,7 @@ SMOKE_PATH = ROOT / ".github" / "workflows" / "release-candidate-smoke.yml"
 WINDOWS_NATIVE_PATH = ROOT / ".github" / "workflows" / "windows-native.yml"
 FRESH_INSTALL = (ROOT / "scripts" / "test-fresh-install-release-windows.ps1").read_text(encoding="utf-8")
 DISPOSABLE_LAUNCHER = (ROOT / "scripts" / "invoke-windows-setup-standard-user-ci.ps1").read_text(encoding="utf-8")
+DISPOSABLE_FILE_GUARD = (ROOT / "scripts" / "windows-disposable-file-guard.cs").read_text(encoding="utf-8")
 STANDARD_USER_PROCESS_LAUNCHER = (ROOT / "scripts" / "windows-disposable-standard-user-launcher.cs").read_text(
     encoding="utf-8"
 )
@@ -643,6 +644,30 @@ def test_disposable_setup_failure_preserves_bounded_native_log_before_profile_cl
     assert "Copy-Item" not in DISPOSABLE_LAUNCHER
 
 
+def test_native_diagnostic_capture_is_bound_to_verified_file_handles() -> None:
+    selection = _function("Get-WindowsNativeCaptureFiles")
+    capture = _function("Invoke-Capture")
+
+    assert "SortedDictionary[string, IO.FileInfo]" in selection
+    assert "$selectionLimit = 30" in selection
+    assert "$matches" not in selection.casefold()
+    assert "$visited" not in selection
+    assert "OpenRootedReader($root)" in capture
+    assert "ReadBoundedUtf8($file.FullName, 1048576)" in capture
+    assert "ReadAllText($file.FullName)" not in capture
+
+    for contract in (
+        "FILE_FLAG_OPEN_REPARSE_POINT",
+        "GetFileInformationByHandle",
+        "GetFinalPathNameByHandleW",
+        "sealed class RootedReader",
+        "guarded file resolved outside its retained root",
+    ):
+        assert contract in DISPOSABLE_FILE_GUARD
+    assert "leaf replaced by a reparse point after enumeration" in HARNESS
+    assert "replaced ancestor outside its retained root" in HARNESS
+
+
 def test_publish_includes_windows_binaries_without_an_omission_mode() -> None:
     workflow = _workflow(RELEASE_PATH)
     jobs = workflow["jobs"]
@@ -823,7 +848,7 @@ def test_amp_windows_live_prompts_invoke_native_pwsh_explicitly() -> None:
     assert result_gate is not None
     assert live_run is not None
     assert "(Get-Process -Id $PID).Path.Replace('\\', '/')" in helper.group(0)
-    assert '-NoLogo -NoProfile -NonInteractive -Command' in helper.group(0)
+    assert "-NoLogo -NoProfile -NonInteractive -Command" in helper.group(0)
     assert "cannot contain double quotes" in helper.group(0)
     assert "Get-AmpWindowsPowerShellToolCommand(" in result_gate.group(0)
     assert result_gate.group(0).count("Get-Content -Raw -LiteralPath") == 1
