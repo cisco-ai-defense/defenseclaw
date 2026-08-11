@@ -3003,6 +3003,22 @@ func ProvesPOSIXStdinInterpreter(command CommandFact) bool {
 	return exactPOSIXShellStdinArguments(program, command.Argv)
 }
 
+// ProvesPOSIXInteractiveShell reports whether the bounded shell invocation
+// parser recognized a final interactive state. It deliberately remains true
+// when startup files make the overall action non-authoritative: callers use
+// this only as one ingredient in a stronger typed proof, never to suppress a
+// conservative fallback.
+func ProvesPOSIXInteractiveShell(command CommandFact) bool {
+	if command.Dialect != DialectPOSIX ||
+		command.Effect != EffectExecute ||
+		!command.ArgvComplete {
+		return false
+	}
+	invocation := parsePOSIXShellInvocation(command.Program, command.Argv)
+	return invocation.recognized && invocation.interactive &&
+		invocation.mode == posixShellModeStdin
+}
+
 func exactPOSIXShellStdinArguments(program string, argv []string) bool {
 	invocation := parsePOSIXShellInvocation(program, argv)
 	return invocation.valid &&

@@ -25,6 +25,7 @@ import (
 	"path"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -428,12 +429,36 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 	},
 }
 
+type trustedLegacyProvenCommandDetectionOnlyContract struct {
+	pattern      string
+	title        string
+	severity     string
+	confidence   float64
+	tags         []string
+	prerequisite func(actionfacts.Facts) bool
+}
+
 // trustedLegacyProvenCommandDetectionOnly is deliberately code-owned instead
-// of rule-pack metadata: policy data must not be able to opt an arbitrary
-// command owner out of enforcement. These entries apply only after
-// ActionFacts proves the command owner, never to literal/raw fallback.
-var trustedLegacyProvenCommandDetectionOnly = map[string]struct{}{
-	"CMD-PYTHON-C": {},
+// of rule-pack metadata: policy data must not be able to opt an arbitrary or
+// overridden command owner out of enforcement. Each entry binds the shipped
+// immutable rule identity as well as its ActionFacts proof. Literal/raw
+// fallback and custom rules with a reused ID retain conservative enforcement.
+var trustedLegacyProvenCommandDetectionOnly = map[string]trustedLegacyProvenCommandDetectionOnlyContract{
+	"CMD-BASH-C": {
+		pattern:      `(?i)\b(?:ba)?sh\s+-c\s+`,
+		title:        "Shell -c execution",
+		severity:     "LOW",
+		confidence:   0.55,
+		tags:         []string{"execution"},
+		prerequisite: trustedBashInlineCommandOwnerProven,
+	},
+	"CMD-PYTHON-C": {
+		pattern:    `(?i)\bpython[23]?\s+-c\s+`,
+		title:      "Python inline execution",
+		severity:   "LOW",
+		confidence: 0.55,
+		tags:       []string{"execution"},
+	},
 }
 
 func stdinInterpreterPipelineFallbackProof(
@@ -624,18 +649,48 @@ func devTCPFallbackProof(
 		) {
 			return true
 		}
+		// An interactive shell can bind stdin and stdout directly to a
+		// /dev/tcp descriptor without the process-level flow emitted for
+		// `exec N<>/dev/tcp/...`. Require both directions on the same typed
+		// command so one-way health probes and file transfers do not inherit
+		// reverse-shell ownership.
+		if actionfacts.ProvesPOSIXInteractiveShell(command) &&
+			hasCommandDataFlow(
+				facts,
+				0,
+				command.ID,
+				actionfacts.DataNetwork,
+				actionfacts.DataStdin,
+			) && hasCommandDataFlow(
+			facts,
+			command.ID,
+			0,
+			actionfacts.DataStdout,
+			actionfacts.DataNetwork,
+		) {
+			return true
+		}
 	}
 	if requireShell {
 		for _, command := range facts.Commands {
 			if command.Effect == actionfacts.EffectExecute &&
 				shellProgram(command.Program) &&
-				containsFold(command.Argv, "-i") &&
+				(actionfacts.ProvesPOSIXInteractiveShell(command) ||
+					legacyUnmodeledInteractiveShellOption(command)) &&
 				len(command.Redirects) != 0 {
 				return true
 			}
 		}
 	}
 	return false
+}
+
+func legacyUnmodeledInteractiveShellOption(command actionfacts.CommandFact) bool {
+	// Zsh and fish intentionally remain outside ActionFacts' bounded invocation
+	// grammar. Preserve only the pre-existing requireShell fallback for those
+	// programs; the new bidirectional /dev/tcp owner never calls this lane.
+	return oneOfFold(command.Program, "zsh", "fish") &&
+		containsFold(command.Argv, "-i")
 }
 
 func containsFold(values []string, target string) bool {
@@ -1115,7 +1170,10 @@ func filterTrustedLegacyActionContext(
 			}
 		case "command":
 			if _, ok := commandMatches[finding.RuleID]; ok {
-				filtered = append(filtered, trustedLegacyProvenCommandFinding(finding))
+				filtered = append(
+					filtered,
+					trustedLegacyProvenCommandFinding(generation, finding, facts),
+				)
 			}
 		case "c2":
 			if _, ok := networkMatches[finding.RuleID]; ok {
@@ -1133,7 +1191,10 @@ func filterTrustedLegacyActionContext(
 				}
 			case strings.HasPrefix(finding.RuleID, "CMD-"):
 				if _, ok := commandMatches[finding.RuleID]; ok {
-					filtered = append(filtered, trustedLegacyProvenCommandFinding(finding))
+					filtered = append(
+						filtered,
+						trustedLegacyProvenCommandFinding(generation, finding, facts),
+					)
 				}
 			case strings.HasPrefix(finding.RuleID, "C2-"):
 				if _, ok := networkMatches[finding.RuleID]; ok {
@@ -1147,18 +1208,76 @@ func filterTrustedLegacyActionContext(
 	return filtered
 }
 
-func trustedLegacyProvenCommandFinding(finding RuleFinding) RuleFinding {
-	// CMD-PYTHON-C is a generic interpreter-shape owner. Once ActionFacts
-	// proves that Python -c is the command being executed, retain the LOW match
-	// as audit telemetry without letting the generic shape alert or block.
+func trustedLegacyProvenCommandFinding(
+	generation *compiledRulePackCategories,
+	finding RuleFinding,
+	facts actionfacts.Facts,
+) RuleFinding {
+	// CMD-PYTHON-C and CMD-BASH-C are generic interpreter-shape owners. Once
+	// ActionFacts proves the command being executed, retain the LOW match as
+	// audit telemetry without letting the generic shape alert or block.
 	// Specific semantic owners (for example reverse shells and destructive
 	// commands) remain independently enforcement-capable. Unstructured and
 	// malformed literal fallback never reaches this proven-owner branch and
 	// keeps its existing conservative contract.
-	if _, ok := trustedLegacyProvenCommandDetectionOnly[finding.RuleID]; ok {
-		finding.enforcement = findingEnforcementDetectionOnly
+	contract, ok := trustedLegacyProvenCommandDetectionOnly[finding.RuleID]
+	if !ok || !trustedLegacyDetectionOnlyCommandRule(
+		generation,
+		finding.RuleID,
+		contract,
+	) {
+		return finding
 	}
+	if contract.prerequisite != nil && !contract.prerequisite(facts) {
+		return finding
+	}
+	finding.enforcement = findingEnforcementDetectionOnly
 	return finding
+}
+
+func trustedLegacyDetectionOnlyCommandRule(
+	generation *compiledRulePackCategories,
+	ruleID string,
+	contract trustedLegacyProvenCommandDetectionOnlyContract,
+) bool {
+	if generation == nil {
+		return false
+	}
+	matched := false
+	for _, category := range generation.categories {
+		for _, rule := range category.Rules {
+			if rule.ID != ruleID {
+				continue
+			}
+			if matched || rule.Pattern == nil ||
+				rule.Pattern.String() != contract.pattern ||
+				rule.Expression != "" || rule.ToolCallOnly ||
+				rule.Title != contract.title ||
+				rule.Severity != contract.severity ||
+				rule.Confidence != contract.confidence ||
+				!slices.Equal(rule.Tags, contract.tags) {
+				return false
+			}
+			matched = true
+		}
+	}
+	return matched
+}
+
+func trustedBashInlineCommandOwnerProven(facts actionfacts.Facts) bool {
+	if !facts.Authoritative() {
+		return false
+	}
+	for _, command := range facts.Commands {
+		if command.Effect == actionfacts.EffectExecute &&
+			command.ArgvComplete &&
+			oneOfFold(command.Program, "bash", "sh") &&
+			len(command.Argv) >= 3 && command.Argv[1] == "-c" &&
+			strings.TrimSpace(command.Argv[2]) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func trustedReadOnlyArgumentDataFinding(category string, finding RuleFinding) bool {
@@ -3663,6 +3782,14 @@ func trustedLegacyPathRuleMatches(
 				},
 			)
 			for _, match := range matches {
+				if match.RuleID == "persistence.shell_profile_write" &&
+					path.Flavor == actionfacts.PathFlavorWindows &&
+					looksLikeSystemShellProfilePath(value) {
+					// A leading slash in CMD is rooted on the current Windows
+					// drive, not the POSIX system profile. Keep the legacy
+					// regex fallback from discarding the typed path flavor.
+					continue
+				}
 				category := trustedLegacyRuleCategory(generation, match.RuleID)
 				if category == "sensitive-path" ||
 					strings.HasPrefix(match.RuleID, "PATH-") {
