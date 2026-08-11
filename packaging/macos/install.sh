@@ -813,15 +813,38 @@ if [[ "${SKIP_CONNECTOR}" != "true" ]]; then
     || die "could not reserve a private manifest staging file"
   INSTALL_TEMP_FILES+=("${MANIFEST_TMP}")
   render_targets_manifest "${SUPPORT_DIR}" "${CONNECTOR}" "${USER_LINES}" > "${MANIFEST_TMP}"
-  # Belt-and-suspenders: catch the case where user_lines was non-empty
-  # AND the connector CSV was non-empty but the rendered cross product
-  # still produced zero targets (e.g. every connector was filtered out
-  # as unsupported). Without this check the guardian would happily
-  # reconcile a "0 targets, all ok" manifest and the daemon would look
-  # green while enforcing nothing.
+  # A user_lines-non-empty × connector-non-empty cross product that
+  # still resolves to zero targets means either (a) every requested
+  # connector is unsupported (not in amp/codex/claudecode/cursor) or
+  # (b) no eligible user has any of the requested connector CLIs
+  # installed yet (AIFW-31486: the AVC-shipped .pkg lands on boxes
+  # where amp/Codex/ClaudeCode/Cursor haven't been installed yet).
+  #
+  # We do NOT fail the install here — bootstrapping the daemons with
+  # an empty manifest is still useful: the hook-enumerator LaunchDaemon
+  # re-renders targets.yaml on a 5-min tick, so as soon as a user
+  # installs a supported connector the guardian picks it up and wires
+  # hooks without any operator action. Failing the install would leave
+  # the customer with no reconciler running at all.
+  #
+  # classify_zero_target_reason distinguishes the two modes above so an
+  # operator scanning install.log knows whether to (a) rerun with a
+  # supported --connector value or (b) just wait for the enumerator's
+  # tick to pick up the connector once someone installs it.
   MANIFEST_TARGETS="$(grep -c '^  - user:' "${MANIFEST_TMP}" || true)"
-  if [[ "${MANIFEST_TARGETS}" == "0" ]] && [[ -n "${USER_LINES}" ]] && [[ "${ALLOW_EMPTY_USERS}" != "true" ]]; then
-    die "rendered hook-guardian manifest has zero targets despite ${USER_COUNT} eligible user(s) and connectors=${CONNECTOR}. Either every requested connector is unsupported (only amp/codex/claudecode/cursor auto-wire today), or none of the requested connectors are installed for any eligible user (install the CLI/app first, or narrow --connector to what is on this box). Pass --allow-empty-users to proceed anyway."
+  if [[ "${MANIFEST_TARGETS}" == "0" ]] && [[ -n "${USER_LINES}" ]]; then
+    ZERO_TARGET_REASON="$(classify_zero_target_reason "${CONNECTOR}")"
+    case "${ZERO_TARGET_REASON}" in
+      all-unsupported)
+        warn "hook-guardian manifest has zero targets: no requested connector is auto-wireable (supported today: amp|codex|claudecode|cursor; got connectors=${CONNECTOR})"
+        warn "  proceeding anyway — the hook-enumerator's tick will NOT fix this on its own; rerun the installer with --connector picking a supported entry"
+        ;;
+      *)
+        warn "hook-guardian manifest has zero targets (users=${USER_COUNT}, connectors=${CONNECTOR}); no supported connector CLI is installed for any eligible user yet"
+        warn "  proceeding anyway — the hook-enumerator's 5-min tick will re-render targets.yaml and the hook-guardian will wire hooks automatically once a connector appears"
+        ;;
+    esac
+    unset ZERO_TARGET_REASON
   fi
   chown root:wheel "${MANIFEST_TMP}"
   chmod 0640 "${MANIFEST_TMP}"

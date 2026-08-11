@@ -135,10 +135,11 @@ t_absent_connector_skipped_partial_box() {
 
 t_all_connectors_absent_yields_zero_rows() {
   # No connectors installed at all — every row skipped. The manifest is
-  # still schema-valid (version + targets:) so the guardian can load it;
-  # install.sh's MANIFEST_TARGETS==0 preflight is what turns this into a
-  # user-visible die() so an operator isn't left with a silently-empty
-  # deployment.
+  # still schema-valid (version + targets:) so the guardian can load it.
+  # install.sh warns loudly on this case (AIFW-31486) but still proceeds
+  # to bootstrap the hook-guardian + hook-enumerator daemons, so the
+  # enumerator's 5-min tick will re-render targets.yaml and the guardian
+  # will wire hooks the moment a supported connector CLI appears.
   discover_agent_version() { printf ''; }
 
   local users="shawnxu:501:20:/Users/shawnxu"
