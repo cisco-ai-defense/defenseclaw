@@ -649,26 +649,28 @@ func (g *GuardrailInspector) Inspect(ctx context.Context, direction, content str
 // ScanAllRules), no LLM judge, and no OPA finalize. This is the "AID is
 // authoritative" contract — see the managed aid-only inspection design.
 //
-// Fail-open semantics: if the managed inspector is unwired (ciscoClient ==
-// nil), there is nothing to inspect (no messages), or AID returns no verdict
+// Fail-open semantics: if there is no inspectable message text, the managed
+// inspector is unwired (ciscoClient == nil), or AID returns no verdict
 // (transport error, timeout, token failure), the request is ALLOWED rather
 // than blocked. Operators still see the failure via EmitCiscoError on the
 // client side, but traffic is never held hostage to AID availability in
 // managed mode.
 func (g *GuardrailInspector) inspectManagedAIDOnly(ctx context.Context, direction string, messages []ChatMessage) *ScanVerdict {
+	if !managedAIDMessagesHaveInspectableContent(messages) {
+		// Nothing AID can inspect (for example, Inspect rewrites every empty
+		// completion to one assistant message with empty Content). This is a
+		// benign skipped scan, not an availability failure. Classify it before
+		// checking the client so empty traffic cannot page for an unwired or
+		// unavailable inspector that was never needed.
+		g.recordManagedAIDFailOpen(ctx, aidFailOpenNoContent, direction)
+		return allowVerdict("ai-defense")
+	}
 	if g.ciscoClient == nil {
 		// Managed mode with no wired inspector = no decision-maker at all.
 		// Fail open, but surface it loudly so operators can alert on a
 		// misconfigured managed install rather than silently running with
 		// no enforcement.
 		g.recordManagedAIDFailOpen(ctx, aidFailOpenUnwired, direction)
-		return allowVerdict("ai-defense")
-	}
-	if len(messages) == 0 {
-		// Nothing to inspect (e.g. an empty completion). This is a benign
-		// skipped scan, not an availability failure — record it at info
-		// level with a distinct reason so it stays out of AID-outage alerts.
-		g.recordManagedAIDFailOpen(ctx, aidFailOpenNoContent, direction)
 		return allowVerdict("ai-defense")
 	}
 	t0 := time.Now()
@@ -690,6 +692,23 @@ func (g *GuardrailInspector) inspectManagedAIDOnly(ctx context.Context, directio
 		v.ScannerSources = []string{"ai-defense"}
 	}
 	return v
+}
+
+// managedAIDContentIsInspectable mirrors the text AID actually receives.
+// Both Cisco clients serialize ChatMessage.Content and ignore RawContent,
+// tool calls, and other local-only fields, so whitespace-only Content cannot
+// produce a meaningful remote decision.
+func managedAIDContentIsInspectable(content string) bool {
+	return strings.TrimSpace(content) != ""
+}
+
+func managedAIDMessagesHaveInspectableContent(messages []ChatMessage) bool {
+	for _, message := range messages {
+		if managedAIDContentIsInspectable(message.Content) {
+			return true
+		}
+	}
+	return false
 }
 
 // managedAIDFailOpenComponent is the stable diagnostic component / message

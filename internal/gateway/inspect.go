@@ -212,11 +212,11 @@ func (a *APIServer) managedAIDOnly() bool {
 // fails open with an explicit allow verdict.
 func (a *APIServer) inspectManagedAIDOnly(ctx context.Context, toolName, content string) *ToolInspectVerdict {
 	failOpenReason := aidFailOpenUnavailable
-	if a == nil || a.ciscoInspector == nil || a.scannerCfg == nil ||
+	if !managedAIDHookContentIsInspectable(toolName, content) {
+		failOpenReason = aidFailOpenNoContent
+	} else if a == nil || a.ciscoInspector == nil || a.scannerCfg == nil ||
 		!a.scannerCfg.CiscoAIDefense.HookSurfaceEnabled() {
 		failOpenReason = aidFailOpenUnwired
-	} else if content == "" {
-		failOpenReason = aidFailOpenNoContent
 	}
 	aid := a.hookAIDInspect(ctx, toolName, content)
 	if aid == nil {
@@ -236,7 +236,7 @@ func (a *APIServer) hookAIDInspect(ctx context.Context, toolName string, content
 	if a.scannerCfg == nil || !a.scannerCfg.CiscoAIDefense.HookSurfaceEnabled() {
 		return nil
 	}
-	if content == "" {
+	if !managedAIDHookContentIsInspectable(toolName, content) {
 		return nil
 	}
 	// Prepend the tool name to the content so AID classifiers that
@@ -249,6 +249,17 @@ func (a *APIServer) hookAIDInspect(ctx context.Context, toolName string, content
 		body = fmt.Sprintf("Tool call: %s\n%s", toolName, content)
 	}
 	return a.ciscoInspector.Inspect(ctx, []ChatMessage{{Role: "user", Content: body}})
+}
+
+// managedAIDHookContentIsInspectable applies text trimming only to the
+// message hook, whose Content is sent to AID verbatim. Named tool calls keep
+// their established exact-empty check: non-empty argument whitespace is
+// still combined with the tool name below and remains policy-inspectable.
+func managedAIDHookContentIsInspectable(toolName, content string) bool {
+	if toolName == "message" {
+		return managedAIDContentIsInspectable(content)
+	}
+	return content != ""
 }
 
 // mergeWithAIDVerdict folds an AID ScanVerdict into an existing

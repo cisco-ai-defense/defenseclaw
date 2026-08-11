@@ -216,6 +216,7 @@ func TestHookManagedAIDOnly_FailOpenProductionPathsRecordBoundedReasonMetric(t *
 		inspector   Inspector
 		content     string
 		messagePath bool
+		wantCalls   int
 		wantReason  string
 	}{
 		{
@@ -227,11 +228,19 @@ func TestHookManagedAIDOnly_FailOpenProductionPathsRecordBoundedReasonMetric(t *
 			name:       "AID returns no verdict",
 			inspector:  &stubAIDInspector{verdict: nil},
 			content:    "ordinary payload",
+			wantCalls:  1,
 			wantReason: aidFailOpenUnavailable,
 		},
 		{
 			name:        "empty message content",
 			inspector:   &stubAIDInspector{verdict: blockVerdict()},
+			messagePath: true,
+			wantReason:  aidFailOpenNoContent,
+		},
+		{
+			name:        "whitespace message content",
+			inspector:   &stubAIDInspector{verdict: blockVerdict()},
+			content:     " \t\r\n",
 			messagePath: true,
 			wantReason:  aidFailOpenNoContent,
 		},
@@ -244,12 +253,18 @@ func TestHookManagedAIDOnly_FailOpenProductionPathsRecordBoundedReasonMetric(t *
 
 			var verdict *ToolInspectVerdict
 			if tc.messagePath {
-				verdict = api.inspectMessageContent(t.Context(), &ToolInspectRequest{Tool: "message"})
+				verdict = api.inspectMessageContent(
+					t.Context(),
+					&ToolInspectRequest{Tool: "message", Content: tc.content},
+				)
 			} else {
 				verdict = api.inspectManagedAIDOnly(t.Context(), "run_shell", tc.content)
 			}
 			if verdict == nil || verdict.Action != "allow" {
 				t.Fatalf("fail-open verdict = %+v, want allow", verdict)
+			}
+			if stub, ok := tc.inspector.(*stubAIDInspector); ok && stub.calls != tc.wantCalls {
+				t.Fatalf("remote calls = %d, want %d", stub.calls, tc.wantCalls)
 			}
 			if len(capture.metricErrors) != 0 || len(capture.metricRecords) != 1 {
 				t.Fatalf(
@@ -470,6 +485,215 @@ func TestManagedAIDFailOpenReasonNormalizationIsClosed(t *testing.T) {
 		if got := normalizeManagedAIDFailOpenReason(input); got != want {
 			t.Errorf("normalizeManagedAIDFailOpenReason(%q)=%q, want %q", input, got, want)
 		}
+	}
+}
+
+func TestManagedAIDMessagesHaveInspectableContent(t *testing.T) {
+	tests := []struct {
+		name     string
+		messages []ChatMessage
+		want     bool
+	}{
+		{name: "nil messages"},
+		{name: "one empty message", messages: []ChatMessage{{Role: "assistant"}}},
+		{
+			name: "multiple whitespace messages",
+			messages: []ChatMessage{
+				{Role: "system", Content: " \t"},
+				{Role: "user", Content: "\r\n\u00a0"},
+			},
+		},
+		{
+			name: "raw and tool fields are not serialized by AID",
+			messages: []ChatMessage{{
+				Role:       "assistant",
+				RawContent: json.RawMessage(`[{"type":"image_url","image_url":{"url":"https://example.test/image.png"}}]`),
+				ToolCalls:  json.RawMessage(`[{"id":"call-1","type":"function"}]`),
+			}},
+		},
+		{
+			name: "mixed blank and text messages",
+			messages: []ChatMessage{
+				{Role: "system", Content: " \t"},
+				{Role: "user", Content: "hello"},
+			},
+			want: true,
+		},
+		{
+			name:     "zero width character remains conservative content",
+			messages: []ChatMessage{{Role: "user", Content: "\u200b"}},
+			want:     true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := managedAIDMessagesHaveInspectableContent(tc.messages); got != tc.want {
+				t.Fatalf("managedAIDMessagesHaveInspectableContent()=%t, want %t", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestProxyManagedAIDOnly_BlankMessagePayloadsRecordNoContent(t *testing.T) {
+	cases := []struct {
+		name      string
+		direction string
+		content   string
+		messages  []ChatMessage
+		wired     bool
+	}{
+		{
+			name:      "empty completion rewritten to assistant message",
+			direction: "completion",
+			messages:  []ChatMessage{{Role: "user", Content: "prior request"}},
+			wired:     true,
+		},
+		{
+			name:      "whitespace-only prompt message array",
+			direction: "prompt",
+			content:   " \t\r\n",
+			messages: []ChatMessage{
+				{Role: "system", Content: " \t"},
+				{Role: "user", Content: "\r\n"},
+			},
+			wired: true,
+		},
+		{
+			name:      "whitespace-only completion rewritten to assistant message",
+			direction: "completion",
+			content:   " \t\r\n",
+			messages:  []ChatMessage{{Role: "user", Content: "prior request"}},
+			wired:     true,
+		},
+		{
+			name:      "unwired empty completion still stays benign",
+			direction: "completion",
+			messages:  []ChatMessage{{Role: "user", Content: "prior request"}},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			capture := &managedAIDFailOpenCapture{}
+			g := NewGuardrailInspector("both", nil, nil, "")
+			g.SetManagedMode(true)
+			stub := &stubAIDInspector{verdict: nil}
+			if tc.wired {
+				g.SetCiscoInspector(stub)
+			}
+			configureGuardrailInspectorObservabilityV8(g, capture, nil)
+
+			verdict := g.Inspect(
+				t.Context(), tc.direction, tc.content, tc.messages, "gpt", "block",
+			)
+			if verdict == nil || verdict.Action != "allow" {
+				t.Fatalf("blank managed payload verdict = %+v, want allow", verdict)
+			}
+			if stub.calls != 0 {
+				t.Fatalf("remote calls = %d, want 0", stub.calls)
+			}
+			if len(capture.errors) != 0 || len(capture.records) != 1 ||
+				len(capture.metricErrors) != 0 || len(capture.metricRecords) != 1 {
+				t.Fatalf(
+					"fail-open signals logs=%d log_errors=%v metrics=%d metric_errors=%v, want exactly one each",
+					len(capture.records), capture.errors,
+					len(capture.metricRecords), capture.metricErrors,
+				)
+			}
+
+			record := capture.records[0]
+			severity, present := record.Severity()
+			if !present || severity != observability.SeverityInfo ||
+				record.Bucket() != observability.BucketDiagnostic ||
+				record.EventName() != observability.EventName(observability.TelemetryEventDiagnosticMessage) ||
+				record.Mandatory() {
+				t.Fatalf(
+					"no-content log identity=%s/%s severity=(%q,%t) mandatory=%t",
+					record.Bucket(), record.EventName(), severity, present, record.Mandatory(),
+				)
+			}
+			if record.Phase() != tc.direction {
+				t.Fatalf("no-content phase=%q, want %q", record.Phase(), tc.direction)
+			}
+
+			instrumentValue, present := capture.metricRecords[0].InstrumentData()
+			if !present {
+				t.Fatal("no-content metric has no instrument data")
+			}
+			instrument, err := instrumentValue.Object()
+			if err != nil {
+				t.Fatal(err)
+			}
+			attributes, ok := instrument["attributes"].(map[string]any)
+			if !ok || fmt.Sprint(instrument["value"]) != "1" ||
+				attributes["defenseclaw.metric.reason"] != aidFailOpenNoContent {
+				t.Fatalf("no-content metric instrument=%v", instrument)
+			}
+		})
+	}
+}
+
+func TestProxyManagedAIDOnly_InspectableMessagePayloadsStillReachAID(t *testing.T) {
+	cases := []struct {
+		name      string
+		direction string
+		content   string
+		messages  []ChatMessage
+	}{
+		{
+			name:      "mixed blank and nonblank prompt messages",
+			direction: "prompt",
+			content:   "hello",
+			messages: []ChatMessage{
+				{Role: "system", Content: " \t"},
+				{Role: "user", Content: "hello"},
+			},
+		},
+		{
+			name:      "zero width completion remains conservative content",
+			direction: "completion",
+			content:   "\u200b",
+			messages:  []ChatMessage{{Role: "user", Content: "prior request"}},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			capture := &managedAIDFailOpenCapture{}
+			stub := &stubAIDInspector{verdict: blockVerdict()}
+			g := NewGuardrailInspector("both", nil, nil, "")
+			g.SetManagedMode(true)
+			g.SetCiscoInspector(stub)
+			configureGuardrailInspectorObservabilityV8(g, capture, nil)
+
+			verdict := g.Inspect(
+				t.Context(), tc.direction, tc.content, tc.messages, "gpt", "block",
+			)
+			if verdict == nil || verdict.Action != "block" {
+				t.Fatalf("inspectable managed payload verdict = %+v, want AID block", verdict)
+			}
+			if stub.calls != 1 {
+				t.Fatalf("remote calls = %d, want 1", stub.calls)
+			}
+			if len(capture.records) != 0 || len(capture.metricRecords) != 0 ||
+				len(capture.errors) != 0 || len(capture.metricErrors) != 0 {
+				t.Fatalf(
+					"unexpected fail-open signals logs=%d log_errors=%v metrics=%d metric_errors=%v",
+					len(capture.records), capture.errors,
+					len(capture.metricRecords), capture.metricErrors,
+				)
+			}
+		})
+	}
+}
+
+func TestHookManagedAIDOnly_NamedToolWhitespaceStillInspectsToolName(t *testing.T) {
+	stub := &stubAIDInspector{verdict: blockVerdict()}
+	api := managedHookServer(stub)
+	verdict := api.inspectManagedAIDOnly(t.Context(), "zero_arg_tool", " \t\r\n")
+	if verdict == nil || verdict.Action != "block" {
+		t.Fatalf("named tool whitespace verdict = %+v, want AID block", verdict)
+	}
+	if stub.calls != 1 {
+		t.Fatalf("remote calls = %d, want 1", stub.calls)
 	}
 }
 
