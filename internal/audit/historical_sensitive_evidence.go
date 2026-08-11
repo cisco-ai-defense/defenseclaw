@@ -340,11 +340,11 @@ func scrubHistoricalScanResultRows(ex dbExecer) error {
 				if row.knownSensitive {
 					return fmt.Errorf("audit: decode historical sensitive scan result JSON: %w", decodeErr)
 				}
-				continue
+				return fmt.Errorf("audit: decode historical scan result JSON: %w", decodeErr)
 			}
 			object, objectOK := generic.(map[string]any)
 			if !objectOK {
-				continue
+				return fmt.Errorf("audit: historical scan result JSON is not an object")
 			}
 			if _, carriesFindings := object["findings"]; !carriesFindings {
 				continue
@@ -377,8 +377,10 @@ type historicalSensitiveNeedle struct {
 
 // scrubHistoricalRawScanResult repairs the generic JSON tree rather than
 // round-tripping scanner.ScanResult. Historical producers may have added fields
-// that the current wire type does not know; preserve those fields while
-// redacting any extension value that repeats sensitive finding material.
+// that the current wire type does not know. Preserve producer result fields
+// unless they repeat known evidence, and preserve finding-owned extension
+// shape while redacting every non-empty string once that finding is known to
+// be sensitive.
 func scrubHistoricalRawScanResult(object map[string]any, failClosed bool) (bool, error) {
 	rawFindings, carriesFindings := object["findings"]
 	if !carriesFindings {
@@ -415,7 +417,8 @@ func scrubHistoricalRawScanResult(object map[string]any, failClosed bool) (bool,
 
 		// The canonical scrubber intentionally drops unrecognized finding-owned
 		// fields. Save them first, then restore their shape after recursively
-		// replacing only values that repeat known sensitive evidence.
+		// replacing every non-empty string. Once the finding is classified as
+		// sensitive, an unknown producer key cannot prove its string leaves safe.
 		extensions := make(map[string]any)
 		for key, value := range finding {
 			if !historicalKnownRawFindingKey(key) {
@@ -424,7 +427,7 @@ func scrubHistoricalRawScanResult(object map[string]any, failClosed bool) (bool,
 		}
 		historicalScrubFindingJSON(finding, kind)
 		for key, value := range extensions {
-			repaired, _ := scrubHistoricalExtensionValue(value, needles)
+			repaired, _ := scrubHistoricalSensitiveFindingExtensionValue(value, kind)
 			finding[key] = repaired
 		}
 		after, err := marshalHistoricalJSON(finding)
@@ -550,6 +553,42 @@ func scrubHistoricalExtensionValue(value any, needles []historicalSensitiveNeedl
 		changed := false
 		for key, child := range typed {
 			repaired, childChanged := scrubHistoricalExtensionValue(child, needles)
+			if childChanged {
+				typed[key] = repaired
+				changed = true
+			}
+		}
+		return typed, changed
+	default:
+		return value, false
+	}
+}
+
+func scrubHistoricalSensitiveFindingExtensionValue(
+	value any,
+	kind sensitiveFindingKind,
+) (any, bool) {
+	switch typed := value.(type) {
+	case string:
+		if strings.TrimSpace(typed) == "" {
+			return value, false
+		}
+		repaired := historicalRedactedJSONValue(typed, kind)
+		return repaired, repaired != typed
+	case []any:
+		changed := false
+		for index, child := range typed {
+			repaired, childChanged := scrubHistoricalSensitiveFindingExtensionValue(child, kind)
+			if childChanged {
+				typed[index] = repaired
+				changed = true
+			}
+		}
+		return typed, changed
+	case map[string]any:
+		changed := false
+		for key, child := range typed {
+			repaired, childChanged := scrubHistoricalSensitiveFindingExtensionValue(child, kind)
 			if childChanged {
 				typed[key] = repaired
 				changed = true
