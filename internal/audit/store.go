@@ -1744,6 +1744,10 @@ var migrations = []migration{
 			return nil
 		},
 	},
+	{
+		description: historicalSensitiveEvidenceMigrationDescription,
+		apply:       migrateHistoricalSensitiveEvidence,
+	},
 }
 
 // tableExists reports whether the given SQLite table is present.

@@ -254,6 +254,62 @@ The migration cursor records success only after the atomic write. Retrying an
 interrupted upgrade is idempotent: it does not duplicate destinations, routes,
 comments, environment entries, or schema work.
 
+## Historical audit-evidence repair
+
+The upgrade repairs credential, PII, and active trust-exploit evidence written
+before the current audit persistence boundary. The repair covers normalized
+scan findings, embedded scan-result JSON, and the structured, payload, and
+projected copies of finding events. It runs in the same SQLite transaction as
+its migration cursor. If any affected JSON cannot be decoded or any write
+fails, the gateway remains unready and the complete repair rolls back.
+
+A repaired canonical projection receives a new SHA-256 projection hash. The
+migration does not have access to the runtime signing key, so it clears the old
+HMAC, algorithm, and key identifier. Integrity verification therefore reports
+the row as `unsigned` with a valid projection hash instead of treating the old
+signature as evidence for bytes it never signed.
+
+<Callout title="Keep the database offline during manual custody or cleanup">
+The release-owned resolver already stops the gateway while it backs up and
+migrates local state. If you take an additional checkpoint or perform the
+cleanup below, stop every DefenseClaw gateway process first. Keep
+`audit.db`, `audit.db-wal`, and `audit.db-shm` together; copying only the main
+file while a writer is active is not a consistent SQLite checkpoint.
+</Callout>
+
+For a database that may already contain a credential or personal identifier:
+
+1. Before upgrading, make an owner-private, encrypted checkpoint for recovery.
+   Treat the checkpoint, its WAL/SHM companions, and every existing upgrade or
+   system backup as sensitive incident material. Do not attach them to a
+   support ticket or restore them after the repaired upgrade except for an
+   isolated recovery investigation.
+2. Run the authenticated release-owned upgrade and confirm the gateway health
+   check succeeds. A failed repair is transactional; retain the checkpoint and
+   correct the reported database problem before retrying.
+3. With the gateway stopped again, checkpoint and compact the repaired SQLite
+   file using the host's trusted `sqlite3` binary:
+
+   ```bash
+   defenseclaw-gateway stop
+   sqlite3 ~/.defenseclaw/audit.db \
+     'PRAGMA wal_checkpoint(TRUNCATE); PRAGMA secure_delete=ON; VACUUM;'
+   defenseclaw-gateway start
+   ```
+
+4. Retire superseded database copies, WAL/SHM files, crash artifacts, and
+   backups through your organization's secure-media and retention process.
+   Flash storage, copy-on-write filesystems, snapshots, and cloud backups may
+   retain old physical blocks even after SQLite cleanup; use encrypted storage
+   and destroy the relevant encryption keys or backup generations when policy
+   permits.
+5. Rotate every credential whose bytes could have appeared in the old database
+   or its backups at the credential's issuing system. If the affected value was
+   the DefenseClaw gateway token, rotate it with
+   `defenseclaw setup rotate-token --yes`. Handle exposed PII under your privacy
+   and incident-response policy; database redaction does not undo prior access
+   or copies.
+
 ## Native Windows servicing
 
 <Callout title="No published cross-release Windows baseline">
