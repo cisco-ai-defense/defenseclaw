@@ -109,7 +109,7 @@ func scrubHistoricalLegacyFindingRows(ex dbExecer) error {
 		}
 		for _, row := range batch {
 			cursor = row.rowID
-			decodedTags, tagsErr := decodeHistoricalLegacyFindingTags(row.tags)
+			decodedTags, tagsErr := decodeHistoricalFindingTags(row.tags)
 			finding := scanner.Finding{
 				Scanner: row.scanner, RuleID: row.ruleID, Title: row.title,
 				Description: row.description, Location: row.location,
@@ -215,17 +215,36 @@ func scrubHistoricalScanFindingRows(ex dbExecer) error {
 		}
 		for _, row := range batch {
 			cursor = row.rowID
+			decodedTags, tagsErr := decodeHistoricalFindingTags(row.tags)
 			finding := scanner.Finding{
 				RuleID: row.ruleID, Category: row.category, Title: row.title,
 				Description: row.description, EvidenceSummary: row.evidence,
 				Location: row.location, Remediation: row.remediation,
-				Tags:                decodeHistoricalStringSlice(row.tags),
+				Tags:                decodedTags,
 				DataAxis:            decodeHistoricalStringSlice(row.dataAxis),
 				ToolCapabilityClass: row.toolCapability,
 				ContentFingerprint:  row.fingerprint, ExternalEndpoint: row.endpoint,
 				DecisionPath: json.RawMessage(row.decisionPath),
 			}
-			kind, sensitive := historicalSensitiveFindingKind(finding)
+			var kind sensitiveFindingKind
+			var sensitive bool
+			if tagsErr != nil {
+				// If trustworthy identity already proves sensitivity, malformed
+				// tags can be replaced canonically. Otherwise the tags may be the
+				// only classification evidence, so fail the whole migration rather
+				// than silently retaining an unclassifiable historical row.
+				kind, sensitive = historicalSensitiveFindingKind(scanner.Finding{
+					RuleID: row.ruleID, Category: row.category,
+				})
+				if !sensitive {
+					kind, sensitive = historicalSensitiveRuleIDKind(row.ruleID, row.scanner)
+				}
+				if !sensitive {
+					return fmt.Errorf("audit: decode historical scan finding tags at rowid %d: %w", row.rowID, tagsErr)
+				}
+			} else {
+				kind, sensitive = historicalSensitiveFindingKind(finding)
+			}
 			if !sensitive {
 				continue
 			}
@@ -1277,7 +1296,7 @@ func decodeHistoricalStringSlice(raw string) []string {
 	return values
 }
 
-func decodeHistoricalLegacyFindingTags(raw string) ([]string, error) {
+func decodeHistoricalFindingTags(raw string) ([]string, error) {
 	trimmed := strings.TrimSpace(raw)
 	if trimmed == "" || trimmed == "null" {
 		return nil, nil

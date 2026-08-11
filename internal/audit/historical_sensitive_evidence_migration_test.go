@@ -172,6 +172,61 @@ func TestHistoricalSensitiveEvidenceMigrationRejectsMalformedUnclassifiedLegacyT
 	}
 }
 
+func TestHistoricalSensitiveEvidenceMigrationRejectsMalformedUnclassifiedScanFindingTagsAtomically(t *testing.T) {
+	fixture := newHistoricalSensitiveEvidenceFixture(t)
+	malformedTags := `["secret","` + fixture.secret
+	if _, err := fixture.store.db.Exec(`
+		UPDATE scan_findings
+		SET rule_id='SAFE-RULE', category='quality', tags=?
+		WHERE id='historical-secret-finding'`, malformedTags); err != nil {
+		t.Fatal(err)
+	}
+	before := historicalSensitiveEvidenceSnapshot(t, fixture.store.db)
+
+	err := fixture.store.applyMigration(fixture.migrationVersion, fixture.migration)
+	if err == nil || !strings.Contains(err.Error(), "decode historical scan finding tags") {
+		t.Fatalf("malformed unclassified scan-finding tags migration error=%v", err)
+	}
+	after := historicalSensitiveEvidenceSnapshot(t, fixture.store.db)
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("malformed unclassified scan-finding tags did not roll back every surface:\nbefore=%s\nafter=%s",
+			before, after)
+	}
+	version, versionErr := fixture.store.SchemaVersion()
+	if versionErr != nil || version != fixture.migrationVersion-1 {
+		t.Fatalf("schema version after malformed scan-finding tags refusal=%d want=%d err=%v",
+			version, fixture.migrationVersion-1, versionErr)
+	}
+}
+
+func TestHistoricalSensitiveEvidenceMigrationRepairsMalformedScanFindingTagsWithSensitiveIdentity(t *testing.T) {
+	fixture := newHistoricalSensitiveEvidenceFixture(t)
+	malformedTags := `["secret","` + fixture.secret
+	if _, err := fixture.store.db.Exec(`
+		UPDATE scan_findings
+		SET rule_id='SAFE-RULE', category='credential-leak', tags=?
+		WHERE id='historical-secret-finding'`, malformedTags); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := fixture.store.Init(); err != nil {
+		t.Fatalf("repair malformed tags with independently sensitive identity: %v", err)
+	}
+	var ruleID, category, tags string
+	if err := fixture.store.db.QueryRow(`
+		SELECT rule_id, category, tags FROM scan_findings
+		WHERE id='historical-secret-finding'`).Scan(&ruleID, &category, &tags); err != nil {
+		t.Fatal(err)
+	}
+	if ruleID != "redacted.secret.unknown" || category != "credential-leak" ||
+		tags != `["secret","redacted"]` {
+		t.Fatalf("malformed known-sensitive scan-finding tags were not canonicalized: rule=%q category=%q tags=%q",
+			ruleID, category, tags)
+	}
+	assertNoHistoricalSensitiveMarker(t, tags, []string{fixture.secret})
+	assertHistoricalSensitiveEvidenceAbsent(t, fixture)
+}
+
 func TestHistoricalSensitiveEvidenceMigrationRejectsMalformedSensitiveScanResultAtomically(t *testing.T) {
 	fixture := newHistoricalSensitiveEvidenceFixture(t)
 	const malformedRawJSON = `{"findings":[`
