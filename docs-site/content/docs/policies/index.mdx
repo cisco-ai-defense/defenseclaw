@@ -388,16 +388,14 @@ Every finding DefenseClaw records is tagged with a **data axis** (one or more of
 
 ### Bundled patterns
 
-Four patterns ship in `internal/guardrail/defaults/correlation-patterns.yaml`:
+Two high-confidence patterns ship in `internal/guardrail/defaults/correlation-patterns.yaml`:
 
 | Pattern ID | Window | Match severity | Trigger |
 | --- | --- | --- | --- |
 | `LETHAL-TRIFECTA` | 30 events | CRITICAL | Ordered axes: untrusted ingress, then sensitive access, then external egress. |
 | `TRIFECTA-WITH-FINGERPRINT-MATCH` | 30 events | CRITICAL | Same content fingerprint seen in a `sensitive_access` finding and a later `egress_external` finding — direct exfil, not just temporal coincidence. |
-| `ESCALATION-CHAIN` | 10 events | CRITICAL | MEDIUM → HIGH → HIGH severity progression inside the same session — attacker iterating on a prompt. |
-| `DESTRUCTIVE-FLOW` | 50 events | CRITICAL | An `exec_shell` finding at HIGH+ in the same session window as a `sensitive_access` finding. |
 
-Each pattern sets its own window size — `ESCALATION-CHAIN` wants the progression tight; `DESTRUCTIVE-FLOW` tolerates 50 events between a credential read and an `rm -rf`.
+Broad severity-only and capability-only sequences are intentionally not bundled. Operators can still define custom ordered `all_of` or `sequence` patterns when their environment has stronger, deployment-specific signals.
 
 ### What the operator sees
 

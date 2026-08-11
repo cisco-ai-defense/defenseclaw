@@ -233,6 +233,37 @@ _VALID_FIELDS: dict[str, set[str]] = {
     "runtime": {"", "disable", "enable"},
 }
 _SUMMARY_DETAILS_BYTES = 4096
+_ALERT_ALL_SEVERITIES = ("CRITICAL", "HIGH", "MEDIUM", "LOW", "ERROR")
+_ALERT_ACTIONABLE_SEVERITIES = ("CRITICAL", "HIGH", "ERROR")
+_ALERT_NON_ALLOW_OUTCOMES = (
+    "alert",
+    "ask",
+    "block",
+    "blocked",
+    "confirm",
+    "deny",
+    "denied",
+    "fail",
+    "failed",
+    "failure",
+    "quarantine",
+    "quarantined",
+    "reject",
+    "rejected",
+    "revoked",
+    "terminated",
+    "timed_out",
+)
+_LEGACY_FINDING_ACTIONS = (
+    "alert",
+    "connector-hook-tampered",
+    "gateway-multi-turn-injection",
+    "gateway-session-prompt-alert",
+    "gateway-tool-call-flagged",
+    "gateway-tool-call-judge-flagged",
+    "scan-finding",
+    "tool-result-pii-alert",
+)
 
 
 def _validate(field: str, value: str) -> None:
@@ -257,6 +288,9 @@ class Store:
 
         self.read_only = read_only
         self._scan_results_has_retention_timestamp: bool | None = None
+        self._audit_schema_version: int | None = None
+        self._audit_event_columns_cache: frozenset[str] = frozenset()
+        self._audit_tables_cache: frozenset[str] = frozenset()
         newly_created = not read_only and self._db_will_be_created(db_path)
         connect_path = self._read_only_uri(db_path) if read_only else db_path
         self.db = sqlite3.connect(
@@ -305,11 +339,7 @@ class Store:
             raise ValueError("audit: read-only Store requires an on-disk database")
         if db_path.startswith("file:"):
             base, _, raw_query = db_path.partition("?")
-            query = [
-                item
-                for item in raw_query.split("&")
-                if item and not item.lower().startswith("mode=")
-            ]
+            query = [item for item in raw_query.split("&") if item and not item.lower().startswith("mode=")]
             query.append("mode=ro")
             return f"{base}?{'&'.join(query)}"
         return f"{Path(os.path.abspath(db_path)).as_uri()}?mode=ro"
@@ -319,9 +349,7 @@ class Store:
         """True for an on-disk DB path (not an in-memory database)."""
         if not db_path or db_path == ":memory:":
             return False
-        if db_path.startswith("file:") and (
-            db_path.startswith("file::memory:") or "mode=memory" in db_path
-        ):
+        if db_path.startswith("file:") and (db_path.startswith("file::memory:") or "mode=memory" in db_path):
             return False
         return True
 
@@ -382,13 +410,9 @@ class Store:
     # -- Old list migration (matches Go migrateOldLists) --
 
     def _migrate_old_lists(self) -> None:
-        cur = self.db.execute(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='block_list'"
-        )
+        cur = self.db.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='block_list'")
         block_exists = cur.fetchone()[0] > 0
-        cur = self.db.execute(
-            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='allow_list'"
-        )
+        cur = self.db.execute("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='allow_list'")
         allow_exists = cur.fetchone()[0] > 0
 
         if not block_exists and not allow_exists:
@@ -421,17 +445,11 @@ class Store:
 
     def _ensure_run_id_columns(self) -> None:
         for table in ("audit_events", "scan_results"):
-            columns = {
-                row[1]
-                for row in self.db.execute(f"PRAGMA table_info({table})").fetchall()
-            }
+            columns = {row[1] for row in self.db.execute(f"PRAGMA table_info({table})").fetchall()}
             if "run_id" in columns:
                 continue
             self.db.execute(f"ALTER TABLE {table} ADD COLUMN run_id TEXT")
-        audit_columns = {
-            row[1]
-            for row in self.db.execute("PRAGMA table_info(audit_events)").fetchall()
-        }
+        audit_columns = {row[1] for row in self.db.execute("PRAGMA table_info(audit_events)").fetchall()}
         if "structured_json" not in audit_columns:
             self.db.execute("ALTER TABLE audit_events ADD COLUMN structured_json TEXT")
         self.db.execute("CREATE INDEX IF NOT EXISTS idx_audit_run_id ON audit_events(run_id)")
@@ -441,10 +459,7 @@ class Store:
     def _ensure_audit_connector_columns(self) -> None:
         """Mirror Go's additive audit_events connector columns and indexes."""
 
-        columns = {
-            row[1]
-            for row in self.db.execute("PRAGMA table_info(audit_events)").fetchall()
-        }
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(audit_events)").fetchall()}
         for column, ddl in (
             ("connector", "ALTER TABLE audit_events ADD COLUMN connector TEXT"),
             ("step_idx", "ALTER TABLE audit_events ADD COLUMN step_idx INTEGER"),
@@ -468,11 +483,8 @@ class Store:
         before the Go process without creating an incompatible placeholder.
         """
 
-        columns = {
-            row[1]
-            for row in self.db.execute("PRAGMA table_info(audit_events)").fetchall()
-        }
-        for column in ("bucket", "event_name"):
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(audit_events)").fetchall()}
+        for column in ("bucket", "event_name", "payload_json"):
             if column not in columns:
                 self.db.execute(f"ALTER TABLE audit_events ADD COLUMN {column} TEXT")
         self.db.executescript(
@@ -511,14 +523,9 @@ class Store:
         ``(target_type, target_name, connector)`` so a target can carry one
         global entry plus one entry per connector without colliding.
         """
-        columns = {
-            row[1]
-            for row in self.db.execute("PRAGMA table_info(actions)").fetchall()
-        }
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(actions)").fetchall()}
         if "connector" not in columns:
-            self.db.execute(
-                "ALTER TABLE actions ADD COLUMN connector TEXT NOT NULL DEFAULT ''"
-            )
+            self.db.execute("ALTER TABLE actions ADD COLUMN connector TEXT NOT NULL DEFAULT ''")
         # Swap the legacy 2-column uniqueness index for the connector-aware one.
         # DROP first so an upgraded DB cannot keep both (the old one would
         # reject per-connector rows). Both statements are guarded so re-running
@@ -620,10 +627,18 @@ class Store:
                 id, timestamp, action, target, actor, details,
                 structured_json, severity, run_id, connector
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (event.id, event.timestamp.isoformat(), event.action,
-             event.target or None, event.actor, event.details or None,
-             structured_json, event.severity or None, event.run_id or None,
-             connector or None),
+            (
+                event.id,
+                event.timestamp.isoformat(),
+                event.action,
+                event.target or None,
+                event.actor,
+                event.details or None,
+                structured_json,
+                event.severity or None,
+                event.run_id or None,
+                connector or None,
+            ),
         )
         self.db.commit()
 
@@ -747,9 +762,7 @@ class Store:
         """Count scan results in the active Overview session window."""
 
         if since is None:
-            return int(
-                self.db.execute("SELECT COUNT(*) FROM scan_results").fetchone()[0] or 0
-            )
+            return int(self.db.execute("SELECT COUNT(*) FROM scan_results").fetchone()[0] or 0)
         if self._scan_results_supports_retention_timestamp():
             cutoff_unix_nano = _datetime_unix_nano(since)
             if -(2**63) <= cutoff_unix_nano <= (2**63) - 1:
@@ -781,25 +794,186 @@ class Store:
         cached = self._scan_results_has_retention_timestamp
         if cached is not None:
             return cached
-        columns = {
-            row[1]
-            for row in self.db.execute("PRAGMA table_info(scan_results)").fetchall()
-        }
+        columns = {row[1] for row in self.db.execute("PRAGMA table_info(scan_results)").fetchall()}
         supported = "retention_timestamp_unix_nano" in columns
         self._scan_results_has_retention_timestamp = supported
         return supported
 
+    def _audit_projection_schema(self) -> tuple[frozenset[str], frozenset[str]]:
+        """Return cached audit columns/tables for compatibility-safe reads."""
+
+        schema_version = int(self.db.execute("PRAGMA schema_version").fetchone()[0])
+        if schema_version != self._audit_schema_version:
+            self._audit_event_columns_cache = frozenset(
+                str(row[1]) for row in self.db.execute("PRAGMA table_info(audit_events)").fetchall()
+            )
+            self._audit_tables_cache = frozenset(
+                str(row[0]) for row in self.db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+            )
+            self._audit_schema_version = schema_version
+        return self._audit_event_columns_cache, self._audit_tables_cache
+
+    @staticmethod
+    def _sql_string_values(values: tuple[str, ...]) -> str:
+        """Render a fixed internal vocabulary as SQL string literals."""
+
+        return ",".join(f"'{value}'" for value in values)
+
+    @staticmethod
+    def _safe_json_extract(column: str, path: str) -> str:
+        """Return a malformed-JSON-safe extraction expression."""
+
+        return f"CASE WHEN json_valid(COALESCE({column}, '')) THEN json_extract({column}, '{path}') END"
+
+    def _legacy_explicit_alert_clause(self, columns: frozenset[str]) -> str:
+        outcome_values = self._sql_string_values(_ALERT_NON_ALLOW_OUTCOMES)
+        structured = "structured_json" if "structured_json" in columns else "NULL"
+        enforced = "enforced" if "enforced" in columns else "NULL"
+        details = "COALESCE(details, '')" if "details" in columns else "''"
+        legacy_decision = f"dc_hook_decision({details}, {structured}, {enforced})"
+        return f"""(
+            LOWER(COALESCE(action, '')) IN ({outcome_values})
+            OR LOWER(COALESCE(action, '')) LIKE '%-failure'
+            OR LOWER(COALESCE(action, '')) LIKE '%-failed'
+            OR {legacy_decision} = 'block'
+        )"""
+
+    def _canonical_alert_outcome_expression(
+        self,
+        columns: frozenset[str],
+    ) -> str:
+        outcome_expressions: list[str] = []
+        if "payload_json" in columns:
+            outcome_expressions.extend(
+                self._safe_json_extract("payload_json", path)
+                for path in (
+                    '$."defenseclaw.enforcement.effective_action"',
+                    '$."defenseclaw.guardrail.decision"',
+                    '$."defenseclaw.network.decision"',
+                    '$."defenseclaw.network.policy_outcome"',
+                    '$."defenseclaw.scan.verdict"',
+                )
+            )
+        if "projected_record_json" in columns:
+            outcome_expressions.append(self._safe_json_extract("projected_record_json", "$.outcome"))
+        outcome_expressions.extend(("action", "''"))
+        return "LOWER(COALESCE(" + ",".join(outcome_expressions) + "))"
+
+    def _alert_display_severity_sql(self) -> str:
+        """Promote explicit INFO outcomes to visible alert severities."""
+
+        columns, _tables = self._audit_projection_schema()
+        legacy_explicit = self._legacy_explicit_alert_clause(columns)
+        if {"bucket", "event_name"}.issubset(columns):
+            outcomes = self._sql_string_values(_ALERT_NON_ALLOW_OUTCOMES)
+            canonical_outcome = self._canonical_alert_outcome_expression(columns)
+            return f"""CASE
+                WHEN UPPER(COALESCE(severity, 'INFO')) <> 'INFO' THEN severity
+                WHEN bucket = 'network.egress'
+                 AND {canonical_outcome} IN ({outcomes}) THEN 'WARNING'
+                WHEN bucket = 'enforcement.action'
+                 AND {canonical_outcome} IN ({outcomes}) THEN 'HIGH'
+                WHEN bucket IS NULL AND {legacy_explicit} THEN 'HIGH'
+                ELSE COALESCE(severity, 'INFO')
+            END"""
+        return f"""CASE
+            WHEN UPPER(COALESCE(severity, 'INFO')) = 'INFO'
+             AND {legacy_explicit} THEN 'HIGH'
+            ELSE COALESCE(severity, 'INFO')
+        END"""
+
+    def _alert_where_clause(self, *, actionable: bool) -> str:
+        """Build the one alert-eligibility predicate used by lists/counts.
+
+        The gateway performs additive migrations, while read-only CLI/TUI
+        processes may briefly observe an older schema. Optional v8 fields are
+        therefore included only when present. Legacy explicit blocks remain
+        alerts even when their historical outer severity was INFO.
+        """
+
+        columns, tables = self._audit_projection_schema()
+        severities = _ALERT_ACTIONABLE_SEVERITIES if actionable else _ALERT_ALL_SEVERITIES
+        severity_values = self._sql_string_values(severities)
+        outcome_values = self._sql_string_values(_ALERT_NON_ALLOW_OUTCOMES)
+        severity_clause = f"UPPER(COALESCE(severity, '')) IN ({severity_values})"
+
+        legacy_explicit = self._legacy_explicit_alert_clause(columns)
+        legacy_actions = self._sql_string_values(_LEGACY_FINDING_ACTIONS)
+        legacy_finding = f"""(
+            {severity_clause}
+            AND LOWER(COALESCE(action, '')) IN ({legacy_actions})
+        )"""
+
+        if {"bucket", "event_name"}.issubset(columns):
+            finding = f"""(
+                bucket = 'security.finding'
+                AND event_name = 'finding.observed'
+                AND {severity_clause}
+            )"""
+
+            canonical_outcome = self._canonical_alert_outcome_expression(columns)
+            canonical_action = f"""(
+                bucket IN ('enforcement.action', 'network.egress')
+                AND {canonical_outcome} IN ({outcome_values})
+            )"""
+            health_failure = """(
+                bucket IN ('platform.health', 'diagnostic')
+                AND UPPER(COALESCE(severity, '')) IN ('CRITICAL','HIGH','ERROR')
+            )"""
+            legacy = f"""(
+                bucket IS NULL
+                AND ({legacy_finding} OR {legacy_explicit})
+            )"""
+            eligible = f"({finding} OR {canonical_action} OR {health_failure} OR {legacy})"
+        else:
+            eligible = f"({legacy_finding} OR {legacy_explicit})"
+
+        predicates = [eligible, "action NOT LIKE 'dismiss%'"]
+        if "payload_json" in columns:
+            predicates.append(
+                """NOT EXISTS (
+                    SELECT 1
+                    FROM json_each(
+                        CASE
+                            WHEN json_valid(COALESCE(payload_json, ''))
+                             AND json_type(
+                                     payload_json,
+                                     '$."defenseclaw.finding.tags"'
+                                 ) = 'array'
+                            THEN json_extract(
+                                payload_json,
+                                '$."defenseclaw.finding.tags"'
+                            )
+                            ELSE '[]'
+                        END
+                    ) AS finding_tag
+                    WHERE LOWER(CAST(finding_tag.value AS TEXT)) = 'detection-only'
+                )"""
+            )
+            safe_text_tags = self._safe_json_extract(
+                "payload_json",
+                '$."defenseclaw.finding.tags"',
+            )
+            predicates.append(f"LOWER(COALESCE({safe_text_tags}, '')) <> 'detection-only'")
+        if "alert_acknowledgement_projection" in tables:
+            predicates.append(
+                """NOT EXISTS (
+                    SELECT 1
+                    FROM alert_acknowledgement_projection AS projection
+                    WHERE projection.alert_id = audit_events.id
+                )"""
+            )
+        return " AND ".join(f"({predicate})" for predicate in predicates)
+
     def list_alerts(self, limit: int = 100) -> list[Event]:
+        where = self._alert_where_clause(actionable=False)
+        display_severity = self._alert_display_severity_sql()
         cur = self.db.execute(
-            """SELECT id, timestamp, action, target, actor, details, severity, run_id, structured_json, connector
+            f"""SELECT id, timestamp, action, target, actor, details,
+                      {display_severity} AS severity,
+                      run_id, structured_json, connector
                FROM audit_events
-               WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW','ERROR','INFO')
-                 AND (bucket IS NULL OR (bucket = 'security.finding' AND event_name = 'finding.observed'))
-                 AND action NOT LIKE 'dismiss%'
-                 AND NOT EXISTS (
-                     SELECT 1 FROM alert_acknowledgement_projection AS projection
-                     WHERE projection.alert_id = audit_events.id
-                 )
+               WHERE {where}
                ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
             (max(limit, 1),),
         )
@@ -808,18 +982,15 @@ class Store:
     def list_alert_summaries(self, limit: int = 100) -> list[Event]:
         """List alert rows without loading large structured payloads."""
 
+        where = self._alert_where_clause(actionable=False)
+        display_severity = self._alert_display_severity_sql()
         cur = self.db.execute(
-            """SELECT id, timestamp, action, target, actor,
+            f"""SELECT id, timestamp, action, target, actor,
                       substr(COALESCE(details, ''), 1, ?) AS details,
-                      severity, run_id, NULL AS structured_json, connector
+                      {display_severity} AS severity,
+                      run_id, NULL AS structured_json, connector
                FROM audit_events
-               WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW','ERROR','INFO')
-                 AND (bucket IS NULL OR (bucket = 'security.finding' AND event_name = 'finding.observed'))
-                 AND action NOT LIKE 'dismiss%'
-                 AND NOT EXISTS (
-                     SELECT 1 FROM alert_acknowledgement_projection AS projection
-                     WHERE projection.alert_id = audit_events.id
-                 )
+               WHERE {where}
                ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
             (_SUMMARY_DETAILS_BYTES, max(limit, 1)),
         )
@@ -828,27 +999,15 @@ class Store:
     def list_actionable_alert_summaries(self, limit: int = 100) -> list[Event]:
         """List high-signal alert rows for the default TUI view."""
 
+        where = self._alert_where_clause(actionable=True)
+        display_severity = self._alert_display_severity_sql()
         cur = self.db.execute(
-            """SELECT id, timestamp, action, target, actor,
+            f"""SELECT id, timestamp, action, target, actor,
                       substr(COALESCE(details, ''), 1, ?) AS details,
-                      severity, run_id, NULL AS structured_json, connector
+                      {display_severity} AS severity,
+                      run_id, NULL AS structured_json, connector
                FROM audit_events
-               WHERE (
-                   severity IN ('CRITICAL','HIGH','ERROR')
-                   OR (
-                       action = 'connector-hook'
-                       AND (
-                           details LIKE '%severity=CRITICAL%'
-                           OR details LIKE '%severity=HIGH%'
-                       )
-                   )
-               )
-                 AND (bucket IS NULL OR (bucket = 'security.finding' AND event_name = 'finding.observed'))
-                 AND action NOT LIKE 'dismiss%'
-                 AND NOT EXISTS (
-                     SELECT 1 FROM alert_acknowledgement_projection AS projection
-                     WHERE projection.alert_id = audit_events.id
-                 )
+               WHERE {where}
                ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
             (_SUMMARY_DETAILS_BYTES, max(limit, 1)),
         )
@@ -868,31 +1027,52 @@ class Store:
     # -- Scan results --
 
     def insert_scan_result(
-        self, scan_id: str, scanner: str, target: str,
-        ts: datetime, duration_ms: int, finding_count: int,
-        max_severity: str, raw_json: str,
+        self,
+        scan_id: str,
+        scanner: str,
+        target: str,
+        ts: datetime,
+        duration_ms: int,
+        finding_count: int,
+        max_severity: str,
+        raw_json: str,
     ) -> None:
         run_id = _current_run_id()
         self.db.execute(
             """INSERT INTO scan_results
                (id, scanner, target, timestamp, duration_ms, finding_count, max_severity, raw_json, run_id)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (scan_id, scanner, target, ts.isoformat(), duration_ms,
-             finding_count, max_severity, raw_json, run_id or None),
+            (
+                scan_id,
+                scanner,
+                target,
+                ts.isoformat(),
+                duration_ms,
+                finding_count,
+                max_severity,
+                raw_json,
+                run_id or None,
+            ),
         )
         self.db.commit()
 
     def insert_finding(
-        self, finding_id: str, scan_id: str, severity: str,
-        title: str, description: str, location: str,
-        remediation: str, scanner: str, tags: str,
+        self,
+        finding_id: str,
+        scan_id: str,
+        severity: str,
+        title: str,
+        description: str,
+        location: str,
+        remediation: str,
+        scanner: str,
+        tags: str,
     ) -> None:
         self.db.execute(
             """INSERT INTO findings
                (id, scan_id, severity, title, description, location, remediation, scanner, tags)
                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (finding_id, scan_id, severity, title, description,
-             location, remediation, scanner, tags),
+            (finding_id, scan_id, severity, title, description, location, remediation, scanner, tags),
         )
         self.db.commit()
 
@@ -920,18 +1100,22 @@ class Store:
         )
         results: list[dict[str, Any]] = []
         for row in cur.fetchall():
-            results.append({
-                "id": row[0],
-                "target": row[1],
-                "timestamp": _parse_ts(row[2]),
-                "finding_count": row[3] or 0,
-                "max_severity": row[4] or "INFO",
-                "raw_json": row[5] or "",
-            })
+            results.append(
+                {
+                    "id": row[0],
+                    "target": row[1],
+                    "timestamp": _parse_ts(row[2]),
+                    "finding_count": row[3] or 0,
+                    "max_severity": row[4] or "INFO",
+                    "raw_json": row[5] or "",
+                }
+            )
         return results
 
     def get_severity_counts_for_target(
-        self, target: str, scanner: str,
+        self,
+        target: str,
+        scanner: str,
     ) -> dict[str, int]:
         """Return {severity: count} from the most recent scan for target+scanner."""
         cur = self.db.execute(
@@ -949,7 +1133,9 @@ class Store:
         return {row[0]: row[1] for row in cur.fetchall()}
 
     def get_findings_for_target(
-        self, target: str, scanner: str,
+        self,
+        target: str,
+        scanner: str,
     ) -> list[dict[str, Any]]:
         """Return findings from the most recent scan for target+scanner."""
         cur = self.db.execute(
@@ -966,10 +1152,7 @@ class Store:
                    WHEN 'MEDIUM' THEN 3 WHEN 'LOW' THEN 4 ELSE 5 END""",
             (target, scanner),
         )
-        return [
-            {"severity": r[0], "title": r[1], "location": r[2] or ""}
-            for r in cur.fetchall()
-        ]
+        return [{"severity": r[0], "title": r[1], "location": r[2] or ""} for r in cur.fetchall()]
 
     # -- Actions --
     #
@@ -984,8 +1167,12 @@ class Store:
     # admission layer composes the two exact-match lookups it needs.
 
     def set_action(
-        self, target_type: str, target_name: str,
-        source_path: str, state: ActionState, reason: str,
+        self,
+        target_type: str,
+        target_name: str,
+        source_path: str,
+        state: ActionState,
+        reason: str,
         connector: str = "",
     ) -> None:
         actions_json = json.dumps(state.to_dict())
@@ -1001,14 +1188,17 @@ class Store:
                  reason = excluded.reason,
                  updated_at = excluded.updated_at,
                  source_path = COALESCE(excluded.source_path, source_path)""",
-            (aid, target_type, target_name, source_path or None,
-             actions_json, reason, now, connector),
+            (aid, target_type, target_name, source_path or None, actions_json, reason, now, connector),
         )
         self.db.commit()
 
     def set_action_field(
-        self, target_type: str, target_name: str,
-        field: str, value: str, reason: str,
+        self,
+        target_type: str,
+        target_name: str,
+        field: str,
+        value: str,
+        reason: str,
         connector: str = "",
     ) -> None:
         _validate(field, value)
@@ -1030,7 +1220,10 @@ class Store:
         self.db.commit()
 
     def clear_action_field(
-        self, target_type: str, target_name: str, field: str,
+        self,
+        target_type: str,
+        target_name: str,
+        field: str,
         connector: str = "",
     ) -> None:
         _validate(field, "")
@@ -1049,7 +1242,10 @@ class Store:
         self.db.commit()
 
     def set_source_path(
-        self, target_type: str, target_name: str, path: str,
+        self,
+        target_type: str,
+        target_name: str,
+        path: str,
         connector: str = "",
     ) -> None:
         self.db.execute(
@@ -1072,7 +1268,10 @@ class Store:
         self.db.commit()
 
     def remove_action(
-        self, target_type: str, target_name: str, connector: str = "",
+        self,
+        target_type: str,
+        target_name: str,
+        connector: str = "",
     ) -> None:
         self.db.execute(
             "DELETE FROM actions WHERE target_type = ? AND target_name = ? AND connector = ?",
@@ -1081,7 +1280,10 @@ class Store:
         self.db.commit()
 
     def get_action(
-        self, target_type: str, target_name: str, connector: str = "",
+        self,
+        target_type: str,
+        target_name: str,
+        connector: str = "",
     ) -> ActionEntry | None:
         cur = self.db.execute(
             """SELECT id, target_type, target_name, source_path, actions_json, reason, updated_at, connector
@@ -1094,7 +1296,11 @@ class Store:
         return self._row_to_action(row)
 
     def has_action(
-        self, target_type: str, target_name: str, field: str, value: str,
+        self,
+        target_type: str,
+        target_name: str,
+        field: str,
+        value: str,
         connector: str = "",
     ) -> bool:
         _validate(field, value)
@@ -1117,7 +1323,10 @@ class Store:
         return [self._row_to_action(r) for r in cur.fetchall()]
 
     def list_by_action_and_type(
-        self, field: str, value: str, target_type: str,
+        self,
+        field: str,
+        value: str,
+        target_type: str,
     ) -> list[ActionEntry]:
         _validate(field, value)
         cur = self.db.execute(
@@ -1129,7 +1338,9 @@ class Store:
         return [self._row_to_action(r) for r in cur.fetchall()]
 
     def list_actions_by_type(
-        self, target_type: str, connector: str | None = None,
+        self,
+        target_type: str,
+        connector: str | None = None,
     ) -> list[ActionEntry]:
         """List action entries for a target type.
 
@@ -1305,8 +1516,7 @@ class Store:
             params.append(target_name)
         if connector is not None:
             where.append(
-                "EXISTS (SELECT 1 FROM quarantine_record_connectors c "
-                "WHERE c.quarantine_id = q.id AND c.connector = ?)"
+                "EXISTS (SELECT 1 FROM quarantine_record_connectors c WHERE c.quarantine_id = q.id AND c.connector = ?)"
             )
             params.append(connector)
         rows = self.db.execute(
@@ -1405,22 +1615,15 @@ class Store:
 
         q_skill = "SELECT COUNT(*) FROM actions WHERE target_type='skill' AND json_extract(actions_json,'$.install')="
         q_mcp = "SELECT COUNT(*) FROM actions WHERE target_type='mcp' AND json_extract(actions_json,'$.install')="
+        alert_where = self._alert_where_clause(actionable=False)
         return Counts(
             blocked_skills=_count(q_skill + "'block'"),
             allowed_skills=_count(q_skill + "'allow'"),
             blocked_mcps=_count(q_mcp + "'block'"),
             allowed_mcps=_count(q_mcp + "'allow'"),
-            alerts=_count(
-                "SELECT COUNT(*) FROM audit_events "
-                "WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW') "
-                "AND (bucket IS NULL OR (bucket = 'security.finding' AND event_name = 'finding.observed')) "
-                "AND NOT EXISTS (SELECT 1 FROM alert_acknowledgement_projection AS projection "
-                "WHERE projection.alert_id = audit_events.id)"
-            ),
+            alerts=_count(f"SELECT COUNT(*) FROM audit_events WHERE {alert_where}"),
             total_scans=_count("SELECT COUNT(*) FROM scan_results"),
-            blocked_egress_calls=_count(
-                "SELECT COUNT(*) FROM network_egress_events WHERE blocked = 1"
-            ),
+            blocked_egress_calls=_count("SELECT COUNT(*) FROM network_egress_events WHERE blocked = 1"),
         )
 
     def get_enforcement_counts(self) -> Counts:
@@ -1456,18 +1659,14 @@ class Store:
                FROM actions
                WHERE target_type IN ('skill', 'mcp')"""
         ).fetchone()
-        blocked_skills, allowed_skills, blocked_mcps, allowed_mcps = (
-            int(value or 0) for value in action_counts
-        )
+        blocked_skills, allowed_skills, blocked_mcps, allowed_mcps = (int(value or 0) for value in action_counts)
         return Counts(
             blocked_skills=blocked_skills,
             allowed_skills=allowed_skills,
             blocked_mcps=blocked_mcps,
             allowed_mcps=allowed_mcps,
             total_scans=_count("SELECT COUNT(*) FROM scan_results"),
-            blocked_egress_calls=_count(
-                "SELECT COUNT(*) FROM network_egress_events WHERE blocked = 1"
-            ),
+            blocked_egress_calls=_count("SELECT COUNT(*) FROM network_egress_events WHERE blocked = 1"),
         )
 
     # -- Row converters --
@@ -1495,9 +1694,7 @@ class Store:
             connector=(row[9] or "") if len(row) > 9 else "",
         )
 
-    def get_target_snapshot(
-        self, target_type: str, target_path: str
-    ) -> TargetSnapshot | None:
+    def get_target_snapshot(self, target_type: str, target_path: str) -> TargetSnapshot | None:
         row = self.db.execute(
             "SELECT id, target_type, target_path, content_hash,"
             " dependency_hashes, config_hashes, network_endpoints,"
@@ -1630,10 +1827,7 @@ def _datetime_unix_nano(value: datetime) -> int:
         normalized = value.astimezone(timezone.utc)
     epoch = datetime(1970, 1, 1, tzinfo=timezone.utc)
     delta = normalized - epoch
-    return (
-        (delta.days * 86_400 + delta.seconds) * 1_000_000_000
-        + delta.microseconds * 1_000
-    )
+    return (delta.days * 86_400 + delta.seconds) * 1_000_000_000 + delta.microseconds * 1_000
 
 
 def _current_run_id() -> str:

@@ -202,12 +202,14 @@ func TestLogInspectFindingsWithCorrelationUsesOneGeneratedV8Pipeline(t *testing.
 	logger.SetRuntimeV8Emitter(runtime)
 
 	const evaluationID = "evaluation-runtime-inspect"
+	const sourceEvidence = "source-evidence-excerpt"
+	wantEvidence := redactCredentialFindingValue(sourceEvidence)
 	source := scanner.InspectFindingSource{
 		Scanner: "hook-rules", Target: "codex:PreToolUse", TargetType: "tool_call",
 		Verdict: "block", DurationMs: 7, EvaluationID: evaluationID,
 		Findings: []scanner.InspectFinding{{
 			RuleID: "SECRET-AWS-AKIA", Title: "AWS access key", Severity: scanner.SeverityHigh,
-			Confidence: 0.95, Evidence: "source-evidence-excerpt", Tags: []string{"secret"},
+			Confidence: 0.95, Evidence: sourceEvidence, Tags: []string{"secret"},
 		}},
 	}
 	corr := ScanCorrelation{
@@ -241,14 +243,14 @@ func TestLogInspectFindingsWithCorrelationUsesOneGeneratedV8Pipeline(t *testing.
 		if body["defenseclaw.evaluation.id"] != evaluationID || body["defenseclaw.scan.id"] != scanID {
 			t.Fatalf("record[%d] identifiers=%#v", index, body)
 		}
-		if index == 0 && body["defenseclaw.guardrail.evidence_summary"] != "source-evidence-excerpt" {
+		if index == 0 && body["defenseclaw.guardrail.evidence_summary"] != wantEvidence {
 			t.Fatalf("finding evidence summary=%#v", body)
 		}
 	}
 
 	findings, err := logger.store.ListScanFindings(scanID)
 	if err != nil || len(findings) != 1 || findings[0].EvaluationID != evaluationID ||
-		findings[0].EvidenceSummary.String != "source-evidence-excerpt" ||
+		findings[0].EvidenceSummary.String != wantEvidence ||
 		findings[0].ID != records[0].RecordID() {
 		t.Fatalf("forensic runtime findings=%#v err=%v", findings, err)
 	}

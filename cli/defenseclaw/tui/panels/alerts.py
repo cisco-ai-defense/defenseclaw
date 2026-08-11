@@ -12,13 +12,14 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
 from rich.markup import escape as rich_escape
 
+from defenseclaw.hook_metrics import connector_hook_decision
 from defenseclaw.tui.panels.audit import (
     parse_kv_details,
     split_connector_token,
@@ -30,8 +31,10 @@ from defenseclaw.tui.services.event_models import (
     parse_timestamp,
 )
 from defenseclaw.tui.services.v8_event_history import (
+    V8_LEGACY_FINDING_ACTIONS,
+    V8_NON_ALLOW_OUTCOMES,
     V8EventHistoryRow,
-    load_v8_event_history,
+    load_v8_alert_history,
     payload_text,
 )
 
@@ -155,48 +158,111 @@ class AlertTableRow:
     finding_index: int = -1
 
 
-_V8_ALERT_BUCKETS = frozenset(
-    {
-        "security.finding",
-        "guardrail.evaluation",
-        "enforcement.action",
-        "asset.scan",
-        "network.egress",
-        "platform.health",
-        "diagnostic",
-    }
-)
+_V8_FINDING_SEVERITIES = frozenset({"CRITICAL", "HIGH", "MEDIUM", "LOW", "ERROR", "WARNING"})
+
+
+def _v8_row_outcome(row: V8EventHistoryRow) -> str:
+    return (
+        (
+            payload_text(
+                row.payload,
+                "defenseclaw.enforcement.effective_action",
+                "defenseclaw.guardrail.decision",
+                "defenseclaw.network.decision",
+                "defenseclaw.network.policy_outcome",
+                "defenseclaw.scan.verdict",
+            )
+            or row.outcome
+            or row.action
+        )
+        .strip()
+        .lower()
+    )
+
+
+def _v8_finding_tags(row: V8EventHistoryRow) -> set[str]:
+    tags = {tag.strip().lower() for tag in row.finding_tags if tag.strip()}
+    value = row.payload.get("defenseclaw.finding.tags")
+    if isinstance(value, (list, tuple, set)):
+        tags.update(str(tag).strip().lower() for tag in value if str(tag).strip())
+    if isinstance(value, str):
+        tags.update(
+            tag.strip().strip("\"'").lower() for tag in value.strip("[]").split(",") if tag.strip().strip("\"'")
+        )
+    return tags
 
 
 def _is_v8_alert_row(row: V8EventHistoryRow) -> bool:
-    return row.bucket in _V8_ALERT_BUCKETS
+    """Keep the Alerts queue semantic, not a second copy of Audit.
+
+    Canonical v8 history contains successful hook decisions, clean scan
+    summaries, and ordinary lifecycle telemetry in buckets that used to be
+    projected wholesale into Alerts.  Those records belong in Activity/Audit
+    and made an ``All`` Alerts view look unhealthy even when it reported zero
+    findings.  Findings remain the primary alert rows; only explicit non-allow
+    enforcement/egress outcomes and important health failures join them.
+    """
+
+    severity = (row.severity or "INFO").strip().upper()
+    if row.bucket == "security.finding":
+        return (
+            row.event_name == "finding.observed"
+            and severity in _V8_FINDING_SEVERITIES
+            and "detection-only" not in _v8_finding_tags(row)
+        )
+    if row.bucket in {"enforcement.action", "network.egress"}:
+        return _v8_row_outcome(row) in V8_NON_ALLOW_OUTCOMES
+    if row.bucket in {"platform.health", "diagnostic"}:
+        return severity in {"CRITICAL", "HIGH", "ERROR"}
+    if not row.bucket:
+        action = (row.action or "").strip().lower()
+        if action == "connector-hook":
+            return connector_hook_decision(row.details) == "block"
+        return (
+            (action in V8_LEGACY_FINDING_ACTIONS and severity in _V8_FINDING_SEVERITIES)
+            or action in V8_NON_ALLOW_OUTCOMES
+            or action.endswith("-failure")
+            or action.endswith("-failed")
+        )
+    return False
 
 
 def _v8_alert_event(row: V8EventHistoryRow) -> AlertEvent:
     payload = row.payload
-    action = payload_text(
-        payload,
-        "defenseclaw.guardrail.decision",
-        "defenseclaw.enforcement.effective_action",
-        "defenseclaw.network.decision",
-        "defenseclaw.scan.verdict",
-    ) or row.outcome or row.action or row.event_name
-    target = payload_text(
-        payload,
-        "defenseclaw.finding.target_ref",
-        "defenseclaw.enforcement.target_ref",
-        "defenseclaw.network.target_ref",
-        "defenseclaw.scan.target_ref",
-        "defenseclaw.agent.id",
-    ) or row.event_name
-    summary = payload_text(
-        payload,
-        "defenseclaw.guardrail.evidence_summary",
-        "defenseclaw.finding.evidence_summary",
-        "defenseclaw.finding.description",
-        "defenseclaw.network.reason",
-        "defenseclaw.error.summary",
-    ) or row.details
+    action = (
+        payload_text(
+            payload,
+            "defenseclaw.guardrail.decision",
+            "defenseclaw.enforcement.effective_action",
+            "defenseclaw.network.decision",
+            "defenseclaw.scan.verdict",
+        )
+        or row.outcome
+        or row.action
+        or row.event_name
+    )
+    target = (
+        payload_text(
+            payload,
+            "defenseclaw.finding.target_ref",
+            "defenseclaw.enforcement.target_ref",
+            "defenseclaw.network.target_ref",
+            "defenseclaw.scan.target_ref",
+            "defenseclaw.agent.id",
+        )
+        or row.event_name
+    )
+    summary = (
+        payload_text(
+            payload,
+            "defenseclaw.guardrail.evidence_summary",
+            "defenseclaw.finding.evidence_summary",
+            "defenseclaw.finding.description",
+            "defenseclaw.network.reason",
+            "defenseclaw.error.summary",
+        )
+        or row.details
+    )
     detail_parts = [
         f"bucket={row.bucket}",
         f"event_name={row.event_name}",
@@ -208,9 +274,16 @@ def _v8_alert_event(row: V8EventHistoryRow) -> AlertEvent:
         detail_parts.append(f"redaction_profile={row.redaction_profile}")
     if summary:
         detail_parts.append(f"summary={summary}")
+    severity = (row.severity or "INFO").upper()
+    if row.bucket == "network.egress" and severity == "INFO":
+        severity = "WARNING"
+    elif row.bucket == "enforcement.action" and severity == "INFO":
+        severity = "HIGH"
+    elif not row.bucket and severity == "INFO":
+        severity = "HIGH"
     return AlertEvent(
         id=row.id,
-        severity=(row.severity or "INFO").upper(),
+        severity=severity,
         action=action,
         target=target,
         details=" ".join(detail_parts),
@@ -366,7 +439,7 @@ class AlertsPanelModel:
         """Refresh external data sources owned by the model."""
 
         if self.store is not None:
-            rows = load_v8_event_history(self.store, limit=500)
+            rows = load_v8_alert_history(self.store, limit=500)
             self.apply_v8_history(rows)
         self.refresh_gateway_scans()
 
@@ -440,7 +513,9 @@ class AlertsPanelModel:
             if connector_value and connector_value not in ev_connector:
                 continue
             if remaining:
-                haystack = f"{effective_severity} {event.severity} {event.action} {event.target} {event.details}".lower()
+                haystack = (
+                    f"{effective_severity} {event.severity} {event.action} {event.target} {event.details}".lower()
+                )
                 if remaining not in haystack:
                     continue
             filtered.append(row)
@@ -483,9 +558,7 @@ class AlertsPanelModel:
         self.severity_filter = next_filter
         if severity == "" or next_filter:
             self.show_all_severities = True
-            if self.store is not None and (
-                severity == "" or next_filter in {"MEDIUM", "LOW"}
-            ):
+            if self.store is not None and (severity == "" or next_filter in {"MEDIUM", "LOW"}):
                 self.refresh()
                 return
         self.apply_filter()
@@ -541,13 +614,7 @@ class AlertsPanelModel:
         return [row.event.id for row in self.filtered if not row.event.id.startswith("gw:")]
 
     def all_ids(self) -> list[str]:
-        return sorted(
-            {
-                row.event.id
-                for row in self.flat_rows()
-                if not row.event.id.startswith("gw:")
-            }
-        )
+        return sorted({row.event.id for row in self.flat_rows() if not row.event.id.startswith("gw:")})
 
     def severity_counts(self) -> dict[str, int]:
         if self._severity_counts_cache is not None:
@@ -710,11 +777,7 @@ class AlertsPanelModel:
         # contain bracketed tokens (``target:[skill]``). Escape so the
         # markup parser can't drop the bracketed substring or, worse,
         # leave the span unclosed when the user types a stray ``[``.
-        search_prompt = (
-            f"\n[#22D3EE]/ {rich_escape(self.filter_text)}[/]"
-            if self.filtering
-            else ""
-        )
+        search_prompt = f"\n[#22D3EE]/ {rich_escape(self.filter_text)}[/]" if self.filtering else ""
         return (
             "[bold #22D3EE]Alerts[/]  [#9FB2CC]Alert queue. Click a severity chip above or press 1-5.[/]\n"
             f"[bold]All {sum(counts.values())}[/]  "
@@ -804,9 +867,7 @@ class AlertsPanelModel:
         if hasattr(self.store, "list_actionable_alert_summaries"):
             return self.store.list_actionable_alert_summaries
         return (
-            self.store.list_alert_summaries
-            if hasattr(self.store, "list_alert_summaries")
-            else self.store.list_alerts
+            self.store.list_alert_summaries if hasattr(self.store, "list_alert_summaries") else self.store.list_alerts
         )
 
     def detail_text(self) -> str:
@@ -882,7 +943,17 @@ class AlertsPanelModel:
                         scan=block,
                     ),
                 )
-        event = _get_alert_event_by_id(self.store, event.id) or event
+        hydrated = _get_alert_event_by_id(self.store, event.id)
+        if (
+            hydrated is not None
+            and hydrated.severity.strip().upper() == "INFO"
+            and event.severity.strip().upper() != "INFO"
+        ):
+            # Canonical/legacy explicit non-allow rows may be persisted with a
+            # compatibility INFO severity. Keep the alert projection's visible
+            # promotion when hydrating its full detail row.
+            hydrated = replace(hydrated, severity=event.severity)
+        event = hydrated or event
         return AlertDetailInfo(
             event=event,
             findings=_list_findings_by_run_id(self.store, event.run_id),
@@ -1059,6 +1130,8 @@ def _severity_bucket(severity: str) -> str:
     normalized = severity.strip().upper()
     if normalized == "WARNING":
         return "MEDIUM"
+    if normalized == "ERROR":
+        return "HIGH"
     return normalized
 
 

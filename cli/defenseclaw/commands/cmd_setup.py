@@ -5085,9 +5085,7 @@ def _write_connector_identity(
         if connector not in gc.connectors:
             gc.connectors[connector] = PerConnectorGuardrailConfig()
         primary = (
-            existing_primary
-            if preserve_primary and existing_primary in gc.connectors
-            else sorted(gc.connectors)[0]
+            existing_primary if preserve_primary and existing_primary in gc.connectors else sorted(gc.connectors)[0]
         )
         gc.connector = primary
         cfg.claw.mode = primary
@@ -5513,10 +5511,7 @@ def _print_connector_observability_banner(connector: str, *, mode: str = "observ
     click.echo("  Telemetry channels:")
     if connector == "amp":
         click.echo("    • Plugin API — session/agent/tool lifecycle → /api/v1/amp/hook")
-        click.echo(
-            "    • Enforcement — synchronous tool.call execution gate "
-            "+ model-bound tool.result output gate"
-        )
+        click.echo("    • Enforcement — synchronous tool.call execution gate + model-bound tool.result output gate")
         click.echo(
             "    • Agent360 / Galileo — correlated session, turn, tool, outcome, "
             "decision, audit, log, metric, and trace views"
@@ -5532,9 +5527,7 @@ def _print_connector_observability_banner(connector: str, *, mode: str = "observ
                 "    • Native OTel — optional; inactive until OTEL_* variables are exported for the OmniGent process"
             )
         elif connector == "codex":
-            click.echo(
-                "    • Native OTel — logs, metrics, and traces → scoped bearer + source header on /v1/<signal>"
-            )
+            click.echo("    • Native OTel — logs, metrics, and traces → scoped bearer + source header on /v1/<signal>")
         else:
             click.echo("    • Native OTel — documented agent telemetry → /v1/logs, /v1/metrics, and/or /v1/traces")
     if connector == "codex":
@@ -6499,9 +6492,7 @@ def _dispatch_bare_setup(
     bare-``setup`` behavior in CI / pipelines so nothing hangs on stdin.
     """
     if add_detected and (connectors or detected or all_connectors):
-        raise click.UsageError(
-            "--add-detected cannot be combined with --connector, --detected, or --all"
-        )
+        raise click.UsageError("--add-detected cannot be combined with --connector, --detected, or --all")
     if app is None or getattr(app, "cfg", None) is None:
         click.echo(ctx.get_help())
         return
@@ -6527,17 +6518,9 @@ def _dispatch_bare_setup(
     for raw in connectors:
         _add(raw)
     if add_detected:
-        active = {
-            normalize_connector(str(name))
-            for name in app.cfg.active_connectors()
-            if str(name).strip()
-        }
+        active = {normalize_connector(str(name)) for name in app.cfg.active_connectors() if str(name).strip()}
         for c in _detect_installed_connectors():
-            if (
-                c not in active
-                and c in _HOOK_ENFORCED_CONNECTORS
-                and platform_support.connector_supported_on_os(c)
-            ):
+            if c not in active and c in _HOOK_ENFORCED_CONNECTORS and platform_support.connector_supported_on_os(c):
                 _add(c)
         if not targets:
             click.echo("  No newly detected hook connectors to add.")
@@ -9174,11 +9157,7 @@ def _restart_defense_gateway(
     action = "restarting" if was_running else "starting"
     click.echo(f"  defenseclaw-gateway: {action}...", nl=False)
 
-    if (
-        lifecycle_executable
-        and lifecycle_executable_requires_running
-        and not was_running
-    ):
+    if lifecycle_executable and lifecycle_executable_requires_running and not was_running:
         click.echo(" ✗ (verified running executable is no longer active)")
         return False
     search_path = child_env.get("PATH", os.defpath) if child_env is not None else None
@@ -10931,10 +10910,20 @@ def _resolve_bridge_bin(data_dir: str) -> str | None:
     return splunk_bridge_bin(data_dir)
 
 
+def _splunk_bridge_child_env() -> dict[str, str]:
+    """Return the bridge environment without gateway bearer credentials."""
+
+    env = os.environ.copy()
+    env.pop(_GATEWAY_TOKEN_ENV, None)
+    env.pop(_LEGACY_GATEWAY_TOKEN_ENV, None)
+    return env
+
+
 def _refresh_and_maybe_restart_splunk_bridge(
     data_dir: str,
     *,
     env_file: str | None = None,
+    child_env: dict[str, str] | None = None,
 ) -> RefreshResult:
     """Refresh the seeded Splunk bridge, stopping any running stack first.
 
@@ -10972,6 +10961,7 @@ def _refresh_and_maybe_restart_splunk_bridge(
                     text=True,
                     timeout=120,
                     check=False,
+                    env=(dict(child_env) if child_env is not None else _splunk_bridge_child_env()),
                 )
                 stopped = True
             except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
@@ -11025,8 +11015,13 @@ def _bootstrap_bridge(
     bundle is what gets brought back up.
     """
     env_file = _ensure_private_splunk_bridge_env(data_dir)
+    env = _splunk_bridge_child_env()
     if refresh_bundle:
-        _refresh_and_maybe_restart_splunk_bridge(data_dir, env_file=env_file)
+        _refresh_and_maybe_restart_splunk_bridge(
+            data_dir,
+            env_file=env_file,
+            child_env=env,
+        )
 
     bridge = _resolve_bridge_bin(data_dir)
     if not bridge:
@@ -11035,9 +11030,11 @@ def _bootstrap_bridge(
         return None
 
     click.echo("  Starting local Splunk (this takes ~2 minutes)...")
-    env = None
+    # The bridge has its own private env file and never needs the gateway
+    # bearer. Supplying the same explicit child environment to refresh/down
+    # and up prevents it (and docker/compose descendants) from inheriting the
+    # gateway credential.
     if s3_export:
-        env = os.environ.copy()
         env["S3_EXPORT_ENABLED"] = "true"
         if s3_bucket:
             env["S3_BUCKET"] = s3_bucket
@@ -11053,8 +11050,7 @@ def _bootstrap_bridge(
     result: subprocess.CompletedProcess[str] | None = None
     try:
         run_kwargs = {"capture_output": True, "text": True, "timeout": 300}
-        if env is not None:
-            run_kwargs["env"] = env
+        run_kwargs["env"] = env
         result = subprocess.run(
             [bridge, "up", "--env-file", env_file, "--output", "json"],
             **run_kwargs,
@@ -11456,6 +11452,7 @@ def _stop_bridge(data_dir: str) -> None:
             capture_output=True,
             text=True,
             timeout=60,
+            env=_splunk_bridge_child_env(),
         )
         click.echo("    Local Splunk container stopped")
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):

@@ -594,7 +594,8 @@ func TestAlertAcknowledgementTargetsUseExactEligibility(t *testing.T) {
 	for _, target := range targets {
 		targetIDs[target.AlertID] = target.ProjectionVersion == 0
 	}
-	if len(targets) != 2 || !targetIDs["eligible-alert"] || !targetIDs["v8-finding"] {
+	if len(targets) != 3 || !targetIDs["eligible-alert"] || !targetIDs["v8-finding"] ||
+		!targetIDs["v8-platform"] {
 		t.Fatalf("targets=%+v", targets)
 	}
 	alerts, err := store.ListAlerts(10)
@@ -671,6 +672,98 @@ func TestAlertAcknowledgementTargetsSupportExactAndBroadSelectors(t *testing.T) 
 	if len(injected) != 0 {
 		t.Fatalf("selector value changed SQL semantics: %+v", injected)
 	}
+}
+
+func TestAlertAcknowledgementTargetsMatchVisibleCanonicalAndLegacyAlerts(t *testing.T) {
+	store, err := NewStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`INSERT INTO audit_events (
+		id, timestamp, action, actor, details, severity, bucket, event_name,
+		payload_json, enforced
+	) VALUES
+		('canonical-deny', '2026-07-17T12:00:00Z', 'enforcement', 'gateway', '',
+		 'INFO', 'enforcement.action', 'action.applied',
+		 '{"defenseclaw.enforcement.effective_action":"deny"}', NULL),
+		('canonical-egress', '2026-07-17T12:00:01Z', 'egress', 'gateway', '',
+		 'INFO', 'network.egress', 'egress.decided',
+		 '{"defenseclaw.network.decision":"block"}', NULL),
+		('health-error', '2026-07-17T12:00:02Z', 'sink-failure', 'gateway', '',
+		 'ERROR', 'platform.health', 'destination.export_failed', '{}', NULL),
+		('canonical-allow', '2026-07-17T12:00:03Z', 'enforcement', 'gateway', '',
+		 'INFO', 'enforcement.action', 'action.applied',
+		 '{"defenseclaw.enforcement.effective_action":"allow"}', NULL),
+		('detection-only', '2026-07-17T12:00:04Z', 'scan-finding', 'scanner', '',
+		 'HIGH', 'security.finding', 'finding.observed',
+		 '{"defenseclaw.finding.tags":["secret","detection-only"]}', NULL),
+		('malformed-finding', '2026-07-17T12:00:04.5Z', 'scan-finding', 'scanner', '',
+		 'HIGH', 'security.finding', 'finding.observed', '{not-json', NULL),
+		('legacy-block', '2026-07-17T12:00:05Z', 'connector-hook', 'gateway',
+		 'connector=codex action=block mode=action severity=INFO',
+		 'INFO', NULL, NULL, NULL, 0),
+		('legacy-clean-high', '2026-07-17T12:00:06Z', 'connector-hook', 'gateway',
+		 'connector=codex action=allow mode=observe severity=CRITICAL',
+		 'CRITICAL', NULL, NULL, NULL, 0),
+		('legacy-unrelated-high', '2026-07-17T12:00:07Z', 'sidecar-start', 'gateway',
+		 'healthy', 'HIGH', NULL, NULL, NULL, NULL)`); err != nil {
+		t.Fatal(err)
+	}
+
+	want := map[string]bool{
+		"canonical-deny":    true,
+		"canonical-egress":  true,
+		"health-error":      true,
+		"malformed-finding": true,
+		"legacy-block":      true,
+	}
+	exact, err := store.SelectAlertAcknowledgementTargets(t.Context(), AlertAcknowledgementSelector{
+		AlertIDs: []string{
+			"canonical-deny", "canonical-egress", "health-error", "canonical-allow",
+			"detection-only", "malformed-finding", "legacy-block", "legacy-clean-high",
+			"legacy-unrelated-high",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(exact) != len(want) {
+		t.Fatalf("exact targets=%+v", exact)
+	}
+	for _, target := range exact {
+		if !want[target.AlertID] {
+			t.Fatalf("unexpected exact target=%+v", target)
+		}
+	}
+
+	broad, err := store.SelectAlertAcknowledgementTargets(t.Context(), AlertAcknowledgementSelector{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(broad) != len(want) {
+		t.Fatalf("broad targets=%+v", broad)
+	}
+	for _, target := range broad {
+		if !want[target.AlertID] {
+			t.Fatalf("unexpected broad target=%+v", target)
+		}
+	}
+
+	high, err := store.SelectAlertAcknowledgementTargets(t.Context(), AlertAcknowledgementSelector{
+		Severity: "HIGH",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(high) != 3 || high[0].AlertID != "canonical-deny" ||
+		high[1].AlertID != "legacy-block" || high[2].AlertID != "malformed-finding" {
+		t.Fatalf("HIGH targets=%+v", high)
+	}
+
 }
 
 func TestMigrationFromFreshDB(t *testing.T) {

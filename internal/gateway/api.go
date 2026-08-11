@@ -163,10 +163,16 @@ type APIServer struct {
 	// to atomically refresh the shared OPA engine used by the watcher.
 	policyReloader func() error
 
-	claudeCodeMu                      sync.Mutex
-	claudeCodeLastComponentScan       time.Time
-	codexMu                           sync.Mutex
-	codexLastComponentScan            time.Time
+	claudeCodeMu                sync.Mutex
+	claudeCodeLastComponentScan time.Time
+	codexMu                     sync.Mutex
+	codexLastComponentScan      time.Time
+	// codexAdditionalContextMu protects the bounded, process-local cache used
+	// only to suppress repeated in-chat Observe warnings. Canonical detection,
+	// audit, and notification emission happen before this cache is consulted.
+	codexAdditionalContextMu          sync.Mutex
+	codexAdditionalContextSeen        map[[sha256.Size]byte]time.Time
+	codexAdditionalContextOrder       []codexAdditionalContextEntry
 	rawTelemetryMu                    sync.RWMutex
 	rawTelemetryDedupe                *rawTelemetryDeduper
 	llmPromptMu                       sync.Mutex

@@ -18,8 +18,11 @@ package audit
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -131,11 +134,12 @@ func (l *Logger) runtimeV8Snapshot() RuntimeV8Emitter {
 }
 
 type runtimeV8Binding struct {
-	emitter        RuntimeV8Emitter
-	logBatch       RuntimeV8LogBatchEmitter
-	metricEmitter  RuntimeV8MetricEmitter
-	metricBatch    RuntimeV8MetricBatchEmitter
-	assetScanTrace RuntimeV8AssetScanTraceEmitter
+	emitter                     RuntimeV8Emitter
+	logBatch                    RuntimeV8LogBatchEmitter
+	metricEmitter               RuntimeV8MetricEmitter
+	metricBatch                 RuntimeV8MetricBatchEmitter
+	assetScanTrace              RuntimeV8AssetScanTraceEmitter
+	findingContentFingerprinter RuntimeV8FindingContentFingerprinter
 }
 
 // runtimeV8BindingSnapshot returns the log and generated-metric capabilities
@@ -160,6 +164,9 @@ func (l *Logger) runtimeV8BindingSnapshot() runtimeV8Binding {
 	}
 	if assetScanTrace, ok := emitter.(RuntimeV8AssetScanTraceEmitter); ok {
 		binding.assetScanTrace = assetScanTrace
+	}
+	if fingerprinter, ok := emitter.(RuntimeV8FindingContentFingerprinter); ok {
+		binding.findingContentFingerprinter = fingerprinter
 	}
 	l.mu.RUnlock()
 	return binding
@@ -243,11 +250,22 @@ func (l *Logger) LogScanWithCorrelation(
 	// inventing a workflow status or invoking a secondary model.
 	for index := range result.Findings {
 		finding := &result.Findings[index]
-		if finding.EvidenceSummary != "" {
-			continue
+		if finding.EvidenceSummary == "" {
+			if summary, present := scanFindingV8EvidenceSummary(*finding, result).Get(); present {
+				finding.EvidenceSummary = summary
+			}
 		}
-		if summary, present := scanFindingV8EvidenceSummary(*finding, result).Get(); present {
-			finding.EvidenceSummary = summary
+		fingerprintPersistedFindingEvidence(finding, binding.findingContentFingerprinter)
+		// This is the final in-memory boundary before forensic persistence
+		// and generated audit projection. Literal credentials and executable
+		// trust directives never cross it in cleartext, even when a producer
+		// omitted its dedicated evidence field.
+		if isLiteralCredentialFinding(*finding) {
+			redactPersistedCredentialFinding(finding)
+		} else if isPIIFinding(*finding) {
+			redactPersistedPIIFinding(finding)
+		} else {
+			redactPersistedTrustExploitFinding(finding)
 		}
 	}
 	runID := corr.RunID
@@ -279,6 +297,331 @@ func (l *Logger) LogScanWithCorrelation(
 		return err
 	}
 	return l.emitScanV8(ctx, binding, result, scanID, verdict, corr)
+}
+
+// fingerprintPersistedFindingEvidence replaces every producer-supplied
+// content fingerprint with the installation-keyed hash-v1 evidence token. A
+// missing capability, invalid evidence, malformed output, or hashing failure
+// clears the field so an unkeyed SHA prefix can never cross persistence.
+func fingerprintPersistedFindingEvidence(
+	finding *scanner.Finding,
+	fingerprinter RuntimeV8FindingContentFingerprinter,
+) {
+	if finding == nil {
+		return
+	}
+	finding.ContentFingerprint = ""
+	if strings.TrimSpace(finding.EvidenceSummary) == "" || fingerprinter == nil {
+		return
+	}
+	fingerprint, err := fingerprinter.FingerprintRuntimeV8FindingContent(finding.EvidenceSummary)
+	if err != nil || !isCanonicalContentFingerprint(fingerprint) {
+		return
+	}
+	finding.ContentFingerprint = fingerprint
+}
+
+// redactPersistedCredentialFinding closes the persistence boundary for
+// literal secret findings. Detection needs a stable fingerprint to correlate
+// the same value across turns, but no free-form value field from a secret
+// finding may carry that credential into the forensic database, raw scan JSON,
+// or canonical audit record. Catalog identity, severity, correlation, and the
+// original-value fingerprint remain intact.
+const redactedSecretFindingTitle = "Secret finding"
+
+func redactPersistedCredentialFinding(finding *scanner.Finding) {
+	if finding == nil || !isLiteralCredentialFinding(*finding) {
+		return
+	}
+	if !isCanonicalContentFingerprint(finding.ContentFingerprint) {
+		// The common Logger boundary replaces producer-supplied fingerprints
+		// with keyed tokens. Retain only that canonical representation when this
+		// helper is called directly or evidence hashing failed closed.
+		finding.ContentFingerprint = ""
+	}
+	finding.EvidenceSummary = redactCredentialFindingValue(finding.EvidenceSummary)
+	finding.Title = redactedSecretFindingTitle
+	finding.Description = redactCredentialFindingValue(finding.Description)
+	finding.Location = redactCredentialFindingValue(finding.Location)
+	finding.Remediation = redactCredentialFindingValue(finding.Remediation)
+	finding.ExternalEndpoint = redactCredentialFindingValue(finding.ExternalEndpoint)
+	// Tags are producer supplied and therefore cannot be retained verbatim at
+	// this boundary. Keep only stable semantic labels so downstream enrichment
+	// still recognizes the finding as a secret without persisting source text.
+	detectionOnly := hasExactFindingTag(finding.Tags, scanner.FindingTagDetectionOnly)
+	finding.Tags = []string{"secret"}
+	if detectionOnly {
+		finding.Tags = append(finding.Tags, scanner.FindingTagDetectionOnly)
+	}
+	finding.Tags = append(finding.Tags, "redacted")
+	redactFindingDecisionPath(finding)
+}
+
+func isCanonicalContentFingerprint(value string) bool {
+	value = strings.TrimSpace(value)
+	if len(value) != 8 || value != strings.ToLower(value) {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
+}
+
+// redactPersistedTrustExploitFinding neutralizes prompt-injection material at
+// the common forensic/canonical persistence boundary. Detection identity and
+// correlation metadata remain useful, but replaying an alert or its database
+// evidence cannot submit the original directive to another model turn.
+const redactedTrustFindingTitle = "Trust exploit finding"
+
+func redactPersistedTrustExploitFinding(finding *scanner.Finding) {
+	if finding == nil || !isTrustExploitFinding(*finding) {
+		return
+	}
+	if !isCanonicalContentFingerprint(finding.ContentFingerprint) {
+		finding.ContentFingerprint = ""
+	}
+	// Titles are producer supplied on generic scanner inputs, and several
+	// catalog titles necessarily resemble the directive they detected. Use one
+	// stable, inert label while retaining rule_id as the precise identity.
+	finding.Title = redactedTrustFindingTitle
+	finding.EvidenceSummary = redactCredentialFindingValue(finding.EvidenceSummary)
+	finding.Description = redactCredentialFindingValue(finding.Description)
+	finding.Location = redactCredentialFindingValue(finding.Location)
+	finding.Remediation = redactCredentialFindingValue(finding.Remediation)
+	finding.ExternalEndpoint = redactCredentialFindingValue(finding.ExternalEndpoint)
+	finding.Tags = stableRedactedTrustTags(finding.Tags)
+	redactFindingDecisionPath(finding)
+}
+
+func isTrustExploitFinding(finding scanner.Finding) bool {
+	if hasFindingIDPrefix(finding.RuleID, "CORR-") || hasFindingIDPrefix(finding.ID, "CORR-") {
+		return false
+	}
+	if hasFindingIDPrefix(finding.RuleID, "TRUST-") || hasFindingIDPrefix(finding.ID, "TRUST-") ||
+		hasFindingIDPrefix(finding.RuleID, "LP-INJ-") || hasFindingIDPrefix(finding.ID, "LP-INJ-") ||
+		hasFindingIDPrefix(finding.RuleID, "JUDGE-ADJ-INJECTION") || hasFindingIDPrefix(finding.ID, "JUDGE-ADJ-INJECTION") ||
+		isTrustExploitLabel(finding.Category) {
+		return true
+	}
+	for _, tag := range finding.Tags {
+		if isTrustExploitLabel(tag) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasFindingIDPrefix(value, prefix string) bool {
+	return strings.HasPrefix(strings.ToUpper(strings.TrimSpace(value)), prefix)
+}
+
+func isTrustExploitLabel(value string) bool {
+	value = strings.ToLower(strings.TrimSpace(value))
+	return value == "prompt-injection" || value == "trust-exploit"
+}
+
+func stableRedactedTrustTags(tags []string) []string {
+	out := make([]string, 0, len(tags)+1)
+	seen := make(map[string]struct{}, len(tags)+1)
+	for _, tag := range tags {
+		canonical := strings.ToLower(strings.TrimSpace(tag))
+		if !isStableTrustFindingTag(canonical) {
+			continue
+		}
+		if _, duplicate := seen[canonical]; duplicate {
+			continue
+		}
+		seen[canonical] = struct{}{}
+		out = append(out, canonical)
+	}
+	if _, present := seen["redacted"]; !present {
+		out = append(out, "redacted")
+	}
+	return out
+}
+
+func isStableTrustFindingTag(value string) bool {
+	switch value {
+	case "prompt-injection", "trust-exploit", "obfuscation",
+		scanner.FindingTagDetectionOnly, "redacted":
+		return true
+	default:
+		return false
+	}
+}
+
+func hasExactFindingTag(tags []string, want string) bool {
+	for _, tag := range tags {
+		if strings.EqualFold(strings.TrimSpace(tag), want) {
+			return true
+		}
+	}
+	return false
+}
+
+func redactFindingDecisionPath(finding *scanner.Finding) {
+	if finding == nil || len(finding.DecisionPath) == 0 {
+		return
+	}
+	var existing map[string]string
+	if json.Unmarshal(finding.DecisionPath, &existing) == nil && len(existing) == 1 &&
+		isSensitiveFindingRedactionPlaceholder(existing["redacted_evidence"]) {
+		return
+	}
+	placeholder := redactCredentialFindingValue(string(finding.DecisionPath))
+	finding.DecisionPath, _ = json.Marshal(map[string]string{"redacted_evidence": placeholder})
+}
+
+func redactCredentialFindingValue(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return value
+	}
+	if isSensitiveFindingRedactionPlaceholder(value) {
+		return value
+	}
+	return fmt.Sprintf("<redacted-sensitive len=%d>", len(value))
+}
+
+func isSensitiveFindingRedactionPlaceholder(value string) bool {
+	const prefix = "<redacted-sensitive len="
+	if !strings.HasPrefix(value, prefix) || !strings.HasSuffix(value, ">") {
+		return false
+	}
+	digits := strings.TrimSuffix(strings.TrimPrefix(value, prefix), ">")
+	length, err := strconv.Atoi(digits)
+	return err == nil && length >= 0 && value == fmt.Sprintf("%s%d>", prefix, length)
+}
+
+func isLiteralCredentialFinding(finding scanner.Finding) bool {
+	category := strings.TrimSpace(finding.Category)
+	if hasSecretFindingIDPrefix(finding.RuleID) || hasSecretFindingIDPrefix(finding.ID) ||
+		strings.EqualFold(category, "secret") || strings.EqualFold(category, "cred") ||
+		strings.EqualFold(category, "credential") || strings.EqualFold(category, "credential-leak") {
+		return true
+	}
+	for _, tag := range finding.Tags {
+		canonical := strings.TrimSpace(tag)
+		if strings.EqualFold(canonical, "secret") || strings.EqualFold(canonical, "credential") ||
+			strings.EqualFold(canonical, "credential-leak") {
+			return true
+		}
+	}
+	return false
+}
+
+func hasSecretFindingIDPrefix(value string) bool {
+	value = strings.ToUpper(strings.TrimSpace(value))
+	return strings.HasPrefix(value, "SEC-") || strings.HasPrefix(value, "CS-SEC-") ||
+		strings.HasPrefix(value, "SECRET-") || strings.HasPrefix(value, "JSON-SEC-") ||
+		strings.HasPrefix(value, "CRED-") ||
+		strings.HasPrefix(value, "CG-CRED-") || strings.HasPrefix(value, "LP-SECRET-")
+}
+
+// redactPersistedPIIFinding applies the same last-mile protection as literal
+// credentials to personally identifying data. Detector identity, severity,
+// and correlation-envelope fields remain queryable, while raw values,
+// unkeyed fingerprints, and producer-supplied labels cannot cross into SQLite,
+// raw_json, or generated canonical records.
+const redactedPIIFindingTitle = "PII finding"
+
+func redactPersistedPIIFinding(finding *scanner.Finding) {
+	if finding == nil || !isPIIFinding(*finding) {
+		return
+	}
+	// Common identifiers have small enumerable spaces. Preserve only the
+	// installation-keyed token installed by the common Logger boundary; an
+	// untrusted or malformed producer value fails closed.
+	if !isCanonicalContentFingerprint(finding.ContentFingerprint) {
+		finding.ContentFingerprint = ""
+	}
+	finding.Title = redactedPIIFindingTitle
+	finding.EvidenceSummary = redactPIIFindingValue(finding.EvidenceSummary)
+	finding.Description = redactPIIFindingValue(finding.Description)
+	finding.Location = redactPIIFindingValue(finding.Location)
+	finding.Remediation = redactPIIFindingValue(finding.Remediation)
+	finding.ExternalEndpoint = redactPIIFindingValue(finding.ExternalEndpoint)
+	detectionOnly := hasExactFindingTag(finding.Tags, scanner.FindingTagDetectionOnly)
+	finding.Tags = []string{"pii"}
+	if detectionOnly {
+		finding.Tags = append(finding.Tags, scanner.FindingTagDetectionOnly)
+	}
+	finding.Tags = append(finding.Tags, "redacted")
+	redactPIIFindingDecisionPath(finding)
+}
+
+func redactPIIFindingValue(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return value
+	}
+	if isPIIRedactionPlaceholder(value) {
+		return value
+	}
+	return fmt.Sprintf("<redacted-pii len=%d>", len(value))
+}
+
+func isPIIRedactionPlaceholder(value string) bool {
+	const prefix = "<redacted-pii len="
+	if !strings.HasPrefix(value, prefix) || !strings.HasSuffix(value, ">") {
+		return false
+	}
+	digits := strings.TrimSuffix(strings.TrimPrefix(value, prefix), ">")
+	length, err := strconv.Atoi(digits)
+	return err == nil && length >= 0 && value == fmt.Sprintf("%s%d>", prefix, length)
+}
+
+func redactPIIFindingDecisionPath(finding *scanner.Finding) {
+	if finding == nil || len(finding.DecisionPath) == 0 {
+		return
+	}
+	var existing map[string]string
+	if json.Unmarshal(finding.DecisionPath, &existing) == nil && len(existing) == 1 &&
+		isPIIRedactionPlaceholder(existing["redacted_pii"]) {
+		return
+	}
+	placeholder := redactPIIFindingValue(string(finding.DecisionPath))
+	finding.DecisionPath, _ = json.Marshal(map[string]string{"redacted_pii": placeholder})
+}
+
+func isPIIFinding(finding scanner.Finding) bool {
+	if hasPIIFindingID(finding.RuleID) || hasPIIFindingID(finding.ID) ||
+		isPIIFindingLabel(finding.Category) {
+		return true
+	}
+	for _, tag := range finding.Tags {
+		if isPIIFindingLabel(tag) {
+			return true
+		}
+	}
+	return false
+}
+
+func hasPIIFindingID(value string) bool {
+	value = strings.ToUpper(strings.TrimSpace(value))
+	return strings.HasPrefix(value, "PII-") || strings.HasPrefix(value, "CS-PII-") ||
+		strings.HasPrefix(value, "LP-PII-") || strings.HasPrefix(value, "JUDGE-PII-") ||
+		strings.HasPrefix(value, "JUDGE-ADJ-PII") ||
+		isKnownEnterprisePIIFindingID(value)
+}
+
+func isPIIFindingLabel(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "pii", "pii-exposure":
+		return true
+	default:
+		return false
+	}
+}
+
+func isKnownEnterprisePIIFindingID(value string) bool {
+	switch strings.ToUpper(strings.TrimSpace(value)) {
+	case "ENT-BULK-SSN", "ENT-BULK-SSN-NOHYPHEN",
+		"ENT-CC-VISA", "ENT-CC-MC", "ENT-CC-AMEX", "ENT-CC-DISCOVER",
+		"ENT-IBAN", "ENT-US-PHONE", "ENT-EMAIL-BULK", "ENT-PASSPORT-US",
+		"ENT-DL-CA", "ENT-MEDICAL-RECORD", "ENT-DOB-PATTERN", "ENT-NHS-NUMBER",
+		"ENT-BULK-CSV-PII", "ENT-BULK-JSON-PII":
+		return true
+	default:
+		return false
+	}
 }
 
 // LogInspectFindingsWithCorrelation is the canonical live runtime-inspection

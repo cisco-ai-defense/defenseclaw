@@ -461,21 +461,16 @@ func TestStore_GetCounts_IncludesBlockedEgress(t *testing.T) {
 	}
 }
 
-// TestStore_GetCounts_AlertsIncludesConnectorHookEnvelopeSeverity is the
-// regression pin for the IPC ActiveAlerts stat surface. Connector-hook
-// rows land with severity=INFO on the column (a deliberate
-// noise-reduction choice in gateway.logConnectorHookAuditEnvelope — every
-// tool call produces one) while the real verdict severity lives on the
-// structured_json envelope. Counts.Alerts feeds the IPC GetStatsSnapshot
-// ActiveAlerts field; before this branch was added the counter stayed at
-// zero in managed_enterprise, where hook inspections are the sole
-// enforcement path.
-func TestStore_GetCounts_AlertsIncludesConnectorHookEnvelopeSeverity(t *testing.T) {
+// TestStore_GetCounts_AlertsUseActiveActionableSemantics pins the IPC
+// ActiveAlerts surface to the same semantic queue operators see and can
+// acknowledge. High-severity audit telemetry alone is not an alert.
+func TestStore_GetCounts_AlertsUseActiveActionableSemantics(t *testing.T) {
 	store, cleanup := newTestStore(t)
 	defer cleanup()
 
-	// Non-hook row with a real severity — counts via the column branch.
+	// Unrelated high-severity telemetry must not inflate ActiveAlerts.
 	if err := store.LogEvent(Event{
+		ID:       "unrelated-high",
 		Action:   "guardrail-inspection",
 		Target:   "gpt-5",
 		Severity: "HIGH",
@@ -497,12 +492,15 @@ func TestStore_GetCounts_AlertsIncludesConnectorHookEnvelopeSeverity(t *testing.
 		t.Fatalf("LogEvent hook NONE: %v", err)
 	}
 
-	// Real block from a hook: column=INFO, envelope severity=HIGH.
-	// This is the row that used to be invisible; must now count.
+	// Real blocks from hooks remain actionable even though their outer
+	// severity is INFO.
 	if err := store.LogEvent(Event{
+		ID:       "hook-high",
 		Action:   "connector-hook",
 		Target:   "PreToolUse",
 		Severity: "INFO",
+		Details:  "connector=codex action=block mode=action severity=HIGH",
+		Enforced: true,
 		Structured: map[string]any{
 			"schema":   "defenseclaw.hook.v1",
 			"severity": "HIGH",
@@ -512,11 +510,13 @@ func TestStore_GetCounts_AlertsIncludesConnectorHookEnvelopeSeverity(t *testing.
 		t.Fatalf("LogEvent hook HIGH: %v", err)
 	}
 
-	// Critical hook row for good measure.
 	if err := store.LogEvent(Event{
+		ID:       "hook-critical",
 		Action:   "connector-hook",
 		Target:   "PreToolUse",
 		Severity: "INFO",
+		Details:  "connector=codex action=block mode=action severity=CRITICAL",
+		Enforced: true,
 		Structured: map[string]any{
 			"schema":   "defenseclaw.hook.v1",
 			"severity": "CRITICAL",
@@ -525,15 +525,49 @@ func TestStore_GetCounts_AlertsIncludesConnectorHookEnvelopeSeverity(t *testing.
 	}); err != nil {
 		t.Fatalf("LogEvent hook CRITICAL: %v", err)
 	}
+	if err := store.LogEvent(Event{
+		ID: "legacy-finding", Action: "scan-finding", Target: "skill:test", Severity: "HIGH",
+	}); err != nil {
+		t.Fatalf("LogEvent legacy finding: %v", err)
+	}
+	if err := store.LogEvent(Event{
+		ID: "reviewed-finding", Action: "scan-finding", Target: "skill:reviewed", Severity: "CRITICAL",
+	}); err != nil {
+		t.Fatalf("LogEvent reviewed finding: %v", err)
+	}
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := store.db.Exec(`INSERT INTO alert_acknowledgement_projection (
+		alert_id, disposition, actor, disposition_at, projection_version,
+		source, source_event_id, updated_at
+	) VALUES ('reviewed-finding', 'dismissed', 'test', ?, 1, 'modern',
+		'receipt-reviewed', ?)`, stamp, stamp); err != nil {
+		t.Fatalf("insert reviewed projection: %v", err)
+	}
+	if _, err := store.db.Exec(`INSERT INTO audit_events (
+		id, timestamp, action, actor, details, severity, bucket, event_name,
+		payload_json
+	) VALUES
+		('canonical-deny', ?, 'enforcement', 'gateway', '', 'INFO',
+		 'enforcement.action', 'action.applied',
+		 '{"defenseclaw.enforcement.effective_action":"deny"}'),
+		('health-error', ?, 'sink-failure', 'gateway', '', 'ERROR',
+		 'platform.health', 'destination.export_failed', '{}'),
+		('detection-only', ?, 'scan-finding', 'scanner', '', 'HIGH',
+		 'security.finding', 'finding.observed',
+		 '{"defenseclaw.finding.tags":["secret","detection-only"]}')`,
+		stamp, stamp, stamp); err != nil {
+		t.Fatalf("insert canonical alert fixtures: %v", err)
+	}
 
 	counts, err := store.GetCounts()
 	if err != nil {
 		t.Fatalf("GetCounts: %v", err)
 	}
-	// Expected: 1 (guardrail HIGH via column) + 2 (hook HIGH/CRITICAL via
-	// JSON) = 3. The benign hook row is excluded.
-	if counts.Alerts != 3 {
-		t.Errorf("Alerts = %d, want 3 (column-severity + hook envelope-severity)", counts.Alerts)
+	// Two enforced hooks, one legacy finding, one canonical deny, and one
+	// important health failure. Clean/unrelated/detection-only/reviewed rows
+	// are excluded.
+	if counts.Alerts != 5 {
+		t.Errorf("Alerts = %d, want 5 active actionable alerts", counts.Alerts)
 	}
 }
 

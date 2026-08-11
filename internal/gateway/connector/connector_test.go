@@ -4093,14 +4093,21 @@ func TestCodex_Setup_WiresNotifyBridge(t *testing.T) {
 			t.Fatalf("notify-bridge.sh missing — agent-turn-complete telemetry won't fire: %v", err)
 		}
 		if info.Mode().Perm() != 0o700 {
-			t.Errorf("notify-bridge.sh mode = %v, want 0o700 (operator-only — token is baked in)", info.Mode().Perm())
+			t.Errorf("notify-bridge.sh mode = %v, want 0o700 (operator-only managed executable)", info.Mode().Perm())
 		}
 		bridge, err := os.ReadFile(bridgePath)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(string(bridge), "test-token-codex-notify") {
-			t.Error("bridge missing baked-in APIToken — receiver would reject every call as unauthenticated")
+		if strings.Contains(string(bridge), "test-token-codex-notify") {
+			t.Error("bridge embeds APIToken instead of loading the managed connector-scoped token sidecar")
+		}
+		tokenPath, err := HookAPITokenFilePath(dir, "codex")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(bridge), shellSingleQuote(tokenPath)) {
+			t.Errorf("bridge missing connector-scoped token sidecar path %q", tokenPath)
 		}
 		if !strings.Contains(string(bridge), "127.0.0.1:18970/api/v1/codex/notify") {
 			t.Errorf("bridge missing gateway notify endpoint URL; body:\n%s", bridge)
@@ -6809,11 +6816,11 @@ func TestConnectorScopedHookTokenOverridesGenericEnv(t *testing.T) {
 
 	out := runHookAndReturnCurlArgs(t, filepath.Join(dir, "codex-hook.sh"),
 		map[string]string{"DEFENSECLAW_GATEWAY_TOKEN": "generic-env"})
-	if !containsAuthBearer(out, "scoped-token") {
-		t.Errorf("connector-scoped token should override inherited generic env token; got curl args:\n%s", out)
+	if strings.Contains(out, "scoped-token") {
+		t.Errorf("connector-scoped token leaked into curl argv:\n%s", out)
 	}
-	if containsAuthBearer(out, "generic-env") {
-		t.Errorf("hook leaked inherited generic env token instead of scoped token; got curl args:\n%s", out)
+	if strings.Contains(out, "generic-env") {
+		t.Errorf("hook leaked inherited generic env token into curl argv:\n%s", out)
 	}
 }
 

@@ -2093,20 +2093,18 @@ func parseAdjudicationResponse(raw, category string) *ScanVerdict {
 		return allowVerdict("llm-judge-adjudicate")
 	}
 
-	var findings []string
-	var reasons []string
+	confirmed := false
 	for _, f := range result.Findings {
 		if f.Verdict == "true_positive" {
-			findings = append(findings, fmt.Sprintf("JUDGE-ADJ-%s:%s", strings.ToUpper(category), f.Pattern))
-			if f.Reasoning != "" {
-				reasons = append(reasons, f.Reasoning)
-			}
+			confirmed = true
+			break
 		}
 	}
 
-	if len(findings) == 0 {
+	if !confirmed {
 		return allowVerdict("llm-judge-adjudicate")
 	}
+	findingID, reason := stableAdjudicationFindingIdentity(category)
 
 	severity := result.Severity
 	if severity == "" || severity == "NONE" {
@@ -2121,9 +2119,23 @@ func parseAdjudicationResponse(raw, category string) *ScanVerdict {
 	return &ScanVerdict{
 		Action:   action,
 		Severity: severity,
-		Reason:   "judge-adjudicate-" + category + ": " + strings.Join(reasons, "; "),
-		Findings: findings,
+		Reason:   reason,
+		Findings: []string{findingID},
 		Scanner:  "llm-judge-adjudicate",
+	}
+}
+
+func stableAdjudicationFindingIdentity(category string) (findingID, reason string) {
+	switch strings.ToLower(strings.TrimSpace(category)) {
+	case "pii":
+		return "JUDGE-ADJ-PII", "judge-adjudicate-pii"
+	case "exfil":
+		return "JUDGE-ADJ-EXFIL", "judge-adjudicate-exfil"
+	default:
+		// The only other supported adjudication lane is injection. A static
+		// fallback prevents an unexpected caller value from entering an emitted
+		// finding identity or live hook reason.
+		return "JUDGE-ADJ-INJECTION", "judge-adjudicate-injection"
 	}
 }
 

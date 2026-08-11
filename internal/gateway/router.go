@@ -687,8 +687,16 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 				msg.Model, msg.Provider, promptTokens, completionTokens)
 		}
 
+		// Without a tracker, session key, or stable occurrence identity we
+		// preserve the historical best-effort prompt scan. When identity is
+		// available, RecordOccurrence makes freshness authoritative for both
+		// the per-message scan and the multi-turn accumulator.
+		contextOccurrenceRecorded := true
 		if r.contextTracker != nil && envelope.SessionKey != "" && contentStr != "" {
-			r.contextTracker.Record(envelope.SessionKey, msg.Role, contentStr)
+			contextOccurrenceRecorded = r.contextTracker.RecordOccurrence(
+				envelope.SessionKey, msg.Role, contentStr,
+				envelope.MessageID, envelope.MessageSeq,
+			)
 		}
 
 		// Best-effort prompt-direction guardrail scan for inbound user
@@ -700,13 +708,14 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 		// (e.g. OpenClaw shelling out to a separate CLI subprocess
 		// whose fetch is not monkey-patched) are recorded as canonical
 		// prompt events but never judged.
-		if msg.Role == "user" && contentStr != "" {
+		if msg.Role == "user" && contentStr != "" && contextOccurrenceRecorded {
 			r.scanInboundPrompt(envelope.SessionKey, envelope.MessageID, msg.Model, contentStr)
 		}
 
 		// managed_enterprise: multi-turn injection detection is a local
 		// heuristic — disabled so AID stays the sole decision-maker.
-		if !ManagedEnterpriseActive() && msg.Role == "user" && r.contextTracker != nil && envelope.SessionKey != "" {
+		if !ManagedEnterpriseActive() && msg.Role == "user" && contextOccurrenceRecorded &&
+			r.contextTracker != nil && envelope.SessionKey != "" {
 			if r.contextTracker.HasRepeatedInjection(envelope.SessionKey, 3) {
 				r.logStreamAction(envelope.SessionKey, string(audit.ActionGatewayMultiTurnInjection), envelope.SessionKey,
 					"repeated injection patterns detected across multiple user turns")

@@ -32,6 +32,11 @@ type NormalizedFinding struct {
 	Severity    string  `json:"severity"`
 	Title       string  `json:"title"`
 	Confidence  float64 `json:"confidence,omitempty"`
+	// Evidence retains the source-backed local match until the audit logger's
+	// persistence boundary can classify and redact it and derive an
+	// installation-keyed correlation fingerprint. It must never become part of
+	// a normalized identity or be serialized as normalizer metadata.
+	Evidence string `json:"-"`
 }
 
 // Category constants for normalized findings.
@@ -45,6 +50,10 @@ const (
 	CatSystemFile      = "system-file-access"
 	CatSSRF            = "ssrf"
 	CatGeneral         = "general"
+
+	localCredentialFindingTitle = "Local credential pattern match"
+	localInjectionFindingTitle  = "Local prompt injection pattern match"
+	localPIIFindingTitle        = "Local PII pattern match"
 )
 
 // NormalizeScanVerdict converts a ScanVerdict with raw findings into a
@@ -103,14 +112,50 @@ func NormalizeRuleFindings(findings []RuleFinding, source string) []NormalizedFi
 //   - Free-form strings like "pii-data:123-45-6789" or "ignore previous"
 func normalizeFindingString(raw, source, verdictSeverity string) NormalizedFinding {
 	nf := NormalizedFinding{
-		Source:     source,
-		OriginalID: raw,
-		Severity:   normalizeSeverity(verdictSeverity),
+		Source:   source,
+		Severity: normalizeSeverity(verdictSeverity),
 	}
 
 	// Split "RULE-ID:Title" format
 	parts := strings.SplitN(raw, ":", 2)
-	id := parts[0]
+	id := strings.TrimSpace(parts[0])
+	structuredTitle := ""
+	if len(parts) > 1 {
+		structuredTitle = strings.TrimSpace(parts[1])
+	}
+	localPatternSource := sourceIncludesScanner(source, "local-pattern")
+	// Local-pattern findings are raw matched substrings, not trusted catalog
+	// identities. Classify them before accepting any canonical-looking prefix;
+	// otherwise a directive beginning with TRUST-/LP-/PII- could become its own
+	// persisted RuleID.
+	if localPatternSource {
+		if activeLocalPatternRuleIdentity(id, structuredTitle) {
+			canonicalID := canonicalIDFromRuleID(id)
+			nf.CanonicalID = canonicalID
+			nf.OriginalID = id
+			nf.Category = categoryFromFindingID(canonicalID)
+			nf.Title = structuredTitle
+			return nf
+		}
+		if local, ok := normalizeSensitiveLocalPatternFinding(raw, source, nf.Severity); ok {
+			return local
+		}
+		return normalizeUntrustedLocalPatternFinding(raw, id, source, nf.Severity)
+	}
+	// Catalog and scanner rule IDs are already inert identities. Keep their
+	// precise rule metadata instead of mistaking a static title for a local raw
+	// pattern match. OriginalID deliberately excludes the free-form title.
+	if canonicalID, ok := canonicalStructuredRuleID(id); ok {
+		nf.CanonicalID = canonicalID
+		nf.OriginalID = id
+		nf.Category = categoryFromFindingID(canonicalID)
+		if len(parts) > 1 {
+			nf.Title = strings.TrimSpace(parts[1])
+		}
+		return nf
+	}
+
+	nf.OriginalID = raw
 	if len(parts) > 1 {
 		nf.Title = parts[1]
 	}
@@ -121,13 +166,236 @@ func normalizeFindingString(raw, source, verdictSeverity string) NormalizedFindi
 	return nf
 }
 
+func activeLocalPatternRuleIdentity(ruleID, title string) bool {
+	ruleID = strings.TrimSpace(ruleID)
+	title = strings.TrimSpace(title)
+	if ruleID == "" || title == "" {
+		return false
+	}
+	ruleCategoriesMu.RLock()
+	defer ruleCategoriesMu.RUnlock()
+	for _, category := range allRuleCategories {
+		for _, rule := range category.Rules {
+			if strings.EqualFold(strings.TrimSpace(rule.ID), ruleID) &&
+				strings.TrimSpace(rule.Title) == title {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func normalizeUntrustedLocalPatternFinding(raw, apparentID, source, severity string) NormalizedFinding {
+	upperID := strings.ToUpper(strings.TrimSpace(apparentID))
+	switch {
+	case strings.HasPrefix(upperID, "TRUST-"), strings.HasPrefix(upperID, "INJ-"),
+		strings.HasPrefix(upperID, "OBFUSC-"), strings.HasPrefix(upperID, "LP-INJ-"):
+		return normalizedSensitiveLocalFinding(
+			"LP-INJ-MATCH", CatPromptInjection, localInjectionFindingTitle, raw, source, severity,
+		)
+	case strings.HasPrefix(upperID, "SEC-"), strings.HasPrefix(upperID, "CS-SEC-"),
+		strings.HasPrefix(upperID, "SECRET-"), strings.HasPrefix(upperID, "JSON-SEC-"),
+		strings.HasPrefix(upperID, "CRED-"), strings.HasPrefix(upperID, "LP-SECRET-"):
+		return normalizedSensitiveLocalFinding(
+			"LP-SECRET-MATCH", CatCredentialLeak, localCredentialFindingTitle, raw, source, severity,
+		)
+	case strings.HasPrefix(upperID, "PII-"), strings.HasPrefix(upperID, "CS-PII-"),
+		strings.HasPrefix(upperID, "LP-PII-"):
+		return normalizedSensitiveLocalFinding(
+			"LP-PII-DATA", CatPIIExposure, localPIIFindingTitle, raw, source, severity,
+		)
+	}
+
+	// Preserve only fixed local classifications whose identities do not include
+	// source bytes. Everything else receives a generic stable ID and keeps the
+	// raw match solely in the audit-redaction evidence channel.
+	canonicalID := canonicalIDFromRuleID(raw)
+	switch canonicalID {
+	case "LP-INJ-IGNORE", "LP-INJ-JAILBREAK":
+		return normalizedSensitiveLocalFinding(
+			canonicalID, CatPromptInjection, localInjectionFindingTitle, raw, source, severity,
+		)
+	case "LP-SECRET-MATCH":
+		return normalizedSensitiveLocalFinding(
+			canonicalID, CatCredentialLeak, localCredentialFindingTitle, raw, source, severity,
+		)
+	case "LP-SYSTEM-FILE":
+		return normalizedSensitiveLocalFinding(
+			canonicalID, CatSystemFile, "Local system file pattern match", raw, source, severity,
+		)
+	case "LP-EXFIL":
+		return normalizedSensitiveLocalFinding(
+			canonicalID, CatDataExfil, "Local exfiltration pattern match", raw, source, severity,
+		)
+	default:
+		return normalizedSensitiveLocalFinding(
+			"LP-MATCH", CatGeneral, "Local pattern match", raw, source, severity,
+		)
+	}
+}
+
+func sourceIncludesScanner(source, scannerName string) bool {
+	for _, candidate := range strings.Split(source, "+") {
+		if strings.EqualFold(strings.TrimSpace(candidate), scannerName) {
+			return true
+		}
+	}
+	return false
+}
+
+func canonicalStructuredRuleID(ruleID string) (string, bool) {
+	trimmed := strings.TrimSpace(ruleID)
+	// These are local scanner framing labels whose suffix is the matched value,
+	// not catalog rule IDs. They must flow through sensitive-value handling.
+	switch strings.ToLower(trimmed) {
+	case "pii-data", "pii-request":
+		return "", false
+	}
+	if canonical, ok := canonicalDottedRuleID(trimmed); ok {
+		return canonical, true
+	}
+	upper := strings.ToUpper(trimmed)
+	for _, prefix := range []string{
+		"SEC-", "CS-SEC-", "SECRET-", "JSON-SEC-", "CRED-",
+		"CMD-", "PATH-", "C2-", "COG-", "TRUST-", "INJ-", "OBFUSC-",
+		"PII-", "CS-PII-", "ENT-", "JUDGE-", "LP-",
+	} {
+		if strings.HasPrefix(upper, prefix) {
+			return canonicalIDFromRuleID(trimmed), true
+		}
+	}
+	if strings.HasPrefix(upper, "CISCO-") || strings.HasPrefix(upper, "AID-") {
+		return canonicalIDFromRuleID(trimmed), true
+	}
+	return "", false
+}
+
+func normalizeSensitiveLocalPatternFinding(raw, source, severity string) (NormalizedFinding, bool) {
+	trimmed := strings.TrimSpace(raw)
+	lower := strings.ToLower(trimmed)
+
+	if strings.HasPrefix(lower, "pii-data:") {
+		value := strings.TrimSpace(trimmed[len("pii-data:"):])
+		value = strings.TrimSpace(strings.TrimPrefix(value, "[normalized] "))
+		if !acceptedLocalPIIMatch(value) {
+			return NormalizedFinding{}, false
+		}
+		return normalizedSensitiveLocalFinding(
+			"LP-PII-DATA", CatPIIExposure, localPIIFindingTitle, raw, source, severity,
+		), true
+	}
+	if strings.HasPrefix(lower, "pii-request:") {
+		return normalizedSensitiveLocalFinding(
+			"LP-PII-REQUEST", CatPIIExposure, localPIIFindingTitle, raw, source, severity,
+		), true
+	}
+
+	match := strings.TrimSpace(strings.TrimPrefix(trimmed, "[normalized] "))
+	normalizedMatch := normalizeForTriage(match)
+
+	// A direct PII regex value is not the usual emitted shape (the scanner adds
+	// pii-data:), but accepting it here keeps the persistence boundary safe for
+	// callers that adapt the same configured detector output independently.
+	localPatternsMu.RLock()
+	piiRegexes := piiDataRegexes
+	injectionLiterals := injectionPatterns
+	injectionREs := injectionRegexes
+	secretLiterals := secretPatterns
+	localPatternsMu.RUnlock()
+	for _, re := range piiRegexes {
+		if re != nil {
+			match := firstAcceptedRegexMatch(re, normalizedMatch, acceptedLocalPIIMatch)
+			if match == nil {
+				continue
+			}
+			return normalizedSensitiveLocalFinding(
+				"LP-PII-DATA", CatPIIExposure, localPIIFindingTitle, raw, source, severity,
+			), true
+		}
+	}
+
+	for _, literal := range secretLiterals {
+		literal = normalizeForTriage(literal)
+		if literal != "" && strings.Contains(normalizedMatch, literal) {
+			return normalizedSensitiveLocalFinding(
+				"LP-SECRET-MATCH", CatCredentialLeak, localCredentialFindingTitle, raw, source, severity,
+			), true
+		}
+	}
+	for index, re := range secretPatternRegexes {
+		if re == nil || firstAcceptedRegexMatch(re, match, func(candidate string) bool {
+			return acceptedLocalSecretMatch(index, candidate)
+		}) == nil {
+			continue
+		}
+		canonicalID := "LP-SECRET-ASSIGNMENT"
+		if index == 3 { // bearer-value detector in secretPatternRegexes
+			canonicalID = "LP-SECRET-BEARER"
+		}
+		return normalizedSensitiveLocalFinding(
+			canonicalID, CatCredentialLeak, localCredentialFindingTitle, raw, source, severity,
+		), true
+	}
+
+	for _, literal := range injectionLiterals {
+		literal = normalizeForTriage(literal)
+		if literal != "" && strings.Contains(normalizedMatch, literal) {
+			canonicalID := canonicalIDFromRuleID(match)
+			if !strings.HasPrefix(canonicalID, "LP-INJ-") {
+				canonicalID = "LP-INJ-MATCH"
+			}
+			return normalizedSensitiveLocalFinding(
+				canonicalID, CatPromptInjection, localInjectionFindingTitle, raw, source, severity,
+			), true
+		}
+	}
+	for _, re := range injectionREs {
+		if re != nil && re.MatchString(normalizedMatch) {
+			return normalizedSensitiveLocalFinding(
+				"LP-INJ-MATCH", CatPromptInjection, localInjectionFindingTitle, raw, source, severity,
+			), true
+		}
+	}
+
+	return NormalizedFinding{}, false
+}
+
+func normalizedSensitiveLocalFinding(
+	canonicalID, category, title, evidence, source, severity string,
+) NormalizedFinding {
+	return NormalizedFinding{
+		CanonicalID: canonicalID,
+		Source:      source,
+		OriginalID:  canonicalID,
+		Category:    category,
+		Severity:    severity,
+		Title:       title,
+		Evidence:    evidence,
+	}
+}
+
 // canonicalIDFromRuleID maps a scanner-specific rule ID to a stable
 // canonical ID suitable for cross-scanner correlation.
 func canonicalIDFromRuleID(ruleID string) string {
 	upper := strings.ToUpper(ruleID)
+	lower := strings.ToLower(ruleID)
+
+	// Local-pattern PII findings carry the matched value after a colon. Handle
+	// those pseudo IDs before the generic PII- canonical-prefix path so source
+	// data can never become part of a persisted rule identity.
+	switch {
+	case lower == "pii-data" || strings.HasPrefix(lower, "pii-data:"):
+		return "LP-PII-DATA"
+	case lower == "pii-request" || strings.HasPrefix(lower, "pii-request:"):
+		return "LP-PII-REQUEST"
+	}
 
 	// Already in canonical form (prefixed with a known category)
-	for _, prefix := range []string{"SEC-", "CMD-", "PATH-", "C2-", "COG-", "TRUST-", "OBFUSC-", "JUDGE-"} {
+	for _, prefix := range []string{
+		"SEC-", "CS-SEC-", "SECRET-", "JSON-SEC-", "CRED-",
+		"CMD-", "PATH-", "C2-", "COG-", "TRUST-", "INJ-", "OBFUSC-",
+		"PII-", "CS-PII-", "ENT-", "JUDGE-", "LP-",
+	} {
 		if strings.HasPrefix(upper, prefix) {
 			return upper
 		}
@@ -142,12 +410,7 @@ func canonicalIDFromRuleID(ruleID string) string {
 	}
 
 	// Local pattern match strings: map to canonical
-	lower := strings.ToLower(ruleID)
 	switch {
-	case lower == "pii-data" || strings.HasPrefix(lower, "pii-data:"):
-		return "LP-PII-DATA"
-	case lower == "pii-request" || strings.HasPrefix(lower, "pii-request:"):
-		return "LP-PII-REQUEST"
 	case strings.Contains(lower, "ignore") && strings.Contains(lower, "instruct"):
 		return "LP-INJ-IGNORE"
 	case strings.Contains(lower, "jailbreak") || strings.Contains(lower, "dan mode"):
@@ -234,14 +497,16 @@ func canonicalDottedRuleID(ruleID string) (string, bool) {
 func categoryFromTags(tags []string) string {
 	tagSet := make(map[string]bool, len(tags))
 	for _, t := range tags {
-		tagSet[t] = true
+		tagSet[strings.ToLower(strings.TrimSpace(t))] = true
 	}
 
 	switch {
 	case tagSet["prompt-injection"]:
 		return CatPromptInjection
-	case tagSet["credential"]:
+	case tagSet["credential"] || tagSet["credential-leak"] || tagSet["secret"]:
 		return CatCredentialLeak
+	case tagSet["pii"] || tagSet["pii-exposure"]:
+		return CatPIIExposure
 	case tagSet["reverse-shell"] || tagSet["execution"] || tagSet["destructive"]:
 		return CatDangerousExec
 	case tagSet["exfiltration"] || tagSet["c2"] || tagSet["dns-tunnel"]:
@@ -278,7 +543,9 @@ func categoryFromFindingID(id string) string {
 		strings.HasPrefix(upper, "PERSISTENCE."),
 		strings.HasPrefix(upper, "CHAIN."):
 		return CatDangerousExec
-	case strings.HasPrefix(upper, "SEC-"):
+	case strings.HasPrefix(upper, "SEC-"), strings.HasPrefix(upper, "CS-SEC-"),
+		strings.HasPrefix(upper, "SECRET-"), strings.HasPrefix(upper, "JSON-SEC-"),
+		strings.HasPrefix(upper, "CRED-"), strings.HasPrefix(upper, "LP-SECRET-"):
 		return CatCredentialLeak
 	case strings.HasPrefix(upper, "CMD-"):
 		return CatDangerousExec
@@ -288,13 +555,17 @@ func categoryFromFindingID(id string) string {
 		return CatDataExfil
 	case strings.HasPrefix(upper, "COG-"):
 		return CatCognitiveTamper
-	case strings.HasPrefix(upper, "TRUST-"):
+	case strings.HasPrefix(upper, "TRUST-"), strings.HasPrefix(upper, "INJ-"):
 		return CatPromptInjection
 	case strings.HasPrefix(upper, "OBFUSC-"):
 		return CatPromptInjection
 	case strings.HasPrefix(upper, "JUDGE-INJ"):
 		return CatPromptInjection
-	case strings.HasPrefix(upper, "JUDGE-PII"):
+	case strings.HasPrefix(upper, "JUDGE-ADJ-INJECTION"):
+		return CatPromptInjection
+	case strings.HasPrefix(upper, "JUDGE-PII"), strings.HasPrefix(upper, "PII-"),
+		strings.HasPrefix(upper, "CS-PII-"), strings.HasPrefix(upper, "LP-PII-"),
+		strings.HasPrefix(upper, "JUDGE-ADJ-PII"), isEnterprisePIIRuleID(upper):
 		return CatPIIExposure
 	case strings.HasPrefix(upper, "JUDGE-TOOL-INJ"):
 		return CatPromptInjection
@@ -306,10 +577,25 @@ func categoryFromFindingID(id string) string {
 		return CatCredentialLeak
 	case strings.HasPrefix(upper, "LP-EXFIL"):
 		return CatDataExfil
+	case strings.HasPrefix(upper, "JUDGE-ADJ-EXFIL"):
+		return CatDataExfil
 	case strings.HasPrefix(upper, "LP-SYSTEM"):
 		return CatSystemFile
 	default:
 		return CatGeneral
+	}
+}
+
+func isEnterprisePIIRuleID(ruleID string) bool {
+	switch strings.ToUpper(strings.TrimSpace(ruleID)) {
+	case "ENT-BULK-SSN", "ENT-BULK-SSN-NOHYPHEN",
+		"ENT-CC-VISA", "ENT-CC-MC", "ENT-CC-AMEX", "ENT-CC-DISCOVER",
+		"ENT-IBAN", "ENT-US-PHONE", "ENT-EMAIL-BULK", "ENT-PASSPORT-US",
+		"ENT-DL-CA", "ENT-MEDICAL-RECORD", "ENT-DOB-PATTERN", "ENT-NHS-NUMBER",
+		"ENT-BULK-CSV-PII", "ENT-BULK-JSON-PII":
+		return true
+	default:
+		return false
 	}
 }
 

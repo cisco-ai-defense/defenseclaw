@@ -121,8 +121,8 @@ export function CorrelatorSection({
       {policy.correlator.length === 0 ? (
         <p className="rounded-md border border-dashed border-fd-border bg-fd-background px-3 py-3 text-center text-[11px] text-fd-muted-foreground">
           No correlator patterns loaded. The bundled defaults
-          (LETHAL-TRIFECTA, TRIFECTA-WITH-FINGERPRINT-MATCH, ESCALATION-CHAIN,
-          DESTRUCTIVE-FLOW) only appear once you select a preset.
+          (LETHAL-TRIFECTA and TRIFECTA-WITH-FINGERPRINT-MATCH) only
+          appear once you select a preset.
         </p>
       ) : (
         <ul className="space-y-3">

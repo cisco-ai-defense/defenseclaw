@@ -94,11 +94,12 @@ func buildSessionPromptScanResult(verdict *ScanVerdict, messageID string, elapse
 			title = nf.CanonicalID
 		}
 		findings = append(findings, scanner.Finding{
-			RuleID:   nf.CanonicalID,
-			Title:    title,
-			Severity: sev,
-			Category: nf.Category,
-			Scanner:  scName,
+			RuleID:          nf.CanonicalID,
+			Title:           title,
+			Severity:        sev,
+			Category:        nf.Category,
+			Scanner:         scName,
+			EvidenceSummary: nf.Evidence,
 		})
 	}
 	return &scanner.ScanResult{

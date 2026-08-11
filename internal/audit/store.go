@@ -1133,7 +1133,7 @@ var migrations = []migration{
 		//                             sensitive_access / egress_external
 		//   tool_capability_class   — read_fs / write_fs / exec_shell /
 		//                             network_fetch / send_message
-		//   content_fingerprint     — sha256(redacted_value)[:8]
+		//   content_fingerprint     — keyed hash-v1 evidence HMAC prefix
 		//   external_endpoint       — host or URL for network findings
 		//   turn_id                 — monotonic per-session counter
 		//   decision_path           — JSON audit trail of severity
@@ -3344,6 +3344,125 @@ type AlertAcknowledgementSelector struct {
 	Before    time.Time
 }
 
+const alertNonAllowOutcomeSQL = `'alert','ask','block','blocked','confirm','deny','denied',
+	'fail','failed','failure','quarantine','quarantined','reject','rejected',
+	'revoked','terminated','timed_out'`
+
+func canonicalAlertOutcomeSQL() string {
+	return `LOWER(COALESCE(
+		CASE WHEN json_valid(COALESCE(event.payload_json,''))
+			THEN json_extract(event.payload_json,
+				'$."defenseclaw.enforcement.effective_action"') END,
+		CASE WHEN json_valid(COALESCE(event.payload_json,''))
+			THEN json_extract(event.payload_json,
+				'$."defenseclaw.guardrail.decision"') END,
+		CASE WHEN json_valid(COALESCE(event.payload_json,''))
+			THEN json_extract(event.payload_json,
+				'$."defenseclaw.network.decision"') END,
+		CASE WHEN json_valid(COALESCE(event.payload_json,''))
+			THEN json_extract(event.payload_json,
+				'$."defenseclaw.network.policy_outcome"') END,
+		CASE WHEN json_valid(COALESCE(event.payload_json,''))
+			THEN json_extract(event.payload_json,
+				'$."defenseclaw.scan.verdict"') END,
+		CASE WHEN json_valid(COALESCE(event.projected_record_json,''))
+			THEN json_extract(event.projected_record_json,'$.outcome') END,
+		event.action,''))`
+}
+
+func legacyExplicitAlertSQL() string {
+	return `(
+		LOWER(COALESCE(event.action,'')) IN (` + alertNonAllowOutcomeSQL + `)
+		OR LOWER(COALESCE(event.action,'')) LIKE '%-failure'
+		OR LOWER(COALESCE(event.action,'')) LIKE '%-failed'
+		OR (
+			LOWER(COALESCE(event.action,'')) = 'connector-hook'
+			AND (
+				COALESCE(event.enforced, 0) = 1
+				OR (
+					INSTR(' ' || LOWER(COALESCE(event.details,'')) || ' ',
+						' mode=observe ') = 0
+					AND (
+						INSTR(' ' || LOWER(COALESCE(event.details,'')) || ' ',
+							' action=block ') > 0
+						OR INSTR(' ' || LOWER(COALESCE(event.details,'')) || ' ',
+							' action=deny ') > 0
+					)
+				)
+			)
+		)
+	)`
+}
+
+func alertEligibilitySQL(legacyActionPlaceholders string) string {
+	findingTagsPath := `$."defenseclaw.finding.tags"`
+	canonicalOutcome := canonicalAlertOutcomeSQL()
+	legacyExplicit := legacyExplicitAlertSQL()
+	return `(
+		(
+			event.bucket = 'security.finding'
+			AND event.event_name = 'finding.observed'
+			AND UPPER(COALESCE(event.severity,'')) IN
+				('CRITICAL','HIGH','MEDIUM','LOW','ERROR','WARNING')
+			AND NOT EXISTS (
+				SELECT 1 FROM json_each(
+					CASE
+						WHEN json_valid(COALESCE(event.payload_json,'')) THEN
+							CASE
+								WHEN json_type(event.payload_json, '` + findingTagsPath + `') = 'array'
+								THEN json_extract(event.payload_json, '` + findingTagsPath + `')
+								ELSE '[]'
+							END
+						ELSE '[]'
+					END
+				) AS finding_tag
+				WHERE LOWER(CAST(finding_tag.value AS TEXT)) = 'detection-only'
+			)
+			AND LOWER(COALESCE(
+				CASE WHEN json_valid(COALESCE(event.payload_json,''))
+					THEN json_extract(event.payload_json, '` + findingTagsPath + `') END,
+				''
+			)) <> 'detection-only'
+		)
+		OR (
+			event.bucket IN ('enforcement.action','network.egress')
+			AND ` + canonicalOutcome + ` IN (` + alertNonAllowOutcomeSQL + `)
+		)
+		OR (
+			event.bucket IN ('platform.health','diagnostic')
+			AND UPPER(COALESCE(event.severity,'')) IN ('CRITICAL','HIGH','ERROR')
+		)
+		OR (
+			event.bucket IS NULL
+			AND (
+				(
+					event.action IN (` + legacyActionPlaceholders + `)
+					AND UPPER(COALESCE(event.severity,'')) IN
+						('CRITICAL','HIGH','MEDIUM','LOW','ERROR','WARNING')
+				)
+				OR ` + legacyExplicit + `
+			)
+		)
+	)`
+}
+
+func alertEffectiveSeveritySQL() string {
+	canonicalOutcome := canonicalAlertOutcomeSQL()
+	legacyExplicit := legacyExplicitAlertSQL()
+	return `CASE
+		WHEN UPPER(COALESCE(event.severity,'INFO')) <> 'INFO'
+			THEN UPPER(event.severity)
+		WHEN event.bucket = 'network.egress'
+		 AND ` + canonicalOutcome + ` IN (` + alertNonAllowOutcomeSQL + `)
+			THEN 'WARNING'
+		WHEN event.bucket = 'enforcement.action'
+		 AND ` + canonicalOutcome + ` IN (` + alertNonAllowOutcomeSQL + `)
+			THEN 'HIGH'
+		WHEN event.bucket IS NULL AND ` + legacyExplicit + ` THEN 'HIGH'
+		ELSE 'INFO'
+	END`
+}
+
 // SelectAlertAcknowledgementTargets returns a stable alert-ID ordering and
 // the projection versions that must be included in the caller's preview
 // digest. Every caller-controlled value is bound as a SQL parameter.
@@ -3358,26 +3477,22 @@ func (s *Store) SelectAlertAcknowledgementTargets(
 		return s.selectExactAlertAcknowledgementTargets(ctx, selector.AlertIDs)
 	}
 
+	legacyActions := legacyAlertEligibleActions()
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(legacyActions)), ",")
 	query := `SELECT event.id, COALESCE(projection.projection_version, 0)
 		FROM audit_events AS event
 		LEFT JOIN alert_acknowledgement_projection AS projection ON projection.alert_id = event.id
 		WHERE projection.alert_id IS NULL
-		  AND (
-		      (event.bucket = ? AND event.event_name = 'finding.observed')
-		      OR (event.bucket IS NULL AND event.action IN (`
-	legacyActions := legacyAlertEligibleActions()
-	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(legacyActions)), ",")
-	query += placeholders + `) AND UPPER(COALESCE(event.severity,'')) IN
-		          ('CRITICAL','HIGH','MEDIUM','LOW','ERROR','INFO'))
-		  )`
-	args := []any{string(observability.BucketSecurityFinding)}
+		  AND ` + alertEligibilitySQL(placeholders)
+	args := make([]any, 0, len(legacyActions)+5)
 	for _, action := range legacyActions {
 		args = append(args, action)
 	}
 	if selector.Severity == "" || selector.Severity == "all" {
-		query += ` AND UPPER(COALESCE(event.severity,'')) IN ('CRITICAL','HIGH','MEDIUM','LOW')`
+		// Eligibility already excludes clean lifecycle telemetry and accepts
+		// promoted INFO non-allow outcomes plus ERROR health records.
 	} else {
-		query += ` AND UPPER(COALESCE(event.severity,'')) = ?`
+		query += ` AND ` + alertEffectiveSeveritySQL() + ` = ?`
 		args = append(args, selector.Severity)
 	}
 	if selector.Connector != "" {
@@ -3420,18 +3535,12 @@ func (s *Store) selectExactAlertAcknowledgementTargets(
 		              WHERE alert_id = requested.alert_id)
 		   OR EXISTS (SELECT 1 FROM alert_acknowledgement_health
 		              WHERE alert_id = requested.alert_id)
-		   OR (event.id IS NOT NULL AND (
-		       (event.bucket = ? AND event.event_name = 'finding.observed')
-		       OR (event.bucket IS NULL AND event.action IN (` + actionPlaceholders + `)
-		           AND UPPER(COALESCE(event.severity,'')) IN
-		               ('CRITICAL','HIGH','MEDIUM','LOW','ERROR','INFO'))
-		   ))
+		   OR (event.id IS NOT NULL AND ` + alertEligibilitySQL(actionPlaceholders) + `)
 		ORDER BY requested.alert_id`
-	args := make([]any, 0, len(alertIDs)+1+len(legacyActions))
+	args := make([]any, 0, len(alertIDs)+len(legacyActions))
 	for _, alertID := range alertIDs {
 		args = append(args, alertID)
 	}
-	args = append(args, string(observability.BucketSecurityFinding))
 	for _, action := range legacyActions {
 		args = append(args, action)
 	}
@@ -3629,36 +3738,40 @@ type Counts struct {
 
 func (s *Store) GetCounts() (Counts, error) {
 	var c Counts
+	legacyActions := legacyAlertEligibleActions()
+	legacyPlaceholders := strings.TrimSuffix(strings.Repeat("?,", len(legacyActions)), ",")
+	alertCountSQL := `SELECT COUNT(*) FROM audit_events AS event
+		WHERE ` + alertEligibilitySQL(legacyPlaceholders) + `
+		  AND ` + alertEffectiveSeveritySQL() + ` IN ('CRITICAL','HIGH','ERROR')
+		  AND NOT EXISTS (
+			  SELECT 1 FROM alert_acknowledgement_projection AS projection
+			  WHERE projection.alert_id = event.id
+		  )`
+	alertCountArgs := make([]any, 0, len(legacyActions))
+	for _, action := range legacyActions {
+		alertCountArgs = append(alertCountArgs, action)
+	}
 	queries := []struct {
 		sql  string
+		args []any
 		dest *int
 	}{
-		{`SELECT COUNT(*) FROM actions WHERE target_type = 'skill' AND json_extract(actions_json, '$.install') = 'block'`, &c.BlockedSkills},
-		{`SELECT COUNT(*) FROM actions WHERE target_type = 'skill' AND json_extract(actions_json, '$.install') = 'allow'`, &c.AllowedSkills},
-		{`SELECT COUNT(*) FROM actions WHERE target_type = 'mcp' AND json_extract(actions_json, '$.install') = 'block'`, &c.BlockedMCPs},
-		{`SELECT COUNT(*) FROM actions WHERE target_type = 'mcp' AND json_extract(actions_json, '$.install') = 'allow'`, &c.AllowedMCPs},
-		// Alerts feeds the IPC GetStatsSnapshot ActiveAlerts field. The
-		// severity column is the primary source, but connector-hook rows
-		// are hardcoded to INFO on the column (see
-		// gateway.logConnectorHookAuditEnvelope — a deliberate
-		// noise-reduction choice because every tool call produces a row).
-		// The real verdict severity for those rows lives on the
-		// structured_json envelope, so we OR in a JSON-extract branch
-		// scoped to action='connector-hook' to pick up enforced blocks /
-		// high-severity findings that would otherwise be invisible on the
-		// IPC stat (the managed_enterprise deployment mode's sole
-		// enforcement path is hooks, which is where this used to pin at 0).
-		// The two branches are disjoint by column value, so no double-count.
-		{`SELECT COUNT(*) FROM audit_events
-			 WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW')
-			    OR (action = 'connector-hook'
-			        AND json_extract(structured_json, '$.severity') IN ('CRITICAL','HIGH','MEDIUM','LOW'))`, &c.Alerts},
-		{`SELECT COUNT(*) FROM scan_results`, &c.TotalScans},
-		{`SELECT COUNT(*) FROM network_egress_events WHERE blocked = 1`, &c.BlockedEgressCalls},
+		{`SELECT COUNT(*) FROM actions WHERE target_type = 'skill' AND json_extract(actions_json, '$.install') = 'block'`, nil, &c.BlockedSkills},
+		{`SELECT COUNT(*) FROM actions WHERE target_type = 'skill' AND json_extract(actions_json, '$.install') = 'allow'`, nil, &c.AllowedSkills},
+		{`SELECT COUNT(*) FROM actions WHERE target_type = 'mcp' AND json_extract(actions_json, '$.install') = 'block'`, nil, &c.BlockedMCPs},
+		{`SELECT COUNT(*) FROM actions WHERE target_type = 'mcp' AND json_extract(actions_json, '$.install') = 'allow'`, nil, &c.AllowedMCPs},
+		// ActiveAlerts is the unacknowledged actionable queue, not a count
+		// of every non-INFO audit row. Keep this IPC surface aligned with
+		// the v8 disposition selector: real findings, explicit non-allow
+		// outcomes, and important health failures only. Detection-only,
+		// clean lifecycle, LOW/MEDIUM/WARNING, and reviewed rows stay out.
+		{alertCountSQL, alertCountArgs, &c.Alerts},
+		{`SELECT COUNT(*) FROM scan_results`, nil, &c.TotalScans},
+		{`SELECT COUNT(*) FROM network_egress_events WHERE blocked = 1`, nil, &c.BlockedEgressCalls},
 	}
 	for _, q := range queries {
 		if err := s.scanRow(context.Background(), "get_counts",
-			s.db.QueryRowContext(context.Background(), q.sql), q.dest); err != nil {
+			s.db.QueryRowContext(context.Background(), q.sql, q.args...), q.dest); err != nil {
 			return c, fmt.Errorf("audit: count query: %w", err)
 		}
 	}

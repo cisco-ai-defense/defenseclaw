@@ -595,18 +595,7 @@ func nonEmptyStrings(values ...string) []string {
 }
 
 func claudeCodeString(v interface{}) string {
-	switch t := v.(type) {
-	case string:
-		return t
-	case nil:
-		return ""
-	default:
-		b, err := json.Marshal(t)
-		if err != nil {
-			return ""
-		}
-		return string(b)
-	}
+	return structuredHookContentString(v)
 }
 
 func claudeCodePayloadString(payload map[string]interface{}, key string) string {

@@ -4800,8 +4800,8 @@ func (p *GuardrailProxy) inspectToolCalls(ctx context.Context, toolCallsJSON jso
 		})
 		// Stamp the tool's capability class (read_fs / exec_shell /
 		// network_fetch / …) onto each finding from this call so the
-		// sliding-window correlator can reason about capability
-		// sequences (DESTRUCTIVE-FLOW). Content-only
+		// sliding-window correlator can reason about operator-defined
+		// capability sequences. Content-only
 		// matches with an unknown tool fall back to the rule-id based
 		// capability in the emission pipeline.
 		if cap := guardrail.ClassifyToolName(toolName); cap != guardrail.CapUnknown {
@@ -4822,16 +4822,13 @@ func (p *GuardrailProxy) inspectToolCalls(ctx context.Context, toolCallsJSON jso
 	confidence := HighestConfidence(allFindings, severity)
 
 	enforceable := enforceableRuleFindings(allFindings)
-	action := guardrailActionAlert
+	action := guardrailActionAllow
 	if len(enforceable) > 0 {
 		action = guardrailRuntimeActionForGuardrail(
 			p.cfg,
 			HighestSeverity(enforceable),
 			false,
 		)
-	}
-	if action == guardrailActionAllow {
-		return nil
 	}
 	if action == guardrailActionConfirm {
 		action = guardrailActionAlert

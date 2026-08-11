@@ -821,16 +821,20 @@ func (g *GuardrailInspector) inspectRegexOnly(ctx context.Context, direction, co
 }
 
 // inspectRegexJudge uses triage patterns to route ambiguous findings to the
-// LLM judge, while running the full rule engine (ScanAllRules) as a safety net
-// for patterns triage doesn't cover (sensitive paths, commands, C2, etc.).
+// LLM judge, while keeping content-only rules as a safety net. Action-shaped
+// categories are intentionally excluded here: prose is not proof that a
+// command, path access, cognitive-file mutation, or C2 operation will run.
 func (g *GuardrailInspector) inspectRegexJudge(ctx context.Context, direction, content string, messages []ChatMessage, model, mode string) *ScanVerdict {
 	regexStart := time.Now()
 	_, endRegex := g.startPhaseSpan(ctx, "regex")
 	signals := triagePatterns(direction, content)
 	high, review, _ := partitionSignals(signals)
 
-	// Run the full rule engine for categories triage doesn't cover.
-	ruleFindings := ScanAllRules(content, "")
+	// Keep trust, credential, and PII detection on untrusted content. Concrete
+	// actions are evaluated through the tool-call path where execution facts
+	// are available, rather than treating their literal appearance in prose as
+	// an action.
+	ruleFindings := scanContentRulesForConnector("", content, "", ruleContentScopeUntrusted)
 	var ruleVerdict *ScanVerdict
 	if len(ruleFindings) > 0 {
 		maxSev := HighestSeverity(ruleFindings)
@@ -1060,9 +1064,10 @@ func (g *GuardrailInspector) inspectJudgeFirst(ctx context.Context, direction, c
 		merged = mergeWithJudge(merged, regexVerdict)
 	}
 
-	// Run the full rule engine as a safety net for categories the judge and
-	// triage don't cover (sensitive paths, dangerous commands, C2, etc.).
-	ruleFindings := ScanAllRules(content, "")
+	// Keep the same content/action boundary as regex_judge. The trusted action
+	// dispatcher remains responsible for command, path, cognitive-file, and C2
+	// enforcement because it can reason over parsed execution facts.
+	ruleFindings := scanContentRulesForConnector("", content, "", ruleContentScopeUntrusted)
 	if len(ruleFindings) > 0 {
 		maxSev := HighestSeverity(ruleFindings)
 		if severityRank[maxSev] >= severityRank["HIGH"] {
@@ -1245,43 +1250,25 @@ func (g *GuardrailInspector) finalize(ctx context.Context, direction, model, mod
 
 var localPatternsMu sync.RWMutex
 
-var defaultInjectionPatterns = []string{
-	"ignore previous", "ignore all instructions", "ignore above",
-	"ignore all previous", "ignore your instructions", "ignore prior",
-	"disregard previous", "disregard all", "disregard your",
-	"forget your instructions", "forget all previous",
-	"override your instructions", "override all instructions",
-	"you are now", "pretend you are",
-	"jailbreak", "do anything now", "dan mode",
-	"developer mode enabled",
-}
+// Injection detection is owned by the contextual trust-exploit rules. The old
+// local substring floor promoted ordinary prose such as "pretend you are a
+// compiler" and "ignore prior test output" without an adversarial object.
+// Operators can still opt into local phrases through local-patterns.yaml.
+var defaultInjectionPatterns = []string{}
 
-var injectionPatterns = append([]string(nil), defaultInjectionPatterns...)
+var injectionPatterns = cloneLocalPatternStrings(defaultInjectionPatterns)
 
-var defaultInjectionRegexSources = []string{
-	`ignore\s+(?:all\s+)?(?:previous|prior|above|your)\s+(?:instructions|rules|directives|guidelines)`,
-	`disregard\s+(?:all\s+)?(?:previous|prior|above|your)\s+(?:instructions|rules|directives|guidelines)`,
-	`(?:share|reveal|show|print|output|dump|repeat|give\s+me)\s+(?:your|the)\s+(?:system\s+)?(?:prompt|instructions|rules)`,
-	`(?:what\s+(?:is|are)\s+your\s+(?:system\s+)?(?:prompt|instructions|rules))`,
-	`act\s+as\b`,
-	`bypass\s+(?:your|the|my|all|any)\s+(?:filter|guard|safe|restrict|rule|instruction)`,
-}
+var defaultInjectionRegexSources = []string{}
 
 var injectionRegexes = compileBaseline(defaultInjectionRegexSources)
 
 var defaultPIIRequestPatterns = []string{
 	"find their ssn", "find my ssn", "look up their ssn",
 	"retrieve their ssn", "get their ssn", "get my ssn",
-	"social security number", "mother's maiden name",
-	"mothers maiden name", "credit card number",
 	"find their password", "look up their password",
-	"find their email", "look up their email",
-	"date of birth", "bank account number",
-	"passport number", "driver's license",
-	"drivers license",
 }
 
-var piiRequestPatterns = append([]string(nil), defaultPIIRequestPatterns...)
+var piiRequestPatterns = cloneLocalPatternStrings(defaultPIIRequestPatterns)
 
 var defaultPIIDataRegexSources = []string{
 	`\b\d{3}-\d{2}-\d{4}\b`,
@@ -1291,13 +1278,14 @@ var defaultPIIDataRegexSources = []string{
 
 var piiDataRegexes = compileBaseline(defaultPIIDataRegexSources)
 
-var defaultSecretPatterns = []string{
-	"sk-ant-", "sk-proj-",
-	"-----begin rsa", "-----begin private", "-----begin openssh",
-	"ghp_", "gho_", "github_pat_",
-}
+// Secret prefixes and key-header words are common in detector source and
+// documentation. Actual credential values are owned by the length- and
+// structure-aware secret rules below, so the local literal floor is empty by
+// default. Operator-specific literal indicators remain supported through the
+// local-pattern override.
+var defaultSecretPatterns = []string{}
 
-var secretPatterns = append([]string(nil), defaultSecretPatterns...)
+var secretPatterns = cloneLocalPatternStrings(defaultSecretPatterns)
 
 // compileBaseline panics on a bad pattern. This is intentional: the
 // defaults are constants in source, not operator input, so a bad regex
@@ -1347,16 +1335,16 @@ type localPatternsActivation struct {
 
 func prepareLocalPatternsOverride(lp *guardrail.LocalPatterns) (*localPatternsActivation, error) {
 	activation := &localPatternsActivation{
-		injectionPatterns:  append([]string(nil), defaultInjectionPatterns...),
+		injectionPatterns:  cloneLocalPatternStrings(defaultInjectionPatterns),
 		injectionRegexes:   compileBaseline(defaultInjectionRegexSources),
-		piiRequestPatterns: append([]string(nil), defaultPIIRequestPatterns...),
+		piiRequestPatterns: cloneLocalPatternStrings(defaultPIIRequestPatterns),
 		piiDataRegexes:     compileBaseline(defaultPIIDataRegexSources),
-		secretPatterns:     append([]string(nil), defaultSecretPatterns...),
-		exfilPatterns:      append([]string(nil), defaultExfilPatterns...),
+		secretPatterns:     cloneLocalPatternStrings(defaultSecretPatterns),
+		exfilPatterns:      cloneLocalPatternStrings(defaultExfilPatterns),
 	}
 	if lp != nil {
 		if lp.Injection != nil {
-			activation.injectionPatterns = append([]string(nil), lp.Injection...)
+			activation.injectionPatterns = cloneLocalPatternStrings(lp.Injection)
 		}
 		if lp.InjectionRegexes != nil {
 			compiled, err := compileLocalPatternSources("injection_regexes", lp.InjectionRegexes)
@@ -1366,7 +1354,7 @@ func prepareLocalPatternsOverride(lp *guardrail.LocalPatterns) (*localPatternsAc
 			activation.injectionRegexes = compiled
 		}
 		if lp.PIIRequests != nil {
-			activation.piiRequestPatterns = append([]string(nil), lp.PIIRequests...)
+			activation.piiRequestPatterns = cloneLocalPatternStrings(lp.PIIRequests)
 		}
 		if lp.PIIDataRegexes != nil {
 			compiled, err := compileLocalPatternSources("pii_data_regexes", lp.PIIDataRegexes)
@@ -1376,13 +1364,20 @@ func prepareLocalPatternsOverride(lp *guardrail.LocalPatterns) (*localPatternsAc
 			activation.piiDataRegexes = compiled
 		}
 		if lp.Secrets != nil {
-			activation.secretPatterns = append([]string(nil), lp.Secrets...)
+			activation.secretPatterns = cloneLocalPatternStrings(lp.Secrets)
 		}
 		if lp.Exfiltration != nil {
-			activation.exfilPatterns = append([]string(nil), lp.Exfiltration...)
+			activation.exfilPatterns = cloneLocalPatternStrings(lp.Exfiltration)
 		}
 	}
 	return activation, nil
+}
+
+func cloneLocalPatternStrings(values []string) []string {
+	if values == nil {
+		return nil
+	}
+	return append([]string{}, values...)
 }
 
 func publishLocalPatternsOverride(activation *localPatternsActivation) {
@@ -1429,18 +1424,20 @@ var secretPatternRegexes = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)\baws_(?:access_key_id|secret_access_key)\s*[:=]\s*["']?[A-Za-z0-9/+]{16,}`),
 }
 
-var defaultExfilPatterns = []string{
-	"/etc/passwd", "/etc/shadow", "base64 -d", "base64 --decode",
-	"exfiltrate", "exfil", "send to my server", "curl http",
-}
+// Target names and transfer verbs are common in source review and operational
+// documentation. Strong built-in exfil detection therefore requires the
+// conjunction of a read/dump verb, a sensitive target, and an egress verb.
+// Operators can still add organization-specific literal phrases here.
+var defaultExfilPatterns = []string{}
 
-var exfilPatterns = append([]string(nil), defaultExfilPatterns...)
+var exfilPatterns = cloneLocalPatternStrings(defaultExfilPatterns)
 
-// exfilRegexes is the deterministic regex FLOOR for credential-file
-// reads. It runs against the normalized triage view (lowercased,
-// zero-width stripped, whitespace-around-slashes collapsed) so it
-// catches typo evasions and odd separators that the literal
-// substring list above would silently miss:
+// exfilTargetRegexes recognize sensitive credential-file targets. A target
+// match alone is telemetry-free for prompt prose: findStrongExfilIntent also
+// requires an extraction verb and an egress verb in a compact context window.
+// The target expressions run against the normalized triage view (lowercased,
+// zero-width stripped, whitespace-around-slashes collapsed) so contextual
+// detection still catches typo evasions and odd separators:
 //
 //   - "etccc passwd", "etc passsswd", "etc/  passwd"
 //     → matches via `etc.{0,3}pas{1,8}wd`
@@ -1461,20 +1458,41 @@ var exfilPatterns = append([]string(nil), defaultExfilPatterns...)
 // The pattern is still anchored to the exact target words ("etc" +
 // "pas...wd" / "sha...dow") so false positives from prose
 // containing both fragments separately are rare.
-//
-// Treat this as a floor under the LLM-judge layer: even if the exfil
-// judge is offline, mis-routed, or returns "false" on a polite typo
-// prompt, these patterns alone are enough to raise a HIGH_SIGNAL
-// triage finding. They are intentionally narrow (no `\.env`,
-// `kubeconfig`, etc. — those live under the rules engine and the
-// exfil-context probe) so the FLOOR stays opinionated and hard to
-// false-positive.
-var exfilRegexes = []*regexp.Regexp{
+var exfilTargetRegexes = []*regexp.Regexp{
 	regexp.MustCompile(`etc.{0,3}pas{1,8}wd\b`),
 	regexp.MustCompile(`etc.{0,3}sha{1,8}dow\b`),
 	regexp.MustCompile(`\bid_(?:rsa|ed25519|ecdsa|dsa)\b`),
 	regexp.MustCompile(`(?:^|[/\s'"` + "`" + `])\.ssh/`),
 	regexp.MustCompile(`(?:^|[/\s'"` + "`" + `])\.aws/(?:credentials|config)\b`),
+}
+
+var exfilReadIntentRegex = regexp.MustCompile(`\b(?:cat|collect|copy|dump|extract|fetch|read|steal)\b`)
+var exfilEgressIntentRegex = regexp.MustCompile(`\b(?:exfil(?:trate|tration)?|post|send|transmit|upload)\b`)
+
+const exfilIntentContextBytes = 240
+
+// findStrongExfilIntent reports a sensitive target only when extraction and
+// egress intent occur nearby. Requiring all three components prevents path or
+// command examples in docs from becoming alerts while keeping an offline,
+// deterministic floor for explicit credential-exfiltration requests.
+func findStrongExfilIntent(normalized string) (string, bool) {
+	for _, targetRegex := range exfilTargetRegexes {
+		for _, targetLoc := range targetRegex.FindAllStringIndex(normalized, -1) {
+			start := targetLoc[0] - exfilIntentContextBytes
+			if start < 0 {
+				start = 0
+			}
+			end := targetLoc[1] + exfilIntentContextBytes
+			if end > len(normalized) {
+				end = len(normalized)
+			}
+			window := normalized[start:end]
+			if exfilReadIntentRegex.MatchString(window) && exfilEgressIntentRegex.MatchString(window) {
+				return normalized[targetLoc[0]:targetLoc[1]], true
+			}
+		}
+	}
+	return "", false
 }
 
 // bulkAccessRegex detects prompts requesting bulk extraction from sensitive tools
@@ -1511,6 +1529,11 @@ func scanLocalPatterns(direction, content string) *ScanVerdict {
 	lower := normalizeForTriage(content)
 	var flags []string
 	isHigh := false
+	type localPIICandidate struct {
+		flag     string
+		evidence string
+	}
+	var localPIICandidates []localPIICandidate
 
 	if direction == "prompt" {
 		for _, p := range injPatterns {
@@ -1538,18 +1561,9 @@ func scanLocalPatterns(direction, content string) *ScanVerdict {
 				isHigh = true
 			}
 		}
-		// Regex floor: catches typo evasions like "etccc passwd",
-		// "etc shaadow", and direct ~/.ssh/.aws/ credential paths
-		// that the literal substring list above misses.
-		for _, re := range exfilRegexes {
-			if match, norm, ok := findRegexMatch(content, lower, re); ok {
-				flag := "exfil-regex:" + match
-				if norm {
-					flag = "exfil-regex:[normalized] " + match
-				}
-				flags = append(flags, flag)
-				isHigh = true
-			}
+		if target, ok := findStrongExfilIntent(lower); ok {
+			flags = append(flags, "exfil-context:"+target)
+			isHigh = true
 		}
 		if bulkAccessRegex.MatchString(lower) {
 			flags = append(flags, "bulk-access:sensitive-tool")
@@ -1565,13 +1579,15 @@ func scanLocalPatterns(direction, content string) *ScanVerdict {
 	// be a lie: PII/secret regexes are exactly the surfaces an attacker
 	// would target with invisible-character splicing.
 	for _, re := range piiDRegexes {
-		if match, norm, ok := findRegexMatch(content, lower, re); ok {
+		if match, norm, ok := findAcceptedLocalPIIMatch(content, lower, re); ok {
 			flag := "pii-data:" + match
 			if norm {
 				flag = "pii-data:[normalized] " + match
 			}
-			flags = append(flags, flag)
-			isHigh = true
+			localPIICandidates = append(localPIICandidates, localPIICandidate{
+				flag:     flag,
+				evidence: normalizedPIIEvidenceKey(sanitizeEvidence(match)),
+			})
 		}
 	}
 
@@ -1580,8 +1596,8 @@ func scanLocalPatterns(direction, content string) *ScanVerdict {
 			flags = append(flags, p)
 		}
 	}
-	for _, re := range secretPatternRegexes {
-		if match, norm, ok := findRegexMatch(content, lower, re); ok {
+	for index, re := range secretPatternRegexes {
+		if match, norm, ok := findAcceptedLocalSecretMatch(content, lower, re, index); ok {
 			flag := match
 			if norm {
 				flag = "[normalized] " + match
@@ -1590,10 +1606,29 @@ func scanLocalPatterns(direction, content string) *ScanVerdict {
 		}
 	}
 
-	// Run the full rule engine (sensitive paths, dangerous commands, C2, etc.)
-	// so that scanLocalPatterns covers every category regardless of strategy.
+	// Content scanning retains trust, credential, and PII rules. Literal
+	// commands, paths, cognitive files, and C2 indicators are action categories
+	// and require parsed tool-call facts before they can affect enforcement.
 	maxRuleSev := "NONE"
-	ruleFindings := ScanAllRules(content, "")
+	ruleFindings := scanContentRulesForConnector("", content, "", ruleContentScopeUntrusted)
+	catalogPIIEvidence := make(map[string]struct{})
+	for _, rf := range ruleFindings {
+		if strings.HasPrefix(rf.RuleID, "ENT-") && hasTag(rf.Tags, "pii") {
+			catalogPIIEvidence[normalizedPIIEvidenceKey(rf.Evidence)] = struct{}{}
+		}
+	}
+	seenLocalPIIEvidence := make(map[string]struct{})
+	for _, candidate := range localPIICandidates {
+		if _, duplicate := catalogPIIEvidence[candidate.evidence]; duplicate {
+			continue
+		}
+		if _, duplicate := seenLocalPIIEvidence[candidate.evidence]; duplicate {
+			continue
+		}
+		seenLocalPIIEvidence[candidate.evidence] = struct{}{}
+		flags = append(flags, candidate.flag)
+		isHigh = true
+	}
 	for _, rf := range ruleFindings {
 		flags = append(flags, rf.RuleID+":"+rf.Title)
 		if severityRank[rf.Severity] >= severityRank["HIGH"] {
@@ -1637,36 +1672,13 @@ func scanLocalPatterns(direction, content string) *ScanVerdict {
 // Triage pattern scanning (for regex_judge and judge_first strategies)
 // ---------------------------------------------------------------------------
 
-// Multi-word injection phrases that are unambiguously adversarial.
-var highSignalInjectionPatterns = []string{
-	"ignore all previous instructions", "ignore all instructions",
-	"ignore your instructions", "ignore previous instructions",
-	"disregard all instructions", "disregard previous instructions",
-	"disregard your instructions",
-	"forget your instructions", "forget all previous",
-	"override your instructions", "override all instructions",
-	"developer mode enabled", "do anything now", "dan mode",
-}
-
-// Short injection keywords that need LLM adjudication — many are benign.
-var reviewInjectionPatterns = []string{
-	"ignore previous", "ignore above", "ignore prior",
-	"disregard previous", "disregard all",
-	"you are now", "pretend you are",
-	"jailbreak",
-}
-
-var reviewInjectionRegexes = []*regexp.Regexp{
-	regexp.MustCompile(`act\s+as\b`),
-	regexp.MustCompile(`bypass\s+(?:your|the|my|all|any)\s+(?:filter|guard|safe|restrict|rule|instruction)`),
-}
-
-var highSignalInjectionRegexes = []*regexp.Regexp{
-	regexp.MustCompile(`ignore\s+(?:all\s+)?(?:previous|prior|above|your)\s+(?:instructions|rules|directives|guidelines)`),
-	regexp.MustCompile(`disregard\s+(?:all\s+)?(?:previous|prior|above|your)\s+(?:instructions|rules|directives|guidelines)`),
-	regexp.MustCompile(`(?:share|reveal|show|print|output|dump|repeat|give\s+me)\s+(?:your|the)\s+(?:system\s+)?(?:prompt|instructions|rules)`),
-	regexp.MustCompile(`(?:what\s+(?:is|are)\s+your\s+(?:system\s+)?(?:prompt|instructions|rules))`),
-}
+// Contextual trust-exploit rules are the authoritative injection detector.
+// Keeping duplicate phrase/regex triage floors here caused benign prose to be
+// routed to a missing judge and converted into a MEDIUM alert.
+var highSignalInjectionPatterns = []string{}
+var reviewInjectionPatterns = []string{}
+var reviewInjectionRegexes = []*regexp.Regexp{}
+var highSignalInjectionRegexes = []*regexp.Regexp{}
 
 // SSN format \d{3}-\d{2}-\d{4} is HIGH_SIGNAL (unambiguous).
 var ssnDashRegex = regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`)
@@ -1762,24 +1774,12 @@ func triagePatterns(direction, content string) []TriageSignal {
 				})
 			}
 		}
-		// Regex floor: typo / separator-evasion variants of the
-		// credential-file targets above. HIGH_SIGNAL because the
-		// regex set is opinionated enough that a positive match is
-		// not benign — see exfilRegexes for the discipline. This is
-		// what guarantees that "please dump etccc passwd" still
-		// blocks even if the exfil judge is unreachable.
-		for _, re := range exfilRegexes {
-			if loc, src, norm, ok := findRegexLoc(content, lower, re); ok {
-				ev := extractEvidenceAt(src, loc[0], loc[1])
-				if norm {
-					ev = "[normalized] " + ev
-				}
-				signals = append(signals, TriageSignal{
-					Level: "HIGH_SIGNAL", FindingID: "TRIAGE-EXFIL-REGEX",
-					Category: "exfil", Pattern: re.String(),
-					Evidence: ev, Confidence: 0.90,
-				})
-			}
+		if target, ok := findStrongExfilIntent(lower); ok {
+			signals = append(signals, TriageSignal{
+				Level: "HIGH_SIGNAL", FindingID: "TRIAGE-EXFIL-CONTEXT",
+				Category: "exfil", Pattern: "read-sensitive-target-egress",
+				Evidence: extractEvidence(content, lower, target), Confidence: 0.92,
+			})
 		}
 
 		// Bulk data access (NEEDS_REVIEW — judge decides if intent is benign).
@@ -1796,7 +1796,7 @@ func triagePatterns(direction, content string) []TriageSignal {
 	// `content` and `lower` via findRegexLoc so zero-width / Unicode-
 	// whitespace splicing ("123-45\u200B-6789", "4111\u00A04111…")
 	// cannot slip past SSN / 9-digit / credit-card triage.
-	if loc, src, norm, ok := findRegexLoc(content, lower, ssnDashRegex); ok {
+	if loc, src, norm, ok := findAcceptedRuleLoc(content, lower, "ENT-BULK-SSN", ssnDashRegex); ok {
 		ev := extractEvidenceAt(src, loc[0], loc[1])
 		if norm {
 			ev = "[normalized] " + ev
@@ -1818,7 +1818,7 @@ func triagePatterns(direction, content string) []TriageSignal {
 			Evidence: ev, Confidence: 0.30,
 		})
 	}
-	if loc, src, norm, ok := findRegexLoc(content, lower, creditCardRegex); ok {
+	if loc, src, norm, ok := findAcceptedRuleLoc(content, lower, "ENT-CC-VISA", creditCardRegex); ok {
 		ev := extractEvidenceAt(src, loc[0], loc[1])
 		if norm {
 			ev = "[normalized] " + ev
@@ -1851,9 +1851,17 @@ func triagePatterns(direction, content string) []TriageSignal {
 	// fallback the docstring on scanLocalPatterns above — which
 	// promises normalization defeats whitespace/slash-run evasions —
 	// would not hold for secrets.
-	for _, re := range secretPatternRegexes {
-		if loc, src, norm, ok := findRegexLoc(content, lower, re); ok {
-			ev := extractEvidenceAt(src, loc[0], loc[1])
+	for index, re := range secretPatternRegexes {
+		if match, norm, ok := findAcceptedLocalSecretMatch(content, lower, re, index); ok {
+			src := content
+			if norm {
+				src = lower
+			}
+			loc := strings.Index(src, match)
+			if loc < 0 {
+				continue
+			}
+			ev := extractEvidenceAt(src, loc, loc+len(match))
 			if norm {
 				ev = "[normalized] " + ev
 			}
