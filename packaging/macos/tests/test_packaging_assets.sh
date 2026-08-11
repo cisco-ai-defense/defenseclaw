@@ -104,6 +104,30 @@ t_install_bootstraps_guardian_and_enumerator() {
     "install.sh enumerates local users via the shared helper"
 }
 
+t_install_survives_zero_target_manifest() {
+  # AIFW-31486 regression guard: on a fresh customer box the AVC-shipped
+  # .pkg lands before the user has installed any supported connector CLI
+  # (Codex / ClaudeCode / Cursor). The zero-target render used to `die`
+  # here, which surfaced as the AVC postinstall logging
+  # "DefenseClaw install failed with exit code 1; continuing AVC install"
+  # and left the box with no hook-guardian daemon running at all.
+  #
+  # The new contract: warn and proceed. The hook-enumerator LaunchDaemon
+  # re-renders targets.yaml every 5 min, so the guardian picks up hooks
+  # the moment a connector CLI appears — no operator action required.
+  local body
+  body="$(cat "${PKG_DIR}/install.sh")"
+  # No `die` referencing the zero-target manifest condition may remain.
+  if grep -nE 'die[[:space:]].*hook-guardian manifest has zero targets' "${PKG_DIR}/install.sh" >/dev/null; then
+    _fail "install.sh still die()s on a zero-target manifest — regresses AIFW-31486; must warn+proceed so the enumerator can pick up connectors later"
+    return 1
+  fi
+  # And there must be an explicit warn on that path so an operator
+  # scanning /var/log/install.log can tell why hooks aren't wired yet.
+  assert_contains "${body}" 'warn "hook-guardian manifest has zero targets' \
+    "install.sh warns loudly when the initial manifest has zero targets (AIFW-31486)"
+}
+
 t_install_no_longer_hardcodes_single_target_user() {
   # Regression guard: the pre-2026.7.3 flow called
   #   "${GATEWAY_BIN}" enterprise hooks install --connector ... --user "${TARGET_USER}"
