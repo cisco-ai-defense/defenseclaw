@@ -228,6 +228,8 @@ func TestAlertFatigueBulkDataRequiresRecordsAcrossProfiles(t *testing.T) {
 			`{"type":"object","properties":{"ssn":{"type":"string"},"account_number":{"type":"string"}}}`,
 			`{"ssn":"REDACTED","account_number":"REDACTED"}`,
 			`{"ssn":731428065}`,
+			"{\"ssn\":\"731-42-8065\"}\n{\"account_number\":\"839201774\"}",
+			`[{"ssn":"731-42-8065"},{"account_number":"839201774"}]`,
 		},
 	}
 	positive := map[string][]string{
@@ -239,6 +241,7 @@ func TestAlertFatigueBulkDataRequiresRecordsAcrossProfiles(t *testing.T) {
 			`{"ssn":"731-42-8065","account_number":"839201774"}`,
 			`{"ssn":731428065,"account_number":839201774}`,
 			`{"ssn":"731-42-8065","account_number":839201774}`,
+			"{\n  \"ssn\": \"731-42-8065\",\n  \"account_number\": \"839201774\"\n}",
 		},
 	}
 
@@ -248,7 +251,7 @@ func TestAlertFatigueBulkDataRequiresRecordsAcrossProfiles(t *testing.T) {
 				rule := alertFatigueRule(t, profile, ruleID)
 				for _, sample := range samples {
 					if firstAcceptedRuleMatch(rule, sample) != nil {
-						t.Errorf("%s matched schema/header-only content", ruleID)
+						t.Errorf("%s matched benign or split-record content", ruleID)
 					}
 				}
 				for _, sample := range positive[ruleID] {

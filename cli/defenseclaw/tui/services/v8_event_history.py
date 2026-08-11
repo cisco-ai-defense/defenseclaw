@@ -97,18 +97,28 @@ _V8_ALERT_WHERE_SQL_TEMPLATE = """
                         ELSE '[]'
                     END
                 ) AS finding_tag
-                WHERE LOWER(CAST(finding_tag.value AS TEXT)) = 'detection-only'
+                WHERE LOWER(
+                    TRIM(
+                        CAST(finding_tag.value AS TEXT),
+                        char(9) || char(10) || char(11) ||
+                        char(12) || char(13) || ' '
+                    )
+                ) = 'detection-only'
             )
             AND LOWER(
-                COALESCE(
-                    CASE
-                        WHEN json_valid(COALESCE(payload_json, ''))
-                        THEN json_extract(
-                            payload_json,
-                            '$."defenseclaw.finding.tags"'
-                        )
-                    END,
-                    ''
+                TRIM(
+                    COALESCE(
+                        CASE
+                            WHEN json_valid(COALESCE(payload_json, ''))
+                            THEN json_extract(
+                                payload_json,
+                                '$."defenseclaw.finding.tags"'
+                            )
+                        END,
+                        ''
+                    ),
+                    char(9) || char(10) || char(11) ||
+                    char(12) || char(13) || ' '
                 )
             ) <> 'detection-only'
         )

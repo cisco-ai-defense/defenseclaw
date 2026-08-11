@@ -209,7 +209,7 @@ def test_reader_reprobes_unsupported_schema_after_migration() -> None:
 def test_large_detection_only_payload_keeps_tags_outside_payload_bound() -> None:
     store = _store()
     payload = {
-        "defenseclaw.finding.tags": ["secret", "detection-only"],
+        "defenseclaw.finding.tags": ["secret", " Detection-Only "],
         "defenseclaw.finding.description": "x" * (70 * 1024),
     }
     store.db.execute(
@@ -239,7 +239,7 @@ def test_large_detection_only_payload_keeps_tags_outside_payload_bound() -> None
 
 def test_scalar_detection_only_tag_remains_compatible() -> None:
     store = _store()
-    payload = {"defenseclaw.finding.tags": "detection-only"}
+    payload = {"defenseclaw.finding.tags": " \tDETECTION-ONLY\r\n"}
     store.db.execute(
         """INSERT INTO audit_events (
                id, timestamp, bucket, event_name, source, signal, severity,
