@@ -172,6 +172,32 @@ func TestHistoricalSensitiveEvidenceMigrationRejectsMalformedUnclassifiedLegacyT
 	}
 }
 
+func TestHistoricalSensitiveEvidenceMigrationRejectsMalformedSensitiveScanResultAtomically(t *testing.T) {
+	fixture := newHistoricalSensitiveEvidenceFixture(t)
+	const malformedRawJSON = `{"findings":[`
+	if _, err := fixture.store.db.Exec(
+		`UPDATE scan_results SET raw_json=? WHERE id='historical-scan'`, malformedRawJSON,
+	); err != nil {
+		t.Fatal(err)
+	}
+	before := historicalSensitiveEvidenceSnapshot(t, fixture.store.db)
+
+	err := fixture.store.applyMigration(fixture.migrationVersion, fixture.migration)
+	if err == nil || !strings.Contains(err.Error(), "decode historical sensitive scan result JSON") {
+		t.Fatalf("malformed sensitive scan-result migration error=%v", err)
+	}
+	after := historicalSensitiveEvidenceSnapshot(t, fixture.store.db)
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("malformed sensitive scan-result failure did not roll back every surface:\nbefore=%s\nafter=%s",
+			before, after)
+	}
+	version, versionErr := fixture.store.SchemaVersion()
+	if versionErr != nil || version != fixture.migrationVersion-1 {
+		t.Fatalf("schema version after malformed sensitive scan-result refusal=%d want=%d err=%v",
+			version, fixture.migrationVersion-1, versionErr)
+	}
+}
+
 func TestHistoricalSensitiveEvidenceMigrationRollsBackEverySurface(t *testing.T) {
 	fixture := newHistoricalSensitiveEvidenceFixture(t)
 	if _, err := fixture.store.db.Exec(fmt.Sprintf(`

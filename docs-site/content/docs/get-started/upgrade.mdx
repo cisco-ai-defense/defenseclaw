@@ -268,8 +268,14 @@ and the complete repair rolls back.
 A repaired canonical projection receives a new SHA-256 projection hash. The
 migration does not have access to the runtime signing key, so it clears the old
 HMAC, algorithm, and key identifier. Integrity verification therefore reports
-the row as `unsigned` with a valid projection hash instead of treating the old
-signature as evidence for bytes it never signed.
+that projected row as `unsigned` with a valid projection hash instead of
+treating the old signature as evidence for bytes it never signed.
+
+Some older rows retained only `payload_json` and never stored a canonical
+projection. When the repair rewrites one of those payload-only rows, it clears
+the stale `projection_hash` together with the signing metadata. Verification
+reports the row as `not_projected`; it does not present the repaired payload as
+an unsigned projected record.
 
 <Callout title="Keep the database offline during manual custody or cleanup">
 The release-owned resolver already stops the gateway while it backs up and
