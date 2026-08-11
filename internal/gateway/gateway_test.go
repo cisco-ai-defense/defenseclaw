@@ -3551,10 +3551,10 @@ func TestAPIAlertsAndAuditEventHandlers(t *testing.T) {
 	if err := json.NewDecoder(alertsW.Result().Body).Decode(&alerts); err != nil {
 		t.Fatalf("decode alerts: %v", err)
 	}
-	// /alerts is the mutable v7 acknowledgement queue. Canonical v8 history is
-	// immutable and therefore must not be projected into that queue.
+	// /alerts is a semantic view over immutable history. Ordinary successful
+	// tool-call telemetry is not alert-eligible and must stay in Audit only.
 	if len(alerts) != 0 {
-		t.Fatalf("legacy acknowledgement queue included canonical rows: %#v", alerts)
+		t.Fatalf("semantic alert view included clean telemetry: %#v", alerts)
 	}
 	events, err := store.ListEvents(10)
 	if err != nil {

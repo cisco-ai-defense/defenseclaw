@@ -33,7 +33,6 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
-	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -3607,20 +3606,21 @@ func (s *Store) ListAlerts(limit int) ([]Event, error) {
 	legacyActions := legacyAlertEligibleActions()
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(legacyActions)), ",")
 	query := `SELECT event.id, event.timestamp, event.action, event.target, event.actor,
-			event.details, event.structured_json, event.severity, event.run_id,
+			event.details, event.structured_json, ` + alertEffectiveSeveritySQL() + `,
+			event.run_id,
 			event.trace_id, event.request_id
 		 FROM audit_events AS event
-		 WHERE (
-			(event.bucket = ? AND event.event_name = 'finding.observed')
-			OR (event.bucket IS NULL AND event.action IN (` + placeholders + `))
-		 )
-		 AND event.severity IN ('CRITICAL','HIGH','MEDIUM','LOW','ERROR','INFO')
+		 WHERE (event.bucket IS NULL OR event.bucket IN (
+			'security.finding','enforcement.action','network.egress',
+			'platform.health','diagnostic'
+		 ))
+		 AND ` + alertEligibilitySQL(placeholders) + `
 		 AND NOT EXISTS (
 			 SELECT 1 FROM alert_acknowledgement_projection AS projection
 			 WHERE projection.alert_id = event.id
 		 )
 		 ORDER BY event.timestamp DESC LIMIT ?`
-	args := []any{string(observability.BucketSecurityFinding)}
+	args := make([]any, 0, len(legacyActions)+1)
 	for _, action := range legacyActions {
 		args = append(args, action)
 	}

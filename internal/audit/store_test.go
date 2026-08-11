@@ -578,12 +578,19 @@ func TestAlertAcknowledgementTargetsUseExactEligibility(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := store.db.Exec(`INSERT INTO audit_events (
-		id, timestamp, action, actor, details, severity, bucket, event_name
+		id, timestamp, action, actor, details, severity, bucket, event_name,
+		payload_json
 	) VALUES
 		('v8-finding', '2026-07-07T10:00:00Z', 'scan-finding', 'scanner', 'finding',
-		 'HIGH', 'security.finding', 'finding.observed'),
+		 'HIGH', 'security.finding', 'finding.observed', '{}'),
 		('v8-platform', '2026-07-07T10:00:01Z', 'sink-failure', 'system', 'degraded',
-		 'HIGH', 'platform.health', 'subsystem.degraded')`); err != nil {
+		 'HIGH', 'platform.health', 'subsystem.degraded', '{}'),
+		('v8-enforcement', '2026-07-07T10:00:02Z', 'allowed', 'gateway', 'blocked',
+		 'INFO', 'enforcement.action', 'enforcement.decision',
+		 '{"defenseclaw.enforcement.effective_action":"block"}'),
+		('v8-detection-only', '2026-07-07T10:00:03Z', 'scan-finding', 'scanner', 'source telemetry',
+		 'HIGH', 'security.finding', 'finding.observed',
+		 '{"defenseclaw.finding.tags":["detection-only"]}')`); err != nil {
 		t.Fatal(err)
 	}
 	targets, err := store.ListAlertAcknowledgementTargets(context.Background(), "all")
@@ -594,8 +601,9 @@ func TestAlertAcknowledgementTargetsUseExactEligibility(t *testing.T) {
 	for _, target := range targets {
 		targetIDs[target.AlertID] = target.ProjectionVersion == 0
 	}
-	if len(targets) != 3 || !targetIDs["eligible-alert"] || !targetIDs["v8-finding"] ||
-		!targetIDs["v8-platform"] {
+	if len(targets) != 4 || !targetIDs["eligible-alert"] || !targetIDs["v8-finding"] ||
+		!targetIDs["v8-platform"] || !targetIDs["v8-enforcement"] ||
+		targetIDs["v8-detection-only"] {
 		t.Fatalf("targets=%+v", targets)
 	}
 	alerts, err := store.ListAlerts(10)
@@ -603,11 +611,22 @@ func TestAlertAcknowledgementTargetsUseExactEligibility(t *testing.T) {
 		t.Fatal(err)
 	}
 	alertIDs := map[string]bool{}
+	alertSeverities := map[string]string{}
 	for _, alert := range alerts {
 		alertIDs[alert.ID] = true
+		alertSeverities[alert.ID] = alert.Severity
 	}
-	if len(alerts) != 2 || !alertIDs["eligible-alert"] || !alertIDs["v8-finding"] {
+	if len(alerts) != 4 || !alertIDs["eligible-alert"] || !alertIDs["v8-finding"] ||
+		!alertIDs["v8-platform"] || !alertIDs["v8-enforcement"] ||
+		alertIDs["v8-detection-only"] || alertSeverities["v8-enforcement"] != "HIGH" {
 		t.Fatalf("alerts=%+v", alerts)
+	}
+	counts, err := store.GetCounts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.Alerts != len(alerts) {
+		t.Fatalf("active alert count=%d, REST alerts=%d", counts.Alerts, len(alerts))
 	}
 }
 

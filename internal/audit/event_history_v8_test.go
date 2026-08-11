@@ -672,7 +672,7 @@ func TestExactLogLifecycleAndExecutionAttributesRejectAliasesAndInvalidValues(t 
 	}
 }
 
-func TestLegacyAlertQueryCannotTreatV8HistoryAsMutableQueue(t *testing.T) {
+func TestSemanticAlertQueryIncludesV8HistoryWithoutMutatingIt(t *testing.T) {
 	store := newV8HistoryStore(t)
 	writer, err := NewEventHistoryWriter(store, nil, nil, testLocalProfileResolver{profile: observabilityredaction.ProfileNone})
 	if err != nil {
@@ -687,8 +687,8 @@ func TestLegacyAlertQueryCannotTreatV8HistoryAsMutableQueue(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(alerts) != 0 {
-		t.Fatalf("legacy alert query included v8 immutable history: %#v", alerts)
+	if len(alerts) != 1 || alerts[0].ID != record.RecordID() || alerts[0].Severity != "HIGH" {
+		t.Fatalf("semantic alert query omitted v8 immutable history: %#v", alerts)
 	}
 	if got := loadV8HistoryRow(t, store, record.RecordID()).Severity; got != "HIGH" {
 		t.Fatalf("v8 immutable severity changed to %q", got)
