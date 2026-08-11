@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -239,6 +240,10 @@ def test_no_pull_request_workflow_can_run_full_or_signed_certification() -> None
         "cosign sign-blob",
         "historical-dependency-canary:",
     )
+    protocol_invocation = re.compile(
+        r"^\s*(?:bash\s+)?scripts/test-upgrade-protocol-release\.sh(?:\s|\\|$)",
+        re.MULTILINE,
+    )
     for path in pull_request_workflows:
         text = path.read_text(encoding="utf-8")
         for contract in forbidden:
@@ -246,9 +251,9 @@ def test_no_pull_request_workflow_can_run_full_or_signed_certification() -> None
 
         for job in (_workflow(path).get("jobs") or {}).values():
             for step in job.get("steps", []):
-                rendered = _render(step)
-                if "scripts/test-upgrade-protocol-release.sh" in rendered:
-                    assert "--refusal-contract-only" in rendered, path
+                command = _render(step.get("run", ""))
+                if protocol_invocation.search(command):
+                    assert "--refusal-contract-only" in command, path
 
 
 def test_main_smoke_is_bound_to_exact_sha_and_runs_representative_canary() -> None:

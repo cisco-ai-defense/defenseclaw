@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import subprocess
 import textwrap
 from pathlib import Path
@@ -28,6 +29,21 @@ UPGRADE_RELEASE_SMOKE = ROOT / "scripts" / "test-upgrade-release.sh"
 
 def _source() -> str:
     return INSTALLER.read_text(encoding="utf-8")
+
+
+def _internal_macos_pathspecs() -> set[str]:
+    text = MACOS_CI_WORKFLOW.read_text(encoding="utf-8")
+    match = re.search(
+        r"^\s+macos_paths=\(\n(?P<body>.*?)^\s+\)$",
+        text,
+        re.MULTILINE | re.DOTALL,
+    )
+    assert match is not None
+    return {
+        line.strip().strip("'\"")
+        for line in match.group("body").splitlines()
+        if line.strip()
+    }
 
 
 def test_bundled_runtime_installer_is_fresh_install_only_before_mutation() -> None:
@@ -260,7 +276,7 @@ def test_macos_release_signing_credentials_have_exact_optional_tristate() -> Non
     assert "DefenseClawMac-${VERSION}-macos-arm64-unverified.zip" in build
 
 
-def test_macos_package_ci_runs_for_every_exact_main_sha_with_stable_aggregate() -> None:
+def test_macos_package_ci_always_reports_and_runs_expensive_work_selectively() -> None:
     workflow = yaml.load(
         MACOS_CI_WORKFLOW.read_text(encoding="utf-8"),
         Loader=yaml.BaseLoader,
@@ -269,21 +285,63 @@ def test_macos_package_ci_runs_for_every_exact_main_sha_with_stable_aggregate() 
 
     assert set(triggers) == {"push", "pull_request", "workflow_dispatch"}
     assert triggers["push"] == {"branches": ["main"]}
+    assert triggers["pull_request"] == {}
     assert workflow["concurrency"] == {
         "group": ("macos-app-${{ github.event_name }}-${{ github.event.pull_request.number || github.sha }}"),
         "cancel-in-progress": "true",
     }
+
+    changes = workflow["jobs"]["changes"]
+    assert changes["outputs"] == {"macos": "${{ steps.detect.outputs.macos }}"}
+    checkout = changes["steps"][0]
+    assert checkout["if"] == "${{ github.event_name == 'pull_request' }}"
+    assert checkout["with"] == {
+        "fetch-depth": "0",
+        "persist-credentials": "false",
+    }
+    detector = changes["steps"][1]
+    assert detector["env"] == {
+        "EVENT_NAME": "${{ github.event_name }}",
+        "BASE_SHA": "${{ github.event.pull_request.base.sha }}",
+        "HEAD_SHA": "${{ github.event.pull_request.head.sha }}",
+    }
+    detection = detector["run"]
+    assert 'git cat-file -e "${BASE_SHA}^{commit}"' in detection
+    assert 'git cat-file -e "${HEAD_SHA}^{commit}"' in detection
+    assert detection.count("=~ ^[0-9a-f]{40}$") == 2
+    assert '[[ "$BASE_SHA" == "$HEAD_SHA" ]]' in detection
+    assert (
+        'git diff --quiet --no-renames "$BASE_SHA" "$HEAD_SHA" -- "${macos_paths[@]}"'
+        in detection
+    )
+    assert 'echo "macos=false" >> "$GITHUB_OUTPUT"' in detection
+    assert 'echo "macos=true" >> "$GITHUB_OUTPUT"' in detection
+    assert "unexpected macOS app workflow event" in detection
+    assert "macOS app path detection failed" in detection
+
+    for job_name in ("license-headers", "build-and-test"):
+        job = workflow["jobs"][job_name]
+        assert job["needs"] == "changes"
+        assert job["if"] == "${{ needs.changes.outputs.macos == 'true' }}"
+
     aggregate = workflow["jobs"]["macos-app-required"]
     assert aggregate["name"] == "macOS App Required"
-    assert aggregate["needs"] == ["license-headers", "build-and-test"]
+    assert aggregate["needs"] == ["changes", "license-headers", "build-and-test"]
     assert aggregate["if"] == "${{ always() }}"
     assert aggregate["steps"][0]["env"] == {
+        "CHANGES_RESULT": "${{ needs.changes.result }}",
+        "MACOS_CHANGED": "${{ needs.changes.outputs.macos }}",
         "LICENSE_HEADERS_RESULT": "${{ needs.license-headers.result }}",
         "BUILD_AND_TEST_RESULT": "${{ needs.build-and-test.result }}",
     }
     command = aggregate["steps"][0]["run"]
+    assert 'test "$CHANGES_RESULT" = success' in command
     assert 'test "$LICENSE_HEADERS_RESULT" = success' in command
     assert 'test "$BUILD_AND_TEST_RESULT" = success' in command
+    assert 'test "$LICENSE_HEADERS_RESULT" = skipped' in command
+    assert 'test "$BUILD_AND_TEST_RESULT" = skipped' in command
+    assert "expensive validation was intentionally skipped" in command
+    assert "unexpected macOS app path decision" in command
 
 
 def test_macos_ci_gates_release_wrappers_with_system_bash() -> None:
@@ -291,10 +349,34 @@ def test_macos_ci_gates_release_wrappers_with_system_bash() -> None:
         MACOS_CI_WORKFLOW.read_text(encoding="utf-8"),
         Loader=yaml.BaseLoader,
     )
-    triggers = workflow["on"]
-    watched_paths = triggers["pull_request"]["paths"]
-    assert "scripts/test-upgrade-protocol-release.sh" in watched_paths
-    assert ".github/workflows/release-candidate-smoke.yml" in watched_paths
+    pathspecs = _internal_macos_pathspecs()
+    assert pathspecs == {
+        ":(glob)macos/**",
+        "scripts/build-macos-app-release.sh",
+        "scripts/check-macos-upstream.py",
+        "scripts/export-uv-overrides.py",
+        "scripts/generate-upgrade-manifest.py",
+        "scripts/macos_license_headers.py",
+        "scripts/release_candidate.py",
+        "scripts/source_release_identity.py",
+        "scripts/stamp-version.sh",
+        "scripts/test-upgrade-protocol-release.sh",
+        "scripts/test-upgrade-release.sh",
+        "scripts/update-macos-app.sh",
+        "scripts/verify-macos-app-release.sh",
+        "release/source-install-identity.json",
+        "release/upgrade-baselines.json",
+        "Makefile",
+        "pyproject.toml",
+        ":(glob)cli/**",
+        "go.mod",
+        "go.sum",
+        ":(glob)cmd/**",
+        ":(glob)internal/**",
+        ":(glob)extensions/defenseclaw/**",
+        ".github/workflows/macos-app.yml",
+        ".github/workflows/release-candidate-smoke.yml",
+    }
 
     steps = workflow["jobs"]["build-and-test"]["steps"]
     gate = next(step for step in steps if step.get("name") == "Exercise release wrappers with system Bash")
@@ -359,18 +441,17 @@ def test_macos_ci_builds_and_verifies_reviewed_runtime_fixture_first() -> None:
     package_step = workflow[package : workflow.index("- uses:", package)]
     assert 'scripts/build-macos-app-release.sh "$MACOS_CI_RELEASE_VERSION" dist' in package_step
     assert "make macos-app-release" not in package_step
-    for watched in (
-        '"cli/**"',
-        '"release/source-install-identity.json"',
-        '"release/upgrade-baselines.json"',
-        '"scripts/generate-upgrade-manifest.py"',
-        '"scripts/release_candidate.py"',
-        '"scripts/source_release_identity.py"',
-        '"scripts/test-upgrade-protocol-release.sh"',
-        '"scripts/test-upgrade-release.sh"',
-        '".github/workflows/release-candidate-smoke.yml"',
-    ):
-        assert workflow.count(watched) == 1
+    assert {
+        ":(glob)cli/**",
+        "release/source-install-identity.json",
+        "release/upgrade-baselines.json",
+        "scripts/generate-upgrade-manifest.py",
+        "scripts/release_candidate.py",
+        "scripts/source_release_identity.py",
+        "scripts/test-upgrade-protocol-release.sh",
+        "scripts/test-upgrade-release.sh",
+        ".github/workflows/release-candidate-smoke.yml",
+    }.issubset(_internal_macos_pathspecs())
     assert 'make -C "${build_root}" dist-cli DIST_DIR="${out}"' in smoke
     assert 'make -C "${build_root}" dist-plugin DIST_DIR="${out}"' in smoke
     assert '"${build_root}/scripts/generate-upgrade-manifest.py"' in smoke
