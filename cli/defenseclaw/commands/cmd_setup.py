@@ -9414,17 +9414,22 @@ def _wait_for_defense_gateway_api(
 
             raw_started_at = health.get("started_at") if health is not None else None
             started_at = raw_started_at.strip() if isinstance(raw_started_at, str) else ""
-            if not started_at or started_at == previous_generation.started_at:
+            if not started_at:
                 ready = False
-            try:
-                started_epoch = datetime.fromisoformat(started_at.replace("Z", "+00:00")).timestamp()
-            except (OverflowError, ValueError):
-                started_epoch = 0.0
-            if (
-                previous_generation.started_at is None
-                and started_epoch < previous_generation.replacement_not_before
-            ):
-                ready = False
+            elif previous_generation.started_at is not None:
+                if started_at == previous_generation.started_at:
+                    ready = False
+            else:
+                try:
+                    parsed_started_at = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+                    if parsed_started_at.tzinfo is None or parsed_started_at.utcoffset() is None:
+                        raise ValueError("gateway started_at must include a timezone")
+                    started_epoch = parsed_started_at.timestamp()
+                except (OverflowError, ValueError):
+                    ready = False
+                else:
+                    if started_epoch < previous_generation.replacement_not_before:
+                        ready = False
 
         if ready and expected:
             running: set[str] = set()
