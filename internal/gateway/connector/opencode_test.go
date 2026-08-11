@@ -49,6 +49,13 @@ func TestOpenCodeSetup_WritesBridgePlugin(t *testing.T) {
 	if err := conn.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
+	present, err := OwnedHooksPresent(conn, opts)
+	if err != nil {
+		t.Fatalf("OwnedHooksPresent after setup: %v", err)
+	}
+	if !present {
+		t.Fatal("OwnedHooksPresent after setup = false, want true")
+	}
 
 	raw, err := os.ReadFile(pluginPath)
 	if err != nil {

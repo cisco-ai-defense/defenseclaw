@@ -825,6 +825,34 @@ func (c *hookOnlyConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	return nil
 }
 
+// ownedHookContractPresent verifies the agent-visible plugin identity for
+// plugin-artifact connectors. The generic config reader intentionally parses
+// structured JSON/YAML/TOML hook registrations; an auto-loaded JavaScript
+// plugin is instead authoritative when its exact versioned ownership marker
+// is present in the installed regular file.
+func (c *hookOnlyConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) {
+	if !c.pluginArtifact {
+		return ownedHooksPresentInConfig(c, opts)
+	}
+	path := c.configPath(opts)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("%s read managed plugin %s: %w", c.name, path, err)
+	}
+	tmpl, err := hookFS.ReadFile("hooks/" + c.pluginArtifactAsset)
+	if err != nil {
+		return false, fmt.Errorf("%s read plugin template %s: %w", c.name, c.pluginArtifactAsset, err)
+	}
+	marker, _, _ := bytes.Cut(tmpl, []byte("\n"))
+	if len(marker) == 0 || !bytes.HasPrefix(marker, []byte("// defenseclaw-managed-plugin v")) {
+		return false, fmt.Errorf("%s managed plugin identity is invalid", c.name)
+	}
+	return bytes.Contains(data, marker), nil
+}
+
 // setupPluginArtifact renders the embedded bridge-plugin template
 // (APIAddr / APIToken / FailMode substituted) and writes it to the host
 // agent's auto-load plugin directory at 0o600 (it carries the gateway

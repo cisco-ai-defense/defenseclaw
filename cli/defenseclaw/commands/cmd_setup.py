@@ -158,6 +158,10 @@ _TOKEN_ROTATION_CHILD_ENV_ALLOWLIST = (
     # connector homes; preserve that binding across every rotation child.
     "CODEX_HOME",
     "CLAUDE_CONFIG_DIR",
+    # Connector setup may require an operator-approved user-owned runtime
+    # prefix. Preserve that explicit trust decision across the A/B lifecycle;
+    # every executable still passes connector-specific ownership and mode checks.
+    "DEFENSECLAW_TRUSTED_BIN_PREFIXES",
 )
 _NATIVE_SPLUNK_CONFIG_SNAPSHOT_ATTR = "_native_splunk_config_snapshot"
 _NATIVE_SPLUNK_DOTENV_SNAPSHOT_ATTR = "_native_splunk_dotenv_snapshot"
