@@ -93,6 +93,7 @@ from defenseclaw.file_permissions import (
     darwin_acl_write_error,
     delete_file_durable,
     dotenv_key_is_valid,
+    read_regular_file_no_follow,
     reject_reparse_path,
     windows_acl_custody_confidentiality_error,
     windows_acl_custody_write_error,

@@ -1860,6 +1860,17 @@ class TestIsPidAlive(unittest.TestCase):
         self.assertFalse(_gateway_pid_file_identifies_gateway(pid_file))
 
 
+class TestGatewayPidGenerationMarker(unittest.TestCase):
+    def test_reads_current_pid_record(self):
+        from defenseclaw.commands.cmd_setup import _gateway_pid_generation_marker
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pid_record = b'{"pid":4242,"start_time":12345}\n'
+            Path(tmpdir, "gateway.pid").write_bytes(pid_record)
+
+            self.assertEqual(_gateway_pid_generation_marker(tmpdir), pid_record)
+
+
 class TestRestartDefenseGateway(unittest.TestCase):
     @unittest.skipUnless(os.name == "nt", "native Windows package contract")
     @patch(
