@@ -79,7 +79,7 @@ func recordManagedAIDFailOpenMetricV8(
 				observability.MetricDefenseClawManagedAidFailOpenDecisionsInput{
 					Envelope:                envelope,
 					Value:                   1,
-					DefenseClawMetricReason: observability.Present(reason),
+					DefenseClawMetricReason: reason,
 				},
 			)
 		},

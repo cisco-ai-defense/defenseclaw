@@ -211,8 +211,19 @@ func (a *APIServer) managedAIDOnly() bool {
 // down / timeout / token failure — hookAIDInspect returns nil), the request
 // fails open with an explicit allow verdict.
 func (a *APIServer) inspectManagedAIDOnly(ctx context.Context, toolName, content string) *ToolInspectVerdict {
+	failOpenReason := aidFailOpenUnavailable
+	if a == nil || a.ciscoInspector == nil || a.scannerCfg == nil ||
+		!a.scannerCfg.CiscoAIDefense.HookSurfaceEnabled() {
+		failOpenReason = aidFailOpenUnwired
+	} else if content == "" {
+		failOpenReason = aidFailOpenNoContent
+	}
 	aid := a.hookAIDInspect(ctx, toolName, content)
 	if aid == nil {
+		metricRuntime, _ := a.observabilityV8LifecycleRuntime().(hookLifecycleMetricV8Runtime)
+		if metricRuntime != nil {
+			_ = recordManagedAIDFailOpenMetricV8(ctx, metricRuntime, failOpenReason)
+		}
 		return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
 	}
 	return mergeWithAIDVerdict(nil, aid)

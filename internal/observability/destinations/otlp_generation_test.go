@@ -610,7 +610,7 @@ func TestManagedAIDFailOpenMetricOTLPExporterPreservesBoundedReasonContract(t *t
 					ConfigGeneration: int64(generation), ConfigDigest: digest,
 				},
 			},
-			Value: 1, DefenseClawMetricReason: observability.Present("aid_unavailable"),
+			Value: 1, DefenseClawMetricReason: "aid_unavailable",
 		},
 	)
 	if err != nil {

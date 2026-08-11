@@ -7855,14 +7855,20 @@ groups:
   extends: []
   attributes:
   - ref: defenseclaw.metric.reason
-    requirement_level: recommended
+    requirement_level: required
+    constraints:
+      enum:
+      - inspector_unwired
+      - aid_unavailable
+      - no_content
+      - unknown
   body_fields: []
   metric:
     instrument_name: defenseclaw.managed_aid.fail_open.decisions
     instrument_type: counter
     value_type: int64
     unit: '{decision}'
-    description: Managed AI Defense inspections that allowed because inspection was unwired, unavailable, or had no content
+    description: Managed AI Defense inspections that allowed because inspection was unwired, unavailable, had no content, or returned an unknown fail-open reason
     temporality: delta
     label_projections:
     - profile: local-observability-v1

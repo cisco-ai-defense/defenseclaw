@@ -210,6 +210,63 @@ func TestHookManagedAIDOnly_MessageContentFailOpen(t *testing.T) {
 	}
 }
 
+func TestHookManagedAIDOnly_FailOpenRecordsBoundedReasonMetric(t *testing.T) {
+	cases := []struct {
+		name       string
+		inspector  Inspector
+		content    string
+		wantReason string
+	}{
+		{
+			name:       "unwired inspector",
+			content:    "ordinary payload",
+			wantReason: aidFailOpenUnwired,
+		},
+		{
+			name:       "AID returns no verdict",
+			inspector:  &stubAIDInspector{verdict: nil},
+			content:    "ordinary payload",
+			wantReason: aidFailOpenUnavailable,
+		},
+		{
+			name:       "no content",
+			inspector:  &stubAIDInspector{verdict: blockVerdict()},
+			wantReason: aidFailOpenNoContent,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			capture := &managedAIDFailOpenCapture{}
+			api := managedHookServer(tc.inspector)
+			api.bindObservabilityV8Lifecycle(capture)
+
+			verdict := api.inspectManagedAIDOnly(t.Context(), "run_shell", tc.content)
+			if verdict == nil || verdict.Action != "allow" {
+				t.Fatalf("fail-open verdict = %+v, want allow", verdict)
+			}
+			if len(capture.metricErrors) != 0 || len(capture.metricRecords) != 1 {
+				t.Fatalf(
+					"canonical fail-open metrics=%d errors=%v, want one",
+					len(capture.metricRecords), capture.metricErrors,
+				)
+			}
+			instrumentValue, present := capture.metricRecords[0].InstrumentData()
+			if !present {
+				t.Fatal("canonical fail-open metric has no instrument data")
+			}
+			instrument, err := instrumentValue.Object()
+			if err != nil {
+				t.Fatal(err)
+			}
+			attributes, ok := instrument["attributes"].(map[string]any)
+			if !ok || fmt.Sprint(instrument["value"]) != "1" ||
+				attributes["defenseclaw.metric.reason"] != tc.wantReason {
+				t.Fatalf("canonical fail-open metric instrument=%v", instrument)
+			}
+		})
+	}
+}
+
 // --- Fail-open observability ------------------------------------------------
 
 type managedAIDFailOpenCapture struct {
