@@ -16,6 +16,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -49,6 +51,24 @@ func (s *stubAIDInspector) Inspect(_ context.Context, _ []ChatMessage) *ScanVerd
 }
 
 func (s *stubAIDInspector) bindObservabilityV8(_ hookLifecycleMetricV8Runtime) {}
+
+type cancelGatedAIDInspector struct {
+	started  chan struct{}
+	canceled chan struct{}
+	release  chan struct{}
+	calls    int
+}
+
+func (s *cancelGatedAIDInspector) Inspect(ctx context.Context, _ []ChatMessage) *ScanVerdict {
+	s.calls++
+	close(s.started)
+	<-ctx.Done()
+	close(s.canceled)
+	<-s.release
+	return nil
+}
+
+func (s *cancelGatedAIDInspector) bindObservabilityV8(_ hookLifecycleMetricV8Runtime) {}
 
 // blockVerdict is a convenience AID block verdict. CRITICAL severity is
 // used so the proxy prompt-surface UX contract (clampPromptDirectionVerdict,
@@ -287,6 +307,140 @@ func TestHookManagedAIDOnly_FailOpenProductionPathsRecordBoundedReasonMetric(t *
 			}
 		})
 	}
+}
+
+func TestHookManagedAIDOnly_HTTPFailOpenAccountingFollowsReturnedOutcome(t *testing.T) {
+	t.Run("accounting helper consumes a selected reason exactly once", func(t *testing.T) {
+		capture := &managedAIDFailOpenCapture{}
+		api := managedHookServer(nil)
+		api.bindObservabilityV8Lifecycle(capture)
+		verdict := &ToolInspectVerdict{managedAIDFailOpenReason: aidFailOpenUnavailable}
+
+		api.recordManagedAIDFailOpenVerdict(t.Context(), verdict)
+		api.recordManagedAIDFailOpenVerdict(t.Context(), verdict)
+
+		if len(capture.metricErrors) != 0 || len(capture.metricRecords) != 1 {
+			t.Fatalf(
+				"repeated accounting calls recorded metrics=%d errors=%v, want exactly one",
+				len(capture.metricRecords), capture.metricErrors,
+			)
+		}
+	})
+
+	t.Run("successful fail-open response records exactly once", func(t *testing.T) {
+		capture := &managedAIDFailOpenCapture{}
+		stub := &stubAIDInspector{verdict: nil}
+		api := testAPIServerWithConfig(t, "action")
+		api.scannerCfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+		api.SetCiscoInspector(stub)
+		api.bindObservabilityV8Lifecycle(capture)
+
+		response, verdict := postInspect(
+			t,
+			api,
+			`{"tool":"run_shell","args":{"command":"echo managed"}}`,
+		)
+		if response.Code != http.StatusOK || verdict.Action != "allow" {
+			t.Fatalf("managed fail-open response status=%d verdict=%+v, want 200 allow", response.Code, verdict)
+		}
+		if stub.calls != 1 {
+			t.Fatalf("remote calls=%d, want 1", stub.calls)
+		}
+		if len(capture.metricErrors) != 0 || len(capture.metricRecords) != 1 {
+			t.Fatalf(
+				"returned fail-open metrics=%d errors=%v, want exactly one",
+				len(capture.metricRecords), capture.metricErrors,
+			)
+		}
+		instrumentValue, present := capture.metricRecords[0].InstrumentData()
+		if !present {
+			t.Fatal("returned fail-open metric has no instrument data")
+		}
+		instrument, err := instrumentValue.Object()
+		if err != nil {
+			t.Fatal(err)
+		}
+		attributes, ok := instrument["attributes"].(map[string]any)
+		if !ok || attributes["defenseclaw.metric.reason"] != aidFailOpenUnavailable {
+			t.Fatalf("returned fail-open metric instrument=%v", instrument)
+		}
+	})
+
+	t.Run("parent cancellation returns 504 and discards a later worker candidate", func(t *testing.T) {
+		capture := &managedAIDFailOpenCapture{}
+		stub := &cancelGatedAIDInspector{
+			started:  make(chan struct{}),
+			canceled: make(chan struct{}),
+			release:  make(chan struct{}),
+		}
+		api := testAPIServerWithConfig(t, "action")
+		api.scannerCfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+		api.inspectToolScanTimeout = 30 * time.Second
+		api.SetCiscoInspector(stub)
+		api.bindObservabilityV8Lifecycle(capture)
+		workerDone := make(chan struct{})
+		api.inspectToolWorkerDone = func() { close(workerDone) }
+
+		released := false
+		t.Cleanup(func() {
+			if !released {
+				close(stub.release)
+			}
+		})
+		parentCtx, cancelParent := context.WithCancel(context.Background())
+		t.Cleanup(cancelParent)
+		request := httptest.NewRequest(
+			http.MethodPost,
+			"/api/v1/inspect/tool",
+			bytes.NewBufferString(`{"tool":"run_shell","args":{"command":"echo managed"}}`),
+		).WithContext(parentCtx)
+		response := httptest.NewRecorder()
+		handlerDone := make(chan struct{})
+		go func() {
+			defer close(handlerDone)
+			api.handleInspectTool(response, request)
+		}()
+		select {
+		case <-stub.started:
+		case <-time.After(5 * time.Second):
+			t.Fatal("request never reached AID")
+		}
+		cancelParent()
+		select {
+		case <-stub.canceled:
+		case <-time.After(5 * time.Second):
+			t.Fatal("request cancellation never reached AID")
+		}
+		select {
+		case <-handlerDone:
+		case <-time.After(5 * time.Second):
+			t.Fatal("canceled handler did not return")
+		}
+
+		if response.Code != http.StatusGatewayTimeout {
+			t.Fatalf("timed-out managed response status=%d body=%s, want 504", response.Code, response.Body.String())
+		}
+		if len(capture.metricRecords) != 0 || len(capture.metricErrors) != 0 {
+			t.Fatalf("504 recorded fail-open before worker release: records=%d errors=%v", len(capture.metricRecords), capture.metricErrors)
+		}
+
+		close(stub.release)
+		released = true
+		select {
+		case <-workerDone:
+		case <-time.After(5 * time.Second):
+			t.Fatal("timed-out managed worker did not finish")
+		}
+		if stub.calls != 1 {
+			t.Fatalf("remote calls=%d, want 1", stub.calls)
+		}
+		if len(capture.metricRecords) != 0 || len(capture.metricErrors) != 0 {
+			t.Fatalf(
+				"504 recorded fail-open after worker completion: records=%d errors=%v",
+				len(capture.metricRecords), capture.metricErrors,
+			)
+		}
+	})
 }
 
 // --- Fail-open observability ------------------------------------------------

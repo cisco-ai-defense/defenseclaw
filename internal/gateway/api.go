@@ -81,6 +81,11 @@ type APIServer struct {
 	// exercise policy semantics can use a larger budget so race-detector
 	// scheduler latency is not mistaken for a scanner verdict.
 	inspectToolScanTimeout time.Duration
+	// inspectToolWorkerDone is a test-only completion barrier for the detached
+	// scan worker. Production constructors leave it nil. It lets timeout tests
+	// prove that post-cancellation worker completion cannot record a fail-open
+	// decision after the handler has already returned 504.
+	inspectToolWorkerDone func()
 
 	// observabilityV8Mu protects the complete process-owned runtime capability
 	// set. Sidecar publishes or detaches all four seams atomically.

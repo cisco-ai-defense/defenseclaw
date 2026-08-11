@@ -123,6 +123,11 @@ type ToolInspectVerdict struct {
 	// ctx / emitted events. Tri-state (nil/true/false); never
 	// serialized on the hook response wire.
 	RedactionEnabled *bool `json:"-"`
+	// managedAIDFailOpenReason is an internal accounting marker. The generic
+	// HTTP handler consumes it only after selecting an allow result, so
+	// a timed-out request that the connector fails closed cannot be counted as
+	// a fail-open allow decision. It is never serialized.
+	managedAIDFailOpenReason string
 }
 
 // applyMode stamps the active guardrail mode onto the verdict and,
@@ -220,13 +225,44 @@ func (a *APIServer) inspectManagedAIDOnly(ctx context.Context, toolName, content
 	}
 	aid := a.hookAIDInspect(ctx, toolName, content)
 	if aid == nil {
-		metricRuntime, _ := a.observabilityV8LifecycleRuntime().(hookLifecycleMetricV8Runtime)
-		if metricRuntime != nil {
-			_ = recordManagedAIDFailOpenMetricV8(ctx, metricRuntime, failOpenReason)
+		verdict := &ToolInspectVerdict{
+			Action:                   "allow",
+			Severity:                 "NONE",
+			Findings:                 []string{},
+			managedAIDFailOpenReason: failOpenReason,
 		}
-		return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
+		if !managedAIDFailOpenAccountingDeferred(ctx) {
+			a.recordManagedAIDFailOpenVerdict(ctx, verdict)
+		}
+		return verdict
 	}
 	return mergeWithAIDVerdict(nil, aid)
+}
+
+type managedAIDFailOpenAccountingContextKey struct{}
+
+func deferManagedAIDFailOpenAccounting(ctx context.Context) context.Context {
+	return context.WithValue(ctx, managedAIDFailOpenAccountingContextKey{}, true)
+}
+
+func managedAIDFailOpenAccountingDeferred(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	deferred, _ := ctx.Value(managedAIDFailOpenAccountingContextKey{}).(bool)
+	return deferred
+}
+
+func (a *APIServer) recordManagedAIDFailOpenVerdict(ctx context.Context, verdict *ToolInspectVerdict) {
+	if a == nil || verdict == nil || verdict.managedAIDFailOpenReason == "" {
+		return
+	}
+	reason := verdict.managedAIDFailOpenReason
+	verdict.managedAIDFailOpenReason = ""
+	metricRuntime, _ := a.observabilityV8LifecycleRuntime().(hookLifecycleMetricV8Runtime)
+	if metricRuntime != nil {
+		_ = recordManagedAIDFailOpenMetricV8(ctx, metricRuntime, reason)
+	}
 }
 
 func (a *APIServer) hookAIDInspect(ctx context.Context, toolName string, content string) *ScanVerdict {
@@ -1076,6 +1112,7 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), scanTimeout)
 	defer cancel()
+	workerCtx := deferManagedAIDFailOpenAccounting(ctx)
 
 	fmt.Fprintf(os.Stderr, "[inspect] >>> tool=%q args=%s content_len=%d direction=%s\n",
 		req.Tool, redaction.MessageContent(string(req.Args)), len(req.Content), req.Direction)
@@ -1086,16 +1123,20 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		v *ToolInspectVerdict
 	}
 	ch := make(chan verdictResult, 1)
+	workerDone := a.inspectToolWorkerDone
 	go func() {
+		if workerDone != nil {
+			defer workerDone()
+		}
 		var v *ToolInspectVerdict
 		if strings.EqualFold(req.Tool, "message") {
-			v = a.inspectMessageContent(ctx, &req)
+			v = a.inspectMessageContent(workerCtx, &req)
 		} else {
 			// Pass the 200ms-capped ctx so the tool-call judge lane's
 			// deadline guard short-circuits on this generic endpoint
 			// (mirroring the message lane); native hook callers go
 			// through inspectToolPolicy with a deadline-free context.
-			v = a.inspectToolPolicyCtx(ctx, &req)
+			v = a.inspectToolPolicyCtx(workerCtx, &req)
 		}
 		ch <- verdictResult{v}
 	}()
@@ -1219,6 +1260,13 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 			fmt.Sprintf("severity=%s remote=%s reason_present=%t finding_count=%d",
 				verdict.Severity, r.RemoteAddr, strings.TrimSpace(verdict.Reason) != "",
 				len(verdict.DetailedFindings)))
+	}
+	// The worker only classifies the managed AID fail-open reason. Account for
+	// it after this handler has selected the allow result; the 504
+	// path returns above and deliberately records nothing because installed
+	// hooks fail closed on an unreachable gateway.
+	if verdict.Action == "allow" {
+		a.recordManagedAIDFailOpenVerdict(r.Context(), verdict)
 	}
 	a.writeJSON(w, http.StatusOK, responseVerdict)
 }
