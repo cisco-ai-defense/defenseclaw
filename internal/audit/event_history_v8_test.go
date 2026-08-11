@@ -392,7 +392,17 @@ func TestV8EventHistoryMigrationPreservesHistoricalRowsAndLegacyMeanings(t *test
 		version INTEGER PRIMARY KEY, applied_at DATETIME NOT NULL)`); err != nil {
 		t.Fatal(err)
 	}
-	for index := 0; index < len(migrations)-1; index++ {
+	historyMigrationVersion := 0
+	for index, candidate := range migrations {
+		if candidate.description == "observability v8: add canonical local event-history projection columns" {
+			historyMigrationVersion = index + 1
+			break
+		}
+	}
+	if historyMigrationVersion == 0 {
+		t.Fatal("observability v8 event-history migration not found")
+	}
+	for index := 0; index < historyMigrationVersion-1; index++ {
 		if err := store.applyMigration(index+1, migrations[index]); err != nil {
 			t.Fatalf("apply historical migration %d: %v", index+1, err)
 		}
@@ -407,8 +417,8 @@ func TestV8EventHistoryMigrationPreservesHistoricalRowsAndLegacyMeanings(t *test
 	); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.Init(); err != nil {
-		t.Fatal(err)
+	if err := store.applyMigration(historyMigrationVersion, migrations[historyMigrationVersion-1]); err != nil {
+		t.Fatalf("apply event-history migration: %v", err)
 	}
 	var schemaVersion, generation int
 	var contentHash, details, binaryVersion string

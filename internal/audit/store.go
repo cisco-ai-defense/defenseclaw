@@ -1745,8 +1745,8 @@ var migrations = []migration{
 		},
 	},
 	{
-		description: historicalSensitiveEvidenceMigrationDescription,
-		apply:       migrateHistoricalSensitiveEvidence,
+		description: historicalEvidencePurgeMigrationDescription,
+		apply:       purgeHistoricalEvidence,
 	},
 }
 
