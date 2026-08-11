@@ -122,7 +122,8 @@ func TestOpenCodeOwnedHookContractRequiresExactRegularFileMarker(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read rendered plugin: %v", err)
 	}
-	crlfRendered := bytes.ReplaceAll(rendered, []byte("\n"), []byte("\r\n"))
+	lfRendered := bytes.ReplaceAll(rendered, []byte("\r\n"), []byte("\n"))
+	crlfRendered := bytes.ReplaceAll(lfRendered, []byte("\n"), []byte("\r\n"))
 	if err := os.WriteFile(pluginPath, crlfRendered, 0o600); err != nil {
 		t.Fatalf("write CRLF-rendered plugin: %v", err)
 	}
