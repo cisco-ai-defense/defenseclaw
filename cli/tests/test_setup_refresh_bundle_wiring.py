@@ -39,6 +39,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import yaml
+from click import ClickException
 from click.testing import CliRunner
 from defenseclaw import config
 from defenseclaw.context import AppContext
@@ -115,6 +116,56 @@ def _bridge_up_args(mock_run: MagicMock) -> list[str]:
     raise AssertionError("Splunk bridge up command was not invoked")
 
 
+class _UnreadableSecretEnvironment(dict[str, str]):
+    """Mapping that fails if a blocked credential value is ever requested."""
+
+    def __init__(self, values: dict[str, str], *, blocked_names: set[str]) -> None:
+        super().__init__(values)
+        self._blocked_names = {name.casefold() for name in blocked_names}
+
+    def __getitem__(self, key: str) -> str:
+        if key.casefold() in self._blocked_names:
+            raise AssertionError(f"secret value for {key!r} was read")
+        return super().__getitem__(key)
+
+
+class TestSplunkBridgeChildEnvironment(unittest.TestCase):
+    def test_windows_scrub_is_case_insensitive_and_never_reads_token_values(self) -> None:
+        from defenseclaw.commands.cmd_setup import _splunk_bridge_child_env
+
+        custom_name = "OPERATOR_MANAGED_GATEWAY_TOKEN"
+        blocked_names = {
+            custom_name,
+            "DEFENSECLAW_GATEWAY_TOKEN",
+            "OPENCLAW_GATEWAY_TOKEN",
+        }
+        source = _UnreadableSecretEnvironment(
+            {
+                "operator_managed_gateway_token": "custom-secret-sentinel",
+                "DefenseClaw_Gateway_Token": "canonical-secret-sentinel",
+                "openclaw_gateway_token": "legacy-secret-sentinel",
+                "BRIDGE_UNRELATED_SETTING": "preserved",
+            },
+            blocked_names=blocked_names,
+        )
+
+        child_env = _splunk_bridge_child_env(
+            custom_name,
+            environment=source,
+            platform_name="nt",
+        )
+
+        self.assertEqual(child_env, {"BRIDGE_UNRELATED_SETTING": "preserved"})
+
+    def test_configured_token_name_must_be_a_portable_environment_name(self) -> None:
+        from defenseclaw.commands.cmd_setup import _configured_gateway_token_env_name
+
+        cfg = SimpleNamespace(gateway=SimpleNamespace(token_env="INVALID-TOKEN-NAME"))
+
+        with self.assertRaisesRegex(ClickException, "gateway.token_env"):
+            _configured_gateway_token_env_name(cfg)
+
+
 class TestSetupSplunkRefreshWiring(unittest.TestCase):
     def setUp(self) -> None:
         self.runner = CliRunner()
@@ -172,7 +223,20 @@ class TestSetupSplunkRefreshWiring(unittest.TestCase):
             stderr="",
         )
 
+        custom_name = "OPERATOR_MANAGED_GATEWAY_TOKEN"
+        custom_secret = "setup-up-secret-sentinel"
+        self.app.cfg.gateway.token_env = custom_name
+
         with (
+            patch.dict(
+                os.environ,
+                {
+                    custom_name: custom_secret,
+                    "DEFENSECLAW_GATEWAY_TOKEN": "canonical-secret-sentinel",
+                    "OPENCLAW_GATEWAY_TOKEN": "legacy-secret-sentinel",
+                    "BRIDGE_UNRELATED_SETTING": "preserved",
+                },
+            ),
             patch(
                 "defenseclaw.commands.cmd_setup_observability._require_v8_operator_status",
                 return_value=SimpleNamespace(destinations=()),
@@ -195,10 +259,17 @@ class TestSetupSplunkRefreshWiring(unittest.TestCase):
         child_env = refresh_call.kwargs["child_env"]
         self.assertNotIn("DEFENSECLAW_GATEWAY_TOKEN", child_env)
         self.assertNotIn("OPENCLAW_GATEWAY_TOKEN", child_env)
+        self.assertNotIn(custom_name, child_env)
+        self.assertEqual(child_env["BRIDGE_UNRELATED_SETTING"], "preserved")
         self.assertEqual(
             _bridge_up_args(mock_run),
             ["/tmp/fake-splunk-claw-bridge", "up", "--env-file", env_file, "--output", "json"],
         )
+        up_call = next(call for call in mock_run.call_args_list if call.args[0][1] == "up")
+        self.assertNotIn(custom_name, up_call.kwargs["env"])
+        self.assertEqual(up_call.kwargs["env"]["BRIDGE_UNRELATED_SETTING"], "preserved")
+        self.assertNotIn(custom_secret, repr(up_call.args[0]))
+        self.assertNotIn(custom_secret, result.output)
 
         assert_owner_only_file(env_file)
         entries = _read_dotenv(env_file)
@@ -317,17 +388,26 @@ class TestRefreshAndMaybeRestartSplunkBridge(unittest.TestCase):
         mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
 
         env_file = "/data/splunk-bridge/env/.env"
-        with patch.dict(
-            os.environ,
-            {
-                "DEFENSECLAW_GATEWAY_TOKEN": "gateway-sentinel",
-                "OPENCLAW_GATEWAY_TOKEN": "legacy-sentinel",
-            },
+        custom_name = "OPERATOR_MANAGED_GATEWAY_TOKEN"
+        custom_secret = "refresh-down-secret-sentinel"
+        output = io.StringIO()
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "DEFENSECLAW_GATEWAY_TOKEN": "gateway-sentinel",
+                    "OPENCLAW_GATEWAY_TOKEN": "legacy-sentinel",
+                    custom_name: custom_secret,
+                    "BRIDGE_UNRELATED_SETTING": "preserved",
+                },
+            ),
+            redirect_stdout(output),
         ):
             result = _refresh_and_maybe_restart_splunk_bridge(
                 "/data",
                 env_file=env_file,
                 child_env=os.environ.copy(),
+                gateway_token_env=custom_name,
             )
 
         self.assertTrue(result.was_running)
@@ -353,6 +433,12 @@ class TestRefreshAndMaybeRestartSplunkBridge(unittest.TestCase):
         running_env = _running.call_args.kwargs["environment"]
         self.assertNotIn("DEFENSECLAW_GATEWAY_TOKEN", running_env)
         self.assertNotIn("OPENCLAW_GATEWAY_TOKEN", running_env)
+        self.assertNotIn(custom_name, running_env)
+        self.assertEqual(running_env["BRIDGE_UNRELATED_SETTING"], "preserved")
+        self.assertNotIn(custom_name, down_call.kwargs["env"])
+        self.assertEqual(down_call.kwargs["env"]["BRIDGE_UNRELATED_SETTING"], "preserved")
+        self.assertNotIn(custom_secret, repr(down_call.args[0]))
+        self.assertNotIn(custom_secret, output.getvalue())
         mock_refresh.assert_called_once_with("/data")
 
     @patch(
@@ -434,20 +520,32 @@ class TestStopSplunkBridgeEnvironment(unittest.TestCase):
     ) -> None:
         from defenseclaw.commands.cmd_setup import _stop_bridge
 
-        with patch.dict(
-            os.environ,
-            {
-                "DEFENSECLAW_GATEWAY_TOKEN": "gateway-sentinel",
-                "OPENCLAW_GATEWAY_TOKEN": "legacy-sentinel",
-            },
+        custom_name = "OPERATOR_MANAGED_GATEWAY_TOKEN"
+        custom_secret = "disable-down-secret-sentinel"
+        output = io.StringIO()
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "DEFENSECLAW_GATEWAY_TOKEN": "gateway-sentinel",
+                    "OPENCLAW_GATEWAY_TOKEN": "legacy-sentinel",
+                    custom_name: custom_secret,
+                    "BRIDGE_UNRELATED_SETTING": "preserved",
+                },
+            ),
+            redirect_stdout(output),
         ):
-            _stop_bridge("/data")
+            _stop_bridge("/data", gateway_token_env=custom_name)
 
         mock_run.assert_called_once()
         call = mock_run.call_args
         self.assertEqual(call.args[0], ["/fake/bin/splunk-claw-bridge", "down"])
         self.assertNotIn("DEFENSECLAW_GATEWAY_TOKEN", call.kwargs["env"])
         self.assertNotIn("OPENCLAW_GATEWAY_TOKEN", call.kwargs["env"])
+        self.assertNotIn(custom_name, call.kwargs["env"])
+        self.assertEqual(call.kwargs["env"]["BRIDGE_UNRELATED_SETTING"], "preserved")
+        self.assertNotIn(custom_secret, repr(call.args[0]))
+        self.assertNotIn(custom_secret, output.getvalue())
 
 
 class TestSetupLocalObservabilityRefreshWiring(unittest.TestCase):

@@ -33,6 +33,7 @@ import subprocess
 import sys
 import time
 import uuid
+from collections.abc import Mapping
 from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -11285,6 +11286,7 @@ def _apply_logs_config(
     if bootstrap_bridge:
         contract = _bootstrap_bridge(
             app.cfg.data_dir,
+            gateway_token_env=_configured_gateway_token_env_name(app.cfg),
             s3_export=s3_export,
             s3_bucket=s3_bucket,
             s3_prefix=s3_prefix,
@@ -11549,13 +11551,55 @@ def _resolve_bridge_bin(data_dir: str) -> str | None:
     return splunk_bridge_bin(data_dir)
 
 
-def _splunk_bridge_child_env(environment: dict[str, str] | None = None) -> dict[str, str]:
-    """Return the bridge environment without gateway bearer credentials."""
+def _configured_gateway_token_env_name(cfg: Any) -> str:
+    """Return the configured gateway token variable name after validation."""
 
-    env = dict(os.environ if environment is None else environment)
-    env.pop(_GATEWAY_TOKEN_ENV, None)
-    env.pop(_LEGACY_GATEWAY_TOKEN_ENV, None)
-    return env
+    gateway = getattr(cfg, "gateway", None)
+    raw_name = getattr(gateway, "token_env", "")
+    if raw_name is None:
+        return ""
+    if not isinstance(raw_name, str):
+        raise click.ClickException("gateway.token_env must be a portable environment variable name")
+    name = raw_name.strip()
+    if name and not dotenv_key_is_valid(name):
+        raise click.ClickException("gateway.token_env must be a portable environment variable name")
+    return name
+
+
+def _splunk_bridge_child_env(
+    gateway_token_env: str = "",
+    *,
+    environment: Mapping[str, str] | None = None,
+    platform_name: str | None = None,
+) -> dict[str, str]:
+    """Return the bridge environment without any gateway bearer variable.
+
+    Iterate names first and fetch values only for retained entries so the
+    configured gateway token value is never read while constructing the child
+    environment. Windows environment names are case-insensitive.
+    """
+
+    configured_name = gateway_token_env.strip()
+    if configured_name and not dotenv_key_is_valid(configured_name):
+        raise click.ClickException("gateway.token_env must be a portable environment variable name")
+    blocked_names = {
+        _GATEWAY_TOKEN_ENV,
+        _LEGACY_GATEWAY_TOKEN_ENV,
+    }
+    if configured_name:
+        blocked_names.add(configured_name)
+    case_insensitive = (platform_name or os.name) == "nt"
+    if case_insensitive:
+        blocked_names = {name.casefold() for name in blocked_names}
+
+    source = os.environ if environment is None else environment
+    child_env: dict[str, str] = {}
+    for name in source:
+        compared_name = name.casefold() if case_insensitive else name
+        if compared_name in blocked_names:
+            continue
+        child_env[name] = source[name]
+    return child_env
 
 
 def _refresh_and_maybe_restart_splunk_bridge(
@@ -11563,6 +11607,7 @@ def _refresh_and_maybe_restart_splunk_bridge(
     *,
     env_file: str | None = None,
     child_env: dict[str, str] | None = None,
+    gateway_token_env: str = "",
 ) -> RefreshResult:
     """Refresh the seeded Splunk bridge, stopping any running stack first.
 
@@ -11584,7 +11629,10 @@ def _refresh_and_maybe_restart_splunk_bridge(
     happened and never has to wonder why a previously-running stack
     came back up on a different image.
     """
-    effective_child_env = _splunk_bridge_child_env(child_env)
+    effective_child_env = _splunk_bridge_child_env(
+        gateway_token_env,
+        environment=child_env,
+    )
     was_running = is_compose_project_running(
         SPLUNK_COMPOSE_PROJECT,
         environment=effective_child_env,
@@ -11640,6 +11688,7 @@ def _refresh_and_maybe_restart_splunk_bridge(
 def _bootstrap_bridge(
     data_dir: str,
     *,
+    gateway_token_env: str = "",
     s3_export: bool = False,
     s3_bucket: str | None = None,
     s3_prefix: str | None = None,
@@ -11658,12 +11707,13 @@ def _bootstrap_bridge(
     bundle is what gets brought back up.
     """
     env_file = _ensure_private_splunk_bridge_env(data_dir)
-    env = _splunk_bridge_child_env()
+    env = _splunk_bridge_child_env(gateway_token_env)
     if refresh_bundle:
         _refresh_and_maybe_restart_splunk_bridge(
             data_dir,
             env_file=env_file,
             child_env=env,
+            gateway_token_env=gateway_token_env,
         )
 
     bridge = _resolve_bridge_bin(data_dir)
@@ -11947,6 +11997,11 @@ def _disable_splunk(
     native_s3_export = False
     native_s3_overrides: dict[str, str] = {}
     native_windows = _native_windows_local_splunk()
+    gateway_token_env = (
+        _configured_gateway_token_env_name(app.cfg)
+        if (disable_both or logs_only) and manage_local and not native_windows
+        else ""
+    )
     native_disable_requested = native_windows and manage_local and (disable_both or logs_only)
     config_snapshot: tuple[bytes | None, int | None] | None = None
     config_path = str(config_path_for_data_dir(app.cfg.data_dir))
@@ -12025,7 +12080,10 @@ def _disable_splunk(
             if native_controller is not None and native_was_running:
                 native_controller.down()
         elif (disable_both or logs_only) and manage_local and not native_windows:
-            _stop_bridge(app.cfg.data_dir)
+            _stop_bridge(
+                app.cfg.data_dir,
+                gateway_token_env=gateway_token_env,
+            )
     except BaseException as exc:
         rollback_errors: list[str] = []
         if config_snapshot is not None:
@@ -12070,7 +12128,7 @@ def _disable_splunk(
         app.logger.log_action(ACTION_SETUP_SPLUNK, "config", " ".join(parts))
 
 
-def _stop_bridge(data_dir: str) -> None:
+def _stop_bridge(data_dir: str, *, gateway_token_env: str = "") -> None:
     if not local_shell_stacks_supported():
         return
     if _native_windows_local_splunk():
@@ -12098,7 +12156,7 @@ def _stop_bridge(data_dir: str) -> None:
             capture_output=True,
             text=True,
             timeout=60,
-            env=_splunk_bridge_child_env(),
+            env=_splunk_bridge_child_env(gateway_token_env),
         )
         click.echo("    Local Splunk container stopped")
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
