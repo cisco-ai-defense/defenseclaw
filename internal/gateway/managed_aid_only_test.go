@@ -41,16 +41,50 @@ import (
 // verdict is returned verbatim from Inspect (nil models an AID
 // down/timeout/token failure — the fail-open case).
 type stubAIDInspector struct {
-	verdict *ScanVerdict
-	calls   int
+	verdict  *ScanVerdict
+	calls    int
+	messages []ChatMessage
 }
 
-func (s *stubAIDInspector) Inspect(_ context.Context, _ []ChatMessage) *ScanVerdict {
+func (s *stubAIDInspector) Inspect(_ context.Context, messages []ChatMessage) *ScanVerdict {
 	s.calls++
+	s.messages = append([]ChatMessage(nil), messages...)
 	return s.verdict
 }
 
 func (s *stubAIDInspector) bindObservabilityV8(_ hookLifecycleMetricV8Runtime) {}
+
+type toolIdentityAIDInspector struct {
+	blockTool string
+	inputs    []string
+}
+
+func (s *toolIdentityAIDInspector) Inspect(_ context.Context, messages []ChatMessage) *ScanVerdict {
+	input := ""
+	if len(messages) != 0 {
+		input = messages[0].Content
+	}
+	s.inputs = append(s.inputs, input)
+	if strings.HasPrefix(input, "Tool call: "+s.blockTool+"\n") {
+		return blockVerdict()
+	}
+	return &ScanVerdict{Action: "allow", Severity: "NONE", Scanner: "ai-defense"}
+}
+
+func (s *toolIdentityAIDInspector) bindObservabilityV8(_ hookLifecycleMetricV8Runtime) {}
+
+type cancelBeforeNilAIDInspector struct {
+	cancel context.CancelFunc
+	calls  int
+}
+
+func (s *cancelBeforeNilAIDInspector) Inspect(_ context.Context, _ []ChatMessage) *ScanVerdict {
+	s.calls++
+	s.cancel()
+	return nil
+}
+
+func (s *cancelBeforeNilAIDInspector) bindObservabilityV8(_ hookLifecycleMetricV8Runtime) {}
 
 type cancelGatedAIDInspector struct {
 	started  chan struct{}
@@ -446,12 +480,26 @@ func TestManagedAIDOnly_ToolResponseUsesSemanticOutputAndSkipsJudge(t *testing.T
 		body       string
 		wantCalls  int
 		wantReason string
+		wantInput  string
 	}{
 		{name: "omitted output", body: `{"tool":"read_file"}`, wantReason: aidFailOpenNoContent},
 		{name: "null output", body: `{"tool":"read_file","output":null}`, wantReason: aidFailOpenNoContent},
 		{name: "empty string output", body: `{"tool":"read_file","output":""}`, wantReason: aidFailOpenNoContent},
-		{name: "nonempty string output", body: `{"tool":"read_file","output":"ordinary result"}`, wantCalls: 1, wantReason: aidFailOpenUnavailable},
-		{name: "structured output", body: `{"tool":"read_file","output":{"status":"ok"}}`, wantCalls: 1, wantReason: aidFailOpenUnavailable},
+		{name: "whitespace string output", body: `{"tool":"read_file","output":" \t\r\n"}`, wantReason: aidFailOpenNoContent},
+		{
+			name:       "nonempty string output",
+			body:       `{"tool":"read_file","output":"ordinary result"}`,
+			wantCalls:  1,
+			wantReason: aidFailOpenUnavailable,
+			wantInput:  "Tool call: read_file\nordinary result",
+		},
+		{
+			name:       "structured output",
+			body:       `{"tool":"read_file","output":{"status":"ok"}}`,
+			wantCalls:  1,
+			wantReason: aidFailOpenUnavailable,
+			wantInput:  "Tool call: read_file\n{\"status\":\"ok\"}",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -468,6 +516,12 @@ func TestManagedAIDOnly_ToolResponseUsesSemanticOutputAndSkipsJudge(t *testing.T
 			}
 			if stub.calls != tc.wantCalls {
 				t.Fatalf("remote calls=%d, want %d", stub.calls, tc.wantCalls)
+			}
+			if tc.wantCalls == 0 && len(stub.messages) != 0 {
+				t.Fatalf("blank output reached AID with messages=%+v", stub.messages)
+			}
+			if tc.wantCalls != 0 && (len(stub.messages) != 1 || stub.messages[0].Content != tc.wantInput) {
+				t.Fatalf("AID messages=%+v, want exact input %q", stub.messages, tc.wantInput)
 			}
 			if len(capture.metricRecords) != 1 || len(capture.metricErrors) != 0 {
 				t.Fatalf("fail-open metrics=%d errors=%v, want one", len(capture.metricRecords), capture.metricErrors)
@@ -487,6 +541,48 @@ func TestManagedAIDOnly_ToolResponseUsesSemanticOutputAndSkipsJudge(t *testing.T
 		})
 	}
 
+	t.Run("tool identity selects a tool-specific managed policy", func(t *testing.T) {
+		inspector := &toolIdentityAIDInspector{blockTool: "jira.create"}
+		api := testAPIServerWithConfig(t, "action")
+		api.scannerCfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+		api.SetCiscoInspector(inspector)
+
+		_, blocked := postInspectToolResponse(t, api,
+			`{"tool":"jira.create","output":"ordinary result"}`)
+		if blocked.Action != "block" {
+			t.Fatalf("tool-specific managed verdict=%+v, want block", blocked)
+		}
+		_, allowed := postInspectToolResponse(t, api,
+			`{"tool":"read_file","output":"ordinary result"}`)
+		if allowed.Action != "allow" {
+			t.Fatalf("different-tool managed verdict=%+v, want allow", allowed)
+		}
+		wantInputs := []string{
+			"Tool call: jira.create\nordinary result",
+			"Tool call: read_file\nordinary result",
+		}
+		if len(inspector.inputs) != len(wantInputs) {
+			t.Fatalf("AID inputs=%v, want %v", inspector.inputs, wantInputs)
+		}
+		for i := range wantInputs {
+			if inspector.inputs[i] != wantInputs[i] {
+				t.Fatalf("AID input[%d]=%q, want %q", i, inspector.inputs[i], wantInputs[i])
+			}
+		}
+
+		sentinelInspector := &toolIdentityAIDInspector{blockTool: "message"}
+		api.SetCiscoInspector(sentinelInspector)
+		_, sentinelBlocked := postInspectToolResponse(t, api,
+			`{"tool":"message","output":"ordinary result"}`)
+		if sentinelBlocked.Action != "block" {
+			t.Fatalf("sentinel-named tool verdict=%+v, want block", sentinelBlocked)
+		}
+		wantSentinelInput := "Tool call: message\nordinary result"
+		if len(sentinelInspector.inputs) != 1 || sentinelInspector.inputs[0] != wantSentinelInput {
+			t.Fatalf("sentinel-named tool AID inputs=%v, want [%q]", sentinelInspector.inputs, wantSentinelInput)
+		}
+	})
+
 	t.Run("managed mode never invokes the local judge", func(t *testing.T) {
 		mock := piiCompletionHitProvider()
 		api := newToolOutputJudgeServer(t,
@@ -504,6 +600,93 @@ func TestManagedAIDOnly_ToolResponseUsesSemanticOutputAndSkipsJudge(t *testing.T
 			t.Fatalf("managed route invoked local judge %d time(s)", len(mock.captured))
 		}
 	})
+}
+
+func TestManagedAIDOnly_GenericInspectRoutesAccountForSelectedAllowAfterCancellation(t *testing.T) {
+	type route struct {
+		name    string
+		path    string
+		body    string
+		handler func(*APIServer, http.ResponseWriter, *http.Request)
+	}
+	routes := []route{
+		{
+			name: "request",
+			path: "/api/v1/inspect/request",
+			body: `{"content":"ordinary request"}`,
+			handler: func(api *APIServer, w http.ResponseWriter, r *http.Request) {
+				api.handleInspectRequest(w, r)
+			},
+		},
+		{
+			name: "response",
+			path: "/api/v1/inspect/response",
+			body: `{"content":"ordinary response"}`,
+			handler: func(api *APIServer, w http.ResponseWriter, r *http.Request) {
+				api.handleInspectResponse(w, r)
+			},
+		},
+		{
+			name: "tool response",
+			path: "/api/v1/inspect/tool-response",
+			body: `{"tool":"read_file","output":"ordinary result"}`,
+			handler: func(api *APIServer, w http.ResponseWriter, r *http.Request) {
+				api.handleInspectToolResponse(w, r)
+			},
+		},
+	}
+
+	for _, route := range routes {
+		t.Run(route.name, func(t *testing.T) {
+			parentCtx, cancelParent := context.WithCancel(context.Background())
+			t.Cleanup(cancelParent)
+			inspector := &cancelBeforeNilAIDInspector{cancel: cancelParent}
+			capture := &managedAIDFailOpenContextCapture{}
+			api := testAPIServerWithConfig(t, "action")
+			api.scannerCfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+			api.SetCiscoInspector(inspector)
+			api.bindObservabilityV8Lifecycle(capture)
+
+			request := httptest.NewRequest(
+				http.MethodPost, route.path, bytes.NewBufferString(route.body),
+			).WithContext(parentCtx)
+			response := httptest.NewRecorder()
+			route.handler(api, response, request)
+
+			var verdict ToolInspectVerdict
+			if err := json.NewDecoder(response.Result().Body).Decode(&verdict); err != nil {
+				t.Fatal(err)
+			}
+			if response.Code != http.StatusOK || verdict.Action != "allow" {
+				t.Fatalf("selected fail-open status=%d verdict=%+v, want 200 allow", response.Code, verdict)
+			}
+			if parentCtx.Err() != context.Canceled || inspector.calls != 1 {
+				t.Fatalf("request error=%v AID calls=%d, want canceled/1", parentCtx.Err(), inspector.calls)
+			}
+			if len(capture.metricRecords) != 1 || len(capture.metricErrors) != 0 {
+				t.Fatalf("fail-open metrics=%d errors=%v, want one", len(capture.metricRecords), capture.metricErrors)
+			}
+			if len(capture.contextErrors) != 1 || capture.contextErrors[0] != nil {
+				t.Fatalf("metric context errors=%v, want one live context", capture.contextErrors)
+			}
+			if len(capture.deadlineRemaining) != 1 || capture.deadlineRemaining[0] <= 0 ||
+				capture.deadlineRemaining[0] > time.Second {
+				t.Fatalf("metric deadline remaining=%v, want one live <=1s bound", capture.deadlineRemaining)
+			}
+			instrumentValue, present := capture.metricRecords[0].InstrumentData()
+			if !present {
+				t.Fatal("fail-open metric has no instrument data")
+			}
+			instrument, err := instrumentValue.Object()
+			if err != nil {
+				t.Fatal(err)
+			}
+			attributes, ok := instrument["attributes"].(map[string]any)
+			if !ok || attributes["defenseclaw.metric.reason"] != aidFailOpenUnavailable {
+				t.Fatalf("fail-open metric instrument=%v, want unavailable", instrument)
+			}
+		})
+	}
 }
 
 func TestHookManagedAIDOnly_HTTPFailOpenAccountingFollowsReturnedOutcome(t *testing.T) {
@@ -687,8 +870,9 @@ type managedAIDFailOpenCapture struct {
 
 type managedAIDFailOpenContextCapture struct {
 	managedAIDFailOpenCapture
-	ready         <-chan struct{}
-	contextErrors []error
+	ready             <-chan struct{}
+	contextErrors     []error
+	deadlineRemaining []time.Duration
 }
 
 type managedAIDFailOpenDelivery struct {
@@ -870,8 +1054,16 @@ func (capture *managedAIDFailOpenContextCapture) RecordGeneratedMetricBatch(
 	ctx context.Context,
 	items []observabilityruntime.GeneratedMetricBatchItem,
 ) ([]telemetry.V8MetricRecordResult, error) {
-	<-capture.ready
+	if capture.ready != nil {
+		<-capture.ready
+	}
 	capture.contextErrors = append(capture.contextErrors, ctx.Err())
+	deadline, hasDeadline := ctx.Deadline()
+	if !hasDeadline {
+		capture.deadlineRemaining = append(capture.deadlineRemaining, 0)
+	} else {
+		capture.deadlineRemaining = append(capture.deadlineRemaining, time.Until(deadline))
+	}
 	return capture.managedAIDFailOpenCapture.RecordGeneratedMetricBatch(ctx, items)
 }
 

@@ -87,6 +87,18 @@ func truncateInspectContent(s string, max int) string {
 	return s[:max]
 }
 
+func (a *APIServer) recordManagedAIDFailOpenForSelectedGenericResult(
+	ctx context.Context,
+	verdict *ToolInspectVerdict,
+) {
+	if verdict == nil || verdict.Action != "allow" {
+		return
+	}
+	metricCtx, cancelMetric := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+	a.recordManagedAIDFailOpenVerdict(metricCtx, verdict)
+	cancelMetric()
+}
+
 // RequestInspectRequest is the payload for POST /api/v1/inspect/request.
 // Called before the user query is sent to the LLM.
 type RequestInspectRequest struct {
@@ -138,7 +150,9 @@ func (a *APIServer) handleInspectRequest(w http.ResponseWriter, r *http.Request)
 
 	var verdict *ToolInspectVerdict
 	if managedAIDOnly {
-		verdict = a.inspectManagedAIDOnly(r.Context(), "message", req.Content)
+		verdict = a.inspectManagedAIDOnly(
+			deferManagedAIDFailOpenAccounting(r.Context()), "message", req.Content,
+		)
 	} else {
 		ruleFindings, err := scanWithTimeout(r.Context(), req.Content, "user-request", inspectScanTimeout)
 		if err != nil {
@@ -189,6 +203,9 @@ func (a *APIServer) handleInspectRequest(w http.ResponseWriter, r *http.Request)
 	_ = a.logger.LogActionCtx(r.Context(), auditAction, "pre-request", auditDetails)
 
 	reveal := wantsReveal(r)
+	if managedAIDOnly {
+		a.recordManagedAIDFailOpenForSelectedGenericResult(r.Context(), verdict)
+	}
 	a.writeJSON(w, http.StatusOK, verdict.sanitizeForResponse(reveal))
 }
 
@@ -218,7 +235,9 @@ func (a *APIServer) handleInspectResponse(w http.ResponseWriter, r *http.Request
 
 	var verdict *ToolInspectVerdict
 	if managedAIDOnly {
-		verdict = a.inspectManagedAIDOnly(r.Context(), "message", req.Content)
+		verdict = a.inspectManagedAIDOnly(
+			deferManagedAIDFailOpenAccounting(r.Context()), "message", req.Content,
+		)
 	} else {
 		ruleFindings, err := scanWithTimeout(r.Context(), req.Content, "llm-response", inspectScanTimeout)
 		if err != nil {
@@ -265,6 +284,9 @@ func (a *APIServer) handleInspectResponse(w http.ResponseWriter, r *http.Request
 	_ = a.logger.LogActionCtx(r.Context(), auditAction, "post-response", auditDetails)
 
 	reveal := wantsReveal(r)
+	if managedAIDOnly {
+		a.recordManagedAIDFailOpenForSelectedGenericResult(r.Context(), verdict)
+	}
 	a.writeJSON(w, http.StatusOK, verdict.sanitizeForResponse(reveal))
 }
 
@@ -302,7 +324,13 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 
 	var verdict *ToolInspectVerdict
 	if managedAIDOnly {
-		verdict = a.inspectManagedAIDOnly(r.Context(), "message", outputStr)
+		aidContent := outputStr
+		if strings.TrimSpace(outputStr) != "" {
+			aidContent = fmt.Sprintf("Tool call: %s\n%s", req.Tool, outputStr)
+		}
+		verdict = a.inspectManagedAIDOnly(
+			deferManagedAIDFailOpenAccounting(r.Context()), "message", aidContent,
+		)
 	} else {
 		ruleFindings, err := scanWithTimeout(r.Context(), outputStr, req.Tool+"-response", inspectScanTimeout)
 		if err != nil {
@@ -367,6 +395,9 @@ func (a *APIServer) handleInspectToolResponse(w http.ResponseWriter, r *http.Req
 	_ = a.logger.LogActionCtx(r.Context(), auditAction, req.Tool, auditDetails)
 
 	reveal := wantsReveal(r)
+	if managedAIDOnly {
+		a.recordManagedAIDFailOpenForSelectedGenericResult(r.Context(), verdict)
+	}
 	a.writeJSON(w, http.StatusOK, verdict.sanitizeForResponse(reveal))
 }
 
