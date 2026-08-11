@@ -81,6 +81,23 @@ func TestCiscoFindingCatalogCoversDefaultRules(t *testing.T) {
 	if len(seen) != len(wantIDs) {
 		t.Fatalf("covered %d canonical Cisco rules, want %d", len(seen), len(wantIDs))
 	}
+
+	for _, tc := range []struct {
+		input string
+		id    string
+		label string
+	}{
+		{input: "PII_DETECTION", id: "CISCO-PII", label: "PII Detection"},
+		{input: "pii detection", id: "CISCO-PII", label: "PII Detection"},
+		{input: "arbitrary cloud label", id: ciscoUnknownFindingID, label: "Custom Policy Violation"},
+		{input: "Custom Policy Violation", id: ciscoUnknownFindingID, label: "Custom Policy Violation"},
+	} {
+		if gotID := canonicalCiscoFindingID(tc.input); gotID != tc.id {
+			t.Errorf("canonicalCiscoFindingID(%q) = %q, want %q", tc.input, gotID, tc.id)
+		} else if gotLabel := ciscoFindingDisplayLabel(gotID); gotLabel != tc.label {
+			t.Errorf("ciscoFindingDisplayLabel(%q) = %q, want %q", gotID, gotLabel, tc.label)
+		}
+	}
 }
 
 func TestRecordCiscoInspectV8PreservesCorrelationAndCanonicalDimensions(t *testing.T) {
