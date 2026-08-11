@@ -116,6 +116,8 @@ func withCodexLifecycleTransaction(opts SetupOpts, fn func() error) error {
 func (c *CodexConnector) Name() string        { return "codex" }
 func (c *CodexConnector) HookAPIPath() string { return "/api/v1/codex/hook" }
 
+func (c *CodexConnector) NotifyAPIPath() string { return "/api/v1/codex/notify" }
+
 // HookScriptNames implements HookScriptOwner (plan C2 / S2.5). Codex
 // owns codex-hook.sh; the generic inspect-* scripts come from the
 // shared list maintained by WriteHookScriptsForConnector. Including

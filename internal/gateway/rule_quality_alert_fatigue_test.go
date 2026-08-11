@@ -67,6 +67,7 @@ func TestAlertFatigueSecretValidationAcrossProfiles(t *testing.T) {
 		{"SEC-BEARER", "Authorization: Bearer YOUR_ACCESS_TOKEN"},
 		{"SEC-BEARER", "Authorization: Bearer abcdefghijklmnop"},
 		{"SEC-BEARER", "Authorization: Bearer xxxxxxxxxxxxxxxxxxxxxxxx"},
+		{"SEC-PRIVKEY", "-----BEGIN " + "RSA " + "PRIVATE KEY-----"},
 	}
 	positive := []struct {
 		ruleID string
@@ -80,6 +81,7 @@ func TestAlertFatigueSecretValidationAcrossProfiles(t *testing.T) {
 		{"SEC-CONNSTR", "postgres://user:password123@host.example/db"},
 		{"SEC-CONNSTR", "postgres://user:changeme123@host.example/db"},
 		{"SEC-CONNSTR", "postgres://user:dummy-example@host.example/db"},
+		{"SEC-PRIVKEY", syntheticPrivateKeyPEM("RSA PRIVATE KEY")},
 	}
 
 	for _, profile := range alertFatigueProfiles {
@@ -107,6 +109,16 @@ func TestAlertFatigueRejectedCandidateDoesNotHideRealCredential(t *testing.T) {
 	match := firstAcceptedRuleMatch(rule, text)
 	if match == nil || !strings.Contains(text[match[0]:match[1]], "q7Vx2M9p") {
 		t.Fatalf("real credential after rejected placeholder was not found")
+	}
+}
+
+func TestAlertFatigueRejectedPrivateKeyHeaderDoesNotHideCompleteBlock(t *testing.T) {
+	rule := alertFatigueRule(t, "default", "SEC-PRIVKEY")
+	header := "-----BEGIN " + "RSA " + "PRIVATE KEY-----"
+	text := header + "\nnot a key block\n" + syntheticPrivateKeyPEM("RSA PRIVATE KEY")
+	match := firstAcceptedRuleMatch(rule, text)
+	if match == nil || match[0] <= 0 {
+		t.Fatal("complete private-key block after rejected header was not found")
 	}
 }
 
@@ -212,6 +224,27 @@ func TestAlertFatiguePIIValidationAcrossProfiles(t *testing.T) {
 					t.Errorf("%s did not match a Luhn-valid PAN", ruleID)
 				}
 			}
+
+			ibanRule := alertFatigueRule(t, profile, "ENT-IBAN")
+			wrongRegisteredLength := checksumValidIBANForTest("DE", strings.Repeat("1", 17))
+			for _, invalid := range []string{
+				"GB00 WEST 1234 5698 7654 32",
+				"DE89 3704 0044 0532 0130 01",
+				// This value has a valid MOD97 checksum but not Germany's registered length.
+				wrongRegisteredLength,
+			} {
+				if firstAcceptedRuleMatch(ibanRule, invalid) != nil {
+					t.Errorf("checksum- or length-invalid IBAN %q produced an alert", invalid)
+				}
+			}
+			for _, valid := range []string{
+				"GB82 WEST 1234 5698 7654 32",
+				"DE89 3704 0044 0532 0130 00",
+			} {
+				if firstAcceptedRuleMatch(ibanRule, valid) == nil {
+					t.Errorf("checksum-valid IBAN %q did not match", valid)
+				}
+			}
 		})
 	}
 }
@@ -221,8 +254,12 @@ func TestAlertFatigueBulkDataRequiresRecordsAcrossProfiles(t *testing.T) {
 		"ENT-BULK-CSV-PII": {
 			"first_name,last_name,ssn,account_number",
 			"first_name,last_name,ssn,account_number\nAda,Lovelace,REDACTED,REDACTED",
+			// Weak employee_id headers need two distinct records; strong
+			// ssn/account_number headers match one record containing real values.
+			"first_name,last_name,employee_id\nAda,Lovelace,1",
 			"first_name\tlast_name\tssn\taccount_number",
 			"first_name\tlast_name\tssn\taccount_number\nAda\tLovelace\tREDACTED\tREDACTED",
+			"first_name\tlast_name\temployee_id\nAda\tLovelace\t1",
 		},
 		"ENT-BULK-JSON-PII": {
 			`{"type":"object","properties":{"ssn":{"type":"string"},"account_number":{"type":"string"}}}`,
@@ -238,7 +275,9 @@ func TestAlertFatigueBulkDataRequiresRecordsAcrossProfiles(t *testing.T) {
 	positive := map[string][]string{
 		"ENT-BULK-CSV-PII": {
 			"first_name,last_name,ssn,account_number\nAda,Lovelace,731-42-8065,839201774",
+			"first_name,last_name,employee_id\nAda,Lovelace,1\nGrace,Hopper,2",
 			"first_name\tlast_name\tssn\taccount_number\nAda\tLovelace\t731-42-8065\t839201774",
+			"first_name\tlast_name\temployee_id\nAda\tLovelace\t1\nGrace\tHopper\t2",
 		},
 		"ENT-BULK-JSON-PII": {
 			`{"ssn":"731-42-8065","account_number":"839201774"}`,
@@ -258,7 +297,10 @@ func TestAlertFatigueBulkDataRequiresRecordsAcrossProfiles(t *testing.T) {
 						t.Errorf("%s matched benign or split-record content", ruleID)
 					}
 				}
-				for _, sample := range positive[ruleID] {
+			}
+			for ruleID, samples := range positive {
+				rule := alertFatigueRule(t, profile, ruleID)
+				for _, sample := range samples {
 					if firstAcceptedRuleMatch(rule, sample) == nil {
 						t.Errorf("%s did not match records containing actual values", ruleID)
 					}

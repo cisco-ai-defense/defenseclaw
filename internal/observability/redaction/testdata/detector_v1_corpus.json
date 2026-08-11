@@ -5,7 +5,7 @@
   "required_multiline_detectors": ["credentials.private_key", "credentials.authorization", "credentials.cookie"],
   "cases": [
     {"name":"api-token-positive","detector":"credentials.api_token","group":"credentials","category":"positive","input":"token AKIAAAAAAAAAAAAAAAAA end","match":"AKIAAAAAAAAAAAAAAAAA"},
-    {"name":"private-key-positive","detector":"credentials.private_key","group":"credentials","category":"positive","input":"-----BEGIN PRIVATE KEY-----\nQUJDRA==\n-----END PRIVATE KEY-----","match":"-----BEGIN PRIVATE KEY-----\nQUJDRA==\n-----END PRIVATE KEY-----"},
+    {"name":"private-key-positive","detector":"credentials.private_key","group":"credentials","category":"positive","input":"-----BEGIN PRIVATE KEY-----\nMDMCAQAwDQYJKoZIhvcNAQEBBQAEHzAdAgEAAgIMoQIBEQICCsECAT0CATUCATUC\nATECASY=\n-----END PRIVATE KEY-----","match":"-----BEGIN PRIVATE KEY-----\nMDMCAQAwDQYJKoZIhvcNAQEBBQAEHzAdAgEAAgIMoQIBEQICCsECAT0CATUCATUC\nATECASY=\n-----END PRIVATE KEY-----"},
     {"name":"authorization-positive","detector":"credentials.authorization","group":"credentials","category":"positive","input":"Authorization: Bearer reserved-fixture-value","match":"reserved-fixture-value"},
     {"name":"cookie-positive","detector":"credentials.cookie","group":"credentials","category":"positive","input":"Cookie: theme=safe; session=reserved-cookie-value","match":"reserved-cookie-value"},
     {"name":"connection-positive","detector":"credentials.connection_string","group":"credentials","category":"positive","input":"postgres://fixture:reserved-pass@example.test/db","match":"reserved-pass"},

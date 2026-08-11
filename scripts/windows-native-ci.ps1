@@ -3135,11 +3135,55 @@ function Assert-WizardHookRegistration(
             'amp.activeThread.current',
             'isPluginUINotAvailableError',
             'action: "reject-and-continue"',
-            'Authorization = `Bearer ${DC_API_TOKEN}`'
+            'const DC_TOKEN_FILE = "',
+            '.hook-amp.token',
+            'const DC_TOKEN_PATTERN = /^[0-9a-f]{64}$/',
+            'const DC_MAX_TOKEN_FILE_BYTES = 4096',
+            'runtime.file(DC_TOKEN_FILE).slice(0, DC_MAX_TOKEN_FILE_BYTES + 1).text()',
+            'if (!DC_TOKEN_PATTERN.test(token))',
+            'headers.Authorization = `Bearer ${token}`'
         )) {
             if ($registration.IndexOf($marker, [StringComparison]::Ordinal) -lt 0) {
                 throw "wizard-selected Amp policy plugin is missing required contract marker: $marker"
             }
+        }
+        if ($registration.IndexOf('const DC_API_TOKEN =', [StringComparison]::Ordinal) -ge 0) {
+            throw 'wizard-selected Amp policy plugin retains the obsolete embedded-token constant'
+        }
+        $tokenPath = Join-Path $hookDir '.hook-amp.token'
+        $tokenPathMatch = [regex]::Match(
+            $registration,
+            '(?m)^const DC_TOKEN_FILE\s*=\s*(?<literal>"(?:\\.|[^"\\])*")\s*$'
+        )
+        if (-not $tokenPathMatch.Success) {
+            throw 'wizard-selected Amp policy plugin does not contain one canonical scoped-token path declaration'
+        }
+        try {
+            $renderedTokenPath = $tokenPathMatch.Groups['literal'].Value |
+                ConvertFrom-Json -ErrorAction Stop
+            $expectedFullTokenPath = [IO.Path]::GetFullPath($tokenPath)
+            $renderedFullTokenPath = [IO.Path]::GetFullPath([string]$renderedTokenPath)
+        } catch {
+            throw 'wizard-selected Amp policy plugin contains an invalid scoped-token path declaration'
+        }
+        if (-not [string]::Equals(
+            $renderedFullTokenPath,
+            $expectedFullTokenPath,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+            throw 'wizard-selected Amp policy plugin references the wrong connector-scoped token sidecar'
+        }
+        if (-not (Test-Path -LiteralPath $tokenPath -PathType Leaf)) {
+            throw 'wizard-selected Amp policy plugin is missing its connector-scoped token sidecar'
+        }
+        $scopedToken = [IO.File]::ReadAllText($tokenPath).Trim()
+        if ($scopedToken -cnotmatch '^[0-9a-f]{64}$') {
+            throw 'wizard-selected Amp policy plugin has a malformed connector-scoped token sidecar'
+        }
+        $encodedToken = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($scopedToken))
+        if ($registration.IndexOf($scopedToken, [StringComparison]::Ordinal) -ge 0 -or
+            $registration.IndexOf($encodedToken, [StringComparison]::Ordinal) -ge 0) {
+            throw 'wizard-selected Amp policy plugin embeds raw or encoded connector-scoped token material'
         }
         if ($registration -match '(?i)defenseclaw-hook(?:\.exe|\.cmd)|\bwsl\b|\bbash\b|\bchmod\b') {
             throw 'wizard-selected Amp policy plugin depends on a shell hook or compatibility layer'
@@ -5416,12 +5460,20 @@ function Assert-PackagedClaudeTokenRotation(
         (Join-Path $Logs 'rotation-success.log'),
         (Join-Path $Logs 'rotation-status.json')
     )
-    $setupCodexResult = Invoke-WindowsNativeProcess $Launcher @(
-        'setup', 'codex', '--yes', '--mode', 'action', '--fail-mode', 'closed', '--restart'
-    ) -TimeoutSeconds 300 -LogPath $credentialLogPaths[0] -SuppressOutput
-    $setupClaudeResult = Invoke-WindowsNativeProcess $Launcher @(
-        'setup', 'claude-code', '--yes', '--mode', 'action', '--fail-mode', 'closed', '--restart'
-    ) -TimeoutSeconds 300 -LogPath $credentialLogPaths[1] -SuppressOutput
+    try {
+        $setupCodexResult = Invoke-WindowsNativeProcess $Launcher @(
+            'setup', 'codex', '--yes', '--mode', 'action', '--fail-mode', 'closed', '--restart'
+        ) -TimeoutSeconds 300 -LogPath $credentialLogPaths[0] -SuppressOutput
+    } catch {
+        throw "packaged token rotation setup-codex failed: $($_.Exception.Message)"
+    }
+    try {
+        $setupClaudeResult = Invoke-WindowsNativeProcess $Launcher @(
+            'setup', 'claude-code', '--yes', '--mode', 'action', '--fail-mode', 'closed', '--restart'
+        ) -TimeoutSeconds 300 -LogPath $credentialLogPaths[1] -SuppressOutput
+    } catch {
+        throw "packaged token rotation setup-claudecode failed: $($_.Exception.Message)"
+    }
 
     foreach ($requiredConfig in @(
         (Join-Path $CodexHome 'config.toml'),
@@ -5437,8 +5489,12 @@ function Assert-PackagedClaudeTokenRotation(
         }
     }
 
-    $statusBeforeResult = Invoke-WindowsNativeProcess $Launcher @('status', '--json') `
-        -TimeoutSeconds 120 -LogPath $credentialLogPaths[2] -SuppressOutput
+    try {
+        $statusBeforeResult = Invoke-WindowsNativeProcess $Launcher @('status', '--json') `
+            -TimeoutSeconds 120 -LogPath $credentialLogPaths[2] -SuppressOutput
+    } catch {
+        throw "packaged token rotation status-before failed: $($_.Exception.Message)"
+    }
     try { $statusBefore = $statusBeforeResult.StdOut | ConvertFrom-Json -ErrorAction Stop }
     catch { throw 'packaged pre-rotation status was not valid JSON' }
     $postureBefore = @(Get-PackagedRotationConnectorPosture $statusBefore)
@@ -5451,8 +5507,12 @@ function Assert-PackagedClaudeTokenRotation(
     }
     $tokenAState = [IO.File]::ReadAllBytes($dotenvPath)
     $tokenA = Get-WindowsNativeGatewayTokenFromDotenvState $tokenAState
-    $rotateResult = Invoke-WindowsNativeProcess $Launcher @('setup', 'rotate-token', '--yes') `
-        -TimeoutSeconds 300 -LogPath $credentialLogPaths[3] -SuppressOutput
+    try {
+        $rotateResult = Invoke-WindowsNativeProcess $Launcher @('setup', 'rotate-token', '--yes') `
+            -TimeoutSeconds 300 -LogPath $credentialLogPaths[3] -SuppressOutput
+    } catch {
+        throw "packaged token rotation rotate-token failed: $($_.Exception.Message)"
+    }
     $tokenBState = [IO.File]::ReadAllBytes($dotenvPath)
     if (Test-WindowsNativeByteArraysEqual $tokenAState $tokenBState) {
         throw 'packaged token rotation did not replace the durable gateway token state'
@@ -5462,8 +5522,12 @@ function Assert-PackagedClaudeTokenRotation(
         throw 'packaged token rotation rewrote dotenv bytes without replacing the gateway token'
     }
 
-    $statusResult = Invoke-WindowsNativeProcess $Launcher @('status', '--json') `
-        -TimeoutSeconds 120 -LogPath $credentialLogPaths[4] -SuppressOutput
+    try {
+        $statusResult = Invoke-WindowsNativeProcess $Launcher @('status', '--json') `
+            -TimeoutSeconds 120 -LogPath $credentialLogPaths[4] -SuppressOutput
+    } catch {
+        throw "packaged token rotation status-after failed: $($_.Exception.Message)"
+    }
     try { $status = $statusResult.StdOut | ConvertFrom-Json -ErrorAction Stop }
     catch { throw 'packaged token rotation status was not valid JSON' }
     $postureAfter = @(Get-PackagedRotationConnectorPosture $status)

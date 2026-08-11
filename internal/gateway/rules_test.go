@@ -24,10 +24,15 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	privatekeyfixture "github.com/defenseclaw/defenseclaw/internal/secretshape/testfixture"
 )
 
 func runtimeDetectorSignature(parts ...string) string {
 	return strings.Join(parts, "")
+}
+
+func syntheticPrivateKeyPEM(label string) string {
+	return strings.TrimSuffix(privatekeyfixture.MustPEM(label), "\n")
 }
 
 // ---------------------------------------------------------------------------
@@ -54,9 +59,9 @@ func TestSecretRules_TruePositives(t *testing.T) {
 		{"Slack webhook", "https://" + "hooks.slack.com/services/" +
 			"T00000000/" + "B00000000/" + "X7a9C2d4E6f8G1h3J5k7L9m2", "SEC-SLACK-WEBHOOK"},
 		{"Discord webhook", runtimeDetectorSignature("https://discord.com/api/", "webhooks/123456789/", "abcdef_GHIJKL-12345"), "SEC-DISCORD-WEBHOOK"},
-		{"Private key PEM", runtimeDetectorSignature("-----BEGIN RSA ", "PRIVATE KEY-----"), "SEC-PRIVKEY"},
-		{"EC private key", runtimeDetectorSignature("-----BEGIN EC ", "PRIVATE KEY-----"), "SEC-PRIVKEY"},
-		{"OpenSSH private key", runtimeDetectorSignature("-----BEGIN OPENSSH ", "PRIVATE KEY-----"), "SEC-PRIVKEY"},
+		{"Private key PEM", syntheticPrivateKeyPEM("RSA PRIVATE KEY"), "SEC-PRIVKEY"},
+		{"EC private key", syntheticPrivateKeyPEM("EC PRIVATE KEY"), "SEC-PRIVKEY"},
+		{"OpenSSH private key", syntheticPrivateKeyPEM("OPENSSH PRIVATE KEY"), "SEC-PRIVKEY"},
 		{"JWT token", runtimeDetectorSignature("eyJhbGciOiJIUzI1NiJ9.", "eyJzdWIiOiIxMjM0NTY3ODkwIn0.", "dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"), "SEC-JWT"},
 		{"MongoDB connection string", runtimeDetectorSignature("mongo", "db://admin:secretpass@", "db.example.com:27017/mydb"), "SEC-CONNSTR"},
 		{"Postgres connection string", runtimeDetectorSignature("post", "gres://user:pass123@", "host:5432/db"), "SEC-CONNSTR"},
@@ -101,6 +106,9 @@ func TestSecretRules_FalsePositives(t *testing.T) {
 		{"short bearer placeholder", `Authorization: Bearer example`},
 		{"password word in text", `Update your password policy`},
 		{"api_key as discussion topic", `We need to rotate the api_key`},
+		{"private-key header only", "-----BEGIN " + "RSA " + "PRIVATE KEY-----"},
+		{"private-key arbitrary base64", "-----BEGIN " + "RSA " + "PRIVATE KEY-----\n" +
+			"QUJDRA==\n-----END RSA PRIVATE KEY-----"},
 	}
 
 	for _, tc := range cases {

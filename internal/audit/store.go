@@ -3435,12 +3435,18 @@ func alertEligibilitySQL(legacyActionPlaceholders string) string {
 						ELSE '[]'
 					END
 				) AS finding_tag
-				WHERE LOWER(CAST(finding_tag.value AS TEXT)) = 'detection-only'
+				WHERE LOWER(TRIM(
+					CAST(finding_tag.value AS TEXT),
+					CHAR(9, 10, 11, 12, 13, 32)
+				)) = 'detection-only'
 			)
-			AND LOWER(COALESCE(
-				CASE WHEN json_valid(COALESCE(event.payload_json,''))
-					THEN json_extract(event.payload_json, '` + findingTagsPath + `') END,
-				''
+			AND LOWER(TRIM(
+				COALESCE(
+					CASE WHEN json_valid(COALESCE(event.payload_json,''))
+						THEN json_extract(event.payload_json, '` + findingTagsPath + `') END,
+					''
+				),
+				CHAR(9, 10, 11, 12, 13, 32)
 			)) <> 'detection-only'
 		)
 		OR (

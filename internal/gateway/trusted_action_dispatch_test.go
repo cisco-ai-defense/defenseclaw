@@ -889,11 +889,12 @@ func TestTrustedActionLegacyCommandsAndC2RequireActionFacts(t *testing.T) {
 	pythonLiteral := "python3 -" + "c 'print(1)'"
 	webhookURL := "https://webhook" + ".site/example"
 	for _, test := range []struct {
-		name      string
-		input     actionfacts.Input
-		legacy    string
-		ruleID    string
-		wantMatch bool
+		name          string
+		input         actionfacts.Input
+		legacy        string
+		ruleID        string
+		wantMatch     bool
+		detectionOnly bool
 	}{
 		{
 			name: "command literal in source search",
@@ -921,9 +922,10 @@ func TestTrustedActionLegacyCommandsAndC2RequireActionFacts(t *testing.T) {
 				Command: pythonLiteral,
 				CWD:     "/repo",
 			},
-			legacy:    pythonLiteral,
-			ruleID:    "CMD-PYTHON-C",
-			wantMatch: true,
+			legacy:        pythonLiteral,
+			ruleID:        "CMD-PYTHON-C",
+			wantMatch:     true,
+			detectionOnly: true,
 		},
 		{
 			name: "C2 literal in patch body",
@@ -958,8 +960,8 @@ func TestTrustedActionLegacyCommandsAndC2RequireActionFacts(t *testing.T) {
 			if got := matched != nil; got != test.wantMatch {
 				t.Fatalf("%s present=%t, want %t: %+v", test.ruleID, got, test.wantMatch, findings)
 			}
-			if matched != nil && !matched.contributesToEnforcement() {
-				t.Fatalf("%s lost enforcement: %+v", test.ruleID, *matched)
+			if matched != nil && matched.contributesToEnforcement() == test.detectionOnly {
+				t.Fatalf("%s enforcement provenance = %+v, detection_only=%t", test.ruleID, *matched, test.detectionOnly)
 			}
 		})
 	}
@@ -1220,6 +1222,283 @@ func TestTrustedActionUncertainCommandKeepsStaticActionEvidence(t *testing.T) {
 				t.Fatalf("static uncertain action lost enforcement: %+v", *matched)
 			}
 		})
+	}
+}
+
+func TestTrustedActionDynamicExecutableEmitsParserUncertainty(t *testing.T) {
+	const connector = "trusted-action-dynamic-executable-test"
+	installDefaultProfileConnector(t, connector)
+	dangerous := "rm -rf " + "/"
+
+	for _, test := range []struct {
+		name    string
+		command string
+	}{
+		{
+			name:    "parameter executable",
+			command: `"$RUNNER" -c '` + dangerous + `'`,
+		},
+		{
+			name:    "statically assigned parameter executable",
+			command: `RUNNER=bash; "$RUNNER" -c '` + dangerous + `'`,
+		},
+		{
+			name: "array executable",
+			command: `RUNNER=(bash -c '` + dangerous + `'); ` +
+				`"${RUNNER[@]}"`,
+		},
+		{
+			name:    "star glob executable",
+			command: `/bin/r* -rf /`,
+		},
+		{
+			name:    "question glob executable",
+			command: `/bin/r? -rf /`,
+		},
+		{
+			name:    "bracket glob executable",
+			command: `/bin/r[m] -rf /`,
+		},
+		{
+			name:    "single-quoted bracket member executable",
+			command: `/bin/r['m'] -rf /`,
+		},
+		{
+			name:    "double-quoted bracket member executable",
+			command: `/bin/r["m"] -rf /`,
+		},
+		{
+			name:    "extended glob executable",
+			command: `/bin/@(rm|rmdir) -rf /`,
+		},
+		{
+			name:    "command wrapper parameter executable",
+			command: `command -- "$RUNNER" -c '` + dangerous + `'`,
+		},
+		{
+			name:    "env wrapper assignment and glob executable",
+			command: `env -u UNUSED MODE=check /bin/r* -rf /`,
+		},
+		{
+			name:    "env option terminator before glob executable",
+			command: `env -- /bin/r* -rf /`,
+		},
+		{
+			name:    "exec wrapper glob executable",
+			command: `exec -c /bin/r* -rf /`,
+		},
+		{
+			name:    "sudo wrapper options assignment and glob executable",
+			command: `sudo -n -u root MODE=check /bin/r* -rf /`,
+		},
+		{
+			name:    "sudo option terminator before glob executable",
+			command: `sudo -- /bin/r* -rf /`,
+		},
+		{
+			name:    "absolute sudo wrapper and glob executable",
+			command: `/usr/bin/sudo -n /bin/r* -rf /`,
+		},
+		{
+			name:    "sudo host option and glob executable",
+			command: `sudo -h remote /bin/r* -rf /`,
+		},
+		{
+			name:    "nested transparent wrappers",
+			command: `sudo -n env MODE=check command -p /bin/r* -rf /`,
+		},
+		{
+			name:    "transparent wrapper depth exhaustion",
+			command: `command command command command command /bin/r* -rf /`,
+		},
+		{
+			name:    "env split string has unresolved boundary",
+			command: `env -S 'echo ok'`,
+		},
+		{
+			name:    "command unknown option has unresolved boundary",
+			command: `command --future-option /bin/r* -rf /`,
+		},
+		{
+			name:    "exec unknown option has unresolved boundary",
+			command: `exec --future-option /bin/r* -rf /`,
+		},
+		{
+			name:    "sudo unknown option has unresolved boundary",
+			command: `sudo --future-option /bin/r* -rf /`,
+		},
+		{
+			name:    "sudo login shell has unresolved boundary",
+			command: `sudo -i /bin/r* -rf /`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			input := actionfacts.Input{
+				Tool: "Bash", Command: test.command, CWD: "/repo",
+			}
+			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+				Input: input, LegacyText: test.command, Connector: connector,
+				EnforcementCapable: true,
+			})
+			uncertainty := findingWithID(findings, trustedParserUncertaintyRuleID)
+			if uncertainty == nil || uncertainty.Severity != "LOW" ||
+				uncertainty.contributesToEnforcement() ||
+				!hasTag(uncertainty.Tags, trustedParserUncertaintyTag) {
+				t.Fatalf(
+					"parser uncertainty = %+v, want visible LOW detection-only telemetry; findings=%+v facts=%+v",
+					uncertainty,
+					findings,
+					actionfacts.Analyze(input),
+				)
+			}
+			for _, finding := range findings {
+				if hasTag(finding.Tags, trustedParserUncertaintyTag) &&
+					finding.contributesToEnforcement() {
+					t.Fatalf("parser-uncertain finding became enforceable: %+v", finding)
+				}
+			}
+		})
+	}
+}
+
+func TestTrustedActionDynamicExecutableQuietControls(t *testing.T) {
+	const connector = "trusted-action-dynamic-executable-quiet-test"
+	installDefaultProfileConnector(t, connector)
+	dangerous := "rm -rf " + "/"
+
+	for _, test := range []struct {
+		name               string
+		command            string
+		allowTypedFindings bool
+	}{
+		{
+			name:    "assignment-only array",
+			command: `RUNNER=(bash -c '` + dangerous + `')`,
+		},
+		{
+			name:    "quoted executable review literal",
+			command: `printf '%s\n' '"$RUNNER" -c "` + dangerous + `"'`,
+		},
+		{
+			name: "source search array literal",
+			command: `rg -n 'RUNNER=(bash -c); "${RUNNER[@]}"' ` +
+				`internal/gateway`,
+		},
+		{
+			name:               "dynamic trailing argument",
+			command:            dangerous + ` "$IGNORED"`,
+			allowTypedFindings: true,
+		},
+		{
+			name:    "preview shell",
+			command: `bash -n -c '` + dangerous + `'`,
+		},
+		{
+			name:    "single-quoted glob executable",
+			command: `'/bin/r?' -rf /`,
+		},
+		{
+			name:    "double-quoted glob executable",
+			command: `"/bin/r?" -rf /`,
+		},
+		{
+			name:    "escaped glob executable",
+			command: `/bin/r\? -rf /`,
+		},
+		{
+			name:    "literal bracket command",
+			command: `[ -n "$RUNNER" ]`,
+		},
+		{
+			name:    "quoted bracket delimiters",
+			command: `'/bin/r['m']' -rf /`,
+		},
+		{
+			name:    "command lookup does not execute",
+			command: `command -v /bin/r*`,
+		},
+		{
+			name:    "env assignments without child",
+			command: `env MODE=check OTHER=value`,
+		},
+		{
+			name:    "env option terminator with assignments only",
+			command: `env -- MODE=check OTHER=value`,
+		},
+		{
+			name:    "env syntactic dynamic assignment before static child",
+			command: `env FOO="$IGNORED" echo ok`,
+		},
+		{
+			name:    "exec alternate name without child",
+			command: `exec -a alternate`,
+		},
+		{
+			name:    "sudo list does not execute",
+			command: `sudo -l /bin/r*`,
+		},
+		{
+			name:    "sudo host option precedes static child",
+			command: `sudo -h remote echo ok`,
+		},
+		{
+			name:    "sudo syntactic dynamic assignment before static child",
+			command: `sudo FOO="$IGNORED" echo ok`,
+		},
+		{
+			name:    "sudo option terminator before static child",
+			command: `sudo -- echo ok`,
+		},
+		{
+			name:    "backslash is not a Bash path separator",
+			command: `tools\\sudo /bin/r* -rf /`,
+		},
+		{
+			name:    "env help does not execute",
+			command: `env --help /bin/r*`,
+		},
+		{
+			name:    "env version does not execute",
+			command: `env --version /bin/r*`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			input := actionfacts.Input{
+				Tool: "Bash", Command: test.command, CWD: "/repo",
+			}
+			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+				Input: input, LegacyText: test.command, Connector: connector,
+				EnforcementCapable: true,
+			})
+			if uncertainty := findingWithID(findings, trustedParserUncertaintyRuleID); uncertainty != nil {
+				t.Fatalf("quiet control emitted parser uncertainty: %+v; findings=%+v facts=%+v", uncertainty, findings, actionfacts.Analyze(input))
+			}
+			if !test.allowTypedFindings && len(findings) != 0 {
+				t.Fatalf("quiet control emitted findings: %+v; facts=%+v", findings, actionfacts.Analyze(input))
+			}
+		})
+	}
+
+	for _, command := range []string{
+		dangerous,
+		"command " + dangerous,
+		"env MODE=check " + dangerous,
+		"exec " + dangerous,
+		"sudo -n " + dangerous,
+		"sudo -h remote " + dangerous,
+	} {
+		static := actionfacts.Input{Tool: "Bash", Command: command, CWD: "/repo"}
+		findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+			Input: static, LegacyText: command, Connector: connector,
+			EnforcementCapable: true,
+		})
+		matched := findingWithID(findings, "CMD-RM-RF")
+		if matched == nil || !matched.contributesToEnforcement() {
+			t.Fatalf("static malicious command %q lost enforcement: %+v", command, findings)
+		}
+		if uncertainty := findingWithID(findings, trustedParserUncertaintyRuleID); uncertainty != nil {
+			t.Fatalf("static command %q emitted parser uncertainty: %+v", command, uncertainty)
+		}
 	}
 }
 

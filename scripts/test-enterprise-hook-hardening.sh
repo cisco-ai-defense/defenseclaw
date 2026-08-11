@@ -152,7 +152,6 @@ case "$connector" in
     amp)
         artifact_kind='plugin'
         native_otlp='false'
-        user_token_sidecar='false'
         agent_version='0.0.1785334225'
         hook_name='amp-plugin.ts'
         native_config_rel='.config/amp/plugins/defenseclaw.ts'
@@ -271,8 +270,6 @@ else
 fi
 
 TOKEN_PATH="$user_token" \
-TOKEN_SOURCE="$artifact_kind" \
-PLUGIN_PATH="$native_config" \
 EXPECTED_PATH="$hook_request_path" \
 SERVER_READY="$server_ready" \
 SERVER_RESULT="$server_result" \
@@ -280,27 +277,15 @@ python3 - >"$server_log" 2>&1 <<'PY' &
 import json
 import os
 import pathlib
-import re
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 expected_path = os.environ["EXPECTED_PATH"]
 result_path = os.environ["SERVER_RESULT"]
 token_path = os.environ["TOKEN_PATH"]
-token_source = os.environ["TOKEN_SOURCE"]
-plugin_path = os.environ["PLUGIN_PATH"]
 
 
 def expected_token():
-    if token_source != "plugin":
-        return pathlib.Path(token_path).read_text(encoding="utf-8").rstrip("\n")
-    source = pathlib.Path(plugin_path).read_text(encoding="utf-8")
-    match = re.search(
-        r'(?m)^const DC_API_TOKEN\s*=\s*("(?:\\.|[^"\\])*")\s*$',
-        source,
-    )
-    if match is None:
-        raise RuntimeError("managed Amp plugin is missing DC_API_TOKEN")
-    return json.loads(match.group(1))
+    return pathlib.Path(token_path).read_text(encoding="utf-8").rstrip("\n")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -419,8 +404,9 @@ validate_amp_plugin_constants() {
     local mode="${1:-validate}"
     local scoped_token
     scoped_token="$(sudo -n cat "$service_token")"
-    AMP_SCOPED_TOKEN="$scoped_token" HOOK_PAYLOAD="$hook_payload" \
+    AMP_SCOPED_TOKEN="$scoped_token" AMP_TOKEN_FILE="$user_token" HOOK_PAYLOAD="$hook_payload" \
         python3 - "$native_config" "127.0.0.1:${api_port}" "$hook_request_path" "$mode" <<'PY'
+import base64
 import json
 import os
 import pathlib
@@ -444,7 +430,7 @@ def string_constant(name):
 
 
 api_addr = string_constant("DC_API_ADDR")
-api_token = string_constant("DC_API_TOKEN")
+token_file = string_constant("DC_TOKEN_FILE")
 endpoint = re.search(
     r'fetch\(`http://\$\{DC_API_ADDR\}([^`$]+)`\s*,',
     source,
@@ -453,8 +439,13 @@ if api_addr != expected_addr:
     raise SystemExit("managed Amp plugin has the wrong gateway address")
 if endpoint is None or endpoint.group(1) != expected_path:
     raise SystemExit("managed Amp plugin has the wrong hook endpoint")
-if api_token != os.environ.pop("AMP_SCOPED_TOKEN"):
-    raise SystemExit("managed Amp plugin does not embed the connector-scoped token")
+if token_file != os.environ.pop("AMP_TOKEN_FILE"):
+    raise SystemExit("managed Amp plugin has the wrong connector-scoped token file")
+scoped_token = os.environ.pop("AMP_SCOPED_TOKEN")
+if scoped_token in source or base64.b64encode(scoped_token.encode("utf-8")).decode("ascii") in source:
+    raise SystemExit("managed Amp plugin embeds the connector-scoped token")
+if "DC_API_TOKEN" in source:
+    raise SystemExit("managed Amp plugin retains the obsolete embedded-token constant")
 if "{{." in source:
     raise SystemExit("managed Amp plugin retains an unresolved template placeholder")
 for provider_secret in (
@@ -470,6 +461,9 @@ for provider_secret in (
 
 if mode == "request":
     payload = json.loads(os.environ["HOOK_PAYLOAD"])
+    api_token = pathlib.Path(token_file).read_text(encoding="utf-8").strip()
+    if re.fullmatch(r"[0-9a-f]{64}", api_token) is None:
+        raise SystemExit("managed Amp plugin token sidecar is malformed")
     request = urllib.request.Request(
         f"http://{api_addr}{endpoint.group(1)}",
         data=json.dumps(payload).encode("utf-8"),
@@ -593,7 +587,7 @@ fi
 
 canonical_artifact_hash="$(file_hash "$managed_artifact")"
 if [ "$artifact_kind" = plugin ]; then
-    printf '// attacker-controlled Amp plugin\nconst DC_API_TOKEN = "attacker-controlled-token"\n' >"$managed_artifact"
+    printf '// attacker-controlled Amp plugin\nconst DC_TOKEN_FILE = "/tmp/attacker-controlled-token"\n' >"$managed_artifact"
 else
     printf '#!/bin/sh\nexit 0\n' >"$managed_artifact"
 fi
