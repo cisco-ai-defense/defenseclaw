@@ -573,6 +573,88 @@ func TestGeneratedMetricOTLPSinksProjectGenericAndLocalLabelsWithExactResource(t
 	}
 }
 
+func TestManagedAIDFailOpenMetricOTLPExporterPreservesBoundedReasonContract(t *testing.T) {
+	genericCapture, localCapture := &otlpGenerationCapture{}, &otlpGenerationCapture{}
+	genericServer := httptest.NewServer(http.HandlerFunc(genericCapture.handler))
+	localServer := httptest.NewServer(http.HandlerFunc(localCapture.handler))
+	defer genericServer.Close()
+	defer localServer.Close()
+	plan := compileGenerationRuntimePlan(t, t.TempDir(),
+		metricSend("generic-metrics", genericServer.URL, []observability.Bucket{observability.BucketPlatformHealth}),
+		metricSend(localobservability.DestinationName, localServer.URL, []observability.Bucket{observability.BucketPlatformHealth}),
+	)
+	factory := newTestFactory(t, io.Discard, nil, nil, net.Dialer{}, nil)
+	manager := generationOTLPManager(t, factory, plan)
+	provider, lease := compositeProviderFromManager(t, manager)
+	digest, generation, ok := provider.V8PlanBinding()
+	if !ok || digest == "" || generation != 1 {
+		lease.Release()
+		t.Fatalf("provider binding digest=%q generation=%d ok=%v", digest, generation, ok)
+	}
+	builder, err := observability.NewFamilyBuilder(
+		observability.ClockFunc(func() time.Time { return time.Unix(502, 0).UTC() }),
+		observability.OccurrenceIDGeneratorFunc(func() (string, error) {
+			return "managed-aid-fail-open-export", nil
+		}),
+	)
+	if err != nil {
+		lease.Release()
+		t.Fatal(err)
+	}
+	record, err := builder.BuildMetricDefenseClawManagedAidFailOpenDecisions(
+		observability.MetricDefenseClawManagedAidFailOpenDecisionsInput{
+			Envelope: observability.FamilyEnvelopeInput{
+				Source: observability.SourceGateway,
+				Provenance: observability.FamilyProvenanceInput{
+					Producer: "gateway.managed_aid_fail_open", BinaryVersion: "generation-test",
+					ConfigGeneration: int64(generation), ConfigDigest: digest,
+				},
+			},
+			Value: 1, DefenseClawMetricReason: observability.Present("aid_unavailable"),
+		},
+	)
+	if err != nil {
+		lease.Release()
+		t.Fatal(err)
+	}
+	result, err := provider.RecordGeneratedMetric(t.Context(), record)
+	if err != nil || result != (telemetry.V8MetricRecordResult{Matched: 2, Delivered: 2}) {
+		lease.Release()
+		t.Fatalf("record result=%+v err=%v", result, err)
+	}
+	componentValue, componentOK := lease.Component(telemetry.V8ProviderComponentName)
+	component, typed := componentValue.(*telemetry.V8ProviderComponent)
+	if !componentOK || !typed {
+		lease.Release()
+		t.Fatal("generation provider component missing")
+	}
+	flushContext, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	if err := component.Drain(flushContext); err != nil {
+		lease.Release()
+		t.Fatal(err)
+	}
+	lease.Release()
+
+	_, genericRequests, _ := genericCapture.snapshot()
+	_, localRequests, _ := localCapture.snapshot()
+	const family = "defenseclaw.managed_aid.fail_open.decisions"
+	generic := capturedSumMetric(t, genericRequests, family)
+	local := capturedSumMetric(t, localRequests, family)
+	for name, metric := range map[string]capturedSum{"generic": generic, "local": local} {
+		if metric.unit != "{decision}" ||
+			metric.temporality != metricpb.AggregationTemporality_AGGREGATION_TEMPORALITY_DELTA ||
+			!metric.monotonic || metric.value != 1 {
+			t.Fatalf("%s managed AID fail-open metric contract=%+v", name, metric)
+		}
+	}
+	if !reflect.DeepEqual(generic.attributes, map[string]any{
+		"defenseclaw.metric.reason": "aid_unavailable",
+	}) || !reflect.DeepEqual(local.attributes, map[string]any{"reason": "aid_unavailable"}) {
+		t.Fatalf("generic/local managed AID labels=%v/%v", generic.attributes, local.attributes)
+	}
+}
+
 func TestGeneratedMetricOTLPSinkFailureDoesNotSuppressSiblingDestination(t *testing.T) {
 	var failedCalls atomic.Int64
 	failedServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
@@ -1561,6 +1643,45 @@ type capturedHistogram struct {
 	bounds      []float64
 	attributes  map[string]any
 	resource    map[string]any
+}
+
+type capturedSum struct {
+	unit        string
+	temporality metricpb.AggregationTemporality
+	monotonic   bool
+	value       int64
+	attributes  map[string]any
+}
+
+func capturedSumMetric(
+	t *testing.T,
+	requests []*collectormetricpb.ExportMetricsServiceRequest,
+	name string,
+) capturedSum {
+	t.Helper()
+	for _, request := range requests {
+		for _, resourceMetrics := range request.ResourceMetrics {
+			for _, scope := range resourceMetrics.ScopeMetrics {
+				for _, metric := range scope.Metrics {
+					if metric.Name != name {
+						continue
+					}
+					sum := metric.GetSum()
+					if sum == nil || len(sum.DataPoints) != 1 {
+						t.Fatalf("metric %s data=%T points=%d", name, metric.Data, len(sum.GetDataPoints()))
+					}
+					point := sum.DataPoints[0]
+					return capturedSum{
+						unit: metric.Unit, temporality: sum.AggregationTemporality,
+						monotonic: sum.IsMonotonic, value: point.GetAsInt(),
+						attributes: capturedKeyValues(point.Attributes),
+					}
+				}
+			}
+		}
+	}
+	t.Fatalf("metric %q not captured", name)
+	return capturedSum{}
 }
 
 func capturedHistogramMetric(

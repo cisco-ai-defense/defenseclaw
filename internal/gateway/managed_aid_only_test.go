@@ -214,8 +214,10 @@ func TestHookManagedAIDOnly_MessageContentFailOpen(t *testing.T) {
 
 type managedAIDFailOpenCapture struct {
 	lifecycleV8Runtime
-	records []observability.Record
-	errors  []error
+	records       []observability.Record
+	errors        []error
+	metricRecords []observability.Record
+	metricErrors  []error
 }
 
 type managedAIDFailOpenDelivery struct {
@@ -376,6 +378,37 @@ func (capture *managedAIDFailOpenCapture) Emit(
 	return pipeline.LocalLogOutcome{}, nil
 }
 
+func (capture *managedAIDFailOpenCapture) RecordGeneratedMetricBatch(
+	_ context.Context,
+	items []observabilityruntime.GeneratedMetricBatchItem,
+) ([]telemetry.V8MetricRecordResult, error) {
+	results := make([]telemetry.V8MetricRecordResult, len(items))
+	for index, item := range items {
+		record, err := item.Builder(observabilityruntime.EmitContext{})
+		if err != nil {
+			capture.metricErrors = append(capture.metricErrors, err)
+			return results, err
+		}
+		capture.metricRecords = append(capture.metricRecords, record)
+		results[index] = telemetry.V8MetricRecordResult{Matched: 1, Delivered: 1}
+	}
+	return results, nil
+}
+
+func TestManagedAIDFailOpenReasonNormalizationIsClosed(t *testing.T) {
+	for input, want := range map[string]string{
+		aidFailOpenUnwired:                 aidFailOpenUnwired,
+		"  " + aidFailOpenNoContent + "  ": aidFailOpenNoContent,
+		aidFailOpenUnavailable:             aidFailOpenUnavailable,
+		"future-provider-secret":           "unknown",
+		"":                                 "unknown",
+	} {
+		if got := normalizeManagedAIDFailOpenReason(input); got != want {
+			t.Errorf("normalizeManagedAIDFailOpenReason(%q)=%q, want %q", input, got, want)
+		}
+	}
+}
+
 func TestManagedAIDFailOpen_EmitsDistinctReasons(t *testing.T) {
 	cases := []struct {
 		name         string
@@ -428,6 +461,32 @@ func TestManagedAIDFailOpen_EmitsDistinctReasons(t *testing.T) {
 			}
 			if len(capture.errors) != 0 || len(capture.records) != 1 {
 				t.Fatalf("canonical fail-open records=%d errors=%v, want one", len(capture.records), capture.errors)
+			}
+			if len(capture.metricErrors) != 0 || len(capture.metricRecords) != 1 {
+				t.Fatalf(
+					"canonical fail-open metrics=%d errors=%v, want one",
+					len(capture.metricRecords), capture.metricErrors,
+				)
+			}
+			metric := capture.metricRecords[0]
+			if metric.Bucket() != observability.BucketPlatformHealth ||
+				metric.EventName() != observability.EventName(
+					observability.TelemetryInstrumentDefenseClawManagedAidFailOpenDecisions,
+				) {
+				t.Fatalf("canonical fail-open metric identity=%s/%s", metric.Bucket(), metric.EventName())
+			}
+			instrumentValue, present := metric.InstrumentData()
+			if !present {
+				t.Fatal("canonical fail-open metric has no instrument data")
+			}
+			instrument, err := instrumentValue.Object()
+			if err != nil {
+				t.Fatal(err)
+			}
+			attributes, ok := instrument["attributes"].(map[string]any)
+			if !ok || fmt.Sprint(instrument["value"]) != "1" ||
+				attributes["defenseclaw.metric.reason"] != tc.wantReason {
+				t.Fatalf("canonical fail-open metric instrument=%v", instrument)
 			}
 			record := capture.records[0]
 			severity, present := record.Severity()

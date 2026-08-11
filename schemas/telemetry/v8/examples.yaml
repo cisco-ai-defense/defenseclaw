@@ -363,6 +363,38 @@ examples:
       /attributes/defenseclaw.metric.event_type: metadata
       /attributes/defenseclaw.metric.result: metadata
       /attributes/defenseclaw.metric.reason: metadata
+- id: valid-managed-aid-fail-open-metric
+  valid: true
+  signal: metrics
+  family: metric.defenseclaw.managed_aid.fail_open.decisions
+  description: A managed AI Defense outage decision increments one bounded counter series keyed only by the normalized fail-open reason.
+  builder_context:
+    inheritance: {mode: explicit}
+    occurrence: {timestamp: '2026-07-03T12:00:05Z', record_id: rec-managed-aid-fail-open-001}
+    condition_facts: {}
+    mandatory_facts: {}
+  record:
+    schema_version: 1
+    bucket_catalog_version: 1
+    timestamp: '2026-07-03T12:00:05Z'
+    record_id: rec-managed-aid-fail-open-001
+    bucket: platform.health
+    signal: metrics
+    event_name: defenseclaw.managed_aid.fail_open.decisions
+    source: gateway
+    correlation: {}
+    provenance:
+      producer: gateway.managed_aid_fail_open
+      binary_version: 8.0.0
+      registry_schema_version: 1
+      config_generation: 8
+    instrument_data:
+      value: 1
+      attributes:
+        defenseclaw.metric.reason: aid_unavailable
+    field_classes:
+      /value: metadata
+      /attributes/defenseclaw.metric.reason: metadata
 - id: valid-telemetry-rejection-without-raw-payload
   valid: true
   signal: logs

@@ -154,6 +154,16 @@ def test_local_dashboards_and_rules_use_active_v8_event_sources() -> None:
     assert "expr: service:defenseclaw_guardrail_block_ratio:5m > 0.25" in block_alert
     assert "rate(defenseclaw_guardrail_evaluations_total" not in block_alert
 
+    managed_aid_alert = alert_rules.split(
+        "- alert: DefenseClawManagedAIDFailOpenSustained", maxsplit=1
+    )[1].split("- alert:", maxsplit=1)[0]
+    managed_aid_expr = managed_aid_alert.split("labels:", maxsplit=1)[0]
+    assert "defenseclaw_managed_aid_fail_open_decisions_total" in managed_aid_expr
+    assert 'reason=~"inspector_unwired|aid_unavailable"' in managed_aid_expr
+    assert "no_content" not in managed_aid_expr
+    assert "for: 10m" in managed_aid_alert
+    assert "severity: critical" in managed_aid_alert
+
 
 def test_security_dashboard_exposes_generated_ai_defense_metrics() -> None:
     dashboard = _dashboard("defenseclaw-security.json")
