@@ -51,6 +51,7 @@ const (
 	historicalEmptyScanID             = "historical-empty-scan"
 	historicalWhitespaceScanID        = "historical-whitespace-scan"
 	historicalNullScanID              = "historical-null-scan"
+	historicalNullFindingsScanID      = "historical-null-findings-scan"
 )
 
 func TestHistoricalSensitiveEvidenceMigrationRepairsEverySurfaceAndIntegrity(t *testing.T) {
@@ -270,6 +271,16 @@ func TestHistoricalSensitiveEvidenceMigrationRejectsOpaqueOrphanScanResultAtomic
 		{name: "truncated object", rawJSON: `{"findings":[`, wantError: "decode historical scan result JSON"},
 		{name: "array", rawJSON: `[]`, wantError: "historical scan result JSON is not an object"},
 		{name: "JSON null", rawJSON: `null`, wantError: "historical scan result JSON is not an object"},
+		{
+			name:      "object finding container",
+			rawJSON:   `{"findings":{"category":"credential-leak","evidence":"sk_live_orphan"}}`,
+			wantError: "historical scan result findings is not an array",
+		},
+		{
+			name:      "scalar finding member",
+			rawJSON:   `{"findings":[{"rule_id":"SAFE-RULE","category":"quality"},"sk_live_orphan"]}`,
+			wantError: "historical scan result finding 1 is not an object",
+		},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			fixture := newHistoricalSensitiveEvidenceFixture(t)
@@ -302,6 +313,34 @@ func TestHistoricalSensitiveEvidenceMigrationRejectsOpaqueOrphanScanResultAtomic
 			if versionErr != nil || version != fixture.migrationVersion-1 {
 				t.Fatalf("schema version after opaque scan-result refusal=%d want=%d err=%v",
 					version, fixture.migrationVersion-1, versionErr)
+			}
+		})
+	}
+}
+
+func TestHistoricalSensitiveNeedleMatchesShortTokenBoundaries(t *testing.T) {
+	for _, testCase := range []struct {
+		name, value, needle string
+		want                bool
+	}{
+		{name: "exact credential", value: "tok", needle: "tok", want: true},
+		{name: "delimited credential", value: "token tok", needle: "tok", want: true},
+		{name: "credential substring", value: "token", needle: "tok", want: false},
+		{name: "delimited PII", value: "PIN 1234", needle: "1234", want: true},
+		{name: "PII digit suffix", value: "PIN 12345", needle: "1234", want: false},
+		{name: "delimited trust", value: "directive go", needle: "go", want: true},
+		{name: "trust substring", value: "ongoing", needle: "go", want: false},
+		{name: "unicode letter boundary", value: "égo", needle: "go", want: false},
+		{name: "unicode mark boundary", value: "a\u0301go", needle: "go", want: false},
+		{name: "underscore boundary", value: "prefix_go", needle: "go", want: false},
+		{name: "punctuation whole field", value: "  :) ", needle: ":)", want: true},
+		{name: "punctuation substring", value: "prefix :) suffix", needle: ":)", want: false},
+		{name: "long needle retains substring", value: "prefixabcdefsuffix", needle: "abcdef", want: true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			if got := historicalSensitiveNeedleMatches(testCase.value, testCase.needle); got != testCase.want {
+				t.Fatalf("historicalSensitiveNeedleMatches(%q, %q)=%t want=%t",
+					testCase.value, testCase.needle, got, testCase.want)
 			}
 		})
 	}
@@ -422,7 +461,13 @@ func newHistoricalSensitiveEvidenceFixture(t *testing.T) historicalSensitiveEvid
 	rawObject["legacy_result_field"] = map[string]any{"retained": true}
 	rawObject["legacy_result_safe_string"] = "retain-root-string"
 	rawObject["legacy_result_sensitive"] = secret
+	rawObject["legacy_short_secret_result_sensitive"] = "token tok"
+	rawObject["legacy_short_secret_safe_boundary"] = "token"
 	rawObject["legacy_pii_result_sensitive"] = pii
+	rawObject["legacy_short_pii_result_sensitive"] = "PIN 1234"
+	rawObject["legacy_short_pii_safe_boundary"] = "PIN 12345"
+	rawObject["legacy_short_trust_result_sensitive"] = "directive go"
+	rawObject["legacy_short_trust_safe_boundary"] = "ongoing"
 	rawObject["legacy_mixed_result_sensitive"] = secret + " / " + pii
 	rawFindings, ok := rawObject["findings"].([]any)
 	if !ok || len(rawFindings) != len(findings) {
@@ -435,6 +480,7 @@ func newHistoricalSensitiveEvidenceFixture(t *testing.T) historicalSensitiveEvid
 	// EvidenceSummary is intentionally json:"-" in scanner.Finding. The
 	// migration must retain this historical key while replacing its value.
 	secretFinding["evidence_summary"] = secret
+	secretFinding["evidence"] = "tok"
 	secretFinding["legacy_finding_field"] = map[string]any{
 		"retained":  true,
 		"raw_match": secret,
@@ -449,6 +495,7 @@ func newHistoricalSensitiveEvidenceFixture(t *testing.T) historicalSensitiveEvid
 	if !ok {
 		t.Fatalf("legacy raw PII finding shape=%T", rawFindings[1])
 	}
+	piiFinding["evidence_summary"] = "1234"
 	piiFinding["legacy_pii_extension"] = map[string]any{
 		"independent":      extensionPII,
 		"short":            "p",
@@ -459,6 +506,7 @@ func newHistoricalSensitiveEvidenceFixture(t *testing.T) historicalSensitiveEvid
 	if !ok {
 		t.Fatalf("legacy raw trust finding shape=%T", rawFindings[2])
 	}
+	trustFinding["evidence"] = "go"
 	trustFinding["legacy_trust_extension"] = map[string]any{
 		"independent":      extensionTrust,
 		"short":            "t",
@@ -490,12 +538,14 @@ func newHistoricalSensitiveEvidenceFixture(t *testing.T) historicalSensitiveEvid
 		         (?, 'legacy-runtime', 'safe-target', ?, 1, 1, 'INFO', ?),
 		         (?, 'legacy-runtime', 'empty-target', ?, 1, 0, 'INFO', ''),
 		         (?, 'legacy-runtime', 'whitespace-target', ?, 1, 0, 'INFO', '   '),
-		         (?, 'legacy-runtime', 'null-target', ?, 1, 0, 'INFO', NULL)`,
+		         (?, 'legacy-runtime', 'null-target', ?, 1, 0, 'INFO', NULL),
+		         (?, 'legacy-runtime', 'null-findings-target', ?, 1, 0, 'INFO', '{"findings":null}')`,
 		observed.Format(time.RFC3339Nano), string(rawJSON),
 		historicalSafeScanID, observed.Format(time.RFC3339Nano), string(safeScanJSON),
 		historicalEmptyScanID, observed.Format(time.RFC3339Nano),
 		historicalWhitespaceScanID, observed.Format(time.RFC3339Nano),
-		historicalNullScanID, observed.Format(time.RFC3339Nano)); err != nil {
+		historicalNullScanID, observed.Format(time.RFC3339Nano),
+		historicalNullFindingsScanID, observed.Format(time.RFC3339Nano)); err != nil {
 		t.Fatal(err)
 	}
 	insertHistoricalScanFinding(t, store.db, "historical-secret-finding", findings[0], secret, observed)
@@ -1129,9 +1179,36 @@ func assertHistoricalRawExtensionsPreserved(
 		!isSensitiveFindingRedactionPlaceholder(sensitive) {
 		t.Fatalf("sensitive result extension not retained as a placeholder: %#v", object["legacy_result_sensitive"])
 	}
+	if sensitive, ok := object["legacy_short_secret_result_sensitive"].(string); !ok ||
+		!isSensitiveFindingRedactionPlaceholder(sensitive) {
+		t.Fatalf("short credential result extension not retained as a placeholder: %#v",
+			object["legacy_short_secret_result_sensitive"])
+	}
+	if object["legacy_short_secret_safe_boundary"] != "token" {
+		t.Fatalf("credential substring boundary over-redacted: %#v",
+			object["legacy_short_secret_safe_boundary"])
+	}
 	if sensitive, ok := object["legacy_pii_result_sensitive"].(string); !ok ||
 		!isPIIRedactionPlaceholder(sensitive) {
 		t.Fatalf("PII result extension not retained as a placeholder: %#v", object["legacy_pii_result_sensitive"])
+	}
+	if sensitive, ok := object["legacy_short_pii_result_sensitive"].(string); !ok ||
+		!isPIIRedactionPlaceholder(sensitive) {
+		t.Fatalf("short PII result extension not retained as a placeholder: %#v",
+			object["legacy_short_pii_result_sensitive"])
+	}
+	if object["legacy_short_pii_safe_boundary"] != "PIN 12345" {
+		t.Fatalf("PII substring boundary over-redacted: %#v",
+			object["legacy_short_pii_safe_boundary"])
+	}
+	if sensitive, ok := object["legacy_short_trust_result_sensitive"].(string); !ok ||
+		!isSensitiveFindingRedactionPlaceholder(sensitive) {
+		t.Fatalf("short trust result extension not retained as a placeholder: %#v",
+			object["legacy_short_trust_result_sensitive"])
+	}
+	if object["legacy_short_trust_safe_boundary"] != "ongoing" {
+		t.Fatalf("trust substring boundary over-redacted: %#v",
+			object["legacy_short_trust_safe_boundary"])
 	}
 	if sensitive, ok := object["legacy_mixed_result_sensitive"].(string); !ok ||
 		!isSensitiveFindingRedactionPlaceholder(sensitive) {
@@ -1148,6 +1225,10 @@ func assertHistoricalRawExtensionsPreserved(
 	if evidence, ok := finding["evidence_summary"].(string); !ok ||
 		!isSensitiveFindingRedactionPlaceholder(evidence) {
 		t.Fatalf("json:- evidence_summary was lost or not redacted: %#v", finding["evidence_summary"])
+	}
+	if evidence, ok := finding["evidence"].(string); !ok ||
+		!isSensitiveFindingRedactionPlaceholder(evidence) {
+		t.Fatalf("short credential evidence was not canonically redacted: %#v", finding["evidence"])
 	}
 	extension, ok := finding["legacy_finding_field"].(map[string]any)
 	if !ok || extension["retained"] != true {
@@ -1171,6 +1252,10 @@ func assertHistoricalRawExtensionsPreserved(
 	if !ok {
 		t.Fatalf("repaired PII finding shape=%T", findings[1])
 	}
+	if evidence, ok := piiFinding["evidence_summary"].(string); !ok ||
+		!isPIIRedactionPlaceholder(evidence) {
+		t.Fatalf("short PII evidence was not canonically redacted: %#v", piiFinding["evidence_summary"])
+	}
 	piiExtension, ok := piiFinding["legacy_pii_extension"].(map[string]any)
 	if !ok {
 		t.Fatalf("PII extension container shape changed: %#v", piiFinding["legacy_pii_extension"])
@@ -1184,6 +1269,10 @@ func assertHistoricalRawExtensionsPreserved(
 	trustFinding, ok := findings[2].(map[string]any)
 	if !ok {
 		t.Fatalf("repaired trust finding shape=%T", findings[2])
+	}
+	if evidence, ok := trustFinding["evidence"].(string); !ok ||
+		!isSensitiveFindingRedactionPlaceholder(evidence) {
+		t.Fatalf("short trust evidence was not canonically redacted: %#v", trustFinding["evidence"])
 	}
 	trustExtension, ok := trustFinding["legacy_trust_extension"].(map[string]any)
 	if !ok {
@@ -1255,6 +1344,7 @@ func assertHistoricalSafeScanControlsPreserved(t *testing.T, fixture historicalS
 		{id: historicalEmptyScanID, wantValid: true, wantRaw: ""},
 		{id: historicalWhitespaceScanID, wantValid: true, wantRaw: "   "},
 		{id: historicalNullScanID, wantValid: false},
+		{id: historicalNullFindingsScanID, wantValid: true, wantRaw: `{"findings":null}`},
 	} {
 		var raw sql.NullString
 		if err := fixture.store.db.QueryRow(

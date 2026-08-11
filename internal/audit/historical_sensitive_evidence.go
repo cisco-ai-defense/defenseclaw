@@ -12,6 +12,8 @@ import (
 	"io"
 	"os"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
@@ -349,7 +351,7 @@ func scrubHistoricalScanResultRows(ex dbExecer) error {
 			if _, carriesFindings := object["findings"]; !carriesFindings {
 				continue
 			}
-			changed, repairErr := scrubHistoricalRawScanResult(object, row.knownSensitive)
+			changed, repairErr := scrubHistoricalRawScanResult(object)
 			if repairErr != nil {
 				return repairErr
 			}
@@ -381,17 +383,17 @@ type historicalSensitiveNeedle struct {
 // unless they repeat known evidence, and preserve finding-owned extension
 // shape while redacting every non-empty string once that finding is known to
 // be sensitive.
-func scrubHistoricalRawScanResult(object map[string]any, failClosed bool) (bool, error) {
+func scrubHistoricalRawScanResult(object map[string]any) (bool, error) {
 	rawFindings, carriesFindings := object["findings"]
 	if !carriesFindings {
 		return false, nil
 	}
+	if rawFindings == nil {
+		return false, nil
+	}
 	findings, ok := rawFindings.([]any)
 	if !ok {
-		if failClosed {
-			return false, fmt.Errorf("audit: historical sensitive scan result findings is not an array")
-		}
-		return false, nil
+		return false, fmt.Errorf("audit: historical scan result findings is not an array")
 	}
 
 	changed := false
@@ -399,10 +401,7 @@ func scrubHistoricalRawScanResult(object map[string]any, failClosed bool) (bool,
 	for index, candidate := range findings {
 		finding, ok := candidate.(map[string]any)
 		if !ok {
-			if failClosed {
-				return false, fmt.Errorf("audit: historical sensitive scan result finding %d is not an object", index)
-			}
-			continue
+			return false, fmt.Errorf("audit: historical scan result finding %d is not an object", index)
 		}
 		kind, sensitive := historicalSensitiveFlagsFromJSON(finding).kind()
 		if !sensitive {
@@ -495,7 +494,7 @@ func historicalSensitiveNeedlesFromFinding(
 		switch typed := value.(type) {
 		case string:
 			trimmed := strings.TrimSpace(typed)
-			if len(trimmed) < 6 || isSensitiveFindingRedactionPlaceholder(trimmed) || isPIIRedactionPlaceholder(trimmed) {
+			if trimmed == "" || isSensitiveFindingRedactionPlaceholder(trimmed) || isPIIRedactionPlaceholder(trimmed) {
 				return
 			}
 			if _, duplicate := seen[trimmed]; duplicate {
@@ -611,7 +610,7 @@ func historicalSensitiveNeedleKind(
 	matched := sensitiveFindingKind("")
 	priority := 0
 	for _, needle := range needles {
-		if needle.value == "" || !strings.Contains(value, needle.value) {
+		if needle.value == "" || !historicalSensitiveNeedleMatches(value, needle.value) {
 			continue
 		}
 		candidatePriority := 1
@@ -626,6 +625,54 @@ func historicalSensitiveNeedleKind(
 		}
 	}
 	return matched, priority > 0
+}
+
+func historicalSensitiveNeedleMatches(value, needle string) bool {
+	if utf8.RuneCountInString(needle) >= 6 {
+		return strings.Contains(value, needle)
+	}
+
+	containsTokenRune := false
+	for _, current := range needle {
+		if historicalSensitiveTokenRune(current) {
+			containsTokenRune = true
+			break
+		}
+	}
+	if !containsTokenRune {
+		return strings.TrimSpace(value) == needle
+	}
+
+	first, _ := utf8.DecodeRuneInString(needle)
+	last, _ := utf8.DecodeLastRuneInString(needle)
+	for searchStart := 0; searchStart <= len(value)-len(needle); {
+		relative := strings.Index(value[searchStart:], needle)
+		if relative < 0 {
+			return false
+		}
+		start := searchStart + relative
+		end := start + len(needle)
+		leftBoundary := true
+		if historicalSensitiveTokenRune(first) && start > 0 {
+			previous, _ := utf8.DecodeLastRuneInString(value[:start])
+			leftBoundary = !historicalSensitiveTokenRune(previous)
+		}
+		rightBoundary := true
+		if historicalSensitiveTokenRune(last) && end < len(value) {
+			next, _ := utf8.DecodeRuneInString(value[end:])
+			rightBoundary = !historicalSensitiveTokenRune(next)
+		}
+		if leftBoundary && rightBoundary {
+			return true
+		}
+		_, width := utf8.DecodeRuneInString(value[start:])
+		searchStart = start + width
+	}
+	return false
+}
+
+func historicalSensitiveTokenRune(value rune) bool {
+	return value == '_' || unicode.IsLetter(value) || unicode.IsNumber(value) || unicode.IsMark(value)
 }
 
 type historicalAuditEventRow struct {
