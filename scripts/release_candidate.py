@@ -1296,30 +1296,13 @@ def stage_installers(directory: Path, version: str) -> None:
     _validate_installer_assets(directory, version, snapshots=snapshots)
 
 
-def _load_upgrade_baseline_policy(
-    candidate_version: str | None = None,
-    policy_path: Path | None = None,
+def _parse_upgrade_baseline_policy_payload(
+    candidate_version: str,
+    payload: bytes,
 ) -> tuple[list[str], dict[str, list[str]]]:
-    if candidate_version is None:
-        try:
-            source_identity = json.loads(
-                (ROOT / "release" / "source-install-identity.json").read_text(encoding="utf-8")
-            )
-            candidate_version = source_identity["source_release"]
-        except (
-            OSError,
-            UnicodeError,
-            json.JSONDecodeError,
-            KeyError,
-            TypeError,
-        ) as exc:
-            raise CandidateError("could not resolve source release for baseline validation") from exc
-        if not isinstance(candidate_version, str) or not VERSION_RE.fullmatch(candidate_version):
-            raise CandidateError("source release for baseline validation is invalid")
-    policy_path = policy_path or UPGRADE_BASELINES_PATH
     try:
-        document = json.loads(policy_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        document = json.loads(payload.decode("utf-8", errors="strict"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise CandidateError(f"could not load tested upgrade baselines: {exc}") from exc
     configured = document.get("published_baselines")
     config_versions = document.get("published_baseline_config_versions")
@@ -1364,6 +1347,34 @@ def _load_upgrade_baseline_policy(
         raise CandidateError("tested Windows upgrade baseline policy is invalid")
     _validate_historical_artifact_digest_policy(configured)
     return configured, {"windows": windows}
+
+
+def _load_upgrade_baseline_policy(
+    candidate_version: str | None = None,
+    policy_path: Path | None = None,
+) -> tuple[list[str], dict[str, list[str]]]:
+    if candidate_version is None:
+        try:
+            source_identity = json.loads(
+                (ROOT / "release" / "source-install-identity.json").read_text(encoding="utf-8")
+            )
+            candidate_version = source_identity["source_release"]
+        except (
+            OSError,
+            UnicodeError,
+            json.JSONDecodeError,
+            KeyError,
+            TypeError,
+        ) as exc:
+            raise CandidateError("could not resolve source release for baseline validation") from exc
+        if not isinstance(candidate_version, str) or not VERSION_RE.fullmatch(candidate_version):
+            raise CandidateError("source release for baseline validation is invalid")
+    policy_path = policy_path or UPGRADE_BASELINES_PATH
+    try:
+        payload = policy_path.read_bytes()
+    except OSError as exc:
+        raise CandidateError(f"could not load tested upgrade baselines: {exc}") from exc
+    return _parse_upgrade_baseline_policy_payload(candidate_version, payload)
 
 
 def _validate_historical_artifact_digest_policy(configured: list[str]) -> None:
@@ -5013,20 +5024,20 @@ def record_windows_unverified(
 
 def _validated_effective_upgrade_baselines(root: Path, version: str) -> str:
     path = root / EFFECTIVE_UPGRADE_BASELINES_FILENAME
-    before = _read_bounded_regular_file(
+    captured = _read_bounded_regular_file(
         path,
         label="effective upgrade-baseline policy",
         max_bytes=MAX_EFFECTIVE_UPGRADE_BASELINES_BYTES,
     )
-    _load_upgrade_baseline_policy(version, path)
-    after = _read_bounded_regular_file(
+    _parse_upgrade_baseline_policy_payload(version, captured)
+    current = _read_bounded_regular_file(
         path,
         label="effective upgrade-baseline policy",
         max_bytes=MAX_EFFECTIVE_UPGRADE_BASELINES_BYTES,
     )
-    if before != after:
+    if captured != current:
         raise CandidateError("effective upgrade-baseline policy changed during validation")
-    return hashlib.sha256(after).hexdigest()
+    return hashlib.sha256(captured).hexdigest()
 
 
 def assemble(

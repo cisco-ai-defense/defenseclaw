@@ -2011,6 +2011,120 @@ def test_candidate_verification_rejects_effective_baseline_snapshot_mutation(
         release_candidate.verify(root, VERSION, COMMIT)
 
 
+def test_effective_baseline_validation_aba_parses_and_hashes_captured_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "candidate"
+    root.mkdir()
+    policy = root / release_candidate.EFFECTIVE_UPGRADE_BASELINES_FILENAME
+    captured = (ROOT / "release/upgrade-baselines.json").read_bytes()
+    replacement = b"{}"
+    policy.write_bytes(captured)
+    read_bounded = release_candidate._read_bounded_regular_file
+    read_count = 0
+
+    def aba_read(path: Path, *, label: str, max_bytes: int) -> bytes:
+        nonlocal read_count
+        read_count += 1
+        if read_count == 2:
+            assert policy.read_bytes() == replacement
+            policy.write_bytes(captured)
+        payload = read_bounded(path, label=label, max_bytes=max_bytes)
+        if read_count == 1:
+            assert payload == captured
+            policy.write_bytes(replacement)
+        return payload
+
+    monkeypatch.setattr(release_candidate, "_read_bounded_regular_file", aba_read)
+
+    digest = release_candidate._validated_effective_upgrade_baselines(root, VERSION)
+
+    assert read_count == 2
+    assert digest == hashlib.sha256(captured).hexdigest()
+    assert policy.read_bytes() == captured
+
+
+def test_effective_baseline_validation_rejects_invalid_captured_payload_during_aba(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "candidate"
+    root.mkdir()
+    policy = root / release_candidate.EFFECTIVE_UPGRADE_BASELINES_FILENAME
+    captured = b"{}"
+    replacement = (ROOT / "release/upgrade-baselines.json").read_bytes()
+    policy.write_bytes(captured)
+    read_bounded = release_candidate._read_bounded_regular_file
+    parse_payload = release_candidate._parse_upgrade_baseline_policy_payload
+    read_count = 0
+
+    def aba_read(path: Path, *, label: str, max_bytes: int) -> bytes:
+        nonlocal read_count
+        read_count += 1
+        if read_count == 2:
+            assert policy.read_bytes() == replacement
+            policy.write_bytes(captured)
+        payload = read_bounded(path, label=label, max_bytes=max_bytes)
+        if read_count == 1:
+            assert payload == captured
+            policy.write_bytes(replacement)
+        return payload
+
+    def parse_and_restore(candidate_version: str, payload: bytes) -> tuple[list[str], dict[str, list[str]]]:
+        assert payload == captured
+        try:
+            return parse_payload(candidate_version, payload)
+        finally:
+            assert policy.read_bytes() == replacement
+            policy.write_bytes(captured)
+
+    monkeypatch.setattr(release_candidate, "_read_bounded_regular_file", aba_read)
+    monkeypatch.setattr(release_candidate, "_parse_upgrade_baseline_policy_payload", parse_and_restore)
+
+    with pytest.raises(
+        release_candidate.CandidateError,
+        match="tested upgrade baseline policy is invalid",
+    ):
+        release_candidate._validated_effective_upgrade_baselines(root, VERSION)
+
+    assert read_count == 1
+    assert policy.read_bytes() == captured
+
+
+def test_effective_baseline_validation_rejects_mutation_after_captured_read(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "candidate"
+    root.mkdir()
+    policy = root / release_candidate.EFFECTIVE_UPGRADE_BASELINES_FILENAME
+    captured = (ROOT / "release/upgrade-baselines.json").read_bytes()
+    mutated = captured + b"\n"
+    policy.write_bytes(captured)
+    read_bounded = release_candidate._read_bounded_regular_file
+    read_count = 0
+
+    def mutating_read(path: Path, *, label: str, max_bytes: int) -> bytes:
+        nonlocal read_count
+        read_count += 1
+        payload = read_bounded(path, label=label, max_bytes=max_bytes)
+        if read_count == 1:
+            policy.write_bytes(mutated)
+        return payload
+
+    monkeypatch.setattr(release_candidate, "_read_bounded_regular_file", mutating_read)
+
+    with pytest.raises(
+        release_candidate.CandidateError,
+        match="policy changed during validation",
+    ):
+        release_candidate._validated_effective_upgrade_baselines(root, VERSION)
+
+    assert read_count == 2
+    assert policy.read_bytes() == mutated
+
+
 def test_publication_can_omit_every_windows_specific_asset(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
