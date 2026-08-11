@@ -33,6 +33,7 @@ import sys
 import time
 import uuid
 from dataclasses import dataclass, replace
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -86,6 +87,7 @@ from defenseclaw.file_permissions import (
     atomic_write_private_bytes,
     delete_file_durable,
     dotenv_key_is_valid,
+    read_regular_file_no_follow,
 )
 from defenseclaw.inventory import agent_discovery
 from defenseclaw.logger import CanonicalObservabilityUnavailableError
@@ -126,6 +128,7 @@ _SETUP_BATCH_READINESS_KEY = "defenseclaw._setup_batch_readiness_connectors"
 _SETUP_BATCH_AUDIT_KEY = "defenseclaw._setup_batch_audits"
 _CONNECTOR_RUNTIME_READY_TIMEOUT_SECONDS = 60.0
 _GATEWAY_API_READY_TIMEOUT_SECONDS = 45.0
+_GATEWAY_PID_GENERATION_MAX_BYTES = 16 * 1024
 _DEFENSE_GATEWAY_LIFECYCLE_TIMEOUT_SECONDS = 60
 _DEFENSE_GATEWAY_STATUS_TIMEOUT_SECONDS = 10
 _DEFENSE_GATEWAY_STOP_TIMEOUT_SECONDS = 15
@@ -161,6 +164,15 @@ _TOKEN_ROTATION_CHILD_ENV_ALLOWLIST = (
 )
 _NATIVE_SPLUNK_CONFIG_SNAPSHOT_ATTR = "_native_splunk_config_snapshot"
 _NATIVE_SPLUNK_DOTENV_SNAPSHOT_ATTR = "_native_splunk_dotenv_snapshot"
+
+
+@dataclass(frozen=True)
+class _GatewayRuntimeGeneration:
+    """Pre-lifecycle evidence used to reject the retiring gateway."""
+
+    pid_marker: bytes | None
+    started_at: str | None
+    replacement_not_before: float
 
 
 def _log_setup_action(
@@ -215,7 +227,7 @@ def _safe_mtime(path: str | None) -> float | None:
         return None
     try:
         return os.stat(path).st_mtime
-    except OSError:
+    except (OSError, ValueError):
         return None
 
 
@@ -8759,6 +8771,79 @@ def _is_pid_alive(pid_file: str) -> bool:
     return pid_file_alive(pid_file)
 
 
+def _gateway_pid_generation_marker(data_dir: str) -> bytes | None:
+    """Capture the stable PID-record bytes for one gateway generation."""
+
+    try:
+        return read_regular_file_no_follow(
+            os.path.join(data_dir, "gateway.pid"),
+            max_bytes=_GATEWAY_PID_GENERATION_MAX_BYTES,
+        )
+    except OSError:
+        return None
+
+
+def _gateway_api_endpoint(data_dir: str) -> tuple[str, int] | None:
+    try:
+        cfg = load_config(data_dir=data_dir)
+        gateway = cfg.gateway
+        from defenseclaw.logger import _gateway_api_host
+
+        host = _gateway_api_host(cfg)
+        port = int(getattr(gateway, "api_port", 18970) or 18970)
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+    if not isinstance(host, str) or not host.strip() or not 1 <= port <= 65535:
+        return None
+    return host, port
+
+
+def _read_defense_gateway_health_once(
+    host: str,
+    port: int,
+    *,
+    timeout: float,
+) -> dict[str, Any] | None:
+    connection = http.client.HTTPConnection(host, port, timeout=timeout)
+    try:
+        connection.request("GET", "/health")
+        response = connection.getresponse()
+        body = response.read(1 << 20)
+        if response.status != 200:
+            return None
+        health = _json.loads(body)
+        return health if isinstance(health, dict) else None
+    except (OSError, http.client.HTTPException, UnicodeDecodeError, ValueError):
+        return None
+    finally:
+        connection.close()
+
+
+def _gateway_runtime_generation_before_restart(data_dir: str) -> _GatewayRuntimeGeneration:
+    """Snapshot enough live evidence to distinguish the replacement API."""
+
+    pid_marker = _gateway_pid_generation_marker(data_dir)
+    started_at: str | None = None
+    # Without a PID record this data home has no generation to retire. Avoid
+    # probing an ambient/default API endpoint that may belong to a different
+    # installation while preparing a fresh start.
+    config_path = config_path_for_data_dir(data_dir)
+    endpoint = (
+        _gateway_api_endpoint(data_dir)
+        if pid_marker is not None and os.path.isfile(config_path)
+        else None
+    )
+    if endpoint is not None:
+        health = _read_defense_gateway_health_once(*endpoint, timeout=0.5)
+        raw_started_at = health.get("started_at") if health is not None else None
+        if isinstance(raw_started_at, str) and raw_started_at.strip():
+            started_at = raw_started_at.strip()
+    # Capture this after the old health probe. A replacement sidecar admitted
+    # by the lifecycle call below must have constructed its health state no
+    # earlier than this boundary.
+    return _GatewayRuntimeGeneration(pid_marker, started_at, time.time())
+
+
 def _restart_services(
     data_dir: str,
     oc_host: str = "127.0.0.1",
@@ -8806,23 +8891,43 @@ def _restart_services(
     hook_contract_lock_before = (
         _hook_contract_lock_marker(data_dir) if wait_for_connector_ready and hook_targets else None
     )
+    gateway_generation_before = (
+        _gateway_runtime_generation_before_restart(data_dir) if wait_for_connector_ready and hook_targets else None
+    )
 
     gateway_restarted = (
-        _restart_defense_gateway(data_dir)
+        _restart_defense_gateway(
+            data_dir,
+            previous_generation=gateway_generation_before,
+        )
         if start_if_stopped
-        else _restart_defense_gateway(data_dir, start_if_stopped=False)
+        else _restart_defense_gateway(
+            data_dir,
+            start_if_stopped=False,
+            previous_generation=gateway_generation_before,
+        )
     )
     if not gateway_restarted:
         failed.append("defenseclaw-gateway")
 
     if wait_for_connector_ready and hook_targets and gateway_restarted:
         click.echo("  connector runtime: waiting for verified setup...", nl=False)
-        if _wait_for_connector_runtime(
+        runtime_ready = _wait_for_connector_runtime(
             data_dir,
             hook_targets,
             connector_state_before,
             hook_contract_lock_before,
-        ):
+        )
+        if runtime_ready:
+            # Re-read health only after the new connector markers are ready.
+            # The generation boundary rejects the old API even if it remains
+            # reachable while the new process publishes its marker files.
+            runtime_ready = _wait_for_defense_gateway_api(
+                data_dir,
+                previous_generation=gateway_generation_before,
+                expected_connectors=hook_targets,
+            )
+        if runtime_ready:
             click.echo(" ✓")
         else:
             click.echo(" ✗")
@@ -9137,6 +9242,7 @@ def _restart_defense_gateway(
     child_env: dict[str, str] | None = None,
     lifecycle_executable: str | None = None,
     lifecycle_executable_requires_running: bool = True,
+    previous_generation: _GatewayRuntimeGeneration | None = None,
 ) -> bool:
     # Mark the current Click context as "restart handled" so the
     # `setup` group's auto-restart result callback doesn't bounce the
@@ -9196,6 +9302,7 @@ def _restart_defense_gateway(
         return False
     executable = str(Path(executable).resolve())
     cmd = [executable, "restart"] if was_running else [executable, "start"]
+    generation_before = previous_generation or _gateway_runtime_generation_before_restart(data_dir)
     try:
         result = subprocess.run(
             cmd,
@@ -9207,7 +9314,10 @@ def _restart_defense_gateway(
             timeout=30,
         )
         if result.returncode == 0:
-            if _wait_for_defense_gateway_api(data_dir):
+            if _wait_for_defense_gateway_api(
+                data_dir,
+                previous_generation=generation_before,
+            ):
                 click.echo(" ✓")
                 return True
             click.echo(" ✗ (API health timed out)")
@@ -9235,7 +9345,10 @@ def _restart_defense_gateway(
         # the pre-existing generation rather than stopping an otherwise healthy
         # service whose replacement outcome is uncertain.
         status = _gateway_lifecycle_status(executable, child_env=child_env)
-        if status:
+        if status and _wait_for_defense_gateway_api(
+            data_dir,
+            previous_generation=generation_before,
+        ):
             click.echo(" ✓ (ready after launcher timeout)")
             return True
         if not was_running:
@@ -9247,8 +9360,11 @@ def _restart_defense_gateway(
 def _wait_for_defense_gateway_api(
     data_dir: str,
     timeout: float = _GATEWAY_API_READY_TIMEOUT_SECONDS,
+    *,
+    previous_generation: _GatewayRuntimeGeneration | None = None,
+    expected_connectors: list[str] | tuple[str, ...] = (),
 ) -> bool:
-    """Wait until the replacement gateway can admit canonical v8 facts.
+    """Wait for the replacement generation's API and connector runtime.
 
     The daemon start command returns after spawning its child, before that
     child necessarily binds the sidecar API. Connector setup also observes an
@@ -9257,22 +9373,19 @@ def _wait_for_defense_gateway_api(
     that window makes the command's own mandatory v8 audit handoff fail with
     ``connection refused``.
 
-    Require the replacement process's health document to report the API
-    subsystem as running. This also covers the platform socket-reclaim retry
-    in the Go API server, which may legitimately take up to 30 seconds.
+    A restart has an additional ABA hazard: the retiring API can still answer
+    ``/health`` while the replacement process has already published fresh
+    connector marker files. Bind readiness to three observations from one
+    replacement window: changed PID-record bytes, a newer ``started_at``
+    health generation, and the requested connectors reporting ``running``.
+    This also covers the platform socket-reclaim retry in the Go API server,
+    which may legitimately take up to 30 seconds.
     """
-    try:
-        cfg = load_config(data_dir=data_dir)
-        gateway = cfg.gateway
-        from defenseclaw.logger import _gateway_api_host
-
-        host = _gateway_api_host(cfg)
-        port = int(getattr(gateway, "api_port", 18970) or 18970)
-    except (AttributeError, OSError, TypeError, ValueError):
+    endpoint = _gateway_api_endpoint(data_dir)
+    if endpoint is None:
         return False
-
-    if not 1 <= port <= 65535:
-        return False
+    host, port = endpoint
+    expected = {normalize_connector(name) for name in expected_connectors if name}
 
     bounded_timeout = max(0.0, timeout)
     deadline = time.monotonic() + bounded_timeout
@@ -9281,29 +9394,58 @@ def _wait_for_defense_gateway_api(
         probe_timeout = min(1.0, bounded_timeout, remaining)
         if probe_timeout <= 0:
             break
-        connection = http.client.HTTPConnection(
-            host,
-            port,
-            # Subtracting a large monotonic timestamp can round a few ulps
-            # above the caller's budget. Clamp to that original budget so a
-            # single health probe never receives a longer timeout than setup
-            # promised, particularly for short test/automation deadlines.
-            timeout=probe_timeout,
-        )
-        try:
-            connection.request("GET", "/health")
-            response = connection.getresponse()
-            body = response.read(1 << 20)
-            if response.status == 200:
-                health = _json.loads(body)
-                api = health.get("api") if isinstance(health, dict) else None
-                state = api.get("state") if isinstance(api, dict) else None
-                if isinstance(state, str) and state.strip().lower() == "running":
-                    return True
-        except (OSError, http.client.HTTPException, UnicodeDecodeError, ValueError):
-            pass
-        finally:
-            connection.close()
+        # Subtracting a large monotonic timestamp can round a few ulps above
+        # the caller's budget. Clamp to that original budget so a single
+        # health probe never receives a longer timeout than setup promised,
+        # particularly for short test/automation deadlines.
+        health = _read_defense_gateway_health_once(host, port, timeout=probe_timeout)
+        api = health.get("api") if health is not None else None
+        state = api.get("state") if isinstance(api, dict) else None
+        ready = isinstance(state, str) and state.strip().lower() == "running"
+
+        if ready and previous_generation is not None:
+            current_pid_marker = _gateway_pid_generation_marker(data_dir)
+            if (
+                current_pid_marker is None
+                or current_pid_marker == previous_generation.pid_marker
+                or not _gateway_pid_file_identifies_gateway(os.path.join(data_dir, "gateway.pid"))
+            ):
+                ready = False
+
+            raw_started_at = health.get("started_at") if health is not None else None
+            started_at = raw_started_at.strip() if isinstance(raw_started_at, str) else ""
+            if not started_at or started_at == previous_generation.started_at:
+                ready = False
+            try:
+                started_epoch = datetime.fromisoformat(started_at.replace("Z", "+00:00")).timestamp()
+            except (OverflowError, ValueError):
+                started_epoch = 0.0
+            if (
+                previous_generation.started_at is None
+                and started_epoch < previous_generation.replacement_not_before
+            ):
+                ready = False
+
+        if ready and expected:
+            running: set[str] = set()
+            raw_connectors = health.get("connectors") if health is not None else None
+            if isinstance(raw_connectors, list):
+                for item in raw_connectors:
+                    if not isinstance(item, dict):
+                        continue
+                    name = item.get("name")
+                    connector_state = item.get("state")
+                    if (
+                        isinstance(name, str)
+                        and isinstance(connector_state, str)
+                        and connector_state.strip().lower() == "running"
+                    ):
+                        running.add(normalize_connector(name))
+            if not expected.issubset(running):
+                ready = False
+
+        if ready:
+            return True
         sleep_for = min(0.2, max(0.0, deadline - time.monotonic()))
         if sleep_for:
             time.sleep(sleep_for)

@@ -517,7 +517,7 @@ def test_component_diagnosis_gate_and_lifecycle_use_one_controller(
     monkeypatch.setattr(
         cmd_setup,
         "_wait_for_defense_gateway_api",
-        lambda _data_dir: True,
+        lambda _data_dir, **_kwargs: True,
     )
 
     ambient_resolver = Mock(return_value=os.fspath(wrong_default))
