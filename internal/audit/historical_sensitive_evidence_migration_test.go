@@ -25,6 +25,7 @@ type historicalSensitiveEvidenceFixture struct {
 	migrationVersion          int
 	secret, pii               string
 	secretEventID, piiEventID string
+	payloadOnlyEventID        string
 }
 
 func TestHistoricalSensitiveEvidenceMigrationRepairsEverySurfaceAndIntegrity(t *testing.T) {
@@ -40,6 +41,7 @@ func TestHistoricalSensitiveEvidenceMigrationRepairsEverySurfaceAndIntegrity(t *
 	assertHistoricalSensitiveEvidenceAbsent(t, fixture)
 	assertHistoricalProjectionIntegrity(t, fixture, fixture.secretEventID)
 	assertHistoricalProjectionIntegrity(t, fixture, fixture.piiEventID)
+	assertHistoricalPayloadOnlyIntegrity(t, fixture)
 
 	before := historicalSensitiveEvidenceSnapshot(t, fixture.store.db)
 	if err := fixture.migration.apply(fixture.store.db); err != nil {
@@ -52,6 +54,23 @@ func TestHistoricalSensitiveEvidenceMigrationRepairsEverySurfaceAndIntegrity(t *
 	if !reflect.DeepEqual(after, before) {
 		t.Fatalf("historical repair is not idempotent:\nbefore=%s\nafter=%s", before, after)
 	}
+}
+
+func TestHistoricalSensitiveEvidenceMigrationToleratesPartialCorrelationTable(t *testing.T) {
+	fixture := newHistoricalSensitiveEvidenceFixture(t)
+	if _, err := fixture.store.db.Exec(`DROP TABLE correlation_observations`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fixture.store.db.Exec(`
+		CREATE TABLE correlation_observations (legacy_id TEXT PRIMARY KEY)`); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := fixture.store.Init(); err != nil {
+		t.Fatalf("apply repair with partial correlation_observations table: %v", err)
+	}
+	assertHistoricalSensitiveEvidenceAbsent(t, fixture)
+	assertHistoricalPayloadOnlyIntegrity(t, fixture)
 }
 
 func TestHistoricalSensitiveEvidenceMigrationRollsBackEverySurface(t *testing.T) {
@@ -135,6 +154,33 @@ func newHistoricalSensitiveEvidenceFixture(t *testing.T) historicalSensitiveEvid
 	if err != nil {
 		t.Fatal(err)
 	}
+	var rawObject map[string]any
+	if err := decodeHistoricalJSON(rawJSON, &rawObject); err != nil {
+		t.Fatal(err)
+	}
+	rawObject["legacy_result_field"] = map[string]any{"retained": true}
+	rawObject["legacy_result_sensitive"] = secret
+	rawObject["legacy_pii_result_sensitive"] = pii
+	rawObject["legacy_mixed_result_sensitive"] = secret + " / " + pii
+	rawFindings, ok := rawObject["findings"].([]any)
+	if !ok || len(rawFindings) == 0 {
+		t.Fatalf("legacy raw findings shape=%T", rawObject["findings"])
+	}
+	secretFinding, ok := rawFindings[0].(map[string]any)
+	if !ok {
+		t.Fatalf("legacy raw finding shape=%T", rawFindings[0])
+	}
+	// EvidenceSummary is intentionally json:"-" in scanner.Finding. The
+	// migration must retain this historical key while replacing its value.
+	secretFinding["evidence_summary"] = secret
+	secretFinding["legacy_finding_field"] = map[string]any{
+		"retained":  true,
+		"raw_match": secret,
+	}
+	rawJSON, err = marshalHistoricalJSON(rawObject)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if _, err := store.db.Exec(`
 		INSERT INTO scan_results (
 			id, scanner, target, timestamp, duration_ms, finding_count, max_severity, raw_json
@@ -148,11 +194,16 @@ func newHistoricalSensitiveEvidenceFixture(t *testing.T) historicalSensitiveEvid
 
 	secretEventID := "historical-secret-event"
 	piiEventID := "historical-pii-event"
+	payloadOnlyEventID := "historical-payload-only-event"
 	insertHistoricalAuditFinding(t, store.db, secretEventID, "historical-secret-finding", findings[0], secret, observed)
 	insertHistoricalAuditFinding(t, store.db, piiEventID, "historical-pii-finding", findings[1], pii, observed.Add(time.Second))
+	insertHistoricalPayloadOnlyAuditFinding(
+		t, store.db, payloadOnlyEventID, "historical-secret-finding", findings[0], secret, observed.Add(2*time.Second),
+	)
 	return historicalSensitiveEvidenceFixture{
 		store: store, migration: migration, migrationVersion: migrationVersion,
 		secret: secret, pii: pii, secretEventID: secretEventID, piiEventID: piiEventID,
+		payloadOnlyEventID: payloadOnlyEventID,
 	}
 }
 
@@ -287,6 +338,41 @@ func insertHistoricalAuditFinding(
 	}
 }
 
+func insertHistoricalPayloadOnlyAuditFinding(
+	t *testing.T,
+	db *sql.DB,
+	eventID, findingID string,
+	finding scanner.Finding,
+	raw string,
+	observed time.Time,
+) {
+	t.Helper()
+	payload, err := marshalHistoricalJSON(map[string]any{
+		"rule_id":          finding.RuleID,
+		"category":         finding.Category,
+		"title":            finding.Title,
+		"evidence_summary": raw,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+		INSERT INTO audit_events (
+			id, timestamp, action, actor, details, severity, bucket, event_name,
+			source, signal, payload_json, projected_record_json, record_schema_version,
+			projection_hash, redaction_profile, mandatory, scan_id, finding_id,
+			payload_hmac, integrity_algorithm, integrity_key_id
+		) VALUES (?, ?, 'scan-finding', 'defenseclaw', ?, 'HIGH', 'security.finding',
+		          'finding.observed', 'scanner', 'logs', ?, NULL, 1, ?, 'sensitive', 0,
+		          'historical-scan', ?, ?, ?, ?)`,
+		eventID, observed.Format(time.RFC3339Nano), "legacy payload-only evidence "+raw,
+		string(payload), ProjectionHashAlgorithm+":"+strings.Repeat("b", sha256.Size*2), findingID,
+		strings.Repeat("c", sha256.Size*2), ProjectionIntegrityAlgorithm, "historical-payload-only-key",
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func assertHistoricalSensitiveEvidenceAbsent(t *testing.T, fixture historicalSensitiveEvidenceFixture) {
 	t.Helper()
 	markers := []string{fixture.secret, fixture.pii, historicalUnkeyedFingerprint(fixture.secret), historicalUnkeyedFingerprint(fixture.pii)}
@@ -321,11 +407,13 @@ func assertHistoricalSensitiveEvidenceAbsent(t *testing.T, fixture historicalSen
 		t.Fatal(err)
 	}
 	assertNoHistoricalSensitiveMarker(t, rawJSON, markers)
+	assertHistoricalRawExtensionsPreserved(t, rawJSON)
 
 	eventRows, err := fixture.store.db.Query(`
 		SELECT COALESCE(details,''), COALESCE(structured_json,''), COALESCE(payload_json,''),
 		       COALESCE(projected_record_json,'')
-		FROM audit_events WHERE id IN (?, ?) ORDER BY id`, fixture.secretEventID, fixture.piiEventID)
+		FROM audit_events WHERE id IN (?, ?, ?) ORDER BY id`,
+		fixture.secretEventID, fixture.piiEventID, fixture.payloadOnlyEventID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -339,6 +427,50 @@ func assertHistoricalSensitiveEvidenceAbsent(t *testing.T, fixture historicalSen
 	}
 	if err := eventRows.Close(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func assertHistoricalRawExtensionsPreserved(t *testing.T, rawJSON string) {
+	t.Helper()
+	var object map[string]any
+	if err := decodeHistoricalJSON([]byte(rawJSON), &object); err != nil {
+		t.Fatal(err)
+	}
+	legacyResult, ok := object["legacy_result_field"].(map[string]any)
+	if !ok || legacyResult["retained"] != true {
+		t.Fatalf("safe result extension not preserved: %#v", object["legacy_result_field"])
+	}
+	if sensitive, ok := object["legacy_result_sensitive"].(string); !ok ||
+		!isSensitiveFindingRedactionPlaceholder(sensitive) {
+		t.Fatalf("sensitive result extension not retained as a placeholder: %#v", object["legacy_result_sensitive"])
+	}
+	if sensitive, ok := object["legacy_pii_result_sensitive"].(string); !ok ||
+		!isPIIRedactionPlaceholder(sensitive) {
+		t.Fatalf("PII result extension not retained as a placeholder: %#v", object["legacy_pii_result_sensitive"])
+	}
+	if sensitive, ok := object["legacy_mixed_result_sensitive"].(string); !ok ||
+		!isSensitiveFindingRedactionPlaceholder(sensitive) {
+		t.Fatalf("mixed extension did not use credential precedence: %#v", object["legacy_mixed_result_sensitive"])
+	}
+	findings, ok := object["findings"].([]any)
+	if !ok || len(findings) == 0 {
+		t.Fatalf("repaired findings shape=%T", object["findings"])
+	}
+	finding, ok := findings[0].(map[string]any)
+	if !ok {
+		t.Fatalf("repaired finding shape=%T", findings[0])
+	}
+	if evidence, ok := finding["evidence_summary"].(string); !ok ||
+		!isSensitiveFindingRedactionPlaceholder(evidence) {
+		t.Fatalf("json:- evidence_summary was lost or not redacted: %#v", finding["evidence_summary"])
+	}
+	extension, ok := finding["legacy_finding_field"].(map[string]any)
+	if !ok || extension["retained"] != true {
+		t.Fatalf("safe finding extension not preserved: %#v", finding["legacy_finding_field"])
+	}
+	if rawMatch, ok := extension["raw_match"].(string); !ok ||
+		!isSensitiveFindingRedactionPlaceholder(rawMatch) {
+		t.Fatalf("sensitive finding extension not retained as a placeholder: %#v", extension["raw_match"])
 	}
 }
 
@@ -384,6 +516,25 @@ func assertHistoricalProjectionIntegrity(t *testing.T, fixture historicalSensiti
 	if projection.State != "transformed" || projection.TransformedFields == 0 || projection.RemovedFields == 0 {
 		t.Fatalf("repaired projection metadata=%+v", projection)
 	}
+}
+
+func assertHistoricalPayloadOnlyIntegrity(t *testing.T, fixture historicalSensitiveEvidenceFixture) {
+	t.Helper()
+	var payload, projected, projectionHash, payloadHMAC, algorithm, keyID string
+	if err := fixture.store.db.QueryRow(`
+		SELECT COALESCE(payload_json,''), COALESCE(projected_record_json,''),
+		       COALESCE(projection_hash,''), COALESCE(payload_hmac,''),
+		       COALESCE(integrity_algorithm,''), COALESCE(integrity_key_id,'')
+		FROM audit_events WHERE id=?`, fixture.payloadOnlyEventID).Scan(
+		&payload, &projected, &projectionHash, &payloadHMAC, &algorithm, &keyID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if projected != "" || projectionHash != "" || payloadHMAC != "" || algorithm != "" || keyID != "" {
+		t.Fatalf("payload-only repaired integrity projected=%q hash=%q hmac=%q algorithm=%q key=%q",
+			projected, projectionHash, payloadHMAC, algorithm, keyID)
+	}
+	assertNoHistoricalSensitiveMarker(t, payload, []string{fixture.secret})
 }
 
 func historicalSensitiveEvidenceSnapshot(t *testing.T, db *sql.DB) []byte {

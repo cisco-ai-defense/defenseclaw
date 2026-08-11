@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
@@ -27,15 +28,19 @@ func migrateHistoricalSensitiveEvidence(ex dbExecer) error {
 	if ex == nil {
 		return fmt.Errorf("audit: historical sensitive-evidence migration has no database")
 	}
+	fmt.Fprintln(os.Stderr, "[audit] historical sensitive-evidence repair: scan_findings")
 	if err := scrubHistoricalScanFindingRows(ex); err != nil {
 		return err
 	}
+	fmt.Fprintln(os.Stderr, "[audit] historical sensitive-evidence repair: scan_results")
 	if err := scrubHistoricalScanResultRows(ex); err != nil {
 		return err
 	}
+	fmt.Fprintln(os.Stderr, "[audit] historical sensitive-evidence repair: audit_events")
 	if err := scrubHistoricalAuditEventRows(ex); err != nil {
 		return err
 	}
+	fmt.Fprintln(os.Stderr, "[audit] historical sensitive-evidence repair: complete")
 	return nil
 }
 
@@ -220,26 +225,14 @@ func scrubHistoricalScanResultRows(ex dbExecer) error {
 			if _, carriesFindings := object["findings"]; !carriesFindings {
 				continue
 			}
-			var result scanner.ScanResult
-			if decodeErr := decodeHistoricalJSON([]byte(trimmed), &result); decodeErr != nil {
-				if row.knownSensitive {
-					return fmt.Errorf("audit: decode historical sensitive scan findings JSON: %w", decodeErr)
-				}
-				continue
-			}
-			changed := false
-			for index := range result.Findings {
-				kind, sensitive := historicalSensitiveFindingKind(result.Findings[index])
-				if !sensitive {
-					continue
-				}
-				historicalRedactFinding(&result.Findings[index], result.Scanner, kind)
-				changed = true
+			changed, repairErr := scrubHistoricalRawScanResult(object, row.knownSensitive)
+			if repairErr != nil {
+				return repairErr
 			}
 			if !changed {
 				continue
 			}
-			encoded, encodeErr := marshalHistoricalJSON(result)
+			encoded, encodeErr := marshalHistoricalJSON(object)
 			if encodeErr != nil {
 				return fmt.Errorf("audit: encode repaired historical scan result: %w", encodeErr)
 			}
@@ -251,6 +244,225 @@ func scrubHistoricalScanResultRows(ex dbExecer) error {
 			}
 		}
 	}
+}
+
+type historicalSensitiveNeedle struct {
+	value string
+	kind  sensitiveFindingKind
+}
+
+// scrubHistoricalRawScanResult repairs the generic JSON tree rather than
+// round-tripping scanner.ScanResult. Historical producers may have added fields
+// that the current wire type does not know; preserve those fields while
+// redacting any extension value that repeats sensitive finding material.
+func scrubHistoricalRawScanResult(object map[string]any, failClosed bool) (bool, error) {
+	rawFindings, carriesFindings := object["findings"]
+	if !carriesFindings {
+		return false, nil
+	}
+	findings, ok := rawFindings.([]any)
+	if !ok {
+		if failClosed {
+			return false, fmt.Errorf("audit: historical sensitive scan result findings is not an array")
+		}
+		return false, nil
+	}
+
+	changed := false
+	allNeedles := make([]historicalSensitiveNeedle, 0)
+	for index, candidate := range findings {
+		finding, ok := candidate.(map[string]any)
+		if !ok {
+			if failClosed {
+				return false, fmt.Errorf("audit: historical sensitive scan result finding %d is not an object", index)
+			}
+			continue
+		}
+		kind, sensitive := historicalSensitiveFlagsFromJSON(finding).kind()
+		if !sensitive {
+			continue
+		}
+		before, err := marshalHistoricalJSON(finding)
+		if err != nil {
+			return false, fmt.Errorf("audit: encode historical scan finding before repair: %w", err)
+		}
+		needles := historicalSensitiveNeedlesFromFinding(finding, kind)
+		allNeedles = append(allNeedles, needles...)
+
+		// The canonical scrubber intentionally drops unrecognized finding-owned
+		// fields. Save them first, then restore their shape after recursively
+		// replacing only values that repeat known sensitive evidence.
+		extensions := make(map[string]any)
+		for key, value := range finding {
+			if !historicalKnownRawFindingKey(key) {
+				extensions[key] = value
+			}
+		}
+		historicalScrubFindingJSON(finding, kind)
+		for key, value := range extensions {
+			repaired, _ := scrubHistoricalExtensionValue(value, needles)
+			finding[key] = repaired
+		}
+		after, err := marshalHistoricalJSON(finding)
+		if err != nil {
+			return false, fmt.Errorf("audit: encode historical scan finding after repair: %w", err)
+		}
+		changed = changed || !bytes.Equal(before, after)
+	}
+
+	// Preserve producer result extensions as well. If an extension duplicated
+	// evidence from a finding, redact that value without deleting unrelated
+	// booleans, numbers, objects, arrays, or safe strings.
+	for key, value := range object {
+		if historicalKnownRawScanResultKey(key) {
+			continue
+		}
+		repaired, extensionChanged := scrubHistoricalExtensionValue(value, allNeedles)
+		if extensionChanged {
+			object[key] = repaired
+			changed = true
+		}
+	}
+	return changed, nil
+}
+
+func historicalKnownRawScanResultKey(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "scanner", "target", "timestamp", "findings", "duration", "target_type",
+		"verdict", "exit_code", "error", "scan_id":
+		return true
+	default:
+		return false
+	}
+}
+
+func historicalKnownRawFindingKey(key string) bool {
+	canonicalKey := strings.ToLower(strings.TrimSpace(key))
+	switch canonicalKey {
+	case "id", "finding_occurrence_id", "severity", "title", "description", "evidence",
+		"evidence_summary", "location", "remediation", "scanner", "tags", "rule_id",
+		"category", "line_number", "confidence", "data_axis", "data_axes",
+		"tool_capability_class", "content_fingerprint", "fingerprint", "external_endpoint",
+		"turn_id", "decision_path", "details", "structured_json", "target", "finding", "findings",
+		"defenseclaw.finding.id", "defenseclaw.finding.rule_id", "defenseclaw.finding.category",
+		"defenseclaw.finding.title", "defenseclaw.finding.description",
+		"defenseclaw.guardrail.evidence_summary", "defenseclaw.finding.location",
+		"defenseclaw.finding.remediation", "defenseclaw.finding.tags",
+		"defenseclaw.finding.data_axes", "defenseclaw.finding.tool_capability_class",
+		"defenseclaw.finding.content_fingerprint", "defenseclaw.finding.fingerprint",
+		"defenseclaw.finding.external_endpoint", "defenseclaw.finding.decision_path":
+		return true
+	default:
+		return historicalSafeFindingMetadataKey(canonicalKey)
+	}
+}
+
+func historicalSensitiveNeedlesFromFinding(
+	finding map[string]any,
+	kind sensitiveFindingKind,
+) []historicalSensitiveNeedle {
+	seen := make(map[string]struct{})
+	needles := make([]historicalSensitiveNeedle, 0)
+	var collect func(any)
+	collect = func(value any) {
+		switch typed := value.(type) {
+		case string:
+			trimmed := strings.TrimSpace(typed)
+			if len(trimmed) < 6 || isSensitiveFindingRedactionPlaceholder(trimmed) || isPIIRedactionPlaceholder(trimmed) {
+				return
+			}
+			if _, duplicate := seen[trimmed]; duplicate {
+				return
+			}
+			seen[trimmed] = struct{}{}
+			needles = append(needles, historicalSensitiveNeedle{value: trimmed, kind: kind})
+		case []any:
+			for _, child := range typed {
+				collect(child)
+			}
+		case map[string]any:
+			for _, child := range typed {
+				collect(child)
+			}
+		}
+	}
+	for key, value := range finding {
+		switch strings.ToLower(strings.TrimSpace(key)) {
+		case "id", "rule_id", "title", "description", "evidence", "evidence_summary", "location",
+			"remediation", "tags", "data_axis", "data_axes", "tool_capability_class",
+			"content_fingerprint", "fingerprint", "external_endpoint", "decision_path", "target",
+			"defenseclaw.finding.id", "defenseclaw.finding.rule_id", "defenseclaw.finding.title",
+			"defenseclaw.finding.description", "defenseclaw.guardrail.evidence_summary",
+			"defenseclaw.finding.location", "defenseclaw.finding.remediation",
+			"defenseclaw.finding.tags", "defenseclaw.finding.data_axes",
+			"defenseclaw.finding.tool_capability_class", "defenseclaw.finding.content_fingerprint",
+			"defenseclaw.finding.fingerprint", "defenseclaw.finding.external_endpoint",
+			"defenseclaw.finding.decision_path":
+			collect(value)
+		}
+	}
+	return needles
+}
+
+func scrubHistoricalExtensionValue(value any, needles []historicalSensitiveNeedle) (any, bool) {
+	switch typed := value.(type) {
+	case string:
+		kind, matched := historicalSensitiveNeedleKind(typed, needles)
+		if !matched {
+			return value, false
+		}
+		return historicalRedactedJSONValue(typed, kind), true
+	case []any:
+		changed := false
+		for index, child := range typed {
+			repaired, childChanged := scrubHistoricalExtensionValue(child, needles)
+			if childChanged {
+				typed[index] = repaired
+				changed = true
+			}
+		}
+		return typed, changed
+	case map[string]any:
+		changed := false
+		for key, child := range typed {
+			repaired, childChanged := scrubHistoricalExtensionValue(child, needles)
+			if childChanged {
+				typed[key] = repaired
+				changed = true
+			}
+		}
+		return typed, changed
+	default:
+		return value, false
+	}
+}
+
+func historicalSensitiveNeedleKind(
+	value string,
+	needles []historicalSensitiveNeedle,
+) (sensitiveFindingKind, bool) {
+	trimmed := strings.TrimSpace(value)
+	if isSensitiveFindingRedactionPlaceholder(trimmed) || isPIIRedactionPlaceholder(trimmed) {
+		return "", false
+	}
+	matched := sensitiveFindingKind("")
+	priority := 0
+	for _, needle := range needles {
+		if needle.value == "" || !strings.Contains(value, needle.value) {
+			continue
+		}
+		candidatePriority := 1
+		if needle.kind == sensitiveFindingKindPII {
+			candidatePriority = 2
+		} else if needle.kind == sensitiveFindingKindSecret {
+			candidatePriority = 3
+		}
+		if candidatePriority > priority {
+			priority = candidatePriority
+			matched = needle.kind
+		}
+	}
+	return matched, priority > 0
 }
 
 type historicalAuditEventRow struct {
@@ -282,6 +494,18 @@ func scrubHistoricalAuditEventRows(ex dbExecer) error {
 	correlationObservationsPresent, err := tableExists(ex, "correlation_observations")
 	if err != nil {
 		return err
+	}
+	if correlationObservationsPresent {
+		for _, column := range []string{"record_id", "projection_hash"} {
+			exists, columnErr := hasColumnDB(ex, "correlation_observations", column)
+			if columnErr != nil {
+				return columnErr
+			}
+			if !exists {
+				correlationObservationsPresent = false
+				break
+			}
+		}
 	}
 
 	var cursor int64
@@ -384,6 +608,7 @@ func repairHistoricalAuditEvent(row historicalAuditEventRow) (*historicalAuditEv
 	}
 
 	projectionChanged := false
+	payloadChanged := false
 	if projected != nil {
 		body, ok := projected["body"].(map[string]any)
 		if !ok {
@@ -401,6 +626,7 @@ func repairHistoricalAuditEvent(row historicalAuditEventRow) (*historicalAuditEv
 		}
 		if repaired.payload != string(payloadEncoded) {
 			projectionChanged = true
+			payloadChanged = true
 		}
 		repaired.payload = string(payloadEncoded)
 		projectedEncoded, err := marshalHistoricalJSON(projected)
@@ -417,6 +643,7 @@ func repairHistoricalAuditEvent(row historicalAuditEventRow) (*historicalAuditEv
 		if err != nil {
 			return nil, fmt.Errorf("audit: encode repaired finding payload JSON: %w", err)
 		}
+		payloadChanged = repaired.payload != string(encoded)
 		repaired.payload = string(encoded)
 	}
 
@@ -425,6 +652,14 @@ func repairHistoricalAuditEvent(row historicalAuditEventRow) (*historicalAuditEv
 		repaired.projectionHash = ProjectionHashAlgorithm + ":" + hex.EncodeToString(digest[:])
 		// Migrations execute before runtime key binding. A changed projection
 		// cannot truthfully retain its old signature, so expose it as unsigned.
+		repaired.payloadHMAC = ""
+		repaired.algorithm = ""
+		repaired.integrityKeyID = ""
+	} else if payloadChanged {
+		// There is no projected record from which to recompute a projection
+		// digest. A changed payload cannot truthfully retain either its legacy
+		// digest or signature metadata, so expose the repaired row as unsigned.
+		repaired.projectionHash = ""
 		repaired.payloadHMAC = ""
 		repaired.algorithm = ""
 		repaired.integrityKeyID = ""
