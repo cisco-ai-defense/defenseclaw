@@ -257,11 +257,13 @@ comments, environment entries, or schema work.
 ## Historical audit-evidence repair
 
 The upgrade repairs credential, PII, and active trust-exploit evidence written
-before the current audit persistence boundary. The repair covers normalized
-scan findings, embedded scan-result JSON, and the structured, payload, and
-projected copies of finding events. It runs in the same SQLite transaction as
-its migration cursor. If any affected JSON cannot be decoded or any write
-fails, the gateway remains unready and the complete repair rolls back.
+before the current audit persistence boundary. The repair covers both the
+legacy `findings` table used by pre-v7 queries and the normalized v7+
+`scan_findings` table, embedded scan-result JSON, and the structured, payload,
+and projected copies of finding events. It runs in the same SQLite transaction
+as its migration cursor. If an affected schema is incomplete, finding tags or
+JSON cannot be decoded safely, or any write fails, the gateway remains unready
+and the complete repair rolls back.
 
 A repaired canonical projection receives a new SHA-256 projection hash. The
 migration does not have access to the runtime signing key, so it clears the old

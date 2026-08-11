@@ -28,6 +28,10 @@ func migrateHistoricalSensitiveEvidence(ex dbExecer) error {
 	if ex == nil {
 		return fmt.Errorf("audit: historical sensitive-evidence migration has no database")
 	}
+	fmt.Fprintln(os.Stderr, "[audit] historical sensitive-evidence repair: findings")
+	if err := scrubHistoricalLegacyFindingRows(ex); err != nil {
+		return err
+	}
 	fmt.Fprintln(os.Stderr, "[audit] historical sensitive-evidence repair: scan_findings")
 	if err := scrubHistoricalScanFindingRows(ex); err != nil {
 		return err
@@ -42,6 +46,107 @@ func migrateHistoricalSensitiveEvidence(ex dbExecer) error {
 	}
 	fmt.Fprintln(os.Stderr, "[audit] historical sensitive-evidence repair: complete")
 	return nil
+}
+
+type historicalLegacyFindingRow struct {
+	rowID                                                      int64
+	scanner, ruleID, title, description, location, remediation string
+	tags                                                       string
+}
+
+// scrubHistoricalLegacyFindingRows repairs the migration-1 findings table.
+// The legacy TUI query still reads this table, so it is a first-class forensic
+// surface even after scan_findings became the canonical v7 detail store.
+func scrubHistoricalLegacyFindingRows(ex dbExecer) error {
+	present, err := tableExists(ex, "findings")
+	if err != nil || !present {
+		return err
+	}
+	for _, column := range []string{
+		"id", "scan_id", "severity", "scanner", "rule_id", "title",
+		"description", "location", "remediation", "tags",
+	} {
+		exists, columnErr := hasColumnDB(ex, "findings", column)
+		if columnErr != nil {
+			return columnErr
+		}
+		if !exists {
+			return fmt.Errorf("audit: findings.%s is missing before historical evidence repair", column)
+		}
+	}
+
+	var cursor int64
+	for {
+		rows, queryErr := ex.Query(`
+			SELECT rowid, COALESCE(scanner,''), COALESCE(rule_id,''), COALESCE(title,''),
+			       COALESCE(description,''), COALESCE(location,''), COALESCE(remediation,''),
+			       COALESCE(tags,'')
+			FROM findings WHERE rowid > ? ORDER BY rowid LIMIT ?`,
+			cursor, historicalSensitiveEvidenceBatchSize,
+		)
+		if queryErr != nil {
+			return fmt.Errorf("audit: query historical legacy findings: %w", queryErr)
+		}
+		batch := make([]historicalLegacyFindingRow, 0, historicalSensitiveEvidenceBatchSize)
+		for rows.Next() {
+			var row historicalLegacyFindingRow
+			if scanErr := rows.Scan(
+				&row.rowID, &row.scanner, &row.ruleID, &row.title,
+				&row.description, &row.location, &row.remediation, &row.tags,
+			); scanErr != nil {
+				_ = rows.Close()
+				return fmt.Errorf("audit: scan historical legacy finding: %w", scanErr)
+			}
+			batch = append(batch, row)
+		}
+		iterationErr := rows.Err()
+		_ = rows.Close()
+		if iterationErr != nil {
+			return fmt.Errorf("audit: iterate historical legacy findings: %w", iterationErr)
+		}
+		if len(batch) == 0 {
+			return nil
+		}
+		for _, row := range batch {
+			cursor = row.rowID
+			decodedTags, tagsErr := decodeHistoricalLegacyFindingTags(row.tags)
+			finding := scanner.Finding{
+				Scanner: row.scanner, RuleID: row.ruleID, Title: row.title,
+				Description: row.description, Location: row.location,
+				Remediation: row.remediation, Tags: decodedTags,
+			}
+			kind, sensitive := historicalSensitiveRuleIDKind(row.ruleID, row.scanner)
+			if tagsErr != nil {
+				// A sensitive rule identity is sufficient to force a canonical
+				// overwrite. Otherwise malformed non-empty tags make the row's
+				// classification unknowable, so abort the surrounding transaction.
+				if !sensitive {
+					return fmt.Errorf("audit: decode historical legacy finding tags at rowid %d: %w", row.rowID, tagsErr)
+				}
+			} else if !sensitive {
+				kind, sensitive = historicalSensitiveFindingKind(finding)
+			}
+			if !sensitive {
+				continue
+			}
+			historicalRedactFinding(&finding, row.scanner, kind)
+			encodedTags := encodeHistoricalStringSlice(finding.Tags)
+			if finding.RuleID == row.ruleID && finding.Title == row.title &&
+				finding.Description == row.description && finding.Location == row.location &&
+				finding.Remediation == row.remediation && encodedTags == row.tags {
+				continue
+			}
+			if _, updateErr := ex.Exec(`
+				UPDATE findings
+				SET rule_id=?, title=?, description=?, location=?, remediation=?, tags=?
+				WHERE rowid=?`,
+				nullStr(finding.RuleID), nullStr(finding.Title), nullStr(finding.Description),
+				nullStr(finding.Location), nullStr(finding.Remediation), nullStr(encodedTags), row.rowID,
+			); updateErr != nil {
+				return fmt.Errorf("audit: repair historical legacy finding: %w", updateErr)
+			}
+		}
+	}
 }
 
 type historicalScanFindingRow struct {
@@ -683,6 +788,24 @@ func historicalSensitiveFindingKind(finding scanner.Finding) (sensitiveFindingKi
 	return "", false
 }
 
+func historicalSensitiveRuleIDKind(ruleID, scannerName string) (sensitiveFindingKind, bool) {
+	if kind, sensitive := historicalSensitiveFindingKind(scanner.Finding{RuleID: ruleID}); sensitive {
+		return kind, true
+	}
+	trimmed := strings.TrimSpace(ruleID)
+	for _, kind := range []sensitiveFindingKind{
+		sensitiveFindingKindSecret,
+		sensitiveFindingKindPII,
+		sensitiveFindingKindTrust,
+	} {
+		if _, trusted := trustedSensitiveFindingRuleID(trimmed, kind, scannerName, nil); trusted ||
+			wellFormedSensitiveOpaqueRuleID(trimmed, kind) {
+			return kind, true
+		}
+	}
+	return "", false
+}
+
 func historicalRedactFinding(finding *scanner.Finding, scannerName string, kind sensitiveFindingKind) {
 	if finding == nil {
 		return
@@ -1152,6 +1275,18 @@ func decodeHistoricalStringSlice(raw string) []string {
 		return nil
 	}
 	return values
+}
+
+func decodeHistoricalLegacyFindingTags(raw string) ([]string, error) {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" || trimmed == "null" {
+		return nil, nil
+	}
+	var values []string
+	if err := json.Unmarshal([]byte(trimmed), &values); err != nil {
+		return nil, err
+	}
+	return values, nil
 }
 
 func encodeHistoricalStringSlice(values []string) string {
