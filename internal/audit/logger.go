@@ -260,11 +260,35 @@ func (l *Logger) LogScanWithCorrelation(
 		// and generated audit projection. Literal credentials and executable
 		// trust directives never cross it in cleartext, even when a producer
 		// omitted its dedicated evidence field.
+		// Sensitive classifiers intentionally use one persisted taxonomy. Secret
+		// material takes precedence over PII, which takes precedence over trust
+		// exploits; every branch sanitizes the same free-form value fields, while
+		// the winning branch supplies the only stable title and tag set. Merging
+		// producer-supplied secondary labels here would reopen the persistence
+		// boundary that these redactors close.
 		if isLiteralCredentialFinding(*finding) {
+			ensureSensitiveFindingRuleID(
+				finding,
+				result.Scanner,
+				sensitiveFindingKindSecret,
+				binding.findingContentFingerprinter,
+			)
 			redactPersistedCredentialFinding(finding)
 		} else if isPIIFinding(*finding) {
+			ensureSensitiveFindingRuleID(
+				finding,
+				result.Scanner,
+				sensitiveFindingKindPII,
+				binding.findingContentFingerprinter,
+			)
 			redactPersistedPIIFinding(finding)
-		} else {
+		} else if isTrustExploitFinding(*finding) {
+			ensureSensitiveFindingRuleID(
+				finding,
+				result.Scanner,
+				sensitiveFindingKindTrust,
+				binding.findingContentFingerprinter,
+			)
 			redactPersistedTrustExploitFinding(finding)
 		}
 	}
@@ -321,6 +345,56 @@ func fingerprintPersistedFindingEvidence(
 	finding.ContentFingerprint = fingerprint
 }
 
+type sensitiveFindingKind string
+
+const (
+	sensitiveFindingKindSecret sensitiveFindingKind = "secret"
+	sensitiveFindingKindPII    sensitiveFindingKind = "pii"
+	sensitiveFindingKindTrust  sensitiveFindingKind = "trust"
+)
+
+// ensureSensitiveFindingRuleID preserves canonical detector identity before
+// the persistence redactors clear Finding.ID. Internal and structured
+// producers should populate RuleID directly. For legacy ID-only inputs, the
+// source ID is producer controlled and may contain the matched credential,
+// identifier, or directive, so it cannot be copied or slugged into RuleID.
+// Instead, derive an installation-keyed opaque identity with explicit domain
+// separation. Two schema-sized tokens give the rule identity 64 bits while
+// retaining the existing key-custody interface and exposing no key material.
+// A missing/failing fingerprinter uses one inert class-level identity rather
+// than persisting unkeyed or attacker-controlled bytes.
+func ensureSensitiveFindingRuleID(
+	finding *scanner.Finding,
+	scannerName string,
+	kind sensitiveFindingKind,
+	fingerprinter RuntimeV8FindingContentFingerprinter,
+) {
+	if finding == nil || strings.TrimSpace(finding.RuleID) != "" {
+		return
+	}
+	prefix := "redacted." + string(kind) + "."
+	sourceID := strings.TrimSpace(finding.ID)
+	if sourceID == "" || fingerprinter == nil {
+		finding.RuleID = prefix + "unknown"
+		return
+	}
+
+	identityInput := strings.Join([]string{
+		"defenseclaw-sensitive-finding-rule-id-v1",
+		string(kind),
+		strings.TrimSpace(scannerName),
+		sourceID,
+	}, "\x00")
+	left, leftErr := fingerprinter.FingerprintRuntimeV8FindingContent(identityInput + "\x00left")
+	right, rightErr := fingerprinter.FingerprintRuntimeV8FindingContent(identityInput + "\x00right")
+	if leftErr != nil || rightErr != nil ||
+		!isCanonicalContentFingerprint(left) || !isCanonicalContentFingerprint(right) {
+		finding.RuleID = prefix + "unknown"
+		return
+	}
+	finding.RuleID = prefix + "id-" + left + right
+}
+
 // redactPersistedCredentialFinding closes the persistence boundary for
 // literal secret findings. Detection needs a stable fingerprint to correlate
 // the same value across turns, but no free-form value field from a secret
@@ -333,6 +407,10 @@ func redactPersistedCredentialFinding(finding *scanner.Finding) {
 	if finding == nil || !isLiteralCredentialFinding(*finding) {
 		return
 	}
+	// ID is a producer-controlled compatibility field and is serialized into
+	// scan_results.raw_json. FindingOccurrenceID is the independently minted
+	// canonical occurrence identity and remains intact.
+	finding.ID = ""
 	if !isCanonicalContentFingerprint(finding.ContentFingerprint) {
 		// The common Logger boundary replaces producer-supplied fingerprints
 		// with keyed tokens. Retain only that canonical representation when this
@@ -376,6 +454,7 @@ func redactPersistedTrustExploitFinding(finding *scanner.Finding) {
 	if finding == nil || !isTrustExploitFinding(*finding) {
 		return
 	}
+	finding.ID = ""
 	if !isCanonicalContentFingerprint(finding.ContentFingerprint) {
 		finding.ContentFingerprint = ""
 	}
@@ -458,31 +537,50 @@ func hasExactFindingTag(tags []string, want string) bool {
 	return false
 }
 
+const (
+	sensitiveFindingRedactionPrefix = "<redacted-sensitive len="
+	sensitiveFindingDecisionPathKey = "redacted_evidence"
+	piiFindingRedactionPrefix       = "<redacted-pii len="
+	piiFindingDecisionPathKey       = "redacted_pii"
+)
+
 func redactFindingDecisionPath(finding *scanner.Finding) {
+	redactFindingDecisionPathWith(
+		finding,
+		sensitiveFindingRedactionPrefix,
+		sensitiveFindingDecisionPathKey,
+	)
+}
+
+func redactFindingDecisionPathWith(finding *scanner.Finding, prefix, key string) {
 	if finding == nil || len(finding.DecisionPath) == 0 {
 		return
 	}
 	var existing map[string]string
 	if json.Unmarshal(finding.DecisionPath, &existing) == nil && len(existing) == 1 &&
-		isSensitiveFindingRedactionPlaceholder(existing["redacted_evidence"]) {
+		isFindingRedactionPlaceholder(existing[key], prefix) {
 		return
 	}
-	placeholder := redactCredentialFindingValue(string(finding.DecisionPath))
-	finding.DecisionPath, _ = json.Marshal(map[string]string{"redacted_evidence": placeholder})
+	placeholder := redactFindingValueWithPrefix(string(finding.DecisionPath), prefix)
+	finding.DecisionPath, _ = json.Marshal(map[string]string{key: placeholder})
 }
 
 func redactCredentialFindingValue(value string) string {
-	if strings.TrimSpace(value) == "" {
-		return value
-	}
-	if isSensitiveFindingRedactionPlaceholder(value) {
-		return value
-	}
-	return fmt.Sprintf("<redacted-sensitive len=%d>", len(value))
+	return redactFindingValueWithPrefix(value, sensitiveFindingRedactionPrefix)
 }
 
 func isSensitiveFindingRedactionPlaceholder(value string) bool {
-	const prefix = "<redacted-sensitive len="
+	return isFindingRedactionPlaceholder(value, sensitiveFindingRedactionPrefix)
+}
+
+func redactFindingValueWithPrefix(value, prefix string) string {
+	if strings.TrimSpace(value) == "" || isFindingRedactionPlaceholder(value, prefix) {
+		return value
+	}
+	return fmt.Sprintf("%s%d>", prefix, len(value))
+}
+
+func isFindingRedactionPlaceholder(value, prefix string) bool {
 	if !strings.HasPrefix(value, prefix) || !strings.HasSuffix(value, ">") {
 		return false
 	}
@@ -527,6 +625,7 @@ func redactPersistedPIIFinding(finding *scanner.Finding) {
 	if finding == nil || !isPIIFinding(*finding) {
 		return
 	}
+	finding.ID = ""
 	// Common identifiers have small enumerable spaces. Preserve only the
 	// installation-keyed token installed by the common Logger boundary; an
 	// untrusted or malformed producer value fails closed.
@@ -549,36 +648,15 @@ func redactPersistedPIIFinding(finding *scanner.Finding) {
 }
 
 func redactPIIFindingValue(value string) string {
-	if strings.TrimSpace(value) == "" {
-		return value
-	}
-	if isPIIRedactionPlaceholder(value) {
-		return value
-	}
-	return fmt.Sprintf("<redacted-pii len=%d>", len(value))
+	return redactFindingValueWithPrefix(value, piiFindingRedactionPrefix)
 }
 
 func isPIIRedactionPlaceholder(value string) bool {
-	const prefix = "<redacted-pii len="
-	if !strings.HasPrefix(value, prefix) || !strings.HasSuffix(value, ">") {
-		return false
-	}
-	digits := strings.TrimSuffix(strings.TrimPrefix(value, prefix), ">")
-	length, err := strconv.Atoi(digits)
-	return err == nil && length >= 0 && value == fmt.Sprintf("%s%d>", prefix, length)
+	return isFindingRedactionPlaceholder(value, piiFindingRedactionPrefix)
 }
 
 func redactPIIFindingDecisionPath(finding *scanner.Finding) {
-	if finding == nil || len(finding.DecisionPath) == 0 {
-		return
-	}
-	var existing map[string]string
-	if json.Unmarshal(finding.DecisionPath, &existing) == nil && len(existing) == 1 &&
-		isPIIRedactionPlaceholder(existing["redacted_pii"]) {
-		return
-	}
-	placeholder := redactPIIFindingValue(string(finding.DecisionPath))
-	finding.DecisionPath, _ = json.Marshal(map[string]string{"redacted_pii": placeholder})
+	redactFindingDecisionPathWith(finding, piiFindingRedactionPrefix, piiFindingDecisionPathKey)
 }
 
 func isPIIFinding(finding scanner.Finding) bool {

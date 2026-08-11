@@ -1725,6 +1725,26 @@ var migrations = []migration{
 		description: "guardrails: add pending tool-call predecessor lifecycle",
 		apply:       migrateToolChainPendingState,
 	},
+	{
+		// The sliding-window correlator reads this identity partition after
+		// every finding insert and needs the newest bounded candidates. Include
+		// both sort keys so the hot path does not build a temporary ordering as
+		// scan_findings grows.
+		description: "guardrails: index focused correlation candidate windows",
+		apply: func(ex dbExecer) error {
+			present, err := tableExists(ex, "scan_findings")
+			if err != nil || !present {
+				return err
+			}
+			if _, err := ex.Exec(
+				`CREATE INDEX IF NOT EXISTS idx_scan_findings_correlation_window ` +
+					`ON scan_findings(session_id, agent_instance_id, agent_id, timestamp DESC, id DESC)`,
+			); err != nil {
+				return fmt.Errorf("create idx_scan_findings_correlation_window: %w", err)
+			}
+			return nil
+		},
+	},
 }
 
 // tableExists reports whether the given SQLite table is present.
@@ -3450,8 +3470,8 @@ func alertEffectiveSeveritySQL() string {
 	canonicalOutcome := canonicalAlertOutcomeSQL()
 	legacyExplicit := legacyExplicitAlertSQL()
 	return `CASE
-		WHEN UPPER(COALESCE(event.severity,'INFO')) <> 'INFO'
-			THEN UPPER(event.severity)
+		WHEN UPPER(TRIM(COALESCE(event.severity,''))) NOT IN ('','INFO')
+			THEN UPPER(TRIM(event.severity))
 		WHEN event.bucket = 'network.egress'
 		 AND ` + canonicalOutcome + ` IN (` + alertNonAllowOutcomeSQL + `)
 			THEN 'WARNING'
@@ -3488,10 +3508,10 @@ func (s *Store) SelectAlertAcknowledgementTargets(
 	for _, action := range legacyActions {
 		args = append(args, action)
 	}
-	if selector.Severity == "" || selector.Severity == "all" {
-		// Eligibility already excludes clean lifecycle telemetry and accepts
-		// promoted INFO non-allow outcomes plus ERROR health records.
-	} else {
+	// An empty or "all" severity needs no extra predicate: eligibility already
+	// excludes clean lifecycle telemetry and accepts promoted INFO non-allow
+	// outcomes plus ERROR health records.
+	if selector.Severity != "" && selector.Severity != "all" {
 		query += ` AND ` + alertEffectiveSeveritySQL() + ` = ?`
 		args = append(args, selector.Severity)
 	}
@@ -3741,7 +3761,10 @@ func (s *Store) GetCounts() (Counts, error) {
 	legacyActions := legacyAlertEligibleActions()
 	legacyPlaceholders := strings.TrimSuffix(strings.Repeat("?,", len(legacyActions)), ",")
 	alertCountSQL := `SELECT COUNT(*) FROM audit_events AS event
-		WHERE ` + alertEligibilitySQL(legacyPlaceholders) + `
+		WHERE (event.bucket IS NULL OR event.bucket IN (
+			'security.finding','enforcement.action','network.egress','platform.health','diagnostic'
+		))
+		  AND ` + alertEligibilitySQL(legacyPlaceholders) + `
 		  AND ` + alertEffectiveSeveritySQL() + ` IN ('CRITICAL','HIGH','ERROR')
 		  AND NOT EXISTS (
 			  SELECT 1 FROM alert_acknowledgement_projection AS projection

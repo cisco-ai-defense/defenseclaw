@@ -182,7 +182,8 @@ func (c *SessionCorrelator) RunForSession(
 			persisted[strings.ToLower(strings.TrimSpace(ruleID))] = struct{}{}
 		}
 		for _, match := range matches {
-			if _, exists := persisted[strings.ToLower(match.SyntheticFindingRuleID())]; exists {
+			key := strings.ToLower(strings.TrimSpace(match.SyntheticFindingRuleID()))
+			if _, exists := persisted[key]; exists {
 				fired.Store(match.Pattern.ID, struct{}{})
 			}
 		}
@@ -208,9 +209,9 @@ func (c *SessionCorrelator) RunForSession(
 		FindingCount:    len(synthetic),
 		MaxSeverity:     "CRITICAL",
 		Verdict:         "block",
-		SessionID:       sessionID,
-		AgentInstanceID: agentInstanceID,
-		AgentID:         meta.AgentID,
+		SessionID:       partition.sessionID,
+		AgentInstanceID: partition.agentInstanceID,
+		AgentID:         partition.agentID,
 		RunID:           meta.RunID,
 		RequestID:       meta.RequestID,
 		TraceID:         meta.TraceID,

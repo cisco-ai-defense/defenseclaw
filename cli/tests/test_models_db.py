@@ -494,6 +494,15 @@ class ModelsDbTests(unittest.TestCase):
                     "finding.observed",
                     json.dumps({"defenseclaw.finding.tags": ["secret"]}),
                 ),
+                (
+                    "warning-finding",
+                    now,
+                    "scan-finding",
+                    "WARNING",
+                    "security.finding",
+                    "finding.observed",
+                    json.dumps({"defenseclaw.finding.tags": ["review"]}),
+                ),
             ],
         )
         self.store.db.execute(
@@ -519,16 +528,19 @@ class ModelsDbTests(unittest.TestCase):
         )
         self.store.db.commit()
 
-        self.assertEqual([event.id for event in self.store.list_alerts(10)], ["real-finding"])
         self.assertEqual(
-            [event.id for event in self.store.list_alert_summaries(10)],
-            ["real-finding"],
+            {event.id for event in self.store.list_alerts(10)},
+            {"real-finding", "warning-finding"},
+        )
+        self.assertEqual(
+            {event.id for event in self.store.list_alert_summaries(10)},
+            {"real-finding", "warning-finding"},
         )
         self.assertEqual(
             [event.id for event in self.store.list_actionable_alert_summaries(10)],
             ["real-finding"],
         )
-        self.assertEqual(self.store.get_counts().alerts, 1)
+        self.assertEqual(self.store.get_counts().alerts, 2)
 
     def test_alert_readers_keep_malformed_payload_fail_visible(self):
         now = datetime.now(timezone.utc).isoformat()
@@ -614,12 +626,25 @@ class ModelsDbTests(unittest.TestCase):
                 ),
             ],
         )
+        self.store.db.execute(
+            """INSERT INTO audit_events (
+                   id, timestamp, action, actor, details, severity, bucket,
+                   event_name, payload_json
+               ) VALUES (?, ?, 'egress', 'defenseclaw', '', 'HIGH',
+                         'network.egress', 'egress.decided', ?)""",
+            (
+                "canonical-high-blocked-egress",
+                now,
+                json.dumps({"defenseclaw.network.decision": "block"}),
+            ),
+        )
         self.store.db.commit()
 
         expected = {
             "legacy-block",
             "canonical-deny",
             "canonical-blocked-egress",
+            "canonical-high-blocked-egress",
             "canonical-failure",
         }
         alerts = self.store.list_alerts(100)
@@ -637,7 +662,7 @@ class ModelsDbTests(unittest.TestCase):
         )
         self.assertEqual(
             {event.id for event in self.store.list_actionable_alert_summaries(100)},
-            expected,
+            expected - {"canonical-blocked-egress"},
         )
         self.assertEqual(self.store.get_counts().alerts, len(alerts))
 

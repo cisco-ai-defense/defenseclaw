@@ -24,6 +24,12 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+from defenseclaw.alert_semantics import (
+    ALERT_ACTIONABLE_SEVERITIES,
+    ALERT_ALL_SEVERITIES,
+    ALERT_LEGACY_FINDING_ACTIONS,
+    ALERT_NON_ALLOW_OUTCOMES,
+)
 from defenseclaw.hook_metrics import aggregate_connector_hook_decision
 from defenseclaw.tui.services.event_models import EgressEvent, parse_timestamp
 
@@ -56,51 +62,25 @@ _MAX_ROWS = 1000
 _MAX_PAYLOAD_BYTES = 64 * 1024
 _MAX_FINDING_TAGS_BYTES = 16 * 1024
 
+
+def _sql_string_values(values: tuple[str, ...]) -> str:
+    return ",".join(f"'{value}'" for value in values)
+
+
 # Keep this vocabulary aligned with the canonical outcome registry. Successful
 # terminal outcomes (allowed/applied/completed/etc.) deliberately stay out of
 # the Alerts queue; these values require operator attention even when an older
 # producer persisted the row with INFO severity.
-V8_NON_ALLOW_OUTCOMES = frozenset(
-    {
-        "alert",
-        "ask",
-        "block",
-        "blocked",
-        "confirm",
-        "deny",
-        "denied",
-        "fail",
-        "failed",
-        "failure",
-        "quarantine",
-        "quarantined",
-        "reject",
-        "rejected",
-        "revoked",
-        "terminated",
-        "timed_out",
-    }
-)
-V8_LEGACY_FINDING_ACTIONS = frozenset(
-    {
-        "alert",
-        "connector-hook-tampered",
-        "gateway-multi-turn-injection",
-        "gateway-session-prompt-alert",
-        "gateway-tool-call-flagged",
-        "gateway-tool-call-judge-flagged",
-        "scan-finding",
-        "tool-result-pii-alert",
-    }
-)
+V8_NON_ALLOW_OUTCOMES = frozenset(ALERT_NON_ALLOW_OUTCOMES)
+V8_LEGACY_FINDING_ACTIONS = frozenset(ALERT_LEGACY_FINDING_ACTIONS)
 
-_V8_ALERT_WHERE_SQL = """
+_V8_ALERT_WHERE_SQL_TEMPLATE = """
     (
         (
             bucket = 'security.finding'
             AND event_name = 'finding.observed'
             AND UPPER(COALESCE(severity, 'INFO')) IN
-                ('CRITICAL','HIGH','MEDIUM','LOW','ERROR','WARNING')
+                ({all_severities})
             AND NOT EXISTS (
                 SELECT 1
                 FROM json_each(
@@ -167,9 +147,7 @@ _V8_ALERT_WHERE_SQL = """
                     ''
                 )
             ) IN (
-                'alert','ask','block','blocked','confirm','deny','denied',
-                'fail','failed','failure','quarantine','quarantined','reject',
-                'rejected','revoked','terminated','timed_out'
+                {non_allow_outcomes}
             )
         )
         OR (
@@ -181,37 +159,49 @@ _V8_ALERT_WHERE_SQL = """
             AND (
                 (
                     UPPER(COALESCE(severity, 'INFO')) IN
-                        ('CRITICAL','HIGH','MEDIUM','LOW','ERROR','WARNING')
+                        ({all_severities})
                     AND LOWER(COALESCE(action, '')) IN (
-                        'alert','connector-hook-tampered',
-                        'gateway-multi-turn-injection',
-                        'gateway-session-prompt-alert',
-                        'gateway-tool-call-flagged',
-                        'gateway-tool-call-judge-flagged',
-                        'scan-finding','tool-result-pii-alert'
+                        {legacy_finding_actions}
                     )
                 )
                 OR LOWER(COALESCE(action, '')) IN (
-                    'alert','ask','block','blocked','confirm','deny','denied',
-                    'fail','failed','failure','quarantine','quarantined','reject',
-                    'rejected','revoked','terminated','timed_out'
+                    {non_allow_outcomes}
                 )
                 OR LOWER(COALESCE(action, '')) LIKE '%-failure'
                 OR LOWER(COALESCE(action, '')) LIKE '%-failed'
-                OR dc_hook_decision(COALESCE(details, ''), NULL, NULL) = 'block'
+                OR dc_hook_decision(
+                    COALESCE(details, ''),
+                    {structured_json},
+                    {enforced}
+                ) = 'block'
             )
         )
     )
 """
+
+
+def _v8_alert_where_sql(columns: frozenset[str]) -> str:
+    """Build legacy-compatible alert SQL from the columns actually present."""
+
+    return _V8_ALERT_WHERE_SQL_TEMPLATE.format(
+        structured_json="structured_json" if "structured_json" in columns else "NULL",
+        enforced="enforced" if "enforced" in columns else "NULL",
+        all_severities=_sql_string_values(ALERT_ALL_SEVERITIES),
+        non_allow_outcomes=_sql_string_values(ALERT_NON_ALLOW_OUTCOMES),
+        legacy_finding_actions=_sql_string_values(ALERT_LEGACY_FINDING_ACTIONS),
+    )
+
 
 # Alert windows are bounded, but the default panel intentionally prioritizes
 # actionable records.  Canonical non-allow enforcement and legacy explicit
 # blocks are displayed as HIGH when their outer severity is INFO; network
 # egress INFO remains WARNING and therefore does not consume this priority
 # lane.
-_V8_ACTIONABLE_ALERT_WHERE_SQL = """
+_V8_ACTIONABLE_ALERT_WHERE_SQL = f"""
     (
-        UPPER(COALESCE(severity, 'INFO')) IN ('CRITICAL','HIGH','ERROR')
+        UPPER(COALESCE(severity, 'INFO')) IN (
+            {_sql_string_values(ALERT_ACTIONABLE_SEVERITIES)}
+        )
         OR (
             bucket = 'enforcement.action'
             AND UPPER(COALESCE(severity, 'INFO')) = 'INFO'
@@ -223,7 +213,7 @@ _V8_ACTIONABLE_ALERT_WHERE_SQL = """
     )
 """
 
-_V8_SELECT_COLUMNS = """
+_V8_SELECT_COLUMNS_TEMPLATE = """
     id, timestamp, COALESCE(bucket,''), COALESCE(event_name,''),
     COALESCE(source,''), COALESCE(severity,''), COALESCE(action,''),
     COALESCE(actor,''), COALESCE(details,''), COALESCE(connector,''),
@@ -256,8 +246,27 @@ _V8_SELECT_COLUMNS = """
                  ) END,
             '[]'
         )
-    )
+    ),
+    CASE
+        WHEN bucket IS NULL
+         AND LOWER(COALESCE(action, '')) = 'connector-hook'
+        THEN dc_hook_decision(
+            COALESCE(details, ''),
+            {structured_json},
+            {enforced}
+        )
+        ELSE ''
+    END
 """
+
+
+def _v8_select_columns(columns: frozenset[str]) -> str:
+    """Project a normalized hook decision without retaining legacy payloads."""
+
+    return _V8_SELECT_COLUMNS_TEMPLATE.format(
+        structured_json="structured_json" if "structured_json" in columns else "NULL",
+        enforced="enforced" if "enforced" in columns else "NULL",
+    )
 
 
 @dataclass(frozen=True)
@@ -285,6 +294,7 @@ class V8EventHistoryRow:
     payload: Mapping[str, Any] = field(default_factory=dict)
     payload_truncated: bool = False
     finding_tags: tuple[str, ...] = ()
+    hook_decision: str = ""
 
 
 class V8EventHistoryReader:
@@ -295,6 +305,7 @@ class V8EventHistoryReader:
         self._supported: bool | None = None
         self._schema_version: int | None = None
         self._has_ack_projection = False
+        self._columns: frozenset[str] = frozenset()
         if self.db is not None:
             self.db.create_function(
                 "dc_hook_decision",
@@ -332,10 +343,12 @@ class V8EventHistoryReader:
         bounded_history = self._bounded_limit(history_limit)
         bounded_alerts = self._bounded_limit(alert_limit)
         ack_filter = self._alert_ack_filter_sql()
+        alert_where = _v8_alert_where_sql(self._columns)
+        select_columns = _v8_select_columns(self._columns)
         rows = self.db.execute(
             f"""SELECT * FROM (
                WITH history AS (
-                   SELECT rowid AS dc_rowid, {_V8_SELECT_COLUMNS}
+                   SELECT rowid AS dc_rowid, {select_columns}
                    FROM audit_events
                    WHERE signal = 'logs' AND bucket IS NOT NULL AND bucket <> ''
                    ORDER BY timestamp DESC, rowid DESC LIMIT ?
@@ -347,7 +360,7 @@ class V8EventHistoryReader:
                            (signal = 'logs' AND bucket IS NOT NULL AND bucket <> '')
                            OR bucket IS NULL
                        )
-                     AND {_V8_ALERT_WHERE_SQL}
+                     AND {alert_where}
                      {ack_filter}
                    ORDER BY timestamp DESC, rowid DESC LIMIT ?
                ), actionable_alerts AS (
@@ -358,7 +371,7 @@ class V8EventHistoryReader:
                            (signal = 'logs' AND bucket IS NOT NULL AND bucket <> '')
                            OR bucket IS NULL
                        )
-                     AND {_V8_ALERT_WHERE_SQL}
+                     AND {alert_where}
                      AND {_V8_ACTIONABLE_ALERT_WHERE_SQL}
                      {ack_filter}
                    ORDER BY timestamp DESC, rowid DESC LIMIT ?
@@ -374,7 +387,7 @@ class V8EventHistoryReader:
                    ORDER BY dc_priority DESC, dc_timestamp DESC, dc_rowid DESC
                    LIMIT ?
                ), alerts AS (
-                   SELECT audit_events.rowid AS dc_rowid, {_V8_SELECT_COLUMNS}
+                   SELECT audit_events.rowid AS dc_rowid, {select_columns}
                    FROM audit_events
                    JOIN selected_alerts
                      ON selected_alerts.dc_rowid = audit_events.rowid
@@ -420,6 +433,7 @@ class V8EventHistoryReader:
                 str(row[0]) for row in self.db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
             }
             self._supported = _REQUIRED_COLUMNS.issubset(columns)
+            self._columns = frozenset(columns)
             self._has_ack_projection = "alert_acknowledgement_projection" in tables
             self._schema_version = schema_version
         return bool(self._supported)
@@ -444,11 +458,13 @@ class V8EventHistoryReader:
         if not self._schema_is_supported():
             return ()
         bounded = self._bounded_limit(limit)
+        select_columns = _v8_select_columns(self._columns)
         if alert_only:
+            alert_where = _v8_alert_where_sql(self._columns)
             alert_scope = f"""(
                 (signal = 'logs' AND bucket IS NOT NULL AND bucket <> '')
                 OR bucket IS NULL
-            ) AND {_V8_ALERT_WHERE_SQL} {self._alert_ack_filter_sql()}"""
+            ) AND {alert_where} {self._alert_ack_filter_sql()}"""
             rows = self.db.execute(
                 f"""WITH newest_alerts AS (
                        SELECT rowid AS dc_rowid, timestamp AS dc_timestamp,
@@ -475,7 +491,7 @@ class V8EventHistoryReader:
                        ORDER BY dc_priority DESC, dc_timestamp DESC, dc_rowid DESC
                        LIMIT ?
                    )
-                   SELECT {_V8_SELECT_COLUMNS}
+                   SELECT {select_columns}
                    FROM audit_events
                    JOIN selected_alerts
                      ON selected_alerts.dc_rowid = audit_events.rowid
@@ -493,7 +509,7 @@ class V8EventHistoryReader:
         else:
             where = "signal = 'logs' AND bucket IS NOT NULL AND bucket <> ''"
         rows = self.db.execute(
-            f"""SELECT {_V8_SELECT_COLUMNS}
+            f"""SELECT {select_columns}
                FROM audit_events
                WHERE {where}
                ORDER BY timestamp DESC, rowid DESC LIMIT ?""",
@@ -588,6 +604,7 @@ def _decode_v8_event_history_rows(rows: list[tuple[Any, ...]]) -> tuple[V8EventH
                 payload=payload,
                 payload_truncated=int(row[21] or 0) > _MAX_PAYLOAD_BYTES,
                 finding_tags=finding_tags,
+                hook_decision=str(row[24] or ""),
             )
         )
     return tuple(result)

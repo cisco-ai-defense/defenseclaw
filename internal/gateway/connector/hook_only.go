@@ -30,6 +30,7 @@ import (
 	"sync"
 
 	"github.com/defenseclaw/defenseclaw/internal/hermespath"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"gopkg.in/yaml.v3"
 )
 
@@ -835,7 +836,8 @@ func (c *hookOnlyConnector) ownedHookContractPresent(opts SetupOpts) (bool, erro
 		return ownedHooksPresentInConfig(c, opts)
 	}
 	path := c.configPath(opts)
-	data, err := os.ReadFile(path)
+	const maxManagedPluginBytes = 4 << 20
+	data, err := safefile.ReadRegularFileBounded(path, maxManagedPluginBytes)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return false, nil
@@ -850,7 +852,8 @@ func (c *hookOnlyConnector) ownedHookContractPresent(opts SetupOpts) (bool, erro
 	if len(marker) == 0 || !bytes.HasPrefix(marker, []byte("// defenseclaw-managed-plugin v")) {
 		return false, fmt.Errorf("%s managed plugin identity is invalid", c.name)
 	}
-	return bytes.Contains(data, marker), nil
+	installedMarker, _, _ := bytes.Cut(data, []byte("\n"))
+	return bytes.Equal(installedMarker, marker), nil
 }
 
 // setupPluginArtifact renders the embedded bridge-plugin template

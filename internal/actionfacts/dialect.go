@@ -23,9 +23,11 @@ import (
 )
 
 // chooseRawCommandDialect infers a grammar only for exact, known generic
-// execution tools. Explicit hints and tools that own a shell grammar always
-// win. The boolean reports mixed grammar signals so callers can retain useful
-// facts without treating the projection as authoritative.
+// execution tools. Explicit hints and Windows-owned tools always win. A
+// POSIX-named tool also yields to a narrow native-Windows-plus-PowerShell
+// compound signal because connector tool labels do not identify the host shell
+// consistently on Windows. The boolean reports mixed grammar signals so callers
+// can retain useful facts without treating the projection as authoritative.
 func chooseRawCommandDialect(
 	tool string,
 	hint Dialect,
@@ -41,6 +43,15 @@ func chooseRawCommandDialect(
 	case "cmd", "cmd.exe":
 		return DialectCMD, false
 	case "bash", "sh", "zsh", "dash", "ksh", "mksh", "fish":
+		first := commandProgramForDialect(
+			strings.ToLower(rawFirstWord(source)),
+			DialectPowerShell,
+		)
+		if (windowsNativeCommand(first) ||
+			windowsExternalExecutable(first)) &&
+			containsPowerShellCompoundCommand(source) {
+			return DialectPowerShell, false
+		}
 		return DialectPOSIX, false
 	}
 	if !genericRawExecutionTool(name) {
@@ -75,6 +86,7 @@ func inferRawCommandDialect(source string) (Dialect, bool) {
 		!crossDialectShellLauncher(first)
 	powerShellVariable := containsFold(source, "$env:")
 	powerShellSwitch := containsPowerShellSwitch(source)
+	powerShellCompound := containsPowerShellCompoundCommand(source)
 	cmdSlashSwitch := containsKnownCMDSlashSwitch(first, source)
 	posixSyntax := containsPOSIXSignalForProgram(first, source)
 	filesystemAlias := powerShellFilesystemAlias(first)
@@ -84,6 +96,7 @@ func inferRawCommandDialect(source string) (Dialect, bool) {
 		variableShellCommand(first)
 
 	powerShell := powerShellCmdlet(first) ||
+		powerShellCompound ||
 		((powerShellAlias(first) || filesystemAlias) &&
 			(windowsPathOperand || powerShellSwitch)) ||
 		(powerShellVariable && recognizedWindowsCommand)
@@ -95,6 +108,13 @@ func inferRawCommandDialect(source string) (Dialect, bool) {
 		((windowsNativeCommand(first) || crossPlatformCommand(first)) &&
 			(windowsPathOperand || cmdSlashSwitch)) ||
 		windowsExternal
+	// An exact PowerShell cmdlet after an unquoted semicolon owns the grammar.
+	// Native Windows executables such as reg.exe are valid PowerShell commands,
+	// and their slash-prefixed operands are not evidence of a competing CMD
+	// shell when the following statement is PowerShell-only.
+	if powerShellCompound {
+		cmd = false
+	}
 
 	// A path-shaped substring inside a filesystem alias operand is not enough
 	// to select PowerShell. Keep quoted prose and other non-exact shapes on
@@ -219,11 +239,44 @@ func cmdBuiltin(program string) bool {
 func windowsNativeCommand(program string) bool {
 	switch program {
 	case "xcopy", "robocopy", "schtasks", "net", "icacls", "takeown",
-		"taskkill":
+		"taskkill", "reg", "reg.exe":
 		return true
 	default:
 		return false
 	}
+}
+
+// containsPowerShellCompoundCommand recognizes only a literal PowerShell
+// cmdlet at the start of a later parsed statement. Reusing the bounded
+// PowerShell lexer keeps quoted prose, comments, stop-parsing tokens, and
+// opaque dynamic constructs from becoming dialect signals.
+func containsPowerShellCompoundCommand(source string) bool {
+	if !strings.ContainsAny(source, ";|&\r\n") ||
+		strings.Contains(source, `\;`) {
+		// A backslash does not escape PowerShell separators, but it does in
+		// POSIX shells. Keep that mixed form on the caller's declared grammar.
+		return false
+	}
+	out := newParseOutput(DialectPowerShell, 1)
+	lexemes, ok := windowsLex(source, windowsPowerShell, &out)
+	if !ok {
+		return false
+	}
+	commands, _, _ := windowsBuildCommands(lexemes, &out)
+	for _, command := range commands[1:] {
+		if command.callOperator || len(command.words) == 0 ||
+			command.words[0].expands || command.words[0].quotedOnly {
+			continue
+		}
+		candidate := commandProgramForDialect(
+			strings.ToLower(command.words[0].value),
+			DialectPowerShell,
+		)
+		if powerShellCmdlet(candidate) {
+			return true
+		}
+	}
+	return false
 }
 
 func crossPlatformCommand(program string) bool {
@@ -551,6 +604,14 @@ func knownCMDSlashSwitchAt(program string, source string, start int) bool {
 	case "cmd":
 		switch token {
 		case "/c", "/k", "/s", "/q", "/d", "/a", "/u":
+			return true
+		default:
+			return false
+		}
+	case "reg", "reg.exe":
+		switch token {
+		case "/v", "/ve", "/va", "/t", "/s", "/d", "/f", "/c",
+			"/e", "/se", "/z", "/reg:32", "/reg:64", "/?":
 			return true
 		default:
 			return false

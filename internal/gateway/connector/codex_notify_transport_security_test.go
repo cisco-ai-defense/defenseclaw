@@ -18,8 +18,8 @@ func TestCodexNotifyBridgeKeepsCredentialAndPayloadOutOfCurlProcessState(t *test
 	}
 
 	const (
-		initialToken  = "codex-notify-scoped-token-initial"
-		rotatedToken  = "codex-notify-scoped-token-rotated"
+		initialToken  = "codex-notify-scoped\\token-\"initial"
+		rotatedToken  = "codex-notify-scoped\\token-\"rotated"
 		bakedSentinel = "token-must-not-be-baked-into-notify-bridge"
 		genericToken  = "inherited-generic-gateway-token"
 		inheritedAPI  = "inherited-exported-api-token"
@@ -87,10 +87,15 @@ for arg in "$@"; do
       esac
       want=""
       ;;
+    config)
+      cat "$arg" >> "${CODEX_NOTIFY_HEADER_CAPTURE}"
+      want=""
+      ;;
   esac
   case "$arg" in
     -H|--header) want="header" ;;
     -d|--data|--data-binary) want="body" ;;
+    -K|--config) want="config" ;;
   esac
 done
 `
@@ -129,15 +134,15 @@ done
 				t.Fatalf("curl argv exposed private material %q:\n%s", secret, argv)
 			}
 		}
-		for _, fdArg := range []string{"@/dev/fd/8", "@/dev/fd/9"} {
+		for _, fdArg := range []string{"/dev/fd/8", "@/dev/fd/9"} {
 			if !strings.Contains(argv, fdArg) {
 				t.Fatalf("curl argv missing descriptor transport %q:\n%s", fdArg, argv)
 			}
 		}
 
 		headers := readCodexNotifyCapture(t, headerPath)
-		if !strings.Contains(headers, "Authorization: Bearer "+wantToken) {
-			t.Fatalf("transported headers do not contain current scoped token: %q", headers)
+		if gotToken, ok := capturedCurlAuthorizationToken(headers); !ok || gotToken != wantToken {
+			t.Fatalf("transported Authorization token = %q, %v; want %q (capture=%q)", gotToken, ok, wantToken, headers)
 		}
 		for _, rejected := range []string{oldToken, genericToken, inheritedAPI} {
 			if rejected != "" && strings.Contains(headers, rejected) {
@@ -166,6 +171,49 @@ done
 	const rotatedPayload = `{"type":"agent-turn-complete","private":"rotated-payload"}`
 	runBridge(rotatedPayload)
 	assertTransport(rotatedToken, initialToken, rotatedPayload)
+}
+
+func TestCodexNotifyBridgeRejectsTokenLineBreakBeforeCurl(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("the Bash notify bridge is not installed on Windows")
+	}
+
+	dataDir := t.TempDir()
+	tokenPath, err := HookAPITokenFilePath(dataDir, "codex")
+	if err != nil {
+		t.Fatalf("HookAPITokenFilePath: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(tokenPath), 0o700); err != nil {
+		t.Fatalf("create hook token directory: %v", err)
+	}
+	if err := os.WriteFile(tokenPath, []byte("invalid\rtoken\n"), 0o600); err != nil {
+		t.Fatalf("write invalid scoped token: %v", err)
+	}
+	if err := writeCodexNotifyBridge(SetupOpts{DataDir: dataDir, APIAddr: "127.0.0.1:18970"}); err != nil {
+		t.Fatalf("writeCodexNotifyBridge: %v", err)
+	}
+
+	stubDir := t.TempDir()
+	invokedPath := filepath.Join(stubDir, "curl-invoked")
+	stubPath := filepath.Join(stubDir, "curl")
+	stub := "#!/bin/sh\n: > \"${CODEX_NOTIFY_INVOKED}\"\nexit 99\n"
+	if err := os.WriteFile(stubPath, []byte(stub), 0o755); err != nil {
+		t.Fatalf("write curl stub: %v", err)
+	}
+
+	cmd := exec.Command("/bin/bash", filepath.Join(dataDir, "notify-bridge.sh"), `{"type":"agent-turn-complete"}`)
+	cmd.Env = []string{
+		"PATH=" + stubDir + ":/usr/bin:/bin",
+		"CODEX_NOTIFY_INVOKED=" + invokedPath,
+	}
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("invalid-token notify did not fail open: %v\noutput=%q", err, output)
+	} else if len(output) != 0 {
+		t.Fatalf("invalid-token notify emitted operator noise: %q", output)
+	}
+	if _, err := os.Stat(invokedPath); !os.IsNotExist(err) {
+		t.Fatalf("invalid token invoked curl: %v", err)
+	}
 }
 
 func TestCodexNotifyBridgeFailsOpenWithoutScopedToken(t *testing.T) {
@@ -208,4 +256,29 @@ func readCodexNotifyCapture(t *testing.T, path string) string {
 		t.Fatalf("read notify transport capture %s: %v", filepath.Base(path), err)
 	}
 	return string(data)
+}
+
+func capturedCurlAuthorizationToken(capture string) (string, bool) {
+	const (
+		directPrefix = "Authorization: Bearer "
+		configPrefix = `header = "Authorization: Bearer `
+	)
+	for _, line := range strings.Split(capture, "\n") {
+		if strings.HasPrefix(line, directPrefix) {
+			return strings.TrimPrefix(line, directPrefix), true
+		}
+		if !strings.HasPrefix(line, configPrefix) || !strings.HasSuffix(line, `"`) {
+			continue
+		}
+		encoded := strings.TrimSuffix(strings.TrimPrefix(line, configPrefix), `"`)
+		var decoded strings.Builder
+		for i := 0; i < len(encoded); i++ {
+			if encoded[i] == '\\' && i+1 < len(encoded) && (encoded[i+1] == '\\' || encoded[i+1] == '"') {
+				i++
+			}
+			decoded.WriteByte(encoded[i])
+		}
+		return decoded.String(), true
+	}
+	return "", false
 }

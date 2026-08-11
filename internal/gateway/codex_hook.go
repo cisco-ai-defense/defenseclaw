@@ -740,24 +740,29 @@ func structuredHookContentString(v interface{}) string {
 	}
 }
 
-func collectHookContentStrings(v interface{}, leaves *[]string, depth int) {
+// collectHookContentStrings returns false when its traversal bounds prevent it
+// from examining the complete value. Ordinary detector projections may still
+// use the collected prefix, but source-provenance callers must fail closed.
+func collectHookContentStrings(v interface{}, leaves *[]string, depth int) bool {
 	const (
 		maxDepth  = 8
 		maxLeaves = 256
 	)
-	if depth > maxDepth || len(*leaves) >= maxLeaves {
-		return
+	if depth > maxDepth {
+		return false
 	}
 	switch value := v.(type) {
 	case string:
 		if strings.TrimSpace(value) != "" {
+			if len(*leaves) >= maxLeaves {
+				return false
+			}
 			*leaves = append(*leaves, value)
 		}
 	case []interface{}:
 		for _, item := range value {
-			collectHookContentStrings(item, leaves, depth+1)
-			if len(*leaves) >= maxLeaves {
-				return
+			if !collectHookContentStrings(item, leaves, depth+1) {
+				return false
 			}
 		}
 	case map[string]interface{}:
@@ -767,12 +772,12 @@ func collectHookContentStrings(v interface{}, leaves *[]string, depth int) {
 		}
 		sort.Strings(keys)
 		for _, key := range keys {
-			collectHookContentStrings(value[key], leaves, depth+1)
-			if len(*leaves) >= maxLeaves {
-				return
+			if !collectHookContentStrings(value[key], leaves, depth+1) {
+				return false
 			}
 		}
 	}
+	return true
 }
 
 type codexObserveSourceProof uint8
@@ -888,7 +893,9 @@ func mergeCodexToolResultVerdicts(
 	if normalizedGuardrailActionRank(untrusted.Action) > normalizedGuardrailActionRank(source.Action) {
 		merged.Action = untrusted.Action
 	}
-	if untrusted.RawAction != "" {
+	if untrusted.RawAction != "" && (source.RawAction == "" ||
+		normalizedGuardrailActionRank(untrusted.RawAction) >
+			normalizedGuardrailActionRank(source.RawAction)) {
 		merged.RawAction = untrusted.RawAction
 	}
 	merged.WouldBlock = source.WouldBlock || untrusted.WouldBlock
@@ -936,15 +943,18 @@ func codexSplitAttributedSourceResult(v interface{}, cwd string) (string, string
 		if err := json.Unmarshal(encoded, &decoded); err != nil {
 			return "", "", false
 		}
-		collectHookContentStrings(decoded, &leaves, 0)
+		if !collectHookContentStrings(decoded, &leaves, 0) {
+			return "", "", false
+		}
 	}
 	if len(leaves) == 0 {
 		return "", "", false
 	}
+	trust := newCodexAttributedSourceTrust(cwd)
 	var sourceLines, untrustedLines []string
 	for _, leaf := range leaves {
 		for _, line := range strings.Split(strings.ReplaceAll(leaf, "\r\n", "\n"), "\n") {
-			if codexAttributedWorkspaceSourceLine(line, cwd) {
+			if codexAttributedWorkspaceSourceLine(line, trust) {
 				sourceLines = append(sourceLines, line)
 			} else if line != "" {
 				untrustedLines = append(untrustedLines, line)
@@ -957,8 +967,52 @@ func codexSplitAttributedSourceResult(v interface{}, cwd string) (string, string
 	return strings.Join(sourceLines, "\n"), strings.Join(untrustedLines, "\n"), true
 }
 
-func codexAttributedWorkspaceSourceLine(line, cwd string) bool {
+const (
+	codexAttributedSourceMaxCandidatesPerLine = 32
+	codexAttributedSourceMaxMemoEntries       = 256
+)
+
+type codexAttributedSourceTrust struct {
+	cwd      string
+	paths    map[string]bool
+	validate func(path, cwd string) bool
+}
+
+func newCodexAttributedSourceTrust(cwd string) *codexAttributedSourceTrust {
+	return &codexAttributedSourceTrust{
+		cwd:      cwd,
+		paths:    make(map[string]bool),
+		validate: trustedCodexObserveSourcePath,
+	}
+}
+
+func (t *codexAttributedSourceTrust) trusted(relative, path string) bool {
+	if t == nil || t.validate == nil {
+		return false
+	}
+	key := filepath.Clean(relative)
+	if trusted, cached := t.paths[key]; cached {
+		return trusted
+	}
+	// An attacker-controlled result cannot force unbounded distinct filesystem
+	// proofs. Once the request-local cache is full, unseen paths remain untrusted.
+	if len(t.paths) >= codexAttributedSourceMaxMemoEntries {
+		return false
+	}
+	trusted := t.validate(path, t.cwd)
+	t.paths[key] = trusted
+	return trusted
+}
+
+func codexAttributedWorkspaceSourceLine(
+	line string,
+	trust *codexAttributedSourceTrust,
+) bool {
+	if trust == nil {
+		return false
+	}
 	line = strings.TrimSuffix(line, "\r")
+	candidates := 0
 	for index := 0; index < len(line); index++ {
 		separator := line[index]
 		if separator != ':' && separator != '-' {
@@ -972,7 +1026,16 @@ func codexAttributedWorkspaceSourceLine(line, cwd string) bool {
 		if end == digits || end >= len(line) || line[end] != separator {
 			continue
 		}
-		if trustedCodexObserveSourcePath(line[:index], cwd) {
+		path := line[:index]
+		relative, ok := trustedWorkspaceRelativePath(path, trust.cwd)
+		if !ok || !codexObserveSourceRelativePath(relative) {
+			continue
+		}
+		candidates++
+		if candidates > codexAttributedSourceMaxCandidatesPerLine {
+			return false
+		}
+		if trust.trusted(relative, path) {
 			return true
 		}
 	}
@@ -1010,7 +1073,9 @@ func codexSplitVerifiedGitDiffResult(
 		if err := json.Unmarshal(encoded, &decoded); err != nil {
 			return "", "", false
 		}
-		collectHookContentStrings(decoded, &leaves, 0)
+		if !collectHookContentStrings(decoded, &leaves, 0) {
+			return "", "", false
+		}
 	}
 	if len(leaves) == 0 || len(pathspecs) == 0 {
 		return "", "", false
@@ -3360,7 +3425,7 @@ func (a *APIServer) scanCodexChangedFiles(ctx context.Context, req codexHookRequ
 			maxSeverity = result.MaxSeverity()
 		}
 		for _, f := range result.Findings {
-			findings = append(findings, f.ID)
+			findings = append(findings, firstNonEmpty(f.RuleID, f.ID))
 			if len(findings) >= 20 {
 				break
 			}

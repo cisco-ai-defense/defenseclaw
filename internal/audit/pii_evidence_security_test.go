@@ -9,6 +9,8 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -16,7 +18,48 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
+	"gopkg.in/yaml.v3"
 )
+
+func TestEnterprisePIIFallbackCatalogCoversPIIRules(t *testing.T) {
+	paths, err := filepath.Glob(filepath.Join("..", "..", "policies", "guardrail", "*", "rules", "enterprise-data.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(paths) == 0 {
+		t.Fatal("enterprise PII policy fixtures are unavailable")
+	}
+	type catalogRule struct {
+		ID   string   `yaml:"id"`
+		Tags []string `yaml:"tags"`
+	}
+	var covered int
+	for _, path := range paths {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read %s: %v", path, err)
+		}
+		var catalog struct {
+			Rules []catalogRule `yaml:"rules"`
+		}
+		if err := yaml.Unmarshal(raw, &catalog); err != nil {
+			t.Fatalf("decode %s: %v", path, err)
+		}
+		for _, rule := range catalog.Rules {
+			if !strings.HasPrefix(strings.ToUpper(strings.TrimSpace(rule.ID)), "ENT-") ||
+				!hasExactFindingTag(rule.Tags, "pii") {
+				continue
+			}
+			covered++
+			if !isKnownEnterprisePIIFindingID(rule.ID) {
+				t.Errorf("enterprise PII rule %q in %s is missing from bare-ID redaction fallback", rule.ID, path)
+			}
+		}
+	}
+	if covered == 0 {
+		t.Fatal("enterprise PII catalog contained no tagged rules")
+	}
+}
 
 func TestLogScanNeutralizesPIIValuesAcrossPersistenceSurfaces(t *testing.T) {
 	logger := newTestLogger(t)
@@ -65,7 +108,7 @@ func TestLogScanNeutralizesPIIValuesAcrossPersistenceSurfaces(t *testing.T) {
 			tags = append(tags, scanner.FindingTagDetectionOnly)
 		}
 		findings = append(findings, scanner.Finding{
-			ID: tc.ruleID + "-source", RuleID: tc.ruleID, Category: tc.category,
+			ID: raw, RuleID: tc.ruleID, Category: tc.category,
 			Scanner: "hook-rules", Severity: scanner.SeverityHigh,
 			Title: raw, Description: raw, EvidenceSummary: raw,
 			Location: raw + "-location", Remediation: raw + "-remediation",
@@ -84,6 +127,14 @@ func TestLogScanNeutralizesPIIValuesAcrossPersistenceSurfaces(t *testing.T) {
 	}
 	if err := logger.LogScanWithCorrelation(t.Context(), result, "alert", corr); err != nil {
 		t.Fatalf("log PII findings: %v", err)
+	}
+	for index := range result.Findings {
+		if result.Findings[index].ID != "" {
+			t.Fatalf("PII finding %d retained producer ID %q", index, result.Findings[index].ID)
+		}
+		if result.Findings[index].FindingOccurrenceID == "" {
+			t.Fatalf("PII finding %d lost canonical occurrence ID", index)
+		}
 	}
 
 	rows, err := logger.store.db.Query(`

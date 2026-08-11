@@ -310,6 +310,11 @@ func TestMergeOwnedCodexHooksCollapsesAccumulatedTrustedMatrices(t *testing.T) {
 			currentElevenEvents,
 		)
 	}
+	for _, size := range []int{5, 6, 8, 10} {
+		if profilesBySize[size] == nil {
+			t.Fatalf("shipped Codex hook profile with %d events is missing", size)
+		}
+	}
 	predecessors := []struct {
 		command string
 		groups  []codexHookGroup

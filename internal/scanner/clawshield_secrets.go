@@ -140,6 +140,7 @@ func csSecretsScanContent(content []byte, path string) []Finding {
 			match := text[loc[0]:loc[1]]
 			findings = append(findings, Finding{
 				ID:          rule.id,
+				RuleID:      rule.id,
 				Severity:    rule.severity,
 				Title:       fmt.Sprintf("Secret detected: %s (%s)", rule.id, rule.provider),
 				Description: fmt.Sprintf("Matched value: %s", csTruncateSecret(match)),

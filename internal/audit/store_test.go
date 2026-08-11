@@ -690,6 +690,9 @@ func TestAlertAcknowledgementTargetsMatchVisibleCanonicalAndLegacyAlerts(t *test
 		('canonical-deny', '2026-07-17T12:00:00Z', 'enforcement', 'gateway', '',
 		 'INFO', 'enforcement.action', 'action.applied',
 		 '{"defenseclaw.enforcement.effective_action":"deny"}', NULL),
+		('blank-severity-deny', '2026-07-17T12:00:00.5Z', 'enforcement', 'gateway', '',
+		 '', 'enforcement.action', 'action.applied',
+		 '{"defenseclaw.enforcement.effective_action":"deny"}', NULL),
 		('canonical-egress', '2026-07-17T12:00:01Z', 'egress', 'gateway', '',
 		 'INFO', 'network.egress', 'egress.decided',
 		 '{"defenseclaw.network.decision":"block"}', NULL),
@@ -715,15 +718,16 @@ func TestAlertAcknowledgementTargetsMatchVisibleCanonicalAndLegacyAlerts(t *test
 	}
 
 	want := map[string]bool{
-		"canonical-deny":    true,
-		"canonical-egress":  true,
-		"health-error":      true,
-		"malformed-finding": true,
-		"legacy-block":      true,
+		"blank-severity-deny": true,
+		"canonical-deny":      true,
+		"canonical-egress":    true,
+		"health-error":        true,
+		"malformed-finding":   true,
+		"legacy-block":        true,
 	}
 	exact, err := store.SelectAlertAcknowledgementTargets(t.Context(), AlertAcknowledgementSelector{
 		AlertIDs: []string{
-			"canonical-deny", "canonical-egress", "health-error", "canonical-allow",
+			"blank-severity-deny", "canonical-deny", "canonical-egress", "health-error", "canonical-allow",
 			"detection-only", "malformed-finding", "legacy-block", "legacy-clean-high",
 			"legacy-unrelated-high",
 		},
@@ -759,9 +763,17 @@ func TestAlertAcknowledgementTargetsMatchVisibleCanonicalAndLegacyAlerts(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(high) != 3 || high[0].AlertID != "canonical-deny" ||
-		high[1].AlertID != "legacy-block" || high[2].AlertID != "malformed-finding" {
+	if len(high) != 4 || high[0].AlertID != "blank-severity-deny" ||
+		high[1].AlertID != "canonical-deny" || high[2].AlertID != "legacy-block" ||
+		high[3].AlertID != "malformed-finding" {
 		t.Fatalf("HIGH targets=%+v", high)
+	}
+	counts, err := store.GetCounts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.Alerts != 5 {
+		t.Fatalf("actionable alert count=%d, want blank-severity deny promoted into 5 total", counts.Alerts)
 	}
 
 }

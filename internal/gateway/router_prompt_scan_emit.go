@@ -99,7 +99,7 @@ func buildSessionPromptScanResult(verdict *ScanVerdict, messageID string, elapse
 			Severity:        sev,
 			Category:        nf.Category,
 			Scanner:         scName,
-			EvidenceSummary: nf.Evidence,
+			EvidenceSummary: stripLogInjectionRunes(nf.Evidence),
 		})
 	}
 	return &scanner.ScanResult{

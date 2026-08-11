@@ -338,7 +338,9 @@ LIMIT ?`, identityWhere)
 			return nil, fmt.Errorf("audit: correlation finding row: %w", err)
 		}
 		if tagsJSON.Valid {
-			_ = json.Unmarshal([]byte(tagsJSON.String), &r.Tags)
+			if err := json.Unmarshal([]byte(tagsJSON.String), &r.Tags); err != nil {
+				return nil, fmt.Errorf("audit: decode correlation finding tags for %s: %w", r.ID, err)
+			}
 		}
 		out = append(out, r)
 	}
@@ -395,16 +397,13 @@ FROM scan_findings
 WHERE %s
 	AND LOWER(TRIM(COALESCE(scanner, ''))) = ?
 	AND LOWER(TRIM(COALESCE(rule_id, ''))) IN (%s)
-ORDER BY LOWER(TRIM(rule_id))
-LIMIT ?`, identityWhere, placeholders)
-		args := make([]any, 0, len(identityArgs)+len(batch)+2)
+ORDER BY LOWER(TRIM(rule_id))`, identityWhere, placeholders)
+		args := make([]any, 0, len(identityArgs)+len(batch)+1)
 		args = append(args, identityArgs...)
 		args = append(args, "correlator")
 		for _, ruleID := range batch {
 			args = append(args, ruleID)
 		}
-		args = append(args, len(batch))
-
 		rows, err := s.db.Query(query, args...)
 		if err != nil {
 			return nil, fmt.Errorf("audit: list fired correlation rules in session: %w", err)

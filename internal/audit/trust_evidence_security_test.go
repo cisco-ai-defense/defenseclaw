@@ -54,7 +54,7 @@ func TestLogScanNeutralizesTrustExploitValuesBeforePersistence(t *testing.T) {
 			t.Fatal(err)
 		}
 		findings = append(findings, scanner.Finding{
-			ID: tc.sourceID, RuleID: tc.ruleID, Category: tc.category,
+			ID: payload, RuleID: tc.ruleID, Category: tc.category,
 			Scanner: "hook-rules", Severity: scanner.SeverityHigh,
 			Title:       payload + " title " + string(rune('A'+index)),
 			Description: payload, EvidenceSummary: payload, Location: payload + "-location",
@@ -74,6 +74,14 @@ func TestLogScanNeutralizesTrustExploitValuesBeforePersistence(t *testing.T) {
 	}
 	if err := logger.LogScanWithCorrelation(t.Context(), result, "alert", corr); err != nil {
 		t.Fatalf("log trust findings: %v", err)
+	}
+	for index := range result.Findings {
+		if result.Findings[index].ID != "" {
+			t.Fatalf("trust finding %d retained producer ID %q", index, result.Findings[index].ID)
+		}
+		if result.Findings[index].FindingOccurrenceID == "" {
+			t.Fatalf("trust finding %d lost canonical occurrence ID", index)
+		}
 	}
 
 	rows, err := logger.store.db.Query(`

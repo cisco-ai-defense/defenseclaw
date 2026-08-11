@@ -1369,6 +1369,18 @@ func trustedBashFallbackActions(
 	if input.Tool == trustedProjectedActionTool {
 		return nil
 	}
+	// A generic shell envelope can carry native PowerShell or CMD syntax on
+	// Windows. Those dialects already have their own structural projection;
+	// reparsing their bytes as Bash can turn valid quoted arguments into a raw
+	// parser-uncertainty finding (for example, CMD does not treat a backslash
+	// before a closing quote as an escape). Never manufacture Bash telemetry
+	// for a structurally proven non-Bash dialect. Partial or invalid Windows
+	// parses still retain the bounded uncertainty lane below.
+	if facts.Authoritative() &&
+		(facts.Parse.Dialect == actionfacts.DialectPowerShell ||
+			facts.Parse.Dialect == actionfacts.DialectCMD) {
+		return nil
+	}
 	command, ok := trustedBashCommandInput(input)
 	const maxBashFallbackBytes = 64 << 10
 	if !ok {
@@ -1865,7 +1877,7 @@ func trustedEmbeddedExecutionActions(
 			}
 		case "eval":
 			var fields []string
-			for _, argument := range command.Arguments[1:] {
+			for _, argument := range trustedCommandOperandArguments(command) {
 				if argument.Expands {
 					markUncertainty(serializeArgvForLegacyScan(command.Argv))
 					break
@@ -1891,7 +1903,7 @@ func trustedEmbeddedExecutionActions(
 		switch strings.ToLower(source.Program) {
 		case "echo":
 			var fields []string
-			for _, argument := range source.Arguments[1:] {
+			for _, argument := range trustedCommandOperandArguments(source) {
 				if argument.Expands {
 					markUncertainty(serializeArgvForLegacyScan(source.Argv))
 					break
@@ -1900,7 +1912,7 @@ func trustedEmbeddedExecutionActions(
 			}
 			appendText(strings.Join(fields, " "))
 		case "printf":
-			static := source.Arguments[1:]
+			static := trustedCommandOperandArguments(source)
 			for _, argument := range static {
 				if argument.Expands {
 					markUncertainty(serializeArgvForLegacyScan(source.Argv))
@@ -1909,6 +1921,9 @@ func trustedEmbeddedExecutionActions(
 			}
 			if len(static) == 1 && !static[0].Expands {
 				appendText(static[0].Value)
+				continue
+			}
+			if len(static) <= 1 {
 				continue
 			}
 			for _, argument := range static[1:] {
@@ -3329,7 +3344,7 @@ func trustedLegacyPathRuleMatches(
 				command.Effect != actionfacts.EffectUncertain) {
 			continue
 		}
-		for _, argument := range command.Arguments[1:] {
+		for _, argument := range trustedCommandOperandArguments(command) {
 			for _, match := range windowsSensitivePathFindingsWithOptions(
 				argument.Value,
 				toolName,
@@ -3350,7 +3365,7 @@ func trustedLegacyPathRuleMatches(
 				command.Effect != actionfacts.EffectUncertain) {
 			continue
 		}
-		for _, argument := range command.Arguments[1:] {
+		for _, argument := range trustedCommandOperandArguments(command) {
 			for _, match := range scanRuleGeneration(
 				generation,
 				argument.Value,
@@ -3446,7 +3461,7 @@ func trustedUnresolvedReadRuleMatches(
 				command.Effect != actionfacts.EffectUncertain) {
 			continue
 		}
-		for _, argument := range command.Arguments[1:] {
+		for _, argument := range trustedCommandOperandArguments(command) {
 			collect(argument.Value)
 		}
 		if command.ArgvComplete || !commandHasUnresolvedExpansion(command) {
@@ -3460,12 +3475,19 @@ func trustedUnresolvedReadRuleMatches(
 }
 
 func commandHasUnresolvedExpansion(command actionfacts.CommandFact) bool {
-	for _, argument := range command.Arguments[1:] {
+	for _, argument := range trustedCommandOperandArguments(command) {
 		if argument.Expands && strings.TrimSpace(argument.Value) == "" {
 			return true
 		}
 	}
 	return false
+}
+
+func trustedCommandOperandArguments(command actionfacts.CommandFact) []actionfacts.ArgumentFact {
+	if len(command.Arguments) <= 1 {
+		return nil
+	}
+	return command.Arguments[1:]
 }
 
 func trustedUnresolvedHomePath(value string) bool {

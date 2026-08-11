@@ -178,8 +178,13 @@ func ApplyRulePackOverrides(rp *guardrail.RulePack) error {
 type compiledRulePackCategories struct {
 	categories    []ruleCategory
 	semanticRules []compiledSemanticRule
-	overridden    int
-	added         int
+	// ruleIdentityTitles indexes the immutable generation by normalized rule
+	// ID and exact trimmed title. Local-pattern normalization uses it to
+	// distinguish catalog framing from producer-controlled matched text without
+	// rescanning the full catalog for every finding.
+	ruleIdentityTitles map[string]map[string]struct{}
+	overridden         int
+	added              int
 }
 
 const (
@@ -229,11 +234,24 @@ func compileRulePackGenerationWithCompiler(
 		return nil, errors.New("semantic rule compiler is unavailable")
 	}
 	ownedCategories := cloneRuleCategories(categories)
-	compiled := &compiledRulePackCategories{categories: ownedCategories}
+	compiled := &compiledRulePackCategories{
+		categories:         ownedCategories,
+		ruleIdentityTitles: make(map[string]map[string]struct{}),
+	}
 	claimed := make(map[string]string)
 	var staticCost uint64
 	for _, category := range ownedCategories {
 		for _, rule := range category.Rules {
+			ruleID := strings.ToUpper(strings.TrimSpace(rule.ID))
+			title := strings.TrimSpace(rule.Title)
+			if ruleID != "" && title != "" {
+				titles := compiled.ruleIdentityTitles[ruleID]
+				if titles == nil {
+					titles = make(map[string]struct{})
+					compiled.ruleIdentityTitles[ruleID] = titles
+				}
+				titles[title] = struct{}{}
+			}
 			expression := strings.TrimSpace(rule.Expression)
 			if rule.Expression != expression {
 				return nil, fmt.Errorf(

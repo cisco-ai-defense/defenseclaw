@@ -640,7 +640,7 @@ func (a *APIServer) scanClaudeCodeEventFile(ctx context.Context, req claudeCodeH
 	}
 	findings := make([]string, 0, len(result.Findings))
 	for _, f := range result.Findings {
-		findings = append(findings, f.ID)
+		findings = append(findings, firstNonEmpty(f.RuleID, f.ID))
 		if len(findings) >= 20 {
 			break
 		}
@@ -683,7 +683,7 @@ func (a *APIServer) scanClaudeCodeChangedFiles(ctx context.Context, req claudeCo
 			maxSeverity = result.MaxSeverity()
 		}
 		for _, f := range result.Findings {
-			findings = append(findings, f.ID)
+			findings = append(findings, firstNonEmpty(f.RuleID, f.ID))
 			if len(findings) >= 20 {
 				break
 			}

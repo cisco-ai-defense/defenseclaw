@@ -8,6 +8,8 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -113,7 +115,10 @@ func TestLogScanRedactsAllSecretValueFieldsAndClassifiers(t *testing.T) {
 			sourceID = tc.ruleID + "-source"
 		}
 		finding := scanner.Finding{
-			ID: sourceID, RuleID: tc.ruleID, Category: tc.category,
+			// ID is producer-controlled compatibility data and may itself carry
+			// the matched value. The persistence boundary must clear it while
+			// preserving the separately minted occurrence ID.
+			ID: sourceID + ":" + tc.secret, RuleID: tc.ruleID, Category: tc.category,
 			Title: "Source title containing " + tc.secret, Severity: scanner.SeverityHigh,
 			Tags: append(append([]string(nil), tc.tags...), tc.secret), Scanner: "hook-rules",
 			ContentFingerprint: tc.secret,
@@ -148,6 +153,14 @@ func TestLogScanRedactsAllSecretValueFieldsAndClassifiers(t *testing.T) {
 	}
 	if err := logger.LogScanWithCorrelation(t.Context(), result, "alert", corr); err != nil {
 		t.Fatalf("log classified secret findings: %v", err)
+	}
+	for index := range result.Findings {
+		if result.Findings[index].ID != "" {
+			t.Fatalf("secret finding %d retained producer ID %q", index, result.Findings[index].ID)
+		}
+		if result.Findings[index].FindingOccurrenceID == "" {
+			t.Fatalf("secret finding %d lost canonical occurrence ID", index)
+		}
 	}
 
 	rows, err := logger.store.db.Query(`
@@ -335,7 +348,34 @@ func valueAsText(value any) string {
 			parts = append(parts, valueAsText(item))
 		}
 		return strings.Join(parts, " ")
-	default:
+	case map[string]any:
+		keys := make([]string, 0, len(typed))
+		for key := range typed {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		parts := make([]string, 0, len(keys)*2)
+		for _, key := range keys {
+			parts = append(parts, key, valueAsText(typed[key]))
+		}
+		return strings.Join(parts, " ")
+	case nil:
 		return ""
+	default:
+		return fmt.Sprintf("%v", typed)
+	}
+}
+
+func TestValueAsTextRecursesIntoNestedCanonicalValues(t *testing.T) {
+	raw := map[string]any{
+		"outer": map[string]any{
+			"nested": []any{"sensitive-marker", 42, true},
+		},
+	}
+	got := valueAsText(raw)
+	for _, want := range []string{"outer", "nested", "sensitive-marker", "42", "true"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("valueAsText(%#v) = %q, missing %q", raw, got, want)
+		}
 	}
 }

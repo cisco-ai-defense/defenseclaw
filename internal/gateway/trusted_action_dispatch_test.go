@@ -140,6 +140,83 @@ func TestTrustedActionSemanticIsolationAndPreview(t *testing.T) {
 	}
 }
 
+func TestTrustedActionCMDQuotedBenignDoesNotEmitBashParserUncertainty(t *testing.T) {
+	const connector = "trusted-action-cmd-quoted-benign"
+	installDefaultProfileConnector(t, connector)
+	command := `echo "rmdir /s /q C:\"`
+	input := actionfacts.Input{
+		Tool:        "shell",
+		Command:     command,
+		DialectHint: actionfacts.DialectCMD,
+	}
+	if facts := actionfacts.Analyze(input); !facts.Authoritative() {
+		t.Fatalf("valid quoted CMD command was not authoritative: %+v", facts)
+	}
+	findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+		Input:              input,
+		LegacyText:         command,
+		Connector:          connector,
+		EnforcementCapable: true,
+	})
+	if finding := findingWithID(findings, trustedParserUncertaintyRuleID); finding != nil {
+		t.Fatalf("valid quoted CMD argument produced parser uncertainty: %+v", *finding)
+	}
+	if len(findings) != 0 {
+		t.Fatalf("valid quoted CMD argument produced findings: %v", FindingStrings(findings))
+	}
+
+	malformed := actionfacts.Input{
+		Tool:        "shell",
+		Command:     `echo "unterminated`,
+		DialectHint: actionfacts.DialectCMD,
+	}
+	if facts := actionfacts.Analyze(malformed); facts.Authoritative() {
+		t.Fatalf("malformed CMD command unexpectedly authoritative: %+v", facts)
+	}
+	findings = dispatchTrustedAction(t.Context(), trustedActionRequest{
+		Input:              malformed,
+		LegacyText:         malformed.Command,
+		Connector:          connector,
+		EnforcementCapable: true,
+	})
+	if finding := findingWithID(findings, trustedParserUncertaintyRuleID); finding == nil ||
+		finding.contributesToEnforcement() {
+		t.Fatalf("malformed CMD command must retain detection-only uncertainty: %v", FindingStrings(findings))
+	}
+}
+
+func TestTrustedActionHelpersTolerateMissingArgumentFacts(t *testing.T) {
+	const connector = "trusted-action-missing-arguments"
+	installDefaultProfileConnector(t, connector)
+	facts := actionfacts.Facts{
+		Parse: actionfacts.ParseResult{
+			Status:  actionfacts.StatusComplete,
+			Dialect: actionfacts.DialectPOSIX,
+		},
+		Commands: []actionfacts.CommandFact{
+			{ID: 1, Program: "eval", Effect: actionfacts.EffectExecute},
+			{ID: 2, Program: "cat", Effect: actionfacts.EffectExecute},
+		},
+	}
+	input := actionfacts.Input{Tool: "shell", Command: "eval; cat"}
+
+	if actions := trustedNestedExecutionActions(input, facts); len(actions) != 0 {
+		t.Fatalf("missing operands produced nested actions: %+v", actions)
+	}
+	paths, mutations := trustedLegacyPathRuleMatches(
+		snapshotRulePackGeneration(connector),
+		input,
+		input.Tool,
+		facts,
+	)
+	if len(paths) != 0 || len(mutations) != 0 {
+		t.Fatalf("missing operands produced path matches: paths=%v mutations=%v", paths, mutations)
+	}
+	if commandHasUnresolvedExpansion(facts.Commands[0]) {
+		t.Fatal("missing operands were treated as an unresolved expansion")
+	}
+}
+
 func TestPowerShellDownloadExecSafeNegativeIsActionWide(t *testing.T) {
 	facts := actionfacts.Facts{
 		Parse: actionfacts.ParseResult{
@@ -703,7 +780,7 @@ func TestTrustedActionReadOnlyInspectionDataBoundaryCrossPlatform(t *testing.T) 
 			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 				Input: actionfacts.Input{
 					Tool: test.tool, Command: test.command, Args: test.args,
-					CWD: `C:\\repo`,
+					CWD: `C:\repo`,
 				},
 				LegacyText: firstNonEmpty(test.command, string(test.args)), Connector: connector,
 				EnforcementCapable: true, DowngradeReadOnlyDataArgs: true,
@@ -716,7 +793,7 @@ func TestTrustedActionReadOnlyInspectionDataBoundaryCrossPlatform(t *testing.T) 
 					matched,
 					actionfacts.Analyze(actionfacts.Input{
 						Tool: test.tool, Command: test.command, Args: test.args,
-						CWD: `C:\\repo`,
+						CWD: `C:\repo`,
 					}),
 				)
 			}

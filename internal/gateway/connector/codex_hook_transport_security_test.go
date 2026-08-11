@@ -47,7 +47,7 @@ set -eu
 : > "${CODEX_CURL_ARGV_CAPTURE}"
 : > "${CODEX_CURL_HEADER_CAPTURE}"
 : > "${CODEX_CURL_BODY_CAPTURE}"
-printf '%s\n%s\n%s\n' "${DEFENSECLAW_GATEWAY_TOKEN-}" "${API_TOKEN-}" "${PAYLOAD-}" > "${CODEX_CURL_ENV_CAPTURE}"
+/usr/bin/env > "${CODEX_CURL_ENV_CAPTURE}"
 want=""
 for arg in "$@"; do
   printf '%s\n' "$arg" >> "${CODEX_CURL_ARGV_CAPTURE}"
@@ -66,10 +66,15 @@ for arg in "$@"; do
       esac
       want=""
       ;;
+    config)
+      cat "$arg" >> "${CODEX_CURL_HEADER_CAPTURE}"
+      want=""
+      ;;
   esac
   case "$arg" in
     -H|--header) want="header" ;;
     -d|--data|--data-binary) want="body" ;;
+    -K|--config) want="config" ;;
   esac
 done
 printf '%s\n%s\n' '{"action":"allow","codex_output":{"decision":"allow"}}' '200'
@@ -124,6 +129,75 @@ printf '%s\n%s\n' '{"action":"allow","codex_output":{"decision":"allow"}}' '200'
 	}
 	if !strings.Contains(stdout.String(), `"decision":"allow"`) || strings.TrimSpace(stderr.String()) != "" {
 		t.Fatalf("hook protocol changed: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
+func TestCodexHookEscapesCurlConfigTokenMetacharacters(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell hooks are not used on Windows")
+	}
+
+	const scopedToken = "codex-scoped\\token-\"quoted"
+	hooksDir := t.TempDir()
+	if err := WriteHookScriptsForConnectorObject(
+		hooksDir,
+		"127.0.0.1:18970",
+		scopedToken,
+		NewCodexConnector(),
+	); err != nil {
+		t.Fatalf("write Codex hook: %v", err)
+	}
+
+	capture := runHookAndCaptureCurlTransport(t, filepath.Join(hooksDir, "codex-hook.sh"), nil)
+	if strings.Contains(capture.argv, scopedToken) {
+		t.Fatalf("curl argv exposed the scoped token:\n%s", capture.argv)
+	}
+	const wantConfigLine = `header = "Authorization: Bearer codex-scoped\\token-\"quoted"`
+	if !strings.Contains(capture.headers, wantConfigLine+"\n") {
+		t.Fatalf("transported curl config = %q, want escaped line %q", capture.headers, wantConfigLine)
+	}
+}
+
+func TestCodexHookRejectsTokenLineBreakBeforeCurl(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell hooks are not used on Windows")
+	}
+
+	hooksDir := t.TempDir()
+	if err := WriteHookScriptsForConnectorObject(
+		hooksDir,
+		"127.0.0.1:18970",
+		"initial-scoped-token",
+		NewCodexConnector(),
+	); err != nil {
+		t.Fatalf("write Codex hook: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(hooksDir, ".hook-codex.token"), []byte("invalid\rtoken\n"), 0o600); err != nil {
+		t.Fatalf("replace scoped token: %v", err)
+	}
+
+	stubDir := t.TempDir()
+	invokedPath := filepath.Join(stubDir, "curl-invoked")
+	stubPath := filepath.Join(stubDir, "curl")
+	stub := "#!/bin/sh\n: > \"${CODEX_CURL_INVOKED}\"\nexit 99\n"
+	if err := os.WriteFile(stubPath, []byte(stub), 0o755); err != nil {
+		t.Fatalf("write curl stub: %v", err)
+	}
+
+	hookPath := filepath.Join(hooksDir, "codex-hook.sh")
+	bakeHookPathForTest(t, hookPath, stubDir+":/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin")
+	cmd := exec.Command("bash", hookPath)
+	cmd.Env = append(os.Environ(),
+		"DEFENSECLAW_HOME="+t.TempDir(),
+		"CODEX_CURL_INVOKED="+invokedPath,
+	)
+	cmd.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse","tool_name":"Read"}`)
+	output, _ := cmd.CombinedOutput()
+	if strings.Contains(string(output), "invalid\rtoken") {
+		t.Fatalf("invalid token leaked into hook output: %q", output)
+	}
+	if _, err := os.Stat(invokedPath); !os.IsNotExist(err) {
+		t.Fatalf("invalid token invoked curl: %v", err)
 	}
 }
 

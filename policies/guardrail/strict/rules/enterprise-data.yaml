@@ -100,14 +100,14 @@ rules:
     tags: [pii, regulated]
 
   - id: ENT-BULK-CSV-PII
-    pattern: '(?im)(?:^|\n)[^\r\n]*(?:first[\s_]?name|last[\s_]?name|ssn|social[\s_]?security|credit[\s_]?card|card[\s_]?number|account[\s_]?number)[^\r\n]*,[^\r\n]*(?:first[\s_]?name|last[\s_]?name|ssn|social[\s_]?security|credit[\s_]?card|card[\s_]?number|account[\s_]?number)[^\r\n]*\r?\n[^\r\n]*[0-9][^\r\n]*'
+    pattern: '(?im)(?:^|\n)[^\r\n]*(?:first[\s_]?name|last[\s_]?name|ssn|social[\s_]?security|credit[\s_]?card|card[\s_]?number|account[\s_]?number)[^\r\n]*[,\t][^\r\n]*(?:first[\s_]?name|last[\s_]?name|ssn|social[\s_]?security|credit[\s_]?card|card[\s_]?number|account[\s_]?number)[^\r\n]*\r?\n[^\r\n]*[0-9][^\r\n]*'
     title: "CSV/TSV records with multiple PII columns"
     severity: HIGH
     confidence: 0.80
     tags: [pii, bulk-data]
 
   - id: ENT-BULK-JSON-PII
-    pattern: '(?i)"(?:ssn|social_security|credit_card|card_number|account_number|routing_number)"\s*:\s*"(?:\d[\s-]?){6,19}"[\s\S]{0,512}"(?:ssn|social_security|credit_card|card_number|account_number|routing_number)"\s*:\s*"(?:\d[\s-]?){6,19}"'
+    pattern: '(?i)"(?:ssn|social_security|credit_card|card_number|account_number|routing_number)"\s*:\s*(?:"(?:\d[\s-]?){6,19}"|\d{6,19}\b)[\s\S]{0,512}"(?:ssn|social_security|credit_card|card_number|account_number|routing_number)"\s*:\s*(?:"(?:\d[\s-]?){6,19}"|\d{6,19}\b)'
     title: "JSON record with multiple PII values"
     severity: HIGH
     confidence: 0.75

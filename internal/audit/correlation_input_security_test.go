@@ -5,11 +5,68 @@ package audit
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 )
+
+func TestListRecentFindingsInSessionRejectsMalformedTags(t *testing.T) {
+	logger := newTestLogger(t)
+	at := time.Date(2026, 8, 10, 11, 55, 0, 0, time.UTC)
+	if err := logger.store.InsertScanSummary(scanner.ScanSummaryParams{
+		ScanID: "scan-malformed-tags", Scanner: "hook-rules", Target: "codex:PostToolUse",
+		Timestamp: at, FindingCount: 1, MaxSeverity: "HIGH",
+		SessionID: "malformed-session", AgentInstanceID: "malformed-agent",
+	}); err != nil {
+		t.Fatalf("insert malformed-tags summary: %v", err)
+	}
+	if err := logger.store.InsertScanFindings(
+		"scan-malformed-tags",
+		"codex:PostToolUse",
+		[]scanner.Finding{{
+			FindingOccurrenceID: "malformed-finding", Scanner: "hook-rules",
+			RuleID: "TRUST-MALFORMED", Category: "trust-exploit",
+			Severity: scanner.SeverityHigh, Title: "Trust finding",
+			Tags: []string{"prompt-injection"},
+		}},
+		scanner.ScanFindingMeta{
+			Timestamp: at, SessionID: "malformed-session", AgentInstanceID: "malformed-agent",
+		},
+	); err != nil {
+		t.Fatalf("insert malformed-tags finding: %v", err)
+	}
+	if _, err := logger.store.db.Exec(
+		`UPDATE scan_findings SET tags = ? WHERE id = ?`, "{", "malformed-finding",
+	); err != nil {
+		t.Fatalf("corrupt persisted tags fixture: %v", err)
+	}
+
+	rows, err := logger.store.ListRecentFindingsInSession(
+		"malformed-session", "malformed-agent", "", 10,
+	)
+	if err == nil {
+		t.Fatalf("malformed correlation tags returned rows: %#v", rows)
+	}
+	if !strings.Contains(err.Error(), "decode correlation finding tags for malformed-finding") {
+		t.Fatalf("malformed correlation tags error=%q, want occurrence context", err)
+	}
+}
+
+func TestStoreInitCreatesCorrelationWindowIndex(t *testing.T) {
+	logger := newTestLogger(t)
+	var ddl string
+	if err := logger.store.db.QueryRow(`
+SELECT sql FROM sqlite_master
+WHERE type = 'index' AND name = 'idx_scan_findings_correlation_window'`).Scan(&ddl); err != nil {
+		t.Fatalf("load correlation window index: %v", err)
+	}
+	want := "ON scan_findings(session_id, agent_instance_id, agent_id, timestamp DESC, id DESC)"
+	if !strings.Contains(ddl, want) {
+		t.Fatalf("correlation window index=%q, want coverage %q", ddl, want)
+	}
+}
 
 func TestListRecentFindingsInSessionFiltersAmplificationBeforeLimit(t *testing.T) {
 	logger := newTestLogger(t)

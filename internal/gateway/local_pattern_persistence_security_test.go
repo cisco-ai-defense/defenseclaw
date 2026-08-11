@@ -22,6 +22,7 @@ func TestLocalPatternSensitiveRawShapesNormalizeWithoutIdentityLeak(t *testing.T
 	assignment := strings.Join([]string{"api", "key"}, "_") + " = " + secretValue
 	directive := strings.Join([]string{"developer", "mode", "enabled"}, " ")
 	prefixDirective := "TRUST-CUSTOM:" + directive
+	localPrefixDirective := "LP-INJ-CUSTOM:" + directive
 	personalValue := strings.Join([]string{"4773", "9182", "6405", "7399"}, ".")
 	personalRecord := "payment card: " + personalValue
 	withLocalPatternsRestored(t)
@@ -45,6 +46,7 @@ func TestLocalPatternSensitiveRawShapesNormalizeWithoutIdentityLeak(t *testing.T
 		{name: "assignment", raw: assignment, category: CatCredentialLeak, idPrefix: "LP-SECRET-", sensitive: secretValue, stableTitle: localCredentialFindingTitle},
 		{name: "injection phrase", raw: directive, category: CatPromptInjection, idPrefix: "LP-INJ-", sensitive: directive, stableTitle: localInjectionFindingTitle},
 		{name: "canonical-prefix injection", raw: prefixDirective, category: CatPromptInjection, idPrefix: "LP-INJ-", sensitive: directive, stableTitle: localInjectionFindingTitle},
+		{name: "local-prefix injection", raw: localPrefixDirective, category: CatPromptInjection, idPrefix: "LP-INJ-", sensitive: directive, stableTitle: localInjectionFindingTitle},
 		{name: "PII value", raw: "pii-data:" + personalRecord, category: CatPIIExposure, idPrefix: "LP-PII-", sensitive: personalValue, stableTitle: localPIIFindingTitle},
 	}
 	for _, tc := range tests {

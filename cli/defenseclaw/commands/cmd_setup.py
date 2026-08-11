@@ -159,8 +159,10 @@ _TOKEN_ROTATION_CHILD_ENV_ALLOWLIST = (
     "CODEX_HOME",
     "CLAUDE_CONFIG_DIR",
     # Connector setup may require an operator-approved user-owned runtime
-    # prefix. Preserve that explicit trust decision across the A/B lifecycle;
-    # every executable still passes connector-specific ownership and mode checks.
+    # prefix. Preserve that explicit trust decision across the A/B lifecycle.
+    # On POSIX, current-user-owned 0700 prefixes/executables are trusted (a
+    # same-user attacker is outside this boundary); unsafe modes are rejected.
+    # Windows paths must pass the equivalent ACL write-access checks.
     "DEFENSECLAW_TRUSTED_BIN_PREFIXES",
 )
 _NATIVE_SPLUNK_CONFIG_SNAPSHOT_ATTR = "_native_splunk_config_snapshot"

@@ -32,6 +32,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from defenseclaw.alert_semantics import (
+    ALERT_ACTIONABLE_SEVERITIES,
+    ALERT_ALL_SEVERITIES,
+    ALERT_LEGACY_FINDING_ACTIONS,
+    ALERT_NON_ALLOW_OUTCOMES,
+)
 from defenseclaw.hook_metrics import (
     aggregate_connector_hook_decision,
     connector_hook_connector,
@@ -233,37 +239,6 @@ _VALID_FIELDS: dict[str, set[str]] = {
     "runtime": {"", "disable", "enable"},
 }
 _SUMMARY_DETAILS_BYTES = 4096
-_ALERT_ALL_SEVERITIES = ("CRITICAL", "HIGH", "MEDIUM", "LOW", "ERROR")
-_ALERT_ACTIONABLE_SEVERITIES = ("CRITICAL", "HIGH", "ERROR")
-_ALERT_NON_ALLOW_OUTCOMES = (
-    "alert",
-    "ask",
-    "block",
-    "blocked",
-    "confirm",
-    "deny",
-    "denied",
-    "fail",
-    "failed",
-    "failure",
-    "quarantine",
-    "quarantined",
-    "reject",
-    "rejected",
-    "revoked",
-    "terminated",
-    "timed_out",
-)
-_LEGACY_FINDING_ACTIONS = (
-    "alert",
-    "connector-hook-tampered",
-    "gateway-multi-turn-injection",
-    "gateway-session-prompt-alert",
-    "gateway-tool-call-flagged",
-    "gateway-tool-call-judge-flagged",
-    "scan-finding",
-    "tool-result-pii-alert",
-)
 
 
 def _validate(field: str, value: str) -> None:
@@ -826,7 +801,7 @@ class Store:
         return f"CASE WHEN json_valid(COALESCE({column}, '')) THEN json_extract({column}, '{path}') END"
 
     def _legacy_explicit_alert_clause(self, columns: frozenset[str]) -> str:
-        outcome_values = self._sql_string_values(_ALERT_NON_ALLOW_OUTCOMES)
+        outcome_values = self._sql_string_values(ALERT_NON_ALLOW_OUTCOMES)
         structured = "structured_json" if "structured_json" in columns else "NULL"
         enforced = "enforced" if "enforced" in columns else "NULL"
         details = "COALESCE(details, '')" if "details" in columns else "''"
@@ -865,7 +840,7 @@ class Store:
         columns, _tables = self._audit_projection_schema()
         legacy_explicit = self._legacy_explicit_alert_clause(columns)
         if {"bucket", "event_name"}.issubset(columns):
-            outcomes = self._sql_string_values(_ALERT_NON_ALLOW_OUTCOMES)
+            outcomes = self._sql_string_values(ALERT_NON_ALLOW_OUTCOMES)
             canonical_outcome = self._canonical_alert_outcome_expression(columns)
             return f"""CASE
                 WHEN UPPER(COALESCE(severity, 'INFO')) <> 'INFO' THEN severity
@@ -892,13 +867,13 @@ class Store:
         """
 
         columns, tables = self._audit_projection_schema()
-        severities = _ALERT_ACTIONABLE_SEVERITIES if actionable else _ALERT_ALL_SEVERITIES
+        severities = ALERT_ACTIONABLE_SEVERITIES if actionable else ALERT_ALL_SEVERITIES
         severity_values = self._sql_string_values(severities)
-        outcome_values = self._sql_string_values(_ALERT_NON_ALLOW_OUTCOMES)
+        outcome_values = self._sql_string_values(ALERT_NON_ALLOW_OUTCOMES)
         severity_clause = f"UPPER(COALESCE(severity, '')) IN ({severity_values})"
 
         legacy_explicit = self._legacy_explicit_alert_clause(columns)
-        legacy_actions = self._sql_string_values(_LEGACY_FINDING_ACTIONS)
+        legacy_actions = self._sql_string_values(ALERT_LEGACY_FINDING_ACTIONS)
         legacy_finding = f"""(
             {severity_clause}
             AND LOWER(COALESCE(action, '')) IN ({legacy_actions})
@@ -912,9 +887,19 @@ class Store:
             )"""
 
             canonical_outcome = self._canonical_alert_outcome_expression(columns)
+            canonical_priority = "1 = 1"
+            if actionable:
+                canonical_priority = f"""(
+                    {severity_clause}
+                    OR (
+                        bucket = 'enforcement.action'
+                        AND UPPER(COALESCE(severity, 'INFO')) = 'INFO'
+                    )
+                )"""
             canonical_action = f"""(
                 bucket IN ('enforcement.action', 'network.egress')
                 AND {canonical_outcome} IN ({outcome_values})
+                AND {canonical_priority}
             )"""
             health_failure = """(
                 bucket IN ('platform.health', 'diagnostic')

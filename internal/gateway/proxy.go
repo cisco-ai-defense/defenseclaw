@@ -357,6 +357,11 @@ func NewGuardrailProxy(
 	judge := NewLLMJudge(&cfg.Judge, judgeLLM, dotenvPath, rp, providers)
 
 	inspector := NewGuardrailInspector(cfg.ScannerMode, cisco, judge, policyDir)
+	connectorName := ""
+	if conn != nil {
+		connectorName = conn.Name()
+	}
+	inspector.SetFallbackProfile(guardrailProfileForConnector(cfg, connectorName))
 	inspector.SetDetectionStrategy(
 		cfg.DetectionStrategy,
 		cfg.DetectionStrategyPrompt,
@@ -473,7 +478,20 @@ func (p *GuardrailProxy) ApplyGuardrailConfig(cfg *config.GuardrailConfig) {
 	if newName := strings.TrimSpace(cfg.Connector); newName != "" {
 		p.switchConnectorLocked(strings.ToLower(newName))
 	}
+	p.applyInspectorFallbackProfileLocked()
 	p.rtMu.Unlock()
+}
+
+func (p *GuardrailProxy) applyInspectorFallbackProfileLocked() {
+	setter, ok := p.inspector.(interface{ SetFallbackProfile(string) })
+	if !ok {
+		return
+	}
+	connectorName := ""
+	if p.connector != nil {
+		connectorName = p.connector.Name()
+	}
+	setter.SetFallbackProfile(guardrailProfileForConnector(p.cfg, connectorName))
 }
 
 // StartHookConfigGuard launches the connector hook self-heal guard bound to
@@ -3998,6 +4016,7 @@ func (p *GuardrailProxy) switchConnectorLocked(newName string) {
 	}
 
 	p.connector = newConn
+	p.applyInspectorFallbackProfileLocked()
 	if err := connector.SaveActiveConnector(p.setupOpts.DataDir, newName); err != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] save active connector state: %v\n", err)
 	}

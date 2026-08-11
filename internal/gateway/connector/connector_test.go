@@ -6814,13 +6814,19 @@ func TestConnectorScopedHookTokenOverridesGenericEnv(t *testing.T) {
 		t.Fatalf("WriteHookScriptsForConnectorObject: %v", err)
 	}
 
-	out := runHookAndReturnCurlArgs(t, filepath.Join(dir, "codex-hook.sh"),
+	capture := runHookAndCaptureCurlTransport(t, filepath.Join(dir, "codex-hook.sh"),
 		map[string]string{"DEFENSECLAW_GATEWAY_TOKEN": "generic-env"})
-	if strings.Contains(out, "scoped-token") {
-		t.Errorf("connector-scoped token leaked into curl argv:\n%s", out)
+	if strings.Contains(capture.argv, "scoped-token") {
+		t.Errorf("connector-scoped token leaked into curl argv:\n%s", capture.argv)
 	}
-	if strings.Contains(out, "generic-env") {
-		t.Errorf("hook leaked inherited generic env token into curl argv:\n%s", out)
+	if strings.Contains(capture.argv, "generic-env") {
+		t.Errorf("hook leaked inherited generic env token into curl argv:\n%s", capture.argv)
+	}
+	if !strings.Contains(capture.headers, "Authorization: Bearer scoped-token") {
+		t.Errorf("hook did not transport the connector-scoped token: %q", capture.headers)
+	}
+	if strings.Contains(capture.headers, "generic-env") {
+		t.Errorf("hook transported the inherited generic token: %q", capture.headers)
 	}
 }
 
@@ -6851,20 +6857,40 @@ func TestConnectorScopedHookReadFailureClearsGenericEnv(t *testing.T) {
 }
 
 // runHookAndReturnCurlArgs executes the given hook script with `curl`
-// replaced by a stub that writes its argv, one per line, to a file. The
-// hook script pipes curl's stderr to /dev/null, so stdout/stderr capture
-// would lose the evidence — the stub persists it out-of-band. This lets
-// us assert on the real argv curl would have seen, including the
-// runtime-computed Authorization header.
+// replaced by a stub that persists its argv out-of-band. The companion
+// transport helper also dereferences header and config descriptors so tests
+// can verify private header transport without putting credentials in argv.
 func runHookAndReturnCurlArgs(t *testing.T, scriptPath string, extraEnv map[string]string) string {
+	t.Helper()
+	return runHookAndCaptureCurlTransport(t, scriptPath, extraEnv).argv
+}
+
+type hookCurlTransportCapture struct {
+	argv    string
+	headers string
+}
+
+func runHookAndCaptureCurlTransport(t *testing.T, scriptPath string, extraEnv map[string]string) hookCurlTransportCapture {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell-hook runtime is covered by native defenseclaw-hook.exe tests on Windows")
 	}
 	stubDir := t.TempDir()
 	argFile := filepath.Join(stubDir, "curl-args.txt")
+	headerFile := filepath.Join(stubDir, "curl-headers.txt")
 	stub := filepath.Join(stubDir, "curl")
-	stubSrc := "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >> " + argFile + "; done\nprintf '{\"action\":\"allow\"}\\n200'\nexit 0\n"
+	stubSrc := "#!/bin/sh\n" +
+		"want=\n" +
+		"for a in \"$@\"; do\n" +
+		"  printf '%s\\n' \"$a\" >> " + shellSingleQuoteForTest(argFile) + "\n" +
+		"  case \"$want\" in\n" +
+		"    header) case \"$a\" in @*) cat \"${a#@}\" ;; *) printf '%s\\n' \"$a\" ;; esac >> " + shellSingleQuoteForTest(headerFile) + "; want= ;;\n" +
+		"    config) cat \"$a\" >> " + shellSingleQuoteForTest(headerFile) + "; want= ;;\n" +
+		"  esac\n" +
+		"  case \"$a\" in -H|--header) want=header ;; -K|--config) want=config ;; esac\n" +
+		"done\n" +
+		"printf '{\"action\":\"allow\"}\\n200'\n" +
+		"exit 0\n"
 	if err := os.WriteFile(stub, []byte(stubSrc), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -6897,7 +6923,11 @@ func runHookAndReturnCurlArgs(t *testing.T, scriptPath string, extraEnv map[stri
 	if err != nil {
 		t.Fatalf("curl stub never recorded args: %v", err)
 	}
-	return string(data)
+	headers, err := os.ReadFile(headerFile)
+	if err != nil {
+		t.Fatalf("curl stub never recorded headers: %v", err)
+	}
+	return hookCurlTransportCapture{argv: string(data), headers: string(headers)}
 }
 
 func bakeHookPathForTest(t *testing.T, scriptPath, hookPath string) {

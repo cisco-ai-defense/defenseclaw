@@ -6,6 +6,7 @@ package guardrail
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"strings"
 	"testing"
 
@@ -20,6 +21,24 @@ type staticSessionFindingReader struct {
 type partitionedSessionFindingReader struct {
 	rows             []SessionFindingRow
 	firedByPartition map[string][]string
+}
+
+type failingLedgerSessionFindingReader struct {
+	rows []SessionFindingRow
+}
+
+func (r failingLedgerSessionFindingReader) ListRecentFindingsInSession(
+	_, _, _ string,
+	_ int,
+) ([]SessionFindingRow, error) {
+	return append([]SessionFindingRow(nil), r.rows...), nil
+}
+
+func (failingLedgerSessionFindingReader) ListFiredCorrelationRuleIDsInSession(
+	_, _, _ string,
+	_ []string,
+) ([]string, error) {
+	return nil, errors.New("ledger unavailable")
 }
 
 func (r partitionedSessionFindingReader) ListRecentFindingsInSession(_, _, _ string, _ int) ([]SessionFindingRow, error) {
@@ -231,8 +250,8 @@ func TestSessionCorrelatorDoesNotCombineAgentsInSharedSessionInstance(t *testing
 	persisted := &recordingCorrelationPersistence{}
 	correlator := NewSessionCorrelator(staticSessionFindingReader{rows: rows}, []CorrelationPattern{pattern})
 	if err := correlator.RunForSession(
-		context.Background(), "shared-session", "shared-instance", persisted, "codex:PostToolUse",
-		scanner.ScanFindingMeta{AgentID: "agent-a"},
+		context.Background(), " shared-session ", " shared-instance ", persisted, "codex:PostToolUse",
+		scanner.ScanFindingMeta{AgentID: " agent-a "},
 	); err != nil {
 		t.Fatalf("RunForSession: %v", err)
 	}
@@ -273,8 +292,36 @@ func TestSessionCorrelatorCorrelatesOrderedPrimitivesForOneAgent(t *testing.T) {
 		t.Fatalf("one-agent ordered primitives did not correlate: %#v", persisted.findings)
 	}
 	if len(persisted.summaries) != 1 || persisted.summaries[0].AgentID != "agent-a" ||
-		persisted.summaries[0].AgentInstanceID != "shared-instance" {
+		persisted.summaries[0].AgentInstanceID != "shared-instance" ||
+		persisted.summaries[0].SessionID != "shared-session" {
 		t.Fatalf("synthetic summary lost agent partition: %#v", persisted.summaries)
+	}
+}
+
+func TestSessionCorrelatorPropagatesPersistedLedgerFailure(t *testing.T) {
+	pattern := CorrelationPattern{
+		ID: "PAIR", WindowEvents: 10, SeverityOnMatch: "CRITICAL",
+		Sequence: []SequenceClause{{Severity: "MEDIUM"}, {Severity: "HIGH"}},
+	}
+	rows := []SessionFindingRow{
+		correlationTestRow("high", "TRUST-HIGH", "trust-exploit", "HIGH", "highfp", "hook-rules", nil),
+		correlationTestRow("medium", "TRUST-MEDIUM", "trust-exploit", "MEDIUM", "mediumfp", "hook-rules", nil),
+	}
+	persisted := &recordingCorrelationPersistence{}
+	correlator := NewSessionCorrelator(
+		failingLedgerSessionFindingReader{rows: rows},
+		[]CorrelationPattern{pattern},
+	)
+
+	err := correlator.RunForSession(
+		context.Background(), "session", "agent", persisted, "codex:PostToolUse",
+		scanner.ScanFindingMeta{},
+	)
+	if err == nil || !strings.Contains(err.Error(), "read persisted firing ledger") {
+		t.Fatalf("RunForSession error = %v, want persisted-ledger failure", err)
+	}
+	if len(persisted.summaries) != 0 || len(persisted.findings) != 0 {
+		t.Fatalf("ledger failure emitted correlation: summaries=%#v findings=%#v", persisted.summaries, persisted.findings)
 	}
 }
 

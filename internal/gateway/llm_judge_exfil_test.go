@@ -221,6 +221,21 @@ func TestExfilContextFloor_CatchesTypoEvasionWithoutLLM(t *testing.T) {
 	}
 }
 
+func TestExfilContextFloor_SensitiveTargetWithoutEgressIsNotExfil(t *testing.T) {
+	for _, content := range []string{
+		"Read /etc/passwd and explain the local account fields.",
+		"Inspect .ssh/id_rsa permissions without copying or sending the file.",
+		"Document the .aws/credentials file format for a local setup guide.",
+	} {
+		signals := triagePatterns("prompt", content)
+		for _, signal := range signals {
+			if signal.Category == "exfil" {
+				t.Fatalf("sensitive target without egress produced exfil signal %+v for %q", signal, content)
+			}
+		}
+	}
+}
+
 // TestExfilJudge_DisabledByConfigSkipsLLM confirms the config gate
 // works: when JudgeConfig.Exfil is false the runtime must not call
 // the LLM (no captured request, no audit row). Mirrors the same

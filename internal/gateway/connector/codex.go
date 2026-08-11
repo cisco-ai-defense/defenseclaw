@@ -1647,7 +1647,7 @@ func writeCodexNotifyBridge(opts SetupOpts) error {
 		"set -u\n" +
 		// Unset first so an inherited exported variable cannot retain its export
 		// attribute when the bridge assigns the private payload below.
-		"unset JSON API_TOKEN DEFENSECLAW_GATEWAY_TOKEN\n" +
+		"unset JSON API_TOKEN CURL_CONFIG_TOKEN DEFENSECLAW_GATEWAY_TOKEN\n" +
 		"JSON=\"${1:-}\"\n" +
 		"if [ -z \"${JSON}\" ]; then\n" +
 		"  exit 0\n" +
@@ -1660,6 +1660,7 @@ func writeCodexNotifyBridge(opts SetupOpts) error {
 		"if [ -z \"${API_TOKEN}\" ]; then\n" +
 		"  exit 0\n" +
 		"fi\n" +
+		"case \"${API_TOKEN}\" in *$'\\n'*|*$'\\r'*) exit 0 ;; esac\n" +
 		"TRACE_HEADERS=()\n" +
 		"TP=\"${DEFENSECLAW_TRACEPARENT:-${TRACEPARENT:-}}\"\n" +
 		"TS=\"${DEFENSECLAW_TRACESTATE:-${TRACESTATE:-}}\"\n" +
@@ -1667,19 +1668,26 @@ func writeCodexNotifyBridge(opts SetupOpts) error {
 		"case \"${TS}\" in *$'\\n'*|*$'\\r'*) TS=\"\" ;; esac\n" +
 		"if [ -n \"${TP}\" ]; then TRACE_HEADERS+=(--header \"traceparent: ${TP}\"); fi\n" +
 		"if [ -n \"${TS}\" ]; then TRACE_HEADERS+=(--header \"tracestate: ${TS}\"); fi\n" +
-		"exec 8< <(printf '%s\\n' \"Authorization: Bearer ${API_TOKEN}\")\n" +
+		// curl supported descriptor-backed config files before it added
+		// --header @file in 7.55.0. Keep compatibility without exposing the
+		// connector credential in argv or the child environment. Escape quoted
+		// config metacharacters after rejecting invalid HTTP field line breaks.
+		`CURL_CONFIG_TOKEN="${API_TOKEN//\\/\\\\}"` + "\n" +
+		`CURL_CONFIG_TOKEN="${CURL_CONFIG_TOKEN//\"/\\\"}"` + "\n" +
+		"exec 8< <(printf '%s\\n' \"header = \\\"Authorization: Bearer ${CURL_CONFIG_TOKEN}\\\"\")\n" +
 		"exec 9< <(printf '%s' \"${JSON}\")\n" +
 		// Clear every private shell value before curl is spawned. The descriptor
 		// producers retain only their fork-local copies long enough to write them.
 		"API_TOKEN=\n" +
 		"JSON=\n" +
-		"unset API_TOKEN JSON DEFENSECLAW_GATEWAY_TOKEN\n" +
+		"CURL_CONFIG_TOKEN=\n" +
+		"unset API_TOKEN JSON CURL_CONFIG_TOKEN DEFENSECLAW_GATEWAY_TOKEN\n" +
 		"curl --silent --show-error --max-time 5 \\\n" +
 		"  --header 'Content-Type: application/json' \\\n" +
 		// Authorization: Bearer is the canonical credential the gateway's
 		// tokenAuth middleware checks first. curl reads it from an inherited
 		// descriptor rather than receiving the credential as an argv value.
-		"  --header '@/dev/fd/8' \\\n" +
+		"  --config '/dev/fd/8' \\\n" +
 		// X-DefenseClaw-Client is required by the gateway's CSRF gate;
 		// without it apiCSRFProtect 403s the POST. inspect-tool-response
 		// and the python CLI set the same header; the value is purely

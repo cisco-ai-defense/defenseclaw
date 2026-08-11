@@ -101,6 +101,60 @@ func TestOpenCodeSetup_WritesBridgePlugin(t *testing.T) {
 	}
 }
 
+func TestOpenCodeOwnedHookContractRequiresExactRegularFileMarker(t *testing.T) {
+	dir := t.TempDir()
+	pluginPath := filepath.Join(dir, ".config", "opencode", "plugins", "defenseclaw.js")
+	prev := OpenCodePluginPathOverride
+	OpenCodePluginPathOverride = pluginPath
+	t.Cleanup(func() { OpenCodePluginPathOverride = prev })
+
+	conn := NewOpenCodeConnector()
+	opts := SetupOpts{
+		DataDir:  filepath.Join(dir, "dc"),
+		APIAddr:  "127.0.0.1:18970",
+		APIToken: "tok-opencode-marker-test",
+	}
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	rendered, err := os.ReadFile(pluginPath)
+	if err != nil {
+		t.Fatalf("read rendered plugin: %v", err)
+	}
+
+	foreignFirstLine := append([]byte("// operator-owned plugin\n"), rendered...)
+	if err := os.WriteFile(pluginPath, foreignFirstLine, 0o600); err != nil {
+		t.Fatalf("write marker lookalike: %v", err)
+	}
+	if present, err := conn.ownedHookContractPresent(opts); err != nil || present {
+		t.Fatalf("marker below first line present=%v err=%v, want false/nil", present, err)
+	}
+
+	if err := os.Remove(pluginPath); err != nil {
+		t.Fatalf("remove plugin: %v", err)
+	}
+	if err := os.Mkdir(pluginPath, 0o700); err != nil {
+		t.Fatalf("replace plugin with directory: %v", err)
+	}
+	if present, err := conn.ownedHookContractPresent(opts); err == nil || present {
+		t.Fatalf("directory present=%v err=%v, want false/error", present, err)
+	}
+	if err := os.Remove(pluginPath); err != nil {
+		t.Fatalf("remove plugin directory: %v", err)
+	}
+
+	target := filepath.Join(dir, "operator-plugin.js")
+	if err := os.WriteFile(target, rendered, 0o600); err != nil {
+		t.Fatalf("write symlink target: %v", err)
+	}
+	if err := os.Symlink(target, pluginPath); err != nil {
+		t.Skipf("symlink creation is unavailable: %v", err)
+	}
+	if present, err := conn.ownedHookContractPresent(opts); err == nil || present {
+		t.Fatalf("symlink present=%v err=%v, want false/error", present, err)
+	}
+}
+
 // TestOpenCodeSetup_FailModeDefaultsClosed asserts an unset HookFailMode
 // renders the bridge in fail-closed mode, matching defaultHookFailMode
 // (deny by default; see normalizeHookFailMode).

@@ -86,7 +86,32 @@ func allowVerdict(scanner string) *ScanVerdict {
 }
 
 func guardrailFallbackActionForSeverity(severity string) string {
-	switch strings.ToUpper(strings.TrimSpace(severity)) {
+	return guardrailFallbackActionForProfile(severity, "default")
+}
+
+func guardrailFallbackActionForProfile(severity, profile string) string {
+	severity = strings.ToUpper(strings.TrimSpace(severity))
+	switch strings.ToLower(strings.TrimSpace(profile)) {
+	case "strict":
+		switch severity {
+		case "CRITICAL", "HIGH", "MEDIUM":
+			return "block"
+		case "LOW":
+			return "alert"
+		default:
+			return "allow"
+		}
+	case "permissive":
+		switch severity {
+		case "CRITICAL":
+			return "block"
+		case "HIGH":
+			return "alert"
+		default:
+			return "allow"
+		}
+	}
+	switch severity {
 	case "CRITICAL":
 		return "block"
 	case "MEDIUM", "HIGH":
@@ -97,11 +122,15 @@ func guardrailFallbackActionForSeverity(severity string) string {
 }
 
 func fallbackGuardrailVerdict(v *ScanVerdict) *ScanVerdict {
+	return fallbackGuardrailVerdictForProfile(v, "default")
+}
+
+func fallbackGuardrailVerdictForProfile(v *ScanVerdict, profile string) *ScanVerdict {
 	if v == nil {
 		return allowVerdict("fallback")
 	}
 	out := *v
-	out.Action = guardrailFallbackActionForSeverity(out.Severity)
+	out.Action = guardrailFallbackActionForProfile(out.Severity, profile)
 	return &out
 }
 
@@ -166,6 +195,7 @@ type GuardrailInspector struct {
 	managedMode       bool
 	judge             *LLMJudge
 	policyDir         string
+	fallbackProfile   atomic.Value // string; default, strict, or permissive
 	detectionStrategy string
 	strategyPrompt    string
 	strategyComplete  string
@@ -226,10 +256,39 @@ func NewGuardrailInspector(scannerMode string, cisco *CiscoInspectClient, judge 
 		judge:       judge,
 		policyDir:   policyDir,
 	}
+	g.SetFallbackProfile("default")
 	if cisco != nil {
 		g.ciscoClient = cisco
 	}
 	return g
+}
+
+// SetFallbackProfile preserves the configured posture when OPA is absent or
+// unavailable. The value is atomic because validated config reloads can race
+// in-flight inspections.
+func (g *GuardrailInspector) SetFallbackProfile(profile string) {
+	if g == nil {
+		return
+	}
+	switch strings.ToLower(strings.TrimSpace(profile)) {
+	case "strict":
+		g.fallbackProfile.Store("strict")
+	case "permissive":
+		g.fallbackProfile.Store("permissive")
+	default:
+		g.fallbackProfile.Store("default")
+	}
+}
+
+func (g *GuardrailInspector) currentFallbackProfile() string {
+	if g == nil {
+		return "default"
+	}
+	profile, _ := g.fallbackProfile.Load().(string)
+	if profile == "" {
+		return "default"
+	}
+	return profile
 }
 
 // SetCiscoInspector replaces the remote inspector after construction.
@@ -1174,15 +1233,15 @@ func (g *GuardrailInspector) ReloadPolicies() error {
 }
 
 // finalize runs OPA policy evaluation if available, otherwise applies the
-// built-in CRITICAL-only block fallback.
+// built-in posture-equivalent fallback.
 func (g *GuardrailInspector) finalize(ctx context.Context, direction, model, mode, content string, merged *ScanVerdict, ciscoResult *ScanVerdict) *ScanVerdict {
 	if g.policyDir == "" {
-		return fallbackGuardrailVerdict(merged)
+		return fallbackGuardrailVerdictForProfile(merged, g.currentFallbackProfile())
 	}
 
 	engine := g.policyEngine()
 	if engine == nil {
-		return fallbackGuardrailVerdict(merged)
+		return fallbackGuardrailVerdictForProfile(merged, g.currentFallbackProfile())
 	}
 
 	input := policy.GuardrailInput{
@@ -1219,7 +1278,7 @@ func (g *GuardrailInspector) finalize(ctx context.Context, direction, model, mod
 		// Record the latency even on failure so the phase span
 		// makes the OPA fallback visible in trace waterfalls.
 		endOPA("", "", opaLatency)
-		return fallbackGuardrailVerdict(merged)
+		return fallbackGuardrailVerdictForProfile(merged, g.currentFallbackProfile())
 	}
 	endOPA(out.Action, out.Severity, opaLatency)
 
@@ -1271,7 +1330,7 @@ var defaultPIIRequestPatterns = []string{
 var piiRequestPatterns = cloneLocalPatternStrings(defaultPIIRequestPatterns)
 
 var defaultPIIDataRegexSources = []string{
-	`\b\d{3}-\d{2}-\d{4}\b`,
+	`\b(?:00[1-9]|0[1-9][0-9]|[1-5][0-9]{2}|6[0-5][0-9]|66[0-5]|66[7-9]|6[7-9][0-9]|[78][0-9]{2})-(?:0[1-9]|[1-9][0-9])-(?:000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3})\b`,
 	`\b(?:4\d{3}|5[1-5]\d{2}|6(?:011|5\d{2}))[- ]?\d{4}[- ]?\d{4}[- ]?\d{4}\b`,
 	`\b3[47]\d{2}[- ]?\d{6}[- ]?\d{5}\b`,
 }
@@ -1411,17 +1470,33 @@ func compileLocalPatternSources(field string, sources []string) ([]*regexp.Regex
 	return compiled, nil
 }
 
-// secretPatternRegexes tighten patterns that cause false positives as bare
-// substrings. Requires assignment-like context with a long alphanumeric value
-// (20+ chars) to avoid matching conversational "reply with this token: XYZ".
-var secretPatternRegexes = []*regexp.Regexp{
-	regexp.MustCompile(`(?i)\btoken\s*[:=]\s*["']?[A-Za-z0-9_\-/.]{20,}`),
+type localSecretDetectorKind uint8
+
+const (
+	localSecretDetectorToken localSecretDetectorKind = iota + 1
+	localSecretDetectorPassword
+	localSecretDetectorAPIKey
+	localSecretDetectorBearer
+	localSecretDetectorAWS
+)
+
+type localSecretDetector struct {
+	kind        localSecretDetectorKind
+	canonicalID string
+	pattern     *regexp.Regexp
+}
+
+// secretPatternDetectors tighten patterns that cause false positives as bare
+// substrings. Every detector carries stable behavioral and canonical identities
+// so slice reordering cannot silently change acceptance or finding IDs.
+var secretPatternDetectors = []localSecretDetector{
+	{localSecretDetectorToken, "LP-SECRET-ASSIGNMENT", regexp.MustCompile(`(?i)\btoken\s*[:=]\s*["']?[A-Za-z0-9_\-/.]{20,}`)},
 	// Require an actual secret-shaped VALUE after the key name, so prose
 	// that merely mentions "password" / "api_key" / "bearer" is not flagged.
-	regexp.MustCompile(`(?i)\b(?:password|passwd|pwd)\s*[:=]\s*["']?[^\s"']{8,}`),
-	regexp.MustCompile(`(?i)\bapi[_-]?key\s*[:=]\s*["']?[A-Za-z0-9_\-]{16,}`),
-	regexp.MustCompile(`(?i)\bbearer\s+[A-Za-z0-9._\-]{20,}`),
-	regexp.MustCompile(`(?i)\baws_(?:access_key_id|secret_access_key)\s*[:=]\s*["']?[A-Za-z0-9/+]{16,}`),
+	{localSecretDetectorPassword, "LP-SECRET-ASSIGNMENT", regexp.MustCompile(`(?i)\b(?:password|passwd|pwd)\s*[:=]\s*["']?[^\s"']{8,}`)},
+	{localSecretDetectorAPIKey, "LP-SECRET-ASSIGNMENT", regexp.MustCompile(`(?i)\bapi[_-]?key\s*[:=]\s*["']?[A-Za-z0-9_\-]{16,}`)},
+	{localSecretDetectorBearer, "LP-SECRET-BEARER", regexp.MustCompile(`(?i)\bbearer\s+[A-Za-z0-9._\-]{20,}`)},
+	{localSecretDetectorAWS, "LP-SECRET-ASSIGNMENT", regexp.MustCompile(`(?i)\baws_(?:access_key_id|secret_access_key)\s*[:=]\s*["']?[A-Za-z0-9/+]{16,}`)},
 }
 
 // Target names and transfer verbs are common in source review and operational
@@ -1596,8 +1671,8 @@ func scanLocalPatterns(direction, content string) *ScanVerdict {
 			flags = append(flags, p)
 		}
 	}
-	for index, re := range secretPatternRegexes {
-		if match, norm, ok := findAcceptedLocalSecretMatch(content, lower, re, index); ok {
+	for _, detector := range secretPatternDetectors {
+		if match, norm, ok := findAcceptedLocalSecretMatch(content, lower, detector); ok {
 			flag := match
 			if norm {
 				flag = "[normalized] " + match
@@ -1675,11 +1750,6 @@ func scanLocalPatterns(direction, content string) *ScanVerdict {
 // Contextual trust-exploit rules are the authoritative injection detector.
 // Keeping duplicate phrase/regex triage floors here caused benign prose to be
 // routed to a missing judge and converted into a MEDIUM alert.
-var highSignalInjectionPatterns = []string{}
-var reviewInjectionPatterns = []string{}
-var reviewInjectionRegexes = []*regexp.Regexp{}
-var highSignalInjectionRegexes = []*regexp.Regexp{}
-
 // SSN format \d{3}-\d{2}-\d{4} is HIGH_SIGNAL (unambiguous).
 var ssnDashRegex = regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`)
 
@@ -1697,9 +1767,7 @@ func triagePatterns(direction, content string) []TriageSignal {
 		return nil
 	}
 	// Snapshot the overridable pattern sets once for the lifetime of
-	// the call, same reasoning as in scanLocalPatterns. The high/low
-	// signal injection splits are not (yet) operator-tunable so they
-	// are read directly from their compiled-in globals.
+	// the call, same reasoning as in scanLocalPatterns.
 	localPatternsMu.RLock()
 	piiPatterns := piiRequestPatterns
 	exfPatterns := exfilPatterns
@@ -1713,46 +1781,6 @@ func triagePatterns(direction, content string) []TriageSignal {
 	var signals []TriageSignal
 
 	if direction == "prompt" {
-		// HIGH_SIGNAL injection patterns (multi-word, unambiguous).
-		for _, p := range highSignalInjectionPatterns {
-			if strings.Contains(lower, p) {
-				signals = append(signals, TriageSignal{
-					Level: "HIGH_SIGNAL", FindingID: "TRIAGE-INJ-PHRASE",
-					Category: "injection", Pattern: p,
-					Evidence: extractEvidence(content, lower, p), Confidence: 0.95,
-				})
-			}
-		}
-		for _, re := range highSignalInjectionRegexes {
-			if re.MatchString(lower) {
-				signals = append(signals, TriageSignal{
-					Level: "HIGH_SIGNAL", FindingID: "TRIAGE-INJ-REGEX",
-					Category: "injection", Pattern: re.String(),
-					Evidence: extractEvidenceRegex(content, lower, re), Confidence: 0.90,
-				})
-			}
-		}
-
-		// NEEDS_REVIEW injection patterns (short, ambiguous).
-		for _, p := range reviewInjectionPatterns {
-			if strings.Contains(lower, p) {
-				signals = append(signals, TriageSignal{
-					Level: "NEEDS_REVIEW", FindingID: "TRIAGE-INJ-REVIEW",
-					Category: "injection", Pattern: p,
-					Evidence: extractEvidence(content, lower, p), Confidence: 0.50,
-				})
-			}
-		}
-		for _, re := range reviewInjectionRegexes {
-			if re.MatchString(lower) {
-				signals = append(signals, TriageSignal{
-					Level: "NEEDS_REVIEW", FindingID: "TRIAGE-INJ-REVIEW",
-					Category: "injection", Pattern: re.String(),
-					Evidence: extractEvidenceRegex(content, lower, re), Confidence: 0.50,
-				})
-			}
-		}
-
 		// PII request patterns (asking for PII = HIGH_SIGNAL).
 		for _, p := range piiPatterns {
 			if strings.Contains(lower, p) {
@@ -1851,8 +1879,8 @@ func triagePatterns(direction, content string) []TriageSignal {
 	// fallback the docstring on scanLocalPatterns above — which
 	// promises normalization defeats whitespace/slash-run evasions —
 	// would not hold for secrets.
-	for index, re := range secretPatternRegexes {
-		if match, norm, ok := findAcceptedLocalSecretMatch(content, lower, re, index); ok {
+	for _, detector := range secretPatternDetectors {
+		if match, norm, ok := findAcceptedLocalSecretMatch(content, lower, detector); ok {
 			src := content
 			if norm {
 				src = lower
@@ -1867,7 +1895,7 @@ func triagePatterns(direction, content string) []TriageSignal {
 			}
 			signals = append(signals, TriageSignal{
 				Level: secretLevel, FindingID: "TRIAGE-SECRET-REGEX",
-				Category: "secret", Pattern: re.String(),
+				Category: "secret", Pattern: detector.pattern.String(),
 				Evidence: ev, Confidence: 0.75,
 			})
 		}

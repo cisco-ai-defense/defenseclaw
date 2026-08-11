@@ -11,7 +11,6 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
-	"unicode/utf8"
 )
 
 var ssnListCandidatePattern = regexp.MustCompile(`\b(?:\d{3}-\d{2}-\d{4}|\d{9})\b`)
@@ -29,7 +28,7 @@ func firstAcceptedRuleMatch(rule PatternRule, text string) []int {
 }
 
 func firstAcceptedRegexMatch(pattern interface {
-	FindStringIndex(string) []int
+	FindAllStringIndex(string, int) [][]int
 }, text string, accept func(string) bool) []int {
 	return firstAcceptedRegexMatchAt(pattern, text, func(match string, _, _ int) bool {
 		return accept(match)
@@ -37,38 +36,26 @@ func firstAcceptedRegexMatch(pattern interface {
 }
 
 func firstAcceptedRegexMatchAt(pattern interface {
-	FindStringIndex(string) []int
+	FindAllStringIndex(string, int) [][]int
 }, text string, accept func(match string, start, end int) bool) []int {
 	if pattern == nil || text == "" {
 		return nil
 	}
-	for offset := 0; offset <= len(text); {
-		loc := pattern.FindStringIndex(text[offset:])
-		if loc == nil {
-			return nil
-		}
-		start, end := offset+loc[0], offset+loc[1]
+	// Enumerate against the complete input once. Restarting a regex on
+	// text[offset:] changes the meaning of ^ and word-boundary assertions after
+	// a rejected candidate, allowing a non-match in the original text to become
+	// a match solely because the validation cursor moved.
+	for _, loc := range pattern.FindAllStringIndex(text, -1) {
+		start, end := loc[0], loc[1]
 		if accept(text[start:end], start, end) {
 			return []int{start, end}
 		}
-		if end > start {
-			offset = end
-			continue
-		}
-		if end >= len(text) {
-			return nil
-		}
-		_, size := utf8.DecodeRuneInString(text[end:])
-		if size <= 0 {
-			size = 1
-		}
-		offset = end + size
 	}
 	return nil
 }
 
 func findAcceptedLocalPIIMatch(original, normalized string, pattern interface {
-	FindStringIndex(string) []int
+	FindAllStringIndex(string, int) [][]int
 }) (match string, wasNormalized, ok bool) {
 	acceptOriginal := func(match string, start, end int) bool {
 		return acceptedLocalPIIMatchAt(original, match, start, end)
@@ -87,15 +74,18 @@ func findAcceptedLocalPIIMatch(original, normalized string, pattern interface {
 	return "", false, false
 }
 
-func findAcceptedLocalSecretMatch(original, normalized string, pattern interface {
-	FindStringIndex(string) []int
-}, patternIndex int) (match string, wasNormalized, ok bool) {
-	accept := func(match string) bool { return acceptedLocalSecretMatch(patternIndex, match) }
-	if loc := firstAcceptedRegexMatch(pattern, original, accept); loc != nil {
+func findAcceptedLocalSecretMatch(
+	original, normalized string,
+	detector localSecretDetector,
+) (match string, wasNormalized, ok bool) {
+	accept := func(match string) bool {
+		return acceptedLocalSecretMatch(detector.kind, match)
+	}
+	if loc := firstAcceptedRegexMatch(detector.pattern, original, accept); loc != nil {
 		return original[loc[0]:loc[1]], false, true
 	}
 	if normalized != original {
-		if loc := firstAcceptedRegexMatch(pattern, normalized, accept); loc != nil {
+		if loc := firstAcceptedRegexMatch(detector.pattern, normalized, accept); loc != nil {
 			return normalized[loc[0]:loc[1]], true, true
 		}
 	}
@@ -103,7 +93,7 @@ func findAcceptedLocalSecretMatch(original, normalized string, pattern interface
 }
 
 func findAcceptedRuleLoc(original, normalized, ruleID string, pattern interface {
-	FindStringIndex(string) []int
+	FindAllStringIndex(string, int) [][]int
 }) (loc []int, source string, wasNormalized, ok bool) {
 	acceptOriginal := func(match string, start, end int) bool {
 		return acceptedRuleMatchAt(ruleID, original, match, start, end)
@@ -235,9 +225,9 @@ func ssnImmediateLabelTail(value string) bool {
 	}
 }
 
-func acceptedLocalSecretMatch(patternIndex int, match string) bool {
+func acceptedLocalSecretMatch(kind localSecretDetectorKind, match string) bool {
 	candidate := assignmentValue(match)
-	if patternIndex == 3 {
+	if kind == localSecretDetectorBearer {
 		lower := strings.ToLower(match)
 		if bearer := strings.Index(lower, "bearer"); bearer >= 0 {
 			candidate = strings.TrimSpace(match[bearer+len("bearer"):])
@@ -249,13 +239,14 @@ func acceptedLocalSecretMatch(patternIndex int, match string) bool {
 	// An explicit password assignment is itself the signal. Weak defaults such
 	// as changeme123 and examplepass are often the credentials operators most
 	// need surfaced, not documentation placeholders to suppress.
-	if patternIndex == 1 {
+	if kind == localSecretDetectorPassword {
 		return true
 	}
 	if obviousCredentialPlaceholder(candidate) {
 		return false
 	}
-	return patternIndex != 3 || credentialEntropy(compactCredential(candidate)) >= 2.5
+	return kind != localSecretDetectorBearer ||
+		credentialEntropy(compactCredential(candidate)) >= 2.5
 }
 
 func normalizedPIIEvidenceKey(evidence string) string {

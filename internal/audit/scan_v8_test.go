@@ -203,7 +203,7 @@ func TestLogInspectFindingsWithCorrelationUsesOneGeneratedV8Pipeline(t *testing.
 
 	const evaluationID = "evaluation-runtime-inspect"
 	const sourceEvidence = "source-evidence-excerpt"
-	wantEvidence := redactCredentialFindingValue(sourceEvidence)
+	const wantEvidence = "<redacted-sensitive len=23>"
 	source := scanner.InspectFindingSource{
 		Scanner: "hook-rules", Target: "codex:PreToolUse", TargetType: "tool_call",
 		Verdict: "block", DurationMs: 7, EvaluationID: evaluationID,

@@ -258,6 +258,29 @@ def test_alert_reader_keeps_malformed_payload_fail_visible() -> None:
     assert "malformed-payload-finding" in alert_ids
 
 
+def test_alert_reader_and_panel_keep_warning_findings_in_all_view() -> None:
+    store = _store()
+    store.db.execute(
+        """INSERT INTO audit_events (
+               id, timestamp, bucket, event_name, source, signal, severity,
+               action, actor, details, connector, redaction_profile,
+               payload_json, projected_record_json
+           ) VALUES (
+               'warning-finding', '2026-07-11T00:00:01Z',
+               'security.finding', 'finding.observed', 'gateway', 'logs',
+               'WARNING', 'scan-finding', 'gateway', '', 'codex', 'default',
+               '{}', '{}'
+           )"""
+    )
+    store.db.commit()
+
+    rows = V8EventHistoryReader(store).load_alerts(500)
+    events = alerts_from_v8_history(rows)
+
+    assert "warning-finding" in {row.id for row in rows}
+    assert "warning-finding" in {event.id for event in events}
+
+
 def test_alert_reader_keeps_only_explicit_non_allow_legacy_hooks() -> None:
     store = _store()
     store.db.executemany(
@@ -301,6 +324,54 @@ def test_alert_reader_keeps_only_explicit_non_allow_legacy_hooks() -> None:
     assert panel_severities["legacy-explicit-block"] == "HIGH"
     assert "legacy-clean-high" not in panel_severities
     assert "legacy-unrelated-high" not in panel_severities
+
+
+def test_alert_reader_uses_structured_legacy_decisions_when_columns_exist() -> None:
+    store = _store()
+    store.db.execute("ALTER TABLE audit_events ADD COLUMN structured_json TEXT")
+    store.db.execute("ALTER TABLE audit_events ADD COLUMN enforced INTEGER")
+    store.db.executemany(
+        """INSERT INTO audit_events (
+               id, timestamp, bucket, event_name, signal, severity, action,
+               actor, details, connector, payload_json, projected_record_json,
+               structured_json, enforced
+           ) VALUES (?, '2026-07-11T00:00:03Z', NULL, NULL, NULL, 'INFO',
+                     'connector-hook', 'gateway', 'healthy', 'codex', NULL,
+                     NULL, ?, ?)""",
+        [
+            (
+                "legacy-structured-block",
+                json.dumps({"action": "block", "mode": "action"}),
+                None,
+            ),
+            (
+                "legacy-enforced-block",
+                json.dumps({"action": "allow", "mode": "action"}),
+                1,
+            ),
+            (
+                "legacy-structured-allow",
+                json.dumps({"action": "allow", "mode": "observe"}),
+                0,
+            ),
+        ],
+    )
+    store.db.commit()
+
+    rows = V8EventHistoryReader(store).load_alerts(500)
+    row_decisions = {row.id: row.hook_decision for row in rows if row.id.startswith("legacy-")}
+    event_ids = {event.id for event in alerts_from_v8_history(rows) if event.id.startswith("legacy-")}
+    panel = AlertsPanelModel(store=store)
+    panel.refresh()
+    panel_ids = {event.id for event in panel.audit_events if event.id.startswith("legacy-")}
+
+    assert row_decisions == {
+        "legacy-structured-block": "block",
+        "legacy-enforced-block": "block",
+    }
+    assert event_ids == {"legacy-structured-block", "legacy-enforced-block"}
+    assert panel_ids == {"legacy-structured-block", "legacy-enforced-block"}
+    assert "legacy-structured-allow" not in row_decisions
 
 
 def test_alert_reader_excludes_acknowledged_and_dismissed_rows() -> None:

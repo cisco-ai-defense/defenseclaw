@@ -88,7 +88,7 @@ fi
 # Drop inherited export attributes before these names receive private values.
 # A plain Bash assignment preserves the exported bit of an inherited variable,
 # which would otherwise copy the hook payload or bearer into curl's environment.
-unset PAYLOAD API_TOKEN
+unset PAYLOAD API_TOKEN CURL_CONFIG_TOKEN
 PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
   echo "defenseclaw: codex hook refusing oversized payload" >&2
   if [ "$FAIL_MODE" = "closed" ]; then
@@ -160,13 +160,23 @@ fi
 # inspection is available to other same-user processes on supported hosts, so
 # passing either value as a literal argv entry discloses the gateway credential
 # and the potentially sensitive tool payload. curl reads both through inherited
-# descriptors instead; argv contains only the descriptor paths.
+# descriptors instead; argv contains only the descriptor paths. The
+# descriptor-backed --config form works on curl releases older than 7.55.0,
+# unlike --header @file.
 AUTH_HEADER_ARGS=()
 AUTH_HEADER_FD_OPEN=0
 if [ -n "${API_TOKEN}" ]; then
-  exec 8< <(printf '%s\n' "Authorization: Bearer ${API_TOKEN}")
+  # A bearer token is an HTTP field value, so CR/LF is never valid. Reject it
+  # before formatting curl configuration, then escape the two metacharacters
+  # recognized inside a quoted curl config value.
+  case "${API_TOKEN}" in
+    *$'\n'*|*$'\r'*) fail_response "invalid gateway token" ;;
+  esac
+  CURL_CONFIG_TOKEN="${API_TOKEN//\\/\\\\}"
+  CURL_CONFIG_TOKEN="${CURL_CONFIG_TOKEN//\"/\\\"}"
+  exec 8< <(printf '%s\n' "header = \"Authorization: Bearer ${CURL_CONFIG_TOKEN}\"")
   AUTH_HEADER_FD_OPEN=1
-  AUTH_HEADER_ARGS=(-H "@/dev/fd/8")
+  AUTH_HEADER_ARGS=(--config "/dev/fd/8")
 fi
 
 # curl does not need the shell-local values once the private descriptors are
@@ -175,7 +185,8 @@ fi
 exec 9< <(printf '%s' "${PAYLOAD}")
 API_TOKEN=
 PAYLOAD=
-unset API_TOKEN PAYLOAD
+CURL_CONFIG_TOKEN=
+unset API_TOKEN PAYLOAD CURL_CONFIG_TOKEN
 
 CURL_STATUS=0
 RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/codex/hook" \

@@ -151,7 +151,10 @@ func regexActionFindings(text, toolName string) []RuleFinding {
 	var action []RuleFinding
 	for _, category := range []string{"command", "sensitive-path", "cognitive-file", "c2"} {
 		action = append(action, scanRuleGeneration(
-			generation, text, toolName, ruleScanOptions{onlyCategory: category},
+			generation, text, toolName, ruleScanOptions{
+				onlyCategory:        category,
+				includeToolCallOnly: true,
+			},
 		)...)
 	}
 	return action

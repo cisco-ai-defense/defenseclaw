@@ -336,11 +336,20 @@ func TestCodexToolResultContentScope_StaticSafeReaderFallback(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	for _, relative := range []string{
+	literalOuterNameCases := []string{
 		"'policies/guardrail/default/rules/trust-exploit.yaml'",
-		`"policies/guardrail/default/rules/trust-exploit.yaml"`,
 		" policies/guardrail/default/rules/trust-exploit.yaml ",
-	} {
+	}
+	// A double quote is a legal literal filename byte on Unix but forbidden by
+	// the Windows filesystem. The equivalent decoded-path boundary remains
+	// covered there by the apostrophe and surrounding-space cases.
+	if runtime.GOOS != "windows" {
+		literalOuterNameCases = append(
+			literalOuterNameCases,
+			`"policies/guardrail/default/rules/trust-exploit.yaml"`,
+		)
+	}
+	for _, relative := range literalOuterNameCases {
 		path := filepath.Join(repoRoot, relative)
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			t.Fatal(err)

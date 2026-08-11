@@ -19,6 +19,11 @@ from typing import Any, Literal
 
 from rich.markup import escape as rich_escape
 
+from defenseclaw.alert_semantics import (
+    ALERT_ALL_SEVERITIES,
+    ALERT_LEGACY_FINDING_ACTIONS,
+    ALERT_NON_ALLOW_OUTCOMES,
+)
 from defenseclaw.hook_metrics import connector_hook_decision
 from defenseclaw.tui.panels.audit import (
     parse_kv_details,
@@ -31,8 +36,6 @@ from defenseclaw.tui.services.event_models import (
     parse_timestamp,
 )
 from defenseclaw.tui.services.v8_event_history import (
-    V8_LEGACY_FINDING_ACTIONS,
-    V8_NON_ALLOW_OUTCOMES,
     V8EventHistoryRow,
     load_v8_alert_history,
     payload_text,
@@ -158,7 +161,7 @@ class AlertTableRow:
     finding_index: int = -1
 
 
-_V8_FINDING_SEVERITIES = frozenset({"CRITICAL", "HIGH", "MEDIUM", "LOW", "ERROR", "WARNING"})
+_V8_FINDING_SEVERITIES = frozenset(ALERT_ALL_SEVERITIES)
 
 
 def _v8_row_outcome(row: V8EventHistoryRow) -> str:
@@ -211,16 +214,19 @@ def _is_v8_alert_row(row: V8EventHistoryRow) -> bool:
             and "detection-only" not in _v8_finding_tags(row)
         )
     if row.bucket in {"enforcement.action", "network.egress"}:
-        return _v8_row_outcome(row) in V8_NON_ALLOW_OUTCOMES
+        return _v8_row_outcome(row) in ALERT_NON_ALLOW_OUTCOMES
     if row.bucket in {"platform.health", "diagnostic"}:
         return severity in {"CRITICAL", "HIGH", "ERROR"}
     if not row.bucket:
         action = (row.action or "").strip().lower()
         if action == "connector-hook":
+            projected_decision = (row.hook_decision or "").strip().lower()
+            if projected_decision in {"allow", "alert", "block"}:
+                return projected_decision == "block"
             return connector_hook_decision(row.details) == "block"
         return (
-            (action in V8_LEGACY_FINDING_ACTIONS and severity in _V8_FINDING_SEVERITIES)
-            or action in V8_NON_ALLOW_OUTCOMES
+            (action in ALERT_LEGACY_FINDING_ACTIONS and severity in _V8_FINDING_SEVERITIES)
+            or action in ALERT_NON_ALLOW_OUTCOMES
             or action.endswith("-failure")
             or action.endswith("-failed")
         )

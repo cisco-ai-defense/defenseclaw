@@ -811,7 +811,7 @@ func TestApplyRulePackOverrides_AddsNewCategoryKeepsDefaults(t *testing.T) {
 				Version:  1,
 				Category: "test-override",
 				Rules: []guardrail.RuleDefYAML{
-					{ID: "TEST-1", Pattern: `test_secret_[a-f0-9]+`, Severity: "HIGH", Confidence: 0.95},
+					{ID: "TEST-1", Pattern: `test_secret_[a-f0-9]+`, Title: "Indexed test override", Severity: "HIGH", Confidence: 0.95},
 				},
 			},
 		},
@@ -835,6 +835,9 @@ func TestApplyRulePackOverrides_AddsNewCategoryKeepsDefaults(t *testing.T) {
 	}
 	if !names["test-override"] {
 		t.Error("new category test-override not present after override")
+	}
+	if !activeLocalPatternRuleIdentity("test-1", "Indexed test override") {
+		t.Fatal("published rule-pack override did not update the normalization identity index")
 	}
 
 	findings := ScanAllRules("found test_secret_deadbeef here", "exec")
