@@ -158,12 +158,133 @@ class TestSplunkBridgeChildEnvironment(unittest.TestCase):
         self.assertEqual(child_env, {"BRIDGE_UNRELATED_SETTING": "preserved"})
 
     def test_configured_token_name_must_be_a_portable_environment_name(self) -> None:
-        from defenseclaw.commands.cmd_setup import _configured_gateway_token_env_name
+        from defenseclaw.commands.cmd_setup import (
+            _configured_gateway_token_env_name,
+            _splunk_bridge_child_env,
+        )
 
-        cfg = SimpleNamespace(gateway=SimpleNamespace(token_env="INVALID-TOKEN-NAME"))
+        for invalid_name in (
+            "INVALID-TOKEN-NAME",
+            " OPERATOR_MANAGED_GATEWAY_TOKEN",
+            "OPERATOR_MANAGED_GATEWAY_TOKEN ",
+        ):
+            with self.subTest(invalid_name=invalid_name):
+                cfg = SimpleNamespace(gateway=SimpleNamespace(token_env=invalid_name))
+                source = _UnreadableSecretEnvironment(
+                    {
+                        invalid_name: "whitespace-secret-sentinel",
+                        "BRIDGE_UNRELATED_SETTING": "preserved",
+                    },
+                    blocked_names={invalid_name},
+                )
 
-        with self.assertRaisesRegex(ClickException, "gateway.token_env"):
-            _configured_gateway_token_env_name(cfg)
+                with self.assertRaisesRegex(ClickException, "gateway.token_env"):
+                    _configured_gateway_token_env_name(cfg)
+                with self.assertRaisesRegex(ClickException, "gateway.token_env"):
+                    _splunk_bridge_child_env(
+                        invalid_name,
+                        environment=source,
+                        platform_name="nt",
+                    )
+
+    def test_managed_name_contract_covers_current_and_historical_bridge_keys(self) -> None:
+        from defenseclaw.commands.cmd_setup import _SPLUNK_BRIDGE_MANAGED_ENV_NAMES
+        from defenseclaw.paths import bundled_splunk_bridge_dir
+
+        current_names = set(_read_dotenv(str(bundled_splunk_bridge_dir() / "env" / ".env.example")))
+        self.assertLessEqual(current_names, _SPLUNK_BRIDGE_MANAGED_ENV_NAMES)
+        self.assertLessEqual(
+            {
+                "DEFENSECLAW_LOCAL_PASSWORD",
+                "DEFENSECLAW_LOCAL_SPLUNK_HEC_TOKEN",
+                "DEFENSECLAW_LOCAL_USERNAME",
+                "SPLUNK_ENV_FILE",
+            },
+            _SPLUNK_BRIDGE_MANAGED_ENV_NAMES,
+        )
+
+    def test_every_managed_name_collision_is_windows_case_insensitive(self) -> None:
+        from defenseclaw.commands.cmd_setup import (
+            _SPLUNK_BRIDGE_MANAGED_ENV_NAMES,
+            _splunk_bridge_child_env,
+            _validated_splunk_gateway_token_env_name,
+        )
+
+        for managed_name in sorted(_SPLUNK_BRIDGE_MANAGED_ENV_NAMES):
+            mixed_case_name = managed_name.swapcase()
+            source = _UnreadableSecretEnvironment(
+                {
+                    mixed_case_name: "managed-collision-secret-sentinel",
+                    "BRIDGE_UNRELATED_SETTING": "preserved",
+                },
+                blocked_names={mixed_case_name},
+            )
+            with self.subTest(managed_name=managed_name):
+                with self.assertRaisesRegex(ClickException, "Local Splunk managed"):
+                    _validated_splunk_gateway_token_env_name(
+                        mixed_case_name,
+                        platform_name="nt",
+                    )
+                with self.assertRaisesRegex(ClickException, "Local Splunk managed"):
+                    _splunk_bridge_child_env(
+                        mixed_case_name,
+                        environment=source,
+                        platform_name="nt",
+                    )
+
+    def test_managed_name_collision_is_exact_on_posix(self) -> None:
+        from defenseclaw.commands.cmd_setup import (
+            _SPLUNK_BRIDGE_MANAGED_ENV_NAMES,
+            _validated_splunk_gateway_token_env_name,
+        )
+
+        for managed_name in sorted(_SPLUNK_BRIDGE_MANAGED_ENV_NAMES):
+            with self.subTest(managed_name=managed_name):
+                with self.assertRaisesRegex(ClickException, "Local Splunk managed"):
+                    _validated_splunk_gateway_token_env_name(
+                        managed_name,
+                        platform_name="posix",
+                    )
+
+        self.assertEqual(
+            _validated_splunk_gateway_token_env_name(
+                "splunk_image",
+                platform_name="posix",
+            ),
+            "splunk_image",
+        )
+
+    @patch("defenseclaw.commands.cmd_setup._ensure_private_splunk_bridge_env")
+    def test_bootstrap_rejects_invalid_or_managed_name_before_private_env_mutation(
+        self,
+        ensure_private_env: MagicMock,
+    ) -> None:
+        from defenseclaw.commands.cmd_setup import _bootstrap_bridge
+
+        for rejected_name in (
+            " OPERATOR_MANAGED_GATEWAY_TOKEN",
+            "SPLUNK_IMAGE",
+            "DEFENSECLAW_LOCAL_USERNAME",
+        ):
+            secret = "rejected-bootstrap-secret-sentinel"
+            source = _UnreadableSecretEnvironment(
+                {
+                    rejected_name: secret,
+                    "BRIDGE_UNRELATED_SETTING": "preserved",
+                },
+                blocked_names={rejected_name},
+            )
+            with self.subTest(rejected_name=rejected_name):
+                with (
+                    patch("defenseclaw.commands.cmd_setup.os.environ", source),
+                    self.assertRaisesRegex(ClickException, "gateway.token_env"),
+                ):
+                    _bootstrap_bridge(
+                        "/unused",
+                        gateway_token_env=rejected_name,
+                    )
+
+        ensure_private_env.assert_not_called()
 
 
 class TestSetupSplunkRefreshWiring(unittest.TestCase):
@@ -210,16 +331,18 @@ class TestSetupSplunkRefreshWiring(unittest.TestCase):
         )
         mock_run.return_value = MagicMock(
             returncode=0,
-            stdout=json.dumps({
-                "splunk_web_url": "http://127.0.0.1:8000",
-                "hec_url": "http://127.0.0.1:8088/services/collector/event",
-                "hec_token": "bootstrap-token",
-                "license_group": "Free",
-                "web_login_required": False,
-                "index": "defenseclaw_local",
-                "source": "defenseclaw",
-                "sourcetype": "defenseclaw:json",
-            }),
+            stdout=json.dumps(
+                {
+                    "splunk_web_url": "http://127.0.0.1:8000",
+                    "hec_url": "http://127.0.0.1:8088/services/collector/event",
+                    "hec_token": "bootstrap-token",
+                    "license_group": "Free",
+                    "web_login_required": False,
+                    "index": "defenseclaw_local",
+                    "source": "defenseclaw",
+                    "sourcetype": "defenseclaw:json",
+                }
+            ),
             stderr="",
         )
 
@@ -306,16 +429,18 @@ class TestSetupSplunkRefreshWiring(unittest.TestCase):
 
         mock_run.return_value = MagicMock(
             returncode=0,
-            stdout=json.dumps({
-                "splunk_web_url": "http://127.0.0.1:8000",
-                "hec_url": "http://127.0.0.1:8088/services/collector/event",
-                "hec_token": "bootstrap-token",
-                "license_group": "Free",
-                "web_login_required": False,
-                "index": "defenseclaw_local",
-                "source": "defenseclaw",
-                "sourcetype": "defenseclaw:json",
-            }),
+            stdout=json.dumps(
+                {
+                    "splunk_web_url": "http://127.0.0.1:8000",
+                    "hec_url": "http://127.0.0.1:8088/services/collector/event",
+                    "hec_token": "bootstrap-token",
+                    "license_group": "Free",
+                    "web_login_required": False,
+                    "index": "defenseclaw_local",
+                    "source": "defenseclaw",
+                    "sourcetype": "defenseclaw:json",
+                }
+            ),
             stderr="",
         )
 
@@ -414,14 +539,17 @@ class TestRefreshAndMaybeRestartSplunkBridge(unittest.TestCase):
         self.assertTrue(result.stopped)
         # The down call must precede the refresh call. Pull the
         # subprocess args to confirm we asked the bridge for `down`.
-        self.assertTrue(any(
-            call.args[0] == ["/fake/bin/splunk-claw-bridge", "down", "--env-file", env_file]
-            for call in mock_run.call_args_list
-        ))
+        self.assertTrue(
+            any(
+                call.args[0] == ["/fake/bin/splunk-claw-bridge", "down", "--env-file", env_file]
+                for call in mock_run.call_args_list
+            )
+        )
         down_call = next(
             call
             for call in mock_run.call_args_list
-            if call.args[0] == [
+            if call.args[0]
+            == [
                 "/fake/bin/splunk-claw-bridge",
                 "down",
                 "--env-file",
@@ -495,6 +623,7 @@ class TestStopSplunkBridgeEnvironment(unittest.TestCase):
             {
                 "DEFENSECLAW_GATEWAY_TOKEN": "gateway-sentinel",
                 "OPENCLAW_GATEWAY_TOKEN": "legacy-sentinel",
+                "BRIDGE_UNRELATED_SETTING": "preserved",
             },
         ):
             _stop_bridge("/data")
@@ -503,6 +632,94 @@ class TestStopSplunkBridgeEnvironment(unittest.TestCase):
         environment = native_stop.call_args.kwargs["environment"]
         self.assertNotIn("DEFENSECLAW_GATEWAY_TOKEN", environment)
         self.assertNotIn("OPENCLAW_GATEWAY_TOKEN", environment)
+        self.assertEqual(environment["BRIDGE_UNRELATED_SETTING"], "preserved")
+
+    @patch("defenseclaw.commands.cmd_setup.local_shell_stacks_supported", return_value=True)
+    @patch("defenseclaw.commands.cmd_setup._native_windows_local_splunk", return_value=True)
+    @patch(
+        "defenseclaw.observability.local_splunk.stop_native_local_splunk",
+        return_value=True,
+    )
+    def test_native_disable_scrubs_mixed_case_custom_gateway_token(
+        self,
+        native_stop: MagicMock,
+        _native_windows: MagicMock,
+        _supported: MagicMock,
+    ) -> None:
+        from defenseclaw.commands.cmd_setup import _stop_bridge
+
+        custom_name = "OPERATOR_MANAGED_GATEWAY_TOKEN"
+        custom_secret = "native-stop-secret-sentinel"
+        source = _UnreadableSecretEnvironment(
+            {
+                "operator_managed_gateway_token": custom_secret,
+                "DefenseClaw_Gateway_Token": "canonical-secret-sentinel",
+                "openclaw_gateway_token": "legacy-secret-sentinel",
+                "BRIDGE_UNRELATED_SETTING": "preserved",
+            },
+            blocked_names={
+                custom_name,
+                "DEFENSECLAW_GATEWAY_TOKEN",
+                "OPENCLAW_GATEWAY_TOKEN",
+            },
+        )
+        output = io.StringIO()
+        with (
+            patch("defenseclaw.commands.cmd_setup.os.environ", source),
+            redirect_stdout(output),
+        ):
+            _stop_bridge("/data", gateway_token_env=custom_name)
+
+        environment = native_stop.call_args.kwargs["environment"]
+        self.assertFalse(
+            {
+                "operator_managed_gateway_token",
+                "DefenseClaw_Gateway_Token",
+                "openclaw_gateway_token",
+            }
+            & set(environment)
+        )
+        self.assertEqual(environment["BRIDGE_UNRELATED_SETTING"], "preserved")
+        self.assertNotIn(custom_secret, repr(native_stop.call_args.args))
+        self.assertNotIn(custom_secret, output.getvalue())
+
+    @patch("defenseclaw.commands.cmd_setup.local_shell_stacks_supported", return_value=True)
+    @patch("defenseclaw.commands.cmd_setup._native_windows_local_splunk", return_value=True)
+    @patch("defenseclaw.observability.local_splunk.stop_native_local_splunk")
+    def test_native_disable_rejects_invalid_or_managed_custom_name_before_stop(
+        self,
+        native_stop: MagicMock,
+        _native_windows: MagicMock,
+        _supported: MagicMock,
+    ) -> None:
+        from defenseclaw.commands.cmd_setup import _stop_bridge
+
+        for rejected_name in (
+            "INVALID-TOKEN-NAME",
+            " OPERATOR_MANAGED_GATEWAY_TOKEN",
+            "OPERATOR_MANAGED_GATEWAY_TOKEN ",
+            "defenseclaw_local_splunk_hec_token",
+            "defenseclaw_local_password",
+        ):
+            secret = "rejected-native-stop-secret-sentinel"
+            source = _UnreadableSecretEnvironment(
+                {
+                    rejected_name: secret,
+                    "BRIDGE_UNRELATED_SETTING": "preserved",
+                },
+                blocked_names={rejected_name},
+            )
+            output = io.StringIO()
+            with self.subTest(rejected_name=rejected_name):
+                with (
+                    patch("defenseclaw.commands.cmd_setup.os.environ", source),
+                    redirect_stdout(output),
+                    self.assertRaisesRegex(ClickException, "gateway.token_env"),
+                ):
+                    _stop_bridge("/data", gateway_token_env=rejected_name)
+                self.assertNotIn(secret, output.getvalue())
+
+        native_stop.assert_not_called()
 
     @patch("defenseclaw.commands.cmd_setup.local_shell_stacks_supported", return_value=True)
     @patch("defenseclaw.commands.cmd_setup._native_windows_local_splunk", return_value=False)
@@ -574,8 +791,7 @@ class TestSetupLocalObservabilityRefreshWiring(unittest.TestCase):
                 return_value=controller,
             ),
             patch(
-                "defenseclaw.commands.cmd_setup_local_observability"
-                "._refresh_and_maybe_restart_local_observability",
+                "defenseclaw.commands.cmd_setup_local_observability._refresh_and_maybe_restart_local_observability",
             ) as mock_refresh,
             patch(
                 "defenseclaw.commands.cmd_setup_local_observability._apply_local_otlp_config",
@@ -622,8 +838,7 @@ class TestSetupLocalObservabilityRefreshWiring(unittest.TestCase):
                 return_value=controller,
             ),
             patch(
-                "defenseclaw.commands.cmd_setup_local_observability"
-                "._refresh_and_maybe_restart_local_observability",
+                "defenseclaw.commands.cmd_setup_local_observability._refresh_and_maybe_restart_local_observability",
             ) as mock_refresh,
             patch(
                 "defenseclaw.commands.cmd_setup_local_observability._apply_local_otlp_config",
@@ -657,8 +872,7 @@ class TestSetupLocalObservabilityRefreshWiring(unittest.TestCase):
                 return_value=controller,
             ),
             patch(
-                "defenseclaw.commands.cmd_setup_local_observability"
-                "._refresh_and_maybe_restart_local_observability",
+                "defenseclaw.commands.cmd_setup_local_observability._refresh_and_maybe_restart_local_observability",
             ) as mock_refresh,
             patch(
                 "defenseclaw.commands.cmd_setup_local_observability._apply_local_otlp_config",
@@ -695,8 +909,7 @@ class TestSetupLocalObservabilityRefreshWiring(unittest.TestCase):
                 return_value=controller,
             ),
             patch(
-                "defenseclaw.commands.cmd_setup_local_observability"
-                "._refresh_and_maybe_restart_local_observability",
+                "defenseclaw.commands.cmd_setup_local_observability._refresh_and_maybe_restart_local_observability",
             ) as mock_refresh,
             patch(
                 "defenseclaw.commands.cmd_setup_local_observability._apply_local_otlp_config",
@@ -722,8 +935,7 @@ class TestRefreshAndMaybeRestartLocalObservability(unittest.TestCase):
     """Direct coverage for local-observability refresh messaging."""
 
     @patch(
-        "defenseclaw.commands.cmd_setup_local_observability"
-        ".refresh_local_observability_stack",
+        "defenseclaw.commands.cmd_setup_local_observability.refresh_local_observability_stack",
     )
     def test_preserved_config_hint_is_printed(self, mock_refresh: MagicMock) -> None:
         from defenseclaw.bundle_refresh import RefreshResult

@@ -10318,6 +10318,59 @@ _SPLUNK_LOCAL_HEC_DEFAULTS = {
 
 _SPLUNK_BRIDGE_ENV_REL = os.path.join("splunk-bridge", "env", ".env")
 
+# Every name authored by the current bridge env contract, plus names shipped
+# by earlier supported bundles and the native controller's generated token.
+# The bridge shell and native controller both overlay their private env file
+# after the ambient environment is scrubbed. A configured gateway bearer name
+# must therefore never collide with any of these names or a different managed
+# value would be reintroduced into Docker/Compose descendants.
+_SPLUNK_BRIDGE_MANAGED_ENV_NAMES = frozenset(
+    {
+        "AWS_ACCESS_KEY_ID",
+        "AWS_REGION",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "DEFENSECLAW_HEC_TOKEN",
+        "DEFENSECLAW_HEC_URL",
+        "DEFENSECLAW_INDEX",
+        "DEFENSECLAW_INTEGRATION_ENABLED",
+        "DEFENSECLAW_LOCAL_PASSWORD",
+        "DEFENSECLAW_LOCAL_SPLUNK_HEC_TOKEN",
+        "DEFENSECLAW_LOCAL_USERNAME",
+        "DEFENSECLAW_REF",
+        "DEFENSECLAW_SOURCE",
+        "DEFENSECLAW_SOURCETYPE",
+        "DEPLOYMENT_ENVIRONMENT",
+        "NEMOCLAW_LOCAL_MODEL",
+        "NEMOCLAW_LOCAL_OLLAMA_HOST",
+        "NEMOCLAW_LOCAL_POLICY_MODE",
+        "NEMOCLAW_LOCAL_PROVIDER",
+        "NEMOCLAW_LOCAL_SANDBOX_NAME",
+        "NEMOCLAW_REF",
+        "PHONE_HOME_ENABLED",
+        "PHONE_HOME_HEC_TOKEN",
+        "PHONE_HOME_HEC_URL",
+        "S3_BUCKET",
+        "S3_ENDPOINT_URL",
+        "S3_EXPORT_ENABLED",
+        "S3_EXPORT_INTERVAL_SECONDS",
+        "S3_EXPORT_LOOKBACK_SECONDS",
+        "S3_EXPORT_ONCE",
+        "S3_EXPORT_WINDOW_SECONDS",
+        "S3_PREFIX",
+        "S3_SSE",
+        "SPLUNK_ENV_FILE",
+        "SPLUNK_GENERAL_TERMS",
+        "SPLUNK_HEC_TOKEN",
+        "SPLUNK_IMAGE",
+        "SPLUNK_LICENSE_URI",
+        "SPLUNK_PASSWORD",
+        "SPLUNK_START_ARGS",
+        "TENANT_ID",
+        "WORKSPACE_ID",
+    }
+)
+
 
 def _native_windows_local_splunk() -> bool:
     """Select the argument-vector native controller only on Windows."""
@@ -10546,6 +10599,11 @@ def setup_splunk(
 
     native_combined = _native_windows_local_splunk() and enable_logs and (enable_o11y or enable_enterprise)
     if native_combined:
+        gateway_token_env = _configured_gateway_token_env_name(app.cfg)
+        native_child_env = _splunk_bridge_child_env(
+            gateway_token_env,
+            platform_name="nt",
+        )
         # Resolve every interactive/flag prerequisite and prove the entire
         # native Local Splunk environment before the first remote-pipeline
         # config write. Local Splunk runs last so its gateway reload activates
@@ -10605,6 +10663,7 @@ def setup_splunk(
                 app.cfg.data_dir,
                 license_accepted=True,
                 require_s3=s3_export,
+                environment=native_child_env,
             )
         except LocalStackError as exc:
             raise click.ClickException(f"Local Splunk preflight failed: {exc}") from exc
@@ -10733,6 +10792,13 @@ def _interactive_splunk_setup(
             "  Enable local Splunk (Docker, HEC logs, Free mode)?", default=False
         )
         enable_enterprise = click.confirm("  Enable remote Splunk Enterprise (HEC)?", default=False)
+        if enable_logs:
+            # Reject an invalid configured variable name before any selected
+            # remote integration mutates config in this combined transaction.
+            _validated_splunk_gateway_token_env_name(
+                _configured_gateway_token_env_name(app.cfg),
+                platform_name="nt",
+            )
         combined = enable_logs and (enable_o11y or enable_enterprise)
         config_path = str(config_path_for_data_dir(app.cfg.data_dir))
         dotenv_path = os.path.join(app.cfg.data_dir, ".env")
@@ -11268,7 +11334,16 @@ def _apply_logs_config(
     refresh_bundle: bool = True,
 ) -> None:
     """Configure the local Splunk bridge as a canonical HEC destination."""
-    if bootstrap_bridge and _native_windows_local_splunk():
+    native_windows = bootstrap_bridge and _native_windows_local_splunk()
+    gateway_token_env = (
+        _validated_splunk_gateway_token_env_name(
+            _configured_gateway_token_env_name(app.cfg),
+            platform_name="nt" if native_windows else None,
+        )
+        if bootstrap_bridge
+        else ""
+    )
+    if native_windows:
         _apply_native_windows_logs_config(
             app,
             index=index,
@@ -11279,6 +11354,7 @@ def _apply_logs_config(
             s3_prefix=s3_prefix,
             aws_region=aws_region,
             refresh_bundle=refresh_bundle,
+            gateway_token_env=gateway_token_env,
         )
         return
 
@@ -11286,7 +11362,7 @@ def _apply_logs_config(
     if bootstrap_bridge:
         contract = _bootstrap_bridge(
             app.cfg.data_dir,
-            gateway_token_env=_configured_gateway_token_env_name(app.cfg),
+            gateway_token_env=gateway_token_env,
             s3_export=s3_export,
             s3_bucket=s3_bucket,
             s3_prefix=s3_prefix,
@@ -11338,8 +11414,14 @@ def _apply_native_windows_logs_config(
     s3_prefix: str | None,
     aws_region: str | None,
     refresh_bundle: bool,
+    gateway_token_env: str,
 ) -> None:
     """Commit native Local Splunk, its sink, and gateway as one transaction."""
+
+    native_child_env = _splunk_bridge_child_env(
+        gateway_token_env,
+        platform_name="nt",
+    )
 
     from defenseclaw.observability.local_splunk import (
         LOCAL_TOKEN_ENV,
@@ -11376,7 +11458,7 @@ def _apply_native_windows_logs_config(
             s3_prefix=s3_prefix,
             aws_region=aws_region,
             refresh_bundle=refresh_bundle,
-            environment=_splunk_bridge_child_env(),
+            environment=native_child_env,
         )
         contract = transaction.contract
         click.echo("    Docker Desktop, Compose v2, Linux containers, assets, and ports... ok")
@@ -11551,19 +11633,47 @@ def _resolve_bridge_bin(data_dir: str) -> str | None:
     return splunk_bridge_bin(data_dir)
 
 
-def _configured_gateway_token_env_name(cfg: Any) -> str:
-    """Return the configured gateway token variable name after validation."""
+def _validated_gateway_token_env_name(raw_name: Any) -> str:
+    """Return one exact portable environment name without normalizing it."""
 
-    gateway = getattr(cfg, "gateway", None)
-    raw_name = getattr(gateway, "token_env", "")
     if raw_name is None:
         return ""
     if not isinstance(raw_name, str):
         raise click.ClickException("gateway.token_env must be a portable environment variable name")
-    name = raw_name.strip()
-    if name and not dotenv_key_is_valid(name):
+    if raw_name != raw_name.strip() or (raw_name and not dotenv_key_is_valid(raw_name)):
         raise click.ClickException("gateway.token_env must be a portable environment variable name")
-    return name
+    return raw_name
+
+
+def _configured_gateway_token_env_name(cfg: Any) -> str:
+    """Return the configured gateway token variable name after validation."""
+
+    gateway = getattr(cfg, "gateway", None)
+    return _validated_gateway_token_env_name(getattr(gateway, "token_env", ""))
+
+
+def _validated_splunk_gateway_token_env_name(
+    gateway_token_env: Any,
+    *,
+    platform_name: str | None = None,
+) -> str:
+    """Reject names that a Local Splunk private env overlay can recreate."""
+
+    configured_name = _validated_gateway_token_env_name(gateway_token_env)
+    if not configured_name:
+        return ""
+    case_insensitive = (platform_name or os.name) == "nt"
+    compared_name = configured_name.casefold() if case_insensitive else configured_name
+    managed_names = (
+        {name.casefold() for name in _SPLUNK_BRIDGE_MANAGED_ENV_NAMES}
+        if case_insensitive
+        else _SPLUNK_BRIDGE_MANAGED_ENV_NAMES
+    )
+    if compared_name in managed_names:
+        raise click.ClickException(
+            "gateway.token_env must not collide with a Local Splunk managed environment variable name"
+        )
+    return configured_name
 
 
 def _splunk_bridge_child_env(
@@ -11579,9 +11689,10 @@ def _splunk_bridge_child_env(
     environment. Windows environment names are case-insensitive.
     """
 
-    configured_name = gateway_token_env.strip()
-    if configured_name and not dotenv_key_is_valid(configured_name):
-        raise click.ClickException("gateway.token_env must be a portable environment variable name")
+    configured_name = _validated_splunk_gateway_token_env_name(
+        gateway_token_env,
+        platform_name=platform_name,
+    )
     blocked_names = {
         _GATEWAY_TOKEN_ENV,
         _LEGACY_GATEWAY_TOKEN_ENV,
@@ -11706,8 +11817,8 @@ def _bootstrap_bridge(
     volumes survive ``down``, so user data is preserved) so the new
     bundle is what gets brought back up.
     """
-    env_file = _ensure_private_splunk_bridge_env(data_dir)
     env = _splunk_bridge_child_env(gateway_token_env)
+    env_file = _ensure_private_splunk_bridge_env(data_dir)
     if refresh_bundle:
         _refresh_and_maybe_restart_splunk_bridge(
             data_dir,
@@ -11988,6 +12099,19 @@ def _disable_splunk(
         raise click.ClickException(LOCAL_SHELL_STACKS_UNSUPPORTED_REASON)
     disable_both = not o11y_only and not logs_only and not enterprise_only
     manage_local = local_shell_stacks_supported()
+    native_windows = _native_windows_local_splunk()
+    gateway_token_env = (
+        _validated_splunk_gateway_token_env_name(
+            _configured_gateway_token_env_name(app.cfg),
+            platform_name="nt" if native_windows else None,
+        )
+        if (disable_both or logs_only) and manage_local
+        else ""
+    )
+    native_disable_requested = native_windows and manage_local and (disable_both or logs_only)
+    native_child_env = (
+        _splunk_bridge_child_env(gateway_token_env, platform_name="nt") if native_disable_requested else None
+    )
 
     click.echo()
     click.echo("  Disabling Splunk integration...")
@@ -11996,13 +12120,6 @@ def _disable_splunk(
     native_was_running = False
     native_s3_export = False
     native_s3_overrides: dict[str, str] = {}
-    native_windows = _native_windows_local_splunk()
-    gateway_token_env = (
-        _configured_gateway_token_env_name(app.cfg)
-        if (disable_both or logs_only) and manage_local and not native_windows
-        else ""
-    )
-    native_disable_requested = native_windows and manage_local and (disable_both or logs_only)
     config_snapshot: tuple[bytes | None, int | None] | None = None
     config_path = str(config_path_for_data_dir(app.cfg.data_dir))
 
@@ -12024,7 +12141,10 @@ def _disable_splunk(
         from defenseclaw.observability.local_stack import LocalStackError
 
         try:
-            native_controller, native_was_running = prepare_native_local_splunk_stop(app.cfg.data_dir)
+            native_controller, native_was_running = prepare_native_local_splunk_stop(
+                app.cfg.data_dir,
+                environment=native_child_env,
+            )
             if native_controller is not None and native_was_running:
                 native_s3_export, native_s3_overrides = native_controller.s3_runtime_state()
         except LocalStackError as exc:
@@ -12131,14 +12251,19 @@ def _disable_splunk(
 def _stop_bridge(data_dir: str, *, gateway_token_env: str = "") -> None:
     if not local_shell_stacks_supported():
         return
-    if _native_windows_local_splunk():
+    native_windows = _native_windows_local_splunk()
+    child_env = _splunk_bridge_child_env(
+        gateway_token_env,
+        platform_name="nt" if native_windows else None,
+    )
+    if native_windows:
         from defenseclaw.observability.local_splunk import stop_native_local_splunk
         from defenseclaw.observability.local_stack import LocalStackError
 
         try:
             stopped = stop_native_local_splunk(
                 data_dir,
-                environment=_splunk_bridge_child_env(),
+                environment=child_env,
             )
         except LocalStackError as exc:
             raise click.ClickException(f"could not stop owned Local Splunk stack: {exc}") from exc
@@ -12156,7 +12281,7 @@ def _stop_bridge(data_dir: str, *, gateway_token_env: str = "") -> None:
             capture_output=True,
             text=True,
             timeout=60,
-            env=_splunk_bridge_child_env(gateway_token_env),
+            env=child_env,
         )
         click.echo("    Local Splunk container stopped")
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):

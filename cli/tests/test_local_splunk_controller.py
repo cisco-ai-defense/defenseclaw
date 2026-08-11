@@ -576,6 +576,7 @@ def test_upgrade_rollback_restores_prior_assets_running_stack_and_volumes(
     runner.add_owned(stable, container_id="prior-container")
     runner.add_owned_exporter(stable, container_id="prior-exporter", bucket="restore-me")
     volumes_before = set(runner.volumes)
+    runtime_environment = {"NATIVE_UNRELATED_SETTING": "preserved"}
     monkeypatch.setattr(NativeLocalSplunkController, "_port_in_use", staticmethod(lambda _port: True))
     monkeypatch.setattr(NativeLocalSplunkController, "_web_ready", staticmethod(lambda _timeout: True))
     monkeypatch.setattr(NativeLocalSplunkController, "_hec_ready", lambda self, _timeout: True)
@@ -588,7 +589,7 @@ def test_upgrade_rollback_restores_prior_assets_running_stack_and_volumes(
         docker_path=docker_exe,
         runner=runner,
         os_name="linux",
-        environment={},
+        environment=runtime_environment,
         timeout=2,
     )
     assert b"replacement_index" in (stable / ENV_FILE_REL).read_bytes()
@@ -605,3 +606,6 @@ def test_upgrade_rollback_restores_prior_assets_running_stack_and_volumes(
     assert "--profile" in restored_up[0]
     assert restored_up[2]["S3_BUCKET"] == "restore-me"
     assert restored_up[2]["AWS_REGION"] == "eu-west-1"
+    assert restored_up[2]["NATIVE_UNRELATED_SETTING"] == "preserved"
+    assert "DEFENSECLAW_GATEWAY_TOKEN" not in restored_up[2]
+    assert "OPENCLAW_GATEWAY_TOKEN" not in restored_up[2]
