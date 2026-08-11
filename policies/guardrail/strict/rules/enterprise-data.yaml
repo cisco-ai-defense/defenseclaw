@@ -107,7 +107,7 @@ rules:
     tags: [pii, bulk-data]
 
   - id: ENT-BULK-JSON-PII
-    pattern: '(?i)"(?:ssn|social_security|credit_card|card_number|account_number|routing_number)"\s*:\s*(?:"(?:\d[\s-]?){6,19}"|\d{6,19}\b)[^{}]{0,512}"(?:ssn|social_security|credit_card|card_number|account_number|routing_number)"\s*:\s*(?:"(?:\d[\s-]?){6,19}"|\d{6,19}\b)'
+    pattern: '(?i)\{[^{}]{0,512}"(?:ssn|social_security|credit_card|card_number|account_number|routing_number)"\s*:\s*(?:"(?:\d[\s-]?){6,19}"|\d{6,19}\b)\s*,[^{}]{0,512}"(?:ssn|social_security|credit_card|card_number|account_number|routing_number)"\s*:\s*(?:"(?:\d[\s-]?){6,19}"|\d{6,19}\b)[^{}]{0,512}\}'
     title: "JSON record with multiple PII values"
     severity: HIGH
     confidence: 0.75
