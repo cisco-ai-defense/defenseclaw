@@ -777,10 +777,6 @@ func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectR
 		}
 	}
 
-	if content == "" {
-		return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
-	}
-
 	// managed_enterprise: Cisco AI Defense is the sole decision-maker.
 	// Skip the connector regex packs and the judge lane; AID inspects the
 	// message content directly and a nil AID verdict fails open.
@@ -790,6 +786,10 @@ func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectR
 			clampSourceScopeVerdict(verdict)
 		}
 		return verdict
+	}
+
+	if content == "" {
+		return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
 	}
 
 	// Outbound messages get the full scan — tool name "message" for context.

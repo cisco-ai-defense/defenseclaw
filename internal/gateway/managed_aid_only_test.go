@@ -210,12 +210,13 @@ func TestHookManagedAIDOnly_MessageContentFailOpen(t *testing.T) {
 	}
 }
 
-func TestHookManagedAIDOnly_FailOpenRecordsBoundedReasonMetric(t *testing.T) {
+func TestHookManagedAIDOnly_FailOpenProductionPathsRecordBoundedReasonMetric(t *testing.T) {
 	cases := []struct {
-		name       string
-		inspector  Inspector
-		content    string
-		wantReason string
+		name        string
+		inspector   Inspector
+		content     string
+		messagePath bool
+		wantReason  string
 	}{
 		{
 			name:       "unwired inspector",
@@ -229,9 +230,10 @@ func TestHookManagedAIDOnly_FailOpenRecordsBoundedReasonMetric(t *testing.T) {
 			wantReason: aidFailOpenUnavailable,
 		},
 		{
-			name:       "no content",
-			inspector:  &stubAIDInspector{verdict: blockVerdict()},
-			wantReason: aidFailOpenNoContent,
+			name:        "empty message content",
+			inspector:   &stubAIDInspector{verdict: blockVerdict()},
+			messagePath: true,
+			wantReason:  aidFailOpenNoContent,
 		},
 	}
 	for _, tc := range cases {
@@ -240,7 +242,12 @@ func TestHookManagedAIDOnly_FailOpenRecordsBoundedReasonMetric(t *testing.T) {
 			api := managedHookServer(tc.inspector)
 			api.bindObservabilityV8Lifecycle(capture)
 
-			verdict := api.inspectManagedAIDOnly(t.Context(), "run_shell", tc.content)
+			var verdict *ToolInspectVerdict
+			if tc.messagePath {
+				verdict = api.inspectMessageContent(t.Context(), &ToolInspectRequest{Tool: "message"})
+			} else {
+				verdict = api.inspectManagedAIDOnly(t.Context(), "run_shell", tc.content)
+			}
 			if verdict == nil || verdict.Action != "allow" {
 				t.Fatalf("fail-open verdict = %+v, want allow", verdict)
 			}
