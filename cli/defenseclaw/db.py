@@ -901,9 +901,11 @@ class Store:
                 AND {canonical_outcome} IN ({outcome_values})
                 AND {canonical_priority}
             )"""
-            health_failure = """(
+            health_failure = f"""(
                 bucket IN ('platform.health', 'diagnostic')
-                AND UPPER(COALESCE(severity, '')) IN ('CRITICAL','HIGH','ERROR')
+                AND UPPER(COALESCE(severity, '')) IN (
+                    {self._sql_string_values(ALERT_ACTIONABLE_SEVERITIES)}
+                )
             )"""
             legacy = f"""(
                 bucket IS NULL

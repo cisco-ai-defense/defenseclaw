@@ -3510,9 +3510,10 @@ func (s *Store) SelectAlertAcknowledgementTargets(
 	// An empty or "all" severity needs no extra predicate: eligibility already
 	// excludes clean lifecycle telemetry and accepts promoted INFO non-allow
 	// outcomes plus ERROR health records.
-	if selector.Severity != "" && selector.Severity != "all" {
+	severity := strings.ToUpper(strings.TrimSpace(selector.Severity))
+	if severity != "" && severity != "ALL" {
 		query += ` AND ` + alertEffectiveSeveritySQL() + ` = ?`
-		args = append(args, selector.Severity)
+		args = append(args, severity)
 	}
 	if selector.Connector != "" {
 		query += ` AND LOWER(COALESCE(event.connector,'')) = LOWER(?)`

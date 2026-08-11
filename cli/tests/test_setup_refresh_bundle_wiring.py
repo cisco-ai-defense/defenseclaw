@@ -327,6 +327,7 @@ class TestRefreshAndMaybeRestartSplunkBridge(unittest.TestCase):
             result = _refresh_and_maybe_restart_splunk_bridge(
                 "/data",
                 env_file=env_file,
+                child_env=os.environ.copy(),
             )
 
         self.assertTrue(result.was_running)
@@ -349,6 +350,9 @@ class TestRefreshAndMaybeRestartSplunkBridge(unittest.TestCase):
         )
         self.assertNotIn("DEFENSECLAW_GATEWAY_TOKEN", down_call.kwargs["env"])
         self.assertNotIn("OPENCLAW_GATEWAY_TOKEN", down_call.kwargs["env"])
+        running_env = _running.call_args.kwargs["environment"]
+        self.assertNotIn("DEFENSECLAW_GATEWAY_TOKEN", running_env)
+        self.assertNotIn("OPENCLAW_GATEWAY_TOKEN", running_env)
         mock_refresh.assert_called_once_with("/data")
 
     @patch(
@@ -386,6 +390,34 @@ class TestRefreshAndMaybeRestartSplunkBridge(unittest.TestCase):
 
 
 class TestStopSplunkBridgeEnvironment(unittest.TestCase):
+    @patch("defenseclaw.commands.cmd_setup.local_shell_stacks_supported", return_value=True)
+    @patch("defenseclaw.commands.cmd_setup._native_windows_local_splunk", return_value=True)
+    @patch(
+        "defenseclaw.observability.local_splunk.stop_native_local_splunk",
+        return_value=True,
+    )
+    def test_native_disable_does_not_inherit_gateway_tokens(
+        self,
+        native_stop: MagicMock,
+        _native_windows: MagicMock,
+        _supported: MagicMock,
+    ) -> None:
+        from defenseclaw.commands.cmd_setup import _stop_bridge
+
+        with patch.dict(
+            os.environ,
+            {
+                "DEFENSECLAW_GATEWAY_TOKEN": "gateway-sentinel",
+                "OPENCLAW_GATEWAY_TOKEN": "legacy-sentinel",
+            },
+        ):
+            _stop_bridge("/data")
+
+        native_stop.assert_called_once()
+        environment = native_stop.call_args.kwargs["environment"]
+        self.assertNotIn("DEFENSECLAW_GATEWAY_TOKEN", environment)
+        self.assertNotIn("OPENCLAW_GATEWAY_TOKEN", environment)
+
     @patch("defenseclaw.commands.cmd_setup.local_shell_stacks_supported", return_value=True)
     @patch("defenseclaw.commands.cmd_setup._native_windows_local_splunk", return_value=False)
     @patch(

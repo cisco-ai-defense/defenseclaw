@@ -849,10 +849,12 @@ func (c *hookOnlyConnector) ownedHookContractPresent(opts SetupOpts) (bool, erro
 		return false, fmt.Errorf("%s read plugin template %s: %w", c.name, c.pluginArtifactAsset, err)
 	}
 	marker, _, _ := bytes.Cut(tmpl, []byte("\n"))
+	marker = bytes.TrimSuffix(marker, []byte("\r"))
 	if len(marker) == 0 || !bytes.HasPrefix(marker, []byte("// defenseclaw-managed-plugin v")) {
 		return false, fmt.Errorf("%s managed plugin identity is invalid", c.name)
 	}
 	installedMarker, _, _ := bytes.Cut(data, []byte("\n"))
+	installedMarker = bytes.TrimSuffix(installedMarker, []byte("\r"))
 	return bytes.Equal(installedMarker, marker), nil
 }
 

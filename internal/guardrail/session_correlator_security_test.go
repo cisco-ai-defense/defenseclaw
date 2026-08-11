@@ -7,7 +7,9 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
@@ -25,6 +27,94 @@ type partitionedSessionFindingReader struct {
 
 type failingLedgerSessionFindingReader struct {
 	rows []SessionFindingRow
+}
+
+type persistedLedgerStressReader struct {
+	mu          sync.Mutex
+	rows        []SessionFindingRow
+	recentCalls int
+	ledgerCalls int
+}
+
+func (r *persistedLedgerStressReader) ListRecentFindingsInSession(
+	_, agentInstanceID, agentID string,
+	_ int,
+) ([]SessionFindingRow, error) {
+	r.mu.Lock()
+	r.recentCalls++
+	r.mu.Unlock()
+	rows := append([]SessionFindingRow(nil), r.rows...)
+	for index := range rows {
+		rows[index].AgentInstanceID = agentInstanceID
+		rows[index].AgentID = agentID
+	}
+	return rows, nil
+}
+
+func (r *persistedLedgerStressReader) ListFiredCorrelationRuleIDsInSession(
+	_, _, _ string,
+	candidateRuleIDs []string,
+) ([]string, error) {
+	r.mu.Lock()
+	r.ledgerCalls++
+	r.mu.Unlock()
+	return append([]string(nil), candidateRuleIDs...), nil
+}
+
+type durableCorrelationHarness struct {
+	mu        sync.Mutex
+	rows      []SessionFindingRow
+	fired     map[string]struct{}
+	summaries int
+	findings  int
+}
+
+func (h *durableCorrelationHarness) ListRecentFindingsInSession(
+	_, agentInstanceID, agentID string,
+	_ int,
+) ([]SessionFindingRow, error) {
+	rows := append([]SessionFindingRow(nil), h.rows...)
+	for index := range rows {
+		rows[index].AgentInstanceID = agentInstanceID
+		rows[index].AgentID = agentID
+	}
+	return rows, nil
+}
+
+func (h *durableCorrelationHarness) ListFiredCorrelationRuleIDsInSession(
+	_, _, _ string,
+	candidateRuleIDs []string,
+) ([]string, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var out []string
+	for _, ruleID := range candidateRuleIDs {
+		if _, exists := h.fired[strings.ToLower(strings.TrimSpace(ruleID))]; exists {
+			out = append(out, ruleID)
+		}
+	}
+	return out, nil
+}
+
+func (h *durableCorrelationHarness) InsertScanSummary(scanner.ScanSummaryParams) error {
+	h.mu.Lock()
+	h.summaries++
+	h.mu.Unlock()
+	return nil
+}
+
+func (h *durableCorrelationHarness) InsertScanFindings(
+	_, _ string,
+	findings []scanner.Finding,
+	_ scanner.ScanFindingMeta,
+) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.findings += len(findings)
+	for _, finding := range findings {
+		h.fired[strings.ToLower(strings.TrimSpace(finding.RuleID))] = struct{}{}
+	}
+	return nil
 }
 
 func (r failingLedgerSessionFindingReader) ListRecentFindingsInSession(
@@ -96,6 +186,103 @@ func (p *recordingCorrelationPersistence) InsertScanSummary(summary scanner.Scan
 func (p *recordingCorrelationPersistence) InsertScanFindings(_ string, _ string, findings []scanner.Finding, _ scanner.ScanFindingMeta) error {
 	p.findings = append(p.findings, append([]scanner.Finding(nil), findings...))
 	return nil
+}
+
+func TestSessionCorrelatorStaysDisabledWithoutAgentIdentity(t *testing.T) {
+	pattern := CorrelationPattern{
+		ID: "PAIR", WindowEvents: 10, SeverityOnMatch: "CRITICAL",
+		Sequence: []SequenceClause{{Severity: "MEDIUM"}, {Severity: "HIGH"}},
+	}
+	reader := &persistedLedgerStressReader{rows: []SessionFindingRow{
+		correlationTestRow("high", "TRUST-HIGH", "trust-exploit", "HIGH", "highfp", "hook-rules", nil),
+		correlationTestRow("medium", "TRUST-MEDIUM", "trust-exploit", "MEDIUM", "mediumfp", "hook-rules", nil),
+	}}
+	persisted := &recordingCorrelationPersistence{}
+	correlator := NewSessionCorrelator(reader, []CorrelationPattern{pattern})
+
+	if err := correlator.RunForSession(
+		context.Background(), "ambiguous-session", "", persisted, "codex:PostToolUse",
+		scanner.ScanFindingMeta{},
+	); err != nil {
+		t.Fatalf("RunForSession: %v", err)
+	}
+	if reader.recentCalls != 0 || reader.ledgerCalls != 0 {
+		t.Fatalf("ambiguous identity reached correlation storage: recent=%d ledger=%d", reader.recentCalls, reader.ledgerCalls)
+	}
+	if len(persisted.summaries) != 0 || len(persisted.findings) != 0 {
+		t.Fatalf("ambiguous identity emitted correlation: summaries=%#v findings=%#v", persisted.summaries, persisted.findings)
+	}
+}
+
+func TestSessionCorrelatorUsesFixedPartitionStorageUnderSessionChurn(t *testing.T) {
+	pattern := CorrelationPattern{
+		ID: "PAIR", WindowEvents: 10, SeverityOnMatch: "CRITICAL",
+		Sequence: []SequenceClause{{Severity: "MEDIUM"}, {Severity: "HIGH"}},
+	}
+	reader := &persistedLedgerStressReader{rows: []SessionFindingRow{
+		correlationTestRow("high", "TRUST-HIGH", "trust-exploit", "HIGH", "highfp", "hook-rules", nil),
+		correlationTestRow("medium", "TRUST-MEDIUM", "trust-exploit", "MEDIUM", "mediumfp", "hook-rules", nil),
+	}}
+	persisted := &recordingCorrelationPersistence{}
+	correlator := NewSessionCorrelator(reader, []CorrelationPattern{pattern})
+	const sessions = 4096
+
+	for index := 0; index < sessions; index++ {
+		if err := correlator.RunForSession(
+			context.Background(), "session-"+strconv.Itoa(index), "agent", persisted,
+			"codex:PostToolUse", scanner.ScanFindingMeta{},
+		); err != nil {
+			t.Fatalf("RunForSession(%d): %v", index, err)
+		}
+	}
+	if reader.recentCalls != sessions || reader.ledgerCalls != sessions {
+		t.Fatalf("stress calls recent=%d ledger=%d, want %d each", reader.recentCalls, reader.ledgerCalls, sessions)
+	}
+	if got := len(correlator.partitionLocks); got != sessionCorrelatorPartitionLockStripes {
+		t.Fatalf("partition lock storage=%d, want fixed %d", got, sessionCorrelatorPartitionLockStripes)
+	}
+	if len(persisted.summaries) != 0 || len(persisted.findings) != 0 {
+		t.Fatalf("durably fired sessions replayed: summaries=%d findings=%d", len(persisted.summaries), len(persisted.findings))
+	}
+}
+
+func TestSessionCorrelatorSerializesSamePartitionAgainstDurableLedger(t *testing.T) {
+	pattern := CorrelationPattern{
+		ID: "PAIR", WindowEvents: 10, SeverityOnMatch: "CRITICAL",
+		Sequence: []SequenceClause{{Severity: "MEDIUM"}, {Severity: "HIGH"}},
+	}
+	harness := &durableCorrelationHarness{
+		rows: []SessionFindingRow{
+			correlationTestRow("high", "TRUST-HIGH", "trust-exploit", "HIGH", "highfp", "hook-rules", nil),
+			correlationTestRow("medium", "TRUST-MEDIUM", "trust-exploit", "MEDIUM", "mediumfp", "hook-rules", nil),
+		},
+		fired: make(map[string]struct{}),
+	}
+	correlator := NewSessionCorrelator(harness, []CorrelationPattern{pattern})
+
+	const evaluations = 32
+	errCh := make(chan error, evaluations)
+	var wg sync.WaitGroup
+	for index := 0; index < evaluations; index++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errCh <- correlator.RunForSession(
+				context.Background(), "shared-session", "agent", harness,
+				"codex:PostToolUse", scanner.ScanFindingMeta{},
+			)
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		if err != nil {
+			t.Fatalf("RunForSession: %v", err)
+		}
+	}
+	if harness.summaries != 1 || harness.findings != 1 {
+		t.Fatalf("same partition emitted summaries=%d findings=%d, want 1/1", harness.summaries, harness.findings)
+	}
 }
 
 func TestSessionCorrelatorRejectsSelfObservationAmplificationInputs(t *testing.T) {

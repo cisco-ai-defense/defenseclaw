@@ -237,6 +237,29 @@ def test_large_detection_only_payload_keeps_tags_outside_payload_bound() -> None
     assert "large-detection-only" not in {item.id for item in reader.load_alerts(500)}
 
 
+def test_scalar_detection_only_tag_remains_compatible() -> None:
+    store = _store()
+    payload = {"defenseclaw.finding.tags": "detection-only"}
+    store.db.execute(
+        """INSERT INTO audit_events (
+               id, timestamp, bucket, event_name, source, signal, severity,
+               action, actor, details, connector, redaction_profile,
+               payload_json, projected_record_json
+           ) VALUES (
+               'scalar-detection-only', '2026-07-11T00:00:01Z',
+               'security.finding', 'finding.observed', 'gateway', 'logs',
+               'HIGH', 'scan-finding', 'gateway', '', 'codex', 'default', ?, '{}'
+           )""",
+        (json.dumps(payload),),
+    )
+    store.db.commit()
+    reader = V8EventHistoryReader(store)
+
+    row = next(item for item in reader.load(500) if item.id == "scalar-detection-only")
+    assert row.finding_tags == ("detection-only",)
+    assert "scalar-detection-only" not in {item.id for item in reader.load_alerts(500)}
+
+
 def test_alert_reader_keeps_malformed_payload_fail_visible() -> None:
     store = _store()
     store.db.execute(

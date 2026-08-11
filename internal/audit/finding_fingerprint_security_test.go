@@ -52,6 +52,7 @@ func TestLogScanKeysAllEvidenceFingerprintsAndDeduplicatesRepeats(t *testing.T) 
 	if err := logger.LogScanWithCorrelation(t.Context(), result, "alert", corr); err != nil {
 		t.Fatalf("log keyed findings: %v", err)
 	}
+	secretRuleID := result.Findings[0].RuleID
 
 	rows, err := logger.store.db.Query(`
 SELECT rule_id, content_fingerprint FROM scan_findings
@@ -77,7 +78,7 @@ WHERE scan_id = ? ORDER BY rowid`, result.ScanID)
 	if err := rows.Err(); err != nil {
 		t.Fatal(err)
 	}
-	for _, ruleID := range []string{"SEC-SHARED", "LP-PII-DATA", "C2-SHARED-EGRESS"} {
+	for _, ruleID := range []string{secretRuleID, "LP-PII-DATA", "C2-SHARED-EGRESS"} {
 		if fingerprints[ruleID] != wantShared {
 			t.Fatalf("%s fingerprint=%q, want shared keyed token %q", ruleID, fingerprints[ruleID], wantShared)
 		}

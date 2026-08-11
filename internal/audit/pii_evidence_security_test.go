@@ -128,6 +128,7 @@ func TestLogScanNeutralizesPIIValuesAcrossPersistenceSurfaces(t *testing.T) {
 	if err := logger.LogScanWithCorrelation(t.Context(), result, "alert", corr); err != nil {
 		t.Fatalf("log PII findings: %v", err)
 	}
+	detectionOnlyByRuleID := make(map[string]bool, len(cases))
 	for index := range result.Findings {
 		if result.Findings[index].ID != "" {
 			t.Fatalf("PII finding %d retained producer ID %q", index, result.Findings[index].ID)
@@ -135,6 +136,11 @@ func TestLogScanNeutralizesPIIValuesAcrossPersistenceSurfaces(t *testing.T) {
 		if result.Findings[index].FindingOccurrenceID == "" {
 			t.Fatalf("PII finding %d lost canonical occurrence ID", index)
 		}
+		persistedRuleID := result.Findings[index].RuleID
+		rawValues[persistedRuleID] = rawValues[cases[index].ruleID]
+		keyedFingerprints[persistedRuleID] = keyedFingerprints[cases[index].ruleID]
+		rawDigests[persistedRuleID] = rawDigests[cases[index].ruleID]
+		detectionOnlyByRuleID[persistedRuleID] = cases[index].detectionOnly
 	}
 
 	rows, err := logger.store.db.Query(`
@@ -175,7 +181,7 @@ FROM scan_findings WHERE scan_id = ?`, result.ScanID)
 				ruleID, title, severity, fingerprint, evaluationID, sessionID, agentInstanceID)
 		}
 		wantTags := `["pii","redacted"]`
-		if ruleID == "LP-PII-DATA" {
+		if detectionOnlyByRuleID[ruleID] {
 			wantTags = `["pii","detection-only","redacted"]`
 		}
 		if tags != wantTags {

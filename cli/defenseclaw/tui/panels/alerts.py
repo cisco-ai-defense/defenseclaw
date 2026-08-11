@@ -20,6 +20,7 @@ from typing import Any, Literal
 from rich.markup import escape as rich_escape
 
 from defenseclaw.alert_semantics import (
+    ALERT_ACTIONABLE_SEVERITIES,
     ALERT_ALL_SEVERITIES,
     ALERT_LEGACY_FINDING_ACTIONS,
     ALERT_NON_ALLOW_OUTCOMES,
@@ -45,7 +46,6 @@ SeverityFilter = Literal["", "CRITICAL", "HIGH", "MEDIUM", "LOW"]
 AlertRowKind = Literal["audit", "scan", "scan_finding", "egress"]
 
 SEVERITY_FILTERS: tuple[SeverityFilter, ...] = ("", "CRITICAL", "HIGH", "MEDIUM", "LOW")
-ACTIONABLE_SEVERITIES = {"CRITICAL", "HIGH", "ERROR"}
 LOW_SIGNAL_SEVERITIES = {"INFO", "LOW", "MEDIUM", "WARNING"}
 
 
@@ -216,7 +216,7 @@ def _is_v8_alert_row(row: V8EventHistoryRow) -> bool:
     if row.bucket in {"enforcement.action", "network.egress"}:
         return _v8_row_outcome(row) in ALERT_NON_ALLOW_OUTCOMES
     if row.bucket in {"platform.health", "diagnostic"}:
-        return severity in {"CRITICAL", "HIGH", "ERROR"}
+        return severity in ALERT_ACTIONABLE_SEVERITIES
     if not row.bucket:
         action = (row.action or "").strip().lower()
         if action == "connector-hook":
@@ -1160,7 +1160,7 @@ def _event_display_severity(event: AlertEvent) -> str:
 def _is_low_signal_alert(row: AlertRow) -> bool:
     event = row.event
     severity = _event_severity_bucket(event)
-    if severity in ACTIONABLE_SEVERITIES:
+    if severity in ALERT_ACTIONABLE_SEVERITIES:
         return False
     if severity not in LOW_SIGNAL_SEVERITIES:
         return False

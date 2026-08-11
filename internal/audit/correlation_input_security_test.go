@@ -99,18 +99,20 @@ func TestListRecentFindingsInSessionFiltersAmplificationBeforeLimit(t *testing.T
 	insert("scan-repeat-one", "finding-repeat-one", "hook-rules", "TRUST-REPEAT", "repeat12", []string{"prompt-injection"}, base.Add(time.Second))
 	insert("scan-repeat-two", "finding-repeat-two", "hook-rules", "TRUST-REPEAT", "repeat12", []string{"prompt-injection"}, base.Add(2*time.Second))
 	insert("scan-detection", "finding-detection", "hook-rules", "TRUST-SOURCE", "source12", []string{"prompt-injection", "detection-only"}, base.Add(3*time.Second))
+	insert("scan-detection-spaced", "finding-detection-spaced", "hook-rules", "TRUST-SPACED", "spaced12", []string{"prompt-injection", " Detection-Only "}, base.Add(3250*time.Millisecond))
+	insert("scan-similar-tag", "finding-similar-tag", "hook-rules", "TRUST-SIMILAR", "similar1", []string{"prompt-injection", "pre-detection-only"}, base.Add(3500*time.Millisecond))
 	insert("scan-correlation", "finding-correlation", "correlator", "CORR-TEST", "corr1234", []string{"correlation"}, base.Add(4*time.Second))
 
 	rows, err := logger.store.ListRecentFindingsInSession("session", "agent", "", 2)
 	if err != nil {
 		t.Fatalf("ListRecentFindingsInSession: %v", err)
 	}
-	if len(rows) != 2 || rows[0].ID != "finding-repeat-one" || rows[1].ID != "finding-observe" ||
+	if len(rows) != 2 || rows[0].ID != "finding-similar-tag" || rows[1].ID != "finding-repeat-one" ||
 		rows[0].Scanner != "hook-rules" || rows[1].Scanner != "hook-rules" {
-		t.Fatalf("eligible correlation rows=%#v, want earliest repeat plus distinct Observe finding", rows)
+		t.Fatalf("eligible correlation rows=%#v, want substring tag plus earliest repeated primitive", rows)
 	}
-	if len(rows[1].Tags) != 1 || rows[1].Tags[0] != "prompt-injection" {
-		t.Fatalf("projected tags=%v, want prompt-injection", rows[1].Tags)
+	if len(rows[0].Tags) != 2 || rows[0].Tags[1] != "pre-detection-only" {
+		t.Fatalf("projected tags=%v, want non-exact detection-only substring retained", rows[0].Tags)
 	}
 }
 

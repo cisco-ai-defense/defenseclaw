@@ -68,11 +68,16 @@ type SessionFindingRow struct {
 // library against a session's recent findings and writes back CORR-*
 // synthetic findings when any pattern fires.
 type SessionCorrelator struct {
-	reader       SessionFindingReader
-	patterns     []CorrelationPattern
-	windowLimit  int
-	firedPerSess sync.Map // map[sessKey]map[patternID]struct{} to avoid firing the same pattern repeatedly in a session
+	reader      SessionFindingReader
+	patterns    []CorrelationPattern
+	windowLimit int
+	// Partition locks close the in-process check-then-persist race without
+	// retaining attacker-controlled session keys. The persisted CORR-* ledger
+	// remains the durable once-per-session authority after a lock is released.
+	partitionLocks [sessionCorrelatorPartitionLockStripes]sync.Mutex
 }
+
+const sessionCorrelatorPartitionLockStripes = 64
 
 // NewSessionCorrelator builds a correlator from a reader and a
 // pre-loaded pattern set. The reader is how it reaches into persisted
@@ -156,44 +161,47 @@ func (c *SessionCorrelator) RunForSession(
 		return nil
 	}
 
-	sessKey := partition.key()
-	firedAny, _ := c.firedPerSess.LoadOrStore(sessKey, &sync.Map{})
-	fired := firedAny.(*sync.Map)
+	// Serialize the durable-ledger read and synthetic write for this partition
+	// inside one process. A fixed stripe table bounds memory independently of
+	// client-controlled session cardinality; collisions only serialize work.
+	partitionLock := &c.partitionLocks[correlationPartitionLockIndex(partition.key())]
+	partitionLock.Lock()
+	defer partitionLock.Unlock()
 
-	// The in-memory map handles concurrent/repeated evaluations within one
-	// process. Query persisted CORR-* identities for currently matched patterns
-	// as a durable once-per-session ledger so a restart cannot replay an alert
-	// from unchanged primitives. These rows never enter the contributor window.
+	// Query persisted CORR-* identities for currently matched patterns as the
+	// durable once-per-session ledger. These rows never enter the contributor
+	// window, and an evicted/previous partition needs no retained in-memory key.
 	candidateRuleIDs := make([]string, 0, len(matches))
+	candidateSet := make(map[string]struct{}, len(matches))
 	for _, match := range matches {
-		if _, already := fired.Load(match.Pattern.ID); !already {
+		key := strings.ToLower(strings.TrimSpace(match.SyntheticFindingRuleID()))
+		if _, exists := candidateSet[key]; !exists {
+			candidateSet[key] = struct{}{}
 			candidateRuleIDs = append(candidateRuleIDs, match.SyntheticFindingRuleID())
 		}
 	}
-	if len(candidateRuleIDs) > 0 {
-		persistedRuleIDs, err := c.reader.ListFiredCorrelationRuleIDsInSession(
-			partition.sessionID, partition.agentInstanceID, partition.agentID, candidateRuleIDs,
-		)
-		if err != nil {
-			return fmt.Errorf("correlator: read persisted firing ledger: %w", err)
-		}
-		persisted := make(map[string]struct{}, len(persistedRuleIDs))
-		for _, ruleID := range persistedRuleIDs {
-			persisted[strings.ToLower(strings.TrimSpace(ruleID))] = struct{}{}
-		}
-		for _, match := range matches {
-			key := strings.ToLower(strings.TrimSpace(match.SyntheticFindingRuleID()))
-			if _, exists := persisted[key]; exists {
-				fired.Store(match.Pattern.ID, struct{}{})
-			}
-		}
+	persistedRuleIDs, err := c.reader.ListFiredCorrelationRuleIDsInSession(
+		partition.sessionID, partition.agentInstanceID, partition.agentID, candidateRuleIDs,
+	)
+	if err != nil {
+		return fmt.Errorf("correlator: read persisted firing ledger: %w", err)
+	}
+	persisted := make(map[string]struct{}, len(persistedRuleIDs))
+	for _, ruleID := range persistedRuleIDs {
+		persisted[strings.ToLower(strings.TrimSpace(ruleID))] = struct{}{}
 	}
 
 	var synthetic []scanner.Finding
+	scheduled := make(map[string]struct{}, len(matches))
 	for _, m := range matches {
-		if _, already := fired.LoadOrStore(m.Pattern.ID, struct{}{}); already {
+		key := strings.ToLower(strings.TrimSpace(m.SyntheticFindingRuleID()))
+		if _, already := persisted[key]; already {
 			continue
 		}
+		if _, already := scheduled[key]; already {
+			continue
+		}
+		scheduled[key] = struct{}{}
 		synthetic = append(synthetic, syntheticFindingFromMatch(m, meta))
 	}
 	if len(synthetic) == 0 {
@@ -253,6 +261,21 @@ func newCorrelationAgentPartition(sessionID, agentInstanceID, agentID string) (c
 
 func (p correlationAgentPartition) key() string {
 	return p.sessionID + "\x00" + p.agentInstanceID + "\x00" + p.agentID
+}
+
+func correlationPartitionLockIndex(key string) int {
+	// FNV-1a is sufficient for lock striping: collisions affect scheduling,
+	// never identity or authorization, and the table size is fixed.
+	const (
+		fnvOffset32 = uint32(2166136261)
+		fnvPrime32  = uint32(16777619)
+	)
+	hash := fnvOffset32
+	for index := 0; index < len(key); index++ {
+		hash ^= uint32(key[index])
+		hash *= fnvPrime32
+	}
+	return int(hash % uint32(sessionCorrelatorPartitionLockStripes))
 }
 
 func (p correlationAgentPartition) includes(row SessionFindingRow) bool {

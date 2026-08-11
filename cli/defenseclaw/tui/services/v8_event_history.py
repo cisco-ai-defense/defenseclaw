@@ -152,7 +152,7 @@ _V8_ALERT_WHERE_SQL_TEMPLATE = """
         )
         OR (
             bucket IN ('platform.health', 'diagnostic')
-            AND UPPER(COALESCE(severity, 'INFO')) IN ('CRITICAL','HIGH','ERROR')
+            AND UPPER(COALESCE(severity, 'INFO')) IN ({actionable_severities})
         )
         OR (
             bucket IS NULL
@@ -187,6 +187,7 @@ def _v8_alert_where_sql(columns: frozenset[str]) -> str:
         structured_json="structured_json" if "structured_json" in columns else "NULL",
         enforced="enforced" if "enforced" in columns else "NULL",
         all_severities=_sql_string_values(ALERT_ALL_SEVERITIES),
+        actionable_severities=_sql_string_values(ALERT_ACTIONABLE_SEVERITIES),
         non_allow_outcomes=_sql_string_values(ALERT_NON_ALLOW_OUTCOMES),
         legacy_finding_actions=_sql_string_values(ALERT_LEGACY_FINDING_ACTIONS),
     )
@@ -506,8 +507,7 @@ class V8EventHistoryReader:
                 ),
             ).fetchall()
             return _decode_v8_event_history_rows(rows)
-        else:
-            where = "signal = 'logs' AND bucket IS NOT NULL AND bucket <> ''"
+        where = "signal = 'logs' AND bucket IS NOT NULL AND bucket <> ''"
         rows = self.db.execute(
             f"""SELECT {select_columns}
                FROM audit_events

@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -43,5 +44,45 @@ func TestFirstAcceptedRegexMatchPreservesFullTextContext(t *testing.T) {
 				t.Fatalf("validator calls=%d, want one original-context candidate", calls)
 			}
 		})
+	}
+}
+
+func TestFirstAcceptedRegexMatchRejectsTypedNil(t *testing.T) {
+	t.Parallel()
+	var pattern *regexp.Regexp
+	if match := firstAcceptedRegexMatch(pattern, "candidate", func(string) bool { return true }); match != nil {
+		t.Fatalf("typed-nil pattern returned match %v", match)
+	}
+	if match, normalized, ok := findAcceptedLocalSecretMatch(
+		"candidate", "candidate", localSecretDetector{pattern: pattern},
+	); ok || normalized || match != "" {
+		t.Fatalf("typed-nil local detector returned %q normalized=%v ok=%v", match, normalized, ok)
+	}
+}
+
+func TestCredibleSSNContextAlignsWideDelimitedHeader(t *testing.T) {
+	t.Parallel()
+	columns := make([]string, 0, 25)
+	values := make([]string, 0, 25)
+	for index := 0; index < 24; index++ {
+		columns = append(columns, "wide_export_column_"+strings.Repeat("x", 8))
+		values = append(values, strings.Repeat("v", 24))
+	}
+	columns = append(columns, "ssn")
+	values = append(values, "731-42-8065")
+	text := strings.Join(columns, ",") + "\n" + strings.Join(values, ",")
+	start := strings.LastIndex(text, values[len(values)-1])
+	if start < 0 || start-strings.LastIndex(text[:start], "ssn") <= 80 {
+		t.Fatal("wide CSV fixture did not exceed the ordinary SSN label window")
+	}
+	if !credibleSSNContext(text, start, start+len(values[len(values)-1])) {
+		t.Fatal("wide CSV record lost its aligned SSN header context")
+	}
+
+	columns[len(columns)-1] = "ssn_hash"
+	nonRecord := strings.Join(columns, ",") + "\n" + strings.Join(values, ",")
+	start = strings.LastIndex(nonRecord, values[len(values)-1])
+	if credibleSSNContext(nonRecord, start, start+len(values[len(values)-1])) {
+		t.Fatal("non-record ssn_hash column was treated as an SSN label")
 	}
 }

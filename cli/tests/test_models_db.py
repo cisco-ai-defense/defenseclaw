@@ -666,6 +666,10 @@ class ModelsDbTests(unittest.TestCase):
         )
         self.assertEqual(self.store.get_counts().alerts, len(alerts))
 
+    @unittest.skipIf(
+        sqlite3.sqlite_version_info < (3, 35, 0),
+        "SQLite 3.35+ is required for ALTER TABLE DROP COLUMN",
+    )
     def test_read_only_alert_queries_support_schema_without_payload_json(self):
         now = datetime.now(timezone.utc).isoformat()
         self.store.db.execute(

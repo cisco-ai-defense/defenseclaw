@@ -63,7 +63,7 @@ func TestCodeGuardPostLogVerdictUsesCanonicalRuleID(t *testing.T) {
 
 func TestScanAPIResponseEnvelopeRetainsCanonicalFindingIdentity(t *testing.T) {
 	result := &scanner.ScanResult{Findings: []scanner.Finding{{
-		RuleID: "redacted.secret.id-0123456789abcdef", FindingOccurrenceID: "finding-occurrence",
+		RuleID: "redacted.secret.id-0123456789abcdef.mac-fedcba9876543210", FindingOccurrenceID: "finding-occurrence",
 		Severity: scanner.SeverityHigh, Title: "Secret finding",
 	}}}
 	encoded, err := json.Marshal(scanAPIResponseEnvelope(result))

@@ -17,6 +17,7 @@
 package connector
 
 import (
+	"bytes"
 	"context"
 	"os"
 	"path/filepath"
@@ -120,6 +121,16 @@ func TestOpenCodeOwnedHookContractRequiresExactRegularFileMarker(t *testing.T) {
 	rendered, err := os.ReadFile(pluginPath)
 	if err != nil {
 		t.Fatalf("read rendered plugin: %v", err)
+	}
+	crlfRendered := bytes.ReplaceAll(rendered, []byte("\n"), []byte("\r\n"))
+	if err := os.WriteFile(pluginPath, crlfRendered, 0o600); err != nil {
+		t.Fatalf("write CRLF-rendered plugin: %v", err)
+	}
+	if present, err := conn.ownedHookContractPresent(opts); err != nil || !present {
+		t.Fatalf("CRLF marker present=%v err=%v, want true/nil", present, err)
+	}
+	if err := os.WriteFile(pluginPath, rendered, 0o600); err != nil {
+		t.Fatalf("restore rendered plugin: %v", err)
 	}
 
 	foreignFirstLine := append([]byte("// operator-owned plugin\n"), rendered...)

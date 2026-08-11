@@ -27,17 +27,13 @@ func firstAcceptedRuleMatch(rule PatternRule, text string) []int {
 	})
 }
 
-func firstAcceptedRegexMatch(pattern interface {
-	FindAllStringIndex(string, int) [][]int
-}, text string, accept func(string) bool) []int {
+func firstAcceptedRegexMatch(pattern *regexp.Regexp, text string, accept func(string) bool) []int {
 	return firstAcceptedRegexMatchAt(pattern, text, func(match string, _, _ int) bool {
 		return accept(match)
 	})
 }
 
-func firstAcceptedRegexMatchAt(pattern interface {
-	FindAllStringIndex(string, int) [][]int
-}, text string, accept func(match string, start, end int) bool) []int {
+func firstAcceptedRegexMatchAt(pattern *regexp.Regexp, text string, accept func(match string, start, end int) bool) []int {
 	if pattern == nil || text == "" {
 		return nil
 	}
@@ -54,9 +50,7 @@ func firstAcceptedRegexMatchAt(pattern interface {
 	return nil
 }
 
-func findAcceptedLocalPIIMatch(original, normalized string, pattern interface {
-	FindAllStringIndex(string, int) [][]int
-}) (match string, wasNormalized, ok bool) {
+func findAcceptedLocalPIIMatch(original, normalized string, pattern *regexp.Regexp) (match string, wasNormalized, ok bool) {
 	acceptOriginal := func(match string, start, end int) bool {
 		return acceptedLocalPIIMatchAt(original, match, start, end)
 	}
@@ -78,6 +72,9 @@ func findAcceptedLocalSecretMatch(
 	original, normalized string,
 	detector localSecretDetector,
 ) (match string, wasNormalized, ok bool) {
+	if detector.pattern == nil {
+		return "", false, false
+	}
 	accept := func(match string) bool {
 		return acceptedLocalSecretMatch(detector.kind, match)
 	}
@@ -92,9 +89,7 @@ func findAcceptedLocalSecretMatch(
 	return "", false, false
 }
 
-func findAcceptedRuleLoc(original, normalized, ruleID string, pattern interface {
-	FindAllStringIndex(string, int) [][]int
-}) (loc []int, source string, wasNormalized, ok bool) {
+func findAcceptedRuleLoc(original, normalized, ruleID string, pattern *regexp.Regexp) (loc []int, source string, wasNormalized, ok bool) {
 	acceptOriginal := func(match string, start, end int) bool {
 		return acceptedRuleMatchAt(ruleID, original, match, start, end)
 	}
@@ -164,6 +159,15 @@ func credibleSSNContext(text string, start, end int) bool {
 	if hasDistinctValidSSNList(text, start, end) {
 		return true
 	}
+	// Wide CSV/TSV exports can place the column header hundreds of bytes
+	// before the first value. Preserve that record context by requiring the
+	// candidate's exact column to align with a recognized header on the
+	// immediately preceding row. This is deliberately narrower than simply
+	// widening the free-text window, which would turn distant schema examples
+	// back into alerts.
+	if hasDelimitedSSNColumnHeader(text, start) {
+		return true
+	}
 	windowStart := start - 80
 	if windowStart < 0 {
 		windowStart = 0
@@ -189,6 +193,129 @@ func credibleSSNContext(text string, start, end int) bool {
 		}
 	}
 	return false
+}
+
+const maxDelimitedSSNContextBytes = 64 * 1024
+
+func hasDelimitedSSNColumnHeader(text string, candidateStart int) bool {
+	if candidateStart <= 0 || candidateStart > len(text) {
+		return false
+	}
+	rowSearchStart := candidateStart - maxDelimitedSSNContextBytes
+	if rowSearchStart < 0 {
+		rowSearchStart = 0
+	}
+	rowBreak := strings.LastIndexByte(text[rowSearchStart:candidateStart], '\n')
+	if rowBreak < 0 {
+		return false
+	}
+	rowStart := rowSearchStart + rowBreak + 1
+	headerEnd := rowStart - 1
+	if headerEnd > 0 && text[headerEnd-1] == '\r' {
+		headerEnd--
+	}
+	headerSearchStart := headerEnd - maxDelimitedSSNContextBytes
+	if headerSearchStart < 0 {
+		headerSearchStart = 0
+	}
+	headerBreak := strings.LastIndexByte(text[headerSearchStart:headerEnd], '\n')
+	headerStart := headerSearchStart
+	if headerBreak >= 0 {
+		headerStart += headerBreak + 1
+	} else if headerSearchStart != 0 {
+		return false
+	}
+
+	rowEnd := len(text)
+	if boundedEnd := rowStart + maxDelimitedSSNContextBytes; boundedEnd < rowEnd {
+		rowEnd = boundedEnd
+	}
+	if nextBreak := strings.IndexByte(text[candidateStart:rowEnd], '\n'); nextBreak >= 0 {
+		rowEnd = candidateStart + nextBreak
+	}
+	if rowEnd > rowStart && text[rowEnd-1] == '\r' {
+		rowEnd--
+	}
+	header := text[headerStart:headerEnd]
+	row := text[rowStart:rowEnd]
+
+	delimiter := byte(0)
+	for _, candidate := range []byte{'\t', ','} {
+		if strings.IndexByte(header, candidate) >= 0 && strings.IndexByte(row, candidate) >= 0 {
+			delimiter = candidate
+			break
+		}
+	}
+	if delimiter == 0 {
+		return false
+	}
+	column, ok := delimitedFieldIndexAt(row, candidateStart-rowStart, delimiter)
+	if !ok {
+		return false
+	}
+	headerField, ok := delimitedField(header, column, delimiter)
+	if !ok {
+		return false
+	}
+	label := strings.ToLower(strings.Trim(strings.TrimSpace(headerField), `"'`))
+	label = strings.Join(strings.Fields(strings.NewReplacer("_", " ", "-", " ").Replace(label)), " ")
+	switch label {
+	case "ssn", "social security", "social security number", "taxpayer id", "taxpayer identification":
+		return true
+	default:
+		return false
+	}
+}
+
+func delimitedFieldIndexAt(row string, offset int, delimiter byte) (int, bool) {
+	if offset < 0 || offset > len(row) {
+		return 0, false
+	}
+	column := 0
+	quoted := false
+	for index := 0; index < offset; index++ {
+		switch row[index] {
+		case '"':
+			if quoted && index+1 < offset && row[index+1] == '"' {
+				index++
+				continue
+			}
+			quoted = !quoted
+		default:
+			if row[index] == delimiter && !quoted {
+				column++
+			}
+		}
+	}
+	return column, true
+}
+
+func delimitedField(row string, wanted int, delimiter byte) (string, bool) {
+	if wanted < 0 {
+		return "", false
+	}
+	column := 0
+	start := 0
+	quoted := false
+	for index := 0; index <= len(row); index++ {
+		if index == len(row) || (row[index] == delimiter && !quoted) {
+			if column == wanted {
+				return row[start:index], true
+			}
+			column++
+			start = index + 1
+			continue
+		}
+		if row[index] != '"' {
+			continue
+		}
+		if quoted && index+1 < len(row) && row[index+1] == '"' {
+			index++
+			continue
+		}
+		quoted = !quoted
+	}
+	return "", false
 }
 
 func hasDistinctValidSSNList(text string, start, end int) bool {

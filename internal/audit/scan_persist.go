@@ -297,7 +297,17 @@ WITH eligible AS (
 	FROM scan_findings
 	WHERE %s
 		AND COALESCE(scanner, '') <> ? COLLATE NOCASE
-		AND COALESCE(tags, '[]') NOT LIKE ? COLLATE NOCASE
+		AND NOT EXISTS (
+			SELECT 1
+			FROM json_each(
+				CASE
+					WHEN json_valid(COALESCE(tags, '')) THEN
+						CASE WHEN json_type(tags) = 'array' THEN tags ELSE '[]' END
+					ELSE '[]'
+				END
+			) AS finding_tag
+			WHERE LOWER(TRIM(CAST(finding_tag.value AS TEXT))) = ?
+		)
 	ORDER BY timestamp DESC, id DESC
 	LIMIT ?
 ), ranked AS (
@@ -317,9 +327,9 @@ SELECT id, agent_id, agent_instance_id, scanner, rule_id, category, severity, ta
 FROM ranked
 WHERE primitive_rank = 1
 ORDER BY timestamp DESC, id DESC
-LIMIT ?`, identityWhere)
+	LIMIT ?`, identityWhere)
 	queryArgs := append([]any(nil), identityArgs...)
-	queryArgs = append(queryArgs, "correlator", `%"`+scanner.FindingTagDetectionOnly+`"%`, candidateLimit, limit)
+	queryArgs = append(queryArgs, "correlator", strings.ToLower(scanner.FindingTagDetectionOnly), candidateLimit, limit)
 	rows, err := s.db.Query(query, queryArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("audit: list recent findings in session: %w", err)

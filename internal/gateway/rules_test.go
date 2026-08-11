@@ -26,6 +26,10 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
+func runtimeDetectorSignature(parts ...string) string {
+	return strings.Join(parts, "")
+}
+
 // ---------------------------------------------------------------------------
 // Secret rules — true positives
 // ---------------------------------------------------------------------------
@@ -36,29 +40,29 @@ func TestSecretRules_TruePositives(t *testing.T) {
 		input  string
 		wantID string
 	}{
-		{"AWS access key", `{"key": "AKIA7G4N2K9Q6M8R3T5V"}`, "SEC-AWS-KEY"},
-		{"AWS secret key assignment", `aws_secret_access_key = wJ8fN2qK5vR9mT3xP7dL1cH6zB4sY0uE8aG2iC5`, "SEC-AWS-SECRET"},
-		{"Anthropic key", `{"api_key": "sk-ant-api03-A7b9C2d4E6f8G1h3J5k7L9m2"}`, "SEC-ANTHROPIC"},
-		{"OpenAI project key", `sk-proj-A7b9C2d4E6f8G1h3J5k7L9m2`, "SEC-OPENAI"},
-		{"OpenAI long key", `sk-A7b9C2d4E6f8G1h3J5k7L9m2N4p6Q8r1S3t5U7v9`, "SEC-OPENAI-V2"},
-		{"Stripe live key", `sk_live_51HtGkKLM2vN3rS5pQ7uYxWz`, "SEC-STRIPE"},
-		{"GitHub PAT", `ghp_A7b9C2d4E6f8G1h3J5k7L9m2N4p6Q8r1S3t5`, "SEC-GITHUB-TOKEN"},
-		{"GitHub fine-grained PAT", `github_pat_11AAAAAA_abcdefghijklmnopqrstuv`, "SEC-GITHUB-PAT"},
-		{"GitLab PAT", "glpat-" + "xY7q2V9m4K8r1T6p3N5z", "SEC-GITLAB"},
-		{"Google API key", `AIza7G4N2K9Q6M8R3T5V1X7B4C9D2F6H8J3K5L9`, "SEC-GOOGLE"},
-		{"Slack bot token", `xoxb-123456789012-1234567890123-AbCdEfGh`, "SEC-SLACK-TOKEN"},
+		{"AWS access key", runtimeDetectorSignature(`{"key": "AK`, `IA7G4N2K9Q6M8R3T5V"}`), "SEC-AWS-KEY"},
+		{"AWS secret key assignment", runtimeDetectorSignature("aws_secret_access_", "key = wJ8fN2qK5vR9mT3xP7dL", "1cH6zB4sY0uE8aG2iC5"), "SEC-AWS-SECRET"},
+		{"Anthropic key", runtimeDetectorSignature(`{"api_key": "sk-ant-`, `api03-A7b9C2d4E6f8G1h3J5k7L9m2"}`), "SEC-ANTHROPIC"},
+		{"OpenAI project key", runtimeDetectorSignature("sk-proj-", "A7b9C2d4E6f8", "G1h3J5k7L9m2"), "SEC-OPENAI"},
+		{"OpenAI long key", runtimeDetectorSignature("sk-", "A7b9C2d4E6f8G1h3J5k7", "L9m2N4p6Q8r1S3t5U7v9"), "SEC-OPENAI-V2"},
+		{"Stripe live key", runtimeDetectorSignature("sk_", "live_51HtGkKLM2", "vN3rS5pQ7uYxWz"), "SEC-STRIPE"},
+		{"GitHub PAT", runtimeDetectorSignature("gh", "p_A7b9C2d4E6f8G1h3J5k7", "L9m2N4p6Q8r1S3t5"), "SEC-GITHUB-TOKEN"},
+		{"GitHub fine-grained PAT", runtimeDetectorSignature("github_", "pat_11AAAAAA_", "abcdefghijklmnopqrstuv"), "SEC-GITHUB-PAT"},
+		{"GitLab PAT", runtimeDetectorSignature("gl", "pat-", "xY7q2V9m4K8r1T6p3N5z"), "SEC-GITLAB"},
+		{"Google API key", runtimeDetectorSignature("AI", "za7G4N2K9Q6M8R3T5V1X7", "B4C9D2F6H8J3K5L9"), "SEC-GOOGLE"},
+		{"Slack bot token", runtimeDetectorSignature("xox", "b-123456789012-1234567890123-", "AbCdEfGh"), "SEC-SLACK-TOKEN"},
 		{"Slack webhook", "https://" + "hooks.slack.com/services/" +
 			"T00000000/" + "B00000000/" + "X7a9C2d4E6f8G1h3J5k7L9m2", "SEC-SLACK-WEBHOOK"},
-		{"Discord webhook", `https://discord.com/api/webhooks/123456789/abcdef_GHIJKL-12345`, "SEC-DISCORD-WEBHOOK"},
-		{"Private key PEM", `-----BEGIN RSA PRIVATE KEY-----`, "SEC-PRIVKEY"},
-		{"EC private key", `-----BEGIN EC PRIVATE KEY-----`, "SEC-PRIVKEY"},
-		{"OpenSSH private key", `-----BEGIN OPENSSH PRIVATE KEY-----`, "SEC-PRIVKEY"},
-		{"JWT token", `eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U`, "SEC-JWT"},
-		{"MongoDB connection string", `mongodb://admin:secretpass@db.example.com:27017/mydb`, "SEC-CONNSTR"},
-		{"Postgres connection string", `postgres://user:pass123@host:5432/db`, "SEC-CONNSTR"},
-		{"SendGrid key", `SG.A7b9C2d4E6f8G1h3.J5k7L9m2N4p6Q8r1`, "SEC-SENDGRID"},
-		{"npm token", `npm_A7b9C2d4E6f8G1h3J5k7L9m2N4p6Q8r1T7u9`, "SEC-NPM-TOKEN"},
-		{"PyPI token", `pypi-AgEIcHlwaS5vcmcCJGNlNjRhMGQ2LTljNmQtNGNmOC1iMTc2LWFjYmQ4ZTRhNjk1`, "SEC-PYPI-TOKEN"},
+		{"Discord webhook", runtimeDetectorSignature("https://discord.com/api/", "webhooks/123456789/", "abcdef_GHIJKL-12345"), "SEC-DISCORD-WEBHOOK"},
+		{"Private key PEM", runtimeDetectorSignature("-----BEGIN RSA ", "PRIVATE KEY-----"), "SEC-PRIVKEY"},
+		{"EC private key", runtimeDetectorSignature("-----BEGIN EC ", "PRIVATE KEY-----"), "SEC-PRIVKEY"},
+		{"OpenSSH private key", runtimeDetectorSignature("-----BEGIN OPENSSH ", "PRIVATE KEY-----"), "SEC-PRIVKEY"},
+		{"JWT token", runtimeDetectorSignature("eyJhbGciOiJIUzI1NiJ9.", "eyJzdWIiOiIxMjM0NTY3ODkwIn0.", "dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"), "SEC-JWT"},
+		{"MongoDB connection string", runtimeDetectorSignature("mongo", "db://admin:secretpass@", "db.example.com:27017/mydb"), "SEC-CONNSTR"},
+		{"Postgres connection string", runtimeDetectorSignature("post", "gres://user:pass123@", "host:5432/db"), "SEC-CONNSTR"},
+		{"SendGrid key", runtimeDetectorSignature("SG.", "A7b9C2d4E6f8G1h3.", "J5k7L9m2N4p6Q8r1"), "SEC-SENDGRID"},
+		{"npm token", runtimeDetectorSignature("npm_", "A7b9C2d4E6f8G1h3J5k7", "L9m2N4p6Q8r1T7u9"), "SEC-NPM-TOKEN"},
+		{"PyPI token", runtimeDetectorSignature("pypi-", "AgEIcHlwaS5vcmcCJGNlNjRhMGQ2", "LTljNmQtNGNmOC1iMTc2LWFjYmQ4ZTRhNjk1"), "SEC-PYPI-TOKEN"},
 	}
 
 	for _, tc := range cases {
@@ -111,7 +115,7 @@ func TestSecretRules_FalsePositives(t *testing.T) {
 }
 
 func TestSecretRules_HexSecretPrecision(t *testing.T) {
-	truePositive := `api_key="8f2c7a4e9d1b6f3a5c8e0d2b7a9f4c6e"`
+	truePositive := runtimeDetectorSignature(`api_`, `key="8f2c7a4e9d1b6f3a`, `5c8e0d2b7a9f4c6e"`)
 	findings := ScanAllRules(truePositive, "write_file")
 	found := false
 	for _, f := range findings {
@@ -145,13 +149,13 @@ func TestSecretRules_BlockBoundary(t *testing.T) {
 		input  string
 		wantID string
 	}{
-		{"Google API key", `AIza7G4N2K9Q6M8R3T5V1X7B4C9D2F6H8J3K5L9`, "SEC-GOOGLE"},
-		{"Slack bot token", `xoxb-123456789012-1234567890123-AbCdEfGh`, "SEC-SLACK-TOKEN"},
+		{"Google API key", runtimeDetectorSignature("AI", "za7G4N2K9Q6M8R3T5V1X7", "B4C9D2F6H8J3K5L9"), "SEC-GOOGLE"},
+		{"Slack bot token", runtimeDetectorSignature("xox", "b-123456789012-1234567890123-", "AbCdEfGh"), "SEC-SLACK-TOKEN"},
 		{"Slack webhook", "https://" + "hooks.slack.com/services/" +
 			"T00000000/" + "B00000000/" + "X7a9C2d4E6f8G1h3J5k7L9m2", "SEC-SLACK-WEBHOOK"},
-		{"Discord webhook", `https://discord.com/api/webhooks/123456789/abcdef_GHIJKL-12345`, "SEC-DISCORD-WEBHOOK"},
-		{"connection string", `postgres://admin:s3cret@db.prod.internal:5432/maindb`, "SEC-CONNSTR"},
-		{"SendGrid key", `SG.A7b9C2d4E6f8G1h3.J5k7L9m2N4p6Q8r1`, "SEC-SENDGRID"},
+		{"Discord webhook", runtimeDetectorSignature("https://discord.com/api/", "webhooks/123456789/", "abcdef_GHIJKL-12345"), "SEC-DISCORD-WEBHOOK"},
+		{"connection string", runtimeDetectorSignature("post", "gres://admin:s3cret@", "db.prod.internal:5432/maindb"), "SEC-CONNSTR"},
+		{"SendGrid key", runtimeDetectorSignature("SG.", "A7b9C2d4E6f8G1h3.", "J5k7L9m2N4p6Q8r1"), "SEC-SENDGRID"},
 	}
 
 	for _, tc := range criticalCases {
@@ -166,16 +170,16 @@ func TestSecretRules_BlockBoundary(t *testing.T) {
 		input  string
 		wantID string
 	}{
-		{"minimum-length generic bearer", `Authorization: Bearer q7Vx2M9p4Rk8T3n6`, "SEC-BEARER"},
-		{"generic bearer", `Authorization: Bearer q7Vx2M9p4Rk8T3n6W1y5Za0BcDeFgHiJ`, "SEC-BEARER"},
+		{"minimum-length generic bearer", runtimeDetectorSignature("Authorization: Bearer ", "q7Vx2M9p", "4Rk8T3n6"), "SEC-BEARER"},
+		{"generic bearer", runtimeDetectorSignature("Authorization: Bearer ", "q7Vx2M9p4Rk8T3n6", "W1y5Za0BcDeFgHiJ"), "SEC-BEARER"},
 		// Synthesised Twilio-shaped fixture — assembled at runtime so
 		// the literal "SK<32 hex>" form never appears in source. GitHub
 		// secret scanning flags any committed copy of that exact shape
 		// (even in clearly-fake test fixtures), so we keep the bytes
 		// out of the file. The scanner under test only sees the joined
 		// string, which is what matters for the assertion.
-		{"Twilio key-shaped token", "SK" + "8f2c7a4e9d1b6f3a5c8e0d2b7a9f4c6e", "SEC-TWILIO"},
-		{"generic hex secret", `api_key="8f2c7a4e9d1b6f3a5c8e0d2b7a9f4c6e"`, "SEC-HEX-SECRET"},
+		{"Twilio key-shaped token", runtimeDetectorSignature("S", "K", "8f2c7a4e9d1b6f3a", "5c8e0d2b7a9f4c6e"), "SEC-TWILIO"},
+		{"generic hex secret", runtimeDetectorSignature(`api_`, `key="8f2c7a4e9d1b6f3a`, `5c8e0d2b7a9f4c6e"`), "SEC-HEX-SECRET"},
 	}
 
 	for _, tc := range highCases {
@@ -1077,7 +1081,7 @@ func TestScanAllRulesForConnector_FallsBackToGlobal(t *testing.T) {
 	// a real AWS key), not borrow conn-a's narrowed secret set.
 	mustApplyConnectorRulePack(t, "conn-a", secretOverridePack("CONN-A", `conn_a_token_[a-f0-9]+`))
 
-	awsKey := "AKIA7G4N2K9Q6M8R3T5V"
+	awsKey := runtimeDetectorSignature("AK", "IA7G4N2K9Q6M8R3T5V")
 	for _, connector := range []string{"", "unregistered"} {
 		ids := ruleIDsForConnector(connector, awsKey)
 		if !containsRuleID(ids, "SEC-AWS-KEY") {
@@ -1145,7 +1149,7 @@ func TestApplyConnectorRulePackOverrides_NilPackPinsDefaults(t *testing.T) {
 
 	// conn-default must detect a real AWS key (compiled-in default), and must
 	// NOT carry the primary's narrowed rule.
-	ids := ruleIDsForConnector("conn-default", "AKIA7G4N2K9Q6M8R3T5V")
+	ids := ruleIDsForConnector("conn-default", runtimeDetectorSignature("AK", "IA7G4N2K9Q6M8R3T5V"))
 	if !containsRuleID(ids, "SEC-AWS-KEY") {
 		t.Errorf("nil-pack connector should keep compiled-in defaults, got %v", ids)
 	}

@@ -777,7 +777,7 @@ func TestAlertAcknowledgementTargetsMatchVisibleCanonicalAndLegacyAlerts(t *test
 	}
 
 	high, err := store.SelectAlertAcknowledgementTargets(t.Context(), AlertAcknowledgementSelector{
-		Severity: "HIGH",
+		Severity: " high ",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -786,6 +786,15 @@ func TestAlertAcknowledgementTargetsMatchVisibleCanonicalAndLegacyAlerts(t *test
 		high[1].AlertID != "canonical-deny" || high[2].AlertID != "legacy-block" ||
 		high[3].AlertID != "malformed-finding" {
 		t.Fatalf("HIGH targets=%+v", high)
+	}
+	all, err := store.SelectAlertAcknowledgementTargets(t.Context(), AlertAcknowledgementSelector{
+		Severity: " ALL ",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != len(want) {
+		t.Fatalf("ALL targets=%+v", all)
 	}
 	counts, err := store.GetCounts()
 	if err != nil {

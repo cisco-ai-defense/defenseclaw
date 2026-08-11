@@ -353,27 +353,44 @@ const (
 	sensitiveFindingKindTrust  sensitiveFindingKind = "trust"
 )
 
-// ensureSensitiveFindingRuleID preserves canonical detector identity before
-// the persistence redactors clear Finding.ID. Internal and structured
-// producers should populate RuleID directly. For legacy ID-only inputs, the
-// source ID is producer controlled and may contain the matched credential,
-// identifier, or directive, so it cannot be copied or slugged into RuleID.
-// Instead, derive an installation-keyed opaque identity with explicit domain
-// separation. Two schema-sized tokens give the rule identity 64 bits while
-// retaining the existing key-custody interface and exposing no key material.
-// A missing/failing fingerprinter uses one inert class-level identity rather
-// than persisting unkeyed or attacker-controlled bytes.
+// ensureSensitiveFindingRuleID preserves only closed-catalog detector
+// identities before the persistence redactors clear Finding.ID. All producer
+// fields are untrusted at this boundary: an arbitrary non-empty RuleID can
+// contain the matched credential, identifier, or directive just as readily as
+// ID can. Unknown inputs receive an installation-keyed opaque identity with
+// explicit domain separation. Two schema-sized tokens give the rule identity
+// 64 bits, and two more independently domain-separated tokens authenticate its
+// provenance before an already-opaque ID can be preserved. This retains the
+// existing key-custody interface without exposing key material. A missing or
+// failing fingerprinter uses one inert class-level identity rather than
+// persisting unkeyed or attacker-controlled bytes.
 func ensureSensitiveFindingRuleID(
 	finding *scanner.Finding,
 	scannerName string,
 	kind sensitiveFindingKind,
 	fingerprinter RuntimeV8FindingContentFingerprinter,
 ) {
-	if finding == nil || strings.TrimSpace(finding.RuleID) != "" {
+	if finding == nil {
+		return
+	}
+	// Preserve the already-established sensitive class while RuleID is replaced.
+	// Each redactor revalidates its input before mutating it, so leaving an
+	// untrusted category here could make the opaque ID hide the very signal that
+	// selected the redaction branch.
+	finding.Category = canonicalSensitiveFindingCategory(kind)
+	if trusted, ok := trustedSensitiveFindingRuleID(finding.RuleID, kind, scannerName, fingerprinter); ok {
+		finding.RuleID = trusted
 		return
 	}
 	prefix := "redacted." + string(kind) + "."
-	sourceID := strings.TrimSpace(finding.ID)
+	sourceID := strings.TrimSpace(finding.RuleID)
+	if sourceID != "" {
+		// Keep the ID and RuleID compatibility namespaces distinct without
+		// copying either producer-controlled value into persisted metadata.
+		sourceID = "rule-id\x00" + sourceID
+	} else {
+		sourceID = strings.TrimSpace(finding.ID)
+	}
 	if sourceID == "" || fingerprinter == nil {
 		finding.RuleID = prefix + "unknown"
 		return
@@ -392,7 +409,13 @@ func ensureSensitiveFindingRuleID(
 		finding.RuleID = prefix + "unknown"
 		return
 	}
-	finding.RuleID = prefix + "id-" + left + right
+	identity := left + right
+	authenticator, ok := sensitiveOpaqueRuleIDAuthenticator(identity, kind, scannerName, fingerprinter)
+	if !ok {
+		finding.RuleID = prefix + "unknown"
+		return
+	}
+	finding.RuleID = prefix + "id-" + identity + ".mac-" + authenticator
 }
 
 // redactPersistedCredentialFinding closes the persistence boundary for
@@ -411,6 +434,8 @@ func redactPersistedCredentialFinding(finding *scanner.Finding) {
 	// scan_results.raw_json. FindingOccurrenceID is the independently minted
 	// canonical occurrence identity and remains intact.
 	finding.ID = ""
+	finding.Category = canonicalSensitiveFindingCategory(sensitiveFindingKindSecret)
+	canonicalizeSensitiveFindingMetadata(finding)
 	if !isCanonicalContentFingerprint(finding.ContentFingerprint) {
 		// The common Logger boundary replaces producer-supplied fingerprints
 		// with keyed tokens. Retain only that canonical representation when this
@@ -455,6 +480,8 @@ func redactPersistedTrustExploitFinding(finding *scanner.Finding) {
 		return
 	}
 	finding.ID = ""
+	finding.Category = canonicalSensitiveFindingCategory(sensitiveFindingKindTrust)
+	canonicalizeSensitiveFindingMetadata(finding)
 	if !isCanonicalContentFingerprint(finding.ContentFingerprint) {
 		finding.ContentFingerprint = ""
 	}
@@ -626,6 +653,8 @@ func redactPersistedPIIFinding(finding *scanner.Finding) {
 		return
 	}
 	finding.ID = ""
+	finding.Category = canonicalSensitiveFindingCategory(sensitiveFindingKindPII)
+	canonicalizeSensitiveFindingMetadata(finding)
 	// Common identifiers have small enumerable spaces. Preserve only the
 	// installation-keyed token installed by the common Logger boundary; an
 	// untrusted or malformed producer value fails closed.
@@ -645,6 +674,14 @@ func redactPersistedPIIFinding(finding *scanner.Finding) {
 	}
 	finding.Tags = append(finding.Tags, "redacted")
 	redactPIIFindingDecisionPath(finding)
+}
+
+func canonicalizeSensitiveFindingMetadata(finding *scanner.Finding) {
+	if finding == nil {
+		return
+	}
+	finding.DataAxis = canonicalSensitiveFindingDataAxes(finding.DataAxis)
+	finding.ToolCapabilityClass = canonicalSensitiveFindingToolCapabilityClass(finding.ToolCapabilityClass)
 }
 
 func redactPIIFindingValue(value string) string {

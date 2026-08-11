@@ -10742,6 +10742,7 @@ def _apply_native_windows_logs_config(
             s3_prefix=s3_prefix,
             aws_region=aws_region,
             refresh_bundle=refresh_bundle,
+            environment=_splunk_bridge_child_env(),
         )
         contract = transaction.contract
         click.echo("    Docker Desktop, Compose v2, Linux containers, assets, and ports... ok")
@@ -10916,10 +10917,10 @@ def _resolve_bridge_bin(data_dir: str) -> str | None:
     return splunk_bridge_bin(data_dir)
 
 
-def _splunk_bridge_child_env() -> dict[str, str]:
+def _splunk_bridge_child_env(environment: dict[str, str] | None = None) -> dict[str, str]:
     """Return the bridge environment without gateway bearer credentials."""
 
-    env = os.environ.copy()
+    env = dict(os.environ if environment is None else environment)
     env.pop(_GATEWAY_TOKEN_ENV, None)
     env.pop(_LEGACY_GATEWAY_TOKEN_ENV, None)
     return env
@@ -10951,7 +10952,11 @@ def _refresh_and_maybe_restart_splunk_bridge(
     happened and never has to wonder why a previously-running stack
     came back up on a different image.
     """
-    was_running = is_compose_project_running(SPLUNK_COMPOSE_PROJECT)
+    effective_child_env = _splunk_bridge_child_env(child_env)
+    was_running = is_compose_project_running(
+        SPLUNK_COMPOSE_PROJECT,
+        environment=effective_child_env,
+    )
     stopped = False
     if was_running:
         click.echo(f"  {ux.dim('→')} Stopping running local Splunk stack to refresh bundle...")
@@ -10967,7 +10972,7 @@ def _refresh_and_maybe_restart_splunk_bridge(
                     text=True,
                     timeout=120,
                     check=False,
-                    env=(dict(child_env) if child_env is not None else _splunk_bridge_child_env()),
+                    env=effective_child_env,
                 )
                 stopped = True
             except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
@@ -11441,7 +11446,10 @@ def _stop_bridge(data_dir: str) -> None:
         from defenseclaw.observability.local_stack import LocalStackError
 
         try:
-            stopped = stop_native_local_splunk(data_dir)
+            stopped = stop_native_local_splunk(
+                data_dir,
+                environment=_splunk_bridge_child_env(),
+            )
         except LocalStackError as exc:
             raise click.ClickException(f"could not stop owned Local Splunk stack: {exc}") from exc
         if stopped:

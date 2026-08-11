@@ -75,6 +75,7 @@ func TestLogScanNeutralizesTrustExploitValuesBeforePersistence(t *testing.T) {
 	if err := logger.LogScanWithCorrelation(t.Context(), result, "alert", corr); err != nil {
 		t.Fatalf("log trust findings: %v", err)
 	}
+	detectionOnlyByRuleID := make(map[string]bool, len(cases))
 	for index := range result.Findings {
 		if result.Findings[index].ID != "" {
 			t.Fatalf("trust finding %d retained producer ID %q", index, result.Findings[index].ID)
@@ -82,6 +83,11 @@ func TestLogScanNeutralizesTrustExploitValuesBeforePersistence(t *testing.T) {
 		if result.Findings[index].FindingOccurrenceID == "" {
 			t.Fatalf("trust finding %d lost canonical occurrence ID", index)
 		}
+		persistedRuleID := result.Findings[index].RuleID
+		payloads[persistedRuleID] = payloads[cases[index].ruleID]
+		hyphenatedPayloads[persistedRuleID] = hyphenatedPayloads[cases[index].ruleID]
+		unkeyedFingerprints[persistedRuleID] = unkeyedFingerprints[cases[index].ruleID]
+		detectionOnlyByRuleID[persistedRuleID] = hasExactFindingTag(cases[index].tags, scanner.FindingTagDetectionOnly)
 	}
 
 	rows, err := logger.store.db.Query(`
@@ -143,7 +149,7 @@ FROM scan_findings WHERE scan_id = ?`, result.ScanID)
 		if !strings.Contains(tags, `"redacted"`) {
 			t.Fatalf("%s tags=%s, want redacted provenance", ruleID, tags)
 		}
-		if ruleID == "TRUST-CUSTOM" && !strings.Contains(tags, `"detection-only"`) {
+		if detectionOnlyByRuleID[ruleID] && !strings.Contains(tags, `"detection-only"`) {
 			t.Fatalf("detection-only provenance was lost: %s", tags)
 		}
 		if strings.Contains(tags, `"source-code"`) {

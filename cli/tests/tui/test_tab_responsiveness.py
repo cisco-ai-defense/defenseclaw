@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import json
 import sqlite3
 import sys
 import threading
@@ -455,11 +456,11 @@ def _seed_responsiveness_store(path: Path, *, event_count: int = 7_000) -> Store
                 f"run-{index // 20}",
                 connector,
                 int(decision == "block"),
-                "guardrail.evaluation",
-                "guardrail.evaluated",
+                "enforcement.action",
+                "action.applied",
                 "gateway",
                 "logs",
-                "{}",
+                json.dumps({"defenseclaw.enforcement.effective_action": decision}),
                 "{}",
                 "none",
             )

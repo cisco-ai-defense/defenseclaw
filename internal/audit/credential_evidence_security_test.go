@@ -154,6 +154,7 @@ func TestLogScanRedactsAllSecretValueFieldsAndClassifiers(t *testing.T) {
 	if err := logger.LogScanWithCorrelation(t.Context(), result, "alert", corr); err != nil {
 		t.Fatalf("log classified secret findings: %v", err)
 	}
+	caseByPersistedRuleID := make(map[string]int, len(cases))
 	for index := range result.Findings {
 		if result.Findings[index].ID != "" {
 			t.Fatalf("secret finding %d retained producer ID %q", index, result.Findings[index].ID)
@@ -161,6 +162,10 @@ func TestLogScanRedactsAllSecretValueFieldsAndClassifiers(t *testing.T) {
 		if result.Findings[index].FindingOccurrenceID == "" {
 			t.Fatalf("secret finding %d lost canonical occurrence ID", index)
 		}
+		persistedRuleID := result.Findings[index].RuleID
+		caseByPersistedRuleID[persistedRuleID] = index
+		wantFingerprint[persistedRuleID] = wantFingerprint[cases[index].ruleID]
+		unkeyedFingerprint[persistedRuleID] = unkeyedFingerprint[cases[index].ruleID]
 	}
 
 	rows, err := logger.store.db.Query(`
@@ -185,16 +190,11 @@ FROM scan_findings WHERE scan_id = ?`, result.ScanID)
 		); err != nil {
 			t.Fatalf("scan persisted secret finding: %v", err)
 		}
-		var tc *secretCase
-		for index := range cases {
-			if cases[index].ruleID == ruleID {
-				tc = &cases[index]
-				break
-			}
-		}
-		if tc == nil {
+		caseIndex, ok := caseByPersistedRuleID[ruleID]
+		if !ok {
 			t.Fatalf("unexpected persisted rule %q", ruleID)
 		}
+		tc := &cases[caseIndex]
 		seen[ruleID] = true
 		if title.String != redactedSecretFindingTitle || tags.String != `["secret","redacted"]` ||
 			severity != string(scanner.SeverityHigh) ||

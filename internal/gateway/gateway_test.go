@@ -49,6 +49,7 @@ import (
 	observabilityredaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
+	"github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
 func testStoreAndLogger(t *testing.T) (*audit.Store, *audit.Logger) {
@@ -5587,6 +5588,57 @@ func TestNormalizeCiscoResponse(t *testing.T) {
 		}
 		if v.Severity != "HIGH" {
 			t.Errorf("severity = %q, want HIGH", v.Severity)
+		}
+		if len(v.Findings) != 1 || v.Findings[0] != "CISCO-PROMPT-INJECTION" {
+			t.Errorf("findings = %v, want fixed Cisco catalog identity", v.Findings)
+		}
+	})
+
+	t.Run("untrusted labels use fixed identity", func(t *testing.T) {
+		marker := "producer-label-" + strings.Repeat("z", 40)
+		v := normalizeCiscoResponse(map[string]interface{}{
+			"is_safe": false,
+			"action":  "Block",
+			"classifications": []interface{}{
+				marker,
+			},
+			"rules": []interface{}{
+				map[string]interface{}{"rule_name": "custom-" + marker, "classification": "VIOLATION"},
+			},
+		})
+		if len(v.Findings) != 1 || v.Findings[0] != ciscoUnknownFindingID {
+			t.Fatalf("untrusted Cisco findings=%v, want fixed unknown identities", v.Findings)
+		}
+		if strings.Contains(v.Reason, marker) || v.Reason !=
+			"Cisco AI Defense: Custom Policy Violation" {
+			t.Fatalf("untrusted Cisco labels reached reason: %q", v.Reason)
+		}
+		if projected := redaction.ForSinkReason(v.Reason); projected != v.Reason || strings.Contains(projected, marker) {
+			t.Fatalf("Cisco reason redaction projection=%q, want fixed display labels", projected)
+		}
+		for _, finding := range NormalizeScanVerdict(v) {
+			if finding.CanonicalID != ciscoUnknownFindingID || strings.Contains(finding.CanonicalID, marker) ||
+				strings.Contains(finding.OriginalID, marker) || strings.HasPrefix(finding.CanonicalID, "UNKNOWN-") {
+				t.Fatalf("untrusted Cisco label reached normalized identity: %+v", finding)
+			}
+		}
+
+		store, logger := testStoreAndV8Logger(t)
+		projectedReason := redaction.ForSinkReason(v.Reason)
+		if err := logger.LogAction(
+			string(audit.ActionGatewaySessionPromptAlert),
+			"cisco-label-regression",
+			"reason="+projectedReason,
+		); err != nil {
+			t.Fatalf("persist fixed Cisco reason: %v", err)
+		}
+		events, err := store.ListEvents(10)
+		if err != nil || len(events) != 1 {
+			t.Fatalf("persisted Cisco events=%#v err=%v", events, err)
+		}
+		persistedEvent := fmt.Sprintf("%s %#v", events[0].Details, events[0].Structured)
+		if strings.Contains(persistedEvent, marker) || !strings.Contains(persistedEvent, "Custom Policy Violation") {
+			t.Fatalf("persisted Cisco reason retained cloud label: %s", persistedEvent)
 		}
 	})
 }
