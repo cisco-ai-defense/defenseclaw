@@ -1922,6 +1922,12 @@ resolve_version
 ensure_uv
 ensure_python
 load_release_policy
+if [[ "${INSTALL_SANDBOX}" == true ]]; then
+    [[ "${MODERN_RELEASE}" == true ]] \
+        || die "Sandbox installation requires a signed DefenseClaw release bundle; no sandbox installer was executed"
+    version_gte "${RELEASE_VERSION}" "${SANDBOX_INSTALLER_ASSET_START_VERSION}" \
+        || die "DefenseClaw ${RELEASE_VERSION} does not publish an authenticated sandbox installer; use ${SANDBOX_INSTALLER_ASSET_START_VERSION} or newer"
+fi
 if [[ "${MODERN_RELEASE}" == true ]]; then
     # Bind both roots before publishing payloads or rollback-token hardlinks.
     # A custom state home may be on another filesystem; its sibling custody is

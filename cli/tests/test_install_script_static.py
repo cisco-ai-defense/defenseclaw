@@ -133,6 +133,19 @@ def test_sandbox_installer_is_authenticated_before_execution() -> None:
     assert download < authenticate < bind_digest < recheck < execute
 
 
+def test_unsupported_sandbox_release_fails_before_installation_work() -> None:
+    text = INSTALL_SH.read_text(encoding="utf-8")
+
+    release_policy = text.index("load_release_policy\n", text.index("main()"))
+    early_version_gate = text.index(
+        'version_gte "${RELEASE_VERSION}" "${SANDBOX_INSTALLER_ASSET_START_VERSION}"',
+        release_policy,
+    )
+    first_install = text.index("install_gateway\n", release_policy)
+
+    assert release_policy < early_version_gate < first_install
+
+
 def test_sandbox_installer_rejects_tampered_bytes_and_executes_authenticated_bytes(
     tmp_path: Path,
 ) -> None:
