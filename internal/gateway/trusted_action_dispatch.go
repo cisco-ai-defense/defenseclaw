@@ -430,6 +430,7 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 }
 
 type trustedLegacyProvenCommandDetectionOnlyContract struct {
+	category     string
 	pattern      string
 	title        string
 	severity     string
@@ -438,6 +439,16 @@ type trustedLegacyProvenCommandDetectionOnlyContract struct {
 	prerequisite func(actionfacts.Facts) bool
 }
 
+const (
+	trustedPerlInlinePattern = `(?i)\bperl\s+-e\s+`
+	trustedRubyInlinePattern = `(?i)\bruby\s+-e\s+`
+)
+
+var (
+	trustedPerlInlineRegexp = regexp.MustCompile(trustedPerlInlinePattern)
+	trustedRubyInlineRegexp = regexp.MustCompile(trustedRubyInlinePattern)
+)
+
 // trustedLegacyProvenCommandDetectionOnly is deliberately code-owned instead
 // of rule-pack metadata: policy data must not be able to opt an arbitrary or
 // overridden command owner out of enforcement. Each entry binds the shipped
@@ -445,6 +456,7 @@ type trustedLegacyProvenCommandDetectionOnlyContract struct {
 // fallback and custom rules with a reused ID retain conservative enforcement.
 var trustedLegacyProvenCommandDetectionOnly = map[string]trustedLegacyProvenCommandDetectionOnlyContract{
 	"CMD-BASH-C": {
+		category:     "command",
 		pattern:      `(?i)\b(?:ba)?sh\s+-c\s+`,
 		title:        "Shell -c execution",
 		severity:     "LOW",
@@ -453,11 +465,30 @@ var trustedLegacyProvenCommandDetectionOnly = map[string]trustedLegacyProvenComm
 		prerequisite: trustedBashInlineCommandOwnerProven,
 	},
 	"CMD-PYTHON-C": {
+		category:   "command",
 		pattern:    `(?i)\bpython[23]?\s+-c\s+`,
 		title:      "Python inline execution",
 		severity:   "LOW",
 		confidence: 0.55,
 		tags:       []string{"execution"},
+	},
+	"CMD-PERL-E": {
+		category:     "command",
+		pattern:      trustedPerlInlinePattern,
+		title:        "Perl inline execution",
+		severity:     "LOW",
+		confidence:   0.55,
+		tags:         []string{"execution"},
+		prerequisite: trustedPerlInlineEffectFreeOwnerProven,
+	},
+	"CMD-RUBY-E": {
+		category:     "command",
+		pattern:      trustedRubyInlinePattern,
+		title:        "Ruby inline execution",
+		severity:     "LOW",
+		confidence:   0.55,
+		tags:         []string{"execution"},
+		prerequisite: trustedRubyInlineEffectFreeOwnerProven,
 	},
 }
 
@@ -1246,10 +1277,11 @@ func trustedLegacyDetectionOnlyCommandRule(
 	matched := false
 	for _, category := range generation.categories {
 		for _, rule := range category.Rules {
-			if rule.ID != ruleID {
+			if canonicalTrustedRuleID(rule.ID) != canonicalTrustedRuleID(ruleID) {
 				continue
 			}
-			if matched || rule.Pattern == nil ||
+			if matched || rule.ID != ruleID || category.Name != contract.category ||
+				rule.Pattern == nil ||
 				rule.Pattern.String() != contract.pattern ||
 				rule.Expression != "" || rule.ToolCallOnly ||
 				rule.Title != contract.title ||
@@ -1262,6 +1294,10 @@ func trustedLegacyDetectionOnlyCommandRule(
 		}
 	}
 	return matched
+}
+
+func canonicalTrustedRuleID(ruleID string) string {
+	return strings.ToUpper(strings.TrimSpace(ruleID))
 }
 
 func trustedBashInlineCommandOwnerProven(facts actionfacts.Facts) bool {
@@ -1278,6 +1314,152 @@ func trustedBashInlineCommandOwnerProven(facts actionfacts.Facts) bool {
 		}
 	}
 	return false
+}
+
+func trustedPerlInlineEffectFreeOwnerProven(facts actionfacts.Facts) bool {
+	return trustedInlineEffectFreeOwnerProven(
+		facts,
+		"perl",
+		trustedPerlInlineRegexp,
+		actionfacts.RecognizesPOSIXPerlInlineBody,
+	)
+}
+
+func trustedRubyInlineEffectFreeOwnerProven(facts actionfacts.Facts) bool {
+	return trustedInlineEffectFreeOwnerProven(
+		facts,
+		"ruby",
+		trustedRubyInlineRegexp,
+		actionfacts.RecognizesPOSIXRubyInlineBody,
+	)
+}
+
+func trustedInlineEffectFreeOwnerProven(
+	facts actionfacts.Facts,
+	program string,
+	compiledPattern *regexp.Regexp,
+	recognizes func(actionfacts.CommandFact) bool,
+) bool {
+	if !facts.Authoritative() || !facts.EnforcementEligible() ||
+		recognizes == nil || compiledPattern == nil {
+		return false
+	}
+	commandIndex, ok := inlineCommandIndex(facts.Commands)
+	if !ok {
+		return false
+	}
+	matched := 0
+	for _, command := range facts.Commands {
+		text := strings.TrimSpace(command.Executable)
+		if len(command.Argv) != 0 {
+			text = serializeArgvForLegacyScan(command.Argv)
+		}
+		patternMatches := compiledPattern.MatchString(text) ||
+			compiledPattern.MatchString(normalizeShell(text))
+		if command.Program != program {
+			if patternMatches {
+				return false
+			}
+			continue
+		}
+		if !patternMatches {
+			continue
+		}
+		if command.ParentCommandID != 0 || command.Dialect != actionfacts.DialectPOSIX ||
+			command.Effect != actionfacts.EffectExecute || !command.ArgvComplete ||
+			command.PipelineID != 0 || len(command.Redirects) != 0 ||
+			len(command.Wrappers) != 0 || !recognizes(command) ||
+			actionfacts.ProvesPOSIXInlineInterpreterForkBomb(command) ||
+			len(command.Operations) != 1 || command.Operations[0] != actionfacts.OperationExecute {
+			return false
+		}
+		matched++
+	}
+	if matched == 0 {
+		return false
+	}
+	for _, command := range facts.Commands {
+		if command.ParentCommandID != 0 && (command.Program == program ||
+			inlineCommandDescendsFromProgram(commandIndex, command, program)) {
+			return false
+		}
+	}
+	for _, fact := range facts.Paths {
+		if inlineFactOwnedByProgram(commandIndex, fact.CommandID, program) {
+			return false
+		}
+	}
+	for _, fact := range facts.Network {
+		if inlineFactOwnedByProgram(commandIndex, fact.CommandID, program) {
+			return false
+		}
+	}
+	for _, fact := range facts.DataFlows {
+		if inlineFactOwnedByProgram(commandIndex, fact.FromCommandID, program) ||
+			inlineFactOwnedByProgram(commandIndex, fact.ToCommandID, program) {
+			return false
+		}
+	}
+	return true
+}
+
+func inlineCommandIndex(
+	commands []actionfacts.CommandFact,
+) (map[int64]actionfacts.CommandFact, bool) {
+	index := make(map[int64]actionfacts.CommandFact, len(commands))
+	for _, command := range commands {
+		if command.ID == 0 {
+			return nil, false
+		}
+		if _, duplicate := index[command.ID]; duplicate {
+			return nil, false
+		}
+		index[command.ID] = command
+	}
+	return index, true
+}
+
+func inlineCommandDescendsFromProgram(
+	commandIndex map[int64]actionfacts.CommandFact,
+	command actionfacts.CommandFact,
+	program string,
+) bool {
+	parentID := command.ParentCommandID
+	visited := make(map[int64]struct{}, len(commandIndex))
+	for steps := 0; parentID != 0; steps++ {
+		if steps >= len(commandIndex) {
+			return true
+		}
+		if _, repeated := visited[parentID]; repeated {
+			return true
+		}
+		visited[parentID] = struct{}{}
+		parent, found := commandIndex[parentID]
+		if !found {
+			return true
+		}
+		if parent.Program == program {
+			return true
+		}
+		parentID = parent.ParentCommandID
+	}
+	return false
+}
+
+func inlineFactOwnedByProgram(
+	commandIndex map[int64]actionfacts.CommandFact,
+	commandID int64,
+	program string,
+) bool {
+	if commandID == 0 {
+		return false
+	}
+	command, found := commandIndex[commandID]
+	if !found {
+		return true
+	}
+	return command.Program == program ||
+		inlineCommandDescendsFromProgram(commandIndex, command, program)
 }
 
 func trustedReadOnlyArgumentDataFinding(category string, finding RuleFinding) bool {
