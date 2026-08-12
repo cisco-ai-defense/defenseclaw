@@ -774,7 +774,7 @@ func scanRuleGeneration(
 	if generation == nil {
 		return nil
 	}
-	return scanRuleCategoriesWithOptions(generation.categories, text, toolName, options)
+	return scanRuleCategoriesWithOptions(generation, text, toolName, options)
 }
 
 // scanRuleCategories runs every rule in cats against text, scanning both the
@@ -782,15 +782,22 @@ func scanRuleGeneration(
 // shared core of ScanAllRules / ScanAllRulesForConnector — the only
 // difference between those entry points is which category set they select.
 func scanRuleCategories(cats []ruleCategory, text string, toolName string) []RuleFinding {
-	return scanRuleCategoriesWithOptions(cats, text, toolName, ruleScanOptions{})
+	generation, err := compileRulePackGeneration(cats)
+	if err != nil {
+		return nil
+	}
+	return scanRuleCategoriesWithOptions(generation, text, toolName, ruleScanOptions{})
 }
 
 func scanRuleCategoriesWithOptions(
-	cats []ruleCategory,
+	generation *compiledRulePackCategories,
 	text string,
 	toolName string,
 	options ruleScanOptions,
 ) []RuleFinding {
+	if generation == nil {
+		return nil
+	}
 	var findings []RuleFinding
 	// The hard-coded Windows recognizers cover only command and sensitive-path
 	// actions, both of which are intentionally absent from content scans.
@@ -804,15 +811,17 @@ func scanRuleCategoriesWithOptions(
 	}
 
 	// Scan raw text first
-	for _, cat := range cats {
+	for categoryIndex := range generation.categories {
+		cat := &generation.categories[categoryIndex]
 		if !options.allowsCategory(cat.Name) {
 			continue
 		}
-		for _, rule := range cat.Rules {
+		for ruleIndex := range cat.Rules {
+			rule := &cat.Rules[ruleIndex]
 			if !options.allows(rule.ID, rule.ToolCallOnly) {
 				continue
 			}
-			loc := firstAcceptedRuleMatch(rule, text)
+			loc := firstAcceptedRuleMatch(*rule, text)
 			if loc == nil {
 				continue
 			}
@@ -829,6 +838,7 @@ func scanRuleCategoriesWithOptions(
 			}
 
 			f = adjustConfidence(toolName, f)
+			f = applyTrustLiteralContext(generation, cat.Name, rule, text, f)
 			findings = append(findings, f)
 			seen[rule.ID] = true
 		}
@@ -837,18 +847,20 @@ func scanRuleCategoriesWithOptions(
 	// Scan normalized text to catch shell obfuscation
 	normalized := normalizeShell(text)
 	if normalized != text {
-		for _, cat := range cats {
+		for categoryIndex := range generation.categories {
+			cat := &generation.categories[categoryIndex]
 			if !options.allowsCategory(cat.Name) {
 				continue
 			}
-			for _, rule := range cat.Rules {
+			for ruleIndex := range cat.Rules {
+				rule := &cat.Rules[ruleIndex]
 				if !options.allows(rule.ID, rule.ToolCallOnly) {
 					continue
 				}
 				if seen[rule.ID] {
 					continue // already found on raw pass
 				}
-				loc := firstAcceptedRuleMatch(rule, normalized)
+				loc := firstAcceptedRuleMatch(*rule, normalized)
 				if loc == nil {
 					continue
 				}
@@ -865,6 +877,7 @@ func scanRuleCategoriesWithOptions(
 				}
 
 				f = adjustConfidence(toolName, f)
+				f = applyTrustLiteralContext(generation, cat.Name, rule, normalized, f)
 				findings = append(findings, f)
 			}
 		}

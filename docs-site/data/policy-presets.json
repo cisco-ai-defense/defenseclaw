@@ -1870,7 +1870,7 @@
                 },
                 {
                   "id": "TRUST-PROMPT-EXTRACT",
-                  "pattern": "(?i)(?:show|reveal|print|output|display|repeat|tell\\s+me)\\s+(?:me\\s+)?(?:your\\s+)?(?:the\\s+)?(?:system\\s+|initial\\s+)?(?:prompt|instructions?|rules?|guidelines?)",
+                  "pattern": "(?i)(?:show|reveal|print|output|display|repeat|tell\\s+me)\\s+(?:me\\s+)?(?:your\\s+)?(?:the\\s+)?(?:(?:system|initial|hidden|private|internal)\\s+)?(?:prompt|instructions?|rules?|guidelines?)",
                   "title": "System prompt extraction attempt",
                   "severity": "MEDIUM",
                   "confidence": 0.75,
@@ -4270,7 +4270,7 @@
                 },
                 {
                   "id": "TRUST-PROMPT-EXTRACT",
-                  "pattern": "(?i)(?:show|reveal|print|output|display|repeat|tell\\s+me)\\s+(?:me\\s+)?(?:your\\s+)?(?:the\\s+)?(?:system\\s+|initial\\s+)?(?:prompt|instructions?|rules?|guidelines?)",
+                  "pattern": "(?i)(?:show|reveal|print|output|display|repeat|tell\\s+me)\\s+(?:me\\s+)?(?:your\\s+)?(?:the\\s+)?(?:(?:system|initial|hidden|private|internal)\\s+)?(?:prompt|instructions?|rules?|guidelines?)",
                   "title": "System prompt extraction attempt",
                   "severity": "MEDIUM",
                   "confidence": 0.75,
@@ -6582,7 +6582,7 @@
                 },
                 {
                   "id": "TRUST-PROMPT-EXTRACT",
-                  "pattern": "(?i)(?:show|reveal|print|output|display|repeat|tell\\s+me)\\s+(?:me\\s+)?(?:your\\s+)?(?:the\\s+)?(?:system\\s+|initial\\s+)?(?:prompt|instructions?|rules?|guidelines?)",
+                  "pattern": "(?i)(?:show|reveal|print|output|display|repeat|tell\\s+me)\\s+(?:me\\s+)?(?:your\\s+)?(?:the\\s+)?(?:(?:system|initial|hidden|private|internal)\\s+)?(?:prompt|instructions?|rules?|guidelines?)",
                   "title": "System prompt extraction attempt",
                   "severity": "MEDIUM",
                   "confidence": 0.75,
