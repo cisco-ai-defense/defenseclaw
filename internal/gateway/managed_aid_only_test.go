@@ -18,8 +18,10 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -158,6 +160,207 @@ func TestProxyManagedAIDOnly_ReturnsAIDVerdict(t *testing.T) {
 	}
 	if stub.calls != 1 {
 		t.Fatalf("expected AID consulted once, got %d calls", stub.calls)
+	}
+}
+
+func TestHandlePassthrough_ManagedAIDInspectsProviderNativeTopLevelPrompts(t *testing.T) {
+	var forwarded atomic.Int32
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		forwarded.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"id":"unexpected-forward","object":"response","status":"completed"}`))
+	}))
+	defer upstream.Close()
+
+	target, err := url.Parse(upstream.URL)
+	if err != nil {
+		t.Fatalf("parse upstream URL: %v", err)
+	}
+	registerProviderDomainForTest(t, target.Hostname(), "openai")
+
+	tests := []struct {
+		name string
+		path string
+		body string
+		want string
+	}{
+		{
+			name: "OpenAI Responses string input",
+			path: "/v1/responses",
+			body: `{"model":"gpt-4.1","input":"responses native prompt"}`,
+			want: "responses native prompt",
+		},
+		{
+			name: "Ollama top-level prompt",
+			path: "/api/generate",
+			body: `{"model":"llama3.2","prompt":"ollama native prompt"}`,
+			want: "ollama native prompt",
+		},
+		{
+			name: "system-only provider request",
+			path: "/v1/messages",
+			body: `{"model":"claude-sonnet-4","system":"system-only native prompt"}`,
+			want: "system-only native prompt",
+		},
+		{
+			name: "OpenAI Responses instructions-only request",
+			path: "/v1/responses",
+			body: `{"model":"gpt-4.1","instructions":"responses instructions prompt"}`,
+			want: "responses instructions prompt",
+		},
+		{
+			name: "Gemini systemInstruction-only request",
+			path: "/v1beta/models/gemini-2.5-pro:generateContent",
+			body: `{"model":"gemini-2.5-pro","systemInstruction":{"parts":[{"text":"gemini system prompt"}]}}`,
+			want: "gemini system prompt",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := &stubAIDInspector{verdict: blockVerdict()}
+			guardrail := NewGuardrailInspector("both", nil, nil, "")
+			guardrail.SetManagedMode(true)
+			guardrail.SetCiscoInspector(stub)
+			proxy := newTestProxy(t, &mockProvider{}, guardrail, "action")
+
+			before := forwarded.Load()
+			req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
+			req.Header.Set("Content-Type", "application/json")
+			req.Header.Set("X-DC-Target-URL", upstream.URL)
+			req.Header.Set("X-AI-Auth", "Bearer inert-upstream-token")
+			req.RemoteAddr = "127.0.0.1:12345"
+			rec := httptest.NewRecorder()
+
+			proxy.handlePassthrough(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want managed block response 200; body=%s", rec.Code, rec.Body.String())
+			}
+			if stub.calls != 1 {
+				t.Fatalf("AID calls = %d, want exactly 1", stub.calls)
+			}
+			wantMessages := []ChatMessage{{Role: "user", Content: tc.want}}
+			if !reflect.DeepEqual(stub.messages, wantMessages) {
+				t.Fatalf("AID messages = %#v, want %#v", stub.messages, wantMessages)
+			}
+			if got := forwarded.Load(); got != before {
+				t.Fatalf("upstream calls advanced from %d to %d despite managed block", before, got)
+			}
+		})
+	}
+}
+
+func TestProxyManagedAIDOnly_NormalizesTopLevelPromptContent(t *testing.T) {
+	tests := []struct {
+		name       string
+		aidVerdict *ScanVerdict
+		wantAction string
+	}{
+		{name: "allow remains allow", aidVerdict: allowVerdict("ai-defense"), wantAction: "allow"},
+		{name: "block remains block", aidVerdict: blockVerdict(), wantAction: "block"},
+		{name: "unavailable remains fail open", wantAction: "allow"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			stub := &stubAIDInspector{verdict: tc.aidVerdict}
+			guardrail := NewGuardrailInspector("both", nil, nil, "")
+			guardrail.SetManagedMode(true)
+			guardrail.SetCiscoInspector(stub)
+
+			verdict := guardrail.Inspect(
+				t.Context(), "prompt", "provider-native prompt", nil, "provider/model", "action",
+			)
+			if verdict == nil || verdict.Action != tc.wantAction {
+				t.Fatalf("verdict = %+v, want action %q", verdict, tc.wantAction)
+			}
+			if stub.calls != 1 {
+				t.Fatalf("AID calls = %d, want 1", stub.calls)
+			}
+			wantMessages := []ChatMessage{{Role: "user", Content: "provider-native prompt"}}
+			if !reflect.DeepEqual(stub.messages, wantMessages) {
+				t.Fatalf("AID messages = %#v, want %#v", stub.messages, wantMessages)
+			}
+		})
+	}
+}
+
+func TestProxyManagedAIDOnly_PreservesHistoryWithoutDuplication(t *testing.T) {
+	t.Run("serializable history is authoritative", func(t *testing.T) {
+		original := []ChatMessage{
+			{Role: "system", Content: "system context"},
+			{Role: "assistant", Content: "prior answer"},
+			{Role: "user", Content: "current prompt"},
+		}
+		stub := &stubAIDInspector{verdict: blockVerdict()}
+		guardrail := NewGuardrailInspector("both", nil, nil, "")
+		guardrail.SetManagedMode(true)
+		guardrail.SetCiscoInspector(stub)
+
+		verdict := guardrail.Inspect(
+			t.Context(), "prompt", "current prompt", original, "provider/model", "action",
+		)
+		if verdict == nil || verdict.Action != "block" {
+			t.Fatalf("verdict = %+v, want block", verdict)
+		}
+		if stub.calls != 1 {
+			t.Fatalf("AID calls = %d, want 1", stub.calls)
+		}
+		if !reflect.DeepEqual(stub.messages, original) {
+			t.Fatalf("AID messages = %#v, want original history %#v", stub.messages, original)
+		}
+	})
+
+	t.Run("unserializable history is retained before synthetic turn", func(t *testing.T) {
+		original := []ChatMessage{{
+			Role:       "assistant",
+			Content:    " \t",
+			RawContent: json.RawMessage(`[{"type":"image_url"}]`),
+			ToolCalls:  json.RawMessage(`[{"id":"call-1"}]`),
+		}}
+		before := append([]ChatMessage(nil), original...)
+		stub := &stubAIDInspector{verdict: blockVerdict()}
+		guardrail := NewGuardrailInspector("both", nil, nil, "")
+		guardrail.SetManagedMode(true)
+		guardrail.SetCiscoInspector(stub)
+
+		verdict := guardrail.Inspect(
+			t.Context(), "prompt", "provider-native prompt", original, "provider/model", "action",
+		)
+		if verdict == nil || verdict.Action != "block" {
+			t.Fatalf("verdict = %+v, want block", verdict)
+		}
+		wantMessages := append(before, ChatMessage{Role: "user", Content: "provider-native prompt"})
+		if !reflect.DeepEqual(stub.messages, wantMessages) {
+			t.Fatalf("AID messages = %#v, want preserved history plus synthetic turn %#v", stub.messages, wantMessages)
+		}
+		if !reflect.DeepEqual(original, before) {
+			t.Fatalf("caller messages mutated: got %#v, want %#v", original, before)
+		}
+	})
+}
+
+func TestProxyManagedAIDOnly_CompletionRemainsAssistantOnly(t *testing.T) {
+	stub := &stubAIDInspector{verdict: blockVerdict()}
+	guardrail := NewGuardrailInspector("both", nil, nil, "")
+	guardrail.SetManagedMode(true)
+	guardrail.SetCiscoInspector(stub)
+
+	verdict := guardrail.Inspect(
+		t.Context(),
+		"completion",
+		"provider response",
+		[]ChatMessage{{Role: "user", Content: "prior prompt"}},
+		"provider/model",
+		"action",
+	)
+	if verdict == nil || verdict.Action != "block" {
+		t.Fatalf("verdict = %+v, want block", verdict)
+	}
+	wantMessages := []ChatMessage{{Role: "assistant", Content: "provider response"}}
+	if !reflect.DeepEqual(stub.messages, wantMessages) {
+		t.Fatalf("AID messages = %#v, want assistant-only payload %#v", stub.messages, wantMessages)
 	}
 }
 
@@ -1566,6 +1769,12 @@ func TestProxyManagedAIDOnly_BlankMessagePayloadsRecordNoContent(t *testing.T) {
 				{Role: "user", Content: "\r\n"},
 			},
 			wired: true,
+		},
+		{
+			name:      "unicode-whitespace-only top-level prompt",
+			direction: "prompt",
+			content:   "\u00a0\u2003",
+			wired:     true,
 		},
 		{
 			name:      "whitespace-only completion rewritten to assistant message",

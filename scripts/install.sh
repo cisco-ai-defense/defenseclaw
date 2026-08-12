@@ -72,6 +72,7 @@ readonly MAX_PYTHON_VERSION_EXCLUSIVE="3.14"
 readonly COSIGN_BOOTSTRAP_VERSION="2.6.3"
 readonly COSIGN_BOOTSTRAP_MAX_BYTES="209715200"
 readonly SANDBOX_INSTALLER_ASSET_START_VERSION="0.8.11"
+readonly MACOS_SYSCTL_BIN="/usr/sbin/sysctl"
 VERIFIED_CHECKSUM=""
 COSIGN_BIN=""
 
@@ -103,6 +104,17 @@ die() { err "$@"; exit 1; }
 # ── Utilities ─────────────────────────────────────────────────────────────────
 
 has() { command -v "$1" &>/dev/null; }
+
+macos_hardware_machine() {
+    local machine="$1"
+    if [[ "${machine}" == "x86_64" || "${machine}" == "amd64" ]] \
+        && [[ -x "${MACOS_SYSCTL_BIN}" && ! -L "${MACOS_SYSCTL_BIN}" ]] \
+        && [[ "$("${MACOS_SYSCTL_BIN}" -in sysctl.proc_translated 2>/dev/null || true)" == "1" ]]; then
+        printf '%s\n' "arm64"
+        return 0
+    fi
+    printf '%s\n' "${machine}"
+}
 
 existing_install_detected() {
     has defenseclaw \
@@ -859,6 +871,9 @@ detect_platform() {
 
     OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
     ARCH="$(uname -m)"
+    if [[ "${OS}" == "darwin" ]]; then
+        ARCH="$(macos_hardware_machine "${ARCH}")"
+    fi
 
     case "${ARCH}" in
         x86_64|amd64)  ARCH_NORM="amd64" ;;
@@ -871,6 +886,10 @@ detect_platform() {
         linux)  OS_NAME="Linux" ;;
         *)      die "Unsupported OS: ${OS}" ;;
     esac
+
+    if [[ "${OS}" == "darwin" && "${ARCH_NORM}" != "arm64" ]]; then
+        die "Intel macOS (${ARCH}) is unsupported. DefenseClaw for macOS requires Apple Silicon (arm64); no changes were made."
+    fi
 
     ok "${OS_NAME} (${ARCH_NORM})"
 }
@@ -979,7 +998,6 @@ resolve_cosign() {
 
     local expected filename verifier_url verifier_path actual size
     case "${OS}/${ARCH_NORM}" in
-        darwin/amd64) expected="5715d61dd00a9b6dcb344de14910b434145855b7f82690b94183c553ac1b68be" ;;
         darwin/arm64) expected="ff497a698f125f3130b04f000b2cb0dd163bcaf00b5e776ef536035e6d0b3f3e" ;;
         linux/amd64) expected="7c78a7f2efc00088bd788a758db6e0928e79f3e0eb83eb5d3c499ed98da4c4f4" ;;
         linux/arm64) expected="b7c23659a50a59fd8eec44b87188e9062157d0c87796cac7b38727e5390c4917" ;;

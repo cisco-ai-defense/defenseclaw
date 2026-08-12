@@ -307,6 +307,104 @@ func TestCommittedInstallCleanupPreservesNewTreeAndRemovesArtifacts(t *testing.T
 	}
 }
 
+func TestCommittedInstallCleanupDoesNotTraverseLivePayload(t *testing.T) {
+	installRoot, dataRoot, maintenancePath := testTransactionRoots(t)
+	transaction := testSetupTransactionForRoots("install", installRoot, dataRoot, maintenancePath, nil)
+	writeInstallTree(t, installRoot, testInstallState(
+		installRoot,
+		dataRoot,
+		maintenancePath,
+		transaction.ID,
+		transaction.TargetVersion,
+	))
+	volatileRuntime := filepath.Join(installRoot, "runtime", "volatile")
+	if err := os.MkdirAll(volatileRuntime, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(volatileRuntime, "ephemeral"), []byte("runtime-owned"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	restoreRuntimeAccess := installLivePayloadTraversalTrap(t, installRoot, volatileRuntime)
+
+	if err := cleanupCommittedSetupTransaction(transaction); err != nil {
+		t.Fatalf("cleanup traversed an unrelated live-runtime subtree: %v", err)
+	}
+	restoreRuntimeAccess()
+	entries, err := os.ReadDir(volatileRuntime)
+	if err != nil {
+		t.Fatalf("read restored live-runtime subtree: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "ephemeral" {
+		t.Fatalf("restored live-runtime subtree entries = %v, want ephemeral", entries)
+	}
+	assertInstallVersion(t, installRoot, transaction, transaction.TargetVersion)
+}
+
+func TestFinishCommittedSetupTransactionLabelsTerminalOperation(t *testing.T) {
+	wantErr := errors.New("file does not exist")
+	tests := []struct {
+		name          string
+		wantOperation string
+		converge      func(setupTransaction) error
+		markConverged func(setupTransaction) error
+		cleanup       func(setupTransaction) error
+		markComplete  func(setupTransaction) error
+	}{
+		{
+			name:          "convergence",
+			wantOperation: "converge committed setup transaction",
+			converge:      func(setupTransaction) error { return wantErr },
+		},
+		{
+			name:          "converged journal",
+			wantOperation: "record converged setup transaction",
+			markConverged: func(setupTransaction) error { return wantErr },
+		},
+		{
+			name:          "cleanup",
+			wantOperation: "clean converged setup transaction",
+			cleanup:       func(setupTransaction) error { return wantErr },
+		},
+		{
+			name:          "terminal journal",
+			wantOperation: "record completed setup transaction",
+			markComplete:  func(setupTransaction) error { return wantErr },
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			noError := func(setupTransaction) error { return nil }
+			converge := test.converge
+			if converge == nil {
+				converge = noError
+			}
+			markConverged := test.markConverged
+			if markConverged == nil {
+				markConverged = noError
+			}
+			cleanup := test.cleanup
+			if cleanup == nil {
+				cleanup = noError
+			}
+			markComplete := test.markComplete
+			if markComplete == nil {
+				markComplete = noError
+			}
+
+			_, err := finishCommittedSetupTransactionWith(
+				setupTransaction{},
+				converge,
+				markConverged,
+				cleanup,
+				markComplete,
+			)
+			if !errors.Is(err, wantErr) || !strings.Contains(err.Error(), test.wantOperation) {
+				t.Fatalf("error = %v, want wrapped %q", err, test.wantOperation)
+			}
+		})
+	}
+}
+
 func TestCommittedUninstallCleanupConvergesAfterRename(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows delayed maintenance-cache cleanup")

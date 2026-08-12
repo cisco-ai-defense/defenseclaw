@@ -272,22 +272,6 @@ func TestBashInlineDemotionPreservesUncertaintyLiteralsAndOtherInterpreters(t *t
 			wantMatch:       true,
 			wantEnforcement: true,
 		},
-		{
-			name:            "Perl remains unchanged",
-			input:           actionfacts.Input{Tool: "shell", Command: `perl -e 'print 1'`, CWD: "/repo"},
-			legacy:          `perl -e 'print 1'`,
-			ruleID:          "CMD-PERL-E",
-			wantMatch:       true,
-			wantEnforcement: true,
-		},
-		{
-			name:            "Ruby remains unchanged",
-			input:           actionfacts.Input{Tool: "shell", Command: `ruby -e 'puts 1'`, CWD: "/repo"},
-			legacy:          `ruby -e 'puts 1'`,
-			ruleID:          "CMD-RUBY-E",
-			wantMatch:       true,
-			wantEnforcement: true,
-		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{

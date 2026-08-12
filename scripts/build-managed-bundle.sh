@@ -9,7 +9,7 @@
 # invokes the make target with CMID_OVERLAY + CMID_VERSION set.
 #
 # Prereqs (fail-fast checked before we start):
-#   - macOS host with Xcode CLT (for `lipo`).
+#   - Apple Silicon macOS host with Xcode CLT.
 #   - go >= the version pinned in defenseclaw/go.mod.
 #   - GOPRIVATE=github.com/cisco-aispg/* (or equivalent) so `go get`
 #     can resolve the pinned pseudo-version at build time.
@@ -25,7 +25,7 @@
 #   scripts/build-managed-bundle.sh --keep                # keep the ai-common checkout after the build
 #
 # Environment overrides (all optional, forwarded to make):
-#   BUNDLE_GOARCH    (default: universal)  — see Makefile
+#   BUNDLE_GOARCH    (default: arm64; no other value is supported) — see Makefile
 #   BUNDLE_GOOS      (default: darwin)     — see Makefile
 #   BUNDLE_TAGS      (default: cmid)       — see Makefile
 #   VERSION          (default: `git describe` on the defenseclaw repo)
@@ -35,6 +35,19 @@
 #                        Falls back to HTTPS if the SSH clone fails.
 
 set -euo pipefail
+
+readonly MACOS_SYSCTL_BIN="/usr/sbin/sysctl"
+
+macos_hardware_machine() {
+  local machine="$1"
+  if [[ "${machine}" == "x86_64" || "${machine}" == "amd64" ]] \
+    && [[ -x "${MACOS_SYSCTL_BIN}" && ! -L "${MACOS_SYSCTL_BIN}" ]] \
+    && [[ "$("${MACOS_SYSCTL_BIN}" -in sysctl.proc_translated 2>/dev/null || true)" == "1" ]]; then
+    printf '%s\n' "arm64"
+    return 0
+  fi
+  printf '%s\n' "${machine}"
+}
 
 # ---- args ---------------------------------------------------------------
 
@@ -66,6 +79,23 @@ AI_COMMON_REPO_HTTPS="${AI_COMMON_REPO_HTTPS:-https://github.com/cisco-aispg/ai-
 
 : "${GOPRIVATE:=github.com/cisco-aispg/*}"
 export GOPRIVATE
+BUNDLE_GOARCH="${BUNDLE_GOARCH:-arm64}"
+BUNDLE_GOOS="${BUNDLE_GOOS:-darwin}"
+BUNDLE_TAGS="${BUNDLE_TAGS:-cmid}"
+
+[[ "${BUNDLE_GOARCH}" == "arm64" ]] || {
+  echo "build-managed-bundle: BUNDLE_GOARCH must be arm64 (got '${BUNDLE_GOARCH}')" >&2
+  exit 1
+}
+
+[[ "$(uname -s)" == "Darwin" ]] || {
+  echo "build-managed-bundle: this target is macOS-only" >&2
+  exit 1
+}
+[[ "$(macos_hardware_machine "$(uname -m)")" == "arm64" ]] || {
+  echo "build-managed-bundle: Apple Silicon macOS host is required" >&2
+  exit 1
+}
 
 # ---- prereq checks ------------------------------------------------------
 
@@ -78,12 +108,6 @@ require_bin() {
 
 require_bin git
 require_bin go
-require_bin lipo   # macOS-only; the make target refuses to lipo elsewhere
-
-if [[ "$(uname -s)" != "Darwin" ]]; then
-  echo "build-managed-bundle: this target is macOS-only (need lipo)" >&2
-  exit 1
-fi
 
 # ---- ai-common checkout -------------------------------------------------
 
@@ -176,10 +200,6 @@ echo "    cmid commit: ${COMMIT_SHA}"
 echo "    pseudo-ver:  ${CMID_VERSION}"
 
 # ---- drive the make target ---------------------------------------------
-
-BUNDLE_GOARCH="${BUNDLE_GOARCH:-universal}"
-BUNDLE_GOOS="${BUNDLE_GOOS:-darwin}"
-BUNDLE_TAGS="${BUNDLE_TAGS:-cmid}"
 
 echo "==> building managed bundle"
 echo "    CMID_OVERLAY=${OVERLAY_PATH}"

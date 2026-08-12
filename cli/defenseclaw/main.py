@@ -55,7 +55,11 @@ from defenseclaw.commands.cmd_status import status
 from defenseclaw.commands.cmd_tool import tool
 from defenseclaw.commands.cmd_tui import tui
 from defenseclaw.commands.cmd_uninstall import reset_cmd, uninstall_cmd
-from defenseclaw.commands.cmd_upgrade import _maybe_delegate_public_upgrade, upgrade
+from defenseclaw.commands.cmd_upgrade import (
+    _maybe_delegate_public_upgrade,
+    _reject_unsupported_intel_macos,
+    upgrade,
+)
 from defenseclaw.commands.cmd_version import version_cmd
 from defenseclaw.context import AppContext
 from defenseclaw.resolver_hint import authenticated_resolver_instructions
@@ -184,6 +188,7 @@ def cli(ctx: click.Context) -> None:
 
     invoked = ctx.invoked_subcommand
     if invoked == "upgrade" and not _is_help_invocation(ctx):
+        _reject_unsupported_intel_macos()
         recovery_home = os.path.abspath(os.path.expanduser(os.environ.get("DEFENSECLAW_HOME") or "~/.defenseclaw"))
         recovery_root = os.path.join(recovery_home, ".upgrade-recovery")
         recovery_journals = tuple(

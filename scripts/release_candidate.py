@@ -1523,6 +1523,10 @@ def _expected_runtime_config_version(version: str) -> int:
 
 def _expected_release_artifacts(version: str) -> dict[str, Any]:
     _validate_version(version)
+    # Preserve the complete protocol-2 map for authenticated compatibility.
+    # Darwin/amd64 is a schema slot, not a supported macOS target: current
+    # install, upgrade, rescue, package, build-validation, and certification
+    # paths all reject Intel macOS before selecting a runtime artifact.
     gateways: dict[str, dict[str, str]] = {}
     for os_name in ("darwin", "linux", "windows"):
         gateways[os_name] = {

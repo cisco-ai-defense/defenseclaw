@@ -309,10 +309,10 @@ def test_release_jobs_pin_the_bundle_verifier_binary() -> None:
         if step.get("uses", "").startswith("sigstore/cosign-installer@")
     ]
 
-    assert len(installers) == 8
+    assert len(installers) == 9
     assert all(step["uses"] == COSIGN_INSTALLER_ACTION for step in installers)
     versions = [step.get("with", {}).get("cosign-release") for step in installers]
-    assert versions.count("v2.6.2") == 6
+    assert versions.count("v2.6.2") == 7
     assert versions.count("v2.6.3") == 2
     channel = _workflow()["jobs"]["advance-stable-channel"]
     channel_installer = next(
@@ -332,12 +332,11 @@ def test_cosign_version_split_is_documented_and_bound_to_offline_production_pins
     assert re.fullmatch(r"[0-9a-f]{64}", release_candidate.WINDOWS_COSIGN_SHA256)
     assert resolver_hint.COSIGN_BOOTSTRAP_VERSION == "2.6.3"
     production_digests = {
-        resolver_hint.COSIGN_BOOTSTRAP_SHA256[("darwin", "amd64")],
         resolver_hint.COSIGN_BOOTSTRAP_SHA256[("darwin", "arm64")],
         resolver_hint.COSIGN_BOOTSTRAP_SHA256[("linux", "amd64")],
         resolver_hint.COSIGN_BOOTSTRAP_SHA256[("linux", "arm64")],
     }
-    assert len(production_digests) == 4
+    assert len(production_digests) == 3
     assert all(re.fullmatch(r"[0-9a-f]{64}", digest) for digest in production_digests)
 
     # These are the shipped rescue/install verifier identities, not a
@@ -811,7 +810,7 @@ def test_release_certificate_is_canonicalized_and_authenticated_before_seal() ->
     assert "scripts/release_candidate.py verify" in seal_script
 
 
-def test_exact_posix_fresh_install_and_twelve_upgrade_cells_gate_publication() -> None:
+def test_exact_posix_fresh_install_twelve_upgrades_and_intel_refusal_gate_publication() -> None:
     workflow = _certification_workflow()
     assert set(workflow["on"]) == {"workflow_call"}
     assert set(workflow["on"]["workflow_call"]["inputs"]) == {
@@ -824,6 +823,7 @@ def test_exact_posix_fresh_install_and_twelve_upgrade_cells_gate_publication() -
     assert set(jobs) == {
         "posix-fresh-install",
         "posix-upgrade",
+        "macos-intel-refusal",
         "windows-fresh-install",
     }
     assert jobs["posix-fresh-install"]["timeout-minutes"] == "30"
@@ -908,6 +908,24 @@ def test_exact_posix_fresh_install_and_twelve_upgrade_cells_gate_publication() -
         "certification-complete",
     ):
         assert retired not in text
+
+
+def test_intel_macos_refusal_gate_uses_the_exact_sealed_candidate() -> None:
+    intel_refusal = _certification_workflow()["jobs"]["macos-intel-refusal"]
+    assert intel_refusal["runs-on"] == "macos-15-intel"
+    assert intel_refusal["timeout-minutes"] == "20"
+    assert intel_refusal["strategy"] == {
+        "fail-fast": "false",
+        "matrix": {"surface": ["fresh-install", "upgrade"]},
+    }
+    intel_refusal_text = str(intel_refusal)
+    assert 'test "$RUNNER_ARCH" = "X64"' in intel_refusal_text
+    assert "scripts/release_candidate.py verify" in intel_refusal_text
+    assert "scripts/verify-sigstore-blob.py" in intel_refusal_text
+    assert "scripts/test-upgrade-macos-intel-refusal.sh" in intel_refusal_text
+    assert "'REFUSAL_SURFACE': '${{ matrix.surface }}'" in intel_refusal_text
+    assert '--surface "$REFUSAL_SURFACE"' in intel_refusal_text
+    assert '--surface "${{ matrix.surface }}"' not in intel_refusal_text
 
 
 def test_posix_fresh_install_gates_temporary_and_external_cosign_paths() -> None:

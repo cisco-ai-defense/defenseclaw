@@ -241,6 +241,9 @@ def protected_release_artifacts(version: str) -> dict[str, Any]:
     """Name every protocol-2 runtime artifact explicitly in signed policy."""
 
     _ver_tuple(version)
+    # Darwin/amd64 remains only to preserve the authenticated protocol-2 map.
+    # It is not in the supported macOS install, package, validation, or
+    # certification matrix; those entry points reject Intel before selection.
     gateways: dict[str, dict[str, str]] = {}
     for os_name in ("darwin", "linux", "windows"):
         gateways[os_name] = {

@@ -34,6 +34,19 @@
 
 set -euo pipefail
 
+readonly MACOS_SYSCTL_BIN="/usr/sbin/sysctl"
+
+macos_hardware_machine() {
+  local machine="$1"
+  if [[ "${machine}" == "x86_64" || "${machine}" == "amd64" ]] \
+    && [[ -x "${MACOS_SYSCTL_BIN}" && ! -L "${MACOS_SYSCTL_BIN}" ]] \
+    && [[ "$("${MACOS_SYSCTL_BIN}" -in sysctl.proc_translated 2>/dev/null || true)" == "1" ]]; then
+    printf '%s\n' "arm64"
+    return 0
+  fi
+  printf '%s\n' "${machine}"
+}
+
 # ---- defaults -----------------------------------------------------------
 
 DEFAULT_MODE="observe"
@@ -208,6 +221,12 @@ AGENT_VERSION=""
 log()  { printf '[install] %s\n' "$*"; }
 warn() { printf '[install] WARN: %s\n' "$*" >&2; }
 die()  { printf '[install] ERROR: %s\n' "$*" >&2; exit 1; }
+
+process_machine="$(uname -m)"
+hardware_machine="$(macos_hardware_machine "${process_machine}")"
+if [[ "$(uname -s)" == "Darwin" && "${hardware_machine}" != "arm64" ]]; then
+  die "Intel macOS (${process_machine}) is unsupported; the managed macOS package requires Apple Silicon (arm64)"
+fi
 
 # The persistent install.log sink is set up LATER (after the fresh-host
 # preflight passes and after LOGS_DIR has been created by

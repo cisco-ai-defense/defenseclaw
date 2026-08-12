@@ -147,6 +147,7 @@ func analyze(input Input) Facts {
 			dialect = DialectArgv
 		}
 		parsed := analyzeStructuredArgv(argv, startID, 0, dialect)
+		expandBoundedInlineInterpreters(&parsed, 0)
 		classifyOutput(&parsed)
 		enforceAnalyzeAuthority(&parsed)
 		base.merge(parsed)
@@ -162,6 +163,7 @@ func analyze(input Input) Facts {
 			base.markAmbiguous(IssueConflictingSources)
 		}
 		parsed := parseCommandAs(command, dialect, startID, 0)
+		expandBoundedInlineInterpreters(&parsed, 0)
 		classifyOutput(&parsed)
 		enforceAnalyzeAuthority(&parsed)
 		base.merge(parsed)
