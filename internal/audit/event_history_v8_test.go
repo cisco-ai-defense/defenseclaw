@@ -87,11 +87,13 @@ type testProjectionSigner struct {
 }
 
 type testEventHistoryHealthReporter struct {
-	codes []EventHistoryHealthCode
+	codes       []EventHistoryHealthCode
+	transitions []EventHistoryHealthTransition
 }
 
-func (reporter *testEventHistoryHealthReporter) ReportEventHistoryHealth(code EventHistoryHealthCode) {
-	reporter.codes = append(reporter.codes, code)
+func (reporter *testEventHistoryHealthReporter) ReportEventHistoryHealth(transition EventHistoryHealthTransition) {
+	reporter.codes = append(reporter.codes, transition.Code)
+	reporter.transitions = append(reporter.transitions, transition)
 }
 
 type queryingEventHistoryHealthReporter struct {
@@ -100,6 +102,24 @@ type queryingEventHistoryHealthReporter struct {
 	codes       []EventHistoryHealthCode
 	errors      []error
 	closeErrors []error
+}
+
+type reentrantEventHistoryHealthReporter struct {
+	once        sync.Once
+	writer      *EventHistoryWriter
+	record      observability.Record
+	projection  observabilityredaction.Projection
+	transitions []EventHistoryHealthTransition
+	appendErr   error
+}
+
+func (reporter *reentrantEventHistoryHealthReporter) ReportEventHistoryHealth(
+	transition EventHistoryHealthTransition,
+) {
+	reporter.transitions = append(reporter.transitions, transition)
+	reporter.once.Do(func() {
+		reporter.appendErr = reporter.writer.Append(reporter.record, reporter.projection)
+	})
 }
 
 type toggleProjectionSigner struct {
@@ -125,18 +145,21 @@ func (signer *toggleProjectionSigner) HMACSHA256(
 }
 
 type blockingEventHistoryHealthReporter struct {
-	started chan EventHistoryHealthCode
-	release chan struct{}
-	once    sync.Once
-	mu      sync.Mutex
-	codes   []EventHistoryHealthCode
+	started     chan EventHistoryHealthCode
+	release     chan struct{}
+	once        sync.Once
+	mu          sync.Mutex
+	codes       []EventHistoryHealthCode
+	transitions []EventHistoryHealthTransition
 }
 
 func (reporter *blockingEventHistoryHealthReporter) ReportEventHistoryHealth(
-	code EventHistoryHealthCode,
+	transition EventHistoryHealthTransition,
 ) {
+	code := transition.Code
 	reporter.mu.Lock()
 	reporter.codes = append(reporter.codes, code)
+	reporter.transitions = append(reporter.transitions, transition)
 	reporter.mu.Unlock()
 	reporter.once.Do(func() {
 		reporter.started <- code
@@ -150,7 +173,14 @@ func (reporter *blockingEventHistoryHealthReporter) snapshot() []EventHistoryHea
 	return append([]EventHistoryHealthCode(nil), reporter.codes...)
 }
 
-func (reporter *queryingEventHistoryHealthReporter) ReportEventHistoryHealth(code EventHistoryHealthCode) {
+func (reporter *blockingEventHistoryHealthReporter) transitionSnapshot() []EventHistoryHealthTransition {
+	reporter.mu.Lock()
+	defer reporter.mu.Unlock()
+	return append([]EventHistoryHealthTransition(nil), reporter.transitions...)
+}
+
+func (reporter *queryingEventHistoryHealthReporter) ReportEventHistoryHealth(transition EventHistoryHealthTransition) {
+	code := transition.Code
 	reporter.codes = append(reporter.codes, code)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
@@ -248,6 +278,48 @@ func newV8HistoryRecordAt(t *testing.T, id, message string, timestamp time.Time)
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	return record
+}
+
+func newMandatoryV8HistoryRecord(t *testing.T, id string) observability.Record {
+	t.Helper()
+	builder, err := observability.NewRecordBuilder(
+		observability.ClockFunc(func() time.Time {
+			return time.Date(2026, 7, 3, 15, 0, 0, 0, time.UTC)
+		}),
+		observability.OccurrenceIDGeneratorFunc(func() (string, error) { return id, nil }),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record, err := builder.BuildClassifiedLog(observability.ClassifiedLogInput{
+		ProducerKind: observability.ProducerGatewayEvent,
+		ProducerKey:  "activity",
+		ClassificationContext: observability.ClassificationContext{
+			Bucket:      observability.BucketComplianceActivity,
+			EventName:   "config.change.applied",
+			RawSeverity: "WARN",
+			MandatoryFacts: observability.MandatoryFacts{
+				ControlPlaneMutation: true,
+			},
+		},
+		Source: observability.SourceOperatorAPI, Action: "config.change", Phase: "apply",
+		Outcome: observability.OutcomeApplied,
+		Provenance: observability.Provenance{
+			Producer: "operator_api", BinaryVersion: "v8.0.0-test",
+			RegistrySchemaVersion: 1, ConfigGeneration: 24,
+		},
+		Body: map[string]any{"target": "observability.routes", "reason": "approved change"},
+		FieldClasses: map[string]observability.FieldClass{
+			"/target": observability.FieldClassPath, "/reason": observability.FieldClassReason,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !record.Mandatory() {
+		t.Fatal("mandatory fixture was not classified as mandatory")
 	}
 	return record
 }
@@ -1485,6 +1557,272 @@ func TestEventHistoryWriterReportsBoundedProjectionUnsignedAndWriteHealth(t *tes
 	}
 }
 
+func TestEventHistoryWriterRecoversOnlyAfterMandatorySignedCommit(t *testing.T) {
+	store := newV8HistoryStore(t)
+	health := &testEventHistoryHealthReporter{}
+	writer, err := NewEventHistoryWriterForGeneration(
+		store,
+		&testProjectionSigner{keyID: "integrity-key-v1", key: bytes.Repeat([]byte{0x31}, 32)},
+		health,
+		testLocalProfileResolver{profile: observabilityredaction.ProfileNone},
+		7,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`CREATE TRIGGER reject_recovery_fixture BEFORE INSERT ON audit_events
+		WHEN NEW.id = 'history-recovery-failure' BEGIN SELECT RAISE(ABORT, 'private path'); END`); err != nil {
+		t.Fatal(err)
+	}
+	failed := newV8HistoryRecord(t, "history-recovery-failure", "private")
+	if err := writer.Append(failed, projectV8HistoryRecord(t, failed, observabilityredaction.ProfileNone)); err == nil {
+		t.Fatal("write failure was hidden")
+	}
+	optional := newV8HistoryRecord(t, "history-recovery-optional", "private")
+	if optional.Mandatory() {
+		t.Fatal("optional fixture became mandatory")
+	}
+	if err := writer.Append(optional, projectV8HistoryRecord(t, optional, observabilityredaction.ProfileNone)); err != nil {
+		t.Fatal(err)
+	}
+	if len(health.transitions) != 1 {
+		t.Fatalf("optional signed commit recovered write health: %+v", health.transitions)
+	}
+	mandatory := newMandatoryV8HistoryRecord(t, "history-recovery-mandatory")
+	if err := writer.Append(mandatory, projectV8HistoryRecord(t, mandatory, observabilityredaction.ProfileNone)); err != nil {
+		t.Fatal(err)
+	}
+	if len(health.transitions) != 2 {
+		t.Fatalf("health transitions = %+v", health.transitions)
+	}
+	failure, recovery := health.transitions[0], health.transitions[1]
+	if failure.Generation != 7 || failure.State != EventHistoryHealthFailed ||
+		failure.Code != EventHistoryHealthWriteFailed ||
+		failure.SQLiteClass != EventHistorySQLiteConstraintCorrupt || failure.SQLitePrimaryCode != 19 ||
+		failure.OccurredAt.IsZero() || failure.OccurredAt.Location() != time.UTC {
+		t.Fatalf("failure transition = %+v", failure)
+	}
+	if recovery.Generation != 7 || recovery.State != EventHistoryHealthRecovered ||
+		recovery.Code != EventHistoryHealthWriteFailed || recovery.Sequence <= failure.Sequence ||
+		recovery.SQLiteClass != "" || recovery.SQLitePrimaryCode != 0 || recovery.OccurredAt.IsZero() {
+		t.Fatalf("recovery transition = %+v after %+v", recovery, failure)
+	}
+}
+
+func TestEventHistoryWriterUnsignedMandatoryCommitDoesNotRecoverWriteHealth(t *testing.T) {
+	store := newV8HistoryStore(t)
+	health := &testEventHistoryHealthReporter{}
+	writer, err := NewEventHistoryWriterForGeneration(
+		store, nil, health,
+		testLocalProfileResolver{profile: observabilityredaction.ProfileNone}, 3,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`CREATE TRIGGER reject_unsigned_recovery BEFORE INSERT ON audit_events
+		WHEN NEW.id = 'history-unsigned-failure' BEGIN SELECT RAISE(ABORT, 'private'); END`); err != nil {
+		t.Fatal(err)
+	}
+	failed := newV8HistoryRecord(t, "history-unsigned-failure", "private")
+	if err := writer.Append(failed, projectV8HistoryRecord(t, failed, observabilityredaction.ProfileNone)); err == nil {
+		t.Fatal("write failure was hidden")
+	}
+	mandatory := newMandatoryV8HistoryRecord(t, "history-unsigned-mandatory")
+	if err := writer.Append(mandatory, projectV8HistoryRecord(t, mandatory, observabilityredaction.ProfileNone)); err != nil {
+		t.Fatal(err)
+	}
+	for _, transition := range health.transitions {
+		if transition.State == EventHistoryHealthRecovered {
+			t.Fatalf("unsigned commit recovered write health: %+v", health.transitions)
+		}
+	}
+}
+
+func TestEventHistoryWriterKeepsNewestWriteFailureBehindBlockedCallback(t *testing.T) {
+	store := newV8HistoryStore(t)
+	reporter := &blockingEventHistoryHealthReporter{
+		started: make(chan EventHistoryHealthCode, 1), release: make(chan struct{}),
+	}
+	writer, err := NewEventHistoryWriterForGeneration(
+		store,
+		&testProjectionSigner{keyID: "integrity-key-v1", key: bytes.Repeat([]byte{0x42}, 32)},
+		reporter,
+		testLocalProfileResolver{profile: observabilityredaction.ProfileNone}, 9,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`CREATE TRIGGER reject_blocked_failures BEFORE INSERT ON audit_events
+		WHEN NEW.id IN ('history-blocked-failure-1','history-blocked-failure-3')
+		BEGIN SELECT RAISE(ABORT, 'private'); END`); err != nil {
+		t.Fatal(err)
+	}
+	first := newV8HistoryRecord(t, "history-blocked-failure-1", "private")
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- writer.Append(first, projectV8HistoryRecord(t, first, observabilityredaction.ProfileNone))
+	}()
+	select {
+	case code := <-reporter.started:
+		if code != EventHistoryHealthWriteFailed {
+			t.Fatalf("first code = %q", code)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("failure callback did not start")
+	}
+	mandatory := newMandatoryV8HistoryRecord(t, "history-blocked-recovery-2")
+	if err := writer.Append(mandatory, projectV8HistoryRecord(t, mandatory, observabilityredaction.ProfileNone)); err != nil {
+		t.Fatal(err)
+	}
+	newer := newV8HistoryRecord(t, "history-blocked-failure-3", "private")
+	if err := writer.Append(newer, projectV8HistoryRecord(t, newer, observabilityredaction.ProfileNone)); err == nil {
+		t.Fatal("newer write failure was hidden")
+	}
+	close(reporter.release)
+	if err := <-firstDone; err == nil {
+		t.Fatal("first write failure was hidden")
+	}
+	transitions := reporter.transitionSnapshot()
+	if len(transitions) != 2 || transitions[0].State != EventHistoryHealthFailed ||
+		transitions[1].State != EventHistoryHealthFailed ||
+		transitions[1].Sequence <= transitions[0].Sequence {
+		t.Fatalf("blocked transition sequence = %+v", transitions)
+	}
+}
+
+func TestEventHistoryWriterPreservesFailureDiagnosticBeforePendingRecovery(t *testing.T) {
+	store := newV8HistoryStore(t)
+	reporter := &blockingEventHistoryHealthReporter{
+		started: make(chan EventHistoryHealthCode, 1), release: make(chan struct{}),
+	}
+	writer, err := NewEventHistoryWriterForGeneration(
+		store,
+		&testProjectionSigner{keyID: "integrity-key-v1", key: bytes.Repeat([]byte{0x43}, 32)},
+		reporter,
+		testLocalProfileResolver{profile: observabilityredaction.ProfileNone}, 10,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Block an unrelated callback so neither the write failure nor its recovery
+	// has been delivered when both are queued.
+	unrelatedDone := make(chan struct{})
+	go func() {
+		writer.reportHealthFailure(EventHistoryHealthProjectionRejected, errors.New("private"), "")
+		close(unrelatedDone)
+	}()
+	select {
+	case code := <-reporter.started:
+		if code != EventHistoryHealthProjectionRejected {
+			t.Fatalf("blocked code = %q", code)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("unrelated callback did not start")
+	}
+	if _, err := store.db.Exec(`CREATE TRIGGER reject_pending_failure BEFORE INSERT ON audit_events
+		WHEN NEW.id = 'history-pending-failure' BEGIN SELECT RAISE(ABORT, 'private'); END`); err != nil {
+		t.Fatal(err)
+	}
+	failed := newV8HistoryRecord(t, "history-pending-failure", "private")
+	if err := writer.Append(failed, projectV8HistoryRecord(t, failed, observabilityredaction.ProfileNone)); err == nil {
+		t.Fatal("pending failure was hidden")
+	}
+	mandatory := newMandatoryV8HistoryRecord(t, "history-pending-recovery")
+	if err := writer.Append(mandatory, projectV8HistoryRecord(t, mandatory, observabilityredaction.ProfileNone)); err != nil {
+		t.Fatal(err)
+	}
+	close(reporter.release)
+	select {
+	case <-unrelatedDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("health drain did not finish")
+	}
+	transitions := reporter.transitionSnapshot()
+	if len(transitions) != 3 || transitions[1].State != EventHistoryHealthFailed ||
+		transitions[1].Code != EventHistoryHealthWriteFailed ||
+		transitions[1].SQLiteClass != EventHistorySQLiteConstraintCorrupt ||
+		transitions[2].State != EventHistoryHealthRecovered ||
+		transitions[2].Sequence <= transitions[1].Sequence {
+		t.Fatalf("pending failure/recovery transitions = %+v", transitions)
+	}
+}
+
+type eventHistoryTestCodedError struct {
+	code int
+	text string
+}
+
+func (err eventHistoryTestCodedError) Error() string { return err.text }
+func (err eventHistoryTestCodedError) Code() int     { return err.code }
+
+func TestClassifyEventHistorySQLiteFailureIsBounded(t *testing.T) {
+	tests := []struct {
+		name    string
+		err     error
+		class   EventHistorySQLiteClass
+		primary uint8
+	}{
+		{name: "busy extended", err: eventHistoryTestCodedError{code: 5 | 12<<8, text: "/secret/busy"}, class: EventHistorySQLiteBusyLocked, primary: 5},
+		{name: "locked", err: eventHistoryTestCodedError{code: 6, text: "secret"}, class: EventHistorySQLiteBusyLocked, primary: 6},
+		{name: "deadline", err: context.DeadlineExceeded, class: EventHistorySQLiteDeadline},
+		{
+			name: "deadline with unrelated coded cause",
+			err: errors.Join(
+				context.DeadlineExceeded,
+				eventHistoryTestCodedError{code: 5, text: "/secret/busy"},
+			),
+			class: EventHistorySQLiteDeadline,
+		},
+		{name: "full", err: eventHistoryTestCodedError{code: 13, text: "secret"}, class: EventHistorySQLiteFull, primary: 13},
+		{name: "io", err: eventHistoryTestCodedError{code: 10, text: "secret"}, class: EventHistorySQLiteIO, primary: 10},
+		{name: "readonly", err: eventHistoryTestCodedError{code: 8, text: "secret"}, class: EventHistorySQLiteReadOnlyCantOpen, primary: 8},
+		{name: "cantopen", err: eventHistoryTestCodedError{code: 14, text: "secret"}, class: EventHistorySQLiteReadOnlyCantOpen, primary: 14},
+		{name: "constraint", err: eventHistoryTestCodedError{code: 19, text: "secret"}, class: EventHistorySQLiteConstraintCorrupt, primary: 19},
+		{name: "unknown", err: eventHistoryTestCodedError{code: 255, text: "/secret/unknown"}, class: EventHistorySQLiteOther},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			class, primary := classifyEventHistorySQLiteFailure(test.err)
+			if class != test.class || primary != test.primary {
+				t.Fatalf("classification = %q/%d, want %q/%d", class, primary, test.class, test.primary)
+			}
+			transition := EventHistoryHealthTransition{
+				Generation: 1, Sequence: 1, State: EventHistoryHealthFailed,
+				Code: EventHistoryHealthWriteFailed, OccurredAt: time.Now().UTC(),
+				SQLiteClass: class, SQLitePrimaryCode: primary,
+			}
+			if !validEventHistoryHealthTransition(transition) {
+				t.Fatalf("classifier emitted an invalid transition: %+v", transition)
+			}
+			encoded, err := json.Marshal(transition)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if bytes.Contains(encoded, []byte("secret")) {
+				t.Fatalf("bounded transition leaked driver text: %s", encoded)
+			}
+		})
+	}
+}
+
+func TestEventHistoryWriterClassOverrideClearsDriverPrimaryCode(t *testing.T) {
+	health := &testEventHistoryHealthReporter{}
+	writer := &EventHistoryWriter{healthReporter: health, generation: 1}
+	writer.reportHealthFailure(
+		EventHistoryHealthWriteFailed,
+		eventHistoryTestCodedError{code: 5, text: "/secret/busy"},
+		EventHistorySQLiteUnavailable,
+	)
+	if len(health.transitions) != 1 {
+		t.Fatalf("health transitions = %+v", health.transitions)
+	}
+	transition := health.transitions[0]
+	if transition.SQLiteClass != EventHistorySQLiteUnavailable || transition.SQLitePrimaryCode != 0 ||
+		!validEventHistoryHealthTransition(transition) {
+		t.Fatalf("overridden diagnostic = %+v", transition)
+	}
+}
+
 func TestEventHistoryWriterReportsHealthOnlyAfterTransactionEnds(t *testing.T) {
 	store := newV8HistoryStore(t)
 	health := &queryingEventHistoryHealthReporter{
@@ -1549,6 +1887,120 @@ func TestEventHistoryWriterReportsHealthOnlyAfterTransactionEnds(t *testing.T) {
 	}
 	if len(health.closeErrors) != 1 || health.closeErrors[0] != nil {
 		t.Fatalf("health callback could not close store after lifecycle release: %#v", health.closeErrors)
+	}
+}
+
+func TestEventHistoryWriterHealthCallbackCanReenterSameWriter(t *testing.T) {
+	store := newV8HistoryStore(t)
+	reporter := &reentrantEventHistoryHealthReporter{}
+	writer, err := NewEventHistoryWriterForGeneration(
+		store,
+		&testProjectionSigner{keyID: "integrity-key-v1", key: bytes.Repeat([]byte{0x22}, 32)},
+		reporter,
+		testLocalProfileResolver{profile: observabilityredaction.ProfileNone}, 11,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reporter.writer = writer
+	reporter.record = newMandatoryV8HistoryRecord(t, "history-reentrant-recovery")
+	reporter.projection = projectV8HistoryRecord(
+		t, reporter.record, observabilityredaction.ProfileNone,
+	)
+	if _, err := store.db.Exec(`CREATE TRIGGER reject_reentrant_initial BEFORE INSERT ON audit_events
+		WHEN NEW.id = 'history-reentrant-failure' BEGIN SELECT RAISE(ABORT, 'private'); END`); err != nil {
+		t.Fatal(err)
+	}
+	failed := newV8HistoryRecord(t, "history-reentrant-failure", "private")
+	done := make(chan error, 1)
+	go func() {
+		done <- writer.Append(failed, projectV8HistoryRecord(t, failed, observabilityredaction.ProfileNone))
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("initial failure was hidden")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("reentrant callback deadlocked the writer")
+	}
+	if reporter.appendErr != nil {
+		t.Fatalf("reentrant append: %v", reporter.appendErr)
+	}
+	if len(reporter.transitions) != 2 ||
+		reporter.transitions[0].State != EventHistoryHealthFailed ||
+		reporter.transitions[1].State != EventHistoryHealthRecovered ||
+		reporter.transitions[1].Sequence <= reporter.transitions[0].Sequence {
+		t.Fatalf("reentrant transitions = %+v", reporter.transitions)
+	}
+	var count int
+	if err := store.db.QueryRow(`SELECT COUNT(*) FROM audit_events WHERE id=?`, reporter.record.RecordID()).Scan(&count); err != nil || count != 1 {
+		t.Fatalf("reentrant committed rows = %d, err=%v", count, err)
+	}
+}
+
+func TestEventHistoryWriterReportsClosedStoreAsUnavailable(t *testing.T) {
+	store := newV8HistoryStore(t)
+	health := &testEventHistoryHealthReporter{}
+	writer, err := NewEventHistoryWriterForGeneration(
+		store,
+		&testProjectionSigner{keyID: "integrity-key-v1", key: bytes.Repeat([]byte{0x24}, 32)},
+		health, testLocalProfileResolver{profile: observabilityredaction.ProfileNone}, 12,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	record := newV8HistoryRecord(t, "history-closed-store", "private")
+	if err := writer.Append(record, projectV8HistoryRecord(t, record, observabilityredaction.ProfileNone)); err == nil {
+		t.Fatal("closed store append succeeded")
+	}
+	if len(health.transitions) != 1 {
+		t.Fatalf("closed store transitions = %+v", health.transitions)
+	}
+	transition := health.transitions[0]
+	if transition.State != EventHistoryHealthFailed || transition.Code != EventHistoryHealthWriteFailed ||
+		transition.SQLiteClass != EventHistorySQLiteUnavailable || transition.SQLitePrimaryCode != 0 {
+		t.Fatalf("closed store transition = %+v", transition)
+	}
+}
+
+func TestEventHistoryWriterBeginFailureReportsAfterStoreRelease(t *testing.T) {
+	store := newV8HistoryStore(t)
+	health := &queryingEventHistoryHealthReporter{
+		store: store, closeOnCode: EventHistoryHealthWriteFailed,
+	}
+	writer, err := NewEventHistoryWriterForGeneration(
+		store,
+		&testProjectionSigner{keyID: "integrity-key-v1", key: bytes.Repeat([]byte{0x25}, 32)},
+		health, testLocalProfileResolver{profile: observabilityredaction.ProfileNone}, 13,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Close the underlying pool without changing Store.Ready so Append reaches
+	// BeginTx and proves its failure callback runs after lifecycle release.
+	if err := store.db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	record := newV8HistoryRecord(t, "history-begin-failure", "private")
+	done := make(chan error, 1)
+	go func() {
+		done <- writer.Append(record, projectV8HistoryRecord(t, record, observabilityredaction.ProfileNone))
+	}()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("closed database BeginTx succeeded")
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("BeginTx failure callback held Store lifecycle lock")
+	}
+	if len(health.codes) != 1 || health.codes[0] != EventHistoryHealthWriteFailed ||
+		len(health.closeErrors) != 1 || health.closeErrors[0] != nil {
+		t.Fatalf("BeginTx health callback = codes:%+v close:%+v", health.codes, health.closeErrors)
 	}
 }
 

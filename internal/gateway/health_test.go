@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
@@ -390,7 +391,7 @@ func TestObservabilityV8HealthOnlyExposesValidRetentionFailures(t *testing.T) {
 				"degraded",
 				test.failure,
 				30,
-				"",
+				observabilityV8EventHistorySnapshot{},
 			)
 			failure, published := health.Details["retention_failure"]
 			if published != test.wantPublished {
@@ -416,7 +417,7 @@ func TestObservabilityV8HealthHidesInvalidEventHistoryFailureButFailsClosed(t *t
 		"healthy",
 		"",
 		30,
-		"secret_internal_failure",
+		observabilityV8EventHistorySnapshot{activeCode: "secret_internal_failure"},
 	)
 	if health.State != StateError {
 		t.Fatalf("telemetry state = %q, want %q", health.State, StateError)
@@ -454,6 +455,309 @@ func TestObservabilityV8HealthRejectsStaleFailureAcrossReload(t *testing.T) {
 	rows = health.Snapshot().Telemetry.Details["destinations"].([]map[string]interface{})
 	if rows[0]["failure"] != nil || rows[0]["generation"] != uint64(9) {
 		t.Fatalf("stale transition contaminated successor: %+v", rows[0])
+	}
+}
+
+func eventHistoryTransition(
+	generation, sequence uint64,
+	state audit.EventHistoryHealthState,
+	code audit.EventHistoryHealthCode,
+	class audit.EventHistorySQLiteClass,
+	primary uint8,
+) audit.EventHistoryHealthTransition {
+	return audit.EventHistoryHealthTransition{
+		Generation: generation, Sequence: sequence, State: state, Code: code,
+		OccurredAt:  time.Date(2026, 8, 12, 12, 0, int(sequence), 0, time.UTC),
+		SQLiteClass: class, SQLitePrimaryCode: primary,
+	}
+}
+
+func TestObservabilityV8EventHistoryFailureRecoversAndKeepsBoundedHistory(t *testing.T) {
+	source := &fakeObservabilityV8HealthSource{snapshot: observabilityruntime.DestinationHealthSnapshot{
+		Generation: 4,
+	}}
+	health := NewSidecarHealth()
+	health.bindObservabilityV8HealthSource(source)
+	health.bindObservabilityV8EventHistoryGeneration(4)
+	health.observeObservabilityV8EventHistory(eventHistoryTransition(
+		4, 1, audit.EventHistoryHealthFailed, audit.EventHistoryHealthWriteFailed,
+		audit.EventHistorySQLiteBusyLocked, 5,
+	))
+	failed := health.Snapshot().Telemetry
+	if failed.State != StateError || failed.Details["event_history_failure"] != "sqlite_write_failed" ||
+		failed.Details["event_history_last_sqlite_class"] != "busy_locked" ||
+		failed.Details["event_history_last_sqlite_primary_code"] != uint8(5) {
+		t.Fatalf("failed health = %+v", failed)
+	}
+	health.observeObservabilityV8EventHistory(eventHistoryTransition(
+		4, 2, audit.EventHistoryHealthRecovered, audit.EventHistoryHealthWriteFailed, "", 0,
+	))
+	recovered := health.Snapshot().Telemetry
+	if recovered.State != StateRunning {
+		t.Fatalf("recovered health = %+v", recovered)
+	}
+	if _, active := recovered.Details["event_history_failure"]; active {
+		t.Fatalf("recovered health retained active failure: %+v", recovered.Details)
+	}
+	if recovered.Details["event_history_last_sqlite_class"] != "busy_locked" ||
+		recovered.Details["event_history_last_sqlite_primary_code"] != uint8(5) {
+		t.Fatalf("recovery lost bounded failure history: %+v", recovered.Details)
+	}
+	// A delayed older callback cannot relatch the cleared failure.
+	health.observeObservabilityV8EventHistory(eventHistoryTransition(
+		4, 1, audit.EventHistoryHealthFailed, audit.EventHistoryHealthWriteFailed,
+		audit.EventHistorySQLiteFull, 13,
+	))
+	if stale := health.Snapshot().Telemetry; stale.State != StateRunning {
+		t.Fatalf("stale failure relatched health: %+v", stale)
+	}
+}
+
+func TestObservabilityV8EventHistoryBlockedDeliveryRetainsFailureClassAfterRecovery(t *testing.T) {
+	source := &fakeObservabilityV8HealthSource{snapshot: observabilityruntime.DestinationHealthSnapshot{Generation: 14}}
+	health := NewSidecarHealth()
+	health.bindObservabilityV8HealthSource(source)
+	health.bindObservabilityV8EventHistoryGeneration(14)
+	// These are the ordered transitions emitted after an unrelated reporter
+	// callback unblocks: the bounded failure diagnostic must arrive before its
+	// recovery even though Snapshot observes only the final active state.
+	health.observeObservabilityV8EventHistory(eventHistoryTransition(
+		14, 2, audit.EventHistoryHealthFailed, audit.EventHistoryHealthWriteFailed,
+		audit.EventHistorySQLiteFull, 13,
+	))
+	health.observeObservabilityV8EventHistory(eventHistoryTransition(
+		14, 3, audit.EventHistoryHealthRecovered, audit.EventHistoryHealthWriteFailed, "", 0,
+	))
+	snapshot := health.Snapshot().Telemetry
+	if snapshot.State != StateRunning {
+		t.Fatalf("final recovered state = %+v", snapshot)
+	}
+	if _, active := snapshot.Details["event_history_failure"]; active ||
+		snapshot.Details["event_history_last_sqlite_class"] != "full" ||
+		snapshot.Details["event_history_last_sqlite_primary_code"] != uint8(13) {
+		t.Fatalf("recovered state lost queued failure diagnostic: %+v", snapshot.Details)
+	}
+}
+
+func TestObservabilityV8EventHistoryNewerFailureBeatsStaleRecovery(t *testing.T) {
+	source := &fakeObservabilityV8HealthSource{snapshot: observabilityruntime.DestinationHealthSnapshot{Generation: 5}}
+	health := NewSidecarHealth()
+	health.bindObservabilityV8HealthSource(source)
+	health.bindObservabilityV8EventHistoryGeneration(5)
+	health.observeObservabilityV8EventHistory(eventHistoryTransition(
+		5, 3, audit.EventHistoryHealthFailed, audit.EventHistoryHealthWriteFailed,
+		audit.EventHistorySQLiteIO, 10,
+	))
+	health.observeObservabilityV8EventHistory(eventHistoryTransition(
+		5, 2, audit.EventHistoryHealthRecovered, audit.EventHistoryHealthWriteFailed, "", 0,
+	))
+	snapshot := health.Snapshot().Telemetry
+	if snapshot.State != StateError || snapshot.Details["event_history_failure"] != "sqlite_write_failed" ||
+		snapshot.Details["event_history_last_sqlite_class"] != "io" {
+		t.Fatalf("stale recovery cleared newer failure: %+v", snapshot)
+	}
+}
+
+func TestObservabilityV8EventHistoryRecoveryLeavesUnrelatedFailureActive(t *testing.T) {
+	source := &fakeObservabilityV8HealthSource{snapshot: observabilityruntime.DestinationHealthSnapshot{Generation: 6}}
+	health := NewSidecarHealth()
+	health.bindObservabilityV8HealthSource(source)
+	health.bindObservabilityV8EventHistoryGeneration(6)
+	health.observeObservabilityV8EventHistory(eventHistoryTransition(
+		6, 1, audit.EventHistoryHealthFailed, audit.EventHistoryHealthProjectionRejected, "", 0,
+	))
+	health.observeObservabilityV8EventHistory(eventHistoryTransition(
+		6, 2, audit.EventHistoryHealthFailed, audit.EventHistoryHealthWriteFailed,
+		audit.EventHistorySQLiteFull, 13,
+	))
+	health.observeObservabilityV8EventHistory(eventHistoryTransition(
+		6, 3, audit.EventHistoryHealthRecovered, audit.EventHistoryHealthWriteFailed, "", 0,
+	))
+	snapshot := health.Snapshot().Telemetry
+	if snapshot.State != StateError || snapshot.Details["event_history_failure"] != "projection_rejected" {
+		t.Fatalf("write recovery cleared unrelated failure: %+v", snapshot)
+	}
+}
+
+func TestObservabilityV8EventHistoryGenerationCarriesFailureAndRejectsRetiredCallbacks(t *testing.T) {
+	source := &fakeObservabilityV8HealthSource{snapshot: observabilityruntime.DestinationHealthSnapshot{Generation: 1}}
+	health := NewSidecarHealth()
+	health.bindObservabilityV8HealthSource(source)
+	_ = health.Snapshot()
+	health.observeObservabilityV8EventHistory(eventHistoryTransition(
+		1, 7, audit.EventHistoryHealthFailed, audit.EventHistoryHealthWriteFailed,
+		audit.EventHistorySQLiteBusyLocked, 5,
+	))
+	source.snapshot = observabilityruntime.DestinationHealthSnapshot{Generation: 2}
+	carried := health.Snapshot().Telemetry
+	if carried.State != StateError || carried.Details["event_history_failure"] != "sqlite_write_failed" {
+		t.Fatalf("reload cleared unproven failure: %+v", carried)
+	}
+	for _, retired := range []audit.EventHistoryHealthTransition{
+		eventHistoryTransition(1, 8, audit.EventHistoryHealthRecovered, audit.EventHistoryHealthWriteFailed, "", 0),
+		eventHistoryTransition(1, 9, audit.EventHistoryHealthFailed, audit.EventHistoryHealthWriteFailed, audit.EventHistorySQLiteIO, 10),
+	} {
+		health.observeObservabilityV8EventHistory(retired)
+	}
+	if stale := health.Snapshot().Telemetry; stale.Details["event_history_last_sqlite_class"] != "busy_locked" {
+		t.Fatalf("retired callback contaminated generation two: %+v", stale)
+	}
+	health.observeObservabilityV8EventHistory(eventHistoryTransition(
+		2, 1, audit.EventHistoryHealthRecovered, audit.EventHistoryHealthWriteFailed, "", 0,
+	))
+	if recovered := health.Snapshot().Telemetry; recovered.State != StateRunning {
+		t.Fatalf("generation two proof did not recover inherited failure: %+v", recovered)
+	}
+}
+
+func TestObservabilityV8EventHistoryReloadPreservesCrossCodeOrder(t *testing.T) {
+	source := &fakeObservabilityV8HealthSource{snapshot: observabilityruntime.DestinationHealthSnapshot{Generation: 1}}
+	health := NewSidecarHealth()
+	health.bindObservabilityV8HealthSource(source)
+	_ = health.Snapshot()
+	health.observeObservabilityV8EventHistory(eventHistoryTransition(
+		1, 1, audit.EventHistoryHealthFailed, audit.EventHistoryHealthWriteFailed,
+		audit.EventHistorySQLiteBusyLocked, 5,
+	))
+	health.observeObservabilityV8EventHistory(eventHistoryTransition(
+		1, 2, audit.EventHistoryHealthFailed, audit.EventHistoryHealthSigningFailed, "", 0,
+	))
+	source.snapshot = observabilityruntime.DestinationHealthSnapshot{Generation: 2}
+	for index := 0; index < 20; index++ {
+		snapshot := health.Snapshot().Telemetry
+		if snapshot.State != StateError || snapshot.Details["event_history_failure"] != "integrity_signing_failed" {
+			t.Fatalf("reload snapshot %d lost cross-code order: %+v", index, snapshot)
+		}
+	}
+	health.observeObservabilityV8EventHistory(eventHistoryTransition(
+		2, 1, audit.EventHistoryHealthRecovered, audit.EventHistoryHealthWriteFailed, "", 0,
+	))
+	for index := 0; index < 20; index++ {
+		snapshot := health.Snapshot().Telemetry
+		if snapshot.State != StateError || snapshot.Details["event_history_failure"] != "integrity_signing_failed" {
+			t.Fatalf("write recovery %d cleared unrelated health: %+v", index, snapshot)
+		}
+	}
+}
+
+func TestObservabilityV8EventHistoryNewGenerationCallbackPreservesOtherCodesBeforeBind(t *testing.T) {
+	source := &fakeObservabilityV8HealthSource{snapshot: observabilityruntime.DestinationHealthSnapshot{Generation: 1}}
+	health := NewSidecarHealth()
+	health.bindObservabilityV8HealthSource(source)
+	_ = health.Snapshot()
+	health.observeObservabilityV8EventHistory(eventHistoryTransition(
+		1, 1, audit.EventHistoryHealthFailed, audit.EventHistoryHealthWriteFailed,
+		audit.EventHistorySQLiteBusyLocked, 5,
+	))
+	health.observeObservabilityV8EventHistory(eventHistoryTransition(
+		1, 2, audit.EventHistoryHealthFailed, audit.EventHistoryHealthProjectionRejected, "", 0,
+	))
+	// A generation-two callback may arrive after graph publication but before
+	// owner.reload returns and explicitly advances the health generation floor.
+	health.observeObservabilityV8EventHistory(eventHistoryTransition(
+		2, 1, audit.EventHistoryHealthFailed, audit.EventHistoryHealthSigningFailed, "", 0,
+	))
+	health.mu.RLock()
+	if len(health.observabilityV8EventHistory) != 3 {
+		health.mu.RUnlock()
+		t.Fatalf("new generation callback erased inherited failures: %+v", health.observabilityV8EventHistory)
+	}
+	health.mu.RUnlock()
+	health.observeObservabilityV8EventHistory(eventHistoryTransition(
+		2, 2, audit.EventHistoryHealthRecovered, audit.EventHistoryHealthWriteFailed, "", 0,
+	))
+	health.bindObservabilityV8EventHistoryGeneration(2)
+	source.snapshot = observabilityruntime.DestinationHealthSnapshot{Generation: 2}
+	snapshot := health.Snapshot().Telemetry
+	if snapshot.State != StateError || snapshot.Details["event_history_failure"] != "integrity_signing_failed" {
+		t.Fatalf("write recovery erased unrelated inherited failure: %+v", snapshot)
+	}
+	health.mu.RLock()
+	projection := health.observabilityV8EventHistory[string(audit.EventHistoryHealthProjectionRejected)]
+	health.mu.RUnlock()
+	if !projection.active || projection.generation != 1 {
+		t.Fatalf("inherited projection failure was not preserved: %+v", projection)
+	}
+}
+
+func TestObservabilityV8EventHistoryActivationRejectsDelayedRetiredCallback(t *testing.T) {
+	health := NewSidecarHealth()
+	health.bindObservabilityV8EventHistoryGeneration(1)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		close(started)
+		<-release
+		health.observeObservabilityV8EventHistory(eventHistoryTransition(
+			1, 1, audit.EventHistoryHealthFailed, audit.EventHistoryHealthWriteFailed,
+			audit.EventHistorySQLiteBusyLocked, 5,
+		))
+		close(done)
+	}()
+	<-started
+	// This is the local component Activate-time bind performed immediately
+	// after graph publication, while retirement may still be waiting on a
+	// generation-one lease and its delayed callback.
+	health.bindObservabilityV8EventHistoryGeneration(2)
+	close(release)
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("delayed callback did not return")
+	}
+	health.mu.RLock()
+	defer health.mu.RUnlock()
+	if len(health.observabilityV8EventHistory) != 0 ||
+		health.observabilityV8EventHistoryGeneration != 2 {
+		t.Fatalf("retired callback crossed activation boundary: generation=%d observations=%+v",
+			health.observabilityV8EventHistoryGeneration, health.observabilityV8EventHistory)
+	}
+}
+
+func TestObservabilityV8EventHistoryRejectsMismatchedSQLiteDiagnostics(t *testing.T) {
+	tests := []struct {
+		name    string
+		class   audit.EventHistorySQLiteClass
+		primary uint8
+	}{
+		{name: "busy with arbitrary code", class: audit.EventHistorySQLiteBusyLocked, primary: 255},
+		{name: "busy with io code", class: audit.EventHistorySQLiteBusyLocked, primary: 10},
+		{name: "unavailable with driver code", class: audit.EventHistorySQLiteUnavailable, primary: 28},
+		{name: "full without full code", class: audit.EventHistorySQLiteFull, primary: 0},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			health := NewSidecarHealth()
+			health.bindObservabilityV8EventHistoryGeneration(1)
+			health.observeObservabilityV8EventHistory(eventHistoryTransition(
+				1, 1, audit.EventHistoryHealthFailed, audit.EventHistoryHealthWriteFailed,
+				test.class, test.primary,
+			))
+			health.mu.RLock()
+			defer health.mu.RUnlock()
+			if len(health.observabilityV8EventHistory) != 0 {
+				t.Fatalf("mismatched diagnostic was accepted: %+v", health.observabilityV8EventHistory)
+			}
+		})
+	}
+}
+
+func TestObservabilityV8EventHistoryStateDoesNotSurviveSidecarRestart(t *testing.T) {
+	source := &fakeObservabilityV8HealthSource{snapshot: observabilityruntime.DestinationHealthSnapshot{Generation: 1}}
+	failed := NewSidecarHealth()
+	failed.bindObservabilityV8HealthSource(source)
+	failed.observeObservabilityV8EventHistory(eventHistoryTransition(
+		1, 1, audit.EventHistoryHealthFailed, audit.EventHistoryHealthWriteFailed,
+		audit.EventHistorySQLiteOther, 0,
+	))
+	if failed.Snapshot().Telemetry.State != StateError {
+		t.Fatal("failure fixture did not latch")
+	}
+	restarted := NewSidecarHealth()
+	restarted.bindObservabilityV8HealthSource(source)
+	if snapshot := restarted.Snapshot().Telemetry; snapshot.State != StateRunning {
+		t.Fatalf("new sidecar inherited process-local latch: %+v", snapshot)
 	}
 }
 
@@ -495,7 +799,11 @@ func TestObservabilityV8HealthSnapshotFailureIsBoundedAndFailClosed(t *testing.T
 			health := NewSidecarHealth()
 			health.bindObservabilityV8HealthSource(test.source)
 			health.setObservabilityV8Retention("degraded", 30, "scheduler_failed")
-			health.setObservabilityV8EventHistoryFailure("sqlite_write_failed")
+			health.observeObservabilityV8EventHistory(audit.EventHistoryHealthTransition{
+				Generation: 1, Sequence: 1, State: audit.EventHistoryHealthFailed,
+				Code: audit.EventHistoryHealthWriteFailed, OccurredAt: time.Now().UTC(),
+				SQLiteClass: audit.EventHistorySQLiteOther,
+			})
 
 			snapshot := health.Snapshot()
 			if snapshot.Telemetry.State != StateError {

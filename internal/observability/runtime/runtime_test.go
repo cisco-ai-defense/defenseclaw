@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -43,6 +44,51 @@ type runtimeTestDependencies struct {
 	retentionReaper     *fakeRetentionReaper
 	retentionController *RetentionController
 	retentionScheduler  *scriptedRetentionScheduler
+}
+
+type generationBindingHealthReporter struct {
+	mu          sync.Mutex
+	generations []uint64
+	transitions []audit.EventHistoryHealthTransition
+	bound       chan uint64
+}
+
+func (reporter *generationBindingHealthReporter) ReportEventHistoryHealth(
+	transition audit.EventHistoryHealthTransition,
+) {
+	reporter.mu.Lock()
+	latest := uint64(0)
+	if len(reporter.generations) > 0 {
+		latest = reporter.generations[len(reporter.generations)-1]
+	}
+	if transition.Generation >= latest {
+		reporter.transitions = append(reporter.transitions, transition)
+	}
+	reporter.mu.Unlock()
+}
+
+func (reporter *generationBindingHealthReporter) BindEventHistoryHealthGeneration(generation uint64) {
+	reporter.mu.Lock()
+	reporter.generations = append(reporter.generations, generation)
+	reporter.mu.Unlock()
+	if reporter.bound != nil {
+		select {
+		case reporter.bound <- generation:
+		default:
+		}
+	}
+}
+
+func (reporter *generationBindingHealthReporter) transitionSnapshot() []audit.EventHistoryHealthTransition {
+	reporter.mu.Lock()
+	defer reporter.mu.Unlock()
+	return append([]audit.EventHistoryHealthTransition(nil), reporter.transitions...)
+}
+
+func (reporter *generationBindingHealthReporter) snapshot() []uint64 {
+	reporter.mu.Lock()
+	defer reporter.mu.Unlock()
+	return append([]uint64(nil), reporter.generations...)
 }
 
 func newRuntimeTestDependencies(t *testing.T) runtimeTestDependencies {
@@ -315,6 +361,101 @@ func TestRuntimeRetentionOnlyReloadReplacesGraphAndReusesStore(t *testing.T) {
 	newLocal := newComponent.(*localLogComponent)
 	if newLocal == oldLocal || newLocal.store != dependencies.store || oldLocal.store != dependencies.store {
 		t.Fatal("retention reload did not replace only generation state around the stable store")
+	}
+}
+
+func TestRuntimeBindsEventHistoryGenerationOnlyWhenGraphActivates(t *testing.T) {
+	dependencies := newRuntimeTestDependencies(t)
+	reporter := &generationBindingHealthReporter{}
+	options := dependencies.options()
+	options.EventHistoryHealthReporter = reporter
+	initialPlan := runtimeTestPlan(t, dependencies.storePath, dependencies.judgePath, 90, nil)
+	runtime, err := New(t.Context(), runtimegraph.ConfigFromPlan(initialPlan, false), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = runtime.Close(t.Context()) })
+	if got := reporter.snapshot(); !reflect.DeepEqual(got, []uint64{1}) {
+		t.Fatalf("initial generation bindings = %+v", got)
+	}
+	// Rejected candidates are prepared off-path but must not advance the health
+	// generation. An applied replacement binds from its Activate call, before
+	// Reload waits for retirement of the old graph.
+	invalid := runtimegraph.ConfigFromPlan(initialPlan, false)
+	invalid.LocalPath = filepath.Join(t.TempDir(), "wrong.db")
+	if _, reloadErr := runtime.Reload(t.Context(), invalid); reloadErr == nil {
+		t.Fatal("invalid reload was applied")
+	}
+	if got := reporter.snapshot(); !reflect.DeepEqual(got, []uint64{1}) {
+		t.Fatalf("rejected candidate bound generation: %+v", got)
+	}
+	candidate := runtimeTestPlan(t, dependencies.storePath, dependencies.judgePath, 30, nil)
+	result, reloadErr := runtime.Reload(t.Context(), runtimegraph.ConfigFromPlan(candidate, false))
+	if reloadErr != nil || result.Status() != runtimegraph.ReloadApplied {
+		t.Fatalf("reload = %s/%v", result.Status(), reloadErr)
+	}
+	if got := reporter.snapshot(); !reflect.DeepEqual(got, []uint64{1, 2}) {
+		t.Fatalf("activation generation bindings = %+v", got)
+	}
+}
+
+func TestRuntimeActivationBindsBeforeOldGenerationRetires(t *testing.T) {
+	dependencies := newRuntimeTestDependencies(t)
+	reporter := &generationBindingHealthReporter{bound: make(chan uint64, 2)}
+	options := dependencies.options()
+	options.EventHistoryHealthReporter = reporter
+	initialPlan := runtimeTestPlan(t, dependencies.storePath, dependencies.judgePath, 90, nil)
+	runtime, err := New(t.Context(), runtimegraph.ConfigFromPlan(initialPlan, false), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = runtime.Close(t.Context()) })
+	<-reporter.bound // generation one Activate
+	oldLease, leaseErr := runtime.manager.Acquire(t.Context())
+	if leaseErr != nil {
+		t.Fatal(leaseErr)
+	}
+	type reloadOutcome struct {
+		result runtimegraph.ReloadResult
+		err    *runtimegraph.Error
+	}
+	reloadDone := make(chan reloadOutcome, 1)
+	candidate := runtimeTestPlan(t, dependencies.storePath, dependencies.judgePath, 30, nil)
+	go func() {
+		result, reloadErr := runtime.Reload(t.Context(), runtimegraph.ConfigFromPlan(candidate, false))
+		reloadDone <- reloadOutcome{result: result, err: reloadErr}
+	}()
+	select {
+	case generation := <-reporter.bound:
+		if generation != 2 {
+			t.Fatalf("activated generation = %d", generation)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("generation two did not activate while old lease was held")
+	}
+	select {
+	case outcome := <-reloadDone:
+		t.Fatalf("reload returned before old generation retirement: %+v", outcome)
+	default:
+	}
+	// This represents a delayed callback admitted under the still-held old
+	// graph lease. The activation-time floor must already reject it.
+	reporter.ReportEventHistoryHealth(audit.EventHistoryHealthTransition{
+		Generation: 1, Sequence: 99, State: audit.EventHistoryHealthFailed,
+		Code: audit.EventHistoryHealthWriteFailed, OccurredAt: time.Now().UTC(),
+		SQLiteClass: audit.EventHistorySQLiteBusyLocked, SQLitePrimaryCode: 5,
+	})
+	if got := reporter.transitionSnapshot(); len(got) != 0 {
+		t.Fatalf("retired callback crossed generation activation: %+v", got)
+	}
+	oldLease.Release()
+	select {
+	case outcome := <-reloadDone:
+		if outcome.err != nil || outcome.result.Status() != runtimegraph.ReloadApplied {
+			t.Fatalf("reload = %s/%v", outcome.result.Status(), outcome.err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("reload did not finish after old lease release")
 	}
 }
 

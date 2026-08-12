@@ -953,13 +953,20 @@ func (observer sidecarV8RetentionObserver) ReportRetentionController(
 
 type sidecarV8EventHistoryObserver struct{ s *Sidecar }
 
+func (observer sidecarV8EventHistoryObserver) BindEventHistoryHealthGeneration(generation uint64) {
+	if observer.s == nil || observer.s.health == nil {
+		return
+	}
+	observer.s.health.bindObservabilityV8EventHistoryGeneration(generation)
+}
+
 func (observer sidecarV8EventHistoryObserver) ReportEventHistoryHealth(
-	code audit.EventHistoryHealthCode,
+	transition audit.EventHistoryHealthTransition,
 ) {
 	if observer.s == nil || observer.s.health == nil {
 		return
 	}
-	observer.s.health.setObservabilityV8EventHistoryFailure(string(code))
+	observer.s.health.observeObservabilityV8EventHistory(transition)
 }
 
 func newSidecarObservabilityV8BootstrapError(

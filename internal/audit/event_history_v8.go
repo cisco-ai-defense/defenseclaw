@@ -30,6 +30,7 @@ import (
 	"io"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -111,8 +112,54 @@ const (
 	EventHistoryHealthWriteFailed        EventHistoryHealthCode = "sqlite_write_failed"
 )
 
+// EventHistoryHealthState distinguishes a bounded failure observation from a
+// later proof that the same persistence rail recovered.
+type EventHistoryHealthState string
+
+const (
+	EventHistoryHealthFailed    EventHistoryHealthState = "failed"
+	EventHistoryHealthRecovered EventHistoryHealthState = "recovered"
+)
+
+// EventHistorySQLiteClass is a deliberately coarse SQLite diagnostic. It is
+// safe to expose in health output; arbitrary driver text and extended result
+// codes never cross this boundary.
+type EventHistorySQLiteClass string
+
+const (
+	EventHistorySQLiteBusyLocked        EventHistorySQLiteClass = "busy_locked"
+	EventHistorySQLiteDeadline          EventHistorySQLiteClass = "deadline"
+	EventHistorySQLiteFull              EventHistorySQLiteClass = "full"
+	EventHistorySQLiteIO                EventHistorySQLiteClass = "io"
+	EventHistorySQLiteReadOnlyCantOpen  EventHistorySQLiteClass = "readonly_cantopen"
+	EventHistorySQLiteConstraintCorrupt EventHistorySQLiteClass = "constraint_corrupt"
+	EventHistorySQLiteUnavailable       EventHistorySQLiteClass = "unavailable"
+	EventHistorySQLiteOther             EventHistorySQLiteClass = "other"
+)
+
+// EventHistoryHealthTransition is immutable, bounded health state. Generation
+// identifies its runtime writer; Sequence is the writer-local outcome
+// linearization order assigned when a failure is staged or a commit succeeds,
+// independently of callback arrival.
+type EventHistoryHealthTransition struct {
+	Generation        uint64
+	Sequence          uint64
+	State             EventHistoryHealthState
+	Code              EventHistoryHealthCode
+	OccurredAt        time.Time
+	SQLiteClass       EventHistorySQLiteClass
+	SQLitePrimaryCode uint8
+}
+
 type EventHistoryHealthReporter interface {
-	ReportEventHistoryHealth(EventHistoryHealthCode)
+	ReportEventHistoryHealth(EventHistoryHealthTransition)
+}
+
+// EventHistoryHealthGenerationBinder is an optional runtime integration hook.
+// It is invoked only from the new graph component's Activate path, after the
+// graph has been published; candidate preparation never advances health state.
+type EventHistoryHealthGenerationBinder interface {
+	BindEventHistoryHealthGeneration(uint64)
 }
 
 type eventHistoryWriteError struct{ cause error }
@@ -145,8 +192,9 @@ func (err *eventHistoryHealthError) Unwrap() error {
 }
 
 type eventHistoryAppendOutcome struct {
-	signed   bool
-	unsigned bool
+	mandatory bool
+	signed    bool
+	unsigned  bool
 }
 
 func eventHistoryFailure(code EventHistoryHealthCode, err error) error {
@@ -234,19 +282,25 @@ func cloneLocalProjectionProfiles(
 // EventHistoryWriter appends immutable v8 log projections to audit_events. A
 // nil signer is valid and produces an explicitly unsigned row.
 type EventHistoryWriter struct {
-	store            *Store
-	signer           ProjectionIntegritySigner
-	healthReporter   EventHistoryHealthReporter
-	localProfiles    map[observability.Bucket]observabilityredaction.Profile
-	projectionEngine *observabilityredaction.Engine
-	graphDigest      string
-	appendCommitMu   sync.Mutex
-	healthMu         sync.Mutex
-	healthQueue      []EventHistoryHealthCode
-	healthPending    map[EventHistoryHealthCode]bool
-	healthDraining   bool
-	healthActive     EventHistoryHealthCode
-	unsignedReported bool
+	store              *Store
+	signer             ProjectionIntegritySigner
+	healthReporter     EventHistoryHealthReporter
+	localProfiles      map[observability.Bucket]observabilityredaction.Profile
+	projectionEngine   *observabilityredaction.Engine
+	graphDigest        string
+	generation         uint64
+	healthSequence     atomic.Uint64
+	appendCommitMu     sync.Mutex
+	healthMu           sync.Mutex
+	healthQueue        []EventHistoryHealthTransition
+	healthDraining     bool
+	healthActive       EventHistoryHealthTransition
+	writeHealthKnown   bool
+	writeHealthState   EventHistoryHealthState
+	writeHealthSeq     uint64
+	writeHealthClass   EventHistorySQLiteClass
+	writeHealthPrimary uint8
+	unsignedReported   bool
 }
 
 // NewEventHistoryWriter snapshots the compiled runtime graph's complete local
@@ -258,10 +312,22 @@ func NewEventHistoryWriter(
 	healthReporter EventHistoryHealthReporter,
 	binding LocalProjectionBinding,
 ) (*EventHistoryWriter, error) {
+	return NewEventHistoryWriterForGeneration(store, signer, healthReporter, binding, 1)
+}
+
+// NewEventHistoryWriterForGeneration binds health transitions to the same
+// immutable runtime generation that owns this writer.
+func NewEventHistoryWriterForGeneration(
+	store *Store,
+	signer ProjectionIntegritySigner,
+	healthReporter EventHistoryHealthReporter,
+	binding LocalProjectionBinding,
+	generation uint64,
+) (*EventHistoryWriter, error) {
 	if store == nil || store.db == nil || !store.Ready() {
 		return nil, fmt.Errorf("audit: ready v8 event-history store is required")
 	}
-	if binding == nil {
+	if binding == nil || generation == 0 {
 		return nil, fmt.Errorf("audit: local projection binding is required")
 	}
 	snapshot := binding.eventHistoryProjectionBinding()
@@ -279,7 +345,7 @@ func NewEventHistoryWriter(
 	}
 	return &EventHistoryWriter{
 		store: store, signer: signer, healthReporter: healthReporter, localProfiles: profiles,
-		projectionEngine: snapshot.engine, graphDigest: snapshot.graphDigest,
+		projectionEngine: snapshot.engine, graphDigest: snapshot.graphDigest, generation: generation,
 	}, nil
 }
 
@@ -290,6 +356,17 @@ func (writer *EventHistoryWriter) GraphDigest() string {
 		return ""
 	}
 	return writer.graphDigest
+}
+
+// ActivateHealthGeneration binds the reporter to this published writer's
+// generation before its component begins accepting records.
+func (writer *EventHistoryWriter) ActivateHealthGeneration() {
+	if writer == nil || writer.healthReporter == nil {
+		return
+	}
+	if binder, ok := writer.healthReporter.(EventHistoryHealthGenerationBinder); ok {
+		binder.BindEventHistoryHealthGeneration(writer.generation)
+	}
 }
 
 // Append persists exactly one local event-history row using a background
@@ -321,7 +398,7 @@ func (writer *EventHistoryWriter) AppendContext(
 	}
 	release, err := writer.store.acquireReady()
 	if err != nil {
-		writer.reportHealth(EventHistoryHealthWriteFailed)
+		writer.reportHealthFailure(EventHistoryHealthWriteFailed, err, EventHistorySQLiteUnavailable)
 		return err
 	}
 	released := false
@@ -334,8 +411,9 @@ func (writer *EventHistoryWriter) AppendContext(
 	defer releaseReady()
 	tx, err := writer.store.db.BeginTx(ctx, nil)
 	if err != nil {
+		writer.stageHealthFailure(EventHistoryHealthWriteFailed, err, "")
 		releaseReady()
-		writer.reportHealth(EventHistoryHealthWriteFailed)
+		writer.flushHealth()
 		return fmt.Errorf("audit: begin v8 event-history write: %w", err)
 	}
 	defer tx.Rollback() //nolint:errcheck
@@ -345,8 +423,9 @@ func (writer *EventHistoryWriter) AppendContext(
 		// same single-connection Store. End this transaction before invoking
 		// external code so failure reporting cannot self-deadlock.
 		_ = tx.Rollback()
+		writer.stageAppendError(err)
 		releaseReady()
-		writer.reportAppendError(err)
+		writer.flushHealth()
 		return err
 	}
 	if err := writer.commitAppendTransaction(tx, outcome); err != nil {
@@ -434,7 +513,9 @@ func (writer *EventHistoryWriter) appendContextTxResolvedProfile(
 		}
 		return eventHistoryAppendOutcome{}, eventHistoryFailure(EventHistoryHealthSigningFailed, err)
 	}
-	outcome := eventHistoryAppendOutcome{signed: !unsigned, unsigned: unsigned}
+	outcome := eventHistoryAppendOutcome{
+		mandatory: record.Mandatory(), signed: !unsigned, unsigned: unsigned,
+	}
 
 	correlation := record.Correlation()
 	provenance := record.Provenance()
@@ -656,11 +737,15 @@ func exactObservationTopology(traceID, spanID string) (string, string) {
 }
 
 func (writer *EventHistoryWriter) reportAppendError(err error) {
+	writer.stageAppendError(err)
+	writer.flushHealth()
+}
+
+func (writer *EventHistoryWriter) stageAppendError(err error) {
 	var healthErr *eventHistoryHealthError
 	if errors.As(err, &healthErr) {
-		writer.enqueueHealth(healthErr.code)
+		writer.stageHealthFailure(healthErr.code, err, "")
 	}
-	writer.flushHealth()
 }
 
 // commitAppendTransaction serializes commit order with signed/unsigned health
@@ -676,14 +761,19 @@ func (writer *EventHistoryWriter) commitAppendTransaction(
 	writer.appendCommitMu.Lock()
 	defer writer.appendCommitMu.Unlock()
 	if err := tx.Commit(); err != nil {
-		writer.enqueueHealth(EventHistoryHealthWriteFailed)
+		writer.enqueueHealthFailure(
+			writer.nextHealthSequence(), EventHistoryHealthWriteFailed, err, "",
+		)
 		return err
 	}
-	writer.stageAppendOutcome(outcome)
+	writer.stageAppendOutcome(outcome, writer.nextHealthSequence())
 	return nil
 }
 
-func (writer *EventHistoryWriter) stageAppendOutcome(outcome eventHistoryAppendOutcome) {
+func (writer *EventHistoryWriter) stageAppendOutcome(
+	outcome eventHistoryAppendOutcome,
+	sequence uint64,
+) {
 	if writer == nil {
 		return
 	}
@@ -691,6 +781,11 @@ func (writer *EventHistoryWriter) stageAppendOutcome(outcome eventHistoryAppendO
 	defer writer.healthMu.Unlock()
 	if outcome.signed {
 		writer.unsignedReported = false
+		if outcome.mandatory {
+			writer.enqueueHealthTransitionLocked(writer.healthTransition(
+				sequence, EventHistoryHealthRecovered, EventHistoryHealthWriteFailed, "", 0,
+			))
+		}
 		return
 	}
 	if outcome.unsigned && !writer.unsignedReported {
@@ -698,44 +793,152 @@ func (writer *EventHistoryWriter) stageAppendOutcome(outcome eventHistoryAppendO
 		// A signed commit can restore health while an earlier unsigned
 		// transition is still being reported. Preserve one later unsigned
 		// transition behind the active callback instead of dropping it.
-		writer.enqueueHealthLocked(EventHistoryHealthUnsigned, true)
+		writer.enqueueHealthTransitionLocked(writer.healthTransition(
+			sequence, EventHistoryHealthFailed, EventHistoryHealthUnsigned, "", 0,
+		))
 	}
 }
 
-func (writer *EventHistoryWriter) reportHealth(code EventHistoryHealthCode) {
-	writer.enqueueHealth(code)
+func (writer *EventHistoryWriter) nextHealthSequence() uint64 {
+	if writer == nil {
+		return 0
+	}
+	return writer.healthSequence.Add(1)
+}
+
+func (writer *EventHistoryWriter) healthTransition(
+	sequence uint64,
+	state EventHistoryHealthState,
+	code EventHistoryHealthCode,
+	sqliteClass EventHistorySQLiteClass,
+	primary uint8,
+) EventHistoryHealthTransition {
+	return EventHistoryHealthTransition{
+		Generation: writer.generation, Sequence: sequence, State: state, Code: code,
+		OccurredAt: time.Now().UTC(), SQLiteClass: sqliteClass, SQLitePrimaryCode: primary,
+	}
+}
+
+func (writer *EventHistoryWriter) reportHealthFailure(
+	code EventHistoryHealthCode,
+	err error,
+	classOverride EventHistorySQLiteClass,
+) {
+	writer.stageHealthFailure(code, err, classOverride)
 	writer.flushHealth()
 }
 
-func (writer *EventHistoryWriter) enqueueHealth(code EventHistoryHealthCode) {
+func (writer *EventHistoryWriter) stageHealthFailure(
+	code EventHistoryHealthCode,
+	err error,
+	classOverride EventHistorySQLiteClass,
+) {
+	if writer == nil {
+		return
+	}
+	writer.appendCommitMu.Lock()
+	writer.enqueueHealthFailure(writer.nextHealthSequence(), code, err, classOverride)
+	writer.appendCommitMu.Unlock()
+}
+
+func (writer *EventHistoryWriter) enqueueHealthFailure(
+	sequence uint64,
+	code EventHistoryHealthCode,
+	err error,
+	classOverride EventHistorySQLiteClass,
+) {
 	if writer == nil || writer.healthReporter == nil {
 		return
 	}
+	var sqliteClass EventHistorySQLiteClass
+	var primary uint8
+	if code == EventHistoryHealthWriteFailed {
+		sqliteClass, primary = classifyEventHistorySQLiteFailure(err)
+		if classOverride != "" {
+			sqliteClass = classOverride
+			// An override describes a lifecycle boundary rather than the
+			// driver's exact result. Do not pair it with a primary code whose
+			// meaning belongs to the discarded driver-derived class.
+			primary = 0
+		}
+	}
+	transition := writer.healthTransition(
+		sequence, EventHistoryHealthFailed, code, sqliteClass, primary,
+	)
 	writer.healthMu.Lock()
 	defer writer.healthMu.Unlock()
-	writer.enqueueHealthLocked(code, false)
+	writer.enqueueHealthTransitionLocked(transition)
 }
 
-func (writer *EventHistoryWriter) enqueueHealthLocked(
-	code EventHistoryHealthCode,
-	allowAfterActive bool,
+func (writer *EventHistoryWriter) enqueueHealthTransitionLocked(
+	transition EventHistoryHealthTransition,
 ) {
-	if writer.healthReporter == nil || code == "" || (code == writer.healthActive && !allowAfterActive) {
+	if writer.healthReporter == nil || !validEventHistoryHealthTransition(transition) {
 		return
 	}
-	if writer.healthPending == nil {
-		writer.healthPending = make(map[EventHistoryHealthCode]bool, 4)
+	if transition.Code == EventHistoryHealthWriteFailed {
+		if transition.Sequence <= writer.writeHealthSeq {
+			return
+		}
+		previousState := writer.writeHealthState
+		previousClass := writer.writeHealthClass
+		previousPrimary := writer.writeHealthPrimary
+		writer.writeHealthSeq = transition.Sequence
+		writer.writeHealthState = transition.State
+		writer.writeHealthClass = transition.SQLiteClass
+		writer.writeHealthPrimary = transition.SQLitePrimaryCode
+		if writer.writeHealthKnown && previousState == transition.State &&
+			(transition.State == EventHistoryHealthRecovered ||
+				previousClass == transition.SQLiteClass && previousPrimary == transition.SQLitePrimaryCode) {
+			return
+		}
+		writer.writeHealthKnown = true
 	}
-	if writer.healthPending[code] {
+	if transition.Code == EventHistoryHealthWriteFailed {
+		// Preserve the latest failed diagnostic immediately before a following
+		// recovery while another callback is active. A newer failure supersedes
+		// both; a newer recovery supersedes only an older recovery. The sidecar
+		// therefore learns the last bounded SQLite class even when the final
+		// state delivered from this drain is recovered.
+		keptFailure := false
+		queue := writer.healthQueue[:0]
+		for _, pending := range writer.healthQueue {
+			if pending.Code != EventHistoryHealthWriteFailed {
+				queue = append(queue, pending)
+				continue
+			}
+			if transition.State == EventHistoryHealthRecovered &&
+				pending.State == EventHistoryHealthFailed && !keptFailure {
+				queue = append(queue, pending)
+				keptFailure = true
+			}
+		}
+		writer.healthQueue = queue
+		if len(writer.healthQueue) >= 5 {
+			return
+		}
+		writer.healthQueue = append(writer.healthQueue, transition)
 		return
 	}
-	// The vocabulary has four values. Coalescing one pending transition per
-	// code makes the queue bounded even if a reporter re-enters this writer.
-	if len(writer.healthQueue) >= 4 {
+
+	// The active callback is separate. Behind it, retain only the latest
+	// failure for each non-write code. Moving the replacement to the tail
+	// preserves its actual outcome order relative to other codes.
+	for index := len(writer.healthQueue) - 1; index >= 0; index-- {
+		pending := writer.healthQueue[index]
+		if pending.Code != transition.Code {
+			continue
+		}
+		if pending.Generation > transition.Generation ||
+			pending.Generation == transition.Generation && pending.Sequence >= transition.Sequence {
+			return
+		}
+		writer.healthQueue = append(writer.healthQueue[:index], writer.healthQueue[index+1:]...)
+	}
+	if len(writer.healthQueue) >= 5 {
 		return
 	}
-	writer.healthPending[code] = true
-	writer.healthQueue = append(writer.healthQueue, code)
+	writer.healthQueue = append(writer.healthQueue, transition)
 }
 
 func (writer *EventHistoryWriter) flushHealth() {
@@ -753,23 +956,119 @@ func (writer *EventHistoryWriter) flushHealth() {
 	for {
 		writer.healthMu.Lock()
 		if len(writer.healthQueue) == 0 {
-			writer.healthActive = ""
+			writer.healthActive = EventHistoryHealthTransition{}
 			writer.healthDraining = false
 			writer.healthMu.Unlock()
 			return
 		}
-		code := writer.healthQueue[0]
+		transition := writer.healthQueue[0]
 		writer.healthQueue = writer.healthQueue[1:]
-		delete(writer.healthPending, code)
-		writer.healthActive = code
+		writer.healthActive = transition
 		writer.healthMu.Unlock()
 
-		writer.healthReporter.ReportEventHistoryHealth(code)
+		writer.healthReporter.ReportEventHistoryHealth(transition)
 
 		writer.healthMu.Lock()
-		writer.healthActive = ""
+		writer.healthActive = EventHistoryHealthTransition{}
 		writer.healthMu.Unlock()
 	}
+}
+
+func validEventHistoryHealthTransition(transition EventHistoryHealthTransition) bool {
+	if transition.Generation == 0 || transition.Sequence == 0 || transition.OccurredAt.IsZero() {
+		return false
+	}
+	switch transition.Code {
+	case EventHistoryHealthProjectionRejected, EventHistoryHealthUnsigned,
+		EventHistoryHealthSigningFailed, EventHistoryHealthWriteFailed:
+	default:
+		return false
+	}
+	if transition.State == EventHistoryHealthRecovered {
+		return transition.Code == EventHistoryHealthWriteFailed && transition.SQLiteClass == "" &&
+			transition.SQLitePrimaryCode == 0
+	}
+	if transition.State != EventHistoryHealthFailed {
+		return false
+	}
+	if transition.Code != EventHistoryHealthWriteFailed {
+		return transition.SQLiteClass == "" && transition.SQLitePrimaryCode == 0
+	}
+	return validEventHistorySQLiteDiagnostic(transition.SQLiteClass, transition.SQLitePrimaryCode)
+}
+
+// ValidEventHistoryHealthTransition validates the complete bounded transition
+// contract at package boundaries. Consumers use this instead of independently
+// reconstructing class/primary-code pairings that could drift.
+func ValidEventHistoryHealthTransition(transition EventHistoryHealthTransition) bool {
+	return validEventHistoryHealthTransition(transition)
+}
+
+func validEventHistorySQLiteDiagnostic(class EventHistorySQLiteClass, primary uint8) bool {
+	switch class {
+	case EventHistorySQLiteBusyLocked:
+		return primary == 5 || primary == 6
+	case EventHistorySQLiteDeadline:
+		return primary == 0 || primary == 9
+	case EventHistorySQLiteFull:
+		return primary == 13
+	case EventHistorySQLiteIO:
+		return primary == 10
+	case EventHistorySQLiteReadOnlyCantOpen:
+		return primary == 8 || primary == 14
+	case EventHistorySQLiteConstraintCorrupt:
+		return primary == 11 || primary == 19 || primary == 26
+	case EventHistorySQLiteUnavailable:
+		return primary == 0
+	case EventHistorySQLiteOther:
+		return primary == 0 || primary >= 1 && primary <= 28 &&
+			primary != 5 && primary != 6 && primary != 8 && primary != 9 &&
+			primary != 10 && primary != 11 && primary != 13 && primary != 14 &&
+			primary != 19 && primary != 26
+	default:
+		return false
+	}
+}
+
+func classifyEventHistorySQLiteFailure(err error) (EventHistorySQLiteClass, uint8) {
+	if errors.Is(err, context.DeadlineExceeded) {
+		primary := sqlitePrimaryCode(err)
+		if primary != 9 {
+			primary = 0
+		}
+		return EventHistorySQLiteDeadline, primary
+	}
+	primary := sqlitePrimaryCode(err)
+	switch primary {
+	case 5, 6:
+		return EventHistorySQLiteBusyLocked, primary
+	case 9:
+		return EventHistorySQLiteDeadline, primary
+	case 13:
+		return EventHistorySQLiteFull, primary
+	case 10:
+		return EventHistorySQLiteIO, primary
+	case 8, 14:
+		return EventHistorySQLiteReadOnlyCantOpen, primary
+	case 11, 19, 26:
+		return EventHistorySQLiteConstraintCorrupt, primary
+	default:
+		return EventHistorySQLiteOther, primary
+	}
+}
+
+func sqlitePrimaryCode(err error) uint8 {
+	var coded sqliteCoded
+	if !errors.As(err, &coded) {
+		return 0
+	}
+	primary := coded.Code() & 0xff
+	// SQLite currently defines primary result codes 1 through 28. Never
+	// expose an arbitrary driver-provided integer outside that allowlist.
+	if primary < 1 || primary > 28 {
+		return 0
+	}
+	return uint8(primary)
 }
 
 func projectedCompatibilityTarget(projection observabilityredaction.Projection) string {

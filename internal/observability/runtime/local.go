@@ -77,11 +77,12 @@ func (factory *localLogFactory) Prepare(
 	if err != nil {
 		return nil, &localFactoryError{}
 	}
-	writer, err := audit.NewEventHistoryWriter(
+	writer, err := audit.NewEventHistoryWriterForGeneration(
 		factory.store,
 		factory.signer,
 		factory.healthReporter,
 		binding,
+		input.Generation,
 	)
 	if err != nil {
 		return nil, &localFactoryError{}
@@ -157,6 +158,7 @@ func (component *localLogComponent) applyAlertAcknowledgement(
 
 func (component *localLogComponent) Activate() {
 	if component != nil && !component.closed.Load() {
+		component.history.ActivateHealthGeneration()
 		component.active.Store(true)
 	}
 }
