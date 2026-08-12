@@ -159,7 +159,10 @@ def test_persistent_e2e_jobs_use_the_source_install_helper_once() -> None:
         assert install.count(path) == 1
         assert 'USER_HOME="${E2E_INSTALL_HOME}"' in install
         assert 'OC_EXT_DIR="$HOME/.openclaw/extensions/defenseclaw"' in install
-        assert 'echo "${E2E_INSTALL_HOME}/.local/bin" >> "$GITHUB_PATH"' in _step_script(job, "Activate venv")
+        activate = _step_script(job, "Activate venv")
+        assert activate.count(path) == 1
+        assert 'echo "PATH=${{ github.workspace }}/.venv/bin:${E2E_PATH}" >> "$GITHUB_ENV"' in activate
+        assert "$GITHUB_PATH" not in activate
         for test_step in ("Unit tests", "TypeScript plugin tests", "Rego policy tests"):
             assert 'USER_HOME="${E2E_INSTALL_HOME}"' in _step_script(job, test_step)
 
@@ -169,6 +172,8 @@ def test_opa_is_installed_into_the_isolated_job_bin() -> None:
         install_opa = _step_script(job, "Install OPA")
         assert 'install -d -m 0755 "${E2E_INSTALL_HOME}/.local/bin"' in install_opa
         assert 'install -m 0755 /tmp/opa "${E2E_INSTALL_HOME}/.local/bin/opa"' in install_opa
+        assert '"${E2E_INSTALL_HOME}/.local/bin/opa" version' in install_opa
+        assert "command -v opa" not in install_opa
         assert "$HOME/.local/bin/opa" not in install_opa
 
 

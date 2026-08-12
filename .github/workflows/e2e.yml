@@ -363,16 +363,11 @@ jobs:
 
       - name: Activate venv
         run: |
-          echo "${{ github.workspace }}/.venv/bin" >> "$GITHUB_PATH"
-          echo "${E2E_INSTALL_HOME}/.local/bin" >> "$GITHUB_PATH"
+          E2E_PATH="$(python3 scripts/e2e-source-install.py path "${E2E_INSTALL_HOME}")"
+          echo "PATH=${{ github.workspace }}/.venv/bin:${E2E_PATH}" >> "$GITHUB_ENV"
 
       - name: Install OPA
         run: |
-          if command -v opa >/dev/null 2>&1; then
-            opa version
-            exit 0
-          fi
-
           case "$(uname -m)" in
             aarch64|arm64) OPA_ARCH="arm64" ;;
             x86_64|amd64) OPA_ARCH="amd64" ;;
@@ -387,7 +382,7 @@ jobs:
             "https://openpolicyagent.org/downloads/v1.14.1/opa_linux_${OPA_ARCH}_static"
           install -d -m 0755 "${E2E_INSTALL_HOME}/.local/bin"
           install -m 0755 /tmp/opa "${E2E_INSTALL_HOME}/.local/bin/opa"
-          opa version
+          "${E2E_INSTALL_HOME}/.local/bin/opa" version
 
       - name: Init DefenseClaw
         run: |
@@ -1036,16 +1031,11 @@ jobs:
 
       - name: Activate venv
         run: |
-          echo "${{ github.workspace }}/.venv/bin" >> "$GITHUB_PATH"
-          echo "${E2E_INSTALL_HOME}/.local/bin" >> "$GITHUB_PATH"
+          E2E_PATH="$(python3 scripts/e2e-source-install.py path "${E2E_INSTALL_HOME}")"
+          echo "PATH=${{ github.workspace }}/.venv/bin:${E2E_PATH}" >> "$GITHUB_ENV"
 
       - name: Install OPA
         run: |
-          if command -v opa >/dev/null 2>&1; then
-            opa version
-            exit 0
-          fi
-
           case "$(uname -m)" in
             aarch64|arm64) OPA_ARCH="arm64" ;;
             x86_64|amd64) OPA_ARCH="amd64" ;;
@@ -1060,7 +1050,7 @@ jobs:
             "https://openpolicyagent.org/downloads/v1.14.1/opa_linux_${OPA_ARCH}_static"
           install -d -m 0755 "${E2E_INSTALL_HOME}/.local/bin"
           install -m 0755 /tmp/opa "${E2E_INSTALL_HOME}/.local/bin/opa"
-          opa version
+          "${E2E_INSTALL_HOME}/.local/bin/opa" version
 
       - name: Prepare OpenClaw Anthropic model + auth
         run: |
