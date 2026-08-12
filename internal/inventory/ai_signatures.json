@@ -282,6 +282,19 @@
         "Cursor"
       ],
       "local_endpoints": [],
+      "skill_paths": [
+        "~/.cursor/skills-cursor",
+        "~/.cursor/skills",
+        ".cursor/skills-cursor",
+        ".cursor/skills",
+        ".agents/skills",
+        "~/.agents/skills"
+      ],
+      "plugin_paths": [
+        "~/.cursor/plugins",
+        ".cursor/plugins",
+        ".agents/plugins"
+      ],
       "rule_paths": [
         "~/.cursor/rules",
         ".cursor/rules"
