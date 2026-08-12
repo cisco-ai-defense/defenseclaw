@@ -135,6 +135,23 @@ for _candidate in \
 done
 unset _candidate
 
+# Guardrail rule packs source — the sidecar loads them from
+# ${DataDir}/policies/guardrail/<profile>/ on cold start. Without them
+# the gateway fails init with:
+#   rule pack directory_not_found at .: rule-pack directory does not exist
+# Bundle layout ships them beside install.sh; dev/CI runs source from
+# the repo tree.
+POLICIES_SRC=""
+for _candidate in \
+  "${SCRIPT_DIR}/policies" \
+  "${REPO_ROOT}/policies"; do
+  if [[ -d "${_candidate}/guardrail/default" ]]; then
+    POLICIES_SRC="${_candidate}"
+    break
+  fi
+done
+unset _candidate
+
 SKIP_BUILD="false"
 SKIP_LAUNCHD="false"
 SKIP_CONNECTOR="false"
@@ -621,6 +638,24 @@ GUARDIAN_AUTH_DIR="${SUPPORT_DIR}/hook-guardian-state"
 create_install_directory_no_replace "${CONFIG_DIR}" root wheel 0755
 create_install_directory_no_replace "${RUNTIME_DIR}" root wheel 0750
 create_install_directory_no_replace "${GUARDIAN_AUTH_DIR}" root wheel 0750
+
+# Stage the shipped guardrail rule packs under runtime/policies/. The
+# gateway's cold-start sidecar init reads
+# ${DataDir}/policies/guardrail/default/ (see config default in
+# internal/config/config.go:3573). Ship all three profiles so an
+# operator can retarget rule_pack_dir at strict/permissive without a
+# reinstall.
+[[ -n "${POLICIES_SRC}" ]] \
+  || die "guardrail policies source not found (expected ${SCRIPT_DIR}/policies/guardrail/default or ${REPO_ROOT}/policies/guardrail/default)"
+POLICIES_DST="${RUNTIME_DIR}/policies"
+create_install_directory_no_replace "${POLICIES_DST}" root wheel 0750
+log "installing guardrail rule packs -> ${POLICIES_DST}/guardrail"
+# cp -R + explicit chown/chmod: we don't have install_dir_no_replace for
+# a whole tree, and RUNTIME_DIR itself is already 0750 root:wheel.
+cp -R "${POLICIES_SRC}/guardrail" "${POLICIES_DST}/guardrail"
+chown -R root:wheel "${POLICIES_DST}/guardrail"
+find "${POLICIES_DST}/guardrail" -type d -exec chmod 0750 {} +
+find "${POLICIES_DST}/guardrail" -type f -exec chmod 0640 {} +
 # Multi-user hook wiring: the hook-guardian LaunchDaemon reads its
 # per-tick manifest from ${GUARDIAN_MANIFEST_DIR}/targets.yaml. Creating
 # the directory unconditionally keeps the guardian's LoadManifest happy

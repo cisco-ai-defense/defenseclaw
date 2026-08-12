@@ -191,6 +191,15 @@ cp packaging/launchd/com.cisco.secureclient.defenseclaw.hook-guardian.plist \
     "${BUNDLE_DIR}/com.cisco.secureclient.defenseclaw.hook-guardian.plist"
 cp packaging/launchd/com.cisco.secureclient.defenseclaw.hook-enumerator.plist \
     "${BUNDLE_DIR}/com.cisco.secureclient.defenseclaw.hook-enumerator.plist"
+# Ship the guardrail rule packs beside install.sh. install.sh stages
+# them into ${DataDir}/policies/guardrail/ so the sidecar's cold-start
+# LoadRulePack finds them; without this the gateway fails init with
+# "rule-pack directory does not exist". Only guardrail/ from the repo's
+# policies/ is shipped — the openshell/, scanners/, rego/ trees and the
+# {default,strict,permissive}.yaml profile files are not consumed by
+# the managed gateway.
+mkdir -p "${BUNDLE_DIR}/policies"
+cp -R policies/guardrail "${BUNDLE_DIR}/policies/guardrail"
 chmod 0755 "${BUNDLE_DIR}/install.sh" "${BUNDLE_DIR}/uninstall.sh"
 chmod 0755 "${BUNDLE_DIR}/lib/installer_lib.sh" "${BUNDLE_DIR}/lib/scrub_agent_configs.py"
 chmod 0755 "${BUNDLE_DIR}/lib/render-targets.sh"
@@ -199,6 +208,8 @@ chmod 0644 "${BUNDLE_DIR}/com.cisco.secureclient.defenseclaw.hook-guardian.plist
 chmod 0644 "${BUNDLE_DIR}/com.cisco.secureclient.defenseclaw.hook-enumerator.plist"
 chmod 0644 "${BUNDLE_DIR}/LICENSE" "${BUNDLE_DIR}/NOTICE" \
   "${BUNDLE_DIR}/THIRD_PARTY_LICENSES.txt"
+find "${BUNDLE_DIR}/policies" -type d -exec chmod 0755 {} +
+find "${BUNDLE_DIR}/policies" -type f -exec chmod 0644 {} +
 
 # ---- README -------------------------------------------------------------
 
