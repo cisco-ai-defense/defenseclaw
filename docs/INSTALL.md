@@ -11,6 +11,10 @@ This repository file remains only as a stable target for older links. It does
 not duplicate commands because release versions, platform support, and
 installer behavior change together.
 
+Current macOS releases support Apple Silicon (`arm64`) only. Intel
+(`x86_64`/`amd64`) macOS is unsupported across release, upgrade, rescue,
+managed-package, and source-install entry points.
+
 ## Contributor builds
 
 Contributor build targets are defined in [`../Makefile`](../Makefile); run

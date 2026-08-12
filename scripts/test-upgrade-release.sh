@@ -271,12 +271,12 @@ PY
 detect_platform() {
     if [[ -n "${BUILD_PLATFORM}" ]]; then
         case "${BUILD_PLATFORM}" in
-            linux/amd64|linux/arm64|darwin/amd64|darwin/arm64|windows/amd64|windows/arm64)
+            linux/amd64|linux/arm64|darwin/arm64|windows/amd64|windows/arm64)
                 OS_NAME="${BUILD_PLATFORM%%/*}"
                 ARCH_NAME="${BUILD_PLATFORM##*/}"
                 return ;;
             *)
-                die "--platform must be one of linux/amd64, linux/arm64, darwin/amd64, darwin/arm64, windows/amd64, windows/arm64" ;;
+                die "--platform must be one of linux/amd64, linux/arm64, darwin/arm64, windows/amd64, windows/arm64" ;;
         esac
     fi
     case "$(uname -s)" in
@@ -289,6 +289,9 @@ detect_platform() {
         x86_64|amd64) ARCH_NAME="amd64" ;;
         *) die "unsupported architecture for upgrade smoke: $(uname -m)" ;;
     esac
+    if [[ "${OS_NAME}" == "darwin" && "${ARCH_NAME}" != "arm64" ]]; then
+        die "Intel macOS is outside the supported release-upgrade test matrix"
+    fi
 }
 
 normalize_baseline_versions() {

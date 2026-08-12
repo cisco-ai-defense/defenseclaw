@@ -746,10 +746,10 @@ packaging-macos-test:
 #
 # Overrides: GOOS/GOARCH cross-compile the gateway.
 BUNDLE_GOOS  ?= darwin
-# Universal (x86_64 + arm64 via lipo) is the default for macOS drops so the
-# packaging team ships one artifact for both Intel and Apple Silicon. Override
-# with BUNDLE_GOARCH=amd64 or =arm64 for a single-arch bundle.
-BUNDLE_GOARCH ?= universal
+# macOS release support is Apple Silicon only. Keep the bundle architecture
+# fixed to arm64 so local packaging cannot accidentally recreate an unsupported
+# Intel or universal release surface.
+BUNDLE_GOARCH ?= arm64
 BUNDLE_NAME  := defenseclaw-macos-$(VERSION)-$(BUNDLE_GOOS)-$(BUNDLE_GOARCH)
 BUNDLE_DIR   := $(DIST_DIR)/$(BUNDLE_NAME)
 # BUNDLE_LDFLAGS is passed to `go build -ldflags <value>` as a single
@@ -780,6 +780,9 @@ CMID_OVERLAY ?=
 CMID_VERSION ?=
 
 packaging-macos-bundle:
+	@test "$(BUNDLE_GOARCH)" = "arm64" || { \
+		echo "packaging-macos-bundle supports only BUNDLE_GOARCH=arm64" >&2; exit 1; \
+	}
 	@scripts/build-macos-bundle.sh \
 	    "$(BUNDLE_GOOS)" \
 	    "$(BUNDLE_GOARCH)" \
@@ -1129,7 +1132,7 @@ _bundle-data:
 
 dist-gateway:
 	@mkdir -p $(DIST_DIR)
-	@for pair in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do \
+	@for pair in linux/amd64 linux/arm64 darwin/arm64; do \
 		goos=$${pair%%/*}; goarch=$${pair##*/}; \
 		echo "Building gateway $${goos}/$${goarch}..."; \
 		CGO_ENABLED=0 GOOS=$$goos GOARCH=$$goarch go build \

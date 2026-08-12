@@ -188,7 +188,8 @@ gh release view "$RELEASE_VERSION" \
 Require the exact version, a non-draft/non-prerelease immutable release, and
 the expected complete families:
 
-- Linux, macOS, and Windows amd64/arm64 gateway artifacts and their SBOMs;
+- Linux amd64/arm64, macOS arm64, and Windows amd64/arm64 gateway artifacts
+  and their SBOMs; Intel macOS is outside the supported release contract;
 - the CLI wheel and plugin release assets;
 - the macOS app DMG and ZIP, either notarized names or explicit
   `-unverified` names;
@@ -199,6 +200,11 @@ the expected complete families:
 - the upgrade manifest, release provenance, and source map; and
 - `checksums.txt`, `checksums.txt.pem`, `checksums.txt.sig`, and
   `checksums.txt.bundle`.
+
+Protocol-2 policy still carries the legacy Darwin/amd64 slot for authenticated
+schema compatibility. It is not a supported macOS asset: release install,
+upgrade, rescue, package, build-validation, and certification paths must all
+refuse Intel macOS before using it.
 
 On a clean Linux verification host, download every public asset, authenticate
 the checksum manifest, and check every payload digest:

@@ -872,6 +872,10 @@ detect_platform() {
         *)      die "Unsupported OS: ${OS}" ;;
     esac
 
+    if [[ "${OS}" == "darwin" && "${ARCH_NORM}" != "arm64" ]]; then
+        die "Intel macOS (${ARCH}) is unsupported. DefenseClaw for macOS requires Apple Silicon (arm64); no changes were made."
+    fi
+
     ok "${OS_NAME} (${ARCH_NORM})"
 }
 
@@ -979,7 +983,6 @@ resolve_cosign() {
 
     local expected filename verifier_url verifier_path actual size
     case "${OS}/${ARCH_NORM}" in
-        darwin/amd64) expected="5715d61dd00a9b6dcb344de14910b434145855b7f82690b94183c553ac1b68be" ;;
         darwin/arm64) expected="ff497a698f125f3130b04f000b2cb0dd163bcaf00b5e776ef536035e6d0b3f3e" ;;
         linux/amd64) expected="7c78a7f2efc00088bd788a758db6e0928e79f3e0eb83eb5d3c499ed98da4c4f4" ;;
         linux/arm64) expected="b7c23659a50a59fd8eec44b87188e9062157d0c87796cac7b38727e5390c4917" ;;

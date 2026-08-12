@@ -192,6 +192,10 @@ log()  { printf '[install] %s\n' "$*"; }
 warn() { printf '[install] WARN: %s\n' "$*" >&2; }
 die()  { printf '[install] ERROR: %s\n' "$*" >&2; exit 1; }
 
+if [[ "$(uname -s)" == "Darwin" && "$(uname -m)" != "arm64" ]]; then
+  die "Intel macOS ($(uname -m)) is unsupported; the managed macOS package requires Apple Silicon (arm64)"
+fi
+
 # The persistent install.log sink is set up LATER (after the fresh-host
 # preflight passes and after LOGS_DIR has been created by
 # create_install_directory_no_replace). Creating LOGS_DIR before the

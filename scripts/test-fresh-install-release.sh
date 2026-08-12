@@ -152,6 +152,10 @@ assert_bootstrap_retired_privately() {
             exit 1
             ;;
     esac
+    if [[ "${normalized_os}" == "darwin" && "${normalized_arch}" != "arm64" ]]; then
+        echo "Intel macOS is outside the supported release-candidate install matrix" >&2
+        exit 1
+    fi
     filename="cosign-${normalized_os}-${normalized_arch}"
     python3 - "${BOOTSTRAP_TMP}" "${filename}" <<'PY'
 from pathlib import Path

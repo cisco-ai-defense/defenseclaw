@@ -33,8 +33,8 @@ PUBLISHER = ROOT / "scripts/publish-release-channel.sh"
 WORKFLOW = ROOT / ".github/workflows/release.yaml"
 DOC = ROOT / "docs/RELEASE_CHANNEL.md"
 SCRIPT_TIMEOUT_SECONDS = 30
-IMMUTABLE_088_RESCUE_SHA256 = "0c98aa9aa7d56e88f04768e0fe70681f2de777fc22021f9af4ccc06be1d8099b"
-IMMUTABLE_088_RESCUE_SIZE = 28_419
+IMMUTABLE_088_RESCUE_SHA256 = "7fd79da57feba2c44193eed27c004de156023e5764378818d2565109dda5dafd"
+IMMUTABLE_088_RESCUE_SIZE = 28_382
 COSIGN_RELEASE_BASE_URL = (
     f"https://github.com/sigstore/cosign/releases/download/v{resolver_hint.COSIGN_BOOTSTRAP_VERSION}"
 )
@@ -79,10 +79,6 @@ POISONED_AUTH_ENVIRONMENT = {
 }
 
 _COSIGN_FIXTURES = {
-    ("Darwin", "x86_64"): (
-        "cosign-darwin-amd64",
-        "5715d61dd00a9b6dcb344de14910b434145855b7f82690b94183c553ac1b68be",
-    ),
     ("Darwin", "arm64"): (
         "cosign-darwin-arm64",
         "ff497a698f125f3130b04f000b2cb0dd163bcaf00b5e776ef536035e6d0b3f3e",
@@ -985,10 +981,6 @@ def test_posix_rescue_trampoline_accepts_relative_saved_filename(
 
 def test_posix_rescue_cosign_pins_match_resolver_hint_and_test_fixtures() -> None:
     expected = {
-        ("Darwin", "x86_64"): (
-            "cosign-darwin-amd64",
-            resolver_hint.COSIGN_BOOTSTRAP_SHA256[("darwin", "amd64")],
-        ),
         ("Darwin", "arm64"): (
             "cosign-darwin-arm64",
             resolver_hint.COSIGN_BOOTSTRAP_SHA256[("darwin", "arm64")],
@@ -1022,7 +1014,6 @@ def test_posix_rescue_cosign_pins_match_resolver_hint_and_test_fixtures() -> Non
         )
     }
     assert observed_pins == {
-        ("darwin/x86_64", "cosign-darwin-amd64"): resolver_hint.COSIGN_BOOTSTRAP_SHA256[("darwin", "amd64")],
         ("darwin/arm64", "cosign-darwin-arm64"): resolver_hint.COSIGN_BOOTSTRAP_SHA256[("darwin", "arm64")],
         ("linux/x86_64 | linux/amd64", "cosign-linux-amd64"): resolver_hint.COSIGN_BOOTSTRAP_SHA256[("linux", "amd64")],
         (
@@ -1030,6 +1021,32 @@ def test_posix_rescue_cosign_pins_match_resolver_hint_and_test_fixtures() -> Non
             "cosign-linux-arm64",
         ): resolver_hint.COSIGN_BOOTSTRAP_SHA256[("linux", "arm64")],
     }
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX rescue bootstrap")
+def test_posix_rescue_rejects_intel_before_network_or_host_state(tmp_path: Path) -> None:
+    env, rescue = _rescue_fixture(tmp_path)
+    source = rescue.read_text(encoding="utf-8")
+    platform_probe = 'platform="$("${UNAME_BIN}" -s | tr \'[:upper:]\' \'[:lower:]\')/$("${UNAME_BIN}" -m)"'
+    assert source.count(platform_probe) == 1
+    _write_executable(rescue, source.replace(platform_probe, 'platform="darwin/x86_64"'))
+
+    completed = subprocess.run(
+        [str(rescue)],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=SCRIPT_TIMEOUT_SECONDS,
+    )
+
+    assert completed.returncode != 0
+    assert "Intel macOS is unsupported" in completed.stderr
+    assert not (tmp_path / "curl.log").exists()
+    assert not (tmp_path / "resolver-env.log").exists()
+    assert not (tmp_path / "installer-env.log").exists()
+    assert list(tmp_path.glob("defenseclaw-rescue.*")) == []
 
 
 def test_posix_rescue_downloads_have_finite_network_time_bounds() -> None:
@@ -1403,11 +1420,6 @@ def test_immutable_088_rescue_hands_clean_path_to_new_resolver_uv_custody(
     assert function_end > function_start, "resolve_upgrade_uv() end anchor moved"
     resolver_function = upgrade_source[function_start:function_end]
     uv_assets = {
-        ("Darwin", "x86_64"): (
-            "uv-x86_64-apple-darwin.tar.gz",
-            "uv-x86_64-apple-darwin/uv",
-            "2ad79983127ffca7d77b77ce6a24278d7e4f7b817a1acf72fea5f8124b4aac5e",
-        ),
         ("Darwin", "arm64"): (
             "uv-aarch64-apple-darwin.tar.gz",
             "uv-aarch64-apple-darwin/uv",

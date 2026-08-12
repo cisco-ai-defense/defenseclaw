@@ -11,7 +11,6 @@ DEFAULT_REPOSITORY = "cisco-ai-defense/defenseclaw"
 RESOLVER_COMPLETENESS_MARKER = "# DefenseClaw upgrade resolver complete v1"
 COSIGN_BOOTSTRAP_VERSION = "2.6.3"
 COSIGN_BOOTSTRAP_SHA256 = {
-    ("darwin", "amd64"): "5715d61dd00a9b6dcb344de14910b434145855b7f82690b94183c553ac1b68be",
     ("darwin", "arm64"): "ff497a698f125f3130b04f000b2cb0dd163bcaf00b5e776ef536035e6d0b3f3e",
     ("linux", "amd64"): "7c78a7f2efc00088bd788a758db6e0928e79f3e0eb83eb5d3c499ed98da4c4f4",
     ("linux", "arm64"): "b7c23659a50a59fd8eec44b87188e9062157d0c87796cac7b38727e5390c4917",
@@ -145,8 +144,9 @@ def authenticated_resolver_instructions(
         "  trap 'rm -rf \"$d\"' EXIT\n"
         "  platform=\"$(uname -s | tr '[:upper:]' '[:lower:]')/$(uname -m)\"\n"
         '  case "$platform" in\n'
-        "    darwin/x86_64) cosign_asset='cosign-darwin-amd64'; "
-        f"cosign_sha='{COSIGN_BOOTSTRAP_SHA256[('darwin', 'amd64')]}' ;;\n"
+        "    darwin/x86_64) "
+        "echo 'Intel macOS is unsupported; DefenseClaw for macOS requires Apple Silicon (arm64).' "
+        ">&2; exit 1 ;;\n"
         "    darwin/arm64) cosign_asset='cosign-darwin-arm64'; "
         f"cosign_sha='{COSIGN_BOOTSTRAP_SHA256[('darwin', 'arm64')]}' ;;\n"
         "    linux/x86_64|linux/amd64) cosign_asset='cosign-linux-amd64'; "

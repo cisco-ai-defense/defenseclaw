@@ -54,8 +54,13 @@ publication:
 | Platform | Built assets | Validation |
 |---|---|---|
 | Linux | amd64 and arm64 gateway archives plus the shared CLI/plugin assets | Install the exact sealed candidate with `install.sh`; upgrade every authenticated historical lane selected for the target, including the latest older release, fixed migration boundaries, and representative `0.7.x`, `0.6.x`, and `0.5.x` releases; require the candidate CLI and gateway to be healthy |
-| macOS | Intel and Apple Silicon gateway archives, shared CLI/plugin assets, and the unified macOS app | Install the exact sealed candidate with `install.sh`; run the same target-specific authenticated upgrade paths; with a complete Apple credential set, require Developer ID signing and notarization; with no Apple credentials, require ad-hoc signing and explicit `-unverified` artifact names |
+| macOS | Apple Silicon (`arm64`) gateway archive, shared CLI/plugin assets, and the arm64 macOS app | Install the exact sealed candidate with `install.sh` on an Apple Silicon runner; prove Intel hosts fail before dependency, artifact, or state changes; run the same target-specific authenticated upgrade paths; with a complete Apple credential set, require Developer ID signing and notarization; with no Apple credentials, require ad-hoc signing and explicit `-unverified` artifact names |
 | Windows | amd64 and arm64 gateway binaries, shared CLI assets, and the x64 `DefenseClawSetup-x64.exe` | Exercise the exact x64 candidate through `install.ps1` and native Setup; verify the installed CLI/gateway versions; with both Windows credentials, require Cisco Authenticode; with neither, require explicit unverified provenance and exact `NotSigned` state |
+
+Intel macOS is unsupported. The protocol-2 signed manifest retains its existing
+Darwin/amd64 compatibility slot so older authenticated policy readers keep the
+same schema, but no supported installer, upgrader, rescue path, package,
+build-validation lane, or release certification may consume that slot.
 
 This is the complete release acceptance scope. Windows acceptance is
 explicitly fresh-install-only. Every target must pass the exact native Setup

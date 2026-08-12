@@ -435,8 +435,7 @@ readonly cosign_home cosign_config cosign_cache cosign_data cosign_state
 platform="$("${UNAME_BIN}" -s | tr '[:upper:]' '[:lower:]')/$("${UNAME_BIN}" -m)"
 case "${platform}" in
     darwin/x86_64)
-        cosign_asset="cosign-darwin-amd64"
-        cosign_sha256="5715d61dd00a9b6dcb344de14910b434145855b7f82690b94183c553ac1b68be"
+        die "Intel macOS is unsupported; DefenseClaw for macOS requires Apple Silicon (arm64)"
         ;;
     darwin/arm64)
         cosign_asset="cosign-darwin-arm64"

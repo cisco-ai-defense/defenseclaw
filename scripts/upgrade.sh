@@ -214,9 +214,7 @@ resolve_upgrade_uv() {
 
     case "$(uname -s)/$(uname -m)" in
         Darwin/x86_64)
-            asset="uv-x86_64-apple-darwin.tar.gz"
-            expected="2ad79983127ffca7d77b77ce6a24278d7e4f7b817a1acf72fea5f8124b4aac5e"
-            member="uv-x86_64-apple-darwin/uv"
+            die "Intel macOS (x86_64) is unsupported. DefenseClaw for macOS requires Apple Silicon (arm64). No changes were made."
             ;;
         Darwin/arm64)
             asset="uv-aarch64-apple-darwin.tar.gz"
@@ -4268,6 +4266,10 @@ printf "${BOLD}  DefenseClaw Upgrade${NC}\n"
 printf "  ${DIM}Downloads release artifacts from GitHub and replaces installed files${NC}\n"
 printf "\n"
 
+if [[ "$(uname -s)" == "Darwin" && "$(uname -m)" != "arm64" ]]; then
+    die "Intel macOS ($(uname -m)) is unsupported. DefenseClaw for macOS requires Apple Silicon (arm64). No changes were made."
+fi
+
 if [[ -e "${UPGRADE_RECOVERY_ROOT}/phase-one-active.json" \
       || -L "${UPGRADE_RECOVERY_ROOT}/phase-one-active.json" \
       || -e "${UPGRADE_RECOVERY_ROOT}/phase-two-active.json" \
@@ -5313,7 +5315,6 @@ resolve_cosign() {
 
     local expected filename verifier_url verifier_path actual size
     case "${OS}/${ARCH_NORM}" in
-        darwin/amd64) expected="5715d61dd00a9b6dcb344de14910b434145855b7f82690b94183c553ac1b68be" ;;
         darwin/arm64) expected="ff497a698f125f3130b04f000b2cb0dd163bcaf00b5e776ef536035e6d0b3f3e" ;;
         linux/amd64) expected="7c78a7f2efc00088bd788a758db6e0928e79f3e0eb83eb5d3c499ed98da4c4f4" ;;
         linux/arm64) expected="b7c23659a50a59fd8eec44b87188e9062157d0c87796cac7b38727e5390c4917" ;;
@@ -5402,7 +5403,7 @@ print_new_upgrade_script_hint() {
       if [ -z "\$cosign_bin" ]; then
         platform="\$(uname -s | tr '[:upper:]' '[:lower:]')/\$(uname -m)"
         case "\$platform" in
-          darwin/x86_64) cosign_asset='cosign-darwin-amd64'; cosign_sha='5715d61dd00a9b6dcb344de14910b434145855b7f82690b94183c553ac1b68be' ;;
+          darwin/x86_64) echo 'Intel macOS is unsupported; DefenseClaw for macOS requires Apple Silicon (arm64).' >&2; exit 1 ;;
           darwin/arm64) cosign_asset='cosign-darwin-arm64'; cosign_sha='ff497a698f125f3130b04f000b2cb0dd163bcaf00b5e776ef536035e6d0b3f3e' ;;
           linux/x86_64|linux/amd64) cosign_asset='cosign-linux-amd64'; cosign_sha='7c78a7f2efc00088bd788a758db6e0928e79f3e0eb83eb5d3c499ed98da4c4f4' ;;
           linux/aarch64|linux/arm64) cosign_asset='cosign-linux-arm64'; cosign_sha='b7c23659a50a59fd8eec44b87188e9062157d0c87796cac7b38727e5390c4917' ;;

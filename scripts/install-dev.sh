@@ -130,6 +130,8 @@ check_os() {
 
     case "${OS}" in
         darwin)
+            [[ "${ARCH_NORMALIZED}" == "arm64" ]] \
+                || die "Intel macOS (${ARCH}) is unsupported. DefenseClaw for macOS requires Apple Silicon (arm64)."
             OS_NAME="macOS"
             PLATFORM="${OS}-${ARCH_NORMALIZED}"
             ;;

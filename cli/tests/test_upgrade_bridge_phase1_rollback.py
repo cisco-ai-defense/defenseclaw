@@ -44,10 +44,6 @@ def _resolver_with_fixture_uv(
     archive_root: Path,
 ) -> tuple[Path, Path]:
     uv_assets = {
-        ("Darwin", "x86_64"): (
-            "uv-x86_64-apple-darwin.tar.gz",
-            "uv-x86_64-apple-darwin/uv",
-        ),
         ("Darwin", "arm64"): (
             "uv-aarch64-apple-darwin.tar.gz",
             "uv-aarch64-apple-darwin/uv",

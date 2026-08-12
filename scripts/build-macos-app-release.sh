@@ -40,6 +40,10 @@ OUT_DIR="${2:-dist}"
     echo "macOS app releases must be built on macOS" >&2
     exit 1
 }
+[[ "$(uname -m)" == "arm64" ]] || {
+    echo "Intel macOS is unsupported; macOS app releases require Apple Silicon (arm64)" >&2
+    exit 1
+}
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 APP_ROOT="${ROOT}/macos/DefenseClawMac"

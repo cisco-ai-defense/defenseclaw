@@ -332,12 +332,11 @@ def test_cosign_version_split_is_documented_and_bound_to_offline_production_pins
     assert re.fullmatch(r"[0-9a-f]{64}", release_candidate.WINDOWS_COSIGN_SHA256)
     assert resolver_hint.COSIGN_BOOTSTRAP_VERSION == "2.6.3"
     production_digests = {
-        resolver_hint.COSIGN_BOOTSTRAP_SHA256[("darwin", "amd64")],
         resolver_hint.COSIGN_BOOTSTRAP_SHA256[("darwin", "arm64")],
         resolver_hint.COSIGN_BOOTSTRAP_SHA256[("linux", "amd64")],
         resolver_hint.COSIGN_BOOTSTRAP_SHA256[("linux", "arm64")],
     }
-    assert len(production_digests) == 4
+    assert len(production_digests) == 3
     assert all(re.fullmatch(r"[0-9a-f]{64}", digest) for digest in production_digests)
 
     # These are the shipped rescue/install verifier identities, not a

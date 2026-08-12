@@ -2733,6 +2733,13 @@ def _detect_platform() -> tuple[str, str]:
         ux.err(f"Unsupported OS: {system}", indent="  ")
         raise SystemExit(1)
 
+    if system == "darwin" and arch != "arm64":
+        ux.err(
+            "Intel macOS is unsupported; DefenseClaw for macOS requires Apple Silicon (arm64).",
+            indent="  ",
+        )
+        raise SystemExit(1)
+
     if system == "windows" and arch in WINDOWS_NOT_CERTIFIED_ARCHITECTURES:
         ux.err(
             f"Windows {arch.upper()} is not certified for this release; use certified Windows x64 (amd64).",
