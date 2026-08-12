@@ -160,11 +160,6 @@ func TestIsolatedPOSIXCommandFailsClosedOnBrokenAncestry(t *testing.T) {
 	}, &standalone) {
 		t.Fatal("standalone command was not isolated")
 	}
-	if isolatedPOSIXCommand(&parseOutput{
-		status: StatusPartial, commands: []CommandFact{standalone},
-	}, &standalone) {
-		t.Fatal("partial parse was classified isolated")
-	}
 
 	for _, test := range []struct {
 		name    string
@@ -272,6 +267,12 @@ func TestIsolatedPOSIXCommandFailsClosedOnBrokenAncestry(t *testing.T) {
 	if isolatedPOSIXCommand(&forgedProgram, &wrapperChild) {
 		t.Fatal("wrapper with mismatched executable and program was isolated")
 	}
+	forgedArgvOwner := wrapper
+	forgedArgvOwner.commands = cloneCommands(wrapper.commands)
+	forgedArgvOwner.commands[0].Argv[0] = "attacker"
+	if isolatedPOSIXCommand(&forgedArgvOwner, &wrapperChild) {
+		t.Fatal("wrapper with mismatched executable and argv owner was isolated")
+	}
 
 	arbitraryChild := CommandFact{ID: 2, ParentCommandID: 1}
 	arbitrary := parseOutput{
@@ -286,6 +287,20 @@ func TestIsolatedPOSIXCommandFailsClosedOnBrokenAncestry(t *testing.T) {
 	}
 	if isolatedPOSIXCommand(&arbitrary, &arbitraryChild) {
 		t.Fatal("arbitrary parent command was treated as a transparent wrapper")
+	}
+}
+
+func TestExactCaseSensitivePOSIXProgramBindsArgvOwner(t *testing.T) {
+	command := CommandFact{
+		Dialect: DialectPOSIX, Executable: "bash", Program: "bash",
+		Argv: []string{"bash", "-n", "script.sh"}, ArgvComplete: true,
+	}
+	if !exactCaseSensitivePOSIXProgram(&command, "bash") {
+		t.Fatal("exact POSIX owner was rejected")
+	}
+	command.Argv[0] = "attacker"
+	if exactCaseSensitivePOSIXProgram(&command, "bash") {
+		t.Fatal("forged argv owner was accepted")
 	}
 }
 

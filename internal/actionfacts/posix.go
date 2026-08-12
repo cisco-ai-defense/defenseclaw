@@ -639,16 +639,8 @@ func expandStaticPOSIXWrappers(out *parseOutput, wrapperDepth int) {
 				continue
 			}
 			if invocation.noExec {
-				if !provesIsolatedPOSIXNoExecPreview(
-					out,
-					&command,
-					invocation,
-					posixShellModeCommand,
-				) {
-					// A pipeline or redirect can route shell parser output into
-					// another action. Retain an opaque executing carrier for fallback.
-					out.markPartial(IssueUnsupportedConstruct)
-				}
+				// Defer the all-or-nothing preview decision until classifyOutput
+				// has established the final status of every non-noexec command.
 				continue
 			}
 			if wrapperDepth >= maxWrapperDepth {

@@ -17,6 +17,7 @@
 package actionfacts
 
 import (
+	"path"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -170,10 +171,11 @@ func analyze(input Input) Facts {
 	}
 
 	addToolArgumentFacts(&base, input.Tool, extracted)
-	deduplicateFacts(&base)
 	if base.hasFacts() && base.status == StatusNotApplicable {
 		base.status = StatusComplete
 	}
+	finalizePOSIXNoExecPreviews(&base)
+	deduplicateFacts(&base)
 	activeHome, _ := normalizeActiveHome(input.ActiveHome)
 	return base.factsWithContext(
 		safeToolName(input.Tool),
@@ -458,18 +460,8 @@ type posixShellInvocation struct {
 	valid        bool
 }
 
-func provesIsolatedPOSIXNoExecPreview(
-	out *parseOutput,
-	command *CommandFact,
-	invocation posixShellInvocation,
-	mode posixShellMode,
-) bool {
-	return invocation.valid && invocation.mode == mode && invocation.noExec &&
-		isolatedPOSIXCommand(out, command)
-}
-
 func isolatedPOSIXCommand(out *parseOutput, command *CommandFact) bool {
-	if out == nil || command == nil || out.status != StatusComplete {
+	if out == nil || command == nil {
 		return false
 	}
 	commandsByID := make(map[int64]*CommandFact, len(out.commands))
@@ -518,10 +510,7 @@ func exactTransparentPOSIXWrapper(
 		(command.Dialect != DialectPOSIX && command.Dialect != DialectArgv) ||
 		command.Effect != EffectExecute || !command.ArgvComplete ||
 		len(command.Argv) < 2 || command.Program == "" ||
-		command.Program != commandProgramForDialect(
-			command.Executable,
-			command.Dialect,
-		) {
+		!exactCaseSensitivePOSIXProgram(command, command.Program) {
 		return false
 	}
 	switch command.Program {
@@ -534,6 +523,44 @@ func exactTransparentPOSIXWrapper(
 	default:
 		return false
 	}
+}
+
+func exactCaseSensitivePOSIXProgram(
+	command *CommandFact,
+	program string,
+) bool {
+	if command == nil || program == "" || command.Executable == "" ||
+		len(command.Argv) == 0 || command.Argv[0] != command.Executable ||
+		strings.ContainsAny(command.Executable, `\:`) ||
+		command.Executable != strings.ToLower(command.Executable) {
+		return false
+	}
+	executable := command.Executable
+	if strings.ContainsRune(executable, '/') {
+		if !strings.HasPrefix(executable, "/") || path.Clean(executable) != executable ||
+			path.Base(executable) != program {
+			return false
+		}
+		trustedDirectory := false
+		for _, directory := range []string{
+			"/bin", "/sbin", "/usr/bin", "/usr/sbin",
+		} {
+			if path.Dir(executable) == directory {
+				trustedDirectory = true
+				break
+			}
+		}
+		if !trustedDirectory {
+			return false
+		}
+	} else if executable != program {
+		return false
+	}
+	return command.Program == program &&
+		command.Program == commandProgramForDialect(
+			command.Executable,
+			command.Dialect,
+		)
 }
 
 func parsePOSIXShellInvocation(
@@ -1780,23 +1807,14 @@ func enforceAnalyzeAuthority(out *parseOutput) {
 				command.Argv,
 			)
 			if invocation.valid && invocation.mode == posixShellModeCommand {
-				if !invocation.noExec || provesIsolatedPOSIXNoExecPreview(
-					out,
-					command,
-					invocation,
-					posixShellModeCommand,
-				) {
+				if !invocation.noExec || command.Effect == EffectPreview {
 					continue
 				}
 				out.markPartial(IssueUnsupportedConstruct)
 				continue
 			}
-			if provesIsolatedPOSIXNoExecPreview(
-				out,
-				command,
-				invocation,
-				posixShellModeScript,
-			) {
+			if invocation.valid && invocation.mode == posixShellModeScript &&
+				invocation.noExec && command.Effect == EffectPreview {
 				continue
 			}
 			if _, script := exactPOSIXShellScriptOperand(
