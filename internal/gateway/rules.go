@@ -178,8 +178,13 @@ func ApplyRulePackOverrides(rp *guardrail.RulePack) error {
 type compiledRulePackCategories struct {
 	categories    []ruleCategory
 	semanticRules []compiledSemanticRule
-	overridden    int
-	added         int
+	// ruleIdentityTitles indexes the immutable generation by normalized rule
+	// ID and exact trimmed title. Local-pattern normalization uses it to
+	// distinguish catalog framing from producer-controlled matched text without
+	// rescanning the full catalog for every finding.
+	ruleIdentityTitles map[string]map[string]struct{}
+	overridden         int
+	added              int
 }
 
 const (
@@ -229,11 +234,24 @@ func compileRulePackGenerationWithCompiler(
 		return nil, errors.New("semantic rule compiler is unavailable")
 	}
 	ownedCategories := cloneRuleCategories(categories)
-	compiled := &compiledRulePackCategories{categories: ownedCategories}
+	compiled := &compiledRulePackCategories{
+		categories:         ownedCategories,
+		ruleIdentityTitles: make(map[string]map[string]struct{}),
+	}
 	claimed := make(map[string]string)
 	var staticCost uint64
 	for _, category := range ownedCategories {
 		for _, rule := range category.Rules {
+			ruleID := strings.ToUpper(strings.TrimSpace(rule.ID))
+			title := strings.TrimSpace(rule.Title)
+			if ruleID != "" && title != "" {
+				titles := compiled.ruleIdentityTitles[ruleID]
+				if titles == nil {
+					titles = make(map[string]struct{})
+					compiled.ruleIdentityTitles[ruleID] = titles
+				}
+				titles[title] = struct{}{}
+			}
 			expression := strings.TrimSpace(rule.Expression)
 			if rule.Expression != expression {
 				return nil, fmt.Errorf(
@@ -592,9 +610,75 @@ func ScanAllRulesForConnector(connector, text, toolName string) []RuleFinding {
 	return scanRuleGeneration(generation, text, toolName, ruleScanOptions{})
 }
 
+// scanContentRulesForConnector applies the content-only rule boundary used by
+// connector prompts and tool results. Concrete actions (commands, paths,
+// cognitive-file mutations, and C2 operations) belong to the trusted tool-call
+// dispatcher, where ActionFacts can prove what will execute. Scanning those
+// categories against prose or returned bytes turns source, tests, and command
+// output into false actions. Trust, secret, and PII rules remain fully eligible
+// for untrusted output. In the much narrower physically verified fixture/rule
+// scope, matches remain visible as LOW detection-only telemetry; repository
+// enforcement is owned by CodeGuard instead of generating a HIGH/CRITICAL hook
+// alert every time an operator reads a security test corpus.
+func scanContentRulesForConnector(
+	connector, text, toolName string,
+	scope ruleContentScope,
+) []RuleFinding {
+	return scanContentRuleCategoryForConnector(connector, text, toolName, scope, "")
+}
+
+// scanContentRuleCategoryForConnector applies the same content boundary as
+// scanContentRulesForConnector while restricting evaluation to one declared
+// rule-pack category. An empty category preserves the all-content-category
+// behavior above. Keeping the filter in the scan options means custom rule IDs
+// and tags cannot accidentally enter a category-specific decision.
+func scanContentRuleCategoryForConnector(
+	connector, text, toolName string,
+	scope ruleContentScope,
+	category string,
+) []RuleFinding {
+	if ManagedEnterpriseActive() {
+		return nil
+	}
+	if scope == ruleContentScopeSource {
+		text = neutralizeKnownFixtureDataLiterals(text)
+	}
+	findings := scanRuleGeneration(
+		snapshotRulePackGeneration(connector),
+		text,
+		toolName,
+		ruleScanOptions{contentScope: scope, onlyCategory: category},
+	)
+	if scope == ruleContentScopeSource {
+		// Physically verified test, fixture, and bundled rule sources are useful
+		// telemetry, but their contents are not an action by the agent. Keeping
+		// literal attack strings or sample credentials at HIGH/CRITICAL created
+		// an alert for every source review. CodeGuard remains the enforcement
+		// owner for credentials committed to repository files, while symlinked,
+		// mixed, ordinary-source, process, and external output never enter this
+		// narrow scope and retain their original severity.
+		for i := range findings {
+			findings[i].Severity = "LOW"
+			findings[i].enforcement = findingEnforcementDetectionOnly
+		}
+	}
+	return findings
+}
+
+type ruleContentScope uint8
+
+const (
+	ruleContentScopeAll ruleContentScope = iota
+	ruleContentScopeSource
+	ruleContentScopeUntrusted
+)
+
 type ruleScanOptions struct {
 	includeToolCallOnly bool
+	excludeTrustExploit bool
 	excludedRuleIDs     map[string]struct{}
+	contentScope        ruleContentScope
+	onlyCategory        string
 }
 
 func (o ruleScanOptions) allows(ruleID string, toolCallOnly bool) bool {
@@ -603,6 +687,45 @@ func (o ruleScanOptions) allows(ruleID string, toolCallOnly bool) bool {
 	}
 	_, excluded := o.excludedRuleIDs[ruleID]
 	return !excluded
+}
+
+func (o ruleScanOptions) allowsCategory(category string) bool {
+	if o.onlyCategory != "" && category != o.onlyCategory {
+		return false
+	}
+	if o.excludeTrustExploit && category == "trust-exploit" {
+		return false
+	}
+	if o.contentScope == ruleContentScopeAll {
+		return true
+	}
+	switch category {
+	case "command", "sensitive-path", "cognitive-file", "c2":
+		return false
+	case "trust-exploit":
+		// Source-scope matches are retained and downgraded after matching rather
+		// than suppressed here, so telemetry still records the literal.
+		return o.contentScope == ruleContentScopeUntrusted ||
+			o.contentScope == ruleContentScopeSource
+	case "secret", "enterprise-data":
+		return true
+	default:
+		return true
+	}
+}
+
+// neutralizeKnownFixtureDataLiterals removes only canonical public examples.
+// It deliberately does not suppress an entire detector category: a fixture can
+// still contain a real credential or PII value, and a fixture-looking path can
+// be redirected to live data by a symlink.
+func neutralizeKnownFixtureDataLiterals(text string) string {
+	for _, literal := range []string{
+		"AKIA" + "IOSFODNN7EXAMPLE",
+		"123" + "-45-6789",
+	} {
+		text = strings.ReplaceAll(text, literal, strings.Repeat("x", len(literal)))
+	}
+	return text
 }
 
 func snapshotRulePackGeneration(connector string) *compiledRulePackCategories {
@@ -651,7 +774,7 @@ func scanRuleGeneration(
 	if generation == nil {
 		return nil
 	}
-	return scanRuleCategoriesWithOptions(generation.categories, text, toolName, options)
+	return scanRuleCategoriesWithOptions(generation, text, toolName, options)
 }
 
 // scanRuleCategories runs every rule in cats against text, scanning both the
@@ -659,16 +782,28 @@ func scanRuleGeneration(
 // shared core of ScanAllRules / ScanAllRulesForConnector — the only
 // difference between those entry points is which category set they select.
 func scanRuleCategories(cats []ruleCategory, text string, toolName string) []RuleFinding {
-	return scanRuleCategoriesWithOptions(cats, text, toolName, ruleScanOptions{})
+	generation, err := compileRulePackGeneration(cats)
+	if err != nil {
+		return nil
+	}
+	return scanRuleCategoriesWithOptions(generation, text, toolName, ruleScanOptions{})
 }
 
 func scanRuleCategoriesWithOptions(
-	cats []ruleCategory,
+	generation *compiledRulePackCategories,
 	text string,
 	toolName string,
 	options ruleScanOptions,
 ) []RuleFinding {
-	findings := windowsCommandFindingsWithOptions(text, toolName, options)
+	if generation == nil {
+		return nil
+	}
+	var findings []RuleFinding
+	// The hard-coded Windows recognizers cover only command and sensitive-path
+	// actions, both of which are intentionally absent from content scans.
+	if options.contentScope == ruleContentScopeAll {
+		findings = windowsCommandFindingsWithOptions(text, toolName, options)
+	}
 	seen := make(map[string]bool)
 	for i := range findings {
 		findings[i] = adjustConfidence(toolName, findings[i])
@@ -676,12 +811,17 @@ func scanRuleCategoriesWithOptions(
 	}
 
 	// Scan raw text first
-	for _, cat := range cats {
-		for _, rule := range cat.Rules {
+	for categoryIndex := range generation.categories {
+		cat := &generation.categories[categoryIndex]
+		if !options.allowsCategory(cat.Name) {
+			continue
+		}
+		for ruleIndex := range cat.Rules {
+			rule := &cat.Rules[ruleIndex]
 			if !options.allows(rule.ID, rule.ToolCallOnly) {
 				continue
 			}
-			loc := rule.Pattern.FindStringIndex(text)
+			loc := firstAcceptedRuleMatch(*rule, text)
 			if loc == nil {
 				continue
 			}
@@ -698,6 +838,7 @@ func scanRuleCategoriesWithOptions(
 			}
 
 			f = adjustConfidence(toolName, f)
+			f = applyTrustLiteralContext(generation, cat.Name, rule, text, f)
 			findings = append(findings, f)
 			seen[rule.ID] = true
 		}
@@ -706,15 +847,20 @@ func scanRuleCategoriesWithOptions(
 	// Scan normalized text to catch shell obfuscation
 	normalized := normalizeShell(text)
 	if normalized != text {
-		for _, cat := range cats {
-			for _, rule := range cat.Rules {
+		for categoryIndex := range generation.categories {
+			cat := &generation.categories[categoryIndex]
+			if !options.allowsCategory(cat.Name) {
+				continue
+			}
+			for ruleIndex := range cat.Rules {
+				rule := &cat.Rules[ruleIndex]
 				if !options.allows(rule.ID, rule.ToolCallOnly) {
 					continue
 				}
 				if seen[rule.ID] {
 					continue // already found on raw pass
 				}
-				loc := rule.Pattern.FindStringIndex(normalized)
+				loc := firstAcceptedRuleMatch(*rule, normalized)
 				if loc == nil {
 					continue
 				}
@@ -731,6 +877,7 @@ func scanRuleCategoriesWithOptions(
 				}
 
 				f = adjustConfidence(toolName, f)
+				f = applyTrustLiteralContext(generation, cat.Name, rule, normalized, f)
 				findings = append(findings, f)
 			}
 		}

@@ -30,6 +30,27 @@ type fakeScanPersistence struct {
 	findings []Finding
 }
 
+type recordingCorrelator struct {
+	calls           int
+	sessionID       string
+	agentInstanceID string
+	meta            ScanFindingMeta
+}
+
+func (c *recordingCorrelator) RunForSession(
+	_ context.Context,
+	sessionID, agentInstanceID string,
+	_ ScanPersistence,
+	_ string,
+	meta ScanFindingMeta,
+) error {
+	c.calls++
+	c.sessionID = sessionID
+	c.agentInstanceID = agentInstanceID
+	c.meta = meta
+	return nil
+}
+
 func (f *fakeScanPersistence) InsertScanSummary(p ScanSummaryParams) error {
 	f.summary = p
 	return nil
@@ -104,5 +125,28 @@ func TestFindingEnricher_DoesNotOverwriteExistingAxes(t *testing.T) {
 	}
 	if !reflect.DeepEqual(pers.findings[0].DataAxis, []string{"egress_external"}) {
 		t.Errorf("prelabeled DataAxis overwritten; got %v", pers.findings[0].DataAxis)
+	}
+}
+
+func TestEmitScanResultInvokesCorrelatorWithAgentIDFallback(t *testing.T) {
+	original := defaultCorrelator
+	defer func() { defaultCorrelator = original }()
+	recorder := &recordingCorrelator{}
+	SetCorrelator(recorder)
+
+	pers := &fakeScanPersistence{}
+	result := &ScanResult{
+		Scanner: "test", Target: "t", Timestamp: time.Now(),
+		Findings: []Finding{{ID: "1", Severity: SeverityHigh, Title: "finding", RuleID: "RULE"}},
+	}
+	_, err := EmitScanResult(context.Background(), pers, result, AgentIdentity{
+		SessionID: "session", AgentID: "logical-agent",
+	})
+	if err != nil {
+		t.Fatalf("EmitScanResult: %v", err)
+	}
+	if recorder.calls != 1 || recorder.sessionID != "session" || recorder.agentInstanceID != "" ||
+		recorder.meta.AgentID != "logical-agent" {
+		t.Fatalf("agent-id fallback correlator call=%#v", recorder)
 	}
 }

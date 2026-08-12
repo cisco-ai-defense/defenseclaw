@@ -676,9 +676,9 @@ def test_candidate_renderer_is_deterministic_complete_and_in_memory(
         f"{PREFIX}/examples/manifest.json",
         f"{PREFIX}/otlp-fixtures/manifest.json",
     }.issubset(artifacts)
-    assert sum("/examples/valid/" in path for path in artifacts) == 7
+    assert sum("/examples/valid/" in path for path in artifacts) == 8
     assert sum("/examples/invalid/" in path for path in artifacts) == 6
-    assert sum("/otlp-fixtures/cases/" in path for path in artifacts) == 13
+    assert sum("/otlp-fixtures/cases/" in path for path in artifacts) == 14
     with pytest.raises(TypeError):
         artifacts["new"] = artifacts[next(iter(artifacts))]  # type: ignore[index]
     for path, artifact in artifacts.items():
@@ -1417,7 +1417,7 @@ def test_bundle_is_complete_draft_2020_12_and_examples_have_exact_dispositions(
                 "mandatory_facts": [],
                 "occurrence": None,
             }
-    assert observed == {True: 7, False: 6}
+    assert observed == {True: 8, False: 6}
 
 
 def test_provenance_import_schema_is_closed_bounded_and_cross_field_exact(
@@ -2744,7 +2744,7 @@ def test_normalized_example_and_otlp_manifests_cover_the_same_cases(
     assert examples["conformance"]["scope"] == "canonical-schema-comparison-only"
     assert fixtures["conformance"]["builder_parity"] == "pending-source-inputs"
     assert [item["id"] for item in examples["cases"]] == [item["id"] for item in fixtures["cases"]]
-    assert len(examples["cases"]) == 13
+    assert len(examples["cases"]) == 14
     assert fixtures["canonical_to_otlp"]["json_mapping"] == "opentelemetry_proto_json_v1"
     assert "$type" not in json.dumps(fixtures["canonical_to_otlp"])
 

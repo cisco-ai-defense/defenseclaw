@@ -1501,6 +1501,27 @@ private-secret-name = "DefenseClaw must remain redacted"
         $standardUserFileGuardText -match 'NumberOfLinks != 1' -and
         $standardUserFileGuardText -match 'FileMode\.CreateNew') `
         'diagnostic/result handoff validates and consumes one no-follow, single-link regular-file handle'
+    $captureSelectionFunction = [regex]::Match(
+        $nativeHarnessText,
+        '(?s)function Get-WindowsNativeCaptureFiles\b.*?(?=\r?\nfunction )'
+    ).Value
+    $captureFunction = [regex]::Match(
+        $nativeHarnessText,
+        '(?s)function Invoke-Capture\b.*?(?=\r?\nfunction )'
+    ).Value
+    Assert-True ($captureSelectionFunction -match 'SortedDictionary\[string, IO\.FileInfo\]' -and
+        $captureSelectionFunction -match '\$selectionLimit = 30' -and
+        $captureSelectionFunction -notmatch '\$matches\b' -and
+        $captureSelectionFunction -notmatch '\$visited\b' -and
+        $captureFunction -match 'DisposableFileGuard\]::OpenRootedReader\(\$root\)' -and
+        $captureFunction -match 'ReadBoundedUtf8\(\$file\.FullName, 1048576\)' -and
+        $captureFunction -notmatch 'ReadAllText\(\$file\.FullName\)' -and
+        $standardUserFileGuardText -match 'sealed class RootedReader' -and
+        $standardUserFileGuardText -match 'GetFinalPathNameByHandleW' -and
+        $standardUserFileGuardText -match 'guarded file resolved outside its retained root' -and
+        $nativeHarnessText -match 'leaf replaced by a reparse point after enumeration' -and
+        $nativeHarnessText -match 'replaced ancestor outside its retained root') `
+        'native capture exhaustively selects priority logs and reads only retained-root no-follow handles'
     Assert-True ($standardUserSafetyText -match 'function Grant-DisposableAncestorReadLease' -and
         $standardUserSafetyText -match 'function Restore-DisposableAncestorReadLease' -and
         $standardUserSafetyText -match '(?s)Grant-DisposableAncestorReadLease.*?FileSystemRights\]::ReadAndExecute.*?InheritanceFlags\]::None.*?PropagationFlags\]::None' -and
@@ -1784,6 +1805,10 @@ private-secret-name = "DefenseClaw must remain redacted"
         'Codex certification never bypasses hook trust'
     $doctorContract = [regex]::Match($harnessText, '(?s)function Assert-DoctorWindowsHookRegistration\b.*?\n\}').Value
     $doctorSetupContract = [regex]::Match($harnessText, '(?s)function Assert-DoctorHookRegistration\b.*?\n\}').Value
+    $ampScopedTokenContract = [regex]::Match(
+        $harnessText,
+        '(?s)function Assert-AmpScopedTokenPluginContract\b.*?(?=\r?\nfunction )'
+    ).Value
     $wizardHookContract = [regex]::Match(
         $nativeHarnessText,
         '(?s)function Assert-WizardHookRegistration\b.*?(?=\r?\nfunction )'
@@ -1797,13 +1822,37 @@ private-secret-name = "DefenseClaw must remain redacted"
         'ctx.ui.confirm',
         'amp.activeThread.current',
         'isPluginUINotAvailableError',
-        'action: "reject-and-continue"',
-        'Authorization = `Bearer ${DC_API_TOKEN}`'
+        'action: "reject-and-continue"'
     )) {
         Assert-True ($doctorSetupContract.Contains($marker) -and
             $wizardHookContract.Contains($marker)) `
             "Windows setup and wizard contracts require the Amp plugin marker: $marker"
     }
+    foreach ($marker in @(
+        'const DC_TOKEN_FILE = "',
+        '.hook-amp.token',
+        'const DC_TOKEN_PATTERN = /^[0-9a-f]{64}$/',
+        'const DC_MAX_TOKEN_FILE_BYTES = 4096',
+        'runtime.file(DC_TOKEN_FILE).slice(0, DC_MAX_TOKEN_FILE_BYTES + 1).text()',
+        'if (!DC_TOKEN_PATTERN.test(token))',
+        'headers.Authorization = `Bearer ${token}`',
+        'ToBase64String',
+        'const DC_API_TOKEN =',
+        'ConvertFrom-Json',
+        'GetFullPath',
+        'OrdinalIgnoreCase'
+    )) {
+        Assert-True ($ampScopedTokenContract.Contains($marker) -and
+            $wizardHookContract.Contains($marker)) `
+            "Windows setup and wizard contracts validate the Amp scoped-token boundary: $marker"
+    }
+    Assert-True ($wizardHookContract.Contains(
+        '$tokenPath = Join-Path $hookDir ''.hook-amp.token'''
+    ) -and $wizardHookContract -notmatch '\$env:DEFENSECLAW_HOME') `
+        'wizard Amp scoped-token validation derives its sidecar from the selected data root'
+    Assert-True ($doctorSetupContract.Contains('Assert-AmpScopedTokenPluginContract') -and
+        $doctorContract.Contains('Assert-AmpScopedTokenPluginContract')) `
+        'both Windows doctor contracts invoke the Amp scoped-token boundary validator'
     foreach ($marker in @(
         'const DC_FAIL_MODE: string = "closed"',
         'const DC_TIMEOUT_MS = 10000',

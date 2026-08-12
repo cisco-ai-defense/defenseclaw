@@ -505,6 +505,107 @@ def test_private_atomic_rewrite_preserves_stricter_existing_windows_dacl(tmp_pat
     assert target.read_bytes() == b"rewritten"
 
 
+@pytest.mark.skipif(os.name != "nt", reason="validates managed Windows DACL preservation")
+@pytest.mark.allow_subprocess
+def test_managed_custody_atomic_rewrite_preserves_gateway_dacl_and_parent(tmp_path):
+    from defenseclaw import windows_acl
+
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    target = hooks / ".hook-codex.token"
+    target.write_bytes(b"a" * 64 + b"\n")
+    for path, ace in (
+        (hooks, "*S-1-5-32-544:(OI)(CI)F"),
+        (target, "*S-1-5-32-544:F"),
+    ):
+        file_permissions._set_windows_owner_only_acl(os.fspath(path), set_owner=True)
+        subprocess.run(
+            ["icacls", os.fspath(path), "/grant", ace],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    parent_before = windows_acl.capture_path(os.fspath(hooks), directory=True)
+    target_before = windows_acl.capture_path(os.fspath(target))
+    assert (
+        file_permissions.windows_acl_custody_write_error(
+            hooks,
+            allow_current_user=True,
+            require_current_user_owner=True,
+        )
+        is None
+    )
+    assert file_permissions.windows_acl_custody_confidentiality_error(target) is None
+
+    file_permissions.atomic_write_private_bytes(
+        target,
+        b"b" * 64 + b"\n",
+        windows_managed_custody=True,
+    )
+
+    assert windows_acl.capture_path(os.fspath(hooks), directory=True) == parent_before
+    assert windows_acl.capture_path(os.fspath(target)) == target_before
+    assert target.read_bytes() == b"b" * 64 + b"\n"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="validates managed Windows DACL creation")
+@pytest.mark.allow_subprocess
+def test_managed_custody_atomic_write_safely_creates_absent_target(tmp_path):
+    from defenseclaw import windows_acl
+
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    file_permissions._set_windows_owner_only_acl(os.fspath(hooks), set_owner=True)
+    subprocess.run(
+        ["icacls", os.fspath(hooks), "/grant", "*S-1-5-32-544:(OI)(CI)F"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    parent_before = windows_acl.capture_path(os.fspath(hooks), directory=True)
+    expected_target_security = windows_acl.private_security_for_directory(os.fspath(hooks))
+    target = hooks / ".hook-codex.token"
+
+    file_permissions.atomic_write_private_bytes(
+        target,
+        b"c" * 64 + b"\n",
+        windows_managed_custody=True,
+    )
+
+    assert windows_acl.capture_path(os.fspath(hooks), directory=True) == parent_before
+    assert windows_acl.capture_path(os.fspath(target)) == expected_target_security
+    assert file_permissions.windows_acl_custody_confidentiality_error(target) is None
+    assert target.read_bytes() == b"c" * 64 + b"\n"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="validates managed Windows DACL protection")
+@pytest.mark.allow_subprocess
+def test_managed_custody_atomic_rewrite_rejects_inheritable_target(tmp_path):
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    file_permissions._set_windows_owner_only_acl(os.fspath(hooks), set_owner=True)
+    target = hooks / ".hook-codex.token"
+    original = b"d" * 64 + b"\n"
+    target.write_bytes(original)
+    file_permissions._set_windows_owner_only_acl(os.fspath(target), set_owner=True)
+    subprocess.run(
+        ["icacls", os.fspath(target), "/inheritance:e"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert file_permissions._windows_dacl_is_protected(target) is False
+
+    with pytest.raises(OSError, match="Windows DACL is inheritable"):
+        file_permissions.atomic_write_private_bytes(
+            target,
+            b"e" * 64 + b"\n",
+            windows_managed_custody=True,
+        )
+
+    assert target.read_bytes() == original
+
+
 @pytest.mark.skipif(os.name != "nt", reason="validates protected Windows DACL copying")
 @pytest.mark.allow_subprocess
 def test_copy_windows_dacl_protects_destination_from_parent_inheritance(tmp_path):
@@ -587,6 +688,380 @@ def test_windows_post_replace_inspection_error_removes_target(monkeypatch, tmp_p
         file_permissions._verify_or_repair_windows_private_target(os.fspath(target))
 
     assert not target.exists()
+
+
+def _synthetic_managed_security(owner: bytes):
+    from defenseclaw.windows_acl import WindowsFileSecurity
+
+    return WindowsFileSecurity(owner=owner, dacl=b"synthetic-dacl", dacl_protected=True)
+
+
+def _patch_synthetic_managed_claim(monkeypatch, target, *, capture, apply=None, delete=None):
+    from defenseclaw import windows_acl
+
+    monkeypatch.setattr(
+        windows_acl,
+        "open_regular_security_mutation_fd",
+        lambda path: os.open(path, os.O_RDWR),
+    )
+    monkeypatch.setattr(windows_acl, "capture_fd", capture)
+    monkeypatch.setattr(windows_acl, "apply_fd", apply or Mock())
+    monkeypatch.setattr(windows_acl, "delete_regular_fd", delete or Mock())
+
+
+def test_managed_windows_bound_post_replace_exact_success(monkeypatch, tmp_path):
+    from defenseclaw import windows_acl
+
+    target = tmp_path / ".hook-codex.token"
+    target.write_bytes(b"generation-b")
+    staged = target.stat()
+    expected = _synthetic_managed_security(b"expected-owner")
+    apply = Mock()
+    delete = Mock()
+    custody = Mock(return_value=None)
+    _patch_synthetic_managed_claim(
+        monkeypatch,
+        target,
+        capture=Mock(return_value=expected),
+        apply=apply,
+        delete=delete,
+    )
+    monkeypatch.setattr(file_permissions, "windows_acl_custody_confidentiality_error", custody)
+
+    file_permissions._verify_managed_windows_private_target(os.fspath(target), staged, expected)
+
+    assert target.read_bytes() == b"generation-b"
+    custody.assert_called_once_with(os.fspath(target))
+    apply.assert_not_called()
+    delete.assert_not_called()
+    assert windows_acl.capture_fd.call_count == 1
+
+
+def test_managed_windows_bound_post_replace_repairs_descriptor_mismatch(monkeypatch, tmp_path):
+    target = tmp_path / ".hook-codex.token"
+    target.write_bytes(b"generation-b")
+    staged = target.stat()
+    expected = _synthetic_managed_security(b"expected-owner")
+    changed = _synthetic_managed_security(b"changed-owner")
+    apply = Mock()
+    delete = Mock()
+    capture = Mock(side_effect=[changed, expected])
+    _patch_synthetic_managed_claim(
+        monkeypatch,
+        target,
+        capture=capture,
+        apply=apply,
+        delete=delete,
+    )
+    monkeypatch.setattr(file_permissions, "windows_acl_custody_confidentiality_error", Mock(return_value=None))
+
+    file_permissions._verify_managed_windows_private_target(os.fspath(target), staged, expected)
+
+    apply.assert_called_once()
+    assert capture.call_count == 2
+    delete.assert_not_called()
+    assert target.read_bytes() == b"generation-b"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="synthetic fixture relies on POSIX delete sharing")
+def test_managed_windows_bound_post_replace_unsafe_acl_deletes_exact_claim(monkeypatch, tmp_path):
+    target = tmp_path / ".hook-codex.token"
+    target.write_bytes(b"generation-b")
+    staged = target.stat()
+    expected = _synthetic_managed_security(b"expected-owner")
+    deleted: list[os.stat_result] = []
+
+    def delete_claim(descriptor: int) -> None:
+        claimed = os.fstat(descriptor)
+        assert os.path.samestat(claimed, os.stat(target, follow_symlinks=False))
+        deleted.append(claimed)
+        os.unlink(target)
+
+    _patch_synthetic_managed_claim(
+        monkeypatch,
+        target,
+        capture=Mock(return_value=expected),
+        apply=Mock(),
+        delete=delete_claim,
+    )
+    monkeypatch.setattr(
+        file_permissions,
+        "windows_acl_custody_confidentiality_error",
+        Mock(return_value="ACL grants read access to untrusted SID S-1-5-32-545"),
+    )
+
+    with pytest.raises(OSError, match="published managed-custody target is unsafe"):
+        file_permissions._verify_managed_windows_private_target(os.fspath(target), staged, expected)
+
+    assert len(deleted) == 1
+    assert os.path.samestat(deleted[0], staged)
+    assert not target.exists()
+
+
+def test_managed_windows_bound_cleanup_failure_is_combined_and_secret_safe(monkeypatch, tmp_path):
+    secret = "sensitive-cleanup-detail-that-must-not-leak"
+    target = tmp_path / ".hook-codex.token"
+    target.write_bytes(secret.encode("ascii"))
+    staged = target.stat()
+    expected = _synthetic_managed_security(b"expected-owner")
+    changed = _synthetic_managed_security(b"changed-owner")
+    _patch_synthetic_managed_claim(
+        monkeypatch,
+        target,
+        capture=Mock(return_value=changed),
+        apply=Mock(side_effect=OSError(1234, f"repair denied: {secret}")),
+        delete=Mock(side_effect=OSError(4321, f"cleanup denied: {secret}")),
+    )
+
+    with pytest.raises(OSError) as caught:
+        file_permissions._verify_managed_windows_private_target(os.fspath(target), staged, expected)
+
+    detail = str(caught.value)
+    assert "managed Windows security changed during atomic publication" in detail
+    assert "repair failed: OSError code 1234" in detail
+    assert "cleanup failed: OSError code 4321" in detail
+    assert secret not in detail
+    assert caught.value.__cause__ is None
+    assert caught.value.__context__ is None
+    assert target.exists()
+
+
+def test_managed_windows_bound_postcheck_missing_target_is_explicit_and_secret_safe(monkeypatch, tmp_path):
+    from defenseclaw import windows_acl
+
+    secret = "missing-error-secret"
+    target = tmp_path / ".hook-codex.token"
+    target.write_bytes(b"generation-b")
+    staged = target.stat()
+    target.unlink()
+    expected = _synthetic_managed_security(b"expected-owner")
+    delete = Mock()
+    monkeypatch.setattr(
+        windows_acl,
+        "open_regular_security_mutation_fd",
+        Mock(side_effect=FileNotFoundError(2, secret)),
+    )
+    monkeypatch.setattr(windows_acl, "delete_regular_fd", delete)
+
+    with pytest.raises(OSError, match="publication disappeared before validation") as caught:
+        file_permissions._verify_managed_windows_private_target(os.fspath(target), staged, expected)
+
+    assert secret not in str(caught.value)
+    delete.assert_not_called()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="synthetic fixture relies on POSIX delete sharing")
+def test_managed_windows_bound_custody_swap_preserves_concurrent_replacement(monkeypatch, tmp_path):
+    target = tmp_path / ".hook-codex.token"
+    replacement = tmp_path / ".hook-codex.concurrent"
+    target.write_bytes(b"generation-b")
+    replacement.write_bytes(b"generation-c")
+    staged = target.stat()
+    expected = _synthetic_managed_security(b"expected-owner")
+    apply = Mock()
+    delete = Mock()
+    _patch_synthetic_managed_claim(
+        monkeypatch,
+        target,
+        capture=Mock(return_value=expected),
+        apply=apply,
+        delete=delete,
+    )
+
+    def swap_during_custody(_path):
+        os.replace(replacement, target)
+        return None
+
+    monkeypatch.setattr(
+        file_permissions,
+        "windows_acl_custody_confidentiality_error",
+        swap_during_custody,
+    )
+
+    with pytest.raises(OSError, match="concurrently replaced.*replacement was preserved"):
+        file_permissions._verify_managed_windows_private_target(os.fspath(target), staged, expected)
+
+    assert target.read_bytes() == b"generation-c"
+    apply.assert_not_called()
+    delete.assert_not_called()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="synthetic fixture relies on POSIX delete sharing")
+def test_managed_windows_bound_claim_swap_preserves_concurrent_replacement(monkeypatch, tmp_path):
+    from defenseclaw import windows_acl
+
+    target = tmp_path / ".hook-codex.token"
+    replacement = tmp_path / ".hook-codex.concurrent"
+    target.write_bytes(b"generation-b")
+    replacement.write_bytes(b"generation-c")
+    staged = target.stat()
+    expected = _synthetic_managed_security(b"expected-owner")
+    capture = Mock()
+    delete = Mock()
+
+    def claim_then_swap(path):
+        descriptor = os.open(path, os.O_RDWR)
+        os.replace(replacement, target)
+        return descriptor
+
+    monkeypatch.setattr(windows_acl, "open_regular_security_mutation_fd", claim_then_swap)
+    monkeypatch.setattr(windows_acl, "capture_fd", capture)
+    monkeypatch.setattr(windows_acl, "delete_regular_fd", delete)
+
+    with pytest.raises(OSError, match="concurrently replaced.*replacement was preserved"):
+        file_permissions._verify_managed_windows_private_target(os.fspath(target), staged, expected)
+
+    assert target.read_bytes() == b"generation-c"
+    capture.assert_not_called()
+    delete.assert_not_called()
+
+
+def _prepare_native_managed_target(tmp_path, *, existing=True):
+    hooks = tmp_path / "hooks"
+    hooks.mkdir()
+    target = hooks / ".hook-codex.token"
+    file_permissions._set_windows_owner_only_acl(os.fspath(hooks), set_owner=True)
+    subprocess.run(
+        ["icacls", os.fspath(hooks), "/grant", "*S-1-5-32-544:(OI)(CI)F"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    if existing:
+        target.write_bytes(b"a" * 64 + b"\n")
+        file_permissions._set_windows_owner_only_acl(os.fspath(target), set_owner=True)
+        subprocess.run(
+            ["icacls", os.fspath(target), "/grant", "*S-1-5-32-544:F"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    return target
+
+
+@pytest.mark.skipif(os.name != "nt", reason="validates native managed Windows exact-handle cleanup")
+@pytest.mark.allow_subprocess
+@pytest.mark.parametrize("existing", [True, False])
+def test_managed_custody_native_repair_failure_deletes_exact_publication(monkeypatch, tmp_path, existing):
+    from defenseclaw import windows_acl
+
+    secret = "native-repair-error-secret"
+    target = _prepare_native_managed_target(tmp_path, existing=existing)
+    real_open = windows_acl.open_regular_security_mutation_fd
+    real_delete = windows_acl.delete_regular_fd
+    claimed: list[os.stat_result] = []
+    deleted: list[os.stat_result] = []
+
+    def open_drifted(path):
+        subprocess.run(
+            ["icacls", os.fspath(path), "/grant", "*S-1-5-32-545:R"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        descriptor = real_open(path)
+        claimed.append(os.fstat(descriptor))
+        return descriptor
+
+    def delete_claim(descriptor):
+        deleted.append(os.fstat(descriptor))
+        real_delete(descriptor)
+
+    monkeypatch.setattr(windows_acl, "open_regular_security_mutation_fd", open_drifted)
+    monkeypatch.setattr(
+        windows_acl,
+        "apply_fd",
+        Mock(side_effect=OSError(1234, f"repair denied: {secret}")),
+    )
+    monkeypatch.setattr(windows_acl, "delete_regular_fd", delete_claim)
+
+    with pytest.raises(OSError, match="repair failed: OSError code 1234") as caught:
+        file_permissions.atomic_write_private_bytes(
+            target,
+            b"b" * 64 + b"\n",
+            windows_managed_custody=True,
+        )
+
+    assert secret not in str(caught.value)
+    assert len(claimed) == len(deleted) == 1
+    assert os.path.samestat(claimed[0], deleted[0])
+    assert not target.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="validates native managed Windows concurrent replacement")
+@pytest.mark.allow_subprocess
+def test_managed_custody_native_concurrent_replacement_survives(monkeypatch, tmp_path):
+    from defenseclaw import windows_acl
+
+    target = _prepare_native_managed_target(tmp_path)
+    replacement = target.with_name(".hook-codex.concurrent")
+    replacement.write_bytes(b"generation-c")
+    file_permissions._set_windows_owner_only_acl(os.fspath(replacement), set_owner=True)
+    real_open = windows_acl.open_regular_security_mutation_fd
+    delete = Mock()
+
+    def swap_before_claim(path):
+        os.replace(replacement, path)
+        return real_open(path)
+
+    monkeypatch.setattr(windows_acl, "open_regular_security_mutation_fd", swap_before_claim)
+    monkeypatch.setattr(windows_acl, "delete_regular_fd", delete)
+
+    with pytest.raises(OSError, match="concurrently replaced before validation.*replacement was preserved"):
+        file_permissions.atomic_write_private_bytes(
+            target,
+            b"b" * 64 + b"\n",
+            windows_managed_custody=True,
+        )
+
+    assert target.read_bytes() == b"generation-c"
+    delete.assert_not_called()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="validates native managed Windows missing postcheck target")
+@pytest.mark.allow_subprocess
+def test_managed_custody_native_missing_postcheck_target_is_explicit(monkeypatch, tmp_path):
+    from defenseclaw import windows_acl
+
+    target = _prepare_native_managed_target(tmp_path)
+    real_open = windows_acl.open_regular_security_mutation_fd
+
+    def delete_before_claim(path):
+        descriptor = real_open(path)
+        try:
+            windows_acl.delete_regular_fd(descriptor)
+        finally:
+            os.close(descriptor)
+        return real_open(path)
+
+    monkeypatch.setattr(windows_acl, "open_regular_security_mutation_fd", delete_before_claim)
+
+    with pytest.raises(OSError, match="publication disappeared before validation"):
+        file_permissions.atomic_write_private_bytes(
+            target,
+            b"b" * 64 + b"\n",
+            windows_managed_custody=True,
+        )
+
+    assert not target.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="validates generic Windows secret isolation")
+def test_generic_windows_dotenv_write_never_uses_managed_remediation(monkeypatch, tmp_path):
+    target = tmp_path / ".env"
+    target.write_bytes(b"old-secret")
+    file_permissions._set_windows_owner_only_acl(os.fspath(target), set_owner=True)
+    generic_verify = Mock(wraps=file_permissions._verify_or_repair_windows_private_target)
+    managed_verify = Mock(side_effect=AssertionError("generic writes must not enter managed custody"))
+    monkeypatch.setattr(file_permissions, "_verify_or_repair_windows_private_target", generic_verify)
+    monkeypatch.setattr(file_permissions, "_verify_managed_windows_private_target", managed_verify)
+
+    file_permissions.atomic_write_private_bytes(target, b"new-secret")
+
+    assert target.read_bytes() == b"new-secret"
+    assert file_permissions.windows_acl_confidentiality_error(target) is None
+    generic_verify.assert_called_once_with(os.fspath(target.resolve()))
+    managed_verify.assert_not_called()
 
 
 def test_windows_confidentiality_rejects_read_only_untrusted_sid(monkeypatch):
@@ -706,6 +1181,125 @@ def test_windows_runtime_custody_accepts_trusted_system_writers(monkeypatch):
     )
 
 
+def test_windows_managed_secret_custody_accepts_only_system_controllers(monkeypatch):
+    current_sid = "S-1-5-21-current"
+    trusted_installer = "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
+    fake_os = SimpleNamespace(name="nt", fspath=os.fspath)
+    entries = [
+        (0x10000000, 1, 0, current_sid),
+        (0x10000000, 1, 0, "S-1-5-18"),
+        (0x10000000, 1, 0, "S-1-5-32-544"),
+        (0x10000000, 1, 0, trusted_installer),
+    ]
+    monkeypatch.setattr(file_permissions, "os", fake_os)
+    monkeypatch.setattr(
+        file_permissions,
+        "_windows_acl_snapshot",
+        lambda _path: (current_sid, False, entries),
+    )
+    monkeypatch.setattr(file_permissions, "_windows_current_user_sid", lambda: current_sid)
+    monkeypatch.setattr(file_permissions, "_windows_acl_has_required_access", lambda _path: True)
+    monkeypatch.setattr(file_permissions, "_windows_dacl_is_protected", lambda _path: True)
+
+    assert (
+        file_permissions.windows_acl_confidentiality_error("synthetic-private-secret")
+        == "ACL grants read access to untrusted SID S-1-5-32-544"
+    )
+    assert file_permissions.windows_acl_custody_confidentiality_error("synthetic-managed-token") is None
+
+
+@pytest.mark.parametrize(
+    "permissions",
+    [
+        0x80000000,  # GENERIC_READ
+        0x10000000,  # GENERIC_ALL
+        0x20000000,  # GENERIC_EXECUTE
+        0x00000001,  # FILE_READ_DATA
+        0x00000008,  # FILE_READ_EA
+        0x00000080,  # FILE_READ_ATTRIBUTES
+        0x00000020,  # FILE_EXECUTE
+    ],
+)
+def test_windows_managed_secret_custody_rejects_gateway_read_like_masks(monkeypatch, permissions):
+    current_sid = "S-1-5-21-current"
+    untrusted_sid = "S-1-5-32-545"
+    fake_os = SimpleNamespace(name="nt", fspath=os.fspath)
+    entries = [
+        (0x10000000, 1, 0, current_sid),
+        (0x10000000, 1, 0, "S-1-5-18"),
+        (permissions, 1, 0, untrusted_sid),
+    ]
+    monkeypatch.setattr(file_permissions, "os", fake_os)
+    monkeypatch.setattr(
+        file_permissions,
+        "_windows_acl_snapshot",
+        lambda _path: (current_sid, False, entries),
+    )
+    monkeypatch.setattr(file_permissions, "_windows_current_user_sid", lambda: current_sid)
+    monkeypatch.setattr(file_permissions, "_windows_acl_has_required_access", lambda _path: True)
+    monkeypatch.setattr(file_permissions, "_windows_dacl_is_protected", lambda _path: True)
+
+    assert file_permissions.windows_acl_custody_confidentiality_error("synthetic-managed-token") == (
+        f"ACL grants read access to untrusted SID {untrusted_sid}"
+    )
+
+
+def test_windows_managed_secret_custody_rejects_untrusted_writer(monkeypatch):
+    current_sid = "S-1-5-21-current"
+    untrusted_sid = "S-1-5-32-545"
+    fake_os = SimpleNamespace(name="nt", fspath=os.fspath)
+    entries = [
+        (0x10000000, 1, 0, current_sid),
+        (0x10000000, 1, 0, "S-1-5-18"),
+        (0x40000000, 1, 0, untrusted_sid),
+    ]
+    monkeypatch.setattr(file_permissions, "os", fake_os)
+    monkeypatch.setattr(
+        file_permissions,
+        "_windows_acl_snapshot",
+        lambda _path: (current_sid, False, entries),
+    )
+    monkeypatch.setattr(file_permissions, "_windows_current_user_sid", lambda: current_sid)
+    monkeypatch.setattr(file_permissions, "_windows_acl_has_required_access", lambda _path: True)
+    monkeypatch.setattr(file_permissions, "_windows_dacl_is_protected", lambda _path: True)
+
+    assert file_permissions.windows_acl_custody_confidentiality_error("synthetic-managed-token") == (
+        f"ACL grants write access to untrusted SID {untrusted_sid}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("protection", "expected"),
+    [
+        (False, "Windows DACL is inheritable"),
+        (OSError("control lookup failed"), "cannot inspect Windows DACL protection (control lookup failed)"),
+    ],
+)
+def test_windows_managed_secret_custody_requires_protected_dacl(monkeypatch, protection, expected):
+    current_sid = "S-1-5-21-current"
+    fake_os = SimpleNamespace(name="nt", fspath=os.fspath)
+    entries = [
+        (0x10000000, 1, 0, current_sid),
+        (0x10000000, 1, 0, "S-1-5-18"),
+    ]
+    monkeypatch.setattr(file_permissions, "os", fake_os)
+    monkeypatch.setattr(
+        file_permissions,
+        "_windows_acl_snapshot",
+        lambda _path: (current_sid, False, entries),
+    )
+    monkeypatch.setattr(file_permissions, "_windows_current_user_sid", lambda: current_sid)
+
+    def inspect_protection(_path):
+        if isinstance(protection, OSError):
+            raise protection
+        return protection
+
+    monkeypatch.setattr(file_permissions, "_windows_dacl_is_protected", inspect_protection)
+
+    assert file_permissions.windows_acl_custody_confidentiality_error("synthetic-managed-token") == expected
+
+
 def test_windows_runtime_custody_requires_current_user_owner(monkeypatch):
     current_sid = "S-1-5-21-current"
     system_sid = "S-1-5-18"
@@ -764,6 +1358,7 @@ def test_windows_runtime_custody_rejects_untrusted_writer(monkeypatch):
             },
         ),
         (file_permissions.windows_acl_confidentiality_error, {}),
+        (file_permissions.windows_acl_custody_confidentiality_error, {}),
     ],
 )
 def test_windows_user_acl_validators_reject_unresolved_current_sid(
@@ -821,6 +1416,7 @@ def test_windows_system_custody_does_not_require_current_sid(monkeypatch):
             },
         ),
         (file_permissions.windows_acl_confidentiality_error, {}),
+        (file_permissions.windows_acl_custody_confidentiality_error, {}),
     ],
 )
 def test_windows_user_acl_validators_reject_sid_resolution_error(

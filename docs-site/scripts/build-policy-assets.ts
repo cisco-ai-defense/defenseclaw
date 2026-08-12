@@ -672,54 +672,6 @@ function buildScenarios(): Scenario[] {
         content_length: 0,
       },
     },
-    {
-      id: 'correlator-escalation-chain',
-      title: 'Escalation chain promotion',
-      domain: 'guardrail',
-      description:
-        'Session ran MEDIUM → HIGH → HIGH severity findings in order. The correlator emits a CRITICAL on chain completion.',
-      expectedVerdict: 'block',
-      input: {
-        direction: 'prompt',
-        model: 'gpt-4o-mini',
-        mode: 'action',
-        scanner_mode: 'local',
-        local_result: {
-          action: 'block',
-          severity: 'CRITICAL',
-          findings: ['Session matched ESCALATION-CHAIN correlator pattern'],
-          reason: 'CORR-ESCALATION-CHAIN: MEDIUM→HIGH→HIGH sequence in 6 events',
-          signal_strength: 'high',
-          correlator_pattern_id: 'ESCALATION-CHAIN',
-        },
-        cisco_result: null,
-        content_length: 0,
-      },
-    },
-    {
-      id: 'correlator-destructive-flow',
-      title: 'Destructive shell after sensitive read',
-      domain: 'guardrail',
-      description:
-        'rm -rf invoked in the same session as a prior ~/.ssh read. Correlator emits CRITICAL.',
-      expectedVerdict: 'block',
-      input: {
-        direction: 'tool_call',
-        model: 'gpt-4o-mini',
-        mode: 'action',
-        scanner_mode: 'local',
-        local_result: {
-          action: 'block',
-          severity: 'CRITICAL',
-          findings: ['Session matched DESTRUCTIVE-FLOW correlator pattern'],
-          reason: 'CORR-DESTRUCTIVE-FLOW: exec_shell capability after sensitive_access finding',
-          signal_strength: 'high',
-          correlator_pattern_id: 'DESTRUCTIVE-FLOW',
-        },
-        cisco_result: null,
-        content_length: 0,
-      },
-    },
   ];
 }
 

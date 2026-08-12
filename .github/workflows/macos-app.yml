@@ -19,33 +19,10 @@ name: macOS App
 on:
   push:
     branches: [main]
-  pull_request:
-    paths:
-      - "macos/**"
-      - "scripts/build-macos-app-release.sh"
-      - "scripts/check-macos-upstream.py"
-      - "scripts/export-uv-overrides.py"
-      - "scripts/generate-upgrade-manifest.py"
-      - "scripts/macos_license_headers.py"
-      - "scripts/release_candidate.py"
-      - "scripts/source_release_identity.py"
-      - "scripts/stamp-version.sh"
-      - "scripts/test-upgrade-protocol-release.sh"
-      - "scripts/test-upgrade-release.sh"
-      - "scripts/update-macos-app.sh"
-      - "scripts/verify-macos-app-release.sh"
-      - "release/source-install-identity.json"
-      - "release/upgrade-baselines.json"
-      - "Makefile"
-      - "pyproject.toml"
-      - "cli/**"
-      - "go.mod"
-      - "go.sum"
-      - "cmd/**"
-      - "internal/**"
-      - "extensions/defenseclaw/**"
-      - ".github/workflows/macos-app.yml"
-      - ".github/workflows/release-candidate-smoke.yml"
+  # Always start on pull requests so the stable aggregate below can be made
+  # required without leaving unrelated changes permanently pending. The
+  # changes job keeps the expensive macOS work selective.
+  pull_request: {}
   workflow_dispatch:
 
 permissions:
@@ -56,8 +33,106 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  changes:
+    name: Detect macOS app changes
+    runs-on: ubuntu-latest
+    env:
+      MACOS_PATHS: >-
+        :(glob)macos/**
+        scripts/build-macos-app-release.sh
+        scripts/check-macos-upstream.py
+        scripts/export-uv-overrides.py
+        scripts/generate-upgrade-manifest.py
+        scripts/macos_license_headers.py
+        scripts/release_candidate.py
+        scripts/source_release_identity.py
+        scripts/stamp-version.sh
+        scripts/test-upgrade-protocol-release.sh
+        scripts/test-upgrade-release.sh
+        scripts/update-macos-app.sh
+        scripts/verify-macos-app-release.sh
+        release/source-install-identity.json
+        release/upgrade-baselines.json
+        Makefile
+        pyproject.toml
+        :(glob)cli/**
+        go.mod
+        go.sum
+        :(glob)cmd/**
+        :(glob)internal/**
+        :(glob)extensions/defenseclaw/**
+        .github/workflows/macos-app.yml
+        .github/workflows/release-candidate-smoke.yml
+    outputs:
+      macos: ${{ steps.detect.outputs.macos }}
+    steps:
+      - if: ${{ github.event_name == 'pull_request' }}
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Select macOS app validation
+        id: detect
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          case "$EVENT_NAME" in
+            push|workflow_dispatch)
+              echo "macos=true" >> "$GITHUB_OUTPUT"
+              exit 0
+              ;;
+            pull_request)
+              ;;
+            *)
+              echo "::error::unexpected macOS app workflow event: $EVENT_NAME"
+              exit 1
+              ;;
+          esac
+
+          if [[ ! "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::pull request base SHA is not an exact commit ID"
+            exit 1
+          fi
+          if [[ ! "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::pull request head SHA is not an exact commit ID"
+            exit 1
+          fi
+          if [[ "$BASE_SHA" == "$HEAD_SHA" ]]; then
+            echo "::error::pull request base and head SHAs must differ"
+            exit 1
+          fi
+
+          read -r -a macos_paths <<< "$MACOS_PATHS"
+          if ((${#macos_paths[@]} == 0)); then
+            echo "::error::macOS app path contract is empty"
+            exit 1
+          fi
+
+          git cat-file -e "${BASE_SHA}^{commit}"
+          git cat-file -e "${HEAD_SHA}^{commit}"
+          set +e
+          git diff --quiet --no-renames "$BASE_SHA...$HEAD_SHA" -- "${macos_paths[@]}"
+          diff_status=$?
+          set -e
+
+          case "$diff_status" in
+            0) echo "macos=false" >> "$GITHUB_OUTPUT" ;;
+            1) echo "macos=true" >> "$GITHUB_OUTPUT" ;;
+            *)
+              echo "::error::macOS app path detection failed (git diff exit $diff_status)"
+              exit "$diff_status"
+              ;;
+          esac
+
   license-headers:
     name: Cisco License Headers
+    needs: changes
+    if: ${{ needs.changes.outputs.macos == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -67,6 +142,8 @@ jobs:
 
   build-and-test:
     name: Build and Test (arm64)
+    needs: changes
+    if: ${{ needs.changes.outputs.macos == 'true' }}
     runs-on: macos-15
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -194,14 +271,31 @@ jobs:
 
   macos-app-required:
     name: macOS App Required
-    needs: [license-headers, build-and-test]
+    needs: [changes, license-headers, build-and-test]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
       - name: Require every macOS app check
         env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          MACOS_CHANGED: ${{ needs.changes.outputs.macos }}
           LICENSE_HEADERS_RESULT: ${{ needs.license-headers.result }}
           BUILD_AND_TEST_RESULT: ${{ needs.build-and-test.result }}
         run: |
-          test "$LICENSE_HEADERS_RESULT" = success
-          test "$BUILD_AND_TEST_RESULT" = success
+          set -euo pipefail
+          test "$CHANGES_RESULT" = success
+          case "$MACOS_CHANGED" in
+            true)
+              test "$LICENSE_HEADERS_RESULT" = success
+              test "$BUILD_AND_TEST_RESULT" = success
+              ;;
+            false)
+              test "$LICENSE_HEADERS_RESULT" = skipped
+              test "$BUILD_AND_TEST_RESULT" = skipped
+              echo "No macOS app paths changed; expensive validation was intentionally skipped."
+              ;;
+            *)
+              echo "::error::unexpected macOS app path decision: $MACOS_CHANGED"
+              exit 1
+              ;;
+          esac

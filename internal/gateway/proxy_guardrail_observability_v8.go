@@ -117,21 +117,26 @@ func configureGuardrailInspectorObservabilityV8(
 		return
 	}
 	logRuntime, _ := runtime.(sidecarRuntimeEmitter)
-	if logRuntime == nil {
+	metricRuntime, _ := runtime.(hookLifecycleMetricV8Runtime)
+	if logRuntime == nil && metricRuntime == nil {
 		inspector.SetManagedAIDFailOpenRecorder(nil)
 	} else {
 		inspector.SetManagedAIDFailOpenRecorder(func(ctx context.Context, reason, direction string) {
-			if err := emitManagedAIDFailOpenV8(ctx, logRuntime, reason, direction); err != nil {
-				fmt.Fprintf(
-					os.Stderr,
-					"[guardrail] managed AID fail-open emit_status=failed reason=%s direction=%s\n",
-					normalizeManagedAIDFailOpenReason(reason),
-					normalizeManagedAIDFailOpenDirection(direction),
-				)
+			if metricRuntime != nil {
+				_ = recordManagedAIDFailOpenMetricV8(ctx, metricRuntime, reason)
+			}
+			if logRuntime != nil {
+				if err := emitManagedAIDFailOpenV8(ctx, logRuntime, reason, direction); err != nil {
+					fmt.Fprintf(
+						os.Stderr,
+						"[guardrail] managed AID fail-open emit_status=failed reason=%s direction=%s\n",
+						normalizeManagedAIDFailOpenReason(reason),
+						normalizeManagedAIDFailOpenDirection(direction),
+					)
+				}
 			}
 		})
 	}
-	metricRuntime, _ := runtime.(hookLifecycleMetricV8Runtime)
 	if inspector.ciscoClient != nil {
 		inspector.ciscoClient.bindObservabilityV8(metricRuntime)
 	}

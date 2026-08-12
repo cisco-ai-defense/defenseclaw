@@ -56,6 +56,12 @@ func TestLocalJudgeGeneratedSpanAllCallPaths(t *testing.T) {
 			},
 		},
 		{
+			name: "adjudicate secret", kind: "adjudicate_secret", direction: "output", response: cleanAdjudicationJSON,
+			run: func(judge *LLMJudge) {
+				judge.adjudicateCategory(t.Context(), "completion", strings.Repeat("a", 40), []TriageSignal{{Pattern: "secret", Evidence: "matched"}}, "secret")
+			},
+		},
+		{
 			name: "adjudicate exfil", kind: "adjudicate_exfil", direction: "input", response: cleanAdjudicationJSON,
 			run: func(judge *LLMJudge) {
 				judge.adjudicateCategory(t.Context(), "prompt", strings.Repeat("a", 40), []TriageSignal{{Pattern: "exfil", Evidence: "matched"}}, "exfil")

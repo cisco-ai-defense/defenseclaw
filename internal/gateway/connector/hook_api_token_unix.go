@@ -16,6 +16,26 @@ import (
 	"syscall"
 )
 
+// Unix custody is represented by the existing owner/mode/ACL checks. Windows
+// carries an additional exact owner/DACL witness in this platform slot.
+type hookAPITokenPublishProtection struct{}
+
+func captureHookAPITokenPublishProtectionPlatform(
+	file *os.File, info os.FileInfo,
+) (hookAPITokenPublishProtection, bool, error) {
+	return hookAPITokenPublishProtection{}, otlpValidatePerm(file.Name(), info) == nil, nil
+}
+
+func applyHookAPITokenPublishProtectionPlatform(
+	_ *os.File, _ hookAPITokenPublishProtection,
+) error {
+	return nil
+}
+
+func hookAPITokenPublishProtectionIsZero(hookAPITokenPublishProtection) bool { return true }
+
+func hookAPITokenPublishProtectionsEqual(_, _ hookAPITokenPublishProtection) bool { return true }
+
 func hookAPIValidateOwner(path string, info os.FileInfo) error {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {

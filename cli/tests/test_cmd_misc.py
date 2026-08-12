@@ -184,9 +184,9 @@ class TestAlertsCommand(unittest.TestCase):
     def test_alerts_with_data(self):
         from defenseclaw.commands.cmd_alerts import alerts
 
-        self.app.store.log_event(Event(action="scan", target="/skills/bad",
+        self.app.store.log_event(Event(action="scan-finding", target="/skills/bad",
                                        severity="HIGH", details="found issues"))
-        self.app.store.log_event(Event(action="scan", target="/skills/worse",
+        self.app.store.log_event(Event(action="scan-finding", target="/skills/worse",
                                        severity="CRITICAL", details="major vulnerability"))
 
         result = self.runner.invoke(alerts, ["--no-tui"], obj=self.app, catch_exceptions=False)
@@ -199,7 +199,7 @@ class TestAlertsCommand(unittest.TestCase):
         from defenseclaw.commands.cmd_alerts import alerts
 
         for i in range(5):
-            self.app.store.log_event(Event(action="scan", target=f"/skills/s{i}",
+            self.app.store.log_event(Event(action="scan-finding", target=f"/skills/s{i}",
                                            severity="MEDIUM", details=f"issue {i}"))
 
         result = self.runner.invoke(alerts, ["--no-tui", "-n", "2"], obj=self.app,
@@ -221,7 +221,7 @@ class TestAlertsCommand(unittest.TestCase):
     def test_alerts_show_prints_full_detail(self):
         from defenseclaw.commands.cmd_alerts import alerts
 
-        self.app.store.log_event(Event(action="scan", target="/skills/bad",
+        self.app.store.log_event(Event(action="scan-finding", target="/skills/bad",
                                        severity="HIGH",
                                        details="scanner=skill-scanner findings=2 max_severity=HIGH"))
 
@@ -235,7 +235,7 @@ class TestAlertsCommand(unittest.TestCase):
     def test_alerts_show_out_of_range(self):
         from defenseclaw.commands.cmd_alerts import alerts
 
-        self.app.store.log_event(Event(action="scan", target="/skills/x",
+        self.app.store.log_event(Event(action="scan-finding", target="/skills/x",
                                        severity="LOW", details="scanner=skill-scanner findings=0"))
 
         result = self.runner.invoke(alerts, ["--no-tui", "--show", "99"], obj=self.app,
@@ -247,10 +247,10 @@ class TestAlertsCommand(unittest.TestCase):
     # ------------------------------------------------------------------
 
     def _seed_two_connectors(self):
-        self.app.store.log_event(Event(action="connector-hook", target="/a",
+        self.app.store.log_event(Event(action="scan-finding", target="/a",
                                        severity="HIGH",
                                        details="connector=codex marker_codexonly"))
-        self.app.store.log_event(Event(action="connector-hook", target="/b",
+        self.app.store.log_event(Event(action="scan-finding", target="/b",
                                        severity="HIGH",
                                        details="connector=claudecode marker_cconly"))
 
@@ -1489,23 +1489,38 @@ class TestSetupSplunkCommand(unittest.TestCase):
         # passthrough on the `up` invocation. The refresh + restart
         # cycle is exercised separately in
         # ``test_setup_refresh_bundle_wiring.py``.
-        contract = _bootstrap_bridge(
-            self.tmp_dir,
-            s3_export=True,
-            s3_bucket="agentwatch-demo",
-            s3_prefix="agentwatch/defenseclaw",
-            aws_region="us-west-2",
-            refresh_bundle=False,
-        )
+        with patch.dict(
+            os.environ,
+            {
+                "DEFENSECLAW_GATEWAY_TOKEN": "gateway-sentinel",
+                "OPENCLAW_GATEWAY_TOKEN": "legacy-sentinel",
+            },
+        ):
+            contract = _bootstrap_bridge(
+                self.tmp_dir,
+                s3_export=True,
+                s3_bucket="agentwatch-demo",
+                s3_prefix="agentwatch/defenseclaw",
+                aws_region="us-west-2",
+                refresh_bundle=False,
+            )
 
         self.assertEqual(contract["hec_token"], "bootstrap-token")
-        mock_run.assert_called_once()
+        bridge_calls = [
+            call
+            for call in mock_run.call_args_list
+            if call.args
+            and call.args[0]
+            and call.args[0][0] == "/tmp/fake-splunk-claw-bridge"
+        ]
+        self.assertEqual(len(bridge_calls), 1)
+        bridge_call = bridge_calls[0]
         env_file = os.path.join(self.tmp_dir, "splunk-bridge", "env", ".env")
         self.assertEqual(
-            mock_run.call_args.args[0],
+            bridge_call.args[0],
             ["/tmp/fake-splunk-claw-bridge", "up", "--env-file", env_file, "--output", "json"],
         )
-        kwargs = mock_run.call_args.kwargs
+        kwargs = bridge_call.kwargs
         self.assertEqual(kwargs["capture_output"], True)
         self.assertEqual(kwargs["text"], True)
         self.assertEqual(kwargs["timeout"], 300)
@@ -1513,6 +1528,8 @@ class TestSetupSplunkCommand(unittest.TestCase):
         self.assertEqual(kwargs["env"]["S3_BUCKET"], "agentwatch-demo")
         self.assertEqual(kwargs["env"]["S3_PREFIX"], "agentwatch/defenseclaw")
         self.assertEqual(kwargs["env"]["AWS_REGION"], "us-west-2")
+        self.assertNotIn("DEFENSECLAW_GATEWAY_TOKEN", kwargs["env"])
+        self.assertNotIn("OPENCLAW_GATEWAY_TOKEN", kwargs["env"])
 
     @patch("defenseclaw.commands.cmd_setup._bootstrap_bridge", return_value=None)
     @patch("defenseclaw.commands.cmd_setup._preflight_docker", return_value=(True, ""))

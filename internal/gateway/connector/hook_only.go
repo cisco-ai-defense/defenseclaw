@@ -30,6 +30,7 @@ import (
 	"sync"
 
 	"github.com/defenseclaw/defenseclaw/internal/hermespath"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"gopkg.in/yaml.v3"
 )
 
@@ -825,10 +826,43 @@ func (c *hookOnlyConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	return nil
 }
 
+// ownedHookContractPresent verifies the agent-visible plugin identity for
+// plugin-artifact connectors. The generic config reader intentionally parses
+// structured JSON/YAML/TOML hook registrations; an auto-loaded JavaScript
+// plugin is instead authoritative when its exact versioned ownership marker
+// is present in the installed regular file.
+func (c *hookOnlyConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) {
+	if !c.pluginArtifact {
+		return ownedHooksPresentInConfig(c, opts)
+	}
+	path := c.configPath(opts)
+	const maxManagedPluginBytes = 4 << 20
+	data, err := safefile.ReadRegularFileBounded(path, maxManagedPluginBytes)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("%s read managed plugin %s: %w", c.name, path, err)
+	}
+	tmpl, err := hookFS.ReadFile("hooks/" + c.pluginArtifactAsset)
+	if err != nil {
+		return false, fmt.Errorf("%s read plugin template %s: %w", c.name, c.pluginArtifactAsset, err)
+	}
+	marker, _, _ := bytes.Cut(tmpl, []byte("\n"))
+	marker = bytes.TrimSuffix(marker, []byte("\r"))
+	if len(marker) == 0 || !bytes.HasPrefix(marker, []byte("// defenseclaw-managed-plugin v")) {
+		return false, fmt.Errorf("%s managed plugin identity is invalid", c.name)
+	}
+	installedMarker, _, _ := bytes.Cut(data, []byte("\n"))
+	installedMarker = bytes.TrimSuffix(installedMarker, []byte("\r"))
+	return bytes.Equal(installedMarker, marker), nil
+}
+
 // setupPluginArtifact renders the embedded bridge-plugin template
-// (APIAddr / APIToken / FailMode substituted) and writes it to the host
-// agent's auto-load plugin directory at 0o600 (it carries the gateway
-// token, so it is owner-only and never executable). The destination is
+// (APIAddr / stable token-sidecar path / FailMode substituted) and writes it
+// to the host agent's auto-load plugin directory at 0o600. The scoped token is
+// deliberately loaded from its owner-only sidecar at request time rather than
+// copied into this longer-lived artifact. The destination is
 // captured in the managed-file backup so Teardown can heal it: if the
 // plugin file is unchanged since setup it is removed (we created it);
 // if the operator hand-edited it, the backup restore leaves it alone.
@@ -837,15 +871,23 @@ func (c *hookOnlyConnector) setupPluginArtifact(opts SetupOpts) error {
 	if err != nil {
 		return fmt.Errorf("%s read plugin template %s: %w", c.name, c.pluginArtifactAsset, err)
 	}
+	tokenPath, err := HookAPITokenFilePath(opts.DataDir, c.name)
+	if err != nil {
+		return fmt.Errorf("%s resolve scoped hook credential: %w", c.name, err)
+	}
+	tokenPath, err = filepath.Abs(tokenPath)
+	if err != nil {
+		return fmt.Errorf("%s resolve absolute scoped hook credential path: %w", c.name, err)
+	}
 	failMode := normalizeHookFailMode(opts.HookFailMode)
 	if failMode == "closed" && !c.capability(opts).SupportsFailClosed {
 		failMode = "open"
 	}
 	rendered, err := renderTemplate(string(tmpl), templateData{
-		APIAddr:  opts.APIAddr,
-		APIToken: opts.APIToken,
-		FailMode: failMode,
-		Managed:  opts.ManagedEnterprise,
+		APIAddr:     opts.APIAddr,
+		TokenFileJS: javaScriptStringContent(tokenPath),
+		FailMode:    failMode,
+		Managed:     opts.ManagedEnterprise,
 	})
 	if err != nil {
 		return fmt.Errorf("%s render plugin template: %w", c.name, err)
@@ -867,8 +909,16 @@ func (c *hookOnlyConnector) setupPluginArtifact(opts SetupOpts) error {
 	return updateManagedFileBackupPostHash(opts.DataDir, c.name, "config", path)
 }
 
-// validatePluginArtifactDestination protects the scoped gateway token embedded
-// in bridge plugins. Plugin directories are host-agent auto-load locations, so
+func javaScriptStringContent(value string) string {
+	encoded, err := json.Marshal(value)
+	if err != nil || len(encoded) < 2 {
+		return ""
+	}
+	return string(encoded[1 : len(encoded)-1])
+}
+
+// validatePluginArtifactDestination protects the integrity of the managed
+// policy bridge. Plugin directories are host-agent auto-load locations, so
 // they must meet the same owner/ACL requirements as the hook API token tree.
 // Unlike ordinary agent config writes, plugin installation never follows a
 // symlink: an existing target must be the trusted regular file we inspected.

@@ -332,7 +332,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		// per-profile evaluators (claudeCode / codex / generic) so
 		// they round-trip back to the HTTP response and onto the
 		// audit envelope without a second pass here.
-		resp, panicked := a.safeEvaluateHook(ctx, connectorName, req, b, payload, runtime)
+		accountingCtx := ctx
+		evaluationCtx, managedAIDFailOpenGate := deferManagedAIDFailOpenNativeHookAccounting(ctx)
+		resp, panicked := a.safeEvaluateHook(evaluationCtx, connectorName, req, b, payload, runtime)
 		var chainFinalization toolChainHookFinalization
 		if !panicked {
 			resp = a.safeApplyExperimentalArtifactPromotion(
@@ -385,6 +387,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			}
 		}
 		finalized = true
+		a.recordManagedAIDFailOpenForSelectedNativeHookResult(
+			accountingCtx, managedAIDFailOpenGate, resp.Action, panicked,
+		)
 
 		// Mark the write attempt BEFORE invoking writeJSON. A panic
 		// from inside renderAgentHookResponseForProfile or json.Encode
@@ -723,7 +728,9 @@ func (a *APIServer) handleAgentHookSynthetic(ctx context.Context, connectorName 
 	// run even when the evaluator dies. Same RecordPanic +
 	// fail-open contract as handleAgentHook.
 	t0 := time.Now()
-	resp, panicked := a.safeEvaluateSyntheticHook(ctx, connectorName, req)
+	accountingCtx := ctx
+	evaluationCtx, managedAIDFailOpenGate := deferManagedAIDFailOpenNativeHookAccounting(ctx)
+	resp, panicked := a.safeEvaluateSyntheticHook(evaluationCtx, connectorName, req)
 	elapsed := time.Since(t0)
 	enrichAgentHookSpan(ctx, req, resp, elapsed)
 	enrichAgentHookSpanSynthetic(ctx)
@@ -783,6 +790,9 @@ func (a *APIServer) handleAgentHookSynthetic(ctx context.Context, connectorName 
 			}
 		}
 	}
+	a.recordManagedAIDFailOpenForSelectedNativeHookResult(
+		accountingCtx, managedAIDFailOpenGate, resp.Action, panicked,
+	)
 	return resp
 }
 

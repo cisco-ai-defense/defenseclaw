@@ -50,6 +50,77 @@ var defaultEnabledRules = []map[string]string{
 	{"rule_name": "Code Detection"},
 }
 
+const ciscoUnknownFindingID = "CISCO-UNKNOWN"
+
+// canonicalCiscoFindingID converts cloud-controlled classification and rule
+// labels into a closed set of inert identities. Human-readable reasons are
+// separately reconstructed from fixed display labels, so arbitrary API bytes
+// cannot enter either the generic UNKNOWN-* fallback or persisted reason text.
+func canonicalCiscoFindingID(value string) string {
+	canonical := strings.ToUpper(strings.TrimSpace(value))
+	canonical = strings.NewReplacer("_", " ", "-", " ", "&", " ").Replace(canonical)
+	canonical = strings.Join(strings.Fields(canonical), " ")
+	switch canonical {
+	case "PROMPT INJECTION":
+		return "CISCO-PROMPT-INJECTION"
+	case "JAILBREAK":
+		return "CISCO-JAILBREAK"
+	case "PII", "PII DETECTION":
+		return "CISCO-PII"
+	case "SENSITIVE DATA":
+		return "CISCO-SENSITIVE-DATA"
+	case "DATA LEAKAGE":
+		return "CISCO-DATA-LEAKAGE"
+	case "HARASSMENT":
+		return "CISCO-HARASSMENT"
+	case "HATE SPEECH":
+		return "CISCO-HATE-SPEECH"
+	case "PROFANITY":
+		return "CISCO-PROFANITY"
+	case "SEXUAL CONTENT EXPLOITATION":
+		return "CISCO-SEXUAL-CONTENT"
+	case "SOCIAL DIVISION POLARIZATION":
+		return "CISCO-SOCIAL-DIVISION"
+	case "VIOLENCE PUBLIC SAFETY THREATS":
+		return "CISCO-VIOLENCE"
+	case "CODE DETECTION":
+		return "CISCO-CODE"
+	default:
+		return ciscoUnknownFindingID
+	}
+}
+
+func ciscoFindingDisplayLabel(canonicalID string) string {
+	switch canonicalID {
+	case "CISCO-PROMPT-INJECTION":
+		return "Prompt Injection"
+	case "CISCO-JAILBREAK":
+		return "Jailbreak"
+	case "CISCO-PII":
+		return "PII Detection"
+	case "CISCO-SENSITIVE-DATA":
+		return "Sensitive Data"
+	case "CISCO-DATA-LEAKAGE":
+		return "Data Leakage"
+	case "CISCO-HARASSMENT":
+		return "Harassment"
+	case "CISCO-HATE-SPEECH":
+		return "Hate Speech"
+	case "CISCO-PROFANITY":
+		return "Profanity"
+	case "CISCO-SEXUAL-CONTENT":
+		return "Sexual Content & Exploitation"
+	case "CISCO-SOCIAL-DIVISION":
+		return "Social Division & Polarization"
+	case "CISCO-VIOLENCE":
+		return "Violence & Public Safety Threats"
+	case "CISCO-CODE":
+		return "Code Detection"
+	default:
+		return "Custom Policy Violation"
+	}
+}
+
 // inspectCall carries the per-endpoint pieces doInspectHTTP() needs. The
 // payload map is mutated in place on 400-drop-config retry, so callers
 // that reuse the map must marshal a fresh copy per call.
@@ -348,6 +419,17 @@ func normalizeCiscoResponse(data map[string]interface{}) *ScanVerdict {
 	apiAction = strings.ToLower(apiAction)
 
 	var findings []string
+	var findingLabels []string
+	seenFindingIDs := make(map[string]struct{})
+	appendFinding := func(rawLabel string) {
+		canonicalID := canonicalCiscoFindingID(rawLabel)
+		if _, duplicate := seenFindingIDs[canonicalID]; duplicate {
+			return
+		}
+		seenFindingIDs[canonicalID] = struct{}{}
+		findings = append(findings, canonicalID)
+		findingLabels = append(findingLabels, ciscoFindingDisplayLabel(canonicalID))
+	}
 
 	// Cloud-controlled per-inspection redaction directive. Only the
 	// managed DefenseClawInspect response carries is_redaction_enabled;
@@ -361,7 +443,7 @@ func normalizeCiscoResponse(data map[string]interface{}) *ScanVerdict {
 	if classRaw, ok := data["classifications"].([]interface{}); ok {
 		for _, c := range classRaw {
 			if s, ok := c.(string); ok && s != "" && s != "NONE_VIOLATION" {
-				findings = append(findings, s)
+				appendFinding(s)
 			}
 		}
 	}
@@ -373,7 +455,7 @@ func normalizeCiscoResponse(data map[string]interface{}) *ScanVerdict {
 					continue
 				}
 				if name, ok := r["rule_name"].(string); ok && name != "" {
-					findings = append(findings, name)
+					appendFinding(name)
 				}
 			}
 		}
@@ -404,8 +486,8 @@ func normalizeCiscoResponse(data map[string]interface{}) *ScanVerdict {
 	// named rules (which the preview deployment sometimes does on
 	// custom-policy paths) we still credit the lane explicitly.
 	reason := "Cisco AI Defense custom policy block"
-	if len(findings) > 0 {
-		top := findings
+	if len(findingLabels) > 0 {
+		top := findingLabels
 		if len(top) > 5 {
 			top = top[:5]
 		}

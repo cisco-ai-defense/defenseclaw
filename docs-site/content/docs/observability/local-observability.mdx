@@ -252,6 +252,41 @@ difference between **0**, **No data**, and **Not reported**.
 
 They're auto-provisioned via `bundles/local_observability_stack/grafana/provisioning/`. The folder is named "DefenseClaw" inside Grafana so they're easy to find. Edits you make in the UI are not persisted back to disk by default — copy them out with `Dashboard → JSON Model` if you want to keep them.
 
+## Managed AI Defense fail-open monitoring
+
+Managed-enterprise mode deliberately allows a request when the authoritative
+AI Defense inspection cannot return a verdict. DefenseClaw exposes every such
+decision through the generated OpenTelemetry counter
+`defenseclaw.managed_aid.fail_open.decisions` (`int64`, unit `{decision}`,
+delta temporality). The counter has one bounded `defenseclaw.metric.reason`
+attribute; the local-observability projection exports it as the Prometheus
+`reason` label on `defenseclaw_managed_aid_fail_open_decisions_total`.
+
+| `reason` | Meaning | Paging treatment |
+| --- | --- | --- |
+| `inspector_unwired` | The gateway entered managed inspection without an AI Defense inspector. | Page when sustained. |
+| `aid_unavailable` | AI Defense returned no verdict, including transport, timeout, or token failures. | Page when sustained. |
+| `no_content` | The request contained no inspectable messages. | Diagnostic only; never page. |
+| `unknown` | A future or invalid producer reason was normalized at the metric boundary. | Diagnostic only; investigate producer drift. |
+
+The bundled `DefenseClawManagedAIDFailOpenSustained` rule uses a positive
+availability-reason allowlist, so `no_content` and `unknown` cannot accidentally
+become paging conditions:
+
+```text
+sum by (reason) (
+  rate(defenseclaw_managed_aid_fail_open_decisions_total{reason=~"inspector_unwired|aid_unavailable"}[5m])
+) > 0
+```
+
+The expression must remain true for 10 minutes before the critical alert
+fires. It is traffic-gated by construction: an idle gateway produces no
+fail-open decisions and does not page. If it fires, verify that the gateway is
+running in the intended deployment mode, confirm the managed inspector was
+wired at startup, test AI Defense credentials and endpoint reachability, and
+check the provider status. The allow behavior is intentional during recovery;
+restore authoritative inspection before considering the incident resolved.
+
 ## Tear it down
 
 ```bash

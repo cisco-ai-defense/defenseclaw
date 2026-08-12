@@ -21,6 +21,7 @@ Mirrors internal/cli/setup.go.
 
 from __future__ import annotations
 
+import hashlib
 import http.client
 import json as _json
 import os
@@ -32,7 +33,10 @@ import subprocess
 import sys
 import time
 import uuid
+from collections.abc import Mapping
+from contextlib import ExitStack
 from dataclasses import dataclass, replace
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -74,6 +78,8 @@ from defenseclaw.config import (
     load as load_config,
 )
 from defenseclaw.connector_contracts import (
+    HOOK_CONTRACTS,
+    PROXY_CONNECTORS,
     STATUS_KNOWN,
     STATUS_NOT_GATED,
     STATUS_UNVERSIONED,
@@ -84,8 +90,14 @@ from defenseclaw.context import SETUP_RESTART_HANDLED_META_KEY, AppContext, pass
 from defenseclaw.file_permissions import (
     MAX_DOTENV_BYTES,
     atomic_write_private_bytes,
+    darwin_acl_confidentiality_error,
+    darwin_acl_write_error,
     delete_file_durable,
     dotenv_key_is_valid,
+    read_regular_file_no_follow,
+    reject_reparse_path,
+    windows_acl_custody_confidentiality_error,
+    windows_acl_custody_write_error,
 )
 from defenseclaw.inventory import agent_discovery
 from defenseclaw.logger import CanonicalObservabilityUnavailableError
@@ -126,6 +138,7 @@ _SETUP_BATCH_READINESS_KEY = "defenseclaw._setup_batch_readiness_connectors"
 _SETUP_BATCH_AUDIT_KEY = "defenseclaw._setup_batch_audits"
 _CONNECTOR_RUNTIME_READY_TIMEOUT_SECONDS = 60.0
 _GATEWAY_API_READY_TIMEOUT_SECONDS = 45.0
+_GATEWAY_PID_GENERATION_MAX_BYTES = 16 * 1024
 _DEFENSE_GATEWAY_LIFECYCLE_TIMEOUT_SECONDS = 60
 _DEFENSE_GATEWAY_STATUS_TIMEOUT_SECONDS = 10
 _DEFENSE_GATEWAY_STOP_TIMEOUT_SECONDS = 15
@@ -133,6 +146,13 @@ _TOKEN_ROTATION_LIFECYCLE_TIMEOUT_SECONDS = 120
 _TOKEN_ROTATION_TRANSACTION_FLAG = "--rotation-transaction"
 _TOKEN_ROTATION_CLEANUP_FLAG = "--rotation-cleanup"
 _TOKEN_ROTATION_CONNECTOR_STATE_FLAG = "--rotation-connector-state"
+_TOKEN_ROTATION_MAX_HOOK_DIRECTORY_ENTRIES = 4096
+_TOKEN_ROTATION_MAX_HOOK_SIDECARS = 128
+_TOKEN_ROTATION_MAX_HOOK_SCOPE_LENGTH = 128
+# ``locked_file_update`` appends ``.lock``. Keep this base name byte-for-byte
+# aligned with ``hookAPITokenPublishLockBaseName`` in the Go connector so CLI
+# rotation and managed-enterprise publication share one cross-process boundary.
+_TOKEN_ROTATION_HOOK_PUBLISH_LOCK_BASE_NAME = ".hook-api-token-publish"
 _GATEWAY_TOKEN_ENV = "DEFENSECLAW_GATEWAY_TOKEN"
 _LEGACY_GATEWAY_TOKEN_ENV = "OPENCLAW_GATEWAY_TOKEN"
 _DEFENSECLAW_HOME_ENV = "DEFENSECLAW_HOME"
@@ -158,9 +178,24 @@ _TOKEN_ROTATION_CHILD_ENV_ALLOWLIST = (
     # connector homes; preserve that binding across every rotation child.
     "CODEX_HOME",
     "CLAUDE_CONFIG_DIR",
+    # Connector setup may require an operator-approved user-owned runtime
+    # prefix. Preserve that explicit trust decision across the A/B lifecycle.
+    # On POSIX, current-user-owned 0700 prefixes/executables are trusted (a
+    # same-user attacker is outside this boundary); unsafe modes are rejected.
+    # Windows paths must pass the equivalent ACL write-access checks.
+    "DEFENSECLAW_TRUSTED_BIN_PREFIXES",
 )
 _NATIVE_SPLUNK_CONFIG_SNAPSHOT_ATTR = "_native_splunk_config_snapshot"
 _NATIVE_SPLUNK_DOTENV_SNAPSHOT_ATTR = "_native_splunk_dotenv_snapshot"
+
+
+@dataclass(frozen=True)
+class _GatewayRuntimeGeneration:
+    """Pre-lifecycle evidence used to reject the retiring gateway."""
+
+    pid_marker: bytes | None
+    started_at: str | None
+    replacement_not_before: float
 
 
 def _log_setup_action(
@@ -215,7 +250,7 @@ def _safe_mtime(path: str | None) -> float | None:
         return None
     try:
         return os.stat(path).st_mtime
-    except OSError:
+    except (OSError, ValueError):
         return None
 
 
@@ -2384,6 +2419,347 @@ class _RotateTokenDotenvSnapshot:
     mode: int | None
 
 
+@dataclass(frozen=True)
+class _RotateTokenHookSnapshot:
+    connector: str
+    path: str
+    existed: bool
+    body: bytes
+    mode: int | None
+    fingerprint: str | None
+    windows_security: Any | None = None
+
+
+def _rotate_token_hook_scope(raw: str) -> str:
+    scope = normalize_connector(raw)
+    if (
+        not scope
+        or len(scope) > _TOKEN_ROTATION_MAX_HOOK_SCOPE_LENGTH
+        or not scope[0].isalnum()
+        or any(character not in "abcdefghijklmnopqrstuvwxyz0123456789_-" for character in scope)
+    ):
+        raise click.ClickException("Configured connector name is invalid; refusing token rotation.")
+    return scope
+
+
+def _rotate_token_configured_connectors(cfg: Any) -> list[str]:
+    if hasattr(cfg, "active_connectors"):
+        configured = cfg.active_connectors()
+    else:
+        configured = [(getattr(getattr(cfg, "guardrail", None), "connector", "") or "").strip()]
+    result: list[str] = []
+    for raw in configured:
+        if not str(raw or "").strip():
+            continue
+        scope = _rotate_token_hook_scope(raw)
+        if scope not in result:
+            result.append(scope)
+    return sorted(result)
+
+
+def _rotate_token_enabled_connectors(cfg: Any) -> list[str]:
+    guardrail = getattr(cfg, "guardrail", None)
+    enabled_resolver = getattr(guardrail, "effective_enabled", None)
+    return [
+        connector
+        for connector in _rotate_token_configured_connectors(cfg)
+        if (bool(enabled_resolver(connector)) if callable(enabled_resolver) else True)
+    ]
+
+
+def _rotate_token_scoped_connectors(cfg: Any, data_dir: str) -> list[str]:
+    """Return enabled token owners plus every safely persisted sidecar."""
+
+    result: set[str] = set(_rotate_token_persisted_hook_scopes(data_dir))
+    enabled = set(_rotate_token_enabled_connectors(cfg))
+    for connector in _rotate_token_configured_connectors(cfg):
+        sidecar_exists = os.path.lexists(_rotate_token_hook_path(data_dir, connector))
+        has_enabled_contract = connector in enabled and (connector in PROXY_CONNECTORS or connector in HOOK_CONTRACTS)
+        if sidecar_exists or has_enabled_contract:
+            result.add(connector)
+    return sorted(result)
+
+
+def _rotate_token_hook_path(data_dir: str, connector: str) -> str:
+    scope = _rotate_token_hook_scope(connector)
+    return os.path.join(data_dir, "hooks", f".hook-{scope}.token")
+
+
+def _rotate_token_trusted_posix_owner(info: os.stat_result) -> bool:
+    if os.name == "nt" or not hasattr(info, "st_uid"):
+        return True
+    trusted = {0}
+    for resolver in (getattr(os, "getuid", None), getattr(os, "geteuid", None)):
+        if callable(resolver):
+            trusted.add(int(resolver()))
+    return int(info.st_uid) in trusted
+
+
+def _rotate_token_validate_hooks_directory(data_dir: str) -> str | None:
+    """Return the trusted hooks directory without following a redirect."""
+
+    hooks_dir = os.path.abspath(os.path.join(data_dir, "hooks"))
+    if not os.path.lexists(hooks_dir):
+        return None
+    try:
+        reject_reparse_path(hooks_dir)
+        info = os.lstat(hooks_dir)
+    except OSError as exc:
+        raise click.ClickException(
+            "The connector hook credential directory is unsafe; refusing token rotation."
+        ) from exc
+    if not stat.S_ISDIR(info.st_mode):
+        raise click.ClickException(
+            "The connector hook credential directory is not a directory; refusing token rotation."
+        )
+    if not _rotate_token_trusted_posix_owner(info):
+        raise click.ClickException(
+            "The connector hook credential directory has an untrusted owner; refusing token rotation."
+        )
+    if os.name != "nt" and stat.S_IMODE(info.st_mode) & 0o022:
+        raise click.ClickException(
+            "The connector hook credential directory is writable by another user; refusing token rotation."
+        )
+    if (
+        os.name == "nt"
+        and windows_acl_custody_write_error(
+            hooks_dir,
+            allow_current_user=True,
+            require_current_user_owner=True,
+        )
+        is not None
+    ):
+        raise click.ClickException(
+            "The connector hook credential directory ACL is not trusted; refusing token rotation."
+        )
+    if sys.platform == "darwin" and darwin_acl_write_error(hooks_dir) is not None:
+        raise click.ClickException(
+            "The connector hook credential directory ACL is not trusted; refusing token rotation."
+        )
+    return hooks_dir
+
+
+def _rotate_token_hook_metadata(path: str) -> os.stat_result:
+    """Validate one secret-bearing sidecar without opening or following it."""
+
+    try:
+        reject_reparse_path(path)
+        info = os.lstat(path)
+    except OSError as exc:
+        raise click.ClickException("A connector hook credential path is unsafe; refusing token rotation.") from exc
+    if not stat.S_ISREG(info.st_mode):
+        raise click.ClickException("A connector hook credential is not a regular file; refusing token rotation.")
+    if not _rotate_token_trusted_posix_owner(info):
+        raise click.ClickException("A connector hook credential has an untrusted owner; refusing token rotation.")
+    if os.name != "nt" and stat.S_IMODE(info.st_mode) & 0o077:
+        raise click.ClickException("A connector hook credential is not owner-only; refusing token rotation.")
+    if os.name == "nt" and windows_acl_custody_confidentiality_error(path) is not None:
+        raise click.ClickException("A connector hook credential ACL is not private; refusing token rotation.")
+    if sys.platform == "darwin" and darwin_acl_confidentiality_error(path) is not None:
+        raise click.ClickException("A connector hook credential ACL is not private; refusing token rotation.")
+    return info
+
+
+def _rotate_token_persisted_hook_scopes(data_dir: str) -> list[str]:
+    """Discover bounded, canonical, private ``.hook-*.token`` sidecars."""
+
+    hooks_dir = _rotate_token_validate_hooks_directory(data_dir)
+    if hooks_dir is None:
+        return []
+    scopes: set[str] = set()
+    try:
+        with os.scandir(hooks_dir) as entries:
+            for entry_count, entry in enumerate(entries, start=1):
+                if entry_count > _TOKEN_ROTATION_MAX_HOOK_DIRECTORY_ENTRIES:
+                    raise click.ClickException(
+                        "The connector hook credential directory contains too many entries; refusing token rotation."
+                    )
+                folded = entry.name.casefold()
+                if not (folded.startswith(".hook-") and folded.endswith(".token")):
+                    continue
+                raw_scope = entry.name[len(".hook-") : -len(".token")]
+                try:
+                    scope = _rotate_token_hook_scope(raw_scope)
+                except click.ClickException as exc:
+                    raise click.ClickException(
+                        "A persisted connector hook credential has an unsafe name; refusing token rotation."
+                    ) from exc
+                if entry.name != f".hook-{scope}.token":
+                    raise click.ClickException(
+                        "A persisted connector hook credential has a non-canonical name; refusing token rotation."
+                    )
+                if scope in scopes:
+                    raise click.ClickException(
+                        "The connector hook credential directory repeats a scope; refusing token rotation."
+                    )
+                _rotate_token_hook_metadata(entry.path)
+                scopes.add(scope)
+                if len(scopes) > _TOKEN_ROTATION_MAX_HOOK_SIDECARS:
+                    raise click.ClickException(
+                        "The connector hook credential roster is too large; refusing token rotation."
+                    )
+    except click.ClickException:
+        raise
+    except OSError as exc:
+        raise click.ClickException("Connector hook credentials could not be enumerated safely.") from exc
+    return sorted(scopes)
+
+
+def _rotate_token_hook_value(body: bytes) -> str:
+    try:
+        value = body.decode("ascii").strip()
+    except UnicodeDecodeError as exc:
+        raise click.ClickException("A connector hook credential is malformed; refusing token rotation.") from exc
+    if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+        raise click.ClickException("A connector hook credential is malformed; refusing token rotation.")
+    return value
+
+
+def _rotate_token_hook_fingerprint(value: str) -> str:
+    return hashlib.sha256(value.encode("ascii")).hexdigest()
+
+
+def _rotate_token_hook_snapshot_locked(
+    data_dir: str,
+    connector: str,
+) -> _RotateTokenHookSnapshot:
+    """Capture one scoped sidecar without returning its value to callers."""
+
+    path = _rotate_token_hook_path(data_dir, connector)
+    if not os.path.lexists(path):
+        return _RotateTokenHookSnapshot(connector, path, False, b"", None, None)
+    info = _rotate_token_hook_metadata(path)
+
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_BINARY", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    fd = os.open(path, flags)
+    try:
+        opened = os.fstat(fd)
+        if not stat.S_ISREG(opened.st_mode) or not os.path.samestat(info, opened):
+            raise click.ClickException("A connector hook credential changed while opening; refusing token rotation.")
+        windows_security = None
+        if os.name == "nt":
+            from defenseclaw import windows_acl
+
+            windows_security = windows_acl.capture_fd(fd)
+        with os.fdopen(fd, "rb") as stream:
+            fd = -1
+            body = stream.read(4097)
+            if os.name == "nt":
+                from defenseclaw import windows_acl
+
+                if windows_acl.capture_fd(stream.fileno()) != windows_security:
+                    raise click.ClickException(
+                        "A connector hook credential security descriptor changed while reading; "
+                        "refusing token rotation."
+                    )
+        if len(body) > 4096:
+            raise click.ClickException("A connector hook credential is oversized; refusing token rotation.")
+        value = _rotate_token_hook_value(body)
+        return _RotateTokenHookSnapshot(
+            connector=connector,
+            path=path,
+            existed=True,
+            body=body,
+            mode=stat.S_IMODE(opened.st_mode),
+            fingerprint=_rotate_token_hook_fingerprint(value),
+            windows_security=windows_security,
+        )
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def _rotate_token_new_hook_values(
+    connectors: list[str],
+    gateway_token: str,
+    previous_fingerprints: dict[str, str],
+) -> dict[str, str]:
+    """Mint distinct connector credentials without exposing them to child processes."""
+
+    values: dict[str, str] = {}
+    forbidden = {gateway_token}
+    forbidden_fingerprints = set(previous_fingerprints.values())
+    for connector in connectors:
+        for _attempt in range(16):
+            value = secrets.token_bytes(32).hex()
+            if value not in forbidden and _rotate_token_hook_fingerprint(value) not in forbidden_fingerprints:
+                break
+        else:
+            raise click.ClickException("Could not mint distinct connector hook credentials.")
+        forbidden.add(value)
+        values[connector] = value
+    return values
+
+
+def _rotate_token_restore_hook_snapshot_locked(snapshot: _RotateTokenHookSnapshot) -> None:
+    if snapshot.existed:
+        atomic_write_private_bytes(
+            snapshot.path,
+            snapshot.body,
+            windows_managed_custody=True,
+            windows_managed_security=snapshot.windows_security,
+        )
+        if os.name != "nt" and snapshot.mode is not None:
+            os.chmod(snapshot.path, snapshot.mode)
+        return
+    if os.path.lexists(snapshot.path):
+        reject_symlink(snapshot.path, what="connector hook credential")
+        if not stat.S_ISREG(os.lstat(snapshot.path).st_mode):
+            raise click.ClickException("A connector hook credential rollback path is not a regular file.")
+        delete_file_durable(snapshot.path)
+
+
+def _rotate_token_restore_hook_snapshots_locked(snapshots: list[_RotateTokenHookSnapshot]) -> None:
+    first_error: BaseException | None = None
+    for snapshot in snapshots:
+        try:
+            _rotate_token_restore_hook_snapshot_locked(snapshot)
+        except BaseException as exc:
+            if first_error is None:
+                first_error = exc
+    if first_error is not None:
+        raise click.ClickException(
+            "One or more connector hook credentials could not be restored exactly."
+        ) from first_error
+
+
+def _rotate_token_verify_restored_hook_snapshots_locked(snapshots: list[_RotateTokenHookSnapshot]) -> None:
+    """Re-read every restored sidecar and prove exact bytes/mode/absence."""
+
+    first_error: BaseException | None = None
+    for expected in snapshots:
+        try:
+            actual = _rotate_token_hook_snapshot_locked(
+                os.path.dirname(os.path.dirname(expected.path)), expected.connector
+            )
+            if expected.existed:
+                if not actual.existed or actual.body != expected.body:
+                    raise click.ClickException("A connector hook credential was not restored byte-for-byte.")
+                if os.name != "nt" and actual.mode != expected.mode:
+                    raise click.ClickException("A connector hook credential mode was not restored exactly.")
+                if os.name == "nt" and actual.windows_security != expected.windows_security:
+                    raise click.ClickException(
+                        "A connector hook credential Windows security descriptor was not restored exactly."
+                    )
+            elif actual.existed or os.path.lexists(expected.path):
+                raise click.ClickException("A newly created connector hook credential was not removed during rollback.")
+        except BaseException as exc:
+            if first_error is None:
+                first_error = exc
+    if first_error is not None:
+        raise click.ClickException(
+            "One or more connector hook credential rollback snapshots could not be verified exactly."
+        ) from first_error
+
+
+def _rotate_token_verify_hook_values_locked(data_dir: str, values: dict[str, str]) -> None:
+    for connector, expected in sorted(values.items()):
+        snapshot = _rotate_token_hook_snapshot_locked(data_dir, connector)
+        if not snapshot.existed or snapshot.fingerprint != _rotate_token_hook_fingerprint(expected):
+            raise click.ClickException("A connector hook credential did not converge during token rotation.")
+
+
 def _rotate_token_snapshot_locked(dotenv_path: str) -> _RotateTokenDotenvSnapshot:
     """Capture the exact dotenv bytes while the caller owns its lock."""
 
@@ -2594,7 +2970,10 @@ class _RotateTokenConnectorPolicy:
     enabled: bool
 
 
-def _rotate_token_connector_state(cfg: Any) -> str:
+def _rotate_token_connector_state(
+    cfg: Any,
+    hook_token_fingerprints: dict[str, str] | None = None,
+) -> str:
     """Serialize the complete configured connector posture for A/B verification."""
 
     if hasattr(cfg, "active_connectors"):
@@ -2641,6 +3020,33 @@ def _rotate_token_connector_state(cfg: Any) -> str:
             for policy in sorted(policies.values(), key=lambda policy: policy.name)
         ],
     }
+    if hook_token_fingerprints:
+        configured_fingerprints: dict[str, str] = {}
+        orphan_fingerprints: dict[str, str] = {}
+        for raw_name, fingerprint in hook_token_fingerprints.items():
+            name = _rotate_token_hook_scope(raw_name)
+            if name != raw_name:
+                raise click.ClickException(
+                    "Connector hook credential scope is not canonical; refusing token rotation."
+                )
+            if (
+                len(fingerprint) != 64
+                or fingerprint != fingerprint.lower()
+                or any(character not in "0123456789abcdef" for character in fingerprint)
+            ):
+                raise click.ClickException(
+                    "Connector hook credential fingerprint is invalid; refusing token rotation."
+                )
+            target = configured_fingerprints if name in policies else orphan_fingerprints
+            target[name] = fingerprint
+        if configured_fingerprints:
+            payload["hook_token_fingerprints"] = {
+                name: configured_fingerprints[name] for name in sorted(configured_fingerprints)
+            }
+        if orphan_fingerprints:
+            payload["orphan_hook_token_fingerprints"] = {
+                name: orphan_fingerprints[name] for name in sorted(orphan_fingerprints)
+            }
     return _json.dumps(payload, sort_keys=True, separators=(",", ":"))
 
 
@@ -2708,8 +3114,10 @@ def _rotate_token_transaction(
     audit_details: str,
     *,
     recover_previous_runtime: bool = True,
+    scoped_connectors: tuple[str, ...] = (),
+    require_complete_scoped_roster: bool = False,
 ) -> None:
-    """Commit token B only between verified stop(A) and start(B).
+    """Commit gateway and scoped token B only between stop(A) and start(B).
 
     Normal operator-initiated rotation restores ready gateway A if B cannot
     activate. Doctor passes ``recover_previous_runtime=False`` when A's token
@@ -2725,19 +3133,71 @@ def _rotate_token_transaction(
     # this on-disk A/B boundary: stop loads config+dotenv A, while start reloads
     # config+dotenv B under the explicit data directory. Do not reuse a
     # post-commit loader result for the authenticated stop phase.
-    with locked_config_yaml(config_file), locked_file_update(dotenv_path):
+    requested_scopes = sorted({_rotate_token_hook_scope(name) for name in scoped_connectors})
+    hook_publish_lock_base = os.path.join(
+        data_dir,
+        _TOKEN_ROTATION_HOOK_PUBLISH_LOCK_BASE_NAME,
+    )
+    with (
+        locked_file_update(hook_publish_lock_base),
+        locked_config_yaml(config_file),
+        locked_file_update(dotenv_path),
+        ExitStack() as hook_locks,
+    ):
         config_snapshot, config_mode = _snapshot_regular_file(config_file, what="gateway config")
         authoritative_cfg = load_config(data_dir=data_dir)
         current_config, current_mode = _snapshot_regular_file(config_file, what="gateway config")
         if current_config != config_snapshot or current_mode != config_mode:
             raise click.ClickException("Gateway configuration changed while token rotation was taking its snapshot.")
-        connector_state = _rotate_token_connector_state(authoritative_cfg)
+        configured_scopes = set(_rotate_token_configured_connectors(authoritative_cfg))
+        persisted_scopes = set(_rotate_token_persisted_hook_scopes(data_dir))
+        rotatable_scopes = configured_scopes | persisted_scopes
+        if not set(requested_scopes).issubset(rotatable_scopes):
+            raise click.ClickException(
+                "Connector hook credential scope changed before rotation; no credentials were modified."
+            )
+        tracked_scopes = sorted(rotatable_scopes)
+        for connector in tracked_scopes:
+            hook_locks.enter_context(locked_file_update(_rotate_token_hook_path(data_dir, connector)))
+        if require_complete_scoped_roster and set(requested_scopes) != set(
+            _rotate_token_scoped_connectors(authoritative_cfg, data_dir)
+        ):
+            raise click.ClickException(
+                "The authoritative scoped-hook connector roster changed before rotation; no credentials were modified."
+            )
         snapshot = _rotate_token_snapshot_locked(dotenv_path)
+        hook_snapshots = [_rotate_token_hook_snapshot_locked(data_dir, connector) for connector in tracked_scopes]
         old_token = _rotate_token_previous_value(app, snapshot)
         pid_file = os.path.join(data_dir, "gateway.pid")
         was_running = _is_pid_alive(pid_file)
+        if was_running and any(
+            hook_snapshot.connector in requested_scopes and not hook_snapshot.existed
+            for hook_snapshot in hook_snapshots
+        ):
+            raise click.ClickException(
+                "A running connector is missing its scoped hook credential; restart or repair setup before rotation."
+            )
+        old_hook_fingerprints = {
+            hook_snapshot.connector: hook_snapshot.fingerprint
+            for hook_snapshot in hook_snapshots
+            if hook_snapshot.connector in requested_scopes and hook_snapshot.fingerprint is not None
+        }
+        hook_windows_security = {
+            hook_snapshot.connector: hook_snapshot.windows_security for hook_snapshot in hook_snapshots
+        }
+        # Recovery A intentionally verifies only configured scopes. A stale
+        # orphan that the prior runtime never registered must fail B closed,
+        # but must not hold exact rollback hostage. Every orphan is still
+        # restored and locally re-read for exact bytes/mode/absence below.
+        configured_old_hook_fingerprints = {
+            name: fingerprint
+            for name, fingerprint in old_hook_fingerprints.items()
+            if name in configured_scopes
+        }
+        connector_state_a = _rotate_token_connector_state(authoritative_cfg, configured_old_hook_fingerprints)
         old_stopped = False
         mutation_attempted = False
+        new_hook_values: dict[str, str] = {}
         try:
             try:
                 _run_rotate_token_lifecycle(data_dir, "stop", token=old_token, config_file=config_file)
@@ -2753,7 +3213,7 @@ def _rotate_token_transaction(
                             "start",
                             token=old_token,
                             config_file=config_file,
-                            connector_state=connector_state,
+                            connector_state=connector_state_a,
                         )
                     except BaseException:
                         raise click.ClickException(
@@ -2763,8 +3223,24 @@ def _rotate_token_transaction(
                 raise
             old_stopped = True
 
+            new_hook_values = _rotate_token_new_hook_values(
+                requested_scopes,
+                new_token,
+                old_hook_fingerprints,
+            )
+            new_hook_fingerprints = {
+                connector: _rotate_token_hook_fingerprint(value) for connector, value in new_hook_values.items()
+            }
+            connector_state_b = _rotate_token_connector_state(authoritative_cfg, new_hook_fingerprints)
             mutation_attempted = True
             atomic_write_private_bytes(dotenv_path, _rotate_token_render(snapshot, new_token))
+            for connector, value in sorted(new_hook_values.items()):
+                atomic_write_private_bytes(
+                    _rotate_token_hook_path(data_dir, connector),
+                    (value + "\n").encode("ascii"),
+                    windows_managed_custody=True,
+                    windows_managed_security=hook_windows_security[connector],
+                )
             os.environ[_GATEWAY_TOKEN_ENV] = new_token
 
             _run_rotate_token_lifecycle(
@@ -2772,8 +3248,9 @@ def _rotate_token_transaction(
                 "start",
                 token=new_token,
                 config_file=config_file,
-                connector_state=connector_state,
+                connector_state=connector_state_b,
             )
+            _rotate_token_verify_hook_values_locked(data_dir, new_hook_values)
             current_config, current_mode = _snapshot_regular_file(config_file, what="gateway config")
             if current_config != config_snapshot or current_mode != config_mode:
                 raise click.ClickException("Gateway configuration changed during token rotation.")
@@ -2804,13 +3281,22 @@ def _rotate_token_transaction(
                         "safely stopped; token B was preserved on disk."
                     ) from primary_error
 
+            restore_error: BaseException | None = None
+            try:
+                _rotate_token_restore_hook_snapshots_locked(hook_snapshots)
+                _rotate_token_verify_restored_hook_snapshots_locked(hook_snapshots)
+            except BaseException as exc:
+                restore_error = exc
             try:
                 _rotate_token_restore_locked(dotenv_path, snapshot)
-            except BaseException:
+            except BaseException as exc:
+                if restore_error is None:
+                    restore_error = exc
+            if restore_error is not None:
                 raise click.ClickException(
-                    "Token rotation failed and the exact prior dotenv snapshot could not "
-                    "be restored; the gateway remains stopped."
-                ) from primary_error
+                    "Token rotation failed and the exact prior credential snapshots could not "
+                    "all be restored; the gateway remains stopped."
+                ) from restore_error
 
             try:
                 current_config, current_mode = _snapshot_regular_file(config_file, what="gateway config")
@@ -2835,11 +3321,11 @@ def _rotate_token_transaction(
                         "start",
                         token=old_token,
                         config_file=config_file,
-                        connector_state=connector_state,
+                        connector_state=connector_state_a,
                     )
                 except BaseException:
                     raise click.ClickException(
-                        "Token rotation failed; the exact prior dotenv snapshot was restored, "
+                        "Token rotation failed; the exact prior credential snapshots were restored, "
                         "but gateway A did not return to verified readiness."
                     ) from primary_error
             raise
@@ -2851,7 +3337,10 @@ def _rotate_token_transaction(
 @click.option(
     "--connector",
     default=None,
-    help="Optional presentation hint (the token is shared, so ALL active connectors are refreshed).",
+    help=(
+        "Optional presentation hint (rotation covers every eligible configured scope and safely discovered "
+        "persisted sidecar)."
+    ),
 )
 @click.option(
     "--no-restart",
@@ -2865,18 +3354,17 @@ def _rotate_token_transaction(
 )
 @pass_ctx
 def rotate_token_cmd(app: AppContext, connector: str | None, no_restart: bool, yes: bool) -> None:
-    """Rotate the DEFENSECLAW_GATEWAY_TOKEN.
+    """Rotate the gateway token and connector-scoped hook credentials.
 
-    Generates a new 32-byte CSPRNG hex token, verifies and stops gateway A
-    with token/config A, durably commits ~/.defenseclaw/.env B, then starts
-    and verifies gateway B. Any post-stop failure restores the exact dotenv
-    snapshot and the prior ready generation.
+    Generates distinct 32-byte CSPRNG values, verifies and stops gateway A,
+    durably commits the gateway and scoped sidecars for generation B, then
+    refreshes every affected hook/plugin and verifies gateway B. Any post-stop
+    failure restores the exact credential snapshots and prior ready generation.
 
-    The token is a single shared secret baked into every connector's hook
-    scripts, so rotation is inherently global: refreshing only one
-    connector would leave the others authenticating with the now-invalid
-    old token. On a multi-connector install all active connectors are
-    refreshed in one restart.
+    Rotation is global by design: every eligible configured scoped-hook
+    credential and every safely discovered persisted sidecar receive distinct
+    least-privilege replacements in the same transaction. ``--connector``
+    remains a presentation hint and never narrows this security boundary.
 
     Plan B5 / S0.5.
     """
@@ -2912,29 +3400,45 @@ def rotate_token_cmd(app: AppContext, connector: str | None, no_restart: bool, y
         active = normalize_connector(raw)
         if active and active not in actives:
             actives.append(active)
+    rotation_data_dir = os.path.abspath(app.cfg.data_dir or os.path.dirname(dotenv_path))
+    scoped_actives = _rotate_token_scoped_connectors(app.cfg, rotation_data_dir)
 
     requested_hint = normalize_connector(connector)
     if requested_hint and requested_hint not in actives:
         click.echo(f"  Ignoring inactive connector restart hint {connector!r}.")
 
     if not yes:
-        scope = ", ".join(actives) if actives else "no active connector"
+        scope = f"{len(scoped_actives)} scoped-hook credential(s)" if scoped_actives else "no scoped-hook credential"
         click.confirm(
-            f"This will rotate DEFENSECLAW_GATEWAY_TOKEN in {dotenv_path}\n"
-            f"and restart the gateway so every active connector ({scope}) re-bakes\n"
-            "the new token into its hook scripts. Continue?",
+            f"This will rotate DEFENSECLAW_GATEWAY_TOKEN in {dotenv_path},\n"
+            f"replace every eligible or safely persisted scoped-hook credential ({scope}) with a distinct value,\n"
+            "refresh their hooks/plugins, and restart the gateway. Continue?",
             abort=True,
         )
 
     new_token = secrets.token_hex(32)
-    audit_details = f"action=rotate-token active_connectors={len(actives)} restart=true"
+    audit_details = (
+        f"action=rotate-token active_connectors={len(actives)} scoped_hook_tokens={len(scoped_actives)} restart=true"
+    )
     target_summary = ", ".join(actives) if actives else "no active connectors"
-    click.echo(f"  {ux.dim('Rotating gateway token for')} {target_summary}…")
-    _rotate_token_transaction(app, dotenv_path, new_token, audit_details)
+    click.echo(f"  {ux.dim('Rotating gateway and scoped hook credentials for')} {target_summary}…")
+    _rotate_token_transaction(
+        app,
+        dotenv_path,
+        new_token,
+        audit_details,
+        scoped_connectors=tuple(scoped_actives),
+        require_complete_scoped_roster=True,
+    )
 
     ux.ok(f"Rotated DEFENSECLAW_GATEWAY_TOKEN in {dotenv_path} (mode 0o600); gateway B is verified ready.")
-    if actives:
-        ux.ok(f"Hook scripts refreshed for {len(actives)} active connector(s).")
+    if scoped_actives:
+        ux.ok(
+            f"Rotated {len(scoped_actives)} connector-scoped hook credential(s); "
+            "affected hooks/plugins are verified ready."
+        )
+    elif actives:
+        ux.subhead("no connector-scoped hook credentials to rotate")
     else:
         ux.subhead("active connector roster: none")
     click.echo()
@@ -5085,9 +5589,7 @@ def _write_connector_identity(
         if connector not in gc.connectors:
             gc.connectors[connector] = PerConnectorGuardrailConfig()
         primary = (
-            existing_primary
-            if preserve_primary and existing_primary in gc.connectors
-            else sorted(gc.connectors)[0]
+            existing_primary if preserve_primary and existing_primary in gc.connectors else sorted(gc.connectors)[0]
         )
         gc.connector = primary
         cfg.claw.mode = primary
@@ -5513,10 +6015,7 @@ def _print_connector_observability_banner(connector: str, *, mode: str = "observ
     click.echo("  Telemetry channels:")
     if connector == "amp":
         click.echo("    • Plugin API — session/agent/tool lifecycle → /api/v1/amp/hook")
-        click.echo(
-            "    • Enforcement — synchronous tool.call execution gate "
-            "+ model-bound tool.result output gate"
-        )
+        click.echo("    • Enforcement — synchronous tool.call execution gate + model-bound tool.result output gate")
         click.echo(
             "    • Agent360 / Galileo — correlated session, turn, tool, outcome, "
             "decision, audit, log, metric, and trace views"
@@ -5532,9 +6031,7 @@ def _print_connector_observability_banner(connector: str, *, mode: str = "observ
                 "    • Native OTel — optional; inactive until OTEL_* variables are exported for the OmniGent process"
             )
         elif connector == "codex":
-            click.echo(
-                "    • Native OTel — logs, metrics, and traces → scoped bearer + source header on /v1/<signal>"
-            )
+            click.echo("    • Native OTel — logs, metrics, and traces → scoped bearer + source header on /v1/<signal>")
         else:
             click.echo("    • Native OTel — documented agent telemetry → /v1/logs, /v1/metrics, and/or /v1/traces")
     if connector == "codex":
@@ -6499,9 +6996,7 @@ def _dispatch_bare_setup(
     bare-``setup`` behavior in CI / pipelines so nothing hangs on stdin.
     """
     if add_detected and (connectors or detected or all_connectors):
-        raise click.UsageError(
-            "--add-detected cannot be combined with --connector, --detected, or --all"
-        )
+        raise click.UsageError("--add-detected cannot be combined with --connector, --detected, or --all")
     if app is None or getattr(app, "cfg", None) is None:
         click.echo(ctx.get_help())
         return
@@ -6527,17 +7022,9 @@ def _dispatch_bare_setup(
     for raw in connectors:
         _add(raw)
     if add_detected:
-        active = {
-            normalize_connector(str(name))
-            for name in app.cfg.active_connectors()
-            if str(name).strip()
-        }
+        active = {normalize_connector(str(name)) for name in app.cfg.active_connectors() if str(name).strip()}
         for c in _detect_installed_connectors():
-            if (
-                c not in active
-                and c in _HOOK_ENFORCED_CONNECTORS
-                and platform_support.connector_supported_on_os(c)
-            ):
+            if c not in active and c in _HOOK_ENFORCED_CONNECTORS and platform_support.connector_supported_on_os(c):
                 _add(c)
         if not targets:
             click.echo("  No newly detected hook connectors to add.")
@@ -8759,6 +9246,79 @@ def _is_pid_alive(pid_file: str) -> bool:
     return pid_file_alive(pid_file)
 
 
+def _gateway_pid_generation_marker(data_dir: str) -> bytes | None:
+    """Capture the stable PID-record bytes for one gateway generation."""
+
+    try:
+        return read_regular_file_no_follow(
+            os.path.join(data_dir, "gateway.pid"),
+            max_bytes=_GATEWAY_PID_GENERATION_MAX_BYTES,
+        )
+    except OSError:
+        return None
+
+
+def _gateway_api_endpoint(data_dir: str) -> tuple[str, int] | None:
+    try:
+        cfg = load_config(data_dir=data_dir)
+        gateway = cfg.gateway
+        from defenseclaw.logger import _gateway_api_host
+
+        host = _gateway_api_host(cfg)
+        port = int(getattr(gateway, "api_port", 18970) or 18970)
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None
+    if not isinstance(host, str) or not host.strip() or not 1 <= port <= 65535:
+        return None
+    return host, port
+
+
+def _read_defense_gateway_health_once(
+    host: str,
+    port: int,
+    *,
+    timeout: float,
+) -> dict[str, Any] | None:
+    connection = http.client.HTTPConnection(host, port, timeout=timeout)
+    try:
+        connection.request("GET", "/health")
+        response = connection.getresponse()
+        body = response.read(1 << 20)
+        if response.status != 200:
+            return None
+        health = _json.loads(body)
+        return health if isinstance(health, dict) else None
+    except (OSError, http.client.HTTPException, UnicodeDecodeError, ValueError):
+        return None
+    finally:
+        connection.close()
+
+
+def _gateway_runtime_generation_before_restart(data_dir: str) -> _GatewayRuntimeGeneration:
+    """Snapshot enough live evidence to distinguish the replacement API."""
+
+    pid_marker = _gateway_pid_generation_marker(data_dir)
+    started_at: str | None = None
+    # Without a PID record this data home has no generation to retire. Avoid
+    # probing an ambient/default API endpoint that may belong to a different
+    # installation while preparing a fresh start.
+    config_path = config_path_for_data_dir(data_dir)
+    endpoint = (
+        _gateway_api_endpoint(data_dir)
+        if pid_marker is not None and os.path.isfile(config_path)
+        else None
+    )
+    if endpoint is not None:
+        health = _read_defense_gateway_health_once(*endpoint, timeout=0.5)
+        raw_started_at = health.get("started_at") if health is not None else None
+        if isinstance(raw_started_at, str) and raw_started_at.strip():
+            started_at = raw_started_at.strip()
+    # Capture this after the old health probe. A replacement sidecar admitted
+    # by the lifecycle call below must have constructed its health state no
+    # earlier than this boundary.
+    return _GatewayRuntimeGeneration(pid_marker, started_at, time.time())
+
+
 def _restart_services(
     data_dir: str,
     oc_host: str = "127.0.0.1",
@@ -8806,23 +9366,43 @@ def _restart_services(
     hook_contract_lock_before = (
         _hook_contract_lock_marker(data_dir) if wait_for_connector_ready and hook_targets else None
     )
+    gateway_generation_before = (
+        _gateway_runtime_generation_before_restart(data_dir) if wait_for_connector_ready and hook_targets else None
+    )
 
     gateway_restarted = (
-        _restart_defense_gateway(data_dir)
+        _restart_defense_gateway(
+            data_dir,
+            previous_generation=gateway_generation_before,
+        )
         if start_if_stopped
-        else _restart_defense_gateway(data_dir, start_if_stopped=False)
+        else _restart_defense_gateway(
+            data_dir,
+            start_if_stopped=False,
+            previous_generation=gateway_generation_before,
+        )
     )
     if not gateway_restarted:
         failed.append("defenseclaw-gateway")
 
     if wait_for_connector_ready and hook_targets and gateway_restarted:
         click.echo("  connector runtime: waiting for verified setup...", nl=False)
-        if _wait_for_connector_runtime(
+        runtime_ready = _wait_for_connector_runtime(
             data_dir,
             hook_targets,
             connector_state_before,
             hook_contract_lock_before,
-        ):
+        )
+        if runtime_ready:
+            # Re-read health only after the new connector markers are ready.
+            # The generation boundary rejects the old API even if it remains
+            # reachable while the new process publishes its marker files.
+            runtime_ready = _wait_for_defense_gateway_api(
+                data_dir,
+                previous_generation=gateway_generation_before,
+                expected_connectors=hook_targets,
+            )
+        if runtime_ready:
             click.echo(" ✓")
         else:
             click.echo(" ✗")
@@ -9137,6 +9717,7 @@ def _restart_defense_gateway(
     child_env: dict[str, str] | None = None,
     lifecycle_executable: str | None = None,
     lifecycle_executable_requires_running: bool = True,
+    previous_generation: _GatewayRuntimeGeneration | None = None,
 ) -> bool:
     # Mark the current Click context as "restart handled" so the
     # `setup` group's auto-restart result callback doesn't bounce the
@@ -9174,11 +9755,7 @@ def _restart_defense_gateway(
     action = "restarting" if was_running else "starting"
     click.echo(f"  defenseclaw-gateway: {action}...", nl=False)
 
-    if (
-        lifecycle_executable
-        and lifecycle_executable_requires_running
-        and not was_running
-    ):
+    if lifecycle_executable and lifecycle_executable_requires_running and not was_running:
         click.echo(" ✗ (verified running executable is no longer active)")
         return False
     search_path = child_env.get("PATH", os.defpath) if child_env is not None else None
@@ -9196,6 +9773,7 @@ def _restart_defense_gateway(
         return False
     executable = str(Path(executable).resolve())
     cmd = [executable, "restart"] if was_running else [executable, "start"]
+    generation_before = previous_generation or _gateway_runtime_generation_before_restart(data_dir)
     try:
         result = subprocess.run(
             cmd,
@@ -9207,7 +9785,10 @@ def _restart_defense_gateway(
             timeout=30,
         )
         if result.returncode == 0:
-            if _wait_for_defense_gateway_api(data_dir):
+            if _wait_for_defense_gateway_api(
+                data_dir,
+                previous_generation=generation_before,
+            ):
                 click.echo(" ✓")
                 return True
             click.echo(" ✗ (API health timed out)")
@@ -9235,7 +9816,10 @@ def _restart_defense_gateway(
         # the pre-existing generation rather than stopping an otherwise healthy
         # service whose replacement outcome is uncertain.
         status = _gateway_lifecycle_status(executable, child_env=child_env)
-        if status:
+        if status and _wait_for_defense_gateway_api(
+            data_dir,
+            previous_generation=generation_before,
+        ):
             click.echo(" ✓ (ready after launcher timeout)")
             return True
         if not was_running:
@@ -9247,8 +9831,11 @@ def _restart_defense_gateway(
 def _wait_for_defense_gateway_api(
     data_dir: str,
     timeout: float = _GATEWAY_API_READY_TIMEOUT_SECONDS,
+    *,
+    previous_generation: _GatewayRuntimeGeneration | None = None,
+    expected_connectors: list[str] | tuple[str, ...] = (),
 ) -> bool:
-    """Wait until the replacement gateway can admit canonical v8 facts.
+    """Wait for the replacement generation's API and connector runtime.
 
     The daemon start command returns after spawning its child, before that
     child necessarily binds the sidecar API. Connector setup also observes an
@@ -9257,22 +9844,19 @@ def _wait_for_defense_gateway_api(
     that window makes the command's own mandatory v8 audit handoff fail with
     ``connection refused``.
 
-    Require the replacement process's health document to report the API
-    subsystem as running. This also covers the platform socket-reclaim retry
-    in the Go API server, which may legitimately take up to 30 seconds.
+    A restart has an additional ABA hazard: the retiring API can still answer
+    ``/health`` while the replacement process has already published fresh
+    connector marker files. Bind readiness to three observations from one
+    replacement window: changed PID-record bytes, a newer ``started_at``
+    health generation, and the requested connectors reporting ``running``.
+    This also covers the platform socket-reclaim retry in the Go API server,
+    which may legitimately take up to 30 seconds.
     """
-    try:
-        cfg = load_config(data_dir=data_dir)
-        gateway = cfg.gateway
-        from defenseclaw.logger import _gateway_api_host
-
-        host = _gateway_api_host(cfg)
-        port = int(getattr(gateway, "api_port", 18970) or 18970)
-    except (AttributeError, OSError, TypeError, ValueError):
+    endpoint = _gateway_api_endpoint(data_dir)
+    if endpoint is None:
         return False
-
-    if not 1 <= port <= 65535:
-        return False
+    host, port = endpoint
+    expected = {normalize_connector(name) for name in expected_connectors if name}
 
     bounded_timeout = max(0.0, timeout)
     deadline = time.monotonic() + bounded_timeout
@@ -9281,29 +9865,63 @@ def _wait_for_defense_gateway_api(
         probe_timeout = min(1.0, bounded_timeout, remaining)
         if probe_timeout <= 0:
             break
-        connection = http.client.HTTPConnection(
-            host,
-            port,
-            # Subtracting a large monotonic timestamp can round a few ulps
-            # above the caller's budget. Clamp to that original budget so a
-            # single health probe never receives a longer timeout than setup
-            # promised, particularly for short test/automation deadlines.
-            timeout=probe_timeout,
-        )
-        try:
-            connection.request("GET", "/health")
-            response = connection.getresponse()
-            body = response.read(1 << 20)
-            if response.status == 200:
-                health = _json.loads(body)
-                api = health.get("api") if isinstance(health, dict) else None
-                state = api.get("state") if isinstance(api, dict) else None
-                if isinstance(state, str) and state.strip().lower() == "running":
-                    return True
-        except (OSError, http.client.HTTPException, UnicodeDecodeError, ValueError):
-            pass
-        finally:
-            connection.close()
+        # Subtracting a large monotonic timestamp can round a few ulps above
+        # the caller's budget. Clamp to that original budget so a single
+        # health probe never receives a longer timeout than setup promised,
+        # particularly for short test/automation deadlines.
+        health = _read_defense_gateway_health_once(host, port, timeout=probe_timeout)
+        api = health.get("api") if health is not None else None
+        state = api.get("state") if isinstance(api, dict) else None
+        ready = isinstance(state, str) and state.strip().lower() == "running"
+
+        if ready and previous_generation is not None:
+            current_pid_marker = _gateway_pid_generation_marker(data_dir)
+            if (
+                current_pid_marker is None
+                or current_pid_marker == previous_generation.pid_marker
+                or not _gateway_pid_file_identifies_gateway(os.path.join(data_dir, "gateway.pid"))
+            ):
+                ready = False
+
+            raw_started_at = health.get("started_at") if health is not None else None
+            started_at = raw_started_at.strip() if isinstance(raw_started_at, str) else ""
+            if not started_at:
+                ready = False
+            elif previous_generation.started_at is not None:
+                if started_at == previous_generation.started_at:
+                    ready = False
+            else:
+                try:
+                    parsed_started_at = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+                    if parsed_started_at.tzinfo is None or parsed_started_at.utcoffset() is None:
+                        raise ValueError("gateway started_at must include a timezone")
+                    started_epoch = parsed_started_at.timestamp()
+                except (OverflowError, ValueError):
+                    ready = False
+                else:
+                    if started_epoch < previous_generation.replacement_not_before:
+                        ready = False
+
+        if ready and expected:
+            running: set[str] = set()
+            raw_connectors = health.get("connectors") if health is not None else None
+            if isinstance(raw_connectors, list):
+                for item in raw_connectors:
+                    if not isinstance(item, dict):
+                        continue
+                    name = item.get("name")
+                    connector_state = item.get("state")
+                    if (
+                        isinstance(name, str)
+                        and isinstance(connector_state, str)
+                        and connector_state.strip().lower() == "running"
+                    ):
+                        running.add(normalize_connector(name))
+            if not expected.issubset(running):
+                ready = False
+
+        if ready:
+            return True
         sleep_for = min(0.2, max(0.0, deadline - time.monotonic()))
         if sleep_for:
             time.sleep(sleep_for)
@@ -9700,6 +10318,59 @@ _SPLUNK_LOCAL_HEC_DEFAULTS = {
 
 _SPLUNK_BRIDGE_ENV_REL = os.path.join("splunk-bridge", "env", ".env")
 
+# Every name authored by the current bridge env contract, plus names shipped
+# by earlier supported bundles and the native controller's generated token.
+# The bridge shell and native controller both overlay their private env file
+# after the ambient environment is scrubbed. A configured gateway bearer name
+# must therefore never collide with any of these names or a different managed
+# value would be reintroduced into Docker/Compose descendants.
+_SPLUNK_BRIDGE_MANAGED_ENV_NAMES = frozenset(
+    {
+        "AWS_ACCESS_KEY_ID",
+        "AWS_REGION",
+        "AWS_SECRET_ACCESS_KEY",
+        "AWS_SESSION_TOKEN",
+        "DEFENSECLAW_HEC_TOKEN",
+        "DEFENSECLAW_HEC_URL",
+        "DEFENSECLAW_INDEX",
+        "DEFENSECLAW_INTEGRATION_ENABLED",
+        "DEFENSECLAW_LOCAL_PASSWORD",
+        "DEFENSECLAW_LOCAL_SPLUNK_HEC_TOKEN",
+        "DEFENSECLAW_LOCAL_USERNAME",
+        "DEFENSECLAW_REF",
+        "DEFENSECLAW_SOURCE",
+        "DEFENSECLAW_SOURCETYPE",
+        "DEPLOYMENT_ENVIRONMENT",
+        "NEMOCLAW_LOCAL_MODEL",
+        "NEMOCLAW_LOCAL_OLLAMA_HOST",
+        "NEMOCLAW_LOCAL_POLICY_MODE",
+        "NEMOCLAW_LOCAL_PROVIDER",
+        "NEMOCLAW_LOCAL_SANDBOX_NAME",
+        "NEMOCLAW_REF",
+        "PHONE_HOME_ENABLED",
+        "PHONE_HOME_HEC_TOKEN",
+        "PHONE_HOME_HEC_URL",
+        "S3_BUCKET",
+        "S3_ENDPOINT_URL",
+        "S3_EXPORT_ENABLED",
+        "S3_EXPORT_INTERVAL_SECONDS",
+        "S3_EXPORT_LOOKBACK_SECONDS",
+        "S3_EXPORT_ONCE",
+        "S3_EXPORT_WINDOW_SECONDS",
+        "S3_PREFIX",
+        "S3_SSE",
+        "SPLUNK_ENV_FILE",
+        "SPLUNK_GENERAL_TERMS",
+        "SPLUNK_HEC_TOKEN",
+        "SPLUNK_IMAGE",
+        "SPLUNK_LICENSE_URI",
+        "SPLUNK_PASSWORD",
+        "SPLUNK_START_ARGS",
+        "TENANT_ID",
+        "WORKSPACE_ID",
+    }
+)
+
 
 def _native_windows_local_splunk() -> bool:
     """Select the argument-vector native controller only on Windows."""
@@ -9928,6 +10599,11 @@ def setup_splunk(
 
     native_combined = _native_windows_local_splunk() and enable_logs and (enable_o11y or enable_enterprise)
     if native_combined:
+        gateway_token_env = _configured_gateway_token_env_name(app.cfg)
+        native_child_env = _splunk_bridge_child_env(
+            gateway_token_env,
+            platform_name="nt",
+        )
         # Resolve every interactive/flag prerequisite and prove the entire
         # native Local Splunk environment before the first remote-pipeline
         # config write. Local Splunk runs last so its gateway reload activates
@@ -9987,6 +10663,7 @@ def setup_splunk(
                 app.cfg.data_dir,
                 license_accepted=True,
                 require_s3=s3_export,
+                environment=native_child_env,
             )
         except LocalStackError as exc:
             raise click.ClickException(f"Local Splunk preflight failed: {exc}") from exc
@@ -10115,6 +10792,13 @@ def _interactive_splunk_setup(
             "  Enable local Splunk (Docker, HEC logs, Free mode)?", default=False
         )
         enable_enterprise = click.confirm("  Enable remote Splunk Enterprise (HEC)?", default=False)
+        if enable_logs:
+            # Reject an invalid configured variable name before any selected
+            # remote integration mutates config in this combined transaction.
+            _validated_splunk_gateway_token_env_name(
+                _configured_gateway_token_env_name(app.cfg),
+                platform_name="nt",
+            )
         combined = enable_logs and (enable_o11y or enable_enterprise)
         config_path = str(config_path_for_data_dir(app.cfg.data_dir))
         dotenv_path = os.path.join(app.cfg.data_dir, ".env")
@@ -10650,7 +11334,16 @@ def _apply_logs_config(
     refresh_bundle: bool = True,
 ) -> None:
     """Configure the local Splunk bridge as a canonical HEC destination."""
-    if bootstrap_bridge and _native_windows_local_splunk():
+    native_windows = bootstrap_bridge and _native_windows_local_splunk()
+    gateway_token_env = (
+        _validated_splunk_gateway_token_env_name(
+            _configured_gateway_token_env_name(app.cfg),
+            platform_name="nt" if native_windows else None,
+        )
+        if bootstrap_bridge
+        else ""
+    )
+    if native_windows:
         _apply_native_windows_logs_config(
             app,
             index=index,
@@ -10661,6 +11354,7 @@ def _apply_logs_config(
             s3_prefix=s3_prefix,
             aws_region=aws_region,
             refresh_bundle=refresh_bundle,
+            gateway_token_env=gateway_token_env,
         )
         return
 
@@ -10668,6 +11362,7 @@ def _apply_logs_config(
     if bootstrap_bridge:
         contract = _bootstrap_bridge(
             app.cfg.data_dir,
+            gateway_token_env=gateway_token_env,
             s3_export=s3_export,
             s3_bucket=s3_bucket,
             s3_prefix=s3_prefix,
@@ -10719,8 +11414,14 @@ def _apply_native_windows_logs_config(
     s3_prefix: str | None,
     aws_region: str | None,
     refresh_bundle: bool,
+    gateway_token_env: str,
 ) -> None:
     """Commit native Local Splunk, its sink, and gateway as one transaction."""
+
+    native_child_env = _splunk_bridge_child_env(
+        gateway_token_env,
+        platform_name="nt",
+    )
 
     from defenseclaw.observability.local_splunk import (
         LOCAL_TOKEN_ENV,
@@ -10757,6 +11458,7 @@ def _apply_native_windows_logs_config(
             s3_prefix=s3_prefix,
             aws_region=aws_region,
             refresh_bundle=refresh_bundle,
+            environment=native_child_env,
         )
         contract = transaction.contract
         click.echo("    Docker Desktop, Compose v2, Linux containers, assets, and ports... ok")
@@ -10931,10 +11633,92 @@ def _resolve_bridge_bin(data_dir: str) -> str | None:
     return splunk_bridge_bin(data_dir)
 
 
+def _validated_gateway_token_env_name(raw_name: Any) -> str:
+    """Return one exact portable environment name without normalizing it."""
+
+    if raw_name is None:
+        return ""
+    if not isinstance(raw_name, str):
+        raise click.ClickException("gateway.token_env must be a portable environment variable name")
+    if raw_name != raw_name.strip() or (raw_name and not dotenv_key_is_valid(raw_name)):
+        raise click.ClickException("gateway.token_env must be a portable environment variable name")
+    return raw_name
+
+
+def _configured_gateway_token_env_name(cfg: Any) -> str:
+    """Return the configured gateway token variable name after validation."""
+
+    gateway = getattr(cfg, "gateway", None)
+    return _validated_gateway_token_env_name(getattr(gateway, "token_env", ""))
+
+
+def _validated_splunk_gateway_token_env_name(
+    gateway_token_env: Any,
+    *,
+    platform_name: str | None = None,
+) -> str:
+    """Reject names that a Local Splunk private env overlay can recreate."""
+
+    configured_name = _validated_gateway_token_env_name(gateway_token_env)
+    if not configured_name:
+        return ""
+    case_insensitive = (platform_name or os.name) == "nt"
+    compared_name = configured_name.casefold() if case_insensitive else configured_name
+    managed_names = (
+        {name.casefold() for name in _SPLUNK_BRIDGE_MANAGED_ENV_NAMES}
+        if case_insensitive
+        else _SPLUNK_BRIDGE_MANAGED_ENV_NAMES
+    )
+    if compared_name in managed_names:
+        raise click.ClickException(
+            "gateway.token_env must not collide with a Local Splunk managed environment variable name"
+        )
+    return configured_name
+
+
+def _splunk_bridge_child_env(
+    gateway_token_env: str = "",
+    *,
+    environment: Mapping[str, str] | None = None,
+    platform_name: str | None = None,
+) -> dict[str, str]:
+    """Return the bridge environment without any gateway bearer variable.
+
+    Iterate names first and fetch values only for retained entries so the
+    configured gateway token value is never read while constructing the child
+    environment. Windows environment names are case-insensitive.
+    """
+
+    configured_name = _validated_splunk_gateway_token_env_name(
+        gateway_token_env,
+        platform_name=platform_name,
+    )
+    blocked_names = {
+        _GATEWAY_TOKEN_ENV,
+        _LEGACY_GATEWAY_TOKEN_ENV,
+    }
+    if configured_name:
+        blocked_names.add(configured_name)
+    case_insensitive = (platform_name or os.name) == "nt"
+    if case_insensitive:
+        blocked_names = {name.casefold() for name in blocked_names}
+
+    source = os.environ if environment is None else environment
+    child_env: dict[str, str] = {}
+    for name in source:
+        compared_name = name.casefold() if case_insensitive else name
+        if compared_name in blocked_names:
+            continue
+        child_env[name] = source[name]
+    return child_env
+
+
 def _refresh_and_maybe_restart_splunk_bridge(
     data_dir: str,
     *,
     env_file: str | None = None,
+    child_env: dict[str, str] | None = None,
+    gateway_token_env: str = "",
 ) -> RefreshResult:
     """Refresh the seeded Splunk bridge, stopping any running stack first.
 
@@ -10956,7 +11740,14 @@ def _refresh_and_maybe_restart_splunk_bridge(
     happened and never has to wonder why a previously-running stack
     came back up on a different image.
     """
-    was_running = is_compose_project_running(SPLUNK_COMPOSE_PROJECT)
+    effective_child_env = _splunk_bridge_child_env(
+        gateway_token_env,
+        environment=child_env,
+    )
+    was_running = is_compose_project_running(
+        SPLUNK_COMPOSE_PROJECT,
+        environment=effective_child_env,
+    )
     stopped = False
     if was_running:
         click.echo(f"  {ux.dim('→')} Stopping running local Splunk stack to refresh bundle...")
@@ -10972,6 +11763,7 @@ def _refresh_and_maybe_restart_splunk_bridge(
                     text=True,
                     timeout=120,
                     check=False,
+                    env=effective_child_env,
                 )
                 stopped = True
             except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
@@ -11007,6 +11799,7 @@ def _refresh_and_maybe_restart_splunk_bridge(
 def _bootstrap_bridge(
     data_dir: str,
     *,
+    gateway_token_env: str = "",
     s3_export: bool = False,
     s3_bucket: str | None = None,
     s3_prefix: str | None = None,
@@ -11024,9 +11817,15 @@ def _bootstrap_bridge(
     volumes survive ``down``, so user data is preserved) so the new
     bundle is what gets brought back up.
     """
+    env = _splunk_bridge_child_env(gateway_token_env)
     env_file = _ensure_private_splunk_bridge_env(data_dir)
     if refresh_bundle:
-        _refresh_and_maybe_restart_splunk_bridge(data_dir, env_file=env_file)
+        _refresh_and_maybe_restart_splunk_bridge(
+            data_dir,
+            env_file=env_file,
+            child_env=env,
+            gateway_token_env=gateway_token_env,
+        )
 
     bridge = _resolve_bridge_bin(data_dir)
     if not bridge:
@@ -11035,9 +11834,11 @@ def _bootstrap_bridge(
         return None
 
     click.echo("  Starting local Splunk (this takes ~2 minutes)...")
-    env = None
+    # The bridge has its own private env file and never needs the gateway
+    # bearer. Supplying the same explicit child environment to refresh/down
+    # and up prevents it (and docker/compose descendants) from inheriting the
+    # gateway credential.
     if s3_export:
-        env = os.environ.copy()
         env["S3_EXPORT_ENABLED"] = "true"
         if s3_bucket:
             env["S3_BUCKET"] = s3_bucket
@@ -11053,8 +11854,7 @@ def _bootstrap_bridge(
     result: subprocess.CompletedProcess[str] | None = None
     try:
         run_kwargs = {"capture_output": True, "text": True, "timeout": 300}
-        if env is not None:
-            run_kwargs["env"] = env
+        run_kwargs["env"] = env
         result = subprocess.run(
             [bridge, "up", "--env-file", env_file, "--output", "json"],
             **run_kwargs,
@@ -11299,6 +12099,19 @@ def _disable_splunk(
         raise click.ClickException(LOCAL_SHELL_STACKS_UNSUPPORTED_REASON)
     disable_both = not o11y_only and not logs_only and not enterprise_only
     manage_local = local_shell_stacks_supported()
+    native_windows = _native_windows_local_splunk()
+    gateway_token_env = (
+        _validated_splunk_gateway_token_env_name(
+            _configured_gateway_token_env_name(app.cfg),
+            platform_name="nt" if native_windows else None,
+        )
+        if (disable_both or logs_only) and manage_local
+        else ""
+    )
+    native_disable_requested = native_windows and manage_local and (disable_both or logs_only)
+    native_child_env = (
+        _splunk_bridge_child_env(gateway_token_env, platform_name="nt") if native_disable_requested else None
+    )
 
     click.echo()
     click.echo("  Disabling Splunk integration...")
@@ -11307,8 +12120,6 @@ def _disable_splunk(
     native_was_running = False
     native_s3_export = False
     native_s3_overrides: dict[str, str] = {}
-    native_windows = _native_windows_local_splunk()
-    native_disable_requested = native_windows and manage_local and (disable_both or logs_only)
     config_snapshot: tuple[bytes | None, int | None] | None = None
     config_path = str(config_path_for_data_dir(app.cfg.data_dir))
 
@@ -11330,7 +12141,10 @@ def _disable_splunk(
         from defenseclaw.observability.local_stack import LocalStackError
 
         try:
-            native_controller, native_was_running = prepare_native_local_splunk_stop(app.cfg.data_dir)
+            native_controller, native_was_running = prepare_native_local_splunk_stop(
+                app.cfg.data_dir,
+                environment=native_child_env,
+            )
             if native_controller is not None and native_was_running:
                 native_s3_export, native_s3_overrides = native_controller.s3_runtime_state()
         except LocalStackError as exc:
@@ -11386,7 +12200,10 @@ def _disable_splunk(
             if native_controller is not None and native_was_running:
                 native_controller.down()
         elif (disable_both or logs_only) and manage_local and not native_windows:
-            _stop_bridge(app.cfg.data_dir)
+            _stop_bridge(
+                app.cfg.data_dir,
+                gateway_token_env=gateway_token_env,
+            )
     except BaseException as exc:
         rollback_errors: list[str] = []
         if config_snapshot is not None:
@@ -11431,15 +12248,23 @@ def _disable_splunk(
         app.logger.log_action(ACTION_SETUP_SPLUNK, "config", " ".join(parts))
 
 
-def _stop_bridge(data_dir: str) -> None:
+def _stop_bridge(data_dir: str, *, gateway_token_env: str = "") -> None:
     if not local_shell_stacks_supported():
         return
-    if _native_windows_local_splunk():
+    native_windows = _native_windows_local_splunk()
+    child_env = _splunk_bridge_child_env(
+        gateway_token_env,
+        platform_name="nt" if native_windows else None,
+    )
+    if native_windows:
         from defenseclaw.observability.local_splunk import stop_native_local_splunk
         from defenseclaw.observability.local_stack import LocalStackError
 
         try:
-            stopped = stop_native_local_splunk(data_dir)
+            stopped = stop_native_local_splunk(
+                data_dir,
+                environment=child_env,
+            )
         except LocalStackError as exc:
             raise click.ClickException(f"could not stop owned Local Splunk stack: {exc}") from exc
         if stopped:
@@ -11456,6 +12281,7 @@ def _stop_bridge(data_dir: str) -> None:
             capture_output=True,
             text=True,
             timeout=60,
+            env=child_env,
         )
         click.echo("    Local Splunk container stopped")
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):

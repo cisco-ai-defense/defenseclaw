@@ -20,3 +20,7 @@ func atomicFileValidateStagedProtection(_ *os.File, _ os.FileMode) error { retur
 func atomicFilePublish(source, destination string, _ os.FileInfo, _ os.FileMode) error {
 	return safefile.ReplaceFile(source, destination)
 }
+
+func atomicFilePublishHookAPIToken(source, destination string, info os.FileInfo, perm os.FileMode) error {
+	return atomicFilePublish(source, destination, info, perm)
+}

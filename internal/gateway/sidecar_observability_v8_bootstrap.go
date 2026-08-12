@@ -13,6 +13,7 @@ package gateway
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -334,17 +335,35 @@ func (s *Sidecar) prepareObservabilityV8Runtime(
 		return nil, newSidecarObservabilityV8BootstrapError(sidecarObservabilityV8BootstrapRuntime, err)
 	}
 	return &sidecarOwnedObservabilityV8Runtime{
-		runtime: runtime, dataDir: filepath.Clean(compiled.DataDir),
+		runtime: runtime, redactionEngine: engine, dataDir: filepath.Clean(compiled.DataDir),
 		retainJudgeBodies: retainJudgeBodies,
 	}, nil
 }
 
 type sidecarOwnedObservabilityV8Runtime struct {
 	runtime           *observabilityruntime.Runtime
+	redactionEngine   *redaction.Engine
 	dataDir           string
 	retainJudgeBodies bool
 	lifecycleMu       sync.RWMutex
 	closed            bool
+}
+
+// FingerprintRuntimeV8FindingContent keeps the correlation key inside the
+// observability redaction Engine and exposes only the schema-sized keyed token
+// to the audit persistence boundary.
+func (owner *sidecarOwnedObservabilityV8Runtime) FingerprintRuntimeV8FindingContent(
+	value string,
+) (string, error) {
+	if owner == nil || owner.redactionEngine == nil {
+		return "", fmt.Errorf("sidecar observability v8 correlation fingerprint is unavailable")
+	}
+	owner.lifecycleMu.RLock()
+	defer owner.lifecycleMu.RUnlock()
+	if owner.closed {
+		return "", fmt.Errorf("sidecar observability v8 correlation fingerprint is unavailable")
+	}
+	return owner.redactionEngine.CorrelationFingerprintV1(value, observability.FieldClassEvidence)
 }
 
 func (owner *sidecarOwnedObservabilityV8Runtime) ApplyAlertAcknowledgement(
@@ -964,10 +983,11 @@ func newSidecarObservabilityV8BootstrapError(
 }
 
 var (
-	_ sidecarRuntimeEmitter                = (*sidecarOwnedObservabilityV8Runtime)(nil)
-	_ sidecarRuntimeCanaryEmitter          = (*sidecarOwnedObservabilityV8Runtime)(nil)
-	_ sidecarRuntimeLocalOnlyEmitter       = (*sidecarOwnedObservabilityV8Runtime)(nil)
-	_ lifecycleV8Runtime                   = (*sidecarOwnedObservabilityV8Runtime)(nil)
-	_ audit.RuntimeV8Emitter               = (*sidecarOwnedObservabilityV8Runtime)(nil)
-	_ config.ObservabilityV8SecretResolver = sidecarObservabilityV8SecretResolver{}
+	_ sidecarRuntimeEmitter                      = (*sidecarOwnedObservabilityV8Runtime)(nil)
+	_ sidecarRuntimeCanaryEmitter                = (*sidecarOwnedObservabilityV8Runtime)(nil)
+	_ sidecarRuntimeLocalOnlyEmitter             = (*sidecarOwnedObservabilityV8Runtime)(nil)
+	_ lifecycleV8Runtime                         = (*sidecarOwnedObservabilityV8Runtime)(nil)
+	_ audit.RuntimeV8Emitter                     = (*sidecarOwnedObservabilityV8Runtime)(nil)
+	_ audit.RuntimeV8FindingContentFingerprinter = (*sidecarOwnedObservabilityV8Runtime)(nil)
+	_ config.ObservabilityV8SecretResolver       = sidecarObservabilityV8SecretResolver{}
 )

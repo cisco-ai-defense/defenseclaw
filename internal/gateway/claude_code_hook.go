@@ -595,18 +595,7 @@ func nonEmptyStrings(values ...string) []string {
 }
 
 func claudeCodeString(v interface{}) string {
-	switch t := v.(type) {
-	case string:
-		return t
-	case nil:
-		return ""
-	default:
-		b, err := json.Marshal(t)
-		if err != nil {
-			return ""
-		}
-		return string(b)
-	}
+	return structuredHookContentString(v)
 }
 
 func claudeCodePayloadString(payload map[string]interface{}, key string) string {
@@ -651,7 +640,7 @@ func (a *APIServer) scanClaudeCodeEventFile(ctx context.Context, req claudeCodeH
 	}
 	findings := make([]string, 0, len(result.Findings))
 	for _, f := range result.Findings {
-		findings = append(findings, f.ID)
+		findings = append(findings, firstNonEmpty(f.RuleID, f.ID))
 		if len(findings) >= 20 {
 			break
 		}
@@ -694,7 +683,7 @@ func (a *APIServer) scanClaudeCodeChangedFiles(ctx context.Context, req claudeCo
 			maxSeverity = result.MaxSeverity()
 		}
 		for _, f := range result.Findings {
-			findings = append(findings, f.ID)
+			findings = append(findings, firstNonEmpty(f.RuleID, f.ID))
 			if len(findings) >= 20 {
 				break
 			}

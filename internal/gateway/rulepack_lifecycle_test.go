@@ -467,8 +467,9 @@ func TestConnectorRosterOnlyReloadRetiresRemovedPreviousManualConnector(t *testi
 			removedPresent,
 		)
 	}
+	candidateAWSKey := "AKIA" + "7G4N2K9Q6M8R3T5V"
 	if containsRuleID(ruleIDsForConnector("codex", "old_codex_token"), "OLD-CODEX") ||
-		!containsRuleID(ruleIDsForConnector("codex", "AKIAIOSFODNN7EXAMPLE"), "SEC-AWS-KEY") {
+		!containsRuleID(ruleIDsForConnector("codex", candidateAWSKey), "SEC-AWS-KEY") {
 		t.Fatal("retained connector did not receive the candidate default generation")
 	}
 	if !containsRuleID(findingIDs(ScanAllRules("global_before_token", "exec")), "GLOBAL-BEFORE") {

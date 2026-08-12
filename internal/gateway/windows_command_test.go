@@ -288,6 +288,64 @@ func TestWindowsDownloadExecuteLiveConnectorToolNames(t *testing.T) {
 	}
 }
 
+func TestWindowsConnectorContractCompoundRegistryPersistence(t *testing.T) {
+	t.Parallel()
+	const command = `reg.exe add HKCU\Software\Microsoft\Windows\CurrentVersion\Run /v DefenseClawContract /t REG_SZ /d harmless-placeholder /f; Set-Content -LiteralPath 'C:\Temp\registry-persistence.marker' -Value 'unexpected-execution'`
+
+	assertBlocked := func(t *testing.T, rawAction string, ruleIDs []string) {
+		t.Helper()
+		if rawAction != guardrailActionBlock {
+			t.Fatalf("raw_action=%q rule_ids=%v, want block", rawAction, ruleIDs)
+		}
+		if !containsString(ruleIDs, "CMD-WIN-REG-PERSIST") {
+			t.Fatalf("registry persistence rule missing from %v", ruleIDs)
+		}
+	}
+
+	t.Run("codex", func(t *testing.T) {
+		store, logger := testStoreAndLogger(t)
+		cfg := &config.Config{}
+		cfg.Guardrail.Mode = "observe"
+		cfg.Guardrail.Connector = "codex"
+		api := &APIServer{scannerCfg: cfg, store: store, logger: logger}
+		response := api.evaluateCodexHook(t.Context(), codexHookRequest{
+			HookEventName: "PreToolUse",
+			ToolName:      "shell",
+			ToolInput:     map[string]interface{}{"command": command},
+		})
+		assertBlocked(t, response.RawAction, response.RuleIDs)
+	})
+
+	t.Run("claudecode", func(t *testing.T) {
+		store, logger := testStoreAndLogger(t)
+		cfg := &config.Config{}
+		cfg.Guardrail.Mode = "observe"
+		cfg.Guardrail.Connector = "claudecode"
+		api := &APIServer{scannerCfg: cfg, store: store, logger: logger}
+		response := api.evaluateClaudeCodeHook(t.Context(), claudeCodeHookRequest{
+			HookEventName: "PreToolUse",
+			ToolName:      "Bash",
+			ToolInput:     map[string]interface{}{"command": command},
+		})
+		assertBlocked(t, response.RawAction, response.RuleIDs)
+	})
+
+	t.Run("amp", func(t *testing.T) {
+		store, logger := testStoreAndLogger(t)
+		cfg := &config.Config{}
+		cfg.Guardrail.Mode = "observe"
+		cfg.Guardrail.Connector = "amp"
+		api := &APIServer{scannerCfg: cfg, store: store, logger: logger}
+		response := api.evaluateAgentHook(t.Context(), agentHookRequest{
+			ConnectorName: "amp",
+			HookEventName: "tool.call",
+			ToolName:      "shell",
+			ToolArgs:      mustJSONMarshal(map[string]interface{}{"command": command}),
+		})
+		assertBlocked(t, response.RawAction, response.RuleIDs)
+	})
+}
+
 func TestWindowsCommandScopedDeleteAllowsWithoutFilesystemSideEffect(t *testing.T) {
 	dir := t.TempDir()
 	sentinel := filepath.Join(dir, "sentinel.txt")

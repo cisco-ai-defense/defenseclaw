@@ -131,8 +131,8 @@ func TestAxesForRuleID_CoversRealScannerRules(t *testing.T) {
 
 // TestJudgeDestructiveHasNoAxis pins the one tool-injection judge
 // category that must NOT carry a trifecta axis — destructive commands
-// flow through the capability path (DESTRUCTIVE-FLOW), not the
-// ingress/sensitive/egress axes.
+// flow through the capability path, not the ingress/sensitive/egress
+// axes.
 func TestJudgeDestructiveHasNoAxis(t *testing.T) {
 	if got := AxesForRuleID("JUDGE-TOOL-INJ-DESTRUCT"); len(got) != 0 {
 		t.Errorf("AxesForRuleID(JUDGE-TOOL-INJ-DESTRUCT) = %v, want no axis", got)
@@ -164,8 +164,8 @@ func TestAxesForFinding_Fallbacks(t *testing.T) {
 
 // TestCapabilityForRuleID_ProducerCoverage pins the rule IDs whose
 // matched behaviour exercises a tool capability. Without these the
-// DESTRUCTIVE-FLOW correlator pattern can never fire
-// on regex/plugin findings (which carry no tool name).
+// capability dimension is unavailable to custom correlation patterns
+// for regex/plugin findings (which carry no tool name).
 func TestCapabilityForRuleID_ProducerCoverage(t *testing.T) {
 	cases := map[string]ToolCapabilityClass{
 		// Shell / code execution

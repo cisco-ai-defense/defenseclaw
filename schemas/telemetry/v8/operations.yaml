@@ -7847,6 +7847,43 @@ groups:
     legacy_bindings:
     - source: schemas/otel/metrics.schema.json x-emitted-metrics
       disposition: preserved
+- id: metric.defenseclaw.managed_aid.fail_open.decisions
+  type: metric
+  brief: Managed AI Defense decisions that fail open instead of enforcing a remote verdict
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: defenseclaw.metric.reason
+    requirement_level: required
+    constraints:
+      enum:
+      - inspector_unwired
+      - aid_unavailable
+      - no_content
+      - unknown
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.managed_aid.fail_open.decisions
+    instrument_type: counter
+    value_type: int64
+    unit: '{decision}'
+    description: Managed AI Defense inspections that allowed because inspection was unwired, unavailable, had no content, or returned an unknown fail-open reason
+    temporality: delta
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.metric.reason
+        label: reason
+  x-defenseclaw:
+    bucket: platform.health
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: schemas/otel/metrics.schema.json x-emitted-metrics
+      disposition: preserved
 - id: metric.defenseclaw.otel.ingest.bytes
   type: metric
   brief: Total OTLP body bytes received by the connector ingest receiver, by signal/source

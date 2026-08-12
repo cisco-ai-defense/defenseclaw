@@ -8,6 +8,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -223,9 +224,13 @@ FROM scan_findings WHERE scan_id = ? ORDER BY severity`, scanID)
 // drive pattern matching.
 type CorrelationFindingRow struct {
 	ID                  string
+	AgentID             string
+	AgentInstanceID     string
+	Scanner             string
 	RuleID              sql.NullString
 	Category            sql.NullString
 	Severity            string
+	Tags                []string
 	DataAxis            sql.NullString
 	ToolCapabilityClass sql.NullString
 	ContentFingerprint  sql.NullString
@@ -234,21 +239,98 @@ type CorrelationFindingRow struct {
 	Timestamp           string
 }
 
-// ListRecentFindingsInSession returns up to `limit` most-recent findings
-// for a given (session_id, agent_instance_id) pair, newest first. The
-// correlator calls this on every new finding insert to evaluate its
-// pattern library against a sliding event window.
-func (s *Store) ListRecentFindingsInSession(sessionID, agentInstanceID string, limit int) ([]CorrelationFindingRow, error) {
+const correlationCandidateMultiplier = 8
+
+// correlationAgentPartitionSQL returns the exact identity predicate used by
+// both the contributor window and durable firing ledger. When an instance is
+// present, a known logical agent must match inside it; missing logical identity
+// is isolated from known agents. When the instance is absent, only rows that
+// also lack an instance may use agent_id as a conservative fallback.
+func correlationAgentPartitionSQL(sessionID, agentInstanceID, agentID string) (string, []any, bool) {
+	sessionID = strings.TrimSpace(sessionID)
+	agentInstanceID = strings.TrimSpace(agentInstanceID)
+	agentID = strings.TrimSpace(agentID)
+	if sessionID == "" || (agentInstanceID == "" && agentID == "") {
+		return "", nil, false
+	}
+	if agentInstanceID != "" && agentID != "" {
+		return `session_id = ? AND agent_instance_id = ? AND agent_id = ?`,
+			[]any{sessionID, agentInstanceID, agentID}, true
+	}
+	if agentInstanceID != "" {
+		return `session_id = ? AND agent_instance_id = ? AND TRIM(COALESCE(agent_id, '')) = ''`,
+			[]any{sessionID, agentInstanceID}, true
+	}
+	return `session_id = ? AND TRIM(COALESCE(agent_instance_id, '')) = '' AND agent_id = ?`,
+		[]any{sessionID, agentID}, true
+}
+
+// ListRecentFindingsInSession returns up to limit most-recent findings for one
+// exact session/agent partition, newest first. The correlator calls this on
+// every new finding insert to evaluate its pattern library against a sliding
+// event window.
+func (s *Store) ListRecentFindingsInSession(
+	sessionID, agentInstanceID, agentID string,
+	limit int,
+) ([]CorrelationFindingRow, error) {
 	if limit <= 0 {
 		limit = 20
 	}
-	rows, err := s.db.Query(`
-SELECT id, rule_id, category, severity,
+	identityWhere, identityArgs, ok := correlationAgentPartitionSQL(sessionID, agentInstanceID, agentID)
+	if !ok {
+		return nil, nil
+	}
+	// Read a bounded overscan so duplicate primitives can be collapsed before
+	// the declared correlation window is applied. This recovers older distinct
+	// signals after ordinary alert replay without turning every new finding into
+	// an unbounded full-session query.
+	candidateLimit := limit
+	if maxInt := int(^uint(0) >> 1); limit <= maxInt/correlationCandidateMultiplier {
+		candidateLimit = limit * correlationCandidateMultiplier
+	}
+	query := fmt.Sprintf(`
+WITH eligible AS (
+	SELECT id, COALESCE(agent_id, '') AS agent_id,
+	       COALESCE(agent_instance_id, '') AS agent_instance_id,
+	       scanner, rule_id, category, severity, tags,
+	       data_axis, tool_capability_class, content_fingerprint, external_endpoint, turn_id, timestamp
+	FROM scan_findings
+	WHERE %s
+		AND COALESCE(scanner, '') <> ? COLLATE NOCASE
+		AND NOT EXISTS (
+			SELECT 1
+			FROM json_each(
+				CASE
+					WHEN json_valid(COALESCE(tags, '')) THEN
+						CASE WHEN json_type(tags) = 'array' THEN tags ELSE '[]' END
+					ELSE '[]'
+				END
+			) AS finding_tag
+			WHERE LOWER(TRIM(CAST(finding_tag.value AS TEXT))) = ?
+		)
+	ORDER BY timestamp DESC, id DESC
+	LIMIT ?
+), ranked AS (
+	SELECT eligible.*,
+	       ROW_NUMBER() OVER (
+			PARTITION BY
+				CASE WHEN TRIM(COALESCE(content_fingerprint, '')) = '' THEN id ELSE '' END,
+				CASE WHEN TRIM(COALESCE(content_fingerprint, '')) = '' THEN '' ELSE LOWER(TRIM(COALESCE(rule_id, ''))) END,
+				CASE WHEN TRIM(COALESCE(content_fingerprint, '')) = '' THEN '' ELSE LOWER(TRIM(COALESCE(category, ''))) END,
+				CASE WHEN TRIM(COALESCE(content_fingerprint, '')) = '' THEN '' ELSE LOWER(TRIM(content_fingerprint)) END
+			ORDER BY timestamp ASC, id ASC
+	       ) AS primitive_rank
+	FROM eligible
+)
+SELECT id, agent_id, agent_instance_id, scanner, rule_id, category, severity, tags,
        data_axis, tool_capability_class, content_fingerprint, external_endpoint, turn_id, timestamp
-FROM scan_findings
-WHERE session_id = ? AND agent_instance_id = ?
-ORDER BY timestamp DESC
-LIMIT ?`, sessionID, agentInstanceID, limit)
+FROM ranked
+WHERE primitive_rank = 1
+ORDER BY timestamp DESC, id DESC
+	LIMIT ?`, identityWhere)
+	queryArgs := append([]any(nil), identityArgs...)
+	queryArgs = append(queryArgs, "correlator", strings.ToLower(scanner.FindingTagDetectionOnly), candidateLimit, limit)
+	rows, err := s.db.Query(query, queryArgs...)
 	if err != nil {
 		return nil, fmt.Errorf("audit: list recent findings in session: %w", err)
 	}
@@ -257,14 +339,102 @@ LIMIT ?`, sessionID, agentInstanceID, limit)
 	var out []CorrelationFindingRow
 	for rows.Next() {
 		var r CorrelationFindingRow
+		var tagsJSON sql.NullString
 		if err := rows.Scan(
-			&r.ID, &r.RuleID, &r.Category, &r.Severity,
+			&r.ID, &r.AgentID, &r.AgentInstanceID, &r.Scanner, &r.RuleID, &r.Category, &r.Severity, &tagsJSON,
 			&r.DataAxis, &r.ToolCapabilityClass, &r.ContentFingerprint,
 			&r.ExternalEndpoint, &r.TurnID, &r.Timestamp,
 		); err != nil {
 			return nil, fmt.Errorf("audit: correlation finding row: %w", err)
 		}
+		if tagsJSON.Valid {
+			if err := json.Unmarshal([]byte(tagsJSON.String), &r.Tags); err != nil {
+				return nil, fmt.Errorf("audit: decode correlation finding tags for %s: %w", r.ID, err)
+			}
+		}
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+const correlationLedgerBatchSize = 100
+
+// ListFiredCorrelationRuleIDsInSession returns the subset of candidate CORR-*
+// rule IDs already persisted for a session. Synthetic rows remain excluded
+// from contributor windows; this narrow metadata lookup is only the durable
+// once-per-session firing ledger used after a process restart.
+func (s *Store) ListFiredCorrelationRuleIDsInSession(
+	sessionID, agentInstanceID, agentID string,
+	candidateRuleIDs []string,
+) ([]string, error) {
+	if len(candidateRuleIDs) == 0 {
+		return nil, nil
+	}
+	identityWhere, identityArgs, ok := correlationAgentPartitionSQL(sessionID, agentInstanceID, agentID)
+	if !ok {
+		return nil, nil
+	}
+
+	// Normalize and deduplicate the caller's bounded pattern set before
+	// constructing parameterized IN queries. Batching stays below SQLite's
+	// variable ceiling even for an unusually large operator rule pack.
+	wanted := make(map[string]string, len(candidateRuleIDs))
+	ordered := make([]string, 0, len(candidateRuleIDs))
+	for _, ruleID := range candidateRuleIDs {
+		trimmed := strings.TrimSpace(ruleID)
+		if trimmed == "" {
+			continue
+		}
+		key := strings.ToLower(trimmed)
+		if _, duplicate := wanted[key]; duplicate {
+			continue
+		}
+		wanted[key] = trimmed
+		ordered = append(ordered, key)
+	}
+
+	fired := make([]string, 0, len(ordered))
+	for start := 0; start < len(ordered); start += correlationLedgerBatchSize {
+		end := start + correlationLedgerBatchSize
+		if end > len(ordered) {
+			end = len(ordered)
+		}
+		batch := ordered[start:end]
+		placeholders := strings.TrimSuffix(strings.Repeat("?,", len(batch)), ",")
+		query := fmt.Sprintf(`
+SELECT DISTINCT LOWER(TRIM(rule_id))
+FROM scan_findings
+WHERE %s
+	AND LOWER(TRIM(COALESCE(scanner, ''))) = ?
+	AND LOWER(TRIM(COALESCE(rule_id, ''))) IN (%s)
+ORDER BY LOWER(TRIM(rule_id))`, identityWhere, placeholders)
+		args := make([]any, 0, len(identityArgs)+len(batch)+1)
+		args = append(args, identityArgs...)
+		args = append(args, "correlator")
+		for _, ruleID := range batch {
+			args = append(args, ruleID)
+		}
+		rows, err := s.db.Query(query, args...)
+		if err != nil {
+			return nil, fmt.Errorf("audit: list fired correlation rules in session: %w", err)
+		}
+		for rows.Next() {
+			var normalizedRuleID string
+			if err := rows.Scan(&normalizedRuleID); err != nil {
+				rows.Close()
+				return nil, fmt.Errorf("audit: fired correlation rule row: %w", err)
+			}
+			if original, ok := wanted[normalizedRuleID]; ok {
+				fired = append(fired, original)
+			}
+		}
+		rowsErr := rows.Err()
+		if closeErr := rows.Close(); rowsErr == nil {
+			rowsErr = closeErr
+		}
+		if rowsErr != nil {
+			return nil, fmt.Errorf("audit: iterate fired correlation rules in session: %w", rowsErr)
+		}
+	}
+	return fired, nil
 }

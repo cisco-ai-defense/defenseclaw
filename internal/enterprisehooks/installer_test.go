@@ -6,6 +6,7 @@ package enterprisehooks
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"os"
 	"path/filepath"
@@ -130,6 +131,7 @@ func TestInstallOmnigentPolicyModuleThroughGuardian(t *testing.T) {
 		connector.OmnigentSitePackagesPathOverride = previousSite
 	})
 
+	scopedToken := strings.Repeat("c", 64)
 	result, err := Install(context.Background(), InstallOptions{
 		ConnectorName: "omnigent",
 		UserHome:      home,
@@ -137,7 +139,7 @@ func TestInstallOmnigentPolicyModuleThroughGuardian(t *testing.T) {
 		OwnerGID:      os.Getgid(),
 		APIAddr:       "127.0.0.1:18970",
 		ProxyAddr:     "127.0.0.1:4000",
-		APIToken:      "omnigent-scoped-token",
+		APIToken:      scopedToken,
 		GuardrailMode: "action",
 		HookFailMode:  "closed",
 		AgentVersion:  "omnigent 0.1.0",
@@ -159,6 +161,29 @@ func TestInstallOmnigentPolicyModuleThroughGuardian(t *testing.T) {
 	if !strings.Contains(string(configData), "defenseclaw_omnigent_policy.defenseclaw_policy") {
 		t.Fatalf("OmniGent config does not reference DefenseClaw policy module:\n%s", configData)
 	}
+	tokenPath := filepath.Join(home, ".defenseclaw", "hooks", ".hook-omnigent.token")
+	tokenData, err := os.ReadFile(tokenPath)
+	if err != nil {
+		t.Fatalf("read OmniGent scoped token sidecar: %v", err)
+	}
+	if got, want := string(tokenData), scopedToken+"\n"; got != want {
+		t.Fatalf("OmniGent scoped token sidecar = %q, want exact token plus newline", got)
+	}
+	if info, err := os.Stat(tokenPath); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("OmniGent scoped token sidecar mode/info = %v, %v", info, err)
+	}
+	modulePath := filepath.Join(home, ".defenseclaw", "hooks", "defenseclaw_omnigent_policy.py")
+	moduleData, err := os.ReadFile(modulePath)
+	if err != nil {
+		t.Fatalf("read OmniGent policy module: %v", err)
+	}
+	if encodedPath := base64.StdEncoding.EncodeToString([]byte(tokenPath)); !strings.Contains(string(moduleData), encodedPath) {
+		t.Fatalf("OmniGent policy module does not reference the stable scoped token sidecar")
+	}
+	if strings.Contains(string(moduleData), scopedToken) ||
+		strings.Contains(string(moduleData), base64.StdEncoding.EncodeToString([]byte(scopedToken))) {
+		t.Fatal("OmniGent policy module embedded the connector-scoped token")
+	}
 }
 
 func TestInstallAMPManagedPluginThroughGuardian(t *testing.T) {
@@ -173,6 +198,7 @@ func TestInstallAMPManagedPluginThroughGuardian(t *testing.T) {
 		t.Fatalf("precondition: Amp plugin must be absent before first install: %v", err)
 	}
 
+	scopedToken := strings.Repeat("a", 64)
 	opts := InstallOptions{
 		ConnectorName: "amp",
 		UserHome:      home,
@@ -180,7 +206,7 @@ func TestInstallAMPManagedPluginThroughGuardian(t *testing.T) {
 		OwnerGID:      os.Getgid(),
 		APIAddr:       "127.0.0.1:18970",
 		ProxyAddr:     "127.0.0.1:4000",
-		APIToken:      "amp-enterprise-scoped-token",
+		APIToken:      scopedToken,
 		GuardrailMode: "action",
 		HookFailMode:  "closed",
 		AgentVersion:  "0.0.1785334225",
@@ -213,7 +239,8 @@ func TestInstallAMPManagedPluginThroughGuardian(t *testing.T) {
 	}
 	for _, marker := range []string{
 		"// defenseclaw-managed-plugin v2",
-		"amp-enterprise-scoped-token",
+		"DC_TOKEN_FILE",
+		filepath.Join(home, ".defenseclaw", "hooks", ".hook-amp.token"),
 		`amp.on("tool.call"`,
 		`amp.on("tool.result"`,
 	} {
@@ -221,18 +248,31 @@ func TestInstallAMPManagedPluginThroughGuardian(t *testing.T) {
 			t.Fatalf("Amp plugin missing %q", marker)
 		}
 	}
+	if strings.Contains(string(body), scopedToken) ||
+		strings.Contains(string(body), base64.StdEncoding.EncodeToString([]byte(scopedToken))) {
+		t.Fatal("Amp plugin embedded the connector-scoped token")
+	}
 	backupPath := filepath.Join(home, ".defenseclaw", "connector_backups", "amp", "config.json")
 	if backupInfo, err := os.Stat(backupPath); err != nil {
 		t.Fatalf("Amp managed backup missing: %v", err)
 	} else if got := backupInfo.Mode().Perm(); got != 0o600 {
 		t.Fatalf("Amp managed backup mode = %#o, want 0600", got)
 	}
-	if _, err := os.Stat(filepath.Join(home, ".defenseclaw", "hooks", ".hook-amp.token")); !os.IsNotExist(err) {
-		t.Fatalf("plugin install wrote an unnecessary user token sidecar: %v", err)
+	tokenPath := filepath.Join(home, ".defenseclaw", "hooks", ".hook-amp.token")
+	if tokenData, err := os.ReadFile(tokenPath); err != nil {
+		t.Fatalf("read Amp scoped token sidecar: %v", err)
+	} else if got, want := string(tokenData), scopedToken+"\n"; got != want {
+		t.Fatalf("Amp scoped token sidecar = %q, want exact token plus newline", got)
+	}
+	if info, err := os.Stat(tokenPath); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("Amp scoped token sidecar mode/info = %v, %v", info, err)
 	}
 
 	if err := os.WriteFile(pluginPath, []byte("// attacker replacement\n"), 0o644); err != nil {
 		t.Fatalf("tamper Amp plugin: %v", err)
+	}
+	if err := os.WriteFile(tokenPath, []byte("attacker-controlled-token\n"), 0o644); err != nil {
+		t.Fatalf("tamper Amp scoped token sidecar: %v", err)
 	}
 	opts.AllowMissingHookConfigRepair = true
 	if _, err := Install(context.Background(), opts); err != nil {
@@ -242,12 +282,23 @@ func TestInstallAMPManagedPluginThroughGuardian(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read repaired Amp plugin: %v", err)
 	}
-	if !strings.Contains(string(repaired), "amp-enterprise-scoped-token") ||
+	if !strings.Contains(string(repaired), "DC_TOKEN_FILE") ||
+		!strings.Contains(string(repaired), tokenPath) ||
 		strings.Contains(string(repaired), "attacker replacement") {
 		t.Fatalf("Amp plugin was not repaired:\n%s", repaired)
 	}
+	if strings.Contains(string(repaired), scopedToken) ||
+		strings.Contains(string(repaired), base64.StdEncoding.EncodeToString([]byte(scopedToken))) {
+		t.Fatal("repaired Amp plugin embedded the connector-scoped token")
+	}
 	if info, err := os.Stat(pluginPath); err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatalf("repaired Amp plugin mode/info = %v, %v", info, err)
+	}
+	if tokenData, err := os.ReadFile(tokenPath); err != nil || string(tokenData) != scopedToken+"\n" {
+		t.Fatalf("repaired Amp scoped token sidecar = %q, %v", tokenData, err)
+	}
+	if info, err := os.Stat(tokenPath); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("repaired Amp scoped token sidecar mode/info = %v, %v", info, err)
 	}
 
 	decoy := filepath.Join(home, "amp-plugin-decoy")
@@ -268,6 +319,86 @@ func TestInstallAMPManagedPluginThroughGuardian(t *testing.T) {
 	}
 	if got, err := os.ReadFile(decoy); err != nil || string(got) != "decoy must remain unchanged\n" {
 		t.Fatalf("Amp decoy changed: %q err=%v", got, err)
+	}
+}
+
+func TestInstallAMPRejectsMissingOrMalformedScopedTokenBeforeMutation(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
+	skipIfRoot(t)
+	for _, test := range []struct {
+		name  string
+		token string
+	}{
+		{name: "missing"},
+		{name: "non-hex", token: "not-a-scoped-token"},
+		{name: "uppercase", token: strings.Repeat("A", 64)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			home := newTestHome(t)
+			pluginPath := filepath.Join(home, ".config", "amp", "plugins", "defenseclaw.ts")
+			tokenPath := filepath.Join(home, ".defenseclaw", "hooks", ".hook-amp.token")
+			_, err := Install(context.Background(), InstallOptions{
+				ConnectorName: "amp",
+				UserHome:      home,
+				OwnerUID:      os.Getuid(),
+				OwnerGID:      os.Getgid(),
+				APIAddr:       "127.0.0.1:18970",
+				ProxyAddr:     "127.0.0.1:4000",
+				APIToken:      test.token,
+				GuardrailMode: "action",
+				HookFailMode:  "closed",
+				AgentVersion:  "0.0.1785334225",
+				Registry:      connector.NewDefaultRegistry(),
+			})
+			if err == nil || !strings.Contains(err.Error(), "connector-scoped hook token is required") {
+				t.Fatalf("Install error = %v, want scoped-token refusal", err)
+			}
+			if _, statErr := os.Lstat(pluginPath); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("Amp plugin was mutated before scoped-token refusal: %v", statErr)
+			}
+			if _, statErr := os.Lstat(tokenPath); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("Amp scoped token was mutated before refusal: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestInstallAMPPublicationFailureRollsBackRuntimeTokenAndContractLock(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
+	skipIfRoot(t)
+	home := newTestHome(t)
+	pluginPath := filepath.Join(home, ".config", "amp", "plugins", "defenseclaw.ts")
+	tokenPath := filepath.Join(home, ".defenseclaw", "hooks", ".hook-amp.token")
+	originalPublisher := publishEnterpriseHookAPIToken
+	publishEnterpriseHookAPIToken = func(_, _, _ string) error {
+		return errors.New("injected connector-scoped publication failure")
+	}
+	t.Cleanup(func() { publishEnterpriseHookAPIToken = originalPublisher })
+
+	_, err := Install(context.Background(), InstallOptions{
+		ConnectorName: "amp",
+		UserHome:      home,
+		OwnerUID:      os.Getuid(),
+		OwnerGID:      os.Getgid(),
+		APIAddr:       "127.0.0.1:18970",
+		ProxyAddr:     "127.0.0.1:4000",
+		APIToken:      strings.Repeat("a", 64),
+		GuardrailMode: "action",
+		HookFailMode:  "closed",
+		AgentVersion:  "0.0.1785334225",
+		Registry:      connector.NewDefaultRegistry(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "injected connector-scoped publication failure") {
+		t.Fatalf("Install error = %v, want injected publication failure", err)
+	}
+	if _, statErr := os.Lstat(pluginPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("failed install left the managed Amp policy plugin committed: %v", statErr)
+	}
+	if _, statErr := os.Lstat(tokenPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("failed install left the connector-scoped token committed: %v", statErr)
+	}
+	if entry := connector.LoadHookContractLockEntry(filepath.Join(home, ".defenseclaw"), "amp"); entry.Connector != "" {
+		t.Fatalf("failed install left the Amp hook contract lock committed: %+v", entry)
 	}
 }
 
@@ -297,7 +428,7 @@ func TestInstallAMPFirstInstallRefusesPluginSymlink(t *testing.T) {
 		OwnerGID:      os.Getgid(),
 		APIAddr:       "127.0.0.1:18970",
 		ProxyAddr:     "127.0.0.1:4000",
-		APIToken:      "amp-enterprise-scoped-token",
+		APIToken:      strings.Repeat("a", 64),
 		GuardrailMode: "action",
 		HookFailMode:  "closed",
 		AgentVersion:  "0.0.1785334225",
@@ -719,7 +850,7 @@ func TestWatchOwnedFilesClassifiesAMPPluginAsExclusive(t *testing.T) {
 		OwnerGID:      os.Getgid(),
 		APIAddr:       "127.0.0.1:18970",
 		ProxyAddr:     "127.0.0.1:4000",
-		APIToken:      "amp-enterprise-scoped-token",
+		APIToken:      strings.Repeat("a", 64),
 		GuardrailMode: "action",
 		HookFailMode:  "closed",
 		AgentVersion:  "0.0.1785334225",
@@ -733,6 +864,13 @@ func TestWatchOwnedFilesClassifiesAMPPluginAsExclusive(t *testing.T) {
 	}
 	if sliceContains(own.SharedWriter, pluginPath) {
 		t.Fatalf("Amp plugin must not be a shared-writer config file: %v", own.SharedWriter)
+	}
+	scopedTokenPath := filepath.Join(home, ".defenseclaw", "hooks", ".hook-amp.token")
+	if !sliceContains(own.ExclusiveWriter, scopedTokenPath) {
+		t.Fatalf("Amp scoped token sidecar missing from ExclusiveWriter: %v", own.ExclusiveWriter)
+	}
+	if sliceContains(own.SharedWriter, scopedTokenPath) {
+		t.Fatalf("Amp scoped token sidecar must not be a shared-writer file: %v", own.SharedWriter)
 	}
 }
 

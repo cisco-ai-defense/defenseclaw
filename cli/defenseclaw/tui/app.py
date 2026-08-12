@@ -1183,6 +1183,7 @@ class DefenseClawTUI(App[None]):
                         tooltip="Run `defenseclaw keys fill-missing`",
                     )
                 with Horizontal(id="alerts-controls", classes="panel-controls hidden"):
+                    yield Button("Actionable", id="alerts-filter-actionable", compact=True)
                     yield Button("All", id="alerts-filter-all", compact=True)
                     yield Button("Critical", id="alerts-filter-critical", compact=True, classes="severity-critical")
                     yield Button("High", id="alerts-filter-high", compact=True, classes="severity-high")
@@ -4347,8 +4348,8 @@ class DefenseClawTUI(App[None]):
         button.disabled = not visible
 
     def _sync_alert_controls(self) -> None:
-        active = (self.alerts_model.severity_filter or "all").lower()
-        for key in ("all", "critical", "high", "medium", "low"):
+        active = self.alerts_model.active_scope_key()
+        for key in ("actionable", "all", "critical", "high", "medium", "low"):
             self._set_button_active(f"#alerts-filter-{key}", active == key)
         selected = len(self.alerts_model.selected_ids)
         filtered = len(self.alerts_model.filtered_ids())
@@ -4749,6 +4750,11 @@ class DefenseClawTUI(App[None]):
             return
 
     def _handle_alert_control(self, button_id: str) -> None:
+        if button_id == "alerts-filter-actionable":
+            self.alerts_model.set_actionable_scope()
+            self._set_status("Showing actionable alerts.")
+            self._render_chrome()
+            return
         severity_by_button = {
             "alerts-filter-all": "",
             "alerts-filter-critical": "CRITICAL",

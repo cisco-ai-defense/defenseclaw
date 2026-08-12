@@ -254,6 +254,82 @@ The migration cursor records success only after the atomic write. Retrying an
 interrupted upgrade is idempotent: it does not duplicate destinations, routes,
 comments, environment entries, or schema work.
 
+## Historical audit-evidence cutoff (breaking)
+
+The first upgrade carrying this migration deliberately discards all rows that
+are present in these four local SQLite stores when the migration begins:
+
+- `findings`
+- `scan_findings`
+- `scan_results`
+- `audit_events`
+
+This is a one-time, breaking loss of historical scans, findings, alerts, and
+event history. The tables, indexes, integrity triggers, and current write APIs
+remain in place; new scans and audit events work normally after the gateway
+becomes ready. Alert-acknowledgement state, correlation state, guardrail replay
+and deny receipts, target snapshots, configuration, activity, egress, judge,
+and other operational tables are not history targets and are preserved.
+Those preserved operational and provenance rows can retain opaque identifiers
+or correlation metadata that refer to purged records. The cutoff therefore does
+not imply that all metadata or every form of forensic history has vanished.
+
+This is a one-way v8 cutoff. DefenseClaw does not interpret or preserve v7-and-
+older row meanings or JSON shapes at this boundary. Only current v8 operational
+state and new v8 writes made after the purge are guaranteed. An absent
+migration-1 `findings` table is treated as already empty cleanup, not as a
+promise of legacy compatibility.
+
+The four deletes and the existing schema-version cursor commit in one SQLite
+transaction. A missing mandatory active table, a constraint failure, or any
+late delete failure keeps the gateway unready and restores every affected row
+and the prior cursor. There is no content classification or JSON rewrite: even
+malformed, missing, or `null` legacy finding payloads are removed.
+If `scan_findings`, `scan_results`, or `audit_events` is missing, do not
+hand-create a replacement table. Preserve any incident copy required by policy,
+then restore a known-good current database or reinitialize local audit state
+before retrying the upgrade.
+
+<Callout title="This is logical deletion, not forensic erasure">
+After the migration commits, the four stores are empty to DefenseClaw queries,
+but deleted bytes can remain in free database pages, WAL/SHM files, an open
+reader's snapshot, filesystem snapshots, crash artifacts, and backups. Keep the
+database offline for checkpoint or compaction work. Do not claim physical
+erasure based only on a successful upgrade or an empty query result.
+</Callout>
+
+For a database that may already contain a credential or personal identifier:
+
+1. Stop every DefenseClaw process before making a manual checkpoint. If policy
+   requires a recovery copy, make an owner-private, encrypted checkpoint and
+   keep `audit.db`, `audit.db-wal`, and `audit.db-shm` together. Treat that copy
+   and every older backup as sensitive incident material.
+2. Run the authenticated release-owned upgrade and confirm the gateway health
+   check succeeds. A failed purge is transactional; correct the reported
+   database problem before retrying.
+3. If you must reclaim free pages or retire the WAL after the successful
+   logical purge, stop the gateway and all readers, then use the host's trusted
+   `sqlite3` binary. Let `sqlite3` close before restarting so the gateway opens
+   a fresh database snapshot:
+
+   ```bash
+   defenseclaw-gateway stop
+   sqlite3 ~/.defenseclaw/audit.db \
+     'PRAGMA wal_checkpoint(TRUNCATE); PRAGMA secure_delete=ON; VACUUM; PRAGMA wal_checkpoint(TRUNCATE);'
+   defenseclaw-gateway start
+   ```
+
+4. Retire superseded database copies, WAL/SHM files, crash artifacts, and
+   backups through your organization's secure-media and retention process.
+   Flash storage, copy-on-write filesystems, snapshots, and cloud backups can
+   retain physical blocks even after checkpoint and compaction; follow your
+   storage provider's destruction and encryption-key procedures.
+5. Rotate every credential whose bytes could have appeared in the old database
+   or its copies at the issuing system. If the affected value was the
+   DefenseClaw gateway token, rotate it with
+   `defenseclaw setup rotate-token --yes`. Handle exposed PII under your privacy
+   and incident-response policy; deletion does not undo prior access or copies.
+
 ## Native Windows servicing
 
 <Callout title="No published cross-release Windows baseline">

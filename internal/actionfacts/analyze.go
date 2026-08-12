@@ -448,6 +448,8 @@ type posixShellInvocation struct {
 	commandIndex int
 	scriptIndex  int
 	noExec       bool
+	interactive  bool
+	recognized   bool
 	valid        bool
 }
 
@@ -479,6 +481,7 @@ func parseBashInvocation(argv []string) posixShellInvocation {
 		mode:         posixShellModeStdin,
 		commandIndex: -1,
 		scriptIndex:  -1,
+		recognized:   true,
 		valid:        true,
 	}
 	forcedStdin := false
@@ -663,11 +666,12 @@ func finishBashInvocation(
 	posixMode bool,
 	startupFile bool,
 ) posixShellInvocation {
+	invocation.interactive = interactive
 	// Login shells also execute a logout file, for which Bash has no matching
 	// command-line disable. Interactive shells execute startup input unless an
 	// order-valid --norc proves it disabled; POSIX mode substitutes ENV instead.
 	if login || startupFile || interactive && (!noRC || posixMode) {
-		return posixShellInvocation{}
+		invocation.valid = false
 	}
 	return invocation
 }
@@ -721,6 +725,7 @@ func parseConservativePOSIXShellInvocation(
 		mode:         posixShellModeStdin,
 		commandIndex: -1,
 		scriptIndex:  -1,
+		recognized:   true,
 		valid:        true,
 	}
 	allowedOptions := conservativePOSIXShellShortOptions(program)
@@ -841,8 +846,9 @@ func finishConservativePOSIXShellInvocation(
 	login bool,
 	explicitStartup bool,
 ) posixShellInvocation {
+	invocation.interactive = interactive
 	if interactive || login || explicitStartup {
-		return posixShellInvocation{}
+		invocation.valid = false
 	}
 	return invocation
 }

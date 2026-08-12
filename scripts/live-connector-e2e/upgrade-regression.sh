@@ -488,9 +488,17 @@ if ! dc_upgrade_setup_without_restart "${BASELINE_BIN}"; then
   exit 4
 fi
 dc_record_result "baseline:setup" pass "mode=${MODE}"
-if ! PATH="$(dirname "${BASELINE_BIN}"):${ORIGINAL_PATH}" defenseclaw-gateway start; then
-  DETAIL="isolated gateway failed to start for the baseline"
-  exit 4
+baseline_gateway_start_log="${ARTIFACTS_DIR}/gateway/baseline-start.log"
+if ! PATH="$(dirname "${BASELINE_BIN}"):${ORIGINAL_PATH}" \
+  defenseclaw-gateway start 2>&1 | tee "${baseline_gateway_start_log}"; then
+  if dc_file_looks_like_auth_failure "${baseline_gateway_start_log}"; then
+    CLASSIFICATION="auth_failure"
+    DETAIL="known-good baseline login prevented isolated gateway startup; refresh the connector login"
+    HARNESS_EXIT_CODE=3
+  else
+    DETAIL="isolated gateway failed to start for the baseline"
+  fi
+  exit "${HARNESS_EXIT_CODE}"
 fi
 GATEWAY_STARTED=1
 if ! PATH="$(dirname "${BASELINE_BIN}"):${ORIGINAL_PATH}" dc_wait_for_gateway 30; then

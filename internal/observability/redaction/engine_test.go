@@ -5,6 +5,7 @@ package redaction
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -204,6 +205,44 @@ func TestEngineCorrelationKeyCustodyBoundary(t *testing.T) {
 	failed, _, err := keyless.Project(record, content)
 	if err != nil || failed.Metadata().State != ProjectionStateFailedClosed {
 		t.Fatalf("zero custodied key projection = %#v, %v", failed.Metadata(), err)
+	}
+}
+
+func TestEngineCorrelationFingerprintV1IsKeyedDeterministicAndClassSeparated(t *testing.T) {
+	engine := newTestEngine(t)
+	value := strings.Join([]string{"private", "evidence", "value"}, "-")
+	first, err := engine.CorrelationFingerprintV1(value, observability.FieldClassEvidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := engine.CorrelationFingerprintV1(value, observability.FieldClassEvidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	differentValue, err := engine.CorrelationFingerprintV1(value+"-different", observability.FieldClassEvidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	differentClass, err := engine.CorrelationFingerprintV1(value, observability.FieldClassContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second || len(first) != 8 || first != strings.ToLower(first) {
+		t.Fatalf("correlation fingerprint is not stable canonical hex: %q / %q", first, second)
+	}
+	if _, err := hex.DecodeString(first); err != nil {
+		t.Fatalf("correlation fingerprint is not hex: %q", first)
+	}
+	if first == differentValue || first == differentClass {
+		t.Fatalf("correlation fingerprint lacked value/class separation: value=%q class=%q", differentValue, differentClass)
+	}
+
+	keyless, err := NewEngine(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fingerprint, err := keyless.CorrelationFingerprintV1(value, observability.FieldClassEvidence); fingerprint != "" || !IsHashV1Error(err, HashV1ErrorInvalidKey) {
+		t.Fatalf("keyless fingerprint=%q err=%v, want safe key-unavailable failure", fingerprint, err)
 	}
 }
 

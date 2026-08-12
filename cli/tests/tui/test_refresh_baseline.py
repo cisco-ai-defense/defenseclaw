@@ -46,7 +46,7 @@ async def test_shared_snapshot_reads_history_once_per_sqlite_generation(tmp_path
     assert result.final_rows == 33
     assert result.derived_counts == {
         "history": 33,
-        "alert_events": 25,
+        "alert_events": 16,
         "egress_events": 9,
         "mutations": 16,
         "log_verdict_rows": 16,

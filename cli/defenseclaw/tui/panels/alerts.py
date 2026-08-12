@@ -12,13 +12,20 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Literal
 
 from rich.markup import escape as rich_escape
 
+from defenseclaw.alert_semantics import (
+    ALERT_ACTIONABLE_SEVERITIES,
+    ALERT_ALL_SEVERITIES,
+    ALERT_LEGACY_FINDING_ACTIONS,
+    ALERT_NON_ALLOW_OUTCOMES,
+)
+from defenseclaw.hook_metrics import connector_hook_decision
 from defenseclaw.tui.panels.audit import (
     parse_kv_details,
     split_connector_token,
@@ -31,7 +38,7 @@ from defenseclaw.tui.services.event_models import (
 )
 from defenseclaw.tui.services.v8_event_history import (
     V8EventHistoryRow,
-    load_v8_event_history,
+    load_v8_alert_history,
     payload_text,
 )
 
@@ -39,7 +46,6 @@ SeverityFilter = Literal["", "CRITICAL", "HIGH", "MEDIUM", "LOW"]
 AlertRowKind = Literal["audit", "scan", "scan_finding", "egress"]
 
 SEVERITY_FILTERS: tuple[SeverityFilter, ...] = ("", "CRITICAL", "HIGH", "MEDIUM", "LOW")
-ACTIONABLE_SEVERITIES = {"CRITICAL", "HIGH", "ERROR"}
 LOW_SIGNAL_SEVERITIES = {"INFO", "LOW", "MEDIUM", "WARNING"}
 
 
@@ -155,48 +161,123 @@ class AlertTableRow:
     finding_index: int = -1
 
 
-_V8_ALERT_BUCKETS = frozenset(
-    {
-        "security.finding",
-        "guardrail.evaluation",
-        "enforcement.action",
-        "asset.scan",
-        "network.egress",
-        "platform.health",
-        "diagnostic",
-    }
-)
+@dataclass(frozen=True)
+class _AlertScopeMetrics:
+    """Summary metrics for the active connector/search context."""
+
+    severity_counts: dict[str, int]
+    actionable_count: int
+    total_count: int
+
+
+_V8_FINDING_SEVERITIES = frozenset(ALERT_ALL_SEVERITIES)
+
+
+def _v8_row_outcome(row: V8EventHistoryRow) -> str:
+    return (
+        (
+            payload_text(
+                row.payload,
+                "defenseclaw.enforcement.effective_action",
+                "defenseclaw.guardrail.decision",
+                "defenseclaw.network.decision",
+                "defenseclaw.network.policy_outcome",
+                "defenseclaw.scan.verdict",
+            )
+            or row.outcome
+            or row.action
+        )
+        .strip()
+        .lower()
+    )
+
+
+def _v8_finding_tags(row: V8EventHistoryRow) -> set[str]:
+    tags = {tag.strip().lower() for tag in row.finding_tags if tag.strip()}
+    value = row.payload.get("defenseclaw.finding.tags")
+    if isinstance(value, (list, tuple, set)):
+        tags.update(str(tag).strip().lower() for tag in value if str(tag).strip())
+    if isinstance(value, str):
+        tags.update(
+            tag.strip().strip("\"'").lower() for tag in value.strip("[]").split(",") if tag.strip().strip("\"'")
+        )
+    return tags
 
 
 def _is_v8_alert_row(row: V8EventHistoryRow) -> bool:
-    return row.bucket in _V8_ALERT_BUCKETS
+    """Keep the Alerts queue semantic, not a second copy of Audit.
+
+    Canonical v8 history contains successful hook decisions, clean scan
+    summaries, and ordinary lifecycle telemetry in buckets that used to be
+    projected wholesale into Alerts.  Those records belong in Activity/Audit
+    and made an ``All`` Alerts view look unhealthy even when it reported zero
+    findings.  Findings remain the primary alert rows; only explicit non-allow
+    enforcement/egress outcomes and important health failures join them.
+    """
+
+    severity = (row.severity or "INFO").strip().upper()
+    if row.bucket == "security.finding":
+        return (
+            row.event_name == "finding.observed"
+            and severity in _V8_FINDING_SEVERITIES
+            and "detection-only" not in _v8_finding_tags(row)
+        )
+    if row.bucket in {"enforcement.action", "network.egress"}:
+        return _v8_row_outcome(row) in ALERT_NON_ALLOW_OUTCOMES
+    if row.bucket in {"platform.health", "diagnostic"}:
+        return severity in ALERT_ACTIONABLE_SEVERITIES
+    if not row.bucket:
+        action = (row.action or "").strip().lower()
+        if action == "connector-hook":
+            projected_decision = (row.hook_decision or "").strip().lower()
+            if projected_decision in {"allow", "alert", "block"}:
+                return projected_decision == "block"
+            return connector_hook_decision(row.details) == "block"
+        return (
+            (action in ALERT_LEGACY_FINDING_ACTIONS and severity in _V8_FINDING_SEVERITIES)
+            or action in ALERT_NON_ALLOW_OUTCOMES
+            or action.endswith("-failure")
+            or action.endswith("-failed")
+        )
+    return False
 
 
 def _v8_alert_event(row: V8EventHistoryRow) -> AlertEvent:
     payload = row.payload
-    action = payload_text(
-        payload,
-        "defenseclaw.guardrail.decision",
-        "defenseclaw.enforcement.effective_action",
-        "defenseclaw.network.decision",
-        "defenseclaw.scan.verdict",
-    ) or row.outcome or row.action or row.event_name
-    target = payload_text(
-        payload,
-        "defenseclaw.finding.target_ref",
-        "defenseclaw.enforcement.target_ref",
-        "defenseclaw.network.target_ref",
-        "defenseclaw.scan.target_ref",
-        "defenseclaw.agent.id",
-    ) or row.event_name
-    summary = payload_text(
-        payload,
-        "defenseclaw.guardrail.evidence_summary",
-        "defenseclaw.finding.evidence_summary",
-        "defenseclaw.finding.description",
-        "defenseclaw.network.reason",
-        "defenseclaw.error.summary",
-    ) or row.details
+    action = (
+        payload_text(
+            payload,
+            "defenseclaw.guardrail.decision",
+            "defenseclaw.enforcement.effective_action",
+            "defenseclaw.network.decision",
+            "defenseclaw.scan.verdict",
+        )
+        or row.outcome
+        or row.action
+        or row.event_name
+    )
+    target = (
+        payload_text(
+            payload,
+            "defenseclaw.finding.target_ref",
+            "defenseclaw.enforcement.target_ref",
+            "defenseclaw.network.target_ref",
+            "defenseclaw.scan.target_ref",
+            "defenseclaw.agent.id",
+        )
+        or row.event_name
+    )
+    summary = (
+        payload_text(
+            payload,
+            "defenseclaw.guardrail.evidence_summary",
+            "defenseclaw.finding.evidence_summary",
+            "defenseclaw.finding.description",
+            "defenseclaw.network.reason",
+            "defenseclaw.error.summary",
+        )
+        or row.details
+    )
     detail_parts = [
         f"bucket={row.bucket}",
         f"event_name={row.event_name}",
@@ -208,9 +289,16 @@ def _v8_alert_event(row: V8EventHistoryRow) -> AlertEvent:
         detail_parts.append(f"redaction_profile={row.redaction_profile}")
     if summary:
         detail_parts.append(f"summary={summary}")
+    severity = (row.severity or "INFO").upper()
+    if row.bucket == "network.egress" and severity == "INFO":
+        severity = "WARNING"
+    elif row.bucket == "enforcement.action" and severity == "INFO":
+        severity = "HIGH"
+    elif not row.bucket and severity == "INFO":
+        severity = "HIGH"
     return AlertEvent(
         id=row.id,
-        severity=(row.severity or "INFO").upper(),
+        severity=severity,
         action=action,
         target=target,
         details=" ".join(detail_parts),
@@ -366,7 +454,7 @@ class AlertsPanelModel:
         """Refresh external data sources owned by the model."""
 
         if self.store is not None:
-            rows = load_v8_event_history(self.store, limit=500)
+            rows = load_v8_alert_history(self.store, limit=500)
             self.apply_v8_history(rows)
         self.refresh_gateway_scans()
 
@@ -417,35 +505,71 @@ class AlertsPanelModel:
         self._severity_counts_cache = None
 
     def apply_filter(self) -> None:
-        query = self.filter_text.lower()
-        # E5: support the same ``connector:<name>`` token the Audit panel
-        # uses, so operators filter alerts by connector with one syntax
-        # across panels. The token is pulled out and matched against the
-        # event's kv connector; the remainder keeps the legacy substring
-        # search so existing free-text queries behave unchanged.
-        connector_value, remaining = split_connector_token(query)
         filtered: list[AlertRow] = []
+        context_query = self._context_filter_query()
         for row in self.flat_rows():
             event = row.event
             effective_severity = _event_severity_bucket(event)
             if self.severity_filter and effective_severity != self.severity_filter:
                 continue
-            if not self.severity_filter and not self.show_all_severities and _is_low_signal_alert(row):
+            if (
+                not self.severity_filter
+                and not self.show_all_severities
+                and _is_low_signal_alert(row, effective_severity=effective_severity)
+            ):
                 continue
-            ev_connector = parse_kv_details(event.details).get("connector", "").lower()
-            # 8.13: the shared connector filter (from the chip) is ANDed with
-            # the typed ``connector:`` token so both narrow the same way.
-            if self.connector_filter and self.connector_filter not in ev_connector:
+            if not self._row_matches_context_filters(
+                row,
+                context_query,
+                effective_severity=effective_severity,
+            ):
                 continue
-            if connector_value and connector_value not in ev_connector:
-                continue
-            if remaining:
-                haystack = f"{effective_severity} {event.severity} {event.action} {event.target} {event.details}".lower()
-                if remaining not in haystack:
-                    continue
             filtered.append(row)
         self.filtered = filtered
         self.cursor = min(self.cursor, max(len(self.filtered) - 1, 0))
+
+    def _context_filter_query(self) -> tuple[str, str]:
+        """Parse the operator query once for each filter/count pass."""
+
+        return split_connector_token(self.filter_text.lower())
+
+    def _row_matches_context_filters(
+        self,
+        row: AlertRow,
+        context_query: tuple[str, str] | None = None,
+        *,
+        parsed_details: dict[str, str] | None = None,
+        effective_severity: str | None = None,
+    ) -> bool:
+        """Apply connector and search context without changing alert scope."""
+
+        # E5: support the same ``connector:<name>`` token the Audit panel
+        # uses, so operators filter alerts by connector with one syntax
+        # across panels. The token is pulled out and matched against the
+        # event's kv connector; the remainder keeps the legacy substring
+        # search so existing free-text queries behave unchanged.
+        connector_value, remaining = context_query or self._context_filter_query()
+        event = row.event
+        details = parsed_details
+        # 8.13: the shared connector filter (from the chip) is ANDed with
+        # the typed ``connector:`` token so both narrow the same way.
+        if self.connector_filter or connector_value:
+            details = details if details is not None else parse_kv_details(event.details)
+            ev_connector = details.get("connector", "").lower()
+            if self.connector_filter and self.connector_filter not in ev_connector:
+                return False
+            if connector_value and connector_value not in ev_connector:
+                return False
+        if remaining:
+            severity = (
+                effective_severity
+                if effective_severity is not None
+                else _event_severity_bucket(event, parsed_details=details)
+            )
+            haystack = f"{severity} {event.severity} {event.action} {event.target} {event.details}".lower()
+            if remaining not in haystack:
+                return False
+        return True
 
     def set_connector_filter(self, connector: str) -> None:
         """Set the shared connector filter ("" = All) and re-apply filters."""
@@ -478,25 +602,38 @@ class AlertsPanelModel:
             return
         self.apply_filter()
 
+    def set_actionable_scope(self) -> None:
+        """Restore the default queue of actionable alerts."""
+
+        self.severity_filter = ""
+        self.show_all_severities = False
+        self.apply_filter()
+
     def set_severity_filter(self, severity: SeverityFilter) -> None:
         next_filter = "" if self.severity_filter == severity else severity
         self.severity_filter = next_filter
         if severity == "" or next_filter:
             self.show_all_severities = True
-            if self.store is not None and (
-                severity == "" or next_filter in {"MEDIUM", "LOW"}
-            ):
+            if self.store is not None and (severity == "" or next_filter in {"MEDIUM", "LOW"}):
                 self.refresh()
                 return
         self.apply_filter()
 
     def active_filter_label(self) -> str:
-        parts: list[str] = []
-        if self.severity_filter:
-            parts.append(self.severity_filter.title())
+        parts = [self.active_scope_label()]
         if self.filter_text:
             parts.append(f"search '{self.filter_text}'")
         return ", ".join(parts)
+
+    def active_scope_key(self) -> str:
+        if self.severity_filter:
+            return self.severity_filter.lower()
+        return "all" if self.show_all_severities else "actionable"
+
+    def active_scope_label(self) -> str:
+        if self.severity_filter:
+            return self.severity_filter.title()
+        return "All severities" if self.show_all_severities else "Actionable"
 
     def selected(self) -> AlertRow | None:
         if 0 <= self.cursor < len(self.filtered):
@@ -541,13 +678,7 @@ class AlertsPanelModel:
         return [row.event.id for row in self.filtered if not row.event.id.startswith("gw:")]
 
     def all_ids(self) -> list[str]:
-        return sorted(
-            {
-                row.event.id
-                for row in self.flat_rows()
-                if not row.event.id.startswith("gw:")
-            }
-        )
+        return sorted({row.event.id for row in self.flat_rows() if not row.event.id.startswith("gw:")})
 
     def severity_counts(self) -> dict[str, int]:
         if self._severity_counts_cache is not None:
@@ -561,6 +692,54 @@ class AlertsPanelModel:
                 counts[bucket] += 1
         self._severity_counts_cache = counts
         return dict(counts)
+
+    def _scope_metrics(self) -> _AlertScopeMetrics:
+        """Compute all active-context summary metrics in one row pass."""
+
+        counts = {"CRITICAL": 0, "HIGH": 0, "MEDIUM": 0, "LOW": 0}
+        actionable = 0
+        total = 0
+        context_query = self._context_filter_query()
+        for row in self.flat_rows():
+            if row.kind == "scan_finding":
+                continue
+            event = row.event
+            needs_detail_severity = _is_hook_event(event) and _severity_bucket(event.severity) not in counts
+            needs_connector = bool(self.connector_filter or context_query[0])
+            parsed_details = parse_kv_details(event.details) if needs_detail_severity or needs_connector else None
+            effective_severity = _event_severity_bucket(event, parsed_details=parsed_details)
+            if not self._row_matches_context_filters(
+                row,
+                context_query,
+                parsed_details=parsed_details,
+                effective_severity=effective_severity,
+            ):
+                continue
+            total += 1
+            if not _is_low_signal_alert(row, effective_severity=effective_severity):
+                actionable += 1
+            if effective_severity in counts:
+                counts[effective_severity] += 1
+        return _AlertScopeMetrics(
+            severity_counts=counts,
+            actionable_count=actionable,
+            total_count=total,
+        )
+
+    def scope_severity_counts(self) -> dict[str, int]:
+        """Return severity counts for the active connector/search context."""
+
+        return dict(self._scope_metrics().severity_counts)
+
+    def actionable_count(self) -> int:
+        """Return actionable top-level rows in the active context."""
+
+        return self._scope_metrics().actionable_count
+
+    def scope_total_count(self) -> int:
+        """Return every top-level row in the active connector/search context."""
+
+        return self._scope_metrics().total_count
 
     def alert_count(self) -> int:
         """Return the number of top-level rows represented in Alerts."""
@@ -702,22 +881,19 @@ class AlertsPanelModel:
         return AlertPanelAction(False)
 
     def summary_text(self) -> str:
-        counts = self.severity_counts()
-        active = self.severity_filter or ("All" if self.show_all_severities else "Actionable")
+        metrics = self._scope_metrics()
+        counts = metrics.severity_counts
+        active = self.active_scope_label()
         selected = len(self.selected_ids)
         filter_label = f"  search={self.filter_text!r}" if self.filter_text else ""
         # ``filter_text`` is operator-typed search input that may
         # contain bracketed tokens (``target:[skill]``). Escape so the
         # markup parser can't drop the bracketed substring or, worse,
         # leave the span unclosed when the user types a stray ``[``.
-        search_prompt = (
-            f"\n[#22D3EE]/ {rich_escape(self.filter_text)}[/]"
-            if self.filtering
-            else ""
-        )
+        search_prompt = f"\n[#22D3EE]/ {rich_escape(self.filter_text)}[/]" if self.filtering else ""
         return (
-            "[bold #22D3EE]Alerts[/]  [#9FB2CC]Alert queue. Click a severity chip above or press 1-5.[/]\n"
-            f"[bold]All {sum(counts.values())}[/]  "
+            "[bold #22D3EE]Alerts[/]  [#9FB2CC]Alert queue. Click a scope or severity chip above; 1-5 selects All/Critical/High/Medium/Low.[/]\n"
+            f"[bold]Actionable {metrics.actionable_count}[/]  [bold]In scope {metrics.total_count}[/]  "
             f"[#F87171]Critical {counts['CRITICAL']}[/]  [#FB923C]High {counts['HIGH']}[/]  "
             f"[#FBBF24]Medium {counts['MEDIUM']}[/]  [#60A5FA]Low {counts['LOW']}[/]  "
             f"active={active}  selected={selected}"
@@ -804,9 +980,7 @@ class AlertsPanelModel:
         if hasattr(self.store, "list_actionable_alert_summaries"):
             return self.store.list_actionable_alert_summaries
         return (
-            self.store.list_alert_summaries
-            if hasattr(self.store, "list_alert_summaries")
-            else self.store.list_alerts
+            self.store.list_alert_summaries if hasattr(self.store, "list_alert_summaries") else self.store.list_alerts
         )
 
     def detail_text(self) -> str:
@@ -882,7 +1056,17 @@ class AlertsPanelModel:
                         scan=block,
                     ),
                 )
-        event = _get_alert_event_by_id(self.store, event.id) or event
+        hydrated = _get_alert_event_by_id(self.store, event.id)
+        if (
+            hydrated is not None
+            and hydrated.severity.strip().upper() == "INFO"
+            and event.severity.strip().upper() != "INFO"
+        ):
+            # Canonical/legacy explicit non-allow rows may be persisted with a
+            # compatibility INFO severity. Keep the alert projection's visible
+            # promotion when hydrating its full detail row.
+            hydrated = replace(hydrated, severity=event.severity)
+        event = hydrated or event
         return AlertDetailInfo(
             event=event,
             findings=_list_findings_by_run_id(self.store, event.run_id),
@@ -1059,15 +1243,18 @@ def _severity_bucket(severity: str) -> str:
     normalized = severity.strip().upper()
     if normalized == "WARNING":
         return "MEDIUM"
+    if normalized == "ERROR":
+        return "HIGH"
     return normalized
 
 
-def _event_severity_bucket(event: AlertEvent) -> str:
+def _event_severity_bucket(event: AlertEvent, *, parsed_details: dict[str, str] | None = None) -> str:
     bucket = _severity_bucket(event.severity)
     if bucket in {"CRITICAL", "HIGH", "MEDIUM", "LOW"}:
         return bucket
     if _is_hook_event(event):
-        detail_bucket = _severity_bucket(parse_kv_details(event.details).get("severity", ""))
+        details = parsed_details if parsed_details is not None else parse_kv_details(event.details)
+        detail_bucket = _severity_bucket(details.get("severity", ""))
         if detail_bucket in {"CRITICAL", "HIGH", "MEDIUM", "LOW"}:
             return detail_bucket
     return bucket
@@ -1078,10 +1265,10 @@ def _event_display_severity(event: AlertEvent) -> str:
     return bucket or event.severity
 
 
-def _is_low_signal_alert(row: AlertRow) -> bool:
+def _is_low_signal_alert(row: AlertRow, *, effective_severity: str | None = None) -> bool:
     event = row.event
-    severity = _event_severity_bucket(event)
-    if severity in ACTIONABLE_SEVERITIES:
+    severity = effective_severity if effective_severity is not None else _event_severity_bucket(event)
+    if severity in ALERT_ACTIONABLE_SEVERITIES:
         return False
     if severity not in LOW_SIGNAL_SEVERITIES:
         return False

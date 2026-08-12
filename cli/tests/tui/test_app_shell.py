@@ -1431,10 +1431,10 @@ async def test_alerts_panel_renders_table_and_panel_local_keys_win() -> None:
         await pilot.pause()
 
         table = app.query_one("#panel-table", DataTable)
-        await _wait_for_background(lambda: table.row_count == 2 and "All 2" in app.body_text)
+        await _wait_for_background(lambda: table.row_count == 2 and "In scope 2" in app.body_text)
         assert app.active_panel == "alerts"
         assert table.row_count == 2
-        assert "All 2" in app.body_text
+        assert "In scope 2" in app.body_text
 
         await pilot.press("3")
         await pilot.pause()
@@ -1517,6 +1517,22 @@ async def test_alerts_clickable_filter_and_dismiss_controls_open_preview() -> No
     async with app.run_test(size=(150, 40)) as pilot:
         await pilot.press("2")
         await _wait_for_panel_render(app, "alerts")
+
+        actionable_filter = app.query_one("#alerts-filter-actionable", Button)
+        all_filter = app.query_one("#alerts-filter-all", Button)
+        assert actionable_filter.has_class("active-chip")
+        assert not all_filter.has_class("active-chip")
+        assert app.query_one("#panel-table", DataTable).row_count == 1
+
+        await _click_when_ready(pilot, "#alerts-filter-all")
+        await _wait_for_background(lambda: app.query_one("#panel-table", DataTable).row_count == 2)
+        assert all_filter.has_class("active-chip")
+        assert not actionable_filter.has_class("active-chip")
+
+        await _click_when_ready(pilot, "#alerts-filter-actionable")
+        await _wait_for_background(lambda: app.query_one("#panel-table", DataTable).row_count == 1)
+        assert actionable_filter.has_class("active-chip")
+        assert not all_filter.has_class("active-chip")
 
         await _click_when_ready(pilot, "#alerts-filter-high")
         await pilot.pause()

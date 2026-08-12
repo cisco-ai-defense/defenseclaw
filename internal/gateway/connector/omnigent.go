@@ -198,8 +198,16 @@ func (c *OmnigentConnector) Setup(ctx context.Context, opts SetupOpts) error {
 	if err != nil {
 		return rollback(fmt.Errorf("omnigent read policy template: %w", err))
 	}
+	tokenPath, err := HookAPITokenFilePath(opts.DataDir, c.Name())
+	if err != nil {
+		return rollback(fmt.Errorf("omnigent resolve scoped hook credential: %w", err))
+	}
+	tokenPath, err = filepath.Abs(tokenPath)
+	if err != nil {
+		return rollback(fmt.Errorf("omnigent resolve absolute scoped hook credential path: %w", err))
+	}
 	failMode := normalizeHookFailMode(opts.HookFailMode)
-	rendered := renderOmnigentPolicy(string(templateBytes), opts.APIAddr, opts.APIToken, failMode)
+	rendered := renderOmnigentPolicy(string(templateBytes), opts.APIAddr, tokenPath, failMode)
 	if err := atomicWriteFile(modulePath, []byte(rendered), 0o600); err != nil {
 		return rollback(fmt.Errorf("omnigent write policy module: %w", err))
 	}
@@ -401,6 +409,8 @@ func (c *OmnigentConnector) HookRuntimeArtifacts(opts SetupOpts) []string {
 	}
 }
 
+func (c *OmnigentConnector) RequiresScopedHookToken() bool { return true }
+
 func (c *OmnigentConnector) HookConfigReferenceNeedles(SetupOpts) []string {
 	return []string{omnigentPolicyHandler}
 }
@@ -563,11 +573,11 @@ func validateOmnigentInterpreter(path string) error {
 	return nil
 }
 
-func renderOmnigentPolicy(template, apiAddr, token, failMode string) string {
+func renderOmnigentPolicy(template, apiAddr, tokenFile, failMode string) string {
 	encode := func(value string) string { return base64.StdEncoding.EncodeToString([]byte(value)) }
 	replacer := strings.NewReplacer(
 		"{{API_ADDR_B64}}", encode(strings.TrimSpace(apiAddr)),
-		"{{API_TOKEN_B64}}", encode(token),
+		"{{TOKEN_FILE_B64}}", encode(tokenFile),
 		"{{FAIL_MODE_B64}}", encode(normalizeHookFailMode(failMode)),
 	)
 	return replacer.Replace(template)
