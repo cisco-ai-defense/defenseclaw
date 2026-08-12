@@ -438,8 +438,10 @@ func TestRuntimeActivationBindsBeforeOldGenerationRetires(t *testing.T) {
 		t.Fatalf("reload returned before old generation retirement: %+v", outcome)
 	default:
 	}
-	// This represents a delayed callback admitted under the still-held old
-	// graph lease. The activation-time floor must already reject it.
+	// Invoke the generationBindingHealthReporter test double directly to prove
+	// activation ordering while the old lease is still held. The production
+	// SidecarHealth rejection path is covered by
+	// TestObservabilityV8EventHistoryActivationRejectsDelayedRetiredCallback.
 	reporter.ReportEventHistoryHealth(audit.EventHistoryHealthTransition{
 		Generation: 1, Sequence: 99, State: audit.EventHistoryHealthFailed,
 		Code: audit.EventHistoryHealthWriteFailed, OccurredAt: time.Now().UTC(),

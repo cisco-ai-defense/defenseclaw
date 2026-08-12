@@ -559,6 +559,36 @@ func TestStoreInitFailsWhenMandatoryV8EventHistoryColumnIsMissing(t *testing.T) 
 	}
 }
 
+func TestEventHistoryWriterForGenerationRejectsMissingIdentityInputs(t *testing.T) {
+	store := newV8HistoryStore(t)
+	tests := []struct {
+		name       string
+		binding    LocalProjectionBinding
+		generation uint64
+		want       string
+	}{
+		{
+			name:       "missing binding",
+			generation: 7,
+			want:       "audit: local projection binding is required",
+		},
+		{
+			name:       "missing generation",
+			binding:    testLocalProfileResolver{profile: observabilityredaction.ProfileNone},
+			generation: 0,
+			want:       "audit: event-history writer generation is required",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := NewEventHistoryWriterForGeneration(store, nil, nil, test.binding, test.generation)
+			if err == nil || err.Error() != test.want {
+				t.Fatalf("NewEventHistoryWriterForGeneration error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestEventHistoryWriterPersistsExactCanonicalProjectionAndLegacyView(t *testing.T) {
 	store := newV8HistoryStore(t)
 	writer, err := NewEventHistoryWriter(store, nil, nil, testLocalProfileResolver{profile: observabilityredaction.ProfileNone})

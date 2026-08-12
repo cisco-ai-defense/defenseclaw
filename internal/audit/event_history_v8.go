@@ -327,8 +327,11 @@ func NewEventHistoryWriterForGeneration(
 	if store == nil || store.db == nil || !store.Ready() {
 		return nil, fmt.Errorf("audit: ready v8 event-history store is required")
 	}
-	if binding == nil || generation == 0 {
+	if binding == nil {
 		return nil, fmt.Errorf("audit: local projection binding is required")
+	}
+	if generation == 0 {
+		return nil, fmt.Errorf("audit: event-history writer generation is required")
 	}
 	snapshot := binding.eventHistoryProjectionBinding()
 	if !observability.IsStableToken(snapshot.graphDigest) || snapshot.engine == nil ||
