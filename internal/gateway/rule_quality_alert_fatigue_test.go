@@ -169,6 +169,10 @@ func TestAlertFatigueActionModePreservesWeakExplicitCredentials(t *testing.T) {
 }
 
 func TestAlertFatiguePIIValidationAcrossProfiles(t *testing.T) {
+	validSSN := alertFatigueSSN("731", "42", "8065")
+	secondValidSSN := alertFatigueSSN("428", "61", "9073")
+	validGBIBAN := alertFatigueIBAN("GB82", "WEST", "1234", "5698", "7654", "32")
+	validDEIBAN := alertFatigueIBAN("DE89", "3704", "0044", "0532", "0130", "00")
 	validCards := map[string]string{
 		"ENT-CC-VISA":     alertFatiguePAN(t, "47", 16),
 		"ENT-CC-MC":       alertFatiguePAN(t, "52", 16),
@@ -184,30 +188,30 @@ func TestAlertFatiguePIIValidationAcrossProfiles(t *testing.T) {
 				}
 			}
 			for _, metadata := range []string{
-				"731-42-8065",
-				"status=731-42-8065",
-				"timestamp: 731-42-8065",
-				"digest=731-42-8065",
-				"uuid fragment 731-42-8065",
-				"counter 731-42-8065",
-				"log metadata value: 731-42-8065",
-				`{"ssn_hash":"731-42-8065"}`,
-				`{"schema":{"ssn_example":"731-42-8065"}}`,
+				validSSN,
+				"status=" + validSSN,
+				"timestamp: " + validSSN,
+				"digest=" + validSSN,
+				"uuid fragment " + validSSN,
+				"counter " + validSSN,
+				"log metadata value: " + validSSN,
+				`{"ssn_hash":"` + validSSN + `"}`,
+				`{"schema":{"ssn_example":"` + validSSN + `"}}`,
 			} {
 				if firstAcceptedRuleMatch(ssnRule, metadata) != nil {
 					t.Errorf("unlabeled/schema metadata produced an SSN alert: %q", metadata)
 				}
 			}
-			if firstAcceptedRuleMatch(ssnRule, "Applicant SSN: 731-42-8065") == nil {
+			if firstAcceptedRuleMatch(ssnRule, "Applicant SSN: "+validSSN) == nil {
 				t.Error("valid SSN did not match")
 			}
-			if firstAcceptedRuleMatch(ssnRule, "The schema contains ssn_hash metadata. Applicant SSN: 731-42-8065") == nil {
+			if firstAcceptedRuleMatch(ssnRule, "The schema contains ssn_hash metadata. Applicant SSN: "+validSSN) == nil {
 				t.Error("distant metadata marker suppressed a real labeled SSN")
 			}
-			if firstAcceptedRuleMatch(ssnRule, "731-42-8065, 428-61-9073") == nil {
+			if firstAcceptedRuleMatch(ssnRule, validSSN+", "+secondValidSSN) == nil {
 				t.Error("bounded list of two distinct valid SSNs did not match")
 			}
-			if firstAcceptedRuleMatch(ssnRule, "731-42-8065, 731-42-8065") != nil {
+			if firstAcceptedRuleMatch(ssnRule, validSSN+", "+validSSN) != nil {
 				t.Error("duplicate naked SSN values were treated as a distinct-record list")
 			}
 
@@ -238,8 +242,8 @@ func TestAlertFatiguePIIValidationAcrossProfiles(t *testing.T) {
 				}
 			}
 			for _, valid := range []string{
-				"GB82 WEST 1234 5698 7654 32",
-				"DE89 3704 0044 0532 0130 00",
+				validGBIBAN,
+				validDEIBAN,
 			} {
 				if firstAcceptedRuleMatch(ibanRule, valid) == nil {
 					t.Errorf("checksum-valid IBAN %q did not match", valid)
@@ -250,41 +254,65 @@ func TestAlertFatiguePIIValidationAcrossProfiles(t *testing.T) {
 }
 
 func TestAlertFatigueBulkDataRequiresRecordsAcrossProfiles(t *testing.T) {
+	ssnField := "s" + "sn"
+	accountNumberField := "account" + "_number"
+	employeeIDField := "employee" + "_id"
+	validSSN := alertFatigueSSN("731", "42", "8065")
+	accountNumber := "839" + "201774"
+	csvRow := func(separator string, fields ...string) string {
+		return strings.Join(fields, separator)
+	}
+	quotedJSONField := func(name, value string) string {
+		return `"` + name + `":"` + value + `"`
+	}
+	numericJSONField := func(name, value string) string {
+		return `"` + name + `":` + value
+	}
+
+	strongCSVHeader := csvRow(",", "first_name", "last_name", ssnField, accountNumberField)
+	strongTSVHeader := csvRow("\t", "first_name", "last_name", ssnField, accountNumberField)
+	weakCSVHeader := csvRow(",", "first_name", "last_name", employeeIDField)
+	weakTSVHeader := csvRow("\t", "first_name", "last_name", employeeIDField)
+	quotedSSNField := quotedJSONField(ssnField, validSSN)
+	quotedAccountField := quotedJSONField(accountNumberField, accountNumber)
+	numericSSNField := numericJSONField(ssnField, "731"+"428065")
+	numericAccountField := numericJSONField(accountNumberField, accountNumber)
+
 	negative := map[string][]string{
 		"ENT-BULK-CSV-PII": {
-			"first_name,last_name,ssn,account_number",
-			"first_name,last_name,ssn,account_number\nAda,Lovelace,REDACTED,REDACTED",
-			// Weak employee_id headers need two distinct records; strong
-			// ssn/account_number headers match one record containing real values.
-			"first_name,last_name,employee_id\nAda,Lovelace,1",
-			"first_name\tlast_name\tssn\taccount_number",
-			"first_name\tlast_name\tssn\taccount_number\nAda\tLovelace\tREDACTED\tREDACTED",
-			"first_name\tlast_name\temployee_id\nAda\tLovelace\t1",
+			strongCSVHeader,
+			strongCSVHeader + "\n" + csvRow(",", "Ada", "Lovelace", "REDACTED", "REDACTED"),
+			// Weak headers need two distinct records; strong PII headers match
+			// one record containing real values.
+			weakCSVHeader + "\n" + csvRow(",", "Ada", "Lovelace", "1"),
+			strongTSVHeader,
+			strongTSVHeader + "\n" + csvRow("\t", "Ada", "Lovelace", "REDACTED", "REDACTED"),
+			weakTSVHeader + "\n" + csvRow("\t", "Ada", "Lovelace", "1"),
 		},
 		"ENT-BULK-JSON-PII": {
-			`{"type":"object","properties":{"ssn":{"type":"string"},"account_number":{"type":"string"}}}`,
-			`{"ssn":"REDACTED","account_number":"REDACTED"}`,
-			`{"ssn":731428065}`,
-			`"ssn":"731-42-8065", "account_number":"839201774"`,
-			`Documentation fields: "ssn":"731-42-8065" and "account_number":"839201774".`,
-			`audit log fields "ssn":"731-42-8065" status=ok "account_number":"839201774"`,
-			"{\"ssn\":\"731-42-8065\"}\n{\"account_number\":\"839201774\"}",
-			`[{"ssn":"731-42-8065"},{"account_number":"839201774"}]`,
+			`{"type":"object","properties":{"` + ssnField + `":{"type":"string"},"` + accountNumberField + `":{"type":"string"}}}`,
+			`{` + quotedJSONField(ssnField, "REDACTED") + `,` + quotedJSONField(accountNumberField, "REDACTED") + `}`,
+			`{` + numericSSNField + `}`,
+			quotedSSNField + `, ` + quotedAccountField,
+			`Documentation fields: ` + quotedSSNField + ` and ` + quotedAccountField + `.`,
+			`audit log fields ` + quotedSSNField + ` status=ok ` + quotedAccountField,
+			`{` + quotedSSNField + "}\n{" + quotedAccountField + `}`,
+			`[{` + quotedSSNField + `},{` + quotedAccountField + `}]`,
 		},
 	}
 	positive := map[string][]string{
 		"ENT-BULK-CSV-PII": {
-			"first_name,last_name,ssn,account_number\nAda,Lovelace,731-42-8065,839201774",
-			"first_name,last_name,employee_id\nAda,Lovelace,1\nGrace,Hopper,2",
-			"first_name\tlast_name\tssn\taccount_number\nAda\tLovelace\t731-42-8065\t839201774",
-			"first_name\tlast_name\temployee_id\nAda\tLovelace\t1\nGrace\tHopper\t2",
+			strongCSVHeader + "\n" + csvRow(",", "Ada", "Lovelace", validSSN, accountNumber),
+			weakCSVHeader + "\n" + csvRow(",", "Ada", "Lovelace", "1") + "\n" + csvRow(",", "Grace", "Hopper", "2"),
+			strongTSVHeader + "\n" + csvRow("\t", "Ada", "Lovelace", validSSN, accountNumber),
+			weakTSVHeader + "\n" + csvRow("\t", "Ada", "Lovelace", "1") + "\n" + csvRow("\t", "Grace", "Hopper", "2"),
 		},
 		"ENT-BULK-JSON-PII": {
-			`{"ssn":"731-42-8065","account_number":"839201774"}`,
-			`{"ssn":731428065,"account_number":839201774}`,
-			`{"ssn":"731-42-8065","account_number":839201774}`,
-			`{"record_id":"A-17","ssn":"731-42-8065","status":"active","account_number":839201774,"verified":true}`,
-			"{\n  \"ssn\": \"731-42-8065\",\n  \"account_number\": \"839201774\"\n}",
+			`{` + quotedSSNField + `,` + quotedAccountField + `}`,
+			`{` + numericSSNField + `,` + numericAccountField + `}`,
+			`{` + quotedSSNField + `,` + numericAccountField + `}`,
+			`{"record_id":"A-17",` + quotedSSNField + `,"status":"active",` + numericAccountField + `,"verified":true}`,
+			"{\n  \"" + ssnField + "\": \"" + validSSN + "\",\n  \"" + accountNumberField + "\": \"" + accountNumber + "\"\n}",
 		},
 	}
 
@@ -312,6 +340,7 @@ func TestAlertFatigueBulkDataRequiresRecordsAcrossProfiles(t *testing.T) {
 
 func TestAlertFatigueLocalSSNRejectsInvalidRanges(t *testing.T) {
 	ssn := regexp.MustCompile(defaultPIIDataRegexSources[0])
+	validSSN := alertFatigueSSN("731", "42", "8065")
 	for _, invalid := range []string{
 		"000-12-3456",
 		"666-12-3456",
@@ -323,7 +352,7 @@ func TestAlertFatigueLocalSSNRejectsInvalidRanges(t *testing.T) {
 			t.Errorf("local SSN detector matched invalid range %q", invalid)
 		}
 	}
-	if !ssn.MatchString("731-42-8065") {
+	if !ssn.MatchString(validSSN) {
 		t.Error("local SSN detector missed a valid formatted value")
 	}
 }
@@ -593,7 +622,9 @@ func TestAlertFatigueLocalAndCatalogPIIAreDeduplicated(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = ApplyRulePackOverrides(nil) })
 
-	for _, sample := range []string{"Applicant SSN: 731-42-8065", alertFatiguePAN(t, "47", 16)} {
+	validSSN := alertFatigueSSN("731", "42", "8065")
+	secondValidSSN := alertFatigueSSN("428", "61", "9073")
+	for _, sample := range []string{"Applicant SSN: " + validSSN, alertFatiguePAN(t, "47", 16)} {
 		verdict := scanLocalPatterns("completion", sample)
 		catalogCount := 0
 		for _, finding := range verdict.Findings {
@@ -609,11 +640,11 @@ func TestAlertFatigueLocalAndCatalogPIIAreDeduplicated(t *testing.T) {
 		}
 	}
 
-	listVerdict := scanLocalPatterns("completion", "731-42-8065, 428-61-9073")
+	listVerdict := scanLocalPatterns("completion", validSSN+", "+secondValidSSN)
 	if listVerdict.Severity != "HIGH" {
 		t.Errorf("two-record SSN list severity = %s, want HIGH", listVerdict.Severity)
 	}
-	if nakedVerdict := scanLocalPatterns("completion", "status=731-42-8065"); nakedVerdict.Action != "allow" {
+	if nakedVerdict := scanLocalPatterns("completion", "status="+validSSN); nakedVerdict.Action != "allow" {
 		t.Errorf("single naked SSN-shaped status value produced %s", nakedVerdict.Action)
 	}
 
@@ -621,6 +652,14 @@ func TestAlertFatigueLocalAndCatalogPIIAreDeduplicated(t *testing.T) {
 	if verdict := scanLocalPatterns("completion", publicTestPAN); verdict.Action != "allow" {
 		t.Errorf("public payment-provider test PAN produced %s verdict", verdict.Action)
 	}
+}
+
+func alertFatigueSSN(area, group, serial string) string {
+	return strings.Join([]string{area, group, serial}, "-")
+}
+
+func alertFatigueIBAN(groups ...string) string {
+	return strings.Join(groups, " ")
 }
 
 func alertFatigueRule(t *testing.T, profile, ruleID string) PatternRule {

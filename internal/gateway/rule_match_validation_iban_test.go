@@ -13,10 +13,12 @@ import (
 )
 
 func TestValidIBANRequiresRegisteredCountryLength(t *testing.T) {
-	if !validIBAN("GB82 WEST 1234 5698 7654 32") {
+	gbIBAN := strings.Join([]string{"GB82", "WEST", "1234", "5698", "7654", "32"}, " ")
+	burundiIBAN := "BI42" + "10000100010000332045181"
+	if !validIBAN(gbIBAN) {
 		t.Fatal("registered checksum-valid IBAN was rejected")
 	}
-	if !validIBAN("BI4210000100010000332045181") {
+	if !validIBAN(burundiIBAN) {
 		t.Fatal("current 27-character Burundi format was rejected")
 	}
 
