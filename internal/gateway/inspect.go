@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -231,7 +232,9 @@ func (a *APIServer) inspectManagedAIDOnly(ctx context.Context, toolName, content
 			Findings:                 []string{},
 			managedAIDFailOpenReason: failOpenReason,
 		}
-		if !managedAIDFailOpenAccountingDeferred(ctx) {
+		if gate := managedAIDFailOpenNativeHookGateFromContext(ctx); gate != nil {
+			gate.enqueue(verdict)
+		} else if !managedAIDFailOpenAccountingDeferred(ctx) {
 			a.recordManagedAIDFailOpenVerdict(ctx, verdict)
 		}
 		return verdict
@@ -241,8 +244,74 @@ func (a *APIServer) inspectManagedAIDOnly(ctx context.Context, toolName, content
 
 type managedAIDFailOpenAccountingContextKey struct{}
 
+type managedAIDFailOpenNativeHookGateContextKey struct{}
+
+// managedAIDFailOpenNativeHookGate holds fail-open candidates until the
+// unified native-hook owner has selected the final effective response. Native
+// evaluation can inspect more than one segment, so the gate preserves proposal
+// order and consumes the whole batch exactly once.
+type managedAIDFailOpenNativeHookGate struct {
+	mu       sync.Mutex
+	pending  []*ToolInspectVerdict
+	consumed bool
+}
+
 func deferManagedAIDFailOpenAccounting(ctx context.Context) context.Context {
 	return context.WithValue(ctx, managedAIDFailOpenAccountingContextKey{}, true)
+}
+
+func deferManagedAIDFailOpenNativeHookAccounting(
+	ctx context.Context,
+) (context.Context, *managedAIDFailOpenNativeHookGate) {
+	gate := &managedAIDFailOpenNativeHookGate{}
+	ctx = deferManagedAIDFailOpenAccounting(ctx)
+	return context.WithValue(ctx, managedAIDFailOpenNativeHookGateContextKey{}, gate), gate
+}
+
+func managedAIDFailOpenNativeHookGateFromContext(
+	ctx context.Context,
+) *managedAIDFailOpenNativeHookGate {
+	if ctx == nil {
+		return nil
+	}
+	gate, _ := ctx.Value(managedAIDFailOpenNativeHookGateContextKey{}).(*managedAIDFailOpenNativeHookGate)
+	return gate
+}
+
+func (gate *managedAIDFailOpenNativeHookGate) enqueue(verdict *ToolInspectVerdict) {
+	if gate == nil || verdict == nil || verdict.managedAIDFailOpenReason == "" {
+		return
+	}
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+	if gate.consumed {
+		verdict.managedAIDFailOpenReason = ""
+		return
+	}
+	gate.pending = append(gate.pending, verdict)
+}
+
+func (gate *managedAIDFailOpenNativeHookGate) consume(selectedAllow bool) []*ToolInspectVerdict {
+	if gate == nil {
+		return nil
+	}
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+	if gate.consumed {
+		return nil
+	}
+	gate.consumed = true
+	pending := gate.pending
+	gate.pending = nil
+	if selectedAllow {
+		return pending
+	}
+	for _, verdict := range pending {
+		if verdict != nil {
+			verdict.managedAIDFailOpenReason = ""
+		}
+	}
+	return nil
 }
 
 func managedAIDFailOpenAccountingDeferred(ctx context.Context) bool {
@@ -262,6 +331,23 @@ func (a *APIServer) recordManagedAIDFailOpenVerdict(ctx context.Context, verdict
 	metricRuntime, _ := a.observabilityV8LifecycleRuntime().(hookLifecycleMetricV8Runtime)
 	if metricRuntime != nil {
 		_ = recordManagedAIDFailOpenMetricV8(ctx, metricRuntime, reason)
+	}
+}
+
+func (a *APIServer) recordManagedAIDFailOpenForSelectedNativeHookResult(
+	ctx context.Context,
+	gate *managedAIDFailOpenNativeHookGate,
+	action string,
+	panicked bool,
+) {
+	pending := gate.consume(!panicked && action == "allow")
+	if len(pending) == 0 {
+		return
+	}
+	metricCtx, cancelMetric := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+	defer cancelMetric()
+	for _, verdict := range pending {
+		a.recordManagedAIDFailOpenVerdict(metricCtx, verdict)
 	}
 }
 
@@ -1265,11 +1351,7 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	// it after this handler has selected the allow result; the 504
 	// path returns above and deliberately records nothing because installed
 	// hooks fail closed on an unreachable gateway.
-	if verdict.Action == "allow" {
-		metricCtx, cancelMetric := context.WithTimeout(context.WithoutCancel(r.Context()), time.Second)
-		a.recordManagedAIDFailOpenVerdict(metricCtx, verdict)
-		cancelMetric()
-	}
+	a.recordManagedAIDFailOpenForSelectedGenericResult(r.Context(), verdict)
 	a.writeJSON(w, http.StatusOK, responseVerdict)
 }
 

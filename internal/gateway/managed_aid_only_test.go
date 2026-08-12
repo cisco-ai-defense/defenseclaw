@@ -18,14 +18,17 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
@@ -85,6 +88,24 @@ func (s *cancelBeforeNilAIDInspector) Inspect(_ context.Context, _ []ChatMessage
 }
 
 func (s *cancelBeforeNilAIDInspector) bindObservabilityV8(_ hookLifecycleMetricV8Runtime) {}
+
+// managedAIDPanicResponseConnector exercises a panic after the generic
+// evaluator has proposed a managed AID fail-open reason. Respond runs inside
+// safeEvaluateHook, so the real HTTP owner must discard the proposal when the
+// response shaper panics and the evaluator recovers to its safe allow result.
+type managedAIDPanicResponseConnector struct {
+	*stubConnector
+}
+
+func (c *managedAIDPanicResponseConnector) HookProfile(opts connector.SetupOpts) connector.HookProfile {
+	profile := connector.NewHermesConnector().HookProfile(opts)
+	profile.Name = c.Name()
+	profile.Correlation = connector.ExplicitCanonicalCorrelationSpec(c.Name())
+	profile.Respond = func(connector.HookRespondInput) connector.HookRespondOutput {
+		panic("managed AID post-proposal response-shaper panic")
+	}
+	return profile
+}
 
 type cancelGatedAIDInspector struct {
 	started  chan struct{}
@@ -381,12 +402,13 @@ func TestManagedAIDOnly_GenericInspectRoutesUseAuthoritativeAID(t *testing.T) {
 	}
 
 	states := []struct {
-		name       string
-		body       func(route) string
-		inspector  func() Inspector
-		wantAction string
-		wantCalls  int
-		wantReason string
+		name                string
+		body                func(route) string
+		inspector           func() Inspector
+		wantAction          string
+		wantCalls           int
+		wantReason          string
+		wantNoLocalFindings bool
 	}{
 		{
 			name: "AID block overrides locally benign content",
@@ -405,9 +427,10 @@ func TestManagedAIDOnly_GenericInspectRoutesUseAuthoritativeAID(t *testing.T) {
 			inspector: func() Inspector {
 				return &stubAIDInspector{verdict: nil}
 			},
-			wantAction: "allow",
-			wantCalls:  1,
-			wantReason: aidFailOpenUnavailable,
+			wantAction:          "allow",
+			wantCalls:           1,
+			wantReason:          aidFailOpenUnavailable,
+			wantNoLocalFindings: true,
 		},
 		{
 			name:       "unwired nonblank content",
@@ -441,7 +464,7 @@ func TestManagedAIDOnly_GenericInspectRoutesUseAuthoritativeAID(t *testing.T) {
 					if response.Code != http.StatusOK || verdict.Action != state.wantAction {
 						t.Fatalf("status=%d verdict=%+v, want 200/%s", response.Code, verdict, state.wantAction)
 					}
-					if state.name == "AID unavailable bypasses local detectors" && len(verdict.Findings) != 0 {
+					if state.wantNoLocalFindings && len(verdict.Findings) != 0 {
 						t.Fatalf("managed route leaked local findings: %v", verdict.Findings)
 					}
 					if stub, ok := inspector.(*stubAIDInspector); ok && stub.calls != state.wantCalls {
@@ -472,6 +495,389 @@ func TestManagedAIDOnly_GenericInspectRoutesUseAuthoritativeAID(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestManagedAIDOnly_NativeHookAccountingFollowsFinalAssetOutcome(t *testing.T) {
+	type nativeRoute struct {
+		connector string
+		assetBody string
+		allowBody string
+	}
+	routes := []nativeRoute{
+		{
+			connector: "hermes",
+			assetBody: `{"hook_event_name":"pre_tool_call","session_id":"managed-hermes-asset","tool_name":"mcp__rogue__search","tool_args":{"query":"status"}}`,
+			allowBody: `{"hook_event_name":"pre_tool_call","session_id":"managed-hermes-allow","tool_name":"read_file","tool_args":{"path":"README.md"}}`,
+		},
+		{
+			connector: "codex",
+			assetBody: `{"hook_event_name":"PreToolUse","session_id":"managed-codex-asset","tool_name":"mcp__rogue__search","tool_input":{"query":"status"}}`,
+			allowBody: `{"hook_event_name":"PreToolUse","session_id":"managed-codex-allow","tool_name":"read_file","tool_input":{"path":"README.md"}}`,
+		},
+		{
+			connector: "claudecode",
+			assetBody: `{"hook_event_name":"PreToolUse","session_id":"managed-claude-asset","tool_name":"mcp__rogue__search","tool_input":{"query":"status"}}`,
+			allowBody: `{"hook_event_name":"PreToolUse","session_id":"managed-claude-allow","tool_name":"read_file","tool_input":{"path":"README.md"}}`,
+		},
+	}
+	states := []struct {
+		name          string
+		assetMode     string
+		useAssetBody  bool
+		wantAction    string
+		wantRawAction string
+		wantMetrics   int
+	}{
+		{
+			name:          "enforcing asset block consumes without recording",
+			assetMode:     "action",
+			useAssetBody:  true,
+			wantAction:    "block",
+			wantRawAction: "block",
+		},
+		{
+			name:          "observe asset would-block still returns fail-open allow",
+			assetMode:     "observe",
+			useAssetBody:  true,
+			wantAction:    "allow",
+			wantRawAction: "block",
+			wantMetrics:   1,
+		},
+		{
+			name:          "unmatched tool returns fail-open allow",
+			wantAction:    "allow",
+			wantRawAction: "allow",
+			wantMetrics:   1,
+		},
+	}
+
+	for _, route := range routes {
+		t.Run(route.connector, func(t *testing.T) {
+			for _, state := range states {
+				t.Run(state.name, func(t *testing.T) {
+					capture := &managedAIDFailOpenCapture{}
+					inspector := &stubAIDInspector{}
+					api := testAPIServerWithConfig(t, "action")
+					api.scannerCfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+					api.scannerCfg.Guardrail.Connector = route.connector
+					api.scannerCfg.Guardrail.Mode = "action"
+					api.scannerCfg.AssetPolicy = config.DefaultAssetPolicy()
+					if state.assetMode != "" {
+						api.scannerCfg.AssetPolicy.Enabled = true
+						api.scannerCfg.AssetPolicy.Mode = state.assetMode
+						api.scannerCfg.AssetPolicy.MCP.RegistryRequired = true
+						api.scannerCfg.AssetPolicy.MCP.Registry = []config.AssetPolicyRule{{Name: "trusted"}}
+					}
+					api.SetCiscoInspector(inspector)
+					api.bindObservabilityV8Lifecycle(capture)
+
+					body := route.allowBody
+					if state.useAssetBody {
+						body = route.assetBody
+					}
+					response := invokeNativeSkillHook(t, api, route.connector, body)
+					if response.Action != state.wantAction || response.RawAction != state.wantRawAction {
+						t.Fatalf(
+							"final action=%q raw=%q, want %q/%q reason=%q",
+							response.Action,
+							response.RawAction,
+							state.wantAction,
+							state.wantRawAction,
+							response.Reason,
+						)
+					}
+					if inspector.calls != 1 {
+						t.Fatalf("AID calls=%d, want 1", inspector.calls)
+					}
+					if len(capture.metricRecords) != state.wantMetrics || len(capture.metricErrors) != 0 {
+						t.Fatalf(
+							"fail-open metrics=%d errors=%v, want %d",
+							len(capture.metricRecords),
+							capture.metricErrors,
+							state.wantMetrics,
+						)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestManagedAIDOnly_NativeHookAccountingSyntheticParity(t *testing.T) {
+	tests := []struct {
+		name        string
+		assetMode   string
+		tool        string
+		wantAction  string
+		wantMetrics int
+	}{
+		{name: "final allow records", tool: "read_file", wantAction: "allow", wantMetrics: 1},
+		{name: "final asset block discards", assetMode: "action", tool: "mcp__rogue__search", wantAction: "block"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			capture := &managedAIDFailOpenCapture{}
+			inspector := &stubAIDInspector{}
+			api := testAPIServerWithConfig(t, "action")
+			api.scannerCfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+			api.scannerCfg.Guardrail.Connector = "hermes"
+			api.scannerCfg.Guardrail.Mode = "action"
+			api.scannerCfg.AssetPolicy = config.DefaultAssetPolicy()
+			if test.assetMode != "" {
+				api.scannerCfg.AssetPolicy.Enabled = true
+				api.scannerCfg.AssetPolicy.Mode = test.assetMode
+				api.scannerCfg.AssetPolicy.MCP.RegistryRequired = true
+				api.scannerCfg.AssetPolicy.MCP.Registry = []config.AssetPolicyRule{{Name: "trusted"}}
+			}
+			api.SetCiscoInspector(inspector)
+			api.bindObservabilityV8Lifecycle(capture)
+
+			resp := api.handleAgentHookSynthetic(t.Context(), "hermes", agentHookRequest{
+				ConnectorName: "hermes",
+				HookEventName: "pre_tool_call",
+				SessionID:     "managed-synthetic-" + strings.ReplaceAll(test.name, " ", "-"),
+				ToolName:      test.tool,
+				ToolArgs:      json.RawMessage(`{"query":"status"}`),
+				Payload:       map[string]interface{}{"mcp_server_name": "rogue"},
+			}, []byte(`{"synthetic":true}`))
+			if resp.Action != test.wantAction {
+				t.Fatalf("synthetic action=%q raw=%q reason=%q, want %q", resp.Action, resp.RawAction, resp.Reason, test.wantAction)
+			}
+			if inspector.calls != 1 {
+				t.Fatalf("AID calls=%d, want 1", inspector.calls)
+			}
+			if len(capture.metricRecords) != test.wantMetrics || len(capture.metricErrors) != 0 {
+				t.Fatalf("fail-open metrics=%d errors=%v, want %d", len(capture.metricRecords), capture.metricErrors, test.wantMetrics)
+			}
+		})
+	}
+}
+
+func TestManagedAIDOnly_NativeHookGateConsumesOrderedCandidatesExactlyOnce(t *testing.T) {
+	capture := &managedAIDFailOpenCapture{}
+	inspector := &stubAIDInspector{}
+	api := testAPIServerWithConfig(t, "action")
+	api.scannerCfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+	api.SetCiscoInspector(inspector)
+	api.bindObservabilityV8Lifecycle(capture)
+
+	evaluationCtx, gate := deferManagedAIDFailOpenNativeHookAccounting(t.Context())
+	_ = api.inspectManagedAIDOnly(evaluationCtx, "message", "")
+	_ = api.inspectManagedAIDOnly(evaluationCtx, "message", "ordinary content")
+	api.recordManagedAIDFailOpenForSelectedNativeHookResult(t.Context(), gate, "allow", false)
+	api.recordManagedAIDFailOpenForSelectedNativeHookResult(t.Context(), gate, "allow", false)
+
+	if inspector.calls != 1 {
+		t.Fatalf("AID calls=%d, want one inspectable proposal", inspector.calls)
+	}
+	if len(capture.metricRecords) != 2 || len(capture.metricErrors) != 0 {
+		t.Fatalf("fail-open metrics=%d errors=%v, want two ordered records", len(capture.metricRecords), capture.metricErrors)
+	}
+	wantReasons := []string{aidFailOpenNoContent, aidFailOpenUnavailable}
+	for index, wantReason := range wantReasons {
+		instrumentValue, present := capture.metricRecords[index].InstrumentData()
+		if !present {
+			t.Fatalf("fail-open metric[%d] has no instrument data", index)
+		}
+		instrument, err := instrumentValue.Object()
+		if err != nil {
+			t.Fatal(err)
+		}
+		attributes, ok := instrument["attributes"].(map[string]any)
+		if !ok || attributes["defenseclaw.metric.reason"] != wantReason {
+			t.Fatalf("fail-open metric[%d]=%v, want reason %q", index, instrument, wantReason)
+		}
+	}
+
+	for _, test := range []struct {
+		name     string
+		action   string
+		panicked bool
+	}{
+		{name: "block", action: "block"},
+		{name: "alert", action: "alert"},
+		{name: "confirm", action: "confirm"},
+		{name: "unknown", action: "unknown"},
+		{name: "panic allow", action: "allow", panicked: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, discardGate := deferManagedAIDFailOpenNativeHookAccounting(t.Context())
+			_ = api.inspectManagedAIDOnly(ctx, "message", "ordinary content")
+			api.recordManagedAIDFailOpenForSelectedNativeHookResult(t.Context(), discardGate, test.action, test.panicked)
+			api.recordManagedAIDFailOpenForSelectedNativeHookResult(t.Context(), discardGate, "allow", false)
+			if len(capture.metricRecords) != 2 {
+				t.Fatalf("discarded outcome appended metric: %d", len(capture.metricRecords))
+			}
+		})
+	}
+}
+
+func TestManagedAIDOnly_NativeHookSelectedAllowAccountsAfterCancellation(t *testing.T) {
+	parentCtx, cancelParent := context.WithCancel(context.Background())
+	t.Cleanup(cancelParent)
+	inspector := &cancelBeforeNilAIDInspector{cancel: cancelParent}
+	capture := &managedAIDFailOpenContextCapture{}
+	api := testAPIServerWithConfig(t, "action")
+	api.scannerCfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+	api.scannerCfg.Guardrail.Connector = "hermes"
+	api.SetCiscoInspector(inspector)
+	api.bindObservabilityV8Lifecycle(capture)
+
+	request := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/hermes/hook",
+		strings.NewReader(`{"hook_event_name":"pre_tool_call","tool_name":"read_file","tool_args":{"path":"README.md"}}`),
+	).WithContext(parentCtx)
+	response := httptest.NewRecorder()
+	api.handleAgentHook("hermes")(response, request)
+
+	var verdict agentHookResponse
+	if err := json.NewDecoder(response.Result().Body).Decode(&verdict); err != nil {
+		t.Fatal(err)
+	}
+	if response.Code != http.StatusOK || verdict.Action != "allow" || parentCtx.Err() != context.Canceled {
+		t.Fatalf("status=%d action=%q request error=%v, want 200/allow/canceled", response.Code, verdict.Action, parentCtx.Err())
+	}
+	if inspector.calls != 1 || len(capture.metricRecords) != 1 || len(capture.metricErrors) != 0 {
+		t.Fatalf("AID calls=%d fail-open metrics=%d errors=%v, want 1/1", inspector.calls, len(capture.metricRecords), capture.metricErrors)
+	}
+	if len(capture.contextErrors) != 1 || capture.contextErrors[0] != nil {
+		t.Fatalf("metric context errors=%v, want one live context", capture.contextErrors)
+	}
+	if len(capture.deadlineRemaining) != 1 || capture.deadlineRemaining[0] <= 0 || capture.deadlineRemaining[0] > time.Second {
+		t.Fatalf("metric deadline remaining=%v, want one live <=1s bound", capture.deadlineRemaining)
+	}
+}
+
+func TestManagedAIDOnly_NativeHookOwnerDiscardsPostProposalPanicAndArtifactBlock(t *testing.T) {
+	t.Run("HTTP evaluator panic after proposal", func(t *testing.T) {
+		const connectorName = "managed-aid-panic-owner"
+		registry := connector.NewDefaultRegistry()
+		if err := registry.RegisterPlugin(&managedAIDPanicResponseConnector{
+			stubConnector: &stubConnector{name: connectorName},
+		}); err != nil {
+			t.Fatal(err)
+		}
+
+		capture := &managedAIDFailOpenCapture{}
+		inspector := &stubAIDInspector{}
+		api := testAPIServerWithConfig(t, "action")
+		api.connectorRegistry = registry
+		api.scannerCfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+		api.scannerCfg.Guardrail.Connector = connectorName
+		api.SetCiscoInspector(inspector)
+		api.bindObservabilityV8Lifecycle(capture)
+
+		response := invokeNativeSkillHook(
+			t,
+			api,
+			connectorName,
+			`{"hook_event_name":"pre_tool_call","session_id":"managed-panic","tool_name":"read_file","tool_args":{"path":"README.md"}}`,
+		)
+		if response.Action != "allow" || response.RawAction != "allow" ||
+			!strings.Contains(response.Reason, "internal evaluator error") {
+			t.Fatalf("panic response=%+v, want safe allow", response)
+		}
+		if inspector.calls != 1 {
+			t.Fatalf("AID calls=%d, want proposal before panic", inspector.calls)
+		}
+		if got := countGeneratedMetricRecordsByName(
+			capture.metricRecords,
+			observability.TelemetryInstrumentDefenseClawManagedAidFailOpenDecisions,
+		); got != 0 {
+			t.Fatalf("post-proposal panic recorded fail-open decisions=%d, want zero", got)
+		}
+		if got := countGeneratedMetricRecordsByName(
+			capture.metricRecords,
+			observability.TelemetryInstrumentDefenseClawPanicsTotal,
+		); got != 1 {
+			t.Fatalf("gateway panic metrics=%d, want one recovered panic", got)
+		}
+	})
+
+	t.Run("post-evaluator artifact promotion block", func(t *testing.T) {
+		requireNativePOSIXArtifactHost(t)
+		if ManagedEnterpriseActive() {
+			t.Fatal("precondition: artifact promotion is disabled by the process-wide managed runtime flag")
+		}
+		installDefaultProfileConnector(t, "claudecode")
+		path := filepath.Join(t.TempDir(), "managed-proposal-then-block.sh")
+		if err := os.WriteFile(path, []byte("#!/bin/sh\nrm -rf /\n"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		facts := actionfacts.Analyze(actionfacts.Input{
+			Tool: "shell", Command: fmt.Sprintf("bash %q", path), CWD: filepath.Dir(path),
+		})
+		// Managed inspectTrustedToolPolicyCtx returns to AID before invoking the
+		// trusted-action record callback, so today's built-in managed evaluator
+		// cannot populate req.toolChain for this later modifier. Exercise the
+		// owner boundary with a prospective runtime that records the exact
+		// ActionFacts after proposing fail-open, then run the real post-evaluator
+		// modifier to pin the final-outcome accounting if that lifecycle becomes
+		// reachable.
+		toolChain := &toolChainHookCapture{}
+
+		capture := &managedAIDFailOpenCapture{}
+		inspector := &stubAIDInspector{}
+		api := testAPIServerWithConfig(t, "action")
+		api.scannerCfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
+		api.scannerCfg.Guardrail.Connector = "claudecode"
+		api.scannerCfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), "strict")
+		api.SetCiscoInspector(inspector)
+		api.bindObservabilityV8Lifecycle(capture)
+
+		req := agentHookRequest{
+			ConnectorName:           "claudecode",
+			HookEventName:           "PreToolUse",
+			SuppressCorrelationEmit: true,
+			toolChain:               toolChain,
+		}
+		evaluationCtx, gate := deferManagedAIDFailOpenNativeHookAccounting(t.Context())
+		evaluated, panicked := api.safeEvaluateHook(
+			evaluationCtx,
+			"claudecode",
+			req,
+			nil,
+			nil,
+			hookProfileRuntime{Evaluate: func(
+				server *APIServer,
+				ctx context.Context,
+				request agentHookRequest,
+				_ []byte,
+				_ map[string]interface{},
+			) agentHookResponse {
+				verdict := server.inspectManagedAIDOnly(ctx, "message", "ordinary content")
+				if verdict == nil || verdict.Action != "allow" {
+					panic(fmt.Sprintf("managed proposal=%+v, want fail-open allow", verdict))
+				}
+				request.toolChain.recordTrustedAction(facts, nil)
+				return agentHookResponse{Action: "allow", RawAction: "allow", Severity: "NONE", Mode: "action"}
+			}},
+		)
+		if panicked || evaluated.Action != "allow" || !toolChain.recorded {
+			t.Fatalf("evaluated=%+v panicked=%v tool-chain recorded=%v", evaluated, panicked, toolChain.recorded)
+		}
+		final := api.safeApplyExperimentalArtifactPromotion(
+			t.Context(),
+			api.hookProfileForConnector("claudecode"),
+			req,
+			evaluated,
+			0,
+		)
+		if final.Action != guardrailActionBlock || final.RawAction != guardrailActionBlock {
+			t.Fatalf("artifact promotion result=%+v, want final block", final)
+		}
+		api.recordManagedAIDFailOpenForSelectedNativeHookResult(t.Context(), gate, final.Action, panicked)
+		if inspector.calls != 1 {
+			t.Fatalf("AID calls=%d, want one proposal", inspector.calls)
+		}
+		if got := countGeneratedMetricRecordsByName(
+			capture.metricRecords,
+			observability.TelemetryInstrumentDefenseClawManagedAidFailOpenDecisions,
+		); got != 0 {
+			t.Fatalf("post-evaluator artifact block recorded fail-open decisions=%d, want zero", got)
+		}
+	})
 }
 
 func TestManagedAIDOnly_ToolResponseUsesSemanticOutputAndSkipsJudge(t *testing.T) {
@@ -866,6 +1272,16 @@ type managedAIDFailOpenCapture struct {
 	errors        []error
 	metricRecords []observability.Record
 	metricErrors  []error
+}
+
+func countGeneratedMetricRecordsByName(records []observability.Record, name string) int {
+	count := 0
+	for _, record := range records {
+		if string(record.EventName()) == name {
+			count++
+		}
+	}
+	return count
 }
 
 type managedAIDFailOpenContextCapture struct {
