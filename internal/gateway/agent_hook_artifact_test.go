@@ -157,6 +157,10 @@ func TestPromotedArtifactHonorsPOSIXNoExecScriptMode(t *testing.T) {
 			name: "dash noexec re-enabled", invocation: "dash -n +n",
 			wantFinding: true, enforceable: true,
 		},
+		// For identity failures below, direct shell artifact candidates remain
+		// enforceable because the promoted script is analyzed separately and must
+		// be authoritative. Wrapper/nested candidates remain detection-only because
+		// promotedArtifactCandidateEnforcementEligible rejects them.
 		{
 			name: "mixed case bash", invocation: "Bash -n",
 			wantFinding: true, enforceable: true,

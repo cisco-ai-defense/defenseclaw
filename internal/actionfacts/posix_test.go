@@ -26,6 +26,7 @@ func noExecScriptSemanticSignature(facts Facts, scripts ...string) string {
 	for _, script := range scripts {
 		commandID := int64(0)
 		effect := CommandEffect("")
+		found := false
 		for _, command := range facts.Commands {
 			invocation := parsePOSIXShellInvocation(command.Program, command.Argv)
 			if invocation.valid && invocation.mode == posixShellModeScript &&
@@ -34,8 +35,13 @@ func noExecScriptSemanticSignature(facts Facts, scripts ...string) string {
 				command.Argv[invocation.scriptIndex] == script {
 				commandID = command.ID
 				effect = command.Effect
+				found = true
 				break
 			}
+		}
+		if !found {
+			fmt.Fprintf(&signature, " %s={owner:missing}", script)
+			continue
 		}
 		read := false
 		execute := false
@@ -56,6 +62,18 @@ func noExecScriptSemanticSignature(facts Facts, scripts ...string) string {
 		)
 	}
 	return signature.String()
+}
+
+func requireNoExecScriptOwners(t *testing.T, facts Facts, scripts ...string) {
+	t.Helper()
+	for _, script := range scripts {
+		if strings.Contains(
+			noExecScriptSemanticSignature(facts, script),
+			"{owner:missing}",
+		) {
+			t.Fatalf("no noexec command owns %q: %#v", script, facts.Commands)
+		}
+	}
 }
 
 func exactPOSIXNoExecPreviewCount(facts Facts) int {
@@ -903,6 +921,7 @@ func TestParsePOSIXNoExecPreviewUsesFinalClassificationStatus(t *testing.T) {
 					t.Fatalf("noexec sibling became preview: %#v", command)
 				}
 			}
+			requireNoExecScriptOwners(t, facts, script)
 			signature := noExecScriptSemanticSignature(facts, script)
 			if baseline == "" {
 				baseline = signature
@@ -951,6 +970,9 @@ func TestParsePOSIXNoExecCandidatesFailClosedAsASet(t *testing.T) {
 				!factsHavePath(facts, PathAccessWrite, output) {
 				t.Fatalf("mixed noexec candidates = %#v", facts)
 			}
+			requireNoExecScriptOwners(
+				t, facts, firstScript, secondScript, thirdScript,
+			)
 			signature := noExecScriptSemanticSignature(
 				facts,
 				firstScript,
@@ -1002,6 +1024,9 @@ func TestParsePOSIXNoExecPipelineCandidateFailsClosedAsASet(t *testing.T) {
 				factsHavePath(facts, PathAccessRead, thirdScript) {
 				t.Fatalf("pipelined noexec candidate set = %#v", facts)
 			}
+			requireNoExecScriptOwners(
+				t, facts, firstScript, secondScript, thirdScript,
+			)
 			signature := noExecScriptSemanticSignature(
 				facts,
 				firstScript,
@@ -1077,6 +1102,7 @@ func TestParsePOSIXNoExecScriptAndUnsafeCommandFailClosedAsASet(t *testing.T) {
 			if !noExecCommandExecute {
 				t.Fatalf("unsafe noexec -c did not retain execute carrier: %#v", facts.Commands)
 			}
+			requireNoExecScriptOwners(t, facts, script)
 			signature := noExecScriptSemanticSignature(facts, script)
 			if baseline == "" {
 				baseline = signature

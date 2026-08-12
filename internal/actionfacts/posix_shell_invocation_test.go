@@ -274,13 +274,16 @@ func TestIsolatedPOSIXCommandFailsClosedOnBrokenAncestry(t *testing.T) {
 		t.Fatal("wrapper with mismatched executable and argv owner was isolated")
 	}
 
-	arbitraryChild := CommandFact{ID: 2, ParentCommandID: 1}
+	arbitraryChild := CommandFact{
+		ID: 2, ParentCommandID: 1, Argv: []string{"bash", "-n", "script.sh"},
+	}
 	arbitrary := parseOutput{
 		status: StatusComplete,
 		commands: []CommandFact{
 			{
 				ID: 1, Dialect: DialectPOSIX, Effect: EffectExecute,
-				Executable: "sudo", Program: "sudo",
+				Executable: "sudo", Program: "sudo", ArgvComplete: true,
+				Argv: []string{"sudo", "bash", "-n", "script.sh"},
 			},
 			arbitraryChild,
 		},
