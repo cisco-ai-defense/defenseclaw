@@ -235,6 +235,18 @@ stop_daemon() {
   local plist="$2"
   if launchctl print "system/${label}" >/dev/null 2>&1; then
     log "stopping LaunchDaemon (${label})"
+
+    # Capture the child PID BEFORE bootout so we can wait for the
+    # actual process to exit. bootout returns once launchd has
+    # released the label, but the child may still be alive for a
+    # moment. For hook-guardian this matters: while alive, its
+    # fsnotify handler re-heals the very agent-config files the
+    # subsequent scrub is about to strip, silently undoing the
+    # uninstall.
+    local pid=""
+    pid="$(launchctl print "system/${label}" 2>/dev/null \
+      | awk '/^[[:space:]]*pid = / {print $3; exit}')"
+
     # Try both bootout forms (target vs plist path); either works and
     # both are safe when the target is already gone.
     launchctl bootout "system/${label}" 2>/dev/null || \
@@ -249,14 +261,43 @@ stop_daemon() {
       sleep 1
       settle=$((settle + 1))
     done
+
+    # Now wait for the child process itself to exit. bootout sends
+    # SIGTERM; escalate to SIGKILL after 10s in case the process is
+    # blocked in a syscall or ignoring the signal.
+    if [[ -n "${pid}" && "${pid}" =~ ^[0-9]+$ ]]; then
+      local waited=0
+      while (( waited < 10 )); do
+        kill -0 "${pid}" 2>/dev/null || break
+        sleep 1
+        waited=$((waited + 1))
+      done
+      if kill -0 "${pid}" 2>/dev/null; then
+        warn "PID ${pid} for ${label} did not exit within 10s; sending SIGKILL"
+        kill -9 "${pid}" 2>/dev/null || true
+        waited=0
+        while (( waited < 3 )); do
+          kill -0 "${pid}" 2>/dev/null || break
+          sleep 1
+          waited=$((waited + 1))
+        done
+        if kill -0 "${pid}" 2>/dev/null; then
+          warn "PID ${pid} for ${label} still alive after SIGKILL; hooks scrub may race with the reconciler"
+        fi
+      fi
+    fi
   fi
 }
 
-stop_daemon "${LAUNCHD_LABEL}"            "${PLIST_DST}"
+# Stop the hook-guardian FIRST — it's the fsnotify-driven reconciler
+# that re-heals scrubbed agent-config entries. Everything else can
+# race with the scrub without corrupting the result, but the guardian
+# will actively undo it if given even a ~1s window.
 stop_daemon "${GUARDIAN_LAUNCHD_LABEL}"   "${GUARDIAN_PLIST_DST}"
 stop_daemon "${ENUMERATOR_LAUNCHD_LABEL}" "${ENUMERATOR_PLIST_DST}"
-stop_daemon "${LEGACY_LAUNCHD_LABEL}"     "${LEGACY_PLIST_DST}"
+stop_daemon "${LAUNCHD_LABEL}"            "${PLIST_DST}"
 stop_daemon "${LEGACY_GUARDIAN_LAUNCHD_LABEL}" "${LEGACY_GUARDIAN_PLIST_DST}"
+stop_daemon "${LEGACY_LAUNCHD_LABEL}"     "${LEGACY_PLIST_DST}"
 
 # ---- agent-config scrub (BEFORE we delete ~/.defenseclaw) --------------
 #
