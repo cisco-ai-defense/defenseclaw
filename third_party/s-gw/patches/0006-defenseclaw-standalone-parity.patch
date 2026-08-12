@@ -1,0 +1,161 @@
+From ee75dcb5c80012b1bcb818c566b5a7b4788f7da0 Mon Sep 17 00:00:00 2001
+From: barry <bayuan@cisco.com>
+Date: Wed, 5 Aug 2026 09:44:30 -0700
+Subject: [PATCH 6/7] Adapt DefenseClaw boundary to standalone parity
+
+---
+ src/cli.ts                        |  4 +++
+ src/trusted-windows-command.ts    | 29 ++++++++++++++++---
+ tests/defenseclaw-runtime.test.ts | 48 +++++++++++++++++++++++++++++--
+ 3 files changed, 74 insertions(+), 7 deletions(-)
+
+diff --git a/src/cli.ts b/src/cli.ts
+index 63b0f69..ca34be5 100644
+--- a/src/cli.ts
++++ b/src/cli.ts
+@@ -2253,6 +2253,10 @@ function rejectDefenseClawAuthorizationMutation(
+   third: string | undefined,
+   flags: Record<string, string | boolean | string[]>
+ ): void {
++  if (first === "__windows-login-start") {
++    throw nativeAuthorizationGuidance();
++  }
++
+   if (Object.prototype.hasOwnProperty.call(flags, "allow-command")) {
+     throw nativeAuthorizationGuidance();
+   }
+diff --git a/src/trusted-windows-command.ts b/src/trusted-windows-command.ts
+index 44b2872..c9b8a6b 100644
+--- a/src/trusted-windows-command.ts
++++ b/src/trusted-windows-command.ts
+@@ -1,4 +1,4 @@
+-import { lstatSync, realpathSync } from "node:fs";
++import { closeSync, constants, fstatSync, lstatSync, openSync, realpathSync } from "node:fs";
+ import path from "node:path";
+ import { trustedWindowsPowerShellSync } from "./windows-system.js";
+ 
+@@ -9,14 +9,35 @@ export function trustedWindowsPowershell(): string {
+   }
+ 
+   const resolved = realpathSync(candidate);
+-  const systemPowershell = trustedWindowsPowerShellSync();
+-  if (path.win32.normalize(resolved).toLowerCase() !== path.win32.normalize(candidate).toLowerCase()
+-    || path.win32.normalize(resolved).toLowerCase() !== path.win32.normalize(systemPowershell).toLowerCase()) {
++  if (path.win32.normalize(resolved).toLowerCase() !== path.win32.normalize(candidate).toLowerCase()) {
+     throw new Error("The trusted Windows PowerShell path changed during validation.");
+   }
+   const info = lstatSync(candidate);
+   if (info.isSymbolicLink() || !info.isFile()) {
+     throw new Error("The trusted Windows PowerShell path is unsafe.");
+   }
++
++  const systemPowershell = trustedWindowsPowerShellSync();
++  const systemInfo = lstatSync(systemPowershell);
++  if (systemInfo.isSymbolicLink() || !systemInfo.isFile()
++    || !sameFile(candidate, systemPowershell)) {
++    throw new Error("The trusted Windows PowerShell path changed during validation.");
++  }
+   return systemPowershell;
+ }
++
++function sameFile(candidate: string, systemPowershell: string): boolean {
++  const candidateFd = openSync(candidate, constants.O_RDONLY);
++  let systemFd: number | undefined;
++  try {
++    systemFd = openSync(systemPowershell, constants.O_RDONLY);
++    const candidateInfo = fstatSync(candidateFd, { bigint: true });
++    const systemInfo = fstatSync(systemFd, { bigint: true });
++    return systemInfo.ino !== 0n
++      && candidateInfo.dev === systemInfo.dev
++      && candidateInfo.ino === systemInfo.ino;
++  } finally {
++    closeSync(candidateFd);
++    if (systemFd !== undefined) closeSync(systemFd);
++  }
++}
+diff --git a/tests/defenseclaw-runtime.test.ts b/tests/defenseclaw-runtime.test.ts
+index 2f5fe1b..31d47c1 100644
+--- a/tests/defenseclaw-runtime.test.ts
++++ b/tests/defenseclaw-runtime.test.ts
+@@ -1,9 +1,10 @@
+ import { execFileSync, spawnSync } from "node:child_process";
+-import { access, chmod, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
++import { access, chmod, copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+ import os from "node:os";
+ import path from "node:path";
+ import { pathToFileURL } from "node:url";
+ import { describe, expect, it } from "vitest";
++import { trustedWindowsPowershell } from "../src/trusted-windows-command.js";
+ 
+ const repoRoot = process.cwd();
+ const tsxCli = path.join(repoRoot, "node_modules", "tsx", "dist", "cli.mjs");
+@@ -17,16 +18,56 @@ describe("DefenseClaw local console launch", () => {
+     ].map((name) => readFile(new URL(`../src/${name}`, import.meta.url), "utf8")));
+     const trusted = await readFile(new URL("../src/trusted-windows-command.ts", import.meta.url), "utf8");
+     const sshAcl = await readFile(new URL("../src/windows-acl.ts", import.meta.url), "utf8");
++    const windowsSystem = await readFile(new URL("../src/windows-system.ts", import.meta.url), "utf8");
+ 
+     expect(sources.join("\n")).not.toContain('"powershell.exe"');
+     expect(sources.join("\n")).not.toContain("process.env.SystemRoot");
+     expect(trusted).toContain("process.env.SGW_TRUSTED_POWERSHELL");
+     expect(trusted).toContain("realpathSync(candidate)");
+-    expect(sshAcl).toContain("GLOBALROOT\\SystemRoot");
+-    expect(sshAcl).toContain('process.env.SGW_TEST_MODE !== "1"');
++    expect(trusted).toContain("sameFile(candidate, systemPowershell)");
++    expect(trusted).toContain("fstatSync");
++    expect(`${sshAcl}\n${windowsSystem}`).toContain("GLOBALROOT\\SystemRoot");
++    expect(`${sshAcl}\n${windowsSystem}`).toContain('process.env.SGW_TEST_MODE === "1"');
+     expect(sshAcl).not.toContain('spawn("powershell.exe"');
+   });
+ 
++  it.skipIf(process.platform !== "win32")(
++    "binds the host PowerShell path to the kernel-anchored executable",
++    async () => {
++      const windowsRoot = process.env.SystemRoot?.trim();
++      if (!windowsRoot) throw new Error("SystemRoot is unavailable in the Windows test environment.");
++
++      const candidate = path.win32.join(
++        windowsRoot,
++        "System32",
++        "WindowsPowerShell",
++        "v1.0",
++        "powershell.exe"
++      );
++      const expected = candidate;
++      const tmpDir = await mkdtemp(path.join(os.tmpdir(), "sgw-defenseclaw-powershell-"));
++      const decoy = path.join(tmpDir, "powershell.exe");
++      const testMode = process.env.SGW_TEST_MODE;
++      const trusted = process.env.SGW_TRUSTED_POWERSHELL;
++
++      try {
++        delete process.env.SGW_TEST_MODE;
++        process.env.SGW_TRUSTED_POWERSHELL = candidate;
++        expect(trustedWindowsPowershell()).toBe(expected);
++
++        await copyFile(process.execPath, decoy);
++        process.env.SGW_TRUSTED_POWERSHELL = decoy;
++        expect(() => trustedWindowsPowershell()).toThrow(/changed during validation/i);
++      } finally {
++        if (testMode === undefined) delete process.env.SGW_TEST_MODE;
++        else process.env.SGW_TEST_MODE = testMode;
++        if (trusted === undefined) delete process.env.SGW_TRUSTED_POWERSHELL;
++        else process.env.SGW_TRUSTED_POWERSHELL = trusted;
++        await rm(tmpDir, { recursive: true, force: true });
++      }
++    }
++  );
++
+   it("contains no TypeScript proxy-tokenizer or approval mutation fallback", async () => {
+     const cli = await readFile(new URL("../src/cli.ts", import.meta.url), "utf8");
+     const mcp = await readFile(new URL("../src/mcp-server.ts", import.meta.url), "utf8");
+@@ -143,6 +184,7 @@ describe("DefenseClaw local console launch", () => {
+   it("rejects approval and authorization mutations before creating store state", async () => {
+     const policyAliases = ["add", "update", "edit", "arrange", "organize", "delete", "remove", "enable", "disable"];
+     const rejectedRoutes = [
++      ["__windows-login-start", "--payload", "untrusted"],
+       ["approve", "req-test"],
+       ["deny", "req-test"],
+       ["approval", "set"],
+-- 
+2.50.1 (Apple Git-155)
+

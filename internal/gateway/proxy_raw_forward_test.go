@@ -123,9 +123,8 @@ func TestRawForwardNonStreamingInspectsToolCalls(t *testing.T) {
 	defer upstream.Close()
 
 	registerRawForwardProviderDomain(t, upstream.URL, "openai")
-	allowRawForwardPrivateTargets(t)
-
 	proxy := newTestProxy(t, &mockProvider{}, newMockInspector(), "action")
+	allowRawForwardPrivateTargets(proxy)
 	body := mustJSON(t, map[string]interface{}{
 		"model":    "gpt-4",
 		"messages": []map[string]interface{}{{"role": "user", "content": "call a tool"}},
@@ -178,9 +177,8 @@ func TestRawForwardStreamingFlushesChunksIncrementally(t *testing.T) {
 	defer upstream.Close()
 
 	registerRawForwardProviderDomain(t, upstream.URL, "openai")
-	allowRawForwardPrivateTargets(t)
-
 	proxy := newTestProxy(t, &mockProvider{}, newMockInspector(), "observe")
+	allowRawForwardPrivateTargets(proxy)
 	proxyServer := httptest.NewServer(http.HandlerFunc(proxy.handleChatCompletion))
 	defer proxyServer.Close()
 
@@ -237,9 +235,8 @@ func TestRawForwardPreservesHeadersAndAzureAuth(t *testing.T) {
 	defer upstream.Close()
 
 	registerRawForwardProviderDomain(t, upstream.URL, "azure")
-	allowRawForwardPrivateTargets(t)
-
 	proxy := newTestProxy(t, &mockProvider{}, newMockInspector(), "observe")
+	allowRawForwardPrivateTargets(proxy)
 	runtime, capture := newProxyGeneratedTraceRuntime(t)
 	proxy.bindObservabilityV8Trace(runtime)
 	body := mustJSON(t, map[string]interface{}{
@@ -299,9 +296,6 @@ func registerRawForwardProviderDomain(t *testing.T, rawURL, provider string) {
 	registerForwardingProviderDomain(t, u.Hostname(), provider)
 }
 
-func allowRawForwardPrivateTargets(t *testing.T) {
-	t.Helper()
-	orig := passthroughAllowPrivateForTest
-	passthroughAllowPrivateForTest = true
-	t.Cleanup(func() { passthroughAllowPrivateForTest = orig })
+func allowRawForwardPrivateTargets(proxy *GuardrailProxy) {
+	proxy.allowPrivatePassthroughForTest = true
 }

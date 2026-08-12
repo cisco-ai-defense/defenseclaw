@@ -196,7 +196,8 @@ jobs:
           ditto "$candidate_root/$version" dist
           python3 scripts/release_candidate.py verify-runtime \
             --release-dir dist \
-            --version "$version"
+            --version "$version" \
+            --source-only-sgw
           python3 scripts/release_candidate.py extract-gateway \
             --release-dir dist \
             --output build/macos-app/runtime-input/defenseclaw \

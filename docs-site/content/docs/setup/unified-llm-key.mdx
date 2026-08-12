@@ -129,7 +129,7 @@ The CLI resolves credential values from the **most specific** source down:
 This order is implemented by `cli/defenseclaw/credentials.py::resolve` and is the same code path that `defenseclaw quickstart` and `defenseclaw doctor` use, so what you see in `keys list` is exactly what the running gateway and scanners see.
 
 <Callout title="No macOS Keychain">
-DefenseClaw does **not** read or write the macOS Keychain. The `~/.defenseclaw/.env` file is the only on-disk credential store; transient overrides go through `os.environ`. Use a secret manager (1Password, Vault, AWS Secrets Manager) plus `export` in your shell init if you need to keep secrets out of `~/.defenseclaw/.env`.
+The `defenseclaw keys` command does **not** read or write the macOS Keychain. Its on-disk store remains `~/.defenseclaw/.env`, and transient overrides go through `os.environ`. The optional [s-gw credential broker](/docs/setup/credential-protection) is a separate integration with its own encrypted credential store and approval workflow; DefenseClaw does not migrate existing `keys` values into it.
 </Callout>
 
 ## Per-component overrides

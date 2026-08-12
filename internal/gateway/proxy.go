@@ -114,6 +114,10 @@ type GuardrailProxy struct {
 	hilt         *HILTApprovalManager
 	notifier     *notifier.Dispatcher
 
+	credentialTokenizerMu       sync.RWMutex
+	credentialProtectionEnabled bool
+	credentialTokenizer         CredentialTokenizer
+
 	// resolveProviderFn selects the upstream LLMProvider for a request.
 	// Defaults to resolveProviderFromHeaders (uses X-DC-Target-URL).
 	// Tests can override this to inject a mock provider.
@@ -161,6 +165,10 @@ type GuardrailProxy struct {
 	// X-DC-Auth header. Production callers MUST never set this —
 	// it bypasses the security floor entirely.
 	skipAuthForTest bool
+
+	// Tests that forward to httptest.Server opt in per proxy. Production
+	// callers must leave this false so private upstreams stay blocked.
+	allowPrivatePassthroughForTest bool
 }
 
 // SetDefaultAgentName sets the agent name fallback for OTel spans when
@@ -609,9 +617,10 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 	srv := &http.Server{Addr: addr, Handler: handler}
 
 	p.health.SetGuardrail(StateStarting, "", map[string]interface{}{
-		"port": p.cfg.Port,
-		"mode": p.mode,
-		"addr": addr,
+		"port":                  p.cfg.Port,
+		"mode":                  p.mode,
+		"addr":                  addr,
+		"credential_protection": p.credentialProtectionCoverage(),
 	})
 	fmt.Fprintf(os.Stderr, "[guardrail] starting proxy (addr=%s mode=%s model=%s)\n",
 		addr, p.mode, p.cfg.ModelName)
@@ -636,9 +645,10 @@ func (p *GuardrailProxy) Run(ctx context.Context) error {
 		return fmt.Errorf("proxy: listen %s: %w", addr, err)
 	case <-time.After(200 * time.Millisecond):
 		p.health.SetGuardrail(StateRunning, "", map[string]interface{}{
-			"port": p.cfg.Port,
-			"mode": p.mode,
-			"addr": addr,
+			"port":                  p.cfg.Port,
+			"mode":                  p.mode,
+			"addr":                  addr,
+			"credential_protection": p.credentialProtectionCoverage(),
 		})
 		fmt.Fprintf(os.Stderr, "[guardrail] proxy ready on %s\n", addr)
 		_ = p.logger.LogAction(string(audit.ActionGuardrailHealthy), "", fmt.Sprintf("port=%d", p.cfg.Port))
@@ -787,12 +797,22 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	}
 
 	// Peek the body once so the shape classifier can run even when the
-	// URL is unknown. 10 MiB cap matches the original io.Copy budget.
-	body, err := io.ReadAll(io.LimitReader(r.Body, 10*1024*1024))
+	// URL is unknown.
+	body, err := readProxyRequestBody(r.Body)
 	if err != nil {
+		if errors.Is(err, errProxyRequestBodyTooLarge) {
+			writeOpenAIError(w, http.StatusRequestEntityTooLarge, "request body exceeds 10 MiB limit")
+			return
+		}
 		writeOpenAIError(w, http.StatusBadRequest, "failed to read request body")
 		return
 	}
+
+	var tokenMeta struct {
+		Model  string `json:"model"`
+		Stream bool   `json:"stream"`
+	}
+	_ = json.Unmarshal(body, &tokenMeta)
 
 	targetOrigin := r.Header.Get("X-DC-Target-URL")
 	// Native-binary connectors (codex, zeptoclaw) can't inject
@@ -873,6 +893,10 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	}
 	branch := "passthrough"
 	bodyShape := BodyShapeNone
+	provider := inferProviderFromURL(targetForMatch)
+	if provider == "" {
+		provider, _ = splitModel(tokenMeta.Model)
+	}
 	if isKnownProviderDomain(targetForMatch) {
 		branch = "known"
 	} else {
@@ -896,12 +920,13 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	}
 
 	if branch == "passthrough" {
-		fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED passthrough to unknown domain: %s (path=%s)\n", targetOrigin, r.URL.Path)
+		fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED passthrough to unknown domain: %s (path=%s)\n", scrubURLSecrets(targetOrigin), r.URL.Path)
 		p.emitEgress(r.Context(), mkEgress("block", "unknown-host-no-shape"))
 		writeOpenAIError(w, http.StatusForbidden, "target URL does not match any known LLM provider domain")
 		return
 	}
 
+	egressReason := "known-provider"
 	if branch == "shape" {
 		// SSRF defense-in-depth: never forward an LLM-shaped request
 		// to a private / link-local IP even when AllowUnknownLLMDomains
@@ -924,10 +949,26 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			writeOpenAIError(w, http.StatusForbidden, "target URL does not match any known LLM provider domain (set guardrail.allow_unknown_llm_domains to permit)")
 			return
 		}
-		p.emitEgress(r.Context(), mkEgress("allow", "allow-unknown-enabled"))
-	} else {
-		p.emitEgress(r.Context(), mkEgress("allow", "known-provider"))
+		egressReason = "allow-unknown-enabled"
 	}
+
+	// Resolve and admit the final target before sending any request content to
+	// the credential broker. Rejected targets must not create enrollment work,
+	// and connector/config hydration must determine the provider label.
+	if p.guardResolvedTargetURL(w, r, targetOrigin, branch, branch != "passthrough") {
+		return
+	}
+	protectedBody, protectionBlock := p.protectProxyBody(r, provider, body)
+	if protectionBlock != nil {
+		p.writeCredentialProtectionBlock(
+			w, r.URL.Path, provider, credentialBlockModel,
+			credentialRequestStreams(r.URL.Path, tokenMeta.Stream), protectionBlock,
+		)
+		return
+	}
+	body = protectedBody
+
+	p.emitEgress(r.Context(), mkEgress("allow", egressReason))
 
 	// Extract text for inspection. Parse multiple API formats:
 	//  - Chat Completions: {"messages": [...]}
@@ -953,7 +994,6 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	customBlockMsg := p.blockMessage
 	p.rtMu.RUnlock()
 
-	provider := inferProviderFromURL(targetForMatch)
 	label := provider + r.URL.Path // e.g. "anthropic/v1/messages"
 
 	userText := lastUserText(partial.Messages)
@@ -2140,7 +2180,10 @@ func (p *GuardrailProxy) resolveConfiguredProvider(req *ChatRequest) LLMProvider
 	}
 
 	instanceName := strings.TrimSpace(p.cfg.LLM.InstanceName)
-	baseURL := strings.TrimSpace(p.cfg.LLM.BaseURL)
+	baseURL := strings.TrimSpace(req.AdmittedBaseURL)
+	if baseURL == "" {
+		baseURL = strings.TrimSpace(p.cfg.LLM.BaseURL)
+	}
 	if instanceName != "" {
 		fmt.Fprintf(os.Stderr, "[guardrail] direct-provider mode: model=%q instance=%q\n", cfgModel, instanceName)
 	} else {
@@ -2164,6 +2207,15 @@ func (p *GuardrailProxy) resolveConfiguredProvider(req *ChatRequest) LLMProvider
 		return nil
 	}
 	return provider
+}
+
+func (p *GuardrailProxy) configuredProviderTargetURL() string {
+	if p == nil || p.cfg == nil {
+		return ""
+	}
+	registry, _, _ := providerRegistrySnapshot()
+	instance := configuredProviderInstance(strings.TrimSpace(p.cfg.LLM.InstanceName), registry)
+	return effectiveLLMBaseURL(&p.cfg.LLM, instance)
 }
 
 // resolveDirectProviderUpstreamKey returns the upstream API key to use
@@ -2342,24 +2394,42 @@ func (p *GuardrailProxy) resolveProviderFromHeaders(req *ChatRequest) LLMProvide
 // Returns true when the request was rejected and the caller must stop
 // processing. An empty targetURL is a no-op (no upstream override in play).
 func (p *GuardrailProxy) guardUpstreamTargetURL(w http.ResponseWriter, r *http.Request, targetURL string) bool {
+	return p.guardResolvedTargetURL(w, r, targetURL, "chat", true)
+}
+
+func (p *GuardrailProxy) guardResolvedTargetURL(
+	w http.ResponseWriter,
+	r *http.Request,
+	targetURL, branch string,
+	looksLikeLLM bool,
+) bool {
 	if targetURL == "" {
 		return false
 	}
 	u, perr := url.Parse(targetURL)
-	if perr != nil {
-		return false
+	if perr != nil || u.Hostname() == "" {
+		p.emitEgress(r.Context(), gatewaylog.EgressPayload{
+			TargetPath:   r.URL.Path,
+			LooksLikeLLM: looksLikeLLM,
+			Branch:       branch,
+			Decision:     "block",
+			Reason:       "invalid-target-url",
+			Source:       "go",
+		})
+		writeOpenAIError(w, http.StatusBadRequest, "upstream target URL is invalid")
+		return true
 	}
 	if u.User != nil {
 		p.emitEgress(r.Context(), gatewaylog.EgressPayload{
 			TargetHost:   u.Hostname(),
 			TargetPath:   r.URL.Path,
-			LooksLikeLLM: true,
-			Branch:       "chat",
+			LooksLikeLLM: looksLikeLLM,
+			Branch:       branch,
 			Decision:     "block",
 			Reason:       "userinfo-in-target-url",
 			Source:       "go",
 		})
-		fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED chat: userinfo in upstream target URL\n")
+		fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED %s: userinfo in upstream target URL\n", branch)
 		writeOpenAIError(w, http.StatusBadRequest, "upstream target URL must not contain userinfo")
 		return true
 	}
@@ -2367,8 +2437,8 @@ func (p *GuardrailProxy) guardUpstreamTargetURL(w http.ResponseWriter, r *http.R
 		p.emitEgress(r.Context(), gatewaylog.EgressPayload{
 			TargetHost:   u.Hostname(),
 			TargetPath:   r.URL.Path,
-			LooksLikeLLM: true,
-			Branch:       "chat",
+			LooksLikeLLM: looksLikeLLM,
+			Branch:       branch,
 			Decision:     "block",
 			Reason:       "non-http-scheme",
 			Source:       "go",
@@ -2378,17 +2448,17 @@ func (p *GuardrailProxy) guardUpstreamTargetURL(w http.ResponseWriter, r *http.R
 	}
 	if host := u.Hostname(); host != "" && isPrivateHost(host) &&
 		!isOllamaLoopback(targetURL+r.URL.Path, 0) &&
-		!passthroughAllowPrivateForTest {
+		!p.allowPrivatePassthroughForTest {
 		p.emitEgress(r.Context(), gatewaylog.EgressPayload{
 			TargetHost:   host,
 			TargetPath:   r.URL.Path,
-			LooksLikeLLM: true,
-			Branch:       "chat",
+			LooksLikeLLM: looksLikeLLM,
+			Branch:       branch,
 			Decision:     "block",
 			Reason:       "private-ip",
 			Source:       "go",
 		})
-		fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED chat: private-host target %s\n", host)
+		fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED %s: private-host target %s\n", branch, host)
 		writeOpenAIError(w, http.StatusForbidden, "target host resolves to a private address")
 		return true
 	}
@@ -2408,8 +2478,12 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	body, err := io.ReadAll(io.LimitReader(r.Body, 10*1024*1024))
+	body, err := readProxyRequestBody(r.Body)
 	if err != nil {
+		if errors.Is(err, errProxyRequestBodyTooLarge) {
+			writeOpenAIError(w, http.StatusRequestEntityTooLarge, "request body exceeds 10 MiB limit")
+			return
+		}
 		writeOpenAIError(w, http.StatusBadRequest, "failed to read request body")
 		return
 	}
@@ -2481,14 +2555,19 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		}
 	}
 
-	// SSRF / userinfo / scheme guards run here — AFTER connector hydration —
-	// so they see the *final* upstream, whether it came from the
+	// SSRF / userinfo / scheme guards run here — AFTER connector and direct
+	// provider hydration — so they see the *final* upstream, whether it came from the
 	// X-DC-Target-URL header (fetch-interceptor connectors) or was resolved by
 	// a native-binary connector's config snapshot (Codex / ZeptoClaw). Running
 	// before hydration would leave the connector-resolved upstream unguarded
 	// (it would only fail opaquely at dial time in ssrfSafeDialContext, with no
 	// structured 400/403 + labeled egress block event).
-	if p.guardUpstreamTargetURL(w, r, req.TargetURL) {
+	resolvedTargetURL := req.TargetURL
+	if resolvedTargetURL == "" {
+		resolvedTargetURL = p.configuredProviderTargetURL()
+		req.AdmittedBaseURL = resolvedTargetURL
+	}
+	if p.guardUpstreamTargetURL(w, r, resolvedTargetURL) {
 		return
 	}
 
@@ -2554,6 +2633,43 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 			http.StatusServiceUnavailable)
 		return
 	}
+
+	tokenizationProvider := inferProviderFromURL(resolvedTargetURL + req.TargetPath)
+	if tokenizationProvider == "" && req.TargetURL == "" && p.cfg != nil {
+		tokenizationProvider, _ = splitModel(p.cfg.Model)
+	}
+	if tokenizationProvider == "" {
+		tokenizationProvider, _ = splitModel(req.Model)
+	}
+
+	protectedBody, protectionBlock := p.protectProxyBody(r, tokenizationProvider, body)
+	if protectionBlock != nil {
+		p.writeCredentialProtectionBlock(
+			w, r.URL.Path, tokenizationProvider, credentialBlockModel, req.Stream, protectionBlock,
+		)
+		return
+	}
+
+	// Tokenization can rewrite structured fields. Rebuild the parsed request
+	// while retaining the admitted routing data, which never comes from the
+	// rewritten body.
+	routingTargetURL := req.TargetURL
+	routingTargetPath := req.TargetPath
+	routingAPIKey := req.TargetAPIKey
+	routingAdmittedBaseURL := req.AdmittedBaseURL
+	var protectedReq ChatRequest
+	if err := json.Unmarshal(protectedBody, &protectedReq); err != nil {
+		writeOpenAIError(w, http.StatusInternalServerError, "credential protection returned an invalid request body")
+		return
+	}
+	protectedReq.RawBody = protectedBody
+	protectedReq.ExtraParams = extractExtraParams(protectedBody)
+	protectedReq.TargetURL = routingTargetURL
+	protectedReq.TargetPath = routingTargetPath
+	protectedReq.TargetAPIKey = routingAPIKey
+	protectedReq.AdmittedBaseURL = routingAdmittedBaseURL
+	req = protectedReq
+	body = protectedBody
 
 	// --- Launder prior DefenseClaw-generated assistant turns ---
 	//
@@ -4167,10 +4283,20 @@ func redactAuthValue(val string) string {
 	return "[set]"
 }
 
-// scrubURLSecrets returns a URL safe for diagnostics. It never changes the URL
-// used for the upstream request.
+// scrubURLSecrets returns an absolute URL safe for diagnostics. It never
+// changes the URL used for the upstream request.
 func scrubURLSecrets(raw string) string {
-	return netguard.ScrubURLString(raw)
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Hostname() == "" {
+		return "<unparseable-url>"
+	}
+	u.ForceQuery = false
+	u.Fragment = ""
+	u.RawFragment = ""
+	return netguard.ScrubURL(u, "request_id")
 }
 
 // isOllamaLoopback returns true when targetURL points at a loopback

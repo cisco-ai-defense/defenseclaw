@@ -336,14 +336,14 @@ def test_third_party_license_text_and_platform_packaging_contracts():
         assert f'cp {name} ' in bundle_builder
         assert f'cp "${{ROOT}}/{name}" ' in app_builder
     assert windows_gateway_license_staging in windows_builder
-    assert (
-        "foreach ($file in @('pyproject.toml', 'README.md', 'LICENSE', 'NOTICE', "
-        "'THIRD_PARTY_LICENSES.txt', 'MANIFEST.in'))"
-    ) in windows_builder
-    assert (
-        "Copy-Item -LiteralPath (Join-Path $WorkspaceRoot $file) "
-        "-Destination $packageStage -Force"
-    ) in windows_builder
+    package_copy = windows_builder[
+        windows_builder.index("function Copy-PackageBuildInputs") : windows_builder.index(
+            "function Invoke-BuildArtifacts"
+        )
+    ]
+    for name in ("pyproject.toml", "README.md", "LICENSE", "NOTICE", "THIRD_PARTY_LICENSES.txt", "MANIFEST.in"):
+        assert f"'{name}'" in package_copy
+    assert "Copy-PackageBuildInputs $packageStage" in windows_builder
     assert 'cmp -s "${ROOT}/${relative}" "${PAYLOAD}/${relative}"' in app_verifier
     assert (
         """\

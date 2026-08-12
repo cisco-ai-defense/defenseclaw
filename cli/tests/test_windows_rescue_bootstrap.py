@@ -425,6 +425,9 @@ def test_windows_rescue_streaming_download_has_one_end_to_end_deadline() -> None
     download = source[
         source.index("function Invoke-SingleBoundedDownload {") : source.index("\nfunction Invoke-BoundedDownload {")
     ]
+    retry = source[
+        source.index("function Invoke-BoundedDownload {") : source.index("\nfunction Get-ReleaseChannelCommit {")
+    ]
 
     assert "$DownloadTransferTimeoutSeconds = 300" in source
     assert "$client.Timeout = [Threading.Timeout]::InfiniteTimeSpan" in source
@@ -435,6 +438,8 @@ def test_windows_rescue_streaming_download_has_one_end_to_end_deadline() -> None
     assert "$inputStream.ReadAsync(" in download
     assert "$inputStream.Read(" not in download
     assert "$transferCancellation.Dispose()" in download
+    assert "for ($attempt = 1; $attempt -le 3; $attempt++)" in retry
+    assert "[Threading.Thread]::Sleep(1000)" in retry
 
 
 @pytest.mark.skipif(
@@ -451,13 +456,24 @@ def test_windows_rescue_stream_deadline_cancels_a_stalled_body(
     download = source[
         source.index("function Invoke-SingleBoundedDownload {") : source.index("\nfunction Get-ReleaseChannelCommit {")
     ]
+    transfer_timeout_seconds = 1
+    expected_attempts = 3
+    retry_delay_seconds = 1
+    loaded_runner_allowance_seconds = 10
+    deadline_seconds = (
+        transfer_timeout_seconds * expected_attempts
+        + retry_delay_seconds * (expected_attempts - 1)
+        + loaded_runner_allowance_seconds
+    )
     destination = tmp_path / "stalled-download"
     harness = tmp_path / "stalled-download.ps1"
     harness.write_text(
         (
             "Set-StrictMode -Version Latest\n"
             '$ErrorActionPreference = "Stop"\n'
-            "$DownloadTransferTimeoutSeconds = 1\n"
+            f"$DownloadTransferTimeoutSeconds = {transfer_timeout_seconds}\n"
+            f"$TestDeadlineSeconds = {deadline_seconds}\n"
+            f"$ExpectedAttempts = {expected_attempts}\n"
             f"{die}\n"
             f"{regular_file}\n"
             f"{download}\n"
@@ -535,7 +551,7 @@ try {
     exit 90
 } catch {
     $watch.Stop()
-    if ($watch.Elapsed.TotalSeconds -gt 7) {
+    if ($watch.Elapsed.TotalSeconds -gt $TestDeadlineSeconds) {
         [Console]::Error.WriteLine("stream cancellation exceeded its deadline")
         exit 91
     }
@@ -543,7 +559,7 @@ try {
         [Console]::Error.WriteLine("cancelled stream retained a partial output")
         exit 92
     }
-    if ([DefenseClawStallingHandler]::Attempts -ne 3) {
+    if ([DefenseClawStallingHandler]::Attempts -ne $ExpectedAttempts) {
         [Console]::Error.WriteLine(
             "stream cancellation attempted $([DefenseClawStallingHandler]::Attempts) transfers"
         )

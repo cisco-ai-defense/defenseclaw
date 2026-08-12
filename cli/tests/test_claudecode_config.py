@@ -83,18 +83,23 @@ class MakeClaudeCodeSettingsShapeTests(unittest.TestCase):
 
 class ClaudeCodeMCPReaderTests(unittest.TestCase):
     """``connector_paths.mcp_servers('claudecode')`` reads
-    ``~/.claude/settings.json`` ``mcpServers`` and merges in an
+    ``~/.claude.json`` ``mcpServers`` and merges in an
     explicit workspace ``.mcp.json`` when configured.
     """
 
-    def test_reads_mcp_from_settings_json(self):
+    def test_reads_mcp_from_user_registry(self):
         with _IsolatedHome() as home:
-            make_claudecode_settings(
-                home,
-                mcp_servers={
-                    "playwright": {"command": "npx", "args": ["@playwright/mcp"]},
-                    "filesystem": {"command": "uvx", "args": ["mcp-server-filesystem"]},
-                },
+            registry = Path(home) / ".claude.json"
+            registry.write_text(
+                json.dumps(
+                    {
+                        "mcpServers": {
+                            "playwright": {"command": "npx", "args": ["@playwright/mcp"]},
+                            "filesystem": {"command": "uvx", "args": ["mcp-server-filesystem"]},
+                        }
+                    }
+                ),
+                encoding="utf-8",
             )
             entries = connector_paths.mcp_servers("claudecode")
             names = sorted(e.name for e in entries)
@@ -104,7 +109,7 @@ class ClaudeCodeMCPReaderTests(unittest.TestCase):
             self.assertEqual(playwright.command, "npx")
             self.assertEqual(playwright.args, ["@playwright/mcp"])
 
-    def test_missing_settings_returns_empty(self):
+    def test_missing_user_registry_returns_empty(self):
         with _IsolatedHome():
             self.assertEqual(connector_paths.mcp_servers("claudecode"), [])
 
@@ -147,7 +152,11 @@ class ClaudeCodeHooksRoundTripTests(unittest.TestCase):
     def test_partial_restore_preserves_foreign_hooks(self):
         with _IsolatedHome() as home:
             foreign = {"event": "PreToolUse", "matcher": "Bash", "command": "/usr/local/bin/audit.sh"}
-            ours = {"event": "PreToolUse", "matcher": "Bash", "command": "/home/u/.defenseclaw/hooks/claude-code-hook.sh"}
+            ours = {
+                "event": "PreToolUse",
+                "matcher": "Bash",
+                "command": "/home/u/.defenseclaw/hooks/claude-code-hook.sh",
+            }
             path = make_claudecode_settings(home, hooks=[foreign, ours])
 
             with open(path) as fh:

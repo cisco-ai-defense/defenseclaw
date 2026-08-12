@@ -419,6 +419,16 @@ func TestLoadOTLPPathToken_RejectsUnsafeFiles(t *testing.T) {
 				if err := os.WriteFile(path, []byte(token), 0o644); err != nil {
 					t.Fatal(err)
 				}
+				if err := os.Chmod(path, 0o644); err != nil {
+					t.Fatal(err)
+				}
+				info, err := os.Lstat(path)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if mode := info.Mode().Perm(); mode != 0o644 {
+					t.Fatalf("wide-mode fixture has mode %o, want 644", mode)
+				}
 			},
 		},
 		{

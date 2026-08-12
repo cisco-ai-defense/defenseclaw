@@ -160,22 +160,24 @@ func validateRunCommand(command string) error {
 }
 
 type options struct {
-	Action             string
-	Quiet              bool
-	NoRestart          bool // Standard installer property; setup never initiates an OS reboot.
-	InstallScope       string
-	Connector          string
-	Mode               string
-	StartGateway       bool
-	DeleteUserData     bool
-	ConnectorSet       bool
-	ModeSet            bool
-	StartGatewaySet    bool
-	WaitPID            uint32
-	FromVersion        string
-	CleanupTransaction string
-	CodexHome          string
-	ClaudeConfigDir    string
+	Action                  string
+	Quiet                   bool
+	NoRestart               bool // Standard installer property; setup never initiates an OS reboot.
+	InstallScope            string
+	Connector               string
+	Mode                    string
+	StartGateway            bool
+	CredentialProtection    bool
+	DeleteUserData          bool
+	ConnectorSet            bool
+	ModeSet                 bool
+	StartGatewaySet         bool
+	CredentialProtectionSet bool
+	WaitPID                 uint32
+	FromVersion             string
+	CleanupTransaction      string
+	CodexHome               string
+	ClaudeConfigDir         string
 	// PreserveConnectorConfiguration is internal transaction intent, never a
 	// command-line property. Servicing an existing install without an explicit
 	// connector or mode selection must refresh its owned registrations in place
@@ -1046,6 +1048,42 @@ func readNativeConfiguredConnectors(dataRoot string) ([]string, error) {
 	return result(), nil
 }
 
+func readNativeCredentialProtectionEnabled(dataRoot string) (bool, error) {
+	data, exists, err := readBoundedNativeStateFile(
+		filepath.Join(dataRoot, "config.yaml"),
+		nativeConfigRosterLimit,
+	)
+	if err != nil || !exists {
+		return false, err
+	}
+
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	var document yaml.Node
+	if err := decoder.Decode(&document); err != nil {
+		return false, fmt.Errorf("inspect credential protection: invalid YAML")
+	}
+	var extra yaml.Node
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		return false, fmt.Errorf("inspect credential protection: invalid YAML document count")
+	}
+	root, err := nativeYAMLMappingRoot(&document)
+	if err != nil {
+		return false, err
+	}
+	section, err := nativeYAMLMappingChild(root, "credential_protection")
+	if err != nil || section == nil {
+		return false, err
+	}
+	enabled, err := nativeYAMLChild(section, "enabled")
+	if err != nil || enabled == nil {
+		return false, err
+	}
+	if enabled.Kind != yaml.ScalarNode || enabled.Tag != "!!bool" {
+		return false, fmt.Errorf("credential_protection.enabled is not a boolean")
+	}
+	return strings.EqualFold(strings.TrimSpace(enabled.Value), "true"), nil
+}
+
 func nativeYAMLMappingRoot(document *yaml.Node) (*yaml.Node, error) {
 	if document == nil || document.Kind != yaml.DocumentNode || len(document.Content) != 1 {
 		return nil, fmt.Errorf("config roster has an invalid document shape")
@@ -1705,21 +1743,60 @@ func runInitialConfigurationWithEnv(root, dataRoot string, opts options, env []s
 }
 
 func initialConfigurationArgs(opts options) []string {
-	return []string{
+	args := []string{
 		"init", "--skip-install", "--non-interactive", "--yes",
 		"--connector", opts.Connector,
 		"--profile", opts.Mode,
 		"--no-start-gateway", "--no-verify",
 	}
+	if opts.CredentialProtectionSet {
+		if opts.CredentialProtection {
+			args = append(args, "--credential-protection")
+		} else {
+			args = append(args, "--no-credential-protection")
+		}
+	}
+	return args
 }
 
 func runCanonicalInitializationWithEnv(root, dataRoot string, env []string) error {
 	return runInitialConfigurationWithEnv(
 		root,
 		dataRoot,
-		options{Connector: "none", Mode: "observe", Quiet: true},
+		canonicalInitializationOptions(),
 		env,
 	)
+}
+
+func canonicalInitializationOptions() options {
+	// Connector selection happens later, so only committed convergence may start s-gw.
+	return options{
+		Connector:               "none",
+		Mode:                    "observe",
+		Quiet:                   true,
+		CredentialProtectionSet: true,
+	}
+}
+
+func runCredentialProtectionSetupWithEnv(root, dataRoot string, enabled bool, env []string) error {
+	output, err := runCapturedSetupCommand(
+		setupConfigurationTimeout,
+		env,
+		filepath.Join(root, "bin", "defenseclaw.exe"),
+		credentialProtectionSetupArgs(enabled)...,
+	)
+	if err != nil {
+		return fmt.Errorf("credential protection configuration failed: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	return nil
+}
+
+func credentialProtectionSetupArgs(enabled bool) []string {
+	args := []string{"setup", "credential-protection"}
+	if !enabled {
+		args = append(args, "--disable")
+	}
+	return append(args, "--yes")
 }
 
 const packagedMigrationScript = `import inspect, json, sys
@@ -2466,6 +2543,13 @@ func parseArgs(args []string) (options, error) {
 				}
 				opts.StartGateway = parsed
 				opts.StartGatewaySet = true
+			case "CREDENTIALPROTECTION":
+				parsed, err := parseBooleanProperty(value)
+				if err != nil {
+					return opts, fmt.Errorf("invalid CREDENTIALPROTECTION value: %w", err)
+				}
+				opts.CredentialProtection = parsed
+				opts.CredentialProtectionSet = true
 			case "DELETEUSERDATA":
 				parsed, err := parseBooleanProperty(value)
 				if err != nil {
@@ -2550,7 +2634,7 @@ func normalizeConnector(value string) string {
 }
 
 func printUsage() {
-	fmt.Println("DefenseClawSetup-x64.exe [/quiet] [/norestart] [INSTALLSCOPE=user] [CONNECTOR=codex|claudecode|amp|none] [MODE=observe|action] [STARTGATEWAY=1] | /verify")
+	fmt.Println("DefenseClawSetup-x64.exe [/quiet] [/norestart] [INSTALLSCOPE=user] [CONNECTOR=codex|claudecode|amp|none] [MODE=observe|action] [STARTGATEWAY=1] [CREDENTIALPROTECTION=0|1] | /verify")
 	fmt.Println("Maintenance: DefenseClawSetup-x64.exe /repair | /upgrade | /uninstall [DELETEUSERDATA=1]")
 }
 

@@ -136,6 +136,16 @@ func TestJSONLRefusesSymlinkHardlinkNonRegularAndUnsafeMode(t *testing.T) {
 		if err := os.WriteFile(path, nil, 0o640); err != nil {
 			t.Fatal(err)
 		}
+		if err := os.Chmod(path, 0o640); err != nil {
+			t.Fatal(err)
+		}
+		info, err := os.Lstat(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if mode := info.Mode().Perm(); mode != 0o640 {
+			t.Fatalf("group-readable fixture has mode %o, want 640", mode)
+		}
 		if _, err := NewJSONL(JSONLConfig{Path: path, MaxSizeMB: 1}); !IsError(err, ErrorUnsafePath) {
 			t.Fatalf("NewJSONL error = %v, want unsafe_path", err)
 		}

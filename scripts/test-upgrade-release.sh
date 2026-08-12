@@ -651,10 +651,12 @@ PY
     if version_lte "${PROTECTED_ARTIFACT_VERSION}" "${TARGET_VERSION}"; then
         python3 "${build_root}/scripts/release_candidate.py" prepare-runtime \
             --release-dir "${out}" \
-            --version "${TARGET_VERSION}"
+            --version "${TARGET_VERSION}" \
+            --source-only-sgw
         python3 "${build_root}/scripts/release_candidate.py" verify-runtime \
             --release-dir "${out}" \
-            --version "${TARGET_VERSION}"
+            --version "${TARGET_VERSION}" \
+            --source-only-sgw
         python3 "${build_root}/scripts/release_candidate.py" stage-resolvers \
             --release-dir "${out}" \
             --version "${TARGET_VERSION}"

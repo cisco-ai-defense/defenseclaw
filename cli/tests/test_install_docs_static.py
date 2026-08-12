@@ -16,6 +16,7 @@ import json
 import os
 import platform
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -32,24 +33,20 @@ ROOT = Path(__file__).resolve().parents[2]
 # identity. Published documentation is allowed to advance independently.
 CURRENT_RELEASE = "0.8.6"
 CURRENT_PUBLISHED_RELEASE = "0.8.10"
-LATEST_POSIX_INSTALL_URL = (
-    "https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh"
-)
+LATEST_POSIX_INSTALL_URL = "https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh"
 LATEST_POSIX_INSTALL_COMMAND = f"curl -LsSf {LATEST_POSIX_INSTALL_URL} | bash"
 DOC_INSTALL_COMMANDS = {
     "docs-site/content/docs/get-started/install.mdx": (LATEST_POSIX_INSTALL_COMMAND,)
     + (
         ".\\DefenseClawSetup-x64.exe",
         ".\\DefenseClawSetup-x64.exe /quiet /norestart INSTALLSCOPE=user CONNECTOR=codex MODE=observe STARTGATEWAY=1",
-        "after download it does not require Python, `uv`, Go, Node.js, Git, or a",
-        "PowerShell installation command.",
+        "after download the base payload does not require Python, `uv`, Go, Git, or a",
+        "PowerShell installation command. Fresh installs enable credential protection",
     ),
     "docs-site/content/docs/get-started/first-guardrail.mdx": (
         f"{LATEST_POSIX_INSTALL_COMMAND} -s -- --connector claudecode",
     ),
-    "docs-site/components/terminal-demo.tsx": (
-        f"text: '{LATEST_POSIX_INSTALL_COMMAND}',",
-    ),
+    "docs-site/components/terminal-demo.tsx": (f"text: '{LATEST_POSIX_INSTALL_COMMAND}',",),
 }
 
 INSTALLER_FILES = (
@@ -1358,8 +1355,14 @@ def test_source_install_preflight_refuses_release_and_other_checkout_but_allows_
     make = shutil.which("make")
     if make is None:
         pytest.skip("make is unavailable")
+    tool_dir = tmp_path / "tools"
+    tool_dir.mkdir()
+    go_invoked = tmp_path / "go-invoked"
+    fake_go = tool_dir / "go"
+    fake_go.write_text(f"#!/bin/sh\n: > {shlex.quote(str(go_invoked))}\nexit 99\n", encoding="utf-8")
+    fake_go.chmod(0o755)
     tool_dirs = {str(Path(tool).parent) for name in ("go", "python3") if (tool := shutil.which(name)) is not None}
-    test_path = os.pathsep.join(sorted(tool_dirs) + ["/usr/bin", "/bin"])
+    test_path = os.pathsep.join([str(tool_dir), *sorted(tool_dirs), "/usr/bin", "/bin"])
 
     def run(
         home: Path,
@@ -1466,6 +1469,7 @@ def test_source_install_preflight_refuses_release_and_other_checkout_but_allows_
     (owner_bin / "defenseclaw").unlink()
     allowed = run(owner_home, owner_bin)
     assert allowed.returncode == 0, allowed.stdout + allowed.stderr
+    assert not go_invoked.exists()
 
 
 @pytest.mark.skipif(os.name == "nt", reason="source ownership uses POSIX executables")
@@ -1771,10 +1775,7 @@ def test_public_operator_docs_never_advertise_direct_defenseclaw_package_install
         "docs/CLI.md",
         "docs/INSTALL.md",
         "docs/OBSERVABILITY.md",
-        *(
-            path.relative_to(ROOT).as_posix()
-            for path in (ROOT / "docs-site/content/docs").rglob("*.mdx")
-        ),
+        *(path.relative_to(ROOT).as_posix() for path in (ROOT / "docs-site/content/docs").rglob("*.mdx")),
     }
     package_install = re.compile(
         r"\b(?:pipx|pip|uv\s+pip|uv\s+tool)\s+install\b[^\n`]*"
@@ -1820,16 +1821,10 @@ def test_repository_operator_pointers_delegate_to_the_canonical_website() -> Non
 
 def test_scanner_recovery_docs_match_dependency_and_registry_contracts() -> None:
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
-    mcp_docs = (ROOT / "docs-site/content/docs/setup/mcp-scanner.mdx").read_text(
-        encoding="utf-8"
-    )
-    registry_docs = (
-        ROOT / "docs-site/content/docs/setup/registries.mdx"
-    ).read_text(encoding="utf-8")
+    mcp_docs = (ROOT / "docs-site/content/docs/setup/mcp-scanner.mdx").read_text(encoding="utf-8")
+    registry_docs = (ROOT / "docs-site/content/docs/setup/registries.mdx").read_text(encoding="utf-8")
     llm_source = (ROOT / "cli/defenseclaw/llm.py").read_text(encoding="utf-8")
-    mcp_source = (ROOT / "cli/defenseclaw/scanner/mcp.py").read_text(
-        encoding="utf-8"
-    )
+    mcp_source = (ROOT / "cli/defenseclaw/scanner/mcp.py").read_text(encoding="utf-8")
 
     assert "python_version>='3.11'" in pyproject
     assert "including a POSIX release install" in mcp_docs
@@ -2018,12 +2013,8 @@ def test_published_posix_install_examples_default_to_latest_release() -> None:
         assert "INSTALL_URL=" not in text
         assert "INSTALL_VERSION" not in text
 
-    install_page = (
-        ROOT / "docs-site/content/docs/get-started/install.mdx"
-    ).read_text(encoding="utf-8")
-    assert install_page.index(LATEST_POSIX_INSTALL_COMMAND) < install_page.index(
-        "## Prerequisites"
-    )
+    install_page = (ROOT / "docs-site/content/docs/get-started/install.mdx").read_text(encoding="utf-8")
+    assert install_page.index(LATEST_POSIX_INSTALL_COMMAND) < install_page.index("## Prerequisites")
 
 
 def test_current_observability_docs_do_not_advertise_retired_redaction_controls() -> None:

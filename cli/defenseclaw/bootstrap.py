@@ -159,6 +159,13 @@ class FirstRunOptions:
     # falling back to a stricter posture is safer than silently
     # promoting a typo into a permissive setting.
     hilt_min_severity: str = ""
+    # None preserves existing behavior for callers that do not own this
+    # choice. Init and quickstart pass an explicit value for fresh installs;
+    # reruns never enable or disable credential protection implicitly.
+    credential_protection: bool | None = None
+    # Multi-connector init owns one final roster reconciliation. Keep a fresh
+    # setting disabled until that complete roster is ready.
+    defer_credential_protection_setup: bool = False
 
 
 @dataclass
@@ -174,6 +181,7 @@ class FirstRunReport:
     readiness: list[StepResult] = field(default_factory=list)
     next_commands: list[str] = field(default_factory=list)
     connector_mode_warnings: list[dict] = field(default_factory=list)
+    credential_protection_deferred: bool = False
 
     def to_dict(self) -> dict:
         data = {
@@ -618,7 +626,7 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
     try:
         cfg = cfg_mod.load()
     except Exception as exc:
-        if connector == "none" and not was_config_absent:
+        if not was_config_absent:
             cfg = cfg_mod.default_config()
             setup.append(
                 StepResult(
@@ -648,6 +656,24 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
         # unversioned/legacy objects after the hard cutover.
         if new_config and getattr(cfg, "_source_config_version", 0) == 0:
             cfg_mod.prepare_fresh_v8_config(cfg)
+
+    previous_connectors = {str(name).strip().lower() for name in cfg.active_connectors() if str(name).strip()}
+
+    new_credential_protection_requested = False
+    credential_protection_deferred = False
+    if new_config:
+        credential_protection_requested = options.credential_protection
+        if credential_protection_requested is None:
+            from defenseclaw.credential_protection import (
+                credential_protection_default_enabled,
+            )
+
+            credential_protection_requested = credential_protection_default_enabled()
+        new_credential_protection_requested = bool(credential_protection_requested)
+        # Keep the persisted setting off until both the broker and its active
+        # connector registrations are ready. A setup failure or interruption
+        # must not publish an enabled-but-unprotected fresh installation.
+        cfg.credential_protection.enabled = False
 
     try:
         repaired_migration_state = repair_pending_first_run_config(cfg)
@@ -721,6 +747,34 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
 
         _persist_first_run_secrets(cfg, options, setup)
 
+        credential_setup_step = None
+        if new_config and new_credential_protection_requested:
+            if options.defer_credential_protection_setup:
+                credential_protection_deferred = True
+                setup.append(
+                    StepResult(
+                        "Credential broker",
+                        "skip",
+                        "deferred until the complete connector roster is configured",
+                    )
+                )
+            else:
+                cfg.credential_protection.enabled = True
+                credential_setup_step = _setup_credential_protection_structured(
+                    cfg,
+                    already_enabled=False,
+                )
+                if credential_setup_step.status != "pass":
+                    cfg.credential_protection.enabled = False
+                setup.append(credential_setup_step)
+        elif new_config:
+            detail = (
+                "opted out"
+                if options.credential_protection is False
+                else "authenticated s-gw release artifacts are not installed"
+            )
+            setup.append(StepResult("Credential broker", "skip", detail))
+
         if options.skip_install:
             setup.append(StepResult("Scanners", "skip", "--skip-install"))
         else:
@@ -738,6 +792,21 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
             setup.append(_quiet_guardrail_setup(app, connector, verbose=options.verbose))
         setup.extend(_connector_mode_warning_steps(connector_mode_warnings))
 
+        # An existing enabled broker still needs its MCP registration reconciled
+        # after init or quickstart changes the active connector. Preserve the
+        # setting itself, but do not leave the new connector outside s-gw.
+        if not new_config and cfg.credential_protection.enabled:
+            current_connectors = {str(name).strip().lower() for name in cfg.active_connectors() if str(name).strip()}
+            removed_connectors = sorted(previous_connectors - current_connectors)
+            if removed_connectors:
+                credential_setup_step = _setup_credential_protection_structured(
+                    cfg,
+                    removed_connectors=removed_connectors,
+                )
+            else:
+                credential_setup_step = _setup_credential_protection_structured(cfg)
+            setup.append(credential_setup_step)
+
         if options.sandbox:
             setup.append(
                 StepResult(
@@ -748,8 +817,26 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
                 )
             )
 
-        if options.start_gateway:
-            setup.append(_start_gateway_structured(cfg))
+        credential_setup_incomplete = credential_protection_deferred or (
+            credential_setup_step is not None
+            and (credential_setup_step.status == "fail" or (new_config and credential_setup_step.status != "pass"))
+        )
+        if options.start_gateway and not credential_setup_incomplete:
+            setup.append(
+                _start_gateway_structured(
+                    cfg,
+                    restart_if_running=credential_setup_step is not None,
+                )
+            )
+        elif options.start_gateway:
+            setup.append(
+                StepResult(
+                    "Sidecar",
+                    "skip",
+                    "not started because credential-protection setup did not complete",
+                    "defenseclaw setup credential-protection --yes",
+                )
+            )
         else:
             setup.append(
                 StepResult(
@@ -785,6 +872,7 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
             readiness=readiness,
             next_commands=next_commands,
             connector_mode_warnings=connector_mode_warnings,
+            credential_protection_deferred=credential_protection_deferred,
         )
     finally:
         try:
@@ -808,6 +896,18 @@ def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult
             "defenseclaw init" if not os.path.isfile(cfg_path) else "",
         )
     )
+
+    if getattr(getattr(cfg, "credential_protection", None), "enabled", False):
+        steps.append(_credential_protection_readiness(cfg))
+    else:
+        steps.append(
+            StepResult(
+                "Credential broker",
+                "skip",
+                "disabled",
+                "defenseclaw setup credential-protection --yes",
+            )
+        )
     steps.append(
         StepResult(
             "Audit database",
@@ -883,6 +983,96 @@ def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult
         steps.append(StepResult("Gateway binary", "pass", "found on PATH"))
 
     return steps
+
+
+def _setup_credential_protection_structured(
+    cfg: Config,
+    *,
+    removed_connectors: tuple[str, ...] | list[str] = (),
+    already_enabled: bool | None = None,
+) -> StepResult:
+    from defenseclaw.credential_protection import (
+        CredentialProtectionError,
+        mcp_reconciliation_failed,
+        reconcile_mcp_connector_roster,
+        setup_broker_for_runtime,
+    )
+
+    try:
+        was_enabled = bool(cfg.credential_protection.enabled) if already_enabled is None else already_enabled
+        status = setup_broker_for_runtime(
+            cfg.data_dir,
+            already_enabled=was_enabled,
+        )
+        mcp_results = reconcile_mcp_connector_roster(
+            cfg,
+            removed_connectors=removed_connectors,
+        )
+    except CredentialProtectionError as exc:
+        return StepResult(
+            "Credential broker",
+            "fail",
+            str(exc),
+            "defenseclaw setup credential-protection --yes",
+        )
+    version = f"s-gw {status['version']} ready" if status.get("version") else "s-gw ready"
+    registrations = ", ".join(f"{item['connector']}={item['mcp_registration']}" for item in mcp_results)
+    detail = f"{version}; MCP {registrations}" if registrations else f"{version}; no active connector MCP registration"
+    if mcp_reconciliation_failed(mcp_results):
+        return StepResult(
+            "Credential broker",
+            "fail",
+            detail,
+            "defenseclaw setup credential-protection --yes",
+        )
+    if any(item["mcp_registration"] in {"manual", "unsupported"} for item in mcp_results):
+        return StepResult(
+            "Credential broker",
+            "warn",
+            detail,
+            "defenseclaw credential-protection status",
+        )
+    return StepResult("Credential broker", "pass", detail)
+
+
+def _credential_protection_readiness(cfg: Config) -> StepResult:
+    from defenseclaw.credential_protection import (
+        mcp_connector_status,
+        mcp_reconciliation_failed,
+        remediation,
+        safe_status,
+    )
+
+    status = safe_status(cfg.data_dir, enabled=True)
+    if status["ready"]:
+        version = f"s-gw {status['version']} ready" if status.get("version") else "s-gw ready"
+        mcp_results = mcp_connector_status(cfg)
+        registrations = ", ".join(f"{item['connector']}={item['mcp_registration']}" for item in mcp_results)
+        detail = (
+            f"{version}; MCP {registrations}" if registrations else f"{version}; no active connector MCP registration"
+        )
+        if mcp_reconciliation_failed(mcp_results) or any(item["mcp_registration"] == "missing" for item in mcp_results):
+            return StepResult(
+                "Credential broker",
+                "fail",
+                detail,
+                "defenseclaw setup credential-protection --yes",
+            )
+        if any(item["mcp_registration"] in {"manual", "unsupported"} for item in mcp_results):
+            return StepResult(
+                "Credential broker",
+                "warn",
+                detail,
+                "defenseclaw credential-protection status",
+            )
+        return StepResult("Credential broker", "pass", detail)
+    reason = str(status.get("error_code") or status.get("state") or "unavailable").replace("_", " ")
+    return StepResult(
+        "Credential broker",
+        "fail",
+        reason,
+        remediation(status),
+    )
 
 
 def _normalize_connector(raw: str | None) -> str:
@@ -1219,7 +1409,11 @@ def _quiet_guardrail_setup(app, connector: str, *, verbose: bool) -> StepResult:
     sink = contextlib.nullcontext() if verbose else contextlib.redirect_stdout(buf)
     try:
         with sink:
-            ok, warnings = execute_guardrail_setup(app, save_config=True)
+            ok, warnings = execute_guardrail_setup(
+                app,
+                save_config=True,
+                reconcile_credentials=False,
+            )
     except Exception as exc:
         detail = str(exc)
         if not verbose and buf.getvalue().strip():
@@ -1273,7 +1467,11 @@ def _running_connector_from_state_file(data_dir: str) -> str | None:
     return name or None
 
 
-def _start_gateway_structured(cfg: Config) -> StepResult:
+def _start_gateway_structured(
+    cfg: Config,
+    *,
+    restart_if_running: bool = False,
+) -> StepResult:
     """Start (or restart) the defenseclaw-gateway sidecar to match
     the on-disk config, returning a structured StepResult.
 
@@ -1281,8 +1479,7 @@ def _start_gateway_structured(cfg: Config) -> StepResult:
 
     1. **Not running** → spawn ``defenseclaw-gateway start``.
     2. **Running, configured connector matches the live one** →
-       no-op, return ``"already running"``. The cheapest path and
-       what most reruns of ``defenseclaw init`` end up doing.
+       no-op unless the caller just repaired credential protection.
     3. **Running, configured connector differs from the live one** →
        call ``defenseclaw-gateway restart``. This is the path the
        fail-mode/connector-switch UX bug used to short-circuit:
@@ -1315,7 +1512,17 @@ def _start_gateway_structured(cfg: Config) -> StepResult:
         # bounces the daemon themselves".
         desired = cfg.active_connector()
         running = _running_connector_from_state_file(cfg.data_dir)
-        if running is not None and running != desired:
+        connector_drift = running is not None and running != desired
+        if restart_if_running or connector_drift:
+            if restart_if_running and connector_drift:
+                reason = f"credential-protection service with connector drift detected ({running} → {desired})"
+                success = f"restarted after credential-protection service ({running} → {desired})"
+            elif restart_if_running:
+                reason = "credential-protection service"
+                success = "restarted after credential-protection service"
+            else:
+                reason = f"connector drift detected ({running} → {desired})"
+                success = f"restarted (was {running}, now {desired})"
             try:
                 result = subprocess.run(
                     [gw, "restart"],
@@ -1327,28 +1534,23 @@ def _start_gateway_structured(cfg: Config) -> StepResult:
                 return StepResult(
                     "Sidecar",
                     "warn",
-                    f"connector drift detected ({running} → {desired}) but restart timed out",
+                    f"{reason} completed, but the gateway restart timed out",
                     "defenseclaw-gateway restart",
                 )
             except OSError as exc:
                 return StepResult(
                     "Sidecar",
                     "warn",
-                    f"connector drift detected ({running} → {desired}): {exc}",
+                    f"{reason} completed, but the gateway restart failed: {exc}",
                     "defenseclaw-gateway restart",
                 )
             if result.returncode == 0:
-                return StepResult(
-                    "Sidecar",
-                    "pass",
-                    f"restarted (was {running}, now {desired})",
-                )
+                return StepResult("Sidecar", "pass", success)
             detail = (result.stderr or result.stdout or "restart failed").strip().splitlines()
             return StepResult(
                 "Sidecar",
                 "warn",
-                f"connector drift detected ({running} → {desired}) but restart failed: "
-                f"{detail[0] if detail else 'restart failed'}",
+                f"{reason} completed, but the gateway restart failed: {detail[0] if detail else 'restart failed'}",
                 "defenseclaw-gateway restart",
             )
         return StepResult("Sidecar", "pass", "already running")

@@ -123,7 +123,8 @@ class WindowsManagedVenvResetTests(unittest.TestCase):
             ):
                 target = data_dir / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text("reset me", encoding="utf-8")
+                content = "config_version: 8\n" if relative == "config.yaml" else "reset me"
+                target.write_text(content, encoding="utf-8")
 
             bootstrap = root / "invoke_reset.py"
             bootstrap.write_text(

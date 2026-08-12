@@ -41,6 +41,7 @@ OpenClaw, never against the other adapters — calling
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -56,8 +57,8 @@ from pathlib import Path
 
 import click
 
+from defenseclaw import __version__, install_publish, ux
 from defenseclaw import config as config_module
-from defenseclaw import ux
 from defenseclaw.commands import windows_native_uninstall
 
 # Connectors whose teardown the Python CLI knows how to perform locally
@@ -68,6 +69,10 @@ _PYTHON_FALLBACK_CONNECTORS: frozenset[str] = frozenset({"openclaw"})
 _RESET_PRESERVED_ENTRIES: tuple[str, ...] = (".venv",)
 _WIN_SYNCHRONIZE = 0x00100000
 _WIN_PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+_SOURCE_MARKER_NAME = ".defenseclaw-source-root"
+_SOURCE_INSTALL_COMPATIBILITY_EPOCH = 2
+_SOURCE_RUNTIME_CONFIG_VERSION = 8
+_MAX_GATEWAY_BINARY_BYTES = 512 * 1024 * 1024
 _CONNECTOR_BACKUP_MARKERS: dict[str, tuple[str, ...]] = {
     "openclaw": (os.path.join("connector_backups", "openclaw", "openclaw.json.json"),),
     "codex": (
@@ -79,9 +84,7 @@ _CONNECTOR_BACKUP_MARKERS: dict[str, tuple[str, ...]] = {
         "claudecode_backup.json",
         os.path.join("connector_backups", "claudecode", "settings.json.json"),
     ),
-    "amp": (
-        os.path.join("connector_backups", "amp", "config.json"),
-    ),
+    "amp": (os.path.join("connector_backups", "amp", "config.json"),),
     "zeptoclaw": (
         "zeptoclaw_backup.json",
         os.path.join("connector_backups", "zeptoclaw", "config.json.json"),
@@ -96,6 +99,7 @@ class UninstallPlan:
     stop_gateway: bool = True
     revert_openclaw: bool = True
     remove_plugin: bool = True
+    remove_credential_mcp: bool = False
     remove_data_dir: bool = False
     remove_binaries: bool = False
     data_dir: str = ""
@@ -117,6 +121,12 @@ class UninstallPlan:
     managed_venv: str = ""
     gateway_path: str = ""
     binary_targets: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class _PosixBinaryClaim:
+    identity: install_publish.StrongIdentity
+    symlink_targets: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -404,6 +414,7 @@ def _build_plan(
         stop_gateway=True,
         revert_openclaw=revert_openclaw and owns_openclaw,
         remove_plugin=remove_plugin and owns_openclaw,
+        remove_credential_mcp=True,
         remove_data_dir=wipe_data,
         remove_binaries=binaries,
         data_dir=data_dir,
@@ -445,6 +456,7 @@ def _owned_binary_targets(platform_name: str) -> tuple[str, tuple[str, ...]]:
             "mcp-scanner",
             "mcp-scanner-api",
             "litellm",
+            ".defenseclaw-source-root",
         )
     return install_root, tuple(os.path.join(install_root, name) for name in names)
 
@@ -593,6 +605,7 @@ def _render_plan(plan: UninstallPlan, *, dry_run: bool) -> None:
             f"({plan.openclaw_config_file})"
         )
         click.echo(f"  • {ux.bold('remove plugin:')}        {'yes' if plan.remove_plugin else 'no'}")
+    click.echo(f"  • {ux.bold('remove s-gw MCP:')}     {'yes' if plan.remove_credential_mcp else 'no'}")
     click.echo(f"  • {ux.bold('wipe ' + plan.data_dir + ':')} {'yes' if plan.remove_data_dir else 'no'}")
     if plan.preserve_data_entries:
         click.echo(f"  • {ux.bold('preserve runtime:')}      {', '.join(plan.preserve_data_entries)}")
@@ -631,6 +644,8 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
         run_phase("gateway stop", lambda: _stop_gateway(plan))
     if plan.connectors:
         run_phase("connector teardown", lambda: _connector_teardown(plan))
+    if plan.remove_credential_mcp:
+        run_phase("s-gw MCP removal", lambda: _remove_credential_mcp(plan))
     if plan.remove_plugin and "openclaw" in plan.connectors:
         # Plugin removal is OpenClaw-specific. For other connectors the
         # gateway sentinel teardown above already removed their hook
@@ -666,6 +681,46 @@ def _execute_plan(plan: UninstallPlan) -> ExecutionResult:
     return result
 
 
+def _remove_credential_mcp(plan: UninstallPlan) -> None:
+    """Remove exact managed s-gw entries before its module can be deleted."""
+    if not os.path.lexists(plan.data_dir):
+        return
+
+    from defenseclaw.credential_protection import (
+        CredentialProtectionError,
+        mcp_removal_failed,
+        remove_managed_mcp_connectors,
+        rollback_mcp_removal,
+    )
+
+    try:
+        cfg = config_module.load(data_dir=plan.data_dir)
+    except Exception as exc:  # noqa: BLE001 - malformed config must block destructive cleanup.
+        raise click.ClickException("could not load configuration for s-gw MCP cleanup") from exc
+
+    try:
+        results = remove_managed_mcp_connectors(cfg, include_inactive=True)
+    except CredentialProtectionError as exc:
+        raise click.ClickException(f"could not identify managed s-gw MCP registrations: {exc}") from exc
+    if mcp_removal_failed(results):
+        raise click.ClickException("managed s-gw MCP registrations could not be removed transactionally")
+
+    credential = getattr(cfg, "credential_protection", None)
+    if credential is None or not bool(getattr(credential, "enabled", False)):
+        return
+    credential.enabled = False
+    try:
+        cfg.save()
+    except OSError as exc:
+        credential.enabled = True
+        try:
+            rolled_back = rollback_mcp_removal(cfg, results)
+        except CredentialProtectionError:
+            rolled_back = False
+        detail = "" if rolled_back else "; one or more MCP registrations could not be restored"
+        raise click.ClickException(f"could not disable credential protection before uninstall{detail}") from exc
+
+
 def _render_execution_result(result: ExecutionResult) -> None:
     """Render a compact, stable phase ledger for humans and automation."""
     ux.subhead("Phase results:")
@@ -695,6 +750,187 @@ def _validate_windows_ancestor_chain(path: str, label: str) -> None:
         if os.path.lexists(candidate) and _is_reparse_path(candidate):
             raise click.ClickException(f"refusing reparse-point ancestor for {label}: {candidate}")
         candidate = candidate.parent
+
+
+def _open_posix_owned_file(path: str, label: str, *, executable: bool = False) -> tuple[int, os.stat_result]:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as exc:
+        raise click.ClickException(f"could not verify {label}: {exc}") from exc
+    try:
+        info = os.fstat(descriptor)
+        current_uid = getattr(os, "geteuid", lambda: info.st_uid)()
+        mode = stat.S_IMODE(info.st_mode)
+        if not stat.S_ISREG(info.st_mode) or info.st_uid != current_uid or mode & 0o022:
+            raise click.ClickException(f"refusing unowned or unsafe {label}: {path}")
+        if executable and not mode & 0o111:
+            raise click.ClickException(f"refusing non-executable {label}: {path}")
+        return descriptor, info
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _path_identity(path: str, label: str) -> install_publish.StrongIdentity:
+    try:
+        return install_publish.path_identity(Path(path))
+    except install_publish.PublishError as exc:
+        raise click.ClickException(f"could not bind {label} identity: {exc}") from exc
+
+
+def _read_posix_source_marker(
+    plan: UninstallPlan,
+) -> tuple[str, str, install_publish.StrongIdentity] | None:
+    marker_path = os.path.join(plan.install_root, _SOURCE_MARKER_NAME)
+    if not os.path.lexists(marker_path):
+        return None
+
+    marker_identity = _path_identity(marker_path, "source-install marker")
+    descriptor, info = _open_posix_owned_file(marker_path, "source-install marker")
+    try:
+        if not 0 < info.st_size <= install_publish.SOURCE_MARKER_MAX_BYTES:
+            raise click.ClickException("source-install marker has an invalid size")
+        if (info.st_dev, info.st_ino) != marker_identity[:2]:
+            raise click.ClickException("source-install marker changed while it was opened")
+        chunks: list[bytes] = []
+        remaining = install_publish.SOURCE_MARKER_MAX_BYTES + 1
+        while remaining:
+            chunk = os.read(descriptor, min(remaining, 64 * 1024))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        raw = b"".join(chunks)
+        after = os.fstat(descriptor)
+        if (
+            len(raw) != info.st_size
+            or len(raw) > install_publish.SOURCE_MARKER_MAX_BYTES
+            or after.st_size != info.st_size
+            or after.st_mtime_ns != info.st_mtime_ns
+            or after.st_ctime_ns != info.st_ctime_ns
+        ):
+            raise click.ClickException("source-install marker changed while it was opened")
+    finally:
+        os.close(descriptor)
+
+    if _path_identity(marker_path, "source-install marker") != marker_identity:
+        raise click.ClickException("source-install marker changed while it was read")
+
+    try:
+        payload = install_publish.parse_source_marker(
+            raw,
+            source_release=__version__,
+            compatibility_epoch=_SOURCE_INSTALL_COMPATIBILITY_EPOCH,
+            runtime_version=_SOURCE_RUNTIME_CONFIG_VERSION,
+            allow_source_transition=True,
+        )
+    except install_publish.SourceMarkerError as exc:
+        raise click.ClickException(str(exc)) from exc
+    return str(payload["checkout_root"]), str(payload["gateway_sha256"]), marker_identity
+
+
+def _posix_symlink_claim(
+    path: str,
+    expected: tuple[str, ...],
+) -> _PosixBinaryClaim | None:
+    try:
+        info = os.lstat(path)
+        if not stat.S_ISLNK(info.st_mode):
+            return None
+        identity = _path_identity(path, "launcher")
+        if (info.st_dev, info.st_ino) != identity[:2]:
+            raise click.ClickException(f"launcher changed while it was inspected: {path}")
+        target = os.readlink(path)
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise click.ClickException(f"could not verify launcher ownership: {path}: {exc}") from exc
+    if not os.path.isabs(target):
+        target = os.path.join(os.path.dirname(path), target)
+    if _normalized(os.path.normpath(target)) not in {_normalized(item) for item in expected}:
+        return None
+    if _path_identity(path, "launcher") != identity:
+        raise click.ClickException(f"launcher changed while it was inspected: {path}")
+    return _PosixBinaryClaim(identity=identity, symlink_targets=expected)
+
+
+def _posix_gateway_digest(path: str, label: str) -> tuple[str, install_publish.StrongIdentity]:
+    identity = _path_identity(path, label)
+    descriptor, info = _open_posix_owned_file(path, label, executable=True)
+    digest = hashlib.sha256()
+    byte_count = 0
+    try:
+        if (info.st_dev, info.st_ino) != identity[:2]:
+            raise click.ClickException(f"{label} changed while it was opened")
+        if not 0 < info.st_size <= _MAX_GATEWAY_BINARY_BYTES:
+            raise click.ClickException(f"{label} has an invalid size")
+        while chunk := os.read(descriptor, 1024 * 1024):
+            digest.update(chunk)
+            byte_count += len(chunk)
+            if byte_count > _MAX_GATEWAY_BINARY_BYTES:
+                raise click.ClickException(f"{label} exceeded the maximum size while it was read")
+        after = os.fstat(descriptor)
+        if (
+            byte_count != info.st_size
+            or after.st_size != info.st_size
+            or after.st_mtime_ns != info.st_mtime_ns
+            or after.st_ctime_ns != info.st_ctime_ns
+        ):
+            raise click.ClickException(f"{label} changed while it was opened")
+    finally:
+        os.close(descriptor)
+    if _path_identity(path, label) != identity:
+        raise click.ClickException(f"{label} changed while it was read")
+    return digest.hexdigest(), identity
+
+
+def _posix_owned_binary_targets(plan: UninstallPlan) -> dict[str, _PosixBinaryClaim]:
+    source_marker = _read_posix_source_marker(plan)
+    source_bin = os.path.join(source_marker[0], ".venv", "bin") if source_marker else ""
+    managed_bin = os.path.join(plan.managed_venv, "bin") if plan.managed_venv else ""
+
+    owned: dict[str, _PosixBinaryClaim] = {}
+    for path in plan.binary_targets:
+        if not os.path.lexists(path):
+            continue
+        name = os.path.basename(path)
+        if name == _SOURCE_MARKER_NAME:
+            if source_marker is not None:
+                owned[path] = _PosixBinaryClaim(identity=source_marker[2])
+            continue
+        if name == "defenseclaw-gateway":
+            if source_marker is not None:
+                digest, identity = _posix_gateway_digest(path, "source-owned gateway")
+                if digest != source_marker[1]:
+                    raise click.ClickException(
+                        "refusing source gateway removal: digest does not match ownership marker"
+                    )
+                owned[path] = _PosixBinaryClaim(identity=identity)
+            continue
+
+        expected: list[str] = []
+        if source_bin:
+            expected.append(os.path.join(source_bin, name))
+        if managed_bin and name == "defenseclaw":
+            expected.append(os.path.join(managed_bin, name))
+        claim = _posix_symlink_claim(path, tuple(expected)) if expected else None
+        if claim is not None:
+            owned[path] = claim
+    return owned
+
+
+def _posix_install_custody(
+    plan: UninstallPlan,
+    claims: dict[str, _PosixBinaryClaim],
+) -> Path:
+    install_root = Path(plan.install_root)
+    marker = str(install_root / _SOURCE_MARKER_NAME)
+    if marker in claims:
+        return install_root / ".defenseclaw-install-custody"
+    if install_root.name == "bin" and install_root.parent.name == ".local":
+        return install_root.parent.parent / ".defenseclaw-install-custody"
+    return install_root.parent / ".defenseclaw-install-custody"
 
 
 def _validate_windows_binary_ownership(plan: UninstallPlan) -> None:
@@ -788,6 +1024,7 @@ def _validate_plan(plan: UninstallPlan) -> None:
                 "mcp-scanner",
                 "mcp-scanner-api",
                 "litellm",
+                ".defenseclaw-source-root",
             }
         )
         for target in plan.binary_targets:
@@ -800,6 +1037,8 @@ def _validate_plan(plan: UninstallPlan) -> None:
                 raise click.ClickException(f"refusing symlink or reparse-point binary target: {target}")
         if plan.platform_name == "win32":
             _validate_windows_binary_ownership(plan)
+        else:
+            _posix_owned_binary_targets(plan)
 
     if plan.gateway_path:
         if plan.platform_name == "win32":
@@ -1211,6 +1450,9 @@ def _revert_openclaw_python(plan: UninstallPlan) -> None:
 
     pristine = pristine_backup_path(plan.openclaw_config_file, plan.data_dir)
     target = _expand(plan.openclaw_config_file)
+    if not os.path.lexists(target) and not pristine:
+        ux.subhead(f"{plan.openclaw_config_file} is already absent — nothing to revert")
+        return
     if pristine:
         try:
             shutil.copy2(pristine, target)
@@ -1385,19 +1627,96 @@ def _remove_binaries(plan: UninstallPlan | None = None) -> None:
         )
     _validate_plan(plan)
     failures: list[str] = []
+    posix_claims = _posix_owned_binary_targets(plan) if plan.platform_name != "win32" else {}
+    custody_root = _posix_install_custody(plan, posix_claims) if plan.platform_name != "win32" else None
+    custody_candidates: tuple[Path, ...] = ()
+    if custody_root is not None:
+        source_custody = Path(plan.install_root) / ".defenseclaw-install-custody"
+        user_home = Path(os.path.expanduser("~"))
+        try:
+            Path(plan.install_root).relative_to(user_home)
+            release_custody: Path | None = user_home / ".defenseclaw-install-custody"
+        except ValueError:
+            release_custody = None
+        state_custody = None
+        if plan.data_dir and Path(plan.data_dir).is_absolute():
+            state_custody = Path(plan.data_dir).parent / ".defenseclaw-install-custody"
+        custody_candidates = tuple(
+            dict.fromkeys(
+                root for root in (custody_root, source_custody, release_custody, state_custody) if root is not None
+            )
+        )
+        for pending_root in dict.fromkeys(custody_candidates):
+            try:
+                cleanup_phase = install_publish.inspect_custody_cleanup(pending_root)
+            except (OSError, install_publish.PublishError) as exc:
+                raise OSError(f"could not inspect installer-owned binary custody: {exc}") from exc
+            active = cleanup_phase in {"discarding", "closing"}
+            armed_without_claims = cleanup_phase == "armed" and (pending_root != custody_root or not posix_claims)
+            if not active and not armed_without_claims:
+                continue
+            try:
+                install_publish.discard_custody(pending_root)
+            except (OSError, install_publish.PublishError) as exc:
+                raise OSError(f"could not resume installer-owned binary custody cleanup: {exc}") from exc
+        for pending_root in custody_candidates:
+            if not install_publish.custody_is_bound(pending_root):
+                continue
+            try:
+                install_publish.recover_custody(pending_root)
+            except (OSError, install_publish.PublishError) as exc:
+                raise OSError(f"could not recover installer-owned binary custody: {exc}") from exc
+    if custody_root is not None and posix_claims:
+        try:
+            if not install_publish.custody_cleanup_armed(custody_root):
+                install_publish.recover_custody(custody_root)
+            install_publish.arm_custody_discard(custody_root, Path(plan.install_root))
+        except (OSError, install_publish.PublishError) as exc:
+            raise OSError(f"could not arm installer-owned binary custody cleanup: {exc}") from exc
     targets = list(plan.binary_targets)
     if plan.platform_name == "win32":
         targets.sort(key=lambda path: os.path.basename(path).lower() == "defenseclaw.cmd")
+    else:
+        targets.sort(key=lambda path: os.path.basename(path) == _SOURCE_MARKER_NAME)
     for path in targets:
         if not os.path.lexists(path):
             click.echo(f"  {ux.dim('·')} {path} not installed")
             continue
+        if plan.platform_name != "win32" and os.path.basename(path) == _SOURCE_MARKER_NAME and failures:
+            ux.subhead("preserved source-install marker because an owned launcher could not be removed")
+            continue
+        if plan.platform_name != "win32" and path not in posix_claims:
+            ux.subhead(f"preserved launcher without DefenseClaw ownership proof: {path}")
+            continue
+        if plan.platform_name != "win32":
+            claim = posix_claims[path]
+            try:
+                if claim.symlink_targets:
+                    removed = install_publish.unlink_exact_symlink(
+                        Path(path),
+                        claim.identity,
+                        claim.symlink_targets,
+                        custody_root=custody_root,
+                    )
+                else:
+                    removed = install_publish.unlink_exact(
+                        Path(path),
+                        claim.identity,
+                        custody_root=custody_root,
+                    )
+            except (OSError, install_publish.PublishError) as exc:
+                failures.append(f"{path}: {exc}")
+                continue
+            if not removed:
+                failures.append(f"{path}: ownership changed and the replacement was preserved")
+                continue
+            ux.ok(f"removed {path}")
+            continue
         last_error: OSError | None = None
-        attempts = 40 if plan.platform_name == "win32" else 1
+        attempts = 40
         for attempt in range(attempts):
             try:
-                if plan.platform_name == "win32":
-                    _validate_plan(plan)
+                _validate_plan(plan)
                 os.unlink(path)
                 ux.ok(f"removed {path}")
                 last_error = None
@@ -1411,6 +1730,28 @@ def _remove_binaries(plan: UninstallPlan | None = None) -> None:
                     time.sleep(0.25)
         if last_error is not None:
             failures.append(f"{path}: {last_error}")
+
+    if not failures and custody_root is not None and posix_claims:
+        try:
+            install_publish.discard_custody(custody_root)
+        except (OSError, install_publish.PublishError) as exc:
+            failures.append(f"{custody_root}: could not discard installer-owned binary custody: {exc}")
+
+    if not failures:
+        for extra_root in custody_candidates:
+            if not install_publish.custody_is_bound(extra_root):
+                continue
+            if not install_publish.custody_discardable(extra_root):
+                failures.append(
+                    f"{extra_root}: installer-owned custody contains unexpected or incomplete "
+                    "unresolved entries and was preserved"
+                )
+                break
+            try:
+                install_publish.discard_custody(extra_root)
+            except (OSError, install_publish.PublishError) as exc:
+                failures.append(f"{extra_root}: could not discard installer-owned custody: {exc}")
+                break
 
     if failures:
         raise OSError("; ".join(failures))

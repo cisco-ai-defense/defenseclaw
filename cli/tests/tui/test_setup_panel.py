@@ -106,6 +106,7 @@ def test_setup_config_sections_match_go_catalog_order() -> None:
         "Agent Hooks",
         "Connector Hooks",
         "Gateway",
+        "Credential Protection",
         "Guardrail",
         "Scanners",
         "Asset Policy",
@@ -124,6 +125,21 @@ def test_setup_config_sections_match_go_catalog_order() -> None:
         "Firewall",
         "Trusted Paths",
     )
+
+
+def test_credential_protection_config_panel_is_explicit_about_proxy_coverage() -> None:
+    section = _section(
+        build_setup_sections({"credential_protection": {"enabled": True}}),
+        "Credential Protection",
+    )
+    field = _field_by_key((section,), "credential_protection.enabled")
+
+    assert field.kind == "header"
+    assert field.interactive is False
+    assert field.value == "true"
+    assert "through the DefenseClaw proxy" in field.hint
+    assert "s-gw" in section.summary
+    assert "setup credential-protection" in section.help
 
 
 def test_exact_v8_setup_replaces_legacy_observability_editors_with_effective_plan() -> None:

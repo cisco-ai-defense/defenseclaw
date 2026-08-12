@@ -36,6 +36,7 @@ from defenseclaw.commands.cmd_alerts import alerts
 from defenseclaw.commands.cmd_audit import audit
 from defenseclaw.commands.cmd_codeguard import codeguard
 from defenseclaw.commands.cmd_config import config_cmd
+from defenseclaw.commands.cmd_credential_protection import credential_protection
 from defenseclaw.commands.cmd_doctor import doctor
 from defenseclaw.commands.cmd_guardrail import guardrail
 from defenseclaw.commands.cmd_init import init_cmd
@@ -325,6 +326,7 @@ cli.add_command(upgrade)
 cli.add_command(migrations_cmd, "migrations")
 cli.add_command(keys_cmd, "keys")
 cli.add_command(config_cmd, "config")
+cli.add_command(credential_protection)
 cli.add_command(observability_cmd, "observability")
 cli.add_command(settings_cmd, "settings")
 cli.add_command(uninstall_cmd, "uninstall")

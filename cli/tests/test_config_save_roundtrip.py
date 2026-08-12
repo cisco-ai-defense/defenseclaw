@@ -245,6 +245,25 @@ class TestConfigSaveV8HardCutover(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "unversioned default"):
             prepare_fresh_v8_config(cfg)
 
+    def test_credential_protection_is_absent_by_default_and_round_trips_when_enabled(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            config_path = os.path.join(tmpdir, "config.yaml")
+            with patch.dict(os.environ, {"DEFENSECLAW_HOME": tmpdir}, clear=False):
+                cfg = prepare_fresh_v8_config(default_config())
+                cfg.data_dir = tmpdir
+                cfg.save()
+                with open(config_path, encoding="utf-8") as stream:
+                    self.assertNotIn("credential_protection", yaml.safe_load(stream))
+
+                cfg.credential_protection.enabled = True
+                cfg.save()
+                loaded = load()
+
+            with open(config_path, encoding="utf-8") as stream:
+                persisted = yaml.safe_load(stream)
+            self.assertEqual(persisted["credential_protection"], {"enabled": True})
+            self.assertTrue(loaded.credential_protection.enabled)
+
     def test_loaded_v8_can_enable_ai_discovery_without_restoring_v7_routing(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             config_path = os.path.join(tmpdir, "config.yaml")
@@ -417,8 +436,6 @@ class TestGatewayFleetModeRoundTrip(unittest.TestCase):
             self.assertEqual(reloaded.gateway.fleet_mode or "auto", "auto")
             self.assertNotIn("fleet_mode", persisted["gateway"])
             self.assertEqual(persisted, original)
-
-
 class TestConfigSaveResilienceContinued(unittest.TestCase):
     def test_corrupt_yaml_falls_back_to_dataclass_only(self):
         """Operator with a half-edited YAML must still be able to recover

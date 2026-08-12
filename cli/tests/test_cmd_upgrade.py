@@ -71,6 +71,7 @@ from defenseclaw.commands.cmd_upgrade import (
     _materialize_protected_artifact,
     _native_windows_install_state,
     _normalize_target_version,
+    _offer_credential_protection,
     _parse_release_provenance,
     _poll_health,
     _poll_installed_health,
@@ -99,6 +100,7 @@ from defenseclaw.commands.cmd_upgrade import (
     _run_installed_migrations,
     _run_phase_two_mutator,
     _run_silent,
+    _service_enabled_credential_protection,
     _start_and_verify_services,
     _target_migration_capabilities,
     _TargetMigrationCapabilities,
@@ -5429,6 +5431,42 @@ class TestUpgradeServiceVerification(unittest.TestCase):
                 expected_version=None,
             )
 
+    def test_enabled_credential_broker_is_reconciled_before_gateway_start(self):
+        from defenseclaw.bootstrap import StepResult
+
+        app = AppContext()
+        app.cfg = Config()
+        app.cfg.credential_protection.enabled = True
+        events: list[str] = []
+
+        def service_broker(cfg):
+            events.append("credential broker")
+            return StepResult("Credential broker", "pass", "s-gw ready")
+
+        def run_silent(args, *_messages, **_kwargs):
+            events.append(" ".join(args))
+            return True
+
+        with (
+            patch(
+                "defenseclaw.commands.cmd_upgrade._reload_post_upgrade_config",
+                return_value=app.cfg,
+            ),
+            patch(
+                "defenseclaw.bootstrap._setup_credential_protection_structured",
+                side_effect=service_broker,
+            ),
+            patch(
+                "defenseclaw.commands.cmd_upgrade._run_silent",
+                side_effect=run_silent,
+            ),
+            patch("defenseclaw.commands.cmd_upgrade._poll_health"),
+        ):
+            _start_and_verify_services(app, 7, data_dir="/private/upgrade-data")
+
+        self.assertEqual(events[0], "credential broker")
+        self.assertEqual(events[1], "defenseclaw-gateway start")
+
     def test_gateway_environment_preserves_fresh_process_readiness_handoff(self):
         data_dir = "/private/upgrade-data"
         config_path = "/private/controller/config.yaml"
@@ -6712,13 +6750,9 @@ class TestUpgradeManifest(unittest.TestCase):
             return nullcontext()
         stack = ExitStack()
         security = Mock(name="native-windows-security")
-        stack.enter_context(
-            patch("defenseclaw.windows_acl.capture_path", return_value=security)
-        )
+        stack.enter_context(patch("defenseclaw.windows_acl.capture_path", return_value=security))
         stack.enter_context(patch("defenseclaw.windows_acl.assert_trusted_owner"))
-        stack.enter_context(
-            patch("defenseclaw.windows_acl.assert_not_broadly_writable")
-        )
+        stack.enter_context(patch("defenseclaw.windows_acl.assert_not_broadly_writable"))
         return stack
 
     @staticmethod
@@ -7583,10 +7617,13 @@ class TestUpgradeManifest(unittest.TestCase):
         with TemporaryDirectory() as temp:
             local_appdata, profile, _state = self._native_install_state_fixture(temp)
 
-            with patch(
-                "defenseclaw.commands.cmd_upgrade._windows_known_folder",
-                side_effect=[local_appdata, profile],
-            ), self._native_windows_acl_fixture():
+            with (
+                patch(
+                    "defenseclaw.commands.cmd_upgrade._windows_known_folder",
+                    side_effect=[local_appdata, profile],
+                ),
+                self._native_windows_acl_fixture(),
+            ):
                 loaded = _native_windows_install_state("windows", expected_version="0.8.7")
 
         self.assertIsNotNone(loaded)
@@ -8695,6 +8732,60 @@ class TestPostUpgradeDriftCheck(unittest.TestCase):
                 output = out.getvalue().decode()
 
         self.assertNotIn("drift", output.lower())
+
+    def test_upgrade_offers_credential_protection_without_enabling_it(self):
+        cfg = types.SimpleNamespace(
+            credential_protection=types.SimpleNamespace(enabled=False),
+        )
+        runner = CliRunner()
+
+        with runner.isolation() as (out, _err, _):
+            _offer_credential_protection(cfg)
+            output = out.getvalue().decode()
+
+        self.assertFalse(cfg.credential_protection.enabled)
+        self.assertIn("credential-protection --yes", output)
+
+    def test_upgrade_does_not_offer_already_enabled_credential_protection(self):
+        cfg = types.SimpleNamespace(
+            credential_protection=types.SimpleNamespace(enabled=True),
+        )
+        runner = CliRunner()
+
+        with runner.isolation() as (out, _err, _):
+            _offer_credential_protection(cfg)
+            output = out.getvalue().decode()
+
+        self.assertEqual(output, "")
+
+    def test_upgrade_services_enabled_credential_protection(self):
+        cfg = Config()
+        cfg.credential_protection.enabled = True
+
+        from defenseclaw.bootstrap import StepResult
+
+        with patch(
+            "defenseclaw.bootstrap._setup_credential_protection_structured",
+            return_value=StepResult("Credential broker", "pass", "s-gw 0.2.0 ready"),
+        ) as setup_broker:
+            _service_enabled_credential_protection(cfg)
+
+        setup_broker.assert_called_once_with(cfg)
+
+    def test_upgrade_refuses_to_start_when_enabled_broker_service_fails(self):
+        cfg = Config()
+        cfg.credential_protection.enabled = True
+
+        from defenseclaw.bootstrap import StepResult
+
+        with (
+            patch(
+                "defenseclaw.bootstrap._setup_credential_protection_structured",
+                return_value=StepResult("Credential broker", "fail", "runner unavailable"),
+            ),
+            self.assertRaises(SystemExit),
+        ):
+            _service_enabled_credential_protection(cfg)
 
 
 class TestMigrationCursorSummary(unittest.TestCase):

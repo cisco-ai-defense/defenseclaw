@@ -50,6 +50,7 @@ param(
     [ValidateSet("observe", "action", "")]
     [string]$QuickstartMode = "",
     [switch]$Quickstart,
+    [switch]$NoCredentialProtection,
     [switch]$NoOpenclaw,
     [switch]$NoPersistPath,
     [switch]$Yes,
@@ -116,6 +117,7 @@ Options:
   -CosignPath <file>   Pinned Cosign binary for -Local (or place it in <dir>)
   -Quickstart          Configure the selected connector and start the gateway
   -QuickstartMode <m>  Quickstart policy mode (observe|action)
+  -NoCredentialProtection  Opt out of s-gw on a fresh installation
   -Yes                 Run native Setup silently without confirmation prompts
   -Help                Show this help
 
@@ -898,6 +900,9 @@ function New-SetupArgumentList {
         }
     } elseif (-not [string]::IsNullOrWhiteSpace($QuickstartMode)) {
         Write-Warn2 "-QuickstartMode is ignored unless -Quickstart is specified"
+    }
+    if ($NoCredentialProtection) {
+        $arguments += "CREDENTIALPROTECTION=0"
     }
     return [string[]]$arguments
 }

@@ -2242,6 +2242,13 @@ def _normalize_connector_key(name: str | None) -> str:
 
 
 @dataclass
+class CredentialProtectionConfig:
+    """Local s-gw credential broker activation."""
+
+    enabled: bool = False
+
+
+@dataclass
 class Config:
     data_dir: str = ""
     # Unified v5 LLM configuration. Every LLM-using component resolves
@@ -2297,6 +2304,7 @@ class Config:
     _loaded_v8_modeled_snapshot: dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
     ai_discovery: AIDiscoveryConfig = field(default_factory=AIDiscoveryConfig)
     application_protection: ApplicationProtectionConfig = field(default_factory=ApplicationProtectionConfig)
+    credential_protection: CredentialProtectionConfig = field(default_factory=CredentialProtectionConfig)
     notifications: NotificationsConfig = field(default_factory=lambda: NotificationsConfig())
 
     # -- Claw-mode path resolution (mirrors claw.go) --
@@ -2938,6 +2946,8 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
         d.pop("application_protection", None)
     else:
         _serialize_application_protection(cfg, d.get("application_protection"))
+    if not cfg.credential_protection.enabled:
+        d.pop("credential_protection", None)
     # Mirror Go's ``yaml:"notifications,omitempty"`` — when the
     # block is at full defaults (master switch off, every category /
     # source still on, default throttles) drop it so legacy configs
@@ -4634,6 +4644,7 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
         observability=_merge_observability(raw.get("observability")),
         ai_discovery=_merge_ai_discovery(raw.get("ai_discovery")),
         application_protection=_merge_application_protection(raw.get("application_protection")),
+        credential_protection=_merge_credential_protection(raw.get("credential_protection")),
         notifications=_merge_notifications(raw.get("notifications")),
     )
     cfg._loaded_authoritative_dicts = _snapshot_authoritative_dicts(raw)
@@ -4737,6 +4748,12 @@ def _merge_application_protection(raw: dict[str, Any] | None) -> ApplicationProt
         asset_policy=asset_policy,
         connectors=_merge_application_protection_connectors(raw.get("connectors")),
     )
+
+
+def _merge_credential_protection(raw: Any) -> CredentialProtectionConfig:
+    if not isinstance(raw, dict):
+        return CredentialProtectionConfig()
+    return CredentialProtectionConfig(enabled=_coerce_bool(raw.get("enabled", False)))
 
 
 def _merge_application_protection_connectors(

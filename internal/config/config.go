@@ -227,6 +227,7 @@ type Config struct {
 	Observability         ObservabilityConfig         `mapstructure:"observability"    yaml:"observability,omitempty"`
 	AIDiscovery           AIDiscoveryConfig           `mapstructure:"ai_discovery"     yaml:"ai_discovery,omitempty"`
 	ApplicationProtection ApplicationProtectionConfig `mapstructure:"application_protection" yaml:"application_protection,omitempty"`
+	CredentialProtection  CredentialProtectionConfig  `mapstructure:"credential_protection"  yaml:"credential_protection,omitempty"`
 	Notifications         NotificationsConfig         `mapstructure:"notifications"    yaml:"notifications,omitempty"`
 	// Managed configures the local UDS gRPC server consumed by AVC
 	// (Cisco Secure Client). Only active when ManagedIPCEnabled()
@@ -3545,6 +3546,7 @@ func setDefaults(dataDir string, legacyObservability bool) {
 	viper.SetDefault("application_protection.guardrail.mode", "observe")
 	viper.SetDefault("application_protection.asset_policy.mode", AssetPolicyModeObserve)
 	viper.SetDefault("application_protection.connectors", map[string]any{})
+	viper.SetDefault("credential_protection.enabled", false)
 
 	viper.SetDefault("guardrail.enabled", false)
 	viper.SetDefault("guardrail.mode", "observe")

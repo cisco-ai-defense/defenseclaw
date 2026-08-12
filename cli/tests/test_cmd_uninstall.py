@@ -27,6 +27,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import click
@@ -51,6 +52,7 @@ def capture_click_output():
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from defenseclaw.commands import cmd_uninstall  # noqa: E402  (sys.path tweak above)
+from defenseclaw.credential_protection import CredentialProtectionError  # noqa: E402
 
 
 class BuildPlanTests(unittest.TestCase):
@@ -127,6 +129,7 @@ class UninstallCommandTests(unittest.TestCase):
             )
             self.assertEqual(result.exit_code, 0, msg=result.output)
             self.assertIn("dry-run", result.output)
+            self.assertIn("remove s-gw MCP", result.output)
             exec_mock.assert_not_called()
 
     def test_confirmation_declined_aborts(self):
@@ -187,6 +190,7 @@ class ResetCommandTests(unittest.TestCase):
         with (
             patch("defenseclaw.commands.cmd_uninstall._stop_gateway"),
             patch("defenseclaw.commands.cmd_uninstall._connector_teardown"),
+            patch("defenseclaw.commands.cmd_uninstall._remove_credential_mcp"),
             patch("defenseclaw.commands.cmd_uninstall._remove_data_dir", side_effect=OSError("locked native module")),
         ):
             result = runner.invoke(cmd_uninstall.reset_cmd, ["--yes"])
@@ -197,6 +201,771 @@ class ResetCommandTests(unittest.TestCase):
         self.assertIn("data removal: failed", result.output)
         self.assertIn("locked native module", result.output)
         self.assertNotIn("Reset complete", result.output)
+
+
+@unittest.skipIf(os.name == "nt", "POSIX source-install custody has separate Windows coverage")
+class UnixOwnedCleanupTests(unittest.TestCase):
+    @staticmethod
+    def _write_source_marker(
+        marker: Path,
+        checkout: Path,
+        *,
+        gateway_sha256: str,
+    ) -> None:
+        marker.write_text(
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "checkout_root": str(checkout),
+                    "source_release": cmd_uninstall.__version__,
+                    "source_install_compatibility_epoch": 2,
+                    "runtime_config_version": 8,
+                    "gateway_sha256": gateway_sha256,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    def test_linux_plan_includes_source_ownership_marker(self):
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            patch.dict(os.environ, {"HOME": tmp}, clear=False),
+            patch.object(cmd_uninstall.config_module, "default_data_path", return_value=Path(tmp) / ".defenseclaw"),
+        ):
+            plan = cmd_uninstall._build_plan(
+                wipe_data=True,
+                binaries=True,
+                revert_openclaw=False,
+                remove_plugin=False,
+                platform_name="linux",
+            )
+
+        self.assertIn(".defenseclaw-source-root", tuple(Path(path).name for path in plan.binary_targets))
+
+    def test_binary_removal_preserves_foreign_launcher_and_clears_source_owned_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            root = tmp_path / "bin"
+            checkout = tmp_path / "checkout"
+            source_bin = checkout / ".venv" / "bin"
+            root.mkdir()
+            source_bin.mkdir(parents=True)
+            cli = root / "defenseclaw"
+            gateway = root / "defenseclaw-gateway"
+            owned_litellm = root / "litellm"
+            broken_owned_scanner = root / "mcp-scanner"
+            foreign_scanner = root / "skill-scanner"
+            foreign_scanner_link = root / "skill-scanner-api"
+            broken_foreign_link = root / "mcp-scanner-api"
+            marker = root / ".defenseclaw-source-root"
+            (source_bin / "defenseclaw").write_text("source cli", encoding="utf-8")
+            (source_bin / "litellm").write_text("source litellm", encoding="utf-8")
+            cli.symlink_to(source_bin / "defenseclaw")
+            owned_litellm.symlink_to(source_bin / "litellm")
+            broken_owned_scanner.symlink_to(source_bin / "mcp-scanner")
+            gateway.write_bytes(b"source gateway")
+            gateway.chmod(0o700)
+            foreign_scanner.write_text("foreign launcher", encoding="utf-8")
+            outside = tmp_path / "outside-scanner"
+            outside.write_text("foreign target", encoding="utf-8")
+            foreign_scanner_link.symlink_to(outside)
+            broken_foreign_link.symlink_to(tmp_path / "missing-foreign-scanner")
+            self._write_source_marker(
+                marker,
+                checkout,
+                gateway_sha256=hashlib.sha256(gateway.read_bytes()).hexdigest(),
+            )
+            plan = cmd_uninstall.UninstallPlan(
+                platform_name="linux",
+                install_root=str(root),
+                gateway_path=str(gateway),
+                binary_targets=(
+                    str(gateway),
+                    str(cli),
+                    str(owned_litellm),
+                    str(broken_owned_scanner),
+                    str(foreign_scanner),
+                    str(foreign_scanner_link),
+                    str(broken_foreign_link),
+                    str(marker),
+                ),
+                remove_binaries=True,
+            )
+
+            cmd_uninstall._remove_binaries(plan)
+
+            self.assertFalse(cli.exists())
+            self.assertFalse(gateway.exists())
+            self.assertFalse(marker.exists())
+            self.assertFalse(os.path.lexists(owned_litellm))
+            self.assertFalse(os.path.lexists(broken_owned_scanner))
+            self.assertEqual(foreign_scanner.read_text(encoding="utf-8"), "foreign launcher")
+            self.assertTrue(os.path.lexists(foreign_scanner_link))
+            self.assertTrue(os.path.lexists(broken_foreign_link))
+            self.assertEqual(outside.read_text(encoding="utf-8"), "foreign target")
+            custody = root / ".defenseclaw-install-custody"
+            self.assertFalse(custody.exists())
+
+    def test_source_custody_cleanup_resumes_after_marker_is_retired(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            root = tmp_path / "bin"
+            checkout = tmp_path / "checkout"
+            source_bin = checkout / ".venv" / "bin"
+            root.mkdir()
+            source_bin.mkdir(parents=True)
+            (source_bin / "defenseclaw").write_text("source cli", encoding="utf-8")
+            cli = root / "defenseclaw"
+            cli.symlink_to(source_bin / "defenseclaw")
+            marker = root / ".defenseclaw-source-root"
+            self._write_source_marker(marker, checkout, gateway_sha256="0" * 64)
+            plan = cmd_uninstall.UninstallPlan(
+                platform_name="linux",
+                install_root=str(root),
+                binary_targets=(str(cli), str(marker)),
+                remove_binaries=True,
+            )
+            real_unlink = cmd_uninstall.install_publish.os.unlink
+            crashed = False
+
+            def crash_during_discard(path, *args, **kwargs):
+                nonlocal crashed
+                real_unlink(path, *args, **kwargs)
+                if str(path).startswith("retired-") and not crashed:
+                    crashed = True
+                    raise SystemExit("simulated process death during custody discard")
+
+            with (
+                patch.object(cmd_uninstall.install_publish.os, "unlink", side_effect=crash_during_discard),
+                self.assertRaises(SystemExit),
+            ):
+                cmd_uninstall._remove_binaries(plan)
+
+            custody = root / ".defenseclaw-install-custody"
+            self.assertTrue(crashed)
+            self.assertFalse(os.path.lexists(cli))
+            self.assertFalse(marker.exists())
+            self.assertTrue((custody / cmd_uninstall.install_publish.CUSTODY_DISCARD_MARKER).is_file())
+            self.assertEqual(cmd_uninstall._posix_owned_binary_targets(plan), {})
+
+            cmd_uninstall._remove_binaries(plan)
+
+            self.assertFalse(custody.exists())
+
+    def test_source_custody_cleanup_resumes_when_discard_dies_on_entry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            root = tmp_path / "bin"
+            checkout = tmp_path / "checkout"
+            source_bin = checkout / ".venv" / "bin"
+            root.mkdir()
+            source_bin.mkdir(parents=True)
+            (source_bin / "defenseclaw").write_text("source cli", encoding="utf-8")
+            cli = root / "defenseclaw"
+            cli.symlink_to(source_bin / "defenseclaw")
+            marker = root / ".defenseclaw-source-root"
+            self._write_source_marker(marker, checkout, gateway_sha256="0" * 64)
+            plan = cmd_uninstall.UninstallPlan(
+                platform_name="linux",
+                install_root=str(root),
+                binary_targets=(str(cli), str(marker)),
+                remove_binaries=True,
+            )
+            custody = root / ".defenseclaw-install-custody"
+            real_discard = cmd_uninstall.install_publish.discard_custody
+
+            with (
+                patch.object(
+                    cmd_uninstall.install_publish,
+                    "discard_custody",
+                    side_effect=SystemExit("simulated death on discard entry"),
+                ),
+                self.assertRaises(SystemExit),
+            ):
+                cmd_uninstall._remove_binaries(plan)
+
+            self.assertFalse(os.path.lexists(cli))
+            self.assertFalse(marker.exists())
+            self.assertTrue(cmd_uninstall.install_publish.custody_cleanup_armed(custody))
+
+            with patch.object(cmd_uninstall.install_publish, "discard_custody", wraps=real_discard):
+                cmd_uninstall._remove_binaries(plan)
+
+            self.assertFalse(custody.exists())
+
+    def test_non_home_custody_cleanup_resumes_after_last_claim_is_retired(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            root = tmp_path / "prefix" / "bin"
+            managed_venv = tmp_path / "managed-venv"
+            managed_bin = managed_venv / "bin"
+            root.mkdir(parents=True)
+            managed_bin.mkdir(parents=True)
+            (managed_bin / "defenseclaw").write_text("managed cli", encoding="utf-8")
+            cli = root / "defenseclaw"
+            cli.symlink_to(managed_bin / "defenseclaw")
+            plan = cmd_uninstall.UninstallPlan(
+                platform_name="linux",
+                install_root=str(root),
+                managed_venv=str(managed_venv),
+                binary_targets=(str(cli),),
+                remove_binaries=True,
+            )
+            custody = root.parent / ".defenseclaw-install-custody"
+            real_discard = cmd_uninstall.install_publish.discard_custody
+
+            with (
+                patch.object(
+                    cmd_uninstall.install_publish,
+                    "discard_custody",
+                    side_effect=SystemExit("simulated death before non-home custody discard"),
+                ),
+                self.assertRaises(SystemExit),
+            ):
+                cmd_uninstall._remove_binaries(plan)
+
+            self.assertFalse(cli.exists())
+            self.assertTrue(cmd_uninstall.install_publish.custody_cleanup_armed(custody))
+            self.assertEqual(cmd_uninstall._posix_owned_binary_targets(plan), {})
+
+            with patch.object(cmd_uninstall.install_publish, "discard_custody", wraps=real_discard):
+                cmd_uninstall._remove_binaries(plan)
+
+            self.assertFalse(custody.exists())
+
+    def test_armed_source_custody_survives_preflight_failure_after_marker_retirement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            root = tmp_path / "bin"
+            checkout = tmp_path / "checkout"
+            source_bin = checkout / ".venv" / "bin"
+            root.mkdir()
+            source_bin.mkdir(parents=True)
+            (source_bin / "defenseclaw").write_text("source cli", encoding="utf-8")
+            cli = root / "defenseclaw"
+            cli.symlink_to(source_bin / "defenseclaw")
+            marker = root / ".defenseclaw-source-root"
+            self._write_source_marker(marker, checkout, gateway_sha256="0" * 64)
+            custody = root / ".defenseclaw-install-custody"
+            cmd_uninstall.install_publish.prepare_custody(custody, root)
+            unknown = custody / "operator-note"
+            unknown.write_text("preserve", encoding="utf-8")
+            plan = cmd_uninstall.UninstallPlan(
+                platform_name="linux",
+                install_root=str(root),
+                binary_targets=(str(cli), str(marker)),
+                remove_binaries=True,
+            )
+
+            with self.assertRaisesRegex(OSError, "unexpected or incomplete"):
+                cmd_uninstall._remove_binaries(plan)
+
+            self.assertFalse(os.path.lexists(cli))
+            self.assertFalse(marker.exists())
+            self.assertEqual(unknown.read_text(encoding="utf-8"), "preserve")
+            self.assertTrue(cmd_uninstall.install_publish.custody_cleanup_armed(custody))
+
+            unknown.unlink()
+            cmd_uninstall._remove_binaries(plan)
+
+            self.assertFalse(custody.exists())
+
+    def test_live_source_marker_does_not_hide_pending_release_custody(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp).resolve() / "home"
+            root = home / ".local" / "bin"
+            checkout = home / "checkout"
+            source_bin = checkout / ".venv" / "bin"
+            root.mkdir(parents=True)
+            source_bin.mkdir(parents=True)
+            (source_bin / "defenseclaw").write_text("source cli", encoding="utf-8")
+            cli = root / "defenseclaw"
+            cli.symlink_to(source_bin / "defenseclaw")
+            marker = root / ".defenseclaw-source-root"
+            self._write_source_marker(marker, checkout, gateway_sha256="0" * 64)
+            release_custody = home / ".defenseclaw-install-custody"
+            old_release = home / "old-release-entry"
+            old_release.write_text("retired", encoding="utf-8")
+            old_identity = cmd_uninstall.install_publish.path_identity(old_release)
+            self.assertTrue(
+                cmd_uninstall.install_publish.unlink_exact(
+                    old_release,
+                    old_identity,
+                    custody_root=release_custody,
+                )
+            )
+            cmd_uninstall.install_publish.arm_custody_discard(release_custody, home)
+            plan = cmd_uninstall.UninstallPlan(
+                platform_name="linux",
+                install_root=str(root),
+                binary_targets=(str(cli), str(marker)),
+                remove_binaries=True,
+            )
+
+            with patch.dict(os.environ, {"HOME": str(home)}, clear=False):
+                cmd_uninstall._remove_binaries(plan)
+
+            self.assertFalse(release_custody.exists())
+            self.assertFalse((root / ".defenseclaw-install-custody").exists())
+
+    def test_custom_state_custody_is_removed_when_every_entry_is_proven(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            root = tmp_path / "bin"
+            checkout = tmp_path / "checkout"
+            source_bin = checkout / ".venv" / "bin"
+            state_parent = tmp_path / "custom-state"
+            root.mkdir()
+            source_bin.mkdir(parents=True)
+            state_parent.mkdir()
+            (source_bin / "defenseclaw").write_text("source cli", encoding="utf-8")
+            cli = root / "defenseclaw"
+            cli.symlink_to(source_bin / "defenseclaw")
+            marker = root / ".defenseclaw-source-root"
+            self._write_source_marker(marker, checkout, gateway_sha256="0" * 64)
+            state_custody = state_parent / ".defenseclaw-install-custody"
+            old_state = state_parent / "old-state"
+            old_state.write_text("retired", encoding="utf-8")
+            old_identity = cmd_uninstall.install_publish.path_identity(old_state)
+            self.assertTrue(
+                cmd_uninstall.install_publish.unlink_exact(old_state, old_identity, custody_root=state_custody)
+            )
+            plan = cmd_uninstall.UninstallPlan(
+                platform_name="linux",
+                install_root=str(root),
+                data_dir=str(state_parent / ".defenseclaw"),
+                binary_targets=(str(cli), str(marker)),
+                remove_binaries=True,
+            )
+
+            cmd_uninstall._remove_binaries(plan)
+
+            self.assertFalse(state_custody.exists())
+
+    def test_custom_state_custody_recovers_interrupted_intent_stage(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            root = tmp_path / "bin"
+            checkout = tmp_path / "checkout"
+            source_bin = checkout / ".venv" / "bin"
+            state_parent = tmp_path / "custom-state"
+            root.mkdir()
+            source_bin.mkdir(parents=True)
+            state_parent.mkdir()
+            (source_bin / "defenseclaw").write_text("source cli", encoding="utf-8")
+            cli = root / "defenseclaw"
+            cli.symlink_to(source_bin / "defenseclaw")
+            marker = root / ".defenseclaw-source-root"
+            self._write_source_marker(marker, checkout, gateway_sha256="0" * 64)
+            state_custody = state_parent / ".defenseclaw-install-custody"
+            cmd_uninstall.install_publish.prepare_custody(state_custody, state_parent)
+            interrupted = state_custody / f"intent-{'a' * 64}.json.stage"
+            interrupted.write_bytes(b"partial")
+            interrupted.chmod(0o600)
+            plan = cmd_uninstall.UninstallPlan(
+                platform_name="linux",
+                install_root=str(root),
+                data_dir=str(state_parent / ".defenseclaw"),
+                binary_targets=(str(cli), str(marker)),
+                remove_binaries=True,
+            )
+
+            cmd_uninstall._remove_binaries(plan)
+
+            self.assertFalse(state_custody.exists())
+
+    def test_custom_state_custody_preserves_unknown_entries_and_trees(self):
+        for variant in ("unknown", "tree"):
+            with self.subTest(variant=variant), tempfile.TemporaryDirectory() as tmp:
+                tmp_path = Path(tmp).resolve()
+                root = tmp_path / "bin"
+                checkout = tmp_path / "checkout"
+                source_bin = checkout / ".venv" / "bin"
+                state_parent = tmp_path / "custom-state"
+                root.mkdir()
+                source_bin.mkdir(parents=True)
+                state_parent.mkdir()
+                (source_bin / "defenseclaw").write_text("source cli", encoding="utf-8")
+                cli = root / "defenseclaw"
+                cli.symlink_to(source_bin / "defenseclaw")
+                marker = root / ".defenseclaw-source-root"
+                self._write_source_marker(marker, checkout, gateway_sha256="0" * 64)
+                state_custody = state_parent / ".defenseclaw-install-custody"
+                if variant == "unknown":
+                    cmd_uninstall.install_publish.prepare_custody(state_custody, state_parent)
+                    preserved = state_custody / "operator-note"
+                    preserved.write_text("preserve", encoding="utf-8")
+                else:
+                    tree = state_parent / "managed-tree"
+                    tree.mkdir()
+                    (tree / "state").write_text("preserve", encoding="utf-8")
+                    tree_identity = cmd_uninstall.install_publish.path_identity(tree)
+                    self.assertTrue(
+                        cmd_uninstall.install_publish.remove_tree_exact(
+                            tree,
+                            tree_identity,
+                            custody_root=state_custody,
+                        )
+                    )
+                    preserved = next(state_custody.glob("retired-*")) / "state"
+                plan = cmd_uninstall.UninstallPlan(
+                    platform_name="linux",
+                    install_root=str(root),
+                    data_dir=str(state_parent / ".defenseclaw"),
+                    binary_targets=(str(cli), str(marker)),
+                    remove_binaries=True,
+                )
+
+                with self.assertRaisesRegex(OSError, "unresolved entries and was preserved"):
+                    cmd_uninstall._remove_binaries(plan)
+
+                self.assertEqual(preserved.read_text(encoding="utf-8"), "preserve")
+
+    def test_no_claims_preserve_unrelated_source_custody_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve() / "bin"
+            root.mkdir()
+            custody = root / ".defenseclaw-install-custody"
+            custody.mkdir(mode=0o755)
+            foreign = custody / "operator-note"
+            foreign.write_text("preserve", encoding="utf-8")
+            plan = cmd_uninstall.UninstallPlan(
+                platform_name="linux",
+                install_root=str(root),
+                binary_targets=(str(root / "defenseclaw"),),
+                remove_binaries=True,
+            )
+
+            cmd_uninstall._remove_binaries(plan)
+
+            self.assertEqual(foreign.read_text(encoding="utf-8"), "preserve")
+
+    def test_root_absent_invalid_close_intent_fails_visibly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve() / "bin"
+            root.mkdir()
+            custody = root / ".defenseclaw-install-custody"
+            close_intent = custody.parent / cmd_uninstall.install_publish._custody_close_name(custody)
+            close_intent.write_bytes(b"invalid close intent\n")
+            close_intent.chmod(0o600)
+            plan = cmd_uninstall.UninstallPlan(
+                platform_name="linux",
+                install_root=str(root),
+                binary_targets=(str(root / "defenseclaw"),),
+                remove_binaries=True,
+            )
+
+            with self.assertRaisesRegex(OSError, "close intent is invalid"):
+                cmd_uninstall._remove_binaries(plan)
+
+            self.assertEqual(close_intent.read_bytes(), b"invalid close intent\n")
+
+    def test_missing_install_root_has_no_custody_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve() / "missing" / "bin"
+            plan = cmd_uninstall.UninstallPlan(
+                platform_name="linux",
+                install_root=str(root),
+                binary_targets=(str(root / "defenseclaw"),),
+                remove_binaries=True,
+            )
+
+            cmd_uninstall._remove_binaries(plan)
+
+            self.assertFalse(root.exists())
+
+    def test_source_marker_symlink_refuses_before_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            root = tmp_path / "bin"
+            source_bin = tmp_path / "checkout" / ".venv" / "bin"
+            root.mkdir()
+            source_bin.mkdir(parents=True)
+            cli = root / "defenseclaw"
+            cli.symlink_to(source_bin / "defenseclaw")
+            outside = tmp_path / "outside-marker"
+            self._write_source_marker(outside, tmp_path / "checkout", gateway_sha256="0" * 64)
+            marker = root / ".defenseclaw-source-root"
+            marker.symlink_to(outside)
+            plan = cmd_uninstall.UninstallPlan(
+                platform_name="linux",
+                install_root=str(root),
+                binary_targets=(str(cli), str(marker)),
+                remove_binaries=True,
+            )
+
+            with self.assertRaises(click.ClickException):
+                cmd_uninstall._remove_binaries(plan)
+
+            self.assertTrue(os.path.lexists(cli))
+            self.assertTrue(os.path.lexists(marker))
+            self.assertTrue(outside.is_file())
+
+    def test_utf16_source_marker_refuses_cleanly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            root = tmp_path / "bin"
+            root.mkdir()
+            marker = root / ".defenseclaw-source-root"
+            self._write_source_marker(marker, tmp_path / "checkout", gateway_sha256="0" * 64)
+            marker.write_bytes(marker.read_text(encoding="utf-8").encode("utf-16"))
+            plan = cmd_uninstall.UninstallPlan(
+                platform_name="linux",
+                install_root=str(root),
+                binary_targets=(str(marker),),
+                remove_binaries=True,
+            )
+
+            with self.assertRaisesRegex(click.ClickException, "not valid UTF-8 JSON"):
+                cmd_uninstall._remove_binaries(plan)
+
+            self.assertTrue(marker.read_bytes().startswith((b"\xff\xfe", b"\xfe\xff")))
+
+    def test_duplicate_source_marker_field_refuses_cleanly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            root = tmp_path / "bin"
+            root.mkdir()
+            marker = root / ".defenseclaw-source-root"
+            self._write_source_marker(marker, tmp_path / "checkout", gateway_sha256="0" * 64)
+            raw = marker.read_bytes()
+            marker.write_bytes(b'{"schema_version":2,' + raw.removeprefix(b"{"))
+            plan = cmd_uninstall.UninstallPlan(
+                platform_name="linux",
+                install_root=str(root),
+                binary_targets=(str(marker),),
+                remove_binaries=True,
+            )
+
+            with self.assertRaisesRegex(click.ClickException, "duplicate field 'schema_version'"):
+                cmd_uninstall._remove_binaries(plan)
+
+            self.assertTrue(marker.is_file())
+
+    def test_newer_source_marker_refuses_before_launcher_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            root = tmp_path / "bin"
+            checkout = tmp_path / "checkout"
+            source_bin = checkout / ".venv" / "bin"
+            root.mkdir()
+            source_bin.mkdir(parents=True)
+            cli = root / "defenseclaw"
+            cli.symlink_to(source_bin / "defenseclaw")
+            marker = root / ".defenseclaw-source-root"
+            self._write_source_marker(marker, checkout, gateway_sha256="0" * 64)
+            payload = json.loads(marker.read_text(encoding="utf-8"))
+            payload["runtime_config_version"] = 9
+            marker.write_text(json.dumps(payload), encoding="utf-8")
+            plan = cmd_uninstall.UninstallPlan(
+                platform_name="linux",
+                install_root=str(root),
+                binary_targets=(str(cli), str(marker)),
+                remove_binaries=True,
+            )
+
+            with self.assertRaisesRegex(click.ClickException, "newer than this checkout"):
+                cmd_uninstall._remove_binaries(plan)
+
+            self.assertTrue(os.path.lexists(cli))
+            self.assertTrue(marker.is_file())
+
+    def test_gateway_digest_mismatch_refuses_before_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            root = tmp_path / "bin"
+            checkout = tmp_path / "checkout"
+            source_bin = checkout / ".venv" / "bin"
+            root.mkdir()
+            source_bin.mkdir(parents=True)
+            cli = root / "defenseclaw"
+            cli.symlink_to(source_bin / "defenseclaw")
+            gateway = root / "defenseclaw-gateway"
+            gateway.write_bytes(b"unexpected gateway")
+            gateway.chmod(0o700)
+            marker = root / ".defenseclaw-source-root"
+            self._write_source_marker(marker, checkout, gateway_sha256="0" * 64)
+            plan = cmd_uninstall.UninstallPlan(
+                platform_name="linux",
+                install_root=str(root),
+                gateway_path=str(gateway),
+                binary_targets=(str(cli), str(gateway), str(marker)),
+                remove_binaries=True,
+            )
+
+            with self.assertRaises(click.ClickException):
+                cmd_uninstall._remove_binaries(plan)
+
+            self.assertTrue(os.path.lexists(cli))
+            self.assertTrue(gateway.is_file())
+            self.assertTrue(marker.is_file())
+
+    def test_gateway_digest_rejects_oversized_sparse_file_without_reading(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            gateway = Path(tmp).resolve() / "defenseclaw-gateway"
+            gateway.touch(mode=0o700)
+            gateway.chmod(0o700)
+            os.truncate(gateway, cmd_uninstall._MAX_GATEWAY_BINARY_BYTES + 1)
+
+            with (
+                patch.object(cmd_uninstall.os, "read", side_effect=AssertionError("gateway must not be read")),
+                self.assertRaisesRegex(click.ClickException, "invalid size"),
+            ):
+                cmd_uninstall._posix_gateway_digest(str(gateway), "source-owned gateway")
+
+    def test_owned_launcher_failure_preserves_source_marker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            root = tmp_path / "bin"
+            checkout = tmp_path / "checkout"
+            source_bin = checkout / ".venv" / "bin"
+            root.mkdir()
+            source_bin.mkdir(parents=True)
+            cli = root / "defenseclaw"
+            cli.symlink_to(source_bin / "defenseclaw")
+            marker = root / ".defenseclaw-source-root"
+            self._write_source_marker(marker, checkout, gateway_sha256="0" * 64)
+            plan = cmd_uninstall.UninstallPlan(
+                platform_name="linux",
+                install_root=str(root),
+                binary_targets=(str(cli), str(marker)),
+                remove_binaries=True,
+            )
+
+            with (
+                patch.object(
+                    cmd_uninstall.install_publish,
+                    "unlink_exact_symlink",
+                    side_effect=cmd_uninstall.install_publish.PublishError("locked"),
+                ),
+                self.assertRaises(OSError),
+            ):
+                cmd_uninstall._remove_binaries(plan)
+
+            self.assertTrue(os.path.lexists(cli))
+            self.assertTrue(marker.is_file())
+
+    def test_release_cleanup_preserves_gateway_without_ownership_receipt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            root = tmp_path / ".local" / "bin"
+            managed_venv = tmp_path / ".defenseclaw" / ".venv"
+            managed_bin = managed_venv / "bin"
+            root.mkdir(parents=True)
+            managed_bin.mkdir(parents=True)
+            cli = root / "defenseclaw"
+            cli.symlink_to(managed_bin / "defenseclaw")
+            gateway = root / "defenseclaw-gateway"
+            gateway.write_bytes(b"release gateway")
+            gateway.chmod(0o700)
+            optional = root / "litellm"
+            optional.symlink_to(managed_bin / "litellm")
+            plan = cmd_uninstall.UninstallPlan(
+                platform_name="linux",
+                install_root=str(root),
+                managed_venv=str(managed_venv),
+                gateway_path=str(gateway),
+                binary_targets=(str(gateway), str(cli), str(optional)),
+                remove_binaries=True,
+            )
+
+            cmd_uninstall._remove_binaries(plan)
+
+            self.assertFalse(os.path.lexists(cli))
+            self.assertEqual(gateway.read_bytes(), b"release gateway")
+            self.assertTrue(os.path.lexists(optional))
+            custody = tmp_path / ".defenseclaw-install-custody"
+            self.assertFalse(custody.exists())
+
+    def test_binary_path_swap_preserves_replacement_and_marker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            root = tmp_path / "bin"
+            checkout = tmp_path / "checkout"
+            source_bin = checkout / ".venv" / "bin"
+            root.mkdir()
+            source_bin.mkdir(parents=True)
+            cli = root / "defenseclaw"
+            cli.symlink_to(source_bin / "defenseclaw")
+            moved = root / "owned-away"
+            marker = root / ".defenseclaw-source-root"
+            self._write_source_marker(marker, checkout, gateway_sha256="0" * 64)
+            plan = cmd_uninstall.UninstallPlan(
+                platform_name="linux",
+                install_root=str(root),
+                binary_targets=(str(cli), str(marker)),
+                remove_binaries=True,
+            )
+            real_unlink = cmd_uninstall.install_publish.unlink_exact_symlink
+            swapped = False
+
+            def swap_before_unlink(path, identity, expected_targets, *, custody_root=None):
+                nonlocal swapped
+                if path == cli and not swapped:
+                    swapped = True
+                    cli.rename(moved)
+                    cli.write_text("foreign replacement", encoding="utf-8")
+                return real_unlink(path, identity, expected_targets, custody_root=custody_root)
+
+            with (
+                patch.object(
+                    cmd_uninstall.install_publish,
+                    "unlink_exact_symlink",
+                    side_effect=swap_before_unlink,
+                ),
+                self.assertRaises(OSError),
+            ):
+                cmd_uninstall._remove_binaries(plan)
+
+            self.assertEqual(cli.read_text(encoding="utf-8"), "foreign replacement")
+            self.assertTrue(os.path.lexists(moved))
+            self.assertTrue(marker.is_file())
+
+    def test_readlink_aba_cannot_authorize_foreign_launcher_retirement(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp).resolve()
+            root = tmp_path / "bin"
+            checkout = tmp_path / "checkout"
+            source_bin = checkout / ".venv" / "bin"
+            root.mkdir()
+            source_bin.mkdir(parents=True)
+            cli = root / "defenseclaw"
+            foreign_target = tmp_path / "foreign" / "defenseclaw"
+            cli.symlink_to(foreign_target)
+            parked = root / "foreign-parked"
+            marker = root / ".defenseclaw-source-root"
+            self._write_source_marker(marker, checkout, gateway_sha256="0" * 64)
+            plan = cmd_uninstall.UninstallPlan(
+                platform_name="linux",
+                install_root=str(root),
+                binary_targets=(str(cli), str(marker)),
+                remove_binaries=True,
+            )
+            real_readlink = os.readlink
+            swaps = 0
+
+            def swap_while_reading(path, *args, **kwargs):
+                nonlocal swaps
+                if kwargs.get("dir_fd") is None and os.fspath(path) == str(cli):
+                    swaps += 1
+                    cli.rename(parked)
+                    cli.symlink_to(source_bin / "defenseclaw")
+                    try:
+                        return real_readlink(path, *args, **kwargs)
+                    finally:
+                        cli.unlink()
+                        parked.rename(cli)
+                return real_readlink(path, *args, **kwargs)
+
+            with (
+                patch.object(cmd_uninstall.os, "readlink", side_effect=swap_while_reading),
+                self.assertRaises(OSError),
+            ):
+                cmd_uninstall._remove_binaries(plan)
+
+            self.assertGreaterEqual(swaps, 2)
+            self.assertEqual(os.readlink(cli), str(foreign_target))
+            self.assertTrue(marker.is_file())
 
 
 class WindowsOwnedCleanupTests(unittest.TestCase):
@@ -223,7 +992,7 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
 
     def test_binary_only_removes_exact_targets_and_preserves_unrelated_files(self):
         with tempfile.TemporaryDirectory() as tmp:
-            profile = Path(tmp) / "kévin profile"
+            profile = Path(tmp).resolve() / "kévin profile"
             root = profile / "bin"
             root.mkdir(parents=True)
             targets = tuple(
@@ -261,7 +1030,7 @@ class WindowsOwnedCleanupTests(unittest.TestCase):
 
     def test_binary_failure_propagates(self):
         with tempfile.TemporaryDirectory() as tmp:
-            root = Path(tmp) / "bin"
+            root = Path(tmp).resolve() / "bin"
             root.mkdir()
             target = root / "defenseclaw.cmd"
             managed_venv = Path(tmp) / ".defenseclaw" / ".venv"
@@ -963,6 +1732,62 @@ class ConnectorTeardownDispatchTests(unittest.TestCase):
         self.assertIn("codex teardown failed", str(raised.exception))
 
 
+class OpenClawFallbackTests(unittest.TestCase):
+    def test_missing_openclaw_config_is_already_reverted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plan = cmd_uninstall.UninstallPlan(
+                data_dir=os.path.join(tmp, ".defenseclaw"),
+                openclaw_config_file=os.path.join(tmp, ".openclaw", "openclaw.json"),
+            )
+            with (
+                capture_click_output() as output,
+                patch("defenseclaw.guardrail.pristine_backup_path", return_value=""),
+                patch("defenseclaw.guardrail.restore_openclaw_config") as restore,
+            ):
+                cmd_uninstall._revert_openclaw_python(plan)
+
+        restore.assert_not_called()
+        self.assertIn("already absent", output.getvalue())
+
+    def test_existing_malformed_openclaw_config_still_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            openclaw_config = os.path.join(tmp, ".openclaw", "openclaw.json")
+            os.makedirs(os.path.dirname(openclaw_config))
+            with open(openclaw_config, "w", encoding="utf-8") as stream:
+                stream.write("{malformed")
+            plan = cmd_uninstall.UninstallPlan(
+                data_dir=os.path.join(tmp, ".defenseclaw"),
+                openclaw_config_file=openclaw_config,
+            )
+            with (
+                patch("defenseclaw.guardrail.pristine_backup_path", return_value=""),
+                patch("defenseclaw.guardrail.restore_openclaw_config", return_value=False) as restore,
+                self.assertRaises(click.ClickException) as raised,
+            ):
+                cmd_uninstall._revert_openclaw_python(plan)
+
+        restore.assert_called_once_with(openclaw_config, original_model="")
+        self.assertIn("missing or malformed", str(raised.exception))
+
+    def test_missing_target_with_pristine_backup_is_restored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            openclaw_config = os.path.join(tmp, ".openclaw", "openclaw.json")
+            os.makedirs(os.path.dirname(openclaw_config))
+            pristine = os.path.join(tmp, ".defenseclaw", "backups", "openclaw.json.pristine")
+            os.makedirs(os.path.dirname(pristine))
+            with open(pristine, "w", encoding="utf-8") as stream:
+                stream.write('{"theme":"preserved"}\n')
+            plan = cmd_uninstall.UninstallPlan(
+                data_dir=os.path.join(tmp, ".defenseclaw"),
+                openclaw_config_file=openclaw_config,
+            )
+            with patch("defenseclaw.guardrail.pristine_backup_path", return_value=pristine):
+                cmd_uninstall._revert_openclaw_python(plan)
+
+            with open(openclaw_config, encoding="utf-8") as stream:
+                self.assertEqual(stream.read(), '{"theme":"preserved"}\n')
+
+
 class GatewaySupportProbeTests(unittest.TestCase):
     def test_returns_false_when_gateway_missing(self):
         with patch("shutil.which", return_value=None):
@@ -1115,6 +1940,164 @@ class RemoveDataDirTests(unittest.TestCase):
                     cmd_uninstall._remove_data_dir(str(data_dir))
 
             self.assertTrue(marker.is_file())
+
+
+class CredentialMCPUninstallTests(unittest.TestCase):
+    def test_cleanup_does_not_recreate_an_absent_data_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / ".defenseclaw"
+            plan = cmd_uninstall.UninstallPlan(data_dir=str(data_dir))
+            with (
+                patch.object(cmd_uninstall.config_module, "load") as load,
+                patch("defenseclaw.credential_protection.remove_managed_mcp_connectors") as remove,
+            ):
+                cmd_uninstall._remove_credential_mcp(plan)
+
+            load.assert_not_called()
+            remove.assert_not_called()
+            self.assertFalse(data_dir.exists())
+
+    def test_cleanup_sweeps_known_connectors_when_config_is_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / ".defenseclaw"
+            data_dir.mkdir()
+            cfg = SimpleNamespace(
+                credential_protection=SimpleNamespace(enabled=False),
+            )
+            plan = cmd_uninstall.UninstallPlan(data_dir=str(data_dir))
+            with (
+                patch.object(cmd_uninstall.config_module, "load", return_value=cfg) as load,
+                patch(
+                    "defenseclaw.credential_protection.remove_managed_mcp_connectors",
+                    return_value=[],
+                ) as remove,
+            ):
+                cmd_uninstall._remove_credential_mcp(plan)
+
+            load.assert_called_once_with(data_dir=str(data_dir))
+            remove.assert_called_once_with(cfg, include_inactive=True)
+
+    def test_cleanup_sweeps_inactive_connectors_and_disables_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / ".defenseclaw"
+            data_dir.mkdir()
+            (data_dir / "config.yaml").write_text("config_version: 8\n", encoding="utf-8")
+            saved: list[bool] = []
+            cfg = SimpleNamespace(
+                credential_protection=SimpleNamespace(enabled=True),
+                save=lambda: saved.append(True),
+            )
+            results = [
+                {
+                    "connector": "codex",
+                    "mcp_registration": "removed",
+                    "changed": True,
+                    "proxy_prompt_tokenization": "not_in_direct_upstream_path",
+                }
+            ]
+            plan = cmd_uninstall.UninstallPlan(data_dir=str(data_dir))
+            with (
+                patch.object(cmd_uninstall.config_module, "load", return_value=cfg),
+                patch(
+                    "defenseclaw.credential_protection.remove_managed_mcp_connectors",
+                    return_value=results,
+                ) as remove,
+            ):
+                cmd_uninstall._remove_credential_mcp(plan)
+
+            remove.assert_called_once_with(cfg, include_inactive=True)
+            self.assertFalse(cfg.credential_protection.enabled)
+            self.assertEqual(saved, [True])
+
+    def test_cleanup_failure_stops_before_data_removal(self):
+        plan = cmd_uninstall.UninstallPlan(
+            data_dir="/tmp/dc",
+            connectors=("codex",),
+            remove_credential_mcp=True,
+            remove_data_dir=True,
+        )
+        order: list[str] = []
+        with (
+            patch.object(cmd_uninstall, "_validate_plan"),
+            patch.object(cmd_uninstall, "_stop_gateway"),
+            patch.object(cmd_uninstall, "_connector_teardown", side_effect=lambda _: order.append("teardown")),
+            patch.object(
+                cmd_uninstall,
+                "_remove_credential_mcp",
+                side_effect=click.ClickException("injected MCP cleanup failure"),
+            ),
+            patch.object(cmd_uninstall, "_remove_data_dir", side_effect=lambda *_args, **_kwargs: order.append("wipe")),
+        ):
+            with self.assertRaises(click.ClickException):
+                cmd_uninstall._execute_plan(plan)
+
+        self.assertEqual(order, ["teardown"])
+
+    def test_unproven_sgw_cleanup_blocks_data_removal_for_repair(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / ".defenseclaw"
+            data_dir.mkdir()
+            marker = data_dir / "module-repair-evidence"
+            marker.write_text("preserve", encoding="utf-8")
+            cfg = SimpleNamespace(
+                credential_protection=SimpleNamespace(enabled=True),
+            )
+            plan = cmd_uninstall.UninstallPlan(
+                data_dir=str(data_dir),
+                remove_credential_mcp=True,
+                remove_data_dir=True,
+            )
+            with (
+                patch.object(cmd_uninstall, "_validate_plan"),
+                patch.object(cmd_uninstall, "_stop_gateway"),
+                patch.object(cmd_uninstall.config_module, "load", return_value=cfg),
+                patch(
+                    "defenseclaw.credential_protection.remove_managed_mcp_connectors",
+                    side_effect=CredentialProtectionError("mcp_reconciliation_failed"),
+                ),
+                patch.object(cmd_uninstall, "_remove_data_dir") as remove_data,
+            ):
+                with self.assertRaises(click.ClickException) as caught:
+                    cmd_uninstall._execute_plan(plan)
+
+            self.assertIn("could not identify managed s-gw MCP registrations", str(caught.exception))
+            remove_data.assert_not_called()
+            self.assertTrue(marker.is_file())
+
+    def test_cleanup_rolls_back_when_config_save_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            data_dir = Path(tmp) / ".defenseclaw"
+            data_dir.mkdir()
+            (data_dir / "config.yaml").write_text("config_version: 8\n", encoding="utf-8")
+            cfg = SimpleNamespace(
+                credential_protection=SimpleNamespace(enabled=True),
+                save=lambda: (_ for _ in ()).throw(OSError("injected save failure")),
+            )
+            results = [
+                {
+                    "connector": "codex",
+                    "mcp_registration": "removed",
+                    "changed": True,
+                    "proxy_prompt_tokenization": "not_in_direct_upstream_path",
+                }
+            ]
+            plan = cmd_uninstall.UninstallPlan(data_dir=str(data_dir))
+            with (
+                patch.object(cmd_uninstall.config_module, "load", return_value=cfg),
+                patch(
+                    "defenseclaw.credential_protection.remove_managed_mcp_connectors",
+                    return_value=results,
+                ),
+                patch(
+                    "defenseclaw.credential_protection.rollback_mcp_removal",
+                    return_value=True,
+                ) as rollback,
+            ):
+                with self.assertRaises(click.ClickException):
+                    cmd_uninstall._remove_credential_mcp(plan)
+
+            self.assertTrue(cfg.credential_protection.enabled)
+            rollback.assert_called_once_with(cfg, results)
 
 
 class ExecutePlanConnectorTests(unittest.TestCase):

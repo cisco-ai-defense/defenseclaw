@@ -19,7 +19,8 @@
 # DefenseClaw Installer
 #
 # Installs DefenseClaw from pre-built release artifacts.
-# No Go, Node.js, or git required — only Python and uv.
+# Base installation needs only Python and uv. Fresh credential protection
+# setup additionally requires Node.js 20 or newer.
 #
 #   # From GitHub release:
 #   curl -LsSf https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh | bash
@@ -1711,6 +1712,9 @@ run_quickstart() {
     if [[ -n "${QUICKSTART_MODE}" ]]; then
         args+=(--mode "${QUICKSTART_MODE}")
     fi
+    if [[ "${NO_CREDENTIAL_PROTECTION}" == true ]]; then
+        args+=(--no-credential-protection)
+    fi
 
     if "${dc_bin}" "${args[@]}"; then
         ok "Quickstart completed"
@@ -1819,6 +1823,7 @@ RUN_QUICKSTART=false
 QUICKSTART_MODE=""
 CONNECTOR=""
 NO_OPENCLAW=false
+NO_CREDENTIAL_PROTECTION=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -1837,6 +1842,7 @@ while [[ $# -gt 0 ]]; do
             shift 2
             ;;
         --no-openclaw) NO_OPENCLAW=true; shift ;;
+        --no-credential-protection) NO_CREDENTIAL_PROTECTION=true; shift ;;
         # Run ``defenseclaw quickstart --non-interactive`` after the
         # binaries land. This gives a single-command install→bootstrap
         # path: everything a user needs to go from ``curl | bash`` to a
@@ -1866,6 +1872,7 @@ while [[ $# -gt 0 ]]; do
             echo "  --no-openclaw         Skip OpenClaw runtime+plugin install (alias for --connector none)"
             echo "  --quickstart          Run 'defenseclaw quickstart --non-interactive' post-install"
             echo "  --quickstart-mode M   Pass --mode M to quickstart (observe|action; implies --quickstart)"
+            echo "  --no-credential-protection  Opt out of s-gw during post-install quickstart"
             echo "  --help, -h            Show this help"
             echo ""
             echo "Environment variables:"
@@ -1888,6 +1895,10 @@ while [[ $# -gt 0 ]]; do
 done
 export YES_MODE
 trap cleanup_install_attempt EXIT
+
+if [[ "${NO_CREDENTIAL_PROTECTION}" == true && "${RUN_QUICKSTART}" != true ]]; then
+    warn "--no-credential-protection applies only to --quickstart; repeat the flag when you later run defenseclaw init or quickstart"
+fi
 
 # Reconcile --no-openclaw and --connector. The two flags can be combined
 # coherently (e.g. --no-openclaw --connector codex), but conflicting use

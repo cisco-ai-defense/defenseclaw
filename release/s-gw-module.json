@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "module_name": "s-gw",
+  "package_name": "@s-gw/s-gw",
+  "package_version": "0.2.0",
+  "upstream_package_version": "0.1.19",
+  "upstream_repository": "https://github.com/sgateway/s-gw.git",
+  "upstream_revision": "a9ffa790060d81b0e4e22eea21eb153d2cdeca22",
+  "upstream_tree": "ecf1639f4c6f4b2e55f3945da8784adb36e7082a",
+  "source_path": "third_party/s-gw/upstream",
+  "source_inventory": "third_party/s-gw/SOURCE_MANIFEST.json",
+  "patches": [
+    "third_party/s-gw/patches/0001-defenseclaw-native-runtime-boundary.patch",
+    "third_party/s-gw/patches/0002-defenseclaw-native-authorization-hardening.patch",
+    "third_party/s-gw/patches/0003-defenseclaw-setup-help.patch",
+    "third_party/s-gw/patches/0004-defenseclaw-windows-launch-trust.patch",
+    "third_party/s-gw/patches/0005-defenseclaw-credential-status.patch",
+    "third_party/s-gw/patches/0006-defenseclaw-standalone-parity.patch",
+    "third_party/s-gw/patches/0007-defenseclaw-macos-keychain-status.patch"
+  ],
+  "source_selection": {
+    "files": [
+      "LICENSE",
+      "NOTICE",
+      "README.md",
+      "TRADEMARKS.md",
+      "docs/ui/THIRD_PARTY_NOTICES.md",
+      "docs/ui/vendor/d3-sankey/d3-array.LICENSE.txt",
+      "docs/ui/vendor/d3-sankey/d3-path.LICENSE.txt",
+      "docs/ui/vendor/d3-sankey/d3-sankey.LICENSE.txt",
+      "docs/ui/vendor/d3-sankey/d3-shape.LICENSE.txt",
+      "docs/ui/vendor/sankeymatic/LICENSE.txt",
+      "package-lock.json",
+      "package.json",
+      "tests/mcp-e2e.test.ts",
+      "tests/setup.ts",
+      "tsconfig.json",
+      "vitest.config.ts"
+    ],
+    "directories": [
+      "src"
+    ],
+    "exclude_directories": [
+      "src/console-ui"
+    ]
+  },
+  "minimum_node_version": "20.0.0",
+  "build_toolchain": {
+    "node": "24.18.1",
+    "npm": "11.16.0"
+  },
+  "entrypoints": {
+    "cli": "dist/cli.js",
+    "mcp": "dist/mcp-server.js"
+  },
+  "artifact": {
+    "filename_template": "defenseclaw-s-gw-module-0.2.0-{target}.tar.gz",
+    "resource_template": "_data/sgw/modules/{target}/s-gw-module.tar.gz",
+    "checksum_manifest": "checksums.txt"
+  },
+  "install": {
+    "module_directory": "modules/s-gw",
+    "receipt": "modules/s-gw/receipt.json",
+    "shared_store_default": "~/.s-gw"
+  },
+  "production_components": [
+    "runner",
+    "credential_helper",
+    "approval_ui",
+    "license_bundle"
+  ],
+  "runner_manifest": "release/s-gw-runners.json"
+}

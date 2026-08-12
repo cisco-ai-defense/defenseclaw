@@ -69,6 +69,8 @@ With neither multi flag nor `--connector`, non-interactive init keeps the single
 
 The scripted equivalent. Same backend, no prompts ever, safe defaults baked in: `observe` profile, `local` scanner, no LLM judge, no HITL.
 
+On a new packaged installation, `init` and `quickstart` enable the bundled s-gw credential broker when the staged module passes its release checksum. This step requires Node.js 20 or newer. Source checkouts without staged release artifacts leave credential protection disabled; use `--credential-protection` to request it explicitly or `--no-credential-protection` to record an opt-out. Rerunning either command never changes the credential-protection setting implicitly.
+
 <Steps>
 
 <Step>
@@ -213,6 +215,11 @@ and redaction profile that file is allowed to receive.
     "--skip-gateway": {
       type: "flag",
       description: "Do not start the sidecar at the end of quickstart. Useful when you start defenseclaw-gateway under systemd.",
+    },
+    "--credential-protection / --no-credential-protection": {
+      type: "flag",
+      description: "Enable or opt out of the bundled s-gw broker when creating a new configuration. Existing configurations are preserved.",
+      default: "enabled when a checksum-verified staged module is bundled",
     },
     "--json-summary": {
       type: "flag",

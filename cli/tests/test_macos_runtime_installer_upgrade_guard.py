@@ -405,6 +405,7 @@ def test_macos_ci_builds_and_verifies_reviewed_runtime_fixture_first() -> None:
 
     verify_runtime = fixture.index("scripts/release_candidate.py verify-runtime")
     extract_gateway = fixture.index("scripts/release_candidate.py extract-gateway")
+    assert "--source-only-sgw" in fixture[verify_runtime:extract_gateway]
     cleanup = fixture.index("shutil.rmtree(workdir)")
     go_cache_cleanup = fixture.index("go clean -cache -modcache")
     uv_cache_cleanup = fixture.index("uv cache clean")
@@ -508,10 +509,7 @@ def test_mac_app_runtime_update_exposes_only_runnable_authenticated_command() ->
     assert "copy the authenticated resolver command" in app_state
     assert "defenseclaw-upgrade.sh" in settings
     assert "checksums" in settings
-    assert (
-        "https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/upgrade/"
-        in settings
-    )
+    assert "https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/upgrade/" in settings
     assert "docs/CLI.md#upgrade" not in settings
     assert "scripts/upgrade.sh resolver" not in app_state
     assert "scripts/upgrade.sh resolver" not in settings

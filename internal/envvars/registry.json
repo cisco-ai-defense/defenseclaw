@@ -6,7 +6,7 @@
     "debug": "Verbose-logging toggles. Safe but noisy.",
     "telemetry": "OTel / observability config. Override values normally set in config.yaml.",
     "runtime_path": "Path / binary overrides for installation and runtime layout.",
-    "hook_internal": "Set by hook scripts and the daemon launcher. Do not override manually.",
+    "hook_internal": "Set by hook scripts, the daemon, and trusted child-process launchers. Do not override manually.",
     "upgrade_internal": "Set only by trusted upgrade controllers during fresh-process and staged bridge handoffs. Do not override manually.",
     "credential": "Auth materials (API keys, tokens, passwords). Should reference env vars, not contain raw values in code.",
     "discovery": "Probe / discovery tuning.",
@@ -2990,6 +2990,146 @@
       ],
       "since": "0.8.11",
       "security_note": "Bypassing the env_config file trust check lets a group-writable file at the canonical path retarget bearer-authenticated inspection POSTs. Test-only."
+    },
+    {
+      "name": "DEFENSECLAW_MCP_OWNER",
+      "category": "hook_internal",
+      "purpose": "Marks connector MCP entries that are owned by DefenseClaw credential protection so lifecycle reconciliation can distinguish them from operator-managed s-gw entries.",
+      "default": "unset",
+      "accepted_values": ["s-gw-credential-protection-v1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cli/defenseclaw/credential_protection.py", "description": "Writes and verifies the ownership marker in managed connector MCP environments"}
+      ],
+      "since": "0.8.11"
+    },
+    {
+      "name": "DEFENSECLAW_REQUIRE_SGW_MODULES",
+      "category": "runtime_path",
+      "purpose": "Requires authenticated s-gw production modules during protected package staging instead of permitting a source-only build.",
+      "default": "unset (source-only staging is allowed)",
+      "accepted_values": ["1", "true", "yes", "on", "0", "false", "no", "off", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "Makefile", "description": "Exports the effective source or production module requirement to packaging children"},
+        {"location": "scripts/stage_sgw_modules.py", "description": "Fails protected staging when a complete authenticated module set is unavailable"}
+      ],
+      "since": "0.8.11"
+    },
+    {
+      "name": "DEFENSECLAW_SGW_ARTIFACT_DIR",
+      "category": "runtime_path",
+      "purpose": "Selects the directory containing authenticated target-specific s-gw module archives during package staging.",
+      "default": "dist/sgw",
+      "accepted_values": ["filesystem path"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "Makefile", "description": "Passes the reviewed artifact directory into package staging"},
+        {"location": "scripts/stage_sgw_modules.py", "description": "Uses the directory as the default authenticated artifact source"}
+      ],
+      "since": "0.8.11"
+    },
+    {
+      "name": "DEFENSECLAW_SGW_ACL_OPERATION",
+      "category": "hook_internal",
+      "purpose": "Carries the private ACL operation from the authenticated s-gw packaging driver to its bounded Windows PowerShell child.",
+      "default": "unset",
+      "accepted_values": ["apply", "verify", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "scripts/sgw_module.py", "description": "Sets the exact operation in the child-only process environment before applying or verifying a managed artifact ACL"}
+      ],
+      "since": "0.8.11",
+      "security_note": "The trusted parent overwrites any ambient value before launch, and the PowerShell child rejects every other value."
+    },
+    {
+      "name": "DEFENSECLAW_SGW_ACL_SCOPE",
+      "category": "hook_internal",
+      "purpose": "Carries the private ACL traversal scope from the authenticated s-gw packaging driver to its bounded Windows PowerShell child.",
+      "default": "unset",
+      "accepted_values": ["single", "recursive", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "scripts/sgw_module.py", "description": "Sets the exact traversal scope in the child-only process environment before applying or verifying a managed artifact ACL"}
+      ],
+      "since": "0.8.11",
+      "security_note": "The trusted parent overwrites any ambient value before launch, and the PowerShell child rejects every other value."
+    },
+    {
+      "name": "DEFENSECLAW_SGW_ACL_ROOT",
+      "category": "hook_internal",
+      "purpose": "Carries the canonical managed-artifact path from the authenticated s-gw packaging driver to its bounded Windows PowerShell child.",
+      "default": "unset",
+      "accepted_values": ["absolute filesystem path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "scripts/sgw_module.py", "description": "Sets the already-resolved managed path in the child-only process environment so it is never interpolated into PowerShell source"}
+      ],
+      "since": "0.8.11",
+      "security_note": "The trusted parent overwrites any ambient value with its resolved path and launches PowerShell without positional or shell interpolation."
+    },
+    {
+      "name": "DEFENSECLAW_SGW_MODULE_MANIFEST",
+      "category": "runtime_path",
+      "purpose": "Overrides the s-gw module contract path for isolated driver and packaging tests.",
+      "default": "the manifest packaged beside the driver",
+      "accepted_values": ["filesystem path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "scripts/sgw_module.py", "description": "Resolves the module contract when no explicit manifest path is supplied"}
+      ],
+      "since": "0.8.11",
+      "security_note": "DefenseClaw runtime launches pass an explicit authenticated manifest and do not forward this ambient override."
+    },
+    {
+      "name": "DEFENSECLAW_SGW_NODE",
+      "category": "runtime_path",
+      "purpose": "Selects an explicit Node.js executable for isolated s-gw driver use and local credential-protection diagnostics.",
+      "default": "node resolved from the local executable path",
+      "accepted_values": ["absolute executable path", "executable name", "unset"],
+      "security_impact": "low",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cli/defenseclaw/credential_protection.py", "description": "Resolves the host Node.js executable before invoking the authenticated module driver"},
+        {"location": "scripts/sgw_module.py", "description": "Uses the override only when no explicit Node.js path was supplied"}
+      ],
+      "since": "0.8.11",
+      "security_note": "A non-default value changes which local executable runs the authenticated s-gw module driver. Runtime admission still verifies the packaged module and native runner."
+    },
+    {
+      "name": "DEFENSECLAW_SGW_RUNNER_MANIFEST",
+      "category": "runtime_path",
+      "purpose": "Overrides the signed s-gw runner manifest path for isolated module-driver tests.",
+      "default": "the authenticated manifest adjacent to the packaged module contract",
+      "accepted_values": ["filesystem path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "scripts/sgw_module.py", "description": "Locates runner metadata when an explicit runtime context is not supplied"}
+      ],
+      "since": "0.8.11",
+      "security_note": "Production lifecycle commands use authenticated packaged paths; this override is retained for isolated verification."
+    },
+    {
+      "name": "DEFENSECLAW_SGW_RUNTIME_MANIFEST",
+      "category": "runtime_path",
+      "purpose": "Selects the authenticated s-gw production component manifest used while staging release packages.",
+      "default": "release/s-gw-runners.json",
+      "accepted_values": ["filesystem path"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "Makefile", "description": "Passes the reviewed runtime manifest to package staging"},
+        {"location": "scripts/stage_sgw_modules.py", "description": "Uses the manifest to authenticate required target artifacts"}
+      ],
+      "since": "0.8.11"
     },
     {
       "name": "DEFENSECLAW_AUDIT_DB_LOCK_HELPER_PATH",

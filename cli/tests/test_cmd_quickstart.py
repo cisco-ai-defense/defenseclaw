@@ -38,8 +38,26 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         os.makedirs(self.home_dir, exist_ok=True)
         os.makedirs(self.empty_path, exist_ok=True)
         self.runner = CliRunner()
+        self.credential_setup_patcher = patch(
+            "defenseclaw.bootstrap._setup_credential_protection_structured",
+            return_value=StepResult("Credential protection", "pass", "s-gw fixture ready"),
+        )
+        self.credential_default_patcher = patch(
+            "defenseclaw.credential_protection.credential_protection_default_enabled",
+            return_value=True,
+        )
+        self.credential_readiness_patcher = patch(
+            "defenseclaw.bootstrap._credential_protection_readiness",
+            return_value=StepResult("Credential protection", "pass", "s-gw fixture ready"),
+        )
+        self.credential_setup = self.credential_setup_patcher.start()
+        self.credential_readiness = self.credential_readiness_patcher.start()
+        self.credential_default_patcher.start()
 
     def tearDown(self):
+        self.credential_default_patcher.stop()
+        self.credential_readiness_patcher.stop()
+        self.credential_setup_patcher.stop()
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
 
     def _invoke(self, args):
@@ -72,12 +90,14 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         )
 
     def test_codex_defaults_to_observe_profile(self):
-        result = self._invoke([
-            "--connector",
-            "codex",
-            "--skip-gateway",
-            "--json-summary",
-        ])
+        result = self._invoke(
+            [
+                "--connector",
+                "codex",
+                "--skip-gateway",
+                "--json-summary",
+            ]
+        )
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
         summary = json.loads(result.output)
         self.assertEqual(summary["connector"], "codex")
@@ -90,26 +110,282 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         self.assertTrue(migration_state.is_applied(state, "0.8.5"))
 
     def test_openclaw_defaults_to_observe_profile(self):
-        result = self._invoke([
-            "--connector",
-            "openclaw",
-            "--skip-gateway",
-            "--json-summary",
-        ])
+        result = self._invoke(
+            [
+                "--connector",
+                "openclaw",
+                "--skip-gateway",
+                "--json-summary",
+            ]
+        )
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
         summary = json.loads(result.output)
         self.assertEqual(summary["connector"], "openclaw")
         self.assertEqual(summary["profile"], "observe")
 
+    def test_fresh_install_enables_credential_protection_by_default(self):
+        result = self._invoke(
+            [
+                "--connector",
+                "codex",
+                "--skip-gateway",
+                "--json-summary",
+            ]
+        )
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+
+        import yaml
+
+        with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh)
+        self.assertEqual(cfg["credential_protection"], {"enabled": True})
+
+    def test_source_install_without_staged_module_defaults_off(self):
+        self.credential_setup.reset_mock()
+        with patch(
+            "defenseclaw.credential_protection.credential_protection_default_enabled",
+            return_value=False,
+        ):
+            result = self._invoke(
+                [
+                    "--connector",
+                    "codex",
+                    "--skip-gateway",
+                    "--json-summary",
+                ]
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        self.credential_setup.assert_not_called()
+        import yaml
+
+        with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh)
+        self.assertNotIn("credential_protection", cfg)
+        summary = json.loads(result.output)
+        step = next(item for item in summary["setup"] if item["name"] == "Credential broker")
+        self.assertIn("release artifacts are not installed", step["detail"])
+
+    def test_explicit_source_opt_in_still_runs_broker_setup(self):
+        self.credential_setup.reset_mock()
+        with patch(
+            "defenseclaw.credential_protection.credential_protection_default_enabled",
+            return_value=False,
+        ):
+            result = self._invoke(
+                [
+                    "--connector",
+                    "codex",
+                    "--skip-gateway",
+                    "--credential-protection",
+                    "--json-summary",
+                ]
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        self.credential_setup.assert_called_once()
+        import yaml
+
+        with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh)
+        self.assertEqual(cfg["credential_protection"], {"enabled": True})
+
+    def test_fresh_install_can_opt_out_of_credential_protection(self):
+        result = self._invoke(
+            [
+                "--connector",
+                "codex",
+                "--skip-gateway",
+                "--no-credential-protection",
+                "--json-summary",
+            ]
+        )
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+
+        import yaml
+
+        with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh)
+        self.assertNotIn("credential_protection", cfg)
+        self.credential_setup.assert_not_called()
+
+    def test_missing_node_blocks_default_credential_protection_setup(self):
+        self.credential_setup.return_value = StepResult(
+            "Credential protection",
+            "fail",
+            "Node.js 20 or newer is required for credential protection.",
+            "defenseclaw setup credential-protection",
+        )
+        self.credential_readiness.return_value = StepResult(
+            "Credential protection",
+            "fail",
+            "node missing",
+            "Install Node.js 20 or newer.",
+        )
+
+        result = self._invoke(
+            [
+                "--connector",
+                "codex",
+                "--skip-gateway",
+                "--json-summary",
+            ]
+        )
+
+        self.assertEqual(result.exit_code, 1, result.output + (result.stderr or ""))
+        summary = json.loads(result.output)
+        self.assertEqual(summary["status"], "needs_attention")
+        setup = {step["name"]: step for step in summary["setup"]}
+        self.assertEqual(setup["Credential protection"]["status"], "fail")
+
+        import yaml
+
+        with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh)
+        self.assertNotIn("credential_protection", cfg)
+
+    def test_gateway_does_not_start_after_credential_setup_failure(self):
+        self.credential_setup.return_value = StepResult(
+            "Credential protection",
+            "fail",
+            "MCP codex=conflict",
+            "defenseclaw setup credential-protection --yes",
+        )
+        self.credential_readiness.return_value = StepResult(
+            "Credential protection",
+            "fail",
+            "MCP codex=conflict",
+            "defenseclaw setup credential-protection --yes",
+        )
+
+        with patch("defenseclaw.bootstrap._start_gateway_structured") as start_gateway:
+            result = self._invoke(["--connector", "codex", "--json-summary"])
+
+        self.assertEqual(result.exit_code, 1, result.output + (result.stderr or ""))
+        start_gateway.assert_not_called()
+        summary = json.loads(result.output)
+        sidecar = next(step for step in summary["setup"] if step["name"] == "Sidecar")
+        self.assertIn("credential-protection setup did not complete", sidecar["detail"])
+
+    @patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=True)
+    def test_rerun_does_not_enable_credential_protection_implicitly(self, _gate):
+        with open(os.path.join(self.tmp_dir, "config.yaml"), "w", encoding="utf-8") as fh:
+            fh.write(
+                "config_version: 8\n"
+                "observability: {}\n"
+                "claw:\n"
+                "  mode: codex\n"
+                "guardrail:\n"
+                "  enabled: true\n"
+                "  connector: codex\n"
+                "  mode: observe\n"
+            )
+
+        result = self._invoke(
+            [
+                "--connector",
+                "codex",
+                "--skip-gateway",
+                "--json-summary",
+            ]
+        )
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+
+        import yaml
+
+        with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
+            cfg = yaml.safe_load(fh)
+        self.assertNotIn("credential_protection", cfg)
+
+    @patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=True)
+    def test_existing_enabled_broker_reconciles_after_connector_change(self, _gate):
+        with open(os.path.join(self.tmp_dir, "config.yaml"), "w", encoding="utf-8") as fh:
+            fh.write(
+                "config_version: 8\n"
+                "observability: {}\n"
+                "credential_protection:\n"
+                "  enabled: true\n"
+                "claw:\n"
+                "  mode: codex\n"
+                "guardrail:\n"
+                "  enabled: true\n"
+                "  connector: codex\n"
+                "  mode: observe\n"
+            )
+
+        self.credential_setup.reset_mock()
+        result = self._invoke(
+            [
+                "--connector",
+                "claudecode",
+                "--skip-gateway",
+                "--json-summary",
+            ]
+        )
+
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        self.credential_setup.assert_called_once()
+        configured = self.credential_setup.call_args.args[0]
+        self.assertIn("claudecode", configured.active_connectors())
+        self.assertEqual(
+            self.credential_setup.call_args.kwargs["removed_connectors"],
+            ["codex"],
+        )
+
+    @patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=True)
+    def test_existing_enabled_broker_repair_restarts_same_connector_gateway(self, _gate):
+        with open(os.path.join(self.tmp_dir, "config.yaml"), "w", encoding="utf-8") as fh:
+            fh.write(
+                "config_version: 8\n"
+                "observability: {}\n"
+                "credential_protection:\n"
+                "  enabled: true\n"
+                "claw:\n"
+                "  mode: codex\n"
+                "guardrail:\n"
+                "  enabled: true\n"
+                "  connector: codex\n"
+                "  mode: observe\n"
+            )
+
+        with (
+            patch(
+                "defenseclaw.bootstrap._start_gateway_structured",
+                return_value=StepResult(
+                    "Sidecar",
+                    "pass",
+                    "restarted after credential-protection service",
+                ),
+            ) as start_gateway,
+            patch("defenseclaw.bootstrap._pid_file_running", return_value=True),
+            patch(
+                "defenseclaw.bootstrap._connector_readiness",
+                return_value=StepResult("Connector", "pass", "Codex config found"),
+            ),
+        ):
+            result = self._invoke(
+                [
+                    "--connector",
+                    "codex",
+                    "--json-summary",
+                ]
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        start_gateway.assert_called_once()
+        self.assertTrue(start_gateway.call_args.kwargs["restart_if_running"])
+
     def test_explicit_mode_overrides_connector_default(self):
-        result = self._invoke([
-            "--connector",
-            "codex",
-            "--mode",
-            "observe",
-            "--skip-gateway",
-            "--json-summary",
-        ])
+        result = self._invoke(
+            [
+                "--connector",
+                "codex",
+                "--mode",
+                "observe",
+                "--skip-gateway",
+                "--json-summary",
+            ]
+        )
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
         summary = json.loads(result.output)
         self.assertEqual(summary["profile"], "observe")
@@ -132,14 +408,16 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
                 "      mode: observe\n"
             )
 
-        result = self._invoke([
-            "--connector",
-            "hermes",
-            "--mode",
-            "action",
-            "--skip-gateway",
-            "--json-summary",
-        ])
+        result = self._invoke(
+            [
+                "--connector",
+                "hermes",
+                "--mode",
+                "action",
+                "--skip-gateway",
+                "--json-summary",
+            ]
+        )
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
         summary = json.loads(result.output)
         self.assertEqual(summary["profile"], "action")
@@ -147,6 +425,7 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         self.assertIn("hermes, mode=action", setup["Guardrail"]["detail"])
 
         import yaml
+
         with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
             cfg = yaml.safe_load(fh)
         self.assertEqual(cfg["guardrail"]["connectors"]["hermes"]["mode"], "action")
@@ -159,14 +438,16 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         disc.agents["hermes"].error = agent_discovery.UNTRUSTED_PREFIX_ERROR
         mock_discover.return_value = disc
 
-        result = self._invoke([
-            "--connector",
-            "hermes",
-            "--mode",
-            "action",
-            "--skip-gateway",
-            "--json-summary",
-        ])
+        result = self._invoke(
+            [
+                "--connector",
+                "hermes",
+                "--mode",
+                "action",
+                "--skip-gateway",
+                "--json-summary",
+            ]
+        )
         self.assertEqual(result.exit_code, 1, result.output + (result.stderr or ""))
         summary = json.loads(result.output)
         self.assertEqual(summary["status"], "needs_attention")
@@ -183,6 +464,7 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         )
 
         import yaml
+
         with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
             cfg = yaml.safe_load(fh)
         self.assertEqual(cfg["guardrail"]["connector"], "hermes")
@@ -197,17 +479,20 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         self.assertIn("--fail-mode", result.output)
 
     def test_fail_mode_closed_persists_to_config(self):
-        result = self._invoke([
-            "--connector",
-            "codex",
-            "--skip-gateway",
-            "--fail-mode",
-            "closed",
-            "--json-summary",
-        ])
+        result = self._invoke(
+            [
+                "--connector",
+                "codex",
+                "--skip-gateway",
+                "--fail-mode",
+                "closed",
+                "--json-summary",
+            ]
+        )
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
 
         import yaml
+
         with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
             cfg = yaml.safe_load(fh)
         from defenseclaw.config import _normalize_hook_fail_mode
@@ -225,18 +510,22 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         # silently allowing it. Existing v3 installs are protected by
         # _migrate_0_4_0_seed_hook_fail_mode (migrations.py), so this
         # behavior change is new-install-only.
-        result = self._invoke([
-            "--connector",
-            "codex",
-            "--skip-gateway",
-            "--json-summary",
-        ])
+        result = self._invoke(
+            [
+                "--connector",
+                "codex",
+                "--skip-gateway",
+                "--json-summary",
+            ]
+        )
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
 
         import yaml
+
         with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
             cfg = yaml.safe_load(fh)
         from defenseclaw.config import _normalize_hook_fail_mode
+
         raw = cfg["guardrail"].get("hook_fail_mode", "")
         self.assertEqual(_normalize_hook_fail_mode(raw), "closed")
 
@@ -262,12 +551,14 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         self.assertIn("status=needs_attention", human.output)
         self.assertIn("simulated gateway start failure", human.output)
 
-        structured = invoke([
-            "--connector",
-            "codex",
-            "--json-summary",
-            "--force",
-        ])
+        structured = invoke(
+            [
+                "--connector",
+                "codex",
+                "--json-summary",
+                "--force",
+            ]
+        )
         self.assertEqual(
             structured.exit_code,
             1,
@@ -275,11 +566,7 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         )
         summary = json.loads(structured.output)
         self.assertEqual(summary["status"], "needs_attention")
-        sidecars = [
-            step
-            for step in summary["setup"] + summary["readiness"]
-            if step["name"] == "Sidecar"
-        ]
+        sidecars = [step for step in summary["setup"] + summary["readiness"] if step["name"] == "Sidecar"]
         self.assertTrue(sidecars)
         self.assertTrue(all(step["status"] == "fail" for step in sidecars))
 
@@ -291,11 +578,13 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
             ),
             patch("defenseclaw.bootstrap._pid_file_running", return_value=False),
         ):
-            result = self._invoke([
-                "--connector",
-                "codex",
-                "--json-summary",
-            ])
+            result = self._invoke(
+                [
+                    "--connector",
+                    "codex",
+                    "--json-summary",
+                ]
+            )
 
         self.assertEqual(result.exit_code, 1, result.output + (result.stderr or ""))
         summary = json.loads(result.output)
@@ -311,21 +600,27 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
             "Codex config not found yet",
             "defenseclaw setup codex",
         )
-        with patch(
-            "defenseclaw.bootstrap._connector_readiness",
-            return_value=missing_connector,
-        ), patch(
-            "defenseclaw.bootstrap._start_gateway_structured",
-            return_value=StepResult("Sidecar", "pass", "started"),
-        ), patch(
-            "defenseclaw.bootstrap._pid_file_running",
-            return_value=True,
+        with (
+            patch(
+                "defenseclaw.bootstrap._connector_readiness",
+                return_value=missing_connector,
+            ),
+            patch(
+                "defenseclaw.bootstrap._start_gateway_structured",
+                return_value=StepResult("Sidecar", "pass", "started"),
+            ),
+            patch(
+                "defenseclaw.bootstrap._pid_file_running",
+                return_value=True,
+            ),
         ):
-            result = self._invoke([
-                "--connector",
-                "codex",
-                "--json-summary",
-            ])
+            result = self._invoke(
+                [
+                    "--connector",
+                    "codex",
+                    "--json-summary",
+                ]
+            )
 
         self.assertEqual(result.exit_code, 1, result.output + (result.stderr or ""))
         summary = json.loads(result.output)
@@ -343,22 +638,19 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
                 return_value=StepResult("Connector", "pass", "Codex config found"),
             ),
         ):
-            result = self._invoke([
-                "--connector",
-                "codex",
-                "--skip-gateway",
-                "--json-summary",
-            ])
+            result = self._invoke(
+                [
+                    "--connector",
+                    "codex",
+                    "--skip-gateway",
+                    "--json-summary",
+                ]
+            )
 
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
         summary = json.loads(result.output)
         self.assertEqual(summary["status"], "partial")
-        self.assertFalse(
-            any(
-                step["status"] == "fail"
-                for step in summary["setup"] + summary["readiness"]
-            )
-        )
+        self.assertFalse(any(step["status"] == "fail" for step in summary["setup"] + summary["readiness"]))
 
     def test_fully_healthy_report_is_ready_and_zero(self):
         available = [StepResult("Skill scanner", "pass", "found")]
@@ -370,12 +662,14 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
             ),
             patch("defenseclaw.bootstrap.shutil.which", return_value="available"),
         ):
-            result = self._invoke([
-                "--connector",
-                "codex",
-                "--skip-gateway",
-                "--json-summary",
-            ])
+            result = self._invoke(
+                [
+                    "--connector",
+                    "codex",
+                    "--skip-gateway",
+                    "--json-summary",
+                ]
+            )
 
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
         summary = json.loads(result.output)

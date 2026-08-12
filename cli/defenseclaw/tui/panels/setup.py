@@ -1596,6 +1596,24 @@ def build_setup_sections(
             ),
             "Sidecar WebSocket gateway: connection settings, TLS/auth, API bind, reconnect tuning.",
         ),
+        ConfigSection(
+            "Credential Protection",
+            (
+                ConfigField(
+                    "Enabled (managed by setup command)",
+                    "credential_protection.enabled",
+                    "header",
+                    _value(cfg, "credential_protection.enabled"),
+                    _value(cfg, "credential_protection.enabled"),
+                    hint=(
+                        "Use setup credential-protection to enable or disable s-gw safely. Prompt "
+                        "tokenization applies only when a connector sends LLM traffic through the DefenseClaw proxy."
+                    ),
+                ),
+            ),
+            "Local s-gw broker status. Approval and secret handling stay in s-gw.",
+            "Use setup credential-protection so module verification, connector registration, and the config change complete together.",
+        ),
         _guardrail_section(cfg),
         _scanners_section(cfg),
         ConfigSection(

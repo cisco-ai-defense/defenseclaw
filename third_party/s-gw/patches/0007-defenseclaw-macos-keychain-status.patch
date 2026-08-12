@@ -1,0 +1,150 @@
+From 90214df02b2fd0e01a8423fbc450e9622232f8ca Mon Sep 17 00:00:00 2001
+From: barry <bayuan@cisco.com>
+Date: Fri, 7 Aug 2026 14:57:50 -0700
+Subject: [PATCH 7/7] Use signed helper for macOS credential status
+
+---
+ src/unlock.ts                     | 31 +++++--------
+ tests/defenseclaw-runtime.test.ts | 77 +++++++++++++++++++++++++++++++
+ 2 files changed, 88 insertions(+), 20 deletions(-)
+
+diff --git a/src/unlock.ts b/src/unlock.ts
+index 800ca75..d100c8c 100644
+--- a/src/unlock.ts
++++ b/src/unlock.ts
+@@ -1002,28 +1002,19 @@ function runKeychainGet(info: KeychainInfo): string {
+ 
+ function keychainItemExists(info: KeychainInfo): boolean {
+   if (process.platform === "darwin") {
+-    const inspector = findPackagedKeychainInspector();
+-    if (!inspector) {
+-      if (process.env.SGW_ALLOW_SECURITY_CLI === "1") {
+-        return keychainItemExistsWithSecurityCli(info);
++    if (info.provider === "native-helper" && info.helperPath) {
++      const output = runNativeHelper(
++        info.helperPath,
++        ["status", "--service", info.service, "--account", info.account]
++      );
++      const status = JSON.parse(output) as { configured?: unknown };
++      if (typeof status.configured !== "boolean") {
++        throw new Error("macOS Keychain helper status returned an invalid response.");
+       }
+-      throw new Error("The macOS Keychain inspector is missing. Reinstall s-gw before accessing credentials.");
++      return status.configured;
+     }
+-    const result = spawnSync(inspector, ["exists", "--service", info.service, "--account", info.account], {
+-      encoding: "utf8",
+-      stdio: ["ignore", "ignore", "pipe"]
+-    });
+-
+-    if (result.error) {
+-      throw result.error;
+-    }
+-    if (result.status === 0) {
+-      return true;
+-    }
+-    if (result.status === 44) {
+-      return false;
+-    }
+-    throw new Error(result.stderr.trim() || `Keychain inspector failed with status ${result.status}`);
++    if (info.provider === "security-cli") return keychainItemExistsWithSecurityCli(info);
++    throw missingCredentialStoreError();
+   }
+ 
+   if (info.provider === "windows-helper" && info.helperPath) {
+diff --git a/tests/defenseclaw-runtime.test.ts b/tests/defenseclaw-runtime.test.ts
+index 31d47c1..f245f49 100644
+--- a/tests/defenseclaw-runtime.test.ts
++++ b/tests/defenseclaw-runtime.test.ts
+@@ -5,11 +5,88 @@ import path from "node:path";
+ import { pathToFileURL } from "node:url";
+ import { describe, expect, it } from "vitest";
+ import { trustedWindowsPowershell } from "../src/trusted-windows-command.js";
++import { unlockStatus } from "../src/unlock.js";
+ 
+ const repoRoot = process.cwd();
+ const tsxCli = path.join(repoRoot, "node_modules", "tsx", "dist", "cli.mjs");
+ 
+ describe("DefenseClaw local console launch", () => {
++  it("uses the signed helper for macOS status and binds reusable approval to argv", async () => {
++    const unlock = await readFile(new URL("../src/unlock.ts", import.meta.url), "utf8");
++    const store = await readFile(new URL("../src/store.ts", import.meta.url), "utf8");
++    const statusStart = unlock.indexOf("function keychainItemExists(");
++    const statusEnd = unlock.indexOf("function keychainItemExistsWithSecurityCli(", statusStart);
++    const macStatus = unlock.slice(statusStart, statusEnd);
++
++    expect(statusStart).toBeGreaterThan(-1);
++    expect(statusEnd).toBeGreaterThan(statusStart);
++    expect(macStatus).toContain('info.provider === "native-helper"');
++    expect(macStatus).toMatch(
++      /\[\s*"status",\s*"--service",\s*info\.service,\s*"--account",\s*info\.account\s*\]/
++    );
++    expect(macStatus).toContain("JSON.parse(output)");
++    expect(macStatus).toContain('typeof status.configured !== "boolean"');
++    expect(macStatus).toContain("macOS Keychain helper status returned an invalid response.");
++    expect(macStatus).not.toContain("findPackagedKeychainInspector");
++    expect(store).toContain("{ args: normalized.args }");
++    expect(store).toContain("Credential-backed execution of /usr/bin/security is not allowed.");
++  });
++
++  it.skipIf(process.platform !== "darwin")(
++    "fails closed when the signed macOS status helper returns malformed JSON",
++    async () => {
++      const tmpDir = await mkdtemp(path.join(os.tmpdir(), "sgw-defenseclaw-keychain-status-"));
++      const helper = path.join(tmpDir, "s-gw-keychain-helper");
++      const capture = path.join(tmpDir, "args.json");
++      const envNames = [
++        "SGW_DISABLE_KEYCHAIN",
++        "SGW_KEYCHAIN_ACCOUNT",
++        "SGW_KEYCHAIN_HELPER",
++        "SGW_KEYCHAIN_SERVICE",
++        "SGW_MASTER_PASSPHRASE",
++        "SGW_TEST_MODE",
++        "SGW_TEST_STATUS_CAPTURE"
++      ] as const;
++      const previous = new Map(envNames.map((name) => [name, process.env[name]]));
++
++      try {
++        await writeFile(
++          helper,
++          `#!/usr/bin/env node\nconst fs = require("fs");\nfs.writeFileSync(process.env.SGW_TEST_STATUS_CAPTURE, JSON.stringify(process.argv.slice(2)));\nprocess.stdout.write("not-json\\n");\n`,
++          { mode: 0o700 }
++        );
++        await chmod(helper, 0o700);
++        delete process.env.SGW_DISABLE_KEYCHAIN;
++        delete process.env.SGW_MASTER_PASSPHRASE;
++        process.env.SGW_KEYCHAIN_ACCOUNT = "unit-test";
++        process.env.SGW_KEYCHAIN_HELPER = helper;
++        process.env.SGW_KEYCHAIN_SERVICE = "com.s-gw.test";
++        process.env.SGW_TEST_MODE = "1";
++        process.env.SGW_TEST_STATUS_CAPTURE = capture;
++
++        const status = unlockStatus();
++        expect(status.activeSource).toBe("none");
++        expect(status.keychain.state).toBe("unavailable");
++        expect(status.keychain.configured).toBe(false);
++        expect(status.keychain.error).toMatch(/JSON|Unexpected token/i);
++        expect(JSON.parse(await readFile(capture, "utf8"))).toEqual([
++          "status",
++          "--service",
++          "com.s-gw.test",
++          "--account",
++          "unit-test"
++        ]);
++      } finally {
++        for (const name of envNames) {
++          const value = previous.get(name);
++          if (value === undefined) delete process.env[name];
++          else process.env[name] = value;
++        }
++        await rm(tmpDir, { recursive: true, force: true });
++      }
++    }
++  );
++
+   it("admits only trusted PowerShell paths on Windows", async () => {
+     const sources = await Promise.all([
+       "install.ts",
+-- 
+2.50.1 (Apple Git-155)
+

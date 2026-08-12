@@ -102,11 +102,6 @@ func TestHandleChatCompletion_HydratedTargetURL_HitsSSRFGuards(t *testing.T) {
 	prov := &mockProvider{}
 	insp := newMockInspector()
 	proxy := newTestProxy(t, prov, insp, "action")
-	// newTestProxy enables passthroughAllowPrivateForTest so legacy
-	// httptest fixtures keep working. Disable it so the production
-	// SSRF guard runs against our hydrated upstream.
-	passthroughAllowPrivateForTest = false
-	t.Cleanup(func() { passthroughAllowPrivateForTest = true })
 
 	body := mustJSON(t, map[string]interface{}{
 		"model":    "openai/gpt-4",
@@ -167,8 +162,6 @@ func TestHandleChatCompletion_HydratedTargetURL_RejectsUserinfo(t *testing.T) {
 	prov := &mockProvider{}
 	insp := newMockInspector()
 	proxy := newTestProxy(t, prov, insp, "action")
-	passthroughAllowPrivateForTest = false
-	t.Cleanup(func() { passthroughAllowPrivateForTest = true })
 
 	proxy.connector = &hydratingTestConnector{
 		upstream: "https://attacker:password@api.openai.com",
@@ -201,8 +194,6 @@ func TestHandleChatCompletion_HydratedTargetURL_RejectsNonHTTPScheme(t *testing.
 	prov := &mockProvider{}
 	insp := newMockInspector()
 	proxy := newTestProxy(t, prov, insp, "action")
-	passthroughAllowPrivateForTest = false
-	t.Cleanup(func() { passthroughAllowPrivateForTest = true })
 
 	proxy.connector = &hydratingTestConnector{
 		upstream: "file:///etc/passwd",

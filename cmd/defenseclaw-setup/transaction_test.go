@@ -637,6 +637,46 @@ func TestValidateSetupTransactionBindsPreservedConnectorState(t *testing.T) {
 	}
 }
 
+func TestValidateSetupTransactionBindsCredentialProtectionToFreshInstall(t *testing.T) {
+	installRoot, dataRoot, maintenancePath := testTransactionRoots(t)
+	expected := setupTransactionExpectations{
+		InstallRoot: installRoot, DataRoot: dataRoot, MaintenancePath: maintenancePath,
+	}
+	fresh := testSetupTransactionForRoots("install", installRoot, dataRoot, maintenancePath, nil)
+	fresh.TargetCredentialProtectionSet = true
+	if err := validateSetupTransaction(fresh, expected); err != nil {
+		t.Fatalf("fresh credential protection opt-out rejected: %v", err)
+	}
+	fresh.TargetCredentialProtection = true
+	if err := validateSetupTransaction(fresh, expected); err != nil {
+		t.Fatalf("fresh credential protection default rejected: %v", err)
+	}
+
+	missingSet := fresh
+	missingSet.TargetCredentialProtectionSet = false
+	if err := validateSetupTransaction(missingSet, expected); err == nil {
+		t.Fatal("credential protection target without a set marker was accepted")
+	}
+
+	previous := testInstallState(installRoot, dataRoot, maintenancePath, testPreviousTransactionID, "1.0.0")
+	upgrade := testSetupTransactionForRoots("install", installRoot, dataRoot, maintenancePath, &previous)
+	upgrade.TargetCredentialProtectionSet = true
+	upgrade.TargetCredentialProtection = true
+	if err := validateSetupTransaction(upgrade, expected); err != nil {
+		t.Fatalf("enabled credential protection upgrade servicing rejected: %v", err)
+	}
+	upgrade.TargetCredentialProtection = false
+	if err := validateSetupTransaction(upgrade, expected); err == nil {
+		t.Fatal("upgrade credential protection disable was accepted")
+	}
+
+	uninstall := testSetupTransactionForRoots("uninstall", installRoot, dataRoot, maintenancePath, &previous)
+	uninstall.TargetCredentialProtectionSet = true
+	if err := validateSetupTransaction(uninstall, expected); err == nil {
+		t.Fatal("uninstall credential protection mutation was accepted")
+	}
+}
+
 func TestValidateSetupTransactionRejectsReparseRoot(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows reparse-point validation")
@@ -674,6 +714,8 @@ func TestValidateSetupTransactionRejectsReparseRoot(t *testing.T) {
 func TestDurableTransactionMarkerRoundTripAndNoOverwrite(t *testing.T) {
 	installRoot, dataRoot, maintenancePath := testTransactionRoots(t)
 	transaction := testSetupTransactionForRoots("install", installRoot, dataRoot, maintenancePath, nil)
+	transaction.TargetCredentialProtection = true
+	transaction.TargetCredentialProtectionSet = true
 	marker := filepath.Join(t.TempDir(), "setup-transaction.json")
 	if err := writeDurableTransaction(marker, transaction); err != nil {
 		t.Fatalf("writeDurableTransaction: %v", err)
@@ -682,11 +724,258 @@ func TestDurableTransactionMarkerRoundTripAndNoOverwrite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readSetupTransaction: %v", err)
 	}
-	if loaded == nil || loaded.ID != transaction.ID || loaded.Action != transaction.Action {
-		t.Fatalf("loaded transaction = %+v, want id %s action %s", loaded, transaction.ID, transaction.Action)
+	if loaded == nil || !reflect.DeepEqual(*loaded, transaction) {
+		t.Fatalf("loaded transaction = %+v, want %+v", loaded, transaction)
 	}
 	if err := writeDurableTransaction(marker, transaction); err == nil {
 		t.Fatal("writeDurableTransaction overwrote an existing durable marker")
+	}
+}
+
+func TestCredentialProtectionTransactionIntent(t *testing.T) {
+	tests := []struct {
+		name         string
+		action       string
+		hadInstall   bool
+		configExists bool
+		existing     bool
+		opts         options
+		wantEnabled  bool
+		wantSet      bool
+	}{
+		{name: "fresh default", action: "install", wantEnabled: true, wantSet: true},
+		{
+			name:        "fresh explicit enable",
+			action:      "install",
+			opts:        options{CredentialProtection: true, CredentialProtectionSet: true},
+			wantEnabled: true,
+			wantSet:     true,
+		},
+		{
+			name:    "fresh opt out",
+			action:  "install",
+			opts:    options{CredentialProtectionSet: true},
+			wantSet: true,
+		},
+		{name: "upgrade disabled", action: "install", hadInstall: true},
+		{
+			name:        "upgrade enabled service",
+			action:      "install",
+			hadInstall:  true,
+			existing:    true,
+			wantEnabled: true,
+			wantSet:     true,
+		},
+		{name: "data preserving reinstall", action: "install", configExists: true},
+		{
+			name:         "data preserving enabled service",
+			action:       "install",
+			configExists: true,
+			existing:     true,
+			wantEnabled:  true,
+			wantSet:      true,
+		},
+		{name: "uninstall", action: "uninstall"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			enabled, set := credentialProtectionTransactionIntent(
+				test.action,
+				test.hadInstall,
+				test.configExists,
+				test.existing,
+				test.opts,
+			)
+			if enabled != test.wantEnabled || set != test.wantSet {
+				t.Fatalf("credential protection intent = %t, %t, want %t, %t", enabled, set, test.wantEnabled, test.wantSet)
+			}
+		})
+	}
+}
+
+func TestUpgradeWithDeletedConfigurationInitializesNeutralWithoutApplyingFreshIntent(t *testing.T) {
+	enabled, set := credentialProtectionTransactionIntent("install", true, false, false, options{})
+	transaction := setupTransaction{
+		InstallRoot:                   "install",
+		DataRoot:                      "data",
+		HadInstall:                    true,
+		TargetCredentialProtection:    enabled,
+		TargetCredentialProtectionSet: set,
+	}
+	args := initialConfigurationArgs(canonicalInitializationOptions())
+	if !slices.Contains(args, "--no-credential-protection") {
+		t.Fatalf("upgrade canonical initialization args = %v", args)
+	}
+	calls := 0
+	if err := applyCommittedCredentialProtection(
+		transaction,
+		nil,
+		func(string, string, bool, []string) error {
+			calls++
+			return nil
+		},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 0 {
+		t.Fatalf("upgrade with deleted config applied fresh credential intent %d times", calls)
+	}
+}
+
+func TestCommittedCredentialProtectionUsesPersistedIntent(t *testing.T) {
+	tests := []struct {
+		name        string
+		enabled     bool
+		set         bool
+		wantCalls   int
+		wantEnabled bool
+	}{
+		{name: "default on", enabled: true, set: true, wantCalls: 1, wantEnabled: true},
+		{name: "explicit opt out", set: true, wantCalls: 0},
+		{name: "legacy or upgrade", wantCalls: 0},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			transaction := setupTransaction{
+				InstallRoot:                   "install",
+				DataRoot:                      "data",
+				TargetCredentialProtection:    test.enabled,
+				TargetCredentialProtectionSet: test.set,
+			}
+			calls := 0
+			err := applyCommittedCredentialProtection(
+				transaction,
+				[]string{"MANAGED=1"},
+				func(root, dataRoot string, enabled bool, env []string) error {
+					calls++
+					if root != "install" || dataRoot != "data" || enabled != test.wantEnabled ||
+						!slices.Equal(env, []string{"MANAGED=1"}) {
+						t.Fatalf("credential protection call = %q, %q, %t, %v", root, dataRoot, enabled, env)
+					}
+					return nil
+				},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if calls != test.wantCalls {
+				t.Fatalf("credential protection calls = %d, want %d", calls, test.wantCalls)
+			}
+		})
+	}
+}
+
+func TestCommittedCredentialProtectionServicesEnabledUpgrade(t *testing.T) {
+	transaction := setupTransaction{
+		InstallRoot:                   "install",
+		DataRoot:                      "data",
+		HadInstall:                    true,
+		TargetCredentialProtection:    true,
+		TargetCredentialProtectionSet: true,
+	}
+	calls := 0
+	err := applyCommittedCredentialProtection(
+		transaction,
+		[]string{"MANAGED=1"},
+		func(root, dataRoot string, enabled bool, env []string) error {
+			calls++
+			if root != "install" || dataRoot != "data" || !enabled || !slices.Equal(env, []string{"MANAGED=1"}) {
+				t.Fatalf("upgrade service call = %q %q %t %v", root, dataRoot, enabled, env)
+			}
+			return nil
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 {
+		t.Fatalf("enabled upgrade service calls = %d, want 1", calls)
+	}
+}
+
+func TestCommittedCredentialProtectionOptOutDoesNotInvokeBroker(t *testing.T) {
+	transaction := setupTransaction{
+		InstallRoot:                   "install",
+		DataRoot:                      "data",
+		TargetCredentialProtectionSet: true,
+	}
+	calls := 0
+	err := applyCommittedCredentialProtection(
+		transaction,
+		[]string{"MANAGED=1"},
+		func(string, string, bool, []string) error {
+			calls++
+			return errors.New("broker must not run for a fresh opt-out")
+		},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 0 {
+		t.Fatalf("credential protection opt-out invoked broker %d times", calls)
+	}
+}
+
+func TestCommittedCredentialProtectionIntentSurvivesJournalRecovery(t *testing.T) {
+	installRoot, dataRoot, maintenancePath := testTransactionRoots(t)
+	transaction := testSetupTransactionForRoots("install", installRoot, dataRoot, maintenancePath, nil)
+	transaction.TargetCredentialProtection = true
+	transaction.TargetCredentialProtectionSet = true
+	path := filepath.Join(t.TempDir(), "private", "setup-transaction.json")
+	if err := writeDurableJournal(path, setupJournal{
+		SchemaVersion: setupJournalSchemaVersion,
+		Phase:         setupPhaseCommitted,
+		Transaction:   transaction,
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+
+	injected := errors.New("injected credential setup failure")
+	calls := 0
+	ops := setupRecoveryOps{
+		Converge: func(got setupTransaction) error {
+			if !got.TargetCredentialProtectionSet || !got.TargetCredentialProtection {
+				t.Fatalf("recovered credential protection intent = %+v", got)
+			}
+			return applyCommittedCredentialProtection(got, []string{"MANAGED=1"}, func(
+				root, recoveredDataRoot string,
+				enabled bool,
+				env []string,
+			) error {
+				calls++
+				if root != installRoot || recoveredDataRoot != dataRoot || !enabled ||
+					!slices.Equal(env, []string{"MANAGED=1"}) {
+					t.Fatalf("recovered credential setup call = %q, %q, %t, %v", root, recoveredDataRoot, enabled, env)
+				}
+				if calls == 1 {
+					return injected
+				}
+				return nil
+			})
+		},
+		Cleanup: func(setupTransaction) error { return nil },
+		Transition: func(got setupTransaction, from, to string) error {
+			return transitionSetupJournalAt(path, got, from, to)
+		},
+	}
+	expected := setupTransactionExpectations{
+		InstallRoot: installRoot, DataRoot: dataRoot, MaintenancePath: maintenancePath,
+	}
+	if err := recoverSetupTransactionAt(path, expected, ops); !errors.Is(err, injected) {
+		t.Fatalf("first recovery error = %v, want %v", err, injected)
+	}
+	loaded, err := readSetupJournal(path)
+	if err != nil || loaded == nil || loaded.Phase != setupPhaseCommitted ||
+		!loaded.Transaction.TargetCredentialProtectionSet ||
+		!loaded.Transaction.TargetCredentialProtection {
+		t.Fatalf("journal after failed recovery = %+v, %v", loaded, err)
+	}
+	if err := recoverSetupTransactionAt(path, expected, ops); err != nil {
+		t.Fatalf("second recovery: %v", err)
+	}
+	loaded, err = readSetupJournal(path)
+	if err != nil || loaded == nil || loaded.Phase != setupPhaseComplete || calls != 2 {
+		t.Fatalf("journal after successful recovery = %+v, calls=%d, err=%v", loaded, calls, err)
 	}
 }
 

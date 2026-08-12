@@ -10,7 +10,12 @@
 
 from __future__ import annotations
 
+import os
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 INSTALL_DEV = ROOT / "scripts" / "install-dev.sh"
@@ -70,6 +75,102 @@ def test_dev_install_syncs_openclaw_embed_before_go_build() -> None:
     assert sync in text
     assert build in text
     assert text.index(sync) < text.index(build)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="requires a POSIX make recipe shell")
+def test_make_go_build_args_do_not_replace_inherited_goflags(tmp_path: Path) -> None:
+    make = shutil.which("make")
+    if make is None:
+        pytest.skip("make is unavailable")
+
+    probe = tmp_path / "probe.mk"
+    probe.write_text(
+        "_go-build-args-probe:\n"
+        "\t@printf '%s\\n' \"$$GOFLAGS\" '$(GO_BUILD_ARGS)'\n",
+        encoding="utf-8",
+    )
+    environment = os.environ.copy()
+    environment["GOFLAGS"] = "-mod=readonly"
+
+    completed = subprocess.run(
+        [
+            make,
+            "--no-print-directory",
+            "-f",
+            str(MAKEFILE),
+            "-f",
+            str(probe),
+            "_go-build-args-probe",
+        ],
+        cwd=ROOT,
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert completed.stdout.splitlines() == [
+        "-mod=readonly",
+        f'-ldflags "-X main.version={_make_version()}"',
+    ]
+
+
+def _make_version() -> str:
+    text = MAKEFILE.read_text(encoding="utf-8")
+    for line in text.splitlines():
+        if line.startswith("VERSION"):
+            return line.split(":=", 1)[1].strip()
+    raise AssertionError("Makefile VERSION is missing")
+
+
+def test_gateway_targets_use_non_reserved_go_build_args() -> None:
+    text = MAKEFILE.read_text(encoding="utf-8")
+
+    assert 'GO_BUILD_ARGS := -ldflags "-X main.version=$(VERSION)"' in text
+    assert "GOFLAGS     :=" not in text
+    assert text.count("go build $(GO_BUILD_ARGS)") == 2
+
+
+@pytest.mark.skipif(os.name == "nt", reason="requires a POSIX make recipe shell")
+def test_openclaw_embed_sync_keeps_the_tracked_placeholder(tmp_path: Path) -> None:
+    make = shutil.which("make")
+    if make is None:
+        pytest.skip("make is unavailable")
+
+    checkout = tmp_path / "checkout"
+    embed_dir = checkout / "internal/gateway/connector/openclaw_extension"
+    plugin_dir = checkout / "plugin"
+    (plugin_dir / "dist").mkdir(parents=True)
+    embed_dir.mkdir(parents=True)
+    placeholder = ROOT / "internal/gateway/connector/openclaw_extension/.placeholder"
+    shutil.copy2(placeholder, embed_dir / placeholder.name)
+    (plugin_dir / "package.json").write_text('{"name":"fixture"}\n', encoding="utf-8")
+    (plugin_dir / "openclaw.plugin.json").write_text("{}\n", encoding="utf-8")
+    (plugin_dir / "dist/index.js").write_text("export {};\n", encoding="utf-8")
+
+    completed = subprocess.run(
+        [
+            make,
+            "--no-print-directory",
+            "-f",
+            str(MAKEFILE),
+            "sync-openclaw-extension",
+            f"PLUGIN_DIR={plugin_dir}",
+        ],
+        cwd=checkout,
+        env=os.environ.copy(),
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert (embed_dir / ".placeholder").read_bytes() == placeholder.read_bytes()
+    assert (embed_dir / "package.json").is_file()
+    assert (embed_dir / "dist/index.js").is_file()
 
 
 def test_optional_developer_entry_points_do_not_abort_make_install() -> None:

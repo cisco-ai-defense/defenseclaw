@@ -2,6 +2,7 @@ graft cli
 graft bundles/local_observability_stack
 graft bundles/splunk_local_bridge
 prune cli/defenseclaw/_data/config/v8
+prune cli/defenseclaw/_data/sgw
 prune cli/defenseclaw/_data/telemetry/v8
 recursive-exclude cli *.py[cod]
 prune .venv
@@ -14,11 +15,19 @@ prune .git
 prune .github
 prune .pytest_cache
 include setup.py
+include defenseclaw_build_backend.py
 include LICENSE
 include NOTICE
 include THIRD_PARTY_LICENSES.txt
 include internal/envvars/registry.json
 include scripts/telemetry_runtime_assets.py
+include scripts/sgw_module.py
+include scripts/build_sgw_module.py
+include scripts/stage_sgw_modules.py
+include scripts/sync_sgw_vendor.py
+include release/s-gw-module.json
+include release/s-gw-runners.json
+graft third_party/s-gw
 include schemas/config/v8/defenseclaw-config.schema.json
 include schemas/config/v8/reference/observability.yaml
 include schemas/config/v8/reference/observability.md

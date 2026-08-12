@@ -2043,6 +2043,7 @@ def test_generated_go_drift_check_accepts_crlf_but_not_content_drift(tmp_path: P
     target.parent.mkdir(parents=True)
     expected = b"package observability\n\nconst generated = true\n"
     target.write_bytes(expected.replace(b"\n", b"\r\n"))
+    target.chmod(0o644)
 
     assert module._drift(tmp_path, {relative: expected}) == []
 

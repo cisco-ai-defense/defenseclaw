@@ -23,7 +23,7 @@ runtime, and maintenance copy as one transaction.
 | Install scope | Current user only. There is no machine-scope Setup or MSI. |
 | Terminal | The installed commands run from PowerShell or cmd. Windows Terminal and PowerShell 7 are optional hosts, not prerequisites. |
 | Agent | A supported agent installed natively for the same Windows user. Claude Code also retains its own Git for Windows requirement. |
-| Included runtime | Setup includes the CLI/TUI runtime, gateway, hook launcher, scanners, and pinned packages. No separate Python, `uv`, Go, Node.js, or global scanner install is required. |
+| Included runtime | Setup includes the CLI/TUI runtime, gateway, hook launcher, scanners, and pinned packages. No separate Python, `uv`, Go, or global scanner install is required. Credential protection is enabled by default on a fresh install and requires Node.js 20 or newer; clear its wizard checkbox or use `CREDENTIALPROTECTION=0` with quiet Setup to opt out. |
 | Networking | Release download needs network unless staged offline. At runtime, the certified DefenseClaw path is authenticated loopback, normally `127.0.0.1:18970`; each agent still reaches its own upstream normally. |
 | Disk and memory | No exact minimum is published. Setup checks and stages the packaged transaction; an allocation or publication failure is reported and recovered rather than converted into an invented requirement. |
 
@@ -148,6 +148,7 @@ Public Setup properties are:
 | Connector | `CONNECTOR=codex`, `claudecode`, `amp`, or `none` |
 | Policy mode | `MODE=observe` or `action` |
 | Gateway | `STARTGATEWAY=1` or `0`, subject to the connector rule above |
+| Credential protection | The fresh-install wizard checkbox defaults on. Quiet Setup accepts `CREDENTIALPROTECTION=1` or `0`; enabled setup requires Node.js 20 or newer. |
 | User data on uninstall | `DELETEUSERDATA=0` (default) or `1` |
 
 Do not use internal handoff properties shown in diagnostic process listings as

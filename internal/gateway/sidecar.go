@@ -1713,6 +1713,7 @@ func guardrailNeedsRestart(oldCfg, newCfg *config.Config) bool {
 	}
 	oldG, newG := oldCfg.Guardrail, newCfg.Guardrail
 	if oldG.Host != newG.Host || oldG.Port != newG.Port || oldG.Enabled != newG.Enabled ||
+		oldCfg.CredentialProtection != newCfg.CredentialProtection ||
 		oldG.Connector != newG.Connector ||
 		oldG.RetainJudgeBodies != newG.RetainJudgeBodies ||
 		!reflect.DeepEqual(oldCfg.LLM, newCfg.LLM) ||
@@ -2749,6 +2750,19 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		// somehow not blocking anything" sidecar.
 		return err
 	}
+	var credentialTokenizer *sgwCredentialTokenizer
+	if credentialTokenizerRequired(s.currentConfig(), conn) {
+		credentialTokenizer, err = newInstalledSGWCredentialTokenizer(s.currentConfig().DataDir)
+		if err != nil {
+			startupErr := fmt.Errorf("credential protection enabled but s-gw tokenizer is unavailable: %w", err)
+			s.health.SetGuardrail(StateError, startupErr.Error(), map[string]interface{}{
+				"connector":             conn.Name(),
+				"credential_protection": "unavailable",
+			})
+			return startupErr
+		}
+		defer credentialTokenizer.Close()
+	}
 	compiledConnectorRules, err := compileRulePackCategories(rp)
 	if err != nil {
 		return fmt.Errorf("guardrail: compile connector %s rule pack: %w", conn.Name(), err)
@@ -2980,6 +2994,9 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		proxy.SetWebhookDispatcher(webhooks)
 	}
 	if err == nil && proxy != nil {
+		if credentialTokenizer != nil {
+			proxy.SetCredentialTokenizer(true, credentialTokenizer)
+		}
 		s.setGuardrailProxy(proxy)
 		defer s.setGuardrailProxy(nil)
 		proxy.SetDefaultAgentName(string(s.currentConfig().Claw.Mode))
@@ -3081,16 +3098,17 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 					hint = "connector uses an agent-native lifecycle surface; local guardrail proxy is not in the LLM data path"
 				}
 				s.health.SetGuardrail(state, status, map[string]interface{}{
-					"summary":             summary,
-					"connector":           conn.Name(),
-					"mode":                "observability",
-					"policy_mode":         policyMode,
-					"enforcement_enabled": verifiedEnforcement,
-					"enforcement_surface": surface,
-					"proxy_port":          "closed",
-					"hint":                hint,
-					"lifecycle_manager":   "enterprise_hook_guardian",
-					"guardian_verified":   covered,
+					"summary":               summary,
+					"connector":             conn.Name(),
+					"mode":                  "observability",
+					"policy_mode":           policyMode,
+					"enforcement_enabled":   verifiedEnforcement,
+					"enforcement_surface":   surface,
+					"proxy_port":            "closed",
+					"hint":                  hint,
+					"lifecycle_manager":     "enterprise_hook_guardian",
+					"guardian_verified":     covered,
+					"credential_protection": credentialProtectionCoverage(s.currentConfig(), false),
 				})
 			}
 			publishHealth()
@@ -3107,15 +3125,16 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 			}
 		}
 		s.health.SetGuardrail(StateRunning, "", map[string]interface{}{
-			"summary":             summary,
-			"connector":           conn.Name(),
-			"mode":                "observability",
-			"policy_mode":         policyMode,
-			"enforcement_enabled": enforcementEnabled,
-			"enforcement_surface": surface,
-			"proxy_port":          "closed",
-			"hint":                "connector uses an agent-native lifecycle surface; local guardrail proxy is not in the LLM data path",
-			"lifecycle_manager":   lifecycleManagerForConnector(s.currentConfig(), conn),
+			"summary":               summary,
+			"connector":             conn.Name(),
+			"mode":                  "observability",
+			"policy_mode":           policyMode,
+			"enforcement_enabled":   enforcementEnabled,
+			"enforcement_surface":   surface,
+			"proxy_port":            "closed",
+			"hint":                  "connector uses an agent-native lifecycle surface; local guardrail proxy is not in the LLM data path",
+			"lifecycle_manager":     lifecycleManagerForConnector(s.currentConfig(), conn),
+			"credential_protection": credentialProtectionCoverage(s.currentConfig(), false),
 		})
 		fmt.Fprintf(os.Stderr, "[guardrail] direct-upstream mode: %s policy_mode=%s enforcement=%t — proxy port intentionally not bound\n", conn.Name(), policyMode, enforcementEnabled)
 		<-ctx.Done()
@@ -3455,12 +3474,13 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 		anyEnforcement = anyEnforcement || mode == "action"
 	}
 	s.health.SetGuardrail(StateRunning, "", map[string]interface{}{
-		"summary":             fmt.Sprintf("multi-connector direct-upstream mode (%d active)", len(succeeded)),
-		"connectors":          succeeded,
-		"connector_modes":     connectorModes,
-		"enforcement_enabled": anyEnforcement,
-		"proxy_port":          "closed",
-		"hint":                "hook/policy connectors enforce through agent-native lifecycle surfaces; the local guardrail proxy is not in the LLM data path",
+		"summary":               fmt.Sprintf("multi-connector direct-upstream mode (%d active)", len(succeeded)),
+		"connectors":            succeeded,
+		"connector_modes":       connectorModes,
+		"enforcement_enabled":   anyEnforcement,
+		"proxy_port":            "closed",
+		"hint":                  "hook/policy connectors enforce through agent-native lifecycle surfaces; the local guardrail proxy is not in the LLM data path",
+		"credential_protection": credentialProtectionCoverage(s.currentConfig(), false),
 	})
 	fmt.Fprintf(os.Stderr, "[guardrail] multi-connector direct-upstream mode: %d active connector(s): %s; enforcement=%t — proxy port intentionally not bound\n", len(succeeded), strings.Join(succeeded, ", "), anyEnforcement)
 
@@ -3572,13 +3592,14 @@ func (s *Sidecar) runManagedEnterpriseMultiHookGuardrail(ctx context.Context, re
 			hint = "hook-only connectors talk directly to their native upstreams; enterprise hook guardian owns installation and repair"
 		}
 		s.health.SetGuardrail(state, status, map[string]interface{}{
-			"summary":             summary,
-			"connectors":          succeeded,
-			"enforcement_enabled": enforcementEnabled,
-			"proxy_port":          "closed",
-			"hint":                hint,
-			"lifecycle_manager":   "enterprise_hook_guardian",
-			"guardian_verified":   covered,
+			"summary":               summary,
+			"connectors":            succeeded,
+			"enforcement_enabled":   enforcementEnabled,
+			"proxy_port":            "closed",
+			"hint":                  hint,
+			"lifecycle_manager":     "enterprise_hook_guardian",
+			"guardian_verified":     covered,
+			"credential_protection": credentialProtectionCoverage(s.currentConfig(), false),
 		})
 	}
 	publishHealth()
@@ -3929,6 +3950,21 @@ func proxyShouldBindForConnector(conn connector.Connector, gc *config.GuardrailC
 		return true
 	}
 	return !connector.IsKnownBuiltinConnector(conn.Name())
+}
+
+func credentialProtectionCoverage(cfg *config.Config, proxyPath bool) string {
+	if cfg == nil || !cfg.CredentialProtection.Enabled {
+		return "disabled"
+	}
+	if proxyPath {
+		return "proxy_tokenization"
+	}
+	return "not_in_direct_upstream_path"
+}
+
+func credentialTokenizerRequired(cfg *config.Config, conn connector.Connector) bool {
+	return cfg != nil && cfg.CredentialProtection.Enabled && cfg.Guardrail.Enabled &&
+		proxyShouldBindForConnector(conn, &cfg.Guardrail)
 }
 
 func managedEnterpriseGuardianOwnsConnectorLifecycle(cfg *config.Config, conn connector.Connector) bool {

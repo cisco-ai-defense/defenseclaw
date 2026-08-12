@@ -31,6 +31,7 @@ import click
 from defenseclaw import ux
 from defenseclaw.config import config_path
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.credential_protection import safe_status as credential_protection_status
 from defenseclaw.scanner_binary import resolve_scanner_binary
 
 # ---------------------------------------------------------------------------
@@ -144,6 +145,8 @@ def status(app: AppContext, as_json: bool) -> None:
             "Sandbox",
             ux._style("not available", fg="yellow") + ux.dim(" (OpenShell not found)"),
         )
+
+    _print_credential_protection_status(cfg)
 
     # Scanners
     ux.section("Scanners")
@@ -300,6 +303,35 @@ def _connector_scope_text(cfg) -> str:
     if workspace:
         return f"workspace ({workspace})"
     return "global user config"
+
+
+def _credential_protection_payload(cfg) -> dict:
+    enabled = bool(getattr(getattr(cfg, "credential_protection", None), "enabled", False))
+    payload = dict(credential_protection_status(cfg.data_dir, enabled=enabled))
+    payload["scope"] = "credential_broker_readiness"
+    payload["connector_coverage"] = "not_checked"
+    payload["connector_coverage_command"] = "defenseclaw credential-protection status"
+    return payload
+
+
+def _print_credential_protection_status(cfg) -> None:
+    status = _credential_protection_payload(cfg)
+    if not status["enabled"]:
+        _status_row(
+            "Credential broker",
+            ux._style("disabled", fg="yellow") + ux.dim(" (enable: defenseclaw setup credential-protection --yes)"),
+        )
+        return
+    if status["ready"]:
+        version = f" (s-gw {status['version']})" if status.get("version") else ""
+        coverage = "; connector coverage not checked — run defenseclaw credential-protection status"
+        _status_row(
+            "Credential broker",
+            ux._style("ready", fg="green") + ux.dim(version + coverage),
+        )
+        return
+    reason = str(status.get("error_code") or status.get("state") or "unavailable").replace("_", " ")
+    _status_row("Credential broker", ux._style("unavailable", fg="yellow") + ux.dim(f" ({reason})"))
 
 
 def _print_agents(
@@ -928,6 +960,7 @@ def _status_payload(app) -> dict:
         "scope": _connector_scope_text(cfg),
         "sandbox": {"available": _openshell_available(cfg)},
         "scanners": _scanner_status_map(cfg),
+        "credential_protection": _credential_protection_payload(cfg),
     }
 
     if app.store:

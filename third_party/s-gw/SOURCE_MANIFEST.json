@@ -1,0 +1,316 @@
+{
+  "files": [
+    {
+      "git_blob": "db461af6e963d7c7e51fd3f1f45c7fc71c28f147",
+      "mode": "100644",
+      "path": "LICENSE",
+      "sha256": "279b5aa0011fc9cd70bcf9b236b269e3da5c470671f54462d54b3917d9ad0ede",
+      "size": 11340
+    },
+    {
+      "git_blob": "434c9567d7be6670be914e91c6eecc77ecf41c4b",
+      "mode": "100644",
+      "path": "NOTICE",
+      "sha256": "ddcdfabed04a676144b296859fc63c3519b00c5cb5a55d4fe5b7065d4073f60f",
+      "size": 482
+    },
+    {
+      "git_blob": "a612f73a48d72a7cdc6c4a9740dadb2d36f40361",
+      "mode": "100644",
+      "path": "README.md",
+      "sha256": "6e859219f85fa6d2be685c685cf30c8280d6763595301302bd636432f05b3ba2",
+      "size": 15280
+    },
+    {
+      "git_blob": "75775431624b8beb790be6d00595a82ed2f75f0b",
+      "mode": "100644",
+      "path": "TRADEMARKS.md",
+      "sha256": "a31b2add56668d3e41d5106032a4ce1c13ad0739c7227bc1c285d47392a170d8",
+      "size": 1143
+    },
+    {
+      "git_blob": "420c77db030c4d8b223374a26769ddc294e4cc59",
+      "mode": "100644",
+      "path": "docs/ui/THIRD_PARTY_NOTICES.md",
+      "sha256": "51e99c1f696beeb28015daba75255c986bd2a9c99dffd874571af434c0a1730d",
+      "size": 4726
+    },
+    {
+      "git_blob": "894ddc6549f17d1694d5890c4e6011d95ffc5747",
+      "mode": "100644",
+      "path": "docs/ui/vendor/d3-sankey/d3-array.LICENSE.txt",
+      "sha256": "0747bebeb06b10954913149be9b9a8bdf6fad3e6fdcbd9f9524e7a94c13d2cea",
+      "size": 1475
+    },
+    {
+      "git_blob": "576b910b2775b47c0f591ff8746844ccfb4f852b",
+      "mode": "100644",
+      "path": "docs/ui/vendor/d3-sankey/d3-path.LICENSE.txt",
+      "sha256": "b8265327ab678f554800e71188b1cc6b1ff57522e292d2b1c0be66f27cf328b6",
+      "size": 1475
+    },
+    {
+      "git_blob": "77d73f7ca8c435096f0d73b874d73d02a9763b16",
+      "mode": "100644",
+      "path": "docs/ui/vendor/d3-sankey/d3-sankey.LICENSE.txt",
+      "sha256": "2bf785e778d67a4f5266cffcd4f2cc5bb98cde73791666e7efeb8002ba32dfa5",
+      "size": 1471
+    },
+    {
+      "git_blob": "4f0b022ceefd39f1f270bce414220b2aa51faff5",
+      "mode": "100644",
+      "path": "docs/ui/vendor/d3-sankey/d3-shape.LICENSE.txt",
+      "sha256": "7eea8533ea92bd8c32a901e89ecb0305890905bb12711449565ddff96891146d",
+      "size": 1475
+    },
+    {
+      "git_blob": "a4a39855906a79111bebc4714d1e1e28b80a0598",
+      "mode": "100644",
+      "path": "docs/ui/vendor/sankeymatic/LICENSE.txt",
+      "sha256": "30d054be6f7c2abbeb9b2f0c03a1ac7f226f05958e07f72f45b1995dd42a6157",
+      "size": 810
+    },
+    {
+      "git_blob": "61828e7513b12fd6e6a68cbb326f683ea3d7490e",
+      "mode": "100644",
+      "path": "package-lock.json",
+      "sha256": "39e780029312d104695c08b3906dbf53d94bc2aaec1d034f06691da880bb6625",
+      "size": 209957
+    },
+    {
+      "git_blob": "2d0e4932c33d736e1089d51d97e513e3cd86bf4e",
+      "mode": "100644",
+      "path": "package.json",
+      "sha256": "0adc7df82d114cbff1909e1216e04b0fe9978f2610737ce32fc73303d9bf3a7a",
+      "size": 4286
+    },
+    {
+      "git_blob": "aadbd688140b2f3c9be24b3e48dd1e02b7306ae5",
+      "mode": "100644",
+      "path": "src/agent-context.ts",
+      "sha256": "4e802c5c1fa5185e9502e4a390744b4240704c7517453e6938665de7f4b712be",
+      "size": 7416
+    },
+    {
+      "git_blob": "39a82346498acffec9f46afa8b9acb63fb6e7dc9",
+      "mode": "100644",
+      "path": "src/agent-install.ts",
+      "sha256": "0140f6d320e7666555c9e5e2607ecac6a279ab70b4398e6f04314850589e1191",
+      "size": 65414
+    },
+    {
+      "git_blob": "c66b96e637c8900968009cb2e72215e5a217b3fe",
+      "mode": "100644",
+      "path": "src/agents.ts",
+      "sha256": "8a3ba11ed30f93c8cfe853e2b09e5388b74c644c537583f831e40d543e29a5f5",
+      "size": 29759
+    },
+    {
+      "git_blob": "8ec42f4a8ef3286c2b29852814e77fef31d5be6f",
+      "mode": "100644",
+      "path": "src/cli.ts",
+      "sha256": "61ab434faed8eb05bed345f5cb0e543d15c037a8bc22b2cc207a6c157745dd78",
+      "size": 82891
+    },
+    {
+      "git_blob": "61223080caf26b055375a454c2261be9914462cb",
+      "mode": "100644",
+      "path": "src/command-path.ts",
+      "sha256": "c91d6633a233b5ca42d54c6da3f5ac9dac0ecba673d35a7c845c2333edfe0bac",
+      "size": 5954
+    },
+    {
+      "git_blob": "6f67005428acd88245dbc79df13970c15f3a35b0",
+      "mode": "100644",
+      "path": "src/command-suggest.ts",
+      "sha256": "d76f3e1d293a99acf4f08a2ffe496f33c375ce3095bf2ca4a0b44b6fadd06648",
+      "size": 4676
+    },
+    {
+      "git_blob": "af2a67c1d227bf6a7461c29576b09ccfd68a81b6",
+      "mode": "100644",
+      "path": "src/console-server.ts",
+      "sha256": "0e84bd3b83de7908fa79e1a55f9d43b3b565f792e6e6cf5a56ce78b7661050e0",
+      "size": 48948
+    },
+    {
+      "git_blob": "aaa43e2537be94a257d8ea741d895d79e293cf0b",
+      "mode": "100644",
+      "path": "src/crypto.ts",
+      "sha256": "73447a6ff1295be8cdc9b71fc31710fb4c4106b779a8caa7342e896a447169f7",
+      "size": 2075
+    },
+    {
+      "git_blob": "6941e382c4c613eae643b1761a04d894c5d671df",
+      "mode": "100644",
+      "path": "src/executor.ts",
+      "sha256": "29f8e844c6a7fe5184a79e62f0a8f238adbb9f91747301274fd2c9362dcb1dbd",
+      "size": 20627
+    },
+    {
+      "git_blob": "8be0c2a40cef3f945dac2d6017096fe6d6e76ae7",
+      "mode": "100644",
+      "path": "src/gateway.ts",
+      "sha256": "683b62ee5de86d13afb58b650419b35d9cd3e78860381de301bc7d68708fca33",
+      "size": 5313
+    },
+    {
+      "git_blob": "883dc460ea1bc0c51a0ce4ae2a58a106e59352d1",
+      "mode": "100644",
+      "path": "src/guard.ts",
+      "sha256": "2fff3e9ca43d0fb3b1e9f21af9de59f77d5bd9bfb14d68167c29ace4933e4773",
+      "size": 16122
+    },
+    {
+      "git_blob": "056b930e5bf2c6981e5f819b939ef03ff51ae6a1",
+      "mode": "100644",
+      "path": "src/install.ts",
+      "sha256": "e3bd5b5d9080c1f072e6d5d2a1f5893cff9544c6bd87f4eaf976ca801b61b574",
+      "size": 101277
+    },
+    {
+      "git_blob": "dde6a858ac8436d259791c90979735dc8fabe8bb",
+      "mode": "100644",
+      "path": "src/mcp-server.ts",
+      "sha256": "cd94e1ae9025a608d3da1233e5316f4302df6c9becbb4c92baf910b28337f0c8",
+      "size": 6793
+    },
+    {
+      "git_blob": "65fcd04dba682a95484ee912457585dc52d00cc2",
+      "mode": "100644",
+      "path": "src/onepassword.ts",
+      "sha256": "81e3c92ffaf01a06135eaf9c9492e7c280e82ab50f9ec4f7099827b226110f4d",
+      "size": 17225
+    },
+    {
+      "git_blob": "3043ea1879dd53ccfd9895c401e30cf56f9472f6",
+      "mode": "100644",
+      "path": "src/package-update.ts",
+      "sha256": "c53766ca68dcce0b436d28da644c8768bc4da4171334a29f7d36829dec11afa7",
+      "size": 29779
+    },
+    {
+      "git_blob": "4d111c261330a7606a27ccfbafb8a7778f2b1e8f",
+      "mode": "100644",
+      "path": "src/paths.ts",
+      "sha256": "63cc0e744dba2670b112930e372da9bf2a6f81eac48bc5ee93f3fed5c68d11ca",
+      "size": 12731
+    },
+    {
+      "git_blob": "1a604b8f204ed6b5fcdeebf2275272325f71cf4b",
+      "mode": "100644",
+      "path": "src/policy-order.ts",
+      "sha256": "ccb3a041ed208372150eb190b173a6883bbeb571f365b791ddc245963daabf72",
+      "size": 6711
+    },
+    {
+      "git_blob": "1b048a21022e6691540fe88f54864c871c9cf764",
+      "mode": "100644",
+      "path": "src/scanner.ts",
+      "sha256": "a75e4005844d7177b623fe11e6ad1c4ec4361a2c8022bc62beb15db84506764d",
+      "size": 12002
+    },
+    {
+      "git_blob": "ea60745d8f37bffe63fc0a78b359ae804cca39f3",
+      "mode": "100644",
+      "path": "src/self-contained-runtime.ts",
+      "sha256": "d6a0e0f77aae5db6fc439b370ddad3f3a734c0e1b3bac823f01370cb89663ac3",
+      "size": 3765
+    },
+    {
+      "git_blob": "2fdcfd7bdd1eac54e28cfb3334a525be21c972b6",
+      "mode": "100644",
+      "path": "src/ssh.ts",
+      "sha256": "6d5024ce4f99e1af51e9c776f0b212003be31e92a6d615666657b302331f29c9",
+      "size": 19205
+    },
+    {
+      "git_blob": "5460a2c8be8f74cffc45c33542377fd8091a631d",
+      "mode": "100644",
+      "path": "src/store.ts",
+      "sha256": "ee5f2a12133afbe6264a34021c34b5353e16b1d9e1ecd3269cc4a612ef1a182b",
+      "size": 159606
+    },
+    {
+      "git_blob": "9323ed2169ad67a13b526d7af5c44bc083031413",
+      "mode": "100644",
+      "path": "src/types.ts",
+      "sha256": "6867f2c1c0be17c15f4fcf349971708c5a24ba1c1a99490c412be92e243ab120",
+      "size": 5160
+    },
+    {
+      "git_blob": "ff7541ca1495bfb0946eb3afb27d592687831104",
+      "mode": "100644",
+      "path": "src/unlock.ts",
+      "sha256": "d370fdaf6cbd7eea3a97a812f6c2df44cd3acebdb0883b1f93a502bd26532de5",
+      "size": 43613
+    },
+    {
+      "git_blob": "82acba4b424c74317ca147db74151c006b990c54",
+      "mode": "100644",
+      "path": "src/update-check.ts",
+      "sha256": "fadbdcb86b2893a7a1a8784f721f2c48c6aafddf98fe5a3f275b506d26938716",
+      "size": 13712
+    },
+    {
+      "git_blob": "fa9ab620c15f804a635d212251ce282fe95610e0",
+      "mode": "100644",
+      "path": "src/version.ts",
+      "sha256": "92744da6264a9f3933c0edbd6d16ed9e54590114627a811014e4a85ec5ffecad",
+      "size": 41
+    },
+    {
+      "git_blob": "4488a8eee10a320ce83945df2e05c06283f0687d",
+      "mode": "100644",
+      "path": "src/windows-acl.ts",
+      "sha256": "14e42b731fd9955c08f08f7fad711569048cd278aea14af7144d6bc2eae74df5",
+      "size": 19147
+    },
+    {
+      "git_blob": "0f3f50ea4ed947d56eee0a4f210b353a2de4a6b8",
+      "mode": "100644",
+      "path": "src/windows-startup.ts",
+      "sha256": "d27d0600a4c3f3d31bd7349f5a361786b948662248c8fec6c30958be2cd9909f",
+      "size": 28752
+    },
+    {
+      "git_blob": "4966702453a4620b4d2efaa065078b8beff5866e",
+      "mode": "100644",
+      "path": "src/windows-system.ts",
+      "sha256": "0e03a554839786372f6bcd8f34db6188482326d63f6b6c6ae3cab0e3e99216fe",
+      "size": 6867
+    },
+    {
+      "git_blob": "656f52e01ef0cc23da44f51700fb3b99f05a8c50",
+      "mode": "100644",
+      "path": "tests/mcp-e2e.test.ts",
+      "sha256": "71cf3e48b84fabeb6bcc2431d03f1c6e125a8ae30f753e89bffaf82958815761",
+      "size": 4878
+    },
+    {
+      "git_blob": "6ae653b495514d2aa6f0d2587fb1ca0fd2c8c916",
+      "mode": "100644",
+      "path": "tests/setup.ts",
+      "sha256": "078fd99b6ad70e3a4c375f438642f39acf938bd995904657317f1f1af0754946",
+      "size": 2225
+    },
+    {
+      "git_blob": "df5ecc4d1aaaf7b71175f569b3a2b364e9d25575",
+      "mode": "100644",
+      "path": "tsconfig.json",
+      "sha256": "77b94fde5449baf66080255091b625719518845c725cfe7d28aab1ef6a9538ef",
+      "size": 440
+    },
+    {
+      "git_blob": "ccb972b83764c67c13f90c57d0b5afcb0ecc365d",
+      "mode": "100644",
+      "path": "vitest.config.ts",
+      "sha256": "2c0673de84b1ea69669ee7c5068ffaa4bc464f0ff9afa9412309bb923eff680f",
+      "size": 524
+    }
+  ],
+  "repository": "https://github.com/sgateway/s-gw.git",
+  "revision": "a9ffa790060d81b0e4e22eea21eb153d2cdeca22",
+  "schema_version": 2,
+  "tree": "ecf1639f4c6f4b2e55f3945da8784adb36e7082a"
+}

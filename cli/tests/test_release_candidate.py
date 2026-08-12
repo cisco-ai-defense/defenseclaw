@@ -760,7 +760,6 @@ def _windows_setup_dir(
             "publisher": release_candidate.WINDOWS_SETUP_PUBLISHER,
             "signature_type": "Authenticode",
             "signer": {"thumbprint_sha256": signer},
-            "chain": [],
             "timestamp": {
                 "present": True,
                 "format": "rfc3161",
@@ -797,7 +796,6 @@ def _windows_setup_dir(
             "publisher": "",
             "signature_type": "None",
             "signer": None,
-            "chain": None,
             "timestamp": {
                 "present": False,
                 "format": "",
@@ -814,6 +812,28 @@ def _windows_setup_dir(
         "sha256": setup_hash,
         "expected": expected_authenticode,
         "observed": observed_authenticode,
+    }
+    pinned_path = "runtime/python/python.exe"
+    pinned_evidence = {
+        "schema_version": 1,
+        "installed_path": pinned_path,
+        "sbom_file_name": "./expanded/python/python.exe",
+        "sha256": "4" * 64,
+        "expected": {
+            "policy": "pinned-input-observation",
+            "status": "Valid",
+            "publisher": "",
+            "signature_type": "",
+            "platform_identity_required": False,
+            "timestamp_required": False,
+            "signer_thumbprint_sha256": "",
+            "timestamp_signer_thumbprint_sha256": "",
+            "timestamp_token_sha256": "",
+        },
+        "observed": {
+            "status": "Valid",
+            "embedded_signatures": [{}],
+        },
     }
     gateway_archive = f"defenseclaw_{version}_windows_amd64.zip"
     wheel = f"defenseclaw-{version}-py3-none-any.whl"
@@ -863,7 +883,10 @@ def _windows_setup_dir(
         "unsigned": not signed,
         "authenticode": {
             "schema_version": 1,
-            "files": {setup.name: authenticode_evidence},
+            "files": {
+                setup.name: authenticode_evidence,
+                pinned_path: pinned_evidence,
+            },
         },
         "inputs": provenance_inputs,
         "toolchain": {
@@ -1477,6 +1500,49 @@ def test_windows_setup_exact_artifact_set_validates(tmp_path: Path, signed: bool
         COMMIT,
         exact_file_set=True,
     )
+
+
+@pytest.mark.parametrize("target", ["setup", "nested", "pinned"])
+def test_windows_setup_provenance_rejects_machine_specific_certificate_chains(
+    tmp_path: Path,
+    target: str,
+) -> None:
+    windows = _windows_setup_dir(tmp_path)
+    path = windows / f"{release_candidate.WINDOWS_SETUP_ASSET}.provenance.json"
+    document = json.loads(path.read_text(encoding="utf-8"))
+    files = document["authenticode"]["files"]
+    observed = files[release_candidate.WINDOWS_SETUP_ASSET]["observed"]
+    if target == "nested":
+        observed["embedded_signatures"][0]["timestamp"]["chain"] = {}
+    elif target == "pinned":
+        files["runtime/python/python.exe"]["observed"]["chain"] = {}
+    else:
+        observed["chain"] = {}
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(release_candidate.CandidateError, match="machine-specific certificate chain"):
+        release_candidate._validate_windows_installer_assets(
+            windows,
+            WINDOWS_SETUP_VERSION,
+            COMMIT,
+            exact_file_set=True,
+        )
+
+
+def test_windows_setup_provenance_rejects_pinned_host_selected_observation(tmp_path: Path) -> None:
+    windows = _windows_setup_dir(tmp_path)
+    path = windows / f"{release_candidate.WINDOWS_SETUP_ASSET}.provenance.json"
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document["authenticode"]["files"]["runtime/python/python.exe"]["observed"]["publisher"] = "ambient"
+    path.write_text(json.dumps(document), encoding="utf-8")
+
+    with pytest.raises(release_candidate.CandidateError, match="Pinned Windows Authenticode observation"):
+        release_candidate._validate_windows_installer_assets(
+            windows,
+            WINDOWS_SETUP_VERSION,
+            COMMIT,
+            exact_file_set=True,
+        )
 
 
 @pytest.mark.parametrize(

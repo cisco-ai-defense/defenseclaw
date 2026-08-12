@@ -168,27 +168,48 @@ func (w *InstallWatcher) SetWebhookDispatcher(d WebhookDispatcher) {
 }
 
 // Run starts watching configured directories. It blocks until ctx is cancelled.
-func (w *InstallWatcher) Run(ctx context.Context) error {
+func (w *InstallWatcher) Run(ctx context.Context) (runErr error) {
 	fsw, err := fsnotify.NewWatcher()
 	if err != nil {
 		return fmt.Errorf("watcher: create fsnotify watcher: %w", err)
 	}
-	defer fsw.Close()
+	ownedDirs := make([]ownedWatchDir, 0)
+	defer func() {
+		closeErr := fsw.Close()
+		cleanupErr := cleanupOwnedWatchDirs(ownedDirs)
+		if closeErr != nil {
+			fmt.Fprintf(os.Stderr, "[watch] close watcher: %v\n", closeErr)
+			if runErr == nil {
+				runErr = fmt.Errorf("watcher: close fsnotify watcher: %w", closeErr)
+			}
+		}
+		if cleanupErr == nil {
+			return
+		}
+		fmt.Fprintf(os.Stderr, "[watch] created directory cleanup: %v\n", cleanupErr)
+		if runErr == nil {
+			runErr = fmt.Errorf("watcher: clean created directories: %w", cleanupErr)
+		}
+	}()
 
 	watched := 0
 	for _, dir := range w.skillDirs {
-		if err := ensureAndWatch(fsw, dir); err != nil {
+		created, err := ensureAndWatch(fsw, dir)
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "[watch] skill dir %s: %v (skipping)\n", dir, err)
 			continue
 		}
+		ownedDirs = append(ownedDirs, created...)
 		watched++
 		fmt.Printf("[watch] monitoring skill dir: %s\n", dir)
 	}
 	for _, dir := range w.pluginDirs {
-		if err := ensureAndWatch(fsw, dir); err != nil {
+		created, err := ensureAndWatch(fsw, dir)
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "[watch] plugin dir %s: %v (skipping)\n", dir, err)
 			continue
 		}
+		ownedDirs = append(ownedDirs, created...)
 		watched++
 		fmt.Printf("[watch] monitoring plugin dir: %s\n", dir)
 	}
@@ -1128,16 +1149,4 @@ func toFindingInputs(findings []scanner.Finding) []policy.FindingInput {
 		})
 	}
 	return out
-}
-
-func ensureAndWatch(fsw *fsnotify.Watcher, dir string) error {
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return fmt.Errorf("create dir: %w", err)
-	}
-
-	if err := fsw.Add(dir); err != nil {
-		return fmt.Errorf("watch: %w", err)
-	}
-
-	return nil
 }

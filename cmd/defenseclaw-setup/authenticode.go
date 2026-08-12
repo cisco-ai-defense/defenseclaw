@@ -93,6 +93,71 @@ func validateEmptyAuthenticodeIdentity(policy authenticodeFilePolicy) error {
 	return nil
 }
 
+func containsMachineSpecificCertificateChain(value any) bool {
+	switch typed := value.(type) {
+	case map[string]any:
+		for key, item := range typed {
+			if key == "chain" || containsMachineSpecificCertificateChain(item) {
+				return true
+			}
+		}
+	case []any:
+		for _, item := range typed {
+			if containsMachineSpecificCertificateChain(item) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func hasExactAuthenticodeObservationFields(observed map[string]any, fields ...string) bool {
+	if len(observed) != len(fields) {
+		return false
+	}
+	for _, field := range fields {
+		if _, present := observed[field]; !present {
+			return false
+		}
+	}
+	return true
+}
+
+func validateCanonicalAuthenticodeObservation(policy authenticodeFilePolicy, observed map[string]any) error {
+	if policy.Policy == pinnedInputAuthenticodePolicy {
+		if !hasExactAuthenticodeObservationFields(observed, "status", "embedded_signatures") {
+			return errors.New("pinned input observation contains host-selected fields")
+		}
+	} else if !hasExactAuthenticodeObservationFields(
+		observed,
+		"status",
+		"publisher",
+		"signature_type",
+		"signer",
+		"timestamp",
+		"embedded_signatures",
+	) {
+		return errors.New("platform Authenticode observation omits enforced fields or contains ambient fields")
+	}
+	if status, ok := observed["status"].(string); !ok || status != policy.Status {
+		return errors.New("observed Authenticode status differs from policy")
+	}
+	if policy.Policy != pinnedInputAuthenticodePolicy {
+		publisher, publisherOK := observed["publisher"].(string)
+		signatureType, signatureTypeOK := observed["signature_type"].(string)
+		if !publisherOK || !signatureTypeOK || publisher != policy.Publisher || signatureType != policy.SignatureType {
+			return errors.New("observed Authenticode platform identity differs from policy")
+		}
+		if _, ok := observed["timestamp"].(map[string]any); !ok {
+			return errors.New("observed Authenticode timestamp is missing")
+		}
+	}
+	if _, ok := observed["embedded_signatures"].([]any); !ok {
+		return errors.New("embedded Authenticode signature inventory is invalid")
+	}
+	return nil
+}
+
 func validateAuthenticodeManifest(manifest payloadManifest) error {
 	inventory := manifest.Authenticode
 	if inventory.SchemaVersion != authenticodeInventorySchemaVersion || len(inventory.Files) == 0 {
@@ -125,13 +190,19 @@ func validateAuthenticodeManifest(manifest payloadManifest) error {
 		if !validLowerSHA256(evidence.SHA256) {
 			return fmt.Errorf("invalid Authenticode SHA-256 for %s", key)
 		}
-		var observed map[string]json.RawMessage
+		var observed map[string]any
 		if len(evidence.Observed) == 0 || json.Unmarshal(evidence.Observed, &observed) != nil ||
-			len(observed) == 0 || observed["embedded_signatures"] == nil {
+			len(observed) == 0 {
 			return fmt.Errorf("invalid Authenticode observation for %s", key)
+		}
+		if containsMachineSpecificCertificateChain(observed) {
+			return fmt.Errorf("machine-specific certificate chain is embedded for %s", key)
 		}
 
 		policy := evidence.Expected
+		if err := validateCanonicalAuthenticodeObservation(policy, observed); err != nil {
+			return fmt.Errorf("invalid Authenticode observation for %s: %w", key, err)
+		}
 		switch policy.Policy {
 		case productAuthenticodePolicy:
 			if _, required := requiredProducts[key]; !required {

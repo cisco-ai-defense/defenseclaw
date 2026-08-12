@@ -93,6 +93,7 @@ const (
 	idMode        = 1002
 	idStart       = 1003
 	idDeleteData  = 1004
+	idCredential  = 1005
 	idOpenTerm    = 1007
 	idProgress    = 1008
 	idDescription = 1009
@@ -183,6 +184,7 @@ type setupWizard struct {
 	modeLabel      uintptr
 	mode           uintptr
 	start          uintptr
+	credential     uintptr
 	deleteData     uintptr
 	progress       uintptr
 	primary        uintptr
@@ -199,6 +201,7 @@ type setupWizard struct {
 	code              int
 	err               error
 	terminalErr       error
+	credentialOffered bool
 	mu                sync.Mutex
 }
 
@@ -233,14 +236,20 @@ func runInteractiveWizard(opts options, installRoot, dataRoot string) (int, erro
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 
+	credentialOffered := false
 	if opts.Action == "install" {
 		opts = interactiveInstallOptions(opts, installRoot)
+		credentialOffered = shouldOfferCredentialProtection(installRoot, dataRoot)
+		if credentialOffered && !opts.CredentialProtectionSet {
+			opts.CredentialProtection = true
+		}
 	}
 	wiz := &setupWizard{
-		opts:        opts,
-		installRoot: installRoot,
-		dataRoot:    dataRoot,
-		code:        userExitCode,
+		opts:              opts,
+		installRoot:       installRoot,
+		dataRoot:          dataRoot,
+		credentialOffered: credentialOffered,
+		code:              userExitCode,
 	}
 	if err := registerSetupWindowClass(); err != nil {
 		return 1, err
@@ -409,13 +418,14 @@ func (w *setupWizard) createControls() error {
 	w.modeLabel = w.control("STATIC", "&Mode", wsChild|wsVisible|ssLeft, 294, 178, 180, 18, 0)
 	w.mode = w.control("COMBOBOX", "", wsChild|wsVisible|wsTabStop|cbsDropDownList|cbsHasStrings, 294, 198, 230, 160, idMode)
 	w.start = w.control("BUTTON", "&Start gateway now and at sign-in", wsChild|wsVisible|wsTabStop|bsAutoCheckBox, 24, 244, 300, 24, idStart)
+	w.credential = w.control("BUTTON", "&Enable credential protection with s-gw (requires Node.js 20+)", wsChild|wsVisible|wsTabStop|bsAutoCheckBox, 24, 270, 500, 24, idCredential)
 	w.deleteData = w.control("BUTTON", "&Delete user data under %USERPROFILE%\\.defenseclaw", wsChild|wsVisible|wsTabStop|bsAutoCheckBox, 24, 244, 430, 24, idDeleteData)
-	w.progress = w.control("msctls_progress32", "", wsChild|pbsMarquee, 24, 286, 500, 20, idProgress)
+	w.progress = w.control("msctls_progress32", "", wsChild|pbsMarquee, 24, 300, 500, 20, idProgress)
 	w.primary = w.control("BUTTON", "", wsChild|wsVisible|wsTabStop|wsGroup|bsDefPushButton, 300, 334, 100, 30, idPrimary)
 	w.openTerm = w.control("BUTTON", "Open &Terminal", wsChild|wsTabStop|bsPushButton, 284, 334, 116, 30, idOpenTerm)
 	w.openLog = w.control("BUTTON", "Open &Log", wsChild|wsTabStop|bsPushButton, 284, 334, 116, 30, idOpenLog)
 	w.cancel = w.control("BUTTON", "&Cancel", wsChild|wsVisible|wsTabStop|bsPushButton, 416, 334, 100, 30, idCancel)
-	for _, hwnd := range []uintptr{w.heading, w.description, w.pathLabel, w.pathEdit, w.connectorLabel, w.connector, w.modeLabel, w.mode, w.start, w.deleteData, w.progress, w.primary, w.openTerm, w.openLog, w.cancel} {
+	for _, hwnd := range []uintptr{w.heading, w.description, w.pathLabel, w.pathEdit, w.connectorLabel, w.connector, w.modeLabel, w.mode, w.start, w.credential, w.deleteData, w.progress, w.primary, w.openTerm, w.openLog, w.cancel} {
 		if hwnd == 0 {
 			return fmt.Errorf("create setup wizard control failed")
 		}
@@ -431,6 +441,9 @@ func (w *setupWizard) createControls() error {
 	procSendMessage.Call(w.mode, cbSetCurSel, uintptr(modeIndex(w.opts.Mode)), 0)
 	if w.opts.StartGateway {
 		procSendMessage.Call(w.start, bmSetCheck, bstChecked, 0)
+	}
+	if w.opts.CredentialProtection {
+		procSendMessage.Call(w.credential, bmSetCheck, bstChecked, 0)
 	}
 	w.syncGatewayChoice()
 	if w.opts.DeleteUserData {
@@ -476,6 +489,7 @@ func (w *setupWizard) showOptions() {
 		w.show(w.modeLabel, false)
 		w.show(w.mode, false)
 		w.show(w.start, false)
+		w.show(w.credential, false)
 		w.show(w.deleteData, true)
 	} else if w.opts.Action == "repair" || w.opts.Action == "upgrade" {
 		setText(w.primary, primaryLabel(w.opts.Action))
@@ -484,6 +498,7 @@ func (w *setupWizard) showOptions() {
 		w.show(w.modeLabel, false)
 		w.show(w.mode, false)
 		w.show(w.start, false)
+		w.show(w.credential, false)
 		w.show(w.deleteData, false)
 	} else {
 		setText(w.primary, primaryLabel(w.opts.Action))
@@ -492,6 +507,7 @@ func (w *setupWizard) showOptions() {
 		w.show(w.modeLabel, true)
 		w.show(w.mode, true)
 		w.show(w.start, true)
+		w.show(w.credential, w.credentialOffered)
 		w.show(w.deleteData, false)
 	}
 	w.show(w.progress, false)
@@ -606,6 +622,11 @@ func (w *setupWizard) startAction() {
 				selection(w.connector),
 				selection(w.mode),
 				checked(w.start),
+			)
+			w.opts = applyWizardCredentialProtectionChoice(
+				w.opts,
+				w.credentialOffered,
+				checked(w.credential),
 			)
 		}
 		setText(w.description, "Installing packaged files and updating user registration...")
@@ -741,7 +762,7 @@ func wizardCompletionDescription(connector string) string {
 }
 
 func (w *setupWizard) enableInputs(enabled bool) {
-	for _, hwnd := range []uintptr{w.pathEdit, w.connector, w.mode, w.start, w.deleteData, w.primary, w.cancel, w.openTerm, w.openLog} {
+	for _, hwnd := range []uintptr{w.pathEdit, w.connector, w.mode, w.start, w.credential, w.deleteData, w.primary, w.cancel, w.openTerm, w.openLog} {
 		procEnableWindow.Call(hwnd, boolToUintptr(enabled))
 	}
 }
@@ -950,6 +971,24 @@ func optionsFromWizardSelections(opts options, connectorSelection, modeSelection
 	opts.ModeSet = true
 	opts.StartGatewaySet = true
 	return opts
+}
+
+func applyWizardCredentialProtectionChoice(opts options, offered, enabled bool) options {
+	if !offered {
+		return opts
+	}
+	opts.CredentialProtection = enabled
+	opts.CredentialProtectionSet = true
+	return opts
+}
+
+func shouldOfferCredentialProtection(installRoot, dataRoot string) bool {
+	state, err := loadExistingInstallState(installRoot)
+	if err != nil || state != nil {
+		return false
+	}
+	_, err = os.Lstat(filepath.Join(dataRoot, "config.yaml"))
+	return errors.Is(err, os.ErrNotExist)
 }
 
 func interactiveInstallOptions(opts options, installRoot string) options {

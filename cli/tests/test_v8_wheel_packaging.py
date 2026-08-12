@@ -59,20 +59,31 @@ def build_hook_module() -> ModuleType:
     spec = importlib.util.spec_from_file_location("defenseclaw_build_setup", ROOT / "setup.py")
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
+    setup_source = (ROOT / "setup.py").read_text(encoding="utf-8").replace(r"\r\n", r"\n")
     setuptools_module = ModuleType("setuptools")
     setuptools_module.setup = lambda **_kwargs: None  # type: ignore[attr-defined]
     command_module = ModuleType("setuptools.command")
+    bdist_wheel_module = ModuleType("setuptools.command.bdist_wheel")
     build_py_module = ModuleType("setuptools.command.build_py")
+    dist_info_module = ModuleType("setuptools.command.dist_info")
+    editable_wheel_module = ModuleType("setuptools.command.editable_wheel")
+    bdist_wheel_module.bdist_wheel = object  # type: ignore[attr-defined]
     build_py_module.build_py = object  # type: ignore[attr-defined]
+    dist_info_module.dist_info = object  # type: ignore[attr-defined]
+    editable_wheel_module.editable_wheel = object  # type: ignore[attr-defined]
     with mock.patch.dict(
         sys.modules,
         {
             "setuptools": setuptools_module,
             "setuptools.command": command_module,
+            "setuptools.command.bdist_wheel": bdist_wheel_module,
             "setuptools.command.build_py": build_py_module,
+            "setuptools.command.dist_info": dist_info_module,
+            "setuptools.command.editable_wheel": editable_wheel_module,
         },
     ):
-        spec.loader.exec_module(module)
+        # Match setuptools build_meta's preprocessing before setup.py is executed.
+        exec(compile(setup_source, str(ROOT / "setup.py"), "exec"), module.__dict__)
     return module
 
 
@@ -92,12 +103,19 @@ def _copy_pristine_source(destination: Path) -> None:
     required_files = {
         Path("pyproject.toml"),
         Path("setup.py"),
+        Path("defenseclaw_build_backend.py"),
         Path("MANIFEST.in"),
         Path("README.md"),
         Path("LICENSE"),
         Path("NOTICE"),
         Path("THIRD_PARTY_LICENSES.txt"),
         Path("internal/envvars/registry.json"),
+        Path("release/s-gw-module.json"),
+        Path("release/s-gw-runners.json"),
+        Path("scripts/build_sgw_module.py"),
+        Path("scripts/sgw_module.py"),
+        Path("scripts/stage_sgw_modules.py"),
+        Path("scripts/sync_sgw_vendor.py"),
         Path("scripts/telemetry_runtime_assets.py"),
         *[Path(path) for path in EXPECTED_SDIST_CONFIG_INPUTS],
         *[Path(path) for path in EXPECTED_SDIST_TELEMETRY_INPUTS],
@@ -113,6 +131,7 @@ def _copy_pristine_source(destination: Path) -> None:
         Path("cli/defenseclaw"),
         Path("bundles/local_observability_stack"),
         Path("bundles/splunk_local_bridge"),
+        Path("third_party/s-gw"),
     ):
         shutil.copytree(
             ROOT / relative,
@@ -160,6 +179,97 @@ def test_build_hook_rejects_duplicate_v8_source_contract(
 
     with pytest.raises(RuntimeError, match="duplicated"):
         build_hook_module._stage_v8_assets(source, tmp_path / "build")
+
+
+def _wheel_metadata_payload(newline: bytes = b"\n") -> bytes:
+    return newline.join(
+        (
+            b"Metadata-Version: 2.4",
+            b"Name: defenseclaw",
+            b"Version: 0.0.0",
+            b"License-Expression: Apache-2.0",
+            b"License-File: LICENSE",
+            b"License-File: NOTICE",
+            b"License-File: THIRD_PARTY_LICENSES.txt",
+            b"",
+            b"DefenseClaw package metadata.",
+            b"",
+        )
+    )
+
+
+def test_wheel_metadata_normalizes_canonical_crlf(
+    build_hook_module: ModuleType,
+    tmp_path: Path,
+) -> None:
+    metadata_path = tmp_path / "METADATA"
+    metadata_path.write_bytes(_wheel_metadata_payload(b"\r\n"))
+    contract = {
+        "production_modules": False,
+        "license_expression": build_hook_module.BASE_LICENSE_EXPRESSION,
+    }
+
+    build_hook_module._update_wheel_metadata(metadata_path, contract, allow_update=False)
+
+    assert metadata_path.read_bytes() == _wheel_metadata_payload()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param(
+            _wheel_metadata_payload(b"\r\n").replace(b"\r\n", b"\n", 1),
+            id="leading-lf",
+        ),
+        pytest.param(
+            _wheel_metadata_payload().replace(b"\n", b"\r\n", 1),
+            id="leading-crlf",
+        ),
+    ],
+)
+def test_wheel_metadata_normalizes_mixed_lf_and_crlf(
+    build_hook_module: ModuleType,
+    tmp_path: Path,
+    payload: bytes,
+) -> None:
+    metadata_path = tmp_path / "METADATA"
+    metadata_path.write_bytes(payload)
+    contract = {
+        "production_modules": False,
+        "license_expression": build_hook_module.BASE_LICENSE_EXPRESSION,
+    }
+
+    build_hook_module._update_wheel_metadata(metadata_path, contract, allow_update=False)
+
+    assert metadata_path.read_bytes() == _wheel_metadata_payload()
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        pytest.param(
+            _wheel_metadata_payload().replace(b"Name: ", b"Name: \0", 1),
+            id="nul",
+        ),
+        pytest.param(_wheel_metadata_payload(b"\r"), id="bare-cr"),
+    ],
+)
+def test_wheel_metadata_rejects_noncanonical_newlines(
+    build_hook_module: ModuleType,
+    tmp_path: Path,
+    payload: bytes,
+) -> None:
+    metadata_path = tmp_path / "METADATA"
+    metadata_path.write_bytes(payload)
+    contract = {
+        "production_modules": False,
+        "license_expression": build_hook_module.BASE_LICENSE_EXPRESSION,
+    }
+
+    with pytest.raises(RuntimeError, match="not canonical LF or CRLF text"):
+        build_hook_module._update_wheel_metadata(metadata_path, contract, allow_update=False)
+
+    assert metadata_path.read_bytes() == payload
 
 
 def _run_build(arguments: list[str], *, cwd: Path, environment: dict[str, str]) -> None:
@@ -315,11 +425,18 @@ def test_sdist_contains_exact_build_inputs_and_builds_complete_wheel(
         == EXPECTED_SDIST_TELEMETRY_INPUTS
     )
     for required in (
+        "defenseclaw_build_backend.py",
         "LICENSE",
         "NOTICE",
         "THIRD_PARTY_LICENSES.txt",
         "setup.py",
         "internal/envvars/registry.json",
+        "release/s-gw-module.json",
+        "release/s-gw-runners.json",
+        "scripts/build_sgw_module.py",
+        "scripts/sgw_module.py",
+        "scripts/stage_sgw_modules.py",
+        "scripts/sync_sgw_vendor.py",
         "scripts/telemetry_runtime_assets.py",
     ):
         assert relative_names.count(required) == 1

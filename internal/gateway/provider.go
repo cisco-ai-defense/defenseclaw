@@ -122,21 +122,22 @@ func (m ChatMessage) MarshalJSON() ([]byte, error) {
 // Everything else is pass-through. RawBody carries the original JSON so
 // the OpenAI provider can forward unknown fields verbatim.
 type ChatRequest struct {
-	Model        string          `json:"model"`
-	Messages     []ChatMessage   `json:"messages"`
-	MaxTokens    *int            `json:"max_tokens,omitempty"`
-	Temperature  *float64        `json:"temperature,omitempty"`
-	TopP         *float64        `json:"top_p,omitempty"`
-	Stream       bool            `json:"stream,omitempty"`
-	Stop         json.RawMessage `json:"stop,omitempty"`
-	Tools        json.RawMessage `json:"tools,omitempty"`
-	ToolChoice   json.RawMessage `json:"tool_choice,omitempty"`
-	Fallbacks    []string        `json:"fallbacks,omitempty"` // gateway failover models (e.g. Bifrost)
-	ExtraParams  map[string]any  `json:"-"`                   // provider-specific request fields forwarded through Bifrost
-	RawBody      json.RawMessage `json:"-"`
-	TargetURL    string          `json:"-"` // from X-DC-Target-URL header, set by fetch interceptor (origin only)
-	TargetPath   string          `json:"-"` // incoming request path; combined with TargetURL for provider matching
-	TargetAPIKey string          `json:"-"` // from Authorization header, forwarded to upstream
+	Model           string          `json:"model"`
+	Messages        []ChatMessage   `json:"messages"`
+	MaxTokens       *int            `json:"max_tokens,omitempty"`
+	Temperature     *float64        `json:"temperature,omitempty"`
+	TopP            *float64        `json:"top_p,omitempty"`
+	Stream          bool            `json:"stream,omitempty"`
+	Stop            json.RawMessage `json:"stop,omitempty"`
+	Tools           json.RawMessage `json:"tools,omitempty"`
+	ToolChoice      json.RawMessage `json:"tool_choice,omitempty"`
+	Fallbacks       []string        `json:"fallbacks,omitempty"` // gateway failover models (e.g. Bifrost)
+	ExtraParams     map[string]any  `json:"-"`                   // provider-specific request fields forwarded through Bifrost
+	RawBody         json.RawMessage `json:"-"`
+	TargetURL       string          `json:"-"` // from X-DC-Target-URL header, set by fetch interceptor (origin only)
+	TargetPath      string          `json:"-"` // incoming request path; combined with TargetURL for provider matching
+	TargetAPIKey    string          `json:"-"` // from Authorization header, forwarded to upstream
+	AdmittedBaseURL string          `json:"-"` // effective direct-provider base URL admitted before credential tokenization
 }
 
 // ChatChoice is a single choice in an OpenAI chat completion response.
@@ -309,16 +310,9 @@ func NewProviderForLLMConfig(llm *config.LLMConfig, providers *configs.Providers
 	if llm == nil {
 		return nil, fmt.Errorf("gateway: NewProviderForLLMConfig: llm config is nil")
 	}
-	var inst *configs.Provider
 	name := strings.TrimSpace(llm.InstanceName)
+	inst := configuredProviderInstance(name, providers)
 	if name != "" && providers != nil {
-		clean := strings.ToLower(name)
-		for i := range providers.Providers {
-			if strings.ToLower(providers.Providers[i].Name) == clean {
-				inst = &providers.Providers[i]
-				break
-			}
-		}
 		if inst == nil {
 			// Fall through with inst=nil so a typo in instance_name
 			// surfaces in `defenseclaw doctor` rather than taking
@@ -331,6 +325,29 @@ func NewProviderForLLMConfig(llm *config.LLMConfig, providers *configs.Providers
 	return buildProviderFromEffective(llm, inst)
 }
 
+func configuredProviderInstance(name string, providers *configs.ProvidersConfig) *configs.Provider {
+	if name == "" || providers == nil {
+		return nil
+	}
+	for i := range providers.Providers {
+		if strings.EqualFold(providers.Providers[i].Name, name) {
+			return &providers.Providers[i]
+		}
+	}
+	return nil
+}
+
+func effectiveLLMBaseURL(llm *config.LLMConfig, inst *configs.Provider) string {
+	if llm == nil {
+		return ""
+	}
+	baseURL := strings.TrimSpace(llm.BaseURL)
+	if baseURL == "" && inst != nil {
+		baseURL = strings.TrimSpace(inst.BaseURL)
+	}
+	return strings.TrimRight(baseURL, "/")
+}
+
 // buildProviderFromEffective performs the role-wins / overlay-fills
 // merge and returns a “bifrostProvider“ ready for dispatch. Pulled out
 // of NewProviderForLLMConfig so NewProviderForInstance can share the
@@ -338,7 +355,7 @@ func NewProviderForLLMConfig(llm *config.LLMConfig, providers *configs.Providers
 func buildProviderFromEffective(llm *config.LLMConfig, inst *configs.Provider) (LLMProvider, error) {
 	model := llm.Model
 	apiKey := llm.ResolvedAPIKey()
-	baseURL := strings.TrimRight(strings.TrimSpace(llm.BaseURL), "/")
+	baseURL := effectiveLLMBaseURL(llm, inst)
 	// Provider type precedence: explicit role config > overlay's
 	// base_provider_type > known model prefix > infer. The
 	// LLMConfig.Provider field is the only "explicit role family"
@@ -363,9 +380,6 @@ func buildProviderFromEffective(llm *config.LLMConfig, inst *configs.Provider) (
 
 	extraHeaders := llm.ExtraHeaders
 	if inst != nil {
-		if baseURL == "" {
-			baseURL = strings.TrimRight(inst.BaseURL, "/")
-		}
 		if providerType == "" {
 			providerType = inst.BaseProviderType
 		}
@@ -666,13 +680,6 @@ func isUnsafeIP(ip net.IP) bool {
 	}
 	return false
 }
-
-// passthroughAllowPrivateForTest is a test-only seam letting the
-// passthrough integration tests simulate a "known provider" pointed
-// at httptest.NewServer (which binds 127.0.0.1). Production code MUST
-// leave this at false; the dedicated SSRF tests still route private
-// targets through the shape-branch which is not subject to this gate.
-var passthroughAllowPrivateForTest bool
 
 // secureDialContext returns a DialContext that re-resolves the
 // destination at dial time and rejects private/loopback/link-local/

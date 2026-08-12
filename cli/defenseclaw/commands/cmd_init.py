@@ -176,6 +176,12 @@ _render_checkbox_menu = terminal_checkbox.render_checkbox_menu
 )
 @click.option("--start-gateway/--no-start-gateway", default=None, help="Start the gateway sidecar after setup.")
 @click.option("--verify/--no-verify", default=None, help="Run targeted readiness checks before exiting.")
+@click.option(
+    "--credential-protection/--no-credential-protection",
+    default=None,
+    show_default="when bundled",
+    help="Enable the local s-gw credential broker on a fresh install when authenticated release artifacts are bundled.",
+)
 @click.option("--json-summary", is_flag=True, help="Emit the final first-run report as JSON.")
 @click.option("--verbose", is_flag=True, help="Show full subprocess/setup output.")
 @pass_ctx
@@ -206,6 +212,7 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     cisco_api_key_env: str,
     start_gateway: bool | None,
     verify: bool | None,
+    credential_protection: bool | None,
     json_summary: bool,
     verbose: bool,
 ) -> None:
@@ -238,8 +245,7 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
         support = platform_support.connector_platform_support(requested)
         if not support.available:
             raise click.ClickException(
-                f"connector {requested!r} is {support.status} on "
-                f"{platform_support.host_os()}: {support.reason}"
+                f"connector {requested!r} is {support.status} on {platform_support.host_os()}: {support.reason}"
             )
 
     if _use_guided_first_run(
@@ -289,6 +295,7 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
             cisco_api_key_env=cisco_api_key_env,
             start_gateway=start_gateway,
             verify=verify,
+            credential_protection=credential_protection,
             json_summary=json_summary,
             verbose=verbose,
         )
@@ -324,15 +331,29 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
 
     cfg_file = config_path()
     is_new_config = not os.path.lexists(cfg_file)
+    requested_credential_protection = credential_protection
+    new_credential_protection_requested = False
     if is_new_config:
         cfg = default_config()
         prepare_fresh_v8_config(cfg)
+        if credential_protection is None:
+            from defenseclaw.credential_protection import (
+                credential_protection_default_enabled,
+            )
+
+            credential_protection = credential_protection_default_enabled()
+        new_credential_protection_requested = bool(credential_protection)
+        cfg.credential_protection.enabled = False
         click.echo("  Config:        " + ux._style("created new defaults", fg="green"))
     else:
         cfg = load()
         if getattr(cfg, "_source_config_version", None) != 8:
             raise click.ClickException("configuration schema v8 is required; run 'defenseclaw upgrade' first")
         click.echo("  Config:        " + ux.dim("preserved existing"))
+
+    previous_connectors = set()
+    if not is_new_config:
+        previous_connectors = {str(name).strip().lower() for name in cfg.active_connectors() if str(name).strip()}
 
     from defenseclaw.bootstrap import (
         FreshMigrationStateError,
@@ -418,6 +439,51 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
         click.echo("  Run 'defenseclaw init --enable-guardrail' or")
         click.echo("  'defenseclaw setup guardrail' to enable the guardrail proxy.")
 
+    credential_step = None
+    if is_new_config or cfg.credential_protection.enabled:
+        ux.banner("Credential broker")
+        should_setup_credentials = (
+            new_credential_protection_requested if is_new_config else cfg.credential_protection.enabled
+        )
+        if should_setup_credentials:
+            from defenseclaw.bootstrap import _setup_credential_protection_structured
+
+            if is_new_config:
+                cfg.credential_protection.enabled = True
+            current_connectors = {str(name).strip().lower() for name in cfg.active_connectors() if str(name).strip()}
+            removed_connectors = sorted(previous_connectors - current_connectors)
+            if is_new_config:
+                credential_step = _setup_credential_protection_structured(
+                    cfg,
+                    removed_connectors=removed_connectors,
+                    already_enabled=False,
+                )
+            elif removed_connectors:
+                credential_step = _setup_credential_protection_structured(
+                    cfg,
+                    removed_connectors=removed_connectors,
+                )
+            else:
+                credential_step = _setup_credential_protection_structured(cfg)
+            if is_new_config and credential_step.status != "pass":
+                cfg.credential_protection.enabled = False
+            if credential_step.status == "fail":
+                ux.err(
+                    f"{credential_step.detail}. Next: {credential_step.next_command}",
+                    indent="  ",
+                )
+            elif credential_step.status == "warn":
+                ux.warn(credential_step.detail)
+            else:
+                ux.ok(credential_step.detail, indent="  ")
+        elif is_new_config:
+            detail = (
+                "opted out"
+                if requested_credential_protection is False
+                else "authenticated s-gw release artifacts are not installed"
+            )
+            click.echo(f"  Credential broker: {detail}")
+
     ux.banner("Skills")
     click.echo("  CodeGuard:     skipped (opt in with 'defenseclaw codeguard install --target skill')")
 
@@ -475,14 +541,25 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
                 )
 
     sidecar_started = False
-    if not sandbox:
+    credential_incomplete = credential_step is not None and (
+        credential_step.status == "fail" or (is_new_config and credential_step.status != "pass")
+    )
+    credential_ready = not credential_incomplete
+    if not sandbox and credential_ready:
         ux.banner("Sidecar")
-        _start_gateway(cfg, logger)
+        _start_gateway(
+            cfg,
+            logger,
+            restart_if_running=credential_step is not None,
+        )
         sidecar_started = True
 
         if guardrail_ok and sidecar_started:
             click.echo("  " + ux.dim("Restarting sidecar to apply guardrail config..."))
             _restart_gateway_quiet()
+    elif not sandbox:
+        ux.banner("Sidecar")
+        ux.warn("Not started because credential-protection setup did not complete.")
 
     from defenseclaw.bootstrap import finalize_first_run_config
 
@@ -501,7 +578,10 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     click.echo()
     click.echo("  " + ux.dim("─" * 54))
     click.echo()
-    ux.ok("DefenseClaw initialized.", indent="  ")
+    if credential_incomplete:
+        ux.warn("DefenseClaw initialized, but the credential broker needs attention.")
+    else:
+        ux.ok("DefenseClaw initialized.", indent="  ")
     click.echo()
     click.echo("  " + ux.bold("Next steps:"))
     if sandbox and not guardrail_ok:
@@ -515,11 +595,12 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     click.echo(f"    {ux.accent('defenseclaw skill scan all')}   " + ux.dim("Scan installed agent skills"))
     click.echo(f"    {ux.accent('defenseclaw mcp scan --all')}   " + ux.dim("Scan configured MCP servers"))
     click.echo(
-        f"    {ux.accent('defenseclaw setup <connector>')} "
-        + ux.dim("Add another agent (codex, claudecode, amp)")
+        f"    {ux.accent('defenseclaw setup <connector>')} " + ux.dim("Add another agent (codex, claudecode, amp)")
     )
 
     store.close()
+    if credential_incomplete:
+        raise SystemExit(1)
 
 
 def _stdin_is_tty() -> bool:
@@ -597,13 +678,16 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
     cisco_api_key_env: str,
     start_gateway: bool | None,
     verify: bool | None,
+    credential_protection: bool | None,
     json_summary: bool,
     verbose: bool,
 ) -> None:
     from defenseclaw.bootstrap import (
         FirstRunOptions,
+        StepResult,
         _next_commands,
         _rollup_status,
+        _start_gateway_structured,
         run_first_run,
     )
     from defenseclaw.config import config_path, default_data_path, source_config_version
@@ -702,8 +786,7 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
     selected_agent_connectors = [
         item["connector"]
         for item in connector_settings
-        if platform_support.host_os() == "windows"
-        and connector_paths.normalize(item["connector"]) == "codex"
+        if platform_support.host_os() == "windows" and connector_paths.normalize(item["connector"]) == "codex"
     ]
     if selected_agent_connectors:
         from defenseclaw.agent_selection import record_setup_agent_selections
@@ -714,16 +797,11 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
                 selected_agent_connectors,
             )
         except OSError as exc:
-            raise click.ClickException(
-                f"could not protect explicit agent executable selection: {exc}"
-            ) from exc
+            raise click.ClickException(f"could not protect explicit agent executable selection: {exc}") from exc
         if selection_errors:
-            details = "; ".join(
-                f"{name}: {detail}" for name, detail in sorted(selection_errors.items())
-            )
+            details = "; ".join(f"{name}: {detail}" for name, detail in sorted(selection_errors.items()))
             raise click.ClickException(
-                "cannot configure native hooks without a freshly verified selected agent executable "
-                f"({details})"
+                f"cannot configure native hooks without a freshly verified selected agent executable ({details})"
             )
     # When extra connectors will be merged in after the primary bootstrap,
     # defer the gateway start to a single reconcile at the end so its
@@ -761,6 +839,8 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
         # invalid values.
         human_approval=primary["human_approval"],
         hilt_min_severity=primary["hilt_min_severity"] or "",
+        credential_protection=credential_protection,
+        defer_credential_protection_setup=bool(extras),
     )
     report = run_first_run(opts)
 
@@ -780,13 +860,66 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
 
     activated = [] if primary["connector"] == "none" else [primary["connector"]]
     if extras:
-        activated, sidecar_step = _activate_additional_connectors(
+        activated, _ = _activate_additional_connectors(
             primary,
             extras,
-            start_gateway=bool(start_gateway),
+            start_gateway=False,
             quiet=json_summary,
             allow_trusted_path_prompt=interactive_wizard,
         )
+        credential_setup_deferred = report.credential_protection_deferred
+        credential_refresh = _refresh_credential_protection_after_connector_activation(
+            report,
+            enable_deferred=credential_setup_deferred,
+        )
+
+        sidecar_step = None
+        if defer_gateway:
+            credential_incomplete = any(
+                step.name == "Credential broker" and step.status == "fail" for step in report.setup
+            )
+            if credential_refresh is not None and (
+                credential_refresh.status == "fail"
+                or (credential_setup_deferred and credential_refresh.status != "pass")
+            ):
+                credential_incomplete = True
+            expected_connectors = {
+                connector_paths.normalize(item["connector"])
+                for item in connector_settings
+                if item["connector"] != "none"
+            }
+            if credential_incomplete:
+                sidecar_step = StepResult(
+                    "Sidecar",
+                    "skip",
+                    "not started because credential-protection setup did not complete",
+                    "defenseclaw setup credential-protection --yes",
+                )
+            elif set(activated) != expected_connectors:
+                sidecar_step = StepResult(
+                    "Sidecar",
+                    "fail",
+                    "not started because connector activation did not complete",
+                    "defenseclaw init",
+                )
+            else:
+                from defenseclaw import config as cfg_mod
+
+                try:
+                    active_cfg = cfg_mod.load()
+                except Exception:  # noqa: BLE001 - keep the report bounded and actionable.
+                    sidecar_step = StepResult(
+                        "Sidecar",
+                        "fail",
+                        "not started because the active configuration could not be reloaded",
+                        "defenseclaw config validate",
+                    )
+                else:
+                    sidecar_step = _start_gateway_structured(
+                        active_cfg,
+                        restart_if_running=credential_refresh is not None,
+                    )
+
         # When the gateway start was deferred (multi-connector + start_gateway),
         # run_first_run recorded a stale "Sidecar not started (--no-start-gateway)"
         # Setup step. Replace it with the real outcome of the reconcile restart
@@ -831,6 +964,68 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
         click.echo("  Configured connectors: " + ", ".join(activated))
     if report.status == "needs_attention":
         raise SystemExit(1)
+
+
+def _refresh_credential_protection_after_connector_activation(
+    report,
+    *,
+    enable_deferred: bool = False,
+):
+    """Reconcile the broker after a first-run connector roster expands."""
+    from defenseclaw import config as cfg_mod
+    from defenseclaw.bootstrap import (
+        StepResult,
+        _credential_protection_readiness,
+        _next_commands,
+        _rollup_status,
+        _setup_credential_protection_structured,
+    )
+
+    if enable_deferred:
+        report.credential_protection_deferred = False
+    cfg = None
+    try:
+        cfg = cfg_mod.load()
+    except Exception:  # noqa: BLE001 - the first-run report is the safe error surface.
+        step = StepResult(
+            "Credential broker",
+            "fail",
+            "could not reload configuration after connector activation",
+            "defenseclaw setup credential-protection --yes",
+        )
+    else:
+        enabled = bool(getattr(getattr(cfg, "credential_protection", None), "enabled", False))
+        if not enabled and not enable_deferred:
+            return None
+        if enable_deferred:
+            cfg.credential_protection.enabled = True
+            step = _setup_credential_protection_structured(cfg, already_enabled=False)
+            if step.status != "pass":
+                cfg.credential_protection.enabled = False
+            else:
+                try:
+                    cfg.save()
+                except OSError as exc:
+                    cfg.credential_protection.enabled = False
+                    step = StepResult(
+                        "Credential broker",
+                        "fail",
+                        f"s-gw is ready, but the enabled setting could not be saved: {exc}",
+                        "defenseclaw setup credential-protection --yes",
+                    )
+        else:
+            step = _setup_credential_protection_structured(cfg)
+
+    report.setup = [item for item in report.setup if item.name != "Credential broker"] + [step]
+    if any(item.name == "Credential broker" for item in report.readiness):
+        if cfg is not None and step.status != "fail" and (not enable_deferred or step.status == "pass"):
+            readiness = _credential_protection_readiness(cfg)
+        else:
+            readiness = step
+        report.readiness = [readiness if item.name == "Credential broker" else item for item in report.readiness]
+    report.status = _rollup_status(report.setup, report.readiness)
+    report.next_commands = _next_commands(report.setup, report.readiness, cfg or report, report.profile)
+    return step
 
 
 def _parse_connector_list(raw: str | None) -> list[str]:
@@ -1057,8 +1252,7 @@ def _note_proxy_connectors(disc) -> None:
     for name in unavailable:
         support = platform_support.connector_platform_support(name)
         ux.warn(
-            f"Detected {name}, but it is {support.status} on "
-            f"{platform_support.host_os()}: {support.reason}",
+            f"Detected {name}, but it is {support.status} on {platform_support.host_os()}: {support.reason}",
             indent="  ",
         )
     if not detected:
@@ -1918,9 +2112,7 @@ def _seed_local_observability_stack(data_dir: str) -> None:
         except OSError as exc:
             click.echo(f"  warning: could not seed observability stack: {exc}", err=True)
             return
-        _refreshed, _preserved, errors = _rsync_overwrite(
-            src=Path(bundled), dest=Path(dest), preserve=()
-        )
+        _refreshed, _preserved, errors = _rsync_overwrite(src=Path(bundled), dest=Path(dest), preserve=())
         if errors:
             for error in errors[:3]:
                 click.echo(f"  warning: could not seed observability stack: {error}", err=True)
@@ -1965,9 +2157,7 @@ def _refresh_observability_stack_scripts(bundled, dest: str) -> list[str]:
     try:
         _assert_safe_bundle_destination(dest_root.parent, dest_root)
     except OSError as exc:
-        click.echo(
-            f"  warning: could not refresh observability stack: {exc}", err=True
-        )
+        click.echo(f"  warning: could not refresh observability stack: {exc}", err=True)
         return refreshed
     for rel in _OBSERVABILITY_STACK_REFRESH_PATHS:
         src = bundled / rel
@@ -2031,12 +2221,7 @@ def _verify_scanner_sdk(name: str, import_name: str, min_python: tuple[int, ...]
         click.echo(f"  {label}{ux._style('available', fg='green')}")
     except ImportError:
         click.echo(f"  {label}{ux._style('not installed', fg='yellow')}")
-        click.echo(
-            "                 "
-            + ux.dim(
-                "repair the managed installation; source checkouts: uv sync"
-            )
-        )
+        click.echo("                 " + ux.dim("repair the managed installation; source checkouts: uv sync"))
 
 
 def _show_scanner_defaults(cfg) -> None:
@@ -2540,7 +2725,7 @@ def _setup_guardrail_inline(app, cfg, logger) -> bool:
     return ok
 
 
-def _start_gateway(cfg, logger) -> None:
+def _start_gateway(cfg, logger, *, restart_if_running: bool = False) -> None:
     """Start the defenseclaw-gateway sidecar and verify it is running."""
     gw_bin = shutil.which("defenseclaw-gateway")
     if not gw_bin:
@@ -2549,16 +2734,18 @@ def _start_gateway(cfg, logger) -> None:
         return
 
     pid_file = os.path.join(cfg.data_dir, "gateway.pid")
-    if _is_sidecar_running(pid_file):
+    running = _is_sidecar_running(pid_file)
+    if running and not restart_if_running:
         pid = _read_pid(pid_file)
         click.echo(f"  Sidecar:       already running (PID {pid})")
         return
 
     started = False
-    click.echo("  Sidecar:       " + ux.dim("starting..."), nl=False)
+    action = "restarting after credential-protection service..." if running else "starting..."
+    click.echo("  Sidecar:       " + ux.dim(action), nl=False)
     try:
         result = subprocess.run(
-            ["defenseclaw-gateway", "start"],
+            [gw_bin, "restart" if running else "start"],
             capture_output=True,
             text=True,
             timeout=30,
@@ -2568,7 +2755,11 @@ def _start_gateway(cfg, logger) -> None:
             pid = _read_pid(pid_file)
             if pid:
                 click.echo(f"  PID:           {ux.bold(str(pid))}")
-            logger.log_action("init-sidecar", "start", f"pid={pid or 'unknown'}")
+            logger.log_action(
+                "init-sidecar",
+                "restart" if running else "start",
+                f"pid={pid or 'unknown'}",
+            )
             started = True
         else:
             click.echo(" " + ux._style("✗", fg="red", bold=True))

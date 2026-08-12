@@ -5,6 +5,7 @@
     "guardrail",
     "sandbox",
     "unified-llm-key",
+    "credential-protection",
     "skill-scanner",
     "mcp-scanner",
     "webhooks",

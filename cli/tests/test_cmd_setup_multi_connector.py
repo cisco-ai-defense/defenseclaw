@@ -117,6 +117,85 @@ class TestAdditiveSetupCommand(unittest.TestCase):
         self.assertEqual(self.app.cfg.claw.mode, "codex")
         self.assertEqual(self.app.cfg.active_connectors(), ["codex", "cursor"])
 
+    def test_enabled_broker_reconciles_an_added_connector(self):
+        self._seed_single("codex")
+        self.app.cfg.credential_protection.enabled = True
+        with (
+            _setup_patches(),
+            patch(
+                "defenseclaw.credential_protection.reconcile_mcp_connector_roster",
+                return_value=[],
+            ) as reconcile,
+        ):
+            result = _invoke(["cursor", "--yes", "--no-restart"], self.app)
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        reconcile.assert_called_once_with(self.app.cfg, removed_connectors=[])
+
+    def test_enabled_broker_removes_replaced_connector_registration(self):
+        self._seed_map("codex", "cursor")
+        self.app.cfg.credential_protection.enabled = True
+        with (
+            _setup_patches(),
+            patch(
+                "defenseclaw.credential_protection.reconcile_mcp_connector_roster",
+                return_value=[],
+            ) as reconcile,
+        ):
+            result = _invoke(
+                ["windsurf", "--replace", "--yes", "--no-restart"],
+                self.app,
+            )
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        reconcile.assert_called_once_with(
+            self.app.cfg,
+            removed_connectors=["codex", "cursor"],
+        )
+
+    def test_bare_batch_reconciles_the_final_selected_roster(self):
+        self._seed_map("codex", "cursor")
+        self.app.cfg.credential_protection.enabled = True
+        with (
+            _setup_patches(),
+            patch(
+                "defenseclaw.credential_protection.reconcile_mcp_connector_roster",
+                return_value=[],
+            ) as reconcile,
+        ):
+            result = _invoke(
+                ["-c", "codex", "--yes", "--no-restart"],
+                self.app,
+            )
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(
+            reconcile.call_args_list[-1].kwargs["removed_connectors"],
+            ["cursor"],
+        )
+
+    def test_broker_reconciliation_failure_is_nonzero(self):
+        from defenseclaw.credential_protection import CredentialProtectionError
+
+        self._seed_single("codex")
+        self.app.cfg.credential_protection.enabled = True
+        with (
+            _setup_patches() as restart,
+            patch(
+                "defenseclaw.credential_protection.reconcile_mcp_connector_roster",
+                side_effect=CredentialProtectionError("managed MCP entry conflicts"),
+            ),
+        ):
+            result = CliRunner().invoke(
+                setup_group,
+                ["cursor", "--yes", "--no-restart"],
+                obj=self.app,
+            )
+
+        self.assertEqual(result.exit_code, 1, msg=result.output)
+        self.assertIn("setup credential-protection --yes", result.output)
+        restart.assert_not_called()
+
     def test_bare_batch_restart_waits_for_every_active_connector(self):
         self._seed_map("codex", "cursor")
         with (
@@ -326,9 +405,7 @@ class TestObservabilitySummaryDisplay(unittest.TestCase):
         cleanup_app(self.app, self.db_path, self.tmp_dir)
 
     def _seed_map(self, *connectors):
-        self.app.cfg.guardrail.connectors = {
-            c: PerConnectorGuardrailConfig() for c in connectors
-        }
+        self.app.cfg.guardrail.connectors = {c: PerConnectorGuardrailConfig() for c in connectors}
         self.app.cfg.guardrail.connector = sorted(connectors)[0]
         self.app.cfg.claw.mode = sorted(connectors)[0]
 
@@ -467,6 +544,27 @@ class TestRemoveConnector(unittest.TestCase):
         self.assertEqual(set(gc.connectors), {"codex"})
         self.assertEqual(gc.connector, "codex")
         self.assertEqual(self.app.cfg.claw.mode, "codex")
+
+    def test_enabled_broker_removes_the_managed_registration(self):
+        self._seed_map("codex", "cursor")
+        self.app.cfg.credential_protection.enabled = True
+        with (
+            self._no_restart_bounce(),
+            patch(
+                "defenseclaw.credential_protection.reconcile_mcp_connector_roster",
+                return_value=[],
+            ) as reconcile,
+        ):
+            result = _invoke(
+                ["remove", "cursor", "--yes", "--no-restart"],
+                self.app,
+            )
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        reconcile.assert_called_once_with(
+            self.app.cfg,
+            removed_connectors=["cursor"],
+        )
 
     # D2=A: removing the last connector without --force is refused, no-op.
     def test_remove_last_without_force_refused(self):
@@ -631,13 +729,46 @@ class TestRemoveConnector(unittest.TestCase):
     # Declining the confirmation prompt is a no-op.
     def test_remove_declined_is_noop(self):
         self._seed_map("codex", "cursor")
-        with self._no_restart_bounce(), patch(
-            "defenseclaw.commands.cmd_setup.click.confirm", return_value=False
-        ):
+        with self._no_restart_bounce(), patch("defenseclaw.commands.cmd_setup.click.confirm", return_value=False):
             result = _invoke(["remove", "cursor", "--no-restart"], self.app)
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn("Aborted", result.output)
         self.assertEqual(set(self.app.cfg.guardrail.connectors), {"codex", "cursor"})
+
+
+class TestGenericGuardrailCredentialRoster(unittest.TestCase):
+    def setUp(self):
+        self.app, self.tmp_dir, self.db_path = make_app_context()
+
+    def tearDown(self):
+        cleanup_app(self.app, self.db_path, self.tmp_dir)
+
+    def test_proxy_connector_save_reconciles_replaced_registration(self):
+        from defenseclaw.commands.cmd_setup import execute_guardrail_setup
+
+        for connector in ("openclaw", "zeptoclaw"):
+            with self.subTest(connector=connector):
+                cfg = self.app.cfg
+                cfg.credential_protection.enabled = True
+                cfg.guardrail.connector = "codex"
+                cfg.guardrail.connectors = {}
+                cfg.claw.mode = "codex"
+                cfg.save()
+
+                cfg.guardrail.connector = connector
+                cfg.claw.mode = connector
+                with patch(
+                    "defenseclaw.credential_protection.reconcile_mcp_connector_roster",
+                    return_value=[],
+                ) as reconcile:
+                    ok, warnings = execute_guardrail_setup(self.app, save_config=True)
+
+                self.assertTrue(ok)
+                self.assertEqual(warnings, [])
+                reconcile.assert_called_once_with(
+                    cfg,
+                    removed_connectors=["codex"],
+                )
 
 
 class TestPerConnectorModeAndPreserve(unittest.TestCase):

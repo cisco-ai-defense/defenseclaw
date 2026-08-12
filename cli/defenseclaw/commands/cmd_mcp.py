@@ -18,7 +18,7 @@
 
 Reads MCP server configuration from the configured connector(s)'
 connector-specific config (openclaw.json, .codex/config.toml,
-.claude/settings.json, .zeptoclaw/config.json, …). For OpenClaw, writes
+.claude.json, .zeptoclaw/config.json, …). For OpenClaw, writes
 go through the ``openclaw config`` CLI so OpenClaw validates the schema
 and hot-reloads cleanly; other connectors are written to their own
 config files. ``list`` defaults to every configured connector; ``scan --all``
@@ -87,8 +87,7 @@ def _parse_args(raw: str) -> list[str]:
                         recovered.append(decoded)
                 except (json.JSONDecodeError, ValueError):
                     raise click.BadParameter(
-                        "malformed JSON array; pass a JSON string array or a "
-                        "comma-separated argument list",
+                        "malformed JSON array; pass a JSON string array or a comma-separated argument list",
                         param_hint="--args",
                     ) from None
                 return recovered
@@ -110,6 +109,7 @@ def mcp() -> None:
 # ---------------------------------------------------------------------------
 # list
 # ---------------------------------------------------------------------------
+
 
 @mcp.command("list")
 @click.option("--json", "as_json", is_flag=True, help="Output as JSON")
@@ -136,9 +136,7 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
 
     all_connectors = resolve_list_connectors(app, "")
     connectors = (
-        resolve_list_connectors(app, connector_flag)
-        if connector_flag and connector_flag.strip()
-        else all_connectors
+        resolve_list_connectors(app, connector_flag) if connector_flag and connector_flag.strip() else all_connectors
     )
     allow_legacy_plain_scans = len(all_connectors) == 1
 
@@ -148,21 +146,30 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
             for c in connectors:
                 servers = _collect_mcps_for_connector(app, c)
                 scan_map = _build_mcp_scan_map(
-                    app.store, servers, c,
+                    app.store,
+                    servers,
+                    c,
                     allow_legacy_plain=allow_legacy_plain_scans,
                 )
                 actions_map = _build_mcp_actions_map(app.store, c)
-                groups.append({
-                    "connector": c,
-                    "mcp_servers": _mcp_list_json_items(
-                        servers, scan_map, actions_map, connector=c,
-                    ),
-                })
+                groups.append(
+                    {
+                        "connector": c,
+                        "mcp_servers": _mcp_list_json_items(
+                            servers,
+                            scan_map,
+                            actions_map,
+                            connector=c,
+                        ),
+                    }
+                )
             click.echo(json.dumps(groups, indent=2, default=str))
         else:
             servers = _collect_mcps_for_connector(app, connectors[0])
             scan_map = _build_mcp_scan_map(
-                app.store, servers, connectors[0],
+                app.store,
+                servers,
+                connectors[0],
                 allow_legacy_plain=allow_legacy_plain_scans,
             )
             actions_map = _build_mcp_actions_map(app.store, connectors[0])
@@ -171,7 +178,10 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
             # --connector request gets an envelope even when empty so JSON
             # automation never has to remember argv to know the scope.
             items = _mcp_list_json_items(
-                servers, scan_map, actions_map, connector=connectors[0],
+                servers,
+                scan_map,
+                actions_map,
+                connector=connectors[0],
             )
             payload = (
                 {"connector": connectors[0], "mcp_servers": items}
@@ -185,14 +195,15 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
     for connector in connectors:
         servers = _collect_mcps_for_connector(app, connector)
         scan_map = _build_mcp_scan_map(
-            app.store, servers, connector,
+            app.store,
+            servers,
+            connector,
             allow_legacy_plain=allow_legacy_plain_scans,
         )
         actions_map = _build_mcp_actions_map(app.store, connector)
         if not servers:
             ux.warn(
-                f"No MCP servers configured for connector={connector!r} "
-                f"(checked: {_mcp_source_hint(connector)}).",
+                f"No MCP servers configured for connector={connector!r} (checked: {_mcp_source_hint(connector)}).",
             )
             continue
         _print_mcp_list_table(servers, scan_map, actions_map, connector)
@@ -200,11 +211,13 @@ def list_mcps(app: AppContext, as_json: bool, connector_flag: str) -> None:
 
     if shown_any:
         from defenseclaw.commands import hint
+
         hint("Scan all servers:  defenseclaw mcp scan --all")
 
 
 def _collect_mcps_for_connector(
-    app: AppContext, connector: str,
+    app: AppContext,
+    connector: str,
 ) -> list[MCPServerEntry]:
     """Return the per-connector MCP server list.
 
@@ -252,7 +265,9 @@ def _mcp_list_json_items(
     out = []
     for s in servers:
         transport = connector_paths.infer_mcp_transport(
-            s.transport, url=s.url, command=s.command,
+            s.transport,
+            url=s.url,
+            command=s.command,
         )
         entry: dict = {"name": s.name, "transport": transport}
         if connector:
@@ -270,7 +285,8 @@ def _mcp_list_json_items(
             if not ae.actions.is_empty():
                 entry["actions"] = ae.actions.to_dict()
         verdict_label, _ = _compute_verdict(
-            actions_map.get(s.name), scan_map.get(s.name),
+            actions_map.get(s.name),
+            scan_map.get(s.name),
         )
         entry["verdict"] = verdict_label
         out.append(entry)
@@ -317,13 +333,16 @@ def _print_mcp_list_table(
             actions_str = actions_map[s.name].actions.summary()
 
         verdict_label, verdict_style = _compute_verdict(
-            actions_map.get(s.name), scan_map.get(s.name),
+            actions_map.get(s.name),
+            scan_map.get(s.name),
         )
 
         table.add_row(
             s.name,
             connector_paths.infer_mcp_transport(
-                s.transport, url=s.url, command=s.command,
+                s.transport,
+                url=s.url,
+                command=s.command,
             ),
             s.command or "",
             s.url or "",
@@ -367,7 +386,7 @@ def _parse_mcp_scoped_scan_target(target: str) -> tuple[str, str]:
     """Return ``(connector, name)`` for connector-scoped MCP scan targets."""
     if not target.startswith(_MCP_SCOPED_SCAN_PREFIX):
         return "", ""
-    rest = target[len(_MCP_SCOPED_SCAN_PREFIX):]
+    rest = target[len(_MCP_SCOPED_SCAN_PREFIX) :]
     if "/" not in rest:
         return "", ""
     connector, name = rest.split("/", 1)
@@ -375,8 +394,11 @@ def _parse_mcp_scoped_scan_target(target: str) -> tuple[str, str]:
 
 
 def _build_mcp_scan_map(
-    store, servers: list[MCPServerEntry], connector: str = "",
-    *, allow_legacy_plain: bool | None = None,
+    store,
+    servers: list[MCPServerEntry],
+    connector: str = "",
+    *,
+    allow_legacy_plain: bool | None = None,
 ) -> dict[str, dict]:
     """Build a map of server-name -> latest scan from the DB."""
     scan_map: dict[str, dict] = {}
@@ -433,7 +455,8 @@ def _build_mcp_scan_map(
 
 
 def _effective_mcp_action_entry(
-    global_entry: ActionEntry | None, scoped_entry: ActionEntry | None,
+    global_entry: ActionEntry | None,
+    scoped_entry: ActionEntry | None,
 ) -> ActionEntry | None:
     """Merge global + scoped rows using policy-engine per-field fallback."""
     if global_entry is None:
@@ -477,7 +500,8 @@ def _build_mcp_actions_map(store, connector: str = "") -> dict:
     for e in entries:
         if connector_paths.normalize(e.connector) == normalized_connector and e.target_name not in scoped_seen:
             actions_map[e.target_name] = _effective_mcp_action_entry(
-                actions_map.get(e.target_name), e,
+                actions_map.get(e.target_name),
+                e,
             )
             scoped_seen.add(e.target_name)
     return actions_map
@@ -486,6 +510,7 @@ def _build_mcp_actions_map(store, connector: str = "") -> dict:
 # ---------------------------------------------------------------------------
 # scan
 # ---------------------------------------------------------------------------
+
 
 def _resolve_scan_target(
     app: AppContext, target: str, connector: str | None = None
@@ -515,14 +540,8 @@ def _resolve_scan_target(
         # connector-specific config (e.g. claudecode → .claude/settings.json),
         # so the legacy filename was misleading. ``connector`` may be None
         # (single-connector default), in which case resolve the active one.
-        searched = connector or (
-            app.cfg.active_connector()
-            if hasattr(app.cfg, "active_connector")
-            else "openclaw"
-        )
-        raise click.ClickException(
-            f"MCP server {target!r} not found for connector {searched!r}.\n{hint}"
-        )
+        searched = connector or (app.cfg.active_connector() if hasattr(app.cfg, "active_connector") else "openclaw")
+        raise click.ClickException(f"MCP server {target!r} not found for connector {searched!r}.\n{hint}")
 
     if server.url:
         return server.url, server
@@ -533,16 +552,21 @@ def _resolve_scan_target(
     )
 
 
-def _run_scan(app: AppContext, target: str, analyzers: str,
-              scan_prompts: bool, scan_resources: bool,
-              scan_instructions: bool,
-              server_entry: MCPServerEntry | None = None,
-              quiet: bool = False,
-              allow_private: bool = False,
-              connector: str = "",
-              json_error_sink: list[dict] | None = None,
-              audit_target: str = "",
-              pack_cache: RulePackOverlayCache | None = None) -> ScanResult | None:
+def _run_scan(
+    app: AppContext,
+    target: str,
+    analyzers: str,
+    scan_prompts: bool,
+    scan_resources: bool,
+    scan_instructions: bool,
+    server_entry: MCPServerEntry | None = None,
+    quiet: bool = False,
+    allow_private: bool = False,
+    connector: str = "",
+    json_error_sink: list[dict] | None = None,
+    audit_target: str = "",
+    pack_cache: RulePackOverlayCache | None = None,
+) -> ScanResult | None:
     """Run the MCP scanner on *target*.  Returns None on fatal error."""
     from dataclasses import replace
 
@@ -594,14 +618,10 @@ def _run_scan(app: AppContext, target: str, analyzers: str,
         if quiet:
             with _route_mcpscanner_logs_to_stderr(), _capture_scan_stdout() as stdout_buffer:
                 captured_stdout = stdout_buffer
-                result = scanner.scan(
-                    target, server_entry=server_entry, allow_private=allow_private
-                )
+                result = scanner.scan(target, server_entry=server_entry, allow_private=allow_private)
             _emit_captured_stdout(captured_stdout.getvalue())
         else:
-            result = scanner.scan(
-                target, server_entry=server_entry, allow_private=allow_private
-            )
+            result = scanner.scan(target, server_entry=server_entry, allow_private=allow_private)
     except SystemExit:
         raise
     except Exception as exc:
@@ -609,7 +629,9 @@ def _run_scan(app: AppContext, target: str, analyzers: str,
             _emit_captured_stdout(captured_stdout.getvalue())
         if quiet:
             payload = _mcp_scan_error_json_payload(
-                target, exc, connector=connector,
+                target,
+                exc,
+                connector=connector,
             )
             if json_error_sink is not None:
                 json_error_sink.append(payload)
@@ -625,7 +647,10 @@ def _run_scan(app: AppContext, target: str, analyzers: str,
 
 
 def _mcp_scan_error_json_payload(
-    target: str, exc: Exception, *, connector: str = "",
+    target: str,
+    exc: Exception,
+    *,
+    connector: str = "",
 ) -> dict:
     payload = {
         "scanner": "mcp-scanner",
@@ -645,7 +670,9 @@ def _mcp_scan_error_json_payload(
 
 
 def _mcp_scan_result_json_payload(
-    result: ScanResult, *, connector: str = "",
+    result: ScanResult,
+    *,
+    connector: str = "",
 ) -> dict:
     payload = json.loads(result.to_json())
     if connector:
@@ -670,8 +697,7 @@ def _route_mcpscanner_logs_to_stderr() -> Iterator[None]:
         "mcpscanner.core.analyzers.llm_analyzer",
     }
     known_names.update(
-        name for name in logging.root.manager.loggerDict
-        if isinstance(name, str) and name.startswith("mcpscanner")
+        name for name in logging.root.manager.loggerDict if isinstance(name, str) and name.startswith("mcpscanner")
     )
 
     loggers = [logging.getLogger(name) for name in sorted(known_names)]
@@ -775,7 +801,10 @@ def _capture_scan_stdout() -> Iterator[io.StringIO]:
 
 
 def _print_scan_result(
-    result: ScanResult, as_json: bool, *, connector: str = "",
+    result: ScanResult,
+    as_json: bool,
+    *,
+    connector: str = "",
 ) -> None:
     """Print the *details* of a scan result.
 
@@ -786,10 +815,12 @@ def _print_scan_result(
     here so call sites don't have to replicate the per-finding loop.
     """
     if as_json:
-        click.echo(json.dumps(
-            _mcp_scan_result_json_payload(result, connector=connector),
-            indent=2,
-        ))
+        click.echo(
+            json.dumps(
+                _mcp_scan_result_json_payload(result, connector=connector),
+                indent=2,
+            )
+        )
         return
     if result.is_clean():
         return
@@ -849,9 +880,9 @@ def _scan_all_mcp(
         # N2: honor a per-connector block — resolve most-specific-wins for the
         # connector being scanned (connector-scoped entry, else global), so a
         # block scoped to a different peer doesn't skip this connector's scan.
-        if pe.is_blocked_for_connector(
-            "mcp", s.name, connector
-        ) or pe.is_blocked_for_connector("mcp", scan_target, connector):
+        if pe.is_blocked_for_connector("mcp", s.name, connector) or pe.is_blocked_for_connector(
+            "mcp", scan_target, connector
+        ):
             if not as_json:
                 click.echo(
                     f"BLOCKED: {s.name} — skipping (remove from block list first)",
@@ -862,10 +893,7 @@ def _scan_all_mcp(
 
     if not scan_targets:
         if not as_json:
-            click.echo(
-                f"No scannable MCP servers for connector={connector!r} "
-                "(all blocked or none configured)."
-            )
+            click.echo(f"No scannable MCP servers for connector={connector!r} (all blocked or none configured).")
         return []
     ctx = _scan_ui.ScanContext.for_mcp(
         connector=connector,
@@ -881,9 +909,14 @@ def _scan_all_mcp(
     for s, scan_target in scan_targets:
         json_errors: list[dict] = []
         result = _run_scan(
-            app, scan_target, analyzers,
-            scan_prompts, scan_resources, scan_instructions,
-            server_entry=s, quiet=as_json,
+            app,
+            scan_target,
+            analyzers,
+            scan_prompts,
+            scan_resources,
+            scan_instructions,
+            server_entry=s,
+            quiet=as_json,
             allow_private=allow_private,
             connector=connector,
             json_error_sink=json_errors if as_json else None,
@@ -896,7 +929,9 @@ def _scan_all_mcp(
                 json_rows.extend(json_errors)
             else:
                 _scan_ui.render_per_target_status(
-                    ctx, target=s.name, verdict=_scan_ui.VERDICT_ERROR,
+                    ctx,
+                    target=s.name,
+                    verdict=_scan_ui.VERDICT_ERROR,
                     detail="see error log above",
                 )
             continue
@@ -906,7 +941,10 @@ def _scan_all_mcp(
             if result.is_clean():
                 clean += 1
                 _scan_ui.render_per_target_status(
-                    ctx, target=s.name, verdict=_scan_ui.VERDICT_CLEAN, findings=0,
+                    ctx,
+                    target=s.name,
+                    verdict=_scan_ui.VERDICT_CLEAN,
+                    findings=0,
                 )
             else:
                 blocked += 1
@@ -930,6 +968,7 @@ def _scan_all_mcp(
             duration_ms=duration_ms,
         )
         from defenseclaw.commands import hint
+
         if blocked:
             hint("View alerts:  defenseclaw alerts")
     if error_count_sink is not None:
@@ -944,14 +983,13 @@ def _connector_has_server(app: AppContext, connector: str, name: str) -> bool:
 
 def _connector_owns_mcp_target(app: AppContext, connector: str, target: str) -> bool:
     """True when *connector* registers *target* as an MCP name or URL."""
-    return any(
-        s.name == target or (s.url and s.url == target)
-        for s in app.cfg.mcp_servers(connector)
-    )
+    return any(s.name == target or (s.url and s.url == target) for s in app.cfg.mcp_servers(connector))
 
 
 def _mcp_policy_fanout_connectors(
-    app: AppContext, pe, target: str,
+    app: AppContext,
+    pe,
+    target: str,
 ) -> list[str]:
     """Connectors where a bare MCP policy command should apply.
 
@@ -989,7 +1027,9 @@ def _mcp_policy_fanout_connectors(
 
 
 def _mcp_has_connector_enforcement(
-    app: AppContext, target: str, connector: str,
+    app: AppContext,
+    target: str,
+    connector: str,
 ) -> bool:
     if app.store is None:
         return False
@@ -1002,7 +1042,9 @@ def _mcp_has_connector_enforcement(
 
 
 def _scan_name_not_found_msg(
-    app: AppContext, target: str, connectors: list[str],
+    app: AppContext,
+    target: str,
+    connectors: list[str],
 ) -> str:
     """Build the 'not found on any configured connector' message for a bare name.
 
@@ -1010,18 +1052,13 @@ def _scan_name_not_found_msg(
     source) and lists what *is* available, rather than the legacy hardcoded
     'openclaw.json' mental model.
     """
-    available = sorted({
-        s.name for c in connectors for s in app.cfg.mcp_servers(c)
-    })
+    available = sorted({s.name for c in connectors for s in app.cfg.mcp_servers(c)})
     avail = (
         f"  Available: {', '.join(available)}"
         if available
         else "  No MCP servers configured on any configured connector."
     )
-    return (
-        f"MCP server {target!r} not found on any configured connector "
-        f"({', '.join(connectors)}).\n{avail}"
-    )
+    return f"MCP server {target!r} not found on any configured connector ({', '.join(connectors)}).\n{avail}"
 
 
 def _scan_one_resolved(
@@ -1067,14 +1104,22 @@ def _scan_one_resolved(
             return "policy-blocked"
 
     ctx = _scan_ui.ScanContext.for_mcp(
-        connector=connector, paths=[resolved], as_json=as_json,
+        connector=connector,
+        paths=[resolved],
+        as_json=as_json,
     )
     _scan_ui.render_preamble(ctx, target_count=1)
 
     started = time.monotonic()
     result = _run_scan(
-        app, resolved, analyzers, scan_prompts, scan_resources,
-        scan_instructions, server_entry=entry, quiet=as_json,
+        app,
+        resolved,
+        analyzers,
+        scan_prompts,
+        scan_resources,
+        scan_instructions,
+        server_entry=entry,
+        quiet=as_json,
         allow_private=allow_private,
         connector=connector,
         audit_target=_mcp_scoped_scan_target(connector, entry.name) if entry else "",
@@ -1089,7 +1134,10 @@ def _scan_one_resolved(
 
     if result.is_clean():
         _scan_ui.render_per_target_status(
-            ctx, target=target, verdict=_scan_ui.VERDICT_CLEAN, findings=0,
+            ctx,
+            target=target,
+            verdict=_scan_ui.VERDICT_CLEAN,
+            findings=0,
         )
     else:
         _scan_ui.render_per_target_status(
@@ -1128,14 +1176,15 @@ def _scan_one_resolved(
 @click.option("--scan-resources", is_flag=True, help="Also scan MCP resources")
 @click.option("--scan-instructions", is_flag=True, help="Also scan server instructions")
 @click.option(
-    "--all", "scan_all", is_flag=True,
-    help=(
-        "Scan every configured server across configured connectors "
-        "(use --connector <name> to scope to one)."
-    ),
+    "--all",
+    "scan_all",
+    is_flag=True,
+    help=("Scan every configured server across configured connectors (use --connector <name> to scope to one)."),
 )
 @click.option(
-    "--connector", "connector_flag", default="",
+    "--connector",
+    "connector_flag",
+    default="",
     help=(
         "Scope scanning to one connector: narrows a bare-name lookup to it, "
         "scans just that connector when no TARGET is given, or limits --all "
@@ -1143,7 +1192,9 @@ def _scan_one_resolved(
     ),
 )
 @click.option(
-    "--allow-private", "allow_private", is_flag=True,
+    "--allow-private",
+    "allow_private",
+    is_flag=True,
     help=(
         "Opt in to scanning remote MCP targets that resolve to private, "
         "loopback, link-local or CGNAT addresses (blocked by default to "
@@ -1197,8 +1248,14 @@ def scan(
             if len(connectors) > 1 and not as_json:
                 click.secho(f"\n── connector: {c} ──", fg="cyan")
             rows = _scan_all_mcp(
-                app, c, analyzers, scan_prompts, scan_resources, scan_instructions,
-                as_json, allow_private=allow_private,
+                app,
+                c,
+                analyzers,
+                scan_prompts,
+                scan_resources,
+                scan_instructions,
+                as_json,
+                allow_private=allow_private,
                 error_count_sink=error_counts,
                 pack_cache=pack_cache,
             )
@@ -1217,8 +1274,14 @@ def scan(
             connector = resolve_list_connector(app, connector_flag)
             error_counts: list[int] = []
             rows = _scan_all_mcp(
-                app, connector, analyzers, scan_prompts, scan_resources,
-                scan_instructions, as_json, allow_private=allow_private,
+                app,
+                connector,
+                analyzers,
+                scan_prompts,
+                scan_resources,
+                scan_instructions,
+                as_json,
+                allow_private=allow_private,
                 error_count_sink=error_counts,
                 pack_cache=pack_cache,
             )
@@ -1296,6 +1359,7 @@ def scan(
     if errored:
         raise SystemExit(1)
 
+
 # ---------------------------------------------------------------------------
 # block / allow / unblock  (accept name or url)
 #
@@ -1349,14 +1413,21 @@ def block(app: AppContext, target: str, reason: str, connector_flag: str) -> Non
     if connector:
         if pe.is_blocked_for_connector("mcp", target, connector):
             if app.store and app.store.has_action(
-                "mcp", target, "install", "block", connector,
+                "mcp",
+                target,
+                "install",
+                "block",
+                connector,
             ):
                 click.echo(f"Already blocked for {connector}: {target}")
             else:
                 click.echo(f"Already blocked globally (covers {connector}): {target}")
             return
         pe.block_for_connector(
-            "mcp", target, connector, reason or "manually blocked via CLI",
+            "mcp",
+            target,
+            connector,
+            reason or "manually blocked via CLI",
         )
         click.secho(f"Blocked: {target} (connector={connector})", fg="red")
     else:
@@ -1368,7 +1439,9 @@ def block(app: AppContext, target: str, reason: str, connector_flag: str) -> Non
 
     if app.logger:
         app.logger.log_action(
-            "block-mcp", target, f"reason={reason} connector={connector}",
+            "block-mcp",
+            target,
+            f"reason={reason} connector={connector}",
         )
 
 
@@ -1376,7 +1449,9 @@ def block(app: AppContext, target: str, reason: str, connector_flag: str) -> Non
 @click.argument("target")
 @click.option("--reason", default="", help="Reason for allowing")
 @click.option(
-    "--connector", "connector_flag", default="",
+    "--connector",
+    "connector_flag",
+    default="",
     help=(
         "Scope to one connector. Default: allow matching configured server "
         "copies and clear stale scoped blocks. "
@@ -1399,14 +1474,21 @@ def allow(app: AppContext, target: str, reason: str, connector_flag: str) -> Non
     if connector:
         if pe.is_allowed_for_connector("mcp", target, connector):
             if app.store and app.store.has_action(
-                "mcp", target, "install", "allow", connector,
+                "mcp",
+                target,
+                "install",
+                "allow",
+                connector,
             ):
                 click.echo(f"Already allowed for {connector}: {target}")
             else:
                 click.echo(f"Already allowed globally (covers {connector}): {target}")
             return
         pe.allow_for_connector(
-            "mcp", target, connector, reason or "manually allowed via CLI",
+            "mcp",
+            target,
+            connector,
+            reason or "manually allowed via CLI",
         )
         click.secho(f"Allowed: {target} (connector={connector})", fg="green")
     else:
@@ -1427,7 +1509,9 @@ def allow(app: AppContext, target: str, reason: str, connector_flag: str) -> Non
                 pe.remove_action("mcp", target)
             if app.logger:
                 app.logger.log_action(
-                    "allow-mcp", target, f"reason={reason} connector=all",
+                    "allow-mcp",
+                    target,
+                    f"reason={reason} connector=all",
                 )
             return
         if pe.is_allowed("mcp", target):
@@ -1438,14 +1522,18 @@ def allow(app: AppContext, target: str, reason: str, connector_flag: str) -> Non
 
     if app.logger:
         app.logger.log_action(
-            "allow-mcp", target, f"reason={reason} connector={connector}",
+            "allow-mcp",
+            target,
+            f"reason={reason} connector={connector}",
         )
 
 
 @mcp.command()
 @click.argument("target")
 @click.option(
-    "--connector", "connector_flag", default="",
+    "--connector",
+    "connector_flag",
+    default="",
     help=(
         "Scope to one connector. Default: clear matching connector copies and "
         "unscoped state. "
@@ -1490,8 +1578,7 @@ def unblock(app: AppContext, target: str, connector_flag: str) -> None:
             or app.store.has_action("mcp", target, "runtime", "disable")
         )
         has_scoped_state = any(
-            _mcp_has_connector_enforcement(app, target, target_connector)
-            for target_connector in targets
+            _mcp_has_connector_enforcement(app, target, target_connector) for target_connector in targets
         )
         if targets and (has_unscoped_state or has_scoped_state):
             for target_connector in targets:
@@ -1504,12 +1591,12 @@ def unblock(app: AppContext, target: str, connector_flag: str) -> None:
                 )
             if has_unscoped_state:
                 pe.remove_action("mcp", target)
-            click.echo(
-                "  The server will go through normal scanning on next check."
-            )
+            click.echo("  The server will go through normal scanning on next check.")
             if app.logger:
                 app.logger.log_action(
-                    "mcp-unblock", target, "manual unblock via CLI connector=all",
+                    "mcp-unblock",
+                    target,
+                    "manual unblock via CLI connector=all",
                 )
             return
         has_state = has_unscoped_state
@@ -1524,17 +1611,16 @@ def unblock(app: AppContext, target: str, connector_flag: str) -> None:
         pe.remove_action("mcp", target)
     scope = f" (connector={connector})" if connector else ""
     click.secho(
-        f"[mcp] {target!r} all enforcement state cleared{scope} "
-        f"(allow/block/quarantine/disable)",
+        f"[mcp] {target!r} all enforcement state cleared{scope} (allow/block/quarantine/disable)",
         fg="green",
     )
-    click.echo(
-        "  The server will go through normal scanning on next check."
-    )
+    click.echo("  The server will go through normal scanning on next check.")
 
     if app.logger:
         app.logger.log_action(
-            "mcp-unblock", target, f"manual unblock via CLI connector={connector}",
+            "mcp-unblock",
+            target,
+            f"manual unblock via CLI connector={connector}",
         )
 
 
@@ -1552,13 +1638,17 @@ def unblock(app: AppContext, target: str, connector_flag: str) -> None:
 # safe write surface — we surface a clear error rather than racing
 # ZeptoClaw's autosave.
 
+
 def _openclaw_config_set(path: str, value: str) -> None:
     """Write a value via ``openclaw config set`` (schema-validated, hot-reloaded)."""
     from defenseclaw.config import openclaw_bin, openclaw_cmd_prefix
+
     prefix = openclaw_cmd_prefix()
     result = subprocess.run(
         [*prefix, openclaw_bin(), "config", "set", path, value, "--strict-json"],
-        capture_output=True, text=True, timeout=15,
+        capture_output=True,
+        text=True,
+        timeout=15,
     )
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip()
@@ -1568,10 +1658,13 @@ def _openclaw_config_set(path: str, value: str) -> None:
 def _openclaw_config_unset(path: str) -> None:
     """Remove a value via ``openclaw config unset``."""
     from defenseclaw.config import openclaw_bin, openclaw_cmd_prefix
+
     prefix = openclaw_cmd_prefix()
     result = subprocess.run(
         [*prefix, openclaw_bin(), "config", "unset", path],
-        capture_output=True, text=True, timeout=15,
+        capture_output=True,
+        text=True,
+        timeout=15,
     )
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip()
@@ -1668,10 +1761,7 @@ def _opencode_command_trust_error(cmd: str) -> str | None:
             "to launch this server until it is installed/resolvable"
         )
     if not _is_trusted_binary_path(resolved):
-        return (
-            f"opencode will EXECUTE {c!r} (resolved {resolved!r}), which is not "
-            "in a trusted install prefix"
-        )
+        return f"opencode will EXECUTE {c!r} (resolved {resolved!r}), which is not in a trusted install prefix"
     return None
 
 
@@ -1689,7 +1779,9 @@ def _opencode_command_trust_error(cmd: str) -> str | None:
     help="For opencode only: write a command outside trusted install prefixes.",
 )
 @click.option(
-    "--connector", "connector_flag", default="",
+    "--connector",
+    "connector_flag",
+    default="",
     help="Scope to one connector's MCP config (default: every configured connector)",
 )
 @pass_ctx
@@ -1813,17 +1905,23 @@ def set_server(
         # Mirror runtime env.
         scan_env = entry.get("env") if isinstance(entry.get("env"), dict) else {}
         scan_entry = MCPServerEntry(
-            name=name, command=cmd, args=parsed_args, url=url, transport=transport,
+            name=name,
+            command=cmd,
+            args=parsed_args,
+            url=url,
+            transport=transport,
             env=dict(scan_env),
         )
-        audit_target = (
-            _mcp_scoped_scan_target(connectors[0], name)
-            if len(connectors) == 1
-            else ""
-        )
+        audit_target = _mcp_scoped_scan_target(connectors[0], name) if len(connectors) == 1 else ""
         result = _run_scan(
-            app, url or name, "", False, False, False,
-            server_entry=scan_entry, audit_target=audit_target,
+            app,
+            url or name,
+            "",
+            False,
+            False,
+            False,
+            server_entry=scan_entry,
+            audit_target=audit_target,
         )
         if result is None:
             click.secho("Scan failed — use --skip-scan to add anyway.", fg="yellow")
@@ -1831,10 +1929,10 @@ def set_server(
         _print_scan_result(result, as_json=False)
 
     applied: list[str] = []
-    skipped: list[str] = []          # connector has no writable MCP surface
-    policy_blocked: list[str] = []   # rejected by block list / asset rule
-    scan_rejected: list[str] = []    # rejected by scan-findings policy
-    invalid_input: list[str] = []    # opencode name/command failed validation
+    skipped: list[str] = []  # connector has no writable MCP surface
+    policy_blocked: list[str] = []  # rejected by block list / asset rule
+    scan_rejected: list[str] = []  # rejected by scan-findings policy
+    invalid_input: list[str] = []  # opencode name/command failed validation
     write_failed: list[tuple[str, Exception]] = []  # unexpected write error
     for c in connectors:
         pre_c = pre[c]
@@ -1856,10 +1954,7 @@ def set_server(
             trust_err = _opencode_command_trust_error(cmd)
             if trust_err:
                 if force_untrusted_command:
-                    ux.warn(
-                        f"{trust_err}. Proceeding because "
-                        "--force-untrusted-command was supplied."
-                    )
+                    ux.warn(f"{trust_err}. Proceeding because --force-untrusted-command was supplied.")
                 else:
                     click.secho(
                         f"  refused [{c}]: {trust_err}. Add the directory to "
@@ -1882,8 +1977,7 @@ def set_server(
             if post_c.verdict == "rejected":
                 sev = result.max_severity()
                 click.secho(
-                    f"  blocked [{c}]: {sev} findings — rejected by mcp_actions policy "
-                    "(use --skip-scan to override)",
+                    f"  blocked [{c}]: {sev} findings — rejected by mcp_actions policy (use --skip-scan to override)",
                     fg="red",
                 )
                 scan_rejected.append(c)
@@ -1919,7 +2013,8 @@ def set_server(
                 pe.block_for_connector("mcp", name, c, reason)
             if app.logger:
                 app.logger.log_action(
-                    "mcp-set-blocked", name,
+                    "mcp-set-blocked",
+                    name,
                     f"severity={result.max_severity()} findings={len(result.findings)} "
                     f"connectors={','.join(scan_rejected)}",
                 )
@@ -1935,25 +2030,17 @@ def set_server(
             reasons.append(f"invalid input: {', '.join(invalid_input)}")
         if write_failed:
             reasons.append(f"write failed: {', '.join(c for c, _ in write_failed)}")
-        raise click.ClickException(
-            f"MCP set failed: no connector accepted {name!r} ({'; '.join(reasons)})."
-        )
+        raise click.ClickException(f"MCP set failed: no connector accepted {name!r} ({'; '.join(reasons)}).")
 
-    not_applied = (
-        policy_blocked + scan_rejected + skipped + invalid_input
-        + [c for c, _ in write_failed]
-    )
+    not_applied = policy_blocked + scan_rejected + skipped + invalid_input + [c for c, _ in write_failed]
     # Always name the connectors that did NOT receive the server, even when the
     # server landed on 2+ connectors — otherwise a partial fan-out (e.g. 2
     # applied, 1 policy-blocked) prints a green "Added to 2 connectors" line
     # that silently omits the blocked/skipped peer.
-    not_applied_suffix = (
-        f" ({len(not_applied)} not applied: {', '.join(not_applied)})" if not_applied else ""
-    )
+    not_applied_suffix = f" ({len(not_applied)} not applied: {', '.join(not_applied)})" if not_applied else ""
     if len(applied) > 1:
         click.secho(
-            f"Added MCP server: {name} to {len(applied)} connectors: "
-            f"{', '.join(applied)}{not_applied_suffix}",
+            f"Added MCP server: {name} to {len(applied)} connectors: {', '.join(applied)}{not_applied_suffix}",
             fg="green",
         )
     elif not_applied:
@@ -1972,19 +2059,20 @@ def set_server(
     # partial application, while the connectors that did land are kept.
     if write_failed:
         if app.logger:
-            app.logger.log_action(
-                "mcp-set-failed", name, f"connectors={','.join(c for c, _ in write_failed)}"
-            )
+            app.logger.log_action("mcp-set-failed", name, f"connectors={','.join(c for c, _ in write_failed)}")
         raise SystemExit(1)
 
     from defenseclaw.commands import hint
+
     hint(f"Scan it now:  defenseclaw mcp scan {name}")
 
 
 @mcp.command("unset")
 @click.argument("name")
 @click.option(
-    "--connector", "connector_flag", default="",
+    "--connector",
+    "connector_flag",
+    default="",
     help="Scope to one connector's MCP config (default: every configured connector)",
 )
 @pass_ctx
@@ -2024,17 +2112,14 @@ def unset_server(app: AppContext, name: str, connector_flag: str) -> None:
     if not removed:
         if write_failed:
             raise click.ClickException(
-                f"MCP server {name!r} removal failed on: "
-                f"{', '.join(c for c, _ in write_failed)}."
+                f"MCP server {name!r} removal failed on: {', '.join(c for c, _ in write_failed)}."
             )
         if skipped:
             raise click.ClickException(
-                f"MCP server {name!r} is present but not removable on: "
-                f"{', '.join(skipped)} (no writable MCP surface)."
+                f"MCP server {name!r} is present but not removable on: {', '.join(skipped)} (no writable MCP surface)."
             )
         click.secho(
-            f"MCP server {name!r} not configured on: {', '.join(connectors)}; "
-            "nothing to remove.",
+            f"MCP server {name!r} not configured on: {', '.join(connectors)}; nothing to remove.",
             fg="yellow",
         )
         if app.logger:
@@ -2045,8 +2130,7 @@ def unset_server(app: AppContext, name: str, connector_flag: str) -> None:
         click.secho(f"Removed MCP server: {name} from {', '.join(removed)}", fg="yellow")
     elif skipped:
         click.secho(
-            f"Removed MCP server: {name} from {removed[0]} "
-            f"({len(skipped)} skipped: {', '.join(skipped)})",
+            f"Removed MCP server: {name} from {removed[0]} ({len(skipped)} skipped: {', '.join(skipped)})",
             fg="yellow",
         )
     else:
@@ -2060,7 +2144,5 @@ def unset_server(app: AppContext, name: str, connector_flag: str) -> None:
     # up are kept.
     if write_failed:
         if app.logger:
-            app.logger.log_action(
-                "mcp-unset-failed", name, f"connectors={','.join(c for c, _ in write_failed)}"
-            )
+            app.logger.log_action("mcp-unset-failed", name, f"connectors={','.join(c for c, _ in write_failed)}")
         raise SystemExit(1)

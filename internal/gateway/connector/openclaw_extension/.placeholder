@@ -1,1 +1,1 @@
-OpenClaw extension bundle is not present in this source checkout.
+This tracked marker keeps the OpenClaw embed directory available to go:embed.

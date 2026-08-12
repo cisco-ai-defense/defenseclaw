@@ -773,11 +773,15 @@ if (-not $Version) { $Version = Get-ProjectVersion }
 if ($Version -notmatch '^\d+\.\d+\.\d+(-[A-Za-z0-9_.-]+)?$') {
     throw "Invalid version for installer payload: $Version"
 }
+$numericVersion = [Version]([regex]::Match($Version, '^\d+\.\d+\.\d+').Value)
+$requiresSgwSbom = $numericVersion -ge [Version]'0.8.11'
 $gatewayZip = Join-Path $dist "defenseclaw_${Version}_windows_amd64.zip"
 $wheel = Join-Path $dist "defenseclaw-$Version-py3-none-any.whl"
+$sgwSbom = "$wheel.sbom.json"
 $upgradeManifest = Join-Path $dist 'upgrade-manifest.json'
 Copy-RequiredFile $gatewayZip $gatewayZip
 Copy-RequiredFile $wheel $wheel
+if ($requiresSgwSbom) { Copy-RequiredFile $sgwSbom $sgwSbom }
 Copy-RequiredFile $upgradeManifest $upgradeManifest
 
 Add-Type -AssemblyName System.IO.Compression.FileSystem
@@ -1246,6 +1250,32 @@ try {
     $releaseAuthenticode | ConvertTo-Json -Depth 16 |
         Set-Content -LiteralPath $authenticodeInventoryPath -Encoding UTF8
 
+    $provenanceInputs = [ordered]@{
+        gateway_archive = (Split-Path -Leaf $gatewayZip)
+        gateway_archive_sha256 = Get-FileHashHex $gatewayZip
+        embedded_gateway_archive_sha256 = Get-FileHashHex $embeddedGatewayZip
+        embedded_payload_sha256 = Get-FileHashHex $embeddedPayload
+        hook_launcher_sha256 = Get-FileHashHex $hookLauncher
+        product_executables_authenticode_signed = $payloadSigned
+        wheel = (Split-Path -Leaf $wheel)
+        wheel_sha256 = Get-FileHashHex $wheel
+        python_embed = $PythonEmbedName
+        python_embed_sha256 = $PythonEmbedSha256.ToLowerInvariant()
+        site_packages_sha256 = Get-FileHashHex $siteZip
+        yara_compat_wheel = (Split-Path -Leaf $yaraCompatWheel)
+        yara_compat_wheel_sha256 = $yaraCompatSha256
+        cosign_sha256 = Get-FileHashHex (Join-Path $payload 'cosign.exe')
+        payload_manifest_sha256 = Get-FileHashHex (Join-Path $payload 'manifest.json')
+        go_component_inventory_sha256 = Get-FileHashHex $goInventoryPath
+        payload_files = $files
+        windows_resource_policy = 'internal/windowsresources'
+        windows_resource_icon = 'macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png'
+        windows_resource_icon_sha256 = Get-FileHashHex $resourceIcon
+    }
+    if ($requiresSgwSbom) {
+        $provenanceInputs['sgw_sbom'] = (Split-Path -Leaf $sgwSbom)
+        $provenanceInputs['sgw_sbom_sha256'] = Get-FileHashHex $sgwSbom
+    }
     $provenance = [ordered]@{
         schema_version = 1
         artifact = (Split-Path -Leaf $setupPath)
@@ -1256,33 +1286,12 @@ try {
         built_at_utc = if ($signed) { [DateTime]::UtcNow.ToString('o') } else { $reproducibleBuiltAt }
         unsigned = -not $signed
         authenticode = $releaseAuthenticode
-        inputs = [ordered]@{
-            gateway_archive = (Split-Path -Leaf $gatewayZip)
-            gateway_archive_sha256 = Get-FileHashHex $gatewayZip
-            embedded_gateway_archive_sha256 = Get-FileHashHex $embeddedGatewayZip
-            embedded_payload_sha256 = Get-FileHashHex $embeddedPayload
-            hook_launcher_sha256 = Get-FileHashHex $hookLauncher
-            product_executables_authenticode_signed = $payloadSigned
-            wheel = (Split-Path -Leaf $wheel)
-            wheel_sha256 = Get-FileHashHex $wheel
-            python_embed = $PythonEmbedName
-            python_embed_sha256 = $PythonEmbedSha256.ToLowerInvariant()
-            site_packages_sha256 = Get-FileHashHex $siteZip
-            yara_compat_wheel = (Split-Path -Leaf $yaraCompatWheel)
-            yara_compat_wheel_sha256 = $yaraCompatSha256
-            cosign_sha256 = Get-FileHashHex (Join-Path $payload 'cosign.exe')
-            payload_manifest_sha256 = Get-FileHashHex (Join-Path $payload 'manifest.json')
-            go_component_inventory_sha256 = Get-FileHashHex $goInventoryPath
-            payload_files = $files
-            windows_resource_policy = 'internal/windowsresources'
-            windows_resource_icon = 'macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png'
-            windows_resource_icon_sha256 = Get-FileHashHex $resourceIcon
-        }
+        inputs = $provenanceInputs
         toolchain = $manifest.toolchain
     }
     $provenance | ConvertTo-Json -Depth 16 | Set-Content -LiteralPath $provenancePath -Encoding UTF8
 
-    Invoke-CheckedProcess $validationPython @(
+    $sbomArguments = @(
         $WindowsArtifactHelper, 'sbom',
         '--setup', $setupPath,
         '--payload-root', $payload,
@@ -1296,6 +1305,8 @@ try {
         '--go-inventory', $goInventoryPath,
         '--authenticode-inventory', $authenticodeInventoryPath
     )
+    if ($requiresSgwSbom) { $sbomArguments += @('--sgw-sbom', $sgwSbom) }
+    Invoke-CheckedProcess $validationPython $sbomArguments
     $sbom = Get-Content -LiteralPath $sbomPath -Raw -Encoding UTF8 | ConvertFrom-Json
     if ([string]$sbom.spdxVersion -ne 'SPDX-2.3' -or
         [string]$sbom.dataLicense -ne 'CC0-1.0' -or

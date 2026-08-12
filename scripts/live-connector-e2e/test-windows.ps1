@@ -1280,7 +1280,7 @@ private-secret-name = "DefenseClaw must remain redacted"
         $wizardHarnessText -notmatch 'if \(-not \$ActivateInstall\) \{ return \}' -and
         $nativeHarnessText -match "Name -eq 'wizard-driver\.log'") `
         'wizard automation records and prioritizes bounded install and cancel diagnostics'
-    foreach ($controlID in @(1001, 1002, 1003, 1009, 1011)) {
+    foreach ($controlID in @(1001, 1002, 1003, 1005, 1009, 1011)) {
         Assert-True ($wizardHarnessText -match "Get-WizardControl \`$window $controlID") `
             "wizard automation reaches required real control id $controlID"
     }
@@ -1291,8 +1291,10 @@ private-secret-name = "DefenseClaw must remain redacted"
         $wizardHarnessText -match 'foreach \(\$index in 0\.\.1\)' -and
         $wizardHarnessText -match 'connectorIndices\s*=\s*@\{[^}]*amp\s*=\s*3' -and
         $wizardHarnessText -match 'Set-AndAssertCheckState \$startControl \$false' -and
-        $wizardHarnessText -match 'Set-AndAssertCheckState \$startControl \$true') `
-        'wizard automation deterministically exercises every connector, mode, and start choice'
+        $wizardHarnessText -match 'Set-AndAssertCheckState \$startControl \$true' -and
+        $wizardHarnessText -match 'Set-AndAssertCheckState \$credentialControl \$false' -and
+        $wizardHarnessText -match 'Set-AndAssertCheckState \$credentialControl \$true') `
+        'wizard automation deterministically exercises every connector, mode, start, and credential-protection choice'
     Assert-True ($wizardHarnessText -match "Send-WizardCommand \`$window 1 'Install'" -and
         $wizardHarnessText -match "heading -ne 'DefenseClaw is installed'" -and
         $wizardHarnessText -match "Send-WizardCommand \`$window 1 'Finish'") `
@@ -1353,12 +1355,14 @@ private-secret-name = "DefenseClaw must remain redacted"
     ).Value
     Assert-True ($contractFunction -match 'DefenseClawSetup-x64\.exe' -and
         $contractFunction -match "'CONNECTOR=none'" -and
+        $contractFunction -match "'CREDENTIALPROTECTION=0'" -and
+        $contractFunction -match 'Assert-SetupCredentialProtectionState' -and
         $contractFunction -match 'Assert-ManagedDistributionIntegrity' -and
         $contractFunction -match "@\('/uninstall', '/quiet', 'DELETEUSERDATA=1'\)" -and
         $contractFunction -notmatch 'Install-PackagedArtifacts' -and
         $contractFunction -notmatch 'scripts\\install\.ps1') `
         'connector contract installs, validates, and removes the exact native Setup artifact'
-    Assert-True ($nativeWorkflowText -match '(?s)Required setup, allow/block, audit, telemetry, timeout, and teardown contract.*?invoke-windows-setup-standard-user-ci\.ps1.*?-Mode contract.*?-Connector \$env:CONNECTOR.*?-DiagnosticsRoot \$env:DC_DIAGNOSTICS' -and
+    Assert-True ($nativeWorkflowText -match '(?s)Required setup, allow/block, audit, telemetry, timeout, and teardown contract.*?invoke-windows-setup-standard-user-ci\.ps1.*?-Mode contract.*?-Connector \$env:CONNECTOR.*?-DiagnosticsRoot \$env:DC_DIAGNOSTICS.*?-NoCredentialProtection' -and
         $nativeWorkflowText -notmatch '\./scripts/windows-native-ci\.ps1 -Operation contract') `
         'hosted connector contracts run as disposable real standard users and preserve the matrix connector'
     Assert-True ($nativeWorkflowText -notmatch '-Operation acceptance\b' -and
@@ -1540,6 +1544,7 @@ private-secret-name = "DefenseClaw must remain redacted"
         'disposable acceptance revalidates the exact single-link Setup handle before and after the lifecycle'
     Assert-True ($releaseWorkflowText -match 'invoke-windows-setup-standard-user-ci\.ps1' -and
         $releaseWorkflowText -match '-Mode setup-acceptance' -and
+        $releaseWorkflowText -notmatch '(?s)Validate the exact installer lifecycle.*?-NoCredentialProtection' -and
         $releaseWorkflowText -notmatch '(?s)Validate the exact installer lifecycle.*?-AllowCurrentUserSetupAcceptance') `
         'Setup acceptance uses the same real standard-user boundary'
     Assert-True ($nativeWorkflowText -match 'Always clean isolated processes, listeners, and temp state') 'required jobs have cleanup safety nets'

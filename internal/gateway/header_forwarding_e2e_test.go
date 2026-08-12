@@ -66,6 +66,7 @@ func newForwardingProxy(t *testing.T, upstreamURL string) *GuardrailProxy {
 		mode:            "observe",
 		skipAuthForTest: true,
 	}
+	allowRawForwardPrivateTargets(p)
 	p.resolveProviderFn = func(_ *ChatRequest) LLMProvider { return &mockProvider{} }
 	u, err := url.Parse(upstreamURL)
 	if err != nil {

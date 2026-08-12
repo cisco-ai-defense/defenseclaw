@@ -7,12 +7,15 @@ import base64
 import gzip
 import hashlib
 import importlib.util
+import io
 import json
 import os
 import re
 import shutil
 import stat
 import subprocess
+import sys
+import tarfile
 import time
 import warnings
 import zipfile
@@ -33,6 +36,34 @@ SPEC = importlib.util.spec_from_file_location("windows_installer_artifacts", HEL
 assert SPEC and SPEC.loader
 artifacts = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(artifacts)
+SGW_CORE_TERMS = (
+    "Permission is granted to run this s-gw Core fixture solely with the authenticated "
+    "DefenseClaw distribution. No redistribution rights are granted by these test terms."
+)
+SOURCE_LICENSE = (ROOT / "LICENSE").read_bytes()
+SOURCE_NOTICE = (ROOT / "NOTICE").read_bytes()
+SOURCE_THIRD_PARTY = (ROOT / "THIRD_PARTY_LICENSES.txt").read_bytes()
+
+
+def test_helper_direct_execution_ignores_unrelated_scripts_package(tmp_path: Path) -> None:
+    shadow_root = tmp_path / "shadow"
+    shadow_package = shadow_root / "scripts"
+    shadow_package.mkdir(parents=True)
+    (shadow_package / "__init__.py").write_text("", encoding="utf-8")
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(shadow_root)
+
+    completed = subprocess.run(
+        [sys.executable, str(HELPER_PATH), "--help"],
+        cwd=tmp_path,
+        env=environment,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stdout + completed.stderr
 
 
 def _zip_bytes(files: dict[str, bytes]) -> bytes:
@@ -181,13 +212,22 @@ def _run_v8_wheel_gate(tmp_path: Path, wheel: Path) -> subprocess.CompletedProce
         pytest.skip(f"resolved PowerShell executable is not launchable: {exc}")
 
 
-def _metadata(name: str, version: str, requires: str | None = None) -> bytes:
+def _metadata(
+    name: str,
+    version: str,
+    requires: str | None = None,
+    *,
+    license_expression: str = "Apache-2.0",
+    license_files: tuple[str, ...] = (),
+) -> bytes:
     lines = [
         "Metadata-Version: 2.4",
         f"Name: {name}",
         f"Version: {version}",
-        "License-Expression: Apache-2.0",
+        f"License-Expression: {license_expression}",
     ]
+    for license_file in license_files:
+        lines.append(f"License-File: {license_file}")
     if requires:
         lines.append(f"Requires-Dist: {requires}")
     return ("\n".join(lines) + "\n\n").encode()
@@ -195,6 +235,137 @@ def _metadata(name: str, version: str, requires: str | None = None) -> bytes:
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _sgw_component_paths(target: str) -> dict[str, list[str]]:
+    runner = f"dist/native/{target}/s-gw-core" + (".exe" if target.startswith("win32-") else "")
+    if target.startswith("darwin-"):
+        helper = f"dist/native/{target}/s-gw-keychain-helper"
+    elif target.startswith("linux-"):
+        helper = f"dist/native/{target}/s-gw-secret-service-helper"
+    else:
+        helper = "dist/windows/s-gw-credential.ps1"
+    return {
+        "runner": [runner],
+        "credential_helper": [helper],
+        "approval_ui": [
+            "dist/console-ui/assets/app.js",
+            "dist/console-ui/capabilities.json",
+            "dist/console-ui/index.html",
+        ],
+        "license_bundle": ["THIRD_PARTY_LICENSES.txt"],
+    }
+
+
+def _sgw_module_bytes(target: str) -> bytes:
+    component_paths = _sgw_component_paths(target)
+    files = {
+        "package.json": b'{"name":"@s-gw/s-gw","version":"0.2.0","license":"Apache-2.0"}\n',
+        "package-lock.json": json.dumps(
+            {
+                "name": "@s-gw/s-gw",
+                "version": "0.2.0",
+                "lockfileVersion": 3,
+                "packages": {
+                    "": {"name": "@s-gw/s-gw", "version": "0.2.0"},
+                    "node_modules/example-dependency": {"version": "1.0.0", "license": "MIT"},
+                },
+            },
+            sort_keys=True,
+        ).encode()
+        + b"\n",
+        "dist/cli.js": b"export {};\n",
+        "dist/mcp-server.js": b"export {};\n",
+        "node_modules/example-dependency/package.json": b'{"name":"example-dependency","version":"1.0.0"}\n',
+        "node_modules/example-dependency/index.js": b"module.exports = {};\n",
+        "dist/console-ui/index.html": b"<main>s-gw</main>\n",
+        "dist/console-ui/capabilities.json": b'{"schema_version":1,"capabilities":[]}\n',
+        "dist/console-ui/assets/app.js": b"export {};\n",
+        "THIRD_PARTY_LICENSES.txt": (
+            b"----- BEGIN LicenseRef-s-gw-Core -----\n" + SGW_CORE_TERMS.encode() + b"\n"
+            b"----- END LicenseRef-s-gw-Core -----\n"
+            b"Fixture dependency licenses follow.\n"
+        ),
+    }
+    files[component_paths["runner"][0]] = f"runner-{target}\n".encode()
+    files[component_paths["credential_helper"][0]] = f"helper-{target}\n".encode()
+    digests = {name: hashlib.sha256(payload).hexdigest() for name, payload in files.items()}
+    components = {}
+    for component, owned in component_paths.items():
+        installed = artifacts.stage_sgw_modules.sgw_module.component_inventory_sha256(
+            {name: digests[name] for name in owned}
+        )
+        components[component] = {
+            "artifact_sha256": hashlib.sha256(f"artifact-{target}-{component}".encode()).hexdigest(),
+            "installed_sha256": installed,
+            "signature": "fixture",
+            "destination": owned[0],
+            "files": owned,
+        }
+    metadata = {
+        "schema_version": 1,
+        "target": target,
+        "production_ready": True,
+        "package_name": "@s-gw/s-gw",
+        "package_version": "0.2.0",
+        "files": digests,
+        "components": components,
+    }
+    files["defenseclaw-module.json"] = (json.dumps(metadata, sort_keys=True) + "\n").encode()
+    output = io.BytesIO()
+    with tarfile.open(fileobj=output, mode="w:gz") as archive:
+        for name, payload in sorted(files.items()):
+            info = tarfile.TarInfo(f"package/{name}")
+            info.size = len(payload)
+            info.mode = 0o644
+            archive.addfile(info, io.BytesIO(payload))
+    return output.getvalue()
+
+
+def _sgw_wheel_entries() -> dict[str, bytes]:
+    prefix = "defenseclaw/_data/sgw"
+    targets = artifacts.stage_sgw_modules.TARGETS
+    runtime = {
+        "targets": {
+            target: {
+                "components": {
+                    component: {"path": None}
+                    for component in ("runner", "credential_helper", "approval_ui", "license_bundle")
+                }
+            }
+            for target in targets
+        }
+    }
+    runtime_payload = artifacts.stage_sgw_modules.sanitized_runtime_manifest(
+        (json.dumps(runtime, sort_keys=True) + "\n").encode()
+    )
+    entries = {
+        f"{prefix}/s-gw-module.json": b'{"package_name":"@s-gw/s-gw"}\n',
+        f"{prefix}/s-gw-runners.json": runtime_payload,
+        f"{prefix}/sgw_module.py": b"# fixture runtime driver\n",
+    }
+    digests = {}
+    for target in targets:
+        module = _sgw_module_bytes(target)
+        digest = hashlib.sha256(module).hexdigest()
+        artifact_name = f"{prefix}/modules/{target}/s-gw-module.tar.gz"
+        entries[artifact_name] = module
+        entries[f"{artifact_name}.sha256"] = f"{digest}  s-gw-module.tar.gz\n".encode()
+        digests[target] = digest
+    entries[f"{prefix}/checksums.txt"] = artifacts.stage_sgw_modules.checksum_manifest(digests)
+    return entries
+
+
+def _with_wheel_record(entries: dict[str, bytes], dist_info: str) -> dict[str, bytes]:
+    result = dict(entries)
+    rows = []
+    for name, payload in sorted(entries.items()):
+        encoded = base64.urlsafe_b64encode(hashlib.sha256(payload).digest()).rstrip(b"=").decode("ascii")
+        rows.append(f"{name},sha256={encoded},{len(payload)}")
+    record_name = f"{dist_info}/RECORD"
+    rows.append(f"{record_name},,")
+    result[record_name] = ("\n".join(rows) + "\n").encode()
+    return result
 
 
 def _fixture(tmp_path: Path) -> argparse.Namespace:
@@ -214,13 +385,40 @@ def _fixture(tmp_path: Path) -> argparse.Namespace:
     )
 
     wheel_name = f"defenseclaw-{version}-py3-none-any.whl"
+    defense_metadata = f"defenseclaw-{version}.dist-info"
+    wheel_entries = _with_wheel_record(
+        {
+            **_sgw_wheel_entries(),
+            "defenseclaw/__init__.py": b"__version__ = '1.2.3'\n",
+            f"{defense_metadata}/METADATA": _metadata(
+                "defenseclaw",
+                version,
+                license_expression=artifacts.SGW_MIXED_LICENSE,
+                license_files=("LICENSE", "NOTICE", "THIRD_PARTY_LICENSES.txt"),
+            ),
+            f"{defense_metadata}/WHEEL": artifacts.stage_sgw_modules.EXPECTED_WHEEL_METADATA,
+            f"{defense_metadata}/entry_points.txt": artifacts.stage_sgw_modules.EXPECTED_ENTRY_POINTS,
+            f"{defense_metadata}/licenses/LICENSE": SOURCE_LICENSE,
+            f"{defense_metadata}/licenses/NOTICE": artifacts.stage_sgw_modules.production_notice(
+                SOURCE_NOTICE, SGW_CORE_TERMS
+            ),
+            f"{defense_metadata}/licenses/THIRD_PARTY_LICENSES.txt": SOURCE_THIRD_PARTY,
+        },
+        defense_metadata,
+    )
     _write_zip(
         payload / wheel_name,
-        {
-            "defenseclaw/__init__.py": b"__version__ = '1.2.3'\n",
-            f"defenseclaw-{version}.dist-info/METADATA": _metadata("defenseclaw", version),
-        },
+        wheel_entries,
     )
+    sgw_sbom = tmp_path / f"{wheel_name}.sbom.json"
+    sgw_document = artifacts.stage_sgw_modules._build_sgw_sbom(
+        payload / wheel_name,
+        version=version,
+        source_commit=source_commit,
+        source_epoch=1_700_000_000,
+        authenticate=False,
+    )
+    sgw_sbom.write_text(json.dumps(sgw_document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     compat_name = "yara_python-4.5.4.post1-py3-none-any.whl"
     _write_zip(
         payload / compat_name,
@@ -230,13 +428,28 @@ def _fixture(tmp_path: Path) -> argparse.Namespace:
         },
     )
 
-    defense_metadata = f"defenseclaw-{version}.dist-info"
     yara_metadata = "yara_python-4.5.4.post1.dist-info"
     site_files = {
         "defenseclaw/__init__.py": b"__version__ = '1.2.3'\n",
-        f"{defense_metadata}/METADATA": _metadata("defenseclaw", version, "yara-python>=4.5.4"),
+        f"{defense_metadata}/METADATA": _metadata(
+            "defenseclaw",
+            version,
+            "yara-python>=4.5.4",
+            license_expression=artifacts.SGW_MIXED_LICENSE,
+            license_files=("LICENSE", "NOTICE", "THIRD_PARTY_LICENSES.txt"),
+        ),
+        f"{defense_metadata}/licenses/LICENSE": SOURCE_LICENSE,
+        f"{defense_metadata}/licenses/NOTICE": artifacts.stage_sgw_modules.production_notice(
+            SOURCE_NOTICE, SGW_CORE_TERMS
+        ),
+        f"{defense_metadata}/licenses/THIRD_PARTY_LICENSES.txt": SOURCE_THIRD_PARTY,
         f"{defense_metadata}/RECORD": (
-            f"defenseclaw/__init__.py,,\n{defense_metadata}/METADATA,,\n{defense_metadata}/RECORD,,\n"
+            f"defenseclaw/__init__.py,,\n"
+            f"{defense_metadata}/METADATA,,\n"
+            f"{defense_metadata}/licenses/LICENSE,,\n"
+            f"{defense_metadata}/licenses/NOTICE,,\n"
+            f"{defense_metadata}/licenses/THIRD_PARTY_LICENSES.txt,,\n"
+            f"{defense_metadata}/RECORD,,\n"
         ).encode(),
         "yara/__init__.py": b"# compat\n",
         f"{yara_metadata}/METADATA": _metadata("yara-python", "4.5.4.post1"),
@@ -292,14 +505,40 @@ def _fixture(tmp_path: Path) -> argparse.Namespace:
     }
     authenticode_files = {}
 
-    def add_evidence(installed_path: str, sbom_name: str, digest: str) -> None:
+    def add_evidence(
+        installed_path: str,
+        sbom_name: str,
+        digest: str,
+        policy: str = "defenseclaw-product-publisher",
+    ) -> None:
+        status = "NotSigned" if policy == "digest-only-upstream" else "Valid"
+        publisher = "Fixture Publisher" if policy == "defenseclaw-product-publisher" else ""
+        signature_type = "None" if policy == "digest-only-upstream" else "Authenticode"
+        observed = {
+            "status": status,
+            "embedded_signatures": [] if policy == "digest-only-upstream" else [{}],
+        }
+        if policy != "pinned-input-observation":
+            observed.update(
+                {
+                    "publisher": publisher,
+                    "signature_type": signature_type,
+                    "signer": None if status == "NotSigned" else {},
+                    "timestamp": {"present": status == "Valid"},
+                }
+            )
         authenticode_files[installed_path] = {
             "schema_version": 1,
             "installed_path": installed_path,
             "sbom_file_name": sbom_name,
             "sha256": digest,
-            "expected": {"policy": "fixture"},
-            "observed": {"status": "Valid", "embedded_signatures": [{}]},
+            "expected": {
+                "policy": policy,
+                "status": status,
+                "publisher": publisher,
+                "signature_type": "" if policy == "pinned-input-observation" else signature_type,
+            },
+            "observed": observed,
         }
 
     add_evidence(setup.name, f"./{setup.name}", component_hashes["setup"])
@@ -326,8 +565,14 @@ def _fixture(tmp_path: Path) -> argparse.Namespace:
         "runtime/python/python.exe",
         "./expanded/python/python.exe",
         hashlib.sha256(b"python").hexdigest(),
+        "pinned-input-observation",
     )
-    add_evidence("runtime/tools/cosign.exe", "./payload/cosign.exe", component_hashes["cosign"])
+    add_evidence(
+        "runtime/tools/cosign.exe",
+        "./payload/cosign.exe",
+        component_hashes["cosign"],
+        "digest-only-upstream",
+    )
     manifest["unsigned"] = False
     manifest["authenticode"] = {
         "schema_version": 1,
@@ -368,6 +613,31 @@ def _fixture(tmp_path: Path) -> argparse.Namespace:
         cosign_version="2.6.2",
         go_inventory=go_inventory,
         authenticode_inventory=authenticode_inventory,
+        sgw_sbom=sgw_sbom,
+    )
+
+
+def test_helper_imports_by_file_path_outside_repository(tmp_path: Path) -> None:
+    probe = tmp_path / "load-helper.py"
+    probe.write_text(
+        "import importlib.util\n"
+        f"path = {str(HELPER_PATH)!r}\n"
+        "spec = importlib.util.spec_from_file_location('detached_windows_artifacts', path)\n"
+        "assert spec and spec.loader\n"
+        "module = importlib.util.module_from_spec(spec)\n"
+        "spec.loader.exec_module(module)\n"
+        "assert module.SGW_CORE_LICENSE\n",
+        encoding="utf-8",
+    )
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    subprocess.run(
+        [sys.executable, "-I", str(probe)],
+        cwd=tmp_path,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
     )
 
 
@@ -436,11 +706,20 @@ def test_builder_binds_authenticode_inventory_to_payload_provenance_and_sbom() -
     helper = AUTHENTICODE_PS1.read_text(encoding="utf-8")
     assert ". $WindowsAuthenticodeHelper" in build
     assert "Get-DefenseClawAuthenticodeEvidence" in build
+    assert "$releaseAuthenticodeFiles[$entry.Key] = $entry.Value" in build
     assert build.index(". $WindowsAuthenticodeHelper") < build.index("Get-DefenseClawAuthenticodeEvidence")
     assert "schema_version = 2" in build
     assert "authenticode = $releaseAuthenticode" in build
     assert "'--authenticode-inventory', $authenticodeInventoryPath" in build
+    assert "$requiresSgwSbom = $numericVersion -ge [Version]'0.8.11'" in build
+    assert "$provenanceInputs['sgw_sbom_sha256'] = Get-FileHashHex $sgwSbom" in build
+    assert "$sbomArguments += @('--sgw-sbom', $sgwSbom)" in build
     assert "function Get-DefenseClawTimestampEvidence" in helper
+    assert "Get-DefenseClawCertificateChainEvidence" not in helper
+    assert "not_before_utc" in helper
+    assert "not_after_utc" in helper
+    assert "$observed['publisher'] = $publisher" in helper
+    assert "$observed['embedded_signatures'] = $embeddedSignatures" in helper
     assert "ExpectedSignerThumbprintSha256" in helper
 
 
@@ -814,12 +1093,11 @@ def test_signed_release_stages_offline_resource_verifier_before_lifecycle() -> N
     assert release.index(builder) < release.index(lifecycle)
 
 
-def test_offline_chain_and_timeout_helpers_are_strictly_bounded() -> None:
+def test_authenticode_evidence_is_store_independent_and_timeouts_are_bounded() -> None:
     authenticode = AUTHENTICODE_PS1.read_text(encoding="utf-8")
     identity = BINARY_IDENTITY_PS1.read_text(encoding="utf-8")
-    assert "DisableCertificateDownloads" in authenticode
-    assert "$chain.ChainPolicy.DisableCertificateDownloads = $true" in authenticode
-    assert "runtime with cache-only certificate-chain support" in authenticode
+    assert "X509Chain" not in authenticode
+    assert "Get-DefenseClawCertificateChainEvidence" not in authenticode
     assert "$process.WaitForExit($remaining)" in identity
     assert "$drainTask.Wait($remaining)" in identity
     assert "$process.WaitForExit()" not in identity
@@ -999,6 +1277,9 @@ def test_merged_spdx_covers_exact_and_expanded_windows_payload(tmp_path: Path) -
     assert summary["go_modules"] == 2
     assert summary["payload_digests"] == 11
     assert summary["authenticode_files"] == 11
+    assert summary["sgw_packages"] == 42
+    assert summary["sgw_files"] > 60
+    assert summary["sgw_sbom_sha256"] == _sha256(args.sgw_sbom)
     assert {package["name"] for package in document["packages"]} >= {
         "DefenseClaw Windows Setup",
         "DefenseClaw embedded installer payload",
@@ -1019,8 +1300,28 @@ def test_merged_spdx_covers_exact_and_expanded_windows_payload(tmp_path: Path) -
     assert "./expanded/site-packages/defenseclaw/__init__.py" in file_names
     assert "./expanded/gateway/defenseclaw-hook.exe" in file_names
     assert "./payload/defenseclaw-hook-launcher.exe" in file_names
+    assert "./sgw/win32-x64/package-lock.json" in file_names
+    assert "./sgw/linux-arm64/node_modules/example-dependency/index.js" in file_names
     setup_package = next(package for package in document["packages"] if package["name"] == "DefenseClaw Windows Setup")
     assert setup_package["checksums"][0]["checksumValue"] == _sha256(args.setup)
+    assert setup_package["licenseDeclared"] == "Apache-2.0 AND LicenseRef-s-gw-Core"
+    wheel_package = next(
+        package
+        for package in document["packages"]
+        if package.get("packageFileName")
+        == args.payload_root.joinpath(f"defenseclaw-{args.version}-py3-none-any.whl").name
+    )
+    assert wheel_package["licenseDeclared"] == "Apache-2.0 AND LicenseRef-s-gw-Core"
+    assert document["hasExtractedLicensingInfos"][0]["licenseId"] == "LicenseRef-s-gw-Core"
+    assert document["hasExtractedLicensingInfos"][0]["extractedText"].startswith("Permission is granted")
+    assert document["externalDocumentRefs"][0]["checksum"]["checksumValue"] == _sha256(args.sgw_sbom)
+    npm_roots = [
+        package
+        for package in document["packages"]
+        if str(package.get("comment", "")).startswith("DefenseClaw s-gw inventory role=npm-root")
+    ]
+    assert len(npm_roots) == 6
+    assert {package["licenseDeclared"] for package in npm_roots} == {"Apache-2.0"}
     setup_file = next(file for file in document["files"] if file["fileName"] == "./DefenseClawSetup-x64.exe")
     assert setup_file["comment"].startswith("DefenseClaw Authenticode evidence: ")
     hook_file = next(
@@ -1033,10 +1334,154 @@ def test_merged_spdx_covers_exact_and_expanded_windows_payload(tmp_path: Path) -
     assert '"installed_path":"bin/defenseclaw-hook-launcher.exe"' in hook_launcher_file["comment"]
 
 
+def test_sbom_rejects_machine_chain_evidence_in_release_inventory(tmp_path: Path) -> None:
+    args = _fixture(tmp_path)
+    inventory = json.loads(args.authenticode_inventory.read_text(encoding="utf-8"))
+    evidence = inventory["files"]["bin/defenseclaw-hook.exe"]
+    evidence["observed"]["chain"] = {
+        "build_succeeded": True,
+        "statuses": [],
+        "certificates": [{"thumbprint_sha256": "a" * 64}],
+    }
+    evidence["observed"]["embedded_signatures"][0]["chain"] = {
+        "build_succeeded": True,
+        "statuses": [],
+        "certificates": [{"thumbprint_sha256": "b" * 64}],
+    }
+    args.authenticode_inventory.write_text(json.dumps(inventory), encoding="utf-8")
+
+    with pytest.raises(artifacts.ArtifactError, match="Release Authenticode evidence contains"):
+        artifacts.build_sbom(args)
+
+
+def test_sbom_rejects_machine_chain_evidence_in_payload_manifest(tmp_path: Path) -> None:
+    args = _fixture(tmp_path)
+    manifest_path = args.payload_root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["authenticode"]["files"]["bin/defenseclaw-hook.exe"]["observed"]["chain"] = {
+        "build_succeeded": True,
+        "statuses": [],
+        "certificates": [],
+    }
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    inventory = json.loads(args.authenticode_inventory.read_text(encoding="utf-8"))
+    inventory["files"]["bin/defenseclaw-hook.exe"]["observed"]["chain"] = {
+        "build_succeeded": True,
+        "statuses": [],
+        "certificates": [],
+    }
+    args.authenticode_inventory.write_text(json.dumps(inventory), encoding="utf-8")
+    artifacts.deterministic_zip(args.payload_root, args.embedded_payload, args.source_epoch, include_root=True)
+
+    with pytest.raises(artifacts.ArtifactError, match="machine-specific certificate chains"):
+        artifacts.build_sbom(args)
+
+
+def test_sbom_rejects_pinned_host_selected_observation_fields(tmp_path: Path) -> None:
+    args = _fixture(tmp_path)
+    manifest_path = args.payload_root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["authenticode"]["files"]["runtime/python/python.exe"]["observed"]["publisher"] = "ambient"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    inventory = json.loads(args.authenticode_inventory.read_text(encoding="utf-8"))
+    inventory["files"]["runtime/python/python.exe"]["observed"]["publisher"] = "ambient"
+    args.authenticode_inventory.write_text(json.dumps(inventory), encoding="utf-8")
+    artifacts.deterministic_zip(args.payload_root, args.embedded_payload, args.source_epoch, include_root=True)
+
+    with pytest.raises(artifacts.ArtifactError, match="Pinned Authenticode observation contains host-selected"):
+        artifacts.build_sbom(args)
+
+
+def test_sbom_rejects_null_embedded_signature_inventory(tmp_path: Path) -> None:
+    args = _fixture(tmp_path)
+    manifest_path = args.payload_root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["authenticode"]["files"]["runtime/python/python.exe"]["observed"]["embedded_signatures"] = None
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    inventory = json.loads(args.authenticode_inventory.read_text(encoding="utf-8"))
+    inventory["files"]["runtime/python/python.exe"]["observed"]["embedded_signatures"] = None
+    args.authenticode_inventory.write_text(json.dumps(inventory), encoding="utf-8")
+    artifacts.deterministic_zip(args.payload_root, args.embedded_payload, args.source_epoch, include_root=True)
+
+    with pytest.raises(artifacts.ArtifactError, match="Invalid embedded Authenticode signature inventory"):
+        artifacts.build_sbom(args)
+
+
+@pytest.mark.parametrize(
+    "installed_path",
+    ["bin/defenseclaw-hook.exe", "runtime/tools/cosign.exe"],
+)
+def test_sbom_requires_product_and_digest_observation_fields(tmp_path: Path, installed_path: str) -> None:
+    args = _fixture(tmp_path)
+    manifest_path = args.payload_root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    del manifest["authenticode"]["files"][installed_path]["observed"]["signer"]
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    inventory = json.loads(args.authenticode_inventory.read_text(encoding="utf-8"))
+    del inventory["files"][installed_path]["observed"]["signer"]
+    args.authenticode_inventory.write_text(json.dumps(inventory), encoding="utf-8")
+    artifacts.deterministic_zip(args.payload_root, args.embedded_payload, args.source_epoch, include_root=True)
+
+    with pytest.raises(artifacts.ArtifactError, match="omits enforced fields"):
+        artifacts.build_sbom(args)
+
+
+def test_sbom_rejects_non_chain_release_evidence_drift(tmp_path: Path) -> None:
+    args = _fixture(tmp_path)
+    inventory = json.loads(args.authenticode_inventory.read_text(encoding="utf-8"))
+    inventory["files"]["bin/defenseclaw-hook.exe"]["observed"]["status"] = "NotSigned"
+    args.authenticode_inventory.write_text(json.dumps(inventory), encoding="utf-8")
+
+    with pytest.raises(artifacts.ArtifactError, match="Release and payload Authenticode evidence differ"):
+        artifacts.build_sbom(args)
+
+
 def test_sbom_fails_closed_when_payload_digest_no_longer_matches(tmp_path: Path) -> None:
     args = _fixture(tmp_path)
     (args.payload_root / "cosign.exe").write_bytes(b"tampered")
     with pytest.raises(artifacts.ArtifactError, match="Payload digest mismatch for cosign.exe"):
+        artifacts.build_sbom(args)
+
+
+def test_sbom_fails_closed_when_sgw_inventory_is_missing_or_incomplete(tmp_path: Path) -> None:
+    args = _fixture(tmp_path)
+    args.sgw_sbom = None
+    with pytest.raises(artifacts.ArtifactError, match="s-gw SPDX SBOM is required"):
+        artifacts.build_sbom(args)
+
+    tampered_root = tmp_path / "tampered"
+    tampered_root.mkdir()
+    args = _fixture(tampered_root)
+    document = json.loads(args.sgw_sbom.read_text(encoding="utf-8"))
+    document["packages"] = [
+        package
+        for package in document["packages"]
+        if package.get("comment") != "DefenseClaw s-gw inventory role=module-archive; target=linux-x64"
+    ]
+    args.sgw_sbom.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(artifacts.ArtifactError, match="incomplete or differs"):
+        artifacts.build_sbom(args)
+
+
+def test_sbom_rejects_installed_defenseclaw_metadata_with_apache_only_license(tmp_path: Path) -> None:
+    args = _fixture(tmp_path)
+    site_archive = args.payload_root / "site-packages.zip"
+    with zipfile.ZipFile(site_archive) as archive:
+        entries = {name: archive.read(name) for name in archive.namelist()}
+    metadata_name = f"defenseclaw-{args.version}.dist-info/METADATA"
+    entries[metadata_name] = entries[metadata_name].replace(
+        f"License-Expression: {artifacts.SGW_MIXED_LICENSE}\n".encode(),
+        b"License-Expression: Apache-2.0\n",
+    )
+    _write_zip(site_archive, entries)
+
+    manifest_path = args.payload_root / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["files"][site_archive.name] = _sha256(site_archive)
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    artifacts.deterministic_zip(args.payload_root, args.embedded_payload, args.source_epoch, True)
+
+    with pytest.raises(artifacts.ArtifactError, match="does not declare the required s-gw license"):
         artifacts.build_sbom(args)
 
 

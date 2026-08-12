@@ -13,6 +13,8 @@
 without_host_agent_bins() {
   local fakebin
   fakebin="$(mktest_tmp)"
+  local real_python
+  real_python="$(command -v python3)"
   local bin
   for bin in amp claude codex; do
     cat > "${fakebin}/${bin}" <<'SH'
@@ -21,7 +23,17 @@ exit 127
 SH
     chmod 0700 "${fakebin}/${bin}"
   done
-  PATH="${fakebin}:${PATH}" "$@"
+  # Keep temp-HOME cases independent of packages installed globally on the
+  # developer or CI host while still exercising the real metadata reader.
+  cat > "${fakebin}/python3" <<'SH'
+#!/usr/bin/env bash
+case "${3:-}" in
+  /usr/local/lib/node_modules/*|/opt/homebrew/lib/node_modules/*) exit 0 ;;
+esac
+exec "${DC_TEST_REAL_PYTHON3}" "$@"
+SH
+  chmod 0700 "${fakebin}/python3"
+  DC_TEST_REAL_PYTHON3="${real_python}" PATH="${fakebin}:${PATH}" "$@"
 }
 
 t_amp_from_user_npm_metadata_without_executing_cli() {
