@@ -324,16 +324,18 @@ func TestCommittedInstallCleanupDoesNotTraverseLivePayload(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(volatileRuntime, "ephemeral"), []byte("runtime-owned"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(volatileRuntime, 0); err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(volatileRuntime, 0o700) })
+	restoreRuntimeAccess := denyTestDirectoryListing(t, volatileRuntime)
 
 	if err := cleanupCommittedSetupTransaction(transaction); err != nil {
 		t.Fatalf("cleanup traversed an unrelated live-runtime subtree: %v", err)
 	}
-	if err := os.Chmod(volatileRuntime, 0o700); err != nil {
-		t.Fatal(err)
+	restoreRuntimeAccess()
+	entries, err := os.ReadDir(volatileRuntime)
+	if err != nil {
+		t.Fatalf("read restored live-runtime subtree: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != "ephemeral" {
+		t.Fatalf("restored live-runtime subtree entries = %v, want ephemeral", entries)
 	}
 	assertInstallVersion(t, installRoot, transaction, transaction.TargetVersion)
 }
