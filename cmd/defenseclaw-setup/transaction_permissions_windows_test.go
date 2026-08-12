@@ -6,92 +6,64 @@
 package main
 
 import (
-	"errors"
 	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
-
-	"github.com/defenseclaw/defenseclaw/internal/winpath"
-	"golang.org/x/sys/windows"
 )
 
-func denyTestDirectoryListing(t *testing.T, path string) func() {
+func installLivePayloadTraversalTrap(t *testing.T, installRoot, path string) func() {
 	t.Helper()
-	extended, err := winpath.Extended(path)
-	if err != nil {
+	target := t.TempDir()
+	sentinelPath := filepath.Join(target, "sentinel")
+	if err := os.WriteFile(sentinelPath, []byte("runtime-target"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	descriptor, err := windows.GetNamedSecurityInfo(
-		extended,
-		windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION,
-	)
+	trapPath := filepath.Join(path, "trap")
+	output, err := exec.Command(
+		"cmd.exe", "/D", "/C", "mklink", "/J", trapPath, target,
+	).CombinedOutput()
 	if err != nil {
-		t.Fatalf("capture test directory DACL: %v", err)
-	}
-	originalDACL, _, err := descriptor.DACL()
-	if err != nil || originalDACL == nil {
-		t.Fatalf("capture test directory DACL entries: %v", err)
-	}
-	control, _, err := descriptor.Control()
-	if err != nil {
-		t.Fatalf("capture test directory DACL control: %v", err)
-	}
-	user, err := windows.GetCurrentProcessToken().GetTokenUser()
-	if err != nil || user == nil || user.User.Sid == nil {
-		t.Fatalf("resolve current Windows user: %v", err)
-	}
-	deniedDACL, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
-		AccessPermissions: windows.FILE_LIST_DIRECTORY,
-		AccessMode:        windows.DENY_ACCESS,
-		Inheritance:       windows.NO_INHERITANCE,
-		Trustee: windows.TRUSTEE{
-			TrusteeForm:  windows.TRUSTEE_IS_SID,
-			TrusteeType:  windows.TRUSTEE_IS_USER,
-			TrusteeValue: windows.TrusteeValueFromSID(user.User.Sid),
-		},
-	}}, originalDACL)
-	if err != nil {
-		t.Fatalf("build access-denied test DACL: %v", err)
-	}
-	if err := windows.SetNamedSecurityInfo(
-		extended,
-		windows.SE_FILE_OBJECT,
-		windows.DACL_SECURITY_INFORMATION,
-		nil,
-		nil,
-		deniedDACL,
-		nil,
-	); err != nil {
-		t.Fatalf("apply access-denied test DACL: %v", err)
+		t.Fatalf("create live-runtime reparse trap: %v\n%s", err, output)
 	}
 
 	var once sync.Once
 	restore := func() {
 		once.Do(func() {
-			securityInformation := windows.SECURITY_INFORMATION(windows.DACL_SECURITY_INFORMATION)
-			if control&windows.SE_DACL_PROTECTED != 0 {
-				securityInformation |= windows.PROTECTED_DACL_SECURITY_INFORMATION
-			} else {
-				securityInformation |= windows.UNPROTECTED_DACL_SECURITY_INFORMATION
+			reparse, err := isReparsePoint(trapPath)
+			if err != nil {
+				t.Errorf("inspect preserved live-runtime reparse trap: %v", err)
+			} else if !reparse {
+				t.Errorf("live-runtime reparse trap was removed or replaced")
 			}
-			if err := windows.SetNamedSecurityInfo(
-				extended,
-				windows.SE_FILE_OBJECT,
-				securityInformation,
-				nil,
-				nil,
-				originalDACL,
-				nil,
-			); err != nil {
-				t.Errorf("restore test directory DACL: %v", err)
+			data, err := os.ReadFile(filepath.Join(trapPath, "sentinel"))
+			if err != nil {
+				t.Errorf("read preserved live-runtime reparse target: %v", err)
+			} else if string(data) != "runtime-target" {
+				t.Errorf("live-runtime reparse target = %q, want runtime-target", data)
+			}
+			if err := os.Remove(trapPath); err != nil && !os.IsNotExist(err) {
+				t.Errorf("remove live-runtime reparse trap: %v", err)
 			}
 		})
 	}
 	t.Cleanup(restore)
-	if _, err := os.ReadDir(path); !errors.Is(err, os.ErrPermission) {
+
+	reparse, err := isReparsePoint(trapPath)
+	if err != nil {
 		restore()
-		t.Fatalf("access-denied directory read error = %v, want permission denied", err)
+		t.Fatalf("inspect live-runtime reparse trap: %v", err)
+	}
+	if !reparse {
+		restore()
+		t.Fatal("live-runtime traversal trap is not a reparse point")
+	}
+	if err := rejectReparseTree(installRoot); err == nil ||
+		!strings.Contains(err.Error(), "transaction tree contains a reparse point") {
+		restore()
+		t.Fatalf("legacy full-tree validation error = %v, want reparse rejection", err)
 	}
 	return restore
 }

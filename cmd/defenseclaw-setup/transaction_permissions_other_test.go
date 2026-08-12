@@ -12,7 +12,7 @@ import (
 	"testing"
 )
 
-func denyTestDirectoryListing(t *testing.T, path string) func() {
+func installLivePayloadTraversalTrap(t *testing.T, _ string, path string) func() {
 	t.Helper()
 	if err := os.Chmod(path, 0); err != nil {
 		t.Fatal(err)

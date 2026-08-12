@@ -324,7 +324,7 @@ func TestCommittedInstallCleanupDoesNotTraverseLivePayload(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(volatileRuntime, "ephemeral"), []byte("runtime-owned"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	restoreRuntimeAccess := denyTestDirectoryListing(t, volatileRuntime)
+	restoreRuntimeAccess := installLivePayloadTraversalTrap(t, installRoot, volatileRuntime)
 
 	if err := cleanupCommittedSetupTransaction(transaction); err != nil {
 		t.Fatalf("cleanup traversed an unrelated live-runtime subtree: %v", err)
