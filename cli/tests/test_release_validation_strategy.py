@@ -395,6 +395,7 @@ def test_release_smoke_is_exact_candidate_install_and_upgrade_only() -> None:
     assert set(jobs) == {
         "posix-fresh-install",
         "posix-upgrade",
+        "macos-intel-refusal",
         "windows-fresh-install",
     }
 
@@ -423,6 +424,18 @@ def test_release_smoke_is_exact_candidate_install_and_upgrade_only() -> None:
     assert "scripts/release_candidate.py verify" in rendered_upgrade
     assert "scripts/test-upgrade-protocol-release.sh" in rendered_upgrade
     assert "--success-path-only" in rendered_upgrade
+
+    intel = jobs["macos-intel-refusal"]
+    assert intel["runs-on"] == "macos-15-intel"
+    assert intel["strategy"]["matrix"] == {
+        "surface": ["fresh-install", "upgrade"],
+    }
+    rendered_intel = _render(intel)
+    assert 'test "$RUNNER_ARCH" = "X64"' in rendered_intel
+    assert "scripts/release_candidate.py verify" in rendered_intel
+    assert "scripts/verify-sigstore-blob.py" in rendered_intel
+    assert "scripts/test-upgrade-macos-intel-refusal.sh" in rendered_intel
+    assert '--surface "${{ matrix.surface }}"' in rendered_intel
 
     windows = _render(jobs["windows-fresh-install"])
     assert "scripts/release_candidate.py verify" in windows

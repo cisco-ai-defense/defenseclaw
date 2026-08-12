@@ -51,6 +51,13 @@ set -euo pipefail
 # is group-writable (for example 0002).
 umask 077
 
+# Reject unsupported Intel macOS before resolving Python, reading recovery
+# state, creating staging/lock custody, or selecting release artifacts.
+if [[ "$(uname -s)" == "Darwin" && "$(uname -m)" != "arm64" ]]; then
+    printf '%s\n' "Intel macOS ($(uname -m)) is unsupported. DefenseClaw for macOS requires Apple Silicon (arm64). No changes were made." >&2
+    exit 1
+fi
+
 main() {
 
 # ── Configuration ─────────────────────────────────────────────────────────────
@@ -4265,10 +4272,6 @@ printf "\n"
 printf "${BOLD}  DefenseClaw Upgrade${NC}\n"
 printf "  ${DIM}Downloads release artifacts from GitHub and replaces installed files${NC}\n"
 printf "\n"
-
-if [[ "$(uname -s)" == "Darwin" && "$(uname -m)" != "arm64" ]]; then
-    die "Intel macOS ($(uname -m)) is unsupported. DefenseClaw for macOS requires Apple Silicon (arm64). No changes were made."
-fi
 
 if [[ -e "${UPGRADE_RECOVERY_ROOT}/phase-one-active.json" \
       || -L "${UPGRADE_RECOVERY_ROOT}/phase-one-active.json" \

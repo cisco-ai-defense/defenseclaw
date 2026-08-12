@@ -140,8 +140,6 @@ def authenticated_resolver_instructions(
         "  done\n"
         "  unset function_env_name function_env_names\n"
         "  umask 077\n"
-        '  d="$(mktemp -d "${TMPDIR:-/tmp}/defenseclaw-upgrade.XXXXXX")"\n'
-        "  trap 'rm -rf \"$d\"' EXIT\n"
         "  platform=\"$(uname -s | tr '[:upper:]' '[:lower:]')/$(uname -m)\"\n"
         '  case "$platform" in\n'
         "    darwin/x86_64) "
@@ -155,6 +153,8 @@ def authenticated_resolver_instructions(
         f"cosign_sha='{COSIGN_BOOTSTRAP_SHA256[('linux', 'arm64')]}' ;;\n"
         "    *) echo 'Unsupported platform for automatic Cosign verification.' >&2; exit 1 ;;\n"
         "  esac\n"
+        '  d="$(mktemp -d "${TMPDIR:-/tmp}/defenseclaw-upgrade.XXXXXX")"\n'
+        "  trap 'rm -rf \"$d\"' EXIT\n"
         '  cosign_bin="$d/$cosign_asset"\n'
         "  curl --fail --silent --show-error --location \\\n"
         "    --proto '=https' --proto-redir '=https' --tlsv1.2 \\\n"

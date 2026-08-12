@@ -309,10 +309,10 @@ def test_release_jobs_pin_the_bundle_verifier_binary() -> None:
         if step.get("uses", "").startswith("sigstore/cosign-installer@")
     ]
 
-    assert len(installers) == 8
+    assert len(installers) == 9
     assert all(step["uses"] == COSIGN_INSTALLER_ACTION for step in installers)
     versions = [step.get("with", {}).get("cosign-release") for step in installers]
-    assert versions.count("v2.6.2") == 6
+    assert versions.count("v2.6.2") == 7
     assert versions.count("v2.6.3") == 2
     channel = _workflow()["jobs"]["advance-stable-channel"]
     channel_installer = next(
@@ -810,7 +810,7 @@ def test_release_certificate_is_canonicalized_and_authenticated_before_seal() ->
     assert "scripts/release_candidate.py verify" in seal_script
 
 
-def test_exact_posix_fresh_install_and_twelve_upgrade_cells_gate_publication() -> None:
+def test_exact_posix_fresh_install_twelve_upgrades_and_intel_refusal_gate_publication() -> None:
     workflow = _certification_workflow()
     assert set(workflow["on"]) == {"workflow_call"}
     assert set(workflow["on"]["workflow_call"]["inputs"]) == {
@@ -823,10 +823,12 @@ def test_exact_posix_fresh_install_and_twelve_upgrade_cells_gate_publication() -
     assert set(jobs) == {
         "posix-fresh-install",
         "posix-upgrade",
+        "macos-intel-refusal",
         "windows-fresh-install",
     }
     assert jobs["posix-fresh-install"]["timeout-minutes"] == "30"
     assert jobs["posix-upgrade"]["timeout-minutes"] == "60"
+    assert jobs["macos-intel-refusal"]["timeout-minutes"] == "20"
     assert jobs["windows-fresh-install"]["timeout-minutes"] == "45"
 
     assert jobs["posix-fresh-install"]["strategy"] == {
@@ -897,6 +899,18 @@ def test_exact_posix_fresh_install_and_twelve_upgrade_cells_gate_publication() -
     assert "bridge-dependency-drift" in upgrade
     assert "baseline_dependencies=target" in upgrade
     assert '--baseline-dependencies "$baseline_dependencies"' in upgrade
+
+    intel_refusal = jobs["macos-intel-refusal"]
+    assert intel_refusal["runs-on"] == "macos-15-intel"
+    assert intel_refusal["strategy"] == {
+        "fail-fast": "false",
+        "matrix": {"surface": ["fresh-install", "upgrade"]},
+    }
+    intel_refusal_text = str(intel_refusal)
+    assert 'test "$RUNNER_ARCH" = "X64"' in intel_refusal_text
+    assert "scripts/release_candidate.py verify" in intel_refusal_text
+    assert "scripts/verify-sigstore-blob.py" in intel_refusal_text
+    assert "scripts/test-upgrade-macos-intel-refusal.sh" in intel_refusal_text
 
     text = CERTIFICATION_WORKFLOW.read_text(encoding="utf-8")
     for retired in (

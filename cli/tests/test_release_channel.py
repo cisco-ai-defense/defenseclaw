@@ -33,8 +33,8 @@ PUBLISHER = ROOT / "scripts/publish-release-channel.sh"
 WORKFLOW = ROOT / ".github/workflows/release.yaml"
 DOC = ROOT / "docs/RELEASE_CHANNEL.md"
 SCRIPT_TIMEOUT_SECONDS = 30
-IMMUTABLE_088_RESCUE_SHA256 = "7fd79da57feba2c44193eed27c004de156023e5764378818d2565109dda5dafd"
-IMMUTABLE_088_RESCUE_SIZE = 28_382
+IMMUTABLE_088_RESCUE_SHA256 = "1df4baf83c15fd9efba933e365a2955c8c754f075e27a34bb1584ddbb057a2bb"
+IMMUTABLE_088_RESCUE_SIZE = 28_391
 COSIGN_RELEASE_BASE_URL = (
     f"https://github.com/sigstore/cosign/releases/download/v{resolver_hint.COSIGN_BOOTSTRAP_VERSION}"
 )
@@ -1029,7 +1029,19 @@ def test_posix_rescue_rejects_intel_before_network_or_host_state(tmp_path: Path)
     source = rescue.read_text(encoding="utf-8")
     platform_probe = 'platform="$("${UNAME_BIN}" -s | tr \'[:upper:]\' \'[:lower:]\')/$("${UNAME_BIN}" -m)"'
     assert source.count(platform_probe) == 1
-    _write_executable(rescue, source.replace(platform_probe, 'platform="darwin/x86_64"'))
+    assert source.index(platform_probe) < source.index('temp_root_input="${TMPDIR:-/tmp}"')
+    assert source.index(platform_probe) < source.index('workdir="$(mktemp -d')
+    mktemp_marker = tmp_path / "mktemp-invoked"
+    workdir_probe = 'workdir="$(mktemp -d "${temp_root}/defenseclaw-rescue.XXXXXX")"'
+    assert source.count(workdir_probe) == 1
+    instrumented_workdir = f"printf invoked > {mktemp_marker!s}; {workdir_probe}"
+    _write_executable(
+        rescue,
+        source.replace(platform_probe, 'platform="darwin/x86_64"').replace(
+            workdir_probe,
+            instrumented_workdir,
+        ),
+    )
 
     completed = subprocess.run(
         [str(rescue)],
@@ -1046,6 +1058,7 @@ def test_posix_rescue_rejects_intel_before_network_or_host_state(tmp_path: Path)
     assert not (tmp_path / "curl.log").exists()
     assert not (tmp_path / "resolver-env.log").exists()
     assert not (tmp_path / "installer-env.log").exists()
+    assert not mktemp_marker.exists()
     assert list(tmp_path.glob("defenseclaw-rescue.*")) == []
 
 

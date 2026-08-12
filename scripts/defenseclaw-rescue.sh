@@ -385,6 +385,29 @@ if [[ "${rescue_mode}" == "install" ]]; then
 fi
 readonly rescue_mode
 
+platform="$("${UNAME_BIN}" -s | tr '[:upper:]' '[:lower:]')/$("${UNAME_BIN}" -m)"
+case "${platform}" in
+    darwin/x86_64)
+        die "Intel macOS is unsupported; DefenseClaw for macOS requires Apple Silicon (arm64)"
+        ;;
+    darwin/arm64)
+        cosign_asset="cosign-darwin-arm64"
+        cosign_sha256="ff497a698f125f3130b04f000b2cb0dd163bcaf00b5e776ef536035e6d0b3f3e"
+        ;;
+    linux/x86_64 | linux/amd64)
+        cosign_asset="cosign-linux-amd64"
+        cosign_sha256="7c78a7f2efc00088bd788a758db6e0928e79f3e0eb83eb5d3c499ed98da4c4f4"
+        ;;
+    linux/aarch64 | linux/arm64)
+        cosign_asset="cosign-linux-arm64"
+        cosign_sha256="b7c23659a50a59fd8eec44b87188e9062157d0c87796cac7b38727e5390c4917"
+        ;;
+    *)
+        die "unsupported platform for automatic Cosign verification: ${platform}"
+        ;;
+esac
+readonly platform cosign_asset cosign_sha256
+
 temp_root_input="${TMPDIR:-/tmp}"
 [[ "${temp_root_input}" == /* ]] || die "temporary directory root must be absolute"
 temp_root="$(cd -P -- "${temp_root_input}" 2>/dev/null && pwd -P)" \
@@ -431,29 +454,6 @@ cosign_state="${workdir}/cosign-state"
 mkdir -m 700 "${cosign_home}" "${cosign_config}" "${cosign_cache}" \
     "${cosign_data}" "${cosign_state}"
 readonly cosign_home cosign_config cosign_cache cosign_data cosign_state
-
-platform="$("${UNAME_BIN}" -s | tr '[:upper:]' '[:lower:]')/$("${UNAME_BIN}" -m)"
-case "${platform}" in
-    darwin/x86_64)
-        die "Intel macOS is unsupported; DefenseClaw for macOS requires Apple Silicon (arm64)"
-        ;;
-    darwin/arm64)
-        cosign_asset="cosign-darwin-arm64"
-        cosign_sha256="ff497a698f125f3130b04f000b2cb0dd163bcaf00b5e776ef536035e6d0b3f3e"
-        ;;
-    linux/x86_64 | linux/amd64)
-        cosign_asset="cosign-linux-amd64"
-        cosign_sha256="7c78a7f2efc00088bd788a758db6e0928e79f3e0eb83eb5d3c499ed98da4c4f4"
-        ;;
-    linux/aarch64 | linux/arm64)
-        cosign_asset="cosign-linux-arm64"
-        cosign_sha256="b7c23659a50a59fd8eec44b87188e9062157d0c87796cac7b38727e5390c4917"
-        ;;
-    *)
-        die "unsupported platform for automatic Cosign verification: ${platform}"
-        ;;
-esac
-readonly cosign_asset cosign_sha256
 
 cosign_bin="${workdir}/${cosign_asset}"
 cosign_candidate_copy="${workdir}/.${cosign_asset}.candidate"

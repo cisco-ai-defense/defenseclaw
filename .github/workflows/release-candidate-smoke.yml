@@ -181,6 +181,57 @@ jobs:
             --success-path-only \
             --health-timeout 60
 
+  macos-intel-refusal:
+    name: Reject unsupported Intel macOS exact candidate (${{ matrix.surface }})
+    runs-on: macos-15-intel
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        surface:
+          - fresh-install
+          - upgrade
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ inputs.commit }}
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: "3.13"
+      - uses: sigstore/cosign-installer@dc72c7d5c4d10cd6bcb8cf6e3fd625a9e5e537da # v3.7.0
+        with:
+          cosign-release: "v2.6.2"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ inputs.candidate_artifact }}
+          path: candidate-transport
+      - name: Restore exact candidate modes
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ARCH" = "X64"
+          python3 scripts/release_candidate.py unpack-transport \
+            --archive candidate-transport/release-candidate.tar \
+            --destination release-candidate
+      - name: Authenticate candidate and prove pre-effect refusal
+        env:
+          RELEASE_TAG: ${{ inputs.version }}
+          RELEASE_COMMIT: ${{ inputs.commit }}
+        run: |
+          set -euo pipefail
+          python3 scripts/release_candidate.py verify \
+            --root release-candidate --version "$RELEASE_TAG" --commit "$RELEASE_COMMIT"
+          python3 scripts/verify-sigstore-blob.py \
+            --certificate release-candidate/dist/checksums.txt.pem \
+            --signature release-candidate/dist/checksums.txt.sig \
+            --certificate-identity "https://github.com/$GITHUB_REPOSITORY/.github/workflows/release.yaml@refs/heads/main" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            release-candidate/dist/checksums.txt
+          bash scripts/test-upgrade-macos-intel-refusal.sh \
+            --surface "${{ matrix.surface }}" \
+            --release-dir "$GITHUB_WORKSPACE/release-candidate/dist" \
+            --version "$RELEASE_TAG"
+
   windows-fresh-install:
     name: Fresh install exact candidate (windows-amd64)
     runs-on: windows-latest
