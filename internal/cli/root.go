@@ -151,6 +151,29 @@ Run without arguments to start the sidecar daemon.`,
 	SilenceUsage: true,
 }
 
+// rootPersistentPreRunNoAuditE mirrors rootPersistentPreRunE minus the
+// audit.db open. Used by co-resident subcommands that never read or write the
+// audit store — most importantly the hook-guardian's `enterprise hooks watch`,
+// which runs as a long-lived LaunchDaemon beside the main gateway. SQLite
+// cannot accept two RW owners on the same file, so opening audit.db from a
+// co-resident daemon consistently fails with SQLITE_BUSY (5); and the same
+// unlink-on-close hazard flagged in loadGatewayCommandConfigOnly's comment
+// applies to long-lived hooks daemons too. The enterprise hooks pathway does
+// not read auditStore / auditLog anywhere, so skipping the open is dead-work
+// removal, not a feature drop.
+func rootPersistentPreRunNoAuditE(cmd *cobra.Command, _ []string) error {
+	if versionJSON {
+		return nil
+	}
+	if err := daemon.RegisterCurrentProcess(); err != nil {
+		return err
+	}
+	if err := loadGatewayCommandConfigOnly(); err != nil {
+		return err
+	}
+	return nil
+}
+
 // loadGatewayCommandConfigOnly performs the strict v8 configuration phase
 // shared by the daemon and read-only control commands. It deliberately does
 // not open audit.db: a short-lived `status` process must never become a second
