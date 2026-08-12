@@ -435,7 +435,9 @@ def test_release_smoke_is_exact_candidate_install_and_upgrade_only() -> None:
     assert "scripts/release_candidate.py verify" in rendered_intel
     assert "scripts/verify-sigstore-blob.py" in rendered_intel
     assert "scripts/test-upgrade-macos-intel-refusal.sh" in rendered_intel
-    assert '--surface "${{ matrix.surface }}"' in rendered_intel
+    assert "'REFUSAL_SURFACE': '${{ matrix.surface }}'" in rendered_intel
+    assert '--surface "$REFUSAL_SURFACE"' in rendered_intel
+    assert '--surface "${{ matrix.surface }}"' not in rendered_intel
 
     windows = _render(jobs["windows-fresh-install"])
     assert "scripts/release_candidate.py verify" in windows

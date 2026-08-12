@@ -217,6 +217,7 @@ jobs:
         env:
           RELEASE_TAG: ${{ inputs.version }}
           RELEASE_COMMIT: ${{ inputs.commit }}
+          REFUSAL_SURFACE: ${{ matrix.surface }}
         run: |
           set -euo pipefail
           python3 scripts/release_candidate.py verify \
@@ -228,7 +229,7 @@ jobs:
             --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
             release-candidate/dist/checksums.txt
           bash scripts/test-upgrade-macos-intel-refusal.sh \
-            --surface "${{ matrix.surface }}" \
+            --surface "$REFUSAL_SURFACE" \
             --release-dir "$GITHUB_WORKSPACE/release-candidate/dist" \
             --version "$RELEASE_TAG"
 

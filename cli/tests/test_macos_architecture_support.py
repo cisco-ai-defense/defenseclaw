@@ -151,11 +151,15 @@ def test_release_build_and_package_contract_is_arm64_only() -> None:
     assert '[[ "$(macos_hardware_machine "$(uname -m)")" == "arm64" ]]' in app_builder
     assert "macOS app releases require Apple Silicon (arm64)" in app_builder
 
-    goreleaser = _text(".goreleaser.yaml")
-    assert "Darwin/amd64 compatibility slot" in goreleaser
-    assert "user entry point rejects Intel macOS" in goreleaser
+    goreleaser = yaml.safe_load(_text(".goreleaser.yaml"))
+    gateway_build = next(build for build in goreleaser["builds"] if build["id"] == "defenseclaw")
+    # GoReleaser still feeds the signed Protocol-2 compatibility slot. The
+    # supported build/package matrices above remain arm64-only on Darwin.
+    assert gateway_build["goos"] == ["linux", "darwin"]
+    assert gateway_build["goarch"] == ["amd64", "arm64"]
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell contract")
 def test_managed_bundle_wrapper_drives_arm64_target_without_lipo(tmp_path: Path) -> None:
     ai_common = tmp_path / "ai-common"
     fake_bin = tmp_path / "bin"
@@ -231,6 +235,7 @@ def test_managed_bundle_wrapper_drives_arm64_target_without_lipo(tmp_path: Path)
     assert "universal" not in invocation
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell contract")
 def test_macos_bundle_builder_refuses_intel_before_writing_output(tmp_path: Path) -> None:
     output = tmp_path / "bundle"
     completed = subprocess.run(
@@ -277,10 +282,11 @@ def test_all_macos_install_and_recovery_surfaces_refuse_intel_explicitly() -> No
     assert "DefenseClaw for macOS requires Apple Silicon (arm64)" in source_install
 
     rescue = _text("scripts/defenseclaw-rescue.sh")
-    assert 'darwin/x86_64)\n        die "Intel macOS is unsupported' in rescue
+    assert 'darwin/x86_64 | darwin/amd64)\n        die "Intel macOS is unsupported' in rescue
 
 
 @pytest.mark.parametrize("path", MACOS_HARDWARE_ENTRYPOINTS)
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell contract")
 def test_shell_entrypoints_distinguish_rosetta_from_genuine_intel(tmp_path: Path, path: str) -> None:
     source = _text(path)
     start = source.index("macos_hardware_machine() {")
@@ -310,11 +316,13 @@ def test_shell_entrypoints_distinguish_rosetta_from_genuine_intel(tmp_path: Path
     assert probe.stdout.strip() == "x86_64"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell contract")
 def test_authenticated_resolver_has_no_intel_macos_verifier_or_state_path(tmp_path: Path) -> None:
     assert ("darwin", "amd64") not in COSIGN_BOOTSTRAP_SHA256
     instructions = authenticated_resolver_instructions("9.9.9")
     assert "cosign-darwin-amd64" not in instructions
     assert "Intel macOS is unsupported" in instructions
+    assert "darwin/x86_64|darwin/amd64" in instructions
     platform_probe = "  platform_os=\"$(uname -s | tr '[:upper:]' '[:lower:]')\""
     temp_allocation = '  d="$(mktemp -d "${TMPDIR:-/tmp}/defenseclaw-upgrade.XXXXXX")"'
     assert instructions.index(platform_probe) < instructions.index(temp_allocation)
@@ -381,8 +389,9 @@ def test_documented_resolver_rejects_intel_before_temp_or_network() -> None:
     site = _text("docs-site/content/docs/get-started/upgrade.mdx")
     platform_probe = 'platform_os="$(uname -s | tr \'[:upper:]\' \'[:lower:]\')"'
     assert site.index(platform_probe) < site.index('d="$(mktemp -d')
-    assert site.index("darwin/x86_64) echo 'Intel macOS is unsupported") < site.index('d="$(mktemp -d')
-    assert site.index("darwin/x86_64) echo 'Intel macOS is unsupported") < site.index("curl --fail")
+    refusal = "darwin/x86_64|darwin/amd64) echo 'Intel macOS is unsupported"
+    assert site.index(refusal) < site.index('d="$(mktemp -d')
+    assert site.index(refusal) < site.index("curl --fail")
     assert "sysctl.proc_translated" in site
 
 
@@ -390,6 +399,7 @@ def test_documented_resolver_rejects_intel_before_temp_or_network() -> None:
     ("surface", "controller_name"),
     (("fresh-install", "install.sh"), ("upgrade", "defenseclaw-upgrade.sh")),
 )
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell contract")
 def test_intel_refusal_harness_detects_transient_create_delete(
     tmp_path: Path,
     surface: str,
@@ -451,6 +461,77 @@ def test_intel_refusal_harness_detects_transient_create_delete(
     assert not list(runner_temp.iterdir())
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell contract")
+def test_intel_refusal_harness_requires_release_dir() -> None:
+    completed = subprocess.run(
+        [
+            str(INTEL_REFUSAL_HARNESS),
+            "--surface",
+            "fresh-install",
+            "--version",
+            "9.9.9",
+        ],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert completed.returncode == 2
+    assert "usage:" in completed.stderr
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX refusal harness")
+@pytest.mark.parametrize(
+    ("include_uname", "expected"),
+    (
+        (False, "uname is required to exercise the native platform guard"),
+        (True, "python3 is required to snapshot the exact candidate and isolated install roots"),
+    ),
+)
+def test_intel_refusal_harness_reports_missing_required_tools(
+    tmp_path: Path,
+    include_uname: bool,
+    expected: str,
+) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    (fake_bin / "bash").symlink_to("/bin/bash")
+    if include_uname:
+        _write_executable(
+            fake_bin / "uname",
+            "#!/bin/bash\n"
+            "case \"${1:-}\" in\n"
+            "  -s) printf 'Darwin\\n' ;;\n"
+            "  -m) printf 'x86_64\\n' ;;\n"
+            "  *) exit 64 ;;\n"
+            "esac\n",
+        )
+
+    completed = subprocess.run(
+        [
+            str(INTEL_REFUSAL_HARNESS),
+            "--surface",
+            "fresh-install",
+            "--release-dir",
+            str(ROOT),
+            "--version",
+            "9.9.9",
+        ],
+        cwd=ROOT,
+        env={"PATH": str(fake_bin)},
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=30,
+    )
+
+    assert completed.returncode == 1
+    assert expected in completed.stderr
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shell contract")
 def test_intel_refusal_harness_reaches_real_fresh_installer_guard(tmp_path: Path) -> None:
     release = tmp_path / "release"
     fake_bin = tmp_path / "fake-bin"

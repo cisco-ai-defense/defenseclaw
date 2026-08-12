@@ -429,7 +429,7 @@ def test_windows_release_is_fresh_install_only_and_uses_public_install_ps1() -> 
     windows_jobs = {
         name
         for name, candidate in smoke_workflow["jobs"].items()
-        if "windows" in str((candidate.get("runs-on"), candidate.get("strategy", {}))).lower()
+        if "windows" in str(candidate.get("runs-on", "")).lower()
     }
     assert windows_jobs == {
         "windows-fresh-install",

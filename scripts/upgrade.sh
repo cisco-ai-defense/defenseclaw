@@ -5423,14 +5423,15 @@ print_new_upgrade_script_hint() {
       umask 077
       platform_os="\$(uname -s | tr '[:upper:]' '[:lower:]')"
       platform_arch="\$(uname -m)"
-      if [ "\$platform_os/\$platform_arch" = 'darwin/x86_64' ] \
+      if [ "\$platform_os" = 'darwin' ] \
+        && { [ "\$platform_arch" = 'x86_64' ] || [ "\$platform_arch" = 'amd64' ]; } \
         && [ -x /usr/sbin/sysctl ] && [ ! -L /usr/sbin/sysctl ] \
         && [ "\$("/usr/sbin/sysctl" -in sysctl.proc_translated 2>/dev/null || true)" = '1' ]; then
         platform_arch='arm64'
       fi
       platform="\$platform_os/\$platform_arch"
       case "\$platform" in
-        darwin/x86_64) echo 'Intel macOS is unsupported; DefenseClaw for macOS requires Apple Silicon (arm64).' >&2; exit 1 ;;
+        darwin/x86_64|darwin/amd64) echo 'Intel macOS is unsupported; DefenseClaw for macOS requires Apple Silicon (arm64).' >&2; exit 1 ;;
         darwin/arm64|linux/x86_64|linux/amd64|linux/aarch64|linux/arm64) ;;
         *) echo 'Unsupported platform for the DefenseClaw resolver.' >&2; exit 1 ;;
       esac

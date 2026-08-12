@@ -43,22 +43,23 @@ case "${surface}" in
     *) usage ;;
 esac
 [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || usage
-process_machine="$(uname -m)"
-[[ "$(uname -s)" == "Darwin" \
-    && "${process_machine}" == "x86_64" \
-    && "$(macos_hardware_machine "${process_machine}")" == "x86_64" ]] || {
+[[ -n "${release_dir}" ]] || usage
+platform_uname="$(command -v uname || true)"
+[[ -n "${platform_uname}" ]] || {
+    echo "uname is required to exercise the native platform guard" >&2
+    exit 1
+}
+process_machine="$("${platform_uname}" -m)"
+[[ "$("${platform_uname}" -s)" == "Darwin" \
+    && ( "${process_machine}" == "x86_64" || "${process_machine}" == "amd64" ) \
+    && "$(macos_hardware_machine "${process_machine}")" == "${process_machine}" ]] || {
     echo "this refusal gate requires native Intel macOS (Darwin/x86_64)" >&2
     exit 1
 }
 release_dir="$(cd -P -- "${release_dir}" && pwd -P)"
-snapshot_python="$(command -v python3)"
-platform_uname="$(command -v uname)"
+snapshot_python="$(command -v python3 || true)"
 [[ -n "${snapshot_python}" ]] || {
     echo "python3 is required to snapshot the exact candidate and isolated install roots" >&2
-    exit 1
-}
-[[ -n "${platform_uname}" ]] || {
-    echo "uname is required to exercise the native platform guard" >&2
     exit 1
 }
 

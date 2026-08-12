@@ -27,14 +27,17 @@ VERSION = "0.8.8"
 COMMIT = "a" * 40
 CHANNEL_BRANCH_COMMIT = "f" * 40
 RESCUE = ROOT / "scripts/defenseclaw-rescue.sh"
+IMMUTABLE_088_RESCUE = ROOT / "cli/tests/fixtures/release/defenseclaw-rescue-0.8.8.sh"
 UPGRADE_RESOLVER = ROOT / "scripts/upgrade.sh"
 WINDOWS_RESCUE = ROOT / "scripts/defenseclaw-rescue.ps1"
 PUBLISHER = ROOT / "scripts/publish-release-channel.sh"
 WORKFLOW = ROOT / ".github/workflows/release.yaml"
 DOC = ROOT / "docs/RELEASE_CHANNEL.md"
 SCRIPT_TIMEOUT_SECONDS = 30
-IMMUTABLE_088_RESCUE_SHA256 = "0ef7ce94aee25c7d4a8bbaefcf4d7b5d2fb789bc65ea378aacec16a549b6668f"
-IMMUTABLE_088_RESCUE_SIZE = 28_993
+# Exact authenticated 0.8.8 release asset, retained as a hermetic compatibility
+# fixture so current rescue hardening cannot rewrite the published-byte proof.
+IMMUTABLE_088_RESCUE_SHA256 = "0c98aa9aa7d56e88f04768e0fe70681f2de777fc22021f9af4ccc06be1d8099b"
+IMMUTABLE_088_RESCUE_SIZE = 28_419
 COSIGN_RELEASE_BASE_URL = (
     f"https://github.com/sigstore/cosign/releases/download/v{resolver_hint.COSIGN_BOOTSTRAP_VERSION}"
 )
@@ -716,6 +719,7 @@ def _rescue_fixture(
     trust_path_cosign: bool = False,
     patch_cosign_digest: bool = True,
     channel_failure_plan: str = "",
+    rescue_source_path: Path = RESCUE,
 ) -> tuple[dict[str, str], Path]:
     assert channel_failure_plan in {
         "",
@@ -852,7 +856,7 @@ exit {cosign_exit}
         hashlib.sha256(path_cosign.read_bytes()).hexdigest() if trust_path_cosign else authenticated_cosign_digest
     )
 
-    rescue_source = RESCUE.read_text(encoding="utf-8")
+    rescue_source = rescue_source_path.read_text(encoding="utf-8")
     assert rescue_source.count(production_cosign_digest) == 1
     if patch_cosign_digest:
         rescue_source = rescue_source.replace(
@@ -1024,7 +1028,11 @@ def test_posix_rescue_cosign_pins_match_resolver_hint_and_test_fixtures() -> Non
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX rescue bootstrap")
-def test_posix_rescue_rejects_intel_before_network_or_host_state(tmp_path: Path) -> None:
+@pytest.mark.parametrize("intel_arch", ["x86_64", "amd64"])
+def test_posix_rescue_rejects_intel_before_network_or_host_state(
+    tmp_path: Path,
+    intel_arch: str,
+) -> None:
     env, rescue = _rescue_fixture(tmp_path)
     source = rescue.read_text(encoding="utf-8")
     platform_probe = 'platform_os="$("${UNAME_BIN}" -s | tr \'[:upper:]\' \'[:lower:]\')"'
@@ -1043,7 +1051,7 @@ def test_posix_rescue_rejects_intel_before_network_or_host_state(tmp_path: Path)
         rescue,
         source.replace('readonly MACOS_SYSCTL_BIN="/usr/sbin/sysctl"', f'readonly MACOS_SYSCTL_BIN="{fake_sysctl!s}"')
         .replace(platform_probe, 'platform_os="darwin"')
-        .replace(arch_probe, 'platform_arch="x86_64"')
+        .replace(arch_probe, f'platform_arch="{intel_arch}"')
         .replace(
             workdir_probe,
             instrumented_workdir,
@@ -1422,7 +1430,7 @@ def test_rescue_without_operator_arguments_executes_exact_tagged_resolver(
 def test_immutable_088_rescue_hands_clean_path_to_new_resolver_uv_custody(
     tmp_path: Path,
 ) -> None:
-    rescue_bytes = RESCUE.read_bytes()
+    rescue_bytes = IMMUTABLE_088_RESCUE.read_bytes()
     assert len(rescue_bytes) == IMMUTABLE_088_RESCUE_SIZE
     assert hashlib.sha256(rescue_bytes).hexdigest() == IMMUTABLE_088_RESCUE_SHA256
 
@@ -1524,7 +1532,11 @@ def test_immutable_088_rescue_hands_clean_path_to_new_resolver_uv_custody(
         + 'printf "resolver-clean-path=%s\\n" "${PATH}"\n'
         + "# DefenseClaw upgrade resolver complete v1\n"
     ).encode()
-    env, rescue = _rescue_fixture(tmp_path, resolver_payload=resolver_payload)
+    env, rescue = _rescue_fixture(
+        tmp_path,
+        resolver_payload=resolver_payload,
+        rescue_source_path=IMMUTABLE_088_RESCUE,
+    )
     home = tmp_path / "home"
     known_bin = home / ".local" / "bin"
     known_bin.mkdir(parents=True)

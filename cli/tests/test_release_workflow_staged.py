@@ -828,7 +828,6 @@ def test_exact_posix_fresh_install_twelve_upgrades_and_intel_refusal_gate_public
     }
     assert jobs["posix-fresh-install"]["timeout-minutes"] == "30"
     assert jobs["posix-upgrade"]["timeout-minutes"] == "60"
-    assert jobs["macos-intel-refusal"]["timeout-minutes"] == "20"
     assert jobs["windows-fresh-install"]["timeout-minutes"] == "45"
 
     assert jobs["posix-fresh-install"]["strategy"] == {
@@ -900,18 +899,6 @@ def test_exact_posix_fresh_install_twelve_upgrades_and_intel_refusal_gate_public
     assert "baseline_dependencies=target" in upgrade
     assert '--baseline-dependencies "$baseline_dependencies"' in upgrade
 
-    intel_refusal = jobs["macos-intel-refusal"]
-    assert intel_refusal["runs-on"] == "macos-15-intel"
-    assert intel_refusal["strategy"] == {
-        "fail-fast": "false",
-        "matrix": {"surface": ["fresh-install", "upgrade"]},
-    }
-    intel_refusal_text = str(intel_refusal)
-    assert 'test "$RUNNER_ARCH" = "X64"' in intel_refusal_text
-    assert "scripts/release_candidate.py verify" in intel_refusal_text
-    assert "scripts/verify-sigstore-blob.py" in intel_refusal_text
-    assert "scripts/test-upgrade-macos-intel-refusal.sh" in intel_refusal_text
-
     text = CERTIFICATION_WORKFLOW.read_text(encoding="utf-8")
     for retired in (
         "live-continuity",
@@ -921,6 +908,24 @@ def test_exact_posix_fresh_install_twelve_upgrades_and_intel_refusal_gate_public
         "certification-complete",
     ):
         assert retired not in text
+
+
+def test_intel_macos_refusal_gate_uses_the_exact_sealed_candidate() -> None:
+    intel_refusal = _certification_workflow()["jobs"]["macos-intel-refusal"]
+    assert intel_refusal["runs-on"] == "macos-15-intel"
+    assert intel_refusal["timeout-minutes"] == "20"
+    assert intel_refusal["strategy"] == {
+        "fail-fast": "false",
+        "matrix": {"surface": ["fresh-install", "upgrade"]},
+    }
+    intel_refusal_text = str(intel_refusal)
+    assert 'test "$RUNNER_ARCH" = "X64"' in intel_refusal_text
+    assert "scripts/release_candidate.py verify" in intel_refusal_text
+    assert "scripts/verify-sigstore-blob.py" in intel_refusal_text
+    assert "scripts/test-upgrade-macos-intel-refusal.sh" in intel_refusal_text
+    assert "'REFUSAL_SURFACE': '${{ matrix.surface }}'" in intel_refusal_text
+    assert '--surface "$REFUSAL_SURFACE"' in intel_refusal_text
+    assert '--surface "${{ matrix.surface }}"' not in intel_refusal_text
 
 
 def test_posix_fresh_install_gates_temporary_and_external_cosign_paths() -> None:
