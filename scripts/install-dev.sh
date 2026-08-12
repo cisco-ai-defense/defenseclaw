@@ -35,6 +35,7 @@ readonly MIN_PYTHON_VERSION="3.10"
 readonly MAX_PYTHON_VERSION="3.13"
 readonly MAX_PYTHON_VERSION_EXCLUSIVE="3.14"
 readonly PREFERRED_PYTHON_VERSIONS=("3.12" "3.11" "3.13" "3.10")
+readonly MACOS_SYSCTL_BIN="/usr/sbin/sysctl"
 
 readonly VENV_DIR="${REPO_ROOT}/.venv"
 readonly INSTALL_DIR="${HOME}/.local/bin"
@@ -60,6 +61,17 @@ log_step()    { echo -e "\n${BOLD}${CYAN}==> $*${NC}"; }
 die() {
     log_error "$@"
     exit 1
+}
+
+macos_hardware_machine() {
+    local machine="$1"
+    if [[ "${machine}" == "x86_64" || "${machine}" == "amd64" ]] \
+        && [[ -x "${MACOS_SYSCTL_BIN}" && ! -L "${MACOS_SYSCTL_BIN}" ]] \
+        && [[ "$("${MACOS_SYSCTL_BIN}" -in sysctl.proc_translated 2>/dev/null || true)" == "1" ]]; then
+        printf '%s\n' "arm64"
+        return 0
+    fi
+    printf '%s\n' "${machine}"
 }
 
 source_install_ownership() {
@@ -120,6 +132,9 @@ check_os() {
 
     OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
     ARCH="$(uname -m)"
+    if [[ "${OS}" == "darwin" ]]; then
+        ARCH="$(macos_hardware_machine "${ARCH}")"
+    fi
 
     case "${ARCH}" in
         x86_64)  ARCH_NORMALIZED="amd64" ;;

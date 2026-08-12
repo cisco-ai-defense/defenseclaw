@@ -25,6 +25,19 @@
 
 set -euo pipefail
 
+readonly MACOS_SYSCTL_BIN="/usr/sbin/sysctl"
+
+macos_hardware_machine() {
+    local machine="$1"
+    if [[ "${machine}" == "x86_64" || "${machine}" == "amd64" ]] \
+        && [[ -x "${MACOS_SYSCTL_BIN}" && ! -L "${MACOS_SYSCTL_BIN}" ]] \
+        && [[ "$("${MACOS_SYSCTL_BIN}" -in sysctl.proc_translated 2>/dev/null || true)" == "1" ]]; then
+        printf '%s\n' "arm64"
+        return 0
+    fi
+    printf '%s\n' "${machine}"
+}
+
 if [[ $# -lt 1 || $# -gt 2 ]]; then
     echo "usage: $0 VERSION [OUTPUT_DIR]" >&2
     exit 64
@@ -40,7 +53,7 @@ OUT_DIR="${2:-dist}"
     echo "macOS app releases must be built on macOS" >&2
     exit 1
 }
-[[ "$(uname -m)" == "arm64" ]] || {
+[[ "$(macos_hardware_machine "$(uname -m)")" == "arm64" ]] || {
     echo "Intel macOS is unsupported; macOS app releases require Apple Silicon (arm64)" >&2
     exit 1
 }

@@ -51,10 +51,31 @@ set -euo pipefail
 # is group-writable (for example 0002).
 umask 077
 
+readonly MACOS_SYSCTL_BIN="/usr/sbin/sysctl"
+
+macos_hardware_machine() {
+    local machine="$1"
+    if [[ "${machine}" == "x86_64" || "${machine}" == "amd64" ]] \
+        && [[ -x "${MACOS_SYSCTL_BIN}" && ! -L "${MACOS_SYSCTL_BIN}" ]] \
+        && [[ "$("${MACOS_SYSCTL_BIN}" -in sysctl.proc_translated 2>/dev/null || true)" == "1" ]]; then
+        printf '%s\n' "arm64"
+        return 0
+    fi
+    printf '%s\n' "${machine}"
+}
+
+HOST_SYSTEM="$(uname -s)"
+HOST_PROCESS_MACHINE="$(uname -m)"
+HOST_MACHINE="${HOST_PROCESS_MACHINE}"
+if [[ "${HOST_SYSTEM}" == "Darwin" ]]; then
+    HOST_MACHINE="$(macos_hardware_machine "${HOST_PROCESS_MACHINE}")"
+fi
+readonly HOST_SYSTEM HOST_PROCESS_MACHINE HOST_MACHINE
+
 # Reject unsupported Intel macOS before resolving Python, reading recovery
 # state, creating staging/lock custody, or selecting release artifacts.
-if [[ "$(uname -s)" == "Darwin" && "$(uname -m)" != "arm64" ]]; then
-    printf '%s\n' "Intel macOS ($(uname -m)) is unsupported. DefenseClaw for macOS requires Apple Silicon (arm64). No changes were made." >&2
+if [[ "${HOST_SYSTEM}" == "Darwin" && "${HOST_MACHINE}" != "arm64" ]]; then
+    printf '%s\n' "Intel macOS (${HOST_PROCESS_MACHINE}) is unsupported. DefenseClaw for macOS requires Apple Silicon (arm64). No changes were made." >&2
     exit 1
 fi
 
@@ -219,7 +240,7 @@ resolve_upgrade_uv() {
     chmod 700 "${tool_root}" \
         || die "Could not protect private Python tool custody. No changes were made."
 
-    case "$(uname -s)/$(uname -m)" in
+    case "${HOST_SYSTEM}/${HOST_MACHINE}" in
         Darwin/x86_64)
             die "Intel macOS (x86_64) is unsupported. DefenseClaw for macOS requires Apple Silicon (arm64). No changes were made."
             ;;
@@ -4297,8 +4318,8 @@ fi
 
 section "Detecting Platform"
 
-OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
-ARCH="$(uname -m)"
+OS="$(printf '%s' "${HOST_SYSTEM}" | tr '[:upper:]' '[:lower:]')"
+ARCH="${HOST_MACHINE}"
 
 case "${ARCH}" in
     x86_64|amd64)  ARCH_NORM="amd64" ;;
@@ -5400,17 +5421,27 @@ print_new_upgrade_script_hint() {
       set -eu
       unset VERSION
       umask 077
+      platform_os="\$(uname -s | tr '[:upper:]' '[:lower:]')"
+      platform_arch="\$(uname -m)"
+      if [ "\$platform_os/\$platform_arch" = 'darwin/x86_64' ] \
+        && [ -x /usr/sbin/sysctl ] && [ ! -L /usr/sbin/sysctl ] \
+        && [ "\$("/usr/sbin/sysctl" -in sysctl.proc_translated 2>/dev/null || true)" = '1' ]; then
+        platform_arch='arm64'
+      fi
+      platform="\$platform_os/\$platform_arch"
+      case "\$platform" in
+        darwin/x86_64) echo 'Intel macOS is unsupported; DefenseClaw for macOS requires Apple Silicon (arm64).' >&2; exit 1 ;;
+        darwin/arm64|linux/x86_64|linux/amd64|linux/aarch64|linux/arm64) ;;
+        *) echo 'Unsupported platform for the DefenseClaw resolver.' >&2; exit 1 ;;
+      esac
       d="\$(mktemp -d "\${TMPDIR:-/tmp}/defenseclaw-upgrade.XXXXXX")"
       trap 'rm -rf "\$d"' EXIT
       cosign_bin="\$(command -v cosign || true)"
       if [ -z "\$cosign_bin" ]; then
-        platform="\$(uname -s | tr '[:upper:]' '[:lower:]')/\$(uname -m)"
         case "\$platform" in
-          darwin/x86_64) echo 'Intel macOS is unsupported; DefenseClaw for macOS requires Apple Silicon (arm64).' >&2; exit 1 ;;
           darwin/arm64) cosign_asset='cosign-darwin-arm64'; cosign_sha='ff497a698f125f3130b04f000b2cb0dd163bcaf00b5e776ef536035e6d0b3f3e' ;;
           linux/x86_64|linux/amd64) cosign_asset='cosign-linux-amd64'; cosign_sha='7c78a7f2efc00088bd788a758db6e0928e79f3e0eb83eb5d3c499ed98da4c4f4' ;;
           linux/aarch64|linux/arm64) cosign_asset='cosign-linux-arm64'; cosign_sha='b7c23659a50a59fd8eec44b87188e9062157d0c87796cac7b38727e5390c4917' ;;
-          *) echo 'Unsupported platform for automatic Cosign verification.' >&2; exit 1 ;;
         esac
         cosign_bin="\$d/\$cosign_asset"
         curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --tlsv1.2 --max-filesize 209715200 --output "\$cosign_bin" 'https://github.com/sigstore/cosign/releases/download/v${COSIGN_BOOTSTRAP_VERSION}/'"\$cosign_asset"

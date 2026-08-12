@@ -21,6 +21,19 @@ set -euo pipefail
 # deterministic on development hosts with a permissive login umask.
 umask 077
 
+readonly MACOS_SYSCTL_BIN="/usr/sbin/sysctl"
+
+macos_hardware_machine() {
+    local machine="$1"
+    if [[ "${machine}" == "x86_64" || "${machine}" == "amd64" ]] \
+        && [[ -x "${MACOS_SYSCTL_BIN}" && ! -L "${MACOS_SYSCTL_BIN}" ]] \
+        && [[ "$("${MACOS_SYSCTL_BIN}" -in sysctl.proc_translated 2>/dev/null || true)" == "1" ]]; then
+        printf '%s\n' "arm64"
+        return 0
+    fi
+    printf '%s\n' "${machine}"
+}
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REPO="cisco-ai-defense/defenseclaw"
 UPGRADE_BASELINE_POLICY="${UPGRADE_BASELINE_POLICY:-${ROOT}/release/upgrade-baselines.json}"
@@ -284,10 +297,16 @@ detect_platform() {
         Linux) OS_NAME="linux" ;;
         *) die "unsupported OS for upgrade smoke: $(uname -s)" ;;
     esac
-    case "$(uname -m)" in
+    local process_arch effective_arch
+    process_arch="$(uname -m)"
+    effective_arch="${process_arch}"
+    if [[ "${OS_NAME}" == "darwin" ]]; then
+        effective_arch="$(macos_hardware_machine "${process_arch}")"
+    fi
+    case "${effective_arch}" in
         arm64|aarch64) ARCH_NAME="arm64" ;;
         x86_64|amd64) ARCH_NAME="amd64" ;;
-        *) die "unsupported architecture for upgrade smoke: $(uname -m)" ;;
+        *) die "unsupported architecture for upgrade smoke: ${process_arch}" ;;
     esac
     if [[ "${OS_NAME}" == "darwin" && "${ARCH_NAME}" != "arm64" ]]; then
         die "Intel macOS is outside the supported release-upgrade test matrix"

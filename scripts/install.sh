@@ -72,6 +72,7 @@ readonly MAX_PYTHON_VERSION_EXCLUSIVE="3.14"
 readonly COSIGN_BOOTSTRAP_VERSION="2.6.3"
 readonly COSIGN_BOOTSTRAP_MAX_BYTES="209715200"
 readonly SANDBOX_INSTALLER_ASSET_START_VERSION="0.8.11"
+readonly MACOS_SYSCTL_BIN="/usr/sbin/sysctl"
 VERIFIED_CHECKSUM=""
 COSIGN_BIN=""
 
@@ -103,6 +104,17 @@ die() { err "$@"; exit 1; }
 # ── Utilities ─────────────────────────────────────────────────────────────────
 
 has() { command -v "$1" &>/dev/null; }
+
+macos_hardware_machine() {
+    local machine="$1"
+    if [[ "${machine}" == "x86_64" || "${machine}" == "amd64" ]] \
+        && [[ -x "${MACOS_SYSCTL_BIN}" && ! -L "${MACOS_SYSCTL_BIN}" ]] \
+        && [[ "$("${MACOS_SYSCTL_BIN}" -in sysctl.proc_translated 2>/dev/null || true)" == "1" ]]; then
+        printf '%s\n' "arm64"
+        return 0
+    fi
+    printf '%s\n' "${machine}"
+}
 
 existing_install_detected() {
     has defenseclaw \
@@ -859,6 +871,9 @@ detect_platform() {
 
     OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
     ARCH="$(uname -m)"
+    if [[ "${OS}" == "darwin" ]]; then
+        ARCH="$(macos_hardware_machine "${ARCH}")"
+    fi
 
     case "${ARCH}" in
         x86_64|amd64)  ARCH_NORM="amd64" ;;

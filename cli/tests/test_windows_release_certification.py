@@ -426,9 +426,12 @@ def test_windows_setup_bytes_are_bound_into_the_single_sealed_candidate() -> Non
 
 def test_windows_release_is_fresh_install_only_and_uses_public_install_ps1() -> None:
     smoke_workflow = _workflow(SMOKE_PATH)
-    assert set(smoke_workflow["jobs"]) == {
-        "posix-fresh-install",
-        "posix-upgrade",
+    windows_jobs = {
+        name
+        for name, candidate in smoke_workflow["jobs"].items()
+        if "windows" in str((candidate.get("runs-on"), candidate.get("strategy", {}))).lower()
+    }
+    assert windows_jobs == {
         "windows-fresh-install",
     }
     job = smoke_workflow["jobs"]["windows-fresh-install"]

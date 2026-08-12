@@ -11,6 +11,19 @@
 set -euo pipefail
 umask 077
 
+readonly MACOS_SYSCTL_BIN="/usr/sbin/sysctl"
+
+macos_hardware_machine() {
+    local machine="$1"
+    if [[ "${machine}" == "x86_64" || "${machine}" == "amd64" ]] \
+        && [[ -x "${MACOS_SYSCTL_BIN}" && ! -L "${MACOS_SYSCTL_BIN}" ]] \
+        && [[ "$("${MACOS_SYSCTL_BIN}" -in sysctl.proc_translated 2>/dev/null || true)" == "1" ]]; then
+        printf '%s\n' "arm64"
+        return 0
+    fi
+    printf '%s\n' "${machine}"
+}
+
 if [[ $# -ne 2 ]]; then
     echo "usage: $0 RELEASE_DIR VERSION" >&2
     exit 64
@@ -144,11 +157,17 @@ PY
 assert_bootstrap_retired_privately() {
     local normalized_os normalized_arch filename
     normalized_os="$(uname -s | tr '[:upper:]' '[:lower:]')"
-    case "$(uname -m)" in
+    local process_arch effective_arch
+    process_arch="$(uname -m)"
+    effective_arch="${process_arch}"
+    if [[ "${normalized_os}" == "darwin" ]]; then
+        effective_arch="$(macos_hardware_machine "${process_arch}")"
+    fi
+    case "${effective_arch}" in
         x86_64|amd64) normalized_arch="amd64" ;;
         arm64|aarch64) normalized_arch="arm64" ;;
         *)
-            echo "unsupported architecture in fresh-install gate: $(uname -m)" >&2
+            echo "unsupported architecture in fresh-install gate: ${process_arch}" >&2
             exit 1
             ;;
     esac

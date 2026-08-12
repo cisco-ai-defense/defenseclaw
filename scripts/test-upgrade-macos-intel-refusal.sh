@@ -8,6 +8,19 @@
 
 set -euo pipefail
 
+readonly MACOS_SYSCTL_BIN="/usr/sbin/sysctl"
+
+macos_hardware_machine() {
+    local machine="$1"
+    if [[ "${machine}" == "x86_64" || "${machine}" == "amd64" ]] \
+        && [[ -x "${MACOS_SYSCTL_BIN}" && ! -L "${MACOS_SYSCTL_BIN}" ]] \
+        && [[ "$("${MACOS_SYSCTL_BIN}" -in sysctl.proc_translated 2>/dev/null || true)" == "1" ]]; then
+        printf '%s\n' "arm64"
+        return 0
+    fi
+    printf '%s\n' "${machine}"
+}
+
 usage() {
     echo "usage: $0 --surface fresh-install|upgrade --release-dir DIR --version X.Y.Z" >&2
     exit 2
@@ -30,7 +43,10 @@ case "${surface}" in
     *) usage ;;
 esac
 [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || usage
-[[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "x86_64" ]] || {
+process_machine="$(uname -m)"
+[[ "$(uname -s)" == "Darwin" \
+    && "${process_machine}" == "x86_64" \
+    && "$(macos_hardware_machine "${process_machine}")" == "x86_64" ]] || {
     echo "this refusal gate requires native Intel macOS (Darwin/x86_64)" >&2
     exit 1
 }

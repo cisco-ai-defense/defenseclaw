@@ -1232,6 +1232,8 @@ def test_interrupted_phase_two_downloads_pinned_uv_under_clean_path(
         "PLAN_ONLY=0\n"
         "STAGING_DIR=\"\"\n"
         "UV_BIN=\"\"\n"
+        f'HOST_SYSTEM="{uv_platform[0]}"\n'
+        f'HOST_MACHINE="{uv_platform[1]}"\n'
         f'UV_BOOTSTRAP_VERSION="{version_match.group(1)}"\n'
         f'UV_BOOTSTRAP_MAX_BYTES="{maximum_match.group(1)}"\n'
         "RED=\"\"; GREEN=\"\"; YELLOW=\"\"; BLUE=\"\"; CYAN=\"\"; BOLD=\"\"; DIM=\"\"; NC=\"\"\n"

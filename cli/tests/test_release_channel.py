@@ -33,8 +33,8 @@ PUBLISHER = ROOT / "scripts/publish-release-channel.sh"
 WORKFLOW = ROOT / ".github/workflows/release.yaml"
 DOC = ROOT / "docs/RELEASE_CHANNEL.md"
 SCRIPT_TIMEOUT_SECONDS = 30
-IMMUTABLE_088_RESCUE_SHA256 = "1df4baf83c15fd9efba933e365a2955c8c754f075e27a34bb1584ddbb057a2bb"
-IMMUTABLE_088_RESCUE_SIZE = 28_391
+IMMUTABLE_088_RESCUE_SHA256 = "0ef7ce94aee25c7d4a8bbaefcf4d7b5d2fb789bc65ea378aacec16a549b6668f"
+IMMUTABLE_088_RESCUE_SIZE = 28_993
 COSIGN_RELEASE_BASE_URL = (
     f"https://github.com/sigstore/cosign/releases/download/v{resolver_hint.COSIGN_BOOTSTRAP_VERSION}"
 )
@@ -1027,17 +1027,24 @@ def test_posix_rescue_cosign_pins_match_resolver_hint_and_test_fixtures() -> Non
 def test_posix_rescue_rejects_intel_before_network_or_host_state(tmp_path: Path) -> None:
     env, rescue = _rescue_fixture(tmp_path)
     source = rescue.read_text(encoding="utf-8")
-    platform_probe = 'platform="$("${UNAME_BIN}" -s | tr \'[:upper:]\' \'[:lower:]\')/$("${UNAME_BIN}" -m)"'
+    platform_probe = 'platform_os="$("${UNAME_BIN}" -s | tr \'[:upper:]\' \'[:lower:]\')"'
+    arch_probe = 'platform_arch="$("${UNAME_BIN}" -m)"'
     assert source.count(platform_probe) == 1
+    assert source.count(arch_probe) == 1
     assert source.index(platform_probe) < source.index('temp_root_input="${TMPDIR:-/tmp}"')
-    assert source.index(platform_probe) < source.index('workdir="$(mktemp -d')
+    assert source.index(arch_probe) < source.index('workdir="$(mktemp -d')
     mktemp_marker = tmp_path / "mktemp-invoked"
+    fake_sysctl = tmp_path / "sysctl"
+    _write_executable(fake_sysctl, "#!/bin/sh\nprintf '0\\n'\n")
     workdir_probe = 'workdir="$(mktemp -d "${temp_root}/defenseclaw-rescue.XXXXXX")"'
     assert source.count(workdir_probe) == 1
     instrumented_workdir = f"printf invoked > {mktemp_marker!s}; {workdir_probe}"
     _write_executable(
         rescue,
-        source.replace(platform_probe, 'platform="darwin/x86_64"').replace(
+        source.replace('readonly MACOS_SYSCTL_BIN="/usr/sbin/sysctl"', f'readonly MACOS_SYSCTL_BIN="{fake_sysctl!s}"')
+        .replace(platform_probe, 'platform_os="darwin"')
+        .replace(arch_probe, 'platform_arch="x86_64"')
+        .replace(
             workdir_probe,
             instrumented_workdir,
         ),
@@ -1489,9 +1496,11 @@ def test_immutable_088_rescue_hands_clean_path_to_new_resolver_uv_custody(
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
         "umask 077\n"
-        f'readonly UV_BOOTSTRAP_VERSION="{pin.group(1)}"\n'
-        f'readonly UV_BOOTSTRAP_MAX_BYTES="{maximum.group(1)}"\n'
-        'UV_BIN=""\n'
+            f'readonly UV_BOOTSTRAP_VERSION="{pin.group(1)}"\n'
+            f'readonly UV_BOOTSTRAP_MAX_BYTES="{maximum.group(1)}"\n'
+            f'HOST_SYSTEM="{uv_platform[0]}"\n'
+            f'HOST_MACHINE="{uv_platform[1]}"\n'
+            'UV_BIN=""\n'
         'die() { printf "die: %s\\n" "$*" >&2; exit 1; }\n'
         'ok() { printf "ok: %s\\n" "$*"; }\n'
         'warn() { printf "warn: %s\\n" "$*" >&2; }\n'

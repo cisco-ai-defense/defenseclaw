@@ -218,6 +218,19 @@
       "since": "0.8.4"
     },
     {
+      "name": "DEFENSECLAW_INTEL_REFUSAL_COMMAND_LOG",
+      "category": "test_fixture",
+      "purpose": "Records any dependency, network, service, or mutation command reached by the native Intel macOS exact-candidate refusal harness.",
+      "default": "unset",
+      "accepted_values": ["absolute path inside the isolated refusal-test root", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "scripts/test-upgrade-macos-intel-refusal.sh", "description": "Fails the native Intel release gate if a blocked command executes before architecture refusal"}
+      ],
+      "since": "0.8.12"
+    },
+    {
       "name": "DEFENSECLAW_TEST_BASH",
       "category": "test_fixture",
       "purpose": "Selects the Bash executable used by release-workflow tests so macOS CI can exercise wrappers with the system Bash runtime.",

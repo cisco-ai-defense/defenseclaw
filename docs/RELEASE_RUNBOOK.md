@@ -159,6 +159,9 @@ Confirm that the exact run shows:
   Linux and macOS under the immutable rescue bootstrap’s clean tool path;
 - every candidate resolver success case ran without a runner-installed `uv`
   on `PATH`, proving the authenticated private bootstrap and handoffs;
+- the native `macos-15-intel` fresh-install and authenticated-upgrade lanes
+  both verified the exact sealed candidate, then refused before dependency,
+  network, artifact, or state effects;
 - native Windows x64 fresh install through `install.ps1` and
   `DefenseClawSetup-x64.exe`;
 - exact CLI and gateway version plus healthy gateway checks;

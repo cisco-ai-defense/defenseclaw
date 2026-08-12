@@ -130,6 +130,7 @@ readonly TRUSTED_BASH="/bin/bash"
 readonly CURL_BIN="/usr/bin/curl"
 readonly STAT_BIN="/usr/bin/stat"
 readonly UNAME_BIN="/usr/bin/uname"
+readonly MACOS_SYSCTL_BIN="/usr/sbin/sysctl"
 readonly TRUSTED_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
 
 # An existing Cosign is only an optimization source. It is never executed in
@@ -138,6 +139,17 @@ readonly TRUSTED_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
 readonly cosign_candidate
 PATH="${TRUSTED_PATH}"
 export PATH
+
+macos_hardware_machine() {
+    local machine="$1"
+    if [[ "${machine}" == "x86_64" || "${machine}" == "amd64" ]] \
+        && [[ -x "${MACOS_SYSCTL_BIN}" && ! -L "${MACOS_SYSCTL_BIN}" ]] \
+        && [[ "$("${MACOS_SYSCTL_BIN}" -in sysctl.proc_translated 2>/dev/null || true)" == "1" ]]; then
+        printf '%s\n' "arm64"
+        return 0
+    fi
+    printf '%s\n' "${machine}"
+}
 
 sanitize_authenticated_environment() {
     unset BASH_ENV ENV CDPATH GLOBIGNORE BASH_COMPAT POSIXLY_CORRECT
@@ -385,7 +397,12 @@ if [[ "${rescue_mode}" == "install" ]]; then
 fi
 readonly rescue_mode
 
-platform="$("${UNAME_BIN}" -s | tr '[:upper:]' '[:lower:]')/$("${UNAME_BIN}" -m)"
+platform_os="$("${UNAME_BIN}" -s | tr '[:upper:]' '[:lower:]')"
+platform_arch="$("${UNAME_BIN}" -m)"
+if [[ "${platform_os}" == "darwin" ]]; then
+    platform_arch="$(macos_hardware_machine "${platform_arch}")"
+fi
+platform="${platform_os}/${platform_arch}"
 case "${platform}" in
     darwin/x86_64)
         die "Intel macOS is unsupported; DefenseClaw for macOS requires Apple Silicon (arm64)"
