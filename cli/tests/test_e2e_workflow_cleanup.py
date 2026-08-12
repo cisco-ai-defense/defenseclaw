@@ -56,13 +56,13 @@ def _substring_offsets(text: str, needle: str) -> list[int]:
     return offsets
 
 
-def _helper_env(runner_temp: Path, persistent_home: Path, *, path: str | None = None) -> dict[str, str]:
+def _helper_env(runner_workspace: Path, persistent_home: Path, *, path: str | None = None) -> dict[str, str]:
     environment = os.environ.copy()
     environment.update(
         {
             "HOME": os.fspath(persistent_home),
             "USERPROFILE": os.fspath(persistent_home),
-            "RUNNER_TEMP": os.fspath(runner_temp),
+            "RUNNER_WORKSPACE": os.fspath(runner_workspace),
         }
     )
     if path is not None:
@@ -74,7 +74,7 @@ def _run_helper(
     command: str,
     root: Path,
     *,
-    runner_temp: Path,
+    runner_workspace: Path,
     persistent_home: Path,
     path: str | None = None,
     check: bool = True,
@@ -84,7 +84,7 @@ def _run_helper(
         check=check,
         capture_output=True,
         text=True,
-        env=_helper_env(runner_temp, persistent_home, path=path),
+        env=_helper_env(runner_workspace, persistent_home, path=path),
     )
 
 
@@ -104,7 +104,7 @@ def test_persistent_e2e_jobs_are_serialized_through_cleanup() -> None:
         assert _step(job, "Post-run cleanup")["if"] == "always()"
 
 
-def test_persistent_e2e_jobs_use_distinct_run_owned_install_homes() -> None:
+def test_persistent_e2e_jobs_use_distinct_persistent_install_homes() -> None:
     install_names: dict[str, str] = {}
     for job in ("core", "full-live"):
         environment = WORKFLOW["jobs"][job]["env"]
@@ -113,7 +113,9 @@ def test_persistent_e2e_jobs_use_distinct_run_owned_install_homes() -> None:
         select_home = _step_script(job, "Select isolated DefenseClaw home")
         assert install_name == expected
         assert "/" not in install_name
-        assert 'E2E_INSTALL_HOME="${RUNNER_TEMP}/${E2E_INSTALL_NAME}"' in select_home
+        assert 'E2E_INSTALL_HOME="${RUNNER_WORKSPACE}/${E2E_INSTALL_NAME}"' in select_home
+        assert 'E2E_INSTALL_HOME="${RUNNER_TEMP}/${E2E_INSTALL_NAME}"' not in select_home
+        assert "RUNNER_TEMP is emptied by the Actions runner before each job" in select_home
         assert 'echo "DEFENSECLAW_HOME=${E2E_INSTALL_HOME}/.defenseclaw"' in select_home
         assert (
             'echo "DEFENSECLAW_CUSTOM_PROVIDERS_PATH=${E2E_INSTALL_HOME}/.defenseclaw/'
@@ -434,13 +436,33 @@ def test_runner_cleanup_accepts_a_safe_isolated_state_root(tmp_path: Path) -> No
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+def test_runner_cleanup_pins_the_state_tree_during_privileged_repair() -> None:
+    cleanup = RUNNER_CLEANUP.read_text(encoding="utf-8")
+
+    assert "sudo -n chown -R" not in cleanup
+    assert "sudo -n chmod -R" not in cleanup
+    assert "sudo -n setfacl -R" not in cleanup
+    assert "descriptor = os.open(os.path.sep, directory_flags)" in cleanup
+    assert "child = os.open(component, directory_flags, dir_fd=descriptor)" in cleanup
+    assert "| os.O_NOFOLLOW" in cleanup
+    assert "os.listdir(descriptor)" in cleanup
+    assert "os.stat(name, dir_fd=descriptor, follow_symlinks=False)" in cleanup
+    assert "os.fchown(descriptor, uid, gid)" in cleanup
+    assert "os.fchmod(descriptor" in cleanup
+    assert "state directory changed during repair" in cleanup
+    assert "Avoid every pathname-based privileged mutation" in cleanup
+    assert "state repair refuses multiply-linked files" in cleanup
+    assert "directory_mode &= ~(stat.S_ISUID | stat.S_ISGID | stat.S_ISVTX)" in cleanup
+    assert "mode &= ~(stat.S_ISUID | stat.S_ISGID | stat.S_ISVTX)" in cleanup
+
+
 def test_source_install_helper_lifecycle_preserves_persistent_home(tmp_path: Path) -> None:
-    runner_temp = tmp_path / "runner-temp"
+    runner_workspace = tmp_path / "runner-workspace"
     persistent_home = tmp_path / "persistent-home"
     persistent_bin = persistent_home / ".local" / "bin"
     persistent_state = persistent_home / ".defenseclaw" / "config.yaml"
     unrelated_bin = tmp_path / "unrelated-bin"
-    runner_temp.mkdir()
+    runner_workspace.mkdir()
     persistent_bin.mkdir(parents=True)
     persistent_state.parent.mkdir()
     unrelated_bin.mkdir()
@@ -448,9 +470,9 @@ def test_source_install_helper_lifecycle_preserves_persistent_home(tmp_path: Pat
     for name in ("defenseclaw", "defenseclaw-gateway", ".defenseclaw-source-root"):
         (persistent_bin / name).write_text("persistent\n", encoding="utf-8")
 
-    root = runner_temp / "defenseclaw-e2e-slot-core"
-    _run_helper("prepare", root, runner_temp=runner_temp, persistent_home=persistent_home)
-    _run_helper("verify", root, runner_temp=runner_temp, persistent_home=persistent_home)
+    root = runner_workspace / "defenseclaw-e2e-slot-core"
+    _run_helper("prepare", root, runner_workspace=runner_workspace, persistent_home=persistent_home)
+    _run_helper("verify", root, runner_workspace=runner_workspace, persistent_home=persistent_home)
     assert (root / OWNER_MARKER).read_text(encoding="utf-8") == f"{root.name}\n"
 
     isolated_bin = root / ".local" / "bin"
@@ -459,7 +481,7 @@ def test_source_install_helper_lifecycle_preserves_persistent_home(tmp_path: Pat
         _run_helper(
             "path",
             root,
-            runner_temp=runner_temp,
+            runner_workspace=runner_workspace,
             persistent_home=persistent_home,
             path=os.pathsep.join((os.fspath(persistent_bin), os.fspath(unrelated_bin), os.fspath(isolated_bin))),
         )
@@ -472,11 +494,11 @@ def test_source_install_helper_lifecycle_preserves_persistent_home(tmp_path: Pat
         workflow_path = _run_helper(
             "path",
             root,
-            runner_temp=runner_temp,
+            runner_workspace=runner_workspace,
             persistent_home=persistent_home,
             path=os.pathsep.join((os.fspath(persistent_bin), os.defpath)),
         ).stdout.strip()
-        preflight_env = _helper_env(runner_temp, persistent_home, path=workflow_path)
+        preflight_env = _helper_env(runner_workspace, persistent_home, path=workflow_path)
         preflight_env["DEFENSECLAW_HOME"] = os.fspath(root / ".defenseclaw")
         preflight = subprocess.run(
             [
@@ -497,27 +519,141 @@ def test_source_install_helper_lifecycle_preserves_persistent_home(tmp_path: Pat
         assert preflight.returncode == 0, preflight.stdout + preflight.stderr
 
     (root / ".defenseclaw").mkdir()
-    _run_helper("cleanup", root, runner_temp=runner_temp, persistent_home=persistent_home)
+    _run_helper("cleanup", root, runner_workspace=runner_workspace, persistent_home=persistent_home)
     assert not root.exists()
     assert persistent_state.read_text(encoding="utf-8") == "persistent: true\n"
     for name in ("defenseclaw", "defenseclaw-gateway", ".defenseclaw-source-root"):
         assert (persistent_bin / name).read_text(encoding="utf-8") == "persistent\n"
 
 
-def test_stable_slot_retry_replaces_only_owned_crash_state(tmp_path: Path) -> None:
+def test_source_install_helper_rejects_the_ephemeral_runner_temp(tmp_path: Path) -> None:
+    runner_workspace = tmp_path / "runner-workspace"
     runner_temp = tmp_path / "runner-temp"
     persistent_home = tmp_path / "persistent-home"
-    root = runner_temp / "defenseclaw-e2e-slot-core"
+    runner_workspace.mkdir()
     runner_temp.mkdir()
     persistent_home.mkdir()
+    environment = _helper_env(runner_workspace, persistent_home)
+    environment["RUNNER_TEMP"] = os.fspath(runner_temp)
+    result = subprocess.run(
+        [
+            sys.executable,
+            os.fspath(SOURCE_INSTALL_HELPER),
+            "prepare",
+            os.fspath(runner_temp / "defenseclaw-e2e-slot-core"),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        env=environment,
+    )
 
-    _run_helper("prepare", root, runner_temp=runner_temp, persistent_home=persistent_home)
+    assert result.returncode != 0
+    assert "install home must be a direct child of RUNNER_WORKSPACE" in result.stderr
+    assert not (runner_temp / "defenseclaw-e2e-slot-core").exists()
+
+
+@POSIX_SHELL_ONLY
+def test_isolated_path_preserves_only_required_account_build_tools(tmp_path: Path) -> None:
+    runner_workspace = tmp_path / "runner-workspace"
+    persistent_home = tmp_path / "persistent-home"
+    persistent_bin = persistent_home / ".local" / "bin"
+    unrelated_bin = tmp_path / "unrelated-bin"
+    runner_workspace.mkdir()
+    persistent_bin.mkdir(parents=True)
+    unrelated_bin.mkdir()
+
+    for name in ("uv", "npm", "go", "node", "opa", "defenseclaw"):
+        executable = persistent_bin / name
+        executable.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+        executable.chmod(0o700)
+
+    root = runner_workspace / "defenseclaw-e2e-slot-core"
+    _run_helper("prepare", root, runner_workspace=runner_workspace, persistent_home=persistent_home)
+    selected = Path(
+        _run_helper(
+            "path",
+            root,
+            runner_workspace=runner_workspace,
+            persistent_home=persistent_home,
+            path=os.pathsep.join((os.fspath(persistent_bin), os.fspath(unrelated_bin))),
+        )
+        .stdout.strip()
+        .split(os.pathsep)[1]
+    )
+
+    assert selected.name == ".e2e-build-tools"
+    assert not selected.is_symlink()
+    assert {entry.name for entry in selected.iterdir()} == {"go", "node", "npm", "uv"}
+    for name in ("go", "node", "npm", "uv"):
+        assert (selected / name).is_symlink()
+        assert (selected / name).resolve(strict=True) == (persistent_bin / name).resolve(strict=True)
+    assert not (selected / "opa").exists()
+    assert not (selected / "defenseclaw").exists()
+
+
+@POSIX_SHELL_ONLY
+def test_isolated_path_refreshes_the_bounded_build_tool_shims(tmp_path: Path) -> None:
+    runner_workspace = tmp_path / "runner-workspace"
+    persistent_home = tmp_path / "persistent-home"
+    persistent_bin = persistent_home / ".local" / "bin"
+    unrelated_bin = tmp_path / "unrelated-bin"
+    runner_workspace.mkdir()
+    persistent_bin.mkdir(parents=True)
+    unrelated_bin.mkdir()
+
+    uv = persistent_bin / "uv"
+    uv.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    uv.chmod(0o700)
+    root = runner_workspace / "defenseclaw-e2e-slot-core"
+    _run_helper("prepare", root, runner_workspace=runner_workspace, persistent_home=persistent_home)
+    selected = (
+        _run_helper(
+            "path",
+            root,
+            runner_workspace=runner_workspace,
+            persistent_home=persistent_home,
+            path=os.pathsep.join((os.fspath(persistent_bin), os.fspath(unrelated_bin))),
+        )
+        .stdout.strip()
+        .split(os.pathsep)
+    )
+    shim_dir = Path(selected[1])
+    assert {entry.name for entry in shim_dir.iterdir()} == {"uv"}
+
+    uv.unlink()
+    npm = persistent_bin / "npm"
+    npm.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    npm.chmod(0o700)
+    refreshed = (
+        _run_helper(
+            "path",
+            root,
+            runner_workspace=runner_workspace,
+            persistent_home=persistent_home,
+            path=os.pathsep.join((os.fspath(persistent_bin), os.fspath(unrelated_bin))),
+        )
+        .stdout.strip()
+        .split(os.pathsep)
+    )
+    assert refreshed[1] == os.fspath(shim_dir)
+    assert {entry.name for entry in shim_dir.iterdir()} == {"npm"}
+
+
+def test_stable_slot_retry_replaces_only_owned_crash_state(tmp_path: Path) -> None:
+    runner_workspace = tmp_path / "runner-workspace"
+    persistent_home = tmp_path / "persistent-home"
+    root = runner_workspace / "defenseclaw-e2e-slot-core"
+    runner_workspace.mkdir()
+    persistent_home.mkdir()
+
+    _run_helper("prepare", root, runner_workspace=runner_workspace, persistent_home=persistent_home)
     stale = root / ".defenseclaw" / "root-owned-from-crash"
     stale.parent.mkdir()
     stale.write_text("stale\n", encoding="utf-8")
 
-    _run_helper("authorize-cleanup", root, runner_temp=runner_temp, persistent_home=persistent_home)
-    _run_helper("prepare", root, runner_temp=runner_temp, persistent_home=persistent_home)
+    _run_helper("authorize-cleanup", root, runner_workspace=runner_workspace, persistent_home=persistent_home)
+    _run_helper("prepare", root, runner_workspace=runner_workspace, persistent_home=persistent_home)
     assert not stale.exists()
     assert (root / OWNER_MARKER).read_text(encoding="utf-8") == f"{root.name}\n"
 
@@ -553,16 +689,16 @@ def test_owned_tree_removal_reports_an_e2e_refusal(tmp_path: Path, monkeypatch: 
 
 
 def test_prepare_resumes_a_marked_prepublication_stage(tmp_path: Path) -> None:
-    runner_temp = tmp_path / "runner-temp"
+    runner_workspace = tmp_path / "runner-workspace"
     persistent_home = tmp_path / "persistent-home"
-    root = runner_temp / "defenseclaw-e2e-slot-core"
+    root = runner_workspace / "defenseclaw-e2e-slot-core"
     staging, _ = _transaction_paths(root)
-    runner_temp.mkdir()
+    runner_workspace.mkdir()
     persistent_home.mkdir()
     staging.mkdir(mode=0o700)
     (staging / OWNER_MARKER).write_text(f"{root.name}\n", encoding="utf-8")
 
-    _run_helper("prepare", root, runner_temp=runner_temp, persistent_home=persistent_home)
+    _run_helper("prepare", root, runner_workspace=runner_workspace, persistent_home=persistent_home)
 
     assert root.is_dir()
     assert not staging.exists()
@@ -570,13 +706,13 @@ def test_prepare_resumes_a_marked_prepublication_stage(tmp_path: Path) -> None:
 
 
 def test_prepare_recovers_a_marked_midretirement_tombstone(tmp_path: Path) -> None:
-    runner_temp = tmp_path / "runner-temp"
+    runner_workspace = tmp_path / "runner-workspace"
     persistent_home = tmp_path / "persistent-home"
-    root = runner_temp / "defenseclaw-e2e-slot-full-live"
+    root = runner_workspace / "defenseclaw-e2e-slot-full-live"
     _, tombstone = _transaction_paths(root)
-    runner_temp.mkdir()
+    runner_workspace.mkdir()
     persistent_home.mkdir()
-    _run_helper("prepare", root, runner_temp=runner_temp, persistent_home=persistent_home)
+    _run_helper("prepare", root, runner_workspace=runner_workspace, persistent_home=persistent_home)
     stale = root / ".defenseclaw" / "partial-retirement"
     stale.parent.mkdir()
     stale.write_text("stale\n", encoding="utf-8")
@@ -585,12 +721,12 @@ def test_prepare_recovers_a_marked_midretirement_tombstone(tmp_path: Path) -> No
     _run_helper(
         "authorize-cleanup",
         root,
-        runner_temp=runner_temp,
+        runner_workspace=runner_workspace,
         persistent_home=persistent_home,
     )
     assert root.is_dir()
     assert not tombstone.exists()
-    _run_helper("prepare", root, runner_temp=runner_temp, persistent_home=persistent_home)
+    _run_helper("prepare", root, runner_workspace=runner_workspace, persistent_home=persistent_home)
 
     assert root.is_dir()
     assert not tombstone.exists()
@@ -598,14 +734,18 @@ def test_prepare_recovers_a_marked_midretirement_tombstone(tmp_path: Path) -> No
     assert {entry.name for entry in root.iterdir()} == {OWNER_MARKER}
 
 
-@pytest.mark.parametrize("suffix", [STAGING_SUFFIX, TOMBSTONE_SUFFIX])
+@pytest.mark.parametrize("transaction_index", [0, 1])
 @pytest.mark.parametrize("command", ["prepare", "authorize-cleanup", "cleanup"])
-def test_helper_preserves_an_unmarked_transaction_path(tmp_path: Path, suffix: str, command: str) -> None:
-    runner_temp = tmp_path / "runner-temp"
+def test_helper_preserves_an_unmarked_transaction_path(
+    tmp_path: Path,
+    transaction_index: int,
+    command: str,
+) -> None:
+    runner_workspace = tmp_path / "runner-workspace"
     persistent_home = tmp_path / "persistent-home"
-    root = runner_temp / "defenseclaw-e2e-slot-core"
-    transaction = runner_temp / f".{root.name}{suffix}"
-    runner_temp.mkdir()
+    root = runner_workspace / "defenseclaw-e2e-slot-core"
+    transaction = _transaction_paths(root)[transaction_index]
+    runner_workspace.mkdir()
     persistent_home.mkdir()
     transaction.mkdir()
     sentinel = transaction / "keep.txt"
@@ -614,7 +754,7 @@ def test_helper_preserves_an_unmarked_transaction_path(tmp_path: Path, suffix: s
     result = _run_helper(
         command,
         root,
-        runner_temp=runner_temp,
+        runner_workspace=runner_workspace,
         persistent_home=persistent_home,
         check=False,
     )
@@ -625,11 +765,11 @@ def test_helper_preserves_an_unmarked_transaction_path(tmp_path: Path, suffix: s
 
 
 def test_cleanup_resumes_marked_staging_and_tombstone_state(tmp_path: Path) -> None:
-    runner_temp = tmp_path / "runner-temp"
+    runner_workspace = tmp_path / "runner-workspace"
     persistent_home = tmp_path / "persistent-home"
-    root = runner_temp / "defenseclaw-e2e-slot-core"
+    root = runner_workspace / "defenseclaw-e2e-slot-core"
     staging, tombstone = _transaction_paths(root)
-    runner_temp.mkdir()
+    runner_workspace.mkdir()
     persistent_home.mkdir()
 
     for transaction in (staging, tombstone):
@@ -640,10 +780,10 @@ def test_cleanup_resumes_marked_staging_and_tombstone_state(tmp_path: Path) -> N
     _run_helper(
         "authorize-cleanup",
         root,
-        runner_temp=runner_temp,
+        runner_workspace=runner_workspace,
         persistent_home=persistent_home,
     )
-    _run_helper("cleanup", root, runner_temp=runner_temp, persistent_home=persistent_home)
+    _run_helper("cleanup", root, runner_workspace=runner_workspace, persistent_home=persistent_home)
 
     assert not root.exists()
     assert not staging.exists()
@@ -652,11 +792,11 @@ def test_cleanup_resumes_marked_staging_and_tombstone_state(tmp_path: Path) -> N
 
 @pytest.mark.parametrize("command", ["prepare", "authorize-cleanup", "cleanup"])
 def test_helper_rejects_ambiguous_canonical_and_tombstone_state(tmp_path: Path, command: str) -> None:
-    runner_temp = tmp_path / "runner-temp"
+    runner_workspace = tmp_path / "runner-workspace"
     persistent_home = tmp_path / "persistent-home"
-    root = runner_temp / "defenseclaw-e2e-slot-core"
+    root = runner_workspace / "defenseclaw-e2e-slot-core"
     _, tombstone = _transaction_paths(root)
-    runner_temp.mkdir()
+    runner_workspace.mkdir()
     persistent_home.mkdir()
 
     for transaction in (root, tombstone):
@@ -670,7 +810,7 @@ def test_helper_rejects_ambiguous_canonical_and_tombstone_state(tmp_path: Path, 
     result = _run_helper(
         command,
         root,
-        runner_temp=runner_temp,
+        runner_workspace=runner_workspace,
         persistent_home=persistent_home,
         check=False,
     )
@@ -683,9 +823,9 @@ def test_helper_rejects_ambiguous_canonical_and_tombstone_state(tmp_path: Path, 
 
 @pytest.mark.parametrize("command", ["prepare", "verify", "authorize-cleanup", "cleanup"])
 def test_helper_rejects_an_unmarked_existing_root(tmp_path: Path, command: str) -> None:
-    runner_temp = tmp_path / "runner-temp"
+    runner_workspace = tmp_path / "runner-workspace"
     persistent_home = tmp_path / "persistent-home"
-    root = runner_temp / "defenseclaw-e2e-slot-full-live"
+    root = runner_workspace / "defenseclaw-e2e-slot-full-live"
     root.mkdir(parents=True)
     persistent_home.mkdir()
     sentinel = root / "keep.txt"
@@ -693,7 +833,7 @@ def test_helper_rejects_an_unmarked_existing_root(tmp_path: Path, command: str) 
     result = _run_helper(
         command,
         root,
-        runner_temp=runner_temp,
+        runner_workspace=runner_workspace,
         persistent_home=persistent_home,
         check=False,
     )
@@ -703,16 +843,16 @@ def test_helper_rejects_an_unmarked_existing_root(tmp_path: Path, command: str) 
 
 
 def test_cleanup_authorization_accepts_absence_but_rejects_unowned_state(tmp_path: Path) -> None:
-    runner_temp = tmp_path / "runner-temp"
+    runner_workspace = tmp_path / "runner-workspace"
     persistent_home = tmp_path / "persistent-home"
-    root = runner_temp / "defenseclaw-e2e-slot-core"
-    runner_temp.mkdir()
+    root = runner_workspace / "defenseclaw-e2e-slot-core"
+    runner_workspace.mkdir()
     persistent_home.mkdir()
 
     absent = _run_helper(
         "authorize-cleanup",
         root,
-        runner_temp=runner_temp,
+        runner_workspace=runner_workspace,
         persistent_home=persistent_home,
         check=False,
     )
@@ -724,7 +864,7 @@ def test_cleanup_authorization_accepts_absence_but_rejects_unowned_state(tmp_pat
     unowned = _run_helper(
         "authorize-cleanup",
         root,
-        runner_temp=runner_temp,
+        runner_workspace=runner_workspace,
         persistent_home=persistent_home,
         check=False,
     )
@@ -735,11 +875,11 @@ def test_cleanup_authorization_accepts_absence_but_rejects_unowned_state(tmp_pat
 
 @pytest.mark.parametrize("command", ["prepare", "verify", "authorize-cleanup", "cleanup"])
 def test_helper_rejects_a_symlink_root(tmp_path: Path, command: str) -> None:
-    runner_temp = tmp_path / "runner-temp"
+    runner_workspace = tmp_path / "runner-workspace"
     persistent_home = tmp_path / "persistent-home"
     target = tmp_path / "target"
-    root = runner_temp / "defenseclaw-e2e-slot-core"
-    runner_temp.mkdir()
+    root = runner_workspace / "defenseclaw-e2e-slot-core"
+    runner_workspace.mkdir()
     persistent_home.mkdir()
     target.mkdir()
     sentinel = target / "keep.txt"
@@ -752,7 +892,7 @@ def test_helper_rejects_a_symlink_root(tmp_path: Path, command: str) -> None:
     result = _run_helper(
         command,
         root,
-        runner_temp=runner_temp,
+        runner_workspace=runner_workspace,
         persistent_home=persistent_home,
         check=False,
     )

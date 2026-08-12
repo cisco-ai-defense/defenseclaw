@@ -81,17 +81,87 @@ PY
 validate_defenseclaw_state_home || exit $?
 
 repair_state_path() {
-  local state_path="$1"
+  local state_path="$1" runner_uid runner_gid
   [ -e "$state_path" ] || return 0
-  if sudo -n chown -R -- "$runner_uid:$runner_gid" "$state_path" 2>/dev/null; then
-    chmod -R u+rwX -- "$state_path" 2>/dev/null || true
-    return 0
-  fi
-  if sudo -n setfacl -R -m "u:${runner_uid}:rwX" -- "$state_path" 2>/dev/null; then
-    return 0
-  fi
-  if sudo -n chmod -R a+rwX -- "$state_path" 2>/dev/null; then
-    log "Relaxed permissions on $state_path after ownership repair failed"
+  runner_uid="$(id -u)"
+  runner_gid="$(id -g)"
+  if sudo -n python3 - "$state_path" "$runner_uid" "$runner_gid" <<'PY'
+import os
+import stat
+import sys
+
+root, uid_text, gid_text = sys.argv[1:]
+uid = int(uid_text)
+gid = int(gid_text)
+directory_flags = (
+    os.O_RDONLY
+    | os.O_DIRECTORY
+    | os.O_NOFOLLOW
+    | os.O_CLOEXEC
+)
+
+
+def repair_directory(descriptor):
+    os.fchown(descriptor, uid, gid)
+    directory_mode = stat.S_IMODE(os.fstat(descriptor).st_mode)
+    directory_mode &= ~(stat.S_ISUID | stat.S_ISGID | stat.S_ISVTX)
+    os.fchmod(descriptor, directory_mode | stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+    for name in os.listdir(descriptor):
+        metadata = os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+        if stat.S_ISLNK(metadata.st_mode):
+            # Ownership of a link is irrelevant to unlinking it; leave it
+            # untouched and never cross it into an external target.
+            continue
+        if stat.S_ISDIR(metadata.st_mode):
+            child = os.open(name, directory_flags, dir_fd=descriptor)
+            try:
+                opened = os.fstat(child)
+                if (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino):
+                    raise OSError("state directory changed during repair")
+                repair_directory(child)
+            finally:
+                os.close(child)
+            continue
+        if not stat.S_ISREG(metadata.st_mode):
+            # Sockets, devices, and FIFOs do not need recursive permission
+            # repair. Avoid every pathname-based privileged mutation.
+            continue
+        if metadata.st_nlink != 1:
+            raise OSError("state repair refuses multiply-linked files")
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
+        child = os.open(name, flags, dir_fd=descriptor)
+        try:
+            opened = os.fstat(child)
+            if (opened.st_dev, opened.st_ino) != (metadata.st_dev, metadata.st_ino):
+                raise OSError("state entry changed during repair")
+            if opened.st_nlink != 1:
+                raise OSError("state repair refuses multiply-linked files")
+            os.fchown(child, uid, gid)
+            repaired = os.fstat(child)
+            mode = stat.S_IMODE(repaired.st_mode)
+            mode &= ~(stat.S_ISUID | stat.S_ISGID | stat.S_ISVTX)
+            mode |= stat.S_IRUSR | stat.S_IWUSR
+            if repaired.st_mode & (stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH):
+                mode |= stat.S_IXUSR
+            os.fchmod(child, mode)
+        finally:
+            os.close(child)
+
+
+absolute = os.path.abspath(root)
+descriptor = os.open(os.path.sep, directory_flags)
+try:
+    for component in absolute.split(os.path.sep)[1:]:
+        if not component:
+            continue
+        child = os.open(component, directory_flags, dir_fd=descriptor)
+        os.close(descriptor)
+        descriptor = child
+    repair_directory(descriptor)
+finally:
+    os.close(descriptor)
+PY
+  then
     return 0
   fi
   return 1

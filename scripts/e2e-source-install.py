@@ -21,6 +21,8 @@ _ROOT_RE = re.compile(r"defenseclaw-e2e-slot-(?:core|full-live)")
 _OWNER_MARKER = ".defenseclaw-e2e-owner"
 _STAGING_SUFFIX = ".staging"
 _TOMBSTONE_SUFFIX = ".tombstone"
+_BUILD_TOOL_NAMES = ("go", "node", "npm", "uv")
+_BUILD_TOOL_SHIM_DIR = ".e2e-build-tools"
 
 
 def _fail(message: str) -> NoReturn:
@@ -29,33 +31,33 @@ def _fail(message: str) -> NoReturn:
     raise SystemExit(f"e2e source install refused: {message}")
 
 
-def _runner_temp() -> Path:
-    """Return the real, trusted GitHub runner temp directory."""
+def _runner_workspace() -> Path:
+    """Return the real, persistent GitHub runner workspace directory."""
 
-    value = os.environ.get("RUNNER_TEMP", "")
+    value = os.environ.get("RUNNER_WORKSPACE", "")
     if not value:
-        _fail("RUNNER_TEMP is required")
+        _fail("RUNNER_WORKSPACE is required")
     candidate = Path(value)
     if not candidate.is_absolute():
-        _fail("RUNNER_TEMP must be absolute")
+        _fail("RUNNER_WORKSPACE must be absolute")
     try:
         info = candidate.lstat()
     except FileNotFoundError:
-        _fail("RUNNER_TEMP does not exist")
+        _fail("RUNNER_WORKSPACE does not exist")
     if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
-        _fail("RUNNER_TEMP must be a real directory")
+        _fail("RUNNER_WORKSPACE must be a real directory")
     return candidate.resolve(strict=True)
 
 
 def _root(value: str) -> Path:
-    """Validate one canonical stable-slot child of the runner temp directory."""
+    """Validate one canonical stable-slot child of the persistent workspace."""
 
     candidate = Path(value)
     if not candidate.is_absolute() or not _ROOT_RE.fullmatch(candidate.name):
-        _fail("install home must be an absolute, run-named E2E path")
-    base = _runner_temp()
+        _fail("install home must be an absolute, slot-named E2E path")
+    base = _runner_workspace()
     if candidate.parent.resolve(strict=True) != base:
-        _fail("install home must be a direct child of RUNNER_TEMP")
+        _fail("install home must be a direct child of RUNNER_WORKSPACE")
     return base / candidate.name
 
 
@@ -256,8 +258,56 @@ def authorize_cleanup(root_value: str) -> None:
         _validate_owned(root)
 
 
+def _preserve_persistent_build_tools(root: Path, persistent_bin: Path) -> Path | None:
+    """Expose only required build tools that resolve from the filtered account bin."""
+
+    preserved: dict[str, Path] = {}
+    for name in _BUILD_TOOL_NAMES:
+        resolved = shutil.which(name)
+        if not resolved:
+            continue
+        candidate = Path(resolved)
+        if candidate.parent.resolve(strict=False) != persistent_bin:
+            continue
+        try:
+            target = candidate.resolve(strict=True)
+            info = target.stat()
+        except OSError:
+            _fail(f"persistent build tool {name} is not a stable executable")
+        if not stat.S_ISREG(info.st_mode) or not os.access(target, os.X_OK):
+            _fail(f"persistent build tool {name} is not a stable executable")
+        preserved[name] = target
+
+    if not preserved:
+        return None
+
+    shim_dir = root / _BUILD_TOOL_SHIM_DIR
+    if _entry_exists(shim_dir):
+        info = shim_dir.lstat()
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+            _fail("isolated build-tool directory is not a real directory")
+        if hasattr(os, "getuid") and info.st_uid != os.getuid():
+            _fail("isolated build-tool directory is not owned by the current user")
+        unexpected = {entry.name for entry in shim_dir.iterdir()} - set(_BUILD_TOOL_NAMES)
+        if unexpected:
+            _fail("isolated build-tool directory contains unexpected entries")
+        for entry in shim_dir.iterdir():
+            if not stat.S_ISLNK(entry.lstat().st_mode):
+                _fail(f"isolated build-tool shim {entry.name} is not a symbolic link")
+            entry.unlink()
+    else:
+        shim_dir.mkdir(mode=0o700)
+
+    for name, target in preserved.items():
+        shim = shim_dir / name
+        shim.symlink_to(target)
+        if shim.resolve(strict=True) != target:
+            _fail(f"isolated build-tool shim {name} does not match its executable")
+    return shim_dir
+
+
 def isolated_path(root_value: str) -> str:
-    """Prepend the isolated bin and remove the persistent account's bin."""
+    """Prepend isolated bins without exposing unrelated account executables."""
 
     root = _root(root_value)
     _validate_owned(root)
@@ -270,7 +320,11 @@ def isolated_path(root_value: str) -> str:
         if Path(component).resolve(strict=False) in (persistent_bin, isolated_bin):
             continue
         components.append(component)
-    return os.pathsep.join((os.fspath(isolated_bin), *components))
+    build_tools = _preserve_persistent_build_tools(root, persistent_bin)
+    prefix = [os.fspath(isolated_bin)]
+    if build_tools is not None:
+        prefix.append(os.fspath(build_tools))
+    return os.pathsep.join((*prefix, *components))
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:

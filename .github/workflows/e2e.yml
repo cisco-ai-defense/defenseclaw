@@ -73,7 +73,10 @@ jobs:
     steps:
       - name: Select isolated DefenseClaw home
         run: |
-          E2E_INSTALL_HOME="${RUNNER_TEMP}/${E2E_INSTALL_NAME}"
+          # RUNNER_TEMP is emptied by the Actions runner before each job. Keep
+          # marker-authenticated crash recovery beside the checkout instead so
+          # our own helper controls repair and retirement on the next schedule.
+          E2E_INSTALL_HOME="${RUNNER_WORKSPACE}/${E2E_INSTALL_NAME}"
           {
             echo "E2E_INSTALL_HOME=${E2E_INSTALL_HOME}"
             echo "DEFENSECLAW_HOME=${E2E_INSTALL_HOME}/.defenseclaw"
@@ -729,7 +732,10 @@ jobs:
     steps:
       - name: Select isolated DefenseClaw home
         run: |
-          E2E_INSTALL_HOME="${RUNNER_TEMP}/${E2E_INSTALL_NAME}"
+          # RUNNER_TEMP is emptied by the Actions runner before each job. Keep
+          # marker-authenticated crash recovery beside the checkout instead so
+          # our own helper controls repair and retirement on the next schedule.
+          E2E_INSTALL_HOME="${RUNNER_WORKSPACE}/${E2E_INSTALL_NAME}"
           {
             echo "E2E_INSTALL_HOME=${E2E_INSTALL_HOME}"
             echo "DEFENSECLAW_HOME=${E2E_INSTALL_HOME}/.defenseclaw"
