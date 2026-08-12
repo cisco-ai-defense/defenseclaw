@@ -591,7 +591,11 @@ func (g *GuardrailInspector) Inspect(ctx context.Context, direction, content str
 		// the sole decision-maker. Local regex, judge, and OPA are all
 		// skipped; a request AID cannot decide fails open. See
 		// inspectManagedAIDOnly.
-		verdict = g.inspectManagedAIDOnly(ctx, direction, messages)
+		verdict = g.inspectManagedAIDOnly(
+			ctx,
+			direction,
+			managedAIDMessagesForInspection(direction, content, messages),
+		)
 	case strategy == "regex_judge":
 		verdict = g.inspectRegexJudge(ctx, direction, content, messages, model, mode)
 	case strategy == "judge_first":
@@ -709,6 +713,27 @@ func managedAIDMessagesHaveInspectableContent(messages []ChatMessage) bool {
 		}
 	}
 	return false
+}
+
+// managedAIDMessagesForInspection closes the gap between provider-native
+// prompt formats and the canonical message payload sent to Cisco AI Defense.
+// Passthrough routes expose top-level prompt text through content, while both
+// Cisco clients serialize only ChatMessage.Content. When no existing message
+// has serializable text, preserve the original history and append one user
+// turn carrying that prompt. Existing chat history is already authoritative
+// and must not receive a duplicate; blank prompts keep the benign no_content
+// path. Completion/response payloads are normalized to one assistant message
+// before this helper runs and are intentionally left alone.
+func managedAIDMessagesForInspection(direction, content string, messages []ChatMessage) []ChatMessage {
+	if direction != "prompt" ||
+		!managedAIDContentIsInspectable(content) ||
+		managedAIDMessagesHaveInspectableContent(messages) {
+		return messages
+	}
+
+	normalized := make([]ChatMessage, len(messages), len(messages)+1)
+	copy(normalized, messages)
+	return append(normalized, ChatMessage{Role: "user", Content: content})
 }
 
 // managedAIDFailOpenComponent is the stable diagnostic component / message
