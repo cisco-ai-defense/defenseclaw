@@ -639,7 +639,16 @@ func expandStaticPOSIXWrappers(out *parseOutput, wrapperDepth int) {
 				continue
 			}
 			if invocation.noExec {
-				setPOSIXCommandEffect(out, command.ID, EffectPreview)
+				if !provesIsolatedPOSIXNoExecPreview(
+					out,
+					&command,
+					invocation,
+					posixShellModeCommand,
+				) {
+					// A pipeline or redirect can route shell parser output into
+					// another action. Retain an opaque executing carrier for fallback.
+					out.markPartial(IssueUnsupportedConstruct)
+				}
 				continue
 			}
 			if wrapperDepth >= maxWrapperDepth {
@@ -713,19 +722,6 @@ func expandStaticPOSIXWrappers(out *parseOutput, wrapperDepth int) {
 			)
 		}
 		out.mergeNested(child)
-	}
-}
-
-func setPOSIXCommandEffect(
-	out *parseOutput,
-	commandID int64,
-	effect CommandEffect,
-) {
-	for index := range out.commands {
-		if out.commands[index].ID == commandID {
-			out.commands[index].Effect = effect
-			return
-		}
 	}
 }
 

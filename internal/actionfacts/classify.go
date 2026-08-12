@@ -2920,7 +2920,40 @@ func classifyShellInvocation(out *parseOutput, command *CommandFact) {
 		return
 	}
 	invocation := parsePOSIXShellInvocation(command.Program, command.Argv)
+	if provesIsolatedPOSIXNoExecPreview(
+		out,
+		command,
+		invocation,
+		posixShellModeScript,
+	) {
+		// No-exec shells parse the selected file without running its commands.
+		// Preserve the file read only when no surrounding pipeline or redirect
+		// can route parser output into another action.
+		command.Effect = EffectPreview
+		if invocation.scriptIndex >= 0 &&
+			invocation.scriptIndex < len(command.Argv) {
+			appendPath(
+				out,
+				command.ID,
+				PathAccessRead,
+				command.Argv[invocation.scriptIndex],
+			)
+		}
+		return
+	}
+	if provesIsolatedPOSIXNoExecPreview(
+		out,
+		command,
+		invocation,
+		posixShellModeCommand,
+	) {
+		command.Effect = EffectPreview
+		return
+	}
 	if invocation.valid && invocation.mode == posixShellModeCommand {
+		if invocation.noExec {
+			out.markPartial(IssueUnsupportedConstruct)
+		}
 		return
 	}
 	if exactPOSIXShellPreviewInvocation(command) {

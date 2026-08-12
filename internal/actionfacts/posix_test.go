@@ -637,6 +637,11 @@ func TestParsePOSIXNoExecShellCommandIsPreviewOnly(t *testing.T) {
 		`bash -cn 'rm -rf /tmp/victim'`,
 		`bash +n -n -c 'rm -rf /tmp/victim'`,
 		`bash +o noexec -o noexec -c 'rm -rf /tmp/victim'`,
+		`bash -nv -c 'rm -rf /tmp/victim'`,
+		`bash --verbose -n -c 'rm -rf /tmp/victim'`,
+		`bash -o noexec -o verbose -c 'rm -rf /tmp/victim'`,
+		`sh -nv -c 'rm -rf /tmp/victim'`,
+		`dash -nv -c 'rm -rf /tmp/victim'`,
 	}
 	for _, source := range tests {
 		source := source
@@ -668,6 +673,235 @@ func TestParsePOSIXNoExecShellCommandIsPreviewOnly(t *testing.T) {
 	}
 }
 
+func TestParsePOSIXNoExecShellScriptIsPreviewOnly(t *testing.T) {
+	for _, test := range []struct {
+		source string
+		script string
+	}{
+		{source: `bash -n /tmp/runner-cleanup.sh`, script: "/tmp/runner-cleanup.sh"},
+		{source: `bash -n /tmp/runner-cleanup.sh +n`, script: "/tmp/runner-cleanup.sh"},
+		{
+			source: `bash -n /tmp/runner-cleanup.sh /tmp/test-e2e-full-stack.sh`,
+			script: "/tmp/runner-cleanup.sh",
+		},
+		{source: `bash -o noexec /tmp/runner-cleanup.sh`, script: "/tmp/runner-cleanup.sh"},
+		{source: `bash -nv /tmp/runner-cleanup.sh`, script: "/tmp/runner-cleanup.sh"},
+		{source: `bash --verbose -n /tmp/runner-cleanup.sh`, script: "/tmp/runner-cleanup.sh"},
+		{
+			source: `bash -o noexec -o verbose /tmp/runner-cleanup.sh`,
+			script: "/tmp/runner-cleanup.sh",
+		},
+		{source: `sh -n /tmp/runner-cleanup.sh`, script: "/tmp/runner-cleanup.sh"},
+		{source: `sh -nv /tmp/runner-cleanup.sh`, script: "/tmp/runner-cleanup.sh"},
+		{source: `dash -n /tmp/runner-cleanup.sh`, script: "/tmp/runner-cleanup.sh"},
+		{source: `dash -nv /tmp/runner-cleanup.sh`, script: "/tmp/runner-cleanup.sh"},
+		{source: `sh -n -- -c 'rm -rf /tmp/victim'`, script: "-c"},
+	} {
+		test := test
+		t.Run(test.source, func(t *testing.T) {
+			t.Parallel()
+
+			facts := Analyze(Input{
+				Tool:        "exec",
+				Command:     test.source,
+				DialectHint: DialectPOSIX,
+			})
+			if !facts.Authoritative() ||
+				facts.Parse.Status != StatusComplete ||
+				len(facts.Commands) != 1 ||
+				facts.Commands[0].Effect != EffectPreview ||
+				!factsHavePath(facts, PathAccessRead, test.script) ||
+				factsHavePath(facts, PathAccessExecute, test.script) ||
+				factsHavePath(facts, PathAccessRead, "/tmp/test-e2e-full-stack.sh") ||
+				facts.EnforcementEligible() {
+				t.Fatalf("no-exec shell script facts = %#v", facts)
+			}
+
+			projected := facts.EnforcementProjection()
+			if len(projected.Commands) != 0 ||
+				len(projected.Paths) != 0 ||
+				projected.EnforcementEligible() {
+				t.Fatalf("no-exec shell script projection = %#v", projected)
+			}
+		})
+	}
+}
+
+func TestParsePOSIXNoExecShellScriptReenableExecutes(t *testing.T) {
+	const script = "/tmp/runner-cleanup.sh"
+	for _, source := range []string{
+		`bash -n +n ` + script,
+		`bash -o noexec +o noexec ` + script,
+		`sh -n +n ` + script,
+		`dash -n +n ` + script,
+	} {
+		source := source
+		t.Run(source, func(t *testing.T) {
+			t.Parallel()
+
+			facts := Analyze(Input{
+				Tool:        "exec",
+				Command:     source,
+				DialectHint: DialectPOSIX,
+			})
+			if facts.Parse.Status != StatusPartial ||
+				len(facts.Commands) != 1 ||
+				facts.Commands[0].Effect != EffectExecute ||
+				!factsHavePath(facts, PathAccessExecute, script) ||
+				factsHavePath(facts, PathAccessRead, script) {
+				t.Fatalf("re-enabled shell script facts = %#v", facts)
+			}
+		})
+	}
+}
+
+func TestParsePOSIXNoExecShellScriptPipelineRemainsOpaque(t *testing.T) {
+	const script = "/tmp/bad\nprintf SAFE_FILENAME_MARKER\n#"
+	for _, test := range []struct {
+		name   string
+		source string
+	}{
+		{name: "bash", source: `bash -n '` + script + `' 2>/dev/stdout | bash`},
+		{name: "bash verbose", source: `bash -nv '` + script + `' 2>/dev/stdout | bash`},
+		{name: "sh", source: `sh -n '` + script + `' 2>/dev/stdout | bash`},
+		{name: "dash verbose", source: `dash -nv '` + script + `' 2>/dev/stdout | bash`},
+		{name: "env bash", source: `env bash -n '` + script + `' 2>/dev/stdout | bash`},
+		{name: "command sh", source: `command -- sh -n '` + script + `' 2>/dev/stdout | bash`},
+		{name: "exec dash", source: `exec dash -n '` + script + `' 2>/dev/stdout | bash`},
+		{name: "subshell", source: `(bash -n '` + script + `') 2>/dev/stdout | bash`},
+		{name: "block", source: `{ bash -n '` + script + `'; } 2>/dev/stdout | bash`},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			facts := Analyze(Input{
+				Tool: "exec", Command: test.source, DialectHint: DialectPOSIX,
+			})
+			if facts.Parse.Status != StatusPartial || facts.Authoritative() ||
+				!containsIssue(facts.Parse.Issues, IssueOpaqueArtifact) ||
+				!factsHavePath(facts, PathAccessExecute, script) ||
+				factsHavePath(facts, PathAccessRead, script) {
+				t.Fatalf("pipelined no-exec script facts = %#v", facts)
+			}
+		})
+	}
+}
+
+func TestParsePOSIXNoExecShellScriptBranchContextRemainsOpaque(t *testing.T) {
+	const script = "/tmp/runner-cleanup.sh"
+	for _, source := range []string{
+		`if true; then bash -n ` + script + `; fi`,
+		`while false; do bash -n ` + script + `; done`,
+	} {
+		source := source
+		t.Run(source, func(t *testing.T) {
+			t.Parallel()
+			facts := Analyze(Input{
+				Tool: "exec", Command: source, DialectHint: DialectPOSIX,
+			})
+			if facts.Parse.Status != StatusPartial || facts.Authoritative() ||
+				!containsIssue(facts.Parse.Issues, IssueOpaqueArtifact) ||
+				!factsHavePath(facts, PathAccessExecute, script) ||
+				factsHavePath(facts, PathAccessRead, script) {
+				t.Fatalf("compound no-exec script facts = %#v", facts)
+			}
+		})
+	}
+}
+
+func TestParsePOSIXNoExecShellCommandPipelineStaysOpaque(t *testing.T) {
+	const dangerous = `rm -rf /tmp/victim`
+	for _, source := range []string{
+		`bash -n -c '` + dangerous + `' 2>&1 | bash`,
+		`bash -nv -c '` + dangerous + `' 2>&1 | bash`,
+		`env bash -n -c '` + dangerous + `' 2>&1 | bash`,
+		`command -- sh -n -c '` + dangerous + `' 2>&1 | bash`,
+		`exec dash -nv -c '` + dangerous + `' 2>&1 | bash`,
+	} {
+		source := source
+		t.Run(source, func(t *testing.T) {
+			t.Parallel()
+			facts := Analyze(Input{
+				Tool: "exec", Command: source, DialectHint: DialectPOSIX,
+			})
+			if facts.Parse.Status != StatusPartial || facts.Authoritative() ||
+				hasExecutable(facts.Commands, "rm") ||
+				factsHavePath(facts, PathAccessDelete, "/tmp/victim") {
+				t.Fatalf("pipelined no-exec command facts = %#v", facts)
+			}
+		})
+	}
+}
+
+func TestPOSIXNoExecShellScriptRawStructuredWrapperParity(t *testing.T) {
+	const script = "/tmp/runner-cleanup.sh"
+	for _, test := range []struct {
+		name string
+		raw  string
+		argv []string
+	}{
+		{name: "bash", raw: `bash -n ` + script, argv: []string{"bash", "-n", script}},
+		{name: "bash verbose", raw: `bash -nv ` + script, argv: []string{"bash", "-nv", script}},
+		{name: "sh", raw: `sh -n ` + script, argv: []string{"sh", "-n", script}},
+		{name: "dash", raw: `dash -n ` + script, argv: []string{"dash", "-n", script}},
+		{
+			name: "env bash",
+			raw:  `env bash -n ` + script,
+			argv: []string{"env", "bash", "-n", script},
+		},
+		{
+			name: "command sh",
+			raw:  `command -- sh -n ` + script,
+			argv: []string{"command", "--", "sh", "-n", script},
+		},
+		{
+			name: "exec dash",
+			raw:  `exec dash -n ` + script,
+			argv: []string{"exec", "dash", "-n", script},
+		},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			raw := Analyze(Input{
+				Tool: "exec", Command: test.raw, DialectHint: DialectPOSIX,
+			})
+			structured := Analyze(Input{
+				Tool: "exec", Argv: test.argv, DialectHint: DialectPOSIX,
+			})
+			for name, facts := range map[string]Facts{
+				"raw": raw, "structured": structured,
+			} {
+				if !facts.Authoritative() ||
+					containsIssue(facts.Parse.Issues, IssueOpaqueArtifact) ||
+					!factsHavePath(facts, PathAccessRead, script) ||
+					factsHavePath(facts, PathAccessExecute, script) ||
+					factsHavePath(
+						facts.EnforcementProjection(),
+						PathAccessExecute,
+						script,
+					) {
+					t.Fatalf("%s facts = %#v", name, facts)
+				}
+				preview := false
+				for _, command := range facts.Commands {
+					preview = preview || command.Effect == EffectPreview &&
+						(command.Program == "bash" || command.Program == "sh" ||
+							command.Program == "dash")
+				}
+				if !preview {
+					t.Fatalf("%s lost shell preview: %#v", name, facts.Commands)
+				}
+			}
+			if raw.Parse.Status != structured.Parse.Status ||
+				len(raw.Commands) != len(structured.Commands) ||
+				len(raw.Paths) != len(structured.Paths) {
+				t.Fatalf("raw=%#v structured=%#v", raw, structured)
+			}
+		})
+	}
+}
+
 func TestParsePOSIXNoExecDoesNotSuppressOuterRedirect(t *testing.T) {
 	facts := Analyze(Input{
 		Tool: "exec",
@@ -675,18 +909,21 @@ func TestParsePOSIXNoExecDoesNotSuppressOuterRedirect(t *testing.T) {
 			`> /tmp/parser-output`,
 		DialectHint: DialectPOSIX,
 	})
-	if !facts.Authoritative() ||
+	if facts.Parse.Status != StatusPartial || facts.Authoritative() ||
 		len(facts.Commands) != 1 ||
-		facts.Commands[0].Effect != EffectPreview ||
+		facts.Commands[0].Effect != EffectExecute ||
+		hasExecutable(facts.Commands, "rm") ||
 		factsHavePath(facts, PathAccessDelete, "/tmp/victim") ||
 		!factsHavePath(facts, PathAccessWrite, "/tmp/parser-output") {
 		t.Fatalf("no-exec redirect facts = %#v", facts)
 	}
 
 	projected := facts.EnforcementProjection()
-	if !projected.EnforcementEligible() ||
+	if projected.EnforcementEligible() ||
 		len(projected.Commands) != 1 ||
-		projected.Commands[0].Kind != CommandKindShellRedirect ||
+		projected.Commands[0].Kind != CommandKindProcess ||
+		projected.Commands[0].Effect != EffectExecute ||
+		hasExecutable(projected.Commands, "rm") ||
 		factsHavePath(projected, PathAccessDelete, "/tmp/victim") ||
 		!factsHavePath(
 			projected,
@@ -729,8 +966,6 @@ func TestParsePOSIXNoExecPositionAndOpaqueInputsFailClosed(t *testing.T) {
 
 	for _, source := range []string{
 		`sh -n`,
-		`sh -n ./script.sh`,
-		`sh -n -- -c 'rm -rf /tmp/victim'`,
 	} {
 		source := source
 		t.Run(source, func(t *testing.T) {

@@ -259,15 +259,18 @@ func analyzeStructuredArgv(
 		child = parsePOSIX(nested, out.nextID, wrapperDepth+1)
 	case "bash", "sh", "zsh", "dash", "ksh", "mksh":
 		invocation := parsePOSIXShellInvocation(program, argv)
+		if invocation.valid && invocation.noExec &&
+			(invocation.mode == posixShellModeCommand ||
+				invocation.mode == posixShellModeScript) {
+			// Classification applies the preview only after it can prove that
+			// the command is structurally isolated from pipelines and redirects.
+			return out
+		}
 		if !invocation.valid ||
 			invocation.mode != posixShellModeCommand ||
 			invocation.commandIndex >= len(argv) ||
 			strings.TrimSpace(argv[invocation.commandIndex]) == "" {
 			out.markUnsupported(IssueUnsupportedConstruct)
-			return out
-		}
-		if invocation.noExec {
-			out.commands[0].Effect = EffectPreview
 			return out
 		}
 		if wrapperDepth >= maxWrapperDepth {
@@ -453,6 +456,84 @@ type posixShellInvocation struct {
 	interactive  bool
 	recognized   bool
 	valid        bool
+}
+
+func provesIsolatedPOSIXNoExecPreview(
+	out *parseOutput,
+	command *CommandFact,
+	invocation posixShellInvocation,
+	mode posixShellMode,
+) bool {
+	return invocation.valid && invocation.mode == mode && invocation.noExec &&
+		isolatedPOSIXCommand(out, command)
+}
+
+func isolatedPOSIXCommand(out *parseOutput, command *CommandFact) bool {
+	if out == nil || command == nil || out.status != StatusComplete {
+		return false
+	}
+	commandsByID := make(map[int64]*CommandFact, len(out.commands))
+	for index := range out.commands {
+		candidate := &out.commands[index]
+		if candidate.ID == 0 {
+			return false
+		}
+		if _, duplicate := commandsByID[candidate.ID]; duplicate {
+			return false
+		}
+		commandsByID[candidate.ID] = candidate
+	}
+	current, ok := commandsByID[command.ID]
+	if !ok {
+		return false
+	}
+	visited := make(map[int64]struct{}, len(out.commands))
+	for {
+		if current.ID == 0 {
+			return false
+		}
+		if _, seen := visited[current.ID]; seen {
+			return false
+		}
+		visited[current.ID] = struct{}{}
+		if current.PipelineID != 0 || len(current.Redirects) != 0 {
+			return false
+		}
+		if current.ParentCommandID == 0 {
+			return true
+		}
+		parent, ok := commandsByID[current.ParentCommandID]
+		if !ok || !exactTransparentPOSIXWrapper(parent, current) {
+			return false
+		}
+		current = parent
+	}
+}
+
+func exactTransparentPOSIXWrapper(
+	command *CommandFact,
+	child *CommandFact,
+) bool {
+	if command == nil || child == nil ||
+		(command.Dialect != DialectPOSIX && command.Dialect != DialectArgv) ||
+		command.Effect != EffectExecute || !command.ArgvComplete ||
+		len(command.Argv) < 2 || command.Program == "" ||
+		command.Program != commandProgramForDialect(
+			command.Executable,
+			command.Dialect,
+		) {
+		return false
+	}
+	switch command.Program {
+	case "env", "command", "exec":
+		nested, ok, uncertain := staticPOSIXWrapperArgv(
+			command.Argv,
+			command.Program,
+		)
+		return ok && !uncertain && equalStrings(nested, child.Argv)
+	default:
+		return false
+	}
 }
 
 func parsePOSIXShellInvocation(
@@ -1699,6 +1780,23 @@ func enforceAnalyzeAuthority(out *parseOutput) {
 				command.Argv,
 			)
 			if invocation.valid && invocation.mode == posixShellModeCommand {
+				if !invocation.noExec || provesIsolatedPOSIXNoExecPreview(
+					out,
+					command,
+					invocation,
+					posixShellModeCommand,
+				) {
+					continue
+				}
+				out.markPartial(IssueUnsupportedConstruct)
+				continue
+			}
+			if provesIsolatedPOSIXNoExecPreview(
+				out,
+				command,
+				invocation,
+				posixShellModeScript,
+			) {
 				continue
 			}
 			if _, script := exactPOSIXShellScriptOperand(
