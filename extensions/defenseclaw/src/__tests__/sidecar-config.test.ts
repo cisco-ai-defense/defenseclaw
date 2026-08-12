@@ -33,13 +33,28 @@ import { loadSidecarConfig, _resetSidecarConfigCache } from "../sidecar-config.j
 const mockReadFileSync = vi.mocked(readFileSync);
 
 describe("loadSidecarConfig", () => {
+  const savedDefenseClawHome = process.env.DEFENSECLAW_HOME;
+  const savedE2EGatewayToken = process.env.E2E_GATEWAY_TOKEN;
+
   beforeEach(() => {
     _resetSidecarConfigCache();
     mockReadFileSync.mockReset();
+    delete process.env.DEFENSECLAW_HOME;
+    delete process.env.E2E_GATEWAY_TOKEN;
   });
 
   afterEach(() => {
     _resetSidecarConfigCache();
+    if (savedDefenseClawHome === undefined) {
+      delete process.env.DEFENSECLAW_HOME;
+    } else {
+      process.env.DEFENSECLAW_HOME = savedDefenseClawHome;
+    }
+    if (savedE2EGatewayToken === undefined) {
+      delete process.env.E2E_GATEWAY_TOKEN;
+    } else {
+      process.env.E2E_GATEWAY_TOKEN = savedE2EGatewayToken;
+    }
   });
 
   it("returns defaults when config file is missing", () => {
@@ -66,6 +81,67 @@ describe("loadSidecarConfig", () => {
       join("/mock-home", ".defenseclaw", "config.yaml"),
       "utf8"
     );
+  });
+
+  it("reads config and dotenv from an absolute DEFENSECLAW_HOME", () => {
+    process.env.DEFENSECLAW_HOME = "/isolated-defenseclaw";
+    mockReadFileSync.mockImplementation((path) => {
+      const selectedPath = String(path);
+      if (selectedPath === join("/isolated-defenseclaw", "config.yaml")) {
+        return "gateway:\n  host: 10.0.0.8\n  token_env: E2E_GATEWAY_TOKEN\n";
+      }
+      if (selectedPath === join("/isolated-defenseclaw", ".env")) {
+        return "E2E_GATEWAY_TOKEN=isolated-token\n";
+      }
+      throw new Error(`unexpected path: ${selectedPath}`);
+    });
+
+    const cfg = loadSidecarConfig();
+    expect(cfg.host).toBe("10.0.0.8");
+    expect(cfg.token).toBe("isolated-token");
+    expect(mockReadFileSync).not.toHaveBeenCalledWith(
+      join("/mock-home", ".defenseclaw", "config.yaml"),
+      "utf8"
+    );
+    expect(mockReadFileSync).not.toHaveBeenCalledWith(
+      join("/mock-home", ".defenseclaw", ".env"),
+      "utf8"
+    );
+  });
+
+  it("uses the default home when DEFENSECLAW_HOME is empty", () => {
+    process.env.DEFENSECLAW_HOME = "";
+    mockReadFileSync.mockImplementation((path) => {
+      const selectedPath = String(path);
+      if (selectedPath === join("/mock-home", ".defenseclaw", "config.yaml")) {
+        return "gateway:\n  host: 127.0.0.2\n";
+      }
+      throw new Error(`unexpected path: ${selectedPath}`);
+    });
+
+    expect(loadSidecarConfig().host).toBe("127.0.0.2");
+    expect(mockReadFileSync).toHaveBeenCalledWith(
+      join("/mock-home", ".defenseclaw", "config.yaml"),
+      "utf8"
+    );
+  });
+
+  it("rejects a relative DEFENSECLAW_HOME without reading persistent state", () => {
+    process.env.DEFENSECLAW_HOME = "relative/state";
+
+    expect(() => loadSidecarConfig()).toThrow(
+      "DEFENSECLAW_HOME must be an absolute path"
+    );
+    expect(mockReadFileSync).not.toHaveBeenCalled();
+  });
+
+  it("rejects a whitespace DEFENSECLAW_HOME without reading persistent state", () => {
+    process.env.DEFENSECLAW_HOME = "   ";
+
+    expect(() => loadSidecarConfig()).toThrow(
+      "DEFENSECLAW_HOME must be an absolute path"
+    );
+    expect(mockReadFileSync).not.toHaveBeenCalled();
   });
 
   it("reads approval timeout and hilt flag from config.yaml", () => {
