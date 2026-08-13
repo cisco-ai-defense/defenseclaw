@@ -41,6 +41,7 @@ import (
 	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/inventory/lockparse"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
@@ -184,6 +185,20 @@ type AIEvidence struct {
 	RawPath       string  `json:"raw_path,omitempty"`
 	Quality       float64 `json:"quality,omitempty"`    // 0..1, default 1.0 when unset (defaultEvidenceQuality)
 	MatchKind     string  `json:"match_kind,omitempty"` // exact | substring | heuristic; engine reads to weight contributions
+	// Origin distinguishes vendor-managed bundled entries from
+	// user-installed ones. Emitted for skill/plugin item rows so
+	// downstream mutation surfaces (block, disable, quarantine) can
+	// hard-refuse any action targeting a bundled entry — a vendor
+	// component the operator cannot restore. Empty means the walker
+	// did not classify this row; callers of mutation APIs MUST treat
+	// missing origin as non-actionable (fail-safe), not as user-owned.
+	// Values: "user" | "bundled".
+	Origin string `json:"origin,omitempty"`
+	// Bundled is a convenience boolean derived from Origin so wire
+	// consumers that only want a yes/no gate don't have to string-match.
+	// Kept in sync with Origin at emit time; either both are set or
+	// both are absent.
+	Bundled bool `json:"bundled,omitempty"`
 }
 
 // Match-kind constants. Stamped by detectors so the confidence engine
@@ -1795,11 +1810,31 @@ func (s *ContinuousDiscoveryService) signalFromDirectoryChildren(sig AISignature
 				if name == "" {
 					continue
 				}
+				// Skill-only special case: a `.system` container is a
+				// vendor-shipped bundled-skill directory (see Codex's
+				// bundled-skills contract). Do NOT emit the container
+				// itself as an ordinary skill_entry — recurse one
+				// level and emit each of its children with
+				// origin="bundled" so downstream mutation surfaces
+				// can hard-refuse. Any other detector (rule / plugin)
+				// treats `.system` as an ordinary child.
+				if detector == "skill" && enforce.IsBundledSkillContainerName(entry.Name()) {
+					systemDir := filepath.Join(path, entry.Name())
+					s.appendBundledSkillChildren(&evidence, systemDir)
+					continue
+				}
 				child := filepath.Join(path, entry.Name())
 				ev := AIEvidence{
 					Type:     detector + "_entry",
 					Basename: name,
 					PathHash: hashPath(child),
+				}
+				if detector == "skill" {
+					// Explicit user origin so mutation surfaces can
+					// tell "walker classified this as user-installed"
+					// apart from "walker didn't stamp an origin"
+					// (latter must fail-safe).
+					ev.Origin = "user"
 				}
 				if s.opts.StoreRawLocalPaths {
 					ev.RawPath = child
@@ -1814,6 +1849,40 @@ func (s *ContinuousDiscoveryService) signalFromDirectoryChildren(sig AISignature
 		out.LastActiveAt = &mt
 	}
 	return out
+}
+
+// appendBundledSkillChildren enumerates one level below a `.system`
+// container and emits each child as a skill_entry with
+// origin="bundled", bundled=true. Nested bundled subtrees are not
+// recursed into — Codex's contract is one level of vendor children,
+// not a general bundled-tree. Cap check mirrors the parent walker so
+// a pathological bundled directory can't blow up payload size.
+func (s *ContinuousDiscoveryService) appendBundledSkillChildren(evidence *[]AIEvidence, systemDir string) {
+	entries, err := os.ReadDir(systemDir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if len(*evidence) >= maxEvidencePerSignal {
+			return
+		}
+		name := sanitizeBasenameValue(entry.Name())
+		if name == "" {
+			continue
+		}
+		child := filepath.Join(systemDir, entry.Name())
+		ev := AIEvidence{
+			Type:     "skill_entry",
+			Basename: name,
+			PathHash: hashPath(child),
+			Origin:   "bundled",
+			Bundled:  true,
+		}
+		if s.opts.StoreRawLocalPaths {
+			ev.RawPath = child
+		}
+		*evidence = append(*evidence, ev)
+	}
 }
 
 // sanitizeBasenameValue returns the trimmed name if it is a legitimate

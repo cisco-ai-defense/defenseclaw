@@ -68,6 +68,16 @@ func NewAssetQuarantinePlan(
 	if err != nil {
 		return AssetQuarantinePlan{}, fmt.Errorf("enforce: quarantine source: %w", err)
 	}
+	// Bundled-skill containers (`<skills-root>/.system/…`) are
+	// vendor-managed and must never be quarantined. This check runs
+	// after pathWithinRoots normalises the source path so a caller
+	// cannot bypass it by passing a relative or unnormalised input.
+	// The equivalent check also runs in PluginEnforcer.Quarantine as
+	// defence in depth for legacy call sites that don't go through
+	// this planning layer.
+	if strings.TrimSpace(targetType) == "skill" && IsBundledSkillPath(sourcePath) {
+		return AssetQuarantinePlan{}, ErrBundledSkill
+	}
 	if err := validateExistingAncestors(filepath.Dir(sourcePath)); err != nil {
 		return AssetQuarantinePlan{}, fmt.Errorf("enforce: quarantine source ancestry: %w", err)
 	}
