@@ -944,8 +944,85 @@ attributes:
     overrides:
       max_utf8_bytes: 256
       pattern: '^[^/\\]*$'
-    notes: Connector or MCP configuration name only; never a path
+    notes: Connector or MCP configuration name only; never a path. Basename-only — scope-aware disambiguation is carried by defenseclaw.ai.component.id (which folds in the parent-surface hash so two users' identically-named items get distinct IDs).
   introduced_in: telemetry-registry-v1
+- id: defenseclaw.inventory.item.origin
+  type: string
+  brief: Whether an endpoint inventory item is user-installed or vendor-bundled
+  examples: [user, bundled]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [user, bundled]
+    notes: |
+      Stamped by the discovery walker on every skill / plugin item row
+      so downstream mutation surfaces (block, disable, quarantine) can
+      hard-refuse action on a vendor-managed bundled entry. Absent
+      value MUST be treated as non-actionable by mutation paths
+      (fail-safe) — an inventory row without an origin claim cannot
+      be assumed user-owned.
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.inventory.item.bundled
+  type: boolean
+  brief: Convenience boolean derived from defenseclaw.inventory.item.origin
+  examples: [true, false]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: |
+      Kept in sync with defenseclaw.inventory.item.origin at emit time
+      — either both are present or both are absent. Consumers that
+      only want a yes/no gate on bundled vs user can pivot on this
+      without string-matching origin values.
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.inventory.partial
+  type: boolean
+  brief: The inventory snapshot is not complete (cap hit, read error, or parse failure)
+  examples: [true, false]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: |
+      Consumers that promise "authoritative snapshot" (managed
+      remediation, dashboards) MUST fail-close on partial=true — the
+      operator view is incomplete. Absent / false means every item
+      the detector could see is present in the payload. Pairs with
+      defenseclaw.inventory.coverage_reason which names the WHY.
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.inventory.coverage_reason
+  type: string
+  brief: Reason an inventory snapshot is partial
+  examples: [cap_exceeded, permission_denied, read_error, parse_error]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [cap_exceeded, permission_denied, read_error, parse_error]
+    notes: |
+      Consumers can route diagnostics per reason: cap_exceeded (bump
+      cap or page), permission_denied (fix ownership then rescan),
+      read_error (transient, retry), parse_error (config invalid;
+      rescan won't help). Empty when partial=false. Unknown values
+      MUST NOT be treated as "no reason" — unknown reasons are still
+      reasons for incomplete coverage.
+  introduced_in: telemetry-registry-v2
 - id: defenseclaw.inventory.item.description
   type: string
   brief: Bounded catalog description of one endpoint inventory item
