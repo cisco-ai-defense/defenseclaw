@@ -1293,7 +1293,7 @@ def test_every_artifact_carries_candidate_authority_and_view_digest(
                 "authority": renderer.CANDIDATE_AUTHORITY,
                 "generator": renderer.GENERATOR_ID,
                 "materialized_view_sha256": view.typed_canonical_json_sha256,
-                "registry_version": 1,
+                "registry_version": 2,
             }
             assert artifact.ownership_marker == renderer.JSON_OWNERSHIP_MARKER
         else:
