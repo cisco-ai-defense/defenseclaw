@@ -40,7 +40,7 @@ from defenseclaw.file_permissions import make_private_directory
 BUNDLED_SKILL_CONTAINER = ".system"
 
 
-class BundledSkillRefused(Exception):
+class BundledSkillRefusedError(Exception):
     """Raised by SkillEnforcer.quarantine when the target is bundled.
 
     Mirrors internal/enforce/bundled_skill.go ErrBundledSkill. Callers
@@ -273,7 +273,7 @@ class SkillEnforcer:
     ) -> str | None:
         """Copy, verify, then remove a skill from its original location.
 
-        Raises BundledSkillRefused when the source path resolves under a
+        Raises BundledSkillRefusedError when the source path resolves under a
         `.system` container — vendor-managed skills are refused at the
         file-mutation boundary. The check runs before any hash or copy
         work so a bundled skill's content is never staged, even
@@ -291,7 +291,7 @@ class SkillEnforcer:
         except OSError:
             resolved = source
         if is_bundled_skill_path(source) or is_bundled_skill_path(resolved):
-            raise BundledSkillRefused(
+            raise BundledSkillRefusedError(
                 f"refusing to quarantine bundled skill under .system: {skill_name!r}"
             )
         if not self._validate_tree(source):

@@ -44,9 +44,9 @@ func TestSupportedConnectorParityMatrix(t *testing.T) {
 	// Build the connector -> artifacts map so we can produce a
 	// deterministic report ordered by connector slug.
 	type coverage struct {
-		mcp     bool
-		skill   bool
-		plugin  bool
+		mcp    bool
+		skill  bool
+		plugin bool
 	}
 	byConnector := map[string]coverage{}
 	for _, sig := range sigs {
