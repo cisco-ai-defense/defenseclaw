@@ -413,9 +413,35 @@ func readMCPServersUnderHome(connectorName, home string) [][]config.MCPServerEnt
 	case "openhands":
 		tryFile(config.ReadMCPFromDotMCPJSON, ".openhands/mcp.json")
 	case "zeptoclaw":
+		// zeptoclaw's own config is JSON with mcpServers at top level;
+		// mcp.json is a legacy fallback location some installs use.
+		tryFile(config.ReadMCPFromDotMCPJSON, ".zeptoclaw/config.json")
 		tryFile(config.ReadMCPFromDotMCPJSON, ".zeptoclaw/mcp.json")
 	case "hermes":
+		// Hermes native config is YAML with `mcp.servers` at top level
+		// (see cli/defenseclaw/config/hermes.yaml.template). Only the
+		// YAML reader can decode this — the generic mcpServers reader
+		// silently returns nothing. Fall back to the legacy .hermes/mcp.json
+		// for pre-YAML installs.
+		tryFile(func(p string) ([]config.MCPServerEntry, error) {
+			return config.ReadMCPFromYAMLPath(p, []string{"mcp", "servers"}, []string{"mcpServers"})
+		}, ".hermes/config.yaml")
 		tryFile(config.ReadMCPFromDotMCPJSON, ".hermes/mcp.json")
+	case "openclaw":
+		tryFile(config.ReadMCPFromDotMCPJSON, ".openclaw/openclaw.json")
+	case "antigravity":
+		tryFile(config.ReadMCPFromDotMCPJSON, ".gemini/config/mcp_config.json")
+		tryFile(config.ReadMCPFromDotMCPJSON, ".agents/mcp_config.json")
+	case "opencode":
+		tryFile(config.ReadMCPFromDotMCPJSON, ".config/opencode/opencode.json")
+		tryFile(config.ReadMCPFromDotMCPJSON, ".opencode/opencode.json")
+	case "amp":
+		// Amp's settings.json follows the Claude Code shape (top-level
+		// `mcpServers`), so the Claude Settings reader is the right
+		// dispatch; the generic DotMCPJSON reader also works but the
+		// Claude Settings one is stricter.
+		tryFile(config.ReadMCPFromClaudeSettings, ".config/amp/settings.json")
+		tryFile(config.ReadMCPFromClaudeSettings, ".amp/settings.json")
 	}
 	return results
 }
