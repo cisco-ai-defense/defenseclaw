@@ -371,7 +371,35 @@ type AISignal struct {
 	// SanitizeEvidenceForWire; size is bounded by maxEvidencePerSignal so a
 	// hostile pack cannot blow up payload size.
 	Evidence []AIEvidence `json:"evidence,omitempty"`
+	// Partial reports that the evidence rows do not cover everything
+	// the detector saw. Set to true when a per-signal cap was hit, a
+	// read failed on a subtree, a permission bit prevented full
+	// enumeration, or a config parser reported malformed input. Any
+	// consumer that promises "authoritative snapshot" must fail-close
+	// on Partial=true — the operator's view is incomplete. Absent /
+	// false means "everything the detector could see is present".
+	Partial bool `json:"partial,omitempty"`
+	// CoverageReason names WHY the snapshot is partial. Enumerated so
+	// downstream consumers can route diagnostics: cap_exceeded (bump
+	// the cap or page), permission_denied (chown / rerun as owner),
+	// read_error (transient / rescan), parse_error (config invalid;
+	// rescan won't help). Empty when Partial=false. Kept as a stable
+	// string so telemetry destinations can pivot on it without
+	// pattern-matching prose.
+	CoverageReason string `json:"coverage_reason,omitempty"`
 }
+
+// Coverage-reason enum. Kept in sync with the schema documented in
+// schemas/telemetry/v8/operations.yaml (see the v8 telemetry spec
+// update landed with the v8-only managed-egress refactor). Consumers
+// that see an unknown value MUST NOT treat the snapshot as complete —
+// unknown reasons are still reasons.
+const (
+	CoverageReasonCapExceeded      = "cap_exceeded"
+	CoverageReasonReadError        = "read_error"
+	CoverageReasonPermissionDenied = "permission_denied"
+	CoverageReasonParseError       = "parse_error"
+)
 
 // maxEvidencePerSignal caps the number of evidence rows the engine
 // will accept on a single signal. The bound is generous (manifests
@@ -1631,8 +1659,38 @@ func (s *ContinuousDiscoveryService) signalFromMCPConfigPath(sig AISignature, pa
 		base.RawPath = path
 	}
 	evidence := []AIEvidence{base}
-	for _, name := range readMCPServerNames(path) {
-		if len(evidence) >= maxEvidencePerSignal {
+	// Coverage state: two independent early-exit paths (parse failure
+	// vs. per-signal evidence cap). Both must surface as partial=true
+	// so managed remediation can distinguish "31 servers is really
+	// what's in this config" from "there are 40 servers and we
+	// silently dropped 9" (Vineet's [P1] inline on this function). A
+	// parse error also propagates because a malformed MCP config
+	// leaves the operator with zero item rows for a real surface,
+	// which downstream must not read as "no MCP servers configured".
+	names, parseErr := readMCPServerNamesWithErr(path)
+	var partial bool
+	var coverageReason string
+	if parseErr != nil {
+		// Parse failure — the base "mcp" evidence row remains so the
+		// operator sees the endpoint has MCP configured, but no
+		// server-name rows will follow. Marking partial signals the
+		// gap.
+		partial = true
+		coverageReason = CoverageReasonParseError
+	}
+	// Reserve one slot for the parent row (evidence[0]) by capping
+	// server-name rows at maxEvidencePerSignal - 1. Explicit constant
+	// so the intent is grep-able — the previous behaviour just fell
+	// off the end of the same cap that the parent row already
+	// occupies and dropped the 32nd real server without a signal.
+	const maxMCPServerRowsPerSignal = maxEvidencePerSignal - 1
+	added := 0
+	for _, name := range names {
+		if added >= maxMCPServerRowsPerSignal {
+			partial = true
+			if coverageReason == "" {
+				coverageReason = CoverageReasonCapExceeded
+			}
 			break
 		}
 		if name = sanitizeBasenameValue(name); name == "" {
@@ -1643,13 +1701,35 @@ func (s *ContinuousDiscoveryService) signalFromMCPConfigPath(sig AISignature, pa
 			Basename:  name,
 			ValueHash: hashValue(name),
 		})
+		added++
 	}
 	out := s.signalFromEvidence(sig, SignalMCPServer, "mcp", evidence)
+	out.Partial = partial
+	out.CoverageReason = coverageReason
 	if st, err := os.Stat(path); err == nil {
 		mt := st.ModTime().UTC()
 		out.LastActiveAt = &mt
 	}
 	return out
+}
+
+// readMCPServerNamesWithErr wraps readMCPServerNames with the parser's
+// error state so signalFromMCPConfigPath can distinguish
+// "unparseable" from "no servers declared". The plain readMCPServerNames
+// remains for callers that don't need the reason.
+func readMCPServerNamesWithErr(path string) ([]string, error) {
+	entries, err := parseMCPConfigForNames(path)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		name := strings.TrimSpace(e.Name)
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+	return names, nil
 }
 
 // readMCPServerNames parses `path` with the appropriate format-specific
@@ -1799,11 +1879,37 @@ func (s *ContinuousDiscoveryService) signalFromDirectoryChildren(sig AISignature
 		base.RawPath = path
 	}
 	evidence := []AIEvidence{base}
+	// Track coverage so a consumer that acts on the snapshot (managed
+	// remediation, dashboards, alert rules) can distinguish "no more
+	// entries" from "we stopped early because <reason>". Set by every
+	// early-exit path below.
+	var partial bool
+	var coverageReason string
 	fi, statErr := os.Stat(path)
-	if statErr == nil && fi.IsDir() {
-		if entries, err := os.ReadDir(path); err == nil {
+	switch {
+	case statErr != nil && os.IsPermission(statErr):
+		partial = true
+		coverageReason = CoverageReasonPermissionDenied
+	case statErr != nil && !os.IsNotExist(statErr):
+		partial = true
+		coverageReason = CoverageReasonReadError
+	case statErr == nil && fi.IsDir():
+		entries, readErr := os.ReadDir(path)
+		switch {
+		case readErr != nil && os.IsPermission(readErr):
+			partial = true
+			coverageReason = CoverageReasonPermissionDenied
+		case readErr != nil:
+			partial = true
+			coverageReason = CoverageReasonReadError
+		default:
 			for _, entry := range entries {
 				if len(evidence) >= maxEvidencePerSignal {
+					// Cap hit before we processed every child.
+					// Downstream must render "N of M" and must not
+					// treat this as authoritative.
+					partial = true
+					coverageReason = CoverageReasonCapExceeded
 					break
 				}
 				name := sanitizeBasenameValue(entry.Name())
@@ -1820,7 +1926,12 @@ func (s *ContinuousDiscoveryService) signalFromDirectoryChildren(sig AISignature
 				// treats `.system` as an ordinary child.
 				if detector == "skill" && enforce.IsBundledSkillContainerName(entry.Name()) {
 					systemDir := filepath.Join(path, entry.Name())
-					s.appendBundledSkillChildren(&evidence, systemDir)
+					if childPartial, childReason := s.appendBundledSkillChildren(&evidence, systemDir); childPartial {
+						partial = true
+						if coverageReason == "" {
+							coverageReason = childReason
+						}
+					}
 					continue
 				}
 				child := filepath.Join(path, entry.Name())
@@ -1844,6 +1955,8 @@ func (s *ContinuousDiscoveryService) signalFromDirectoryChildren(sig AISignature
 		}
 	}
 	out := s.signalFromEvidence(sig, category, detector, evidence)
+	out.Partial = partial
+	out.CoverageReason = coverageReason
 	if statErr == nil {
 		mt := fi.ModTime().UTC()
 		out.LastActiveAt = &mt
@@ -1857,14 +1970,24 @@ func (s *ContinuousDiscoveryService) signalFromDirectoryChildren(sig AISignature
 // recursed into — Codex's contract is one level of vendor children,
 // not a general bundled-tree. Cap check mirrors the parent walker so
 // a pathological bundled directory can't blow up payload size.
-func (s *ContinuousDiscoveryService) appendBundledSkillChildren(evidence *[]AIEvidence, systemDir string) {
+//
+// Returns (partial, coverageReason) so the caller can propagate
+// truncation state up to the outer signal — a bundled read error
+// leaves the operator's snapshot incomplete just as a user-skill
+// read error does.
+func (s *ContinuousDiscoveryService) appendBundledSkillChildren(evidence *[]AIEvidence, systemDir string) (bool, string) {
 	entries, err := os.ReadDir(systemDir)
 	if err != nil {
-		return
+		switch {
+		case os.IsPermission(err):
+			return true, CoverageReasonPermissionDenied
+		default:
+			return true, CoverageReasonReadError
+		}
 	}
 	for _, entry := range entries {
 		if len(*evidence) >= maxEvidencePerSignal {
-			return
+			return true, CoverageReasonCapExceeded
 		}
 		name := sanitizeBasenameValue(entry.Name())
 		if name == "" {
@@ -1883,6 +2006,7 @@ func (s *ContinuousDiscoveryService) appendBundledSkillChildren(evidence *[]AIEv
 		}
 		*evidence = append(*evidence, ev)
 	}
+	return false, ""
 }
 
 // sanitizeBasenameValue returns the trimmed name if it is a legitimate
