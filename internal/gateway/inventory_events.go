@@ -260,7 +260,7 @@ func perConnectorMCPEntries(cfg *config.Config, reg *connector.Registry) []endpo
 	homes := cfg.AIDiscovery.HomeDirs
 	seenComponent := make(map[string]struct{})
 	components := make([]endpointInventoryComponent, 0, len(connectors)*(len(homes)+1))
-	appendServers := func(connectorName string, servers []config.MCPServerEntry) {
+	appendServers := func(connectorName, homeScope string, servers []config.MCPServerEntry) {
 		slug := inventoryStableToken(connectorName, 128)
 		for _, server := range servers {
 			command := inventorySafeBasename(server.Command)
@@ -276,7 +276,13 @@ func perConnectorMCPEntries(cfg *config.Config, reg *connector.Registry) []endpo
 			if product == "" {
 				product = host
 			}
-			identity := connectorName + "/" + server.Name
+			// Identity + dedup key both carry the home scope so two
+			// users' same-named MCP servers (e.g. `codex/webex` in
+			// each user's ~/.codex/config.toml) get distinct
+			// component ids AND both survive the seenComponent
+			// dedup. Empty homeScope (Pass 1 — daemon's own HOME)
+			// keeps the historical shape.
+			identity := connectorName + "/" + homeScope + "/" + server.Name
 			if _, seen := seenComponent[identity]; seen {
 				continue
 			}
@@ -307,23 +313,29 @@ func perConnectorMCPEntries(cfg *config.Config, reg *connector.Registry) []endpo
 	// any unrecognized connector slug would spuriously duplicate OpenClaw
 	// servers under a foreign agent label. Restrict this pass to the slugs
 	// with a native MCP reader (mirrors the switch in ReadMCPServersForConnector).
+	// homeScope="" for this pass so its identity shape matches the
+	// historical pre-scope id when HomeDirs is empty — that keeps
+	// stable ids across a scope-aware rollout for single-home hosts.
 	for _, connectorName := range connectors {
 		if !hasNativeMCPReader(connectorName) {
 			continue
 		}
 		if servers, err := cfg.ReadMCPServersForConnector(connectorName); err == nil {
-			appendServers(connectorName, servers)
+			appendServers(connectorName, "", servers)
 		}
 	}
 	// Pass 2 — every configured user home via direct-path readers.
+	// Each home gets its own scope key so same-named servers across
+	// homes stay distinct.
 	for _, home := range homes {
 		home = strings.TrimSpace(home)
 		if home == "" {
 			continue
 		}
+		homeScope := endpointInventoryScopeKey(home)
 		for _, connectorName := range connectors {
 			for _, servers := range readMCPServersUnderHome(connectorName, home) {
-				appendServers(connectorName, servers)
+				appendServers(connectorName, homeScope, servers)
 			}
 		}
 	}
@@ -908,6 +920,55 @@ func endpointInventoryComponentID(kind, identity string) string {
 	return fmt.Sprintf("endpoint-%s-%x", kind, digest[:])
 }
 
+// endpointInventoryScopeKey returns a short deterministic key for a
+// home directory / workspace path, used to disambiguate same-named
+// items (skills, plugins, MCP servers) across user homes on the same
+// endpoint. Without this, two users' `~/.codex/skills/hello` collapse
+// to a single component ID at the SAM (Vineet's [P1] identity
+// finding). The path is absolutised before hashing so a relative path
+// and its absolute form produce the same scope key.
+//
+// Truncated to 16 hex chars — the resulting component id stays well
+// under the wire-schema length limit for defenseclaw.ai.component.id,
+// and the collision probability at fleet scale is negligible for a
+// disambiguation-only key. This is NOT a security boundary; do not
+// use the value for authentication.
+func endpointInventoryScopeKey(path string) string {
+	if strings.TrimSpace(path) == "" {
+		return ""
+	}
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+	sum := sha256.Sum256([]byte(path))
+	return fmt.Sprintf("%x", sum[:8])
+}
+
+// endpointInventoryScopeFromEvidence extracts the scope key from a
+// signal produced by the AI-Discovery walker. The walker's evidence[0]
+// is always the parent-surface row and carries the PathHash of the
+// full home-prefixed path (see signalFromDirectoryChildren and
+// signalFromMCPConfigPath) — reusing that hash means report-derived
+// component IDs are stable across walker restarts even when the raw
+// path-hash key rotates, and it costs zero extra hashing. Returns ""
+// when the signal has no evidence (walker bug guard).
+func endpointInventoryScopeFromEvidence(evidence []inventory.AIEvidence) string {
+	if len(evidence) == 0 {
+		return ""
+	}
+	// Trim the "hmac-sha256:" / "sha256:" prefix — the identity
+	// hasher folds this token into the wider digest so the prefix
+	// adds no information beyond length.
+	h := evidence[0].PathHash
+	if i := strings.LastIndex(h, ":"); i >= 0 {
+		h = h[i+1:]
+	}
+	if len(h) > 16 {
+		h = h[:16]
+	}
+	return h
+}
+
 func inventoryStableIdentifier(value string) string {
 	return inventoryStableToken(value, observability.MaxStableTokenBytes)
 }
@@ -1040,8 +1101,18 @@ func discoveredEntriesFromReport(
 			// Use hyphen (not underscore) in the id kind — the family
 			// constraint for defenseclaw.ai.component.id is
 			// ^[A-Za-z0-9][A-Za-z0-9._:/-]*$ which rejects underscores.
+			//
+			// Identity input: signalID/scope/name where `scope` is
+			// derived from the parent surface's PathHash so two
+			// users' same-named skills (e.g. `~/user1/.codex/skills/hello`
+			// and `~/user2/.codex/skills/hello`) don't collapse to a
+			// single component id. Signals from the same home + same
+			// signature + same basename still produce a stable id
+			// across scans (PathHash of the parent surface is
+			// deterministic within a single walker configuration).
+			scope := endpointInventoryScopeFromEvidence(signal.Evidence)
 			components = append(components, endpointInventoryComponent{
-				id:              endpointInventoryComponentID(kind+"-entry", signal.SignatureID+"/"+name),
+				id:              endpointInventoryComponentID(kind+"-entry", signal.SignatureID+"/"+scope+"/"+name),
 				componentType:   kind,
 				signal:          inventoryStableToken(signal.SignatureID, 128),
 				product:         inventoryStableToken(signal.Product, 128),
@@ -1085,9 +1156,13 @@ func discoveredMCPEntriesFromReport(
 				continue
 			}
 			// Hyphen (not underscore) in the id kind to satisfy the
-			// defenseclaw.ai.component.id pattern.
+			// defenseclaw.ai.component.id pattern. Scope key derives
+			// from the parent MCP-config surface hash so same-named
+			// servers configured in different user homes get
+			// distinct component ids.
+			scope := endpointInventoryScopeFromEvidence(signal.Evidence)
 			components = append(components, endpointInventoryComponent{
-				id:             endpointInventoryComponentID("mcp-entry", signal.SignatureID+"/"+name),
+				id:             endpointInventoryComponentID("mcp-entry", signal.SignatureID+"/"+scope+"/"+name),
 				componentType:  inventory.SignalMCPServer,
 				signal:         inventoryStableToken(signal.SignatureID, 128),
 				product:        inventoryStableToken(signal.Product, 128),
