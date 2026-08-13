@@ -269,30 +269,24 @@ func projectManagedCompatibility(
 		if !projectManagedVerdict(&event, wire.Body, &projection) {
 			return managedCompatibilityProjection{}, false, false
 		}
-	case wire.Bucket == "ai.discovery" &&
-		wire.Action == string(config.ObservabilityV8ManagedConnectorInventoryAction):
-		if !projectManagedConnectorInventory(&event, wire.EventName, wire.Body, deviceID, hostname, &projection) {
-			return managedCompatibilityProjection{}, false, false
-		}
-	case wire.Bucket == "ai.discovery" &&
-		wire.Action == string(config.ObservabilityV8ManagedMCPInventoryAction):
-		if !projectManagedMCPInventory(&event, wire.EventName, wire.Body, deviceID, hostname, &projection) {
-			return managedCompatibilityProjection{}, false, false
-		}
-	case wire.Bucket == "ai.discovery" &&
-		wire.Action == string(config.ObservabilityV8ManagedAgentInventoryAction):
-		if !projectManagedAgentInventory(&event, wire.EventName, wire.Body, deviceID, hostname, &projection) {
-			return managedCompatibilityProjection{}, false, false
-		}
 	default:
-		// v8 discovery / inventory records without a v7 legacy wrapper
-		// (skill / plugin per-item inventories, and the AI-Discovery scan
-		// summary action=ai_discovery) are candidates by identity but not
-		// by legacy shape. Let them flow through as ordinary OTLP log
-		// records without any legacy projection. Every other action --
-		// including diagnostic actions like local_inventory_diagnostic --
-		// remains fail-closed so an unknown record shape cannot silently
-		// leak past the compatibility projector.
+		// v8-ONLY managed-inventory contract (Vineet's [P1] on this
+		// file). Every ai.discovery record — agent, connector, MCP,
+		// skill, and plugin inventories, plus the ai_discovery scan
+		// summary — flows through as its original v8 OTLP log with
+		// no legacy gatewaylog.Event wrapping. The previous design
+		// projected agent / connector / MCP into schema-v7
+		// envelopes while skill / plugin passed through as v8,
+		// which left managed inventory in a mixed contract. The
+		// three legacy projectors
+		// (projectManagedConnectorInventory / projectManagedMCPInventory /
+		// projectManagedAgentInventory) still live in this package so a
+		// rollback commit could restore them, but they are no longer
+		// wired to the compatibility projector.
+		//
+		// Every ai.discovery action is now v8-passthrough. Records
+		// outside guardrail.evaluation.completed remain fail-closed
+		// here so an unknown record shape can't silently leak.
 		if wire.Bucket == "ai.discovery" && isV8PassThroughAction(wire.Action) {
 			return managedCompatibilityProjection{}, false, true
 		}
@@ -316,14 +310,20 @@ func projectManagedCompatibility(
 }
 
 // isV8PassThroughAction reports whether the given routing action names a v8
-// discovery/inventory record that has no v7 legacy wrapper and should flow
-// through the managed AID adapter unprojected. Skill and plugin per-item
-// inventories, plus the AI-Discovery scan summary (action=ai_discovery), fall
-// into this category; every other action -- including diagnostic actions --
-// stays fail-closed so unknown record shapes cannot silently pass.
+// discovery/inventory record that should flow through the managed AID
+// adapter unprojected. Under the v8-only contract this covers EVERY
+// ai.discovery action — agent, connector, MCP, skill, and plugin
+// per-item inventories, plus the ai_discovery scan summary. Diagnostic
+// actions like local_inventory_diagnostic are intentionally NOT here —
+// those never reach the managed egress route (see
+// reserveObservabilityV8ManagedInventory) so the compatibility projector
+// never sees them.
 func isV8PassThroughAction(action string) bool {
 	switch action {
-	case string(config.ObservabilityV8ManagedSkillInventoryAction),
+	case string(config.ObservabilityV8ManagedAgentInventoryAction),
+		string(config.ObservabilityV8ManagedConnectorInventoryAction),
+		string(config.ObservabilityV8ManagedMCPInventoryAction),
+		string(config.ObservabilityV8ManagedSkillInventoryAction),
 		string(config.ObservabilityV8ManagedPluginInventoryAction),
 		"ai_discovery":
 		return true

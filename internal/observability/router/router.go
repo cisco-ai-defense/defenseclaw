@@ -437,7 +437,12 @@ func validManagedFallbackDestination(
 		source.PolicyForm != config.ObservabilityV8PolicyImplicitLocal || !source.FirstMatchPerSignal ||
 		len(source.Capabilities.Signals) != 1 || source.Capabilities.Signals[0] != observability.SignalLogs ||
 		len(source.SelectedSignals) != 1 || source.SelectedSignals[0] != observability.SignalLogs ||
-		len(source.Routes) != 3 || len(destination.routes) != 3 ||
+		// v8-only contract (Vineet's [P1]): 2 generated routes now
+		// — the local-diagnostic drop plus the send-all fallback. The
+		// old middle route "drop-managed-inventory-components" was
+		// removed with the compatibility projector for ai.discovery
+		// inventory records.
+		len(source.Routes) != 2 || len(destination.routes) != 2 ||
 		source.Transport.Protocol != "http/json" || source.Transport.Method != "POST" ||
 		source.Transport.LoggerName != "defenseclaw" ||
 		source.ReloadApplicability.Policy != config.ObservabilityV8RestartRequired ||
@@ -450,30 +455,20 @@ func validManagedFallbackDestination(
 		return false
 	}
 	diagnosticDrop := source.Routes[0]
-	componentDrop := source.Routes[1]
-	send := source.Routes[2]
+	send := source.Routes[1]
 	if !validGeneratedManagedDropRoute(
 		diagnosticDrop,
 		0,
 		"drop-local-inventory-diagnostics",
 		[]observability.ProducerKey{config.ObservabilityV8LocalInventoryDiagnosticAction},
 		nil,
-	) || !validGeneratedManagedDropRoute(
-		componentDrop,
-		1,
-		"drop-managed-inventory-components",
-		[]observability.ProducerKey{
-			config.ObservabilityV8ManagedAgentInventoryAction,
-			config.ObservabilityV8ManagedConnectorInventoryAction,
-		},
-		[]observability.EventName{"ai_component.observed"},
-	) || send.Index != 2 || send.Name != "all-collected-logs" || !send.Generated ||
+	) || send.Index != 1 || send.Name != "all-collected-logs" || !send.Generated ||
 		len(send.Signals) != 1 || send.Signals[0] != observability.SignalLogs ||
 		send.Action != config.ObservabilityV8RouteSend || send.IncludesMandatoryFloor ||
 		!send.Selector.BucketWildcard || len(send.Selector.Buckets) != len(observability.Buckets()) ||
 		len(send.Selector.Sources) != 0 || len(send.Selector.Connectors) != 0 ||
 		len(send.Selector.Actions) != 0 || len(send.Selector.EventNames) != 0 ||
-		send.Selector.MinSeverity != "" || !coversCatalog(destination.routes[2].selector.buckets) ||
+		send.Selector.MinSeverity != "" || !coversCatalog(destination.routes[1].selector.buckets) ||
 		len(send.RedactionProfileByBucket) != len(observability.Buckets()) {
 		return false
 	}

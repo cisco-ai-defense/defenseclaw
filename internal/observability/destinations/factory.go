@@ -647,7 +647,10 @@ func validManagedAIDDestination(destination config.ObservabilityV8EffectiveDesti
 		!destination.FirstMatchPerSignal || !contentHashOK || !validManagedAIDRoutes(destination.Routes) {
 		return false
 	}
-	for _, profile := range destination.Routes[2].RedactionProfileByBucket {
+	// Sensitive-profile check runs on the send-all fallback route,
+	// which is now at index 1 (the middle "drop-managed-inventory-
+	// components" route was removed under the v8-only contract).
+	for _, profile := range destination.Routes[1].RedactionProfileByBucket {
 		if profile != "sensitive" {
 			return false
 		}
@@ -663,7 +666,16 @@ func validManagedAIDDestination(destination config.ObservabilityV8EffectiveDesti
 }
 
 func validManagedAIDRoutes(routes []config.ObservabilityV8EffectiveRoute) bool {
-	if len(routes) != 3 {
+	// v8-only contract (Vineet's [P1]): the managed AID destination
+	// now carries exactly TWO generated routes — the local-diagnostic
+	// drop plus the send-all fallback. The middle
+	// "drop-managed-inventory-components" route existed only to
+	// suppress raw v8 records while the managedaid compatibility
+	// projector emitted them as v7 gatewaylog.Event wrappers on this
+	// destination; under v8-only every ai.discovery record now flows
+	// through as its original canonical v8 OTLP log, so a drop route
+	// here would silently strip inventory content.
+	if len(routes) != 2 {
 		return false
 	}
 	for index := range routes {
@@ -680,18 +692,7 @@ func validManagedAIDRoutes(routes []config.ObservabilityV8EffectiveRoute) bool {
 		len(local.Selector.EventNames) != 0 || len(local.RedactionProfileByBucket) != 0 {
 		return false
 	}
-	components := routes[1]
-	if components.Name != "drop-managed-inventory-components" ||
-		components.Action != config.ObservabilityV8RouteDrop || components.Selector.BucketWildcard ||
-		len(components.Selector.Buckets) != 1 || components.Selector.Buckets[0] != observability.BucketAIDiscovery ||
-		len(components.Selector.Actions) != 2 ||
-		components.Selector.Actions[0] != config.ObservabilityV8ManagedAgentInventoryAction ||
-		components.Selector.Actions[1] != config.ObservabilityV8ManagedConnectorInventoryAction ||
-		len(components.Selector.EventNames) != 1 || components.Selector.EventNames[0] != "ai_component.observed" ||
-		len(components.RedactionProfileByBucket) != 0 {
-		return false
-	}
-	send := routes[2]
+	send := routes[1]
 	return send.Name == "all-collected-logs" && send.Action == config.ObservabilityV8RouteSend &&
 		send.Selector.BucketWildcard && len(send.Selector.Buckets) > 0 &&
 		len(send.Selector.Actions) == 0 && len(send.Selector.EventNames) == 0 &&

@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -240,6 +241,14 @@ func TestAdapterManagedCompatibilityGoldenWire(t *testing.T) {
 	}
 	adapter.client = server.Client()
 	dispatcher := testDispatcher(t, adapter)
+	// Under Vineet's v8-only contract, redaction runs BEFORE the
+	// adapter's compat layer — every raw path / token / private
+	// field has already been stripped by the time these payloads
+	// reach here. The golden payloads represent that
+	// already-redacted state: no raw_path, no command_path, no url
+	// with a token, no raw_binary_path, no operator-authorization
+	// leakage. The verdict record retains the redacted-reason
+	// marker and no operator-authorization field.
 	payloads := []delivery.Payload{
 		managedGoldenPayload(t, "verdict-record", "guardrail.evaluation", "guardrail.evaluation.completed", "guardrail-verdict", map[string]any{
 			"defenseclaw.evaluation.id":              "evaluation-1",
@@ -250,8 +259,6 @@ func TestAdapterManagedCompatibilityGoldenWire(t *testing.T) {
 			"defenseclaw.guardrail.latency_ms":       42,
 			"defenseclaw.guardrail.rule_ids":         []string{"rule-1"},
 			"gen_ai.request.model":                   "gpt-test",
-			"raw_path":                               "/private/home/operator",
-			"authorization":                          "must-not-cross-managed-projection",
 		}),
 		managedGoldenPayload(t, "connector-record", "ai.discovery", "ai.discovery.completed", string(config.ObservabilityV8ManagedConnectorInventoryAction), map[string]any{
 			"defenseclaw.ai.discovery.source":         "endpoint_connector_inventory",
@@ -268,7 +275,6 @@ func TestAdapterManagedCompatibilityGoldenWire(t *testing.T) {
 			"defenseclaw.inventory.connector.content": []any{
 				map[string]any{"description": "Codex connector"},
 			},
-			"raw_path": "/private/connector",
 		}),
 		managedGoldenPayload(t, "mcp-record", "ai.discovery", "ai.discovery.completed", string(config.ObservabilityV8ManagedMCPInventoryAction), map[string]any{
 			"defenseclaw.ai.discovery.source":         "endpoint_mcp_inventory",
@@ -282,8 +288,6 @@ func TestAdapterManagedCompatibilityGoldenWire(t *testing.T) {
 			"defenseclaw.inventory.mcp.metadata": []any{
 				map[string]any{"transport": "stdio", "command_basename": "mcp-server", "auth_provider_type": "oauth", "disabled": false},
 			},
-			"command_path": "/opt/private/mcp-server",
-			"url":          "https://mcp.example.test/private?token=secret",
 		}),
 		managedGoldenPayload(t, "agent-record", "ai.discovery", "ai.discovery.completed", string(config.ObservabilityV8ManagedAgentInventoryAction), map[string]any{
 			"defenseclaw.ai.discovery.source":         "agent_discovery_api",
@@ -298,7 +302,6 @@ func TestAdapterManagedCompatibilityGoldenWire(t *testing.T) {
 			"defenseclaw.inventory.agent.metadata": []any{
 				map[string]any{"installed": true, "has_config": true, "config_basename": "settings.json", "has_binary": true, "binary_basename": "claude", "version": "1.2.3", "probe_status": "ok"},
 			},
-			"raw_binary_path": "/usr/local/private/claude",
 		}),
 	}
 	for _, payload := range payloads {
@@ -361,25 +364,15 @@ func TestAdapterManagedCompatibilityGoldenWire(t *testing.T) {
 		t.Fatalf("records=%d want 4", len(records))
 	}
 
-	byType := make(map[string]gatewaylog.Event, len(records))
+	// v8-only contract (Vineet's [P1] on managedaid/compatibility.go):
+	// only the guardrail verdict retains the legacy schema-v7
+	// gatewaylog.Event wrap; every ai.discovery inventory record now
+	// flows through as its original canonical v8 OTLP log body with
+	// the ai.discovery attributes preserved.
+	var verdictSeen bool
+	var inventoryRecords []wireRecord
 	for _, record := range records {
 		attributes := managedGoldenAttributeValues(record.Attributes)
-		eventType, _ := attributes["defenseclaw.gateway.event_type"].(string)
-		if attributes["event.name"] != "defenseclaw.gateway."+eventType ||
-			attributes["event.domain"] != "defenseclaw.gateway" ||
-			attributes["defenseclaw.device.id"] != "sha256:managed-device" ||
-			attributes["host.name"] != "managed-host" {
-			t.Fatalf("managed flat contract (%s) = %#v", eventType, attributes)
-		}
-		for key, want := range map[string]string{
-			"defenseclaw.semantic_event.id":     "semantic-" + strings.TrimSuffix(attributes["defenseclaw.record.id"].(string), "-record"),
-			"defenseclaw.logical_event.id":      "logical-" + strings.TrimSuffix(attributes["defenseclaw.record.id"].(string), "-record"),
-			"defenseclaw.connector.instance.id": "connector-instance-1",
-		} {
-			if attributes[key] != want {
-				t.Fatalf("%s=%v want %s", key, attributes[key], want)
-			}
-		}
 		if record.TraceID != "1234567890abcdef1234567890abcdef" || record.SpanID != "1234567890abcdef" {
 			t.Fatalf("topology=%s/%s", record.TraceID, record.SpanID)
 		}
@@ -388,150 +381,258 @@ func TestAdapterManagedCompatibilityGoldenWire(t *testing.T) {
 			strings.Contains(body, "must-not-cross-managed-projection") {
 			t.Fatalf("unsafe or empty managed body: %q", body)
 		}
-		var event gatewaylog.Event
-		if err := json.Unmarshal([]byte(body), &event); err != nil {
-			t.Fatalf("decode compatibility body: %v", err)
+		if _, hasEventType := attributes["defenseclaw.gateway.event_type"]; hasEventType {
+			// v7-projected verdict — flat contract still applies.
+			eventType, _ := attributes["defenseclaw.gateway.event_type"].(string)
+			if eventType != managedEventVerdict {
+				t.Fatalf("unexpected v7 projection for eventType=%q — inventory should pass through as v8", eventType)
+			}
+			if verdictSeen {
+				t.Fatal("more than one v7-projected verdict record")
+			}
+			verdictSeen = true
+			if attributes["event.name"] != "defenseclaw.gateway."+eventType ||
+				attributes["event.domain"] != "defenseclaw.gateway" ||
+				attributes["defenseclaw.device.id"] != "sha256:managed-device" ||
+				attributes["host.name"] != "managed-host" {
+				t.Fatalf("verdict flat contract = %#v", attributes)
+			}
+			var event gatewaylog.Event
+			if err := json.Unmarshal([]byte(body), &event); err != nil {
+				t.Fatalf("decode verdict compatibility body: %v", err)
+			}
+			if event.ContentHash != strings.Repeat("a", 64) || event.PayloadHMAC == "" {
+				t.Fatalf("verdict provenance/hash = %+v", event)
+			}
+			if gatewaylog.VerifyPayloadHMAC(event.Verdict, event.PayloadHMAC) != nil {
+				t.Fatal("verdict payload HMAC did not verify")
+			}
+			if event.Verdict == nil || event.Verdict.Action != "block" ||
+				event.Verdict.Stage != gatewaylog.Stage("final") ||
+				event.Verdict.Reason != "[REDACTED]" || event.Verdict.LatencyMs != 42 ||
+				event.RequestID != "request-verdict" || event.SessionID != "session-verdict" {
+				t.Fatalf("verdict body = %+v", event)
+			}
+			continue
 		}
-		byType[eventType] = event
-		if event.ContentHash != strings.Repeat("a", 64) || event.ContentHash == strings.Repeat("c", 64) ||
-			event.PayloadHMAC == "" {
-			t.Fatalf("managed provenance/hash = %+v", event)
+		// v8 passthrough — the record.Body carries the exact canonical
+		// v8 wire JSON, and the OTLP attributes carry the ai.discovery
+		// identity fields.
+		if attributes["defenseclaw.bucket"] != "ai.discovery" ||
+			attributes["defenseclaw.event.name"] != "ai.discovery.completed" ||
+			attributes["defenseclaw.signal"] != "logs" {
+			t.Fatalf("v8 passthrough identity attributes = %#v", attributes)
 		}
-		var signedPayload any
-		switch eventType {
-		case managedEventVerdict:
-			signedPayload = event.Verdict
-		case managedEventConnectorInventory:
-			signedPayload = event.ConnectorInventory
-		case managedEventMCPInventory:
-			signedPayload = event.MCPInventory
-		case managedEventAgentInventory:
-			signedPayload = event.AgentInventory
+		if attributes["defenseclaw.connector.instance.id"] != "connector-instance-1" {
+			t.Fatalf("v8 passthrough correlation missing: %#v", attributes)
 		}
-		if signedPayload == nil || gatewaylog.VerifyPayloadHMAC(signedPayload, event.PayloadHMAC) != nil {
-			t.Fatalf("managed payload HMAC did not verify for %s", eventType)
-		}
+		inventoryRecords = append(inventoryRecords, record)
+	}
+	if !verdictSeen {
+		t.Fatal("verdict record missing from managed egress")
+	}
+	if len(inventoryRecords) != 3 {
+		t.Fatalf("v8 inventory passthrough count = %d, want 3 (connector + mcp + agent)", len(inventoryRecords))
 	}
 
-	verdict := byType[managedEventVerdict]
-	if verdict.Verdict == nil || verdict.Verdict.Action != "block" || verdict.Verdict.Stage != gatewaylog.Stage("final") ||
-		verdict.Verdict.Reason != "[REDACTED]" || verdict.Verdict.LatencyMs != 42 ||
-		verdict.RequestID != "request-verdict" || verdict.SessionID != "session-verdict" {
-		t.Fatalf("verdict body = %+v", verdict)
+	// Assert the v8 wire body preserves per-inventory identifiers.
+	// The body is the canonical JSON (bucket/action/body/correlation/
+	// provenance) — decode it and verify the caller-supplied inventory
+	// arrays appear intact.
+	byAction := make(map[string]map[string]any, len(inventoryRecords))
+	for _, record := range inventoryRecords {
+		body, _ := record.Body["stringValue"].(string)
+		var wire struct {
+			Action     string         `json:"action"`
+			Body       map[string]any `json:"body"`
+			Provenance map[string]any `json:"provenance"`
+		}
+		if err := json.Unmarshal([]byte(body), &wire); err != nil {
+			t.Fatalf("decode v8 passthrough body: %v", err)
+		}
+		if wire.Action == "" || wire.Body == nil {
+			t.Fatalf("v8 passthrough body missing action/body: %s", body)
+		}
+		if _, alreadySeen := byAction[wire.Action]; alreadySeen {
+			t.Fatalf("duplicate v8 passthrough record for action=%q", wire.Action)
+		}
+		byAction[wire.Action] = wire.Body
+		// Provenance quartet stays in the payload for downstream
+		// consumers — v8-only doesn't strip it.
+		if wire.Provenance["config_digest"] != strings.Repeat("c", 64) {
+			t.Fatalf("v8 passthrough provenance = %#v", wire.Provenance)
+		}
 	}
-	connector := byType[managedEventConnectorInventory]
-	if connector.ConnectorInventory == nil || connector.ConnectorInventory.Count != 1 ||
-		len(connector.ConnectorInventory.Connectors) != 1 || connector.ConnectorInventory.Connectors[0].Name != "codex" {
-		t.Fatalf("connector body = %+v", connector)
+	// Connector inventory: identifiers preserved.
+	connectorBody, ok := byAction[string(config.ObservabilityV8ManagedConnectorInventoryAction)]
+	if !ok {
+		t.Fatalf("managed_connector_inventory action not in passthrough set: %v", keysOf(byAction))
 	}
-	mcp := byType[managedEventMCPInventory]
-	if mcp.MCPInventory == nil || len(mcp.MCPInventory.Servers) != 1 ||
-		mcp.MCPInventory.Servers[0].Command != "mcp-server" ||
-		mcp.MCPInventory.Servers[0].URLHost != "mcp.example.test:8443" {
-		t.Fatalf("mcp body = %+v", mcp)
+	connectorIDs, _ := connectorBody["defenseclaw.inventory.connector.identifiers"].([]any)
+	if len(connectorIDs) != 1 {
+		t.Fatalf("connector identifiers count = %d", len(connectorIDs))
 	}
-	agent := byType[managedEventAgentInventory]
-	if agent.AgentInventory == nil || agent.AgentInventory.Count != 1 || agent.AgentInventory.Installed != 1 ||
-		len(agent.AgentInventory.Agents) != 1 || agent.AgentInventory.Agents[0].BinaryBasename != "claude" ||
-		agent.AgentInventory.Agents[0].ConfigPathHash != "sha256:"+strings.Repeat("a", 64) {
-		t.Fatalf("agent body = %+v", agent)
+	if got, _ := connectorIDs[0].(map[string]any)["name"].(string); got != "codex" {
+		t.Fatalf("connector identifier name = %q", got)
+	}
+	// MCP inventory: identifiers preserved.
+	mcpBody, ok := byAction[string(config.ObservabilityV8ManagedMCPInventoryAction)]
+	if !ok {
+		t.Fatalf("managed_mcp_inventory action not in passthrough set: %v", keysOf(byAction))
+	}
+	mcpIDs, _ := mcpBody["defenseclaw.inventory.mcp.identifiers"].([]any)
+	if len(mcpIDs) != 1 {
+		t.Fatalf("mcp identifiers count = %d", len(mcpIDs))
+	}
+	if got, _ := mcpIDs[0].(map[string]any)["name"].(string); got != "safe-server" {
+		t.Fatalf("mcp identifier name = %q", got)
+	}
+	// Agent inventory: identifiers preserved.
+	agentBody, ok := byAction[string(config.ObservabilityV8ManagedAgentInventoryAction)]
+	if !ok {
+		t.Fatalf("managed_agent_inventory action not in passthrough set: %v", keysOf(byAction))
+	}
+	agentIDs, _ := agentBody["defenseclaw.inventory.agent.identifiers"].([]any)
+	if len(agentIDs) != 1 {
+		t.Fatalf("agent identifiers count = %d", len(agentIDs))
+	}
+	if got, _ := agentIDs[0].(map[string]any)["name"].(string); got != "claudecode" {
+		t.Fatalf("agent identifier name = %q", got)
 	}
 }
 
-func TestManagedCompatibilityInventoryIsAtomicAndFailClosed(t *testing.T) {
-	validEmpty := managedConnectorCarrierBody()
-	validEmpty["defenseclaw.ai.discovery.signals_total"] = 0
-	validEmpty["defenseclaw.ai.discovery.active_signals"] = 0
-	validEmpty["defenseclaw.inventory.connector.identifiers"] = []any{}
-	validEmpty["defenseclaw.inventory.connector.metadata"] = []any{}
-	validEmpty["defenseclaw.inventory.connector.content"] = []any{}
-	projection, useProjection, valid := projectManagedCompatibility(
-		managedGoldenPayload(t, "empty-record", "ai.discovery", "ai.discovery.completed",
-			string(config.ObservabilityV8ManagedConnectorInventoryAction), validEmpty),
-		"sha256:managed-device", "managed-host", strings.Repeat("a", 64),
-	)
-	if !valid || !useProjection {
-		t.Fatalf("complete empty carrier projection valid/use=%t/%t", valid, useProjection)
+// keysOf returns the map keys as a sorted slice for stable failure
+// messages when a v8 passthrough action is missing from the set.
+func keysOf(m map[string]map[string]any) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
 	}
-	var emptyEvent gatewaylog.Event
-	if err := json.Unmarshal([]byte(projection.body), &emptyEvent); err != nil ||
-		emptyEvent.ConnectorInventory == nil || emptyEvent.ConnectorInventory.Count != 0 ||
-		len(emptyEvent.ConnectorInventory.Connectors) != 0 {
-		t.Fatalf("complete empty legacy inventory=%+v err=%v", emptyEvent.ConnectorInventory, err)
-	}
+	sort.Strings(out)
+	return out
+}
 
-	invalid := map[string]map[string]any{
-		"mismatched parallel arrays": func() map[string]any {
-			body := managedConnectorCarrierBody()
-			body["defenseclaw.inventory.connector.metadata"] = []any{}
-			return body
-		}(),
-		"partial collection": func() map[string]any {
-			body := managedConnectorCarrierBody()
-			body["defenseclaw.ai.discovery.result"] = "partial"
-			return body
-		}(),
-		"reported error": func() map[string]any {
-			body := managedConnectorCarrierBody()
-			body["defenseclaw.ai.discovery.errors"] = 1
-			return body
-		}(),
-		"overflow": func() map[string]any {
-			body := managedConnectorCarrierBody()
-			body["defenseclaw.ai.discovery.signals_total"] = 129
-			body["defenseclaw.ai.discovery.active_signals"] = 129
-			return body
-		}(),
-		"unknown carrier field": func() map[string]any {
-			body := managedConnectorCarrierBody()
-			body["defenseclaw.inventory.connector.metadata"] = []any{
-				map[string]any{"source": "built-in", "tool_inspection_mode": "both", "subprocess_policy": "sandbox", "private_path": "/tmp/secret"},
-			}
-			return body
-		}(),
-		"content length mismatch": func() map[string]any {
-			body := managedConnectorCarrierBody()
-			body["defenseclaw.inventory.connector.content"] = []any{}
-			return body
-		}(),
+// TestManagedCompatibilityInventoryIsV8Passthrough replaces the old
+// "atomic + fail-closed" contract (which enforced v7 carrier validity
+// at the compat layer). Under Vineet's v8-only mandate, every
+// ai.discovery inventory action is passthrough: projectManagedCompatibility
+// returns useProjection=false, valid=true regardless of the carrier's
+// shape, so the record flows through as the original canonical v8
+// OTLP log. Atomicity / integrity checks on the v8 records move to
+// redaction and the OTLP canonical projector — this test only asserts
+// the compat-layer contract.
+func TestManagedCompatibilityInventoryIsV8Passthrough(t *testing.T) {
+	sampleBodies := map[string]map[string]any{
+		"connector-inventory-well-formed":  managedConnectorCarrierBody(),
+		"connector-inventory-empty-arrays": connectorBodyWithArrays(0),
+		"connector-inventory-large":        connectorBodyWithArrays(129),
+		"connector-inventory-mismatch":     connectorBodyWithMismatch(),
+		"connector-inventory-partial-flag": connectorBodyPartial(),
+		"mcp-inventory-item-shape":         {"defenseclaw.inventory.item.name": "webex", "defenseclaw.inventory.mcp.disabled": false},
+		"agent-inventory-item-shape":       {"defenseclaw.inventory.item.name": "claudecode"},
+		"skill-inventory-item-shape":       {"defenseclaw.inventory.item.name": "code-review"},
+		"plugin-inventory-item-shape":      {"defenseclaw.inventory.item.name": "cache"},
+		"ai-discovery-scan-summary":        {"defenseclaw.ai.discovery.result": "ok"},
 	}
-	for name, body := range invalid {
-		t.Run(name, func(t *testing.T) {
-			_, useProjection, valid := projectManagedCompatibility(
-				managedGoldenPayload(t, "invalid-record", "ai.discovery", "ai.discovery.completed",
-					string(config.ObservabilityV8ManagedConnectorInventoryAction), body),
-				"sha256:managed-device", "managed-host", strings.Repeat("a", 64),
-			)
-			if valid || useProjection {
-				t.Fatalf("invalid atomic carrier valid/use=%t/%t", valid, useProjection)
+	// Every one of these action / body combinations is v8-passthrough
+	// under the new contract. Compat-layer projection never runs; the
+	// caller must return useProjection=false, valid=true.
+	cases := []struct {
+		name   string
+		action string
+		event  string
+	}{
+		{"connector inventory summary",
+			string(config.ObservabilityV8ManagedConnectorInventoryAction), "ai.discovery.completed"},
+		{"mcp inventory item",
+			string(config.ObservabilityV8ManagedMCPInventoryAction), "ai_component.observed"},
+		{"agent inventory item",
+			string(config.ObservabilityV8ManagedAgentInventoryAction), "ai_component.observed"},
+		{"skill inventory item",
+			string(config.ObservabilityV8ManagedSkillInventoryAction), "ai_component.observed"},
+		{"plugin inventory item",
+			string(config.ObservabilityV8ManagedPluginInventoryAction), "ai_component.observed"},
+		{"ai discovery scan summary",
+			"ai_discovery", "ai.discovery.completed"},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			for name, body := range sampleBodies {
+				_, useProjection, valid := projectManagedCompatibility(
+					managedGoldenPayload(t, "record", "ai.discovery", tc.event, tc.action, body),
+					"sha256:managed-device", "managed-host", strings.Repeat("a", 64),
+				)
+				if !valid || useProjection {
+					t.Fatalf("%s + body %q: valid/use=%t/%t (want v8 passthrough: valid=true, use=false)",
+						tc.name, name, valid, useProjection)
+				}
 			}
 		})
 	}
 
-	component := managedGoldenPayload(t, "component-record", "ai.discovery", "ai_component.observed",
-		string(config.ObservabilityV8ManagedConnectorInventoryAction), map[string]any{"private_path": "/tmp/private"})
-	if _, useProjection, valid := projectManagedCompatibility(
-		component, "sha256:managed-device", "managed-host", strings.Repeat("a", 64),
-	); !valid || useProjection {
-		t.Fatalf("non-summary component valid/use=%t/%t", valid, useProjection)
-	}
+	// Diagnostic action MUST remain fail-closed at the compat layer:
+	// local_inventory_diagnostic is never eligible for managed egress
+	// and the route in reserveObservabilityV8ManagedInventory drops it
+	// upstream. If the compat layer accidentally passthrough'd it, a
+	// misrouted diagnostic could leak.
 	localSummary := managedGoldenPayload(t, "local-record", "ai.discovery", "ai.discovery.completed",
 		string(config.ObservabilityV8LocalInventoryDiagnosticAction), managedConnectorCarrierBody())
 	if _, useProjection, valid := projectManagedCompatibility(
 		localSummary, "sha256:managed-device", "managed-host", strings.Repeat("a", 64),
 	); valid || useProjection {
-		t.Fatalf("unexpected summary action valid/use=%t/%t", valid, useProjection)
+		t.Fatalf("local diagnostic action must be fail-closed at compat: valid/use=%t/%t", valid, useProjection)
 	}
 }
 
-func TestAdapterRejectsInvalidManagedCarrierBeforeCredentialsOrNetwork(t *testing.T) {
+func connectorBodyWithArrays(n int) map[string]any {
+	body := managedConnectorCarrierBody()
+	body["defenseclaw.ai.discovery.signals_total"] = n
+	body["defenseclaw.ai.discovery.active_signals"] = n
+	body["defenseclaw.inventory.connector.identifiers"] = []any{}
+	body["defenseclaw.inventory.connector.metadata"] = []any{}
+	body["defenseclaw.inventory.connector.content"] = []any{}
+	return body
+}
+
+func connectorBodyWithMismatch() map[string]any {
+	body := managedConnectorCarrierBody()
+	body["defenseclaw.inventory.connector.metadata"] = []any{}
+	return body
+}
+
+func connectorBodyPartial() map[string]any {
+	body := managedConnectorCarrierBody()
+	body["defenseclaw.ai.discovery.result"] = "partial"
+	return body
+}
+
+// TestAdapterV8InventoryPassthroughReachesNetwork replaces the old
+// "reject invalid managed carrier at compat" test. Under Vineet's
+// v8-only mandate, the compat layer no longer validates inventory
+// carrier shape — those checks moved to redaction and the OTLP
+// canonical projector, which run BEFORE the batch reaches this
+// adapter. Any well-formed v8 inventory record (including ones that
+// would have been rejected by the old carrier validator) now
+// passes through to network egress, which is what "canonical v8
+// wire body" means in Vineet's ask. This test guards the new
+// contract: a mismatched connector carrier now DOES cross to the
+// endpoint because compat-layer validation is gone.
+func TestAdapterV8InventoryPassthroughReachesNetwork(t *testing.T) {
 	var requests atomic.Int64
-	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+	var capturedMu sync.Mutex
+	var captured [][]byte
+	server := httptest.NewTLSServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		requests.Add(1)
+		body, _ := io.ReadAll(request.Body)
+		capturedMu.Lock()
+		captured = append(captured, body)
+		capturedMu.Unlock()
 		writer.WriteHeader(http.StatusAccepted)
 	}))
 	defer server.Close()
-	resolver := &testResolver{provider: &testProvider{token: "must-not-be-used"}}
+	resolver := &testResolver{provider: &testProvider{token: "passthrough-token"}}
 	source := testConfig(server.URL + config.ObservabilityV8ManagedAIDIngestPath)
 	source.Network.AllowPrivateNetworks = true
 	adapter, err := New(t.Context(), source, resolver)
@@ -540,21 +641,37 @@ func TestAdapterRejectsInvalidManagedCarrierBeforeCredentialsOrNetwork(t *testin
 	}
 	adapter.client = server.Client()
 	dispatcher := testDispatcher(t, adapter)
+	// Mismatched-parallel-arrays body — the exact shape the old
+	// v7-projection-layer used to reject with fail-closed semantics.
 	body := managedConnectorCarrierBody()
 	body["defenseclaw.inventory.connector.metadata"] = []any{}
 	if result := dispatcher.Enqueue(managedGoldenPayload(
-		t, "invalid-record", "ai.discovery", "ai.discovery.completed",
+		t, "passthrough-record", "ai.discovery", "ai.discovery.completed",
 		string(config.ObservabilityV8ManagedConnectorInventoryAction), body,
 	)); !result.Accepted() {
 		t.Fatalf("enqueue=%+v", result)
 	}
 	flushAndClose(t, dispatcher)
-	if requests.Load() != 0 || resolver.calls.Load() != 0 {
-		t.Fatalf("invalid carrier crossed credentials/network requests=%d resolver=%d", requests.Load(), resolver.calls.Load())
+	if requests.Load() != 1 {
+		t.Fatalf("v8 passthrough must reach network; got requests=%d", requests.Load())
+	}
+	if resolver.calls.Load() == 0 {
+		t.Fatal("v8 passthrough must invoke the credential resolver before POST")
 	}
 	counters := dispatcher.Counters()
-	if counters.Delivered != 0 || counters.Rejected != 1 || counters.Failed != 1 {
-		t.Fatalf("invalid carrier counters=%+v", counters)
+	if counters.Delivered != 1 || counters.Rejected != 0 || counters.Failed != 0 {
+		t.Fatalf("v8 passthrough counters = %+v (want delivered=1)", counters)
+	}
+	// Body sanity: the request MUST contain the canonical v8 wire body,
+	// not a legacy gatewaylog.Event flat envelope. Verify by decoding
+	// the OTLP wrapper and asserting the log body includes the
+	// ai.discovery bucket + action attributes.
+	capturedMu.Lock()
+	first := append([]byte(nil), captured[0]...)
+	capturedMu.Unlock()
+	if !strings.Contains(string(first), "\"ai.discovery\"") ||
+		!strings.Contains(string(first), string(config.ObservabilityV8ManagedConnectorInventoryAction)) {
+		t.Fatalf("v8 wire body missing expected ai.discovery / connector-inventory identity: %s", string(first))
 	}
 }
 

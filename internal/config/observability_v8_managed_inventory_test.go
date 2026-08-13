@@ -65,11 +65,15 @@ func TestManagedAgentInventoryIsForceCollectedAndReservedToManagedDestination(t 
 	if operator.Routes[1].Index != 1 || operator.Routes[1].Action != ObservabilityV8RouteSend {
 		t.Fatalf("operator original route not shifted intact=%+v", operator.Routes[1])
 	}
+	// v8-only contract: managed destination now has exactly TWO
+	// routes (Vineet's [P1]). The old middle route
+	// "drop-managed-inventory-components" was removed with the
+	// compatibility projector; every ai.discovery record flows through
+	// as its canonical v8 OTLP log.
 	managed, ok := plan.RuntimeDestination(ObservabilityV8ManagedAIDDestinationName)
-	if !ok || len(managed.Routes) != 3 || managed.Routes[0].Action != ObservabilityV8RouteDrop ||
-		managed.Routes[1].Action != ObservabilityV8RouteDrop ||
-		managed.Routes[2].Action != ObservabilityV8RouteSend ||
-		!managed.Routes[2].Selector.BucketWildcard {
+	if !ok || len(managed.Routes) != 2 || managed.Routes[0].Action != ObservabilityV8RouteDrop ||
+		managed.Routes[1].Action != ObservabilityV8RouteSend ||
+		!managed.Routes[1].Selector.BucketWildcard {
 		t.Fatalf("managed inventory route=%+v present=%t", managed.Routes, ok)
 	}
 

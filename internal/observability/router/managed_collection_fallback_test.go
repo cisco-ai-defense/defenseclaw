@@ -64,20 +64,26 @@ func TestManagedFallbackDestinationIdentityFailsClosed(t *testing.T) {
 		{name: "source-shaped policy", mutate: func(destination *config.ObservabilityV8EffectiveDestination) {
 			destination.PolicyForm = config.ObservabilityV8PolicyAdvancedRoutes
 		}},
+		// v8-only contract (Vineet's [P1]): the managed destination
+		// carries exactly TWO generated routes now — the
+		// local-diagnostic drop at index 0 and the send-all fallback
+		// at index 1. The old "component drop broadened" test targeted
+		// a middle route that no longer exists; the tests below
+		// reference Routes[1] (the send-all) for identity mutations.
 		{name: "non-sensitive route", mutate: func(destination *config.ObservabilityV8EffectiveDestination) {
-			destination.Routes[2].RedactionProfileByBucket[observability.BucketDiagnostic] = "none"
+			destination.Routes[1].RedactionProfileByBucket[observability.BucketDiagnostic] = "none"
 		}},
 		{name: "operator selector", mutate: func(destination *config.ObservabilityV8EffectiveDestination) {
-			destination.Routes[2].Selector.Sources = []observability.Source{observability.SourceGateway}
+			destination.Routes[1].Selector.Sources = []observability.Source{observability.SourceGateway}
 		}},
 		{name: "floor route", mutate: func(destination *config.ObservabilityV8EffectiveDestination) {
-			destination.Routes[2].IncludesMandatoryFloor = true
+			destination.Routes[1].IncludesMandatoryFloor = true
 		}},
 		{name: "diagnostic drop removed", mutate: func(destination *config.ObservabilityV8EffectiveDestination) {
 			destination.Routes = destination.Routes[1:]
 		}},
-		{name: "component drop broadened", mutate: func(destination *config.ObservabilityV8EffectiveDestination) {
-			destination.Routes[1].Selector.EventNames = nil
+		{name: "send-all route removed", mutate: func(destination *config.ObservabilityV8EffectiveDestination) {
+			destination.Routes = destination.Routes[:1]
 		}},
 		{name: "arbitrary endpoint path", mutate: func(destination *config.ObservabilityV8EffectiveDestination) {
 			destination.Transport.Endpoint = "https://aid.example.test/operator-route"

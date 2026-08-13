@@ -149,32 +149,19 @@ func WithObservabilityV8ManagedAIDDestination(
 				},
 				Action: ObservabilityV8RouteDrop,
 			},
+			// The old "drop-managed-inventory-components" route (agent /
+			// connector inventory dropped by name at Index=1) existed
+			// only to suppress raw v8 records while the managedaid
+			// compatibility projector emitted them as v7
+			// gatewaylog.Event wrappers on this same destination — a
+			// deliberate mixed contract that Vineet flagged for
+			// removal. Under the v8-only contract every ai.discovery
+			// record now flows through as the original v8 OTLP log
+			// (see managedaid/compatibility.go), so dropping them here
+			// would silently strip the managed AID destination of its
+			// inventory content.
 			{
-				Index: 1, Name: "drop-managed-inventory-components", Generated: true,
-				Signals: []observability.Signal{observability.SignalLogs},
-				Selector: ObservabilityV8EffectiveSelector{
-					Buckets: []observability.Bucket{observability.BucketAIDiscovery},
-					// The drop route only covers legacy-compat inventories
-					// (agent / connector). Those records go through the
-					// managedaid compatibility projector which wraps them in v7
-					// envelopes; the drop route prevents them from also shipping
-					// as raw ai_component.observed records on operator
-					// destinations. Skill / plugin / MCP per-item inventories
-					// don't have a v7 wrapper for the item fields (the v7 MCP
-					// envelope only carries a count rollup) — they must NOT be
-					// dropped here, or Route 2 (send-all) never gets a chance to
-					// forward the per-item detail with agent_connector
-					// correlation.
-					Actions: []observability.ProducerKey{
-						ObservabilityV8ManagedAgentInventoryAction,
-						ObservabilityV8ManagedConnectorInventoryAction,
-					},
-					EventNames: []observability.EventName{"ai_component.observed"},
-				},
-				Action: ObservabilityV8RouteDrop,
-			},
-			{
-				Index: 2, Name: "all-collected-logs", Generated: true,
+				Index: 1, Name: "all-collected-logs", Generated: true,
 				Signals: []observability.Signal{observability.SignalLogs},
 				Selector: ObservabilityV8EffectiveSelector{
 					Buckets: buckets, BucketWildcard: true,
