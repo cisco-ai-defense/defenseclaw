@@ -231,6 +231,150 @@ t_read_json_field_decodes_unicode_escape_bytes() {
   assert_eq "${got}" "${want_grin}" "surrogate pair decodes correctly under LC_ALL=C too"
 }
 
+# ---- discovery-error propagation ---------------------------------------
+#
+# _read_json_field / _read_json_version / _probe_json_version /
+# discover_agent_version distinguish "metadata absent" (file not there
+# → connector genuinely not installed, rc 0, empty stdout, silent) from
+# "metadata present but malformed" (rc 2, empty stdout, discovery
+# error appended to DC_DISCOVERY_ERRORS_LOG when set). install.sh's
+# zero-target branch treats a non-empty errors-log as fatal so a
+# corrupt codex package.json cannot silently downgrade to a
+# "none-installed → will pick up on next reconciler tick" warn path
+# — the operator needs to see the failing path and repair the install.
+
+t_read_json_field_rc_0_on_wellformed_missing_field() {
+  local dir; dir="$(mktest_tmp)"
+  local cfg="${dir}/pkg.json"
+  printf '{"name":"x"}\n' > "${cfg}"
+  local out rc
+  out="$(_read_json_field "${cfg}" version)"
+  rc=$?
+  assert_eq "${out}" "" "well-formed JSON without target field emits empty stdout"
+  assert_eq "${rc}"  "0" "well-formed JSON without target field exits 0 (absent, not malformed)"
+}
+
+t_read_json_field_rc_2_on_malformed() {
+  local dir; dir="$(mktest_tmp)"
+  local cfg="${dir}/pkg.json"
+  # Truncated mid-value: opens object, key + colon, no scalar, no close.
+  printf '{"version":' > "${cfg}"
+  local out rc
+  out="$(_read_json_field "${cfg}" version)"
+  rc=$?
+  assert_eq "${out}" "" "malformed JSON emits empty stdout"
+  assert_eq "${rc}"  "2" "malformed JSON exits 2 (distinguishes from rc-0 absent)"
+}
+
+t_read_json_field_rc_2_on_non_object_root() {
+  local dir; dir="$(mktest_tmp)"
+  local cfg="${dir}/pkg.json"
+  # Valid JSON but not a top-level object — for our use case (npm
+  # package.json parsing) that's still malformed.
+  printf '[1,2,3]\n' > "${cfg}"
+  local rc
+  _read_json_field "${cfg}" version >/dev/null
+  rc=$?
+  assert_eq "${rc}" "2" "non-object root JSON is malformed for this reader"
+}
+
+t_read_json_field_rc_0_on_missing_file() {
+  local rc
+  _read_json_field /nonexistent/path.json version >/dev/null
+  rc=$?
+  assert_eq "${rc}" "0" "missing file is rc 0 (nothing to parse — not a discovery error)"
+}
+
+t_probe_json_version_records_malformed_when_log_set() {
+  local dir; dir="$(mktest_tmp)"
+  local cfg="${dir}/pkg.json"
+  local log="${dir}/errors.log"
+  : > "${log}"
+  # Malformed: unclosed object.
+  printf '{"version":"1.0.0"' > "${cfg}"
+  local out
+  DC_DISCOVERY_ERRORS_LOG="${log}" \
+    DC_INSTALLER_TARGET_USER="alice" \
+    out="$(_probe_json_version "${cfg}" codex)"
+  assert_eq "${out}" "" "malformed metadata produces empty version output"
+  # Log line must carry user, connector, reason, path — tab-separated.
+  local line
+  line="$(cat "${log}")"
+  assert_contains "${line}" "alice"          "discovery log records target user"
+  assert_contains "${line}" "codex"          "discovery log records connector"
+  assert_contains "${line}" "malformed-json" "discovery log records short reason"
+  assert_contains "${line}" "${cfg}"         "discovery log records failing path"
+}
+
+t_probe_json_version_no_log_when_env_unset() {
+  local dir; dir="$(mktest_tmp)"
+  local cfg="${dir}/pkg.json"
+  printf '{"version":' > "${cfg}"
+  local out rc
+  unset DC_DISCOVERY_ERRORS_LOG
+  out="$(_probe_json_version "${cfg}" codex)"
+  rc=$?
+  assert_eq "${out}" "" "malformed metadata with no log configured still emits empty"
+  assert_eq "${rc}"  "0" "probe never bubbles rc 2 up; error is quietly recorded via the log"
+}
+
+t_probe_json_version_passthrough_on_wellformed() {
+  local dir; dir="$(mktest_tmp)"
+  local cfg="${dir}/pkg.json"
+  local log="${dir}/errors.log"
+  : > "${log}"
+  printf '{"name":"@openai/codex","version":"0.142.0"}\n' > "${cfg}"
+  local out
+  DC_DISCOVERY_ERRORS_LOG="${log}" \
+    out="$(_probe_json_version "${cfg}" codex)"
+  assert_eq "${out}" "0.142.0" "well-formed metadata passes the version through"
+  assert_eq "$(wc -c < "${log}" | tr -d ' ')" "0" \
+    "well-formed metadata does NOT append to the discovery error log"
+}
+
+t_discover_agent_version_records_error_for_corrupt_codex_npm() {
+  # QA scenario: user has codex installed via npm but the package.json
+  # got truncated (partial download, disk full during install). Without
+  # discovery-error propagation, discover_agent_version returned "" and
+  # install.sh silently classified this as "codex not installed —
+  # nothing to wire", proceeded, and the customer's codex hook was
+  # never registered. The reconciler could not recover on its own.
+  # With the DC_DISCOVERY_ERRORS_LOG side channel, the corrupt
+  # package.json is now surfaced to install.sh as a fatal condition.
+  #
+  # Skip when a higher-priority codex source is present on the host —
+  # ChatGPT.app / Caskroom win over the npm probe, so a real dev box
+  # with codex installed via either channel would return a valid
+  # version and never touch our corrupt fixture. The unit-level
+  # coverage on _probe_json_version already proves the log-append
+  # semantics; this is the end-to-end guard for the codex npm branch.
+  if [[ -x /Applications/ChatGPT.app/Contents/Resources/codex ]] \
+     || [[ -x /Applications/ChatGPT.app/Contents/MacOS/codex ]] \
+     || compgen -G "/opt/homebrew/Caskroom/codex/*/" >/dev/null 2>&1 \
+     || compgen -G "/usr/local/Caskroom/codex/*/" >/dev/null 2>&1; then
+    if [[ "${VERBOSE:-false}" == "true" ]]; then
+      printf '  skip (higher-priority codex source on host — end-to-end covered by _probe_json_version unit tests above)\n'
+    fi
+    return 0
+  fi
+  local home; home="$(mktest_tmp)"
+  local log; log="$(mktest_tmp)/log"
+  : > "${log}"
+  local pkg_dir="${home}/.npm-global/lib/node_modules/@openai/codex"
+  mkdir -p "${pkg_dir}"
+  # Truncated mid-key — obviously malformed.
+  printf '{"version"' > "${pkg_dir}/package.json"
+
+  local got
+  got="$(DC_DISCOVERY_ERRORS_LOG="${log}" \
+         DC_INSTALLER_TARGET_USER="bob" \
+         without_host_agent_bins discover_agent_version codex "${home}" 2>/dev/null || true)"
+  assert_eq "${got}" "" "corrupt npm package.json still yields empty version (fall-through preserved)"
+  # The log must have received an entry pointing at the corrupt file.
+  assert_contains "$(cat "${log}")" "@openai/codex/package.json" \
+    "corrupt codex package.json path was recorded in the discovery error log"
+}
+
 run_case "amp from trusted user npm metadata" t_amp_from_user_npm_metadata_without_executing_cli
 run_case "amp package metadata identity"      t_amp_metadata_requires_package_identity
 run_case "amp without metadata is unversioned" t_amp_missing_metadata_may_be_unversioned
@@ -242,3 +386,11 @@ run_case "codex from user npm metadata"      t_codex_from_user_npm_metadata
 run_case "codex ChatGPT.app-bundled wins over stale npm" t_codex_chatgpt_app_bundled_wins_over_npm
 run_case "unknown connector returns empty"   t_unknown_connector
 run_case "_read_json_field decodes \\uXXXX under UTF-8 locale" t_read_json_field_decodes_unicode_escape_bytes
+run_case "_read_json_field rc 0 for well-formed w/o field" t_read_json_field_rc_0_on_wellformed_missing_field
+run_case "_read_json_field rc 2 for malformed body"        t_read_json_field_rc_2_on_malformed
+run_case "_read_json_field rc 2 for non-object root"       t_read_json_field_rc_2_on_non_object_root
+run_case "_read_json_field rc 0 for missing file"          t_read_json_field_rc_0_on_missing_file
+run_case "_probe_json_version records malformed when log set"    t_probe_json_version_records_malformed_when_log_set
+run_case "_probe_json_version no log without env var set"        t_probe_json_version_no_log_when_env_unset
+run_case "_probe_json_version passthrough on well-formed"        t_probe_json_version_passthrough_on_wellformed
+run_case "discover_agent_version records corrupt codex metadata" t_discover_agent_version_records_error_for_corrupt_codex_npm

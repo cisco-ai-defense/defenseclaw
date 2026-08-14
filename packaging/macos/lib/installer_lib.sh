@@ -81,13 +81,15 @@ is_supported_connector() {
 #                    the enumerator's 5-min tick picks it up
 #                    automatically as connectors appear.
 #
-# Known preexisting cross-layer gap (not addressed by this helper):
-# discover_agent_version swallows real metadata errors (unreadable file,
-# malformed JSON) into an empty version, so a "not installed" result
-# from that helper can also mean "installed but version discovery
-# failed". Threading a real status through
-# discover_agent_version → render_targets_manifest → install.sh is a
-# larger refactor and is out of scope for the AIFW-31486 release fix.
+# Discovery-error separation: this helper only classifies "how did we
+# end up with zero rows"; it does not classify "was metadata corrupt".
+# When DC_DISCOVERY_ERRORS_LOG has entries after render_targets_manifest
+# runs, install.sh treats that log as a fatal condition BEFORE reaching
+# classify_zero_target_reason — an operator whose codex install has a
+# corrupt package.json needs to hear "your metadata is unreadable at
+# /path/to/package.json", not "we couldn't find any connector installed".
+# See _record_discovery_error / _probe_json_version for the plumbing
+# that feeds that log.
 classify_zero_target_reason() {
   local raw="$1"
   local c
@@ -119,6 +121,65 @@ home_perms_ok() {
 }
 
 # ---- agent version discovery -------------------------------------------
+
+# _record_discovery_error CONNECTOR PATH REASON -> void
+#
+# Appends a tab-separated record to the file named by
+# DC_DISCOVERY_ERRORS_LOG (env var; caller-owned). Silently no-op when
+# the env var is unset — callers who don't care about discovery errors
+# (unit tests, ad-hoc invocations) keep the historical "corrupt
+# metadata is silently treated as absent" behaviour.
+#
+# Record layout: USER\tCONNECTOR\tREASON\tPATH\n
+#   USER      — DC_INSTALLER_TARGET_USER at the time of the failure
+#               (empty when the caller didn't scope to a user).
+#   CONNECTOR — connector token (amp / codex / claudecode / cursor).
+#   REASON    — short machine-readable reason (e.g. "malformed-json").
+#   PATH      — absolute path of the metadata file that failed to
+#               parse; the operator can act on this directly.
+#
+# The append is best-effort (2>/dev/null) so a full disk or a
+# read-only log path can never abort the installer mid-render.
+_record_discovery_error() {
+  local connector="$1"
+  local path="$2"
+  local reason="$3"
+  [[ -n "${DC_DISCOVERY_ERRORS_LOG:-}" ]] || return 0
+  printf '%s\t%s\t%s\t%s\n' \
+    "${DC_INSTALLER_TARGET_USER:-}" \
+    "${connector}" \
+    "${reason}" \
+    "${path}" >> "${DC_DISCOVERY_ERRORS_LOG}" 2>/dev/null || true
+}
+
+# _probe_json_version PATH CONNECTOR [EXPECTED_NAME] -> echoes version or ""
+#
+# Thin wrapper around _read_json_version that records a discovery
+# error when the file exists but its JSON is malformed. Callers use
+# this from inside discover_agent_version to consolidate the
+# rc-2-to-error-log translation so each per-connector probe loop
+# stays a single line.
+#
+# On rc 0 (well-formed or absent): output is passed through unchanged.
+# On rc 2 (malformed): output is dropped, an error is recorded, and
+# this helper still returns rc 0 so the outer probe loop can continue
+# to the next fallback (e.g. Caskroom after npm). If EVERY probe for
+# a connector on a given user's home is malformed and none yields a
+# valid version, the recorded errors are what install.sh's zero-target
+# branch surfaces to the operator.
+_probe_json_version() {
+  local path="$1"
+  local connector="$2"
+  local expected_name="${3:-}"
+  local v rc
+  v="$(_read_json_version "${path}" "${expected_name}")"
+  rc=$?
+  if [[ ${rc} -eq 2 ]]; then
+    _record_discovery_error "${connector}" "${path}" "malformed-json"
+    return 0
+  fi
+  printf '%s' "${v}"
+}
 
 # discover_agent_version CONNECTOR HOME -> echoes the agent version or "".
 #
@@ -192,6 +253,20 @@ _read_codex_version_as_user() {
 
 
 # _read_json_field PATH FIELD -> echoes the top-level FIELD or "".
+#
+# Exit codes:
+#   0  — file missing OR file well-formed (FIELD emitted if present, empty
+#        stdout if absent). Both cases are semantically "no error, field
+#        just wasn't there."
+#   2  — file exists but its top-level JSON structure is malformed (not an
+#        object, unbalanced braces, invalid escape, truncated mid-value,
+#        trailing garbage). Distinguishes "not installed" (empty stdout, rc 0)
+#        from "installed but metadata corrupt" (empty stdout, rc 2) so
+#        discover_agent_version can propagate a real discovery-error status
+#        instead of silently classifying corrupt metadata as an absent
+#        connector — see the DC_DISCOVERY_ERRORS_LOG plumbing in
+#        discover_agent_version / install.sh for the full contract.
+#
 #
 # Reads a JSON document from PATH and echoes the value of the given
 # top-level string field, or empty on any error (missing file,
@@ -341,7 +416,7 @@ _read_json_field() {
       pos = 1
       err = 0
       skip_ws()
-      if (substr(buf, pos, 1) != "{") exit 0
+      if (substr(buf, pos, 1) != "{") exit 2
       pos++
       # State machine: only the OUTER object members are iterated,
       # so keys are always at logical depth 1. For values that are
@@ -361,7 +436,9 @@ _read_json_field() {
       val = ""
       while (pos <= buflen) {
         skip_ws()
-        if (pos > buflen) exit 0
+        # Reached EOF without a closing brace: object was truncated.
+        # Malformed (rc 2).
+        if (pos > buflen) exit 2
         c = substr(buf, pos, 1)
         if (c == "}") {
           # Closing brace — object end. Validate that only
@@ -369,25 +446,34 @@ _read_json_field() {
           # emitting.
           pos++
           skip_ws()
-          if (pos <= buflen) exit 0
+          # Trailing content after the outer `}` is malformed (rc 2).
+          if (pos <= buflen) exit 2
           if (found) print val
+          # Clean parse of a well-formed object. `found` distinguishes
+          # "field present" (val emitted) from "field absent" (empty
+          # stdout). Both are rc 0 — callers use empty stdout + rc 0
+          # to mean "not present", empty stdout + rc 2 to mean "parse
+          # failed".
           exit 0
         }
         if (c == ",") { pos++; continue }
-        if (c != "\"") exit 0
+        # Top-level key must be a JSON string. Anything else means the
+        # object body is malformed.
+        if (c != "\"") exit 2
         # Read the top-level key.
         key_is_target = 0
         key = read_string()
-        if (err) exit 0
+        if (err) exit 2
         if (key == FIELD) key_is_target = 1
         skip_ws()
-        if (substr(buf, pos, 1) != ":") exit 0
+        # `:` must follow the key. Absence = malformed.
+        if (substr(buf, pos, 1) != ":") exit 2
         pos++
         skip_ws()
         c = substr(buf, pos, 1)
         if (key_is_target && c == "\"") {
           v = read_string()
-          if (err) exit 0
+          if (err) exit 2
           # Remember the last string value seen for FIELD. JSON
           # semantics: duplicate top-level keys are permitted but
           # ill-defined; most parsers keep the LAST one. Follow
@@ -401,7 +487,7 @@ _read_json_field() {
         # literal (true/false/null), object, or array.
         if (c == "\"") {
           skip_string()
-          if (err) exit 0
+          if (err) exit 2
           # A non-target string value invalidates a previously-found
           # match with the SAME key iff it was actually the same key;
           # we do not track that here because the key path above
@@ -414,14 +500,15 @@ _read_json_field() {
             c = substr(buf, pos, 1)
             if (c == "\"") {
               skip_string()
-              if (err) exit 0
+              if (err) exit 2
               continue
             }
             if (c == "{" || c == "[") nest_depth++
             else if (c == "}" || c == "]") nest_depth--
             pos++
           }
-          if (nest_depth != 0) exit 0
+          # Unbalanced braces at inner-container boundary = malformed.
+          if (nest_depth != 0) exit 2
         } else {
           # scalar: number / true / false / null — consume until we
           # hit a delimiter (comma, closing brace, whitespace).
@@ -434,12 +521,12 @@ _read_json_field() {
                 c == "\n" || c == "\r") break
             pos++
           }
-          if (pos == start_pos) exit 0
+          if (pos == start_pos) exit 2
         }
       }
       # Ran off the end of the buffer without a closing brace: object
-      # was truncated. Discard any found value.
-      exit 0
+      # was truncated. Malformed (rc 2).
+      exit 2
     }
   ' "${path}" 2>/dev/null
 }
@@ -454,14 +541,28 @@ _read_json_field() {
 # identity check).
 #
 # Delegates to _read_json_field so we do not grow two copies of the
-# same JSON reader. On any mismatch or read error the output is empty,
-# matching the pre-existing callers' "empty means skip" contract.
+# same JSON reader.
+#
+# Exit codes mirror _read_json_field:
+#   0  — file missing, name mismatch, or file well-formed. Empty stdout
+#        means "no version to emit from this file, and that's fine".
+#   2  — file exists but its JSON is malformed. Callers use this signal
+#        to distinguish a truly absent metadata file (skip silently)
+#        from a present-but-corrupt one (record a discovery error).
 _read_json_version() {
   local path="$1"
   local expected_name="${2:-}"
   if [[ -n "${expected_name}" ]]; then
-    local actual_name
+    local actual_name rc
     actual_name="$(_read_json_field "${path}" "name")"
+    rc=$?
+    # Propagate malformed-JSON status. A name mismatch on a
+    # well-formed file (rc 0, actual_name != expected_name) is a
+    # legitimate "different package in the same tree" outcome and
+    # stays rc 0 with empty stdout.
+    if [[ ${rc} -eq 2 ]]; then
+      return 2
+    fi
     if [[ "${actual_name}" != "${expected_name}" ]]; then
       return 0
     fi
@@ -487,7 +588,7 @@ discover_agent_version() {
         /usr/local/lib/node_modules/@ampcode/cli/package.json \
         /opt/homebrew/lib/node_modules/@ampcode/cli/package.json; do
         [[ -f "${pkg}" ]] || continue
-        local v; v="$(_read_json_version "${pkg}" "@ampcode/cli")"
+        local v; v="$(_probe_json_version "${pkg}" amp "@ampcode/cli")"
         if [[ -n "${v}" ]]; then echo "${v}"; return; fi
       done
       ;;
@@ -562,7 +663,7 @@ discover_agent_version() {
         /usr/local/lib/node_modules/@openai/codex/package.json \
         /opt/homebrew/lib/node_modules/@openai/codex/package.json; do
         [[ -f "${pkg}" ]] || continue
-        local v; v="$(_read_json_version "${pkg}")"
+        local v; v="$(_probe_json_version "${pkg}" codex)"
         if [[ -n "${v}" ]]; then echo "${v}"; return; fi
       done
 
@@ -587,7 +688,7 @@ discover_agent_version() {
         "${home}"/.cursor/extensions/anthropic.claude-code-*/package.json \
         "${home}"/.vscode/extensions/anthropic.claude-code-*/package.json; do
         [[ -f "${pkg}" ]] || continue
-        local v; v="$(_read_json_version "${pkg}")"
+        local v; v="$(_probe_json_version "${pkg}" claudecode)"
         if [[ -n "${v}" ]]; then echo "${v}"; return; fi
       done
       ;;

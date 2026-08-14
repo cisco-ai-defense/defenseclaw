@@ -812,7 +812,39 @@ if [[ "${SKIP_CONNECTOR}" != "true" ]]; then
   MANIFEST_TMP="$(mktemp "${GUARDIAN_MANIFEST_PATH}.new.XXXXXX")" \
     || die "could not reserve a private manifest staging file"
   INSTALL_TEMP_FILES+=("${MANIFEST_TMP}")
-  render_targets_manifest "${SUPPORT_DIR}" "${CONNECTOR}" "${USER_LINES}" > "${MANIFEST_TMP}"
+  # Discovery-error side channel: discover_agent_version's per-connector
+  # probes distinguish "metadata absent" (file not there → connector not
+  # installed) from "metadata present but malformed" (JSON parse fails)
+  # by appending a record to this file. The file starts empty; a
+  # non-empty file at the end of render_targets_manifest signals that
+  # AT LEAST one connector had corrupt metadata on some user's home,
+  # which is a fatal condition — silently classifying it as
+  # `none-installed` (the old behaviour) hid a broken install behind
+  # a "just wait for the enumerator" warning.
+  DISCOVERY_ERRORS_LOG="$(mktemp "${GUARDIAN_MANIFEST_PATH}.discovery-errors.XXXXXX")" \
+    || die "could not reserve a private discovery-errors staging file"
+  INSTALL_TEMP_FILES+=("${DISCOVERY_ERRORS_LOG}")
+  DC_DISCOVERY_ERRORS_LOG="${DISCOVERY_ERRORS_LOG}" \
+    render_targets_manifest "${SUPPORT_DIR}" "${CONNECTOR}" "${USER_LINES}" \
+    > "${MANIFEST_TMP}"
+
+  # Fatal-first: if any probe recorded a malformed-metadata failure,
+  # abort before falling through to the "manifest is empty, will
+  # reconcile later" warn path. The reconciler CANNOT fix a corrupt
+  # package.json on its own; the operator needs to see the failing
+  # path and reinstall / repair the connector. Emit a de-duplicated
+  # summary so a shared-metadata failure (e.g. system-wide
+  # /usr/local/lib/node_modules/... corrupted across every user) does
+  # not spam one line per user.
+  if [[ -s "${DISCOVERY_ERRORS_LOG}" ]]; then
+    warn "hook-guardian manifest rendering hit connector metadata errors:"
+    while IFS=$'\t' read -r user connector reason path; do
+      warn "  user=${user:-<none>} connector=${connector} reason=${reason} path=${path}"
+    done < <(sort -u "${DISCOVERY_ERRORS_LOG}")
+    die "refusing to install with unreadable/malformed connector metadata (fix the listed file(s) or uninstall the affected connector and rerun)"
+  fi
+  unset DC_DISCOVERY_ERRORS_LOG
+
   # A user_lines-non-empty × connector-non-empty cross product that
   # still resolves to zero targets means either (a) every requested
   # connector is unsupported (not in amp/codex/claudecode/cursor) or
@@ -830,7 +862,10 @@ if [[ "${SKIP_CONNECTOR}" != "true" ]]; then
   # classify_zero_target_reason distinguishes the two modes above so an
   # operator scanning install.log knows whether to (a) rerun with a
   # supported --connector value or (b) just wait for the enumerator's
-  # tick to pick up the connector once someone installs it.
+  # tick to pick up the connector once someone installs it. The
+  # discovery-error case above takes precedence — by the time we reach
+  # this branch we know the zero-target outcome is genuinely
+  # "connector CLI not present anywhere", not "metadata was corrupt".
   MANIFEST_TARGETS="$(grep -c '^  - user:' "${MANIFEST_TMP}" || true)"
   if [[ "${MANIFEST_TARGETS}" == "0" ]] && [[ -n "${USER_LINES}" ]]; then
     ZERO_TARGET_REASON="$(classify_zero_target_reason "${CONNECTOR}")"
