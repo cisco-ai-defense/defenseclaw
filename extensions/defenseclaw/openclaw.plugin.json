@@ -3,6 +3,9 @@
   "name": "DefenseClaw Security",
   "version": "0.2.0",
   "enabledByDefault": true,
+  "activation": {
+    "onStartup": true
+  },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
