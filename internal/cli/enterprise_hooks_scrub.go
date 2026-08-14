@@ -180,6 +180,14 @@ func runEnterpriseHooksScrub(cmd *cobra.Command, _ []string) error {
 	// otherwise conflate "operator forgot --file" with "operator
 	// asked for an unknown connector" — different classes of error
 	// with different remediation.
+	if connector == "" {
+		// Same rationale as the path == "" branch below: rc 5 marks
+		// "operator forgot to pass --connector", distinct from rc 3
+		// which means "operator passed a connector we don't
+		// recognise". Without this guard an empty flag falls through
+		// to the map lookup, misses, and misroutes as rc 3.
+		return &scrubExitError{code: 5, msg: "enterprise hooks scrub: --connector is required"}
+	}
 	if path == "" {
 		return &scrubExitError{code: 5, msg: "enterprise hooks scrub: --file is required"}
 	}

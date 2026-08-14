@@ -470,6 +470,33 @@ func TestScrubReturnsRC2OnMissingFile(t *testing.T) {
 	}
 }
 
+// TestScrubReturnsRC5OnEmptyConnector guards the "missing required
+// argument" branch that runs when a direct caller (test harness,
+// future refactor, hand-crafted invocation) bypasses Cobra's
+// MarkFlagRequired gate. Cobra normally catches this before RunE
+// executes; the belt-and-suspenders guard inside RunE must return
+// rc 5 (missing required input), not rc 3 (unsupported connector),
+// so shell callers can tell "operator forgot --connector" apart
+// from "operator asked for something we don't recognise". Without
+// the explicit guard the empty flag would fall through to the map
+// lookup, miss, and misroute as rc 3.
+func TestScrubReturnsRC5OnEmptyConnector(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "x.json")
+	writeFile(t, filePath, "{}")
+	setScrubFlags(t, "", filePath, false)
+	err := runEnterpriseHooksScrub(enterpriseHooksScrubCmd, nil)
+	if err == nil {
+		t.Fatalf("expected error for empty connector")
+	}
+	var exitErr *scrubExitError
+	if !errors.As(err, &exitErr) {
+		t.Fatalf("expected *scrubExitError, got %T: %v", err, err)
+	}
+	if exitErr.ExitCode() != 5 {
+		t.Errorf("exit code = %d, want 5 (empty --connector must map to missing-required-input, not to rc 3 unsupported-connector)", exitErr.ExitCode())
+	}
+}
+
 // TestScrubReturnsRC3OnUnsupportedConnector guards the "geminicli
 // returns rc 3" contract from the previous shell test suite.
 func TestScrubReturnsRC3OnUnsupportedConnector(t *testing.T) {
