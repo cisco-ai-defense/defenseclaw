@@ -30,13 +30,208 @@ func classifyOutput(out *parseOutput) {
 	if out == nil {
 		return
 	}
+	type deferredPOSIXNoExec struct {
+		commandIndex int
+		invocation   posixShellInvocation
+	}
+	deferred := make([]deferredPOSIXNoExec, 0, len(out.commands))
 	for i := range out.commands {
+		if invocation, ok := validPOSIXNoExecCandidate(&out.commands[i]); ok {
+			deferred = append(deferred, deferredPOSIXNoExec{
+				commandIndex: i,
+				invocation:   invocation,
+			})
+			continue
+		}
 		classifyCommand(out, &out.commands[i])
 		if out.status == StatusLimitExceeded {
 			return
 		}
 	}
+
+	allowPreview := out.status == StatusComplete
+	requiredPreviewPaths := 0
+	if allowPreview {
+		for _, candidate := range deferred {
+			if !isolatedPOSIXCommand(
+				out,
+				&out.commands[candidate.commandIndex],
+			) {
+				allowPreview = false
+				break
+			}
+			if candidate.invocation.mode == posixShellModeScript &&
+				candidate.invocation.scriptIndex >= 0 &&
+				candidate.invocation.scriptIndex <
+					len(out.commands[candidate.commandIndex].Argv) {
+				script := out.commands[candidate.commandIndex].Argv[candidate.invocation.scriptIndex]
+				if script != "" && script != "-" {
+					requiredPreviewPaths++
+				}
+			}
+		}
+	}
+	if allowPreview && requiredPreviewPaths > maxPathFacts-len(out.paths) {
+		out.markLimit(IssueFactLimit)
+		allowPreview = false
+	}
+	if !allowPreview && len(deferred) > 0 {
+		// Freeze the all-or-nothing decision before classifying any deferred
+		// shell. Otherwise an earlier noexec command could become a preview
+		// before a later command makes the final parse non-authoritative.
+		out.markPartial(IssueUnsupportedConstruct)
+	}
+	if out.status == StatusLimitExceeded {
+		deduplicateFacts(out)
+		return
+	}
+	for _, candidate := range deferred {
+		classifyPOSIXNoExecCandidate(
+			out,
+			&out.commands[candidate.commandIndex],
+			candidate.invocation,
+			allowPreview,
+		)
+		if out.status == StatusLimitExceeded {
+			return
+		}
+	}
 	deduplicateFacts(out)
+}
+
+func validPOSIXNoExecCandidate(
+	command *CommandFact,
+) (posixShellInvocation, bool) {
+	if command == nil || command.Effect != EffectExecute {
+		return posixShellInvocation{}, false
+	}
+	return exactPOSIXNoExecInvocation(command)
+}
+
+func exactPOSIXNoExecInvocation(
+	command *CommandFact,
+) (posixShellInvocation, bool) {
+	if command == nil || command.Executable == "" ||
+		(command.Dialect != DialectPOSIX && command.Dialect != DialectArgv) ||
+		!command.ArgvComplete ||
+		len(command.Argv) == 0 || command.Program == "" ||
+		!exactCaseSensitivePOSIXProgram(command, command.Program) {
+		return posixShellInvocation{}, false
+	}
+	invocation := parsePOSIXShellInvocation(command.Program, command.Argv)
+	if !invocation.valid || !invocation.noExec ||
+		(invocation.mode != posixShellModeCommand &&
+			invocation.mode != posixShellModeScript) {
+		return posixShellInvocation{}, false
+	}
+	return invocation, true
+}
+
+// finalizePOSIXNoExecPreviews revokes locally proven previews when a later
+// source merge or tool-argument projection makes the complete action
+// non-authoritative. Revocation is transactional: every matching command is
+// switched back to execution before any bounded path fact is appended.
+func finalizePOSIXNoExecPreviews(out *parseOutput) {
+	if out == nil || out.status == StatusComplete {
+		return
+	}
+	type previewCandidate struct {
+		commandIndex int
+		invocation   posixShellInvocation
+	}
+	candidates := make([]previewCandidate, 0, len(out.commands))
+	for index := range out.commands {
+		command := &out.commands[index]
+		if command.Effect != EffectPreview {
+			continue
+		}
+		invocation, ok := exactPOSIXNoExecInvocation(command)
+		if !ok {
+			continue
+		}
+		candidates = append(candidates, previewCandidate{
+			commandIndex: index,
+			invocation:   invocation,
+		})
+	}
+
+	// No path-capacity failure may leave an earlier candidate as a preview.
+	for _, candidate := range candidates {
+		out.commands[candidate.commandIndex].Effect = EffectExecute
+	}
+	for _, candidate := range candidates {
+		command := &out.commands[candidate.commandIndex]
+		if candidate.invocation.mode != posixShellModeScript ||
+			candidate.invocation.scriptIndex < 0 ||
+			candidate.invocation.scriptIndex >= len(command.Argv) {
+			out.markPartial(IssueUnsupportedConstruct)
+			continue
+		}
+		script := command.Argv[candidate.invocation.scriptIndex]
+		if script == "" || script == "-" {
+			out.markPartial(IssueOpaqueArtifact)
+			continue
+		}
+		reclassified := false
+		for index := range out.paths {
+			fact := &out.paths[index]
+			if fact.CommandID == command.ID && fact.Value == script &&
+				fact.Access == PathAccessRead {
+				fact.Access = PathAccessExecute
+				reclassified = true
+			}
+		}
+		if !reclassified {
+			appendPath(out, command.ID, PathAccessExecute, script)
+		}
+		out.markPartial(IssueOpaqueArtifact)
+	}
+}
+
+func classifyPOSIXNoExecCandidate(
+	out *parseOutput,
+	command *CommandFact,
+	invocation posixShellInvocation,
+	preview bool,
+) {
+	addOperation(command, OperationExecute)
+	if preview && invocation.mode == posixShellModeScript &&
+		(invocation.scriptIndex < 0 ||
+			invocation.scriptIndex >= len(command.Argv)) {
+		// A preview without a proven script operand would hide the artifact
+		// from path enforcement and gateway promotion. Fail closed even if a
+		// future caller violates the invocation parser's index invariant.
+		preview = false
+	}
+	if preview {
+		command.Effect = EffectPreview
+		if invocation.mode == posixShellModeScript {
+			appendPath(
+				out,
+				command.ID,
+				PathAccessRead,
+				command.Argv[invocation.scriptIndex],
+			)
+		}
+		classifyRedirects(out, command)
+		return
+	}
+
+	command.Effect = EffectExecute
+	if invocation.mode == posixShellModeScript &&
+		invocation.scriptIndex >= 0 &&
+		invocation.scriptIndex < len(command.Argv) {
+		appendPath(
+			out,
+			command.ID,
+			PathAccessExecute,
+			command.Argv[invocation.scriptIndex],
+		)
+		out.markPartial(IssueOpaqueArtifact)
+	} else {
+		out.markPartial(IssueUnsupportedConstruct)
+	}
+	classifyRedirects(out, command)
 }
 
 func classifyCommand(out *parseOutput, command *CommandFact) {
@@ -2921,6 +3116,11 @@ func classifyShellInvocation(out *parseOutput, command *CommandFact) {
 	}
 	invocation := parsePOSIXShellInvocation(command.Program, command.Argv)
 	if invocation.valid && invocation.mode == posixShellModeCommand {
+		if invocation.noExec {
+			// classifyOutput owns the order-independent noexec preview decision.
+			// Any candidate reaching this fallback path must remain opaque.
+			out.markPartial(IssueUnsupportedConstruct)
+		}
 		return
 	}
 	if exactPOSIXShellPreviewInvocation(command) {

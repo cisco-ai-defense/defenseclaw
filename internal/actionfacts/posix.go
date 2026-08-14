@@ -639,7 +639,8 @@ func expandStaticPOSIXWrappers(out *parseOutput, wrapperDepth int) {
 				continue
 			}
 			if invocation.noExec {
-				setPOSIXCommandEffect(out, command.ID, EffectPreview)
+				// Defer the all-or-nothing preview decision until classifyOutput
+				// has established the final status of every non-noexec command.
 				continue
 			}
 			if wrapperDepth >= maxWrapperDepth {
@@ -713,19 +714,6 @@ func expandStaticPOSIXWrappers(out *parseOutput, wrapperDepth int) {
 			)
 		}
 		out.mergeNested(child)
-	}
-}
-
-func setPOSIXCommandEffect(
-	out *parseOutput,
-	commandID int64,
-	effect CommandEffect,
-) {
-	for index := range out.commands {
-		if out.commands[index].ID == commandID {
-			out.commands[index].Effect = effect
-			return
-		}
 	}
 }
 

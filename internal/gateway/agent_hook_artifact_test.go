@@ -6,6 +6,7 @@
 package gateway
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -91,6 +92,345 @@ func TestPromotedArtifactFindingsBlocksOnlyAuthoritativeFinalBytes(t *testing.T)
 				)
 			}
 		})
+	}
+}
+
+func TestPromotedArtifactHonorsPOSIXNoExecScriptMode(t *testing.T) {
+	requireNativePOSIXArtifactHost(t)
+	const connectorName = "artifact-noexec-script-test"
+	installDefaultProfileConnector(t, connectorName)
+	home := trustedSameHostHome()
+	if home == "" {
+		t.Skip("same-host home unavailable")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "runner-cleanup.sh")
+	statePath := filepath.Join(
+		home,
+		".defenseclaw",
+		"quarantine",
+		"skills",
+		"e2e-stale",
+	)
+	body := fmt.Sprintf("#!/bin/sh\nrm -rf -- %q\n", statePath)
+	if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, test := range []struct {
+		name        string
+		invocation  string
+		wantFinding bool
+		enforceable bool
+	}{
+		{name: "bash short noexec", invocation: "bash -n"},
+		{name: "bash named noexec", invocation: "bash -o noexec"},
+		{name: "lowercase absolute bash", invocation: "/usr/bin/bash -n"},
+		{name: "sh noexec", invocation: "sh -n"},
+		{name: "dash noexec", invocation: "dash -n"},
+		{name: "lowercase env wrapper", invocation: "env bash -n"},
+		{name: "lowercase command wrapper", invocation: "command -- sh -n"},
+		{name: "lowercase exec wrapper", invocation: "exec dash -n"},
+		{name: "bash verbose noexec", invocation: "bash -nv"},
+		{name: "bash final verbose noexec", invocation: "bash +v -nv"},
+		{name: "bash named verbose noexec", invocation: "bash -o noexec -o verbose"},
+		{name: "bash long verbose noexec", invocation: "bash --verbose -n"},
+		{name: "sh verbose noexec", invocation: "sh -nv"},
+		{name: "dash verbose noexec", invocation: "dash -nv"},
+		{name: "bash verbose disabled", invocation: "bash -nv +v"},
+		{name: "bash named verbose disabled", invocation: "bash -o noexec -o verbose +o verbose"},
+		{name: "sh verbose disabled", invocation: "sh -nv +v"},
+		{name: "dash verbose disabled", invocation: "dash -nv +v"},
+		{
+			name: "bash short noexec re-enabled", invocation: "bash -n +n",
+			wantFinding: true, enforceable: true,
+		},
+		{
+			name: "bash named noexec re-enabled", invocation: "bash -o noexec +o noexec",
+			wantFinding: true, enforceable: true,
+		},
+		{
+			name: "sh noexec re-enabled", invocation: "sh -n +n",
+			wantFinding: true, enforceable: true,
+		},
+		{
+			name: "dash noexec re-enabled", invocation: "dash -n +n",
+			wantFinding: true, enforceable: true,
+		},
+		// For identity failures below, direct shell artifact candidates remain
+		// enforceable because the promoted script is analyzed separately and must
+		// be authoritative. Wrapper/nested candidates remain detection-only because
+		// promotedArtifactCandidateEnforcementEligible rejects them.
+		{
+			name: "mixed case bash", invocation: "Bash -n",
+			wantFinding: true, enforceable: true,
+		},
+		{
+			name: "mixed case basename", invocation: "/usr/bin/Bash -n",
+			wantFinding: true, enforceable: true,
+		},
+		{
+			name: "mixed case directory", invocation: "/USR/bin/bash -n",
+			wantFinding: true, enforceable: true,
+		},
+		{name: "mixed case env wrapper", invocation: "Env bash -n", wantFinding: true},
+		{name: "mixed case env child", invocation: "env Bash -n", wantFinding: true},
+		{
+			name: "mixed case command wrapper", invocation: "Command -- sh -n",
+			wantFinding: true,
+		},
+		{name: "mixed case command child", invocation: "command -- Sh -n", wantFinding: true},
+		{name: "mixed case exec wrapper", invocation: "Exec dash -n", wantFinding: true},
+		{name: "mixed case exec child", invocation: "exec Dash -n", wantFinding: true},
+		{
+			name: "nested shell path", invocation: "/usr/bin/fake/bash -n",
+			wantFinding: true, enforceable: true,
+		},
+		{name: "nested env path", invocation: "/usr/bin/fake/env bash -n", wantFinding: true},
+		{
+			name: "nested command path", invocation: "/usr/bin/fake/command -- sh -n",
+			wantFinding: true,
+		},
+		{name: "nested exec path", invocation: "/usr/bin/fake/exec dash -n", wantFinding: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			facts := actionfacts.Analyze(actionfacts.Input{
+				Tool:    "shell",
+				Command: fmt.Sprintf("%s %q", test.invocation, path),
+				CWD:     dir,
+			})
+			findings := promotedArtifactFindings(t.Context(), agentHookRequest{
+				ConnectorName: connectorName,
+			}, facts, true)
+			matched := findingWithID(findings, "tamper.detector_state_write")
+			if !test.wantFinding {
+				if len(findings) != 0 {
+					t.Fatalf(
+						"no-exec script produced findings: %v facts=%+v",
+						FindingStrings(findings),
+						facts,
+					)
+				}
+				return
+			}
+			if matched == nil || matched.contributesToEnforcement() != test.enforceable {
+				t.Fatalf(
+					"executing script finding enforcement=%t want %t: %v facts=%+v",
+					matched != nil && matched.contributesToEnforcement(),
+					test.enforceable,
+					FindingStrings(findings),
+					facts,
+				)
+			}
+		})
+	}
+}
+
+func TestPromotedArtifactRevokesNoExecPreviewAfterConflictingSources(t *testing.T) {
+	requireNativePOSIXArtifactHost(t)
+	const connectorName = "artifact-noexec-conflict-test"
+	installDefaultProfileConnector(t, connectorName)
+	home := trustedSameHostHome()
+	if home == "" {
+		t.Skip("same-host home unavailable")
+	}
+	dir := t.TempDir()
+	script := filepath.Join(dir, "runner-cleanup.sh")
+	statePath := filepath.Join(
+		home, ".defenseclaw", "quarantine", "skills", "source-conflict",
+	)
+	if err := os.WriteFile(
+		script,
+		[]byte(fmt.Sprintf("#!/bin/sh\nrm -rf -- %q\n", statePath)),
+		0o700,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, test := range []struct {
+		name    string
+		command string
+		argv    []string
+	}{
+		{
+			name:    "raw executes structured noexec",
+			command: fmt.Sprintf("bash %q", script),
+			argv:    []string{"bash", "-n", script},
+		},
+		{
+			name:    "raw noexec structured executes",
+			command: fmt.Sprintf("bash -n %q", script),
+			argv:    []string{"bash", script},
+		},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			facts := actionfacts.Analyze(actionfacts.Input{
+				Tool: "shell", Command: test.command, Argv: test.argv,
+				CWD: dir, ActiveHome: home, DialectHint: actionfacts.DialectPOSIX,
+			})
+			if facts.Parse.Status == actionfacts.StatusComplete || facts.Authoritative() {
+				t.Fatalf("conflicting sources stayed authoritative: %+v", facts)
+			}
+			for _, command := range facts.Commands {
+				if command.Effect == actionfacts.EffectPreview {
+					t.Fatalf("conflicting sources retained preview: %+v", facts)
+				}
+			}
+			findings := promotedArtifactFindings(t.Context(), agentHookRequest{
+				ConnectorName: connectorName,
+			}, facts, true)
+			matched := findingWithID(findings, "tamper.detector_state_write")
+			if matched == nil {
+				t.Fatalf("source conflict lost tamper finding: %v facts=%+v", FindingStrings(findings), facts)
+			}
+			if matched.contributesToEnforcement() {
+				t.Fatalf("source-conflict artifact unexpectedly enforceable: %+v", *matched)
+			}
+		})
+	}
+}
+
+func TestPOSIXNoExecArtifactPipelineRetainsFinding(t *testing.T) {
+	requireNativePOSIXArtifactHost(t)
+	const connectorName = "artifact-noexec-pipeline-test"
+	installDefaultProfileConnector(t, connectorName)
+	home := trustedSameHostHome()
+	if home == "" {
+		t.Skip("same-host home unavailable")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bad\nprintf SAFE_FILENAME_MARKER\n#")
+	statePath := filepath.Join(
+		home, ".defenseclaw", "quarantine", "skills", "e2e-stale",
+	)
+	if err := os.WriteFile(
+		path,
+		[]byte(fmt.Sprintf("#!/bin/sh\nrm -rf -- %q\n(\n", statePath)),
+		0o700,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, test := range []struct {
+		name   string
+		format string
+	}{
+		{name: "bash", format: "bash -n '%s' 2>/dev/stdout | bash"},
+		{name: "bash verbose", format: "bash -nv '%s' 2>/dev/stdout | bash"},
+		{name: "sh", format: "sh -n '%s' 2>/dev/stdout | bash"},
+		{name: "dash verbose", format: "dash -nv '%s' 2>/dev/stdout | bash"},
+		{name: "env bash", format: "env bash -n '%s' 2>/dev/stdout | bash"},
+		{name: "command sh", format: "command -- sh -n '%s' 2>/dev/stdout | bash"},
+		{name: "exec dash", format: "exec dash -n '%s' 2>/dev/stdout | bash"},
+		{name: "subshell", format: "(bash -n '%s') 2>/dev/stdout | bash"},
+		{name: "block", format: "{ bash -n '%s'; } 2>/dev/stdout | bash"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			command := fmt.Sprintf(test.format, path)
+			facts := actionfacts.Analyze(actionfacts.Input{
+				Tool: "shell", Command: command, CWD: dir, ActiveHome: home,
+			})
+			findings := promotedArtifactFindings(t.Context(), agentHookRequest{
+				ConnectorName: connectorName,
+			}, facts, true)
+			matched := findingWithID(findings, "tamper.detector_state_write")
+			if matched == nil {
+				t.Fatalf("no-exec pipeline lost tamper finding: %v facts=%+v", FindingStrings(findings), facts)
+			}
+			if matched.contributesToEnforcement() {
+				t.Fatalf("pipeline artifact unexpectedly became enforceable: %+v", *matched)
+			}
+		})
+	}
+}
+
+func TestPOSIXNoExecCommandPipelineRetainsFinding(t *testing.T) {
+	const connectorName = "noexec-command-pipeline-test"
+	installDefaultProfileConnector(t, connectorName)
+	for _, test := range []struct {
+		name    string
+		command string
+	}{
+		{name: "bash", command: `bash -n -c 'rm -rf /' 2>&1 | bash`},
+		{name: "bash verbose", command: `bash -nv -c 'rm -rf /' 2>&1 | bash`},
+		{name: "env bash", command: `env bash -n -c 'rm -rf /' 2>&1 | bash`},
+		{name: "command sh", command: `command -- sh -n -c 'rm -rf /' 2>&1 | bash`},
+		{name: "exec dash", command: `exec dash -n -c 'rm -rf /' 2>&1 | bash`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			args, err := json.Marshal(map[string]string{"command": test.command})
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, input := range []actionfacts.Input{
+				{Tool: "shell", Command: test.command, CWD: "/repo"},
+				{Tool: "Bash", Args: args, CWD: "/repo"},
+			} {
+				findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+					Input: input, LegacyText: test.command, Connector: connectorName,
+					EnforcementCapable: true,
+				})
+				if findingWithID(findings, "CMD-RM-RF") == nil {
+					t.Fatalf("no-exec command pipeline lost finding: %v", FindingStrings(findings))
+				}
+			}
+		})
+	}
+}
+
+func TestPOSIXNoExecScriptRedirectRetainsStateMutationDetection(t *testing.T) {
+	requireNativePOSIXArtifactHost(t)
+	const connectorName = "artifact-noexec-redirect-test"
+	installDefaultProfileConnector(t, connectorName)
+	home := trustedSameHostHome()
+	if home == "" {
+		t.Skip("same-host home unavailable")
+	}
+	dir := t.TempDir()
+	script := filepath.Join(dir, "runner-cleanup.sh")
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf safe\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	target := filepath.Join(
+		home,
+		".defenseclaw",
+		"quarantine",
+		"skills",
+		"redirected-output",
+	)
+	command := fmt.Sprintf("bash -n %q > %q", script, target)
+	input := actionfacts.Input{
+		Tool: "shell", Command: command, CWD: dir, ActiveHome: home,
+	}
+	facts := actionfacts.Analyze(input)
+	sawScriptExecute := false
+	sawTargetWrite := false
+	for _, path := range facts.Paths {
+		sawScriptExecute = sawScriptExecute || path.Access == actionfacts.PathAccessExecute &&
+			semanticPathValue(path) == canonicalSemanticPath(script)
+		sawTargetWrite = sawTargetWrite || path.Access == actionfacts.PathAccessWrite &&
+			semanticPathValue(path) == canonicalSemanticPath(target)
+	}
+	if facts.Parse.Status != actionfacts.StatusPartial || facts.Authoritative() ||
+		!sawScriptExecute || !sawTargetWrite {
+		t.Fatalf("no-exec redirect facts=%+v", facts)
+	}
+	if findings := promotedArtifactFindings(
+		t.Context(),
+		agentHookRequest{ConnectorName: connectorName},
+		facts,
+		true,
+	); len(findings) != 0 {
+		t.Fatalf("safe redirected script produced artifact findings: %v", FindingStrings(findings))
+	}
+	findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+		Input: input, LegacyText: command, Connector: connectorName,
+		EnforcementCapable: true,
+	})
+	matched := findingWithID(findings, "tamper.detector_state_write")
+	if matched == nil || matched.contributesToEnforcement() {
+		t.Fatalf("redirect lost fallback tamper finding: %v", FindingStrings(findings))
 	}
 }
 
