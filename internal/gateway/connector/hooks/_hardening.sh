@@ -68,6 +68,22 @@ DEFENSECLAW_BAKED_HOOK_PATH=""
 #        routes (/api/v1/<connector>/hook, /api/v1/codex/notify) via
 #        shouldExtractHookTrace, so an unscoped caller cannot splice
 #        an arbitrary trace context into the gateway's trace tree.
+#   v6 — refuses the stock macOS /usr/bin/python3 CLT launcher stub.
+#        Adds _dc_python3_usable, which additionally verifies
+#        `xcode-select -p` succeeds before trusting a python3 binary
+#        under /usr/bin on Darwin, and switches both python3 call sites
+#        (_dc_jq's fallback and defenseclaw_read_stdin_capped's tier 1)
+#        to the new gate. Without the guard, QA on stock macOS hosts
+#        (AVC + codex, no Xcode CLT) saw the "install command line
+#        developer tools" GUI dialog pop on every hook invocation and
+#        the subsequent codex hook then received an empty stdin payload,
+#        posted a bad request to the gateway, and blocked the user's
+#        prompt with a "codex hook error: gateway returned HTTP 400"
+#        message. Internal-only helper; no hook-script signatures
+#        changed and the schema marker stays at v6, so older gateways
+#        that already wrote a v6 helper here (bare `command -v python3`
+#        gate) still get the fix on next write via writeHookHelpers'
+#        same-version bytes-different path.
 #
 # Sourced at the top of every hook in this directory (claude-code-hook.sh,
 # codex-hook.sh, inspect-*.sh) BEFORE any agent-supplied data is touched.
@@ -339,6 +355,45 @@ defenseclaw_json_string_field() {
   fi
 }
 
+# _dc_python3_usable returns 0 when python3 is on PATH AND can be safely
+# invoked. On stock macOS hosts without Xcode Command Line Tools,
+# /usr/bin/python3 exists as a launcher stub that pops the "install
+# command line developer tools" GUI dialog on first invocation and then
+# exits non-zero without executing the script — a bare `command -v
+# python3` check treats that stub as usable, and the resulting invocation
+# both harasses the operator with an installer dialog and returns an
+# empty body that fails the downstream hook (gateway sees a truncated
+# payload, responds HTTP 400, hook fails closed and blocks the user's
+# prompt). Skip the stub by verifying `xcode-select -p` succeeds when
+# python3 resolves under /usr/bin on Darwin; if CLT is not installed,
+# treat python3 as absent and fall through to the head(1) / string-only
+# paths.
+#
+# `xcode-select -p` itself is safe to run without CLT: it is a macOS
+# system binary (part of the base OS, not CLT) whose only side effect
+# is to print the currently selected developer directory or exit 2. The
+# GUI installer dialog is triggered by `xcode-select --install`, which
+# this helper never invokes.
+_dc_python3_usable() {
+  local _dc_p3 _dc_uname
+  _dc_p3="$(command -v python3 2>/dev/null || printf '')"
+  [ -n "$_dc_p3" ] || return 1
+  _dc_uname="$(uname -s 2>/dev/null || printf unknown)"
+  case "$_dc_uname" in
+    Darwin) : ;;
+    *) return 0 ;;
+  esac
+  case "$_dc_p3" in
+    /usr/bin/python3*)
+      # Any /usr/bin/python3* on macOS is a CLT-managed path; the base
+      # OS itself does not ship a working Python interpreter there.
+      # Confirm CLT is present before trusting the binary.
+      xcode-select -p >/dev/null 2>&1 || return 1
+      ;;
+  esac
+  return 0
+}
+
 # _dc_jq is a drop-in shim for jq covering the small subset of filters
 # used by DefenseClaw hook scripts.  When the real jq binary is present
 # (all Unix installs; some Windows installs) it is used unchanged.
@@ -348,6 +403,13 @@ defenseclaw_json_string_field() {
 # (e.g. claude_code_output) return empty from the string-only fallback;
 # hook scripts handle empty output correctly (fall through to exit-2
 # block path).
+#
+# The python3 probe uses _dc_python3_usable, which refuses the stock
+# macOS /usr/bin/python3 CLT stub. Without that guard, `command -v
+# python3` returns success on a stock Mac, we invoke the stub, macOS
+# pops the "install command line developer tools" dialog, and the
+# subsequent gateway call fails with HTTP 400. See _dc_python3_usable
+# above for the full rationale.
 #
 # Supported filter forms (covers all patterns in DefenseClaw hooks):
 #   .field                    — raw value
@@ -380,7 +442,12 @@ _dc_jq() {
   # All values are passed via env to avoid shell quoting issues.
   # The script uses only double-quoted Python strings so it is safe
   # inside shell single quotes.
-  if command -v python3 >/dev/null 2>&1; then
+  #
+  # _dc_python3_usable (not a bare `command -v python3`) guards the probe
+  # so we never invoke the macOS CLT stub at /usr/bin/python3, which
+  # would trigger an "install command line developer tools" GUI dialog
+  # and return no output.
+  if _dc_python3_usable; then
     DCJQ_FILTER="$_dcjq_filter" DCJQ_RAW="$_dcjq_raw" DCJQ_COMPACT="$_dcjq_compact" \
     DCJQ_EXIT="$_dcjq_exit" \
       python3 -c \
@@ -645,7 +712,15 @@ defenseclaw_read_stdin_capped() {
   # body instead of failing closed. python3 is the same interpreter the
   # _dc_jq shim already relies on, so requiring it here adds no new dep on
   # the hosts these hooks actually run on.
-  if command -v python3 >/dev/null 2>&1; then
+  #
+  # _dc_python3_usable (not a bare `command -v python3`) is the gate:
+  # stock macOS hosts without CLT resolve /usr/bin/python3 to a launcher
+  # stub that would trigger an OS installer dialog on first invocation
+  # and return no body at all — the hook would then post an empty payload
+  # to the gateway, get HTTP 400, and fail closed. Skipping the stub
+  # falls through to the head(1) tier which reads stdin correctly on
+  # stock macOS.
+  if _dc_python3_usable; then
     local _dc_body _dc_rc
     _dc_body="$(DCHOOK_CAP="$cap" python3 -c \
 'import sys,os

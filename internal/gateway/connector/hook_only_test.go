@@ -216,6 +216,304 @@ printf '{"nested":{"action":"deny"}}' | _dc_jq -r '.action // "allow"'
 	}
 }
 
+// TestHardeningPython3UsableRefusesMacosCLTStub pins the QA regression
+// where a stock macOS host without Xcode Command Line Tools resolves
+// python3 to the /usr/bin/python3 CLT launcher stub. A bare
+// `command -v python3` treats that stub as usable; invoking it pops
+// the "install command line developer tools" GUI dialog and returns
+// no body, which then propagates as an empty payload / HTTP 400 into
+// the codex hook and blocks the user's prompt.
+//
+// _dc_python3_usable must refuse the stub by cross-checking
+// `xcode-select -p` (a safe macOS system call that does not trigger
+// the installer dialog).
+func TestHardeningPython3UsableRefusesMacosCLTStub(t *testing.T) {
+	if _, err := os.Stat("/bin/bash"); err != nil {
+		t.Skip("bash is required")
+	}
+	helper, err := hookFS.ReadFile("hooks/_hardening.sh")
+	if err != nil {
+		t.Fatalf("read hardening helper: %v", err)
+	}
+	dir := t.TempDir()
+	helperPath := filepath.Join(dir, "_hardening.sh")
+	if err := os.WriteFile(helperPath, helper, 0o700); err != nil {
+		t.Fatalf("write hardening helper: %v", err)
+	}
+	// Simulate stock macOS without CLT:
+	//   - command -v python3 -> /usr/bin/python3 (the launcher stub)
+	//   - uname -s -> Darwin
+	//   - xcode-select -p -> exit 2 (CLT missing)
+	// _dc_python3_usable must return non-zero. If it returns 0, the
+	// caller would invoke /usr/bin/python3 and the QA popup returns.
+	script := `. "$1"
+command() {
+  if [ "$1" = "-v" ] && [ "$2" = "python3" ]; then
+    printf '/usr/bin/python3\n'
+    return 0
+  fi
+  builtin command "$@"
+}
+uname() { printf 'Darwin\n'; }
+xcode-select() { return 2; }
+if _dc_python3_usable; then
+  echo STUB_ACCEPTED
+  exit 1
+fi
+echo STUB_REFUSED
+`
+	cmd := exec.Command("/bin/bash", "-c", script, "bash", helperPath)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run stub-refusal probe: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != "STUB_REFUSED" {
+		t.Fatalf("_dc_python3_usable accepted the /usr/bin/python3 CLT stub without CLT installed: %q", got)
+	}
+}
+
+// TestHardeningPython3UsableAcceptsMacosCLTInstalled asserts the other
+// half of the contract: on macOS with CLT actually installed
+// (xcode-select -p succeeds), _dc_python3_usable trusts
+// /usr/bin/python3 as a real interpreter and returns 0 so the
+// preferred tier-1 python3 path in defenseclaw_read_stdin_capped and
+// the _dc_jq shim remain in use.
+func TestHardeningPython3UsableAcceptsMacosCLTInstalled(t *testing.T) {
+	if _, err := os.Stat("/bin/bash"); err != nil {
+		t.Skip("bash is required")
+	}
+	helper, err := hookFS.ReadFile("hooks/_hardening.sh")
+	if err != nil {
+		t.Fatalf("read hardening helper: %v", err)
+	}
+	dir := t.TempDir()
+	helperPath := filepath.Join(dir, "_hardening.sh")
+	if err := os.WriteFile(helperPath, helper, 0o700); err != nil {
+		t.Fatalf("write hardening helper: %v", err)
+	}
+	script := `. "$1"
+command() {
+  if [ "$1" = "-v" ] && [ "$2" = "python3" ]; then
+    printf '/usr/bin/python3\n'
+    return 0
+  fi
+  builtin command "$@"
+}
+uname() { printf 'Darwin\n'; }
+xcode-select() { printf '/Library/Developer/CommandLineTools\n'; return 0; }
+if _dc_python3_usable; then
+  echo REAL_ACCEPTED
+  exit 0
+fi
+echo REAL_REJECTED
+exit 1
+`
+	cmd := exec.Command("/bin/bash", "-c", script, "bash", helperPath)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("_dc_python3_usable refused python3 despite CLT installed: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != "REAL_ACCEPTED" {
+		t.Fatalf("_dc_python3_usable did not accept real /usr/bin/python3 with CLT: %q", got)
+	}
+}
+
+// TestHardeningPython3UsableAcceptsHomebrewPython covers the case
+// where the operator has installed python3 outside the CLT-managed
+// /usr/bin path (typical for homebrew, pyenv, asdf, etc.). Only
+// /usr/bin/python3 on Darwin is a CLT launcher stub — everything
+// else is trusted at face value regardless of xcode-select state.
+func TestHardeningPython3UsableAcceptsHomebrewPython(t *testing.T) {
+	if _, err := os.Stat("/bin/bash"); err != nil {
+		t.Skip("bash is required")
+	}
+	helper, err := hookFS.ReadFile("hooks/_hardening.sh")
+	if err != nil {
+		t.Fatalf("read hardening helper: %v", err)
+	}
+	dir := t.TempDir()
+	helperPath := filepath.Join(dir, "_hardening.sh")
+	if err := os.WriteFile(helperPath, helper, 0o700); err != nil {
+		t.Fatalf("write hardening helper: %v", err)
+	}
+	script := `. "$1"
+command() {
+  if [ "$1" = "-v" ] && [ "$2" = "python3" ]; then
+    printf '/usr/local/bin/python3\n'
+    return 0
+  fi
+  builtin command "$@"
+}
+uname() { printf 'Darwin\n'; }
+xcode-select() { return 2; }
+if _dc_python3_usable; then
+  echo BREW_ACCEPTED
+  exit 0
+fi
+echo BREW_REJECTED
+exit 1
+`
+	cmd := exec.Command("/bin/bash", "-c", script, "bash", helperPath)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("_dc_python3_usable refused non-/usr/bin python3: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != "BREW_ACCEPTED" {
+		t.Fatalf("_dc_python3_usable did not accept /usr/local/bin/python3 on Darwin: %q", got)
+	}
+}
+
+// TestHardeningPython3UsableSkipsXcodeSelectOffDarwin asserts that
+// the CLT stub check is Darwin-only. On Linux hosts we do not consult
+// xcode-select at all — python3 is a first-class binary there and a
+// failing (or missing) xcode-select must not gate the python3 tier.
+func TestHardeningPython3UsableSkipsXcodeSelectOffDarwin(t *testing.T) {
+	if _, err := os.Stat("/bin/bash"); err != nil {
+		t.Skip("bash is required")
+	}
+	helper, err := hookFS.ReadFile("hooks/_hardening.sh")
+	if err != nil {
+		t.Fatalf("read hardening helper: %v", err)
+	}
+	dir := t.TempDir()
+	helperPath := filepath.Join(dir, "_hardening.sh")
+	if err := os.WriteFile(helperPath, helper, 0o700); err != nil {
+		t.Fatalf("write hardening helper: %v", err)
+	}
+	script := `. "$1"
+command() {
+  if [ "$1" = "-v" ] && [ "$2" = "python3" ]; then
+    printf '/usr/bin/python3\n'
+    return 0
+  fi
+  builtin command "$@"
+}
+uname() { printf 'Linux\n'; }
+xcode-select() { echo "xcode-select must not be consulted on Linux" >&2; return 127; }
+if _dc_python3_usable; then
+  echo LINUX_ACCEPTED
+  exit 0
+fi
+echo LINUX_REJECTED
+exit 1
+`
+	cmd := exec.Command("/bin/bash", "-c", script, "bash", helperPath)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("_dc_python3_usable rejected python3 on Linux: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != "LINUX_ACCEPTED" {
+		t.Fatalf("_dc_python3_usable did not accept /usr/bin/python3 on Linux: %q", got)
+	}
+}
+
+// TestHardeningPython3UsableRejectsAbsentPython3 asserts the base
+// case: when python3 is not on PATH at all, _dc_python3_usable
+// returns non-zero regardless of platform. This is the pre-existing
+// contract for the tier-2 head(1) fallback in
+// defenseclaw_read_stdin_capped and the string-only tail in _dc_jq.
+func TestHardeningPython3UsableRejectsAbsentPython3(t *testing.T) {
+	if _, err := os.Stat("/bin/bash"); err != nil {
+		t.Skip("bash is required")
+	}
+	helper, err := hookFS.ReadFile("hooks/_hardening.sh")
+	if err != nil {
+		t.Fatalf("read hardening helper: %v", err)
+	}
+	dir := t.TempDir()
+	helperPath := filepath.Join(dir, "_hardening.sh")
+	if err := os.WriteFile(helperPath, helper, 0o700); err != nil {
+		t.Fatalf("write hardening helper: %v", err)
+	}
+	script := `. "$1"
+command() {
+  if [ "$1" = "-v" ] && [ "$2" = "python3" ]; then
+    return 1
+  fi
+  builtin command "$@"
+}
+if _dc_python3_usable; then
+  echo ACCEPTED_MISSING
+  exit 1
+fi
+echo REJECTED_MISSING
+`
+	cmd := exec.Command("/bin/bash", "-c", script, "bash", helperPath)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run absent-python3 probe: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(string(out)); got != "REJECTED_MISSING" {
+		t.Fatalf("_dc_python3_usable accepted absent python3: %q", got)
+	}
+}
+
+// TestHardeningReadStdinCappedSkipsPython3StubOnStockMacos is the
+// integration guard: defenseclaw_read_stdin_capped must fall through
+// to the head(1) tier (tier 2) when python3 resolves to the macOS
+// CLT stub, instead of invoking the stub and returning an empty body.
+//
+// If this test regresses, the codex hook on stock macOS will post an
+// empty payload to the gateway, get HTTP 400, and block the user's
+// prompt with "codex hook error: gateway returned HTTP 400" — the
+// exact QA-reported failure this fix addresses.
+func TestHardeningReadStdinCappedSkipsPython3StubOnStockMacos(t *testing.T) {
+	if _, err := os.Stat("/bin/bash"); err != nil {
+		t.Skip("bash is required")
+	}
+	helper, err := hookFS.ReadFile("hooks/_hardening.sh")
+	if err != nil {
+		t.Fatalf("read hardening helper: %v", err)
+	}
+	dir := t.TempDir()
+	helperPath := filepath.Join(dir, "_hardening.sh")
+	if err := os.WriteFile(helperPath, helper, 0o700); err != nil {
+		t.Fatalf("write hardening helper: %v", err)
+	}
+	// A python3 impostor that would empty stdin and exit non-zero if
+	// invoked — mirrors the macOS CLT stub's observed behaviour. If
+	// _dc_python3_usable incorrectly says "yes", this stub runs and
+	// the captured body is empty; the assertion below fails.
+	stubDir := filepath.Join(dir, "stub-bin")
+	if err := os.Mkdir(stubDir, 0o755); err != nil {
+		t.Fatalf("mkdir stub-bin: %v", err)
+	}
+	stubPython := filepath.Join(stubDir, "python3")
+	stubBody := "#!/bin/bash\n" +
+		"# Behaves like the macOS CLT launcher stub: consumes nothing,\n" +
+		"# prints the developer-tools note to stderr, exits non-zero.\n" +
+		"echo 'xcode-select: note: No developer tools were found, requesting install.' >&2\n" +
+		"exit 1\n"
+	if err := os.WriteFile(stubPython, []byte(stubBody), 0o755); err != nil {
+		t.Fatalf("write python3 stub: %v", err)
+	}
+	script := `. "$1"
+# Point command -v python3 at the stub we control, and mask xcode-select
+# so _dc_python3_usable classifies it as the CLT launcher.
+command() {
+  if [ "$1" = "-v" ] && [ "$2" = "python3" ]; then
+    printf '/usr/bin/python3\n'
+    return 0
+  fi
+  builtin command "$@"
+}
+uname() { printf 'Darwin\n'; }
+xcode-select() { return 2; }
+PATH="$2:$PATH"
+BODY="$(defenseclaw_read_stdin_capped)"
+printf 'BODY=<%s>\n' "$BODY"
+`
+	cmd := exec.Command("/bin/bash", "-c", script, "bash", helperPath, stubDir)
+	cmd.Stdin = strings.NewReader("hello-world")
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("run stdin-capped probe: %v\n%s", err, out)
+	}
+	if !strings.Contains(string(out), "BODY=<hello-world>") {
+		t.Fatalf("defenseclaw_read_stdin_capped invoked the CLT stub and lost the body:\n%s", out)
+	}
+}
+
 func TestHookOnlyConnector_SurfaceCapabilities(t *testing.T) {
 	opts := SetupOpts{DataDir: t.TempDir(), WorkspaceDir: t.TempDir(), APIAddr: "127.0.0.1:18970"}
 	cases := []struct {
