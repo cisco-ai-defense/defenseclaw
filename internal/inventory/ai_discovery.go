@@ -694,6 +694,17 @@ func normalizeAIDiscoveryOptions(opts AIDiscoveryOptions) AIDiscoveryOptions {
 	if opts.ProcessInterval <= 0 {
 		opts.ProcessInterval = 60 * time.Second
 	}
+	// In managed_enterprise every scan tick (full or process-only) fans
+	// out through managedInventoryEmit, so a 60s process interval becomes
+	// a 60s connector/MCP snapshot push to AI Defense. Push volume, not
+	// process-detection cost, dominates the operational spend on managed
+	// installs — align the process cadence with the full-scan cadence so
+	// the two tickers produce one push per 5 min instead of six. Operators
+	// can still configure a longer interval; the floor only lifts values
+	// below the full-scan default.
+	if opts.ManagedEnterprise && opts.ProcessInterval < 5*time.Minute {
+		opts.ProcessInterval = 5 * time.Minute
+	}
 	if opts.MaxFilesPerScan <= 0 {
 		opts.MaxFilesPerScan = 1000
 	}

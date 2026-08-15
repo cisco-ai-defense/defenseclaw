@@ -2536,3 +2536,34 @@ func TestAIStoredSignalModelProvenanceHubResolvedAtJSON(t *testing.T) {
 		})
 	}
 }
+
+func TestNormalizeAIDiscoveryOptionsProcessIntervalManagedFloor(t *testing.T) {
+	cases := []struct {
+		name    string
+		managed bool
+		input   time.Duration
+		want    time.Duration
+	}{
+		{"unmanaged_default_stays_60s", false, 60 * time.Second, 60 * time.Second},
+		{"unmanaged_zero_falls_back_to_60s", false, 0, 60 * time.Second},
+		{"managed_default_60s_promoted_to_5m", true, 60 * time.Second, 5 * time.Minute},
+		{"managed_zero_promoted_to_5m", true, 0, 5 * time.Minute},
+		{"managed_below_floor_promoted", true, 90 * time.Second, 5 * time.Minute},
+		{"managed_at_floor_preserved", true, 5 * time.Minute, 5 * time.Minute},
+		{"managed_above_floor_preserved", true, 10 * time.Minute, 10 * time.Minute},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			opts := normalizeAIDiscoveryOptions(AIDiscoveryOptions{
+				DataDir:           t.TempDir(),
+				HomeDir:           t.TempDir(),
+				ProcessInterval:   tc.input,
+				ManagedEnterprise: tc.managed,
+			})
+			if opts.ProcessInterval != tc.want {
+				t.Fatalf("ProcessInterval = %s, want %s (managed=%t, input=%s)",
+					opts.ProcessInterval, tc.want, tc.managed, tc.input)
+			}
+		})
+	}
+}
