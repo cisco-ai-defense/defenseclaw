@@ -12,8 +12,10 @@
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 from defenseclaw.db import Store
 from defenseclaw.models import ActionState, Event
@@ -296,6 +298,32 @@ def test_audit_refresh_preserves_last_good_rows_when_database_is_locked() -> Non
     assert [event.id for event in panel.items] == ["cached"]
     assert [event.id for event in panel.filtered] == ["cached"]
     assert panel.error_message == "Audit refresh failed: database is locked"
+
+
+def test_audit_detail_survives_malformed_sqlite_history() -> None:
+    class CorruptDatabase:
+        def execute(self, *_args: object, **_kwargs: object) -> None:
+            raise sqlite3.DatabaseError("database disk image is malformed")
+
+    event = Event(
+        id="corrupt-db-event",
+        timestamp=datetime(2026, 4, 16, 12, 0, 0),
+        action="scan-finding",
+        target="claudecode:PostToolBatch",
+        severity="CRITICAL",
+        run_id="run-1",
+    )
+    panel = AuditPanelModel(SimpleNamespace(db=CorruptDatabase()))
+    panel.set_events([event])
+    panel.toggle_detail()
+
+    info = panel.get_detail_info()
+
+    assert info is not None
+    assert info.event == event
+    assert info.findings == ()
+    assert info.related == ()
+    assert ("Action", "scan-finding") in panel.detail_pairs()
 
 
 def test_audit_view_metadata_exposes_toolbar_rows_columns_and_styles() -> None:

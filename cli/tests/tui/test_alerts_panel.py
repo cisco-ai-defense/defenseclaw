@@ -12,7 +12,9 @@
 
 from __future__ import annotations
 
+import sqlite3
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 
 import defenseclaw.tui.panels.alerts as alerts_panel
 from defenseclaw.tui.panels.alerts import (
@@ -175,6 +177,31 @@ def test_alert_detail_hydration_preserves_visible_non_info_promotion() -> None:
 
     assert detail is not None
     assert detail.event.severity == "HIGH"
+
+
+def test_alert_detail_survives_malformed_sqlite_history() -> None:
+    class CorruptDatabase:
+        def execute(self, *_args: object, **_kwargs: object) -> None:
+            raise sqlite3.DatabaseError("database disk image is malformed")
+
+    event = AlertEvent(
+        id="corrupt-db-alert",
+        severity="CRITICAL",
+        action="scan-finding",
+        target="claudecode:PostToolBatch",
+        run_id="run-1",
+    )
+    model = AlertsPanelModel(store=SimpleNamespace(db=CorruptDatabase()))
+    model.set_events([event])
+    model.toggle_expand_or_detail()
+
+    detail = model.get_detail_info()
+
+    assert detail is not None
+    assert detail.event == event
+    assert detail.findings == ()
+    assert detail.history == ()
+    assert "CRITICAL scan-finding" in model.detail_text()
 
 
 def test_humanize_alert_details_fast_paths_and_host_port() -> None:
