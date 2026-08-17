@@ -250,6 +250,9 @@ var enterpriseHooksWindowsConfigLoader = func() (*config.Config, error) {
 
 func enterpriseHooksNativePersistentPreRun(cmd *cobra.Command, args []string) error {
 	if enterpriseHooksRuntimeGOOS() != "windows" {
+		if cmd == enterpriseHooksStatusCmd {
+			return enterpriseHooksConfigOnlyPersistentPreRun(cmd, args)
+		}
 		return enterpriseHooksFullRootPersistentPreRun(cmd, args)
 	}
 	if versionJSON {
@@ -260,6 +263,9 @@ func enterpriseHooksNativePersistentPreRun(cmd *cobra.Command, args []string) er
 	// so normal Windows startup retains its historical dotenv/config order and
 	// performs no preliminary protected-config I/O.
 	if !managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) {
+		if cmd == enterpriseHooksStatusCmd {
+			return enterpriseHooksConfigOnlyPersistentPreRun(cmd, args)
+		}
 		return enterpriseHooksFullRootPersistentPreRun(cmd, args)
 	}
 	loaded, err := enterpriseHooksWindowsConfigLoader()

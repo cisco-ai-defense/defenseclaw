@@ -16,7 +16,7 @@ import (
 	"path/filepath"
 	"runtime"
 
-	"golang.org/x/sys/windows"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // Both version directories under this root move with Secure Client
@@ -29,7 +29,7 @@ const cmidVendorRelativeRoot = `Cisco\Cisco Secure Client\CM`
 // installed one. Callers treat the empty result as "no override" and
 // leave the provider to its own default.
 func DiscoverCMIDLibrary() string {
-	programFiles, err := windows.KnownFolderPath(windows.FOLDERID_ProgramFiles, windows.KF_FLAG_DEFAULT)
+	programFiles, err := winpath.TrustedProgramFiles()
 	if err != nil {
 		return ""
 	}

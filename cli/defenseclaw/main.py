@@ -188,7 +188,18 @@ def cli(ctx: click.Context) -> None:
                 raise SystemExit(1) from exc
         return
 
-    if invoked not in SKIP_AUTO_VALIDATE:
+    if invoked == "setup":
+        # ``setup trusted-paths`` is the public bootstrap for a custom agent
+        # runtime that first-run selection must trust. Permit a missing v8
+        # document here, then let the setup group admit only that narrow
+        # subcommand. Existing legacy/malformed documents still fail before
+        # compatibility loading or mutation.
+        try:
+            cfg_mod.require_v8_config(allow_missing=True)
+        except cfg_mod.ConfigVersionError as exc:
+            ux.echo(str(exc), err=True)
+            raise SystemExit(1) from exc
+    elif invoked not in SKIP_AUTO_VALIDATE:
         try:
             cfg_mod.require_v8_config()
         except cfg_mod.ConfigVersionError as exc:
@@ -215,11 +226,19 @@ def cli(ctx: click.Context) -> None:
 
     source_is_v8 = getattr(app.cfg, "_source_config_version", None) == 8
 
+    if invoked == "setup" and not source_is_v8:
+        # A missing config is represented by an in-memory source version of
+        # zero. Do not create audit/runtime state before the setup group proves
+        # that the requested child is the trusted-paths bootstrap. Config.save
+        # will promote this fresh document to v8 while holding its file lock.
+        app.preinit_setup_bootstrap = True
+        return
+
     # Fast-fail on config errors before any command runs, so operators
     # see a clear diagnostic instead of a deep stack trace. Skipped for
     # recovery commands (doctor/config/keys/upgrade) so a broken config
     # doesn't lock them out of the tools that would fix it.
-    if invoked not in SKIP_AUTO_VALIDATE:
+    if invoked not in SKIP_AUTO_VALIDATE and invoked != "setup":
         from defenseclaw.commands.cmd_config import validate_config
 
         result = validate_config()
@@ -234,6 +253,15 @@ def cli(ctx: click.Context) -> None:
                 err=True,
             )
             raise SystemExit(1)
+
+    # The setup group must inspect its child command before deciding whether
+    # gateway-backed canonical validation and runtime/audit initialization are
+    # required. ``setup trusted-paths add|list|remove`` is the deliberately
+    # narrow offline trust bootstrap; every other setup path performs the same
+    # validation and initialization in the setup group callback.
+    if invoked == "setup":
+        app.setup_runtime_deferred = True
+        return
 
     try:
         app.store = Store(app.cfg.audit_db)

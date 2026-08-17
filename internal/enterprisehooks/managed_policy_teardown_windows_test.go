@@ -5,7 +5,10 @@
 
 package enterprisehooks
 
-import "testing"
+import (
+	"encoding/json"
+	"testing"
+)
 
 // A Codex-only deployment tears down an empty Claude target set, and this gate
 // runs before the transaction opens.
@@ -97,5 +100,88 @@ func TestValidateWindowsClaudeManagedPolicyTeardownStateExactIdentity(t *testing
 				t.Fatal("tampered teardown identity was accepted")
 			}
 		})
+	}
+}
+
+func TestValidateWindowsClaudeManagedPolicyLifecycleSnapshotExactPreimage(t *testing.T) {
+	original := windowsEnterpriseHookTrustCheck
+	windowsEnterpriseHookTrustCheck = func(string) error { return nil }
+	t.Cleanup(func() { windowsEnterpriseHookTrustCheck = original })
+
+	opts := WindowsClaudeManagedPolicyTeardownOptions{
+		HookExecutable:     `C:\Program Files\DefenseClaw\bin\defenseclaw-hook.exe`,
+		GatewayAddr:        "127.0.0.1:18970",
+		GatewayServiceName: "DefenseClawGateway",
+		TargetSIDs:         []string{"S-1-5-21-111-222-333-1001"},
+	}
+	policy := []byte(`{"hooks":{"DefenseClaw":true}}`)
+	state := windowsClaudeManagedPolicyState{
+		SchemaVersion:      2,
+		PolicySHA256:       windowsManagedPolicyDigest(policy),
+		HookExecutable:     opts.HookExecutable,
+		GatewayAddr:        opts.GatewayAddr,
+		GatewayServiceName: opts.GatewayServiceName,
+		TargetSIDs:         append([]string(nil), opts.TargetSIDs...),
+	}
+	stateBody, err := json.Marshal(state)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := WindowsClaudeManagedPolicyTeardownSnapshot{
+		PolicyExisted: true,
+		Policy:        policy,
+		StateExisted:  true,
+		State:         stateBody,
+	}
+	if err := validateWindowsClaudeManagedPolicySnapshot(
+		opts,
+		opts.TargetSIDs,
+		snapshot,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	tampered := snapshot
+	tampered.Policy = append([]byte(nil), policy...)
+	tampered.Policy[0] ^= 1
+	if err := validateWindowsClaudeManagedPolicySnapshot(
+		opts,
+		opts.TargetSIDs,
+		tampered,
+	); err == nil {
+		t.Fatal("lifecycle snapshot policy digest tamper was accepted")
+	}
+
+	emptyOpts := opts
+	emptyOpts.TargetSIDs = nil
+	if err := validateWindowsClaudeManagedPolicySnapshot(
+		emptyOpts,
+		nil,
+		WindowsClaudeManagedPolicyTeardownSnapshot{},
+	); err != nil {
+		t.Fatalf("empty pre-activation snapshot was rejected: %v", err)
+	}
+	if err := validateWindowsClaudeManagedPolicySnapshot(
+		opts,
+		opts.TargetSIDs,
+		WindowsClaudeManagedPolicyTeardownSnapshot{},
+	); err == nil {
+		t.Fatal("empty snapshot was accepted for a prior active enrollment")
+	}
+}
+
+func TestWindowsClaudeManagedPolicyLifecycleSubsetRejectsForeignIdentity(t *testing.T) {
+	allowed := []string{
+		"S-1-5-21-111-222-333-1001",
+		"S-1-5-21-111-222-333-1002",
+	}
+	if !windowsClaudeTargetSIDSubset(allowed[:1], allowed) {
+		t.Fatal("manifest subset was rejected")
+	}
+	if windowsClaudeTargetSIDSubset(
+		[]string{"S-1-5-21-111-222-333-1099"},
+		allowed,
+	) {
+		t.Fatal("foreign target SID was accepted by lifecycle rollback")
 	}
 }

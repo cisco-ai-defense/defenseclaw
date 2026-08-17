@@ -14,16 +14,16 @@ $programFiles = [Environment]::GetFolderPath([Environment+SpecialFolder]::Progra
 $programData = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
 $modulePath = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '..\DefenseClawEnterprise.psm1'))
 $token = ([Guid]::NewGuid().ToString('N')).Substring(0, 10)
-$installRoot = Join-Path $programFiles 'Cisco\DefenseClaw'
-$stateRoot = Join-Path $programData 'Cisco\DefenseClaw'
+$installRoot = Join-Path $programFiles 'Cisco\Cisco Secure Client\DefenseClaw'
+$stateRoot = Join-Path $programData 'Cisco\Cisco Secure Client\DefenseClaw'
 $gatewayService = 'DefenseClawGateway'
 $guardianService = 'DefenseClawHookGuardian'
 $customInstallRoot = Join-Path `
     $programFiles `
-    "Cisco\DefenseClaw-ModuleSmoke-$token\DefenseClaw"
+    "Cisco\Cisco Secure Client\DefenseClaw-ModuleSmoke-$token\DefenseClaw"
 $customStateRoot = Join-Path `
     $programData `
-    "Cisco\DefenseClaw-ModuleSmoke-$token\DefenseClaw"
+    "Cisco\Cisco Secure Client\DefenseClaw-ModuleSmoke-$token\DefenseClaw"
 $customGatewayService = "DefenseClawGatewaySmoke_$token"
 $customGuardianService = "DefenseClawGuardianSmoke_$token"
 $codexMachinePolicyDirectory = Join-Path $programData 'OpenAI\Codex'
@@ -163,11 +163,24 @@ $wrongCertificationCodexHome = Join-Path (
 ) ".codex-defenseclaw-cert-$token-wrong"
 $certificationInstallRoot = Join-Path `
     $programFiles `
-    "Cisco\DefenseClaw-Cert\$token"
+    "Cisco\Cisco Secure Client\DefenseClaw-Cert\$token"
 $certificationStateRoot = Join-Path `
     $programData `
-    "Cisco\DefenseClaw-Cert\$token"
+    "Cisco\Cisco Secure Client\DefenseClaw-Cert\$token"
 try {
+    $missingCertificationStatus = Invoke-DefenseClawEnterpriseLifecycle `
+        -Action Status `
+        -InstallRoot $certificationInstallRoot `
+        -StateRoot $certificationStateRoot `
+        -GatewayServiceName "DefenseClawCertGateway_$token" `
+        -GuardianServiceName "DefenseClawCertGuardian_$token" `
+        -CertificationCodexHome $certificationCodexHome `
+        -AllowUnsigned
+    if (-not [bool]$missingCertificationStatus.ok -or
+        [bool]$missingCertificationStatus.installed -or
+        (Test-Path -LiteralPath $certificationCodexHome)) {
+        throw 'unsigned pre-install Status did not preserve its absent certification CODEX_HOME'
+    }
     [void](New-Item -ItemType Directory -Path $certificationCodexHome)
     [void](New-Item -ItemType Directory -Path $wrongCertificationCodexHome)
     $certificationStatus = Invoke-DefenseClawEnterpriseLifecycle `
@@ -176,7 +189,8 @@ try {
         -StateRoot $certificationStateRoot `
         -GatewayServiceName "DefenseClawCertGateway_$token" `
         -GuardianServiceName "DefenseClawCertGuardian_$token" `
-        -CertificationCodexHome $certificationCodexHome
+        -CertificationCodexHome $certificationCodexHome `
+        -AllowUnsigned
     if (-not [bool]$certificationStatus.ok -or [bool]$certificationStatus.installed) {
         throw 'certification Status did not accept its exact isolated CODEX_HOME'
     }
@@ -239,6 +253,187 @@ finally {
     }
 }
 
+if (-not ('DefenseClaw.Windows.Tests.CommandLine' -as [type])) {
+    [void](Microsoft.PowerShell.Utility\Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+
+namespace DefenseClaw.Windows.Tests
+{
+    public static class CommandLine
+    {
+        [DllImport(
+            "shell32.dll",
+            CharSet = CharSet.Unicode,
+            ExactSpelling = true,
+            SetLastError = true)]
+        private static extern IntPtr CommandLineToArgvW(
+            string commandLine,
+            out int argumentCount);
+
+        [DllImport("kernel32.dll")]
+        private static extern IntPtr LocalFree(IntPtr memory);
+
+        public static string[] Parse(string commandLine)
+        {
+            int count;
+            IntPtr values = CommandLineToArgvW(commandLine, out count);
+            if (values == IntPtr.Zero)
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            try
+            {
+                string[] result = new string[count];
+                for (int index = 0; index < count; index++)
+                {
+                    IntPtr value = Marshal.ReadIntPtr(values, index * IntPtr.Size);
+                    result[index] = Marshal.PtrToStringUni(value);
+                }
+                return result;
+            }
+            finally
+            {
+                LocalFree(values);
+            }
+        }
+    }
+}
+'@ -Language CSharp -ErrorAction Stop)
+}
+
+& $module {
+    $argumentFixture = [string[]]@(
+        'config',
+        'DefenseClawGateway',
+        'binPath=',
+        '"C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\defenseclaw-gateway.exe" enterprise hooks watch --manifest "C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\targets.yaml" --interval 1m',
+        'trailing-slash\',
+        ''
+    )
+    $encodedFixture = ConvertTo-DefenseClawWindowsCommandLine `
+        -Arguments $argumentFixture
+    $decodedFixture = [DefenseClaw.Windows.Tests.CommandLine]::Parse(
+        'fixture.exe ' + $encodedFixture
+    )
+    if ($decodedFixture.Count -ne $argumentFixture.Count + 1) {
+        throw 'native command-line encoder changed the argument count'
+    }
+    for ($index = 0; $index -lt $argumentFixture.Count; $index++) {
+        if (-not [string]::Equals(
+            [string]$decodedFixture[$index + 1],
+            [string]$argumentFixture[$index],
+            [StringComparison]::Ordinal
+        )) {
+            throw "native command-line encoder changed argv[$index]"
+        }
+    }
+    foreach ($invalidFixture in @(
+        [pscustomobject]@{
+            name = 'null'
+            arguments = [object[]]@('safe', $null)
+        },
+        [pscustomobject]@{
+            name = 'NUL'
+            arguments = [object[]]@('safe', ('unsafe' + [char]0))
+        }
+    )) {
+        $rejected = $false
+        try {
+            [void](ConvertTo-DefenseClawWindowsCommandLine `
+                -Arguments $invalidFixture.arguments)
+        }
+        catch {
+            $rejected = $true
+        }
+        if (-not $rejected) {
+            throw "native command-line encoder accepted a $($invalidFixture.name) argument"
+        }
+    }
+
+    $engine = Microsoft.PowerShell.Management\Join-Path `
+        $script:System32 `
+        'WindowsPowerShell\v1.0\powershell.exe'
+    $success = Invoke-DefenseClawProcess `
+        -File $engine `
+        -Arguments @(
+            '-NoLogo',
+            '-NoProfile',
+            '-NonInteractive',
+            '-Command',
+            '[Console]::Out.Write("fresh-success"); exit 0'
+        ) `
+        -TimeoutSeconds 15
+    if ([int]$success.exit_code -ne 0 -or
+        [string]$success.stdout -cne 'fresh-success') {
+        throw 'fresh native success result was not captured exactly'
+    }
+    $failure = Invoke-DefenseClawProcess `
+        -File $engine `
+        -Arguments @(
+            '-NoLogo',
+            '-NoProfile',
+            '-NonInteractive',
+            '-Command',
+            '[Console]::Error.Write("fresh-stderr"); exit 23'
+        ) `
+        -TimeoutSeconds 15
+    if ([int]$failure.exit_code -ne 23 -or
+        [string]$failure.stderr -cne 'fresh-stderr') {
+        throw 'fresh native nonzero/stderr result was not captured exactly'
+    }
+    $timedOut = $false
+    try {
+        [void](Invoke-DefenseClawProcess `
+            -File $engine `
+            -Arguments @(
+                '-NoLogo',
+                '-NoProfile',
+                '-NonInteractive',
+                '-Command',
+                'Start-Sleep -Seconds 5'
+            ) `
+            -TimeoutSeconds 1)
+    }
+    catch {
+        $timedOut = $_.Exception.Message -match 'timed out after 1 seconds'
+    }
+    if (-not $timedOut) {
+        throw 'bounded native process did not report its timeout'
+    }
+
+    $jsonRoot = Microsoft.PowerShell.Management\Join-Path `
+        ([IO.Path]::GetTempPath()) `
+        ('defenseclaw-json-smoke-' + [Guid]::NewGuid().ToString('N'))
+    $jsonPath = Microsoft.PowerShell.Management\Join-Path `
+        $jsonRoot `
+        'state.json'
+    try {
+        [IO.Directory]::CreateDirectory($jsonRoot) |
+            Microsoft.PowerShell.Core\Out-Null
+        Write-DefenseClawJsonAtomic `
+            -Value ([ordered]@{ schema_version = 1; ok = $true }) `
+            -Path $jsonPath
+        $jsonBytes = [IO.File]::ReadAllBytes($jsonPath)
+        if ($jsonBytes.Length -lt 2 -or
+            ($jsonBytes.Length -ge 3 -and
+                $jsonBytes[0] -eq 0xEF -and
+                $jsonBytes[1] -eq 0xBB -and
+                $jsonBytes[2] -eq 0xBF)) {
+            throw 'atomic JSON writer emitted an empty document or UTF-8 BOM'
+        }
+        $json = [Text.Encoding]::UTF8.GetString($jsonBytes) |
+            Microsoft.PowerShell.Utility\ConvertFrom-Json
+        if ([int]$json.schema_version -ne 1 -or -not [bool]$json.ok) {
+            throw 'atomic JSON writer did not round-trip its payload'
+        }
+    }
+    finally {
+        if ([IO.Directory]::Exists($jsonRoot)) {
+            [IO.Directory]::Delete($jsonRoot, $true)
+        }
+    }
+}
+
 & $module {
     $nativeSecurityType = Initialize-DefenseClawNativeSecurity
     if ($null -eq $nativeSecurityType -or
@@ -262,8 +457,8 @@ finally {
         throw 'failure actions do not encode three repeating restarts'
     }
     $layout = Get-DefenseClawLayout `
-        -InstallRoot (Join-Path $script:ProgramFiles 'Cisco\DefenseClaw') `
-        -StateRoot (Join-Path $script:ProgramData 'Cisco\DefenseClaw')
+        -InstallRoot (Join-Path $script:ProgramFiles 'Cisco\Cisco Secure Client\DefenseClaw') `
+        -StateRoot (Join-Path $script:ProgramData 'Cisco\Cisco Secure Client\DefenseClaw')
     $expectedCodexParent = Join-Path $script:ProgramData 'OpenAI\Codex'
     if (-not [string]::Equals(
         [string]$layout.CodexMachinePolicyDirectory,
@@ -302,10 +497,10 @@ finally {
     $unsignedGuardian = "DefenseClawCertGuardian_$unsignedRunID"
     $unsignedInstallRoot = Join-Path `
         $script:ProgramFiles `
-        "Cisco\DefenseClaw-Cert\$unsignedRunID"
+        "Cisco\Cisco Secure Client\DefenseClaw-Cert\$unsignedRunID"
     $unsignedStateRoot = Join-Path `
         $script:ProgramData `
-        "Cisco\DefenseClaw-Cert\$unsignedRunID"
+        "Cisco\Cisco Secure Client\DefenseClaw-Cert\$unsignedRunID"
     $unsignedCodexHome = "C:\Users\Certification\.codex-defenseclaw-cert-$unsignedRunID"
     Assert-DefenseClawUnsignedCertificationScope `
         -Action Install `
@@ -605,16 +800,63 @@ if ($elevated) {
             -Path $lockLayout.LifecycleLockDirectory `
             -Label 'smoke lifecycle lock' `
             -RequiredBase $script:ProgramData
-        $lock = Enter-DefenseClawLifecycleLock `
-            -Layout $lockLayout `
-            -TimeoutSeconds 2
         try {
-            if ($null -eq $lock) {
-                throw 'protected lifecycle file lock was not returned'
+            $lock = Enter-DefenseClawLifecycleLock `
+                -Layout $lockLayout `
+                -TimeoutSeconds 2
+            try {
+                if ($null -eq $lock) {
+                    throw 'protected lifecycle file lock was not returned'
+                }
+            }
+            finally {
+                Exit-DefenseClawLifecycleLock -Lock $lock
+            }
+            $sections = (
+                [Security.AccessControl.AccessControlSections]::Access -bor
+                [Security.AccessControl.AccessControlSections]::Owner -bor
+                [Security.AccessControl.AccessControlSections]::Group
+            )
+            $beforeItem = Get-Item `
+                -LiteralPath $lockLayout.LifecycleLockPath `
+                -Force `
+                -ErrorAction Stop
+            $beforeSDDL = (Get-Acl `
+                -LiteralPath $lockLayout.LifecycleLockPath `
+                -ErrorAction Stop).GetSecurityDescriptorSddlForm($sections)
+            $beforeHash = (Get-FileHash `
+                -LiteralPath $lockLayout.LifecycleLockPath `
+                -Algorithm SHA256).Hash
+
+            $lock = Enter-DefenseClawLifecycleLock `
+                -Layout $lockLayout `
+                -TimeoutSeconds 2
+            try {
+                if ($null -eq $lock) {
+                    throw 'persistent lifecycle file lock was not reusable'
+                }
+            }
+            finally {
+                Exit-DefenseClawLifecycleLock -Lock $lock
+            }
+            $afterItem = Get-Item `
+                -LiteralPath $lockLayout.LifecycleLockPath `
+                -Force `
+                -ErrorAction Stop
+            $afterSDDL = (Get-Acl `
+                -LiteralPath $lockLayout.LifecycleLockPath `
+                -ErrorAction Stop).GetSecurityDescriptorSddlForm($sections)
+            $afterHash = (Get-FileHash `
+                -LiteralPath $lockLayout.LifecycleLockPath `
+                -Algorithm SHA256).Hash
+            if ([int64]$beforeItem.Length -ne 0 -or
+                [int64]$afterItem.Length -ne 0 -or
+                $afterHash -cne $beforeHash -or
+                $afterSDDL -cne $beforeSDDL) {
+                throw 'persistent lifecycle file lock changed across consecutive acquisitions'
             }
         }
         finally {
-            Exit-DefenseClawLifecycleLock -Lock $lock
             Remove-DefenseClawManagedTree `
                 -Path $SmokeStateRoot `
                 -RequiredBase $script:ProgramData `
@@ -643,6 +885,48 @@ else {
     }
 }
 
+$teardownFailurePreserved = & $module {
+    function script:Assert-DefenseClawAdministrator {}
+    function script:Invoke-DefenseClawGatewayCommand {
+        param(
+            [hashtable]$Layout,
+            [string]$GatewayServiceName,
+            [object[]]$Arguments,
+            [switch]$Capture,
+            [switch]$AllowFailure
+        )
+        return [pscustomobject]@{
+            exit_code = 1
+            output = @(
+                '{"schema_version":2,"action":"prepare","ok":false,"error":"resolve trusted ProgramData: restricted fixture"}'
+            )
+        }
+    }
+    $failureLayout = @{
+        ManifestPath = 'C:\missing\targets.yaml'
+        ManagedHooksTeardownJournalPath = 'C:\missing\managed-hooks-teardown.json'
+    }
+    $caught = $null
+    try {
+        [void](Invoke-DefenseClawManagedHooksTeardownCommand `
+            -Layout $failureLayout `
+            -GatewayServiceName 'DefenseClawGateway' `
+            -Action prepare)
+    }
+    catch {
+        $caught = [string]$_.Exception.Message
+    }
+    if ([string]::IsNullOrWhiteSpace($caught) -or
+        $caught -notmatch 'resolve trusted ProgramData: restricted fixture' -or
+        $caught -match 'missing (manifest_path|journal_path)') {
+        throw "failed managed-hook teardown masked its original error: $caught"
+    }
+    return $true
+}
+if (-not [bool]$teardownFailurePreserved) {
+    throw 'failed managed-hook teardown diagnostic regression did not execute'
+}
+
 [pscustomobject]@{
     schema_version = 1
     ok = $true
@@ -650,8 +934,12 @@ else {
     elevated = $elevated
     windows_directory = $windowsDirectory
     lifecycle_file_lock_executed = $elevated
+    lifecycle_file_lock_reuse_stable = $elevated
     ambient_cmdlet_shadow_ignored = $true
     fixed_native_helper_spoof_ignored = $true
+    command_line_empty_argument_round_trip = $true
+    command_line_invalid_arguments_rejected = $true
+    teardown_failure_diagnostic_preserved = $teardownFailurePreserved
     production_codex_home_absent = $true
     certification_codex_home_exact = $true
     certification_scope_rejections = $true

@@ -19,7 +19,7 @@ func main() {
 	var (
 		target     = flag.String("target", "windows_amd64", "build target (windows_amd64 or windows_arm64)")
 		executable = flag.String("executable", "", "Windows executable to update or verify")
-		component  = flag.String("component", "", "resource component: gateway, hook, launcher, startup, or setup")
+		component  = flag.String("component", "", "resource component: gateway, hook, launcher, startup, setup, or enterprise-setup")
 		version    = flag.String("version", "", "semantic product version")
 		icon       = flag.String("icon", windowsresources.IconSource, "project-owned source PNG")
 		verifyOnly = flag.Bool("verify-only", false, "verify resources without changing the executable")

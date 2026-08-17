@@ -66,6 +66,12 @@ func stageWindowsEnterprisePayloadIn(
 				cleanup(),
 			)
 		}
+		if err := protectWindowsEnterpriseStagedPayload(path); err != nil {
+			return "", nil, errors.Join(
+				fmt.Errorf("protect the embedded %s: %w", filepath.Base(path), err),
+				cleanup(),
+			)
+		}
 	}
 	// The staged pair meets the same trust gate as a pair found on disk, so a
 	// staging root anyone else can write fails here rather than in PowerShell.
@@ -75,16 +81,40 @@ func stageWindowsEnterprisePayloadIn(
 	return script, cleanup, nil
 }
 
+// protectWindowsEnterpriseStagedPayload aligns files created in the elevated
+// ProgramData capability with its machine-trusted ownership. os.WriteFile
+// otherwise leaves them owned by the creating administrator account even
+// though the parent has an Administrators-owned protected DACL. Unelevated
+// status staging remains owned by the calling user and is validated against
+// that same user's trusted temporary-directory boundary.
+func protectWindowsEnterpriseStagedPayload(path string) error {
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		return nil
+	}
+	administrators, err := windows.CreateWellKnownSid(
+		windows.WinBuiltinAdministratorsSid,
+	)
+	if err != nil {
+		return fmt.Errorf("resolve the Administrators SID: %w", err)
+	}
+	if err := setEnterpriseWindowsRuntimeProtection(
+		path,
+		administrators,
+		nil,
+		false,
+	); err != nil {
+		return fmt.Errorf("apply machine-trusted payload protection: %w", err)
+	}
+	return nil
+}
+
 // newWindowsEnterprisePayloadDirectory creates the directory the scripts are
 // staged into. An elevated run stages under a root only SYSTEM and
 // Administrators can write, so nobody can swap a script between this write and
 // the read PowerShell makes.
 func newWindowsEnterprisePayloadDirectory() (string, error) {
 	if windows.GetCurrentProcessToken().IsElevated() {
-		parent, err := windows.KnownFolderPath(
-			windows.FOLDERID_ProgramData,
-			windows.KF_FLAG_DEFAULT,
-		)
+		parent, err := windowsEnterpriseProgramDataResolver()
 		if err != nil {
 			return "", fmt.Errorf("resolve the trusted ProgramData directory: %w", err)
 		}

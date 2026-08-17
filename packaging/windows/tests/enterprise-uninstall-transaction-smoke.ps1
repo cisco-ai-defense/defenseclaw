@@ -14,7 +14,7 @@ $modulePath = [IO.Path]::GetFullPath(
 )
 $testRoot = Microsoft.PowerShell.Management\Join-Path `
     ([IO.Path]::GetTempPath()) `
-    ('defenseclaw-uninstall-transaction-' + [Guid]::NewGuid().ToString('N'))
+    ('dcut-' + [Guid]::NewGuid().ToString('N'))
 Microsoft.PowerShell.Management\New-Item `
     -ItemType Directory `
     -Path $testRoot `
@@ -51,6 +51,28 @@ try {
             if (-not $Condition) {
                 throw $Message
             }
+        }
+
+        # Windows PowerShell 5.1 runs on .NET Framework and still reaches the
+        # legacy MAX_PATH boundary for ordinary file APIs. Keep filesystem
+        # fixture names compact; retain descriptive case names in the report.
+        $script:HarnessCaseSequence = 0
+        function New-HarnessCaseRoot {
+            param(
+                [Parameter(Mandatory)][string]$Parent,
+                [Parameter(Mandatory)][string]$Label
+            )
+            $script:HarnessCaseSequence++
+            $root = Microsoft.PowerShell.Management\Join-Path `
+                $Parent `
+                ('c{0:d3}' -f $script:HarnessCaseSequence)
+            $receiptProbe = Microsoft.PowerShell.Management\Join-Path `
+                (Microsoft.PowerShell.Management\Join-Path $root 'lifecycle') `
+                ('purge-' + ('1' * 64) + '.json')
+            if ($receiptProbe.Length -ge 240) {
+                throw "PowerShell 5.1 fixture path is too long for ${Label}: $receiptProbe"
+            }
+            return $root
         }
 
         function Get-HarnessSHA256 {
@@ -215,6 +237,11 @@ try {
                         $installState `
                         'managed-hooks-teardown-journal.json'
                 )
+                ManagedHooksLifecycleJournalPath = (
+                    Microsoft.PowerShell.Management\Join-Path `
+                        $installState `
+                        'managed-hooks-lifecycle-journal.json'
+                )
                 CodexTrustedShellAttestationPath = (
                     Microsoft.PowerShell.Management\Join-Path `
                         $installState `
@@ -246,7 +273,8 @@ try {
                 [Parameter(Mandatory)]
                 [AllowEmptyString()]
                 [string]$PreimageSHA256,
-                [Parameter(Mandatory)][bool]$ServicesRunning
+                [Parameter(Mandatory)][bool]$ServicesRunning,
+                [bool]$ServicesExisted = $true
             )
             $snapshot = [ordered]@{
                 schema_version = 1
@@ -268,15 +296,15 @@ try {
                 services = @(
                     [ordered]@{
                         name = 'DefenseClawGateway'
-                        existed = $true
+                        existed = $ServicesExisted
                         running = $ServicesRunning
-                        start_mode = 2
+                        start_mode = $(if ($ServicesExisted) { 2 } else { 0 })
                     },
                     [ordered]@{
                         name = 'DefenseClawHookGuardian'
-                        existed = $true
+                        existed = $ServicesExisted
                         running = $ServicesRunning
-                        start_mode = 2
+                        start_mode = $(if ($ServicesExisted) { 2 } else { 0 })
                     }
                 )
                 created_shared_directories = @()
@@ -415,10 +443,20 @@ try {
                 )) {
                 throw 'generic restore changed the live managed-hook journal'
             }
-            $script:HarnessState.active_references = $true
-            Write-HarnessJournal `
-                -Path $Layout.ManagedHooksTeardownJournalPath `
-                -Phase 'rolled_back'
+            $phase = Get-HarnessJournalPhase `
+                -Path $Layout.ManagedHooksTeardownJournalPath
+            if ($phase -eq 'rolled_back') {
+                if (-not [bool]$script:HarnessState.active_references) {
+                    throw 'rolled-back journal has missing active references'
+                }
+                $script:HarnessState.rollback_verification_only++
+            }
+            else {
+                $script:HarnessState.active_references = $true
+                Write-HarnessJournal `
+                    -Path $Layout.ManagedHooksTeardownJournalPath `
+                    -Phase 'rolled_back'
+            }
             return [pscustomobject]@{ ok = $true }
         }
 
@@ -476,7 +514,7 @@ try {
                 [bool]$ServicesRunning = $true,
                 [bool]$ExpectFailure = $false
             )
-            $root = Microsoft.PowerShell.Management\Join-Path $TestRoot $Name
+            $root = New-HarnessCaseRoot -Parent $TestRoot -Label $Name
             $layout = New-HarnessLayout -Root $root
             $journalPath = [string]$layout.ManagedHooksTeardownJournalPath
             $preimageBytes = $null
@@ -516,9 +554,12 @@ try {
                 expected_journal_bytes = $expectedBytes
                 binary_present = $BinaryPresent
                 services_running = $false
-                active_references = -not $LiveJournalExists
+                active_references = (
+                    -not $LiveJournalExists -or $LivePhase -eq 'rolled_back'
+                )
                 restore_calls = 0
                 rollback_calls = 0
+                rollback_verification_only = 0
                 start_calls = 0
             }
 
@@ -549,6 +590,13 @@ try {
                 Assert-Harness `
                     -Condition ($script:HarnessState.rollback_calls -eq 1) `
                     -Message "$Name did not run exactly one authenticated rollback"
+                if ($LivePhase -eq 'rolled_back') {
+                    Assert-Harness `
+                        -Condition (
+                            $script:HarnessState.rollback_verification_only -eq 1
+                        ) `
+                        -Message "$Name repeated an already-completed hook rollback"
+                }
                 Assert-Harness `
                     -Condition ([bool]$script:HarnessState.active_references) `
                     -Message "$Name did not restore machine hook references"
@@ -642,9 +690,9 @@ try {
             -LivePhase '' `
             -ExpectRollback:$true `
             -ExpectFailure:$true
-        $invalidCoreRoot = Microsoft.PowerShell.Management\Join-Path `
-            $TestRoot `
-            'snapshot-core-without-scope'
+        $invalidCoreRoot = New-HarnessCaseRoot `
+            -Parent $TestRoot `
+            -Label 'snapshot-core-without-scope'
         $invalidCoreLayout = New-HarnessLayout -Root $invalidCoreRoot
         $invalidCoreSnapshot = Microsoft.PowerShell.Management\Join-Path `
             $invalidCoreLayout.StateRoot `
@@ -698,6 +746,7 @@ try {
             )
             return [pscustomobject]@{
                 installed = [bool]$script:HarnessState.installed
+                codex_target_enabled = $false
             }
         }
         function script:Assert-DefenseClawMetadataIdentity {
@@ -873,13 +922,30 @@ try {
                 $snapshotPath = Microsoft.PowerShell.Management\Join-Path `
                     ([string]$Layout.StateRoot) `
                     'install-snapshot.json'
+                $servicesExisted = $true
+                if ($script:HarnessState.ContainsKey(
+                        'track_fresh_install_services'
+                    ) -and
+                    [bool]$script:HarnessState.track_fresh_install_services) {
+                    $servicesExisted = [bool](
+                        $script:HarnessState.service_exists[
+                            $GatewayServiceName
+                        ] -or
+                        $script:HarnessState.service_exists[
+                            $GuardianServiceName
+                        ]
+                    )
+                    $script:HarnessState.fresh_services_existed =
+                        $servicesExisted
+                }
                 Write-HarnessSnapshot `
                     -Layout $Layout `
                     -SnapshotPath $snapshotPath `
                     -Prepared:$false `
                     -PreimageExisted:$false `
                     -PreimageSHA256 '' `
-                    -ServicesRunning:$false
+                    -ServicesRunning:$false `
+                    -ServicesExisted:$servicesExisted
                 $script:HarnessState.snapshot_path = $snapshotPath
                 return $snapshotPath
             }
@@ -948,6 +1014,18 @@ try {
                     if ($script:HarnessState.crash_at -eq 'captured') {
                         throw 'injected crash after captured journal publication'
                     }
+                    if ($script:HarnessState.crash_at -eq
+                            'failed-teardown-self-restored') {
+                        $script:HarnessState.active_references = $false
+                        $script:HarnessState.active_references = $true
+                        Write-HarnessJournal `
+                            -Path $Layout.ManagedHooksTeardownJournalPath `
+                            -Phase 'rolled_back'
+                        throw (
+                            'injected disconnected target teardown incomplete ' +
+                            'after exact self-rollback'
+                        )
+                    }
                     $script:HarnessState.active_references = $false
                     Write-HarnessJournal `
                         -Path $Layout.ManagedHooksTeardownJournalPath `
@@ -986,13 +1064,96 @@ try {
                     if ($phase -notin @('captured', 'prepared', 'rolled_back')) {
                         throw "rollback received invalid journal phase: $phase"
                     }
-                    $script:HarnessState.active_references = $true
-                    Write-HarnessJournal `
-                        -Path $Layout.ManagedHooksTeardownJournalPath `
-                        -Phase 'rolled_back'
+                    if ($phase -eq 'rolled_back') {
+                        if (-not [bool]$script:HarnessState.active_references) {
+                            throw 'rolled-back journal has missing active references'
+                        }
+                        $script:HarnessState.rollback_verification_only++
+                    }
+                    else {
+                        $script:HarnessState.active_references = $true
+                        Write-HarnessJournal `
+                            -Path $Layout.ManagedHooksTeardownJournalPath `
+                            -Phase 'rolled_back'
+                    }
                     return [pscustomobject]@{ ok = $true }
                 }
             }
+        }
+        function script:Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand {
+            param(
+                [Parameter(Mandatory)][hashtable]$Layout,
+                [Parameter(Mandatory)][string]$GatewayServiceName,
+                [Parameter(Mandatory)]
+                [ValidateSet('capture', 'restore', 'retire')]
+                [string]$Action
+            )
+            $null = $GatewayServiceName
+            $script:HarnessState.events.Add("lifecycle-snapshot:$Action")
+            switch ($Action) {
+                'capture' {
+                    if ($script:HarnessState.ContainsKey(
+                            'track_fresh_install_services'
+                        ) -and
+                        [bool]$script:HarnessState.track_fresh_install_services) {
+                        if (-not [bool]$script:HarnessState.service_exists[
+                                $GatewayServiceName
+                            ] -or
+                            -not [bool]$script:HarnessState.service_exists[
+                                'DefenseClawHookGuardian'
+                            ]) {
+                            throw 'snapshot capture ran before both service identities existed'
+                        }
+                        if ($script:HarnessState.service_start_modes[
+                                $GatewayServiceName
+                            ] -ne 4 -or
+                            $script:HarnessState.service_start_modes[
+                                'DefenseClawHookGuardian'
+                            ] -ne 4) {
+                            throw 'snapshot capture observed a startable fresh service'
+                        }
+                        if ($script:HarnessState.events.IndexOf(
+                                'managed-core-acls'
+                            ) -lt 0) {
+                            throw 'snapshot capture ran before service-SID ACL setup'
+                        }
+                    }
+                    $script:HarnessState.lifecycle_preimage_active = [bool](
+                        $script:HarnessState.active_references
+                    )
+                    [IO.File]::WriteAllText(
+                        $Layout.ManagedHooksLifecycleJournalPath,
+                        '{"schema_version":1,"phase":"captured"}',
+                        [Text.UTF8Encoding]::new($false)
+                    )
+                    if ($script:HarnessState.ContainsKey(
+                            'fail_fresh_install_capture'
+                        ) -and
+                        [bool]$script:HarnessState.fail_fresh_install_capture) {
+                        throw 'injected fresh-install snapshot failure'
+                    }
+                }
+                'restore' {
+                    if (-not (Microsoft.PowerShell.Management\Test-Path `
+                        -LiteralPath $Layout.ManagedHooksLifecycleJournalPath `
+                        -PathType Leaf)) {
+                        throw 'lifecycle snapshot restore lost its journal'
+                    }
+                    $script:HarnessState.active_references = [bool](
+                        $script:HarnessState.lifecycle_preimage_active
+                    )
+                }
+                'retire' {
+                    if (Microsoft.PowerShell.Management\Test-Path `
+                        -LiteralPath $Layout.ManagedHooksLifecycleJournalPath `
+                        -PathType Leaf) {
+                        Microsoft.PowerShell.Management\Remove-Item `
+                            -LiteralPath $Layout.ManagedHooksLifecycleJournalPath `
+                            -Force
+                    }
+                }
+            }
+            return [pscustomobject]@{ ok = $true; action = $Action }
         }
         function script:Restore-DefenseClawTransaction {
             param(
@@ -1002,6 +1163,62 @@ try {
             )
             $script:HarnessState.events.Add('restore')
             $script:HarnessState.restore_calls++
+            if ($script:HarnessState.operation -eq 'install') {
+                [void](Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `
+                    -Layout $Layout `
+                    -GatewayServiceName 'DefenseClawGateway' `
+                    -Action restore)
+                [void](Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `
+                    -Layout $Layout `
+                    -GatewayServiceName 'DefenseClawGateway' `
+                    -Action retire)
+                if ($script:HarnessState.ContainsKey(
+                        'track_fresh_install_services'
+                    ) -and
+                    [bool]$script:HarnessState.track_fresh_install_services -and
+                    -not [bool]$script:HarnessState.fresh_services_existed) {
+                    # Model the exact absent file preimage recorded by a real
+                    # fresh-install transaction. Leaving the staged hook
+                    # binary behind makes the committed-uninstall preflight
+                    # correctly reject the retry before it opens a transaction.
+                    foreach ($path in @(
+                        $Layout.GatewayPath,
+                        $Layout.HookPath,
+                        $Layout.CLIPath,
+                        $Layout.ConfigPath,
+                        $Layout.ManifestPath,
+                        $Layout.InstallerPath,
+                        $Layout.ModulePath
+                    )) {
+                        if (Microsoft.PowerShell.Management\Test-Path `
+                                -LiteralPath $path) {
+                            Microsoft.PowerShell.Management\Remove-Item `
+                                -LiteralPath $path `
+                                -Force
+                        }
+                    }
+                    foreach ($name in @(
+                        'DefenseClawGateway',
+                        'DefenseClawHookGuardian'
+                    )) {
+                        $script:HarnessState.service_exists[$name] = $false
+                        $script:HarnessState.service_start_modes[$name] = 0
+                    }
+                    $script:HarnessState.removed_services += 2
+                    $script:HarnessState.installed = $false
+                    $script:HarnessState.services_running = $false
+                    return
+                }
+                $script:HarnessState.installed = $true
+                $script:HarnessState.services_running = $false
+                $script:HarnessState.service_start_modes[
+                    'DefenseClawGateway'
+                ] = 4
+                $script:HarnessState.service_start_modes[
+                    'DefenseClawHookGuardian'
+                ] = 4
+                return
+            }
             if (-not $DeferServiceRestart) {
                 throw 'uninstall recovery did not defer service restart'
             }
@@ -1196,17 +1413,23 @@ try {
                 [switch]$CodexTrustedHookLauncherVerified,
                 [switch]$DeferAutomaticStart
             )
+            $script:HarnessState.events.Add('managed-services')
             $mode = if ($DeferAutomaticStart) { 4 } else { 2 }
             $script:HarnessState.service_start_modes[$GatewayServiceName] =
                 $mode
             $script:HarnessState.service_start_modes[$GuardianServiceName] =
                 $mode
+            if ($script:HarnessState.ContainsKey('service_exists')) {
+                $script:HarnessState.service_exists[$GatewayServiceName] = $true
+                $script:HarnessState.service_exists[$GuardianServiceName] = $true
+            }
         }
         function script:Set-DefenseClawManagedCoreAcls {
             param(
                 [Parameter(Mandatory)][hashtable]$Layout,
                 [Parameter(Mandatory)][string]$GatewayServiceName
             )
+            $script:HarnessState.events.Add('managed-core-acls')
         }
         function script:Set-DefenseClawManagedAcls {
             param(
@@ -1277,6 +1500,9 @@ try {
             Start-DefenseClawService -Name $GuardianServiceName
             if ($script:HarnessState.ContainsKey('fail_fresh_guardian') -and
                 [bool]$script:HarnessState.fail_fresh_guardian) {
+                # Model a first activation that published only part of the
+                # machine enrollment before its causal failure.
+                $script:HarnessState.active_references = $true
                 throw 'injected stale guardian generation'
             }
             $script:HarnessState.guardian_fresh = $true
@@ -1527,9 +1753,9 @@ try {
                 [bool]$Purge = $false,
                 [bool]$SelfUninstall = $false
             )
-            $root = Microsoft.PowerShell.Management\Join-Path `
-                $TestRoot `
-                ('uninstall-' + $Name)
+            $root = New-HarnessCaseRoot `
+                -Parent $TestRoot `
+                -Label ('uninstall-' + $Name)
             $layout = New-HarnessLayout -Root $root
             [IO.File]::WriteAllText(
                 $layout.CodexTrustedShellAttestationPath,
@@ -1566,6 +1792,7 @@ try {
                 prepare_calls = 0
                 verify_calls = 0
                 rollback_calls = 0
+                rollback_verification_only = 0
                 restore_calls = 0
                 complete_calls = 0
                 service_contract_checks = 0
@@ -1591,6 +1818,7 @@ try {
                 barrier_complete = $false
             }
             $failed = $false
+            $failureMessage = ''
             try {
                 [void](Invoke-DefenseClawUninstallLifecycle `
                     -Layout $layout `
@@ -1605,6 +1833,7 @@ try {
             }
             catch {
                 $failed = $true
+                $failureMessage = [string]$_.Exception.Message
                 if ($ExpectSuccess) {
                     throw
                 }
@@ -1685,6 +1914,21 @@ try {
                         -Condition ($script:HarnessState.removed_services -eq 0) `
                         -Message "$Name deleted a service after deletion-boundary drift"
                 }
+                if ($CrashAt -eq 'failed-teardown-self-restored') {
+                    Assert-Harness `
+                        -Condition (
+                            $script:HarnessState.rollback_verification_only -eq 1
+                        ) `
+                        -Message "$Name repeated an already-completed hook rollback"
+                    Assert-Harness `
+                        -Condition (
+                            $failureMessage -like
+                                '*disconnected target teardown incomplete*' -and
+                            $failureMessage -notmatch
+                                '(?i)rollback also failed|Replace|path exception'
+                        ) `
+                        -Message "$Name replaced the original teardown diagnostic: $failureMessage"
+                }
             }
             $transactionIndex = $script:HarnessState.events.IndexOf(
                 'transaction'
@@ -1744,13 +1988,199 @@ try {
                 no_surviving_reference_before_delete = (
                     -not [bool]$script:HarnessState.reheal_observed
                 )
+                failure = $failureMessage
+            })
+        }
+
+        function Invoke-HarnessFreshInstallServiceBootstrapSequence {
+            $root = New-HarnessCaseRoot `
+                -Parent $TestRoot `
+                -Label 'fresh-install-service-bootstrap'
+            $layout = New-HarnessLayout -Root $root
+            $manifest = @'
+version: 1
+targets:
+  - connector: claudecode
+    sid: S-1-5-21-111-222-333-1001
+    user_home: C:\Users\Alice
+    data_dir: C:\Users\Alice\.defenseclaw
+    agent_version: 2.9.999
+    enabled: true
+'@
+            $sources = @{
+                gateway = 'fresh-gateway'
+                hook = 'fresh-hook'
+                installer = 'fresh-installer'
+                module = 'fresh-module'
+                config = 'listen_addr: 127.0.0.1:18970'
+                manifest = $manifest
+            }
+            $script:HarnessState = @{
+                operation = 'install'
+                crash_at = ''
+                events = [Collections.Generic.List[string]]::new()
+                layout = $layout
+                active_references = $false
+                lifecycle_preimage_active = $false
+                binary_present = $false
+                installed = $false
+                guardian_running = $false
+                gateway_running = $false
+                services_running = $false
+                services_were_running = $false
+                reheal_observed = $false
+                prepare_while_guardian_running = $false
+                transaction_calls = 0
+                prepare_calls = 0
+                verify_calls = 0
+                rollback_calls = 0
+                restore_calls = 0
+                complete_calls = 0
+                service_contract_checks = 0
+                owned_checks = 0
+                removed_services = 0
+                purged_state = $false
+                install_saw_retired_journal = $false
+                snapshot_path = ''
+                track_fresh_install_services = $true
+                fresh_services_existed = $false
+                fail_fresh_install_capture = $true
+                service_start_modes = @{
+                    DefenseClawGateway = 0
+                    DefenseClawHookGuardian = 0
+                }
+                service_exists = @{
+                    DefenseClawGateway = $false
+                    DefenseClawHookGuardian = $false
+                }
+                guardian_fresh = $false
+                queued_gateway_restart = $false
+                queued_restart_blocked = $true
+                gateway_started_before_guardian = $false
+                barrier_required = $true
+                barrier_complete = $false
+            }
+
+            for ($attempt = 1; $attempt -le 2; $attempt++) {
+                $script:HarnessState.events.Clear()
+                $failure = ''
+                try {
+                    [void](Invoke-DefenseClawInstallLikeLifecycle `
+                        -Action 'Install' `
+                        -Layout $layout `
+                        -Sources $sources `
+                        -GatewayServiceName 'DefenseClawGateway' `
+                        -GuardianServiceName 'DefenseClawHookGuardian' `
+                        -NoStart)
+                }
+                catch {
+                    $failure = [string]$_.Exception.Message
+                }
+
+                $transaction = $script:HarnessState.events.IndexOf(
+                    'transaction'
+                )
+                $services = $script:HarnessState.events.IndexOf(
+                    'managed-services'
+                )
+                $coreAcls = $script:HarnessState.events.IndexOf(
+                    'managed-core-acls'
+                )
+                $capture = $script:HarnessState.events.IndexOf(
+                    'lifecycle-snapshot:capture'
+                )
+                $eventTrace = [string]::Join(
+                    ', ',
+                    @($script:HarnessState.events)
+                )
+                Assert-Harness `
+                    -Condition (
+                        $transaction -ge 0 -and
+                        $services -gt $transaction -and
+                        $coreAcls -gt $services -and
+                        $capture -gt $coreAcls
+                    ) `
+                    -Message (
+                        "fresh install attempt $attempt violated " +
+                        'transaction/service/ACL/snapshot ordering ' +
+                        "(transaction=$transaction services=$services " +
+                        "core_acls=$coreAcls capture=$capture; " +
+                        "failure=$failure; events=[$eventTrace])"
+                    )
+
+                if ($attempt -eq 1) {
+                    Assert-Harness `
+                        -Condition ($failure -match 'injected fresh-install snapshot failure') `
+                        -Message "fresh install fault lost its causal failure: $failure"
+                    Assert-Harness `
+                        -Condition (
+                            -not [bool]$script:HarnessState.service_exists[
+                                'DefenseClawGateway'
+                            ] -and
+                            -not [bool]$script:HarnessState.service_exists[
+                                'DefenseClawHookGuardian'
+                            ] -and
+                            $script:HarnessState.service_start_modes[
+                                'DefenseClawGateway'
+                            ] -eq 0 -and
+                            $script:HarnessState.service_start_modes[
+                                'DefenseClawHookGuardian'
+                            ] -eq 0
+                        ) `
+                        -Message 'fresh install rollback retained a transaction-created service'
+                    Assert-Harness `
+                        -Condition (
+                            -not (Microsoft.PowerShell.Management\Test-Path `
+                                -LiteralPath $layout.PendingPath) -and
+                            -not (Microsoft.PowerShell.Management\Test-Path `
+                                -LiteralPath $layout.ManagedHooksLifecycleJournalPath)
+                        ) `
+                        -Message 'fresh install rollback retained protected transaction state'
+                    $script:HarnessState.fail_fresh_install_capture = $false
+                }
+                else {
+                    Assert-Harness `
+                        -Condition ([string]::IsNullOrWhiteSpace($failure)) `
+                        -Message "fresh install retry failed: $failure"
+                    Assert-Harness `
+                        -Condition (
+                            [bool]$script:HarnessState.installed -and
+                            [bool]$script:HarnessState.service_exists[
+                                'DefenseClawGateway'
+                            ] -and
+                            [bool]$script:HarnessState.service_exists[
+                                'DefenseClawHookGuardian'
+                            ] -and
+                            $script:HarnessState.service_start_modes[
+                                'DefenseClawGateway'
+                            ] -eq 4 -and
+                            $script:HarnessState.service_start_modes[
+                                'DefenseClawHookGuardian'
+                            ] -eq 4
+                        ) `
+                        -Message 'fresh Install -NoStart retry did not leave both services disabled'
+                }
+            }
+            Assert-Harness `
+                -Condition (
+                    $script:HarnessState.transaction_calls -eq 2 -and
+                    $script:HarnessState.restore_calls -eq 1 -and
+                    $script:HarnessState.removed_services -eq 2
+                ) `
+                -Message 'fresh install fault/retry did not use exact transactional rollback'
+            $uninstallResults.Add([pscustomobject]@{
+                name = 'fresh-install-service-bootstrap-rollback-retry'
+                failed = $false
+                rollback = $script:HarnessState.restore_calls
+                service_contract_checks = 0
+                no_surviving_reference_before_delete = $true
             })
         }
 
         function Invoke-HarnessDirectReinstallSequence {
-            $root = Microsoft.PowerShell.Management\Join-Path `
-                $TestRoot `
-                'direct-reinstall-after-committed-crash'
+            $root = New-HarnessCaseRoot `
+                -Parent $TestRoot `
+                -Label 'direct-reinstall-after-committed-crash'
             $layout = New-HarnessLayout -Root $root
             $oldJournal = [ordered]@{
                 schema_version = 1
@@ -1899,15 +2329,156 @@ targets:
             })
         }
 
+        function Invoke-HarnessFirstActivationFailureSequence {
+            $root = New-HarnessCaseRoot `
+                -Parent $TestRoot `
+                -Label 'first-activation-failure'
+            $layout = New-HarnessLayout -Root $root
+            $manifest = @'
+version: 1
+targets:
+  - connector: claudecode
+    sid: S-1-5-21-111-222-333-1001
+    user_home: C:\Users\Alice
+    data_dir: C:\Users\Alice\.defenseclaw
+    agent_version: 2.9.999
+    enabled: true
+'@
+            $sources = @{
+                gateway = 'activation-gateway'
+                hook = 'activation-hook'
+                installer = 'activation-installer'
+                module = 'activation-module'
+                config = 'listen_addr: 127.0.0.1:18970'
+                manifest = $manifest
+            }
+            foreach ($entry in @(
+                @($layout.ConfigPath, 'listen_addr: 127.0.0.1:18969'),
+                @($layout.ManifestPath, $manifest)
+            )) {
+                $parent = [IO.Path]::GetDirectoryName([string]$entry[0])
+                if (-not (Microsoft.PowerShell.Management\Test-Path `
+                    -LiteralPath $parent `
+                    -PathType Container)) {
+                    Microsoft.PowerShell.Management\New-Item `
+                        -ItemType Directory `
+                        -Path $parent `
+                        -Force | Microsoft.PowerShell.Core\Out-Null
+                }
+                [IO.File]::WriteAllText(
+                    [string]$entry[0],
+                    [string]$entry[1],
+                    [Text.UTF8Encoding]::new($false)
+                )
+            }
+            $script:HarnessState = @{
+                operation = 'install'
+                crash_at = ''
+                events = [Collections.Generic.List[string]]::new()
+                layout = $layout
+                active_references = $false
+                lifecycle_preimage_active = $false
+                binary_present = $true
+                installed = $true
+                guardian_running = $false
+                gateway_running = $false
+                services_running = $false
+                services_were_running = $false
+                reheal_observed = $false
+                prepare_while_guardian_running = $false
+                transaction_calls = 0
+                prepare_calls = 0
+                verify_calls = 0
+                rollback_calls = 0
+                restore_calls = 0
+                complete_calls = 0
+                service_contract_checks = 0
+                owned_checks = 0
+                removed_services = 0
+                purged_state = $false
+                install_saw_retired_journal = $false
+                snapshot_path = ''
+                service_start_modes = @{
+                    DefenseClawGateway = 4
+                    DefenseClawHookGuardian = 4
+                }
+                guardian_fresh = $false
+                fail_fresh_guardian = $true
+                queued_gateway_restart = $false
+                queued_restart_blocked = $true
+                gateway_started_before_guardian = $false
+                barrier_required = $true
+                barrier_complete = $false
+            }
+            for ($attempt = 1; $attempt -le 2; $attempt++) {
+                $script:HarnessState.events.Clear()
+                $script:HarnessState.barrier_complete = $false
+                $script:HarnessState.active_references = $false
+                $failure = ''
+                try {
+                    [void](Invoke-DefenseClawInstallLikeLifecycle `
+                        -Action 'Repair' `
+                        -Layout $layout `
+                        -Sources $sources `
+                        -GatewayServiceName 'DefenseClawGateway' `
+                        -GuardianServiceName 'DefenseClawHookGuardian')
+                }
+                catch {
+                    $failure = [string]$_.Exception.Message
+                }
+                Assert-Harness `
+                    -Condition ($failure -match 'injected stale guardian generation') `
+                    -Message "first activation attempt $attempt lost its causal failure: $failure"
+                Assert-Harness `
+                    -Condition (-not [bool]$script:HarnessState.active_references) `
+                    -Message "first activation attempt $attempt retained partial machine enrollment"
+                Assert-Harness `
+                    -Condition (-not (Microsoft.PowerShell.Management\Test-Path `
+                        -LiteralPath $layout.ManagedHooksLifecycleJournalPath)) `
+                    -Message "first activation attempt $attempt retained its completed lifecycle journal"
+                Assert-Harness `
+                    -Condition (-not (Microsoft.PowerShell.Management\Test-Path `
+                        -LiteralPath $layout.PendingPath)) `
+                    -Message "first activation attempt $attempt retained pending recovery after exact rollback"
+                $capture = $script:HarnessState.events.IndexOf(
+                    'lifecycle-snapshot:capture'
+                )
+                $restore = $script:HarnessState.events.IndexOf(
+                    'lifecycle-snapshot:restore'
+                )
+                $complete = $script:HarnessState.events.IndexOf('complete')
+                $retire = $script:HarnessState.events.IndexOf(
+                    'lifecycle-snapshot:retire'
+                )
+                Assert-Harness `
+                    -Condition (
+                        $capture -ge 0 -and
+                        $restore -gt $capture -and
+                        $retire -gt $restore -and
+                        $complete -gt $retire
+                    ) `
+                    -Message "first activation attempt $attempt violated capture/restore/retire ordering"
+            }
+            $uninstallResults.Add([pscustomobject]@{
+                name = 'repeated-first-activation-failure-exact-rollback'
+                failed = $false
+                rollback = $script:HarnessState.restore_calls
+                service_contract_checks = (
+                    $script:HarnessState.service_contract_checks
+                )
+                no_surviving_reference_before_delete = $true
+            })
+        }
+
         $purgeResults = [Collections.Generic.List[object]]::new()
         function New-HarnessCommittedPurgeCase {
             param(
                 [Parameter(Mandatory)][string]$Name,
                 [string]$CrashAt = ''
             )
-            $root = Microsoft.PowerShell.Management\Join-Path `
-                $TestRoot `
-                ('purge-' + $Name)
+            $root = New-HarnessCaseRoot `
+                -Parent $TestRoot `
+                -Label ('purge-' + $Name)
             $layout = New-HarnessLayout -Root $root
             [IO.File]::WriteAllText(
                 $layout.MetadataPath,
@@ -2322,7 +2893,7 @@ targets:
                 else {
                     Microsoft.PowerShell.Management\Join-Path `
                         $script:ProgramData `
-                        'Cisco\DefenseClaw-Lifecycle\DefenseClaw'
+                        'Cisco\Cisco Secure Client\DefenseClaw-Lifecycle\DefenseClaw'
                 }
                 [void](Get-DefenseClawLayout `
                     -InstallRoot (
@@ -2396,9 +2967,9 @@ targets:
                 )]
                 [string]$InvalidMode = ''
             )
-            $root = Microsoft.PowerShell.Management\Join-Path `
-                $TestRoot `
-                ('quiescing-' + $Name)
+            $root = New-HarnessCaseRoot `
+                -Parent $TestRoot `
+                -Label ('quiescing-' + $Name)
             $layout = New-HarnessLayout -Root $root
             $id = [Guid]::NewGuid().ToString('N')
             $transactionDirectory = Microsoft.PowerShell.Management\Join-Path `
@@ -2802,6 +3373,10 @@ targets:
             -CrashAt 'captured' `
             -ExpectSuccess:$false
         Invoke-HarnessUninstallCase `
+            -Name 'failed-teardown-self-restored' `
+            -CrashAt 'failed-teardown-self-restored' `
+            -ExpectSuccess:$false
+        Invoke-HarnessUninstallCase `
             -Name 'prepared-before-marker' `
             -CrashAt 'prepared-before-marker' `
             -ExpectSuccess:$false
@@ -2835,7 +3410,9 @@ targets:
             -ExpectSuccess:$true `
             -SelfUninstall:$true `
             -Purge:$true
+        Invoke-HarnessFreshInstallServiceBootstrapSequence
         Invoke-HarnessDirectReinstallSequence
+        Invoke-HarnessFirstActivationFailureSequence
 
         # Exercise the authenticated pre-layout self-uninstall state machine
         # directly. These cases cover the rename/transaction crash windows
@@ -3002,9 +3579,9 @@ targets:
                 [string]$ForeignFile = '',
                 [bool]$ExpectFailure = $false
             )
-            $root = Microsoft.PowerShell.Management\Join-Path `
-                $TestRoot `
-                ('shared-rollback-' + $Name)
+            $root = New-HarnessCaseRoot `
+                -Parent $TestRoot `
+                -Label ('shared-rollback-' + $Name)
             $layout = New-HarnessLayout -Root $root
             foreach ($directory in @(
                 $layout.CodexVendorDirectory,
@@ -3107,9 +3684,9 @@ targets:
                 [bool]$ExpectEvidence = $false,
                 [string[]]$ExpectedEventOrder = @()
             )
-            $root = Microsoft.PowerShell.Management\Join-Path `
-                $TestRoot `
-                ('self-recovery-' + $Name)
+            $root = New-HarnessCaseRoot `
+                -Parent $TestRoot `
+                -Label ('self-recovery-' + $Name)
             $layout = New-HarnessLayout -Root $root
             $retiredRoot = "$($layout.InstallRoot).retired-$(
                 [Guid]::NewGuid().ToString('N')

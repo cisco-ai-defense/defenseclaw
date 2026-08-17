@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -34,8 +35,10 @@ import (
 )
 
 const (
-	windowsEnterpriseInstallerEnv = "DEFENSECLAW_WINDOWS_ENTERPRISE_INSTALLER"
-	windowsEnterpriseTempSDDL     = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+	windowsEnterpriseInstallerEnv     = "DEFENSECLAW_WINDOWS_ENTERPRISE_INSTALLER"
+	windowsEnterpriseTempSDDL         = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"
+	windowsEnterpriseOutputCaptureMax = 1 << 20
+	windowsEnterpriseDiagnosticMax    = 4096
 	// 1603 is the fatal-install result Windows deployment systems act on.
 	// Never report 3010 from a failure: that means installed and awaiting a
 	// reboot, and it would mark an incomplete deployment as done.
@@ -81,6 +84,26 @@ type windowsEnterpriseLifecyclePreflightFailure struct {
 	Errors        []string `json:"errors"`
 }
 
+type windowsEnterpriseOutputCapture struct {
+	buffer    bytes.Buffer
+	truncated bool
+}
+
+func (capture *windowsEnterpriseOutputCapture) Write(body []byte) (int, error) {
+	written := len(body)
+	remaining := windowsEnterpriseOutputCaptureMax - capture.buffer.Len()
+	if remaining <= 0 {
+		capture.truncated = true
+		return written, nil
+	}
+	if len(body) > remaining {
+		body = body[:remaining]
+		capture.truncated = true
+	}
+	_, _ = capture.buffer.Write(body)
+	return written, nil
+}
+
 type windowsServiceConfigValidation struct {
 	SchemaVersion  int    `json:"schema_version"`
 	OK             bool   `json:"ok"`
@@ -97,12 +120,9 @@ var (
 	windowsEnterprisePayloadStager        = stageWindowsEnterprisePayload
 	windowsEnterpriseTrustValidator       = validateWindowsEnterpriseInstallerTrust
 	windowsEnterpriseExecutableResolver   = os.Executable
-	windowsEnterpriseProgramFilesResolver = func() (string, error) {
-		return windows.KnownFolderPath(
-			windows.FOLDERID_ProgramFiles,
-			windows.KF_FLAG_DEFAULT,
-		)
-	}
+	windowsEnterpriseProgramFilesResolver = trustedWindowsEnterpriseProgramFiles
+	windowsEnterpriseProgramDataResolver  = trustedWindowsEnterpriseProgramData
+	windowsEnterpriseMachineRootsResolver = resolveWindowsEnterpriseMachineRoots
 )
 
 type windowsEnterprisePowerShellTempOps struct {
@@ -137,6 +157,7 @@ func init() {
 	enterpriseWindowsCmd.AddCommand(newWindowsServiceConfigValidationCommand())
 	enterpriseWindowsCmd.AddCommand(newWindowsCodexRequirementsCommand())
 	enterpriseWindowsCmd.AddCommand(newWindowsManagedHooksTeardownCommand())
+	enterpriseWindowsCmd.AddCommand(newWindowsManagedHooksLifecycleCommand())
 	enterpriseCmd.AddCommand(enterpriseWindowsCmd)
 }
 
@@ -221,10 +242,6 @@ func runWindowsEnterpriseLifecycle(
 	}
 	if opts.noStart && action != "install" && action != "upgrade" && action != "repair" {
 		return failPreflight(errors.New("--no-start is valid only with install, upgrade, or repair"))
-	}
-	if opts.allowUnsigned && action != "install" && action != "upgrade" &&
-		action != "repair" && action != "uninstall" {
-		return failPreflight(errors.New("--allow-unsigned is valid only with install, upgrade, repair, or uninstall"))
 	}
 	if err := validateWindowsEnterpriseLifecycleSecurityOptions(cmd, action, opts); err != nil {
 		return failPreflight(err)
@@ -501,27 +518,25 @@ func validateWindowsEnterpriseLifecycleSecurityOptions(
 		return errors.New("Windows enterprise lifecycle options are unavailable")
 	}
 	mutationAction := action == "install" || action == "upgrade" || action == "repair"
-	securityOptionUsed := opts.attestAgentApplicationControl ||
+	mutationSecurityOptionUsed := opts.attestAgentApplicationControl ||
 		opts.attestClaudeEffectivePolicy ||
 		opts.attestCodexTrustedHookLauncher ||
 		opts.coreHardeningCertification ||
-		strings.TrimSpace(opts.codexTrustedHookLauncherBinary) != "" ||
-		strings.TrimSpace(opts.certificationCodexHome) != ""
+		strings.TrimSpace(opts.codexTrustedHookLauncherBinary) != ""
 	for _, name := range []string{
 		"attest-agent-application-control",
 		"attest-claude-effective-policy",
 		"attest-codex-trusted-hook-launcher",
 		"codex-trusted-hook-launcher-binary",
-		"certification-codex-home",
 		"core-hardening-certification",
 	} {
 		if cmd != nil && cmd.Flags().Changed(name) {
-			securityOptionUsed = true
+			mutationSecurityOptionUsed = true
 		}
 	}
-	if securityOptionUsed && !mutationAction {
+	if mutationSecurityOptionUsed && !mutationAction {
 		return errors.New(
-			"Windows enterprise security attestations and certification options are valid only with install, upgrade, or repair",
+			"Windows enterprise security attestations and core certification are valid only with install, upgrade, or repair",
 		)
 	}
 	if opts.codexTrustedHookLauncherBinary != "" &&
@@ -673,7 +688,8 @@ func runWindowsEnterprisePowerShell(
 	child.Env = childEnvironment
 	child.Dir = workingDirectory
 	child.Stdin = cmd.InOrStdin()
-	child.Stdout = cmd.OutOrStdout()
+	var childOutput windowsEnterpriseOutputCapture
+	child.Stdout = io.MultiWriter(cmd.OutOrStdout(), &childOutput)
 	child.Stderr = cmd.ErrOrStderr()
 	runErr := child.Run()
 	cleanupErr := cleanupTemp()
@@ -685,10 +701,22 @@ func runWindowsEnterprisePowerShell(
 			// "exit status N" alone does not say who exited.
 			var exit *exec.ExitError
 			if errors.As(runErr, &exit) {
-				failures = append(failures, fmt.Errorf(
-					"Windows enterprise installer exited with code %d",
-					exit.ExitCode(),
-				))
+				if action, detail, ok := windowsEnterpriseInstallerFailureDiagnostic(
+					childOutput.buffer.Bytes(),
+					childOutput.truncated,
+				); ok {
+					failures = append(failures, fmt.Errorf(
+						"Windows enterprise installer %s failed: %s (exit code %d)",
+						action,
+						detail,
+						exit.ExitCode(),
+					))
+				} else {
+					failures = append(failures, fmt.Errorf(
+						"Windows enterprise installer exited with code %d",
+						exit.ExitCode(),
+					))
+				}
 			} else {
 				failures = append(failures, fmt.Errorf("Windows enterprise installer: %w", runErr))
 			}
@@ -701,20 +729,64 @@ func runWindowsEnterprisePowerShell(
 	return nil
 }
 
+func windowsEnterpriseInstallerFailureDiagnostic(
+	body []byte,
+	truncated bool,
+) (action, detail string, ok bool) {
+	if truncated {
+		return "", "", false
+	}
+	var report struct {
+		SchemaVersion int      `json:"schema_version"`
+		Action        string   `json:"action"`
+		OK            bool     `json:"ok"`
+		Error         string   `json:"error"`
+		Errors        []string `json:"errors"`
+	}
+	trimmed := trimWindowsJSONBOM(bytes.TrimSpace(body))
+	if len(trimmed) == 0 || len(trimmed) > windowsEnterpriseOutputCaptureMax ||
+		json.Unmarshal(trimmed, &report) != nil || report.SchemaVersion != 1 ||
+		report.OK {
+		return "", "", false
+	}
+	rawDetail := strings.TrimSpace(report.Error)
+	if rawDetail == "" {
+		for _, candidate := range report.Errors {
+			if rawDetail = strings.TrimSpace(candidate); rawDetail != "" {
+				break
+			}
+		}
+	}
+	if rawDetail == "" {
+		return "", "", false
+	}
+	action = strings.ToLower(strings.TrimSpace(report.Action))
+	if action == "" || strings.IndexFunc(action, func(value rune) bool {
+		return value < 'a' || value > 'z'
+	}) >= 0 {
+		action = "lifecycle"
+	}
+	detail = strings.Map(func(value rune) rune {
+		if value < 0x20 || value == 0x7f {
+			return ' '
+		}
+		return value
+	}, rawDetail)
+	if len(detail) > windowsEnterpriseDiagnosticMax {
+		detail = detail[:windowsEnterpriseDiagnosticMax] + "..."
+	}
+	return action, detail, true
+}
+
 func trustedWindowsEnterpriseEnvironment(powerShellTemp string) ([]string, error) {
 	windowsDirectory, err := windows.GetSystemWindowsDirectory()
 	if err != nil {
 		return nil, fmt.Errorf("resolve the trusted Windows directory: %w", err)
 	}
-	programFiles, err := windows.KnownFolderPath(windows.FOLDERID_ProgramFiles, 0)
+	machineRoots, err := windowsEnterpriseMachineRootsResolver()
 	if err != nil {
-		return nil, fmt.Errorf("resolve the trusted Program Files folder: %w", err)
+		return nil, fmt.Errorf("resolve trusted Windows machine roots: %w", err)
 	}
-	programData, err := windows.KnownFolderPath(windows.FOLDERID_ProgramData, 0)
-	if err != nil {
-		return nil, fmt.Errorf("resolve the trusted ProgramData folder: %w", err)
-	}
-	programFilesX86, _ := windows.KnownFolderPath(windows.FOLDERID_ProgramFilesX86, 0)
 	if strings.TrimSpace(powerShellTemp) == "" {
 		return nil, errors.New("trusted Windows enterprise PowerShell temporary directory is empty")
 	}
@@ -728,10 +800,10 @@ func trustedWindowsEnterpriseEnvironment(powerShellTemp string) ([]string, error
 		"windir":          windowsDirectory,
 		"SystemDrive":     filepath.VolumeName(windowsDirectory),
 		"ComSpec":         filepath.Join(system32, "cmd.exe"),
-		"ProgramFiles":    programFiles,
-		"ProgramW6432":    programFiles,
-		"ProgramData":     programData,
-		"ALLUSERSPROFILE": programData,
+		"ProgramFiles":    machineRoots.ProgramFiles,
+		"ProgramW6432":    machineRoots.ProgramFiles,
+		"ProgramData":     machineRoots.ProgramData,
+		"ALLUSERSPROFILE": machineRoots.ProgramData,
 		"TEMP":            powerShellTemp,
 		"TMP":             powerShellTemp,
 		"LOCALAPPDATA":    powerShellTemp,
@@ -753,9 +825,7 @@ func trustedWindowsEnterpriseEnvironment(powerShellTemp string) ([]string, error
 			filepath.Join(system32, "WindowsPowerShell", "v1.0"),
 		}, string(os.PathListSeparator)),
 	}
-	if strings.TrimSpace(programFilesX86) != "" {
-		allowed["ProgramFiles(x86)"] = programFilesX86
-	}
+	allowed["ProgramFiles(x86)"] = machineRoots.ProgramFilesX86
 
 	environment := make([]string, 0, len(allowed))
 	for key, value := range allowed {
@@ -774,10 +844,7 @@ func prepareWindowsEnterprisePowerShellTemp() (string, func() error, error) {
 			elevatedTempRoot: func() (string, error) {
 				// ProgramData permits create-only access at its root without
 				// granting unprivileged callers replacement access to this child.
-				return windows.KnownFolderPath(
-					windows.FOLDERID_ProgramData,
-					windows.KF_FLAG_DEFAULT,
-				)
+				return windowsEnterpriseProgramDataResolver()
 			},
 			randomRead:      rand.Read,
 			createDirectory: windows.CreateDirectory,

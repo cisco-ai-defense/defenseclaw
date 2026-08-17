@@ -30,8 +30,8 @@ func TestWindowsEnterprisePowerShellArgsLifecycleParity(t *testing.T) {
 		cliBinary:                      `C:\stage\defenseclaw.exe`,
 		configPath:                     `C:\stage\config.yaml`,
 		manifestPath:                   `C:\stage\targets.yaml`,
-		installRoot:                    `C:\Program Files\Cisco\DefenseClaw`,
-		stateRoot:                      `C:\ProgramData\Cisco\DefenseClaw`,
+		installRoot:                    `C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw`,
+		stateRoot:                      `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw`,
 		gatewayServiceName:             "DefenseClawGateway",
 		guardianServiceName:            "DefenseClawHookGuardian",
 		certificationCodexHome:         `C:\certification\codex-home`,
@@ -146,6 +146,38 @@ func TestWindowsEnterpriseLifecycleCertificationModeMatrix(t *testing.T) {
 			},
 		},
 		{
+			name:   "unsigned preinstall status",
+			action: "status",
+			opts: windowsEnterpriseLifecycleOptions{
+				allowUnsigned:          true,
+				certificationCodexHome: certificationHome,
+			},
+		},
+		{
+			name:   "unsigned verify",
+			action: "verify",
+			opts: windowsEnterpriseLifecycleOptions{
+				allowUnsigned:          true,
+				certificationCodexHome: certificationHome,
+			},
+		},
+		{
+			name:   "unsigned reconcile",
+			action: "reconcile",
+			opts: windowsEnterpriseLifecycleOptions{
+				allowUnsigned:          true,
+				certificationCodexHome: certificationHome,
+			},
+		},
+		{
+			name:   "unsigned uninstall",
+			action: "uninstall",
+			opts: windowsEnterpriseLifecycleOptions{
+				allowUnsigned:          true,
+				certificationCodexHome: certificationHome,
+			},
+		},
+		{
 			name:        "unsigned lacks scope home",
 			action:      "install",
 			opts:        windowsEnterpriseLifecycleOptions{allowUnsigned: true},
@@ -231,6 +263,22 @@ func TestWindowsEnterprisePowerShellArgsCoreCertificationIsExplicit(t *testing.T
 	}
 }
 
+func TestWindowsEnterprisePowerShellArgsUnsignedReadOnlyScopeIsExplicit(t *testing.T) {
+	opts := &windowsEnterpriseLifecycleOptions{
+		allowUnsigned:          true,
+		certificationCodexHome: `C:\Users\cert\.codex-defenseclaw-cert-0123456789`,
+	}
+	got := windowsEnterprisePowerShellArgs("status", opts)
+	want := []string{
+		"-Action", "Status",
+		"-CertificationCodexHome", opts.certificationCodexHome,
+		"-AllowUnsigned",
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("unsigned status args = %#v, want %#v", got, want)
+	}
+}
+
 func TestWindowsEnterprisePowerShellArgsPurgeIsExplicit(t *testing.T) {
 	got := windowsEnterprisePowerShellArgs("uninstall", &windowsEnterpriseLifecycleOptions{purge: true})
 	if !reflect.DeepEqual(got, []string{"-Action", "Uninstall", "-Purge"}) {
@@ -244,8 +292,8 @@ func TestWindowsEnterprisePowerShellArgsPurgeIsExplicit(t *testing.T) {
 
 func TestWindowsEnterpriseSelfUninstallCallerRequiresExactInstalledLayout(t *testing.T) {
 	const processID = 4242
-	installer := `C:\Program Files\Cisco\DefenseClaw\libexec\install-enterprise.ps1`
-	executable := `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe`
+	installer := `C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\libexec\install-enterprise.ps1`
+	executable := `C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\bin\defenseclaw.exe`
 	got, ok := windowsEnterpriseSelfUninstallCaller(
 		"uninstall",
 		installer,
@@ -281,20 +329,20 @@ func TestWindowsEnterpriseSelfUninstallCallerRequiresExactInstalledLayout(t *tes
 			name:       "near-prefix install root",
 			action:     "uninstall",
 			installer:  installer,
-			executable: `C:\Program Files\Cisco\DefenseClaw2\bin\defenseclaw.exe`,
+			executable: `C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw2\bin\defenseclaw.exe`,
 			processID:  processID,
 		},
 		{
 			name:       "wrong installer directory",
 			action:     "uninstall",
-			installer:  `C:\Program Files\Cisco\DefenseClaw\libexec2\install-enterprise.ps1`,
+			installer:  `C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\libexec2\install-enterprise.ps1`,
 			executable: executable,
 			processID:  processID,
 		},
 		{
 			name:       "wrong installer name",
 			action:     "uninstall",
-			installer:  `C:\Program Files\Cisco\DefenseClaw\libexec\other.ps1`,
+			installer:  `C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\libexec\other.ps1`,
 			executable: executable,
 			processID:  processID,
 		},
@@ -452,7 +500,7 @@ func TestWindowsEnterpriseSelfUpgradeResolutionErrorsFailClosed(t *testing.T) {
 
 	if conflict, err := windowsEnterpriseSelfUpgradeConflict(
 		"upgrade",
-		`..\..\Program Files\Cisco\DefenseClaw`,
+		`..\..\Program Files\Cisco\Cisco Secure Client\DefenseClaw`,
 		`C:\stage\defenseclaw.exe`,
 		`C:\release\defenseclaw.exe`,
 	); err == nil || conflict ||
@@ -616,7 +664,7 @@ func TestRunWindowsEnterpriseLifecycleResolutionErrorsFailClosedJSON(t *testing.
 	}{
 		{
 			name:        "relative explicit install root",
-			installRoot: `..\..\Program Files\Cisco\DefenseClaw`,
+			installRoot: `..\..\Program Files\Cisco\Cisco Secure Client\DefenseClaw`,
 			executable: func() (string, error) {
 				return `C:\release\defenseclaw.exe`, nil
 			},
@@ -811,6 +859,53 @@ func TestRunWindowsEnterpriseLifecyclePreflightAndRunnerJSONBoundaries(t *testin
 			t.Fatalf("Go preflight double-emitted runner JSON: %q", output.String())
 		}
 	})
+}
+
+func TestWindowsEnterpriseInstallerFailureDiagnosticPreservesCausalJSON(t *testing.T) {
+	body := []byte(`{"schema_version":1,"ok":false,"action":"repair","error":"guardian activation failed\npolicy incomplete","errors":["guardian activation failed"]}`)
+	action, detail, ok := windowsEnterpriseInstallerFailureDiagnostic(body, false)
+	if !ok || action != "repair" ||
+		detail != "guardian activation failed policy incomplete" {
+		t.Fatalf("diagnostic = (%q, %q, %t)", action, detail, ok)
+	}
+	legacy := append([]byte{0xef, 0xbb, 0xbf}, body...)
+	if action, detail, ok := windowsEnterpriseInstallerFailureDiagnostic(
+		legacy,
+		false,
+	); !ok || action != "repair" || detail == "" {
+		t.Fatalf("PowerShell 5.1 BOM diagnostic = (%q, %q, %t)", action, detail, ok)
+	}
+	errorsOnly := []byte(`{"schema_version":1,"ok":false,"action":"repair","errors":["readiness timeout"]}`)
+	if _, detail, ok := windowsEnterpriseInstallerFailureDiagnostic(
+		errorsOnly,
+		false,
+	); !ok || detail != "readiness timeout" {
+		t.Fatalf("errors-only diagnostic = (%q, %t)", detail, ok)
+	}
+	for name, test := range map[string]struct {
+		body      []byte
+		truncated bool
+	}{
+		"success report": {
+			body: []byte(`{"schema_version":1,"ok":true,"action":"repair","error":"unexpected"}`),
+		},
+		"non-json prefix": {
+			body: []byte("warning\n" + string(body)),
+		},
+		"truncated": {
+			body:      body,
+			truncated: true,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, _, ok := windowsEnterpriseInstallerFailureDiagnostic(
+				test.body,
+				test.truncated,
+			); ok {
+				t.Fatal("untrusted installer output was promoted to a public diagnostic")
+			}
+		})
+	}
 }
 
 func assertWindowsEnterprisePreflightFailureJSON(
@@ -1372,10 +1467,7 @@ func TestPrepareWindowsEnterprisePowerShellTempElevatedDescriptorAndCleanupRefus
 		_ = os.RemoveAll(path)
 	})
 
-	programData, err := windows.KnownFolderPath(
-		windows.FOLDERID_ProgramData,
-		windows.KF_FLAG_DEFAULT,
-	)
+	programData, err := trustedWindowsEnterpriseProgramData()
 	if err != nil {
 		t.Fatalf("resolve ProgramData: %v", err)
 	}

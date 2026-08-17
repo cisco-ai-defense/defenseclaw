@@ -3048,6 +3048,138 @@
         {"location": "internal/gateway/security_suite_test.go", "description": "TestSecuritySuiteE2E reads this to locate the gateway; uses an in-process server when unset"}
       ],
       "since": "0.7.0"
+    },
+    {
+      "name": "DEFENSECLAW_ENV_CONFIG_SKIP_TRUST",
+      "category": "test_fixture",
+      "purpose": "Skip the on-disk trust check LoadEnvConfigEndpoint enforces on the AVC-authored env_config.json: root ownership and no group/world write on Unix, administrator ownership across the ancestor chain on Windows. Set only in unit tests that exercise the JSON parse / URL validation branches with a fixture the test user can write.",
+      "default": "unset (trust check enforced)",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "medium",
+      "surface_in_doctor": true,
+      "consumers": [
+        {"location": "internal/config/env_config.go", "description": "trustEnvConfigFile short-circuits when set — production installs must leave this unset so a non-root-authored / group-writable env_config.json is refused"},
+        {"location": "internal/config/env_config_windows.go", "description": "shouldEnforceEnvConfigTrust short-circuits when set, skipping the managed.ValidateTrustedFilePath ancestor walk"}
+      ],
+      "since": "0.8.11",
+      "security_note": "Bypassing the env_config file trust check lets a file at the canonical path that untrusted principals can write retarget bearer-authenticated inspection POSTs. Test-only."
+    },
+    {
+      "name": "DEFENSECLAW_ATTRIBUTION_ROOT",
+      "category": "test_fixture",
+      "purpose": "Passes a temporary attribution root path from the Windows guardian-attribution Go test harness to its PowerShell child processes so they resolve InstallRoot/StateRoot/ClaudeManagedPolicyPath under the test's t.TempDir() instead of the machine defaults.",
+      "default": "unset",
+      "accepted_values": ["absolute Windows path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw/service_windows_test.go", "description": "The Windows guardian-attribution tests set the env var when launching PowerShell child processes so managed-path resolution happens under an isolated t.TempDir()"}
+      ],
+      "since": "0.8.11"
+    },
+    {
+      "name": "DEFENSECLAW_TEMP_RACE_ROOT",
+      "category": "test_fixture",
+      "purpose": "Root directory the Windows temp-race observation harness writes its baseline / observation records under. Set only by the Go test harness before invoking its PowerShell child; consumed by the observation function to emit deterministic evidence for the race check.",
+      "default": "unset",
+      "accepted_values": ["absolute Windows path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw/service_windows_test.go", "description": "Passed to the PowerShell child driving the Windows temp-race observation test"}
+      ],
+      "since": "0.8.11"
+    },
+    {
+      "name": "DEFENSECLAW_LEDGER_ROOT",
+      "category": "test_fixture",
+      "purpose": "State-root anchor for the Windows guardian semantic-ledger test harness. The Go test writes t.TempDir() into this env var so the child PowerShell resolves StateRoot under an isolated directory rather than the machine default.",
+      "default": "unset",
+      "accepted_values": ["absolute Windows path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw/service_windows_test.go", "description": "Anchors the semantic-ledger StateRoot in the guardian-semantic tests"}
+      ],
+      "since": "0.8.11"
+    },
+    {
+      "name": "DEFENSECLAW_SPARSE_EVIDENCE_ROOT",
+      "category": "test_fixture",
+      "purpose": "Work-root anchor for the Windows sparse-artifact recovery evidence harness. The Go test writes t.TempDir() into this env var so the child PowerShell resolves WorkRoot under an isolated directory.",
+      "default": "unset",
+      "accepted_values": ["absolute Windows path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw/service_windows_test.go", "description": "Anchors the WorkRoot the sparse-artifact recovery evidence test emits into"}
+      ],
+      "since": "0.8.11"
+    },
+    {
+      "name": "DEFENSECLAW_BOUNDED_DIGEST_ROOT",
+      "category": "test_fixture",
+      "purpose": "Root directory the bounded artifact-digest test harness writes its managed.token fixture under. Consumed by a PowerShell child so the Windows certification path resolves the fixture under the test's t.TempDir() rather than the machine defaults.",
+      "default": "unset",
+      "accepted_values": ["absolute Windows path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "cmd/defenseclaw/service_windows_test.go", "description": "Anchors the fixture the bounded artifact-digest certification test emits"}
+      ],
+      "since": "0.8.11"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_CODEX_MANAGED_SUBPROCESS",
+      "category": "test_fixture",
+      "purpose": "Marker the Windows connector-reconcile subprocess test sets in a re-execed child so it takes the Codex-managed code path instead of the parent's test-harness path. Consumed only by tests, never by production callers.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/cli/connector_reconcile_subprocess_windows_test.go", "description": "Marker the re-execed child reads to select the Codex-managed subprocess path under test"}
+      ],
+      "since": "0.8.11"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_CODEX_MANAGED_DATA",
+      "category": "test_fixture",
+      "purpose": "Passes the isolated Codex managed data root from the Windows connector-reconcile Go test to its re-execed subprocess so the child resolves managed-Codex artifacts under t.TempDir().",
+      "default": "unset",
+      "accepted_values": ["absolute Windows path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/cli/connector_reconcile_subprocess_windows_test.go", "description": "Handed to the re-execed subprocess to anchor the managed data root during the reconcile test"}
+      ],
+      "since": "0.8.11"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_CODEX_MANAGED_HOME",
+      "category": "test_fixture",
+      "purpose": "Passes the isolated user-home root from the Windows connector-reconcile Go test to its re-execed subprocess so the child resolves per-user managed-Codex artifacts under t.TempDir() rather than the runner's real profile.",
+      "default": "unset",
+      "accepted_values": ["absolute Windows path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/cli/connector_reconcile_subprocess_windows_test.go", "description": "Handed to the re-execed subprocess to anchor the per-user home during the reconcile test"}
+      ],
+      "since": "0.8.11"
+    },
+    {
+      "name": "DEFENSECLAW_TEST_RESTRICTED_ENTERPRISE_STAGING",
+      "category": "test_fixture",
+      "purpose": "Marker the Windows enterprise-payload restricted-environment staging test sets in a re-execed helper so the helper knows it is running inside a simulated restricted-user posture and applies the matching payload-staging path. Consumed only by tests.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "internal/cli/windows_enterprise_payload_test.go", "description": "Marker the re-execed staging helper reads to select the restricted-environment payload-staging path under test"}
+      ],
+      "since": "0.8.11"
     }
   ]
 }

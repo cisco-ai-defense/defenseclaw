@@ -606,6 +606,7 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
     from defenseclaw.ux import CLIRenderer
 
     data_dir = default_data_path()
+    trusted_binary_prefixes = _validated_preinit_trusted_binary_prefixes(data_dir)
     connector_settings: list[dict] | None = None
     judge_hook_connectors: list[str] | None = None
     interactive_wizard = False
@@ -757,6 +758,7 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
         # invalid values.
         human_approval=primary["human_approval"],
         hilt_min_severity=primary["hilt_min_severity"] or "",
+        trusted_binary_prefixes=trusted_binary_prefixes,
     )
     report = run_first_run(opts)
 
@@ -827,6 +829,34 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
         click.echo("  Configured connectors: " + ", ".join(activated))
     if report.status == "needs_attention":
         raise SystemExit(1)
+
+
+def _validated_preinit_trusted_binary_prefixes(
+    data_dir: str | os.PathLike[str],
+) -> tuple[str, ...] | None:
+    """Snapshot exact config-backed trust before the init transaction."""
+
+    from defenseclaw import config as cfg_mod
+
+    if not os.path.lexists(cfg_mod.config_path_for_data_dir(data_dir)):
+        return None
+    cfg = cfg_mod.load(data_dir=os.fspath(data_dir))
+    values = tuple(cfg.ai_discovery.trusted_binary_prefixes or ())
+    resolved_values: list[str] = []
+    seen: set[str] = set()
+    for raw in values:
+        resolved, error = agent_discovery.validate_trusted_prefix(str(raw))
+        if not resolved or error:
+            raise click.ClickException(
+                "pre-init trusted binary prefix is no longer safe: "
+                f"{raw!r} ({error or 'invalid path'})"
+            )
+        key = agent_discovery._path_key(resolved)
+        if key in seen:
+            continue
+        seen.add(key)
+        resolved_values.append(resolved)
+    return tuple(resolved_values)
 
 
 def _parse_connector_list(raw: str | None) -> list[str]:

@@ -89,6 +89,8 @@ func installWindowsCodexManagedResult(
 		targetSID: target.sid,
 	}
 	var lockEntry connector.HookContractLockEntry
+	var lockUpdatedAt string
+	var entryUpdatedAt string
 	err = connector.WithUserHomeDir(target.home, func() error {
 		return windowsEnterpriseTargetImpersonation(target.sid, target.home, func() error {
 			verifiedHome, verifiedSID, verifyErr := validateWindowsEnterpriseHome(
@@ -156,12 +158,24 @@ func installWindowsCodexManagedResult(
 			lockEntry.Locations = connector.ConnectorLocations{
 				HookConfigPaths: []string{requirementsPath},
 			}
-			if err := connector.SaveHookContractLockEntryForMode(
+			if err := connector.SaveRecoveredHookContractLockEntryForMode(
 				target.dataDir,
 				lockEntry,
-				true,
+				opts.RecoveryHookContractLockUpdatedAt,
+				opts.RecoveryHookContractEntryUpdatedAt,
 			); err != nil {
 				return fail(fmt.Errorf("enterprise hooks: save Codex managed hook contract: %w", err))
+			}
+			lockUpdatedAt, entryUpdatedAt, err =
+				connector.ManagedHookContractTimestamps(
+					target.dataDir,
+					"codex",
+				)
+			if err != nil {
+				return fail(fmt.Errorf(
+					"enterprise hooks: load protected Codex hook contract recovery state: %w",
+					err,
+				))
 			}
 			if err := hardenWindowsUserRuntime(
 				target.home,
@@ -225,13 +239,15 @@ func installWindowsCodexManagedResult(
 		)
 	}
 	return InstallResult{
-		Connector:       "codex",
-		UserHome:        target.home,
-		DataDir:         target.dataDir,
-		HookConfigPaths: []string{requirementsPath},
-		CreatedDirs:     []string{transaction.dataDir, transaction.hookDir},
-		AgentVersion:    target.setup.AgentVersion,
-		HookContractID:  lockEntry.ContractID,
+		Connector:                  "codex",
+		UserHome:                   target.home,
+		DataDir:                    target.dataDir,
+		HookConfigPaths:            []string{requirementsPath},
+		CreatedDirs:                []string{transaction.dataDir, transaction.hookDir},
+		AgentVersion:               target.setup.AgentVersion,
+		HookContractID:             lockEntry.ContractID,
+		HookContractLockUpdatedAt:  lockUpdatedAt,
+		HookContractEntryUpdatedAt: entryUpdatedAt,
 	}, nil
 }
 

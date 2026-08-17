@@ -147,3 +147,43 @@ func TestWindowsEnterpriseHooksBootstrapUsesFullPreRunOutsideManagedMode(t *test
 		t.Fatal("normal Windows mode retained minimal guardian config instead of full pre-run config")
 	}
 }
+
+func TestWindowsEnterpriseHooksStatusUsesConfigOnlyPreRunOutsideManagedMode(t *testing.T) {
+	originalRuntimeGOOS := enterpriseHooksRuntimeGOOS
+	originalFullPreRun := enterpriseHooksFullRootPersistentPreRun
+	originalConfigOnlyPreRun := enterpriseHooksConfigOnlyPersistentPreRun
+	originalCfg := cfg
+	t.Cleanup(func() {
+		enterpriseHooksRuntimeGOOS = originalRuntimeGOOS
+		enterpriseHooksFullRootPersistentPreRun = originalFullPreRun
+		enterpriseHooksConfigOnlyPersistentPreRun = originalConfigOnlyPreRun
+		cfg = originalCfg
+	})
+
+	enterpriseHooksRuntimeGOOS = func() string { return "windows" }
+	t.Setenv(managed.DeploymentModeEnv, "")
+	enterpriseHooksFullRootPersistentPreRun = func(*cobra.Command, []string) error {
+		t.Fatal("unmanaged status initialized the full audit runtime")
+		return nil
+	}
+	loaded := &config.Config{
+		DeploymentMode: string(config.DeploymentModeUnmanagedBYOD),
+		DataDir:        filepath.Join(t.TempDir(), "absent-data"),
+	}
+	configOnlyCalls := 0
+	enterpriseHooksConfigOnlyPersistentPreRun = func(gotCommand *cobra.Command, _ []string) error {
+		if gotCommand != enterpriseHooksStatusCmd {
+			t.Fatalf("config-only pre-run command = %q, want status", gotCommand.Name())
+		}
+		configOnlyCalls++
+		cfg = loaded
+		return nil
+	}
+
+	if err := enterpriseHooksNativePersistentPreRun(enterpriseHooksStatusCmd, nil); err != nil {
+		t.Fatalf("unmanaged Windows status pre-run: %v", err)
+	}
+	if configOnlyCalls != 1 || cfg != loaded {
+		t.Fatalf("config-only pre-run calls/config = %d/%p, want 1/%p", configOnlyCalls, cfg, loaded)
+	}
+}

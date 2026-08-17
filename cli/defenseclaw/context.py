@@ -28,6 +28,15 @@ class AppContext:
         self.cfg = None
         self.store = None
         self.logger = None
+        # Set only by the root CLI when ``setup`` starts without config.yaml.
+        # The setup group uses it to admit the trusted-paths bootstrap and
+        # reject every other setup mutation until init has completed.
+        self.preinit_setup_bootstrap = False
+        # Set only when the root CLI deliberately defers setup's canonical
+        # validation and runtime initialization until the setup group can see
+        # its nested child command. Direct command-unit invocations retain
+        # their existing already-initialized AppContext contract.
+        self.setup_runtime_deferred = False
 
 
 pass_ctx = click.make_pass_decorator(AppContext, ensure=True)

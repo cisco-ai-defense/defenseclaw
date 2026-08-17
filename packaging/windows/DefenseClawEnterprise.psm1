@@ -8,6 +8,93 @@
 Microsoft.PowerShell.Core\Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
+function ConvertTo-DefenseClawTrustedMachineRoot {
+    param(
+        [Parameter(Mandatory)][string]$Value,
+        [Parameter(Mandatory)][string]$Label
+    )
+    if ([string]::IsNullOrWhiteSpace($Value) -or
+        $Value -match '[\x00-\x1f%]' -or
+        -not [IO.Path]::IsPathRooted($Value)) {
+        throw "trusted $Label root is empty, relative, or contains an invalid character"
+    }
+    $provided = $Value.TrimEnd('\')
+    $full = [IO.Path]::GetFullPath($Value).TrimEnd('\')
+    $driveRoot = [IO.Path]::GetPathRoot($full)
+    if ([string]::IsNullOrWhiteSpace($driveRoot) -or
+        $driveRoot -notmatch '^[A-Za-z]:\\$' -or
+        -not [string]::Equals(
+            $provided,
+            $full,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        $full.StartsWith('\\') -or
+        $full.StartsWith('//') -or
+        $full.StartsWith('\\?\') -or
+        $full.StartsWith('\\.\') -or
+        ($full.Length -gt 2 -and $full.Substring(2).Contains(':')) -or
+        -not [IO.Directory]::Exists($full)) {
+        throw "trusted $Label root is not an existing canonical local directory: $full"
+    }
+    return $full
+}
+
+function Get-DefenseClawTrustedMachineRoots {
+    # GetFolderPath can return an empty string when Windows PowerShell 5.1 is
+    # launched with the deliberately reduced certification environment. Read
+    # fixed machine registration instead of process-controlled environment.
+    $windows = ConvertTo-DefenseClawTrustedMachineRoot `
+        -Value ([IO.Path]::GetDirectoryName([Environment]::SystemDirectory)) `
+        -Label 'Windows'
+    $base = $null
+    $currentVersion = $null
+    $shell = $null
+    try {
+        $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+            [Microsoft.Win32.RegistryHive]::LocalMachine,
+            [Microsoft.Win32.RegistryView]::Registry64
+        )
+        $currentVersion = $base.OpenSubKey(
+            'SOFTWARE\Microsoft\Windows\CurrentVersion',
+            $false
+        )
+        if ($null -eq $currentVersion) {
+            throw 'trusted Program Files machine registration is missing'
+        }
+        $programFilesRaw = [string]$currentVersion.GetValue(
+            'ProgramFilesDir',
+            $null,
+            [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
+        )
+        $shell = $base.OpenSubKey(
+            'SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders',
+            $false
+        )
+        if ($null -eq $shell) {
+            throw 'trusted ProgramData machine registration is missing'
+        }
+        $programDataRaw = [string]$shell.GetValue(
+            'Common AppData',
+            $null,
+            [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
+        )
+    }
+    finally {
+        if ($null -ne $shell) { $shell.Dispose() }
+        if ($null -ne $currentVersion) { $currentVersion.Dispose() }
+        if ($null -ne $base) { $base.Dispose() }
+    }
+    return [pscustomobject]@{
+        Windows = $windows
+        ProgramFiles = ConvertTo-DefenseClawTrustedMachineRoot `
+            -Value $programFilesRaw `
+            -Label 'Program Files'
+        ProgramData = ConvertTo-DefenseClawTrustedMachineRoot `
+            -Value $programDataRaw `
+            -Label 'ProgramData'
+    }
+}
+
 # Bind privileged cmdlets to modules shipped with the current PowerShell
 # engine. Windows PowerShell 5.1 can otherwise auto-select an incompatible
 # PowerShell 7 module when a parent tool prepends its module directory; an
@@ -43,9 +130,10 @@ $script:SchemaVersion = 1
 $script:AgentApplicationControlAttestationSchemaVersion = 2
 $script:AgentApplicationControlPrerequisite = 'wdac_or_applocker_approved_agent_client_rules'
 $script:CodexTrustedHookLauncherPrerequisite = 'approved_fail_closed_fixed_hook_launcher'
-$script:ProgramFiles = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
-$script:ProgramData = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
-$script:WindowsDirectory = [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)
+$trustedMachineRoots = Get-DefenseClawTrustedMachineRoots
+$script:ProgramFiles = [string]$trustedMachineRoots.ProgramFiles
+$script:ProgramData = [string]$trustedMachineRoots.ProgramData
+$script:WindowsDirectory = [string]$trustedMachineRoots.Windows
 $script:System32 = [IO.Path]::GetFullPath(
     [IO.Path]::Combine($script:WindowsDirectory, 'System32')
 ).TrimEnd('\')
@@ -1135,7 +1223,8 @@ function Resolve-DefenseClawCertificationCodexHome {
     param(
         [string]$Path,
         [Parameter(Mandatory)][string]$GatewayServiceName,
-        [Parameter(Mandatory)][string]$GuardianServiceName
+        [Parameter(Mandatory)][string]$GuardianServiceName,
+        [switch]$AllowMissing
     )
     if ([string]::IsNullOrWhiteSpace($Path)) {
         return ''
@@ -1150,7 +1239,7 @@ function Resolve-DefenseClawCertificationCodexHome {
         throw 'certification gateway and guardian service names must use the same run identifier'
     }
 
-    $full = Resolve-DefenseClawFullPath -Path $Path -MustExist
+    $full = Resolve-DefenseClawFullPath -Path $Path
     if ($full.StartsWith('\\') -or $full.StartsWith('//') -or
         $full.StartsWith('\\?\') -or $full.StartsWith('\\.\') -or
         ($full.Length -gt 2 -and $full.Substring(2).Contains(':'))) {
@@ -1164,8 +1253,15 @@ function Resolve-DefenseClawCertificationCodexHome {
     )) {
         throw "certification CODEX_HOME basename must be exactly $expectedLeaf"
     }
-    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $full -PathType Container)) {
+    $exists = Microsoft.PowerShell.Management\Test-Path `
+        -LiteralPath $full `
+        -PathType Container
+    if (-not $exists -and -not $AllowMissing) {
         throw "certification CODEX_HOME must be an existing directory: $full"
+    }
+    if ((Microsoft.PowerShell.Management\Test-Path -LiteralPath $full) -and
+        -not $exists) {
+        throw "certification CODEX_HOME must be a directory when present: $full"
     }
     $driveRoot = [IO.Path]::GetPathRoot($full)
     $logicalDisk = Get-DefenseClawLogicalDisk -DriveID $driveRoot.TrimEnd('\')
@@ -1177,7 +1273,9 @@ function Resolve-DefenseClawCertificationCodexHome {
         )) {
         throw "certification CODEX_HOME must be on a local fixed NTFS volume: $full"
     }
-    Assert-DefenseClawNoReparsePath -Path $full
+    Assert-DefenseClawNoReparsePath `
+        -Path $full `
+        -AllowMissingLeaf:(-not $exists)
     return $full
 }
 
@@ -1191,8 +1289,16 @@ function Assert-DefenseClawUnsignedCertificationScope {
         [string]$CertificationCodexHome
     )
     $prefix = '-AllowUnsigned is restricted to exact disposable DefenseClaw certification scope'
-    if ($Action -notin @('Install', 'Upgrade', 'Repair', 'Uninstall')) {
-        throw "$prefix; action must be Install, Upgrade, Repair, or Uninstall"
+    if ($Action -notin @(
+        'Install',
+        'Upgrade',
+        'Repair',
+        'Reconcile',
+        'Status',
+        'Verify',
+        'Uninstall'
+    )) {
+        throw "$prefix; action is outside the enterprise lifecycle"
     }
     if ($GatewayServiceName -cnotmatch '^DefenseClawCertGateway_([a-f0-9]{10})$') {
         throw "$prefix; gateway service name is outside the certification namespace"
@@ -1205,12 +1311,14 @@ function Assert-DefenseClawUnsignedCertificationScope {
     $expectedInstall = [IO.Path]::Combine(
         $script:ProgramFiles,
         'Cisco',
+        'Cisco Secure Client',
         'DefenseClaw-Cert',
         $runID
     ).TrimEnd('\')
     $expectedState = [IO.Path]::Combine(
         $script:ProgramData,
         'Cisco',
+        'Cisco Secure Client',
         'DefenseClaw-Cert',
         $runID
     ).TrimEnd('\')
@@ -1446,6 +1554,146 @@ function Install-DefenseClawSourceDescriptor {
     }
 }
 
+function ConvertTo-DefenseClawWindowsCommandLineArgument {
+    param([AllowEmptyString()][string]$Argument)
+    if ($null -eq $Argument -or $Argument.IndexOf([char]0) -ge 0) {
+        throw 'native process argument is null or contains NUL'
+    }
+    if ($Argument.Length -eq 0) {
+        return '""'
+    }
+    if ($Argument -notmatch '[\s"]') {
+        return $Argument
+    }
+
+    # ProcessStartInfo on .NET Framework exposes only a single command-line
+    # string. Encode each argv element with the inverse of CommandLineToArgvW
+    # so Windows PowerShell 5.1 cannot strip literal quotes from values such as
+    # an SCM binPath containing a quoted executable and quoted manifest.
+    $encoded = [Text.StringBuilder]::new($Argument.Length + 2)
+    [void]$encoded.Append('"')
+    $backslashes = 0
+    foreach ($character in $Argument.ToCharArray()) {
+        if ($character -eq [char]0x5c) {
+            $backslashes++
+            continue
+        }
+        if ($character -eq '"') {
+            [void]$encoded.Append([char]0x5c, (2 * $backslashes) + 1)
+            [void]$encoded.Append('"')
+            $backslashes = 0
+            continue
+        }
+        if ($backslashes -gt 0) {
+            [void]$encoded.Append([char]0x5c, $backslashes)
+            $backslashes = 0
+        }
+        [void]$encoded.Append($character)
+    }
+    if ($backslashes -gt 0) {
+        [void]$encoded.Append([char]0x5c, 2 * $backslashes)
+    }
+    [void]$encoded.Append('"')
+    return $encoded.ToString()
+}
+
+function ConvertTo-DefenseClawWindowsCommandLine {
+    param(
+        [Parameter(Mandatory)]
+        [ValidateNotNull()]
+        [AllowEmptyString()]
+        [object[]]$Arguments
+    )
+    $encoded = [Collections.Generic.List[string]]::new()
+    foreach ($argument in $Arguments) {
+        # Preserve and authenticate the element before scalar [string]
+        # binding can coerce $null to ''. Empty strings remain valid argv.
+        if ($null -eq $argument -or $argument -isnot [string]) {
+            throw 'native process arguments must be non-null strings'
+        }
+        $encoded.Add((
+            ConvertTo-DefenseClawWindowsCommandLineArgument `
+                -Argument $argument
+        ))
+    }
+    $commandLine = $encoded -join ' '
+    if ($commandLine.Length -ge 32767) {
+        throw 'native process command line is too long'
+    }
+    return $commandLine
+}
+
+function ConvertFrom-DefenseClawProcessText {
+    param([AllowEmptyString()][string]$Text)
+    if ([string]::IsNullOrEmpty($Text)) {
+        return @()
+    }
+    return @(
+        $Text.TrimEnd([char[]]@([char]13, [char]10)) -split '\r?\n'
+    )
+}
+
+function Invoke-DefenseClawProcess {
+    param(
+        [Parameter(Mandatory)][string]$File,
+        [Parameter(Mandatory)][string[]]$Arguments,
+        [ValidateRange(1, 1800)][int]$TimeoutSeconds = 300
+    )
+    $resolved = [IO.Path]::GetFullPath($File)
+    if (-not (Microsoft.PowerShell.Management\Test-Path `
+            -LiteralPath $resolved `
+            -PathType Leaf)) {
+        throw "required native executable is missing: $resolved"
+    }
+    Assert-DefenseClawNoReparsePath -Path $resolved
+
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = $resolved
+    $start.Arguments = ConvertTo-DefenseClawWindowsCommandLine `
+        -Arguments $Arguments
+    if ($resolved.Length + $start.Arguments.Length + 4 -ge 32767) {
+        throw 'native process application path plus command line is too long'
+    }
+    $start.WorkingDirectory = [IO.Path]::GetDirectoryName($resolved)
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+
+    $process = [Diagnostics.Process]::new()
+    $process.StartInfo = $start
+    try {
+        if (-not $process.Start()) {
+            throw "native process did not start: $resolved"
+        }
+        # Begin both reads before waiting so neither redirected pipe can fill
+        # and deadlock the child. ExitCode comes from the Process object, never
+        # ambient automatic-variable state in a fresh module scope.
+        $standardOutput = $process.StandardOutput.ReadToEndAsync()
+        $standardError = $process.StandardError.ReadToEndAsync()
+        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+            try { $process.Kill() } catch {}
+            try { $process.WaitForExit() } catch {}
+            throw "native process timed out after $TimeoutSeconds seconds: $resolved"
+        }
+        $process.WaitForExit()
+        $stdout = [string]$standardOutput.Result
+        $stderr = [string]$standardError.Result
+        return [pscustomobject]@{
+            exit_code = [int]$process.ExitCode
+            stdout = $stdout
+            stderr = $stderr
+            output = @(
+                @(ConvertFrom-DefenseClawProcessText -Text $stdout) +
+                @(ConvertFrom-DefenseClawProcessText -Text $stderr)
+            )
+        }
+    }
+    finally {
+        $process.Dispose()
+    }
+}
+
 function Invoke-DefenseClawNative {
     param(
         [Parameter(Mandatory)][string]$File,
@@ -1457,28 +1705,15 @@ function Invoke-DefenseClawNative {
         [IO.Path]::GetDirectoryName($resolved) -ine $script:System32) {
         throw "refusing elevated native tool outside System32: $File"
     }
-    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $resolved -PathType Leaf)) {
-        throw "required System32 tool is missing: $resolved"
-    }
-    Assert-DefenseClawNoReparsePath -Path $resolved
-    # 5.1 raises native stderr as a terminating error while the preference
-    # is Stop. The exit code is the assertion here, so let the tool write to
-    # stderr and judge it on what it returned.
-    $previousErrorAction = $ErrorActionPreference
-    try {
-        $ErrorActionPreference = 'Continue'
-        $output = & $resolved @Arguments 2>&1
-        $exitCode = $LASTEXITCODE
-    }
-    finally {
-        $ErrorActionPreference = $previousErrorAction
-    }
-    if ($exitCode -ne 0) {
-        $detail = ($output | Microsoft.PowerShell.Utility\Out-String).Trim()
-        throw "$resolved exited $exitCode while running '$($Arguments -join ' ')': $detail"
+    $result = Invoke-DefenseClawProcess `
+        -File $resolved `
+        -Arguments $Arguments
+    if ([int]$result.exit_code -ne 0) {
+        $detail = ($result.output | Microsoft.PowerShell.Utility\Out-String).Trim()
+        throw "$resolved exited $($result.exit_code) while running '$($Arguments -join ' ')': $detail"
     }
     if ($Capture) {
-        return @($output)
+        return @($result.output)
     }
 }
 
@@ -2106,6 +2341,10 @@ function Enter-DefenseClawLifecycleLock {
 
 function Exit-DefenseClawLifecycleLock {
     param([Parameter(Mandatory)]$Lock)
+    # The protected machine-wide lock identity intentionally persists across
+    # deployments. Only the handle is released here; deleting/recreating the
+    # predictable path would weaken cross-run serialization and reopen a
+    # squatting race between consecutive lifecycle processes.
     $Lock.Dispose()
 }
 
@@ -2220,17 +2459,58 @@ function Install-DefenseClawFileAtomic {
     param(
         [Parameter(Mandatory)][string]$Source,
         [Parameter(Mandatory)][string]$Destination,
-        [string]$ExpectedSHA256
+        [string]$ExpectedSHA256,
+        [switch]$SkipIfContentMatches
     )
     Assert-DefenseClawNoReparsePath -Path $Source
     Assert-DefenseClawNoReparsePath -Path $Destination -AllowMissingLeaf
+    if ($SkipIfContentMatches -and [IO.File]::Exists($Destination)) {
+        $sourceItem = Microsoft.PowerShell.Management\Get-Item `
+            -LiteralPath $Source `
+            -Force
+        $destinationItem = Microsoft.PowerShell.Management\Get-Item `
+            -LiteralPath $Destination `
+            -Force
+        if ([int64]$sourceItem.Length -eq [int64]$destinationItem.Length) {
+            $sourceHash = (
+                Microsoft.PowerShell.Utility\Get-FileHash `
+                    -LiteralPath $Source `
+                    -Algorithm SHA256
+            ).Hash
+            if (-not [string]::IsNullOrWhiteSpace($ExpectedSHA256) -and
+                -not [string]::Equals(
+                    $sourceHash,
+                    $ExpectedSHA256,
+                    [StringComparison]::OrdinalIgnoreCase
+                )) {
+                throw "source changed while checking managed artifact: $Source"
+            }
+            $destinationHash = (
+                Microsoft.PowerShell.Utility\Get-FileHash `
+                    -LiteralPath $Destination `
+                    -Algorithm SHA256
+            ).Hash
+            if ([string]::Equals(
+                $sourceHash,
+                $destinationHash,
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+                return
+            }
+        }
+    }
     New-DefenseClawDirectory -Path ([IO.Path]::GetDirectoryName($Destination))
     $temporary = "$Destination.new.$([Guid]::NewGuid().ToString('N'))"
+    $backup = ''
     try {
         Microsoft.PowerShell.Management\Copy-Item -LiteralPath $Source -Destination $temporary -Force
         Assert-DefenseClawNoReparsePath -Path $temporary
+        $copiedHash = (
+            Microsoft.PowerShell.Utility\Get-FileHash `
+                -LiteralPath $temporary `
+                -Algorithm SHA256
+        ).Hash
         if (-not [string]::IsNullOrWhiteSpace($ExpectedSHA256)) {
-            $copiedHash = (Microsoft.PowerShell.Utility\Get-FileHash -LiteralPath $temporary -Algorithm SHA256).Hash
             if (-not [string]::Equals(
                 $copiedHash,
                 $ExpectedSHA256,
@@ -2239,7 +2519,42 @@ function Install-DefenseClawFileAtomic {
                 throw "source changed while staging managed artifact: $Source"
             }
         }
-        Microsoft.PowerShell.Management\Move-Item -LiteralPath $temporary -Destination $Destination -Force
+        if ([IO.File]::Exists($Destination)) {
+            # Move-Item -Force does not reliably replace an existing file on
+            # Windows PowerShell 5.1. File.Replace requires a non-empty backup
+            # path on both .NET Framework and modern .NET. Keep the prior file
+            # beside the protected destination until the replacement hash is
+            # verified, then retire only that unique recovery artifact.
+            $backup = "$Destination.backup.$([Guid]::NewGuid().ToString('N'))"
+            Assert-DefenseClawNoReparsePath -Path $backup -AllowMissingLeaf
+            if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $backup) {
+                throw "atomic replacement backup path unexpectedly exists: $backup"
+            }
+            [IO.File]::Replace($temporary, $Destination, $backup, $true)
+        }
+        else {
+            [IO.File]::Move($temporary, $Destination)
+        }
+        Assert-DefenseClawNoReparsePath -Path $Destination
+        $installedHash = (
+            Microsoft.PowerShell.Utility\Get-FileHash `
+                -LiteralPath $Destination `
+                -Algorithm SHA256
+        ).Hash
+        if (-not [string]::Equals(
+            $installedHash,
+            $copiedHash,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+            throw "atomic replacement verification failed: $Destination"
+        }
+        if (-not [string]::IsNullOrWhiteSpace($backup)) {
+            Assert-DefenseClawNoReparsePath -Path $backup
+            Microsoft.PowerShell.Management\Remove-Item `
+                -LiteralPath $backup `
+                -Force
+            $backup = ''
+        }
     }
     finally {
         if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $temporary) {
@@ -2256,7 +2571,15 @@ function Write-DefenseClawJsonAtomic {
     New-DefenseClawDirectory -Path ([IO.Path]::GetDirectoryName($Path))
     $temporary = "$Path.new.$([Guid]::NewGuid().ToString('N'))"
     try {
-        $Value | Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 12 | Microsoft.PowerShell.Management\Set-Content -LiteralPath $temporary -Encoding UTF8
+        $json = $Value | Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 12
+        # Windows PowerShell 5.1's -Encoding UTF8 emits a BOM, which Go's
+        # encoding/json intentionally rejects. Use explicit BOM-less UTF-8 so
+        # every PowerShell version publishes byte-identical JSON.
+        [IO.File]::WriteAllText(
+            $temporary,
+            $json,
+            [Text.UTF8Encoding]::new($false)
+        )
         Microsoft.PowerShell.Management\Move-Item -LiteralPath $temporary -Destination $Path -Force
     }
     finally {
@@ -2727,6 +3050,9 @@ function Set-DefenseClawManagedServices {
             'DisplayName=', 'DefenseClaw Enterprise Gateway'
         ))
     }
+    Assert-DefenseClawServiceImagePath `
+        -Name $GatewayServiceName `
+        -ExpectedImage $gatewayImage
     if (Test-DefenseClawServiceExists -Name $GuardianServiceName) {
         [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @(
             'config', $GuardianServiceName,
@@ -2751,6 +3077,9 @@ function Set-DefenseClawManagedServices {
             'DisplayName=', 'DefenseClaw Enterprise Hook Guardian'
         ))
     }
+    Assert-DefenseClawServiceImagePath `
+        -Name $GuardianServiceName `
+        -ExpectedImage $guardianImage
 
     [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @('sidtype', $GatewayServiceName, 'restricted'))
     [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @('sidtype', $GuardianServiceName, 'unrestricted'))
@@ -3208,6 +3537,31 @@ function Set-DefenseClawManagedCoreAcls {
         -SkipCodexMachineState
 }
 
+function Set-DefenseClawManagedServicesForTransaction {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName
+    )
+    Set-DefenseClawManagedServices `
+        -GatewayServiceName $GatewayServiceName `
+        -GuardianServiceName $GuardianServiceName `
+        -GatewayPath $Layout.GatewayPath `
+        -ManifestPath $Layout.ManifestPath `
+        -RuntimeDirectory $Layout.RuntimeDirectory `
+        -ConfigPath $Layout.ConfigPath `
+        -AuthorizationDirectory $Layout.AuthorizationDirectory `
+        -GatewayLogPath $Layout.GatewayLogPath `
+        -GuardianLogPath $Layout.GuardianLogPath `
+        -AgentApplicationControlAttested:$Layout.AgentApplicationControlAttested `
+        -ClaudeEffectivePolicyVerified:$Layout.ClaudeEffectivePolicyVerified `
+        -CodexTrustedHookLauncherVerified:$Layout.CodexTrustedHookLauncherVerified `
+        -DeferAutomaticStart
+    Set-DefenseClawManagedCoreAcls `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName
+}
+
 function Get-DefenseClawLayout {
     param(
         [Parameter(Mandatory)][string]$InstallRoot,
@@ -3232,12 +3586,14 @@ function Get-DefenseClawLayout {
         $expectedInstallRoot = [IO.Path]::Combine(
             $script:ProgramFiles,
             'Cisco',
+            'Cisco Secure Client',
             'DefenseClaw-Cert',
             $certificationRunID
         ).TrimEnd('\')
         $expectedStateRoot = [IO.Path]::Combine(
             $script:ProgramData,
             'Cisco',
+            'Cisco Secure Client',
             'DefenseClaw-Cert',
             $certificationRunID
         ).TrimEnd('\')
@@ -3275,11 +3631,13 @@ function Get-DefenseClawLayout {
         $expectedInstallRoot = [IO.Path]::Combine(
             $script:ProgramFiles,
             'Cisco',
+            'Cisco Secure Client',
             'DefenseClaw'
         ).TrimEnd('\')
         $expectedStateRoot = [IO.Path]::Combine(
             $script:ProgramData,
             'Cisco',
+            'Cisco Secure Client',
             'DefenseClaw'
         ).TrimEnd('\')
         if (-not [string]::Equals(
@@ -3309,7 +3667,7 @@ function Get-DefenseClawLayout {
     $guardianLogDirectory = Microsoft.PowerShell.Management\Join-Path $logDirectory 'guardian'
     $lifecycleLockDirectory = Microsoft.PowerShell.Management\Join-Path `
         $script:ProgramData `
-        'Cisco\DefenseClaw-Lifecycle'
+        'Cisco\Cisco Secure Client\DefenseClaw-Lifecycle'
     $stateBoundary = $fullStateRoot + '\'
     $lifecycleBoundary = [IO.Path]::GetFullPath(
         $lifecycleLockDirectory
@@ -3409,6 +3767,7 @@ function Get-DefenseClawLayout {
         CodexRequirementsAclBackupPath = (Microsoft.PowerShell.Management\Join-Path $installState 'codex-requirements-acl-backup.json')
         CodexTrustedShellAttestationPath = (Microsoft.PowerShell.Management\Join-Path $installState 'agent-application-control-attestation.json')
         ManagedHooksTeardownJournalPath = (Microsoft.PowerShell.Management\Join-Path $installState 'managed-hooks-teardown-journal.json')
+        ManagedHooksLifecycleJournalPath = (Microsoft.PowerShell.Management\Join-Path $installState 'managed-hooks-lifecycle-journal.json')
         CoreHardeningCertification = [bool]$CoreHardeningCertification
         AgentApplicationControlAttested = [bool]$AgentApplicationControlAttested
         ClaudeEffectivePolicyVerified = $false
@@ -3423,7 +3782,8 @@ function Assert-DefenseClawLayoutVolumeIdentity {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][string]$GatewayServiceName,
-        [Parameter(Mandatory)][string]$GuardianServiceName
+        [Parameter(Mandatory)][string]$GuardianServiceName,
+        [switch]$AllowMissingCertificationCodexHome
     )
     $installRoot = Assert-DefenseClawSafeRoot `
         -Path ([string]$Layout.InstallRoot) `
@@ -3451,7 +3811,8 @@ function Assert-DefenseClawLayoutVolumeIdentity {
         $certificationHome = Resolve-DefenseClawCertificationCodexHome `
             -Path ([string]$Layout.CertificationCodexHome) `
             -GatewayServiceName $GatewayServiceName `
-            -GuardianServiceName $GuardianServiceName
+            -GuardianServiceName $GuardianServiceName `
+            -AllowMissing:$AllowMissingCertificationCodexHome
         if (-not [string]::Equals(
                 $certificationHome,
                 [string]$Layout.CertificationCodexHome,
@@ -3669,16 +4030,24 @@ function New-DefenseClawDeploymentMetadata {
                     -Algorithm SHA256
             ).Hash.ToLowerInvariant()
         }
-        [void](Get-DefenseClawCodexTrustedShellAttestation -Layout $Layout)
         if ([bool]$Layout.CodexTrustedHookLauncherVerified) {
             $codexLauncherIdentity =
                 Get-DefenseClawCodexTrustedHookLauncherIdentity -Layout $Layout
         }
-        $codexTrustedShellAttestationSha256 = (
-            Microsoft.PowerShell.Utility\Get-FileHash `
-                -LiteralPath $Layout.CodexTrustedShellAttestationPath `
-                -Algorithm SHA256
-        ).Hash.ToLowerInvariant()
+        if ([bool]$Layout.CoreHardeningCertification) {
+            if (Microsoft.PowerShell.Management\Test-Path `
+                -LiteralPath $Layout.CodexTrustedShellAttestationPath) {
+                throw 'core-hardening certification cannot retain external application-control attestation evidence'
+            }
+        }
+        else {
+            [void](Get-DefenseClawCodexTrustedShellAttestation -Layout $Layout)
+            $codexTrustedShellAttestationSha256 = (
+                Microsoft.PowerShell.Utility\Get-FileHash `
+                    -LiteralPath $Layout.CodexTrustedShellAttestationPath `
+                    -Algorithm SHA256
+            ).Hash.ToLowerInvariant()
+        }
     }
     $metadata = [ordered]@{
         schema_version = $script:SchemaVersion
@@ -3753,6 +4122,8 @@ function New-DefenseClawDeploymentMetadata {
         agent_application_control_prerequisite = $script:AgentApplicationControlPrerequisite
         external_security_prerequisites_satisfied = [bool](
             $Installed -and
+            ($Layout.ClaudeTargetEnabled -or
+                $Layout.CodexTargetEnabled) -and
             $Layout.AgentApplicationControlAttested -and
             (-not $Layout.ClaudeTargetEnabled -or
                 $Layout.ClaudeEffectivePolicyVerified) -and
@@ -3761,6 +4132,8 @@ function New-DefenseClawDeploymentMetadata {
         )
         security_complete = [bool](
             $Installed -and
+            ($Layout.ClaudeTargetEnabled -or
+                $Layout.CodexTargetEnabled) -and
             $Layout.AgentApplicationControlAttested -and
             (-not $Layout.ClaudeTargetEnabled -or
                 $Layout.ClaudeEffectivePolicyVerified) -and
@@ -3838,6 +4211,31 @@ function Assert-DefenseClawOwnedServiceOrAbsent {
     $expectedAccount = if ($Guardian) { 'LocalSystem' } else { "NT SERVICE\$Name" }
     if (-not [string]::Equals($objectName, $expectedAccount, [StringComparison]::OrdinalIgnoreCase)) {
         throw "refusing to replace service $Name owned by unexpected account $objectName"
+    }
+}
+
+function Assert-DefenseClawServiceImagePath {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$ExpectedImage
+    )
+    Assert-DefenseClawServiceName -Name $Name
+    if (-not (Test-DefenseClawServiceExists -Name $Name)) {
+        throw "SCM did not publish the managed service after configuration: $Name"
+    }
+    $key = "HKLM:\SYSTEM\CurrentControlSet\Services\$Name"
+    $actual = [string](
+        Microsoft.PowerShell.Management\Get-ItemPropertyValue `
+            -LiteralPath $key `
+            -Name ImagePath `
+            -ErrorAction Stop
+    )
+    if (-not [string]::Equals(
+        $actual,
+        $ExpectedImage,
+        [StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw "SCM published an unexpected ImagePath for $Name`: $actual"
     }
 }
 
@@ -4982,8 +5380,10 @@ function Get-DefenseClawCodexTrustedShellAttestation {
 
 function Write-DefenseClawCodexTrustedShellAttestation {
     param([Parameter(Mandatory)][hashtable]$Layout)
-    if (-not [bool]$Layout.AgentApplicationControlAttested -and
-        -not [bool]$Layout.CoreHardeningCertification) {
+    if ([bool]$Layout.CoreHardeningCertification) {
+        throw 'core-hardening certification must not publish external application-control attestation evidence'
+    }
+    if (-not [bool]$Layout.AgentApplicationControlAttested) {
         throw 'managed-enterprise mode requires explicit agent application-control attestation'
     }
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -5278,6 +5678,26 @@ function Restore-DefenseClawTransaction {
         -Path $SnapshotPath `
         -Phase quiesced `
         -ServicesQuiescedAt $restoreQuiescedAt
+    if ($Layout.ContainsKey('ManagedHooksLifecycleJournalPath') -and
+        (Microsoft.PowerShell.Management\Test-Path `
+            -LiteralPath $Layout.ManagedHooksLifecycleJournalPath `
+            -PathType Leaf)) {
+        # Restore the authenticated machine-policy preimage while the staged
+        # gateway still implements this transaction's hidden command. Generic
+        # file rollback may replace that gateway with an older release.
+        [void](Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `
+            -Layout $Layout `
+            -GatewayServiceName ([string]$snapshot.gateway_service) `
+            -Action restore)
+        # Retire while the staged gateway still implements this command. The
+        # Claude preimage is already exact and services remain disabled, so a
+        # crash after retirement resumes safely through the generic pending
+        # transaction without requiring this journal again.
+        [void](Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `
+            -Layout $Layout `
+            -GatewayServiceName ([string]$snapshot.gateway_service) `
+            -Action retire)
+    }
     foreach ($file in $snapshot.files) {
         $destination = [IO.Path]::GetFullPath([string]$file.path)
         $inInstall = $destination.StartsWith($Layout.InstallRoot + '\', [StringComparison]::OrdinalIgnoreCase)
@@ -5312,7 +5732,10 @@ function Restore-DefenseClawTransaction {
         if ([bool]$file.existed) {
             $backup = [string]$file.backup
             Assert-DefenseClawDescendant -Path $backup -Root $Layout.StateRoot -Label 'transaction backup' | Microsoft.PowerShell.Core\Out-Null
-            Install-DefenseClawFileAtomic -Source $backup -Destination $destination
+            Install-DefenseClawFileAtomic `
+                -Source $backup `
+                -Destination $destination `
+                -SkipIfContentMatches
             $securityProperty = $file.PSObject.Properties['security_descriptor']
             if ($isSharedCodexFile -and
                 $null -ne $securityProperty -and
@@ -6095,27 +6518,19 @@ function Invoke-DefenseClawGatewayCommand {
             $null,
             'Process'
         )
-        # See Invoke-DefenseClawNative: 5.1 raises native stderr as a
-        # terminating error under Stop, and -AllowFailure needs the code.
-        $previousErrorAction = $ErrorActionPreference
-        try {
-            $ErrorActionPreference = 'Continue'
-            $output = & $gateway @Arguments 2>&1
-            $exitCode = $LASTEXITCODE
-        }
-        finally {
-            $ErrorActionPreference = $previousErrorAction
-        }
-        if ($exitCode -ne 0 -and -not $AllowFailure) {
-            throw "defenseclaw-gateway exited $exitCode for '$($Arguments -join ' ')': $(($output | Microsoft.PowerShell.Utility\Out-String).Trim())"
+        $processResult = Invoke-DefenseClawProcess `
+            -File $gateway `
+            -Arguments $Arguments
+        if ([int]$processResult.exit_code -ne 0 -and -not $AllowFailure) {
+            throw "defenseclaw-gateway exited $($processResult.exit_code) for '$($Arguments -join ' ')': $(($processResult.output | Microsoft.PowerShell.Utility\Out-String).Trim())"
         }
         if ($Capture) {
             return [ordered]@{
-                exit_code = $exitCode
-                output = @($output)
+                exit_code = [int]$processResult.exit_code
+                output = @($processResult.output)
             }
         }
-        return $exitCode
+        return [int]$processResult.exit_code
     }
     finally {
         foreach ($key in $keys) {
@@ -6180,6 +6595,15 @@ function Invoke-DefenseClawCodexRequirementsCommand {
     )) {
         throw "Codex requirements report action mismatch: $($report.action)"
     }
+    if ([int]$probe.exit_code -ne 0 -or -not [bool]$report.ok) {
+        $detail = if (-not [string]::IsNullOrWhiteSpace([string]$report.error)) {
+            [string]$report.error
+        }
+        else {
+            (($probe.output | Microsoft.PowerShell.Utility\Out-String).Trim())
+        }
+        throw "Codex requirements $Action failed: $detail"
+    }
     foreach ($pair in @(
         @('requirements_path', $Layout.CodexMachinePolicyPath),
         @('ownership_path', $Layout.CodexRequirementsOwnershipPath),
@@ -6209,15 +6633,6 @@ function Invoke-DefenseClawCodexRequirementsCommand {
             [string]$property.Value -cnotmatch '^[0-9a-f]{64}$') {
             throw "Codex requirements report contains an invalid $hashName"
         }
-    }
-    if ([int]$probe.exit_code -ne 0 -or -not [bool]$report.ok) {
-        $detail = if (-not [string]::IsNullOrWhiteSpace([string]$report.error)) {
-            [string]$report.error
-        }
-        else {
-            (($probe.output | Microsoft.PowerShell.Utility\Out-String).Trim())
-        }
-        throw "Codex requirements $Action failed: $detail"
     }
     if ($Action -in @('inspect', 'reconcile', 'verify')) {
         if ([string]$report.agent_application_control_prerequisite -cne
@@ -6272,6 +6687,8 @@ function Invoke-DefenseClawCodexRequirementsCommand {
             throw "Codex requirements $Action Claude effective-policy evidence does not match the protected live verification result"
         }
         $expectedSecurityComplete = [bool](
+            ([bool]$report.claude_target_enabled -or
+                [bool]$report.codex_target_enabled) -and
             $Layout.AgentApplicationControlAttested -and
             (-not [bool]$report.claude_target_enabled -or
                 [bool]$Layout.ClaudeEffectivePolicyVerified) -and
@@ -6495,11 +6912,28 @@ function Invoke-DefenseClawManagedHooksTeardownCommand {
         throw "managed-hook teardown command emitted $($reports.Count) JSON reports; expected exactly one"
     }
     $report = $reports[0]
-    if ([int]$report.schema_version -ne 1) {
+    if ([int]$report.schema_version -ne 2) {
         throw "unsupported managed-hook teardown report schema: $($report.schema_version)"
     }
     if ([string]$report.action -cne $Action) {
         throw "managed-hook teardown report action mismatch: $($report.action)"
+    }
+    $reportOK = $report.PSObject.Properties['ok']
+    if ($null -eq $reportOK -or $reportOK.Value -isnot [bool]) {
+        throw 'managed-hook teardown report is missing boolean ok'
+    }
+    # Failure reports cannot safely attest success-only paths or counts. Surface
+    # their bounded original diagnostic before validating those fields so a
+    # bootstrap/layout failure is not replaced by a secondary schema complaint.
+    if ([int]$probe.exit_code -ne 0 -or -not [bool]$reportOK.Value) {
+        $detail = if (-not [string]::IsNullOrWhiteSpace([string]$report.error)) {
+            [string]$report.error
+        }
+        else {
+            $probe.output
+        }
+        $detail = ConvertTo-DefenseClawBoundedDiagnostic -Value $detail
+        throw "managed-hook teardown $Action failed: $detail"
     }
     foreach ($pair in @(
         @('manifest_path', $Layout.ManifestPath),
@@ -6523,6 +6957,7 @@ function Invoke-DefenseClawManagedHooksTeardownCommand {
     $counts = @{}
     foreach ($name in @(
         'target_count',
+        'enrollment_target_count',
         'succeeded_count',
         'verified_clean_count',
         'failed_count',
@@ -6575,15 +7010,6 @@ function Invoke-DefenseClawManagedHooksTeardownCommand {
             throw "managed-hook teardown did not complete target $($row.connector)@$($row.sid)$rowDetail"
         }
     }
-    if ([int]$probe.exit_code -ne 0 -or -not [bool]$report.ok) {
-        $detail = if (-not [string]::IsNullOrWhiteSpace([string]$report.error)) {
-            [string]$report.error
-        }
-        else {
-            (($probe.output | Microsoft.PowerShell.Utility\Out-String).Trim())
-        }
-        throw "managed-hook teardown $Action failed: $detail"
-    }
     if ($counts.failed_count -ne 0 -or
         $counts.succeeded_count -ne $counts.target_count) {
         throw "managed-hook teardown $Action did not complete every manifest target"
@@ -6615,8 +7041,8 @@ function Invoke-DefenseClawManagedHooksTeardownCommand {
             $null -eq $verifiedInstalled -or
             $verifiedInstalled.Value -is [bool] -or
             [Convert]::ToInt64($verifiedInstalled.Value) -ne
-                $counts.target_count) {
-            throw 'managed-hook teardown rollback did not reinstall and verify every original target'
+                $counts.enrollment_target_count) {
+            throw 'managed-hook teardown rollback did not restore and verify the exact pre-teardown enrollment'
         }
     }
     if (-not (Microsoft.PowerShell.Management\Test-Path `
@@ -6647,6 +7073,93 @@ function Invoke-DefenseClawManagedHooksTeardownCommand {
         -RequiredRights (New-DefenseClawRequiredRights -Kind Admin) `
         -AllowInheritance `
         -RejectUntrustedRead
+    return $report
+}
+
+function Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)]
+        [ValidateSet('capture', 'restore', 'retire')]
+        [string]$Action
+    )
+    Assert-DefenseClawAdministrator
+    $probe = Invoke-DefenseClawGatewayCommand `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName `
+        -Arguments @(
+            'enterprise',
+            'windows',
+            'managed-hooks-lifecycle-snapshot',
+            $Action,
+            '--json'
+        ) `
+        -Capture `
+        -AllowFailure
+    $reports = [Collections.Generic.List[object]]::new()
+    foreach ($line in @($probe.output)) {
+        $text = ([string]$line).Trim()
+        if (-not $text.StartsWith('{', [StringComparison]::Ordinal)) {
+            continue
+        }
+        try {
+            $reports.Add(
+                ($text | Microsoft.PowerShell.Utility\ConvertFrom-Json)
+            )
+        }
+        catch {
+            throw "managed-hook lifecycle snapshot emitted malformed JSON: $text"
+        }
+    }
+    if ($reports.Count -ne 1) {
+        throw "managed-hook lifecycle snapshot emitted $($reports.Count) JSON reports; expected exactly one"
+    }
+    $report = $reports[0]
+    if ([int]$report.schema_version -ne 1) {
+        throw "unsupported managed-hook lifecycle snapshot schema: $($report.schema_version)"
+    }
+    if ([string]$report.action -cne $Action) {
+        throw "managed-hook lifecycle snapshot action mismatch: $($report.action)"
+    }
+    $ok = $report.PSObject.Properties['ok']
+    if ($null -eq $ok -or $ok.Value -isnot [bool]) {
+        throw 'managed-hook lifecycle snapshot is missing boolean ok'
+    }
+    if ([int]$probe.exit_code -ne 0 -or -not [bool]$ok.Value) {
+        $detail = if (-not [string]::IsNullOrWhiteSpace([string]$report.error)) {
+            [string]$report.error
+        }
+        else {
+            $probe.output
+        }
+        $detail = ConvertTo-DefenseClawBoundedDiagnostic -Value $detail
+        throw "managed-hook lifecycle snapshot $Action failed: $detail"
+    }
+    $journal = $report.PSObject.Properties['journal_path']
+    if ($null -eq $journal -or
+        [string]::IsNullOrWhiteSpace([string]$journal.Value)) {
+        throw 'managed-hook lifecycle snapshot is missing journal_path'
+    }
+    $actual = [IO.Path]::GetFullPath([string]$journal.Value).TrimEnd('\')
+    $expected = [IO.Path]::GetFullPath(
+        [string]$Layout.ManagedHooksLifecycleJournalPath
+    ).TrimEnd('\')
+    if (-not [string]::Equals(
+        $actual,
+        $expected,
+        [StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw "managed-hook lifecycle snapshot journal is outside the exact protected layout: $actual"
+    }
+    $expectedPhase = switch ($Action) {
+        'capture' { 'captured' }
+        'restore' { 'restored' }
+        'retire' { @('absent', 'retired') }
+    }
+    if ([string]$report.phase -notin @($expectedPhase)) {
+        throw "managed-hook lifecycle snapshot $Action returned invalid phase: $($report.phase)"
+    }
     return $report
 }
 
@@ -7176,6 +7689,8 @@ function Assert-DefenseClawEnterpriseDeployment {
         'external_security_prerequisites_satisfied'
     ]
     $expectedSecurityComplete = [bool](
+        ([bool]$claudeTargetProperty.Value -or
+            $codexTargetEnabled) -and
         [bool]$applicationControlProperty.Value -and
         (-not [bool]$claudeTargetProperty.Value -or
             [bool]$claudeEffectiveProperty.Value) -and
@@ -7193,41 +7708,54 @@ function Assert-DefenseClawEnterpriseDeployment {
             [bool]$Layout.CoreHardeningCertification)) {
         throw 'deployment metadata has an invalid aggregate Windows enterprise security result'
     }
-    $attestation = Get-DefenseClawCodexTrustedShellAttestation -Layout $Layout
-    if ([bool]$attestation.agent_application_control_enforced -ne
-        [bool]$metadata.agent_application_control_enforced) {
-        throw 'protected application-control evidence disagrees with deployment metadata'
-    }
-    if ([bool]$attestation.codex_trusted_hook_launcher_verified -ne
-        [bool]$metadata.codex_trusted_hook_launcher_verified) {
-        throw 'protected Codex trusted-hook-launcher evidence disagrees with deployment metadata'
-    }
-    if ([bool]$attestation.claude_effective_policy_verified -ne
-        [bool]$metadata.claude_effective_policy_verified) {
-        throw 'protected Claude effective-policy evidence disagrees with deployment metadata'
-    }
     $Layout.AgentApplicationControlAttested = [bool](
         $applicationControlProperty.Value
     )
     $Layout.ClaudeTargetEnabled = [bool]$claudeTargetProperty.Value
-    $Layout.ClaudeEffectivePolicyVerified = [bool](
-        $attestation.claude_effective_policy_verified
-    )
-    $Layout.CodexTrustedHookLauncherVerified = [bool](
-        $attestation.codex_trusted_hook_launcher_verified
-    )
     $Layout.CodexTargetEnabled = $codexTargetEnabled
     $recordedAttestationHash = [string]$metadata.agent_application_control_attestation_sha256
-    if ($recordedAttestationHash -cnotmatch '^[0-9a-f]{64}$') {
-        throw 'deployment metadata contains an invalid agent application-control attestation SHA-256'
+    if ([bool]$Layout.CoreHardeningCertification) {
+        if ((Microsoft.PowerShell.Management\Test-Path `
+                -LiteralPath $Layout.CodexTrustedShellAttestationPath) -or
+            -not [string]::IsNullOrEmpty($recordedAttestationHash)) {
+            throw 'core-hardening deployment retains false external application-control evidence'
+        }
+        $Layout.ClaudeEffectivePolicyVerified = [bool](
+            $metadata.claude_effective_policy_verified
+        )
+        $Layout.CodexTrustedHookLauncherVerified = $false
     }
-    $actualAttestationHash = (
-        Microsoft.PowerShell.Utility\Get-FileHash `
-            -LiteralPath $Layout.CodexTrustedShellAttestationPath `
-            -Algorithm SHA256
-    ).Hash.ToLowerInvariant()
-    if ($actualAttestationHash -cne $recordedAttestationHash) {
-        throw 'agent application-control attestation hash drift'
+    else {
+        $attestation = Get-DefenseClawCodexTrustedShellAttestation -Layout $Layout
+        if ([bool]$attestation.agent_application_control_enforced -ne
+            [bool]$metadata.agent_application_control_enforced) {
+            throw 'protected application-control evidence disagrees with deployment metadata'
+        }
+        if ([bool]$attestation.codex_trusted_hook_launcher_verified -ne
+            [bool]$metadata.codex_trusted_hook_launcher_verified) {
+            throw 'protected Codex trusted-hook-launcher evidence disagrees with deployment metadata'
+        }
+        if ([bool]$attestation.claude_effective_policy_verified -ne
+            [bool]$metadata.claude_effective_policy_verified) {
+            throw 'protected Claude effective-policy evidence disagrees with deployment metadata'
+        }
+        $Layout.ClaudeEffectivePolicyVerified = [bool](
+            $attestation.claude_effective_policy_verified
+        )
+        $Layout.CodexTrustedHookLauncherVerified = [bool](
+            $attestation.codex_trusted_hook_launcher_verified
+        )
+        if ($recordedAttestationHash -cnotmatch '^[0-9a-f]{64}$') {
+            throw 'deployment metadata contains an invalid agent application-control attestation SHA-256'
+        }
+        $actualAttestationHash = (
+            Microsoft.PowerShell.Utility\Get-FileHash `
+                -LiteralPath $Layout.CodexTrustedShellAttestationPath `
+                -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
+        if ($actualAttestationHash -cne $recordedAttestationHash) {
+            throw 'agent application-control attestation hash drift'
+        }
     }
     if ($codexTargetEnabled) {
         Assert-DefenseClawCodexMachinePolicyDirectory `
@@ -7322,10 +7850,16 @@ function Assert-DefenseClawEnterpriseDeployment {
         $Layout.ManifestPath,
         $Layout.LogDirectory,
         $Layout.GuardianLogDirectory,
-        $Layout.MetadataPath,
-        $Layout.CodexTrustedShellAttestationPath
+        $Layout.MetadataPath
     )) {
         $adminOnlyPaths.Add([string]$path)
+    }
+    if (Microsoft.PowerShell.Management\Test-Path `
+        -LiteralPath $Layout.CodexTrustedShellAttestationPath `
+        -PathType Leaf) {
+        $adminOnlyPaths.Add(
+            [string]$Layout.CodexTrustedShellAttestationPath
+        )
     }
     if ($codexTargetEnabled) {
         $adminOnlyPaths.Add([string]$Layout.CodexRequirementsOwnershipPath)
@@ -7339,15 +7873,20 @@ function Assert-DefenseClawEnterpriseDeployment {
             -RequiredRights $adminRights `
             -RejectUntrustedRead
     }
-    if (Microsoft.PowerShell.Management\Test-Path `
-        -LiteralPath $Layout.ManagedHooksTeardownJournalPath `
-        -PathType Leaf) {
-        Assert-DefenseClawPathAcl `
-            -Path $Layout.ManagedHooksTeardownJournalPath `
-            -AllowedWriterSIDs $adminWriters `
-            -AllowedReaderSIDs $adminReaders `
-            -RequiredRights $adminRights `
-            -RejectUntrustedRead
+    foreach ($journalPath in @(
+        $Layout.ManagedHooksLifecycleJournalPath,
+        $Layout.ManagedHooksTeardownJournalPath
+    )) {
+        if (Microsoft.PowerShell.Management\Test-Path `
+            -LiteralPath $journalPath `
+            -PathType Leaf) {
+            Assert-DefenseClawPathAcl `
+                -Path $journalPath `
+                -AllowedWriterSIDs $adminWriters `
+                -AllowedReaderSIDs $adminReaders `
+                -RequiredRights $adminRights `
+                -RejectUntrustedRead
+        }
     }
     foreach ($ancestor in @($Layout.StateRootAncestors)) {
         Assert-DefenseClawStateAncestorTraverse `
@@ -7689,6 +8228,25 @@ function Get-DefenseClawServiceState {
     return $service.Status.ToString().ToLowerInvariant()
 }
 
+function ConvertTo-DefenseClawBoundedDiagnostic {
+    param(
+        [AllowNull()]$Value,
+        [ValidateRange(64, 4096)][int]$MaxLength = 2048
+    )
+    $text = (($Value | Microsoft.PowerShell.Utility\Out-String).Trim())
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return 'unavailable'
+    }
+    $text = $text -replace '[\x00-\x1f\x7f]+', ' '
+    $text = $text -replace '(?i)\bBearer\s+[A-Za-z0-9._~+/=-]+', 'Bearer <redacted>'
+    $text = $text -replace '(?i)\b(password|passwd|secret|token|api[_-]?key)\s*[:=]\s*(?:"[^"]*"|''[^'']*''|[^,;\s]+)', '$1=<redacted>'
+    $text = $text.Trim()
+    if ($text.Length -gt $MaxLength) {
+        return $text.Substring(0, $MaxLength - 3) + '...'
+    }
+    return $text
+}
+
 function Get-DefenseClawGuardianStatusReport {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
@@ -7715,9 +8273,19 @@ function Get-DefenseClawGuardianStatusReport {
         }
     }
     catch {
-        return $null
+        return [pscustomobject][ordered]@{
+            ok = $false
+            errors = @(
+                "guardian status command failed: $(ConvertTo-DefenseClawBoundedDiagnostic -Value $_.Exception.Message)"
+            )
+        }
     }
-    return $null
+    return [pscustomobject][ordered]@{
+        ok = $false
+        errors = @(
+            "guardian status command exited $($probe.exit_code) without a valid JSON report: $(ConvertTo-DefenseClawBoundedDiagnostic -Value $probe.output)"
+        )
+    }
 }
 
 function Get-DefenseClawLifecycleStatus {
@@ -7776,6 +8344,16 @@ function Get-DefenseClawLifecycleStatus {
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName
             $generation = Get-DefenseClawGuardianGeneration -Report $guardianReport
+            if ($null -ne $guardianReport -and
+                $null -ne $guardianReport.PSObject.Properties['errors']) {
+                foreach ($issue in @($guardianReport.PSObject.Properties['errors'].Value)) {
+                    if (-not [string]::IsNullOrWhiteSpace([string]$issue)) {
+                        $errors.Add(
+                            "guardian status: $(ConvertTo-DefenseClawBoundedDiagnostic -Value $issue)"
+                        )
+                    }
+                }
+            }
         }
         catch {
             $errors.Add($_.Exception.Message)
@@ -7828,6 +8406,7 @@ function Get-DefenseClawLifecycleStatus {
     }
     $externalSecuritySatisfied = [bool](
         $installed -and
+        ($claudeTargetEnabled -or $codexTargetEnabled) -and
         $Layout.AgentApplicationControlAttested -and
         (-not $claudeTargetEnabled -or
             $claudeEffectivePolicyVerified) -and
@@ -7904,6 +8483,7 @@ function Wait-DefenseClawFreshGuardianReconcile {
     Start-DefenseClawService -Name $GuardianServiceName
 
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    $lastStatus = 'guardian status report unavailable'
     do {
         $report = Get-DefenseClawGuardianStatusReport `
             -Layout $Layout `
@@ -7912,6 +8492,26 @@ function Wait-DefenseClawFreshGuardianReconcile {
             $null -ne $report.PSObject.Properties['ok'] -and
             [bool]$report.ok
         $generation = if ($reportOK) { Get-DefenseClawGuardianGeneration -Report $report } else { $null }
+        if (-not $reportOK) {
+            $issues = [Collections.Generic.List[string]]::new()
+            if ($null -ne $report -and $null -ne $report.PSObject.Properties['errors']) {
+                foreach ($issue in @($report.PSObject.Properties['errors'].Value)) {
+                    if (-not [string]::IsNullOrWhiteSpace([string]$issue)) {
+                        $issues.Add([string]$issue)
+                    }
+                }
+            }
+            if ($issues.Count -eq 0) {
+                $issues.Add('guardian status reported ok=false without an error')
+            }
+            $lastStatus = ConvertTo-DefenseClawBoundedDiagnostic -Value ($issues -join '; ')
+        }
+        elseif ($null -eq $generation) {
+            $lastStatus = 'guardian status reported ok=true without a generation'
+        }
+        else {
+            $lastStatus = "guardian status generation '$generation' is not fresh"
+        }
         if ($null -ne $generation) {
             try {
                 $generationTime = [DateTime]::Parse(
@@ -7926,11 +8526,13 @@ function Wait-DefenseClawFreshGuardianReconcile {
             }
             catch {
                 # Keep waiting for a complete, parseable guardian record.
+                $lastStatus = ConvertTo-DefenseClawBoundedDiagnostic `
+                    -Value "guardian status generation '$generation' is invalid: $($_.Exception.Message)"
             }
         }
         Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 250
     } while ([DateTime]::UtcNow -lt $deadline)
-    throw "LocalSystem guardian restarted but did not publish a fresh reconcile within $TimeoutSeconds seconds"
+    throw "LocalSystem guardian restarted but did not publish a fresh reconcile within $TimeoutSeconds seconds; last_status=$lastStatus"
 }
 
 function Assert-DefenseClawManagedInstallTree {
@@ -9588,6 +10190,7 @@ function Complete-DefenseClawSelfUninstallRetirement {
     $expectedLifecycleDirectory = [IO.Path]::Combine(
         $script:ProgramData,
         'Cisco',
+        'Cisco Secure Client',
         'DefenseClaw-Lifecycle'
     ).TrimEnd('\')
     if (-not [string]::Equals(
@@ -10347,6 +10950,17 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         Assert-DefenseClawCodexMachinePolicyFilePreflight -Layout $Layout
         Assert-DefenseClawCodexManagedHooksStateFilePreflight -Layout $Layout
     }
+    if (Microsoft.PowerShell.Management\Test-Path `
+        -LiteralPath $Layout.ManagedHooksLifecycleJournalPath `
+        -PathType Leaf) {
+        # A crash after transaction commit but before journal retirement is
+        # harmless. Authenticate and retire that stale preimage before a new
+        # lifecycle transaction is allowed to replace it.
+        [void](Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -Action retire)
+    }
     $snapshot = New-DefenseClawTransaction `
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName `
@@ -10355,7 +10969,19 @@ function Invoke-DefenseClawInstallLikeLifecycle {
     try {
         Stop-DefenseClawService -Name $GuardianServiceName
         Stop-DefenseClawService -Name $GatewayServiceName
-        foreach ($name in $Sources.Keys) {
+        # Upgrade/Repair must capture the old machine-policy identity before a
+        # replacement config or manifest changes its endpoint/target set. New
+        # gateway/hook bytes are staged first so even an upgrade from a release
+        # without the snapshot command can open the protected journal.
+        $deferredPolicySources = if ($Action -eq 'Install') {
+            @()
+        }
+        else {
+            @('config', 'manifest')
+        }
+        foreach ($name in @($Sources.Keys | Microsoft.PowerShell.Core\Where-Object {
+            $_ -notin $deferredPolicySources
+        })) {
             $destination = Get-DefenseClawArtifactPath -Layout $Layout -Name $name
             Install-DefenseClawSourceDescriptor `
                 -Source $Sources[$name] `
@@ -10373,31 +10999,78 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 throw "required managed artifact is missing after $Action staging: $requiredPath"
             }
         }
+        if ($Action -ne 'Install') {
+            [void](Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName `
+                -Action capture)
+        }
+        foreach ($name in @($deferredPolicySources | Microsoft.PowerShell.Core\Where-Object {
+            $Sources.ContainsKey($_)
+        })) {
+            $destination = Get-DefenseClawArtifactPath -Layout $Layout -Name $name
+            Install-DefenseClawSourceDescriptor `
+                -Source $Sources[$name] `
+                -Destination $destination
+        }
+        foreach ($requiredPath in @(
+            $Layout.GatewayPath,
+            $Layout.HookPath,
+            $Layout.ConfigPath,
+            $Layout.ManifestPath,
+            $Layout.InstallerPath,
+            $Layout.ModulePath
+        )) {
+            if (-not (Microsoft.PowerShell.Management\Test-Path `
+                -LiteralPath $requiredPath `
+                -PathType Leaf)) {
+                throw "required managed artifact is missing after $Action policy staging: $requiredPath"
+            }
+        }
+        if ($Action -eq 'Install') {
+            # A clean install has no NT SERVICE identities until SCM creates
+            # the transaction-owned service pair. The snapshot subprocess
+            # loads the protected managed config and validates the gateway's
+            # virtual-service SID, so register both services disabled and
+            # establish the SID-dependent runtime ACL before capture. The
+            # transaction already recorded both services as absent and removes
+            # them if capture or any later step fails.
+            Set-DefenseClawManagedServicesForTransaction `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName `
+                -GuardianServiceName $GuardianServiceName
+            [void](Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName `
+                -Action capture)
+        }
 
         $attestationNeedsRefresh = [bool]$RefreshApplicationControlAttestation
         $attestationExists = Microsoft.PowerShell.Management\Test-Path `
             -LiteralPath $Layout.CodexTrustedShellAttestationPath `
             -PathType Leaf
-        if (-not $attestationNeedsRefresh -and $attestationExists) {
+        if ([bool]$Layout.CoreHardeningCertification -and $attestationExists) {
+            $staleAttestation =
+                Get-DefenseClawCodexTrustedShellAttestation -Layout $Layout
+            if ([bool]$staleAttestation.agent_application_control_enforced) {
+                throw 'core-hardening migration refuses to discard genuine application-control attestation evidence'
+            }
+            Microsoft.PowerShell.Management\Remove-Item `
+                -LiteralPath $Layout.CodexTrustedShellAttestationPath `
+                -Force
+            $attestationExists = $false
+        }
+        elseif (-not $attestationNeedsRefresh -and $attestationExists) {
             [void](Get-DefenseClawCodexTrustedShellAttestation -Layout $Layout)
         }
-        Set-DefenseClawManagedServices `
-            -GatewayServiceName $GatewayServiceName `
-            -GuardianServiceName $GuardianServiceName `
-            -GatewayPath $Layout.GatewayPath `
-            -ManifestPath $Layout.ManifestPath `
-            -RuntimeDirectory $Layout.RuntimeDirectory `
-            -ConfigPath $Layout.ConfigPath `
-            -AuthorizationDirectory $Layout.AuthorizationDirectory `
-            -GatewayLogPath $Layout.GatewayLogPath `
-            -GuardianLogPath $Layout.GuardianLogPath `
-            -AgentApplicationControlAttested:$Layout.AgentApplicationControlAttested `
-            -ClaudeEffectivePolicyVerified:$Layout.ClaudeEffectivePolicyVerified `
-            -CodexTrustedHookLauncherVerified:$Layout.CodexTrustedHookLauncherVerified `
-            -DeferAutomaticStart
-        Set-DefenseClawManagedCoreAcls `
-            -Layout $Layout `
-            -GatewayServiceName $GatewayServiceName
+        if ($Action -ne 'Install') {
+            # Upgrade/Repair deliberately capture the previous hook identity
+            # before reconfiguring the existing service pair.
+            Set-DefenseClawManagedServicesForTransaction `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName `
+                -GuardianServiceName $GuardianServiceName
+        }
         $targetReport = Invoke-DefenseClawCodexRequirementsCommand `
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName `
@@ -10450,7 +11123,8 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                     -Force
             }
         }
-        if ($attestationNeedsRefresh -or -not $attestationExists) {
+        if (-not [bool]$Layout.CoreHardeningCertification -and
+            ($attestationNeedsRefresh -or -not $attestationExists)) {
             Write-DefenseClawCodexTrustedShellAttestation -Layout $Layout
             Set-DefenseClawManagedCoreAcls `
                 -Layout $Layout `
@@ -10635,7 +11309,36 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         catch {
             throw "$Action failed ($($operationError.Exception.Message)); rollback also failed and pending recovery was retained: $($_.Exception.Message)"
         }
+        try {
+            if (Microsoft.PowerShell.Management\Test-Path `
+                -LiteralPath $Layout.ManagedHooksLifecycleJournalPath `
+                -PathType Leaf) {
+                [void](Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `
+                    -Layout $Layout `
+                    -GatewayServiceName $GatewayServiceName `
+                    -Action retire)
+            }
+        }
+        catch {
+            throw (
+                "$Action failed ($($operationError.Exception.Message)); " +
+                'the exact prior machine enrollment was restored, but its ' +
+                "completed lifecycle journal could not be retired: $($_.Exception.Message)"
+            )
+        }
         throw $operationError
+    }
+    try {
+        [void](Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -Action retire)
+    }
+    catch {
+        throw (
+            "$Action committed, but its protected managed-hook lifecycle " +
+            "journal could not be retired: $($_.Exception.Message)"
+        )
     }
     $result = Get-DefenseClawLifecycleStatus `
         -Action $Action `
@@ -10692,6 +11395,14 @@ function Invoke-DefenseClawUninstallLifecycle {
         -Metadata $metadata `
         -Layout $Layout `
         -Action 'Uninstall'
+    if (Microsoft.PowerShell.Management\Test-Path `
+        -LiteralPath $Layout.ManagedHooksLifecycleJournalPath `
+        -PathType Leaf) {
+        [void](Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand `
+            -Layout $Layout `
+            -GatewayServiceName $GatewayServiceName `
+            -Action retire)
+    }
     $selfUninstallCallerIdentity = $null
     if ($SelfUninstallCallerPID -gt 0) {
         $selfUninstallCallerIdentity =
@@ -10736,9 +11447,13 @@ function Invoke-DefenseClawUninstallLifecycle {
                 -GatewayServiceName $GatewayServiceName `
                 -Report $codexRemoval
         }
-        Microsoft.PowerShell.Management\Remove-Item `
+        if (Microsoft.PowerShell.Management\Test-Path `
             -LiteralPath $Layout.CodexTrustedShellAttestationPath `
-            -Force
+            -PathType Leaf) {
+            Microsoft.PowerShell.Management\Remove-Item `
+                -LiteralPath $Layout.CodexTrustedShellAttestationPath `
+                -Force
+        }
         # Re-authenticate every service field and both ACL surfaces at the
         # deletion boundary. A concurrent administrative drift or same-name
         # takeover fails closed before either sc.exe delete.
@@ -11046,8 +11761,8 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         [string]$CodexTrustedHookLauncherBinary,
         [string]$Config,
         [string]$Manifest,
-        [string]$InstallRoot = (Microsoft.PowerShell.Management\Join-Path $script:ProgramFiles 'Cisco\DefenseClaw'),
-        [string]$StateRoot = (Microsoft.PowerShell.Management\Join-Path $script:ProgramData 'Cisco\DefenseClaw'),
+        [string]$InstallRoot = (Microsoft.PowerShell.Management\Join-Path $script:ProgramFiles 'Cisco\Cisco Secure Client\DefenseClaw'),
+        [string]$StateRoot = (Microsoft.PowerShell.Management\Join-Path $script:ProgramData 'Cisco\Cisco Secure Client\DefenseClaw'),
         [string]$GatewayServiceName = 'DefenseClawGateway',
         [string]$GuardianServiceName = 'DefenseClawHookGuardian',
         [string]$CertificationCodexHome,
@@ -11083,7 +11798,8 @@ function Invoke-DefenseClawEnterpriseLifecycle {
     $resolvedCertificationCodexHome = Resolve-DefenseClawCertificationCodexHome `
         -Path $CertificationCodexHome `
         -GatewayServiceName $GatewayServiceName `
-        -GuardianServiceName $GuardianServiceName
+        -GuardianServiceName $GuardianServiceName `
+        -AllowMissing:($Action -in @('Status', 'Verify'))
     if ($Purge -and $Action -ne 'Uninstall') {
         throw '-Purge is valid only with Uninstall'
     }
@@ -11094,17 +11810,13 @@ function Invoke-DefenseClawEnterpriseLifecycle {
     if ($NoStart -and $Action -notin @('Install', 'Upgrade', 'Repair')) {
         throw '-NoStart is valid only with Install, Upgrade, or Repair'
     }
-    if ($AllowUnsigned -and $Action -notin @('Install', 'Upgrade', 'Repair', 'Uninstall')) {
-        throw '-AllowUnsigned is valid only with Install, Upgrade, Repair, or Uninstall'
-    }
     if ($CoreHardeningCertification -and
         $Action -notin @('Install', 'Upgrade', 'Repair')) {
         throw '-CoreHardeningCertification is valid only with Install, Upgrade, or Repair'
     }
     if (-not [string]::IsNullOrWhiteSpace($resolvedCertificationCodexHome) -and
-        $Action -in @('Install', 'Upgrade', 'Repair') -and
         -not $AllowUnsigned) {
-        throw '-CertificationCodexHome requires -AllowUnsigned for every Install, Upgrade, or Repair'
+        throw '-CertificationCodexHome requires -AllowUnsigned for every lifecycle action'
     }
     if ($CoreHardeningCertification -and
         (-not $AllowUnsigned -or
@@ -11180,7 +11892,8 @@ function Invoke-DefenseClawEnterpriseLifecycle {
     Assert-DefenseClawLayoutVolumeIdentity `
         -Layout $layout `
         -GatewayServiceName $GatewayServiceName `
-        -GuardianServiceName $GuardianServiceName
+        -GuardianServiceName $GuardianServiceName `
+        -AllowMissingCertificationCodexHome:($Action -in @('Status', 'Verify'))
     if ((Microsoft.PowerShell.Management\Test-Path `
             -LiteralPath $layout.MetadataPath `
             -PathType Leaf) -and
@@ -11241,7 +11954,8 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         Assert-DefenseClawLayoutVolumeIdentity `
             -Layout $layout `
             -GatewayServiceName $GatewayServiceName `
-            -GuardianServiceName $GuardianServiceName
+            -GuardianServiceName $GuardianServiceName `
+            -AllowMissingCertificationCodexHome
         return Get-DefenseClawLifecycleStatus `
             -Action $Action `
             -Layout $layout `
@@ -11252,7 +11966,8 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         Assert-DefenseClawLayoutVolumeIdentity `
             -Layout $layout `
             -GatewayServiceName $GatewayServiceName `
-            -GuardianServiceName $GuardianServiceName
+            -GuardianServiceName $GuardianServiceName `
+            -AllowMissingCertificationCodexHome
         if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $layout.PendingPath -PathType Leaf) {
             throw 'cannot verify while a lifecycle transaction is pending; run Repair'
         }

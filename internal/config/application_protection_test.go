@@ -87,6 +87,31 @@ func TestApplicationProtectionPolicyOverlay(t *testing.T) {
 	}
 }
 
+func TestManagedEnterpriseNativeHookFailModesAreAlwaysClosed(t *testing.T) {
+	cfg := &Config{DeploymentMode: "managed_enterprise"}
+	cfg.Guardrail.Mode = "observe"
+	cfg.Guardrail.HookFailMode = "open"
+	cfg.Guardrail.Connectors = map[string]PerConnectorGuardrailConfig{
+		"codex":      {HookFailMode: "open"},
+		"claudecode": {HookFailMode: "open"},
+		"cursor":     {HookFailMode: "open"},
+	}
+
+	for _, connector := range []string{"codex", "claudecode"} {
+		if got := cfg.EffectiveHookFailModeForConnector(connector); got != "closed" {
+			t.Errorf("managed enterprise %s fail mode = %q, want closed", connector, got)
+		}
+	}
+	if got := cfg.EffectiveHookFailModeForConnector("cursor"); got != "open" {
+		t.Errorf("managed enterprise non-native connector fail mode = %q, want open", got)
+	}
+
+	cfg.DeploymentMode = "unmanaged_byod"
+	if got := cfg.EffectiveHookFailModeForConnector("claudecode"); got != "open" {
+		t.Errorf("unmanaged Claude fail mode = %q, want operator-configured open", got)
+	}
+}
+
 func TestApplicationProtectionEffectiveMinConfidenceHonorsExplicitZero(t *testing.T) {
 	cfg := DefaultApplicationProtectionConfig()
 	cfg.MinConfidence = 0

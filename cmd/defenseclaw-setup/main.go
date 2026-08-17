@@ -2176,7 +2176,7 @@ func verifyPayloadManifest(root string, manifest payloadManifest) error {
 	}
 	if manifest.DistributionFlavor != "oss" {
 		return fmt.Errorf(
-			"unsupported payload distribution flavor %q; managed-enterprise requires the private Windows CMID release overlay",
+			"unsupported payload distribution flavor %q; the per-user Setup accepts only oss",
 			manifest.DistributionFlavor,
 		)
 	}

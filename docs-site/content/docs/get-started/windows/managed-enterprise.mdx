@@ -64,7 +64,7 @@ Managed enterprise on native Windows is qualified only for `codex` and
 `claudecode` targets. Other connectors remain outside the Windows enterprise
 certification boundary.
 
-- **Codex:** version 0.131.0 or newer is required, but version alone is not
+- **Codex:** version 0.133.0 or newer is required, but version alone is not
   sufficient. Production enforcement also requires approved-client application
   control and a separately verified, fail-closed fixed hook launcher.
 - **Claude Code:** version 2.1.152 or newer is required. Production acceptance
@@ -117,8 +117,8 @@ lifecycle and use the generic enterprise-hook commands only for read-only
 target diagnostics:
 
 ```powershell
-$Gateway = 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe'
-$Manifest = 'C:\ProgramData\Cisco\DefenseClaw\hook-guardian\targets.yaml'
+$Gateway = 'C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\bin\defenseclaw-gateway.exe'
+$Manifest = 'C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\hook-guardian\targets.yaml'
 
 & $Gateway enterprise windows reconcile --json
 & $Gateway enterprise hooks status --manifest $Manifest --json

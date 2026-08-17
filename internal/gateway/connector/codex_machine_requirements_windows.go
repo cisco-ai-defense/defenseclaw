@@ -30,9 +30,7 @@ const windowsCodexMachineLockTimeout = 10 * time.Second
 var (
 	windowsCodexMachineProcessMu sync.Mutex
 
-	windowsCodexMachineProgramData = func() (string, error) {
-		return windows.KnownFolderPath(windows.FOLDERID_ProgramData, windows.KF_FLAG_DEFAULT)
-	}
+	windowsCodexMachineProgramData     = winpath.TrustedProgramData
 	windowsCodexMachineTrustedDirCheck = func(path, label string) error {
 		return managed.ValidateTrustedRuntimeDir(path, label)
 	}

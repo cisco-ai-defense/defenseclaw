@@ -39,6 +39,34 @@ func TestWindowsCodexMachinePrerequisitesDecoupleClaudeEffectivePolicy(t *testin
 	}
 }
 
+func TestWindowsCodexMachineSecurityCompleteRequiresEnabledTarget(t *testing.T) {
+	opts := testWindowsCodexMachineOptions()
+	opts.AgentApplicationControlEnforced = true
+	if windowsCodexMachineSecurityComplete(opts) {
+		t.Fatal("zero-target deployment must not report security_complete")
+	}
+
+	opts.EnterpriseTargetEnabled = true
+	opts.ClaudeTargetEnabled = true
+	opts.ClaudeEffectivePolicyVerified = true
+	if !windowsCodexMachineSecurityComplete(opts) {
+		t.Fatal("verified Claude-only target should be security-complete")
+	}
+
+	opts.ClaudeTargetEnabled = false
+	opts.ClaudeEffectivePolicyVerified = false
+	opts.CodexTargetEnabled = true
+	opts.CodexTrustedHookLauncherVerified = true
+	if !windowsCodexMachineSecurityComplete(opts) {
+		t.Fatal("verified Codex-only target should be security-complete")
+	}
+
+	opts.EnterpriseTargetEnabled = false
+	if windowsCodexMachineSecurityComplete(opts) {
+		t.Fatal("disabled last target must clear security_complete")
+	}
+}
+
 func TestNormalizeWindowsManagedGatewayAddrRequiresExactCanonicalIPv4Loopback(t *testing.T) {
 	for _, value := range []string{
 		"",

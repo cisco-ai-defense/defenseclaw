@@ -88,7 +88,7 @@ func installWindowsClaudeManagedResultSecure(ctx context.Context, opts InstallOp
 		Interactive:        false,
 		ManagedEnterprise:  true,
 		WorkspaceDir:       strings.TrimSpace(opts.WorkspaceDir),
-		HookFailMode:       strings.TrimSpace(opts.HookFailMode),
+		HookFailMode:       windowsEnterpriseHookFailMode("claudecode", opts.HookFailMode),
 		HILTEnabled:        opts.HILTEnabled,
 		AgentVersion:       strings.TrimSpace(opts.AgentVersion),
 		HookContractID:     strings.TrimSpace(opts.HookContractID),
@@ -105,11 +105,13 @@ func installWindowsClaudeManagedResultSecure(ctx context.Context, opts InstallOp
 	}
 
 	var (
-		home        string
-		policyBody  []byte
-		lockEntry   connector.HookContractLockEntry
-		hookScripts []string
-		transaction windowsClaudeUserRuntimeTransaction
+		home           string
+		policyBody     []byte
+		lockEntry      connector.HookContractLockEntry
+		lockUpdatedAt  string
+		entryUpdatedAt string
+		hookScripts    []string
+		transaction    windowsClaudeUserRuntimeTransaction
 	)
 	err = windowsEnterpriseTargetImpersonation(targetSID, opts.UserHome, func() error {
 		verifiedHome, verifiedSID, err := validateWindowsEnterpriseHome(opts.UserHome, opts.OwnerSID)
@@ -231,8 +233,24 @@ func installWindowsClaudeManagedResultSecure(ctx context.Context, opts InstallOp
 			))
 		}
 		lockEntry.Locations.HookConfigPaths = []string{policyPath}
-		if err := connector.SaveHookContractLockEntryForMode(setup.DataDir, lockEntry, true); err != nil {
+		if err := connector.SaveRecoveredHookContractLockEntryForMode(
+			setup.DataDir,
+			lockEntry,
+			opts.RecoveryHookContractLockUpdatedAt,
+			opts.RecoveryHookContractEntryUpdatedAt,
+		); err != nil {
 			return fail(fmt.Errorf("enterprise hooks: save hook contract lock: %w", err))
+		}
+		lockUpdatedAt, entryUpdatedAt, err =
+			connector.ManagedHookContractTimestamps(
+				setup.DataDir,
+				conn.Name(),
+			)
+		if err != nil {
+			return fail(fmt.Errorf(
+				"enterprise hooks: load protected hook contract recovery state: %w",
+				err,
+			))
 		}
 		if err := hardenWindowsUserRuntime(home, setup.DataDir, transaction.paths, targetSID); err != nil {
 			return fail(err)
@@ -319,14 +337,16 @@ func installWindowsClaudeManagedResultSecure(ctx context.Context, opts InstallOp
 
 	_ = ctx
 	return InstallResult{
-		Connector:       conn.Name(),
-		UserHome:        home,
-		DataDir:         setup.DataDir,
-		HookConfigPaths: []string{policyPath},
-		HookScripts:     sortedUnique(hookScripts),
-		CreatedDirs:     sortedUnique([]string{transaction.dataDir, transaction.hookDir}),
-		AgentVersion:    setup.AgentVersion,
-		HookContractID:  lockEntry.ContractID,
+		Connector:                  conn.Name(),
+		UserHome:                   home,
+		DataDir:                    setup.DataDir,
+		HookConfigPaths:            []string{policyPath},
+		HookScripts:                sortedUnique(hookScripts),
+		CreatedDirs:                sortedUnique([]string{transaction.dataDir, transaction.hookDir}),
+		AgentVersion:               setup.AgentVersion,
+		HookContractID:             lockEntry.ContractID,
+		HookContractLockUpdatedAt:  lockUpdatedAt,
+		HookContractEntryUpdatedAt: entryUpdatedAt,
 	}, nil
 }
 
@@ -351,6 +371,21 @@ func restoreWindowsClaudeUserRuntime(transaction windowsClaudeUserRuntimeTransac
 	}
 	if transaction.createdDataDir {
 		return removeEmptyWindowsDirectory(transaction.dataDir)
+	}
+	if transaction.createdHookDir {
+		// The hook directory was absent in the transaction preimage and has
+		// just been removed. Re-harden only the pre-existing data directory;
+		// requiring the absent hook directory here would turn a successful
+		// exact rollback into a second, masking failure.
+		return prepareWindowsGenericPath(
+			transaction.home,
+			transaction.dataDir,
+			transaction.targetSID,
+			true,
+			true,
+			true,
+			"restored per-user data directory",
+		)
 	}
 	return hardenWindowsUserRuntime(transaction.home, transaction.dataDir, transaction.paths, transaction.targetSID)
 }

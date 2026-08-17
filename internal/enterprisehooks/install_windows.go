@@ -55,6 +55,19 @@ func platformInstall(ctx context.Context, opts InstallOptions) (InstallResult, b
 	return result, true, err
 }
 
+// windowsEnterpriseHookFailMode is the authoritative managed-native hook
+// policy used by rendering, lock publication, and verification. The protected
+// Windows deployment never permits Codex or Claude hooks to inherit a
+// fail-open normal-mode setting.
+func windowsEnterpriseHookFailMode(connectorName, configured string) string {
+	switch strings.ToLower(strings.TrimSpace(connectorName)) {
+	case "codex", "claudecode":
+		return "closed"
+	default:
+		return strings.TrimSpace(configured)
+	}
+}
+
 func platformVerify(ctx context.Context, opts InstallOptions) (InstallResult, bool, error) {
 	if err := requireWindowsEnterpriseManagedAgentVersion(
 		opts.ConnectorName,
@@ -197,7 +210,7 @@ func verifyWindowsClaudeManagedResult(ctx context.Context, opts InstallOptions) 
 		Interactive:        false,
 		ManagedEnterprise:  true,
 		WorkspaceDir:       strings.TrimSpace(opts.WorkspaceDir),
-		HookFailMode:       strings.TrimSpace(opts.HookFailMode),
+		HookFailMode:       windowsEnterpriseHookFailMode(name, opts.HookFailMode),
 		HILTEnabled:        opts.HILTEnabled,
 		AgentVersion:       strings.TrimSpace(opts.AgentVersion),
 		HookContractID:     strings.TrimSpace(opts.HookContractID),
@@ -363,7 +376,7 @@ func resolveWindowsGenericManagedTarget(opts InstallOptions) (windowsGenericMana
 		Interactive:        false,
 		ManagedEnterprise:  true,
 		WorkspaceDir:       strings.TrimSpace(opts.WorkspaceDir),
-		HookFailMode:       strings.TrimSpace(opts.HookFailMode),
+		HookFailMode:       windowsEnterpriseHookFailMode(name, opts.HookFailMode),
 		HILTEnabled:        opts.HILTEnabled,
 		AgentVersion:       strings.TrimSpace(opts.AgentVersion),
 		HookContractID:     strings.TrimSpace(opts.HookContractID),
@@ -2151,8 +2164,11 @@ func removeEmptyWindowsDirectory(path string) error {
 	if errors.Is(err, os.ErrNotExist) {
 		return nil
 	}
-	if err != nil || len(entries) != 0 {
+	if err != nil {
 		return err
+	}
+	if len(entries) != 0 {
+		return fmt.Errorf("enterprise hooks: rollback directory is not empty: %s", path)
 	}
 	return os.Remove(path)
 }

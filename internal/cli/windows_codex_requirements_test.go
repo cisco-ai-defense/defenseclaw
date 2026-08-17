@@ -6,11 +6,23 @@
 package cli
 
 import (
+	"bytes"
 	"path/filepath"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 )
+
+func TestTrimWindowsJSONBOMAcceptsLegacyPowerShell51Output(t *testing.T) {
+	plain := []byte(`{"schema_version":1}`)
+	legacy := append([]byte{0xef, 0xbb, 0xbf}, plain...)
+	if got := trimWindowsJSONBOM(legacy); !bytes.Equal(got, plain) {
+		t.Fatalf("trim legacy BOM = %x, want %x", got, plain)
+	}
+	if got := trimWindowsJSONBOM(plain); !bytes.Equal(got, plain) {
+		t.Fatalf("BOM-less JSON changed: %x", got)
+	}
+}
 
 func TestResolveWindowsCodexManifestApplicabilityUsesGuardianManifest(t *testing.T) {
 	stateRoot := filepath.Clean(`C:\ProgramData\DefenseClaw\state`)

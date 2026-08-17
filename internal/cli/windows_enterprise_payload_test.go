@@ -16,13 +16,207 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/spf13/cobra"
+	"golang.org/x/sys/windows"
 
 	windowspayload "github.com/defenseclaw/defenseclaw/packaging/windows"
 )
+
+const windowsEnterpriseRestrictedStagingHelperEnv = "DEFENSECLAW_TEST_RESTRICTED_ENTERPRISE_STAGING"
+
+func TestWindowsEnterpriseEmbeddedPayloadStagingWithRestrictedEnvironment(t *testing.T) {
+	if os.Getenv(windowsEnterpriseRestrictedStagingHelperEnv) == "1" {
+		if _, present := os.LookupEnv("ProgramData"); present {
+			t.Fatal("restricted staging helper inherited ProgramData")
+		}
+		expectedParent, err := trustedWindowsEnterpriseProgramData()
+		if err != nil {
+			t.Fatalf("resolve ProgramData from fixed machine registration: %v", err)
+		}
+		script, cleanup, err := stageWindowsEnterprisePayload()
+		if err != nil {
+			t.Fatalf("stage embedded payload from restricted environment: %v", err)
+		}
+		payloadCleanupPending := true
+		t.Cleanup(func() {
+			if payloadCleanupPending {
+				_ = cleanup()
+			}
+		})
+		stagingDirectory := filepath.Dir(script)
+		if !strings.EqualFold(filepath.Dir(stagingDirectory), expectedParent) {
+			t.Fatalf(
+				"embedded payload parent = %q, want trusted ProgramData %q",
+				filepath.Dir(stagingDirectory),
+				expectedParent,
+			)
+		}
+		for name, want := range map[string][]byte{
+			windowspayload.InstallerName: windowspayload.Installer(),
+			windowspayload.ModuleName:    windowspayload.Module(),
+		} {
+			got, readErr := os.ReadFile(filepath.Join(stagingDirectory, name))
+			if readErr != nil {
+				t.Fatalf("read restricted staged %s: %v", name, readErr)
+			}
+			if !bytes.Equal(got, want) {
+				t.Fatalf("restricted staged %s differs from embedded bytes", name)
+			}
+		}
+		if err := cleanup(); err != nil {
+			t.Fatalf("clean up restricted embedded payload: %v", err)
+		}
+		payloadCleanupPending = false
+		if _, err := os.Lstat(stagingDirectory); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("restricted staging directory survived cleanup: %v", err)
+		}
+
+		powerShellTemp, cleanupTemp, err := prepareWindowsEnterprisePowerShellTemp()
+		if err != nil {
+			t.Fatalf("prepare protected PowerShell temp from restricted environment: %v", err)
+		}
+		tempCleanupPending := true
+		t.Cleanup(func() {
+			if tempCleanupPending {
+				_ = cleanupTemp()
+			}
+		})
+		environment, err := trustedWindowsEnterpriseEnvironment(powerShellTemp)
+		if err != nil {
+			t.Fatalf("construct trusted child environment from restricted process: %v", err)
+		}
+		childValues := make(map[string]string, len(environment))
+		for _, entry := range environment {
+			name, value, found := strings.Cut(entry, "=")
+			if found {
+				childValues[strings.ToLower(name)] = value
+			}
+		}
+		roots, err := resolveWindowsEnterpriseMachineRoots()
+		if err != nil {
+			t.Fatalf("resolve roots for trusted child environment assertion: %v", err)
+		}
+		for name, want := range map[string]string{
+			"programdata":       roots.ProgramData,
+			"programfiles":      roots.ProgramFiles,
+			"programfiles(x86)": roots.ProgramFilesX86,
+			"temp":              powerShellTemp,
+			"tmp":               powerShellTemp,
+		} {
+			if !strings.EqualFold(childValues[name], want) {
+				t.Fatalf("trusted child %s = %q, want %q", name, childValues[name], want)
+			}
+		}
+		if err := cleanupTemp(); err != nil {
+			t.Fatalf("clean up restricted protected PowerShell temp: %v", err)
+		}
+		tempCleanupPending = false
+		if _, err := os.Lstat(powerShellTemp); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("restricted protected PowerShell temp survived cleanup: %v", err)
+		}
+		return
+	}
+
+	if !windows.GetCurrentProcessToken().IsElevated() {
+		t.Skip("embedded ProgramData payload staging requires an elevated process token")
+	}
+	windowsDirectory, err := windows.GetSystemWindowsDirectory()
+	if err != nil {
+		t.Fatalf("resolve trusted Windows directory: %v", err)
+	}
+	system32 := filepath.Join(windowsDirectory, "System32")
+	temporaryProfile := t.TempDir()
+	command := exec.Command(
+		os.Args[0],
+		"-test.run=^TestWindowsEnterpriseEmbeddedPayloadStagingWithRestrictedEnvironment$",
+	)
+	command.Env = []string{
+		windowsEnterpriseRestrictedStagingHelperEnv + "=1",
+		"ComSpec=" + filepath.Join(system32, "cmd.exe"),
+		"PATH=" + strings.Join([]string{
+			system32,
+			windowsDirectory,
+			filepath.Join(system32, "Wbem"),
+			filepath.Join(system32, "WindowsPowerShell", "v1.0"),
+		}, string(os.PathListSeparator)),
+		"PSModulePath=" + filepath.Join(
+			system32,
+			"WindowsPowerShell",
+			"v1.0",
+			"Modules",
+		),
+		"SystemRoot=" + windowsDirectory,
+		"TEMP=" + temporaryProfile,
+		"TMP=" + temporaryProfile,
+	}
+	output, err := command.CombinedOutput()
+	if err != nil {
+		t.Fatalf("restricted embedded-payload staging helper: %v\n%s", err, output)
+	}
+}
+
+func TestResolveWindowsEnterpriseMachineRootsIgnoresProcessEnvironment(t *testing.T) {
+	poison := filepath.Join(t.TempDir(), "attacker-controlled")
+	t.Setenv("ProgramData", poison)
+	t.Setenv("ProgramFiles", poison)
+	t.Setenv("ProgramFiles(x86)", poison)
+	roots, err := resolveWindowsEnterpriseMachineRoots()
+	if err != nil {
+		t.Fatalf("resolve fixed machine roots: %v", err)
+	}
+	for label, root := range map[string]string{
+		"ProgramData":       roots.ProgramData,
+		"Program Files":     roots.ProgramFiles,
+		"Program Files x86": roots.ProgramFilesX86,
+	} {
+		if strings.EqualFold(root, poison) || !filepath.IsAbs(root) {
+			t.Fatalf("%s machine root = %q, want absolute non-environment value", label, root)
+		}
+	}
+}
+
+func TestValidateWindowsEnterpriseMachineRootRejectsUnsafeSyntaxAndMissingPath(t *testing.T) {
+	for name, value := range map[string]string{
+		"empty":               "",
+		"relative":            `ProgramData`,
+		"environment":         `%ProgramData%`,
+		"UNC":                 `\\server\share`,
+		"extended device":     `\\?\C:\ProgramData`,
+		"DOS device":          `\\.\C:\ProgramData`,
+		"alternate stream":    `C:\ProgramData:stream`,
+		"noncanonical parent": `C:\ProgramData\..`,
+		"forward slash":       `C:/ProgramData`,
+		"padded":              ` C:\ProgramData`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := validateWindowsEnterpriseMachineRoot(value, "fixture"); err == nil {
+				t.Fatalf("unsafe machine root %q was accepted", value)
+			}
+		})
+	}
+	missing := filepath.Join(t.TempDir(), "missing-machine-root")
+	if _, err := validateWindowsEnterpriseMachineRoot(missing, "fixture"); err == nil {
+		t.Fatalf("missing machine root %q was accepted", missing)
+	}
+}
+
+func TestValidateWindowsEnterpriseMachineRootRejectsReparseRoot(t *testing.T) {
+	target := t.TempDir()
+	link := filepath.Join(filepath.Dir(target), filepath.Base(target)+"-reparse")
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("directory reparse fixture unavailable: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Remove(link) })
+	if _, err := validateWindowsEnterpriseMachineRoot(link, "fixture"); err == nil ||
+		!strings.Contains(strings.ToLower(err.Error()), "reparse") {
+		t.Fatalf("reparse machine root error = %v, want explicit rejection", err)
+	}
+}
 
 func TestWindowsEnterprisePayloadCarriesBothLifecycleScripts(t *testing.T) {
 	if !windowspayload.Available() {

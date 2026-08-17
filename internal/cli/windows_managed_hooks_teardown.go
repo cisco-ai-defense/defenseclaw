@@ -27,7 +27,7 @@ import (
 )
 
 const (
-	windowsManagedHooksTeardownSchema      = 1
+	windowsManagedHooksTeardownSchema      = 2
 	windowsManagedHooksTeardownJournalMax  = 4 << 20
 	windowsManagedHooksTeardownJournalFile = "managed-hooks-teardown-journal.json"
 )
@@ -48,6 +48,7 @@ type windowsManagedHooksTeardownJournal struct {
 	GatewayAddr         string                                                     `json:"gateway_addr"`
 	GatewayServiceName  string                                                     `json:"gateway_service_name"`
 	Targets             []windowsManagedHooksTeardownTarget                        `json:"targets"`
+	ClaudeTargetSIDs    []string                                                   `json:"claude_target_sids"`
 	Claude              enterprisehooks.WindowsClaudeManagedPolicyTeardownSnapshot `json:"claude"`
 }
 
@@ -65,6 +66,7 @@ type windowsManagedHooksTeardownReport struct {
 	ManifestPath                 string                              `json:"manifest_path"`
 	JournalPath                  string                              `json:"journal_path"`
 	TargetCount                  int                                 `json:"target_count"`
+	EnrollmentTargetCount        int                                 `json:"enrollment_target_count"`
 	SucceededCount               int                                 `json:"succeeded_count"`
 	VerifiedCleanCount           int                                 `json:"verified_clean_count"`
 	VerifiedInstalledCount       int                                 `json:"verified_installed_count"`
@@ -138,7 +140,9 @@ func runWindowsManagedHooksTeardown(
 		report.Error = err.Error()
 		report.SucceededCount = 0
 		report.VerifiedCleanCount = 0
-		report.VerifiedInstalledCount = 0
+		if !report.RollbackCompleted {
+			report.VerifiedInstalledCount = 0
+		}
 		report.FailedCount = report.TargetCount
 		for index := range report.Results {
 			report.Results[index].OK = false
@@ -230,22 +234,36 @@ func runWindowsManagedHooksTeardown(
 		GatewayServiceName:  opts.GatewayServiceName,
 		Targets:             targets,
 	}
-	claudeOpts := enterprisehooks.WindowsClaudeManagedPolicyTeardownOptions{
-		HookExecutable:     opts.HookBinary,
-		GatewayAddr:        opts.GatewayAddr,
-		GatewayServiceName: opts.GatewayServiceName,
-		TargetSIDs:         claudeTargets,
-	}
-
 	switch action {
 	case "prepare":
-		err = prepareWindowsManagedHooksTeardown(
+		currentClaude, claudeActive, readErr :=
+			enterprisehooks.ReadWindowsClaudeManagedPolicyTargets()
+		if readErr != nil {
+			err = readErr
+			break
+		}
+		currentClaude, err = windowsManagedHooksPartialClaudeTargets(
+			claudeTargets,
+			currentClaude,
+			claudeActive,
+		)
+		if err != nil {
+			break
+		}
+		identity.ClaudeTargetSIDs = currentClaude
+		report.EnrollmentTargetCount = len(currentClaude) + len(codexTargets)
+		var rollbackCompleted bool
+		rollbackCompleted, err = prepareWindowsManagedHooksTeardown(
 			opts,
-			claudeOpts,
+			windowsManagedHooksClaudeOptions(opts, currentClaude),
 			codexTargets,
 			identity,
 			report.JournalPath,
 		)
+		if rollbackCompleted {
+			report.RollbackCompleted = true
+			report.VerifiedInstalledCount = report.EnrollmentTargetCount
+		}
 		if err == nil {
 			report.RollbackReady = true
 			report.SafeToRemoveBinary = true
@@ -257,6 +275,10 @@ func runWindowsManagedHooksTeardown(
 		journal, err = readWindowsManagedHooksTeardownJournal(report.JournalPath)
 		if err == nil {
 			err = validateWindowsManagedHooksTeardownJournal(journal, identity)
+		}
+		if err == nil {
+			report.EnrollmentTargetCount =
+				len(journal.ClaudeTargetSIDs) + len(codexTargets)
 		}
 		if err == nil && journal.Phase != "prepared" {
 			err = fmt.Errorf(
@@ -279,6 +301,10 @@ func runWindowsManagedHooksTeardown(
 		if err == nil {
 			err = validateWindowsManagedHooksTeardownJournal(journal, identity)
 		}
+		if err == nil {
+			report.EnrollmentTargetCount =
+				len(journal.ClaudeTargetSIDs) + len(codexTargets)
+		}
 		if err == nil && journal.Phase != "captured" &&
 			journal.Phase != "prepared" && journal.Phase != "rolled_back" {
 			err = fmt.Errorf(
@@ -289,7 +315,7 @@ func runWindowsManagedHooksTeardown(
 		if err == nil {
 			err = rollbackWindowsManagedHooksTeardown(
 				opts,
-				claudeOpts,
+				windowsManagedHooksClaudeOptions(opts, journal.ClaudeTargetSIDs),
 				codexTargets,
 				journal,
 				report.JournalPath,
@@ -297,7 +323,7 @@ func runWindowsManagedHooksTeardown(
 		}
 		if err == nil {
 			report.RollbackCompleted = true
-			report.VerifiedInstalledCount = report.TargetCount
+			report.VerifiedInstalledCount = report.EnrollmentTargetCount
 			report.SucceededCount = report.TargetCount
 		}
 	}
@@ -319,15 +345,15 @@ func prepareWindowsManagedHooksTeardown(
 	codexTargets []connector.WindowsCodexManagedRuntimeTarget,
 	identity windowsManagedHooksTeardownJournal,
 	journalPath string,
-) error {
+) (bool, error) {
 	if existing, err := readWindowsManagedHooksTeardownJournal(journalPath); err == nil {
 		if validateErr := validateWindowsManagedHooksTeardownJournal(existing, identity); validateErr != nil {
-			return validateErr
+			return false, validateErr
 		}
 		switch existing.Phase {
 		case "prepared":
 			if _, verifyErr := verifyWindowsManagedHooksTeardownClean(opts); verifyErr == nil {
-				return nil
+				return false, nil
 			}
 			// A committed uninstall can crash after transaction completion but
 			// before PowerShell retires this protected journal. If a later
@@ -336,24 +362,24 @@ func prepareWindowsManagedHooksTeardown(
 			// Partial or mismatched enrollment still fails the installed-state
 			// verification before any mutation.
 		case "captured":
-			return errors.New(
+			return false, errors.New(
 				"managed-hook teardown has an incomplete captured transaction; rollback is required",
 			)
 		case "rolled_back":
 			// A subsequent lifecycle attempt may safely replace a completed
 			// journal after the active set is verified below.
 		default:
-			return fmt.Errorf("unsupported managed-hook teardown journal phase %q", existing.Phase)
+			return false, fmt.Errorf("unsupported managed-hook teardown journal phase %q", existing.Phase)
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
+		return false, err
 	}
 	if err := verifyWindowsManagedHooksTeardownInstalled(
 		opts,
 		claudeOpts.TargetSIDs,
 		codexTargets,
 	); err != nil {
-		return err
+		return false, err
 	}
 
 	var captured enterprisehooks.WindowsClaudeManagedPolicyTeardownSnapshot
@@ -372,33 +398,33 @@ func prepareWindowsManagedHooksTeardown(
 			return nil
 		},
 	)
-	if err != nil {
-		return err
-	}
-	if !persisted {
-		return errors.New("managed-hook teardown did not durably publish its rollback journal")
-	}
-	restoreOnFailure := func(cause error) error {
-		var failures []string
-		if restoreErr := enterprisehooks.RestoreWindowsClaudeManagedPolicyTeardown(
+	restoreOnFailure := func(cause error) (bool, error) {
+		journal := identity
+		journal.Phase = "captured"
+		journal.Claude = captured
+		if rollbackErr := rollbackWindowsManagedHooksTeardown(
+			opts,
 			claudeOpts,
-			captured,
-		); restoreErr != nil {
-			failures = append(failures, restoreErr.Error())
-		}
-		if len(codexTargets) != 0 {
-			if restoreErr := restoreWindowsCodexManagedHooks(opts, codexTargets); restoreErr != nil {
-				failures = append(failures, restoreErr.Error())
-			}
-		}
-		if len(failures) != 0 {
-			return fmt.Errorf(
-				"%v (managed-hook teardown rollback failed: %s)",
+			codexTargets,
+			journal,
+			journalPath,
+		); rollbackErr != nil {
+			return false, fmt.Errorf(
+				"%v (managed-hook teardown rollback failed: %v)",
 				cause,
-				strings.Join(failures, "; "),
+				rollbackErr,
 			)
 		}
-		return cause
+		return true, cause
+	}
+	if err != nil {
+		if persisted {
+			return restoreOnFailure(err)
+		}
+		return false, err
+	}
+	if !persisted {
+		return false, errors.New("managed-hook teardown did not durably publish its rollback journal")
 	}
 
 	removeReport, err := connector.RemoveWindowsCodexMachineRequirements(opts)
@@ -420,7 +446,42 @@ func prepareWindowsManagedHooksTeardown(
 	if err := writeWindowsManagedHooksTeardownJournal(journalPath, journal); err != nil {
 		return restoreOnFailure(err)
 	}
-	return nil
+	return false, nil
+}
+
+func completeWindowsManagedHooksTeardownRollback(
+	journal windowsManagedHooksTeardownJournal,
+	restore func() error,
+	verify func() error,
+	persist func(windowsManagedHooksTeardownJournal) error,
+) error {
+	switch journal.Phase {
+	case "captured", "prepared", "rolled_back":
+	default:
+		return fmt.Errorf(
+			"managed-hook teardown journal phase %q cannot be rolled back",
+			journal.Phase,
+		)
+	}
+	verificationErr := verify()
+	if verificationErr != nil {
+		if journal.Phase == "rolled_back" {
+			return verificationErr
+		}
+		if err := restore(); err != nil {
+			return err
+		}
+		if err := verify(); err != nil {
+			return err
+		}
+	}
+	if journal.Phase == "rolled_back" {
+		// A failed prepare may already have restored and authenticated every
+		// target. Revalidate that state without repeating file replacement.
+		return nil
+	}
+	journal.Phase = "rolled_back"
+	return persist(journal)
 }
 
 func rollbackWindowsManagedHooksTeardown(
@@ -430,38 +491,41 @@ func rollbackWindowsManagedHooksTeardown(
 	journal windowsManagedHooksTeardownJournal,
 	journalPath string,
 ) error {
-	if err := enterprisehooks.RestoreWindowsClaudeManagedPolicyTeardown(
-		claudeOpts,
-		journal.Claude,
-	); err != nil {
-		return err
-	}
-	if len(codexTargets) != 0 {
-		if err := restoreWindowsCodexManagedHooks(opts, codexTargets); err != nil {
-			return err
-		}
-	} else {
-		disabled := opts
-		disabled.CodexTargetEnabled = false
-		codexReport, codexErr := connector.VerifyWindowsCodexMachineRequirements(disabled)
-		if codexErr != nil || !codexReport.OK ||
-			!codexReport.SafeToRemoveBinary ||
-			codexReport.SurvivingOwnedPathReferences != 0 {
+	return completeWindowsManagedHooksTeardownRollback(
+		journal,
+		func() error {
+			if err := enterprisehooks.RestoreWindowsClaudeManagedPolicyTeardown(
+				claudeOpts,
+				journal.Claude,
+			); err != nil {
+				return err
+			}
+			if len(codexTargets) != 0 {
+				return restoreWindowsCodexManagedHooks(opts, codexTargets)
+			}
+			disabled := opts
+			disabled.CodexTargetEnabled = false
+			codexReport, codexErr := connector.VerifyWindowsCodexMachineRequirements(disabled)
 			if codexErr != nil {
 				return codexErr
 			}
-			return errors.New("Codex machine policy is not clean after teardown rollback")
-		}
-	}
-	if err := verifyWindowsManagedHooksTeardownInstalled(
-		opts,
-		claudeOpts.TargetSIDs,
-		codexTargets,
-	); err != nil {
-		return err
-	}
-	journal.Phase = "rolled_back"
-	return writeWindowsManagedHooksTeardownJournal(journalPath, journal)
+			if !codexReport.OK || !codexReport.SafeToRemoveBinary ||
+				codexReport.SurvivingOwnedPathReferences != 0 {
+				return errors.New("Codex machine policy is not clean after teardown rollback")
+			}
+			return nil
+		},
+		func() error {
+			return verifyWindowsManagedHooksTeardownInstalled(
+				opts,
+				claudeOpts.TargetSIDs,
+				codexTargets,
+			)
+		},
+		func(updated windowsManagedHooksTeardownJournal) error {
+			return writeWindowsManagedHooksTeardownJournal(journalPath, updated)
+		},
+	)
 }
 
 func restoreWindowsCodexManagedHooks(
@@ -639,9 +703,23 @@ func validateWindowsManagedHooksTeardownJournal(
 			return errors.New("managed-hook teardown journal target set changed")
 		}
 	}
+	allowedClaudeTargets := make([]string, 0, len(identity.Targets))
+	for _, target := range identity.Targets {
+		if target.Connector == "claudecode" {
+			allowedClaudeTargets = append(allowedClaudeTargets, target.SID)
+		}
+	}
+	if _, err := windowsManagedHooksPartialClaudeTargets(
+		allowedClaudeTargets,
+		journal.ClaudeTargetSIDs,
+		len(journal.ClaudeTargetSIDs) != 0,
+	); err != nil {
+		return err
+	}
 	if journal.Claude.PolicyExisted != journal.Claude.StateExisted ||
 		len(journal.Claude.Policy) > windowsManagedHooksTeardownJournalMax ||
-		len(journal.Claude.State) > windowsManagedHooksTeardownJournalMax {
+		len(journal.Claude.State) > windowsManagedHooksTeardownJournalMax ||
+		(journal.Claude.PolicyExisted != (len(journal.ClaudeTargetSIDs) != 0)) {
 		return errors.New("managed-hook teardown journal contains an invalid Claude snapshot")
 	}
 	return nil

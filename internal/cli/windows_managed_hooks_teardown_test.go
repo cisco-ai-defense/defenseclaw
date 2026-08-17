@@ -7,6 +7,7 @@ package cli
 
 import (
 	"encoding/json"
+	"errors"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -182,12 +183,13 @@ func TestValidateWindowsManagedHooksTeardownJournalRejectsIdentityChanges(t *tes
 
 func TestWindowsManagedHooksTeardownReportJSONContract(t *testing.T) {
 	report := windowsManagedHooksTeardownReport{
-		SchemaVersion:                1,
+		SchemaVersion:                windowsManagedHooksTeardownSchema,
 		Action:                       "prepare",
 		OK:                           true,
 		ManifestPath:                 `C:\ProgramData\DefenseClaw\hook-guardian\targets.yaml`,
 		JournalPath:                  `C:\ProgramData\DefenseClaw\install\managed-hooks-teardown-journal.json`,
 		TargetCount:                  1,
+		EnrollmentTargetCount:        1,
 		SucceededCount:               1,
 		VerifiedCleanCount:           1,
 		VerifiedInstalledCount:       0,
@@ -211,6 +213,7 @@ func TestWindowsManagedHooksTeardownReportJSONContract(t *testing.T) {
 	}
 	for _, numeric := range []string{
 		"target_count",
+		"enrollment_target_count",
 		"succeeded_count",
 		"verified_clean_count",
 		"failed_count",
@@ -219,5 +222,78 @@ func TestWindowsManagedHooksTeardownReportJSONContract(t *testing.T) {
 		if _, ok := decoded[numeric].(float64); !ok {
 			t.Fatalf("%s = %#v, want JSON number", numeric, decoded[numeric])
 		}
+	}
+}
+
+func TestCompleteWindowsManagedHooksTeardownRollbackIsIdempotent(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		phase        string
+		installed    bool
+		wantRestores int
+		wantVerifies int
+		wantWrites   int
+	}{
+		{
+			name: "captured partial teardown", phase: "captured",
+			wantRestores: 1, wantVerifies: 2, wantWrites: 1,
+		},
+		{
+			name: "prepared teardown", phase: "prepared",
+			wantRestores: 1, wantVerifies: 2, wantWrites: 1,
+		},
+		{
+			name: "captured after self rollback", phase: "captured", installed: true,
+			wantRestores: 0, wantVerifies: 1, wantWrites: 1,
+		},
+		{
+			name: "already rolled back", phase: "rolled_back", installed: true,
+			wantRestores: 0, wantVerifies: 1, wantWrites: 0,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			restores := 0
+			verifies := 0
+			writes := 0
+			installed := test.installed
+			err := completeWindowsManagedHooksTeardownRollback(
+				windowsManagedHooksTeardownJournal{Phase: test.phase},
+				func() error {
+					restores++
+					installed = true
+					return nil
+				},
+				func() error {
+					verifies++
+					if !installed {
+						return errors.New("managed hooks are not installed")
+					}
+					return nil
+				},
+				func(journal windowsManagedHooksTeardownJournal) error {
+					writes++
+					if journal.Phase != "rolled_back" {
+						t.Fatalf("persisted phase = %q", journal.Phase)
+					}
+					return nil
+				},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if restores != test.wantRestores ||
+				verifies != test.wantVerifies ||
+				writes != test.wantWrites {
+				t.Fatalf(
+					"restores=%d verifies=%d writes=%d, want %d/%d/%d",
+					restores,
+					verifies,
+					writes,
+					test.wantRestores,
+					test.wantVerifies,
+					test.wantWrites,
+				)
+			}
+		})
 	}
 }

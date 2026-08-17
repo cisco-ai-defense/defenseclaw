@@ -19,8 +19,8 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"github.com/spf13/cobra"
-	"golang.org/x/sys/windows"
 )
 
 var (
@@ -223,9 +223,9 @@ func resolveWindowsCodexRequirementsLayout(
 		return opts, err
 	}
 
-	programData, err := windows.KnownFolderPath(windows.FOLDERID_ProgramData, windows.KF_FLAG_DEFAULT)
+	programData, err := winpath.TrustedProgramData()
 	if err != nil {
-		return opts, fmt.Errorf("resolve ProgramData: %w", err)
+		return opts, fmt.Errorf("resolve trusted ProgramData: %w", err)
 	}
 	requirementsPath := filepath.Join(programData, "OpenAI", "Codex", "requirements.toml")
 	enterpriseTargetEnabled, codexTargetEnabled, claudeTargetEnabled, err :=
@@ -255,7 +255,7 @@ func resolveWindowsCodexRequirementsLayout(
 		return connector.WindowsCodexMachineRequirementsOptions{}, err
 	}
 	if !exists {
-		if action != "reconcile" && action != "inspect" {
+		if action != "reconcile" && action != "inspect" && action != "lifecycle" {
 			return connector.WindowsCodexMachineRequirementsOptions{}, fmt.Errorf(
 				"Codex requirements %s requires protected deployment metadata",
 				action,
@@ -271,7 +271,8 @@ func resolveWindowsCodexRequirementsLayout(
 			"protected deployment metadata does not match the running gateway and strict service environment",
 		)
 	}
-	if metadata.Installed != nil && !*metadata.Installed && action != "remove" {
+	if metadata.Installed != nil && !*metadata.Installed &&
+		action != "remove" && action != "lifecycle" {
 		return connector.WindowsCodexMachineRequirementsOptions{}, errors.New(
 			"protected deployment metadata marks this installation inactive",
 		)
@@ -368,6 +369,9 @@ func readWindowsCodexDeploymentMetadata(
 	if err != nil || !os.SameFile(opened, current) {
 		return metadata, false, errors.New("protected deployment metadata path changed while it was read")
 	}
+	// Windows PowerShell 5.1 historically wrote UTF-8 JSON with a BOM. Accept
+	// that one exact legacy prefix while new lifecycle writes are BOM-less.
+	body = trimWindowsJSONBOM(body)
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	if err := decoder.Decode(&metadata); err != nil {
 		return metadata, false, fmt.Errorf("parse protected deployment metadata: %w", err)
@@ -377,6 +381,10 @@ func readWindowsCodexDeploymentMetadata(
 		return metadata, false, errors.New("protected deployment metadata contains trailing JSON")
 	}
 	return metadata, true, nil
+}
+
+func trimWindowsJSONBOM(body []byte) []byte {
+	return bytes.TrimPrefix(body, []byte{0xef, 0xbb, 0xbf})
 }
 
 func sameWindowsEnterprisePathCLI(left, right string) bool {

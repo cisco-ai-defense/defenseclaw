@@ -108,7 +108,7 @@ The matrix is an ownership switch, not an auto-heal switch. Both rows repair hoo
 The durable controls live outside the agent user's authority:
 
 1. **The gateway is a system service.** It runs as the dedicated `defenseclaw` identity, not as the interactive Codex or Claude Code user. Killing the agent process does not kill the gateway.
-2. **The executable and service definition are administrator-owned.** A standard user cannot replace `/opt/defenseclaw/bin/defenseclaw-gateway`, edit the systemd unit, replace `/opt/cisco/secureclient/defenseclaw/bin/defenseclaw-gateway`, unload a system LaunchDaemon, replace `C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe`, or change/delete the Windows SCM services.
+2. **The executable and service definition are administrator-owned.** A standard user cannot replace `/opt/defenseclaw/bin/defenseclaw-gateway`, edit the systemd unit, replace `/opt/cisco/secureclient/defenseclaw/bin/defenseclaw-gateway`, unload a system LaunchDaemon, replace `C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\bin\defenseclaw-gateway.exe`, or change/delete the Windows SCM services.
 3. **Policy is administrator-owned and mode-pinned.** The service sets `DEFENSECLAW_DEPLOYMENT_MODE=managed_enterprise`; changing a user environment variable or user config cannot downgrade the running service.
 4. **Runtime mutation is denied.** Authenticated non-admin clients receive HTTP 403 for managed-enterprise config changes. Security-critical changes require an administrator edit and service restart.
 5. **Guardian authorization is root-owned.** Service-writable status is not sufficient to authorize repair or claim readiness. The gateway trusts the separate administrator-owned authorization record.
@@ -303,17 +303,17 @@ The default managed layout is:
 
 | Surface | Default path | Authority |
 | --- | --- | --- |
-| Gateway, native hook, and optional CLI binaries | `C:\Program Files\Cisco\DefenseClaw\bin` | Administrators/LocalSystem own and write; service identities receive only the access they need. |
-| Managed config | `C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml` | Administrators/LocalSystem write; the gateway service can read. |
-| Runtime state and service-side scoped credentials | `C:\ProgramData\Cisco\DefenseClaw\runtime` | Gateway virtual account and LocalSystem; standard users have no read or write grant. |
-| Logs | `C:\ProgramData\Cisco\DefenseClaw\logs` | Service identities write; grant support-reader access separately if required. |
-| Guardian manifest | `C:\ProgramData\Cisco\DefenseClaw\hook-guardian\targets.yaml` | Administrators/LocalSystem write; guardian reads. |
-| Trusted authorization ledger | `C:\ProgramData\Cisco\DefenseClaw\hook-guardian-state\protected_targets.json` | LocalSystem/Administrators only; gateway receives the narrow read access required for readiness. |
-| Deployment metadata | `C:\ProgramData\Cisco\DefenseClaw\install\deployment.json` | Installer-owned transaction and servicing state. |
+| Gateway, native hook, and optional CLI binaries | `C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\bin` | Administrators/LocalSystem own and write; service identities receive only the access they need. |
+| Managed config | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\etc\config.yaml` | Administrators/LocalSystem write; the gateway service can read. |
+| Runtime state and service-side scoped credentials | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\runtime` | Gateway virtual account and LocalSystem; standard users have no read or write grant. |
+| Logs | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\logs` | Service identities write; grant support-reader access separately if required. |
+| Guardian manifest | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\hook-guardian\targets.yaml` | Administrators/LocalSystem write; guardian reads. |
+| Trusted authorization ledger | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\hook-guardian-state\protected_targets.json` | LocalSystem/Administrators only; gateway receives the narrow read access required for readiness. |
+| Deployment metadata | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\install\deployment.json` | Installer-owned transaction and servicing state. |
 | Shared Codex machine-policy parent | `C:\ProgramData\OpenAI\Codex` | Explicit install/upgrade/repair creates missing `OpenAI` and `Codex` directories atomically with Administrators/System full control and Users read/traverse only. Existing directories are validation-only and are never taken over. |
 | Codex managed requirements | `C:\ProgramData\OpenAI\Codex\requirements.toml`, `.defenseclaw-managed-hooks.state`, and `.defenseclaw-managed-hooks.lock` | DefenseClaw-owned canonical ten-event policy, enrollment state, and protected bounded transaction lock; users can read policy but cannot write it. Ownership and ACL-preimage records are private under the install-state directory. |
 | Claude managed hook policy | `C:\Program Files\ClaudeCode\managed-settings.d\90-defenseclaw.json` and adjacent ownership state | Administrators/LocalSystem write; registered users read and invoke; unrelated Claude settings remain outside DefenseClaw ownership. |
-| Agent-control evidence | `C:\ProgramData\Cisco\DefenseClaw\install\agent-application-control-attestation.json` | Protected schema-v2 application-control and Claude-precedence evidence, plus a separate Codex trusted-launcher result. |
+| Agent-control evidence | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\install\agent-application-control-attestation.json` | Protected schema-v2 application-control and Claude-precedence evidence, plus a separate Codex trusted-launcher result. |
 | Service definitions | SCM registry and security descriptors | Administrators/LocalSystem only. |
 
 The installer rejects install/state roots outside exact mount-manager drive
@@ -342,17 +342,17 @@ backslashes in YAML:
 ```yaml
 config_version: 8
 deployment_mode: managed_enterprise
-data_dir: 'C:\ProgramData\Cisco\DefenseClaw\runtime'
+data_dir: 'C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\runtime'
 observability:
   local:
-    path: 'C:\ProgramData\Cisco\DefenseClaw\runtime\audit.db'
-    judge_bodies_path: 'C:\ProgramData\Cisco\DefenseClaw\runtime\judge_bodies.db'
+    path: 'C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\runtime\audit.db'
+    judge_bodies_path: 'C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\runtime\judge_bodies.db'
   defaults:
     redaction_profile: sensitive
-plugin_dir: 'C:\ProgramData\Cisco\DefenseClaw\runtime\plugins'
-policy_dir: 'C:\ProgramData\Cisco\DefenseClaw\runtime\policies'
+plugin_dir: 'C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\runtime\plugins'
+policy_dir: 'C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\runtime\policies'
 gateway:
-  device_key_file: 'C:\ProgramData\Cisco\DefenseClaw\runtime\device.key'
+  device_key_file: 'C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\runtime\device.key'
   api_bind: 127.0.0.1
   api_port: 18970
   config_reload:
@@ -413,7 +413,7 @@ only for `Install`, `Upgrade`, or `Repair`, and only when the service names are
 the exact case-sensitive `DefenseClawCertGateway_<10-lowercase-hex>` and
 `DefenseClawCertGuardian_<same-id>`, the install and state roots are the exact
 same-id leaves under the dedicated Program Files and ProgramData
-`Cisco\DefenseClaw-Cert` roots, and a required certification CODEX_HOME
+`Cisco\Cisco Secure Client\DefenseClaw-Cert` roots, and a required certification CODEX_HOME
 basename carries that same identifier. Production defaults, mismatched
 identifiers, case near misses, descendant/nested roots, and all other actions
 reject the switch. Omit it for every production deployment.
@@ -437,7 +437,7 @@ directory through the known-folder API and use the in-box engine with
 ```powershell
 $Windows = [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)
 $PowerShell = Join-Path $Windows 'System32\WindowsPowerShell\v1.0\powershell.exe'
-$Stage = 'C:\ProgramData\Cisco\DefenseClaw-Staging\<release-id>'
+$Stage = 'C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw-Staging\<release-id>'
 $Installer = Join-Path $Stage 'install-enterprise.ps1'
 
 & $PowerShell -NoLogo -NoProfile -NonInteractive -File $Installer `
@@ -647,8 +647,8 @@ a path string.
 Run one explicit service-mediated reconcile before accepting the endpoint:
 
 ```powershell
-$Gateway = 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe'
-$Manifest = 'C:\ProgramData\Cisco\DefenseClaw\hook-guardian\targets.yaml'
+$Gateway = 'C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\bin\defenseclaw-gateway.exe'
+$Manifest = 'C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\hook-guardian\targets.yaml'
 
 & $Gateway enterprise windows reconcile --json
 & $Gateway enterprise hooks status --manifest $Manifest --json
@@ -731,13 +731,13 @@ sc.exe qfailure $GatewayService
 sc.exe sdshow $GatewayService
 sc.exe sdshow $GuardianService
 
-Get-Acl 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe' |
+Get-Acl 'C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\bin\defenseclaw-gateway.exe' |
   Format-List Owner, Sddl
-Get-Acl 'C:\ProgramData\Cisco\DefenseClaw\etc\config.yaml' |
+Get-Acl 'C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\etc\config.yaml' |
   Format-List Owner, Sddl
-Get-Acl 'C:\ProgramData\Cisco\DefenseClaw\hook-guardian\targets.yaml' |
+Get-Acl 'C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\hook-guardian\targets.yaml' |
   Format-List Owner, Sddl
-Get-Acl 'C:\ProgramData\Cisco\DefenseClaw\hook-guardian-state\protected_targets.json' |
+Get-Acl 'C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\hook-guardian-state\protected_targets.json' |
   Format-List Owner, Sddl
 ```
 
@@ -873,7 +873,7 @@ transaction and DACL/service contract:
 ```powershell
 $Windows = [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)
 $PowerShell = Join-Path $Windows 'System32\WindowsPowerShell\v1.0\powershell.exe'
-$Stage = 'C:\ProgramData\Cisco\DefenseClaw-Staging\<release-id>'
+$Stage = 'C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw-Staging\<release-id>'
 $Installer = Join-Path $Stage 'install-enterprise.ps1'
 
 & $PowerShell -NoLogo -NoProfile -NonInteractive -File $Installer `
@@ -930,14 +930,14 @@ protected asynchronous retirement receipt while a fixed-System32 finalizer
 removes the running CLI's renamed install tree:
 
 ```powershell
-$InstalledCLI = 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw.exe'
+$InstalledCLI = 'C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\bin\defenseclaw.exe'
 & $InstalledCLI enterprise windows uninstall `
-  --installer 'C:\Program Files\Cisco\DefenseClaw\libexec\install-enterprise.ps1' `
+  --installer 'C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\libexec\install-enterprise.ps1' `
   --json
 
 # Approved decommission only:
 & $InstalledCLI enterprise windows uninstall `
-  --installer 'C:\Program Files\Cisco\DefenseClaw\libexec\install-enterprise.ps1' `
+  --installer 'C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\libexec\install-enterprise.ps1' `
   --purge `
   --json
 ```
@@ -1001,8 +1001,8 @@ Windows enterprise Codex registration is machine policy, not a patch to
 C:\ProgramData\OpenAI\Codex\requirements.toml
 C:\ProgramData\OpenAI\Codex\.defenseclaw-managed-hooks.state
 C:\ProgramData\OpenAI\Codex\.defenseclaw-managed-hooks.lock
-C:\ProgramData\Cisco\DefenseClaw\install\codex-requirements-ownership.json
-C:\ProgramData\Cisco\DefenseClaw\install\codex-requirements-acl-backup.json
+C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\install\codex-requirements-ownership.json
+C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\install\codex-requirements-acl-backup.json
 ```
 
 The canonical TOML sets `allow_managed_hooks_only = true`, enables hooks, pins
@@ -1017,11 +1017,11 @@ The hidden installed-binary commands are lifecycle internals and read-only
 operator diagnostics except for service-mediated reconcile/removal:
 
 ```powershell
-$Gateway = 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe'
+$Gateway = 'C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\bin\defenseclaw-gateway.exe'
 & $Gateway enterprise windows codex-requirements verify --json
 & $Gateway enterprise windows reconcile --json
 & $Gateway enterprise hooks verify `
-  --manifest 'C:\ProgramData\Cisco\DefenseClaw\hook-guardian\targets.yaml' `
+  --manifest 'C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\hook-guardian\targets.yaml' `
   --json
 ```
 
@@ -1031,7 +1031,7 @@ The exact installed path, managed mode, protected metadata, administrator
 identity, and service environment are all revalidated.
 
 Client application control and hook execution are separate gates. Approved
-Codex must be at least 0.131.0, but stock signed Codex 0.144.3 is intentionally
+Codex must be at least 0.133.0, but stock signed Codex 0.144.3 is intentionally
 not accepted as complete enterprise enforcement: when a hostile hook shell is
 OS-blocked it can continue to the provider with exit zero and no hook contact.
 AppLocker/WDAC shell rules alone therefore do not satisfy the trusted-launcher
@@ -1061,8 +1061,8 @@ writing `~/.claude/settings.json`. Enrollment is service-mediated. Add the
 approved `claudecode` target to the protected guardian manifest, then run:
 
 ```powershell
-$Gateway = 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe'
-$Manifest = 'C:\ProgramData\Cisco\DefenseClaw\hook-guardian\targets.yaml'
+$Gateway = 'C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\bin\defenseclaw-gateway.exe'
+$Manifest = 'C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\hook-guardian\targets.yaml'
 
 & $Gateway enterprise windows reconcile --json
 & $Gateway enterprise hooks verify --manifest $Manifest --json
@@ -1541,8 +1541,8 @@ On Windows, use the matching service and guardian checks:
 ```powershell
 Get-Service DefenseClawGateway, DefenseClawHookGuardian
 
-$Gateway = 'C:\Program Files\Cisco\DefenseClaw\bin\defenseclaw-gateway.exe'
-$Manifest = 'C:\ProgramData\Cisco\DefenseClaw\hook-guardian\targets.yaml'
+$Gateway = 'C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\bin\defenseclaw-gateway.exe'
+$Manifest = 'C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\hook-guardian\targets.yaml'
 & $Gateway enterprise hooks status --manifest $Manifest --json
 & $Gateway enterprise hooks verify --manifest $Manifest --json
 & $PowerShell -NoLogo -NoProfile -NonInteractive -File $Installer `

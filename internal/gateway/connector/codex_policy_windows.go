@@ -16,11 +16,12 @@ import (
 	"unsafe"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
 
 func codexSystemRequirementsPath() (string, error) {
-	programData, err := windows.KnownFolderPath(windows.FOLDERID_ProgramData, windows.KF_FLAG_DEFAULT)
+	programData, err := winpath.TrustedProgramData()
 	if err != nil {
 		return "", err
 	}

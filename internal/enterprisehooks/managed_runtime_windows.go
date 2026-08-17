@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
 
@@ -248,12 +249,9 @@ func validateWindowsCodexManagedRuntime(
 }
 
 func windowsCodexMachineRequirementsPath() (string, error) {
-	programData, err := windows.KnownFolderPath(
-		windows.FOLDERID_ProgramData,
-		windows.KF_FLAG_DEFAULT,
-	)
+	programData, err := winpath.TrustedProgramData()
 	if err != nil {
-		return "", fmt.Errorf("enterprise hooks: resolve ProgramData: %w", err)
+		return "", fmt.Errorf("enterprise hooks: resolve trusted ProgramData: %w", err)
 	}
 	return filepath.Join(programData, "OpenAI", "Codex", "requirements.toml"), nil
 }

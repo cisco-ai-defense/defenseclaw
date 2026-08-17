@@ -153,7 +153,13 @@ func enterpriseManagedHookRuntimeNoop(connectorName string) bool {
 		registered := nativeEnterpriseHookRuntimeSnapshot.registered
 		err := nativeEnterpriseHookRuntimeSnapshot.err
 		nativeEnterpriseHookRuntimeSnapshot.Unlock()
-		return managedRuntimeAbsentWithTrustedTombstone(policyActive, registered, err)
+		return enterpriseManagedRuntimeAbsenceNoop(
+			executable,
+			connectorName,
+			policyActive,
+			registered,
+			err,
+		)
 	}
 	nativeEnterpriseHookRuntimeSnapshot.Unlock()
 
@@ -169,11 +175,53 @@ func enterpriseManagedHookRuntimeNoop(connectorName string) bool {
 	nativeEnterpriseHookRuntimeSnapshot.gatewayServiceName = runtime.GatewayServiceName
 	nativeEnterpriseHookRuntimeSnapshot.err = err
 	nativeEnterpriseHookRuntimeSnapshot.Unlock()
-	return managedRuntimeAbsentWithTrustedTombstone(
+	return enterpriseManagedRuntimeAbsenceNoop(
+		executable,
+		connectorName,
 		runtime.PolicyActive,
 		runtime.Registered,
 		err,
 	)
+}
+
+func enterpriseManagedRuntimeAbsenceNoop(
+	executable string,
+	connectorName string,
+	policyActive bool,
+	registered bool,
+	resolveErr error,
+) bool {
+	if managedRuntimeAbsentWithTrustedTombstone(
+		policyActive,
+		registered,
+		resolveErr,
+	) {
+		return true
+	}
+	if resolveErr != nil || policyActive || registered {
+		return false
+	}
+	// An absent machine target is a trusted no-op only for the stable per-user
+	// launcher after its installer-owned state has become an inactive
+	// tombstone. Any other cached/retained enterprise runtime is de-enrolled;
+	// classify it before buildHookOptions can consult target-owned sidecars or
+	// attempt a gateway peer connection.
+	nativeEnterpriseHookRuntimeSnapshot.Lock()
+	defer nativeEnterpriseHookRuntimeSnapshot.Unlock()
+	if nativeEnterpriseHookRuntimeSnapshot.prepared &&
+		sameWindowsHookPath(
+			nativeEnterpriseHookRuntimeSnapshot.executable,
+			executable,
+		) &&
+		nativeEnterpriseHookRuntimeSnapshot.connector == connectorName &&
+		nativeEnterpriseHookRuntimeSnapshot.err == nil {
+		nativeEnterpriseHookRuntimeSnapshot.err = fmt.Errorf(
+			"%s: connector %s is absent from the protected target set",
+			enterprisehooks.WindowsManagedSIDUnregisteredReason,
+			connectorName,
+		)
+	}
+	return false
 }
 
 func managedRuntimeAbsentWithTrustedTombstone(

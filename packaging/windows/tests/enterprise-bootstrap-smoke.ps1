@@ -205,23 +205,27 @@ $scopeGuardianService = "DefenseClawCertGuardian_$scopeToken"
 $scopeInstallRoot = [IO.Path]::Combine(
     [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles),
     'Cisco',
+    'Cisco Secure Client',
     'DefenseClaw-Cert',
     $scopeToken
 )
 $scopeStateRoot = [IO.Path]::Combine(
     [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData),
     'Cisco',
+    'Cisco Secure Client',
     'DefenseClaw-Cert',
     $scopeToken
 )
 $productionInstallRoot = [IO.Path]::Combine(
     [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles),
     'Cisco',
+    'Cisco Secure Client',
     'DefenseClaw'
 )
 $productionStateRoot = [IO.Path]::Combine(
     [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData),
     'Cisco',
+    'Cisco Secure Client',
     'DefenseClaw'
 )
 $scopeCertificationCodexHome = Join-Path (
@@ -688,6 +692,19 @@ try {
     Invoke-RejectedBootstrap `
         -InstallerPath (Join-Path $untrustedRoot 'install-enterprise.ps1') `
         -ExpectedError 'untrusted owner|replacement access|write-like access'
+    Invoke-RejectedBootstrap `
+        -InstallerPath (Join-Path $untrustedRoot 'install-enterprise.ps1') `
+        -ExpectedError 'untrusted owner|replacement access|write-like access' `
+        -InstallerArguments @(
+            '-Action', 'Status',
+            '-GatewayServiceName', $scopeGatewayService,
+            '-GuardianServiceName', $scopeGuardianService,
+            '-InstallRoot', $scopeInstallRoot,
+            '-StateRoot', $scopeStateRoot,
+            '-CertificationCodexHome', $scopeCertificationCodexHome,
+            '-AllowUnsigned',
+            '-Json'
+        )
     Invoke-RejectedBootstrap `
         -InstallerPath (Join-Path $untrustedRoot 'install-enterprise.ps1') `
         -ExpectedError 'untrusted owner|replacement access|write-like access' `

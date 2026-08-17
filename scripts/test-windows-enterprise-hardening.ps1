@@ -103,7 +103,10 @@ param(
 
     [switch]$DisposableHost,
 
-    [switch]$KeepWorkRoot
+    [switch]$KeepWorkRoot,
+
+    [ValidateSet('none', 'fixture', 'normal-mode-noop', 'certification-isolation')]
+    [string]$FailureInjectionPhase = 'none'
 )
 
 Set-StrictMode -Version Latest
@@ -123,6 +126,8 @@ $script:PrimarySID = ''
 $script:HostileSID = ''
 $script:PrimaryProfile = ''
 $script:HostileProfile = ''
+$script:HostileProfileExpected = ''
+$script:HostileProfileExpectedWasAbsent = $false
 $script:PrimarySessionID = -1
 $script:PrimaryDataDir = ''
 $script:CertificationCodexHome = ''
@@ -159,6 +164,12 @@ $script:ScheduledTasks = [Collections.Generic.List[string]]::new()
 $script:UserTreeSnapshots = [Collections.Generic.List[object]]::new()
 $script:SecretNeedles = [Collections.Generic.List[string]]::new()
 $script:SourceDigests = [ordered]@{}
+$script:PowerShellSelection = $null
+$script:PowerShellPrerequisite = $null
+$script:FailureEvidence = $null
+$script:CertificationParentRoots = @()
+$script:LifecycleLockPreinstallBaseline = $null
+$script:LifecycleLockCleanupBaseline = $null
 $script:CodexSharedOwnedByHarness = $false
 $script:CodexSharedExpectedBeforeCleanup = $null
 $script:APIPort = 0
@@ -173,6 +184,7 @@ $script:SparseAttackLogicalBytes = [int64]1099511627776
 $script:SparseAttackInitialGrowBytes = [int64]8388608
 $script:SparseAttackMaxAllocatedBytes = [int64]1048576
 $script:SparseAttackMaxGuardianWorkingSetGrowthBytes = [int64]268435456
+$script:ManagedArtifactDigestMaxBytes = [int64]4194304
 
 function Protect-DisplayText([string]$Value) {
     if ($null -eq $Value) { return '' }
@@ -191,6 +203,33 @@ function Protect-SensitiveDisplayText([string]$Value) {
         }
     }
     return $text
+}
+
+function ConvertTo-CertificationErrorEvidence(
+    [Management.Automation.ErrorRecord]$Record
+) {
+    if ($null -eq $Record) { return $null }
+    $invocation = $Record.InvocationInfo
+    return [pscustomobject]@{
+        exception_type = Protect-SensitiveDisplayText (
+            $Record.Exception.GetType().FullName
+        )
+        message = Protect-SensitiveDisplayText $Record.Exception.Message
+        fully_qualified_error_id = Protect-SensitiveDisplayText (
+            [string]$Record.FullyQualifiedErrorId
+        )
+        script_stack_trace = Protect-SensitiveDisplayText (
+            [string]$Record.ScriptStackTrace
+        )
+        script_name = Protect-SensitiveDisplayText (
+            [IO.Path]::GetFileName([string]$invocation.ScriptName)
+        )
+        script_line_number = [int]$invocation.ScriptLineNumber
+        offset_in_line = [int]$invocation.OffsetInLine
+        invocation_position = Protect-SensitiveDisplayText (
+            [string]$invocation.PositionMessage
+        )
+    }
 }
 
 function ConvertTo-CanonicalPath([string]$Path) {
@@ -409,10 +448,10 @@ function Assert-CertificationScope {
     }
 
     $productionInstall = ConvertTo-CanonicalPath (
-        Join-Path $script:KnownProgramFiles 'Cisco\DefenseClaw'
+        Join-Path $script:KnownProgramFiles 'Cisco\Cisco Secure Client\DefenseClaw'
     )
     $productionState = ConvertTo-CanonicalPath (
-        Join-Path $script:KnownProgramData 'Cisco\DefenseClaw'
+        Join-Path $script:KnownProgramData 'Cisco\Cisco Secure Client\DefenseClaw'
     )
     if ($script:GatewayServiceName -eq 'DefenseClawGateway' -or
         $script:GuardianServiceName -eq 'DefenseClawHookGuardian' -or
@@ -447,7 +486,11 @@ function Invoke-Check([string]$Name, [scriptblock]$Body) {
         if ($null -eq $detail) { $detail = 'passed' }
         Add-Result $Name 'passed' ([string]$detail)
     } catch {
-        Add-Result $Name 'failed' $_.Exception.Message
+        Add-Result `
+            $Name `
+            'failed' `
+            $_.Exception.Message `
+            @{ error = ConvertTo-CertificationErrorEvidence $_ }
         throw
     }
 }
@@ -456,37 +499,157 @@ function Add-SkippedResult([string]$Name, [string]$Reason) {
     Add-Result $Name 'skipped' $Reason
 }
 
-function Get-PowerShellExecutable {
-    $candidates = [Collections.Generic.List[string]]::new()
-    $processPathProperty = [Environment].GetProperty(
-        'ProcessPath',
-        [Reflection.BindingFlags]::Public -bor
-            [Reflection.BindingFlags]::Static
+function Assert-MachineWidePowerShellPath([string]$Path) {
+    $full = ConvertTo-CanonicalPath $Path
+    if (-not (Test-Path -LiteralPath $full -PathType Leaf)) {
+        throw "machine-wide PowerShell executable is missing: $full"
+    }
+    $windowsDirectory = ConvertTo-CanonicalPath (
+        [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)
     )
-    if ($null -ne $processPathProperty) {
-        $processPath = [string]$processPathProperty.GetValue($null, $null)
-        if (-not [string]::IsNullOrWhiteSpace($processPath)) {
-            $candidates.Add($processPath)
+    $systemPowerShell = ConvertTo-CanonicalPath (
+        Join-Path `
+            $windowsDirectory `
+            'System32\WindowsPowerShell\v1.0\powershell.exe'
+    )
+    $programFiles = ConvertTo-CanonicalPath (
+        [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
+    )
+    $programFilesPowerShell = ConvertTo-CanonicalPath (
+        Join-Path $programFiles 'PowerShell'
+    )
+    $source = ''
+    $boundary = ''
+    if ($full.Equals(
+            $systemPowerShell,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        $source = 'windows-system32'
+        $boundary = $windowsDirectory
+    } elseif ($full.StartsWith(
+            ($programFilesPowerShell.TrimEnd('\') + '\'),
+            [StringComparison]::OrdinalIgnoreCase
+        ) -and
+        [IO.Path]::GetFileName($full).Equals(
+            'pwsh.exe',
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        $source = 'program-files'
+        $boundary = $programFiles
+    } else {
+        throw (
+            'credentialed child PowerShell must be machine-wide under ' +
+            "System32 or Program Files; selected=$full"
+        )
+    }
+
+    $current = $full
+    while ($true) {
+        $item = Get-Item -LiteralPath $current -Force -ErrorAction Stop
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "machine-wide PowerShell path traverses a reparse point: $current"
+        }
+        if ($current.Equals($boundary, [StringComparison]::OrdinalIgnoreCase)) {
+            break
+        }
+        $parent = [IO.Path]::GetDirectoryName($current)
+        if ([string]::IsNullOrWhiteSpace($parent) -or
+            $parent.Equals($current, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "machine-wide PowerShell path escaped its approved root: $full"
+        }
+        $current = ConvertTo-CanonicalPath $parent
+    }
+    return [pscustomobject]@{
+        path = $full
+        source = $source
+        acl_chain_checked = $true
+        reparse_free = $true
+    }
+}
+
+function Get-PowerShellExecutable {
+    $programFiles = ConvertTo-CanonicalPath (
+        [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
+    )
+    $windowsDirectory = ConvertTo-CanonicalPath (
+        [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)
+    )
+    $candidates = [Collections.Generic.List[string]]::new()
+    $candidates.Add((Join-Path $programFiles 'PowerShell\7\pwsh.exe'))
+    $powerShellRoot = Join-Path $programFiles 'PowerShell'
+    if (Test-Path -LiteralPath $powerShellRoot -PathType Container) {
+        foreach ($directory in @(
+            Get-ChildItem `
+                -LiteralPath $powerShellRoot `
+                -Directory `
+                -Force `
+                -ErrorAction Stop |
+                Sort-Object Name -Descending
+        )) {
+            $candidates.Add((Join-Path $directory.FullName 'pwsh.exe'))
         }
     }
-    try {
-        $currentProcessPath = [string](
-            Get-Process -Id $PID -ErrorAction Stop
-        ).Path
-        if (-not [string]::IsNullOrWhiteSpace($currentProcessPath)) {
-            $candidates.Add($currentProcessPath)
-        }
-    } catch {}
-    foreach ($name in @('powershell.exe', 'pwsh.exe')) {
-        $candidates.Add((Join-Path $PSHOME $name))
-    }
+    $candidates.Add((
+        Join-Path `
+            $windowsDirectory `
+            'System32\WindowsPowerShell\v1.0\powershell.exe'
+    ))
+
+    $seen = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::OrdinalIgnoreCase
+    )
     foreach ($candidate in @($candidates.ToArray())) {
-        if (-not [string]::IsNullOrWhiteSpace($candidate) -and
-            (Test-Path -LiteralPath $candidate -PathType Leaf)) {
-            return ConvertTo-CanonicalPath $candidate
+        if (-not $seen.Add((ConvertTo-CanonicalPath $candidate)) -or
+            -not (Test-Path -LiteralPath $candidate -PathType Leaf)) {
+            continue
         }
+        $selection = Assert-MachineWidePowerShellPath $candidate
+        $script:PowerShellSelection = $selection
+        return [string]$selection.path
     }
-    throw 'cannot resolve the current 64-bit PowerShell executable'
+    throw (
+        'cannot resolve a machine-wide PowerShell executable under Program ' +
+        'Files or Windows System32; install PowerShell 7 machine-wide or ' +
+        'repair the built-in Windows PowerShell installation'
+    )
+}
+
+function Stop-NativeProcessTree {
+    param(
+        [Parameter(Mandatory)][Diagnostics.Process]$Process,
+        [Parameter(Mandatory)][string]$Label
+    )
+    try { $Process.Refresh() } catch {}
+    if ($Process.HasExited) { return }
+
+    $killerStart = [Diagnostics.ProcessStartInfo]::new()
+    $killerStart.FileName = Join-Path $script:System32 'taskkill.exe'
+    $killerStart.Arguments = "/PID $($Process.Id) /T /F"
+    $killerStart.UseShellExecute = $false
+    $killerStart.CreateNoWindow = $true
+    $killerStart.RedirectStandardOutput = $true
+    $killerStart.RedirectStandardError = $true
+    $killer = [Diagnostics.Process]::new()
+    $killer.StartInfo = $killerStart
+    try {
+        if (-not $killer.Start()) {
+            throw "$Label taskkill did not start"
+        }
+        if (-not $killer.WaitForExit(10000)) {
+            try { $killer.Kill() } catch {}
+            throw "$Label taskkill timed out"
+        }
+        $killer.WaitForExit()
+    }
+    finally {
+        $killer.Dispose()
+    }
+    try { $Process.WaitForExit(10000) | Out-Null } catch {}
+    try { $Process.Refresh() } catch {}
+    if (-not $Process.HasExited) {
+        try { $Process.Kill() } catch {}
+        throw "$Label process tree did not terminate"
+    }
 }
 
 function Invoke-NativeProcess {
@@ -514,10 +677,6 @@ function Invoke-NativeProcess {
     if ($StrictWindowsBootstrapEnvironment) {
         $start.Environment.Clear()
         $bootstrapEnvironment = [ordered]@{
-            SystemRoot = $script:WindowsDirectory
-            windir = $script:WindowsDirectory
-            ProgramFiles = $script:KnownProgramFiles
-            ProgramData = $script:KnownProgramData
             ComSpec = Join-Path $script:System32 'cmd.exe'
             PATH = @(
                 $script:System32,
@@ -528,6 +687,7 @@ function Invoke-NativeProcess {
             PSModulePath = Join-Path `
                 $script:System32 `
                 'WindowsPowerShell\v1.0\Modules'
+            SystemRoot = $script:WindowsDirectory
             TEMP = $script:WorkRoot
             TMP = $script:WorkRoot
         }
@@ -556,7 +716,7 @@ function Invoke-NativeProcess {
     try {
         if ($null -eq $DuringExecution) {
             if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
-                try { $process.Kill($true) } catch {}
+                Stop-NativeProcessTree -Process $process -Label $Label
                 throw "$Label timed out after $TimeoutSeconds seconds"
             }
         } else {
@@ -568,18 +728,21 @@ function Invoke-NativeProcess {
                 $process.Refresh()
             }
             if (-not $process.HasExited) {
-                try { $process.Kill($true) } catch {}
+                Stop-NativeProcessTree -Process $process -Label $Label
                 throw "$Label timed out after $TimeoutSeconds seconds"
             }
-            $process.WaitForExit()
         }
+        # Windows PowerShell 5.1 requires the parameterless wait after a
+        # successful timed wait before redirected asynchronous streams and
+        # ExitCode are guaranteed to be published.
+        $process.WaitForExit()
         $stdoutText = $stdoutTask.GetAwaiter().GetResult()
         $stderrText = $stderrTask.GetAwaiter().GetResult()
         $exitCode = $process.ExitCode
     } catch {
         try {
             if (-not $process.HasExited) {
-                $process.Kill($true)
+                Stop-NativeProcessTree -Process $process -Label $Label
             }
         } catch {}
         throw
@@ -589,7 +752,12 @@ function Invoke-NativeProcess {
     [IO.File]::WriteAllText($stdout, $stdoutText, [Text.UTF8Encoding]::new($false))
     [IO.File]::WriteAllText($stderr, $stderrText, [Text.UTF8Encoding]::new($false))
     if ($AllowedExitCodes -notcontains $exitCode) {
-        throw "$Label exited $exitCode; expected $($AllowedExitCodes -join ', '). stderr: $(Protect-SensitiveDisplayText $stderrText)"
+        $failureText = if ([string]::IsNullOrWhiteSpace($stderrText)) {
+            $stdoutText
+        } else {
+            $stderrText
+        }
+        throw "$Label exited $exitCode; expected $($AllowedExitCodes -join ', '). output: $(Protect-SensitiveDisplayText $failureText)"
     }
     return [pscustomobject]@{
         ExitCode = $exitCode
@@ -621,6 +789,126 @@ function Set-ICaclsOwnerAndDacl {
             @($Options)
         ) `
         -Label $Label
+}
+
+function Assert-NormalModeRuntimeFileSecurity(
+    [string]$Path,
+    [string]$ExpectedOwnerSID,
+    [string]$Label
+) {
+    $full = ConvertTo-CanonicalPath $Path
+    $item = Get-Item -LiteralPath $full -Force -ErrorAction Stop
+    if ($item.PSIsContainer -or
+        ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "$Label is not a regular runtime file: $full"
+    }
+    $acl = Get-Acl -LiteralPath $full -ErrorAction Stop
+    $ownerSID = ConvertTo-CertificationSID $acl.Owner
+    $rules = @($acl.Access)
+    $expectedSIDs = @(
+        $ExpectedOwnerSID,
+        'S-1-5-18',
+        'S-1-5-32-544'
+    )
+    if ($ownerSID -ne $ExpectedOwnerSID -or
+        -not [bool]$acl.AreAccessRulesProtected -or
+        $rules.Count -ne $expectedSIDs.Count) {
+        throw (
+            "$Label owner/DACL is not exact: owner=$ownerSID " +
+            "protected=$($acl.AreAccessRulesProtected) rules=$($rules.Count)"
+        )
+    }
+    foreach ($expectedSID in $expectedSIDs) {
+        $matches = @(
+            $rules |
+                Where-Object {
+                    (ConvertTo-CertificationSID $_.IdentityReference) -eq
+                        $expectedSID
+                }
+        )
+        if ($matches.Count -ne 1 -or
+            $matches[0].AccessControlType -ne
+                [Security.AccessControl.AccessControlType]::Allow -or
+            $matches[0].FileSystemRights -ne
+                [Security.AccessControl.FileSystemRights]::FullControl -or
+            $matches[0].InheritanceFlags -ne
+                [Security.AccessControl.InheritanceFlags]::None -or
+            $matches[0].PropagationFlags -ne
+                [Security.AccessControl.PropagationFlags]::None -or
+            [bool]$matches[0].IsInherited) {
+            throw "$Label ACL entry for $expectedSID is not exact Full Control"
+        }
+    }
+    return [pscustomobject]@{
+        path = $full
+        owner_sid = $ownerSID
+        dacl_protected = $true
+        explicit_full_control_sids = $expectedSIDs
+    }
+}
+
+function Assert-AlternateUserPowerShellPrerequisite(
+    [Management.Automation.PSCredential]$Credential,
+    [string]$ExpectedSID,
+    [string]$Label
+) {
+    $actualSID = (
+        [Security.Principal.NTAccount]::new($Credential.UserName)
+    ).Translate([Security.Principal.SecurityIdentifier]).Value
+    if ($actualSID -ne $ExpectedSID) {
+        throw "$Label credential SID is $actualSID, want $ExpectedSID"
+    }
+    $selection = Assert-MachineWidePowerShellPath `
+        $script:PowerShellExecutable
+    $stdout = Join-Path $script:WorkRoot ($Label + '.stdout.log')
+    $stderr = Join-Path $script:WorkRoot ($Label + '.stderr.log')
+    $process = $null
+    try {
+        try {
+            $process = Start-Process `
+                -FilePath ([string]$selection.path) `
+                -ArgumentList '-NoLogo -NoProfile -NonInteractive -Command "exit 0"' `
+                -WorkingDirectory $script:System32 `
+                -Credential $Credential `
+                -WindowStyle Hidden `
+                -RedirectStandardOutput $stdout `
+                -RedirectStandardError $stderr `
+                -PassThru
+        } catch {
+            throw (
+                "$Label cannot start the selected machine-wide PowerShell " +
+                "as $ExpectedSID. Ensure Read & Execute access on the " +
+                'executable and every parent directory. ' +
+                "path=$($selection.path); error=$($_.Exception.Message)"
+            )
+        }
+        if (-not $process.WaitForExit(30000)) {
+            try { $process.Kill($true) } catch {}
+            throw "$Label machine-wide PowerShell access preflight timed out"
+        }
+        $process.Refresh()
+        if ($process.ExitCode -ne 0) {
+            $stderrText = if (Test-Path -LiteralPath $stderr -PathType Leaf) {
+                [IO.File]::ReadAllText($stderr)
+            } else { '' }
+            throw (
+                "$Label machine-wide PowerShell access preflight exited " +
+                "$($process.ExitCode): " +
+                (Protect-SensitiveDisplayText $stderrText)
+            )
+        }
+    } finally {
+        if ($null -ne $process) { $process.Dispose() }
+    }
+    $script:PowerShellPrerequisite = [pscustomobject]@{
+        path = [string]$selection.path
+        source = [string]$selection.source
+        target_sid = $ExpectedSID
+        acl_chain_checked = [bool]$selection.acl_chain_checked
+        target_execution_succeeded = $true
+        load_user_profile_requested = $false
+    }
+    return $script:PowerShellPrerequisite
 }
 
 function Invoke-UserPowerShell {
@@ -701,10 +989,14 @@ function Invoke-UserPowerShell {
         }
     }
     $stdoutText = if (Test-Path -LiteralPath $stdout) {
-        [IO.File]::ReadAllText($stdout)
+        Read-CredentialedProcessOutputFile `
+            -Path $stdout `
+            -Label "$Label standard output"
     } else { '' }
     $stderrText = if (Test-Path -LiteralPath $stderr) {
-        [IO.File]::ReadAllText($stderr)
+        Read-CredentialedProcessOutputFile `
+            -Path $stderr `
+            -Label "$Label standard error"
     } else { '' }
     if ($AllowedExitCodes -notcontains $exitCode) {
         throw "$Label exited $exitCode; expected $($AllowedExitCodes -join ', '). stderr: $(Protect-SensitiveDisplayText $stderrText)"
@@ -716,6 +1008,31 @@ function Invoke-UserPowerShell {
         StdOutPath = $stdout
         StdErrPath = $stderr
     }
+}
+
+function Read-CredentialedProcessOutputFile {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Label,
+        [int]$TimeoutMilliseconds = 10000
+    )
+    $deadline = [DateTimeOffset]::UtcNow.AddMilliseconds(
+        $TimeoutMilliseconds
+    )
+    do {
+        try {
+            return [IO.File]::ReadAllText($Path)
+        }
+        catch [IO.IOException] {
+            if ([DateTimeOffset]::UtcNow -ge $deadline) {
+                throw (
+                    "$Label remained locked after $TimeoutMilliseconds ms: " +
+                    $_.Exception.Message
+                )
+            }
+            Start-Sleep -Milliseconds 50
+        }
+    } while ($true)
 }
 
 function ConvertFrom-SingleJSONDocument([string]$Text, [string]$Label) {
@@ -901,11 +1218,14 @@ function Get-ActiveWTSSessions {
 
 function Resolve-ProtectedActiveUser([string]$ExplicitSID) {
     $sessions = @(Get-ActiveWTSSessions)
-    $matches = if ([string]::IsNullOrWhiteSpace($ExplicitSID)) {
-        $sessions
-    } else {
-        @($sessions | Where-Object { [string]$_.sid -eq $ExplicitSID.Trim() })
-    }
+    $matches = @(
+        if ([string]::IsNullOrWhiteSpace($ExplicitSID)) {
+            $sessions
+        } else {
+            $sessions |
+                Where-Object { [string]$_.sid -eq $ExplicitSID.Trim() }
+        }
+    )
     if ($matches.Count -ne 1) {
         $active = @($sessions | ForEach-Object {
             "$($_.account)[$($_.sid)]/session=$($_.session_id)"
@@ -1068,7 +1388,11 @@ function Get-ScheduledTaskEngineProcessIDs([string]$TaskName) {
         $folder = $service.GetFolder('\')
         $task = $folder.GetTask($TaskName)
         $instances = @($task.GetInstances(0))
-        return @($instances | ForEach-Object { [uint32]$_.EnginePID })
+        return @(
+            $instances |
+                ForEach-Object { [uint32]$_.EnginePID } |
+                Where-Object { $_ -gt 0 }
+        )
     } finally {
         foreach ($instance in $instances) {
             try {
@@ -1244,66 +1568,72 @@ function Remove-CertificationScheduledTask([string]$TaskName) {
     $enginePIDs = [uint32[]]@(
         Get-ScheduledTaskEngineProcessIDs $safeTaskName
     )
+    $taskAbsent = $false
     try {
-        Stop-ScheduledTask `
+        try {
+            Stop-ScheduledTask `
+                -TaskName $safeTaskName `
+                -TaskPath '\' `
+                -ErrorAction Stop
+        } catch {
+            # Stopping is best-effort; unregistering and proving absence are not.
+        }
+        Unregister-ScheduledTask `
             -TaskName $safeTaskName `
             -TaskPath '\' `
+            -Confirm:$false `
             -ErrorAction Stop
-    } catch {
-        # Stopping is best-effort; unregistering and proving absence are not.
-    }
-    Unregister-ScheduledTask `
-        -TaskName $safeTaskName `
-        -TaskPath '\' `
-        -Confirm:$false `
-        -ErrorAction Stop
-    $remaining = @(
-        Get-ScheduledTask -ErrorAction Stop |
-            Where-Object {
-                [string]$_.TaskName -ceq $safeTaskName -and
-                [string]$_.TaskPath -ceq '\'
-            }
-    )
-    if ($remaining.Count -ne 0) {
-        throw (
-            'certification scheduled task remains after unregister: ' +
-            $safeTaskName
+        $remaining = @(
+            Get-ScheduledTask -ErrorAction Stop |
+                Where-Object {
+                    [string]$_.TaskName -ceq $safeTaskName -and
+                    [string]$_.TaskPath -ceq '\'
+                }
         )
-    }
-    $engineDeadline = [DateTimeOffset]::UtcNow.AddSeconds(30)
-    do {
-        $remainingEnginePIDs = @(
-            foreach ($enginePID in $enginePIDs) {
-                try {
-                    $engineProcess = [Diagnostics.Process]::GetProcessById(
-                        [int]$enginePID
-                    )
-                    try {
-                        if (-not $engineProcess.HasExited) {
-                            $enginePID
-                        }
-                    } finally {
-                        $engineProcess.Dispose()
-                    }
-                } catch [ArgumentException] {}
-            }
-        )
-        if ($remainingEnginePIDs.Count -eq 0) {
-            break
+        if ($remaining.Count -ne 0) {
+            throw (
+                'certification scheduled task remains after unregister: ' +
+                $safeTaskName
+            )
         }
-        Start-Sleep -Milliseconds 100
-    } while ([DateTimeOffset]::UtcNow -lt $engineDeadline)
-    if ($remainingEnginePIDs.Count -ne 0) {
-        throw (
-            'certification scheduled-task engines remain after cleanup: ' +
-            ($remainingEnginePIDs -join ',')
-        )
+        $taskAbsent = $true
+        $engineDeadline = [DateTimeOffset]::UtcNow.AddSeconds(30)
+        do {
+            $remainingEnginePIDs = @(
+                foreach ($enginePID in $enginePIDs) {
+                    if ([uint32]$enginePID -eq 0) { continue }
+                    try {
+                        $engineProcess = [Diagnostics.Process]::GetProcessById(
+                            [int]$enginePID
+                        )
+                        try {
+                            if (-not $engineProcess.HasExited) {
+                                $enginePID
+                            }
+                        } finally {
+                            $engineProcess.Dispose()
+                        }
+                    } catch [ArgumentException] {}
+                }
+            )
+            if ($remainingEnginePIDs.Count -eq 0) {
+                break
+            }
+            Start-Sleep -Milliseconds 100
+        } while ([DateTimeOffset]::UtcNow -lt $engineDeadline)
+        if ($remainingEnginePIDs.Count -ne 0) {
+            throw (
+                'certification scheduled-task engines remain after cleanup: ' +
+                ($remainingEnginePIDs -join ',')
+            )
+        }
     }
-    if (-not $script:ScheduledTasks.Remove($safeTaskName)) {
-        throw (
-            'certification scheduled-task tracking removal failed: ' +
-            $safeTaskName
-        )
+    finally {
+        # Once task absence is proven, stale tracking must not turn a later
+        # cleanup pass into a false missing-task failure.
+        if ($taskAbsent) {
+            [void]$script:ScheduledTasks.Remove($safeTaskName)
+        }
     }
 }
 
@@ -1510,8 +1840,44 @@ $payload = [Text.Encoding]::UTF8.GetString(
 $pipe = $null
 $exitCode = 255
 $errorText = ''
+$errorType = ''
+$errorStack = ''
+$errorLine = 0
+$errorPosition = ''
 $stdoutText = ''
 $stderrText = ''
+function Stop-CaptureDescendantTree([Diagnostics.Process]$Target) {
+    if ($null -eq $Target) { return }
+    try { $Target.Refresh() } catch {}
+    if ($Target.HasExited) { return }
+    $killerStart = [Diagnostics.ProcessStartInfo]::new()
+    $killerStart.FileName = Join-Path (
+        [Environment]::SystemDirectory
+    ) 'taskkill.exe'
+    $killerStart.Arguments = "/PID $($Target.Id) /T /F"
+    $killerStart.UseShellExecute = $false
+    $killerStart.CreateNoWindow = $true
+    $killerStart.RedirectStandardOutput = $true
+    $killerStart.RedirectStandardError = $true
+    $killer = [Diagnostics.Process]::new()
+    $killer.StartInfo = $killerStart
+    try {
+        if (-not $killer.Start()) {
+            throw 'taskkill did not start'
+        }
+        if (-not $killer.WaitForExit(10000)) {
+            try { $killer.Kill() } catch {}
+            throw 'taskkill timed out'
+        }
+    } finally {
+        $killer.Dispose()
+    }
+    try { $Target.WaitForExit(10000) | Out-Null } catch {}
+    try { $Target.Refresh() } catch {}
+    if (-not $Target.HasExited) {
+        try { $Target.Kill() } catch {}
+    }
+}
 try {
     $pipe = [IO.Pipes.NamedPipeClientStream]::new(
         '.',
@@ -1658,7 +2024,7 @@ try {
         }
         if ($timedOut -or $captureExceeded -or
             -not [string]::IsNullOrWhiteSpace($readError)) {
-            try { $process.Kill() } catch {}
+            try { Stop-CaptureDescendantTree $process } catch {}
             try { $process.WaitForExit(10000) | Out-Null } catch {}
             if ($captureExceeded) {
                 $exitCode = 253
@@ -1675,7 +2041,7 @@ try {
                 ($deadline - [DateTimeOffset]::UtcNow).TotalMilliseconds
             )
             if ($remaining -le 0 -or -not $process.WaitForExit($remaining)) {
-                try { $process.Kill() } catch {}
+                try { Stop-CaptureDescendantTree $process } catch {}
                 try { $process.WaitForExit(10000) | Out-Null } catch {}
                 $exitCode = 254
                 $errorText = 'nested active-user probe timed out'
@@ -1691,6 +2057,10 @@ try {
     }
 } catch {
     $errorText = $_.Exception.Message
+    $errorType = $_.Exception.GetType().FullName
+    $errorStack = [string]$_.ScriptStackTrace
+    $errorLine = [int]$_.InvocationInfo.ScriptLineNumber
+    $errorPosition = [string]$_.InvocationInfo.PositionMessage
 } finally {
     if ($null -ne $pipe -and $pipe.IsConnected) {
         $result = [pscustomobject]@{
@@ -1701,6 +2071,10 @@ try {
             nonce = [string]$payload.nonce
             exit_code = $exitCode
             wrapper_error = $errorText
+            wrapper_error_type = $errorType
+            wrapper_script_stack_trace = $errorStack
+            wrapper_script_line_number = $errorLine
+            wrapper_invocation_position = $errorPosition
             stdout = $stdoutText
             stderr = $stderrText
         }
@@ -1717,6 +2091,10 @@ try {
                     nonce = [string]$payload.nonce
                     exit_code = 253
                     wrapper_error = 'active-user capture exceeded its bounded payload'
+                    wrapper_error_type = 'System.InvalidOperationException'
+                    wrapper_script_stack_trace = ''
+                    wrapper_script_line_number = 0
+                    wrapper_invocation_position = ''
                     stdout = ''
                     stderr = ''
                 } | ConvertTo-Json -Compress)
@@ -1910,6 +2288,18 @@ if (-not [string]::IsNullOrWhiteSpace($errorText)) { exit 251 }
                 "$Label active-user wrapper failed: " +
                 (Protect-SensitiveDisplayText (
                     [string]$done.wrapper_error
+                )) +
+                "; type=" +
+                (Protect-SensitiveDisplayText (
+                    [string]$done.wrapper_error_type
+                )) +
+                "; line=$([int]$done.wrapper_script_line_number); stack=" +
+                (Protect-SensitiveDisplayText (
+                    [string]$done.wrapper_script_stack_trace
+                )) +
+                "; position=" +
+                (Protect-SensitiveDisplayText (
+                    [string]$done.wrapper_invocation_position
                 ))
             )
         }
@@ -2714,6 +3104,17 @@ function Start-ActiveUserSparseArtifactAttack(
     $renameMarker = Join-Path `
         $script:ActiveUserHandoffRoot `
         "$safeLabel-$nonce.sparse-rename.json"
+    $retainedEvidenceRoot = Assert-PathBelow `
+        (Join-Path $script:EvidenceDirectory 'logs\sparse-recovery-evidence') `
+        $script:EvidenceDirectory `
+        'retained sparse recovery evidence root'
+    $retainedEvidence = Assert-PathBelow `
+        (Join-Path $retainedEvidenceRoot "$safeLabel-final.json") `
+        $retainedEvidenceRoot `
+        'retained sparse recovery evidence'
+    if (Test-Path -LiteralPath $retainedEvidence) {
+        throw "$Label retained sparse evidence already exists"
+    }
     $typeName = (
         "DefenseClawSparseAttack_$($script:RunToken)_" +
         $nonce.Substring(0, 8)
@@ -2730,6 +3131,7 @@ function Start-ActiveUserSparseArtifactAttack(
         logical_bytes = $script:SparseAttackLogicalBytes
         max_allocated_bytes = $script:SparseAttackMaxAllocatedBytes
         timeout_seconds = 90
+        repair_observation_seconds = $RepairTimeoutSeconds
         type_name = $typeName
     }
     $inputBase64 = [Convert]::ToBase64String(
@@ -2738,10 +3140,11 @@ function Start-ActiveUserSparseArtifactAttack(
         )
     )
     $attackScript = @'
+param([Parameter(Mandatory)][string]$InputBase64)
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $inputObject = [Text.Encoding]::UTF8.GetString(
-    [Convert]::FromBase64String('__INPUT__')
+    [Convert]::FromBase64String($InputBase64)
 ) | ConvertFrom-Json -ErrorAction Stop
 $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 if ($sid -ne [string]$inputObject.expected_sid) {
@@ -2949,7 +3352,9 @@ try {
     # sharing so it cannot obstruct repair and can witness the renamed handle.
     $stream.Dispose()
     $stream = $null
-    $repairDeadline = [DateTimeOffset]::UtcNow.AddSeconds(30)
+    $repairDeadline = [DateTimeOffset]::UtcNow.AddSeconds(
+        [int]$inputObject.repair_observation_seconds
+    )
     do {
         try {
             $finalHandlePath = $native::FinalPath(
@@ -2984,7 +3389,11 @@ try {
                 }
             } catch {}
         }
-        if ($renamedToQuarantine -and $canonicalRecreated) {
+        # The rename event is diagnostic: FileSystemWatcher delivery is lossy.
+        # Canonical recreation is enough to end observation; the elevated
+        # caller subsequently proves exact bytes, a new single-link identity,
+        # owner/DACL, quarantine removal, and healthy Status/Verify.
+        if ($canonicalRecreated) {
             break
         }
         Start-Sleep -Milliseconds 25
@@ -3026,13 +3435,35 @@ try {
     )
 }
 if (-not [string]::IsNullOrWhiteSpace($failure)) { exit 21 }
-'@.Replace('__INPUT__', $inputBase64)
-    $encoded = [Convert]::ToBase64String(
-        [Text.Encoding]::Unicode.GetBytes($attackScript)
+'@
+    $payload = Join-Path $script:WorkRoot (
+        "$safeLabel-$nonce.sparse-attack.ps1"
     )
-    if ($encoded.Length -gt 30000) {
+    if (Test-Path -LiteralPath $payload) {
+        throw "$Label sparse task payload already exists"
+    }
+    [IO.File]::WriteAllText(
+        $payload,
+        $attackScript,
+        [Text.UTF8Encoding]::new($false)
+    )
+    $null = Set-ICaclsOwnerAndDacl `
+        -Path $payload `
+        -Owner '*S-1-5-32-544' `
+        -Grants @(
+            '*S-1-5-18:F',
+            '*S-1-5-32-544:F',
+            "*$($script:PrimarySID):RX"
+        ) `
+        -Label "$Label-sparse-task-payload-acl"
+    $payloadSHA256 = Get-FileDigest $payload
+    $taskArguments = (
+        '-NoLogo -NoProfile -NonInteractive -File "' + $payload +
+        '" -InputBase64 "' + $inputBase64 + '"'
+    )
+    if ($taskArguments.Length -gt 30000) {
         throw (
-            "$Label encoded sparse task exceeds the bounded Windows " +
+            "$Label sparse task action exceeds the bounded Windows " +
             'Task Scheduler argument budget'
         )
     }
@@ -3046,10 +3477,13 @@ if (-not [string]::IsNullOrWhiteSpace($failure)) { exit 21 }
     }
     $action = New-ScheduledTaskAction `
         -Execute $script:PowerShellExecutable `
-        -Argument "-NoLogo -NoProfile -NonInteractive -EncodedCommand $encoded"
+        -Argument $taskArguments
     $principal = New-ActiveUserScheduledTaskPrincipal
+    $taskExecutionTimeoutSeconds = 120 + $RepairTimeoutSeconds
     $settings = New-ScheduledTaskSettingsSet `
-        -ExecutionTimeLimit ([TimeSpan]::FromSeconds(150)) `
+        -ExecutionTimeLimit (
+            [TimeSpan]::FromSeconds($taskExecutionTimeoutSeconds)
+        ) `
         -AllowStartIfOnBatteries `
         -DontStopIfGoingOnBatteries
     $task = New-ScheduledTask `
@@ -3114,6 +3548,8 @@ if (-not [string]::IsNullOrWhiteSpace($failure)) { exit 21 }
             throw "$Label did not establish the exact bounded non-admin sparse fixture"
         }
     } catch {
+        $startFailure = $_
+        $payloadSealError = ''
         try {
             [IO.File]::WriteAllText(
                 $release,
@@ -3130,7 +3566,16 @@ if (-not [string]::IsNullOrWhiteSpace($failure)) { exit 21 }
                     return Test-Path -LiteralPath $evidence -PathType Leaf
                 }
         } catch {}
-        Remove-CertificationScheduledTask $taskName
+        try {
+            Remove-CertificationScheduledTask $taskName
+            if ((Get-FileDigest $payload) -cne $payloadSHA256) {
+                throw "$Label sparse task payload changed during execution"
+            }
+            Protect-AdministratorFile $payload "$Label-sparse-task-payload-seal"
+        }
+        catch {
+            $payloadSealError = $_.Exception.Message
+        }
         try {
             $null = Wait-Until `
                 -Description "$Label sparse canonical repair after start failure" `
@@ -3146,14 +3591,24 @@ if (-not [string]::IsNullOrWhiteSpace($failure)) { exit 21 }
                     )
                 }
         } catch {}
-        throw
+        if (-not [string]::IsNullOrWhiteSpace($payloadSealError)) {
+            throw (
+                $startFailure.Exception.Message +
+                " (sparse payload cleanup failed: $payloadSealError)"
+            )
+        }
+        throw $startFailure
     }
     return [pscustomobject]@{
         TaskName = $taskName
         ReadyPath = $ready
         ReleasePath = $release
         EvidencePath = $evidence
+        RetainedEvidencePath = $retainedEvidence
         RenameMarkerPath = $renameMarker
+        PayloadPath = $payload
+        PayloadSHA256 = $payloadSHA256
+        TaskArgumentLength = $taskArguments.Length
         Path = $canonical
         PID = [uint32]$readyJSON.pid
         LogicalBytes = [int64]$readyJSON.logical_bytes
@@ -3186,10 +3641,12 @@ function Stop-ActiveUserSparseArtifactAttack(
             [int64]0
         }
     }
+    $completionError = $null
+    $payloadCleanupError = ''
     try {
         $evidence = Wait-Until `
             -Description 'non-admin sparse artifact attack completion' `
-            -TimeoutSeconds 45 `
+            -TimeoutSeconds ($RepairTimeoutSeconds + 15) `
             -PollMilliseconds 100 `
             -Condition {
                 if ($null -ne $GuardianBaseline) {
@@ -3222,19 +3679,94 @@ function Stop-ActiveUserSparseArtifactAttack(
                 } catch {}
                 return $false
             }
-    } finally {
-        Remove-CertificationScheduledTask ([string]$Attack.TaskName)
     }
-    $evidence | Add-Member `
-        -NotePropertyName guardian_release_peak_working_set_bytes `
-        -NotePropertyValue ([int64]$resourceState.peak_working_set_bytes) `
-        -Force
-    $evidence | Add-Member `
-        -NotePropertyName guardian_release_lifetime_peak_working_set_bytes `
-        -NotePropertyValue (
-            [int64]$resourceState.lifetime_peak_working_set_bytes
-        ) `
-        -Force
+    catch {
+        $completionError = $_
+    }
+    finally {
+        try {
+            Remove-CertificationScheduledTask ([string]$Attack.TaskName)
+            if ((Get-FileDigest ([string]$Attack.PayloadPath)) -cne
+                [string]$Attack.PayloadSHA256) {
+                throw 'non-admin sparse artifact task payload changed during execution'
+            }
+            Protect-AdministratorFile `
+                ([string]$Attack.PayloadPath) `
+                'sparse-task-payload-seal'
+        }
+        catch {
+            $payloadCleanupError = $_.Exception.Message
+        }
+    }
+    if ($null -eq $evidence -and
+        (Test-Path -LiteralPath ([string]$Attack.EvidencePath) -PathType Leaf)) {
+        try {
+            $candidateEvidence = Get-Content `
+                -LiteralPath ([string]$Attack.EvidencePath) `
+                -Raw |
+                ConvertFrom-Json -ErrorAction Stop
+            if ([bool]$candidateEvidence.final) {
+                $evidence = $candidateEvidence
+            }
+        } catch {}
+    }
+    if ($null -ne $evidence) {
+        $evidence | Add-Member `
+            -NotePropertyName guardian_release_peak_working_set_bytes `
+            -NotePropertyValue ([int64]$resourceState.peak_working_set_bytes) `
+            -Force
+        $evidence | Add-Member `
+            -NotePropertyName guardian_release_lifetime_peak_working_set_bytes `
+            -NotePropertyValue (
+                [int64]$resourceState.lifetime_peak_working_set_bytes
+            ) `
+            -Force
+        $retainedEvidenceRoot = Assert-PathBelow `
+            (Join-Path `
+                $script:EvidenceDirectory `
+                'logs\sparse-recovery-evidence') `
+            $script:EvidenceDirectory `
+            'retained sparse recovery evidence root'
+        $retainedEvidencePath = Assert-PathBelow `
+            ([string]$Attack.RetainedEvidencePath) `
+            $retainedEvidenceRoot `
+            'retained sparse recovery evidence'
+        if (-not [string]::Equals(
+            [IO.Path]::GetDirectoryName($retainedEvidencePath),
+            $retainedEvidenceRoot,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+            throw 'retained sparse recovery evidence is not an exact root child'
+        }
+        [IO.Directory]::CreateDirectory($retainedEvidenceRoot) | Out-Null
+        $evidence | Add-Member `
+            -NotePropertyName retained_evidence_path `
+            -NotePropertyValue $retainedEvidencePath `
+            -Force
+        [IO.File]::WriteAllText(
+            $retainedEvidencePath,
+            (($evidence | ConvertTo-Json -Depth 8) + "`n"),
+            [Text.UTF8Encoding]::new($false)
+        )
+        Protect-AdministratorFile `
+            $retainedEvidencePath `
+            'retained-sparse-recovery-evidence'
+    }
+    if ($null -ne $completionError) {
+        if (-not [string]::IsNullOrWhiteSpace($payloadCleanupError)) {
+            throw (
+                $completionError.Exception.Message +
+                " (sparse payload cleanup failed: $payloadCleanupError)"
+            )
+        }
+        throw $completionError
+    }
+    if (-not [string]::IsNullOrWhiteSpace($payloadCleanupError)) {
+        throw $payloadCleanupError
+    }
+    if ($null -eq $evidence) {
+        throw 'non-admin sparse artifact attack emitted no final evidence'
+    }
     if (-not [bool]$evidence.ok) {
         throw (
             'non-admin sparse artifact attack failed: ' +
@@ -3253,21 +3785,30 @@ function Stop-ActiveUserSparseArtifactAttack(
         [int64]$evidence.allocated_bytes -gt
             $script:SparseAttackMaxAllocatedBytes -or
         [int]$evidence.grow_operations -lt 2 -or
-        -not [bool]$evidence.renamed_to_quarantine -or
-        -not [bool]$evidence.canonical_recreated) {
+        -not [bool]$evidence.final) {
+        $proofValues = [ordered]@{
+            final = [bool]$evidence.final
+            sparse = [bool]$evidence.sparse
+            logical_bytes = [int64]$evidence.logical_bytes
+            allocated_bytes = [int64]$evidence.allocated_bytes
+            grow_operations = [int]$evidence.grow_operations
+            renamed_to_quarantine =
+                [bool]$evidence.renamed_to_quarantine
+            canonical_recreated = [bool]$evidence.canonical_recreated
+        } | ConvertTo-Json -Compress
         throw (
             'non-admin sparse artifact attack did not prove bounded grow, ' +
-            'quarantine rename, and canonical recreation'
+            'bounded allocation, and final evidence publication; values=' +
+            $proofValues
         )
     }
     return $evidence
 }
 
 function Get-EnterprisePowerShellTempSnapshot {
-    $root = Assert-PathBelow `
-        (Join-Path $script:WindowsDirectory 'Temp') `
-        $script:WindowsDirectory `
-        'Windows enterprise PowerShell temp parent'
+    # The public Go launcher creates elevated capability directories directly
+    # below the trusted ProgramData Known Folder, not Windows\Temp.
+    $root = ConvertTo-CanonicalPath $script:KnownProgramData
     $rootItem = Get-Item -LiteralPath $root -Force -ErrorAction Stop
     if (-not $rootItem.PSIsContainer -or
         ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
@@ -3349,7 +3890,30 @@ function Update-EnterprisePowerShellTempObservation(
         )) {
         throw 'public lifecycle CLI changed elevated temp capability mid-call'
     }
-    $acl = Get-Acl -LiteralPath $child.FullName -ErrorAction Stop
+    try {
+        $acl = Get-Acl -LiteralPath $child.FullName -ErrorAction Stop
+    }
+    catch {
+        $aclError = $_
+        try {
+            $pathExists = Test-Path `
+                -LiteralPath $child.FullName `
+                -ErrorAction Stop
+        }
+        catch {
+            # An inaccessible or otherwise unprovable path is not equivalent
+            # to a vanished capability. Preserve the original ACL diagnostic.
+            throw $aclError
+        }
+        if (-not $pathExists) {
+            # The elevated launcher owns this short-lived capability. A
+            # verified disappearance between enumeration and ACL inspection
+            # is expected regardless of the provider's exception subtype; the
+            # caller keeps polling and still requires a protected-ACL sample.
+            return
+        }
+        throw $aclError
+    }
     $sddl = $acl.GetSecurityDescriptorSddlForm(
         [Security.AccessControl.AccessControlSections]::All
     )
@@ -3633,20 +4197,21 @@ function Stop-ActiveUserEnterprisePowerShellTempProbe([object]$Probe) {
 }
 
 function Initialize-CertificationCodexHome {
-    $home = Assert-CertificationCodexHomePath $script:CertificationCodexHome
-    if (Test-Path -LiteralPath $home) {
-        throw "refusing pre-existing certification CODEX_HOME: $home"
+    $certificationHome = Assert-CertificationCodexHomePath `
+        $script:CertificationCodexHome
+    if (Test-Path -LiteralPath $certificationHome) {
+        throw "refusing pre-existing certification CODEX_HOME: $certificationHome"
     }
     $snapshot = New-ProtectedUserTreeSnapshot `
-        -Path $home `
+        -Path $certificationHome `
         -Name "codex-cert-$($script:RunToken)"
     if ([bool]$snapshot.inventory.existed) {
-        throw "certification CODEX_HOME absent baseline unexpectedly existed: $home"
+        throw "certification CODEX_HOME absent baseline unexpectedly existed: $certificationHome"
     }
 
     $script:CodexUserHookSentinel = Assert-PathBelow `
-        (Join-Path $home 'forbidden-user-hook-fired.txt') `
-        $home `
+        (Join-Path $certificationHome 'forbidden-user-hook-fired.txt') `
+        $certificationHome `
         'forbidden user-hook sentinel'
     $hostileHookScript = @"
 [IO.File]::WriteAllText(
@@ -3664,7 +4229,7 @@ function Initialize-CertificationCodexHome {
         $hostileEncoded
     )
     $inputObject = [ordered]@{
-        path = $home
+        path = $certificationHome
         profile = $script:PrimaryProfile
         sid = $script:PrimarySID
         expected_name = ".codex-defenseclaw-cert-$($script:RunToken)"
@@ -3745,17 +4310,19 @@ if (Test-Path -LiteralPath ([string]$inputObject.hostile_sentinel)) {
         [string]$json.sid -ne $script:PrimarySID -or
         -not [string]::Equals(
             [string]$json.codex_home,
-            $home,
+            $certificationHome,
             [StringComparison]::OrdinalIgnoreCase
         )) {
         throw 'active-user certification CODEX_HOME initialization returned inconsistent identity/path evidence'
     }
     $script:CertificationCodexHomeInitialized = $true
     $script:PrimaryConfigPath = Assert-PathBelow `
-        (Join-Path $home 'config.toml') `
-        $home `
+        (Join-Path $certificationHome 'config.toml') `
+        $certificationHome `
         'certification Codex config'
-    $null = Assert-CertificationCodexHomePath $home -RequireExisting
+    $null = Assert-CertificationCodexHomePath `
+        $certificationHome `
+        -RequireExisting
     if (-not (Test-Path -LiteralPath $script:PrimaryConfigPath -PathType Leaf)) {
         throw "active user did not initialize certification Codex config: $($script:PrimaryConfigPath)"
     }
@@ -3769,7 +4336,7 @@ if (Test-Path -LiteralPath ([string]$inputObject.hostile_sentinel)) {
     $script:PrimaryConfigBaselineACL = Get-Acl -LiteralPath $script:PrimaryConfigPath
     $script:PrimaryConfigBaselineSHA256 = Get-FileDigest $script:PrimaryConfigPath
     return [pscustomobject]@{
-        path = $home
+        path = $certificationHome
         config = $script:PrimaryConfigPath
         sid = $script:PrimarySID
         owner_sid = $configOwnerSID
@@ -3784,6 +4351,26 @@ function New-RandomCredential([string]$UserName) {
     $secure = ConvertTo-SecureString $passwordText -AsPlainText -Force
     $qualified = "$env:COMPUTERNAME\$UserName"
     return [pscredential]::new($qualified, $secure)
+}
+
+function Get-ExpectedCertificationProfilePath([string]$UserName) {
+    Assert-CertificationUserName $UserName 'profile'
+    $profileListKey =
+        'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList'
+    $profilesDirectory = Get-ItemPropertyValue `
+        -LiteralPath $profileListKey `
+        -Name ProfilesDirectory `
+        -ErrorAction Stop
+    $root = ConvertTo-CanonicalPath ([string]$profilesDirectory)
+    $expected = ConvertTo-CanonicalPath (Join-Path $root $UserName)
+    if (-not [IO.Path]::GetDirectoryName($expected).Equals(
+            $root,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        [IO.Path]::GetFileName($expected) -cne $UserName) {
+        throw "temporary profile path is not the exact expected child: $expected"
+    }
+    return $expected
 }
 
 function New-CertificationLocalUser(
@@ -3802,7 +4389,13 @@ function New-CertificationLocalUser(
         -UserMayNotChangePassword `
         -Description 'DefenseClaw enterprise certification user' |
         Out-Null
+    if ($UserName -ceq $script:HostileUserName) {
+        $script:HostileUserCreated = $true
+    }
     $user = Get-LocalUser -Name $UserName -ErrorAction Stop
+    if ($UserName -ceq $script:HostileUserName) {
+        $script:HostileSID = [string]$user.SID.Value
+    }
     if ($user.Enabled -ne $true) {
         throw "temporary local user is disabled: $UserName"
     }
@@ -3817,6 +4410,10 @@ function Initialize-CertificationProfile(
     [Management.Automation.PSCredential]$Credential,
     [string]$Label
 ) {
+    $null = Assert-AlternateUserPowerShellPrerequisite `
+        -Credential $Credential `
+        -ExpectedSID $script:HostileSID `
+        -Label ($Label + '-powershell-prerequisite')
     $result = Invoke-UserPowerShell `
         -Credential $Credential `
         -Label $Label `
@@ -4028,8 +4625,7 @@ function Initialize-ProtectedCertificationSources {
 function Get-AgentBinaryTrustIdentity(
     [string]$Path,
     [ValidateSet('codex', 'claude')]
-    [string]$Agent,
-    [switch]$AllowMissingFileVersion
+    [string]$Agent
 ) {
     $resolved = Assert-SourcePathHasNoReparse $Path "$Agent application-control"
     $signature = Get-AuthenticodeSignature -LiteralPath $resolved
@@ -4056,16 +4652,8 @@ function Get-AgentBinaryTrustIdentity(
         $fileVersionText,
         '(?<!\d)(\d+\.\d+\.\d+(?:\.\d+)?)(?!\d)'
     )
-    if (-not $match.Success -and
-        -not (
-            $Agent -eq 'codex' -and
-            $AllowMissingFileVersion -and
-            [string]::IsNullOrWhiteSpace($fileVersionText)
-        )) {
-        throw "$Agent application-control artifact has no parseable file version: $fileVersionText"
-    }
     $version = $null
-    $versionSource = 'protected_active_user_runtime_probe_required'
+    $versionSource = 'agent_version_probe'
     if ($match.Success) {
         try {
             $version = [Version]$match.Groups[1].Value
@@ -4073,6 +4661,12 @@ function Get-AgentBinaryTrustIdentity(
         } catch {
             throw "$Agent application-control artifact has invalid file version: $fileVersionText"
         }
+    }
+    elseif ($Agent -ne 'codex') {
+        # The Codex CLI ships without PE VersionInfo whatever version it is, so
+        # its version comes from the contract's own probe. Claude carries one,
+        # and reading it here keeps the artifact check off the binary.
+        throw "$Agent application-control artifact has no parseable file version: $fileVersionText"
     }
     return [pscustomobject]@{
         agent = $Agent
@@ -4116,18 +4710,115 @@ function Get-CodexTrustedHookLauncherIdentity([string]$Path) {
     }
 }
 
+$script:ApprovedCodexVersion = $null
+
+# Every later phase records or compares the approved Codex version, and all of
+# them run after protected-approved-agent-runtimes establishes it. Reading it
+# early is an ordering mistake, so say so rather than compare against nothing.
+function Get-ApprovedCodexVersionText {
+    if ($null -eq $script:ApprovedCodexVersion) {
+        throw (
+            'the approved Codex version is not established yet; ' +
+            'Initialize-ProtectedCodexRuntime must run first'
+        )
+    }
+    return [string]$script:ApprovedCodexVersion.text
+}
+
+# The certified range comes from what the product publishes, not a number
+# pinned here. internal/gateway/connector/hook_contract.go is held to this
+# inventory by a Go test, so certification tracks the versions DefenseClaw
+# actually supports instead of drifting on every Codex release.
+function Get-CertifiedAgentContract([ValidateSet('codex', 'claudecode')][string]$Agent) {
+    $inventory = Join-Path `
+        (Split-Path -Parent $PSScriptRoot) `
+        'cli\defenseclaw\inventory\hook_contracts.json'
+    if (-not (Test-Path -LiteralPath $inventory -PathType Leaf)) {
+        throw "hook contract inventory is missing: $inventory"
+    }
+    $document = ConvertFrom-SingleJSONDocument `
+        ([IO.File]::ReadAllText((ConvertTo-CanonicalPath $inventory))) `
+        'hook contract inventory'
+    if ($document.connectors.PSObject.Properties.Name -notcontains $Agent) {
+        throw "hook contract inventory publishes no $Agent connector"
+    }
+    $connector = $document.connectors.$Agent
+    # Certification proves the contract a current agent resolves to, which is
+    # the one DefenseClaw falls back to when it cannot read a version.
+    $default = @($connector.contracts | Where-Object {
+        [bool]$_.default_for_unversioned
+    })
+    if ($default.Count -ne 1) {
+        throw (
+            "$Agent must publish exactly one default hook contract; " +
+            "got $($default.Count)"
+        )
+    }
+    $minimum = [string]$default[0].agent_version.min_inclusive
+    if ([string]::IsNullOrWhiteSpace($minimum)) {
+        throw (
+            "$Agent default hook contract $($default[0].contract_id) " +
+            'publishes no minimum version'
+        )
+    }
+    $maximum = [string]$default[0].agent_version.max_exclusive
+    return [pscustomobject]@{
+        agent = $Agent
+        contract_id = [string]$default[0].contract_id
+        probe = [string]$connector.version_probe
+        min_inclusive = [Version]$minimum
+        max_exclusive = if ([string]::IsNullOrWhiteSpace($maximum)) {
+            $null
+        } else {
+            [Version]$maximum
+        }
+    }
+}
+
+# Asks the artifact its own version the way the contract says to. Signature and
+# digest have already accepted this binary, and nothing else can report the
+# version of a CLI that carries no PE VersionInfo. Only for artifacts
+# certification is meant to run: a rejected fixture is read, never executed.
+function Get-AgentArtifactVersion(
+    [string]$Path,
+    [pscustomobject]$Contract,
+    [string]$Label
+) {
+    $arguments = @($Contract.probe -split '\s+' | Where-Object {
+        -not [string]::IsNullOrWhiteSpace($_)
+    })
+    if ($arguments.Count -lt 2) {
+        throw "$($Contract.agent) contract publishes no usable version probe: $($Contract.probe)"
+    }
+    $reported = (Invoke-NativeProcess `
+        -FilePath $Path `
+        -ArgumentList $arguments[1..($arguments.Count - 1)] `
+        -Label $Label `
+        -TimeoutSeconds 60).StdOut.Trim()
+    $match = [regex]::Match($reported, '(?<!\d)(\d+\.\d+\.\d+)(?!\d)')
+    if (-not $match.Success) {
+        throw (
+            "$($Contract.agent) artifact reported no parseable version from " +
+            "'$($Contract.probe)': $reported"
+        )
+    }
+    return [pscustomobject]@{
+        text = $reported
+        version = [Version]$match.Groups[1].Value
+    }
+}
+
 function Initialize-ProtectedCodexRuntime {
     $source = Assert-SourcePathHasNoReparse `
         $script:OriginalCodexSource `
-        'Codex 0.144.3'
+        'approved Codex'
     $sourceDigest = Get-FileDigest $source
     if ($sourceDigest -cne [string]$script:SourceDigests['codex']) {
         throw 'Codex source changed between preflight and protected runtime staging'
     }
     $approvedCodexIdentity = Get-AgentBinaryTrustIdentity `
         $source `
-        'codex' `
-        -AllowMissingFileVersion
+        'codex'
     $approvedClaudeIdentity = Get-AgentBinaryTrustIdentity `
         $script:OriginalClaudeSource `
         'claude'
@@ -4162,29 +4853,56 @@ function Initialize-ProtectedCodexRuntime {
             throw "$($identityCheck.identity.agent) source changed between preflight and protected staging"
         }
     }
-    if ($null -ne $approvedCodexIdentity.version -and
-        $approvedCodexIdentity.version.ToString(3) -cne '0.144.3') {
+    $codexContract = Get-CertifiedAgentContract 'codex'
+    $script:ApprovedCodexVersion = Get-AgentArtifactVersion `
+        $source `
+        $codexContract `
+        'approved-codex-version'
+    if ($script:ApprovedCodexVersion.version -lt $codexContract.min_inclusive -or
+        ($null -ne $codexContract.max_exclusive -and
+            $script:ApprovedCodexVersion.version -ge $codexContract.max_exclusive)) {
         throw (
-            'approved Codex certification artifact must be exact 0.144.3; ' +
-            "got $($approvedCodexIdentity.file_version)"
+            'approved Codex certification artifact is outside hook contract ' +
+            "$($codexContract.contract_id) " +
+            "[$($codexContract.min_inclusive), $($codexContract.max_exclusive)); " +
+            "got $($script:ApprovedCodexVersion.text)"
         )
     }
-    if ($approvedClaudeIdentity.version -lt [Version]'2.1.152') {
+    # Claude does carry PE VersionInfo, so only the threshold comes from the
+    # contract; the version still reads off the artifact without running it.
+    $claudeContract = Get-CertifiedAgentContract 'claudecode'
+    if ($approvedClaudeIdentity.version -lt $claudeContract.min_inclusive) {
         throw (
-            'approved Claude certification artifact is below 2.1.152; ' +
-            "got $($approvedClaudeIdentity.file_version)"
+            'approved Claude certification artifact is below ' +
+            "$($claudeContract.min_inclusive), the minimum of hook contract " +
+            "$($claudeContract.contract_id); got $($approvedClaudeIdentity.file_version)"
         )
     }
-    if ($rejectedCodexIdentity.version -ge [Version]'0.131.0') {
+    # The rejected fixture has to fall outside the certified contract, or the
+    # matrix proves nothing about refusing an agent DefenseClaw cannot govern.
+    # Its version comes off the PE header rather than the contract's probe:
+    # application control is required to deny this artifact process creation,
+    # so nothing here may depend on being able to run it.
+    if ($null -eq $rejectedCodexIdentity.version) {
+        throw (
+            'rejected Codex artifact must carry a readable PE file version; ' +
+            'certification is not allowed to execute it to ask, because ' +
+            'application control must deny it: ' +
+            "$($rejectedCodexIdentity.file_version)"
+        )
+    }
+    if ($rejectedCodexIdentity.version -ge $codexContract.min_inclusive) {
         throw (
             'rejected Codex artifact must be an official signed release below ' +
-            "0.131.0; got $($rejectedCodexIdentity.file_version)"
+            "$($codexContract.min_inclusive), the minimum of hook contract " +
+            "$($codexContract.contract_id); got $($rejectedCodexIdentity.file_version)"
         )
     }
-    if ($rejectedClaudeIdentity.version -ge [Version]'2.1.152') {
+    if ($rejectedClaudeIdentity.version -ge $claudeContract.min_inclusive) {
         throw (
             'rejected Claude artifact must be an official signed release below ' +
-            "2.1.152; got $($rejectedClaudeIdentity.file_version)"
+            "$($claudeContract.min_inclusive), the minimum of hook contract " +
+            "$($claudeContract.contract_id); got $($rejectedClaudeIdentity.file_version)"
         )
     }
     if ([string]$approvedCodexIdentity.sha256 -ceq
@@ -4353,6 +5071,7 @@ public static class $probeClass
             -FilePath $compiler `
             -ArgumentList @(
                 '/nologo',
+                '/noconfig',
                 '/target:exe',
                 '/optimize+',
                 ("/out:$($script:HostileShellProbeBinary)"),
@@ -4377,7 +5096,7 @@ public static class $probeClass
         [Text.Encoding]::UTF8.GetBytes($script:CodexRuntimeBinary)
     )
     $versionProbe = Invoke-ActiveUserPowerShell `
-        -Label 'codex-0.144.3-active-user-version' `
+        -Label 'approved-codex-active-user-version' `
         -Script @"
 `$ErrorActionPreference = 'Stop'
 `$binary = [Text.Encoding]::UTF8.GetString(
@@ -4393,11 +5112,12 @@ if (`$LASTEXITCODE -ne 0) { exit `$LASTEXITCODE }
     $version = ConvertFrom-SingleJSONDocument `
         $versionProbe.StdOut `
         'Codex active-user version'
-    if ([string]$version.version -cne 'codex-cli 0.144.3' -or
+    if ([string]$version.version -cne [string]$script:ApprovedCodexVersion.text -or
         [string]$version.sid -ne $script:PrimarySID) {
         throw (
-            'protected runtime is not exact Codex 0.144.3 under the target ' +
-            "medium token: version=$($version.version) sid=$($version.sid)"
+            'protected runtime is not the approved Codex ' +
+            "$($script:ApprovedCodexVersion.text) under the target medium " +
+            "token: version=$($version.version) sid=$($version.sid)"
         )
     }
     $trustedLauncherVersion = $null
@@ -4424,10 +5144,12 @@ if (`$LASTEXITCODE -ne 0) { exit `$LASTEXITCODE }
         $trustedLauncherVersion = ConvertFrom-SingleJSONDocument `
             $launcherVersionProbe.StdOut `
             'Codex trusted hook launcher active-user version'
-        if ([string]$trustedLauncherVersion.version -cne 'codex-cli 0.144.3' -or
+        if ([string]$trustedLauncherVersion.version -cne
+                [string]$script:ApprovedCodexVersion.text -or
             [string]$trustedLauncherVersion.sid -ne $script:PrimarySID) {
             throw (
-                'trusted hook launcher is not a drop-in Codex 0.144.3 CLI ' +
+                'trusted hook launcher is not a drop-in Codex ' +
+                "$($script:ApprovedCodexVersion.text) CLI " +
                 "under the target medium token: version=" +
                 "$($trustedLauncherVersion.version) sid=" +
                 "$($trustedLauncherVersion.sid)"
@@ -4454,11 +5176,17 @@ if (`$LASTEXITCODE -ne 0) { exit `$LASTEXITCODE }
     $claudeVersion = ConvertFrom-SingleJSONDocument `
         $claudeVersionProbe.StdOut `
         'Claude active-user version'
-    if ([string]$claudeVersion.version -notmatch
-            '(?<!\d)2\.1\.(?:15[2-9]|1[6-9]\d|[2-9]\d{2,})(?!\d)' -or
+    $claudeRuntimeReported = [regex]::Match(
+        [string]$claudeVersion.version,
+        '(?<!\d)(\d+\.\d+\.\d+)(?!\d)'
+    )
+    if (-not $claudeRuntimeReported.Success -or
+        [Version]$claudeRuntimeReported.Groups[1].Value -lt
+            $claudeContract.min_inclusive -or
         [string]$claudeVersion.sid -ne $script:PrimarySID) {
         throw (
-            'protected runtime is not approved Claude >=2.1.152 under the ' +
+            'protected runtime is not approved Claude >=' +
+            "$($claudeContract.min_inclusive) under the " +
             "target medium token: version=$($claudeVersion.version) " +
             "sid=$($claudeVersion.sid)"
         )
@@ -4467,11 +5195,8 @@ if (`$LASTEXITCODE -ne 0) { exit `$LASTEXITCODE }
         codex_path = $script:CodexRuntimeBinary
         codex_sha256 = $sourceDigest
         codex_version = [string]$version.version
-        codex_version_source = if ($null -eq $approvedCodexIdentity.version) {
-            'protected_active_user_runtime_probe'
-        } else {
-            'pe_version_info_and_protected_active_user_runtime_probe'
-        }
+        codex_version_source = 'agent_version_probe_and_protected_active_user_runtime_probe'
+        codex_hook_contract = [string]$codexContract.contract_id
         codex_signer_subject = [string]$stagedSignature.SignerCertificate.Subject
         codex_trusted_hook_launcher_path =
             $script:CodexTrustedHookLauncherRuntimeBinary
@@ -4507,12 +5232,12 @@ if (`$LASTEXITCODE -ne 0) { exit `$LASTEXITCODE }
 }
 
 function Test-AgentApplicationControlBoundary {
-    $home = Assert-CertificationCodexHomePath `
+    $certificationHome = Assert-CertificationCodexHomePath `
         $script:CertificationCodexHome `
         -RequireExisting
     $fixtureRoot = Assert-PathBelow `
-        (Join-Path $home 'application-control') `
-        $home `
+        (Join-Path $certificationHome 'application-control') `
+        $certificationHome `
         'user-writable application-control fixture'
     if (Test-Path -LiteralPath $fixtureRoot) {
         throw "application-control fixture already exists: $fixtureRoot"
@@ -4627,8 +5352,8 @@ foreach ($property in $inputObject.sources.PSObject.Properties) {
     }
 
     $script:CodexRejectedClientMarker = Assert-PathBelow `
-        (Join-Path $home ".defenseclaw-rejected-client-$($script:RunToken).txt") `
-        $home `
+        (Join-Path $certificationHome ".defenseclaw-rejected-client-$($script:RunToken).txt") `
+        $certificationHome `
         'rejected client marker'
     if (Test-Path -LiteralPath $script:CodexRejectedClientMarker) {
         throw "rejected-client marker already exists: $($script:CodexRejectedClientMarker)"
@@ -4749,9 +5474,14 @@ foreach ($case in @(
     $approvedClaude = @(
         $rows | Where-Object { [string]$_.name -eq 'approved_claude' }
     )[0]
-    if ([string]$approvedCodex.stdout -cne 'codex-cli 0.144.3' -or
-        [string]$approvedClaude.stdout -notmatch
-            '(?<!\d)2\.1\.(?:15[2-9]|1[6-9]\d|[2-9]\d{2,})(?!\d)') {
+    $claudeContract = Get-CertifiedAgentContract 'claudecode'
+    $claudeReported = [regex]::Match(
+        [string]$approvedClaude.stdout,
+        '(?<!\d)(\d+\.\d+\.\d+)(?!\d)'
+    )
+    if ([string]$approvedCodex.stdout -cne (Get-ApprovedCodexVersionText) -or
+        -not $claudeReported.Success -or
+        [Version]$claudeReported.Groups[1].Value -lt $claudeContract.min_inclusive) {
         throw 'approved portable clients did not report the certified versions'
     }
     foreach ($rejected in @(
@@ -4780,10 +5510,13 @@ foreach ($case in @(
         throw 'an unsigned custom client or fake shell executed and wrote its marker'
     }
     return [pscustomobject]@{
-        approved_portable_clients = @('codex 0.144.3', 'claude >=2.1.152')
+        approved_portable_clients = @(
+            (Get-ApprovedCodexVersionText),
+            "claude >=$($claudeContract.min_inclusive)"
+        )
         rejected_portable_clients = @(
-            'signed Codex <0.131.0',
-            'signed Claude <2.1.152',
+            'signed Codex below the certified hook contract',
+            "signed Claude <$($claudeContract.min_inclusive)",
             'unsigned custom Codex',
             'unsigned custom Claude',
             'fake pwsh',
@@ -4896,6 +5629,13 @@ function Assert-SameUserTreeInventory([object]$Expected, [object]$Actual, [strin
             'sddl'
         )) {
             if ([string]$before.$property -cne [string]$after.$property) {
+                if ($property -eq 'sddl') {
+                    throw (
+                        "$Label changed $($before.relative_path) property " +
+                        "sddl; before=$([string]$before.sddl); " +
+                        "after=$([string]$after.sddl)"
+                    )
+                }
                 throw "$Label changed $($before.relative_path) property $property"
             }
         }
@@ -4935,6 +5675,7 @@ function New-ProtectedUserTreeSnapshot(
         (Join-Path $script:StagingRoot "user-baseline\$Name") `
         $script:StagingRoot `
         "$Name backup"
+    $aclBackup = "$backup.acl.txt"
     if ([bool]$inventory.existed) {
         [IO.Directory]::CreateDirectory($backup) | Out-Null
         Protect-AdministratorTree $backup
@@ -4960,6 +5701,20 @@ function New-ProtectedUserTreeSnapshot(
             -TimeoutSeconds 300 `
             -Label "snapshot-$Name"
         Assert-UserTreeBackupMatches $inventory $backup $Name
+        $icacls = Join-Path $script:System32 'icacls.exe'
+        $null = Invoke-NativeProcess `
+            -FilePath $icacls `
+            -ArgumentList @(
+                [string]$inventory.root,
+                '/save',
+                $aclBackup,
+                '/T',
+                '/C',
+                '/L',
+                '/Q'
+            ) `
+            -Label "snapshot-$Name-native-acl"
+        Protect-AdministratorFile $aclBackup "$Name-native-acl-backup"
         $after = Get-ProtectedUserTreeInventory $Path "$Name post-snapshot"
         Assert-SameUserTreeInventory $inventory $after "$Name snapshot stability"
     }
@@ -4967,7 +5722,9 @@ function New-ProtectedUserTreeSnapshot(
         name = $Name
         path = [string]$inventory.root
         backup = $backup
+        acl_backup = $aclBackup
         inventory = $inventory
+        ephemeral = [bool]$Ephemeral
     }
     if (-not $Ephemeral) {
         $script:UserTreeSnapshots.Add($snapshot)
@@ -5007,6 +5764,78 @@ function Remove-ExactCanonicalUserTreeReparse(
     }
 }
 
+function Assert-CleanupTreeDirectFullControl {
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [Parameter(Mandatory)][string]$Label
+    )
+    $safeRoot = ConvertTo-CanonicalPath $Root
+    $entries = [Collections.Generic.List[object]]::new()
+    $entries.Add((Get-Item -LiteralPath $safeRoot -Force -ErrorAction Stop))
+    foreach ($entry in @(
+        Get-CertificationTreeEntriesNoFollow `
+            -Root $safeRoot `
+            -Label "$Label ACL validation" `
+            -IncludeReparse
+    )) {
+        $entries.Add($entry)
+    }
+    $requiredSIDs = @(
+        'S-1-5-18',
+        'S-1-5-32-544',
+        [string]$script:PrimarySID
+    ) | Sort-Object -Unique
+    foreach ($entry in @($entries.ToArray())) {
+        if (($entry.Attributes -band
+                [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            continue
+        }
+        $entryPath = if ([string]::Equals(
+                $entry.FullName,
+                $safeRoot,
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+            $safeRoot
+        }
+        else {
+            Assert-PathBelow $entry.FullName $safeRoot "$Label ACL entry"
+        }
+        $acl = Microsoft.PowerShell.Security\Get-Acl `
+            -LiteralPath $entryPath `
+            -ErrorAction Stop
+        if (-not $acl.AreAccessRulesProtected) {
+            throw "$Label cleanup ACL still inherits at $entryPath"
+        }
+        foreach ($requiredSID in $requiredSIDs) {
+            $hasDirectFullControl = $false
+            foreach ($rule in @($acl.Access)) {
+                $ruleSID = ''
+                try {
+                    $ruleSID = $rule.IdentityReference.Translate(
+                        [Security.Principal.SecurityIdentifier]
+                    ).Value
+                }
+                catch {
+                    continue
+                }
+                if ($ruleSID -ceq $requiredSID -and
+                    -not $rule.IsInherited -and
+                    $rule.AccessControlType -eq
+                        [Security.AccessControl.AccessControlType]::Allow -and
+                    ($rule.FileSystemRights -band
+                        [Security.AccessControl.FileSystemRights]::FullControl) -eq
+                        [Security.AccessControl.FileSystemRights]::FullControl) {
+                    $hasDirectFullControl = $true
+                    break
+                }
+            }
+            if (-not $hasDirectFullControl) {
+                throw "$Label cleanup ACL lacks direct full control for $requiredSID at $entryPath"
+            }
+        }
+    }
+}
+
 function Restore-ProtectedUserTreeSnapshot([object]$Snapshot) {
     $root = ConvertTo-CanonicalPath ([string]$Snapshot.path)
     $safe = Assert-PathBelow $root $script:PrimaryProfile "$($Snapshot.name) restore"
@@ -5017,7 +5846,17 @@ function Restore-ProtectedUserTreeSnapshot([object]$Snapshot) {
             [StringComparison]::OrdinalIgnoreCase
         )
     )
+    $isACLMatrixRoot = (
+        [bool]$Snapshot.ephemeral -and
+        [IO.Path]::GetDirectoryName($safe).Equals(
+            $script:PrimaryProfile,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -and
+        [IO.Path]::GetFileName($safe) -ceq
+            ".defenseclaw-acl-roundtrip-$($script:RunToken)"
+    )
     if (-not $isCertificationCodexHome -and
+        -not $isACLMatrixRoot -and
         [IO.Path]::GetFileName($safe) -cne '.defenseclaw') {
         throw "protected-user restore root is unexpected: $safe"
     }
@@ -5027,11 +5866,70 @@ function Restore-ProtectedUserTreeSnapshot([object]$Snapshot) {
             Remove-ExactCanonicalUserTreeReparse `
                 -Path $safe `
                 -Label "$($Snapshot.name) restore"
-        } else {
-            Remove-Item -LiteralPath $safe -Recurse -Force -ErrorAction Stop
+        } elseif (-not $item.PSIsContainer) {
+            throw "protected-user restore root is not a directory: $safe"
         }
     }
     if (-not [bool]$Snapshot.inventory.existed) {
+        if (Test-Path -LiteralPath $safe) {
+            # This is an exact harness-created direct child, already limited
+            # above to the registered certification home or ACL matrix root.
+            # Product hardening may have replaced its owner/DACL before a
+            # failed transaction, so first recover deletion rights without
+            # following any reparse point.
+            $cleanupGrants = @(
+                '*S-1-5-18:(OI)(CI)F',
+                '*S-1-5-32-544:(OI)(CI)F',
+                "*$($script:PrimarySID):(OI)(CI)F"
+            )
+            $descendantCleanupGrants = @(
+                '*S-1-5-18:F',
+                '*S-1-5-32-544:F',
+                "*$($script:PrimarySID):F"
+            )
+            $null = Set-ICaclsOwnerAndDacl `
+                -Path $safe `
+                -Owner '*S-1-5-32-544' `
+                -Grants $descendantCleanupGrants `
+                -Options @('/T', '/C', '/L') `
+                -Label "$($Snapshot.name)-absent-cleanup-descendant-acl"
+            $null = Set-ICaclsOwnerAndDacl `
+                -Path $safe `
+                -Owner '*S-1-5-32-544' `
+                -Grants $cleanupGrants `
+                -Label "$($Snapshot.name)-absent-cleanup-root-acl"
+            Assert-CleanupTreeDirectFullControl `
+                -Root $safe `
+                -Label "$($Snapshot.name) absent cleanup"
+            $nestedReparse = @(
+                Get-CertificationTreeEntriesNoFollow `
+                    -Root $safe `
+                    -Label "$($Snapshot.name) absent-cleanup tree" `
+                    -IncludeReparse |
+                    Where-Object {
+                        ($_.Attributes -band
+                            [IO.FileAttributes]::ReparsePoint) -ne 0
+                    } |
+                    Sort-Object { $_.FullName.Length } -Descending
+            )
+            foreach ($reparse in $nestedReparse) {
+                $reparsePath = Assert-PathBelow `
+                    $reparse.FullName `
+                    $safe `
+                    "$($Snapshot.name) absent-cleanup reparse"
+                if ($reparse.PSIsContainer) {
+                    [IO.Directory]::Delete($reparsePath, $false)
+                }
+                else {
+                    [IO.File]::Delete($reparsePath)
+                }
+            }
+            Remove-Item `
+                -LiteralPath $safe `
+                -Recurse `
+                -Force `
+                -ErrorAction Stop
+        }
         if (Test-Path -LiteralPath $safe) {
             throw "absent baseline remains after cleanup: $safe"
         }
@@ -5045,7 +5943,7 @@ function Restore-ProtectedUserTreeSnapshot([object]$Snapshot) {
         -ArgumentList @(
             [string]$Snapshot.backup,
             $safe,
-            '/E',
+            '/MIR',
             '/COPY:DAT',
             '/DCOPY:DAT',
             '/XJ',
@@ -5061,15 +5959,22 @@ function Restore-ProtectedUserTreeSnapshot([object]$Snapshot) {
         -TimeoutSeconds 300 `
         -Label "restore-$($Snapshot.name)"
 
-    $sections = (
-        [Security.AccessControl.AccessControlSections]::Access -bor
+    $ownerGroupSections = (
         [Security.AccessControl.AccessControlSections]::Owner -bor
         [Security.AccessControl.AccessControlSections]::Group
     )
-    $rows = @($Snapshot.inventory.entries | Sort-Object {
-        ([string]$_.relative_path).Length
-    } -Descending)
-    foreach ($row in $rows) {
+    # Restore owner/group without rewriting the DACL, then let icacls restore
+    # its native saved descriptor stream. Set-Acl reconstructs inherited ACEs
+    # and can canonicalize a migration lock differently under PS 5.1 and 7.
+    $securityRows = @(
+        $Snapshot.inventory.entries |
+            Sort-Object `
+                @{ Expression = {
+                    ([string]$_.relative_path).Length
+                } }, `
+                @{ Expression = { [string]$_.relative_path } }
+    )
+    foreach ($row in $securityRows) {
         $target = if ([string]$row.relative_path -eq '.') {
             $safe
         } else {
@@ -5080,8 +5985,41 @@ function Restore-ProtectedUserTreeSnapshot([object]$Snapshot) {
         } else {
             [Security.AccessControl.FileSecurity]::new()
         }
-        $security.SetSecurityDescriptorSddlForm([string]$row.sddl, $sections)
+        $security.SetSecurityDescriptorSddlForm(
+            [string]$row.sddl,
+            $ownerGroupSections
+        )
         Set-Acl -LiteralPath $target -AclObject $security
+    }
+    if (-not (Test-Path `
+        -LiteralPath ([string]$Snapshot.acl_backup) `
+        -PathType Leaf)) {
+        throw "$($Snapshot.name) native ACL backup is missing"
+    }
+    $icacls = Join-Path $script:System32 'icacls.exe'
+    $null = Invoke-NativeProcess `
+        -FilePath $icacls `
+        -ArgumentList @(
+            (Split-Path -Parent $safe),
+            '/restore',
+            [string]$Snapshot.acl_backup,
+            '/C',
+            '/L',
+            '/Q'
+        ) `
+        -Label "restore-$($Snapshot.name)-native-acl"
+
+    # Restore timestamps and attributes from children to parents after all
+    # copying and ACL propagation so child updates cannot drift parent metadata.
+    $metadataRows = @($Snapshot.inventory.entries | Sort-Object {
+        ([string]$_.relative_path).Length
+    } -Descending)
+    foreach ($row in $metadataRows) {
+        $target = if ([string]$row.relative_path -eq '.') {
+            $safe
+        } else {
+            Join-Path $safe ([string]$row.relative_path)
+        }
         $lastWrite = [DateTime]::new(
             [long]$row.last_write_utc_ticks,
             [DateTimeKind]::Utc
@@ -5095,6 +6033,165 @@ function Restore-ProtectedUserTreeSnapshot([object]$Snapshot) {
     }
     $restored = Get-ProtectedUserTreeInventory $safe "$($Snapshot.name) restored"
     Assert-SameUserTreeInventory $Snapshot.inventory $restored "$($Snapshot.name) restore"
+}
+
+function Test-ProtectedUserTreeSecurityRoundTrip {
+    $root = Assert-PathBelow `
+        (Join-Path `
+            $script:PrimaryProfile `
+            ".defenseclaw-acl-roundtrip-$($script:RunToken)") `
+        $script:PrimaryProfile `
+        'ACL round-trip matrix root'
+    if (-not [IO.Path]::GetDirectoryName($root).Equals(
+            $script:PrimaryProfile,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        [IO.Path]::GetFileName($root) -cne
+            ".defenseclaw-acl-roundtrip-$($script:RunToken)") {
+        throw "ACL round-trip matrix root is not the exact profile child: $root"
+    }
+    if (Test-Path -LiteralPath $root) {
+        throw "ACL round-trip matrix root already exists: $root"
+    }
+
+    # Exercise the absent-baseline branch against the same ownership/DACL
+    # shape left by a failed first enterprise transaction before running the
+    # existing-baseline round trip below.
+    $absentSnapshot = New-ProtectedUserTreeSnapshot `
+        -Path $root `
+        -Name "acl-roundtrip-$($script:RunToken)" `
+        -Ephemeral
+    $failedInstallDirectory = Join-Path $root 'failed-first-install'
+    [IO.Directory]::CreateDirectory($failedInstallDirectory) | Out-Null
+    Write-UTF8File `
+        (Join-Path $failedInstallDirectory 'partial-state.json') `
+        '{"partial":true}'
+    $null = Set-ICaclsOwnerAndDacl `
+        -Path $root `
+        -Owner '*S-1-5-32-544' `
+        -Grants @(
+            '*S-1-5-18:(OI)(CI)F',
+            '*S-1-5-32-544:(OI)(CI)F'
+        ) `
+        -Options @('/T', '/C', '/L') `
+        -Label 'acl-roundtrip-absent-baseline-drift'
+    Restore-ProtectedUserTreeSnapshot $absentSnapshot
+    if (Test-Path -LiteralPath $root) {
+        throw 'absent-baseline ACL round trip retained its failed-install tree'
+    }
+
+    $snapshot = $null
+    try {
+        $inheritedDirectory = Join-Path $root 'inherited'
+        $protectedDirectory = Join-Path $root 'protected'
+        [IO.Directory]::CreateDirectory($inheritedDirectory) | Out-Null
+        [IO.Directory]::CreateDirectory($protectedDirectory) | Out-Null
+        Write-UTF8File (Join-Path $inheritedDirectory 'empty.txt') ''
+        Write-UTF8File `
+            (Join-Path $inheritedDirectory 'nonempty.txt') `
+            "inherited-baseline`r`n"
+        Write-UTF8File `
+            (Join-Path $protectedDirectory 'nonempty.txt') `
+            "protected-baseline`r`n"
+
+        $rootACL = Get-Acl -LiteralPath $root -ErrorAction Stop
+        $rootACL.SetOwner([Security.Principal.SecurityIdentifier]::new(
+            $script:PrimarySID
+        ))
+        $rootACL.SetGroup([Security.Principal.SecurityIdentifier]::new(
+            'S-1-5-32-544'
+        ))
+        Set-Acl -LiteralPath $root -AclObject $rootACL
+        $null = Set-ICaclsOwnerAndDacl `
+            -Path $protectedDirectory `
+            -Owner '*S-1-5-32-544' `
+            -Grants @(
+                "*$($script:PrimarySID):(OI)(CI)F",
+                '*S-1-5-18:(OI)(CI)F',
+                '*S-1-5-32-544:(OI)(CI)F'
+            ) `
+            -Label 'acl-roundtrip-protected-directory'
+
+        $rootACL = Get-Acl -LiteralPath $root -ErrorAction Stop
+        $inheritedACL = Get-Acl `
+            -LiteralPath $inheritedDirectory `
+            -ErrorAction Stop
+        $protectedACL = Get-Acl `
+            -LiteralPath $protectedDirectory `
+            -ErrorAction Stop
+        if ([bool]$rootACL.AreAccessRulesProtected -or
+            [bool]$inheritedACL.AreAccessRulesProtected -or
+            -not [bool]$protectedACL.AreAccessRulesProtected -or
+            (ConvertTo-CertificationSID $rootACL.Owner) -ne
+                $script:PrimarySID -or
+            (ConvertTo-CertificationSID $rootACL.Group) -ne
+                'S-1-5-32-544' -or
+            (ConvertTo-CertificationSID $protectedACL.Owner) -ne
+                'S-1-5-32-544') {
+            throw 'ACL round-trip matrix did not establish its owner/group/inheritance cases'
+        }
+
+        $snapshot = New-ProtectedUserTreeSnapshot `
+            -Path $root `
+            -Name "acl-roundtrip-$($script:RunToken)" `
+            -Ephemeral
+        Write-UTF8File `
+            (Join-Path $inheritedDirectory 'nonempty.txt') `
+            "changed`r`n"
+        Remove-Item `
+            -LiteralPath (Join-Path $inheritedDirectory 'empty.txt') `
+            -Force `
+            -ErrorAction Stop
+        Write-UTF8File (Join-Path $protectedDirectory 'extra.txt') 'extra'
+        $null = Set-ICaclsOwnerAndDacl `
+            -Path $root `
+            -Owner '*S-1-5-32-544' `
+            -Grants @(
+                '*S-1-5-18:(OI)(CI)F',
+                '*S-1-5-32-544:(OI)(CI)F'
+            ) `
+            -Label 'acl-roundtrip-drift'
+
+        Restore-ProtectedUserTreeSnapshot $snapshot
+        return [pscustomobject]@{
+            protected_inheritance = $true
+            unprotected_inheritance = $true
+            owner_and_group = $true
+            canonical_ace_order = $true
+            inherited_aces = $true
+            empty_and_nonempty_files = $true
+            exact_inventory_restored = $true
+            absent_baseline_removed = $true
+        }
+    } finally {
+        if (Test-Path -LiteralPath $root) {
+            $item = Get-Item -LiteralPath $root -Force -ErrorAction Stop
+            if (-not $item.PSIsContainer -or
+                ($item.Attributes -band
+                    [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "ACL round-trip cleanup root is unsafe: $root"
+            }
+            $nestedReparse = @(
+                Get-ChildItem `
+                    -LiteralPath $root `
+                    -Force `
+                    -Recurse `
+                    -ErrorAction Stop |
+                    Where-Object {
+                        ($_.Attributes -band
+                            [IO.FileAttributes]::ReparsePoint) -ne 0
+                    }
+            )
+            if ($nestedReparse.Count -ne 0) {
+                throw 'ACL round-trip cleanup found a reparse point'
+            }
+            Remove-Item `
+                -LiteralPath $root `
+                -Recurse `
+                -Force `
+                -ErrorAction Stop
+        }
+    }
 }
 
 function Get-DeploymentDigests {
@@ -5198,8 +6295,8 @@ function Get-NormalModeEnterpriseMachineSnapshot {
     $paths = @(
         $script:InstallRoot,
         $script:StateRoot,
-        (Join-Path $script:KnownProgramFiles 'Cisco\DefenseClaw'),
-        (Join-Path $script:KnownProgramData 'Cisco\DefenseClaw'),
+        (Join-Path $script:KnownProgramFiles 'Cisco\Cisco Secure Client\DefenseClaw'),
+        (Join-Path $script:KnownProgramData 'Cisco\Cisco Secure Client\DefenseClaw'),
         $script:LifecycleLockDirectory,
         $script:LifecycleLockPath,
         (Join-Path $script:InstallRoot 'bin\defenseclaw-gateway.exe'),
@@ -5237,6 +6334,218 @@ function Get-NormalModeEnterpriseMachineSnapshot {
     }
 }
 
+function Get-NormalModeEnterpriseAttributionSnapshot([object]$Snapshot) {
+    # Attribute only state that normal mode could have changed without a live
+    # service legitimately refreshing it. All selected protected objects keep
+    # their existence, type, attributes, and ACL checks. Byte checks are scoped
+    # to immutable installation inputs; guardian-owned policy/state bytes are
+    # verified in the dedicated guardian and repair phases. LastWriteTime is
+    # deliberately excluded for every row because directory timestamps also
+    # change when a service atomically republishes a descendant.
+    $immutableDigestPaths = [Collections.Generic.HashSet[string]]::new(
+        [StringComparer]::OrdinalIgnoreCase
+    )
+    foreach ($path in @(
+        (Join-Path $script:InstallRoot 'bin\defenseclaw-gateway.exe'),
+        (Join-Path $script:InstallRoot 'bin\defenseclaw-hook.exe'),
+        (Join-Path $script:InstallRoot 'bin\defenseclaw.exe'),
+        (Join-Path $script:StateRoot 'etc\config.yaml'),
+        (Join-Path $script:StateRoot 'install\deployment.json')
+    )) {
+        [void]$immutableDigestPaths.Add((ConvertTo-CanonicalPath $path))
+    }
+    $paths = @(
+        foreach ($row in @($Snapshot.paths)) {
+            $path = ConvertTo-CanonicalPath ([string]$row.path)
+            [pscustomobject]@{
+                path = $path
+                existed = [bool]$row.existed
+                kind = [string]$row.kind
+                attributes = [int]$row.attributes
+                last_write_utc_ticks = 0
+                sddl = [string]$row.sddl
+            }
+        }
+    )
+    $fileDigests = @(
+        $Snapshot.file_digests |
+            Where-Object {
+                $immutableDigestPaths.Contains(
+                    (ConvertTo-CanonicalPath ([string]$_.path))
+                )
+            } |
+            ForEach-Object {
+                [pscustomobject]@{
+                    path = ConvertTo-CanonicalPath ([string]$_.path)
+                    sha256 = [string]$_.sha256
+                }
+            }
+    )
+    $services = @(
+        foreach ($service in @($Snapshot.services)) {
+            [pscustomobject]@{
+                name = [string]$service.name
+                start_mode = [string]$service.start_mode
+                start_name = [string]$service.start_name
+                path_name = [string]$service.path_name
+            }
+        }
+    )
+    return [pscustomobject]@{
+        paths = $paths
+        file_digests = $fileDigests
+        services = $services
+    }
+}
+
+function Get-GuardianAuthorizationSemanticSnapshot([string]$Path) {
+    $safe = Assert-PathBelow `
+        $Path `
+        $script:StateRoot `
+        'guardian authorization ledger'
+    if (-not (Test-Path -LiteralPath $safe -PathType Leaf)) {
+        throw "guardian authorization ledger is missing: $safe"
+    }
+    $document = ConvertFrom-SingleJSONDocument `
+        (Read-CredentialedProcessOutputFile `
+            -Path $safe `
+            -Label 'guardian authorization ledger') `
+        'guardian authorization ledger'
+    $updatedAt = $document.PSObject.Properties['updated_at']
+    if ($null -eq $updatedAt -or
+        [string]::IsNullOrWhiteSpace([string]$updatedAt.Value)) {
+        throw 'guardian authorization ledger is missing updated_at'
+    }
+    # Freshness and the complete live schema are checked by status/verify.
+    # Remove only the publication timestamp for causal comparisons; all target,
+    # result, authorization, count, and future root fields remain fail-closed.
+    $document.PSObject.Properties.Remove('updated_at')
+    return $document
+}
+
+function Get-StableGuardianAuthorizationSemanticSnapshot([string]$Path) {
+    $deadline = [DateTimeOffset]::UtcNow.AddSeconds(10)
+    $previous = Get-GuardianAuthorizationSemanticSnapshot $Path
+    do {
+        Start-Sleep -Milliseconds 100
+        $current = Get-GuardianAuthorizationSemanticSnapshot $Path
+        $previousJSON = $previous | ConvertTo-Json -Compress -Depth 8
+        $currentJSON = $current | ConvertTo-Json -Compress -Depth 8
+        if ([string]::Equals(
+            $previousJSON,
+            $currentJSON,
+            [StringComparison]::Ordinal
+        )) {
+            return $current
+        }
+        $previous = $current
+    } while ([DateTimeOffset]::UtcNow -lt $deadline)
+    throw 'guardian authorization ledger semantics did not stabilize within 10 seconds'
+}
+
+function Get-CertificationPersistentLifecycleLockBaseline {
+    $directory = ConvertTo-CanonicalPath $script:LifecycleLockDirectory
+    $path = Assert-PathBelow `
+        $script:LifecycleLockPath `
+        $script:KnownProgramData `
+        'persistent enterprise lifecycle lock'
+    $directoryExists = Test-Path -LiteralPath $directory
+    $pathExists = Test-Path -LiteralPath $path
+    if (-not $directoryExists -and -not $pathExists) {
+        return [pscustomobject]@{
+            present = $false
+            directory = $directory
+            path = $path
+            exact_single_child = $true
+            zero_bytes = $true
+            canonical_acl = $true
+        }
+    }
+    if (-not $directoryExists -or -not $pathExists) {
+        throw 'persistent lifecycle lock directory/file existence is inconsistent'
+    }
+
+    $directoryItem = Get-Item -LiteralPath $directory -Force -ErrorAction Stop
+    $lockItem = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+    if (-not $directoryItem.PSIsContainer -or
+        ($directoryItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "persistent lifecycle lock root is not a regular directory: $directory"
+    }
+    if ($lockItem.PSIsContainer -or
+        ($lockItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+        [int64]$lockItem.Length -ne 0) {
+        throw "persistent lifecycle lock is not an exact zero-byte regular file: $path"
+    }
+    $children = @(Get-ChildItem -LiteralPath $directory -Force -ErrorAction Stop)
+    if ($children.Count -ne 1 -or
+        -not [string]::Equals(
+            [string]$children[0].FullName,
+            $path,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw (
+            'persistent lifecycle root contains objects other than the exact ' +
+            "lifecycle.lock: $directory"
+        )
+    }
+
+    $security = [ordered]@{}
+    foreach ($entry in @(
+        [pscustomobject]@{ path = $directory; directory = $true },
+        [pscustomobject]@{ path = $path; directory = $false }
+    )) {
+        $acl = Get-Acl -LiteralPath $entry.path -ErrorAction Stop
+        if ((ConvertTo-CertificationSID $acl.Owner) -cne 'S-1-5-32-544' -or
+            (ConvertTo-CertificationSID $acl.Group) -cne 'S-1-5-32-544' -or
+            -not $acl.AreAccessRulesProtected) {
+            throw "persistent lifecycle ACL owner/group/protection is noncanonical: $($entry.path)"
+        }
+        $rules = @($acl.Access)
+        if ($rules.Count -ne 2) {
+            throw "persistent lifecycle ACL has $($rules.Count) rules, expected two: $($entry.path)"
+        }
+        $expectedInheritance = if ([bool]$entry.directory) {
+            [Security.AccessControl.InheritanceFlags]::ObjectInherit -bor
+                [Security.AccessControl.InheritanceFlags]::ContainerInherit
+        } else {
+            [Security.AccessControl.InheritanceFlags]::None
+        }
+        foreach ($expectedSID in @('S-1-5-18', 'S-1-5-32-544')) {
+            $matches = @(
+                $rules | Where-Object {
+                    (ConvertTo-CertificationSID $_.IdentityReference) -ceq
+                        $expectedSID
+                }
+            )
+            if ($matches.Count -ne 1 -or
+                $matches[0].AccessControlType -ne
+                    [Security.AccessControl.AccessControlType]::Allow -or
+                $matches[0].FileSystemRights -ne
+                    [Security.AccessControl.FileSystemRights]::FullControl -or
+                $matches[0].InheritanceFlags -ne $expectedInheritance -or
+                $matches[0].PropagationFlags -ne
+                    [Security.AccessControl.PropagationFlags]::None -or
+                [bool]$matches[0].IsInherited) {
+                throw "persistent lifecycle ACL rule for $expectedSID is noncanonical: $($entry.path)"
+            }
+        }
+        $security[[string]$entry.path] = Get-ManagedUserPathSecurityFingerprint `
+            $entry.path
+    }
+
+    return [pscustomobject]@{
+        present = $true
+        directory = $directory
+        path = $path
+        exact_single_child = $true
+        zero_bytes = $true
+        canonical_acl = $true
+        lock_sha256 = Get-FileDigest $path
+        directory_security = $security[$directory]
+        lock_security = $security[$path]
+    }
+}
+
 function Test-NormalModePreinstallNoOp {
     $dataRoot = Assert-PathBelow `
         (Join-Path $script:FixtureRoot 'normal-mode-unmanaged-data') `
@@ -5255,7 +6564,6 @@ guardrail:
   enabled: true
   mode: observe
   scanner_mode: local
-  hook_self_heal: true
 application_protection:
   enabled: false
 "@
@@ -5273,8 +6581,8 @@ application_protection:
     $machineRoots = @(
         $script:InstallRoot,
         $script:StateRoot,
-        (Join-Path $script:KnownProgramFiles 'Cisco\DefenseClaw'),
-        (Join-Path $script:KnownProgramData 'Cisco\DefenseClaw'),
+        (Join-Path $script:KnownProgramFiles 'Cisco\Cisco Secure Client\DefenseClaw'),
+        (Join-Path $script:KnownProgramData 'Cisco\Cisco Secure Client\DefenseClaw'),
         $script:CodexVendorDirectory,
         $script:CodexMachinePolicyDirectory
     )
@@ -5326,15 +6634,32 @@ application_protection:
     return 'installer Status and candidate gateway reported an absent/disabled enterprise deployment; created no service/data/Codex-policy/machine root; canonical user-tree bytes and security metadata remained exact'
 }
 
+function Get-NormalModeServiceNames {
+    param(
+        [AllowEmptyCollection()]
+        [object[]]$Services = @()
+    )
+    return @(
+        $Services |
+            ForEach-Object { [string]$_.name }
+    )
+}
+
 function Test-NormalModeLiveAutoHeal([switch]$RequireEnterpriseAbsent) {
     $machineBefore = Get-NormalModeEnterpriseMachineSnapshot
+    $attributionBefore =
+        Get-NormalModeEnterpriseAttributionSnapshot $machineBefore
+    $persistentLockBaseline =
+        Get-CertificationPersistentLifecycleLockBaseline
+    if ($RequireEnterpriseAbsent) {
+        $script:LifecycleLockPreinstallBaseline = $persistentLockBaseline
+    }
     if ($RequireEnterpriseAbsent) {
         $requiredAbsentPaths = @(
             $script:InstallRoot,
             $script:StateRoot,
-            (Join-Path $script:KnownProgramFiles 'Cisco\DefenseClaw'),
-            (Join-Path $script:KnownProgramData 'Cisco\DefenseClaw'),
-            $script:LifecycleLockDirectory,
+            (Join-Path $script:KnownProgramFiles 'Cisco\Cisco Secure Client\DefenseClaw'),
+            (Join-Path $script:KnownProgramData 'Cisco\Cisco Secure Client\DefenseClaw'),
             $script:CodexVendorDirectory,
             $script:ClaudeManagedPolicyPath,
             $script:ClaudeManagedStatePath,
@@ -5350,10 +6675,15 @@ function Test-NormalModeLiveAutoHeal([switch]$RequireEnterpriseAbsent) {
         )
         if ($unexpectedPaths.Count -ne 0 -or
             @($machineBefore.services).Count -ne 0) {
+            $unexpectedServices = @(
+                Get-NormalModeServiceNames `
+                    -Services @($machineBefore.services)
+            )
             throw (
-                'normal-mode live auto-heal requires an absent enterprise ' +
-                "machine baseline; paths=[$($unexpectedPaths -join ',')]; " +
-                "services=[$(@($machineBefore.services.name) -join ',')]"
+                'normal-mode live auto-heal requires an absent run-scoped ' +
+                'enterprise baseline plus the canonical persistent lock; ' +
+                "unexpected paths=[$($unexpectedPaths -join ',')]; " +
+                "services=[$($unexpectedServices -join ',')]"
             )
         }
     }
@@ -5454,6 +6784,28 @@ function Test-NormalModeLiveAutoHeal([switch]$RequireEnterpriseAbsent) {
             '*S-1-5-32-544:(OI)(CI)F'
         ) `
         -Label 'normal-mode-synthetic-home-dacl'
+    foreach ($entry in $runtimeFiles.GetEnumerator()) {
+        $null = Set-ICaclsOwnerAndDacl `
+            -Path ([string]$entry.Value.destination) `
+            -Owner "*$($script:PrimarySID)" `
+            -Grants @(
+                "*$($script:PrimarySID):F",
+                '*S-1-5-18:F',
+                '*S-1-5-32-544:F'
+            ) `
+            -Label "normal-mode-$($entry.Key)-runtime-file-dacl"
+        $security = Assert-NormalModeRuntimeFileSecurity `
+            -Path ([string]$entry.Value.destination) `
+            -ExpectedOwnerSID $script:PrimarySID `
+            -Label "normal-mode $($entry.Key) runtime file"
+        if ((Get-FileDigest ([string]$entry.Value.destination)) -cne
+            [string]$entry.Value.sha256) {
+            throw "normal-mode $($entry.Key) runtime bytes changed while securing the file"
+        }
+        $entry.Value | Add-Member `
+            -NotePropertyName security `
+            -NotePropertyValue $security
+    }
 
     $inputObject = [ordered]@{
         expected_sid = $script:PrimarySID
@@ -5477,6 +6829,7 @@ function Test-NormalModeLiveAutoHeal([switch]$RequireEnterpriseAbsent) {
         gateway_sha256 = [string]$runtimeFiles.gateway.sha256
         hook_sha256 = [string]$runtimeFiles.hook.sha256
         codex_sha256 = [string]$runtimeFiles.codex.sha256
+        codex_version = Get-ApprovedCodexVersionText
         api_port = Get-FreeLoopbackPort
     }
     $inputBase64 = [Convert]::ToBase64String(
@@ -5522,7 +6875,12 @@ function Read-SharedBytes([string]$Path) {
                 $memory = [IO.MemoryStream]::new()
                 try {
                     $stream.CopyTo($memory)
-                    return $memory.ToArray()
+                    # PowerShell enumerates arrays written to its pipeline. A
+                    # zero-byte array would therefore become no output and the
+                    # caller would receive $null. Unary comma preserves the
+                    # byte[] as one object under both Windows PowerShell 5.1
+                    # and PowerShell 7.
+                    return ,$memory.ToArray()
                 } finally {
                     $memory.Dispose()
                 }
@@ -5551,6 +6909,96 @@ function Get-BytesSHA256([byte[]]$Bytes) {
     }
 }
 
+function ConvertTo-SanitizedNormalModeDiagnostic([string]$Value) {
+    $safe = [string]$Value
+    $safe = $safe -replace (
+        '(?i)\bauthorization\s*[:=]\s*[^\r\n,;]+'
+    ), 'authorization=<redacted>'
+    $safe = $safe -replace (
+        '(?i)\b(password|secret|token|api[_-]?key|access[_-]?token)' +
+        '\s*[:=]\s*[^\r\n,;]+'
+    ), '$1=<redacted>'
+    $safe = ($safe -replace '[\x00-\x1f]+', ' ').Trim()
+    if ($safe.Length -gt 512) {
+        $safe = $safe.Substring(0, 512) + '...'
+    }
+    return $safe
+}
+
+function Get-NormalModeReadinessSnapshot(
+    [string]$GatewayPIDPath,
+    [string]$WatchdogPIDPath,
+    [string]$ManagedConfigPath
+) {
+    $snapshot = [ordered]@{}
+    foreach ($entry in @(
+        [pscustomobject]@{ name = 'gateway'; path = $GatewayPIDPath },
+        [pscustomobject]@{ name = 'watchdog'; path = $WatchdogPIDPath }
+    )) {
+        $state = [ordered]@{
+            exists = Test-Path -LiteralPath $entry.path -PathType Leaf
+            content = ''
+            pid = 0
+            executable = ''
+            error = ''
+        }
+        if ($state.exists) {
+            try {
+                $raw = Read-SharedText ([string]$entry.path)
+                $state.content = ConvertTo-SanitizedNormalModeDiagnostic $raw
+                $state.pid = Read-PID ([string]$entry.path)
+                $state.executable = Get-ProcessExecutable ([int]$state.pid)
+            } catch {
+                $state.error = ConvertTo-SanitizedNormalModeDiagnostic (
+                    $_.Exception.Message
+                )
+            }
+        }
+        $snapshot[[string]$entry.name] = [pscustomobject]$state
+    }
+
+    $config = [ordered]@{
+        exists = Test-Path -LiteralPath $ManagedConfigPath -PathType Leaf
+        size = 0
+        sha256 = ''
+        hook_table = $false
+        event_tables = 0
+        command_windows = 0
+        private_trusted_hashes = 0
+        error = ''
+    }
+    if ($config.exists) {
+        try {
+            $bytes = Read-SharedBytes $ManagedConfigPath
+            $config.size = $bytes.Length
+            $config.sha256 = Get-BytesSHA256 $bytes
+            $text = [Text.Encoding]::UTF8.GetString($bytes)
+            $config.hook_table = [regex]::IsMatch(
+                $text,
+                '(?m)^\[hooks\]\s*$'
+            )
+            $config.event_tables = [regex]::Matches(
+                $text,
+                '(?m)^\[\[hooks\.(PreToolUse|PermissionRequest|PostToolUse|SubagentStart|SubagentStop|PreCompact|PostCompact|SessionStart|UserPromptSubmit|Stop)\]\]\s*$'
+            ).Count
+            $config.command_windows = [regex]::Matches(
+                $text,
+                '(?m)^\s*command_windows\s*='
+            ).Count
+            $config.private_trusted_hashes = [regex]::Matches(
+                $text,
+                '(?m)^\s*trusted_hash\s*='
+            ).Count
+        } catch {
+            $config.error = ConvertTo-SanitizedNormalModeDiagnostic (
+                $_.Exception.Message
+            )
+        }
+    }
+    $snapshot['managed_config'] = [pscustomobject]$config
+    return [pscustomobject]$snapshot
+}
+
 function Read-PID([string]$Path) {
     $raw = (Read-SharedText $Path).Trim()
     if ($raw -match '^\d+$') { return [int]$raw }
@@ -5562,70 +7010,121 @@ function Read-PID([string]$Path) {
     return [int]$record.pid
 }
 
-function Get-CodexHookFingerprint([string]$Text, [string]$ExpectedHook) {
+function Get-CodexManagedHookFingerprint(
+    [string]$Text,
+    [string]$ExpectedHook
+) {
     $hookTable = [regex]::Match(
         $Text,
         '(?ms)^\[hooks\]\s*\r?\n.*?(?=^\[(?!hooks(?:\.|\]))[^\]]+\]\s*$|\z)'
     )
     if (-not $hookTable.Success) {
-        throw 'Codex registration has no owned [hooks] table'
+        throw 'Codex managed registration has no owned [hooks] table'
     }
-    $commandLiteral = [regex]::Match(
+    $eventMatches = @([regex]::Matches(
         $hookTable.Value,
-        'command_windows\s*=\s*(?<literal>"(?:\\.|[^"\\])*"|''[^'']*'')'
-    )
-    if (-not $commandLiteral.Success) {
-        throw 'Codex registration has no Windows hook command'
-    }
-    $literal = $commandLiteral.Groups['literal'].Value
-    if ($literal.StartsWith("'", [StringComparison]::Ordinal)) {
-        $command = $literal.Substring(1, $literal.Length - 2)
-    } else {
-        $command = $literal | ConvertFrom-Json -ErrorAction Stop
-    }
-    $encoded = [regex]::Match(
-        $command,
-        '(?i)(?:^|\s)-EncodedCommand\s+([A-Za-z0-9+/=]+)(?:\s|$)'
-    )
-    if (-not $encoded.Success) {
-        throw 'Codex Windows hook command is not encoded'
-    }
-    $decoded = [Text.Encoding]::Unicode.GetString(
-        [Convert]::FromBase64String($encoded.Groups[1].Value)
-    )
-    if ($decoded.IndexOf(
-            $ExpectedHook,
-            [StringComparison]::OrdinalIgnoreCase
-        ) -lt 0 -or
-        $decoded -notmatch '(?i)\bhook\s+--connector\s+codex\b') {
-        throw 'Codex Windows hook command does not name the exact candidate hook'
-    }
+        '(?m)^\[\[hooks\.(PreToolUse|PermissionRequest|PostToolUse|SubagentStart|SubagentStop|PreCompact|PostCompact|SessionStart|UserPromptSubmit|Stop)\]\]\s*$'
+    ))
     $events = @(
-        [regex]::Matches(
-            $hookTable.Value,
-            '(?m)^\[\[hooks\.(PreToolUse|PermissionRequest|PostToolUse|SubagentStart|SubagentStop|PreCompact|PostCompact|SessionStart|UserPromptSubmit|Stop)\]\]\s*$'
-        ) |
+        $eventMatches |
             ForEach-Object { $_.Groups[1].Value } |
             Sort-Object -Unique
     )
-    $hashes = @(
-        [regex]::Matches(
-            $hookTable.Value,
-            '(?m)^\s*trusted_hash\s*=\s*[''"](?<hash>sha256:[0-9a-fA-F]{64})[''"]\s*$'
-        ) |
-            ForEach-Object { $_.Groups['hash'].Value.ToLowerInvariant() } |
-            Sort-Object
-    )
-    if ($events.Count -ne 10 -or $hashes.Count -ne 10) {
+    if ($eventMatches.Count -ne 10 -or $events.Count -ne 10) {
         throw (
-            'Codex owned registration is incomplete: ' +
-            "events=$($events.Count) trusted_hashes=$($hashes.Count)"
+            'Codex managed registration is incomplete: ' +
+            "event_tables=$($eventMatches.Count) unique_events=$($events.Count)"
         )
     }
+    $commandLiterals = @(
+        for ($eventIndex = 0; $eventIndex -lt $eventMatches.Count; $eventIndex++) {
+            $segmentStart = $eventMatches[$eventIndex].Index
+            $segmentEnd = if ($eventIndex + 1 -lt $eventMatches.Count) {
+                $eventMatches[$eventIndex + 1].Index
+            } else {
+                $hookTable.Value.Length
+            }
+            $segment = $hookTable.Value.Substring(
+                $segmentStart,
+                $segmentEnd - $segmentStart
+            )
+            $segmentCommands = @([regex]::Matches(
+                $segment,
+                'command_windows\s*=\s*(?<literal>"(?:\\.|[^"\\])*"|''[^'']*'')'
+            ))
+            if ($segmentCommands.Count -ne 1) {
+                throw (
+                    'Codex managed registration has the wrong Windows ' +
+                    "handler count for $($eventMatches[$eventIndex].Groups[1].Value): " +
+                    $segmentCommands.Count
+                )
+            }
+            $segmentCommands[0]
+        }
+    )
+    $privateTrustHashes = @([regex]::Matches(
+        $hookTable.Value,
+        '(?m)^\s*trusted_hash\s*='
+    ))
+    if ($privateTrustHashes.Count -ne 0) {
+        throw 'Codex managed registration synthesized private trusted_hash state'
+    }
+    $decodedCommands = @(
+        foreach ($commandLiteral in $commandLiterals) {
+            $literal = $commandLiteral.Groups['literal'].Value
+            if ($literal.StartsWith("'", [StringComparison]::Ordinal)) {
+                $command = $literal.Substring(1, $literal.Length - 2)
+            } else {
+                $command = $literal | ConvertFrom-Json -ErrorAction Stop
+            }
+            $encoded = [regex]::Match(
+                $command,
+                '(?i)(?:^|\s)-EncodedCommand\s+([A-Za-z0-9+/=]+)(?:\s|$)'
+            )
+            if (-not $encoded.Success) {
+                throw 'Codex Windows managed hook command is not encoded'
+            }
+            $decoded = [Text.Encoding]::Unicode.GetString(
+                [Convert]::FromBase64String($encoded.Groups[1].Value)
+            )
+            $startProcess = [regex]::Match(
+                $decoded,
+                '(?i)\$hookProcess=Microsoft\.PowerShell\.Management\\Start-Process\s+-FilePath\s+(?<file>''(?:''''|[^''])+'')\s+-ArgumentList\s+@\(''hook'',''--connector'',''codex''\)\s+-NoNewWindow\s+-Wait\s+-PassThru'
+            )
+            if (-not $startProcess.Success -or
+                $decoded -notmatch
+                    '(?i)(?:^|;\s*)exit\s+\$hookProcess\.ExitCode(?:;|$)' -or
+                $decoded -match '(?i)\$LASTEXITCODE') {
+                throw 'Codex Windows managed hook command does not use the exact synchronous launcher contract'
+            }
+            $fileLiteral = $startProcess.Groups['file'].Value
+            $actualHook = [IO.Path]::GetFullPath(
+                $fileLiteral.Substring(1, $fileLiteral.Length - 2).Replace(
+                    "''",
+                    "'"
+                )
+            ).TrimEnd('\')
+            $expectedCanonicalHook = [IO.Path]::GetFullPath(
+                $ExpectedHook
+            ).TrimEnd('\')
+            if (-not [string]::Equals(
+                    $actualHook,
+                    $expectedCanonicalHook,
+                    [StringComparison]::OrdinalIgnoreCase
+                )) {
+                throw (
+                    'Codex Windows managed hook command names an unexpected ' +
+                    "candidate: actual=$actualHook expected=$expectedCanonicalHook"
+                )
+            }
+            $decoded
+        }
+    )
     return [pscustomobject]@{
         events = $events
-        trusted_hashes = $hashes
-        decoded_command = $decoded
+        command_windows_count = $commandLiterals.Count
+        decoded_commands = $decodedCommands
+        trust_model = 'managed_source'
         table_index = $hookTable.Index
         table_length = $hookTable.Length
     }
@@ -5638,6 +7137,124 @@ function Get-ProcessExecutable([int]$PIDValue) {
         -ErrorAction SilentlyContinue
     if ($null -eq $process) { return '' }
     return [IO.Path]::GetFullPath([string]$process.ExecutablePath)
+}
+
+function ConvertTo-NormalModeProcessArgument([string]$Value) {
+    if ($null -eq $Value) { $Value = '' }
+    if ($Value.IndexOf([char]0) -ge 0 -or
+        $Value.IndexOf("`r") -ge 0 -or
+        $Value.IndexOf("`n") -ge 0) {
+        throw 'normal-mode process argument contains a control character'
+    }
+    if ($Value -notmatch '[\s"]') { return $Value }
+    $escaped = $Value -replace '(\\*)"', '$1$1\"'
+    $escaped = $escaped -replace '(\\+)$', '$1$1'
+    return '"' + $escaped + '"'
+}
+
+function Stop-NormalModeProcessTree(
+    [Diagnostics.Process]$Process,
+    [string]$Label
+) {
+    if ($null -eq $Process) { return }
+    try { $Process.Refresh() } catch {}
+    if ($Process.HasExited) { return }
+    $taskkill = Join-Path ([Environment]::SystemDirectory) 'taskkill.exe'
+    $killer = Start-Process `
+        -FilePath $taskkill `
+        -ArgumentList ("/PID $($Process.Id) /T /F") `
+        -WindowStyle Hidden `
+        -PassThru
+    try {
+        if (-not $killer.WaitForExit(10000)) {
+            try { $killer.Kill() } catch {}
+            throw "$Label taskkill did not finish within 10 seconds"
+        }
+    } finally {
+        $killer.Dispose()
+    }
+    try { $Process.WaitForExit(10000) | Out-Null } catch {}
+    try { $Process.Refresh() } catch {}
+    if (-not $Process.HasExited) {
+        try { $Process.Kill() } catch {}
+        throw "$Label process tree did not terminate"
+    }
+}
+
+function Invoke-NormalModeProcess {
+    param(
+        [Parameter(Mandatory)][string]$Executable,
+        [Parameter(Mandatory)][string[]]$Arguments,
+        [Parameter(Mandatory)][string]$Label,
+        [Parameter(Mandatory)][int]$TimeoutSeconds,
+        [int[]]$AllowedExitCodes = @(0)
+    )
+    $safeLabel = $Label -replace '[^A-Za-z0-9_.-]', '_'
+    $stdoutPath = Join-Path $workRoot ($safeLabel + '.stdout.log')
+    $stderrPath = Join-Path $workRoot ($safeLabel + '.stderr.log')
+    $argumentLine = @(
+        $Arguments |
+            ForEach-Object {
+                ConvertTo-NormalModeProcessArgument ([string]$_)
+            }
+    ) -join ' '
+    [Console]::Error.WriteLine(
+        "[normal-mode] starting $Label (timeout=${TimeoutSeconds}s)"
+    )
+    $started = [DateTimeOffset]::UtcNow
+    $process = Start-Process `
+        -FilePath $Executable `
+        -ArgumentList $argumentLine `
+        -WorkingDirectory $workRoot `
+        -WindowStyle Hidden `
+        -RedirectStandardOutput $stdoutPath `
+        -RedirectStandardError $stderrPath `
+        -PassThru
+    try {
+        if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
+            $terminationError = ''
+            try {
+                Stop-NormalModeProcessTree $process $Label
+            } catch {
+                $terminationError = '; termination error: ' +
+                    $_.Exception.Message
+            }
+            throw (
+                "$Label timed out after $TimeoutSeconds seconds; " +
+                "diagnostics: stdout=$stdoutPath stderr=$stderrPath" +
+                $terminationError
+            )
+        }
+        $process.Refresh()
+        $exitCode = $process.ExitCode
+    } finally {
+        $process.Dispose()
+    }
+    $stdoutText = if (Test-Path -LiteralPath $stdoutPath -PathType Leaf) {
+        Read-SharedText $stdoutPath
+    } else { '' }
+    $stderrText = if (Test-Path -LiteralPath $stderrPath -PathType Leaf) {
+        Read-SharedText $stderrPath
+    } else { '' }
+    $elapsed = [Math]::Round(
+        ([DateTimeOffset]::UtcNow - $started).TotalMilliseconds,
+        0
+    )
+    [Console]::Error.WriteLine(
+        "[normal-mode] completed $Label exit=$exitCode elapsed_ms=$elapsed"
+    )
+    if ($AllowedExitCodes -notcontains $exitCode) {
+        throw (
+            "$Label exited $exitCode; expected " +
+            "$($AllowedExitCodes -join ', '). stderr: $stderrText"
+        )
+    }
+    return [pscustomobject]@{
+        ExitCode = $exitCode
+        StdOut = $stdoutText
+        StdErr = $stderrText
+        ElapsedMilliseconds = $elapsed
+    }
 }
 
 function Remove-FixtureTree([string]$Path, [string]$ExpectedParent) {
@@ -5675,7 +7292,48 @@ if (-not [string]::Equals(
 $dataRoot = [IO.Path]::GetFullPath([string]$inputObject.data_root).TrimEnd('\')
 $codexHome = [IO.Path]::GetFullPath([string]$inputObject.codex_home).TrimEnd('\')
 $claudeHome = [IO.Path]::GetFullPath([string]$inputObject.claude_home).TrimEnd('\')
-$runtimeRoot = [IO.Path]::GetFullPath([string]$inputObject.runtime_root).TrimEnd('\')
+$expectedRuntimeRoot = [IO.Path]::GetFullPath(
+    (Join-Path $syntheticHome '.local\bin')
+).TrimEnd('\')
+function Assert-ExactNormalModeRuntimeRoot([string]$Candidate) {
+    $full = [IO.Path]::GetFullPath($Candidate).TrimEnd('\')
+    if (-not $full.Equals(
+            $expectedRuntimeRoot,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        -not [IO.Path]::GetDirectoryName($full).Equals(
+            [IO.Path]::GetFullPath(
+                (Join-Path $syntheticHome '.local')
+            ).TrimEnd('\'),
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw 'normal-mode trusted runtime root escaped the exact synthetic .local\bin child'
+    }
+    return $full
+}
+$runtimeRoot = Assert-ExactNormalModeRuntimeRoot (
+    [string]$inputObject.runtime_root
+)
+$trustedPrefixEscapeRejections = 0
+foreach ($escapeCandidate in @(
+    $profile,
+    $syntheticHome,
+    [IO.Path]::GetDirectoryName($runtimeRoot)
+)) {
+    try {
+        $null = Assert-ExactNormalModeRuntimeRoot $escapeCandidate
+        throw 'normal-mode trusted runtime root accepted an escaping prefix'
+    } catch {
+        if ($_.Exception.Message -notlike
+            'normal-mode trusted runtime root escaped*') {
+            throw
+        }
+        $trustedPrefixEscapeRejections++
+    }
+}
+if ($trustedPrefixEscapeRejections -ne 3) {
+    throw 'normal-mode trusted runtime escape-negative matrix was incomplete'
+}
 $workRoot = [IO.Path]::GetFullPath([string]$inputObject.work_root).TrimEnd('\')
 $cli = [IO.Path]::GetFullPath([string]$inputObject.source_cli)
 $wheel = [IO.Path]::GetFullPath([string]$inputObject.source_wheel)
@@ -5688,6 +7346,11 @@ $fingerprintSHA256 = ''
 $repairMilliseconds = 0
 $gatewayPID = 0
 $watchdogPID = 0
+$trustedConfigPath = ''
+$agentSelectionPath = ''
+$agentSelectionRawVersion = ''
+$agentSelectionNormalizedVersion = ''
+$agentSelectionSHA256 = ''
 try {
     foreach ($entry in @(
     [pscustomobject]@{ role = 'cli'; path = $cli; sha256 = [string]$inputObject.cli_sha256 },
@@ -5722,6 +7385,61 @@ try {
     $env:DEFENSECLAW_HOME = $dataRoot
     $env:DEFENSECLAW_CONFIG = Join-Path $dataRoot 'config.yaml'
     $env:DEFENSECLAW_DEPLOYMENT_MODE = 'unmanaged_byod'
+    $trustedPathAddProcess = Invoke-NormalModeProcess `
+        -Executable $cli `
+        -Arguments @('setup', 'trusted-paths', 'add', $runtimeRoot, '--json') `
+        -Label 'trusted-path-add' `
+        -TimeoutSeconds 30
+    $trustedPathAddOutput = [string]$trustedPathAddProcess.StdOut
+    $trustedPathAdd = $trustedPathAddOutput |
+        ConvertFrom-Json -ErrorAction Stop
+    if (-not [bool]$trustedPathAdd.ok -or
+        -not [string]::Equals(
+            [IO.Path]::GetFullPath([string]$trustedPathAdd.path).TrimEnd('\'),
+            $runtimeRoot,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw 'normal-mode trusted-paths add did not persist the exact canonical runtime root'
+    }
+    $configPath = Join-Path $dataRoot 'config.yaml'
+    if (-not (Test-Path -LiteralPath $configPath -PathType Leaf)) {
+        throw 'normal-mode trusted-paths add did not create config.yaml'
+    }
+    $trustedPathListProcess = Invoke-NormalModeProcess `
+        -Executable $cli `
+        -Arguments @('setup', 'trusted-paths', 'list', '--json') `
+        -Label 'trusted-path-list-before-init' `
+        -TimeoutSeconds 30
+    $trustedPathListOutput = [string]$trustedPathListProcess.StdOut
+    $trustedPathRows = @(
+        $trustedPathListOutput | ConvertFrom-Json -ErrorAction Stop
+    )
+    $configTrustedRows = @(
+        $trustedPathRows |
+            Where-Object { [string]$_.source -ceq 'config' }
+    )
+    if ($configTrustedRows.Count -ne 1 -or
+        -not [string]::Equals(
+            [IO.Path]::GetFullPath(
+                [string]$configTrustedRows[0].path
+            ).TrimEnd('\'),
+            $runtimeRoot,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        -not [string]::Equals(
+            [IO.Path]::GetFullPath(
+                [string]$configTrustedRows[0].resolved
+            ).TrimEnd('\'),
+            $runtimeRoot,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw 'normal-mode config.yaml does not contain exactly the canonical runtime root'
+    }
+    $trustedConfigPath = [IO.Path]::GetFullPath(
+        [string]$configTrustedRows[0].resolved
+    ).TrimEnd('\')
+    $logs.Add($trustedPathAddOutput.Trim())
+    $logs.Add($trustedPathListOutput.Trim())
     $env:CODEX_HOME = $codexHome
     $env:CLAUDE_CONFIG_DIR = $claudeHome
     $env:USERPROFILE = $syntheticHome
@@ -5744,90 +7462,162 @@ try {
     ) -join [IO.Path]::PathSeparator
     Set-Location -LiteralPath $workRoot
 
-    $initOutput = (
-        & $cli init `
-            --skip-install `
-            --non-interactive `
-            --yes `
-            --connector codex `
-            --profile observe `
-            --no-start-gateway `
-            --no-verify 2>&1 |
-            Out-String
+    $expectedCodexRawVersion = [string]$inputObject.codex_version
+    $versionMatch = [regex]::Match(
+        $expectedCodexRawVersion,
+        '(?i)(?:^|[^0-9])v?([0-9]+)(?:\.([0-9]+))?(?:\.([0-9]+))?'
     )
-    if ($LASTEXITCODE -ne 0) {
-        throw "normal-mode init failed: $initOutput"
+    if (-not $versionMatch.Success) {
+        throw "normal-mode Codex version is not normalizable: $expectedCodexRawVersion"
     }
+    $expectedCodexNormalizedVersion = @(
+        foreach ($index in 1..3) {
+            $value = $versionMatch.Groups[$index].Value
+            if ([string]::IsNullOrWhiteSpace($value)) {
+                '0'
+            } else {
+                [string][int]$value
+            }
+        }
+    ) -join '.'
+
+    $initProcess = Invoke-NormalModeProcess `
+        -Executable $cli `
+        -Arguments @(
+            'init',
+            '--skip-install',
+            '--non-interactive',
+            '--yes',
+            '--connector',
+            'codex',
+            '--profile',
+            'observe',
+            '--no-start-gateway',
+            '--no-verify'
+        ) `
+        -Label 'init' `
+        -TimeoutSeconds 90
+    $initOutput = [string]$initProcess.StdOut
     $logs.Add($initOutput.Trim())
 
-    $configPath = Join-Path $dataRoot 'config.yaml'
-    $config = [IO.File]::ReadAllText($configPath)
-    $apiPortMatches = [regex]::Matches(
-        $config,
-        '(?m)^(?<indent>\s*)api_port:\s*\d+\s*$'
-    )
-    if ($apiPortMatches.Count -ne 1) {
-        throw (
-            'normal-mode fixture requires exactly one gateway api_port; ' +
-            "observed $($apiPortMatches.Count)"
-        )
+    $agentSelectionReceiptPath = Join-Path $dataRoot 'agent_selection.json'
+    if (-not (Test-Path -LiteralPath $agentSelectionReceiptPath -PathType Leaf)) {
+        throw 'normal-mode init did not publish agent_selection.json'
     }
-    $updated = [regex]::Replace(
-        $config,
-        '(?m)^(?<indent>\s*)api_port:\s*\d+\s*$',
-        ('${indent}api_port: ' + [string]$inputObject.api_port),
-        1
+    $agentSelectionReceipt = Read-SharedText $agentSelectionReceiptPath |
+        ConvertFrom-Json -ErrorAction Stop
+    $selectionProperties = @(
+        $agentSelectionReceipt.selections.PSObject.Properties
     )
-    if ($updated -notmatch '(?m)^\s*hook_self_heal:\s*true\s*$') {
-        $guardrailMatches = [regex]::Matches(
-            $updated,
-            '(?m)^guardrail:\s*$'
-        )
-        if ($guardrailMatches.Count -ne 1) {
-            throw (
-                'normal-mode fixture requires exactly one guardrail block; ' +
-                "observed $($guardrailMatches.Count)"
-            )
-        }
-        $updated = [regex]::Replace(
-            $updated,
-            '(?m)^guardrail:\s*$',
-            "guardrail:`r`n  hook_self_heal: true",
-            1
-        )
+    if ([int]$agentSelectionReceipt.schema_version -ne 1 -or
+        $selectionProperties.Count -ne 1 -or
+        [string]$selectionProperties[0].Name -cne 'codex') {
+        throw 'normal-mode agent_selection.json does not contain exactly one Codex selection'
     }
-    if ($updated -notmatch '(?m)^\s*hook_self_heal:\s*true\s*$') {
-        throw 'normal-mode fixture did not set explicit hook self-heal'
-    }
-    [IO.File]::WriteAllText(
-        $configPath,
-        $updated,
-        [Text.UTF8Encoding]::new($false)
+    $codexSelection = $agentSelectionReceipt.selections.codex
+    $agentSelectionPath = [IO.Path]::GetFullPath(
+        [string]$codexSelection.executable
     )
+    $agentSelectionRawVersion = [string]$codexSelection.raw_version
+    $agentSelectionNormalizedVersion =
+        [string]$codexSelection.normalized_version
+    $agentSelectionSHA256 = [string]$codexSelection.sha256
+    if ([string]$codexSelection.connector -cne 'codex' -or
+        [string]$codexSelection.source -cne 'setup-selected' -or
+        -not [string]::Equals(
+            $agentSelectionPath,
+            $codex,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        $agentSelectionRawVersion -cne $expectedCodexRawVersion -or
+        $agentSelectionNormalizedVersion -cne
+            $expectedCodexNormalizedVersion -or
+        $agentSelectionSHA256 -cne
+            ([string]$inputObject.codex_sha256).ToLowerInvariant()) {
+        throw 'normal-mode agent_selection.json did not bind the expected Codex path, version, and SHA-256'
+    }
 
-    $setupOutput = (
-        & $cli setup codex --yes --mode observe --restart 2>&1 |
-            Out-String
+    $postInitTrustProcess = Invoke-NormalModeProcess `
+        -Executable $cli `
+        -Arguments @('setup', 'trusted-paths', 'list', '--json') `
+        -Label 'trusted-path-list-after-init' `
+        -TimeoutSeconds 30
+    $postInitTrustedRows = @(
+        ([string]$postInitTrustProcess.StdOut) |
+            ConvertFrom-Json -ErrorAction Stop |
+            Where-Object { [string]$_.source -ceq 'config' }
     )
-    if ($LASTEXITCODE -ne 0) {
-        throw "normal-mode setup failed: $setupOutput"
+    if ($postInitTrustedRows.Count -ne 1 -or
+        -not [string]::Equals(
+            [IO.Path]::GetFullPath(
+                [string]$postInitTrustedRows[0].resolved
+            ).TrimEnd('\'),
+            $runtimeRoot,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw 'normal-mode init did not retain exactly the canonical trusted runtime root'
     }
+    $logs.Add(([string]$postInitTrustProcess.StdOut).Trim())
+
+    $gatewaySetupProcess = Invoke-NormalModeProcess `
+        -Executable $cli `
+        -Arguments @(
+            'setup',
+            'gateway',
+            '--api-port',
+            [string]$inputObject.api_port,
+            '--non-interactive',
+            '--no-verify'
+        ) `
+        -Label 'gateway-config-offline' `
+        -TimeoutSeconds 30
+    $gatewaySetupOutput = [string]$gatewaySetupProcess.StdOut
+    if ($gatewaySetupOutput -notmatch (
+            '(?m)^\s*gateway\.api_port:\s+' +
+            [regex]::Escape([string]$inputObject.api_port) +
+            '\s*$'
+        )) {
+        throw 'normal-mode public gateway setup did not report the requested effective API port'
+    }
+    $logs.Add($gatewaySetupOutput.Trim())
+    $gatewayConfigProcess = Invoke-NormalModeProcess `
+        -Executable $cli `
+        -Arguments @('config', 'show', '--source', '--format', 'json') `
+        -Label 'gateway-config-source-verification' `
+        -TimeoutSeconds 30
+    $gatewayConfigSource = ([string]$gatewayConfigProcess.StdOut) |
+        ConvertFrom-Json -ErrorAction Stop
+    if ([int]$gatewayConfigSource.gateway.api_port -ne
+        [int]$inputObject.api_port) {
+        throw 'normal-mode canonical config source did not retain the requested API port'
+    }
+    $logs.Add(([string]$gatewayConfigProcess.StdOut).Trim())
+
+    $setupProcess = Invoke-NormalModeProcess `
+        -Executable $cli `
+        -Arguments @('setup', 'codex', '--yes', '--mode', 'observe', '--restart') `
+        -Label 'codex-setup-restart' `
+        -TimeoutSeconds 120
+    $setupOutput = [string]$setupProcess.StdOut
     $logs.Add($setupOutput.Trim())
 
-    $nativeConfig = Join-Path $codexHome 'config.toml'
+    $userConfig = Join-Path $codexHome 'config.toml'
+    $managedConfig = Join-Path $codexHome 'managed_config.toml'
     $gatewayPIDPath = Join-Path $dataRoot 'gateway.pid'
     $watchdogPIDPath = Join-Path $dataRoot 'watchdog.pid'
     $deadline = [DateTimeOffset]::UtcNow.AddSeconds(60)
     $baselineFingerprint = $null
+    $lastReadinessError = ''
+    $lastReadinessSnapshot = $null
     while ([DateTimeOffset]::UtcNow -lt $deadline) {
         try {
             $gatewayPID = Read-PID $gatewayPIDPath
             $watchdogPID = Read-PID $watchdogPIDPath
             $gatewayExecutable = Get-ProcessExecutable $gatewayPID
             $watchdogExecutable = Get-ProcessExecutable $watchdogPID
-            $nativeText = Read-SharedText $nativeConfig
-            $candidateFingerprint = Get-CodexHookFingerprint `
-                $nativeText `
+            $managedText = Read-SharedText $managedConfig
+            $candidateFingerprint = Get-CodexManagedHookFingerprint `
+                $managedText `
                 $hook
             if ($gatewayExecutable.Equals(
                     $gateway,
@@ -5840,18 +7630,46 @@ try {
                 $baselineFingerprint = $candidateFingerprint
                 break
             }
-        } catch {}
+            $lastReadinessError = (
+                'gateway/watchdog executable identity does not match the ' +
+                'exact staged gateway'
+            )
+        } catch {
+            $lastReadinessError = ConvertTo-SanitizedNormalModeDiagnostic (
+                $_.Exception.Message
+            )
+        }
+        $lastReadinessSnapshot = Get-NormalModeReadinessSnapshot `
+            $gatewayPIDPath `
+            $watchdogPIDPath `
+            $managedConfig
         Start-Sleep -Milliseconds 100
     }
     if ($null -eq $baselineFingerprint) {
-        throw 'normal-mode gateway, watchdog, and Codex hook registration did not become ready'
+        $lastReadinessSnapshot = Get-NormalModeReadinessSnapshot `
+            $gatewayPIDPath `
+            $watchdogPIDPath `
+            $managedConfig
+        $snapshotJSON = $lastReadinessSnapshot |
+            ConvertTo-Json -Compress -Depth 6
+        throw (
+            'normal-mode gateway, watchdog, and Codex hook registration ' +
+            'did not become ready; last_error=' + $lastReadinessError +
+            '; final_snapshot=' + $snapshotJSON
+        )
     }
 
     Start-Sleep -Seconds 5
-    $baselineText = Read-SharedText $nativeConfig
-    $baselineFingerprint = Get-CodexHookFingerprint $baselineText $hook
+    $userText = Read-SharedText $userConfig
+    if ($userText -match '(?m)^\[hooks\]\s*$') {
+        throw 'normal-mode setup wrote the managed hook matrix into user config.toml'
+    }
+    $baselineText = Read-SharedText $managedConfig
+    $baselineFingerprint = Get-CodexManagedHookFingerprint `
+        $baselineText `
+        $hook
     $fingerprintJSON = $baselineFingerprint |
-        Select-Object events, trusted_hashes, decoded_command |
+        Select-Object events, command_windows_count, decoded_commands, trust_model |
         ConvertTo-Json -Compress -Depth 4
     $fingerprintSHA256 = Get-BytesSHA256 (
         [Text.Encoding]::UTF8.GetBytes($fingerprintJSON)
@@ -5868,18 +7686,18 @@ try {
         $hookTable.Length
     )
     [IO.File]::WriteAllText(
-        $nativeConfig,
+        $managedConfig,
         $outsideBefore,
         [Text.UTF8Encoding]::new($false)
     )
     try {
-        $null = Get-CodexHookFingerprint `
-            (Read-SharedText $nativeConfig) `
+        $null = Get-CodexManagedHookFingerprint `
+            (Read-SharedText $managedConfig) `
             $hook
         throw 'normal-mode hook removal did not remove the owned registration'
     } catch {
         if ($_.Exception.Message -notlike
-            'Codex registration has no owned*') {
+            'Codex managed registration has no owned*') {
             throw
         }
     }
@@ -5888,12 +7706,12 @@ try {
     $deadline = $repairStarted.AddSeconds(60)
     while ([DateTimeOffset]::UtcNow -lt $deadline) {
         try {
-            $restoredText = Read-SharedText $nativeConfig
-            $restoredFingerprint = Get-CodexHookFingerprint `
+            $restoredText = Read-SharedText $managedConfig
+            $restoredFingerprint = Get-CodexManagedHookFingerprint `
                 $restoredText `
                 $hook
             $restoredJSON = $restoredFingerprint |
-                Select-Object events, trusted_hashes, decoded_command |
+                Select-Object events, command_windows_count, decoded_commands, trust_model |
                 ConvertTo-Json -Compress -Depth 4
             $restoredTable = [regex]::Match(
                 $restoredText,
@@ -5918,17 +7736,42 @@ try {
     if (-not $healed) {
         throw (
             'normal-mode hook self-heal did not restore the exact owned ' +
-            'Codex event/hash contract while preserving unrelated settings'
+            'Codex managed event/command contract while preserving unrelated settings'
         )
     }
 } finally {
     Set-Location -LiteralPath $profile
-    try { & $gateway stop 1>$null 2>$null } catch {}
     try {
-        & $gateway connector teardown `
-            --connector codex `
-            --data-dir $dataRoot 1>$null 2>$null
-    } catch {}
+        $null = Invoke-NormalModeProcess `
+            -Executable $gateway `
+            -Arguments @('stop') `
+            -Label 'gateway-stop-cleanup' `
+            -TimeoutSeconds 20
+    } catch {
+        [Console]::Error.WriteLine(
+            '[normal-mode] gateway stop cleanup failed: ' +
+            $_.Exception.Message
+        )
+    }
+    try {
+        $null = Invoke-NormalModeProcess `
+            -Executable $gateway `
+            -Arguments @(
+                'connector',
+                'teardown',
+                '--connector',
+                'codex',
+                '--data-dir',
+                $dataRoot
+            ) `
+            -Label 'codex-teardown-cleanup' `
+            -TimeoutSeconds 30
+    } catch {
+        [Console]::Error.WriteLine(
+            '[normal-mode] connector teardown cleanup failed: ' +
+            $_.Exception.Message
+        )
+    }
     $deadline = [DateTimeOffset]::UtcNow.AddSeconds(30)
     do {
         $alive = @(
@@ -5947,7 +7790,49 @@ try {
         Start-Sleep -Milliseconds 100
     } while ([DateTimeOffset]::UtcNow -lt $deadline)
     if ($alive.Count -ne 0) {
-        throw "normal-mode fixture processes did not stop: $($alive -join ',')"
+        foreach ($candidatePID in $alive) {
+            $candidateExecutable = Get-ProcessExecutable $candidatePID
+            if (-not [string]::Equals(
+                    $candidateExecutable,
+                    $gateway,
+                    [StringComparison]::OrdinalIgnoreCase
+                )) {
+                throw (
+                    "refusing to terminate unexpected normal-mode PID " +
+                    "$candidatePID at $candidateExecutable"
+                )
+            }
+            $candidateProcess = Get-Process `
+                -Id $candidatePID `
+                -ErrorAction SilentlyContinue
+            if ($null -ne $candidateProcess) {
+                try {
+                    Stop-NormalModeProcessTree `
+                        $candidateProcess `
+                        "normal-mode forced cleanup PID $candidatePID"
+                } finally {
+                    $candidateProcess.Dispose()
+                }
+            }
+        }
+    }
+    $stillAlive = @(
+        foreach ($candidatePID in @($gatewayPID, $watchdogPID)) {
+            if ($candidatePID -gt 0 -and
+                $null -ne (
+                    Get-Process `
+                        -Id $candidatePID `
+                        -ErrorAction SilentlyContinue
+                )) {
+                $candidatePID
+            }
+        }
+    )
+    if ($stillAlive.Count -ne 0) {
+        throw (
+            'normal-mode fixture processes survived forced cleanup: ' +
+            ($stillAlive -join ',')
+        )
     }
     Remove-FixtureTree $syntheticHome $profile
 }
@@ -5955,11 +7840,23 @@ try {
     sid = $sid
     deployment_mode = 'unmanaged_byod'
     hook_self_heal = $healed
+    hook_registration_path = $managedConfig
+    hook_registration_source = 'managed_config.toml'
+    hook_trust_model = 'managed_source'
     owned_hook_fingerprint_sha256 = $fingerprintSHA256
     repair_milliseconds = $repairMilliseconds
     gateway_pid = $gatewayPID
     watchdog_pid = $watchdogPID
     gateway_port = [int]$inputObject.api_port
+    trusted_bin_prefix = $trustedConfigPath
+    trusted_bin_prefix_persisted = $true
+    agent_selection_verified = $true
+    agent_selection_path = $agentSelectionPath
+    agent_selection_raw_version = $agentSelectionRawVersion
+    agent_selection_normalized_version = $agentSelectionNormalizedVersion
+    agent_selection_sha256 = $agentSelectionSHA256
+    trusted_prefix_escape_rejections = $trustedPrefixEscapeRejections
+    runtime_file_count = 5
     log_count = $logs.Count
 } | ConvertTo-Json -Compress
 '@.Replace('__INPUT__', $inputBase64)
@@ -5975,7 +7872,37 @@ try {
         -not [bool]$result.hook_self_heal -or
         [string]::IsNullOrWhiteSpace(
             [string]$result.owned_hook_fingerprint_sha256
-        )) {
+        ) -or
+        [string]$result.hook_registration_source -cne
+            'managed_config.toml' -or
+        [string]$result.hook_trust_model -cne 'managed_source' -or
+        -not [string]::Equals(
+            [string]$result.hook_registration_path,
+            (Join-Path $codexHome 'managed_config.toml'),
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        -not [string]::Equals(
+            [string]$result.trusted_bin_prefix,
+            $runtimeRoot,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        -not [bool]$result.trusted_bin_prefix_persisted -or
+        -not [bool]$result.agent_selection_verified -or
+        -not [string]::Equals(
+            [string]$result.agent_selection_path,
+            [string]$runtimeFiles.codex.destination,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        [string]$result.agent_selection_sha256 -cne
+            [string]$runtimeFiles.codex.sha256 -or
+        [string]::IsNullOrWhiteSpace(
+            [string]$result.agent_selection_raw_version
+        ) -or
+        [string]::IsNullOrWhiteSpace(
+            [string]$result.agent_selection_normalized_version
+        ) -or
+        [int]$result.trusted_prefix_escape_rejections -ne 3 -or
+        [int]$result.runtime_file_count -ne $runtimeFiles.Count) {
         throw 'normal-mode active user did not prove existing hook auto-heal'
     }
     $after = Get-ProtectedUserTreeInventory `
@@ -5987,9 +7914,11 @@ try {
         'normal-mode synthetic fixture cleanup'
     $script:NormalModeSyntheticHome = ''
     $machineAfter = Get-NormalModeEnterpriseMachineSnapshot
+    $attributionAfter =
+        Get-NormalModeEnterpriseAttributionSnapshot $machineAfter
     Assert-SameObjectJSON `
-        $machineBefore `
-        $machineAfter `
+        $attributionBefore `
+        $attributionAfter `
         'normal-mode enterprise-protected machine state'
     return [pscustomobject]@{
         target_sid = $script:PrimarySID
@@ -6001,8 +7930,22 @@ try {
         gateway_pid = [int]$result.gateway_pid
         watchdog_pid = [int]$result.watchdog_pid
         enterprise_absent_before = [bool]$RequireEnterpriseAbsent
+        run_scoped_enterprise_absent_before = [bool]$RequireEnterpriseAbsent
+        persistent_lifecycle_lock_allowed = $true
+        persistent_lifecycle_lock_baseline = $persistentLockBaseline
         protected_machine_state_unchanged = $true
+        trusted_bin_prefix_exact = $true
+        trusted_bin_prefix_persisted = $true
+        agent_selection_verified = $true
+        agent_selection_path = [string]$result.agent_selection_path
+        agent_selection_raw_version =
+            [string]$result.agent_selection_raw_version
+        agent_selection_normalized_version =
+            [string]$result.agent_selection_normalized_version
+        agent_selection_sha256 = [string]$result.agent_selection_sha256
+        runtime_files_target_owned = $true
         fixture_cleanup_exact = $true
+        live_guardian_output_attribution_bounded = $true
         machine_before = $machineBefore
         machine_after = $machineAfter
     }
@@ -6062,7 +8005,6 @@ guardrail:
   enabled: true
   mode: observe
   scanner_mode: local
-  hook_self_heal: true
 application_protection:
   enabled: false
 "@ `
@@ -6733,6 +8675,8 @@ $attempts = [Collections.Generic.List[object]]::new()
 foreach ($mode in @('exclusive_open', 'overwrite', 'delete')) {
     $succeeded = $false
     $errorCode = 0
+    $errorHResult = 0
+    $errorType = ''
     try {
         switch ($mode) {
             'exclusive_open' {
@@ -6760,14 +8704,22 @@ foreach ($mode in @('exclusive_open', 'overwrite', 'delete')) {
         }
         $succeeded = $true
     } catch {
-        $errorCode = [Runtime.InteropServices.Marshal]::GetHRForException(
-            $_.Exception
-        ) -band 0xffff
+        $rootException = $_.Exception
+        while ($null -ne $rootException.InnerException) {
+            $rootException = $rootException.InnerException
+        }
+        $errorHResult = [Runtime.InteropServices.Marshal]::GetHRForException(
+            $rootException
+        )
+        $errorCode = $errorHResult -band 0xffff
+        $errorType = $rootException.GetType().FullName
     }
     $attempts.Add([pscustomobject]@{
         mode = $mode
         succeeded = $succeeded
         error_code = $errorCode
+        error_hresult = $errorHResult
+        error_type = $errorType
     })
 }
 [pscustomobject]@{
@@ -6780,7 +8732,13 @@ foreach ($mode in @('exclusive_open', 'overwrite', 'delete')) {
         'non-admin lifecycle lock squatting'
     if ([string]$result.sid -ne $script:PrimarySID -or
         @($result.attempts | Where-Object {
-            [bool]$_.succeeded -or [int]$_.error_code -notin @(5, 32)
+            [bool]$_.succeeded -or (
+                [int]$_.error_code -notin @(5, 32, 33) -and
+                [string]$_.error_type -notin @(
+                    'System.UnauthorizedAccessException',
+                    'System.IO.IOException'
+                )
+            )
         }).Count -ne 0) {
         throw (
             'standard user could capture/change the predictable lifecycle ' +
@@ -7339,18 +9297,44 @@ $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 if ($sid -ne [string]$inputObject.expected_sid) {
     throw "unregistered hook probe SID mismatch: $sid"
 }
-$output = @(
-    '{"hook_event_name":"SessionStart","source":"startup"}' |
-        & ([string]$inputObject.hook) `
-            hook `
-            --connector ([string]$inputObject.connector) `
-            --enterprise-managed 2>&1
+$start = [Diagnostics.ProcessStartInfo]::new()
+$start.FileName = [string]$inputObject.hook
+$start.Arguments = (
+    'hook --connector ' + [string]$inputObject.connector +
+    ' --enterprise-managed'
 )
-$hookExit = $LASTEXITCODE
+$start.UseShellExecute = $false
+$start.CreateNoWindow = $true
+$start.RedirectStandardInput = $true
+$start.RedirectStandardOutput = $true
+$start.RedirectStandardError = $true
+$hookProcess = [Diagnostics.Process]::new()
+$hookProcess.StartInfo = $start
+try {
+    if (-not $hookProcess.Start()) {
+        throw 'unregistered managed hook process did not start'
+    }
+    $stdoutTask = $hookProcess.StandardOutput.ReadToEndAsync()
+    $stderrTask = $hookProcess.StandardError.ReadToEndAsync()
+    $hookProcess.StandardInput.WriteLine(
+        '{"hook_event_name":"SessionStart","source":"startup"}'
+    )
+    $hookProcess.StandardInput.Close()
+    if (-not $hookProcess.WaitForExit(60000)) {
+        try { $hookProcess.Kill() } catch {}
+        throw 'unregistered managed hook process timed out'
+    }
+    $hookExit = [int]$hookProcess.ExitCode
+    $output = [string]$stdoutTask.Result + "`n" +
+        [string]$stderrTask.Result
+}
+finally {
+    $hookProcess.Dispose()
+}
 [pscustomobject]@{
     sid = $sid
     hook_exit_code = $hookExit
-    output = ($output | ForEach-Object { [string]$_ }) -join "`n"
+    output = $output
 } | ConvertTo-Json -Compress
 '@.Replace('__INPUT__', $inputBase64)
     $process = Invoke-UserPowerShell `
@@ -7368,7 +9352,7 @@ $hookExit = $LASTEXITCODE
         throw 'unregistered interactive SID was silently allowed/no-op by the managed hook'
     }
     if ([string]$result.output -notmatch
-        '(?i)enterprise_managed_sid_not_enrolled|not (?:enrolled|registered)|unauthori[sz]ed SID') {
+        '(?i)enterprise_managed_sid_(?:not_enrolled|unregistered)|not (?:enrolled|registered)|unauthori[sz]ed SID') {
         throw (
             'unregistered managed hook did not emit a causal enrollment ' +
             "diagnostic: $(Protect-SensitiveDisplayText ([string]$result.output))"
@@ -7429,7 +9413,7 @@ targets:
     sid: '$($script:PrimarySID)'
     data_dir: '$primaryDataYAML'
     connector: codex
-    agent_version: "codex-cli 0.144.3"
+    agent_version: "$(Get-ApprovedCodexVersionText)"
   - user_home: '$primaryHomeYAML'
     sid: '$($script:PrimarySID)'
     data_dir: '$primaryDataYAML'
@@ -7520,17 +9504,41 @@ $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 if ($sid -ne [string]$inputObject.expected_sid) {
     throw "disabled-target hook probe SID mismatch: $sid"
 }
-$output = @(
-    '{"hook_event_name":"SessionStart","source":"startup"}' |
-        & ([string]$inputObject.hook) `
-            hook `
-            --connector claudecode `
-            --enterprise-managed 2>&1
-)
+$start = [Diagnostics.ProcessStartInfo]::new()
+$start.FileName = [string]$inputObject.hook
+$start.Arguments = 'hook --connector claudecode --enterprise-managed'
+$start.UseShellExecute = $false
+$start.CreateNoWindow = $true
+$start.RedirectStandardInput = $true
+$start.RedirectStandardOutput = $true
+$start.RedirectStandardError = $true
+$hookProcess = [Diagnostics.Process]::new()
+$hookProcess.StartInfo = $start
+try {
+    if (-not $hookProcess.Start()) {
+        throw 'disabled-target managed hook process did not start'
+    }
+    $stdoutTask = $hookProcess.StandardOutput.ReadToEndAsync()
+    $stderrTask = $hookProcess.StandardError.ReadToEndAsync()
+    $hookProcess.StandardInput.WriteLine(
+        '{"hook_event_name":"SessionStart","source":"startup"}'
+    )
+    $hookProcess.StandardInput.Close()
+    if (-not $hookProcess.WaitForExit(60000)) {
+        try { $hookProcess.Kill() } catch {}
+        throw 'disabled-target managed hook process timed out'
+    }
+    $hookExit = [int]$hookProcess.ExitCode
+    $output = [string]$stdoutTask.Result + "`n" +
+        [string]$stderrTask.Result
+}
+finally {
+    $hookProcess.Dispose()
+}
 [pscustomobject]@{
     sid = $sid
-    exit_code = $LASTEXITCODE
-    output = ($output | ForEach-Object { [string]$_ }) -join "`n"
+    exit_code = $hookExit
+    output = $output
 } | ConvertTo-Json -Compress
 '@.Replace('__INPUT__', $inputBase64)
         $probe = Invoke-ActiveUserPowerShell `
@@ -7542,7 +9550,7 @@ $output = @(
             'disabled Claude target managed hook'
         if ([int]$probeJSON.exit_code -eq 0 -or
             [string]$probeJSON.output -notmatch
-                '(?i)enterprise_managed_sid_not_enrolled|not (?:enrolled|registered)|unauthori[sz]ed SID|disabled') {
+                '(?i)enterprise_managed_sid_(?:not_enrolled|unregistered)|not (?:enrolled|registered)|unauthori[sz]ed SID|disabled') {
             throw (
                 'disabled Claude target managed invocation did not fail closed ' +
                 "with a causal enrollment diagnostic: exit=" +
@@ -7579,7 +9587,7 @@ targets:
     sid: '$($script:PrimarySID)'
     data_dir: '$primaryDataYAML'
     connector: codex
-    agent_version: "codex-cli 0.144.3"
+    agent_version: "$(Get-ApprovedCodexVersionText)"
 "@
         }
         Write-ProtectedManifest `
@@ -7636,7 +9644,7 @@ targets:
             'removed Claude target managed hook'
         if ([int]$removedProbeJSON.exit_code -eq 0 -or
             [string]$removedProbeJSON.output -notmatch
-                '(?i)enterprise_managed_sid_not_enrolled|not (?:enrolled|registered)|unauthori[sz]ed SID|disabled') {
+                '(?i)enterprise_managed_sid_(?:not_enrolled|unregistered)|not (?:enrolled|registered)|unauthori[sz]ed SID|disabled') {
             throw (
                 'removed Claude target managed invocation did not fail closed ' +
                 "with a causal enrollment diagnostic: exit=" +
@@ -7724,18 +9732,44 @@ $sid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 if ($sid -ne [string]$inputObject.expected_sid) {
     throw "registered hook probe SID mismatch: $sid"
 }
-$output = @(
-    '{"hook_event_name":"SessionStart","source":"startup"}' |
-        & ([string]$inputObject.hook) `
-            hook `
-            --connector ([string]$inputObject.connector) `
-            --enterprise-managed 2>&1
+$start = [Diagnostics.ProcessStartInfo]::new()
+$start.FileName = [string]$inputObject.hook
+$start.Arguments = (
+    'hook --connector ' + [string]$inputObject.connector +
+    ' --enterprise-managed'
 )
-$hookExit = $LASTEXITCODE
+$start.UseShellExecute = $false
+$start.CreateNoWindow = $true
+$start.RedirectStandardInput = $true
+$start.RedirectStandardOutput = $true
+$start.RedirectStandardError = $true
+$hookProcess = [Diagnostics.Process]::new()
+$hookProcess.StartInfo = $start
+try {
+    if (-not $hookProcess.Start()) {
+        throw 'registered managed hook process did not start'
+    }
+    $stdoutTask = $hookProcess.StandardOutput.ReadToEndAsync()
+    $stderrTask = $hookProcess.StandardError.ReadToEndAsync()
+    $hookProcess.StandardInput.WriteLine(
+        '{"hook_event_name":"SessionStart","source":"startup"}'
+    )
+    $hookProcess.StandardInput.Close()
+    if (-not $hookProcess.WaitForExit(60000)) {
+        try { $hookProcess.Kill() } catch {}
+        throw 'registered managed hook process timed out'
+    }
+    $hookExit = [int]$hookProcess.ExitCode
+    $output = [string]$stdoutTask.Result + "`n" +
+        [string]$stderrTask.Result
+}
+finally {
+    $hookProcess.Dispose()
+}
 [pscustomobject]@{
     sid = $sid
     hook_exit_code = $hookExit
-    output = ($output | ForEach-Object { [string]$_ }) -join "`n"
+    output = $output
 } | ConvertTo-Json -Compress
 '@.Replace('__INPUT__', $inputBase64)
     $process = Invoke-ActiveUserPowerShell `
@@ -8194,7 +10228,7 @@ function Get-CertificationLifecycleScopeSHA256 {
 function Get-CertificationLifecycleReceiptPaths {
     $scope = Get-CertificationLifecycleScopeSHA256
     $lifecycleRoot = Assert-PathBelow `
-        (Join-Path $script:KnownProgramData 'Cisco\DefenseClaw-Lifecycle') `
+        (Join-Path $script:KnownProgramData 'Cisco\Cisco Secure Client\DefenseClaw-Lifecycle') `
         $script:KnownProgramData `
         'certification lifecycle receipt directory'
     return [pscustomobject]@{
@@ -8521,16 +10555,17 @@ function Assert-EnterpriseMachinePolicyAbsent([string]$Label) {
 }
 
 function Test-FreshClientsHaveNoEnterpriseHookAfterUninstall {
-    $home = Assert-CertificationCodexHomePath $script:CertificationCodexHome
-    if (Test-Path -LiteralPath $home) {
-        throw "fresh post-uninstall client home unexpectedly exists: $home"
+    $certificationHome = Assert-CertificationCodexHomePath `
+        $script:CertificationCodexHome
+    if (Test-Path -LiteralPath $certificationHome) {
+        throw "fresh post-uninstall client home unexpectedly exists: $certificationHome"
     }
     $snapshot = @(
         $script:UserTreeSnapshots.ToArray() |
             Where-Object {
                 [string]::Equals(
                     [string]$_.path,
-                    $home,
+                    $certificationHome,
                     [StringComparison]::OrdinalIgnoreCase
                 )
             }
@@ -8544,7 +10579,7 @@ function Test-FreshClientsHaveNoEnterpriseHookAfterUninstall {
     $policyBefore = Assert-EnterpriseMachinePolicyAbsent `
         'before fresh post-uninstall client processes'
     $inputObject = [ordered]@{
-        path = $home
+        path = $certificationHome
         profile = $script:PrimaryProfile
         sid = $script:PrimarySID
         expected_name = ".codex-defenseclaw-cert-$($script:RunToken)"
@@ -8606,12 +10641,14 @@ if (-not $item.PSIsContainer -or
         [string]$created.sid -ne $script:PrimarySID -or
         -not [string]::Equals(
             [string]$created.path,
-            $home,
+            $certificationHome,
             [StringComparison]::OrdinalIgnoreCase
         )) {
         throw 'fresh post-uninstall client root creation returned inconsistent evidence'
     }
-    $null = Assert-CertificationCodexHomePath $home -RequireExisting
+    $null = Assert-CertificationCodexHomePath `
+        $certificationHome `
+        -RequireExisting
 
     $codex = $null
     $claude = $null
@@ -8633,7 +10670,7 @@ if (-not $item.PSIsContainer -or
         Restore-ProtectedUserTreeSnapshot $snapshot[0]
     }
     $restored = Get-ProtectedUserTreeInventory `
-        $home `
+        $certificationHome `
         'fresh post-uninstall client root after cleanup'
     Assert-SameUserTreeInventory `
         $snapshot[0].inventory `
@@ -9251,10 +11288,10 @@ function Get-CertificationLifecycleScopeArguments(
     [bool]$CoreHardeningCertification
 ) {
     $arguments = [Collections.Generic.List[string]]::new()
-    if ($Action -notin @('Install', 'Upgrade', 'Repair')) {
-        return $arguments.ToArray()
-    }
-    if ($CoreHardeningCertification -and -not $UnsignedCertification) {
+    $mutation = $Action -in @('Install', 'Upgrade', 'Repair')
+    if ($mutation -and
+        $CoreHardeningCertification -and
+        -not $UnsignedCertification) {
         throw (
             'internal certification scope error: core hardening requires ' +
             'unsigned certification'
@@ -9263,9 +11300,16 @@ function Get-CertificationLifecycleScopeArguments(
     if (-not $UnsignedCertification) {
         return $arguments.ToArray()
     }
-    if (-not $script:CertificationCodexHomeInitialized) {
+    if ($Action -in @(
+            'Install',
+            'Upgrade',
+            'Repair',
+            'Reconcile',
+            'Uninstall'
+        ) -and
+        -not $script:CertificationCodexHomeInitialized) {
         throw (
-            'unsigned mutating lifecycle scope requires the exact initialized ' +
+            'unsigned stateful lifecycle scope requires the exact initialized ' +
             'certification CODEX_HOME'
         )
     }
@@ -9273,7 +11317,7 @@ function Get-CertificationLifecycleScopeArguments(
     $arguments.Add('-CertificationCodexHome')
     $arguments.Add($script:CertificationCodexHome)
     $arguments.Add('-AllowUnsigned')
-    if ($CoreHardeningCertification) {
+    if ($mutation -and $CoreHardeningCertification) {
         $arguments.Add('-CoreHardeningCertification')
     }
     return $arguments.ToArray()
@@ -9436,18 +11480,25 @@ function Get-EnterpriseLifecycleCLIArguments(
     if ($Purge) {
         $arguments.Add('--purge')
     }
-    if ($AllowUnsigned -and $mutation) {
+    if ($AllowUnsigned) {
         Assert-CertificationScope
-        if (-not $script:CertificationCodexHomeInitialized) {
+        if ($Action -in @(
+                'Install',
+                'Upgrade',
+                'Repair',
+                'Reconcile',
+                'Uninstall'
+            ) -and
+            -not $script:CertificationCodexHomeInitialized) {
             throw (
-                "unsigned public $Action requires the exact initialized " +
+                "unsigned stateful public $Action requires the exact initialized " +
                 'certification CODEX_HOME scope'
             )
         }
         $arguments.Add('--certification-codex-home')
         $arguments.Add($script:CertificationCodexHome)
         $arguments.Add('--allow-unsigned')
-        if ($ClaudeOnly) {
+        if ($mutation -and $ClaudeOnly) {
             $arguments.Add('--core-hardening-certification')
         }
     }
@@ -9555,8 +11606,9 @@ function Test-AllowUnsignedHarnessContract {
             Where-Object { $_ -ceq '-CoreHardeningCertification' }
     ).Count
     $expectedInstallUnsigned = if ($AllowUnsigned) { 1 } else { 0 }
+    $expectedVerifyUnsigned = if ($AllowUnsigned) { 1 } else { 0 }
     if ($installUnsignedCount -ne $expectedInstallUnsigned -or
-        $verifyUnsignedCount -ne 0) {
+        $verifyUnsignedCount -ne $expectedVerifyUnsigned) {
         throw (
             'harness unsigned argument contract is unsafe: ' +
             "install=$installUnsignedCount verify=$verifyUnsignedCount " +
@@ -9601,11 +11653,12 @@ function Test-AllowUnsignedHarnessContract {
     $expectedCertificationHomeCount = if ($AllowUnsigned) { 1 } else { 0 }
     if ($installCertificationHomeCount -ne
             $expectedCertificationHomeCount -or
-        $verifyCertificationHomeCount -ne 0) {
+        $verifyCertificationHomeCount -ne
+            $expectedCertificationHomeCount) {
         throw (
-            'CertificationCodexHome must accompany only unsigned mutating ' +
-            'certification transactions in full and Claude-only modes; signed ' +
-            "production and read-only actions must omit it: install=$installCertificationHomeCount " +
+            'CertificationCodexHome must accompany every unsigned ' +
+            'certification lifecycle action; signed production actions omit ' +
+            "it: install=$installCertificationHomeCount " +
             "verify=$verifyCertificationHomeCount " +
             "allow_unsigned=$([bool]$AllowUnsigned)"
         )
@@ -9668,8 +11721,8 @@ function Test-AllowUnsignedHarnessContract {
             action = 'Verify'
             allow_unsigned = $true
             core_hardening = $true
-            home_count = 0
-            unsigned_count = 0
+            home_count = 1
+            unsigned_count = 1
             core_count = 0
         }
     )) {
@@ -9721,8 +11774,8 @@ function Test-AllowUnsignedHarnessContract {
             name = 'production-defaults'
             gateway = 'DefenseClawGateway'
             guardian = 'DefenseClawHookGuardian'
-            install = Join-Path $script:KnownProgramFiles 'Cisco\DefenseClaw'
-            state = Join-Path $script:KnownProgramData 'Cisco\DefenseClaw'
+            install = Join-Path $script:KnownProgramFiles 'Cisco\Cisco Secure Client\DefenseClaw'
+            state = Join-Path $script:KnownProgramData 'Cisco\Cisco Secure Client\DefenseClaw'
             codex_home = [string]$saved.codex_home
         },
         [pscustomobject]@{
@@ -9933,9 +11986,12 @@ function Invoke-EnterpriseInstallerJSON {
 function Get-ManagedCLIEnvironment {
     return @{
         DEFENSECLAW_CONFIG = Join-Path $script:StateRoot 'etc\config.yaml'
-        DEFENSECLAW_HOME = $script:StateRoot
+        DEFENSECLAW_HOME = Join-Path $script:StateRoot 'runtime'
         DEFENSECLAW_DEPLOYMENT_MODE = 'managed_enterprise'
         DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR = Join-Path $script:StateRoot 'hook-guardian-state'
+        DEFENSECLAW_WINDOWS_SERVICE_ACCOUNT = "NT SERVICE\$($script:GatewayServiceName)"
+        DEFENSECLAW_WINDOWS_GATEWAY_SERVICE_NAME = $script:GatewayServiceName
+        DEFENSECLAW_WINDOWS_SERVICE_NAME = $script:GatewayServiceName
         CODEX_HOME = $null
     }
 }
@@ -10105,23 +12161,23 @@ function Invoke-ActualCodexCertificationRun {
         )) {
         throw "$Label did not select the protected $BinaryRole runtime"
     }
-    $home = Assert-CertificationCodexHomePath `
+    $certificationHome = Assert-CertificationCodexHomePath `
         $script:CertificationCodexHome `
         -RequireExisting
     $port = Get-FreeLoopbackPort
     $shellDirectory = Assert-PathBelow `
-        (Join-Path $home ".defenseclaw-hostile-shell-$($script:RunToken)") `
-        $home `
+        (Join-Path $certificationHome ".defenseclaw-hostile-shell-$($script:RunToken)") `
+        $certificationHome `
         'hostile Codex shell directory'
     $script:CodexHostileShellMarker = Assert-PathBelow `
-        (Join-Path $home ".defenseclaw-shell-probe-$($script:RunToken).txt") `
-        $home `
+        (Join-Path $certificationHome ".defenseclaw-shell-probe-$($script:RunToken).txt") `
+        $certificationHome `
         'hostile Codex shell marker'
     $inputObject = [ordered]@{
         binary = $resolvedBinary
         binary_sha256 = $ExpectedSHA256
         binary_role = $BinaryRole
-        home = $home
+        home = $certificationHome
         sid = $script:PrimarySID
         port = $port
         profile = 'defenseclaw-cert'
@@ -10151,7 +12207,9 @@ $actualSID = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 if ($actualSID -ne [string]$inputObject.sid) {
     throw "actual Codex test SID mismatch: $actualSID"
 }
-$home = [IO.Path]::GetFullPath([string]$inputObject.home).TrimEnd('\')
+$certificationHome = [IO.Path]::GetFullPath(
+    [string]$inputObject.home
+).TrimEnd('\')
 $binary = [IO.Path]::GetFullPath([string]$inputObject.binary)
 if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) {
     throw "protected Codex binary is missing: $binary"
@@ -10164,7 +12222,7 @@ if ($binarySHA256 -cne [string]$inputObject.binary_sha256) {
 }
 $baseConfig = [IO.Path]::GetFullPath([string]$inputObject.base_config)
 $homeWasEmpty = @(
-    Get-ChildItem -LiteralPath $home -Force -ErrorAction Stop
+    Get-ChildItem -LiteralPath $certificationHome -Force -ErrorAction Stop
 ).Count -eq 0
 if ([bool]$inputObject.delete_user_config) {
     if (Test-Path -LiteralPath $baseConfig -PathType Leaf) {
@@ -10174,7 +12232,7 @@ if ([bool]$inputObject.delete_user_config) {
         throw "failed to delete alternate user config: $baseConfig"
     }
 }
-$profilePath = Join-Path $home (
+$profilePath = Join-Path $certificationHome (
     ([string]$inputObject.profile) + '.config.toml'
 )
 $provider = @"
@@ -10233,12 +12291,12 @@ $processStartTimeUTC = ''
 try {
     $start = [Diagnostics.ProcessStartInfo]::new()
     $start.FileName = $binary
-    $start.WorkingDirectory = $home
+    $start.WorkingDirectory = $certificationHome
     $start.UseShellExecute = $false
     $start.CreateNoWindow = $true
     $start.RedirectStandardOutput = $true
     $start.RedirectStandardError = $true
-    $start.Environment['CODEX_HOME'] = $home
+    $start.Environment['CODEX_HOME'] = $certificationHome
     $start.Environment['DEFENSECLAW_CERT_DUMMY_KEY'] = 'local-certification-only'
     $start.Environment['NO_PROXY'] = '127.0.0.1,localhost'
     $start.Environment['no_proxy'] = '127.0.0.1,localhost'
@@ -10515,7 +12573,7 @@ try {
         return [pscustomobject]@{
             label = $Label
             binary_role = $BinaryRole
-            codex_version = 'codex-cli 0.144.3'
+            codex_version = Get-ApprovedCodexVersionText
             codex_sha256 = $ExpectedSHA256
             codex_exit_code = [int]$result.exit_code
             provider_reached = $true
@@ -10563,12 +12621,12 @@ try {
     return [pscustomobject]@{
         label = $Label
         binary_role = $BinaryRole
-        codex_version = 'codex-cli 0.144.3'
+        codex_version = Get-ApprovedCodexVersionText
         codex_sha256 = $ExpectedSHA256
         codex_exit_code = [int]$result.exit_code
         provider_reached = [bool]$result.provider_reached
         request_line = [string]$result.request_line
-        alternate_codex_home = $home
+        alternate_codex_home = $certificationHome
         user_config_deleted = [bool]$DeleteUserConfig
         bypass_hook_trust_requested = [bool]$BypassHookTrust
         hostile_shell_injected = [bool]$HostileShell
@@ -10596,13 +12654,12 @@ try {
 }
 
 function Get-ClaudeHookAuditRows([string]$Label) {
-    $result = Invoke-GatewayProcess `
+    $result = Invoke-GatewayCommand `
         -Arguments @(
             'audit', 'export',
             '--output', '-',
             '--connector', 'claudecode'
         ) `
-        -Environment (Get-ManagedCLIEnvironment) `
         -Label $Label
     $rows = [Collections.Generic.List[object]]::new()
     foreach ($line in @($result.StdOut -split "\r?\n")) {
@@ -10665,21 +12722,21 @@ function Invoke-ActualClaudeCertificationRun {
             -not (Test-Path -LiteralPath $script:HostileShellProbeBinary -PathType Leaf))) {
         throw "$Label requires protected Claude and hostile-hook probe binaries"
     }
-    $home = Assert-CertificationCodexHomePath `
+    $certificationHome = Assert-CertificationCodexHomePath `
         $script:CertificationCodexHome `
         -RequireExisting
     $port = Get-FreeLoopbackPort
     $configDir = Assert-PathBelow `
-        (Join-Path $home ".claude-config-$($script:RunToken)") `
-        $home `
+        (Join-Path $certificationHome ".claude-config-$($script:RunToken)") `
+        $certificationHome `
         'hostile Claude user settings directory'
     $workspace = Assert-PathBelow `
-        (Join-Path $home "claude-workspace-$($script:RunToken)") `
-        $home `
+        (Join-Path $certificationHome "claude-workspace-$($script:RunToken)") `
+        $certificationHome `
         'hostile Claude project directory'
     $hostileMarker = Assert-PathBelow `
-        (Join-Path $home ".claude-hostile-hook-$($script:RunToken).txt") `
-        $home `
+        (Join-Path $certificationHome ".claude-hostile-hook-$($script:RunToken).txt") `
+        $certificationHome `
         'hostile Claude hook marker'
     $dummyKey = "dc-claude-local-$($script:RunToken)"
     $script:SecretNeedles.Add($dummyKey)
@@ -10688,7 +12745,7 @@ function Invoke-ActualClaudeCertificationRun {
         binary_sha256 = [string]$script:SourceDigests['claude']
         hostile_hook_binary = $script:HostileShellProbeBinary
         hostile_hook_marker = $hostileMarker
-        home = $home
+        home = $certificationHome
         config_dir = $configDir
         workspace = $workspace
         sid = $script:PrimarySID
@@ -11568,9 +13625,13 @@ function Get-CertificationServiceProcessSnapshot {
         if ([string]$service.State -ne 'Running' -or [uint32]$service.ProcessId -eq 0) {
             throw "service process snapshot found $name state=$($service.State) pid=$($service.ProcessId)"
         }
+        $process = Get-Process `
+            -Id ([uint32]$service.ProcessId) `
+            -ErrorAction Stop
         $rows.Add([pscustomobject]@{
             name = $name
             process_id = [uint32]$service.ProcessId
+            process_created_at = $process.StartTime.ToUniversalTime().ToString('o')
             state = [string]$service.State
         })
     }
@@ -12060,6 +14121,14 @@ function Get-CertificationServiceTokenSnapshot {
                 'SeTcbPrivilege'
             )
         }
+        $expectedIntegritySID = if ($gateway) {
+            # A restricted virtual service account is expected to run High,
+            # not with LocalSystem's System integrity level.
+            'S-1-16-12288'
+        } else {
+            'S-1-16-16384'
+        }
+        $expectedIntegrityName = if ($gateway) { 'high' } else { 'system' }
         $serviceSID = [Security.Principal.NTAccount]::new(
             "NT SERVICE\$serviceName"
         ).Translate([Security.Principal.SecurityIdentifier]).Value
@@ -12069,8 +14138,8 @@ function Get-CertificationServiceTokenSnapshot {
         if ([string]$token.UserSid -ne $expectedUserSID) {
             throw "$serviceName PID $($process.process_id) TokenUser $($token.UserSid), want $expectedUserSID"
         }
-        if ([string]$token.IntegritySid -ne 'S-1-16-16384') {
-            throw "$serviceName PID $($process.process_id) integrity $($token.IntegritySid), want system S-1-16-16384"
+        if ([string]$token.IntegritySid -ne $expectedIntegritySID) {
+            throw "$serviceName PID $($process.process_id) integrity $($token.IntegritySid), want $expectedIntegrityName $expectedIntegritySID"
         }
         $actualPrivileges = @(
             $token.Privileges |
@@ -12123,7 +14192,12 @@ function Get-CertificationServiceTokenSnapshot {
             $token.Groups |
                 Where-Object { [string]$_.Sid -eq $serviceSID }
         )
-        if ($serviceGroups.Count -ne 1 -or [bool]$serviceGroups[0].DenyOnly) {
+        # The virtual-account gateway already proves the service SID as its
+        # exact TokenUser. Windows does not redundantly duplicate that identity
+        # in TokenGroups. The LocalSystem guardian has a different TokenUser,
+        # so its non-deny-only service SID group remains mandatory.
+        if (-not $gateway -and
+            ($serviceGroups.Count -ne 1 -or [bool]$serviceGroups[0].DenyOnly)) {
             throw "$serviceName PID $($process.process_id) lacks its non-deny-only service SID group $serviceSID"
         }
         $restrictedSIDs = @(
@@ -12153,6 +14227,9 @@ function Get-CertificationServiceTokenSnapshot {
             token_user_sid = [string]$token.UserSid
             token_user_name = [string]$token.UserName
             integrity_sid = [string]$token.IntegritySid
+            expected_integrity_sid = $expectedIntegritySID
+            service_sid_group_required = -not $gateway
+            service_sid_group_count = $serviceGroups.Count
             restricted = [bool]$token.IsRestricted
             required_privileges = @($wantedPrivileges)
             actual_privileges = @(
@@ -12717,12 +14794,12 @@ function Assert-NoStandardUserAccess(
         [Security.AccessControl.FileSystemRights]::AppendData -bor
         [Security.AccessControl.FileSystemRights]::CreateFiles -bor
         [Security.AccessControl.FileSystemRights]::CreateDirectories -bor
+        [Security.AccessControl.FileSystemRights]::WriteAttributes -bor
+        [Security.AccessControl.FileSystemRights]::WriteExtendedAttributes -bor
         [Security.AccessControl.FileSystemRights]::Delete -bor
         [Security.AccessControl.FileSystemRights]::DeleteSubdirectoriesAndFiles -bor
         [Security.AccessControl.FileSystemRights]::ChangePermissions -bor
-        [Security.AccessControl.FileSystemRights]::TakeOwnership -bor
-        [Security.AccessControl.FileSystemRights]::FullControl -bor
-        [Security.AccessControl.FileSystemRights]::Modify
+        [Security.AccessControl.FileSystemRights]::TakeOwnership
     )
     foreach ($rule in $rules) {
         if ($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow) {
@@ -12776,14 +14853,23 @@ function Invoke-StandardUserControlProbe {
             [ordered]@{
                 name = 'policy'
                 path = $script:ClaudeManagedPolicyPath
+                present = Test-Path `
+                    -LiteralPath $script:ClaudeManagedPolicyPath `
+                    -PathType Leaf
             },
             [ordered]@{
                 name = 'state'
                 path = $script:ClaudeManagedStatePath
+                present = Test-Path `
+                    -LiteralPath $script:ClaudeManagedStatePath `
+                    -PathType Leaf
             },
             [ordered]@{
                 name = 'lock'
                 path = $script:ClaudeManagedLockPath
+                present = Test-Path `
+                    -LiteralPath $script:ClaudeManagedLockPath `
+                    -PathType Leaf
             }
         )
         connector = if ($ClaudeOnly) { 'claudecode' } else { 'codex' }
@@ -12806,13 +14892,34 @@ $ErrorActionPreference = 'Stop'
 $inputJSON = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('__INPUT__'))
 $input = $inputJSON | ConvertFrom-Json -ErrorAction Stop
 $checks = [Collections.Generic.List[object]]::new()
-function Add-Probe([string]$Name, [bool]$Denied, [string]$Detail) {
-    $checks.Add([pscustomobject]@{ name = $Name; denied = $Denied; detail = $Detail })
+function Add-Probe(
+    [string]$Name,
+    [bool]$Denied,
+    [string]$Detail,
+    [bool]$Applicable = $true
+) {
+    $checks.Add([pscustomobject]@{
+        name = $Name
+        denied = $Denied
+        applicable = $Applicable
+        detail = $Detail
+    })
+}
+function Add-NotApplicableProbe([string]$Name, [string]$Detail) {
+    Add-Probe $Name $true $Detail $false
 }
 Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
 public static class DefenseClawHostileNative {
+    public const UInt32 GENERIC_READ = 0x80000000U;
+    public const UInt32 GENERIC_WRITE = 0x40000000U;
+    public const UInt32 DELETE_ACCESS = 0x00010000U;
+    public const UInt32 FILE_SHARE_ALL = 0x00000007U;
+    public const UInt32 OPEN_EXISTING = 3U;
+    public const UInt32 FILE_FLAG_BACKUP_SEMANTICS = 0x02000000U;
+    public const UInt32 PROCESS_QUERY_LIMITED_INFORMATION = 0x00001000U;
+
     [DllImport("kernel32.dll", SetLastError = true)]
     public static extern IntPtr OpenProcess(
         UInt32 desiredAccess,
@@ -12862,11 +14969,11 @@ function Test-WriteHandle([string]$Name, [string]$Path) {
     $invalid = [IntPtr]::new(-1)
     $handle = [DefenseClawHostileNative]::CreateFileW(
         $Path,
-        0x40000000,
-        0x00000007,
+        [DefenseClawHostileNative]::GENERIC_WRITE,
+        [DefenseClawHostileNative]::FILE_SHARE_ALL,
         [IntPtr]::Zero,
-        3,
-        0,
+        [DefenseClawHostileNative]::OPEN_EXISTING,
+        [uint32]0,
         [IntPtr]::Zero
     )
     if ($handle -eq $invalid) {
@@ -12890,13 +14997,17 @@ function Test-DeleteHandle(
     [bool]$Directory = $false
 ) {
     $invalid = [IntPtr]::new(-1)
-    $flags = if ($Directory) { 0x02000000 } else { 0 }
+    $flags = if ($Directory) {
+        [DefenseClawHostileNative]::FILE_FLAG_BACKUP_SEMANTICS
+    } else {
+        [uint32]0
+    }
     $handle = [DefenseClawHostileNative]::CreateFileW(
         $Path,
-        0x00010000,
-        0x00000007,
+        [DefenseClawHostileNative]::DELETE_ACCESS,
+        [DefenseClawHostileNative]::FILE_SHARE_ALL,
         [IntPtr]::Zero,
-        3,
+        [DefenseClawHostileNative]::OPEN_EXISTING,
         $flags,
         [IntPtr]::Zero
     )
@@ -12928,9 +15039,9 @@ function Test-ChangeACLDenied([string]$Name, [string]$Path) {
             GetSecurityDescriptorSddlForm($sections)
         Add-Probe `
             $Name `
-            ($code -eq 5 -and $beforeSDDL -ceq $afterSDDL) `
+            ($code -ne 0 -and $beforeSDDL -ceq $afterSDDL) `
             ("icacls.exe exit " + $code +
-                " (want ERROR_ACCESS_DENIED=5); unchanged=" +
+                " (want nonzero denial); unchanged=" +
                 ($beforeSDDL -ceq $afterSDDL))
     } catch [UnauthorizedAccessException] {
         Add-Probe $Name $true 'Get-Acl access denied before any change'
@@ -13014,6 +15125,20 @@ foreach ($entry in @(
 foreach ($entry in @($input.claude_machine_paths)) {
     $name = [string]$entry.name
     $path = [string]$entry.path
+    if (-not [bool]$entry.present -and
+        -not (Test-Path -LiteralPath $path -PathType Leaf)) {
+        $detail = (
+            'not applicable: the administrator observed this Claude machine ' +
+            'artifact absent before the hostile probe; its access boundary ' +
+            'requires WTSActive guardian reconciliation'
+        )
+        foreach ($operation in @('write', 'delete', 'change_acl')) {
+            Add-NotApplicableProbe `
+                ($operation + '_claude_machine_' + $name) `
+                $detail
+        }
+        continue
+    }
     Test-WriteHandle ('write_claude_machine_' + $name) $path
     Test-DeleteHandle ('delete_claude_machine_' + $name) $path
     Test-ChangeACLDenied ('change_acl_claude_machine_' + $name) $path
@@ -13025,11 +15150,11 @@ foreach ($entry in @($input.service_tokens)) {
     Test-DeleteHandle ('delete_service_token_' + $tokenName) $tokenPath
     $credentialHandle = [DefenseClawHostileNative]::CreateFileW(
         $tokenPath,
-        0x80000000,
-        0x00000007,
+        [DefenseClawHostileNative]::GENERIC_READ,
+        [DefenseClawHostileNative]::FILE_SHARE_ALL,
         [IntPtr]::Zero,
-        3,
-        0,
+        [DefenseClawHostileNative]::OPEN_EXISTING,
+        [uint32]0,
         [IntPtr]::Zero
     )
     $invalid = [IntPtr]::new(-1)
@@ -13100,34 +15225,54 @@ foreach ($process in @(
             }
         }
     }
+    $tokenAccesses = @(
+        [pscustomobject]@{ name = 'assign_primary'; mask = [uint32]0x00000001 },
+        [pscustomobject]@{ name = 'duplicate'; mask = [uint32]0x00000002 },
+        [pscustomobject]@{ name = 'impersonate'; mask = [uint32]0x00000004 },
+        [pscustomobject]@{ name = 'adjust_privileges'; mask = [uint32]0x00000020 },
+        [pscustomobject]@{ name = 'adjust_groups'; mask = [uint32]0x00000040 },
+        [pscustomobject]@{ name = 'adjust_default'; mask = [uint32]0x00000080 },
+        [pscustomobject]@{ name = 'write_dac'; mask = [uint32]0x00040000 },
+        [pscustomobject]@{ name = 'write_owner'; mask = [uint32]0x00080000 },
+        [pscustomobject]@{ name = 'all_mutation'; mask = [uint32]0x000C00E7 }
+    )
     $queryHandle = [DefenseClawHostileNative]::OpenProcess(
-        0x00001000,
+        [DefenseClawHostileNative]::PROCESS_QUERY_LIMITED_INFORMATION,
         $false,
         [uint32]$process.pid
     )
     if ($queryHandle -eq [IntPtr]::Zero) {
         $queryError = [Runtime.InteropServices.Marshal]::GetLastWin32Error()
+        $queryDenied = $queryError -eq 5
+        $queryDetail = if ($queryDenied) {
+            'access denied; the service process DACL provides stronger isolation'
+        } else {
+            'unexpected OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION) error ' +
+                $queryError
+        }
         Add-Probe `
             ('open_process_query_limited_' + [string]$process.service) `
-            $false `
-            ("OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION) error " + $queryError)
+            $queryDenied `
+            $queryDetail
+        foreach ($tokenAccess in $tokenAccesses) {
+            Add-NotApplicableProbe `
+                ('open_process_token_' + [string]$tokenAccess.name + '_' +
+                    [string]$process.service) `
+                $(if ($queryDenied) {
+                    'not applicable: the process DACL denied the prerequisite ' +
+                        'query-limited process handle'
+                } else {
+                    'not evaluated: the prerequisite query-limited process ' +
+                        "handle failed with Win32 error $queryError"
+                })
+        }
     } else {
         try {
             Add-Probe `
                 ('open_process_query_limited_' + [string]$process.service) `
                 $true `
                 'query-limited handle granted as expected'
-            foreach ($tokenAccess in @(
-                [pscustomobject]@{ name = 'assign_primary'; mask = [uint32]0x00000001 },
-                [pscustomobject]@{ name = 'duplicate'; mask = [uint32]0x00000002 },
-                [pscustomobject]@{ name = 'impersonate'; mask = [uint32]0x00000004 },
-                [pscustomobject]@{ name = 'adjust_privileges'; mask = [uint32]0x00000020 },
-                [pscustomobject]@{ name = 'adjust_groups'; mask = [uint32]0x00000040 },
-                [pscustomobject]@{ name = 'adjust_default'; mask = [uint32]0x00000080 },
-                [pscustomobject]@{ name = 'write_dac'; mask = [uint32]0x00040000 },
-                [pscustomobject]@{ name = 'write_owner'; mask = [uint32]0x00080000 },
-                [pscustomobject]@{ name = 'all_mutation'; mask = [uint32]0x000C00E7 }
-            )) {
+            foreach ($tokenAccess in $tokenAccesses) {
                 $tokenHandle = [IntPtr]::Zero
                 $opened = [DefenseClawHostileNative]::OpenProcessToken(
                     $queryHandle,
@@ -13256,9 +15401,17 @@ if ($failed.Count -ne 0) { exit 17 }
         -TimeoutSeconds 180
     $json = ConvertFrom-SingleJSONDocument $result.StdOut 'standard-user-control-probe'
     if (-not [bool]$json.ok -or $result.ExitCode -ne 0) {
-        throw "standard user crossed protected boundary: $(@($json.failed) -join ', ')"
+        throw (
+            'standard-user boundary probe failed or was incomplete: ' +
+            "$(@($json.failed) -join ', ')"
+        )
     }
-    return "all $(@($json.checks).Count) protected operations were denied"
+    $applicable = @($json.checks | Where-Object { [bool]$_.applicable }).Count
+    $notApplicable = @($json.checks).Count - $applicable
+    return (
+        "all $applicable applicable standard-user boundary checks passed; " +
+        "$notApplicable checks were not applicable"
+    )
 }
 
 function Assert-ProtectedUserTamperToken {
@@ -13738,6 +15891,77 @@ function Get-ArtifactSnapshots([Collections.IDictionary]$Paths) {
     return [pscustomobject]$out
 }
 
+function Test-BoundedArtifactSnapshotMatch([object]$Snapshot) {
+    if ($null -eq $Snapshot -or
+        [string]::IsNullOrWhiteSpace([string]$Snapshot.path) -or
+        [string]$Snapshot.sha256 -notmatch '^[a-f0-9]{64}$') {
+        return $false
+    }
+    $expectedLength = [int64]$Snapshot.length
+    if ($expectedLength -lt 0 -or
+        $expectedLength -gt $script:ManagedArtifactDigestMaxBytes) {
+        return $false
+    }
+
+    $stream = $null
+    $sha256 = $null
+    try {
+        $share = (
+            [IO.FileShare]::ReadWrite -bor
+            [IO.FileShare]::Delete
+        )
+        $stream = [IO.File]::Open(
+            [string]$Snapshot.path,
+            [IO.FileMode]::Open,
+            [IO.FileAccess]::Read,
+            $share
+        )
+        if ($stream.Length -ne $expectedLength -or
+            $stream.Length -gt $script:ManagedArtifactDigestMaxBytes) {
+            return $false
+        }
+
+        # Hash only the already-open, size-validated handle and enforce the
+        # same byte ceiling while reading. A concurrent sparse grow can no
+        # longer make one polling condition run past Wait-Until's deadline.
+        $sha256 = [Security.Cryptography.SHA256]::Create()
+        $buffer = [byte[]]::new(65536)
+        $total = [int64]0
+        while (($read = $stream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+            $total += [int64]$read
+            if ($total -gt $expectedLength -or
+                $total -gt $script:ManagedArtifactDigestMaxBytes) {
+                return $false
+            }
+            $null = $sha256.TransformBlock(
+                $buffer,
+                0,
+                $read,
+                $buffer,
+                0
+            )
+        }
+        if ($total -ne $expectedLength -or
+            $stream.Length -ne $expectedLength) {
+            return $false
+        }
+        $empty = [byte[]]::new(0)
+        $null = $sha256.TransformFinalBlock($empty, 0, 0)
+        $actual = [BitConverter]::ToString($sha256.Hash)
+        $actual = $actual.Replace('-', '').ToLowerInvariant()
+        return [string]::Equals(
+            $actual,
+            [string]$Snapshot.sha256,
+            [StringComparison]::Ordinal
+        )
+    } catch {
+        return $false
+    } finally {
+        if ($null -ne $sha256) { $sha256.Dispose() }
+        if ($null -ne $stream) { $stream.Dispose() }
+    }
+}
+
 function Assert-SameArtifactSnapshots([object]$Before, [object]$After, [string]$Label) {
     foreach ($property in $Before.PSObject.Properties) {
         $name = $property.Name
@@ -13950,14 +16174,7 @@ function Wait-ForArtifactRepair(
     Wait-Until -Description "$Label artifact repair" -Condition {
         foreach ($property in $Baseline.PSObject.Properties) {
             $snapshot = $property.Value
-            if (-not (Test-Path -LiteralPath $snapshot.path -PathType Leaf)) {
-                return $false
-            }
-            if (-not [string]::Equals(
-                (Get-FileDigest $snapshot.path),
-                [string]$snapshot.sha256,
-                [StringComparison]::Ordinal
-            )) {
+            if (-not (Test-BoundedArtifactSnapshotMatch $snapshot)) {
                 return $false
             }
         }
@@ -14253,12 +16470,12 @@ targets:
     sid: '$($script:PrimarySID)'
     data_dir: '$primaryDataYAML'
     connector: codex
-    agent_version: "codex-cli 0.144.3"
+    agent_version: "$(Get-ApprovedCodexVersionText)"
   - user_home: '$hostileHomeYAML'
     sid: '$($script:PrimarySID)'
     data_dir: '$hostileDataYAML'
     connector: codex
-    agent_version: "codex-cli 0.144.3"
+    agent_version: "$(Get-ApprovedCodexVersionText)"
   - user_home: '$primaryHomeYAML'
     sid: '$($script:PrimarySID)'
     data_dir: '$primaryDataYAML'
@@ -14494,13 +16711,17 @@ function Assert-HealthyGuardianJSON([string]$Label) {
         if (-not [bool]$result.JSON.ok) {
             throw "$command returned ok=false after $Label"
         }
-        if (-not [string]::IsNullOrWhiteSpace([string]$result.JSON.manifest) -and
+        $manifestProperty = $result.JSON.PSObject.Properties['manifest']
+        if ($null -ne $manifestProperty -and
+            -not [string]::IsNullOrWhiteSpace(
+                [string]$manifestProperty.Value
+            ) -and
             -not [string]::Equals(
-                (ConvertTo-CanonicalPath ([string]$result.JSON.manifest)),
+                (ConvertTo-CanonicalPath ([string]$manifestProperty.Value)),
                 (ConvertTo-CanonicalPath $manifest),
                 [StringComparison]::OrdinalIgnoreCase
             )) {
-            throw "$command reported a different manifest: $($result.JSON.manifest)"
+            throw "$command reported a different manifest: $($manifestProperty.Value)"
         }
     }
     return 'status and verify emitted healthy JSON with zero exit status'
@@ -15861,6 +18082,12 @@ function Add-AdministratorDenyACE(
 function Test-GuardianRepairsPreexistingSelfDenyDACL(
     [Collections.IDictionary]$ArtifactPaths
 ) {
+    $systemHookConfigKey = if ($ClaudeOnly) {
+        'hookcfg_claudecode'
+    }
+    else {
+        'hookcfg_codex'
+    }
     $cases = @(
         [pscustomobject]@{
             name = 'target'
@@ -15875,7 +18102,7 @@ function Test-GuardianRepairsPreexistingSelfDenyDACL(
         [pscustomobject]@{
             name = 'system'
             deny_sid = 'S-1-5-18'
-            path = [string]$ArtifactPaths['hookcfg_codex']
+            path = [string]$ArtifactPaths[$systemHookConfigKey]
         },
         [pscustomobject]@{
             name = 'administrators'
@@ -16436,6 +18663,8 @@ function Test-ManagedSparseOversizedArtifactRecovery(
             $guardianBefore `
             $guardianAfter `
             "$($case.name) completed sparse recovery"
+        $null = Assert-HealthyGuardianJSON `
+            "sparse-$($case.name)-authoritative-repair"
         $workingSetPeak = [Math]::Max(
             $workingSetPeak,
             [int64](
@@ -16483,6 +18712,10 @@ function Test-ManagedSparseOversizedArtifactRecovery(
         $observations.Add([pscustomobject]@{
             artifact = [string]$case.name
             target_sid_verified = $true
+            attack_process_ok = [bool]$attackEvidence.ok
+            attack_final_evidence = [bool]$attackEvidence.final
+            retained_evidence_path =
+                [string]$attackEvidence.retained_evidence_path
             sparse_logical_bytes = [int64]$attackEvidence.logical_bytes
             sparse_allocated_bytes = [int64]$attackEvidence.allocated_bytes
             grow_operations = [int]$attackEvidence.grow_operations
@@ -16506,6 +18739,10 @@ function Test-ManagedSparseOversizedArtifactRecovery(
                 $script:SparseAttackMaxGuardianWorkingSetGrowthBytes
             quarantine_rename_observed =
                 [bool]$attackEvidence.renamed_to_quarantine
+            canonical_recreation_observed =
+                [bool]$attackEvidence.canonical_recreated
+            watcher_observation_authoritative = $false
+            healthy_status_and_verify_after_repair = $true
             quarantine_slot_removed = $true
             file_identity_replaced = $true
             exact_bytes_restored = $true
@@ -16611,6 +18848,8 @@ function Test-PreviouslyAuthorizedRootObstructionRepair(
         -Name "authorized-obstruction-$($script:RunToken)" `
         -Ephemeral
     $completed = $false
+    $primaryError = $null
+    $cleanupErrors = [Collections.Generic.List[string]]::new()
     $recoveries = [ordered]@{}
     try {
         foreach ($mode in @('delete', 'junction')) {
@@ -16663,26 +18902,59 @@ function Test-PreviouslyAuthorizedRootObstructionRepair(
             $null = Assert-HealthyGuardianJSON "authorized-$mode-obstruction"
         }
         $completed = $true
-    } finally {
+    }
+    catch {
+        $primaryError = $_
+    }
+    finally {
         if (-not $completed) {
-            $service = Get-Service -Name $script:GuardianServiceName -ErrorAction SilentlyContinue
-            if ($null -ne $service -and
-                $service.Status -ne [ServiceProcess.ServiceControllerStatus]::Stopped) {
-                Stop-Service -Name $script:GuardianServiceName -Force -ErrorAction Stop
-                Wait-Until -Description 'authorized obstruction guardian stop for restore' -Condition {
-                    (Get-Service -Name $script:GuardianServiceName -ErrorAction Stop).Status -eq
-                        [ServiceProcess.ServiceControllerStatus]::Stopped
-                } | Out-Null
+            try {
+                $service = Get-Service -Name $script:GuardianServiceName -ErrorAction SilentlyContinue
+                if ($null -ne $service -and
+                    $service.Status -ne [ServiceProcess.ServiceControllerStatus]::Stopped) {
+                    Stop-Service -Name $script:GuardianServiceName -Force -ErrorAction Stop
+                    Wait-Until -Description 'authorized obstruction guardian stop for restore' -Condition {
+                        (Get-Service -Name $script:GuardianServiceName -ErrorAction Stop).Status -eq
+                            [ServiceProcess.ServiceControllerStatus]::Stopped
+                    } | Out-Null
+                }
+                Restore-ProtectedUserTreeSnapshot $emergencySnapshot
             }
-            Restore-ProtectedUserTreeSnapshot $emergencySnapshot
+            catch {
+                $cleanupErrors.Add(
+                    'emergency protected-user restore failed: ' +
+                    $_.Exception.Message
+                )
+            }
         }
-        $outsideAfterCleanup = Get-ProtectedUserTreeInventory `
-            $outside `
-            'authorized obstruction outside after cleanup'
-        Assert-SameUserTreeInventory `
-            $outsideBefore `
-            $outsideAfterCleanup `
-            'authorized obstruction outside after cleanup'
+        try {
+            $outsideAfterCleanup = Get-ProtectedUserTreeInventory `
+                $outside `
+                'authorized obstruction outside after cleanup'
+            Assert-SameUserTreeInventory `
+                $outsideBefore `
+                $outsideAfterCleanup `
+                'authorized obstruction outside after cleanup'
+        }
+        catch {
+            $cleanupErrors.Add(
+                'outside-target cleanup verification failed: ' +
+                $_.Exception.Message
+            )
+        }
+    }
+    if ($null -ne $primaryError) {
+        if ($cleanupErrors.Count -ne 0) {
+            throw (
+                $primaryError.Exception.Message +
+                ' (cleanup diagnostics: ' +
+                ($cleanupErrors -join '; ') + ')'
+            )
+        }
+        throw $primaryError
+    }
+    if ($cleanupErrors.Count -ne 0) {
+        throw ($cleanupErrors -join '; ')
     }
     return [pscustomobject]@{
         DeletedRootRepairMilliseconds = $recoveries['delete']
@@ -16711,34 +18983,84 @@ function Test-AdministratorGenericMutationDenied {
     return 'elevated administrator direct generic reconcile was denied; LocalSystem service-mediated reconcile remains healthy'
 }
 
-function Remove-CertificationProfile([string]$SID, [string]$Label) {
+function Remove-CertificationProfile(
+    [string]$SID,
+    [string]$UserName,
+    [string]$Label
+) {
     if ([string]::IsNullOrWhiteSpace($SID)) { return }
+    Assert-CertificationUserName $UserName 'profile cleanup'
+    if (Get-LocalUser -Name $UserName -ErrorAction SilentlyContinue) {
+        throw "$Label profile cleanup requires the exact local account to be removed first"
+    }
     $profiles = @(Get-CimInstance Win32_UserProfile -ErrorAction SilentlyContinue | Where-Object {
         [string]$_.SID -eq $SID
     })
     if ($profiles.Count -gt 1) {
         throw "$Label SID has multiple user profiles"
     }
-    $expectedPath = if ($Label -ceq 'hostile') {
-        $script:HostileProfile
-    } elseif ($Label -ceq 'primary') {
-        $script:PrimaryProfile
-    } else {
+    if ($Label -cne 'hostile') {
         throw "unknown certification profile label: $Label"
+    }
+    $expectedPath = if (-not [string]::IsNullOrWhiteSpace(
+        $script:HostileProfile
+    )) {
+        ConvertTo-CanonicalPath $script:HostileProfile
+    } else {
+        ConvertTo-CanonicalPath $script:HostileProfileExpected
+    }
+    $expectedFromName = Get-ExpectedCertificationProfilePath $UserName
+    if (-not $expectedPath.Equals(
+            $expectedFromName,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        -not $script:HostileProfileExpectedWasAbsent) {
+        throw "$Label profile cleanup path lacks an exact absent baseline: $expectedPath"
     }
     foreach ($profile in $profiles) {
         $localPath = ConvertTo-CanonicalPath ([string]$profile.LocalPath)
         if ([bool]$profile.Loaded -or [bool]$profile.Special -or
-            $localPath -cne $expectedPath) {
+            -not $localPath.Equals(
+                $expectedPath,
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
             throw "$Label profile is unsafe to delete: $localPath"
         }
-        $item = Get-Item -LiteralPath $localPath -Force -ErrorAction Stop
-        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-            throw "$Label profile is a reparse point: $localPath"
+        if (Test-Path -LiteralPath $localPath) {
+            $item = Get-Item -LiteralPath $localPath -Force -ErrorAction Stop
+            if (-not $item.PSIsContainer -or
+                ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "$Label profile is not a real directory: $localPath"
+            }
         }
         Remove-CimInstance `
             -InputObject $profile `
             -Confirm:$false `
+            -ErrorAction Stop
+    }
+    if (Test-Path -LiteralPath $expectedPath) {
+        $item = Get-Item -LiteralPath $expectedPath -Force -ErrorAction Stop
+        if (-not $item.PSIsContainer -or
+            ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "$Label residual profile is not a real directory: $expectedPath"
+        }
+        $nestedReparse = @(
+            Get-ChildItem `
+                -LiteralPath $expectedPath `
+                -Force `
+                -Recurse `
+                -ErrorAction Stop |
+                Where-Object {
+                    ($_.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+                }
+        )
+        if ($nestedReparse.Count -ne 0) {
+            throw "$Label residual profile contains a reparse point"
+        }
+        Remove-Item `
+            -LiteralPath $expectedPath `
+            -Recurse `
+            -Force `
             -ErrorAction Stop
     }
     $remaining = @(Get-CimInstance Win32_UserProfile -ErrorAction Stop | Where-Object {
@@ -16761,6 +19083,51 @@ function Remove-CertificationRoot(
     }
     $safe = Assert-PathBelow $Path $ExpectedParent $Label
     Remove-Item -LiteralPath $safe -Recurse -Force -ErrorAction Stop
+}
+
+function Remove-EmptyCertificationParentRoot([object]$State) {
+    if ([bool]$State.existed_before -or
+        -not (Test-Path -LiteralPath ([string]$State.path))) {
+        return
+    }
+    $expected = @(
+        $script:ProgramFilesCertificationRoot,
+        $script:ProgramDataCertificationRoot,
+        $script:ProgramDataStagingRoot,
+        $script:ProgramDataWorkRoot
+    ) | Where-Object {
+        [string]::Equals(
+            (ConvertTo-CanonicalPath $_),
+            (ConvertTo-CanonicalPath ([string]$State.path)),
+            [StringComparison]::OrdinalIgnoreCase
+        )
+    }
+    if (@($expected).Count -ne 1) {
+        throw "unrecognized certification parent cleanup target: $($State.path)"
+    }
+    $safe = ConvertTo-CanonicalPath ([string]$State.path)
+    $item = Get-Item -LiteralPath $safe -Force -ErrorAction Stop
+    if (-not $item.PSIsContainer -or
+        ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "certification parent cleanup target is unsafe: $safe"
+    }
+    $children = @(
+        Get-ChildItem -LiteralPath $safe -Force -ErrorAction Stop
+    )
+    if ($children.Count -ne 0) {
+        return
+    }
+    Remove-Item -LiteralPath $safe -Force -ErrorAction Stop
+    if (Test-Path -LiteralPath $safe) {
+        throw "empty certification parent remains after cleanup: $safe"
+    }
+}
+
+function Invoke-CertificationFailureInjection([string]$Checkpoint) {
+    if ($FailureInjectionPhase -cne 'none' -and
+        $FailureInjectionPhase -ceq $Checkpoint) {
+        throw "intentional certification failure injection after $Checkpoint"
+    }
 }
 
 function Register-CertificationSecretFile([string]$Path) {
@@ -16794,23 +19161,148 @@ function Register-CurrentCertificationSecrets {
         if (($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
             continue
         }
-        foreach ($file in Get-ChildItem -LiteralPath $root -Filter '*.token' -File -Recurse -Force) {
+        $tokenFiles = @(
+            Get-CertificationTreeEntriesNoFollow `
+                -Root $root `
+                -Label 'certification secret discovery' |
+                Where-Object {
+                    -not $_.PSIsContainer -and
+                    $_.Name.EndsWith(
+                        '.token',
+                        [StringComparison]::OrdinalIgnoreCase
+                    )
+                }
+        )
+        foreach ($file in $tokenFiles) {
             Register-CertificationSecretFile $file.FullName
         }
     }
 }
 
-function Protect-TreeFromRegisteredSecretLeak([string]$Root, [string]$Label) {
-    if (-not (Test-Path -LiteralPath $Root -PathType Container) -or
-        $script:SecretNeedles.Count -eq 0) {
+function Test-CertificationEvidenceTextFile([IO.FileInfo]$File) {
+    return $File.Extension.ToLowerInvariant() -in @(
+        '.csv',
+        '.err',
+        '.json',
+        '.log',
+        '.out',
+        '.ps1',
+        '.toml',
+        '.txt',
+        '.xml',
+        '.yaml',
+        '.yml'
+    )
+}
+
+function Get-CertificationTreeEntriesNoFollow {
+    param(
+        [string]$Root,
+        [string]$Label,
+        [switch]$IncludeReparse
+    )
+    $canonicalRoot = ConvertTo-CanonicalPath $Root
+    $rootItem = Get-Item -LiteralPath $canonicalRoot -Force -ErrorAction Stop
+    if (-not $rootItem.PSIsContainer -or
+        ($rootItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "$Label root is not a real directory: $canonicalRoot"
+    }
+
+    # Enumerate one directory at a time. Reparse directories are either
+    # rejected or returned as leaf entries; they are never placed on the
+    # traversal stack.
+    $pending = [Collections.Generic.Stack[string]]::new()
+    $entries = [Collections.Generic.List[IO.FileSystemInfo]]::new()
+    $pending.Push($canonicalRoot)
+    $maximumEntries = 100000
+    while ($pending.Count -gt 0) {
+        $current = $pending.Pop()
+        foreach ($entry in Get-ChildItem `
+            -LiteralPath $current `
+            -Force `
+            -ErrorAction Stop) {
+            $entryPath = Assert-PathBelow `
+                $entry.FullName `
+                $canonicalRoot `
+                "$Label entry"
+            $isReparse = (
+                ($entry.Attributes -band
+                    [IO.FileAttributes]::ReparsePoint) -ne 0
+            )
+            if ($isReparse -and -not $IncludeReparse) {
+                throw "$Label contains an unsafe reparse entry: $entryPath"
+            }
+            $entries.Add($entry)
+            if ($entries.Count -gt $maximumEntries) {
+                throw "$Label exceeds the $maximumEntries-entry evidence bound"
+            }
+            if ($entry.PSIsContainer -and -not $isReparse) {
+                $pending.Push($entryPath)
+            }
+            elseif (-not $entry.PSIsContainer -and
+                -not $isReparse -and
+                -not (Test-Path -LiteralPath $entryPath -PathType Leaf)) {
+                throw "$Label contains a non-regular filesystem object: $entryPath"
+            }
+        }
+    }
+    return $entries.ToArray()
+}
+
+function Protect-TreeFromRegisteredSecretLeak {
+    param(
+        [string]$Root,
+        [string]$Label,
+        [IO.FileInfo[]]$Files
+    )
+    if (-not (Test-Path -LiteralPath $Root -PathType Container)) {
         return
     }
+    if ($null -eq $Files) {
+        $Files = [IO.FileInfo[]]@(
+            Get-CertificationTreeEntriesNoFollow `
+                -Root $Root `
+                -Label $Label |
+                Where-Object {
+                    -not $_.PSIsContainer -and
+                    (Test-CertificationEvidenceTextFile $_)
+                }
+        )
+    }
+    $maximumTextFileBytes = 8MB
+    $maximumTotalTextBytes = 64MB
+    [int64]$processedTextBytes = 0
     $leaked = [Collections.Generic.List[string]]::new()
-    foreach ($file in Get-ChildItem -LiteralPath $Root -File -Recurse -Force) {
-        if (($file.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-            throw "$Label contains an unsafe reparse file: $($file.FullName)"
+    foreach ($file in $Files) {
+        if ($file.Length -gt $maximumTextFileBytes -or
+            $processedTextBytes + $file.Length -gt $maximumTotalTextBytes) {
+            # WorkRoot is an exact disposable harness tree. Replace unbounded
+            # text artifacts with non-secret metadata instead of reading or
+            # copying gigabytes into evidence.
+            $omission = [ordered]@{
+                omitted = $true
+                reason = 'bounded certification text-evidence limit'
+                original_length = [int64]$file.Length
+                per_file_limit = [int64]$maximumTextFileBytes
+                total_limit = [int64]$maximumTotalTextBytes
+            } | ConvertTo-Json -Compress
+            [IO.File]::WriteAllText(
+                $file.FullName,
+                $omission,
+                [Text.UTF8Encoding]::new($false)
+            )
+            continue
         }
         $text = [IO.File]::ReadAllText($file.FullName)
+        $processedTextBytes += $file.Length
+        if ($text.IndexOf([char]0) -ge 0) {
+            [IO.File]::WriteAllText(
+                $file.FullName,
+                '{"omitted":true,"reason":"binary content in text evidence"}',
+                [Text.UTF8Encoding]::new($false)
+            )
+            continue
+        }
         $redacted = $text
         foreach ($secret in @($script:SecretNeedles.ToArray())) {
             if (-not [string]::IsNullOrWhiteSpace($secret)) {
@@ -16836,20 +19328,194 @@ function Copy-WorkEvidence {
         return
     }
     Register-CurrentCertificationSecrets
-    Protect-TreeFromRegisteredSecretLeak $script:WorkRoot 'work logs'
+    $textFiles = [IO.FileInfo[]]@(
+        Get-CertificationTreeEntriesNoFollow `
+            -Root $script:WorkRoot `
+            -Label 'work evidence' |
+            Where-Object {
+                -not $_.PSIsContainer -and
+                (Test-CertificationEvidenceTextFile $_)
+            }
+    )
+    Protect-TreeFromRegisteredSecretLeak `
+        $script:WorkRoot `
+        'work logs' `
+        $textFiles
     $logRoot = Join-Path $script:EvidenceDirectory 'logs'
     [IO.Directory]::CreateDirectory($logRoot) | Out-Null
-    foreach ($entry in Get-ChildItem -LiteralPath $script:WorkRoot -Force) {
-        Copy-Item -LiteralPath $entry.FullName -Destination $logRoot -Recurse -Force
+    foreach ($file in $textFiles) {
+        $relative = $file.FullName.Substring(
+            $script:WorkRoot.TrimEnd('\').Length
+        ).TrimStart('\')
+        $destination = Assert-PathBelow `
+            (Join-Path $logRoot $relative) `
+            $logRoot `
+            'bounded work evidence destination'
+        [IO.Directory]::CreateDirectory(
+            [IO.Path]::GetDirectoryName($destination)
+        ) | Out-Null
+        Copy-Item `
+            -LiteralPath $file.FullName `
+            -Destination $destination `
+            -Force
     }
-    Protect-TreeFromRegisteredSecretLeak $logRoot 'copied evidence logs'
+
+    $binaryDigests = [Collections.Generic.List[object]]::new()
+    foreach ($binary in @(
+        [pscustomobject]@{
+            name = 'codex'
+            path = $script:CodexRuntimeBinary
+        },
+        [pscustomobject]@{
+            name = 'claude'
+            path = $script:ClaudeRuntimeBinary
+        },
+        [pscustomobject]@{
+            name = 'codex_trusted_hook_launcher'
+            path = $script:CodexTrustedHookLauncherRuntimeBinary
+        }
+    )) {
+        if ([string]::IsNullOrWhiteSpace([string]$binary.path) -or
+            -not (Test-Path -LiteralPath $binary.path -PathType Leaf)) {
+            continue
+        }
+        $safeBinary = Assert-PathBelow `
+            ([string]$binary.path) `
+            $script:WorkRoot `
+            "staged $($binary.name) evidence binary"
+        $item = Get-Item -LiteralPath $safeBinary -Force
+        if (($item.Attributes -band
+                [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "staged evidence binary is a reparse point: $safeBinary"
+        }
+        $binaryDigests.Add([pscustomobject]@{
+            name = [string]$binary.name
+            path = $safeBinary
+            length = [int64]$item.Length
+            sha256 = Get-FileDigest $safeBinary
+        })
+    }
+    [IO.File]::WriteAllText(
+        (Join-Path $logRoot 'staged-binary-digests.json'),
+        ($binaryDigests.ToArray() | ConvertTo-Json -Depth 3),
+        [Text.UTF8Encoding]::new($false)
+    )
+}
+
+function Get-NormalModeProcessStartIdentity(
+    [Diagnostics.Process]$Process
+) {
+    try {
+        $unixEpoch = [DateTime]::new(
+            1970,
+            1,
+            1,
+            0,
+            0,
+            0,
+            [DateTimeKind]::Utc
+        )
+        $unixTicks = [long](
+            $Process.StartTime.ToUniversalTime().Ticks - $unixEpoch.Ticks
+        )
+        return ([long]($unixTicks * 100)).ToString(
+            [Globalization.CultureInfo]::InvariantCulture
+        )
+    } catch {
+        return ''
+    }
+}
+
+function Stop-NormalModeFixtureProcesses([string]$SafeNormalHome) {
+    $dataRoot = Join-Path $SafeNormalHome '.defenseclaw'
+    $expectedGateway = ConvertTo-CanonicalPath (
+        Join-Path $SafeNormalHome '.local\bin\defenseclaw-gateway.exe'
+    )
+    $observed = [Collections.Generic.List[object]]::new()
+    foreach ($pidFileName in @('gateway.pid', 'watchdog.pid')) {
+        $pidPath = Join-Path $dataRoot $pidFileName
+        if (-not (Test-Path -LiteralPath $pidPath -PathType Leaf)) {
+            continue
+        }
+        $record = [IO.File]::ReadAllText($pidPath) |
+            ConvertFrom-Json -ErrorAction Stop
+        $processID = [int]$record.pid
+        $recordedExecutable = ConvertTo-CanonicalPath (
+            [string]$record.executable
+        )
+        $recordedIdentity = [string]$record.start_identity
+        if ($processID -le 0 -or
+            [string]::IsNullOrWhiteSpace($recordedIdentity) -or
+            -not $recordedExecutable.Equals(
+                $expectedGateway,
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+            throw (
+                "refusing unsafe normal-mode process record $pidFileName"
+            )
+        }
+        $native = $null
+        try {
+            try {
+                $native = [Diagnostics.Process]::GetProcessById($processID)
+            } catch [ArgumentException] {
+                continue
+            }
+            $liveExecutable = ConvertTo-CanonicalPath (
+                [string]$native.MainModule.FileName
+            )
+            $liveIdentity = Get-NormalModeProcessStartIdentity $native
+            if (-not $liveExecutable.Equals(
+                    $expectedGateway,
+                    [StringComparison]::OrdinalIgnoreCase
+                ) -or
+                $liveIdentity -cne $recordedIdentity) {
+                throw (
+                    "refusing to terminate PID $processID because its " +
+                    'live identity does not match the protected PID record'
+                )
+            }
+            $observed.Add([pscustomobject]@{
+                pid = $processID
+                start_identity = $recordedIdentity
+            })
+        } finally {
+            if ($null -ne $native) { $native.Dispose() }
+        }
+        $null = Invoke-NativeProcess `
+            -FilePath (Join-Path $script:System32 'taskkill.exe') `
+            -ArgumentList @('/PID', [string]$processID, '/T', '/F') `
+            -AllowedExitCodes @(0, 128) `
+            -TimeoutSeconds 20 `
+            -Label "cleanup-normal-mode-$pidFileName"
+    }
+    foreach ($identity in @($observed.ToArray())) {
+        $survivor = $null
+        try {
+            try {
+                $survivor = [Diagnostics.Process]::GetProcessById(
+                    [int]$identity.pid
+                )
+            } catch [ArgumentException] {
+                continue
+            }
+            if ((Get-NormalModeProcessStartIdentity $survivor) -ceq
+                [string]$identity.start_identity) {
+                throw (
+                    "normal-mode PID $($identity.pid) survived bounded " +
+                    'descendant-process cleanup'
+                )
+            }
+        } finally {
+            if ($null -ne $survivor) { $survivor.Dispose() }
+        }
+    }
 }
 
 function Restore-ProtectedUserFixture {
     if (-not [string]::IsNullOrWhiteSpace(
             $script:NormalModeSyntheticHome
-        ) -and
-        (Test-Path -LiteralPath $script:NormalModeSyntheticHome)) {
+        )) {
         $safeNormalHome = Assert-PathBelow `
             $script:NormalModeSyntheticHome `
             $script:PrimaryProfile `
@@ -16865,31 +19531,78 @@ function Restore-ProtectedUserFixture {
                 "synthetic home: $safeNormalHome"
             )
         }
-        $item = Get-Item -LiteralPath $safeNormalHome -Force
-        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-            [IO.Directory]::Delete($safeNormalHome, $false)
-        } else {
-            $nestedReparse = @(
-                Get-ChildItem `
-                    -LiteralPath $safeNormalHome `
-                    -Force `
-                    -Recurse |
-                    Where-Object {
-                        ($_.Attributes -band
-                            [IO.FileAttributes]::ReparsePoint) -ne 0
-                    }
-            )
-            if ($nestedReparse.Count -ne 0) {
-                throw (
-                    'normal-mode synthetic home contains an unexpected ' +
-                    "reparse point: $($nestedReparse[0].FullName)"
-                )
-            }
-            Remove-Item `
-                -LiteralPath $safeNormalHome `
-                -Recurse `
+        $entries = @(
+            Get-ChildItem `
+                -LiteralPath $script:PrimaryProfile `
                 -Force `
-                -ErrorAction Stop
+                -ErrorAction Stop |
+                Where-Object {
+                    [string]::Equals(
+                        $_.FullName,
+                        $safeNormalHome,
+                        [StringComparison]::OrdinalIgnoreCase
+                    )
+                }
+        )
+        if ($entries.Count -gt 1) {
+            throw 'normal-mode cleanup found duplicate exact synthetic homes'
+        }
+        if ($entries.Count -eq 0) {
+            $script:NormalModeSyntheticHome = ''
+        } else {
+            $item = $entries[0]
+            if (($item.Attributes -band
+                    [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                [IO.Directory]::Delete($safeNormalHome, $false)
+            } else {
+                $cleanupGrants = @(
+                    '*S-1-5-18:(OI)(CI)F',
+                    '*S-1-5-32-544:(OI)(CI)F',
+                    "*$($script:PrimarySID):(OI)(CI)F"
+                )
+                $descendantCleanupGrants = @(
+                    '*S-1-5-18:F',
+                    '*S-1-5-32-544:F',
+                    "*$($script:PrimarySID):F"
+                )
+                $null = Set-ICaclsOwnerAndDacl `
+                    -Path $safeNormalHome `
+                    -Owner '*S-1-5-32-544' `
+                    -Grants $descendantCleanupGrants `
+                    -Options @('/T', '/C', '/L') `
+                    -Label 'normal-mode-cleanup-descendant-acl'
+                $null = Set-ICaclsOwnerAndDacl `
+                    -Path $safeNormalHome `
+                    -Owner '*S-1-5-32-544' `
+                    -Grants $cleanupGrants `
+                    -Label 'normal-mode-cleanup-root-acl'
+                Assert-CleanupTreeDirectFullControl `
+                    -Root $safeNormalHome `
+                    -Label 'normal-mode synthetic-home cleanup'
+                Stop-NormalModeFixtureProcesses $safeNormalHome
+                $nestedReparse = @(
+                    Get-ChildItem `
+                        -LiteralPath $safeNormalHome `
+                        -Force `
+                        -Recurse `
+                        -ErrorAction Stop |
+                        Where-Object {
+                            ($_.Attributes -band
+                                [IO.FileAttributes]::ReparsePoint) -ne 0
+                        }
+                )
+                if ($nestedReparse.Count -ne 0) {
+                    throw (
+                        'normal-mode synthetic home contains an unexpected ' +
+                        "reparse point: $($nestedReparse[0].FullName)"
+                    )
+                }
+                Remove-Item `
+                    -LiteralPath $safeNormalHome `
+                    -Recurse `
+                    -Force `
+                    -ErrorAction Stop
+            }
         }
     }
     $script:NormalModeSyntheticHome = ''
@@ -17060,21 +19773,31 @@ function Invoke-BoundedCleanup {
         }
     )) {
         if (-not [bool]$user.Created) { continue }
-        try {
-            Remove-CertificationProfile $user.SID $user.Label
-        } catch {
-            $script:CleanupErrors.Add(
-                "$($user.Label) profile: " + (Protect-SensitiveDisplayText $_.Exception.Message)
-            )
-        }
+        $cleanupSID = [string]$user.SID
         try {
             Assert-CertificationUserName $user.Name 'cleanup'
-            if (Get-LocalUser -Name $user.Name -ErrorAction SilentlyContinue) {
+            $localUser = Get-LocalUser `
+                -Name $user.Name `
+                -ErrorAction SilentlyContinue
+            if ($null -ne $localUser) {
+                if ([string]::IsNullOrWhiteSpace($cleanupSID)) {
+                    $cleanupSID = [string]$localUser.SID.Value
+                }
                 Remove-LocalUser -Name $user.Name -ErrorAction Stop
             }
         } catch {
             $script:CleanupErrors.Add(
                 "$($user.Label) user: " + (Protect-SensitiveDisplayText $_.Exception.Message)
+            )
+        }
+        try {
+            Remove-CertificationProfile `
+                $cleanupSID `
+                $user.Name `
+                $user.Label
+        } catch {
+            $script:CleanupErrors.Add(
+                "$($user.Label) profile: " + (Protect-SensitiveDisplayText $_.Exception.Message)
             )
         }
     }
@@ -17120,6 +19843,33 @@ function Invoke-BoundedCleanup {
                 'work root: ' + (Protect-SensitiveDisplayText $_.Exception.Message)
             )
         }
+    }
+    foreach ($parentState in @($script:CertificationParentRoots)) {
+        if ($KeepWorkRoot -and
+            [string]::Equals(
+                [string]$parentState.path,
+                $script:ProgramDataWorkRoot,
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+            continue
+        }
+        try {
+            Remove-EmptyCertificationParentRoot $parentState
+        } catch {
+            $script:CleanupErrors.Add(
+                'certification parent root: ' +
+                (Protect-SensitiveDisplayText $_.Exception.Message)
+            )
+        }
+    }
+    try {
+        $script:LifecycleLockCleanupBaseline =
+            Get-CertificationPersistentLifecycleLockBaseline
+    } catch {
+        $script:CleanupErrors.Add(
+            'persistent lifecycle lock baseline: ' +
+            (Protect-SensitiveDisplayText $_.Exception.Message)
+        )
     }
 }
 
@@ -17183,8 +19933,15 @@ function Write-FinalEvidence([string]$Status, [string]$Failure) {
             protected_config_baseline_sha256 = $script:PrimaryConfigBaselineSHA256
             denial_user = $script:HostileUserName
             denial_user_sid = $script:HostileSID
+            credentialed_powershell = $script:PowerShellSelection
+            credentialed_powershell_prerequisite =
+                $script:PowerShellPrerequisite
             install_root = $script:InstallRoot
             state_root = $script:StateRoot
+            persistent_lifecycle_lock_preinstall =
+                $script:LifecycleLockPreinstallBaseline
+            persistent_lifecycle_lock_cleanup =
+                $script:LifecycleLockCleanupBaseline
         }
         certification = [ordered]@{
             profile = if ($ClaudeOnly) {
@@ -17239,6 +19996,7 @@ function Write-FinalEvidence([string]$Status, [string]$Failure) {
             live_codex_mutated = $false
         }
         failure = Protect-SensitiveDisplayText $Failure
+        failure_detail = $script:FailureEvidence
         results = $script:Results
         cleanup_ok = $script:CleanupErrors.Count -eq 0
         cleanup_errors = $script:CleanupErrors
@@ -17448,7 +20206,7 @@ $script:CodexVendorDirectory = ConvertTo-CanonicalPath (
     Join-Path $script:KnownProgramData 'OpenAI'
 )
 $script:LifecycleLockDirectory = ConvertTo-CanonicalPath (
-    Join-Path $script:KnownProgramData 'Cisco\DefenseClaw-Lifecycle'
+    Join-Path $script:KnownProgramData 'Cisco\Cisco Secure Client\DefenseClaw-Lifecycle'
 )
 $script:LifecycleLockPath = Assert-PathBelow `
     (Join-Path $script:LifecycleLockDirectory 'lifecycle.lock') `
@@ -17496,16 +20254,16 @@ if (-not (Test-Path -LiteralPath $script:BootstrapPowerShellExecutable -PathType
     throw "fixed Windows PowerShell bootstrap is missing: $($script:BootstrapPowerShellExecutable)"
 }
 $script:ProgramFilesCertificationRoot = ConvertTo-CanonicalPath (
-    Join-Path $script:KnownProgramFiles 'Cisco\DefenseClaw-Cert'
+    Join-Path $script:KnownProgramFiles 'Cisco\Cisco Secure Client\DefenseClaw-Cert'
 )
 $script:ProgramDataCertificationRoot = ConvertTo-CanonicalPath (
-    Join-Path $script:KnownProgramData 'Cisco\DefenseClaw-Cert'
+    Join-Path $script:KnownProgramData 'Cisco\Cisco Secure Client\DefenseClaw-Cert'
 )
 $script:ProgramDataStagingRoot = ConvertTo-CanonicalPath (
-    Join-Path $script:KnownProgramData 'Cisco\DefenseClaw-Cert-Staging'
+    Join-Path $script:KnownProgramData 'Cisco\Cisco Secure Client\DefenseClaw-Cert-Staging'
 )
 $script:ProgramDataWorkRoot = ConvertTo-CanonicalPath (
-    Join-Path $script:KnownProgramData 'Cisco\DefenseClaw-Cert-Work'
+    Join-Path $script:KnownProgramData 'Cisco\Cisco Secure Client\DefenseClaw-Cert-Work'
 )
 $script:InstallRoot = Assert-PathBelow `
     (Join-Path $script:ProgramFilesCertificationRoot $script:RunToken) `
@@ -17548,6 +20306,19 @@ $script:WorkRoot = Assert-PathBelow `
     (Join-Path $script:ProgramDataWorkRoot $script:RunToken) `
     $script:ProgramDataWorkRoot `
     'work root'
+$script:CertificationParentRoots = @(
+    foreach ($parentRoot in @(
+        $script:ProgramFilesCertificationRoot,
+        $script:ProgramDataCertificationRoot,
+        $script:ProgramDataStagingRoot,
+        $script:ProgramDataWorkRoot
+    )) {
+        [pscustomobject]@{
+            path = ConvertTo-CanonicalPath $parentRoot
+            existed_before = Test-Path -LiteralPath $parentRoot
+        }
+    }
+)
 $script:FixtureRoot = Join-Path $script:StagingRoot 'fixtures'
 $script:ConfigSource = Join-Path $script:StagingRoot 'config.yaml'
 $script:ManifestSource = Join-Path $script:StagingRoot 'targets.yaml'
@@ -17597,6 +20368,7 @@ $plan = [ordered]@{
     claude_managed_state_path = $script:ClaudeManagedStatePath
     staging_root = $script:StagingRoot
     work_root = $script:WorkRoot
+    credentialed_powershell = $script:PowerShellSelection
     evidence_directory = $script:EvidenceDirectory
     allow_unsigned_fixture_binaries = [bool]$AllowUnsigned
     agent_application_control_attested = [bool]$AttestAgentApplicationControl
@@ -17630,8 +20402,8 @@ $plan = [ordered]@{
         }
         read_only = [ordered]@{
             action = 'status|verify|reconcile|uninstall'
-            certification_codex_home = $false
-            allow_unsigned = $false
+            certification_codex_home = $true
+            allow_unsigned = $true
             core_hardening_certification = $false
         }
     }
@@ -17641,6 +20413,7 @@ $plan = [ordered]@{
         'codex-and-claude'
     }
     host_mutation = -not $script:PlanOnly
+    failure_injection_phase = $FailureInjectionPhase
 }
 
 if ($script:PlanOnly) {
@@ -17759,6 +20532,17 @@ try {
         Initialize-ActiveUserHandoff
 
         $script:HostileCredential = New-RandomCredential $script:HostileUserName
+        $script:HostileProfileExpected =
+            Get-ExpectedCertificationProfilePath $script:HostileUserName
+        $script:HostileProfileExpectedWasAbsent = -not (
+            Test-Path -LiteralPath $script:HostileProfileExpected
+        )
+        if (-not $script:HostileProfileExpectedWasAbsent) {
+            throw (
+                'refusing pre-existing temporary profile path: ' +
+                $script:HostileProfileExpected
+            )
+        }
         $script:HostileSID = New-CertificationLocalUser `
             $script:HostileUserName `
             $script:HostileCredential
@@ -17770,8 +20554,20 @@ try {
             throw "hostile profile SID mismatch: $($hostile.sid) != $($script:HostileSID)"
         }
         $script:HostileProfile = ConvertTo-CanonicalPath ([string]$hostile.profile)
+        if (-not $script:HostileProfile.Equals(
+                $script:HostileProfileExpected,
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+            throw (
+                'temporary user profile did not use the exact expected path: ' +
+                $script:HostileProfile
+            )
+        }
         $token = Assert-ProtectedUserTamperToken
         return "active target $($script:PrimaryUserName) session=$($script:PrimarySessionID); created exact non-admin denial user $($script:HostileUserName); $token"
+    }
+    Invoke-Check 'protected-user-acl-round-trip-matrix' {
+        Test-ProtectedUserTreeSecurityRoundTrip
     }
     Invoke-Check 'protected-source-staging' {
         Initialize-ProtectedCertificationSources
@@ -17794,6 +20590,7 @@ try {
             'cannot modify them'
         )
     }
+    Invoke-CertificationFailureInjection 'fixture'
 
     $script:Phase = 'normal-mode-noop'
     try {
@@ -17814,6 +20611,7 @@ try {
     Invoke-Check 'preinstall-normal-mode-is-no-op' {
         Test-NormalModePreinstallNoOp
     }
+    Invoke-CertificationFailureInjection 'normal-mode-noop'
     $script:Phase = 'certification-isolation'
     Invoke-Check 'certification-codex-home-fixture' {
         $fixture = Initialize-CertificationCodexHome
@@ -17826,6 +20624,7 @@ try {
         $null = Assert-MachineCodexHomeUnchanged
         return 'machine and coordinator process CODEX_HOME stayed byte/type/existence exact'
     }
+    Invoke-CertificationFailureInjection 'certification-isolation'
 
     $apiPort = Get-FreeLoopbackPort
     $script:APIPort = $apiPort
@@ -17855,7 +20654,6 @@ guardrail:
   scanner_mode: local
   host: 127.0.0.1
   port: $proxyPort
-  hook_self_heal: true
 application_protection:
   enabled: false
 "@
@@ -17879,7 +20677,7 @@ targets:
     sid: '$($script:PrimarySID)'
     data_dir: '$primaryDataYAML'
     connector: codex
-    agent_version: "codex-cli 0.144.3"
+    agent_version: "$(Get-ApprovedCodexVersionText)"
   - user_home: '$primaryHomeYAML'
     sid: '$($script:PrimarySID)'
     data_dir: '$primaryDataYAML'
@@ -17894,7 +20692,7 @@ targets:
         Add-Result `
             'allow-unsigned-certification-scope' `
             'passed' `
-            'unsigned import is emitted only for mutating install/upgrade/repair inside the exact run-scoped service/root/CODEX_HOME grammar; production defaults and every near miss were rejected' `
+            'unsigned import is emitted for every lifecycle action only inside the exact run-scoped service/root/CODEX_HOME grammar; core and production attestations remain mutation-only, and production defaults plus every near miss were rejected' `
             @{
                 contract = $unsignedScopeProof
             }
@@ -17981,7 +20779,7 @@ targets:
         Add-Result `
             'live-service-token-least-privilege' `
             'passed' `
-            'live gateway/guardian TokenUser, system integrity, privileges, service SID groups, and restricted-token semantics match the hardened contract' `
+            'live gateway/guardian TokenUser, High gateway/System guardian integrity, privileges, service-SID identity/group semantics, and restricted-token semantics match the hardened contract' `
             @{ service_tokens = @($serviceTokenSnapshot) }
     } catch {
         Add-Result `
@@ -18082,7 +20880,9 @@ targets:
     $controlArtifactBaseline = Get-ArtifactSnapshots $artifactSet.Paths
     $controlDeploymentBaseline = Get-DeploymentDigests
     $controlLedgerPath = Join-Path $script:StateRoot 'hook-guardian-state\protected_targets.json'
-    $controlLedgerDigest = Get-FileDigest $controlLedgerPath
+    $null = Assert-HealthyGuardianJSON 'initial-control-baseline'
+    $controlLedgerSemantics =
+        Get-StableGuardianAuthorizationSemanticSnapshot $controlLedgerPath
     $controlMachinePolicyRoot = if ($ClaudeOnly) {
         $script:ClaudeManagedPolicyDirectory
     } else {
@@ -18092,7 +20892,6 @@ targets:
         $controlMachinePolicyRoot `
         'managed machine policy directories before hostile probe'
     $serviceControlBaseline = Get-ServiceControlSnapshot 'before-hostile-control'
-    $serviceProcessBaseline = Get-CertificationServiceProcessSnapshot
 
     $script:Phase = 'protected-boundary'
     Invoke-Check 'certification-scope-and-work-root-dacls' {
@@ -18174,7 +20973,14 @@ targets:
         return 'binaries, policy, ledger, managed machine parents, and service credentials enforce the expected standard-user boundary'
     }
     Invoke-Check 'standard-user-control-denials' {
-        Invoke-StandardUserControlProbe
+        $hostileProcessBaseline = Get-CertificationServiceProcessSnapshot
+        $detail = Invoke-StandardUserControlProbe
+        $hostileProcessAfter = Get-CertificationServiceProcessSnapshot
+        Assert-SameObjectJSON `
+            $hostileProcessBaseline `
+            $hostileProcessAfter `
+            'causal hostile process-termination probe'
+        return $detail
     }
     try {
         $lifecycleLockEvidence = Test-ProtectedLifecycleLockSquattingDenied
@@ -18245,7 +21051,9 @@ targets:
             $postDeenrollmentStatus.JSON
     }
     $controlArtifactBaseline = Get-ArtifactSnapshots $artifactSet.Paths
-    $controlLedgerDigest = Get-FileDigest $controlLedgerPath
+    $null = Assert-HealthyGuardianJSON 'post-deenrollment-control-baseline'
+    $controlLedgerSemantics =
+        Get-StableGuardianAuthorizationSemanticSnapshot $controlLedgerPath
     $controlCodexSharedBaseline = Get-ProtectedUserTreeInventory `
         $controlMachinePolicyRoot `
         'managed machine policy directories after de-enrollment restore'
@@ -18274,20 +21082,22 @@ targets:
             $controlCodexSharedBaseline `
             $afterCodexShared `
             'hostile managed machine-policy directory probe'
-        if ([string]::IsNullOrWhiteSpace($controlLedgerDigest) -or
-            (Get-FileDigest $controlLedgerPath) -ne $controlLedgerDigest) {
-            throw 'hostile unregister probe changed the protected authorization ledger'
-        }
+        $null = Assert-HealthyGuardianJSON 'standard-user-probe'
+        $afterLedgerSemantics =
+            Get-StableGuardianAuthorizationSemanticSnapshot $controlLedgerPath
+        Assert-SameObjectJSON `
+            $controlLedgerSemantics `
+            $afterLedgerSemantics `
+            'hostile unregister probe authorization semantics'
         $afterServiceControl = Get-ServiceControlSnapshot 'after-hostile-control'
         Assert-SameServiceControlSnapshot `
             $serviceControlBaseline `
             $afterServiceControl `
             'hostile SCM probe'
         $afterServiceProcesses = Get-CertificationServiceProcessSnapshot
-        Assert-SameObjectJSON `
-            $serviceProcessBaseline `
-            $afterServiceProcesses `
-            'hostile process-termination probe'
+        if (@($afterServiceProcesses).Count -ne 2) {
+            throw 'managed services are not both running after authorized lifecycle transitions'
+        }
         $responsive = Invoke-EnterpriseInstallerJSON `
             -Action Verify `
             -GatewaySource '' `
@@ -18297,8 +21107,7 @@ targets:
         if (-not [bool]$responsive.JSON.ok) {
             throw 'installer Verify found a service unresponsive after hostile process/token handle probes'
         }
-        Assert-HealthyGuardianJSON 'standard-user-probe'
-        return 'services/PIDs remained running/responsive; process and token mutation handles, SCM mutation, and file/ACL tamper were denied; SCM contract, ledger, deployment bytes, machine policy parent, and protected hook remained unchanged'
+        return 'services/PIDs remained running/responsive; process and token mutation handles, SCM mutation, and file/ACL tamper were denied; SCM contract, authorization semantics, deployment bytes, machine policy parent, and protected hook remained unchanged'
     }
 
     $script:Phase = 'repair'
@@ -18720,8 +21529,13 @@ targets:
     }
     $completed = $true
 } catch {
+    $script:FailureEvidence = ConvertTo-CertificationErrorEvidence $_
     $failure = $_.Exception.Message
-    Add-Result 'harness-failure' 'failed' $failure
+    Add-Result `
+        'harness-failure' `
+        'failed' `
+        $failure `
+        @{ error = $script:FailureEvidence }
 } finally {
     try {
         if (-not (Test-Path -LiteralPath $script:EvidenceDirectory -PathType Container)) {

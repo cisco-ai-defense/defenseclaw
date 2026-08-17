@@ -59,11 +59,14 @@ var (
 	enterpriseHookWatchDebounce time.Duration
 	enterpriseHookWatchSettle   time.Duration
 
-	enterpriseHooksRuntimeGOOS                 = func() string { return runtime.GOOS }
-	enterpriseHooksPlatformPreflight           = enterpriseHooksNativePlatformPreflight
-	enterpriseHooksMutationIdentityPreflight   = enterpriseHooksNativeMutationIdentityPreflight
-	enterpriseHooksRootPersistentPreRun        = enterpriseHooksNativePersistentPreRun
-	enterpriseHooksFullRootPersistentPreRun    = rootPersistentPreRunE
+	enterpriseHooksRuntimeGOOS                = func() string { return runtime.GOOS }
+	enterpriseHooksPlatformPreflight          = enterpriseHooksNativePlatformPreflight
+	enterpriseHooksMutationIdentityPreflight  = enterpriseHooksNativeMutationIdentityPreflight
+	enterpriseHooksRootPersistentPreRun       = enterpriseHooksNativePersistentPreRun
+	enterpriseHooksFullRootPersistentPreRun   = rootPersistentPreRunE
+	enterpriseHooksConfigOnlyPersistentPreRun = func(*cobra.Command, []string) error {
+		return loadGatewayCommandConfigOnly()
+	}
 	enterpriseHooksPluginRegistryFactory       = newConnectorRegistryWithPlugins
 	enterpriseHooksCertifiedRegistryFactory    = newWindowsEnterpriseCertifiedConnectorRegistry
 	enterpriseHooksInstallRunE                 = runEnterpriseHooksInstall
@@ -99,6 +102,8 @@ const hookGuardianAuthorizationDirEnv = managed.HookGuardianAuthorizationDirEnv
 const (
 	enterpriseHookGuardianStateMaxBytes         int64 = 1 << 20
 	enterpriseHookGuardianAuthorizationMaxBytes int64 = 4 << 20
+	enterpriseHookWatchRepairRetryMin                 = time.Second
+	enterpriseHookWatchRepairRetryMax                 = 15 * time.Second
 )
 
 var enterpriseCmd = &cobra.Command{
@@ -380,28 +385,36 @@ func runEnterpriseHooksInstall(cmd *cobra.Command, _ []string) error {
 		return enterpriseHooksInstallError(cmd, err)
 	}
 
-	previouslyProtected, err := previousEnterpriseHookSuccess(cfg.DataDir, enterpriseHookUser, target.home, target.sid, enterpriseHookConnector)
+	previousProtection, err := previousEnterpriseHookProtection(
+		cfg.DataDir,
+		enterpriseHookUser,
+		target.home,
+		target.sid,
+		enterpriseHookConnector,
+	)
 	if err != nil {
 		return enterpriseHooksInstallError(cmd, err)
 	}
 	opts := enterprisehooks.InstallOptions{
-		ConnectorName:                enterpriseHookConnector,
-		UserHome:                     target.home,
-		OwnerUID:                     target.uid,
-		OwnerGID:                     target.gid,
-		OwnerSID:                     target.sid,
-		DataDir:                      enterpriseHookDataDir,
-		APIAddr:                      apiAddr,
-		ProxyAddr:                    proxyAddr,
-		APIToken:                     token,
-		OTLPPathToken:                otlpToken,
-		HookFailMode:                 cfg.EffectiveHookFailModeForConnector(enterpriseHookConnector),
-		GuardrailMode:                cfg.EffectiveGuardrailModeForConnector(enterpriseHookConnector),
-		HILTEnabled:                  cfg.EffectiveHILTForConnector(enterpriseHookConnector).Enabled,
-		AgentVersion:                 enterpriseHookAgentVersion,
-		WorkspaceDir:                 cfg.ConnectorWorkspaceDir(),
-		Registry:                     newEnterpriseHooksConnectorRegistry(),
-		AllowMissingHookConfigRepair: previouslyProtected,
+		ConnectorName:                      enterpriseHookConnector,
+		UserHome:                           target.home,
+		OwnerUID:                           target.uid,
+		OwnerGID:                           target.gid,
+		OwnerSID:                           target.sid,
+		DataDir:                            enterpriseHookDataDir,
+		APIAddr:                            apiAddr,
+		ProxyAddr:                          proxyAddr,
+		APIToken:                           token,
+		OTLPPathToken:                      otlpToken,
+		HookFailMode:                       cfg.EffectiveHookFailModeForConnector(enterpriseHookConnector),
+		GuardrailMode:                      cfg.EffectiveGuardrailModeForConnector(enterpriseHookConnector),
+		HILTEnabled:                        cfg.EffectiveHILTForConnector(enterpriseHookConnector).Enabled,
+		AgentVersion:                       enterpriseHookAgentVersion,
+		WorkspaceDir:                       cfg.ConnectorWorkspaceDir(),
+		Registry:                           newEnterpriseHooksConnectorRegistry(),
+		AllowMissingHookConfigRepair:       previousProtection.PreviouslyProtected,
+		RecoveryHookContractLockUpdatedAt:  previousProtection.HookContractLockUpdatedAt,
+		RecoveryHookContractEntryUpdatedAt: previousProtection.HookContractEntryUpdatedAt,
 	}
 
 	ctx, cancel := context.WithCancel(cmd.Context())
@@ -530,6 +543,7 @@ func runEnterpriseHooksStatus(cmd *cobra.Command, _ []string) error {
 		report.Errors = append(report.Errors, "hook guardian has not completed a reconcile")
 	} else {
 		report.State = &state
+		report.Errors = append(report.Errors, enterpriseHookGuardianFailureIssues(state)...)
 	}
 	authorization, authorizationExists, authorizationErr := loadEnterpriseHookGuardianAuthorization(cfg.DataDir)
 	if authorizationErr != nil {
@@ -590,6 +604,24 @@ func enterpriseHooksStatusError(cmd *cobra.Command, report enterpriseHookStatusR
 		return fmt.Errorf("enterprise hooks status failed")
 	}
 	return err
+}
+
+func enterpriseHookGuardianFailureIssues(state enterpriseHookGuardianState) []string {
+	issues := make([]string, 0, state.FailureCount)
+	for _, row := range state.Results {
+		if row.OK {
+			continue
+		}
+		detail := strings.TrimSpace(row.Error)
+		if detail == "" {
+			detail = "no target error was recorded"
+		}
+		issues = append(
+			issues,
+			fmt.Sprintf("last guardian reconcile failed for %s: %s", enterpriseHookTargetLabel(row), detail),
+		)
+	}
+	return issues
 }
 
 func loadEnterpriseHookGuardianState(dataDir string) (enterpriseHookGuardianState, bool, error) {
@@ -1018,28 +1050,36 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 			}
 		}
 		if err == nil {
-			previouslyProtected, authorizationErr := previousEnterpriseHookSuccess(cfg.DataDir, target.User, resolved.home, resolved.sid, target.Connector)
+			previousProtection, authorizationErr := previousEnterpriseHookProtection(
+				cfg.DataDir,
+				target.User,
+				resolved.home,
+				resolved.sid,
+				target.Connector,
+			)
 			if authorizationErr != nil {
 				err = authorizationErr
 			}
 			opts := enterprisehooks.InstallOptions{
-				ConnectorName:                target.Connector,
-				UserHome:                     resolved.home,
-				OwnerUID:                     resolved.uid,
-				OwnerGID:                     resolved.gid,
-				OwnerSID:                     resolved.sid,
-				DataDir:                      strings.TrimSpace(target.DataDir),
-				APIAddr:                      apiAddr,
-				ProxyAddr:                    proxyAddr,
-				APIToken:                     token,
-				OTLPPathToken:                otlpToken,
-				HookFailMode:                 cfg.EffectiveHookFailModeForConnector(target.Connector),
-				GuardrailMode:                cfg.EffectiveGuardrailModeForConnector(target.Connector),
-				HILTEnabled:                  cfg.EffectiveHILTForConnector(target.Connector).Enabled,
-				AgentVersion:                 strings.TrimSpace(target.AgentVersion),
-				WorkspaceDir:                 cfg.ConnectorWorkspaceDir(),
-				Registry:                     registry,
-				AllowMissingHookConfigRepair: previouslyProtected,
+				ConnectorName:                      target.Connector,
+				UserHome:                           resolved.home,
+				OwnerUID:                           resolved.uid,
+				OwnerGID:                           resolved.gid,
+				OwnerSID:                           resolved.sid,
+				DataDir:                            strings.TrimSpace(target.DataDir),
+				APIAddr:                            apiAddr,
+				ProxyAddr:                          proxyAddr,
+				APIToken:                           token,
+				OTLPPathToken:                      otlpToken,
+				HookFailMode:                       cfg.EffectiveHookFailModeForConnector(target.Connector),
+				GuardrailMode:                      cfg.EffectiveGuardrailModeForConnector(target.Connector),
+				HILTEnabled:                        cfg.EffectiveHILTForConnector(target.Connector).Enabled,
+				AgentVersion:                       strings.TrimSpace(target.AgentVersion),
+				WorkspaceDir:                       cfg.ConnectorWorkspaceDir(),
+				Registry:                           registry,
+				AllowMissingHookConfigRepair:       previousProtection.PreviouslyProtected,
+				RecoveryHookContractLockUpdatedAt:  previousProtection.HookContractLockUpdatedAt,
+				RecoveryHookContractEntryUpdatedAt: previousProtection.HookContractEntryUpdatedAt,
 			}
 			if err == nil {
 				if dirs, watchErr := enterprisehooks.WatchDirs(opts); watchErr == nil {
@@ -1161,9 +1201,12 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	// Cleared on every reconcile (fsnotify OR interval).
 	var lastTriggerPath string
 	var lastTriggerOp fsnotify.Op
+	repairRetryNeeded := false
+	repairRetryDelay := time.Duration(0)
 	reconcile := func(reason string) (bool, error) {
 		run, err := runEnterpriseHookReconcileOnce(cmd.Context())
 		if err != nil {
+			repairRetryNeeded = true
 			return false, err
 		}
 		dirs := append([]string{filepath.Dir(filepath.Clean(enterpriseHookManifest))}, run.WatchDirs...)
@@ -1216,6 +1259,10 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		if run.StateErr != nil {
 			fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] state write failed: %s\n", run.StateErr)
 		}
+		repairRetryNeeded = run.Failures > 0 || run.StateErr != nil
+		if !repairRetryNeeded {
+			repairRetryDelay = 0
+		}
 		// When the row set is byte-identical to the previous run,
 		// any Write/Chmod events still leaking past the normal
 		// settle window are tail-writes from our own reconcile
@@ -1248,6 +1295,51 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		<-debounce.C
 	}
 	debouncePending := false
+	debounceReason := ""
+	repairRetry := time.NewTimer(time.Hour)
+	if !repairRetry.Stop() {
+		<-repairRetry.C
+	}
+	defer repairRetry.Stop()
+	repairRetryPending := false
+	// Keep failed-repair backoff independent from filesystem debounce. A
+	// target that can generate owned-file events must not be able to postpone
+	// the retry that replaces a released locked or oversized artifact.
+	scheduleRepairRetry := func() {
+		if !repairRetryNeeded || repairRetryPending {
+			return
+		}
+		repairRetryDelay = enterpriseHookWatchNextRepairRetryDelay(repairRetryDelay)
+		resetEnterpriseHookWatchTimer(repairRetry, repairRetryDelay)
+		repairRetryPending = true
+		fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] repair incomplete; retrying in %s\n", repairRetryDelay)
+	}
+	cancelRepairRetry := func() {
+		if !repairRetryPending {
+			return
+		}
+		if !repairRetry.Stop() {
+			select {
+			case <-repairRetry.C:
+			default:
+			}
+		}
+		repairRetryPending = false
+	}
+	cancelPendingDebounce := func() {
+		if !debouncePending {
+			return
+		}
+		if !debounce.Stop() {
+			select {
+			case <-debounce.C:
+			default:
+			}
+		}
+		debouncePending = false
+		debounceReason = ""
+	}
+	scheduleRepairRetry()
 
 	for {
 		select {
@@ -1319,6 +1411,7 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			}
 			resetEnterpriseHookWatchTimer(debounce, enterpriseHookWatchDebounce)
 			debouncePending = true
+			debounceReason = "fsnotify"
 		case err, ok := <-fsw.Errors:
 			if !ok {
 				if contextErr := cmd.Context().Err(); contextErr != nil {
@@ -1330,16 +1423,52 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		case <-debounce.C:
 			if debouncePending {
 				debouncePending = false
-				if _, err := reconcile("fsnotify"); err != nil {
-					fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] reconcile after fsnotify failed: %s\n", err)
+				reason := debounceReason
+				debounceReason = ""
+				if reason == "" {
+					reason = "fsnotify"
 				}
+				if _, err := reconcile(reason); err != nil {
+					fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] reconcile after %s failed: %s\n", reason, err)
+				}
+				if repairRetryNeeded {
+					scheduleRepairRetry()
+				} else {
+					cancelRepairRetry()
+				}
+			}
+		case <-repairRetry.C:
+			repairRetryPending = false
+			if _, err := reconcile("retry"); err != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] reconcile after retry failed: %s\n", err)
+			}
+			if repairRetryNeeded {
+				scheduleRepairRetry()
+			} else {
+				cancelRepairRetry()
 			}
 		case <-ticker.C:
 			if _, err := reconcile("interval"); err != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] interval reconcile failed: %s\n", err)
 			}
+			if repairRetryNeeded {
+				scheduleRepairRetry()
+			} else {
+				cancelRepairRetry()
+				cancelPendingDebounce()
+			}
 		}
 	}
+}
+
+func enterpriseHookWatchNextRepairRetryDelay(previous time.Duration) time.Duration {
+	if previous < enterpriseHookWatchRepairRetryMin {
+		return enterpriseHookWatchRepairRetryMin
+	}
+	if previous >= enterpriseHookWatchRepairRetryMax/2 {
+		return enterpriseHookWatchRepairRetryMax
+	}
+	return previous * 2
 }
 
 // enterpriseHookWatchEventInSettleWindow reports whether an fsnotify
@@ -1659,25 +1788,62 @@ func writeEnterpriseHookGuardianState(dataDir, manifest string, rows []enterpris
 	return nil
 }
 
-func previousEnterpriseHookSuccess(dataDir, userName, userHome, sid, connectorName string) (bool, error) {
+type enterpriseHookPreviousProtection struct {
+	PreviouslyProtected        bool
+	HookContractLockUpdatedAt  string
+	HookContractEntryUpdatedAt string
+}
+
+func previousEnterpriseHookProtection(
+	dataDir,
+	userName,
+	userHome,
+	sid,
+	connectorName string,
+) (enterpriseHookPreviousProtection, error) {
+	var protection enterpriseHookPreviousProtection
 	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
 	userName = strings.TrimSpace(userName)
 	userHome = filepath.Clean(strings.TrimSpace(userHome))
 	sid = strings.TrimSpace(sid)
 	if dataDir == "" || connectorName == "" {
-		return false, nil
+		return protection, nil
 	}
 	authorization, _, err := loadEnterpriseHookGuardianAuthorization(dataDir)
 	if err != nil {
-		return false, err
+		return protection, err
 	}
 	for _, row := range authorization.ProtectedTargets {
 		if !enterpriseHookRowMatches(row, userName, userHome, sid, connectorName) {
 			continue
 		}
-		return true, nil
+		protection.PreviouslyProtected = true
+		if row.Result != nil {
+			protection.HookContractLockUpdatedAt =
+				strings.TrimSpace(row.Result.HookContractLockUpdatedAt)
+			protection.HookContractEntryUpdatedAt =
+				strings.TrimSpace(row.Result.HookContractEntryUpdatedAt)
+		}
+		return protection, nil
 	}
-	return false, nil
+	return protection, nil
+}
+
+func previousEnterpriseHookSuccess(
+	dataDir,
+	userName,
+	userHome,
+	sid,
+	connectorName string,
+) (bool, error) {
+	protection, err := previousEnterpriseHookProtection(
+		dataDir,
+		userName,
+		userHome,
+		sid,
+		connectorName,
+	)
+	return protection.PreviouslyProtected, err
 }
 
 func loadEnterpriseHookGuardianAuthorization(dataDir string) (enterpriseHookGuardianAuthorization, bool, error) {

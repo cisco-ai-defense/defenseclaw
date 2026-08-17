@@ -689,7 +689,8 @@ func windowsCodexCountOwnedPathReferences(value interface{}, needles []string) i
 }
 
 func windowsCodexMachineSecurityComplete(opts WindowsCodexMachineRequirementsOptions) bool {
-	return (!opts.EnterpriseTargetEnabled || opts.AgentApplicationControlEnforced) &&
+	return opts.EnterpriseTargetEnabled &&
+		opts.AgentApplicationControlEnforced &&
 		(!opts.ClaudeTargetEnabled || opts.ClaudeEffectivePolicyVerified) &&
 		(!opts.CodexTargetEnabled || opts.CodexTrustedHookLauncherVerified)
 }

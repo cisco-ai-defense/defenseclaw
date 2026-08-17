@@ -244,6 +244,46 @@ func TestRecognizedPerUserLauncherWithCachedManagedArgsNoopsAfterTombstone(t *te
 	}
 }
 
+func TestRetainedActiveRuntimeFailsAsUnregisteredBeforeGatewayLookup(t *testing.T) {
+	executable, dataRoot := stageTrustedNativeHookForTest(t, "closed")
+	stubEnterpriseManagedRuntimeResolver(t, func(string, string) (enterprisehooks.WindowsManagedHookRuntime, error) {
+		return enterprisehooks.WindowsManagedHookRuntime{Connector: "claudecode"}, nil
+	})
+	nativeHookRuntimeSnapshot.Lock()
+	oldPrepared := nativeHookRuntimeSnapshot.prepared
+	oldExecutable := nativeHookRuntimeSnapshot.executable
+	oldState := nativeHookRuntimeSnapshot.state
+	oldRecognized := nativeHookRuntimeSnapshot.recognized
+	oldErr := nativeHookRuntimeSnapshot.err
+	nativeHookRuntimeSnapshot.prepared = true
+	nativeHookRuntimeSnapshot.executable = executable
+	nativeHookRuntimeSnapshot.recognized = true
+	nativeHookRuntimeSnapshot.err = nil
+	nativeHookRuntimeSnapshot.state = hookruntime.State{
+		Status:   hookruntime.StatusActive,
+		DataRoot: dataRoot,
+	}
+	nativeHookRuntimeSnapshot.Unlock()
+	t.Cleanup(func() {
+		nativeHookRuntimeSnapshot.Lock()
+		nativeHookRuntimeSnapshot.prepared = oldPrepared
+		nativeHookRuntimeSnapshot.executable = oldExecutable
+		nativeHookRuntimeSnapshot.state = oldState
+		nativeHookRuntimeSnapshot.recognized = oldRecognized
+		nativeHookRuntimeSnapshot.err = oldErr
+		nativeHookRuntimeSnapshot.Unlock()
+	})
+
+	if enterpriseManagedHookRuntimeNoop("claudecode") {
+		t.Fatal("de-enrolled active runtime was incorrectly treated as a no-op")
+	}
+	opts := buildHookOptionsForRuntime("claudecode", "PreToolUse", "", "open", true)
+	if opts.ManagedRuntimeFailure != enterprisehooks.WindowsManagedSIDUnregisteredReason ||
+		opts.APIAddr != "" || opts.FailMode != "closed" || !opts.StrictAvailability {
+		t.Fatalf("de-enrolled runtime was not rejected before gateway lookup: %+v", opts)
+	}
+}
+
 func TestEnterpriseProgramFilesCommandDoesNotClaimPerUserTombstoneNoop(t *testing.T) {
 	installRoot := filepath.Join(t.TempDir(), "Program Files", "Cisco", "DefenseClaw")
 	executable := filepath.Join(installRoot, "bin", nativeHookLauncherName)

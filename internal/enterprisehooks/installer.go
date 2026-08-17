@@ -55,8 +55,13 @@ type InstallOptions struct {
 	HILTEnabled    bool
 	AgentVersion   string
 	HookContractID string
-	WorkspaceDir   string
-	Registry       *connector.Registry
+	// Protected recovery timestamps are copied only from the administrator-
+	// owned guardian authorization ledger. They make a deleted target-owned
+	// hook contract lock byte-reproducible without trusting profile state.
+	RecoveryHookContractLockUpdatedAt  string
+	RecoveryHookContractEntryUpdatedAt string
+	WorkspaceDir                       string
+	Registry                           *connector.Registry
 
 	// AllowMissingHookConfigRepair permits the guardian to recreate a missing
 	// native hook config file only after an administrator-owned caller has
@@ -67,15 +72,17 @@ type InstallOptions struct {
 }
 
 type InstallResult struct {
-	Connector       string   `json:"connector"`
-	UserHome        string   `json:"user_home"`
-	DataDir         string   `json:"data_dir"`
-	HookConfigPaths []string `json:"hook_config_paths,omitempty"`
-	HookScripts     []string `json:"hook_scripts,omitempty"`
-	BackupFiles     []string `json:"backup_files,omitempty"`
-	CreatedDirs     []string `json:"created_dirs,omitempty"`
-	AgentVersion    string   `json:"agent_version,omitempty"`
-	HookContractID  string   `json:"hook_contract_id,omitempty"`
+	Connector                  string   `json:"connector"`
+	UserHome                   string   `json:"user_home"`
+	DataDir                    string   `json:"data_dir"`
+	HookConfigPaths            []string `json:"hook_config_paths,omitempty"`
+	HookScripts                []string `json:"hook_scripts,omitempty"`
+	BackupFiles                []string `json:"backup_files,omitempty"`
+	CreatedDirs                []string `json:"created_dirs,omitempty"`
+	AgentVersion               string   `json:"agent_version,omitempty"`
+	HookContractID             string   `json:"hook_contract_id,omitempty"`
+	HookContractLockUpdatedAt  string   `json:"hook_contract_lock_updated_at,omitempty"`
+	HookContractEntryUpdatedAt string   `json:"hook_contract_entry_updated_at,omitempty"`
 }
 
 // RemoveManagedPolicy removes one target user's administrator-managed vendor

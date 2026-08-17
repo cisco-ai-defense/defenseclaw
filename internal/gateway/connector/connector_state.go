@@ -481,7 +481,7 @@ func LoadHookContractLockEntryForMode(
 }
 
 func SaveHookContractLockEntry(dataDir string, entry HookContractLockEntry) error {
-	return saveHookContractLockEntry(dataDir, entry, false, false)
+	return saveHookContractLockEntry(dataDir, entry, false, false, "", "")
 }
 
 // SaveFreshHookContractLockEntry persists the same contract evidence as
@@ -489,7 +489,7 @@ func SaveHookContractLockEntry(dataDir string, entry HookContractLockEntry) erro
 // otherwise unchanged. Gateway boot uses this narrow variant as its durable
 // readiness acknowledgement; ordinary callers retain idempotent no-op saves.
 func SaveFreshHookContractLockEntry(dataDir string, entry HookContractLockEntry) error {
-	return saveHookContractLockEntry(dataDir, entry, false, true)
+	return saveHookContractLockEntry(dataDir, entry, false, true, "", "")
 }
 
 func SaveHookContractLockEntryForMode(
@@ -497,7 +497,34 @@ func SaveHookContractLockEntryForMode(
 	entry HookContractLockEntry,
 	managedEnterprise bool,
 ) error {
-	return saveHookContractLockEntry(dataDir, entry, managedEnterprise, false)
+	return saveHookContractLockEntry(
+		dataDir,
+		entry,
+		managedEnterprise,
+		false,
+		"",
+		"",
+	)
+}
+
+// SaveRecoveredHookContractLockEntryForMode recreates a missing managed
+// target-owned lock with timestamps authenticated by the protected guardian
+// authorization ledger. This keeps a deleted user runtime byte-reproducible
+// without reading recovery state from the user-controlled profile.
+func SaveRecoveredHookContractLockEntryForMode(
+	dataDir string,
+	entry HookContractLockEntry,
+	lockUpdatedAt string,
+	entryUpdatedAt string,
+) error {
+	return saveHookContractLockEntry(
+		dataDir,
+		entry,
+		true,
+		false,
+		lockUpdatedAt,
+		entryUpdatedAt,
+	)
 }
 
 func saveHookContractLockEntry(
@@ -505,6 +532,8 @@ func saveHookContractLockEntry(
 	entry HookContractLockEntry,
 	managedEnterprise bool,
 	forceRefresh bool,
+	recoveredLockUpdatedAt string,
+	recoveredEntryUpdatedAt string,
 ) error {
 	if strings.TrimSpace(dataDir) == "" || strings.TrimSpace(entry.Connector) == "" {
 		return nil
@@ -527,6 +556,19 @@ func saveHookContractLockEntry(
 		}
 		if lock.Connectors == nil {
 			lock.Connectors = map[string]HookContractLockEntry{}
+		}
+		_, entryAlreadyExists := lock.Connectors[entry.Connector]
+		recoveringMissingEntry := managedEnterprise && !entryAlreadyExists &&
+			(recoveredLockUpdatedAt != "" || recoveredEntryUpdatedAt != "")
+		if recoveringMissingEntry {
+			lockTime, lockErr := time.Parse(time.RFC3339Nano, recoveredLockUpdatedAt)
+			entryTime, entryErr := time.Parse(time.RFC3339Nano, recoveredEntryUpdatedAt)
+			if lockErr != nil || entryErr != nil || entryTime.After(lockTime) {
+				return errors.New(
+					"invalid protected managed hook-contract recovery timestamps",
+				)
+			}
+			entry.UpdatedAt = recoveredEntryUpdatedAt
 		}
 		shared := takeSharedHookScriptDigests(entry.HookScriptDigests)
 		expectedShared := len(genericHookScripts) + len(hookHelperScripts)
@@ -579,6 +621,9 @@ func saveHookContractLockEntry(
 		}
 		nowTime := time.Now().UTC()
 		now := nowTime.Format(time.RFC3339)
+		if recoveringMissingEntry {
+			now = recoveredLockUpdatedAt
+		}
 		if forceRefresh {
 			now = nowTime.Format(time.RFC3339Nano)
 			if now == entry.UpdatedAt {
@@ -596,6 +641,40 @@ func saveHookContractLockEntry(
 		}
 		return atomicWriteFile(path, append(data, '\n'), 0o600)
 	})
+}
+
+// ManagedHookContractTimestamps returns the authenticated bounded timestamps
+// needed to reproduce the exact managed lock after a target-owned root is
+// deleted. Callers persist these values only in administrator-owned state.
+func ManagedHookContractTimestamps(
+	dataDir string,
+	connectorName string,
+) (lockUpdatedAt string, entryUpdatedAt string, err error) {
+	lock, err := loadManagedHookContractLock(dataDir)
+	if err != nil {
+		return "", "", err
+	}
+	entry, ok := lock.Connectors[normalizeConnectorName(connectorName)]
+	if !ok {
+		return "", "", fmt.Errorf(
+			"managed hook contract has no %s entry",
+			normalizeConnectorName(connectorName),
+		)
+	}
+	lockTime, err := time.Parse(time.RFC3339Nano, lock.UpdatedAt)
+	if err != nil {
+		return "", "", fmt.Errorf("invalid managed hook lock timestamp: %w", err)
+	}
+	entryTime, err := time.Parse(time.RFC3339Nano, entry.UpdatedAt)
+	if err != nil {
+		return "", "", fmt.Errorf("invalid managed hook entry timestamp: %w", err)
+	}
+	if entryTime.After(lockTime) {
+		return "", "", errors.New(
+			"managed hook entry timestamp is newer than its lock",
+		)
+	}
+	return lock.UpdatedAt, entry.UpdatedAt, nil
 }
 
 func ClearHookContractLockEntry(dataDir, connectorName string) error {

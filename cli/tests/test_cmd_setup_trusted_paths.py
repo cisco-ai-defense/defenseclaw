@@ -347,7 +347,7 @@ class TrustedPathsCliTests(unittest.TestCase):
             self.assertEqual(result.exit_code, 0, msg=result.output)
             rows = json.loads(result.output)
             resolved = {r["resolved"] for r in rows}
-            expected = set(ad._expand_bin_prefixes(ad._TRUSTED_BIN_PREFIXES_DEFAULT))
+            expected = set(ad._expand_bin_prefixes(ad._builtin_trusted_bin_prefixes()))
             self.assertTrue(expected <= resolved)
             self.assertTrue(all({"path", "resolved", "source", "status", "removable"} <= set(r) for r in rows))
 
@@ -418,6 +418,79 @@ class TrustedPathsCliTests(unittest.TestCase):
                 result = self.runner.invoke(cmd_setup.trusted_paths, ["add", default, "--json"], obj=app)
             self.assertEqual(result.exit_code, 0, msg=result.output)
             self.assertIn("default", json.loads(result.output)["message"])
+
+    def test_config_provenance_wins_when_path_becomes_builtin_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = _make_app_context(tmp)
+            newdir = os.path.join(tmp, "tools")
+            os.makedirs(newdir)
+            resolved = os.path.realpath(newdir)
+            with patch.dict(os.environ, {"DEFENSECLAW_TRUSTED_BIN_PREFIXES": ""}, clear=False):
+                added = self.runner.invoke(
+                    cmd_setup.trusted_paths,
+                    ["add", newdir, "--json"],
+                    obj=app,
+                )
+                self.assertEqual(added.exit_code, 0, msg=added.output)
+
+                # Model a new Windows process whose HOME/profile-derived
+                # defaults now include the path the operator already saved.
+                with (
+                    patch.object(ad, "_TRUSTED_BIN_PREFIXES_DEFAULT", (resolved,)),
+                    patch.object(
+                        ad,
+                        "_builtin_trusted_bin_prefixes",
+                        return_value=(resolved,),
+                    ),
+                ):
+                    listing = self.runner.invoke(
+                        cmd_setup.trusted_paths,
+                        ["list", "--json"],
+                        obj=app,
+                    )
+                    duplicate = self.runner.invoke(
+                        cmd_setup.trusted_paths,
+                        ["add", newdir, "--json"],
+                        obj=app,
+                    )
+                    removed = self.runner.invoke(
+                        cmd_setup.trusted_paths,
+                        ["remove", newdir, "--json"],
+                        obj=app,
+                    )
+                    after = self.runner.invoke(
+                        cmd_setup.trusted_paths,
+                        ["list", "--json"],
+                        obj=app,
+                    )
+
+            self.assertEqual(listing.exit_code, 0, msg=listing.output)
+            rows = [
+                row
+                for row in json.loads(listing.output)
+                if row["resolved"] == resolved
+            ]
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["source"], "config")
+            self.assertTrue(rows[0]["removable"])
+            self.assertEqual(duplicate.exit_code, 0, msg=duplicate.output)
+            self.assertIn("operator-added", json.loads(duplicate.output)["message"])
+            self.assertEqual(removed.exit_code, 0, msg=removed.output)
+            post_rows = [
+                row
+                for row in json.loads(after.output)
+                if row["resolved"] == resolved
+            ]
+            self.assertEqual(len(post_rows), 1)
+            self.assertEqual(post_rows[0]["source"], "default")
+            self.assertFalse(post_rows[0]["removable"])
+            body = yaml.safe_load(
+                open(os.path.join(tmp, "config.yaml"), encoding="utf-8")
+            ) or {}
+            self.assertNotIn(
+                resolved,
+                body.get("ai_discovery", {}).get("trusted_binary_prefixes", []),
+            )
 
     def test_remove_operator_added(self):
         with tempfile.TemporaryDirectory() as tmp:

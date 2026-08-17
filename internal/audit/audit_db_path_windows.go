@@ -9,10 +9,15 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"unsafe"
 
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"golang.org/x/sys/windows"
 )
+
+var auditDBWindowsServiceAccountSID = managed.WindowsServiceAccountSID
 
 func openAuditDBFileNoFollow(path string, create bool) (*os.File, error) {
 	pathPtr, err := windows.UTF16PtrFromString(path)
@@ -56,6 +61,10 @@ func openAuditDBFileNoFollow(path string, create bool) (*os.File, error) {
 }
 
 func validateAuditDBPlatformTrust(path string, _ os.FileInfo, directory, protectChildren bool) error {
+	gatewayServiceSID, err := auditDBWindowsPinnedGatewayServiceSID()
+	if err != nil {
+		return err
+	}
 	pathPtr, err := windows.UTF16PtrFromString(path)
 	if err != nil {
 		return fmt.Errorf("audit: encode Windows path: %w", err)
@@ -83,7 +92,7 @@ func validateAuditDBPlatformTrust(path string, _ os.FileInfo, directory, protect
 	if err != nil {
 		return fmt.Errorf("audit: inspect Windows owner: %w", err)
 	}
-	if !auditDBWindowsTrustedPrincipal(owner) {
+	if !auditDBWindowsTrustedPrincipal(owner, gatewayServiceSID) {
 		return fmt.Errorf("audit: Windows owner %s is not trusted", auditDBWindowsSID(owner))
 	}
 	dacl, _, err := sd.DACL()
@@ -93,7 +102,13 @@ func validateAuditDBPlatformTrust(path string, _ os.FileInfo, directory, protect
 	if dacl == nil {
 		return errors.New("audit: null Windows DACL is not trusted")
 	}
-	return rejectUntrustedAuditDBWindowsACEs(path, dacl, directory, protectChildren)
+	return rejectUntrustedAuditDBWindowsACEs(
+		path,
+		dacl,
+		directory,
+		protectChildren,
+		gatewayServiceSID,
+	)
 }
 
 func secureAuditDBPlatformPath(path string, directory bool) error {
@@ -138,6 +153,10 @@ func secureAuditDBPlatformFile(file *os.File, directory bool) error {
 }
 
 func auditDBWindowsProtectedDACL(directory bool) (*windows.ACL, error) {
+	gatewayServiceSID, err := auditDBWindowsPinnedGatewayServiceSID()
+	if err != nil {
+		return nil, err
+	}
 	currentUser, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil || currentUser == nil || currentUser.User.Sid == nil {
 		return nil, fmt.Errorf("audit: resolve current Windows user: %w", err)
@@ -154,8 +173,25 @@ func auditDBWindowsProtectedDACL(directory bool) (*windows.ACL, error) {
 	if directory {
 		inheritance = uint32(windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT)
 	}
-	entries := make([]windows.EXPLICIT_ACCESS, 0, 3)
-	for _, sid := range []*windows.SID{currentUser.User.Sid, administrators, localSystem} {
+	trustedSIDs := []*windows.SID{
+		currentUser.User.Sid,
+		administrators,
+		localSystem,
+	}
+	if gatewayServiceSID != nil {
+		trustedSIDs = append(trustedSIDs, gatewayServiceSID)
+	}
+	entries := make([]windows.EXPLICIT_ACCESS, 0, len(trustedSIDs))
+	seen := make(map[string]struct{}, len(trustedSIDs))
+	for _, sid := range trustedSIDs {
+		if sid == nil {
+			continue
+		}
+		key := strings.ToUpper(sid.String())
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
 		entries = append(entries, windows.EXPLICIT_ACCESS{
 			AccessPermissions: windows.GENERIC_ALL,
 			AccessMode:        windows.GRANT_ACCESS,
@@ -174,7 +210,13 @@ func auditDBWindowsProtectedDACL(directory bool) (*windows.ACL, error) {
 	return dacl, nil
 }
 
-func rejectUntrustedAuditDBWindowsACEs(path string, dacl *windows.ACL, directory, protectChildren bool) error {
+func rejectUntrustedAuditDBWindowsACEs(
+	path string,
+	dacl *windows.ACL,
+	directory bool,
+	protectChildren bool,
+	gatewayServiceSID *windows.SID,
+) error {
 	const (
 		accessAllowedCompoundACEType       = 0x4
 		accessAllowedObjectACEType         = 0x5
@@ -212,7 +254,7 @@ func rejectUntrustedAuditDBWindowsACEs(path string, dacl *windows.ACL, directory
 			inheritOnly && sid.IsWellKnown(windows.WinCreatorOwnerSid) {
 			continue
 		}
-		if !auditDBWindowsTrustedPrincipal(sid) {
+		if !auditDBWindowsTrustedPrincipal(sid, gatewayServiceSID) {
 			return fmt.Errorf(
 				"audit: untrusted Windows principal %s has access mask 0x%x that can expose or modify audit storage on %s",
 				auditDBWindowsSID(sid), uint32(ace.Mask), path,
@@ -249,12 +291,20 @@ func auditDBWindowsWriteLikeAccess(mask windows.ACCESS_MASK, protectChildren boo
 	return mask&unsafeMask != 0
 }
 
-func auditDBWindowsTrustedPrincipal(sid *windows.SID) bool {
+func auditDBWindowsTrustedPrincipal(
+	sid *windows.SID,
+	gatewayServiceSID ...*windows.SID,
+) bool {
 	if sid == nil {
 		return false
 	}
 	if sid.IsWellKnown(windows.WinBuiltinAdministratorsSid) || sid.IsWellKnown(windows.WinLocalSystemSid) {
 		return true
+	}
+	for _, allowed := range gatewayServiceSID {
+		if allowed != nil && sid.Equals(allowed) {
+			return true
+		}
 	}
 	currentUser, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err == nil && currentUser != nil && currentUser.User.Sid != nil && sid.Equals(currentUser.User.Sid) {
@@ -262,6 +312,42 @@ func auditDBWindowsTrustedPrincipal(sid *windows.SID) bool {
 	}
 	trustedInstaller, err := windows.StringToSid("S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464")
 	return err == nil && sid.Equals(trustedInstaller)
+}
+
+func auditDBWindowsPinnedGatewayServiceSID() (*windows.SID, error) {
+	account := os.Getenv(managed.WindowsServiceAccountEnv)
+	serviceName := os.Getenv(connector.WindowsGatewayServiceNameEnv)
+	if account == "" && serviceName == "" {
+		return nil, nil
+	}
+	if account == "" || serviceName == "" {
+		return nil, errors.New(
+			"audit: managed Windows gateway service identity pins are incomplete",
+		)
+	}
+	if err := connector.ValidateWindowsManagedGatewayServiceName(serviceName); err != nil {
+		return nil, fmt.Errorf("audit: invalid managed gateway service name: %w", err)
+	}
+	expectedAccount := `NT SERVICE\` + serviceName
+	if !strings.EqualFold(account, expectedAccount) ||
+		account != strings.TrimSpace(account) {
+		return nil, fmt.Errorf(
+			"audit: managed service account %q does not match exact gateway service %q",
+			account,
+			serviceName,
+		)
+	}
+	sid, err := auditDBWindowsServiceAccountSID(account)
+	if err != nil {
+		return nil, fmt.Errorf(
+			"audit: resolve exact managed gateway service SID: %w",
+			err,
+		)
+	}
+	if sid == nil {
+		return nil, errors.New("audit: exact managed gateway service SID is unavailable")
+	}
+	return sid, nil
 }
 
 func auditDBWindowsSID(sid *windows.SID) string {

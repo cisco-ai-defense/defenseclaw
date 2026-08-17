@@ -24,14 +24,8 @@ param(
     [string]$Config,
     [string]$Manifest,
 
-    [string]$InstallRoot = ([IO.Path]::Combine(
-        [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles),
-        'Cisco\DefenseClaw'
-    )),
-    [string]$StateRoot = ([IO.Path]::Combine(
-        [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData),
-        'Cisco\DefenseClaw'
-    )),
+    [string]$InstallRoot,
+    [string]$StateRoot,
     [string]$GatewayServiceName = 'DefenseClawGateway',
     [string]$GuardianServiceName = 'DefenseClawHookGuardian',
     [string]$CertificationCodexHome,
@@ -51,9 +45,105 @@ param(
 Microsoft.PowerShell.Core\Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$trustedWindows = [Environment]::GetFolderPath([Environment+SpecialFolder]::Windows)
-$trustedProgramFiles = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
-$trustedProgramData = [Environment]::GetFolderPath([Environment+SpecialFolder]::CommonApplicationData)
+function ConvertTo-DefenseClawTrustedMachineRoot {
+    param(
+        [Parameter(Mandatory)][string]$Value,
+        [Parameter(Mandatory)][string]$Label
+    )
+    if ([string]::IsNullOrWhiteSpace($Value) -or
+        $Value -match '[\x00-\x1f%]' -or
+        -not [IO.Path]::IsPathRooted($Value)) {
+        throw "trusted $Label root is empty, relative, or contains an invalid character"
+    }
+    $full = [IO.Path]::GetFullPath($Value).TrimEnd('\')
+    $driveRoot = [IO.Path]::GetPathRoot($full)
+    if ([string]::IsNullOrWhiteSpace($driveRoot) -or
+        $driveRoot -notmatch '^[A-Za-z]:\\$' -or
+        $full.StartsWith('\\') -or
+        $full.StartsWith('//') -or
+        $full.StartsWith('\\?\') -or
+        $full.StartsWith('\\.\') -or
+        -not [IO.Directory]::Exists($full)) {
+        throw "trusted $Label root is not an existing canonical local directory: $full"
+    }
+    return $full
+}
+
+function Get-DefenseClawTrustedMachineRoots {
+    # Environment.GetFolderPath can return an empty string when PowerShell is
+    # launched with the deliberately reduced native-bootstrap environment.
+    # Resolve machine roots from fixed HKLM registration plus the Win32-backed
+    # Environment.SystemDirectory property, without consulting process HOME,
+    # profile, ProgramFiles, ProgramData, SystemRoot, or windir variables.
+    $windows = ConvertTo-DefenseClawTrustedMachineRoot `
+        -Value ([IO.Path]::GetDirectoryName([Environment]::SystemDirectory)) `
+        -Label 'Windows'
+    $base = $null
+    $shell = $null
+    try {
+        $base = [Microsoft.Win32.RegistryKey]::OpenBaseKey(
+            [Microsoft.Win32.RegistryHive]::LocalMachine,
+            [Microsoft.Win32.RegistryView]::Registry64
+        )
+        $currentVersion = $base.OpenSubKey(
+            'SOFTWARE\Microsoft\Windows\CurrentVersion',
+            $false
+        )
+        if ($null -eq $currentVersion) {
+            throw 'trusted Program Files machine registration is missing'
+        }
+        try {
+            $programFilesRaw = [string]$currentVersion.GetValue(
+                'ProgramFilesDir',
+                $null,
+                [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
+            )
+        } finally {
+            $currentVersion.Dispose()
+        }
+        $shell = $base.OpenSubKey(
+            'SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Shell Folders',
+            $false
+        )
+        if ($null -eq $shell) {
+            throw 'trusted ProgramData machine registration is missing'
+        }
+        $programDataRaw = [string]$shell.GetValue(
+            'Common AppData',
+            $null,
+            [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames
+        )
+    } finally {
+        if ($null -ne $shell) { $shell.Dispose() }
+        if ($null -ne $base) { $base.Dispose() }
+    }
+    return [pscustomobject]@{
+        Windows = $windows
+        ProgramFiles = ConvertTo-DefenseClawTrustedMachineRoot `
+            -Value $programFilesRaw `
+            -Label 'Program Files'
+        ProgramData = ConvertTo-DefenseClawTrustedMachineRoot `
+            -Value $programDataRaw `
+            -Label 'ProgramData'
+    }
+}
+
+$trustedMachineRoots = Get-DefenseClawTrustedMachineRoots
+$trustedWindows = [string]$trustedMachineRoots.Windows
+$trustedProgramFiles = [string]$trustedMachineRoots.ProgramFiles
+$trustedProgramData = [string]$trustedMachineRoots.ProgramData
+$InstallRoot = if ([string]::IsNullOrWhiteSpace($InstallRoot)) {
+    [IO.Path]::Combine(
+        $trustedProgramFiles,
+        'Cisco\Cisco Secure Client\DefenseClaw'
+    )
+} else { $InstallRoot }
+$StateRoot = if ([string]::IsNullOrWhiteSpace($StateRoot)) {
+    [IO.Path]::Combine(
+        $trustedProgramData,
+        'Cisco\Cisco Secure Client\DefenseClaw'
+    )
+} else { $StateRoot }
 $trustedSystem32 = [IO.Path]::Combine($trustedWindows, 'System32')
 [Environment]::SetEnvironmentVariable('SystemRoot', $trustedWindows, 'Process')
 [Environment]::SetEnvironmentVariable('windir', $trustedWindows, 'Process')
@@ -323,8 +413,16 @@ function Assert-DefenseClawBootstrapUnsignedCertificationScope {
         [string]$RequestedCertificationCodexHome
     )
     $prefix = '-AllowUnsigned is restricted to exact disposable DefenseClaw certification scope'
-    if ($LifecycleAction -notin @('Install', 'Upgrade', 'Repair', 'Uninstall')) {
-        throw "$prefix; action must be Install, Upgrade, Repair, or Uninstall"
+    if ($LifecycleAction -notin @(
+        'Install',
+        'Upgrade',
+        'Repair',
+        'Reconcile',
+        'Status',
+        'Verify',
+        'Uninstall'
+    )) {
+        throw "$prefix; action is outside the enterprise lifecycle"
     }
     if ($RequestedGatewayServiceName -cnotmatch '^DefenseClawCertGateway_([a-f0-9]{10})$') {
         throw "$prefix; gateway service name is outside the certification namespace"
@@ -352,12 +450,14 @@ function Assert-DefenseClawBootstrapUnsignedCertificationScope {
     $expectedInstall = [IO.Path]::Combine(
         $trustedProgramFiles,
         'Cisco',
+        'Cisco Secure Client',
         'DefenseClaw-Cert',
         $runID
     ).TrimEnd('\')
     $expectedState = [IO.Path]::Combine(
         $trustedProgramData,
         'Cisco',
+        'Cisco Secure Client',
         'DefenseClaw-Cert',
         $runID
     ).TrimEnd('\')
@@ -390,10 +490,21 @@ function Assert-DefenseClawBootstrapUnsignedCertificationScope {
             ".codex-defenseclaw-cert-$runID") {
         throw "$prefix; CertificationCodexHome must be the exact local run-scoped directory"
     }
-    if (-not (Microsoft.PowerShell.Management\Test-Path `
+    $certificationHomeExists = Microsoft.PowerShell.Management\Test-Path `
         -LiteralPath $certificationHome `
-        -PathType Container)) {
+        -PathType Container
+    $allowMissingCertificationHome = $LifecycleAction -in @(
+        'Status',
+        'Verify'
+    )
+    if (-not $certificationHomeExists -and
+        -not $allowMissingCertificationHome) {
         throw "$prefix; CertificationCodexHome must be an existing directory"
+    }
+    if ((Microsoft.PowerShell.Management\Test-Path `
+            -LiteralPath $certificationHome) -and
+        -not $certificationHomeExists) {
+        throw "$prefix; CertificationCodexHome must be a directory when present"
     }
 
     $nativePathType = Initialize-DefenseClawBootstrapNativePath
@@ -410,7 +521,12 @@ function Assert-DefenseClawBootstrapUnsignedCertificationScope {
         )) {
         throw "$prefix; CertificationCodexHome must be on local fixed NTFS without redirection"
     }
-    $current = $certificationHome
+    $current = if ($certificationHomeExists) {
+        $certificationHome
+    }
+    else {
+        [IO.Path]::GetDirectoryName($certificationHome)
+    }
     while (-not [string]::IsNullOrWhiteSpace($current)) {
         $item = Microsoft.PowerShell.Management\Get-Item `
             -LiteralPath $current `
@@ -459,12 +575,14 @@ function Assert-DefenseClawBootstrapLifecycleScope {
         $expectedInstall = [IO.Path]::Combine(
             $trustedProgramFiles,
             'Cisco',
+            'Cisco Secure Client',
             'DefenseClaw-Cert',
             $runID
         ).TrimEnd('\')
         $expectedState = [IO.Path]::Combine(
             $trustedProgramData,
             'Cisco',
+            'Cisco Secure Client',
             'DefenseClaw-Cert',
             $runID
         ).TrimEnd('\')
@@ -507,11 +625,13 @@ function Assert-DefenseClawBootstrapLifecycleScope {
     $expectedInstall = [IO.Path]::Combine(
         $trustedProgramFiles,
         'Cisco',
+        'Cisco Secure Client',
         'DefenseClaw'
     ).TrimEnd('\')
     $expectedState = [IO.Path]::Combine(
         $trustedProgramData,
         'Cisco',
+        'Cisco Secure Client',
         'DefenseClaw'
     ).TrimEnd('\')
     if (-not [string]::Equals(
@@ -1262,9 +1382,8 @@ try {
             -RequestedGuardianServiceName $GuardianServiceName `
             -RequestedCertificationCodexHome $CertificationCodexHome
     }
-    elseif (-not [string]::IsNullOrWhiteSpace($CertificationCodexHome) -and
-        $Action -in @('Install', 'Upgrade', 'Repair')) {
-        throw '-CertificationCodexHome requires -AllowUnsigned for every Install, Upgrade, or Repair'
+    elseif (-not [string]::IsNullOrWhiteSpace($CertificationCodexHome)) {
+        throw '-CertificationCodexHome requires -AllowUnsigned for every lifecycle action'
     }
     if ($CoreHardeningCertification -and
         $Action -notin @('Install', 'Upgrade', 'Repair')) {
@@ -1329,12 +1448,9 @@ try {
         AttestCodexTrustedHookLauncher = [bool]$AttestCodexTrustedHookLauncher
         CodexTrustedHookLauncherBinary = $CodexTrustedHookLauncherBinary
         SelfUninstallCallerPID = $SelfUninstallCallerPID
-        # -AllowUnsigned also permits the protected staged module to bootstrap
-        # in certification builds. The lifecycle module accepts that
-        # relaxation only while installing/replacing artifacts.
-        AllowUnsigned = [bool](
-            $AllowUnsigned -and $Action -in @('Install', 'Upgrade', 'Repair', 'Uninstall')
-        )
+        # The exact service/root/CODEX_HOME grammar scopes this relaxation for
+        # every certification lifecycle action, including pre-install Status.
+        AllowUnsigned = [bool]$AllowUnsigned
         InstallerSource = $PSCommandPath
         ModuleSource = $modulePath
     }
@@ -1390,6 +1506,7 @@ if (-not [string]::IsNullOrWhiteSpace($failureMessage)) {
             ok = $false
             action = $Action.ToLowerInvariant()
             error = $failureMessage
+            errors = @($failureMessage)
         } | Microsoft.PowerShell.Utility\ConvertTo-Json -Depth 6 -Compress
     }
     else {

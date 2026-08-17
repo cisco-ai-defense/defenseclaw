@@ -277,6 +277,31 @@ func TestRotationConnectorStateRejectsFallbackPolicyDrift(t *testing.T) {
 	}
 }
 
+func TestRotationConnectorStateNormalizesManagedNativeHooksClosed(t *testing.T) {
+	cfg := config.DefaultConfig()
+	cfg.DeploymentMode = "managed_enterprise"
+	cfg.Guardrail.Enabled = true
+	cfg.Guardrail.Mode = "observe"
+	cfg.Guardrail.HookFailMode = "open"
+	cfg.Guardrail.Connectors = map[string]config.PerConnectorGuardrailConfig{
+		"claudecode": {Mode: "observe", HookFailMode: "open"},
+		"codex":      {Mode: "observe", HookFailMode: "open"},
+	}
+
+	state, err := rotationConnectorStateFromConfig(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Connectors) != 2 {
+		t.Fatalf("connector state rows = %d, want 2: %#v", len(state.Connectors), state.Connectors)
+	}
+	for _, row := range state.Connectors {
+		if row.HookFailMode != "closed" {
+			t.Errorf("managed %s persisted fail mode = %q, want closed", row.Name, row.HookFailMode)
+		}
+	}
+}
+
 func TestParseRotationConnectorStateIsStrict(t *testing.T) {
 	valid := `{"connectors":[{"enabled":true,"hook_fail_mode":"closed","mode":"action","name":"codex"}],"version":1}`
 	if _, err := parseRotationConnectorState(valid); err != nil {

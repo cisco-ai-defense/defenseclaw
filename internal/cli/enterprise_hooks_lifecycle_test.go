@@ -7,6 +7,7 @@ package cli
 import (
 	"bytes"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -172,6 +173,73 @@ func TestEnterpriseHooksSupportedPlatformChainsRootPreRunAndCommand(t *testing.T
 	}
 }
 
+func TestEnterpriseHooksStatusDoesNotInitializeAbsentDataRoot(t *testing.T) {
+	restoreEnterpriseHooksLifecycleTestState(t)
+	originalJSON := enterpriseHookJSON
+	t.Cleanup(func() { enterpriseHookJSON = originalJSON })
+
+	scope := t.TempDir()
+	dataDir := filepath.Join(scope, "absent-data")
+	cfg = &config.Config{
+		DataDir:        dataDir,
+		DeploymentMode: "unmanaged_byod",
+	}
+	t.Setenv(managed.DeploymentModeEnv, "")
+	enterpriseHookJSON = true
+	enterpriseHooksRuntimeGOOS = func() string { return runtime.GOOS }
+	enterpriseHooksPlatformPreflight = func() error { return nil }
+	fullPreRunCalled := false
+	enterpriseHooksFullRootPersistentPreRun = func(*cobra.Command, []string) error {
+		fullPreRunCalled = true
+		return errors.New("status must not initialize the audit runtime")
+	}
+	configOnlyCalled := false
+	enterpriseHooksConfigOnlyPersistentPreRun = func(*cobra.Command, []string) error {
+		configOnlyCalled = true
+		if _, err := os.Lstat(dataDir); !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("config-only pre-run observed a created data root: %v", err)
+		}
+		return nil
+	}
+
+	before := snapshotEnterpriseHooksTree(t, scope)
+	var stdout, stderr bytes.Buffer
+	rootCmd.SetOut(&stdout)
+	rootCmd.SetErr(&stderr)
+	rootCmd.SetArgs([]string{"enterprise", "hooks", "status", "--json"})
+	if _, err := rootCmd.ExecuteC(); err != nil {
+		t.Fatalf("enterprise hooks status: %v; stderr=%s", err, stderr.String())
+	}
+	if !configOnlyCalled || fullPreRunCalled {
+		t.Fatalf(
+			"status pre-run calls = config-only:%t full:%t, want true/false",
+			configOnlyCalled,
+			fullPreRunCalled,
+		)
+	}
+	var report enterpriseHookStatusReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); err != nil {
+		t.Fatalf("decode status JSON %q: %v", stdout.String(), err)
+	}
+	if !report.OK || report.Enabled {
+		t.Fatalf("unmanaged status = %+v, want healthy disabled report", report)
+	}
+	after := snapshotEnterpriseHooksTree(t, scope)
+	if !reflect.DeepEqual(after, before) {
+		t.Fatalf("status mutated absent explicit data root:\nbefore: %#v\nafter:  %#v", before, after)
+	}
+	for _, path := range []string{
+		dataDir,
+		filepath.Join(dataDir, "audit.db"),
+		filepath.Join(dataDir, hookGuardianStateFile),
+		filepath.Join(dataDir, "authorization"),
+	} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("read-only Status created %s (stat error %v)", path, err)
+		}
+	}
+}
+
 func TestEnterpriseHooksNativeWindowsAdministratorPreflightSmoke(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("native Windows smoke test")
@@ -303,6 +371,8 @@ func restoreEnterpriseHooksLifecycleTestState(t *testing.T) {
 	originalPlatformPreflight := enterpriseHooksPlatformPreflight
 	originalMutationPreflight := enterpriseHooksMutationIdentityPreflight
 	originalRootPreRun := enterpriseHooksRootPersistentPreRun
+	originalFullRootPreRun := enterpriseHooksFullRootPersistentPreRun
+	originalConfigOnlyPreRun := enterpriseHooksConfigOnlyPersistentPreRun
 	originalInstall := enterpriseHooksInstallRunE
 	originalUninstall := enterpriseHooksUninstallRunE
 	originalReconcile := enterpriseHooksReconcileRunE
@@ -318,6 +388,8 @@ func restoreEnterpriseHooksLifecycleTestState(t *testing.T) {
 		enterpriseHooksPlatformPreflight = originalPlatformPreflight
 		enterpriseHooksMutationIdentityPreflight = originalMutationPreflight
 		enterpriseHooksRootPersistentPreRun = originalRootPreRun
+		enterpriseHooksFullRootPersistentPreRun = originalFullRootPreRun
+		enterpriseHooksConfigOnlyPersistentPreRun = originalConfigOnlyPreRun
 		enterpriseHooksInstallRunE = originalInstall
 		enterpriseHooksUninstallRunE = originalUninstall
 		enterpriseHooksReconcileRunE = originalReconcile

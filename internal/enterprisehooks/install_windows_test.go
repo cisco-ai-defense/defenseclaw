@@ -677,6 +677,231 @@ func TestInstallWindowsClaudeManagedPolicySurvivesManagedOnlyHooks(t *testing.T)
 	}
 }
 
+func TestInstallWindowsClaudeNormalizesManagedFailModeClosed(t *testing.T) {
+	fixture := newWindowsManagedInstallFixture(t, map[string]interface{}{
+		"allowManagedHooksOnly": true,
+	})
+	opts := windowsManagedInstallOptions(fixture)
+	// Observe-mode and legacy protected configurations may resolve to open.
+	// Windows enterprise native hooks must still publish and verify one
+	// authoritative fail-closed contract.
+	opts.HookFailMode = "open"
+	if _, err := Install(context.Background(), opts); err != nil {
+		t.Fatalf("Install with configured fail-open mode: %v", err)
+	}
+	lock := connector.LoadHookContractLockEntry(
+		filepath.Join(fixture.home, ".defenseclaw"),
+		"claudecode",
+	)
+	if lock.HookFailMode != "closed" {
+		t.Fatalf("managed Claude lock fail mode = %q, want closed", lock.HookFailMode)
+	}
+	if _, err := Verify(context.Background(), opts); err != nil {
+		t.Fatalf("Verify with the same configured fail-open input: %v", err)
+	}
+}
+
+func TestInstallWindowsClaudeRebuildsDeletedRuntimeBytesAndSecurityExactly(t *testing.T) {
+	fixture := newWindowsManagedInstallFixture(
+		t,
+		map[string]interface{}{"allowManagedHooksOnly": true},
+	)
+	opts := windowsManagedInstallOptions(fixture)
+	result, err := Install(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.HookContractLockUpdatedAt == "" ||
+		result.HookContractEntryUpdatedAt == "" {
+		t.Fatalf("install omitted protected recovery timestamps: %+v", result)
+	}
+	dataDir := filepath.Join(fixture.home, ".defenseclaw")
+	want := snapshotWindowsRuntimeContentAndSecurity(t, dataDir)
+	if err := os.RemoveAll(dataDir); err != nil {
+		t.Fatal(err)
+	}
+	opts.AllowMissingHookConfigRepair = true
+	opts.RecoveryHookContractLockUpdatedAt = result.HookContractLockUpdatedAt
+	opts.RecoveryHookContractEntryUpdatedAt = result.HookContractEntryUpdatedAt
+	rebuilt, err := Install(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rebuilt.HookContractLockUpdatedAt != result.HookContractLockUpdatedAt ||
+		rebuilt.HookContractEntryUpdatedAt != result.HookContractEntryUpdatedAt {
+		t.Fatalf("rebuilt recovery timestamps drifted: %+v", rebuilt)
+	}
+	got := snapshotWindowsRuntimeContentAndSecurity(t, dataDir)
+	if len(got) != len(want) {
+		t.Fatalf("rebuilt runtime entries = %d, want %d", len(got), len(want))
+	}
+	for path, expected := range want {
+		if actual, ok := got[path]; !ok || actual != expected {
+			t.Fatalf(
+				"rebuilt runtime drift at %s\nwant: %s\n got: %s",
+				path,
+				expected,
+				actual,
+			)
+		}
+	}
+}
+
+func TestInstallWindowsClaudeRepairsReleasedSparseOversizedToken(t *testing.T) {
+	stubWindowsAuthorizedRepairIdentityChecks(t)
+	fixture := newWindowsManagedInstallFixture(
+		t,
+		map[string]interface{}{"allowManagedHooksOnly": true},
+	)
+	opts := windowsManagedInstallOptions(fixture)
+	installed, err := Install(context.Background(), opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokenPath := filepath.Join(
+		fixture.home,
+		".defenseclaw",
+		"hooks",
+		".hook-claudecode.token",
+	)
+	expected, err := os.ReadFile(tokenPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	file, err := os.OpenFile(tokenPath, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.DeviceIoControl(
+		windows.Handle(file.Fd()),
+		windows.FSCTL_SET_SPARSE,
+		nil,
+		0,
+		nil,
+		0,
+		nil,
+		nil,
+	); err != nil {
+		_ = file.Close()
+		if errors.Is(err, windows.ERROR_INVALID_FUNCTION) ||
+			errors.Is(err, windows.ERROR_NOT_SUPPORTED) {
+			t.Skipf("test volume does not support sparse files: %v", err)
+		}
+		t.Fatal(err)
+	}
+	const sparseSize = int64(1) << 40
+	if err := file.Truncate(sparseSize); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	extended, err := winpath.Extended(tokenPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ptr, err := windows.UTF16PtrFromString(extended)
+	if err != nil {
+		t.Fatal(err)
+	}
+	held, err := windows.CreateFile(
+		ptr,
+		windows.GENERIC_READ|windows.GENERIC_WRITE,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_ATTRIBUTE_NORMAL,
+		0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	opts.AllowMissingHookConfigRepair = true
+	opts.RecoveryHookContractLockUpdatedAt =
+		installed.HookContractLockUpdatedAt
+	opts.RecoveryHookContractEntryUpdatedAt =
+		installed.HookContractEntryUpdatedAt
+	if _, err := Install(context.Background(), opts); err == nil ||
+		!strings.Contains(strings.ToLower(err.Error()), "quarantine") {
+		_ = windows.CloseHandle(held)
+		t.Fatalf("locked sparse token Install error = %v, want bounded quarantine retry", err)
+	}
+	if err := windows.CloseHandle(held); err != nil {
+		t.Fatal(err)
+	}
+
+	// Keep the attacker-grown file alive through the successful repair, but
+	// allow it to be renamed and deleted. Without an open identity handle NTFS
+	// may recycle the removed file ID before os.SameFile compares it with the
+	// replacement, making a correct quarantine-and-recreate repair look like an
+	// in-place rewrite.
+	identityHandle, err := windows.CreateFile(
+		ptr,
+		windows.GENERIC_READ,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_ATTRIBUTE_NORMAL,
+		0,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identityFile := os.NewFile(uintptr(identityHandle), tokenPath)
+	if identityFile == nil {
+		_ = windows.CloseHandle(identityHandle)
+		t.Fatal("wrap sparse token identity handle")
+	}
+	t.Cleanup(func() { _ = identityFile.Close() })
+	original, err := identityFile.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := Install(context.Background(), opts); err != nil {
+		t.Fatalf("repair released sparse token: %v", err)
+	}
+	actual, err := os.ReadFile(tokenPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(actual) != string(expected) {
+		t.Fatal("repaired sparse token does not match the exact protected token")
+	}
+	repaired, err := os.Stat(tokenPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repaired.Size() > windowsEnterpriseTokenMaxBytes {
+		t.Fatalf("repaired token remains oversized: %d", repaired.Size())
+	}
+	if os.SameFile(original, repaired) {
+		t.Fatal("sparse token repair retained the attacker-grown file identity")
+	}
+	// Closing the last handle lets Windows finish deleting the quarantined
+	// original before the bounded-slot cleanup assertion below.
+	if err := identityFile.Close(); err != nil {
+		t.Fatalf("close sparse token identity handle: %v", err)
+	}
+	if err := validateWindowsUserPathElement(
+		tokenPath,
+		fixture.targetSID,
+		false,
+		false,
+		true,
+	); err != nil {
+		t.Fatalf("repaired sparse token protection: %v", err)
+	}
+	if _, err := os.Lstat(
+		windowsManagedObstructionQuarantinePath(tokenPath),
+	); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("sparse token quarantine survived repair: %v", err)
+	}
+}
+
 func TestInstallWindowsClaudeAutoHealsDeletedManagedPolicyFromExactState(t *testing.T) {
 	fixture := newWindowsManagedInstallFixture(
 		t,
@@ -1724,6 +1949,53 @@ func TestInstallWindowsClaudeRollsBackNewManagedPolicyDirectories(t *testing.T) 
 	}
 }
 
+func TestInstallWindowsClaudeRollbackRestoresAbsentHookDirectory(t *testing.T) {
+	fixture := newWindowsManagedInstallFixture(t, nil)
+	dataDir := filepath.Join(fixture.home, ".defenseclaw")
+	hookDir := filepath.Join(dataDir, "hooks")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := setWindowsUserPathProtection(dataDir, fixture.targetSID, true); err != nil {
+		t.Fatal(err)
+	}
+	sentinelPath := filepath.Join(dataDir, "existing-user-state.txt")
+	const sentinel = "preserve me\n"
+	if err := os.WriteFile(sentinelPath, []byte(sentinel), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := setWindowsUserPathProtection(sentinelPath, fixture.targetSID, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(hookDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("precondition: hooks directory exists: %v", err)
+	}
+
+	originalWriter := windowsManagedPolicyWriter
+	windowsManagedPolicyWriter = func(path string, data []byte, readable bool) error {
+		if filepath.Base(path) == windowsClaudeManagedStateFile {
+			return errors.New("injected state publication failure")
+		}
+		return writeWindowsManagedFile(path, data, readable)
+	}
+	t.Cleanup(func() { windowsManagedPolicyWriter = originalWriter })
+	opts := windowsManagedInstallOptions(fixture)
+	opts.HookFailMode = "open"
+	_, err := Install(context.Background(), opts)
+	if err == nil || !strings.Contains(err.Error(), "injected state publication failure") {
+		t.Fatalf("Install error = %v, want injected rollback failure", err)
+	}
+	if strings.Contains(err.Error(), "rollback failed") {
+		t.Fatalf("Install masked the original failure with rollback residue: %v", err)
+	}
+	if _, err := os.Lstat(hookDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("new managed hooks directory survived rollback: %v", err)
+	}
+	if got, err := os.ReadFile(sentinelPath); err != nil || string(got) != sentinel {
+		t.Fatalf("pre-existing data-dir state changed: %q err=%v", got, err)
+	}
+}
+
 func TestEnsureWindowsManagedPolicyDirectoryRejectsWritableAncestorWithoutArtifacts(t *testing.T) {
 	fixture := newWindowsManagedInstallFixture(t, nil)
 	policyDir := filepath.Dir(fixture.policyPath)
@@ -2168,6 +2440,44 @@ func snapshotWindowsTestTree(t *testing.T, root string) string {
 		t.Fatal(err)
 	}
 	return snapshot.String()
+}
+
+func snapshotWindowsRuntimeContentAndSecurity(
+	t *testing.T,
+	root string,
+) map[string]string {
+	t.Helper()
+	snapshot := make(map[string]string)
+	err := filepath.WalkDir(root, func(
+		path string,
+		entry os.DirEntry,
+		walkErr error,
+	) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		descriptor := windowsTestSecurityDescriptorString(t, path)
+		kind := "directory"
+		body := ""
+		if !entry.IsDir() {
+			kind = "file"
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			body = fmt.Sprintf("%x", data)
+		}
+		snapshot[relative] = kind + "|" + descriptor + "|" + body
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return snapshot
 }
 
 func TestWindowsEnterpriseManagedAgentVersionMinimums(t *testing.T) {

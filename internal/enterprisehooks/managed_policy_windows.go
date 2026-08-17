@@ -98,6 +98,67 @@ type WindowsClaudeManagedPolicyTeardownSnapshot struct {
 	State         []byte `json:"state,omitempty"`
 }
 
+// CaptureWindowsClaudeManagedPolicySnapshot authenticates and copies the
+// exact current machine-policy pair without changing it. The enterprise
+// lifecycle keeps the returned bytes only in its protected transaction
+// journal so a failed first activation can restore the pre-activation state.
+func CaptureWindowsClaudeManagedPolicySnapshot(
+	opts WindowsClaudeManagedPolicyTeardownOptions,
+) (WindowsClaudeManagedPolicyTeardownSnapshot, error) {
+	var result WindowsClaudeManagedPolicyTeardownSnapshot
+	if err := requireWindowsClaudeTeardownAdministrator(); err != nil {
+		return result, err
+	}
+	expected, err := validateWindowsClaudeManagedPolicyTeardownOptions(opts)
+	if err != nil {
+		return result, err
+	}
+	err = windowsClaudeManagedPolicyTransaction(func() error {
+		path, err := windowsClaudeManagedPolicyPath()
+		if err != nil {
+			return err
+		}
+		statePath := filepath.Join(filepath.Dir(path), windowsClaudeManagedStateFile)
+		policy, err := snapshotWindowsManagedFileWithLimit(
+			path,
+			windowsClaudeManagedPolicyLimit,
+		)
+		if err != nil {
+			return err
+		}
+		state, err := snapshotWindowsManagedFileWithLimit(
+			statePath,
+			windowsClaudeManagedStateLimit,
+		)
+		if err != nil {
+			return err
+		}
+		parsed, err := validateExistingWindowsManagedPolicyOwnership(policy, state)
+		if err != nil {
+			return err
+		}
+		if !policy.existed {
+			if len(expected) != 0 {
+				return errors.New(
+					"enterprise hooks: expected Claude managed policy is absent during lifecycle capture",
+				)
+			}
+			return nil
+		}
+		if err := validateWindowsClaudeManagedPolicyTeardownState(parsed, opts, expected); err != nil {
+			return err
+		}
+		result = WindowsClaudeManagedPolicyTeardownSnapshot{
+			PolicyExisted: true,
+			Policy:        append([]byte(nil), policy.data...),
+			StateExisted:  true,
+			State:         append([]byte(nil), state.data...),
+		}
+		return nil
+	})
+	return result, err
+}
+
 type windowsClaudeManagedPolicyTarget struct {
 	dataDir            string
 	hookExecutable     string
@@ -496,6 +557,205 @@ func RestoreWindowsClaudeManagedPolicyTeardown(
 	})
 }
 
+// RestoreWindowsClaudeManagedPolicySnapshot replaces only machine policy that
+// still authenticates to the same protected deployment and a subset of the
+// administrator manifest. This is deliberately stronger than a blind file
+// restore: a concurrent foreign policy or newly enrolled SID stops rollback.
+func RestoreWindowsClaudeManagedPolicySnapshot(
+	priorOpts WindowsClaudeManagedPolicyTeardownOptions,
+	allowedOpts WindowsClaudeManagedPolicyTeardownOptions,
+	snapshot WindowsClaudeManagedPolicyTeardownSnapshot,
+) error {
+	if err := requireWindowsClaudeTeardownAdministrator(); err != nil {
+		return err
+	}
+	priorTargets, err := validateWindowsClaudeManagedPolicyTeardownOptions(priorOpts)
+	if err != nil {
+		return err
+	}
+	allowedTargets, err := validateWindowsClaudeManagedPolicyTeardownOptions(allowedOpts)
+	if err != nil {
+		return err
+	}
+	if priorOpts.HookExecutable != allowedOpts.HookExecutable ||
+		priorOpts.GatewayServiceName != allowedOpts.GatewayServiceName {
+		return errors.New(
+			"enterprise hooks: Claude lifecycle snapshot changed the protected hook or service identity",
+		)
+	}
+	if err := validateWindowsClaudeManagedPolicySnapshot(
+		priorOpts,
+		priorTargets,
+		snapshot,
+	); err != nil {
+		return err
+	}
+
+	return windowsClaudeManagedPolicyTransaction(func() error {
+		path, err := windowsClaudeManagedPolicyPath()
+		if err != nil {
+			return err
+		}
+		statePath := filepath.Join(filepath.Dir(path), windowsClaudeManagedStateFile)
+		currentPolicy, err := snapshotWindowsManagedFileWithLimit(
+			path,
+			windowsClaudeManagedPolicyLimit,
+		)
+		if err != nil {
+			return err
+		}
+		currentState, err := snapshotWindowsManagedFileWithLimit(
+			statePath,
+			windowsClaudeManagedStateLimit,
+		)
+		if err != nil {
+			return err
+		}
+		current, err := validateExistingWindowsManagedPolicyOwnership(
+			currentPolicy,
+			currentState,
+		)
+		if err != nil {
+			return err
+		}
+		if currentPolicy.existed == snapshot.PolicyExisted &&
+			currentState.existed == snapshot.StateExisted &&
+			bytes.Equal(currentPolicy.data, snapshot.Policy) &&
+			bytes.Equal(currentState.data, snapshot.State) {
+			if snapshot.PolicyExisted {
+				return verifyWindowsClaudeManagedPolicy(path, snapshot.Policy)
+			}
+			return nil
+		}
+		if currentPolicy.existed {
+			if err := validateWindowsClaudeManagedPolicyIdentitySubset(
+				current,
+				allowedOpts,
+				allowedTargets,
+			); err != nil {
+				return err
+			}
+		}
+
+		rollback := func(cause error) error {
+			var failures []string
+			for _, prior := range []windowsManagedFileSnapshot{currentState, currentPolicy} {
+				if restoreErr := restoreWindowsManagedFile(prior); restoreErr != nil {
+					failures = append(failures, restoreErr.Error())
+				}
+			}
+			if len(failures) != 0 {
+				return fmt.Errorf(
+					"%v (Claude lifecycle snapshot rollback failed: %s)",
+					cause,
+					strings.Join(failures, "; "),
+				)
+			}
+			return cause
+		}
+		// Policy disappears first so a concurrent Claude process fails closed
+		// while the exact preimage is being republished.
+		if currentPolicy.existed {
+			if err := os.Remove(path); err != nil {
+				return rollback(fmt.Errorf("remove current Claude managed policy: %w", err))
+			}
+		}
+		if currentState.existed {
+			if err := os.Remove(statePath); err != nil {
+				return rollback(fmt.Errorf("remove current Claude managed policy state: %w", err))
+			}
+		}
+		if snapshot.PolicyExisted {
+			if err := windowsManagedPolicyWriter(statePath, snapshot.State, true); err != nil {
+				return rollback(err)
+			}
+			if err := windowsManagedPolicyWriter(path, snapshot.Policy, true); err != nil {
+				return rollback(err)
+			}
+			if err := verifyWindowsClaudeManagedPolicy(path, snapshot.Policy); err != nil {
+				return rollback(err)
+			}
+			return nil
+		}
+		for _, candidate := range []string{path, statePath} {
+			if _, err := os.Lstat(candidate); !errors.Is(err, os.ErrNotExist) {
+				if err == nil {
+					err = errors.New("artifact still exists")
+				}
+				return rollback(fmt.Errorf(
+					"verify empty Claude lifecycle preimage for %s: %w",
+					candidate,
+					err,
+				))
+			}
+		}
+		return nil
+	})
+}
+
+func validateWindowsClaudeManagedPolicySnapshot(
+	opts WindowsClaudeManagedPolicyTeardownOptions,
+	expected []string,
+	snapshot WindowsClaudeManagedPolicyTeardownSnapshot,
+) error {
+	if snapshot.PolicyExisted != snapshot.StateExisted {
+		return errors.New("enterprise hooks: incomplete Claude managed lifecycle snapshot")
+	}
+	if !snapshot.PolicyExisted {
+		if len(expected) != 0 || len(snapshot.Policy) != 0 || len(snapshot.State) != 0 {
+			return errors.New("enterprise hooks: invalid empty Claude managed lifecycle snapshot")
+		}
+		return nil
+	}
+	if len(snapshot.Policy) == 0 ||
+		len(snapshot.Policy) > windowsClaudeManagedPolicyLimit ||
+		len(snapshot.State) == 0 ||
+		len(snapshot.State) > windowsClaudeManagedStateLimit {
+		return errors.New("enterprise hooks: Claude managed lifecycle snapshot exceeds bounded limits")
+	}
+	var authenticated windowsClaudeManagedPolicyState
+	if err := decodeWindowsClaudeManagedPolicyState(snapshot.State, &authenticated); err != nil {
+		return fmt.Errorf("enterprise hooks: decode Claude managed lifecycle snapshot: %w", err)
+	}
+	if authenticated.PolicySHA256 != windowsManagedPolicyDigest(snapshot.Policy) {
+		return errors.New("enterprise hooks: Claude managed lifecycle snapshot digest mismatch")
+	}
+	return validateWindowsClaudeManagedPolicyTeardownState(authenticated, opts, expected)
+}
+
+func validateWindowsClaudeManagedPolicyIdentitySubset(
+	state windowsClaudeManagedPolicyState,
+	opts WindowsClaudeManagedPolicyTeardownOptions,
+	allowed []string,
+) error {
+	if state.SchemaVersion != 2 ||
+		state.HookExecutable != opts.HookExecutable ||
+		state.GatewayAddr != opts.GatewayAddr ||
+		state.GatewayServiceName != opts.GatewayServiceName ||
+		!windowsClaudeTargetSIDSubset(state.TargetSIDs, allowed) {
+		return errors.New(
+			"enterprise hooks: current Claude managed policy is outside the protected lifecycle identity",
+		)
+	}
+	return nil
+}
+
+func windowsClaudeTargetSIDSubset(candidate, allowed []string) bool {
+	if len(candidate) > len(allowed) {
+		return false
+	}
+	allowedSet := make(map[string]struct{}, len(allowed))
+	for _, sid := range allowed {
+		allowedSet[sid] = struct{}{}
+	}
+	for _, sid := range candidate {
+		if _, ok := allowedSet[sid]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 func validateWindowsClaudeManagedPolicyTeardownOptions(
 	opts WindowsClaudeManagedPolicyTeardownOptions,
 ) ([]string, error) {
@@ -873,9 +1133,9 @@ func windowsClaudeManagedPolicyPath() (string, error) {
 }
 
 func defaultWindowsClaudeManagedPolicyPath() (string, error) {
-	programFiles, err := windows.KnownFolderPath(windows.FOLDERID_ProgramFiles, windows.KF_FLAG_DEFAULT)
+	programFiles, err := winpath.TrustedProgramFiles()
 	if err != nil {
-		return "", fmt.Errorf("enterprise hooks: resolve Program Files known folder: %w", err)
+		return "", fmt.Errorf("enterprise hooks: resolve trusted Program Files: %w", err)
 	}
 	return filepath.Join(programFiles, "ClaudeCode", "managed-settings.d", windowsClaudeManagedPolicyFile), nil
 }
