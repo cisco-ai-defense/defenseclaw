@@ -513,8 +513,18 @@ scrub_agent_config() {
   # lives in scrub_agent_configs.py). Everything else uses the Go
   # binary, which is python3-free per the QA rip-out.
   if [[ "${connector}" == "amp" ]]; then
-    if [[ ! -f "${SCRUB_PY}" ]]; then
-      warn "python scrub helper missing: ${SCRUB_PY}; skipping ${cfg}"
+    # Threat model parity with the Go binary path below: uninstall.sh
+    # runs under `sudo`, and this branch executes SCRUB_PY as
+    # root-or-target-user. Reuse the bundle tier of _scrub_bin_trusted
+    # so a hostile symlink or a group/other-writable script under
+    # SCRIPT_DIR cannot slip past. `--allow-non-root-owner` mirrors
+    # the bundle-tier relaxation used elsewhere: SCRIPT_DIR extracts
+    # under the operator's uid, which is documented behaviour, but
+    # every OTHER check (absolute path, regular file, executable bit,
+    # non-group-writable mode) must still pass. scrub_agent_configs.py
+    # is shipped 0755, so the -x check is a positive assertion that
+    # the tarball extraction preserved the mode.
+    if ! _scrub_bin_trusted "${SCRUB_PY}" "python scrub helper" --allow-non-root-owner >/dev/null; then
       SCRUB_FAILED="true"
       return 0
     fi

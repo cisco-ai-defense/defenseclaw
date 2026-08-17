@@ -1189,8 +1189,17 @@ resolve_aid_endpoint() {
 # (mv into a symlink would follow the link). Callers get preserved rollback
 # state and a fresh install landing zone without touching user data.
 move_legacy_aside() {
-  local path="$1" backup_root="$2" version="$3"
-  shift 3
+  # Callers of this library source it under `set -u` (see install.sh,
+  # install-enterprise.sh, and the test harness), so a bare
+  # `local path="$1"` would abort the shell with "unbound variable"
+  # if fewer than three positional args are passed — never reaching
+  # the `return 2` validation below. Read defensively with `${N:-}`
+  # so a short argv falls through to the explicit empty-argument
+  # check and returns rc 2 as documented.
+  local path="${1:-}" backup_root="${2:-}" version="${3:-}"
+  # Same protection for `shift 3` (bash 3.2 errors on shifting past
+  # $#). Consume only what we have.
+  if (( $# > 3 )); then shift 3; else shift $#; fi
   local dry_run="false"
   local arg
   for arg in "$@"; do
@@ -1761,8 +1770,17 @@ apply_ai_discovery_home_dirs() {
 # Callers are responsible for feeding a real absolute PATH; the helper
 # does not sanitize input.
 move_legacy_aside() {
-  local path="$1" backup_root="$2" version="$3"
-  shift 3
+  # Callers of this library source it under `set -u` (see install.sh,
+  # install-enterprise.sh, and the test harness), so a bare
+  # `local path="$1"` would abort the shell with "unbound variable"
+  # if fewer than three positional args are passed — never reaching
+  # the `return 2` validation below. Read defensively with `${N:-}`
+  # so a short argv falls through to the explicit empty-argument
+  # check and returns rc 2 as documented.
+  local path="${1:-}" backup_root="${2:-}" version="${3:-}"
+  # Same protection for `shift 3` (bash 3.2 errors on shifting past
+  # $#). Consume only what we have.
+  if (( $# > 3 )); then shift 3; else shift $#; fi
   local dry_run="false"
   local arg
   for arg in "$@"; do

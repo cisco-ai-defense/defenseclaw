@@ -271,23 +271,23 @@ func scrubCursorFile(path string, markers []string) (bool, error) {
 		return false, fmt.Errorf("parse JSON: %w", err)
 	}
 	hooks, _ := cfg["hooks"].(map[string]any)
-	if hooks != nil {
-		for event, raw := range hooks {
-			entries, ok := raw.([]any)
-			if !ok {
-				continue
+	// `range` over a nil map iterates zero times, so the previous
+	// `if hooks != nil` guard was redundant (golangci-lint S1031).
+	for event, raw := range hooks {
+		entries, ok := raw.([]any)
+		if !ok {
+			continue
+		}
+		kept := make([]any, 0, len(entries))
+		for _, entry := range entries {
+			if !looksOwned(entry, markers) {
+				kept = append(kept, entry)
 			}
-			kept := make([]any, 0, len(entries))
-			for _, entry := range entries {
-				if !looksOwned(entry, markers) {
-					kept = append(kept, entry)
-				}
-			}
-			if len(kept) == 0 {
-				delete(hooks, event)
-			} else {
-				hooks[event] = kept
-			}
+		}
+		if len(kept) == 0 {
+			delete(hooks, event)
+		} else {
+			hooks[event] = kept
 		}
 	}
 	return writeSortedJSON(path, cfg, data)
@@ -305,42 +305,42 @@ func scrubClaudeCodeFile(path string, markers []string) (bool, error) {
 		return false, fmt.Errorf("parse JSON: %w", err)
 	}
 	hooks, _ := cfg["hooks"].(map[string]any)
-	if hooks != nil {
-		for event, raw := range hooks {
-			groups, ok := raw.([]any)
-			if !ok {
+	// `range` over a nil map iterates zero times, so the previous
+	// `if hooks != nil` guard was redundant (golangci-lint S1031).
+	for event, raw := range hooks {
+		groups, ok := raw.([]any)
+		if !ok {
+			continue
+		}
+		keptGroups := make([]any, 0, len(groups))
+		for _, g := range groups {
+			gm, isMap := g.(map[string]any)
+			if !isMap {
+				keptGroups = append(keptGroups, g)
 				continue
 			}
-			keptGroups := make([]any, 0, len(groups))
-			for _, g := range groups {
-				gm, isMap := g.(map[string]any)
-				if !isMap {
-					keptGroups = append(keptGroups, g)
-					continue
-				}
-				inner, hasInner := gm["hooks"].([]any)
-				if !hasInner {
-					if !looksOwned(gm, markers) {
-						keptGroups = append(keptGroups, gm)
-					}
-					continue
-				}
-				keptInner := make([]any, 0, len(inner))
-				for _, h := range inner {
-					if !looksOwned(h, markers) {
-						keptInner = append(keptInner, h)
-					}
-				}
-				if len(keptInner) > 0 {
-					gm["hooks"] = keptInner
+			inner, hasInner := gm["hooks"].([]any)
+			if !hasInner {
+				if !looksOwned(gm, markers) {
 					keptGroups = append(keptGroups, gm)
 				}
+				continue
 			}
-			if len(keptGroups) == 0 {
-				delete(hooks, event)
-			} else {
-				hooks[event] = keptGroups
+			keptInner := make([]any, 0, len(inner))
+			for _, h := range inner {
+				if !looksOwned(h, markers) {
+					keptInner = append(keptInner, h)
+				}
 			}
+			if len(keptInner) > 0 {
+				gm["hooks"] = keptInner
+				keptGroups = append(keptGroups, gm)
+			}
+		}
+		if len(keptGroups) == 0 {
+			delete(hooks, event)
+		} else {
+			hooks[event] = keptGroups
 		}
 	}
 	if env, ok := cfg["env"].(map[string]any); ok {
@@ -397,13 +397,29 @@ func writeSortedJSON(path string, cfg any, original []byte) (bool, error) {
 //
 // A symlink-swap privesc surface exists only when the writer runs at
 // a HIGHER privilege than the entity that controls the link target
-// path. This scrubber runs via `sudo -u <target-user>` in
-// uninstall.sh, so the effective uid at write time is the target
-// user's — a symlink they control can only redirect the write to a
-// path they could already write to themselves. The check that
-// remains is: no writing through symlinks whose eventual target is
-// outside the caller's uid boundary, which the kernel enforces via
-// the standard file-permissions gate.
+// path. Two callers to consider:
+//
+//  1. `uninstall.sh` runs the scrub via `sudo -u <target-user>`, so
+//     the effective uid at write time is the target user's — a
+//     symlink they control can only redirect the write to a path they
+//     could already write to themselves. The kernel-level file-perm
+//     gate is sufficient here.
+//  2. The direct `defenseclaw enterprise hooks scrub --file …` entry
+//     is public and, when the operator runs it under `sudo`, executes
+//     with euid=0. A hostile symlink chain pointing at, say,
+//     `/etc/passwd` would then let root be tricked into overwriting
+//     files far outside the target user's territory.
+//
+// For case 2, verifyOwnerBoundary below tracks the initial pre-
+// resolution owner uid and rejects any symlink hop whose target is
+// owned by a different uid. Root-owned entries in the chain are also
+// rejected: an attacker cannot plant root-owned symlinks, so a
+// root-owned hop only appears when the operator manually pointed
+// scrub at a system path — which is not a supported use case. This
+// is not fully race-resistant (a concurrent path swap between
+// Lstat and Rename could still slip through), but it closes the
+// obvious symlink-farming vector without pulling in the platform-
+// specific openat2/RESOLVE_NO_SYMLINKS machinery.
 //
 // Falls back to 0600 mode when the target did not exist (dead code
 // on the scrub path — callers Stat first — but robust if this helper
@@ -427,6 +443,21 @@ func writeConfigAtomic(path string, payload []byte) error {
 	// resolved target's parent directory is temporarily missing
 	// (rare, but possible during a chezmoi apply in-flight) would
 	// abort the scrub. Manual per-hop resolution degrades gracefully.
+	// Root-boundary check: when running as root, capture the initial
+	// path's owner uid so verifyOwnerBoundary can reject any symlink
+	// hop that lands on a file owned by a different uid. -1 disables
+	// the check for non-root invocations (uninstall.sh's sudo -u
+	// path), where the kernel-level file-perm gate already prevents
+	// cross-uid writes.
+	rootBoundaryUID := -1
+	if os.Geteuid() == 0 {
+		if lstat, err := os.Lstat(path); err == nil {
+			if u, _ := fileOwner(lstat); u >= 0 {
+				rootBoundaryUID = u
+			}
+		}
+	}
+
 	resolved := path
 	const maxSymlinkHops = 16
 	for hop := 0; hop < maxSymlinkHops; hop++ {
@@ -440,6 +471,23 @@ func writeConfigAtomic(path string, payload []byte) error {
 		}
 		if !filepath.IsAbs(target) {
 			target = filepath.Join(filepath.Dir(resolved), target)
+		}
+		// Before following into `target`, check the next hop's owner
+		// under the root uid boundary. A stat error here is benign —
+		// the downstream Rename will surface a concrete errno, and
+		// falling through to a truncated resolved path is what the
+		// pre-check block already promised for missing chains.
+		if rootBoundaryUID >= 0 {
+			targetStat, statErr := os.Lstat(target)
+			if statErr == nil {
+				hopUID, _ := fileOwner(targetStat)
+				if hopUID >= 0 && hopUID != rootBoundaryUID {
+					return fmt.Errorf(
+						"refusing to follow symlink across uid boundary while running as root: %s -> %s (hop owner uid=%d, initial path owner uid=%d)",
+						resolved, target, hopUID, rootBoundaryUID,
+					)
+				}
+			}
 		}
 		resolved = target
 	}
@@ -478,7 +526,14 @@ func writeConfigAtomic(path string, payload []byte) error {
 		// uid on the swapped-in file than abort. On a root uninstall
 		// (the primary caller) it succeeds and preserves the user's
 		// ownership across the atomic swap.
-		_ = os.Chown(tmpName, uid, gid)
+		//
+		// Use tmp.Chown (fchown on the open descriptor) rather than
+		// os.Chown(tmpName, ...), which re-resolves the path and would
+		// reintroduce a TOCTOU window between the earlier fd-based
+		// Chmod and this ownership change if the tempdir moved out
+		// from under us. Matches the fd-first pattern used at
+		// tmp.Write / tmp.Sync / tmp.Chmod above.
+		_ = tmp.Chown(uid, gid)
 	}
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close temp: %w", err)
@@ -525,11 +580,15 @@ func marshalSortedIndent(v any, indent string) ([]byte, error) {
 //   - json.Marshal's default `<` / `>` / `&` treatment is meant for
 //     `<script>` embedding, which does not apply here.
 //
-// The equivalent to Python's ensure_ascii=False (letting non-ASCII
-// bytes through un-\uXXXX-encoded) is emitting the raw UTF-8. Python
-// defaults to ensure_ascii=True (escapes), which matches Go's
-// json.Marshal behaviour for non-ASCII bytes, so no adjustment is
-// needed there.
+// Non-ASCII handling: Go's json.NewEncoder + SetEscapeHTML(false) is
+// closer to Python's ensure_ascii=False than to the default — a byte
+// like `é` survives as raw UTF-8, whereas Python's default writes
+// `é`. That divergence is fine here: after the first Go rewrite
+// the file is normalised to the raw-UTF-8 shape and every subsequent
+// scrub over that file is byte-idempotent. `U+2028` and `U+2029`
+// (JS line/paragraph separators) do get escaped by Go regardless of
+// SetEscapeHTML, so a Python-authored file that contains them would
+// also flip once and then stabilise.
 func writeSortedJSONValue(buf *bytes.Buffer, v any, prefix, indent string) error {
 	// jsonNoHTMLEscape marshals a value with SetEscapeHTML(false) so
 	// `<`, `>`, `&` survive verbatim.
@@ -664,6 +723,34 @@ var (
 	// lets the section-scan walk every `otel.*` subsection as one
 	// logical block.
 	tomlOtelSectionRE = regexp.MustCompile(`^\s*\[otel(?:\.[^\[\]]+)?\]\s*$`)
+	// tomlHooksSectionRE matches every table header rooted at the
+	// `hooks` key, in EITHER single-bracket or double-bracket
+	// (array-of-tables) form:
+	//   [hooks]                              (bare)
+	//   [hooks.PreToolUse]                   (dotted table)
+	//   [[hooks.PreToolUse]]                 (array-of-tables — pelletier
+	//                                         emits this shape when the
+	//                                         Go source is
+	//                                         map[string]interface{}{
+	//                                           "hooks": {
+	//                                             "PreToolUse": []interface{}{...},
+	//                                           },
+	//                                         })
+	//   [[hooks.PreToolUse.hooks]]           (nested array-of-tables — the
+	//                                         leaf DefenseClaw hook table
+	//                                         where `command = ".../codex-hook.sh"`
+	//                                         and `type = "command"` land)
+	//
+	// A scrubber that only matched bare `[hooks]` (via tomlTopLevelRE)
+	// would miss the entire block when the Codex TOML writer emits the
+	// array-of-tables shape directly at top level — every DefenseClaw
+	// script-path marker lives inside a `[[hooks.…]]` sub-table, so
+	// stopping at the first bracket boundary before them means the
+	// scan never observes the marker and the whole hook chain survives
+	// `defenseclaw uninstall --purge`. This regex lets the section
+	// scan span every `hooks.*` subsection as one logical block, same
+	// pattern as tomlOtelSectionRE.
+	tomlHooksSectionRE = regexp.MustCompile(`^\s*\[\[?hooks(?:\.[^\[\]]+)?\]\]?\s*$`)
 )
 
 func scrubCodexFile(path string, markers []string) (bool, error) {
@@ -741,16 +828,40 @@ func scrubCodexFile(path string, markers []string) (bool, error) {
 		return tomlOtelSectionRE.MatchString(hdr)
 	}
 
+	// stayInHooksHierarchy accepts any `[hooks]`, `[hooks.<sub>]`,
+	// `[[hooks.<sub>]]`, or `[[hooks.<sub>.<sub2>]]` header so the
+	// section-scan spans the whole DC-emitted hooks TOML shape:
+	//
+	//   [[hooks.PreToolUse]]
+	//     [[hooks.PreToolUse.hooks]]
+	//     command = "/…/hooks/codex-hook.sh"   <-- DC marker lives here
+	//     type = "command"
+	//     timeout = 30
+	//
+	// pelletier/go-toml v2 emits the array-of-tables shape when the
+	// Go source is map[string]interface{}{ "hooks": { <event>: []… } }
+	// (see internal/gateway/connector/codex.go HookProfile). A scan
+	// that stopped at the first bracket boundary would miss the leaf
+	// `[[hooks.<event>.hooks]]` table where every DefenseClaw script
+	// path lives, leaving dangling hook entries after
+	// `defenseclaw uninstall --purge`.
+	stayInHooksHierarchy := func(hdr string) bool {
+		return tomlHooksSectionRE.MatchString(hdr)
+	}
+
 	for i < n {
 		line := lines[i]
 		trimmed := strings.TrimSpace(line)
 
+		// Bare `[hooks]` / `[otel]` — the original entry shape.
 		if m := tomlTopLevelRE.FindStringSubmatch(trimmed); m != nil && (m[1] == "hooks" || m[1] == "otel") {
 			var extra []string
 			var stayIn func(string) bool
 			if m[1] == "otel" {
 				extra = scrubCodexOtelMarkers
 				stayIn = stayInOtelHierarchy
+			} else {
+				stayIn = stayInHooksHierarchy
 			}
 			matched, end := sectionReferencesDC(i+1, extra, stayIn)
 			if matched {
@@ -766,6 +877,32 @@ func scrubCodexFile(path string, markers []string) (bool, error) {
 			// user table, so a later `notify = …` no longer refers to
 			// the top-level DC-owned notify array. Same policy as any
 			// other table header below.
+			inTopLevel = false
+			out = append(out, line)
+			i++
+			continue
+		}
+
+		// `[[hooks.<event>]]` / `[hooks.<event>]` — pelletier's default
+		// shape for hooks map + slice values. tomlTopLevelRE above
+		// only matches bare `[hooks]`, so without this second entry
+		// point the scanner drops into the generic table-header
+		// branch below and every DefenseClaw command inside the
+		// array-of-tables sub-tree survives the scrub.
+		if tomlHooksSectionRE.MatchString(trimmed) {
+			matched, end := sectionReferencesDC(i+1, nil, stayInHooksHierarchy)
+			if matched {
+				changed = true
+				i = end
+				if i < n && strings.TrimSpace(lines[i]) == "" {
+					i++
+				}
+				continue
+			}
+			// User's hooks sub-table survived because it doesn't
+			// reference DC markers. Same top-level-flip policy as
+			// above: subsequent `notify = …` is scoped to a user
+			// table, not the DC notify array.
 			inTopLevel = false
 			out = append(out, line)
 			i++

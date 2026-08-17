@@ -5,6 +5,7 @@
 package cli
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"testing"
 
 	"github.com/pelletier/go-toml/v2"
+	"github.com/spf13/cobra"
 )
 
 // TestScrubCursor_DropsDCKeepsUserEntryIdempotent guards the primary
@@ -238,6 +240,106 @@ notify = ["bash", "/Users/u/.defenseclaw/notify-bridge.sh"]
 	}
 }
 
+// TestScrubCodex_StripsNestedHooksArrayOfTables pins the regression
+// where pelletier/go-toml v2 marshals the Codex hook profile
+//
+//	map[string]interface{}{"hooks": {"PreToolUse": []… }}
+//
+// as an array-of-tables at TOP LEVEL (no bare `[hooks]` header):
+//
+//	[[hooks.PreToolUse]]
+//	  [[hooks.PreToolUse.hooks]]
+//	  command = "…/codex-hook.sh"
+//	  type = "command"
+//
+// Before this fix, scrubCodexFile only branched on a bare `[hooks]`
+// header via tomlTopLevelRE, so the array-of-tables entry point
+// dropped into the generic "unknown table" fall-through and every
+// DefenseClaw command inside survived `defenseclaw uninstall --purge`.
+// The customer-visible symptom was a lingering Codex hook pointing at
+// a deleted `~/.defenseclaw/hooks/codex-hook.sh`, which then failed
+// every tool call on the next Codex launch.
+//
+// stayInHooksHierarchy accepts both `[hooks.*]` and `[[hooks.*]]`
+// forms so the whole nested block is scrubbed as one section.
+func TestScrubCodex_StripsNestedHooksArrayOfTables(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	writeFile(t, path, `model = "gpt-5"
+
+[[hooks.PreToolUse]]
+
+  [[hooks.PreToolUse.hooks]]
+  command = "/Users/u/.defenseclaw/hooks/codex-hook.sh"
+  type = "command"
+  timeout = 30
+
+[[hooks.PreLLMCall]]
+
+  [[hooks.PreLLMCall.hooks]]
+  command = "/Users/u/.defenseclaw/hooks/codex-hook.sh"
+  type = "command"
+
+[projects."/Users/u/dev"]
+trust_level = "trusted"
+`)
+	if _, err := scrubCodexFile(path, scrubDefaultMarkers); err != nil {
+		t.Fatalf("scrubCodexFile: %v", err)
+	}
+	out := readFile(t, path)
+	// Every DC-owned hook reference must be gone — the leaf sub-table
+	// where the script path lived was the whole point of the scrub.
+	for _, forbidden := range []string{"codex-hook.sh", "defenseclaw", "[[hooks.", "[hooks."} {
+		if strings.Contains(out, forbidden) {
+			t.Errorf("DC-owned nested hooks marker %q still present:\n%s", forbidden, out)
+		}
+	}
+	// User state outside the hooks hierarchy must survive.
+	for _, want := range []string{`model = "gpt-5"`, `[projects."/Users/u/dev"]`, `trust_level = "trusted"`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("user state dropped: %s\n---output---\n%s", want, out)
+		}
+	}
+	// Whatever the scrubber emits must remain parseable TOML — a
+	// mangled scrub would brick Codex on the operator's next launch,
+	// which is exactly why writeSortedJSON's TOML-parse guard exists.
+	var parsed map[string]any
+	if err := toml.Unmarshal([]byte(out), &parsed); err != nil {
+		t.Errorf("post-scrub TOML no longer parses: %v\n---output---\n%s", err, out)
+	}
+}
+
+// TestScrubCodex_PreservesUserHooksArrayOfTables asserts the
+// complement of the above: a user's own `[[hooks.PreToolUse.hooks]]`
+// block (pointing at a script the user wrote themselves, not at any
+// DC-managed path) MUST survive the scrub. The
+// stayInHooksHierarchy predicate only scrubs sections that reference
+// a DC marker, so a non-DC command inside the same TOML shape is
+// left intact.
+func TestScrubCodex_PreservesUserHooksArrayOfTables(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	body := `model = "gpt-5"
+
+[[hooks.PreToolUse]]
+
+  [[hooks.PreToolUse.hooks]]
+  command = "/Users/u/bin/my-own-hook.sh"
+  type = "command"
+`
+	writeFile(t, path, body)
+	if _, err := scrubCodexFile(path, scrubDefaultMarkers); err != nil {
+		t.Fatalf("scrubCodexFile: %v", err)
+	}
+	out := readFile(t, path)
+	if !strings.Contains(out, "/Users/u/bin/my-own-hook.sh") {
+		t.Errorf("user-owned hook stripped:\n%s", out)
+	}
+	if !strings.Contains(out, "[[hooks.PreToolUse]]") {
+		t.Errorf("user-owned hooks section header stripped:\n%s", out)
+	}
+}
+
 func TestScrubCodex_StopsAtDottedTableHeader(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.toml")
@@ -445,11 +547,21 @@ PreToolUse = "/Users/u/my-own-hook.sh"
 // or a new test that reads these vars without assigning them.
 func setScrubFlags(t *testing.T, connector, file string, quietMissing bool) {
 	t.Helper()
+	// runEnterpriseHooksScrub reads FIVE package-level flag vars. The
+	// helper's contract is "no test in this package can leak flag
+	// state into another," so all five need save+restore, not just
+	// the three each individual test explicitly sets. A future test
+	// that reaches for scrubJSONOutput or scrubDataDirMarker without
+	// wrapping the assignment in setScrubFlags would otherwise
+	// silently corrupt every later test.
 	prevConn, prevFile, prevQuiet := scrubConnectorFlag, scrubFileFlag, scrubMissingIsSilent
+	prevJSON, prevMarker := scrubJSONOutput, scrubDataDirMarker
 	t.Cleanup(func() {
 		scrubConnectorFlag, scrubFileFlag, scrubMissingIsSilent = prevConn, prevFile, prevQuiet
+		scrubJSONOutput, scrubDataDirMarker = prevJSON, prevMarker
 	})
 	scrubConnectorFlag, scrubFileFlag, scrubMissingIsSilent = connector, file, quietMissing
+	scrubJSONOutput, scrubDataDirMarker = false, ""
 }
 
 // TestScrubReturnsRC2OnMissingFile covers the file-not-found exit code
@@ -467,6 +579,56 @@ func TestScrubReturnsRC2OnMissingFile(t *testing.T) {
 	}
 	if exitErr.ExitCode() != 2 {
 		t.Errorf("exit code = %d, want 2", exitErr.ExitCode())
+	}
+}
+
+// TestScrubEmitsJSONSummaryOnSuccess pins the --json contract that
+// uninstall.sh's shell caller keys off. The `defenseclaw enterprise
+// hooks scrub --json …` machine-readable output must expose exactly
+// four keys — `ok`, `connector`, `file`, `changed` — with the values
+// runEnterpriseHooksScrub computed. Without this test, a future
+// refactor could rename or drop a key and every packaging integration
+// that greps the shell output would silently misparse.
+func TestScrubEmitsJSONSummaryOnSuccess(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "hooks.json")
+	writeFile(t, filePath, "{}")
+	setScrubFlags(t, "cursor", filePath, false)
+	scrubJSONOutput = true
+	// Capture stdout via a fake cobra.Command so the JSON payload
+	// runEnterpriseHooksScrub emits ends up somewhere we can decode.
+	buf := &bytes.Buffer{}
+	cmd := &cobra.Command{}
+	cmd.SetOut(buf)
+	if err := runEnterpriseHooksScrub(cmd, nil); err != nil {
+		t.Fatalf("runEnterpriseHooksScrub: %v", err)
+	}
+	var got map[string]any
+	if err := json.Unmarshal(buf.Bytes(), &got); err != nil {
+		t.Fatalf("--json output is not valid JSON: %v\n%s", err, buf.String())
+	}
+	if want := true; got["ok"] != want {
+		t.Errorf("ok=%v want %v", got["ok"], want)
+	}
+	if want := "cursor"; got["connector"] != want {
+		t.Errorf("connector=%v want %v", got["connector"], want)
+	}
+	if want := filePath; got["file"] != want {
+		t.Errorf("file=%v want %v", got["file"], want)
+	}
+	// changed must be present and boolean; the empty file was already
+	// scrubbed clean so no rewrite happened, hence false. Value is
+	// checked loosely (JSON decoded as bool via any) so a future
+	// change to always-write can just flip the assertion.
+	if _, ok := got["changed"].(bool); !ok {
+		t.Errorf("changed=%v (%T) — expected bool key present in --json summary", got["changed"], got["changed"])
+	}
+	// No stray extra keys — a leak here means shell callers might see
+	// unexpected fields when jq-parsing the output, so pin the shape.
+	wantKeys := map[string]bool{"ok": true, "connector": true, "file": true, "changed": true}
+	for k := range got {
+		if !wantKeys[k] {
+			t.Errorf("--json output has unexpected key %q; contract is {ok,connector,file,changed}", k)
+		}
 	}
 }
 
