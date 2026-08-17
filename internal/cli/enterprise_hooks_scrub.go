@@ -551,10 +551,18 @@ func writeConfigAtomic(path string, payload []byte) error {
 	return nil
 }
 
-// marshalSortedIndent is a Go equivalent of json.dumps(sort_keys=True,
-// indent=2). encoding/json already sorts map keys but doesn't offer a
-// custom recursion hook, so we drop into a small manual encoder that
-// walks the decoded structure. Numbers arriving from json.Unmarshal are
+// marshalSortedIndent produces a byte shape close to Python
+// json.dumps(sort_keys=True, indent=2, ensure_ascii=False): sorted
+// map keys, two-space indent, raw UTF-8 for non-ASCII code points.
+// The bytes are NOT identical to Python's DEFAULT dumps output —
+// Python defaults to ensure_ascii=True and would emit `é` where
+// this encoder emits raw `é`. See writeSortedJSONValue for the full
+// non-ASCII / HTML-escape accounting; the divergence is intentional
+// and byte-idempotent after the first Go rewrite.
+//
+// encoding/json already sorts map keys but doesn't offer a custom
+// recursion hook, so we drop into a small manual encoder that walks
+// the decoded structure. Numbers arriving from json.Unmarshal are
 // float64 or json.Number depending on the decoder; we don't use
 // UseNumber() here, so plain float64/string/bool/nil are enough.
 func marshalSortedIndent(v any, indent string) ([]byte, error) {
@@ -580,15 +588,19 @@ func marshalSortedIndent(v any, indent string) ([]byte, error) {
 //   - json.Marshal's default `<` / `>` / `&` treatment is meant for
 //     `<script>` embedding, which does not apply here.
 //
-// Non-ASCII handling: Go's json.NewEncoder + SetEscapeHTML(false) is
-// closer to Python's ensure_ascii=False than to the default — a byte
-// like `é` survives as raw UTF-8, whereas Python's default writes
-// `é`. That divergence is fine here: after the first Go rewrite
-// the file is normalised to the raw-UTF-8 shape and every subsequent
-// scrub over that file is byte-idempotent. `U+2028` and `U+2029`
-// (JS line/paragraph separators) do get escaped by Go regardless of
-// SetEscapeHTML, so a Python-authored file that contains them would
-// also flip once and then stabilise.
+// Non-ASCII handling: Go's json.NewEncoder + SetEscapeHTML(false)
+// emits non-ASCII code points as RAW UTF-8 (e.g. `é` → 0xc3 0xa9
+// straight through). Python's `json.dumps` default is
+// ensure_ascii=True, which escapes those to `\uXXXX` (e.g. `é` →
+// `é`). So the two encoders DIVERGE on any non-ASCII input,
+// and a file the old Python scrubber wrote will fail `bytes.Equal`
+// against a fresh Go rewrite the first time. That's fine here:
+// after the first Go rewrite the file is normalised to the raw-
+// UTF-8 shape and every subsequent scrub is byte-idempotent, so
+// nothing observes the flip after the migration finishes. Go still
+// escapes `U+2028` and `U+2029` (JS line/paragraph separators)
+// regardless of SetEscapeHTML, so a Python-authored file
+// containing them also flips once and then stabilises.
 func writeSortedJSONValue(buf *bytes.Buffer, v any, prefix, indent string) error {
 	// jsonNoHTMLEscape marshals a value with SetEscapeHTML(false) so
 	// `<`, `>`, `&` survive verbatim.
@@ -723,6 +735,13 @@ var (
 	// lets the section-scan walk every `otel.*` subsection as one
 	// logical block.
 	tomlOtelSectionRE = regexp.MustCompile(`^\s*\[otel(?:\.[^\[\]]+)?\]\s*$`)
+	// tomlHooksEventRE captures the `<event>` name from a
+	// `[hooks.<event>[.sub]]` or `[[hooks.<event>[.sub]]]` header.
+	// Used to construct a per-event scan predicate so the scrubber
+	// only removes DefenseClaw-owned event subtrees and leaves any
+	// adjacent user-owned event blocks intact — see the mixed-hooks
+	// regression note on scrubCodexFile.
+	tomlHooksEventRE = regexp.MustCompile(`^\s*\[\[?hooks\.([^\[\].]+)`)
 	// tomlHooksSectionRE matches every table header rooted at the
 	// `hooks` key, in EITHER single-bracket or double-bracket
 	// (array-of-tables) form:
@@ -849,6 +868,23 @@ func scrubCodexFile(path string, markers []string) (bool, error) {
 		return tomlHooksSectionRE.MatchString(hdr)
 	}
 
+	// newStayInHooksEvent returns a predicate that stays inside a
+	// specific event's subtree — accepts `[hooks.<event>]`,
+	// `[[hooks.<event>]]`, and any dotted / array-of-tables sub-tables
+	// (`[hooks.<event>.hooks]`, `[[hooks.<event>.hooks]]`, etc.), but
+	// STOPS at a sibling event's header (`[[hooks.<other>]]`). Without
+	// this per-event scoping, sectionReferencesDC would span across
+	// EVERY consecutive `hooks.*` table and, on a DC marker found
+	// anywhere in the run, remove the whole run — including an
+	// adjacent user-owned event block that never referenced DC. The
+	// mixed-nested regression test pins the fix.
+	newStayInHooksEvent := func(event string) func(string) bool {
+		return func(hdr string) bool {
+			m := tomlHooksEventRE.FindStringSubmatch(hdr)
+			return m != nil && m[1] == event
+		}
+	}
+
 	for i < n {
 		line := lines[i]
 		trimmed := strings.TrimSpace(line)
@@ -889,8 +925,27 @@ func scrubCodexFile(path string, markers []string) (bool, error) {
 		// point the scanner drops into the generic table-header
 		// branch below and every DefenseClaw command inside the
 		// array-of-tables sub-tree survives the scrub.
+		//
+		// The scan predicate is per-event, not "any hooks.* table":
+		// a file with a user-owned `[[hooks.PreToolUse]]` followed by
+		// a DC-owned `[[hooks.PreLLMCall]]` must lose ONLY the
+		// PreLLMCall subtree. A whole-hierarchy span would find the
+		// DC marker downstream and eat the user block on the way. The
+		// per-event `stayIn` stops at the sibling event boundary so
+		// each event block is judged on its own contents.
 		if tomlHooksSectionRE.MatchString(trimmed) {
-			matched, end := sectionReferencesDC(i+1, nil, stayInHooksHierarchy)
+			var stayIn func(string) bool
+			if m := tomlHooksEventRE.FindStringSubmatch(trimmed); m != nil {
+				stayIn = newStayInHooksEvent(m[1])
+			} else {
+				// Defensive fallback: `tomlHooksSectionRE` also
+				// accepts bare `[hooks]`, but that shape is handled
+				// by the `tomlTopLevelRE` branch above and would not
+				// normally reach here. If it does, span all `hooks.*`
+				// as before.
+				stayIn = stayInHooksHierarchy
+			}
+			matched, end := sectionReferencesDC(i+1, nil, stayIn)
 			if matched {
 				changed = true
 				i = end

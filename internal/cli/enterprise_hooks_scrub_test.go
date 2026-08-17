@@ -309,6 +309,81 @@ trust_level = "trusted"
 	}
 }
 
+// TestScrubCodex_MixedNestedHooksKeepsUserEventLosesDCEvent is the
+// regression pin for CodeRabbit's follow-up finding on commit
+// 1dc69444: when the scanner spanned the whole `hooks.*`
+// hierarchy, a user-owned `[[hooks.PreToolUse]]` block ADJACENT to
+// a DC-owned `[[hooks.PreLLMCall]]` block would be scrubbed
+// alongside it — the DC marker anywhere in the run flagged the run
+// as owned, and the run boundary was "next non-hooks table" not
+// "next event." That over-scrub silently dropped user config
+// during `defenseclaw uninstall --purge` and is exactly the shape
+// that motivates a per-event scope: each `[[hooks.<event>]]`
+// top-level entry is judged on its own contents, not on its
+// neighbours'.
+//
+// Expectation: user's PreToolUse block SURVIVES, DC's PreLLMCall
+// block DISAPPEARS.
+func TestScrubCodex_MixedNestedHooksKeepsUserEventLosesDCEvent(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	writeFile(t, path, `model = "gpt-5"
+
+[[hooks.PreToolUse]]
+
+  [[hooks.PreToolUse.hooks]]
+  command = "/Users/u/bin/my-own-hook.sh"
+  type = "command"
+
+[[hooks.PreLLMCall]]
+
+  [[hooks.PreLLMCall.hooks]]
+  command = "/Users/u/.defenseclaw/hooks/codex-hook.sh"
+  type = "command"
+
+[projects."/Users/u/dev"]
+trust_level = "trusted"
+`)
+	if _, err := scrubCodexFile(path, scrubDefaultMarkers); err != nil {
+		t.Fatalf("scrubCodexFile: %v", err)
+	}
+	out := readFile(t, path)
+	// User's PreToolUse block MUST survive — its command points at a
+	// script the user wrote themselves.
+	for _, want := range []string{
+		"[[hooks.PreToolUse]]",
+		"[[hooks.PreToolUse.hooks]]",
+		"/Users/u/bin/my-own-hook.sh",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("user-owned PreToolUse block was scrubbed (mixed-hooks regression): missing %q\n---output---\n%s", want, out)
+		}
+	}
+	// DC's PreLLMCall event and every DC marker inside it MUST be gone.
+	for _, forbidden := range []string{
+		"[[hooks.PreLLMCall]]",
+		"[[hooks.PreLLMCall.hooks]]",
+		"codex-hook.sh",
+		"defenseclaw",
+	} {
+		if strings.Contains(out, forbidden) {
+			t.Errorf("DC-owned PreLLMCall subtree still present after scrub: %q\n---output---\n%s", forbidden, out)
+		}
+	}
+	// Non-hooks state must be untouched.
+	for _, want := range []string{`model = "gpt-5"`, `[projects."/Users/u/dev"]`, `trust_level = "trusted"`} {
+		if !strings.Contains(out, want) {
+			t.Errorf("user state dropped: %s\n---output---\n%s", want, out)
+		}
+	}
+	// Post-scrub bytes must still parse as valid TOML — a malformed
+	// scrub would brick Codex on next launch.
+	var parsed map[string]any
+	if err := toml.Unmarshal([]byte(out), &parsed); err != nil {
+		t.Errorf("post-scrub TOML no longer parses: %v\n---output---\n%s", err, out)
+	}
+}
+
 // TestScrubCodex_PreservesUserHooksArrayOfTables asserts the
 // complement of the above: a user's own `[[hooks.PreToolUse.hooks]]`
 // block (pointing at a script the user wrote themselves, not at any
