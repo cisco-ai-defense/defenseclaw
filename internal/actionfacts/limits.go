@@ -17,24 +17,25 @@
 package actionfacts
 
 const (
-	maxArgsJSONBytes       = 256 << 10
-	maxCommandBytes        = 64 << 10
-	maxScalarBytes         = 4 << 10
-	maxArgvItems           = 256
-	maxArgvBytes           = 64 << 10
-	maxJSONDepth           = 16
-	maxJSONMembers         = 512
-	maxWrapperDepth        = 4
-	maxNestedCommandBytes  = 128 << 10
-	maxPOSIXNodes          = 4096
-	maxPOSIXDepth          = 64
-	maxCommands            = 128
-	maxRedirectsPerCommand = 256
-	maxPathFacts           = 256
-	maxNetworkFacts        = 128
-	maxDataFlowFacts       = 256
-	maxIssues              = 8
-	maxWindowsTokens       = 512
-	maxWindowsTokenBytes   = maxScalarBytes
-	maxClassificationSteps = 4096
+	maxArgsJSONBytes          = 256 << 10
+	maxCommandBytes           = 64 << 10
+	maxScalarBytes            = 4 << 10
+	maxInlineInterpreterBytes = 2 << 10
+	maxArgvItems              = 256
+	maxArgvBytes              = 64 << 10
+	maxJSONDepth              = 16
+	maxJSONMembers            = 512
+	maxWrapperDepth           = 4
+	maxNestedCommandBytes     = 128 << 10
+	maxPOSIXNodes             = 4096
+	maxPOSIXDepth             = 64
+	maxCommands               = 128
+	maxRedirectsPerCommand    = 256
+	maxPathFacts              = 256
+	maxNetworkFacts           = 128
+	maxDataFlowFacts          = 256
+	maxIssues                 = 8
+	maxWindowsTokens          = 512
+	maxWindowsTokenBytes      = maxScalarBytes
+	maxClassificationSteps    = 4096
 )

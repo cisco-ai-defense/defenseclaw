@@ -27,12 +27,15 @@ VERSION = "0.8.8"
 COMMIT = "a" * 40
 CHANNEL_BRANCH_COMMIT = "f" * 40
 RESCUE = ROOT / "scripts/defenseclaw-rescue.sh"
+IMMUTABLE_088_RESCUE = ROOT / "cli/tests/fixtures/release/defenseclaw-rescue-0.8.8.sh"
 UPGRADE_RESOLVER = ROOT / "scripts/upgrade.sh"
 WINDOWS_RESCUE = ROOT / "scripts/defenseclaw-rescue.ps1"
 PUBLISHER = ROOT / "scripts/publish-release-channel.sh"
 WORKFLOW = ROOT / ".github/workflows/release.yaml"
 DOC = ROOT / "docs/RELEASE_CHANNEL.md"
 SCRIPT_TIMEOUT_SECONDS = 30
+# Exact authenticated 0.8.8 release asset, retained as a hermetic compatibility
+# fixture so current rescue hardening cannot rewrite the published-byte proof.
 IMMUTABLE_088_RESCUE_SHA256 = "0c98aa9aa7d56e88f04768e0fe70681f2de777fc22021f9af4ccc06be1d8099b"
 IMMUTABLE_088_RESCUE_SIZE = 28_419
 COSIGN_RELEASE_BASE_URL = (
@@ -79,10 +82,6 @@ POISONED_AUTH_ENVIRONMENT = {
 }
 
 _COSIGN_FIXTURES = {
-    ("Darwin", "x86_64"): (
-        "cosign-darwin-amd64",
-        "5715d61dd00a9b6dcb344de14910b434145855b7f82690b94183c553ac1b68be",
-    ),
     ("Darwin", "arm64"): (
         "cosign-darwin-arm64",
         "ff497a698f125f3130b04f000b2cb0dd163bcaf00b5e776ef536035e6d0b3f3e",
@@ -720,6 +719,7 @@ def _rescue_fixture(
     trust_path_cosign: bool = False,
     patch_cosign_digest: bool = True,
     channel_failure_plan: str = "",
+    rescue_source_path: Path = RESCUE,
 ) -> tuple[dict[str, str], Path]:
     assert channel_failure_plan in {
         "",
@@ -856,7 +856,7 @@ exit {cosign_exit}
         hashlib.sha256(path_cosign.read_bytes()).hexdigest() if trust_path_cosign else authenticated_cosign_digest
     )
 
-    rescue_source = RESCUE.read_text(encoding="utf-8")
+    rescue_source = rescue_source_path.read_text(encoding="utf-8")
     assert rescue_source.count(production_cosign_digest) == 1
     if patch_cosign_digest:
         rescue_source = rescue_source.replace(
@@ -985,10 +985,6 @@ def test_posix_rescue_trampoline_accepts_relative_saved_filename(
 
 def test_posix_rescue_cosign_pins_match_resolver_hint_and_test_fixtures() -> None:
     expected = {
-        ("Darwin", "x86_64"): (
-            "cosign-darwin-amd64",
-            resolver_hint.COSIGN_BOOTSTRAP_SHA256[("darwin", "amd64")],
-        ),
         ("Darwin", "arm64"): (
             "cosign-darwin-arm64",
             resolver_hint.COSIGN_BOOTSTRAP_SHA256[("darwin", "arm64")],
@@ -1022,7 +1018,6 @@ def test_posix_rescue_cosign_pins_match_resolver_hint_and_test_fixtures() -> Non
         )
     }
     assert observed_pins == {
-        ("darwin/x86_64", "cosign-darwin-amd64"): resolver_hint.COSIGN_BOOTSTRAP_SHA256[("darwin", "amd64")],
         ("darwin/arm64", "cosign-darwin-arm64"): resolver_hint.COSIGN_BOOTSTRAP_SHA256[("darwin", "arm64")],
         ("linux/x86_64 | linux/amd64", "cosign-linux-amd64"): resolver_hint.COSIGN_BOOTSTRAP_SHA256[("linux", "amd64")],
         (
@@ -1030,6 +1025,56 @@ def test_posix_rescue_cosign_pins_match_resolver_hint_and_test_fixtures() -> Non
             "cosign-linux-arm64",
         ): resolver_hint.COSIGN_BOOTSTRAP_SHA256[("linux", "arm64")],
     }
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX rescue bootstrap")
+@pytest.mark.parametrize("intel_arch", ["x86_64", "amd64"])
+def test_posix_rescue_rejects_intel_before_network_or_host_state(
+    tmp_path: Path,
+    intel_arch: str,
+) -> None:
+    env, rescue = _rescue_fixture(tmp_path)
+    source = rescue.read_text(encoding="utf-8")
+    platform_probe = 'platform_os="$("${UNAME_BIN}" -s | tr \'[:upper:]\' \'[:lower:]\')"'
+    arch_probe = 'platform_arch="$("${UNAME_BIN}" -m)"'
+    assert source.count(platform_probe) == 1
+    assert source.count(arch_probe) == 1
+    assert source.index(platform_probe) < source.index('temp_root_input="${TMPDIR:-/tmp}"')
+    assert source.index(arch_probe) < source.index('workdir="$(mktemp -d')
+    mktemp_marker = tmp_path / "mktemp-invoked"
+    fake_sysctl = tmp_path / "sysctl"
+    _write_executable(fake_sysctl, "#!/bin/sh\nprintf '0\\n'\n")
+    workdir_probe = 'workdir="$(mktemp -d "${temp_root}/defenseclaw-rescue.XXXXXX")"'
+    assert source.count(workdir_probe) == 1
+    instrumented_workdir = f"printf invoked > {mktemp_marker!s}; {workdir_probe}"
+    _write_executable(
+        rescue,
+        source.replace('readonly MACOS_SYSCTL_BIN="/usr/sbin/sysctl"', f'readonly MACOS_SYSCTL_BIN="{fake_sysctl!s}"')
+        .replace(platform_probe, 'platform_os="darwin"')
+        .replace(arch_probe, f'platform_arch="{intel_arch}"')
+        .replace(
+            workdir_probe,
+            instrumented_workdir,
+        ),
+    )
+
+    completed = subprocess.run(
+        [str(rescue)],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=SCRIPT_TIMEOUT_SECONDS,
+    )
+
+    assert completed.returncode != 0
+    assert "Intel macOS is unsupported" in completed.stderr
+    assert not (tmp_path / "curl.log").exists()
+    assert not (tmp_path / "resolver-env.log").exists()
+    assert not (tmp_path / "installer-env.log").exists()
+    assert not mktemp_marker.exists()
+    assert list(tmp_path.glob("defenseclaw-rescue.*")) == []
 
 
 def test_posix_rescue_downloads_have_finite_network_time_bounds() -> None:
@@ -1385,7 +1430,7 @@ def test_rescue_without_operator_arguments_executes_exact_tagged_resolver(
 def test_immutable_088_rescue_hands_clean_path_to_new_resolver_uv_custody(
     tmp_path: Path,
 ) -> None:
-    rescue_bytes = RESCUE.read_bytes()
+    rescue_bytes = IMMUTABLE_088_RESCUE.read_bytes()
     assert len(rescue_bytes) == IMMUTABLE_088_RESCUE_SIZE
     assert hashlib.sha256(rescue_bytes).hexdigest() == IMMUTABLE_088_RESCUE_SHA256
 
@@ -1403,11 +1448,6 @@ def test_immutable_088_rescue_hands_clean_path_to_new_resolver_uv_custody(
     assert function_end > function_start, "resolve_upgrade_uv() end anchor moved"
     resolver_function = upgrade_source[function_start:function_end]
     uv_assets = {
-        ("Darwin", "x86_64"): (
-            "uv-x86_64-apple-darwin.tar.gz",
-            "uv-x86_64-apple-darwin/uv",
-            "2ad79983127ffca7d77b77ce6a24278d7e4f7b817a1acf72fea5f8124b4aac5e",
-        ),
         ("Darwin", "arm64"): (
             "uv-aarch64-apple-darwin.tar.gz",
             "uv-aarch64-apple-darwin/uv",
@@ -1464,9 +1504,11 @@ def test_immutable_088_rescue_hands_clean_path_to_new_resolver_uv_custody(
         "#!/usr/bin/env bash\n"
         "set -euo pipefail\n"
         "umask 077\n"
-        f'readonly UV_BOOTSTRAP_VERSION="{pin.group(1)}"\n'
-        f'readonly UV_BOOTSTRAP_MAX_BYTES="{maximum.group(1)}"\n'
-        'UV_BIN=""\n'
+            f'readonly UV_BOOTSTRAP_VERSION="{pin.group(1)}"\n'
+            f'readonly UV_BOOTSTRAP_MAX_BYTES="{maximum.group(1)}"\n'
+            f'HOST_SYSTEM="{uv_platform[0]}"\n'
+            f'HOST_MACHINE="{uv_platform[1]}"\n'
+            'UV_BIN=""\n'
         'die() { printf "die: %s\\n" "$*" >&2; exit 1; }\n'
         'ok() { printf "ok: %s\\n" "$*"; }\n'
         'warn() { printf "warn: %s\\n" "$*" >&2; }\n'
@@ -1490,7 +1532,11 @@ def test_immutable_088_rescue_hands_clean_path_to_new_resolver_uv_custody(
         + 'printf "resolver-clean-path=%s\\n" "${PATH}"\n'
         + "# DefenseClaw upgrade resolver complete v1\n"
     ).encode()
-    env, rescue = _rescue_fixture(tmp_path, resolver_payload=resolver_payload)
+    env, rescue = _rescue_fixture(
+        tmp_path,
+        resolver_payload=resolver_payload,
+        rescue_source_path=IMMUTABLE_088_RESCUE,
+    )
     home = tmp_path / "home"
     known_bin = home / ".local" / "bin"
     known_bin.mkdir(parents=True)

@@ -555,6 +555,33 @@ func (m *ConfigManager) Reload(ctx context.Context, reason string) error {
 	// (rather than duplicating the logic locally, which would let a
 	// regression here slip past the test suite).
 	preserveManagedGatewayRuntimeFields(oldCfg, next)
+	// Inject the release-owned managed destination NOW, after the
+	// env_config overlay above has resolved next.CiscoAIDefense.Endpoint
+	// and preserveManagedGatewayRuntimeFields has settled any oldCfg
+	// carry-forward. Both sides of the subsequent digest / equivalence
+	// comparison then see the same endpoint that Sidecar's apply
+	// boundary will recompute with. Doing this before the overlay bakes
+	// the raw config.yaml endpoint into compiled.Plan, which then fails
+	// idempotency at the Sidecar boundary with "generated
+	// managed-enterprise destination rejected".
+	if source.compiledV8 != nil && source.compiledV8.Plan != nil {
+		if err := applySidecarObservabilityV8ManagedDestination(
+			source.compiledV8,
+			sidecarObservabilityV8ManagedOptionsFromConfig(next, source.raw),
+		); err != nil {
+			m.recordLoadError(ctx, "managed_destination_rejected")
+			if m.health != nil {
+				m.health.SetConfig(StateError, err.Error(), map[string]interface{}{
+					"path":       m.path,
+					"generation": m.gen.Load(),
+					"reason":     reason,
+				})
+			}
+			return fmt.Errorf(
+				"config reload observability v8 managed destination: %w", err,
+			)
+		}
+	}
 	diff := diffConfigs(oldCfg, next)
 	if source.compiledV8 != nil && source.compiledV8.Plan != nil && m.observabilityV8PlanChanged(source.compiledV8.Plan) {
 		diff.Changed = sortedUniqueStrings(append(diff.Changed, "observability"))
@@ -707,19 +734,16 @@ func (m *ConfigManager) loadStableCandidate(ctx context.Context) (*config.Config
 		}
 		next.AuditDB = snapshot.Local.Path
 		next.JudgeBodiesDB = snapshot.Local.JudgeBodiesPath
-		// ConfigManager owns plan comparison and persistence. Inject the
-		// release-owned managed destination here, from the fully defaulted and
-		// environment-resolved candidate, so both sides of its digest/equivalence
-		// comparison have the same generated shape. The Sidecar apply boundary
-		// repeats this operation defensively; the plan transform is idempotent.
-		if err := applySidecarObservabilityV8ManagedDestination(
-			compiled,
-			sidecarObservabilityV8ManagedOptionsFromConfig(next, before.raw),
-		); err != nil {
-			return nil, configReloadSource{}, fmt.Errorf(
-				"config reload observability v8 managed destination: %w", err,
-			)
-		}
+		// NOTE: the release-owned managed-enterprise destination is NOT
+		// injected here. `next.CiscoAIDefense.Endpoint` at this point is
+		// the raw config.yaml value; the AVC env_config.json overlay
+		// (Reload, below) may replace it before the plan is applied. If
+		// we baked the pre-overlay endpoint into compiled.Plan now, the
+		// Sidecar apply boundary would recompute the managed dest with
+		// the overlaid endpoint, WithObservabilityV8ManagedAIDDestination
+		// would see the two endpoints disagree, and the reload would
+		// fail with "generated managed-enterprise destination rejected".
+		// Reload applies the transform post-overlay instead.
 		source.compiledV8 = compiled
 		return next, source, nil
 	}

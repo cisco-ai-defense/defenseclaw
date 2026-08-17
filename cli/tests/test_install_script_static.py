@@ -10,8 +10,15 @@
 
 from __future__ import annotations
 
+import hashlib
+import os
 import re
+import shlex
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 try:
     import tomllib
@@ -113,10 +120,104 @@ def test_windows_native_workflow_builds_exact_setup_before_lifecycle_acceptance(
     assert "-Mode setup-acceptance" in acceptance
 
 
-def test_sandbox_installer_fallback_uses_selected_release() -> None:
+def test_sandbox_installer_is_authenticated_before_execution() -> None:
     text = INSTALL_SH.read_text(encoding="utf-8")
-    assert "raw.githubusercontent.com/${REPO}/main/scripts/install-openshell-sandbox.sh" not in text
-    assert "raw.githubusercontent.com/${REPO}/${RELEASE_VERSION}/scripts/install-openshell-sandbox.sh" in text
+    assert "raw.githubusercontent.com/${REPO}" not in text
+    assert 'local asset_name="install-openshell-sandbox.sh"' in text
+    assert 'version_gte "${RELEASE_VERSION}" "${SANDBOX_INSTALLER_ASSET_START_VERSION}"' in text
+    download = text.index('fetch_artifact "$(artifact_path "${asset_name}")" "${sandbox_installer}"')
+    authenticate = text.index('verify_checksum "${sandbox_installer}" "${asset_name}"', download)
+    bind_digest = text.index('verified_sha256="${VERIFIED_CHECKSUM}"', authenticate)
+    recheck = text.index('"$(sha256_file "${sandbox_installer}")" == "${verified_sha256}"', bind_digest)
+    execute = text.index('bash "${sandbox_installer}"', recheck)
+    assert download < authenticate < bind_digest < recheck < execute
+
+
+def test_unsupported_sandbox_release_fails_before_installation_work() -> None:
+    text = INSTALL_SH.read_text(encoding="utf-8")
+
+    release_policy = text.index("load_release_policy\n", text.index("main()"))
+    early_version_gate = text.index(
+        'version_gte "${RELEASE_VERSION}" "${SANDBOX_INSTALLER_ASSET_START_VERSION}"',
+        release_policy,
+    )
+    first_install = text.index("install_gateway\n", release_policy)
+
+    assert release_policy < early_version_gate < first_install
+
+
+def test_sandbox_installer_rejects_tampered_bytes_and_executes_authenticated_bytes(
+    tmp_path: Path,
+) -> None:
+    text = INSTALL_SH.read_text(encoding="utf-8")
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("Bash is unavailable on this platform")
+
+    def shell_function(name: str) -> str:
+        match = re.search(rf"(?ms)^{re.escape(name)}\(\) \{{\n.*?^\}}\n", text)
+        assert match is not None, name
+        return match.group(0)
+
+    functions = "\n".join(
+        shell_function(name)
+        for name in (
+            "version_gte",
+            "sha256_file",
+            "artifact_path",
+            "fetch_artifact",
+            "verify_checksum",
+            "install_openshell_sandbox",
+        )
+    )
+    asset_payload = b'#!/usr/bin/env bash\nprintf "executed\\n" > "${SANDBOX_EXECUTION_MARKER}"\n'
+
+    for authenticated in (False, True):
+        case = tmp_path / ("authenticated" if authenticated else "tampered")
+        release = case / "release"
+        policy = case / "policy"
+        release.mkdir(parents=True)
+        policy.mkdir()
+        asset = release / "install-openshell-sandbox.sh"
+        asset.write_bytes(asset_payload)
+        expected = hashlib.sha256(asset_payload).hexdigest() if authenticated else "0" * 64
+        checksums = release / "checksums.txt"
+        checksums.write_text(f"{expected}  {asset.name}\n", encoding="utf-8")
+        marker = case / "executed"
+        program = f"""set -euo pipefail
+has() {{ command -v "$1" >/dev/null 2>&1; }}
+info() {{ :; }}
+warn() {{ :; }}
+step() {{ :; }}
+die() {{ printf '%s\\n' "$*" >&2; exit 71; }}
+{functions}
+MODERN_RELEASE=true
+RELEASE_VERSION=0.8.11
+SANDBOX_INSTALLER_ASSET_START_VERSION=0.8.11
+LOCAL_DIR={shlex.quote(release.as_posix())}
+POLICY_DIR={shlex.quote(policy.as_posix())}
+CHECKSUMS_FILE={shlex.quote(checksums.as_posix())}
+VERIFIED_CHECKSUM=''
+install_openshell_sandbox
+"""
+        environment = os.environ.copy()
+        environment["SANDBOX_EXECUTION_MARKER"] = marker.as_posix()
+        completed = subprocess.run(
+            [bash, "-c", program],
+            env=environment,
+            text=True,
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+
+        if authenticated:
+            assert completed.returncode == 0, completed.stdout + completed.stderr
+            assert marker.read_text(encoding="utf-8") == "executed\n"
+        else:
+            assert completed.returncode == 71, completed.stdout + completed.stderr
+            assert "Checksum mismatch" in completed.stderr
+            assert not marker.exists()
 
 
 def test_release_installers_track_known_connector_choices() -> None:

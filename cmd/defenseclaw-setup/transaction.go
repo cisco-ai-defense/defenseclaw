@@ -1857,23 +1857,23 @@ func finishCommittedSetupTransactionWith(
 	markComplete func(setupTransaction) error,
 ) (bool, error) {
 	if err := converge(transaction); err != nil {
-		return false, err
+		return false, fmt.Errorf("converge committed setup transaction: %w", err)
 	}
 	if err := markConverged(transaction); err != nil {
-		return false, err
+		return false, fmt.Errorf("record converged setup transaction: %w", err)
 	}
 	cleanupErr := cleanup(transaction)
 	restartRequired := errors.Is(cleanupErr, errUninstallCleanupRequiresRestart)
 	if cleanupErr != nil &&
 		!errors.Is(cleanupErr, errTransactionCleanupDeferred) &&
 		!restartRequired {
-		return false, cleanupErr
+		return false, fmt.Errorf("clean converged setup transaction: %w", cleanupErr)
 	}
 	if restartRequired {
 		return true, nil
 	}
 	if err := markComplete(transaction); err != nil {
-		return false, err
+		return false, fmt.Errorf("record completed setup transaction: %w", err)
 	}
 	return false, nil
 }
@@ -2970,6 +2970,29 @@ func loadTransactionInstallState(treeRoot string, transaction setupTransaction) 
 	)
 }
 
+// loadCommittedInstallStateForCleanup authenticates only the immutable state
+// path needed to prove ownership of the live install. Convergence has already
+// started the selected runtime before committed cleanup runs, so recursively
+// walking the entire published payload here races legitimate transient runtime
+// files. Destructive cleanup paths still call removeTransactionTree, which
+// retains the full-tree reparse check immediately before deletion.
+func loadCommittedInstallStateForCleanup(transaction setupTransaction) (*installState, error) {
+	statePath := filepath.Join(transaction.InstallRoot, "installer", "install-state.json")
+	if err := rejectReparseAncestors(statePath); err != nil {
+		return nil, fmt.Errorf("validate committed install state path %s: %w", statePath, err)
+	}
+	state, err := loadInstallStateFromTreeForRoots(
+		transaction.InstallRoot,
+		transaction.InstallRoot,
+		transaction.DataRoot,
+		transaction.MaintenancePath,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("read committed install state %s: %w", statePath, err)
+	}
+	return state, nil
+}
+
 func cleanupStagingTree(transaction setupTransaction) error {
 	if !pathExists(transaction.StagingPath) {
 		return nil
@@ -3183,7 +3206,7 @@ func cleanupCommittedSetupTransactionWithReconciliationReader(
 	readReconciliation func() (*connectorReconciliationState, error),
 ) error {
 	if transaction.Action == "install" {
-		state, err := loadTransactionInstallState(transaction.InstallRoot, transaction)
+		state, err := loadCommittedInstallStateForCleanup(transaction)
 		if err != nil {
 			return err
 		}
@@ -3191,12 +3214,12 @@ func cleanupCommittedSetupTransactionWithReconciliationReader(
 			return errors.New("committed install tree is not owned by the transaction")
 		}
 		if err := cleanupStagingTree(transaction); err != nil {
-			return err
+			return fmt.Errorf("clean committed staging path %s: %w", transaction.StagingPath, err)
 		}
 		if pathExists(transaction.BackupPath) {
 			backupState, err := loadTransactionInstallState(transaction.BackupPath, transaction)
 			if err != nil {
-				return err
+				return fmt.Errorf("validate committed backup path %s: %w", transaction.BackupPath, err)
 			}
 			// Committed cleanup may already have removed install-state.json before
 			// encountering a locked file. The committed marker authorizes finishing
@@ -3205,13 +3228,16 @@ func cleanupCommittedSetupTransactionWithReconciliationReader(
 				return errors.New("committed transaction backup does not match previous state")
 			}
 			if err := removeTransactionTree(transaction.BackupPath, filepath.Dir(transaction.InstallRoot)); err != nil {
-				return err
+				return fmt.Errorf("remove committed backup path %s: %w", transaction.BackupPath, err)
 			}
 		}
 		if err := removeTransactionPath(transaction.MaintenanceNew, filepath.Dir(transaction.MaintenancePath)); err != nil {
-			return err
+			return fmt.Errorf("remove committed maintenance staging path %s: %w", transaction.MaintenanceNew, err)
 		}
-		return removeTransactionPath(transaction.MaintenanceBackup, filepath.Dir(transaction.MaintenancePath))
+		if err := removeTransactionPath(transaction.MaintenanceBackup, filepath.Dir(transaction.MaintenancePath)); err != nil {
+			return fmt.Errorf("remove committed maintenance backup path %s: %w", transaction.MaintenanceBackup, err)
+		}
+		return nil
 	}
 	if pathExists(transaction.InstallRoot) {
 		state, err := loadTransactionInstallState(transaction.InstallRoot, transaction)

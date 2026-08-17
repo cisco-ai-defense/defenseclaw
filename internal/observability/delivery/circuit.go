@@ -21,6 +21,14 @@ const (
 	defaultCircuitFailureThreshold = 3
 	defaultCircuitOpenDuration     = 30 * time.Second
 	immediateCircuitOpenDuration   = maxCircuitOpenDuration
+	// authenticationCircuitOpenDuration bounds how long the circuit stays
+	// open after an authentication failure. A single failed token mint or
+	// a transient identity-service hiccup would otherwise trip the shared
+	// immediateCircuitOpenDuration (24h) on first hit and suppress the
+	// destination for a full day. Five minutes is long enough to let the
+	// upstream cache / rotation cycle recover but short enough that a
+	// recoverable auth error clears within the same operator session.
+	authenticationCircuitOpenDuration = 5 * time.Minute
 
 	// halfOpenProbeDeadline bounds how long a granted probe may remain
 	// unresolved. A correct caller always reports the probe outcome through
@@ -179,10 +187,23 @@ func (circuit *Circuit) RecordFailure(class FailureClass, at time.Time) bool {
 	circuit.halfOpenUntil = time.Time{}
 	openDuration := circuit.policy.OpenDuration
 	if immediateFailure {
-		openDuration = immediateCircuitOpenDuration
+		openDuration = immediateCircuitOpenDurationFor(class)
 	}
 	circuit.openUntil = at.UTC().Add(openDuration)
 	return true
+}
+
+// immediateCircuitOpenDurationFor selects the "open-immediately" cool-down
+// per failure class. Authentication failures use a bounded few-minute window
+// so a single failed token mint or a transient identity-service hiccup does
+// not suppress the destination for a full 24-hour period. Unsafe-endpoint
+// failures retain the 24-hour trap because a broken endpoint is not expected
+// to self-heal within a session.
+func immediateCircuitOpenDurationFor(class FailureClass) time.Duration {
+	if class == FailureClassAuthentication {
+		return authenticationCircuitOpenDuration
+	}
+	return immediateCircuitOpenDuration
 }
 
 // Snapshot returns a detached, content-free circuit view.

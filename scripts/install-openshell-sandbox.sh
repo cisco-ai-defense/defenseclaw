@@ -318,3 +318,4 @@ echo ""
 }
 
 main "$@"
+# DefenseClaw OpenShell sandbox installer complete v1

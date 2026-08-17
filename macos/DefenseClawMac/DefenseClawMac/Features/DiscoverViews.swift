@@ -447,6 +447,9 @@ private enum AIDiscoverySelection: Hashable {
 
 struct AIDiscoveryView: View {
     @Environment(AppState.self) private var appState
+    @AppStorage("aiDiscovery.showAllModels") private var showAllModels = false
+    @AppStorage("aiDiscovery.modelModality") private var modelModalityRaw = AIModelModalityFilter.all.rawValue
+    @AppStorage("aiDiscovery.modelRelevance") private var modelRelevanceRaw = AIModelRelevanceFilter.all.rawValue
     @State private var snapshot = AIUsageSnapshot()
     @State private var search = ""
     @State private var selection: AIDiscoverySelection?
@@ -469,8 +472,36 @@ struct AIDiscoveryView: View {
         }
     }
 
-    private var filteredModels: [AIModelDiscoveryRow] {
+    private var modelModality: AIModelModalityFilter {
+        AIModelModalityFilter(rawValue: modelModalityRaw) ?? .all
+    }
+
+    private var modelRelevance: AIModelRelevanceFilter {
+        AIModelRelevanceFilter(rawValue: modelRelevanceRaw) ?? .all
+    }
+
+    private var modelFilter: AIModelDiscoveryFilter {
+        AIModelDiscoveryFilter(
+            showAllModels: showAllModels,
+            modality: modelModality,
+            relevance: modelRelevance
+        ).preservingLegacySnapshot(snapshot.modelRows)
+    }
+
+    private var searchMatchedModels: [AIModelDiscoveryRow] {
         snapshot.modelRows.filter { $0.matches(search) }
+    }
+
+    private var filteredModels: [AIModelDiscoveryRow] {
+        searchMatchedModels.filter(modelFilter.includes)
+    }
+
+    private var hiddenModelCount: Int {
+        max(searchMatchedModels.count - filteredModels.count, 0)
+    }
+
+    private var displayedDetectorErrorKeys: [String] {
+        Array(snapshot.detectorErrors.keys.sorted().prefix(6))
     }
 
     private var emptyState: (title: String, message: String) {
@@ -484,6 +515,12 @@ struct AIDiscoveryView: View {
             return (
                 "AI discovery disabled",
                 "Enable AI discovery in Setup or run: defenseclaw agent discovery enable"
+            )
+        }
+        if hiddenModelCount > 0, filteredModels.isEmpty {
+            return (
+                "Models hidden by filters",
+                "Use Model Filters in the toolbar, or choose Show All Models to review every discovery."
             )
         }
         if !search.isEmpty {
@@ -507,24 +544,21 @@ struct AIDiscoveryView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            // Exact TUI header parts: active is always present (including a
-            // real zero), churn appears only when non-zero, then files. Like
-            // the TUI, no synthetic zero header appears before the first load.
             if loaded {
-                HStack(spacing: 14) {
-                    ForEach(snapshot.discoveryHeaderParts, id: \.self) { part in
-                        Text(part)
-                            .font(.caption.monospacedDigit())
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                }
-                .padding(12)
+                scanSummaryHeader
+                Divider()
+            }
+            if snapshot.isPartial {
+                partialScanBanner
                 Divider()
             }
             if let error {
                 Label(error, systemImage: "exclamationmark.triangle")
                     .font(.caption).foregroundStyle(Cisco.red).padding(6)
+            }
+            if hiddenModelCount > 0 {
+                modelFilterNotice
+                Divider()
             }
             if filteredProducts.isEmpty, filteredModels.isEmpty {
                 DCEmptyState(
@@ -552,6 +586,7 @@ struct AIDiscoveryView: View {
         .searchable(text: $search, placement: .toolbar, prompt: "Filter products and models")
         .toolbar {
             ToolbarItemGroup {
+                modelFilterMenu
                 Button {
                     scan()
                 } label: {
@@ -573,7 +608,10 @@ struct AIDiscoveryView: View {
         // Pulse-fed retry: a transient gateway failure (restart mid-fetch,
         // token rotation) must not freeze the panel on a stale error.
         .task(id: appState.health.fetchedAt) { if error != nil || !loaded { await load() } }
-        .onChange(of: search) { selection = nil }
+        .onChange(of: search) { reconcileSelection() }
+        .onChange(of: showAllModels) { reconcileSelection() }
+        .onChange(of: modelModalityRaw) { reconcileSelection() }
+        .onChange(of: modelRelevanceRaw) { reconcileSelection() }
         .onReceive(NotificationCenter.default.publisher(for: .dcRefreshPanel)) { _ in Task { await load() } }
         .onReceive(NotificationCenter.default.publisher(for: .dcScanAIDiscovery)) { _ in
             guard !scanning,
@@ -582,6 +620,144 @@ struct AIDiscoveryView: View {
             else { return }
             scan()
         }
+    }
+
+    private var scanSummaryHeader: some View {
+        HStack(spacing: 14) {
+            if !snapshot.result.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                || snapshot.isPartial {
+                Label(scanResultTitle, systemImage: scanResultSystemImage)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(scanResultColor)
+                    .accessibilityLabel("Last AI discovery result: \(scanResultTitle)")
+                Text(snapshot.discoveryIssueLabel)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(snapshot.isPartial ? Cisco.orange : Color.secondary)
+                    .accessibilityLabel(snapshot.discoveryIssueLabel)
+            }
+            ForEach(snapshot.discoveryHeaderParts, id: \.self) { part in
+                Text(part)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+        }
+        .padding(12)
+    }
+
+    private var scanResultTitle: String {
+        if snapshot.isPartial { return "Partial scan" }
+        switch snapshot.result.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "ok", "complete", "completed": return "Scan complete"
+        case "disabled": return "Discovery disabled"
+        case let value where !value.isEmpty:
+            return value.replacingOccurrences(of: "_", with: " ").capitalized
+        default: return "Scan status unavailable"
+        }
+    }
+
+    private var scanResultSystemImage: String {
+        if snapshot.isPartial { return "exclamationmark.triangle.fill" }
+        switch snapshot.result.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "ok", "complete", "completed": return "checkmark.circle.fill"
+        case "disabled": return "pause.circle.fill"
+        default: return "info.circle.fill"
+        }
+    }
+
+    private var scanResultColor: Color {
+        if snapshot.isPartial { return Cisco.orange }
+        switch snapshot.result.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+        case "ok", "complete", "completed": return Cisco.green
+        default: return .secondary
+        }
+    }
+
+    private var partialScanBanner: some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Label("Partial scan — results may be incomplete", systemImage: "exclamationmark.triangle.fill")
+                .font(.callout.weight(.semibold))
+                .foregroundStyle(Cisco.orange)
+            Text(snapshot.partialDiscoveryDescription)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            ForEach(displayedDetectorErrorKeys, id: \.self) { detector in
+                if let message = snapshot.detectorErrors[detector] {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(detector.replacingOccurrences(of: "_", with: " ").capitalized)
+                            .font(.caption.weight(.semibold))
+                        Text(message)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel("\(detector) detector error: \(message)")
+                }
+            }
+            if snapshot.detectorErrors.count > displayedDetectorErrorKeys.count {
+                Text("\(snapshot.detectorErrors.count - displayedDetectorErrorKeys.count) additional detector errors not shown.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel(
+                        "\(snapshot.detectorErrors.count - displayedDetectorErrorKeys.count) additional detector errors"
+                    )
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(Cisco.orange.opacity(0.09))
+    }
+
+    private var modelFilterNotice: some View {
+        HStack(spacing: 8) {
+            Label(
+                "\(hiddenModelCount) model\(hiddenModelCount == 1 ? "" : "s") hidden by filters",
+                systemImage: "line.3.horizontal.decrease.circle"
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            Spacer()
+            Button("Show All Models") {
+                showAllModels = true
+                modelModalityRaw = AIModelModalityFilter.all.rawValue
+                modelRelevanceRaw = AIModelRelevanceFilter.all.rawValue
+            }
+            .buttonStyle(.borderless)
+            .accessibilityHint("Shows embedded, unknown, low-confidence, and other non-recommended models")
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 7)
+        .background(Cisco.surfacePanel)
+    }
+
+    private var modelFilterMenu: some View {
+        Menu {
+            Toggle("Show All Models", isOn: $showAllModels)
+            Divider()
+            Picker("Modality", selection: $modelModalityRaw) {
+                ForEach(AIModelModalityFilter.allCases) { option in
+                    Text(option.displayName).tag(option.rawValue)
+                }
+            }
+            Picker("Relevance", selection: $modelRelevanceRaw) {
+                ForEach(AIModelRelevanceFilter.allCases) { option in
+                    Text(option.displayName).tag(option.rawValue)
+                }
+            }
+            Divider()
+            Button("Reset to Recommended") {
+                showAllModels = false
+                modelModalityRaw = AIModelModalityFilter.all.rawValue
+                modelRelevanceRaw = AIModelRelevanceFilter.all.rawValue
+            }
+        } label: {
+            Label("Model Filters", systemImage: "line.3.horizontal.decrease.circle")
+        }
+        .help("Choose which discovered models appear")
+        .accessibilityLabel("Model Filters")
+        .accessibilityHint("Filter models by modality and relevance, or show all models")
     }
 
     private var productSelection: Binding<String?> {
@@ -634,7 +810,12 @@ struct AIDiscoveryView: View {
 
     private var modelSection: some View {
         VStack(spacing: 0) {
-            tableSectionHeader("Models", count: filteredModels.count, systemImage: "cpu")
+            tableSectionHeader(
+                "Models",
+                count: filteredModels.count,
+                total: searchMatchedModels.count,
+                systemImage: "cpu"
+            )
             Divider()
             modelTable
         }
@@ -649,11 +830,16 @@ struct AIDiscoveryView: View {
         }
     }
 
-    private func tableSectionHeader(_ title: String, count: Int, systemImage: String) -> some View {
+    private func tableSectionHeader(
+        _ title: String,
+        count: Int,
+        total: Int? = nil,
+        systemImage: String
+    ) -> some View {
         HStack(spacing: 7) {
             Label(title, systemImage: systemImage)
                 .font(.caption.weight(.semibold))
-            Text("\(count)")
+            Text(total.map { $0 == count ? "\(count)" : "\(count) of \($0)" } ?? "\(count)")
                 .font(.caption2.monospacedDigit())
                 .foregroundStyle(.secondary)
             Spacer()
@@ -678,28 +864,33 @@ struct AIDiscoveryView: View {
                     .help(row.modelID)
             }
             .width(min: 150, ideal: 240)
-            TableColumn("Country") { (row: AIModelDiscoveryRow) in
-                let country = row.provenance?.countryDisplay ?? ""
-                Text(country.isEmpty ? "—" : country)
+            TableColumn("Owner") { (row: AIModelDiscoveryRow) in
+                let owners = AIDiscoveryGrouping.csvTruncated(row.ownerApplications)
+                Text(owners.isEmpty ? "Unknown app" : owners)
                     .font(.caption)
-                    .accessibilityLabel(country.isEmpty ? "Country unknown" : "Country \(country)")
+                    .foregroundStyle(owners.isEmpty ? .secondary : .primary)
+                    .lineLimit(1)
+                    .help(owners)
             }
-            .width(72)
-            TableColumn("Publisher") { (row: AIModelDiscoveryRow) in
-                let publisher = row.provenance?.publisher ?? ""
-                Text(publisher.isEmpty ? "—" : publisher).font(.caption).lineLimit(1)
+            .width(min: 105, ideal: 140)
+            TableColumn("Modality") { (row: AIModelDiscoveryRow) in
+                Text(row.effectiveModality.displayName)
+                    .font(.caption)
             }
-            .width(min: 90, ideal: 120)
-            TableColumn("Root") { (row: AIModelDiscoveryRow) in
-                let root = row.provenance?.rootDisplay ?? ""
-                Text(root.isEmpty ? "—" : root).font(.caption).lineLimit(1).help(root)
+            .width(82)
+            TableColumn("Relevance") { (row: AIModelDiscoveryRow) in
+                Text(row.effectiveRelevance.displayName)
+                    .font(.caption)
+                    .foregroundStyle(row.effectiveRelevance == .primary ? .primary : .secondary)
             }
-            .width(min: 130, ideal: 210)
-            TableColumn("Derivation") { (row: AIModelDiscoveryRow) in
-                let derivation = row.provenance?.derivationDisplay ?? ""
-                Text(derivation.isEmpty ? "—" : derivation).font(.caption).lineLimit(1)
+            .width(82)
+            TableColumn("Confidence") { (row: AIModelDiscoveryRow) in
+                Text(row.confidenceDisplayLabel)
+                    .font(.caption.monospacedDigit())
+                    .foregroundStyle(.secondary)
+                    .accessibilityLabel(row.confidenceAccessibilityLabel)
             }
-            .width(115)
+            .width(84)
             TableColumn("Status") { (row: AIModelDiscoveryRow) in
                 Text(AIDiscoveryGrouping.csvTruncated(row.statuses))
                     .font(.caption).foregroundStyle(.secondary).lineLimit(1)
@@ -711,6 +902,7 @@ struct AIDiscoveryView: View {
             }
             .width(82)
         }
+        .accessibilityLabel("Discovered local models")
     }
 
     /// Column set mirrors the TUI: State · Categories · Product · Component ·
@@ -788,6 +980,27 @@ struct AIDiscoveryView: View {
         } else {
             provenancePairs = [("Provenance", "Unknown")]
         }
+        let size = row.maxSizeBytes > 0
+            ? ByteCountFormatter.string(fromByteCount: row.maxSizeBytes, countStyle: .file)
+            : ""
+        let modelPairs: [(String, String)] = [
+            ("State", row.state),
+            ("Signals", "\(row.count)"),
+            ("Owner application", row.ownerApplications.joined(separator: ", ").nonEmpty ?? "Unknown"),
+            ("Modality", row.modalities.map(\.displayName).joined(separator: ", ")),
+            ("Relevance", row.relevances.map(\.displayName).joined(separator: ", ")),
+            ("Confidence", row.confidenceDisplayLabel),
+            ("Status", row.statuses.joined(separator: ", ")),
+            ("Format", row.formats.joined(separator: ", ")),
+            ("Runtime / provider", row.providers.joined(separator: ", ")),
+            ("Products", row.products.joined(separator: ", ")),
+            ("Vendors", row.vendors.joined(separator: ", ")),
+            ("Detectors", row.detectors.joined(separator: ", ")),
+            ("Size", size),
+            ("Pinned", row.isPinned ? "Yes" : ""),
+            ("Last active", DCDates.relative(row.lastActive)),
+        ]
+        let inspectorPairs = (modelPairs + provenancePairs).filter { !$0.1.isEmpty }
 
         return VStack(alignment: .leading, spacing: 10) {
             HStack {
@@ -801,20 +1014,7 @@ struct AIDiscoveryView: View {
             }
             ScrollView {
                 VStack(alignment: .leading, spacing: 10) {
-                    KeyValueGrid(pairs: ([
-                        ("State", row.state),
-                        ("Signals", "\(row.count)"),
-                        ("Status", row.statuses.joined(separator: ", ")),
-                        ("Format", row.formats.joined(separator: ", ")),
-                        ("Runtime / provider", row.providers.joined(separator: ", ")),
-                        ("Products", row.products.joined(separator: ", ")),
-                        ("Vendors", row.vendors.joined(separator: ", ")),
-                        ("Detectors", row.detectors.joined(separator: ", ")),
-                        ("Size", row.maxSizeBytes > 0
-                            ? ByteCountFormatter.string(fromByteCount: row.maxSizeBytes, countStyle: .file) : ""),
-                        ("Pinned", row.isPinned ? "Yes" : ""),
-                        ("Last active", DCDates.relative(row.lastActive)),
-                    ] + provenancePairs).filter { !$0.1.isEmpty })
+                    KeyValueGrid(pairs: inspectorPairs)
                     Divider()
                     Text("Signals").font(.caption.weight(.semibold)).foregroundStyle(.secondary)
                     VStack(alignment: .leading, spacing: 6) {

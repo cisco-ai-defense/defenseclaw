@@ -22,9 +22,11 @@ import json
 import locale
 import ntpath
 import os
+import plistlib
 import shutil
 import stat
 import subprocess
+import sys
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass
@@ -33,6 +35,7 @@ from functools import lru_cache
 from io import StringIO
 from pathlib import Path
 from typing import Any, NamedTuple
+from xml.parsers.expat import ExpatError
 
 import yaml
 
@@ -63,10 +66,11 @@ from defenseclaw.file_permissions import atomic_write_private_bytes
 # sides — if the wording ever changes, the consumer can't silently drift.
 UNTRUSTED_PREFIX_ERROR = "binary path is not in a trusted install prefix"
 
-# Version 3 separates a connector's on-disk configuration from a verified
-# application installation.  Version 2 caches treated either signal as
-# ``installed``, which produced false positives for observe-only connectors.
-CACHE_SCHEMA_VERSION = 3
+# Version 4 adds passive macOS application-bundle discovery. Version 3
+# separates a connector's on-disk configuration from a verified application
+# installation; older caches therefore cannot represent every current install
+# signal faithfully.
+CACHE_SCHEMA_VERSION = 4
 CACHE_TTL_SECONDS = 86_400
 CACHE_FILENAME = "agent_discovery.json"
 VERSION_TIMEOUT_SECONDS = 2.0
@@ -1680,6 +1684,8 @@ def _version_for_agent_binary(
 ) -> tuple[str, str]:
     """Probe a CLI, or read metadata for a GUI that must not be launched."""
 
+    if name == "cursor" and _macos_app_bundle_for_binary(binary_path) is not None:
+        return _macos_app_version_for_binary(binary_path)
     if name == "antigravity" and _binary_command_name(binary_path) == "antigravity":
         return _windows_file_version_for_binary(
             binary_path,
@@ -1692,6 +1698,26 @@ def _version_for_agent_binary(
         require_trusted_binary_paths=require_trusted_binary_paths,
         data_dir=data_dir,
     )
+
+
+def _macos_app_version_for_binary(binary_path: str) -> tuple[str, str]:
+    """Read a Cursor app bundle's version without launching its executable."""
+
+    bundle = _macos_app_bundle_for_binary(binary_path)
+    if bundle is None:
+        return "", "macOS application bundle is unavailable"
+    info_path = bundle / "Contents" / "Info.plist"
+    try:
+        with info_path.open("rb") as stream:
+            info = plistlib.load(stream)
+    except (OSError, plistlib.InvalidFileException, ExpatError, ValueError) as exc:
+        return "", f"application metadata probe failed: {exc}"
+    if not isinstance(info, dict):
+        return "", "application metadata is invalid"
+    version = str(info.get("CFBundleShortVersionString") or info.get("CFBundleVersion") or "").strip()
+    if not version:
+        return "", "application metadata has no version"
+    return version, ""
 
 
 def _windows_file_version_for_binary(
@@ -1824,15 +1850,26 @@ def _binary_candidates_for_agent(name: str, spec: _AgentSpec) -> tuple[str, ...]
     if not spec.binary_name:
         return ()
     candidates: list[str] = []
-    path = _which(spec.binary_name)
-    if path:
-        candidates.append(path)
+    binary_names = (spec.binary_name,)
+    if name == "cursor":
+        # Cursor's standalone/headless installer exposes ``cursor-agent``;
+        # the desktop application's optional shell command remains ``cursor``.
+        binary_names = ("cursor-agent", spec.binary_name)
+    for binary_name in dict.fromkeys(binary_names):
+        path = _which(binary_name)
+        if path:
+            candidates.append(path)
+    if not _is_windows_host() and _is_macos_host():
+        for candidate in _macos_binary_candidates(name):
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                candidates.append(os.path.abspath(candidate))
     if not _is_windows_host():
-        return tuple(candidates)
+        return _deduplicate_paths(candidates)
 
-    for candidate in _windows_binary_candidates(name, spec.binary_name):
-        if os.path.isfile(candidate):
-            candidates.append(os.path.abspath(candidate))
+    for binary_name in dict.fromkeys(binary_names):
+        for candidate in _windows_binary_candidates(name, binary_name):
+            if os.path.isfile(candidate):
+                candidates.append(os.path.abspath(candidate))
 
     if name == "codex":
         for local_app_data in _windows_current_user_local_app_data_roots():
@@ -1854,6 +1891,12 @@ def _binary_candidates_for_agent(name: str, spec: _AgentSpec) -> tuple[str, ...]
                 if os.path.isfile(candidate):
                     candidates.append(os.path.abspath(candidate))
 
+    return _deduplicate_paths(candidates)
+
+
+def _deduplicate_paths(candidates: list[str]) -> tuple[str, ...]:
+    """Return path candidates once, using host-appropriate comparisons."""
+
     deduplicated: list[str] = []
     seen: set[str] = set()
     for candidate in candidates:
@@ -1863,6 +1906,56 @@ def _binary_candidates_for_agent(name: str, spec: _AgentSpec) -> tuple[str, ...]
         seen.add(key)
         deduplicated.append(candidate)
     return tuple(deduplicated)
+
+
+def _is_macos_host() -> bool:
+    """Return whether documented macOS application locations apply."""
+
+    return sys.platform == "darwin"
+
+
+def _macos_application_roots() -> tuple[Path, ...]:
+    """Return the standard system and per-user macOS application roots."""
+
+    return (Path("/Applications"), Path(os.path.expanduser("~/Applications")))
+
+
+def _macos_binary_candidates(connector: str) -> tuple[str, ...]:
+    """Return embedded CLIs from documented macOS application bundles."""
+
+    if connector != "cursor":
+        return ()
+    relative = Path("Cursor.app") / "Contents" / "Resources" / "app" / "bin" / "cursor"
+    return tuple(os.fspath(root / relative) for root in _macos_application_roots())
+
+
+def _macos_app_bundle_for_binary(binary_path: str) -> Path | None:
+    """Resolve a known embedded Cursor CLI back to its application bundle."""
+
+    if not _is_macos_host() or not binary_path:
+        return None
+    try:
+        candidate = os.path.realpath(os.path.abspath(binary_path))
+    except (OSError, ValueError):
+        return None
+    for application_root in _macos_application_roots():
+        try:
+            root = os.path.realpath(os.path.abspath(os.fspath(application_root)))
+            bundle = os.path.realpath(os.path.join(root, "Cursor.app"))
+            expected = os.path.realpath(
+                os.path.join(bundle, "Contents", "Resources", "app", "bin", "cursor")
+            )
+        except (OSError, ValueError):
+            continue
+        # A symlinked bundle or embedded CLI must remain inside the resolved
+        # application root. This is the bundle equivalent of trusted-prefix
+        # validation and prevents passive metadata from blessing an app that
+        # escapes to an attacker-controlled location.
+        if not _path_is_within(bundle, root) or not _path_is_within(expected, bundle):
+            continue
+        if _path_key(candidate) == _path_key(expected):
+            return Path(bundle)
+    return None
 
 
 def _is_windows_host() -> bool:

@@ -34,6 +34,19 @@
 
 set -euo pipefail
 
+readonly MACOS_SYSCTL_BIN="/usr/sbin/sysctl"
+
+macos_hardware_machine() {
+  local machine="$1"
+  if [[ "${machine}" == "x86_64" || "${machine}" == "amd64" ]] \
+    && [[ -x "${MACOS_SYSCTL_BIN}" && ! -L "${MACOS_SYSCTL_BIN}" ]] \
+    && [[ "$("${MACOS_SYSCTL_BIN}" -in sysctl.proc_translated 2>/dev/null || true)" == "1" ]]; then
+    printf '%s\n' "arm64"
+    return 0
+  fi
+  printf '%s\n' "${machine}"
+}
+
 # ---- defaults -----------------------------------------------------------
 
 DEFAULT_MODE="observe"
@@ -135,6 +148,23 @@ for _candidate in \
 done
 unset _candidate
 
+# Guardrail rule packs source — the sidecar loads them from
+# ${DataDir}/policies/guardrail/<profile>/ on cold start. Without them
+# the gateway fails init with:
+#   rule pack directory_not_found at .: rule-pack directory does not exist
+# Bundle layout ships them beside install.sh; dev/CI runs source from
+# the repo tree.
+POLICIES_SRC=""
+for _candidate in \
+  "${SCRIPT_DIR}/policies" \
+  "${REPO_ROOT}/policies"; do
+  if [[ -d "${_candidate}/guardrail/default" ]]; then
+    POLICIES_SRC="${_candidate}"
+    break
+  fi
+done
+unset _candidate
+
 SKIP_BUILD="false"
 SKIP_LAUNCHD="false"
 SKIP_CONNECTOR="false"
@@ -191,6 +221,12 @@ AGENT_VERSION=""
 log()  { printf '[install] %s\n' "$*"; }
 warn() { printf '[install] WARN: %s\n' "$*" >&2; }
 die()  { printf '[install] ERROR: %s\n' "$*" >&2; exit 1; }
+
+process_machine="$(uname -m)"
+hardware_machine="$(macos_hardware_machine "${process_machine}")"
+if [[ "$(uname -s)" == "Darwin" && "${hardware_machine}" != "arm64" ]]; then
+  die "Intel macOS (${process_machine}) is unsupported; the managed macOS package requires Apple Silicon (arm64)"
+fi
 
 # The persistent install.log sink is set up LATER (after the fresh-host
 # preflight passes and after LOGS_DIR has been created by
@@ -621,6 +657,24 @@ GUARDIAN_AUTH_DIR="${SUPPORT_DIR}/hook-guardian-state"
 create_install_directory_no_replace "${CONFIG_DIR}" root wheel 0755
 create_install_directory_no_replace "${RUNTIME_DIR}" root wheel 0750
 create_install_directory_no_replace "${GUARDIAN_AUTH_DIR}" root wheel 0750
+
+# Stage the shipped guardrail rule packs under runtime/policies/. The
+# gateway's cold-start sidecar init reads
+# ${DataDir}/policies/guardrail/default/ (see config default in
+# internal/config/config.go:3573). Ship all three profiles so an
+# operator can retarget rule_pack_dir at strict/permissive without a
+# reinstall.
+[[ -n "${POLICIES_SRC}" ]] \
+  || die "guardrail policies source not found (expected ${SCRIPT_DIR}/policies/guardrail/default or ${REPO_ROOT}/policies/guardrail/default)"
+POLICIES_DST="${RUNTIME_DIR}/policies"
+create_install_directory_no_replace "${POLICIES_DST}" root wheel 0750
+log "installing guardrail rule packs -> ${POLICIES_DST}/guardrail"
+# cp -R + explicit chown/chmod: we don't have install_dir_no_replace for
+# a whole tree, and RUNTIME_DIR itself is already 0750 root:wheel.
+cp -R "${POLICIES_SRC}/guardrail" "${POLICIES_DST}/guardrail"
+chown -R root:wheel "${POLICIES_DST}/guardrail"
+find "${POLICIES_DST}/guardrail" -type d -exec chmod 0750 {} +
+find "${POLICIES_DST}/guardrail" -type f -exec chmod 0640 {} +
 # Multi-user hook wiring: the hook-guardian LaunchDaemon reads its
 # per-tick manifest from ${GUARDIAN_MANIFEST_DIR}/targets.yaml. Creating
 # the directory unconditionally keeps the guardian's LoadManifest happy
@@ -680,11 +734,31 @@ CONFIG_PATH="${CONFIG_DIR}/config.yaml"
 [[ ! -e "${CONFIG_PATH}" && ! -L "${CONFIG_PATH}" ]] \
   || die "managed config appeared after fresh-host preflight and was preserved: ${CONFIG_PATH}"
 
-log "writing config (mode=${MODE} connectors=${CONNECTORS[*]} port=${API_PORT} env=${AID_ENV} redaction_profile=sensitive)"
+# Enumerate eligible local user homes so the sidecar's per-user AI-discovery
+# detectors (skills / rules / plugins / MCP under ~/.claude, ~/.codex, …) can
+# scan every real user rather than just the launchd-daemon HOME (/var/root
+# under root, where no operator has any real agent state). We pass the list
+# to render_config which writes it as `ai_discovery.home_dirs` in the
+# managed config so the daemon's `~/.claude/skills`-style expansions resolve
+# to each user's actual home. Uses the same enumerate_local_users filter
+# that populates targets.yaml so per-user detection and per-user hook
+# wiring stay in lockstep.
+HOME_DIRS=()
+if _user_lines_for_home_dirs="$(enumerate_local_users 2>/dev/null || true)"; then
+  while IFS=: read -r _u _uid _gid _home; do
+    [[ -z "${_home}" ]] && continue
+    HOME_DIRS+=("${_home}")
+  done <<< "${_user_lines_for_home_dirs}"
+  unset _u _uid _gid _home _user_lines_for_home_dirs
+fi
+
+log "writing config (mode=${MODE} connectors=${CONNECTORS[*]} port=${API_PORT} env=${AID_ENV} redaction_profile=sensitive home_dirs=${#HOME_DIRS[@]})"
 CONFIG_TMP="$(mktemp "${CONFIG_PATH}.new.XXXXXX")" \
   || die "could not reserve a private managed-config staging file"
 INSTALL_TEMP_FILES+=("${CONFIG_TMP}")
-render_config "${MODE}" "${PRIMARY_CONNECTOR}" "${API_PORT}" "${SUPPORT_DIR}" "${AID_ENDPOINT}" "${CONNECTORS[@]}" > "${CONFIG_TMP}"
+render_config "${MODE}" "${PRIMARY_CONNECTOR}" "${API_PORT}" "${SUPPORT_DIR}" "${AID_ENDPOINT}" \
+  "${#HOME_DIRS[@]}" "${HOME_DIRS[@]+"${HOME_DIRS[@]}"}" \
+  "${CONNECTORS[@]}" > "${CONFIG_TMP}"
 chown root:wheel "${CONFIG_TMP}"
 chmod 0640 "${CONFIG_TMP}"
 ln "${CONFIG_TMP}" "${CONFIG_PATH}" \

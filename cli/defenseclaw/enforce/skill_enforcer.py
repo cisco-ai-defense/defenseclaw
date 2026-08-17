@@ -33,6 +33,45 @@ from typing import Any, BinaryIO
 
 from defenseclaw.file_permissions import make_private_directory
 
+# Bundled-skill container name. Mirrors internal/enforce/bundled_skill.go
+# BundledSkillContainer. A `.system` segment anywhere in a skill path
+# marks a vendor-managed bundled entry that must never be blocked,
+# disabled, or quarantined. Keep in sync with the Go constant.
+BUNDLED_SKILL_CONTAINER = ".system"
+
+
+class BundledSkillRefusedError(Exception):
+    """Raised by SkillEnforcer.quarantine when the target is bundled.
+
+    Mirrors internal/enforce/bundled_skill.go ErrBundledSkill. Callers
+    surface it as an operator-visible error (CLI: distinct exit code;
+    audit-log: refused-bundled-skill event) rather than silently
+    returning None — the caller needs to be able to tell "target
+    doesn't exist" apart from "target is vendor-managed, refusing".
+    """
+
+
+def is_bundled_skill_path(path: str) -> bool:
+    """Component-wise check for a `.system` segment in path.
+
+    Path is normalized before check. Symlink resolution is the
+    caller's responsibility: mutation surfaces MUST realpath the
+    input before calling this — otherwise a symlink outside the
+    bundled tree pointing INTO `.system/hello` bypasses the guard.
+
+    Returns False for an empty path; the missing-provenance rule at
+    a layer above handles the path-less case as non-actionable.
+    """
+    if not path or not path.strip():
+        return False
+    cleaned = os.path.normpath(path.strip())
+    # Split on the OS separator so a Windows path (`\`) and a POSIX
+    # path (`/`) both match the same reserved-name check.
+    for part in cleaned.split(os.sep):
+        if part == BUNDLED_SKILL_CONTAINER:
+            return True
+    return False
+
 
 class SkillEnforcer:
     def __init__(self, quarantine_dir: str) -> None:
@@ -232,10 +271,29 @@ class SkillEnforcer:
         *,
         expected_hash: str = "",
     ) -> str | None:
-        """Copy, verify, then remove a skill from its original location."""
+        """Copy, verify, then remove a skill from its original location.
+
+        Raises BundledSkillRefusedError when the source path resolves under a
+        `.system` container — vendor-managed skills are refused at the
+        file-mutation boundary. The check runs before any hash or copy
+        work so a bundled skill's content is never staged, even
+        transiently.
+        """
         if not self._existing_path_is_safe(self.quarantine_dir):
             return None
         source = os.path.abspath(source_path)
+        # Resolve symlinks so a link outside the bundled tree pointing
+        # into `<skills-root>/.system/hello` can't bypass the guard.
+        # os.path.realpath is a no-op when source is already a real
+        # path, so this doesn't perturb the ordinary case.
+        try:
+            resolved = os.path.realpath(source)
+        except OSError:
+            resolved = source
+        if is_bundled_skill_path(source) or is_bundled_skill_path(resolved):
+            raise BundledSkillRefusedError(
+                f"refusing to quarantine bundled skill under .system: {skill_name!r}"
+            )
         if not self._validate_tree(source):
             return None
         source_hash = self.content_hash(source)

@@ -90,9 +90,8 @@ func AxesForRuleID(ruleID string) []DataAxis {
 		return []DataAxis{AxisIngressUntrusted}
 	case strings.HasPrefix(ruleID, "CMD-DESTRUCTIVE"),
 		strings.HasPrefix(ruleID, "SHELL-DESTRUCTIVE"):
-		// Destructive commands aren't one of the three trifecta
-		// axes; the DESTRUCTIVE-FLOW correlator pattern matches on
-		// tool_capability_class + rule_id instead.
+		// Destructive commands aren't one of the three trifecta axes;
+		// keep their execution capability separate from data movement.
 		return nil
 	}
 	return nil

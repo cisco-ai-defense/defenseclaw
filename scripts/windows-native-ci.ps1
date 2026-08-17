@@ -41,6 +41,14 @@ if (-not ('DefenseClaw.SetupStandardUserLauncher' -as [type])) {
     Add-Type -Path $setupStandardUserLauncherSource
 }
 
+$disposableFileGuardSource = Join-Path $PSScriptRoot 'windows-disposable-file-guard.cs'
+if (-not ('DefenseClaw.DisposableFileGuard' -as [type])) {
+    if (-not (Test-Path -LiteralPath $disposableFileGuardSource -PathType Leaf)) {
+        throw "Windows disposable file guard source is missing: $disposableFileGuardSource"
+    }
+    Add-Type -Path $disposableFileGuardSource
+}
+
 function Get-RedactionValues {
     $names = @(
         'OPENAI_API_KEY', 'ANTHROPIC_API_KEY', 'AMP_API_KEY', 'AZURE_OPENAI_API_KEY',
@@ -1752,6 +1760,8 @@ async def smoke():
             signal_id='model', state='seen', category='local_model',
             model=AIUsageModel(
                 id='Qwen/Qwen3-4B-GGUF', status='installed', format='gguf',
+                owner_application='Meetily', modality='generative',
+                relevance='primary', discovery_confidence=0.95,
                 provenance=AIUsageModelProvenance(
                     publisher='Alibaba Cloud', country_code='CN',
                     root_model='Qwen/Qwen3-4B', quantized=True,
@@ -1786,8 +1796,9 @@ async def smoke():
         model_cells = tuple(str(cell) for cell in models.get_row_at(0))
         if not any('Qwen/Qwen3-4B-GGUF' in cell for cell in model_cells):
             raise RuntimeError(f'packaged model row missing model ID: {model_cells}')
-        if not any('CN' in cell for cell in model_cells):
-            raise RuntimeError(f'packaged model row missing accessible country code: {model_cells}')
+        expected_cells = ('seen', 'Qwen/Qwen3-4B-GGUF', 'Meetily', 'Generative', 'Primary', '95%', 'installed', 'gguf')
+        if model_cells != expected_cells:
+            raise RuntimeError(f'packaged model row has unexpected compact columns: {model_cells}')
         await pilot.press('t')
         focus_deadline = loop.time() + 5
         while loop.time() < focus_deadline:
@@ -1797,6 +1808,10 @@ async def smoke():
             await asyncio.sleep(0.025)
         else:
             raise RuntimeError('packaged keyboard could not focus the local-model table')
+        await pilot.press('enter')
+        await pilot.pause()
+        if not discovery.detail_open or 'country=CN' not in app.detail_text:
+            raise RuntimeError(f'packaged model detail missing country provenance: {app.detail_text}')
 
 asyncio.run(asyncio.wait_for(smoke(), timeout=20))
 print('headless TUI rendered separate AI product/model tables with provenance')
@@ -3128,11 +3143,55 @@ function Assert-WizardHookRegistration(
             'amp.activeThread.current',
             'isPluginUINotAvailableError',
             'action: "reject-and-continue"',
-            'Authorization = `Bearer ${DC_API_TOKEN}`'
+            'const DC_TOKEN_FILE = "',
+            '.hook-amp.token',
+            'const DC_TOKEN_PATTERN = /^[0-9a-f]{64}$/',
+            'const DC_MAX_TOKEN_FILE_BYTES = 4096',
+            'runtime.file(DC_TOKEN_FILE).slice(0, DC_MAX_TOKEN_FILE_BYTES + 1).text()',
+            'if (!DC_TOKEN_PATTERN.test(token))',
+            'headers.Authorization = `Bearer ${token}`'
         )) {
             if ($registration.IndexOf($marker, [StringComparison]::Ordinal) -lt 0) {
                 throw "wizard-selected Amp policy plugin is missing required contract marker: $marker"
             }
+        }
+        if ($registration.IndexOf('const DC_API_TOKEN =', [StringComparison]::Ordinal) -ge 0) {
+            throw 'wizard-selected Amp policy plugin retains the obsolete embedded-token constant'
+        }
+        $tokenPath = Join-Path $hookDir '.hook-amp.token'
+        $tokenPathMatch = [regex]::Match(
+            $registration,
+            '(?m)^const DC_TOKEN_FILE\s*=\s*(?<literal>"(?:\\.|[^"\\])*")\s*$'
+        )
+        if (-not $tokenPathMatch.Success) {
+            throw 'wizard-selected Amp policy plugin does not contain one canonical scoped-token path declaration'
+        }
+        try {
+            $renderedTokenPath = $tokenPathMatch.Groups['literal'].Value |
+                ConvertFrom-Json -ErrorAction Stop
+            $expectedFullTokenPath = [IO.Path]::GetFullPath($tokenPath)
+            $renderedFullTokenPath = [IO.Path]::GetFullPath([string]$renderedTokenPath)
+        } catch {
+            throw 'wizard-selected Amp policy plugin contains an invalid scoped-token path declaration'
+        }
+        if (-not [string]::Equals(
+            $renderedFullTokenPath,
+            $expectedFullTokenPath,
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+            throw 'wizard-selected Amp policy plugin references the wrong connector-scoped token sidecar'
+        }
+        if (-not (Test-Path -LiteralPath $tokenPath -PathType Leaf)) {
+            throw 'wizard-selected Amp policy plugin is missing its connector-scoped token sidecar'
+        }
+        $scopedToken = [IO.File]::ReadAllText($tokenPath).Trim()
+        if ($scopedToken -cnotmatch '^[0-9a-f]{64}$') {
+            throw 'wizard-selected Amp policy plugin has a malformed connector-scoped token sidecar'
+        }
+        $encodedToken = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($scopedToken))
+        if ($registration.IndexOf($scopedToken, [StringComparison]::Ordinal) -ge 0 -or
+            $registration.IndexOf($encodedToken, [StringComparison]::Ordinal) -ge 0) {
+            throw 'wizard-selected Amp policy plugin embeds raw or encoded connector-scoped token material'
         }
         if ($registration -match '(?i)defenseclaw-hook(?:\.exe|\.cmd)|\bwsl\b|\bbash\b|\bchmod\b') {
             throw 'wizard-selected Amp policy plugin depends on a shell hook or compatibility layer'
@@ -5409,12 +5468,20 @@ function Assert-PackagedClaudeTokenRotation(
         (Join-Path $Logs 'rotation-success.log'),
         (Join-Path $Logs 'rotation-status.json')
     )
-    $setupCodexResult = Invoke-WindowsNativeProcess $Launcher @(
-        'setup', 'codex', '--yes', '--mode', 'action', '--fail-mode', 'closed', '--restart'
-    ) -TimeoutSeconds 300 -LogPath $credentialLogPaths[0] -SuppressOutput
-    $setupClaudeResult = Invoke-WindowsNativeProcess $Launcher @(
-        'setup', 'claude-code', '--yes', '--mode', 'action', '--fail-mode', 'closed', '--restart'
-    ) -TimeoutSeconds 300 -LogPath $credentialLogPaths[1] -SuppressOutput
+    try {
+        $setupCodexResult = Invoke-WindowsNativeProcess $Launcher @(
+            'setup', 'codex', '--yes', '--mode', 'action', '--fail-mode', 'closed', '--restart'
+        ) -TimeoutSeconds 300 -LogPath $credentialLogPaths[0] -SuppressOutput
+    } catch {
+        throw "packaged token rotation setup-codex failed: $($_.Exception.Message)"
+    }
+    try {
+        $setupClaudeResult = Invoke-WindowsNativeProcess $Launcher @(
+            'setup', 'claude-code', '--yes', '--mode', 'action', '--fail-mode', 'closed', '--restart'
+        ) -TimeoutSeconds 300 -LogPath $credentialLogPaths[1] -SuppressOutput
+    } catch {
+        throw "packaged token rotation setup-claudecode failed: $($_.Exception.Message)"
+    }
 
     foreach ($requiredConfig in @(
         (Join-Path $CodexHome 'config.toml'),
@@ -5430,8 +5497,12 @@ function Assert-PackagedClaudeTokenRotation(
         }
     }
 
-    $statusBeforeResult = Invoke-WindowsNativeProcess $Launcher @('status', '--json') `
-        -TimeoutSeconds 120 -LogPath $credentialLogPaths[2] -SuppressOutput
+    try {
+        $statusBeforeResult = Invoke-WindowsNativeProcess $Launcher @('status', '--json') `
+            -TimeoutSeconds 120 -LogPath $credentialLogPaths[2] -SuppressOutput
+    } catch {
+        throw "packaged token rotation status-before failed: $($_.Exception.Message)"
+    }
     try { $statusBefore = $statusBeforeResult.StdOut | ConvertFrom-Json -ErrorAction Stop }
     catch { throw 'packaged pre-rotation status was not valid JSON' }
     $postureBefore = @(Get-PackagedRotationConnectorPosture $statusBefore)
@@ -5444,8 +5515,12 @@ function Assert-PackagedClaudeTokenRotation(
     }
     $tokenAState = [IO.File]::ReadAllBytes($dotenvPath)
     $tokenA = Get-WindowsNativeGatewayTokenFromDotenvState $tokenAState
-    $rotateResult = Invoke-WindowsNativeProcess $Launcher @('setup', 'rotate-token', '--yes') `
-        -TimeoutSeconds 300 -LogPath $credentialLogPaths[3] -SuppressOutput
+    try {
+        $rotateResult = Invoke-WindowsNativeProcess $Launcher @('setup', 'rotate-token', '--yes') `
+            -TimeoutSeconds 300 -LogPath $credentialLogPaths[3] -SuppressOutput
+    } catch {
+        throw "packaged token rotation rotate-token failed: $($_.Exception.Message)"
+    }
     $tokenBState = [IO.File]::ReadAllBytes($dotenvPath)
     if (Test-WindowsNativeByteArraysEqual $tokenAState $tokenBState) {
         throw 'packaged token rotation did not replace the durable gateway token state'
@@ -5455,8 +5530,12 @@ function Assert-PackagedClaudeTokenRotation(
         throw 'packaged token rotation rewrote dotenv bytes without replacing the gateway token'
     }
 
-    $statusResult = Invoke-WindowsNativeProcess $Launcher @('status', '--json') `
-        -TimeoutSeconds 120 -LogPath $credentialLogPaths[4] -SuppressOutput
+    try {
+        $statusResult = Invoke-WindowsNativeProcess $Launcher @('status', '--json') `
+            -TimeoutSeconds 120 -LogPath $credentialLogPaths[4] -SuppressOutput
+    } catch {
+        throw "packaged token rotation status-after failed: $($_.Exception.Message)"
+    }
     try { $status = $statusResult.StdOut | ConvertFrom-Json -ErrorAction Stop }
     catch { throw 'packaged token rotation status was not valid JSON' }
     $postureAfter = @(Get-PackagedRotationConnectorPosture $status)
@@ -5808,23 +5887,54 @@ function Stop-StateProcesses([string]$Root) {
     if ($remaining.Count) { throw "isolated process cleanup timed out: $($remaining -join ', ')" }
 }
 
+function Test-WindowsNativeReparsePoint([IO.FileSystemInfo]$Item) {
+    return (($Item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0)
+}
+
 function Get-WindowsNativeCaptureFiles([string]$Root) {
     if (-not (Test-Path -LiteralPath $Root)) { return @() }
-    return @(
-        Get-ChildItem -LiteralPath $Root -Recurse -File -ErrorAction SilentlyContinue |
-            Where-Object {
-                $_.Name -match '^(gateway|watchdog|results|doctor|.*\.log)' -and
-                    $_.Length -le 1048576
-            } |
-            Sort-Object @{
-                Expression = {
-                    if ($_.Name -eq 'wizard-driver.log') { 0 }
-                    elseif ($_.Name -in @('go-test-failure-summary.log', 'go-test.log')) { 1 }
-                    else { 2 }
-                }
-            }, FullName |
-            Select-Object -First 30
+    try {
+        $rootItem = [IO.DirectoryInfo](Get-Item -LiteralPath $Root -Force -ErrorAction Stop)
+    } catch {
+        return @()
+    }
+    if (Test-WindowsNativeReparsePoint $rootItem) { return @() }
+
+    $pending = [Collections.Generic.Queue[IO.DirectoryInfo]]::new()
+    $pending.Enqueue($rootItem)
+    $selected = [Collections.Generic.SortedDictionary[string, IO.FileInfo]]::new(
+        [StringComparer]::OrdinalIgnoreCase
     )
+    $selectionLimit = 30
+    while ($pending.Count -gt 0) {
+        $directory = $pending.Dequeue()
+        if (Test-WindowsNativeReparsePoint $directory) { continue }
+        try {
+            $children = @(Get-ChildItem -LiteralPath $directory.FullName -Force -ErrorAction SilentlyContinue)
+        } catch {
+            continue
+        }
+        foreach ($child in $children) {
+            if (Test-WindowsNativeReparsePoint $child) { continue }
+            if ($child.PSIsContainer) {
+                $pending.Enqueue([IO.DirectoryInfo]$child)
+            } elseif ($child -is [IO.FileInfo] -and
+                $child.Name -match '^(gateway|watchdog|results|doctor|.*\.log)' -and
+                $child.Length -le 1048576) {
+                $priority = if ($child.Name -eq 'wizard-driver.log') { 0 }
+                    elseif ($child.Name -in @('go-test-failure-summary.log', 'go-test.log')) { 1 }
+                    else { 2 }
+                $selectionKey = '{0}|{1}' -f $priority, $child.FullName
+                $selected[$selectionKey] = [IO.FileInfo]$child
+                if ($selected.Count -gt $selectionLimit) {
+                    $lastKey = @($selected.Keys)[-1]
+                    [void]$selected.Remove($lastKey)
+                }
+            }
+        }
+    }
+
+    return @($selected.Values)
 }
 
 function Invoke-Capture {
@@ -5848,9 +5958,26 @@ function Invoke-Capture {
     }
     Write-BoundedText (Join-Path $destination 'listeners.txt') ($listeners -join [Environment]::NewLine)
     if (Test-Path -LiteralPath $root) {
-        foreach ($file in @(Get-WindowsNativeCaptureFiles $root)) {
-            $relative = [IO.Path]::GetRelativePath($root, $file.FullName) -replace '[\\/:*?"<>|]', '_'
-            Write-BoundedText (Join-Path $destination $relative) ([IO.File]::ReadAllText($file.FullName))
+        $captureReader = $null
+        try {
+            $captureReader = [DefenseClaw.DisposableFileGuard]::OpenRootedReader($root)
+        } catch {
+            $captureReader = $null
+        }
+        if ($null -ne $captureReader) {
+            try {
+                foreach ($file in @(Get-WindowsNativeCaptureFiles $root)) {
+                    try {
+                        $capturedText = $captureReader.ReadBoundedUtf8($file.FullName, 1048576)
+                    } catch {
+                        continue
+                    }
+                    $relative = [IO.Path]::GetRelativePath($root, $file.FullName) -replace '[\\/:*?"<>|]', '_'
+                    Write-BoundedText (Join-Path $destination $relative) $capturedText
+                }
+            } finally {
+                $captureReader.Dispose()
+            }
         }
     }
 }
@@ -5902,6 +6029,9 @@ function Invoke-SelfTest {
     $boundedLimit = 256
     $boundedSecret = 'bounded-secret-value'
     $captureFixture = Join-Path $root 'bounded-capture-selection'
+    $symlinkTarget = $null
+    $outsideCaptureRoot = $null
+    $captureReader = $null
     $originalBoundedSecret = [Environment]::GetEnvironmentVariable('DC_E2E_TEST_SECRET')
     try {
         $env:DC_E2E_TEST_SECRET = $boundedSecret
@@ -6087,6 +6217,14 @@ function Invoke-SelfTest {
             [IO.FileShare]::None
         )
         try { $oversized.SetLength(1048577) } finally { $oversized.Dispose() }
+        $outsideCaptureRoot = Join-Path ([IO.Path]::GetTempPath()) (
+            'defenseclaw-native-capture-outside-' + [guid]::NewGuid().ToString('N')
+        )
+        [IO.Directory]::CreateDirectory($outsideCaptureRoot) | Out-Null
+        $symlinkTarget = Join-Path $outsideCaptureRoot 'outside-capture-secret.bin'
+        $symlinkPath = Join-Path $captureFixture 'doctor.log'
+        Set-Content -LiteralPath $symlinkTarget -Value 'sensitive diagnostic fixture' -NoNewline
+        New-Item -ItemType SymbolicLink -Path $symlinkPath -Target $symlinkTarget -ErrorAction Stop | Out-Null
 
         $captureFiles = @(Get-WindowsNativeCaptureFiles $root)
         if (-not ($captureFiles | Where-Object {
@@ -6104,10 +6242,76 @@ function Invoke-SelfTest {
         }) {
             throw 'oversized diagnostic bypassed the native capture size guard'
         }
+        if ($captureFiles | Where-Object {
+            $_.FullName.Equals($symlinkPath, [StringComparison]::OrdinalIgnoreCase)
+        }) {
+            throw 'reparse-point diagnostic bypassed the native capture symlink guard'
+        }
+
+        $captureReader = [DefenseClaw.DisposableFileGuard]::OpenRootedReader($captureFixture)
+        $guardedBoundedText = $captureReader.ReadBoundedUtf8($boundedPath, 1048576)
+        if ($guardedBoundedText -cne [IO.File]::ReadAllText($boundedPath)) {
+            throw 'capture retained-root reader changed a verified regular diagnostic'
+        }
+        $leafSwapRoot = Join-Path $captureFixture 'leaf-swap'
+        [IO.Directory]::CreateDirectory($leafSwapRoot) | Out-Null
+        $leafSwapPath = Join-Path $leafSwapRoot 'wizard-driver.log'
+        Set-Content -LiteralPath $leafSwapPath -Value 'safe diagnostic fixture' -NoNewline
+        $leafCandidate = @(Get-WindowsNativeCaptureFiles $leafSwapRoot) |
+            Where-Object {
+                $_.FullName.Equals($leafSwapPath, [StringComparison]::OrdinalIgnoreCase)
+            } |
+            Select-Object -First 1
+        if ($null -eq $leafCandidate) {
+            throw 'capture leaf-swap fixture was not selected before replacement'
+        }
+        [IO.File]::Delete($leafSwapPath)
+        New-Item -ItemType SymbolicLink -Path $leafSwapPath -Target $symlinkTarget -ErrorAction Stop | Out-Null
+        $leafSwapRejected = $false
+        try {
+            $null = $captureReader.ReadBoundedUtf8($leafCandidate.FullName, 1048576)
+        } catch {
+            $leafSwapRejected = $true
+        }
+        if (-not $leafSwapRejected) {
+            throw 'capture followed a leaf replaced by a reparse point after enumeration'
+        }
+
+        $ancestorSwapRoot = Join-Path $captureFixture 'ancestor-swap'
+        [IO.Directory]::CreateDirectory($ancestorSwapRoot) | Out-Null
+        $ancestorSwapPath = Join-Path $ancestorSwapRoot 'doctor.log'
+        Set-Content -LiteralPath $ancestorSwapPath -Value 'safe diagnostic fixture' -NoNewline
+        $ancestorCandidate = @(Get-WindowsNativeCaptureFiles $ancestorSwapRoot) |
+            Where-Object {
+                $_.FullName.Equals($ancestorSwapPath, [StringComparison]::OrdinalIgnoreCase)
+            } |
+            Select-Object -First 1
+        if ($null -eq $ancestorCandidate) {
+            throw 'capture ancestor-swap fixture was not selected before replacement'
+        }
+        Set-Content -LiteralPath (Join-Path $outsideCaptureRoot 'doctor.log') `
+            -Value 'outside diagnostic fixture' -NoNewline
+        Remove-SafeDisposableTree -Path $ancestorSwapRoot -Root $captureFixture
+        New-Item -ItemType Junction -Path $ancestorSwapRoot -Target $outsideCaptureRoot -ErrorAction Stop | Out-Null
+        $ancestorSwapRejected = $false
+        try {
+            $null = $captureReader.ReadBoundedUtf8($ancestorCandidate.FullName, 1048576)
+        } catch {
+            $ancestorSwapRejected = $true
+        }
+        if (-not $ancestorSwapRejected) {
+            throw 'capture followed a replaced ancestor outside its retained root'
+        }
     } finally {
         [Environment]::SetEnvironmentVariable('DC_E2E_TEST_SECRET', $originalBoundedSecret)
+        if ($null -ne $captureReader) {
+            $captureReader.Dispose()
+        }
         if (Test-Path -LiteralPath $captureFixture) {
             Remove-SafeDisposableTree -Path $captureFixture -Root $root
+        }
+        if ($outsideCaptureRoot -and (Test-Path -LiteralPath $outsideCaptureRoot)) {
+            Remove-SafeDisposableTree -Path $outsideCaptureRoot -Root $outsideCaptureRoot
         }
     }
 

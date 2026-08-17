@@ -151,6 +151,39 @@ func TestEventMarshalOmitsEmptyPayloads(t *testing.T) {
 	}
 }
 
+func TestAIDiscoveryModelClassificationJSONCompatibility(t *testing.T) {
+	confidence := 0.95
+	want := AIDiscoveryModel{
+		ID:                  "Qwen3.5-4B-Q4_K_M",
+		Status:              "installed",
+		OwnerApplication:    "Meetily",
+		Modality:            "generative",
+		Relevance:           "primary",
+		DiscoveryConfidence: &confidence,
+	}
+	raw, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("marshal AI discovery model: %v", err)
+	}
+	var got AIDiscoveryModel
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal AI discovery model: %v", err)
+	}
+	if got.OwnerApplication != want.OwnerApplication || got.Modality != want.Modality ||
+		got.Relevance != want.Relevance || got.DiscoveryConfidence == nil ||
+		*got.DiscoveryConfidence != *want.DiscoveryConfidence {
+		t.Fatalf("classification metadata did not round trip: got=%+v want=%+v", got, want)
+	}
+	zero := 0.0
+	raw, err = json.Marshal(AIDiscoveryModel{ID: "unknown", Status: "installed", DiscoveryConfidence: &zero})
+	if err != nil {
+		t.Fatalf("marshal explicit zero discovery confidence: %v", err)
+	}
+	if !strings.Contains(string(raw), `"discovery_confidence":0`) {
+		t.Fatalf("explicit zero discovery confidence was omitted: %s", raw)
+	}
+}
+
 func TestEventHookDecisionPayloadPreservesEnforcementSemantics(t *testing.T) {
 	e := Event{
 		Timestamp: time.Unix(0, 0).UTC(), EventType: EventHookDecision,

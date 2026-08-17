@@ -1431,10 +1431,10 @@ async def test_alerts_panel_renders_table_and_panel_local_keys_win() -> None:
         await pilot.pause()
 
         table = app.query_one("#panel-table", DataTable)
-        await _wait_for_background(lambda: table.row_count == 2 and "All 2" in app.body_text)
+        await _wait_for_background(lambda: table.row_count == 2 and "In scope 2" in app.body_text)
         assert app.active_panel == "alerts"
         assert table.row_count == 2
-        assert "All 2" in app.body_text
+        assert "In scope 2" in app.body_text
 
         await pilot.press("3")
         await pilot.pause()
@@ -1517,6 +1517,22 @@ async def test_alerts_clickable_filter_and_dismiss_controls_open_preview() -> No
     async with app.run_test(size=(150, 40)) as pilot:
         await pilot.press("2")
         await _wait_for_panel_render(app, "alerts")
+
+        actionable_filter = app.query_one("#alerts-filter-actionable", Button)
+        all_filter = app.query_one("#alerts-filter-all", Button)
+        assert actionable_filter.has_class("active-chip")
+        assert not all_filter.has_class("active-chip")
+        assert app.query_one("#panel-table", DataTable).row_count == 1
+
+        await _click_when_ready(pilot, "#alerts-filter-all")
+        await _wait_for_background(lambda: app.query_one("#panel-table", DataTable).row_count == 2)
+        assert all_filter.has_class("active-chip")
+        assert not actionable_filter.has_class("active-chip")
+
+        await _click_when_ready(pilot, "#alerts-filter-actionable")
+        await _wait_for_background(lambda: app.query_one("#panel-table", DataTable).row_count == 1)
+        assert actionable_filter.has_class("active-chip")
+        assert not all_filter.has_class("active-chip")
 
         await _click_when_ready(pilot, "#alerts-filter-high")
         await pilot.pause()
@@ -3549,6 +3565,7 @@ async def test_ai_discovery_panel_exposes_action_bar() -> None:
             "#ai-disable",
             "#ai-scan",
             "#ai-refresh",
+            "#ai-model-scope",
             "#ai-open-detail",
             "#ai-export",
         ):
@@ -3705,6 +3722,10 @@ async def test_ai_discovery_renders_models_in_separate_table_with_detail() -> No
                         id="Qwen3-Q4_K_M",
                         status="installed",
                         format="gguf",
+                        owner_application="Meetily",
+                        modality="generative",
+                        relevance="primary",
+                        discovery_confidence=0.95,
                         provenance=provenance,
                     ),
                 ),
@@ -3726,7 +3747,10 @@ async def test_ai_discovery_renders_models_in_separate_table_with_detail() -> No
         assert model_table.row_count == 1
         assert "Codex" in str(product_table.get_cell_at((0, 2)))
         assert "Qwen3-Q4_K_M" in str(model_table.get_cell_at((0, 1)))
-        assert "CN 🇨🇳" in str(model_table.get_cell_at((0, 2)))
+        assert "Meetily" in str(model_table.get_cell_at((0, 2)))
+        assert "Generative" in str(model_table.get_cell_at((0, 3)))
+        assert "Primary" in str(model_table.get_cell_at((0, 4)))
+        assert "95%" in str(model_table.get_cell_at((0, 5)))
         assert app.query_one("#ai-model-table-label", Static).has_class("hidden") is False
 
         ai_model.set_model_cursor(0)
@@ -3736,6 +3760,77 @@ async def test_ai_discovery_renders_models_in_separate_table_with_detail() -> No
         assert ai_model.detail_open is True
         assert "publisher=Alibaba Cloud" in app.detail_text
         assert "root=Qwen/Qwen3" in app.detail_text
+
+
+@pytest.mark.asyncio
+async def test_ai_discovery_model_scope_button_reveals_hidden_artifacts() -> None:
+    ai_model = AIDiscoveryPanelModel()
+    ai_model.set_snapshot(
+        AIUsageSnapshot(
+            enabled=True,
+            signals=(
+                AIUsageSignal(
+                    signal_id="primary",
+                    state="seen",
+                    category="local_model",
+                    detector="model_file",
+                    confidence=0.9,
+                    model=AIUsageModel(
+                        id="Meetily-LLM",
+                        owner_application="Meetily",
+                        modality="generative",
+                        relevance="primary",
+                        discovery_confidence=0.95,
+                    ),
+                ),
+                AIUsageSignal(
+                    signal_id="embedded",
+                    state="seen",
+                    category="local_model",
+                    detector="model_file",
+                    confidence=0.9,
+                    model=AIUsageModel(
+                        id="39D6225B0612C5CC",
+                        format="tflite",
+                        owner_application="Chrome",
+                        modality="unknown",
+                        relevance="embedded",
+                        discovery_confidence=0.8,
+                    ),
+                ),
+            ),
+        )
+    )
+    ai_model.start_filter()
+    app = DefenseClawTUI(ai_discovery_model=ai_model)
+
+    async with app.run_test(size=(180, 50)) as pilot:
+        await pilot.press("V")
+        await pilot.pause()
+        model_table = app.query_one("#ai-model-table", DataTable)
+        scope_button = app.query_one("#ai-model-scope", Button)
+        model_label = app.query_one("#ai-model-table-label", Static)
+        await _wait_for_background(lambda: model_table.row_count == 1)
+
+        assert str(scope_button.label) == "Show all models"
+        assert "1 hidden" in str(model_label.render())
+        assert ai_model.filtering is True
+        assert ai_model.filter_text == ""
+
+        scope_button.press()
+        await _wait_for_background(lambda: model_table.row_count == 2)
+        assert ai_model.show_all_models is True
+        assert ai_model.filtering is True
+        assert ai_model.filter_text == ""
+        assert str(scope_button.label) == "Recommended models"
+        assert "ALL" in str(model_label.render())
+
+        scope_button.press()
+        await _wait_for_background(lambda: model_table.row_count == 1)
+        assert ai_model.show_all_models is False
+        assert ai_model.filtering is True
+        assert ai_model.filter_text == ""
+        assert "RECOMMENDED" in str(model_label.render())
 
 
 @pytest.mark.asyncio

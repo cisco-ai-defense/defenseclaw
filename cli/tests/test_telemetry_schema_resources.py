@@ -88,7 +88,7 @@ def test_packaged_telemetry_resource_matches_generated_source(
     document = json.loads(packaged)
     marker = document["x-defenseclaw-generated"]
     assert marker["artifact"] == source_name
-    assert marker["registry_version"] == 1
+    assert marker["registry_version"] == 2
 
 
 def test_staged_telemetry_inventory_is_exact() -> None:

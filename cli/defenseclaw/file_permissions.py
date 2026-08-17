@@ -28,7 +28,10 @@ import uuid
 from collections.abc import Callable
 from contextlib import contextmanager, suppress
 from pathlib import Path
-from typing import TextIO
+from typing import TYPE_CHECKING, TextIO
+
+if TYPE_CHECKING:
+    from defenseclaw.windows_acl import WindowsFileSecurity
 
 # Stable UnsafePathError.code values. Add a constant rather than a new bare
 # string so every consumer's match stays exhaustive and greppable.
@@ -59,6 +62,15 @@ class UnsafePathError(OSError):
 
 
 MAX_DOTENV_BYTES = 1024 * 1024
+
+_WINDOWS_TRUSTED_SYSTEM_CONTROLLER_SIDS = frozenset(
+    {
+        "S-1-5-18",  # LocalSystem
+        "S-1-5-32-544",  # BUILTIN\Administrators
+        # NT SERVICE\TrustedInstaller
+        "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464",
+    }
+)
 
 _DOTENV_PROCESS_CONTROL_NAMES = frozenset(
     {
@@ -942,11 +954,199 @@ def _verify_or_repair_windows_private_target(path: str) -> None:
     raise OSError(f"private Windows DACL verification failed: {detail}")
 
 
+def _safe_os_error_label(exc: OSError) -> str:
+    """Return an error label that cannot replay sensitive exception text."""
+
+    code = getattr(exc, "winerror", None) or exc.errno
+    if code is None:
+        return type(exc).__name__
+    return f"{type(exc).__name__} code {code}"
+
+
+def _managed_windows_publication_name_stat(
+    path: str,
+    claimed_stat: os.stat_result,
+) -> os.stat_result:
+    """Prove that *path* still names the exclusively claimed publication."""
+
+    try:
+        named_stat = os.stat(path, follow_symlinks=False)
+    except OSError as exc:
+        code = getattr(exc, "winerror", None) or exc.errno
+        if code in {2, 3}:
+            raise OSError("managed Windows publication disappeared during validation") from None
+        raise OSError(f"managed Windows publication name inspection failed ({_safe_os_error_label(exc)})") from None
+    if not os.path.samestat(named_stat, claimed_stat):
+        raise OSError("managed Windows publication was concurrently replaced; the replacement was preserved") from None
+    return named_stat
+
+
+def _managed_windows_publication_security_problem(
+    path: str,
+    descriptor: int,
+    claimed_stat: os.stat_result,
+    expected_security: WindowsFileSecurity | None,
+) -> str | None:
+    """Return a value-safe custody failure for one identity-bound file."""
+
+    from defenseclaw import windows_acl
+
+    try:
+        actual_security = windows_acl.capture_fd(descriptor)
+    except OSError as exc:
+        return f"managed Windows security inspection failed ({_safe_os_error_label(exc)})"
+    if actual_security != expected_security:
+        return "managed Windows security changed during atomic publication"
+    inspection_problem: str | None = None
+    try:
+        problem = windows_acl_custody_confidentiality_error(path)
+    except OSError as exc:
+        problem = None
+        inspection_problem = f"managed Windows custody inspection failed ({_safe_os_error_label(exc)})"
+    _managed_windows_publication_name_stat(path, claimed_stat)
+    if inspection_problem is not None:
+        return inspection_problem
+    if problem is not None:
+        return f"published managed-custody target is unsafe: {problem}"
+    return None
+
+
+def _repair_managed_windows_publication(
+    path: str,
+    descriptor: int,
+    claimed_stat: os.stat_result,
+    expected_security: WindowsFileSecurity | None,
+) -> str | None:
+    """Repair and revalidate one claimed publication, returning safe failure detail."""
+
+    from defenseclaw import windows_acl
+
+    if expected_security is None:
+        return "expected managed Windows security is unavailable"
+    try:
+        windows_acl.apply_fd(descriptor, expected_security)
+        _managed_windows_publication_name_stat(path, claimed_stat)
+        repaired_security = windows_acl.capture_fd(descriptor)
+    except OSError as exc:
+        return _safe_os_error_label(exc)
+    if repaired_security != expected_security:
+        return "managed Windows security remained changed after repair"
+    inspection_problem: str | None = None
+    try:
+        problem = windows_acl_custody_confidentiality_error(path)
+    except OSError as exc:
+        problem = None
+        inspection_problem = f"managed Windows custody inspection failed ({_safe_os_error_label(exc)})"
+    _managed_windows_publication_name_stat(path, claimed_stat)
+    if inspection_problem is not None:
+        return inspection_problem
+    if problem is not None:
+        return f"managed Windows custody remained unsafe after repair: {problem}"
+    return None
+
+
+def _verify_managed_windows_private_target(
+    path: str,
+    staged_stat: os.stat_result,
+    expected_security: WindowsFileSecurity | None,
+) -> None:
+    """Repair or delete only the exact managed file published from staging."""
+
+    from defenseclaw import windows_acl
+
+    try:
+        descriptor = windows_acl.open_regular_security_mutation_fd(path)
+    except OSError as exc:
+        code = getattr(exc, "winerror", None) or exc.errno
+        if code in {2, 3}:
+            raise OSError("managed Windows publication disappeared before validation") from None
+        raise OSError(f"managed Windows publication claim failed ({_safe_os_error_label(exc)})") from None
+
+    claimed_stat: os.stat_result | None = None
+    problem: str | None = None
+    repair_problem: str | None = None
+    cleanup_problem: str | None = None
+    delete_requested = False
+    close_problem: str | None = None
+    try:
+        try:
+            claimed_stat = os.fstat(descriptor)
+        except OSError as exc:
+            raise OSError(
+                f"managed Windows publication identity inspection failed ({_safe_os_error_label(exc)})"
+            ) from None
+        if not os.path.samestat(claimed_stat, staged_stat):
+            raise OSError(
+                "managed Windows publication was concurrently replaced before validation; the replacement was preserved"
+            ) from None
+        _managed_windows_publication_name_stat(path, claimed_stat)
+        problem = _managed_windows_publication_security_problem(
+            path,
+            descriptor,
+            claimed_stat,
+            expected_security,
+        )
+        if problem is not None:
+            repair_problem = _repair_managed_windows_publication(
+                path,
+                descriptor,
+                claimed_stat,
+                expected_security,
+            )
+            if repair_problem is not None:
+                _managed_windows_publication_name_stat(path, claimed_stat)
+                try:
+                    windows_acl.delete_regular_fd(descriptor)
+                except OSError as exc:
+                    cleanup_problem = _safe_os_error_label(exc)
+                else:
+                    delete_requested = True
+    finally:
+        try:
+            os.close(descriptor)
+        except OSError as exc:
+            close_problem = _safe_os_error_label(exc)
+
+    if problem is None or repair_problem is None:
+        if close_problem is not None:
+            raise OSError(f"managed Windows publication handle close failed: {close_problem}") from None
+        return
+
+    concurrent_replacement = False
+    if delete_requested and close_problem is None:
+        try:
+            named_after = os.stat(path, follow_symlinks=False)
+        except OSError as exc:
+            code = getattr(exc, "winerror", None) or exc.errno
+            if code not in {2, 3}:
+                cleanup_problem = f"post-delete name inspection failed ({_safe_os_error_label(exc)})"
+        else:
+            if claimed_stat is None:
+                cleanup_problem = "claimed managed publication identity was unavailable"
+            elif os.path.samestat(named_after, claimed_stat):
+                cleanup_problem = "exact managed publication remained after bound deletion"
+            else:
+                concurrent_replacement = True
+
+    detail = problem
+    if repair_problem is not None:
+        detail += f"; repair failed: {repair_problem}"
+    if cleanup_problem is not None:
+        detail += f"; cleanup failed: {cleanup_problem}"
+    if close_problem is not None:
+        detail += f"; handle close failed: {close_problem}"
+    if concurrent_replacement:
+        detail += "; concurrent replacement appeared after exact cleanup and was preserved"
+    raise OSError(detail) from None
+
+
 def atomic_write_private(
     path: str | os.PathLike[str],
     write: Callable[[int], None],
     *,
     protect_parent: bool = True,
+    windows_managed_custody: bool = False,
+    windows_managed_security: WindowsFileSecurity | None = None,
 ) -> None:
     """Atomically materialize a sensitive file with native protections.
 
@@ -954,21 +1154,51 @@ def atomic_write_private(
     called.  Existing safe Windows DACLs are copied to the replacement so an
     operator-hardened target is never widened. Unsafe inherited read or write
     grants are replaced by the canonical owner/SYSTEM policy instead.
+
+    ``windows_managed_custody`` is reserved for connector hook credentials
+    whose Go writer admits Windows system controllers. It preserves an existing
+    custody-safe DACL and validates, without narrowing, the containing hooks
+    directory. Generic user-secret writes retain the stricter default policy.
+    A new managed target receives the Go-compatible owner/SYSTEM/Administrators
+    descriptor rather than inheriting the parent or using a generic secret DACL.
+    A rollback may provide its previously captured ``windows_managed_security``
+    so the exact accepted descriptor, rather than generation B's descriptor,
+    is applied to the staged replacement before publication.
     """
+    if windows_managed_security is not None and not windows_managed_custody:
+        raise ValueError("managed Windows security requires managed-custody mode")
     target = os.path.abspath(os.fspath(path))
     parent = os.path.dirname(target) or os.curdir
     _reject_reparse_chain(parent)
     _make_private_directories(parent)
     with _hold_windows_directory(parent):
         _reject_reparse_chain(parent)
-        if protect_parent:
+        if windows_managed_custody and os.name == "nt":
+            problem = windows_acl_custody_write_error(
+                parent,
+                allow_current_user=True,
+                require_current_user_owner=True,
+            )
+            if problem is not None:
+                raise OSError(f"unsafe managed-custody parent {parent}: {problem}")
+        elif protect_parent:
             _protect_private_directory(parent)
         else:
             _validate_unmodified_parent(parent)
         _reject_reparse_path(target, allow_missing=True)
 
+        managed_security = windows_managed_security
+        if windows_managed_custody and os.name == "nt" and os.path.exists(target) and managed_security is None:
+            problem = windows_acl_custody_confidentiality_error(target)
+            if problem is not None:
+                raise OSError(f"unsafe managed-custody target {target}: {problem}")
+            from defenseclaw import windows_acl
+
+            managed_security = windows_acl.capture_path(target)
+
         fd = -1
         tmp = ""
+        staged_stat: os.stat_result | None = None
         try:
             fd, tmp = tempfile.mkstemp(
                 prefix=f".{os.path.basename(target)}.",
@@ -978,12 +1208,25 @@ def atomic_write_private(
             set_file_mode(fd, tmp, 0o600, set_owner=True)
             write(fd)
             os.fsync(fd)
+            if windows_managed_custody and os.name == "nt":
+                staged_stat = os.fstat(fd)
             os.close(fd)
             fd = -1
 
             _reject_reparse_chain(parent)
             _reject_reparse_path(target, allow_missing=True)
-            if os.name == "nt" and os.path.exists(target):
+            if windows_managed_custody and os.name == "nt":
+                from defenseclaw import windows_acl
+
+                if managed_security is not None:
+                    windows_acl.apply_path(tmp, managed_security)
+                else:
+                    managed_security = windows_acl.private_security_for_directory(parent)
+                    windows_acl.apply_path(tmp, managed_security)
+                problem = windows_acl_custody_confidentiality_error(tmp)
+                if problem is not None:
+                    raise OSError(f"staged managed-custody target is unsafe: {problem}")
+            elif os.name == "nt" and os.path.exists(target):
                 # Preserve an existing DACL only when it grants no untrusted
                 # read or write access. A readable inherited DACL must not be
                 # copied onto the new secret-bearing staging file.
@@ -992,7 +1235,16 @@ def atomic_write_private(
             replace_file_durable(tmp, target)
             tmp = ""
             if os.name == "nt":
-                _verify_or_repair_windows_private_target(target)
+                if windows_managed_custody:
+                    if staged_stat is None:
+                        raise OSError("managed Windows staging identity is unavailable")
+                    _verify_managed_windows_private_target(
+                        target,
+                        staged_stat,
+                        managed_security,
+                    )
+                else:
+                    _verify_or_repair_windows_private_target(target)
         finally:
             if fd != -1:
                 with suppress(OSError):
@@ -1002,7 +1254,14 @@ def atomic_write_private(
                     os.unlink(tmp)
 
 
-def atomic_write_private_bytes(path: str | os.PathLike[str], data: bytes, *, protect_parent: bool = True) -> None:
+def atomic_write_private_bytes(
+    path: str | os.PathLike[str],
+    data: bytes,
+    *,
+    protect_parent: bool = True,
+    windows_managed_custody: bool = False,
+    windows_managed_security: WindowsFileSecurity | None = None,
+) -> None:
     """Convenience wrapper for a complete in-memory payload."""
 
     def _write(fd: int) -> None:
@@ -1013,7 +1272,13 @@ def atomic_write_private_bytes(path: str | os.PathLike[str], data: bytes, *, pro
                 raise OSError("short write while materializing private file")
             view = view[written:]
 
-    atomic_write_private(path, _write, protect_parent=protect_parent)
+    atomic_write_private(
+        path,
+        _write,
+        protect_parent=protect_parent,
+        windows_managed_custody=windows_managed_custody,
+        windows_managed_security=windows_managed_security,
+    )
 
 
 def windows_acl_write_error(path: str | os.PathLike[str]) -> str | None:
@@ -1083,12 +1348,7 @@ def windows_acl_custody_write_error(
             return "current user SID could not be resolved"
         if not current_sid:
             return "current user SID could not be resolved"
-    system_controllers = {
-        "S-1-5-18",  # LocalSystem
-        "S-1-5-32-544",  # BUILTIN\Administrators
-        # NT SERVICE\TrustedInstaller
-        "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464",
-    }
+    system_controllers = set(_WINDOWS_TRUSTED_SYSTEM_CONTROLLER_SIDS)
     trusted_owners = set(system_controllers)
     if trust_current_user:
         trusted_owners.add(current_sid)
@@ -1156,6 +1416,63 @@ def windows_acl_confidentiality_error(path: str | os.PathLike[str]) -> str | Non
         if access_mode not in (1, 2) or inheritance & inherit_only_ace:
             continue
         if sid in trusted:
+            continue
+        if permissions & read_mask:
+            return f"ACL grants read access to untrusted SID {sid or '<unknown>'}"
+        if permissions & write_mask:
+            return f"ACL grants write access to untrusted SID {sid or '<unknown>'}"
+    if not _windows_acl_has_required_access(path):
+        return "owner/SYSTEM effective access is missing"
+    return None
+
+
+def windows_acl_custody_confidentiality_error(path: str | os.PathLike[str]) -> str | None:
+    """Validate a current-user secret managed by Windows system controllers.
+
+    The gateway's connector-token trust model admits the current user,
+    LocalSystem, BUILTIN\\Administrators, and TrustedInstaller so the same
+    managed credential survives user and service lifecycle transitions.
+    Generic user-secret validation remains stricter; this predicate is for
+    that managed-token boundary only. Every other effective read or write ACE,
+    a foreign owner, an inheritable or null DACL, or missing owner/SYSTEM access
+    still fails.
+    """
+
+    if os.name != "nt":
+        return None
+    try:
+        owner_sid, null_dacl, entries = _windows_acl_snapshot(os.fspath(path))
+    except OSError as exc:
+        return f"cannot read Windows ACL ({exc})"
+    if null_dacl:
+        return "ACL grants read/write access to Everyone (null DACL)"
+
+    try:
+        current_sid = _windows_current_user_sid()
+    except OSError:
+        return "current user SID could not be resolved"
+    if not current_sid:
+        return "current user SID could not be resolved"
+    if owner_sid != current_sid:
+        return f"owner SID {owner_sid or '<unknown>'} is not the current user"
+    try:
+        dacl_protected = _windows_dacl_is_protected(path)
+    except OSError as exc:
+        return f"cannot inspect Windows DACL protection ({exc})"
+    if not dacl_protected:
+        return "Windows DACL is inheritable"
+
+    trusted = set(_WINDOWS_TRUSTED_SYSTEM_CONTROLLER_SIDS) | {
+        "S-1-3-4",  # OWNER RIGHTS, constrained by the owner check above
+        current_sid,
+    }
+    # Keep exact parity with the gateway's otlpWindowsRejectUntrustedReadACEs:
+    # GENERIC_{READ,ALL,EXECUTE}, FILE_READ_{DATA,EA,ATTRIBUTES}, FILE_EXECUTE.
+    read_mask = 0x80000000 | 0x10000000 | 0x20000000 | 0x00000001 | 0x00000008 | 0x00000080 | 0x00000020
+    write_mask = 0x10000000 | 0x40000000 | 0x000D0156
+    inherit_only_ace = 0x08
+    for permissions, access_mode, inheritance, sid in entries:
+        if access_mode not in (1, 2) or inheritance & inherit_only_ace or sid in trusted:
             continue
         if permissions & read_mask:
             return f"ACL grants read access to untrusted SID {sid or '<unknown>'}"

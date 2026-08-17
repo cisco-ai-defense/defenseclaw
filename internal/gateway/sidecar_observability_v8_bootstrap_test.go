@@ -333,15 +333,19 @@ func TestSidecarBootstrapAndReloadOwnManagedAIDDestinationWithoutCredentials(t *
 		destination.Transport.Endpoint != first.URL+config.ObservabilityV8ManagedAIDIngestPath {
 		t.Fatalf("managed destination=%+v present=%t", destination, ok)
 	}
-	if len(destination.Routes) != 3 || destination.Routes[0].Name != "drop-local-inventory-diagnostics" ||
+	// v8-only contract (Vineet's [P1]): the managed destination now
+	// has exactly TWO generated routes — the local-diagnostic drop
+	// plus the send-all fallback. The middle
+	// "drop-managed-inventory-components" route was removed with the
+	// managedaid compatibility projector for ai.discovery inventory
+	// records.
+	if len(destination.Routes) != 2 || destination.Routes[0].Name != "drop-local-inventory-diagnostics" ||
 		destination.Routes[0].Action != config.ObservabilityV8RouteDrop ||
-		destination.Routes[1].Name != "drop-managed-inventory-components" ||
-		destination.Routes[1].Action != config.ObservabilityV8RouteDrop ||
-		destination.Routes[2].Name != "all-collected-logs" ||
-		destination.Routes[2].Action != config.ObservabilityV8RouteSend {
+		destination.Routes[1].Name != "all-collected-logs" ||
+		destination.Routes[1].Action != config.ObservabilityV8RouteSend {
 		t.Fatalf("managed routes=%+v", destination.Routes)
 	}
-	for bucket, profile := range destination.Routes[2].RedactionProfileByBucket {
+	for bucket, profile := range destination.Routes[1].RedactionProfileByBucket {
 		if profile != "sensitive" {
 			t.Fatalf("managed bucket %q profile=%q", bucket, profile)
 		}

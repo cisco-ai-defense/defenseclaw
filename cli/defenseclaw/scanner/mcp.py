@@ -38,11 +38,12 @@ import subprocess
 import sys
 import tempfile
 import threading
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, TypeVar
+from urllib.parse import urlparse
 
 from defenseclaw.config import (
     CiscoAIDefenseConfig,
@@ -54,6 +55,8 @@ from defenseclaw.config import (
 from defenseclaw.models import Finding, ScanResult
 from defenseclaw.registries.ssrf import (
     SSRFError,
+    analyzer_dns_resolution,
+    pinned_async_getaddrinfo,
     pinned_getaddrinfo,
     resolve_and_pin,
 )
@@ -65,6 +68,8 @@ from defenseclaw.scanner._llm_env import (
 
 if TYPE_CHECKING:
     pass
+
+_T = TypeVar("_T")
 
 
 # env vars whose names contain any of these
@@ -837,6 +842,62 @@ def _inspect_to_llm(il: InspectLLMConfig) -> LLMConfig:
     )
 
 
+def _scope_network_analyzer_dns(
+    scanner: object,
+    *,
+    api_endpoint: str,
+    llm_base_url: str,
+    llm_uses_local_default: bool,
+) -> None:
+    """Keep analyzer traffic separate without allowing private redirects."""
+    endpoint_by_analyzer = {
+        "_api_analyzer": api_endpoint,
+        "_llm_analyzer": llm_base_url,
+    }
+    for attr_name, endpoint in endpoint_by_analyzer.items():
+        analyzer = getattr(scanner, attr_name, None)
+        analyze = getattr(analyzer, "analyze", None)
+        if not callable(analyze):
+            continue
+
+        try:
+            endpoint_host = urlparse(endpoint).hostname if endpoint else None
+        except ValueError:
+            endpoint_host = None
+        loopback_only_hosts: tuple[str, ...] = ()
+        if endpoint_host:
+            trusted_hosts = (endpoint_host,)
+        elif attr_name == "_llm_analyzer" and llm_uses_local_default:
+            # LiteLLM's built-in local-provider endpoints use these spellings
+            # when no explicit base URL is configured. Require their answers
+            # to remain loopback; redirects and unrelated private names still
+            # pass through analyzer_dns_resolution's public-IP policy.
+            trusted_hosts = ()
+            loopback_only_hosts = ("localhost", "127.0.0.1", "::1")
+        else:
+            trusted_hosts = ()
+
+        async def run_analyzer(
+            *args,
+            _analyze=analyze,
+            _trusted_hosts=trusted_hosts,
+            _loopback_only_hosts=loopback_only_hosts,
+            **kwargs,
+        ):
+            with analyzer_dns_resolution(
+                *_trusted_hosts,
+                loopback_only_hosts=_loopback_only_hosts,
+            ):
+                return await _analyze(*args, **kwargs)
+
+        analyzer.analyze = run_analyzer
+
+
+async def _run_with_pinned_dns(make_scan: Callable[[], Awaitable[_T]]) -> _T:
+    async with pinned_async_getaddrinfo():
+        return await make_scan()
+
+
 class MCPScannerWrapper:
     """Wraps the cisco-ai-mcp-scanner SDK.
 
@@ -1000,6 +1061,12 @@ class MCPScannerWrapper:
         )
 
         scanner = MCPSDKScanner(sdk_config)
+        _scope_network_analyzer_dns(
+            scanner,
+            api_endpoint=aid.endpoint,
+            llm_base_url=llm.base_url,
+            llm_uses_local_default=llm.is_local_provider(),
+        )
         analyzers = self._parse_analyzers(AnalyzerEnum)
 
         start = time.monotonic()
@@ -1219,7 +1286,11 @@ class MCPScannerWrapper:
         all_findings: list[object] = []
 
         tool_results = asyncio.run(
-            scanner.scan_remote_server_tools(target, analyzers=analyzers)
+            _run_with_pinned_dns(
+                lambda: scanner.scan_remote_server_tools(
+                    target, analyzers=analyzers
+                )
+            )
         )
         for tr in tool_results:
             entity_name = getattr(tr, "tool_name", "")
@@ -1230,7 +1301,11 @@ class MCPScannerWrapper:
 
         if cfg.scan_prompts:
             prompt_results = asyncio.run(
-                scanner.scan_remote_server_prompts(target, analyzers=analyzers)
+                _run_with_pinned_dns(
+                    lambda: scanner.scan_remote_server_prompts(
+                        target, analyzers=analyzers
+                    )
+                )
             )
             for pr in prompt_results:
                 entity_name = getattr(pr, "prompt_name", "")
@@ -1241,7 +1316,11 @@ class MCPScannerWrapper:
 
         if cfg.scan_resources:
             resource_results = asyncio.run(
-                scanner.scan_remote_server_resources(target, analyzers=analyzers)
+                _run_with_pinned_dns(
+                    lambda: scanner.scan_remote_server_resources(
+                        target, analyzers=analyzers
+                    )
+                )
             )
             for rr in resource_results:
                 entity_name = getattr(rr, "resource_name", "") or getattr(rr, "resource_uri", "")
@@ -1253,7 +1332,12 @@ class MCPScannerWrapper:
         if cfg.scan_instructions:
             try:
                 instr_results = asyncio.run(
-                    scanner.scan_remote_server_instructions(target, analyzers=analyzers)
+                    _run_with_pinned_dns(
+                        lambda: scanner.scan_remote_server_instructions(
+                            target,
+                            analyzers=analyzers,
+                        )
+                    )
                 )
                 items = instr_results if isinstance(instr_results, list) else [instr_results]
                 for ir in items:

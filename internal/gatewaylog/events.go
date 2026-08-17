@@ -897,16 +897,19 @@ type AIDiscoveryComponent struct {
 // private repository names. Local `/api/v1/ai-usage` responses still carry the
 // model block regardless of outbound sink redaction.
 type AIDiscoveryModel struct {
-	ID         string                      `json:"id"`
-	Status     string                      `json:"status"`
-	Format     string                      `json:"format,omitempty"`
-	Provider   string                      `json:"provider,omitempty"`
-	Recipe     string                      `json:"recipe,omitempty"`
-	Modality   string                      `json:"modality,omitempty"`
-	Device     string                      `json:"device,omitempty"`
-	SizeBytes  int64                       `json:"size_bytes,omitempty"`
-	Pinned     bool                        `json:"pinned,omitempty"`
-	Provenance *AIDiscoveryModelProvenance `json:"provenance,omitempty"`
+	ID                  string                      `json:"id"`
+	Status              string                      `json:"status"`
+	Format              string                      `json:"format,omitempty"`
+	Provider            string                      `json:"provider,omitempty"`
+	Recipe              string                      `json:"recipe,omitempty"`
+	Modality            string                      `json:"modality,omitempty"`
+	Device              string                      `json:"device,omitempty"`
+	SizeBytes           int64                       `json:"size_bytes,omitempty"`
+	Pinned              bool                        `json:"pinned,omitempty"`
+	OwnerApplication    string                      `json:"owner_application,omitempty"`
+	Relevance           string                      `json:"relevance,omitempty"`
+	DiscoveryConfidence *float64                    `json:"discovery_confidence,omitempty"`
+	Provenance          *AIDiscoveryModelProvenance `json:"provenance,omitempty"`
 }
 
 // AIDiscoveryModelProvenance mirrors inventory.LocalModelProvenance for

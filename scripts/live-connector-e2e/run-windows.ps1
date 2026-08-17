@@ -552,7 +552,30 @@ function Test-CanonicalConnectorRecord([AllowNull()][object]$Record, [string]$Na
         [string]::Equals($connector, $Name, [StringComparison]::OrdinalIgnoreCase)
 }
 
-function Test-ConnectorEvent([string]$Path, [string]$Name, [int]$Since) {
+function Test-ConnectorEvent(
+    [string]$Path,
+    [string]$Name,
+    [int]$Since,
+    [string]$SessionID = '',
+    [string]$HookEvent = '',
+    [string]$RequestID = '',
+    [string]$ToolInvocationID = ''
+) {
+    if (-not [string]::IsNullOrWhiteSpace($SessionID) -or
+        -not [string]::IsNullOrWhiteSpace($HookEvent) -or
+        -not [string]::IsNullOrWhiteSpace($RequestID) -or
+        -not [string]::IsNullOrWhiteSpace($ToolInvocationID)) {
+        $decision = Get-LatestHookDecision `
+            -Path $Path -Name $Name -Since $Since `
+            -SessionID $SessionID -HookEvent $HookEvent `
+            -ToolInvocationID $ToolInvocationID
+        if ($null -eq $decision -or
+            [string]::IsNullOrWhiteSpace([string]$decision.request_id)) {
+            return $false
+        }
+        return [string]::IsNullOrWhiteSpace($RequestID) -or
+            [string]$decision.request_id -ceq $RequestID
+    }
     $lines = @(Get-EventLines $Path)
     if ($Since -ge $lines.Count) { return $false }
     foreach ($line in $lines[$Since..($lines.Count - 1)]) {
@@ -563,13 +586,37 @@ function Test-ConnectorEvent([string]$Path, [string]$Name, [int]$Since) {
     return $false
 }
 
-function Test-BlockVerdict([string]$Path, [int]$Since) {
+function Test-BlockVerdict(
+    [string]$Path,
+    [int]$Since,
+    [string]$Name = '',
+    [string]$RequestID = '',
+    [string]$SessionID = '',
+    [string]$ToolInvocationID = ''
+) {
     $lines = @(Get-EventLines $Path)
     if ($Since -ge $lines.Count) { return $false }
     foreach ($line in $lines[$Since..($lines.Count - 1)]) {
         try {
             $eventRecord = $line | ConvertFrom-Json
             if ((Get-JsonPropertyValue $eventRecord 'schema_version') -ne 1) { continue }
+            if (-not [string]::IsNullOrWhiteSpace($Name) -and
+                -not (Test-CanonicalConnectorRecord $eventRecord $Name)) {
+                continue
+            }
+            $correlation = Get-JsonPropertyValue $eventRecord 'correlation'
+            if (-not [string]::IsNullOrWhiteSpace($RequestID) -and
+                [string](Get-JsonPropertyValue $correlation 'request_id') -cne $RequestID) {
+                continue
+            }
+            if (-not [string]::IsNullOrWhiteSpace($SessionID) -and
+                [string](Get-JsonPropertyValue $correlation 'session_id') -cne $SessionID) {
+                continue
+            }
+            if (-not [string]::IsNullOrWhiteSpace($ToolInvocationID) -and
+                [string](Get-JsonPropertyValue $correlation 'tool_invocation_id') -cne $ToolInvocationID) {
+                continue
+            }
             $eventName = [string](Get-JsonPropertyValue $eventRecord 'event_name')
             $bucket = [string](Get-JsonPropertyValue $eventRecord 'bucket')
             $body = Get-JsonPropertyValue $eventRecord 'body'
@@ -584,11 +631,76 @@ function Test-BlockVerdict([string]$Path, [int]$Since) {
             }
             $blockedValues = if ($eventName -ceq 'scan.completed') { @('block') } else { @('block', 'deny') }
             foreach ($field in $fields) {
-                if ([string](Get-JsonPropertyValue $body $field) -cin $blockedValues) { return $true }
+                if ([string](Get-JsonPropertyValue $body $field) -cin $blockedValues) {
+                    return $true
+                }
             }
         } catch { continue }
     }
     return $false
+}
+
+function Wait-GatewayEvidenceAfter(
+    [string]$Path,
+    [string]$Name,
+    [int]$Since,
+    [bool]$RequireBlock,
+    [int]$TimeoutMilliseconds = 5000,
+    [string]$SessionID = '',
+    [string]$HookEvent = '',
+    [string]$ToolInvocationID = ''
+) {
+    $deadline = [DateTime]::UtcNow.AddMilliseconds($TimeoutMilliseconds)
+    $connectorEvent = $false
+    $blockVerdict = $false
+    $requestID = ''
+    $hasHookIdentity = -not [string]::IsNullOrWhiteSpace($SessionID) -or
+        -not [string]::IsNullOrWhiteSpace($HookEvent) -or
+        -not [string]::IsNullOrWhiteSpace($ToolInvocationID)
+    do {
+        $decision = $null
+        if ($hasHookIdentity) {
+            $decision = Get-LatestHookDecision `
+                -Path $Path -Name $Name -Since $Since `
+                -SessionID $SessionID -HookEvent $HookEvent `
+                -ToolInvocationID $ToolInvocationID
+            if ($null -ne $decision) {
+                $requestID = [string]$decision.request_id
+                $connectorEvent = Test-ConnectorEvent `
+                    -Path $Path -Name $Name -Since $Since `
+                    -SessionID $SessionID -HookEvent $HookEvent -RequestID $requestID `
+                    -ToolInvocationID $ToolInvocationID
+            } else {
+                $connectorEvent = $false
+            }
+        } else {
+            $connectorEvent = Test-ConnectorEvent -Path $Path -Name $Name -Since $Since
+        }
+        if ($RequireBlock) {
+            if ($hasHookIdentity) {
+                if ($null -ne $decision -and
+                    [string]$decision.raw_action -cin @('block', 'deny') -and
+                    ([bool]$decision.enforced -or [bool]$decision.would_block) -and
+                    -not [string]::IsNullOrWhiteSpace($requestID)) {
+                    $blockVerdict = Test-BlockVerdict `
+                        -Path $Path -Since $Since -Name $Name -RequestID $requestID `
+                        -SessionID $SessionID -ToolInvocationID $ToolInvocationID
+                }
+            } else {
+                $blockVerdict = Test-BlockVerdict -Path $Path -Since $Since -Name $Name
+            }
+        }
+        if ($connectorEvent -and (-not $RequireBlock -or $blockVerdict)) { break }
+        if ([DateTime]::UtcNow -ge $deadline) { break }
+        Start-Sleep -Milliseconds 100
+    } while ([DateTime]::UtcNow -lt $deadline)
+
+    return [pscustomobject][ordered]@{
+        ConnectorEvent = $connectorEvent
+        BlockVerdict = $blockVerdict
+        RequestID = $requestID
+        ToolInvocationID = $ToolInvocationID
+    }
 }
 
 function Read-SharedText([string]$Path) {
@@ -617,7 +729,8 @@ function Get-LatestHookDecision(
     [string]$Name,
     [int]$Since,
     [string]$SessionID = '',
-    [string]$HookEvent = ''
+    [string]$HookEvent = '',
+    [string]$ToolInvocationID = ''
 ) {
     $lines = @(Get-EventLines $Path)
     if ($Since -ge $lines.Count) { return $null }
@@ -641,6 +754,10 @@ function Get-LatestHookDecision(
                 [string](Get-JsonPropertyValue $body 'defenseclaw.hook.event') -cne $HookEvent) {
                 continue
             }
+            if (-not [string]::IsNullOrWhiteSpace($ToolInvocationID) -and
+                [string](Get-JsonPropertyValue $correlation 'tool_invocation_id') -cne $ToolInvocationID) {
+                continue
+            }
             $match = [pscustomobject][ordered]@{
                 connector = [string](Get-JsonPropertyValue $eventRecord 'connector')
                 action = [string](Get-JsonPropertyValue $body 'defenseclaw.guardrail.effective_action')
@@ -650,6 +767,7 @@ function Get-LatestHookDecision(
                 enforced = [bool]$enforced.Value
                 rule_ids = @(Get-JsonPropertyValue $body 'defenseclaw.guardrail.rule_ids')
                 request_id = [string](Get-JsonPropertyValue $correlation 'request_id')
+                tool_invocation_id = [string](Get-JsonPropertyValue $correlation 'tool_invocation_id')
                 record_id = [string](Get-JsonPropertyValue $eventRecord 'record_id')
             }
         } catch { continue }
@@ -1127,13 +1245,13 @@ function Assert-DoctorHookRegistration {
             'ctx.ui.confirm',
             'amp.activeThread.current',
             'isPluginUINotAvailableError',
-            'action: "reject-and-continue"',
-            'Authorization = `Bearer ${DC_API_TOKEN}`'
+            'action: "reject-and-continue"'
         )) {
             if ($registration.IndexOf($marker, [StringComparison]::Ordinal) -lt 0) {
                 throw "setup-created Amp policy plugin is missing required marker: $marker"
             }
         }
+        Assert-AmpScopedTokenPluginContract $registration 'setup-created Amp policy plugin'
         if ($registration -match '(?i)defenseclaw-hook(?:\.exe|\.cmd)|\bwsl\b|\bbash\b|\bchmod\b') {
             throw 'setup-created Amp policy plugin depends on a shell hook or compatibility layer'
         }
@@ -1146,6 +1264,61 @@ function Assert-DoctorHookRegistration {
     Write-Result doctor-hooks pass "$label accepted the setup-created native registration"
     if ($Connector -eq 'amp') {
         Write-Result 'amp:plugin-contract' pass 'five callbacks, scoped bearer auth, foreground confirmation, background/headless safe rejection, and no shell dependency'
+    }
+}
+
+function Assert-AmpScopedTokenPluginContract([string]$Registration, [string]$Context) {
+    foreach ($marker in @(
+        'const DC_TOKEN_FILE = "',
+        '.hook-amp.token',
+        'const DC_TOKEN_PATTERN = /^[0-9a-f]{64}$/',
+        'const DC_MAX_TOKEN_FILE_BYTES = 4096',
+        'runtime.file(DC_TOKEN_FILE).slice(0, DC_MAX_TOKEN_FILE_BYTES + 1).text()',
+        'if (!DC_TOKEN_PATTERN.test(token))',
+        'headers.Authorization = `Bearer ${token}`'
+    )) {
+        if ($Registration.IndexOf($marker, [StringComparison]::Ordinal) -lt 0) {
+            throw "$Context is missing scoped-token marker: $marker"
+        }
+    }
+    if ($Registration.IndexOf('const DC_API_TOKEN =', [StringComparison]::Ordinal) -ge 0) {
+        throw "$Context retains the obsolete embedded-token constant"
+    }
+
+    $tokenPath = Join-Path (Join-Path $env:DEFENSECLAW_HOME 'hooks') '.hook-amp.token'
+    $tokenPathMatch = [regex]::Match(
+        $Registration,
+        '(?m)^const DC_TOKEN_FILE\s*=\s*(?<literal>"(?:\\.|[^"\\])*")\s*$'
+    )
+    if (-not $tokenPathMatch.Success) {
+        throw "$Context does not contain one canonical scoped-token path declaration"
+    }
+    try {
+        $renderedTokenPath = $tokenPathMatch.Groups['literal'].Value |
+            ConvertFrom-Json -ErrorAction Stop
+        $expectedFullTokenPath = [IO.Path]::GetFullPath($tokenPath)
+        $renderedFullTokenPath = [IO.Path]::GetFullPath([string]$renderedTokenPath)
+    } catch {
+        throw "$Context contains an invalid scoped-token path declaration"
+    }
+    if (-not [string]::Equals(
+        $renderedFullTokenPath,
+        $expectedFullTokenPath,
+        [StringComparison]::OrdinalIgnoreCase
+    )) {
+        throw "$Context references the wrong connector-scoped token sidecar"
+    }
+    if (-not (Test-Path -LiteralPath $tokenPath -PathType Leaf)) {
+        throw "$Context is missing its connector-scoped token sidecar"
+    }
+    $scopedToken = [IO.File]::ReadAllText($tokenPath).Trim()
+    if ($scopedToken -cnotmatch '^[0-9a-f]{64}$') {
+        throw "$Context has a malformed connector-scoped token sidecar"
+    }
+    $encodedToken = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($scopedToken))
+    if ($Registration.IndexOf($scopedToken, [StringComparison]::Ordinal) -ge 0 -or
+        $Registration.IndexOf($encodedToken, [StringComparison]::Ordinal) -ge 0) {
+        throw "$Context embeds raw or encoded connector-scoped token material"
     }
 }
 
@@ -1188,15 +1361,76 @@ function Invoke-Teardown {
     }
 }
 
-function Invoke-Hook([string]$EventName, [string]$Payload, [ValidateSet('allow', 'block')][string]$Expected, [bool]$RequireGatewayBlock = $false) {
+function New-AmpHookPayloadOccurrence(
+    [string]$Payload,
+    [string]$IdentitySuffix,
+    [string]$OutputRoot
+) {
+    if ($IdentitySuffix -cnotmatch '^[a-z0-9][a-z0-9-]*$') {
+        throw "invalid Amp hook identity suffix: $IdentitySuffix"
+    }
+    $payloadObject = [IO.File]::ReadAllText($Payload) | ConvertFrom-Json -ErrorAction Stop
+    $sourceEventID = [string](Get-JsonPropertyValue $payloadObject 'source_event_id')
+    if ([string]::IsNullOrWhiteSpace($sourceEventID)) {
+        throw 'Amp hook occurrence requires source_event_id'
+    }
+    $payloadObject.source_event_id = "$sourceEventID`:$IdentitySuffix"
+    $sourceSequenceText = [string](Get-JsonPropertyValue $payloadObject 'source_sequence')
+    [long]$sourceSequence = 0
+    if (-not [long]::TryParse($sourceSequenceText, [ref]$sourceSequence) -or
+        $sourceSequence -gt ([long]::MaxValue - 1000000)) {
+        throw 'Amp hook occurrence requires a bounded numeric source_sequence'
+    }
+    $payloadObject.source_sequence = [string]($sourceSequence + 1000000)
+    $toolCallID = [string](Get-JsonPropertyValue $payloadObject 'tool_call_id')
+    if (-not [string]::IsNullOrWhiteSpace($toolCallID)) {
+        $payloadObject.tool_call_id = "$toolCallID-$IdentitySuffix"
+    }
+    [IO.Directory]::CreateDirectory($OutputRoot) | Out-Null
+    $outputPath = Join-Path $OutputRoot "amp-$IdentitySuffix.json"
+    [IO.File]::WriteAllText(
+        $outputPath,
+        ($payloadObject | ConvertTo-Json -Depth 32 -Compress)
+    )
+    return $outputPath
+}
+
+function Invoke-Hook(
+    [string]$EventName,
+    [string]$Payload,
+    [ValidateSet('allow', 'block')][string]$Expected,
+    [bool]$RequireGatewayBlock = $false,
+    [string]$IdentitySuffix = ''
+) {
     $before = @(Get-EventLines $script:GatewayJsonl).Count
-    $result = Invoke-Tool (Resolve-ContractHookTool) @('hook', '--connector', $Connector, '--event', $EventName) @(0, 2) -InputPath $Payload
-    Start-Sleep -Milliseconds 800
-    if (-not (Test-ConnectorEvent $script:GatewayJsonl $Connector $before)) { throw "$EventName did not reach the gateway" }
+    $effectivePayload = $Payload
+    if ($Connector -eq 'amp' -and -not [string]::IsNullOrWhiteSpace($IdentitySuffix)) {
+        $effectivePayload = New-AmpHookPayloadOccurrence `
+            -Payload $Payload -IdentitySuffix $IdentitySuffix `
+            -OutputRoot (Join-Path $StateRoot 'hook-payloads')
+    }
+    $payloadObject = [IO.File]::ReadAllText($effectivePayload) | ConvertFrom-Json -ErrorAction Stop
+    $sessionID = [string](Get-JsonPropertyValue $payloadObject 'session_id')
+    $hookEvent = [string](Get-JsonPropertyValue $payloadObject 'hook_event_name')
+    if ([string]::IsNullOrWhiteSpace($hookEvent)) { $hookEvent = $EventName }
+    $toolInvocationID = [string](Get-JsonPropertyValue $payloadObject 'tool_call_id')
+    if ([string]::IsNullOrWhiteSpace($toolInvocationID)) {
+        $toolInvocationID = [string](Get-JsonPropertyValue $payloadObject 'tool_use_id')
+    }
+    if ([string]::IsNullOrWhiteSpace($toolInvocationID)) {
+        $toolInvocationID = [string](Get-JsonPropertyValue $payloadObject 'toolUseId')
+    }
+    $result = Invoke-Tool (Resolve-ContractHookTool) @('hook', '--connector', $Connector, '--event', $EventName) @(0, 2) -InputPath $effectivePayload
+    $requireBlockEvidence = $Expected -eq 'block' -or $RequireGatewayBlock
+    $evidence = Wait-GatewayEvidenceAfter `
+        -Path $script:GatewayJsonl -Name $Connector -Since $before `
+        -RequireBlock $requireBlockEvidence -SessionID $sessionID -HookEvent $hookEvent `
+        -ToolInvocationID $toolInvocationID
+    if (-not $evidence.ConnectorEvent) { throw "$EventName did not reach the gateway" }
     if ($Expected -eq 'allow' -and $result.ExitCode -ne 0) { throw "$EventName should allow but exited $($result.ExitCode)" }
     if ($Expected -eq 'block' -and $result.ExitCode -ne 2 -and $result.StdOut -notmatch '(?i)block|deny') { throw "$EventName did not shape a block decision" }
-    if ($Expected -eq 'block' -and -not (Test-BlockVerdict $script:GatewayJsonl $before)) { throw "$EventName has no gateway block verdict" }
-    if ($RequireGatewayBlock -and -not (Test-BlockVerdict $script:GatewayJsonl $before)) { throw "$EventName has no observe-mode would-block verdict" }
+    if ($Expected -eq 'block' -and -not $evidence.BlockVerdict) { throw "$EventName has no gateway block verdict" }
+    if ($RequireGatewayBlock -and -not $evidence.BlockVerdict) { throw "$EventName has no observe-mode would-block verdict" }
     Write-Result "$EventName`:fires" pass "jsonl line $before"
     Write-Result "$EventName`:verdict" pass "exit=$($result.ExitCode) expected=$Expected"
 }
@@ -1501,6 +1735,7 @@ function Assert-DoctorWindowsHookRegistration {
                 throw "Amp policy plugin is missing its fail-safe contract marker: $marker"
             }
         }
+        Assert-AmpScopedTokenPluginContract $config 'Amp policy plugin'
         Assert-AmpPluginPrivateACL $configPath
     }
 
@@ -2135,7 +2370,9 @@ function Invoke-ContractRun {
         Invoke-Hook 'tool.call' (Join-Path $golden 'subagent_tool_call.json') allow
     }
     Invoke-DangerousCommandCorpus action
-    Invoke-Hook $blockEvent (Join-Path $golden 'pre_tool_block.json') block
+    $blockIdentitySuffix = if ($Connector -eq 'amp') { 'action-block' } else { '' }
+    Invoke-Hook $blockEvent (Join-Path $golden 'pre_tool_block.json') block `
+        -IdentitySuffix $blockIdentitySuffix
     if ($Connector -eq 'amp') {
         Invoke-Hook 'agent.end' (Join-Path $golden 'agent_end.json') allow
         Invoke-AmpFiveEventProviderContract $golden

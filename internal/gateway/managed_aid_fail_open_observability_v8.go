@@ -48,6 +48,49 @@ func normalizeManagedAIDFailOpenDirection(direction string) string {
 	}
 }
 
+// recordManagedAIDFailOpenMetricV8 records exactly one decision counter for
+// every managed AID fail-open branch. The reason is normalized to a closed
+// four-value set before it reaches the generated bounded label contract.
+// Metric delivery remains best-effort and never changes the fail-open verdict.
+func recordManagedAIDFailOpenMetricV8(
+	ctx context.Context,
+	runtime hookLifecycleMetricV8Runtime,
+	reason string,
+) error {
+	if runtime == nil {
+		return &sidecarObservabilityError{code: sidecarObservabilityInvalidBinding}
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	reason = normalizeManagedAIDFailOpenReason(reason)
+	item := newGatewayGeneratedMetricItem(
+		ctx,
+		time.Now().UTC(),
+		observability.SourceGateway,
+		"",
+		managedAIDFailOpenV8Producer,
+		observability.EventName(observability.TelemetryInstrumentDefenseClawManagedAidFailOpenDecisions),
+		func(
+			builder *observability.FamilyBuilder,
+			envelope observability.FamilyEnvelopeInput,
+		) (observability.Record, error) {
+			return builder.BuildMetricDefenseClawManagedAidFailOpenDecisions(
+				observability.MetricDefenseClawManagedAidFailOpenDecisionsInput{
+					Envelope:                envelope,
+					Value:                   1,
+					DefenseClawMetricReason: reason,
+				},
+			)
+		},
+	)
+	_, err := runtime.RecordGeneratedMetricBatch(
+		ctx,
+		[]observabilityruntime.GeneratedMetricBatchItem{item},
+	)
+	return err
+}
+
 // emitManagedAIDFailOpenV8 separates availability failures from the benign
 // no-content skip. Unwired and unavailable AID inspection are bounded platform
 // health failures with a typed mandatory floor. No-content remains an opt-in

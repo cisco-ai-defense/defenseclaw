@@ -57,9 +57,18 @@ var (
 	enterpriseHookWatchDebounce time.Duration
 	enterpriseHookWatchSettle   time.Duration
 
-	enterpriseHooksRuntimeGOOS                 = func() string { return runtime.GOOS }
-	enterpriseHooksPlatformPreflight           = enterpriseHooksNativePlatformPreflight
-	enterpriseHooksRootPersistentPreRun        = rootPersistentPreRunE
+	enterpriseHooksRuntimeGOOS       = func() string { return runtime.GOOS }
+	enterpriseHooksPlatformPreflight = enterpriseHooksNativePlatformPreflight
+	// Default the enterprise hooks pre-run to the no-audit variant. The
+	// hook-guardian's `enterprise hooks watch` runs as a long-lived
+	// LaunchDaemon beside the main gateway; the main gateway already owns
+	// audit.db in RW mode, and SQLite cannot accept a second RW owner. The
+	// enterprise hooks pathway (watch / install / uninstall / reconcile)
+	// does not use auditStore or auditLog anywhere, so skipping the open
+	// removes dead work and fixes the consistent SQLITE_BUSY crash the
+	// guardian hits on every start. The seam remains overridable so
+	// lifecycle tests keep their custom pre-runs.
+	enterpriseHooksRootPersistentPreRun        = rootPersistentPreRunNoAuditE
 	enterpriseHooksInstallRunE                 = runEnterpriseHooksInstall
 	enterpriseHooksUninstallRunE               = runEnterpriseHooksUninstall
 	enterpriseHooksReconcileRunE               = runEnterpriseHooksReconcile

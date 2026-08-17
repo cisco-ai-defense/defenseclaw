@@ -38,8 +38,8 @@ const (
 // ClassifyToolName maps a well-known MCP tool name to its capability
 // class. Unknown tools return CapUnknown; the correlator ignores
 // capability for those. Conservative on purpose — we'd rather miss
-// classifying an exotic tool than mis-classify and trigger a false
-// CORR-DESTRUCTIVE-FLOW escalation.
+// classifying an exotic tool than feed a false capability signal to
+// an operator-defined correlation pattern.
 func ClassifyToolName(tool string) ToolCapabilityClass {
 	t := strings.ToLower(strings.TrimSpace(tool))
 	switch t {
@@ -83,9 +83,8 @@ func ClassifyToolName(tool string) ToolCapabilityClass {
 // content), so the correlator can't derive a capability from
 // ClassifyToolName for them — this static table is the equivalent
 // rule-id → capability source. Only behaviours that actually exercise
-// a capability are listed; everything else stays CapUnknown so the
-// DESTRUCTIVE-FLOW pattern never escalates on a bare secret or
-// injection finding.
+// a capability are listed; everything else stays CapUnknown so bare
+// secret or injection findings do not masquerade as tool activity.
 var ruleCapabilities = map[string]ToolCapabilityClass{
 	"secrets.cloud_credential_read":             CapReadFS,
 	"secrets.browser_session_store_read":        CapReadFS,
@@ -158,8 +157,8 @@ var ruleCapabilities = map[string]ToolCapabilityClass{
 // rule id represents, or CapUnknown when the rule exercises no
 // capability. This is the rule-id counterpart of ClassifyToolName:
 // the finding enricher uses it to populate ToolCapabilityClass on
-// content-matched findings so capability-aware correlation patterns
-// (DESTRUCTIVE-FLOW) can fire without a tool name.
+// content-matched findings so capability-aware custom correlation
+// patterns can evaluate findings that have no tool name.
 func CapabilityForRuleID(ruleID string) ToolCapabilityClass {
 	if cap, ok := ruleCapabilities[ruleID]; ok {
 		return cap

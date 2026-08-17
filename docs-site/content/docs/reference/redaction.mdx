@@ -112,6 +112,12 @@ collection and routing unchanged. The generated local SQLite projection inherits
 `none`; the managed enterprise destination remains release-owned and locked to
 its managed profile. Existing stored or exported records are not rewritten.
 
+The command governs observability log and trace projections. It does not disable
+the separate safety scrub applied to OS notifications or agent hook responses.
+Those attended surfaces may show exact ship-authored rule IDs and titles, but
+continue to hide free-form reasons and matched literals that could contain PII,
+credentials, or prompt-injection content.
+
 <Callout type="warn" title="remove-all permits raw governed content">
 `remove-all` can expose prompts, responses, tool arguments/results, evidence,
 paths, and identifiers to every configurable destination. Use it only when local

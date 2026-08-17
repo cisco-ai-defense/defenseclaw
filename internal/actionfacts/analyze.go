@@ -17,6 +17,7 @@
 package actionfacts
 
 import (
+	"path"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -147,6 +148,7 @@ func analyze(input Input) Facts {
 			dialect = DialectArgv
 		}
 		parsed := analyzeStructuredArgv(argv, startID, 0, dialect)
+		expandBoundedInlineInterpreters(&parsed, 0)
 		classifyOutput(&parsed)
 		enforceAnalyzeAuthority(&parsed)
 		base.merge(parsed)
@@ -162,16 +164,18 @@ func analyze(input Input) Facts {
 			base.markAmbiguous(IssueConflictingSources)
 		}
 		parsed := parseCommandAs(command, dialect, startID, 0)
+		expandBoundedInlineInterpreters(&parsed, 0)
 		classifyOutput(&parsed)
 		enforceAnalyzeAuthority(&parsed)
 		base.merge(parsed)
 	}
 
 	addToolArgumentFacts(&base, input.Tool, extracted)
-	deduplicateFacts(&base)
 	if base.hasFacts() && base.status == StatusNotApplicable {
 		base.status = StatusComplete
 	}
+	finalizePOSIXNoExecPreviews(&base)
+	deduplicateFacts(&base)
 	activeHome, _ := normalizeActiveHome(input.ActiveHome)
 	return base.factsWithContext(
 		safeToolName(input.Tool),
@@ -257,15 +261,18 @@ func analyzeStructuredArgv(
 		child = parsePOSIX(nested, out.nextID, wrapperDepth+1)
 	case "bash", "sh", "zsh", "dash", "ksh", "mksh":
 		invocation := parsePOSIXShellInvocation(program, argv)
+		if invocation.valid && invocation.noExec &&
+			(invocation.mode == posixShellModeCommand ||
+				invocation.mode == posixShellModeScript) {
+			// Classification applies the preview only after it can prove that
+			// the command is structurally isolated from pipelines and redirects.
+			return out
+		}
 		if !invocation.valid ||
 			invocation.mode != posixShellModeCommand ||
 			invocation.commandIndex >= len(argv) ||
 			strings.TrimSpace(argv[invocation.commandIndex]) == "" {
 			out.markUnsupported(IssueUnsupportedConstruct)
-			return out
-		}
-		if invocation.noExec {
-			out.commands[0].Effect = EffectPreview
 			return out
 		}
 		if wrapperDepth >= maxWrapperDepth {
@@ -448,7 +455,112 @@ type posixShellInvocation struct {
 	commandIndex int
 	scriptIndex  int
 	noExec       bool
+	interactive  bool
+	recognized   bool
 	valid        bool
+}
+
+func isolatedPOSIXCommand(out *parseOutput, command *CommandFact) bool {
+	if out == nil || command == nil {
+		return false
+	}
+	commandsByID := make(map[int64]*CommandFact, len(out.commands))
+	for index := range out.commands {
+		candidate := &out.commands[index]
+		if candidate.ID == 0 {
+			return false
+		}
+		if _, duplicate := commandsByID[candidate.ID]; duplicate {
+			return false
+		}
+		commandsByID[candidate.ID] = candidate
+	}
+	current, ok := commandsByID[command.ID]
+	if !ok {
+		return false
+	}
+	visited := make(map[int64]struct{}, len(out.commands))
+	for {
+		if current.ID == 0 {
+			return false
+		}
+		if _, seen := visited[current.ID]; seen {
+			return false
+		}
+		visited[current.ID] = struct{}{}
+		if current.PipelineID != 0 || len(current.Redirects) != 0 {
+			return false
+		}
+		if current.ParentCommandID == 0 {
+			return true
+		}
+		parent, ok := commandsByID[current.ParentCommandID]
+		if !ok || !exactTransparentPOSIXWrapper(parent, current) {
+			return false
+		}
+		current = parent
+	}
+}
+
+func exactTransparentPOSIXWrapper(
+	command *CommandFact,
+	child *CommandFact,
+) bool {
+	if command == nil || child == nil ||
+		(command.Dialect != DialectPOSIX && command.Dialect != DialectArgv) ||
+		command.Effect != EffectExecute || !command.ArgvComplete ||
+		len(command.Argv) < 2 || command.Program == "" ||
+		!exactCaseSensitivePOSIXProgram(command, command.Program) {
+		return false
+	}
+	switch command.Program {
+	case "env", "command", "exec":
+		nested, ok, uncertain := staticPOSIXWrapperArgv(
+			command.Argv,
+			command.Program,
+		)
+		return ok && !uncertain && equalStrings(nested, child.Argv)
+	default:
+		return false
+	}
+}
+
+func exactCaseSensitivePOSIXProgram(
+	command *CommandFact,
+	program string,
+) bool {
+	if command == nil || program == "" || command.Executable == "" ||
+		len(command.Argv) == 0 || command.Argv[0] != command.Executable ||
+		strings.ContainsAny(command.Executable, `\:`) ||
+		command.Executable != strings.ToLower(command.Executable) {
+		return false
+	}
+	executable := command.Executable
+	if strings.ContainsRune(executable, '/') {
+		if !strings.HasPrefix(executable, "/") || path.Clean(executable) != executable ||
+			path.Base(executable) != program {
+			return false
+		}
+		trustedDirectory := false
+		for _, directory := range []string{
+			"/bin", "/sbin", "/usr/bin", "/usr/sbin",
+		} {
+			if path.Dir(executable) == directory {
+				trustedDirectory = true
+				break
+			}
+		}
+		if !trustedDirectory {
+			return false
+		}
+	} else if executable != program {
+		return false
+	}
+	return command.Program == program &&
+		command.Program == commandProgramForDialect(
+			command.Executable,
+			command.Dialect,
+		)
 }
 
 func parsePOSIXShellInvocation(
@@ -479,6 +591,7 @@ func parseBashInvocation(argv []string) posixShellInvocation {
 		mode:         posixShellModeStdin,
 		commandIndex: -1,
 		scriptIndex:  -1,
+		recognized:   true,
 		valid:        true,
 	}
 	forcedStdin := false
@@ -663,11 +776,12 @@ func finishBashInvocation(
 	posixMode bool,
 	startupFile bool,
 ) posixShellInvocation {
+	invocation.interactive = interactive
 	// Login shells also execute a logout file, for which Bash has no matching
 	// command-line disable. Interactive shells execute startup input unless an
 	// order-valid --norc proves it disabled; POSIX mode substitutes ENV instead.
 	if login || startupFile || interactive && (!noRC || posixMode) {
-		return posixShellInvocation{}
+		invocation.valid = false
 	}
 	return invocation
 }
@@ -721,6 +835,7 @@ func parseConservativePOSIXShellInvocation(
 		mode:         posixShellModeStdin,
 		commandIndex: -1,
 		scriptIndex:  -1,
+		recognized:   true,
 		valid:        true,
 	}
 	allowedOptions := conservativePOSIXShellShortOptions(program)
@@ -841,8 +956,9 @@ func finishConservativePOSIXShellInvocation(
 	login bool,
 	explicitStartup bool,
 ) posixShellInvocation {
+	invocation.interactive = interactive
 	if interactive || login || explicitStartup {
-		return posixShellInvocation{}
+		invocation.valid = false
 	}
 	return invocation
 }
@@ -1691,6 +1807,14 @@ func enforceAnalyzeAuthority(out *parseOutput) {
 				command.Argv,
 			)
 			if invocation.valid && invocation.mode == posixShellModeCommand {
+				if !invocation.noExec || command.Effect == EffectPreview {
+					continue
+				}
+				out.markPartial(IssueUnsupportedConstruct)
+				continue
+			}
+			if invocation.valid && invocation.mode == posixShellModeScript &&
+				invocation.noExec && command.Effect == EffectPreview {
 				continue
 			}
 			if _, script := exactPOSIXShellScriptOperand(

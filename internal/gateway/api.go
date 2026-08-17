@@ -81,6 +81,11 @@ type APIServer struct {
 	// exercise policy semantics can use a larger budget so race-detector
 	// scheduler latency is not mistaken for a scanner verdict.
 	inspectToolScanTimeout time.Duration
+	// inspectToolWorkerDone is a test-only completion barrier for the detached
+	// scan worker. Production constructors leave it nil. It lets timeout tests
+	// prove that post-cancellation worker completion cannot record a fail-open
+	// decision after the handler has already returned 504.
+	inspectToolWorkerDone func()
 
 	// observabilityV8Mu protects the complete process-owned runtime capability
 	// set. Sidecar publishes or detaches all four seams atomically.
@@ -163,10 +168,16 @@ type APIServer struct {
 	// to atomically refresh the shared OPA engine used by the watcher.
 	policyReloader func() error
 
-	claudeCodeMu                      sync.Mutex
-	claudeCodeLastComponentScan       time.Time
-	codexMu                           sync.Mutex
-	codexLastComponentScan            time.Time
+	claudeCodeMu                sync.Mutex
+	claudeCodeLastComponentScan time.Time
+	codexMu                     sync.Mutex
+	codexLastComponentScan      time.Time
+	// codexAdditionalContextMu protects the bounded, process-local cache used
+	// only to suppress repeated in-chat Observe warnings. Canonical detection,
+	// audit, and notification emission happen before this cache is consulted.
+	codexAdditionalContextMu          sync.Mutex
+	codexAdditionalContextSeen        map[[sha256.Size]byte]time.Time
+	codexAdditionalContextOrder       []codexAdditionalContextEntry
 	rawTelemetryMu                    sync.RWMutex
 	rawTelemetryDedupe                *rawTelemetryDeduper
 	llmPromptMu                       sync.Mutex
@@ -908,7 +919,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/api/v1/codex/notify", a.handleCodexNotify)
 	mux.HandleFunc("/v1/connectors", a.handleConnectors)
 
-	handler := maxBodyMiddleware(mux, 1<<20)
+	handler := apiBodyLimitMiddleware(mux, apiRequestBodyMaxBytes, otlpRequestBodyMaxBytes)
 	handler = a.apiCSRFProtect(handler)
 	handler = a.tokenAuth(handler)
 	handler = a.metricsMiddleware(handler)
@@ -3376,23 +3387,44 @@ func (a *APIServer) apiCSRFProtect(next http.Handler) http.Handler {
 	})
 }
 
+const (
+	apiRequestBodyMaxBytes  int64 = 1 << 20
+	otlpRequestBodyMaxBytes int64 = 64 << 20
+)
+
+// apiBodyLimitMiddleware preserves the ordinary API mutation ceiling while
+// allowing exact OTLP-HTTP ingest routes to receive exporter batches. The
+// 64 MiB OTLP limit follows the protocol's recommended receiver default and
+// matches the observability pipeline's supported maximum export batch size.
+func apiBodyLimitMiddleware(next http.Handler, maxBytes, otlpMaxBytes int64) http.Handler {
+	return bodyLimitMiddleware(next, func(r *http.Request) int64 {
+		if isOTLPEndpointPath(r.URL.Path) {
+			return otlpMaxBytes
+		}
+		return maxBytes
+	})
+}
+
+// maxBodyMiddleware applies one uniform cap to all state-changing methods.
+func maxBodyMiddleware(next http.Handler, maxBytes int64) http.Handler {
+	return bodyLimitMiddleware(next, func(*http.Request) int64 { return maxBytes })
+}
+
+func bodyLimitMiddleware(next http.Handler, maxBytes func(*http.Request) int64) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodPatch {
+			r.Body = http.MaxBytesReader(w, r.Body, maxBytes(r))
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 // csrfProtect wraps a handler with localhost CSRF defenses. Mutating methods
 // (POST, PUT, PATCH, DELETE) require:
 //  1. X-DefenseClaw-Client header (blocks simple/no-cors browser requests)
 //  2. Content-Type containing "application/json"
 //  3. Origin, if present, must be a localhost address
 //
-// maxBodyMiddleware caps the request body size for state-changing methods
-// to prevent memory exhaustion from oversized payloads.
-func maxBodyMiddleware(next http.Handler, maxBytes int64) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodPatch {
-			r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
-		}
-		next.ServeHTTP(w, r)
-	})
-}
-
 // Read-only requests (GET, HEAD, OPTIONS) are exempt.
 func csrfProtect(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -612,8 +612,13 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	// first complete connector/MCP snapshot immediately after that binding, then
 	// retain the same callback for each managed discovery scan.
 	if managed.IsManagedEnterprise(s.currentConfig().DeploymentMode) {
-		inventoryEmit := makeEndpointInventoryEmitter(s.currentConfig(), s.observabilityV8Emitter())
-		if discovery := s.aiDiscoverySnapshot(); discovery != nil {
+		var snapshotFn func() inventory.AIDiscoveryReport
+		discovery := s.aiDiscoverySnapshot()
+		if discovery != nil {
+			snapshotFn = discovery.Snapshot
+		}
+		inventoryEmit := makeEndpointInventoryEmitter(s.currentConfig(), s.observabilityV8Emitter(), snapshotFn)
+		if discovery != nil {
 			discovery.SetManagedInventoryEmitHook(inventoryEmit)
 		}
 		inventoryEmit(runCtx)
@@ -1632,8 +1637,13 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	// immediate snapshot so AI Defense sees the change without waiting
 	// for the next scan tick.
 	if nextManagedEnterprise {
-		inventoryEmit := makeEndpointInventoryEmitter(s.currentConfig(), s.observabilityV8Emitter())
-		if svc := s.aiDiscoverySnapshot(); svc != nil {
+		var snapshotFn func() inventory.AIDiscoveryReport
+		svc := s.aiDiscoverySnapshot()
+		if svc != nil {
+			snapshotFn = svc.Snapshot
+		}
+		inventoryEmit := makeEndpointInventoryEmitter(s.currentConfig(), s.observabilityV8Emitter(), snapshotFn)
+		if svc != nil {
 			svc.SetManagedInventoryEmitHook(inventoryEmit)
 		}
 		inventoryEmit(ctx)

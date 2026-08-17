@@ -90,6 +90,7 @@ def test_ai_panel_help_includes_table_switch_shortcut() -> None:
     ai_shortcuts = dict(app._help_sections()[1][1])
 
     assert ai_shortcuts["t"] == "Switch product / model table"
+    assert ai_shortcuts["a"] == "Show all / recommended models"
     assert ai_shortcuts["j/k or Up/Down"] == "Navigate the selected table"
 
 

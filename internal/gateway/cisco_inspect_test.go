@@ -47,6 +47,59 @@ func ciscoMetricMap(metrics []telemetry.V8ProjectedMetric) map[string][]telemetr
 	return result
 }
 
+func TestCiscoFindingCatalogCoversDefaultRules(t *testing.T) {
+	wantIDs := map[string]string{
+		"Prompt Injection":                 "CISCO-PROMPT-INJECTION",
+		"Jailbreak":                        "CISCO-JAILBREAK",
+		"PII Detection":                    "CISCO-PII",
+		"Sensitive Data":                   "CISCO-SENSITIVE-DATA",
+		"Data Leakage":                     "CISCO-DATA-LEAKAGE",
+		"Harassment":                       "CISCO-HARASSMENT",
+		"Hate Speech":                      "CISCO-HATE-SPEECH",
+		"Profanity":                        "CISCO-PROFANITY",
+		"Sexual Content & Exploitation":    "CISCO-SEXUAL-CONTENT",
+		"Social Division & Polarization":   "CISCO-SOCIAL-DIVISION",
+		"Violence & Public Safety Threats": "CISCO-VIOLENCE",
+		"Code Detection":                   "CISCO-CODE",
+	}
+
+	seen := make(map[string]struct{}, len(defaultEnabledRules))
+	for _, rule := range defaultEnabledRules {
+		label := rule["rule_name"]
+		wantID, ok := wantIDs[label]
+		if !ok {
+			t.Errorf("default Cisco rule %q has no canonical identity fixture", label)
+			continue
+		}
+		seen[label] = struct{}{}
+		if gotID := canonicalCiscoFindingID(label); gotID != wantID {
+			t.Errorf("canonicalCiscoFindingID(%q) = %q, want %q", label, gotID, wantID)
+		} else if gotLabel := ciscoFindingDisplayLabel(gotID); gotLabel != label {
+			t.Errorf("ciscoFindingDisplayLabel(%q) = %q, want %q", gotID, gotLabel, label)
+		}
+	}
+	if len(seen) != len(wantIDs) {
+		t.Fatalf("covered %d canonical Cisco rules, want %d", len(seen), len(wantIDs))
+	}
+
+	for _, tc := range []struct {
+		input string
+		id    string
+		label string
+	}{
+		{input: "PII_DETECTION", id: "CISCO-PII", label: "PII Detection"},
+		{input: "pii detection", id: "CISCO-PII", label: "PII Detection"},
+		{input: "arbitrary cloud label", id: ciscoUnknownFindingID, label: "Custom Policy Violation"},
+		{input: "Custom Policy Violation", id: ciscoUnknownFindingID, label: "Custom Policy Violation"},
+	} {
+		if gotID := canonicalCiscoFindingID(tc.input); gotID != tc.id {
+			t.Errorf("canonicalCiscoFindingID(%q) = %q, want %q", tc.input, gotID, tc.id)
+		} else if gotLabel := ciscoFindingDisplayLabel(gotID); gotLabel != tc.label {
+			t.Errorf("ciscoFindingDisplayLabel(%q) = %q, want %q", gotID, gotLabel, tc.label)
+		}
+	}
+}
+
 func TestRecordCiscoInspectV8PreservesCorrelationAndCanonicalDimensions(t *testing.T) {
 	runtime, capture := newProxyGeneratedTraceRuntime(t)
 	ctx, spanContext := ciscoCorrelatedContext(t)

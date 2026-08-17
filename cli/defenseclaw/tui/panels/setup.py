@@ -214,7 +214,7 @@ WIZARD_DESCRIPTIONS: tuple[str, ...] = (
     "List, check, fill, or set env-backed credentials.",
     "Configure the unified LLM block non-interactively.",
     "Inspect and manage the bundled local observability stack.",
-    "Rotate the gateway token and refresh connector hooks.",
+    "Transactionally rotate the gateway and connector-scoped hook credentials.",
     "Manage the custom provider overlay.",
     "Configure skill scanner analyzers and policy.",
     "Configure MCP scanner analyzers and scan targets.",
@@ -239,7 +239,7 @@ WIZARD_HOW_TO: tuple[str, ...] = (
     "Runs: defenseclaw setup llm --non-interactive. Need provider, model, optional base URL, and API key env or value.",
     "Runs: defenseclaw setup local-observability <action>. "
     "Need Docker for up/reset; status/url require no credentials.",
-    "Runs: defenseclaw setup rotate-token --yes. Need connector override only when auto-detect is not enough.",
+    "Runs: defenseclaw setup rotate-token --yes. Rotates every configured scoped-hook credential transactionally.",
     "Runs: defenseclaw setup provider add|remove|list|show. Need provider name and domains for add/remove.",
     "Runs: defenseclaw setup skill-scanner. Need optional LLM, VirusTotal, or Cisco AI Defense credentials.",
     "Runs: defenseclaw setup mcp-scanner. Need analyzer list and prompt/resource/instruction scan choices.",
@@ -3023,7 +3023,7 @@ def _token_rotation_goals(cfg: object | Mapping[str, Any] | None) -> tuple[Wizar
         WizardGoal(
             "auto",
             "Rotate shared token for active connectors",
-            summary="Rotate the gateway token and refresh every active connector hook.",
+            summary="Rotate gateway and distinct connector-scoped hook credentials with exact rollback.",
             fields=("Refresh Hooks",),
         ),
         WizardGoal(

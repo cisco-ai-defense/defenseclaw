@@ -149,6 +149,41 @@ func TestGeneratedTelemetryTracePreservesHierarchyNamesAndFacts(t *testing.T) {
 	}
 }
 
+func TestGeneratedTelemetryTraceCompletesWithoutSpanDestinations(t *testing.T) {
+	dependencies := newRuntimeTestDependencies(t)
+	pipelines := &generatedTracePipelines{
+		consumers: make(map[uint64]*generatedTraceConsumer), withoutSpanDestinations: true,
+	}
+	plan := runtimeTestPlan(t, dependencies.storePath, dependencies.judgePath, 90,
+		func(source *config.ObservabilityV8Source) {
+			source.TracePolicy.Sampler = "always_on"
+		},
+	)
+	runtime := newGeneratedTraceRuntime(t, dependencies, pipelines, plan)
+	base := time.Now().UTC().Add(-time.Second)
+	receiveInput := generatedTelemetryReceiveInput(base, base.Add(500*time.Millisecond))
+	_, receive, err := runtime.StartTelemetryReceiveTrace(t.Context(), receiveInput)
+	if err != nil || receive == nil {
+		t.Fatalf("start receive=%v err=%v", receive, err)
+	}
+	normalizeInput := generatedTelemetryNormalizeInput(
+		base.Add(time.Millisecond), base.Add(400*time.Millisecond),
+	)
+	normalize, err := receive.StartNormalize(normalizeInput)
+	if err != nil || normalize == nil {
+		t.Fatalf("start normalize=%v err=%v", normalize, err)
+	}
+	if err := normalize.End(normalizeInput); err != nil {
+		t.Fatalf("end normalize without destination: %v", err)
+	}
+	if err := receive.End(receiveInput); err != nil {
+		t.Fatalf("end receive without destination: %v", err)
+	}
+	if len(pipelines.consumers) != 0 {
+		t.Fatalf("zero-destination generation unexpectedly created consumers: %d", len(pipelines.consumers))
+	}
+}
+
 func TestGeneratedTelemetryTraceSamplingCollectionAndReload(t *testing.T) {
 	for _, test := range []struct {
 		name               string

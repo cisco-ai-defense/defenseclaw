@@ -14,6 +14,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
+import json
 import os
 import sqlite3
 import sys
@@ -110,14 +111,8 @@ class ModelsDbTests(unittest.TestCase):
         self.assertEqual(counts.allowed_mcps, 1)
         self.assertEqual(counts.total_scans, 1)
         self.assertEqual(counts.alerts, 0)
-        select_statements = [
-            statement
-            for statement in statements
-            if statement.lstrip().upper().startswith("SELECT")
-        ]
-        action_selects = [
-            statement for statement in select_statements if "FROM actions" in statement
-        ]
+        select_statements = [statement for statement in statements if statement.lstrip().upper().startswith("SELECT")]
+        action_selects = [statement for statement in select_statements if "FROM actions" in statement]
         self.assertEqual(len(select_statements), 3)
         self.assertEqual(len(action_selects), 1)
         self.assertEqual(action_selects[0].count("SUM(CASE"), 4)
@@ -147,9 +142,7 @@ class ModelsDbTests(unittest.TestCase):
         statements = []
         self.store.db.set_trace_callback(statements.append)
         try:
-            count = self.store.count_scan_results_since(
-                datetime(2026, 1, 1, tzinfo=timezone.utc)
-            )
+            count = self.store.count_scan_results_since(datetime(2026, 1, 1, tzinfo=timezone.utc))
         finally:
             self.store.db.set_trace_callback(None)
 
@@ -159,12 +152,9 @@ class ModelsDbTests(unittest.TestCase):
         self.assertNotIn("retention_timestamp_unix_nano", count_queries[0])
 
     def test_count_scan_results_since_uses_indexed_retention_timestamp(self):
+        self.store.db.execute("ALTER TABLE scan_results ADD COLUMN retention_timestamp_unix_nano INTEGER")
         self.store.db.execute(
-            "ALTER TABLE scan_results ADD COLUMN retention_timestamp_unix_nano INTEGER"
-        )
-        self.store.db.execute(
-            "CREATE INDEX idx_retention_scan_results_timestamp "
-            "ON scan_results(retention_timestamp_unix_nano, id)"
+            "CREATE INDEX idx_retention_scan_results_timestamp ON scan_results(retention_timestamp_unix_nano, id)"
         )
         since = datetime(2026, 1, 1, tzinfo=timezone.utc)
         cutoff = int(since.timestamp()) * 1_000_000_000
@@ -196,13 +186,10 @@ class ModelsDbTests(unittest.TestCase):
         self.assertEqual(len(count_queries), 1)
         self.assertIn("retention_timestamp_unix_nano >=", count_queries[0])
         plan = self.store.db.execute(
-            "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM scan_results "
-            "WHERE retention_timestamp_unix_nano >= ?",
+            "EXPLAIN QUERY PLAN SELECT COUNT(*) FROM scan_results WHERE retention_timestamp_unix_nano >= ?",
             (cutoff,),
         ).fetchall()
-        self.assertTrue(
-            any("idx_retention_scan_results_timestamp" in row[3] for row in plan)
-        )
+        self.assertTrue(any("idx_retention_scan_results_timestamp" in row[3] for row in plan))
 
     def test_open_read_only_uses_ro_query_only_and_short_timeout(self):
         self.store.close()
@@ -392,9 +379,9 @@ class ModelsDbTests(unittest.TestCase):
     def test_summary_readers_avoid_heavy_payloads_but_get_event_hydrates_full_row(self):
         details = "connector=codex " + ("x" * 6000)
         evt = Event(
-            action="connector-hook",
+            action="scan-finding",
             target="PreToolUse",
-            severity="INFO",
+            severity="HIGH",
             details=details,
             structured={"payload": "y" * 6000},
         )
@@ -431,9 +418,9 @@ class ModelsDbTests(unittest.TestCase):
         alert_ids = [event.id for event in self.store.list_actionable_alert_summaries(10)]
 
         self.assertEqual(audit_ids, ["failure", "high", "hook-high"])
-        self.assertEqual(alert_ids, ["failure", "high", "hook-high"])
+        self.assertEqual(alert_ids, ["failure"])
 
-    def test_alert_readers_include_v8_findings_and_exclude_other_v8_buckets(self):
+    def test_alert_readers_include_v8_findings_and_important_health_failures(self):
         now = datetime.now(timezone.utc).isoformat()
         self.store.db.executemany(
             """INSERT INTO audit_events (
@@ -467,9 +454,266 @@ class ModelsDbTests(unittest.TestCase):
         self.assertIn("v8-finding", alert_ids)
         self.assertIn("v8-finding", summary_ids)
         self.assertIn("v8-finding", actionable_ids)
-        self.assertNotIn("v8-platform-health", alert_ids)
-        self.assertNotIn("v8-platform-health", summary_ids)
-        self.assertNotIn("v8-platform-health", actionable_ids)
+        self.assertIn("v8-platform-health", alert_ids)
+        self.assertIn("v8-platform-health", summary_ids)
+        self.assertIn("v8-platform-health", actionable_ids)
+
+    def test_alert_readers_and_counts_exclude_clean_and_detection_only_rows(self):
+        now = datetime.now(timezone.utc).isoformat()
+        detection_only = json.dumps({"defenseclaw.finding.tags": ["secret", "detection-only"]})
+        self.store.db.executemany(
+            """INSERT INTO audit_events (
+                   id, timestamp, action, actor, details, severity, bucket,
+                   event_name, payload_json
+               ) VALUES (?, ?, ?, 'defenseclaw', '', ?, ?, ?, ?)""",
+            [
+                (
+                    "clean-hook",
+                    now,
+                    "connector-hook",
+                    "INFO",
+                    "guardrail.evaluation",
+                    "legacy.audit.connector.hook",
+                    "{}",
+                ),
+                (
+                    "detection-only",
+                    now,
+                    "scan-finding",
+                    "HIGH",
+                    "security.finding",
+                    "finding.observed",
+                    detection_only,
+                ),
+                (
+                    "detection-only-padded-array",
+                    now,
+                    "scan-finding",
+                    "HIGH",
+                    "security.finding",
+                    "finding.observed",
+                    json.dumps({"defenseclaw.finding.tags": [" Detection-Only "]}),
+                ),
+                (
+                    "detection-only-padded-scalar",
+                    now,
+                    "scan-finding",
+                    "HIGH",
+                    "security.finding",
+                    "finding.observed",
+                    json.dumps({"defenseclaw.finding.tags": " \tDETECTION-ONLY\r\n"}),
+                ),
+                (
+                    "real-finding",
+                    now,
+                    "scan-finding",
+                    "HIGH",
+                    "security.finding",
+                    "finding.observed",
+                    json.dumps({"defenseclaw.finding.tags": ["secret"]}),
+                ),
+                (
+                    "warning-finding",
+                    now,
+                    "scan-finding",
+                    "WARNING",
+                    "security.finding",
+                    "finding.observed",
+                    json.dumps({"defenseclaw.finding.tags": ["review"]}),
+                ),
+            ],
+        )
+        self.store.db.execute(
+            """INSERT INTO audit_events (
+                   id, timestamp, action, actor, details, severity, bucket,
+                   event_name, payload_json
+               ) VALUES (
+                   'legacy-clean-high', ?, 'connector-hook', 'defenseclaw',
+                   'connector=codex action=allow mode=observe severity=CRITICAL',
+                   'CRITICAL', NULL, NULL, NULL
+               )""",
+            (now,),
+        )
+        self.store.db.execute(
+            """INSERT INTO audit_events (
+                   id, timestamp, action, actor, details, severity, bucket,
+                   event_name, payload_json
+               ) VALUES (
+                   'legacy-unrelated-high', ?, 'sidecar-start', 'defenseclaw',
+                   'healthy', 'HIGH', NULL, NULL, NULL
+               )""",
+            (now,),
+        )
+        self.store.db.commit()
+
+        self.assertEqual(
+            {event.id for event in self.store.list_alerts(10)},
+            {"real-finding", "warning-finding"},
+        )
+        self.assertEqual(
+            {event.id for event in self.store.list_alert_summaries(10)},
+            {"real-finding", "warning-finding"},
+        )
+        self.assertEqual(
+            [event.id for event in self.store.list_actionable_alert_summaries(10)],
+            ["real-finding"],
+        )
+        self.assertEqual(self.store.get_counts().alerts, 2)
+
+    def test_alert_readers_keep_malformed_payload_fail_visible(self):
+        now = datetime.now(timezone.utc).isoformat()
+        self.store.db.execute(
+            """INSERT INTO audit_events (
+                   id, timestamp, action, actor, details, severity, bucket,
+                   event_name, payload_json
+               ) VALUES (
+                   'malformed-payload-finding', ?, 'scan-finding',
+                   'defenseclaw', '', 'HIGH', 'security.finding',
+                   'finding.observed', '{not-json'
+               )""",
+            (now,),
+        )
+        self.store.db.commit()
+
+        self.assertEqual(
+            [event.id for event in self.store.list_alerts(10)],
+            ["malformed-payload-finding"],
+        )
+        self.assertEqual(
+            [event.id for event in self.store.list_alert_summaries(10)],
+            ["malformed-payload-finding"],
+        )
+        self.assertEqual(
+            [event.id for event in self.store.list_actionable_alert_summaries(10)],
+            ["malformed-payload-finding"],
+        )
+        self.assertEqual(self.store.get_counts().alerts, 1)
+
+    def test_alert_readers_keep_explicit_non_allow_outcomes_even_at_info(self):
+        now = datetime.now(timezone.utc).isoformat()
+        self.store.db.executemany(
+            """INSERT INTO audit_events (
+                   id, timestamp, action, actor, details, severity, bucket,
+                   event_name, payload_json
+               ) VALUES (?, ?, ?, 'defenseclaw', ?, 'INFO', ?, ?, ?)""",
+            [
+                (
+                    "legacy-block",
+                    now,
+                    "connector-hook",
+                    "connector=codex action=block mode=action severity=INFO",
+                    None,
+                    None,
+                    None,
+                ),
+                (
+                    "canonical-deny",
+                    now,
+                    "enforcement",
+                    "",
+                    "enforcement.action",
+                    "action.applied",
+                    json.dumps({"defenseclaw.enforcement.effective_action": "deny"}),
+                ),
+                (
+                    "canonical-blocked-egress",
+                    now,
+                    "egress",
+                    "",
+                    "network.egress",
+                    "egress.decided",
+                    json.dumps({"defenseclaw.network.decision": "block"}),
+                ),
+                (
+                    "canonical-failure",
+                    now,
+                    "enforcement",
+                    "",
+                    "enforcement.action",
+                    "action.failed",
+                    json.dumps({"defenseclaw.enforcement.effective_action": "failed"}),
+                ),
+                (
+                    "canonical-allow",
+                    now,
+                    "enforcement",
+                    "",
+                    "enforcement.action",
+                    "action.applied",
+                    json.dumps({"defenseclaw.enforcement.effective_action": "allow"}),
+                ),
+            ],
+        )
+        self.store.db.execute(
+            """INSERT INTO audit_events (
+                   id, timestamp, action, actor, details, severity, bucket,
+                   event_name, payload_json
+               ) VALUES (?, ?, 'egress', 'defenseclaw', '', 'HIGH',
+                         'network.egress', 'egress.decided', ?)""",
+            (
+                "canonical-high-blocked-egress",
+                now,
+                json.dumps({"defenseclaw.network.decision": "block"}),
+            ),
+        )
+        self.store.db.commit()
+
+        expected = {
+            "legacy-block",
+            "canonical-deny",
+            "canonical-blocked-egress",
+            "canonical-high-blocked-egress",
+            "canonical-failure",
+        }
+        alerts = self.store.list_alerts(100)
+
+        self.assertEqual({event.id for event in alerts}, expected)
+        severities = {event.id: event.severity for event in alerts}
+        self.assertEqual(severities["legacy-block"], "HIGH")
+        self.assertEqual(severities["canonical-deny"], "HIGH")
+        self.assertEqual(severities["canonical-failure"], "HIGH")
+        self.assertEqual(severities["canonical-blocked-egress"], "WARNING")
+        self.assertNotIn("INFO", severities.values())
+        self.assertEqual(
+            {event.id for event in self.store.list_alert_summaries(100)},
+            expected,
+        )
+        self.assertEqual(
+            {event.id for event in self.store.list_actionable_alert_summaries(100)},
+            expected - {"canonical-blocked-egress"},
+        )
+        self.assertEqual(self.store.get_counts().alerts, len(alerts))
+
+    @unittest.skipIf(
+        sqlite3.sqlite_version_info < (3, 35, 0),
+        "SQLite 3.35+ is required for ALTER TABLE DROP COLUMN",
+    )
+    def test_read_only_alert_queries_support_schema_without_payload_json(self):
+        now = datetime.now(timezone.utc).isoformat()
+        self.store.db.execute(
+            """INSERT INTO audit_events (
+                   id, timestamp, action, actor, details, severity, bucket,
+                   event_name
+               ) VALUES (
+                   'transitional-finding', ?, 'scan-finding', 'defenseclaw',
+                   '', 'HIGH', 'security.finding', 'finding.observed'
+               )""",
+            (now,),
+        )
+        self.store.db.execute("ALTER TABLE audit_events DROP COLUMN payload_json")
+        self.store.db.commit()
+        self.store.close()
+        self.store = Store.open_read_only(self.tmp.name)
+
+        self.assertEqual(
+            [event.id for event in self.store.list_alerts(10)],
+            ["transitional-finding"],
+        )
+        self.assertEqual(
+            [event.id for event in self.store.list_alert_summaries(10)],
+            ["transitional-finding"],
+        )
+        self.assertEqual(self.store.get_counts().alerts, 1)
 
     # -- SK-4: per-connector actions column migration --
 

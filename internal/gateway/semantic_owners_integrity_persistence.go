@@ -1257,6 +1257,9 @@ func matchesSafeSSHDirectoryCandidate(
 
 func matchesShellProfileCandidate(value string) bool {
 	value = canonicalSemanticPath(value)
+	if value == "/etc/profile" {
+		return true
+	}
 	switch pathBase(value) {
 	case ".profile", ".bash_profile", ".bashrc", ".zprofile", ".zshrc",
 		"config.fish", "profile.ps1", "microsoft.powershell_profile.ps1":
@@ -1266,10 +1269,22 @@ func matchesShellProfileCandidate(value string) bool {
 	}
 }
 
+func looksLikeSystemShellProfilePath(value string) bool {
+	value = canonicalSemanticPath(value)
+	if len(value) >= 3 && value[1] == ':' && value[2] == '/' {
+		value = value[2:]
+	}
+	return value == "/etc/profile"
+}
+
 func matchesActiveShellProfile(
 	facts actionfacts.Facts,
 	candidate actionfacts.PathFact,
 ) bool {
+	if candidate.Flavor == actionfacts.PathFlavorPOSIX &&
+		canonicalSemanticPath(semanticPathValue(candidate)) == "/etc/profile" {
+		return true
+	}
 	relative, ok := activeHomeRelative(facts, candidate)
 	if !ok {
 		return false

@@ -84,6 +84,14 @@ type RuntimeV8Emitter interface {
 	) (RuntimeV8EmitOutcome, error)
 }
 
+// RuntimeV8FindingContentFingerprinter is the optional key-custody capability
+// used at the forensic persistence boundary. Implementations retain the
+// installation correlation key and return only the schema-sized keyed token;
+// audit never receives raw key material.
+type RuntimeV8FindingContentFingerprinter interface {
+	FingerprintRuntimeV8FindingContent(string) (string, error)
+}
+
 // RuntimeV8LogBatchEmitter pins one immutable runtime generation across a
 // bounded ordered set of related generated log occurrences.
 type RuntimeV8LogBatchEmitter interface {

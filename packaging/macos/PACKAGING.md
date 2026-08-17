@@ -12,8 +12,8 @@ The short README shipped inside each bundle is generated from
   [`packaging/macos/tests/`](tests/).
 - `make packaging-macos-bundle` invokes
   [`scripts/build-macos-bundle.sh`](../../scripts/build-macos-bundle.sh).
-- `BUNDLE_GOARCH` accepts `universal` (the default), `amd64`, or `arm64`.
-  Universal builds require macOS and `lipo`.
+- `BUNDLE_GOARCH` is fixed to `arm64`. Intel (`amd64`) and universal macOS
+  bundles are unsupported and the builder refuses them before producing files.
 - Release builds provide the managed cloud-auth overlay and its pinned module
   version through `CMID_OVERLAY` and `CMID_VERSION`. Omitting that overlay is
   suitable only for local packaging tests; the resulting binary fails closed

@@ -2839,6 +2839,40 @@ def _format_csv_truncated(items: list[str], *, limit: int = 2) -> str:
     return sample
 
 
+def _format_ai_usage_scan_diagnostics(summary: dict[str, Any]) -> str:
+    """Render bounded detector failures without hiding successful discoveries."""
+
+    result = str(summary.get("result", "") or "").strip().lower()
+    detector_errors = _mapping_block(summary.get("detector_errors"))
+    try:
+        error_count = max(0, int(summary.get("errors", 0) or 0))
+    except (TypeError, ValueError, OverflowError):
+        error_count = 0
+    if result not in {"partial", "failed", "error"} and error_count == 0 and not detector_errors:
+        return ""
+
+    label = result if result in {"partial", "failed", "error"} else "partial"
+    count = max(error_count, len(detector_errors))
+    note = f" Scan {label}"
+    if count:
+        note += f": {count} detector {_pluralize(count, 'error', 'errors')}"
+    details: list[str] = []
+    ordered_errors = sorted(detector_errors.items(), key=lambda item: str(item[0]))
+    for detector, message in ordered_errors[:3]:
+        one_line = " ".join(str(message).split())
+        if len(one_line) > 256:
+            one_line = one_line[:253] + "..."
+        if one_line:
+            details.append(f"{detector}: {one_line}")
+    if details:
+        note += " (" + "; ".join(details)
+        hidden = len(detector_errors) - len(details)
+        if hidden > 0:
+            note += f"; +{hidden} more"
+        note += ")"
+    return note + "."
+
+
 def _render_ai_usage_table(
     payload: dict[str, Any],
     *,
@@ -3034,6 +3068,7 @@ def _render_ai_usage_table(
         )
         if hidden > 0:
             footer += f" {hidden} more hidden by --limit; raise it or use --json for the full list."
+        footer += _format_ai_usage_scan_diagnostics(summary)
         console.print(footer)
         return stream.getvalue()
 
@@ -3133,6 +3168,7 @@ def _render_ai_usage_table(
     hidden = len(full_groups) - len(displayed_full)
     if hidden > 0:
         footer += f" {hidden} more {_pluralize(hidden, 'group', 'groups')} hidden by --limit."
+    footer += _format_ai_usage_scan_diagnostics(summary)
     footer += (
         " Use --detail for per-signal rows, --by-detector to split by "
         "category/detector, --json for raw, --state/--category/--product"
@@ -3244,6 +3280,9 @@ def _render_ai_usage_plain(
         f"changed={summary.get('changed_signals', 0)} "
         f"gone={summary.get('gone_signals', 0)}"
     )
+    diagnostic = _format_ai_usage_scan_diagnostics(summary).strip()
+    if diagnostic:
+        lines.append(diagnostic)
     return "\n".join(lines) + "\n"
 
 

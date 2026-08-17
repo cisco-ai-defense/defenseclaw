@@ -65,7 +65,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -2340,7 +2340,12 @@ SPLUNK_COMPOSE_PROJECT: str = "defenseclaw-splunk-local"
 LOCAL_OBSERVABILITY_COMPOSE_PROJECT: str = "defenseclaw-observability"
 
 
-def is_compose_project_running(project_name: str, *, timeout: float = 5.0) -> bool:
+def is_compose_project_running(
+    project_name: str,
+    *,
+    timeout: float = 5.0,
+    environment: Mapping[str, str] | None = None,
+) -> bool:
     """Return True if a docker-compose project has at least one running container.
 
     Best-effort: returns False if Docker is missing/unreachable rather
@@ -2366,6 +2371,7 @@ def is_compose_project_running(project_name: str, *, timeout: float = 5.0) -> bo
             text=True,
             timeout=timeout,
             check=False,
+            env=(dict(environment) if environment is not None else None),
         )
     except (OSError, subprocess.TimeoutExpired):
         return False

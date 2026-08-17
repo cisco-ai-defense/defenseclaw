@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -56,7 +57,9 @@ const revealHeader = "X-DefenseClaw-Reveal-PII"
 // Destination projection is unaffected: canonical telemetry keeps the source
 // facts and the unified v8 router applies each destination's selected redaction
 // profile independently. The response header changes only this HTTP response;
-// it cannot make a configured destination more or less restrictive.
+// it cannot make a configured destination more or less restrictive. An
+// explicit managed-enterprise redact directive remains authoritative over the
+// response header.
 func wantsReveal(r *http.Request) bool {
 	return r.Header.Get(revealHeader) == "1"
 }
@@ -75,6 +78,13 @@ type ToolInspectRequest struct {
 	// selects the connector generation; a mismatched assertion is rejected.
 	Connector     string `json:"connector,omitempty"`
 	MCPServerName string `json:"mcp_server_name,omitempty"`
+	// contentScope is set only after a connector adapter derives content
+	// provenance from its typed hook payload. It is deliberately not accepted
+	// from the public inspect wire, where a caller could otherwise promote its
+	// own content into the trust-exploit enforcement lane. The zero value keeps
+	// the legacy public inspect API; native adapters opt in after establishing a
+	// prompt or tool-result boundary.
+	contentScope ruleContentScope
 }
 
 // ToolInspectVerdict is the response from the inspect endpoint.
@@ -114,6 +124,11 @@ type ToolInspectVerdict struct {
 	// ctx / emitted events. Tri-state (nil/true/false); never
 	// serialized on the hook response wire.
 	RedactionEnabled *bool `json:"-"`
+	// managedAIDFailOpenReason is an internal accounting marker. The generic
+	// HTTP handler consumes it only after selecting an allow result, so
+	// a timed-out request that the connector fails closed cannot be counted as
+	// a fail-open allow decision. It is never serialized.
+	managedAIDFailOpenReason string
 }
 
 // applyMode stamps the active guardrail mode onto the verdict and,
@@ -202,11 +217,138 @@ func (a *APIServer) managedAIDOnly() bool {
 // down / timeout / token failure — hookAIDInspect returns nil), the request
 // fails open with an explicit allow verdict.
 func (a *APIServer) inspectManagedAIDOnly(ctx context.Context, toolName, content string) *ToolInspectVerdict {
+	failOpenReason := aidFailOpenUnavailable
+	if !managedAIDHookContentIsInspectable(toolName, content) {
+		failOpenReason = aidFailOpenNoContent
+	} else if a == nil || a.ciscoInspector == nil || a.scannerCfg == nil ||
+		!a.scannerCfg.CiscoAIDefense.HookSurfaceEnabled() {
+		failOpenReason = aidFailOpenUnwired
+	}
 	aid := a.hookAIDInspect(ctx, toolName, content)
 	if aid == nil {
-		return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
+		verdict := &ToolInspectVerdict{
+			Action:                   "allow",
+			Severity:                 "NONE",
+			Findings:                 []string{},
+			managedAIDFailOpenReason: failOpenReason,
+		}
+		if gate := managedAIDFailOpenNativeHookGateFromContext(ctx); gate != nil {
+			gate.enqueue(verdict)
+		} else if !managedAIDFailOpenAccountingDeferred(ctx) {
+			a.recordManagedAIDFailOpenVerdict(ctx, verdict)
+		}
+		return verdict
 	}
 	return mergeWithAIDVerdict(nil, aid)
+}
+
+type managedAIDFailOpenAccountingContextKey struct{}
+
+type managedAIDFailOpenNativeHookGateContextKey struct{}
+
+// managedAIDFailOpenNativeHookGate holds fail-open candidates until the
+// unified native-hook owner has selected the final effective response. Native
+// evaluation can inspect more than one segment, so the gate preserves proposal
+// order and consumes the whole batch exactly once.
+type managedAIDFailOpenNativeHookGate struct {
+	mu       sync.Mutex
+	pending  []*ToolInspectVerdict
+	consumed bool
+}
+
+func deferManagedAIDFailOpenAccounting(ctx context.Context) context.Context {
+	return context.WithValue(ctx, managedAIDFailOpenAccountingContextKey{}, true)
+}
+
+func deferManagedAIDFailOpenNativeHookAccounting(
+	ctx context.Context,
+) (context.Context, *managedAIDFailOpenNativeHookGate) {
+	gate := &managedAIDFailOpenNativeHookGate{}
+	ctx = deferManagedAIDFailOpenAccounting(ctx)
+	return context.WithValue(ctx, managedAIDFailOpenNativeHookGateContextKey{}, gate), gate
+}
+
+func managedAIDFailOpenNativeHookGateFromContext(
+	ctx context.Context,
+) *managedAIDFailOpenNativeHookGate {
+	if ctx == nil {
+		return nil
+	}
+	gate, _ := ctx.Value(managedAIDFailOpenNativeHookGateContextKey{}).(*managedAIDFailOpenNativeHookGate)
+	return gate
+}
+
+func (gate *managedAIDFailOpenNativeHookGate) enqueue(verdict *ToolInspectVerdict) {
+	if gate == nil || verdict == nil || verdict.managedAIDFailOpenReason == "" {
+		return
+	}
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+	if gate.consumed {
+		verdict.managedAIDFailOpenReason = ""
+		return
+	}
+	gate.pending = append(gate.pending, verdict)
+}
+
+func (gate *managedAIDFailOpenNativeHookGate) consume(selectedAllow bool) []*ToolInspectVerdict {
+	if gate == nil {
+		return nil
+	}
+	gate.mu.Lock()
+	defer gate.mu.Unlock()
+	if gate.consumed {
+		return nil
+	}
+	gate.consumed = true
+	pending := gate.pending
+	gate.pending = nil
+	if selectedAllow {
+		return pending
+	}
+	for _, verdict := range pending {
+		if verdict != nil {
+			verdict.managedAIDFailOpenReason = ""
+		}
+	}
+	return nil
+}
+
+func managedAIDFailOpenAccountingDeferred(ctx context.Context) bool {
+	if ctx == nil {
+		return false
+	}
+	deferred, _ := ctx.Value(managedAIDFailOpenAccountingContextKey{}).(bool)
+	return deferred
+}
+
+func (a *APIServer) recordManagedAIDFailOpenVerdict(ctx context.Context, verdict *ToolInspectVerdict) {
+	if a == nil || verdict == nil || verdict.managedAIDFailOpenReason == "" {
+		return
+	}
+	reason := verdict.managedAIDFailOpenReason
+	verdict.managedAIDFailOpenReason = ""
+	metricRuntime, _ := a.observabilityV8LifecycleRuntime().(hookLifecycleMetricV8Runtime)
+	if metricRuntime != nil {
+		_ = recordManagedAIDFailOpenMetricV8(ctx, metricRuntime, reason)
+	}
+}
+
+func (a *APIServer) recordManagedAIDFailOpenForSelectedNativeHookResult(
+	ctx context.Context,
+	gate *managedAIDFailOpenNativeHookGate,
+	action string,
+	panicked bool,
+) {
+	pending := gate.consume(!panicked && action == "allow")
+	if len(pending) == 0 {
+		return
+	}
+	metricCtx, cancelMetric := context.WithTimeout(context.WithoutCancel(ctx), time.Second)
+	defer cancelMetric()
+	for _, verdict := range pending {
+		a.recordManagedAIDFailOpenVerdict(metricCtx, verdict)
+	}
 }
 
 func (a *APIServer) hookAIDInspect(ctx context.Context, toolName string, content string) *ScanVerdict {
@@ -216,7 +358,7 @@ func (a *APIServer) hookAIDInspect(ctx context.Context, toolName string, content
 	if a.scannerCfg == nil || !a.scannerCfg.CiscoAIDefense.HookSurfaceEnabled() {
 		return nil
 	}
-	if content == "" {
+	if !managedAIDHookContentIsInspectable(toolName, content) {
 		return nil
 	}
 	// Prepend the tool name to the content so AID classifiers that
@@ -229,6 +371,17 @@ func (a *APIServer) hookAIDInspect(ctx context.Context, toolName string, content
 		body = fmt.Sprintf("Tool call: %s\n%s", toolName, content)
 	}
 	return a.ciscoInspector.Inspect(ctx, []ChatMessage{{Role: "user", Content: body}})
+}
+
+// managedAIDHookContentIsInspectable applies text trimming only to the
+// message hook, whose Content is sent to AID verbatim. Named tool calls keep
+// their established exact-empty check: non-empty argument whitespace is
+// still combined with the tool name below and remains policy-inspectable.
+func managedAIDHookContentIsInspectable(toolName, content string) bool {
+	if toolName == "message" {
+		return managedAIDContentIsInspectable(content)
+	}
+	return content != ""
 }
 
 // mergeWithAIDVerdict folds an AID ScanVerdict into an existing
@@ -537,7 +690,7 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 			}
 		}
 
-		runtimeAction := "alert"
+		runtimeAction := guardrailActionAllow
 		if enforceableSeverity != "NONE" {
 			runtimeAction = guardrailRuntimeActionForConnector(
 				a.scannerCfg,
@@ -757,21 +910,35 @@ func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectR
 		}
 	}
 
-	if content == "" {
-		return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
-	}
-
 	// managed_enterprise: Cisco AI Defense is the sole decision-maker.
 	// Skip the connector regex packs and the judge lane; AID inspects the
 	// message content directly and a nil AID verdict fails open.
 	if a.managedAIDOnly() {
-		return a.inspectManagedAIDOnly(ctx, "message", content)
+		verdict := a.inspectManagedAIDOnly(ctx, "message", content)
+		if req.contentScope == ruleContentScopeSource {
+			clampSourceScopeVerdict(verdict)
+		}
+		return verdict
+	}
+
+	if content == "" {
+		return &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
 	}
 
 	// Outbound messages get the full scan — tool name "message" for context.
 	// Routed through the request's connector so each connector scans against
 	// its own rule pack (empty ⇒ process-global default set).
-	ruleFindings := ScanAllRulesForConnector(req.Connector, content, "message")
+	var ruleFindings []RuleFinding
+	if req.contentScope != ruleContentScopeAll {
+		ruleFindings = scanContentRulesForConnector(
+			req.Connector,
+			content,
+			"message",
+			req.contentScope,
+		)
+	} else {
+		ruleFindings = ScanAllRulesForConnector(req.Connector, content, "message")
+	}
 
 	var verdict *ToolInspectVerdict
 	if len(ruleFindings) == 0 {
@@ -786,7 +953,15 @@ func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectR
 		severity := HighestSeverity(ruleFindings)
 		confidence := HighestConfidence(ruleFindings, severity)
 
-		action := guardrailRuntimeActionForConnector(a.scannerCfg, req.Connector, severity, strings.EqualFold(req.Direction, "outbound"))
+		action := guardrailActionAllow
+		if enforceable := enforceableRuleFindings(ruleFindings); len(enforceable) > 0 {
+			action = guardrailRuntimeActionForConnector(
+				a.scannerCfg,
+				req.Connector,
+				HighestSeverity(enforceable),
+				strings.EqualFold(req.Direction, "outbound"),
+			)
+		}
 
 		reasons := make([]string, 0, minInt(len(ruleFindings), 5))
 		for i, f := range ruleFindings {
@@ -821,7 +996,37 @@ func (a *APIServer) inspectMessageContent(ctx context.Context, req *ToolInspectR
 	if jv := a.hookJudgeInspect(ctx, req, content, verdict); jv != nil {
 		verdict = mergeWithJudgeVerdict(verdict, jv)
 	}
+	if req.contentScope == ruleContentScopeSource {
+		clampSourceScopeVerdict(verdict)
+	}
 	return verdict
+}
+
+// clampSourceScopeVerdict keeps physically verified detector/test source
+// matches visible without letting any local, AID, judge, or managed-AID lane
+// turn source review into a hook action. Source content is still useful
+// telemetry, so findings are retained and uniformly marked LOW and
+// detection-only rather than suppressed.
+func clampSourceScopeVerdict(verdict *ToolInspectVerdict) {
+	if verdict == nil {
+		return
+	}
+	detected := guardrailSeverityRank(verdict.Severity) > severityNone ||
+		len(verdict.Findings) > 0 || len(verdict.DetailedFindings) > 0 ||
+		!strings.EqualFold(strings.TrimSpace(verdict.Action), guardrailActionAllow)
+	verdict.Action = guardrailActionAllow
+	verdict.RawAction = ""
+	verdict.WouldBlock = false
+	verdict.ApprovalTimeoutMS = 0
+	if detected {
+		verdict.Severity = "LOW"
+	} else {
+		verdict.Severity = "NONE"
+	}
+	for i := range verdict.DetailedFindings {
+		verdict.DetailedFindings[i].Severity = "LOW"
+		verdict.DetailedFindings[i].enforcement = findingEnforcementDetectionOnly
+	}
 }
 
 // maxConcurrentHookJudges bounds concurrent hook-lane judge executions
@@ -993,6 +1198,7 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), scanTimeout)
 	defer cancel()
+	workerCtx := deferManagedAIDFailOpenAccounting(ctx)
 
 	fmt.Fprintf(os.Stderr, "[inspect] >>> tool=%q args=%s content_len=%d direction=%s\n",
 		req.Tool, redaction.MessageContent(string(req.Args)), len(req.Content), req.Direction)
@@ -1003,16 +1209,20 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 		v *ToolInspectVerdict
 	}
 	ch := make(chan verdictResult, 1)
+	workerDone := a.inspectToolWorkerDone
 	go func() {
+		if workerDone != nil {
+			defer workerDone()
+		}
 		var v *ToolInspectVerdict
 		if strings.EqualFold(req.Tool, "message") {
-			v = a.inspectMessageContent(ctx, &req)
+			v = a.inspectMessageContent(workerCtx, &req)
 		} else {
 			// Pass the 200ms-capped ctx so the tool-call judge lane's
 			// deadline guard short-circuits on this generic endpoint
 			// (mirroring the message lane); native hook callers go
 			// through inspectToolPolicy with a deadline-free context.
-			v = a.inspectToolPolicyCtx(ctx, &req)
+			v = a.inspectToolPolicyCtx(workerCtx, &req)
 		}
 		ch <- verdictResult{v}
 	}()
@@ -1040,12 +1250,10 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 
 	elapsed := time.Since(t0)
 
-	// verdict.Reason is composed as "matched: <rule-id>:<title>"
-	// which is PII-safe by construction (rule metadata only).
-	// redaction.Reason is a no-op on it because every token passes
-	// the rule-id allow-list — we still route through the helper
-	// so any future reason-building logic that embeds literals
-	// picks up the scrub automatically.
+	// verdict.Reason is normally composed as "matched: <rule-id>:<title>".
+	// Exact compiled-in ID/title pairs are safe metadata, while titles from
+	// external scanners can contain matched literals. Display boundaries use
+	// the catalog-aware helpers in reason_display.go to distinguish the two.
 	safeFindings := make([]string, len(verdict.Findings))
 	for i, finding := range verdict.Findings {
 		safeFindings[i] = redaction.Reason(finding)
@@ -1139,6 +1347,11 @@ func (a *APIServer) handleInspectTool(w http.ResponseWriter, r *http.Request) {
 				verdict.Severity, r.RemoteAddr, strings.TrimSpace(verdict.Reason) != "",
 				len(verdict.DetailedFindings)))
 	}
+	// The worker only classifies the managed AID fail-open reason. Account for
+	// it after this handler has selected the allow result; the 504
+	// path returns above and deliberately records nothing because installed
+	// hooks fail closed on an unreachable gateway.
+	a.recordManagedAIDFailOpenForSelectedGenericResult(r.Context(), verdict)
 	a.writeJSON(w, http.StatusOK, responseVerdict)
 }
 
@@ -1196,19 +1409,21 @@ func appendVerdictReason(reason, suffix string) string {
 // field in DetailedFindings is replaced with the
 // "<redacted-evidence len=... sha=...>" placeholder AND Reason is
 // routed through ForSinkReason. The composed reason is normally
-// shaped as "matched: <rule-id>:<title>, …" — ForSinkReason is a
-// no-op on that metadata-only shape, but if a scanner ever embeds
-// a matched literal in f.Title the sink barrier scrubs it.
+// shaped as "matched: <rule-id>:<title>, …". Exact compiled-in pairs pass
+// through via defaultSinkDisplayReason only when no managed override is
+// active; if a scanner embeds a matched literal in f.Title, the sink barrier
+// still scrubs it.
 //
 // The original verdict is left untouched so canonical observability producers
 // retain the full source data. The unified runtime applies the selected
 // redaction profile independently for each destination after routing.
 func (v *ToolInspectVerdict) sanitizeForResponse(reveal bool) *ToolInspectVerdict {
-	if reveal {
+	policy := sinkPolicyFor(context.Background(), v.RedactionEnabled)
+	if reveal && policy != redaction.SinkPolicyRedact {
 		return v
 	}
 	cp := *v
-	cp.Reason = redaction.ForSinkReason(v.Reason)
+	cp.Reason = defaultSinkDisplayReason(v.Reason, policy)
 	if len(v.DetailedFindings) == 0 {
 		return &cp
 	}

@@ -153,6 +153,254 @@ func TestParsePOSIXShellInvocationModesAndFinalNoExecState(t *testing.T) {
 	}
 }
 
+func TestIsolatedPOSIXCommandFailsClosedOnBrokenAncestry(t *testing.T) {
+	standalone := CommandFact{ID: 1}
+	if !isolatedPOSIXCommand(&parseOutput{
+		status: StatusComplete, commands: []CommandFact{standalone},
+	}, &standalone) {
+		t.Fatal("standalone command was not isolated")
+	}
+
+	for _, test := range []struct {
+		name    string
+		command CommandFact
+		out     parseOutput
+	}{
+		{
+			name:    "pipeline",
+			command: CommandFact{ID: 1, PipelineID: 7},
+			out:     parseOutput{commands: []CommandFact{{ID: 1, PipelineID: 7}}},
+		},
+		{
+			name:    "redirect",
+			command: CommandFact{ID: 1, Redirects: []RedirectFact{{FD: 1}}},
+			out: parseOutput{commands: []CommandFact{{
+				ID: 1, Redirects: []RedirectFact{{FD: 1}},
+			}}},
+		},
+		{
+			name:    "ancestor pipeline",
+			command: CommandFact{ID: 2, ParentCommandID: 1},
+			out: parseOutput{commands: []CommandFact{
+				{ID: 1, PipelineID: 7},
+				{ID: 2, ParentCommandID: 1},
+			}},
+		},
+		{
+			name:    "ancestor redirect",
+			command: CommandFact{ID: 2, ParentCommandID: 1},
+			out: parseOutput{commands: []CommandFact{
+				{ID: 1, Redirects: []RedirectFact{{FD: 1}}},
+				{ID: 2, ParentCommandID: 1},
+			}},
+		},
+		{
+			name:    "starting ID absent",
+			command: CommandFact{ID: 2},
+			out:     parseOutput{commands: []CommandFact{{ID: 1}}},
+		},
+		{
+			name:    "starting ID zero",
+			command: CommandFact{},
+			out:     parseOutput{commands: []CommandFact{{ID: 1}}},
+		},
+		{
+			name:    "forged start cannot hide pipeline",
+			command: CommandFact{ID: 1},
+			out:     parseOutput{commands: []CommandFact{{ID: 1, PipelineID: 7}}},
+		},
+		{
+			name:    "missing parent",
+			command: CommandFact{ID: 2, ParentCommandID: 1},
+			out:     parseOutput{commands: []CommandFact{{ID: 2, ParentCommandID: 1}}},
+		},
+		{
+			name:    "cycle",
+			command: CommandFact{ID: 1, ParentCommandID: 2},
+			out: parseOutput{commands: []CommandFact{
+				{ID: 1, ParentCommandID: 2},
+				{ID: 2, ParentCommandID: 1},
+			}},
+		},
+		{
+			name:    "self cycle",
+			command: CommandFact{ID: 1, ParentCommandID: 1},
+			out:     parseOutput{commands: []CommandFact{{ID: 1, ParentCommandID: 1}}},
+		},
+		{
+			name:    "duplicate ID",
+			command: CommandFact{ID: 1},
+			out: parseOutput{commands: []CommandFact{
+				{ID: 1},
+				{ID: 1},
+			}},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			test.out.status = StatusComplete
+			if isolatedPOSIXCommand(&test.out, &test.command) {
+				t.Fatalf("unsafe command was classified isolated: %+v", test.out.commands)
+			}
+		})
+	}
+
+	wrapperChild := CommandFact{
+		ID: 2, ParentCommandID: 1, Argv: []string{"bash", "-n", "script.sh"},
+	}
+	wrapper := parseOutput{
+		status: StatusComplete,
+		commands: []CommandFact{
+			{
+				ID: 1, Dialect: DialectPOSIX, Effect: EffectExecute,
+				Executable: "env", Program: "env", ArgvComplete: true,
+				Argv: []string{"env", "bash", "-n", "script.sh"},
+			},
+			wrapperChild,
+		},
+	}
+	if !isolatedPOSIXCommand(&wrapper, &wrapperChild) {
+		t.Fatal("standalone transparent wrapper was not isolated")
+	}
+	forgedProgram := wrapper
+	forgedProgram.commands = cloneCommands(wrapper.commands)
+	forgedProgram.commands[0].Program = "command"
+	if isolatedPOSIXCommand(&forgedProgram, &wrapperChild) {
+		t.Fatal("wrapper with mismatched executable and program was isolated")
+	}
+	forgedArgvOwner := wrapper
+	forgedArgvOwner.commands = cloneCommands(wrapper.commands)
+	forgedArgvOwner.commands[0].Argv[0] = "attacker"
+	if isolatedPOSIXCommand(&forgedArgvOwner, &wrapperChild) {
+		t.Fatal("wrapper with mismatched executable and argv owner was isolated")
+	}
+
+	arbitraryChild := CommandFact{
+		ID: 2, ParentCommandID: 1, Argv: []string{"bash", "-n", "script.sh"},
+	}
+	arbitrary := parseOutput{
+		status: StatusComplete,
+		commands: []CommandFact{
+			{
+				ID: 1, Dialect: DialectPOSIX, Effect: EffectExecute,
+				Executable: "sudo", Program: "sudo", ArgvComplete: true,
+				Argv: []string{"sudo", "bash", "-n", "script.sh"},
+			},
+			arbitraryChild,
+		},
+	}
+	if isolatedPOSIXCommand(&arbitrary, &arbitraryChild) {
+		t.Fatal("arbitrary parent command was treated as a transparent wrapper")
+	}
+}
+
+func TestExactCaseSensitivePOSIXProgramBindsArgvOwner(t *testing.T) {
+	command := CommandFact{
+		Dialect: DialectPOSIX, Executable: "bash", Program: "bash",
+		Argv: []string{"bash", "-n", "script.sh"}, ArgvComplete: true,
+	}
+	if !exactCaseSensitivePOSIXProgram(&command, "bash") {
+		t.Fatal("exact POSIX owner was rejected")
+	}
+	command.Argv[0] = "attacker"
+	if exactCaseSensitivePOSIXProgram(&command, "bash") {
+		t.Fatal("forged argv owner was accepted")
+	}
+}
+
+func TestProvesPOSIXInteractiveShellUsesRecognizedFinalState(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		program string
+		argv    []string
+		want    bool
+	}{
+		{name: "exact bash", program: "bash", argv: []string{"bash", "-i"}, want: true},
+		{
+			name:    "bash startup disabled before interactive",
+			program: "bash", argv: []string{"bash", "--norc", "-i"}, want: true,
+		},
+		{name: "bundled login interactive", program: "bash", argv: []string{"bash", "-li"}, want: true},
+		{name: "exact sh", program: "sh", argv: []string{"sh", "-i"}, want: true},
+		{
+			name:    "interactive disabled later",
+			program: "bash", argv: []string{"bash", "-i", "+i", "-c", "cat"},
+		},
+		{name: "terminal option", program: "bash", argv: []string{"bash", "--version", "-i"}},
+		{
+			name:    "invalid option",
+			program: "bash", argv: []string{"bash", "--definitely-invalid", "-i"},
+		},
+		{name: "script positional", program: "sh", argv: []string{"sh", "script", "-i"}},
+		{name: "end of options", program: "sh", argv: []string{"sh", "--", "-i"}},
+		{
+			name:    "command positional",
+			program: "bash", argv: []string{"bash", "-c", "cat", "-i"},
+		},
+		{
+			name:    "interactive command mode",
+			program: "bash", argv: []string{"bash", "-ic", "printf fixed"},
+		},
+		{
+			name:    "interactive script mode",
+			program: "bash", argv: []string{"bash", "-i", "local.sh"},
+		},
+		{name: "unmodeled zsh", program: "zsh", argv: []string{"zsh", "-i"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			command := CommandFact{
+				Dialect: DialectPOSIX, Effect: EffectExecute,
+				Program: test.program, Argv: test.argv, ArgvComplete: true,
+			}
+			if got := ProvesPOSIXInteractiveShell(command); got != test.want {
+				t.Fatalf("interactive proof = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
+func TestProvesPOSIXInteractiveShellRejectsGuardFailures(t *testing.T) {
+	positive := CommandFact{
+		Dialect: DialectPOSIX, Effect: EffectExecute,
+		Program: "bash", Argv: []string{"bash", "-i"}, ArgvComplete: true,
+	}
+	for _, test := range []struct {
+		name   string
+		mutate func(*CommandFact)
+	}{
+		{
+			name: "non POSIX dialect",
+			mutate: func(command *CommandFact) {
+				command.Dialect = DialectCMD
+			},
+		},
+		{
+			name: "non execute effect",
+			mutate: func(command *CommandFact) {
+				command.Effect = EffectPreview
+			},
+		},
+		{
+			name: "incomplete argv",
+			mutate: func(command *CommandFact) {
+				command.ArgvComplete = false
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			command := positive
+			test.mutate(&command)
+			invocation := parsePOSIXShellInvocation(command.Program, command.Argv)
+			if !invocation.recognized || !invocation.interactive ||
+				invocation.mode != posixShellModeStdin {
+				t.Fatalf("guard fixture lost its positive parser state: %#v", invocation)
+			}
+			if ProvesPOSIXInteractiveShell(command) {
+				t.Fatal("interactive proof accepted a failed command guard")
+			}
+		})
+	}
+}
+
 func TestParsePOSIXShellInvocationRejectsUnsafeOrInvalidForms(t *testing.T) {
 	tests := []struct {
 		name    string

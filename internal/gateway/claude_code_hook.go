@@ -235,7 +235,10 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		a.dispatchClaudeCodeHookNotification(req, action, rawAction, verdict.Severity, verdict.Reason, wouldBlock, evalCtx,
 			sinkPolicyFor(ctx, verdict.RedactionEnabled))
 	}
-	resp := claudeCodeResponseFor(req, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings, mode, wouldBlock)
+	resp := claudeCodeResponseFor(
+		req, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings, mode, wouldBlock,
+		sinkPolicyFor(ctx, verdict.RedactionEnabled),
+	)
 	// Stamp the unified-pipeline correlation keys so the agent-hook
 	// dispatch wrapper (claudeCodeResponseToAgentHookResponse) and
 	// the audit envelope (HookAuditEnvelope.EvaluationID / RuleIDs)
@@ -279,8 +282,9 @@ func (a *APIServer) dispatchClaudeCodeHookNotification(req claudeCodeHookRequest
 	}
 	// Honor the cloud-controlled per-inspection redaction policy
 	// (all-sinks scope, managed_enterprise only) when a caller passes
-	// one; otherwise default to the historical ForSinkReason behavior.
-	safeReason := redaction.ReasonForSink(reason, notificationSinkPolicy(policy))
+	// one; otherwise keep compatibility redaction while allowing exact
+	// compiled-in rule metadata through for operator triage.
+	safeReason := notificationDisplayReason(reason, notificationSinkPolicy(policy))
 	base := notifier.BlockEvent{
 		Source:       notifier.SourceHook,
 		Target:       target,
@@ -363,7 +367,7 @@ func (a *APIServer) claudeCodeMode() string {
 	return normalizeAgentHookMode(mode)
 }
 
-func claudeCodeResponseFor(req claudeCodeHookRequest, action, rawAction, severity, reason string, findings []string, mode string, wouldBlock bool) claudeCodeHookResponse {
+func claudeCodeResponseFor(req claudeCodeHookRequest, action, rawAction, severity, reason string, findings []string, mode string, wouldBlock bool, policy ...redaction.SinkPolicy) claudeCodeHookResponse {
 	if severity == "" {
 		severity = "NONE"
 	}
@@ -373,7 +377,7 @@ func claudeCodeResponseFor(req claudeCodeHookRequest, action, rawAction, severit
 	if rawAction == "" {
 		rawAction = action
 	}
-	safeReason := redaction.ReasonForAgent(reason)
+	safeReason := agentDisplayReason(reason, notificationSinkPolicy(policy))
 	additional := claudeCodeAdditionalContext(rawAction, severity, safeReason, wouldBlock)
 	resp := claudeCodeHookResponse{
 		Action:            action,
@@ -591,18 +595,7 @@ func nonEmptyStrings(values ...string) []string {
 }
 
 func claudeCodeString(v interface{}) string {
-	switch t := v.(type) {
-	case string:
-		return t
-	case nil:
-		return ""
-	default:
-		b, err := json.Marshal(t)
-		if err != nil {
-			return ""
-		}
-		return string(b)
-	}
+	return structuredHookContentString(v)
 }
 
 func claudeCodePayloadString(payload map[string]interface{}, key string) string {
@@ -647,7 +640,7 @@ func (a *APIServer) scanClaudeCodeEventFile(ctx context.Context, req claudeCodeH
 	}
 	findings := make([]string, 0, len(result.Findings))
 	for _, f := range result.Findings {
-		findings = append(findings, f.ID)
+		findings = append(findings, firstNonEmpty(f.RuleID, f.ID))
 		if len(findings) >= 20 {
 			break
 		}
@@ -690,7 +683,7 @@ func (a *APIServer) scanClaudeCodeChangedFiles(ctx context.Context, req claudeCo
 			maxSeverity = result.MaxSeverity()
 		}
 		for _, f := range result.Findings {
-			findings = append(findings, f.ID)
+			findings = append(findings, firstNonEmpty(f.RuleID, f.ID))
 			if len(findings) >= 20 {
 				break
 			}

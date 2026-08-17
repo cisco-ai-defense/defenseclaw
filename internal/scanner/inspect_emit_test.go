@@ -50,7 +50,7 @@ func TestBuildInspectScanResultPreservesFindingFacts(t *testing.T) {
 	}
 }
 
-func TestBuildInspectScanResultBoundsEvidenceSummaryWithoutChangingFingerprintSource(t *testing.T) {
+func TestBuildInspectScanResultBoundsEvidenceSummaryAndDefersFingerprinting(t *testing.T) {
 	evidence := strings.Repeat("界", 2000)
 	_, result := BuildInspectScanResult(InspectFindingSource{
 		Scanner: "hook-rules", Target: "codex:PreToolUse",
@@ -61,8 +61,8 @@ func TestBuildInspectScanResultBoundsEvidenceSummaryWithoutChangingFingerprintSo
 		!utf8.ValidString(finding.EvidenceSummary) {
 		t.Fatalf("bounded evidence summary bytes=%d valid=%v", len(finding.EvidenceSummary), utf8.ValidString(finding.EvidenceSummary))
 	}
-	if finding.ContentFingerprint != evidenceFingerprint(evidence) {
-		t.Fatalf("fingerprint=%q want hash of complete source excerpt", finding.ContentFingerprint)
+	if finding.ContentFingerprint != "" {
+		t.Fatalf("fingerprint=%q, want audit-boundary keyed fingerprinting", finding.ContentFingerprint)
 	}
 }
 

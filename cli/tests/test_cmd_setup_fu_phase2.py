@@ -34,12 +34,14 @@ Covers:
 from __future__ import annotations
 
 import contextlib
+import copy
 import os
 import sys
 import unittest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import click
 import pytest
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -740,6 +742,144 @@ class TestBareSetupBatch(_BaseSetup):
             res = _invoke(["--detected", "--no-restart"], self.app)
         self.assertEqual(res.exit_code, 0, msg=res.output)
         self.assertEqual(set(self.app.cfg.guardrail.connectors), {"hermes"})
+
+    def test_add_detected_preserves_existing_roster_and_modes(self):
+        self._seed_map("codex", "hermes")
+        gc = self.app.cfg.guardrail
+        gc.connectors["codex"].mode = "action"
+        gc.connectors["hermes"].mode = "observe"
+        gc.scanner_mode = "both"
+        ai_discovery = self.app.cfg.ai_discovery
+        ai_discovery.enabled = False
+        ai_discovery.mode = "operator-managed"
+        ai_discovery.include_shell_history = False
+        ai_discovery.include_package_manifests = False
+        ai_discovery.include_env_var_names = False
+        ai_discovery.include_network_domains = False
+        ai_discovery_before = copy.deepcopy(ai_discovery)
+
+        with _stub_side_effects(), patch(
+            "defenseclaw.commands.cmd_setup._detect_installed_connectors",
+            return_value=["codex", "cursor"],
+        ):
+            res = _invoke(["--add-detected", "--yes", "--no-restart"], self.app)
+
+        self.assertEqual(res.exit_code, 0, msg=res.output)
+        self.assertEqual(set(gc.connectors), {"codex", "cursor", "hermes"})
+        self.assertEqual(gc.connectors["codex"].mode, "action")
+        self.assertEqual(gc.connectors["hermes"].mode, "observe")
+        self.assertEqual(gc.connectors["cursor"].mode, "observe")
+        self.assertEqual(gc.scanner_mode, "both")
+        self.assertEqual(ai_discovery, ai_discovery_before)
+
+    def test_add_detected_preserves_primary_when_new_connector_sorts_first(self):
+        self._seed_map("hermes")
+        gc = self.app.cfg.guardrail
+
+        with _stub_side_effects(), patch(
+            "defenseclaw.commands.cmd_setup._detect_installed_connectors",
+            return_value=["codex"],
+        ):
+            res = _invoke(["--add-detected", "--yes", "--no-restart"], self.app)
+
+        self.assertEqual(res.exit_code, 0, msg=res.output)
+        self.assertEqual(set(gc.connectors), {"codex", "hermes"})
+        self.assertEqual(gc.connector, "hermes")
+        self.assertEqual(self.app.cfg.claw.mode, "hermes")
+
+    def test_add_detected_restarting_batch_audits_after_gateway_is_ready(self):
+        self._seed_map("codex")
+        gateway_ready = False
+
+        def restart_gateway(*_args, **_kwargs):
+            nonlocal gateway_ready
+            gateway_ready = True
+
+        def require_running_gateway(*_args, **_kwargs):
+            if not gateway_ready:
+                raise CanonicalObservabilityUnavailableError("offline")
+
+        self.app.logger = MagicMock()
+        self.app.logger.log_action.side_effect = require_running_gateway
+        with _stub_side_effects(), patch(
+            "defenseclaw.commands.cmd_setup._restart_services",
+            side_effect=restart_gateway,
+        ), patch(
+            "defenseclaw.commands.cmd_setup._detect_installed_connectors",
+            return_value=["codex", "cursor"],
+        ):
+            res = _invoke(["--add-detected", "--yes", "--restart"], self.app)
+
+        self.assertEqual(res.exit_code, 0, msg=res.output)
+        self.assertTrue(gateway_ready)
+        self.app.logger.log_action.assert_called_once()
+
+    def test_add_detected_is_a_noop_when_every_detected_connector_is_active(self):
+        self._seed_map("codex")
+        gc = self.app.cfg.guardrail
+        before = (copy.deepcopy(gc.connectors), gc.connector, self.app.cfg.claw.mode)
+
+        with patch(
+            "defenseclaw.commands.cmd_setup._detect_installed_connectors",
+            return_value=["codex"],
+        ), patch("defenseclaw.commands.cmd_setup._apply_setup_batch") as apply_batch:
+            res = _invoke(["--add-detected", "--yes", "--no-restart"], self.app)
+
+        self.assertEqual(res.exit_code, 0, msg=res.output)
+        self.assertIn("No newly detected hook connectors", res.output)
+        self.assertEqual(
+            (gc.connectors, gc.connector, self.app.cfg.claw.mode),
+            before,
+        )
+        apply_batch.assert_not_called()
+
+    def test_add_detected_rejects_exact_batch_flags(self):
+        res = _invoke(
+            ["--add-detected", "--detected", "--yes", "--no-restart"],
+            self.app,
+            catch=True,
+        )
+
+        self.assertNotEqual(res.exit_code, 0)
+        self.assertIn("cannot be combined", res.output)
+
+    def test_add_detected_rejects_conflicts_without_loaded_config(self):
+        ctx = click.Context(setup_group)
+
+        with ctx, self.assertRaises(click.UsageError):
+            cmd_setup._dispatch_bare_setup(
+                ctx,
+                None,
+                connectors=["codex"],
+                detected=False,
+                add_detected=True,
+                all_connectors=False,
+                mode="observe",
+                restart=False,
+                yes=True,
+            )
+
+    def test_add_detected_preserves_an_active_proxy_connector(self):
+        gc = self.app.cfg.guardrail
+        gc.connectors = {}
+        gc.connector = "openclaw"
+        self.app.cfg.claw.mode = "openclaw"
+        before = (copy.deepcopy(gc.connectors), gc.connector, self.app.cfg.claw.mode)
+
+        with patch(
+            "defenseclaw.commands.cmd_setup._detect_installed_connectors",
+            return_value=["cursor"],
+        ), patch("defenseclaw.commands.cmd_setup._apply_setup_batch") as apply_batch:
+            res = _invoke(["--add-detected", "--yes", "--no-restart"], self.app)
+
+        self.assertEqual(res.exit_code, 0, msg=res.output)
+        self.assertIn("active proxy connector", res.output)
+        self.assertEqual(
+            (gc.connectors, gc.connector, self.app.cfg.claw.mode),
+            before,
+        )
+        self.assertEqual(self.app.cfg.active_connectors(), ["openclaw"])
+        apply_batch.assert_not_called()
 
     def test_all_selects_every_hook_connector(self):
         with _stub_side_effects():

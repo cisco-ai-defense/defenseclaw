@@ -64,27 +64,10 @@ func hashV1Error(code HashV1ErrorCode) error {
 // HashV1 applies the version-1, cross-language keyed correlation transform.
 // It returns only the non-reversible token; normalized input is never exposed.
 func HashV1(value string, fieldClass observability.FieldClass, key []byte) (string, error) {
-	if !utf8.ValidString(value) {
-		return "", hashV1Error(HashV1ErrorInvalidUTF8)
-	}
-	if len(key) != hashV1KeySize {
-		return "", hashV1Error(HashV1ErrorInvalidKey)
-	}
-	if !observability.IsFieldClass(fieldClass) {
-		return "", hashV1Error(HashV1ErrorUnsupportedClass)
-	}
-
-	normalized, err := normalizeHashV1Value(value, fieldClass)
+	digest, err := hashV1Digest(value, fieldClass, key)
 	if err != nil {
 		return "", err
 	}
-	mac := hmac.New(sha256.New, key)
-	_, _ = mac.Write([]byte(hashV1Domain))
-	_, _ = mac.Write([]byte{0})
-	_, _ = mac.Write([]byte(fieldClass))
-	_, _ = mac.Write([]byte{0})
-	_, _ = mac.Write([]byte(normalized))
-	digest := mac.Sum(nil)
 	keyID := hashV1KeyID(key)
 
 	return fmt.Sprintf(
@@ -92,8 +75,42 @@ func HashV1(value string, fieldClass observability.FieldClass, key []byte) (stri
 		fieldClass,
 		keyID,
 		len(value),
-		hex.EncodeToString(digest),
+		hex.EncodeToString(digest[:]),
 	), nil
+}
+
+// hashV1Digest is the shared keyed transform behind both the formatted
+// projection token and the compact finding-correlation fingerprint. Keeping
+// the transform here guarantees identical version, normalization, domain, and
+// field-class separation without exposing key material from Engine.
+func hashV1Digest(
+	value string,
+	fieldClass observability.FieldClass,
+	key []byte,
+) ([sha256.Size]byte, error) {
+	var digest [sha256.Size]byte
+	if !utf8.ValidString(value) {
+		return digest, hashV1Error(HashV1ErrorInvalidUTF8)
+	}
+	if len(key) != hashV1KeySize {
+		return digest, hashV1Error(HashV1ErrorInvalidKey)
+	}
+	if !observability.IsFieldClass(fieldClass) {
+		return digest, hashV1Error(HashV1ErrorUnsupportedClass)
+	}
+
+	normalized, err := normalizeHashV1Value(value, fieldClass)
+	if err != nil {
+		return digest, err
+	}
+	mac := hmac.New(sha256.New, key)
+	_, _ = mac.Write([]byte(hashV1Domain))
+	_, _ = mac.Write([]byte{0})
+	_, _ = mac.Write([]byte(fieldClass))
+	_, _ = mac.Write([]byte{0})
+	_, _ = mac.Write([]byte(normalized))
+	copy(digest[:], mac.Sum(nil))
+	return digest, nil
 }
 
 func hashV1KeyID(key []byte) string {

@@ -86,8 +86,9 @@ func (consumer *generatedTraceConsumer) snapshot() []telemetry.V8CanonicalEndedS
 }
 
 type generatedTracePipelines struct {
-	mu        sync.Mutex
-	consumers map[uint64]*generatedTraceConsumer
+	mu                      sync.Mutex
+	consumers               map[uint64]*generatedTraceConsumer
+	withoutSpanDestinations bool
 }
 
 func (pipelines *generatedTracePipelines) build(
@@ -96,6 +97,9 @@ func (pipelines *generatedTracePipelines) build(
 	generation uint64,
 	_ telemetry.V8MetricReaderSpec,
 ) (telemetry.V8GenerationPipelines, error) {
+	if pipelines.withoutSpanDestinations {
+		return telemetry.V8GenerationPipelines{}, nil
+	}
 	consumer := &generatedTraceConsumer{}
 	pipelines.mu.Lock()
 	pipelines.consumers[generation] = consumer

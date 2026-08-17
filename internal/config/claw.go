@@ -403,6 +403,43 @@ func ParseMCPServersJSONArray(data []byte) ([]MCPServerEntry, error) {
 	return parseMCPServersJSONArray(data)
 }
 
+// ReadMCPFromDotMCPJSON is the exported wrapper around the internal
+// `.mcp.json` reader so AI-discovery / signature-catalog callers can
+// enumerate the servers declared inside a matched file without
+// re-implementing the "wrapped in mcpServers vs bare map" fallback.
+func ReadMCPFromDotMCPJSON(path string) ([]MCPServerEntry, error) {
+	return readMCPFromDotMCPJSON(path)
+}
+
+// ReadMCPFromClaudeSettings is the exported wrapper around the
+// Claude Code settings.json / .claude.json reader; input is a path to
+// a JSON file with a top-level `mcpServers` map.
+func ReadMCPFromClaudeSettings(path string) ([]MCPServerEntry, error) {
+	return readMCPFromClaudeSettings(path)
+}
+
+// ReadMCPFromClaudeJSONProjects is the exported wrapper around the
+// per-project local-scope Claude Code MCP reader; input is a path to
+// ~/.claude.json, and the returned entries flatten every
+// projects.<path>.mcpServers subtree.
+func ReadMCPFromClaudeJSONProjects(path string) ([]MCPServerEntry, error) {
+	return readMCPFromClaudeJSONProjects(path)
+}
+
+// ReadMCPFromCodexConfigTOML is the exported wrapper around the
+// Codex `~/.codex/config.toml` reader for callers that need to
+// enumerate mcp_servers entries out of a TOML file.
+func ReadMCPFromCodexConfigTOML(path string) ([]MCPServerEntry, error) {
+	return readMCPFromCodexConfigTOML(path)
+}
+
+// ReadMCPFromYAMLPath is the exported wrapper around readMCPFromYAMLPath;
+// each `paths` argument is a JSON-pointer-style chain of keys to walk
+// (e.g. `[]string{"mcp", "servers"}`).
+func ReadMCPFromYAMLPath(path string, paths ...[]string) ([]MCPServerEntry, error) {
+	return readMCPFromYAMLPath(path, paths...)
+}
+
 func workspaceSkillsDir(homeDir string, oc *openclawConfig) string {
 	workspace := filepath.Join(homeDir, "workspace")
 	if oc != nil && oc.Agents.Defaults.Workspace != "" {
@@ -774,9 +811,32 @@ func readMCPServersClaudeCode(workspaceDir string) ([]MCPServerEntry, error) {
 
 	var entries []MCPServerEntry
 
-	settingsPath := filepath.Join(connectorEnvHome("CLAUDE_CONFIG_DIR", ".claude"), "settings.json")
+	// user-scope: ~/.claude/settings.json — top-level mcpServers
+	claudeHome := connectorEnvHome("CLAUDE_CONFIG_DIR", ".claude")
+	settingsPath := filepath.Join(claudeHome, "settings.json")
 	if e, err := readMCPFromClaudeSettings(settingsPath); err == nil {
 		entries = append(entries, e...)
+	}
+
+	// user-scope: ~/.claude.json — top-level mcpServers (the Claude Code CLI's
+	// user-scope registry, distinct from settings.json; also holds per-project
+	// local-scope entries under projects.<path>.mcpServers). Location is the
+	// parent of the resolved CLAUDE_CONFIG_DIR (~/) unless the env var is set.
+	// Skip if CLAUDE_CONFIG_DIR is explicitly set (then only the settings dir
+	// is authoritative).
+	claudeJSONPath := ""
+	if _, hasEnv := os.LookupEnv("CLAUDE_CONFIG_DIR"); !hasEnv {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			claudeJSONPath = filepath.Join(home, ".claude.json")
+		}
+	}
+	if claudeJSONPath != "" {
+		// Both user-scope (top-level mcpServers) and local-scope
+		// (projects.<path>.mcpServers) come from the same multi-MB
+		// conversation-state file; read it once and split.
+		if e, err := ReadMCPFromClaudeJSONBothScopes(claudeJSONPath); err == nil {
+			entries = append(entries, e...)
+		}
 	}
 
 	if cwd != "" {
@@ -787,6 +847,95 @@ func readMCPServersClaudeCode(workspaceDir string) ([]MCPServerEntry, error) {
 	}
 
 	return dedupMCPEntries(entries), nil
+}
+
+// readMCPFromClaudeJSONProjects extracts per-project local-scope MCP servers
+// from the projects.<path>.mcpServers subtrees of ~/.claude.json. Each
+// project's servers ship as a single flat list — the parent-path prefix is
+// intentionally not appended so downstream de-dup by name works across scopes.
+func readMCPFromClaudeJSONProjects(path string) ([]MCPServerEntry, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	_, projectEntries, err := parseClaudeJSONScopes(data)
+	if err != nil {
+		return nil, err
+	}
+	return projectEntries, nil
+}
+
+// claudeJSONScopes is the union shape of ~/.claude.json we care about: the
+// user-scope `mcpServers` block and the per-project local-scope
+// `projects.<path>.mcpServers` blocks. Split out so one read+unmarshal of the
+// (often multi-megabyte) file is enough to cover both scopes.
+type claudeJSONMCPServer struct {
+	Command string            `json:"command"`
+	Args    []string          `json:"args"`
+	Env     map[string]string `json:"env"`
+	URL     string            `json:"url"`
+	Type    string            `json:"type"`
+}
+
+type claudeJSONScopes struct {
+	MCPServers map[string]claudeJSONMCPServer `json:"mcpServers"`
+	Projects   map[string]struct {
+		MCPServers map[string]claudeJSONMCPServer `json:"mcpServers"`
+	} `json:"projects"`
+}
+
+// parseClaudeJSONScopes unmarshals ~/.claude.json once and splits the two
+// MCP-server scopes out. `user` is the top-level mcpServers map (user scope);
+// `projects` is the flattened union of every projects.<path>.mcpServers block
+// (local scope). Callers that already have the raw bytes should prefer this
+// helper to the pair of ReadMCPFromClaudeSettings + ReadMCPFromClaudeJSONProjects
+// wrappers, which each open and decode the file independently.
+func parseClaudeJSONScopes(data []byte) (user, projects []MCPServerEntry, err error) {
+	var doc claudeJSONScopes
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, nil, err
+	}
+	for name, s := range doc.MCPServers {
+		user = append(user, MCPServerEntry{
+			Name:      name,
+			Command:   s.Command,
+			Args:      s.Args,
+			Env:       s.Env,
+			URL:       s.URL,
+			Transport: s.Type,
+		})
+	}
+	for _, project := range doc.Projects {
+		for name, s := range project.MCPServers {
+			projects = append(projects, MCPServerEntry{
+				Name:      name,
+				Command:   s.Command,
+				Args:      s.Args,
+				Env:       s.Env,
+				URL:       s.URL,
+				Transport: s.Type,
+			})
+		}
+	}
+	return user, projects, nil
+}
+
+// ReadMCPFromClaudeJSONBothScopes is the exported single-read helper: it
+// opens ~/.claude.json once and returns the union of user-scope
+// (top-level mcpServers) and local-scope (projects.<path>.mcpServers)
+// entries. Callers that need both scopes should prefer this over pairing
+// ReadMCPFromClaudeSettings + ReadMCPFromClaudeJSONProjects, which would
+// each read and decode the (often multi-megabyte) conversation-state file.
+func ReadMCPFromClaudeJSONBothScopes(path string) ([]MCPServerEntry, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	user, projects, err := parseClaudeJSONScopes(data)
+	if err != nil {
+		return nil, err
+	}
+	return append(user, projects...), nil
 }
 
 func readMCPServersCodex(workspaceDir string) ([]MCPServerEntry, error) {
@@ -1429,6 +1578,8 @@ func readMCPFromClaudeSettings(path string) ([]MCPServerEntry, error) {
 			Command string            `json:"command"`
 			Args    []string          `json:"args"`
 			Env     map[string]string `json:"env"`
+			URL     string            `json:"url"`
+			Type    string            `json:"type"`
 		} `json:"mcpServers"`
 	}
 	if err := json.Unmarshal(data, &settings); err != nil {
@@ -1438,10 +1589,12 @@ func readMCPFromClaudeSettings(path string) ([]MCPServerEntry, error) {
 	entries := make([]MCPServerEntry, 0, len(settings.MCPServers))
 	for name, s := range settings.MCPServers {
 		entries = append(entries, MCPServerEntry{
-			Name:    name,
-			Command: s.Command,
-			Args:    s.Args,
-			Env:     s.Env,
+			Name:      name,
+			Command:   s.Command,
+			Args:      s.Args,
+			Env:       s.Env,
+			URL:       s.URL,
+			Transport: s.Type,
 		})
 	}
 	return entries, nil

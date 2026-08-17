@@ -202,6 +202,9 @@ path: _source-install-preflight
 # Run the freshly-installed CLI binary directly so a stale shell PATH
 # doesn't invoke an older `defenseclaw` still sitting earlier in PATH.
 # The CLI handles its own idempotence, so repeated `make all` is safe.
+# When no TTY is available, the follow-up additive setup observes only newly
+# detected hook connectors, preserves existing modes, and restarts the gateway
+# only when it actually adds a connector.
 quickstart: _source-install-preflight
 	@profile="$${PROFILE:-observe}"; \
 	if [ "$${NO_QUICKSTART:-0}" = "1" ]; then \
@@ -241,6 +244,10 @@ quickstart: _source-install-preflight
 				--scanner-mode "$${SCANNER_MODE:-local}" \
 				--no-start-gateway --verify; then \
 				echo "  Quickstart reported errors — run 'defenseclaw doctor' to investigate"; \
+				exit 1; \
+			fi; \
+			if ! "$$dc_bin" setup --add-detected --yes --restart; then \
+				echo "  Could not add newly detected connectors — run 'defenseclaw agent discover --refresh' to investigate"; \
 				exit 1; \
 			fi; \
 		fi; \
@@ -739,10 +746,10 @@ packaging-macos-test:
 #
 # Overrides: GOOS/GOARCH cross-compile the gateway.
 BUNDLE_GOOS  ?= darwin
-# Universal (x86_64 + arm64 via lipo) is the default for macOS drops so the
-# packaging team ships one artifact for both Intel and Apple Silicon. Override
-# with BUNDLE_GOARCH=amd64 or =arm64 for a single-arch bundle.
-BUNDLE_GOARCH ?= universal
+# macOS release support is Apple Silicon only. Keep the bundle architecture
+# fixed to arm64 so local packaging cannot accidentally recreate an unsupported
+# Intel or universal release surface.
+BUNDLE_GOARCH ?= arm64
 BUNDLE_NAME  := defenseclaw-macos-$(VERSION)-$(BUNDLE_GOOS)-$(BUNDLE_GOARCH)
 BUNDLE_DIR   := $(DIST_DIR)/$(BUNDLE_NAME)
 # BUNDLE_LDFLAGS is passed to `go build -ldflags <value>` as a single
@@ -773,6 +780,9 @@ CMID_OVERLAY ?=
 CMID_VERSION ?=
 
 packaging-macos-bundle:
+	@test "$(BUNDLE_GOARCH)" = "arm64" || { \
+		echo "packaging-macos-bundle supports only BUNDLE_GOARCH=arm64" >&2; exit 1; \
+	}
 	@scripts/build-macos-bundle.sh \
 	    "$(BUNDLE_GOOS)" \
 	    "$(BUNDLE_GOARCH)" \
@@ -1122,7 +1132,7 @@ _bundle-data:
 
 dist-gateway:
 	@mkdir -p $(DIST_DIR)
-	@for pair in linux/amd64 linux/arm64 darwin/amd64 darwin/arm64; do \
+	@for pair in linux/amd64 linux/arm64 darwin/arm64; do \
 		goos=$${pair%%/*}; goarch=$${pair##*/}; \
 		echo "Building gateway $${goos}/$${goarch}..."; \
 		CGO_ENABLED=0 GOOS=$$goos GOARCH=$$goarch go build \

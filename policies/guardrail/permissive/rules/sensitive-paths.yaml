@@ -213,7 +213,7 @@ rules:
       p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE,
       defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND,
       defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))
-    pattern: '(?i)(?:~|\$HOME|\$\{HOME\}|/root|/(?:home|Users)/[^/\\"'']+|[a-z]:[/\\]Users[/\\][^/\\"'']+)[/\\](?:\.(?:profile|bash_profile|bashrc|zprofile|zshrc)|\.config[/\\](?:fish[/\\]config\.fish|powershell[/\\](?:profile|microsoft\.powershell_profile)\.ps1)|Documents[/\\](?:Windows)?PowerShell[/\\](?:profile|Microsoft\.PowerShell_profile)\.ps1)\b'
+    pattern: '(?i)(?:(?:~|\$HOME|\$\{HOME\}|/root|/(?:home|Users)/[^/\\"'']+|[a-z]:[/\\]Users[/\\][^/\\"'']+)[/\\](?:\.(?:profile|bash_profile|bashrc|zprofile|zshrc)|\.config[/\\](?:fish[/\\]config\.fish|powershell[/\\](?:profile|microsoft\.powershell_profile)\.ps1)|Documents[/\\](?:Windows)?PowerShell[/\\](?:profile|Microsoft\.PowerShell_profile)\.ps1)\b|(?:^|[^-:A-Za-z0-9_./~\\])/etc/profile(?:$|["''\s]))'
     title: "Shell startup profile mutation"
     severity: MEDIUM
     confidence: 0.92

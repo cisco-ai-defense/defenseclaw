@@ -205,7 +205,7 @@ func TestCircuitFailureClassesOpenAtBoundedThresholds(t *testing.T) {
 	}{
 		{name: "transient-before-threshold", class: FailureClassTransient, failures: 2, wantFailures: 2},
 		{name: "transient-at-threshold", class: FailureClassTransient, failures: 3, wantOpen: true, wantFailures: 3, wantDuration: time.Minute},
-		{name: "authentication", class: FailureClassAuthentication, failures: 1, wantOpen: true, wantFailures: 1, wantDuration: 24 * time.Hour},
+		{name: "authentication", class: FailureClassAuthentication, failures: 1, wantOpen: true, wantFailures: 1, wantDuration: authenticationCircuitOpenDuration},
 		{name: "permanent-payload-before-threshold", class: FailureClassPermanentPayload, failures: 2, wantFailures: 2},
 		{name: "permanent-payload-at-threshold", class: FailureClassPermanentPayload, failures: 3, wantOpen: true, wantFailures: 3, wantDuration: time.Minute},
 		{name: "unsafe-endpoint", class: FailureClassUnsafeEndpoint, failures: 1, wantOpen: true, wantFailures: 1, wantDuration: 24 * time.Hour},
@@ -277,8 +277,8 @@ func TestCircuitCooldownHalfOpenRecoveryAndGenerationReset(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !first.recordCircuitFailure(FailureClassAuthentication, start) {
-		t.Fatal("authentication failure did not open circuit")
+	if !first.recordCircuitFailure(FailureClassUnsafeEndpoint, start) {
+		t.Fatal("unsafe-endpoint failure did not open circuit")
 	}
 	successorConfig := config
 	successorConfig.Generation = 42
@@ -615,7 +615,7 @@ func TestHalfOpenProbeUsesOneAttemptThenRecoversAfterNextCooldown(t *testing.T) 
 		return snapshot.CircuitState == CircuitOpen
 	})
 	if firstOpen.LastFailureClass != FailureClassAuthentication ||
-		!firstOpen.CircuitOpenUntil.Equal(start.Add(immediateCircuitOpenDuration)) {
+		!firstOpen.CircuitOpenUntil.Equal(start.Add(authenticationCircuitOpenDuration)) {
 		t.Fatalf("first open=%+v", firstOpen)
 	}
 

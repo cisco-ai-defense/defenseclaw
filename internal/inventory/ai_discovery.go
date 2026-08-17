@@ -41,6 +41,7 @@ import (
 	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/inventory/lockparse"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
@@ -184,6 +185,20 @@ type AIEvidence struct {
 	RawPath       string  `json:"raw_path,omitempty"`
 	Quality       float64 `json:"quality,omitempty"`    // 0..1, default 1.0 when unset (defaultEvidenceQuality)
 	MatchKind     string  `json:"match_kind,omitempty"` // exact | substring | heuristic; engine reads to weight contributions
+	// Origin distinguishes vendor-managed bundled entries from
+	// user-installed ones. Emitted for skill/plugin item rows so
+	// downstream mutation surfaces (block, disable, quarantine) can
+	// hard-refuse any action targeting a bundled entry — a vendor
+	// component the operator cannot restore. Empty means the walker
+	// did not classify this row; callers of mutation APIs MUST treat
+	// missing origin as non-actionable (fail-safe), not as user-owned.
+	// Values: "user" | "bundled".
+	Origin string `json:"origin,omitempty"`
+	// Bundled is a convenience boolean derived from Origin so wire
+	// consumers that only want a yes/no gate don't have to string-match.
+	// Kept in sync with Origin at emit time; either both are set or
+	// both are absent.
+	Bundled bool `json:"bundled,omitempty"`
 }
 
 // Match-kind constants. Stamped by detectors so the confidence engine
@@ -236,16 +251,19 @@ type ProcessRuntime struct {
 // unbounded. Keeping the identity in this dedicated block makes it available
 // to local API/CLI/TUI consumers without creating a high-cardinality metric.
 type LocalModelInfo struct {
-	ID         string                `json:"id"`
-	Status     string                `json:"status"` // installed | loaded
-	Format     string                `json:"format,omitempty"`
-	Provider   string                `json:"provider,omitempty"`
-	Recipe     string                `json:"recipe,omitempty"`
-	Modality   string                `json:"modality,omitempty"`
-	Device     string                `json:"device,omitempty"`
-	SizeBytes  int64                 `json:"size_bytes,omitempty"`
-	Pinned     bool                  `json:"pinned,omitempty"`
-	Provenance *LocalModelProvenance `json:"provenance,omitempty"`
+	ID                  string                `json:"id"`
+	Status              string                `json:"status"` // installed | loaded
+	Format              string                `json:"format,omitempty"`
+	Provider            string                `json:"provider,omitempty"`
+	Recipe              string                `json:"recipe,omitempty"`
+	Modality            string                `json:"modality,omitempty"`
+	Device              string                `json:"device,omitempty"`
+	SizeBytes           int64                 `json:"size_bytes,omitempty"`
+	Pinned              bool                  `json:"pinned,omitempty"`
+	OwnerApplication    string                `json:"owner_application,omitempty"`
+	Relevance           string                `json:"relevance,omitempty"`
+	DiscoveryConfidence *float64              `json:"discovery_confidence,omitempty"`
+	Provenance          *LocalModelProvenance `json:"provenance,omitempty"`
 	// huggingFaceRepoIDs contains repository identifiers copied directly from
 	// trusted local metadata surfaces (for example a Hugging Face cache path or
 	// an embedded GGUF base-model record). It is deliberately never serialized:
@@ -353,7 +371,35 @@ type AISignal struct {
 	// SanitizeEvidenceForWire; size is bounded by maxEvidencePerSignal so a
 	// hostile pack cannot blow up payload size.
 	Evidence []AIEvidence `json:"evidence,omitempty"`
+	// Partial reports that the evidence rows do not cover everything
+	// the detector saw. Set to true when a per-signal cap was hit, a
+	// read failed on a subtree, a permission bit prevented full
+	// enumeration, or a config parser reported malformed input. Any
+	// consumer that promises "authoritative snapshot" must fail-close
+	// on Partial=true — the operator's view is incomplete. Absent /
+	// false means "everything the detector could see is present".
+	Partial bool `json:"partial,omitempty"`
+	// CoverageReason names WHY the snapshot is partial. Enumerated so
+	// downstream consumers can route diagnostics: cap_exceeded (bump
+	// the cap or page), permission_denied (chown / rerun as owner),
+	// read_error (transient / rescan), parse_error (config invalid;
+	// rescan won't help). Empty when Partial=false. Kept as a stable
+	// string so telemetry destinations can pivot on it without
+	// pattern-matching prose.
+	CoverageReason string `json:"coverage_reason,omitempty"`
 }
+
+// Coverage-reason enum. Kept in sync with the schema documented in
+// schemas/telemetry/v8/operations.yaml (see the v8 telemetry spec
+// update landed with the v8-only managed-egress refactor). Consumers
+// that see an unknown value MUST NOT treat the snapshot as complete —
+// unknown reasons are still reasons.
+const (
+	CoverageReasonCapExceeded      = "cap_exceeded"
+	CoverageReasonReadError        = "read_error"
+	CoverageReasonPermissionDenied = "permission_denied"
+	CoverageReasonParseError       = "parse_error"
+)
 
 // maxEvidencePerSignal caps the number of evidence rows the engine
 // will accept on a single signal. The bound is generous (manifests
@@ -647,6 +693,17 @@ func normalizeAIDiscoveryOptions(opts AIDiscoveryOptions) AIDiscoveryOptions {
 	}
 	if opts.ProcessInterval <= 0 {
 		opts.ProcessInterval = 60 * time.Second
+	}
+	// In managed_enterprise every scan tick (full or process-only) fans
+	// out through managedInventoryEmit, so a 60s process interval becomes
+	// a 60s connector/MCP snapshot push to AI Defense. Push volume, not
+	// process-detection cost, dominates the operational spend on managed
+	// installs — align the process cadence with the full-scan cadence so
+	// the two tickers produce one push per 5 min instead of six. Operators
+	// can still configure a longer interval; the floor only lifts values
+	// below the full-scan default.
+	if opts.ManagedEnterprise && opts.ProcessInterval < 5*time.Minute {
+		opts.ProcessInterval = 5 * time.Minute
 	}
 	if opts.MaxFilesPerScan <= 0 {
 		opts.MaxFilesPerScan = 1000
@@ -1163,7 +1220,7 @@ func (s *ContinuousDiscoveryService) scanSignals(
 		out, files, err := fn()
 		if err != nil {
 			stats.Errors++
-			if name == "process" {
+			if name == "process" || name == "model_file" {
 				stats.DetectorErrors[name] = err.Error()
 			}
 		}
@@ -1210,6 +1267,9 @@ func (s *ContinuousDiscoveryService) scanSignals(
 		stats.ModelFileConclusive = outcome.conclusive
 		stats.ModelFileAttempted = outcome.attempted
 		stats.ModelFileDeferred = outcome.deferred
+		for rootKey, detail := range outcome.rootErrors {
+			stats.DetectorErrors["model_file:"+rootKey] = detail
+		}
 		return out, files, err
 	})
 	if s.opts.IncludeEnvVarNames {
@@ -1588,12 +1648,142 @@ func (s *ContinuousDiscoveryService) detectMCPPaths() []AISignal {
 		for _, candidate := range sig.MCPPaths {
 			for _, path := range s.expandCandidatePath(candidate) {
 				if pathExists(path) {
-					out = append(out, s.signalFromPath(sig, SignalMCPServer, "mcp", path))
+					out = append(out, s.signalFromMCPConfigPath(sig, path))
 				}
 			}
 		}
 	}
 	return out
+}
+
+// signalFromMCPConfigPath builds a SignalMCPServer signal for an MCP
+// configuration file, extending signalFromPath by parsing the file
+// and folding each declared server name into Evidence + Basenames.
+// The base config-file evidence row is preserved so PathHashes still
+// identifies the physical file (needed for lifecycle stability and
+// operator triage). Parse failures fall back to the plain file-only
+// signal so a malformed config never suppresses the "endpoint has
+// MCP configured" signal itself.
+func (s *ContinuousDiscoveryService) signalFromMCPConfigPath(sig AISignature, path string) AISignal {
+	base := AIEvidence{Type: "mcp", Basename: filepath.Base(path), PathHash: hashPath(path)}
+	if s.opts.StoreRawLocalPaths {
+		base.RawPath = path
+	}
+	evidence := []AIEvidence{base}
+	// Coverage state: two independent early-exit paths (parse failure
+	// vs. per-signal evidence cap). Both must surface as partial=true
+	// so managed remediation can distinguish "31 servers is really
+	// what's in this config" from "there are 40 servers and we
+	// silently dropped 9" (Vineet's [P1] inline on this function). A
+	// parse error also propagates because a malformed MCP config
+	// leaves the operator with zero item rows for a real surface,
+	// which downstream must not read as "no MCP servers configured".
+	names, parseErr := readMCPServerNamesWithErr(path)
+	var partial bool
+	var coverageReason string
+	if parseErr != nil {
+		// Parse failure — the base "mcp" evidence row remains so the
+		// operator sees the endpoint has MCP configured, but no
+		// server-name rows will follow. Marking partial signals the
+		// gap.
+		partial = true
+		coverageReason = CoverageReasonParseError
+	}
+	// Reserve one slot for the parent row (evidence[0]) by capping
+	// server-name rows at maxEvidencePerSignal - 1. Explicit constant
+	// so the intent is grep-able — the previous behaviour just fell
+	// off the end of the same cap that the parent row already
+	// occupies and dropped the 32nd real server without a signal.
+	const maxMCPServerRowsPerSignal = maxEvidencePerSignal - 1
+	added := 0
+	for _, name := range names {
+		if added >= maxMCPServerRowsPerSignal {
+			partial = true
+			if coverageReason == "" {
+				coverageReason = CoverageReasonCapExceeded
+			}
+			break
+		}
+		if name = sanitizeBasenameValue(name); name == "" {
+			continue
+		}
+		evidence = append(evidence, AIEvidence{
+			Type:      "mcp_server",
+			Basename:  name,
+			ValueHash: hashValue(name),
+		})
+		added++
+	}
+	out := s.signalFromEvidence(sig, SignalMCPServer, "mcp", evidence)
+	out.Partial = partial
+	out.CoverageReason = coverageReason
+	if st, err := os.Stat(path); err == nil {
+		mt := st.ModTime().UTC()
+		out.LastActiveAt = &mt
+	}
+	return out
+}
+
+// readMCPServerNamesWithErr wraps readMCPServerNames with the parser's
+// error state so signalFromMCPConfigPath can distinguish
+// "unparseable" from "no servers declared". The plain readMCPServerNames
+// remains for callers that don't need the reason.
+func readMCPServerNamesWithErr(path string) ([]string, error) {
+	entries, err := parseMCPConfigForNames(path)
+	if err != nil {
+		return nil, err
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		name := strings.TrimSpace(e.Name)
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+	return names, nil
+}
+
+// readMCPServerNames parses `path` with the appropriate format-specific
+// reader and returns the declared MCP server names. Best-effort: an
+// unreadable/unparseable/format-unknown file yields nil.
+func readMCPServerNames(path string) []string {
+	entries, err := parseMCPConfigForNames(path)
+	if err != nil || len(entries) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		name := strings.TrimSpace(e.Name)
+		if name != "" {
+			names = append(names, name)
+		}
+	}
+	return names
+}
+
+// parseMCPConfigForNames dispatches to the right config parser for
+// `path` and returns MCP server entries. Kept alongside the detector
+// so future signature-catalog additions (new MCP config shapes) can
+// extend the switch in one place without changing the caller.
+func parseMCPConfigForNames(path string) ([]config.MCPServerEntry, error) {
+	lower := strings.ToLower(path)
+	base := strings.ToLower(filepath.Base(path))
+	switch {
+	case strings.HasSuffix(lower, ".toml"):
+		return config.ReadMCPFromCodexConfigTOML(path)
+	case strings.HasSuffix(lower, ".yaml") || strings.HasSuffix(lower, ".yml"):
+		return config.ReadMCPFromYAMLPath(path, []string{"mcp", "servers"}, []string{"mcpServers"})
+	case base == ".claude.json":
+		// ~/.claude.json holds user-scope (top-level `mcpServers`) *and*
+		// per-project local-scope (`projects.<path>.mcpServers`) entries.
+		// Prefer the union reader so we only decode the (often multi-MB)
+		// conversation-state file once and basenames covers both scopes.
+		return config.ReadMCPFromClaudeJSONBothScopes(path)
+	case base == "settings.json" || base == "settings.local.json":
+		return config.ReadMCPFromClaudeSettings(path)
+	default:
+		return config.ReadMCPFromDotMCPJSON(path)
+	}
 }
 
 // dirHasEntry reports whether path exists AND, if it's a directory,
@@ -1644,7 +1834,7 @@ func (s *ContinuousDiscoveryService) detectSkills() []AISignal {
 		for _, candidate := range sig.SkillPaths {
 			for _, path := range s.expandCandidatePath(candidate) {
 				if dirHasEntry(path) {
-					out = append(out, s.signalFromPath(sig, SignalSkill, "skill", path))
+					out = append(out, s.signalFromDirectoryChildren(sig, SignalSkill, "skill", path))
 				}
 			}
 		}
@@ -1658,7 +1848,7 @@ func (s *ContinuousDiscoveryService) detectRules() []AISignal {
 		for _, candidate := range sig.RulePaths {
 			for _, path := range s.expandCandidatePath(candidate) {
 				if dirHasEntry(path) {
-					out = append(out, s.signalFromPath(sig, SignalRule, "rule", path))
+					out = append(out, s.signalFromDirectoryChildren(sig, SignalRule, "rule", path))
 				}
 			}
 		}
@@ -1672,12 +1862,191 @@ func (s *ContinuousDiscoveryService) detectPlugins() []AISignal {
 		for _, candidate := range sig.PluginPaths {
 			for _, path := range s.expandCandidatePath(candidate) {
 				if dirHasEntry(path) {
-					out = append(out, s.signalFromPath(sig, SignalPlugin, "plugin", path))
+					out = append(out, s.signalFromDirectoryChildren(sig, SignalPlugin, "plugin", path))
 				}
 			}
 		}
 	}
 	return out
+}
+
+// signalFromDirectoryChildren emits a signal whose Evidence enumerates
+// the *direct children* of a skills / rules / plugins directory, so
+// Basenames carries the actual skill / rule / plugin names on the wire
+// rather than the constant string "skills" / "rules" / "plugins" that
+// filepath.Base returns for the parent directory itself. When `path`
+// is a single file (the operator-authored scalar case, e.g.
+// `~/.claude/CLAUDE.md` as a rule), the child enumeration is skipped
+// and behaviour matches signalFromPath.
+//
+// The parent-directory row is retained as evidence[0] so PathHashes
+// still identifies the parent surface — needed for lifecycle stability
+// across scans where the child set changes but the surface does not.
+// Evidence is capped at maxEvidencePerSignal so a pathological skill
+// directory with thousands of children cannot blow up payload size.
+func (s *ContinuousDiscoveryService) signalFromDirectoryChildren(sig AISignature, category, detector, path string) AISignal {
+	base := AIEvidence{Type: detector, Basename: filepath.Base(path), PathHash: hashPath(path)}
+	if s.opts.StoreRawLocalPaths {
+		base.RawPath = path
+	}
+	evidence := []AIEvidence{base}
+	// Track coverage so a consumer that acts on the snapshot (managed
+	// remediation, dashboards, alert rules) can distinguish "no more
+	// entries" from "we stopped early because <reason>". Set by every
+	// early-exit path below.
+	var partial bool
+	var coverageReason string
+	fi, statErr := os.Stat(path)
+	switch {
+	case statErr != nil && os.IsPermission(statErr):
+		partial = true
+		coverageReason = CoverageReasonPermissionDenied
+	case statErr != nil && !os.IsNotExist(statErr):
+		partial = true
+		coverageReason = CoverageReasonReadError
+	case statErr == nil && fi.IsDir():
+		entries, readErr := os.ReadDir(path)
+		switch {
+		case readErr != nil && os.IsPermission(readErr):
+			partial = true
+			coverageReason = CoverageReasonPermissionDenied
+		case readErr != nil:
+			partial = true
+			coverageReason = CoverageReasonReadError
+		default:
+			for _, entry := range entries {
+				if len(evidence) >= maxEvidencePerSignal {
+					// Cap hit before we processed every child.
+					// Downstream must render "N of M" and must not
+					// treat this as authoritative.
+					partial = true
+					coverageReason = CoverageReasonCapExceeded
+					break
+				}
+				name := sanitizeBasenameValue(entry.Name())
+				if name == "" {
+					continue
+				}
+				// Skill-only special case: a `.system` container is a
+				// vendor-shipped bundled-skill directory (see Codex's
+				// bundled-skills contract). Do NOT emit the container
+				// itself as an ordinary skill_entry — recurse one
+				// level and emit each of its children with
+				// origin="bundled" so downstream mutation surfaces
+				// can hard-refuse. Any other detector (rule / plugin)
+				// treats `.system` as an ordinary child.
+				if detector == "skill" && enforce.IsBundledSkillContainerName(entry.Name()) {
+					systemDir := filepath.Join(path, entry.Name())
+					if childPartial, childReason := s.appendBundledSkillChildren(&evidence, systemDir); childPartial {
+						partial = true
+						if coverageReason == "" {
+							coverageReason = childReason
+						}
+					}
+					continue
+				}
+				child := filepath.Join(path, entry.Name())
+				ev := AIEvidence{
+					Type:     detector + "_entry",
+					Basename: name,
+					PathHash: hashPath(child),
+				}
+				if detector == "skill" {
+					// Explicit user origin so mutation surfaces can
+					// tell "walker classified this as user-installed"
+					// apart from "walker didn't stamp an origin"
+					// (latter must fail-safe).
+					ev.Origin = "user"
+				}
+				if s.opts.StoreRawLocalPaths {
+					ev.RawPath = child
+				}
+				evidence = append(evidence, ev)
+			}
+		}
+	}
+	out := s.signalFromEvidence(sig, category, detector, evidence)
+	out.Partial = partial
+	out.CoverageReason = coverageReason
+	if statErr == nil {
+		mt := fi.ModTime().UTC()
+		out.LastActiveAt = &mt
+	}
+	return out
+}
+
+// appendBundledSkillChildren enumerates one level below a `.system`
+// container and emits each child as a skill_entry with
+// origin="bundled", bundled=true. Nested bundled subtrees are not
+// recursed into — Codex's contract is one level of vendor children,
+// not a general bundled-tree. Cap check mirrors the parent walker so
+// a pathological bundled directory can't blow up payload size.
+//
+// Returns (partial, coverageReason) so the caller can propagate
+// truncation state up to the outer signal — a bundled read error
+// leaves the operator's snapshot incomplete just as a user-skill
+// read error does.
+func (s *ContinuousDiscoveryService) appendBundledSkillChildren(evidence *[]AIEvidence, systemDir string) (bool, string) {
+	entries, err := os.ReadDir(systemDir)
+	if err != nil {
+		switch {
+		case os.IsPermission(err):
+			return true, CoverageReasonPermissionDenied
+		default:
+			return true, CoverageReasonReadError
+		}
+	}
+	for _, entry := range entries {
+		if len(*evidence) >= maxEvidencePerSignal {
+			return true, CoverageReasonCapExceeded
+		}
+		name := sanitizeBasenameValue(entry.Name())
+		if name == "" {
+			continue
+		}
+		child := filepath.Join(systemDir, entry.Name())
+		ev := AIEvidence{
+			Type:     "skill_entry",
+			Basename: name,
+			PathHash: hashPath(child),
+			Origin:   "bundled",
+			Bundled:  true,
+		}
+		if s.opts.StoreRawLocalPaths {
+			ev.RawPath = child
+		}
+		*evidence = append(*evidence, ev)
+	}
+	return false, ""
+}
+
+// sanitizeBasenameValue returns the trimmed name if it is a legitimate
+// single-component basename (no path separators, no unicode control
+// chars) and does not exceed the wire-schema length bound. Empty
+// values, dotfiles that are OS metadata (`.DS_Store`, `Thumbs.db`),
+// and separator-bearing values are rejected. Kept in the detector
+// package so the sanitized value matches what
+// ValidateSanitizedAIDiscoveryReport will accept — a leaked separator
+// would trip the validator and drop the entire report.
+func sanitizeBasenameValue(name string) string {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return ""
+	}
+	if strings.ContainsAny(name, "/\\") {
+		return ""
+	}
+	if containsUnicodeControl(name) {
+		return ""
+	}
+	switch name {
+	case ".DS_Store", "Thumbs.db", "desktop.ini":
+		return ""
+	}
+	if len(name) > 255 {
+		return ""
+	}
+	return name
 }
 
 func (s *ContinuousDiscoveryService) detectBinaries() []AISignal {
@@ -3305,7 +3674,7 @@ func ValidateSanitizedAIDiscoveryReport(report AIDiscoveryReport) error {
 			}{
 				"format": {model.Format, 64}, "provider": {model.Provider, 96},
 				"recipe": {model.Recipe, 128}, "modality": {model.Modality, 64},
-				"device": {model.Device, 128},
+				"device": {model.Device, 128}, "owner_application": {model.OwnerApplication, 96},
 			} {
 				if len(rule.value) > rule.max || containsUnicodeControl(rule.value) {
 					return fmt.Errorf("model %s must be at most %d printable characters", field, rule.max)
@@ -3313,6 +3682,20 @@ func ValidateSanitizedAIDiscoveryReport(report AIDiscoveryReport) error {
 			}
 			if model.SizeBytes < 0 {
 				return errors.New("model size_bytes must be non-negative")
+			}
+			if strings.ContainsAny(model.OwnerApplication, `/\\`) {
+				return errors.New("model owner_application must not contain path separators")
+			}
+			switch model.Relevance {
+			case "", "primary", "supporting", "embedded", "unknown":
+			default:
+				return fmt.Errorf("unsupported model relevance %q", model.Relevance)
+			}
+			if model.DiscoveryConfidence != nil {
+				confidence := *model.DiscoveryConfidence
+				if confidence != confidence || confidence < 0 || confidence > 1 {
+					return errors.New("model discovery_confidence must be between 0 and 1")
+				}
 			}
 			if err := validateLocalModelProvenance(model.Provenance); err != nil {
 				return err

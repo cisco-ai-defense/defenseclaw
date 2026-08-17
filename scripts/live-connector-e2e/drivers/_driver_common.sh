@@ -271,16 +271,24 @@ dc_probe_log_file() {
   printf '%s/dc-agent-%s.log' "${log_dir}" "${probe_id}"
 }
 
+# dc_file_looks_like_auth_failure <path> — conservative diagnostic for a
+# command that already failed. Callers must never use successful command output
+# as an authentication signal because normal model text may mention login.
+dc_file_looks_like_auth_failure() {
+  local log_file="$1"
+  [ -f "${log_file}" ] || return 1
+  grep -Eqi \
+    'not logged in|login required|please (sign|log) in|please log out and sign in again|authentication (failed|required)|unauthorized|forbidden|invalid (api )?key|expired (token|session)|access token could not be refreshed|refresh token.*(already used|expired|invalid|revoked)|(^|[^0-9])(401|403)([^0-9]|$)|oauth|keychain|credential.*(missing|expired|invalid)' \
+    "${log_file}"
+}
+
 # dc_probe_looks_like_auth_failure <label> — conservative diagnostic only.
 # It is consulted only after the agent returned non-zero, so a model response
 # that happens to mention "login" cannot relabel a successful probe.
 dc_probe_looks_like_auth_failure() {
   local log_file
   log_file="$(dc_probe_log_file "$1")"
-  [ -f "${log_file}" ] || return 1
-  grep -Eqi \
-    'not logged in|login required|please (sign|log) in|authentication (failed|required)|unauthorized|forbidden|invalid (api )?key|expired (token|session)|(^|[^0-9])(401|403)([^0-9]|$)|oauth|keychain|credential.*(missing|expired|invalid)' \
-    "${log_file}"
+  dc_file_looks_like_auth_failure "${log_file}"
 }
 
 dc_driver_event() {

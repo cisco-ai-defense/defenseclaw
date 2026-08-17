@@ -139,6 +139,33 @@ try {
     . $harness -NoRun
     . $nativeHarness -WorkspaceRoot $root -StateRoot (Join-Path $temp 'synthetic-native') -NoRun
 
+    $ampBlockFixturePath = Join-Path $ampGoldenRoot 'pre_tool_block.json'
+    $ampBlockFixtureText = [IO.File]::ReadAllText($ampBlockFixturePath)
+    $ampBlockFixture = $ampBlockFixtureText | ConvertFrom-Json -ErrorAction Stop
+    $ampActionPayloadPath = New-AmpHookPayloadOccurrence `
+        -Payload $ampBlockFixturePath -IdentitySuffix 'action-block' `
+        -OutputRoot (Join-Path $temp 'amp-hook-occurrences')
+    $ampActionPayload = [IO.File]::ReadAllText($ampActionPayloadPath) |
+        ConvertFrom-Json -ErrorAction Stop
+    Assert-True ([string]$ampActionPayload.source_event_id -ceq
+        "$([string]$ampBlockFixture.source_event_id):action-block" -and
+        [string]$ampActionPayload.tool_call_id -ceq
+        "$([string]$ampBlockFixture.tool_call_id)-action-block" -and
+        [long]$ampActionPayload.source_sequence -eq
+        ([long]$ampBlockFixture.source_sequence + 1000000) -and
+        [string]$ampActionPayload.session_id -ceq [string]$ampBlockFixture.session_id -and
+        [IO.File]::ReadAllText($ampBlockFixturePath) -ceq $ampBlockFixtureText) `
+        'Amp action payload has a unique replay identity without mutating the golden fixture'
+    $invalidAmpIdentityRejected = $false
+    try {
+        New-AmpHookPayloadOccurrence `
+            -Payload $ampBlockFixturePath -IdentitySuffix '..\unsafe' `
+            -OutputRoot (Join-Path $temp 'amp-hook-occurrences') | Out-Null
+    } catch {
+        $invalidAmpIdentityRejected = $_.Exception.Message -match 'invalid Amp hook identity suffix'
+    }
+    Assert-True $invalidAmpIdentityRejected 'Amp occurrence payload rejects unsafe identity suffixes'
+
     $safeRegistrationLocations = @(Get-DefenseClawRegistrationLocations @'
 notify = ["C:\synthetic-private-path\DefenseClaw\bin\launcher.exe", "notify"]
 
@@ -820,6 +847,9 @@ private-secret-name = "DefenseClaw must remain redacted"
     $jsonl = Join-Path $temp 'gateway.jsonl'
     $database = Join-Path $temp 'audit.db'
     $requestId = [guid]::NewGuid().ToString()
+    $sessionId = 'windows-contract-session'
+    $hookEvent = 'PreToolUse'
+    $toolInvocationId = 'windows-contract-tool'
     $observedAt = [DateTime]::UtcNow.ToString('o')
     $provenance = [ordered]@{
         producer = 'defenseclaw'
@@ -832,7 +862,10 @@ private-secret-name = "DefenseClaw must remain redacted"
             schema_version = 1; bucket_catalog_version = 1; timestamp = $observedAt
             record_id = 'windows-contract-verdict'; bucket = 'asset.scan'; signal = 'logs'
             event_name = 'scan.completed'; source = 'scanner'; connector = 'codex'
-            correlation = @{ request_id = $requestId }; provenance = $provenance; field_classes = @{}
+            correlation = @{
+                request_id = $requestId; session_id = $sessionId
+                tool_invocation_id = $toolInvocationId
+            }; provenance = $provenance; field_classes = @{}
             mandatory = $false
             body = @{
                 'defenseclaw.scan.verdict' = 'block'
@@ -842,7 +875,10 @@ private-secret-name = "DefenseClaw must remain redacted"
             schema_version = 1; bucket_catalog_version = 1; timestamp = $observedAt
             record_id = 'windows-contract-hook-decision'; bucket = 'guardrail.evaluation'; signal = 'logs'
             event_name = 'hook_decision'; source = 'connector'; connector = 'codex'
-            correlation = @{ request_id = $requestId }; provenance = $provenance; field_classes = @{}
+            correlation = @{
+                request_id = $requestId; session_id = $sessionId
+                tool_invocation_id = $toolInvocationId
+            }; provenance = $provenance; field_classes = @{}
             mandatory = $false
             body = @{
                 'defenseclaw.guardrail.effective_action' = 'allow'
@@ -851,13 +887,17 @@ private-secret-name = "DefenseClaw must remain redacted"
                 'defenseclaw.guardrail.would_block' = $true
                 'defenseclaw.guardrail.enforced' = $false
                 'defenseclaw.guardrail.rule_ids' = @('CMD-WIN-REMOVE-ITEM-RF')
+                'defenseclaw.hook.event' = $hookEvent
             }
         },
         [ordered]@{
             schema_version = 1; bucket_catalog_version = 1; timestamp = $observedAt
             record_id = 'windows-contract-tool'; bucket = 'tool.activity'; signal = 'logs'
             event_name = 'tool.invocation.requested'; source = 'connector'; connector = 'codex'
-            correlation = @{ request_id = $requestId }; provenance = $provenance; field_classes = @{}
+            correlation = @{
+                request_id = $requestId; session_id = $sessionId
+                tool_invocation_id = $toolInvocationId
+            }; provenance = $provenance; field_classes = @{}
             mandatory = $false; body = @{}
         },
         [ordered]@{
@@ -894,8 +934,79 @@ private-secret-name = "DefenseClaw must remain redacted"
     Assert-True ($LASTEXITCODE -eq 0) 'mock audit correlation'
     Assert-True (Test-ConnectorEvent $jsonl 'codex' 0) 'connector event seam'
     Assert-True (-not (Test-ConnectorEvent $jsonl 'claudecode' 0)) 'connector event seam ignores body-text false positives'
+    Assert-True (Test-ConnectorEvent `
+        -Path $jsonl -Name 'codex' -Since 0 -SessionID $sessionId -HookEvent $hookEvent `
+        -ToolInvocationID $toolInvocationId) `
+        'connector event seam accepts the matching hook identity'
+    Assert-True (-not (Test-ConnectorEvent `
+        -Path $jsonl -Name 'codex' -Since 0 -SessionID 'unrelated-session' -HookEvent $hookEvent)) `
+        'connector event seam rejects an unrelated hook identity'
+    Assert-True (-not (Test-ConnectorEvent `
+        -Path $jsonl -Name 'codex' -Since 0 -SessionID $sessionId -HookEvent $hookEvent `
+        -RequestID 'unrelated-request')) `
+        'connector event seam rejects an unrelated request identity'
+    Assert-True (-not (Test-ConnectorEvent `
+        -Path $jsonl -Name 'codex' -Since 0 -SessionID $sessionId -HookEvent $hookEvent `
+        -ToolInvocationID 'unrelated-tool')) `
+        'connector event seam rejects an unrelated tool invocation identity'
     Assert-True (Test-BlockVerdict $jsonl 0) 'block verdict seam'
     Assert-True (-not (Test-BlockVerdict $jsonl 1)) 'block verdict seam rejects hook decisions and non-canonical scan deny values'
+    Assert-True (Test-BlockVerdict `
+        -Path $jsonl -Since 0 -Name 'codex' -RequestID $requestId `
+        -SessionID $sessionId -ToolInvocationID $toolInvocationId) `
+        'block verdict seam accepts the matching request identity'
+    Assert-True (-not (Test-BlockVerdict `
+        -Path $jsonl -Since 0 -Name 'codex' -RequestID 'unrelated-request')) `
+        'block verdict seam rejects an unrelated request identity'
+    Assert-True (-not (Test-BlockVerdict `
+        -Path $jsonl -Since 0 -Name 'codex' -RequestID $requestId `
+        -SessionID $sessionId -ToolInvocationID 'unrelated-tool')) `
+        'block verdict seam rejects an unrelated tool invocation identity'
+    $delayedJsonl = Join-Path $temp 'delayed-gateway-evidence.jsonl'
+    [IO.File]::WriteAllText($delayedJsonl, '')
+    $unrelatedDecision = $fixtureEvents[1] | ConvertFrom-Json -ErrorAction Stop
+    $unrelatedDecision.record_id = 'windows-contract-unrelated-hook-decision'
+    $unrelatedDecision.correlation.request_id = 'unrelated-request'
+    $unrelatedDecision.correlation.session_id = $sessionId
+    $unrelatedDecision.correlation.tool_invocation_id = 'unrelated-tool'
+    $unrelatedVerdict = $fixtureEvents[0] | ConvertFrom-Json -ErrorAction Stop
+    $unrelatedVerdict.record_id = 'windows-contract-unrelated-verdict'
+    $unrelatedVerdict.correlation.request_id = 'unrelated-request'
+    $unrelatedVerdict.correlation.session_id = $sessionId
+    $unrelatedVerdict.correlation.tool_invocation_id = 'unrelated-tool'
+    $delayedWriter = Start-Job -ArgumentList @(
+        $delayedJsonl,
+        ($unrelatedDecision | ConvertTo-Json -Depth 8 -Compress),
+        ($unrelatedVerdict | ConvertTo-Json -Depth 8 -Compress),
+        $fixtureEvents[1],
+        $fixtureEvents[0]
+    ) -ScriptBlock {
+        param($Path, $UnrelatedDecision, $UnrelatedVerdict, $CurrentDecision, $CurrentVerdict)
+        Start-Sleep -Milliseconds 100
+        [IO.File]::AppendAllText($Path, $UnrelatedDecision + [Environment]::NewLine)
+        [IO.File]::AppendAllText($Path, $UnrelatedVerdict + [Environment]::NewLine)
+        Start-Sleep -Milliseconds 1000
+        [IO.File]::AppendAllText($Path, $CurrentDecision + [Environment]::NewLine)
+        Start-Sleep -Milliseconds 100
+        [IO.File]::AppendAllText($Path, $CurrentVerdict + [Environment]::NewLine)
+    }
+    try {
+        $delayedEvidence = Wait-GatewayEvidenceAfter `
+            -Path $delayedJsonl -Name 'codex' -Since 0 -RequireBlock $true `
+            -TimeoutMilliseconds 5000 -SessionID $sessionId -HookEvent $hookEvent `
+            -ToolInvocationID $toolInvocationId
+        Wait-Job -Job $delayedWriter -Timeout 10 | Out-Null
+        Assert-True ($delayedWriter.State -eq 'Completed') `
+            'delayed gateway evidence writer completed within the bounded wait'
+        Receive-Job $delayedWriter -ErrorAction Stop | Out-Null
+        Assert-True ($delayedEvidence.ConnectorEvent -and $delayedEvidence.BlockVerdict -and
+            [string]$delayedEvidence.RequestID -ceq $requestId -and
+            [string]$delayedEvidence.ToolInvocationID -ceq $toolInvocationId) `
+            'gateway evidence polling ignores delayed unrelated records and waits for the matching hook request'
+    } finally {
+        Stop-Job $delayedWriter -ErrorAction SilentlyContinue
+        Remove-Job $delayedWriter -Force -ErrorAction SilentlyContinue
+    }
     $hookDecision = Get-LatestHookDecision $jsonl 'codex' 0
     Assert-True ($null -ne $hookDecision -and $hookDecision.action -eq 'allow' -and
         $hookDecision.raw_action -eq 'block' -and $hookDecision.mode -eq 'observe' -and
@@ -1016,6 +1127,18 @@ private-secret-name = "DefenseClaw must remain redacted"
         $nativeHarnessText,
         '(?s)function Add-WindowsNativeDiagnosticTail\b.*?(?=\r?\nfunction )'
     ).Value
+    $invokeHookFunction = [regex]::Match(
+        $harnessText,
+        '(?s)function Invoke-Hook\b.*?(?=\r?\nfunction )'
+    ).Value
+    Assert-True ($invokeHookFunction -match 'Wait-GatewayEvidenceAfter' -and
+        $invokeHookFunction -match '-SessionID \$sessionID' -and
+        $invokeHookFunction -match '-HookEvent \$hookEvent' -and
+        $invokeHookFunction -match 'Get-JsonPropertyValue \$payloadObject ''tool_call_id''' -and
+        $invokeHookFunction -match '-ToolInvocationID \$toolInvocationID' -and
+        $invokeHookFunction -match 'New-AmpHookPayloadOccurrence' -and
+        $invokeHookFunction -notmatch 'Start-Sleep -Milliseconds 800') `
+        'hook evidence uses session, event, and tool-scoped bounded polling instead of a fixed 800ms delay'
     Assert-True ($nativeWorkflowText -match '(?s)connector-contract:.*?connector: \[codex, claudecode, amp\].*?windows-native-required:') `
         'required Windows contract matrix contains Codex, Claude Code, and Amp'
     Assert-True ($nativeWorkflowText -match '(?m)^\s+name: Windows Native Required\s*$') 'stable aggregate check name exists'
@@ -1378,6 +1501,27 @@ private-secret-name = "DefenseClaw must remain redacted"
         $standardUserFileGuardText -match 'NumberOfLinks != 1' -and
         $standardUserFileGuardText -match 'FileMode\.CreateNew') `
         'diagnostic/result handoff validates and consumes one no-follow, single-link regular-file handle'
+    $captureSelectionFunction = [regex]::Match(
+        $nativeHarnessText,
+        '(?s)function Get-WindowsNativeCaptureFiles\b.*?(?=\r?\nfunction )'
+    ).Value
+    $captureFunction = [regex]::Match(
+        $nativeHarnessText,
+        '(?s)function Invoke-Capture\b.*?(?=\r?\nfunction )'
+    ).Value
+    Assert-True ($captureSelectionFunction -match 'SortedDictionary\[string, IO\.FileInfo\]' -and
+        $captureSelectionFunction -match '\$selectionLimit = 30' -and
+        $captureSelectionFunction -notmatch '\$matches\b' -and
+        $captureSelectionFunction -notmatch '\$visited\b' -and
+        $captureFunction -match 'DisposableFileGuard\]::OpenRootedReader\(\$root\)' -and
+        $captureFunction -match 'ReadBoundedUtf8\(\$file\.FullName, 1048576\)' -and
+        $captureFunction -notmatch 'ReadAllText\(\$file\.FullName\)' -and
+        $standardUserFileGuardText -match 'sealed class RootedReader' -and
+        $standardUserFileGuardText -match 'GetFinalPathNameByHandleW' -and
+        $standardUserFileGuardText -match 'guarded file resolved outside its retained root' -and
+        $nativeHarnessText -match 'leaf replaced by a reparse point after enumeration' -and
+        $nativeHarnessText -match 'replaced ancestor outside its retained root') `
+        'native capture exhaustively selects priority logs and reads only retained-root no-follow handles'
     Assert-True ($standardUserSafetyText -match 'function Grant-DisposableAncestorReadLease' -and
         $standardUserSafetyText -match 'function Restore-DisposableAncestorReadLease' -and
         $standardUserSafetyText -match '(?s)Grant-DisposableAncestorReadLease.*?FileSystemRights\]::ReadAndExecute.*?InheritanceFlags\]::None.*?PropagationFlags\]::None' -and
@@ -1661,6 +1805,10 @@ private-secret-name = "DefenseClaw must remain redacted"
         'Codex certification never bypasses hook trust'
     $doctorContract = [regex]::Match($harnessText, '(?s)function Assert-DoctorWindowsHookRegistration\b.*?\n\}').Value
     $doctorSetupContract = [regex]::Match($harnessText, '(?s)function Assert-DoctorHookRegistration\b.*?\n\}').Value
+    $ampScopedTokenContract = [regex]::Match(
+        $harnessText,
+        '(?s)function Assert-AmpScopedTokenPluginContract\b.*?(?=\r?\nfunction )'
+    ).Value
     $wizardHookContract = [regex]::Match(
         $nativeHarnessText,
         '(?s)function Assert-WizardHookRegistration\b.*?(?=\r?\nfunction )'
@@ -1674,13 +1822,37 @@ private-secret-name = "DefenseClaw must remain redacted"
         'ctx.ui.confirm',
         'amp.activeThread.current',
         'isPluginUINotAvailableError',
-        'action: "reject-and-continue"',
-        'Authorization = `Bearer ${DC_API_TOKEN}`'
+        'action: "reject-and-continue"'
     )) {
         Assert-True ($doctorSetupContract.Contains($marker) -and
             $wizardHookContract.Contains($marker)) `
             "Windows setup and wizard contracts require the Amp plugin marker: $marker"
     }
+    foreach ($marker in @(
+        'const DC_TOKEN_FILE = "',
+        '.hook-amp.token',
+        'const DC_TOKEN_PATTERN = /^[0-9a-f]{64}$/',
+        'const DC_MAX_TOKEN_FILE_BYTES = 4096',
+        'runtime.file(DC_TOKEN_FILE).slice(0, DC_MAX_TOKEN_FILE_BYTES + 1).text()',
+        'if (!DC_TOKEN_PATTERN.test(token))',
+        'headers.Authorization = `Bearer ${token}`',
+        'ToBase64String',
+        'const DC_API_TOKEN =',
+        'ConvertFrom-Json',
+        'GetFullPath',
+        'OrdinalIgnoreCase'
+    )) {
+        Assert-True ($ampScopedTokenContract.Contains($marker) -and
+            $wizardHookContract.Contains($marker)) `
+            "Windows setup and wizard contracts validate the Amp scoped-token boundary: $marker"
+    }
+    Assert-True ($wizardHookContract.Contains(
+        '$tokenPath = Join-Path $hookDir ''.hook-amp.token'''
+    ) -and $wizardHookContract -notmatch '\$env:DEFENSECLAW_HOME') `
+        'wizard Amp scoped-token validation derives its sidecar from the selected data root'
+    Assert-True ($doctorSetupContract.Contains('Assert-AmpScopedTokenPluginContract') -and
+        $doctorContract.Contains('Assert-AmpScopedTokenPluginContract')) `
+        'both Windows doctor contracts invoke the Amp scoped-token boundary validator'
     foreach ($marker in @(
         'const DC_FAIL_MODE: string = "closed"',
         'const DC_TIMEOUT_MS = 10000',
@@ -1791,8 +1963,11 @@ private-secret-name = "DefenseClaw must remain redacted"
     ).Value
     Assert-True ($latestHookDecision -match 'Get-JsonPropertyValue \$correlation ''session_id''' -and
         $latestHookDecision -match 'Get-JsonPropertyValue \$body ''defenseclaw\.hook\.event''' -and
+        $latestHookDecision -match 'Get-JsonPropertyValue \$correlation ''tool_invocation_id''' -and
         $hookDecisionWait -match '\$SessionID \$HookEvent') `
         'gateway hook readiness accepts only the current probe session and event decision'
+    Assert-True ($harnessText -match '(?s)\$blockIdentitySuffix = if \(\$Connector -eq ''amp''\).*?Invoke-Hook.*?-IdentitySuffix \$blockIdentitySuffix') `
+        'Amp action block uses a fresh fixture identity so strict hook-decision correlation remains required'
     $isolatedCleanup = [regex]::Match($harnessText, '(?s)function Stop-IsolatedProcessTree\b.*?\n\}').Value
     Assert-True ($isolatedCleanup -match 'HashSet\[int\]' -and
         $isolatedCleanup -match '\$ancestor\[0\]\.ParentProcessId' -and

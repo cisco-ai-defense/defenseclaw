@@ -24,6 +24,13 @@ authenticated native x64 Windows Setup in the current `0.8.10` release. The macO
 `defenseclaw` CLI and `defenseclaw-gateway` sidecar into `~/.local/bin/`, creates
 `~/.defenseclaw/`, and sets up a virtualenv under `~/.defenseclaw/.venv/`.
 
+<Callout title="Supported macOS architecture">
+DefenseClaw supports Apple Silicon (`arm64`) macOS only. Intel (`x86_64` /
+`amd64`) Macs are unsupported; the release installer, upgrade resolver, rescue
+bootstrap, source installer, and managed package all stop before changing the
+host. Rosetta does not make an Intel Mac a supported target.
+</Callout>
+
 <Callout title="Windows release history">
 Releases `0.8.5` and `0.8.6` published no native Windows Setup artifact.
 Release `0.8.7` was the first release to publish

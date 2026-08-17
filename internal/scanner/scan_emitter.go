@@ -174,8 +174,8 @@ func EmitScanResult(
 		// Auto-populate ToolCapabilityClass the same way: derive it
 		// from the rule_id for content-matched findings that didn't
 		// already get a class from a real tool name upstream. Without
-		// this the DESTRUCTIVE-FLOW correlator pattern (which keys on
-		// exec_shell) can never fire on regex/plugin detections.
+		// this capability-aware custom correlation patterns cannot
+		// evaluate regex/plugin detections.
 		if result.Findings[i].ToolCapabilityClass == "" && capabilityEnricher != nil {
 			if cap := capabilityEnricher(&result.Findings[i]); cap != "" {
 				result.Findings[i].ToolCapabilityClass = cap
@@ -246,7 +246,8 @@ func EmitScanResult(
 		// drop the scan itself. Only runs when session correlation
 		// IDs are present; out-of-session scans (CLI audits, batch
 		// jobs) skip correlation entirely.
-		if c := defaultCorrelator; c != nil && meta.SessionID != "" && meta.AgentInstanceID != "" {
+		if c := defaultCorrelator; c != nil && meta.SessionID != "" &&
+			(meta.AgentInstanceID != "" || meta.AgentID != "") {
 			_ = c.RunForSession(ctx, meta.SessionID, meta.AgentInstanceID, pers, result.Target, meta)
 		}
 	}

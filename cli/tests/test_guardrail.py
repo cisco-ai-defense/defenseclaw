@@ -24,6 +24,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -1859,6 +1860,17 @@ class TestIsPidAlive(unittest.TestCase):
         self.assertFalse(_gateway_pid_file_identifies_gateway(pid_file))
 
 
+class TestGatewayPidGenerationMarker(unittest.TestCase):
+    def test_reads_current_pid_record(self):
+        from defenseclaw.commands.cmd_setup import _gateway_pid_generation_marker
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pid_record = b'{"pid":4242,"start_time":12345}\n'
+            Path(tmpdir, "gateway.pid").write_bytes(pid_record)
+
+            self.assertEqual(_gateway_pid_generation_marker(tmpdir), pid_record)
+
+
 class TestRestartDefenseGateway(unittest.TestCase):
     @unittest.skipUnless(os.name == "nt", "native Windows package contract")
     @patch(
@@ -1898,7 +1910,9 @@ class TestRestartDefenseGateway(unittest.TestCase):
                 os.chdir(previous)
 
         self.assertEqual(mock_run.call_args.args[0], [str(gateway.resolve()), "start"])
-        mock_ready.assert_called_once_with(tmpdir)
+        mock_ready.assert_called_once()
+        self.assertEqual(mock_ready.call_args.args, (tmpdir,))
+        self.assertIsNotNone(mock_ready.call_args.kwargs["previous_generation"])
 
     @patch(
         "defenseclaw.commands.cmd_setup._wait_for_defense_gateway_api",
@@ -1923,7 +1937,9 @@ class TestRestartDefenseGateway(unittest.TestCase):
                 os.path.normcase(str(Path(sys.executable).resolve())),
             )
             self.assertEqual(cmd[1:], ["start"])
-            mock_ready.assert_called_once_with(tmpdir)
+            mock_ready.assert_called_once()
+            self.assertEqual(mock_ready.call_args.args, (tmpdir,))
+            self.assertIsNotNone(mock_ready.call_args.kwargs["previous_generation"])
 
     # F-0721: a live PID is only treated as the running gateway when its
     # identity verifies as the gateway binary. The legitimate "already
@@ -1959,7 +1975,9 @@ class TestRestartDefenseGateway(unittest.TestCase):
                 os.path.normcase(str(Path(sys.executable).resolve())),
             )
             self.assertEqual(cmd[1:], ["restart"])
-            mock_ready.assert_called_once_with(tmpdir)
+            mock_ready.assert_called_once()
+            self.assertEqual(mock_ready.call_args.args, (tmpdir,))
+            self.assertIsNotNone(mock_ready.call_args.kwargs["previous_generation"])
 
     @patch(
         "defenseclaw.commands.cmd_setup._wait_for_defense_gateway_api",
@@ -1976,7 +1994,9 @@ class TestRestartDefenseGateway(unittest.TestCase):
                 return_value=sys.executable,
             ):
                 self.assertFalse(_restart_defense_gateway(tmpdir))
-            mock_ready.assert_called_once_with(tmpdir)
+            mock_ready.assert_called_once()
+            self.assertEqual(mock_ready.call_args.args, (tmpdir,))
+            self.assertIsNotNone(mock_ready.call_args.kwargs["previous_generation"])
 
     @patch(
         "defenseclaw.commands.cmd_setup._gateway_pid_file_identifies_gateway",
@@ -2044,6 +2064,159 @@ class TestWaitForDefenseGatewayAPI(unittest.TestCase):
 
         self.assertFalse(_wait_for_defense_gateway_api("/tmp/defenseclaw", timeout=0.01))
         self.assertGreaterEqual(connection.request.call_count, 1)
+
+    @patch("defenseclaw.commands.cmd_setup.time.sleep")
+    @patch(
+        "defenseclaw.commands.cmd_setup._gateway_pid_file_identifies_gateway",
+        return_value=True,
+    )
+    @patch(
+        "defenseclaw.commands.cmd_setup._gateway_pid_generation_marker",
+        return_value=b"replacement-pid-record",
+    )
+    @patch("defenseclaw.logger._gateway_api_host", return_value="127.0.0.1")
+    @patch("defenseclaw.commands.cmd_setup.load_config")
+    @patch("defenseclaw.commands.cmd_setup.http.client.HTTPConnection")
+    def test_rejects_retiring_api_after_replacement_markers_are_published(
+        self,
+        connection_cls,
+        mock_load,
+        _mock_host,
+        _mock_pid_marker,
+        _mock_pid_identity,
+        _mock_sleep,
+    ):
+        from defenseclaw.commands.cmd_setup import (
+            _GatewayRuntimeGeneration,
+            _wait_for_defense_gateway_api,
+        )
+
+        mock_load.return_value = SimpleNamespace(gateway=SimpleNamespace(api_port=19001))
+        retiring = MagicMock(status=200)
+        retiring.read.return_value = json.dumps(
+            {
+                "started_at": "2026-08-11T04:00:00Z",
+                "api": {"state": "running"},
+                "connectors": [{"name": "claudecode", "state": "running"}],
+            }
+        ).encode()
+        replacement = MagicMock(status=200)
+        replacement.read.return_value = json.dumps(
+            {
+                "started_at": "2026-08-11T04:00:01Z",
+                "api": {"state": "running"},
+                "connectors": [{"name": "claudecode", "state": "running"}],
+            }
+        ).encode()
+        connection_cls.return_value.getresponse.side_effect = [retiring, replacement]
+        previous = _GatewayRuntimeGeneration(
+            b"retiring-pid-record",
+            "2026-08-11T04:00:00Z",
+            0.0,
+        )
+
+        self.assertTrue(
+            _wait_for_defense_gateway_api(
+                "/tmp/defenseclaw",
+                timeout=0.1,
+                previous_generation=previous,
+                expected_connectors=["claudecode"],
+            )
+        )
+        self.assertEqual(connection_cls.return_value.getresponse.call_count, 2)
+
+    @patch("defenseclaw.commands.cmd_setup.time.sleep")
+    @patch(
+        "defenseclaw.commands.cmd_setup._gateway_pid_file_identifies_gateway",
+        return_value=True,
+    )
+    @patch(
+        "defenseclaw.commands.cmd_setup._gateway_pid_generation_marker",
+        return_value=b"replacement-pid-record",
+    )
+    @patch("defenseclaw.logger._gateway_api_host", return_value="127.0.0.1")
+    @patch("defenseclaw.commands.cmd_setup.load_config")
+    @patch("defenseclaw.commands.cmd_setup.http.client.HTTPConnection")
+    def test_rejects_health_started_before_the_replacement_boundary(
+        self,
+        connection_cls,
+        mock_load,
+        _mock_host,
+        _mock_pid_marker,
+        _mock_pid_identity,
+        _mock_sleep,
+    ):
+        from defenseclaw.commands.cmd_setup import (
+            _GatewayRuntimeGeneration,
+            _wait_for_defense_gateway_api,
+        )
+
+        mock_load.return_value = SimpleNamespace(gateway=SimpleNamespace(api_port=19001))
+        response = connection_cls.return_value.getresponse.return_value
+        response.status = 200
+        response.read.return_value = json.dumps(
+            {
+                "started_at": "2026-08-11T04:00:00Z",
+                "api": {"state": "running"},
+            }
+        ).encode()
+        boundary = datetime.fromisoformat("2026-08-11T04:00:01+00:00").timestamp()
+        previous = _GatewayRuntimeGeneration(b"retiring-pid-record", None, boundary)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self.assertFalse(
+                _wait_for_defense_gateway_api(
+                    tmpdir,
+                    timeout=0.01,
+                    previous_generation=previous,
+                )
+            )
+
+    @patch("defenseclaw.commands.cmd_setup.time.sleep")
+    @patch(
+        "defenseclaw.commands.cmd_setup._gateway_pid_file_identifies_gateway",
+        return_value=True,
+    )
+    @patch(
+        "defenseclaw.commands.cmd_setup._gateway_pid_generation_marker",
+        return_value=b"replacement-pid-record",
+    )
+    @patch("defenseclaw.logger._gateway_api_host", return_value="127.0.0.1")
+    @patch("defenseclaw.commands.cmd_setup.load_config")
+    @patch("defenseclaw.commands.cmd_setup.http.client.HTTPConnection")
+    def test_rejects_naive_started_at_for_the_replacement_boundary(
+        self,
+        connection_cls,
+        mock_load,
+        _mock_host,
+        _mock_pid_marker,
+        _mock_pid_identity,
+        _mock_sleep,
+    ):
+        from defenseclaw.commands.cmd_setup import (
+            _GatewayRuntimeGeneration,
+            _wait_for_defense_gateway_api,
+        )
+
+        mock_load.return_value = SimpleNamespace(gateway=SimpleNamespace(api_port=19001))
+        response = connection_cls.return_value.getresponse.return_value
+        response.status = 200
+        response.read.return_value = json.dumps(
+            {
+                "started_at": "2099-08-11T04:00:00",
+                "api": {"state": "running"},
+            }
+        ).encode()
+        previous = _GatewayRuntimeGeneration(b"retiring-pid-record", None, 1.0)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            self.assertFalse(
+                _wait_for_defense_gateway_api(
+                    tmpdir,
+                    timeout=0.01,
+                    previous_generation=previous,
+                )
+            )
 
 
 class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
@@ -2119,19 +2292,28 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
         self.assertTrue(all("via the hook bus" not in message for message in messages))
         self.assertTrue(all("custom policy API" not in message for message in messages))
 
+    @patch("defenseclaw.commands.cmd_setup._wait_for_defense_gateway_api", return_value=True)
     @patch("defenseclaw.commands.cmd_setup._wait_for_connector_runtime", return_value=True)
     @patch("defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True)
-    def test_hook_connector_waits_for_verified_runtime(self, _mock_restart, mock_wait):
+    def test_hook_connector_waits_for_verified_runtime(self, mock_restart, mock_wait, mock_api):
         from defenseclaw.commands.cmd_setup import _restart_services
 
         with tempfile.TemporaryDirectory() as tmpdir:
             _restart_services(tmpdir, connector="codex", wait_for_connector_ready=True)
 
         mock_wait.assert_called_once_with(tmpdir, ["codex"], None, None)
+        mock_api.assert_called_once()
+        self.assertEqual(mock_api.call_args.args, (tmpdir,))
+        self.assertEqual(mock_api.call_args.kwargs["expected_connectors"], ["codex"])
+        self.assertIs(
+            mock_api.call_args.kwargs["previous_generation"],
+            mock_restart.call_args.kwargs["previous_generation"],
+        )
 
+    @patch("defenseclaw.commands.cmd_setup._wait_for_defense_gateway_api", return_value=True)
     @patch("defenseclaw.commands.cmd_setup._wait_for_connector_runtime", return_value=False)
     @patch("defenseclaw.commands.cmd_setup._restart_defense_gateway", return_value=True)
-    def test_hook_connector_readiness_timeout_fails_setup(self, _mock_restart, _mock_wait):
+    def test_hook_connector_readiness_timeout_fails_setup(self, _mock_restart, _mock_wait, mock_api):
         from defenseclaw.commands.cmd_setup import _restart_services
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -2139,6 +2321,7 @@ class TestRestartServicesRestartsAgentGateway(unittest.TestCase):
                 _restart_services(tmpdir, connector="codex", wait_for_connector_ready=True)
 
         self.assertIn("connector runtime readiness", str(raised.exception))
+        mock_api.assert_not_called()
 
     def test_wait_for_connector_runtime_requires_fresh_matching_state(self):
         from defenseclaw.commands.cmd_setup import (

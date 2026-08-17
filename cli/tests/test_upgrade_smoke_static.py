@@ -1101,11 +1101,6 @@ def test_interrupted_phase_two_downloads_pinned_uv_under_clean_path(
     )
     resolve_function = resolver[resolve_start:resolve_end]
     uv_assets = {
-        ("Darwin", "x86_64"): (
-            "uv-x86_64-apple-darwin.tar.gz",
-            "uv-x86_64-apple-darwin/uv",
-            "2ad79983127ffca7d77b77ce6a24278d7e4f7b817a1acf72fea5f8124b4aac5e",
-        ),
         ("Darwin", "arm64"): (
             "uv-aarch64-apple-darwin.tar.gz",
             "uv-aarch64-apple-darwin/uv",
@@ -1237,6 +1232,8 @@ def test_interrupted_phase_two_downloads_pinned_uv_under_clean_path(
         "PLAN_ONLY=0\n"
         "STAGING_DIR=\"\"\n"
         "UV_BIN=\"\"\n"
+        f'HOST_SYSTEM="{uv_platform[0]}"\n'
+        f'HOST_MACHINE="{uv_platform[1]}"\n'
         f'UV_BOOTSTRAP_VERSION="{version_match.group(1)}"\n'
         f'UV_BOOTSTRAP_MAX_BYTES="{maximum_match.group(1)}"\n'
         "RED=\"\"; GREEN=\"\"; YELLOW=\"\"; BLUE=\"\"; CYAN=\"\"; BOLD=\"\"; DIM=\"\"; NC=\"\"\n"

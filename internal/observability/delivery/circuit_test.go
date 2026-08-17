@@ -147,8 +147,9 @@ func TestCircuitGrantsSingleProbeUnderConcurrency(t *testing.T) {
 	}
 }
 
-// An authentication failure opens for the maximum duration, and the deadline
-// clears so a later reclaim cannot be triggered by stale half-open state.
+// An authentication failure opens for the bounded auth cool-down (a few
+// minutes, not the 24h destination-unsafe trap), and the deadline clears so
+// a later reclaim cannot be triggered by stale half-open state.
 func TestCircuitAuthenticationFailureOpensImmediately(t *testing.T) {
 	base := time.Unix(1_800_000_000, 0).UTC()
 	circuit, err := NewCircuit(CircuitPolicy{})
@@ -162,10 +163,21 @@ func TestCircuitAuthenticationFailureOpensImmediately(t *testing.T) {
 	if snapshot.State != CircuitOpen {
 		t.Fatalf("state = %q, want %q", snapshot.State, CircuitOpen)
 	}
-	if want := base.Add(immediateCircuitOpenDuration); !snapshot.OpenUntil.Equal(want) {
+	if want := base.Add(authenticationCircuitOpenDuration); !snapshot.OpenUntil.Equal(want) {
 		t.Fatalf("OpenUntil = %v, want %v", snapshot.OpenUntil, want)
 	}
-	if admission := circuit.Admit(base.Add(time.Hour)); admission != CircuitAdmissionBlocked {
-		t.Fatalf("admission one hour in = %v, want blocked", admission)
+	// While the auth cool-down is still active, the circuit is blocked.
+	if admission := circuit.Admit(base.Add(authenticationCircuitOpenDuration / 2)); admission != CircuitAdmissionBlocked {
+		t.Fatalf("admission mid-cooldown = %v, want blocked", admission)
+	}
+	// After the auth cool-down the circuit grants exactly one probe. A
+	// second Admit at the same instant must be blocked so a regression that
+	// double-admits (or forgets to move to half-open) can't slip through.
+	postCooldown := base.Add(authenticationCircuitOpenDuration + time.Second)
+	if admission := circuit.Admit(postCooldown); admission != CircuitAdmissionProbe {
+		t.Fatalf("admission post-cooldown = %v, want probe", admission)
+	}
+	if admission := circuit.Admit(postCooldown); admission != CircuitAdmissionBlocked {
+		t.Fatalf("second post-cooldown admission = %v, want blocked", admission)
 	}
 }

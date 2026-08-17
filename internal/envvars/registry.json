@@ -218,6 +218,19 @@
       "since": "0.8.4"
     },
     {
+      "name": "DEFENSECLAW_INTEL_REFUSAL_COMMAND_LOG",
+      "category": "test_fixture",
+      "purpose": "Records any dependency, network, service, or mutation command reached by the native Intel macOS exact-candidate refusal harness.",
+      "default": "unset",
+      "accepted_values": ["absolute path inside the isolated refusal-test root", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "scripts/test-upgrade-macos-intel-refusal.sh", "description": "Fails the native Intel release gate if a blocked command executes before architecture refusal"}
+      ],
+      "since": "0.8.12"
+    },
+    {
       "name": "DEFENSECLAW_TEST_BASH",
       "category": "test_fixture",
       "purpose": "Selects the Bash executable used by release-workflow tests so macOS CI can exercise wrappers with the system Bash runtime.",
@@ -2453,6 +2466,50 @@
       "surface_in_doctor": false,
       "consumers": [{"location": "internal/gateway/connector/atomic_transform_v2_exit_windows_test.go", "description": "Native CAS V2 lock hard-exit fixture"}],
       "since": "0.8.0"
+    },
+    {
+      "name": "DEFENSECLAW_HOOK_TOKEN_LOCK_HELPER",
+      "category": "test_fixture",
+      "purpose": "Selects the connector hook-token cross-process lock fixture.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/hook_api_token_test.go", "description": "Connector hook-token lock fixture"}],
+      "since": "0.8.11"
+    },
+    {
+      "name": "DEFENSECLAW_HOOK_TOKEN_LOCK_PATH",
+      "category": "test_fixture",
+      "purpose": "Lock path passed to the connector hook-token cross-process fixture.",
+      "default": "unset",
+      "accepted_values": ["absolute test lock path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/hook_api_token_test.go", "description": "Connector hook-token lock target"}],
+      "since": "0.8.11"
+    },
+    {
+      "name": "DEFENSECLAW_HOOK_TOKEN_LOCK_READY",
+      "category": "test_fixture",
+      "purpose": "Ready-signal path shared with the connector hook-token cross-process fixture.",
+      "default": "unset",
+      "accepted_values": ["absolute test marker path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/hook_api_token_test.go", "description": "Connector hook-token lock readiness fixture"}],
+      "since": "0.8.11"
+    },
+    {
+      "name": "DEFENSECLAW_HOOK_TOKEN_LOCK_RELEASE",
+      "category": "test_fixture",
+      "purpose": "Release-signal path shared with the connector hook-token cross-process fixture.",
+      "default": "unset",
+      "accepted_values": ["absolute test marker path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/hook_api_token_test.go", "description": "Connector hook-token lock release fixture"}],
+      "since": "0.8.11"
     },
     {
       "name": "DEFENSECLAW_HOOK_DELEGATION_TEST_HELPER",

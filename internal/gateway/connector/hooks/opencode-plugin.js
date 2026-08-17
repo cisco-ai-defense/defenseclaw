@@ -7,28 +7,61 @@
 // aborts the tool — by throwing, exactly like opencode's own
 // .env-protection example — when the gateway returns a block decision.
 //
-// The gateway address, bearer token, and fail mode are substituted in at
-// setup time. The file is written 0o600 (owner-only) because it carries
-// the gateway token; it is never executable. DefenseClaw's Teardown
-// removes this file (managed-file backup heal).
+// The gateway address, stable scoped-token sidecar path, and fail mode are
+// substituted in at setup time. The token itself is loaded and validated for
+// every request, so a transactional rotation never leaves a replacement
+// credential in this longer-lived plugin. DefenseClaw's Teardown removes this
+// file (managed-file backup heal).
 //
 // Wire contract: POST {hook_event_name, tool_name, tool_input,
 // tool_response, cwd} to
 // /api/v1/opencode/hook; the response carries hook_output={decision,
 // reason}; decision "deny"/"block" aborts the tool.
 
-// DC_-prefixed constants are values baked in at setup time, not env-var
-// reads — the envvars registry gate scans for DEFENSECLAW_* tokens.
+import { open } from "node:fs/promises";
+
+// DC_-prefixed constants are non-secret values baked in at setup time, not
+// env-var reads — the envvars registry gate scans for DEFENSECLAW_* tokens.
 const DC_API_ADDR = "{{.APIAddr}}";
-const DC_API_TOKEN = "{{.APIToken}}";
+const DC_TOKEN_FILE = "{{.TokenFileJS}}";
 const DC_FAIL_MODE = "{{.FailMode}}"; // "open" or "closed"
 const DC_TIMEOUT_MS = 10000;
+const DC_TOKEN_PATTERN = /^[0-9a-f]{64}$/;
+const DC_MAX_TOKEN_FILE_BYTES = 4096;
 
-async function defenseclawPost(event, toolName, toolInput, toolResponse, cwd, context) {
+async function defenseclawToken() {
+  const file = await open(DC_TOKEN_FILE, "r");
+  try {
+    const raw = new Uint8Array(DC_MAX_TOKEN_FILE_BYTES + 1);
+    let offset = 0;
+    while (offset < raw.byteLength) {
+      const { bytesRead } = await file.read(raw, offset, raw.byteLength - offset, offset);
+      if (bytesRead === 0) break;
+      offset += bytesRead;
+    }
+    if (offset > DC_MAX_TOKEN_FILE_BYTES) throw new Error("oversized scoped hook credential");
+    const token = new TextDecoder("utf-8", { fatal: true }).decode(raw.subarray(0, offset)).trim();
+    if (!DC_TOKEN_PATTERN.test(token)) throw new Error("invalid scoped hook credential");
+    return token;
+  } finally {
+    await file.close();
+  }
+}
+
+async function defenseclawPost(event, toolName, toolInput, toolResponse, cwd, context, actionable) {
+  let token;
+  try {
+    token = await defenseclawToken();
+  } catch (_) {
+    // Missing, unreadable, or malformed credentials are never safe at a
+    // pre-execution boundary, even when transport fail-open was selected.
+    if (actionable) return { reason: "DefenseClaw hook credential is unavailable." };
+    return null;
+  }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DC_TIMEOUT_MS);
   const headers = { "Content-Type": "application/json", "X-DefenseClaw-Client": "opencode-plugin/1.0" };
-  if (DC_API_TOKEN) headers["Authorization"] = "Bearer " + DC_API_TOKEN;
+  headers["Authorization"] = "Bearer " + token;
   try {
     const res = await fetch("http://" + DC_API_ADDR + "/api/v1/opencode/hook", {
       method: "POST",
@@ -73,12 +106,19 @@ async function defenseclawPost(event, toolName, toolInput, toolResponse, cwd, co
 
 async function defenseclawPostLifecycle(event, cwd) {
   if (!event || !event.type) return;
+  let token;
+  try {
+    token = await defenseclawToken();
+  } catch (_) {
+    // Lifecycle telemetry is observe-only; an unavailable credential skips it.
+    return;
+  }
   const properties = event.properties || {};
   const info = properties.info || {};
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DC_TIMEOUT_MS);
   const headers = { "Content-Type": "application/json", "X-DefenseClaw-Client": "opencode-plugin/1.0" };
-  if (DC_API_TOKEN) headers["Authorization"] = "Bearer " + DC_API_TOKEN;
+  headers["Authorization"] = "Bearer " + token;
   try {
     await fetch("http://" + DC_API_ADDR + "/api/v1/opencode/hook", {
       method: "POST",
@@ -128,6 +168,7 @@ export const DefenseClaw = async ({ directory, worktree }) => {
         null,
         cwd,
         input,
+        true,
       );
       if (verdict) throw new Error(verdict.reason);
     },
@@ -143,6 +184,7 @@ export const DefenseClaw = async ({ directory, worktree }) => {
         output,
         cwd,
         input,
+        false,
       );
     },
   };

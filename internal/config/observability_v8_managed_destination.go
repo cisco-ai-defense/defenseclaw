@@ -43,6 +43,14 @@ const (
 	// endpoint-inventory collections to the same managed-only optional route.
 	ObservabilityV8ManagedConnectorInventoryAction observability.ProducerKey = "managed_connector_inventory"
 	ObservabilityV8ManagedMCPInventoryAction       observability.ProducerKey = "managed_mcp_inventory"
+	// ObservabilityV8ManagedSkillInventoryAction and
+	// ObservabilityV8ManagedPluginInventoryAction reserve routing identities
+	// for the per-entry skill / plugin inventories the sidecar derives from
+	// each AI-Discovery scan. Each entry ships as its own
+	// ai_component.observed record with agent_connector set so downstream can
+	// correlate skills / plugins with their parent agent (e.g. codex, claudecode).
+	ObservabilityV8ManagedSkillInventoryAction  observability.ProducerKey = "managed_skill_inventory"
+	ObservabilityV8ManagedPluginInventoryAction observability.ProducerKey = "managed_plugin_inventory"
 	// ObservabilityV8LocalInventoryDiagnosticAction carries incomplete,
 	// overflowed, or otherwise non-authoritative scans to local SQLite only.
 	// It can never be projected as a managed inventory snapshot.
@@ -141,22 +149,19 @@ func WithObservabilityV8ManagedAIDDestination(
 				},
 				Action: ObservabilityV8RouteDrop,
 			},
+			// The old "drop-managed-inventory-components" route (agent /
+			// connector inventory dropped by name at Index=1) existed
+			// only to suppress raw v8 records while the managedaid
+			// compatibility projector emitted them as v7
+			// gatewaylog.Event wrappers on this same destination — a
+			// deliberate mixed contract that Vineet flagged for
+			// removal. Under the v8-only contract every ai.discovery
+			// record now flows through as the original v8 OTLP log
+			// (see managedaid/compatibility.go), so dropping them here
+			// would silently strip the managed AID destination of its
+			// inventory content.
 			{
-				Index: 1, Name: "drop-managed-inventory-components", Generated: true,
-				Signals: []observability.Signal{observability.SignalLogs},
-				Selector: ObservabilityV8EffectiveSelector{
-					Buckets: []observability.Bucket{observability.BucketAIDiscovery},
-					Actions: []observability.ProducerKey{
-						ObservabilityV8ManagedAgentInventoryAction,
-						ObservabilityV8ManagedConnectorInventoryAction,
-						ObservabilityV8ManagedMCPInventoryAction,
-					},
-					EventNames: []observability.EventName{"ai_component.observed"},
-				},
-				Action: ObservabilityV8RouteDrop,
-			},
-			{
-				Index: 2, Name: "all-collected-logs", Generated: true,
+				Index: 1, Name: "all-collected-logs", Generated: true,
 				Signals: []observability.Signal{observability.SignalLogs},
 				Selector: ObservabilityV8EffectiveSelector{
 					Buckets: buckets, BucketWildcard: true,
@@ -257,6 +262,12 @@ func reserveObservabilityV8ManagedInventory(effective *ObservabilityV8EffectiveP
 					ObservabilityV8ManagedAgentInventoryAction,
 					ObservabilityV8ManagedConnectorInventoryAction,
 					ObservabilityV8ManagedMCPInventoryAction,
+					// Per-item skill / plugin records are release-owned managed
+					// inventory too — they carry endpoint identity that must
+					// only reach the release-owned Cisco AI Defense destination,
+					// never an operator-configured exporter.
+					ObservabilityV8ManagedSkillInventoryAction,
+					ObservabilityV8ManagedPluginInventoryAction,
 					ObservabilityV8LocalInventoryDiagnosticAction,
 				},
 			},
