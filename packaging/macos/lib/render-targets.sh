@@ -90,6 +90,19 @@ extract_connectors() {
         in_connectors = 0
       }
       if (!in_guardrail) next
+      # Clear in_connectors BEFORE the dispatch below when a sibling
+      # key at the connectors-parent depth ends the map block, so the
+      # terminating line still gets a chance to match the
+      # `  connector: <primary>` scalar branch. The prior placement
+      # (at the tail of the else-branch) consumed that line inside the
+      # block-exit and would have lost the primary if render_config
+      # ever emitted `connectors:` (empty) before `connector:`.
+      # Purely defensive — the current emitter order is stable — but
+      # it makes the scanner robust to a future config-generation
+      # reordering that would otherwise silently drop the primary.
+      if (in_connectors && $0 != "" && $0 !~ /^      / && $0 !~ /^    /) {
+        in_connectors = 0
+      }
       if (!in_connectors) {
         if ($0 ~ /^  connectors:[ \t]*$/) {
           in_connectors = 1
@@ -113,12 +126,6 @@ extract_connectors() {
           n_map++
           mapc[n_map] = line
           next
-        }
-        # Any line that is NOT six-space indented (map value) and
-        # NOT four-space indented (a map key we already caught) ends
-        # the connectors: block.
-        if ($0 != "" && $0 !~ /^      / && $0 !~ /^    /) {
-          in_connectors = 0
         }
       }
     }
