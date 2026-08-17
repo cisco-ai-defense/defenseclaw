@@ -1808,6 +1808,9 @@ func TestClassifyEventHistorySQLiteFailureIsBounded(t *testing.T) {
 		{name: "readonly", err: eventHistoryTestCodedError{code: 8, text: "secret"}, class: EventHistorySQLiteReadOnlyCantOpen, primary: 8},
 		{name: "cantopen", err: eventHistoryTestCodedError{code: 14, text: "secret"}, class: EventHistorySQLiteReadOnlyCantOpen, primary: 14},
 		{name: "constraint", err: eventHistoryTestCodedError{code: 19, text: "secret"}, class: EventHistorySQLiteConstraintCorrupt, primary: 19},
+		{name: "corrupt", err: eventHistoryTestCodedError{code: 11, text: "secret"}, class: EventHistorySQLiteConstraintCorrupt, primary: 11},
+		{name: "notadb", err: eventHistoryTestCodedError{code: 26, text: "secret"}, class: EventHistorySQLiteConstraintCorrupt, primary: 26},
+		{name: "generic error", err: eventHistoryTestCodedError{code: 1, text: "/secret/sql"}, class: EventHistorySQLiteOther, primary: 1},
 		{name: "unknown", err: eventHistoryTestCodedError{code: 255, text: "/secret/unknown"}, class: EventHistorySQLiteOther},
 	}
 	for _, test := range tests {
@@ -1832,6 +1835,14 @@ func TestClassifyEventHistorySQLiteFailureIsBounded(t *testing.T) {
 				t.Fatalf("bounded transition leaked driver text: %s", encoded)
 			}
 		})
+	}
+}
+
+func TestValidEventHistorySQLiteDiagnosticRejectsMismatchedPairs(t *testing.T) {
+	if validEventHistorySQLiteDiagnostic(EventHistorySQLiteUnavailable, 5) ||
+		validEventHistorySQLiteDiagnostic(EventHistorySQLiteFull, 10) ||
+		validEventHistorySQLiteDiagnostic(EventHistorySQLiteOther, 19) {
+		t.Fatal("validator accepted a mismatched class/primary pair")
 	}
 }
 

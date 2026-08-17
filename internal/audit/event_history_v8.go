@@ -294,7 +294,6 @@ type EventHistoryWriter struct {
 	healthMu           sync.Mutex
 	healthQueue        []EventHistoryHealthTransition
 	healthDraining     bool
-	healthActive       EventHistoryHealthTransition
 	writeHealthKnown   bool
 	writeHealthState   EventHistoryHealthState
 	writeHealthSeq     uint64
@@ -959,21 +958,15 @@ func (writer *EventHistoryWriter) flushHealth() {
 	for {
 		writer.healthMu.Lock()
 		if len(writer.healthQueue) == 0 {
-			writer.healthActive = EventHistoryHealthTransition{}
 			writer.healthDraining = false
 			writer.healthMu.Unlock()
 			return
 		}
 		transition := writer.healthQueue[0]
 		writer.healthQueue = writer.healthQueue[1:]
-		writer.healthActive = transition
 		writer.healthMu.Unlock()
 
 		writer.healthReporter.ReportEventHistoryHealth(transition)
-
-		writer.healthMu.Lock()
-		writer.healthActive = EventHistoryHealthTransition{}
-		writer.healthMu.Unlock()
 	}
 }
 
