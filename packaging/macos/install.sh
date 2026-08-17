@@ -902,20 +902,31 @@ if [[ "${SKIP_CONNECTOR}" != "true" ]]; then
     render_targets_manifest "${SUPPORT_DIR}" "${CONNECTOR}" "${USER_LINES}" \
     > "${MANIFEST_TMP}"
 
-  # Fatal-first: if any probe recorded a malformed-metadata failure,
-  # abort before falling through to the "manifest is empty, will
-  # reconcile later" warn path. The reconciler CANNOT fix a corrupt
-  # package.json on its own; the operator needs to see the failing
-  # path and reinstall / repair the connector. Emit a de-duplicated
-  # summary so a shared-metadata failure (e.g. system-wide
-  # /usr/local/lib/node_modules/... corrupted across every user) does
-  # not spam one line per user.
+  # Count rendered target rows up-front so the discovery-error report
+  # below can distinguish "corrupt metadata blocked every target" from
+  # "corrupt metadata affected one connector but others still resolved".
+  # The prior implementation die()'d on ANY discovery error, which would
+  # fail an install for the whole box just because one user had a
+  # single truncated package.json — the reconciler never got a chance
+  # to run for the connectors that DID resolve cleanly.
+  MANIFEST_TARGETS="$(grep -c '^  - user:' "${MANIFEST_TMP}" || true)"
+
+  # Report per-record discovery errors either way (operator visibility
+  # into what needs repair), but only ABORT when the metadata failures
+  # left the manifest completely empty — otherwise proceed and let the
+  # enumerator's tick pick up the affected connectors after the operator
+  # fixes the file(s). Emit a de-duplicated summary so a shared-metadata
+  # failure (e.g. system-wide /usr/local/lib/node_modules/... corrupted
+  # across every user) does not spam one line per user.
   if [[ -s "${DISCOVERY_ERRORS_LOG}" ]]; then
     warn "hook-guardian manifest rendering hit connector metadata errors:"
     while IFS=$'\t' read -r user connector reason path; do
       warn "  user=${user:-<none>} connector=${connector} reason=${reason} path=${path}"
     done < <(sort -u "${DISCOVERY_ERRORS_LOG}")
-    die "refusing to install with unreadable/malformed connector metadata (fix the listed file(s) or uninstall the affected connector and rerun)"
+    if [[ "${MANIFEST_TARGETS}" == "0" ]]; then
+      die "refusing to install with unreadable/malformed connector metadata (fix the listed file(s) or uninstall the affected connector and rerun)"
+    fi
+    warn "  proceeding — other connectors rendered targets; repair the listed file(s) so the affected connectors get wired on the next enumerator tick"
   fi
   unset DC_DISCOVERY_ERRORS_LOG
 
@@ -937,10 +948,11 @@ if [[ "${SKIP_CONNECTOR}" != "true" ]]; then
   # operator scanning install.log knows whether to (a) rerun with a
   # supported --connector value or (b) just wait for the enumerator's
   # tick to pick up the connector once someone installs it. The
-  # discovery-error case above takes precedence — by the time we reach
-  # this branch we know the zero-target outcome is genuinely
-  # "connector CLI not present anywhere", not "metadata was corrupt".
-  MANIFEST_TARGETS="$(grep -c '^  - user:' "${MANIFEST_TMP}" || true)"
+  # discovery-error branch above already handled the corrupt-metadata
+  # case (die when it left ZERO targets, warn+proceed when other
+  # connectors still rendered), so any zero-target state we see here is
+  # genuinely "connector CLI not present anywhere", not "metadata was
+  # corrupt".
   if [[ "${MANIFEST_TARGETS}" == "0" ]] && [[ -n "${USER_LINES}" ]]; then
     ZERO_TARGET_REASON="$(classify_zero_target_reason "${CONNECTOR}")"
     case "${ZERO_TARGET_REASON}" in

@@ -293,9 +293,13 @@ t_probe_json_version_records_malformed_when_log_set() {
   # Malformed: unclosed object.
   printf '{"version":"1.0.0"' > "${cfg}"
   local out
-  DC_DISCOVERY_ERRORS_LOG="${log}" \
-    DC_INSTALLER_TARGET_USER="alice" \
-    out="$(_probe_json_version "${cfg}" codex)"
+  # Assignments must live INSIDE the command substitution — otherwise
+  # `VAR=x out="$(...)"` is a list of assignments to the test shell, not
+  # an env prefix for the probe, and the DC_* values leak into every
+  # test case that runs after this one. Shellcheck SC2034.
+  out="$(DC_DISCOVERY_ERRORS_LOG="${log}" \
+         DC_INSTALLER_TARGET_USER="alice" \
+         _probe_json_version "${cfg}" codex)"
   assert_eq "${out}" "" "malformed metadata produces empty version output"
   # Log line must carry user, connector, reason, path — tab-separated.
   local line
@@ -325,8 +329,7 @@ t_probe_json_version_passthrough_on_wellformed() {
   : > "${log}"
   printf '{"name":"@openai/codex","version":"0.142.0"}\n' > "${cfg}"
   local out
-  DC_DISCOVERY_ERRORS_LOG="${log}" \
-    out="$(_probe_json_version "${cfg}" codex)"
+  out="$(DC_DISCOVERY_ERRORS_LOG="${log}" _probe_json_version "${cfg}" codex)"
   assert_eq "${out}" "0.142.0" "well-formed metadata passes the version through"
   assert_eq "$(wc -c < "${log}" | tr -d ' ')" "0" \
     "well-formed metadata does NOT append to the discovery error log"
