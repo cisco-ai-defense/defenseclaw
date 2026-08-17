@@ -351,7 +351,6 @@ var builtinHookContracts = map[string][]HookContract{
 				"UserPromptExpansion",
 				"PreToolUse",
 				"PermissionRequest",
-				"PostToolBatch",
 				"TaskCreated",
 				"TaskCompleted",
 				"TeammateIdle",
@@ -371,8 +370,7 @@ var builtinHookContracts = map[string][]HookContract{
 		Notes: []string{
 			"Pinned to the documented Claude Code hook surface as of 2.1.152, which introduced MessageDisplay; older releases exposed smaller hook event sets.",
 			"Claude Code PreToolUse supports native HITL via permissionDecision=ask.",
-			"PostToolUse findings are advisory because the inspected tool side effects have already occurred.",
-			"PostToolBatch can block continuation before the next model call, but cannot undo completed batch side effects.",
+			"PostToolUse and PostToolBatch findings are advisory because their payloads are returned bytes, not typed action requests; command/path enforcement stays on PreToolUse.",
 			"ConfigChange is blockable except when source=policy_settings, where Claude Code ignores blocking decisions.",
 		},
 	}},

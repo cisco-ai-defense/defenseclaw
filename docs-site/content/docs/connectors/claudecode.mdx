@@ -1,6 +1,6 @@
 ---
 title: Claude Code
-description: Claude Code connector wires the documented lifecycle hook set plus native OTel. Fourteen current events can return block decisions, and PreToolUse supports native HITL ask.
+description: Claude Code connector wires the documented lifecycle hook set plus native OTel. Thirteen current events can return block decisions, and PreToolUse supports native HITL ask.
 keywords:
   - DefenseClaw Claude Code connector
   - Claude Code hooks
@@ -15,7 +15,8 @@ The Claude Code connector is **hook-only**. There is no LLM-proxy data path — 
 
 **`mode=action` is supported on Claude Code's declared blocking hook events.**
 `PreToolUse` can return deny or native ask before the tool. Post-result events
-cannot undo a completed side effect, and no proxy listener is involved.
+are advisory: they preserve findings and shadow `would_block` telemetry without
+stopping Claude's next turn. No proxy listener is involved.
 </Callout>
 
 ## Setup
@@ -85,6 +86,21 @@ drifted, only DefenseClaw-owned entries are removed.
 ## Hook capabilities
 
 <HookEventsList connector="claudecode" />
+
+Claude Code's post-result surfaces (`PostToolUse`, `PostToolUseFailure`,
+`PermissionDenied`, and `PostToolBatch`) carry returned content rather than a
+new typed action request. DefenseClaw still scans that content for trust,
+secret, and PII findings, but command, path, cognitive-file, and C2 rules do
+not block on literals found in the returned bytes. For example, source text
+that explains `rm -rf /` can produce telemetry without being mistaken for a
+request to execute it. If Claude later proposes that command, `PreToolUse`
+evaluates the typed tool arguments and can deny it before execution.
+
+A standalone `PostToolUse` response may also use physically verified local
+source provenance to lower source-code trust findings to detection-only
+telemetry. Batch, failure, denial, and mixed outputs remain untrusted content;
+they are still advisory because they cannot be attributed to one executable
+request safely.
 
 <Callout type="info">
 Claude Code is one of the few connectors that supports native PreToolUse ask. HITL approvals surface inside the agent UI itself, so the operator never has to leave Claude Code to decide.
