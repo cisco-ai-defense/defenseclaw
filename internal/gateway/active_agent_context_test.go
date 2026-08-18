@@ -292,3 +292,45 @@ func TestActiveAgentContextIsBoundedAndExpires(t *testing.T) {
 		t.Fatalf("oldest bounded session retained authority: %#v", got)
 	}
 }
+
+func TestActiveAgentContextTimestampTieEvictionIsDeterministic(t *testing.T) {
+	root := t.TempDir()
+	agentFile := writeActiveAgentTestFile(t, root, "AGENTS.md")
+	fixedTime := time.Unix(1_700_000_000, 0)
+
+	for run := 0; run < 32; run++ {
+		cache := activeAgentContextCache{now: func() time.Time { return fixedTime }}
+		for index := 0; index < maxActiveAgentContextSessions; index++ {
+			cache.seed("claudecode", fmt.Sprintf("session-%03d", index), agentFile)
+		}
+		cache.seed("claudecode", "session-new", agentFile)
+
+		cache.mu.Lock()
+		_, oldestRetained := cache.sessions[activeAgentContextKey{
+			connector: "claudecode",
+			sessionID: "session-000",
+		}]
+		_, nextRetained := cache.sessions[activeAgentContextKey{
+			connector: "claudecode",
+			sessionID: "session-001",
+		}]
+		_, newRetained := cache.sessions[activeAgentContextKey{
+			connector: "claudecode",
+			sessionID: "session-new",
+		}]
+		count := len(cache.sessions)
+		cache.mu.Unlock()
+
+		if oldestRetained || !nextRetained || !newRetained ||
+			count != maxActiveAgentContextSessions {
+			t.Fatalf(
+				"run %d eviction: oldest=%t next=%t new=%t count=%d",
+				run,
+				oldestRetained,
+				nextRetained,
+				newRetained,
+				count,
+			)
+		}
+	}
+}

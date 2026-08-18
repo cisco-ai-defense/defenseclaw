@@ -126,13 +126,25 @@ func (cache *activeAgentContextCache) makeRoomLocked() {
 	}
 	var oldestKey activeAgentContextKey
 	var oldestTime time.Time
+	found := false
 	for key, session := range cache.sessions {
-		if oldestTime.IsZero() || session.updatedAt.Before(oldestTime) {
+		if !found || session.updatedAt.Before(oldestTime) ||
+			session.updatedAt.Equal(oldestTime) && activeAgentContextKeyLess(key, oldestKey) {
 			oldestKey = key
 			oldestTime = session.updatedAt
+			found = true
 		}
 	}
-	delete(cache.sessions, oldestKey)
+	if found {
+		delete(cache.sessions, oldestKey)
+	}
+}
+
+func activeAgentContextKeyLess(left, right activeAgentContextKey) bool {
+	if left.connector != right.connector {
+		return left.connector < right.connector
+	}
+	return left.sessionID < right.sessionID
 }
 
 func (cache *activeAgentContextCache) seed(connectorName, sessionID, filePath string) {

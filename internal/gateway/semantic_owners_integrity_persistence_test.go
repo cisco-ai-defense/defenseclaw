@@ -91,6 +91,7 @@ func TestActiveAgentInstructionMutationRequiresExactTrustedPath(t *testing.T) {
 		name        string
 		ruleID      string
 		command     string
+		dialect     actionfacts.Dialect
 		activeFiles []string
 		want        bool
 		wantSafe    bool
@@ -101,6 +102,36 @@ func TestActiveAgentInstructionMutationRequiresExactTrustedPath(t *testing.T) {
 			command:     "printf updated > /repo/AGENTS.md",
 			activeFiles: []string{"/repo/AGENTS.md"},
 			want:        true,
+		},
+		{
+			name:        "POSIX path identity is case sensitive",
+			ruleID:      "COG-AGENTS-MD",
+			command:     "printf updated > /repo/AGENTS.md",
+			activeFiles: []string{"/Repo/AGENTS.md"},
+			wantSafe:    true,
+		},
+		{
+			name:        "POSIX instruction basename is case sensitive",
+			ruleID:      "COG-AGENTS-MD",
+			command:     "printf updated > /repo/agents.md",
+			activeFiles: []string{"/repo/agents.md"},
+			wantSafe:    true,
+		},
+		{
+			name:        "Windows path identity folds case",
+			ruleID:      "COG-AGENTS-MD",
+			command:     `Set-Content -LiteralPath 'C:\Repo\AGENTS.md' -Value updated`,
+			dialect:     actionfacts.DialectPowerShell,
+			activeFiles: []string{`c:\repo\agents.MD`},
+			want:        true,
+		},
+		{
+			name:        "Windows distinct path stays inactive",
+			ruleID:      "COG-AGENTS-MD",
+			command:     `Set-Content -LiteralPath 'C:\Repo\AGENTS.md' -Value updated`,
+			dialect:     actionfacts.DialectPowerShell,
+			activeFiles: []string{`C:\Other\AGENTS.md`},
+			wantSafe:    true,
 		},
 		{
 			name:        "active MEMORY mutation",
@@ -143,6 +174,7 @@ func TestActiveAgentInstructionMutationRequiresExactTrustedPath(t *testing.T) {
 			facts := actionfacts.Analyze(actionfacts.Input{
 				Tool:             "shell",
 				Command:          test.command,
+				DialectHint:      test.dialect,
 				CWD:              "/repo",
 				ActiveHome:       "/home/alice",
 				ActiveAgentFiles: test.activeFiles,
