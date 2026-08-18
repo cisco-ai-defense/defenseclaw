@@ -233,6 +233,7 @@ func TestCompleteWindowsManagedHooksTeardownRollbackIsIdempotent(t *testing.T) {
 		wantRestores int
 		wantVerifies int
 		wantWrites   int
+		wantErr      string
 	}{
 		{
 			name: "captured partial teardown", phase: "captured",
@@ -249,6 +250,15 @@ func TestCompleteWindowsManagedHooksTeardownRollbackIsIdempotent(t *testing.T) {
 		{
 			name: "already rolled back", phase: "rolled_back", installed: true,
 			wantRestores: 0, wantVerifies: 1, wantWrites: 0,
+		},
+		{
+			// A rolled_back journal whose verify fails must NOT trigger a
+			// restore — the fail-closed branch surfaces the verify error
+			// directly so operators see the discrepancy instead of a silent
+			// second-attempt restore.
+			name: "rolled back with failed verify", phase: "rolled_back", installed: false,
+			wantRestores: 0, wantVerifies: 1, wantWrites: 0,
+			wantErr: "managed hooks are not installed",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -278,7 +288,11 @@ func TestCompleteWindowsManagedHooksTeardownRollbackIsIdempotent(t *testing.T) {
 					return nil
 				},
 			)
-			if err != nil {
+			if test.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), test.wantErr) {
+					t.Fatalf("err = %v, want error containing %q", err, test.wantErr)
+				}
+			} else if err != nil {
 				t.Fatal(err)
 			}
 			if restores != test.wantRestores ||

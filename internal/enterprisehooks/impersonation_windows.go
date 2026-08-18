@@ -6,6 +6,7 @@
 package enterprisehooks
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"runtime"
@@ -143,13 +144,23 @@ func runWindowsEnterpriseImpersonatedCallback(
 	return <-result
 }
 
+// errWindowsEnterpriseNotLocalSystem is returned by
+// requireWindowsEnterpriseLocalSystem when the current process token was
+// resolved successfully but does not belong to LocalSystem. Callers that
+// permit a non-guardian fallback should check for this sentinel with
+// errors.Is; any other error indicates that the identity could not be
+// resolved at all and must be surfaced rather than treated as fallback.
+var errWindowsEnterpriseNotLocalSystem = errors.New(
+	"enterprise hooks: per-user Windows hook mutation requires the LocalSystem guardian service",
+)
+
 func requireWindowsEnterpriseLocalSystem() error {
 	user, err := windows.GetCurrentProcessToken().GetTokenUser()
 	if err != nil {
 		return fmt.Errorf("enterprise hooks: resolve guardian process SID: %w", err)
 	}
 	if user == nil || user.User.Sid == nil || !user.User.Sid.IsWellKnown(windows.WinLocalSystemSid) {
-		return fmt.Errorf("enterprise hooks: per-user Windows hook mutation requires the LocalSystem guardian service")
+		return errWindowsEnterpriseNotLocalSystem
 	}
 	return nil
 }

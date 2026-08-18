@@ -253,13 +253,15 @@ func runWindowsManagedHooksTeardown(
 		identity.ClaudeTargetSIDs = currentClaude
 		report.EnrollmentTargetCount = len(currentClaude) + len(codexTargets)
 		var rollbackCompleted bool
-		rollbackCompleted, err = prepareWindowsManagedHooksTeardown(
+		var surviving int
+		rollbackCompleted, surviving, err = prepareWindowsManagedHooksTeardown(
 			opts,
 			windowsManagedHooksClaudeOptions(opts, currentClaude),
 			codexTargets,
 			identity,
 			report.JournalPath,
 		)
+		report.SurvivingOwnedPathReferences = surviving
 		if rollbackCompleted {
 			report.RollbackCompleted = true
 			report.VerifiedInstalledCount = report.EnrollmentTargetCount
@@ -287,7 +289,9 @@ func runWindowsManagedHooksTeardown(
 			)
 		}
 		if err == nil {
-			_, err = verifyWindowsManagedHooksTeardownClean(opts)
+			var surviving int
+			surviving, err = verifyWindowsManagedHooksTeardownClean(opts)
+			report.SurvivingOwnedPathReferences = surviving
 		}
 		if err == nil {
 			report.RollbackReady = true
@@ -345,15 +349,16 @@ func prepareWindowsManagedHooksTeardown(
 	codexTargets []connector.WindowsCodexManagedRuntimeTarget,
 	identity windowsManagedHooksTeardownJournal,
 	journalPath string,
-) (bool, error) {
+) (bool, int, error) {
 	if existing, err := readWindowsManagedHooksTeardownJournal(journalPath); err == nil {
 		if validateErr := validateWindowsManagedHooksTeardownJournal(existing, identity); validateErr != nil {
-			return false, validateErr
+			return false, 0, validateErr
 		}
 		switch existing.Phase {
 		case "prepared":
-			if _, verifyErr := verifyWindowsManagedHooksTeardownClean(opts); verifyErr == nil {
-				return false, nil
+			surviving, verifyErr := verifyWindowsManagedHooksTeardownClean(opts)
+			if verifyErr == nil {
+				return false, surviving, nil
 			}
 			// A committed uninstall can crash after transaction completion but
 			// before PowerShell retires this protected journal. If a later
@@ -362,24 +367,24 @@ func prepareWindowsManagedHooksTeardown(
 			// Partial or mismatched enrollment still fails the installed-state
 			// verification before any mutation.
 		case "captured":
-			return false, errors.New(
+			return false, 0, errors.New(
 				"managed-hook teardown has an incomplete captured transaction; rollback is required",
 			)
 		case "rolled_back":
 			// A subsequent lifecycle attempt may safely replace a completed
 			// journal after the active set is verified below.
 		default:
-			return false, fmt.Errorf("unsupported managed-hook teardown journal phase %q", existing.Phase)
+			return false, 0, fmt.Errorf("unsupported managed-hook teardown journal phase %q", existing.Phase)
 		}
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return false, err
+		return false, 0, err
 	}
 	if err := verifyWindowsManagedHooksTeardownInstalled(
 		opts,
 		claudeOpts.TargetSIDs,
 		codexTargets,
 	); err != nil {
-		return false, err
+		return false, 0, err
 	}
 
 	var captured enterprisehooks.WindowsClaudeManagedPolicyTeardownSnapshot
@@ -398,7 +403,7 @@ func prepareWindowsManagedHooksTeardown(
 			return nil
 		},
 	)
-	restoreOnFailure := func(cause error) (bool, error) {
+	restoreOnFailure := func(cause error, surviving int) (bool, int, error) {
 		journal := identity
 		journal.Phase = "captured"
 		journal.Claude = captured
@@ -409,44 +414,46 @@ func prepareWindowsManagedHooksTeardown(
 			journal,
 			journalPath,
 		); rollbackErr != nil {
-			return false, fmt.Errorf(
+			return false, surviving, fmt.Errorf(
 				"%v (managed-hook teardown rollback failed: %v)",
 				cause,
 				rollbackErr,
 			)
 		}
-		return true, cause
+		return true, surviving, cause
 	}
 	if err != nil {
 		if persisted {
-			return restoreOnFailure(err)
+			return restoreOnFailure(err, 0)
 		}
-		return false, err
+		return false, 0, err
 	}
 	if !persisted {
-		return false, errors.New("managed-hook teardown did not durably publish its rollback journal")
+		return false, 0, errors.New("managed-hook teardown did not durably publish its rollback journal")
 	}
 
 	removeReport, err := connector.RemoveWindowsCodexMachineRequirements(opts)
 	if err != nil {
-		return restoreOnFailure(err)
+		return restoreOnFailure(err, removeReport.SurvivingOwnedPathReferences)
 	}
 	if !removeReport.OK || !removeReport.SafeToRemoveBinary ||
 		removeReport.SurvivingOwnedPathReferences != 0 {
 		return restoreOnFailure(
 			errors.New("Codex managed-hook removal was not reference-clean"),
+			removeReport.SurvivingOwnedPathReferences,
 		)
 	}
-	if _, err := verifyWindowsManagedHooksTeardownClean(opts); err != nil {
-		return restoreOnFailure(err)
+	surviving, err := verifyWindowsManagedHooksTeardownClean(opts)
+	if err != nil {
+		return restoreOnFailure(err, surviving)
 	}
 	journal := identity
 	journal.Phase = "prepared"
 	journal.Claude = captured
 	if err := writeWindowsManagedHooksTeardownJournal(journalPath, journal); err != nil {
-		return restoreOnFailure(err)
+		return restoreOnFailure(err, surviving)
 	}
-	return false, nil
+	return false, surviving, nil
 }
 
 func completeWindowsManagedHooksTeardownRollback(

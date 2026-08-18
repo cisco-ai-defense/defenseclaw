@@ -1279,7 +1279,7 @@ func withWindowsClaudeManagedPolicyTransaction(fn func() error) error {
 			}
 			return fn()
 		}
-		if lockErr != windows.ERROR_SHARING_VIOLATION && lockErr != windows.ERROR_LOCK_VIOLATION {
+		if !errors.Is(lockErr, windows.ERROR_SHARING_VIOLATION) && !errors.Is(lockErr, windows.ERROR_LOCK_VIOLATION) {
 			return fmt.Errorf("enterprise hooks: acquire managed policy transaction lock: %w", lockErr)
 		}
 		if !time.Now().Before(deadline) {
@@ -1931,7 +1931,7 @@ func ensureWindowsManagedPolicyDirectory(path string) error {
 		createErr := windows.CreateDirectory(ptr, attributes)
 		if createErr == nil {
 			created = append(created, directory)
-		} else if createErr != windows.ERROR_ALREADY_EXISTS {
+		} else if !errors.Is(createErr, windows.ERROR_ALREADY_EXISTS) {
 			return cleanupCreated(fmt.Errorf("enterprise hooks: create protected managed policy directory %s: %w", directory, createErr))
 		}
 		if err := rejectWindowsReparseChain(directory); err != nil {

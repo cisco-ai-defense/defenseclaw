@@ -520,14 +520,22 @@ func setPrivateDACL(path string, inherit bool) error {
 		return err
 	}
 	if !identity.impersonated {
-		if err := windows.SetNamedSecurityInfo(
-			extended,
-			windows.SE_FILE_OBJECT,
-			windows.OWNER_SECURITY_INFORMATION,
-			identity.sid,
-			nil,
-			nil,
-			nil,
+		// A file owner receives implicit WRITE_DAC but NOT WRITE_OWNER, so
+		// re-applying an already-correct owner from a non-elevated process
+		// fails with ERROR_ACCESS_DENIED. Read the current owner and skip
+		// the write when the path is already owned by identity.sid.
+		currentSD, err := windows.GetNamedSecurityInfo(
+			extended, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION,
+		)
+		if err != nil {
+			return err
+		}
+		currentOwner, _, err := currentSD.Owner()
+		if err != nil {
+			return err
+		}
+		if err := setWindowsOwnerIfDifferent(
+			extended, currentOwner, identity.sid, windows.SetNamedSecurityInfo,
 		); err != nil {
 			return err
 		}
@@ -666,6 +674,15 @@ func privateSecurityDescriptorIsSafeForSubject(
 			continue
 		}
 		if identity.impersonated && sid.Equals(administrators) {
+			// Under impersonation, an Administrators ACE must be bounded
+			// to the same read-only shape as the Creator Owner Rights
+			// rule above. Accepting any mask (including GENERIC_ALL) or
+			// any inheritance flag would let a DACL that grants
+			// Administrators full write access on the target user's
+			// private file report as safe and skip repair.
+			if ace.Mask != windows.READ_CONTROL || ace.Header.AceFlags != 0 {
+				return false, nil
+			}
 			continue
 		}
 		return false, nil

@@ -135,7 +135,7 @@ func setEnterpriseWindowsRuntimeProtection(path string, owner, serviceSID *windo
 		windows.GENERIC_EXECUTE |
 		windows.DELETE
 	return enterprisehooks.RunWithWindowsOwnerRestorePrivilege(func() error {
-		return setEnterpriseWindowsManagedProtection(path, owner, serviceSID, serviceModify, directory)
+		return enterpriseWindowsProtectionWriter(path, owner, serviceSID, serviceModify, directory)
 	})
 }
 

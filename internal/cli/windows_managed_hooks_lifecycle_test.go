@@ -89,9 +89,16 @@ func TestWindowsManagedHooksPartialClaudeTargetsAcceptsOnlyManifestSubset(t *tes
 	}
 }
 
-func TestValidateWindowsManagedHooksLifecycleJournalRejectsExpandedEnrollment(t *testing.T) {
-	allowed := []string{"S-1-5-21-111-222-333-1001"}
-	identity := windowsManagedHooksLifecycleJournal{
+// windowsManagedHooksLifecycleJournalTestIdentity builds a fresh identity
+// journal + a matching captured journal for the tests below.
+func windowsManagedHooksLifecycleJournalTestIdentity(t *testing.T) (
+	identity windowsManagedHooksLifecycleJournal,
+	journal windowsManagedHooksLifecycleJournal,
+	allowed []string,
+) {
+	t.Helper()
+	allowed = []string{"S-1-5-21-111-222-333-1001"}
+	identity = windowsManagedHooksLifecycleJournal{
 		SchemaVersion:      windowsManagedHooksLifecycleSchema,
 		ManifestPath:       `C:\ProgramData\DefenseClaw\hook-guardian\targets.yaml`,
 		HookBinary:         `C:\Program Files\DefenseClaw\bin\defenseclaw-hook.exe`,
@@ -108,13 +115,22 @@ func TestValidateWindowsManagedHooksLifecycleJournalRejectsExpandedEnrollment(t 
 		t.Fatal(err)
 	}
 	identity.ManifestFingerprint = fingerprint
-	journal := identity
+	journal = identity
 	journal.Phase = "captured"
 	journal.PriorClaudeTargetSIDs = []string{allowed[0]}
 	journal.Claude.PolicyExisted = true
 	journal.Claude.StateExisted = true
 	journal.Claude.Policy = []byte("policy")
 	journal.Claude.State = []byte("state")
+	return identity, journal, allowed
+}
+
+// validateWindowsManagedHooksLifecycleJournal compares only SchemaVersion,
+// ManifestPath, HookBinary, and GatewayServiceName against identity, so
+// GatewayAddr and Targets are intentionally allowed to drift after a staged
+// manifest change. That relaxed contract is checked here.
+func TestValidateWindowsManagedHooksLifecycleJournalToleratesGatewayAddrAndTargetChanges(t *testing.T) {
+	identity, journal, _ := windowsManagedHooksLifecycleJournalTestIdentity(t)
 	if err := validateWindowsManagedHooksLifecycleJournal(
 		journal,
 		identity,
@@ -128,6 +144,7 @@ func TestValidateWindowsManagedHooksLifecycleJournalRejectsExpandedEnrollment(t 
 		SID:       "S-1-5-21-111-222-333-1002",
 		DataDir:   `C:\Users\bob\.defenseclaw`,
 	}}
+	var err error
 	changedIdentity.ManifestFingerprint, err =
 		windowsManagedHooksTeardownFingerprint(changedIdentity.Targets)
 	if err != nil {
@@ -139,6 +156,12 @@ func TestValidateWindowsManagedHooksLifecycleJournalRejectsExpandedEnrollment(t 
 	); err != nil {
 		t.Fatalf("protected prior snapshot was rejected after a staged manifest change: %v", err)
 	}
+}
+
+// validateWindowsManagedHooksLifecycleJournal must reject tampered prior
+// snapshots that expand enrollment beyond the manifest.
+func TestValidateWindowsManagedHooksLifecycleJournalRejectsExpandedEnrollment(t *testing.T) {
+	identity, journal, _ := windowsManagedHooksLifecycleJournalTestIdentity(t)
 	tampered := journal
 	tampered.PriorClaudeTargetSIDs = []string{"S-1-5-21-111-222-333-1099"}
 	if err := validateWindowsManagedHooksLifecycleJournal(
@@ -146,6 +169,33 @@ func TestValidateWindowsManagedHooksLifecycleJournalRejectsExpandedEnrollment(t 
 		identity,
 	); err == nil {
 		t.Fatal("lifecycle journal expanded enrollment outside the manifest")
+	}
+}
+
+// validateWindowsManagedHooksLifecycleJournal must reject journals whose
+// HookBinary or GatewayServiceName no longer matches the current identity —
+// those fields remain part of the identity gate even though GatewayAddr
+// and Targets are tolerated after a staged manifest change.
+func TestValidateWindowsManagedHooksLifecycleJournalRejectsHookBinaryOrServiceNameDrift(t *testing.T) {
+	for name, tweak := range map[string]func(*windowsManagedHooksLifecycleJournal){
+		"HookBinary": func(id *windowsManagedHooksLifecycleJournal) {
+			id.HookBinary = `C:\Program Files\DefenseClaw\bin\other-hook.exe`
+		},
+		"GatewayServiceName": func(id *windowsManagedHooksLifecycleJournal) {
+			id.GatewayServiceName = "SomeOtherService"
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			identity, journal, _ := windowsManagedHooksLifecycleJournalTestIdentity(t)
+			changed := identity
+			tweak(&changed)
+			if err := validateWindowsManagedHooksLifecycleJournal(
+				journal,
+				changed,
+			); err == nil {
+				t.Fatalf("lifecycle journal accepted despite %s drift", name)
+			}
+		})
 	}
 }
 

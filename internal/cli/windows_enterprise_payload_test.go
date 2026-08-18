@@ -19,6 +19,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/spf13/cobra"
@@ -371,8 +372,14 @@ func TestRunWindowsEnterpriseLifecycleFailsRatherThanStageOverAnExplicitInstalle
 	windowsEnterpriseScriptFinder = func(string) (string, error) {
 		return "", fmt.Errorf("%w; pass --installer", errWindowsEnterpriseInstallerNotFound)
 	}
+	// The stager and runner stubs execute inside t.Run subtests, which run on
+	// a different goroutine than the parent test. Calling t.Fatal on the
+	// captured parent T from a foreign goroutine terminates that goroutine
+	// with runtime.Goexit and leaves the subtest in an undefined state.
+	// Record any invocation and assert inside each subtest instead.
+	var stagerCalled, runnerCalled atomic.Bool
 	windowsEnterprisePayloadStager = func() (string, func() error, error) {
-		t.Fatal("an explicitly named installer must never fall back to the embedded copy")
+		stagerCalled.Store(true)
 		return "", nil, nil
 	}
 	windowsEnterpriseCommandRunner = func(
@@ -381,7 +388,7 @@ func TestRunWindowsEnterpriseLifecycleFailsRatherThanStageOverAnExplicitInstalle
 		string,
 		[]string,
 	) error {
-		t.Fatal("a missing explicit installer must not reach PowerShell")
+		runnerCalled.Store(true)
 		return nil
 	}
 
@@ -390,6 +397,8 @@ func TestRunWindowsEnterpriseLifecycleFailsRatherThanStageOverAnExplicitInstalle
 		"env":  {},
 	} {
 		t.Run(name, func(t *testing.T) {
+			stagerCalled.Store(false)
+			runnerCalled.Store(false)
 			if name == "env" {
 				t.Setenv(
 					windowsEnterpriseInstallerEnv,
@@ -408,6 +417,12 @@ func TestRunWindowsEnterpriseLifecycleFailsRatherThanStageOverAnExplicitInstalle
 				opts,
 			); err == nil {
 				t.Fatal("a named installer that is missing must fail")
+			}
+			if stagerCalled.Load() {
+				t.Fatal("an explicitly named installer must never fall back to the embedded copy")
+			}
+			if runnerCalled.Load() {
+				t.Fatal("a missing explicit installer must not reach PowerShell")
 			}
 		})
 	}

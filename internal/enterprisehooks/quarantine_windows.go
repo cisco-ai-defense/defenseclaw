@@ -204,49 +204,55 @@ func windowsQuarantineDirectoryNames(handle windows.Handle) ([]string, error) {
 	// and parse its byte view.
 	aligned := make([]uint64, windowsQuarantineDirectoryBufferSize/8)
 	buffer := unsafe.Slice((*byte)(unsafe.Pointer(&aligned[0])), windowsQuarantineDirectoryBufferSize)
-	err := windows.GetFileInformationByHandleEx(
-		handle,
-		windows.FileFullDirectoryRestartInfo,
-		&buffer[0],
-		uint32(len(buffer)),
-	)
-	if errors.Is(err, windows.ERROR_NO_MORE_FILES) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("enterprise hooks: enumerate bounded quarantine without following: %w", err)
-	}
-
 	names := make([]string, 0, 16)
-	for offset := 0; ; {
-		if offset < 0 || offset+windowsFullDirectoryInfoNameOffset > len(buffer) {
-			return nil, fmt.Errorf("enterprise hooks: invalid bounded quarantine directory record")
-		}
-		next := *(*uint32)(unsafe.Pointer(&buffer[offset]))
-		nameBytes := *(*uint32)(unsafe.Pointer(&buffer[offset+60]))
-		if nameBytes%2 != 0 || uint64(offset)+windowsFullDirectoryInfoNameOffset+uint64(nameBytes) > uint64(len(buffer)) {
-			return nil, fmt.Errorf("enterprise hooks: invalid bounded quarantine directory name length")
-		}
-		nameUnits := unsafe.Slice(
-			(*uint16)(unsafe.Pointer(&buffer[offset+windowsFullDirectoryInfoNameOffset])),
-			int(nameBytes/2),
+	// The 64 KiB buffer can hold ~4096 short entries but far fewer when
+	// names are long. Restart on the first call, then continue with
+	// FileFullDirectoryInfo until ERROR_NO_MORE_FILES so a valid but
+	// long-named quarantine slot cannot leave stragglers unread.
+	infoClass := uint32(windows.FileFullDirectoryRestartInfo)
+	for {
+		err := windows.GetFileInformationByHandleEx(
+			handle,
+			infoClass,
+			&buffer[0],
+			uint32(len(buffer)),
 		)
-		name := windows.UTF16ToString(nameUnits)
-		if name != "." && name != ".." {
-			if name == "" || strings.ContainsAny(name, "\\/\x00") {
-				return nil, fmt.Errorf("enterprise hooks: invalid bounded quarantine child name")
+		if errors.Is(err, windows.ERROR_NO_MORE_FILES) {
+			return names, nil
+		}
+		if err != nil {
+			return nil, fmt.Errorf("enterprise hooks: enumerate bounded quarantine without following: %w", err)
+		}
+		for offset := 0; ; {
+			if offset < 0 || offset+windowsFullDirectoryInfoNameOffset > len(buffer) {
+				return nil, fmt.Errorf("enterprise hooks: invalid bounded quarantine directory record")
 			}
-			names = append(names, name)
+			next := *(*uint32)(unsafe.Pointer(&buffer[offset]))
+			nameBytes := *(*uint32)(unsafe.Pointer(&buffer[offset+60]))
+			if nameBytes%2 != 0 || uint64(offset)+windowsFullDirectoryInfoNameOffset+uint64(nameBytes) > uint64(len(buffer)) {
+				return nil, fmt.Errorf("enterprise hooks: invalid bounded quarantine directory name length")
+			}
+			nameUnits := unsafe.Slice(
+				(*uint16)(unsafe.Pointer(&buffer[offset+windowsFullDirectoryInfoNameOffset])),
+				int(nameBytes/2),
+			)
+			name := windows.UTF16ToString(nameUnits)
+			if name != "." && name != ".." {
+				if name == "" || strings.ContainsAny(name, "\\/\x00") {
+					return nil, fmt.Errorf("enterprise hooks: invalid bounded quarantine child name")
+				}
+				names = append(names, name)
+			}
+			if next == 0 {
+				break
+			}
+			if next < windowsFullDirectoryInfoNameOffset || uint64(offset)+uint64(next) >= uint64(len(buffer)) {
+				return nil, fmt.Errorf("enterprise hooks: invalid bounded quarantine directory continuation")
+			}
+			offset += int(next)
 		}
-		if next == 0 {
-			break
-		}
-		if next < windowsFullDirectoryInfoNameOffset || uint64(offset)+uint64(next) >= uint64(len(buffer)) {
-			return nil, fmt.Errorf("enterprise hooks: invalid bounded quarantine directory continuation")
-		}
-		offset += int(next)
+		infoClass = uint32(windows.FileFullDirectoryInfo)
 	}
-	return names, nil
 }
 
 func openWindowsQuarantineChild(parent windows.Handle, name string) (windows.Handle, error) {
@@ -283,19 +289,28 @@ func openWindowsQuarantineChild(parent windows.Handle, name string) (windows.Han
 }
 
 func windowsQuarantineChildDisappeared(err error) bool {
-	return err == windows.STATUS_OBJECT_NAME_NOT_FOUND ||
-		err == windows.STATUS_OBJECT_PATH_NOT_FOUND ||
-		err == windows.STATUS_DELETE_PENDING
+	// errors.Is keeps this rule correct if any future caller wraps the raw
+	// NTSTATUS: an unwrapped == would silently turn "child already gone"
+	// into "hard failure" and fail the teardown for a benign race.
+	return errors.Is(err, windows.STATUS_OBJECT_NAME_NOT_FOUND) ||
+		errors.Is(err, windows.STATUS_OBJECT_PATH_NOT_FOUND) ||
+		errors.Is(err, windows.STATUS_DELETE_PENDING)
 }
 
 func markWindowsQuarantineHandleForDeletion(handle windows.Handle, attributes uint32) error {
 	flags := uint32(windows.FILE_DISPOSITION_DELETE | windows.FILE_DISPOSITION_IGNORE_READONLY_ATTRIBUTE)
-	if err := windows.SetFileInformationByHandle(
+	// Preserve the FileDispositionInfoEx failure so a subsequent legacy
+	// FileDispositionInfo failure can join both causes in the returned
+	// error. Otherwise the extended failure — which is what modern
+	// Windows uses to expose file-in-use / delete-on-close diagnostics —
+	// is silently discarded and teardown loses that signal.
+	exErr := windows.SetFileInformationByHandle(
 		handle,
 		windows.FileDispositionInfoEx,
 		(*byte)(unsafe.Pointer(&flags)),
 		uint32(unsafe.Sizeof(flags)),
-	); err == nil {
+	)
+	if exErr == nil {
 		return nil
 	}
 
@@ -330,7 +345,10 @@ func markWindowsQuarantineHandleForDeletion(handle windows.Handle, attributes ui
 		&deleteFile,
 		1,
 	); err != nil {
-		return fmt.Errorf("enterprise hooks: mark quarantine object for deletion by handle: %w", err)
+		return fmt.Errorf(
+			"enterprise hooks: mark quarantine object for deletion by handle: %w (FileDispositionInfoEx also failed: %v)",
+			err, exErr,
+		)
 	}
 	return nil
 }

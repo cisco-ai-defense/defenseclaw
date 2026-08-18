@@ -57,6 +57,11 @@ func TestRejectUntrustedWindowsWriteACEsAllowsOnlyExactServiceSID(t *testing.T) 
 	if err != nil {
 		t.Fatalf("DACL: %v", err)
 	}
+	// x/sys/windows may report the control-bit presence flag as false for
+	// an in-memory SDDL descriptor even though it returns its DACL.
+	if dacl == nil {
+		t.Fatal("test descriptor has no DACL")
+	}
 	if err := rejectUntrustedWindowsWriteACEsWithWriter("runtime", dacl, serviceSID, false); err != nil {
 		t.Fatalf("exact service SID rejected: %v", err)
 	}
@@ -200,7 +205,8 @@ func TestWindowsAncestorAllowsCreateOnlyButRejectsReplacementRights(t *testing.T
 		mask    string
 		wantErr bool
 	}{
-		{name: "add file and subdirectory only", mask: "0x00000003"},
+		{name: "list and add-file only", mask: "0x00000003"},
+		{name: "add-subdirectory only", mask: "0x00000004"},
 		{name: "delete child", mask: "0x00000040", wantErr: true},
 		{name: "delete", mask: "SD", wantErr: true},
 		{name: "change dacl", mask: "WD", wantErr: true},
@@ -217,6 +223,9 @@ func TestWindowsAncestorAllowsCreateOnlyButRejectsReplacementRights(t *testing.T
 			dacl, _, err := descriptor.DACL()
 			if err != nil {
 				t.Fatalf("DACL: %v", err)
+			}
+			if dacl == nil {
+				t.Fatal("test descriptor has no DACL")
 			}
 			err = rejectUntrustedWindowsWriteACEsWithWriter("ancestor", dacl, nil, true)
 			if test.wantErr && err == nil {
@@ -251,6 +260,9 @@ func TestWindowsAncestorHoldsEveryoneToTheLeafRule(t *testing.T) {
 			dacl, _, err := descriptor.DACL()
 			if err != nil {
 				t.Fatalf("DACL: %v", err)
+			}
+			if dacl == nil {
+				t.Fatal("test descriptor has no DACL")
 			}
 			err = rejectUntrustedWindowsWriteACEsWithWriter("ancestor", dacl, nil, true)
 			if test.wantErr && err == nil {

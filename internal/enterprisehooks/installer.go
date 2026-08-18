@@ -200,7 +200,13 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			if !present {
 				return fmt.Errorf("enterprise hooks: connector %s hook verification failed: owned hook command not present", conn.Name())
 			}
-			lock, err := connector.LoadHookContractLockEntryForMode(dataDir, conn.Name(), true)
+			// Match validateHookContract's mode selection so Verify does not
+			// load and re-hash the lock in bounded/managed mode on Unix
+			// while the drift check reads it in legacy mode. Windows
+			// managed runtimes stay strict (regular admin-published files);
+			// Unix guardians keep their per-user symlink contract.
+			strictManagedRuntime := setupOpts.ManagedEnterprise && runtime.GOOS == "windows"
+			lock, err := connector.LoadHookContractLockEntryForMode(dataDir, conn.Name(), strictManagedRuntime)
 			if err != nil {
 				return fmt.Errorf("enterprise hooks: load hook contract lock: %w", err)
 			}
@@ -211,7 +217,7 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 				setupOpts,
 				conn,
 				version.Current().BinaryVersion,
-				true,
+				strictManagedRuntime,
 			)
 			if err != nil {
 				return fmt.Errorf("enterprise hooks: hash managed hook runtime: %w", err)
@@ -404,17 +410,20 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			if !present {
 				return rollback(fmt.Errorf("enterprise hooks: connector %s hook verification failed: owned hook command not present", conn.Name()))
 			}
+			// See Verify for the rationale: keep Install's persistence
+			// mode consistent with validateHookContract's drift check.
+			strictManagedRuntime := setupOpts.ManagedEnterprise && runtime.GOOS == "windows"
 			lockEntry, err := connector.NewHookContractLockEntryForMode(
 				setupOpts,
 				conn,
 				version.Current().BinaryVersion,
-				true,
+				strictManagedRuntime,
 			)
 			if err != nil {
 				return rollback(fmt.Errorf("enterprise hooks: hash managed hook runtime: %w", err))
 			}
 			lockWriteAttempted = true
-			if err := connector.SaveHookContractLockEntryForMode(dataDir, lockEntry, true); err != nil {
+			if err := connector.SaveHookContractLockEntryForMode(dataDir, lockEntry, strictManagedRuntime); err != nil {
 				return rollback(fmt.Errorf("enterprise hooks: save hook contract lock: %w", err))
 			}
 

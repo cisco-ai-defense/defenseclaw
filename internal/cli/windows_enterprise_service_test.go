@@ -405,7 +405,11 @@ func TestWindowsEnterpriseSelfUpgradeRequiresExternalReleaseCLI(t *testing.T) {
 		}
 	}
 	if err := os.Link(explicitInstalledCLI, aliasCLI); err != nil {
-		t.Fatalf("create installed CLI hard-link alias: %v", err)
+		// Some filesystems (ReFS, mounted dev drives) do not support hard
+		// links. Treat that as an environment limitation, not a product
+		// failure — the symlink test below already uses t.Skipf for the
+		// same class of limitation.
+		t.Skipf("hard-link creation unavailable on this filesystem: %v", err)
 	}
 
 	originalProgramFilesResolver := windowsEnterpriseProgramFilesResolver

@@ -309,7 +309,34 @@ func windowsVirtualServiceSID(account string) (*windows.SID, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve Windows virtual service account %q: %w", account, err)
 	}
+	// LookupSID resolved the `NT SERVICE\<name>` string, but a compromised
+	// registrar could point the lookup at any SID. Bind trust to the NT
+	// SERVICE authority (S-1-5-80-...) before returning: reject any SID
+	// that is not under NT AUTHORITY (Value 5) with SubAuthority(0) == 80.
+	if !sidIsNTService(sid) {
+		return nil, fmt.Errorf(
+			"resolved Windows virtual service account %q is not under NT SERVICE (S-1-5-80): %s",
+			account, sidString(sid),
+		)
+	}
 	return sid, nil
+}
+
+func sidIsNTService(sid *windows.SID) bool {
+	if sid == nil || !sid.IsValid() {
+		return false
+	}
+	authority := sid.IdentifierAuthority()
+	// NT authority: {0, 0, 0, 0, 0, 5}. Only the last byte varies for known
+	// authorities on modern Windows, so a byte-exact comparison is safe.
+	if authority.Value != [6]byte{0, 0, 0, 0, 0, 5} {
+		return false
+	}
+	if sid.SubAuthorityCount() < 1 {
+		return false
+	}
+	const ntServiceSubAuthority uint32 = 80
+	return sid.SubAuthority(0) == ntServiceSubAuthority
 }
 
 // WindowsServiceAccountSID resolves a narrowly validated NT SERVICE virtual

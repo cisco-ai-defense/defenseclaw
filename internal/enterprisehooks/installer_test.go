@@ -1527,7 +1527,11 @@ func TestLoadManifestValidatesEnabledTargets(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "targets.yaml")
 	targetIdentity := "  - user: alice\n"
 	if runtime.GOOS == "windows" {
-		targetIdentity = "  - user: alice\n    user_home: 'C:\\\\Users\\\\alice'\n    sid: S-1-5-21-1-2-3-1001\n"
+		// YAML single quotes do not process backslash escapes, so a single
+		// pair per separator is what LoadManifest sees. The doubled
+		// backslashes here were previously making the parsed value
+		// `C:\\Users\\alice`, not the intended `C:\Users\alice`.
+		targetIdentity = "  - user: alice\n    user_home: 'C:\\Users\\alice'\n    sid: S-1-5-21-1-2-3-1001\n"
 	}
 	if err := os.WriteFile(path, []byte(`
 targets:

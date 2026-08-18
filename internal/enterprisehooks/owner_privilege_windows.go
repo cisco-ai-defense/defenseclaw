@@ -6,6 +6,7 @@
 package enterprisehooks
 
 import (
+	"errors"
 	"fmt"
 	"runtime"
 
@@ -22,7 +23,15 @@ func RunWithWindowsOwnerRestorePrivilege(fn func() error) error {
 		return fmt.Errorf("enterprise hooks: owner privilege callback is required")
 	}
 	if err := windowsEnterpriseMutationIdentityCheck(); err != nil {
-		return fn()
+		// Only fall through to a non-privileged fn() when the identity was
+		// confirmed to be non-LocalSystem. Any other error (token lookup
+		// failure, opaque GetTokenUser error) means we could not resolve
+		// the identity at all, and hiding it would run mutations without
+		// the required privileges. Propagate those.
+		if errors.Is(err, errWindowsEnterpriseNotLocalSystem) {
+			return fn()
+		}
+		return err
 	}
 	result := make(chan error, 1)
 	go func() {

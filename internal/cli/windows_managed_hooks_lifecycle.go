@@ -287,7 +287,21 @@ func resolveWindowsManagedHooksLifecycleContext() (
 	if err != nil {
 		return ctx, err
 	}
-	stateRoot := filepath.Dir(filepath.Dir(opts.OwnershipPath))
+	// Both lifecycle and teardown publish administrator-owned journals under
+	// filepath.Join(stateRoot, "install"). Apply the same canonicalization the
+	// teardown path applies before deriving that stateRoot, so a layout the
+	// teardown command rejects cannot reach lifecycle journal publication.
+	ownershipPath := opts.OwnershipPath
+	installDir := filepath.Dir(ownershipPath)
+	stateRoot := filepath.Dir(installDir)
+	if ownershipPath == "" || !filepath.IsAbs(ownershipPath) ||
+		strings.TrimSpace(ownershipPath) != ownershipPath ||
+		filepath.Clean(ownershipPath) != ownershipPath ||
+		!strings.EqualFold(filepath.Base(ownershipPath), "codex-requirements-ownership.json") ||
+		!strings.EqualFold(filepath.Base(installDir), "install") ||
+		stateRoot == installDir || stateRoot == filepath.Dir(stateRoot) {
+		return ctx, errors.New("managed-hook lifecycle received a noncanonical protected ownership path")
+	}
 	runtimeDir, err := exactWindowsCodexLayoutEnv("DEFENSECLAW_HOME")
 	if err != nil {
 		return ctx, err

@@ -144,6 +144,13 @@ func hookConnectorFromArgs(args []string) (string, error) {
 }
 
 func enterpriseManagedHookRuntimeNoop(connectorName string) bool {
+	// Cobra passes the raw flag value ("ClaudeCode" for --connector
+	// ClaudeCode), but hookConnectorFromArgs caches the lowercase form
+	// ("claudecode"). Without normalization here the snapshot cache would
+	// key on a case that enterpriseManagedHookRuntimeEndpoint's lowercase
+	// comparison never matches, so events would silently fail closed to
+	// 127.0.0.1:1 with no recorded reason.
+	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
 	executable := nativeHookExecutable()
 	nativeEnterpriseHookRuntimeSnapshot.Lock()
 	if nativeEnterpriseHookRuntimeSnapshot.prepared &&
@@ -267,6 +274,9 @@ func enterpriseManagedHookRuntimeFailureReason() string {
 func enterpriseManagedHookRuntimeEndpoint(
 	connectorName string,
 ) (gatewayAddr, gatewayServiceName string, ok bool) {
+	// Normalize identically to enterpriseManagedHookRuntimeNoop so the
+	// snapshot cache lookup matches regardless of the caller's casing.
+	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
 	nativeEnterpriseHookRuntimeSnapshot.Lock()
 	defer nativeEnterpriseHookRuntimeSnapshot.Unlock()
 	return nativeEnterpriseHookRuntimeSnapshot.gatewayAddr,
@@ -274,8 +284,7 @@ func enterpriseManagedHookRuntimeEndpoint(
 		nativeEnterpriseHookRuntimeSnapshot.prepared &&
 			nativeEnterpriseHookRuntimeSnapshot.err == nil &&
 			nativeEnterpriseHookRuntimeSnapshot.registered &&
-			nativeEnterpriseHookRuntimeSnapshot.connector ==
-				strings.ToLower(strings.TrimSpace(connectorName))
+			nativeEnterpriseHookRuntimeSnapshot.connector == connectorName
 }
 
 type nativeHookInstallState struct {

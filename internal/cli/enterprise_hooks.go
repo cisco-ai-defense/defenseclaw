@@ -1219,6 +1219,10 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		}
 		dirs := append([]string{filepath.Dir(filepath.Clean(enterpriseHookManifest))}, run.WatchDirs...)
 		if err := syncEnterpriseHookWatchDirs(fsw, watched, dirs); err != nil {
+			// Match the runEnterpriseHookReconcileOnce error path: mark
+			// retry so the caller schedules a backoff attempt rather than
+			// waiting for the periodic interval to recover.
+			repairRetryNeeded = true
 			return false, fmt.Errorf("enterprise hooks watch: synchronize watch directories: %w", err)
 		}
 		// Rebuild the owned-file allowlists from this run. The
