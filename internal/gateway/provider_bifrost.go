@@ -690,12 +690,6 @@ func toBifrostChatRequest(provider schemas.ModelProvider, model string, req *Cha
 	if req.TopP != nil {
 		bReq.Params.TopP = req.TopP
 	}
-	if req.FrequencyPenalty != nil {
-		bReq.Params.FrequencyPenalty = req.FrequencyPenalty
-	}
-	if req.PresencePenalty != nil {
-		bReq.Params.PresencePenalty = req.PresencePenalty
-	}
 	if len(req.Stop) > 0 {
 		var stopArr []string
 		if json.Unmarshal(req.Stop, &stopArr) == nil {

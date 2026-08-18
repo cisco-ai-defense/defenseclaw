@@ -8,21 +8,81 @@ package connector
 import (
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"sync"
 	"syscall"
 	"unsafe"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
 
 func codexSystemRequirementsPath() (string, error) {
-	programData, err := windows.KnownFolderPath(windows.FOLDERID_ProgramData, windows.KF_FLAG_DEFAULT)
+	programData, err := winpath.TrustedProgramData()
 	if err != nil {
 		return "", err
 	}
 	return filepath.Join(programData, "OpenAI", "Codex", "requirements.toml"), nil
+}
+
+func validateCodexManagedAgentExecutable(path string, managedEnterprise bool) error {
+	if !managedEnterprise {
+		return nil
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("inspect selected managed Codex executable: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("selected managed Codex executable is not a regular file: %s", path)
+	}
+	if err := managed.ValidateTrustedFilePath(path, "selected managed Codex executable"); err != nil {
+		return fmt.Errorf("selected managed Codex executable is untrusted: %w", err)
+	}
+	return nil
+}
+
+func readCodexSystemRequirements(path string, managedEnterprise bool) ([]byte, bool, error) {
+	if !managedEnterprise {
+		return readLegacyCodexSystemRequirements(path)
+	}
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		parent := filepath.Dir(path)
+		parentInfo, parentErr := os.Lstat(parent)
+		if errors.Is(parentErr, os.ErrNotExist) {
+			return nil, false, fmt.Errorf(
+				"managed Codex requirements parent %s is missing; pre-provision it with an Administrator/System-only owner and DACL",
+				parent,
+			)
+		}
+		if parentErr != nil {
+			return nil, false, fmt.Errorf("inspect managed Codex requirements parent %s: %w", parent, parentErr)
+		}
+		if !parentInfo.IsDir() || parentInfo.Mode()&os.ModeSymlink != 0 {
+			return nil, false, fmt.Errorf("managed Codex requirements parent is not a regular directory: %s", parent)
+		}
+		if trustErr := managed.ValidateTrustedRuntimeDir(parent, "managed Codex requirements parent"); trustErr != nil {
+			return nil, false, fmt.Errorf("managed Codex requirements parent is untrusted: %w", trustErr)
+		}
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, false, fmt.Errorf("managed Codex requirements source is not a regular file")
+	}
+	if info.Size() > codexPolicyMessageLimit {
+		return nil, false, fmt.Errorf("exceeds %d bytes", codexPolicyMessageLimit)
+	}
+	if err := managed.ValidateTrustedFilePath(path, "managed Codex requirements source"); err != nil {
+		return nil, false, fmt.Errorf("managed Codex requirements source is untrusted: %w", err)
+	}
+	return readBoundedCodexSystemRequirements(path)
 }
 
 // startCodexAppServerTree starts the inspector suspended, assigns it to a

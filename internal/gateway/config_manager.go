@@ -91,7 +91,7 @@ type ConfigManager struct {
 	observabilityV8 hookLifecycleMetricV8Runtime
 
 	// envConfigPath is the AVC-authored env_config.json (see
-	// config.DefaultEnvConfigPath). When set, Reload overlays
+	// config.ResolveDefaultEnvConfigPath). When set, Reload overlays
 	// cisco_ai_defense_endpoint from that file on top of the
 	// config.yaml value before diffing, and Run adds the file's parent
 	// directory to the fsnotify watch set so a late-arriving

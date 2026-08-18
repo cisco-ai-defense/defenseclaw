@@ -23,6 +23,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -155,6 +156,12 @@ type Sidecar struct {
 	// for the sidecar's lifetime. Managed-mode wiring only.
 	cmidProviderMu   sync.Mutex
 	cmidProviderInst cloudreg.Provider
+
+	// Last outcome of building the managed cloud auth provider, so
+	// /health can report whether inspection is reachable.
+	inspectionMu        sync.RWMutex
+	inspectionAvailable bool
+	inspectionDetail    string
 }
 
 // osToastSenderFor returns the sender the OS-toast lane of the
@@ -715,10 +722,14 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	// managed_enterprise: wire the AVC-authored env_config.json so the
 	// ConfigManager overlays cisco_ai_defense_endpoint on every reload
 	// and watches its parent dir for late arrivals (AVC packaging can
-	// drop the file AFTER DefenseClaw is installed). Opensource installs
-	// skip this call and get the pre-overlay behavior verbatim.
+	// drop the file AFTER DefenseClaw is installed). OSS installs skip
+	// this call and get the pre-overlay behavior verbatim.
 	if managed.IsManagedEnterprise(s.currentConfig().DeploymentMode) {
-		s.configMgr.SetEnvConfigPath(config.DefaultEnvConfigPath)
+		envConfigPath, err := config.ResolveDefaultEnvConfigPath()
+		if err != nil {
+			return fmt.Errorf("resolve managed env_config path: %w", err)
+		}
+		s.configMgr.SetEnvConfigPath(envConfigPath)
 	}
 	configStartupReady := make(chan error, 1)
 	wg.Add(1)
@@ -2002,16 +2013,65 @@ func (s *Sidecar) ensureCMIDProvider(ctx context.Context) (cloudreg.Provider, er
 	if s.cmidProviderInst != nil {
 		return s.cmidProviderInst, nil
 	}
-	cfg := s.currentConfig()
-	prov, err := cloudreg.New(cloudreg.Config{LibPath: cfg.CloudAuth.LibPath})
+	prov, err := s.buildCMIDProvider(ctx)
+	s.setInspectionAvailability(err)
+	if err != nil {
+		return nil, err
+	}
+	s.cmidProviderInst = prov
+	return prov, nil
+}
+
+func (s *Sidecar) buildCMIDProvider(ctx context.Context) (cloudreg.Provider, error) {
+	libPath := strings.TrimSpace(s.currentConfig().CloudAuth.LibPath)
+	if libPath == "" {
+		// Secure Client nests the identity library under version
+		// directories that move on its own upgrade schedule, so it
+		// cannot be pinned at install time. Finding nothing leaves the
+		// provider its own default.
+		libPath = managed.DiscoverCMIDLibrary()
+	}
+	if libPath != "" {
+		// This is the one config value that ends in native code running
+		// inside the gateway's service account, so it faces the same path
+		// trust the deployment demands of every other artifact: an
+		// administrator-owned library, on an administrator-owned path. An
+		// empty value leaves the provider to find its own library.
+		if err := managed.ValidateTrustedFilePath(libPath, "managed cloud auth library"); err != nil {
+			return nil, fmt.Errorf("refusing untrusted managed cloud auth library: %w", err)
+		}
+	}
+	prov, err := cloudreg.New(cloudreg.Config{LibPath: libPath})
 	if err != nil {
 		return nil, err
 	}
 	if err := prov.Refresh(ctx); err != nil {
 		return nil, err
 	}
-	s.cmidProviderInst = prov
 	return prov, nil
+}
+
+// setInspectionAvailability records whether managed inspection can reach
+// a credential provider. A failure here is what makes pickInspector
+// return nil, so /health reports it alongside enforcement mode.
+func (s *Sidecar) setInspectionAvailability(err error) {
+	s.inspectionMu.Lock()
+	defer s.inspectionMu.Unlock()
+	s.inspectionAvailable = err == nil
+	if err != nil {
+		s.inspectionDetail = err.Error()
+		return
+	}
+	s.inspectionDetail = ""
+}
+
+// inspectionAvailability reports the last managed-inspection outcome.
+// False until a provider has been built at least once, which is why the
+// managed guardrail probes at startup.
+func (s *Sidecar) inspectionAvailability() (bool, string) {
+	s.inspectionMu.RLock()
+	defer s.inspectionMu.RUnlock()
+	return s.inspectionAvailable, s.inspectionDetail
 }
 
 func (s *Sidecar) apiSnapshot() *APIServer {
@@ -3506,6 +3566,23 @@ func (s *Sidecar) runManagedEnterpriseMultiHookGuardrail(ctx context.Context, re
 		return nil
 	}
 
+	// Managed mode disables the local detectors, so remote inspection is
+	// all that stands between a tool call and its upstream. A build with
+	// no credential factory can never reach it.
+	if !cloudreg.Registered() {
+		err := fmt.Errorf(
+			"managed_enterprise requires managed-cloud support: %w",
+			cloudreg.ErrNoProviderRegistered,
+		)
+		s.health.SetGuardrail(StateError, err.Error(), nil)
+		return err
+	}
+	// A registered factory that fails now may only be waiting on the
+	// local agent, so probe once and report rather than refuse.
+	if _, err := s.ensureCMIDProvider(ctx); err != nil {
+		fmt.Fprintf(os.Stderr, "[guardrail] managed_enterprise: inspection unavailable at boot: %v\n", err)
+	}
+
 	type managedConnectorRegistration struct {
 		conn connector.Connector
 		opts connector.SetupOpts
@@ -3581,15 +3658,24 @@ func (s *Sidecar) runManagedEnterpriseMultiHookGuardrail(ctx context.Context, re
 			enforcementEnabled = hookEnforcement
 			hint = "hook-only connectors talk directly to their native upstreams; enterprise hook guardian owns installation and repair"
 		}
-		s.health.SetGuardrail(state, status, map[string]interface{}{
-			"summary":             summary,
-			"connectors":          succeeded,
-			"enforcement_enabled": enforcementEnabled,
-			"proxy_port":          "closed",
-			"hint":                hint,
-			"lifecycle_manager":   "enterprise_hook_guardian",
-			"guardian_verified":   covered,
-		})
+		inspectionAvailable, inspectionDetail := s.inspectionAvailability()
+		detail := map[string]interface{}{
+			"summary":              summary,
+			"connectors":           succeeded,
+			"enforcement_enabled":  enforcementEnabled,
+			"inspection_available": inspectionAvailable,
+			"proxy_port":           "closed",
+			"hint":                 hint,
+			"lifecycle_manager":    "enterprise_hook_guardian",
+			"guardian_verified":    covered,
+		}
+		if !inspectionAvailable {
+			detail["inspection_error"] = inspectionDetail
+			// enforcement_enabled describes the configured hook mode, so
+			// say plainly that nothing is inspecting behind it.
+			detail["hint"] = "remote inspection is unreachable; tool calls are not being inspected"
+		}
+		s.health.SetGuardrail(state, status, detail)
 	}
 	publishHealth()
 	fmt.Fprintf(os.Stderr, "[guardrail] managed_enterprise multi-connector hook mode: %d connector(s): %s — proxy port closed; enterprise hook guardian owns hook files\n", len(succeeded), strings.Join(succeeded, ", "))
@@ -3607,30 +3693,121 @@ func (s *Sidecar) runManagedEnterpriseMultiHookGuardrail(ctx context.Context, re
 }
 
 type managedGuardianAuthorization struct {
-	ProtectedTargets []struct {
-		Connector string `json:"connector"`
-		OK        bool   `json:"ok"`
-	} `json:"protected_targets"`
+	Version          int                                  `json:"version"`
+	UpdatedAt        string                               `json:"updated_at"`
+	OK               bool                                 `json:"ok"`
+	TargetCount      int                                  `json:"target_count"`
+	SuccessCount     int                                  `json:"success_count"`
+	FailureCount     int                                  `json:"failure_count"`
+	ProtectedTargets []managedGuardianAuthorizationTarget `json:"protected_targets"`
 }
+
+type managedGuardianAuthorizationTarget struct {
+	User      string                              `json:"user,omitempty"`
+	UserHome  string                              `json:"user_home,omitempty"`
+	SID       string                              `json:"sid,omitempty"`
+	Connector string                              `json:"connector"`
+	OK        bool                                `json:"ok"`
+	Error     string                              `json:"error,omitempty"`
+	Result    *managedGuardianAuthorizationResult `json:"result,omitempty"`
+}
+
+type managedGuardianAuthorizationResult struct {
+	Connector       string   `json:"connector"`
+	UserHome        string   `json:"user_home"`
+	DataDir         string   `json:"data_dir"`
+	HookConfigPaths []string `json:"hook_config_paths,omitempty"`
+	HookScripts     []string `json:"hook_scripts,omitempty"`
+	BackupFiles     []string `json:"backup_files,omitempty"`
+	CreatedDirs     []string `json:"created_dirs,omitempty"`
+	AgentVersion    string   `json:"agent_version,omitempty"`
+	HookContractID  string   `json:"hook_contract_id,omitempty"`
+}
+
+const managedGuardianAuthorizationMaxBytes int64 = 4 << 20
 
 func managedGuardianCoversConnectors(dataDir string, connectorNames []string) (bool, string) {
 	path := managed.HookGuardianAuthorizationPath(dataDir)
 	if err := validateManagedGuardianAuthorization(path, "hook guardian authorization"); err != nil {
 		return false, err.Error()
 	}
-	data, err := os.ReadFile(path)
+	file, err := os.Open(path)
+	if err != nil {
+		return false, fmt.Sprintf("open hook guardian authorization: %v", err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		return false, fmt.Sprintf("inspect hook guardian authorization: %v", err)
+	}
+	if !info.Mode().IsRegular() {
+		return false, "hook guardian authorization is not a regular file"
+	}
+	if info.Size() > managedGuardianAuthorizationMaxBytes {
+		return false, fmt.Sprintf(
+			"hook guardian authorization exceeds %d bytes",
+			managedGuardianAuthorizationMaxBytes,
+		)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, managedGuardianAuthorizationMaxBytes+1))
 	if err != nil {
 		return false, fmt.Sprintf("read hook guardian authorization: %v", err)
 	}
+	if int64(len(data)) > managedGuardianAuthorizationMaxBytes {
+		return false, fmt.Sprintf(
+			"hook guardian authorization exceeds %d bytes",
+			managedGuardianAuthorizationMaxBytes,
+		)
+	}
 	var authorization managedGuardianAuthorization
-	if err := json.Unmarshal(data, &authorization); err != nil {
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&authorization); err != nil {
 		return false, fmt.Sprintf("parse hook guardian authorization: %v", err)
 	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return false, "parse hook guardian authorization: trailing content"
+	}
+	if authorization.Version != 1 {
+		return false, fmt.Sprintf("hook guardian authorization has unsupported version %d", authorization.Version)
+	}
+	if err := managed.ValidateHookGuardianFreshness(authorization.UpdatedAt, time.Now()); err != nil {
+		return false, fmt.Sprintf("hook guardian authorization is not fresh: %v", err)
+	}
+	if !authorization.OK ||
+		authorization.TargetCount < 0 ||
+		authorization.SuccessCount < 0 ||
+		authorization.FailureCount < 0 ||
+		authorization.FailureCount != 0 ||
+		authorization.SuccessCount != authorization.TargetCount ||
+		authorization.TargetCount != len(authorization.ProtectedTargets) {
+		return false, fmt.Sprintf(
+			"hook guardian authorization is incomplete (%d/%d targets succeeded, %d failed)",
+			authorization.SuccessCount,
+			authorization.TargetCount,
+			authorization.FailureCount,
+		)
+	}
 	covered := make(map[string]struct{}, len(authorization.ProtectedTargets))
+	targets := make(map[string]struct{}, len(authorization.ProtectedTargets))
 	for _, target := range authorization.ProtectedTargets {
-		if target.OK {
-			covered[strings.ToLower(strings.TrimSpace(target.Connector))] = struct{}{}
+		if !target.OK || strings.TrimSpace(target.Error) != "" {
+			return false, "hook guardian authorization contains an unsuccessful protected target"
 		}
+		connectorName := strings.ToLower(strings.TrimSpace(target.Connector))
+		if connectorName == "" && target.Result != nil {
+			connectorName = strings.ToLower(strings.TrimSpace(target.Result.Connector))
+		}
+		key := managedGuardianTargetKey(target, connectorName)
+		if connectorName == "" || key == "" {
+			return false, "hook guardian authorization contains an incomplete protected target"
+		}
+		if _, duplicate := targets[key]; duplicate {
+			return false, fmt.Sprintf("hook guardian authorization contains duplicate protected target %q", key)
+		}
+		targets[key] = struct{}{}
+		covered[connectorName] = struct{}{}
 	}
 	for _, name := range connectorNames {
 		if _, ok := covered[strings.ToLower(strings.TrimSpace(name))]; !ok {
@@ -3638,6 +3815,26 @@ func managedGuardianCoversConnectors(dataDir string, connectorNames []string) (b
 		}
 	}
 	return true, ""
+}
+
+func managedGuardianTargetKey(target managedGuardianAuthorizationTarget, connectorName string) string {
+	if connectorName == "" {
+		return ""
+	}
+	if sid := strings.ToUpper(strings.TrimSpace(target.SID)); sid != "" {
+		return connectorName + "\x00sid\x00" + sid
+	}
+	if userName := strings.TrimSpace(target.User); userName != "" {
+		return connectorName + "\x00user\x00" + userName
+	}
+	home := strings.TrimSpace(target.UserHome)
+	if home == "" && target.Result != nil {
+		home = strings.TrimSpace(target.Result.UserHome)
+	}
+	if home == "" {
+		return ""
+	}
+	return connectorName + "\x00home\x00" + filepath.Clean(home)
 }
 
 func connectorNames(conns []connector.Connector) []string {

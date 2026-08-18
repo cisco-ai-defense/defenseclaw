@@ -25,6 +25,16 @@ import (
 	"syscall"
 )
 
+// DefaultEnvConfigPath is the AVC drop location on Unix managed installs.
+// See the doc comment on the package-level declaration in env_config.go.
+const DefaultEnvConfigPath = "/opt/cisco/secureclient/defenseclaw/env_config.json"
+
+// ResolveDefaultEnvConfigPath returns the fixed AVC-owned Unix drop location.
+func ResolveDefaultEnvConfigPath() (string, error) {
+	return DefaultEnvConfigPath, nil
+}
+
+
 // openEnvConfig opens path with O_NOFOLLOW so a symlinked env_config
 // (attacker replacement between stat and read on Unix) is rejected up
 // front. The returned *os.File is used both for Fstat trust checks

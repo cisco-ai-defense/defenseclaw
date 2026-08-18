@@ -57,7 +57,12 @@ const (
 	hookResponseGrace         = time.Second
 )
 
-var errInvalidHookRequest = errors.New("invalid hook request")
+var (
+	errInvalidHookRequest           = errors.New("invalid hook request")
+	errManagedGatewayPeerUnverified = errors.New("enterprise managed gateway peer unverified")
+)
+
+const managedGatewayPeerUnverifiedReason = "enterprise_managed_gateway_peer_unverified"
 
 // Options configures a single hook invocation. The CLI entrypoint fills these
 // from flags + environment; tests construct them directly so the full decision
@@ -89,9 +94,17 @@ type Options struct {
 	// StrictAvailability mirrors DEFENSECLAW_STRICT_AVAILABILITY: when true,
 	// transport failures and a missing token fail closed instead of open.
 	StrictAvailability bool
-	// ManagedEnterprise marks an administrator-managed runtime. User-owned
-	// Home/.disabled state must never turn that policy into a no-op.
+	// ManagedEnterprise marks an administrator-enrolled native hook. User
+	// deletion of Home or creation of Home\.disabled is tampering, not an
+	// operator-requested no-op, and must therefore fail closed.
 	ManagedEnterprise bool
+	// ManagedRuntimeFailure is a stable, non-sensitive resolver diagnostic
+	// selected before target-owned runtime files are consulted.
+	ManagedRuntimeFailure string
+	// ManagedGatewayServiceName is the administrator-protected SCM identity
+	// that must own the connected loopback listener before any HTTP bytes are
+	// written. It is ignored outside ManagedEnterprise mode.
+	ManagedGatewayServiceName string
 
 	// MaxBody overrides the stdin cap in bytes (default defaultMaxBody).
 	MaxBody int64
@@ -133,19 +146,42 @@ func Run(ctx context.Context, opts Options) int {
 		fmt.Fprintf(opts.Stderr, "defenseclaw: unknown hook connector %q\n", opts.Connector)
 		return blockExit
 	}
+	failMode := normalizeFailMode(opts.FailMode)
+	if opts.ManagedEnterprise && strings.TrimSpace(opts.ManagedRuntimeFailure) != "" {
+		return failUnreachable(
+			opts,
+			sp,
+			"closed",
+			strings.TrimSpace(opts.ManagedRuntimeFailure),
+		)
+	}
 
 	// DEFENSECLAW_HOME guard: an ordinary removed/disabled installation is an
 	// intentional no-op. Administrator-managed hooks carry ManagedEnterprise
 	// (and invalid runtimes also set StrictAvailability), so a missing or
 	// disabled machine-policy home must block instead of bypassing enforcement.
 	if info, err := os.Stat(opts.Home); err != nil || !info.IsDir() {
+		if opts.ManagedEnterprise {
+			return failUnreachable(
+				opts,
+				sp,
+				"closed",
+				"enterprise_managed_runtime_home_missing",
+			)
+		}
 		return handleUnavailableHome(opts, sp, "DefenseClaw home is unavailable")
 	}
 	if _, err := os.Stat(filepath.Join(opts.Home, ".disabled")); err == nil {
+		if opts.ManagedEnterprise {
+			return failUnreachable(
+				opts,
+				sp,
+				"closed",
+				"enterprise_managed_runtime_disable_sentinel_forbidden",
+			)
+		}
 		return handleUnavailableHome(opts, sp, "DefenseClaw home is disabled")
 	}
-
-	failMode := normalizeFailMode(opts.FailMode)
 
 	payload, overflow, err := readCapped(opts.Stdin, opts.MaxBody)
 	if err != nil {
@@ -161,7 +197,19 @@ func Run(ctx context.Context, opts Options) int {
 		if requestTimeout <= 0 {
 			return failUnreachable(opts, sp, failMode, "hook request budget exhausted before gateway contact")
 		}
-		opts.HTTPClient = defaultHTTPClient(requestTimeout)
+		if opts.ManagedEnterprise {
+			var err error
+			opts.HTTPClient, err = managedEnterpriseHTTPClient(
+				requestTimeout,
+				opts.APIAddr,
+				opts.ManagedGatewayServiceName,
+			)
+			if err != nil {
+				return failUnreachable(opts, sp, "closed", managedGatewayPeerUnverifiedReason)
+			}
+		} else {
+			opts.HTTPClient = defaultHTTPClient(requestTimeout)
+		}
 		var cancel context.CancelFunc
 		ctx, cancel = context.WithTimeout(ctx, requestTimeout)
 		defer cancel()
@@ -189,7 +237,11 @@ func Run(ctx context.Context, opts Options) int {
 
 	token := opts.Token
 	if scopedTokenFile || token == "" {
-		token = readTokenFile(tokenFile, scopedTokenFile)
+		token = readTokenFileForMode(
+			tokenFile,
+			scopedTokenFile,
+			opts.ManagedEnterprise,
+		)
 	}
 
 	return doRequest(ctx, opts, sp, failMode, payload, token)
@@ -217,7 +269,11 @@ func RunCodexNotify(ctx context.Context, opts Options, payload []byte) int {
 	}
 	token := opts.Token
 	if scopedTokenFile || token == "" {
-		token = readTokenFile(tokenFile, scopedTokenFile)
+		token = readTokenFileForMode(
+			tokenFile,
+			scopedTokenFile,
+			opts.ManagedEnterprise,
+		)
 	}
 
 	notifyCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
@@ -240,11 +296,27 @@ func RunCodexNotify(ctx context.Context, opts Options, payload []byte) int {
 		req.Header.Set("tracestate", v)
 	}
 	if opts.HTTPClient == nil {
-		opts.HTTPClient = defaultHTTPClient(defaultHookRequestTimeout)
+		if opts.ManagedEnterprise {
+			var err error
+			opts.HTTPClient, err = managedEnterpriseHTTPClient(
+				defaultHookRequestTimeout,
+				opts.APIAddr,
+				opts.ManagedGatewayServiceName,
+			)
+			if err != nil {
+				fmt.Fprintln(opts.Stderr, managedGatewayPeerUnverifiedReason)
+				return 0
+			}
+		} else {
+			opts.HTTPClient = defaultHTTPClient(defaultHookRequestTimeout)
+		}
 	}
 
 	resp, err := opts.HTTPClient.Do(req)
 	if err != nil {
+		if opts.ManagedEnterprise && errors.Is(err, errManagedGatewayPeerUnverified) {
+			fmt.Fprintln(opts.Stderr, managedGatewayPeerUnverifiedReason)
+		}
 		return 0
 	}
 	defer resp.Body.Close()
@@ -271,7 +343,11 @@ func doRequest(ctx context.Context, opts Options, sp spec, failMode string, payl
 		}
 	}
 	if err != nil {
-		return failUnreachable(opts, sp, failMode, "gateway unreachable")
+		reason := "gateway unreachable"
+		if errors.Is(err, errManagedGatewayPeerUnverified) {
+			reason = managedGatewayPeerUnverifiedReason
+		}
+		return failUnreachable(opts, sp, failMode, reason)
 	}
 	defer resp.Body.Close()
 
@@ -657,11 +733,33 @@ func hookTokenFile(hookDir, connector string) (string, bool) {
 // readTokenFile parses DEFENSECLAW_GATEWAY_TOKEN out of a token sidecar,
 // which setup writes as `DEFENSECLAW_GATEWAY_TOKEN="<token>"` (Go-quoted). An
 // unreadable/empty file yields an empty token (loopback no-auth path).
+const managedHookTokenMaxBytes int64 = 64 << 10
+
 func readTokenFile(path string, allowRaw bool) string {
-	data, err := os.ReadFile(path)
+	return readTokenFileForMode(path, allowRaw, false)
+}
+
+func readTokenFileForMode(
+	path string,
+	allowRaw bool,
+	managedEnterprise bool,
+) string {
+	var (
+		data []byte
+		err  error
+	)
+	if managedEnterprise {
+		data, err = readManagedTokenFile(path, managedHookTokenMaxBytes)
+	} else {
+		data, err = os.ReadFile(path)
+	}
 	if err != nil {
 		return ""
 	}
+	return parseTokenFile(data, allowRaw)
+}
+
+func parseTokenFile(data []byte, allowRaw bool) string {
 	for _, line := range strings.Split(string(data), "\n") {
 		line = strings.TrimSpace(line)
 		line = strings.TrimPrefix(line, "export ")

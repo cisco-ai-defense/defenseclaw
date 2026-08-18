@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1006,6 +1007,151 @@ func TestSaveFreshHookContractLockEntryRefreshesIdempotentEvidence(t *testing.T)
 	}
 	if info.ModTime().Equal(old) {
 		t.Fatal("fresh boot save did not rewrite unchanged contract evidence")
+	}
+}
+
+func TestManagedHookContractLockRecoveryReproducesProtectedBytes(t *testing.T) {
+	dir := testenv.PrivateTempDir(t)
+	if err := ReconcileManagedNativeHookRuntime(
+		dir,
+		"127.0.0.1:18970",
+		"codex",
+		"scoped-test-token",
+	); err != nil {
+		t.Fatal(err)
+	}
+	const lockUpdatedAt = "2026-08-16T12:34:56.987654321Z"
+	const entryUpdatedAt = "2026-08-16T12:34:55.123456789Z"
+	entry := HookContractLockEntry{
+		Connector:    "codex",
+		ContractID:   "codex-hooks-v1",
+		HookFailMode: "closed",
+	}
+	if err := SaveRecoveredHookContractLockEntryForMode(
+		dir,
+		entry,
+		lockUpdatedAt,
+		entryUpdatedAt,
+	); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, hookContractLockFile)
+	want, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gotLockTime, gotEntryTime, err := ManagedHookContractTimestamps(dir, "codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotLockTime != lockUpdatedAt || gotEntryTime != entryUpdatedAt {
+		t.Fatalf("recovery timestamps = %q, %q", gotLockTime, gotEntryTime)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := SaveRecoveredHookContractLockEntryForMode(
+		dir,
+		entry,
+		lockUpdatedAt,
+		entryUpdatedAt,
+	); err != nil {
+		t.Fatal(err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("recovered contract bytes changed\nwant: %s\n got: %s", want, got)
+	}
+}
+
+func TestManagedHookContractLockRecoveryRejectsUnauthenticatedTimestampPair(t *testing.T) {
+	dir := testenv.PrivateTempDir(t)
+	entry := HookContractLockEntry{Connector: "codex", HookFailMode: "closed"}
+	for _, test := range []struct {
+		name      string
+		lockTime  string
+		entryTime string
+	}{
+		{name: "missing entry timestamp", lockTime: "2026-08-16T12:34:56Z"},
+		{name: "entry after lock", lockTime: "2026-08-16T12:34:56Z", entryTime: "2026-08-16T12:34:57Z"},
+		{name: "malformed", lockTime: "not-a-time", entryTime: "also-not-a-time"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := SaveRecoveredHookContractLockEntryForMode(
+				dir,
+				entry,
+				test.lockTime,
+				test.entryTime,
+			); err == nil || !strings.Contains(err.Error(), "invalid protected") {
+				t.Fatalf("recovery error = %v", err)
+			}
+		})
+	}
+}
+
+func TestManagedHookContractLockRejectsOversizedSparseFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, hookContractLockFile)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(managedHookContractLockMaxBytes + 1); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := LoadHookContractLockEntryForMode(dir, "claudecode", true); err == nil ||
+		!strings.Contains(err.Error(), "byte limit") {
+		t.Fatalf("managed contract load error = %v, want bounded rejection", err)
+	}
+	entry := HookContractLockEntry{Connector: "claudecode"}
+	if err := SaveHookContractLockEntryForMode(dir, entry, true); err == nil ||
+		!strings.Contains(err.Error(), "byte limit") {
+		t.Fatalf("managed contract update error = %v, want bounded rejection", err)
+	}
+}
+
+func TestManagedHookScriptDigestsRejectSparseArtifactWithoutChangingUnmanagedMode(t *testing.T) {
+	dir := t.TempDir()
+	hookDir := filepath.Join(dir, "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(hookDir, "_hardening.sh")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(managedHookRuntimeArtifactMaxBytes + 1); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	opts := SetupOpts{
+		DataDir:      dir,
+		AgentVersion: "2.1.152",
+	}
+	conn := NewClaudeCodeConnector()
+	if _, err := NewHookContractLockEntryForMode(
+		opts,
+		conn,
+		"test-build",
+		true,
+	); err == nil || !strings.Contains(err.Error(), "byte limit") {
+		t.Fatalf("managed digest error = %v, want bounded rejection", err)
+	}
+	unmanaged := NewHookContractLockEntry(opts, conn, "test-build")
+	if unmanaged.HookScriptDigests["_hardening.sh"] == "" {
+		t.Fatal("unmanaged digest behavior changed for an ordinary regular file")
 	}
 }
 

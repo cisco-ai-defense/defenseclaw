@@ -961,6 +961,42 @@ func TestCodexNotifyRequestWiring(t *testing.T) {
 	}
 }
 
+func TestCodexNotifyManagedEnterpriseRejectsUnverifiedPeer(t *testing.T) {
+	home := t.TempDir()
+	hookDir := filepath.Join(home, "hooks")
+	stderr := &bytes.Buffer{}
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	requests := make(chan *http.Request, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		requests <- req
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	code := RunCodexNotify(context.Background(), Options{
+		APIAddr:                   strings.TrimPrefix(server.URL, "http://"),
+		Home:                      home,
+		HookDir:                   hookDir,
+		Token:                     "managed-notify-token",
+		ManagedEnterprise:         true,
+		ManagedGatewayServiceName: "DefenseClawGateway",
+		Stderr:                    stderr,
+	}, []byte(`{"type":"agent-turn-complete"}`))
+	if code != 0 {
+		t.Fatalf("exit code = %d, want best-effort 0", code)
+	}
+	select {
+	case req := <-requests:
+		t.Fatalf("managed notify reached unverified peer with authorization %q", req.Header.Get("Authorization"))
+	default:
+	}
+	if got := strings.TrimSpace(stderr.String()); got != managedGatewayPeerUnverifiedReason {
+		t.Fatalf("managed notify error = %q, want %q", got, managedGatewayPeerUnverifiedReason)
+	}
+}
+
 func TestCodexNotifyGuardBranchesDoNotSendRequests(t *testing.T) {
 	validHome := t.TempDir()
 	disabledHome := t.TempDir()
@@ -1111,23 +1147,13 @@ func TestNonCursorDisabledOrMissingHomeIsNoop(t *testing.T) {
 	}
 }
 
-func TestStrictOrManagedAvailabilityBlocksDisabledOrMissingHome(t *testing.T) {
+func TestStrictAvailabilityBlocksDisabledOrMissingHome(t *testing.T) {
 	tests := []struct {
-		name    string
-		home    func(*testing.T) string
-		strict  bool
-		managed bool
+		name string
+		home func(*testing.T) string
 	}{
-		{name: "strict missing", strict: true, home: func(t *testing.T) string { return filepath.Join(t.TempDir(), "missing") }},
-		{name: "managed missing", managed: true, home: func(t *testing.T) string { return filepath.Join(t.TempDir(), "missing") }},
-		{name: "strict disabled", strict: true, home: func(t *testing.T) string {
-			home := t.TempDir()
-			if err := os.WriteFile(filepath.Join(home, ".disabled"), nil, 0o600); err != nil {
-				t.Fatal(err)
-			}
-			return home
-		}},
-		{name: "managed disabled", managed: true, home: func(t *testing.T) string {
+		{name: "missing", home: func(t *testing.T) string { return filepath.Join(t.TempDir(), "missing") }},
+		{name: "disabled", home: func(t *testing.T) string {
 			home := t.TempDir()
 			if err := os.WriteFile(filepath.Join(home, ".disabled"), nil, 0o600); err != nil {
 				t.Fatal(err)
@@ -1141,8 +1167,7 @@ func TestStrictOrManagedAvailabilityBlocksDisabledOrMissingHome(t *testing.T) {
 			code := Run(context.Background(), Options{
 				Connector:          "claudecode",
 				Home:               tt.home(t),
-				StrictAvailability: tt.strict,
-				ManagedEnterprise:  tt.managed,
+				StrictAvailability: true,
 				Stdout:             &stdout,
 				Stderr:             &stderr,
 			})
@@ -1150,6 +1175,85 @@ func TestStrictOrManagedAvailabilityBlocksDisabledOrMissingHome(t *testing.T) {
 				t.Fatalf("strict unavailable home = (code=%d, stdout=%q, stderr=%q)", code, stdout.String(), stderr.String())
 			}
 		})
+	}
+}
+
+func TestManagedEnterpriseMissingOrDisabledHomeFailsClosed(t *testing.T) {
+	for _, connectorName := range []string{"claudecode", "codex"} {
+		for _, tc := range []struct {
+			name       string
+			home       func(t *testing.T) string
+			diagnostic string
+		}{
+			{name: "disabled", home: func(t *testing.T) string {
+				home := t.TempDir()
+				if err := os.WriteFile(filepath.Join(home, ".disabled"), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return home
+			}, diagnostic: "enterprise_managed_runtime_disable_sentinel_forbidden"},
+			{name: "missing", home: func(t *testing.T) string {
+				return filepath.Join(t.TempDir(), "missing")
+			}, diagnostic: "enterprise_managed_runtime_home_missing"},
+		} {
+			t.Run(connectorName+"/"+tc.name, func(t *testing.T) {
+				rt := ok(`{"action":"allow"}`)
+				var out, errb bytes.Buffer
+				home := tc.home(t)
+				code := Run(context.Background(), Options{
+					Connector:          connectorName,
+					APIAddr:            "127.0.0.1:1",
+					Home:               home,
+					HookDir:            filepath.Join(home, "hooks"),
+					Token:              "target-readable-token",
+					FailMode:           "open",
+					ManagedEnterprise:  true,
+					StrictAvailability: false,
+					Stdin:              strings.NewReader("{}"),
+					Stdout:             &out,
+					Stderr:             &errb,
+					HTTPClient:         &http.Client{Transport: rt},
+				})
+				if code != blockExit {
+					t.Fatalf("code = %d, want fail-closed %d; stdout=%q stderr=%q", code, blockExit, out.String(), errb.String())
+				}
+				if rt.requests != 0 {
+					t.Fatalf("gateway called %d times, want 0", rt.requests)
+				}
+				if !strings.Contains(errb.String(), tc.diagnostic) {
+					t.Fatalf("stderr = %q, want stable diagnostic %q", errb.String(), tc.diagnostic)
+				}
+			})
+		}
+	}
+}
+
+func TestManagedEnterpriseResolverFailureBlocksBeforeRuntimeOrGateway(t *testing.T) {
+	rt := ok(`{"action":"allow"}`)
+	var out, errb bytes.Buffer
+	home := t.TempDir()
+	code := Run(context.Background(), Options{
+		Connector:             "codex",
+		APIAddr:               "127.0.0.1:1",
+		Home:                  home,
+		HookDir:               filepath.Join(home, "hooks"),
+		Token:                 "target-readable-token",
+		FailMode:              "open",
+		ManagedEnterprise:     true,
+		ManagedRuntimeFailure: "enterprise_managed_sid_unregistered",
+		Stdin:                 strings.NewReader("{}"),
+		Stdout:                &out,
+		Stderr:                &errb,
+		HTTPClient:            &http.Client{Transport: rt},
+	})
+	if code != blockExit {
+		t.Fatalf("code = %d, want fail-closed %d; stdout=%q stderr=%q", code, blockExit, out.String(), errb.String())
+	}
+	if rt.requests != 0 {
+		t.Fatalf("gateway called %d times, want 0", rt.requests)
+	}
+	if !strings.Contains(errb.String(), "enterprise_managed_sid_unregistered") {
+		t.Fatalf("stderr = %q, want stable unregistered-SID diagnostic", errb.String())
 	}
 }
 
@@ -1212,6 +1316,32 @@ func TestReadTokenFile(t *testing.T) {
 	}
 	if got := readTokenFile(path, true); got != " opaque-token " {
 		t.Errorf("raw token = %q, want opaque surrounding spaces preserved", got)
+	}
+}
+
+func TestReadTokenFileManagedRejectsOversizedSparseFileWithoutChangingUnmanagedMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".hook-codex.token")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(managedHookTokenMaxBytes + 1); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := readTokenFileForMode(path, true, true); got != "" {
+		t.Fatalf("managed oversized token returned %d bytes, want fail-closed empty token", len(got))
+	}
+	if got := readTokenFile(path, true); int64(len(got)) != managedHookTokenMaxBytes+1 {
+		t.Fatalf(
+			"unmanaged token behavior changed: length=%d want=%d",
+			len(got),
+			managedHookTokenMaxBytes+1,
+		)
 	}
 }
 

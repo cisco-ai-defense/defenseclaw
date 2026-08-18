@@ -525,14 +525,17 @@ func codexAdditionalContext(rawAction, severity, reason, mode string, wouldBlock
 	if mode != "action" && guardrailSeverityRank(severity) < severityHigh {
 		return ""
 	}
-	prefix := "DefenseClaw observed"
+	lead := "DefenseClaw observed"
+	finding := fmt.Sprintf("a %s Codex hook finding", severity)
 	if wouldBlock {
-		prefix = "DefenseClaw would block this in action mode"
+		// A full clause cannot take the article that follows "observed".
+		lead = "DefenseClaw would block this in action mode:"
+		finding = fmt.Sprintf("%s Codex hook finding", severity)
 	}
 	if reason == "" {
-		return fmt.Sprintf("%s a %s Codex hook finding.", prefix, severity)
+		return fmt.Sprintf("%s %s.", lead, finding)
 	}
-	return fmt.Sprintf("%s a %s Codex hook finding: %s", prefix, severity, reason)
+	return fmt.Sprintf("%s %s: %s", lead, finding, reason)
 }
 
 // codexObserveContextEnforcementEligible keeps the in-chat Observe warning

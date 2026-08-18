@@ -17,8 +17,14 @@ import (
 	"testing"
 )
 
+// writeEnvConfig lays down a fixture and waives the on-disk trust check
+// for it. These tests cover parsing and URL validation; the fixture is
+// owned by whoever runs the test, never the root or administrator the
+// real check demands, so without the waiver every case here would turn
+// on the trust error rather than the branch it names.
 func writeEnvConfig(t *testing.T, dir, name, body string) string {
 	t.Helper()
+	t.Setenv("DEFENSECLAW_ENV_CONFIG_SKIP_TRUST", "1")
 	p := filepath.Join(dir, name)
 	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
 		t.Fatalf("write %s: %v", p, err)

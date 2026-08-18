@@ -148,15 +148,15 @@ func validateAtomicTransformWindowsPrivateHandle(handle windows.Handle) error {
 	if err != nil || dacl == nil {
 		return fmt.Errorf("bound private state directory has no DACL")
 	}
-	user, err := windows.GetCurrentProcessToken().GetTokenUser()
-	if err != nil || user == nil || user.User.Sid == nil {
+	userSID, err := windowsEffectiveUserSID()
+	if err != nil || userSID == nil {
 		return fmt.Errorf("resolve current user for bound state directory: %w", err)
 	}
 	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
 	if err != nil {
 		return err
 	}
-	if owner == nil || !owner.Equals(user.User.Sid) {
+	if owner == nil || !owner.Equals(userSID) {
 		return fmt.Errorf("bound compare-and-swap state directory is not owned by current user")
 	}
 	var ownerMask, systemMask windows.ACCESS_MASK
@@ -172,14 +172,14 @@ func validateAtomicTransformWindowsPrivateHandle(handle windows.Handle) error {
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 		inheritOnly := ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0
 		if ace.Header.AceType == windows.ACCESS_DENIED_ACE_TYPE && ace.Mask != 0 &&
-			(sid.Equals(user.User.Sid) || sid.Equals(system) || sid.IsWellKnown(windows.WinCreatorOwnerRightsSid)) {
+			(sid.Equals(userSID) || sid.Equals(system) || sid.IsWellKnown(windows.WinCreatorOwnerRightsSid)) {
 			return fmt.Errorf("bound compare-and-swap state directory denies a trusted principal")
 		}
 		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE || ace.Mask == 0 {
 			continue
 		}
 		switch {
-		case sid.Equals(user.User.Sid) || sid.IsWellKnown(windows.WinCreatorOwnerRightsSid):
+		case sid.Equals(userSID) || sid.IsWellKnown(windows.WinCreatorOwnerRightsSid):
 			if !inheritOnly {
 				ownerMask |= ace.Mask
 			}
@@ -225,12 +225,12 @@ func atomicTransformBoundObjectAttributes(
 }
 
 func atomicTransformPrivateSecurityDescriptor() (*windows.SECURITY_DESCRIPTOR, error) {
-	user, err := windows.GetCurrentProcessToken().GetTokenUser()
-	if err != nil || user == nil || user.User.Sid == nil {
+	userSID, err := windowsEffectiveUserSID()
+	if err != nil || userSID == nil {
 		return nil, fmt.Errorf("resolve current Windows user for private CAS artifact: %w", err)
 	}
 	return windows.SecurityDescriptorFromString(fmt.Sprintf(
-		"O:%sD:P(A;;FA;;;SY)(A;;FA;;;%s)", user.User.Sid, user.User.Sid,
+		"O:%sD:P(A;;FA;;;SY)(A;;FA;;;%s)", userSID, userSID,
 	))
 }
 

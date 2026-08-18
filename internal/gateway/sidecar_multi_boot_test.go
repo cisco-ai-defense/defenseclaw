@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -448,6 +449,7 @@ func TestSetupConnectorsIsolated_InvalidRulePackDoesNotBlockValidPeer(t *testing
 
 func TestManagedMultiConnectorAllInvalidRulePacksReturnsErrorWithoutPanic(t *testing.T) {
 	resetConnectorRuleCategories(t)
+	registerFakeCloudProvider(t, newFakeCloudProvider("token"), nil)
 	mustApplyConnectorRulePack(t, "codex", secretOverridePack("STALE-CODEX", `stale_codex_token`))
 	mustApplyConnectorRulePack(t, "claudecode", secretOverridePack("STALE-CLAUDE", `stale_claude_token`))
 
@@ -588,6 +590,7 @@ func TestStartMultiHookConfigGuards_DisabledSelfHealStartsNone(t *testing.T) {
 }
 
 func TestManagedMultiHookGuardrailFailsClosedWhenScopedTokenFails(t *testing.T) {
+	registerFakeCloudProvider(t, newFakeCloudProvider("token"), nil)
 	conn := &hookBootStubConnector{bootStubConnector: bootStubConnector{stubConnector: stubConnector{name: "codex"}}}
 	reg := connector.NewRegistry()
 	reg.RegisterBuiltin(conn)
@@ -613,6 +616,7 @@ func TestManagedMultiHookGuardrailFailsClosedWhenScopedTokenFails(t *testing.T) 
 }
 
 func TestManagedMultiHookGuardrailPreflightsAllScopedTokens(t *testing.T) {
+	registerFakeCloudProvider(t, newFakeCloudProvider("token"), nil)
 	first := &bootStubConnector{stubConnector: stubConnector{name: "codex"}}
 	second := &hookBootStubConnector{bootStubConnector: bootStubConnector{stubConnector: stubConnector{name: "cursor"}}}
 	reg := connector.NewRegistry()
@@ -842,6 +846,7 @@ func TestRunGuardrailMultiManagedEnterpriseSkipsServiceHomeLifecycle(t *testing.
 	if runtime.GOOS == "windows" {
 		t.Skip("managed enterprise hook lifecycle is rejected on native Windows")
 	}
+	registerFakeCloudProvider(t, newFakeCloudProvider("token"), nil)
 	dir := t.TempDir()
 	codexConfig := filepath.Join(t.TempDir(), ".codex", "config.toml")
 	claudeSettings := filepath.Join(t.TempDir(), ".claude", "settings.json")
@@ -903,7 +908,16 @@ func TestManagedGuardianCoverageRequiresTrustedAuthorizationForEveryConnector(t 
 	validateManagedGuardianAuthorization = func(_, _ string) error { return nil }
 	t.Cleanup(func() { validateManagedGuardianAuthorization = oldValidate })
 	path := managed.HookGuardianAuthorizationPath(t.TempDir())
-	data := []byte(`{"protected_targets":[{"connector":"codex","ok":true}]}`)
+	fresh := time.Now().UTC().Format(time.RFC3339)
+	data := []byte(fmt.Sprintf(`{
+		"version":1,
+		"updated_at":%q,
+		"ok":true,
+		"target_count":1,
+		"success_count":1,
+		"failure_count":0,
+		"protected_targets":[{"user":"alice","user_home":"/home/alice","connector":"codex","ok":true}]
+	}`, fresh))
 	if err := os.WriteFile(path, data, 0o644); err != nil {
 		t.Fatalf("write authorization: %v", err)
 	}
@@ -913,6 +927,140 @@ func TestManagedGuardianCoverageRequiresTrustedAuthorizationForEveryConnector(t 
 	}
 	if ok, _ := managedGuardianCoversConnectors("unused", []string{"codex", "claudecode"}); ok {
 		t.Fatal("partial guardian authorization reported full connector coverage")
+	}
+
+	partial := []byte(fmt.Sprintf(`{
+		"version":1,
+		"updated_at":%q,
+		"ok":false,
+		"target_count":2,
+		"success_count":1,
+		"failure_count":1,
+		"protected_targets":[{"user":"alice","user_home":"/home/alice","connector":"codex","ok":true}]
+	}`, fresh))
+	if err := os.WriteFile(path, partial, 0o644); err != nil {
+		t.Fatalf("write partial authorization: %v", err)
+	}
+	if ok, _ := managedGuardianCoversConnectors("unused", []string{"codex"}); ok {
+		t.Fatal("aggregate target failure reported connector coverage through a stale successful row")
+	}
+}
+
+func TestManagedGuardianCoverageRejectsInvalidAuthorizationLedger(t *testing.T) {
+	authorizationDir := t.TempDir()
+	t.Setenv(managed.HookGuardianAuthorizationDirEnv, authorizationDir)
+	oldValidate := validateManagedGuardianAuthorization
+	validateManagedGuardianAuthorization = func(_, _ string) error { return nil }
+	t.Cleanup(func() { validateManagedGuardianAuthorization = oldValidate })
+	path := managed.HookGuardianAuthorizationPath(t.TempDir())
+
+	tests := []struct {
+		name string
+		data string
+	}{
+		{name: "corrupt", data: `{"version":`},
+		{name: "partial", data: `{
+			"version":1,"updated_at":"2026-07-29T12:00:00Z","ok":false,
+			"target_count":2,"success_count":1,"failure_count":1,
+			"protected_targets":[{"user":"alice","connector":"codex","ok":true}]
+		}`},
+		{name: "stale_extra_target", data: `{
+			"version":1,"updated_at":"2026-07-29T12:00:00Z","ok":true,
+			"target_count":1,"success_count":1,"failure_count":0,
+			"protected_targets":[
+				{"user":"alice","connector":"codex","ok":true},
+				{"user":"retired","connector":"codex","ok":true}
+			]
+		}`},
+		{name: "duplicate_target", data: `{
+			"version":1,"updated_at":"2026-07-29T12:00:00Z","ok":true,
+			"target_count":2,"success_count":2,"failure_count":0,
+			"protected_targets":[
+				{"sid":"S-1-5-21-1-2-3-1001","connector":"codex","ok":true},
+				{"sid":"s-1-5-21-1-2-3-1001","connector":"codex","ok":true}
+			]
+		}`},
+		{name: "unsuccessful_target", data: `{
+			"version":1,"updated_at":"2026-07-29T12:00:00Z","ok":true,
+			"target_count":1,"success_count":1,"failure_count":0,
+			"protected_targets":[{"user":"alice","connector":"codex","ok":false,"error":"tampered"}]
+		}`},
+		{name: "incomplete_target", data: `{
+			"version":1,"updated_at":"2026-07-29T12:00:00Z","ok":true,
+			"target_count":1,"success_count":1,"failure_count":0,
+			"protected_targets":[{"connector":"codex","ok":true}]
+		}`},
+		{name: "unknown_field", data: `{
+			"version":1,"updated_at":"2026-07-29T12:00:00Z","ok":true,
+			"target_count":1,"success_count":1,"failure_count":0,"unexpected":true,
+			"protected_targets":[{"user":"alice","connector":"codex","ok":true}]
+		}`},
+		{name: "trailing_content", data: `{
+			"version":1,"updated_at":"2026-07-29T12:00:00Z","ok":true,
+			"target_count":1,"success_count":1,"failure_count":0,
+			"protected_targets":[{"user":"alice","connector":"codex","ok":true}]
+		}{}`},
+	}
+	tests = append(tests,
+		struct {
+			name string
+			data string
+		}{
+			name: "stale_timestamp",
+			data: fmt.Sprintf(`{
+				"version":1,"updated_at":%q,"ok":true,
+				"target_count":1,"success_count":1,"failure_count":0,
+				"protected_targets":[{"user":"alice","connector":"codex","ok":true}]
+			}`, time.Now().Add(-managed.HookGuardianMaxAge-time.Minute).UTC().Format(time.RFC3339)),
+		},
+		struct {
+			name string
+			data string
+		}{
+			name: "future_timestamp",
+			data: fmt.Sprintf(`{
+				"version":1,"updated_at":%q,"ok":true,
+				"target_count":1,"success_count":1,"failure_count":0,
+				"protected_targets":[{"user":"alice","connector":"codex","ok":true}]
+			}`, time.Now().Add(managed.HookGuardianFutureSkew+time.Minute).UTC().Format(time.RFC3339)),
+		},
+	)
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(path, []byte(tc.data), 0o644); err != nil {
+				t.Fatalf("write authorization: %v", err)
+			}
+			if ok, reason := managedGuardianCoversConnectors("unused", []string{"codex"}); ok {
+				t.Fatalf("invalid authorization reported coverage; reason=%q", reason)
+			}
+		})
+	}
+}
+
+func TestManagedGuardianCoverageRejectsOversizedAuthorizationLedger(t *testing.T) {
+	authorizationDir := t.TempDir()
+	t.Setenv(managed.HookGuardianAuthorizationDirEnv, authorizationDir)
+	oldValidate := validateManagedGuardianAuthorization
+	validateManagedGuardianAuthorization = func(_, _ string) error { return nil }
+	t.Cleanup(func() { validateManagedGuardianAuthorization = oldValidate })
+	path := managed.HookGuardianAuthorizationPath(t.TempDir())
+
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatalf("create sparse authorization: %v", err)
+	}
+	if err := file.Truncate(managedGuardianAuthorizationMaxBytes + 1); err != nil {
+		_ = file.Close()
+		t.Fatalf("truncate sparse authorization: %v", err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatalf("close sparse authorization: %v", err)
+	}
+
+	if ok, reason := managedGuardianCoversConnectors("unused", []string{"codex"}); ok {
+		t.Fatal("oversized guardian authorization reported connector coverage")
+	} else if !strings.Contains(reason, "exceeds") {
+		t.Fatalf("oversized authorization reason = %q, want bounded refusal", reason)
 	}
 }
 

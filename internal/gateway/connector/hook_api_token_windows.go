@@ -14,6 +14,7 @@ import (
 	"strings"
 	"unsafe"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
@@ -343,6 +344,9 @@ func hookAPIRejectUntrustedWindowsWriteACEs(path string, dacl *windows.ACL, want
 		if inheritOnly && hookAPIWindowsCreatorOwnerTemplate(sid) {
 			continue
 		}
+		if !protectChildren && hookAPIWindowsStockAncestorGrant(ace.Mask, sid) {
+			continue
+		}
 		if !hookAPIWindowsTrustedPrincipal(sid) {
 			return fmt.Errorf("untrusted Windows principal %s has write-like access mask 0x%x on %s", hookAPIWindowsSIDString(sid), uint32(ace.Mask), path)
 		}
@@ -382,6 +386,17 @@ func hookAPIWindowsWriteLikeAccess(mask windows.ACCESS_MASK, protectChildren boo
 	return mask&(unsafe|fileDeleteChild) != 0
 }
 
+// hookAPIWindowsStockAncestorGrant reports whether mask is the grant Windows
+// makes to BUILTIN\Users on roots like C:\ProgramData: add-file and
+// write-EA/attributes, none of which can replace an existing child. Limited to
+// that principal so an ancestor opened up to Everyone is still rejected.
+func hookAPIWindowsStockAncestorGrant(mask windows.ACCESS_MASK, sid *windows.SID) bool {
+	if sid == nil || !sid.IsWellKnown(windows.WinBuiltinUsersSid) {
+		return false
+	}
+	return !managed.WindowsAncestorReplaceAccess(mask)
+}
+
 func hookAPIWindowsTrustedPrincipal(sid *windows.SID) bool {
 	if sid == nil {
 		return false
@@ -389,8 +404,19 @@ func hookAPIWindowsTrustedPrincipal(sid *windows.SID) bool {
 	if sid.IsWellKnown(windows.WinBuiltinAdministratorsSid) || sid.IsWellKnown(windows.WinLocalSystemSid) {
 		return true
 	}
-	currentUser, err := windows.GetCurrentProcessToken().GetTokenUser()
-	if err == nil && currentUser != nil && currentUser.User.Sid != nil && sid.Equals(currentUser.User.Sid) {
+	// Managed Windows services pin one exact virtual gateway account in their
+	// administrator-owned SCM environment. Runtime token paths deliberately
+	// grant that SID Modify so the gateway can mint/rotate scoped tokens. No
+	// service SID exception exists in normal mode, and malformed or unresolved
+	// accounts fail closed.
+	if managed.IsManagedEnterprise(os.Getenv(managed.DeploymentModeEnv)) {
+		serviceSID, err := managed.WindowsServiceAccountSID(os.Getenv(managed.WindowsServiceAccountEnv))
+		if err == nil && serviceSID != nil && sid.Equals(serviceSID) {
+			return true
+		}
+	}
+	currentSID, err := windowsEffectiveUserSID()
+	if err == nil && currentSID != nil && sid.Equals(currentSID) {
 		return true
 	}
 	trustedInstaller, err := windows.StringToSid("S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464")
