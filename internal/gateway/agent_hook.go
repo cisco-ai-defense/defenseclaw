@@ -17,11 +17,13 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"runtime/debug"
@@ -158,7 +160,8 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			return
 		}
 
-		payload, b, err := rawPayloadFromJSONDecoder(json.NewDecoder(r.Body))
+		var originalBody bytes.Buffer
+		payload, b, err := rawPayloadFromJSONDecoder(json.NewDecoder(io.TeeReader(r.Body, &originalBody)))
 		if err != nil {
 			a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "invalid_json", 0)
 			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid JSON body"})
@@ -167,7 +170,7 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 
 		profile := a.hookProfileForConnector(connectorName)
 		runtime := hookRuntimeForProfile(profile)
-		req := normalizeAgentHookRequestWithProfile(connectorName, payload, profile)
+		req := normalizeAgentHookRequestWithRawProfile(connectorName, payload, originalBody.Bytes(), profile)
 		if req.HookEventName == "" {
 			a.recordConnectorHookRejection(r.Context(), connectorName, "unknown", "missing_event", int64(len(b)))
 			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "hook event name is required"})
@@ -1518,6 +1521,10 @@ func normalizeAgentHookRequestWithCorrelation(connectorName string, payload map[
 }
 
 func normalizeAgentHookRequestWithProfile(connectorName string, payload map[string]interface{}, profile connector.HookProfile) agentHookRequest {
+	return normalizeAgentHookRequestWithRawProfile(connectorName, payload, nil, profile)
+}
+
+func normalizeAgentHookRequestWithRawProfile(connectorName string, payload map[string]interface{}, rawPayload []byte, profile connector.HookProfile) agentHookRequest {
 	spec := profile.Correlation
 	if spec.Connector == "" || len(spec.HookBindings) == 0 {
 		spec = connector.ExplicitCanonicalCorrelationSpec(connectorName)
@@ -1541,6 +1548,12 @@ func normalizeAgentHookRequestWithProfile(connectorName string, payload map[stri
 	}
 	if decoded.ToolName != "" {
 		req.ToolName = decoded.ToolName
+	}
+	if decoded.ToolArgsAuthoritative {
+		req.ToolArgs = append(json.RawMessage(nil), decoded.ToolArgs...)
+	}
+	if profile.DecodeToolArgs != nil && len(rawPayload) != 0 {
+		req.ToolArgs = profile.DecodeToolArgs(rawPayload)
 	}
 	if decoded.Content != "" {
 		req.Content = decoded.Content

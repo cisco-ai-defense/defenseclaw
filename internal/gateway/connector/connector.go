@@ -22,6 +22,7 @@ package connector
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"os"
 )
@@ -470,6 +471,13 @@ type HookProfile struct {
 	// contract.
 	ContentEnvelopeKey string
 
+	// DecodeToolArgs extracts the exact structured tool-argument value from
+	// the original request body when a connector nests it outside the shared
+	// hook vocabulary. A non-nil callback owns the projection completely: a
+	// nil result means the connector envelope was absent or ambiguous and the
+	// gateway must not fall back to treating the opaque payload as arguments.
+	DecodeToolArgs func(rawPayload []byte) json.RawMessage
+
 	// Profile-driven dispatch callbacks. All optional — the
 	// unified dispatch helper consults these fields when present
 	// (codex / claudecode set them today); generic connectors leave
@@ -544,10 +552,14 @@ type HookProfileRequest struct {
 	SuppressCorrelationEmit   bool
 	CWD                       string
 	ToolName                  string
-	Content                   string
-	Direction                 string
-	Model                     string
-	Payload                   map[string]interface{}
+	ToolArgs                  json.RawMessage
+	// ToolArgsAuthoritative distinguishes a deliberately empty/fail-closed
+	// connector projection from a decoder that does not own tool arguments.
+	ToolArgsAuthoritative bool
+	Content               string
+	Direction             string
+	Model                 string
+	Payload               map[string]interface{}
 }
 
 // HookVerdictInput is the mode-mapping context fed to a profile's
