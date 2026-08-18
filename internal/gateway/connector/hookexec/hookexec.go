@@ -497,11 +497,13 @@ func (sp spec) decide(opts Options, body []byte) int {
 
 // handleMissingToken mirrors defenseclaw_handle_missing_token: log the bypass,
 // then allow (exit 0) by default or block (exit 2) under strict availability.
+// Managed enterprise mode has no unauthenticated path, so a missing token is
+// always fatal there regardless of the caller-supplied fail mode.
 // No connector-specific JSON body is emitted on this path.
 func handleMissingToken(opts Options, sp spec, failMode string) int {
 	const reason = "missing gateway token (connector-scoped and legacy token sidecars absent; DEFENSECLAW_GATEWAY_TOKEN unset)"
 	logHookFailure(opts, sp, reason, "transport", failMode)
-	if opts.StrictAvailability || failMode == "closed" {
+	if opts.ManagedEnterprise || opts.StrictAvailability || failMode == "closed" {
 		fmt.Fprintf(opts.Stderr,
 			"defenseclaw: %s, blocking %s (fail mode closed)\n", reason, sp.subject)
 		return emit(opts.Stdout, sp.unreachableStrict)

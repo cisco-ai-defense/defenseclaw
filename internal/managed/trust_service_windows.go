@@ -217,11 +217,15 @@ func rejectUntrustedWindowsServiceWriteACEs(
 			continue
 		}
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
-		// CREATOR OWNER / CREATOR GROUP resolve to the file's own owner at
-		// creation time. The child's actual owner is verified independently
-		// by validateTrustedWindowsServicePathElement, so an inheritable
-		// placeholder ACE on the parent is not itself a trust breach.
-		if inheritsToChildFile && windowsServicePlaceholderSID(sid) {
+		// CREATOR OWNER resolves to the child file's actual owner at creation
+		// time, and that owner is validated independently by
+		// validateTrustedWindowsServicePathElement — so an inheritable
+		// CREATOR OWNER ACE on the parent is not itself a trust breach.
+		// CREATOR GROUP is NOT safe to skip: it resolves to the creator's
+		// primary group SID, which we do not validate on the file, so an
+		// inheritable CREATOR GROUP allow ACE with write access would let an
+		// untrusted group tamper with the runtime file.
+		if inheritsToChildFile && windowsServiceCreatorOwnerSID(sid) {
 			continue
 		}
 		var writeLike bool
@@ -246,12 +250,11 @@ func rejectUntrustedWindowsServiceWriteACEs(
 	return nil
 }
 
-func windowsServicePlaceholderSID(sid *windows.SID) bool {
+func windowsServiceCreatorOwnerSID(sid *windows.SID) bool {
 	if sid == nil {
 		return false
 	}
-	return sid.IsWellKnown(windows.WinCreatorOwnerSid) ||
-		sid.IsWellKnown(windows.WinCreatorGroupSid)
+	return sid.IsWellKnown(windows.WinCreatorOwnerSid)
 }
 
 // WindowsAncestorReplaceAccess reports whether mask lets a principal replace a
