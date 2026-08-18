@@ -45,10 +45,14 @@ func Analyze(input Input) (facts Facts) {
 func analyze(input Input) Facts {
 	base := newParseOutput(DialectNone, 1)
 	base.status = StatusNotApplicable
+	activeAgentFiles, activeAgentFilesIssue := normalizeActiveAgentFiles(
+		input.ActiveAgentFiles,
+	)
 	for _, issue := range []IssueCode{
 		validateToolName(input.Tool),
 		validateScalar(input.CWD, maxScalarBytes),
 		validateActiveHome(input.ActiveHome),
+		activeAgentFilesIssue,
 	} {
 		if issue == "" {
 			continue
@@ -60,11 +64,13 @@ func analyze(input Input) Facts {
 		}
 	}
 	if base.status == StatusInvalid || base.status == StatusLimitExceeded {
-		return base.factsWithContext(
+		facts := base.factsWithContext(
 			safeToolName(input.Tool),
 			safeScalar(input.CWD, maxScalarBytes),
 			"",
 		)
+		facts.ActiveAgentFiles = nil
+		return facts
 	}
 
 	extracted := extractArgsForTool(input.Args, input.Tool)
@@ -177,11 +183,13 @@ func analyze(input Input) Facts {
 	finalizePOSIXNoExecPreviews(&base)
 	deduplicateFacts(&base)
 	activeHome, _ := normalizeActiveHome(input.ActiveHome)
-	return base.factsWithContext(
+	facts := base.factsWithContext(
 		safeToolName(input.Tool),
 		safeScalar(cwd, maxScalarBytes),
 		activeHome,
 	)
+	facts.ActiveAgentFiles = cloneSlice(activeAgentFiles)
+	return facts
 }
 
 func analyzeStructuredArgv(

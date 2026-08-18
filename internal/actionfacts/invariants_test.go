@@ -7,6 +7,7 @@
 package actionfacts
 
 import (
+	"slices"
 	"strings"
 	"testing"
 	"unicode/utf8"
@@ -17,6 +18,10 @@ func assertFactsInvariants(t testing.TB, facts Facts) {
 	normalizedHome, homeOK := normalizeActiveHome(facts.ActiveHome)
 	if !homeOK || normalizedHome != facts.ActiveHome {
 		t.Fatalf("invalid active home context: %q", facts.ActiveHome)
+	}
+	normalizedAgentFiles, issue := normalizeActiveAgentFiles(facts.ActiveAgentFiles)
+	if issue != "" || !slices.Equal(normalizedAgentFiles, facts.ActiveAgentFiles) {
+		t.Fatalf("invalid active agent file context: %q", facts.ActiveAgentFiles)
 	}
 	commandIDs := make(map[int64]struct{}, len(facts.Commands))
 	for _, command := range facts.Commands {
