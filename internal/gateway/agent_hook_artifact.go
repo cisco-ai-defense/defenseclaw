@@ -63,6 +63,13 @@ func (a *APIServer) safeApplyExperimentalArtifactPromotion(
 	}
 	caps := profile.Capabilities
 	preExecutionBoundary := caps.CanBlock && eventIn(req.HookEventName, caps.BlockEvents)
+	if req.ConnectorName == "codex" || req.ConnectorName == "claudecode" {
+		req.repositoryPolicy = a.repositoryPolicyProofForTrustedHookCWD(
+			ctx,
+			req.ConnectorName,
+			req.CWD,
+		)
+	}
 	artifactCtx, cancel := context.WithTimeout(ctx, promotedArtifactHookBudget)
 	defer cancel()
 	findings := promotedArtifactFindings(
@@ -159,6 +166,7 @@ func promotedArtifactFindings(
 			LegacyText:         string(body),
 			Connector:          req.ConnectorName,
 			EnforcementCapable: enforcementCapable,
+			repositoryPolicy:   req.repositoryPolicy,
 			recordTelemetry:    telemetryRecorder,
 		})
 		if req.toolChain != nil {

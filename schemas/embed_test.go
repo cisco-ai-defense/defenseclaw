@@ -283,6 +283,7 @@ func TestDefenseClawConfigV8SchemaIdentityAndClosure(t *testing.T) {
 		"watch",
 		"firewall",
 		"guardrail",
+		"repository_policy",
 		"gateway",
 		"cloud_auth",
 		"skill_actions",
@@ -819,6 +820,7 @@ func TestDefenseClawConfigV8RejectsUnknownNestedCurrentFields(t *testing.T) {
 		{"llm", map[string]any{"config_version": 8, "llm": map[string]any{"mystery": true}}},
 		{"scanner", map[string]any{"config_version": 8, "scanners": map[string]any{"skill_scanner": map[string]any{"mystery": true}}}},
 		{"guardrail", map[string]any{"config_version": 8, "guardrail": map[string]any{"mystery": true}}},
+		{"repository policy", map[string]any{"config_version": 8, "repository_policy": map[string]any{"root": "/repo", "mystery": true}}},
 		{"guardrail connector", map[string]any{"config_version": 8, "guardrail": map[string]any{"connectors": map[string]any{"codex": map[string]any{"mystery": true}}}}},
 		{"gateway", map[string]any{"config_version": 8, "gateway": map[string]any{"watcher": map[string]any{"mystery": true}}}},
 		{"action matrix", map[string]any{"config_version": 8, "skill_actions": map[string]any{"critical": map[string]any{"mystery": true}}}},
@@ -832,6 +834,37 @@ func TestDefenseClawConfigV8RejectsUnknownNestedCurrentFields(t *testing.T) {
 				t.Fatalf("unknown nested field unexpectedly passed: %#v", tc.doc)
 			}
 		})
+	}
+}
+
+func TestDefenseClawConfigV8RepositoryPolicyIsClosedAndBounded(t *testing.T) {
+	t.Parallel()
+	schema := compileConfigV8Schema(t)
+	valid := map[string]any{
+		"config_version": 8,
+		"repository_policy": map[string]any{
+			"root": "/srv/repository",
+			"forbidden_rule_ids": []any{
+				"integrity.git_hooks_bypass",
+				"source.git_remote_tamper",
+			},
+		},
+	}
+	if err := schema.Validate(valid); err != nil {
+		t.Fatalf("valid repository policy rejected: %v", err)
+	}
+
+	for _, policy := range []map[string]any{
+		{},
+		{"root": "/srv/repository", "forbidden_rule_ids": []any{"impact.file_delete"}},
+		{"root": "/srv/repository", "forbidden_rule_ids": []any{"integrity.git_hooks_bypass", "integrity.git_hooks_bypass"}},
+		{"root": "/srv/repository", "forbidden_rule_ids": []any{"integrity.git_hooks_bypass", "source.git_remote_tamper", "integrity.git_hooks_bypass"}},
+		{"root": "/srv/repository", "mystery": true},
+	} {
+		document := map[string]any{"config_version": 8, "repository_policy": policy}
+		if err := schema.Validate(document); err == nil {
+			t.Fatalf("invalid repository policy accepted: %#v", policy)
+		}
 	}
 }
 

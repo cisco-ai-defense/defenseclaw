@@ -33,12 +33,16 @@ import (
 // caller-owned mutable map here.
 type trustedRepositoryPolicyProof struct {
 	ForbiddenRuleIDs []string
+	repositoryRoot   string
+	physicalCWD      string
 }
 
 func (p trustedRepositoryPolicyProof) forbids(ruleID string) bool {
-	ruleID = canonicalTrustedRuleID(ruleID)
+	if !trustedRepositoryAdvisoryRule(ruleID) {
+		return false
+	}
 	for _, candidate := range p.ForbiddenRuleIDs {
-		if canonicalTrustedRuleID(candidate) == ruleID {
+		if candidate == ruleID {
 			return true
 		}
 	}
@@ -51,13 +55,12 @@ func (p trustedRepositoryPolicyProof) forbids(ruleID string) bool {
 // untrusted content at a different boundary and retain their existing policy.
 //
 // The function returns an owned findings slice and never promotes a finding
-// that an earlier boundary already marked detection-only. Its only authority
-// input is ActionFacts plus explicit server-owned repository-policy proof.
+// that an earlier boundary already marked detection-only. Repository-policy
+// promotion happens later at the final proof boundary.
 func applyTrustedActionContextDisposition(
 	generation *compiledRulePackCategories,
 	facts actionfacts.Facts,
 	findings []RuleFinding,
-	repositoryPolicy trustedRepositoryPolicyProof,
 ) []RuleFinding {
 	adjusted := append([]RuleFinding(nil), findings...)
 	for index := range adjusted {
@@ -84,14 +87,12 @@ func applyTrustedActionContextDisposition(
 			continue
 		}
 
-		if trustedActionShippedGitAdvisoryRule(
-			generation,
-			finding.RuleID,
-		) && !repositoryPolicy.forbids(finding.RuleID) {
-			// Shipped git remote changes and hook-bypass switches are useful
-			// advisory evidence, but repositories legitimately use both. A
-			// custom rule or explicit repository-policy proof retains its
-			// original enforcement disposition.
+		if trustedRepositoryAdvisoryRule(finding.RuleID) {
+			// Git remote changes and hook-bypass switches are useful advisory
+			// evidence, but repositories legitimately use both. Reusing either
+			// canonical ID in a custom pack is not policy authority: only the
+			// exact shipped rule plus explicit server-owned repository policy may
+			// promote this advisory at the final proof boundary.
 			finding = trustedActionAdvisoryFinding(finding)
 			adjusted[index] = finding
 			continue

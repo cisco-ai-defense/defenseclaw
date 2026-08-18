@@ -225,9 +225,14 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 				CWD:        req.CWD,
 				ActiveHome: trustedSameHostHome(),
 			},
-			LegacyText:                string(toolArgs),
-			Connector:                 "codex",
-			EnforcementCapable:        true,
+			LegacyText:         string(toolArgs),
+			Connector:          "codex",
+			EnforcementCapable: true,
+			repositoryPolicy: a.repositoryPolicyProofForTrustedHookCWD(
+				ctx,
+				"codex",
+				req.CWD,
+			),
 			DowngradeReadOnlyDataArgs: mode != "action",
 			record:                    toolChainRecorderFromContext(ctx),
 		})

@@ -929,6 +929,7 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 	add("watch", oldCfg.Watch, newCfg.Watch)
 	add("guardrail", oldCfg.Guardrail, newCfg.Guardrail)
 	add("guardrail.retain_judge_bodies", oldCfg.Guardrail.RetainJudgeBodies, newCfg.Guardrail.RetainJudgeBodies)
+	add("repository_policy", oldCfg.RepositoryPolicy, newCfg.RepositoryPolicy)
 	oldEffectiveGateway := effectiveGatewayConfigForDiff(oldCfg.Gateway)
 	newEffectiveGateway := effectiveGatewayConfigForDiff(newCfg.Gateway)
 	add("gateway", oldEffectiveGateway, newEffectiveGateway)
@@ -955,14 +956,15 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 
 	var restart []string
 	hotReloadable := map[string]struct{}{
-		"guardrail":        {},
-		"webhooks":         {},
-		"observability":    {},
-		"notifications":    {},
-		"environment":      {},
-		"tenant_id":        {},
-		"workspace_id":     {},
-		"discovery_source": {},
+		"guardrail":         {},
+		"repository_policy": {},
+		"webhooks":          {},
+		"observability":     {},
+		"notifications":     {},
+		"environment":       {},
+		"tenant_id":         {},
+		"workspace_id":      {},
+		"discovery_source":  {},
 	}
 	// managed_enterprise: cisco_ai_defense is hot-reloadable. The AID
 	// inspector rebuild path (inspectorNeedsRebuild → applyConfigReload)

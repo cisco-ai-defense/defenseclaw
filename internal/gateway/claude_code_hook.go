@@ -162,7 +162,12 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			LegacyText:         string(toolArgs),
 			Connector:          "claudecode",
 			EnforcementCapable: true,
-			record:             toolChainRecorderFromContext(ctx),
+			repositoryPolicy: a.repositoryPolicyProofForTrustedHookCWD(
+				ctx,
+				"claudecode",
+				req.CWD,
+			),
+			record: toolChainRecorderFromContext(ctx),
 		})
 		if decision, matched := a.claudeCodeMCPAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "mcp", decision: decision})

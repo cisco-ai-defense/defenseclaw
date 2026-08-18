@@ -116,6 +116,10 @@ type agentHookRequest struct {
 	Direction                 string
 	Payload                   map[string]interface{}
 	toolChain                 *toolChainHookCapture
+	// repositoryPolicy is private server-derived context used only when a
+	// dedicated Codex/Claude hook promotes an exact executable artifact. It is
+	// never decoded from the connector payload.
+	repositoryPolicy trustedRepositoryPolicyProof
 }
 
 type agentHookResponse struct {

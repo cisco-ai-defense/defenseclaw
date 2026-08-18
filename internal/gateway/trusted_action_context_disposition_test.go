@@ -103,7 +103,6 @@ func TestTrustedActionContentLiteralRequiresCommandLocalRiskPair(t *testing.T) {
 				generation,
 				test.facts,
 				[]RuleFinding{finding},
-				trustedRepositoryPolicyProof{},
 			)
 			got = applyTrustedActionProofBoundary(got, true)
 			if len(got) != 1 {
@@ -149,7 +148,6 @@ func TestTrustedActionPIILiteralUsesSameRiskPairBoundary(t *testing.T) {
 		generation,
 		local,
 		[]RuleFinding{finding},
-		trustedRepositoryPolicyProof{},
 	)
 	got = applyTrustedActionProofBoundary(got, true)
 	if len(got) != 1 || got[0].contributesToEnforcement() ||
@@ -168,7 +166,6 @@ func TestTrustedActionPIILiteralUsesSameRiskPairBoundary(t *testing.T) {
 		generation,
 		egress,
 		[]RuleFinding{finding},
-		trustedRepositoryPolicyProof{},
 	)
 	got = applyTrustedActionProofBoundary(got, true)
 	if len(got) != 1 || !got[0].contributesToEnforcement() ||
@@ -179,28 +176,49 @@ func TestTrustedActionPIILiteralUsesSameRiskPairBoundary(t *testing.T) {
 
 func TestTrustedActionShippedGitRulesAreAdvisoryUnlessPolicyProvesForbidden(t *testing.T) {
 	generation := mustCompileRulePackGeneration(defaultRuleCategories)
-	for _, ruleID := range []string{
-		"integrity.git_hooks_bypass",
-		"source.git_remote_tamper",
+	repositoryRoot := gatewayRepositoryPolicyTestRoot(t)
+	for _, test := range []struct {
+		ruleID  string
+		command string
+	}{
+		{
+			ruleID:  "integrity.git_hooks_bypass",
+			command: "git commit --no-verify -m fixture",
+		},
+		{
+			ruleID:  "source.git_remote_tamper",
+			command: "git remote set-url origin https://sink.invalid/repository.git",
+		},
 	} {
-		t.Run(ruleID, func(t *testing.T) {
-			finding := trustedActionDispositionTestFinding(t, generation, ruleID)
-			advisory := applyTrustedActionContextDisposition(
+		t.Run(test.ruleID, func(t *testing.T) {
+			finding := trustedActionDispositionTestFinding(t, generation, test.ruleID)
+			facts := actionfacts.Analyze(actionfacts.Input{
+				Tool:    "shell",
+				Command: test.command,
+			})
+			advisory := finalizeTrustedActionFindings(
 				generation,
-				actionfacts.Facts{},
+				trustedActionRequest{EnforcementCapable: true},
+				facts,
 				[]RuleFinding{finding},
-				trustedRepositoryPolicyProof{},
 			)
 			if len(advisory) != 1 || advisory[0].contributesToEnforcement() ||
 				advisory[0].Severity != "MEDIUM" {
 				t.Fatalf("shipped rule disposition = %#v", advisory)
 			}
 
-			forbidden := applyTrustedActionContextDisposition(
+			forbidden := finalizeTrustedActionFindings(
 				generation,
-				actionfacts.Facts{},
+				trustedActionRequest{
+					EnforcementCapable: true,
+					repositoryPolicy: trustedRepositoryPolicyProof{
+						ForbiddenRuleIDs: []string{test.ruleID},
+						repositoryRoot:   repositoryRoot,
+						physicalCWD:      repositoryRoot,
+					},
+				},
+				facts,
 				[]RuleFinding{finding},
-				trustedRepositoryPolicyProof{ForbiddenRuleIDs: []string{ruleID}},
 			)
 			if len(forbidden) != 1 || !forbidden[0].contributesToEnforcement() {
 				t.Fatalf("repository-forbidden rule disposition = %#v", forbidden)
@@ -209,7 +227,7 @@ func TestTrustedActionShippedGitRulesAreAdvisoryUnlessPolicyProvesForbidden(t *t
 	}
 }
 
-func TestTrustedActionCustomGitRuleRetainsDisposition(t *testing.T) {
+func TestTrustedActionCustomGitRuleCannotBecomeRepositoryPolicy(t *testing.T) {
 	categories := cloneRuleCategories(defaultRuleCategories)
 	for categoryIndex := range categories {
 		for ruleIndex := range categories[categoryIndex].Rules {
@@ -229,9 +247,9 @@ func TestTrustedActionCustomGitRuleRetainsDisposition(t *testing.T) {
 		generation,
 		actionfacts.Facts{},
 		[]RuleFinding{finding},
-		trustedRepositoryPolicyProof{},
 	)
-	if len(got) != 1 || !got[0].contributesToEnforcement() {
+	if len(got) != 1 || got[0].contributesToEnforcement() ||
+		got[0].Severity != "MEDIUM" {
 		t.Fatalf("custom repository rule disposition = %#v", got)
 	}
 }
@@ -253,7 +271,6 @@ func TestTrustedActionContextDispositionNeverPromotesDetectionOnly(t *testing.T)
 		generation,
 		facts,
 		[]RuleFinding{finding},
-		trustedRepositoryPolicyProof{},
 	)
 	if len(got) != 1 || got[0].contributesToEnforcement() {
 		t.Fatalf("preexisting detection-only finding was promoted: %#v", got)
@@ -408,7 +425,6 @@ func TestTrustedActionCredentialPathDispositions(t *testing.T) {
 				generation,
 				test.facts,
 				[]RuleFinding{finding},
-				trustedRepositoryPolicyProof{},
 			)
 			got = applyTrustedActionProofBoundary(got, true)
 			if len(got) != 1 {

@@ -186,35 +186,36 @@ type Config struct {
 	// point this at a separate disk in high-throughput
 	// deployments. The legacy judge_responses rows in audit.db
 	// remain readable; new rows only ever land here.
-	JudgeBodiesDB   string                     `mapstructure:"judge_bodies_db"  yaml:"judge_bodies_db,omitempty"`
-	QuarantineDir   string                     `mapstructure:"quarantine_dir"   yaml:"quarantine_dir"`
-	PluginDir       string                     `mapstructure:"plugin_dir"       yaml:"plugin_dir"`
-	PolicyDir       string                     `mapstructure:"policy_dir"       yaml:"policy_dir"`
-	Environment     string                     `mapstructure:"environment"      yaml:"environment"`
-	TenantID        string                     `mapstructure:"tenant_id"        yaml:"tenant_id,omitempty"`
-	WorkspaceID     string                     `mapstructure:"workspace_id"     yaml:"workspace_id,omitempty"`
-	DeploymentMode  string                     `mapstructure:"deployment_mode"  yaml:"deployment_mode,omitempty"`
-	DiscoverySource string                     `mapstructure:"discovery_source" yaml:"discovery_source,omitempty"`
-	Claw            ClawConfig                 `mapstructure:"claw"             yaml:"claw"`
-	Agent           AgentConfig                `mapstructure:"agent"            yaml:"agent,omitempty"`
-	InspectLLM      InspectLLMConfig           `mapstructure:"inspect_llm"      yaml:"inspect_llm,omitempty"`
-	CiscoAIDefense  CiscoAIDefenseConfig       `mapstructure:"cisco_ai_defense" yaml:"cisco_ai_defense"`
-	Scanners        ScannersConfig             `mapstructure:"scanners"         yaml:"scanners"`
-	OpenShell       OpenShellConfig            `mapstructure:"openshell"        yaml:"openshell"`
-	Watch           WatchConfig                `mapstructure:"watch"            yaml:"watch"`
-	Firewall        FirewallConfig             `mapstructure:"firewall"         yaml:"firewall"`
-	Guardrail       GuardrailConfig            `mapstructure:"guardrail"        yaml:"guardrail"`
-	Gateway         GatewayConfig              `mapstructure:"gateway"          yaml:"gateway"`
-	CloudAuth       CloudAuthConfig            `mapstructure:"cloud_auth"       yaml:"cloud_auth,omitempty"`
-	SkillActions    SkillActionsConfig         `mapstructure:"skill_actions"    yaml:"skill_actions"`
-	MCPActions      MCPActionsConfig           `mapstructure:"mcp_actions"      yaml:"mcp_actions"`
-	PluginActions   PluginActionsConfig        `mapstructure:"plugin_actions"   yaml:"plugin_actions"`
-	AssetPolicy     AssetPolicyConfig          `mapstructure:"asset_policy"     yaml:"asset_policy"`
-	Registries      RegistriesConfig           `mapstructure:"registries"       yaml:"registries,omitempty"`
-	OTel            OTelConfig                 `mapstructure:"otel"             yaml:"otel"`
-	ClaudeCode      AgentHookConfig            `mapstructure:"claude_code"      yaml:"claude_code,omitempty"`
-	Codex           AgentHookConfig            `mapstructure:"codex"            yaml:"codex,omitempty"`
-	ConnectorHooks  map[string]AgentHookConfig `mapstructure:"connector_hooks"  yaml:"connector_hooks,omitempty"`
+	JudgeBodiesDB    string                     `mapstructure:"judge_bodies_db"  yaml:"judge_bodies_db,omitempty"`
+	QuarantineDir    string                     `mapstructure:"quarantine_dir"   yaml:"quarantine_dir"`
+	PluginDir        string                     `mapstructure:"plugin_dir"       yaml:"plugin_dir"`
+	PolicyDir        string                     `mapstructure:"policy_dir"       yaml:"policy_dir"`
+	Environment      string                     `mapstructure:"environment"      yaml:"environment"`
+	TenantID         string                     `mapstructure:"tenant_id"        yaml:"tenant_id,omitempty"`
+	WorkspaceID      string                     `mapstructure:"workspace_id"     yaml:"workspace_id,omitempty"`
+	DeploymentMode   string                     `mapstructure:"deployment_mode"  yaml:"deployment_mode,omitempty"`
+	DiscoverySource  string                     `mapstructure:"discovery_source" yaml:"discovery_source,omitempty"`
+	Claw             ClawConfig                 `mapstructure:"claw"             yaml:"claw"`
+	Agent            AgentConfig                `mapstructure:"agent"            yaml:"agent,omitempty"`
+	InspectLLM       InspectLLMConfig           `mapstructure:"inspect_llm"      yaml:"inspect_llm,omitempty"`
+	CiscoAIDefense   CiscoAIDefenseConfig       `mapstructure:"cisco_ai_defense" yaml:"cisco_ai_defense"`
+	Scanners         ScannersConfig             `mapstructure:"scanners"         yaml:"scanners"`
+	OpenShell        OpenShellConfig            `mapstructure:"openshell"        yaml:"openshell"`
+	Watch            WatchConfig                `mapstructure:"watch"            yaml:"watch"`
+	Firewall         FirewallConfig             `mapstructure:"firewall"         yaml:"firewall"`
+	Guardrail        GuardrailConfig            `mapstructure:"guardrail"        yaml:"guardrail"`
+	RepositoryPolicy *RepositoryPolicyConfig    `mapstructure:"repository_policy" yaml:"repository_policy,omitempty"`
+	Gateway          GatewayConfig              `mapstructure:"gateway"          yaml:"gateway"`
+	CloudAuth        CloudAuthConfig            `mapstructure:"cloud_auth"       yaml:"cloud_auth,omitempty"`
+	SkillActions     SkillActionsConfig         `mapstructure:"skill_actions"    yaml:"skill_actions"`
+	MCPActions       MCPActionsConfig           `mapstructure:"mcp_actions"      yaml:"mcp_actions"`
+	PluginActions    PluginActionsConfig        `mapstructure:"plugin_actions"   yaml:"plugin_actions"`
+	AssetPolicy      AssetPolicyConfig          `mapstructure:"asset_policy"     yaml:"asset_policy"`
+	Registries       RegistriesConfig           `mapstructure:"registries"       yaml:"registries,omitempty"`
+	OTel             OTelConfig                 `mapstructure:"otel"             yaml:"otel"`
+	ClaudeCode       AgentHookConfig            `mapstructure:"claude_code"      yaml:"claude_code,omitempty"`
+	Codex            AgentHookConfig            `mapstructure:"codex"            yaml:"codex,omitempty"`
+	ConnectorHooks   map[string]AgentHookConfig `mapstructure:"connector_hooks"  yaml:"connector_hooks,omitempty"`
 	// AuditSinks preserves v7 decoder fidelity for the explicit upgrade path.
 	// Runtime-v8 loading clears it before any service is constructed; canonical
 	// export ownership lives in observability.destinations/routes.
@@ -2587,6 +2588,12 @@ func loadConfigSource(
 			ReportConfigLoadError(context.Background(), "guardrail_invalid")
 		}
 		return nil, fmt.Errorf("config: guardrail: %w", err)
+	}
+	if err := cfg.RepositoryPolicy.Validate(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "repository_policy_invalid")
+		}
+		return nil, fmt.Errorf("config: repository_policy: %w", err)
 	}
 	if err := cfg.ApplicationProtection.Validate(); err != nil {
 		if ReportConfigLoadError != nil {

@@ -1070,11 +1070,15 @@ func finalizeTrustedActionFindings(
 		generation,
 		facts,
 		findings,
-		request.repositoryPolicy,
 	)
 	for index := range findings {
 		if !request.repositoryPolicy.forbids(findings[index].RuleID) ||
-			!trustedActionShippedGitAdvisoryRule(generation, findings[index].RuleID) {
+			!trustedActionShippedGitAdvisoryRule(generation, findings[index].RuleID) ||
+			!repositoryPolicyGitScopeProven(
+				facts,
+				findings[index].RuleID,
+				request.repositoryPolicy,
+			) {
 			continue
 		}
 		findings[index] = findings[index].withTrustedActionProof(

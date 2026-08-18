@@ -103,6 +103,9 @@
     "guardrail": {
       "$ref": "#/$defs/guardrail"
     },
+    "repository_policy": {
+      "$ref": "#/$defs/repositoryPolicy"
+    },
     "gateway": {
       "$ref": "#/$defs/gateway"
     },
@@ -595,6 +598,26 @@
           "maxItems": 256,
           "uniqueItems": true,
           "items": { "$ref": "#/$defs/boundedString" }
+        }
+      }
+    },
+    "repositoryPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["root"],
+      "properties": {
+        "root": { "$ref": "#/$defs/pathString" },
+        "forbidden_rule_ids": {
+          "type": "array",
+          "maxItems": 2,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": [
+              "integrity.git_hooks_bypass",
+              "source.git_remote_tamper"
+            ]
+          }
         }
       }
     },
