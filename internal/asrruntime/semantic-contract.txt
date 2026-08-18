@@ -1,0 +1,7 @@
+asr.command-local.semantic-contract.v1
+input=normalized-invocation.schema.json@1.0.0
+output=action-semantics.schema.json@1.0.0
+statuses=COMPLETE,PARTIAL,INVALID,UNSUPPORTED,ERROR
+unknown_flags=PARTIAL
+incomplete_argv=PARTIAL
+authority=COMPLETE+exact-pins+conformance-parity

@@ -1,0 +1,918 @@
+{
+  "cases": [
+    {
+      "expect": {
+        "issues": [],
+        "semantics": {
+          "controls": [
+            {
+              "id": "force",
+              "source": {
+                "argument_id": "force",
+                "defaulted": true,
+                "kind": "OPTION_VALUE",
+                "raw_value": null,
+                "spelling": "-f"
+              },
+              "status": "DECODED",
+              "type": "rm.confirmation_policy.v1",
+              "value": {
+                "canonical": "NEVER",
+                "kind": "ENUM"
+              }
+            }
+          ],
+          "effects": [
+            {
+              "conditions": [],
+              "effect_buckets": [
+                "B4_DESTRUCTION_BULK_IMPACT"
+              ],
+              "effect_id": 1,
+              "mapping_id": "universal-linux.rm.v1",
+              "mode": "EXECUTE",
+              "operation": "delete",
+              "parameters": [
+                {
+                  "name": "confirmation_policy",
+                  "source": {
+                    "argument_id": "force",
+                    "defaulted": true,
+                    "kind": "OPTION_VALUE",
+                    "raw_value": null,
+                    "spelling": "-f"
+                  },
+                  "status": "DECODED",
+                  "type": "rm.confirmation_policy.v1",
+                  "value": {
+                    "canonical": "NEVER",
+                    "kind": "ENUM"
+                  }
+                }
+              ],
+              "resource": {
+                "expansions": [],
+                "id": "build",
+                "kind": "HOST_FILESYSTEM_DEVICE",
+                "location": "UNKNOWN",
+                "normalized_value": "build",
+                "raw_value": "build",
+                "resolution": "STATIC",
+                "resolution_kind": "EXACT",
+                "resolved_value": null,
+                "role": "TARGET",
+                "type": "filesystem.entry"
+              },
+              "scope": {
+                "direct_cardinality": {
+                  "kind": "EXACT",
+                  "value": 1
+                },
+                "direct_upper_bound": 1,
+                "extent": "DESCENDANTS",
+                "kind": "UNBOUNDED",
+                "selection_cardinality": {
+                  "kind": "EXACT",
+                  "value": 1
+                }
+              }
+            }
+          ],
+          "evidence": {
+            "coverage_basis": "UNIVERSAL_LINUX",
+            "coverage_status": "COMPLETE",
+            "evaluation_default": "COMPLETE",
+            "kind": "REVIEWED_REGISTRY_MAPPING",
+            "mapping_id": "universal-linux.rm.v1",
+            "mapping_revision": 3,
+            "profile": "universal-linux",
+            "review_state": "REVIEWED"
+          },
+          "flows": [],
+          "mapping_id": "universal-linux.rm.v1",
+          "mode": "EXECUTE",
+          "modifiers": [
+            "IGNORE_MISSING",
+            "NO_PROMPT",
+            "RECURSIVE"
+          ]
+        },
+        "status": "COMPLETE"
+      },
+      "invocation": {
+        "argv": [
+          "rm",
+          "-rf",
+          "build"
+        ],
+        "argv_complete": true,
+        "profile": "universal-linux",
+        "program": "rm",
+        "surface": "direct_argv"
+      },
+      "name": "rm-recursive-force"
+    },
+    {
+      "expect": {
+        "issues": [],
+        "semantics": {
+          "controls": [
+            {
+              "id": "interactive_when",
+              "source": {
+                "argument_id": "interactive_when",
+                "kind": "OPTION_VALUE",
+                "raw_value": "never",
+                "spelling": "--interactive"
+              },
+              "status": "DECODED",
+              "type": "rm.confirmation_policy.v1",
+              "value": {
+                "canonical": "NEVER",
+                "kind": "ENUM"
+              }
+            }
+          ],
+          "effects": [
+            {
+              "conditions": [],
+              "effect_buckets": [
+                "B4_DESTRUCTION_BULK_IMPACT"
+              ],
+              "effect_id": 1,
+              "mapping_id": "universal-linux.rm.v1",
+              "mode": "EXECUTE",
+              "operation": "delete",
+              "parameters": [
+                {
+                  "name": "confirmation_policy",
+                  "source": {
+                    "argument_id": "interactive_when",
+                    "kind": "OPTION_VALUE",
+                    "raw_value": "never",
+                    "spelling": "--interactive"
+                  },
+                  "status": "DECODED",
+                  "type": "rm.confirmation_policy.v1",
+                  "value": {
+                    "canonical": "NEVER",
+                    "kind": "ENUM"
+                  }
+                }
+              ],
+              "resource": {
+                "expansions": [],
+                "id": "report.txt",
+                "kind": "HOST_FILESYSTEM_DEVICE",
+                "location": "UNKNOWN",
+                "normalized_value": "report.txt",
+                "raw_value": "report.txt",
+                "resolution": "STATIC",
+                "resolution_kind": "EXACT",
+                "resolved_value": null,
+                "role": "TARGET",
+                "type": "filesystem.entry"
+              },
+              "scope": {
+                "direct_cardinality": {
+                  "kind": "EXACT",
+                  "value": 1
+                },
+                "extent": "DIRECT",
+                "kind": "ONE",
+                "selection_cardinality": {
+                  "kind": "EXACT",
+                  "value": 1
+                },
+                "upper_bound": 1
+              }
+            }
+          ],
+          "evidence": {
+            "coverage_basis": "UNIVERSAL_LINUX",
+            "coverage_status": "COMPLETE",
+            "evaluation_default": "COMPLETE",
+            "kind": "REVIEWED_REGISTRY_MAPPING",
+            "mapping_id": "universal-linux.rm.v1",
+            "mapping_revision": 3,
+            "profile": "universal-linux",
+            "review_state": "REVIEWED"
+          },
+          "flows": [],
+          "mapping_id": "universal-linux.rm.v1",
+          "mode": "EXECUTE",
+          "modifiers": [
+            "CONDITIONAL_CONFIRMATION"
+          ]
+        },
+        "status": "COMPLETE"
+      },
+      "invocation": {
+        "argv": [
+          "rm",
+          "--interactive=never",
+          "report.txt"
+        ],
+        "argv_complete": true,
+        "profile": "universal-linux",
+        "program": "rm",
+        "surface": "direct_argv"
+      },
+      "name": "rm-typed-interactive"
+    },
+    {
+      "expect": {
+        "issues": [
+          "unknown_option"
+        ],
+        "semantics": {
+          "controls": [],
+          "effects": [
+            {
+              "conditions": [],
+              "effect_buckets": [
+                "B4_DESTRUCTION_BULK_IMPACT"
+              ],
+              "effect_id": 1,
+              "mapping_id": "universal-linux.rm.v1",
+              "mode": "EXECUTE",
+              "operation": "delete",
+              "parameters": [],
+              "resource": {
+                "expansions": [],
+                "id": null,
+                "kind": "HOST_FILESYSTEM_DEVICE",
+                "location": "UNKNOWN",
+                "normalized_value": null,
+                "raw_value": null,
+                "resolution": "UNRESOLVED",
+                "resolution_kind": "UNKNOWN",
+                "resolved_value": null,
+                "role": "TARGET",
+                "type": "filesystem.entry"
+              },
+              "scope": {
+                "direct_cardinality": {
+                  "kind": "UNKNOWN"
+                },
+                "extent": "UNKNOWN",
+                "kind": "UNKNOWN",
+                "selection_cardinality": {
+                  "kind": "UNKNOWN"
+                }
+              }
+            }
+          ],
+          "evidence": {
+            "coverage_basis": "UNIVERSAL_LINUX",
+            "coverage_status": "COMPLETE",
+            "evaluation_default": "COMPLETE",
+            "kind": "REVIEWED_REGISTRY_MAPPING",
+            "mapping_id": "universal-linux.rm.v1",
+            "mapping_revision": 3,
+            "profile": "universal-linux",
+            "review_state": "REVIEWED"
+          },
+          "flows": [],
+          "mapping_id": "universal-linux.rm.v1",
+          "mode": "EXECUTE",
+          "modifiers": []
+        },
+        "status": "PARTIAL"
+      },
+      "invocation": {
+        "argv": [
+          "rm",
+          "-P",
+          "report.txt"
+        ],
+        "argv_complete": true,
+        "profile": "universal-linux",
+        "program": "rm",
+        "surface": "direct_argv"
+      },
+      "name": "rm-unknown-option"
+    },
+    {
+      "expect": {
+        "issues": [
+          "argv_incomplete"
+        ],
+        "semantics": {
+          "controls": [],
+          "effects": [
+            {
+              "conditions": [],
+              "effect_buckets": [
+                "B4_DESTRUCTION_BULK_IMPACT"
+              ],
+              "effect_id": 1,
+              "mapping_id": "universal-linux.rm.v1",
+              "mode": "EXECUTE",
+              "operation": "delete",
+              "parameters": [],
+              "resource": {
+                "expansions": [],
+                "id": null,
+                "kind": "HOST_FILESYSTEM_DEVICE",
+                "location": "UNKNOWN",
+                "normalized_value": null,
+                "raw_value": null,
+                "resolution": "UNRESOLVED",
+                "resolution_kind": "UNKNOWN",
+                "resolved_value": null,
+                "role": "TARGET",
+                "type": "filesystem.entry"
+              },
+              "scope": {
+                "direct_cardinality": {
+                  "kind": "UNKNOWN"
+                },
+                "extent": "UNKNOWN",
+                "kind": "UNKNOWN",
+                "selection_cardinality": {
+                  "kind": "UNKNOWN"
+                }
+              }
+            }
+          ],
+          "evidence": {
+            "coverage_basis": "UNIVERSAL_LINUX",
+            "coverage_status": "COMPLETE",
+            "evaluation_default": "COMPLETE",
+            "kind": "REVIEWED_REGISTRY_MAPPING",
+            "mapping_id": "universal-linux.rm.v1",
+            "mapping_revision": 3,
+            "profile": "universal-linux",
+            "review_state": "REVIEWED"
+          },
+          "flows": [],
+          "mapping_id": "universal-linux.rm.v1",
+          "mode": "EXECUTE",
+          "modifiers": []
+        },
+        "status": "PARTIAL"
+      },
+      "invocation": {
+        "argv": [
+          "rm",
+          "report.txt"
+        ],
+        "argv_complete": false,
+        "profile": "universal-linux",
+        "program": "rm",
+        "surface": "direct_argv"
+      },
+      "name": "rm-incomplete-argv"
+    },
+    {
+      "expect": {
+        "issues": [
+          "missing_operand"
+        ],
+        "semantics": {
+          "controls": [],
+          "effects": [],
+          "evidence": null,
+          "flows": []
+        },
+        "status": "INVALID"
+      },
+      "invocation": {
+        "argv": [
+          "rm"
+        ],
+        "argv_complete": true,
+        "profile": "universal-linux",
+        "program": "rm",
+        "surface": "direct_argv"
+      },
+      "name": "rm-missing-operand"
+    },
+    {
+      "expect": {
+        "issues": [],
+        "semantics": {
+          "controls": [],
+          "effects": [],
+          "evidence": {
+            "coverage_basis": "UPSTREAM_VERSIONED",
+            "coverage_status": "PARTIAL",
+            "evaluation_default": "COMPLETE",
+            "kind": "REVIEWED_REGISTRY_MAPPING",
+            "mapping_id": "universal-linux.git.v1",
+            "mapping_revision": 1,
+            "profile": "universal-linux",
+            "review_state": "REVIEWED"
+          },
+          "flows": [],
+          "mapping_id": "universal-linux.git.v1",
+          "mode": "HELP",
+          "modifiers": []
+        },
+        "status": "COMPLETE"
+      },
+      "invocation": {
+        "argv": [
+          "git",
+          "--help"
+        ],
+        "argv_complete": true,
+        "profile": "universal-linux",
+        "program": "git",
+        "surface": "direct_argv"
+      },
+      "name": "git-help"
+    },
+    {
+      "expect": {
+        "issues": [],
+        "semantics": {
+          "controls": [],
+          "effects": [],
+          "evidence": {
+            "coverage_basis": "UPSTREAM_VERSIONED",
+            "coverage_status": "PARTIAL",
+            "evaluation_default": "COMPLETE",
+            "kind": "REVIEWED_REGISTRY_MAPPING",
+            "mapping_id": "universal-linux.apt-get.v1",
+            "mapping_revision": 1,
+            "profile": "universal-linux",
+            "review_state": "REVIEWED"
+          },
+          "flows": [],
+          "mapping_id": "universal-linux.apt-get.v1",
+          "mode": "HELP",
+          "modifiers": []
+        },
+        "status": "COMPLETE"
+      },
+      "invocation": {
+        "argv": [
+          "apt-get",
+          "--help"
+        ],
+        "argv_complete": true,
+        "profile": "universal-linux",
+        "program": "apt-get",
+        "surface": "direct_argv"
+      },
+      "name": "apt-get-help"
+    },
+    {
+      "expect": {
+        "issues": [],
+        "semantics": {
+          "controls": [],
+          "effects": [],
+          "evidence": {
+            "coverage_basis": "UPSTREAM_VERSIONED",
+            "coverage_status": "PARTIAL",
+            "evaluation_default": "COMPLETE",
+            "kind": "REVIEWED_REGISTRY_MAPPING",
+            "mapping_id": "universal-linux.pip.v1",
+            "mapping_revision": 1,
+            "profile": "universal-linux",
+            "review_state": "REVIEWED"
+          },
+          "flows": [],
+          "mapping_id": "universal-linux.pip.v1",
+          "mode": "HELP",
+          "modifiers": []
+        },
+        "status": "COMPLETE"
+      },
+      "invocation": {
+        "argv": [
+          "pip",
+          "--help"
+        ],
+        "argv_complete": true,
+        "profile": "universal-linux",
+        "program": "pip",
+        "surface": "direct_argv"
+      },
+      "name": "pip-help"
+    },
+    {
+      "expect": {
+        "issues": [
+          "profile_coverage_partial"
+        ],
+        "semantics": {
+          "controls": [],
+          "effects": [],
+          "evidence": {
+            "coverage_basis": "UPSTREAM_VERSIONED",
+            "coverage_status": "PARTIAL",
+            "evaluation_default": "PARTIAL",
+            "kind": "REVIEWED_REGISTRY_MAPPING",
+            "mapping_id": "universal-linux.make.v1",
+            "mapping_revision": 1,
+            "profile": "universal-linux",
+            "review_state": "REVIEWED"
+          },
+          "flows": [],
+          "mapping_id": "universal-linux.make.v1",
+          "mode": "HELP",
+          "modifiers": []
+        },
+        "status": "PARTIAL"
+      },
+      "invocation": {
+        "argv": [
+          "make",
+          "--help"
+        ],
+        "argv_complete": true,
+        "profile": "universal-linux",
+        "program": "make",
+        "surface": "direct_argv"
+      },
+      "name": "make-help-partial-profile"
+    },
+    {
+      "expect": {
+        "issues": [],
+        "semantics": {
+          "controls": [],
+          "effects": [],
+          "evidence": {
+            "coverage_basis": "UPSTREAM_VERSIONED",
+            "coverage_status": "PARTIAL",
+            "evaluation_default": "COMPLETE",
+            "kind": "REVIEWED_REGISTRY_MAPPING",
+            "mapping_id": "universal-linux.gcc.v1",
+            "mapping_revision": 1,
+            "profile": "universal-linux",
+            "review_state": "REVIEWED"
+          },
+          "flows": [],
+          "mapping_id": "universal-linux.gcc.v1",
+          "mode": "HELP",
+          "modifiers": []
+        },
+        "status": "COMPLETE"
+      },
+      "invocation": {
+        "argv": [
+          "gcc",
+          "--help"
+        ],
+        "argv_complete": true,
+        "profile": "universal-linux",
+        "program": "gcc",
+        "surface": "direct_argv"
+      },
+      "name": "gcc-help"
+    },
+    {
+      "expect": {
+        "issues": [],
+        "semantics": {
+          "controls": [],
+          "effects": [],
+          "evidence": {
+            "coverage_basis": "PORTABLE_INTERSECTION",
+            "coverage_status": "PARTIAL",
+            "evaluation_default": "COMPLETE",
+            "kind": "REVIEWED_REGISTRY_MAPPING",
+            "mapping_id": "universal-linux.awk.v1",
+            "mapping_revision": 1,
+            "profile": "universal-linux",
+            "review_state": "REVIEWED"
+          },
+          "flows": [],
+          "mapping_id": "universal-linux.awk.v1",
+          "mode": "HELP",
+          "modifiers": []
+        },
+        "status": "COMPLETE"
+      },
+      "invocation": {
+        "argv": [
+          "awk",
+          "--help"
+        ],
+        "argv_complete": true,
+        "profile": "universal-linux",
+        "program": "awk",
+        "surface": "direct_argv"
+      },
+      "name": "awk-help"
+    },
+    {
+      "expect": {
+        "issues": [],
+        "semantics": {
+          "controls": [],
+          "effects": [],
+          "evidence": {
+            "coverage_basis": "UPSTREAM_VERSIONED",
+            "coverage_status": "PARTIAL",
+            "evaluation_default": "COMPLETE",
+            "kind": "REVIEWED_REGISTRY_MAPPING",
+            "mapping_id": "universal-linux.openssl.v1",
+            "mapping_revision": 1,
+            "profile": "universal-linux",
+            "review_state": "REVIEWED"
+          },
+          "flows": [],
+          "mapping_id": "universal-linux.openssl.v1",
+          "mode": "HELP",
+          "modifiers": []
+        },
+        "status": "COMPLETE"
+      },
+      "invocation": {
+        "argv": [
+          "openssl",
+          "--help"
+        ],
+        "argv_complete": true,
+        "profile": "universal-linux",
+        "program": "openssl",
+        "surface": "direct_argv"
+      },
+      "name": "openssl-help"
+    },
+    {
+      "expect": {
+        "issues": [],
+        "semantics": {
+          "controls": [],
+          "effects": [],
+          "evidence": {
+            "coverage_basis": "UPSTREAM_VERSIONED",
+            "coverage_status": "PARTIAL",
+            "evaluation_default": "COMPLETE",
+            "kind": "REVIEWED_REGISTRY_MAPPING",
+            "mapping_id": "universal-linux.uv.v1",
+            "mapping_revision": 1,
+            "profile": "universal-linux",
+            "review_state": "REVIEWED"
+          },
+          "flows": [],
+          "mapping_id": "universal-linux.uv.v1",
+          "mode": "HELP",
+          "modifiers": []
+        },
+        "status": "COMPLETE"
+      },
+      "invocation": {
+        "argv": [
+          "uv",
+          "--help"
+        ],
+        "argv_complete": true,
+        "profile": "universal-linux",
+        "program": "uv",
+        "surface": "direct_argv"
+      },
+      "name": "uv-help"
+    },
+    {
+      "expect": {
+        "issues": [
+          "profile_coverage_partial"
+        ],
+        "semantics": {
+          "controls": [],
+          "effects": [],
+          "evidence": {
+            "coverage_basis": "UPSTREAM_VERSIONED",
+            "coverage_status": "PARTIAL",
+            "evaluation_default": "PARTIAL",
+            "kind": "REVIEWED_REGISTRY_MAPPING",
+            "mapping_id": "universal-linux.sqlite3.v1",
+            "mapping_revision": 1,
+            "profile": "universal-linux",
+            "review_state": "REVIEWED"
+          },
+          "flows": [],
+          "mapping_id": "universal-linux.sqlite3.v1",
+          "mode": "HELP",
+          "modifiers": []
+        },
+        "status": "PARTIAL"
+      },
+      "invocation": {
+        "argv": [
+          "sqlite3",
+          "--help"
+        ],
+        "argv_complete": true,
+        "profile": "universal-linux",
+        "program": "sqlite3",
+        "surface": "direct_argv"
+      },
+      "name": "sqlite3-help-partial-profile"
+    },
+    {
+      "expect": {
+        "issues": [
+          "profile_coverage_partial"
+        ],
+        "semantics": {
+          "controls": [],
+          "effects": [
+            {
+              "conditions": [
+                "IF_URL_SCHEME_REQUIRES_A_CONNECTION"
+              ],
+              "effect_buckets": [
+                "B7_NETWORK_REACHABILITY_EXPOSURE"
+              ],
+              "effect_id": 1,
+              "mapping_id": "universal-linux.curl.v1",
+              "mode": "EXECUTE",
+              "operation": "connect",
+              "parameters": [],
+              "resource": {
+                "expansions": [],
+                "id": "https://example.com",
+                "kind": "NETWORK_DNS_FIREWALL_ENDPOINT",
+                "location": "UNKNOWN",
+                "normalized_value": "https://example.com",
+                "raw_value": "https://example.com",
+                "resolution": "STATIC",
+                "resolution_kind": "EXACT",
+                "resolved_value": null,
+                "role": "TARGET",
+                "type": "network.url-transfer-endpoint"
+              },
+              "scope": {
+                "direct_cardinality": {
+                  "kind": "UNKNOWN"
+                },
+                "extent": "UNKNOWN",
+                "kind": "UNKNOWN",
+                "selection_cardinality": {
+                  "kind": "UNKNOWN"
+                }
+              }
+            },
+            {
+              "conditions": [
+                "IF_TRANSFER_RETURNS_RESPONSE_DATA"
+              ],
+              "effect_buckets": [
+                "B1_READ_DISCOVERY",
+                "B7_NETWORK_REACHABILITY_EXPOSURE"
+              ],
+              "effect_id": 2,
+              "mapping_id": "universal-linux.curl.v1",
+              "mode": "EXECUTE",
+              "operation": "download",
+              "parameters": [],
+              "resource": {
+                "expansions": [],
+                "id": "https://example.com",
+                "kind": "NETWORK_DNS_FIREWALL_ENDPOINT",
+                "location": "UNKNOWN",
+                "normalized_value": "https://example.com",
+                "raw_value": "https://example.com",
+                "resolution": "STATIC",
+                "resolution_kind": "EXACT",
+                "resolved_value": null,
+                "role": "SOURCE",
+                "type": "network.url-response-source"
+              },
+              "scope": {
+                "direct_cardinality": {
+                  "kind": "UNKNOWN"
+                },
+                "extent": "UNKNOWN",
+                "kind": "UNKNOWN",
+                "selection_cardinality": {
+                  "kind": "UNKNOWN"
+                }
+              }
+            },
+            {
+              "conditions": [
+                "CONFIG_CONTENT_MAY_ADD_URLS_OPTIONS_AND_OUTPUTS",
+                "IF_A_DEFAULT_CURL_CONFIG_EXISTS"
+              ],
+              "effect_buckets": [
+                "B1_READ_DISCOVERY"
+              ],
+              "effect_id": 3,
+              "mapping_id": "universal-linux.curl.v1",
+              "mode": "EXECUTE",
+              "operation": "read",
+              "parameters": [],
+              "resource": {
+                "expansions": [],
+                "id": "default-curl-config-search",
+                "kind": "PROCESS_RUNTIME_AGENT_CONFIG",
+                "location": "UNKNOWN",
+                "normalized_value": "default-curl-config-search",
+                "raw_value": "default-curl-config-search",
+                "resolution": "STATIC",
+                "resolution_kind": "EXACT",
+                "resolved_value": null,
+                "role": "SOURCE",
+                "type": "configuration.curl-default-search"
+              },
+              "scope": {
+                "direct_cardinality": {
+                  "kind": "UNKNOWN"
+                },
+                "extent": "UNKNOWN",
+                "kind": "UNKNOWN",
+                "selection_cardinality": {
+                  "kind": "UNKNOWN"
+                }
+              }
+            }
+          ],
+          "evidence": {
+            "coverage_basis": "UNIVERSAL_LINUX",
+            "coverage_status": "PARTIAL",
+            "evaluation_default": "PARTIAL",
+            "kind": "REVIEWED_REGISTRY_MAPPING",
+            "mapping_id": "universal-linux.curl.v1",
+            "mapping_revision": 2,
+            "profile": "universal-linux",
+            "review_state": "REVIEWED"
+          },
+          "flows": [
+            {
+              "conditions": [
+                "IF_RESPONSE_BODY_IS_EMITTED"
+              ],
+              "flow_id": 1,
+              "from": {
+                "expansions": [],
+                "id": "https://example.com",
+                "kind": "NETWORK_DNS_FIREWALL_ENDPOINT",
+                "location": "UNKNOWN",
+                "normalized_value": "https://example.com",
+                "raw_value": "https://example.com",
+                "resolution": "STATIC",
+                "resolution_kind": "EXACT",
+                "resolved_value": null,
+                "role": "SOURCE",
+                "type": "network.url-response-source"
+              },
+              "kind": "CONTENT",
+              "mapping_id": "universal-linux.curl.v1",
+              "to": {
+                "expansions": [],
+                "id": "stdout",
+                "kind": "HOST_FILESYSTEM_DEVICE",
+                "location": "UNKNOWN",
+                "normalized_value": "stdout",
+                "raw_value": "stdout",
+                "resolution": "STATIC",
+                "resolution_kind": "EXACT",
+                "resolved_value": null,
+                "role": "DESTINATION",
+                "type": "stream.stdout"
+              }
+            }
+          ],
+          "mapping_id": "universal-linux.curl.v1",
+          "mode": "EXECUTE",
+          "modifiers": [
+            "HEADERS_ONLY_REQUEST"
+          ]
+        },
+        "status": "PARTIAL"
+      },
+      "invocation": {
+        "argv": [
+          "curl",
+          "--head",
+          "https://example.com"
+        ],
+        "argv_complete": true,
+        "profile": "universal-linux",
+        "program": "curl",
+        "surface": "direct_argv"
+      },
+      "name": "curl-head-flow"
+    },
+    {
+      "expect": {
+        "issues": [
+          "no_mapping"
+        ],
+        "status": "UNSUPPORTED"
+      },
+      "invocation": {
+        "argv": [
+          "echo",
+          "hello"
+        ],
+        "argv_complete": true,
+        "profile": "universal-linux",
+        "program": "echo",
+        "surface": "direct_argv"
+      },
+      "name": "unsupported-echo"
+    }
+  ],
+  "schema_version": "1.0.0"
+}

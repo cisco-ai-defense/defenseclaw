@@ -1,0 +1,15 @@
+{
+  "format": "defenseclaw.asr.bundle.v1",
+  "schema_version": "1.0.0",
+  "catalog_version": "2026.08.17.5",
+  "catalog_digest": "sha256:8bbafc85764ef36c8847ea048b496fd671b73e930becc34036fe2829dde18242",
+  "snapshot_digest": "sha256:ef3a94c3b340a35c5aa5893f7ae4877a34eafbcd7b4faf887a69be8853f91093",
+  "evaluator_abi": "asr.evaluator.v1",
+  "semantic_contract_digest": "sha256:7eb7c6e1d614612fa4d8723e77dc5519751703c3c22c7be5728c0f7097ebd68f",
+  "conformance": {
+    "digest": "sha256:1abd04b7b9ed8bee89361f4a90040afeb896c4a69125d870493ed28749ea90be",
+    "case_count": 16,
+    "reference_implementation_digest": "sha256:d469b4345cbb11cdc68efa8c5989d6a9a5e66e821554f9453a87c5fc99e3403b",
+    "parity_attested": false
+  }
+}
