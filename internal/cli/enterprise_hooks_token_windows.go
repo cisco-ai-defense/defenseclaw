@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
@@ -54,19 +55,20 @@ func alignEnterpriseOTLPTokenOwner(dataDir string, scope connector.OTLPPathToken
 }
 
 func validateEnterpriseWindowsTokenLocation(dataDir, path, label string) error {
-	if err := managed.ValidateTrustedRuntimeDir(dataDir, "managed data_dir"); err != nil {
+	serviceAccount := os.Getenv(managed.WindowsServiceAccountEnv)
+	if err := managed.ValidateTrustedServiceRuntimeDir(dataDir, "managed data_dir", serviceAccount); err != nil {
 		return fmt.Errorf("enterprise hooks: %w", err)
 	}
 	dir := filepath.Dir(path)
 	if _, err := os.Lstat(dir); err == nil {
-		if err := managed.ValidateTrustedRuntimeDir(dir, label+" directory"); err != nil {
+		if err := managed.ValidateTrustedServiceRuntimeDir(dir, label+" directory", serviceAccount); err != nil {
 			return fmt.Errorf("enterprise hooks: %w", err)
 		}
 	} else if !os.IsNotExist(err) {
 		return err
 	}
 	if _, err := os.Lstat(path); err == nil {
-		if err := managed.ValidateTrustedFilePath(path, label); err != nil {
+		if err := managed.ValidateTrustedServiceRuntimeFilePath(path, label, serviceAccount); err != nil {
 			return fmt.Errorf("enterprise hooks: %w", err)
 		}
 	} else if !os.IsNotExist(err) {
@@ -83,10 +85,14 @@ func alignEnterpriseWindowsTokenOwner(dataDir, path, label string) error {
 	if err != nil {
 		return fmt.Errorf("enterprise hooks: inspect managed data_dir owner: %w", err)
 	}
-	if err := enterpriseWindowsProtectionWriter(filepath.Dir(path), owner, true); err != nil {
+	serviceSID, err := enterpriseWindowsGatewayServiceSID()
+	if err != nil {
+		return err
+	}
+	if err := setEnterpriseWindowsRuntimeProtection(filepath.Dir(path), owner, serviceSID, true); err != nil {
 		return fmt.Errorf("enterprise hooks: harden %s directory: %w", label, err)
 	}
-	if err := enterpriseWindowsProtectionWriter(path, owner, false); err != nil {
+	if err := setEnterpriseWindowsRuntimeProtection(path, owner, serviceSID, false); err != nil {
 		return fmt.Errorf("enterprise hooks: harden %s: %w", label, err)
 	}
 	return validateEnterpriseWindowsTokenLocation(dataDir, path, label)
@@ -105,7 +111,41 @@ func enterpriseWindowsPathOwner(path string) (*windows.SID, error) {
 	return owner, err
 }
 
-func setEnterpriseWindowsManagedProtection(path string, owner *windows.SID, directory bool) error {
+func enterpriseWindowsGatewayServiceSID() (*windows.SID, error) {
+	account := os.Getenv(managed.WindowsServiceAccountEnv)
+	if account == "" {
+		return nil, fmt.Errorf(
+			"enterprise hooks: %s must pin the gateway NT SERVICE account",
+			managed.WindowsServiceAccountEnv,
+		)
+	}
+	sid, err := managed.WindowsServiceAccountSID(account)
+	if err != nil {
+		return nil, fmt.Errorf("enterprise hooks: resolve gateway service SID: %w", err)
+	}
+	if sid == nil {
+		return nil, fmt.Errorf("enterprise hooks: gateway service SID is unavailable")
+	}
+	return sid, nil
+}
+
+func setEnterpriseWindowsRuntimeProtection(path string, owner, serviceSID *windows.SID, directory bool) error {
+	const serviceModify = windows.GENERIC_READ |
+		windows.GENERIC_WRITE |
+		windows.GENERIC_EXECUTE |
+		windows.DELETE
+	return enterprisehooks.RunWithWindowsOwnerRestorePrivilege(func() error {
+		return setEnterpriseWindowsManagedProtection(path, owner, serviceSID, serviceModify, directory)
+	})
+}
+
+func setEnterpriseWindowsManagedProtection(
+	path string,
+	owner *windows.SID,
+	serviceSID *windows.SID,
+	servicePermissions windows.ACCESS_MASK,
+	directory bool,
+) error {
 	if owner == nil {
 		return fmt.Errorf("managed owner SID is unavailable")
 	}
@@ -121,13 +161,21 @@ func setEnterpriseWindowsManagedProtection(path string, owner *windows.SID, dire
 	if directory {
 		inheritance = windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT
 	}
-	entries := []windows.EXPLICIT_ACCESS{}
+	entries := make([]windows.EXPLICIT_ACCESS, 0, 4)
 	for _, sid := range []*windows.SID{owner, system, administrators} {
 		entries = append(entries, windows.EXPLICIT_ACCESS{
 			AccessPermissions: windows.GENERIC_ALL,
 			AccessMode:        windows.GRANT_ACCESS,
 			Inheritance:       inheritance,
 			Trustee:           windows.TRUSTEE{TrusteeForm: windows.TRUSTEE_IS_SID, TrusteeType: windows.TRUSTEE_IS_USER, TrusteeValue: windows.TrusteeValueFromSID(sid)},
+		})
+	}
+	if serviceSID != nil && servicePermissions != 0 {
+		entries = append(entries, windows.EXPLICIT_ACCESS{
+			AccessPermissions: servicePermissions,
+			AccessMode:        windows.GRANT_ACCESS,
+			Inheritance:       inheritance,
+			Trustee:           windows.TRUSTEE{TrusteeForm: windows.TRUSTEE_IS_SID, TrusteeType: windows.TRUSTEE_IS_USER, TrusteeValue: windows.TrusteeValueFromSID(serviceSID)},
 		})
 	}
 	acl, err := windows.ACLFromEntries(entries, nil)

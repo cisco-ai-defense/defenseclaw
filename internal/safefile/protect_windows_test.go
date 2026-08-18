@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"unsafe"
 
@@ -90,6 +91,401 @@ func TestPrivateDACLRejectsExtendedAndUnknownACETypes(t *testing.T) {
 				t.Fatalf("isSimpleDiscretionaryACE(0x%x) = %v, want %v", tc.aceType, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestWindowsProtectionIdentityDistinguishesActualThreadToken(t *testing.T) {
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+
+	processUser, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil || processUser == nil || processUser.User.Sid == nil {
+		t.Fatalf("current process token user: %v", err)
+	}
+	ordinary, err := windowsProtectionIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ordinary.impersonated {
+		t.Fatal("ordinary process unexpectedly has a thread impersonation token")
+	}
+	if !ordinary.sid.Equals(processUser.User.Sid) {
+		t.Fatalf("ordinary protection SID %s, want process SID %s", ordinary.sid, processUser.User.Sid)
+	}
+
+	if err := windows.ImpersonateSelf(windows.SecurityImpersonation); err != nil {
+		t.Skipf("same-user impersonation unavailable: %v", err)
+	}
+	defer func() {
+		if err := windows.RevertToSelf(); err != nil {
+			t.Errorf("revert same-user impersonation: %v", err)
+		}
+	}()
+	impersonated, err := windowsProtectionIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !impersonated.impersonated {
+		t.Fatal("same-SID thread token was misclassified as ordinary process context")
+	}
+	if !impersonated.sid.Equals(processUser.User.Sid) {
+		t.Fatalf("same-user impersonation SID %s, want process SID %s", impersonated.sid, processUser.User.Sid)
+	}
+}
+
+func TestWindowsPrivateOwnershipRepairUsesImpersonatedSubject(t *testing.T) {
+	processUser, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil || processUser == nil || processUser.User.Sid == nil {
+		t.Fatalf("current process token user: %v", err)
+	}
+	anonymous, err := windows.CreateWellKnownSid(windows.WinAnonymousSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
+	impersonateAnonymous := windows.NewLazySystemDLL("advapi32.dll").NewProc("ImpersonateAnonymousToken")
+	result, _, callErr := impersonateAnonymous.Call(uintptr(windows.CurrentThread()))
+	if result == 0 {
+		t.Fatalf("ImpersonateAnonymousToken: %v", callErr)
+	}
+	reverted := false
+	defer func() {
+		if !reverted {
+			if err := windows.RevertToSelf(); err != nil {
+				t.Errorf("revert anonymous impersonation: %v", err)
+			}
+		}
+	}()
+
+	identity, err := windowsProtectionIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !identity.impersonated || !identity.sid.Equals(anonymous) {
+		t.Fatalf("effective protection subject = %+v, want anonymous SID %s", identity, anonymous)
+	}
+	if identity.sid.Equals(processUser.User.Sid) {
+		t.Fatal("anonymous thread token did not produce a distinct effective SID")
+	}
+	if err := windows.RevertToSelf(); err != nil {
+		t.Fatalf("revert anonymous impersonation: %v", err)
+	}
+	reverted = true
+
+	sid := identity.sid.String()
+	descriptor, err := windows.SecurityDescriptorFromString(
+		"O:" + sid + "D:P(A;;GA;;;" + sid + ")(A;;GA;;;SY)",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	repairable, err := privateSecurityDescriptorIsWriterRepairableForSubject(
+		descriptor,
+		identity,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !repairable {
+		t.Fatal("repairability rejected the effective impersonated subject")
+	}
+	repairable, err = privateSecurityDescriptorIsWriterRepairableForSubject(
+		descriptor,
+		windowsProtectionSubject{sid: processUser.User.Sid},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repairable {
+		t.Fatal("repairability accepted the different process-token subject")
+	}
+}
+
+func TestOrdinaryWindowsProtectionRetainsLegacyAdministratorACENormalization(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ordinary-private.json")
+	if err := os.WriteFile(path, []byte("fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ownWindowsTestPath(t, path)
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil || user == nil || user.User.Sid == nil {
+		t.Fatalf("current token user: %v", err)
+	}
+	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	administrators, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{
+		windowsAccessEntry(user.User.Sid, windows.GENERIC_ALL),
+		windowsAccessEntry(system, windows.GENERIC_ALL),
+		windowsAccessEntry(administrators, windows.GENERIC_READ),
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil,
+		nil,
+		acl,
+		nil,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	identity, err := windowsProtectionIdentity()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity.impersonated {
+		t.Fatal("ordinary test process unexpectedly selected impersonated protection semantics")
+	}
+	safe, err := privateDACLIsSafe(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if safe {
+		t.Fatal("ordinary protection accepted an Administrators ACE that legacy behavior normalizes")
+	}
+	if err := ProtectFile(path); err != nil {
+		t.Fatalf("normalize ordinary private file: %v", err)
+	}
+	if got := windowsAllowMaskForSID(t, path, administrators); got != 0 {
+		t.Fatalf("Administrators ACE retained mask 0x%x after ordinary normalization", uint32(got))
+	}
+}
+
+func TestOrdinaryWindowsProtectionRetainsLegacyOwnerRightsCompatibility(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "owner-rights.json")
+	if err := os.WriteFile(path, []byte("fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ownWindowsTestPath(t, path)
+	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerRights, err := windows.CreateWellKnownSid(windows.WinCreatorOwnerRightsSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{
+		windowsAccessEntry(ownerRights, windows.GENERIC_ALL),
+		windowsAccessEntry(system, windows.GENERIC_ALL),
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil,
+		nil,
+		acl,
+		nil,
+	); err != nil {
+		t.Fatal(err)
+	}
+	safe, err := privateDACLIsSafe(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !safe {
+		t.Fatal("ordinary protection rejected the legacy OWNER RIGHTS owner surrogate")
+	}
+}
+
+func TestWindowsPrivateDACLNormalAndImpersonatedPolicies(t *testing.T) {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil || user == nil || user.User.Sid == nil {
+		t.Fatalf("current token user: %v", err)
+	}
+	subjectSID, err := user.User.Sid.Copy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	administrators, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	everyone, err := windows.CreateWellKnownSid(windows.WinWorldSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ownerRights, err := windows.CreateWellKnownSid(windows.WinCreatorOwnerRightsSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	normal := windowsProtectionSubject{sid: subjectSID}
+	impersonated := windowsProtectionSubject{sid: subjectSID, impersonated: true}
+
+	tests := []struct {
+		name                 string
+		entries              []windows.EXPLICIT_ACCESS
+		wantNormalSafe       bool
+		wantImpersonatedSafe bool
+	}{
+		{
+			name: "exact user and system",
+			entries: []windows.EXPLICIT_ACCESS{
+				windowsAccessEntry(subjectSID, windows.GENERIC_ALL),
+				windowsAccessEntry(system, windows.GENERIC_ALL),
+			},
+			wantNormalSafe:       true,
+			wantImpersonatedSafe: true,
+		},
+		{
+			name: "administrators allow",
+			entries: []windows.EXPLICIT_ACCESS{
+				windowsAccessEntry(subjectSID, windows.GENERIC_ALL),
+				windowsAccessEntry(system, windows.GENERIC_ALL),
+				windowsAccessEntry(administrators, windows.GENERIC_READ),
+			},
+			wantNormalSafe:       false,
+			wantImpersonatedSafe: true,
+		},
+		{
+			name: "unrelated deny",
+			entries: []windows.EXPLICIT_ACCESS{
+				windowsDenyEntry(everyone, windows.GENERIC_WRITE),
+				windowsAccessEntry(subjectSID, windows.GENERIC_ALL),
+				windowsAccessEntry(system, windows.GENERIC_ALL),
+			},
+			wantNormalSafe:       true,
+			wantImpersonatedSafe: false,
+		},
+		{
+			name: "owner rights substitutes for owner",
+			entries: []windows.EXPLICIT_ACCESS{
+				windowsAccessEntry(ownerRights, windows.GENERIC_ALL),
+				windowsAccessEntry(system, windows.GENERIC_ALL),
+			},
+			wantNormalSafe:       true,
+			wantImpersonatedSafe: false,
+		},
+		{
+			name: "exact owner rights read control",
+			entries: []windows.EXPLICIT_ACCESS{
+				windowsAccessEntry(subjectSID, windows.GENERIC_ALL),
+				windowsAccessEntry(system, windows.GENERIC_ALL),
+				windowsAccessEntry(ownerRights, windows.READ_CONTROL),
+			},
+			wantNormalSafe:       true,
+			wantImpersonatedSafe: true,
+		},
+		{
+			name: "excess owner rights",
+			entries: []windows.EXPLICIT_ACCESS{
+				windowsAccessEntry(subjectSID, windows.GENERIC_ALL),
+				windowsAccessEntry(system, windows.GENERIC_ALL),
+				windowsAccessEntry(ownerRights, windows.GENERIC_READ),
+			},
+			wantNormalSafe:       true,
+			wantImpersonatedSafe: false,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "private.json")
+			if err := os.WriteFile(path, []byte("fixture"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ownWindowsTestPath(t, path)
+			acl, err := windows.ACLFromEntries(test.entries, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := windows.SetNamedSecurityInfo(
+				path,
+				windows.SE_FILE_OBJECT,
+				windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+				nil,
+				nil,
+				acl,
+				nil,
+			); err != nil {
+				t.Fatal(err)
+			}
+			gotNormal, err := privateDACLIsSafeForSubject(path, normal)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gotNormal != test.wantNormalSafe {
+				t.Fatalf("normal safety = %v, want %v", gotNormal, test.wantNormalSafe)
+			}
+			gotImpersonated, err := privateDACLIsSafeForSubject(path, impersonated)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if gotImpersonated != test.wantImpersonatedSafe {
+				t.Fatalf(
+					"impersonated safety = %v, want %v",
+					gotImpersonated,
+					test.wantImpersonatedSafe,
+				)
+			}
+		})
+	}
+}
+
+func TestWindowsPrivateDACLImpersonatedPolicyRequiresProtection(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "unprotected.json")
+	if err := os.WriteFile(path, []byte("fixture"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ownWindowsTestPath(t, path)
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil || user == nil || user.User.Sid == nil {
+		t.Fatalf("current token user: %v", err)
+	}
+	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{
+		windowsAccessEntry(user.User.Sid, windows.GENERIC_ALL),
+		windowsAccessEntry(system, windows.GENERIC_ALL),
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.UNPROTECTED_DACL_SECURITY_INFORMATION,
+		nil,
+		nil,
+		acl,
+		nil,
+	); err != nil {
+		t.Fatal(err)
+	}
+	subjectSID, err := user.User.Sid.Copy()
+	if err != nil {
+		t.Fatal(err)
+	}
+	safe, err := privateDACLIsSafeForSubject(
+		path,
+		windowsProtectionSubject{sid: subjectSID, impersonated: true},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if safe {
+		t.Fatal("impersonated policy accepted an unprotected DACL")
 	}
 }
 
@@ -517,6 +913,18 @@ func windowsAccessEntry(sid *windows.SID, mask windows.ACCESS_MASK) windows.EXPL
 	return windows.EXPLICIT_ACCESS{
 		AccessPermissions: mask,
 		AccessMode:        windows.GRANT_ACCESS,
+		Trustee: windows.TRUSTEE{
+			TrusteeForm:  windows.TRUSTEE_IS_SID,
+			TrusteeType:  windows.TRUSTEE_IS_USER,
+			TrusteeValue: windows.TrusteeValueFromSID(sid),
+		},
+	}
+}
+
+func windowsDenyEntry(sid *windows.SID, mask windows.ACCESS_MASK) windows.EXPLICIT_ACCESS {
+	return windows.EXPLICIT_ACCESS{
+		AccessPermissions: mask,
+		AccessMode:        windows.DENY_ACCESS,
 		Trustee: windows.TRUSTEE{
 			TrusteeForm:  windows.TRUSTEE_IS_SID,
 			TrusteeType:  windows.TRUSTEE_IS_USER,

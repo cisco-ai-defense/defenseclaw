@@ -1,0 +1,299 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build windows
+
+package cli
+
+import (
+	"encoding/json"
+	"errors"
+	"path/filepath"
+	"slices"
+	"strings"
+	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
+)
+
+func TestWindowsManagedHooksTeardownCommandIsHiddenAndBounded(t *testing.T) {
+	command := newWindowsManagedHooksTeardownCommand()
+	if !command.Hidden {
+		t.Fatal("teardown-managed-hooks command must remain hidden")
+	}
+	if command.Use != "teardown-managed-hooks" {
+		t.Fatalf("Use = %q", command.Use)
+	}
+	var actions []string
+	for _, child := range command.Commands() {
+		if !child.Hidden {
+			t.Fatalf("%s action must remain hidden", child.Name())
+		}
+		if child.Flags().Lookup("json") == nil {
+			t.Fatalf("%s action is missing --json", child.Name())
+		}
+		actions = append(actions, child.Name())
+	}
+	if !slices.Equal(actions, []string{"prepare", "rollback", "verify"}) {
+		t.Fatalf("actions = %v", actions)
+	}
+}
+
+func TestWindowsManagedHooksTeardownTargetsCanonicalExactSet(t *testing.T) {
+	enabled := true
+	disabled := false
+	homeA := filepath.Clean(`C:\Users\alice`)
+	homeB := filepath.Clean(`C:\Users\bob`)
+	manifest := enterprisehooks.Manifest{
+		Version: 1,
+		Targets: []enterprisehooks.ManifestTarget{
+			{
+				UserHome:     homeB,
+				SID:          "S-1-5-21-111-222-333-1002",
+				Connector:    "Codex",
+				AgentVersion: "0.131.0",
+				Enabled:      &enabled,
+			},
+			{
+				UserHome:     homeA,
+				SID:          "S-1-5-21-111-222-333-1001",
+				Connector:    "ClaudeCode",
+				DataDir:      filepath.Join(homeA, ".defenseclaw"),
+				AgentVersion: "2.1.152",
+			},
+			{
+				UserHome:     `C:\Users\disabled`,
+				SID:          "S-1-5-21-111-222-333-1003",
+				Connector:    "codex",
+				AgentVersion: "0.131.0",
+				Enabled:      &disabled,
+			},
+		},
+	}
+	targets, claude, codex, err := windowsManagedHooksTeardownTargets(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 2 || targets[0].Connector != "claudecode" ||
+		targets[1].Connector != "codex" {
+		t.Fatalf("sorted targets = %+v", targets)
+	}
+	if !slices.Equal(claude, []string{"S-1-5-21-111-222-333-1001"}) {
+		t.Fatalf("Claude targets = %v", claude)
+	}
+	if len(codex) != 1 ||
+		codex[0].SID != "S-1-5-21-111-222-333-1002" ||
+		!sameWindowsEnterprisePathCLI(
+			codex[0].DataDir,
+			filepath.Join(homeB, ".defenseclaw"),
+		) {
+		t.Fatalf("Codex targets = %+v", codex)
+	}
+}
+
+func TestWindowsManagedHooksTeardownTargetsRejectsExpansion(t *testing.T) {
+	base := enterprisehooks.ManifestTarget{
+		UserHome:     `C:\Users\alice`,
+		SID:          "S-1-5-21-111-222-333-1001",
+		Connector:    "codex",
+		AgentVersion: "0.131.0",
+	}
+	tests := []struct {
+		name   string
+		mutate func(*enterprisehooks.ManifestTarget)
+		match  string
+	}{
+		{
+			name: "unknown connector",
+			mutate: func(target *enterprisehooks.ManifestTarget) {
+				target.Connector = "custom"
+			},
+			match: "does not support connector",
+		},
+		{
+			name: "arbitrary data dir",
+			mutate: func(target *enterprisehooks.ManifestTarget) {
+				target.DataDir = `C:\ProgramData\attacker`
+			},
+			match: "does not equal canonical",
+		},
+		{
+			name: "malformed SID",
+			mutate: func(target *enterprisehooks.ManifestTarget) {
+				target.SID = "not-a-sid"
+			},
+			match: "invalid managed-hook teardown SID",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			target := base
+			test.mutate(&target)
+			_, _, _, err := windowsManagedHooksTeardownTargets(
+				enterprisehooks.Manifest{Version: 1, Targets: []enterprisehooks.ManifestTarget{target}},
+			)
+			if err == nil || !strings.Contains(err.Error(), test.match) {
+				t.Fatalf("error = %v, want %q", err, test.match)
+			}
+		})
+	}
+}
+
+func TestValidateWindowsManagedHooksTeardownJournalRejectsIdentityChanges(t *testing.T) {
+	targets := []windowsManagedHooksTeardownTarget{{
+		Connector:    "codex",
+		SID:          "S-1-5-21-111-222-333-1001",
+		DataDir:      `C:\Users\alice\.defenseclaw`,
+		AgentVersion: "0.131.0",
+	}}
+	fingerprint, err := windowsManagedHooksTeardownFingerprint(targets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity := windowsManagedHooksTeardownJournal{
+		SchemaVersion:       windowsManagedHooksTeardownSchema,
+		Phase:               "prepared",
+		ManifestPath:        `C:\ProgramData\DefenseClaw\hook-guardian\targets.yaml`,
+		ManifestFingerprint: fingerprint,
+		HookBinary:          `C:\Program Files\DefenseClaw\bin\defenseclaw-hook.exe`,
+		GatewayAddr:         "127.0.0.1:18970",
+		GatewayServiceName:  "DefenseClawGateway",
+		Targets:             targets,
+	}
+	if err := validateWindowsManagedHooksTeardownJournal(identity, identity); err != nil {
+		t.Fatal(err)
+	}
+	tampered := identity
+	tampered.GatewayServiceName = "OtherGateway"
+	if err := validateWindowsManagedHooksTeardownJournal(tampered, identity); err == nil {
+		t.Fatal("service-name journal tamper was accepted")
+	}
+	tampered = identity
+	tampered.Targets = append([]windowsManagedHooksTeardownTarget(nil), identity.Targets...)
+	tampered.Targets[0].SID = "S-1-5-21-111-222-333-1009"
+	if err := validateWindowsManagedHooksTeardownJournal(tampered, identity); err == nil {
+		t.Fatal("target-SID journal tamper was accepted")
+	}
+	tampered = identity
+	tampered.Claude.PolicyExisted = true
+	if err := validateWindowsManagedHooksTeardownJournal(tampered, identity); err == nil {
+		t.Fatal("incomplete Claude snapshot was accepted")
+	}
+}
+
+func TestWindowsManagedHooksTeardownReportJSONContract(t *testing.T) {
+	report := windowsManagedHooksTeardownReport{
+		SchemaVersion:                windowsManagedHooksTeardownSchema,
+		Action:                       "prepare",
+		OK:                           true,
+		ManifestPath:                 `C:\ProgramData\DefenseClaw\hook-guardian\targets.yaml`,
+		JournalPath:                  `C:\ProgramData\DefenseClaw\install\managed-hooks-teardown-journal.json`,
+		TargetCount:                  1,
+		EnrollmentTargetCount:        1,
+		SucceededCount:               1,
+		VerifiedCleanCount:           1,
+		VerifiedInstalledCount:       0,
+		FailedCount:                  0,
+		SurvivingOwnedPathReferences: 0,
+		RollbackReady:                true,
+		SafeToRemoveBinary:           true,
+		Results: []windowsManagedHooksTeardownResult{{
+			Connector: "codex",
+			SID:       "S-1-5-21-111-222-333-1001",
+			OK:        true,
+		}},
+	}
+	body, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(body, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	for _, numeric := range []string{
+		"target_count",
+		"enrollment_target_count",
+		"succeeded_count",
+		"verified_clean_count",
+		"failed_count",
+		"surviving_owned_path_references",
+	} {
+		if _, ok := decoded[numeric].(float64); !ok {
+			t.Fatalf("%s = %#v, want JSON number", numeric, decoded[numeric])
+		}
+	}
+}
+
+func TestCompleteWindowsManagedHooksTeardownRollbackIsIdempotent(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		phase        string
+		installed    bool
+		wantRestores int
+		wantVerifies int
+		wantWrites   int
+	}{
+		{
+			name: "captured partial teardown", phase: "captured",
+			wantRestores: 1, wantVerifies: 2, wantWrites: 1,
+		},
+		{
+			name: "prepared teardown", phase: "prepared",
+			wantRestores: 1, wantVerifies: 2, wantWrites: 1,
+		},
+		{
+			name: "captured after self rollback", phase: "captured", installed: true,
+			wantRestores: 0, wantVerifies: 1, wantWrites: 1,
+		},
+		{
+			name: "already rolled back", phase: "rolled_back", installed: true,
+			wantRestores: 0, wantVerifies: 1, wantWrites: 0,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			restores := 0
+			verifies := 0
+			writes := 0
+			installed := test.installed
+			err := completeWindowsManagedHooksTeardownRollback(
+				windowsManagedHooksTeardownJournal{Phase: test.phase},
+				func() error {
+					restores++
+					installed = true
+					return nil
+				},
+				func() error {
+					verifies++
+					if !installed {
+						return errors.New("managed hooks are not installed")
+					}
+					return nil
+				},
+				func(journal windowsManagedHooksTeardownJournal) error {
+					writes++
+					if journal.Phase != "rolled_back" {
+						t.Fatalf("persisted phase = %q", journal.Phase)
+					}
+					return nil
+				},
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if restores != test.wantRestores ||
+				verifies != test.wantVerifies ||
+				writes != test.wantWrites {
+				t.Fatalf(
+					"restores=%d verifies=%d writes=%d, want %d/%d/%d",
+					restores,
+					verifies,
+					writes,
+					test.wantRestores,
+					test.wantVerifies,
+					test.wantWrites,
+				)
+			}
+		})
+	}
+}

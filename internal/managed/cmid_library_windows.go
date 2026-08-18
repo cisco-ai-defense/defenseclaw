@@ -12,9 +12,35 @@
 
 package managed
 
-// DiscoverCMIDLibrary walks the Cisco Secure Client install to find the
-// newest Cloud Management identity library present on the machine. The full
-// version-nested walk lands with the Windows enterprise Setup work; until
-// then this returns "", so the managed cloud auth provider falls back to its
-// built-in default and callers skip the trust check.
-func DiscoverCMIDLibrary() string { return "" }
+import (
+	"path/filepath"
+	"runtime"
+
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
+)
+
+// Both version directories under this root move with Secure Client
+// upgrades that DefenseClaw does not participate in, so the path cannot
+// be baked in at install time.
+const cmidVendorRelativeRoot = `Cisco\Cisco Secure Client\CM`
+
+// DiscoverCMIDLibrary returns the newest Cloud Management identity
+// library present on this machine, or "" when Secure Client has not
+// installed one. Callers treat the empty result as "no override" and
+// leave the provider to its own default.
+func DiscoverCMIDLibrary() string {
+	programFiles, err := winpath.TrustedProgramFiles()
+	if err != nil {
+		return ""
+	}
+	return discoverCMIDLibraryIn(filepath.Join(programFiles, cmidVendorRelativeRoot), cmidArchDirectory())
+}
+
+// cmidArchDirectory maps the running architecture onto the leaf
+// directory Secure Client ships it under.
+func cmidArchDirectory() string {
+	if runtime.GOARCH == "arm64" {
+		return "arm64"
+	}
+	return "x64"
+}

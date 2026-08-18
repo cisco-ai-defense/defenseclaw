@@ -17,11 +17,14 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -37,7 +40,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
-	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 var (
@@ -57,30 +59,60 @@ var (
 	enterpriseHookWatchDebounce time.Duration
 	enterpriseHookWatchSettle   time.Duration
 
-	enterpriseHooksRuntimeGOOS       = func() string { return runtime.GOOS }
-	enterpriseHooksPlatformPreflight = enterpriseHooksNativePlatformPreflight
-	// Default the enterprise hooks pre-run to the no-audit variant. The
-	// hook-guardian's `enterprise hooks watch` runs as a long-lived
-	// LaunchDaemon beside the main gateway; the main gateway already owns
-	// audit.db in RW mode, and SQLite cannot accept a second RW owner. The
-	// enterprise hooks pathway (watch / install / uninstall / reconcile)
-	// does not use auditStore or auditLog anywhere, so skipping the open
-	// removes dead work and fixes the consistent SQLITE_BUSY crash the
-	// guardian hits on every start. The seam remains overridable so
-	// lifecycle tests keep their custom pre-runs.
-	enterpriseHooksRootPersistentPreRun        = rootPersistentPreRunNoAuditE
+	enterpriseHooksRuntimeGOOS                = func() string { return runtime.GOOS }
+	enterpriseHooksPlatformPreflight          = enterpriseHooksNativePlatformPreflight
+	enterpriseHooksMutationIdentityPreflight  = enterpriseHooksNativeMutationIdentityPreflight
+	enterpriseHooksRootPersistentPreRun       = enterpriseHooksNativePersistentPreRun
+	// Default the "full" enterprise hooks pre-run to the no-audit variant. The
+	// hook-guardian's `enterprise hooks watch` runs as a long-lived daemon
+	// beside the main gateway; the main gateway already owns audit.db in RW
+	// mode, and SQLite cannot accept a second RW owner. The enterprise hooks
+	// pathway (watch / install / uninstall / reconcile) does not use
+	// auditStore or auditLog anywhere, so skipping the open removes dead work
+	// and avoids the consistent SQLITE_BUSY crash the guardian would hit. The
+	// seam remains overridable so lifecycle tests keep their custom pre-runs.
+	enterpriseHooksFullRootPersistentPreRun   = rootPersistentPreRunNoAuditE
+	enterpriseHooksConfigOnlyPersistentPreRun = func(*cobra.Command, []string) error {
+		return loadGatewayCommandConfigOnly()
+	}
+	enterpriseHooksPluginRegistryFactory       = newConnectorRegistryWithPlugins
+	enterpriseHooksCertifiedRegistryFactory    = newWindowsEnterpriseCertifiedConnectorRegistry
 	enterpriseHooksInstallRunE                 = runEnterpriseHooksInstall
 	enterpriseHooksUninstallRunE               = runEnterpriseHooksUninstall
 	enterpriseHooksReconcileRunE               = runEnterpriseHooksReconcile
 	enterpriseHooksWatchRunE                   = runEnterpriseHooksWatch
+	enterpriseHooksStatusRunE                  = runEnterpriseHooksStatus
+	enterpriseHooksVerifyRunE                  = runEnterpriseHooksVerify
 	enterpriseHookAuthorizationOwnershipSetter = setEnterpriseHookAuthorizationOwnership
-	enterpriseHooksRemoveManagedPolicy         = enterprisehooks.RemoveManagedPolicy
+	enterpriseHookAuthorizationDirTrustCheck   = func(path string) error {
+		return managed.ValidateTrustedRuntimeDir(path, "hook guardian authorization directory")
+	}
+	enterpriseHookAuthorizationFileTrustCheck = func(path string) error {
+		return managed.ValidateTrustedFilePath(path, "hook guardian authorization")
+	}
+	enterpriseHookGuardianStateFileTrustCheck = func(path string) error {
+		return managed.ValidateTrustedServiceRuntimeFilePath(
+			path,
+			"hook guardian state",
+			os.Getenv(managed.WindowsServiceAccountEnv),
+		)
+	}
+	enterpriseHooksRemoveManagedPolicy  = enterprisehooks.RemoveManagedPolicy
+	enterpriseHookScopedTokenMinter     = enterpriseHookScopedToken
+	enterpriseHookScopedOTLPTokenMinter = enterpriseHookScopedOTLPToken
 )
 
 const defaultEnterpriseHookManifest = "/etc/defenseclaw/hook-guardian/targets.yaml"
 const hookGuardianStateFile = "hook_guardian_state.json"
 const hookGuardianAuthorizationFile = managed.HookGuardianAuthorizationFile
 const hookGuardianAuthorizationDirEnv = managed.HookGuardianAuthorizationDirEnv
+
+const (
+	enterpriseHookGuardianStateMaxBytes         int64 = 1 << 20
+	enterpriseHookGuardianAuthorizationMaxBytes int64 = 4 << 20
+	enterpriseHookWatchRepairRetryMin                 = time.Second
+	enterpriseHookWatchRepairRetryMax                 = 15 * time.Second
+)
 
 var enterpriseCmd = &cobra.Command{
 	Use:   "enterprise",
@@ -104,6 +136,22 @@ var enterpriseHooksCmd = &cobra.Command{
 	},
 }
 
+func newEnterpriseHooksConnectorRegistry() *connector.Registry {
+	if enterpriseHooksRuntimeGOOS() == "windows" &&
+		cfg != nil &&
+		managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		return enterpriseHooksCertifiedRegistryFactory()
+	}
+	return enterpriseHooksPluginRegistryFactory()
+}
+
+func newWindowsEnterpriseCertifiedConnectorRegistry() *connector.Registry {
+	registry := connector.NewRegistry()
+	registry.RegisterBuiltin(connector.NewCodexConnector())
+	registry.RegisterBuiltin(connector.NewClaudeCodeConnector())
+	return registry
+}
+
 var enterpriseHooksInstallCmd = &cobra.Command{
 	Use:   "install",
 	Short: "Install or repair a hook-native connector for one interactive user",
@@ -111,10 +159,12 @@ var enterpriseHooksInstallCmd = &cobra.Command{
 agent configuration.
 
 The hardened gateway service should not be granted write access to /home.
-Instead, run this command as an administrator for each protected user, or from
-a systemd timer/MDM guardian. First-time installs require the agent's native
-hook config file to already exist, so broad process discovery cannot create a
-new app profile from scratch.`,
+On Linux and macOS, run this command as root for each protected user or from an
+MDM/system guardian. On native Windows, direct hook mutation is reserved for the
+LocalSystem guardian; administrators use the enterprise windows lifecycle
+commands. First-time installs require the agent's native hook config file to
+already exist, so broad process discovery cannot create a new app profile from
+scratch.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return enterpriseHooksInstallRunE(cmd, args)
 	},
@@ -160,6 +210,35 @@ periodic reconcile interval as a backstop for missed filesystem events.`,
 	},
 }
 
+var enterpriseHooksStatusCmd = &cobra.Command{
+	Use:   "status",
+	Short: "Report cached guardian and protected authorization health",
+	Long: `Report the last guardian reconcile and the independent administrator-owned
+authorization ledger without changing either record.
+
+Managed health is successful only when both records describe the same complete
+reconcile. In non-managed mode this command reports enterprise enforcement as
+disabled and does not change ordinary hook auto-heal behavior.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return enterpriseHooksStatusRunE(cmd, args)
+	},
+}
+
+var enterpriseHooksVerifyCmd = &cobra.Command{
+	Use:   "verify",
+	Short: "Verify every enabled manifest target without repairing it",
+	Long: `Perform a read-only live verification of every enabled target in the
+administrator-owned manifest.
+
+The command validates target identity, policy and authorization ownership,
+canonical hook/runtime bytes, connector-scoped credentials, DACLs or modes,
+hook contracts, and protected-ledger coverage. It exits non-zero when any
+target or aggregate guardian control is unhealthy.`,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		return enterpriseHooksVerifyRunE(cmd, args)
+	},
+}
+
 func init() {
 	enterpriseHooksInstallCmd.Flags().StringVar(&enterpriseHookConnector, "connector", "",
 		"Hook-native connector to install or repair (for example codex or claudecode)")
@@ -184,7 +263,7 @@ func init() {
 	enterpriseHooksInstallCmd.Flags().BoolVar(&enterpriseHookJSON, "json", false,
 		"Emit machine-readable JSON")
 	enterpriseHooksUninstallCmd.Flags().StringVar(&enterpriseHookConnector, "connector", "",
-		"Administrator-managed connector to remove (currently claudecode on native Windows)")
+		"Administrator-managed connector to remove (built-in codex or claudecode on native Windows)")
 	enterpriseHooksUninstallCmd.Flags().StringVar(&enterpriseHookUser, "user", "",
 		"Target local user name (resolves home and SID)")
 	enterpriseHooksUninstallCmd.Flags().StringVar(&enterpriseHookUserHome, "user-home", "",
@@ -222,10 +301,26 @@ func init() {
 	enterpriseHooksWatchCmd.Flags().DurationVar(&enterpriseHookWatchSettle, "settle", 2*time.Second,
 		"Post-reconcile quiet window: fsnotify events observed within this window after a reconcile completes are ignored (the guardian's own writes into watched dirs would otherwise loop-trigger reconcile forever)")
 
+	enterpriseHooksStatusCmd.Flags().StringVar(&enterpriseHookManifest, "manifest", defaultEnterpriseHookManifest,
+		"Expected YAML manifest path recorded by the guardian")
+	enterpriseHooksStatusCmd.Flags().BoolVar(&enterpriseHookJSON, "json", false,
+		"Emit machine-readable JSON")
+
+	enterpriseHooksVerifyCmd.Flags().StringVar(&enterpriseHookManifest, "manifest", defaultEnterpriseHookManifest,
+		"YAML manifest of per-user hook targets")
+	enterpriseHooksVerifyCmd.Flags().StringVar(&enterpriseHookAPIAddr, "api-addr", "",
+		"Local gateway API host:port used by hook scripts (default: 127.0.0.1:<gateway.api_port>)")
+	enterpriseHooksVerifyCmd.Flags().StringVar(&enterpriseHookProxyAddr, "proxy-addr", "",
+		"Local guardrail proxy host:port (default: 127.0.0.1:<guardrail.port>)")
+	enterpriseHooksVerifyCmd.Flags().BoolVar(&enterpriseHookJSON, "json", false,
+		"Emit machine-readable JSON")
+
 	enterpriseHooksCmd.AddCommand(enterpriseHooksInstallCmd)
 	enterpriseHooksCmd.AddCommand(enterpriseHooksUninstallCmd)
 	enterpriseHooksCmd.AddCommand(enterpriseHooksReconcileCmd)
 	enterpriseHooksCmd.AddCommand(enterpriseHooksWatchCmd)
+	enterpriseHooksCmd.AddCommand(enterpriseHooksStatusCmd)
+	enterpriseHooksCmd.AddCommand(enterpriseHooksVerifyCmd)
 	enterpriseCmd.AddCommand(enterpriseHooksCmd)
 	rootCmd.AddCommand(enterpriseCmd)
 }
@@ -271,6 +366,9 @@ func runEnterpriseHooksInstall(cmd *cobra.Command, _ []string) error {
 	if cfg == nil {
 		return enterpriseHooksInstallError(cmd, fmt.Errorf("enterprise hooks install: config is not loaded"))
 	}
+	if err := enterpriseHooksManagedMutationPreflight(); err != nil {
+		return enterpriseHooksInstallError(cmd, err)
+	}
 	if err := validateEnterpriseHookManagedRuntime(); err != nil {
 		return enterpriseHooksInstallError(cmd, err)
 	}
@@ -286,33 +384,45 @@ func runEnterpriseHooksInstall(cmd *cobra.Command, _ []string) error {
 	if proxyAddr == "" {
 		proxyAddr = fmt.Sprintf("127.0.0.1:%d", cfg.Guardrail.Port)
 	}
-	token, err := enterpriseHookScopedToken(cfg.DataDir, enterpriseHookConnector)
+	token, err := enterpriseHookScopedTokenMinter(cfg.DataDir, enterpriseHookConnector)
 	if err != nil {
 		return enterpriseHooksInstallError(cmd, err)
 	}
-	otlpToken, err := enterpriseHookScopedOTLPToken(cfg.DataDir, enterpriseHookConnector)
+	otlpToken, err := enterpriseHookScopedOTLPTokenMinter(cfg.DataDir, enterpriseHookConnector)
 	if err != nil {
 		return enterpriseHooksInstallError(cmd, err)
 	}
 
+	previousProtection, err := previousEnterpriseHookProtection(
+		cfg.DataDir,
+		enterpriseHookUser,
+		target.home,
+		target.sid,
+		enterpriseHookConnector,
+	)
+	if err != nil {
+		return enterpriseHooksInstallError(cmd, err)
+	}
 	opts := enterprisehooks.InstallOptions{
-		ConnectorName:                enterpriseHookConnector,
-		UserHome:                     target.home,
-		OwnerUID:                     target.uid,
-		OwnerGID:                     target.gid,
-		OwnerSID:                     target.sid,
-		DataDir:                      enterpriseHookDataDir,
-		APIAddr:                      apiAddr,
-		ProxyAddr:                    proxyAddr,
-		APIToken:                     token,
-		OTLPPathToken:                otlpToken,
-		HookFailMode:                 cfg.EffectiveHookFailModeForConnector(enterpriseHookConnector),
-		GuardrailMode:                cfg.EffectiveGuardrailModeForConnector(enterpriseHookConnector),
-		HILTEnabled:                  cfg.EffectiveHILTForConnector(enterpriseHookConnector).Enabled,
-		AgentVersion:                 enterpriseHookAgentVersion,
-		WorkspaceDir:                 cfg.ConnectorWorkspaceDir(),
-		Registry:                     newConnectorRegistryWithPlugins(),
-		AllowMissingHookConfigRepair: previousEnterpriseHookSuccess(cfg.DataDir, enterpriseHookUser, target.home, enterpriseHookConnector),
+		ConnectorName:                      enterpriseHookConnector,
+		UserHome:                           target.home,
+		OwnerUID:                           target.uid,
+		OwnerGID:                           target.gid,
+		OwnerSID:                           target.sid,
+		DataDir:                            enterpriseHookDataDir,
+		APIAddr:                            apiAddr,
+		ProxyAddr:                          proxyAddr,
+		APIToken:                           token,
+		OTLPPathToken:                      otlpToken,
+		HookFailMode:                       cfg.EffectiveHookFailModeForConnector(enterpriseHookConnector),
+		GuardrailMode:                      cfg.EffectiveGuardrailModeForConnector(enterpriseHookConnector),
+		HILTEnabled:                        cfg.EffectiveHILTForConnector(enterpriseHookConnector).Enabled,
+		AgentVersion:                       enterpriseHookAgentVersion,
+		WorkspaceDir:                       cfg.ConnectorWorkspaceDir(),
+		Registry:                           newEnterpriseHooksConnectorRegistry(),
+		AllowMissingHookConfigRepair:       previousProtection.PreviouslyProtected,
+		RecoveryHookContractLockUpdatedAt:  previousProtection.HookContractLockUpdatedAt,
+		RecoveryHookContractEntryUpdatedAt: previousProtection.HookContractEntryUpdatedAt,
 	}
 
 	ctx, cancel := context.WithCancel(cmd.Context())
@@ -341,6 +451,7 @@ func enterpriseHooksInstallError(cmd *cobra.Command, err error) error {
 type enterpriseHookReconcileRow struct {
 	User      string                         `json:"user,omitempty"`
 	UserHome  string                         `json:"user_home,omitempty"`
+	SID       string                         `json:"sid,omitempty"`
 	Connector string                         `json:"connector"`
 	OK        bool                           `json:"ok"`
 	Error     string                         `json:"error,omitempty"`
@@ -404,12 +515,484 @@ func runEnterpriseHooksReconcile(cmd *cobra.Command, _ []string) error {
 	return nil
 }
 
+type enterpriseHookStatusReport struct {
+	Enabled                       bool                                 `json:"enabled"`
+	OK                            bool                                 `json:"ok"`
+	StateFile                     string                               `json:"state_file"`
+	AuthorizationFile             string                               `json:"authorization_file"`
+	State                         *enterpriseHookGuardianState         `json:"state,omitempty"`
+	Authorization                 *enterpriseHookGuardianAuthorization `json:"authorization,omitempty"`
+	Verification                  []enterpriseHookReconcileRow         `json:"verification,omitempty"`
+	ClaudeEffectivePolicyVerified bool                                 `json:"claude_effective_policy_verified"`
+	Errors                        []string                             `json:"errors,omitempty"`
+}
+
+func runEnterpriseHooksStatus(cmd *cobra.Command, _ []string) error {
+	report := enterpriseHookStatusReport{}
+	if cfg == nil {
+		return enterpriseHooksStatusError(cmd, report, fmt.Errorf("enterprise hooks status: config is not loaded"))
+	}
+	report.Enabled = managed.IsManagedEnterprise(cfg.DeploymentMode)
+	report.StateFile = filepath.Join(strings.TrimSpace(cfg.DataDir), hookGuardianStateFile)
+	report.AuthorizationFile = managed.HookGuardianAuthorizationPath(cfg.DataDir)
+	if !report.Enabled {
+		report.OK = true
+		if enterpriseHookJSON {
+			return json.NewEncoder(cmd.OutOrStdout()).Encode(report)
+		}
+		fmt.Fprintln(cmd.OutOrStdout(), "  Enterprise hook enforcement: disabled (ordinary hook auto-heal unchanged)")
+		return nil
+	}
+
+	state, stateExists, stateErr := loadEnterpriseHookGuardianState(cfg.DataDir)
+	if stateErr != nil {
+		report.Errors = append(report.Errors, stateErr.Error())
+	} else if !stateExists {
+		report.Errors = append(report.Errors, "hook guardian has not completed a reconcile")
+	} else {
+		report.State = &state
+		report.Errors = append(report.Errors, enterpriseHookGuardianFailureIssues(state)...)
+	}
+	authorization, authorizationExists, authorizationErr := loadEnterpriseHookGuardianAuthorization(cfg.DataDir)
+	if authorizationErr != nil {
+		report.Errors = append(report.Errors, authorizationErr.Error())
+	} else if !authorizationExists {
+		report.Errors = append(report.Errors, "protected hook guardian authorization is missing")
+	} else {
+		report.Authorization = &authorization
+	}
+	if stateExists && authorizationExists && stateErr == nil && authorizationErr == nil {
+		report.Errors = append(report.Errors, compareEnterpriseHookGuardianRecords(state, authorization, enterpriseHookManifest)...)
+	}
+	live, liveErr := runEnterpriseHookVerifyOnce(cmd.Context())
+	if liveErr != nil {
+		report.Errors = append(report.Errors, fmt.Sprintf("live hook verification failed: %v", liveErr))
+	} else {
+		report.Verification = live.Rows
+		report.ClaudeEffectivePolicyVerified =
+			enterpriseHooksClaudeEffectivePolicyVerified(live.Rows)
+		if live.AuthorizationErr != nil {
+			report.Errors = append(report.Errors, fmt.Sprintf("live protected authorization check failed: %v", live.AuthorizationErr))
+		}
+		for _, row := range live.Rows {
+			if !row.OK {
+				report.Errors = append(
+					report.Errors,
+					fmt.Sprintf("live verification failed for %s: %s", enterpriseHookTargetLabel(row), row.Error),
+				)
+			}
+		}
+	}
+	report.OK = len(report.Errors) == 0
+	if enterpriseHookJSON {
+		if err := json.NewEncoder(cmd.OutOrStdout()).Encode(report); err != nil {
+			return err
+		}
+		if !report.OK {
+			return fmt.Errorf("enterprise hooks status unhealthy")
+		}
+		return nil
+	}
+	if report.OK {
+		fmt.Fprintf(cmd.OutOrStdout(), "  %s enterprise hook guardian healthy (%d/%d targets verified)\n",
+			Style("✓", "fg=green", "bold"), state.SuccessCount, state.TargetCount)
+		return nil
+	}
+	for _, issue := range report.Errors {
+		fmt.Fprintf(cmd.ErrOrStderr(), "  %s %s\n", Style("✗", "fg=red", "bold"), issue)
+	}
+	return fmt.Errorf("enterprise hooks status unhealthy")
+}
+
+func enterpriseHooksStatusError(cmd *cobra.Command, report enterpriseHookStatusReport, err error) error {
+	report.OK = false
+	report.Errors = append(report.Errors, err.Error())
+	if enterpriseHookJSON {
+		_ = json.NewEncoder(cmd.OutOrStdout()).Encode(report)
+		return fmt.Errorf("enterprise hooks status failed")
+	}
+	return err
+}
+
+func enterpriseHookGuardianFailureIssues(state enterpriseHookGuardianState) []string {
+	issues := make([]string, 0, state.FailureCount)
+	for _, row := range state.Results {
+		if row.OK {
+			continue
+		}
+		detail := strings.TrimSpace(row.Error)
+		if detail == "" {
+			detail = "no target error was recorded"
+		}
+		issues = append(
+			issues,
+			fmt.Sprintf("last guardian reconcile failed for %s: %s", enterpriseHookTargetLabel(row), detail),
+		)
+	}
+	return issues
+}
+
+func loadEnterpriseHookGuardianState(dataDir string) (enterpriseHookGuardianState, bool, error) {
+	path := filepath.Join(strings.TrimSpace(dataDir), hookGuardianStateFile)
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return enterpriseHookGuardianState{}, false, nil
+	}
+	if err != nil {
+		return enterpriseHookGuardianState{}, false, fmt.Errorf("inspect hook guardian state %s: %w", path, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return enterpriseHookGuardianState{}, true, fmt.Errorf("hook guardian state is not a regular file: %s", path)
+	}
+	if cfg != nil && managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		if err := enterpriseHookGuardianStateFileTrustCheck(path); err != nil {
+			return enterpriseHookGuardianState{}, true, fmt.Errorf("validate hook guardian state %s: %w", path, err)
+		}
+	}
+	data, err := readEnterpriseHookBoundedFile(
+		path,
+		info,
+		enterpriseHookGuardianStateMaxBytes,
+		"hook guardian state",
+	)
+	if err != nil {
+		return enterpriseHookGuardianState{}, true, fmt.Errorf("read hook guardian state %s: %w", path, err)
+	}
+	var state enterpriseHookGuardianState
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&state); err != nil {
+		return enterpriseHookGuardianState{}, true, fmt.Errorf("parse hook guardian state %s: %w", path, err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return enterpriseHookGuardianState{}, true, fmt.Errorf("parse hook guardian state %s: trailing content", path)
+	}
+	if state.Version != 1 || state.TargetCount < 0 || state.SuccessCount < 0 || state.FailureCount < 0 ||
+		state.SuccessCount+state.FailureCount != state.TargetCount || len(state.Results) != state.TargetCount {
+		return enterpriseHookGuardianState{}, true, fmt.Errorf("hook guardian state %s has invalid schema or target counts", path)
+	}
+	return state, true, nil
+}
+
+func compareEnterpriseHookGuardianRecords(state enterpriseHookGuardianState, authorization enterpriseHookGuardianAuthorization, expectedManifest string) []string {
+	var issues []string
+	now := time.Now()
+	if err := managed.ValidateHookGuardianFreshness(state.UpdatedAt, now); err != nil {
+		issues = append(issues, fmt.Sprintf("hook guardian state is not fresh: %v", err))
+	}
+	if err := managed.ValidateHookGuardianFreshness(authorization.UpdatedAt, now); err != nil {
+		issues = append(issues, fmt.Sprintf("protected guardian authorization is not fresh: %v", err))
+	}
+	if !state.OK || state.FailureCount != 0 || state.SuccessCount != state.TargetCount {
+		issues = append(issues, fmt.Sprintf("last guardian reconcile is incomplete (%d/%d targets succeeded)", state.SuccessCount, state.TargetCount))
+	}
+	if !authorization.OK || authorization.FailureCount != 0 || authorization.SuccessCount != authorization.TargetCount {
+		issues = append(issues, fmt.Sprintf("protected guardian authorization is incomplete (%d/%d targets succeeded)", authorization.SuccessCount, authorization.TargetCount))
+	}
+	if state.TargetCount != authorization.TargetCount || state.SuccessCount != authorization.SuccessCount ||
+		state.FailureCount != authorization.FailureCount {
+		issues = append(issues, "guardian state and protected authorization target counts do not match")
+	}
+	if state.UpdatedAt == "" || authorization.UpdatedAt == "" || state.UpdatedAt != authorization.UpdatedAt {
+		issues = append(issues, "guardian state and protected authorization do not identify the same reconcile")
+	}
+	if expected := strings.TrimSpace(expectedManifest); expected != "" && !sameEnterpriseHookPath(state.Manifest, expected) {
+		issues = append(issues, fmt.Sprintf("guardian state records manifest %s, expected %s", state.Manifest, expected))
+	}
+	if state.OK && authorization.OK {
+		issues = append(
+			issues,
+			compareEnterpriseHookProtectedTargetSets(state.Results, authorization.ProtectedTargets)...,
+		)
+	} else {
+		for _, row := range state.Results {
+			if !row.OK {
+				continue
+			}
+			covered := false
+			for _, protected := range authorization.ProtectedTargets {
+				if enterpriseHookRowMatches(protected, row.User, row.UserHome, row.SID, strings.ToLower(strings.TrimSpace(row.Connector))) {
+					covered = true
+					break
+				}
+			}
+			if !covered {
+				issues = append(issues, fmt.Sprintf("protected authorization does not cover %s", enterpriseHookTargetLabel(row)))
+			}
+		}
+	}
+	return issues
+}
+
+func compareEnterpriseHookProtectedTargetSets(expected, actual []enterpriseHookReconcileRow) []string {
+	expectedByKey := make(map[string]enterpriseHookReconcileRow, len(expected))
+	actualByKey := make(map[string]enterpriseHookReconcileRow, len(actual))
+	var issues []string
+	for _, row := range expected {
+		key := enterpriseHookProtectedTargetKey(row)
+		if key == "" {
+			issues = append(issues, fmt.Sprintf("current enabled target is incomplete: %s", enterpriseHookTargetLabel(row)))
+			continue
+		}
+		if _, duplicate := expectedByKey[key]; duplicate {
+			issues = append(issues, fmt.Sprintf("current enabled target is duplicated: %s", enterpriseHookTargetLabel(row)))
+			continue
+		}
+		expectedByKey[key] = row
+	}
+	for _, row := range actual {
+		key := enterpriseHookProtectedTargetKey(row)
+		if key == "" {
+			issues = append(issues, fmt.Sprintf("protected authorization contains an incomplete target: %s", enterpriseHookTargetLabel(row)))
+			continue
+		}
+		if _, duplicate := actualByKey[key]; duplicate {
+			issues = append(issues, fmt.Sprintf("protected authorization contains a duplicate target: %s", enterpriseHookTargetLabel(row)))
+			continue
+		}
+		actualByKey[key] = row
+	}
+	for key, row := range expectedByKey {
+		if _, covered := actualByKey[key]; !covered {
+			issues = append(issues, fmt.Sprintf("protected authorization does not cover %s", enterpriseHookTargetLabel(row)))
+		}
+	}
+	for key, row := range actualByKey {
+		if _, enabled := expectedByKey[key]; !enabled {
+			issues = append(issues, fmt.Sprintf("protected authorization contains extra or stale target %s", enterpriseHookTargetLabel(row)))
+		}
+	}
+	sort.Strings(issues)
+	return issues
+}
+
+func sameEnterpriseHookPath(a, b string) bool {
+	a = strings.TrimSpace(a)
+	b = strings.TrimSpace(b)
+	if a == "" || b == "" {
+		return false
+	}
+	absA, errA := filepath.Abs(a)
+	absB, errB := filepath.Abs(b)
+	if errA != nil || errB != nil {
+		return filepath.Clean(a) == filepath.Clean(b)
+	}
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(filepath.Clean(absA), filepath.Clean(absB))
+	}
+	return filepath.Clean(absA) == filepath.Clean(absB)
+}
+
+func enterpriseHookTargetLabel(row enterpriseHookReconcileRow) string {
+	label := strings.TrimSpace(row.Connector)
+	if row.SID != "" {
+		return label + "@" + row.SID
+	}
+	if row.User != "" {
+		return label + "@" + row.User
+	}
+	if row.UserHome != "" {
+		return label + "@" + row.UserHome
+	}
+	return label
+}
+
+type enterpriseHookVerifyRun struct {
+	Manifest         string
+	Rows             []enterpriseHookReconcileRow
+	Failures         int
+	AuthorizationErr error
+}
+
+func runEnterpriseHooksVerify(cmd *cobra.Command, _ []string) error {
+	run, err := runEnterpriseHookVerifyOnce(cmd.Context())
+	if err != nil {
+		return err
+	}
+	ok := run.Failures == 0 && run.AuthorizationErr == nil
+	if enterpriseHookJSON {
+		payload := map[string]any{
+			"ok":                               ok,
+			"manifest":                         run.Manifest,
+			"results":                          run.Rows,
+			"claude_effective_policy_verified": enterpriseHooksClaudeEffectivePolicyVerified(run.Rows),
+		}
+		if run.AuthorizationErr != nil {
+			payload["authorization_error"] = run.AuthorizationErr.Error()
+		}
+		if err := json.NewEncoder(cmd.OutOrStdout()).Encode(payload); err != nil {
+			return err
+		}
+		if !ok {
+			return fmt.Errorf("enterprise hooks verify failed")
+		}
+		return nil
+	}
+	for _, row := range run.Rows {
+		if row.OK {
+			fmt.Fprintf(cmd.OutOrStdout(), "  %s %s verified\n", Style("✓", "fg=green", "bold"), enterpriseHookTargetLabel(row))
+		} else {
+			fmt.Fprintf(cmd.ErrOrStderr(), "  %s %s: %s\n", Style("✗", "fg=red", "bold"), enterpriseHookTargetLabel(row), row.Error)
+		}
+	}
+	if run.AuthorizationErr != nil {
+		fmt.Fprintf(cmd.ErrOrStderr(), "  %s protected authorization: %s\n", Style("✗", "fg=red", "bold"), run.AuthorizationErr)
+	}
+	if !ok {
+		return fmt.Errorf("enterprise hooks verify failed for %d target(s)", run.Failures)
+	}
+	return nil
+}
+
+// enterpriseHooksClaudeEffectivePolicyVerified deliberately remains false for
+// generic guardian verification rows. An OK row proves protected local policy
+// and runtime integrity, but Claude's first-source-wins behavior can only be
+// certified by a distinct approved-client invocation. That lifecycle evidence
+// is persisted separately and must never be inferred here.
+func enterpriseHooksClaudeEffectivePolicyVerified(rows []enterpriseHookReconcileRow) bool {
+	_ = rows
+	return false
+}
+
+func runEnterpriseHookVerifyOnce(ctx context.Context) (enterpriseHookVerifyRun, error) {
+	run := enterpriseHookVerifyRun{Manifest: enterpriseHookManifest}
+	if cfg == nil {
+		return run, fmt.Errorf("enterprise hooks verify: config is not loaded")
+	}
+	if cfg != nil && managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		if err := managed.ValidateTrustedFilePath(enterpriseHookManifest, "hook guardian manifest"); err != nil {
+			return run, fmt.Errorf("enterprise hooks verify: manifest trust check failed: %w", err)
+		}
+		if err := validateEnterpriseHookManagedRuntime(); err != nil {
+			return run, err
+		}
+	}
+	manifest, err := enterprisehooks.LoadManifest(enterpriseHookManifest)
+	if err != nil {
+		return run, err
+	}
+	authorization, exists, authorizationErr := loadEnterpriseHookGuardianAuthorization(cfg.DataDir)
+	if authorizationErr != nil {
+		run.AuthorizationErr = authorizationErr
+	} else if !exists {
+		run.AuthorizationErr = fmt.Errorf("protected hook guardian authorization is missing")
+	} else if !authorization.OK || authorization.FailureCount != 0 ||
+		authorization.SuccessCount != authorization.TargetCount {
+		run.AuthorizationErr = fmt.Errorf("protected hook guardian authorization is incomplete (%d/%d targets succeeded)", authorization.SuccessCount, authorization.TargetCount)
+	} else if freshnessErr := managed.ValidateHookGuardianFreshness(authorization.UpdatedAt, time.Now()); freshnessErr != nil {
+		run.AuthorizationErr = fmt.Errorf("protected hook guardian authorization is not fresh: %w", freshnessErr)
+	}
+	apiAddr := strings.TrimSpace(enterpriseHookAPIAddr)
+	if apiAddr == "" {
+		apiAddr = fmt.Sprintf("127.0.0.1:%d", cfg.Gateway.APIPort)
+	}
+	proxyAddr := strings.TrimSpace(enterpriseHookProxyAddr)
+	if proxyAddr == "" {
+		proxyAddr = fmt.Sprintf("127.0.0.1:%d", cfg.Guardrail.Port)
+	}
+	if err := verifyEnterpriseHookManagedEnrollments(manifest, apiAddr); err != nil {
+		if run.AuthorizationErr == nil {
+			run.AuthorizationErr = fmt.Errorf("protected enrollment set is not exact: %w", err)
+		} else {
+			run.AuthorizationErr = fmt.Errorf(
+				"%v; protected enrollment set is not exact: %w",
+				run.AuthorizationErr,
+				err,
+			)
+		}
+	}
+	registry := newEnterpriseHooksConnectorRegistry()
+	for _, target := range manifest.Targets {
+		if !target.IsEnabled() {
+			continue
+		}
+		row := enterpriseHookReconcileRow{
+			User:      strings.TrimSpace(target.User),
+			UserHome:  strings.TrimSpace(target.UserHome),
+			SID:       strings.TrimSpace(target.SID),
+			Connector: strings.TrimSpace(target.Connector),
+		}
+		resolved, targetErr := resolveEnterpriseHookTargetValues(target.User, target.UserHome, intPtrValue(target.UID), intPtrValue(target.GID), target.SID, target.DataDir)
+		if targetErr == nil && target.SID != "" {
+			resolved.sid = strings.TrimSpace(target.SID)
+		}
+		if targetErr == nil {
+			row.SID = resolved.sid
+			row.UserHome = resolved.home
+		}
+		token := ""
+		otlpToken := ""
+		if targetErr == nil {
+			token, targetErr = loadEnterpriseHookScopedToken(cfg.DataDir, target.Connector)
+		}
+		if targetErr == nil {
+			otlpToken, targetErr = loadEnterpriseHookScopedOTLPToken(cfg.DataDir, target.Connector)
+		}
+		if targetErr == nil {
+			opts := enterprisehooks.InstallOptions{
+				ConnectorName: target.Connector,
+				UserHome:      resolved.home,
+				OwnerUID:      resolved.uid,
+				OwnerGID:      resolved.gid,
+				OwnerSID:      resolved.sid,
+				DataDir:       strings.TrimSpace(target.DataDir),
+				APIAddr:       apiAddr,
+				ProxyAddr:     proxyAddr,
+				APIToken:      token,
+				OTLPPathToken: otlpToken,
+				HookFailMode:  cfg.EffectiveHookFailModeForConnector(target.Connector),
+				GuardrailMode: cfg.EffectiveGuardrailModeForConnector(target.Connector),
+				HILTEnabled:   cfg.EffectiveHILTForConnector(target.Connector).Enabled,
+				AgentVersion:  strings.TrimSpace(target.AgentVersion),
+				WorkspaceDir:  cfg.ConnectorWorkspaceDir(),
+				Registry:      registry,
+			}
+			var result enterprisehooks.InstallResult
+			result, targetErr = enterprisehooks.Verify(ctx, opts)
+			if targetErr == nil {
+				row.Result = &result
+				row.UserHome = result.UserHome
+				row.Connector = result.Connector
+				row.OK = true
+			}
+		}
+		if targetErr == nil && exists {
+			covered := false
+			for _, protected := range authorization.ProtectedTargets {
+				if enterpriseHookRowMatches(protected, row.User, row.UserHome, row.SID, strings.ToLower(strings.TrimSpace(row.Connector))) {
+					covered = true
+					break
+				}
+			}
+			if !covered {
+				targetErr = fmt.Errorf("protected authorization does not cover target")
+			}
+		}
+		if targetErr != nil {
+			row.OK = false
+			row.Error = targetErr.Error()
+			run.Failures++
+		}
+		run.Rows = append(run.Rows, row)
+	}
+	if run.AuthorizationErr == nil && exists {
+		if issues := compareEnterpriseHookProtectedTargetSets(run.Rows, authorization.ProtectedTargets); len(issues) > 0 {
+			run.AuthorizationErr = fmt.Errorf("%s", strings.Join(issues, "; "))
+		}
+	}
+	return run, nil
+}
+
 func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcileRun, error) {
 	run := enterpriseHookReconcileRun{Manifest: enterpriseHookManifest}
 	if cfg == nil {
 		return run, fmt.Errorf("enterprise hooks reconcile: config is not loaded")
 	}
-	if managed.IsManagedEnterprise(cfg.DeploymentMode) {
+	if err := enterpriseHooksManagedMutationPreflight(); err != nil {
+		return run, err
+	}
+	if cfg != nil && managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		if err := managed.ValidateTrustedFilePath(enterpriseHookManifest, "hook guardian manifest"); err != nil {
 			return run, fmt.Errorf("enterprise hooks reconcile: manifest trust check failed: %w", err)
 		}
@@ -429,7 +1012,15 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	if proxyAddr == "" {
 		proxyAddr = fmt.Sprintf("127.0.0.1:%d", cfg.Guardrail.Port)
 	}
-	registry := newConnectorRegistryWithPlugins()
+	// Revoke removed/disabled SIDs before touching any target runtime. This
+	// makes stale enrollment fail closed even when a later repair fails.
+	if err := syncEnterpriseHookManagedEnrollments(manifest, apiAddr, false); err != nil {
+		return run, fmt.Errorf(
+			"enterprise hooks reconcile: revoke stale protected enrollments: %w",
+			err,
+		)
+	}
+	registry := newEnterpriseHooksConnectorRegistry()
 
 	rows := make([]enterpriseHookReconcileRow, 0, len(manifest.Targets))
 	failures := 0
@@ -443,48 +1034,66 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 		row := enterpriseHookReconcileRow{
 			User:      strings.TrimSpace(target.User),
 			UserHome:  strings.TrimSpace(target.UserHome),
+			SID:       strings.TrimSpace(target.SID),
 			Connector: strings.TrimSpace(target.Connector),
 		}
 		token := ""
 		otlpToken := ""
 		resolved, err := resolveEnterpriseHookTargetValues(target.User, target.UserHome, intPtrValue(target.UID), intPtrValue(target.GID), target.SID, target.DataDir)
 		if err == nil {
+			row.SID = strings.TrimSpace(resolved.sid)
+		}
+		if err == nil {
 			var tokenErr error
-			token, tokenErr = enterpriseHookScopedToken(cfg.DataDir, target.Connector)
+			token, tokenErr = enterpriseHookScopedTokenMinter(cfg.DataDir, target.Connector)
 			if tokenErr != nil {
 				err = tokenErr
 			}
 		}
 		if err == nil {
 			var tokenErr error
-			otlpToken, tokenErr = enterpriseHookScopedOTLPToken(cfg.DataDir, target.Connector)
+			otlpToken, tokenErr = enterpriseHookScopedOTLPTokenMinter(cfg.DataDir, target.Connector)
 			if tokenErr != nil {
 				err = tokenErr
 			}
 		}
 		if err == nil {
+			previousProtection, authorizationErr := previousEnterpriseHookProtection(
+				cfg.DataDir,
+				target.User,
+				resolved.home,
+				resolved.sid,
+				target.Connector,
+			)
+			if authorizationErr != nil {
+				err = authorizationErr
+			}
 			opts := enterprisehooks.InstallOptions{
-				ConnectorName:                target.Connector,
-				UserHome:                     resolved.home,
-				OwnerUID:                     resolved.uid,
-				OwnerGID:                     resolved.gid,
-				OwnerSID:                     resolved.sid,
-				DataDir:                      strings.TrimSpace(target.DataDir),
-				APIAddr:                      apiAddr,
-				ProxyAddr:                    proxyAddr,
-				APIToken:                     token,
-				OTLPPathToken:                otlpToken,
-				HookFailMode:                 cfg.EffectiveHookFailModeForConnector(target.Connector),
-				GuardrailMode:                cfg.EffectiveGuardrailModeForConnector(target.Connector),
-				HILTEnabled:                  cfg.EffectiveHILTForConnector(target.Connector).Enabled,
-				AgentVersion:                 strings.TrimSpace(target.AgentVersion),
-				WorkspaceDir:                 cfg.ConnectorWorkspaceDir(),
-				Registry:                     registry,
-				AllowMissingHookConfigRepair: previousEnterpriseHookSuccess(cfg.DataDir, target.User, resolved.home, target.Connector),
+				ConnectorName:                      target.Connector,
+				UserHome:                           resolved.home,
+				OwnerUID:                           resolved.uid,
+				OwnerGID:                           resolved.gid,
+				OwnerSID:                           resolved.sid,
+				DataDir:                            strings.TrimSpace(target.DataDir),
+				APIAddr:                            apiAddr,
+				ProxyAddr:                          proxyAddr,
+				APIToken:                           token,
+				OTLPPathToken:                      otlpToken,
+				HookFailMode:                       cfg.EffectiveHookFailModeForConnector(target.Connector),
+				GuardrailMode:                      cfg.EffectiveGuardrailModeForConnector(target.Connector),
+				HILTEnabled:                        cfg.EffectiveHILTForConnector(target.Connector).Enabled,
+				AgentVersion:                       strings.TrimSpace(target.AgentVersion),
+				WorkspaceDir:                       cfg.ConnectorWorkspaceDir(),
+				Registry:                           registry,
+				AllowMissingHookConfigRepair:       previousProtection.PreviouslyProtected,
+				RecoveryHookContractLockUpdatedAt:  previousProtection.HookContractLockUpdatedAt,
+				RecoveryHookContractEntryUpdatedAt: previousProtection.HookContractEntryUpdatedAt,
 			}
-			if dirs, watchErr := enterprisehooks.WatchDirs(opts); watchErr == nil {
-				for _, dir := range dirs {
-					watchDirs[dir] = struct{}{}
+			if err == nil {
+				if dirs, watchErr := enterprisehooks.WatchDirs(opts); watchErr == nil {
+					for _, dir := range dirs {
+						watchDirs[dir] = struct{}{}
+					}
 				}
 			}
 			if own, filesErr := enterprisehooks.WatchOwnedFiles(opts); filesErr == nil {
@@ -495,13 +1104,15 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 					sharedFiles[f] = struct{}{}
 				}
 			}
-			var result enterprisehooks.InstallResult
-			result, err = enterprisehooks.Install(ctx, opts)
 			if err == nil {
-				row.OK = true
-				row.UserHome = result.UserHome
-				row.Connector = result.Connector
-				row.Result = &result
+				var result enterprisehooks.InstallResult
+				result, err = enterprisehooks.Install(ctx, opts)
+				if err == nil {
+					row.OK = true
+					row.UserHome = result.UserHome
+					row.Connector = result.Connector
+					row.Result = &result
+				}
 			}
 		}
 		if err != nil {
@@ -512,7 +1123,17 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 		rows = append(rows, row)
 	}
 
+	var enrollmentErr error
+	if failures == 0 {
+		enrollmentErr = syncEnterpriseHookManagedEnrollments(manifest, apiAddr, true)
+	}
 	stateErr := writeEnterpriseHookGuardianState(cfg.DataDir, enterpriseHookManifest, rows, failures)
+	if stateErr == nil && enrollmentErr != nil {
+		stateErr = fmt.Errorf(
+			"publish exact protected enrollment set: %w",
+			enrollmentErr,
+		)
+	}
 	run.Rows = rows
 	run.Failures = failures
 	run.StateErr = stateErr
@@ -523,6 +1144,12 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 }
 
 func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
+	if cfg == nil {
+		return fmt.Errorf("enterprise hooks watch: config is not loaded")
+	}
+	if err := enterpriseHooksManagedMutationPreflight(); err != nil {
+		return err
+	}
 	if enterpriseHookWatchInterval <= 0 {
 		return fmt.Errorf("enterprise hooks watch: --interval must be positive")
 	}
@@ -582,13 +1209,18 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	// Cleared on every reconcile (fsnotify OR interval).
 	var lastTriggerPath string
 	var lastTriggerOp fsnotify.Op
+	repairRetryNeeded := false
+	repairRetryDelay := time.Duration(0)
 	reconcile := func(reason string) (bool, error) {
 		run, err := runEnterpriseHookReconcileOnce(cmd.Context())
 		if err != nil {
+			repairRetryNeeded = true
 			return false, err
 		}
 		dirs := append([]string{filepath.Dir(filepath.Clean(enterpriseHookManifest))}, run.WatchDirs...)
-		syncEnterpriseHookWatchDirs(cmd, fsw, watched, dirs)
+		if err := syncEnterpriseHookWatchDirs(fsw, watched, dirs); err != nil {
+			return false, fmt.Errorf("enterprise hooks watch: synchronize watch directories: %w", err)
+		}
 		// Rebuild the owned-file allowlists from this run. The
 		// manifest itself is treated as exclusive-writer: only the
 		// installer / operator ever edits it, so any change is a real
@@ -635,6 +1267,10 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		if run.StateErr != nil {
 			fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] state write failed: %s\n", run.StateErr)
 		}
+		repairRetryNeeded = run.Failures > 0 || run.StateErr != nil
+		if !repairRetryNeeded {
+			repairRetryDelay = 0
+		}
 		// When the row set is byte-identical to the previous run,
 		// any Write/Chmod events still leaking past the normal
 		// settle window are tail-writes from our own reconcile
@@ -667,6 +1303,51 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		<-debounce.C
 	}
 	debouncePending := false
+	debounceReason := ""
+	repairRetry := time.NewTimer(time.Hour)
+	if !repairRetry.Stop() {
+		<-repairRetry.C
+	}
+	defer repairRetry.Stop()
+	repairRetryPending := false
+	// Keep failed-repair backoff independent from filesystem debounce. A
+	// target that can generate owned-file events must not be able to postpone
+	// the retry that replaces a released locked or oversized artifact.
+	scheduleRepairRetry := func() {
+		if !repairRetryNeeded || repairRetryPending {
+			return
+		}
+		repairRetryDelay = enterpriseHookWatchNextRepairRetryDelay(repairRetryDelay)
+		resetEnterpriseHookWatchTimer(repairRetry, repairRetryDelay)
+		repairRetryPending = true
+		fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] repair incomplete; retrying in %s\n", repairRetryDelay)
+	}
+	cancelRepairRetry := func() {
+		if !repairRetryPending {
+			return
+		}
+		if !repairRetry.Stop() {
+			select {
+			case <-repairRetry.C:
+			default:
+			}
+		}
+		repairRetryPending = false
+	}
+	cancelPendingDebounce := func() {
+		if !debouncePending {
+			return
+		}
+		if !debounce.Stop() {
+			select {
+			case <-debounce.C:
+			default:
+			}
+		}
+		debouncePending = false
+		debounceReason = ""
+	}
+	scheduleRepairRetry()
 
 	for {
 		select {
@@ -674,7 +1355,10 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			return cmd.Context().Err()
 		case event, ok := <-fsw.Events:
 			if !ok {
-				return nil
+				if err := cmd.Context().Err(); err != nil {
+					return err
+				}
+				return errors.New("enterprise hooks watch: fsnotify event channel closed unexpectedly")
 			}
 			if !enterpriseHookWatchEventRelevant(event) {
 				continue
@@ -735,24 +1419,64 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			}
 			resetEnterpriseHookWatchTimer(debounce, enterpriseHookWatchDebounce)
 			debouncePending = true
+			debounceReason = "fsnotify"
 		case err, ok := <-fsw.Errors:
 			if !ok {
-				return nil
+				if contextErr := cmd.Context().Err(); contextErr != nil {
+					return contextErr
+				}
+				return errors.New("enterprise hooks watch: fsnotify error channel closed unexpectedly")
 			}
 			fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] fsnotify error: %s\n", err)
 		case <-debounce.C:
 			if debouncePending {
 				debouncePending = false
-				if _, err := reconcile("fsnotify"); err != nil {
-					fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] reconcile after fsnotify failed: %s\n", err)
+				reason := debounceReason
+				debounceReason = ""
+				if reason == "" {
+					reason = "fsnotify"
 				}
+				if _, err := reconcile(reason); err != nil {
+					fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] reconcile after %s failed: %s\n", reason, err)
+				}
+				if repairRetryNeeded {
+					scheduleRepairRetry()
+				} else {
+					cancelRepairRetry()
+				}
+			}
+		case <-repairRetry.C:
+			repairRetryPending = false
+			if _, err := reconcile("retry"); err != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] reconcile after retry failed: %s\n", err)
+			}
+			if repairRetryNeeded {
+				scheduleRepairRetry()
+			} else {
+				cancelRepairRetry()
 			}
 		case <-ticker.C:
 			if _, err := reconcile("interval"); err != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] interval reconcile failed: %s\n", err)
 			}
+			if repairRetryNeeded {
+				scheduleRepairRetry()
+			} else {
+				cancelRepairRetry()
+				cancelPendingDebounce()
+			}
 		}
 	}
+}
+
+func enterpriseHookWatchNextRepairRetryDelay(previous time.Duration) time.Duration {
+	if previous < enterpriseHookWatchRepairRetryMin {
+		return enterpriseHookWatchRepairRetryMin
+	}
+	if previous >= enterpriseHookWatchRepairRetryMax/2 {
+		return enterpriseHookWatchRepairRetryMax
+	}
+	return previous * 2
 }
 
 // enterpriseHookWatchEventInSettleWindow reports whether an fsnotify
@@ -819,6 +1543,13 @@ func enterpriseHookReconcileRowsHash(rows []enterpriseHookReconcileRow) string {
 	return hex.EncodeToString(sum[:])
 }
 
+func enterpriseHooksManagedMutationPreflight() error {
+	if cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		return nil
+	}
+	return enterpriseHooksMutationIdentityPreflight()
+}
+
 func enterpriseHookWatchEventRelevant(event fsnotify.Event) bool {
 	if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Rename|fsnotify.Remove|fsnotify.Chmod) == 0 {
 		return false
@@ -847,8 +1578,9 @@ func enterpriseHookWatchOwnedEventActionable(event fsnotify.Event, exclusiveOwne
 	return event.Op&(fsnotify.Create|fsnotify.Remove|fsnotify.Rename) != 0
 }
 
-func syncEnterpriseHookWatchDirs(cmd *cobra.Command, fsw *fsnotify.Watcher, watched map[string]struct{}, dirs []string) {
+func syncEnterpriseHookWatchDirs(fsw *fsnotify.Watcher, watched map[string]struct{}, dirs []string) error {
 	next := map[string]struct{}{}
+	var addErrors []error
 	for _, dir := range sortedEnterpriseHookStrings(dirs) {
 		dir = strings.TrimSpace(dir)
 		if dir == "" {
@@ -864,7 +1596,7 @@ func syncEnterpriseHookWatchDirs(cmd *cobra.Command, fsw *fsnotify.Watcher, watc
 			continue
 		}
 		if err := fsw.Add(dir); err != nil {
-			fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] watch %s failed: %s\n", dir, err)
+			addErrors = append(addErrors, fmt.Errorf("watch %s: %w", dir, err))
 			delete(next, dir)
 			continue
 		}
@@ -881,6 +1613,7 @@ func syncEnterpriseHookWatchDirs(cmd *cobra.Command, fsw *fsnotify.Watcher, watc
 	for dir := range next {
 		watched[dir] = struct{}{}
 	}
+	return errors.Join(addErrors...)
 }
 
 func resetEnterpriseHookWatchTimer(timer *time.Timer, d time.Duration) {
@@ -923,7 +1656,11 @@ func validateEnterpriseHookManagedRuntime() error {
 	if cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		return nil
 	}
-	if err := managed.ValidateTrustedRuntimeDir(cfg.DataDir, "hook guardian state data_dir"); err != nil {
+	if err := managed.ValidateTrustedServiceRuntimeDir(
+		cfg.DataDir,
+		"hook guardian state data_dir",
+		os.Getenv(managed.WindowsServiceAccountEnv),
+	); err != nil {
 		return fmt.Errorf("enterprise hooks: data_dir trust check failed: %w", err)
 	}
 	if err := managed.ValidateTrustedRuntimeDir(managed.HookGuardianAuthorizationDir(cfg.DataDir), "hook guardian authorization directory"); err != nil {
@@ -947,6 +1684,10 @@ type enterpriseHookGuardianState struct {
 type enterpriseHookGuardianAuthorization struct {
 	Version          int                          `json:"version"`
 	UpdatedAt        string                       `json:"updated_at"`
+	OK               bool                         `json:"ok"`
+	TargetCount      int                          `json:"target_count"`
+	SuccessCount     int                          `json:"success_count"`
+	FailureCount     int                          `json:"failure_count"`
 	ProtectedTargets []enterpriseHookReconcileRow `json:"protected_targets"`
 }
 
@@ -962,10 +1703,18 @@ func writeEnterpriseHookGuardianState(dataDir, manifest string, rows []enterpris
 		}
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	protected := mergeProtectedEnterpriseHookTargets(loadProtectedEnterpriseHookTargets(dataDir), rows)
+	previous, _, err := loadEnterpriseHookGuardianAuthorization(dataDir)
+	if err != nil {
+		return err
+	}
+	protected := mergeProtectedEnterpriseHookTargets(previous.ProtectedTargets, rows)
 	authorization := enterpriseHookGuardianAuthorization{
 		Version:          1,
 		UpdatedAt:        now,
+		OK:               failures == 0 && successes == len(rows),
+		TargetCount:      len(rows),
+		SuccessCount:     successes,
+		FailureCount:     failures,
 		ProtectedTargets: protected,
 	}
 	authorizationData, err := json.MarshalIndent(authorization, "", "  ")
@@ -974,6 +1723,16 @@ func writeEnterpriseHookGuardianState(dataDir, manifest string, rows []enterpris
 	}
 	authorizationData = append(authorizationData, '\n')
 	authorizationDir := managed.HookGuardianAuthorizationDir(dataDir)
+	if info, statErr := os.Lstat(authorizationDir); statErr == nil {
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return fmt.Errorf("hook guardian authorization path is not a trusted directory: %s", authorizationDir)
+		}
+		if err := enterpriseHookAuthorizationDirTrustCheck(authorizationDir); err != nil {
+			return err
+		}
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return fmt.Errorf("inspect hook guardian authorization directory: %w", statErr)
+	}
 	if err := os.MkdirAll(authorizationDir, 0o750); err != nil {
 		return fmt.Errorf("create hook guardian authorization directory: %w", err)
 	}
@@ -983,8 +1742,11 @@ func writeEnterpriseHookGuardianState(dataDir, manifest string, rows []enterpris
 	if err := enterpriseHookAuthorizationOwnershipSetter(authorizationDir); err != nil {
 		return fmt.Errorf("set hook guardian authorization directory ownership: %w", err)
 	}
+	if err := enterpriseHookAuthorizationDirTrustCheck(authorizationDir); err != nil {
+		return err
+	}
 	authorizationPath := filepath.Join(authorizationDir, hookGuardianAuthorizationFile)
-	if err := safefile.Write(authorizationPath, authorizationData); err != nil {
+	if err := writeEnterpriseHookProtectedFile(authorizationPath, authorizationData); err != nil {
 		return fmt.Errorf("write %s: %w", authorizationPath, err)
 	}
 	if err := os.Chmod(authorizationPath, 0o640); err != nil {
@@ -992,6 +1754,9 @@ func writeEnterpriseHookGuardianState(dataDir, manifest string, rows []enterpris
 	}
 	if err := enterpriseHookAuthorizationOwnershipSetter(authorizationPath); err != nil {
 		return fmt.Errorf("set hook guardian authorization file ownership: %w", err)
+	}
+	if err := enterpriseHookAuthorizationFileTrustCheck(authorizationPath); err != nil {
+		return err
 	}
 
 	state := enterpriseHookGuardianState{
@@ -1010,63 +1775,219 @@ func writeEnterpriseHookGuardianState(dataDir, manifest string, rows []enterpris
 	}
 	data = append(data, '\n')
 	path := filepath.Join(dataDir, hookGuardianStateFile)
-	if err := safefile.Write(path, data); err != nil {
+	if err := writeEnterpriseHookProtectedFile(path, data); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
+	}
+	if err := os.Chmod(path, 0o640); err != nil {
+		return fmt.Errorf("make hook guardian state readable: %w", err)
+	}
+	if err := enterpriseHookAuthorizationOwnershipSetter(path); err != nil {
+		return fmt.Errorf("set hook guardian state ownership: %w", err)
+	}
+	if cfg != nil && managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		if err := managed.ValidateTrustedServiceRuntimeFilePath(
+			path,
+			"hook guardian state",
+			os.Getenv(managed.WindowsServiceAccountEnv),
+		); err != nil {
+			return err
+		}
 	}
 	return nil
 }
 
-func previousEnterpriseHookSuccess(dataDir, userName, userHome, connectorName string) bool {
+type enterpriseHookPreviousProtection struct {
+	PreviouslyProtected        bool
+	HookContractLockUpdatedAt  string
+	HookContractEntryUpdatedAt string
+}
+
+func previousEnterpriseHookProtection(
+	dataDir,
+	userName,
+	userHome,
+	sid,
+	connectorName string,
+) (enterpriseHookPreviousProtection, error) {
+	var protection enterpriseHookPreviousProtection
 	connectorName = strings.ToLower(strings.TrimSpace(connectorName))
 	userName = strings.TrimSpace(userName)
 	userHome = filepath.Clean(strings.TrimSpace(userHome))
+	sid = strings.TrimSpace(sid)
 	if dataDir == "" || connectorName == "" {
-		return false
+		return protection, nil
 	}
-	for _, row := range loadProtectedEnterpriseHookTargets(dataDir) {
-		if !enterpriseHookRowMatches(row, userName, userHome, connectorName) {
+	authorization, _, err := loadEnterpriseHookGuardianAuthorization(dataDir)
+	if err != nil {
+		return protection, err
+	}
+	for _, row := range authorization.ProtectedTargets {
+		if !enterpriseHookRowMatches(row, userName, userHome, sid, connectorName) {
 			continue
 		}
-		return true
+		protection.PreviouslyProtected = true
+		if row.Result != nil {
+			protection.HookContractLockUpdatedAt =
+				strings.TrimSpace(row.Result.HookContractLockUpdatedAt)
+			protection.HookContractEntryUpdatedAt =
+				strings.TrimSpace(row.Result.HookContractEntryUpdatedAt)
+		}
+		return protection, nil
 	}
-	return false
+	return protection, nil
 }
 
-func loadProtectedEnterpriseHookTargets(dataDir string) []enterpriseHookReconcileRow {
+func previousEnterpriseHookSuccess(
+	dataDir,
+	userName,
+	userHome,
+	sid,
+	connectorName string,
+) (bool, error) {
+	protection, err := previousEnterpriseHookProtection(
+		dataDir,
+		userName,
+		userHome,
+		sid,
+		connectorName,
+	)
+	return protection.PreviouslyProtected, err
+}
+
+func loadEnterpriseHookGuardianAuthorization(dataDir string) (enterpriseHookGuardianAuthorization, bool, error) {
 	path := managed.HookGuardianAuthorizationPath(dataDir)
-	data, err := os.ReadFile(path)
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return enterpriseHookGuardianAuthorization{}, false, nil
+	}
 	if err != nil {
-		return nil
+		return enterpriseHookGuardianAuthorization{}, false, fmt.Errorf("inspect hook guardian authorization %s: %w", path, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return enterpriseHookGuardianAuthorization{}, true, fmt.Errorf("hook guardian authorization is not a regular file: %s", path)
+	}
+	if err := enterpriseHookAuthorizationFileTrustCheck(path); err != nil {
+		return enterpriseHookGuardianAuthorization{}, true, err
+	}
+	data, err := readEnterpriseHookBoundedFile(
+		path,
+		info,
+		enterpriseHookGuardianAuthorizationMaxBytes,
+		"hook guardian authorization",
+	)
+	if err != nil {
+		return enterpriseHookGuardianAuthorization{}, true, fmt.Errorf("read hook guardian authorization %s: %w", path, err)
 	}
 	var state enterpriseHookGuardianAuthorization
-	if err := json.Unmarshal(data, &state); err != nil {
-		return nil
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&state); err != nil {
+		return enterpriseHookGuardianAuthorization{}, true, fmt.Errorf("parse hook guardian authorization %s: %w", path, err)
 	}
-	var rows []enterpriseHookReconcileRow
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return enterpriseHookGuardianAuthorization{}, true, fmt.Errorf("parse hook guardian authorization %s: trailing content", path)
+	}
+	if state.Version != 1 {
+		return enterpriseHookGuardianAuthorization{}, true, fmt.Errorf("hook guardian authorization %s has unsupported version %d", path, state.Version)
+	}
+	if state.TargetCount < 0 || state.SuccessCount < 0 || state.FailureCount < 0 ||
+		state.SuccessCount+state.FailureCount != state.TargetCount {
+		return enterpriseHookGuardianAuthorization{}, true, fmt.Errorf("hook guardian authorization %s has inconsistent target counts", path)
+	}
+	rows := make([]enterpriseHookReconcileRow, 0, len(state.ProtectedTargets))
+	seen := map[string]struct{}{}
 	for _, row := range state.ProtectedTargets {
-		if row.OK {
-			rows = append(rows, row)
+		if !row.OK {
+			return enterpriseHookGuardianAuthorization{}, true, fmt.Errorf("hook guardian authorization %s contains an unsuccessful protected target", path)
 		}
+		key := enterpriseHookProtectedTargetKey(row)
+		if key == "" {
+			return enterpriseHookGuardianAuthorization{}, true, fmt.Errorf("hook guardian authorization %s contains an incomplete protected target", path)
+		}
+		if _, duplicate := seen[key]; duplicate {
+			return enterpriseHookGuardianAuthorization{}, true, fmt.Errorf("hook guardian authorization %s contains duplicate protected target %q", path, key)
+		}
+		seen[key] = struct{}{}
+		rows = append(rows, row)
 	}
-	return rows
+	state.ProtectedTargets = rows
+	return state, true, nil
+}
+
+func readEnterpriseHookBoundedFile(
+	path string,
+	info os.FileInfo,
+	maxBytes int64,
+	label string,
+) ([]byte, error) {
+	if info == nil {
+		return nil, fmt.Errorf("%s metadata is unavailable", label)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular non-link file", label)
+	}
+	if info.Size() > maxBytes {
+		return nil, fmt.Errorf("%s exceeds %d-byte limit", label, maxBytes)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	openedInfo, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !openedInfo.Mode().IsRegular() || !os.SameFile(info, openedInfo) {
+		return nil, fmt.Errorf("%s changed identity before open", label)
+	}
+	if openedInfo.Size() > maxBytes {
+		return nil, fmt.Errorf("%s exceeds %d-byte limit", label, maxBytes)
+	}
+	current, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if current.Mode()&os.ModeSymlink != 0 || !current.Mode().IsRegular() || !os.SameFile(openedInfo, current) {
+		return nil, fmt.Errorf("%s changed identity before read", label)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("%s exceeds %d-byte limit", label, maxBytes)
+	}
+	return data, nil
 }
 
 func mergeProtectedEnterpriseHookTargets(previous, current []enterpriseHookReconcileRow) []enterpriseHookReconcileRow {
-	merged := map[string]enterpriseHookReconcileRow{}
+	previousByKey := map[string]enterpriseHookReconcileRow{}
 	for _, row := range previous {
 		if !row.OK {
 			continue
 		}
 		if key := enterpriseHookProtectedTargetKey(row); key != "" {
-			merged[key] = row
+			previousByKey[key] = row
 		}
 	}
+	// The current enabled manifest is the authorization allow-list. Preserve a
+	// prior successful row only when that same target is still present but its
+	// current repair failed; removed or disabled targets must be revoked on the
+	// next reconciliation instead of surviving forever in the ledger.
+	merged := map[string]enterpriseHookReconcileRow{}
 	for _, row := range current {
-		if !row.OK {
+		key := enterpriseHookProtectedTargetKey(row)
+		if key == "" {
 			continue
 		}
-		if key := enterpriseHookProtectedTargetKey(row); key != "" {
+		if row.OK {
 			merged[key] = row
+			continue
+		}
+		if prior, ok := previousByKey[key]; ok {
+			merged[key] = prior
 		}
 	}
 	out := make([]enterpriseHookReconcileRow, 0, len(merged))
@@ -1087,6 +2008,9 @@ func enterpriseHookProtectedTargetKey(row enterpriseHookReconcileRow) string {
 	if connectorName == "" {
 		return ""
 	}
+	if sid := strings.ToUpper(strings.TrimSpace(row.SID)); sid != "" {
+		return connectorName + "\x00sid\x00" + sid
+	}
 	if userName := strings.TrimSpace(row.User); userName != "" {
 		return connectorName + "\x00user\x00" + userName
 	}
@@ -1100,13 +2024,18 @@ func enterpriseHookProtectedTargetKey(row enterpriseHookReconcileRow) string {
 	return connectorName + "\x00home\x00" + filepath.Clean(home)
 }
 
-func enterpriseHookRowMatches(row enterpriseHookReconcileRow, userName, userHome, connectorName string) bool {
+func enterpriseHookRowMatches(row enterpriseHookReconcileRow, userName, userHome, sid, connectorName string) bool {
 	rowConnector := strings.ToLower(strings.TrimSpace(row.Connector))
 	if rowConnector == "" && row.Result != nil {
 		rowConnector = strings.ToLower(strings.TrimSpace(row.Result.Connector))
 	}
 	if rowConnector != connectorName {
 		return false
+	}
+	rowSID := strings.TrimSpace(row.SID)
+	sid = strings.TrimSpace(sid)
+	if rowSID != "" || sid != "" {
+		return rowSID != "" && sid != "" && strings.EqualFold(rowSID, sid)
 	}
 	if userName != "" && strings.TrimSpace(row.User) == userName {
 		return true
@@ -1136,7 +2065,8 @@ func resolveEnterpriseHookTargetValues(userName, userHome string, uid, gid int, 
 		gid:  gid,
 		sid:  strings.TrimSpace(sid),
 	}
-	if name := strings.TrimSpace(userName); name != "" {
+	if name := strings.TrimSpace(userName); name != "" &&
+		!(runtime.GOOS == "windows" && target.home != "") {
 		u, err := user.Lookup(name)
 		if err != nil {
 			return target, fmt.Errorf("enterprise hooks: lookup user %q: %w", name, err)
@@ -1205,6 +2135,28 @@ func enterpriseHookScopedToken(dataDir, connectorName string) (string, error) {
 	return token, nil
 }
 
+func loadEnterpriseHookScopedToken(dataDir, connectorName string) (string, error) {
+	connectorName = strings.TrimSpace(connectorName)
+	if connectorName == "" {
+		return "", fmt.Errorf("enterprise hooks: connector is required before reading hook API token")
+	}
+	dataDir = strings.TrimSpace(dataDir)
+	if dataDir == "" {
+		return "", fmt.Errorf("enterprise hooks: config data_dir is required before reading hook API token")
+	}
+	if err := validateEnterpriseHookScopedTokenLocation(dataDir, connectorName); err != nil {
+		return "", err
+	}
+	token, err := connector.LoadHookAPIToken(dataDir, connectorName)
+	if err != nil {
+		return "", fmt.Errorf("enterprise hooks: read scoped hook API token: %w", err)
+	}
+	if token == "" {
+		return "", fmt.Errorf("enterprise hooks: connector-scoped hook API token is missing for %s", connectorName)
+	}
+	return token, nil
+}
+
 func enterpriseHookScopedOTLPToken(dataDir, connectorName string) (string, error) {
 	scope, ok := connector.OTLPPathTokenScopeForConnector(connectorName)
 	if !ok {
@@ -1223,6 +2175,28 @@ func enterpriseHookScopedOTLPToken(dataDir, connectorName string) (string, error
 	}
 	if err := alignEnterpriseOTLPTokenOwner(dataDir, scope); err != nil {
 		return "", err
+	}
+	return token, nil
+}
+
+func loadEnterpriseHookScopedOTLPToken(dataDir, connectorName string) (string, error) {
+	scope, ok := connector.OTLPPathTokenScopeForConnector(connectorName)
+	if !ok {
+		return "", nil
+	}
+	dataDir = strings.TrimSpace(dataDir)
+	if dataDir == "" {
+		return "", fmt.Errorf("enterprise hooks: config data_dir is required before reading OTLP path token")
+	}
+	if err := validateEnterpriseOTLPTokenLocation(dataDir, scope); err != nil {
+		return "", err
+	}
+	token, err := connector.LoadOTLPPathToken(dataDir, scope)
+	if err != nil {
+		return "", fmt.Errorf("enterprise hooks: read scoped OTLP path token: %w", err)
+	}
+	if token == "" {
+		return "", fmt.Errorf("enterprise hooks: scoped OTLP path token is missing for %s", connectorName)
 	}
 	return token, nil
 }

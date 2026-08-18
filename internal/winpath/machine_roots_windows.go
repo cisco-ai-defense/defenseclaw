@@ -149,7 +149,11 @@ func ValidateTrustedMachineRoot(value, label string) (string, error) {
 		return "", fmt.Errorf("trusted %s machine root is not a canonical Windows path", label)
 	}
 	clean := filepath.Clean(value)
-	if clean != value || !isLocalDriveLetterSyntax(clean) {
+	volume := filepath.VolumeName(clean)
+	if clean != value || !filepath.IsAbs(clean) || len(clean) < 3 || clean[2] != '\\' ||
+		len(volume) != 2 || volume[1] != ':' || !isASCIIDriveLetter(volume[0]) ||
+		strings.HasPrefix(clean, `\\`) || strings.HasPrefix(clean, `\\?\`) ||
+		strings.HasPrefix(clean, `\\.\`) || strings.Contains(clean[2:], ":") {
 		return "", fmt.Errorf(
 			"trusted %s machine root must be canonical local drive-letter syntax: %s",
 			label,

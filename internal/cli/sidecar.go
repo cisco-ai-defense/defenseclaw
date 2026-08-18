@@ -53,7 +53,7 @@ func init() {
 	rootCmd.Flags().IntVar(&sidecarPort, "port", 0, "Gateway port (default: from config)")
 }
 
-func runSidecar(_ *cobra.Command, _ []string) error {
+func runSidecar(cmd *cobra.Command, _ []string) error {
 	if sidecarToken != "" {
 		fmt.Fprintln(os.Stderr,
 			"[sidecar] WARNING: --token is deprecated and will be removed in a future release. "+
@@ -126,7 +126,14 @@ func runSidecar(_ *cobra.Command, _ []string) error {
 		}
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	// Use Cobra's caller-owned context so a native Windows SCM stop can
+	// request the same graceful shutdown path as SIGTERM. Interactive and
+	// ordinary daemon invocations still receive a background parent context.
+	parentCtx := cmd.Context()
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
+	ctx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
 	if err := bootstrapConfiguredObservabilityRuntime(ctx, cfg, activeObservabilityV8Startup, sc); err != nil {
 		return err

@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -55,8 +56,13 @@ type InstallOptions struct {
 	HILTEnabled    bool
 	AgentVersion   string
 	HookContractID string
-	WorkspaceDir   string
-	Registry       *connector.Registry
+	// Protected recovery timestamps are copied only from the administrator-
+	// owned guardian authorization ledger. They make a deleted target-owned
+	// hook contract lock byte-reproducible without trusting profile state.
+	RecoveryHookContractLockUpdatedAt  string
+	RecoveryHookContractEntryUpdatedAt string
+	WorkspaceDir                       string
+	Registry                           *connector.Registry
 
 	// AllowMissingHookConfigRepair permits the guardian to recreate a missing
 	// native hook config file only after an administrator-owned caller has
@@ -69,15 +75,17 @@ type InstallOptions struct {
 var publishEnterpriseHookAPIToken = connector.PublishHookAPIToken
 
 type InstallResult struct {
-	Connector       string   `json:"connector"`
-	UserHome        string   `json:"user_home"`
-	DataDir         string   `json:"data_dir"`
-	HookConfigPaths []string `json:"hook_config_paths,omitempty"`
-	HookScripts     []string `json:"hook_scripts,omitempty"`
-	BackupFiles     []string `json:"backup_files,omitempty"`
-	CreatedDirs     []string `json:"created_dirs,omitempty"`
-	AgentVersion    string   `json:"agent_version,omitempty"`
-	HookContractID  string   `json:"hook_contract_id,omitempty"`
+	Connector                  string   `json:"connector"`
+	UserHome                   string   `json:"user_home"`
+	DataDir                    string   `json:"data_dir"`
+	HookConfigPaths            []string `json:"hook_config_paths,omitempty"`
+	HookScripts                []string `json:"hook_scripts,omitempty"`
+	BackupFiles                []string `json:"backup_files,omitempty"`
+	CreatedDirs                []string `json:"created_dirs,omitempty"`
+	AgentVersion               string   `json:"agent_version,omitempty"`
+	HookContractID             string   `json:"hook_contract_id,omitempty"`
+	HookContractLockUpdatedAt  string   `json:"hook_contract_lock_updated_at,omitempty"`
+	HookContractEntryUpdatedAt string   `json:"hook_contract_entry_updated_at,omitempty"`
 }
 
 // RemoveManagedPolicy removes one target user's administrator-managed vendor
@@ -88,6 +96,148 @@ type InstallResult struct {
 // metadata still matches the live policy bytes.
 func RemoveManagedPolicy(ctx context.Context, opts InstallOptions) error {
 	return platformRemoveManagedPolicy(ctx, opts)
+}
+
+// Verify validates one explicit enterprise hook target without repairing or
+// otherwise mutating its native configuration, runtime files, or authorization
+// state. Callers can use the returned InstallResult-shaped inventory alongside
+// Install results without maintaining a second artifact schema.
+func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
+	if result, handled, err := platformVerify(ctx, opts); handled {
+		return result, err
+	}
+	if errEnterpriseHooksUnsupportedWindows != nil {
+		return InstallResult{}, errEnterpriseHooksUnsupportedWindows
+	}
+	home, err := validateUserHome(opts.UserHome)
+	if err != nil {
+		return InstallResult{}, err
+	}
+	uid, gid, err := resolveOwner(home, opts.OwnerUID, opts.OwnerGID)
+	if err != nil {
+		return InstallResult{}, err
+	}
+	if err := validateHomeOwner(home, uid); err != nil {
+		return InstallResult{}, err
+	}
+	dataDir := strings.TrimSpace(opts.DataDir)
+	if dataDir == "" {
+		dataDir = filepath.Join(home, ".defenseclaw")
+	}
+	dataDir, err = filepath.Abs(dataDir)
+	if err != nil {
+		return InstallResult{}, fmt.Errorf("enterprise hooks: resolve data dir: %w", err)
+	}
+	if err := validateUserDataDir(home, dataDir, uid); err != nil {
+		return InstallResult{}, err
+	}
+
+	reg := opts.Registry
+	if reg == nil {
+		reg = connector.NewDefaultRegistry()
+	}
+	name := strings.ToLower(strings.TrimSpace(opts.ConnectorName))
+	if name == "" {
+		return InstallResult{}, fmt.Errorf("enterprise hooks: connector is required")
+	}
+	conn, ok := reg.Get(name)
+	if !ok {
+		return InstallResult{}, fmt.Errorf("enterprise hooks: unknown connector %q", name)
+	}
+	if connector.IsProxyConnector(conn.Name()) {
+		return InstallResult{}, fmt.Errorf("enterprise hooks: connector %q is proxy/plugin setup-only; per-user hook verification is not supported", conn.Name())
+	}
+	if !connector.OwnsManagedHookRuntime(conn) {
+		return InstallResult{}, fmt.Errorf("enterprise hooks: connector %q does not own a managed hook runtime", conn.Name())
+	}
+	if !connector.ConnectorSupportedOnHostOS(conn.Name()) {
+		return InstallResult{}, fmt.Errorf("enterprise hooks: connector %q is not supported on this host OS", conn.Name())
+	}
+
+	setupOpts := connector.SetupOpts{
+		DataDir:           dataDir,
+		ProxyAddr:         strings.TrimSpace(opts.ProxyAddr),
+		APIAddr:           strings.TrimSpace(opts.APIAddr),
+		APIToken:          strings.TrimSpace(opts.APIToken),
+		OTLPPathToken:     strings.TrimSpace(opts.OTLPPathToken),
+		Interactive:       false,
+		ManagedEnterprise: true,
+		WorkspaceDir:      strings.TrimSpace(opts.WorkspaceDir),
+		HookFailMode:      strings.TrimSpace(opts.HookFailMode),
+		HILTEnabled:       opts.HILTEnabled,
+		AgentVersion:      strings.TrimSpace(opts.AgentVersion),
+		HookContractID:    strings.TrimSpace(opts.HookContractID),
+	}
+	if setupOpts.AgentVersion == "" {
+		setupOpts.AgentVersion = connector.LoadCachedAgentVersion(dataDir, conn.Name())
+	}
+	if setupOpts.HookContractID == "" {
+		resolution := connector.ResolveHookContract(conn.Name(), setupOpts.AgentVersion)
+		setupOpts.HookContractID = resolution.Contract.ContractID
+	}
+
+	var result InstallResult
+	err = connector.WithUserHomeDir(home, func() error {
+		paths := connector.HookConfigPathsForConnector(conn, setupOpts)
+		if err := validateActivationSurfaces(home, paths, uid, false, nil); err != nil {
+			return err
+		}
+		if err := validateHookContract(opts.GuardrailMode, conn, setupOpts); err != nil {
+			return err
+		}
+		footprint := connector.AgentPaths{}
+		if ap, ok := conn.(connector.AgentPathProvider); ok {
+			footprint = ap.AgentPaths(setupOpts)
+		}
+		if err := validateInstallFootprintBeforeSetup(home, dataDir, uid, conn.Name(), footprint, false); err != nil {
+			return err
+		}
+		return withOwnerCredentials(uid, gid, func() error {
+			present, err := connector.OwnedHooksPresent(conn, setupOpts)
+			if err != nil {
+				return fmt.Errorf("enterprise hooks: connector %s hook verification failed: %w", conn.Name(), err)
+			}
+			if !present {
+				return fmt.Errorf("enterprise hooks: connector %s hook verification failed: owned hook command not present", conn.Name())
+			}
+			lock, err := connector.LoadHookContractLockEntryForMode(dataDir, conn.Name(), true)
+			if err != nil {
+				return fmt.Errorf("enterprise hooks: load hook contract lock: %w", err)
+			}
+			if lock.Connector != conn.Name() {
+				return fmt.Errorf("enterprise hooks: connector %s hook contract lock is missing", conn.Name())
+			}
+			current, err := connector.NewHookContractLockEntryForMode(
+				setupOpts,
+				conn,
+				version.Current().BinaryVersion,
+				true,
+			)
+			if err != nil {
+				return fmt.Errorf("enterprise hooks: hash managed hook runtime: %w", err)
+			}
+			if connector.HookContractLockDrifted(lock, current) {
+				return fmt.Errorf("enterprise hooks: connector %s hook contract lock drift detected", conn.Name())
+			}
+			result = InstallResult{
+				Connector:       conn.Name(),
+				UserHome:        home,
+				DataDir:         dataDir,
+				HookConfigPaths: sortedUnique(paths),
+				HookScripts:     sortedUnique(footprint.HookScripts),
+				BackupFiles:     sortedUnique(footprint.BackupFiles),
+				CreatedDirs:     sortedUnique(footprint.CreatedDirs),
+				AgentVersion:    lock.RawAgentVersion,
+				HookContractID:  lock.ContractID,
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		return InstallResult{}, err
+	}
+	_ = ctx // reserved for bounded live-client probes
+	return result, nil
 }
 
 func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
@@ -254,9 +404,17 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			if !present {
 				return rollback(fmt.Errorf("enterprise hooks: connector %s hook verification failed: owned hook command not present", conn.Name()))
 			}
-			lockEntry := connector.NewHookContractLockEntry(setupOpts, conn, version.Current().BinaryVersion)
+			lockEntry, err := connector.NewHookContractLockEntryForMode(
+				setupOpts,
+				conn,
+				version.Current().BinaryVersion,
+				true,
+			)
+			if err != nil {
+				return rollback(fmt.Errorf("enterprise hooks: hash managed hook runtime: %w", err))
+			}
 			lockWriteAttempted = true
-			if err := connector.SaveHookContractLockEntry(dataDir, lockEntry); err != nil {
+			if err := connector.SaveHookContractLockEntryForMode(dataDir, lockEntry, true); err != nil {
 				return rollback(fmt.Errorf("enterprise hooks: save hook contract lock: %w", err))
 			}
 
@@ -776,8 +934,28 @@ func validateHookContract(mode string, conn connector.Connector, opts connector.
 	if connector.HookContractNeedsActionOverride(resolution) {
 		return fmt.Errorf("enterprise hooks: connector %s agent version %q is not verified against a known hook contract: %s", conn.Name(), opts.AgentVersion, resolution.Reason)
 	}
-	if previous := connector.LoadHookContractLockEntry(opts.DataDir, conn.Name()); previous.Connector != "" {
-		current := connector.NewHookContractLockEntry(opts, conn, version.Current().BinaryVersion)
+	// Native Windows managed runtimes are administrator-published regular
+	// files. Unix guardians intentionally install hardened per-user symlinks,
+	// so keep their established contract reader and digest semantics.
+	strictManagedRuntime := opts.ManagedEnterprise && runtime.GOOS == "windows"
+	previous, err := connector.LoadHookContractLockEntryForMode(
+		opts.DataDir,
+		conn.Name(),
+		strictManagedRuntime,
+	)
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: load hook contract lock: %w", err)
+	}
+	if previous.Connector != "" {
+		current, err := connector.NewHookContractLockEntryForMode(
+			opts,
+			conn,
+			version.Current().BinaryVersion,
+			strictManagedRuntime,
+		)
+		if err != nil {
+			return fmt.Errorf("enterprise hooks: hash managed hook runtime: %w", err)
+		}
 		if connector.HookContractLockDrifted(previous, current) {
 			return fmt.Errorf("enterprise hooks: connector %s hook contract drift detected: previous version=%q contract=%s current version=%q contract=%s", conn.Name(), previous.RawAgentVersion, previous.ContractID, current.RawAgentVersion, current.ContractID)
 		}

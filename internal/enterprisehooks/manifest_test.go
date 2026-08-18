@@ -49,17 +49,21 @@ func TestLoadManifestAcceptsEmptyDocument(t *testing.T) {
 	}
 }
 
-func TestLoadManifestAcceptsSIDOnlyTarget(t *testing.T) {
+func TestLoadManifestRejectsSparseOversizedInput(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "targets.yaml")
-	data := []byte("version: 1\ntargets:\n  - sid: S-1-5-21-111-222-333-1001\n    connector: claudecode\n")
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		t.Fatalf("write manifest: %v", err)
-	}
-	manifest, err := LoadManifest(path)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
-		t.Fatalf("LoadManifest: %v", err)
+		t.Fatal(err)
 	}
-	if len(manifest.Targets) != 1 || manifest.Targets[0].SID != "S-1-5-21-111-222-333-1001" {
-		t.Fatalf("targets = %+v, want SID-only target", manifest.Targets)
+	if err := file.Truncate(enterpriseHookManifestMaxBytes + 1); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	_, err = LoadManifest(path)
+	if err == nil || !strings.Contains(err.Error(), "exceeds") {
+		t.Fatalf("LoadManifest oversized error = %v, want bounded refusal", err)
 	}
 }
