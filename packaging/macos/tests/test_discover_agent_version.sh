@@ -285,6 +285,106 @@ t_read_json_field_rc_0_on_missing_file() {
   assert_eq "${rc}" "0" "missing file is rc 0 (nothing to parse — not a discovery error)"
 }
 
+# CodeRabbit regression: prior parser accepted a non-target scalar
+# whose value was any run of non-delimiter bytes, so an invalid token
+# like `wat` slipped through and the caller received a "valid version"
+# from a malformed document. The scalar-validate step now rejects
+# anything outside the JSON scalar grammar (true / false / null / a
+# well-formed number per RFC 8259).
+t_read_json_field_rc_2_on_garbage_non_target_scalar() {
+  local dir; dir="$(mktest_tmp)"
+  local cfg="${dir}/pkg.json"
+  # Valid target string BEFORE the garbage. If the parser were still
+  # lenient it would already have `val="1.2.3"` captured and exit 0.
+  printf '{"version":"1.2.3","other":wat}' > "${cfg}"
+  local out rc
+  out="$(_read_json_field "${cfg}" version)"
+  rc=$?
+  assert_eq "${out}" "" "malformed JSON must not emit a captured value from an earlier member"
+  assert_eq "${rc}"  "2" "unquoted garbage scalar (wat) must be rc 2, not treated as a valid non-target value"
+}
+
+# CodeRabbit regression: prior parser silently consumed a `,` between
+# any two positions in the object body — including immediately before
+# the closing `}` (trailing comma). RFC 8259 disallows trailing commas
+# in JSON, so a document with one must return rc 2 and record as a
+# discovery error, not silently produce the version from the preceding
+# member.
+t_read_json_field_rc_2_on_trailing_comma() {
+  local dir; dir="$(mktest_tmp)"
+  local cfg="${dir}/pkg.json"
+  printf '{"version":"1.2.3",}' > "${cfg}"
+  local out rc
+  out="$(_read_json_field "${cfg}" version)"
+  rc=$?
+  assert_eq "${out}" "" "trailing comma must not emit a captured value from the preceding member"
+  assert_eq "${rc}"  "2" "trailing comma is malformed JSON — rc 2"
+}
+
+# Also cover a leading / double comma (`{,"a":1}` and `{"a":1,,"b":2}`).
+# These land in the same code path (comma without a preceding completed
+# member) so we get symmetric coverage cheaply.
+t_read_json_field_rc_2_on_leading_or_double_comma() {
+  local dir; dir="$(mktest_tmp)"
+  local cfg="${dir}/pkg.json"
+
+  printf '{,"version":"1.2.3"}' > "${cfg}"
+  local rc
+  _read_json_field "${cfg}" version >/dev/null
+  rc=$?
+  assert_eq "${rc}" "2" "leading comma inside object is malformed"
+
+  printf '{"version":"1.2.3",,"other":"x"}' > "${cfg}"
+  _read_json_field "${cfg}" version >/dev/null
+  rc=$?
+  assert_eq "${rc}" "2" "double comma inside object is malformed"
+}
+
+# End-to-end guard: _probe_json_version must record both bad inputs as
+# malformed-json in DC_DISCOVERY_ERRORS_LOG (so install.sh's zero-
+# target branch can surface a corrupt metadata file instead of
+# silently classifying it as "connector not installed"). Sanity-checks
+# that the fixed parser's rc 2 flows through the wrapper.
+t_probe_json_version_records_garbage_and_trailing_comma() {
+  local dir; dir="$(mktest_tmp)"
+  local cfg="${dir}/pkg.json"
+  local log; log="${dir}/errors.log"
+  : > "${log}"
+
+  # Garbage non-target scalar.
+  printf '{"version":"1.2.3","other":wat}' > "${cfg}"
+  local out
+  out="$(DC_DISCOVERY_ERRORS_LOG="${log}" \
+         DC_INSTALLER_TARGET_USER="alice" \
+         _probe_json_version "${cfg}" codex)"
+  assert_eq "${out}" "" "garbage-scalar package.json yields empty version through the probe"
+  assert_contains "$(cat "${log}")" "malformed-json" "garbage scalar recorded as malformed-json"
+  assert_contains "$(cat "${log}")" "${cfg}" "garbage scalar records failing path"
+
+  # Reset log and try trailing comma.
+  : > "${log}"
+  printf '{"version":"1.2.3",}' > "${cfg}"
+  out="$(DC_DISCOVERY_ERRORS_LOG="${log}" \
+         DC_INSTALLER_TARGET_USER="alice" \
+         _probe_json_version "${cfg}" codex)"
+  assert_eq "${out}" "" "trailing-comma package.json yields empty version through the probe"
+  assert_contains "$(cat "${log}")" "malformed-json" "trailing comma recorded as malformed-json"
+}
+
+# Positive-side smoke: the tightened parser must NOT reject well-formed
+# JSON that mixes different scalar types (string, number, literal).
+# Regression guard so the fix above doesn't over-strict.
+t_read_json_field_rc_0_on_mixed_valid_scalars() {
+  local dir; dir="$(mktest_tmp)"
+  local cfg="${dir}/pkg.json"
+  printf '{"version":"1.2.3","count":42,"active":true,"data":null,"ratio":-3.14e2}' > "${cfg}"
+  local out rc
+  out="$(_read_json_field "${cfg}" version)"
+  rc=$?
+  assert_eq "${out}" "1.2.3" "well-formed multi-type object still extracts target"
+  assert_eq "${rc}"  "0" "well-formed multi-type object is rc 0"
+}
+
 t_probe_json_version_records_malformed_when_log_set() {
   local dir; dir="$(mktest_tmp)"
   local cfg="${dir}/pkg.json"
@@ -393,6 +493,11 @@ run_case "_read_json_field rc 0 for well-formed w/o field" t_read_json_field_rc_
 run_case "_read_json_field rc 2 for malformed body"        t_read_json_field_rc_2_on_malformed
 run_case "_read_json_field rc 2 for non-object root"       t_read_json_field_rc_2_on_non_object_root
 run_case "_read_json_field rc 0 for missing file"          t_read_json_field_rc_0_on_missing_file
+run_case "_read_json_field rc 2 on garbage non-target scalar" t_read_json_field_rc_2_on_garbage_non_target_scalar
+run_case "_read_json_field rc 2 on trailing comma"           t_read_json_field_rc_2_on_trailing_comma
+run_case "_read_json_field rc 2 on leading/double comma"     t_read_json_field_rc_2_on_leading_or_double_comma
+run_case "_read_json_field rc 0 on mixed valid scalars"      t_read_json_field_rc_0_on_mixed_valid_scalars
+run_case "_probe_json_version records garbage/trailing-comma" t_probe_json_version_records_garbage_and_trailing_comma
 run_case "_probe_json_version records malformed when log set"    t_probe_json_version_records_malformed_when_log_set
 run_case "_probe_json_version no log without env var set"        t_probe_json_version_no_log_when_env_unset
 run_case "_probe_json_version passthrough on well-formed"        t_probe_json_version_passthrough_on_wellformed

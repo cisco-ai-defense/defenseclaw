@@ -434,6 +434,16 @@ _read_json_field() {
       # of a clean parse commits it.
       found = 0
       val = ""
+      # after_member is 1 once we have consumed a full "key: value"
+      # pair; 0 initially and immediately after a comma. It lets us
+      # reject two adjacent commas (a,,b) and a comma appearing
+      # before any member has been read.
+      after_member = 0
+      # saw_comma is set when we accept a comma and cleared when we
+      # start reading the next key. If we hit the closing brace
+      # while saw_comma is still 1, the input ended with a trailing
+      # comma — invalid per RFC 8259, exit 2.
+      saw_comma = 0
       while (pos <= buflen) {
         skip_ws()
         # Reached EOF without a closing brace: object was truncated.
@@ -448,6 +458,8 @@ _read_json_field() {
           skip_ws()
           # Trailing content after the outer `}` is malformed (rc 2).
           if (pos <= buflen) exit 2
+          # Trailing comma (`{"a":1,}`) — invalid per RFC 8259.
+          if (saw_comma) exit 2
           if (found) print val
           # Clean parse of a well-formed object. `found` distinguishes
           # "field present" (val emitted) from "field absent" (empty
@@ -456,10 +468,19 @@ _read_json_field() {
           # failed".
           exit 0
         }
-        if (c == ",") { pos++; continue }
+        if (c == ",") {
+          # A `,` is only legal AFTER a completed member. Otherwise
+          # (leading comma, double comma) the document is malformed.
+          if (!after_member) exit 2
+          after_member = 0
+          saw_comma = 1
+          pos++
+          continue
+        }
         # Top-level key must be a JSON string. Anything else means the
         # object body is malformed.
         if (c != "\"") exit 2
+        saw_comma = 0
         # Read the top-level key.
         key_is_target = 0
         key = read_string()
@@ -480,6 +501,7 @@ _read_json_field() {
           # that convention rather than the first-wins short-circuit.
           val = v
           found = 1
+          after_member = 1
           continue
         }
         # Not the sought field (or non-string value) — skip the value
@@ -522,7 +544,25 @@ _read_json_field() {
             pos++
           }
           if (pos == start_pos) exit 2
+          # Validate the consumed run against the JSON scalar grammar.
+          # Without this guard a garbage token like `wat` in
+          # `{"version":"1.2.3","other":wat}` would silently pass and
+          # the caller would accept a malformed document as valid
+          # metadata (CodeRabbit finding on
+          # packaging/macos/lib/installer_lib.sh#L459). Accept the
+          # three JSON literals plus RFC 8259 numbers (optional sign,
+          # zero or non-zero integer part, optional fractional part,
+          # optional exponent). Anything else → rc 2.
+          scalar = substr(buf, start_pos, pos - start_pos)
+          if (scalar != "true" && scalar != "false" && scalar != "null" &&
+              scalar !~ /^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?$/) {
+            exit 2
+          }
         }
+        # Any of the three non-target branches above completed a full
+        # member; the target branch has already `continue`d after
+        # setting after_member=1.
+        after_member = 1
       }
       # Ran off the end of the buffer without a closing brace: object
       # was truncated. Malformed (rc 2).
