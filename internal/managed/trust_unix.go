@@ -80,6 +80,19 @@ func ValidateTrustedRuntimeDir(path, label string) error {
 	return nil
 }
 
+// ValidateTrustedServiceRuntimeDir is the cross-platform service-runtime
+// entry point. Unix resolves the packaged defenseclaw account by uid, so the
+// Windows account name parameter is intentionally ignored here.
+func ValidateTrustedServiceRuntimeDir(path, label, _ string) error {
+	return ValidateTrustedRuntimeDir(path, label)
+}
+
+// ValidateTrustedServiceRuntimeFilePath validates a service-owned runtime
+// file. Unix runtime files retain the existing trusted-file contract.
+func ValidateTrustedServiceRuntimeFilePath(path, label, _ string) error {
+	return ValidateTrustedFilePath(path, label)
+}
+
 func validateTrustedPathElement(path string, wantDir bool, label string) error {
 	info, err := os.Lstat(path)
 	if err != nil {
