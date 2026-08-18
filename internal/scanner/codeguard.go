@@ -34,6 +34,24 @@ type CodeGuardScanner struct {
 	customRules []rule
 }
 
+// CodeGuardContentScan is the fail-closed result of one in-memory CodeGuard
+// evaluation. Its state is private so JSON or another package cannot claim a
+// complete scan or manufacture code-owned rule provenance.
+type CodeGuardContentScan struct {
+	findings []Finding
+	complete bool
+}
+
+// Findings returns an independent copy of the visible scan findings.
+func (r CodeGuardContentScan) Findings() []Finding {
+	return append([]Finding(nil), r.findings...)
+}
+
+// Complete reports whether the in-process scanner evaluated the whole input.
+func (r CodeGuardContentScan) Complete() bool {
+	return r.complete
+}
+
 func NewCodeGuardScanner(rulesDir string) *CodeGuardScanner {
 	if rulesDir == "" {
 		home, _ := os.UserHomeDir()
@@ -69,6 +87,14 @@ func codeguardRuleCategory(ruleID string) string {
 }
 
 func (s *CodeGuardScanner) ScanContent(filename, content string) []Finding {
+	return s.ScanContentWithProvenance(filename, content).Findings()
+}
+
+// ScanContentWithProvenance scans an in-memory code string and retains
+// private, code-owned provenance for builtin matches. Custom rules remain
+// visible in Findings but never acquire builtin provenance, even if they reuse
+// a builtin rule ID.
+func (s *CodeGuardScanner) ScanContentWithProvenance(filename, content string) CodeGuardContentScan {
 	ext := filepath.Ext(filename)
 	var findings []Finding
 	rules := s.allRules()
@@ -82,23 +108,24 @@ func (s *CodeGuardScanner) ScanContent(filename, content string) []Finding {
 			if r.pattern.MatchString(line) {
 				ln := lineNum + 1
 				findings = append(findings, Finding{
-					ID:          r.id,
-					Severity:    r.severity,
-					Title:       r.title,
-					Description: strings.TrimSpace(line),
-					Location:    fmt.Sprintf("%s:%d", filename, lineNum+1),
-					Remediation: r.remediation,
-					Scanner:     "codeguard",
-					Tags:        []string{"codeguard"},
-					RuleID:      r.id,
-					Category:    codeguardRuleCategory(r.id),
-					LineNumber:  &ln,
+					ID:                  r.id,
+					Severity:            r.severity,
+					Title:               r.title,
+					Description:         strings.TrimSpace(line),
+					Location:            fmt.Sprintf("%s:%d", filename, lineNum+1),
+					Remediation:         r.remediation,
+					Scanner:             "codeguard",
+					Tags:                []string{"codeguard"},
+					RuleID:              r.id,
+					Category:            codeguardRuleCategory(r.id),
+					LineNumber:          &ln,
+					codeGuardProvenance: r.provenance,
 				})
 			}
 		}
 	}
 
-	return findings
+	return CodeGuardContentScan{findings: findings, complete: true}
 }
 
 func (s *CodeGuardScanner) Scan(ctx context.Context, target string) (*ScanResult, error) {
@@ -215,9 +242,10 @@ type rule struct {
 	pattern     *regexp.Regexp
 	remediation string
 	extensions  []string
+	provenance  codeGuardFindingProvenance
 }
 
-var builtinRules = []rule{
+var builtinRules = codeOwnedBuiltinRules([]rule{
 	{
 		id:          "CG-CRED-001",
 		severity:    SeverityHigh,
@@ -294,6 +322,13 @@ var builtinRules = []rule{
 		pattern:     regexp.MustCompile(`(?i)(\.\.\/|\.\.\\|path\.join\(.*\.\.|os\.path\.join\(.*\.\.|filepath\.Join\(.*\.\.)`),
 		remediation: "Canonicalize paths and validate against an allowed root directory",
 	},
+})
+
+func codeOwnedBuiltinRules(rules []rule) []rule {
+	for i := range rules {
+		rules[i].provenance = codeGuardFindingProvenance{builtinRuleID: rules[i].id}
+	}
+	return rules
 }
 
 func scanFileWithRules(path string, rules []rule) ([]Finding, error) {
@@ -334,17 +369,18 @@ func scanFileWithRules(path string, rules []rule) ([]Finding, error) {
 			if r.pattern.MatchString(line) {
 				ln := lineNum
 				findings = append(findings, Finding{
-					ID:          r.id,
-					Severity:    r.severity,
-					Title:       r.title,
-					Description: strings.TrimSpace(line),
-					Location:    fmt.Sprintf("%s:%d", path, lineNum),
-					Remediation: r.remediation,
-					Scanner:     "codeguard",
-					Tags:        []string{"codeguard"},
-					RuleID:      r.id,
-					Category:    codeguardRuleCategory(r.id),
-					LineNumber:  &ln,
+					ID:                  r.id,
+					Severity:            r.severity,
+					Title:               r.title,
+					Description:         strings.TrimSpace(line),
+					Location:            fmt.Sprintf("%s:%d", path, lineNum),
+					Remediation:         r.remediation,
+					Scanner:             "codeguard",
+					Tags:                []string{"codeguard"},
+					RuleID:              r.id,
+					Category:            codeguardRuleCategory(r.id),
+					LineNumber:          &ln,
+					codeGuardProvenance: r.provenance,
 				})
 			}
 		}
