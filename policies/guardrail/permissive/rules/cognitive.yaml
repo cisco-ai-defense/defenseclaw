@@ -14,8 +14,14 @@ rules:
     confidence: 0.95
     tags: [cognitive-tampering]
   - id: COG-MEMORY
+    expression: >-
+      f.commands.exists(c,
+      f.paths.exists(p, p.command_id == c.id &&
+      p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE,
+      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND,
+      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))
     pattern: '(?i)MEMORY\.md'
-    title: "MEMORY.md access"
+    title: "Active MEMORY.md mutation"
     severity: HIGH
     confidence: 0.85
     tags: [cognitive-tampering]
@@ -32,8 +38,14 @@ rules:
     confidence: 0.80
     tags: [cognitive-tampering]
   - id: COG-AGENTS-MD
+    expression: >-
+      f.commands.exists(c,
+      f.paths.exists(p, p.command_id == c.id &&
+      p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE,
+      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND,
+      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))
     pattern: '(?i)AGENTS\.md'
-    title: "AGENTS.md access"
+    title: "Active AGENTS.md mutation"
     severity: HIGH
     confidence: 0.80
     tags: [cognitive-tampering]

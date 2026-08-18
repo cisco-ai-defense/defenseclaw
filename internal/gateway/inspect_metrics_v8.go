@@ -15,6 +15,8 @@ import (
 
 const inspectMetricsV8Producer = "gateway.inspect.metrics"
 
+const trustedParserUncertaintyMetricScanner = "action-parser-uncertainty"
+
 // recordInspectMetricsV8 is the generated-family owner for inspect and
 // guardrail evaluation metrics emitted by the HTTP inspection surfaces. The
 // local-observability projection keeps the established Prometheus names and
@@ -34,7 +36,6 @@ func (a *APIServer) recordInspectMetricsV8(
 	if !ok || runtime == nil {
 		return
 	}
-
 	connectorName = hookDecisionMetricConnector(connectorName)
 	tool = telemetry.NormalizeMetricTextLabel(tool)
 	action = normalizeInspectMetricAction(action)
@@ -101,7 +102,6 @@ func (a *APIServer) recordGuardrailMetricsV8(
 	if !ok || runtime == nil {
 		return
 	}
-
 	connectorName = hookDecisionMetricConnector(connectorName)
 	scanner = telemetry.NormalizeMetricTextLabel(scanner)
 	if scanner == "unknown" {
@@ -149,6 +149,65 @@ func (a *APIServer) recordGuardrailMetricsV8(
 			}),
 	}
 	_, _ = runtime.RecordGeneratedMetricBatch(ctx, items)
+}
+
+// recordParserUncertaintyMetricV8 records parser uncertainty as a value-free
+// counter only. It intentionally emits neither a finding nor an alert metric:
+// incomplete shell projection is an operational coverage signal, not proof of
+// dangerous behavior.
+func (a *APIServer) recordParserUncertaintyMetricV8(
+	ctx context.Context,
+	connectorName string,
+	count int64,
+) {
+	if a == nil || ctx == nil || count <= 0 {
+		return
+	}
+	runtime, ok := a.observabilityV8RuntimeEmitter().(hookLifecycleMetricV8Runtime)
+	if !ok || runtime == nil {
+		return
+	}
+	recordParserUncertaintyMetricV8ForRuntime(
+		ctx,
+		runtime,
+		connectorName,
+		inspectMetricsV8Producer,
+		count,
+	)
+}
+
+func recordParserUncertaintyMetricV8ForRuntime(
+	ctx context.Context,
+	runtime hookLifecycleMetricV8Runtime,
+	connectorName string,
+	producer string,
+	count int64,
+) {
+	if ctx == nil || runtime == nil || count <= 0 {
+		return
+	}
+	connectorName = hookDecisionMetricConnector(connectorName)
+	meta := hookDecisionMetricMeta(ctx, connectorName)
+	meta.Source = connectorName
+	item := newHookV8MetricBatchItemForProducer(
+		ctx,
+		time.Now().UTC(),
+		meta,
+		producer,
+		observability.EventName(observability.TelemetryInstrumentDefenseClawGuardrailEvaluations),
+		func(builder *observability.FamilyBuilder, envelope observability.FamilyEnvelopeInput) (observability.Record, error) {
+			return builder.BuildMetricDefenseClawGuardrailEvaluations(
+				observability.MetricDefenseClawGuardrailEvaluationsInput{
+					Envelope:                            envelope,
+					Value:                               count,
+					DefenseClawGuardrailEffectiveAction: observability.Present(guardrailActionAllow),
+					DefenseClawConnectorSource:          observability.Present(connectorName),
+					DefenseClawMetricGuardrailScanner:   observability.Present(trustedParserUncertaintyMetricScanner),
+				},
+			)
+		},
+	)
+	_, _ = runtime.RecordGeneratedMetricBatch(ctx, []observabilityruntime.GeneratedMetricBatchItem{item})
 }
 
 func (a *APIServer) recordSecurityAlertMetricV8(

@@ -30,6 +30,8 @@ func TestSemanticIntegrityPersistenceOwnerContract(t *testing.T) {
 		"C2-METADATA-AWS",
 		"CMD-CRONTAB",
 		"CMD-SYSTEMCTL",
+		"COG-AGENTS-MD",
+		"COG-MEMORY",
 		"COG-OPENCLAW-JSON",
 		"PATH-ETC-SUDOERS",
 		"PATH-HISTORY",
@@ -79,6 +81,83 @@ func TestSemanticIntegrityPersistenceOwnerContract(t *testing.T) {
 	history := semanticOwnerForRule("integrity.history_tamper")
 	if slices.Contains(history.claimedIDs(true), "PATH-HISTORY") {
 		t.Fatal("command history owner claimed the filesystem history rule")
+	}
+}
+
+func TestActiveAgentInstructionMutationRequiresExactTrustedPath(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name        string
+		ruleID      string
+		command     string
+		activeFiles []string
+		want        bool
+		wantSafe    bool
+	}{
+		{
+			name:        "active AGENTS mutation",
+			ruleID:      "COG-AGENTS-MD",
+			command:     "printf updated > /repo/AGENTS.md",
+			activeFiles: []string{"/repo/AGENTS.md"},
+			want:        true,
+		},
+		{
+			name:        "active MEMORY mutation",
+			ruleID:      "COG-MEMORY",
+			command:     "printf updated >> /repo/MEMORY.md",
+			activeFiles: []string{"/repo/MEMORY.md"},
+			want:        true,
+		},
+		{
+			name:        "ordinary active-file read",
+			ruleID:      "COG-AGENTS-MD",
+			command:     "cat /repo/AGENTS.md",
+			activeFiles: []string{"/repo/AGENTS.md"},
+			wantSafe:    true,
+		},
+		{
+			name:        "inactive same basename",
+			ruleID:      "COG-AGENTS-MD",
+			command:     "printf updated > /repo/examples/AGENTS.md",
+			activeFiles: []string{"/repo/AGENTS.md"},
+			wantSafe:    true,
+		},
+		{
+			name:     "missing active context",
+			ruleID:   "COG-MEMORY",
+			command:  "printf updated > /repo/MEMORY.md",
+			wantSafe: true,
+		},
+		{
+			name:        "filename mention",
+			ruleID:      "COG-AGENTS-MD",
+			command:     "rg -n AGENTS.md internal/gateway",
+			activeFiles: []string{"/repo/AGENTS.md"},
+			wantSafe:    true,
+		},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			facts := actionfacts.Analyze(actionfacts.Input{
+				Tool:             "shell",
+				Command:          test.command,
+				CWD:              "/repo",
+				ActiveHome:       "/home/alice",
+				ActiveAgentFiles: test.activeFiles,
+			})
+			requireAuthoritativeIntegrityFacts(t, facts)
+			owner := semanticIntegrityPersistenceOwners[test.ruleID]
+			if got := owner.prerequisite(facts); got != test.want {
+				t.Fatalf("prerequisite=%t, want %t; facts=%+v", got, test.want, facts)
+			}
+			if !test.want {
+				if got := owner.suppressFallback(facts); got != test.wantSafe {
+					t.Fatalf("safe negative=%t, want %t; facts=%+v", got, test.wantSafe, facts)
+				}
+			}
+		})
 	}
 }
 

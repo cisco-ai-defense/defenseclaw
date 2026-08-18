@@ -59,9 +59,27 @@ type RuleFinding struct {
 	// falls back to a rule-id-based capability (CapabilityForRuleID).
 	ToolCapabilityClass string `json:"tool_capability_class,omitempty"`
 	enforcement         findingEnforcement
+	// disposition is a private, value-free presentation class for trusted
+	// action findings. It lets benchmark and audit code distinguish an
+	// explicitly advisory result from audit-only evidence without changing the
+	// public finding schema or allowing remote input to select enforcement.
+	disposition findingDisposition
+	// proof is private, value-free enforcement provenance. It is intentionally
+	// absent from the public JSON contract: callers may emit the finding, but
+	// only the in-process trusted-action boundary may use the proof to decide
+	// whether the finding can participate in a synchronous deny decision.
+	proof findingProof
 }
 
 type findingEnforcement uint8
+
+type findingDisposition uint8
+
+const (
+	findingDispositionUnspecified findingDisposition = iota
+	findingDispositionAudit
+	findingDispositionAdvisory
+)
 
 const (
 	// findingEnforcementInherit preserves the enforcement behavior of every

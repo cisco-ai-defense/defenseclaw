@@ -29,7 +29,8 @@ const (
 	semanticSudoDiscoveryElevationExpression = `f.commands.exists(c, c.argv_complete && ((c.program == 'sudo' && ('-l' in c.argv || '--list' in c.argv || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PRIVILEGE in c.operations)) || (c.program == 'find' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_SEARCH in c.operations) || (c.program == 'getcap' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_SEARCH in c.operations)))`
 	semanticAccessControlExpression          = `f.commands.exists(c, c.argv_complete && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PERMISSION_CHANGE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_METADATA))`
 	semanticDDDiskWriteExpression            = `f.commands.exists(c, c.argv_complete && c.program == 'dd' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE && p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))`
-	semanticFilesystemWipeExpression         = `f.commands.exists(c, c.argv_complete && c.program != 'dd' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations)`
+	semanticFilesystemWipeExpression         = `f.commands.exists(c, c.argv_complete && c.program in ['mkfs', 'mkfs.ext2', 'mkfs.ext3', 'mkfs.ext4', 'mke2fs', 'mkfs.xfs', 'mkfs.btrfs', 'mkfs.f2fs', 'mkfs.vfat', 'mkdosfs', 'mkfs.ntfs', 'mkntfs', 'mkswap', 'mkfs.exfat', 'mkexfatfs'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE && p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))`
+	semanticDeviceWipeExpression             = `f.commands.exists(c, c.argv_complete && c.program in ['wipefs', 'sgdisk', 'shred', 'blkdiscard', 'tee', 'cryptsetup', 'hdparm', 'nvme', 'parted', 'diskutil', 'format', 'format-volume', 'clear-disk'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE && p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))`
 	semanticNetworkSweepExpression           = `f.commands.exists(c, c.argv_complete && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_NETWORK_SCAN in c.operations && f.network.exists(n, n.command_id == c.id && n.action == defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_SCAN && n.target_kind in [defenseclaw.guardrail.semantic.v1.NetworkTargetKind.NETWORK_TARGET_KIND_MULTI_ADDRESS_CIDR, defenseclaw.guardrail.semantic.v1.NetworkTargetKind.NETWORK_TARGET_KIND_RANGE, defenseclaw.guardrail.semantic.v1.NetworkTargetKind.NETWORK_TARGET_KIND_LIST, defenseclaw.guardrail.semantic.v1.NetworkTargetKind.NETWORK_TARGET_KIND_GENERATED]))`
 	semanticContainerHostEscapeExpression    = `f.commands.exists(c, c.argv_complete && c.program in ['docker', 'podman', 'nerdctl'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONTAINER_RUN in c.operations && c.argv.exists(a, a == '--privileged' || a.startsWith('--privileged=')) && f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE] && (p.normalized == '/' || p.resolved == '/')))`
 	semanticCryptominingExpression           = `f.commands.exists(c, c.argv_complete && c.program in ['docker', 'podman', 'nerdctl'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONTAINER_RUN in c.operations)`
@@ -61,6 +62,10 @@ var semanticReconImpactOwners = map[string]semanticOwner{
 	},
 	"CMD-MKFS": {
 		prerequisite:     filesystemWipePrerequisite,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"CMD-DEVICE-WIPE": {
+		prerequisite:     destructiveDeviceWritePrerequisite,
 		suppressFallback: authoritativeSemanticSafeNegative,
 	},
 	"recon.network_sweep": {
@@ -175,7 +180,7 @@ func recursiveDeletePrerequisite(facts actionfacts.Facts) bool {
 			command.ID,
 			actionfacts.PathAccessDelete,
 			func(candidate actionfacts.PathFact) bool {
-				return deleteTargetIsRootOrHome(facts, candidate)
+				return deleteTargetIsCriticalScope(facts, candidate)
 			},
 		) {
 			return true
@@ -255,13 +260,25 @@ func powerShellRecursiveForceFlags(argv []string) bool {
 			continue
 		}
 		switch key {
-		case "-recurse":
-			recurse = !joined
-		case "-force":
-			force = !joined
+		case "-recurse", "-rec":
+			recurse = powerShellSwitchValueEnabled(joinedValue, joined)
+		case "-force", "-fo":
+			force = powerShellSwitchValueEnabled(joinedValue, joined)
 		}
 	}
 	return recurse && force
+}
+
+func powerShellSwitchValueEnabled(value string, joined bool) bool {
+	if !joined {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "$true", "true":
+		return true
+	default:
+		return false
+	}
 }
 
 func cmdRecursiveQuietFlags(argv []string) bool {
@@ -278,17 +295,25 @@ func cmdRecursiveQuietFlags(argv []string) bool {
 	return recursive && quiet
 }
 
-func deleteTargetIsRootOrHome(
+func deleteTargetIsCriticalScope(
 	facts actionfacts.Facts,
 	candidate actionfacts.PathFact,
 ) bool {
-	value := strings.TrimSpace(semanticPathValue(candidate))
+	value := canonicalSemanticPath(semanticPathValue(candidate))
 	if value == "/" || windowsDriveRoot(value) {
+		return true
+	}
+	switch strings.TrimRight(value, "/") {
+	case "/bin", "/boot", "/dev", "/etc", "/home", "/lib", "/lib64",
+		"/mnt", "/opt", "/proc", "/root", "/sbin", "/srv", "/sys", "/usr", "/var",
+		"/applications", "/library", "/system", "/users",
+		"c:/program files", "c:/program files (x86)", "c:/programdata",
+		"c:/users", "c:/windows":
 		return true
 	}
 	home := strings.TrimRight(canonicalSemanticPath(facts.ActiveHome), "/")
 	return home != "" &&
-		strings.TrimRight(canonicalSemanticPath(value), "/") == home
+		strings.TrimRight(value, "/") == home
 }
 
 func windowsDriveRoot(value string) bool {
@@ -775,24 +800,44 @@ func filesystemWipePrerequisite(facts actionfacts.Facts) bool {
 	for _, command := range facts.Commands {
 		if !reconImpactExecutingOwned(command) ||
 			!hasOperation(command, actionfacts.OperationDiskWrite) ||
-			oneOfFold(command.Program, "dd") {
+			!filesystemFormatterProgram(command.Program) {
 			continue
 		}
-		if filesystemWipeProgram(command.Program) ||
-			len(command.Redirects) != 0 ||
-			commandOwnsDeviceWrite(facts, command.ID) {
+		if commandOwnsDeviceWrite(facts, command.ID) {
 			return true
 		}
 	}
 	return false
 }
 
-func filesystemWipeProgram(program string) bool {
+func filesystemFormatterProgram(program string) bool {
 	switch strings.ToLower(program) {
 	case "mkfs", "mkfs.ext2", "mkfs.ext3", "mkfs.ext4", "mke2fs",
 		"mkfs.xfs", "mkfs.btrfs", "mkfs.f2fs", "mkfs.vfat", "mkdosfs",
-		"mkfs.ntfs", "mkntfs", "mkswap", "mkfs.exfat", "mkexfatfs",
-		"wipefs", "sgdisk", "shred", "blkdiscard", "tee", "cryptsetup",
+		"mkfs.ntfs", "mkntfs", "mkswap", "mkfs.exfat", "mkexfatfs":
+		return true
+	default:
+		return false
+	}
+}
+
+func destructiveDeviceWritePrerequisite(facts actionfacts.Facts) bool {
+	for _, command := range facts.Commands {
+		if !reconImpactExecutingOwned(command) ||
+			!hasOperation(command, actionfacts.OperationDiskWrite) ||
+			!destructiveDeviceWriteProgram(command.Program) {
+			continue
+		}
+		if commandOwnsDeviceWrite(facts, command.ID) {
+			return true
+		}
+	}
+	return false
+}
+
+func destructiveDeviceWriteProgram(program string) bool {
+	switch strings.ToLower(program) {
+	case "wipefs", "sgdisk", "shred", "blkdiscard", "tee", "cryptsetup",
 		"hdparm", "nvme", "parted", "diskutil", "format",
 		"format-volume", "clear-disk":
 		return true
@@ -929,7 +974,8 @@ func cryptominingFallbackProof(
 		if !reconImpactExecutingOwned(command) {
 			continue
 		}
-		if exactMinerName(executableBase(command.Program)) ||
+		if exactMinerName(executableBase(command.Program)) &&
+			!minerPreviewArguments(command.Argv[1:]) ||
 			exactMinerWrapperTarget(command) {
 			return true
 		}
@@ -951,7 +997,8 @@ func exactMinerWrapperTarget(command actionfacts.CommandFact) bool {
 			return false
 		}
 		return index < len(argv) &&
-			exactMinerName(executableBase(argv[index]))
+			exactMinerName(executableBase(argv[index])) &&
+			!minerPreviewArguments(argv[index+1:])
 	case "setsid":
 		for index := 1; index < len(argv); index++ {
 			switch argv[index] {
@@ -989,6 +1036,16 @@ func exactMinerWrapperTarget(command actionfacts.CommandFact) bool {
 			default:
 				return exactMinerName(executableBase(argument))
 			}
+		}
+	}
+	return false
+}
+
+func minerPreviewArguments(arguments []string) bool {
+	for _, argument := range arguments {
+		switch strings.ToLower(argument) {
+		case "-h", "--help", "-v", "--version":
+			return true
 		}
 	}
 	return false

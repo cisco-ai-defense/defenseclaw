@@ -152,10 +152,10 @@ func TestAlertFatigueActionModePreservesWeakExplicitCredentials(t *testing.T) {
 	for _, password := range []string{"changeme123", "dummy-example", "examplepass"} {
 		_, verdict := postInspect(t, api,
 			`{"tool":"shell","args":{"command":"psql postgres://user:`+password+`@host.example/db"}}`)
-		if verdict.Action != "block" || verdict.Severity != "CRITICAL" {
-			t.Errorf("Action verdict for explicit weak credential = %s/%s, want block/CRITICAL", verdict.Action, verdict.Severity)
+		if verdict.Action != "allow" {
+			t.Errorf("Action verdict for unproved credential egress = %s, want allow", verdict.Action)
 		}
-		if !containsRuleID(findingIDs(verdict.DetailedFindings), "SEC-CONNSTR") {
+		if !containsString(verdict.Findings, "SEC-CONNSTR:Connection string with credentials") {
 			t.Errorf("Action verdict missing SEC-CONNSTR: %v", verdict.Findings)
 		}
 	}

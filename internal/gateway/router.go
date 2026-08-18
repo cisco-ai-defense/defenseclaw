@@ -1268,6 +1268,12 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 		LegacyText:         string(payload.Args),
 		Connector:          r.connectorName(),
 		EnforcementCapable: false,
+		recordTelemetry: func(observation trustedActionTelemetry) {
+			r.recordParserUncertaintyMetricV8(
+				context.Background(),
+				observation.ParserUncertaintyCount,
+			)
+		},
 	})
 	severity := HighestSeverity(findings)
 	dangerous := len(findings) > 0 && severityRank[severity] >= severityRank["HIGH"]
@@ -1565,6 +1571,12 @@ func (r *EventRouter) handleApprovalRequest(evt EventFrame) {
 		LegacyText:         legacyText,
 		Connector:          r.connectorName(),
 		EnforcementCapable: true,
+		recordTelemetry: func(observation trustedActionTelemetry) {
+			r.recordParserUncertaintyMetricV8(
+				approvalContext,
+				observation.ParserUncertaintyCount,
+			)
+		},
 	})
 	enforceableFindings := enforceableRuleFindings(allFindings)
 	dangerousByRules := len(enforceableFindings) > 0 &&

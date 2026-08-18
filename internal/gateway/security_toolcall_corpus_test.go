@@ -25,21 +25,22 @@ import (
 )
 
 type toolCallCorpusCase struct {
-	ID             string              `json:"id"`
-	RuleID         string              `json:"rule_id"`
-	Tool           string              `json:"tool,omitempty"`
-	Command        string              `json:"command,omitempty"`
-	Argv           []string            `json:"argv,omitempty"`
-	Args           json.RawMessage     `json:"args,omitempty"`
-	ArgsRaw        string              `json:"args_raw,omitempty"`
-	LegacyText     string              `json:"legacy_text,omitempty"`
-	Dialect        actionfacts.Dialect `json:"dialect,omitempty"`
-	CWD            string              `json:"cwd,omitempty"`
-	ActiveHome     string              `json:"active_home,omitempty"`
-	IsAttack       bool                `json:"is_attack"`
-	ExpectRoute    string              `json:"expect_route"` // none | semantic | fallback
-	DetectionOnly  bool                `json:"detection_only,omitempty"`
-	NoOtherFinding bool                `json:"no_other_finding,omitempty"`
+	ID               string              `json:"id"`
+	RuleID           string              `json:"rule_id"`
+	Tool             string              `json:"tool,omitempty"`
+	Command          string              `json:"command,omitempty"`
+	Argv             []string            `json:"argv,omitempty"`
+	Args             json.RawMessage     `json:"args,omitempty"`
+	ArgsRaw          string              `json:"args_raw,omitempty"`
+	LegacyText       string              `json:"legacy_text,omitempty"`
+	Dialect          actionfacts.Dialect `json:"dialect,omitempty"`
+	CWD              string              `json:"cwd,omitempty"`
+	ActiveHome       string              `json:"active_home,omitempty"`
+	ActiveAgentFiles []string            `json:"active_agent_files,omitempty"`
+	IsAttack         bool                `json:"is_attack"`
+	ExpectRoute      string              `json:"expect_route"` // none | semantic | fallback
+	DetectionOnly    bool                `json:"detection_only,omitempty"`
+	NoOtherFinding   bool                `json:"no_other_finding,omitempty"`
 }
 
 // TestSecuritySuiteToolCall is the compact TP/FP corpus for the trusted
@@ -111,13 +112,14 @@ func TestSecuritySuiteToolCall(t *testing.T) {
 				legacyText = test.Command
 			}
 			input := actionfacts.Input{
-				Tool:        tool,
-				Args:        append(json.RawMessage(nil), test.Args...),
-				Command:     test.Command,
-				Argv:        append([]string(nil), test.Argv...),
-				CWD:         cwd,
-				ActiveHome:  activeHome,
-				DialectHint: test.Dialect,
+				Tool:             tool,
+				Args:             append(json.RawMessage(nil), test.Args...),
+				Command:          test.Command,
+				Argv:             append([]string(nil), test.Argv...),
+				CWD:              cwd,
+				ActiveHome:       activeHome,
+				ActiveAgentFiles: append([]string(nil), test.ActiveAgentFiles...),
+				DialectHint:      test.Dialect,
 			}
 			if test.ArgsRaw != "" {
 				input.Args = json.RawMessage(test.ArgsRaw)

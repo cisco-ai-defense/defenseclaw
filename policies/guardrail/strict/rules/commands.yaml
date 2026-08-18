@@ -121,10 +121,28 @@ rules:
   - id: CMD-MKFS
     expression: >-
       f.commands.exists(c, c.argv_complete &&
-      c.program != 'dd' &&
-      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations)
+      c.program in ['mkfs', 'mkfs.ext2', 'mkfs.ext3', 'mkfs.ext4', 'mke2fs', 'mkfs.xfs', 'mkfs.btrfs', 'mkfs.f2fs', 'mkfs.vfat', 'mkdosfs', 'mkfs.ntfs', 'mkntfs', 'mkswap', 'mkfs.exfat', 'mkexfatfs'] &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations &&
+      f.paths.exists(p, p.command_id == c.id &&
+      p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE &&
+      p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))
     pattern: '(?i)\bmkfs\b'
     title: "Filesystem format command"
+    severity: CRITICAL
+    confidence: 0.90
+    tags: [destructive]
+  - id: CMD-DEVICE-WIPE
+    expression: >-
+      f.commands.exists(c, c.argv_complete &&
+      c.program in ['wipefs', 'sgdisk', 'shred', 'blkdiscard', 'tee', 'cryptsetup', 'hdparm', 'nvme', 'parted', 'diskutil', 'format', 'format-volume', 'clear-disk'] &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations &&
+      f.paths.exists(p, p.command_id == c.id &&
+      p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE &&
+      p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))
+    # Semantic-only: raw mentions of common verbs such as `tee` and `format`
+    # are not evidence of a destructive device write.
+    pattern: 'a^'
+    title: "Destructive write to a disk device"
     severity: CRITICAL
     confidence: 0.90
     tags: [destructive]

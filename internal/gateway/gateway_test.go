@@ -4004,21 +4004,19 @@ func TestInspectToolSecretInArgs(t *testing.T) {
 	_, verdict := postInspect(t, api,
 		`{"tool":"web_search","args":{"query":"api_key=sk-ant-api03-`+"A7b9C2d4E6f8G1h3J5k7L9m2"+`"}}`)
 
-	// Observe mode: .action MUST be "allow" so the inspect-*.sh hook
-	// scripts (which exit 2 on .action == "block") do not kill the
-	// agent. Forensics still flow via .raw_action / .would_block,
-	// matching the codex / claude-code hook handlers.
+	// A search query is content, not proof of secret egress. Preserve the
+	// finding for telemetry while keeping every action surface advisory.
 	if verdict.Action != "allow" {
-		t.Errorf("action = %q, want allow (observe mode never blocks)", verdict.Action)
+		t.Errorf("action = %q, want allow for an unproved search literal", verdict.Action)
 	}
-	if verdict.RawAction == "" || verdict.RawAction == "allow" {
-		t.Errorf("raw_action = %q, want a non-allow latent decision", verdict.RawAction)
+	if verdict.RawAction != "allow" {
+		t.Errorf("raw_action = %q, want allow without typed egress", verdict.RawAction)
 	}
-	if !verdict.WouldBlock {
-		t.Errorf("would_block = false, want true for high-severity finding in observe mode")
+	if verdict.WouldBlock {
+		t.Error("would_block = true for a search literal without typed egress")
 	}
-	if verdict.Severity == "NONE" {
-		t.Errorf("severity = %q, want non-NONE", verdict.Severity)
+	if verdict.Severity != "LOW" {
+		t.Errorf("severity = %q, want LOW audit telemetry", verdict.Severity)
 	}
 	if verdict.Mode != "observe" {
 		t.Errorf("mode = %q, want observe", verdict.Mode)
@@ -4090,7 +4088,7 @@ func TestInspectToolHILTUnsupportedFailsClosed(t *testing.T) {
 	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, store, logger, cfg)
 
 	_, verdict := postInspect(t, api,
-		`{"tool":"shell","args":{"command":"nc -l 4444"},"session_id":"sess-1"}`)
+		`{"tool":"shell","args":{"command":"chmod 777 /etc/shadow"},"session_id":"sess-1"}`)
 
 	if verdict.Action != "block" || verdict.RawAction != "confirm" {
 		t.Fatalf("action=%q raw=%q, want block/confirm when approval cannot be delivered",
@@ -4112,7 +4110,7 @@ func TestInspectToolHILTNativeSurfaceReturnsConfirm(t *testing.T) {
 	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, store, logger, cfg)
 
 	_, verdict := postInspect(t, api,
-		`{"tool":"shell","args":{"command":"nc -l 4444"},"session_id":"sess-1","approval_surface":"native"}`)
+		`{"tool":"shell","args":{"command":"chmod 777 /etc/shadow"},"session_id":"sess-1","approval_surface":"native"}`)
 
 	if verdict.Action != "confirm" || verdict.RawAction != "confirm" {
 		t.Fatalf("action=%q raw=%q, want confirm/confirm for native approval surface", verdict.Action, verdict.RawAction)

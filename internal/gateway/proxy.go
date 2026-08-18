@@ -4816,6 +4816,12 @@ func (p *GuardrailProxy) inspectToolCalls(ctx context.Context, toolCallsJSON jso
 			LegacyText:         args,
 			Connector:          p.connectorName(),
 			EnforcementCapable: true,
+			recordTelemetry: func(observation trustedActionTelemetry) {
+				p.recordParserUncertaintyMetricV8(
+					ctx,
+					observation.ParserUncertaintyCount,
+				)
+			},
 		})
 		// Stamp the tool's capability class (read_fs / exec_shell /
 		// network_fetch / …) onto each finding from this call so the

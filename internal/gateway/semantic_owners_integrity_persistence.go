@@ -34,6 +34,8 @@ var semanticIntegrityPersistenceOwners = map[string]semanticOwner{
 		prerequisite:       schedulerInstallPrerequisite,
 		suppressFallback:   authoritativeSemanticSafeNegative,
 	},
+	"COG-AGENTS-MD": activeAgentInstructionMutationOwner("agents.md"),
+	"COG-MEMORY":    activeAgentInstructionMutationOwner("memory.md"),
 	"integrity.git_hooks_bypass": {
 		prerequisite:     gitHooksBypassPrerequisite,
 		suppressFallback: authoritativeSemanticSafeNegative,
@@ -125,6 +127,35 @@ func integrityMutationOwner(
 			isCandidate, isActive, isSafe,
 		),
 	}
+}
+
+func activeAgentInstructionMutationOwner(fileName string) semanticOwner {
+	isCandidate := func(value string) bool {
+		return pathBase(canonicalSemanticPath(value)) == fileName
+	}
+	isActive := func(
+		facts actionfacts.Facts,
+		candidate actionfacts.PathFact,
+	) bool {
+		candidatePath := canonicalSemanticPath(semanticPathValue(candidate))
+		if candidatePath == "" || !isAbsoluteSemanticPath(candidatePath) ||
+			!isCandidate(candidatePath) {
+			return false
+		}
+		for _, activePath := range facts.ActiveAgentFiles {
+			if canonicalSemanticPath(activePath) == candidatePath {
+				return true
+			}
+		}
+		return false
+	}
+	return integrityMutationOwner(
+		isCandidate,
+		isActive,
+		func(facts actionfacts.Facts, candidate actionfacts.PathFact) bool {
+			return !isActive(facts, candidate)
+		},
+	)
 }
 
 func historyTamperPrerequisite(facts actionfacts.Facts) bool {
@@ -409,7 +440,7 @@ func schedulerInstallPrerequisite(facts actionfacts.Facts) bool {
 			for _, candidate := range facts.Paths {
 				if candidate.CommandID == command.ID &&
 					candidate.Access == actionfacts.PathAccessWrite &&
-					matchesActiveRunKey(candidate) {
+					matchesActiveRegistryPersistence(command, candidate) {
 					return true
 				}
 			}
@@ -467,6 +498,28 @@ func systemctlValueOption(option string) bool {
 	}
 }
 
+func matchesActiveRegistryPersistence(
+	command actionfacts.CommandFact,
+	candidate actionfacts.PathFact,
+) bool {
+	if matchesActiveRunKey(candidate) {
+		return true
+	}
+	if candidate.Flavor != actionfacts.PathFlavorRegistry {
+		return false
+	}
+	value := strings.Trim(canonicalSemanticPath(semanticPathValue(candidate)), "/")
+	valueName := windowsRegistryValueName(command.Argv[1:])
+	switch {
+	case value == "hklm/software/microsoft/windows nt/currentversion/winlogon":
+		return valueName == "shell" || valueName == "userinit"
+	case strings.HasPrefix(value, "hklm/system/currentcontrolset/services/"):
+		return valueName == "imagepath" || valueName == "servicedll"
+	default:
+		return false
+	}
+}
+
 func matchesActiveRunKey(candidate actionfacts.PathFact) bool {
 	if candidate.Flavor != actionfacts.PathFlavorRegistry {
 		return false
@@ -475,7 +528,11 @@ func matchesActiveRunKey(candidate actionfacts.PathFact) bool {
 	return value == "hkcu/software/microsoft/windows/currentversion/run" ||
 		value == "hkcu/software/microsoft/windows/currentversion/runonce" ||
 		value == "hklm/software/microsoft/windows/currentversion/run" ||
-		value == "hklm/software/microsoft/windows/currentversion/runonce"
+		value == "hklm/software/microsoft/windows/currentversion/runonce" ||
+		value == "hkcu/software/wow6432node/microsoft/windows/currentversion/run" ||
+		value == "hkcu/software/wow6432node/microsoft/windows/currentversion/runonce" ||
+		value == "hklm/software/wow6432node/microsoft/windows/currentversion/run" ||
+		value == "hklm/software/wow6432node/microsoft/windows/currentversion/runonce"
 }
 
 func matchesActiveSchedulerPath(
