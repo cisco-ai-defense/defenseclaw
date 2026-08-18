@@ -184,10 +184,14 @@ type asrReplayDispatch struct {
 }
 
 type asrReplayASRCandidate struct {
-	CommandID int64  `json:"command_id"`
-	Source    string `json:"source"`
-	Eligible  bool   `json:"eligible"`
-	Reason    string `json:"reason"`
+	CommandID       int64  `json:"command_id"`
+	Source          string `json:"source"`
+	Provenance      string `json:"provenance,omitempty"`
+	Surface         string `json:"surface,omitempty"`
+	Eligible        bool   `json:"eligible"`
+	Reason          string `json:"reason"`
+	Authoritative   bool   `json:"authoritative"`
+	AuthorityReason string `json:"authority_reason"`
 }
 
 type asrReplayOutput struct {
@@ -290,8 +294,10 @@ func TestASRReplayTrustedDispatcherDetectionOnly(t *testing.T) {
 		t.Fatalf("unexpected dispatch summary: %+v", result.Dispatch)
 	}
 	for _, candidate := range result.ASRCandidates {
-		if candidate.Eligible {
-			t.Fatalf("raw POSIX command became ASR-eligible: %+v", candidate)
+		if !candidate.Eligible || !candidate.Authoritative ||
+			candidate.Surface != "posix_shell" ||
+			candidate.Provenance != "actionfacts_static_posix" {
+			t.Fatalf("complete ActionFacts POSIX node was not ASR-eligible: %+v", candidate)
 		}
 	}
 
@@ -794,6 +800,10 @@ func buildASRReplayOutput(
 ) asrReplayOutput {
 	_, projectionCode := semantic.Project(facts)
 	enforcementFacts := facts.EnforcementProjection()
+	asrProjection := actionfacts.ProjectASRCommandNodes(
+		facts,
+		asrReplayProjectionContext(envelope),
+	)
 	result := asrReplayOutput{
 		Schema:   asrReplayOutputSchema,
 		ID:       envelope.ID,
@@ -869,16 +879,30 @@ func buildASRReplayOutput(
 			})
 		}
 		result.Commands = append(result.Commands, replayCommand)
+	}
+	for _, candidate := range asrProjection.Candidates {
 		result.ASRCandidates = append(
 			result.ASRCandidates,
-			asrReplayCandidate(envelope, facts, command),
+			asrReplayProjectedCandidate(envelope, asrProjection, candidate),
 		)
 	}
-	if len(facts.Commands) == 0 {
+	if len(facts.Commands) > 0 && len(asrProjection.Candidates) == 0 {
+		for _, command := range facts.Commands {
+			result.ASRCandidates = append(result.ASRCandidates, asrReplayASRCandidate{
+				CommandID:       command.ID,
+				Source:          asrReplaySource(envelope),
+				Provenance:      string(asrProjection.Context.Provenance),
+				Reason:          string(asrProjection.Reason),
+				AuthorityReason: "not_projectable",
+			})
+		}
+	} else if len(facts.Commands) == 0 {
 		result.ASRCandidates = append(result.ASRCandidates, asrReplayASRCandidate{
-			Source:   asrReplaySource(envelope),
-			Eligible: false,
-			Reason:   "no_commands",
+			Source:          asrReplaySource(envelope),
+			Provenance:      string(asrProjection.Context.Provenance),
+			Eligible:        false,
+			Reason:          "no_commands",
+			AuthorityReason: "not_projectable",
 		})
 	}
 	for _, pathFact := range facts.Paths {
@@ -937,35 +961,177 @@ func buildASRReplayOutput(
 	return result
 }
 
-func asrReplayCandidate(
+func asrReplayProjectionContext(
 	envelope asrReplayEnvelope,
-	facts actionfacts.Facts,
-	command actionfacts.CommandFact,
-) asrReplayASRCandidate {
-	candidate := asrReplayASRCandidate{
-		CommandID: command.ID,
-		Source:    asrReplaySource(envelope),
-	}
+) actionfacts.ASRProjectionContext {
+	provenance := actionfacts.ASRCommandProvenance("tool_args_unproven")
 	switch {
-	case envelope.Platform != "linux":
-		candidate.Reason = "platform_not_linux"
-	case candidate.Source != "source_argv":
-		candidate.Reason = "source_not_structured_argv"
-	case !facts.Authoritative():
-		candidate.Reason = "facts_not_authoritative"
-	case command.Kind != actionfacts.CommandKindProcess:
-		candidate.Reason = "command_not_process"
-	case command.Effect != actionfacts.EffectExecute:
-		candidate.Reason = "command_not_executing"
-	case !command.ArgvComplete:
-		candidate.Reason = "argv_incomplete"
-	case command.Dialect != actionfacts.DialectArgv:
-		candidate.Reason = "command_dialect_not_argv"
-	default:
-		candidate.Eligible = true
-		candidate.Reason = "eligible"
+	case envelope.hasArgv:
+		provenance = actionfacts.ASRCommandProvenanceStructuredArgv
+	case envelope.hasCommand:
+		provenance = actionfacts.ASRCommandProvenanceActionFactsStaticPOSIX
 	}
-	return candidate
+	return actionfacts.ASRProjectionContext{
+		Platform:   actionfacts.ASRPlatform(envelope.Platform),
+		Profile:    actionfacts.ASRProfileUniversalLinux,
+		Provenance: provenance,
+	}
+}
+
+func asrReplayProjectedCandidate(
+	envelope asrReplayEnvelope,
+	projection actionfacts.ASRCommandProjection,
+	candidate actionfacts.ASRCommandCandidate,
+) asrReplayASRCandidate {
+	authorityReason := "not_projectable"
+	if candidate.Projectable {
+		authorityReason = "whole_action_not_authoritative"
+	}
+	if candidate.Authoritative {
+		authorityReason = "authoritative"
+	}
+	return asrReplayASRCandidate{
+		CommandID:       candidate.CommandID,
+		Source:          asrReplaySource(envelope),
+		Provenance:      string(projection.Context.Provenance),
+		Surface:         string(candidate.Surface),
+		Eligible:        candidate.Projectable,
+		Reason:          string(candidate.Reason),
+		Authoritative:   candidate.Authoritative,
+		AuthorityReason: authorityReason,
+	}
+}
+
+func TestASRReplayCandidateUsesTrustedCommandNodeProof(t *testing.T) {
+	rawPOSIX := asrReplayEnvelope{
+		Platform:   "linux",
+		Tool:       "shell",
+		Command:    "rm -rf /tmp/build",
+		Dialect:    actionfacts.DialectPOSIX,
+		hasCommand: true,
+		hasDialect: true,
+	}
+	structuredArgv := asrReplayEnvelope{
+		Platform: "linux",
+		Tool:     "shell",
+		Argv:     []string{"rm", "-rf", "/tmp/build"},
+		Dialect:  actionfacts.DialectArgv,
+		hasArgv:  true,
+	}
+	key := []byte("0123456789abcdef0123456789abcdef")
+	posixOutput := buildASRReplayOutput(
+		rawPOSIX,
+		actionfacts.Analyze(rawPOSIX.actionFactsInput()),
+		nil,
+		key,
+	)
+	if len(posixOutput.ASRCandidates) != 1 {
+		t.Fatalf("POSIX candidates = %+v", posixOutput.ASRCandidates)
+	}
+	if candidate := posixOutput.ASRCandidates[0]; !candidate.Eligible || !candidate.Authoritative ||
+		candidate.Surface != "posix_shell" ||
+		candidate.Provenance != "actionfacts_static_posix" ||
+		candidate.Source != "raw_posix_structure" {
+		t.Fatalf("complete POSIX node was not projectable: %+v", candidate)
+	}
+
+	argvOutput := buildASRReplayOutput(
+		structuredArgv,
+		actionfacts.Analyze(structuredArgv.actionFactsInput()),
+		nil,
+		key,
+	)
+	if len(argvOutput.ASRCandidates) != 1 {
+		t.Fatalf("argv candidates = %+v", argvOutput.ASRCandidates)
+	}
+	if candidate := argvOutput.ASRCandidates[0]; !candidate.Eligible || !candidate.Authoritative ||
+		candidate.Surface != "direct_argv" ||
+		candidate.Provenance != "structured_argv" ||
+		candidate.Source != "source_argv" {
+		t.Fatalf("complete argv node was not projectable: %+v", candidate)
+	}
+
+	nonLinux := rawPOSIX
+	nonLinux.Platform = "darwin"
+	nonLinuxOutput := buildASRReplayOutput(
+		nonLinux,
+		actionfacts.Analyze(nonLinux.actionFactsInput()),
+		nil,
+		key,
+	)
+	if candidate := nonLinuxOutput.ASRCandidates[0]; candidate.Eligible ||
+		candidate.Authoritative || candidate.Surface != "" ||
+		candidate.Reason != "platform_unsupported" ||
+		candidate.AuthorityReason != "not_projectable" {
+		t.Fatalf("non-Linux candidate = %+v", candidate)
+	}
+}
+
+func TestASRReplayArgsOnlyDoesNotInventProjectionProvenance(t *testing.T) {
+	envelope := asrReplayEnvelope{
+		Platform: "linux",
+		Tool:     "shell",
+		Args:     json.RawMessage(`{"command":"rm -rf /tmp/build"}`),
+		hasArgs:  true,
+	}
+	facts := actionfacts.Analyze(envelope.actionFactsInput())
+	if len(facts.Commands) == 0 {
+		t.Fatalf("expected ActionFacts command: %+v", facts)
+	}
+	output := buildASRReplayOutput(
+		envelope,
+		facts,
+		nil,
+		[]byte("0123456789abcdef0123456789abcdef"),
+	)
+	if candidate := output.ASRCandidates[0]; candidate.Eligible ||
+		candidate.Authoritative || candidate.Provenance != "tool_args_unproven" ||
+		candidate.Reason != "provenance_unsupported" {
+		t.Fatalf("args-only candidate crossed provenance boundary: %+v", candidate)
+	}
+}
+
+func TestASRReplayCandidateDoesNotPromotePartialControlFlow(t *testing.T) {
+	envelope := asrReplayEnvelope{
+		Platform:   "linux",
+		Command:    "false && rm -rf /tmp/build",
+		Dialect:    actionfacts.DialectPOSIX,
+		hasCommand: true,
+		hasDialect: true,
+	}
+	facts := actionfacts.Analyze(envelope.actionFactsInput())
+	if facts.Authoritative() {
+		t.Fatalf("short-circuit action unexpectedly authoritative: %+v", facts.Parse)
+	}
+	foundRM := false
+	for _, command := range facts.Commands {
+		if command.Program != "rm" {
+			continue
+		}
+		foundRM = true
+		projection := actionfacts.ProjectASRCommandNodes(
+			facts,
+			asrReplayProjectionContext(envelope),
+		)
+		var candidate asrReplayASRCandidate
+		for _, projected := range projection.Candidates {
+			if projected.CommandID == command.ID {
+				candidate = asrReplayProjectedCandidate(
+					envelope,
+					projection,
+					projected,
+				)
+				break
+			}
+		}
+		if !candidate.Eligible || candidate.Authoritative ||
+			candidate.AuthorityReason != "whole_action_not_authoritative" {
+			t.Fatalf("partial control-flow node crossed authority boundary: %+v", candidate)
+		}
+	}
+	if !foundRM {
+		t.Fatal("expected retained rm node")
+	}
 }
 
 func asrReplaySource(envelope asrReplayEnvelope) string {
