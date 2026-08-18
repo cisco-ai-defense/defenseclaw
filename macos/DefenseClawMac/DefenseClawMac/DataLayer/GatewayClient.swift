@@ -526,10 +526,16 @@ actor GatewayClient {
         snap.filesScanned = (summary["files_scanned"] as? Int) ?? 0
         // TUI: bool(raw.get("enabled")) — a missing key means disabled.
         snap.enabled = (dict["enabled"] as? Bool) ?? (summary["enabled"] as? Bool) ?? false
+        snap.lookupModelProvenanceOnline =
+            (dict["lookup_model_provenance_online"] as? Bool) ?? false
         snap.newSignals = (summary["new_signals"] as? Int) ?? 0
         snap.changedSignals = (summary["changed_signals"] as? Int) ?? 0
         snap.goneSignals = (summary["gone_signals"] as? Int) ?? 0
         snap.privacyMode = (summary["privacy_mode"] as? String) ?? (summary["mode"] as? String) ?? ""
+        let diagnostics = AIDiscoveryDiagnostics.fromMapping(summary)
+        snap.result = diagnostics.result
+        snap.errors = diagnostics.errors
+        snap.detectorErrors = diagnostics.detectorErrors
         snap.lastScan = DCDates.parse(summary["scanned_at"] ?? summary["last_scan"] ?? summary["lastScan"])
         let signalPayload = dict["signals"] ?? dict["components"]
         let signals = AISignalDecoding.signalMappings(from: signalPayload)

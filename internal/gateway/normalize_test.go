@@ -17,6 +17,7 @@
 package gateway
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -110,16 +111,60 @@ func TestNormalizeScanVerdict_SourceFallback(t *testing.T) {
 	}
 }
 
+func TestActiveLocalPatternRuleIdentityUsesPublishedIndex(t *testing.T) {
+	if !activeLocalPatternRuleIdentity(" sec-aws-key ", " AWS access key ") {
+		t.Fatal("published catalog identity was not found through the normalized index")
+	}
+	if activeLocalPatternRuleIdentity("SEC-AWS-KEY", "different title") {
+		t.Fatal("rule ID alone accepted a mismatched producer-controlled title")
+	}
+	if activeLocalPatternRuleIdentity("", "AWS access key") ||
+		activeLocalPatternRuleIdentity("SEC-AWS-KEY", "") {
+		t.Fatal("empty catalog identity component was accepted")
+	}
+}
+
+func TestNormalizeUntrustedLocalPatternFindingNeverBuildsIdentityFromSource(t *testing.T) {
+	raw := "ordinary-match-" + strings.Repeat("source", 8)
+	got := normalizeUntrustedLocalPatternFinding(raw, raw, "local-pattern", "LOW")
+	if got.CanonicalID != "LP-MATCH" || got.OriginalID != "LP-MATCH" ||
+		got.Title != "Local pattern match" || got.Evidence != raw {
+		t.Fatalf("untrusted local finding was not separated from identity: %#v", got)
+	}
+	for _, identity := range []string{got.CanonicalID, got.OriginalID, got.Title} {
+		if strings.Contains(identity, raw) {
+			t.Fatalf("untrusted source bytes reached normalized identity %q", identity)
+		}
+	}
+}
+
+func TestNormalizeSensitiveLocalPatternFindingUsesStableSecretDetectorID(t *testing.T) {
+	tests := []struct {
+		raw  string
+		want string
+	}{
+		{raw: "api_key=q7V2m9X4k8P6r3T1w5Y0n8C4", want: "LP-SECRET-ASSIGNMENT"},
+		{raw: "Bearer eyJhbGciOiJIUzI1NiJ9.q7V2m9X4k8P6r3T1w5Y0.n8C4x6Z2", want: "LP-SECRET-BEARER"},
+	}
+	for _, test := range tests {
+		got, ok := normalizeSensitiveLocalPatternFinding(test.raw, "local-pattern", "HIGH")
+		if !ok || got.CanonicalID != test.want || got.OriginalID != test.want {
+			t.Errorf("normalizeSensitiveLocalPatternFinding(%q) = %#v, %v; want %s", test.raw, got, ok, test.want)
+		}
+	}
+}
+
 func TestNormalizeRuleFindings(t *testing.T) {
 	findings := []RuleFinding{
 		{RuleID: "SEC-AWS-KEY", Title: "AWS access key", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential"}},
 		{RuleID: "TRUST-JAILBREAK", Title: "Jailbreak attempt", Severity: "CRITICAL", Confidence: 0.92, Tags: []string{"prompt-injection"}},
+		{RuleID: "OBFUSC-UNICODE-ZWSP", Title: "Zero-width character obfuscation", Severity: "HIGH", Confidence: 0.95, Tags: []string{"prompt-injection", "obfuscation"}},
 		{RuleID: "C2-NGROK", Title: "ngrok tunnel", Severity: "HIGH", Confidence: 0.85, Tags: []string{"exfiltration", "c2"}},
 	}
 
 	nfs := NormalizeRuleFindings(findings, "tool-call-inspect")
-	if len(nfs) != 3 {
-		t.Fatalf("expected 3, got %d", len(nfs))
+	if len(nfs) != 4 {
+		t.Fatalf("expected 4, got %d", len(nfs))
 	}
 
 	tests := []struct {
@@ -129,7 +174,8 @@ func TestNormalizeRuleFindings(t *testing.T) {
 	}{
 		{0, "SEC-AWS-KEY", CatCredentialLeak},
 		{1, "TRUST-JAILBREAK", CatPromptInjection},
-		{2, "C2-NGROK", CatDataExfil},
+		{2, "OBFUSC-UNICODE-ZWSP", CatPromptInjection},
+		{3, "C2-NGROK", CatDataExfil},
 	}
 
 	for _, tt := range tests {
@@ -178,6 +224,7 @@ func TestCategoryFromTags(t *testing.T) {
 		expected string
 	}{
 		{[]string{"prompt-injection"}, CatPromptInjection},
+		{[]string{"execution", "obfuscation"}, CatDangerousExec},
 		{[]string{"credential"}, CatCredentialLeak},
 		{[]string{"execution", "reverse-shell"}, CatDangerousExec},
 		{[]string{"exfiltration", "c2"}, CatDataExfil},
@@ -203,6 +250,7 @@ func TestCanonicalIDFromRuleID(t *testing.T) {
 	}{
 		{"SEC-AWS-KEY", "SEC-AWS-KEY"},
 		{"CMD-REVSHELL-BASH", "CMD-REVSHELL-BASH"},
+		{"OBFUSC-UNICODE-ZWSP", "OBFUSC-UNICODE-ZWSP"},
 		{"JUDGE-INJ-INSTRUCT", "JUDGE-INJ-INSTRUCT"},
 		{"JUDGE-PII-EMAIL", "JUDGE-PII-EMAIL"},
 		{"pii-data:123-45-6789", "LP-PII-DATA"},
@@ -212,12 +260,51 @@ func TestCanonicalIDFromRuleID(t *testing.T) {
 		{"sk-ant-something", "LP-SECRET-MATCH"},
 		{"/etc/passwd", "LP-SYSTEM-FILE"},
 		{"base64 --decode", "LP-EXFIL"},
+		{"SECRETS.CLOUD_CREDENTIAL_READ", "secrets.cloud_credential_read"},
+		{"exfil.secret_read_and_egress_oneliner", "exfil.secret_read_and_egress_oneliner"},
+		{"exec.agent_runtime_bypass_flags", "exec.agent_runtime_bypass_flags"},
+		{"IMPACT.MASS_PROCESS_TERMINATION", "impact.mass_process_termination"},
+		{"Persistence.Shell_Profile_Write", "persistence.shell_profile_write"},
+		{"chain.secret_read_then_egress", "chain.secret_read_then_egress"},
 	}
 
 	for _, tt := range tests {
 		got := canonicalIDFromRuleID(tt.input)
 		if got != tt.expected {
 			t.Errorf("canonicalIDFromRuleID(%q) = %q, want %q", tt.input, got, tt.expected)
+		}
+	}
+}
+
+func TestNormalizeDottedSemanticRuleCategories(t *testing.T) {
+	findings := []RuleFinding{
+		{RuleID: "secrets.browser_session_store_read", Tags: []string{"credential"}},
+		{
+			RuleID: "exfil.secret_read_and_egress_oneliner",
+			Tags:   []string{"credential", "exfiltration"},
+		},
+		{RuleID: "exec.reverse_tunnel", Tags: []string{"network", "tunnel"}},
+		{RuleID: "tamper.detector_state_write", Tags: []string{"state"}},
+		{RuleID: "impact.fork_bomb", Tags: []string{"impact"}},
+		{RuleID: "chain.secret_read_then_egress", Tags: []string{"chain"}},
+	}
+	got := NormalizeRuleFindings(findings, "rules")
+	want := []string{
+		CatCredentialLeak,
+		CatDataExfil,
+		CatDangerousExec,
+		CatCognitiveTamper,
+		CatDangerousExec,
+		CatDangerousExec,
+	}
+	for index := range want {
+		if got[index].Category != want[index] {
+			t.Errorf(
+				"NormalizeRuleFindings(%q).Category = %q, want %q",
+				findings[index].RuleID,
+				got[index].Category,
+				want[index],
+			)
 		}
 	}
 }

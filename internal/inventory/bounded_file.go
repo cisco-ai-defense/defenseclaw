@@ -65,6 +65,34 @@ func readBoundedRegularFile(path string, limit int64) ([]byte, error) {
 	return raw, nil
 }
 
+// readRegularFilePrefix is the large-artifact counterpart to
+// readBoundedRegularFile. It verifies the opened object is a regular file and
+// reads at most limit bytes from its prefix, but deliberately does not reject
+// the file merely because the full artifact is larger. Model containers are
+// routinely gigabytes while their provenance header is small and bounded.
+func readRegularFilePrefix(path string, limit int64) ([]byte, error) {
+	if limit <= 0 {
+		return nil, errors.New("bounded metadata prefix limit must be positive")
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return nil, err
+	}
+	f, err := openReadOnlyNonblocking(resolved)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, errBoundedFileNotRegular
+	}
+	return io.ReadAll(io.LimitReader(f, limit))
+}
+
 // os.File is referenced here so both platform implementations have one
 // compile-time signature.
 type boundedReadFile = os.File

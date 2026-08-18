@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -352,7 +353,7 @@ func TestIsLoopback(t *testing.T) {
 
 func TestRegistry_DefaultContainsAllBuiltins(t *testing.T) {
 	r := NewDefaultRegistry()
-	expected := []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent"}
+	expected := []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode", "omnigent", "amp"}
 	for _, name := range expected {
 		if _, ok := r.Get(name); !ok {
 			t.Errorf("default registry missing %q", name)
@@ -3498,7 +3499,7 @@ env_key = "OPENAI_API_KEY"
 
 // TestCodex_Setup_RegistersHooksInline verifies the Codex connector
 // writes an inline [hooks] HookEventsToml struct into config.toml
-// covering all ten Codex events and pointing at the platform-native hook
+// covering the current Codex event matrix and pointing at the platform-native hook
 // command. The hooks key is NOT a path to a hooks.json file —
 // that would trigger a TOML parse error at codex startup.
 func TestCodex_Setup_RegistersHooksInline(t *testing.T) {
@@ -3531,7 +3532,7 @@ func TestCodex_Setup_RegistersHooksInline(t *testing.T) {
 	for _, evt := range []string{
 		"SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest",
 		"PostToolUse", "SubagentStart", "SubagentStop", "PreCompact",
-		"PostCompact", "Stop",
+		"PostCompact", "Stop", "SessionEnd",
 	} {
 		if !strings.Contains(content, "hooks."+evt) && !strings.Contains(content, "hooks\n"+evt) {
 			// Accept either dotted or nested rendering.
@@ -4092,14 +4093,21 @@ func TestCodex_Setup_WiresNotifyBridge(t *testing.T) {
 			t.Fatalf("notify-bridge.sh missing — agent-turn-complete telemetry won't fire: %v", err)
 		}
 		if info.Mode().Perm() != 0o700 {
-			t.Errorf("notify-bridge.sh mode = %v, want 0o700 (operator-only — token is baked in)", info.Mode().Perm())
+			t.Errorf("notify-bridge.sh mode = %v, want 0o700 (operator-only managed executable)", info.Mode().Perm())
 		}
 		bridge, err := os.ReadFile(bridgePath)
 		if err != nil {
 			t.Fatal(err)
 		}
-		if !strings.Contains(string(bridge), "test-token-codex-notify") {
-			t.Error("bridge missing baked-in APIToken — receiver would reject every call as unauthenticated")
+		if strings.Contains(string(bridge), "test-token-codex-notify") {
+			t.Error("bridge embeds APIToken instead of loading the managed connector-scoped token sidecar")
+		}
+		tokenPath, err := HookAPITokenFilePath(dir, "codex")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(bridge), shellSingleQuote(tokenPath)) {
+			t.Errorf("bridge missing connector-scoped token sidecar path %q", tokenPath)
 		}
 		if !strings.Contains(string(bridge), "127.0.0.1:18970/api/v1/codex/notify") {
 			t.Errorf("bridge missing gateway notify endpoint URL; body:\n%s", bridge)
@@ -6806,13 +6814,19 @@ func TestConnectorScopedHookTokenOverridesGenericEnv(t *testing.T) {
 		t.Fatalf("WriteHookScriptsForConnectorObject: %v", err)
 	}
 
-	out := runHookAndReturnCurlArgs(t, filepath.Join(dir, "codex-hook.sh"),
+	capture := runHookAndCaptureCurlTransport(t, filepath.Join(dir, "codex-hook.sh"),
 		map[string]string{"DEFENSECLAW_GATEWAY_TOKEN": "generic-env"})
-	if !containsAuthBearer(out, "scoped-token") {
-		t.Errorf("connector-scoped token should override inherited generic env token; got curl args:\n%s", out)
+	if strings.Contains(capture.argv, "scoped-token") {
+		t.Errorf("connector-scoped token leaked into curl argv:\n%s", capture.argv)
 	}
-	if containsAuthBearer(out, "generic-env") {
-		t.Errorf("hook leaked inherited generic env token instead of scoped token; got curl args:\n%s", out)
+	if strings.Contains(capture.argv, "generic-env") {
+		t.Errorf("hook leaked inherited generic env token into curl argv:\n%s", capture.argv)
+	}
+	if !strings.Contains(capture.headers, "Authorization: Bearer scoped-token") {
+		t.Errorf("hook did not transport the connector-scoped token: %q", capture.headers)
+	}
+	if strings.Contains(capture.headers, "generic-env") {
+		t.Errorf("hook transported the inherited generic token: %q", capture.headers)
 	}
 }
 
@@ -6843,20 +6857,40 @@ func TestConnectorScopedHookReadFailureClearsGenericEnv(t *testing.T) {
 }
 
 // runHookAndReturnCurlArgs executes the given hook script with `curl`
-// replaced by a stub that writes its argv, one per line, to a file. The
-// hook script pipes curl's stderr to /dev/null, so stdout/stderr capture
-// would lose the evidence — the stub persists it out-of-band. This lets
-// us assert on the real argv curl would have seen, including the
-// runtime-computed Authorization header.
+// replaced by a stub that persists its argv out-of-band. The companion
+// transport helper also dereferences header and config descriptors so tests
+// can verify private header transport without putting credentials in argv.
 func runHookAndReturnCurlArgs(t *testing.T, scriptPath string, extraEnv map[string]string) string {
+	t.Helper()
+	return runHookAndCaptureCurlTransport(t, scriptPath, extraEnv).argv
+}
+
+type hookCurlTransportCapture struct {
+	argv    string
+	headers string
+}
+
+func runHookAndCaptureCurlTransport(t *testing.T, scriptPath string, extraEnv map[string]string) hookCurlTransportCapture {
 	t.Helper()
 	if runtime.GOOS == "windows" {
 		t.Skip("POSIX shell-hook runtime is covered by native defenseclaw-hook.exe tests on Windows")
 	}
 	stubDir := t.TempDir()
 	argFile := filepath.Join(stubDir, "curl-args.txt")
+	headerFile := filepath.Join(stubDir, "curl-headers.txt")
 	stub := filepath.Join(stubDir, "curl")
-	stubSrc := "#!/bin/sh\nfor a in \"$@\"; do printf '%s\\n' \"$a\" >> " + argFile + "; done\nprintf '{\"action\":\"allow\"}\\n200'\nexit 0\n"
+	stubSrc := "#!/bin/sh\n" +
+		"want=\n" +
+		"for a in \"$@\"; do\n" +
+		"  printf '%s\\n' \"$a\" >> " + shellSingleQuoteForTest(argFile) + "\n" +
+		"  case \"$want\" in\n" +
+		"    header) case \"$a\" in @*) cat \"${a#@}\" ;; *) printf '%s\\n' \"$a\" ;; esac >> " + shellSingleQuoteForTest(headerFile) + "; want= ;;\n" +
+		"    config) cat \"$a\" >> " + shellSingleQuoteForTest(headerFile) + "; want= ;;\n" +
+		"  esac\n" +
+		"  case \"$a\" in -H|--header) want=header ;; -K|--config) want=config ;; esac\n" +
+		"done\n" +
+		"printf '{\"action\":\"allow\"}\\n200'\n" +
+		"exit 0\n"
 	if err := os.WriteFile(stub, []byte(stubSrc), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -6889,7 +6923,11 @@ func runHookAndReturnCurlArgs(t *testing.T, scriptPath string, extraEnv map[stri
 	if err != nil {
 		t.Fatalf("curl stub never recorded args: %v", err)
 	}
-	return string(data)
+	headers, err := os.ReadFile(headerFile)
+	if err != nil {
+		t.Fatalf("curl stub never recorded headers: %v", err)
+	}
+	return hookCurlTransportCapture{argv: string(data), headers: string(headers)}
 }
 
 func bakeHookPathForTest(t *testing.T, scriptPath, hookPath string) {
@@ -7361,6 +7399,91 @@ func TestShimTemplateRendering(t *testing.T) {
 	}
 }
 
+func TestRenderedShimsPostExecutableAndExactArgv(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX shell shims are not installed on Windows")
+	}
+	if _, err := os.Stat("/bin/bash"); err != nil {
+		t.Skipf("/bin/bash is required to exercise rendered shims: %v", err)
+	}
+	jqPath, err := exec.LookPath("jq")
+	if err != nil {
+		t.Skipf("jq is required to exercise rendered shims: %v", err)
+	}
+
+	root := t.TempDir()
+	shimDir := filepath.Join(root, "shims")
+	binDir := filepath.Join(root, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("create fake binary directory: %v", err)
+	}
+	fakeCurl := `#!/bin/bash
+set -euo pipefail
+payload=""
+while (( $# > 0 )); do
+  if [[ "$1" == "-d" && $# -ge 2 ]]; then
+    payload="$2"
+    shift 2
+    continue
+  fi
+  shift
+done
+printf '%s' "$payload" > "$DEFENSECLAW_SHIM_CAPTURE"
+printf '%s\n%s\n' '{"action":"block","reason":"captured"}' '200'
+`
+	if err := os.WriteFile(filepath.Join(binDir, "curl"), []byte(fakeCurl), 0o700); err != nil {
+		t.Fatalf("write fake curl: %v", err)
+	}
+	if err := WriteShimScripts(shimDir, "127.0.0.1:18970"); err != nil {
+		t.Fatalf("WriteShimScripts: %v", err)
+	}
+
+	inputArgv := []string{"--leading-dash", "argument with spaces", "https://collector.invalid/upload"}
+	for _, name := range shimBinaries {
+		t.Run(name, func(t *testing.T) {
+			capture := filepath.Join(root, name+".json")
+			command := exec.Command(filepath.Join(shimDir, name), inputArgv...)
+			command.Env = []string{
+				"PATH=" + strings.Join([]string{
+					shimDir, binDir, filepath.Dir(jqPath), "/usr/bin", "/bin",
+				}, string(os.PathListSeparator)),
+				"DEFENSECLAW_SHIM_CAPTURE=" + capture,
+			}
+			output, err := command.CombinedOutput()
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+				t.Fatalf("shim exit = %v, want policy block (1); output=%s", err, output)
+			}
+
+			payload, err := os.ReadFile(capture)
+			if err != nil {
+				t.Fatalf("read captured request: %v", err)
+			}
+			var request struct {
+				Tool string                     `json:"tool"`
+				Args map[string]json.RawMessage `json:"args"`
+			}
+			if err := json.Unmarshal(payload, &request); err != nil {
+				t.Fatalf("decode captured request %q: %v", payload, err)
+			}
+			if request.Tool != name {
+				t.Fatalf("tool = %q, want %q", request.Tool, name)
+			}
+			if len(request.Args) != 1 {
+				t.Fatalf("args keys = %v, want only argv", request.Args)
+			}
+			var gotArgv []string
+			if err := json.Unmarshal(request.Args["argv"], &gotArgv); err != nil {
+				t.Fatalf("decode argv: %v", err)
+			}
+			wantArgv := append([]string{name}, inputArgv...)
+			if !slices.Equal(gotArgv, wantArgv) {
+				t.Fatalf("argv = %#v, want %#v", gotArgv, wantArgv)
+			}
+		})
+	}
+}
+
 // --- Plugin discovery on empty dir ---
 
 func TestDiscoverPlugins_EmptyDir(t *testing.T) {
@@ -7370,8 +7493,8 @@ func TestDiscoverPlugins_EmptyDir(t *testing.T) {
 		t.Fatalf("DiscoverPlugins on empty dir: %v", err)
 	}
 	// Should still have only built-in connectors
-	if r.Len() != 13 {
-		t.Errorf("expected 13 built-in connectors, got %d", r.Len())
+	if r.Len() != 14 {
+		t.Errorf("expected 14 built-in connectors, got %d", r.Len())
 	}
 }
 
@@ -10074,6 +10197,7 @@ func TestConnector_EnvRequirementsProvider_AllBuiltinsImplement(t *testing.T) {
 		{"antigravity", func() Connector { return NewAntigravityConnector() }, []EnvScope{EnvScopeNone}},
 		{"opencode", func() Connector { return NewOpenCodeConnector() }, []EnvScope{EnvScopeNone}},
 		{"omnigent", func() Connector { return NewOmnigentConnector() }, []EnvScope{EnvScopeNone, EnvScopeProcess}},
+		{"amp", func() Connector { return NewAMPConnector() }, []EnvScope{EnvScopeNone}},
 	}
 
 	for _, c := range cases {

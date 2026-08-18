@@ -405,6 +405,7 @@ func TestConnectorDefaultHomeBesideDataRootIsStrictlyBound(t *testing.T) {
 	for connectorName, want := range map[string]string{
 		"codex":      filepath.Join(root, ".codex"),
 		"claudecode": filepath.Join(root, ".claude"),
+		"amp":        filepath.Join(root, ".config", "amp"),
 	} {
 		if got := connectorDefaultHomeBesideDataRoot(dataRoot, connectorName); !samePath(got, want) {
 			t.Fatalf("%s default home = %q, want %q", connectorName, got, want)

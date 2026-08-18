@@ -6,6 +6,7 @@ package gateway
 import (
 	"bytes"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"slices"
@@ -163,6 +164,120 @@ func TestHookOccurrenceExactReceiptReplaySuppressesOnlyDuplicateEmission(t *test
 	})
 	if err != nil || len(graph.Events) != 1 {
 		t.Fatalf("graph events=%d err=%v", len(graph.Events), err)
+	}
+}
+
+func TestHookOccurrenceReviewedToolRetryReceiptIsPartitioned(t *testing.T) {
+	installCorrelationHMACForTest()
+	server, store := newHookCorrelationServer(t, filepath.Join(t.TempDir(), "audit.db"))
+	defer store.Close() //nolint:errcheck
+
+	correlate := func(connectorName, sessionID, toolID string) agentHookRequest {
+		t.Helper()
+		profile := server.hookProfileForConnector(connectorName)
+		payload := map[string]interface{}{
+			"hook_event_name": "PreToolUse",
+			"session_id":      sessionID,
+			"tool_name":       "Bash",
+		}
+		if toolID != "" {
+			payload["tool_use_id"] = toolID
+		}
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req := normalizeAgentHookRequestWithProfile(
+			connectorName,
+			payload,
+			profile,
+		)
+		_, req, err = server.correlateHookOccurrence(
+			t.Context(),
+			profile,
+			req,
+			raw,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return req
+	}
+
+	first := correlate("claudecode", "session-a", "tool-a")
+	replay := correlate("claudecode", "session-a", "tool-a")
+	if first.CorrelationReceipt == nil ||
+		replay.SemanticEventID != first.SemanticEventID {
+		t.Fatalf("stable tool retry did not replay: first=%+v replay=%+v", first, replay)
+	}
+
+	for name, distinct := range map[string]agentHookRequest{
+		"different tool":      correlate("claudecode", "session-a", "tool-b"),
+		"different connector": correlate("codex", "session-a", "tool-a"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if distinct.SemanticEventID == first.SemanticEventID ||
+				distinct.ConnectorInstanceID == first.ConnectorInstanceID &&
+					name == "different connector" {
+				t.Fatalf("partition collapsed: first=%+v distinct=%+v", first, distinct)
+			}
+		})
+	}
+
+	claudeProfile := server.hookProfileForConnector("claudecode")
+	sessionBPayload := map[string]interface{}{
+		"hook_event_name": "PreToolUse",
+		"session_id":      "session-b",
+		"tool_use_id":     "tool-a",
+		"tool_name":       "Bash",
+	}
+	sessionB := normalizeAgentHookRequestWithProfile(
+		"claudecode",
+		sessionBPayload,
+		claudeProfile,
+	)
+	firstDigest := reviewedHookToolRetryDigest(
+		claudeProfile.Correlation,
+		audit.ConnectorInstanceID(first.ConnectorInstanceID),
+		first,
+		connector.CorrelationLifecycleToolStart,
+	)
+	sessionBDigest := reviewedHookToolRetryDigest(
+		claudeProfile.Correlation,
+		audit.ConnectorInstanceID(first.ConnectorInstanceID),
+		sessionB,
+		connector.CorrelationLifecycleToolStart,
+	)
+	if firstDigest == "" || sessionBDigest == "" ||
+		firstDigest == sessionBDigest {
+		t.Fatalf("cross-session retry digests collapsed: %q/%q", firstDigest, sessionBDigest)
+	}
+	unreported := first
+	toolValue := first.CorrelationValues[connector.CorrelationTargetTool]
+	toolValue.Origin = connector.CorrelationOriginMinted
+	unreported.CorrelationValues = map[connector.CorrelationTarget]connector.CorrelationValue{
+		connector.CorrelationTargetSession: first.CorrelationValues[connector.CorrelationTargetSession],
+		connector.CorrelationTargetTool:    toolValue,
+	}
+	if digest := reviewedHookToolRetryDigest(
+		claudeProfile.Correlation,
+		audit.ConnectorInstanceID(first.ConnectorInstanceID),
+		unreported,
+		connector.CorrelationLifecycleToolStart,
+	); digest != "" {
+		t.Fatalf("unreported tool identity admitted retry digest %q", digest)
+	}
+
+	missingFirst := correlate("claudecode", "session-missing", "")
+	missingSecond := correlate("claudecode", "session-missing", "")
+	if missingFirst.CorrelationReceipt != nil ||
+		missingSecond.CorrelationReceipt != nil ||
+		missingFirst.SemanticEventID == missingSecond.SemanticEventID {
+		t.Fatalf(
+			"missing provider tool ID did not stay fresh: first=%+v second=%+v",
+			missingFirst,
+			missingSecond,
+		)
 	}
 }
 

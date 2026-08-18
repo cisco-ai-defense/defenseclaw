@@ -19,6 +19,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -36,6 +37,12 @@ func readinessSnapshot(guardrailState, gatewayState gateway.SubsystemState) gate
 		Guardrail: gateway.SubsystemHealth{State: guardrailState},
 		Telemetry: gateway.SubsystemHealth{State: gateway.StateDisabled},
 	}
+}
+
+type readinessRoundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn readinessRoundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return fn(request)
 }
 
 func TestDefaultStartReadinessTimeoutCoversColdWindowsStartup(t *testing.T) {
@@ -304,8 +311,47 @@ func TestRotationConnectorStateNormalizesManagedNativeHooksClosed(t *testing.T) 
 
 func TestParseRotationConnectorStateIsStrict(t *testing.T) {
 	valid := `{"connectors":[{"enabled":true,"hook_fail_mode":"closed","mode":"action","name":"codex"}],"version":1}`
-	if _, err := parseRotationConnectorState(valid); err != nil {
+	state, err := parseRotationConnectorState(valid)
+	if err != nil {
 		t.Fatalf("valid connector state rejected: %v", err)
+	}
+	if state.HookTokenFingerprints != nil {
+		t.Fatalf("legacy connector state fingerprints = %#v, want omitted", state.HookTokenFingerprints)
+	}
+	fingerprint := strings.Repeat("a", 64)
+	withFingerprint := `{"connectors":[{"enabled":false,"hook_fail_mode":"closed","mode":"action","name":"codex"}],"hook_token_fingerprints":{"codex":"` + fingerprint + `"},"version":1}`
+	state, err = parseRotationConnectorState(withFingerprint)
+	if err != nil {
+		t.Fatalf("connector state with a scoped hook expectation rejected: %v", err)
+	}
+	if got := state.HookTokenFingerprints["codex"]; got != fingerprint {
+		t.Fatalf("hook token fingerprint = %q, want exact expectation", got)
+	}
+	withOrphan := `{"connectors":[{"enabled":false,"hook_fail_mode":"closed","mode":"action","name":"codex"}],"hook_token_fingerprints":{"codex":"` + fingerprint + `"},"orphan_hook_token_fingerprints":{"thirdparty":"` + fingerprint + `"},"version":1}`
+	state, err = parseRotationConnectorState(withOrphan)
+	if err != nil {
+		t.Fatalf("connector state with an orphan scoped hook expectation rejected: %v", err)
+	}
+	if got := state.OrphanHookTokenFingerprints["thirdparty"]; got != fingerprint {
+		t.Fatalf("orphan hook token fingerprint = %q, want exact expectation", got)
+	}
+	merged, err := rotationConnectorHookTokenExpectations(state)
+	if err != nil || len(merged) != 2 || merged["codex"] != fingerprint || merged["thirdparty"] != fingerprint {
+		t.Fatalf("merged hook token expectations = %#v, %v", merged, err)
+	}
+	emptyExpectations, err := parseRotationConnectorState(`{"connectors":[],"hook_token_fingerprints":{},"version":1}`)
+	if err != nil {
+		t.Fatalf("empty optional hook token fingerprint object rejected: %v", err)
+	}
+	if emptyExpectations.HookTokenFingerprints == nil {
+		t.Fatal("explicit empty hook token fingerprint object was indistinguishable from legacy omission")
+	}
+	emptyOrphanExpectations, err := parseRotationConnectorState(`{"connectors":[],"orphan_hook_token_fingerprints":{},"version":1}`)
+	if err != nil {
+		t.Fatalf("empty optional orphan hook token fingerprint object rejected: %v", err)
+	}
+	if emptyOrphanExpectations.OrphanHookTokenFingerprints == nil {
+		t.Fatal("explicit empty orphan hook token fingerprint object was indistinguishable from legacy omission")
 	}
 	for _, raw := range []string{
 		``,
@@ -314,6 +360,26 @@ func TestParseRotationConnectorStateIsStrict(t *testing.T) {
 		`{"connectors":[{"enabled":true,"hook_fail_mode":"closed","mode":"action","name":"Codex"}],"version":1}`,
 		`{"connectors":[{"enabled":true,"hook_fail_mode":"closed","mode":"action","name":"codex"},{"enabled":true,"hook_fail_mode":"open","mode":"observe","name":"codex"}],"version":1}`,
 		`{"connectors":[],"unexpected":true,"version":1}`,
+		`{"connectors":[],"hook_token_fingerprints":null,"version":1}`,
+		`{"connectors":[],"hook_token_fingerprints":[],"version":1}`,
+		`{"connectors":[],"orphan_hook_token_fingerprints":null,"version":1}`,
+		`{"connectors":[],"orphan_hook_token_fingerprints":[],"version":1}`,
+		`{"connectors":[{"enabled":true,"hook_fail_mode":"closed","mode":"action","name":"codex"}],"hook_token_fingerprints":{"Codex":"` + fingerprint + `"},"version":1}`,
+		`{"connectors":[{"enabled":true,"hook_fail_mode":"closed","mode":"action","name":"codex"}],"hook_token_fingerprints":{"claudecode":"` + fingerprint + `"},"version":1}`,
+		`{"connectors":[{"enabled":true,"hook_fail_mode":"closed","mode":"action","name":"codex/escape"}],"hook_token_fingerprints":{"codex/escape":"` + fingerprint + `"},"version":1}`,
+		`{"connectors":[{"enabled":true,"hook_fail_mode":"closed","mode":"action","name":"codex"}],"hook_token_fingerprints":{"codex":"abc"},"version":1}`,
+		`{"connectors":[{"enabled":true,"hook_fail_mode":"closed","mode":"action","name":"codex"}],"hook_token_fingerprints":{"codex":"` + strings.Repeat("A", 64) + `"},"version":1}`,
+		`{"connectors":[{"enabled":true,"hook_fail_mode":"closed","mode":"action","name":"codex"}],"hook_token_fingerprints":{"codex":"` + strings.Repeat("z", 64) + `"},"version":1}`,
+		`{"connectors":[{"enabled":true,"hook_fail_mode":"closed","mode":"action","name":"codex"}],"hook_token_fingerprints":{"codex":1},"version":1}`,
+		`{"connectors":[{"enabled":true,"hook_fail_mode":"closed","mode":"action","name":"codex"}],"hook_token_fingerprints":{"codex":"` + fingerprint + `","codex":"` + fingerprint + `"},"version":1}`,
+		`{"connectors":[{"enabled":true,"hook_fail_mode":"closed","mode":"action","name":"codex"}],"orphan_hook_token_fingerprints":{"codex":"` + fingerprint + `"},"version":1}`,
+		`{"connectors":[],"orphan_hook_token_fingerprints":{"ThirdParty":"` + fingerprint + `"},"version":1}`,
+		`{"connectors":[],"orphan_hook_token_fingerprints":{"third party":"` + fingerprint + `"},"version":1}`,
+		`{"connectors":[],"orphan_hook_token_fingerprints":{"third\tparty":"` + fingerprint + `"},"version":1}`,
+		`{"connectors":[],"orphan_hook_token_fingerprints":{"` + strings.Repeat("a", 129) + `":"` + fingerprint + `"},"version":1}`,
+		`{"connectors":[],"orphan_hook_token_fingerprints":{"thirdparty":"abc"},"version":1}`,
+		`{"connectors":[],"orphan_hook_token_fingerprints":{"thirdparty":1},"version":1}`,
+		`{"connectors":[],"orphan_hook_token_fingerprints":{"thirdparty":"` + fingerprint + `","thirdparty":"` + fingerprint + `"},"version":1}`,
 	} {
 		if _, err := parseRotationConnectorState(raw); err == nil {
 			t.Fatalf("invalid connector state accepted: %q", raw)
@@ -383,6 +449,201 @@ func testClaudeRotationProbes(baseURL, credential string) []connector.ClaudeCode
 	return []connector.ClaudeCodeNativeOTLPProbe{
 		{Signal: connector.NativeOTLPSignalLogs, Endpoint: baseURL + "/v1/logs", Headers: headers.Clone()},
 		{Signal: connector.NativeOTLPSignalMetrics, Endpoint: baseURL + "/v1/metrics", Headers: headers.Clone()},
+	}
+}
+
+func TestVerifyRotationConnectorHookAuthenticationUsesExpectedScopedCredentials(t *testing.T) {
+	dataDir := t.TempDir()
+	tokens := make(map[string]string)
+	expected := make(rotationHookTokenFingerprints)
+	for _, name := range []string{"claudecode", "codex"} {
+		token, err := connector.EnsureHookAPIToken(dataDir, name)
+		if err != nil {
+			t.Fatalf("EnsureHookAPIToken(%s): %v", name, err)
+		}
+		tokens[name] = token
+		expected[name] = rotationHookTokenFingerprint(token)
+	}
+
+	seen := map[string]int{}
+	var seenMu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		name := ""
+		probeKey := r.URL.Path
+		switch r.URL.Path {
+		case "/api/v1/inspect/tool":
+			name = r.Header.Get("X-DefenseClaw-Connector")
+			probeKey += ":" + name
+		case "/api/v1/claude-code/hook":
+			name = "claudecode"
+		case "/api/v1/codex/hook", "/api/v1/codex/notify":
+			name = "codex"
+		default:
+			t.Errorf("unexpected hook convergence path %q", r.URL.Path)
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if r.Method != http.MethodGet ||
+			r.Header.Get("Authorization") != "Bearer "+tokens[name] ||
+			r.Header.Get("X-DefenseClaw-Client") != "daemon-rotation-convergence" {
+			t.Errorf("%s hook convergence request did not use the expected no-op auth contract", name)
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		if strings.Contains(r.URL.String(), tokens[name]) {
+			t.Errorf("%s scoped hook credential appeared in the probe URL", name)
+		}
+		seenMu.Lock()
+		seen[probeKey]++
+		seenMu.Unlock()
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}))
+	defer srv.Close()
+
+	if err := verifyRotationConnectorHookAuthentication(
+		srv.Client(), srv.URL+"/status", dataDir, expected,
+	); err != nil {
+		t.Fatalf("verifyRotationConnectorHookAuthentication() error = %v", err)
+	}
+	for _, path := range []string{
+		"/api/v1/inspect/tool:claudecode",
+		"/api/v1/inspect/tool:codex",
+		"/api/v1/claude-code/hook",
+		"/api/v1/codex/hook",
+		"/api/v1/codex/notify",
+	} {
+		seenMu.Lock()
+		count := seen[path]
+		seenMu.Unlock()
+		if count != 1 {
+			t.Fatalf("hook auth probes for %s = %d, want 1", path, count)
+		}
+	}
+}
+
+func TestVerifyRotationConnectorHookAuthenticationRequiresFingerprintsWhenEnabled(t *testing.T) {
+	err := verifyRotationConnectorHookAuthentication(
+		&http.Client{}, "http://127.0.0.1:18970/status", t.TempDir(), nil,
+	)
+	if err == nil || !strings.Contains(err.Error(), "expectations are missing") {
+		t.Fatalf("empty hook fingerprint verification error = %v, want fail-closed rejection", err)
+	}
+}
+
+func TestVerifyRotationConnectorHookAuthenticationFailsClosedWithoutLeakingToken(t *testing.T) {
+	dataDir := t.TempDir()
+	token, err := connector.EnsureHookAPIToken(dataDir, "codex")
+	if err != nil {
+		t.Fatalf("EnsureHookAPIToken(codex): %v", err)
+	}
+
+	var probes atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		probes.Add(1)
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}))
+	defer srv.Close()
+
+	err = verifyRotationConnectorHookAuthentication(
+		srv.Client(),
+		srv.URL+"/status",
+		dataDir,
+		rotationHookTokenFingerprints{"codex": strings.Repeat("0", 64)},
+	)
+	if err == nil || !strings.Contains(err.Error(), "codex") || !strings.Contains(err.Error(), "rotation expectation") {
+		t.Fatalf("stale hook credential error = %v, want redacted fingerprint mismatch", err)
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Fatal("fingerprint mismatch error leaked the connector-scoped token")
+	}
+	if probes.Load() != 0 {
+		t.Fatalf("hook auth probes after fingerprint mismatch = %d, want 0", probes.Load())
+	}
+
+	acceptedFingerprint := rotationHookTokenFingerprint(token)
+	rejecting := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer rejecting.Close()
+	err = verifyRotationConnectorHookAuthentication(
+		rejecting.Client(),
+		rejecting.URL+"/status",
+		dataDir,
+		rotationHookTokenFingerprints{"codex": acceptedFingerprint},
+	)
+	if err == nil || !strings.Contains(err.Error(), "codex") || !strings.Contains(err.Error(), "401") {
+		t.Fatalf("rejected hook auth error = %v, want connector-scoped failure", err)
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Fatal("hook authentication error leaked the connector-scoped token")
+	}
+
+	leakingTransport := &http.Client{Transport: readinessRoundTripFunc(func(r *http.Request) (*http.Response, error) {
+		return nil, fmt.Errorf("transport reflected %s", r.Header.Get("Authorization"))
+	})}
+	err = verifyRotationConnectorHookAuthentication(
+		leakingTransport,
+		"http://127.0.0.1:18970/status",
+		dataDir,
+		rotationHookTokenFingerprints{"codex": acceptedFingerprint},
+	)
+	if err == nil || !strings.Contains(err.Error(), "probe for inspect route failed") {
+		t.Fatalf("transport failure error = %v, want redacted scoped probe failure", err)
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Fatal("transport failure error leaked the connector-scoped token")
+	}
+}
+
+func TestVerifyRotationConnectorHookAuthenticationSupportsProxyAndRejectsUnregisteredScopes(t *testing.T) {
+	expected := rotationHookTokenFingerprints{"codex": strings.Repeat("0", 64)}
+	if err := verifyRotationConnectorHookAuthentication(
+		&http.Client{}, "http://127.0.0.1:18970/status", t.TempDir(), expected,
+	); err == nil || !strings.Contains(err.Error(), "unavailable") {
+		t.Fatalf("missing hook sidecar error = %v, want fail-closed rejection", err)
+	}
+	if err := verifyRotationConnectorHookAuthentication(
+		&http.Client{}, "http://gateway.example.test/status", t.TempDir(), expected,
+	); err == nil || !strings.Contains(err.Error(), "non-loopback") {
+		t.Fatalf("remote hook probe error = %v, want fail-closed loopback rejection", err)
+	}
+
+	dataDir := t.TempDir()
+	token, err := connector.EnsureHookAPIToken(dataDir, "openclaw")
+	if err != nil {
+		t.Fatalf("EnsureHookAPIToken(openclaw): %v", err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/api/v1/inspect/tool" &&
+			r.Header.Get("X-DefenseClaw-Connector") == "openclaw" &&
+			r.Header.Get("Authorization") == "Bearer "+token {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	defer srv.Close()
+	if err := verifyRotationConnectorHookAuthentication(
+		srv.Client(),
+		srv.URL+"/status",
+		dataDir,
+		rotationHookTokenFingerprints{"openclaw": rotationHookTokenFingerprint(token)},
+	); err != nil {
+		t.Fatalf("proxy connector scoped auth rejected: %v", err)
+	}
+
+	pluginToken, err := connector.EnsureHookAPIToken(dataDir, "thirdparty")
+	if err != nil {
+		t.Fatalf("EnsureHookAPIToken(thirdparty): %v", err)
+	}
+	err = verifyRotationConnectorHookAuthentication(
+		srv.Client(),
+		srv.URL+"/status",
+		dataDir,
+		rotationHookTokenFingerprints{"thirdparty": rotationHookTokenFingerprint(pluginToken)},
+	)
+	if err == nil || !strings.Contains(err.Error(), "inspect route") || !strings.Contains(err.Error(), "401") {
+		t.Fatalf("unregistered connector error = %v, want fail-closed inspect rejection", err)
 	}
 }
 
@@ -1109,6 +1370,114 @@ func TestWaitForStartedDaemonRotationStopsBWhenScopedAuthIsRejected(t *testing.T
 	}
 	if base.stopCalls != 1 || base.stoppedPID != 42 {
 		t.Fatalf("B cleanup = (%d calls, PID %d), want (1, 42)", base.stopCalls, base.stoppedPID)
+	}
+}
+
+func TestWaitForStartedDaemonRotationStopsBWhenCodexNotifyAuthIsRejected(t *testing.T) {
+	dataDir := t.TempDir()
+	token, err := connector.EnsureHookAPIToken(dataDir, "codex")
+	if err != nil {
+		t.Fatalf("EnsureHookAPIToken(codex): %v", err)
+	}
+	snap := readinessSnapshot(gateway.StateRunning, gateway.StateDisabled)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/status":
+			_ = json.NewEncoder(w).Encode(snap)
+		case "/api/v1/inspect/tool":
+			if r.Header.Get("Authorization") != "Bearer "+token ||
+				r.Header.Get("X-DefenseClaw-Connector") != "codex" {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		case "/api/v1/codex/hook":
+			if r.Header.Get("Authorization") != "Bearer "+token {
+				w.WriteHeader(http.StatusUnauthorized)
+				return
+			}
+			w.WriteHeader(http.StatusMethodNotAllowed)
+		case "/api/v1/codex/notify":
+			w.WriteHeader(http.StatusUnauthorized)
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	base := &fakeReadinessProcess{running: true, pid: 42}
+	process := &fakeStrongReadinessProcess{fakeReadinessProcess: base, identityOK: true}
+	_, ready, err := waitForStartedDaemon(
+		process,
+		42,
+		srv.Client(),
+		srv.URL+"/status",
+		time.Second,
+		5*time.Millisecond,
+		daemonReadinessRequirements{
+			verifyConnectorHookTokens: true,
+			expectedConnectorState: rotationConnectorState{
+				HookTokenFingerprints: rotationHookTokenFingerprints{
+					"codex": rotationHookTokenFingerprint(token),
+				},
+			},
+			expectedDataDir: dataDir,
+		},
+	)
+	if err == nil || !strings.Contains(err.Error(), "notify route") || ready {
+		t.Fatalf("rejected Codex notify auth readiness = %v, error = %v, want convergence failure", ready, err)
+	}
+	if strings.Contains(err.Error(), token) {
+		t.Fatal("Codex notify readiness error leaked the connector-scoped token")
+	}
+	if base.stopCalls != 1 || base.stoppedPID != 42 {
+		t.Fatalf("B cleanup = (%d calls, PID %d), want (1, 42)", base.stopCalls, base.stoppedPID)
+	}
+}
+
+func TestWaitForStartedDaemonHookTokenVerificationRequiredRejectsEmptyExpectations(t *testing.T) {
+	snap := readinessSnapshot(gateway.StateRunning, gateway.StateDisabled)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(snap)
+	}))
+	defer srv.Close()
+
+	for _, tc := range []struct {
+		name     string
+		required bool
+		wantErr  bool
+	}{
+		{name: "explicit verification", required: true, wantErr: true},
+		{name: "legacy state omission"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base := &fakeReadinessProcess{running: true, pid: 42}
+			process := &fakeStrongReadinessProcess{fakeReadinessProcess: base, identityOK: true}
+			_, ready, err := waitForStartedDaemon(
+				process,
+				42,
+				srv.Client(),
+				srv.URL,
+				time.Second,
+				5*time.Millisecond,
+				daemonReadinessRequirements{
+					verifyConnectorHookTokens: tc.required,
+					expectedDataDir:           t.TempDir(),
+				},
+			)
+			if tc.wantErr {
+				if err == nil || !strings.Contains(err.Error(), "expectations are missing") || ready {
+					t.Fatalf("required empty hook readiness = %v, error = %v, want fail-closed rejection", ready, err)
+				}
+				if base.stopCalls != 1 || base.stoppedPID != 42 {
+					t.Fatalf("B cleanup = (%d calls, PID %d), want (1, 42)", base.stopCalls, base.stoppedPID)
+				}
+				return
+			}
+			if err != nil || !ready || base.stopCalls != 0 {
+				t.Fatalf("legacy omitted hook readiness = %v, error = %v, stop calls = %d", ready, err, base.stopCalls)
+			}
+		})
 	}
 }
 

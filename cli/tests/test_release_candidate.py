@@ -1405,15 +1405,24 @@ def test_public_installers_are_immutable_checksummed_assets_from_088_forward(
         "install.ps1",
         "install.sh",
     )
-    payload = set(release_candidate.payload_asset_names("0.8.8", "unverified"))
-    published = set(release_candidate.published_asset_names("0.8.8", "unverified"))
-    assert {"install.sh", "install.ps1"} <= payload <= published
+    assert release_candidate.installer_asset_names("0.8.10") == (
+        "install.ps1",
+        "install.sh",
+    )
+    assert release_candidate.installer_asset_names("0.8.11") == (
+        "install-openshell-sandbox.sh",
+        "install.ps1",
+        "install.sh",
+    )
+    payload = set(release_candidate.payload_asset_names("0.8.11", "unverified"))
+    published = set(release_candidate.published_asset_names("0.8.11", "unverified"))
+    assert {"install.sh", "install.ps1", "install-openshell-sandbox.sh"} <= payload <= published
 
     staged = tmp_path / "installers"
     staged.mkdir()
-    release_candidate._copy_installer_assets(staged, "0.8.8")
-    release_candidate._validate_installer_assets(staged, "0.8.8")
-    for name in release_candidate.installer_asset_names("0.8.8"):
+    release_candidate._copy_installer_assets(staged, "0.8.11")
+    release_candidate._validate_installer_assets(staged, "0.8.11")
+    for name in release_candidate.installer_asset_names("0.8.11"):
         assert (staged / name).read_bytes() == release_candidate.INSTALLER_ASSETS[name].source.read_bytes()
 
     if os.name == "posix":
@@ -1422,14 +1431,14 @@ def test_public_installers_are_immutable_checksummed_assets_from_088_forward(
             release_candidate.CandidateError,
             match="installer mode differs from reviewed source",
         ):
-            release_candidate._validate_installer_assets(staged, "0.8.8")
+            release_candidate._validate_installer_assets(staged, "0.8.11")
         (staged / "install.sh").chmod(
             stat.S_IMODE(release_candidate.INSTALLER_ASSETS["install.sh"].source.stat().st_mode)
         )
 
     (staged / "install.sh").write_bytes(b"#!/bin/sh\nexit 0\n")
     with pytest.raises(release_candidate.CandidateError, match="differs from reviewed source"):
-        release_candidate._validate_installer_assets(staged, "0.8.8")
+        release_candidate._validate_installer_assets(staged, "0.8.11")
 
 
 def test_windows_setup_custody_starts_at_086_and_survives_legacy_omission() -> None:
@@ -2011,6 +2020,120 @@ def test_candidate_verification_rejects_effective_baseline_snapshot_mutation(
         release_candidate.verify(root, VERSION, COMMIT)
 
 
+def test_effective_baseline_validation_aba_parses_and_hashes_captured_bytes(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "candidate"
+    root.mkdir()
+    policy = root / release_candidate.EFFECTIVE_UPGRADE_BASELINES_FILENAME
+    captured = (ROOT / "release/upgrade-baselines.json").read_bytes()
+    replacement = b"{}"
+    policy.write_bytes(captured)
+    read_bounded = release_candidate._read_bounded_regular_file
+    read_count = 0
+
+    def aba_read(path: Path, *, label: str, max_bytes: int) -> bytes:
+        nonlocal read_count
+        read_count += 1
+        if read_count == 2:
+            assert policy.read_bytes() == replacement
+            policy.write_bytes(captured)
+        payload = read_bounded(path, label=label, max_bytes=max_bytes)
+        if read_count == 1:
+            assert payload == captured
+            policy.write_bytes(replacement)
+        return payload
+
+    monkeypatch.setattr(release_candidate, "_read_bounded_regular_file", aba_read)
+
+    digest = release_candidate._validated_effective_upgrade_baselines(root, VERSION)
+
+    assert read_count == 2
+    assert digest == hashlib.sha256(captured).hexdigest()
+    assert policy.read_bytes() == captured
+
+
+def test_effective_baseline_validation_rejects_invalid_captured_payload_during_aba(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "candidate"
+    root.mkdir()
+    policy = root / release_candidate.EFFECTIVE_UPGRADE_BASELINES_FILENAME
+    captured = b"{}"
+    replacement = (ROOT / "release/upgrade-baselines.json").read_bytes()
+    policy.write_bytes(captured)
+    read_bounded = release_candidate._read_bounded_regular_file
+    parse_payload = release_candidate._parse_upgrade_baseline_policy_payload
+    read_count = 0
+
+    def aba_read(path: Path, *, label: str, max_bytes: int) -> bytes:
+        nonlocal read_count
+        read_count += 1
+        if read_count == 2:
+            assert policy.read_bytes() == replacement
+            policy.write_bytes(captured)
+        payload = read_bounded(path, label=label, max_bytes=max_bytes)
+        if read_count == 1:
+            assert payload == captured
+            policy.write_bytes(replacement)
+        return payload
+
+    def parse_and_restore(candidate_version: str, payload: bytes) -> tuple[list[str], dict[str, list[str]]]:
+        assert payload == captured
+        try:
+            return parse_payload(candidate_version, payload)
+        finally:
+            assert policy.read_bytes() == replacement
+            policy.write_bytes(captured)
+
+    monkeypatch.setattr(release_candidate, "_read_bounded_regular_file", aba_read)
+    monkeypatch.setattr(release_candidate, "_parse_upgrade_baseline_policy_payload", parse_and_restore)
+
+    with pytest.raises(
+        release_candidate.CandidateError,
+        match="tested upgrade baseline policy is invalid",
+    ):
+        release_candidate._validated_effective_upgrade_baselines(root, VERSION)
+
+    assert read_count == 1
+    assert policy.read_bytes() == captured
+
+
+def test_effective_baseline_validation_rejects_mutation_after_captured_read(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "candidate"
+    root.mkdir()
+    policy = root / release_candidate.EFFECTIVE_UPGRADE_BASELINES_FILENAME
+    captured = (ROOT / "release/upgrade-baselines.json").read_bytes()
+    mutated = captured + b"\n"
+    policy.write_bytes(captured)
+    read_bounded = release_candidate._read_bounded_regular_file
+    read_count = 0
+
+    def mutating_read(path: Path, *, label: str, max_bytes: int) -> bytes:
+        nonlocal read_count
+        read_count += 1
+        payload = read_bounded(path, label=label, max_bytes=max_bytes)
+        if read_count == 1:
+            policy.write_bytes(mutated)
+        return payload
+
+    monkeypatch.setattr(release_candidate, "_read_bounded_regular_file", mutating_read)
+
+    with pytest.raises(
+        release_candidate.CandidateError,
+        match="policy changed during validation",
+    ):
+        release_candidate._validated_effective_upgrade_baselines(root, VERSION)
+
+    assert read_count == 2
+    assert policy.read_bytes() == mutated
+
+
 def test_publication_can_omit_every_windows_specific_asset(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -2459,6 +2582,7 @@ def test_exact_reviewed_release_sources_have_cross_platform_lf_attributes() -> N
     reviewed = (
         "scripts/defenseclaw-rescue.sh",
         "scripts/defenseclaw-rescue.ps1",
+        "scripts/install-openshell-sandbox.sh",
         "scripts/install.sh",
         "scripts/install.ps1",
         "scripts/upgrade.sh",

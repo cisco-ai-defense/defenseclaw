@@ -236,28 +236,40 @@ type Config struct {
 
 // AIDiscoveryConfig controls continuous, sidecar-native visibility for
 // supported connectors and broader "shadow AI" usage signals. Outbound
-// telemetry is sanitized by the inventory service; this config only controls
-// which local metadata sources are inspected.
+// telemetry is sanitized by the inventory service. Local inspection is the
+// default; LookupModelProvenanceOnline is a separate, explicit opt-in that
+// sends recovered public model repository IDs to the fixed Hugging Face API.
 type AIDiscoveryConfig struct {
-	Enabled                   bool     `mapstructure:"enabled"                   yaml:"enabled"`
-	Mode                      string   `mapstructure:"mode"                      yaml:"mode"` // passive | enhanced
-	ScanIntervalMin           int      `mapstructure:"scan_interval_min"         yaml:"scan_interval_min"`
-	ProcessIntervalSec        int      `mapstructure:"process_interval_s"        yaml:"process_interval_s"`
-	ScanRoots                 []string `mapstructure:"scan_roots"                yaml:"scan_roots,omitempty"`
-	SignaturePacks            []string `mapstructure:"signature_packs"           yaml:"signature_packs,omitempty"`
-	AllowWorkspaceSignatures  bool     `mapstructure:"allow_workspace_signatures" yaml:"allow_workspace_signatures"`
-	DisabledSignatureIDs      []string `mapstructure:"disabled_signature_ids"    yaml:"disabled_signature_ids,omitempty"`
-	IncludeShellHistory       bool     `mapstructure:"include_shell_history"     yaml:"include_shell_history"`
-	IncludePackageManifests   bool     `mapstructure:"include_package_manifests" yaml:"include_package_manifests"`
-	IncludeEnvVarNames        bool     `mapstructure:"include_env_var_names"     yaml:"include_env_var_names"`
-	IncludeNetworkDomains     bool     `mapstructure:"include_network_domains"   yaml:"include_network_domains"`
-	MaxFilesPerScan           int      `mapstructure:"max_files_per_scan"        yaml:"max_files_per_scan"`
-	MaxFileBytes              int      `mapstructure:"max_file_bytes"            yaml:"max_file_bytes"`
-	EmitOTel                  bool     `mapstructure:"emit_otel"                 yaml:"emit_otel"`
-	StoreRawLocalPaths        bool     `mapstructure:"store_raw_local_paths"     yaml:"store_raw_local_paths"`
-	ConfidencePolicyPath      string   `mapstructure:"confidence_policy_path"    yaml:"confidence_policy_path,omitempty"`
-	RequireTrustedBinaryPaths bool     `mapstructure:"require_trusted_binary_paths" yaml:"require_trusted_binary_paths"`
-	TrustedBinaryPrefixes     []string `mapstructure:"trusted_binary_prefixes" yaml:"trusted_binary_prefixes,omitempty"`
+	Enabled            bool     `mapstructure:"enabled"                   yaml:"enabled"`
+	Mode               string   `mapstructure:"mode"                      yaml:"mode"` // passive | enhanced
+	ScanIntervalMin    int      `mapstructure:"scan_interval_min"         yaml:"scan_interval_min"`
+	ProcessIntervalSec int      `mapstructure:"process_interval_s"        yaml:"process_interval_s"`
+	ScanRoots          []string `mapstructure:"scan_roots"                yaml:"scan_roots,omitempty"`
+	// HomeDirs is the list of user home directories the detectors that
+	// walk per-user dotfiles (editor extensions, MCP configs, shell
+	// history, installed applications) should inspect. Empty means
+	// "the daemon's own $HOME only" — which under launchd/root resolves
+	// to /var/root and misses every actual local user. In
+	// managed_enterprise the packaging layer's hook-enumerator populates
+	// this list from the same eligible-users enumeration that renders
+	// targets.yaml, so per-user detectors and per-user hook wiring stay
+	// in lockstep.
+	HomeDirs                    []string `mapstructure:"home_dirs"                 yaml:"home_dirs,omitempty"`
+	SignaturePacks              []string `mapstructure:"signature_packs"           yaml:"signature_packs,omitempty"`
+	AllowWorkspaceSignatures    bool     `mapstructure:"allow_workspace_signatures" yaml:"allow_workspace_signatures"`
+	DisabledSignatureIDs        []string `mapstructure:"disabled_signature_ids"    yaml:"disabled_signature_ids,omitempty"`
+	IncludeShellHistory         bool     `mapstructure:"include_shell_history"     yaml:"include_shell_history"`
+	IncludePackageManifests     bool     `mapstructure:"include_package_manifests" yaml:"include_package_manifests"`
+	IncludeEnvVarNames          bool     `mapstructure:"include_env_var_names"     yaml:"include_env_var_names"`
+	IncludeNetworkDomains       bool     `mapstructure:"include_network_domains"   yaml:"include_network_domains"`
+	LookupModelProvenanceOnline bool     `mapstructure:"lookup_model_provenance_online" yaml:"lookup_model_provenance_online"`
+	MaxFilesPerScan             int      `mapstructure:"max_files_per_scan"        yaml:"max_files_per_scan"`
+	MaxFileBytes                int      `mapstructure:"max_file_bytes"            yaml:"max_file_bytes"`
+	EmitOTel                    bool     `mapstructure:"emit_otel"                 yaml:"emit_otel"`
+	StoreRawLocalPaths          bool     `mapstructure:"store_raw_local_paths"     yaml:"store_raw_local_paths"`
+	ConfidencePolicyPath        string   `mapstructure:"confidence_policy_path"    yaml:"confidence_policy_path,omitempty"`
+	RequireTrustedBinaryPaths   bool     `mapstructure:"require_trusted_binary_paths" yaml:"require_trusted_binary_paths"`
+	TrustedBinaryPrefixes       []string `mapstructure:"trusted_binary_prefixes" yaml:"trusted_binary_prefixes,omitempty"`
 }
 
 // LLMConfig is the unified LLM configuration block used at the top level
@@ -3562,6 +3574,7 @@ func setDefaults(dataDir string, legacyObservability bool) {
 	viper.SetDefault("ai_discovery.scan_interval_min", 5)
 	viper.SetDefault("ai_discovery.process_interval_s", 60)
 	viper.SetDefault("ai_discovery.scan_roots", []string{"~"})
+	viper.SetDefault("ai_discovery.home_dirs", []string{})
 	viper.SetDefault("ai_discovery.signature_packs", []string{})
 	viper.SetDefault("ai_discovery.allow_workspace_signatures", false)
 	viper.SetDefault("ai_discovery.disabled_signature_ids", []string{})
@@ -3569,6 +3582,7 @@ func setDefaults(dataDir string, legacyObservability bool) {
 	viper.SetDefault("ai_discovery.include_package_manifests", true)
 	viper.SetDefault("ai_discovery.include_env_var_names", true)
 	viper.SetDefault("ai_discovery.include_network_domains", true)
+	viper.SetDefault("ai_discovery.lookup_model_provenance_online", false)
 	viper.SetDefault("ai_discovery.max_files_per_scan", 1000)
 	viper.SetDefault("ai_discovery.max_file_bytes", 512*1024)
 	if legacyObservability {

@@ -32,6 +32,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -151,6 +152,29 @@ Run without arguments to start the sidecar daemon.`,
 		return runSidecar(cmd, args)
 	},
 	SilenceUsage: true,
+}
+
+// rootPersistentPreRunNoAuditE mirrors rootPersistentPreRunE minus the
+// audit.db open. Used by co-resident subcommands that never read or write the
+// audit store — most importantly the hook-guardian's `enterprise hooks watch`,
+// which runs as a long-lived LaunchDaemon beside the main gateway. SQLite
+// cannot accept two RW owners on the same file, so opening audit.db from a
+// co-resident daemon consistently fails with SQLITE_BUSY (5); and the same
+// unlink-on-close hazard flagged in loadGatewayCommandConfigOnly's comment
+// applies to long-lived hooks daemons too. The enterprise hooks pathway does
+// not read auditStore / auditLog anywhere, so skipping the open is dead-work
+// removal, not a feature drop.
+func rootPersistentPreRunNoAuditE(cmd *cobra.Command, _ []string) error {
+	if versionJSON {
+		return nil
+	}
+	if err := daemon.RegisterCurrentProcess(); err != nil {
+		return err
+	}
+	if err := loadGatewayCommandConfigOnly(); err != nil {
+		return err
+	}
+	return nil
 }
 
 // loadGatewayCommandConfigOnly performs the strict v8 configuration phase
@@ -298,7 +322,7 @@ func ExecuteContext(ctx context.Context) int {
 // token_env/bearer_env references and non-observability application secrets
 // available when the sidecar runs without an interactive shell.
 func loadDotEnvIntoOS(path string) {
-	data, err := os.ReadFile(path)
+	data, err := safefile.ReadRegularFileBounded(path, safefile.MaxDotEnvBytes)
 	if err != nil {
 		return
 	}
@@ -313,6 +337,9 @@ func loadDotEnvIntoOS(path string) {
 		}
 		k = strings.TrimSpace(k)
 		v = strings.TrimSpace(v)
+		if !dotEnvKeyIsValid(k) || strings.IndexByte(v, 0) >= 0 || dotEnvKeyIsProcessControl(k) {
+			continue
+		}
 		if len(v) >= 2 && ((v[0] == '"' && v[len(v)-1] == '"') || (v[0] == '\'' && v[len(v)-1] == '\'')) {
 			v = v[1 : len(v)-1]
 		}
@@ -320,4 +347,54 @@ func loadDotEnvIntoOS(path string) {
 			os.Setenv(k, v)
 		}
 	}
+}
+
+func dotEnvKeyIsProcessControl(key string) bool {
+	normalized := strings.ToUpper(strings.TrimSpace(key))
+	switch normalized {
+	case "ALL_PROXY", "BASH_ENV", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "COMSPEC",
+		"CURL_CA_BUNDLE",
+		"DEFENSECLAW_CODEX_LOOPBACK_TRUST",
+		"DEFENSECLAW_CONFIG", "DEFENSECLAW_DATA_DIR", "DEFENSECLAW_GATEWAY_BIN",
+		"DEFENSECLAW_HOME", "DEFENSECLAW_DEV", "DEFENSECLAW_DISABLE_AWS_HTTP1_SHIM",
+		"DEFENSE" + "CLAW_DISABLE_REDACTION", "DEFENSECLAW_DUMP_RAW_SECRETS",
+		"DEFENSECLAW_FAIL_MODE", "DEFENSECLAW_FORCE_AWS_HTTP1_SHIM",
+		"DEFENSECLAW_JSONL_DISABLE", "DEFENSECLAW_OPENSHELL_ALLOW_UNPINNED",
+		"DEFENSECLAW_OTEL_TLS_INSECURE", "DEFENSECLAW_POLICY_VALIDATE_ALLOW_NO_OPA",
+		"DEFENSECLAW_PREPAIR_TRUST_DEVICE_KEY", "DEFENSECLAW_REVEAL_PII",
+		"DEFENSECLAW_SANDBOX_FORCE_REGEX_CLEANUP", "DEFENSECLAW_STRICT_AVAILABILITY",
+		"DEFENSECLAW_TEST", "DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN",
+		"DEFENSECLAW_TRUSTED_PROXY_CIDRS", "DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES",
+		"DEFENSECLAW_UPGRADE_ALLOW_UNVERIFIED", "DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST",
+		daemon.EnvDaemon,
+		"ENV", "GIT_SSL_NO_VERIFY", "HOME", "HTTP_PROXY", "HTTPS_PROXY",
+		"LOCPATH", "NODE_EXTRA_CA_CERTS", "NODE_OPTIONS", "NO_PROXY", "PATH", "PATHEXT",
+		"PYTHONHOME", "PYTHONPATH",
+		"PYTHONSTARTUP", "SYSTEMROOT", "TEMP", "TMP", "TMPDIR", "USERPROFILE",
+		"REQUESTS_CA_BUNDLE", "SSL_CERT_DIR", "SSL_CERT_FILE", "WINDIR",
+		"XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
+		"XDG_RUNTIME_DIR", "XDG_STATE_HOME":
+		return true
+	default:
+		return strings.HasPrefix(normalized, "LD_") ||
+			strings.HasPrefix(normalized, "DYLD_") ||
+			strings.HasPrefix(normalized, "DEFENSE"+"CLAW_ALLOW_")
+	}
+}
+
+func dotEnvKeyIsValid(key string) bool {
+	if key == "" {
+		return false
+	}
+	for index := 0; index < len(key); index++ {
+		character := key[index]
+		if character >= 'a' && character <= 'z' ||
+			character >= 'A' && character <= 'Z' ||
+			character == '_' ||
+			index > 0 && character >= '0' && character <= '9' {
+			continue
+		}
+		return false
+	}
+	return true
 }

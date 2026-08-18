@@ -35,6 +35,38 @@ func atomicFilePublish(source, destination string, stagedInfo os.FileInfo, perm 
 	if perm.Perm()&0o077 != 0 {
 		return safefile.ReplaceFile(source, destination)
 	}
+	return atomicFilePublishPrivateBound(
+		source,
+		destination,
+		stagedInfo,
+		validateAtomicTransformBoundFilePrivatePlatform,
+		false,
+	)
+}
+
+func atomicFilePublishHookAPIToken(
+	source, destination string,
+	stagedInfo os.FileInfo,
+	perm os.FileMode,
+) error {
+	if perm.Perm()&0o077 != 0 {
+		return fmt.Errorf("hook API token publication requires a private file mode")
+	}
+	return atomicFilePublishPrivateBound(
+		source,
+		destination,
+		stagedInfo,
+		validateHookAPITokenBoundFileCustodyPlatform,
+		true,
+	)
+}
+
+func atomicFilePublishPrivateBound(
+	source, destination string,
+	stagedInfo os.FileInfo,
+	validate func(*os.File) error,
+	preserveExactHookProtection bool,
+) error {
 	if !atomicTransformPathsEqualPlatform(filepath.Dir(source), filepath.Dir(destination)) {
 		return fmt.Errorf("private atomic publication crosses directories")
 	}
@@ -56,8 +88,15 @@ func atomicFilePublish(source, destination string, stagedInfo os.FileInfo, perm 
 	if !os.SameFile(stagedInfo, openedInfo) {
 		return fmt.Errorf("staged private file changed before publication")
 	}
-	if err := validateAtomicTransformBoundFilePrivatePlatform(stage); err != nil {
+	if err := validate(stage); err != nil {
 		return fmt.Errorf("validate bound staged file: %w", err)
+	}
+	stageProtection := hookAPITokenPublishProtection{}
+	if preserveExactHookProtection {
+		stageProtection, _, err = captureHookAPITokenPublishProtectionPlatform(stage, openedInfo)
+		if err != nil {
+			return fmt.Errorf("capture bound staged hook-token protection: %w", err)
+		}
 	}
 	if atomicFileBeforePrivatePublish != nil {
 		if err := atomicFileBeforePrivatePublish(destination); err != nil {
@@ -72,12 +111,38 @@ func atomicFilePublish(source, destination string, stagedInfo os.FileInfo, perm 
 	if err := renameAtomicTransformBoundFilePlatform(parent, stage, filepath.Base(destination), true); err != nil {
 		return err
 	}
+	if preserveExactHookProtection {
+		afterRename, _, protectionErr := captureHookAPITokenPublishProtectionPlatform(stage, openedInfo)
+		if protectionErr != nil {
+			return fmt.Errorf("capture renamed hook-token protection: %w", protectionErr)
+		}
+		if !hookAPITokenPublishProtectionsEqual(stageProtection, afterRename) {
+			// The held rename handle excludes metadata writers for this freshly
+			// staged inode. If NTFS inheritance bookkeeping normalized its DACL,
+			// restore the authenticated stage descriptor before releasing it.
+			if err := applyHookAPITokenPublishProtectionPlatform(stage, stageProtection); err != nil {
+				return fmt.Errorf("restore renamed hook-token protection: %w", err)
+			}
+			afterRename, _, protectionErr = captureHookAPITokenPublishProtectionPlatform(stage, openedInfo)
+			if protectionErr != nil {
+				return fmt.Errorf("recapture renamed hook-token protection: %w", protectionErr)
+			}
+			if !hookAPITokenPublishProtectionsEqual(stageProtection, afterRename) {
+				return fmt.Errorf("renamed hook-token protection does not match its staged inode")
+			}
+		}
+	}
 	published, err := openAtomicTransformBoundFilePlatform(parent, filepath.Base(destination), false)
 	if err != nil {
 		return fmt.Errorf("open published private file: %w", err)
 	}
 	publishedInfo, statErr := published.Stat()
-	privateErr := validateAtomicTransformBoundFilePrivatePlatform(published)
+	privateErr := validate(published)
+	publishedProtection := hookAPITokenPublishProtection{}
+	var protectionErr error
+	if statErr == nil && privateErr == nil && preserveExactHookProtection {
+		publishedProtection, _, protectionErr = captureHookAPITokenPublishProtectionPlatform(published, publishedInfo)
+	}
 	closeErr := published.Close()
 	if statErr != nil {
 		return fmt.Errorf("stat published private file: %w", statErr)
@@ -87,6 +152,14 @@ func atomicFilePublish(source, destination string, stagedInfo os.FileInfo, perm 
 	}
 	if privateErr != nil {
 		return fmt.Errorf("validate published private file: %w", privateErr)
+	}
+	if protectionErr != nil {
+		return fmt.Errorf("capture published hook-token protection: %w", protectionErr)
+	}
+	if preserveExactHookProtection {
+		if !hookAPITokenPublishProtectionsEqual(stageProtection, publishedProtection) {
+			return fmt.Errorf("published hook-token protection does not match its staged inode")
+		}
 	}
 	if closeErr != nil {
 		return fmt.Errorf("close published private file: %w", closeErr)

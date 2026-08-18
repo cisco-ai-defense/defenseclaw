@@ -42,6 +42,8 @@ from defenseclaw.config import (
 from defenseclaw.inventory.claw_inventory import (
     ALL_CATEGORIES,
     _admission_verdict,
+    _amp_custom_agent_definitions,
+    _amp_registered_agent_modes,
     _build_actions_map_for_type,
     _build_scan_map_for_type,
     _build_summary,
@@ -49,6 +51,7 @@ from defenseclaw.inventory.claw_inventory import (
     _fetch_all,
     _format_scan,
     _format_verdict,
+    _mask_ts_for_amp_agent_discovery,
     _parse_mcp,
     _parse_plugins,
     _parse_skills,
@@ -65,6 +68,65 @@ from defenseclaw.inventory.claw_inventory import (
 from defenseclaw.models import ActionEntry
 
 from tests.helpers import seed_cached_plugin
+
+
+class TestAmpStaticAgentModeParser(unittest.TestCase):
+    def test_register_agent_mode_accepts_literal_24_character_boundary(self) -> None:
+        key = "abcdefghijklmnopqrstuvwx"
+        label = "ABCDEFGHIJKLMNOPQRSTUVWX"
+        source = (
+            "amp.registerAgentMode({\n"
+            "  metadata: { key: 'nested-mode', label: 'Nested Mode' },\n"
+            f"  label: '{label}',\n"
+            f"  key: '{key}',\n"
+            "})\n"
+        )
+        masked, _comments = _mask_ts_for_amp_agent_discovery(source)
+
+        self.assertEqual(
+            _amp_registered_agent_modes(source, masked),
+            [(key, label)],
+        )
+
+    def test_register_agent_mode_ignores_noncode_dynamic_and_overlong_examples(self) -> None:
+        source = (
+            "// amp.registerAgentMode({ key: 'comment', label: 'Comment' })\n"
+            "/* amp.registerAgentMode({ key: 'block', label: 'Block' }) */\n"
+            "const docs = \"amp.registerAgentMode({ key: 'string', label: 'String' })\"\n"
+            "const template = `amp.registerAgentMode({ key: 'template', label: 'Template' })`\n"
+            "amp.registerAgentMode({ key: dynamicKey, label: 'Dynamic Key' })\n"
+            "amp.registerAgentMode({ key: 'dynamic-label', label: makeLabel() })\n"
+            "amp.registerAgentMode({ key: 'abcdefghijklmnopqrstuvwxy', label: 'Too Long' })\n"
+            "amp.registerAgentMode({ key: 'too-long-label-key', label: 'ABCDEFGHIJKLMNOPQRSTUVWXY' })\n"
+        )
+        masked, _comments = _mask_ts_for_amp_agent_discovery(source)
+
+        self.assertEqual(_amp_registered_agent_modes(source, masked), [])
+
+    def test_create_agent_requires_spawn_evidence_for_subagent_classification(self) -> None:
+        source = (
+            "const modeAgent = amp.createAgent({ name: 'architect', model: 'openai/test', "
+            "instructions: 'mode' })\n"
+            "const reviewer = amp.experimental.createAgent({ name: 'reviewer', model: 'openai/test', "
+            "instructions: 'review' })\n"
+            "const background = amp.createAgent({ name: 'background', model: 'openai/test', "
+            "instructions: 'background' })\n"
+            "const docs = \"reviewer.run('not executable')\"\n"
+            "background.run('standalone command', { show: true })\n"
+            "reviewer.run(request, { parentThreadID: ctx.thread.id })\n"
+            "amp.createAgent({ name: 'unbound', model: 'openai/test', instructions: 'plain' })\n"
+        )
+        masked, _comments = _mask_ts_for_amp_agent_discovery(source)
+
+        self.assertEqual(
+            _amp_custom_agent_definitions(source, masked),
+            [
+                ("architect", "custom-agent"),
+                ("reviewer", "subagent"),
+                ("background", "custom-agent"),
+                ("unbound", "custom-agent"),
+            ],
+        )
 
 # ---------------------------------------------------------------------------
 # Fixtures — canonical JSON payloads returned by ``openclaw … --json``
@@ -2206,6 +2268,110 @@ class TestBuildAibomFromFilesystem(unittest.TestCase):
         self.assertEqual(len(inv["plugins"]), 1)
         self.assertEqual(inv["plugins"][0]["id"], "ext1")
         self.assertEqual(inv["plugins"][0]["manifest"], ".codex-plugin/plugin.json")
+
+    def test_amp_catalogs_direct_plugins_agent_modes_and_subagents_statically(self):
+        """Amp plugin source is inventoried without importing or executing TS."""
+        cfg = _make_cfg_for_connector(self.tmp, "amp")
+        plugin_root = os.path.join(self.tmp, ".config", "amp", "plugins")
+        os.makedirs(plugin_root, exist_ok=True)
+        mode_path = os.path.join(plugin_root, "architect-mode.ts")
+        # Force CRLF on every platform: Amp plugins commonly originate on
+        # native Windows, and the static annotation parser must not lose
+        # metadata at the carriage return before a multiline end anchor.
+        with open(mode_path, "w", encoding="utf-8", newline="\r\n") as handle:
+            handle.write(
+                "// @amp-agent-mode {\"key\":\"architect\",\"label\":\"Architect\"}\n"
+                "// @amp-agent-mode {not-json}\n"
+                "const fakeMode = `\n"
+                "// @amp-agent-mode {\"key\":\"string-mode\",\"label\":\"String Mode\"}\n"
+                "`\n"
+                "// amp.registerAgentMode({ key: 'comment-mode', label: 'Comment' })\n"
+                "/* amp.registerAgentMode({ key: 'block-mode', label: 'Block' }) */\n"
+                "const modeDocs = \"amp.registerAgentMode({ key: 'string-register-mode', "
+                "label: 'String' })\"\n"
+                "const modeTemplate = `amp.registerAgentMode({ key: 'template-mode', "
+                "label: 'Template' })`\n"
+                "// amp.createAgent({ name: 'comment-agent' })\n"
+                "/* amp.createAgent({ name: 'block-comment-agent' }) */\n"
+                "const docs = \"amp.createAgent({ name: 'string-agent' })\"\n"
+                "const template = `amp.createAgent({ name: 'template-agent' })`\n"
+                "throw new Error('inventory must never execute plugin code')\n"
+                "export default function register(amp) {\n"
+                "  amp.registerAgentMode({\n"
+                "    metadata: { key: 'nested-mode', label: 'Nested' },\n"
+                "    key: 'abcdefghijklmnopqrstuvwx',\n"
+                "    label: 'ABCDEFGHIJKLMNOPQRSTUVWX',\n"
+                "  })\n"
+                "  amp.registerAgentMode({\n"
+                "    key: 'abcdefghijklmnopqrstuvwxy',\n"
+                "    label: 'over-limit',\n"
+                "  })\n"
+                "  amp.registerAgentMode({\n"
+                "    key: 'over-label',\n"
+                "    label: 'ABCDEFGHIJKLMNOPQRSTUVWXY',\n"
+                "  })\n"
+                "  amp.registerAgentMode({ key: dynamicKey, label: 'Dynamic Key' })\n"
+                "  amp.registerAgentMode({ key: 'dynamic-label', label: makeLabel() })\n"
+                "  const architectAgent = amp.createAgent({\n"
+                "    name: 'architect',\n"
+                "    instructions: 'Design a safe implementation',\n"
+                "  })\n"
+                "  const reviewer = amp.experimental.createAgent({\n"
+                "    name: \"focused-reviewer\",\n"
+                "    instructions: 'Review only the requested change',\n"
+                "  })\n"
+                "  amp.createAgent({\n"
+                "    metadata: { name: 'nested-object-agent' },\n"
+                "    // name: 'comment-property-agent',\n"
+                "    name: 'literal-agent',\n"
+                "  })\n"
+                "  reviewer.run('review', { parentThreadID: ctx.thread.id })\n"
+                "}\n"
+            )
+        defenseclaw_path = os.path.join(plugin_root, "defenseclaw.ts")
+        with open(defenseclaw_path, "w", encoding="utf-8") as handle:
+            handle.write("export default function defenseclaw() {}\n")
+
+        with self._patch_skill_dirs([]), \
+             self._patch_plugin_dirs([plugin_root]), \
+             self._patch_mcp([]), \
+             patch("defenseclaw.inventory.claw_inventory.subprocess.run") as mock_sub:
+            inv = build_claw_aibom(
+                cfg,
+                live=True,
+                categories={"plugins", "agents"},
+            )
+            mock_sub.assert_not_called()
+
+        plugins = {row["id"]: row for row in inv["plugins"]}
+        self.assertEqual(set(plugins), {"architect-mode", "defenseclaw"})
+        self.assertEqual(plugins["architect-mode"]["path"], mode_path)
+        self.assertEqual(plugins["architect-mode"]["manifest"], "architect-mode.ts")
+        self.assertEqual(plugins["architect-mode"]["status"], "loaded")
+        self.assertEqual(plugins["defenseclaw"]["path"], defenseclaw_path)
+
+        agents = {row["id"]: row for row in inv["agents"]}
+        self.assertEqual(
+            set(agents),
+            {
+                "architect",
+                "abcdefghijklmnopqrstuvwx",
+                "focused-reviewer",
+                "literal-agent",
+            },
+        )
+        self.assertEqual(agents["architect"]["name"], "Architect")
+        self.assertEqual(agents["architect"]["kind"], "agent-mode")
+        self.assertEqual(agents["architect"]["mode_key"], "architect")
+        self.assertEqual(
+            agents["abcdefghijklmnopqrstuvwx"]["name"],
+            "ABCDEFGHIJKLMNOPQRSTUVWX",
+        )
+        self.assertEqual(agents["focused-reviewer"]["kind"], "subagent")
+        self.assertEqual(agents["focused-reviewer"]["plugin"], "architect-mode")
+        self.assertEqual(agents["literal-agent"]["kind"], "custom-agent")
+        self.assertTrue(all(row["source"] == mode_path for row in agents.values()))
+        self.assertNotIn("agents", {item["category"] for item in inv["limitations"]})
 
     def test_codex_inventory_expands_system_skill_container(self):
         cfg = _make_cfg_for_connector(self.tmp, "codex")

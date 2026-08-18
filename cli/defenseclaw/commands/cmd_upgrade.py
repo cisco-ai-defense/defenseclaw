@@ -450,6 +450,8 @@ def upgrade(
     before the gateway is stopped, so a failed download never disrupts a
     running gateway.
     """
+    _reject_unsupported_intel_macos()
+
     from defenseclaw import __version__ as controller_version
 
     ux.banner("DefenseClaw Upgrade")
@@ -1928,6 +1930,7 @@ def _maybe_delegate_public_upgrade(argv: list[str]) -> None:
 
     if not argv or argv[0] != "upgrade" or any(item in {"-h", "--help"} for item in argv[1:]):
         return
+    _reject_unsupported_intel_macos()
     if os.environ.get(_UPGRADE_HANDOFF_ENV) == "1" or os.environ.get(_STAGED_UPGRADE_ENV) == "1":
         return
     if platform.system().lower() == "windows":
@@ -2716,10 +2719,48 @@ def _reject_test_release_base(message: str) -> NoReturn:
     raise SystemExit(1)
 
 
+def _reject_unsupported_intel_macos(
+    *,
+    system: str | None = None,
+    machine: str | None = None,
+) -> None:
+    """Refuse unsupported Intel macOS before upgrade I/O or state access."""
+    detected_system = (system if system is not None else platform.system()).lower()
+    detected_machine = (machine if machine is not None else platform.machine()).lower()
+    detected_machine = _effective_platform_machine(detected_system, detected_machine)
+    if detected_system == "darwin" and detected_machine not in ("aarch64", "arm64"):
+        ux.err(
+            "Intel macOS is unsupported; DefenseClaw for macOS requires Apple Silicon (arm64).",
+            indent="  ",
+        )
+        raise SystemExit(1)
+
+
+def _effective_platform_machine(system: str, machine: str) -> str:
+    """Return Apple Silicon hardware architecture even under Rosetta."""
+    if system != "darwin" or machine not in ("amd64", "x86_64"):
+        return machine
+    try:
+        translated = subprocess.run(
+            ["/usr/sbin/sysctl", "-in", "sysctl.proc_translated"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return machine
+    if translated.returncode == 0 and translated.stdout.strip() == "1":
+        return "arm64"
+    return machine
+
+
 def _detect_platform() -> tuple[str, str]:
     """Return (os_name, arch) matching goreleaser naming convention."""
     system = platform.system().lower()
     machine = platform.machine().lower()
+    machine = _effective_platform_machine(system, machine)
+    _reject_unsupported_intel_macos(system=system, machine=machine)
 
     if machine in ("x86_64", "amd64"):
         arch = "amd64"
@@ -2796,7 +2837,7 @@ def _native_windows_install_state(
         or state.get("install_scope") != "user"
         or not isinstance(state.get("version"), str)
         or _CANONICAL_VERSION_RE.fullmatch(state["version"]) is None
-        or state.get("connector") not in {"none", "codex", "claudecode"}
+        or state.get("connector") not in {"none", "codex", "claudecode", "amp"}
         or state.get("mode") not in {"observe", "action"}
     ):
         ux.err("Native installer state is not a supported native Windows install.", indent="  ")
@@ -3824,7 +3865,7 @@ def _handoff_windows_setup_upgrade(
     """Launch setup from its trusted cache, then return so this runtime can exit."""
     _windows_installer_policy(manifest)
     connector = state.get("connector")
-    if connector not in {"codex", "claudecode", "none"}:
+    if connector not in {"codex", "claudecode", "amp", "none"}:
         connector = "none"
     mode = state.get("mode")
     if mode not in {"observe", "action"}:

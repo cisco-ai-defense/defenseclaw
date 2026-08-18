@@ -24,13 +24,16 @@ import (
 	"io/fs"
 	"math"
 	"net/url"
+	"os"
 	"path"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
@@ -116,7 +119,7 @@ func EmitEndpointInventory(
 	reg *connector.Registry,
 	emitter sidecarRuntimeEmitter,
 ) error {
-	return emitEndpointInventory(ctx, cfg, reg, emitter, false)
+	return emitEndpointInventory(ctx, cfg, reg, emitter, false, nil)
 }
 
 func emitEndpointInventory(
@@ -125,6 +128,7 @@ func emitEndpointInventory(
 	reg *connector.Registry,
 	emitter sidecarRuntimeEmitter,
 	connectorDiscoveryPartial bool,
+	discoveryReport *inventory.AIDiscoveryReport,
 ) error {
 	if !ManagedEnterpriseActive() || ctx == nil || emitter == nil {
 		return nil
@@ -146,15 +150,315 @@ func emitEndpointInventory(
 	); err != nil && firstErr == nil {
 		firstErr = err
 	}
+
+	// Per-entry inventories derived from the latest AI-Discovery scan. Each
+	// enumerated skill / plugin / MCP server ships as its own
+	// ai_component.observed record with defenseclaw.agent.discovery.connector
+	// pointing at the parent connector (e.g. codex, claudecode) so downstream
+	// can correlate skills / plugins / MCP servers with their owning agent.
+	// managed_enterprise gates the whole function above, so this whole block
+	// is inert in unmanaged mode.
+	if discoveryReport != nil {
+		mcpEntries := discoveredMCPEntriesFromReport(*discoveryReport)
+		if err := emitEndpointInventorySnapshot(
+			ctx, emitter, "endpoint_discovered_mcp_inventory", mcpEntries, false,
+			config.ObservabilityV8ManagedMCPInventoryAction,
+		); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		skillEntries := discoveredEntriesFromReport(*discoveryReport, inventory.SignalSkill, "skill")
+		if err := emitEndpointInventorySnapshot(
+			ctx, emitter, "endpoint_skill_inventory", skillEntries, false,
+			config.ObservabilityV8ManagedSkillInventoryAction,
+		); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		pluginEntries := discoveredEntriesFromReport(*discoveryReport, inventory.SignalPlugin, "plugin")
+		if err := emitEndpointInventorySnapshot(
+			ctx, emitter, "endpoint_plugin_inventory", pluginEntries, false,
+			config.ObservabilityV8ManagedPluginInventoryAction,
+		); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	// Per-connector MCP fanout: enumerate every configured connector's MCP
+	// server list directly from its native config, tagging each server with
+	// defenseclaw.agent.discovery.connector so downstream can correlate MCP
+	// entries with the parent agent (codex, claudecode, cursor, ...). This is
+	// deterministic and does not depend on the AI-Discovery scan surfacing
+	// mcp_server evidence rows. When cfg.ActiveConnectors() is empty (managed
+	// installs that don't run `defenseclaw setup` populate no explicit
+	// roster), fall back to the built-in connector registry so every known
+	// connector still gets a scan.
+	if perConnectorMCP := perConnectorMCPEntries(cfg, reg); len(perConnectorMCP) > 0 {
+		if err := emitEndpointInventorySnapshot(
+			ctx, emitter, "endpoint_per_connector_mcp_inventory", perConnectorMCP, false,
+			config.ObservabilityV8ManagedMCPInventoryAction,
+		); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
 	return firstErr
+}
+
+// perConnectorMCPEntries enumerates one endpointInventoryComponent per
+// (home, connector, MCP server) triple by reading each configured connector's
+// native MCP config directly from known filesystem paths under each user home.
+// The parent connector slug is carried in agentConnector so the downstream
+// ai_component.observed record ships with defenseclaw.agent.discovery.connector
+// set. When cfg.ActiveConnectors() is empty the fallback set is derived from
+// reg.Available() so managed installs (which don't populate
+// Guardrail.Connectors) still get a per-connector scan.
+//
+// The connector-native readers exposed on *Config (ReadMCPServersForConnector)
+// use os.UserHomeDir() which under launchd/root resolves to /var/root and
+// misses every real user. To avoid mutating $HOME in a live daemon we call the
+// exported per-file readers directly with paths constructed under each home in
+// cfg.AIDiscovery.HomeDirs (populated by the installer's eligible-users
+// enumeration).
+func perConnectorMCPEntries(cfg *config.Config, reg *connector.Registry) []endpointInventoryComponent {
+	if cfg == nil {
+		return nil
+	}
+	// Union of ActiveConnectors() and reg.Available() so every registered
+	// connector is scanned. ActiveConnectors() alone is often narrower than
+	// what's actually installed on disk (managed installs typically pin a
+	// single connector via guardrail.connector even though the registry knows
+	// about codex, cursor, claudecode, etc.). Deduplicate by lowercase slug.
+	seenConnector := make(map[string]struct{})
+	var connectors []string
+	for _, name := range cfg.ActiveConnectors() {
+		key := strings.ToLower(strings.TrimSpace(name))
+		if key == "" {
+			continue
+		}
+		if _, ok := seenConnector[key]; ok {
+			continue
+		}
+		seenConnector[key] = struct{}{}
+		connectors = append(connectors, name)
+	}
+	if reg != nil {
+		for _, info := range reg.Available() {
+			key := strings.ToLower(strings.TrimSpace(info.Name))
+			if key == "" {
+				continue
+			}
+			if _, ok := seenConnector[key]; ok {
+				continue
+			}
+			seenConnector[key] = struct{}{}
+			connectors = append(connectors, info.Name)
+		}
+	}
+	if len(connectors) == 0 {
+		return nil
+	}
+	// homes = daemon's own HOME (via ReadMCPServersForConnector) plus every
+	// configured user home (via direct-path readers). Empty homes list falls
+	// back to the single ReadMCPServersForConnector path.
+	homes := cfg.AIDiscovery.HomeDirs
+	seenComponent := make(map[string]struct{})
+	components := make([]endpointInventoryComponent, 0, len(connectors)*(len(homes)+1))
+	appendServers := func(connectorName, homeScope string, servers []config.MCPServerEntry) {
+		slug := inventoryStableToken(connectorName, 128)
+		for _, server := range servers {
+			command := inventorySafeBasename(server.Command)
+			host := mcpURLHost(server.URL)
+			name := inventorySafeItemName(server.Name, 256)
+			if name == "" {
+				continue
+			}
+			product := inventoryStableIdentifier(name)
+			if product == "" {
+				product = command
+			}
+			if product == "" {
+				product = host
+			}
+			// Identity + dedup key both carry the home scope so two
+			// users' same-named MCP servers (e.g. `codex/webex` in
+			// each user's ~/.codex/config.toml) get distinct
+			// component ids AND both survive the seenComponent
+			// dedup. Empty homeScope (Pass 1 — daemon's own HOME)
+			// keeps the historical shape.
+			identity := connectorName + "/" + homeScope + "/" + server.Name
+			if _, seen := seenComponent[identity]; seen {
+				continue
+			}
+			seenComponent[identity] = struct{}{}
+			disabled := server.Disabled
+			installed := true
+			// Hyphen (not underscore) in the id kind to satisfy the
+			// defenseclaw.ai.component.id pattern.
+			components = append(components, endpointInventoryComponent{
+				id:                  endpointInventoryComponentID("mcp-entry", identity),
+				componentType:       "mcp_server",
+				signal:              "configured_mcp_server",
+				product:             product,
+				active:              !disabled,
+				itemName:            name,
+				mcpTransport:        inventoryStableToken(server.Transport, 64),
+				mcpCommandBasename:  command,
+				mcpURLHost:          host,
+				mcpAuthProviderType: inventoryStableToken(server.AuthProviderType, 64),
+				mcpDisabled:         &disabled,
+				agentConnector:      slug,
+				agentInstalled:      &installed,
+			})
+		}
+	}
+	// Pass 1 — daemon's own HOME (covers zero-HomeDirs installs and dev runs).
+	// ReadMCPServersForConnector's default case reads the OpenClaw registry, so
+	// any unrecognized connector slug would spuriously duplicate OpenClaw
+	// servers under a foreign agent label. Restrict this pass to the slugs
+	// with a native MCP reader (mirrors the switch in ReadMCPServersForConnector).
+	// homeScope="" for this pass so its identity shape matches the
+	// historical pre-scope id when HomeDirs is empty — that keeps
+	// stable ids across a scope-aware rollout for single-home hosts.
+	for _, connectorName := range connectors {
+		if !hasNativeMCPReader(connectorName) {
+			continue
+		}
+		if servers, err := cfg.ReadMCPServersForConnector(connectorName); err == nil {
+			appendServers(connectorName, "", servers)
+		}
+	}
+	// Pass 2 — every configured user home via direct-path readers.
+	// Each home gets its own scope key so same-named servers across
+	// homes stay distinct.
+	for _, home := range homes {
+		home = strings.TrimSpace(home)
+		if home == "" {
+			continue
+		}
+		homeScope := endpointInventoryScopeKey(home)
+		for _, connectorName := range connectors {
+			for _, servers := range readMCPServersUnderHome(connectorName, home) {
+				appendServers(connectorName, homeScope, servers)
+			}
+		}
+	}
+	return components
+}
+
+// hasNativeMCPReader reports whether the given connector slug has a native
+// MCP-config reader on *Config. Unknown slugs fall through to the OpenClaw
+// registry default in ReadMCPServersForConnector, which would spuriously
+// duplicate OpenClaw servers under a foreign agent label — inventory Pass 1
+// gates on this helper so only genuinely-supported slugs are consulted.
+func hasNativeMCPReader(connectorName string) bool {
+	switch strings.ToLower(strings.TrimSpace(connectorName)) {
+	case "openclaw",
+		"claudecode",
+		"codex",
+		"zeptoclaw",
+		"hermes",
+		"cursor",
+		"windsurf",
+		"geminicli",
+		"copilot",
+		"openhands",
+		"opencode",
+		"amp",
+		"antigravity":
+		return true
+	}
+	return false
+}
+
+// readMCPServersUnderHome reads all MCP-server entries for a given connector
+// from the standard filesystem paths under `home`. Returns a slice of
+// per-source results so callers can label each individually if desired.
+// Missing/unparseable files yield nil entries (best-effort).
+func readMCPServersUnderHome(connectorName, home string) [][]config.MCPServerEntry {
+	if home == "" {
+		return nil
+	}
+	var results [][]config.MCPServerEntry
+	tryFile := func(reader func(string) ([]config.MCPServerEntry, error), relPath string) {
+		full := filepath.Join(home, relPath)
+		if entries, err := reader(full); err == nil && len(entries) > 0 {
+			results = append(results, entries)
+		}
+	}
+	switch strings.ToLower(strings.TrimSpace(connectorName)) {
+	case "codex":
+		tryFile(config.ReadMCPFromCodexConfigTOML, ".codex/config.toml")
+	case "claudecode":
+		// Honor CLAUDE_CONFIG_DIR the same way readMCPServersClaudeCode does:
+		// when the operator has redirected Claude Code to a custom directory,
+		// the default `~/.claude/settings.json` and `~/.claude.json` files may
+		// be stale or ignored by the CLI, so managed inventory must not emit
+		// their servers. `.mcp.json` at the project root is unaffected because
+		// it's the workspace-scope file the CLI reads regardless.
+		if _, hasEnv := os.LookupEnv("CLAUDE_CONFIG_DIR"); !hasEnv {
+			tryFile(config.ReadMCPFromClaudeSettings, ".claude/settings.json")
+			// ~/.claude.json holds both user-scope (top-level `mcpServers`)
+			// and per-project local-scope (`projects.<path>.mcpServers`)
+			// entries. Read the file once and take the union instead of
+			// decoding the (often multi-megabyte) conversation-state file
+			// twice.
+			tryFile(config.ReadMCPFromClaudeJSONBothScopes, ".claude.json")
+		}
+		tryFile(config.ReadMCPFromDotMCPJSON, ".mcp.json")
+	case "cursor":
+		tryFile(config.ReadMCPFromDotMCPJSON, ".cursor/mcp.json")
+	case "windsurf":
+		tryFile(config.ReadMCPFromDotMCPJSON, ".codeium/windsurf/mcp_config.json")
+	case "copilot":
+		tryFile(config.ReadMCPFromDotMCPJSON, ".config/github-copilot/mcp.json")
+	case "geminicli":
+		tryFile(config.ReadMCPFromDotMCPJSON, ".gemini/settings.json")
+	case "openhands":
+		tryFile(config.ReadMCPFromDotMCPJSON, ".openhands/mcp.json")
+	case "zeptoclaw":
+		// zeptoclaw's own config is JSON with mcpServers at top level;
+		// mcp.json is a legacy fallback location some installs use.
+		tryFile(config.ReadMCPFromDotMCPJSON, ".zeptoclaw/config.json")
+		tryFile(config.ReadMCPFromDotMCPJSON, ".zeptoclaw/mcp.json")
+	case "hermes":
+		// Hermes native config is YAML with `mcp.servers` at top level
+		// (see cli/defenseclaw/config/hermes.yaml.template). Only the
+		// YAML reader can decode this — the generic mcpServers reader
+		// silently returns nothing. Fall back to the legacy .hermes/mcp.json
+		// for pre-YAML installs.
+		tryFile(func(p string) ([]config.MCPServerEntry, error) {
+			return config.ReadMCPFromYAMLPath(p, []string{"mcp", "servers"}, []string{"mcpServers"})
+		}, ".hermes/config.yaml")
+		tryFile(config.ReadMCPFromDotMCPJSON, ".hermes/mcp.json")
+	case "openclaw":
+		tryFile(config.ReadMCPFromDotMCPJSON, ".openclaw/openclaw.json")
+	case "antigravity":
+		tryFile(config.ReadMCPFromDotMCPJSON, ".gemini/config/mcp_config.json")
+		tryFile(config.ReadMCPFromDotMCPJSON, ".agents/mcp_config.json")
+	case "opencode":
+		tryFile(config.ReadMCPFromDotMCPJSON, ".config/opencode/opencode.json")
+		tryFile(config.ReadMCPFromDotMCPJSON, ".opencode/opencode.json")
+	case "amp":
+		// Amp's settings.json follows the Claude Code shape (top-level
+		// `mcpServers`), so the Claude Settings reader is the right
+		// dispatch; the generic DotMCPJSON reader also works but the
+		// Claude Settings one is stricter.
+		tryFile(config.ReadMCPFromClaudeSettings, ".config/amp/settings.json")
+		tryFile(config.ReadMCPFromClaudeSettings, ".amp/settings.json")
+	}
+	return results
 }
 
 // makeEndpointInventoryEmitter rebuilds the connector registry for each
 // snapshot so config reload and plugin changes are reflected. The emitter is a
 // generation-owned v8 capability supplied by the active sidecar runtime.
+//
+// snapshotFn optionally returns the most recent AI-Discovery scan report.
+// When present the emitter enumerates the discovered skills / plugins / MCP
+// servers per parent connector and ships each as its own
+// ai_component.observed record with defenseclaw.agent.discovery.connector set
+// so downstream can correlate MCP / skills / plugins with the owning agent.
 func makeEndpointInventoryEmitter(
 	cfg *config.Config,
 	emitter sidecarRuntimeEmitter,
+	snapshotFn func() inventory.AIDiscoveryReport,
 ) func(context.Context) {
 	return func(ctx context.Context) {
 		reg := connector.NewDefaultRegistry()
@@ -165,7 +469,12 @@ func makeEndpointInventoryEmitter(
 			// partial summary carries no path or loader error.
 			partial = reg.DiscoverPlugins(cfg.PluginDir) != nil
 		}
-		_ = emitEndpointInventory(ctx, cfg, reg, emitter, partial)
+		var report *inventory.AIDiscoveryReport
+		if snapshotFn != nil {
+			snap := snapshotFn()
+			report = &snap
+		}
+		_ = emitEndpointInventory(ctx, cfg, reg, emitter, partial, report)
 	}
 }
 
@@ -317,6 +626,9 @@ func managedInventoryLimit(action observability.ProducerKey) int {
 		return maxManagedMCPInventory
 	case config.ObservabilityV8ManagedAgentInventoryAction:
 		return 64
+	case config.ObservabilityV8ManagedSkillInventoryAction,
+		config.ObservabilityV8ManagedPluginInventoryAction:
+		return 512
 	default:
 		return 0
 	}
@@ -400,6 +712,14 @@ func endpointInventoryCarrierFor(
 			agentIdentifiers: observability.Present(observability.TelemetryStructuredDefenseClawInventoryAgentIdentifiers{Items: identifiers}),
 			agentMetadata:    observability.Present(observability.TelemetryStructuredDefenseClawInventoryAgentMetadata{Items: metadata}),
 		}, true
+	case config.ObservabilityV8ManagedSkillInventoryAction,
+		config.ObservabilityV8ManagedPluginInventoryAction:
+		// Per-entry skill / plugin inventories don't populate a structured
+		// aggregate carrier today — each component still flows through
+		// emitEndpointInventoryComponent below as its own ai_component.observed
+		// record with defenseclaw.agent.discovery.connector set so downstream
+		// can correlate the entry with its parent agent.
+		return endpointInventoryCarrier{}, true
 	default:
 		return endpointInventoryCarrier{}, false
 	}
@@ -626,6 +946,55 @@ func endpointInventoryComponentID(kind, identity string) string {
 	return fmt.Sprintf("endpoint-%s-%x", kind, digest[:])
 }
 
+// endpointInventoryScopeKey returns a short deterministic key for a
+// home directory / workspace path, used to disambiguate same-named
+// items (skills, plugins, MCP servers) across user homes on the same
+// endpoint. Without this, two users' `~/.codex/skills/hello` collapse
+// to a single component ID at the SAM (Vineet's [P1] identity
+// finding). The path is absolutised before hashing so a relative path
+// and its absolute form produce the same scope key.
+//
+// Truncated to 16 hex chars — the resulting component id stays well
+// under the wire-schema length limit for defenseclaw.ai.component.id,
+// and the collision probability at fleet scale is negligible for a
+// disambiguation-only key. This is NOT a security boundary; do not
+// use the value for authentication.
+func endpointInventoryScopeKey(path string) string {
+	if strings.TrimSpace(path) == "" {
+		return ""
+	}
+	if abs, err := filepath.Abs(path); err == nil {
+		path = abs
+	}
+	sum := sha256.Sum256([]byte(path))
+	return fmt.Sprintf("%x", sum[:8])
+}
+
+// endpointInventoryScopeFromEvidence extracts the scope key from a
+// signal produced by the AI-Discovery walker. The walker's evidence[0]
+// is always the parent-surface row and carries the PathHash of the
+// full home-prefixed path (see signalFromDirectoryChildren and
+// signalFromMCPConfigPath) — reusing that hash means report-derived
+// component IDs are stable across walker restarts even when the raw
+// path-hash key rotates, and it costs zero extra hashing. Returns ""
+// when the signal has no evidence (walker bug guard).
+func endpointInventoryScopeFromEvidence(evidence []inventory.AIEvidence) string {
+	if len(evidence) == 0 {
+		return ""
+	}
+	// Trim the "hmac-sha256:" / "sha256:" prefix — the identity
+	// hasher folds this token into the wider digest so the prefix
+	// adds no information beyond length.
+	h := evidence[0].PathHash
+	if i := strings.LastIndex(h, ":"); i >= 0 {
+		h = h[i+1:]
+	}
+	if len(h) > 16 {
+		h = h[:16]
+	}
+	return h
+}
+
 func inventoryStableIdentifier(value string) string {
 	return inventoryStableToken(value, observability.MaxStableTokenBytes)
 }
@@ -724,4 +1093,111 @@ func mcpURLHost(raw string) string {
 		return ""
 	}
 	return host
+}
+
+// discoveredEntriesFromReport enumerates per-entry inventory components for a
+// given AI-Discovery category (skill or plugin). One record is produced per
+// enumerated basename with defenseclaw.agent.discovery.connector set to the
+// signal's supported connector slug so downstream can correlate the entry
+// (e.g. "skill-a") with the parent agent (e.g. "codex"). Applies only in
+// managed_enterprise, guaranteed by the caller.
+func discoveredEntriesFromReport(
+	report inventory.AIDiscoveryReport,
+	category string,
+	kind string,
+) []endpointInventoryComponent {
+	components := make([]endpointInventoryComponent, 0)
+	for _, signal := range report.Signals {
+		if signal.Category != category {
+			continue
+		}
+		connectorSlug := inventoryStableToken(signal.SupportedConnector, 128)
+		installed := true
+		for _, evidence := range signal.Evidence {
+			// The parent-directory row also carries a Basename ("skills",
+			// "plugins", etc.). The enumerated child rows use evidence
+			// types like "skill_entry" or "plugin_entry".
+			if evidence.Type != kind+"_entry" {
+				continue
+			}
+			name := inventorySafeItemName(evidence.Basename, 256)
+			if name == "" {
+				continue
+			}
+			// Use hyphen (not underscore) in the id kind — the family
+			// constraint for defenseclaw.ai.component.id is
+			// ^[A-Za-z0-9][A-Za-z0-9._:/-]*$ which rejects underscores.
+			//
+			// Identity input: signalID/scope/name where `scope` is
+			// derived from the parent surface's PathHash so two
+			// users' same-named skills (e.g. `~/user1/.codex/skills/hello`
+			// and `~/user2/.codex/skills/hello`) don't collapse to a
+			// single component id. Signals from the same home + same
+			// signature + same basename still produce a stable id
+			// across scans (PathHash of the parent surface is
+			// deterministic within a single walker configuration).
+			scope := endpointInventoryScopeFromEvidence(signal.Evidence)
+			components = append(components, endpointInventoryComponent{
+				id:              endpointInventoryComponentID(kind+"-entry", signal.SignatureID+"/"+scope+"/"+name),
+				componentType:   kind,
+				signal:          inventoryStableToken(signal.SignatureID, 128),
+				product:         inventoryStableToken(signal.Product, 128),
+				active:          true,
+				itemName:        name,
+				itemDescription: "",
+				agentConnector:  connectorSlug,
+				agentInstalled:  &installed,
+				// agent.discovery.config_path_hash requires sha256:<64hex>.
+				// Our evidence.PathHash uses hmac-sha256:... which fails
+				// that pattern, so leave it empty rather than fail record
+				// build.
+			})
+		}
+	}
+	return components
+}
+
+// discoveredMCPEntriesFromReport enumerates per-server MCP inventory
+// components from the AI-Discovery scan. Each declared MCP server (surfaced
+// through evidence rows of type "mcp_server" — see the basenames-fix
+// commit) ships as its own ai_component.observed record with
+// defenseclaw.agent.discovery.connector set to the parent agent's slug.
+func discoveredMCPEntriesFromReport(
+	report inventory.AIDiscoveryReport,
+) []endpointInventoryComponent {
+	components := make([]endpointInventoryComponent, 0)
+	for _, signal := range report.Signals {
+		if signal.Category != inventory.SignalMCPServer {
+			continue
+		}
+		connectorSlug := inventoryStableToken(signal.SupportedConnector, 128)
+		active := true
+		disabled := false
+		for _, evidence := range signal.Evidence {
+			if evidence.Type != "mcp_server" {
+				continue
+			}
+			name := inventorySafeItemName(evidence.Basename, 256)
+			if name == "" {
+				continue
+			}
+			// Hyphen (not underscore) in the id kind to satisfy the
+			// defenseclaw.ai.component.id pattern. Scope key derives
+			// from the parent MCP-config surface hash so same-named
+			// servers configured in different user homes get
+			// distinct component ids.
+			scope := endpointInventoryScopeFromEvidence(signal.Evidence)
+			components = append(components, endpointInventoryComponent{
+				id:             endpointInventoryComponentID("mcp-entry", signal.SignatureID+"/"+scope+"/"+name),
+				componentType:  inventory.SignalMCPServer,
+				signal:         inventoryStableToken(signal.SignatureID, 128),
+				product:        inventoryStableToken(signal.Product, 128),
+				active:         active,
+				itemName:       name,
+				mcpDisabled:    &disabled,
+				agentConnector: connectorSlug,
+			})
+		}
+	}
+	return components
 }

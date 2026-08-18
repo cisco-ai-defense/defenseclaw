@@ -90,22 +90,25 @@ func TestManagedAIDDestinationIsReleaseOwnedAndSensitive(t *testing.T) {
 		destination.Transport.BearerEnv != "" {
 		t.Fatalf("managed transport accepted user credentials: %+v", destination.Transport)
 	}
-	if len(destination.Routes) != 3 || !destination.Routes[0].Generated ||
+	// v8-only contract (Vineet's [P1]): exactly TWO generated routes.
+	// The old middle "drop-managed-inventory-components" route was
+	// removed with the managedaid compatibility projector for
+	// ai.discovery inventory records; every ai.discovery record now
+	// flows through as its canonical v8 OTLP log via the send-all
+	// route below.
+	if len(destination.Routes) != 2 || !destination.Routes[0].Generated ||
 		destination.Routes[0].Action != ObservabilityV8RouteDrop ||
 		!reflect.DeepEqual(destination.Routes[0].Selector.Actions,
 			[]observability.ProducerKey{ObservabilityV8LocalInventoryDiagnosticAction}) ||
-		destination.Routes[1].Action != ObservabilityV8RouteDrop ||
-		!reflect.DeepEqual(destination.Routes[1].Selector.EventNames,
-			[]observability.EventName{"ai_component.observed"}) ||
-		!destination.Routes[2].Generated || !destination.Routes[2].Selector.BucketWildcard {
+		!destination.Routes[1].Generated || !destination.Routes[1].Selector.BucketWildcard {
 		t.Fatalf("managed route = %+v", destination.Routes)
 	}
-	for bucket, profile := range destination.Routes[2].RedactionProfileByBucket {
+	for bucket, profile := range destination.Routes[1].RedactionProfileByBucket {
 		if profile != "sensitive" {
 			t.Fatalf("managed profile for %s = %q", bucket, profile)
 		}
 	}
-	if len(destination.Routes[2].RedactionProfileByBucket) != len(snapshot.Buckets) {
+	if len(destination.Routes[1].RedactionProfileByBucket) != len(snapshot.Buckets) {
 		t.Fatal("managed route does not cover the complete bucket catalog")
 	}
 	if !reflect.DeepEqual(destination.SelectedSignals, []observability.Signal{observability.SignalLogs}) {

@@ -528,6 +528,53 @@ func TestV8CompositeCanonicalFanoutExactlyOnceAndCopyIsolation(t *testing.T) {
 	}
 }
 
+func TestV8CanonicalHandoffCompletesWithoutDestinations(t *testing.T) {
+	rig := newV8HandoffRig(t)
+	if rig.composite == nil || len(rig.composite.pipelines) != 0 {
+		t.Fatalf("zero-destination composite = %v", rig.composite)
+	}
+	start := time.Unix(1_783_080_025, 0).UTC()
+	span, record := v8StartHandoffSpan(t, rig, start, start.Add(time.Millisecond), nil)
+	if got := rig.provider.EndV8CanonicalSpan(span, record); got != V8CanonicalSpanRegistered {
+		t.Fatalf("zero-destination handoff = %s, want %s", got, V8CanonicalSpanRegistered)
+	}
+	if len(rig.composite.handoff.pending) != 0 || rig.composite.handoff.pendingBytes != 0 {
+		t.Fatal("zero-destination End retained a pending canonical record")
+	}
+}
+
+func TestV8CanonicalImportCompletesWithoutDestinationsAndStillValidates(t *testing.T) {
+	rig := newV8HandoffRig(t)
+	start := time.Unix(1_783_080_026, 0).UTC()
+	traceID := trace.TraceID{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}
+	spanID := trace.SpanID{1, 2, 3, 4, 5, 6, 7, 8}
+	record := v8HandoffRecord(
+		t, traceID, spanID, start, start.Add(time.Millisecond), rig.provider.v8.planDigest,
+		"", observability.Absent[string](), 0x101, rig.provider,
+	)
+	result, err := rig.provider.ImportV8CanonicalSpanWithPolicy(record, V8ImportedExportPolicy{})
+	if err != nil || result != (V8ImportedSpanResult{}) {
+		t.Fatalf("zero-destination import = %+v/%v, want empty result/nil", result, err)
+	}
+
+	if result, err = rig.provider.ImportV8CanonicalSpanWithPolicy(
+		observability.Record{}, V8ImportedExportPolicy{},
+	); err == nil || result != (V8ImportedSpanResult{}) {
+		t.Fatalf("invalid zero-destination import = %+v/%v, want empty result/error", result, err)
+	}
+	mismatched := v8HandoffRecord(
+		t, traceID, trace.SpanID{8, 7, 6, 5, 4, 3, 2, 1}, start,
+		start.Add(time.Millisecond), strings.Repeat("a", 64), "",
+		observability.Absent[string](), 0x101, rig.provider,
+	)
+	if result, err = rig.provider.ImportV8CanonicalSpanWithPolicy(
+		mismatched, V8ImportedExportPolicy{},
+	); err == nil || err.Error() != "telemetry: imported canonical span generation mismatch" ||
+		result != (V8ImportedSpanResult{}) {
+		t.Fatalf("mismatched zero-destination import = %+v/%v, want generation error", result, err)
+	}
+}
+
 func TestV8CanonicalHandoffCopiesTraceStateFlagsScopeAndResource(t *testing.T) {
 	consumer := &v8HandoffConsumer{}
 	rig := newV8HandoffRig(t, V8GenerationSpanPipeline{Destination: "canonical", Canonical: consumer})

@@ -458,14 +458,34 @@ def scan_source_files(
     # JSX/TSX) and point package.json `main`/`bin` at it; the legacy
     # extension list (.ts/.js/.mjs) skipped these executable entries
     # entirely. Add .cjs/.cts/.jsx/.tsx so source rules see them.
-    ts_files = collect_files(
-        directory,
-        [".ts", ".tsx", ".js", ".jsx", ".cjs", ".cts", ".mjs"],
-        max_file_bytes=2 * 1024 * 1024,
-        _symlink_escapes=symlink_escapes,
-        _depth_truncations=depth_truncations,
-        _oversized_files=oversized_files,
+    source_extensions = (".ts", ".tsx", ".js", ".jsx", ".cjs", ".cts", ".mjs")
+    link_status, target_info = inspect_path_link(directory)
+    single_file = (
+        link_status is PathLinkStatus.PLAIN
+        and target_info is not None
+        and stat.S_ISREG(target_info.st_mode)
     )
+    if single_file:
+        # Amp plugins are direct ``~/.config/amp/plugins/*.ts`` files rather
+        # than package directories. Scan one bounded regular source artifact
+        # without widening scope to unrelated sibling plugins.
+        if directory.casefold().endswith(source_extensions):
+            if target_info.st_size <= 2 * 1024 * 1024:
+                ts_files = [directory]
+            else:
+                ts_files = []
+                oversized_files.append(directory)
+        else:
+            ts_files = []
+    else:
+        ts_files = collect_files(
+            directory,
+            list(source_extensions),
+            max_file_bytes=2 * 1024 * 1024,
+            _symlink_escapes=symlink_escapes,
+            _depth_truncations=depth_truncations,
+            _oversized_files=oversized_files,
+        )
     _emit_collection_findings(findings, symlink_escapes, depth_truncations, directory, "source", oversized_files)
 
     # Force-include manifest-declared entrypoints that the extension /
@@ -500,7 +520,11 @@ def scan_source_files(
 
         total_bytes += len(content)
 
-        rel_path = file_path.replace(directory + os.sep, "").replace(os.sep, "/")
+        rel_path = (
+            os.path.basename(file_path)
+            if single_file
+            else file_path.replace(directory + os.sep, "").replace(os.sep, "/")
+        )
         if not rel_path.startswith("/"):
             rel_path_slash = file_path.replace(directory + "/", "")
             if rel_path_slash != file_path:

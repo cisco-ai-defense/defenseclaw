@@ -64,6 +64,10 @@ type HookContract struct {
 	Capabilities            HookCapability
 	SupportsTraceparent     bool
 	NativeOTLP              bool
+	// ToolCallLifecycle declares which hook events are safe inputs to the
+	// structured, stateful tool-call path. Its nested version is independent
+	// of this vendor hook contract's version.
+	ToolCallLifecycle ToolCallLifecycleContract
 	// ContentEnvelopeKey names the single nested payload object this
 	// connector hides inspectable content in (hermes: "extra"). Empty
 	// for flat-payload connectors. See HookProfile.ContentEnvelopeKey
@@ -125,6 +129,7 @@ var builtinHookContracts = map[string][]HookContract{
 		},
 		SupportsTraceparent: true,
 		NativeOTLP:          true,
+		ToolCallLifecycle:   codexToolCallLifecycle(false, false, false),
 		Notes: []string{
 			"Codex 0.124.0 through 0.128.x expose six stable hook events. They have no hooks/list trust introspection and ignore hooks.state; validate them only as legacy no-bypass execution.",
 			"DefenseClaw may preseed inert hook state for upgrade continuity, but does not describe 0.124.0 through 0.128.x as trust-certified.",
@@ -164,6 +169,7 @@ var builtinHookContracts = map[string][]HookContract{
 		},
 		SupportsTraceparent: true,
 		NativeOTLP:          true,
+		ToolCallLifecycle:   codexToolCallLifecycle(false, false, false),
 		Notes: []string{
 			"Codex 0.129.x through 0.132.x add PreCompact and PostCompact plus hooks/list trust introspection, for eight supported events.",
 			"On native Windows the generic and command_windows values must remain byte-identical so 0.129.x and newer clients derive the same trusted hook identity.",
@@ -173,7 +179,7 @@ var builtinHookContracts = map[string][]HookContract{
 		Connector:               "codex",
 		ContractID:              "codex-hooks-v3",
 		MinAgentVersion:         "0.133.0",
-		DefaultForUnversioned:   true,
+		MaxAgentVersion:         "0.135.0",
 		HookScriptVersion:       "v6",
 		HookConfigPathTemplates: []string{"~/.codex/config.toml"},
 		ResponseFieldName:       "codex_output",
@@ -205,8 +211,94 @@ var builtinHookContracts = map[string][]HookContract{
 		},
 		SupportsTraceparent: true,
 		NativeOTLP:          true,
+		ToolCallLifecycle:   codexToolCallLifecycle(false, true, false),
 		Notes: []string{
-			"Codex 0.133.0 is the first release with the complete ten-event DefenseClaw matrix, adding SubagentStart and SubagentStop.",
+			"Codex 0.133.0 through 0.134.x expose the complete ten-event DefenseClaw matrix, adding SubagentStart and SubagentStop while retaining the selective local-function hook payload.",
+			"Native release certification verifies hooks/list reports every owned handler enabled and trusted without a manual approval step.",
+			"Codex has no native hook-side ask surface in this contract; confirm verdicts render as alert/systemMessage.",
+		},
+	}, {
+		Connector:               "codex",
+		ContractID:              "codex-hooks-v3-generic",
+		MinAgentVersion:         "0.135.0",
+		MaxAgentVersion:         "0.145.0",
+		HookScriptVersion:       "v6",
+		HookConfigPathTemplates: []string{"~/.codex/config.toml"},
+		ResponseFieldName:       "codex_output",
+		Events: []string{
+			"SessionStart",
+			"UserPromptSubmit",
+			"PreToolUse",
+			"PermissionRequest",
+			"PostToolUse",
+			"SubagentStart",
+			"SubagentStop",
+			"PreCompact",
+			"PostCompact",
+			"Stop",
+		},
+		AIDSurfaces: []string{"prompt", "tool_call", "tool_result"},
+		Capabilities: HookCapability{
+			CanBlock:     true,
+			CanAskNative: false,
+			BlockEvents: []string{
+				"UserPromptSubmit",
+				"PreToolUse",
+				"PermissionRequest",
+				"PostToolUse",
+				"Stop",
+			},
+			SupportsFailClosed: true,
+			Scope:              "user",
+		},
+		SupportsTraceparent: true,
+		NativeOTLP:          true,
+		ToolCallLifecycle:   codexToolCallLifecycle(true, true, false),
+		Notes: []string{
+			"Codex 0.135.0 extends PreToolUse and PostToolUse to generic local function tools while retaining the ten-event hook matrix.",
+			"Native release certification verifies hooks/list reports every owned handler enabled and trusted without a manual approval step.",
+			"Codex has no native hook-side ask surface in this contract; confirm verdicts render as alert/systemMessage.",
+		},
+	}, {
+		Connector:               "codex",
+		ContractID:              "codex-hooks-v4",
+		MinAgentVersion:         "0.145.0",
+		DefaultForUnversioned:   true,
+		HookScriptVersion:       "v6",
+		HookConfigPathTemplates: []string{"~/.codex/config.toml"},
+		ResponseFieldName:       "codex_output",
+		Events: []string{
+			"SessionStart",
+			"UserPromptSubmit",
+			"PreToolUse",
+			"PermissionRequest",
+			"PostToolUse",
+			"SubagentStart",
+			"SubagentStop",
+			"PreCompact",
+			"PostCompact",
+			"Stop",
+			"SessionEnd",
+		},
+		AIDSurfaces: []string{"prompt", "tool_call", "tool_result"},
+		Capabilities: HookCapability{
+			CanBlock:     true,
+			CanAskNative: false,
+			BlockEvents: []string{
+				"UserPromptSubmit",
+				"PreToolUse",
+				"PermissionRequest",
+				"PostToolUse",
+				"Stop",
+			},
+			SupportsFailClosed: true,
+			Scope:              "user",
+		},
+		SupportsTraceparent: true,
+		NativeOTLP:          true,
+		ToolCallLifecycle:   codexToolCallLifecycle(true, true, true),
+		Notes: []string{
+			"Codex 0.145.0 adds SessionEnd for main-thread teardown; Stop remains a turn boundary and does not end the session.",
 			"Native release certification verifies hooks/list reports every owned handler enabled and trusted without a manual approval step.",
 			"Codex has no native hook-side ask surface in this contract; confirm verdicts render as alert/systemMessage.",
 		},
@@ -259,7 +351,6 @@ var builtinHookContracts = map[string][]HookContract{
 				"UserPromptExpansion",
 				"PreToolUse",
 				"PermissionRequest",
-				"PostToolBatch",
 				"TaskCreated",
 				"TaskCompleted",
 				"TeammateIdle",
@@ -275,11 +366,11 @@ var builtinHookContracts = map[string][]HookContract{
 		},
 		SupportsTraceparent: true,
 		NativeOTLP:          true,
+		ToolCallLifecycle:   claudeCodeToolCallLifecycle(),
 		Notes: []string{
 			"Pinned to the documented Claude Code hook surface as of 2.1.152, which introduced MessageDisplay; older releases exposed smaller hook event sets.",
 			"Claude Code PreToolUse supports native HITL via permissionDecision=ask.",
-			"PostToolUse findings are advisory because the inspected tool side effects have already occurred.",
-			"PostToolBatch can block continuation before the next model call, but cannot undo completed batch side effects.",
+			"PostToolUse and PostToolBatch findings are advisory because their payloads are returned bytes, not typed action requests; command/path enforcement stays on PreToolUse.",
 			"ConfigChange is blockable except when source=policy_settings, where Claude Code ignores blocking decisions.",
 		},
 	}},
@@ -328,6 +419,7 @@ var builtinHookContracts = map[string][]HookContract{
 		// the generic decoder opens this one declared envelope when
 		// every top-level content lookup misses.
 		ContentEnvelopeKey: "extra",
+		ToolCallLifecycle:  hermesToolCallLifecycle(),
 		Notes: []string{
 			"Covers the documented shell-hook lifecycle including session start/end/finalize/reset and subagent start/stop telemetry. Hermes nests prompt/result and delegation identity under the per-event `extra` envelope; the generic decoder lifts those fields into the canonical lifecycle.",
 			"pre_tool_call is the only blockable event: Hermes accepts both {\"action\":\"block\",\"message\"} (canonical) and {\"decision\":\"block\",\"reason\"} (Claude-Code style) and normalizes internally. pre_llm_call injects via {\"context\":...}. Confirm verdicts (no native ask surface) downgrade to a {\"systemMessage\":...} alert via the shared responder epilogue. Non-zero exit codes and hook timeouts only log a warning upstream, so there is no fail-closed surface; Hermes remains live-smoke pending (https://cisco-ai-defense.github.io/defenseclaw/docs/connectors/hermes/).",
@@ -386,6 +478,7 @@ var builtinHookContracts = map[string][]HookContract{
 			Scope:              "user",
 		},
 		SupportsTraceparent: true,
+		ToolCallLifecycle:   cursorToolCallLifecycle(),
 		Notes: []string{
 			"Cursor 1.7 introduced beta hooks for the agent loop.",
 			"Cursor native ask is limited to beforeShellExecution and beforeMCPExecution.",
@@ -423,6 +516,7 @@ var builtinHookContracts = map[string][]HookContract{
 			Scope:              "user",
 		},
 		SupportsTraceparent: true,
+		ToolCallLifecycle:   windsurfToolCallLifecycle(),
 		Notes: []string{
 			"Windsurf 1.12.41 added Cascade hooks on user prompts, completing the pre-hook set used by this contract.",
 		},
@@ -464,6 +558,7 @@ var builtinHookContracts = map[string][]HookContract{
 		},
 		SupportsTraceparent: true,
 		NativeOTLP:          true,
+		ToolCallLifecycle:   geminiCLIToolCallLifecycle(),
 		Notes: []string{
 			"Gemini CLI 0.26.0 enabled hooks by default.",
 		},
@@ -508,6 +603,7 @@ var builtinHookContracts = map[string][]HookContract{
 		},
 		SupportsTraceparent: true,
 		NativeOTLP:          true,
+		ToolCallLifecycle:   copilotToolCallLifecycle(),
 		Notes: []string{
 			"GitHub Copilot CLI shipped preToolUse earlier, but the full DefenseClaw contract also needs postToolUseFailure, permissionRequest, and notification hooks; notification landed in 1.0.18.",
 			"Copilot CLI native ask is limited to preToolUse / PreToolUse hooks.",
@@ -517,7 +613,7 @@ var builtinHookContracts = map[string][]HookContract{
 	"antigravity": {{
 		Connector:               "antigravity",
 		ContractID:              "antigravity-hooks-v2",
-		MinAgentVersion:         "1.0.0",
+		MinAgentVersion:         "1.1.9",
 		DefaultForUnversioned:   true,
 		HookScriptVersion:       "v7",
 		HookConfigPathTemplates: []string{"~/.gemini/config/hooks.json"},
@@ -545,20 +641,19 @@ var builtinHookContracts = map[string][]HookContract{
 			// Ask is meaningful only on Pre* events — by the time
 			// Post* events fire, the action / response has already
 			// happened and prompting the user adds no value.
-			AskEvents: []string{"PreInvocation", "PreToolUse"},
-			// Block on Stop is the spec's "block-terminating the
-			// agent if validation checks fail" use case (Stop hooks
-			// can prevent loop termination). Block on Post* is
-			// excluded — the inspected action has already executed.
-			BlockEvents:        []string{"PreInvocation", "PreToolUse", "Stop"},
+			AskEvents: []string{"PreToolUse"},
+			// Only the reviewed synchronous pre-tool event can deny.
+			// Stop supports continue only, and Post* observes actions
+			// that have already executed.
+			BlockEvents:        []string{"PreToolUse"},
 			SupportsFailClosed: false,
 			Scope:              "user",
 		},
 		SupportsTraceparent: true,
+		ToolCallLifecycle:   antigravityToolCallLifecycle(),
 		Notes: []string{
-			"Hooks v2 expands to all five Antigravity 2.0 lifecycle events (PreInvocation, PreToolUse, PostToolUse, PostInvocation, Stop) per the published spec; v1 covered PreToolUse only. PreToolUse remains the only event empirically verified against agy v1.0.1 — the other four event branches are spec-conformant but gated on upstream agy implementation parity.",
-			"agy returning decision=ask bypasses --dangerously-skip-permissions, which is the strongest user-prompt primitive any DefenseClaw connector currently exposes. AskEvents covers PreInvocation and PreToolUse; agy does not recognize a literal \"force_ask\" decision so DefenseClaw emits \"ask\".",
-			"Stop's wire decision verb is \"block\" (matching agy's Claude-Code lineage) rather than the \"deny\" verb used by Pre* events; this aligns with the spec's \"block-terminating the agent if validation checks fail\" phrasing. PostToolUse and PostInvocation NEVER block — findings surface as additionalContext for next-turn ingestion.",
+			"Hooks v2 covers all five published lifecycle events and requires agy 1.1.9 or newer, which fixed PostToolUse firing on non-tool steps and matcher handling.",
+			"PreToolUse is the only event with native ask/deny. PreInvocation only injects context, Stop only supports decision=continue, and PostToolUse/PostInvocation are observe-only.",
 			"Setup writes only the global ~/.gemini/config/hooks.json (the path agy v1.0.x actually evaluates; the marketing-facing ~/.gemini/antigravity-cli/hooks.json is silently ignored at runtime). agy merges all discovered hooks files (global, project, legacy ~/.gemini/hooks.json), so multiple writes cause duplicate firing. Doctor warns when defenseclaw-managed entries appear in more than one merged location, and separately warns when the legacy antigravity-cli path still holds defenseclaw-managed entries from a pre-v0.5.0 install.",
 		},
 	}},
@@ -591,6 +686,7 @@ var builtinHookContracts = map[string][]HookContract{
 			Scope:              "user,workspace",
 		},
 		SupportsTraceparent: true,
+		ToolCallLifecycle:   openHandsToolCallLifecycle(),
 		Notes: []string{
 			"OpenHands hooks use native snake_case event keys and install to ~/.openhands/hooks.json by default, with repo-local .openhands/hooks.json when a workspace is pinned.",
 			"Validated with OpenHands CLI 1.16.0; the contract stays unbounded because upstream documents the hooks as a config contract rather than a versioned hook API floor.",
@@ -602,7 +698,7 @@ var builtinHookContracts = map[string][]HookContract{
 		ContractID:              "opencode-hooks-v1",
 		MinAgentVersion:         "0.0.0",
 		DefaultForUnversioned:   true,
-		HookScriptVersion:       "v6",
+		HookScriptVersion:       "v7",
 		HookConfigPathTemplates: []string{"~/.config/opencode/plugins/defenseclaw.js"},
 		ResponseFieldName:       "hook_output",
 		// opencode exposes plugin hooks (not shell hooks). DefenseClaw's
@@ -629,10 +725,49 @@ var builtinHookContracts = map[string][]HookContract{
 		// The JS bridge POSTs JSON over fetch and does not propagate the
 		// W3C traceparent the shell hooks forward via _hardening.sh.
 		SupportsTraceparent: false,
+		ToolCallLifecycle:   openCodeToolCallLifecycle(),
 		Notes: []string{
 			"opencode (https://opencode.ai) auto-loads JS/TS plugins from ~/.config/opencode/plugins/ — there is no command-hook config file to patch. DefenseClaw writes a dependency-free bridge plugin (defenseclaw.js) whose tool.execute.before POSTs to /api/v1/opencode/hook and throws new Error(reason) on a block decision, aborting the tool.",
 			"Block is the only active verdict: opencode has no hook-driven ask or context-injection surface. tool.execute.after is observe-only. The bridge honors fail-closed by throwing when the gateway is unreachable and FAIL_MODE=closed.",
 			"Contract is unbounded (min 0.0.0): the plugin hook API is documented as a stable contract rather than a versioned floor, matching the OpenHands precedent.",
+		},
+	}},
+	"amp": {{
+		Connector:               "amp",
+		ContractID:              "amp-plugin-v1",
+		MinAgentVersion:         "0.0.1785334225",
+		DefaultForUnversioned:   true,
+		HookScriptVersion:       "v2",
+		HookConfigPathTemplates: []string{"~/.config/amp/plugins/defenseclaw.ts", "%USERPROFILE%\\.config\\amp\\plugins\\defenseclaw.ts"},
+		ResponseFieldName:       "",
+		Events: []string{
+			"session.start",
+			"agent.start",
+			"tool.call",
+			"tool.result",
+			"agent.end",
+		},
+		AIDSurfaces: []string{"prompt", "tool_call", "tool_result", "event_content"},
+		Capabilities: HookCapability{
+			CanBlock:           true,
+			CanAskNative:       true,
+			AskEvents:          []string{"tool.call", "tool.result"},
+			BlockEvents:        []string{"tool.call", "tool.result"},
+			SupportsFailClosed: true,
+			Scope:              "user",
+		},
+		SupportsTraceparent: false,
+		NativeOTLP:          false,
+		ToolCallLifecycle:   ampToolCallLifecycle(),
+		Notes: []string{
+			"Amp auto-loads system TypeScript plugins from ~/.config/amp/plugins on macOS/Linux and %USERPROFILE%\\.config\\amp\\plugins on Windows. DefenseClaw installs a dependency-free owner-only policy plugin there.",
+			"tool.call is synchronous before execution; tool.result can replace unsafe output before model delivery but cannot undo completed side effects. Both support native confirmation only for the active foreground thread and reject safely when UI is unavailable.",
+			"session.start, agent.start, tool.call, tool.result, and agent.end feed Agent360, Galileo, audit, and generated hook telemetry. Amp documents no session.end or dedicated subagent lifecycle plugin event.",
+			"The plugin reports Amp's first-class custom-agent name/display/declared model or built-in mode when available; this metadata is not a stable agent ID, model request ID, trace context, or parent-thread link.",
+			"Oracle, Task/subagent launchers, MCP tools, and plugin tools remain policy-controlled at the tool.call delegation boundary. Child-thread events are ingested under their reported thread ID when Amp emits them.",
+			"Amp does not document arbitrary model-endpoint proxying, native customer OTLP, or W3C trace propagation from plugins.",
+			"Headless `amp -x` action-mode launches require `--plugin-ready-timeout 30` to guarantee plugin readiness and complete lifecycle capture before the turn; fail-closed cannot protect work that starts before Amp loads the plugin.",
+			"0.0.1785334225 is DefenseClaw's certification floor pinned to the current @ampcode/cli package build used for this contract snapshot; it is not an upstream-declared minimum plugin version.",
 		},
 	}},
 	"omnigent": {{
@@ -662,6 +797,7 @@ var builtinHookContracts = map[string][]HookContract{
 		},
 		SupportsTraceparent: true,
 		NativeOTLP:          true,
+		ToolCallLifecycle:   omniGentToolCallLifecycle(),
 		Notes: []string{
 			"OmniGent invokes DefenseClaw through its documented custom Python policy API; the installed callable translates DefenseClaw allow, confirm, and block verdicts to ALLOW, ASK, and DENY.",
 			"The bridge covers request, tool_call, tool_result, response, llm_request, and llm_response phases exposed by OmniGent's PolicyEvent schema.",
@@ -788,10 +924,13 @@ func NormalizeAgentVersion(_ string, raw string) string {
 	return strings.Join(parts, ".")
 }
 
-func ApplyHookContract(profile HookProfile, opts SetupOpts) HookProfile {
-	resolution := ResolveHookContract(profile.Name, opts.AgentVersion)
+func resolveHookContractForOptions(
+	connectorName string,
+	opts SetupOpts,
+) HookContractResolution {
+	resolution := ResolveHookContract(connectorName, opts.AgentVersion)
 	if pinnedID := strings.TrimSpace(opts.HookContractID); pinnedID != "" {
-		pinned, ok := hookContractByID(profile.Name, pinnedID)
+		pinned, ok := hookContractByID(connectorName, pinnedID)
 		switch {
 		case !ok:
 			resolution.Status = HookCompatibilityUnknown
@@ -805,6 +944,11 @@ func ApplyHookContract(profile HookProfile, opts SetupOpts) HookProfile {
 			resolution.Contract = pinned
 		}
 	}
+	return resolution
+}
+
+func ApplyHookContract(profile HookProfile, opts SetupOpts) HookProfile {
+	resolution := resolveHookContractForOptions(profile.Name, opts)
 	profile.AgentVersion = resolution.RawVersion
 	profile.NormalizedAgentVersion = resolution.NormalizedVersion
 	profile.CompatibilityStatus = resolution.Status
@@ -822,6 +966,7 @@ func ApplyHookContract(profile HookProfile, opts SetupOpts) HookProfile {
 	profile.SupportsTraceparent = contract.SupportsTraceparent
 	profile.ResponseFieldName = contract.ResponseFieldName
 	profile.ContentEnvelopeKey = contract.ContentEnvelopeKey
+	profile.ToolCallLifecycle = cloneToolCallLifecycleContract(contract.ToolCallLifecycle)
 	if spec, ok := CorrelationSpecForConnector(profile.Name, contract.ContractID); ok {
 		profile.Correlation = spec
 	} else {

@@ -20,9 +20,11 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
@@ -221,6 +223,8 @@ func (c *Config) ReadMCPServersForConnector(connector string) ([]MCPServerEntry,
 		return readMCPServersOpenHands()
 	case "opencode":
 		return readMCPServersOpenCode(workspaceDir)
+	case "amp":
+		return readMCPServersAMP(workspaceDir)
 	case "antigravity":
 		return readMCPServersAntigravity(workspaceDir)
 	case "omnigent":
@@ -379,6 +383,63 @@ func parseMCPServersJSONArray(data []byte) ([]MCPServerEntry, error) {
 	return entries, nil
 }
 
+// ParseMCPServersJSON is the exported wrapper around parseMCPServersJSON
+// so packages outside `config` (e.g. inventory's AI-discovery scanner)
+// can enumerate the servers declared inside a matched `mcp.json` /
+// `.cursor/mcp.json` / claude-desktop config file without duplicating the
+// parser. The input is the raw file bytes; the output is one
+// MCPServerEntry per top-level key in the JSON object form
+// (`{"mcpServers": {...}}` callers must pass the inner `mcpServers`
+// object; plain-object callers pass their whole file). Callers that need
+// the array shape should use ParseMCPServersJSONArray.
+func ParseMCPServersJSON(data []byte) ([]MCPServerEntry, error) {
+	return parseMCPServersJSON(data)
+}
+
+// ParseMCPServersJSONArray is the exported wrapper around
+// parseMCPServersJSONArray for callers that need the alternate top-level
+// array form (`[{"name": "...", ...}, ...]`).
+func ParseMCPServersJSONArray(data []byte) ([]MCPServerEntry, error) {
+	return parseMCPServersJSONArray(data)
+}
+
+// ReadMCPFromDotMCPJSON is the exported wrapper around the internal
+// `.mcp.json` reader so AI-discovery / signature-catalog callers can
+// enumerate the servers declared inside a matched file without
+// re-implementing the "wrapped in mcpServers vs bare map" fallback.
+func ReadMCPFromDotMCPJSON(path string) ([]MCPServerEntry, error) {
+	return readMCPFromDotMCPJSON(path)
+}
+
+// ReadMCPFromClaudeSettings is the exported wrapper around the
+// Claude Code settings.json / .claude.json reader; input is a path to
+// a JSON file with a top-level `mcpServers` map.
+func ReadMCPFromClaudeSettings(path string) ([]MCPServerEntry, error) {
+	return readMCPFromClaudeSettings(path)
+}
+
+// ReadMCPFromClaudeJSONProjects is the exported wrapper around the
+// per-project local-scope Claude Code MCP reader; input is a path to
+// ~/.claude.json, and the returned entries flatten every
+// projects.<path>.mcpServers subtree.
+func ReadMCPFromClaudeJSONProjects(path string) ([]MCPServerEntry, error) {
+	return readMCPFromClaudeJSONProjects(path)
+}
+
+// ReadMCPFromCodexConfigTOML is the exported wrapper around the
+// Codex `~/.codex/config.toml` reader for callers that need to
+// enumerate mcp_servers entries out of a TOML file.
+func ReadMCPFromCodexConfigTOML(path string) ([]MCPServerEntry, error) {
+	return readMCPFromCodexConfigTOML(path)
+}
+
+// ReadMCPFromYAMLPath is the exported wrapper around readMCPFromYAMLPath;
+// each `paths` argument is a JSON-pointer-style chain of keys to walk
+// (e.g. `[]string{"mcp", "servers"}`).
+func ReadMCPFromYAMLPath(path string, paths ...[]string) ([]MCPServerEntry, error) {
+	return readMCPFromYAMLPath(path, paths...)
+}
+
 func workspaceSkillsDir(homeDir string, oc *openclawConfig) string {
 	workspace := filepath.Join(homeDir, "workspace")
 	if oc != nil && oc.Agents.Defaults.Workspace != "" {
@@ -532,6 +593,10 @@ func (c *Config) ConnectorHomeDir(connector string) string {
 		// opencode keeps its config under ~/.config/opencode/ (XDG-style);
 		// matches connector_paths.connector_home("opencode").
 		return filepath.Join(home, ".config", "opencode")
+	case "amp":
+		// Amp uses this same config home on macOS, Linux, and native
+		// Windows (%USERPROFILE%\.config\amp).
+		return filepath.Join(home, ".config", "amp")
 	case "omnigent":
 		if configHome := strings.TrimSpace(os.Getenv("OMNIGENT_CONFIG_HOME")); configHome != "" {
 			return expandPath(configHome)
@@ -654,6 +719,8 @@ func (c *Config) SkillDirsForConnector(connector string) []string {
 		// these never fall through to OpenClaw's skill dirs — parity with
 		// connector_paths.skill_dirs() == [] on the Python side.
 		return nil
+	case "amp":
+		return ampSkillDirs(home, cwd)
 	case "antigravity":
 		return dedupNonEmpty([]string{
 			filepath.Join(home, ".gemini", "config", "skills"),
@@ -725,6 +792,11 @@ func (c *Config) PluginDirsForConnector(connector string) []string {
 			workspaceJoin(cwd, ".agents", "plugins"),
 			workspaceJoin(cwd, "_agents", "plugins"),
 		})
+	case "amp":
+		return dedupNonEmpty([]string{
+			filepath.Join(home, ".config", "amp", "plugins"),
+			workspaceJoin(cwd, ".amp", "plugins"),
+		})
 	case "cursor", "windsurf", "copilot", "openhands", "opencode", "omnigent":
 		return nil
 	default:
@@ -739,9 +811,32 @@ func readMCPServersClaudeCode(workspaceDir string) ([]MCPServerEntry, error) {
 
 	var entries []MCPServerEntry
 
-	settingsPath := filepath.Join(connectorEnvHome("CLAUDE_CONFIG_DIR", ".claude"), "settings.json")
+	// user-scope: ~/.claude/settings.json — top-level mcpServers
+	claudeHome := connectorEnvHome("CLAUDE_CONFIG_DIR", ".claude")
+	settingsPath := filepath.Join(claudeHome, "settings.json")
 	if e, err := readMCPFromClaudeSettings(settingsPath); err == nil {
 		entries = append(entries, e...)
+	}
+
+	// user-scope: ~/.claude.json — top-level mcpServers (the Claude Code CLI's
+	// user-scope registry, distinct from settings.json; also holds per-project
+	// local-scope entries under projects.<path>.mcpServers). Location is the
+	// parent of the resolved CLAUDE_CONFIG_DIR (~/) unless the env var is set.
+	// Skip if CLAUDE_CONFIG_DIR is explicitly set (then only the settings dir
+	// is authoritative).
+	claudeJSONPath := ""
+	if _, hasEnv := os.LookupEnv("CLAUDE_CONFIG_DIR"); !hasEnv {
+		if home, err := os.UserHomeDir(); err == nil && home != "" {
+			claudeJSONPath = filepath.Join(home, ".claude.json")
+		}
+	}
+	if claudeJSONPath != "" {
+		// Both user-scope (top-level mcpServers) and local-scope
+		// (projects.<path>.mcpServers) come from the same multi-MB
+		// conversation-state file; read it once and split.
+		if e, err := ReadMCPFromClaudeJSONBothScopes(claudeJSONPath); err == nil {
+			entries = append(entries, e...)
+		}
 	}
 
 	if cwd != "" {
@@ -752,6 +847,95 @@ func readMCPServersClaudeCode(workspaceDir string) ([]MCPServerEntry, error) {
 	}
 
 	return dedupMCPEntries(entries), nil
+}
+
+// readMCPFromClaudeJSONProjects extracts per-project local-scope MCP servers
+// from the projects.<path>.mcpServers subtrees of ~/.claude.json. Each
+// project's servers ship as a single flat list — the parent-path prefix is
+// intentionally not appended so downstream de-dup by name works across scopes.
+func readMCPFromClaudeJSONProjects(path string) ([]MCPServerEntry, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	_, projectEntries, err := parseClaudeJSONScopes(data)
+	if err != nil {
+		return nil, err
+	}
+	return projectEntries, nil
+}
+
+// claudeJSONScopes is the union shape of ~/.claude.json we care about: the
+// user-scope `mcpServers` block and the per-project local-scope
+// `projects.<path>.mcpServers` blocks. Split out so one read+unmarshal of the
+// (often multi-megabyte) file is enough to cover both scopes.
+type claudeJSONMCPServer struct {
+	Command string            `json:"command"`
+	Args    []string          `json:"args"`
+	Env     map[string]string `json:"env"`
+	URL     string            `json:"url"`
+	Type    string            `json:"type"`
+}
+
+type claudeJSONScopes struct {
+	MCPServers map[string]claudeJSONMCPServer `json:"mcpServers"`
+	Projects   map[string]struct {
+		MCPServers map[string]claudeJSONMCPServer `json:"mcpServers"`
+	} `json:"projects"`
+}
+
+// parseClaudeJSONScopes unmarshals ~/.claude.json once and splits the two
+// MCP-server scopes out. `user` is the top-level mcpServers map (user scope);
+// `projects` is the flattened union of every projects.<path>.mcpServers block
+// (local scope). Callers that already have the raw bytes should prefer this
+// helper to the pair of ReadMCPFromClaudeSettings + ReadMCPFromClaudeJSONProjects
+// wrappers, which each open and decode the file independently.
+func parseClaudeJSONScopes(data []byte) (user, projects []MCPServerEntry, err error) {
+	var doc claudeJSONScopes
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, nil, err
+	}
+	for name, s := range doc.MCPServers {
+		user = append(user, MCPServerEntry{
+			Name:      name,
+			Command:   s.Command,
+			Args:      s.Args,
+			Env:       s.Env,
+			URL:       s.URL,
+			Transport: s.Type,
+		})
+	}
+	for _, project := range doc.Projects {
+		for name, s := range project.MCPServers {
+			projects = append(projects, MCPServerEntry{
+				Name:      name,
+				Command:   s.Command,
+				Args:      s.Args,
+				Env:       s.Env,
+				URL:       s.URL,
+				Transport: s.Type,
+			})
+		}
+	}
+	return user, projects, nil
+}
+
+// ReadMCPFromClaudeJSONBothScopes is the exported single-read helper: it
+// opens ~/.claude.json once and returns the union of user-scope
+// (top-level mcpServers) and local-scope (projects.<path>.mcpServers)
+// entries. Callers that need both scopes should prefer this over pairing
+// ReadMCPFromClaudeSettings + ReadMCPFromClaudeJSONProjects, which would
+// each read and decode the (often multi-megabyte) conversation-state file.
+func ReadMCPFromClaudeJSONBothScopes(path string) ([]MCPServerEntry, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	user, projects, err := parseClaudeJSONScopes(data)
+	if err != nil {
+		return nil, err
+	}
+	return append(user, projects...), nil
 }
 
 func readMCPServersCodex(workspaceDir string) ([]MCPServerEntry, error) {
@@ -963,6 +1147,375 @@ func readMCPServersOpenCode(workspaceDir string) ([]MCPServerEntry, error) {
 	return dedupMCPEntries(entries), nil
 }
 
+// readMCPServersAMP inventories Amp's always-on MCP settings and the
+// lower-precedence mcp.json files bundled in discovered skills. Workspace
+// settings are appended before user settings because Amp documents workspace
+// overrides; settings precede skills because an explicit amp.mcpServers entry
+// suppresses a same-named skill server.
+func readMCPServersAMP(workspaceDir string) ([]MCPServerEntry, error) {
+	home, _ := os.UserHomeDir()
+	cwd := strings.TrimSpace(workspaceDir)
+	var entries []MCPServerEntry
+
+	for _, path := range ampSettingsPaths(home, cwd, true) {
+		doc, err := readJSONObjectJSONC(path)
+		if err != nil {
+			continue
+		}
+		if found, err := readMCPFromAnyPaths(doc, []string{"amp.mcpServers"}); err == nil {
+			entries = append(entries, found...)
+		}
+	}
+
+	for _, skillRoot := range ampSkillDirs(home, cwd) {
+		children, err := os.ReadDir(skillRoot)
+		if err != nil {
+			continue
+		}
+		for _, child := range children {
+			if !child.IsDir() {
+				continue
+			}
+			if found, err := readMCPFromDotMCPJSON(filepath.Join(skillRoot, child.Name(), "mcp.json")); err == nil {
+				entries = append(entries, found...)
+			}
+		}
+	}
+	return dedupMCPEntries(entries), nil
+}
+
+// ampSettingsPaths returns settings in effective precedence order when
+// workspaceFirst is true. Amp accepts either JSON or JSONC at each layer; JSON
+// is tried first and JSONC second, with de-duplication handling the unusual
+// case where an operator leaves both files present.
+func ampSettingsPaths(home, workspace string, workspaceFirst bool) []string {
+	user := []string{preferredAMPSettingsPath(
+		filepath.Join(home, ".config", "amp", "settings.json"),
+		filepath.Join(home, ".config", "amp", "settings.jsonc"),
+	)}
+	project := []string{preferredAMPSettingsPath(
+		workspaceJoin(workspace, ".amp", "settings.json"),
+		workspaceJoin(workspace, ".amp", "settings.jsonc"),
+	)}
+	managed := []string{ampManagedSettingsPath()}
+	if workspaceFirst {
+		return dedupNonEmpty(append(managed, append(project, user...)...))
+	}
+	return dedupNonEmpty(append(append(user, project...), managed...))
+}
+
+// preferredAMPSettingsPath mirrors Amp's same-scope selection: settings.json
+// wins when it exists; settings.jsonc is a fallback, not a second merge layer.
+// Return the primary path when neither exists so read-only callers keep a
+// deterministic candidate without accidentally interpreting process cwd.
+func preferredAMPSettingsPath(primary, fallback string) string {
+	for _, candidate := range []string{primary, fallback} {
+		if candidate == "" {
+			continue
+		}
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate
+		}
+	}
+	return primary
+}
+
+func ampManagedSettingsPath() string {
+	switch runtime.GOOS {
+	case "darwin":
+		return filepath.Join(string(filepath.Separator), "Library", "Application Support", "ampcode", "managed-settings.json")
+	case "linux":
+		return filepath.Join(string(filepath.Separator), "etc", "ampcode", "managed-settings.json")
+	case "windows":
+		if programData := strings.TrimSpace(os.Getenv("ProgramData")); programData != "" {
+			return filepath.Join(programData, "ampcode", "managed-settings.json")
+		}
+	}
+	return ""
+}
+
+func ampSkillDirs(home, workspace string) []string {
+	disableClaude := false
+	var extraPath string
+	// Read user then workspace so the documented workspace override wins.
+	for _, path := range ampSettingsPaths(home, workspace, false) {
+		doc, err := readJSONObjectJSONC(path)
+		if err != nil {
+			continue
+		}
+		if value, ok := doc["amp.skills.disableClaudeCodeSkills"].(bool); ok {
+			disableClaude = value
+		}
+		if value, ok := doc["amp.skills.path"].(string); ok {
+			extraPath = value
+		}
+	}
+
+	dirs := []string{
+		filepath.Join(home, ".config", "agents", "skills"),
+		filepath.Join(home, ".agents", "skills"),
+		filepath.Join(home, ".config", "amp", "skills"),
+		workspaceJoin(workspace, ".agents", "skills"),
+	}
+	if !disableClaude {
+		dirs = append(dirs,
+			workspaceJoin(workspace, ".claude", "skills"),
+			filepath.Join(home, ".claude", "skills"),
+		)
+		dirs = append(dirs, ampClaudePluginCacheSkillDirs(home)...)
+	}
+	for _, configured := range filepath.SplitList(extraPath) {
+		configured = expandPath(strings.TrimSpace(configured))
+		if configured == "" {
+			continue
+		}
+		// Never resolve a relative path against the DefenseClaw daemon's cwd.
+		// With a pinned workspace, relative additions are workspace-relative;
+		// otherwise only the documented absolute/~ forms are actionable.
+		if !filepath.IsAbs(configured) {
+			if workspace == "" {
+				continue
+			}
+			configured = filepath.Join(workspace, configured)
+		}
+		dirs = append(dirs, filepath.Clean(configured))
+	}
+	// Plugin-bundled skills are the lowest local precedence documented by
+	// Amp. Only directory plugins can bundle a skills/ component; standalone
+	// .ts plugins remain visible through plugin inventory, not this list.
+	for _, pluginRoot := range dedupNonEmpty([]string{
+		filepath.Join(home, ".config", "amp", "plugins"),
+		workspaceJoin(workspace, ".amp", "plugins"),
+	}) {
+		entries, err := readBoundedAMPDirectory(pluginRoot, 4096)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if entry.IsDir() {
+				dirs = append(dirs, filepath.Join(pluginRoot, entry.Name(), "skills"))
+			}
+		}
+	}
+	return dedupNonEmpty(dirs)
+}
+
+// ampClaudePluginCacheSkillDirs expands Amp's Claude-compatible plugin cache
+// into the actual skills containers. The cache normally has marketplace,
+// plugin, and version directories before a plugin's skills/ directory; using
+// the cache root directly would make inventory treat those containers as
+// skills. Keep traversal fixed beneath the user's cache, bounded, and
+// symlink-free because workspace-driven discovery must not turn into a broad
+// filesystem walk.
+func ampClaudePluginCacheSkillDirs(home string) []string {
+	const (
+		maxDepth   = 4
+		maxEntries = 4096
+	)
+	root := filepath.Join(home, ".claude", "plugins", "cache")
+	info, err := os.Lstat(root)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return nil
+	}
+	type pendingDir struct {
+		path  string
+		depth int
+	}
+	pending := []pendingDir{{path: root}}
+	inspected := 0
+	var skillDirs []string
+	for len(pending) > 0 && inspected < maxEntries {
+		current := pending[0]
+		pending = pending[1:]
+		entries, err := readBoundedAMPDirectory(current.path, maxEntries-inspected)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			inspected++
+			if entry.Type()&os.ModeSymlink != 0 || !entry.IsDir() {
+				continue
+			}
+			childDepth := current.depth + 1
+			child := filepath.Join(current.path, entry.Name())
+			if strings.EqualFold(entry.Name(), "skills") {
+				skillDirs = append(skillDirs, child)
+				continue
+			}
+			if childDepth < maxDepth {
+				pending = append(pending, pendingDir{path: child, depth: childDepth})
+			}
+		}
+	}
+	return dedupNonEmpty(skillDirs)
+}
+
+func readBoundedAMPDirectory(path string, remaining int) ([]os.DirEntry, error) {
+	if remaining <= 0 {
+		return nil, nil
+	}
+	directory, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	entries, readErr := directory.ReadDir(remaining)
+	closeErr := directory.Close()
+	if readErr != nil && readErr != io.EOF {
+		return nil, readErr
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	sort.Slice(entries, func(left, right int) bool {
+		return strings.ToLower(entries[left].Name()) < strings.ToLower(entries[right].Name())
+	})
+	return entries, nil
+}
+
+// readJSONObjectJSONC parses the JSON-with-comments form accepted by Amp.
+// The sanitizer is string-aware: comment markers and commas inside quoted
+// values remain byte-for-byte intact.
+func readJSONObjectJSONC(path string) (map[string]any, error) {
+	data, err := readStableAMPSettingsFile(path)
+	if err != nil {
+		return nil, err
+	}
+	data = stripJSONCComments(data)
+	data = stripJSONCTrailingCommas(data)
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, err
+	}
+	return doc, nil
+}
+
+const ampSettingsReadLimit int64 = 2 << 20
+
+func readStableAMPSettingsFile(path string) ([]byte, error) {
+	before, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() {
+		return nil, fmt.Errorf("Amp settings source is not a regular file")
+	}
+	if before.Size() > ampSettingsReadLimit {
+		return nil, fmt.Errorf("Amp settings source exceeds %d bytes", ampSettingsReadLimit)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	opened, statErr := file.Stat()
+	data, readErr := io.ReadAll(io.LimitReader(file, ampSettingsReadLimit+1))
+	closeErr := file.Close()
+	if statErr != nil {
+		return nil, statErr
+	}
+	if readErr != nil {
+		return nil, readErr
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	if !opened.Mode().IsRegular() || !os.SameFile(before, opened) {
+		return nil, fmt.Errorf("Amp settings source changed during inspection")
+	}
+	if int64(len(data)) > ampSettingsReadLimit {
+		return nil, fmt.Errorf("Amp settings source exceeds %d bytes", ampSettingsReadLimit)
+	}
+	after, err := os.Lstat(path)
+	if err != nil || after.Mode()&os.ModeSymlink != 0 || !after.Mode().IsRegular() ||
+		!os.SameFile(opened, after) || before.Size() != after.Size() ||
+		!before.ModTime().Equal(after.ModTime()) {
+		return nil, fmt.Errorf("Amp settings source changed during inspection")
+	}
+	return data, nil
+}
+
+func stripJSONCComments(data []byte) []byte {
+	out := make([]byte, 0, len(data))
+	inString := false
+	escaped := false
+	for i := 0; i < len(data); {
+		b := data[i]
+		if inString {
+			out = append(out, b)
+			if escaped {
+				escaped = false
+			} else if b == '\\' {
+				escaped = true
+			} else if b == '"' {
+				inString = false
+			}
+			i++
+			continue
+		}
+		if b == '"' {
+			inString = true
+			out = append(out, b)
+			i++
+			continue
+		}
+		if b == '/' && i+1 < len(data) && data[i+1] == '/' {
+			i += 2
+			for i < len(data) && data[i] != '\n' && data[i] != '\r' {
+				i++
+			}
+			continue
+		}
+		if b == '/' && i+1 < len(data) && data[i+1] == '*' {
+			i += 2
+			for i+1 < len(data) && !(data[i] == '*' && data[i+1] == '/') {
+				i++
+			}
+			if i+1 < len(data) {
+				i += 2
+			}
+			continue
+		}
+		out = append(out, b)
+		i++
+	}
+	return out
+}
+
+func stripJSONCTrailingCommas(data []byte) []byte {
+	out := make([]byte, 0, len(data))
+	inString := false
+	escaped := false
+	for i := 0; i < len(data); i++ {
+		b := data[i]
+		if inString {
+			out = append(out, b)
+			if escaped {
+				escaped = false
+			} else if b == '\\' {
+				escaped = true
+			} else if b == '"' {
+				inString = false
+			}
+			continue
+		}
+		if b == '"' {
+			inString = true
+			out = append(out, b)
+			continue
+		}
+		if b == ',' {
+			j := i + 1
+			for j < len(data) && (data[j] == ' ' || data[j] == '\t' || data[j] == '\n' || data[j] == '\r') {
+				j++
+			}
+			if j < len(data) && (data[j] == '}' || data[j] == ']') {
+				continue
+			}
+		}
+		out = append(out, b)
+	}
+	return out
+}
+
 // readMCPFromOpenCodeConfig parses the top-level `mcp` map out of an
 // opencode config file. Go's encoding/json does not accept JSONC
 // comments, so a hand-authored opencode.jsonc with comments yields an
@@ -1025,6 +1578,8 @@ func readMCPFromClaudeSettings(path string) ([]MCPServerEntry, error) {
 			Command string            `json:"command"`
 			Args    []string          `json:"args"`
 			Env     map[string]string `json:"env"`
+			URL     string            `json:"url"`
+			Type    string            `json:"type"`
 		} `json:"mcpServers"`
 	}
 	if err := json.Unmarshal(data, &settings); err != nil {
@@ -1034,10 +1589,12 @@ func readMCPFromClaudeSettings(path string) ([]MCPServerEntry, error) {
 	entries := make([]MCPServerEntry, 0, len(settings.MCPServers))
 	for name, s := range settings.MCPServers {
 		entries = append(entries, MCPServerEntry{
-			Name:    name,
-			Command: s.Command,
-			Args:    s.Args,
-			Env:     s.Env,
+			Name:      name,
+			Command:   s.Command,
+			Args:      s.Args,
+			Env:       s.Env,
+			URL:       s.URL,
+			Transport: s.Type,
 		})
 	}
 	return entries, nil

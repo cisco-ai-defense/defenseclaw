@@ -75,6 +75,7 @@ func newSidecarV8BootstrapFixture(t *testing.T, configVersion int, storePath str
 	if err := os.Chmod(dataDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	installDefaultRulePackForDataDir(t, dataDir)
 	if storePath == "" {
 		storePath = filepath.Join(dataDir, config.DefaultAuditDBName)
 	}
@@ -332,15 +333,19 @@ func TestSidecarBootstrapAndReloadOwnManagedAIDDestinationWithoutCredentials(t *
 		destination.Transport.Endpoint != first.URL+config.ObservabilityV8ManagedAIDIngestPath {
 		t.Fatalf("managed destination=%+v present=%t", destination, ok)
 	}
-	if len(destination.Routes) != 3 || destination.Routes[0].Name != "drop-local-inventory-diagnostics" ||
+	// v8-only contract (Vineet's [P1]): the managed destination now
+	// has exactly TWO generated routes — the local-diagnostic drop
+	// plus the send-all fallback. The middle
+	// "drop-managed-inventory-components" route was removed with the
+	// managedaid compatibility projector for ai.discovery inventory
+	// records.
+	if len(destination.Routes) != 2 || destination.Routes[0].Name != "drop-local-inventory-diagnostics" ||
 		destination.Routes[0].Action != config.ObservabilityV8RouteDrop ||
-		destination.Routes[1].Name != "drop-managed-inventory-components" ||
-		destination.Routes[1].Action != config.ObservabilityV8RouteDrop ||
-		destination.Routes[2].Name != "all-collected-logs" ||
-		destination.Routes[2].Action != config.ObservabilityV8RouteSend {
+		destination.Routes[1].Name != "all-collected-logs" ||
+		destination.Routes[1].Action != config.ObservabilityV8RouteSend {
 		t.Fatalf("managed routes=%+v", destination.Routes)
 	}
-	for bucket, profile := range destination.Routes[2].RedactionProfileByBucket {
+	for bucket, profile := range destination.Routes[1].RedactionProfileByBucket {
 		if profile != "sensitive" {
 			t.Fatalf("managed bucket %q profile=%q", bucket, profile)
 		}
@@ -1379,6 +1384,87 @@ func TestSidecarConfigManagerV8RestartModeDoesNotHotApplyPlan(t *testing.T) {
 	case <-runCtx.Done():
 	default:
 		t.Fatal("restart-mode v8 change did not request process restart")
+	}
+}
+
+func TestSidecarConfigReloadRejectsInvalidRulePackBeforeRestartOrPublication(t *testing.T) {
+	fixture := newSidecarV8BootstrapFixture(t, config.ObservabilityV8ConfigVersion, "")
+	initialRaw := []byte(fmt.Sprintf(
+		"config_version: 8\ndata_dir: %q\nenvironment: original\ngateway:\n  config_reload:\n    mode: restart\nguardrail:\n  rule_pack_dir: \"\"\nobservability: {}\n",
+		fixture.dataDir,
+	))
+	if err := os.WriteFile(fixture.configPath, initialRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	initial, err := config.LoadRuntimeV8File(fixture.configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fixture.sidecar.publishConfig(initial)
+	activePack := mustLoadRulePack(t, "")
+	fixture.sidecar.router = NewEventRouter(nil, nil, nil, false)
+	fixture.sidecar.router.SetRulePack(activePack)
+	bound, err := fixture.sidecar.BootstrapObservabilityRuntime(t.Context(), fixture.configPath, initialRaw)
+	if err != nil || !bound {
+		t.Fatalf("bootstrap bound=%t error=%v", bound, err)
+	}
+	fixture.sidecar.observabilityV8Mu.Lock()
+	owner := fixture.sidecar.observabilityV8.(*sidecarOwnedObservabilityV8Runtime)
+	fixture.sidecar.observabilityV8Mu.Unlock()
+	activeGraph := owner.runtime.Active()
+
+	helperCalls := 0
+	previousHelper := launchConfigRestartHelper
+	launchConfigRestartHelper = func() error {
+		helperCalls++
+		return nil
+	}
+	t.Cleanup(func() { launchConfigRestartHelper = previousHelper })
+
+	mgr := newConfigManagerWithSnapshot(
+		fixture.configPath,
+		initial,
+		nil,
+		nil,
+		fixture.sidecar.observabilityV8ActivePlanDigest(),
+		fixture.sidecar.applyConfigReloadSnapshot,
+	)
+	invalidDir := invalidRulePackDir(t)
+	candidateRaw := []byte(fmt.Sprintf(
+		"config_version: 8\ndata_dir: %q\nenvironment: changed\ngateway:\n  config_reload:\n    mode: restart\nguardrail:\n  rule_pack_dir: %q\nobservability:\n  local:\n    retention_days: 30\n",
+		fixture.dataDir,
+		invalidDir,
+	))
+	if err := os.WriteFile(fixture.configPath, candidateRaw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	reloadErr := mgr.Reload(t.Context(), "test")
+	if reloadErr == nil || !strings.Contains(reloadErr.Error(), "rule pack preflight") {
+		t.Fatalf("invalid rule-pack reload error = %v", reloadErr)
+	}
+	if helperCalls != 0 {
+		t.Fatalf("restart helper calls = %d, want 0", helperCalls)
+	}
+	if owner.runtime.Active() != activeGraph || activeGraph.Generation() != 1 {
+		t.Fatalf("invalid rule pack changed active graph: before=%p after=%p generation=%d",
+			activeGraph, owner.runtime.Active(), owner.runtime.Active().Generation())
+	}
+	if fixture.sidecar.currentConfig().Environment != "original" ||
+		fixture.sidecar.currentConfig().Guardrail.RulePackDir != "" ||
+		mgr.Current().Environment != "original" ||
+		mgr.Current().Guardrail.RulePackDir != "" ||
+		mgr.gen.Load() != 0 {
+		t.Fatalf(
+			"invalid rule pack changed config/generation: sidecar=%q/%q manager=%q/%q gen=%d",
+			fixture.sidecar.currentConfig().Environment,
+			fixture.sidecar.currentConfig().Guardrail.RulePackDir,
+			mgr.Current().Environment,
+			mgr.Current().Guardrail.RulePackDir,
+			mgr.gen.Load(),
+		)
+	}
+	if fixture.sidecar.router.rulePack() != activePack {
+		t.Fatal("invalid rule-pack reload replaced the active router pack")
 	}
 }
 

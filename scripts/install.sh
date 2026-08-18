@@ -71,13 +71,15 @@ readonly MIN_PYTHON_VERSION="3.10"
 readonly MAX_PYTHON_VERSION_EXCLUSIVE="3.14"
 readonly COSIGN_BOOTSTRAP_VERSION="2.6.3"
 readonly COSIGN_BOOTSTRAP_MAX_BYTES="209715200"
+readonly SANDBOX_INSTALLER_ASSET_START_VERSION="0.8.11"
+readonly MACOS_SYSCTL_BIN="/usr/sbin/sysctl"
 VERIFIED_CHECKSUM=""
 COSIGN_BIN=""
 
 # Supported connectors. Keep in sync with cli/defenseclaw/connector_paths.py
 # KNOWN_CONNECTORS. The "none" pseudo-value means "lay binaries only — pick
 # a connector later with `defenseclaw init --connector ...`".
-readonly CONNECTOR_CHOICES=(codex claudecode zeptoclaw openclaw hermes cursor windsurf geminicli copilot openhands antigravity opencode omnigent none)
+readonly CONNECTOR_CHOICES=(codex claudecode zeptoclaw openclaw hermes cursor windsurf geminicli copilot openhands antigravity opencode amp omnigent none)
 
 # ── Terminal Formatting ───────────────────────────────────────────────────────
 
@@ -102,6 +104,17 @@ die() { err "$@"; exit 1; }
 # ── Utilities ─────────────────────────────────────────────────────────────────
 
 has() { command -v "$1" &>/dev/null; }
+
+macos_hardware_machine() {
+    local machine="$1"
+    if [[ "${machine}" == "x86_64" || "${machine}" == "amd64" ]] \
+        && [[ -x "${MACOS_SYSCTL_BIN}" && ! -L "${MACOS_SYSCTL_BIN}" ]] \
+        && [[ "$("${MACOS_SYSCTL_BIN}" -in sysctl.proc_translated 2>/dev/null || true)" == "1" ]]; then
+        printf '%s\n' "arm64"
+        return 0
+    fi
+    printf '%s\n' "${machine}"
+}
 
 existing_install_detected() {
     has defenseclaw \
@@ -733,6 +746,7 @@ connector_display_name() {
         openhands) echo "OpenHands" ;;
         antigravity) echo "Antigravity" ;;
         opencode) echo "OpenCode" ;;
+        amp) echo "Amp" ;;
         omnigent) echo "OmniGent" ;;
         *) echo "$1" ;;
     esac
@@ -857,6 +871,9 @@ detect_platform() {
 
     OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
     ARCH="$(uname -m)"
+    if [[ "${OS}" == "darwin" ]]; then
+        ARCH="$(macos_hardware_machine "${ARCH}")"
+    fi
 
     case "${ARCH}" in
         x86_64|amd64)  ARCH_NORM="amd64" ;;
@@ -869,6 +886,10 @@ detect_platform() {
         linux)  OS_NAME="Linux" ;;
         *)      die "Unsupported OS: ${OS}" ;;
     esac
+
+    if [[ "${OS}" == "darwin" && "${ARCH_NORM}" != "arm64" ]]; then
+        die "Intel macOS (${ARCH}) is unsupported. DefenseClaw for macOS requires Apple Silicon (arm64); no changes were made."
+    fi
 
     ok "${OS_NAME} (${ARCH_NORM})"
 }
@@ -977,7 +998,6 @@ resolve_cosign() {
 
     local expected filename verifier_url verifier_path actual size
     case "${OS}/${ARCH_NORM}" in
-        darwin/amd64) expected="5715d61dd00a9b6dcb344de14910b434145855b7f82690b94183c553ac1b68be" ;;
         darwin/arm64) expected="ff497a698f125f3130b04f000b2cb0dd163bcaf00b5e776ef536035e6d0b3f3e" ;;
         linux/amd64) expected="7c78a7f2efc00088bd788a758db6e0928e79f3e0eb83eb5d3c499ed98da4c4f4" ;;
         linux/arm64) expected="b7c23659a50a59fd8eec44b87188e9062157d0c87796cac7b38727e5390c4917" ;;
@@ -1336,6 +1356,30 @@ verify_checksum() {
         die "Checksum mismatch for ${filename}: expected ${expected}, got ${actual}"
     fi
     VERIFIED_CHECKSUM="${actual}"
+}
+
+install_openshell_sandbox() {
+    step "Installing openshell-sandbox"
+    [[ "${MODERN_RELEASE:-false}" == true ]] \
+        || die "Sandbox installation requires a signed DefenseClaw release bundle; no sandbox installer was executed"
+    version_gte "${RELEASE_VERSION}" "${SANDBOX_INSTALLER_ASSET_START_VERSION}" \
+        || die "DefenseClaw ${RELEASE_VERSION} does not publish an authenticated sandbox installer; use ${SANDBOX_INSTALLER_ASSET_START_VERSION} or newer"
+
+    local asset_name="install-openshell-sandbox.sh"
+    local sandbox_installer="${POLICY_DIR}/${asset_name}"
+    local verified_sha256=""
+    info "Downloading the signed release sandbox installer..."
+    fetch_artifact "$(artifact_path "${asset_name}")" "${sandbox_installer}"
+    verify_checksum "${sandbox_installer}" "${asset_name}"
+    verified_sha256="${VERIFIED_CHECKSUM}"
+    [[ "${verified_sha256}" =~ ^[0-9A-Fa-f]{64}$ ]] \
+        || die "Signed checksums do not authenticate the sandbox installer; no sandbox installer was executed"
+    chmod 500 "${sandbox_installer}" \
+        || die "Could not protect the authenticated sandbox installer; no sandbox installer was executed"
+    [[ "$(sha256_file "${sandbox_installer}")" == "${verified_sha256}" ]] \
+        || die "Authenticated sandbox installer changed before execution; no sandbox installer was executed"
+    bash "${sandbox_installer}" \
+        || die "OpenShell sandbox installation failed"
 }
 
 # ── Install: Gateway binary ──────────────────────────────────────────────────
@@ -1896,6 +1940,12 @@ resolve_version
 ensure_uv
 ensure_python
 load_release_policy
+if [[ "${INSTALL_SANDBOX}" == true ]]; then
+    [[ "${MODERN_RELEASE}" == true ]] \
+        || die "Sandbox installation requires a signed DefenseClaw release bundle; no sandbox installer was executed"
+    version_gte "${RELEASE_VERSION}" "${SANDBOX_INSTALLER_ASSET_START_VERSION}" \
+        || die "DefenseClaw ${RELEASE_VERSION} does not publish an authenticated sandbox installer; use ${SANDBOX_INSTALLER_ASSET_START_VERSION} or newer"
+fi
 if [[ "${MODERN_RELEASE}" == true ]]; then
     # Bind both roots before publishing payloads or rollback-token hardlinks.
     # A custom state home may be on another filesystem; its sibling custody is
@@ -1969,18 +2019,7 @@ if [[ "${INSTALL_SANDBOX}" == true ]]; then
     elif [[ "${OS}" != "linux" ]]; then
         warn "Sandbox mode requires Linux — skipping openshell-sandbox"
     else
-        local script_dir
-        script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-        local sandbox_installer="${script_dir}/install-openshell-sandbox.sh"
-        if [[ -f "${sandbox_installer}" ]]; then
-            bash "${sandbox_installer}"
-        else
-            step "Installing openshell-sandbox"
-            info "Downloading installer..."
-            curl -fsSL \
-                "https://raw.githubusercontent.com/${REPO}/${RELEASE_VERSION}/scripts/install-openshell-sandbox.sh" \
-                | bash
-        fi
+        install_openshell_sandbox
     fi
 fi
 

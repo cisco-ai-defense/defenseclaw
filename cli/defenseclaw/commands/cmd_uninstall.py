@@ -79,6 +79,9 @@ _CONNECTOR_BACKUP_MARKERS: dict[str, tuple[str, ...]] = {
         "claudecode_backup.json",
         os.path.join("connector_backups", "claudecode", "settings.json.json"),
     ),
+    "amp": (
+        os.path.join("connector_backups", "amp", "config.json"),
+    ),
     "zeptoclaw": (
         "zeptoclaw_backup.json",
         os.path.join("connector_backups", "zeptoclaw", "config.json.json"),

@@ -202,12 +202,14 @@ func TestLogInspectFindingsWithCorrelationUsesOneGeneratedV8Pipeline(t *testing.
 	logger.SetRuntimeV8Emitter(runtime)
 
 	const evaluationID = "evaluation-runtime-inspect"
+	const sourceEvidence = "source-evidence-excerpt"
+	const wantEvidence = "<redacted-sensitive len=23>"
 	source := scanner.InspectFindingSource{
 		Scanner: "hook-rules", Target: "codex:PreToolUse", TargetType: "tool_call",
 		Verdict: "block", DurationMs: 7, EvaluationID: evaluationID,
 		Findings: []scanner.InspectFinding{{
 			RuleID: "SECRET-AWS-AKIA", Title: "AWS access key", Severity: scanner.SeverityHigh,
-			Confidence: 0.95, Evidence: "source-evidence-excerpt", Tags: []string{"secret"},
+			Confidence: 0.95, Evidence: sourceEvidence, Tags: []string{"secret"},
 		}},
 	}
 	corr := ScanCorrelation{
@@ -241,16 +243,27 @@ func TestLogInspectFindingsWithCorrelationUsesOneGeneratedV8Pipeline(t *testing.
 		if body["defenseclaw.evaluation.id"] != evaluationID || body["defenseclaw.scan.id"] != scanID {
 			t.Fatalf("record[%d] identifiers=%#v", index, body)
 		}
-		if index == 0 && body["defenseclaw.guardrail.evidence_summary"] != "source-evidence-excerpt" {
+		if index == 0 && body["defenseclaw.guardrail.evidence_summary"] != wantEvidence {
 			t.Fatalf("finding evidence summary=%#v", body)
 		}
 	}
 
 	findings, err := logger.store.ListScanFindings(scanID)
 	if err != nil || len(findings) != 1 || findings[0].EvaluationID != evaluationID ||
-		findings[0].EvidenceSummary.String != "source-evidence-excerpt" ||
-		findings[0].ID != records[0].RecordID() {
+		findings[0].EvidenceSummary.String != wantEvidence ||
+		findings[0].ID != records[0].RecordID() || !findings[0].RuleID.Valid {
 		t.Fatalf("forensic runtime findings=%#v err=%v", findings, err)
+	}
+	persistedRuleID := findings[0].RuleID.String
+	if persistedRuleID == source.Findings[0].RuleID ||
+		!authenticatedSensitiveOpaqueRuleID(
+			persistedRuleID, sensitiveFindingKindSecret, source.Scanner, runtime,
+		) {
+		t.Fatalf("custom producer RuleID was not keyed: source=%q persisted=%q",
+			source.Findings[0].RuleID, persistedRuleID)
+	}
+	if body := securityActionBody(t, records[0]); body["defenseclaw.finding.rule_id"] != persistedRuleID {
+		t.Fatalf("generated finding RuleID=%#v, want persisted %q", body, persistedRuleID)
 	}
 	metrics := runtime.metricSnapshot()
 	if len(metrics) == 0 {
@@ -277,7 +290,7 @@ func TestLogInspectFindingsWithCorrelationUsesOneGeneratedV8Pipeline(t *testing.
 			if !ok || attributes["defenseclaw.scan.scanner"] != "hook-rules" ||
 				attributes["defenseclaw.connector.source"] != "codex" ||
 				attributes["defenseclaw.security.severity"] != "HIGH" ||
-				attributes["defenseclaw.finding.rule_id"] != "SECRET-AWS-AKIA" {
+				attributes["defenseclaw.finding.rule_id"] != persistedRuleID {
 				t.Fatalf("dashboard by-rule dimensions=%#v", data)
 			}
 		}

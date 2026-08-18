@@ -10,13 +10,70 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"time"
 	"unsafe"
 
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 	"golang.org/x/sys/windows"
 )
 
 const maxManagedPIDFileBytes = 64 << 10
+
+const (
+	managedIdentityReadMaxAttempts = 100
+	managedIdentityReadRetryDelay  = 5 * time.Millisecond
+)
+
+type managedIdentityReadFunc func(string, int64) ([]byte, error)
+type managedIdentitySleepFunc func(time.Duration)
+
+// readManagedIdentityFile retries only Windows sharing violations and always
+// repeats the complete handle-bound stable read. It never returns bytes from a
+// failed attempt, so a writer/replacer cannot turn the retry window into a
+// path-swap or in-place mutation bypass. The bounded half-second window covers
+// scanner/indexer handles and watchdog publication handoffs while permanent
+// conflicts still fail closed.
+func readManagedIdentityFile(path string, maxBytes int64) ([]byte, error) {
+	return readManagedIdentityFileWith(
+		path,
+		maxBytes,
+		safefile.ReadRegularFileBounded,
+		time.Sleep,
+	)
+}
+
+func managedIdentityHeldByWriter(err error) bool {
+	return errors.Is(err, windows.ERROR_SHARING_VIOLATION)
+}
+
+func readManagedIdentityFileWith(
+	path string,
+	maxBytes int64,
+	read managedIdentityReadFunc,
+	sleep managedIdentitySleepFunc,
+) ([]byte, error) {
+	if read == nil {
+		return nil, errors.New("daemon: nil managed identity reader")
+	}
+	if sleep == nil {
+		return nil, errors.New("daemon: nil managed identity retry sleeper")
+	}
+	var lastErr error
+	for attempt := 0; attempt < managedIdentityReadMaxAttempts; attempt++ {
+		data, err := read(path, maxBytes)
+		if err == nil {
+			return data, nil
+		}
+		lastErr = err
+		if !errors.Is(err, windows.ERROR_SHARING_VIOLATION) ||
+			attempt+1 == managedIdentityReadMaxAttempts {
+			return nil, err
+		}
+		sleep(managedIdentityReadRetryDelay)
+	}
+	return nil, lastErr
+}
 
 // removePIDFileIf atomically binds the content comparison and deletion to one
 // Windows file object. The handle shares only reads, so both an in-place writer

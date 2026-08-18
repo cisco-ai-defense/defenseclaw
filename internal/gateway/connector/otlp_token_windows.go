@@ -231,9 +231,16 @@ func openSecureOTLPWindowsFile(path string, creationDisposition, shareMode uint3
 			return nil, err
 		}
 	}
+	desiredAccess := uint32(windows.GENERIC_READ | windows.GENERIC_WRITE | windows.READ_CONTROL)
+	if secureCreate {
+		// A freshly-created token stage starts with a current-user GA ACE. Bind
+		// the rights needed to copy an authenticated destination owner/DACL onto
+		// that same handle before any credential bytes are written.
+		desiredAccess |= windows.WRITE_DAC | windows.WRITE_OWNER
+	}
 	handle, err := windows.CreateFile(
 		pathPtr,
-		windows.GENERIC_READ|windows.GENERIC_WRITE|windows.READ_CONTROL,
+		desiredAccess,
 		shareMode,
 		security,
 		creationDisposition,

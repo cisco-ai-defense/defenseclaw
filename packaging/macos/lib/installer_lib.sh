@@ -57,7 +57,7 @@ parse_connectors() {
 # is_supported_connector NAME -> exit 0 if name is auto-wireable.
 is_supported_connector() {
   case "$1" in
-    codex|claudecode|cursor) return 0;;
+    amp|codex|claudecode|cursor) return 0;;
     *) return 1;;
   esac
 }
@@ -85,6 +85,7 @@ home_perms_ok() {
 # explicitly for connectors that don't ship a stable metadata file.
 _read_json_version() {
   local path="$1"
+  local expected_name="${2:-}"
   local py
   py="$(command -v python3 || echo /usr/bin/python3)"
   "${py}" -c '
@@ -109,7 +110,11 @@ try:
   payload = b"".join(chunks)
   if len(payload) > 256 * 1024:
     raise OSError("agent package metadata exceeds its size bound")
-  value = json.loads(payload).get("version", "")
+  document = json.loads(payload)
+  expected_name = sys.argv[2]
+  if expected_name and document.get("name") != expected_name:
+    raise ValueError("agent package metadata identity mismatch")
+  value = document.get("version", "")
   if isinstance(value, str) and re.fullmatch(r"[0-9A-Za-z.+_-]{1,128}", value):
     print(value)
 except Exception:
@@ -117,7 +122,7 @@ except Exception:
 finally:
   if fd >= 0:
     os.close(fd)
-' "${path}" 2>/dev/null
+' "${path}" "${expected_name}" 2>/dev/null
 }
 
 _read_codex_version_as_user() {
@@ -172,6 +177,24 @@ discover_agent_version() {
   local connector="$1"
   local home="$2"
   case "${connector}" in
+    amp)
+      # Amp's supported npm distribution is @ampcode/cli. Read only the
+      # package metadata from known npm prefixes; never execute the user-owned
+      # `amp` shim while this helper is running beneath a root LaunchDaemon.
+      # Curl/native installs may not retain package metadata, in which case an
+      # empty version is intentional and the connector contract decides
+      # whether unversioned reconciliation is permitted.
+      local pkg
+      for pkg in \
+        "${home}"/.npm-global/lib/node_modules/@ampcode/cli/package.json \
+        "${home}"/.local/lib/node_modules/@ampcode/cli/package.json \
+        /usr/local/lib/node_modules/@ampcode/cli/package.json \
+        /opt/homebrew/lib/node_modules/@ampcode/cli/package.json; do
+        [[ -f "${pkg}" ]] || continue
+        local v; v="$(_read_json_version "${pkg}" "@ampcode/cli")"
+        if [[ -n "${v}" ]]; then echo "${v}"; return; fi
+      done
+      ;;
     codex)
       # Codex-cli is a Rust binary that ships from three OpenAI-owned
       # channels on macOS. Probe order picks the first-party
@@ -463,6 +486,11 @@ prepare_userspace_for() {
   local uid="${3:-}"
   local gid="${4:-}"
   case "${connector}" in
+    # Amp's hook is a managed TypeScript plugin. The connector reconciliation
+    # owns creating ~/.config/amp/plugins/defenseclaw.ts together with its
+    # backup metadata; this packaging helper must never precreate a placeholder
+    # file that would be mistaken for user state.
+    amp)        : ;;
     codex)      prepare_codex_userspace      "${home}" "${uid}" "${gid}";;
     claudecode) prepare_claudecode_userspace "${home}" "${uid}" "${gid}";;
     cursor)     prepare_cursor_userspace     "${home}" "${uid}" "${gid}";;
@@ -562,7 +590,7 @@ enumerate_local_users() {
 #
 # Args:
 #   SUPPORT_DIR    e.g. /opt/cisco/secureclient/defenseclaw
-#   CONNECTORS_CSV comma-separated list of connectors (e.g. codex,claudecode,cursor)
+#   CONNECTORS_CSV comma-separated list of connectors (e.g. amp,codex,claudecode,cursor)
 #   USER_LINES     newline-separated user:uid:gid:home lines (as produced by
 #                  enumerate_local_users)
 #
@@ -752,6 +780,84 @@ resolve_aid_endpoint() {
   aid_endpoint_for_env "${env}"
 }
 
+# move_legacy_aside PATH BACKUP_ROOT VERSION [--dry-run] -> stdout log message.
+#
+# Idempotent installer helper for the "reconcile in place" path: relocate a
+# legacy DefenseClaw location under BACKUP_ROOT with a
+# .pre-<version>-<timestamp> suffix instead of deleting it. Missing PATH is a
+# no-op; missing BACKUP_ROOT returns rc 3; a symlinked BACKUP_ROOT returns rc 4
+# (mv into a symlink would follow the link). Callers get preserved rollback
+# state and a fresh install landing zone without touching user data.
+move_legacy_aside() {
+  local path="$1" backup_root="$2" version="$3"
+  shift 3
+  local dry_run="false"
+  local arg
+  for arg in "$@"; do
+    case "${arg}" in
+      --dry-run) dry_run="true";;
+      *) return 2;;
+    esac
+  done
+
+  if [[ -z "${path}" || -z "${backup_root}" || -z "${version}" ]]; then
+    return 2
+  fi
+
+  # Reject a version string that could path-traverse the target. version
+  # flows into ${target}=${backup_root}/${base}.pre-${version}-${timestamp}
+  # verbatim; a version containing '/' or '..' (e.g. a malformed
+  # --version output captured unsanitized) would escape the backup_root.
+  # Whitespace and shell metacharacters are also refused so `printf` /
+  # `mv` cannot be steered by callers that failed to trim their input.
+  if [[ "${version}" == */* || "${version}" == *".."* ]] \
+      || [[ "${version}" =~ [[:space:][:cntrl:]\"\'\\\$\`\;\|\&\<\>] ]]; then
+    return 2
+  fi
+
+  if [[ ! -e "${path}" && ! -L "${path}" ]]; then
+    return 0
+  fi
+
+  # Reject a symlinked BACKUP_ROOT outright — mv into a symlink
+  # target would follow the link and relocate legacy state into
+  # whatever the symlink points at.
+  if [[ -L "${backup_root}" ]]; then
+    return 4
+  fi
+
+  local base timestamp target
+  base="$(basename -- "${path}")"
+  timestamp="$(date -u +%Y%m%dT%H%M%SZ 2>/dev/null || echo "unknown")"
+  target="${backup_root}/${base}.pre-${version}-${timestamp}"
+
+  if [[ "${dry_run}" == "true" ]]; then
+    printf '[install] would move legacy path aside: %s -> %s\n' "${path}" "${target}"
+    return 0
+  fi
+
+  if [[ ! -d "${backup_root}" ]]; then
+    return 3
+  fi
+
+  # Collision suffix in case of same-second re-runs.
+  local suffix=""
+  local i
+  for (( i = 0; i < 100; i++ )); do
+    if [[ ! -e "${target}${suffix}" && ! -L "${target}${suffix}" ]]; then
+      break
+    fi
+    suffix=".${i}"
+  done
+  target="${target}${suffix}"
+
+  if ! /bin/mv -- "${path}" "${target}" 2>/dev/null; then
+    return 4
+  fi
+  printf '[install] moved legacy path aside: %s -> %s\n' "${path}" "${target}"
+  return 0
+}
+
 # render_config MODE PRIMARY API_PORT SUPPORT_DIR AID_ENDPOINT CONN... -> stdout
 # Renders the full config.yaml. Pure stdout, no file writes.
 # Extra args after AID_ENDPOINT are the full connector list (primary + others).
@@ -776,6 +882,27 @@ render_config() {
   local support_dir="$4"
   local aid_endpoint="$5"
   shift 5
+  # Positional arg 6 is the number of home_dirs entries to consume next
+  # (the new managed-inventory shape). The remaining args are connector
+  # names. Legacy callers omit the count and pass connector names
+  # directly; those still work because a non-numeric first-remaining
+  # arg leaves home_dirs empty and treats every arg as a connector.
+  local home_dirs_count=0
+  local -a home_dirs=()
+  if [[ "${1:-}" =~ ^[0-9]+$ ]]; then
+    home_dirs_count="$1"
+    shift
+    local _idx
+    for (( _idx = 0; _idx < home_dirs_count; _idx++ )); do
+      # Stop early if the caller's declared count exceeds the number of
+      # remaining positional args; a missing path would otherwise inject an
+      # empty entry that violates the config schema's minLength:1 constraint.
+      (( $# > 0 )) || break
+      [[ -n "$1" ]] && home_dirs+=("$1")
+      shift
+    done
+    unset _idx
+  fi
   local -a connectors=("$@")
   local runtime_dir="${support_dir}/runtime"
 
@@ -859,8 +986,30 @@ cisco_ai_defense:
 # restored. Other ai_discovery.* keys keep their built-in defaults (mode
 # enhanced, scan intervals). The scanner is a no-op unless enabled, so this
 # block is required for endpoint inventory to flow.
+#
+# home_dirs is populated from the same enumerate_local_users filter that
+# renders targets.yaml so per-user detectors (~/.claude/skills, ~/.codex/*,
+# etc.) resolve to every eligible local user's home — not just the daemon's
+# HOME (/var/root under root, which has no operator agent state).
 ai_discovery:
   enabled: true
+EOF
+
+  if (( ${#home_dirs[@]} > 0 )); then
+    echo "  home_dirs:"
+    local h
+    local quoted_home
+    for h in "${home_dirs[@]}"; do
+      # yaml_double_quoted_scalar performs the same escaping the rest of
+      # this file relies on for user-supplied strings — inserting `h` raw
+      # inside `"..."` would let a `\` or `"` in a legitimate home path
+      # produce invalid YAML or a subtly different path.
+      quoted_home="$(yaml_double_quoted_scalar "${h}")" || return 1
+      printf '    - %s\n' "${quoted_home}"
+    done
+  fi
+
+  cat <<EOF
 
 # asset_policy is intentionally disabled in this managed_enterprise
 # rollout. The AID cloud is the single authoritative source of block

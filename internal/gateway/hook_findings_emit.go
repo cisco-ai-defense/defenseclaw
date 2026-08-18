@@ -91,7 +91,15 @@ func (a *APIServer) emitInspectVerdictFindings(
 	latency time.Duration,
 	errorReason string,
 ) hookEvaluationContext {
-	if verdict == nil || len(verdict.DetailedFindings) == 0 {
+	// A verdict WITHOUT DetailedFindings is still a real scan — the
+	// AID cloud lane in managed_enterprise routinely returns an allow
+	// verdict with zero findings, and the operator's `TotalScans`
+	// counter should reflect that inspection happened. scanner.EmitInspectFindings
+	// handles a zero-finding InspectFindingSource (it emits an EventScan
+	// summary + a scan_results row without any scan_findings rows), so
+	// we pass through here on nil-verdict-only rather than
+	// zero-finding early-return.
+	if verdict == nil {
 		return hookEvaluationContext{}
 	}
 
@@ -213,8 +221,10 @@ func normalizedFindingsToInspect(nfs []NormalizedFinding, fallbackSeverity strin
 			RuleID:     nf.CanonicalID,
 			Title:      title,
 			Severity:   scanner.Severity(sev),
+			Category:   nf.Category,
 			Confidence: nf.Confidence,
 			Tags:       tags,
+			Evidence:   nf.Evidence,
 		})
 	}
 	return out
@@ -517,17 +527,30 @@ func ruleFindingsToInspect(in []RuleFinding) []scanner.InspectFinding {
 	}
 	out := make([]scanner.InspectFinding, 0, len(in))
 	for _, f := range in {
+		tags := append([]string(nil), f.Tags...)
+		if f.enforcement == findingEnforcementDetectionOnly && !hasStableFindingTag(tags, scanner.FindingTagDetectionOnly) {
+			tags = append(tags, scanner.FindingTagDetectionOnly)
+		}
 		out = append(out, scanner.InspectFinding{
 			RuleID:              f.RuleID,
 			Title:               f.Title,
 			Severity:            scanner.Severity(f.Severity),
 			Confidence:          f.Confidence,
 			Evidence:            f.Evidence,
-			Tags:                f.Tags,
+			Tags:                tags,
 			ToolCapabilityClass: f.ToolCapabilityClass,
 		})
 	}
 	return out
+}
+
+func hasStableFindingTag(tags []string, want string) bool {
+	for _, tag := range tags {
+		if tag == want {
+			return true
+		}
+	}
+	return false
 }
 
 // appendHookEvaluationDetails appends `evaluation_id=<uuid>` and

@@ -26,6 +26,7 @@ import tempfile
 import unittest
 import uuid
 from datetime import datetime, timedelta, timezone
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import click
@@ -38,6 +39,7 @@ from defenseclaw.commands.cmd_skill import (
     _build_scan_map,
     _get_openclaw_skill_info,
     _skill_display_name,
+    _skill_install_targets,
     _skill_status_display,
     skill,
 )
@@ -73,6 +75,20 @@ class TestOpenClawSkillInfo(unittest.TestCase):
     @patch("defenseclaw.commands.cmd_skill._run_openclaw", return_value='{"error": ""}')
     def test_empty_error_field_is_still_an_error(self, _mock_run):
         self.assertIsNone(_get_openclaw_skill_info("missing"))
+
+
+class TestSkillInstallTargets(unittest.TestCase):
+    def test_uses_connector_write_scope_instead_of_discovery_precedence(self):
+        cfg = SimpleNamespace(
+            skill_dirs=lambda _connector: ["/global/discovery"],
+            skill_write_dirs=lambda _connector: ["/workspace/.agents/skills"],
+        )
+        app = SimpleNamespace(cfg=cfg)
+
+        self.assertEqual(
+            _skill_install_targets(app, ["amp"], explicit_connector=True),
+            [("amp", "/workspace/.agents/skills")],
+        )
 
 
 class TestSkillBlock(SkillCommandTestBase):
@@ -735,6 +751,19 @@ class TestSkillScan(SkillCommandTestBase):
         self.assertEqual(result.exit_code, 0, result.output)
         called = {c.kwargs["connector"] for c in mock_scan_all.call_args_list}
         self.assertEqual(called, {"claudecode", "codex"})
+
+    @patch("defenseclaw.commands.cmd_skill._scan_all")
+    @patch("defenseclaw.commands.cmd_skill._build_skill_scanner")
+    def test_scan_all_multi_connector_reuses_rule_pack_cache(self, mock_build, _mock_scan_all):
+        mock_build.return_value = MagicMock()
+        self.app.cfg.active_connectors = lambda: ["claudecode", "codex"]  # type: ignore[method-assign]
+
+        result = self.invoke(["scan", "--all"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        caches = [call.kwargs["pack_cache"] for call in mock_build.call_args_list]
+        self.assertEqual(len(caches), 2)
+        self.assertIs(caches[0], caches[1])
 
     @patch("defenseclaw.commands.cmd_skill._scan_all")
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
@@ -3212,6 +3241,28 @@ class TestSkillScannerLLMDefault(SkillCommandTestBase):
         cfg = mock_wrapper.call_args.args[0]
         self.assertFalse(cfg.use_llm)
 
+    @patch("defenseclaw.scanner.rulepack.maybe_wrap")
+    @patch("defenseclaw.scanner.skill.SkillScannerWrapper")
+    @patch("defenseclaw.scanner._llm_env.litellm_model", return_value="")
+    def test_builder_threads_connector_and_pack_cache(
+        self,
+        _mock_model,
+        _mock_wrapper,
+        mock_maybe_wrap,
+    ):
+        from defenseclaw.commands.cmd_skill import _build_skill_scanner
+
+        cache = {}
+        _build_skill_scanner(
+            self.app,
+            None,
+            connector="hermes",
+            pack_cache=cache,
+        )
+
+        self.assertEqual(mock_maybe_wrap.call_args.args[2], "hermes")
+        self.assertIs(mock_maybe_wrap.call_args.kwargs["pack_cache"], cache)
+
     @patch("defenseclaw.commands.cmd_skill._scan_all")
     @patch("defenseclaw.commands.cmd_skill._build_skill_scanner")
     def test_scan_threads_no_use_llm_flag(self, mock_build, _mock_scan_all):
@@ -3334,6 +3385,28 @@ class TestSkillBareNameResolution(SkillCommandTestBase):
         self.assertIn("── connector: hermes ──", result.output)
         self.assertIn("Scanning 1 skill on hermes", result.output)
         self.assertEqual(mock_scan.call_count, 2)
+
+    @patch("defenseclaw.commands.cmd_skill._scan_one_local_skill")
+    @patch("defenseclaw.commands.cmd_skill._build_skill_scanner")
+    def test_bare_name_duplicate_reuses_rule_pack_cache(self, mock_build, _mock_scan):
+        a_root = os.path.join(self.tmp_dir, "codex", "skills")
+        b_root = os.path.join(self.tmp_dir, "hermes", "skills")
+        os.makedirs(os.path.join(a_root, "dup"))
+        os.makedirs(os.path.join(b_root, "dup"))
+
+        self.app.cfg.active_connector = lambda: "codex"  # type: ignore[method-assign]
+        self.app.cfg.active_connectors = lambda: ["codex", "hermes"]  # type: ignore[method-assign]
+        self.app.cfg.skill_dirs = self._fake_dirs(  # type: ignore[method-assign]
+            {"codex": [a_root], "hermes": [b_root]}, "codex",
+        )
+        mock_build.return_value = MagicMock()
+
+        result = self.invoke(["scan", "dup"])
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        caches = [call.kwargs["pack_cache"] for call in mock_build.call_args_list]
+        self.assertEqual(len(caches), 2)
+        self.assertIs(caches[0], caches[1])
 
     @patch("defenseclaw.commands.cmd_skill._get_openclaw_skill_info")
     @patch("defenseclaw.scanner.skill.SkillScannerWrapper.scan")

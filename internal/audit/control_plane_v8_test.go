@@ -130,6 +130,18 @@ func (emitter *testRuntimeV8Emitter) EmitRuntimeV8(
 	return RuntimeV8EmitOutcome{Admission: emitter.admission, LocalPersisted: true}, nil
 }
 
+func (emitter *testRuntimeV8Emitter) FingerprintRuntimeV8FindingContent(
+	value string,
+) (string, error) {
+	if emitter == nil {
+		return "", fmt.Errorf("test correlation fingerprint is unavailable")
+	}
+	return testEventHistoryProjectionEngine.CorrelationFingerprintV1(
+		value,
+		observability.FieldClassEvidence,
+	)
+}
+
 func (emitter *testRuntimeV8Emitter) EmitRuntimeV8LogBatch(
 	ctx context.Context,
 	operations []RuntimeV8LogOperation,

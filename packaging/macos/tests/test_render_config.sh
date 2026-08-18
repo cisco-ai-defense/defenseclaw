@@ -41,13 +41,14 @@ t_single_connector() {
 
 t_multi_connector() {
   local out
-  out="$(render_config observe cursor 18970 "/opt/cisco/secureclient/defenseclaw" "${TEST_AID_ENDPOINT_PROD}" cursor claudecode codex)"
+  out="$(render_config observe cursor 18970 "/opt/cisco/secureclient/defenseclaw" "${TEST_AID_ENDPOINT_PROD}" cursor claudecode codex amp)"
 
   assert_contains "${out}" "connector: cursor"        "primary is first arg"
   assert_contains "${out}" "  connectors:"            "multi-connector map present"
   assert_contains "${out}" "    cursor:"              "cursor entry under connectors"
   assert_contains "${out}" "    claudecode:"          "claudecode entry under connectors"
   assert_contains "${out}" "    codex:"               "codex entry under connectors"
+  assert_contains "${out}" "    amp:"                 "amp entry under connectors"
   assert_contains "${out}" "redaction_profile: sensitive" "managed redaction profile"
   assert_contains "${out}" "mode: observe"            "observe mode"
 }

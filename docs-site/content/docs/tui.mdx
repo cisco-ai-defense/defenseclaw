@@ -55,6 +55,21 @@ with `V` for the full model inventory; model rows add Model, Model status, and
 Format columns, with recipe, modality, device, byte size, and pinned state in
 the detail view when the source reports them.
 
+### Doctor status and cache
+
+The Overview panel reads `~/.defenseclaw/doctor_cache.json`; it does not rerun
+credential or network probes during rendering. Doctor schema v2 keeps health
+checks and repair attempts in separate ledgers, and the Overview derives the
+run outcome from both. A failed or dependency-blocked repair therefore cannot
+produce an all-green Doctor card.
+
+Unknown or malformed schema-v2 state becomes a visible warning rather than
+being assumed healthy. Snapshots older than 15 minutes are marked stale, and
+pressing `D` runs Doctor in the background to refresh the view. Failed
+credential checks also feed the bounded missing-credential notice without
+exposing values. See the [Doctor cache reference](/docs/reference/configuration#doctor-cache)
+for the on-disk format.
+
 ## Handy keys
 
 | Key | Action |

@@ -1030,7 +1030,17 @@ func TestCorrelationMigrationIsAdditiveForPreviousReader(t *testing.T) {
 	if _, err := store.db.Exec(`CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at DATETIME NOT NULL)`); err != nil {
 		t.Fatal(err)
 	}
-	previousCount := len(migrations) - 1
+	correlationVersion := 0
+	for index, candidate := range migrations {
+		if candidate.description == "observability v8: add durable focused correlation ledger" {
+			correlationVersion = index + 1
+			break
+		}
+	}
+	if correlationVersion == 0 {
+		t.Fatal("focused correlation migration not found")
+	}
+	previousCount := correlationVersion - 1
 	for index := 0; index < previousCount; index++ {
 		if err := store.applyMigration(index+1, migrations[index]); err != nil {
 			t.Fatal(err)
@@ -1045,7 +1055,7 @@ func TestCorrelationMigrationIsAdditiveForPreviousReader(t *testing.T) {
 	if err := store.db.QueryRow(`SELECT sql FROM sqlite_master WHERE type='table' AND name='audit_events'`).Scan(&schemaBefore); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.applyMigration(len(migrations), migrations[len(migrations)-1]); err != nil {
+	if err := store.applyMigration(correlationVersion, migrations[correlationVersion-1]); err != nil {
 		t.Fatal(err)
 	}
 	for _, index := range []struct {

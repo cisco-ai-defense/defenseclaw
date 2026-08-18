@@ -5,6 +5,7 @@ package redaction
 
 import (
 	"bytes"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -207,6 +208,44 @@ func TestEngineCorrelationKeyCustodyBoundary(t *testing.T) {
 	}
 }
 
+func TestEngineCorrelationFingerprintV1IsKeyedDeterministicAndClassSeparated(t *testing.T) {
+	engine := newTestEngine(t)
+	value := strings.Join([]string{"private", "evidence", "value"}, "-")
+	first, err := engine.CorrelationFingerprintV1(value, observability.FieldClassEvidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := engine.CorrelationFingerprintV1(value, observability.FieldClassEvidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	differentValue, err := engine.CorrelationFingerprintV1(value+"-different", observability.FieldClassEvidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	differentClass, err := engine.CorrelationFingerprintV1(value, observability.FieldClassContent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first != second || len(first) != 8 || first != strings.ToLower(first) {
+		t.Fatalf("correlation fingerprint is not stable canonical hex: %q / %q", first, second)
+	}
+	if _, err := hex.DecodeString(first); err != nil {
+		t.Fatalf("correlation fingerprint is not hex: %q", first)
+	}
+	if first == differentValue || first == differentClass {
+		t.Fatalf("correlation fingerprint lacked value/class separation: value=%q class=%q", differentValue, differentClass)
+	}
+
+	keyless, err := NewEngine(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fingerprint, err := keyless.CorrelationFingerprintV1(value, observability.FieldClassEvidence); fingerprint != "" || !IsHashV1Error(err, HashV1ErrorInvalidKey) {
+		t.Fatalf("keyless fingerprint=%q err=%v, want safe key-unavailable failure", fingerprint, err)
+	}
+}
+
 func TestEngineConstructorRequiresNoKeyOrExactKey(t *testing.T) {
 	if _, err := NewEngine([]byte("short")); !IsProjectionError(err, ProjectionFailureContext) {
 		t.Fatalf("short key error = %v", err)
@@ -305,6 +344,78 @@ func TestEngineDetectorValidatorFailureProtectsWholeField(t *testing.T) {
 	encoded, _ := projection.Bytes()
 	if bytes.Contains(encoded, []byte(input)) {
 		t.Fatal("validator failure retained the malformed raw field")
+	}
+}
+
+func TestEngineCredentialsOnlyProfileFailsClosedOnAmbiguousQueryKey(t *testing.T) {
+	const sentinel = "credentials-only-secret"
+	input := "postgres://db.example.test/app?%25252574oken=" + sentinel
+	record := newTestRecord(t, observability.SignalLogs,
+		map[string]any{"message": input},
+		map[string]observability.FieldClass{"/message": observability.FieldClassContent},
+	)
+	profile, err := NewCustomProfile(
+		"credentials.only",
+		ProfileSensitive,
+		[]DetectorGroup{DetectorGroupCredentials},
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	projection, _, err := newTestEngine(t).Project(record, profile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	object, err := projection.Payload().Object()
+	if err != nil {
+		t.Fatal(err)
+	}
+	message, _ := object["message"].(string)
+	if strings.Contains(message, sentinel) ||
+		!strings.Contains(message, "<redacted type=credentials.connection_string") {
+		t.Fatalf("credentials-only projection leaked ambiguous query value: %q", message)
+	}
+}
+
+func TestEngineOversizeURLQueryCandidateFailsClosed(t *testing.T) {
+	const sentinel = "oversize-query-secret"
+	profile, err := NewCustomProfile(
+		"credentials.oversize",
+		ProfileSensitive,
+		[]DetectorGroup{DetectorGroupCredentials},
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, input := range []string{
+		"postgres://db.example.test/app?%25252574oken=" +
+			strings.Repeat("a", maxURLQueryCandidateBytes) + sentinel,
+		"postgres://db.example.test/app?token%3D" +
+			strings.Repeat("a", maxURLQueryCandidateBytes) + "=" + sentinel,
+	} {
+		record := newTestRecord(t, observability.SignalLogs,
+			map[string]any{"message": input},
+			map[string]observability.FieldClass{"/message": observability.FieldClassContent},
+		)
+		projection, report, err := newTestEngine(t).Project(record, profile)
+		if err != nil {
+			t.Fatal(err)
+		}
+		object, err := projection.Payload().Object()
+		if err != nil {
+			t.Fatal(err)
+		}
+		message, _ := object["message"].(string)
+		if strings.Contains(message, sentinel) ||
+			message != "<redacted type=failed_closed v=1 code=validator_failed>" {
+			t.Fatalf("oversize URL query candidate did not fail closed: %q", message)
+		}
+		if projection.Metadata().State != ProjectionStateFailedClosed ||
+			len(report.Entries()) != 1 || report.Entries()[0].Code != "validator_failed" {
+			t.Fatalf("oversize failure metadata = %#v / %#v", projection.Metadata(), report.Entries())
+		}
 	}
 }
 

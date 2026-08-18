@@ -25,9 +25,10 @@ func newRuntimeAssetStateTestStore(t *testing.T) *Store {
 }
 
 func TestRuntimeAssetStateMigrationIsAppendOnly(t *testing.T) {
-	if got := migrations[len(migrations)-1].description; got !=
+	const runtimeAssetMigrationIndex = 28
+	if got := migrations[runtimeAssetMigrationIndex].description; got !=
 		"runtime assets: add durable connector session provenance state" {
-		t.Fatalf("last migration = %q, runtime asset migration must stay append-only", got)
+		t.Fatalf("migration 29 = %q, runtime asset migration must stay append-only", got)
 	}
 	if ownership, ok := retentionAuditMigrationCatalog["runtime_asset_state"]; !ok || ownership != retentionOwnedProtected {
 		t.Fatalf("runtime_asset_state retention ownership = %v, present=%v", ownership, ok)

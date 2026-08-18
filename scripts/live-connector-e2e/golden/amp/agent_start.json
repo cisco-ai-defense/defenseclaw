@@ -1,0 +1,12 @@
+{
+  "hook_event_name": "agent.start",
+  "session_id": "dc-e2e-amp",
+  "thread_id": "dc-e2e-amp",
+  "turn_id": "dc-e2e-turn",
+  "message_id": "dc-e2e-turn",
+  "source_event_id": "agent.start:dc-e2e-amp:dc-e2e-turn:windows-contract:1",
+  "source_sequence": "1",
+  "agent_name": "amp",
+  "agent_type": "amp",
+  "prompt": "Reply with only the word ready."
+}

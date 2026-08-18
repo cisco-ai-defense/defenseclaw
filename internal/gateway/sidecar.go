@@ -184,6 +184,21 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	if cfg == nil || cfg.ConfigVersion != config.ObservabilityV8ConfigVersion {
 		return nil, fmt.Errorf("sidecar: schema v8 is required; run 'defenseclaw upgrade' first")
 	}
+	// Rule-pack integrity is a construction precondition. Load both the global
+	// pack and the effective pack for an enabled single-connector deployment
+	// before creating a client or returning any runnable sidecar state.
+	rp, err := loadInitialSidecarRulePack(cfg)
+	if err != nil {
+		return nil, err
+	}
+	initialRules, err := compileRulePackCategories(rp)
+	if err != nil {
+		return nil, fmt.Errorf("sidecar: prepare guardrail rule-pack activation: %w", err)
+	}
+	initialPatterns, err := prepareLocalPatternsOverride(rp.LocalPatterns)
+	if err != nil {
+		return nil, fmt.Errorf("sidecar: prepare guardrail local-pattern activation: %w", err)
+	}
 	fmt.Fprintf(os.Stderr, "[sidecar] initializing client (host=%s port=%d device_key=%s)\n",
 		cfg.Gateway.Host, cfg.Gateway.Port, cfg.Gateway.DeviceKeyFile)
 
@@ -289,16 +304,6 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	// digest) callers can override this via SetDefaultPolicyID.
 	router.SetDefaultPolicyID(cfg.Guardrail.Mode)
 
-	// Load guardrail rule pack for judge prompts, suppressions, etc.
-	rp := loadSidecarRulePack(cfg)
-	router.SetRulePack(rp)
-	ApplyRulePackOverrides(rp)
-	// local-patterns.yaml replaces the compiled-in local pattern set
-	// per-profile when present in the rule pack. Calling with nil
-	// LocalPatterns is a no-op (keeps the defaults), so this is safe
-	// even when an operator hasn't customized the file.
-	ApplyLocalPatternsOverride(rp.LocalPatterns)
-
 	// Seed custom-providers overlay from llm.base_url so a custom LLM
 	// gateway domain is recognized by isKnownProviderDomain(). Must run
 	// before providerRegistrySnapshot() calls below.
@@ -310,7 +315,10 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 	// detection AND tool-result PII inspection (via inspectToolResult),
 	// so it must be initialized whenever judge is enabled — not only when
 	// tool_injection is on.
-	hookJudge := buildSharedJudge(cfg, rp)
+	hookJudge, err := buildInitialSidecarJudge(client, cfg, rp)
+	if err != nil {
+		return nil, err
+	}
 	if hookJudge != nil {
 		router.SetJudge(hookJudge)
 	}
@@ -442,6 +450,13 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 		judgeBodiesReadyPending: judgeBodiesReadyPending,
 		judgeBodiesReadyDetails: judgeBodiesReadyDetails,
 	}
+	// Commit the already-validated cold-start policy candidate only after every
+	// fallible constructor has succeeded. A rejected candidate must leave the
+	// process-global scanners unchanged, and must not publish a rule pack to
+	// its router before that router is part of a runnable Sidecar.
+	publishRulePackOverrides(initialRules)
+	publishLocalPatternsOverride(initialPatterns)
+	router.SetRulePack(rp)
 	sidecar.setEventRouter(router)
 	sidecar.publishConfig(cfg)
 	// Publish the process-global managed carve-out only after every fallible
@@ -604,8 +619,13 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	// first complete connector/MCP snapshot immediately after that binding, then
 	// retain the same callback for each managed discovery scan.
 	if managed.IsManagedEnterprise(s.currentConfig().DeploymentMode) {
-		inventoryEmit := makeEndpointInventoryEmitter(s.currentConfig(), s.observabilityV8Emitter())
-		if discovery := s.aiDiscoverySnapshot(); discovery != nil {
+		var snapshotFn func() inventory.AIDiscoveryReport
+		discovery := s.aiDiscoverySnapshot()
+		if discovery != nil {
+			snapshotFn = discovery.Snapshot
+		}
+		inventoryEmit := makeEndpointInventoryEmitter(s.currentConfig(), s.observabilityV8Emitter(), snapshotFn)
+		if discovery != nil {
 			discovery.SetManagedInventoryEmitHook(inventoryEmit)
 		}
 		inventoryEmit(runCtx)
@@ -1125,26 +1145,172 @@ func configRestartHelperArgs(argv []string) []string {
 	return args
 }
 
-func loadSidecarRulePack(cfg *config.Config) *guardrail.RulePack {
-	rp := guardrail.LoadRulePack(cfg.Guardrail.RulePackDir)
-	rp.Validate()
-	fmt.Fprintf(os.Stderr, "[sidecar] guardrail rule pack loaded: %s\n", rp)
-	return rp
+type sidecarRulePackCandidate struct {
+	active         *guardrail.RulePack
+	activeRules    *compiledRulePackCategories
+	activePatterns *localPatternsActivation
+	connectors     map[string]*guardrail.RulePack
+	connectorRules map[string]*compiledRulePackCategories
 }
 
-func buildSharedJudge(cfg *config.Config, rp *guardrail.RulePack) *LLMJudge {
-	if cfg == nil || !cfg.Guardrail.Judge.Enabled {
-		return nil
+func loadValidatedRulePack(cache *guardrail.RulePackCache, dir, scope string) (*guardrail.RulePack, error) {
+	if cache == nil {
+		return nil, fmt.Errorf("%s rule pack: cache is unavailable", scope)
+	}
+	rp, err := cache.Load(dir)
+	if err != nil {
+		return nil, fmt.Errorf("%s rule pack %q: %w", scope, dir, err)
 	}
 	if rp == nil {
-		rp = loadSidecarRulePack(cfg)
+		return nil, fmt.Errorf("%s rule pack %q: loader returned no rule pack", scope, dir)
+	}
+	if err := rp.Validate(); err != nil {
+		return nil, fmt.Errorf("%s rule pack %q: %w", scope, dir, err)
+	}
+	return rp, nil
+}
+
+// loadInitialSidecarRulePack performs the cold-start contract. Multi-connector
+// packs remain isolated to their individual setup transactions, but the global
+// pack and an enabled single connector's effective pack must be valid before a
+// runnable Sidecar can be returned.
+func loadInitialSidecarRulePack(cfg *config.Config) (*guardrail.RulePack, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("sidecar: guardrail rule pack config is unavailable")
+	}
+	cache := guardrail.NewRulePackCache()
+	global, err := loadValidatedRulePack(cache, cfg.Guardrail.RulePackDir, "global")
+	if err != nil {
+		return nil, fmt.Errorf("sidecar: %w", err)
+	}
+	active := global
+	names := cfg.ActiveConnectors()
+	if cfg.Guardrail.Enabled && len(names) == 1 {
+		name := canonicalConnectorRulePackKey(names[0])
+		if name != "" && cfg.Guardrail.EffectiveEnabled(name) {
+			active, err = loadValidatedRulePack(
+				cache,
+				cfg.EffectiveRulePackDirForConnector(name),
+				"connector "+name,
+			)
+			if err != nil {
+				return nil, fmt.Errorf("sidecar: %w", err)
+			}
+		}
+	}
+	fmt.Fprintf(os.Stderr, "[sidecar] guardrail rule pack loaded: %s\n", active)
+	return active, nil
+}
+
+// preflightSidecarRulePacks loads a reload candidate through a fresh cache.
+// It validates the global pack plus every enabled manual per-connector pack,
+// and all explicitly selectable application-protection packs, before any
+// runtime generation, restart helper, config snapshot, or scanner is changed.
+func preflightSidecarRulePacks(cfg *config.Config) (*sidecarRulePackCandidate, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("config reload rule pack candidate is unavailable")
+	}
+	cache := guardrail.NewRulePackCache()
+	global, err := loadValidatedRulePack(cache, cfg.Guardrail.RulePackDir, "global")
+	if err != nil {
+		return nil, err
+	}
+	candidate := &sidecarRulePackCandidate{
+		active:         global,
+		connectors:     make(map[string]*guardrail.RulePack),
+		connectorRules: make(map[string]*compiledRulePackCategories),
+	}
+
+	activeConnectors := cfg.ActiveConnectors()
+	enabledManual := make([]string, 0, len(activeConnectors))
+	if cfg.Guardrail.Enabled {
+		for _, rawName := range activeConnectors {
+			name := canonicalConnectorRulePackKey(rawName)
+			if name == "" || !cfg.Guardrail.EffectiveEnabled(name) {
+				continue
+			}
+			rp, loadErr := loadValidatedRulePack(
+				cache,
+				cfg.EffectiveRulePackDirForConnector(name),
+				"connector "+name,
+			)
+			if loadErr != nil {
+				return nil, loadErr
+			}
+			candidate.connectors[name] = rp
+			enabledManual = append(enabledManual, name)
+		}
+	}
+	if len(activeConnectors) == 1 && len(enabledManual) == 1 {
+		candidate.active = candidate.connectors[enabledManual[0]]
+	}
+
+	if cfg.ApplicationProtection.Enabled {
+		// The global automatic-protection override can apply to a connector
+		// discovered after publication, so validate it even when no explicit
+		// connector entry currently names it.
+		if dir := strings.TrimSpace(cfg.ApplicationProtection.Guardrail.RulePackDir); dir != "" {
+			if _, loadErr := loadValidatedRulePack(cache, dir, "application protection"); loadErr != nil {
+				return nil, loadErr
+			}
+		}
+		autoNames := make(map[string]struct{}, len(cfg.ApplicationProtection.Connectors)+len(cfg.ApplicationProtection.IncludeConnectors))
+		for rawName := range cfg.ApplicationProtection.Connectors {
+			if name := canonicalConnectorRulePackKey(rawName); name != "" {
+				autoNames[name] = struct{}{}
+			}
+		}
+		for _, rawName := range cfg.ApplicationProtection.IncludeConnectors {
+			if name := canonicalConnectorRulePackKey(rawName); name != "" {
+				autoNames[name] = struct{}{}
+			}
+		}
+		for name := range autoNames {
+			if cfg.ManualConnectorConfigured(name) ||
+				!cfg.ApplicationProtection.EffectiveEnabled(name) ||
+				!cfg.ApplicationProtection.AllowsConnector(name) {
+				continue
+			}
+			if _, loadErr := loadValidatedRulePack(
+				cache,
+				cfg.EffectiveRulePackDirForConnector(name),
+				"application protection connector "+name,
+			); loadErr != nil {
+				return nil, loadErr
+			}
+		}
+	}
+	candidate.activeRules, err = compileRulePackCategories(candidate.active)
+	if err != nil {
+		return nil, fmt.Errorf("active rule pack activation: %w", err)
+	}
+	candidate.activePatterns, err = prepareLocalPatternsOverride(candidate.active.LocalPatterns)
+	if err != nil {
+		return nil, fmt.Errorf("active local-pattern activation: %w", err)
+	}
+	for name, rp := range candidate.connectors {
+		compiled, compileErr := compileRulePackCategories(rp)
+		if compileErr != nil {
+			return nil, fmt.Errorf("connector %s rule pack activation: %w", name, compileErr)
+		}
+		candidate.connectorRules[name] = compiled
+	}
+	return candidate, nil
+}
+
+func buildSharedJudge(cfg *config.Config, rp *guardrail.RulePack) (*LLMJudge, error) {
+	if cfg == nil || !cfg.Guardrail.Judge.Enabled {
+		return nil, nil
+	}
+	if rp == nil {
+		return nil, fmt.Errorf("sidecar: guardrail judge requires a validated rule pack")
 	}
 	dotenvPath := filepath.Join(cfg.DataDir, ".env")
 	judgeLLM := cfg.ResolveLLM("guardrail.judge")
 	providers, _, _ := providerRegistrySnapshot()
 	judge := NewLLMJudge(&cfg.Guardrail.Judge, judgeLLM, dotenvPath, rp, providers)
 	if judge == nil {
-		return nil
+		return nil, nil
 	}
 
 	features := "tool-result-pii"
@@ -1155,7 +1321,27 @@ func buildSharedJudge(cfg *config.Config, rp *guardrail.RulePack) *LLMJudge {
 	if hooks := cfg.Guardrail.Judge.HookConnectors; len(hooks) > 0 {
 		fmt.Fprintf(os.Stderr, "[sidecar] LLM judge hook lane enabled for: %s\n", strings.Join(hooks, ", "))
 	}
-	return judge
+	return judge, nil
+}
+
+// buildInitialSidecarJudge prepares the construction-time judge while the
+// newly created gateway client is still owned by NewSidecar. A judge failure
+// aborts construction, so close that client before returning the primary
+// policy error. Successful construction transfers client ownership to the
+// returned Sidecar and must leave it open.
+func buildInitialSidecarJudge(
+	client *Client,
+	cfg *config.Config,
+	rp *guardrail.RulePack,
+) (*LLMJudge, error) {
+	judge, err := buildSharedJudge(cfg, rp)
+	if err != nil {
+		if client != nil {
+			_ = client.Close()
+		}
+		return nil, err
+	}
+	return judge, nil
 }
 
 func (s *Sidecar) applyConfigReloadSnapshot(
@@ -1190,6 +1376,13 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		return fmt.Errorf("config reload observability v8 managed destination: %w", err)
 	}
 	v8PlanChanged = candidateChanged
+	// Rule packs are part of the same candidate transaction as configuration
+	// and the owned observability graph. Use a new cache for every candidate so
+	// an earlier failed or successful generation cannot mask on-disk state.
+	rulePackCandidate, err := preflightSidecarRulePacks(newCfg)
+	if err != nil {
+		return fmt.Errorf("config reload rule pack preflight: %w", err)
+	}
 	onlyReloadModeChange := onlyConfigReloadModeChanged(oldCfg, newCfg) &&
 		len(diff.Changed) == 1 && diff.Changed[0] == "gateway"
 	if configReloadMode(newCfg) == "restart" && !onlyReloadModeChange {
@@ -1255,7 +1448,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 
 	var nextRulePack *guardrail.RulePack
 	if rulePackReload || judgeReload {
-		nextRulePack = loadSidecarRulePack(&next)
+		nextRulePack = rulePackCandidate.active
 	}
 
 	var nextJudge *LLMJudge
@@ -1265,7 +1458,10 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 				fmt.Fprintf(os.Stderr, "[sidecar] custom-providers seed warning: %v\n", err)
 			}
 		}
-		nextJudge = buildSharedJudge(&next, nextRulePack)
+		nextJudge, err = buildSharedJudge(&next, nextRulePack)
+		if err != nil {
+			return err
+		}
 	}
 
 	// Application-protection observer attachment must be infallible after the
@@ -1320,11 +1516,17 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		providerHTTPClient.CloseIdleConnections()
 	}
 
+	if nextRulePack != nil {
+		publishRulePackOverrides(rulePackCandidate.activeRules)
+		publishLocalPatternsOverride(rulePackCandidate.activePatterns)
+	}
+	publishConnectorRulePackGeneration(
+		current.ActiveConnectors(),
+		rulePackCandidate.connectorRules,
+	)
 	if s.router != nil {
 		if nextRulePack != nil {
 			s.router.SetRulePack(nextRulePack)
-			ApplyRulePackOverrides(nextRulePack)
-			ApplyLocalPatternsOverride(nextRulePack.LocalPatterns)
 		}
 		s.router.SetGuardrailConfig(&appliedCfg.Guardrail)
 		s.router.SetDefaultAgentName(string(appliedCfg.Claw.Mode))
@@ -1409,6 +1611,35 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		s.attachApplicationProtectionObserver(ctx, next.Gateway.Token)
 	}
 
+	// AI Defense inspector hot-rebuild. Fires when any field on
+	// CiscoAIDefense changes — most commonly a fresh
+	// cisco_ai_defense_endpoint from AVC's env_config.json arriving
+	// after DefenseClaw was installed. pickInspector reads
+	// s.currentConfig() (already swapped to the applied snapshot
+	// above via s.publishConfig), so it will construct against the
+	// new endpoint. Same fail-closed contract as boot: a nil
+	// inspector disables the hook-lane AID call entirely; the proxy
+	// lane's SetManagedInspection is called only in managed_enterprise
+	// mode.
+	if inspectorNeedsRebuild(oldCfg, newCfg) {
+		if inspector := s.pickInspector(ctx); inspector != nil {
+			if api := s.apiSnapshot(); api != nil {
+				api.SetCiscoInspector(inspector)
+			}
+		} else if api := s.apiSnapshot(); api != nil {
+			// Reload rejected the inspector (managed provider now
+			// unavailable, or endpoint now empty). Clear the API
+			// binding so the hook lane fails open cleanly instead of
+			// keeping stale state that points at the old endpoint.
+			api.SetCiscoInspector(nil)
+		}
+		if nextManagedEnterprise {
+			if proxy := s.proxySnapshot(); proxy != nil {
+				proxy.SetManagedInspection(true, s.newManagedInspector(ctx, "proxy remote inspection disabled"))
+			}
+		}
+	}
+
 	// managed_enterprise: refresh the connector / MCP endpoint inventory
 	// on every reload — MCP servers and connectors can change via config
 	// without restarting the discovery scanner. Rebuild the emitter from
@@ -1417,8 +1648,13 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	// immediate snapshot so AI Defense sees the change without waiting
 	// for the next scan tick.
 	if nextManagedEnterprise {
-		inventoryEmit := makeEndpointInventoryEmitter(s.currentConfig(), s.observabilityV8Emitter())
-		if svc := s.aiDiscoverySnapshot(); svc != nil {
+		var snapshotFn func() inventory.AIDiscoveryReport
+		svc := s.aiDiscoverySnapshot()
+		if svc != nil {
+			snapshotFn = svc.Snapshot
+		}
+		inventoryEmit := makeEndpointInventoryEmitter(s.currentConfig(), s.observabilityV8Emitter(), snapshotFn)
+		if svc != nil {
 			svc.SetManagedInventoryEmitHook(inventoryEmit)
 		}
 		inventoryEmit(ctx)
@@ -1449,7 +1685,38 @@ func rulePackNeedsReload(oldCfg, newCfg *config.Config) bool {
 	if oldCfg == nil || newCfg == nil {
 		return false
 	}
-	return oldCfg.Guardrail.RulePackDir != newCfg.Guardrail.RulePackDir
+	if oldCfg.Guardrail.RulePackDir != newCfg.Guardrail.RulePackDir {
+		return true
+	}
+	return effectiveActiveSidecarRulePackDir(oldCfg) != effectiveActiveSidecarRulePackDir(newCfg)
+}
+
+func effectiveActiveSidecarRulePackDir(cfg *config.Config) string {
+	active := cfg.Guardrail.RulePackDir
+	activeConnectors := cfg.ActiveConnectors()
+	if !cfg.Guardrail.Enabled || len(activeConnectors) != 1 {
+		return active
+	}
+	name := canonicalConnectorRulePackKey(activeConnectors[0])
+	if name == "" || !cfg.Guardrail.EffectiveEnabled(name) {
+		return active
+	}
+	return cfg.EffectiveRulePackDirForConnector(name)
+}
+
+// inspectorNeedsRebuild reports whether any field on
+// cfg.CiscoAIDefense has changed such that the AID inspector needs to
+// be rebuilt. The inspector captures endpoint + timeout by value at
+// construction (see NewCiscoDefenseClawInspectClient), so any change
+// under this struct is a real signal — deep-equal is the right grain.
+// Called from applyConfigReload after the env_config overlay so a
+// late-arriving env_config.json reaches the running inspector without
+// a full OTel teardown.
+func inspectorNeedsRebuild(oldCfg, newCfg *config.Config) bool {
+	if oldCfg == nil || newCfg == nil {
+		return false
+	}
+	return !reflect.DeepEqual(oldCfg.CiscoAIDefense, newCfg.CiscoAIDefense)
 }
 
 func judgeNeedsReload(oldCfg, newCfg *config.Config) bool {
@@ -2028,6 +2295,15 @@ func resolveWatcherDirs(cfg *config.Config, conn connector.Connector, wcfg confi
 				workspaceDir = cfg.ConnectorWorkspaceDir()
 			}
 			compTargets = scanner.ComponentTargets(workspaceDir)
+			if cfg != nil && strings.EqualFold(strings.TrimSpace(conn.Name()), "amp") {
+				// Amp's effective skill roots depend on settings
+				// (amp.skills.path and amp.skills.disableClaudeCodeSkills).
+				// ComponentTargets cannot read Config without introducing a
+				// package cycle, so bind the watch set through Config's
+				// schema-aware Amp resolver instead of watching static defaults.
+				compTargets["skill"] = ampWatcherSkillDirs(cfg)
+				compTargets["plugin"] = cfg.PluginDirsForConnector("amp")
+			}
 		}
 	}
 
@@ -2064,6 +2340,34 @@ func resolveWatcherDirs(cfg *config.Config, conn connector.Connector, wcfg confi
 	}
 
 	return skillDirs, pluginDirs, src
+}
+
+// ampWatcherSkillDirs keeps Amp's Claude-compatible skill roots available for
+// discovery without letting the watcher materialize another connector's home.
+// The watcher creates each configured directory before registering fsnotify,
+// so optional .claude/skills roots are watchable only when they already exist.
+func ampWatcherSkillDirs(cfg *config.Config) []string {
+	dirs := cfg.SkillDirsForConnector("amp")
+	optionalClaudeRoots := make(map[string]struct{}, 2)
+	if home, err := os.UserHomeDir(); err == nil && strings.TrimSpace(home) != "" {
+		optionalClaudeRoots[filepath.Clean(filepath.Join(home, ".claude", "skills"))] = struct{}{}
+	}
+	if workspace := cfg.ConnectorWorkspaceDir(); workspace != "" {
+		optionalClaudeRoots[filepath.Clean(filepath.Join(workspace, ".claude", "skills"))] = struct{}{}
+	}
+
+	filtered := make([]string, 0, len(dirs))
+	for _, dir := range dirs {
+		cleaned := filepath.Clean(dir)
+		if _, optional := optionalClaudeRoots[cleaned]; optional {
+			info, err := os.Stat(cleaned)
+			if err != nil || !info.IsDir() {
+				continue
+			}
+		}
+		filtered = append(filtered, dir)
+	}
+	return filtered
 }
 
 // runWatcher starts the skill/MCP install watcher if enabled in config.
@@ -2461,7 +2765,12 @@ func resolveActiveConnector(reg *connector.Registry, name, surface string) (conn
 	}
 	conn, ok := reg.Get(trimmed)
 	if !ok {
-		return nil, fmt.Errorf("[%s] guardrail.connector=%q not found in registry — set guardrail.connector to one of the registered connectors (openclaw, codex, claudecode, zeptoclaw, hermes, cursor, windsurf, geminicli, copilot, openhands) or remove the field to default to openclaw", surface, trimmed)
+		return nil, fmt.Errorf(
+			"[%s] guardrail.connector=%q not found in registry — set guardrail.connector to one of the registered connectors (%s) or remove the field to default to openclaw",
+			surface,
+			trimmed,
+			strings.Join(reg.Names(), ", "),
+		)
 	}
 	return conn, nil
 }
@@ -2472,13 +2781,12 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		return s.waitForConnectorSetup(ctx)
 	}
 
-	// Reuse the rule pack already loaded by NewSidecar and stored on the
-	// router, avoiding a redundant disk/embed read and potential drift.
-	rp := s.router.rp
+	// NewSidecar strictly loaded and published the effective single-connector
+	// pack before returning. Runtime startup consumes that immutable candidate
+	// and never performs an implicit second disk load.
+	rp := s.router.rulePack()
 	if rp == nil {
-		rp = guardrail.LoadRulePack(s.currentConfig().Guardrail.RulePackDir)
-		rp.Validate()
-		fmt.Fprintf(os.Stderr, "[guardrail] rule pack loaded (fallback): %s\n", rp)
+		return fmt.Errorf("guardrail: validated cold-start rule pack is unavailable")
 	}
 
 	// Load the active connector from the registry. The connector name is
@@ -2511,15 +2819,10 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 		// somehow not blocking anything" sidecar.
 		return err
 	}
-	rp = guardrail.LoadRulePack(s.currentConfig().EffectiveRulePackDirForConnector(conn.Name()))
-	rp.Validate()
-	fmt.Fprintf(os.Stderr, "[guardrail] rule pack loaded for %s: %s\n", conn.Name(), rp)
-	if s.router != nil {
-		s.router.SetRulePack(rp)
+	compiledConnectorRules, err := compileRulePackCategories(rp)
+	if err != nil {
+		return fmt.Errorf("guardrail: compile connector %s rule pack: %w", conn.Name(), err)
 	}
-	ApplyRulePackOverrides(rp)
-	ApplyConnectorRulePackOverrides(conn.Name(), rp)
-	ApplyLocalPatternsOverride(rp.LocalPatterns)
 	proxyAddr := guardrailListenAddr(s.currentConfig().Guardrail.Port, s.currentConfig().Guardrail.Host)
 	apiBind := "127.0.0.1"
 	if s.currentConfig().Gateway.APIBind != "" {
@@ -2620,6 +2923,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	if !s.currentConfig().Guardrail.Enabled && guardianManagedLifecycle {
 		fmt.Fprintf(os.Stderr, "[guardrail] guardrail disabled — enterprise hook guardian owns hook removal for %s; gateway will not write user hook files\n", conn.Name())
 		connector.ClearActiveConnector(s.currentConfig().DataDir)
+		RemoveConnectorRulePackOverrides(conn.Name())
 		s.health.SetGuardrail(StateDisabled, "guardrail disabled; enterprise hook guardian owns hook removal", map[string]interface{}{
 			"connector":         conn.Name(),
 			"lifecycle_manager": "enterprise_hook_guardian",
@@ -2644,6 +2948,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 			return teardownErr
 		}
 		connector.ClearActiveConnector(s.currentConfig().DataDir)
+		RemoveConnectorRulePackOverrides(conn.Name())
 	} else if guardianManagedLifecycle {
 		fmt.Fprintf(os.Stderr, "[guardrail] managed_enterprise: skipping connector setup/teardown for %s; hooks are installed and repaired by the enterprise hook guardian\n", conn.Name())
 	} else {
@@ -2718,6 +3023,11 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 			}
 			fmt.Fprintf(os.Stderr, "[guardrail] provider probe ok: %s reports %d usable upstream(s)\n", conn.Name(), count)
 		}
+	}
+	if s.currentConfig().Guardrail.Enabled {
+		// Publish only after the connector has reached its verified ready state
+		// (or the enterprise guardian has assumed lifecycle ownership).
+		publishConnectorRulePackOverrides(conn.Name(), compiledConnectorRules)
 	}
 
 	s.health.SetConnector(conn.Name(), conn.ToolInspectionMode(), conn.SubprocessPolicy())
@@ -2983,13 +3293,10 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 		return s.waitForConnectorSetup(ctx)
 	}
 
-	// Reuse the primary rule pack already loaded by NewSidecar (it drives
-	// the process-global scanner overrides). The per-connector packs below
-	// are loaded separately via the cache.
-	primaryRP := s.router.rp
-	if primaryRP == nil {
-		primaryRP = guardrail.LoadRulePack(s.currentConfig().Guardrail.RulePackDir)
-		primaryRP.Validate()
+	// NewSidecar has already strictly loaded and published the global pack.
+	// Per-connector candidates are loaded only by the isolated setup loop.
+	if s.router == nil || s.router.rulePack() == nil {
+		return fmt.Errorf("multi-connector boot: validated global rule pack is unavailable")
 	}
 
 	// Route plugin-loader rejections into the audit pipeline before any
@@ -3100,7 +3407,9 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 			if err := connector.ClearHookContractLockEntry(s.currentConfig().DataDir, conn.Name()); err != nil {
 				fmt.Fprintf(os.Stderr, "[guardrail] WARNING: clear hook contract lock for %s: %v\n", conn.Name(), err)
 				failedTeardown = append(failedTeardown, conn.Name())
+				continue
 			}
+			RemoveConnectorRulePackOverrides(conn.Name())
 		}
 		if len(failedTeardown) == 0 {
 			connector.ClearActiveConnector(s.currentConfig().DataDir)
@@ -3184,7 +3493,6 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 	if len(succeeded) == 0 {
 		err := fmt.Errorf("multi-connector boot: all %d configured connectors failed setup", len(conns))
 		s.health.SetGuardrail(StateError, err.Error(), nil)
-		<-ctx.Done()
 		return err
 	}
 
@@ -3232,6 +3540,11 @@ func (s *Sidecar) runGuardrailMulti(ctx context.Context) error {
 
 func (s *Sidecar) runManagedEnterpriseMultiHookGuardrail(ctx context.Context, registry *connector.Registry, conns []connector.Connector, apiToken, proxyAddr, apiAddr, masterKey string) error {
 	if !s.currentConfig().Guardrail.Enabled {
+		for _, conn := range conns {
+			if conn != nil {
+				RemoveConnectorRulePackOverrides(conn.Name())
+			}
+		}
 		connector.ClearActiveConnector(s.currentConfig().DataDir)
 		s.health.SetGuardrail(StateDisabled, "guardrail disabled; enterprise hook guardian owns hook removal", map[string]interface{}{
 			"connectors":        connectorNames(conns),
@@ -3288,14 +3601,32 @@ func (s *Sidecar) runManagedEnterpriseMultiHookGuardrail(ctx context.Context, re
 	cache := guardrail.NewRulePackCache()
 	succeeded := make([]string, 0, len(registrations))
 	for _, registration := range registrations {
-		registration.conn.SetCredentials(registration.opts.APIToken, masterKey)
-		rp := cache.Load(s.currentConfig().EffectiveRulePackDirForConnector(registration.conn.Name()))
-		if rp != nil {
-			rp.Validate()
+		name := registration.conn.Name()
+		rp, loadErr := loadValidatedRulePack(
+			cache,
+			s.currentConfig().EffectiveRulePackDirForConnector(name),
+			"connector "+name,
+		)
+		if loadErr != nil {
+			RemoveConnectorRulePackOverrides(name)
+			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: managed connector %s rule pack rejected, skipping (other connectors unaffected): %v\n", name, loadErr)
+			continue
 		}
-		ApplyConnectorRulePackOverrides(registration.conn.Name(), rp)
-		succeeded = append(succeeded, registration.conn.Name())
-		fmt.Fprintf(os.Stderr, "[guardrail] managed_enterprise: registered %s for hook evaluation; lifecycle is owned by enterprise hook guardian\n", registration.conn.Name())
+		compiled, compileErr := compileRulePackCategories(rp)
+		if compileErr != nil {
+			RemoveConnectorRulePackOverrides(name)
+			fmt.Fprintf(os.Stderr, "[guardrail] WARNING: managed connector %s rule pack activation rejected, skipping (other connectors unaffected): %v\n", name, compileErr)
+			continue
+		}
+		registration.conn.SetCredentials(registration.opts.APIToken, masterKey)
+		publishConnectorRulePackOverrides(name, compiled)
+		succeeded = append(succeeded, name)
+		fmt.Fprintf(os.Stderr, "[guardrail] managed_enterprise: registered %s for hook evaluation; lifecycle is owned by enterprise hook guardian\n", name)
+	}
+	if len(succeeded) == 0 {
+		err := fmt.Errorf("managed multi-connector boot: all %d configured connectors failed rule-pack preflight", len(registrations))
+		s.health.SetGuardrail(StateError, err.Error(), nil)
+		return err
 	}
 
 	for _, name := range succeeded {
@@ -3661,7 +3992,7 @@ func connectorSetupTokensFor(dataDir string, conn connector.Connector, gatewayTo
 	}
 	scoped, err := connector.EnsureHookAPIToken(dataDir, conn.Name())
 	if err != nil {
-		if managedMode {
+		if managedMode || connector.RequiresScopedHookToken(conn) {
 			return connectorSetupTokens{}, err
 		}
 		// Unmanaged installs historically allowed symlinked/group-writable data
@@ -3683,6 +4014,13 @@ func connectorSetupTokensFor(dataDir string, conn connector.Connector, gatewayTo
 // back just this connector's Setup before returning so a half-installed
 // connector never lingers.
 func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connector, opts connector.SetupOpts, masterKey string, cache *guardrail.RulePackCache) error {
+	rulesPublished := false
+	defer func() {
+		if !rulesPublished {
+			RemoveConnectorRulePackOverrides(conn.Name())
+		}
+	}()
+
 	support := connector.ConnectorSupportOnHostOS(conn.Name())
 	if support.Status == connector.PlatformUnsupported {
 		return fmt.Errorf("connector %q is not supported on %s: %s", conn.Name(), runtime.GOOS, support.Reason)
@@ -3690,21 +4028,24 @@ func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connecto
 	if support.Status == connector.PlatformPreview {
 		fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s is preview on %s: %s\n", conn.Name(), runtime.GOOS, support.Reason)
 	}
-	// Inject credentials before Setup so probes keyed off them succeed.
-	conn.SetCredentials(opts.APIToken, masterKey)
-
 	// Load + validate this connector's effective rule pack through the
 	// shared cache. Connectors sharing a profile read disk once.
-	rp := cache.Load(s.currentConfig().EffectiveRulePackDirForConnector(conn.Name()))
-	if rp != nil {
-		rp.Validate()
+	rp, err := loadValidatedRulePack(
+		cache,
+		s.currentConfig().EffectiveRulePackDirForConnector(conn.Name()),
+		"connector "+conn.Name(),
+	)
+	if err != nil {
+		return err
+	}
+	compiledRules, err := compileRulePackCategories(rp)
+	if err != nil {
+		return fmt.Errorf("connector %s rule pack activation: %w", conn.Name(), err)
 	}
 
-	// Register this connector's rule set so its hook lane scans against its
-	// own pack at runtime (per-connector parity with single-connector mode).
-	// A nil pack still pins the connector to the compiled-in defaults rather
-	// than inheriting whichever pack the primary installed into the global.
-	ApplyConnectorRulePackOverrides(conn.Name(), rp)
+	// Inject credentials only after the connector's immutable policy candidate
+	// has passed strict load, validation, and gateway compilation.
+	conn.SetCredentials(opts.APIToken, masterKey)
 
 	// Enforce the same hook-contract gate the single-connector path applies in
 	// runGuardrail (see HookContractNeedsActionOverride call above). Without
@@ -3758,6 +4099,10 @@ func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connecto
 	if err := publishFreshHookRegistrationEvidence(opts, conn); err != nil {
 		return fmt.Errorf("connector %s hook contract lock save failed: %w", conn.Name(), err)
 	}
+	// Publication is deliberately last: a connector that failed Setup or any
+	// verification step must not leave a scanner override behind.
+	publishConnectorRulePackOverrides(conn.Name(), compiledRules)
+	rulesPublished = true
 	return nil
 }
 
@@ -4066,6 +4411,7 @@ func teardownPreviousConnector(registry *connector.Registry, newName string, opt
 	if err := connector.ClearHookContractLockEntry(opts.DataDir, prev); err != nil {
 		return fmt.Errorf("clear hook contract lock for previous connector %s: %w", prev, err)
 	}
+	RemoveConnectorRulePackOverrides(prev)
 	fmt.Fprintf(os.Stderr, "[guardrail] previous connector %s teardown verified clean\n", prev)
 	return nil
 }
@@ -4120,6 +4466,7 @@ func teardownRemovedConnectors(registry *connector.Registry, previous, current [
 			failed = append(failed, prevName)
 			continue
 		}
+		RemoveConnectorRulePackOverrides(prevName)
 		fmt.Fprintf(os.Stderr, "[guardrail] removed connector %s teardown verified clean\n", prevName)
 	}
 	return failed

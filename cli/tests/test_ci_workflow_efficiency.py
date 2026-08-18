@@ -16,6 +16,8 @@
 
 from pathlib import Path
 
+import yaml
+
 ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -42,13 +44,44 @@ def test_ci_shards_python_once_and_does_not_repeat_unified_corpus() -> None:
     assert "pattern: python-coverage-part-*" in workflow
     assert 'test "${#coverage_parts[@]}" -eq 4' in workflow
     assert ".venv/bin/coverage combine" in workflow
-    assert "name: make test (unified)" not in workflow
     assert "run: make test" not in workflow
 
     pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
     lock = (ROOT / "uv.lock").read_text(encoding="utf-8")
     assert '"pytest-xdist==3.8.0"' in pyproject
     assert 'name = "pytest-xdist"' in lock
+
+
+def test_ci_preserves_make_test_context_without_repeating_test_work() -> None:
+    workflow_text = (ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
+    jobs = yaml.safe_load(workflow_text)["jobs"]
+
+    aggregate = jobs["make-test"]
+    assert aggregate["name"] == "make test (unified)"
+    assert aggregate["needs"] == ["go-test", "python-lint-test"]
+    assert aggregate["if"] == "${{ always() }}"
+    assert aggregate["runs-on"] == "ubuntu-latest"
+    assert len(aggregate["steps"]) == 1
+    step = aggregate["steps"][0]
+    assert set(step) == {"name", "env", "run"}
+    assert step["name"] == "Require unified Go and Python test gates"
+    assert step["env"] == {
+        "GO_TEST_RESULT": "${{ needs.go-test.result }}",
+        "PYTHON_TEST_RESULT": "${{ needs.python-lint-test.result }}",
+    }
+    assert step["run"].splitlines() == [
+        "set -euo pipefail",
+        'test "$GO_TEST_RESULT" = success',
+        'test "$PYTHON_TEST_RESULT" = success',
+    ]
+
+    run_steps = [
+        step["run"]
+        for job in jobs.values()
+        for step in job.get("steps", [])
+        if "run" in step
+    ]
+    assert all("make test" not in run for run in run_steps)
 
 
 def test_ci_shards_slow_gateway_package_and_combines_go_coverage() -> None:

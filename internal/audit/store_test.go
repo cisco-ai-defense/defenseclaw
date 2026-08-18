@@ -578,12 +578,25 @@ func TestAlertAcknowledgementTargetsUseExactEligibility(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := store.db.Exec(`INSERT INTO audit_events (
-		id, timestamp, action, actor, details, severity, bucket, event_name
+		id, timestamp, action, actor, details, severity, bucket, event_name,
+		payload_json
 	) VALUES
 		('v8-finding', '2026-07-07T10:00:00Z', 'scan-finding', 'scanner', 'finding',
-		 'HIGH', 'security.finding', 'finding.observed'),
+		 'HIGH', 'security.finding', 'finding.observed', '{}'),
 		('v8-platform', '2026-07-07T10:00:01Z', 'sink-failure', 'system', 'degraded',
-		 'HIGH', 'platform.health', 'subsystem.degraded')`); err != nil {
+		 'HIGH', 'platform.health', 'subsystem.degraded', '{}'),
+		('v8-enforcement', '2026-07-07T10:00:02Z', 'allowed', 'gateway', 'blocked',
+		 'INFO', 'enforcement.action', 'enforcement.decision',
+		 '{"defenseclaw.enforcement.effective_action":"block"}'),
+		('v8-detection-only', '2026-07-07T10:00:03Z', 'scan-finding', 'scanner', 'source telemetry',
+		 'HIGH', 'security.finding', 'finding.observed',
+		 '{"defenseclaw.finding.tags":["detection-only"]}'),
+		('v8-detection-only-padded-array', '2026-07-07T10:00:04Z', 'scan-finding', 'scanner', 'source telemetry',
+		 'HIGH', 'security.finding', 'finding.observed',
+		 '{"defenseclaw.finding.tags":[" Detection-Only "]}'),
+		('v8-detection-only-padded-scalar', '2026-07-07T10:00:05Z', 'scan-finding', 'scanner', 'source telemetry',
+		 'HIGH', 'security.finding', 'finding.observed',
+		 '{"defenseclaw.finding.tags":" \tDETECTION-ONLY\r\n"}')`); err != nil {
 		t.Fatal(err)
 	}
 	targets, err := store.ListAlertAcknowledgementTargets(context.Background(), "all")
@@ -594,7 +607,10 @@ func TestAlertAcknowledgementTargetsUseExactEligibility(t *testing.T) {
 	for _, target := range targets {
 		targetIDs[target.AlertID] = target.ProjectionVersion == 0
 	}
-	if len(targets) != 2 || !targetIDs["eligible-alert"] || !targetIDs["v8-finding"] {
+	if len(targets) != 4 || !targetIDs["eligible-alert"] || !targetIDs["v8-finding"] ||
+		!targetIDs["v8-platform"] || !targetIDs["v8-enforcement"] ||
+		targetIDs["v8-detection-only"] || targetIDs["v8-detection-only-padded-array"] ||
+		targetIDs["v8-detection-only-padded-scalar"] {
 		t.Fatalf("targets=%+v", targets)
 	}
 	alerts, err := store.ListAlerts(10)
@@ -602,11 +618,23 @@ func TestAlertAcknowledgementTargetsUseExactEligibility(t *testing.T) {
 		t.Fatal(err)
 	}
 	alertIDs := map[string]bool{}
+	alertSeverities := map[string]string{}
 	for _, alert := range alerts {
 		alertIDs[alert.ID] = true
+		alertSeverities[alert.ID] = alert.Severity
 	}
-	if len(alerts) != 2 || !alertIDs["eligible-alert"] || !alertIDs["v8-finding"] {
+	if len(alerts) != 4 || !alertIDs["eligible-alert"] || !alertIDs["v8-finding"] ||
+		!alertIDs["v8-platform"] || !alertIDs["v8-enforcement"] ||
+		alertIDs["v8-detection-only"] || alertIDs["v8-detection-only-padded-array"] ||
+		alertIDs["v8-detection-only-padded-scalar"] || alertSeverities["v8-enforcement"] != "HIGH" {
 		t.Fatalf("alerts=%+v", alerts)
+	}
+	counts, err := store.GetCounts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.Alerts != len(alerts) {
+		t.Fatalf("active alert count=%d, REST alerts=%d", counts.Alerts, len(alerts))
 	}
 }
 
@@ -671,6 +699,119 @@ func TestAlertAcknowledgementTargetsSupportExactAndBroadSelectors(t *testing.T) 
 	if len(injected) != 0 {
 		t.Fatalf("selector value changed SQL semantics: %+v", injected)
 	}
+}
+
+func TestAlertAcknowledgementTargetsMatchVisibleCanonicalAndLegacyAlerts(t *testing.T) {
+	store, err := NewStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.Init(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`INSERT INTO audit_events (
+		id, timestamp, action, actor, details, severity, bucket, event_name,
+		payload_json, enforced
+	) VALUES
+		('canonical-deny', '2026-07-17T12:00:00Z', 'enforcement', 'gateway', '',
+		 'INFO', 'enforcement.action', 'action.applied',
+		 '{"defenseclaw.enforcement.effective_action":"deny"}', NULL),
+		('blank-severity-deny', '2026-07-17T12:00:00.5Z', 'enforcement', 'gateway', '',
+		 '', 'enforcement.action', 'action.applied',
+		 '{"defenseclaw.enforcement.effective_action":"deny"}', NULL),
+		('canonical-egress', '2026-07-17T12:00:01Z', 'egress', 'gateway', '',
+		 'INFO', 'network.egress', 'egress.decided',
+		 '{"defenseclaw.network.decision":"block"}', NULL),
+		('health-error', '2026-07-17T12:00:02Z', 'sink-failure', 'gateway', '',
+		 'ERROR', 'platform.health', 'destination.export_failed', '{}', NULL),
+		('canonical-allow', '2026-07-17T12:00:03Z', 'enforcement', 'gateway', '',
+		 'INFO', 'enforcement.action', 'action.applied',
+		 '{"defenseclaw.enforcement.effective_action":"allow"}', NULL),
+		('detection-only', '2026-07-17T12:00:04Z', 'scan-finding', 'scanner', '',
+		 'HIGH', 'security.finding', 'finding.observed',
+		 '{"defenseclaw.finding.tags":["secret","detection-only"]}', NULL),
+		('malformed-finding', '2026-07-17T12:00:04.5Z', 'scan-finding', 'scanner', '',
+		 'HIGH', 'security.finding', 'finding.observed', '{not-json', NULL),
+		('legacy-block', '2026-07-17T12:00:05Z', 'connector-hook', 'gateway',
+		 'connector=codex action=block mode=action severity=INFO',
+		 'INFO', NULL, NULL, NULL, 0),
+		('legacy-clean-high', '2026-07-17T12:00:06Z', 'connector-hook', 'gateway',
+		 'connector=codex action=allow mode=observe severity=CRITICAL',
+		 'CRITICAL', NULL, NULL, NULL, 0),
+		('legacy-unrelated-high', '2026-07-17T12:00:07Z', 'sidecar-start', 'gateway',
+		 'healthy', 'HIGH', NULL, NULL, NULL, NULL)`); err != nil {
+		t.Fatal(err)
+	}
+
+	want := map[string]bool{
+		"blank-severity-deny": true,
+		"canonical-deny":      true,
+		"canonical-egress":    true,
+		"health-error":        true,
+		"malformed-finding":   true,
+		"legacy-block":        true,
+	}
+	exact, err := store.SelectAlertAcknowledgementTargets(t.Context(), AlertAcknowledgementSelector{
+		AlertIDs: []string{
+			"blank-severity-deny", "canonical-deny", "canonical-egress", "health-error", "canonical-allow",
+			"detection-only", "malformed-finding", "legacy-block", "legacy-clean-high",
+			"legacy-unrelated-high",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(exact) != len(want) {
+		t.Fatalf("exact targets=%+v", exact)
+	}
+	for _, target := range exact {
+		if !want[target.AlertID] {
+			t.Fatalf("unexpected exact target=%+v", target)
+		}
+	}
+
+	broad, err := store.SelectAlertAcknowledgementTargets(t.Context(), AlertAcknowledgementSelector{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(broad) != len(want) {
+		t.Fatalf("broad targets=%+v", broad)
+	}
+	for _, target := range broad {
+		if !want[target.AlertID] {
+			t.Fatalf("unexpected broad target=%+v", target)
+		}
+	}
+
+	high, err := store.SelectAlertAcknowledgementTargets(t.Context(), AlertAcknowledgementSelector{
+		Severity: " high ",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(high) != 4 || high[0].AlertID != "blank-severity-deny" ||
+		high[1].AlertID != "canonical-deny" || high[2].AlertID != "legacy-block" ||
+		high[3].AlertID != "malformed-finding" {
+		t.Fatalf("HIGH targets=%+v", high)
+	}
+	all, err := store.SelectAlertAcknowledgementTargets(t.Context(), AlertAcknowledgementSelector{
+		Severity: " ALL ",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != len(want) {
+		t.Fatalf("ALL targets=%+v", all)
+	}
+	counts, err := store.GetCounts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.Alerts != 5 {
+		t.Fatalf("actionable alert count=%d, want blank-severity deny promoted into 5 total", counts.Alerts)
+	}
+
 }
 
 func TestMigrationFromFreshDB(t *testing.T) {

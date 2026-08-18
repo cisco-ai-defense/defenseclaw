@@ -23,6 +23,9 @@
 # Per-user (target-user-owned, written by the guardian dropping euid/egid):
 #   ~/.<agent>/<hook-config-file>                          (target-user 0600)
 #   ~/.defenseclaw/hooks/<connector>-hook.sh               (target-user 0700)
+#   ~/.config/amp/plugins/defenseclaw.ts                   (target-user 0600)
+#     Amp's TypeScript plugin is rendered by connector reconciliation; the
+#     package never precreates it.
 #
 # This script orchestrates side-effecting steps (sudo, launchctl, install(8))
 # and delegates pure logic (arg parsing, config rendering, version probing,
@@ -30,6 +33,19 @@
 # can drive that logic without root.
 
 set -euo pipefail
+
+readonly MACOS_SYSCTL_BIN="/usr/sbin/sysctl"
+
+macos_hardware_machine() {
+  local machine="$1"
+  if [[ "${machine}" == "x86_64" || "${machine}" == "amd64" ]] \
+    && [[ -x "${MACOS_SYSCTL_BIN}" && ! -L "${MACOS_SYSCTL_BIN}" ]] \
+    && [[ "$("${MACOS_SYSCTL_BIN}" -in sysctl.proc_translated 2>/dev/null || true)" == "1" ]]; then
+    printf '%s\n' "arm64"
+    return 0
+  fi
+  printf '%s\n' "${machine}"
+}
 
 # ---- defaults -----------------------------------------------------------
 
@@ -132,6 +148,23 @@ for _candidate in \
 done
 unset _candidate
 
+# Guardrail rule packs source — the sidecar loads them from
+# ${DataDir}/policies/guardrail/<profile>/ on cold start. Without them
+# the gateway fails init with:
+#   rule pack directory_not_found at .: rule-pack directory does not exist
+# Bundle layout ships them beside install.sh; dev/CI runs source from
+# the repo tree.
+POLICIES_SRC=""
+for _candidate in \
+  "${SCRIPT_DIR}/policies" \
+  "${REPO_ROOT}/policies"; do
+  if [[ -d "${_candidate}/guardrail/default" ]]; then
+    POLICIES_SRC="${_candidate}"
+    break
+  fi
+done
+unset _candidate
+
 SKIP_BUILD="false"
 SKIP_LAUNCHD="false"
 SKIP_CONNECTOR="false"
@@ -188,6 +221,12 @@ AGENT_VERSION=""
 log()  { printf '[install] %s\n' "$*"; }
 warn() { printf '[install] WARN: %s\n' "$*" >&2; }
 die()  { printf '[install] ERROR: %s\n' "$*" >&2; exit 1; }
+
+process_machine="$(uname -m)"
+hardware_machine="$(macos_hardware_machine "${process_machine}")"
+if [[ "$(uname -s)" == "Darwin" && "${hardware_machine}" != "arm64" ]]; then
+  die "Intel macOS (${process_machine}) is unsupported; the managed macOS package requires Apple Silicon (arm64)"
+fi
 
 # The persistent install.log sink is set up LATER (after the fresh-host
 # preflight passes and after LOGS_DIR has been created by
@@ -292,9 +331,9 @@ Usage: sudo $0 [options]
 Gateway options:
   --mode {observe|action}   Guardrail + asset_policy mode (default: ${DEFAULT_MODE})
   --connector LIST          Hook connector(s), comma-separated (default: ${DEFAULT_CONNECTOR})
-                            Supported: codex, claudecode, cursor
-                            Examples: --connector cursor
-                                      --connector cursor,claudecode
+                            Supported: amp, codex, claudecode, cursor
+                            Examples: --connector amp
+                                      --connector amp,cursor,claudecode
   --port PORT               Loopback API port (default: ${DEFAULT_API_PORT})
   --env {prod|preview}      AI Defense cloud environment (default: ${DEFAULT_ENV}).
                             Selects the cisco_ai_defense.endpoint that the
@@ -392,7 +431,7 @@ PRIMARY_CONNECTOR="${CONNECTORS[0]}"
 
 for c in "${CONNECTORS[@]}"; do
   if ! is_supported_connector "${c}"; then
-    warn "connector '${c}' is not in the auto-wire list (codex|claudecode|cursor); will be written to config but per-user hooks won't be auto-wired"
+    warn "connector '${c}' is not in the auto-wire list (amp|codex|claudecode|cursor); will be written to config but per-user hooks won't be auto-wired"
   fi
 done
 
@@ -618,6 +657,24 @@ GUARDIAN_AUTH_DIR="${SUPPORT_DIR}/hook-guardian-state"
 create_install_directory_no_replace "${CONFIG_DIR}" root wheel 0755
 create_install_directory_no_replace "${RUNTIME_DIR}" root wheel 0750
 create_install_directory_no_replace "${GUARDIAN_AUTH_DIR}" root wheel 0750
+
+# Stage the shipped guardrail rule packs under runtime/policies/. The
+# gateway's cold-start sidecar init reads
+# ${DataDir}/policies/guardrail/default/ (see config default in
+# internal/config/config.go:3573). Ship all three profiles so an
+# operator can retarget rule_pack_dir at strict/permissive without a
+# reinstall.
+[[ -n "${POLICIES_SRC}" ]] \
+  || die "guardrail policies source not found (expected ${SCRIPT_DIR}/policies/guardrail/default or ${REPO_ROOT}/policies/guardrail/default)"
+POLICIES_DST="${RUNTIME_DIR}/policies"
+create_install_directory_no_replace "${POLICIES_DST}" root wheel 0750
+log "installing guardrail rule packs -> ${POLICIES_DST}/guardrail"
+# cp -R + explicit chown/chmod: we don't have install_dir_no_replace for
+# a whole tree, and RUNTIME_DIR itself is already 0750 root:wheel.
+cp -R "${POLICIES_SRC}/guardrail" "${POLICIES_DST}/guardrail"
+chown -R root:wheel "${POLICIES_DST}/guardrail"
+find "${POLICIES_DST}/guardrail" -type d -exec chmod 0750 {} +
+find "${POLICIES_DST}/guardrail" -type f -exec chmod 0640 {} +
 # Multi-user hook wiring: the hook-guardian LaunchDaemon reads its
 # per-tick manifest from ${GUARDIAN_MANIFEST_DIR}/targets.yaml. Creating
 # the directory unconditionally keeps the guardian's LoadManifest happy
@@ -677,11 +734,31 @@ CONFIG_PATH="${CONFIG_DIR}/config.yaml"
 [[ ! -e "${CONFIG_PATH}" && ! -L "${CONFIG_PATH}" ]] \
   || die "managed config appeared after fresh-host preflight and was preserved: ${CONFIG_PATH}"
 
-log "writing config (mode=${MODE} connectors=${CONNECTORS[*]} port=${API_PORT} env=${AID_ENV} redaction_profile=sensitive)"
+# Enumerate eligible local user homes so the sidecar's per-user AI-discovery
+# detectors (skills / rules / plugins / MCP under ~/.claude, ~/.codex, …) can
+# scan every real user rather than just the launchd-daemon HOME (/var/root
+# under root, where no operator has any real agent state). We pass the list
+# to render_config which writes it as `ai_discovery.home_dirs` in the
+# managed config so the daemon's `~/.claude/skills`-style expansions resolve
+# to each user's actual home. Uses the same enumerate_local_users filter
+# that populates targets.yaml so per-user detection and per-user hook
+# wiring stay in lockstep.
+HOME_DIRS=()
+if _user_lines_for_home_dirs="$(enumerate_local_users 2>/dev/null || true)"; then
+  while IFS=: read -r _u _uid _gid _home; do
+    [[ -z "${_home}" ]] && continue
+    HOME_DIRS+=("${_home}")
+  done <<< "${_user_lines_for_home_dirs}"
+  unset _u _uid _gid _home _user_lines_for_home_dirs
+fi
+
+log "writing config (mode=${MODE} connectors=${CONNECTORS[*]} port=${API_PORT} env=${AID_ENV} redaction_profile=sensitive home_dirs=${#HOME_DIRS[@]})"
 CONFIG_TMP="$(mktemp "${CONFIG_PATH}.new.XXXXXX")" \
   || die "could not reserve a private managed-config staging file"
 INSTALL_TEMP_FILES+=("${CONFIG_TMP}")
-render_config "${MODE}" "${PRIMARY_CONNECTOR}" "${API_PORT}" "${SUPPORT_DIR}" "${AID_ENDPOINT}" "${CONNECTORS[@]}" > "${CONFIG_TMP}"
+render_config "${MODE}" "${PRIMARY_CONNECTOR}" "${API_PORT}" "${SUPPORT_DIR}" "${AID_ENDPOINT}" \
+  "${#HOME_DIRS[@]}" "${HOME_DIRS[@]+"${HOME_DIRS[@]}"}" \
+  "${CONNECTORS[@]}" > "${CONFIG_TMP}"
 chown root:wheel "${CONFIG_TMP}"
 chmod 0640 "${CONFIG_TMP}"
 ln "${CONFIG_TMP}" "${CONFIG_PATH}" \
@@ -818,7 +895,7 @@ if [[ "${SKIP_CONNECTOR}" != "true" ]]; then
   # green while enforcing nothing.
   MANIFEST_TARGETS="$(grep -c '^  - user:' "${MANIFEST_TMP}" || true)"
   if [[ "${MANIFEST_TARGETS}" == "0" ]] && [[ -n "${USER_LINES}" ]] && [[ "${ALLOW_EMPTY_USERS}" != "true" ]]; then
-    die "rendered hook-guardian manifest has zero targets despite ${USER_COUNT} eligible user(s) and connectors=${CONNECTOR} — every connector may be unsupported (only codex/claudecode/cursor auto-wire today). Fix --connector or pass --allow-empty-users to proceed anyway."
+    die "rendered hook-guardian manifest has zero targets despite ${USER_COUNT} eligible user(s) and connectors=${CONNECTOR} — every connector may be unsupported (only amp/codex/claudecode/cursor auto-wire today). Fix --connector or pass --allow-empty-users to proceed anyway."
   fi
   chown root:wheel "${MANIFEST_TMP}"
   chmod 0640 "${MANIFEST_TMP}"

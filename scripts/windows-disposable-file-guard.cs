@@ -17,9 +17,12 @@ namespace DefenseClaw
     public static class DisposableFileGuard
     {
         private const uint GENERIC_READ = 0x80000000;
+        private const uint FILE_READ_ATTRIBUTES = 0x00000080;
         private const uint FILE_SHARE_READ = 0x00000001;
+        private const uint FILE_SHARE_WRITE = 0x00000002;
         private const uint OPEN_EXISTING = 3;
         private const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
+        private const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
         private const uint FILE_ATTRIBUTE_DIRECTORY = 0x00000010;
         private const uint FILE_ATTRIBUTE_REPARSE_POINT = 0x00000400;
         private const uint FILE_TYPE_DISK = 0x0001;
@@ -70,6 +73,18 @@ namespace DefenseClaw
         [DllImport("kernel32.dll", SetLastError = true)]
         private static extern uint GetFileType(SafeFileHandle file);
 
+        [DllImport(
+            "kernel32.dll",
+            EntryPoint = "GetFinalPathNameByHandleW",
+            CharSet = CharSet.Unicode,
+            ExactSpelling = true,
+            SetLastError = true)]
+        private static extern uint GetFinalPathNameByHandle(
+            SafeFileHandle file,
+            [Out] StringBuilder path,
+            uint pathLength,
+            uint flags);
+
         private static SafeFileHandle OpenNoFollow(string path)
         {
             if (String.IsNullOrWhiteSpace(path) || !Path.IsPathRooted(path))
@@ -97,15 +112,40 @@ namespace DefenseClaw
             return handle;
         }
 
-        private static long ValidateRegularSingleLink(
+        private static SafeFileHandle OpenRootNoFollow(string path)
+        {
+            if (String.IsNullOrWhiteSpace(path) || !Path.IsPathRooted(path))
+            {
+                throw new ArgumentException("guarded root path must be absolute", "path");
+            }
+            if (path.IndexOf('\0') >= 0)
+            {
+                throw new ArgumentException("guarded root path contains NUL", "path");
+            }
+            SafeFileHandle handle = CreateFile(
+                path,
+                FILE_READ_ATTRIBUTES,
+                FILE_SHARE_READ | FILE_SHARE_WRITE,
+                IntPtr.Zero,
+                OPEN_EXISTING,
+                FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS,
+                IntPtr.Zero);
+            if (handle.IsInvalid)
+            {
+                int error = Marshal.GetLastWin32Error();
+                handle.Dispose();
+                throw new Win32Exception(error, "CreateFileW no-follow root open failed for " + path);
+            }
+            return handle;
+        }
+
+        private static BY_HANDLE_FILE_INFORMATION ReadHandleInformation(
             SafeFileHandle handle,
-            long maximumBytes,
             string path)
         {
-            if (maximumBytes < 0) throw new ArgumentOutOfRangeException("maximumBytes");
             if (GetFileType(handle) != FILE_TYPE_DISK)
             {
-                throw new InvalidOperationException("guarded handoff is not a disk file: " + path);
+                throw new InvalidOperationException("guarded object is not on disk: " + path);
             }
             BY_HANDLE_FILE_INFORMATION information;
             if (!GetFileInformationByHandle(handle, out information))
@@ -114,6 +154,16 @@ namespace DefenseClaw
                     Marshal.GetLastWin32Error(),
                     "GetFileInformationByHandle failed for " + path);
             }
+            return information;
+        }
+
+        private static long ValidateRegularSingleLink(
+            SafeFileHandle handle,
+            long maximumBytes,
+            string path)
+        {
+            if (maximumBytes < 0) throw new ArgumentOutOfRangeException("maximumBytes");
+            BY_HANDLE_FILE_INFORMATION information = ReadHandleInformation(handle, path);
             if ((information.FileAttributes &
                 (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0)
             {
@@ -133,6 +183,83 @@ namespace DefenseClaw
                     "guarded handoff exceeds its byte bound: " + path);
             }
             return (long)unsignedSize;
+        }
+
+        private static void ValidateRootDirectory(SafeFileHandle handle, string path)
+        {
+            BY_HANDLE_FILE_INFORMATION information = ReadHandleInformation(handle, path);
+            if ((information.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 ||
+                (information.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0)
+            {
+                throw new InvalidOperationException(
+                    "guarded root is not a real directory: " + path);
+            }
+        }
+
+        private static string GetFinalPath(SafeFileHandle handle, string path)
+        {
+            int capacity = 512;
+            while (capacity <= 65536)
+            {
+                StringBuilder value = new StringBuilder(capacity);
+                uint length = GetFinalPathNameByHandle(
+                    handle,
+                    value,
+                    (uint)value.Capacity,
+                    0);
+                if (length == 0)
+                {
+                    throw new Win32Exception(
+                        Marshal.GetLastWin32Error(),
+                        "GetFinalPathNameByHandleW failed for " + path);
+                }
+                if (length < (uint)value.Capacity)
+                {
+                    return TrimTrailingSeparators(value.ToString());
+                }
+                capacity = checked((int)length + 1);
+            }
+            throw new InvalidOperationException("guarded final path is too long: " + path);
+        }
+
+        private static string TrimTrailingSeparators(string path)
+        {
+            string root = Path.GetPathRoot(path);
+            int minimum = String.IsNullOrEmpty(root) ? 0 : root.Length;
+            int length = path.Length;
+            while (length > minimum &&
+                (path[length - 1] == Path.DirectorySeparatorChar ||
+                 path[length - 1] == Path.AltDirectorySeparatorChar))
+            {
+                length--;
+            }
+            return path.Substring(0, length);
+        }
+
+        private static string NormalizeLexicalPath(string path)
+        {
+            return TrimTrailingSeparators(Path.GetFullPath(path));
+        }
+
+        private static string ToExtendedDosPath(string path)
+        {
+            string full = NormalizeLexicalPath(path);
+            if (full.StartsWith(@"\\?\", StringComparison.Ordinal))
+            {
+                return full;
+            }
+            if (full.StartsWith(@"\\", StringComparison.Ordinal))
+            {
+                return @"\\?\UNC\" + full.Substring(2);
+            }
+            return @"\\?\" + full;
+        }
+
+        private static bool IsStrictChildPath(string child, string root)
+        {
+            return child.Length > root.Length &&
+                child.StartsWith(root, StringComparison.OrdinalIgnoreCase) &&
+                child[root.Length] == Path.DirectorySeparatorChar;
         }
 
         private static byte[] ReadExact(SafeFileHandle handle, long size, string path)
@@ -177,6 +304,96 @@ namespace DefenseClaw
         {
             return new UTF8Encoding(false, true).GetString(
                 ReadBoundedBytes(path, maximumBytes));
+        }
+
+        // Holds the verified state root open while capture enumerates and reads.
+        // Each selected file is opened no-follow, validated by that same handle,
+        // and required to resolve below the retained root before any bytes are read.
+        public sealed class RootedReader : IDisposable
+        {
+            private readonly string lexicalRoot;
+            private readonly string finalRoot;
+            private SafeFileHandle rootHandle;
+
+            internal RootedReader(string rootPath)
+            {
+                lexicalRoot = NormalizeLexicalPath(rootPath);
+                rootHandle = OpenRootNoFollow(lexicalRoot);
+                try
+                {
+                    ValidateRootDirectory(rootHandle, lexicalRoot);
+                    finalRoot = GetFinalPath(rootHandle, lexicalRoot);
+                    string expectedRoot = ToExtendedDosPath(lexicalRoot);
+                    if (!String.Equals(
+                        finalRoot,
+                        expectedRoot,
+                        StringComparison.OrdinalIgnoreCase))
+                    {
+                        throw new InvalidOperationException(
+                            "guarded root resolved through a different filesystem object: " +
+                            lexicalRoot);
+                    }
+                }
+                catch
+                {
+                    rootHandle.Dispose();
+                    rootHandle = null;
+                    throw;
+                }
+            }
+
+            public string ReadBoundedUtf8(string path, long maximumBytes)
+            {
+                if (rootHandle == null || rootHandle.IsClosed || rootHandle.IsInvalid)
+                {
+                    throw new ObjectDisposedException("RootedReader");
+                }
+                string lexicalPath = NormalizeLexicalPath(path);
+                if (!IsStrictChildPath(lexicalPath, lexicalRoot))
+                {
+                    throw new InvalidOperationException(
+                        "guarded file escaped its lexical root: " + path);
+                }
+
+                ValidateRootDirectory(rootHandle, lexicalRoot);
+                string currentRoot = GetFinalPath(rootHandle, lexicalRoot);
+                if (!String.Equals(
+                    currentRoot,
+                    finalRoot,
+                    StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidOperationException(
+                        "guarded root identity changed during capture: " + lexicalRoot);
+                }
+
+                using (SafeFileHandle handle = OpenNoFollow(lexicalPath))
+                {
+                    long size = ValidateRegularSingleLink(handle, maximumBytes, lexicalPath);
+                    string finalPath = GetFinalPath(handle, lexicalPath);
+                    if (!IsStrictChildPath(finalPath, finalRoot))
+                    {
+                        throw new InvalidOperationException(
+                            "guarded file resolved outside its retained root: " + lexicalPath);
+                    }
+                    return new UTF8Encoding(false, true).GetString(
+                        ReadExact(handle, size, lexicalPath));
+                }
+            }
+
+            public void Dispose()
+            {
+                if (rootHandle != null)
+                {
+                    rootHandle.Dispose();
+                    rootHandle = null;
+                }
+                GC.SuppressFinalize(this);
+            }
+        }
+
+        public static RootedReader OpenRootedReader(string rootPath)
+        {
+            return new RootedReader(rootPath);
         }
 
         public static string ComputeSha256Hex(string path, long maximumBytes)

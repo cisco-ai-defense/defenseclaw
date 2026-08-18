@@ -320,6 +320,33 @@ function buildRecipes(strict: PresetBundle): Recipe[] {
       examples: ['https://hooks.slack.com/services/T0000/B0000/abcdefg12345'],
       counterexamples: ['https://hooks.slack.com/wrongpath', 'https://example.com'],
     },
+    'OBFUSC-UNICODE-ZWSP': {
+      examples: [
+        'a' +
+          '\u200B' +
+          'b' +
+          '\u200C' +
+          'c' +
+          '\u200D' +
+          'd' +
+          '\uFEFF' +
+          'e' +
+          '\u200B' +
+          'f' +
+          '\u200C' +
+          'g' +
+          '\u200D' +
+          'h' +
+          '\uFEFF' +
+          'i' +
+          '\u200B' +
+          'j' +
+          '\u200C',
+      ],
+      counterexamples: ['copy' + '\u200B' + 'paste', '👩' + '\u200D' + '💻'],
+      why:
+        'Requires ten zero-width characters immediately after ASCII alphanumerics, avoiding isolated formatting artifacts and emoji ZWJ sequences.',
+    },
   };
 
   for (const [filename, file] of Object.entries(strict.guardrail.rules)) {
@@ -476,11 +503,22 @@ function buildScenarios(): Scenario[] {
       input: {
         target_type: 'plugin',
         target_name: 'defenseclaw',
-        path: '/Users/op/.defenseclaw/plugins/defenseclaw',
+        path: '/Users/op/.config/amp/plugins/defenseclaw.ts',
         block_list: [],
         allow_list: [
-          { target_type: 'plugin', target_name: 'defenseclaw', reason: 'first-party DefenseClaw plugin' },
+          {
+            target_type: 'plugin',
+            target_name: 'defenseclaw',
+            reason: 'first-party DefenseClaw plugin',
+            source_path_contains: ['.config/amp/plugins/defenseclaw.ts'],
+          },
         ],
+        scan_result: {
+          max_severity: 'CRITICAL',
+          total_findings: 1,
+          scanner_name: 'mcp-scanner',
+          findings: [{ severity: 'CRITICAL', scanner: 'mcp-scanner', title: 'Allow-list precedence fixture' }],
+        },
       },
     },
     {
@@ -629,54 +667,6 @@ function buildScenarios(): Scenario[] {
           reason: 'CORR-LETHAL-TRIFECTA: ingress_untrusted + sensitive_access + egress_external in last 5 events',
           signal_strength: 'high',
           correlator_pattern_id: 'LETHAL-TRIFECTA',
-        },
-        cisco_result: null,
-        content_length: 0,
-      },
-    },
-    {
-      id: 'correlator-escalation-chain',
-      title: 'Escalation chain promotion',
-      domain: 'guardrail',
-      description:
-        'Session ran MEDIUM → HIGH → HIGH severity findings in order. The correlator emits a CRITICAL on chain completion.',
-      expectedVerdict: 'block',
-      input: {
-        direction: 'prompt',
-        model: 'gpt-4o-mini',
-        mode: 'action',
-        scanner_mode: 'local',
-        local_result: {
-          action: 'block',
-          severity: 'CRITICAL',
-          findings: ['Session matched ESCALATION-CHAIN correlator pattern'],
-          reason: 'CORR-ESCALATION-CHAIN: MEDIUM→HIGH→HIGH sequence in 6 events',
-          signal_strength: 'high',
-          correlator_pattern_id: 'ESCALATION-CHAIN',
-        },
-        cisco_result: null,
-        content_length: 0,
-      },
-    },
-    {
-      id: 'correlator-destructive-flow',
-      title: 'Destructive shell after sensitive read',
-      domain: 'guardrail',
-      description:
-        'rm -rf invoked in the same session as a prior ~/.ssh read. Correlator emits CRITICAL.',
-      expectedVerdict: 'block',
-      input: {
-        direction: 'tool_call',
-        model: 'gpt-4o-mini',
-        mode: 'action',
-        scanner_mode: 'local',
-        local_result: {
-          action: 'block',
-          severity: 'CRITICAL',
-          findings: ['Session matched DESTRUCTIVE-FLOW correlator pattern'],
-          reason: 'CORR-DESTRUCTIVE-FLOW: exec_shell capability after sensitive_access finding',
-          signal_strength: 'high',
-          correlator_pattern_id: 'DESTRUCTIVE-FLOW',
         },
         cisco_result: null,
         content_length: 0,

@@ -59,7 +59,8 @@ The animation below replays a real `defenseclaw setup guardrail` session — con
     { type: 'dim', text: '   10. OpenHands      — global ~/.openhands/hooks.json command hooks' },
     { type: 'dim', text: '   11. Antigravity    — five Antigravity 2.0 lifecycle hooks in ~/.gemini/config/hooks.json' },
     { type: 'dim', text: '   12. OpenCode       — auto-loaded JS bridge plugin; tool.execute.before blocking' },
-    { type: 'dim', text: '   13. OmniGent       — custom Python policy bridge; ALLOW/ASK/DENY enforcement' },
+    { type: 'dim', text: '   13. Amp            — synchronous TypeScript policy plugin; native call/result confirmation' },
+    { type: 'dim', text: '   14. OmniGent       — custom Python policy bridge; ALLOW/ASK/DENY enforcement' },
     { type: 'spacer' },
     { type: 'prompt', text: '  Selection [3]: ', reply: '', pauseMs: 1100 },
     { type: 'spacer' },
@@ -124,8 +125,8 @@ Each row corresponds to one prompt in the animation. **Default** shows what pres
 
 | Prompt (default) | Flag equivalent | Note |
 | --- | --- | --- |
-| **Which agent framework?** *(default: previous selection or auto-detected)* | `--connector` / `--agent` | Explicitly selects the connector being configured. Accepts `claudecode`, `codex`, `cursor`, `windsurf`, `geminicli`, `copilot`, `hermes`, `openhands`, `antigravity`, `opencode`, `omnigent`, `openclaw`, `zeptoclaw`. |
-| **Direct-to-upstream quick setup** *(default: observe)* | `defenseclaw setup <connector> --mode observe\|action` | Claude Code, Codex, Cursor, Windsurf, Gemini CLI, Copilot CLI, Hermes, OpenHands, Antigravity, OpenCode, and OmniGent all have one-line hook or policy setup aliases. |
+| **Which agent framework?** *(default: previous selection or auto-detected)* | `--connector` / `--agent` | Explicitly selects the connector being configured. Accepts `claudecode`, `codex`, `cursor`, `windsurf`, `geminicli`, `copilot`, `hermes`, `openhands`, `antigravity`, `opencode`, `amp`, `omnigent`, `openclaw`, `zeptoclaw`. |
+| **Direct-to-upstream quick setup** *(default: observe)* | `defenseclaw setup <connector> --mode observe\|action` | Claude Code, Codex, Cursor, Windsurf, Gemini CLI, Copilot CLI, Hermes, OpenHands, Antigravity, OpenCode, Amp, and OmniGent all have one-line hook or policy setup aliases. |
 | **Enable guardrail?** *(default: Y)* | implicit when `--connector` is set | Pass `--disable` to roll the guardrail back. |
 | **Select mode** *(default: observe)* | `--mode observe\|action` | `observe` logs; `action` enforces. |
 | **Select hook fail mode** *(default: current config; closed on a fresh install)* | **interactive-only here** | Change later with `defenseclaw guardrail fail-mode <open\|closed>`. Only asked on first setup or when `--mode` changes. |
@@ -143,14 +144,17 @@ Each row corresponds to one prompt in the animation. **Default** shows what pres
 | **Guardrail proxy port** *(default: 4000)* | `--port` | — |
 | **Custom block message?** *(action mode only)* | `--block-message` | — |
 
-<Callout title="Redaction is v8 policy, not a guardrail setup flag">
-Edit `observability.destinations[].routes[].selector.buckets` and
-`observability.redaction_profiles` in `config.yaml`. Then run
+<Callout title="Redaction has its own v8 policy workflow">
+Run `defenseclaw setup redaction` after guardrail setup. Its simple flow can
+keep policy, remove redaction, or apply one profile; **Show advanced settings?**
+opens all 14 buckets, custom profiles, destinations, and ordered routes. Those
+settings own `observability.destinations[].routes[].selector.buckets` and
+`observability.redaction_profiles`. You can independently verify them with
 `defenseclaw config validate`,
 `defenseclaw config show --effective --section observability`, and
-`defenseclaw observability plan`; apply the reviewed policy with
+`defenseclaw observability plan`; apply an explicit restart with
 `defenseclaw-gateway restart`. See [Redaction](/docs/reference/redaction) for
-resolution order and profile examples.
+the full interactive and scripted workflow.
 </Callout>
 
 On a multi-connector install, `--connector <name>` scopes this setup run to that connector. When `--block-message` is supplied without `--connector`, setup treats it as broad operator intent: it updates the shared block message and reconciles active connector overrides so one connector does not keep stale block text.
@@ -281,7 +285,7 @@ If the same Bedrock / Vertex / Azure posture is already configured on a custom-p
 <TypeTable
   type={{
     "--connector / --agent": {
-      type: "openclaw|zeptoclaw|claudecode|codex|hermes|cursor|windsurf|geminicli|copilot|openhands|antigravity|opencode|omnigent",
+      type: "openclaw|zeptoclaw|claudecode|codex|hermes|cursor|windsurf|geminicli|copilot|openhands|antigravity|opencode|amp|omnigent",
       description: "Agent framework connector. Drives traffic interception, tool inspection, and subprocess enforcement defaults.",
     },
     "--mode": {
@@ -468,7 +472,7 @@ The matrix below is the source of truth. ✓ means "supported"; ✗ means "not s
 | `defenseclaw setup guardrail` | ✓ default | ✓ `--non-interactive` + flags | Two prompts have **no flag** — see callout above. |
 | [`defenseclaw setup claude-code`](/docs/connectors/claudecode) | ✓ confirm prompt | ✓ `--yes`, `--mode`, `--restart/--no-restart`, policy flags | Direct-to-upstream wrapper; observe by default, action returns supported lifecycle verdicts. |
 | [`defenseclaw setup codex`](/docs/connectors/codex) | ✓ confirm prompt | ✓ `--yes`, `--mode`, `--restart/--no-restart`, policy flags | Same shape as `setup claude-code`. |
-| `defenseclaw setup cursor` / `setup windsurf` / `setup geminicli` / `setup copilot` / `setup openhands` / `setup antigravity` / `setup hermes` / `setup opencode` / `setup omnigent` | ✓ confirm prompt | ✓ `--yes`, `--mode`, `--restart/--no-restart`, connector policy flags | Generated wrappers; observe by default, action uses the connector's native hook or policy decision surface. |
+| `defenseclaw setup cursor` / `setup windsurf` / `setup geminicli` / `setup copilot` / `setup openhands` / `setup antigravity` / `setup hermes` / `setup opencode` / `setup amp` / `setup omnigent` | ✓ confirm prompt | ✓ `--yes`, `--mode`, `--restart/--no-restart`, connector policy flags | Generated wrappers; observe by default, action uses the connector's native hook or policy decision surface. |
 | `defenseclaw setup openclaw` / `setup zeptoclaw` | ✓ confirm prompt | ✓ `--yes` | Confirm is skippable; the **full** guardrail wizard is **not** available here — pass `setup guardrail` flags after the confirm. |
 | [`defenseclaw setup splunk`](/docs/observability/splunk) | ✓ wizard when no mode flag | ✓ `--non-interactive` + `--logs` / `--enterprise` / `--o11y` | |
 | [`defenseclaw setup local-observability`](/docs/observability/local-observability) | ✗ no prompts | ✓ flags only | Compose-style up/down/logs subcommands; never asks. |

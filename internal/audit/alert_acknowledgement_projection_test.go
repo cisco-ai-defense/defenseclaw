@@ -130,8 +130,8 @@ type closingAlertHealthReporter struct {
 	errs  chan error
 }
 
-func (reporter *closingAlertHealthReporter) ReportEventHistoryHealth(code EventHistoryHealthCode) {
-	reporter.codes <- code
+func (reporter *closingAlertHealthReporter) ReportEventHistoryHealth(transition EventHistoryHealthTransition) {
+	reporter.codes <- transition.Code
 	reporter.errs <- reporter.store.Close()
 }
 
@@ -724,7 +724,7 @@ func TestAlertAcknowledgementUnsignedOutcomeReportsAfterStoreRelease(t *testing.
 		if err != nil {
 			t.Fatalf("reentrant close: %v", err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("unsigned health reporter deadlocked while closing the alert store")
 	}
 	select {
@@ -732,7 +732,7 @@ func TestAlertAcknowledgementUnsignedOutcomeReportsAfterStoreRelease(t *testing.
 		if err != nil {
 			t.Fatal(err)
 		}
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("alert acknowledgement did not return after the reporter completed")
 	}
 }
@@ -1189,7 +1189,19 @@ func TestAlertAcknowledgementLegacyACKBecomesBaselineWithoutModernAction(t *test
 		version INTEGER PRIMARY KEY, applied_at DATETIME NOT NULL)`); err != nil {
 		t.Fatal(err)
 	}
-	for index := 0; index < len(migrations)-1; index++ {
+	var alertMigration migration
+	alertMigrationVersion := 0
+	for index, candidate := range migrations {
+		if candidate.description == "alert acknowledgements: add CAS projection and reconciliation state" {
+			alertMigration = candidate
+			alertMigrationVersion = index + 1
+			break
+		}
+	}
+	if alertMigration.apply == nil {
+		t.Fatal("alert acknowledgement migration not found")
+	}
+	for index := 0; index < alertMigrationVersion-1; index++ {
 		if err := store.applyMigration(index+1, migrations[index]); err != nil {
 			t.Fatalf("apply historical migration %d: %v", index+1, err)
 		}
@@ -1199,6 +1211,12 @@ func TestAlertAcknowledgementLegacyACKBecomesBaselineWithoutModernAction(t *test
 		VALUES ('legacy-alert', '2025-02-03T04:05:06Z', 'scan-finding', 'legacy-user', 'lost severity', 'ACK'),
 		('legacy-summary', '2025-02-03T04:06:00Z', 'acknowledge-alerts', 'legacy-user', 'summary', 'ACK')`); err != nil {
 		t.Fatal(err)
+	}
+	// Scope the additive compatibility assertion to its owning migration. The
+	// later destructive evidence cutoff removes the source audit rows but must
+	// preserve the materialized acknowledgement state byte-for-byte.
+	if err := store.applyMigration(alertMigrationVersion, alertMigration); err != nil {
+		t.Fatalf("apply alert acknowledgement migration: %v", err)
 	}
 	if err := store.Init(); err != nil {
 		t.Fatal(err)

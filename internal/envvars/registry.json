@@ -218,6 +218,19 @@
       "since": "0.8.4"
     },
     {
+      "name": "DEFENSECLAW_INTEL_REFUSAL_COMMAND_LOG",
+      "category": "test_fixture",
+      "purpose": "Records any dependency, network, service, or mutation command reached by the native Intel macOS exact-candidate refusal harness.",
+      "default": "unset",
+      "accepted_values": ["absolute path inside the isolated refusal-test root", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {"location": "scripts/test-upgrade-macos-intel-refusal.sh", "description": "Fails the native Intel release gate if a blocked command executes before architecture refusal"}
+      ],
+      "since": "0.8.12"
+    },
+    {
       "name": "DEFENSECLAW_TEST_BASH",
       "category": "test_fixture",
       "purpose": "Selects the Bash executable used by release-workflow tests so macOS CI can exercise wrappers with the system Bash runtime.",
@@ -2573,6 +2586,50 @@
       "since": "0.8.0"
     },
     {
+      "name": "DEFENSECLAW_HOOK_TOKEN_LOCK_HELPER",
+      "category": "test_fixture",
+      "purpose": "Selects the connector hook-token cross-process lock fixture.",
+      "default": "unset",
+      "accepted_values": ["1", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/hook_api_token_test.go", "description": "Connector hook-token lock fixture"}],
+      "since": "0.8.11"
+    },
+    {
+      "name": "DEFENSECLAW_HOOK_TOKEN_LOCK_PATH",
+      "category": "test_fixture",
+      "purpose": "Lock path passed to the connector hook-token cross-process fixture.",
+      "default": "unset",
+      "accepted_values": ["absolute test lock path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/hook_api_token_test.go", "description": "Connector hook-token lock target"}],
+      "since": "0.8.11"
+    },
+    {
+      "name": "DEFENSECLAW_HOOK_TOKEN_LOCK_READY",
+      "category": "test_fixture",
+      "purpose": "Ready-signal path shared with the connector hook-token cross-process fixture.",
+      "default": "unset",
+      "accepted_values": ["absolute test marker path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/hook_api_token_test.go", "description": "Connector hook-token lock readiness fixture"}],
+      "since": "0.8.11"
+    },
+    {
+      "name": "DEFENSECLAW_HOOK_TOKEN_LOCK_RELEASE",
+      "category": "test_fixture",
+      "purpose": "Release-signal path shared with the connector hook-token cross-process fixture.",
+      "default": "unset",
+      "accepted_values": ["absolute test marker path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [{"location": "internal/gateway/connector/hook_api_token_test.go", "description": "Connector hook-token lock release fixture"}],
+      "since": "0.8.11"
+    },
+    {
       "name": "DEFENSECLAW_HOOK_DELEGATION_TEST_HELPER",
       "category": "test_fixture",
       "purpose": "Selects the isolated stable-hook delegation helper subprocess.",
@@ -3037,6 +3094,22 @@
       "since": "0.8.8"
     },
     {
+      "name": "DEFENSECLAW_SHIM_CAPTURE",
+      "category": "test_fixture",
+      "purpose": "Carries the output path used by the isolated PATH-shim argv fidelity fixture.",
+      "default": "unset",
+      "accepted_values": ["test-defined absolute path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/gateway/connector/connector_test.go",
+          "description": "Captures the fake curl request body so the test can verify exact shim argv forwarding; never read by production runtime paths"
+        }
+      ],
+      "since": "0.9.0"
+    },
+    {
       "name": "DEFENSECLAW_GATEWAY_URL",
       "category": "test_fixture",
       "purpose": "Base URL of an external gateway for the security-suite e2e tier (TestSecuritySuiteE2E). When set, the test posts to that gateway's /api/v1/inspect/* endpoints; when unset, the tier runs against an in-process inspect server.",
@@ -3178,6 +3251,22 @@
       "surface_in_doctor": false,
       "consumers": [
         {"location": "internal/cli/windows_enterprise_payload_test.go", "description": "Marker the re-execed staging helper reads to select the restricted-environment payload-staging path under test"}
+      ],
+      "since": "0.8.11"
+    },
+    {
+      "name": "DEFENSECLAW_AUDIT_DB_LOCK_HELPER_PATH",
+      "category": "test_fixture",
+      "purpose": "Passes the temporary audit database path to isolated subprocesses that verify SQLite kernel-lock and WAL lifecycle behavior.",
+      "default": "unset",
+      "accepted_values": ["absolute temporary database path", "unset"],
+      "security_impact": "none",
+      "surface_in_doctor": false,
+      "consumers": [
+        {
+          "location": "internal/audit/audit_db_lock_unix_test.go",
+          "description": "Peer-process lock and SQLite-close fixtures; never read by production runtime paths"
+        }
       ],
       "since": "0.8.11"
     }

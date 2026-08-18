@@ -41,6 +41,7 @@ import (
 //   - claudecode response carries the top-level "claude_code_output"
 //     key (Claude Code reads that exact field).
 //   - codex response carries "codex_output".
+//   - Amp and OmniGent consume the canonical top-level action directly.
 //   - every other connector returns "hook_output".
 //   - all responses carry the canonical action/mode/severity fields.
 //
@@ -106,14 +107,14 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 		},
 		{
 			connector:      "copilot",
-			event:          "PreToolUse",
+			event:          "preToolUse",
 			toolName:       "shell",
 			topLevelOutput: "hook_output",
 			expectAction:   "block",
 		},
 		{
 			connector:      "openhands",
-			event:          "PreToolUse",
+			event:          "pre_tool_use",
 			toolName:       "terminal",
 			topLevelOutput: "hook_output",
 			expectAction:   "block",
@@ -130,6 +131,15 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 			event:          "tool.execute.before",
 			toolName:       "bash",
 			topLevelOutput: "hook_output",
+			expectAction:   "block",
+		},
+		{
+			connector: "amp",
+			event:     "tool.call",
+			toolName:  "bash",
+			// The TypeScript plugin consumes canonical top-level action,
+			// reason, and additional_context fields directly.
+			topLevelOutput: "",
 			expectAction:   "block",
 		},
 		{

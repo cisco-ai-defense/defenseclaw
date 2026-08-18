@@ -63,7 +63,15 @@ var (
 	enterpriseHooksPlatformPreflight          = enterpriseHooksNativePlatformPreflight
 	enterpriseHooksMutationIdentityPreflight  = enterpriseHooksNativeMutationIdentityPreflight
 	enterpriseHooksRootPersistentPreRun       = enterpriseHooksNativePersistentPreRun
-	enterpriseHooksFullRootPersistentPreRun   = rootPersistentPreRunE
+	// Default the "full" enterprise hooks pre-run to the no-audit variant. The
+	// hook-guardian's `enterprise hooks watch` runs as a long-lived daemon
+	// beside the main gateway; the main gateway already owns audit.db in RW
+	// mode, and SQLite cannot accept a second RW owner. The enterprise hooks
+	// pathway (watch / install / uninstall / reconcile) does not use
+	// auditStore or auditLog anywhere, so skipping the open removes dead work
+	// and avoids the consistent SQLITE_BUSY crash the guardian would hit. The
+	// seam remains overridable so lifecycle tests keep their custom pre-runs.
+	enterpriseHooksFullRootPersistentPreRun   = rootPersistentPreRunNoAuditE
 	enterpriseHooksConfigOnlyPersistentPreRun = func(*cobra.Command, []string) error {
 		return loadGatewayCommandConfigOnly()
 	}

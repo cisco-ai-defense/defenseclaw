@@ -33,7 +33,6 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/netguard"
-	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -137,9 +136,11 @@ type Event struct {
 	Enforced    bool   `json:"enforced,omitempty"`
 	RulePackDir string `json:"rule_pack_dir,omitempty"`
 
-	// Structured carries sanitized machine-readable data for sink fanout.
-	// It is intentionally not persisted in SQLite audit_events; callers that
-	// need durable structured records should use their native table/log path.
+	// Structured carries sanitized machine-readable data for sink fanout
+	// AND is persisted verbatim in the SQLite audit_events.structured_json
+	// column (see migration 14). Downstream queries — the Alerts counter
+	// via connector-hook severity, the alert-acknowledgement projection —
+	// key off this durable column.
 	Structured map[string]any `json:"structured,omitempty"`
 
 	// RedactionEnabled carries the cloud-controlled per-inspection
@@ -202,8 +203,9 @@ type ActionEntry struct {
 }
 
 type Store struct {
-	db     *sql.DB
-	dbPath string
+	db          *sql.DB
+	dbPath      string
+	dbPathGuard *preparedAuditDatabasePath
 
 	// lifecycleMu serializes initialization/close and lets mandatory v8
 	// event-history transactions pin a ready store until commit or rollback.
@@ -326,11 +328,11 @@ func openSQLite(dbPath string) (*sql.DB, error) {
 }
 
 func NewStore(dbPath string) (*Store, error) {
-	db, identity, err := openHardenedAuditSQLiteWithIdentity(dbPath, auditDBPathHooks{})
+	db, identity, pathGuard, err := openHardenedAuditSQLiteWithIdentity(dbPath, auditDBPathHooks{})
 	if err != nil {
 		return nil, err
 	}
-	return &Store{db: db, dbPath: identity}, nil
+	return &Store{db: db, dbPath: identity, dbPathGuard: pathGuard}, nil
 }
 
 // sqliteCoded is the structural interface implemented by the
@@ -1130,7 +1132,7 @@ var migrations = []migration{
 		//                             sensitive_access / egress_external
 		//   tool_capability_class   — read_fs / write_fs / exec_shell /
 		//                             network_fetch / send_message
-		//   content_fingerprint     — sha256(redacted_value)[:8]
+		//   content_fingerprint     — keyed hash-v1 evidence HMAC prefix
 		//   external_endpoint       — host or URL for network findings
 		//   turn_id                 — monotonic per-session counter
 		//   decision_path           — JSON audit trail of severity
@@ -1714,6 +1716,38 @@ var migrations = []migration{
 		description: "runtime assets: add durable connector session provenance state",
 		apply:       migrateRuntimeAssetState,
 	},
+	{
+		description: "guardrails: add bounded durable tool-call chain state",
+		apply:       migrateToolChainState,
+	},
+	{
+		description: "guardrails: add pending tool-call predecessor lifecycle",
+		apply:       migrateToolChainPendingState,
+	},
+	{
+		// The sliding-window correlator reads this identity partition after
+		// every finding insert and needs the newest bounded candidates. Include
+		// both sort keys so the hot path does not build a temporary ordering as
+		// scan_findings grows.
+		description: "guardrails: index focused correlation candidate windows",
+		apply: func(ex dbExecer) error {
+			present, err := tableExists(ex, "scan_findings")
+			if err != nil || !present {
+				return err
+			}
+			if _, err := ex.Exec(
+				`CREATE INDEX IF NOT EXISTS idx_scan_findings_correlation_window ` +
+					`ON scan_findings(session_id, agent_instance_id, agent_id, timestamp DESC, id DESC)`,
+			); err != nil {
+				return fmt.Errorf("create idx_scan_findings_correlation_window: %w", err)
+			}
+			return nil
+		},
+	},
+	{
+		description: historicalEvidencePurgeMigrationDescription,
+		apply:       purgeHistoricalEvidence,
+	},
 }
 
 // tableExists reports whether the given SQLite table is present.
@@ -1821,6 +1855,13 @@ func (s *Store) Init() error {
 		"correlation_pending_operations",
 		"correlation_receipts",
 		"correlation_identity_claims",
+		"guardrail_chain_partitions",
+		"guardrail_chain_events",
+		"guardrail_chain_deny_receipts",
+		"guardrail_chain_pending_actions",
+		"guardrail_chain_pending_boundaries",
+		"guardrail_chain_terminal_resets",
+		"guardrail_chain_cutoff_barriers",
 	} {
 		present, err := tableExists(s.db, table)
 		if err != nil {
@@ -1836,7 +1877,7 @@ func (s *Store) Init() error {
 	if err := s.proveDurableWrite(context.Background()); err != nil {
 		return err
 	}
-	if err := revalidateHardenedAuditSQLite(s.dbPath, auditDBPathHooks{}); err != nil {
+	if err := revalidateHardenedAuditSQLite(s.dbPathGuard); err != nil {
 		return fmt.Errorf("audit: revalidate database paths after initialization: %w", err)
 	}
 
@@ -2034,6 +2075,14 @@ var knownTables = map[string]bool{
 	"correlation_pending_operations":    true,
 	"correlation_receipts":              true,
 	"correlation_identity_claims":       true,
+	// Bounded, content-free state for the six fixed tool-call chains.
+	"guardrail_chain_partitions":         true,
+	"guardrail_chain_events":             true,
+	"guardrail_chain_deny_receipts":      true,
+	"guardrail_chain_pending_actions":    true,
+	"guardrail_chain_pending_boundaries": true,
+	"guardrail_chain_terminal_resets":    true,
+	"guardrail_chain_cutoff_barriers":    true,
 	// Connector/session selection and load provenance (WIN-AUD-070/071).
 	"runtime_asset_state": true,
 }
@@ -3318,6 +3367,131 @@ type AlertAcknowledgementSelector struct {
 	Before    time.Time
 }
 
+const alertNonAllowOutcomeSQL = `'alert','ask','block','blocked','confirm','deny','denied',
+	'fail','failed','failure','quarantine','quarantined','reject','rejected',
+	'revoked','terminated','timed_out'`
+
+func canonicalAlertOutcomeSQL() string {
+	return `LOWER(COALESCE(
+		CASE WHEN json_valid(COALESCE(event.payload_json,''))
+			THEN json_extract(event.payload_json,
+				'$."defenseclaw.enforcement.effective_action"') END,
+		CASE WHEN json_valid(COALESCE(event.payload_json,''))
+			THEN json_extract(event.payload_json,
+				'$."defenseclaw.guardrail.decision"') END,
+		CASE WHEN json_valid(COALESCE(event.payload_json,''))
+			THEN json_extract(event.payload_json,
+				'$."defenseclaw.network.decision"') END,
+		CASE WHEN json_valid(COALESCE(event.payload_json,''))
+			THEN json_extract(event.payload_json,
+				'$."defenseclaw.network.policy_outcome"') END,
+		CASE WHEN json_valid(COALESCE(event.payload_json,''))
+			THEN json_extract(event.payload_json,
+				'$."defenseclaw.scan.verdict"') END,
+		CASE WHEN json_valid(COALESCE(event.projected_record_json,''))
+			THEN json_extract(event.projected_record_json,'$.outcome') END,
+		event.action,''))`
+}
+
+func legacyExplicitAlertSQL() string {
+	return `(
+		LOWER(COALESCE(event.action,'')) IN (` + alertNonAllowOutcomeSQL + `)
+		OR LOWER(COALESCE(event.action,'')) LIKE '%-failure'
+		OR LOWER(COALESCE(event.action,'')) LIKE '%-failed'
+		OR (
+			LOWER(COALESCE(event.action,'')) = 'connector-hook'
+			AND (
+				COALESCE(event.enforced, 0) = 1
+				OR (
+					INSTR(' ' || LOWER(COALESCE(event.details,'')) || ' ',
+						' mode=observe ') = 0
+					AND (
+						INSTR(' ' || LOWER(COALESCE(event.details,'')) || ' ',
+							' action=block ') > 0
+						OR INSTR(' ' || LOWER(COALESCE(event.details,'')) || ' ',
+							' action=deny ') > 0
+					)
+				)
+			)
+		)
+	)`
+}
+
+func alertEligibilitySQL(legacyActionPlaceholders string) string {
+	findingTagsPath := `$."defenseclaw.finding.tags"`
+	canonicalOutcome := canonicalAlertOutcomeSQL()
+	legacyExplicit := legacyExplicitAlertSQL()
+	return `(
+		(
+			event.bucket = 'security.finding'
+			AND event.event_name = 'finding.observed'
+			AND UPPER(COALESCE(event.severity,'')) IN
+				('CRITICAL','HIGH','MEDIUM','LOW','ERROR','WARNING')
+			AND NOT EXISTS (
+				SELECT 1 FROM json_each(
+					CASE
+						WHEN json_valid(COALESCE(event.payload_json,'')) THEN
+							CASE
+								WHEN json_type(event.payload_json, '` + findingTagsPath + `') = 'array'
+								THEN json_extract(event.payload_json, '` + findingTagsPath + `')
+								ELSE '[]'
+							END
+						ELSE '[]'
+					END
+				) AS finding_tag
+				WHERE LOWER(TRIM(
+					CAST(finding_tag.value AS TEXT),
+					CHAR(9, 10, 11, 12, 13, 32)
+				)) = 'detection-only'
+			)
+			AND LOWER(TRIM(
+				COALESCE(
+					CASE WHEN json_valid(COALESCE(event.payload_json,''))
+						THEN json_extract(event.payload_json, '` + findingTagsPath + `') END,
+					''
+				),
+				CHAR(9, 10, 11, 12, 13, 32)
+			)) <> 'detection-only'
+		)
+		OR (
+			event.bucket IN ('enforcement.action','network.egress')
+			AND ` + canonicalOutcome + ` IN (` + alertNonAllowOutcomeSQL + `)
+		)
+		OR (
+			event.bucket IN ('platform.health','diagnostic')
+			AND UPPER(COALESCE(event.severity,'')) IN ('CRITICAL','HIGH','ERROR')
+		)
+		OR (
+			event.bucket IS NULL
+			AND (
+				(
+					event.action IN (` + legacyActionPlaceholders + `)
+					AND UPPER(COALESCE(event.severity,'')) IN
+						('CRITICAL','HIGH','MEDIUM','LOW','ERROR','WARNING')
+				)
+				OR ` + legacyExplicit + `
+			)
+		)
+	)`
+}
+
+func alertEffectiveSeveritySQL() string {
+	canonicalOutcome := canonicalAlertOutcomeSQL()
+	legacyExplicit := legacyExplicitAlertSQL()
+	return `CASE
+		WHEN UPPER(TRIM(COALESCE(event.severity,''))) NOT IN ('','INFO')
+			THEN UPPER(TRIM(event.severity))
+		WHEN event.bucket = 'network.egress'
+		 AND ` + canonicalOutcome + ` IN (` + alertNonAllowOutcomeSQL + `)
+			THEN 'WARNING'
+		WHEN event.bucket = 'enforcement.action'
+		 AND ` + canonicalOutcome + ` IN (` + alertNonAllowOutcomeSQL + `)
+			THEN 'HIGH'
+		WHEN event.bucket IS NULL AND ` + legacyExplicit + ` THEN 'HIGH'
+		ELSE 'INFO'
+	END`
+}
+
 // SelectAlertAcknowledgementTargets returns a stable alert-ID ordering and
 // the projection versions that must be included in the caller's preview
 // digest. Every caller-controlled value is bound as a SQL parameter.
@@ -3332,27 +3506,24 @@ func (s *Store) SelectAlertAcknowledgementTargets(
 		return s.selectExactAlertAcknowledgementTargets(ctx, selector.AlertIDs)
 	}
 
+	legacyActions := legacyAlertEligibleActions()
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(legacyActions)), ",")
 	query := `SELECT event.id, COALESCE(projection.projection_version, 0)
 		FROM audit_events AS event
 		LEFT JOIN alert_acknowledgement_projection AS projection ON projection.alert_id = event.id
 		WHERE projection.alert_id IS NULL
-		  AND (
-		      (event.bucket = ? AND event.event_name = 'finding.observed')
-		      OR (event.bucket IS NULL AND event.action IN (`
-	legacyActions := legacyAlertEligibleActions()
-	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(legacyActions)), ",")
-	query += placeholders + `) AND UPPER(COALESCE(event.severity,'')) IN
-		          ('CRITICAL','HIGH','MEDIUM','LOW','ERROR','INFO'))
-		  )`
-	args := []any{string(observability.BucketSecurityFinding)}
+		  AND ` + alertEligibilitySQL(placeholders)
+	args := make([]any, 0, len(legacyActions)+5)
 	for _, action := range legacyActions {
 		args = append(args, action)
 	}
-	if selector.Severity == "" || selector.Severity == "all" {
-		query += ` AND UPPER(COALESCE(event.severity,'')) IN ('CRITICAL','HIGH','MEDIUM','LOW')`
-	} else {
-		query += ` AND UPPER(COALESCE(event.severity,'')) = ?`
-		args = append(args, selector.Severity)
+	// An empty or "all" severity needs no extra predicate: eligibility already
+	// excludes clean lifecycle telemetry and accepts promoted INFO non-allow
+	// outcomes plus ERROR health records.
+	severity := strings.ToUpper(strings.TrimSpace(selector.Severity))
+	if severity != "" && severity != "ALL" {
+		query += ` AND ` + alertEffectiveSeveritySQL() + ` = ?`
+		args = append(args, severity)
 	}
 	if selector.Connector != "" {
 		query += ` AND LOWER(COALESCE(event.connector,'')) = LOWER(?)`
@@ -3394,18 +3565,12 @@ func (s *Store) selectExactAlertAcknowledgementTargets(
 		              WHERE alert_id = requested.alert_id)
 		   OR EXISTS (SELECT 1 FROM alert_acknowledgement_health
 		              WHERE alert_id = requested.alert_id)
-		   OR (event.id IS NOT NULL AND (
-		       (event.bucket = ? AND event.event_name = 'finding.observed')
-		       OR (event.bucket IS NULL AND event.action IN (` + actionPlaceholders + `)
-		           AND UPPER(COALESCE(event.severity,'')) IN
-		               ('CRITICAL','HIGH','MEDIUM','LOW','ERROR','INFO'))
-		   ))
+		   OR (event.id IS NOT NULL AND ` + alertEligibilitySQL(actionPlaceholders) + `)
 		ORDER BY requested.alert_id`
-	args := make([]any, 0, len(alertIDs)+1+len(legacyActions))
+	args := make([]any, 0, len(alertIDs)+len(legacyActions))
 	for _, alertID := range alertIDs {
 		args = append(args, alertID)
 	}
-	args = append(args, string(observability.BucketSecurityFinding))
 	for _, action := range legacyActions {
 		args = append(args, action)
 	}
@@ -3452,20 +3617,21 @@ func (s *Store) ListAlerts(limit int) ([]Event, error) {
 	legacyActions := legacyAlertEligibleActions()
 	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(legacyActions)), ",")
 	query := `SELECT event.id, event.timestamp, event.action, event.target, event.actor,
-			event.details, event.structured_json, event.severity, event.run_id,
+			event.details, event.structured_json, ` + alertEffectiveSeveritySQL() + `,
+			event.run_id,
 			event.trace_id, event.request_id
 		 FROM audit_events AS event
-		 WHERE (
-			(event.bucket = ? AND event.event_name = 'finding.observed')
-			OR (event.bucket IS NULL AND event.action IN (` + placeholders + `))
-		 )
-		 AND event.severity IN ('CRITICAL','HIGH','MEDIUM','LOW','ERROR','INFO')
+		 WHERE (event.bucket IS NULL OR event.bucket IN (
+			'security.finding','enforcement.action','network.egress',
+			'platform.health','diagnostic'
+		 ))
+		 AND ` + alertEligibilitySQL(placeholders) + `
 		 AND NOT EXISTS (
 			 SELECT 1 FROM alert_acknowledgement_projection AS projection
 			 WHERE projection.alert_id = event.id
 		 )
 		 ORDER BY event.timestamp DESC LIMIT ?`
-	args := []any{string(observability.BucketSecurityFinding)}
+	args := make([]any, 0, len(legacyActions)+1)
 	for _, action := range legacyActions {
 		args = append(args, action)
 	}
@@ -3603,21 +3769,43 @@ type Counts struct {
 
 func (s *Store) GetCounts() (Counts, error) {
 	var c Counts
+	legacyActions := legacyAlertEligibleActions()
+	legacyPlaceholders := strings.TrimSuffix(strings.Repeat("?,", len(legacyActions)), ",")
+	alertCountSQL := `SELECT COUNT(*) FROM audit_events AS event
+		WHERE (event.bucket IS NULL OR event.bucket IN (
+			'security.finding','enforcement.action','network.egress','platform.health','diagnostic'
+		))
+		  AND ` + alertEligibilitySQL(legacyPlaceholders) + `
+		  AND ` + alertEffectiveSeveritySQL() + ` IN ('CRITICAL','HIGH','ERROR')
+		  AND NOT EXISTS (
+			  SELECT 1 FROM alert_acknowledgement_projection AS projection
+			  WHERE projection.alert_id = event.id
+		  )`
+	alertCountArgs := make([]any, 0, len(legacyActions))
+	for _, action := range legacyActions {
+		alertCountArgs = append(alertCountArgs, action)
+	}
 	queries := []struct {
 		sql  string
+		args []any
 		dest *int
 	}{
-		{`SELECT COUNT(*) FROM actions WHERE target_type = 'skill' AND json_extract(actions_json, '$.install') = 'block'`, &c.BlockedSkills},
-		{`SELECT COUNT(*) FROM actions WHERE target_type = 'skill' AND json_extract(actions_json, '$.install') = 'allow'`, &c.AllowedSkills},
-		{`SELECT COUNT(*) FROM actions WHERE target_type = 'mcp' AND json_extract(actions_json, '$.install') = 'block'`, &c.BlockedMCPs},
-		{`SELECT COUNT(*) FROM actions WHERE target_type = 'mcp' AND json_extract(actions_json, '$.install') = 'allow'`, &c.AllowedMCPs},
-		{`SELECT COUNT(*) FROM audit_events WHERE severity IN ('CRITICAL','HIGH','MEDIUM','LOW')`, &c.Alerts},
-		{`SELECT COUNT(*) FROM scan_results`, &c.TotalScans},
-		{`SELECT COUNT(*) FROM network_egress_events WHERE blocked = 1`, &c.BlockedEgressCalls},
+		{`SELECT COUNT(*) FROM actions WHERE target_type = 'skill' AND json_extract(actions_json, '$.install') = 'block'`, nil, &c.BlockedSkills},
+		{`SELECT COUNT(*) FROM actions WHERE target_type = 'skill' AND json_extract(actions_json, '$.install') = 'allow'`, nil, &c.AllowedSkills},
+		{`SELECT COUNT(*) FROM actions WHERE target_type = 'mcp' AND json_extract(actions_json, '$.install') = 'block'`, nil, &c.BlockedMCPs},
+		{`SELECT COUNT(*) FROM actions WHERE target_type = 'mcp' AND json_extract(actions_json, '$.install') = 'allow'`, nil, &c.AllowedMCPs},
+		// ActiveAlerts is the unacknowledged actionable queue, not a count
+		// of every non-INFO audit row. Keep this IPC surface aligned with
+		// the v8 disposition selector: real findings, explicit non-allow
+		// outcomes, and important health failures only. Detection-only,
+		// clean lifecycle, LOW/MEDIUM/WARNING, and reviewed rows stay out.
+		{alertCountSQL, alertCountArgs, &c.Alerts},
+		{`SELECT COUNT(*) FROM scan_results`, nil, &c.TotalScans},
+		{`SELECT COUNT(*) FROM network_egress_events WHERE blocked = 1`, nil, &c.BlockedEgressCalls},
 	}
 	for _, q := range queries {
 		if err := s.scanRow(context.Background(), "get_counts",
-			s.db.QueryRowContext(context.Background(), q.sql), q.dest); err != nil {
+			s.db.QueryRowContext(context.Background(), q.sql, q.args...), q.dest); err != nil {
 			return c, fmt.Errorf("audit: count query: %w", err)
 		}
 	}
@@ -3804,6 +3992,7 @@ func (s *Store) InsertNetworkEgressEvent(e NetworkEgressRow) error {
 			e.Details = strings.ReplaceAll(e.Details, rawURL, e.URL)
 		}
 	}
+	e.Details = netguard.ScrubURLsInText(e.Details)
 	if e.ID == "" {
 		e.ID = uuid.New().String()
 	}
@@ -3998,7 +4187,10 @@ func (s *Store) Close() error {
 	// transactions to release the lifecycle read lock.
 	s.ready.Store(false)
 	s.closed = true
-	return s.db.Close()
+	err := s.db.Close()
+	s.dbPathGuard.close()
+	s.dbPathGuard = nil
+	return err
 }
 
 // currentRunID resolves the per-process run id used to stamp audit

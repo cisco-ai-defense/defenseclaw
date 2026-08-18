@@ -97,6 +97,8 @@ func FuzzRedactionUnicodeAndMalformedEncodings(f *testing.F) {
 		{[]byte("éperson@example.test界"), 0},
 		{[]byte("token=sk-test-12345678901234567890"), 1},
 		{[]byte("https://example.test/?token=%zz"), 2},
+		{[]byte("https://example.test/?tok%65n=reserved-value"), 2},
+		{[]byte("https://example.test/?%2574oken=reserved-value"), 2},
 		{[]byte("e\u0301 and 😀"), 0},
 		{[]byte{0xff, 0xfe, 'x'}, 1},
 	} {

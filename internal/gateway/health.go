@@ -24,6 +24,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
@@ -47,6 +48,20 @@ type observabilityV8FailureObservation struct {
 	generation uint64
 	code       string
 	occurredAt time.Time
+}
+
+type observabilityV8EventHistoryObservation struct {
+	generation         uint64
+	sequence           uint64
+	active             bool
+	lastFailureClass   string
+	lastFailurePrimary uint8
+}
+
+type observabilityV8EventHistorySnapshot struct {
+	activeCode         string
+	lastFailureClass   string
+	lastFailurePrimary uint8
 }
 
 type SubsystemState string
@@ -107,25 +122,26 @@ type HealthSnapshot struct {
 }
 
 type SidecarHealth struct {
-	mu                                 sync.RWMutex
-	gateway                            SubsystemHealth
-	watcher                            SubsystemHealth
-	config                             SubsystemHealth
-	api                                SubsystemHealth
-	guardrail                          SubsystemHealth
-	telemetry                          SubsystemHealth
-	aiDiscovery                        SubsystemHealth
-	applicationProtection              SubsystemHealth
-	sandbox                            *SubsystemHealth
-	startedAt                          time.Time
-	observabilityV8Source              observabilityV8HealthSource
-	observabilityV8ActiveGeneration    uint64
-	observabilityV8Failures            map[string]observabilityV8FailureObservation
-	observabilityV8RetentionState      string
-	observabilityV8RetentionFailure    string
-	observabilityV8RetentionDays       int64
-	observabilityV8EventHistoryFailure string
-	managed                            *SubsystemHealth
+	mu                                    sync.RWMutex
+	gateway                               SubsystemHealth
+	watcher                               SubsystemHealth
+	config                                SubsystemHealth
+	api                                   SubsystemHealth
+	guardrail                             SubsystemHealth
+	telemetry                             SubsystemHealth
+	aiDiscovery                           SubsystemHealth
+	applicationProtection                 SubsystemHealth
+	sandbox                               *SubsystemHealth
+	startedAt                             time.Time
+	observabilityV8Source                 observabilityV8HealthSource
+	observabilityV8ActiveGeneration       uint64
+	observabilityV8Failures               map[string]observabilityV8FailureObservation
+	observabilityV8RetentionState         string
+	observabilityV8RetentionFailure       string
+	observabilityV8RetentionDays          int64
+	observabilityV8EventHistoryGeneration uint64
+	observabilityV8EventHistory           map[string]observabilityV8EventHistoryObservation
+	managed                               *SubsystemHealth
 
 	// subscribers receive a non-blocking notification after every Set*
 	// call, so long-lived consumers (like the IPC GetHealth stream)
@@ -323,6 +339,8 @@ func (h *SidecarHealth) clearObservabilityV8HealthSource() {
 		h.observabilityV8Source = nil
 		h.observabilityV8ActiveGeneration = 0
 		h.observabilityV8Failures = nil
+		h.observabilityV8EventHistoryGeneration = 0
+		h.observabilityV8EventHistory = nil
 		h.telemetry = SubsystemHealth{State: StateStopped, Since: time.Now()}
 		changed = true
 	}
@@ -405,14 +423,87 @@ func validObservabilityV8RetentionFailure(failure string) bool {
 	}
 }
 
-func (h *SidecarHealth) setObservabilityV8EventHistoryFailure(code string) {
-	if h == nil || !validObservabilityV8EventHistoryFailure(code) {
+func (h *SidecarHealth) observeObservabilityV8EventHistory(
+	transition audit.EventHistoryHealthTransition,
+) {
+	if h == nil || !validObservabilityV8EventHistoryTransition(transition) {
 		return
 	}
 	h.mu.Lock()
-	h.observabilityV8EventHistoryFailure = code
+	if transition.Generation < h.observabilityV8EventHistoryGeneration {
+		h.mu.Unlock()
+		return
+	}
+	if transition.Generation > h.observabilityV8EventHistoryGeneration {
+		h.observabilityV8EventHistoryGeneration = transition.Generation
+	}
+	if h.observabilityV8EventHistory == nil {
+		h.observabilityV8EventHistory = make(map[string]observabilityV8EventHistoryObservation, 4)
+	}
+	code := string(transition.Code)
+	current := h.observabilityV8EventHistory[code]
+	if transition.Generation < current.generation ||
+		transition.Generation == current.generation && transition.Sequence <= current.sequence {
+		h.mu.Unlock()
+		return
+	}
+	observation := observabilityV8EventHistoryObservation{
+		generation: transition.Generation, sequence: transition.Sequence,
+		active:           transition.State == audit.EventHistoryHealthFailed,
+		lastFailureClass: current.lastFailureClass, lastFailurePrimary: current.lastFailurePrimary,
+	}
+	if observation.active && transition.Code == audit.EventHistoryHealthWriteFailed {
+		observation.lastFailureClass = string(transition.SQLiteClass)
+		observation.lastFailurePrimary = transition.SQLitePrimaryCode
+	}
+	h.observabilityV8EventHistory[code] = observation
 	h.mu.Unlock()
 	h.notifySubscribers()
+}
+
+func (h *SidecarHealth) bindObservabilityV8EventHistoryGeneration(generation uint64) {
+	if h == nil || generation == 0 {
+		return
+	}
+	changed := false
+	h.mu.Lock()
+	if generation > h.observabilityV8EventHistoryGeneration {
+		h.observabilityV8EventHistoryGeneration = generation
+		changed = true
+	}
+	h.mu.Unlock()
+	if changed {
+		h.notifySubscribers()
+	}
+}
+
+func snapshotObservabilityV8EventHistory(
+	generation uint64,
+	observations map[string]observabilityV8EventHistoryObservation,
+) observabilityV8EventHistorySnapshot {
+	result := observabilityV8EventHistorySnapshot{}
+	var activeGeneration uint64
+	var activeSequence uint64
+	write := observations[string(audit.EventHistoryHealthWriteFailed)]
+	if write.generation != 0 && write.generation <= generation {
+		result.lastFailureClass = write.lastFailureClass
+		result.lastFailurePrimary = write.lastFailurePrimary
+	}
+	for code, observation := range observations {
+		if observation.generation == 0 || observation.generation > generation || !observation.active ||
+			observation.generation < activeGeneration ||
+			observation.generation == activeGeneration && observation.sequence < activeSequence {
+			continue
+		}
+		activeGeneration = observation.generation
+		activeSequence = observation.sequence
+		result.activeCode = code
+	}
+	return result
+}
+
+func validObservabilityV8EventHistoryTransition(transition audit.EventHistoryHealthTransition) bool {
+	return audit.ValidEventHistoryHealthTransition(transition)
 }
 
 func validObservabilityV8EventHistoryFailure(code string) bool {
@@ -700,7 +791,14 @@ func (h *SidecarHealth) Snapshot() HealthSnapshot {
 	retentionState := h.observabilityV8RetentionState
 	retentionFailure := h.observabilityV8RetentionFailure
 	retentionDays := h.observabilityV8RetentionDays
-	eventHistoryFailure := h.observabilityV8EventHistoryFailure
+	eventHistoryGeneration := h.observabilityV8EventHistoryGeneration
+	eventHistoryObservations := make(
+		map[string]observabilityV8EventHistoryObservation,
+		len(h.observabilityV8EventHistory),
+	)
+	for code, observation := range h.observabilityV8EventHistory {
+		eventHistoryObservations[code] = observation
+	}
 
 	if len(h.connStats) > 0 {
 		names := make([]string, 0, len(h.connStats))
@@ -734,19 +832,34 @@ func (h *SidecarHealth) Snapshot() HealthSnapshot {
 		cancel()
 		if ok {
 			failures = h.reconcileObservabilityV8Failures(live)
+			eventHistory := h.reconcileObservabilityV8EventHistory(live.Generation)
 			snap.Telemetry = renderObservabilityV8Health(
 				snap.Telemetry.Since, live, failures,
-				retentionState, retentionFailure, retentionDays, eventHistoryFailure,
+				retentionState, retentionFailure, retentionDays, eventHistory,
 			)
 		} else {
+			eventHistory := snapshotObservabilityV8EventHistory(
+				eventHistoryGeneration, eventHistoryObservations,
+			)
 			snap.Telemetry = renderObservabilityV8HealthUnavailable(
 				snap.Telemetry.Since,
-				retentionState, retentionFailure, retentionDays, eventHistoryFailure,
+				retentionState, retentionFailure, retentionDays, eventHistory,
 			)
 		}
 	}
 
 	return snap
+}
+
+func (h *SidecarHealth) reconcileObservabilityV8EventHistory(
+	generation uint64,
+) observabilityV8EventHistorySnapshot {
+	h.bindObservabilityV8EventHistoryGeneration(generation)
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return snapshotObservabilityV8EventHistory(
+		h.observabilityV8EventHistoryGeneration, h.observabilityV8EventHistory,
+	)
 }
 
 func (h *SidecarHealth) reconcileObservabilityV8Failures(
@@ -793,7 +906,7 @@ func renderObservabilityV8HealthUnavailable(
 	retentionState string,
 	retentionFailure string,
 	retentionDays int64,
-	eventHistoryFailure string,
+	eventHistory observabilityV8EventHistorySnapshot,
 ) SubsystemHealth {
 	// The source error and recovered panic value may contain destination
 	// endpoints, credentials, or payload fragments. Expose only one stable
@@ -806,9 +919,7 @@ func renderObservabilityV8HealthUnavailable(
 			details["retention_failure"] = retentionFailure
 		}
 	}
-	if eventHistoryFailure != "" && validObservabilityV8EventHistoryFailure(eventHistoryFailure) {
-		details["event_history_failure"] = eventHistoryFailure
-	}
+	appendObservabilityV8EventHistoryDetails(details, eventHistory)
 	return SubsystemHealth{
 		State:     StateError,
 		Since:     since,
@@ -824,7 +935,7 @@ func renderObservabilityV8Health(
 	retentionState string,
 	retentionFailure string,
 	retentionDays int64,
-	eventHistoryFailure string,
+	eventHistory observabilityV8EventHistorySnapshot,
 ) SubsystemHealth {
 	details := make(map[string]interface{}, 6)
 	details["generation"] = snapshot.Generation
@@ -834,6 +945,8 @@ func renderObservabilityV8Health(
 		row := map[string]interface{}{
 			"name": destination.Name, "kind": string(destination.Kind),
 			"enabled": destination.Enabled, "generation": snapshot.Generation,
+			"circuit_state":        string(destination.CircuitState),
+			"consecutive_failures": destination.ConsecutiveFailures,
 		}
 		signals := make([]string, len(destination.Signals))
 		for index, signal := range destination.Signals {
@@ -846,6 +959,12 @@ func renderObservabilityV8Health(
 		if destination.Reason != "" {
 			row["reason"] = destination.Reason
 		}
+		if !destination.CircuitOpenUntil.IsZero() {
+			row["circuit_open_until"] = destination.CircuitOpenUntil.UTC().Format(time.RFC3339Nano)
+		}
+		if destination.LastFailureClass != "" {
+			row["last_failure_class"] = string(destination.LastFailureClass)
+		}
 		if destination.Queue != nil {
 			row["queue"] = renderObservabilityV8Queue(*destination.Queue, destination.Counters)
 		}
@@ -855,7 +974,9 @@ func renderObservabilityV8Health(
 		for _, source := range destination.Sources {
 			signalRow := map[string]interface{}{
 				"signal": source.Signal, "state": string(source.State),
-				"counters": renderObservabilityV8Counters(source.Counters),
+				"counters":             renderObservabilityV8Counters(source.Counters),
+				"circuit_state":        string(source.CircuitState),
+				"consecutive_failures": source.ConsecutiveFailures,
 			}
 			if source.Reason != "" {
 				signalRow["reason"] = source.Reason
@@ -865,6 +986,12 @@ func renderObservabilityV8Health(
 			}
 			if !source.LastFailure.IsZero() {
 				signalRow["last_failure_at"] = source.LastFailure.UTC().Format(time.RFC3339Nano)
+			}
+			if !source.CircuitOpenUntil.IsZero() {
+				signalRow["circuit_open_until"] = source.CircuitOpenUntil.UTC().Format(time.RFC3339Nano)
+			}
+			if source.LastFailureClass != "" {
+				signalRow["last_failure_class"] = string(source.LastFailureClass)
 			}
 			if source.Queue != nil {
 				queue := renderObservabilityV8Queue(*source.Queue, source.Counters)
@@ -880,6 +1007,14 @@ func renderObservabilityV8Health(
 				}
 				if !source.LastFailure.IsZero() {
 					queueRow["last_failure_at"] = source.LastFailure.UTC().Format(time.RFC3339Nano)
+				}
+				queueRow["circuit_state"] = string(source.CircuitState)
+				queueRow["consecutive_failures"] = source.ConsecutiveFailures
+				if !source.CircuitOpenUntil.IsZero() {
+					queueRow["circuit_open_until"] = source.CircuitOpenUntil.UTC().Format(time.RFC3339Nano)
+				}
+				if source.LastFailureClass != "" {
+					queueRow["last_failure_class"] = string(source.LastFailureClass)
 				}
 				queueRows = append(queueRows, queueRow)
 			}
@@ -925,13 +1060,26 @@ func renderObservabilityV8Health(
 			aggregate = StateError
 		}
 	}
-	if eventHistoryFailure != "" {
+	if eventHistory.activeCode != "" {
 		aggregate = StateError
-		if validObservabilityV8EventHistoryFailure(eventHistoryFailure) {
-			details["event_history_failure"] = eventHistoryFailure
+	}
+	appendObservabilityV8EventHistoryDetails(details, eventHistory)
+	return SubsystemHealth{State: aggregate, Since: since, Details: details}
+}
+
+func appendObservabilityV8EventHistoryDetails(
+	details map[string]interface{},
+	eventHistory observabilityV8EventHistorySnapshot,
+) {
+	if eventHistory.activeCode != "" && validObservabilityV8EventHistoryFailure(eventHistory.activeCode) {
+		details["event_history_failure"] = eventHistory.activeCode
+	}
+	if eventHistory.lastFailureClass != "" {
+		details["event_history_last_sqlite_class"] = eventHistory.lastFailureClass
+		if eventHistory.lastFailurePrimary != 0 {
+			details["event_history_last_sqlite_primary_code"] = eventHistory.lastFailurePrimary
 		}
 	}
-	return SubsystemHealth{State: aggregate, Since: since, Details: details}
 }
 
 func renderObservabilityV8Queue(

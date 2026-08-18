@@ -41,6 +41,7 @@ import (
 	"golang.org/x/crypto/pbkdf2"
 	"golang.org/x/time/rate"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/configs"
@@ -48,6 +49,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/netguard"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/google/uuid"
@@ -355,6 +357,11 @@ func NewGuardrailProxy(
 	judge := NewLLMJudge(&cfg.Judge, judgeLLM, dotenvPath, rp, providers)
 
 	inspector := NewGuardrailInspector(cfg.ScannerMode, cisco, judge, policyDir)
+	connectorName := ""
+	if conn != nil {
+		connectorName = conn.Name()
+	}
+	inspector.SetFallbackProfile(guardrailProfileForConnector(cfg, connectorName))
 	inspector.SetDetectionStrategy(
 		cfg.DetectionStrategy,
 		cfg.DetectionStrategyPrompt,
@@ -471,7 +478,20 @@ func (p *GuardrailProxy) ApplyGuardrailConfig(cfg *config.GuardrailConfig) {
 	if newName := strings.TrimSpace(cfg.Connector); newName != "" {
 		p.switchConnectorLocked(strings.ToLower(newName))
 	}
+	p.applyInspectorFallbackProfileLocked()
 	p.rtMu.Unlock()
+}
+
+func (p *GuardrailProxy) applyInspectorFallbackProfileLocked() {
+	setter, ok := p.inspector.(interface{ SetFallbackProfile(string) })
+	if !ok {
+		return
+	}
+	connectorName := ""
+	if p.connector != nil {
+		connectorName = p.connector.Name()
+	}
+	setter.SetFallbackProfile(guardrailProfileForConnector(p.cfg, connectorName))
 }
 
 // StartHookConfigGuard launches the connector hook self-heal guard bound to
@@ -3996,6 +4016,7 @@ func (p *GuardrailProxy) switchConnectorLocked(newName string) {
 	}
 
 	p.connector = newConn
+	p.applyInspectorFallbackProfileLocked()
 	if err := connector.SaveActiveConnector(p.setupOpts.DataDir, newName); err != nil {
 		fmt.Fprintf(os.Stderr, "[guardrail] save active connector state: %v\n", err)
 	}
@@ -4146,22 +4167,10 @@ func redactAuthValue(val string) string {
 	return "[set]"
 }
 
-// scrubURLSecrets removes sensitive query parameters (key, api-key, apikey,
-// token) from a URL string before logging.  Returns the original string
-// unmodified when it contains no query string.
+// scrubURLSecrets returns a URL safe for diagnostics. It never changes the URL
+// used for the upstream request.
 func scrubURLSecrets(raw string) string {
-	u, err := url.Parse(raw)
-	if err != nil || u.RawQuery == "" {
-		return raw
-	}
-	q := u.Query()
-	for _, k := range []string{"key", "api-key", "apikey", "token"} {
-		if q.Has(k) {
-			q.Set(k, "REDACTED")
-		}
-	}
-	u.RawQuery = q.Encode()
-	return u.String()
+	return netguard.ScrubURLString(raw)
 }
 
 // isOllamaLoopback returns true when targetURL points at a loopback
@@ -4799,11 +4808,19 @@ func (p *GuardrailProxy) inspectToolCalls(ctx context.Context, toolCallsJSON jso
 		toolName := tc.Function.Name
 		args := tc.Function.Arguments
 
-		findings := ScanAllRules(args, toolName)
+		findings := dispatchTrustedAction(ctx, trustedActionRequest{
+			Input: actionfacts.Input{
+				Tool: toolName,
+				Args: json.RawMessage(args),
+			},
+			LegacyText:         args,
+			Connector:          p.connectorName(),
+			EnforcementCapable: true,
+		})
 		// Stamp the tool's capability class (read_fs / exec_shell /
 		// network_fetch / …) onto each finding from this call so the
-		// sliding-window correlator can reason about capability
-		// sequences (DESTRUCTIVE-FLOW). Content-only
+		// sliding-window correlator can reason about operator-defined
+		// capability sequences. Content-only
 		// matches with an unknown tool fall back to the rule-id based
 		// capability in the emission pipeline.
 		if cap := guardrail.ClassifyToolName(toolName); cap != guardrail.CapUnknown {
@@ -4823,9 +4840,14 @@ func (p *GuardrailProxy) inspectToolCalls(ctx context.Context, toolCallsJSON jso
 	severity := HighestSeverity(allFindings)
 	confidence := HighestConfidence(allFindings, severity)
 
-	action := guardrailRuntimeActionForGuardrail(p.cfg, severity, false)
-	if action == guardrailActionAllow {
-		return nil
+	enforceable := enforceableRuleFindings(allFindings)
+	action := guardrailActionAllow
+	if len(enforceable) > 0 {
+		action = guardrailRuntimeActionForGuardrail(
+			p.cfg,
+			HighestSeverity(enforceable),
+			false,
+		)
 	}
 	if action == guardrailActionConfirm {
 		action = guardrailActionAlert

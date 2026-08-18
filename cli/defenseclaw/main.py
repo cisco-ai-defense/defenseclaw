@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+from types import SimpleNamespace
 
 import click
 
@@ -54,7 +55,11 @@ from defenseclaw.commands.cmd_status import status
 from defenseclaw.commands.cmd_tool import tool
 from defenseclaw.commands.cmd_tui import tui
 from defenseclaw.commands.cmd_uninstall import reset_cmd, uninstall_cmd
-from defenseclaw.commands.cmd_upgrade import _maybe_delegate_public_upgrade, upgrade
+from defenseclaw.commands.cmd_upgrade import (
+    _maybe_delegate_public_upgrade,
+    _reject_unsupported_intel_macos,
+    upgrade,
+)
 from defenseclaw.commands.cmd_version import version_cmd
 from defenseclaw.context import AppContext
 from defenseclaw.resolver_hint import authenticated_resolver_instructions
@@ -111,6 +116,28 @@ def _is_help_invocation(ctx: click.Context) -> bool:
     return any(a in {"-h", "--help"} for a in argv)
 
 
+def _is_offline_rulepack_validation(ctx: click.Context) -> bool:
+    """Return whether the nested command is ``guardrail validate-pack``.
+
+    Click exposes only the top-level ``guardrail`` name while the root callback
+    is running. Use that parsed name as the trust anchor, then locate its exact
+    argv token so root-option and ``--`` prefixes do not change the result. The
+    next token must be the exact nested command; intervening options or a
+    different subcommand do not receive the config-independent bypass.
+    """
+    if ctx.invoked_subcommand != "guardrail":
+        return False
+    argv = sys.argv[1:]
+    try:
+        guardrail_index = argv.index("guardrail")
+    except ValueError:
+        return False
+    return (
+        guardrail_index + 1 < len(argv)
+        and argv[guardrail_index + 1] == "validate-pack"
+    )
+
+
 def _emit_version_json(ctx: click.Context, _param: click.Parameter | None, value: bool) -> None:
     """Emit a stable installer-facing version record before config loading."""
     if not value or ctx.resilient_parsing:
@@ -161,6 +188,7 @@ def cli(ctx: click.Context) -> None:
 
     invoked = ctx.invoked_subcommand
     if invoked == "upgrade" and not _is_help_invocation(ctx):
+        _reject_unsupported_intel_macos()
         recovery_home = os.path.abspath(os.path.expanduser(os.environ.get("DEFENSECLAW_HOME") or "~/.defenseclaw"))
         recovery_root = os.path.join(recovery_home, ".upgrade-recovery")
         recovery_journals = tuple(
@@ -175,6 +203,8 @@ def cli(ctx: click.Context) -> None:
             )
             raise SystemExit(1)
     if _is_help_invocation(ctx):
+        return
+    if _is_offline_rulepack_validation(ctx):
         return
 
     from defenseclaw import config as cfg_mod
@@ -209,11 +239,30 @@ def cli(ctx: click.Context) -> None:
     try:
         app.cfg = cfg_mod.load()
     except Exception as exc:
+        if invoked == "doctor":
+            from defenseclaw.doctor_preflight import inspect_doctor_config_load_failure
+
+            # Doctor is a recovery surface. Preserve the canonical raw-source
+            # diagnostics for its own renderer instead of aborting before the
+            # command starts or constructing authoritative runtime state.
+            app.doctor_startup_diagnostics = inspect_doctor_config_load_failure(exc)
+            # Preserve a failed cache snapshot in the same operational home the
+            # TUI uses. This is not a runtime Config and is consumed only by
+            # Doctor's best-effort cache writer.
+            app.cfg = SimpleNamespace(data_dir=str(cfg_mod.default_data_path()))
+            return
         ux.echo(
             f"Failed to load config — run 'defenseclaw init' first: {exc}",
             err=True,
         )
         raise SystemExit(1)
+
+    # Doctor must observe the audit database exactly as it existed at command
+    # start. Generic Store.init() performs CREATE TABLE IF NOT EXISTS and would
+    # turn a missing/corrupt-store diagnosis into a false pass before Doctor
+    # gets a chance to inspect it. Doctor owns any explicitly requested repair.
+    if invoked == "doctor":
+        return
 
     # The upgrade controller owns its authenticated preflight, receipts, and
     # rollback transaction. Do not initialize generic audit state before that
@@ -249,7 +298,8 @@ def cli(ctx: click.Context) -> None:
             for issue in result.errors:
                 ux.echo(f"  ✗ {issue}", err=True)
             ux.echo(
-                "  Run 'defenseclaw config validate' for details, or 'defenseclaw doctor --fix' to auto-repair.",
+                "  Run 'defenseclaw config validate' for details, repair or upgrade the configuration, "
+                "then rerun the command.",
                 err=True,
             )
             raise SystemExit(1)

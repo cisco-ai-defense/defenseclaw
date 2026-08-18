@@ -29,9 +29,11 @@ import (
 // TestGenerateRegexImportFromEvalCorpus regenerates the "eval-" rows of
 // regex/corpus.jsonl from the labeled eval corpus (gated by
 // SECURITY_SUITE_IMPORT=1). Benign items the regex layer leaves clean become
-// false-positive guards; attacks it already flags become regression locks;
-// items it doesn't handle deterministically are skipped and stay in the live
-// tier. Curated rows are preserved verbatim.
+// false-positive guards; attacks it handles deterministically become
+// regression locks. Action-rule matches stay on the raw ScanAllRules surface,
+// while contextual content findings stay on the inspector surface. Items not
+// handled by either deterministic boundary remain in the live tier. Curated
+// rows are preserved verbatim.
 func TestGenerateRegexImportFromEvalCorpus(t *testing.T) {
 	if os.Getenv("SECURITY_SUITE_IMPORT") != "1" {
 		t.Skip("generator; set SECURITY_SUITE_IMPORT=1 to regenerate the generated block of regex/corpus.jsonl")
@@ -50,7 +52,11 @@ func TestGenerateRegexImportFromEvalCorpus(t *testing.T) {
 				dir = "prompt"
 			}
 			v := g.Inspect(context.Background(), dir, it.Content, nil, "model", "observe")
-			high := v != nil && severityRank[v.Severity] >= severityRank["HIGH"]
+			inspectorSeverity := "NONE"
+			if v != nil {
+				inspectorSeverity = v.Severity
+			}
+			actionSeverity := HighestSeverity(regexActionFindings(it.Content, it.ToolName))
 
 			c := regexCase{
 				ID:        "eval-" + it.ID,
@@ -58,16 +64,29 @@ func TestGenerateRegexImportFromEvalCorpus(t *testing.T) {
 				ToolName:  it.ToolName,
 				Content:   it.Content,
 				IsAttack:  it.IsAttack,
-				Surfaces:  []string{"inspector"},
 			}
 			switch {
-			case it.IsAttack && high:
+			case it.IsAttack && severityRank[actionSeverity] >= severityRank["HIGH"]:
+				// Commands, sensitive paths, cognitive-file operations, and C2
+				// are action categories. Preserve their raw regex fallback coverage
+				// without asserting that prompt/completion prose executed an action.
+				c.Surfaces = []string{"scan_all_rules"}
 				c.ExpectedSeverityAtLeast = "HIGH"
 				imported = append(imported, c)
 				keptAttack++
-			case it.IsAttack && !high:
+			case it.IsAttack && severityRank[inspectorSeverity] >= severityRank["MEDIUM"]:
+				c.Surfaces = []string{"inspector"}
+				if severityRank[inspectorSeverity] >= severityRank["HIGH"] {
+					c.ExpectedSeverityAtLeast = "HIGH"
+				} else {
+					c.ExpectedSeverityAtLeast = "MEDIUM"
+				}
+				imported = append(imported, c)
+				keptAttack++
+			case it.IsAttack:
 				skipAttack++ // judge-only; lives in the live tier
-			case !it.IsAttack && !high:
+			case severityRank[inspectorSeverity] < severityRank["HIGH"]:
+				c.Surfaces = []string{"inspector"}
 				c.ForbiddenSeverityAtLeast = "HIGH"
 				imported = append(imported, c)
 				keptBenign++
@@ -125,4 +144,18 @@ func TestGenerateRegexImportFromEvalCorpus(t *testing.T) {
 	t.Logf("regex import written to %s", path)
 	t.Logf("benign: kept=%d skipped(regex-flagged)=%d", keptBenign, skipBenign)
 	t.Logf("attack: kept=%d skipped(judge-only)=%d", keptAttack, skipAttack)
+}
+
+func regexActionFindings(text, toolName string) []RuleFinding {
+	generation := snapshotRulePackGeneration("")
+	var action []RuleFinding
+	for _, category := range []string{"command", "sensitive-path", "cognitive-file", "c2"} {
+		action = append(action, scanRuleGeneration(
+			generation, text, toolName, ruleScanOptions{
+				onlyCategory:        category,
+				includeToolCallOnly: true,
+			},
+		)...)
+	}
+	return action
 }

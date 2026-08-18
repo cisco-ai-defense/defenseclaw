@@ -254,7 +254,7 @@ def test_scanner_metadata_intersection_is_satisfiable() -> None:
     # Textual 8.2.8: rich>=14.2; MCP scanner 4.3.0: litellm>=1.77.0;
     # project policy: Textual>=8.2.8,<9, Rich>=14.2,<15, LiteLLM>=1.84,<1.92.
     # Scanner 2.0.5-2.0.9 instead pin old LiteLLM/Textual releases, and
-    # 2.0.10-2.0.12 cap Textual<8, so 2.0.4 is the newest viable wheel.
+    # 2.0.10-2.0.13 cap Textual<8, so 2.0.4 is the newest viable wheel.
     intersections = {
         "rich": [Requirement("rich>=13"), Requirement("rich>=14.2"), Requirement("rich>=14.2,<15")],
         "textual": [Requirement("textual>=1"), Requirement("textual>=8.2.8,<9")],

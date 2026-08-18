@@ -30,6 +30,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/pathidentity"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 const (
@@ -45,7 +46,9 @@ const (
 	// a per-data-dir marker, two legitimate DefenseClaw daemons
 	// running from different profiles cannot tell each other apart by
 	// executable name alone.
-	EnvDataDir = "DEFENSECLAW_DATA_DIR"
+	EnvDataDir              = "DEFENSECLAW_DATA_DIR"
+	maxGatewayDotenvBytes   = safefile.MaxDotEnvBytes
+	maxProcessIdentityBytes = 16 * 1024
 )
 
 var gatewayTokenEnvNames = []string{
@@ -67,9 +70,9 @@ const (
 )
 
 // GracefulStopRequest asks the authenticated gateway control plane to stop the
-// exact managed PID. Returning nil means the request was accepted; Daemon then
-// waits on that original process before using OS-level termination as a bounded
-// compatibility fallback.
+// exact managed PID and corroborate its runtime data directory. Returning nil
+// means the request was accepted. OS-level fallback is permitted only for a
+// current data-directory-bound PID record.
 type GracefulStopRequest func(pid int) error
 
 type Daemon struct {
@@ -129,6 +132,11 @@ func (d *Daemon) openLogFileForChild() (*os.File, error) {
 type pidInfo struct {
 	PID        int    `json:"pid"`
 	Executable string `json:"executable"`
+	// DataDir binds the process identity to the installation that launched
+	// it. Executable + start identity prove which process owns a listener;
+	// this field additionally prevents a copied PID record from authorizing
+	// another profile to stop or restart that process.
+	DataDir string `json:"data_dir,omitempty"`
 	// StartTime is a whole-second wall-clock lower bound captured before the
 	// child was spawned (or, on Windows, before the child initializes). Kept
 	// for startup-generation/readiness diagnostics only — DO NOT use this for
@@ -137,7 +145,7 @@ type pidInfo struct {
 	StartTime int64 `json:"start_time"`
 	// StartIdentity is an opaque per-process token captured immediately
 	// after spawn (Linux: /proc/<pid>/stat field 22 starttime; Darwin:
-	// `ps -o lstart=`). Compared against the live process's identity in
+	// native kern.proc start time). Compared against the live process's identity in
 	// verifyProcess() to detect PID reuse — i.e. "this PID exists and
 	// the executable matches, but the kernel says the process started
 	// at a different time, so it's a DIFFERENT process that happens to
@@ -156,7 +164,7 @@ func (d *Daemon) IsRunning() (bool, int) {
 		d.removePIDFileIfStarted(info)
 		return false, 0
 	}
-	if !d.verifyProcess(info) {
+	if !d.verifyProcess(info) && !d.verifyProcessForAuthenticatedMigration(info) {
 		// Closes (chain ): a stale gateway.pid
 		// pointing at a reused PID must NOT keep status/stop/restart
 		// pinned to the unrelated process. Treat the file as garbage
@@ -168,15 +176,28 @@ func (d *Daemon) IsRunning() (bool, int) {
 }
 
 // HasManagedProcessIdentity requires the complete PID record written by current
-// daemon versions and revalidates both executable and kernel start identity.
-// Legacy bare-PID records remain usable for stop/status compatibility but are
-// not strong enough to prove that an occupied API port is the expected daemon.
+// daemon versions and revalidates its data-directory binding, executable, and
+// kernel start identity. Legacy records may still prevent duplicate startup,
+// but never prove that an occupied API port is the expected daemon.
 func (d *Daemon) HasManagedProcessIdentity(pid int) bool {
 	info, err := d.readPIDInfo()
-	if err != nil || info.PID != pid || info.Executable == "" || info.StartIdentity == "" {
+	if err != nil || info.PID != pid || info.DataDir == "" ||
+		info.Executable == "" || info.StartIdentity == "" {
 		return false
 	}
-	return d.verifyProcess(info)
+	return d.verifyProcessForControl(info)
+}
+
+// HasAuthenticatedMigrationProcessIdentity recognizes only the strong,
+// unbound record written by the immediately preceding release. It does not
+// authorize process control by itself; callers must additionally corroborate
+// listener ownership and authenticated runtime PID/data-directory metadata.
+func (d *Daemon) HasAuthenticatedMigrationProcessIdentity(pid int) bool {
+	info, err := d.readPIDInfo()
+	if err != nil || info.PID != pid {
+		return false
+	}
+	return d.verifyProcessForAuthenticatedMigration(info)
 }
 
 // ManagedProcessStartedAt returns the wall-clock launch generation recorded
@@ -185,26 +206,32 @@ func (d *Daemon) HasManagedProcessIdentity(pid int) bool {
 // kernel start identity have both been revalidated against the live process.
 func (d *Daemon) ManagedProcessStartedAt(pid int) (time.Time, bool) {
 	info, err := d.readPIDInfo()
-	if err != nil || info.PID != pid || info.Executable == "" || info.StartIdentity == "" || info.StartTime <= 0 {
+	if err != nil || info.PID != pid || info.DataDir == "" ||
+		info.Executable == "" || info.StartIdentity == "" || info.StartTime <= 0 {
 		return time.Time{}, false
 	}
-	if !d.verifyProcess(info) {
+	if !d.verifyProcessForControl(info) {
 		return time.Time{}, false
 	}
 	return time.Unix(info.StartTime, 0), true
 }
 
-// verifyProcess returns true when the live process at info.PID is the SAME
-// process recorded in the PID file (executable AND start identity match),
-// false when either signal indicates PID reuse, and true when neither signal
-// is available on this platform (best-effort backwards compatibility).
+// verifyProcess verifies every identity signal present in a PID record. It
+// deliberately remains usable for legacy liveness detection: accepting a
+// legacy record here prevents Start from launching a duplicate daemon during
+// an upgrade. Callers that can signal or otherwise control the process MUST
+// use verifyProcessForControl, which additionally requires the current
+// data-directory binding and an executable identity.
 //
 // Both the executable check and the start-identity check have been hardened
 // to fail-CLOSED when their respective metadata is genuinely unavailable for
 // a process we *can* signal: the previous implementation fell back to "true"
-// on `os.Readlink` errors (Linux) and on `ps` errors (Darwin), which let any
-// unreaped zombie pass verification.
+// on `os.Readlink` errors (Linux) and process-inspection errors (Darwin),
+// which let any unreaped zombie pass verification.
 func (d *Daemon) verifyProcess(info pidInfo) bool {
+	if info.DataDir != "" && !pathidentity.Same(info.DataDir, d.dataDir) {
+		return false
+	}
 	if !d.verifyExecutable(info) {
 		return false
 	}
@@ -212,6 +239,82 @@ func (d *Daemon) verifyProcess(info pidInfo) bool {
 		return false
 	}
 	return true
+}
+
+// verifyProcessForControl authorizes lifecycle mutations only for a record
+// bound to this Daemon's data directory and carrying an executable identity.
+// Older JSON and bare-PID records intentionally cannot authorize Stop or
+// Restart. They remain detection-only until the running daemon publishes a
+// current record; we never "upgrade" a legacy record by signalling its PID.
+func (d *Daemon) verifyProcessForControl(info pidInfo) bool {
+	if strings.TrimSpace(info.DataDir) == "" ||
+		strings.TrimSpace(info.Executable) == "" ||
+		!pathidentity.Same(info.DataDir, d.dataDir) {
+		return false
+	}
+	return d.verifyProcess(info)
+}
+
+// verifyProcessForAuthenticatedMigration recognizes the strong PID record
+// written by releases immediately before data-directory binding was added.
+// It is intentionally narrower than verifyProcess: bare-PID records and JSON
+// records missing either executable or kernel start identity never qualify.
+//
+// A qualifying record still does not authorize an OS signal. It can only be
+// used by stop with a non-nil GracefulStopRequest, whose contract requires the
+// authenticated gateway control plane to corroborate PID and runtime data
+// directory before accepting shutdown.
+func (d *Daemon) verifyProcessForAuthenticatedMigration(info pidInfo) bool {
+	if strings.TrimSpace(info.DataDir) != "" ||
+		strings.TrimSpace(info.Executable) == "" ||
+		strings.TrimSpace(info.StartIdentity) == "" {
+		return false
+	}
+	return d.verifyExecutableForAuthenticatedMigration(info) &&
+		d.verifyStartIdentityForAuthenticatedMigration(info)
+}
+
+func (d *Daemon) verifyExecutableForAuthenticatedMigration(info pidInfo) bool {
+	if runtime.GOOS != "linux" {
+		return d.verifyExecutable(info)
+	}
+	executable, err := os.Readlink(fmt.Sprintf("/proc/%d/exe", info.PID))
+	if err != nil {
+		return false
+	}
+	// An atomic in-place upgrade leaves the old process mapped from a deleted
+	// inode. Linux appends this exact kernel marker to /proc/<pid>/exe. Permit
+	// only the recorded path plus that marker; never basename-match.
+	executableMatches := executable == info.Executable ||
+		executable == info.Executable+" (deleted)"
+	return executableMatches
+}
+
+func (d *Daemon) verifyStartIdentityForAuthenticatedMigration(info pidInfo) bool {
+	if d.verifyStartIdentity(info) {
+		return true
+	}
+	if runtime.GOOS != "darwin" || info.StartTime <= 0 {
+		return false
+	}
+	// origin/main's `ps -o lstart=` token inherited locale and timezone, so
+	// it cannot always be reproduced after upgrade. Its StartTime was captured
+	// immediately before cmd.Start. Bind that launch lower bound to the native
+	// kernel start second within the same five-second registration window.
+	nativeIdentity, err := darwinProcessStartIdentity(info.PID)
+	if err != nil {
+		return false
+	}
+	secondsText, _, ok := strings.Cut(nativeIdentity, ".")
+	if !ok {
+		return false
+	}
+	nativeSeconds, err := strconv.ParseInt(secondsText, 10, 64)
+	if err != nil {
+		return false
+	}
+	delta := nativeSeconds - info.StartTime
+	return delta >= 0 && delta <= int64(childPIDRegistrationTimeout/time.Second)
 }
 
 func (d *Daemon) verifyExecutable(info pidInfo) bool {
@@ -233,15 +336,13 @@ func (d *Daemon) verifyExecutable(info pidInfo) bool {
 	case "darwin":
 		comm, err := processExecutableDarwin(info.PID)
 		if err != nil {
-			// Same fail-closed posture as Linux: ps must succeed for any
-			// process we can signal; if it fails, do NOT trust the PID.
+			// Same fail-closed posture as Linux: the fixed-path OS process
+			// inspector must succeed for any process we can signal; if it
+			// fails, do NOT trust the PID.
 			return false
 		}
-		if info.Executable != "" {
-			exeBase := filepath.Base(info.Executable)
-			if !strings.HasSuffix(comm, exeBase) && comm != exeBase {
-				return false
-			}
+		if info.Executable != "" && !pathidentity.Same(comm, info.Executable) {
+			return false
 		}
 		return true
 	case "windows":
@@ -278,7 +379,18 @@ func (d *Daemon) verifyStartIdentity(info pidInfo) bool {
 		// PID file written by Linux). Fall back to the executable check.
 		return true
 	}
-	return live == info.StartIdentity
+	if live == info.StartIdentity {
+		return true
+	}
+	if runtime.GOOS != "darwin" {
+		return false
+	}
+	// Releases before the native kern.proc identity used `ps -o lstart=`.
+	// Accept that exact live identity for detection and the authenticated
+	// migration bridge; new records continue to use the microsecond native
+	// identity above.
+	legacyLive, err := darwinLegacyProcessStartIdentity(info.PID)
+	return err == nil && legacyLive != "" && legacyLive == info.StartIdentity
 }
 
 // stripTokenArgs removes any --token / -token argv pairs (both the
@@ -314,18 +426,6 @@ func stripTokenArgs(args []string) []string {
 		out = append(out, a)
 	}
 	return out
-}
-
-func processExecutableDarwin(pid int) (string, error) {
-	out, err := exec.Command("ps", "-p", strconv.Itoa(pid), "-o", "comm=").Output()
-	if err != nil {
-		return "", err
-	}
-	comm := strings.TrimSpace(string(out))
-	if comm == "" {
-		return "", fmt.Errorf("daemon: ps returned empty command for pid %d", pid)
-	}
-	return comm, nil
 }
 
 // ValidateStartIdentityFiles performs the identity-file portion of the start
@@ -456,7 +556,12 @@ func (d *Daemon) Start(args []string) (int, error) {
 			_ = logFile.Close()
 			return 0, fmt.Errorf("daemon: write pid: %w", err)
 		}
-		d.started = pidInfo{PID: pid, Executable: executable, StartIdentity: startIdentity}
+		d.started = pidInfo{
+			PID:           pid,
+			Executable:    executable,
+			DataDir:       d.dataDir,
+			StartIdentity: startIdentity,
+		}
 	}
 
 	// Close our copy of the file descriptors — the child holds its own dup'd
@@ -520,7 +625,7 @@ func (d *Daemon) waitForChildPIDRegistration(
 				lastErr = errors.New("pid file start identity is empty")
 			case startIdentity != "" && info.StartIdentity != startIdentity:
 				lastErr = errors.New("pid file start identity does not match the spawned process")
-			case !d.verifyProcess(info):
+			case !d.verifyProcessForControl(info):
 				lastErr = errors.New("pid file does not identify the spawned process")
 			default:
 				return info, false, nil
@@ -581,7 +686,7 @@ func (d *Daemon) childEnv(parentEnv []string) []string {
 
 func readGatewayTokenDotenv(path string) map[string]string {
 	values := map[string]string{}
-	data, err := os.ReadFile(path)
+	data, err := safefile.ReadRegularFileBounded(path, maxGatewayDotenvBytes)
 	if err != nil {
 		return values
 	}
@@ -636,11 +741,12 @@ func (d *Daemon) Stop(timeout time.Duration) error {
 }
 
 // StopGracefully first asks the running gateway to drain itself through its
-// authenticated control plane. If the control plane is unavailable (for
-// example, while replacing an older binary) or the process misses the bounded
-// deadline, stop falls back to the platform termination signal and finally a
-// force kill. PID state is cleared only after the original process handle has
-// confirmed exit.
+// authenticated control plane. A current, data-directory-bound PID record may
+// fall back to platform termination when that request fails. The immediately
+// preceding strong record format (executable + start identity, no data_dir) is
+// migration-only: it must exit after an accepted authenticated request and is
+// never signalled or force-killed by PID. PID state is cleared only after the
+// original process handle has confirmed exit.
 func (d *Daemon) StopGracefully(timeout time.Duration, request GracefulStopRequest) error {
 	return d.stop(timeout, request)
 }
@@ -655,8 +761,19 @@ func (d *Daemon) stop(timeout time.Duration, request GracefulStopRequest) error 
 	// old process is still exiting; unconditionally removing the pathname here
 	// would orphan the healthy replacement daemon.
 	started, err := d.readPIDInfo()
-	if err != nil || started.PID != pid || !d.verifyProcess(started) {
+	if err != nil || started.PID != pid {
 		return ErrNotRunning
+	}
+	currentControlIdentity := d.verifyProcessForControl(started)
+	authenticatedMigration := !currentControlIdentity &&
+		request != nil &&
+		d.verifyProcessForAuthenticatedMigration(started)
+	if !currentControlIdentity && !authenticatedMigration {
+		return fmt.Errorf(
+			"%w: daemon PID record is not bound to data directory %s",
+			ErrUnsafeProcessIdentity,
+			d.dataDir,
+		)
 	}
 
 	proc, err := os.FindProcess(pid)
@@ -666,11 +783,25 @@ func (d *Daemon) stop(timeout time.Duration, request GracefulStopRequest) error 
 	defer proc.Release() //nolint:errcheck -- closes the retained Windows handle.
 
 	if request != nil {
-		if requestErr := request(pid); requestErr == nil {
+		requestErr := request(pid)
+		if requestErr == nil {
 			if waitForProcessExit(proc, pid, timeout) {
 				d.removePIDFileIfStarted(started)
 				return nil
 			}
+		}
+		if authenticatedMigration {
+			if requestErr != nil {
+				return fmt.Errorf(
+					"%w: authenticated migration shutdown was not accepted: %v",
+					ErrUnsafeProcessIdentity,
+					requestErr,
+				)
+			}
+			// Never turn an unbound upgrade record into signal authority. The
+			// accepted control-plane request may be retried after the operator
+			// investigates why the old process did not drain.
+			return ErrStopTimeout
 		}
 	}
 
@@ -711,7 +842,7 @@ func (d *Daemon) stop(timeout time.Duration, request GracefulStopRequest) error 
 // cleanup toward a foreign process.
 func (d *Daemon) StopStarted(pid int, timeout time.Duration) error {
 	info := d.started
-	if info.PID != pid || !d.verifyProcess(info) {
+	if info.PID != pid || !d.verifyProcessForControl(info) {
 		return ErrNotRunning
 	}
 	proc, err := os.FindProcess(pid)
@@ -726,14 +857,16 @@ func (d *Daemon) StopStarted(pid int, timeout time.Duration) error {
 		d.removePIDFileIfStarted(info)
 		return nil
 	}
-	if !d.verifyProcess(info) {
+	if !d.verifyProcessForControl(info) {
 		d.removePIDFileIfStarted(info)
 		return nil
 	}
-	if err := sendKillSignal(proc); err != nil && !errors.Is(err, os.ErrProcessDone) && d.verifyProcess(info) {
+	if err := sendKillSignal(proc); err != nil &&
+		!errors.Is(err, os.ErrProcessDone) &&
+		d.verifyProcessForControl(info) {
 		return fmt.Errorf("daemon: force kill started process %d: %w", pid, err)
 	}
-	if !waitForProcessExit(proc, pid, forcedStopWait) && d.verifyProcess(info) {
+	if !waitForProcessExit(proc, pid, forcedStopWait) && d.verifyProcessForControl(info) {
 		return ErrStopTimeout
 	}
 	d.removePIDFileIfStarted(info)
@@ -776,7 +909,7 @@ func (d *Daemon) Restart(args []string, timeout time.Duration) (int, error) {
 }
 
 func (d *Daemon) readPIDInfo() (pidInfo, error) {
-	data, err := os.ReadFile(d.pidFile)
+	data, err := readManagedIdentityFile(d.pidFile, maxProcessIdentityBytes)
 	if err != nil {
 		return pidInfo{}, err
 	}
@@ -822,6 +955,16 @@ func (d *Daemon) protectedDaemonPIDs() (trackedPID int, watchdogPID int, err err
 
 	watchdogPID, readErr = d.readWatchdogPID()
 	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		if managedIdentityHeldByWriter(readErr) {
+			return 0, 0, fmt.Errorf(
+				"%w: watchdog PID file %s is held by a legacy or live writer; "+
+					"safely stop the previous watchdog and complete the upgrade before retrying "+
+					"(do not delete the PID file while its process may be live): %w",
+				ErrUnsafeProcessIdentity,
+				filepath.Join(d.dataDir, WatchdogPIDFileName),
+				readErr,
+			)
+		}
 		return 0, 0, fmt.Errorf(
 			"%w: watchdog PID file %s cannot be trusted: %v",
 			ErrUnsafeProcessIdentity,
@@ -837,7 +980,7 @@ func (d *Daemon) protectedDaemonPIDs() (trackedPID int, watchdogPID int, err err
 // watchdog stop/status perform the stronger fingerprint verification.
 func (d *Daemon) readWatchdogPID() (int, error) {
 	path := filepath.Join(d.dataDir, WatchdogPIDFileName)
-	data, err := os.ReadFile(path)
+	data, err := readManagedIdentityFile(path, maxProcessIdentityBytes)
 	if err != nil {
 		return 0, err
 	}
@@ -871,6 +1014,7 @@ func (d *Daemon) writePIDInfoAt(pid int, executable string, startIdentity string
 	info := pidInfo{
 		PID:           pid,
 		Executable:    executable,
+		DataDir:       d.dataDir,
 		StartTime:     startedAt.Unix(),
 		StartIdentity: startIdentity,
 	}

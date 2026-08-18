@@ -56,19 +56,23 @@ func TestDestinationHealthSnapshotInventoryQueueActivityAndCopySafety(t *testing
 	}
 	local := destinationHealthByName(t, snapshot, config.ObservabilityV8LocalDestinationName)
 	if !local.Enabled || local.Kind != config.ObservabilityV8DestinationLocalSQLite ||
-		local.State != delivery.HealthHealthy || local.Queue != nil {
+		local.State != delivery.HealthHealthy || local.Queue != nil ||
+		local.CircuitState != delivery.CircuitClosed {
 		t.Fatalf("local health=%+v", local)
 	}
 	disabledHealth := destinationHealthByName(t, snapshot, "disabled-console")
 	if disabledHealth.Enabled || disabledHealth.State != delivery.HealthDisabled ||
-		disabledHealth.Queue != nil || len(disabledHealth.Sources) != 0 {
+		disabledHealth.Queue != nil || len(disabledHealth.Sources) != 0 ||
+		disabledHealth.CircuitState != delivery.CircuitClosed {
 		t.Fatalf("disabled health=%+v", disabledHealth)
 	}
 	live := destinationHealthByName(t, snapshot, "live-console")
 	if !live.Enabled || live.State != delivery.HealthHealthy || live.Queue == nil ||
 		live.Queue.Items != 1 || live.Queue.InFlightItems != 1 || live.Queue.MaxItems != 4 ||
 		live.Counters.Accepted != 1 || live.Counters.Delivered != 0 ||
-		len(live.Sources) != 1 || live.Sources[0].Signal != string(observability.SignalLogs) {
+		live.CircuitState != delivery.CircuitClosed || live.ConsecutiveFailures != 0 ||
+		len(live.Sources) != 1 || live.Sources[0].Signal != string(observability.SignalLogs) ||
+		live.Sources[0].CircuitState != delivery.CircuitClosed {
 		t.Fatalf("live health=%+v", live)
 	}
 
@@ -99,6 +103,66 @@ func TestDestinationHealthSnapshotInventoryQueueActivityAndCopySafety(t *testing
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatalf("successful delivery activity not observed: %+v err=%v", freshLive, err)
+}
+
+func TestDestinationHealthSnapshotAggregatesCircuitDiagnostics(t *testing.T) {
+	dependencies := newRuntimeTestDependencies(t)
+	plan := runtimeTestPlan(t, dependencies.storePath, dependencies.judgePath, 90,
+		func(source *config.ObservabilityV8Source) {
+			source.Destinations = []config.ObservabilityV8DestinationSource{
+				runtimeConsoleDestination("failing-console", "none", 4),
+			}
+		},
+	)
+	adapter := newRuntimeRecordingAdapter(4)
+	adapter.outcome = delivery.OutcomeAuthentication
+	factory := runtimeAdapterFactoryFunc(func(
+		context.Context,
+		config.ObservabilityV8EffectiveDestination,
+		telemetry.V8ResourceContext,
+	) (delivery.Adapter, DestinationAdapterCleanup, error) {
+		return adapter, func(context.Context) error { return nil }, nil
+	})
+	runtime := runtimeWithAdapterFactory(t, dependencies, plan, factory, nil)
+	if _, err := runtime.Emit(
+		t.Context(), diagnosticMetadata(t), runtimeContentRecordBuilder("circuit-open", "projected"),
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		snapshot, err := runtime.DestinationHealthSnapshot(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
+		row := destinationHealthByName(t, snapshot, "failing-console")
+		if row.CircuitState != delivery.CircuitOpen {
+			time.Sleep(time.Millisecond)
+			continue
+		}
+		// Authentication failures use a bounded few-minute cool-down (not the
+		// 24-hour unsafe-endpoint trap) so a single failed token mint does
+		// not suppress the destination for a full day. Assert the observed
+		// cool-down falls within the auth window rather than the unsafe one.
+		// The circuit records LastFailure a beat before CircuitOpenUntil is
+		// stamped, so the observed delta can be a hair under the exact
+		// 5-minute constant. Assert a tight ±1s band around it.
+		cooldown := row.CircuitOpenUntil.Sub(row.LastFailure)
+		if row.State != delivery.HealthFailing ||
+			row.Reason != string(delivery.HealthReasonCircuitOpen) ||
+			row.ConsecutiveFailures != 1 ||
+			row.CircuitOpenUntil.IsZero() ||
+			cooldown < 5*time.Minute-time.Second || cooldown > 5*time.Minute+time.Second ||
+			row.LastFailureClass != delivery.FailureClassAuthentication ||
+			len(row.Sources) != 1 ||
+			row.Sources[0].CircuitState != delivery.CircuitOpen ||
+			row.Sources[0].LastFailureClass != delivery.FailureClassAuthentication {
+			t.Fatalf("circuit health=%+v", row)
+		}
+		return
+	}
+	t.Fatal("circuit diagnostics did not reach destination health snapshot")
 }
 
 func TestDestinationHealthSnapshotNeverReturnsRetiringGeneration(t *testing.T) {

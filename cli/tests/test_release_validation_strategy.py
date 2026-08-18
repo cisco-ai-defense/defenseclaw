@@ -144,6 +144,48 @@ def test_ordinary_ci_is_deterministic_and_selective_not_full_certification() -> 
     )
 
 
+def test_enterprise_hook_hardening_covers_amp_without_provider_secrets() -> None:
+    job = _workflow(CI_PATH)["jobs"]["enterprise-hook-hardening"]
+
+    assert job["strategy"]["matrix"] == {
+        "os": ["ubuntu-latest", "macos-latest"],
+        "connector": ["codex", "claudecode", "amp"],
+    }
+    rendered = _render(job)
+    assert "scripts/test-enterprise-hook-hardening.sh" in rendered
+    assert "${{ matrix.connector }}" in rendered
+    for provider_secret in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "AMP_API_KEY"):
+        assert provider_secret not in rendered
+
+    hardening = (ROOT / "scripts/test-enterprise-hook-hardening.sh").read_text(encoding="utf-8")
+    assert "native_config_rel='.config/amp/plugins/defenseclaw.ts'" in hardening
+    assert "managed_artifact_mode='600'" in hardening
+    assert "validate_amp_plugin_constants request" in hardening
+
+
+def test_required_go_lint_gate_typechecks_amp_against_locked_official_api() -> None:
+    job = _workflow(CI_PATH)["jobs"]["go-lint"]
+    rendered = _render(job)
+    assert "make amp-plugin-typecheck" in rendered
+    assert "scripts/amp-plugin-typecheck/package-lock.json" in rendered
+
+    harness = ROOT / "scripts/amp-plugin-typecheck"
+    package = json.loads((harness / "package.json").read_text(encoding="utf-8"))
+    assert package["devDependencies"] == {
+        "@ampcode/plugin": "0.0.0-20260729002615-g8a974c9",
+        "typescript": "5.9.3",
+    }
+    lock = json.loads((harness / "package-lock.json").read_text(encoding="utf-8"))
+    plugin = lock["packages"]["node_modules/@ampcode/plugin"]
+    assert plugin["version"] == package["devDependencies"]["@ampcode/plugin"]
+    assert plugin["integrity"].startswith("sha512-")
+
+    tsconfig = json.loads((harness / "tsconfig.json").read_text(encoding="utf-8"))
+    assert tsconfig["compilerOptions"]["strict"] is True
+    assert "skipLibCheck" not in tsconfig["compilerOptions"]
+    assert "../../internal/gateway/connector/hooks/amp-plugin.ts" in tsconfig["files"]
+
+
 def test_every_pr_authenticates_live_baselines_inside_a_required_gate() -> None:
     workflow = _workflow(CI_PATH)
     assert {"push", "pull_request"}.issubset(workflow["on"])
@@ -353,6 +395,7 @@ def test_release_smoke_is_exact_candidate_install_and_upgrade_only() -> None:
     assert set(jobs) == {
         "posix-fresh-install",
         "posix-upgrade",
+        "macos-intel-refusal",
         "windows-fresh-install",
     }
 
@@ -381,6 +424,20 @@ def test_release_smoke_is_exact_candidate_install_and_upgrade_only() -> None:
     assert "scripts/release_candidate.py verify" in rendered_upgrade
     assert "scripts/test-upgrade-protocol-release.sh" in rendered_upgrade
     assert "--success-path-only" in rendered_upgrade
+
+    intel = jobs["macos-intel-refusal"]
+    assert intel["runs-on"] == "macos-15-intel"
+    assert intel["strategy"]["matrix"] == {
+        "surface": ["fresh-install", "upgrade"],
+    }
+    rendered_intel = _render(intel)
+    assert 'test "$RUNNER_ARCH" = "X64"' in rendered_intel
+    assert "scripts/release_candidate.py verify" in rendered_intel
+    assert "scripts/verify-sigstore-blob.py" in rendered_intel
+    assert "scripts/test-upgrade-macos-intel-refusal.sh" in rendered_intel
+    assert "'REFUSAL_SURFACE': '${{ matrix.surface }}'" in rendered_intel
+    assert '--surface "$REFUSAL_SURFACE"' in rendered_intel
+    assert '--surface "${{ matrix.surface }}"' not in rendered_intel
 
     windows = _render(jobs["windows-fresh-install"])
     assert "scripts/release_candidate.py verify" in windows

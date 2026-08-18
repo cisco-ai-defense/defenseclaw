@@ -313,7 +313,9 @@ func TestHandleChatCompletionGeneratedInspectorTraceRecordsAppliedBlock(t *testi
 	provider := &mockProvider{response: &ChatResponse{
 		ID: "chatcmpl-blocked", Model: "gpt-4",
 		Choices: []ChatChoice{{
-			Index: 0, Message: &ChatMessage{Role: "assistant", Content: "-----BEGIN PRIVATE KEY-----"},
+			Index: 0, Message: &ChatMessage{
+				Role: "assistant", Content: syntheticPrivateKeyPEM("PRIVATE KEY"),
+			},
 			FinishReason: strPtr("stop"),
 		}},
 	}}

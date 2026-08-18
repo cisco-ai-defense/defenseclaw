@@ -18,6 +18,9 @@ package cli
 
 import (
 	"bytes"
+	"crypto/sha256"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -114,6 +117,10 @@ type managedProcessIdentity interface {
 	HasManagedProcessIdentity(int) bool
 }
 
+type authenticatedMigrationProcessIdentity interface {
+	HasAuthenticatedMigrationProcessIdentity(int) bool
+}
+
 type managedProcessGeneration interface {
 	ManagedProcessStartedAt(int) (time.Time, bool)
 }
@@ -145,8 +152,58 @@ type rotationConnectorPolicy struct {
 }
 
 type rotationConnectorState struct {
-	Version    int                       `json:"version"`
-	Connectors []rotationConnectorPolicy `json:"connectors"`
+	Version                     int                           `json:"version"`
+	Connectors                  []rotationConnectorPolicy     `json:"connectors"`
+	HookTokenFingerprints       rotationHookTokenFingerprints `json:"hook_token_fingerprints,omitempty"`
+	OrphanHookTokenFingerprints rotationHookTokenFingerprints `json:"orphan_hook_token_fingerprints,omitempty"`
+}
+
+// rotationHookTokenFingerprints contains non-secret SHA-256 expectations for
+// connector-scoped hook credentials. A custom decoder rejects duplicate object
+// keys so the rotation controller and gateway cannot interpret an expectation
+// differently.
+type rotationHookTokenFingerprints map[string]string
+
+func (fingerprints *rotationHookTokenFingerprints) UnmarshalJSON(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	opening, err := decoder.Token()
+	if err != nil {
+		return errors.New("hook token fingerprints must be an object")
+	}
+	if delimiter, ok := opening.(json.Delim); !ok || delimiter != '{' {
+		return errors.New("hook token fingerprints must be an object")
+	}
+	decoded := make(rotationHookTokenFingerprints)
+	for decoder.More() {
+		keyToken, keyErr := decoder.Token()
+		if keyErr != nil {
+			return errors.New("hook token fingerprints contain an invalid connector identity")
+		}
+		name, ok := keyToken.(string)
+		if !ok {
+			return errors.New("hook token fingerprints contain an invalid connector identity")
+		}
+		if _, exists := decoded[name]; exists {
+			return errors.New("hook token fingerprints repeat a connector identity")
+		}
+		var fingerprint string
+		if err := decoder.Decode(&fingerprint); err != nil {
+			return errors.New("hook token fingerprint must be a string")
+		}
+		decoded[name] = fingerprint
+	}
+	closing, err := decoder.Token()
+	if err != nil {
+		return errors.New("hook token fingerprints must be an object")
+	}
+	if delimiter, ok := closing.(json.Delim); !ok || delimiter != '}' {
+		return errors.New("hook token fingerprints must be an object")
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return errors.New("hook token fingerprints contain trailing data")
+	}
+	*fingerprints = decoded
+	return nil
 }
 
 var errGatewayIdentityMismatch = errors.New("gateway identity mismatch")
@@ -283,6 +340,11 @@ func runStart(cmd *cobra.Command, _ []string) error {
 		requirements.expectedConnectorState = expectedConnectorState
 		requirements.verifyConnectorState = true
 		requirements.requireExactConnectorRoster = cfg.Guardrail.Enabled
+		// Omission preserves the original v1 state contract. Once the optional
+		// field is present, even an empty object is an explicit requirement that
+		// must fail closed during readiness.
+		requirements.verifyConnectorHookTokens = expectedConnectorState.HookTokenFingerprints != nil ||
+			expectedConnectorState.OrphanHookTokenFingerprints != nil
 		requirements.verifyConnectorOTLP = true
 	}
 	snap, _, err := waitForStartedDaemon(
@@ -815,14 +877,16 @@ type daemonReadinessRequirements struct {
 	guardrailEnabled bool
 	watcherEnabled   bool
 	telemetryEnabled bool
-	// requiredConnectors and verifyConnectorOTLP are transaction-only gates.
+	// requiredConnectors, verifyConnectorHookTokens, and verifyConnectorOTLP
+	// are transaction-only gates.
 	// Ordinary starts retain multi-connector failure isolation; token rotation
 	// must prove that every enabled configured connector converged and that the
-	// gateway accepts each connector's persisted scoped OTLP credential.
+	// gateway accepts each connector's persisted scoped credentials.
 	requiredConnectors          []string
 	expectedConnectorState      rotationConnectorState
 	verifyConnectorState        bool
 	requireExactConnectorRoster bool
+	verifyConnectorHookTokens   bool
 	verifyConnectorOTLP         bool
 	startedNotBefore            time.Time
 	expectedPID                 int
@@ -961,8 +1025,23 @@ func inspectConfiguredListener(d daemonState, cfg *config.Config, client *http.C
 	if !running || managedPID != ownerPID {
 		return false, 0, fmt.Errorf("configured gateway port %d is occupied by foreign process PID %d", cfg.Gateway.APIPort, ownerPID)
 	}
+	authenticatedMigration := false
 	if identity, ok := d.(managedProcessIdentity); ok && !identity.HasManagedProcessIdentity(managedPID) {
-		return false, 0, fmt.Errorf("managed gateway PID %d lacks matching executable and process start identity", managedPID)
+		migration, migrationOK := d.(authenticatedMigrationProcessIdentity)
+		if !migrationOK || !migration.HasAuthenticatedMigrationProcessIdentity(managedPID) {
+			return false, 0, fmt.Errorf("managed gateway PID %d lacks matching executable and process start identity", managedPID)
+		}
+		authenticatedMigration = true
+	}
+	if authenticatedMigration {
+		clientHost := strings.Trim(strings.TrimSpace(gatewayClientHost(cfg)), "[]")
+		clientIP := net.ParseIP(clientHost)
+		if !strings.EqualFold(clientHost, "localhost") && (clientIP == nil || !clientIP.IsLoopback()) {
+			return false, 0, fmt.Errorf(
+				"refusing to send gateway token to non-loopback migration status host %q",
+				clientHost,
+			)
+		}
 	}
 	status, err := fetchSidecarStatus(client, sidecarStatusURL(cfg), daemonGatewayToken(cfg))
 	if err != nil {
@@ -1009,7 +1088,14 @@ func fetchSidecarStatus(client *http.Client, addr, token string) (gatewayStatusE
 	}
 	req.Header.Set("Authorization", "Bearer "+token)
 	req.Header.Set("X-DefenseClaw-Token", token)
-	resp, err := client.Do(req)
+	if client == nil {
+		client = &http.Client{Timeout: defaultReadinessHTTPTimeout}
+	}
+	requestClient := *client
+	requestClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	resp, err := requestClient.Do(req)
 	if err != nil {
 		return status, err
 	}
@@ -1094,7 +1180,25 @@ func waitForStartedDaemon(d daemonReadinessProcess, pid int, client *http.Client
 			identityOK = identity.HasManagedProcessIdentity(pid)
 		}
 		if identityOK {
-			if requirements.verifyConnectorOTLP {
+			if requirements.verifyConnectorHookTokens {
+				expectedHookTokens, expectationErr := rotationConnectorHookTokenExpectations(
+					requirements.expectedConnectorState,
+				)
+				if expectationErr != nil {
+					err = expectationErr
+				} else {
+					err = verifyRotationConnectorHookAuthentication(
+						client,
+						statusURL,
+						requirements.expectedDataDir,
+						expectedHookTokens,
+					)
+				}
+				if err != nil {
+					err = fmt.Errorf("rotation connector convergence: %w", err)
+				}
+			}
+			if err == nil && requirements.verifyConnectorOTLP {
 				err = verifyRotationConnectorOTLPAuthentication(
 					client,
 					statusURL,
@@ -1103,10 +1207,9 @@ func waitForStartedDaemon(d daemonReadinessProcess, pid int, client *http.Client
 				)
 				if err != nil {
 					err = fmt.Errorf("rotation connector convergence: %w", err)
-				} else {
-					return snap, true, nil
 				}
-			} else {
+			}
+			if err == nil {
 				return snap, true, nil
 			}
 		} else {
@@ -1210,6 +1313,7 @@ func validateRotationConnectorState(state rotationConnectorState) error {
 		return errors.New("connector state roster is too large")
 	}
 	previous := ""
+	roster := make(map[string]struct{}, len(state.Connectors))
 	for _, policy := range state.Connectors {
 		name := strings.ToLower(strings.TrimSpace(policy.Name))
 		if name == "" || name != policy.Name || len(name) > 128 || strings.ContainsAny(name, "\x00\r\n\t ") {
@@ -1224,9 +1328,64 @@ func validateRotationConnectorState(state rotationConnectorState) error {
 		if policy.HookFailMode != "open" && policy.HookFailMode != "closed" {
 			return fmt.Errorf("connector %s has invalid hook fail mode", name)
 		}
+		roster[name] = struct{}{}
 		previous = name
 	}
+	if len(state.HookTokenFingerprints) > len(state.Connectors) {
+		return errors.New("hook token fingerprint roster is not a connector subset")
+	}
+	if len(state.HookTokenFingerprints)+len(state.OrphanHookTokenFingerprints) > 128 {
+		return errors.New("hook token fingerprint roster is too large")
+	}
+	for name, fingerprint := range state.HookTokenFingerprints {
+		if err := validateRotationHookTokenFingerprint(name, fingerprint); err != nil {
+			return err
+		}
+		if _, ok := roster[name]; !ok {
+			return fmt.Errorf("hook token fingerprint connector %s is not in the connector roster", name)
+		}
+	}
+	for name, fingerprint := range state.OrphanHookTokenFingerprints {
+		if err := validateRotationHookTokenFingerprint(name, fingerprint); err != nil {
+			return err
+		}
+		if _, configured := roster[name]; configured {
+			return fmt.Errorf("orphan hook token fingerprint connector %s is in the connector roster", name)
+		}
+	}
 	return nil
+}
+
+func validateRotationHookTokenFingerprint(name, fingerprint string) error {
+	canonical := strings.ToLower(strings.TrimSpace(name))
+	if canonical == "" || canonical != name || len(name) > 128 || strings.ContainsAny(name, "\x00\r\n\t ") {
+		return errors.New("hook token fingerprints contain an invalid connector identity")
+	}
+	if _, err := connector.HookTokenFilePath("rotation-state", name); err != nil {
+		return errors.New("hook token fingerprints contain an invalid connector identity")
+	}
+	if len(fingerprint) != sha256.Size*2 || strings.ToLower(fingerprint) != fingerprint {
+		return fmt.Errorf("connector %s has an invalid hook token fingerprint", name)
+	}
+	decoded, err := hex.DecodeString(fingerprint)
+	if err != nil || len(decoded) != sha256.Size {
+		return fmt.Errorf("connector %s has an invalid hook token fingerprint", name)
+	}
+	return nil
+}
+
+func rotationConnectorHookTokenExpectations(state rotationConnectorState) (rotationHookTokenFingerprints, error) {
+	expected := make(rotationHookTokenFingerprints, len(state.HookTokenFingerprints)+len(state.OrphanHookTokenFingerprints))
+	for name, fingerprint := range state.HookTokenFingerprints {
+		expected[name] = fingerprint
+	}
+	for name, fingerprint := range state.OrphanHookTokenFingerprints {
+		if _, duplicate := expected[name]; duplicate {
+			return nil, fmt.Errorf("connector %s appears in both hook token fingerprint rosters", name)
+		}
+		expected[name] = fingerprint
+	}
+	return expected, nil
 }
 
 func rotationConnectorStateFromConfig(cfg *config.Config) (rotationConnectorState, error) {
@@ -1342,6 +1501,142 @@ func rotationRequiredConnectorNamesFromState(state rotationConnectorState, guard
 
 var loadRotationOTLPPathToken = connector.LoadOTLPPathToken
 var loadRotationClaudeNativeOTLPProbes = connector.LoadClaudeCodeNativeOTLPProbes
+var loadRotationHookAPIToken = connector.LoadHookAPIToken
+
+func rotationHookTokenFingerprint(token string) string {
+	digest := sha256.Sum256([]byte(token))
+	return hex.EncodeToString(digest[:])
+}
+
+func verifyRotationConnectorHookAuthentication(
+	client *http.Client,
+	statusURL string,
+	dataDir string,
+	expected rotationHookTokenFingerprints,
+) error {
+	if len(expected) == 0 {
+		return errors.New("scoped hook credential fingerprint expectations are missing")
+	}
+	if client == nil {
+		return errors.New("scoped hook authentication client is unavailable")
+	}
+	base, err := url.Parse(statusURL)
+	if err != nil || base.Scheme != "http" || base.Host == "" || base.Opaque != "" ||
+		base.User != nil || base.RawQuery != "" || base.Fragment != "" {
+		return errors.New("scoped hook authentication endpoint is invalid")
+	}
+	host := strings.TrimSpace(base.Hostname())
+	hostIP := net.ParseIP(host)
+	if !strings.EqualFold(host, "localhost") && (hostIP == nil || !hostIP.IsLoopback()) {
+		return fmt.Errorf("refusing scoped hook authentication probe to non-loopback host %q", host)
+	}
+
+	names := make([]string, 0, len(expected))
+	for name := range expected {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	// Load and validate every expected sidecar before making any request. This
+	// prevents a partial probe from hiding a later connector's stale or missing
+	// credential and keeps the raw tokens confined to request headers.
+	tokens := make(map[string]string, len(names))
+	for _, name := range names {
+		expectedBytes, decodeErr := hex.DecodeString(expected[name])
+		if decodeErr != nil || len(expectedBytes) != sha256.Size ||
+			len(expected[name]) != sha256.Size*2 || strings.ToLower(expected[name]) != expected[name] {
+			return fmt.Errorf("connector %s hook token fingerprint expectation is invalid", name)
+		}
+		token, loadErr := loadRotationHookAPIToken(dataDir, name)
+		if loadErr != nil || strings.TrimSpace(token) == "" {
+			return fmt.Errorf("connector %s scoped hook credential is unavailable", name)
+		}
+		token = strings.TrimSpace(token)
+		actualFingerprint := rotationHookTokenFingerprint(token)
+		if subtle.ConstantTimeCompare([]byte(actualFingerprint), []byte(expected[name])) != 1 {
+			return fmt.Errorf("connector %s scoped hook credential does not match the rotation expectation", name)
+		}
+		tokens[name] = token
+	}
+
+	requestClient := *client
+	requestClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	registry := connector.NewDefaultRegistry()
+	for _, name := range names {
+		// Every setup-owned scoped token authenticates the generic connector
+		// inspection bridge, including proxy and managed-runtime connectors that
+		// do not expose a native HookEndpoint. The running gateway's result is
+		// authoritative for dynamically registered plugin scopes as well.
+		if probeErr := probeRotationConnectorHookAuthentication(
+			&requestClient, base, name, "inspect route", "/api/v1/inspect/tool", tokens[name],
+		); probeErr != nil {
+			return probeErr
+		}
+		registered, builtIn := registry.Get(name)
+		if endpoint, hasHook := registered.(connector.HookEndpoint); builtIn && hasHook {
+			path := endpoint.HookAPIPath()
+			if path == "" || !strings.HasPrefix(path, "/") || strings.ContainsAny(path, "?#\x00\r\n") {
+				return fmt.Errorf("connector %s has no rotation hook authentication contract", name)
+			}
+			if probeErr := probeRotationConnectorHookAuthentication(
+				&requestClient, base, name, "hook route", path, tokens[name],
+			); probeErr != nil {
+				return probeErr
+			}
+		}
+		if notifyEndpoint, hasNotify := registered.(connector.NotifyEndpoint); builtIn && hasNotify {
+			path := notifyEndpoint.NotifyAPIPath()
+			if path == "" || !strings.HasPrefix(path, "/") || strings.ContainsAny(path, "?#\x00\r\n") {
+				return fmt.Errorf("connector %s has no rotation notify authentication contract", name)
+			}
+			if probeErr := probeRotationConnectorHookAuthentication(
+				&requestClient, base, name, "notify route", path, tokens[name],
+			); probeErr != nil {
+				return probeErr
+			}
+		}
+	}
+	return nil
+}
+
+func probeRotationConnectorHookAuthentication(
+	client *http.Client,
+	base *url.URL,
+	connectorName string,
+	probeName string,
+	path string,
+	token string,
+) error {
+	probeURL := *base
+	probeURL.Path = path
+	probeURL.RawPath = ""
+	probeURL.RawQuery = ""
+	probeURL.Fragment = ""
+	req, err := http.NewRequest(http.MethodGet, probeURL.String(), nil)
+	if err != nil {
+		return fmt.Errorf("connector %s scoped hook authentication probe for %s could not be created", connectorName, probeName)
+	}
+	req.Header.Set("Authorization", "Bearer "+token)
+	req.Header.Set("X-DefenseClaw-Client", "daemon-rotation-convergence")
+	req.Header.Set("X-DefenseClaw-Connector", connectorName)
+	resp, err := client.Do(req)
+	if err != nil {
+		// Do not wrap the transport error. A custom transport could include the
+		// authorization header in its error text.
+		return fmt.Errorf("connector %s scoped hook authentication probe for %s failed", connectorName, probeName)
+	}
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, gracefulShutdownResponseMax))
+	_ = resp.Body.Close()
+	// Authentication runs before the hook handler's POST-only method check. A
+	// valid connector-scoped bearer therefore returns 405 without submitting a
+	// synthetic hook or notify event.
+	if resp.StatusCode != http.StatusMethodNotAllowed {
+		return fmt.Errorf("connector %s scoped hook authentication probe for %s returned HTTP %d", connectorName, probeName, resp.StatusCode)
+	}
+	return nil
+}
 
 func verifyRotationConnectorOTLPAuthentication(
 	client *http.Client,

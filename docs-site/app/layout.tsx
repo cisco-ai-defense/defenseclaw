@@ -1,7 +1,7 @@
 import './global.css';
 import type { Metadata, Viewport } from 'next';
 import { JetBrains_Mono, Inter } from 'next/font/google';
-import { siteUrl, defaultKeywords, site } from '@/lib/site';
+import { canonicalUrl, siteUrl, defaultKeywords, site } from '@/lib/site';
 import { OrganizationSchema, WebSiteSchema, SoftwareSourceCodeSchema } from '@/components/structured-data';
 import ClientRootProvider from '@/components/root-provider';
 
@@ -44,7 +44,7 @@ export const metadata: Metadata = {
     siteName: `Cisco · ${site.name}`,
     title: `${site.name} — ${site.tagline}`,
     description: site.description,
-    url: siteUrl,
+    url: canonicalUrl(),
     images: [
       {
         url: '/docs-og/index.png',
@@ -74,7 +74,7 @@ export const metadata: Metadata = {
     },
   },
   alternates: {
-    canonical: '/',
+    canonical: canonicalUrl(),
   },
 };
 

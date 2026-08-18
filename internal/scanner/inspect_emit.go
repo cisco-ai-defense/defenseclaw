@@ -11,8 +11,6 @@
 package scanner
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -55,8 +53,8 @@ type InspectFinding struct {
 	Confidence float64
 	// Evidence is a bounded matched excerpt, not the complete prompt, response,
 	// tool payload, or file. EmitInspectFindings retains it as the canonical
-	// evidence summary and also derives ContentFingerprint = sha256(evidence)[:8]
-	// so the correlator can match the same value across turns.
+	// evidence summary. The audit Logger derives the installation-keyed content
+	// fingerprint at its persistence boundary.
 	Evidence string
 	// Location is the file/tool/source location. The v8 field classification
 	// causes path redaction to be applied independently per destination.
@@ -206,7 +204,6 @@ func adaptInspectFinding(in InspectFinding, scannerName string) Finding {
 	}
 	if strings.TrimSpace(in.Evidence) != "" {
 		f.EvidenceSummary = boundedInspectEvidenceSummary(in.Evidence)
-		f.ContentFingerprint = evidenceFingerprint(in.Evidence)
 	}
 	return f
 }
@@ -238,16 +235,6 @@ func clampConfidence(c float64) float64 {
 	default:
 		return c
 	}
-}
-
-// evidenceFingerprint returns the first 8 hex chars of sha256(evidence) — the
-// same fingerprint shape the correlator already reads via
-// ScanFinding.ContentFingerprint. It hashes the source excerpt before any
-// destination projection so correlation remains stable across redaction
-// profiles.
-func evidenceFingerprint(evidence string) string {
-	sum := sha256.Sum256([]byte(evidence))
-	return hex.EncodeToString(sum[:])[:8]
 }
 
 // TopRuleIDs returns up to n distinct rule_ids from the source

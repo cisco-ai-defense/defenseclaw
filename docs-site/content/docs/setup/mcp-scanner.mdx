@@ -167,12 +167,17 @@ The watcher's verdict is the default. Operators always have manual override (blo
 ```bash
 defenseclaw mcp list                                         # what is configured + state across configured connectors
 defenseclaw mcp list --connector opencode                    # one connector's MCP source
+defenseclaw mcp list --connector amp                         # Amp settings + skill-bundled mcp.json
 defenseclaw mcp set context7 --command uvx --args context7-mcp
 defenseclaw mcp set context7 --command uvx --args context7-mcp --connector opencode
 defenseclaw mcp unset context7 --connector opencode
 defenseclaw mcp block untrusted-fs --reason "exfil tool found"
 defenseclaw mcp allow cisco-internal --reason "first-party"
 ```
+
+Amp MCP discovery is intentionally read-only. Use `amp mcp add` (or edit Amp's
+settings through Amp tooling) for schema-preserving writes and workspace
+approval, then re-run `defenseclaw mcp scan --connector amp`.
 
 Every action is audited (`block-mcp`, etc.) so the trail is intact even when the manual override contradicts the watcher.
 

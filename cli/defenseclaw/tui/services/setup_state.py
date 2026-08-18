@@ -26,6 +26,7 @@ from defenseclaw.tui.services.cli_choices import REGIONAL_PROVIDERS
 ReadinessStatus = Literal["pass", "warn", "fail"]
 ValidationSeverity = Literal["ok", "warning", "error"]
 ConfigFieldKind = Literal["string", "int", "bool", "password", "choice", "header"]
+SetupPreviewRisk = Literal["read-only", "setup"]
 
 
 @dataclass(frozen=True)
@@ -54,6 +55,13 @@ class SetupCommandIntent:
     # environment rather than passed as ``--env KEY=secret`` on the command
     # line. Empty mapping means "no overrides".
     env_overrides: tuple[tuple[str, str], ...] = ()
+    # Minimum command risk used by the preview dispatcher. This is a floor, not
+    # the effective risk: most setup intents keep the read-only default and the
+    # preview screen raises the classification from argv. Interactive redaction
+    # setup sets this to ``setup`` so the TUI switches to Activity before the
+    # child asks for input. Never read this field alone to decide whether a
+    # command needs confirmation.
+    risk: SetupPreviewRisk = "read-only"
 
     @property
     def argv(self) -> tuple[str, ...]:
@@ -1159,6 +1167,7 @@ _BOOL_FIELD_KEYS = frozenset(
         "ai_discovery.include_package_manifests",
         "ai_discovery.include_env_var_names",
         "ai_discovery.include_network_domains",
+        "ai_discovery.lookup_model_provenance_online",
         "ai_discovery.store_raw_local_paths",
         "gateway.watcher.enabled",
         "gateway.watcher.skill.enabled",

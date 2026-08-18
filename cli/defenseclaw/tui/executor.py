@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import codecs
 import contextlib
 import ntpath
 import os
@@ -20,6 +21,8 @@ from typing import Protocol
 from defenseclaw.gateway import resolve_gateway_binary
 
 _CREATE_SUSPENDED = 0x00000004
+_PIPE_FRAGMENT_FLUSH_SECONDS = 0.05
+_PIPE_FRAGMENT_MAX_CHARS = 64 * 1024
 
 
 @dataclass(frozen=True)
@@ -44,9 +47,9 @@ class CommandAlreadyRunningError(RuntimeError):
 class CommandExecutor:
     """Single-flight subprocess executor.
 
-    The Phase 1 implementation covers non-interactive subprocesses.
-    PTY execution is intentionally isolated behind the same API so the
-    full interactive escape hatch can be added without touching panels.
+    POSIX uses a PTY for interactive commands. Native Windows uses captured
+    pipes plus chunked output and writable stdin, which preserves prompt text
+    that does not end in a newline (for example Click's ``Select:`` prompt).
     """
 
     def __init__(
@@ -179,11 +182,41 @@ class CommandExecutor:
                 await process.stdin.drain()
         try:
             assert process.stdout is not None
+            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+            pending = ""
             while True:
-                line = await process.stdout.readline()
-                if not line:
+                try:
+                    chunk = await asyncio.wait_for(
+                        process.stdout.read(4096),
+                        timeout=_PIPE_FRAGMENT_FLUSH_SECONDS,
+                    )
+                except TimeoutError:
+                    # A newline-less interactive prompt must become visible
+                    # while the child is waiting for stdin. Delay only long
+                    # enough to coalesce ordinary cross-chunk line fragments.
+                    for text in _split_terminal_chunk(pending):
+                        yield CommandEvent("output", text)
+                    pending = ""
+                    continue
+                if not chunk:
                     break
-                yield CommandEvent("output", line.decode(errors="replace").rstrip("\n"))
+                pending += decoder.decode(chunk)
+                complete, separator, trailing = pending.rpartition("\n")
+                if not separator:
+                    while len(pending) >= _PIPE_FRAGMENT_MAX_CHARS:
+                        bounded, pending = (
+                            pending[:_PIPE_FRAGMENT_MAX_CHARS],
+                            pending[_PIPE_FRAGMENT_MAX_CHARS:],
+                        )
+                        for text in _split_terminal_chunk(bounded):
+                            yield CommandEvent("output", text)
+                    continue
+                for text in _split_terminal_chunk(complete):
+                    yield CommandEvent("output", text)
+                pending = trailing
+            pending += decoder.decode(b"", final=True)
+            for text in _split_terminal_chunk(pending):
+                yield CommandEvent("output", text)
             exit_code = await process.wait()
         finally:
             async with self._cancel_lock:

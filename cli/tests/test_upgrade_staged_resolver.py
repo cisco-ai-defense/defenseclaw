@@ -31,7 +31,6 @@ from defenseclaw import resolver_hint
 ROOT = Path(__file__).resolve().parents[2]
 UPGRADE_SCRIPT = ROOT / "scripts" / "upgrade.sh"
 _STAGED_COSIGN_SHA256_BY_ASSET = {
-    "cosign-darwin-amd64": resolver_hint.COSIGN_BOOTSTRAP_SHA256[("darwin", "amd64")],
     "cosign-darwin-arm64": resolver_hint.COSIGN_BOOTSTRAP_SHA256[("darwin", "arm64")],
     "cosign-linux-amd64": resolver_hint.COSIGN_BOOTSTRAP_SHA256[("linux", "amd64")],
     "cosign-linux-arm64": resolver_hint.COSIGN_BOOTSTRAP_SHA256[("linux", "arm64")],

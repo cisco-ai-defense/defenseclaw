@@ -104,7 +104,7 @@ func retryPendingConnectorReconciliation(
 		codexHome, claudeHome := "", ""
 		if connectorName == "codex" {
 			codexHome = failure.ConfigHome
-		} else {
+		} else if connectorName == "claudecode" {
 			claudeHome = failure.ConfigHome
 		}
 		env := transactionChildEnvForHomes(transaction, codexHome, claudeHome)
@@ -253,6 +253,8 @@ func connectorManagedBackupExists(dataRoot, connectorName string) bool {
 		logicalName = "config.toml"
 	case "claudecode":
 		logicalName = "settings.json"
+	case "amp":
+		logicalName = "config"
 	default:
 		return false
 	}
@@ -271,6 +273,8 @@ func connectorDefaultHomeBesideDataRoot(dataRoot, connectorName string) string {
 		directory = ".codex"
 	case "claudecode":
 		directory = ".claude"
+	case "amp":
+		return filepath.Join(filepath.Dir(cleanDataRoot), ".config", "amp")
 	default:
 		return ""
 	}
@@ -465,7 +469,7 @@ func validateConnectorReconciliationState(state *connectorReconciliationState) e
 }
 
 func validateConnectorReconciliationIdentity(connectorName, configHome string) error {
-	if connectorName != "codex" && connectorName != "claudecode" {
+	if connectorName != "codex" && connectorName != "claudecode" && connectorName != "amp" {
 		return fmt.Errorf("invalid connector reconciliation target %q", connectorName)
 	}
 	if configHome == "" || !filepath.IsAbs(configHome) || filepath.Clean(configHome) != configHome {
@@ -528,6 +532,12 @@ func connectorConfigHome(transaction setupTransaction, connectorName string, pre
 			return transaction.PreviousClaudeConfigDir
 		}
 		return transaction.ClaudeConfigDir
+	case "amp":
+		// Amp has no home override. DataRoot is bound to the current token's
+		// %USERPROFILE%\.defenseclaw, making this the exact documented
+		// %USERPROFILE%\.config\amp directory for both previous and target
+		// lifecycle operations.
+		return connectorDefaultHomeBesideDataRoot(transaction.DataRoot, connectorName)
 	default:
 		return ""
 	}

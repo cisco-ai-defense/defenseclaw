@@ -136,13 +136,11 @@ func TestEmitEndpointInventoryManagedUsesCanonicalV8Snapshots(t *testing.T) {
 	}
 	records := capture.snapshot()
 	connectorCount := len(registry.Available())
-	if got, want := len(records), connectorCount+2; got != want {
-		t.Fatalf("canonical records=%d want %d connector rows + two collection summaries", got, want)
-	}
 
 	summaries := map[string]map[string]any{}
 	summaryActions := map[string]string{}
-	components := 0
+	connectorComponents := 0
+	mcpComponents := 0
 	for _, record := range records {
 		body, ok := record.Body()
 		if !ok {
@@ -158,23 +156,31 @@ func TestEmitEndpointInventoryManagedUsesCanonicalV8Snapshots(t *testing.T) {
 			summaries[source] = bodyMap
 			summaryActions[source] = record.Action()
 		case "ai_component.observed":
-			components++
-			if got := bodyMap[observability.TelemetryAttributeDefenseClawAIComponentType]; got != "supported_connector" {
-				t.Fatalf("component type=%v", got)
-			}
-			if got := bodyMap[observability.TelemetryAttributeDefenseClawAIDiscoverySource]; got != endpointConnectorInventorySource {
-				t.Fatalf("connector component source=%v", got)
-			}
-			for _, field := range []string{
-				observability.TelemetryAttributeDefenseClawInventoryItemName,
-				observability.TelemetryAttributeDefenseClawInventoryItemDescription,
-				observability.TelemetryAttributeDefenseClawInventoryConnectorSource,
-				observability.TelemetryAttributeDefenseClawInventoryConnectorToolInspectionMode,
-				observability.TelemetryAttributeDefenseClawInventoryConnectorSubprocessPolicy,
-			} {
-				if value, ok := bodyMap[field].(string); !ok || value == "" {
-					t.Fatalf("connector inventory field %s=%T(%v)", field, bodyMap[field], bodyMap[field])
+			componentType, _ := bodyMap[observability.TelemetryAttributeDefenseClawAIComponentType].(string)
+			source, _ := bodyMap[observability.TelemetryAttributeDefenseClawAIDiscoverySource].(string)
+			switch {
+			case componentType == "supported_connector" && source == endpointConnectorInventorySource:
+				connectorComponents++
+				for _, field := range []string{
+					observability.TelemetryAttributeDefenseClawInventoryItemName,
+					observability.TelemetryAttributeDefenseClawInventoryItemDescription,
+					observability.TelemetryAttributeDefenseClawInventoryConnectorSource,
+					observability.TelemetryAttributeDefenseClawInventoryConnectorToolInspectionMode,
+					observability.TelemetryAttributeDefenseClawInventoryConnectorSubprocessPolicy,
+				} {
+					if value, ok := bodyMap[field].(string); !ok || value == "" {
+						t.Fatalf("connector inventory field %s=%T(%v)", field, bodyMap[field], bodyMap[field])
+					}
 				}
+			case componentType == "mcp_server":
+				// Per-connector MCP fanout ships one ai_component.observed per
+				// (home, connector, server) triple under the endpoint per-
+				// connector source. These are optional (empty registries or
+				// zero-HOME test fixtures skip them) but we allow them here
+				// so the test isn't tied to per-connector filesystem fixtures.
+				mcpComponents++
+			default:
+				t.Fatalf("unexpected component type=%q source=%q", componentType, source)
 			}
 		default:
 			t.Fatalf("legacy or unexpected event family %q", record.EventName())
@@ -187,8 +193,19 @@ func TestEmitEndpointInventoryManagedUsesCanonicalV8Snapshots(t *testing.T) {
 			t.Fatalf("endpoint resource anchor duplicated into body: %s", encoded)
 		}
 	}
-	if components != connectorCount {
-		t.Fatalf("connector components=%d want=%d", components, connectorCount)
+	if connectorComponents != connectorCount {
+		t.Fatalf("connector components=%d want=%d", connectorComponents, connectorCount)
+	}
+	// Baseline shape: connector components + connector summary + aggregate
+	// MCP summary. Optional additions: per-connector MCP fanout summary +
+	// N per-item mcp_server components when any configured home has native
+	// MCP config on disk.
+	baseline := connectorCount + 2
+	if len(records) != baseline && len(records) != baseline+1+mcpComponents {
+		t.Fatalf(
+			"canonical records=%d want %d (baseline) or %d (with per-connector MCP fanout)",
+			len(records), baseline, baseline+1+mcpComponents,
+		)
 	}
 	connectorSummary := summaries[endpointConnectorInventorySource]
 	if connectorSummary == nil || canonicalInt64(t, connectorSummary[observability.TelemetryAttributeDefenseClawAIDiscoverySignalsTotal]) != int64(connectorCount) {
@@ -709,40 +726,77 @@ func TestManagedEndpointInventorySurvivesSourceDisabledAIDiscoveryLogs(t *testin
 		t.Fatal(err)
 	}
 
-	wantSources := map[string]string{
-		string(config.ObservabilityV8ManagedConnectorInventoryAction): endpointConnectorInventorySource,
-		string(config.ObservabilityV8ManagedMCPInventoryAction):       endpointMCPInventorySource,
+	// Every configured user home's per-connector MCP fanout ships as an
+	// additional summary under ObservabilityV8ManagedMCPInventoryAction so the
+	// downstream inventory sees each (connector, server) pair with its parent
+	// agent slug. This carries no v7 wrapper — the raw v8 body carries the
+	// full item detail — so the test accepts the summary source loosely by
+	// action, not by a fixed endpoint source string.
+	wantSources := map[string]map[string]struct{}{
+		string(config.ObservabilityV8ManagedConnectorInventoryAction): {endpointConnectorInventorySource: {}},
+		string(config.ObservabilityV8ManagedMCPInventoryAction): {
+			endpointMCPInventorySource:             {},
+			"endpoint_per_connector_mcp_inventory": {},
+		},
 	}
-	for delivered := 0; delivered < 2; delivered++ {
+	// Drain deliveries until every expected DISTINCT (action, source) pair
+	// has landed. Per-item ai_component.observed records also flow through
+	// the same adapter (one per connector row and one per MCP entry); we
+	// ignore them here. Tracking by (action, source) rather than by count
+	// catches a regression where the same summary ships three times while
+	// another one is silently dropped.
+	seenPairs := map[string]struct{}{}
+	expectedPairs := map[string]struct{}{
+		string(config.ObservabilityV8ManagedConnectorInventoryAction) + "\x00" + endpointConnectorInventorySource: {},
+		string(config.ObservabilityV8ManagedMCPInventoryAction) + "\x00" + endpointMCPInventorySource:             {},
+		string(config.ObservabilityV8ManagedMCPInventoryAction) + "\x00" + "endpoint_per_connector_mcp_inventory": {},
+	}
+	deadline := time.After(15 * time.Second)
+drain:
+	for {
+		if len(seenPairs) == len(expectedPairs) {
+			break drain
+		}
 		select {
 		case item := <-adapter.delivered:
 			if item.identity.Bucket != string(observability.BucketAIDiscovery) ||
-				item.identity.Signal != string(observability.SignalLogs) ||
-				item.identity.EventName != "ai.discovery.completed" {
+				item.identity.Signal != string(observability.SignalLogs) {
 				t.Fatalf("managed inventory delivery identity = %+v", item.identity)
+			}
+			if item.identity.EventName != "ai.discovery.completed" {
+				continue
 			}
 			var wire map[string]any
 			if err := json.Unmarshal(item.bytes, &wire); err != nil {
 				t.Fatal(err)
 			}
 			action, _ := wire["action"].(string)
-			wantSource, ok := wantSources[action]
+			validSources, ok := wantSources[action]
 			if !ok {
 				t.Fatalf("managed inventory action=%q", action)
 			}
 			body, ok := wire["body"].(map[string]any)
-			if !ok || body[observability.TelemetryAttributeDefenseClawAIDiscoverySource] != wantSource {
-				t.Fatalf("managed inventory body source=%#v want=%q", body, wantSource)
+			if !ok {
+				t.Fatalf("managed inventory body missing: %#v", wire)
+			}
+			gotSource, _ := body[observability.TelemetryAttributeDefenseClawAIDiscoverySource].(string)
+			if _, ok := validSources[gotSource]; !ok {
+				t.Fatalf("managed inventory body source=%q want one of %v", gotSource, validSources)
 			}
 			if action == string(config.ObservabilityV8ManagedConnectorInventoryAction) {
 				if len(canonicalObjectArray(t, body[observability.TelemetryAttributeDefenseClawInventoryConnectorIdentifiers])) != 1 {
 					t.Fatalf("managed connector atomic carrier=%#v", body)
 				}
-			} else if len(canonicalObjectArray(t, body[observability.TelemetryAttributeDefenseClawInventoryMcpIdentifiers])) != 1 {
+			} else if len(canonicalObjectArray(t, body[observability.TelemetryAttributeDefenseClawInventoryMcpIdentifiers])) < 1 {
 				t.Fatalf("managed MCP atomic carrier=%#v", body)
 			}
-		case <-time.After(15 * time.Second):
-			t.Fatalf("timed out after %d managed inventory deliveries", delivered)
+			key := action + "\x00" + gotSource
+			if _, expected := expectedPairs[key]; !expected {
+				t.Fatalf("unexpected managed inventory (action, source)=(%q, %q)", action, gotSource)
+			}
+			seenPairs[key] = struct{}{}
+		case <-deadline:
+			t.Fatalf("timed out; seen pairs=%v want=%v", seenPairs, expectedPairs)
 		}
 	}
 
@@ -759,8 +813,11 @@ func TestManagedEndpointInventorySurvivesSourceDisabledAIDiscoveryLogs(t *testin
 	).Scan(&persisted); err != nil {
 		t.Fatal(err)
 	}
-	if persisted != 2 {
-		t.Fatalf("persisted managed inventory summaries = %d, want 2", persisted)
+	// Three managed inventory summaries: connector, aggregate MCP, and the
+	// per-connector MCP fanout (each summary carries one atomic carrier plus
+	// its projection under the managed action).
+	if persisted != 3 {
+		t.Fatalf("persisted managed inventory summaries = %d, want 3", persisted)
 	}
 	var inventoryRows int
 	if err := database.QueryRow(`
@@ -772,8 +829,15 @@ func TestManagedEndpointInventorySurvivesSourceDisabledAIDiscoveryLogs(t *testin
 	).Scan(&inventoryRows); err != nil {
 		t.Fatal(err)
 	}
-	if inventoryRows != 4 {
-		t.Fatalf("persisted managed endpoint inventory rows=%d, want 4", inventoryRows)
+	// Minimum floor is 3 summary carriers persisted twice each (raw +
+	// managed-AID projection) = 6. Any per-item ai_component.observed rows
+	// discovered from the daemon's own HOME (Pass 1 of perConnectorMCPEntries)
+	// add on top; CI runs on an empty HOME so the floor is exact, but a
+	// developer's workstation with a populated ~/.codex/config.toml et al.
+	// will legitimately surface extras. Assert the floor rather than pin an
+	// environment-dependent exact count.
+	if inventoryRows < 6 {
+		t.Fatalf("persisted managed endpoint inventory rows=%d, want >= 6", inventoryRows)
 	}
 }
 
@@ -1162,7 +1226,7 @@ func TestEndpointPluginDiscoveryFailureIsPartialAndKeepsBuiltins(t *testing.T) {
 	}
 	cfg := &config.Config{PluginDir: pluginRoot}
 	capture := &endpointInventoryCapture{}
-	makeEndpointInventoryEmitter(cfg, capture)(t.Context())
+	makeEndpointInventoryEmitter(cfg, capture, nil)(t.Context())
 
 	wantBuiltins := len(connector.NewDefaultRegistry().Available())
 	connectorRows := 0
@@ -1255,3 +1319,54 @@ func TestEndpointInventoryHelpersRejectRawPathAndURLMaterial(t *testing.T) {
 
 var _ sidecarRuntimeEmitter = (*endpointInventoryCapture)(nil)
 var _ aiDiscoveryV8Runtime = (*endpointInventoryCapture)(nil)
+
+// TestReadMCPServersUnderHomeHonorsClaudeConfigDirOverride pins the fix for
+// the reported bug: when CLAUDE_CONFIG_DIR is explicitly set the Claude Code
+// CLI ignores the default `~/.claude/settings.json` and `~/.claude.json`
+// files, so managed inventory must not report their servers. This test
+// asserts the per-home reader skips both default files under the override
+// and, when the override is cleared, picks them back up.
+func TestReadMCPServersUnderHomeHonorsClaudeConfigDirOverride(t *testing.T) {
+	tmp := t.TempDir()
+	settingsPath := filepath.Join(tmp, ".claude", "settings.json")
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(settingsPath, []byte(`{"mcpServers":{"stale-settings":{"command":"/usr/bin/x"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	claudeJSONPath := filepath.Join(tmp, ".claude.json")
+	if err := os.WriteFile(claudeJSONPath, []byte(`{"mcpServers":{"stale-claudejson":{"command":"/usr/bin/y"}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// With CLAUDE_CONFIG_DIR set, both default files must be skipped.
+	t.Setenv("CLAUDE_CONFIG_DIR", filepath.Join(tmp, "custom-claude"))
+	if got := readMCPServersUnderHome("claudecode", tmp); len(got) != 0 {
+		t.Fatalf("with CLAUDE_CONFIG_DIR set, got servers=%+v want none", got)
+	}
+
+	// Without the override, both default files should surface.
+	if err := os.Unsetenv("CLAUDE_CONFIG_DIR"); err != nil {
+		t.Fatal(err)
+	}
+	got := readMCPServersUnderHome("claudecode", tmp)
+	var names []string
+	for _, group := range got {
+		for _, entry := range group {
+			names = append(names, entry.Name)
+		}
+	}
+	var haveSettings, haveClaudeJSON bool
+	for _, name := range names {
+		if name == "stale-settings" {
+			haveSettings = true
+		}
+		if name == "stale-claudejson" {
+			haveClaudeJSON = true
+		}
+	}
+	if !haveSettings || !haveClaudeJSON {
+		t.Fatalf("no-override read must surface both defaults, got names=%v", names)
+	}
+}

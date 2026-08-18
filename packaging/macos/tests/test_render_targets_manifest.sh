@@ -19,15 +19,16 @@ t_multi_user_multi_connector_produces_cross_product() {
   users="alice:501:20:/Users/alice
 bob:502:20:/Users/bob"
   local out
-  out="$(render_targets_manifest "${TEST_SUPPORT}" "codex,claudecode" "${users}")"
+  out="$(render_targets_manifest "${TEST_SUPPORT}" "amp,codex,claudecode" "${users}")"
 
   assert_contains "${out}" "version: 1"          "version header"
   assert_contains "${out}" "targets:"            "targets: block"
-  # alice × 2 connectors, bob × 2 connectors = 4 rows
+  # alice × 3 connectors, bob × 3 connectors = 6 rows
   assert_contains "${out}" 'user: "alice"'       "alice row"
   assert_contains "${out}" 'user: "bob"'         "bob row"
   assert_contains "${out}" 'user_home: "/Users/alice"' "alice home"
   assert_contains "${out}" 'user_home: "/Users/bob"'   "bob home"
+  assert_contains "${out}" 'connector: "amp"'        "amp connector"
   assert_contains "${out}" 'connector: "codex"'      "codex connector"
   assert_contains "${out}" 'connector: "claudecode"' "claudecode connector"
   # data_dir is deliberately NOT emitted per-target: the guardian's
@@ -35,10 +36,10 @@ bob:502:20:/Users/bob"
   # home, but SUPPORT_DIR/runtime is machine-wide root storage. Letting
   # Install() default per-user to ~/.defenseclaw is correct.
   assert_not_contains "${out}" "data_dir:" "data_dir intentionally absent (per-user Install default is used)"
-  # Rough sanity: expect at least 4 `- user:` block markers.
+  # Rough sanity: expect 6 `- user:` block markers.
   local count
   count="$(printf '%s\n' "${out}" | grep -c "^  - user:" || true)"
-  assert_eq "${count}" "4" "expected 4 target rows (2 users × 2 supported connectors)"
+  assert_eq "${count}" "6" "expected 6 target rows (2 users × 3 supported connectors)"
 }
 
 t_unsupported_connector_skipped() {

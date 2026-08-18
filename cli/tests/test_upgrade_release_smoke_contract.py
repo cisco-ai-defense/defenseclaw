@@ -115,6 +115,8 @@ def test_developer_activation_is_isolated_from_every_production_upgrade_surface(
     assert '-e "${release_dir}/checksums.txt.pem" || -L "${release_dir}/checksums.txt.pem"' in source
     assert "developer activation HOME escaped its private workdir" in source
     assert "select_private_api_port" in source
+    assert "_seed_guardrail_profiles" in source
+    assert "developer_target_guardrail_profiles=ready" in source
     assert 'gateway.get("api_port") != developer_api_port' in source
     assert "must not claim a production upgrade receipt" in source
     assert "No production resolver, provenance, bridge, receipt, or rollback success was claimed" in source

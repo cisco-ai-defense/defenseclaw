@@ -14,6 +14,11 @@ builds:
     goarch:
       - amd64
       - arm64
+    # Protocol-2 policy predates the Apple-Silicon-only support boundary and
+    # still authenticates a Darwin/amd64 compatibility slot. Keep producing
+    # that sealed input until the manifest schema changes, but do not add it to
+    # installer, package, validation, or certification matrices: every current
+    # user entry point rejects Intel macOS before artifact selection.
     flags:
       - -trimpath
       - -buildvcs=false
@@ -90,6 +95,8 @@ archives:
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     files:
       - LICENSE*
+      - NOTICE
+      - THIRD_PARTY_LICENSES.txt
       - README*
       - CHANGELOG.md
       - packaging/**/*
@@ -105,6 +112,8 @@ archives:
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     files:
       - LICENSE*
+      - NOTICE
+      - THIRD_PARTY_LICENSES.txt
       - README*
       - CHANGELOG.md
       - packaging/**/*
@@ -119,6 +128,8 @@ archives:
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     files:
       - LICENSE*
+      - NOTICE
+      - THIRD_PARTY_LICENSES.txt
       - README*
       - CHANGELOG.md
       - packaging/**/*

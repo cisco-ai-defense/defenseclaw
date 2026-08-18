@@ -4,9 +4,8 @@
 
 """Track 9 — CLI contracts for schemas, settings, and alert review.
 
-Pure-``unittest`` (no pytest dependency) so that ``make test`` works
-against the production venv created by ``make install`` / ``make pycli``
-without needing the ``[dependency-groups] dev`` packages.
+The cases remain pure ``unittest`` so they can also run in minimal packaged
+runtime environments; local Make targets use the shared test-ready venv.
 """
 
 from __future__ import annotations
@@ -310,7 +309,11 @@ class TestGoScanCodeJSONSchema(unittest.TestCase):
                 cwd=str(ROOT),
                 capture_output=True,
                 text=True,
-                timeout=180,
+                # The hosted Windows Python shard cold-compiles the complete
+                # Go CLI without the setup-go cache used by the Go matrix.
+                # Keep the tighter local/POSIX bound while allowing runner
+                # image and scheduling variance on Windows.
+                timeout=300 if os.name == "nt" else 180,
                 env={
                     **os.environ,
                     "HOME": str(isolated_home),

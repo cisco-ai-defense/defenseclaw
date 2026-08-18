@@ -234,6 +234,80 @@ func windowsProtectionIdentity() (windowsProtectionSubject, error) {
 	return windowsProtectionSubject{sid: sid, impersonated: impersonated}, nil
 }
 
+// windowsPathOwner returns the owner SID of the given path. Kept alongside
+// windowsPathOwnedBySubject so callers that only need the raw owner (tests,
+// owner-repair fast paths) can skip the identity lookup.
+func windowsPathOwner(path string) (*windows.SID, error) {
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		return nil, err
+	}
+	sd, err := windows.GetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		return nil, err
+	}
+	if sd == nil {
+		return nil, fmt.Errorf("safefile: path has no security descriptor: %s", path)
+	}
+	owner, _, err := sd.Owner()
+	if err != nil {
+		return nil, err
+	}
+	return owner, nil
+}
+
+// currentWindowsUserSID returns the current process token's user SID. Unlike
+// windowsProtectionIdentity, it never consults the thread token, so it is the
+// right primitive when the caller specifically wants "the process owner" —
+// for example the desired-owner argument to setWindowsOwnerIfDifferent.
+func currentWindowsUserSID() (*windows.SID, error) {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		return nil, err
+	}
+	if user == nil || user.User.Sid == nil {
+		return nil, fmt.Errorf("safefile: current token user is unavailable")
+	}
+	return user.User.Sid, nil
+}
+
+// windowsOwnerSetter matches windows.SetNamedSecurityInfo's signature so
+// setWindowsOwnerIfDifferent can be exercised in tests without hitting the
+// real security-info syscall.
+type windowsOwnerSetter func(
+	objectName string,
+	objectType windows.SE_OBJECT_TYPE,
+	securityInformation windows.SECURITY_INFORMATION,
+	owner *windows.SID,
+	group *windows.SID,
+	dacl *windows.ACL,
+	sacl *windows.ACL,
+) error
+
+// setWindowsOwnerIfDifferent skips the owner update when the current owner is
+// already the desired one. File owners receive implicit WRITE_DAC but not
+// WRITE_OWNER, so re-applying an already-correct owner would fail for a
+// normal (non-elevated) user.
+func setWindowsOwnerIfDifferent(
+	path string,
+	currentOwner *windows.SID,
+	desiredOwner *windows.SID,
+	setOwner windowsOwnerSetter,
+) error {
+	if currentOwner != nil && currentOwner.Equals(desiredOwner) {
+		return nil
+	}
+	return setOwner(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION,
+		desiredOwner,
+		nil,
+		nil,
+		nil,
+	)
+}
+
 func preserveExistingProtection(source, destination string) error {
 	if _, err := os.Lstat(source); os.IsNotExist(err) {
 		return nil

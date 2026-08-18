@@ -268,6 +268,7 @@ _FRIENDLY_CONNECTOR_NAMES = {
     "openhands": "OpenHands",
     "antigravity": "Antigravity",
     "opencode": "OpenCode",
+    "amp": "Amp",
     "omnigent": "OmniGent",
 }
 

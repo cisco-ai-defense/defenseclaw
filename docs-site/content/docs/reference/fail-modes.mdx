@@ -39,11 +39,18 @@ classified as transport.
 | Hook input exceeds its bounded payload | Refuse to process it, record the condition, and allow. | Refuse to process it, record the condition, and block where the connector supports a block response. |
 | Valid gateway verdict | Honor the connector/event mapping. | Honor the same mapping. Fail mode does not turn an observation-only event into a blocking surface. |
 | Internal policy evaluator panic | Allow with `would_block`, warning, and telemetry. | The same fail-open boundary; no authoritative verdict was produced. |
+| Ordered-chain state unavailable or inconsistent | Preserve the current event's standalone verdict; skip only the chain join. | The same standalone verdict. Chain storage never fabricates or removes a single-event block. |
 
 The final row is intentional and important. Hook fail mode governs delivery,
 authentication, parsing, and response availability. It does not fabricate a
 policy denial after an internal evaluator panic. Treat that condition as a
 degraded security incident and inspect gateway health.
+
+Ordered chains follow the same non-weakening rule. A SQLite timeout, closed
+store, missing canonical session, or integrity conflict can prevent a new
+chain match, but it cannot turn an independently blocked tool call into allow.
+An exact unexpired deny receipt can replay its stable denial without emitting
+duplicate finding telemetry.
 
 ## Persisted fail mode
 
@@ -122,6 +129,12 @@ defenseclaw-gateway status
 defenseclaw status
 defenseclaw guardrail status
 defenseclaw doctor
+
+# Avoid synthetic telemetry, LLM, and inspection-content probes
+defenseclaw doctor --passive
+
+# Machine-readable schema v2 (--json is an alias)
+defenseclaw doctor --json-output
 ```
 
 Hook delivery and response failures can also be recorded under
@@ -130,11 +143,94 @@ install the pinned default is
 `%USERPROFILE%\.defenseclaw\logs\hook-failures.jsonl`. Treat it as sensitive
 operational data and do not publish the whole file.
 
-If doctor identifies token drift, preview its safe repair plan with
-`defenseclaw doctor --fix --dry-run`. An intentional master-token rotation uses
-`defenseclaw setup rotate-token --yes`, reconciles all active connectors, and
-requires each agent to be restarted afterward. Never diagnose auth by printing
-or comparing token values.
+Schema-v2 Doctor output keeps health `checks`/`summary` separate from
+`repairs`/`repair_summary`. A failed health check or failed/dependency-blocked
+repair sets the top-level outcome to failed and exits 1; manual, declined, or
+confirmation-required work remains visible without being counted as a repaired
+health check. Each repair record includes its stable ID, risk, dependencies,
+effects, blockers, restart potential, and platform.
+
+If doctor identifies a missing token or token drift, preview its safe repair
+plan with `defenseclaw doctor --fix --dry-run`. Dry-run invokes planners only,
+is always passive, and cannot write or restart anything. `--fix-id REPAIR_ID`
+is repeatable and selects the exact repair plus its declared dependencies. A
+real JSON repair requires `--yes`; blanket `--yes` cannot opt into policy or
+experimental repairs. The real repair runs before the diagnostic pass, so its
+health summary describes the repaired state.
+
+Doctor may generate a local token, start a stopped managed gateway, or restart
+a gateway whose in-memory token or subsystem state is stale; it does not
+overwrite a custom `token_env`. Generated tokens are stored with mode `0600` on
+POSIX or a private DACL on Windows and are never printed. An intentional
+master-token rotation uses `defenseclaw setup rotate-token --yes`, reconciles
+all active connectors, and requires each agent to be restarted afterward.
+Never diagnose auth by printing or comparing token values.
+
+When `.env` was readable by another local principal, Doctor does not simply
+tighten permissions around the exposed value. It crosses a verified
+stop-A/commit-B/start-B boundary and authenticates B before reporting the
+rotation as repaired. A failed activation does not intentionally revive
+compromised A. Rotate every other credential that was present in the exposed
+file separately. Doctor refuses to consume a foreign-owned, attacker-writable,
+linked/reparsed, non-regular, or oversized `.env`.
+
+Credential dotenv files cannot set process-control variables such as `PATH`,
+dynamic-loader injection variables, connector-home overrides, proxy variables,
+TLS trust overrides, or DefenseClaw security opt-outs. Supply those through the
+trusted service environment instead.
+
+For an absent audit database, preview or select the safe recovery explicitly:
+
+```bash
+defenseclaw doctor --fix --dry-run \
+  --fix-id doctor.state.audit-db.initialize
+```
+
+Doctor creates and validates an empty current schema only when the target name
+is safely absent and gateway inactivity is established. Publication is atomic
+and no-overwrite on Linux, macOS, and Windows. Existing, corrupt,
+linked/reparsed, foreign-custody, or ambiguous database state must be restored
+or migrated; Doctor never erases it.
+
+A missing device identity has a stricter recovery boundary:
+
+```bash
+# Attended only; do not add --yes
+defenseclaw doctor --fix \
+  --fix-id doctor.identity.device-key.initialize
+```
+
+The prompt warns that prior pairings cannot be recovered. If approved, Doctor
+publishes HMAC-bound provenance before exposing a new Ed25519 key. It refuses
+blanket `--yes`, an existing key, and any ambiguous continuity evidence.
+
+Unsupported or untested active connector versions are health findings and
+appear under `doctor.connector.compatibility.review` in a repair plan. Doctor
+reports the registered range or interactive vendor/setup guidance. Exact
+attended selection may refresh bounded local version evidence without
+telemetry, but never installs, upgrades, downgrades, or launches an unsupported
+connector workload; unresolved compatibility remains manual/experimental.
+
+DefenseClaw component release drift appears separately under
+`doctor.component.compatibility.review`, with authenticated upgrade or trusted
+reinstall guidance. Doctor does not bypass the upgrade controller by changing
+components inside its repair transaction.
+
+Repeated optional observability export failures open a per-destination,
+per-signal circuit for logs, traces, or metrics. Transient and payload-specific
+failures must reach the bounded threshold, so a single bad payload does not
+suppress later valid telemetry. Authentication and unsafe-endpoint failures
+open that signal route immediately. While open, export work for that route is
+suppressed before adapter and size-estimation work, but mandatory local SQLite,
+sibling signals, and sibling destinations continue. Doctor reports the bounded
+failure class and recovery window; it warns for transient/half-open recovery
+and fails an open authentication, permanent-payload, or unsafe-endpoint
+circuit. This does not silently edit policy. Repair and reload the destination,
+or disable the optional route explicitly:
+
+```bash
+defenseclaw setup observability disable NAME
+```
 
 ## Legacy connector fields
 

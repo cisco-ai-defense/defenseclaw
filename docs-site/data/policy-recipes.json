@@ -276,6 +276,7 @@
       "kind": "rule:c2",
       "body": {
         "id": "C2-METADATA-AWS",
+        "expression": "f.commands.exists(c, c.argv_complete && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_FETCH in c.operations && f.network.exists(n, n.command_id == c.id && n.action in [defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_DOWNLOAD, defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_CONNECT]))",
         "pattern": "169\\.254\\.169\\.254",
         "title": "AWS metadata endpoint (SSRF)",
         "severity": "CRITICAL",
@@ -444,7 +445,7 @@
       "kind": "rule:c2",
       "body": {
         "id": "C2-DNS-TUNNEL",
-        "pattern": "(?i)\\bdig\\b\\s+[^;\\n]*\\bTXT\\b\\s+(?:[a-f0-9]{16,}|[A-Za-z2-7]{24,})\\.[A-Za-z0-9-]{2,}\\.",
+        "pattern": "(?i)\\b(?:dig|host|nslookup|drill)\\b\\s+[^;\\n]*\\$\\((?:whoami|hostname|id(?:\\s+-u)?|cat\\s+(?:/etc/hostname|/etc/machine-id))\\)[A-Za-z0-9._-]*\\.[A-Za-z0-9-]+(?:\\.[A-Za-z0-9-]+)+",
         "title": "DNS TXT query with high-entropy label (tunneling indicator)",
         "severity": "HIGH",
         "confidence": 0.78,
@@ -648,6 +649,7 @@
       "kind": "rule:cognitive-file",
       "body": {
         "id": "COG-OPENCLAW-JSON",
+        "expression": "f.commands.exists(c, f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))",
         "pattern": "(?i)openclaw\\.json",
         "title": "openclaw.json config access",
         "severity": "HIGH",
@@ -693,11 +695,41 @@
       ]
     },
     {
+      "id": "RECIPE-tamper.detector_state_write",
+      "title": "DefenseClaw security state mutation",
+      "kind": "rule:cognitive-file",
+      "body": {
+        "id": "tamper.detector_state_write",
+        "tool_call_only": true,
+        "expression": "f.commands.exists(c, f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))",
+        "pattern": "(?i)(?:~|\\$HOME|\\$\\{HOME\\}|/root|/(?:home|Users)/[^/\\\\\"']+|[a-z]:[/\\\\]Users[/\\\\][^/\\\\\"']+)[/\\\\]\\.defenseclaw[/\\\\](?:\\.env|config\\.yaml|confidence_policy\\.yaml|guardrail_runtime\\.json|device\\.key|picked_connector|custom-providers\\.json|(?:audit|judge|judge_bodies)\\.db(?:-(?:wal|shm))?|(?:cache|policies|quarantine|receipts|registries)[/\\\\][^;\\s]+)\\b",
+        "title": "DefenseClaw security state mutation",
+        "severity": "HIGH",
+        "confidence": 0.98,
+        "tags": [
+          "cognitive-tampering",
+          "tampering",
+          "security-state"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (cognitive.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/cognitive.yaml",
+      "tags": [
+        "cognitive-tampering",
+        "tampering",
+        "security-state"
+      ],
+      "data_axis": []
+    },
+    {
       "id": "RECIPE-CMD-REVSHELL-BASH",
       "title": "Bash reverse shell",
       "kind": "rule:command",
       "body": {
         "id": "CMD-REVSHELL-BASH",
+        "expression": "f.commands.exists(c, c.program in ['nc', 'nc.exe', 'ncat', 'ncat.exe', 'netcat', 'socat'] && (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONNECT in c.operations || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_LISTEN in c.operations) && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_EXECUTE) && f.network.exists(n, n.command_id == c.id && n.action in [defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_CONNECT, defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_LISTEN] && n.scope in [defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_PUBLIC, defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_UNKNOWN]))",
         "pattern": "(?i)bash\\s+-i\\s+>&\\s*/dev/tcp/",
         "title": "Bash reverse shell",
         "severity": "CRITICAL",
@@ -794,7 +826,9 @@
       "kind": "rule:command",
       "body": {
         "id": "CMD-PIPE-CURL",
-        "pattern": "(?i)\\bcurl\\b\\s+[^|]*\\|\\s*(?:[/\\w]+/)?(?:bash|zsh|sh)\\b",
+        "tool_call_only": true,
+        "expression": "f.commands.exists(c, c.argv_complete && c.program in ['curl', 'curl.exe', 'invoke-webrequest', 'iwr', 'invoke-restmethod', 'irm'] && (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_FETCH in c.operations || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in c.operations))",
+        "pattern": "(?i)(?:\\bcurl\\b\\s+[^|;\\r\\n]*\\|\\s*(?:[/\\w.-]+/)?(?:bash|zsh|sh|dash|ksh|python(?:[0-9.]*)?|perl|ruby)\\b|\\b(?:invoke-webrequest|iwr|invoke-restmethod|irm)\\b[^|;\\r\\n]*\\|\\s*(?:invoke-expression|iex)\\b)",
         "title": "curl piped to shell",
         "severity": "CRITICAL",
         "confidence": 0.95,
@@ -821,7 +855,9 @@
       "kind": "rule:command",
       "body": {
         "id": "CMD-PIPE-WGET",
-        "pattern": "(?i)\\bwget\\b\\s+[^|]*\\|\\s*(?:[/\\w]+/)?(?:bash|zsh|sh)\\b",
+        "tool_call_only": true,
+        "expression": "f.commands.exists(c, c.argv_complete && c.program in ['wget', 'wget.exe'] && (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_FETCH in c.operations || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in c.operations))",
+        "pattern": "(?i)\\bwget\\b\\s+[^|]*\\|\\s*(?:[/\\w.-]+/)?(?:bash|zsh|sh|dash|ksh|python(?:[0-9.]*)?|perl|ruby)\\b",
         "title": "wget piped to shell",
         "severity": "CRITICAL",
         "confidence": 0.95,
@@ -848,7 +884,9 @@
       "kind": "rule:command",
       "body": {
         "id": "CMD-PIPE-BASE64",
-        "pattern": "(?i)base64\\s+(?:-[dD]|--decode)\\s*\\|\\s*(?:[/\\w]+/)?(?:bash|zsh|sh)\\b",
+        "tool_call_only": true,
+        "expression": "f.commands.exists(c, c.argv_complete && c.program in ['base64', 'base64.exe'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DECODE in c.operations)",
+        "pattern": "(?i:\\bbase64\\b)[^|;\\n]*\\s(?:-d+i?|--decode)\\b[^|;\\n]*\\|\\s*(?i:(?:[/\\w.-]+/)?(?:bash|zsh|sh|dash|ksh|python(?:[0-9.]*)?|perl|ruby))\\b",
         "title": "base64 decode piped to shell",
         "severity": "CRITICAL",
         "confidence": 0.95,
@@ -982,6 +1020,7 @@
       "kind": "rule:command",
       "body": {
         "id": "CMD-RM-RF",
+        "expression": "f.commands.exists(c, c.argv_complete && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DELETE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE))",
         "pattern": "(?i)\\brm\\s+(?:-[a-zA-Z]*\\s+)*(?:-[a-zA-Z]*)?(?:r[a-zA-Z]*f|f[a-zA-Z]*r)\\b(?:\\s+\\S+)*\\s+/(?:$|[\"'\\s,}\\]]|(?:etc|bin|sbin|usr|var|home|root|opt|boot|lib(?:64)?|srv|mnt|dev|proc|sys)(?:$|/|[\"'\\s,}\\]]))",
         "title": "Recursive force delete from critical root path",
         "severity": "CRITICAL",
@@ -1004,6 +1043,7 @@
       "kind": "rule:command",
       "body": {
         "id": "CMD-MKFS",
+        "expression": "f.commands.exists(c, c.argv_complete && c.program != 'dd' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations)",
         "pattern": "(?i)\\bmkfs\\b",
         "title": "Filesystem format command",
         "severity": "CRITICAL",
@@ -1026,6 +1066,7 @@
       "kind": "rule:command",
       "body": {
         "id": "CMD-DD-IF",
+        "expression": "f.commands.exists(c, c.argv_complete && c.program == 'dd' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE && p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))",
         "pattern": "(?i)\\bdd\\s+if=",
         "title": "dd disk write",
         "severity": "HIGH",
@@ -1048,6 +1089,7 @@
       "kind": "rule:command",
       "body": {
         "id": "CMD-CHMOD-WORLD",
+        "expression": "f.commands.exists(c, c.argv_complete && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PERMISSION_CHANGE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_METADATA))",
         "pattern": "(?i)\\bchmod\\s+[0-7]*[0-7][0-7][2367]\\s",
         "title": "chmod world-writable",
         "severity": "HIGH",
@@ -1092,6 +1134,7 @@
       "kind": "rule:command",
       "body": {
         "id": "CMD-SUDO",
+        "expression": "f.commands.exists(c, c.argv_complete && ((c.program == 'sudo' && ('-l' in c.argv || '--list' in c.argv || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PRIVILEGE in c.operations)) || (c.program in ['find', 'getcap'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_SEARCH in c.operations)))",
         "pattern": "(?i)\\bsudo\\s+",
         "title": "sudo invocation",
         "severity": "LOW",
@@ -1136,6 +1179,7 @@
       "kind": "rule:command",
       "body": {
         "id": "CMD-CRONTAB",
+        "expression": "f.commands.exists(c, c.argv_complete && c.program == 'crontab' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_SCHEDULE in c.operations)",
         "pattern": "(?i)\\bcrontab\\s+(?:-[a-zA-Z]\\s+)*(?:-e|-r|-l|/|['\"<>|])",
         "title": "Crontab modification",
         "severity": "HIGH",
@@ -1158,6 +1202,7 @@
       "kind": "rule:command",
       "body": {
         "id": "CMD-SYSTEMCTL",
+        "expression": "f.commands.exists(c, c.argv_complete && (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_SCHEDULE in c.operations || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONFIG_CHANGE in c.operations || f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])))",
         "pattern": "(?i)\\bsystemctl\\s+enable\\b(?:\\s+--now\\b)?\\s+\\S*(?:backdoor|payload|persist|reverse|shell|evil)\\S*(?:\\.service)?\\b",
         "title": "Suspicious systemd persistence enablement",
         "severity": "CRITICAL",
@@ -1204,6 +1249,7 @@
       "kind": "rule:command",
       "body": {
         "id": "CMD-CURL-UPLOAD",
+        "expression": "f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ) && f.network.exists(n, n.command_id == c.id && n.action == defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_UPLOAD && n.scope in [defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_PUBLIC, defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_UNKNOWN]) && f.data_flows.exists(d, d.to_command_id == c.id && d.from == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_FILE && d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_PROCESS) && f.data_flows.exists(d, d.from_command_id == c.id && d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_NETWORK))",
         "pattern": "(?i)\\bcurl\\b\\s+.*(?:--upload-file|-T\\s|--data\\s+@|-F\\s+.*=@)",
         "title": "curl file upload",
         "severity": "HIGH",
@@ -1282,7 +1328,8 @@
       "kind": "rule:command",
       "body": {
         "id": "CMD-ENV-DUMP",
-        "pattern": "(?:^|[^A-Za-z0-9_./-])(?:env|printenv|export\\s+-p)\\b",
+        "expression": "f.commands.exists(src, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_ENVIRONMENT_READ in src.operations && f.commands.exists(dst, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in dst.operations && src.pipeline_id != 0 && src.pipeline_id == dst.pipeline_id)) && f.commands.exists(src, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_ENVIRONMENT_READ in src.operations && f.data_flows.exists(d, d.from_command_id == src.id && d.from == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDOUT && d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDIN)) && f.commands.exists(dst, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in dst.operations && f.data_flows.exists(d, d.to_command_id == dst.id && d.from == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDOUT && d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDIN) && f.network.exists(n, n.command_id == dst.id && n.action == defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_UPLOAD && n.scope in [defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_PUBLIC, defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_UNKNOWN]) && f.data_flows.exists(d, d.from_command_id == dst.id && d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_NETWORK))",
+        "pattern": "(?i)\\b(?:printenv|export\\s+-p|env)\\b[^|;\\n]*\\|\\s*(?:curl\\b[^;\\n]*(?:--data(?:-binary|-raw)?\\s+@-|--upload-file\\s+-|-T\\s+-)|wget\\b[^;\\n]*--post-(?:data|file)(?:=|\\s+)@?-)",
         "title": "Environment variable dump",
         "severity": "HIGH",
         "confidence": 0.8,
@@ -1298,8 +1345,496 @@
         "credential"
       ],
       "data_axis": [
+        "sensitive_access",
+        "egress_external"
+      ]
+    },
+    {
+      "id": "RECIPE-secrets.cloud_secret_manager_read",
+      "title": "Cloud secret manager value read",
+      "kind": "rule:command",
+      "body": {
+        "id": "secrets.cloud_secret_manager_read",
+        "tool_call_only": true,
+        "expression": "f.commands.exists(c, c.argv_complete && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations && c.program in ['aws', 'gcloud', 'az', 'vault', 'op', 'pass', 'security'])",
+        "pattern": "(?i)\\b(?:aws\\s+secretsmanager\\s+get-secret-value|gcloud\\s+secrets\\s+versions\\s+access|az\\s+keyvault\\s+secret\\s+show|vault\\s+kv\\s+get|op\\s+(?:read|item\\s+get)|pass\\s+show|security\\s+find-(?:generic|internet)-password)\\b",
+        "title": "Cloud secret manager value read",
+        "severity": "CRITICAL",
+        "confidence": 0.94,
+        "tags": [
+          "credential",
+          "cloud",
+          "secret-manager"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "credential",
+        "cloud",
+        "secret-manager"
+      ],
+      "data_axis": [
         "sensitive_access"
       ]
+    },
+    {
+      "id": "RECIPE-exfil.secret_read_and_egress_oneliner",
+      "title": "Sensitive read piped to external upload",
+      "kind": "rule:command",
+      "body": {
+        "id": "exfil.secret_read_and_egress_oneliner",
+        "tool_call_only": true,
+        "expression": "f.commands.exists(src, (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in src.operations || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in src.operations) && f.paths.exists(p, p.command_id == src.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ)) && f.commands.exists(src, (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in src.operations || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in src.operations) && f.commands.exists(dst, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in dst.operations && src.pipeline_id != 0 && src.pipeline_id == dst.pipeline_id)) && f.commands.exists(src, f.data_flows.exists(d, d.from_command_id == src.id && d.from == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDOUT && d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDIN)) && f.commands.exists(dst, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in dst.operations && f.data_flows.exists(d, d.to_command_id == dst.id && d.from == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDOUT && d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDIN) && f.network.exists(n, n.command_id == dst.id && n.action == defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_UPLOAD && n.scope in [defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_PUBLIC, defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_UNKNOWN]) && f.data_flows.exists(d, d.from_command_id == dst.id && d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_NETWORK))",
+        "pattern": "(?i)\\b(?:cat|type|Get-Content)\\b[^|;\\n]*(?:\\.env|credentials|\\.git-credentials|\\.netrc|_netrc|\\.npmrc|\\.pypirc|config\\.json|/token)\\s*\\|\\s*(?:curl\\b[^;\\n]*(?:--data(?:-binary|-raw)?\\s+@-|--upload-file\\s+-|-T\\s+-)|wget\\b[^;\\n]*--post-(?:data|file)(?:=|\\s+)@?-)",
+        "title": "Sensitive read piped to external upload",
+        "severity": "CRITICAL",
+        "confidence": 0.96,
+        "tags": [
+          "credential",
+          "exfiltration",
+          "network"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "credential",
+        "exfiltration",
+        "network"
+      ],
+      "data_axis": [
+        "sensitive_access",
+        "egress_external"
+      ]
+    },
+    {
+      "id": "RECIPE-exec.reverse_tunnel",
+      "title": "SSH reverse tunnel",
+      "kind": "rule:command",
+      "body": {
+        "id": "exec.reverse_tunnel",
+        "tool_call_only": true,
+        "expression": "f.commands.exists(c, c.argv_complete && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_TUNNEL in c.operations && f.network.exists(n, n.command_id == c.id && n.action in [defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_TUNNEL, defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_CONNECT] && n.scope in [defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_PUBLIC, defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_UNKNOWN]))",
+        "pattern": "(?i)(?:\\b(?:ssh|autossh)(?:\\.exe)?\\b[^;\\n]*(?:^|\\s)-R(?:\\s+|\\S)|\\bchisel(?:\\.exe)?\\b[^;\\n]*\\bclient\\b[^;\\n]*\\bR:(?:socks|\\S+)|\\bligolo(?:-ng)?-agent\\b[^;\\n]*--?connect(?:=|\\s+)\\S+)",
+        "title": "SSH reverse tunnel",
+        "severity": "HIGH",
+        "confidence": 0.9,
+        "tags": [
+          "network",
+          "tunnel",
+          "persistence"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "network",
+        "tunnel",
+        "persistence"
+      ],
+      "data_axis": [
+        "egress_external"
+      ]
+    },
+    {
+      "id": "RECIPE-exec.agent_runtime_bypass_flags",
+      "title": "Agent runtime safety bypass flags",
+      "kind": "rule:command",
+      "body": {
+        "id": "exec.agent_runtime_bypass_flags",
+        "tool_call_only": true,
+        "expression": "f.commands.exists(c, c.argv_complete && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_POLICY_BYPASS in c.operations)",
+        "pattern": "(?i)\\b(?:(?:npx(?:\\s+-y)?|pnpm\\s+dlx|bunx)\\s+)?(?:claude|codex|gemini)(?:\\.exe)?\\b[^;\\n]*(?:--dangerously-skip-permissions|--permission-mode(?:=|\\s+)bypassPermissions\\b|--dangerously-bypass-approvals-and-sandbox|--yolo\\b|(?:--sandbox|-s)(?:=|\\s+)danger-full-access\\b[^;\\n]*(?:--ask-for-approval|-a)(?:=|\\s+)never\\b|(?:--ask-for-approval|-a)(?:=|\\s+)never\\b[^;\\n]*(?:--sandbox|-s)(?:=|\\s+)danger-full-access\\b)",
+        "title": "Agent runtime safety bypass flags",
+        "severity": "CRITICAL",
+        "confidence": 0.98,
+        "tags": [
+          "execution",
+          "policy-bypass",
+          "agent-runtime"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "execution",
+        "policy-bypass",
+        "agent-runtime"
+      ],
+      "data_axis": []
+    },
+    {
+      "id": "RECIPE-integrity.git_hooks_bypass",
+      "title": "Git verification hook bypass",
+      "kind": "rule:command",
+      "body": {
+        "id": "integrity.git_hooks_bypass",
+        "tool_call_only": true,
+        "expression": "f.commands.exists(c, c.argv_complete && c.program == 'git')",
+        "pattern": "(?i)\\bgit\\b[^;\\n]*(?:(?:\\bcommit\\b|\\bpush\\b)[^;\\n]*--no-verify\\b|-c\\s+core\\.hooksPath=(?:/dev/null|nul:?|[\"']{2})[^;\\n]*\\b(?:commit|push)\\b|\\bconfig\\s+core\\.hooksPath\\s+(?:/dev/null|nul:?|[\"']{2}))",
+        "title": "Git verification hook bypass",
+        "severity": "MEDIUM",
+        "confidence": 0.9,
+        "tags": [
+          "integrity",
+          "policy-bypass"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity MEDIUM.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "integrity",
+        "policy-bypass"
+      ],
+      "data_axis": []
+    },
+    {
+      "id": "RECIPE-integrity.history_tamper",
+      "title": "Shell history clear or disable",
+      "kind": "rule:command",
+      "body": {
+        "id": "integrity.history_tamper",
+        "tool_call_only": true,
+        "expression": "f.commands.exists(c, c.argv_complete && (c.program == 'history' || (c.program == 'unset' && 'HISTFILE' in c.argv)))",
+        "pattern": "(?i)(?:\\bhistory\\b[^;\\n]*\\s-[acnrw]*c[acnrw]*(?:[\\s;&|]|$)|\\bunset\\b[^;\\n]*\\bHISTFILE\\b)",
+        "title": "Shell history clear or disable",
+        "severity": "MEDIUM",
+        "confidence": 0.95,
+        "tags": [
+          "integrity",
+          "defense-evasion"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity MEDIUM.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "integrity",
+        "defense-evasion"
+      ],
+      "data_axis": []
+    },
+    {
+      "id": "RECIPE-recon.network_sweep",
+      "title": "Multi-host network sweep",
+      "kind": "rule:command",
+      "body": {
+        "id": "recon.network_sweep",
+        "tool_call_only": true,
+        "expression": "f.commands.exists(c, c.argv_complete && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_NETWORK_SCAN in c.operations && f.network.exists(n, n.command_id == c.id && n.action == defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_SCAN && n.target_kind in [defenseclaw.guardrail.semantic.v1.NetworkTargetKind.NETWORK_TARGET_KIND_MULTI_ADDRESS_CIDR, defenseclaw.guardrail.semantic.v1.NetworkTargetKind.NETWORK_TARGET_KIND_RANGE, defenseclaw.guardrail.semantic.v1.NetworkTargetKind.NETWORK_TARGET_KIND_LIST, defenseclaw.guardrail.semantic.v1.NetworkTargetKind.NETWORK_TARGET_KIND_GENERATED]))",
+        "pattern": "(?i)\\b(?:nmap|masscan|zmap|rustscan|naabu|fping)\\b[^;\\n]*(?:\\b(?:-iL|--input-file|--target-file|-list|--list|-iR|-g|--generate)\\b|(?:\\d{1,3}\\.){3}\\d{1,3}/(?:[0-9]|[12][0-9]|3[01])\\b)",
+        "title": "Multi-host network sweep",
+        "severity": "MEDIUM",
+        "confidence": 0.9,
+        "tags": [
+          "reconnaissance",
+          "network"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity MEDIUM.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "reconnaissance",
+        "network"
+      ],
+      "data_axis": [
+        "egress_external"
+      ]
+    },
+    {
+      "id": "RECIPE-privilege.container_host_escape",
+      "title": "Privileged container with host-root bind",
+      "kind": "rule:command",
+      "body": {
+        "id": "privilege.container_host_escape",
+        "tool_call_only": true,
+        "expression": "f.commands.exists(c, c.argv_complete && c.program in ['docker', 'podman', 'nerdctl'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONTAINER_RUN in c.operations && c.argv.exists(a, a == '--privileged' || a.startsWith('--privileged=')) && f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE] && (p.normalized == '/' || p.resolved == '/')))",
+        "pattern": "(?i)\\b(?:docker|podman|nerdctl)\\b[^;\\n]*\\brun\\b[^;\\n]*--privileged\\b[^;\\n]*(?:-v|--volume)(?:=|\\s+)/:[^;\\s]+",
+        "title": "Privileged container with host-root bind",
+        "severity": "CRITICAL",
+        "confidence": 0.96,
+        "tags": [
+          "privilege",
+          "container",
+          "host-escape"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "privilege",
+        "container",
+        "host-escape"
+      ],
+      "data_axis": []
+    },
+    {
+      "id": "RECIPE-privilege.host_namespace_entry",
+      "title": "Host PID-1 namespace or root entry",
+      "kind": "rule:command",
+      "body": {
+        "id": "privilege.host_namespace_entry",
+        "tool_call_only": true,
+        "pattern": "(?i)\\b(?:nsenter\\b[^;\\n]*(?:(?:-t|--target)(?:=|\\s+)1\\b|/proc/1/ns/(?:mnt|uts|ipc|net|pid|user|cgroup|time)\\b)|chroot\\b[^;\\n]*/proc/1/root\\b)",
+        "title": "Host PID-1 namespace or root entry",
+        "severity": "CRITICAL",
+        "confidence": 0.98,
+        "tags": [
+          "privilege",
+          "container",
+          "host-escape"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "privilege",
+        "container",
+        "host-escape"
+      ],
+      "data_axis": []
+    },
+    {
+      "id": "RECIPE-lateral.workload_exec",
+      "title": "Remote workload command execution",
+      "kind": "rule:command",
+      "body": {
+        "id": "lateral.workload_exec",
+        "tool_call_only": true,
+        "pattern": "(?i)\\b(?:(?:kubectl|oc)\\b[^;\\n]*\\b(?:exec|debug|rsh)\\b|crictl\\b[^;\\n]*\\bexec\\b|ctr\\b[^;\\n]*\\btasks?\\s+exec\\b|(?:docker|podman)\\b[^;\\n]*(?:--host|-H)(?:=|\\s+)(?:tcp|ssh)://[^;\\s]+\\s+exec\\b)",
+        "title": "Remote workload command execution",
+        "severity": "HIGH",
+        "confidence": 0.92,
+        "tags": [
+          "execution",
+          "lateral-movement",
+          "workload"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "execution",
+        "lateral-movement",
+        "workload"
+      ],
+      "data_axis": []
+    },
+    {
+      "id": "RECIPE-impact.cryptomining_launch",
+      "title": "Cryptocurrency miner launch",
+      "kind": "rule:command",
+      "body": {
+        "id": "impact.cryptomining_launch",
+        "tool_call_only": true,
+        "expression": "f.commands.exists(c, c.argv_complete && c.program in ['docker', 'podman', 'nerdctl'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONTAINER_RUN in c.operations)",
+        "pattern": "(?i)(?:^|[;&|\\s])(?:[/\\\\\\w.-]+[/\\\\])?(?:xmrig(?:-proxy)?|minerd|cpuminer(?:-multi)?|ethminer|cgminer|bfgminer|t-rex|lolminer|nbminer|teamredminer|phoenixminer|nanominer)(?:\\s|$)",
+        "title": "Cryptocurrency miner launch",
+        "severity": "HIGH",
+        "confidence": 0.95,
+        "tags": [
+          "impact",
+          "resource-hijacking"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "impact",
+        "resource-hijacking"
+      ],
+      "data_axis": []
+    },
+    {
+      "id": "RECIPE-impact.fork_bomb",
+      "title": "Unbounded fork bomb",
+      "kind": "rule:command",
+      "body": {
+        "id": "impact.fork_bomb",
+        "tool_call_only": true,
+        "pattern": "(?i)(?:^|\\s)(?::\\s*\\(\\s*\\)\\s*\\{\\s*:\\s*\\|\\s*:\\s*&\\s*\\}\\s*;\\s*:|perl\\s+-e\\s+['\"]?\\s*fork\\s+while\\s+fork\\s*;?\\s*['\"]?|ruby\\s+-e\\s+['\"]?\\s*loop\\s*\\{\\s*fork\\s*\\}\\s*;?\\s*['\"]?)\\s*$",
+        "title": "Unbounded fork bomb",
+        "severity": "CRITICAL",
+        "confidence": 0.99,
+        "tags": [
+          "impact",
+          "denial-of-service"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "impact",
+        "denial-of-service"
+      ],
+      "data_axis": []
+    },
+    {
+      "id": "RECIPE-impact.mass_process_termination",
+      "title": "Mass process termination",
+      "kind": "rule:command",
+      "body": {
+        "id": "impact.mass_process_termination",
+        "tool_call_only": true,
+        "expression": "f.commands.exists(c, c.argv_complete && c.program in ['kill', 'stop-process', 'taskkill'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PROCESS_KILL in c.operations)",
+        "pattern": "(?i)\\b(?:kill\\b[^;\\n]*(?:-9|-KILL|-SIGKILL)\\b[^;\\n]*-1\\b|stop-process\\b[^;\\n]*(?:-name|-processname)(?:=|\\s+)\\*[^;\\n]*-force\\b|taskkill\\b[^;\\n]*/im\\s+\\*[^;\\n]*/f\\b)",
+        "title": "Mass process termination",
+        "severity": "CRITICAL",
+        "confidence": 0.98,
+        "tags": [
+          "impact",
+          "denial-of-service"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "impact",
+        "denial-of-service"
+      ],
+      "data_axis": []
+    },
+    {
+      "id": "RECIPE-source.git_remote_tamper",
+      "title": "Git remote routing change",
+      "kind": "rule:command",
+      "body": {
+        "id": "source.git_remote_tamper",
+        "tool_call_only": true,
+        "expression": "f.commands.exists(c, c.argv_complete && c.program == 'git' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONFIG_CHANGE in c.operations && f.network.exists(n, n.command_id == c.id && n.action == defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_CONNECT && n.scope in [defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_PUBLIC, defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_UNKNOWN]))",
+        "pattern": "(?i)\\bgit\\b[^;\\n]*\\bremote\\s+(?:add|set-url)\\b[^;\\n]*(?:https?|ssh|git)://[^;\\s]+",
+        "title": "Git remote routing change",
+        "severity": "MEDIUM",
+        "confidence": 0.9,
+        "tags": [
+          "source-control",
+          "network",
+          "tampering"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity MEDIUM.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "source-control",
+        "network",
+        "tampering"
+      ],
+      "data_axis": []
+    },
+    {
+      "id": "RECIPE-source.git_config_exec",
+      "title": "Git executable configuration change or overwrite",
+      "kind": "rule:command",
+      "body": {
+        "id": "source.git_config_exec",
+        "tool_call_only": true,
+        "expression": "f.commands.exists(c, c.argv_complete && c.program == 'git' && (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONFIG_CHANGE in c.operations || (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_WRITE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE && (p.normalized == '.git/config' || p.resolved.endsWith('/.git/config'))))))",
+        "pattern": "(?i)\\bgit\\b[^;\\r\\n]*(?:\\bconfig\\b[^;\\r\\n]*(?:alias\\.[A-Za-z0-9._-]+|credential\\.helper|core\\.(?:sshCommand|hooksPath))\\b[^;\\r\\n]+|\\b(?:show|log|diff|whatchanged)\\b[^;\\r\\n]*--output(?:=|\\s+)[^;\\r\\n]*\\.git[/\\\\]config(?:$|[\"'\\s]))",
+        "title": "Git executable configuration change or overwrite",
+        "severity": "MEDIUM",
+        "confidence": 0.9,
+        "tags": [
+          "source-control",
+          "execution",
+          "tampering"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity MEDIUM.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "source-control",
+        "execution",
+        "tampering"
+      ],
+      "data_axis": []
+    },
+    {
+      "id": "RECIPE-persistence.ssh_authorized_keys_command",
+      "title": "SSH authorized keys mutation",
+      "kind": "rule:command",
+      "body": {
+        "id": "persistence.ssh_authorized_keys_command",
+        "tool_call_only": true,
+        "expression": "f.commands.exists(c, f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))",
+        "pattern": "(?i)(?:>>?|(?:tee|truncate|rm|unlink|cp|mv|set-content|add-content|out-file|remove-item|copy-item|move-item)\\b[^;\\n]*)[^;\\n]*(?:[/\\\\]\\.ssh[/\\\\](?:authorized_keys2?)|[/\\\\]programdata[/\\\\]ssh[/\\\\]administrators_authorized_keys)\\b",
+        "title": "SSH authorized keys mutation",
+        "severity": "CRITICAL",
+        "confidence": 0.98,
+        "tags": [
+          "persistence",
+          "credential",
+          "ssh"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "persistence",
+        "credential",
+        "ssh"
+      ],
+      "data_axis": []
+    },
+    {
+      "id": "RECIPE-persistence.privileged_account_change",
+      "title": "Privileged account or group change",
+      "kind": "rule:command",
+      "body": {
+        "id": "persistence.privileged_account_change",
+        "tool_call_only": true,
+        "expression": "f.commands.exists(c, c.argv_complete && c.program in ['useradd', 'usermod', 'gpasswd', 'groupmems', 'adduser', 'dseditgroup', 'dscl', 'net', 'net1', 'add-localgroupmember', 'add-adgroupmember'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_ACCOUNT_CHANGE in c.operations)",
+        "pattern": "(?i)\\b(?:useradd\\b[^;\\n]*(?:-u|--uid)(?:=|\\s+)0\\b|usermod\\b[^;\\n]*(?:(?:-u|--uid)(?:=|\\s+)0\\b|(?:-G|--groups)(?:=|\\s+)[^;\\n]*(?:root|sudo|wheel|admin|docker|lxd|incus|podman))|(?:gpasswd|groupmems|adduser|dseditgroup|dscl)\\b[^;\\n]*(?:root|sudo|wheel|admin|docker|lxd|incus|podman)\\b|net\\s+localgroup\\s+(?:Administrators|Remote Desktop Users)\\b[^;\\n]*/add\\b|Add-(?:Local|AD)GroupMember\\b[^;\\n]*(?:Administrators|Domain Admins|Enterprise Admins)\\b)",
+        "title": "Privileged account or group change",
+        "severity": "HIGH",
+        "confidence": 0.95,
+        "tags": [
+          "persistence",
+          "privilege",
+          "account"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "persistence",
+        "privilege",
+        "account"
+      ],
+      "data_axis": []
     },
     {
       "id": "RECIPE-ENT-BULK-SSN",
@@ -1307,7 +1842,7 @@
       "kind": "rule:enterprise-data",
       "body": {
         "id": "ENT-BULK-SSN",
-        "pattern": "\\b\\d{3}-\\d{2}-\\d{4}\\b",
+        "pattern": "\\b(?:00[1-9]|0[1-9][0-9]|[1-5][0-9]{2}|6[0-5][0-9]|66[0-5]|66[7-9]|6[7-9][0-9]|[78][0-9]{2})-(?:0[1-9]|[1-9][0-9])-(?:000[1-9]|00[1-9][0-9]|0[1-9][0-9]{2}|[1-9][0-9]{3})\\b",
         "title": "US Social Security Number",
         "severity": "CRITICAL",
         "confidence": 0.85,
@@ -1677,12 +2212,12 @@
     },
     {
       "id": "RECIPE-ENT-BULK-CSV-PII",
-      "title": "CSV/TSV header with multiple PII columns",
+      "title": "CSV/TSV records with multiple PII columns",
       "kind": "rule:enterprise-data",
       "body": {
         "id": "ENT-BULK-CSV-PII",
-        "pattern": "(?i)(?:first[\\s_]?name|last[\\s_]?name|ssn|social[\\s_]?security|credit[\\s_]?card|card[\\s_]?number|account[\\s_]?number),.*(?:first[\\s_]?name|last[\\s_]?name|ssn|social[\\s_]?security|credit[\\s_]?card|card[\\s_]?number|account[\\s_]?number)",
-        "title": "CSV/TSV header with multiple PII columns",
+        "pattern": "(?im)(?:^|\\n)[^\\r\\n]*(?:first[\\s_]?name|last[\\s_]?name|ssn|social[\\s_]?security|credit[\\s_]?card|card[\\s_]?number|account[\\s_]?number)[^\\r\\n]*[,\\t][^\\r\\n]*(?:first[\\s_]?name|last[\\s_]?name|ssn|social[\\s_]?security|credit[\\s_]?card|card[\\s_]?number|account[\\s_]?number)[^\\r\\n]*\\r?\\n[^\\r\\n]*[0-9][^\\r\\n]*",
+        "title": "CSV/TSV records with multiple PII columns",
         "severity": "HIGH",
         "confidence": 0.8,
         "tags": [
@@ -1704,12 +2239,12 @@
     },
     {
       "id": "RECIPE-ENT-BULK-JSON-PII",
-      "title": "JSON field with PII key",
+      "title": "JSON record with multiple PII values",
       "kind": "rule:enterprise-data",
       "body": {
         "id": "ENT-BULK-JSON-PII",
-        "pattern": "(?i)\"(?:ssn|social_security|credit_card|card_number|account_number|routing_number)\"\\s*:\\s*\"",
-        "title": "JSON field with PII key",
+        "pattern": "(?i)\\{[^{}]{0,512}\"(?:ssn|social_security|credit_card|card_number|account_number|routing_number)\"\\s*:\\s*(?:\"(?:\\d[\\s-]?){6,19}\"|\\d{6,19}\\b)\\s*,[^{}]{0,512}\"(?:ssn|social_security|credit_card|card_number|account_number|routing_number)\"\\s*:\\s*(?:\"(?:\\d[\\s-]?){6,19}\"|\\d{6,19}\\b)[^{}]{0,512}\\}",
+        "title": "JSON record with multiple PII values",
         "severity": "HIGH",
         "confidence": 0.75,
         "tags": [
@@ -1735,7 +2270,7 @@
       "kind": "rule:secret",
       "body": {
         "id": "SEC-AWS-KEY",
-        "pattern": "(?:AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[0-9A-Z]{16,}",
+        "pattern": "\\b(?:AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[0-9A-Z]{16,}",
         "title": "AWS access key",
         "severity": "CRITICAL",
         "confidence": 0.95,
@@ -1868,12 +2403,12 @@
     },
     {
       "id": "RECIPE-SEC-STRIPE",
-      "title": "Stripe key",
+      "title": "Stripe secret/restricted key",
       "kind": "rule:secret",
       "body": {
         "id": "SEC-STRIPE",
-        "pattern": "(?:sk_live_|pk_live_|sk_test_|pk_test_|rk_live_|rk_test_)[a-zA-Z0-9]{20,}",
-        "title": "Stripe key",
+        "pattern": "(?:sk_live_|sk_test_|rk_live_|rk_test_)[a-zA-Z0-9]{20,}",
+        "title": "Stripe secret/restricted key",
         "severity": "CRITICAL",
         "confidence": 0.95,
         "tags": [
@@ -2171,7 +2706,7 @@
       "kind": "rule:secret",
       "body": {
         "id": "SEC-BEARER",
-        "pattern": "(?i)(?:authorization|bearer)\\s*[:=]\\s*Bearer\\s+[A-Za-z0-9\\-_.~+/]+=*",
+        "pattern": "(?i)(?:authorization|bearer)\\s*[:=]\\s*Bearer\\s+[A-Za-z0-9\\-_.~+/]{16,}=*",
         "title": "Bearer token in header",
         "severity": "HIGH",
         "confidence": 0.8,
@@ -2321,6 +2856,7 @@
       "kind": "rule:sensitive-path",
       "body": {
         "id": "PATH-SSH-DIR",
+        "expression": "f.commands.exists(c, f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))",
         "pattern": "(?:~|\\$\\{?HOME\\}?|/home/\\w+|/root|/Users/\\w+)/\\.ssh/",
         "title": "SSH directory access",
         "severity": "HIGH",
@@ -2348,6 +2884,7 @@
       "kind": "rule:sensitive-path",
       "body": {
         "id": "PATH-SSH-KEY",
+        "expression": "f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))",
         "pattern": "(?i)(?:^|[\\\\/])id_(?:rsa|ed25519|ecdsa|dsa)(?:$|[^A-Za-z0-9_.-])",
         "title": "SSH private key file path",
         "severity": "CRITICAL",
@@ -2375,6 +2912,7 @@
       "kind": "rule:sensitive-path",
       "body": {
         "id": "PATH-AWS-CREDS",
+        "expression": "f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))",
         "pattern": "(?:~|\\$\\{?HOME\\}?|/home/\\w+|/root|/Users/\\w+)/\\.aws/credentials",
         "title": "AWS credentials file",
         "severity": "CRITICAL",
@@ -2429,6 +2967,7 @@
       "kind": "rule:sensitive-path",
       "body": {
         "id": "PATH-KUBE",
+        "expression": "f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))",
         "pattern": "(?:~|\\$\\{?HOME\\}?|/home/\\w+|/root|/Users/\\w+)/\\.kube/config",
         "title": "Kubernetes config",
         "severity": "HIGH",
@@ -2456,6 +2995,7 @@
       "kind": "rule:sensitive-path",
       "body": {
         "id": "PATH-DOCKER",
+        "expression": "f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))",
         "pattern": "(?:~|\\$\\{?HOME\\}?|/home/\\w+|/root|/Users/\\w+)/\\.docker/config\\.json",
         "title": "Docker config",
         "severity": "HIGH",
@@ -2564,6 +3104,7 @@
       "kind": "rule:sensitive-path",
       "body": {
         "id": "PATH-GIT-CREDS",
+        "expression": "f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))",
         "pattern": "(?:~|\\$\\{?HOME\\}?|/home/\\w+|/root|/Users/\\w+)/\\.git-credentials",
         "title": "Git credentials file",
         "severity": "CRITICAL",
@@ -2618,6 +3159,7 @@
       "kind": "rule:sensitive-path",
       "body": {
         "id": "PATH-ENV-FILE",
+        "expression": "f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))",
         "pattern": "(?:^|[\\s/])\\.env(?:\\.(?:local|production|staging|development))?\\s*[\"'\\s,;\\]})]*$|(?:^|[\\s/])\\.env(?:\\.(?:local|production|staging|development))?[\"'\\s,;\\]})]",
         "title": "Environment file",
         "severity": "HIGH",
@@ -2697,6 +3239,7 @@
       "kind": "rule:sensitive-path",
       "body": {
         "id": "PATH-ETC-SUDOERS",
+        "expression": "f.commands.exists(c, f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))",
         "pattern": "(?i)(?:\\betc[\\s/\\\\]+(?:slash[\\s]+)?sudoers\\b|\\betc%2Fsudoers\\b)",
         "title": "/etc/sudoers access",
         "severity": "HIGH",
@@ -2724,6 +3267,7 @@
       "kind": "rule:sensitive-path",
       "body": {
         "id": "PATH-PROC-ENVIRON",
+        "expression": "f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))",
         "pattern": "/proc/(?:\\d+|self)/environ",
         "title": "/proc environ access",
         "severity": "CRITICAL",
@@ -2744,11 +3288,105 @@
       ]
     },
     {
+      "id": "RECIPE-secrets.cloud_credential_read",
+      "title": "Cloud credential material read",
+      "kind": "rule:sensitive-path",
+      "body": {
+        "id": "secrets.cloud_credential_read",
+        "tool_call_only": true,
+        "expression": "f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))",
+        "pattern": "(?i)(?:~|\\$HOME|\\$\\{HOME\\}|/root|/(?:home|Users)/[^/\\\\\"']+|[a-z]:[/\\\\]Users[/\\\\][^/\\\\\"']+)[/\\\\](?:\\.config[/\\\\](?:gcloud[/\\\\](?:application_default_credentials\\.json|(?:access_tokens|credentials)\\.db)|gh[/\\\\]hosts\\.yml)|AppData[/\\\\]Roaming[/\\\\](?:gcloud[/\\\\](?:application_default_credentials\\.json|(?:access_tokens|credentials)\\.db)|GitHub CLI[/\\\\]hosts\\.yml)|\\.azure[/\\\\](?:azureProfile\\.json|TokenCache\\.dat|msal_token_cache[^/\\\\]*\\.(?:json|bin)))(?:$|[\"'\\s])",
+        "title": "Cloud credential material read",
+        "severity": "CRITICAL",
+        "confidence": 0.92,
+        "tags": [
+          "credential",
+          "cloud",
+          "file-sensitive"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (sensitive-paths.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/sensitive-paths.yaml",
+      "tags": [
+        "credential",
+        "cloud",
+        "file-sensitive"
+      ],
+      "data_axis": [
+        "sensitive_access"
+      ]
+    },
+    {
+      "id": "RECIPE-secrets.browser_session_store_read",
+      "title": "Browser credential or session store read",
+      "kind": "rule:sensitive-path",
+      "body": {
+        "id": "secrets.browser_session_store_read",
+        "tool_call_only": true,
+        "expression": "f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))",
+        "pattern": "(?i)(?:~|\\$HOME|\\$\\{HOME\\}|/root|/(?:home|Users)/[^/\\\\\"']+|[a-z]:[/\\\\]Users[/\\\\][^/\\\\\"']+)[/\\\\](?:\\.config[/\\\\](?:google-chrome|chromium|microsoft-edge)|\\.mozilla[/\\\\]firefox|Library[/\\\\]Application Support[/\\\\](?:google[/\\\\]chrome|chromium|microsoft edge|firefox[/\\\\]profiles)|AppData[/\\\\]Local[/\\\\](?:google[/\\\\]chrome|chromium|microsoft[/\\\\]edge)[/\\\\]User Data|AppData[/\\\\]Roaming[/\\\\]mozilla[/\\\\]firefox[/\\\\]profiles)[/\\\\](?:[^/\\\\\"']+[/\\\\])*(?:Login Data|Cookies|logins\\.json|cookies\\.sqlite|key4\\.db)(?:$|[\"'\\s])",
+        "title": "Browser credential or session store read",
+        "severity": "CRITICAL",
+        "confidence": 0.9,
+        "tags": [
+          "credential",
+          "browser",
+          "file-sensitive"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (sensitive-paths.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/sensitive-paths.yaml",
+      "tags": [
+        "credential",
+        "browser",
+        "file-sensitive"
+      ],
+      "data_axis": [
+        "sensitive_access"
+      ]
+    },
+    {
+      "id": "RECIPE-secrets.workload_identity_token_read",
+      "title": "Workload identity token read",
+      "kind": "rule:sensitive-path",
+      "body": {
+        "id": "secrets.workload_identity_token_read",
+        "tool_call_only": true,
+        "expression": "f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))",
+        "pattern": "/var/run/secrets/(?:(?:kubernetes\\.io|eks\\.amazonaws\\.com)/serviceaccount/token|azure/tokens/azure-identity-token)(?:$|[\"'\\s])",
+        "title": "Workload identity token read",
+        "severity": "CRITICAL",
+        "confidence": 0.96,
+        "tags": [
+          "credential",
+          "workload-identity",
+          "file-sensitive"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (sensitive-paths.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/sensitive-paths.yaml",
+      "tags": [
+        "credential",
+        "workload-identity",
+        "file-sensitive"
+      ],
+      "data_axis": [
+        "sensitive_access"
+      ]
+    },
+    {
       "id": "RECIPE-PATH-HISTORY",
       "title": "Shell history file",
       "kind": "rule:sensitive-path",
       "body": {
         "id": "PATH-HISTORY",
+        "expression": "f.commands.exists(c, f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))",
         "pattern": "(?:~|\\$\\{?HOME\\}?|/home/\\w+|/root|/Users/\\w+)/\\.(?:bash_history|zsh_history|python_history)",
         "title": "Shell history file",
         "severity": "MEDIUM",
@@ -2771,12 +3409,99 @@
       ]
     },
     {
+      "id": "RECIPE-privilege.container_runtime_socket_access",
+      "title": "Container runtime socket access",
+      "kind": "rule:sensitive-path",
+      "body": {
+        "id": "privilege.container_runtime_socket_access",
+        "tool_call_only": true,
+        "expression": "f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONNECT in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_CONNECT))",
+        "pattern": "(?i)(?:unix://)?/(?:var/)?run/(?:docker\\.sock|containerd/containerd\\.sock|crio/crio\\.sock|podman/podman\\.sock)\\b",
+        "title": "Container runtime socket access",
+        "severity": "HIGH",
+        "confidence": 0.95,
+        "tags": [
+          "privilege",
+          "container",
+          "socket"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (sensitive-paths.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/sensitive-paths.yaml",
+      "tags": [
+        "privilege",
+        "container",
+        "socket"
+      ],
+      "data_axis": []
+    },
+    {
+      "id": "RECIPE-persistence.shell_profile_write",
+      "title": "Shell startup profile mutation",
+      "kind": "rule:sensitive-path",
+      "body": {
+        "id": "persistence.shell_profile_write",
+        "tool_call_only": true,
+        "expression": "f.commands.exists(c, f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))",
+        "pattern": "(?i)(?:(?:~|\\$HOME|\\$\\{HOME\\}|/root|/(?:home|Users)/[^/\\\\\"']+|[a-z]:[/\\\\]Users[/\\\\][^/\\\\\"']+)[/\\\\](?:\\.(?:profile|bash_profile|bashrc|zprofile|zshrc)|\\.config[/\\\\](?:fish[/\\\\]config\\.fish|powershell[/\\\\](?:profile|microsoft\\.powershell_profile)\\.ps1)|Documents[/\\\\](?:Windows)?PowerShell[/\\\\](?:profile|Microsoft\\.PowerShell_profile)\\.ps1)\\b|(?:^|[^-:A-Za-z0-9_./~\\\\])/etc/profile(?:$|[\"'\\s]))",
+        "title": "Shell startup profile mutation",
+        "severity": "MEDIUM",
+        "confidence": 0.92,
+        "tags": [
+          "persistence",
+          "shell",
+          "file-sensitive"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (sensitive-paths.yaml). Severity MEDIUM.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/sensitive-paths.yaml",
+      "tags": [
+        "persistence",
+        "shell",
+        "file-sensitive"
+      ],
+      "data_axis": []
+    },
+    {
+      "id": "RECIPE-persistence.git_hook_write",
+      "title": "Active Git hook mutation",
+      "kind": "rule:sensitive-path",
+      "body": {
+        "id": "persistence.git_hook_write",
+        "tool_call_only": true,
+        "expression": "f.commands.exists(c, f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))",
+        "pattern": "(?i)(?:(?:^|[/\\\\])\\.git[/\\\\]hooks[/\\\\]|--output(?:=|\\s+)[^;\\r\\n]*\\.git[/\\\\]hooks[/\\\\])(?:applypatch-msg|commit-msg|fsmonitor-watchman|post-checkout|post-commit|post-merge|post-receive|post-rewrite|pre-applypatch|pre-commit|pre-push|pre-rebase|pre-receive|prepare-commit-msg|push-to-checkout|update)(?:$|[\"'\\s])",
+        "title": "Active Git hook mutation",
+        "severity": "MEDIUM",
+        "confidence": 0.92,
+        "tags": [
+          "persistence",
+          "source-control",
+          "file-sensitive"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (sensitive-paths.yaml). Severity MEDIUM.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/sensitive-paths.yaml",
+      "tags": [
+        "persistence",
+        "source-control",
+        "file-sensitive"
+      ],
+      "data_axis": []
+    },
+    {
       "id": "RECIPE-TRUST-AUTHORITY",
       "title": "Authority claim in tool args",
       "kind": "rule:trust-exploit",
       "body": {
         "id": "TRUST-AUTHORITY",
-        "pattern": "(?i)(?:i am|i'm)\\s+(?:your|the)\\s+(?:creator|developer|admin|owner|operator)",
+        "pattern": "(?i)(?:i am|i'm)\\s+(?:your|the)\\s+(?:creator|developer|admin|owner|operator)\\b[\\s\\S]{0,120}(?:\\b(?:ignore|override|disregard|bypass|disable|reveal|expose|forget|obey|comply)\\b|do\\s+as\\s+i\\s+say|no\\s+(?:content\\s+policy\\s+)?restrictions?)",
         "title": "Authority claim in tool args",
         "severity": "HIGH",
         "confidence": 0.85,
@@ -2801,7 +3526,7 @@
       "kind": "rule:trust-exploit",
       "body": {
         "id": "TRUST-MAINTENANCE",
-        "pattern": "(?i)(?:maintenance|debug|admin|developer)\\s+mode\\s+(?:enabled|activated|on)",
+        "pattern": "(?im)(?:(?:^|[.!?;]\\s*|^\\s*(?:[-*>•]|<!--|[\"'])\\s*|\\b(?:task|instruction|system|assistant)\\s*:\\s*)(?:(?:(?:please,?|now,?|next,?)\\s+)?(?:enable|activate|enter|switch\\s+to)\\s+(?:maintenance|debug|admin|developer)\\s+mode\\b[\\s\\S]{0,80}\\b(?:ignore\\s+(?:safety|rules?|instructions?)|bypass\\s+(?:safety|guardrails?|filters?)|without\\s+(?:rules?|restrictions?|filters?|safety)|do\\s+anything|answer\\s+without\\s+(?:rules?|restrictions?|filters?))|(?:maintenance|debug|admin|developer)\\s+mode\\s+(?:enabled|activated|on)\\b[\\s\\S]{0,80}\\b(?:ignore\\s+(?:safety|rules?|instructions?)|bypass\\s+(?:safety|guardrails?|filters?)|without\\s+(?:rules?|restrictions?|filters?|safety)|do\\s+anything|answer\\s+without\\s+(?:rules?|restrictions?|filters?)))|\\bnew\\s+system\\s+message\\b[\\s\\S]{0,100}\\byou\\s+are\\s+now\\s+in\\s+(?:maintenance|debug|admin|developer)\\s+mode\\b[\\s\\S]{0,100}\\b(?:refusals?|guardrails?|filters?|safety\\s+checks?)\\s+(?:are\\s+)?disabled\\b)",
         "title": "Fake mode activation",
         "severity": "HIGH",
         "confidence": 0.85,
@@ -2826,7 +3551,7 @@
       "kind": "rule:trust-exploit",
       "body": {
         "id": "TRUST-SAFETY-OVERRIDE",
-        "pattern": "(?i)(?:safety|guardrail|filter|restriction)\\s+(?:override|bypass|disable|turn\\s+off|remove)",
+        "pattern": "(?im)(?:^|[.!?;]\\s*|^\\s*(?:[-*>•]|<!--|[\"'])\\s*|\\b(?:task|instruction|system|assistant)\\s*:\\s*)(?:(?:(?:please,?|(?:can|could|will|would)\\s+you|i\\s+(?:want|need)\\s+you\\s+to|let'?s|now,?|next,?)\\s+)?(?:override|bypass|disable|turn\\s+off|remove)\\s+(?:guardrails?|(?:all|your)\\s+(?:guardrails?|filters?|restrictions?|safety(?:\\s+(?:rules?|checks?|filters?|restrictions?))?)|(?:the\\s+)?(?:ai|assistant|agent|model)\\s+(?:guardrails?|filters?|restrictions?|safety(?:\\s+(?:rules?|checks?|filters?|restrictions?))?))|(?:safety|guardrails?)\\s+(?:override|bypass)\\s+(?:enabled|activated|on|now)|(?:guardrails?|(?:all|your)\\s+(?:guardrails?|filters?|restrictions?|safety(?:\\s+(?:rules?|checks?|filters?|restrictions?))?)|(?:the\\s+)?(?:ai|assistant|agent|model)\\s+(?:guardrails?|filters?|restrictions?|safety(?:\\s+(?:rules?|checks?|filters?|restrictions?))?))\\s+(?:must\\s+be|should\\s+be|are\\s+now|is\\s+now|have\\s+been|has\\s+been)\\s+(?:overridden|bypassed|disabled|turned\\s+off|removed))",
         "title": "Safety override attempt",
         "severity": "CRITICAL",
         "confidence": 0.9,
@@ -2851,7 +3576,7 @@
       "kind": "rule:trust-exploit",
       "body": {
         "id": "TRUST-NEW-INSTRUCTIONS",
-        "pattern": "(?i)(?:your|new|updated)\\s+(?:instructions|system\\s+prompt|rules)\\s+(?:have\\s+changed|are|say)",
+        "pattern": "(?i)(?:(?:your|the)\\s+(?:instructions|system\\s+prompt|rules)\\s+(?:have|has)\\s+(?:changed|been\\s+(?:updated|replaced|overridden))\\b[\\s\\S]{0,120}(?:\\b(?:ignore|override|bypass|disable|reveal|expose|forget|obey|comply)\\b|\\b(?:now|next)\\b[\\s,:;-]+(?:do\\s+this|execute\\s+(?:this|the\\s+following)|obey\\s+(?:me|my\\s+commands?)|follow\\s+(?:these|my|the\\s+new)\\s+instructions?)\\b)|(?:new|updated)\\s+(?:instructions|system\\s+prompt|rules)\\s+(?:are|say)\\s+(?:to\\s+)?(?:ignore|override|bypass|disable|reveal))",
         "title": "Fake instruction update",
         "severity": "HIGH",
         "confidence": 0.85,
@@ -2876,7 +3601,7 @@
       "kind": "rule:trust-exploit",
       "body": {
         "id": "TRUST-IGNORE-PREVIOUS",
-        "pattern": "(?i)ignore\\s+(?:all\\s+)?(?:previous|prior|above|earlier)\\s+(?:instructions|rules|guidelines|context)",
+        "pattern": "(?im)(?:^|[.!?;,:]\\s*|(?:[-*>•]|<!--|[\"'])\\s*|\\b(?:task|instruction|system|assistant)\\s*:\\s*)(?:(?:please,?|(?:can|could|will|would)\\s+you(?:\\s+please)?|i\\s+(?:want|need)\\s+you\\s+to(?:\\s+please)?|now,?|next,?|you\\s+(?:must|should|need\\s+to))\\s+)?ignore\\s+(?:all\\s+)?(?:previous|prior|above|earlier)\\s+(?:instructions|rules|guidelines|context)",
         "title": "Ignore previous instructions",
         "severity": "CRITICAL",
         "confidence": 0.9,
@@ -2901,7 +3626,7 @@
       "kind": "rule:trust-exploit",
       "body": {
         "id": "TRUST-DISREGARD",
-        "pattern": "(?i)disregard\\s+(?:all\\s+)?(?:previous|prior|above|your|earlier)\\s+(?:instructions|rules|guidelines|programming|context)",
+        "pattern": "(?im)(?:^|[.!?;,:]\\s*|(?:[-*>•]|<!--|[\"'])\\s*|\\b(?:task|instruction|system|assistant)\\s*:\\s*)(?:(?:please,?|(?:can|could|will|would)\\s+you(?:\\s+please)?|i\\s+(?:want|need)\\s+you\\s+to(?:\\s+please)?|now,?|next,?|you\\s+(?:must|should|need\\s+to))\\s+)?disregard\\s+(?:all\\s+)?(?:previous|prior|above|your|earlier)\\s+(?:instructions|rules|guidelines|programming|context)",
         "title": "Disregard instructions",
         "severity": "CRITICAL",
         "confidence": 0.9,
@@ -2926,7 +3651,7 @@
       "kind": "rule:trust-exploit",
       "body": {
         "id": "TRUST-JAILBREAK",
-        "pattern": "(?i)(?:jailbreak|dan\\s+mode|do\\s+anything\\s+now|you\\s+are\\s+now\\s+(?:free|unfiltered))",
+        "pattern": "(?im)(?:^|[.!?;]\\s*|^\\s*(?:[-*>•]|<!--|[\"'])\\s*|\\b(?:task|instruction|system|assistant)\\s*:\\s*)(?:(?:(?:please,?|(?:can|could|will|would)\\s+you|i\\s+(?:want|need)\\s+you\\s+to|let'?s|now,?|next,?)\\s+)?(?:enable|activate|enter|use|switch\\s+to)\\s+(?:a\\s+|the\\s+)?(?:jailbreak(?:ed)?|dan)(?:\\s+(?:mode|persona))?|(?:(?:please,?)\\s+)?(?:follow|run|apply)\\s+(?:this\\s+|the\\s+|a\\s+)?jailbreak\\s+(?:prompt|instructions?)|(?:(?:please,?)\\s+)?jailbreak\\s+(?:yourself|(?:this|the|your)\\s+(?:ai|assistant|agent|model|system))|(?:jailbreak|dan)\\s+mode\\s+(?:enabled|activated|on)|you\\s+are\\s+(?:now\\s+)?dan\\b[\\s\\S]{0,80}\\b(?:without\\s+(?:rules?|restrictions?|filters?)|do\\s+anything|ignore\\s+(?:safety|rules?|instructions?))|do\\s+anything\\s+now|you\\s+are\\s+now\\s+(?:unfiltered|free\\s+(?:from|without)\\s+(?:rules?|restrictions?|filters?|safety(?:\\s+(?:rules?|filters?|checks?))?)))",
         "title": "Jailbreak attempt",
         "severity": "CRITICAL",
         "confidence": 0.92,
@@ -2951,7 +3676,7 @@
       "kind": "rule:trust-exploit",
       "body": {
         "id": "TRUST-PRETEND",
-        "pattern": "(?i)(?:pretend|act\\s+as(?:\\s+if)?)\\s+(?:you\\s+are|you're)\\s+(?:a\\s+|an\\s+)?(?:different|evil|unrestricted|unfiltered|uncensored)",
+        "pattern": "(?i)(?:(?:pretend|act\\s+as(?:\\s+if)?)\\s+(?:you\\s+are|you're)\\s+(?:a\\s+|an\\s+)?(?:evil|unrestricted|unfiltered|uncensored)|you\\s+are\\s+now\\s+(?:a\\s+|an\\s+)?(?:evil|unrestricted|unfiltered|uncensored)\\s+(?:assistant|agent|model|persona))",
         "title": "Identity override attempt",
         "severity": "HIGH",
         "confidence": 0.85,
@@ -2976,7 +3701,7 @@
       "kind": "rule:trust-exploit",
       "body": {
         "id": "TRUST-FORGET",
-        "pattern": "(?i)forget\\s+(?:everything|all)\\s+(?:you\\s+)?(?:know|learned|were\\s+told)",
+        "pattern": "(?im)\\bforget\\s+(?:everything|all)\\s+(?:you\\s+)?(?:know|learned|were\\s+told)\\b[\\s\\S]{0,160}\\b(?:from\\s+now\\s+on|obey\\s+only|follow\\s+(?:only\\s+)?(?:my|these|the)\\s+(?:commands?|instructions?)|ignore\\s+(?:rules?|instructions?|safety)|bypass\\s+(?:safety|guardrails?|filters?)|without\\s+(?:rules?|restrictions?|filters?|safety))",
         "title": "Forget instructions attack",
         "severity": "CRITICAL",
         "confidence": 0.9,
@@ -3001,7 +3726,7 @@
       "kind": "rule:trust-exploit",
       "body": {
         "id": "TRUST-NEW-INSTRUCT-PREFIX",
-        "pattern": "(?i)new\\s+instructions?\\s*:\\s*",
+        "pattern": "(?i)new\\s+instructions?\\s*:\\s*[\\s\\S]{0,100}\\b(?:(?:ignore|override|disregard|bypass|disable|forget)\\s+(?:all\\s+)?(?:your\\s+|the\\s+)?(?:system\\s+prompt|previous|prior|safety|guardrails?|instructions?|rules?|guidelines?)|(?:reveal|expose)\\s+(?:your\\s+|the\\s+)?(?:system\\s+prompt|hidden\\s+prompt|private\\s+instructions?|internal\\s+rules?|secrets?))\\b",
         "title": "Direct instruction injection prefix",
         "severity": "HIGH",
         "confidence": 0.85,
@@ -3026,7 +3751,7 @@
       "kind": "rule:trust-exploit",
       "body": {
         "id": "TRUST-OVERRIDE-INSTRUCT",
-        "pattern": "(?i)override\\s+(?:previous\\s+)?(?:instructions?|rules?|guidelines?)",
+        "pattern": "(?im)\\boverride\\s+(?:previous\\s+)?(?:instructions?|rules?|guidelines?)\\b[\\s\\S]{0,120}\\b(?:safety\\s+off|(?:respond|answer|continue)\\s+without\\s+(?:a\\s+)?(?:filters?|rules?|restrictions?|safety)|ignore\\s+(?:safety|rules?|instructions?)|bypass\\s+(?:safety|guardrails?|filters?)|follow\\s+(?:this|these|my|the)\\s+(?:task|payload|instructions?)\\s+instead)",
         "title": "Override instructions",
         "severity": "CRITICAL",
         "confidence": 0.88,
@@ -3051,7 +3776,7 @@
       "kind": "rule:trust-exploit",
       "body": {
         "id": "TRUST-FROM-NOW-ON",
-        "pattern": "(?i)from\\s+now\\s+on[,\\s]+you\\s+(?:are|will|must|should)",
+        "pattern": "(?i)from\\s+now\\s+on[,\\s]+(?:(?:you\\s+(?:are|will|must|should)\\b[\\s\\S]{0,100}\\b)?(?:ignore|bypass|disable)\\s+(?:(?:all|any|the|your)\\s+)?(?:guardrails?|safety(?:\\s+(?:rules?|checks?|filters?|restrictions?))?|security\\s+(?:controls?|policy|rules?))|you\\s+(?:are|will|must|should)\\b[\\s\\S]{0,100}\\b(?:never\\s+refuse|not\\s+refuse|answer\\s+without|respond\\s+without|unrestricted|unfiltered|uncensored))",
         "title": "Persistent behavior change",
         "severity": "HIGH",
         "confidence": 0.85,
@@ -3076,7 +3801,7 @@
       "kind": "rule:trust-exploit",
       "body": {
         "id": "TRUST-SWITCH-MODE",
-        "pattern": "(?i)switch\\s+(?:to\\s+)?(?:a\\s+)?(?:different|new|unrestricted)\\s+(?:mode|personality|character|persona)",
+        "pattern": "(?i)switch\\s+(?:to\\s+)?(?:a\\s+|an\\s+)?unrestricted\\s+(?:mode|personality|character|persona)",
         "title": "Mode/personality switch",
         "severity": "HIGH",
         "confidence": 0.85,
@@ -3101,7 +3826,7 @@
       "kind": "rule:trust-exploit",
       "body": {
         "id": "TRUST-PROMPT-EXTRACT",
-        "pattern": "(?i)(?:show|reveal|print|output|display|repeat|tell\\s+me)\\s+(?:me\\s+)?(?:your\\s+)?(?:the\\s+)?(?:system\\s+|initial\\s+)?(?:prompt|instructions?|rules?|guidelines?)",
+        "pattern": "(?i)(?:show|reveal|print|output|display|repeat|tell\\s+me)\\s+(?:me\\s+)?(?:your\\s+)?(?:the\\s+)?(?:(?:system|initial|hidden|private|internal)\\s+)?(?:prompt|instructions?|rules?|guidelines?)",
         "title": "System prompt extraction attempt",
         "severity": "MEDIUM",
         "confidence": 0.75,
@@ -3151,7 +3876,7 @@
       "kind": "rule:trust-exploit",
       "body": {
         "id": "TRUST-NO-ETHICS",
-        "pattern": "(?i)no\\s+(?:ethical|moral)\\s+(?:guidelines?|restrictions?|limits?|constraints?)",
+        "pattern": "(?i)(?:(?:remove|ignore|disable|bypass)\\s+(?:all\\s+)?(?:ethical|moral)\\s+(?:guidelines?|restrictions?|limits?|constraints?)|(?:operate|respond|answer|act)\\s+(?:with\\s+)?no\\s+(?:ethical|moral)\\s+(?:guidelines?|restrictions?|limits?|constraints?)|(?m:(?:^|[.!?;]\\s*|\\b(?:task|instruction|system|assistant)\\s*:\\s*)(?:(?:please,?)\\s+)?(?:operate|respond|answer|act)\\s+without(?:\\s+any)?\\s+(?:ethical|moral)\\s+(?:guidelines?|restrictions?|limits?|constraints?)))",
         "title": "Ethics removal attempt",
         "severity": "HIGH",
         "confidence": 0.88,
@@ -3176,7 +3901,7 @@
       "kind": "rule:trust-exploit",
       "body": {
         "id": "TRUST-TOOL-MANIP",
-        "pattern": "(?i)(?:use\\s+the\\s+\\w+\\s+tool\\s+to\\s+(?:delete|remove|destroy|wipe)|invoke\\s+(?:the\\s+)?\\w+\\s+(?:tool|function)\\s+without\\s+(?:asking|confirmation|approval)|automatically\\s+(?:execute|run|call)\\s+(?:all\\s+)?(?:tools?|functions?))",
+        "pattern": "(?im)(?:^|[.!?;]\\s*|^\\s*(?:[-*>•]|<!--|[\"'])\\s*|\\b(?:task|instruction|system|assistant)\\s*:\\s*)(?:invoke\\s+(?:the\\s+)?\\w+\\s+(?:tool|function)\\s+without\\s+(?:asking|confirmation|approval)|automatically\\s+(?:execute|run|call)\\s+(?:all\\s+)?(?:tools?|functions?))",
         "title": "Tool manipulation directive",
         "severity": "HIGH",
         "confidence": 0.85,
@@ -3201,7 +3926,7 @@
       "kind": "rule:trust-exploit",
       "body": {
         "id": "TRUST-PERSONA",
-        "pattern": "(?i)(?:act\\s+as|you\\s+are\\s+now|roleplay\\s+as|simulate\\s+being|play\\s+the\\s+role\\s+of)\\s+(?:a\\s+|an\\s+)?(?:hacker|pentester|attacker|malware\\s+author|evil|unethical|criminal)",
+        "pattern": "(?i)(?:(?:act\\s+as|you\\s+are\\s+now|roleplay\\s+as|simulate\\s+being|play\\s+the\\s+role\\s+of)\\s+(?:roleplaying\\s+as\\s+)?(?:a\\s+|an\\s+)?(?:malicious\\s+(?:hacker|pentester|attacker|malware\\s+author)|evil|unethical|criminal)|you\\s+are\\s+now\\s+(?:a\\s+)?helpful\\s+tool\\s+for\\s+penetration\\s+testers)",
         "title": "Malicious persona adoption",
         "severity": "HIGH",
         "confidence": 0.88,
@@ -3226,7 +3951,7 @@
       "kind": "rule:trust-exploit",
       "body": {
         "id": "TRUST-DELIMITER",
-        "pattern": "(?i)(?:system\\s+override|end\\s+system\\s+prompt|<\\/system>|<\\|im_end\\|>|\\[INST\\]|\\[\\/INST\\]|<\\|endoftext\\|>|<<\\s*SYS\\s*>>)",
+        "pattern": "(?im)(?:\\[INST\\][\\s\\S]{0,200}\\b(?:override|ignore|disable|bypass|reveal|expose|unfiltered|unrestricted|new\\s+(?:instructions?|rules?|system\\s+prompt)|follow\\s+(?:my|these|the)\\s+instructions?|do\\s+evil)\\b[\\s\\S]{0,200}\\[\\/INST\\]|<\\|im_start\\|>[\\s\\S]{0,200}\\b(?:no\\s+restrictions?|override|ignore|disable|bypass|reveal|expose|unfiltered|unrestricted|new\\s+(?:instructions?|rules?|system\\s+prompt)|follow\\s+(?:my|these|the)\\s+instructions?|do\\s+evil)\\b[\\s\\S]{0,200}<\\|im_end\\|>|(?:system\\s+override|end\\s+system\\s+prompt|<\\/system>|<\\|im_end\\|>|<\\|endoftext\\|>|<<\\s*SYS\\s*>>|\\[INST\\]|\\[\\/INST\\])[\\s\\S]{0,120}\\b(?:override|ignore|disable|bypass|reveal|expose|unfiltered|unrestricted|new\\s+(?:instructions?|rules?|system\\s+prompt)|follow\\s+(?:my|these|the)\\s+instructions?|do\\s+evil)\\b)",
         "title": "Delimiter hijacking / prompt framing escape",
         "severity": "CRITICAL",
         "confidence": 0.93,
@@ -3253,14 +3978,14 @@
         "id": "TRUST-OUTPUT-CONSTRAINT",
         "pattern": "(?i)(?:respond\\s+only\\s+in\\s+(?:hex|base64|rot13|binary|morse|unicode)|encode\\s+your\\s+(?:response|answer|output)\\s+in\\s+(?:base64|hex|rot13|url)|output\\s+as\\s+(?:hex|base64|rot13|url)\\s+encoded|(?:rot13|unicode\\s+escape|url\\s+(?:decode|encode))\\s+(?:the|your|this))",
         "title": "Forced encoding to bypass filters",
-        "severity": "HIGH",
+        "severity": "MEDIUM",
         "confidence": 0.85,
         "tags": [
           "prompt-injection",
           "obfuscation"
         ]
       },
-      "why": "Pattern shipped in the bundled strict rule pack (trust-exploit.yaml). Severity HIGH.",
+      "why": "Pattern shipped in the bundled strict rule pack (trust-exploit.yaml). Severity MEDIUM.",
       "examples": [],
       "counterexamples": [],
       "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
@@ -3280,18 +4005,50 @@
         "id": "TRUST-PAYLOAD-SPLIT",
         "pattern": "(?i)(?:start\\s+your\\s+(?:response|answer|output)\\s+with\\s+[\"'](?:Sure|Absolutely|Of\\s+course|Here\\s+is|I\\s+can\\s+help))|(?:begin\\s+by\\s+saying\\s+[\"'](?:Sure|Yes|Absolutely))",
         "title": "Payload splitting / forced compliance prefix",
-        "severity": "HIGH",
+        "severity": "MEDIUM",
         "confidence": 0.87,
         "tags": [
           "prompt-injection"
         ]
       },
-      "why": "Pattern shipped in the bundled strict rule pack (trust-exploit.yaml). Severity HIGH.",
+      "why": "Pattern shipped in the bundled strict rule pack (trust-exploit.yaml). Severity MEDIUM.",
       "examples": [],
       "counterexamples": [],
       "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
       "tags": [
         "prompt-injection"
+      ],
+      "data_axis": [
+        "ingress_untrusted"
+      ]
+    },
+    {
+      "id": "RECIPE-OBFUSC-UNICODE-ZWSP",
+      "title": "Zero-width character obfuscation",
+      "kind": "rule:trust-exploit",
+      "body": {
+        "id": "OBFUSC-UNICODE-ZWSP",
+        "pattern": "(?:[A-Za-z0-9][\\x{200B}\\x{200C}\\x{200D}\\x{FEFF}][\\s\\S]*?){10,}",
+        "title": "Zero-width character obfuscation",
+        "severity": "HIGH",
+        "confidence": 0.95,
+        "tags": [
+          "prompt-injection",
+          "obfuscation"
+        ]
+      },
+      "why": "Requires ten zero-width characters immediately after ASCII alphanumerics, avoiding isolated formatting artifacts and emoji ZWJ sequences.",
+      "examples": [
+        "a​b‌c‍d﻿e​f‌g‍h﻿i​j‌"
+      ],
+      "counterexamples": [
+        "copy​paste",
+        "👩‍💻"
+      ],
+      "source": "policies/guardrail/strict/rules/trust-exploit.yaml",
+      "tags": [
+        "prompt-injection",
+        "obfuscation"
       ],
       "data_axis": [
         "ingress_untrusted"

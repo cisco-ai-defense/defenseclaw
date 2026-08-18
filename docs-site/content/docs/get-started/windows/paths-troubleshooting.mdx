@@ -35,7 +35,7 @@ intact when diagnosing a problem.
 | `%USERPROFILE%\.defenseclaw\gateway.log` | Appended detached-gateway stdout/stderr. | Read locally; review for sensitive content before sharing excerpts. No size-rotation guarantee is documented. |
 | `%USERPROFILE%\.defenseclaw\logs\hook-failures.jsonl` | Hook delivery/response failure records when produced. | Treat as sensitive operational data. |
 | `%USERPROFILE%\.defenseclaw\hooks\` | Generated hook assets, runtime state, and connector-scoped credential sidecars. | **Never edit, print, or copy credentials.** Reconcile with setup/doctor. |
-| `%USERPROFILE%\.defenseclaw\backups\` | Managed connector and upgrade recovery material. | Do not restore or delete manually; it may contain credential-bearing state. |
+| `%USERPROFILE%\.defenseclaw\backups\` | Managed connector/upgrade recovery material and timestamped `config.yaml.before-redaction-*` pre-change policy backups. | Do not restore or delete manually; they may contain credential-bearing or unredacted policy state. |
 | `%USERPROFILE%\.defenseclaw\quarantine\` | DefenseClaw-owned quarantined skills/plugins and provenance. | Use `skill restore` or `plugin restore`; do not drag files back. |
 | `%USERPROFILE%\.defenseclaw\.upgrade-receipts\` | Private automatic-upgrade admission/recovery receipts when used. | Inspect metadata only; do not edit receipt JSON. |
 | `%USERPROFILE%\.defenseclaw\gateway.pid`, `watchdog.pid` | Protected process identity records, not bare kill instructions. | Do not delete while a process may be running. |
@@ -43,6 +43,7 @@ intact when diagnosing a problem.
 | `%CODEX_HOME%\managed_config.toml` | Effective native Windows Codex hook policy. Default home is `%USERPROFILE%\.codex`. | Do not edit DefenseClaw-managed hooks; use setup/remove. |
 | `%CODEX_HOME%\config.toml` | Codex user config plus DefenseClaw-marked OTLP/notify fields. | Other Codex settings are user-owned; use DefenseClaw teardown to remove managed fields. |
 | `%CLAUDE_CONFIG_DIR%\settings.json` | Claude Code user config plus DefenseClaw-marked hooks/OTLP environment entries. Default is `%USERPROFILE%\.claude`. | Do not remove individual managed entries by hand; use setup/remove. |
+| `%USERPROFILE%\.config\amp\plugins\defenseclaw.ts` | DefenseClaw-managed Amp TypeScript system-policy plugin with a connector-scoped credential. | **Never print, copy, or hand-edit.** Use setup/remove; operator-owned sibling plugins are separate. |
 
 The installer records the exact connector homes and uses them for later repair,
 upgrade, and cleanup. Connector configuration backups are ownership records,
@@ -53,7 +54,9 @@ not a user-facing rollback directory.
 `CODEX_HOME` and `CLAUDE_CONFIG_DIR` are the supported connector configuration
 overrides. Set them to absolute, normalized native Windows paths before initial
 Setup or connector setup. The installer validates and records them; reparse
-ancestors are refused.
+ancestors are refused. Amp has no connector-home override: its certified system
+plugin path is fixed beneath the current `%USERPROFILE%` at
+`.config\amp\plugins\defenseclaw.ts`.
 
 <Tabs items={['PowerShell', 'cmd']}>
   <Tab value="PowerShell">
@@ -198,17 +201,18 @@ residue automatically.
     registration; repair Setup if it is missing. The watchdog runs only when
     `gateway.watchdog.enabled` is configured and is not a Windows service.
   </Accordion>
-  <Accordion title="Codex or Claude Code hooks do not appear">
-    Confirm both products run natively as the same Windows user. Run
+  <Accordion title="Codex or Claude Code hooks, or the Amp plugin, do not appear">
+    Confirm the selected product runs natively as the same Windows user. Run
     `defenseclaw guardrail status` and `defenseclaw doctor`, then re-run the
-    supported connector setup in observe mode. Fully restart the agent. Do not
-    copy hook entries between `config.toml`, `managed_config.toml`, and
-    `settings.json` by hand.
+    supported connector setup in observe mode. Fully restart Codex or Claude
+    Code; fully exit and relaunch Amp. For headless Amp execution, include
+    `--plugin-ready-timeout 30`. Do not copy entries between `config.toml`,
+    `managed_config.toml`, `settings.json`, and `defenseclaw.ts` by hand.
   </Accordion>
   <Accordion title="A connector is disabled or status disagrees with configuration">
     Use `defenseclaw guardrail status` to compare desired and runtime posture.
     A prior `--no-restart` change may require `defenseclaw-gateway restart`.
-    Use connector-scoped enable/disable so the other supported connector is not
+    Use connector-scoped enable/disable so other supported connectors are not
     changed unintentionally.
   </Accordion>
   <Accordion title="A disabled skill or plugin still behaves unexpectedly">
@@ -228,6 +232,12 @@ residue automatically.
     `defenseclaw setup rotate-token --yes` only for an intentional global
     rotation. Never print, compare, copy, or manually replace token files or
     OTLP headers.
+
+    Amp has no documented native-OTLP channel, so this diagnostic does not
+    apply to Amp callback telemetry. Run `defenseclaw doctor`,
+    `defenseclaw guardrail status`, and `defenseclaw-gateway status`; reconcile
+    the plugin with `defenseclaw setup amp --mode observe`, then fully exit and
+    relaunch Amp.
   </Accordion>
   <Accordion title="Upgrade is refused or interrupted">
     A source not listed in the target release's authenticated Windows baseline matrix
@@ -261,17 +271,21 @@ Complete this without real secrets or destructive tools:
   `defenseclaw-gateway` resolve from the product `bin` directory.
 - Run `defenseclaw version`; require the CLI and gateway generation to agree.
 - Run `defenseclaw-gateway status`, `defenseclaw status`, and
-  `defenseclaw guardrail status`; require the intended Codex and/or Claude Code
-  rows, mode, fail mode, and enabled state.
+  `defenseclaw guardrail status`; require the intended Codex, Claude Code,
+  and/or Amp rows, mode, fail mode, and enabled state.
 - Run `defenseclaw config validate` and `defenseclaw doctor`; resolve every
   connector registration or authentication failure.
-- Restart each configured native agent. In an empty disposable directory,
-  submit a non-sensitive prompt such as “Reply with the word ready.” Do not use
-  customer data, credentials, or a destructive tool call.
+- Restart each configured Codex or Claude Code agent; fully exit and relaunch
+  Amp. In an empty disposable directory, submit a non-sensitive prompt such as
+  “Reply with the word ready.” For `amp -x`, include
+  `--plugin-ready-timeout 30`. An authenticated Amp live turn additionally
+  requires `AMP_API_KEY`; do not paste it into the command or diagnostics. Do
+  not use customer data, credentials, or a destructive tool call.
 - Open `defenseclaw tui` or use `defenseclaw alerts` and confirm new activity is
   attributed only to the agent you exercised.
-- If both connectors are installed, repeat the harmless prompt once in each;
-  one connector's success does not prove the other's hook or OTLP settings.
+- If multiple connectors are installed, repeat the harmless prompt once in
+  each; one connector's success does not prove another connector's hook,
+  plugin, or OTLP settings.
 
 ## Post-upgrade checklist
 
@@ -283,13 +297,13 @@ Complete this without real secrets or destructive tools:
   modes, fail modes, enabled state, and optional watchdog state.
 - Confirm the command path still resolves to the installed product directory,
   not a stale checkout or copied binary.
-- Restart Codex and Claude Code, then repeat the harmless per-connector event
-  check above.
+- Restart Codex and Claude Code, fully exit and relaunch Amp, then repeat the
+  harmless per-connector event check above.
 - Verify optional destinations with `defenseclaw observability plan` and the
   destination-specific test command. A destination failure does not erase the
   mandatory local audit, but it must be treated as degraded delivery.
 - Keep private receipts and backups untouched until the upgraded gateway and
-  both configured connectors are healthy.
+  every configured connector are healthy.
 
 For broader context, see [CLI reference](/docs/reference/cli),
 [configuration](/docs/reference/configuration), [upgrade](/docs/get-started/upgrade),

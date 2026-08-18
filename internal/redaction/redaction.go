@@ -781,7 +781,7 @@ var safeEnumValues = map[string]struct{}{
 	// target kinds and connectors
 	"skill": {}, "plugin": {}, "mcp": {}, "codeguard": {}, "scanner": {},
 	"openai": {}, "anthropic": {}, "google": {}, "bedrock": {}, "azure": {}, "ollama": {},
-	"geminicli": {}, "codex": {}, "openclaw": {}, "cursor": {}, "claudecode": {},
+	"geminicli": {}, "codex": {}, "openclaw": {}, "cursor": {}, "claudecode": {}, "amp": {},
 	"zeptoclaw": {}, "litellm": {}, "bifrost": {}, "openrouter": {}, "vertex": {},
 	// transport / wire format
 	"stdio": {}, "sse": {}, "websocket": {}, "http": {}, "https": {}, "tcp": {}, "udp": {},

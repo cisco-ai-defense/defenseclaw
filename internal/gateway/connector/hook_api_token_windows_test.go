@@ -10,7 +10,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 
@@ -136,6 +138,317 @@ func setHookAPITokenWindowsServiceDACL(t *testing.T, path string, serviceSID *wi
 	); err != nil {
 		t.Fatalf("set service runtime DACL: %v", err)
 	}
+}
+
+func TestPublishHookAPITokenWindowsPreservesManagedCustodyDACL(t *testing.T) {
+	dataDir := testenv.PrivateTempDir(t)
+	token := strings.Repeat("a", 64)
+	if err := PublishHookAPIToken(dataDir, "amp", token); err != nil {
+		t.Fatalf("PublishHookAPIToken: %v", err)
+	}
+	tokenPath, err := HookAPITokenFilePath(dataDir, "amp")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	parent, err := openAtomicTransformBoundDirectoryPlatform(filepath.Dir(tokenPath))
+	if err != nil {
+		t.Fatalf("open bound hook token directory: %v", err)
+	}
+	defer parent.Close()
+	file, err := openAtomicTransformBoundFilePlatform(parent, filepath.Base(tokenPath), false)
+	if err != nil {
+		t.Fatalf("open bound hook token file: %v", err)
+	}
+	defer file.Close()
+	if err := validateHookAPITokenBoundFileCustodyPlatform(file); err != nil {
+		t.Fatalf("managed hook token custody validation: %v", err)
+	}
+	if err := validateAtomicTransformBoundFilePrivatePlatform(file); err == nil ||
+		!strings.Contains(err.Error(), "grants access to another principal") {
+		t.Fatalf("generic private-file validation error = %v, want scoped Administrators rejection", err)
+	}
+
+	descriptor, err := windows.GetSecurityInfo(
+		windows.Handle(file.Fd()),
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
+	)
+	if err != nil {
+		t.Fatalf("read published hook token security descriptor: %v", err)
+	}
+	control, _, err := descriptor.Control()
+	if err != nil {
+		t.Fatalf("read published hook token DACL control: %v", err)
+	}
+	if control&windows.SE_DACL_PROTECTED == 0 {
+		t.Fatal("published hook token DACL is inheritable")
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil {
+		t.Fatalf("read published hook token owner: %v", err)
+	}
+	currentUser, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatalf("current token user: %v", err)
+	}
+	if owner == nil || currentUser == nil || currentUser.User.Sid == nil || !owner.Equals(currentUser.User.Sid) {
+		t.Fatalf("published hook token owner = %s, want current user", hookAPIWindowsSIDString(owner))
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil || dacl == nil {
+		t.Fatalf("read published hook token DACL: %v", err)
+	}
+	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		t.Fatalf("LocalSystem SID: %v", err)
+	}
+	administrators, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		t.Fatalf("Administrators SID: %v", err)
+	}
+	for _, principal := range []struct {
+		name string
+		sid  *windows.SID
+	}{
+		{name: "current user", sid: currentUser.User.Sid},
+		{name: "LocalSystem", sid: system},
+		{name: "Administrators", sid: administrators},
+	} {
+		if !windowsACLGrantsGenericAllToSID(t, dacl, principal.sid) {
+			t.Fatalf("published hook token DACL does not grant GENERIC_ALL to %s", principal.name)
+		}
+	}
+}
+
+func TestPublishHookAPITokenWindowsPreservesExactCustomCustodyDescriptor(t *testing.T) {
+	dataDir := testenv.PrivateTempDir(t)
+	oldToken := strings.Repeat("a", 64)
+	newToken := strings.Repeat("b", 64)
+	if err := PublishHookAPIToken(dataDir, "amp", oldToken); err != nil {
+		t.Fatalf("seed hook API token: %v", err)
+	}
+	tokenPath, err := HookAPITokenFilePath(dataDir, "amp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	setHookAPITokenWindowsCustomCustodyDACL(t, tokenPath, windows.GENERIC_READ)
+	before, beforeInfo := captureHookAPITokenWindowsProtectionAndInfo(t, tokenPath)
+
+	if err := PublishHookAPIToken(dataDir, "amp", newToken); err != nil {
+		t.Fatalf("publish changed hook API token: %v", err)
+	}
+	after, afterInfo := captureHookAPITokenWindowsProtectionAndInfo(t, tokenPath)
+	if os.SameFile(beforeInfo, afterInfo) {
+		t.Fatal("changed publication did not replace the token inode")
+	}
+	if !hookAPITokenPublishProtectionsEqual(before, after) {
+		t.Fatal("changed publication did not preserve the exact accepted owner/DACL/protection descriptor")
+	}
+	raw, err := os.ReadFile(tokenPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(raw) != newToken+"\n" {
+		t.Fatal("changed publication did not publish the requested token bytes")
+	}
+}
+
+func TestPublishHookAPITokenWindowsRollbackRestoresExactCustomCustodyDescriptor(t *testing.T) {
+	dataDir := testenv.PrivateTempDir(t)
+	oldToken := strings.Repeat("a", 64)
+	newToken := strings.Repeat("b", 64)
+	if err := PublishHookAPIToken(dataDir, "amp", oldToken); err != nil {
+		t.Fatalf("seed hook API token: %v", err)
+	}
+	tokenPath, err := HookAPITokenFilePath(dataDir, "amp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	setHookAPITokenWindowsCustomCustodyDACL(t, tokenPath, windows.GENERIC_READ)
+	before := captureHookAPITokenWindowsProtection(t, tokenPath)
+
+	originalPublisher := publishHookAPITokenFile
+	publishHookAPITokenFile = func(source, destination string, info os.FileInfo, mode os.FileMode) error {
+		if err := atomicFilePublishHookAPIToken(source, destination, info, mode); err != nil {
+			return err
+		}
+		return errors.New("injected failure after publication")
+	}
+	t.Cleanup(func() { publishHookAPITokenFile = originalPublisher })
+
+	err = PublishHookAPIToken(dataDir, "amp", newToken)
+	if err == nil || !strings.Contains(err.Error(), "injected failure after publication") {
+		t.Fatalf("PublishHookAPIToken error = %v, want injected post-publication failure", err)
+	}
+	after := captureHookAPITokenWindowsProtection(t, tokenPath)
+	if !hookAPITokenPublishProtectionsEqual(before, after) {
+		t.Fatal("rollback did not restore the exact accepted owner/DACL/protection descriptor")
+	}
+	raw, readErr := os.ReadFile(tokenPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(raw) != oldToken+"\n" {
+		t.Fatal("rollback did not restore the original token bytes")
+	}
+}
+
+func TestPublishHookAPITokenWindowsRollbackRejectsDACLOnlyConcurrentMutation(t *testing.T) {
+	dataDir := testenv.PrivateTempDir(t)
+	oldToken := strings.Repeat("a", 64)
+	newToken := strings.Repeat("b", 64)
+	if err := PublishHookAPIToken(dataDir, "amp", oldToken); err != nil {
+		t.Fatalf("seed hook API token: %v", err)
+	}
+	tokenPath, err := HookAPITokenFilePath(dataDir, "amp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	setHookAPITokenWindowsCustomCustodyDACL(t, tokenPath, windows.GENERIC_READ)
+
+	var concurrentProtection hookAPITokenPublishProtection
+	originalPublisher := publishHookAPITokenFile
+	publishHookAPITokenFile = func(source, destination string, info os.FileInfo, mode os.FileMode) error {
+		if err := atomicFilePublishHookAPIToken(source, destination, info, mode); err != nil {
+			return err
+		}
+		// Preserve the just-published bytes and mutate only the otherwise-safe
+		// DACL. Rollback must treat this as a concurrent state change.
+		setHookAPITokenWindowsCustomCustodyDACL(t, destination, windows.GENERIC_ALL)
+		concurrentProtection = captureHookAPITokenWindowsProtection(t, destination)
+		return errors.New("injected failure after DACL-only concurrent mutation")
+	}
+	t.Cleanup(func() { publishHookAPITokenFile = originalPublisher })
+
+	err = PublishHookAPIToken(dataDir, "amp", newToken)
+	if err == nil || !strings.Contains(err.Error(), "changed before rollback") {
+		t.Fatalf("PublishHookAPIToken error = %v, want DACL-only concurrent-change refusal", err)
+	}
+	after := captureHookAPITokenWindowsProtection(t, tokenPath)
+	if !hookAPITokenPublishProtectionsEqual(concurrentProtection, after) {
+		t.Fatal("rollback overwrote the concurrent DACL-only mutation")
+	}
+	raw, readErr := os.ReadFile(tokenPath)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if string(raw) != newToken+"\n" {
+		t.Fatal("rollback overwrote bytes associated with the concurrent DACL-only mutation")
+	}
+}
+
+func captureHookAPITokenWindowsProtection(t *testing.T, tokenPath string) hookAPITokenPublishProtection {
+	t.Helper()
+	protection, _ := captureHookAPITokenWindowsProtectionAndInfo(t, tokenPath)
+	return protection
+}
+
+func captureHookAPITokenWindowsProtectionAndInfo(
+	t *testing.T, tokenPath string,
+) (hookAPITokenPublishProtection, os.FileInfo) {
+	t.Helper()
+	parent, err := openAtomicTransformBoundDirectoryPlatform(filepath.Dir(tokenPath))
+	if err != nil {
+		t.Fatalf("open bound hook token directory: %v", err)
+	}
+	defer parent.Close()
+	file, err := openAtomicTransformBoundFilePlatform(parent, filepath.Base(tokenPath), false)
+	if err != nil {
+		t.Fatalf("open bound hook token file: %v", err)
+	}
+	defer file.Close()
+	info, err := file.Stat()
+	if err != nil {
+		t.Fatalf("stat bound hook token file: %v", err)
+	}
+	protection, private, err := captureHookAPITokenPublishProtectionPlatform(file, info)
+	if err != nil {
+		t.Fatalf("capture bound hook token protection: %v", err)
+	}
+	if !private {
+		t.Fatal("custom hook token descriptor does not satisfy managed custody")
+	}
+	return protection, info
+}
+
+func setHookAPITokenWindowsCustomCustodyDACL(
+	t *testing.T, tokenPath string, trustedInstallerAccess windows.ACCESS_MASK,
+) {
+	t.Helper()
+	currentUser, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatalf("current token user: %v", err)
+	}
+	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		t.Fatalf("LocalSystem SID: %v", err)
+	}
+	administrators, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		t.Fatalf("Administrators SID: %v", err)
+	}
+	trustedInstaller, err := windows.StringToSid("S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464")
+	if err != nil {
+		t.Fatalf("TrustedInstaller SID: %v", err)
+	}
+	entries := make([]windows.EXPLICIT_ACCESS, 0, 4)
+	for _, principal := range []struct {
+		sid        *windows.SID
+		permission windows.ACCESS_MASK
+		typeID     windows.TRUSTEE_TYPE
+	}{
+		{currentUser.User.Sid, windows.GENERIC_ALL, windows.TRUSTEE_IS_USER},
+		{system, windows.GENERIC_ALL, windows.TRUSTEE_IS_WELL_KNOWN_GROUP},
+		{administrators, windows.GENERIC_ALL, windows.TRUSTEE_IS_WELL_KNOWN_GROUP},
+		{trustedInstaller, trustedInstallerAccess, windows.TRUSTEE_IS_USER},
+	} {
+		entries = append(entries, windows.EXPLICIT_ACCESS{
+			AccessPermissions: principal.permission,
+			AccessMode:        windows.GRANT_ACCESS,
+			Trustee: windows.TRUSTEE{
+				TrusteeForm:  windows.TRUSTEE_IS_SID,
+				TrusteeType:  principal.typeID,
+				TrusteeValue: windows.TrusteeValueFromSID(principal.sid),
+			},
+		})
+	}
+	dacl, err := windows.ACLFromEntries(entries, nil)
+	if err != nil {
+		t.Fatalf("build custom custody DACL: %v", err)
+	}
+	if err := windows.SetNamedSecurityInfo(
+		tokenPath,
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil,
+		nil,
+		dacl,
+		nil,
+	); err != nil {
+		t.Fatalf("set custom custody DACL: %v", err)
+	}
+}
+
+func windowsACLGrantsGenericAllToSID(t *testing.T, dacl *windows.ACL, want *windows.SID) bool {
+	t.Helper()
+	const fileAllAccess windows.ACCESS_MASK = 0x001F01FF
+	for index := uint16(0); index < dacl.AceCount; index++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, uint32(index), &ace); err != nil {
+			t.Fatalf("read Windows ACE %d: %v", index, err)
+		}
+		if ace == nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE ||
+			ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 ||
+			(ace.Mask&windows.GENERIC_ALL == 0 && ace.Mask&fileAllAccess != fileAllAccess) {
+			continue
+		}
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		if sid.Equals(want) {
+			return true
+		}
+	}
+	return false
 }
 
 func TestHookAPITokenWindowsRejectsUntrustedDirectoryACL(t *testing.T) {

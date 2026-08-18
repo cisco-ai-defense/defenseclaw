@@ -18,6 +18,7 @@ package enterprisehooks
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -70,6 +71,8 @@ type InstallOptions struct {
 	// profiles from scratch.
 	AllowMissingHookConfigRepair bool
 }
+
+var publishEnterpriseHookAPIToken = connector.PublishHookAPIToken
 
 type InstallResult struct {
 	Connector                  string   `json:"connector"`
@@ -176,7 +179,7 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 	var result InstallResult
 	err = connector.WithUserHomeDir(home, func() error {
 		paths := connector.HookConfigPathsForConnector(conn, setupOpts)
-		if err := validateActivationSurfaces(home, paths, uid, false); err != nil {
+		if err := validateActivationSurfaces(home, paths, uid, false, nil); err != nil {
 			return err
 		}
 		if err := validateHookContract(opts.GuardrailMode, conn, setupOpts); err != nil {
@@ -303,6 +306,14 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 		AgentVersion:      strings.TrimSpace(opts.AgentVersion),
 		HookContractID:    strings.TrimSpace(opts.HookContractID),
 	}
+	requiresScopedHookToken := connector.RequiresScopedHookToken(conn)
+	if requiresScopedHookToken {
+		if !validEnterpriseScopedHookToken(setupOpts.APIToken) {
+			return InstallResult{}, fmt.Errorf("enterprise hooks: connector-scoped hook token is required")
+		}
+		setupOpts.HookAPIToken = setupOpts.APIToken
+		setupOpts.HookAPITokenScoped = true
+	}
 	if setupOpts.AgentVersion == "" {
 		setupOpts.AgentVersion = connector.LoadCachedAgentVersion(dataDir, conn.Name())
 	}
@@ -314,6 +325,7 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 	var result InstallResult
 	err = connector.WithUserHomeDir(home, func() error {
 		paths := connector.HookConfigPathsForConnector(conn, setupOpts)
+		pluginArtifacts := connector.ManagedPluginArtifacts(conn, setupOpts)
 		// Endpoint-product bootstrap: on a fresh target where the
 		// user hasn't launched the agent yet, the native hook config
 		// file doesn't exist and validateActivationSurfaces below
@@ -340,7 +352,13 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			}
 			_ = bootstrapped // reserved for future audit emission
 		}
-		if err := validateActivationSurfaces(home, paths, uid, opts.AllowMissingHookConfigRepair); err != nil {
+		if err := validateActivationSurfaces(
+			home,
+			paths,
+			uid,
+			opts.AllowMissingHookConfigRepair,
+			pluginArtifacts,
+		); err != nil {
 			return err
 		}
 		if err := validateHookContract(opts.GuardrailMode, conn, setupOpts); err != nil {
@@ -356,17 +374,35 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 
 		return withOwnerCredentials(uid, gid, func() error {
 			conn.SetCredentials(setupOpts.APIToken, opts.MasterKey)
+			previousLockEntry := connector.LoadHookContractLockEntry(dataDir, conn.Name())
+			lockWriteAttempted := false
+			rollback := func(cause error) error {
+				failures := []error{cause}
+				if lockWriteAttempted {
+					var lockErr error
+					if strings.TrimSpace(previousLockEntry.Connector) == "" {
+						lockErr = connector.ClearHookContractLockEntry(dataDir, conn.Name())
+					} else {
+						lockErr = connector.SaveHookContractLockEntry(dataDir, previousLockEntry)
+					}
+					if lockErr != nil {
+						failures = append(failures, fmt.Errorf("enterprise hooks: restore previous hook contract lock: %w", lockErr))
+					}
+				}
+				if teardownErr := conn.Teardown(ctx, setupOpts); teardownErr != nil {
+					failures = append(failures, fmt.Errorf("enterprise hooks: connector %s rollback failed: %w", conn.Name(), teardownErr))
+				}
+				return errors.Join(failures...)
+			}
 			if err := conn.Setup(ctx, setupOpts); err != nil {
 				return fmt.Errorf("enterprise hooks: connector %s setup failed: %w", conn.Name(), err)
 			}
 			present, err := connector.OwnedHooksPresent(conn, setupOpts)
 			if err != nil {
-				_ = conn.Teardown(ctx, setupOpts)
-				return fmt.Errorf("enterprise hooks: connector %s hook verification failed: %w", conn.Name(), err)
+				return rollback(fmt.Errorf("enterprise hooks: connector %s hook verification failed: %w", conn.Name(), err))
 			}
 			if !present {
-				_ = conn.Teardown(ctx, setupOpts)
-				return fmt.Errorf("enterprise hooks: connector %s hook verification failed: owned hook command not present", conn.Name())
+				return rollback(fmt.Errorf("enterprise hooks: connector %s hook verification failed: owned hook command not present", conn.Name()))
 			}
 			lockEntry, err := connector.NewHookContractLockEntryForMode(
 				setupOpts,
@@ -375,17 +411,34 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 				true,
 			)
 			if err != nil {
-				_ = conn.Teardown(ctx, setupOpts)
-				return fmt.Errorf("enterprise hooks: hash managed hook runtime: %w", err)
+				return rollback(fmt.Errorf("enterprise hooks: hash managed hook runtime: %w", err))
 			}
+			lockWriteAttempted = true
 			if err := connector.SaveHookContractLockEntryForMode(dataDir, lockEntry, true); err != nil {
-				_ = conn.Teardown(ctx, setupOpts)
-				return fmt.Errorf("enterprise hooks: save hook contract lock: %w", err)
+				return rollback(fmt.Errorf("enterprise hooks: save hook contract lock: %w", err))
 			}
 
-			if err := hardenInstallFootprint(uid, gid, home, dataDir, conn.Name(), footprint, paths); err != nil {
-				_ = conn.Teardown(ctx, setupOpts)
-				return err
+			if err := hardenInstallFootprint(
+				uid,
+				gid,
+				home,
+				dataDir,
+				conn.Name(),
+				footprint,
+				paths,
+				pluginArtifacts,
+			); err != nil {
+				return rollback(err)
+			}
+			// Plugin/policy runtimes load their scoped bearer from the target
+			// user's stable sidecar at event time. Publish only after every other
+			// fallible setup and hardening step has succeeded, so an earlier
+			// failure cannot strand a replacement credential beside a rolled-back
+			// runtime artifact.
+			if requiresScopedHookToken {
+				if err := publishEnterpriseHookAPIToken(dataDir, conn.Name(), setupOpts.HookAPIToken); err != nil {
+					return rollback(fmt.Errorf("enterprise hooks: publish connector-scoped hook token: %w", err))
+				}
 			}
 			result = InstallResult{
 				Connector:       conn.Name(),
@@ -405,6 +458,19 @@ func Install(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 		return InstallResult{}, err
 	}
 	return result, nil
+}
+
+func validEnterpriseScopedHookToken(token string) bool {
+	token = strings.TrimSpace(token)
+	if len(token) != 64 {
+		return false
+	}
+	for _, character := range token {
+		if character < '0' || (character > '9' && character < 'a') || character > 'f' {
+			return false
+		}
+	}
+	return true
 }
 
 func validateUserHome(raw string) (string, error) {
@@ -436,24 +502,37 @@ func validateUserHome(raw string) (string, error) {
 	return clean, nil
 }
 
-func validateActivationSurfaces(home string, paths []string, uid int, allowMissing bool) error {
+func validateActivationSurfaces(
+	home string,
+	paths []string,
+	uid int,
+	allowRepair bool,
+	managedPluginArtifacts []string,
+) error {
 	if len(paths) == 0 {
 		return fmt.Errorf("enterprise hooks: connector does not expose a hook config path")
+	}
+	pluginArtifacts := make(map[string]struct{}, len(managedPluginArtifacts))
+	for _, artifact := range managedPluginArtifacts {
+		if artifact = strings.TrimSpace(artifact); artifact != "" {
+			pluginArtifacts[filepath.Clean(artifact)] = struct{}{}
+		}
 	}
 	for _, raw := range paths {
 		path := filepath.Clean(strings.TrimSpace(raw))
 		if path == "" {
 			continue
 		}
-		if err := validateHookConfigSurface(home, path, uid, allowMissing); err != nil {
+		_, allowMissing := pluginArtifacts[path]
+		if err := validateHookConfigSurface(home, path, uid, allowMissing, allowRepair); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func validateHookConfigSurface(home, path string, uid int, allowMissing bool) error {
-	if !allowMissing {
+func validateHookConfigSurface(home, path string, uid int, allowMissing, allowRepair bool) error {
+	if !allowMissing && !allowRepair {
 		return validateExistingUserFile(home, path, uid, "hook config")
 	}
 	if err := validateOptionalUserPathPrefix(home, path, uid, "hook config", false); err != nil {
@@ -467,16 +546,19 @@ func validateHookConfigSurface(home, path string, uid int, allowMissing bool) er
 		return fmt.Errorf("enterprise hooks: inspect hook config %s: %w", path, err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
-		if err := removeRepairSymlink(path, uid, "hook config"); err != nil {
-			return err
+		if allowRepair {
+			if err := removeRepairSymlink(path, uid, "hook config"); err != nil {
+				return err
+			}
+			return nil
 		}
-		return nil
+		return fmt.Errorf("enterprise hooks: refusing symlink hook config: %s", path)
 	}
 	if info.IsDir() {
 		return fmt.Errorf("enterprise hooks: hook config path is a directory: %s", path)
 	}
 	if info.Mode().Perm()&0o022 != 0 {
-		if allowMissing {
+		if allowRepair {
 			if ok, actual := fileOwnerMatches(path, uid); !ok {
 				return fmt.Errorf("enterprise hooks: hook config %s owner uid=%d does not match target uid=%d", path, actual, uid)
 			}
@@ -734,7 +816,12 @@ func removeRepairSymlink(path string, uid int, label string) error {
 	return nil
 }
 
-func hardenInstallFootprint(uid, gid int, home, dataDir, connectorName string, footprint connector.AgentPaths, hookConfigPaths []string) error {
+func hardenInstallFootprint(
+	uid, gid int,
+	home, dataDir, connectorName string,
+	footprint connector.AgentPaths,
+	hookConfigPaths, managedPluginArtifacts []string,
+) error {
 	if err := validateExistingUserDir(dataDir, uid, "data dir"); err != nil {
 		return err
 	}
@@ -783,6 +870,12 @@ func hardenInstallFootprint(uid, gid int, home, dataDir, connectorName string, f
 		return err
 	}
 	footprintFiles = append(footprintFiles, sidecarFiles...)
+	pluginArtifacts := make(map[string]struct{}, len(managedPluginArtifacts))
+	for _, artifact := range managedPluginArtifacts {
+		if artifact = strings.TrimSpace(artifact); artifact != "" {
+			pluginArtifacts[filepath.Clean(artifact)] = struct{}{}
+		}
+	}
 	for _, path := range sortedUnique(footprintFiles) {
 		path = strings.TrimSpace(path)
 		if path == "" {
@@ -798,16 +891,18 @@ func hardenInstallFootprint(uid, gid int, home, dataDir, connectorName string, f
 			return err
 		}
 		mode := os.FileMode(0o600)
-		for _, script := range footprint.HookScripts {
-			if filepath.Clean(script) == filepath.Clean(path) {
-				mode = 0o700
-				break
+		if _, isManagedPlugin := pluginArtifacts[filepath.Clean(path)]; !isManagedPlugin {
+			for _, script := range footprint.HookScripts {
+				if filepath.Clean(script) == filepath.Clean(path) {
+					mode = 0o700
+					break
+				}
 			}
-		}
-		for _, script := range footprint.GeneratedExecutables {
-			if filepath.Clean(script) == filepath.Clean(path) {
-				mode = 0o700
-				break
+			for _, script := range footprint.GeneratedExecutables {
+				if filepath.Clean(script) == filepath.Clean(path) {
+					mode = 0o700
+					break
+				}
 			}
 		}
 		if err := chmodOwnedPath(path, mode); err != nil {

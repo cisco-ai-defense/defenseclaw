@@ -1272,6 +1272,8 @@ class CommandRegistrationTests(unittest.TestCase):
         # list-packs is the read-only listing surface for guardrail rule
         # packs (built-in presets + the dir each connector enforces) — the
         # day-to-day counterpart to `setup <connector> --rule-pack` (R2).
+        # validate-pack delegates strict offline validation to the installed
+        # gateway helper without starting the runtime.
         # Keep this assertion exact so accidental command removal
         # (e.g. a careless `del`) is caught immediately.
         self.assertEqual(
@@ -1285,6 +1287,7 @@ class CommandRegistrationTests(unittest.TestCase):
                 "block-message",
                 "judge",
                 "list-packs",
+                "validate-pack",
             },
         )
 

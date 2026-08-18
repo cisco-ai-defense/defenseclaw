@@ -88,6 +88,9 @@ jobs:
       - name: Validate documentation shell snippets
         run: npm run validate-snippets
 
+      - name: Validate documentation links
+        run: npm run validate-links
+
       - name: Build static export
         env:
           # Project-pages subpath. Override in repo Settings → Pages

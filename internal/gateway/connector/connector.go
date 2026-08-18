@@ -66,6 +66,13 @@ type SetupOpts struct {
 	ProxyAddr string // 127.0.0.1:4000 (guardrail proxy — LLM traffic)
 	APIAddr   string // 127.0.0.1:18970 (API server — inspection endpoints)
 	APIToken  string // gateway bearer token; baked into hook curl -H
+	// ConfigHome is an explicit, caller-validated connector-native config
+	// directory for lifecycle operations. It prevents privileged setup,
+	// repair, teardown, and verification from resolving a different user
+	// profile through mutable process environment. Connectors that support
+	// it define the directory's exact meaning; Amp uses its ~/.config/amp
+	// root. An empty value preserves normal interactive home discovery.
+	ConfigHome string
 	// HookAPIToken is the least-privilege credential written beside generated
 	// hook artifacts. Proxy connectors keep APIToken as the master credential
 	// for their in-process/plugin integration while their generic shell hooks
@@ -199,6 +206,14 @@ type Connector interface {
 // the route dynamically at boot instead of hardcoding paths in api.go.
 type HookEndpoint interface {
 	HookAPIPath() string
+}
+
+// NotifyEndpoint is implemented by connectors that install an auxiliary
+// notification bridge alongside their primary lifecycle hook. Keeping the
+// path on the connector contract lets rotation readiness verify every scoped
+// route without hard-coding connector identities in the CLI.
+type NotifyEndpoint interface {
+	NotifyAPIPath() string
 }
 
 // HookConfigStub describes the bytes + mode a connector wants written
@@ -437,6 +452,10 @@ type HookProfile struct {
 	NormalizedAgentVersion  string
 	CompatibilityStatus     string
 	CompatibilityReason     string
+	// ToolCallLifecycle is the resolved, versioned routing and trust contract
+	// for structured tool proposals, result content, and lifecycle audit
+	// events. A zero value means the experimental stateful path is disabled.
+	ToolCallLifecycle ToolCallLifecycleContract
 
 	// ContentEnvelopeKey names the single nested payload object this
 	// connector hides inspectable content in (hermes nests prompt /
@@ -459,6 +478,21 @@ type HookProfile struct {
 	Decode     func(payload map[string]interface{}) HookProfileRequest
 	MapVerdict func(in HookVerdictInput) HookVerdictOutput
 	Respond    func(in HookRespondInput) HookRespondOutput
+}
+
+// ExperimentalToolLifecycleEligible reports whether the resolved upstream
+// schema is trusted for stateful enforcement. Unversioned connectors use their
+// explicitly reviewed default contract; a known version mismatch never does.
+func (profile HookProfile) ExperimentalToolLifecycleEligible() bool {
+	if profile.ToolCallLifecycle.Version != ToolCallLifecycleContractVersion {
+		return false
+	}
+	switch profile.CompatibilityStatus {
+	case HookCompatibilityKnown, HookCompatibilityUnversioned:
+		return true
+	default:
+		return false
+	}
 }
 
 // HookProfileRequest is the shared representation of a decoded hook
@@ -758,6 +792,45 @@ type HookScriptOwner interface {
 // pretending the connector owns a shell script.
 type HookConfigReferenceOwner interface {
 	HookConfigReferenceNeedles(opts SetupOpts) []string
+}
+
+// ScopedHookTokenRequirement is implemented by connector runtimes that depend
+// on a connector-scoped bearer credential. Such connectors must fail setup if
+// the least-privilege sidecar cannot be established; they may never fall back
+// to exposing the gateway master token to a host-agent runtime.
+type ScopedHookTokenRequirement interface {
+	RequiresScopedHookToken() bool
+}
+
+// ManagedPluginArtifactOwner identifies connector-managed plugin files that
+// host agents auto-load directly. Unlike shell hooks, these artifacts are
+// owner-readable policy/config files: they may be absent before first install,
+// remain mode 0600 as DefenseClaw-owned policy bridges, and are exclusively
+// written by DefenseClaw. Scoped credentials live in separate sidecars.
+type ManagedPluginArtifactOwner interface {
+	ManagedPluginArtifacts(opts SetupOpts) []string
+}
+
+// ManagedPluginArtifacts returns the connector's auto-loaded managed plugin
+// files, if any. The normalized list lets privileged installers distinguish a
+// plugin artifact from an executable hook even when legacy AgentPaths reports
+// the same file in HookScripts for lifecycle compatibility.
+func ManagedPluginArtifacts(conn Connector, opts SetupOpts) []string {
+	if conn == nil {
+		return nil
+	}
+	owner, ok := conn.(ManagedPluginArtifactOwner)
+	if !ok {
+		return nil
+	}
+	return uniqueNonEmptyStrings(owner.ManagedPluginArtifacts(opts))
+}
+
+// RequiresScopedHookToken reports whether conn must have a connector-scoped
+// credential before its managed runtime can be installed.
+func RequiresScopedHookToken(conn Connector) bool {
+	requirement, ok := conn.(ScopedHookTokenRequirement)
+	return ok && requirement.RequiresScopedHookToken()
 }
 
 // OwnsManagedHookRuntime reports whether the enterprise guardian can install

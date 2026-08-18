@@ -307,10 +307,9 @@ func (c *ClaudeCodeConnector) RequiredEnv() []EnvRequirement {
 //
 // CanBlock=true: PreToolUse/PermissionRequest honour permissionDecision=
 // deny; UserPromptSubmit and other pre-action events honour decision=block;
-// tasks honour continue=false. PostToolUse is advisory because the tool side
-// effects have already occurred; PostToolBatch can still stop the agentic loop
-// before the next model call. ConfigChange is blockable except for the
-// policy_settings source.
+// tasks honour continue=false. PostToolUse and PostToolBatch are advisory:
+// their returned bytes are evidence/context, not a typed action request.
+// ConfigChange is blockable except for the policy_settings source.
 //
 // CanAskNative=true: PreToolUse renders permissionDecision=ask when a
 // hook returns confirm, which Claude Code surfaces as a native HITL
@@ -328,7 +327,6 @@ func (c *ClaudeCodeConnector) HookCapabilities(opts SetupOpts) HookCapability {
 			"UserPromptExpansion",
 			"PreToolUse",
 			"PermissionRequest",
-			"PostToolBatch",
 			"TaskCreated",
 			"TaskCompleted",
 			"TeammateIdle",
@@ -569,7 +567,8 @@ func newClaudeCodeHookGroup(eventType, matcher string) claudeCodeHookGroup {
 		// response delta but cannot return an enforcement decision for this
 		// event. Running it synchronously adds interactive latency without a
 		// security benefit. Every other registered surface remains synchronous
-		// so tool, permission, lifecycle, and stop decisions can block.
+		// so pre-action tool, permission, lifecycle, and stop decisions can
+		// block; post-action result events remain advisory.
 		async: eventType == "MessageDisplay",
 	}
 }

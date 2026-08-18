@@ -162,8 +162,12 @@ jobs:
         with:
           node-version: "24"
           cache: npm
-          cache-dependency-path: extensions/defenseclaw/package-lock.json
+          cache-dependency-path: |
+            extensions/defenseclaw/package-lock.json
+            scripts/amp-plugin-typecheck/package-lock.json
       - run: make plugin
+      - name: Type-check Amp policy plugin against official API
+        run: make amp-plugin-typecheck
       - run: make go-lint
 
   go-test-gateway:
@@ -285,8 +289,13 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        goos: [linux, darwin]
-        goarch: [amd64, arm64]
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: arm64
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -399,6 +408,23 @@ jobs:
         with:
           name: python-coverage
           path: coverage-py.xml
+
+  make-test:
+    # Preserve the legacy required-check context without rerunning the corpus.
+    # The Go and Python aggregate jobs already require every underlying shard.
+    name: make test (unified)
+    needs: [go-test, python-lint-test]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require unified Go and Python test gates
+        env:
+          GO_TEST_RESULT: ${{ needs.go-test.result }}
+          PYTHON_TEST_RESULT: ${{ needs.python-lint-test.result }}
+        run: |
+          set -euo pipefail
+          test "$GO_TEST_RESULT" = success
+          test "$PYTHON_TEST_RESULT" = success
 
   python-wheel-install:
     name: Python Wheel Security Contract (${{ matrix.python-version }})
@@ -860,7 +886,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        connector: [codex, claudecode]
+        connector: [codex, claudecode, amp]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:

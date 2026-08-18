@@ -21,16 +21,141 @@ from __future__ import annotations
 import contextlib
 import os
 import stat
+import subprocess
+import sys
 import tempfile
 import uuid
 from collections.abc import Callable
 from contextlib import contextmanager, suppress
 from pathlib import Path
-from typing import TextIO
+from typing import TYPE_CHECKING, TextIO
+
+if TYPE_CHECKING:
+    from defenseclaw.windows_acl import WindowsFileSecurity
+
+# Stable UnsafePathError.code values. Add a constant rather than a new bare
+# string so every consumer's match stays exhaustive and greppable.
+UNSAFE_PATH_UNKNOWN = "unsafe-path-unknown"
+UNSAFE_PATH_NOT_REGULAR_FILE = "unsafe-path-not-regular-file"
+UNSAFE_PATH_SYMLINK_OR_REPARSE = "unsafe-path-symlink-or-reparse"
+UNSAFE_PATH_EXCEEDS_LIMIT = "unsafe-path-exceeds-limit"
+UNSAFE_PATH_CHANGED = "unsafe-path-changed"
+UNSAFE_PATH_UNTRUSTED_CUSTODY = "unsafe-path-untrusted-custody"
+UNSAFE_PATH_NOT_ABSOLUTE = "unsafe-path-not-absolute"
+UNSAFE_PATH_INSPECTION_FAILED = "unsafe-path-inspection-failed"
 
 
 class UnsafePathError(OSError):
-    """Raised when a sensitive write would traverse a reparse point."""
+    """Raised when a sensitive path fails a custody or stability check.
+
+    ``code`` is the stable, machine-readable reason. Callers that must map a
+    refusal onto their own vocabulary (Doctor turns these into PID-record
+    evidence statuses, and the distinction between "malformed" and
+    "unavailable" changes which repairs are allowed to run) branch on it
+    instead of matching the human-readable message, so rewording a message
+    cannot silently reclassify a security refusal.
+    """
+
+    def __init__(self, message: str, *, code: str = UNSAFE_PATH_UNKNOWN) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+MAX_DOTENV_BYTES = 1024 * 1024
+
+_WINDOWS_TRUSTED_SYSTEM_CONTROLLER_SIDS = frozenset(
+    {
+        "S-1-5-18",  # LocalSystem
+        "S-1-5-32-544",  # BUILTIN\Administrators
+        # NT SERVICE\TrustedInstaller
+        "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464",
+    }
+)
+
+_DOTENV_PROCESS_CONTROL_NAMES = frozenset(
+    {
+        "ALL_PROXY",
+        "BASH_ENV",
+        "CLAUDE_CONFIG_DIR",
+        "CODEX_HOME",
+        "COMSPEC",
+        "CURL_CA_BUNDLE",
+        "DEFENSECLAW_CONFIG",
+        "DEFENSECLAW_CODEX_LOOPBACK_TRUST",
+        "DEFENSECLAW_DATA_DIR",
+        "DEFENSECLAW_DAEMON",
+        "DEFENSECLAW_DEV",
+        "DEFENSECLAW_DISABLE_AWS_HTTP1_SHIM",
+        "DEFENSE" + "CLAW_DISABLE_REDACTION",
+        "DEFENSECLAW_DUMP_RAW_SECRETS",
+        "DEFENSECLAW_FAIL_MODE",
+        "DEFENSECLAW_FORCE_AWS_HTTP1_SHIM",
+        "DEFENSECLAW_GATEWAY_BIN",
+        "DEFENSECLAW_HOME",
+        "DEFENSECLAW_JSONL_DISABLE",
+        "DEFENSECLAW_OPENSHELL_ALLOW_UNPINNED",
+        "DEFENSECLAW_OTEL_TLS_INSECURE",
+        "DEFENSECLAW_POLICY_VALIDATE_ALLOW_NO_OPA",
+        "DEFENSECLAW_PREPAIR_TRUST_DEVICE_KEY",
+        "DEFENSECLAW_REVEAL_PII",
+        "DEFENSECLAW_SANDBOX_FORCE_REGEX_CLEANUP",
+        "DEFENSECLAW_STRICT_AVAILABILITY",
+        "DEFENSECLAW_TEST",
+        "DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN",
+        "DEFENSECLAW_TRUSTED_PROXY_CIDRS",
+        "DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES",
+        "DEFENSECLAW_UPGRADE_ALLOW_UNVERIFIED",
+        "DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST",
+        "ENV",
+        "GIT_SSL_NO_VERIFY",
+        "HOME",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "LOCPATH",
+        "NO_PROXY",
+        "NODE_EXTRA_CA_CERTS",
+        "NODE_OPTIONS",
+        "PATH",
+        "PATHEXT",
+        "PYTHONHOME",
+        "PYTHONPATH",
+        "PYTHONSTARTUP",
+        "REQUESTS_CA_BUNDLE",
+        "SSL_CERT_DIR",
+        "SSL_CERT_FILE",
+        "SYSTEMROOT",
+        "TEMP",
+        "TMP",
+        "TMPDIR",
+        "USERPROFILE",
+        "WINDIR",
+        "XDG_CACHE_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_RUNTIME_DIR",
+        "XDG_STATE_HOME",
+    }
+)
+_DOTENV_PROCESS_CONTROL_PREFIXES = ("DYLD_", "LD_")
+_DOTENV_PROCESS_CONTROL_DEFENSECLAW_PREFIXES = ("DEFENSE" + "CLAW_ALLOW_",)
+
+
+def dotenv_key_is_valid(key: str) -> bool:
+    """Return whether *key* is one portable ASCII environment name."""
+    return bool(
+        key
+        and key.isascii()
+        and (key[0].isalpha() or key[0] == "_")
+        and all(character.isalnum() or character == "_" for character in key)
+    )
+
+
+def dotenv_key_is_process_control(key: str) -> bool:
+    """Return whether a dotenv key can redirect or inject a child process."""
+    normalized = key.strip().upper()
+    return normalized in _DOTENV_PROCESS_CONTROL_NAMES or normalized.startswith(
+        _DOTENV_PROCESS_CONTROL_PREFIXES + _DOTENV_PROCESS_CONTROL_DEFENSECLAW_PREFIXES
+    )
 
 
 def _windows_extended_path(path: str | os.PathLike[str]) -> str:
@@ -147,27 +272,391 @@ def protect_private_file(path: str | os.PathLike[str]) -> None:
         os.close(fd)
 
 
-def open_regular_file_no_follow(path: str | os.PathLike[str]) -> int:
-    """Open one regular file without following a swapped symlink/reparse point."""
+def open_regular_file_no_follow(
+    path: str | os.PathLike[str],
+    *,
+    expected_stat: os.stat_result | None = None,
+    _deny_write_sharing: bool = False,
+) -> int:
+    """Open one regular file without following a swapped symlink/reparse point.
+
+    ``expected_stat`` lets a caller bind this open to an identity it inspected
+    before entering the shared reader. This closes an A→B→A pathname swap in
+    callers that perform custody checks before reading the file.
+    """
     target = os.path.abspath(os.fspath(path))
     _reject_reparse_chain(os.path.dirname(target) or os.curdir)
     expected = _reject_reparse_path(target, allow_missing=False)
     assert expected is not None
+    if expected_stat is not None and not os.path.samestat(expected_stat, expected):
+        raise UnsafePathError(
+            f"sensitive file changed before opening: {target}",
+            code=UNSAFE_PATH_CHANGED,
+        )
+    if not stat.S_ISREG(expected.st_mode):
+        raise UnsafePathError(
+            f"refusing sensitive access to non-file: {target}",
+            code=UNSAFE_PATH_NOT_REGULAR_FILE,
+        )
     # Windows CRT text mode translates CRLF while ``fstat().st_size`` reports
     # the exact bytes on disk. Callers that bind security evidence to the
     # opened file size must therefore always receive a binary descriptor.
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(target, flags)
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    if os.name == "nt" and _deny_write_sharing:
+        fd = _open_windows_stable_read_fd(target)
+    else:
+        fd = os.open(target, flags)
     try:
         opened = os.fstat(fd)
         if not stat.S_ISREG(opened.st_mode):
-            raise UnsafePathError(f"refusing sensitive access to non-file: {target}")
+            raise UnsafePathError(
+                f"refusing sensitive access to non-file: {target}",
+                code=UNSAFE_PATH_NOT_REGULAR_FILE,
+            )
         if not os.path.samestat(expected, opened):
-            raise UnsafePathError(f"sensitive file changed while opening: {target}")
+            raise UnsafePathError(
+                f"sensitive file changed while opening: {target}",
+                code=UNSAFE_PATH_CHANGED,
+            )
     except Exception:
         os.close(fd)
         raise
     return fd
+
+
+def _open_windows_stable_read_fd(path: str) -> int:
+    """Open a binary CRT reader backed by an NT handle that denies writers."""
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    generic_read = 0x80000000
+    file_share_read = 0x00000001
+    file_share_delete = 0x00000004
+    open_existing = 3
+    file_flag_open_reparse_point = 0x00200000
+    invalid_handle = ctypes.c_void_p(-1).value
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = [
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    ]
+    create_file.restype = wintypes.HANDLE
+    close_handle = kernel32.CloseHandle
+    close_handle.argtypes = [wintypes.HANDLE]
+    close_handle.restype = wintypes.BOOL
+
+    handle = create_file(
+        _windows_extended_path(path),
+        generic_read,
+        file_share_read | file_share_delete,
+        None,
+        open_existing,
+        file_flag_open_reparse_point,
+        None,
+    )
+    if handle == invalid_handle:
+        raise ctypes.WinError(ctypes.get_last_error())
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOINHERIT", 0)
+    try:
+        return msvcrt.open_osfhandle(handle, flags)
+    except BaseException:
+        close_handle(handle)
+        raise
+
+
+def _windows_file_stability_times(fd: int) -> tuple[int, int]:
+    """Return handle-bound NT last-write and change times."""
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    class _FileBasicInfo(ctypes.Structure):
+        _fields_ = [
+            ("creation_time", ctypes.c_longlong),
+            ("last_access_time", ctypes.c_longlong),
+            ("last_write_time", ctypes.c_longlong),
+            ("change_time", ctypes.c_longlong),
+            ("file_attributes", wintypes.DWORD),
+        ]
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    get_file_information = kernel32.GetFileInformationByHandleEx
+    get_file_information.argtypes = [
+        wintypes.HANDLE,
+        ctypes.c_int,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+    ]
+    get_file_information.restype = wintypes.BOOL
+    basic = _FileBasicInfo()
+    file_basic_info = 0
+    if not get_file_information(
+        msvcrt.get_osfhandle(fd),
+        file_basic_info,
+        ctypes.byref(basic),
+        ctypes.sizeof(basic),
+    ):
+        raise ctypes.WinError(ctypes.get_last_error())
+    return basic.last_write_time, basic.change_time
+
+
+def _file_stability_snapshot(fd: int) -> tuple[int, int, int, int, int]:
+    """Capture metadata that changes when an open file is mutated in place."""
+    opened = os.fstat(fd)
+    native_modified = 0
+    native_changed = 0
+    if os.name == "nt":
+        native_modified, native_changed = _windows_file_stability_times(fd)
+    return (
+        opened.st_size,
+        opened.st_mtime_ns,
+        opened.st_ctime_ns,
+        native_modified,
+        native_changed,
+    )
+
+
+def read_regular_file_no_follow(
+    path: str | os.PathLike[str],
+    *,
+    max_bytes: int,
+    expected_stat: os.stat_result | None = None,
+) -> bytes:
+    """Read one stable bounded file without following links or blocking on FIFOs."""
+    if max_bytes <= 0:
+        raise ValueError("max_bytes must be positive")
+    target = os.path.abspath(os.fspath(path))
+    fd = open_regular_file_no_follow(
+        target,
+        expected_stat=expected_stat,
+        _deny_write_sharing=True,
+    )
+    try:
+        opened = os.fstat(fd)
+        before = _file_stability_snapshot(fd)
+        if before[0] > max_bytes:
+            raise UnsafePathError(
+                f"sensitive file exceeds {max_bytes}-byte read limit",
+                code=UNSAFE_PATH_EXCEEDS_LIMIT,
+            )
+        chunks: list[bytes] = []
+        remaining = max_bytes + 1
+        while remaining:
+            chunk = os.read(fd, min(64 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        body = b"".join(chunks)
+        after = _file_stability_snapshot(fd)
+    finally:
+        os.close(fd)
+    if len(body) > max_bytes:
+        raise UnsafePathError(
+            f"sensitive file exceeds {max_bytes}-byte read limit",
+            code=UNSAFE_PATH_EXCEEDS_LIMIT,
+        )
+    if before != after or len(body) != before[0]:
+        raise UnsafePathError(
+            f"sensitive file changed while reading: {target}",
+            code=UNSAFE_PATH_CHANGED,
+        )
+    _reject_reparse_chain(os.path.dirname(target) or os.curdir)
+    current = _reject_reparse_path(target, allow_missing=False)
+    assert current is not None
+    if not os.path.samestat(opened, current):
+        raise UnsafePathError(
+            f"sensitive file changed while reading: {target}",
+            code=UNSAFE_PATH_CHANGED,
+        )
+    return body
+
+
+def trusted_system_subprocess_env() -> dict[str, str]:
+    """Return a minimal environment for fixed-path OS evidence commands."""
+    allowed = (
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TZ",
+        "SystemRoot",
+        "WINDIR",
+        "TEMP",
+        "TMP",
+    )
+    return {name: os.environ[name] for name in allowed if name in os.environ}
+
+
+def trusted_posix_executable_path(path: str | os.PathLike[str]) -> str:
+    """Resolve an executable held only by root/current-user, non-writable paths."""
+    if os.name == "nt":
+        raise OSError("POSIX executable custody is unavailable on Windows")
+    raw_path = os.fspath(path)
+    if not os.path.isabs(raw_path):
+        raise UnsafePathError(
+            "gateway executable path is not absolute",
+            code=UNSAFE_PATH_NOT_ABSOLUTE,
+        )
+    candidate = os.path.abspath(raw_path)
+    resolved = os.path.realpath(candidate)
+    try:
+        info = os.lstat(resolved)
+    except OSError as exc:
+        raise UnsafePathError(
+            "gateway executable could not be inspected",
+            code=UNSAFE_PATH_INSPECTION_FAILED,
+        ) from exc
+    if not stat.S_ISREG(info.st_mode) or not os.access(resolved, os.X_OK):
+        raise UnsafePathError(
+            "gateway executable is not an executable regular file",
+            code=UNSAFE_PATH_NOT_REGULAR_FILE,
+        )
+    geteuid = getattr(os, "geteuid", None)
+    current_uid = geteuid() if callable(geteuid) else info.st_uid
+    if info.st_uid not in {0, current_uid} or stat.S_IMODE(info.st_mode) & 0o022:
+        raise UnsafePathError(
+            "gateway executable is writable by an untrusted principal",
+            code=UNSAFE_PATH_UNTRUSTED_CUSTODY,
+        )
+    if sys.platform == "darwin" and darwin_acl_write_error(resolved):
+        raise UnsafePathError(
+            "gateway executable has a write-capable extended ACL",
+            code=UNSAFE_PATH_UNTRUSTED_CUSTODY,
+        )
+
+    current = Path(resolved).parent
+    while True:
+        parent_info = os.lstat(current)
+        if not stat.S_ISDIR(parent_info.st_mode):
+            raise UnsafePathError(
+                "gateway executable ancestor is not a directory",
+                code=UNSAFE_PATH_NOT_REGULAR_FILE,
+            )
+        if parent_info.st_uid not in {0, current_uid} or stat.S_IMODE(parent_info.st_mode) & 0o022:
+            raise UnsafePathError(
+                "gateway executable ancestor is writable by an untrusted principal",
+                code=UNSAFE_PATH_UNTRUSTED_CUSTODY,
+            )
+        if sys.platform == "darwin" and darwin_acl_write_error(current):
+            raise UnsafePathError(
+                "gateway executable ancestor has a write-capable extended ACL",
+                code=UNSAFE_PATH_UNTRUSTED_CUSTODY,
+            )
+        if current.parent == current:
+            break
+        current = current.parent
+    return resolved
+
+
+def _darwin_acl_output(path: str | os.PathLike[str]) -> tuple[str, str]:
+    """Return ``(mode, ACL text)`` from a fixed-path Darwin inspection."""
+    if sys.platform != "darwin":
+        return "", ""
+    try:
+        result = subprocess.run(
+            ["/bin/ls", "-lde", os.path.abspath(os.fspath(path))],
+            capture_output=True,
+            text=True,
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            env=trusted_system_subprocess_env(),
+            timeout=2.0,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return "", ""
+    if result.returncode != 0:
+        return "", ""
+    lines = result.stdout.splitlines()
+    first_line = lines[0] if lines else ""
+    mode_field = first_line.split(maxsplit=1)[0] if first_line else ""
+    return mode_field, "\n".join(lines[1:])
+
+
+def _darwin_acl_allows(acl_text: str, permissions: frozenset[str]) -> bool:
+    for raw_line in acl_text.splitlines():
+        line = raw_line.strip().lower()
+        if " allow " not in f" {line} ":
+            continue
+        granted = line.rsplit(" allow ", 1)[-1]
+        words = {word.strip() for word in granted.replace(":", ",").split(",")}
+        if words & permissions:
+            return True
+    return False
+
+
+def darwin_acl_confidentiality_error(path: str | os.PathLike[str]) -> str | None:
+    """Return whether a Darwin ACL grants file-content read access."""
+    if sys.platform != "darwin":
+        return None
+    mode_field, acl_text = _darwin_acl_output(path)
+    if not mode_field:
+        return "extended ACL could not be inspected"
+    if not acl_text:
+        return "extended ACL could not be interpreted" if "+" in mode_field else None
+    read_permissions = frozenset({"read", "readattr", "readextattr"})
+    return "extended ACL grants additional read access" if _darwin_acl_allows(acl_text, read_permissions) else None
+
+
+def darwin_acl_write_error(path: str | os.PathLike[str]) -> str | None:
+    """Return whether a Darwin ACL grants file-integrity-changing access."""
+    if sys.platform != "darwin":
+        return None
+    mode_field, acl_text = _darwin_acl_output(path)
+    if not mode_field:
+        return "extended ACL could not be inspected"
+    if not acl_text:
+        return "extended ACL could not be interpreted" if "+" in mode_field else None
+    write_permissions = frozenset(
+        {
+            "add_file",
+            "add_subdirectory",
+            "append",
+            "chown",
+            "delete",
+            "delete_child",
+            "write",
+            "writeattr",
+            "writeextattr",
+            "writesecurity",
+        }
+    )
+    return "extended ACL grants additional write access" if _darwin_acl_allows(acl_text, write_permissions) else None
+
+
+def _clear_darwin_extended_acl(fd: int, path: str) -> None:
+    """Remove a Darwin extended ACL and prove the path still names *fd*."""
+    expected = os.fstat(fd)
+    try:
+        result = subprocess.run(
+            ["/bin/chmod", "-N", f"/dev/fd/{fd}"],
+            capture_output=True,
+            text=True,
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            env=trusted_system_subprocess_env(),
+            pass_fds=(fd,),
+            timeout=2.0,
+            check=False,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired, OSError) as exc:
+        raise OSError("could not clear the private file's extended ACL") from exc
+    if result.returncode != 0:
+        raise OSError("could not clear the private file's extended ACL")
+    current = os.lstat(path)
+    if not os.path.samestat(expected, current):
+        raise UnsafePathError(
+            "sensitive file changed while clearing its extended ACL",
+            code=UNSAFE_PATH_CHANGED,
+        )
 
 
 def set_file_mode(fd: int, path: str, mode: int, *, set_owner: bool = False) -> None:
@@ -197,6 +686,10 @@ def set_file_mode(fd: int, path: str, mode: int, *, set_owner: bool = False) -> 
         fchmod(fd, mode)
     else:
         os.chmod(path, mode)
+    if sys.platform == "darwin" and mode & 0o077 == 0:
+        _clear_darwin_extended_acl(fd, path)
+        if fchmod is not None:
+            fchmod(fd, mode)
 
 
 def atomic_write_text_secure(
@@ -416,7 +909,7 @@ def _windows_dacl_is_protected(path: str | os.PathLike[str]) -> bool:
 
 def _windows_private_target_problem(path: str) -> str | None:
     try:
-        problem = windows_acl_write_error(path)
+        problem = windows_acl_confidentiality_error(path)
     except OSError as exc:
         return f"ACL inspection failed: {exc}"
     if problem is not None:
@@ -461,33 +954,251 @@ def _verify_or_repair_windows_private_target(path: str) -> None:
     raise OSError(f"private Windows DACL verification failed: {detail}")
 
 
+def _safe_os_error_label(exc: OSError) -> str:
+    """Return an error label that cannot replay sensitive exception text."""
+
+    code = getattr(exc, "winerror", None) or exc.errno
+    if code is None:
+        return type(exc).__name__
+    return f"{type(exc).__name__} code {code}"
+
+
+def _managed_windows_publication_name_stat(
+    path: str,
+    claimed_stat: os.stat_result,
+) -> os.stat_result:
+    """Prove that *path* still names the exclusively claimed publication."""
+
+    try:
+        named_stat = os.stat(path, follow_symlinks=False)
+    except OSError as exc:
+        code = getattr(exc, "winerror", None) or exc.errno
+        if code in {2, 3}:
+            raise OSError("managed Windows publication disappeared during validation") from None
+        raise OSError(f"managed Windows publication name inspection failed ({_safe_os_error_label(exc)})") from None
+    if not os.path.samestat(named_stat, claimed_stat):
+        raise OSError("managed Windows publication was concurrently replaced; the replacement was preserved") from None
+    return named_stat
+
+
+def _managed_windows_publication_security_problem(
+    path: str,
+    descriptor: int,
+    claimed_stat: os.stat_result,
+    expected_security: WindowsFileSecurity | None,
+) -> str | None:
+    """Return a value-safe custody failure for one identity-bound file."""
+
+    from defenseclaw import windows_acl
+
+    try:
+        actual_security = windows_acl.capture_fd(descriptor)
+    except OSError as exc:
+        return f"managed Windows security inspection failed ({_safe_os_error_label(exc)})"
+    if actual_security != expected_security:
+        return "managed Windows security changed during atomic publication"
+    inspection_problem: str | None = None
+    try:
+        problem = windows_acl_custody_confidentiality_error(path)
+    except OSError as exc:
+        problem = None
+        inspection_problem = f"managed Windows custody inspection failed ({_safe_os_error_label(exc)})"
+    _managed_windows_publication_name_stat(path, claimed_stat)
+    if inspection_problem is not None:
+        return inspection_problem
+    if problem is not None:
+        return f"published managed-custody target is unsafe: {problem}"
+    return None
+
+
+def _repair_managed_windows_publication(
+    path: str,
+    descriptor: int,
+    claimed_stat: os.stat_result,
+    expected_security: WindowsFileSecurity | None,
+) -> str | None:
+    """Repair and revalidate one claimed publication, returning safe failure detail."""
+
+    from defenseclaw import windows_acl
+
+    if expected_security is None:
+        return "expected managed Windows security is unavailable"
+    try:
+        windows_acl.apply_fd(descriptor, expected_security)
+        _managed_windows_publication_name_stat(path, claimed_stat)
+        repaired_security = windows_acl.capture_fd(descriptor)
+    except OSError as exc:
+        return _safe_os_error_label(exc)
+    if repaired_security != expected_security:
+        return "managed Windows security remained changed after repair"
+    inspection_problem: str | None = None
+    try:
+        problem = windows_acl_custody_confidentiality_error(path)
+    except OSError as exc:
+        problem = None
+        inspection_problem = f"managed Windows custody inspection failed ({_safe_os_error_label(exc)})"
+    _managed_windows_publication_name_stat(path, claimed_stat)
+    if inspection_problem is not None:
+        return inspection_problem
+    if problem is not None:
+        return f"managed Windows custody remained unsafe after repair: {problem}"
+    return None
+
+
+def _verify_managed_windows_private_target(
+    path: str,
+    staged_stat: os.stat_result,
+    expected_security: WindowsFileSecurity | None,
+) -> None:
+    """Repair or delete only the exact managed file published from staging."""
+
+    from defenseclaw import windows_acl
+
+    try:
+        descriptor = windows_acl.open_regular_security_mutation_fd(path)
+    except OSError as exc:
+        code = getattr(exc, "winerror", None) or exc.errno
+        if code in {2, 3}:
+            raise OSError("managed Windows publication disappeared before validation") from None
+        raise OSError(f"managed Windows publication claim failed ({_safe_os_error_label(exc)})") from None
+
+    claimed_stat: os.stat_result | None = None
+    problem: str | None = None
+    repair_problem: str | None = None
+    cleanup_problem: str | None = None
+    delete_requested = False
+    close_problem: str | None = None
+    try:
+        try:
+            claimed_stat = os.fstat(descriptor)
+        except OSError as exc:
+            raise OSError(
+                f"managed Windows publication identity inspection failed ({_safe_os_error_label(exc)})"
+            ) from None
+        if not os.path.samestat(claimed_stat, staged_stat):
+            raise OSError(
+                "managed Windows publication was concurrently replaced before validation; the replacement was preserved"
+            ) from None
+        _managed_windows_publication_name_stat(path, claimed_stat)
+        problem = _managed_windows_publication_security_problem(
+            path,
+            descriptor,
+            claimed_stat,
+            expected_security,
+        )
+        if problem is not None:
+            repair_problem = _repair_managed_windows_publication(
+                path,
+                descriptor,
+                claimed_stat,
+                expected_security,
+            )
+            if repair_problem is not None:
+                _managed_windows_publication_name_stat(path, claimed_stat)
+                try:
+                    windows_acl.delete_regular_fd(descriptor)
+                except OSError as exc:
+                    cleanup_problem = _safe_os_error_label(exc)
+                else:
+                    delete_requested = True
+    finally:
+        try:
+            os.close(descriptor)
+        except OSError as exc:
+            close_problem = _safe_os_error_label(exc)
+
+    if problem is None or repair_problem is None:
+        if close_problem is not None:
+            raise OSError(f"managed Windows publication handle close failed: {close_problem}") from None
+        return
+
+    concurrent_replacement = False
+    if delete_requested and close_problem is None:
+        try:
+            named_after = os.stat(path, follow_symlinks=False)
+        except OSError as exc:
+            code = getattr(exc, "winerror", None) or exc.errno
+            if code not in {2, 3}:
+                cleanup_problem = f"post-delete name inspection failed ({_safe_os_error_label(exc)})"
+        else:
+            if claimed_stat is None:
+                cleanup_problem = "claimed managed publication identity was unavailable"
+            elif os.path.samestat(named_after, claimed_stat):
+                cleanup_problem = "exact managed publication remained after bound deletion"
+            else:
+                concurrent_replacement = True
+
+    detail = problem
+    if repair_problem is not None:
+        detail += f"; repair failed: {repair_problem}"
+    if cleanup_problem is not None:
+        detail += f"; cleanup failed: {cleanup_problem}"
+    if close_problem is not None:
+        detail += f"; handle close failed: {close_problem}"
+    if concurrent_replacement:
+        detail += "; concurrent replacement appeared after exact cleanup and was preserved"
+    raise OSError(detail) from None
+
+
 def atomic_write_private(
     path: str | os.PathLike[str],
     write: Callable[[int], None],
     *,
     protect_parent: bool = True,
+    windows_managed_custody: bool = False,
+    windows_managed_security: WindowsFileSecurity | None = None,
 ) -> None:
     """Atomically materialize a sensitive file with native protections.
 
     The random same-directory staging file is protected before ``write`` is
     called.  Existing safe Windows DACLs are copied to the replacement so an
-    operator-hardened target is never widened.  Unsafe inherited write grants
-    are replaced by the canonical owner/SYSTEM policy instead.
+    operator-hardened target is never widened. Unsafe inherited read or write
+    grants are replaced by the canonical owner/SYSTEM policy instead.
+
+    ``windows_managed_custody`` is reserved for connector hook credentials
+    whose Go writer admits Windows system controllers. It preserves an existing
+    custody-safe DACL and validates, without narrowing, the containing hooks
+    directory. Generic user-secret writes retain the stricter default policy.
+    A new managed target receives the Go-compatible owner/SYSTEM/Administrators
+    descriptor rather than inheriting the parent or using a generic secret DACL.
+    A rollback may provide its previously captured ``windows_managed_security``
+    so the exact accepted descriptor, rather than generation B's descriptor,
+    is applied to the staged replacement before publication.
     """
+    if windows_managed_security is not None and not windows_managed_custody:
+        raise ValueError("managed Windows security requires managed-custody mode")
     target = os.path.abspath(os.fspath(path))
     parent = os.path.dirname(target) or os.curdir
     _reject_reparse_chain(parent)
     _make_private_directories(parent)
     with _hold_windows_directory(parent):
         _reject_reparse_chain(parent)
-        if protect_parent:
+        if windows_managed_custody and os.name == "nt":
+            problem = windows_acl_custody_write_error(
+                parent,
+                allow_current_user=True,
+                require_current_user_owner=True,
+            )
+            if problem is not None:
+                raise OSError(f"unsafe managed-custody parent {parent}: {problem}")
+        elif protect_parent:
             _protect_private_directory(parent)
         else:
             _validate_unmodified_parent(parent)
         _reject_reparse_path(target, allow_missing=True)
 
+        managed_security = windows_managed_security
+        if windows_managed_custody and os.name == "nt" and os.path.exists(target) and managed_security is None:
+            problem = windows_acl_custody_confidentiality_error(target)
+            if problem is not None:
+                raise OSError(f"unsafe managed-custody target {target}: {problem}")
+            from defenseclaw import windows_acl
+
+            managed_security = windows_acl.capture_path(target)
+
         fd = -1
         tmp = ""
+        staged_stat: os.stat_result | None = None
         try:
             fd, tmp = tempfile.mkstemp(
                 prefix=f".{os.path.basename(target)}.",
@@ -497,21 +1208,43 @@ def atomic_write_private(
             set_file_mode(fd, tmp, 0o600, set_owner=True)
             write(fd)
             os.fsync(fd)
+            if windows_managed_custody and os.name == "nt":
+                staged_stat = os.fstat(fd)
             os.close(fd)
             fd = -1
 
             _reject_reparse_chain(parent)
             _reject_reparse_path(target, allow_missing=True)
-            if os.name == "nt" and os.path.exists(target):
+            if windows_managed_custody and os.name == "nt":
+                from defenseclaw import windows_acl
+
+                if managed_security is not None:
+                    windows_acl.apply_path(tmp, managed_security)
+                else:
+                    managed_security = windows_acl.private_security_for_directory(parent)
+                    windows_acl.apply_path(tmp, managed_security)
+                problem = windows_acl_custody_confidentiality_error(tmp)
+                if problem is not None:
+                    raise OSError(f"staged managed-custody target is unsafe: {problem}")
+            elif os.name == "nt" and os.path.exists(target):
                 # Preserve an existing DACL only when it grants no untrusted
-                # write-like access. A permissive inherited DACL must not be
-                # copied onto the new protected staging file.
-                if windows_acl_write_error(target) is None and _windows_acl_has_required_access(target):
+                # read or write access. A readable inherited DACL must not be
+                # copied onto the new secret-bearing staging file.
+                if windows_acl_confidentiality_error(target) is None and _windows_acl_has_required_access(target):
                     copy_windows_dacl(target, tmp)
             replace_file_durable(tmp, target)
             tmp = ""
             if os.name == "nt":
-                _verify_or_repair_windows_private_target(target)
+                if windows_managed_custody:
+                    if staged_stat is None:
+                        raise OSError("managed Windows staging identity is unavailable")
+                    _verify_managed_windows_private_target(
+                        target,
+                        staged_stat,
+                        managed_security,
+                    )
+                else:
+                    _verify_or_repair_windows_private_target(target)
         finally:
             if fd != -1:
                 with suppress(OSError):
@@ -521,7 +1254,14 @@ def atomic_write_private(
                     os.unlink(tmp)
 
 
-def atomic_write_private_bytes(path: str | os.PathLike[str], data: bytes, *, protect_parent: bool = True) -> None:
+def atomic_write_private_bytes(
+    path: str | os.PathLike[str],
+    data: bytes,
+    *,
+    protect_parent: bool = True,
+    windows_managed_custody: bool = False,
+    windows_managed_security: WindowsFileSecurity | None = None,
+) -> None:
     """Convenience wrapper for a complete in-memory payload."""
 
     def _write(fd: int) -> None:
@@ -532,7 +1272,13 @@ def atomic_write_private_bytes(path: str | os.PathLike[str], data: bytes, *, pro
                 raise OSError("short write while materializing private file")
             view = view[written:]
 
-    atomic_write_private(path, _write, protect_parent=protect_parent)
+    atomic_write_private(
+        path,
+        _write,
+        protect_parent=protect_parent,
+        windows_managed_custody=windows_managed_custody,
+        windows_managed_security=windows_managed_security,
+    )
 
 
 def windows_acl_write_error(path: str | os.PathLike[str]) -> str | None:
@@ -546,7 +1292,12 @@ def windows_acl_write_error(path: str | os.PathLike[str]) -> str | None:
     if null_dacl:
         return "ACL grants write access to Everyone (null DACL)"
 
-    current_sid = _windows_current_user_sid()
+    try:
+        current_sid = _windows_current_user_sid()
+    except OSError:
+        return "current user SID could not be resolved"
+    if not current_sid:
+        return "current user SID could not be resolved"
     if owner_sid != current_sid:
         return f"owner SID {owner_sid or '<unknown>'} is not the current user"
 
@@ -560,6 +1311,175 @@ def windows_acl_write_error(path: str | os.PathLike[str]) -> str | None:
         if sid == "S-1-3-0" and inheritance & 0x08:
             continue
         return f"ACL grants write access to untrusted SID {sid or '<unknown>'}"
+    return None
+
+
+def windows_acl_custody_write_error(
+    path: str | os.PathLike[str],
+    *,
+    allow_current_user: bool,
+    require_current_user_owner: bool = False,
+) -> str | None:
+    """Return why a path is outside trusted Windows write custody.
+
+    Private credential files use :func:`windows_acl_write_error`, which
+    deliberately requires current-user ownership. Executable and ancestor
+    custody must also admit objects owned by Windows itself. This validator
+    accepts only LocalSystem, BUILTIN\\Administrators, TrustedInstaller, and
+    optionally the current user as owners or write-capable trustees. Runtime
+    state can additionally require current-user ownership while still
+    admitting Windows system controllers as write-capable trustees.
+    """
+    if os.name != "nt":
+        return None
+    try:
+        owner_sid, null_dacl, entries = _windows_acl_snapshot(os.fspath(path))
+    except OSError as exc:
+        return f"cannot read Windows ACL ({exc})"
+    if null_dacl:
+        return "ACL grants write access to Everyone (null DACL)"
+
+    current_sid = ""
+    trust_current_user = allow_current_user or require_current_user_owner
+    if trust_current_user:
+        try:
+            current_sid = _windows_current_user_sid()
+        except OSError:
+            return "current user SID could not be resolved"
+        if not current_sid:
+            return "current user SID could not be resolved"
+    system_controllers = set(_WINDOWS_TRUSTED_SYSTEM_CONTROLLER_SIDS)
+    trusted_owners = set(system_controllers)
+    if trust_current_user:
+        trusted_owners.add(current_sid)
+    if require_current_user_owner and owner_sid != current_sid:
+        return f"owner SID {owner_sid or '<unknown>'} is not the current user"
+    if not require_current_user_owner and owner_sid not in trusted_owners:
+        return f"owner SID {owner_sid or '<unknown>'} is not a trusted custody principal"
+
+    trusted_writers = system_controllers | {
+        "S-1-3-4",  # OWNER RIGHTS, constrained by the owner check above
+        owner_sid,
+    }
+    if trust_current_user:
+        trusted_writers.add(current_sid)
+    write_mask = 0x10000000 | 0x40000000 | 0x000D0156
+    for permissions, access_mode, inheritance, sid in entries:
+        if access_mode not in (1, 2) or not permissions & write_mask:
+            continue
+        if sid in trusted_writers:
+            continue
+        if sid == "S-1-3-0" and inheritance & 0x08:
+            continue
+        return f"ACL grants write access to untrusted SID {sid or '<unknown>'}"
+    return None
+
+
+def windows_acl_confidentiality_error(path: str | os.PathLike[str]) -> str | None:
+    """Return why *path* does not have a private Windows DACL.
+
+    ``windows_acl_write_error`` protects integrity, but a secret-bearing file
+    can still be unsafe when another principal has read-only access.  This
+    stricter validator accepts effective read/write grants only for the current
+    owner, Owner Rights, and LocalSystem.  Inherit-only ACEs do not apply to the
+    file itself and are therefore ignored.
+
+    Non-Windows callers receive ``None`` so cross-platform permission checks can
+    use this helper without importing Win32 APIs.
+    """
+    if os.name != "nt":
+        return None
+    try:
+        owner_sid, null_dacl, entries = _windows_acl_snapshot(os.fspath(path))
+    except OSError as exc:
+        return f"cannot read Windows ACL ({exc})"
+    if null_dacl:
+        return "ACL grants read/write access to Everyone (null DACL)"
+
+    try:
+        current_sid = _windows_current_user_sid()
+    except OSError:
+        return "current user SID could not be resolved"
+    if not current_sid:
+        return "current user SID could not be resolved"
+    if owner_sid != current_sid:
+        return f"owner SID {owner_sid or '<unknown>'} is not the current user"
+
+    trusted = {"S-1-3-4", "S-1-5-18", current_sid}  # OWNER RIGHTS, LocalSystem, current user
+    # Content confidentiality depends on GENERIC_READ/GENERIC_ALL or
+    # FILE_READ_DATA. Metadata-only rights such as READ_CONTROL and
+    # FILE_READ_ATTRIBUTES do not reveal secret bytes.
+    read_mask = 0x80000000 | 0x10000000 | 0x00000001
+    write_mask = 0x10000000 | 0x40000000 | 0x000D0156
+    inherit_only_ace = 0x08
+    for permissions, access_mode, inheritance, sid in entries:
+        if access_mode not in (1, 2) or inheritance & inherit_only_ace:
+            continue
+        if sid in trusted:
+            continue
+        if permissions & read_mask:
+            return f"ACL grants read access to untrusted SID {sid or '<unknown>'}"
+        if permissions & write_mask:
+            return f"ACL grants write access to untrusted SID {sid or '<unknown>'}"
+    if not _windows_acl_has_required_access(path):
+        return "owner/SYSTEM effective access is missing"
+    return None
+
+
+def windows_acl_custody_confidentiality_error(path: str | os.PathLike[str]) -> str | None:
+    """Validate a current-user secret managed by Windows system controllers.
+
+    The gateway's connector-token trust model admits the current user,
+    LocalSystem, BUILTIN\\Administrators, and TrustedInstaller so the same
+    managed credential survives user and service lifecycle transitions.
+    Generic user-secret validation remains stricter; this predicate is for
+    that managed-token boundary only. Every other effective read or write ACE,
+    a foreign owner, an inheritable or null DACL, or missing owner/SYSTEM access
+    still fails.
+    """
+
+    if os.name != "nt":
+        return None
+    try:
+        owner_sid, null_dacl, entries = _windows_acl_snapshot(os.fspath(path))
+    except OSError as exc:
+        return f"cannot read Windows ACL ({exc})"
+    if null_dacl:
+        return "ACL grants read/write access to Everyone (null DACL)"
+
+    try:
+        current_sid = _windows_current_user_sid()
+    except OSError:
+        return "current user SID could not be resolved"
+    if not current_sid:
+        return "current user SID could not be resolved"
+    if owner_sid != current_sid:
+        return f"owner SID {owner_sid or '<unknown>'} is not the current user"
+    try:
+        dacl_protected = _windows_dacl_is_protected(path)
+    except OSError as exc:
+        return f"cannot inspect Windows DACL protection ({exc})"
+    if not dacl_protected:
+        return "Windows DACL is inheritable"
+
+    trusted = set(_WINDOWS_TRUSTED_SYSTEM_CONTROLLER_SIDS) | {
+        "S-1-3-4",  # OWNER RIGHTS, constrained by the owner check above
+        current_sid,
+    }
+    # Keep exact parity with the gateway's otlpWindowsRejectUntrustedReadACEs:
+    # GENERIC_{READ,ALL,EXECUTE}, FILE_READ_{DATA,EA,ATTRIBUTES}, FILE_EXECUTE.
+    read_mask = 0x80000000 | 0x10000000 | 0x20000000 | 0x00000001 | 0x00000008 | 0x00000080 | 0x00000020
+    write_mask = 0x10000000 | 0x40000000 | 0x000D0156
+    inherit_only_ace = 0x08
+    for permissions, access_mode, inheritance, sid in entries:
+        if access_mode not in (1, 2) or inheritance & inherit_only_ace or sid in trusted:
+            continue
+        if permissions & read_mask:
+            return f"ACL grants read access to untrusted SID {sid or '<unknown>'}"
+        if permissions & write_mask:
+            return f"ACL grants write access to untrusted SID {sid or '<unknown>'}"
+    if not _windows_acl_has_required_access(path):
+        return "owner/SYSTEM effective access is missing"
     return None
 
 
@@ -705,20 +1625,49 @@ def _hold_windows_directory(path: str):
 
 def _windows_acl_has_required_access(path: str | os.PathLike[str]) -> bool:
     owner_sid, null_dacl, entries = _windows_acl_snapshot(os.fspath(path))
-    current_sid = _windows_current_user_sid()
-    if null_dacl or owner_sid != current_sid:
+    try:
+        current_sid = _windows_current_user_sid()
+    except OSError:
         return False
-    allowed = {
-        sid for permissions, access_mode, _inheritance, sid in entries if access_mode in (1, 2) and permissions != 0
-    }
-    denied = {sid for permissions, access_mode, _inheritance, sid in entries if access_mode == 3 and permissions != 0}
+    if not current_sid or null_dacl or owner_sid != current_sid:
+        return False
+
+    file_read_data = 0x00000001
+    file_write_data = 0x00000002
+    required_content = file_read_data | file_write_data
+    generic_all = 0x10000000
+    generic_read = 0x80000000
+    generic_write = 0x40000000
+    inherit_only_ace = 0x08
+
+    def _content_mask(permissions: int) -> int:
+        concrete = permissions & required_content
+        if permissions & generic_all:
+            concrete |= required_content
+        if permissions & generic_read:
+            concrete |= file_read_data
+        if permissions & generic_write:
+            concrete |= file_write_data
+        return concrete
+
+    # Without complete token-group expansion for both the interactive owner
+    # and LocalSystem, an applicable group deny cannot be proven irrelevant.
+    # Reject it conservatively instead of preserving an unusable secret DACL.
+    for permissions, access_mode, inheritance, _sid in entries:
+        if access_mode == 3 and not inheritance & inherit_only_ace and _content_mask(permissions):
+            return False
+
+    def _has_content_access(principal_sids: set[str]) -> bool:
+        allowed_content = 0
+        for permissions, access_mode, inheritance, sid in entries:
+            if inheritance & inherit_only_ace or sid not in principal_sids:
+                continue
+            if access_mode in (1, 2):
+                allowed_content |= _content_mask(permissions)
+        return allowed_content == required_content
+
     required_owner_sids = {current_sid, "S-1-3-4"}
-    return (
-        "S-1-5-18" in allowed
-        and "S-1-5-18" not in denied
-        and bool(required_owner_sids & allowed)
-        and not required_owner_sids & denied
-    )
+    return _has_content_access({"S-1-5-18"}) and _has_content_access(required_owner_sids)
 
 
 def _windows_current_user_sid() -> str:
@@ -805,10 +1754,16 @@ def _reject_reparse_path(path: str, *, allow_missing: bool) -> os.stat_result | 
             return None
         raise
     if os.path.islink(path):
-        raise UnsafePathError(f"refusing sensitive write through symlink: {path}")
+        raise UnsafePathError(
+            f"refusing sensitive write through symlink: {path}",
+            code=UNSAFE_PATH_SYMLINK_OR_REPARSE,
+        )
     attributes = getattr(info, "st_file_attributes", 0)
     if attributes & 0x400:  # FILE_ATTRIBUTE_REPARSE_POINT
-        raise UnsafePathError(f"refusing sensitive write through reparse point: {path}")
+        raise UnsafePathError(
+            f"refusing sensitive write through reparse point: {path}",
+            code=UNSAFE_PATH_SYMLINK_OR_REPARSE,
+        )
     return info
 
 

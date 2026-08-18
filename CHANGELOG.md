@@ -69,6 +69,22 @@ boundary.
 
 ### Behaviour changes (no flag)
 
+- **Claude Code post-tool findings are advisory and provenance-aware**:
+  `PostToolUse` and `PostToolBatch` retain findings plus shadow `would_block`
+  telemetry without stopping the next model turn. Returned source text is no
+  longer evaluated as an executable command or sensitive-path request; typed
+  command/path enforcement remains on `PreToolUse`, and physically verified
+  standalone source reads reuse the Codex low-noise source boundary.
+- **Amp is now a first-class connector on macOS, Linux, and native Windows**:
+  setup installs an owner-only authenticated system policy plugin for Amp's five
+  documented callbacks; action mode gates `tool.call` before execution and can
+  withhold unsafe `tool.result` output before model delivery. CLI, TUI, macOS
+  app, native Windows setup, discovery, doctor, upgrade/uninstall, MCP, skills,
+  plugins, Agent360, Galileo, audit, and hook-generated observability all share
+  the same connector contract. Amp exposes no documented native OTLP,
+  `traceparent`, `session.end`, or dedicated subagent lifecycle callback, so
+  DefenseClaw correlates only source-backed thread events and governs delegation
+  tools at their `tool.call` boundary.
 - **`make all` is again the explicit same-checkout developer reinstall**:
   markerless or older source-owned state may advance with the checkout for
   local development. Foreign, newer, release-managed, and different-checkout

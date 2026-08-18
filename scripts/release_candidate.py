@@ -170,9 +170,14 @@ RESOLVER_ASSETS = {
     ),
 }
 RELEASE_CHANNEL_BOOTSTRAP_START_VERSION = (0, 8, 8)
+SANDBOX_INSTALLER_ASSET_START_VERSION = (0, 8, 11)
 MAX_RESOLVER_BYTES = 4 * 1024 * 1024
 MAX_INSTALLER_BYTES = 4 * 1024 * 1024
 INSTALLER_ASSETS = {
+    "install-openshell-sandbox.sh": ReviewedScriptAsset(
+        ROOT / "scripts" / "install-openshell-sandbox.sh",
+        b"# DefenseClaw OpenShell sandbox installer complete v1",
+    ),
     "install.sh": ReviewedScriptAsset(
         ROOT / "scripts" / "install.sh",
         b"# DefenseClaw POSIX installer complete v1",
@@ -193,7 +198,9 @@ WINDOWS_SETUP_PUBLISHER = "Cisco Systems, Inc."
 WINDOWS_SETUP_CLIENTS = {
     "codex": "0.144.3",
     "claudecode": "2.1.208",
+    "amp": "0.0.1785334225-g9abe75",
 }
+WINDOWS_SETUP_CONNECTORS = ["codex", "claudecode", "amp"]
 WINDOWS_SETUP_CERTIFICATION_REQUIREMENTS = (
     "automatic-codex-trust",
     "lifecycle",
@@ -201,7 +208,7 @@ WINDOWS_SETUP_CERTIFICATION_REQUIREMENTS = (
     "tool-block",
     "gateway-jsonl",
     "audit-correlation",
-    "connector-otlp",
+    "gateway-generated-connector-telemetry",
     "repair",
     "upgrade",
     "uninstall",
@@ -1011,12 +1018,16 @@ def resolver_asset_names(version: str) -> tuple[str, ...]:
 
 
 def installer_asset_names(version: str) -> tuple[str, ...]:
-    """Return reviewed public installers shipped as immutable 0.8.8+ assets."""
+    """Return reviewed public installers shipped for one immutable release."""
 
     _validate_version(version)
-    if tuple(map(int, version.split("."))) < RELEASE_CHANNEL_BOOTSTRAP_START_VERSION:
+    version_key = tuple(map(int, version.split(".")))
+    if version_key < RELEASE_CHANNEL_BOOTSTRAP_START_VERSION:
         return ()
-    return tuple(sorted(INSTALLER_ASSETS))
+    names = set(INSTALLER_ASSETS)
+    if version_key < SANDBOX_INSTALLER_ASSET_START_VERSION:
+        names.remove("install-openshell-sandbox.sh")
+    return tuple(sorted(names))
 
 
 def release_identity_asset_names(version: str) -> tuple[str, ...]:
@@ -1294,30 +1305,13 @@ def stage_installers(directory: Path, version: str) -> None:
     _validate_installer_assets(directory, version, snapshots=snapshots)
 
 
-def _load_upgrade_baseline_policy(
-    candidate_version: str | None = None,
-    policy_path: Path | None = None,
+def _parse_upgrade_baseline_policy_payload(
+    candidate_version: str,
+    payload: bytes,
 ) -> tuple[list[str], dict[str, list[str]]]:
-    if candidate_version is None:
-        try:
-            source_identity = json.loads(
-                (ROOT / "release" / "source-install-identity.json").read_text(encoding="utf-8")
-            )
-            candidate_version = source_identity["source_release"]
-        except (
-            OSError,
-            UnicodeError,
-            json.JSONDecodeError,
-            KeyError,
-            TypeError,
-        ) as exc:
-            raise CandidateError("could not resolve source release for baseline validation") from exc
-        if not isinstance(candidate_version, str) or not VERSION_RE.fullmatch(candidate_version):
-            raise CandidateError("source release for baseline validation is invalid")
-    policy_path = policy_path or UPGRADE_BASELINES_PATH
     try:
-        document = json.loads(policy_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        document = json.loads(payload.decode("utf-8", errors="strict"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise CandidateError(f"could not load tested upgrade baselines: {exc}") from exc
     configured = document.get("published_baselines")
     config_versions = document.get("published_baseline_config_versions")
@@ -1362,6 +1356,34 @@ def _load_upgrade_baseline_policy(
         raise CandidateError("tested Windows upgrade baseline policy is invalid")
     _validate_historical_artifact_digest_policy(configured)
     return configured, {"windows": windows}
+
+
+def _load_upgrade_baseline_policy(
+    candidate_version: str | None = None,
+    policy_path: Path | None = None,
+) -> tuple[list[str], dict[str, list[str]]]:
+    if candidate_version is None:
+        try:
+            source_identity = json.loads(
+                (ROOT / "release" / "source-install-identity.json").read_text(encoding="utf-8")
+            )
+            candidate_version = source_identity["source_release"]
+        except (
+            OSError,
+            UnicodeError,
+            json.JSONDecodeError,
+            KeyError,
+            TypeError,
+        ) as exc:
+            raise CandidateError("could not resolve source release for baseline validation") from exc
+        if not isinstance(candidate_version, str) or not VERSION_RE.fullmatch(candidate_version):
+            raise CandidateError("source release for baseline validation is invalid")
+    policy_path = policy_path or UPGRADE_BASELINES_PATH
+    try:
+        payload = policy_path.read_bytes()
+    except OSError as exc:
+        raise CandidateError(f"could not load tested upgrade baselines: {exc}") from exc
+    return _parse_upgrade_baseline_policy_payload(candidate_version, payload)
 
 
 def _validate_historical_artifact_digest_policy(configured: list[str]) -> None:
@@ -1501,6 +1523,10 @@ def _expected_runtime_config_version(version: str) -> int:
 
 def _expected_release_artifacts(version: str) -> dict[str, Any]:
     _validate_version(version)
+    # Preserve the complete protocol-2 map for authenticated compatibility.
+    # Darwin/amd64 is a schema slot, not a supported macOS target: current
+    # install, upgrade, rescue, package, build-validation, and certification
+    # paths all reject Intel macOS before selecting a runtime artifact.
     gateways: dict[str, dict[str, str]] = {}
     for os_name in ("darwin", "linux", "windows"):
         gateways[os_name] = {
@@ -4835,7 +4861,7 @@ def _validate_windows_setup_certification(
                 "publisher": WINDOWS_SETUP_PUBLISHER,
             }
             or document.get("clients") != WINDOWS_SETUP_CLIENTS
-            or document.get("connectors") != ["codex", "claudecode"]
+            or document.get("connectors") != WINDOWS_SETUP_CONNECTORS
             or document.get("requirements") != list(WINDOWS_SETUP_CERTIFICATION_REQUIREMENTS)
         )
     else:
@@ -5011,20 +5037,20 @@ def record_windows_unverified(
 
 def _validated_effective_upgrade_baselines(root: Path, version: str) -> str:
     path = root / EFFECTIVE_UPGRADE_BASELINES_FILENAME
-    before = _read_bounded_regular_file(
+    captured = _read_bounded_regular_file(
         path,
         label="effective upgrade-baseline policy",
         max_bytes=MAX_EFFECTIVE_UPGRADE_BASELINES_BYTES,
     )
-    _load_upgrade_baseline_policy(version, path)
-    after = _read_bounded_regular_file(
+    _parse_upgrade_baseline_policy_payload(version, captured)
+    current = _read_bounded_regular_file(
         path,
         label="effective upgrade-baseline policy",
         max_bytes=MAX_EFFECTIVE_UPGRADE_BASELINES_BYTES,
     )
-    if before != after:
+    if captured != current:
         raise CandidateError("effective upgrade-baseline policy changed during validation")
-    return hashlib.sha256(after).hexdigest()
+    return hashlib.sha256(captured).hexdigest()
 
 
 def assemble(

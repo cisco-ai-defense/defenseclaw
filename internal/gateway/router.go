@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
@@ -49,6 +50,7 @@ type EventRouter struct {
 	observabilityV8Lifecycle     lifecycleV8Runtime
 	observabilityV8Authoritative bool
 	configMu                     sync.RWMutex
+	rulePackMu                   sync.RWMutex
 	notify                       *NotificationQueue
 	judge                        *LLMJudge
 	rp                           *guardrail.RulePack
@@ -334,7 +336,18 @@ func (r *EventRouter) logStreamToolAction(sessionKey, action, toolName, toolID, 
 
 // SetRulePack configures the guardrail rule pack for tool result inspection.
 func (r *EventRouter) SetRulePack(rp *guardrail.RulePack) {
+	r.rulePackMu.Lock()
 	r.rp = rp
+	r.rulePackMu.Unlock()
+}
+
+func (r *EventRouter) rulePack() *guardrail.RulePack {
+	if r == nil {
+		return nil
+	}
+	r.rulePackMu.RLock()
+	defer r.rulePackMu.RUnlock()
+	return r.rp
 }
 
 // Route dispatches a single event frame to the correct handler.
@@ -674,8 +687,16 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 				msg.Model, msg.Provider, promptTokens, completionTokens)
 		}
 
+		// Without a tracker, session key, or stable occurrence identity we
+		// preserve the historical best-effort prompt scan. When identity is
+		// available, RecordOccurrence makes freshness authoritative for both
+		// the per-message scan and the multi-turn accumulator.
+		contextOccurrenceRecorded := true
 		if r.contextTracker != nil && envelope.SessionKey != "" && contentStr != "" {
-			r.contextTracker.Record(envelope.SessionKey, msg.Role, contentStr)
+			contextOccurrenceRecorded = r.contextTracker.RecordOccurrence(
+				envelope.SessionKey, msg.Role, contentStr,
+				envelope.MessageID, envelope.MessageSeq,
+			)
 		}
 
 		// Best-effort prompt-direction guardrail scan for inbound user
@@ -687,13 +708,14 @@ func (r *EventRouter) handleSessionMessage(evt EventFrame) {
 		// (e.g. OpenClaw shelling out to a separate CLI subprocess
 		// whose fetch is not monkey-patched) are recorded as canonical
 		// prompt events but never judged.
-		if msg.Role == "user" && contentStr != "" {
+		if msg.Role == "user" && contentStr != "" && contextOccurrenceRecorded {
 			r.scanInboundPrompt(envelope.SessionKey, envelope.MessageID, msg.Model, contentStr)
 		}
 
 		// managed_enterprise: multi-turn injection detection is a local
 		// heuristic — disabled so AID stays the sole decision-maker.
-		if !ManagedEnterpriseActive() && msg.Role == "user" && r.contextTracker != nil && envelope.SessionKey != "" {
+		if !ManagedEnterpriseActive() && msg.Role == "user" && contextOccurrenceRecorded &&
+			r.contextTracker != nil && envelope.SessionKey != "" {
 			if r.contextTracker.HasRepeatedInjection(envelope.SessionKey, 3) {
 				r.logStreamAction(envelope.SessionKey, string(audit.ActionGatewayMultiTurnInjection), envelope.SessionKey,
 					"repeated injection patterns detected across multiple user turns")
@@ -1236,8 +1258,17 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 		}
 	}
 
-	// Use the shared rule engine — no tool-name gating.
-	findings := ScanAllRules(string(payload.Args), payload.Tool)
+	// The typed router frame establishes a trusted action boundary, but this
+	// lane is observational and therefore cannot synchronously deny.
+	findings := dispatchTrustedAction(context.Background(), trustedActionRequest{
+		Input: actionfacts.Input{
+			Tool: payload.Tool,
+			Args: payload.Args,
+		},
+		LegacyText:         string(payload.Args),
+		Connector:          r.connectorName(),
+		EnforcementCapable: false,
+	})
 	severity := HighestSeverity(findings)
 	dangerous := len(findings) > 0 && severityRank[severity] >= severityRank["HIGH"]
 	flaggedPattern := ""
@@ -1356,10 +1387,11 @@ func (r *EventRouter) handleToolResult(evt EventFrame) {
 //     logged once per call so the operator can see the degraded state —
 //     the deterministic scan still runs.
 func (r *EventRouter) inspectToolResult(payload ToolResultPayload) {
-	if r.rp == nil || payload.Output == "" {
+	rp := r.rulePack()
+	if rp == nil || payload.Output == "" {
 		return
 	}
-	stool := r.rp.LookupSensitiveTool(payload.Tool)
+	stool := rp.LookupSensitiveTool(payload.Tool)
 	if stool == nil || !stool.ResultInspection {
 		return
 	}
@@ -1452,10 +1484,10 @@ func (r *EventRouter) handleApprovalRequest(evt EventFrame) {
 	}
 
 	rawCmd, argv, cwd := payload.CommandContext()
-	if rawCmd == "" && len(argv) > 0 {
-		rawCmd = strings.Join(argv, " ")
-	}
 	cmdName := baseCommand(rawCmd)
+	if cmdName == "" && len(argv) > 0 {
+		cmdName = baseCommand(argv[0])
+	}
 	correlation := payload.CorrelationContext()
 	approval := eventRouterApprovalObservation{
 		id: payload.ID, sessionKey: correlation.SessionKey, sessionID: correlation.SessionID,
@@ -1518,14 +1550,30 @@ func (r *EventRouter) handleApprovalRequest(evt EventFrame) {
 	// already inert in managed; also short-circuit the legacy heuristics so
 	// nothing here can deny.
 	managedAIDOnly := ManagedEnterpriseActive()
-	cmdFindings := ScanAllRules(rawCmd, "shell")
-	argvFindings := ScanAllRules(strings.Join(argv, " "), "shell")
-	allFindings := append(cmdFindings, argvFindings...)
-	dangerousByRules := len(allFindings) > 0 && severityRank[HighestSeverity(allFindings)] >= severityRank["HIGH"]
-	dangerousByLegacy := !managedAIDOnly && (r.isCommandDangerous(rawCmd) || r.isArgvDangerous(argv))
+	legacyText := rawCmd
+	if legacyText == "" {
+		legacyText = serializeArgvForLegacyScan(argv)
+	}
+	allFindings := dispatchTrustedAction(context.Background(), trustedActionRequest{
+		Input: actionfacts.Input{
+			Tool:       "shell",
+			Command:    rawCmd,
+			Argv:       append([]string(nil), argv...),
+			CWD:        cwd,
+			ActiveHome: trustedSameHostHome(),
+		},
+		LegacyText:         legacyText,
+		Connector:          r.connectorName(),
+		EnforcementCapable: true,
+	})
+	enforceableFindings := enforceableRuleFindings(allFindings)
+	dangerousByRules := len(enforceableFindings) > 0 &&
+		severityRank[HighestSeverity(enforceableFindings)] >= severityRank["HIGH"]
+	dangerousByLegacy := !managedAIDOnly &&
+		(r.isResidualCommandDangerous(rawCmd) || r.isResidualArgvDangerous(argv))
 	dangerous := dangerousByRules || dangerousByLegacy
 	topFinding := RuleFinding{RuleID: "UNKNOWN", Title: "dangerous command pattern"}
-	for _, f := range allFindings {
+	for _, f := range enforceableFindings {
 		if severityRank[f.Severity] >= severityRank["HIGH"] {
 			topFinding = f
 			break
@@ -1611,6 +1659,26 @@ func baseCommand(cmd string) string {
 	return base
 }
 
+func serializeArgvForLegacyScan(argv []string) string {
+	serialized := make([]string, 0, len(argv))
+	for _, argument := range argv {
+		if argument != "" && strings.IndexFunc(argument, func(character rune) bool {
+			return !((character >= 'a' && character <= 'z') ||
+				(character >= 'A' && character <= 'Z') ||
+				(character >= '0' && character <= '9') ||
+				strings.ContainsRune("_-./:=@%+,", character))
+		}) == -1 {
+			serialized = append(serialized, argument)
+			continue
+		}
+		serialized = append(
+			serialized,
+			"'"+strings.ReplaceAll(argument, "'", "'\"'\"'")+"'",
+		)
+	}
+	return strings.Join(serialized, " ")
+}
+
 // Legacy pattern helpers retained for backward-compat tests and fallback checks.
 var dangerousPatterns = []string{
 	"curl",
@@ -1678,6 +1746,53 @@ func (r *EventRouter) isArgvDangerous(argv []string) bool {
 var dangerousBinaries = []string{
 	"curl", "wget", "nc", "ncat", "netcat",
 	"dd", "mkfs", "rm",
+}
+
+var residualDangerousPatterns = []string{
+	"eval ",
+	"bash -c",
+	"sh -c",
+	"python -c",
+	"perl -e",
+	"ruby -e",
+	"rm -rf /",
+	"dd if=",
+	"mkfs",
+	"chmod 777",
+	"> /etc/",
+	">> /etc/",
+	"passwd",
+	"shadow",
+	"sudoers",
+}
+
+func (r *EventRouter) isResidualCommandDangerous(rawCmd string) bool {
+	lower := strings.ToLower(rawCmd)
+	for _, pattern := range residualDangerousPatterns {
+		if strings.Contains(lower, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *EventRouter) isResidualArgvDangerous(argv []string) bool {
+	if len(argv) == 0 {
+		return false
+	}
+	if r.isResidualCommandDangerous(strings.Join(argv, " ")) {
+		return true
+	}
+	base := argv[0]
+	if index := strings.LastIndexAny(base, `/\`); index >= 0 {
+		base = base[index+1:]
+	}
+	switch strings.ToLower(base) {
+	case "dd", "mkfs", "mkfs.ext2", "mkfs.ext3", "mkfs.ext4", "rm":
+		return true
+	default:
+		return false
+	}
 }
 
 // inferSystem derives the gen_ai.system value from provider and model strings.

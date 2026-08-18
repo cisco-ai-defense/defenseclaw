@@ -22,6 +22,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	privatekeyfixture "github.com/defenseclaw/defenseclaw/internal/secretshape/testfixture"
 )
 
 type benchCase struct {
@@ -40,13 +42,10 @@ type benchFile struct {
 	Cases []benchCase `json:"cases"`
 }
 
-// benchmarkSyntheticRSAPrivateKeyPEM returns a minimal PEM-shaped string that
-// triggers SEC-PRIVKEY without storing a contiguous "BEGIN … PRIVATE KEY"
-// marker in labels.json (avoids GitHub secret scanning alerts on fixtures).
+// benchmarkSyntheticRSAPrivateKeyPEM returns a deterministic structural
+// fixture without storing a contiguous private-key marker in labels.json.
 func benchmarkSyntheticRSAPrivateKeyPEM() string {
-	return "-----BEGIN " + "RSA " + "PRIVATE KEY-----\n" +
-		"MIIEpAIBAAKCAQEA\n" +
-		"-----END " + "RSA " + "PRIVATE KEY-----"
+	return strings.TrimSuffix(privatekeyfixture.MustPEM("RSA PRIVATE KEY"), "\n")
 }
 
 // TestSeverityBenchmark runs labeled fixtures through scanLocalPatterns

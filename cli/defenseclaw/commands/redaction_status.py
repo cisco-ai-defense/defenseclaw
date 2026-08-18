@@ -35,6 +35,6 @@ def redaction_status_hint(cfg: Any) -> tuple[str, str, str]:
     del cfg
     return (
         "PER DESTINATION (defaults are unredacted)",
-        "Inspect collection and route redaction",
-        "defenseclaw config show --effective --section observability",
+        "Inspect bucket and destination redaction",
+        "defenseclaw setup redaction status",
     )

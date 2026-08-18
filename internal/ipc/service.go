@@ -135,11 +135,21 @@ func (s *service) logStatsError(err error) {
 }
 
 // WatchNotifications streams user-visible notifications. On
-// subscribe, retained HISTORY / TRANSIENT_AND_HISTORY records within
-// the retention window are replayed; TRANSIENT-only records are not.
+// subscribe, retained HISTORY / TRANSIENT_AND_HISTORY records that
+// have not yet been fully delivered are replayed; TRANSIENT-only
+// records are not.
+//
+// After every successful stream.Send the handler acks the record's
+// sequence back to the broadcast. That ack is what lets the broadcast
+// drop the record from the retained ring (deliver-and-forget). A
+// disconnected client cannot ack — its cancel closure releases the
+// pending marker but does not count as delivery, so the record stays
+// retained for the next subscriber. See the contract on
+// broadcast.subscribe / broadcast.ackSubscriber for the full
+// eviction rules.
 func (s *service) WatchNotifications(req *pb.WatchNotificationsRequest, stream grpc.ServerStreamingServer[pb.NotificationRecord]) error {
 	ctx := stream.Context()
-	ch, cancel := s.bcast.subscribe()
+	ch, ack, cancel := s.bcast.subscribe()
 	defer cancel()
 
 	for {
@@ -153,6 +163,12 @@ func (s *service) WatchNotifications(req *pb.WatchNotificationsRequest, stream g
 			if err := stream.Send(rec); err != nil {
 				return err
 			}
+			// stream.Send returned nil — the record is on the wire.
+			// Ack so the broadcast can evict from the retained ring
+			// once every currently-live subscriber has done the same.
+			// The ack itself is bounded and non-blocking; a slow
+			// broadcast lock cannot wedge this stream.
+			ack(rec.Sequence)
 		}
 	}
 }
