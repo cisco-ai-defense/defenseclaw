@@ -34,7 +34,6 @@ func ResolveDefaultEnvConfigPath() (string, error) {
 	return DefaultEnvConfigPath, nil
 }
 
-
 // openEnvConfig opens path with O_NOFOLLOW so a symlinked env_config
 // (attacker replacement between stat and read on Unix) is rejected up
 // front. The returned *os.File is used both for Fstat trust checks
