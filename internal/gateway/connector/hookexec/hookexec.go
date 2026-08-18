@@ -249,6 +249,13 @@ func Run(ctx context.Context, opts Options) int {
 			// requests never sneak past connector-side auth.
 			return failUnreachable(opts, sp, "closed", "managed hook token unreadable")
 		}
+		if opts.ManagedEnterprise && strings.TrimSpace(loaded) == "" {
+			// An empty sidecar parses without error but sendHookRequest would
+			// then omit Authorization entirely and the connector-side loopback
+			// path would accept the credential-less request. Managed mode has
+			// no no-auth path, so fail closed here.
+			return failUnreachable(opts, sp, "closed", "managed hook token empty")
+		}
 		token = loaded
 	}
 

@@ -196,7 +196,17 @@ func rejectUntrustedWindowsServiceWriteACEs(
 		if err := windows.GetAce(dacl, uint32(i), &ace); err != nil {
 			return fmt.Errorf("%s: inspect Windows ACE %d: %w", path, i, err)
 		}
-		if ace == nil || ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0 {
+		if ace == nil {
+			continue
+		}
+		// OBJECT_INHERIT_ACE on a directory propagates the ACE to newly
+		// created child files as an EFFECTIVE ACE. When we are validating
+		// an ancestor of a not-yet-created runtime file, an INHERIT_ONLY
+		// allow ACE with OBJECT_INHERIT_ACE still lets a caller grant the
+		// child write access via inheritance, so it must be evaluated.
+		inheritsToChildFile := ancestor && ace.Header.AceFlags&windows.OBJECT_INHERIT_ACE != 0
+		isInheritOnly := ace.Header.AceFlags&windows.INHERIT_ONLY_ACE != 0
+		if isInheritOnly && !inheritsToChildFile {
 			continue
 		}
 		switch ace.Header.AceType {
@@ -207,9 +217,24 @@ func rejectUntrustedWindowsServiceWriteACEs(
 			continue
 		}
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
-		writeLike := windowsWriteLikeAccess(ace.Mask)
-		if ancestor && !windowsServiceWorldSID(sid) {
+		// CREATOR OWNER / CREATOR GROUP resolve to the file's own owner at
+		// creation time. The child's actual owner is verified independently
+		// by validateTrustedWindowsServicePathElement, so an inheritable
+		// placeholder ACE on the parent is not itself a trust breach.
+		if inheritsToChildFile && windowsServicePlaceholderSID(sid) {
+			continue
+		}
+		var writeLike bool
+		switch {
+		case inheritsToChildFile:
+			// The ACE will land on the child file with its full mask. Use
+			// the file-level write rule so a granted FILE_WRITE_DATA (which
+			// WindowsAncestorReplaceAccess excludes) is caught.
+			writeLike = windowsWriteLikeAccess(ace.Mask)
+		case ancestor && !windowsServiceWorldSID(sid):
 			writeLike = WindowsAncestorReplaceAccess(ace.Mask)
+		default:
+			writeLike = windowsWriteLikeAccess(ace.Mask)
 		}
 		if !writeLike {
 			continue
@@ -219,6 +244,14 @@ func rejectUntrustedWindowsServiceWriteACEs(
 		}
 	}
 	return nil
+}
+
+func windowsServicePlaceholderSID(sid *windows.SID) bool {
+	if sid == nil {
+		return false
+	}
+	return sid.IsWellKnown(windows.WinCreatorOwnerSid) ||
+		sid.IsWellKnown(windows.WinCreatorGroupSid)
 }
 
 // WindowsAncestorReplaceAccess reports whether mask lets a principal replace a

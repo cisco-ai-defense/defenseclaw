@@ -43,14 +43,7 @@ func ValidateFixedNTFSMountedPath(path string) (MountedVolumeIdentity, error) {
 	}
 	path = filepath.Clean(filepath.FromSlash(path))
 	volume := filepath.VolumeName(path)
-	if !filepath.IsAbs(path) ||
-		len(path) < 3 || path[2] != '\\' ||
-		len(volume) != 2 || volume[1] != ':' ||
-		!isASCIIDriveLetter(volume[0]) ||
-		strings.HasPrefix(path, `\\`) ||
-		strings.HasPrefix(path, `\\?\`) ||
-		strings.HasPrefix(path, `\\.\`) ||
-		(len(path) > 2 && strings.Contains(path[2:], ":")) {
+	if !isLocalDriveLetterSyntax(path) {
 		return identity, fmt.Errorf("path must use a local drive letter without UNC, device, or alternate-stream syntax: %s", path)
 	}
 
@@ -139,6 +132,23 @@ func ValidateFixedNTFSMountedPath(path string) (MountedVolumeIdentity, error) {
 
 func isASCIIDriveLetter(value byte) bool {
 	return value >= 'A' && value <= 'Z' || value >= 'a' && value <= 'z'
+}
+
+// isLocalDriveLetterSyntax reports whether path is in the exact local
+// drive-letter form (e.g. `C:\...`). Rejects UNC, `\\?\` and `\\.\` device
+// namespaces, alternate-data-stream syntax (a colon past position 1), and
+// non-ASCII drive letters. Callers that also require Clean-idempotence or
+// forward-slash rejection perform those checks at the call site.
+func isLocalDriveLetterSyntax(path string) bool {
+	volume := filepath.VolumeName(path)
+	return filepath.IsAbs(path) &&
+		len(path) >= 3 && path[2] == '\\' &&
+		len(volume) == 2 && volume[1] == ':' &&
+		isASCIIDriveLetter(volume[0]) &&
+		!strings.HasPrefix(path, `\\`) &&
+		!strings.HasPrefix(path, `\\?\`) &&
+		!strings.HasPrefix(path, `\\.\`) &&
+		!strings.Contains(path[2:], ":")
 }
 
 func validVolumeGUIDName(value string) bool {
