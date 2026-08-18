@@ -112,6 +112,7 @@ type claudeCodeHookResponse struct {
 // value so downstream tooling and the audit envelope receive them.
 
 func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHookRequest) claudeCodeHookResponse {
+	activeAgentFiles := a.applyClaudeCodeActiveAgentContext(ctx, req)
 	mode := a.claudeCodeMode()
 	if a.scannerCfg != nil && !a.claudeCodeEnabled() {
 		return claudeCodeResponseFor(req, "allow", "allow", "NONE", "", nil, mode, false)
@@ -152,10 +153,11 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		}
 		verdict = a.inspectTrustedToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
 			Input: actionfacts.Input{
-				Tool:       toolName,
-				Args:       toolArgs,
-				CWD:        req.CWD,
-				ActiveHome: trustedSameHostHome(),
+				Tool:             toolName,
+				Args:             toolArgs,
+				CWD:              req.CWD,
+				ActiveHome:       trustedSameHostHome(),
+				ActiveAgentFiles: activeAgentFiles,
 			},
 			LegacyText:         string(toolArgs),
 			Connector:          "claudecode",
