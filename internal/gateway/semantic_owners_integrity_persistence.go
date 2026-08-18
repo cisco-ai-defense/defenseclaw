@@ -17,6 +17,7 @@
 package gateway
 
 import (
+	"path"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -34,6 +35,8 @@ var semanticIntegrityPersistenceOwners = map[string]semanticOwner{
 		prerequisite:       schedulerInstallPrerequisite,
 		suppressFallback:   authoritativeSemanticSafeNegative,
 	},
+	"COG-AGENTS-MD": activeAgentInstructionMutationOwner("AGENTS.md"),
+	"COG-MEMORY":    activeAgentInstructionMutationOwner("MEMORY.md"),
 	"integrity.git_hooks_bypass": {
 		prerequisite:     gitHooksBypassPrerequisite,
 		suppressFallback: authoritativeSemanticSafeNegative,
@@ -125,6 +128,110 @@ func integrityMutationOwner(
 			isCandidate, isActive, isSafe,
 		),
 	}
+}
+
+func activeAgentInstructionMutationOwner(fileName string) semanticOwner {
+	isCandidate := func(value string) bool {
+		return pathBase(canonicalSemanticPath(value)) == strings.ToLower(fileName)
+	}
+	isActive := func(
+		facts actionfacts.Facts,
+		candidate actionfacts.PathFact,
+	) bool {
+		candidatePath, ok := activeAgentInstructionPath(
+			exactSemanticPathValue(candidate),
+			candidate.Flavor,
+		)
+		if !ok || !activeAgentInstructionBaseMatches(
+			candidatePath,
+			candidate.Flavor,
+			fileName,
+		) {
+			return false
+		}
+		for _, activePath := range facts.ActiveAgentFiles {
+			canonicalActivePath, active := activeAgentInstructionPath(
+				activePath,
+				candidate.Flavor,
+			)
+			if active && canonicalActivePath == candidatePath {
+				return true
+			}
+		}
+		return false
+	}
+	return integrityMutationOwner(
+		isCandidate,
+		isActive,
+		func(facts actionfacts.Facts, candidate actionfacts.PathFact) bool {
+			return !isActive(facts, candidate)
+		},
+	)
+}
+
+// exactSemanticPathValue intentionally does not use semanticPathValue: that
+// helper folds case for broad pattern matching, while POSIX path identity is
+// case-sensitive. Active instruction-file authority must preserve the
+// filesystem flavor proven by ActionFacts.
+func exactSemanticPathValue(candidate actionfacts.PathFact) string {
+	if candidate.Resolved != "" {
+		return candidate.Resolved
+	}
+	if candidate.Normalized != "" {
+		return candidate.Normalized
+	}
+	return candidate.Value
+}
+
+func activeAgentInstructionPath(
+	value string,
+	flavor actionfacts.PathFlavor,
+) (string, bool) {
+	if value == "" || strings.TrimSpace(value) != value {
+		return "", false
+	}
+	switch flavor {
+	case actionfacts.PathFlavorPOSIX:
+		if !strings.HasPrefix(value, "/") {
+			return "", false
+		}
+		value = path.Clean(value)
+		return value, value != "/"
+	case actionfacts.PathFlavorWindows:
+		value = strings.ReplaceAll(value, `\`, "/")
+		unc := strings.HasPrefix(value, "//")
+		if !unc && (len(value) < 3 || !isASCIIPathLetter(value[0]) ||
+			value[1] != ':' || value[2] != '/') {
+			return "", false
+		}
+		if unc {
+			value = "//" + strings.TrimPrefix(
+				path.Clean("/"+strings.TrimLeft(value, "/")),
+				"/",
+			)
+		} else {
+			value = path.Clean(value)
+		}
+		return strings.ToLower(value), value != "" && value != "//"
+	default:
+		return "", false
+	}
+}
+
+func activeAgentInstructionBaseMatches(
+	value string,
+	flavor actionfacts.PathFlavor,
+	fileName string,
+) bool {
+	base := path.Base(value)
+	if flavor == actionfacts.PathFlavorWindows {
+		return strings.EqualFold(base, fileName)
+	}
+	return flavor == actionfacts.PathFlavorPOSIX && base == fileName
+}
+
+func isASCIIPathLetter(value byte) bool {
+	return value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z'
 }
 
 func historyTamperPrerequisite(facts actionfacts.Facts) bool {
@@ -409,7 +516,7 @@ func schedulerInstallPrerequisite(facts actionfacts.Facts) bool {
 			for _, candidate := range facts.Paths {
 				if candidate.CommandID == command.ID &&
 					candidate.Access == actionfacts.PathAccessWrite &&
-					matchesActiveRunKey(candidate) {
+					matchesActiveRegistryPersistence(command, candidate) {
 					return true
 				}
 			}
@@ -467,6 +574,28 @@ func systemctlValueOption(option string) bool {
 	}
 }
 
+func matchesActiveRegistryPersistence(
+	command actionfacts.CommandFact,
+	candidate actionfacts.PathFact,
+) bool {
+	if matchesActiveRunKey(candidate) {
+		return true
+	}
+	if candidate.Flavor != actionfacts.PathFlavorRegistry {
+		return false
+	}
+	value := strings.Trim(canonicalSemanticPath(semanticPathValue(candidate)), "/")
+	valueName := windowsRegistryValueName(command.Argv[1:])
+	switch {
+	case value == "hklm/software/microsoft/windows nt/currentversion/winlogon":
+		return valueName == "shell" || valueName == "userinit"
+	case strings.HasPrefix(value, "hklm/system/currentcontrolset/services/"):
+		return valueName == "imagepath" || valueName == "servicedll"
+	default:
+		return false
+	}
+}
+
 func matchesActiveRunKey(candidate actionfacts.PathFact) bool {
 	if candidate.Flavor != actionfacts.PathFlavorRegistry {
 		return false
@@ -475,7 +604,11 @@ func matchesActiveRunKey(candidate actionfacts.PathFact) bool {
 	return value == "hkcu/software/microsoft/windows/currentversion/run" ||
 		value == "hkcu/software/microsoft/windows/currentversion/runonce" ||
 		value == "hklm/software/microsoft/windows/currentversion/run" ||
-		value == "hklm/software/microsoft/windows/currentversion/runonce"
+		value == "hklm/software/microsoft/windows/currentversion/runonce" ||
+		value == "hkcu/software/wow6432node/microsoft/windows/currentversion/run" ||
+		value == "hkcu/software/wow6432node/microsoft/windows/currentversion/runonce" ||
+		value == "hklm/software/wow6432node/microsoft/windows/currentversion/run" ||
+		value == "hklm/software/wow6432node/microsoft/windows/currentversion/runonce"
 }
 
 func matchesActiveSchedulerPath(

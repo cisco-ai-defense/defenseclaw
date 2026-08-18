@@ -33,22 +33,28 @@ type Input struct {
 	// ActiveHome is trusted caller context for the identity executing the
 	// action. It must be an absolute POSIX or Windows filesystem path.
 	// ActionFacts never discovers it from process state.
-	ActiveHome  string
-	DialectHint Dialect
+	ActiveHome string
+	// ActiveAgentFiles is trusted connector context containing the exact files
+	// whose instructions are active for this action. Entries must be absolute
+	// filesystem paths. ActionFacts validates, canonicalizes, bounds, and copies
+	// the list; it never discovers active files from argv, CWD, or process state.
+	ActiveAgentFiles []string
+	DialectHint      Dialect
 }
 
 // Facts contains the statically proven subset of one action. Attacker-
 // controlled parse failures are represented by Parse and never returned as
 // errors.
 type Facts struct {
-	Tool       string
-	CWD        string
-	ActiveHome string
-	Parse      ParseResult
-	Commands   []CommandFact
-	Paths      []PathFact
-	Network    []NetworkFact
-	DataFlows  []DataFlowFact
+	Tool             string
+	CWD              string
+	ActiveHome       string
+	ActiveAgentFiles []string
+	Parse            ParseResult
+	Commands         []CommandFact
+	Paths            []PathFact
+	Network          []NetworkFact
+	DataFlows        []DataFlowFact
 }
 
 // Authoritative reports whether the entire action can be evaluated by migrated

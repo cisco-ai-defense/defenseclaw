@@ -70,6 +70,13 @@ func (a *APIServer) safeApplyExperimentalArtifactPromotion(
 		req,
 		req.toolChain.facts,
 		preExecutionBoundary,
+		func(observation trustedActionTelemetry) {
+			a.recordParserUncertaintyMetricV8(
+				artifactCtx,
+				req.ConnectorName,
+				observation.ParserUncertaintyCount,
+			)
+		},
 	)
 	if len(findings) == 0 {
 		return resp
@@ -111,12 +118,17 @@ func promotedArtifactFindings(
 	req agentHookRequest,
 	facts actionfacts.Facts,
 	preExecutionBoundary bool,
+	recordTelemetry ...func(trustedActionTelemetry),
 ) []RuleFinding {
 	candidates := promotedArtifactCandidates(facts)
 	if len(candidates) == 0 {
 		return nil
 	}
 	var findings []RuleFinding
+	var telemetryRecorder func(trustedActionTelemetry)
+	if len(recordTelemetry) > 0 {
+		telemetryRecorder = recordTelemetry[0]
+	}
 	seenRules := make(map[string]struct{})
 	for _, candidate := range candidates {
 		body, dialect, ok := readPromotedArtifactBounded(
@@ -147,6 +159,7 @@ func promotedArtifactFindings(
 			LegacyText:         string(body),
 			Connector:          req.ConnectorName,
 			EnforcementCapable: enforcementCapable,
+			recordTelemetry:    telemetryRecorder,
 		})
 		if req.toolChain != nil {
 			req.toolChain.recordArtifactTrustedAction(

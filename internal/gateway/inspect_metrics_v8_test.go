@@ -114,6 +114,38 @@ func TestInspectMetricsV8DoNotFallBackWhenRuntimeIsUnbound(t *testing.T) {
 	api.recordGuardrailMetricsV8(
 		context.Background(), "codex", "codex:policy-rules", "block", time.Millisecond,
 	)
+	api.recordParserUncertaintyMetricV8(context.Background(), "codex", 1)
+}
+
+func TestParserUncertaintyV8IsCounterOnlyNotAlert(t *testing.T) {
+	api, capture := bindHookModelV8Runtime(t, []string{"metrics"})
+	api.recordParserUncertaintyMetricV8(context.Background(), "CoDeX", 3)
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		_, requests := capture.snapshot()
+		if hookModelV8MetricPointCount(
+			requests,
+			observability.TelemetryInstrumentDefenseClawGuardrailEvaluations,
+		) == 1 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	_, requests := capture.snapshot()
+	assertHookV8MetricPoint(t, hookModelV8MetricPoints(
+		requests, observability.TelemetryInstrumentDefenseClawGuardrailEvaluations,
+	), map[string]string{
+		"defenseclaw.connector.source":           "codex",
+		"defenseclaw.guardrail.effective_action": "allow",
+		"defenseclaw.metric.guardrail.scanner":   trustedParserUncertaintyMetricScanner,
+	}, 3)
+	if got := hookModelV8MetricPointCount(
+		requests,
+		observability.TelemetryInstrumentDefenseClawAlertCount,
+	); got != 0 {
+		t.Fatalf("parser uncertainty emitted alert metric points=%d", got)
+	}
 }
 
 func TestCodeGuardAlertMetricV8DoesNotDuplicateInspectEvaluation(t *testing.T) {

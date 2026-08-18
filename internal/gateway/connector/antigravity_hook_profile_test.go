@@ -18,6 +18,7 @@ package connector
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 )
 
@@ -79,6 +80,13 @@ func TestAntigravityProfileDecode_RealAgyPayload(t *testing.T) {
 	if req.Content != "echo phaseE-claude-shape" {
 		t.Errorf("Content=%q want \"echo phaseE-claude-shape\" — must be lifted from toolCall.args.CommandLine", req.Content)
 	}
+	wantToolArgs := json.RawMessage(`{"CommandLine":"echo phaseE-claude-shape","Cwd":"/tmp/agy-smoketest","WaitMsBeforeAsync":1000}`)
+	if !jsonEqual(req.ToolArgs, wantToolArgs) {
+		t.Errorf("ToolArgs=%s want exact nested toolCall.args %s", req.ToolArgs, wantToolArgs)
+	}
+	if !req.ToolArgsAuthoritative {
+		t.Error("ToolArgsAuthoritative=false want true for antigravity nested projection")
+	}
 	if req.Direction != "tool_call" {
 		t.Errorf("Direction=%q want tool_call", req.Direction)
 	}
@@ -88,6 +96,56 @@ func TestAntigravityProfileDecode_RealAgyPayload(t *testing.T) {
 	if req.Payload == nil {
 		t.Errorf("Payload nil — must round-trip the original payload for downstream evaluators")
 	}
+}
+
+func TestAntigravityToolArgsFromRawPayload_StrictEnvelope(t *testing.T) {
+	t.Run("preserves real nested args", func(t *testing.T) {
+		raw := []byte(`{"hookEventName":"PreToolUse","toolCall":{"name":"run_command","args": { "CommandLine": "rm -rf /", "Cwd": "/tmp/work" }}}`)
+		want := json.RawMessage(`{ "CommandLine": "rm -rf /", "Cwd": "/tmp/work" }`)
+		if got := antigravityToolArgsFromRawPayload(raw); string(got) != string(want) {
+			t.Fatalf("ToolArgs=%q want exact raw nested object %q", got, want)
+		}
+	})
+
+	for _, tc := range []struct {
+		name string
+		raw  string
+	}{
+		{
+			name: "duplicate args field",
+			raw:  `{"toolCall":{"name":"run_command","args":{"CommandLine":"echo safe"},"args":{"CommandLine":"rm -rf /"}}}`,
+		},
+		{
+			name: "conflicting args aliases",
+			raw:  `{"toolCall":{"name":"run_command","args":{"CommandLine":"echo safe"},"arguments":{"CommandLine":"rm -rf /"}}}`,
+		},
+		{
+			name: "conflicting tool call aliases",
+			raw:  `{"toolCall":{"name":"run_command","args":{"CommandLine":"echo safe"}},"tool_call":{"name":"run_command","args":{"CommandLine":"rm -rf /"}}}`,
+		},
+		{
+			name: "malformed string args",
+			raw:  `{"toolCall":{"name":"run_command","args":"{\"CommandLine\":\"rm -rf /\"}"}}`,
+		},
+		{
+			name: "opaque payload string has no authority",
+			raw:  `{"toolCall":{"name":"run_command"},"payload":"{\"args\":{\"CommandLine\":\"rm -rf /\"}}"}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := antigravityToolArgsFromRawPayload([]byte(tc.raw)); got != nil {
+				t.Fatalf("ToolArgs=%s want nil for ambiguous or malformed envelope", got)
+			}
+		})
+	}
+}
+
+func jsonEqual(left, right json.RawMessage) bool {
+	var leftValue interface{}
+	var rightValue interface{}
+	return json.Unmarshal(left, &leftValue) == nil &&
+		json.Unmarshal(right, &rightValue) == nil &&
+		reflect.DeepEqual(leftValue, rightValue)
 }
 
 func TestAntigravityProfileDecode_DoesNotConflateOperationIDsWithTurns(t *testing.T) {

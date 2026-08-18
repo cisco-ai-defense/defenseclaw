@@ -138,7 +138,7 @@ func TestEvaluateClaudeCodeHook_HILTPreToolUseAsks(t *testing.T) {
 		HookEventName: "PreToolUse",
 		ToolName:      "Bash",
 		ToolInput: map[string]interface{}{
-			"command": "nc -l 4444",
+			"command": "chmod 777 /etc/shadow",
 		},
 	})
 

@@ -34,7 +34,7 @@ func TestBuildVerdict_AllDetectionOnlyAllows(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Guardrail.RulePackDir = "/profiles/strict"
 	finding := RuleFinding{
-		RuleID: "ACTION-PARSER-UNCERTAINTY", Title: "parser uncertainty",
+		RuleID: "CMD-PYTHON-C", Title: "generic interpreter execution",
 		Severity: "LOW", enforcement: findingEnforcementDetectionOnly,
 	}
 	verdict := buildVerdictWithConfig([]RuleFinding{finding}, "tool_call", cfg, true)
@@ -64,8 +64,8 @@ func TestInspectTrustedToolPolicy_AllDetectionOnlyAllows(t *testing.T) {
 	response := api.evaluateCodexHook(t.Context(), hookReq)
 	if response.Action != guardrailActionAllow || response.RawAction != guardrailActionAllow ||
 		response.Severity != "LOW" ||
-		!findingStringHasRuleID(response.Findings, trustedParserUncertaintyRuleID) {
-		t.Fatalf("hook response = %+v, want raw allow with LOW parser telemetry", response)
+		findingStringHasRuleID(response.Findings, trustedParserUncertaintyRuleID) {
+		t.Fatalf("hook response = %+v, want raw allow without parser telemetry findings", response)
 	}
 
 	verdict := api.inspectTrustedToolPolicyCtx(t.Context(), &ToolInspectRequest{
@@ -89,6 +89,53 @@ func TestInspectTrustedToolPolicy_AllDetectionOnlyAllows(t *testing.T) {
 	})
 	if dangerous.RawAction == guardrailActionAllow {
 		t.Fatalf("authoritative dangerous action lost enforcement: %+v", dangerous)
+	}
+}
+
+func TestParserUncertaintyIsNotPersistedAsFindingOrAlert(t *testing.T) {
+	const connector = "codex"
+	installDefaultProfileConnector(t, connector)
+	fixture := newSidecarRuntimeFixture(t, true)
+	logger := audit.NewLogger(fixture.store)
+	logger.SetRuntimeV8Emitter(&sidecarOwnedObservabilityV8Runtime{runtime: fixture.runtime})
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = connector
+	cfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), "strict")
+	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, fixture.store, logger, cfg)
+
+	response := api.evaluateCodexHook(t.Context(), codexHookRequest{
+		HookEventName: "PreToolUse",
+		ToolName:      "Bash",
+		ToolInput:     map[string]interface{}{"command": "cat =(rm -rf /)"},
+		CWD:           "/repo",
+	})
+	if response.Action != guardrailActionAllow ||
+		findingStringHasRuleID(response.Findings, trustedParserUncertaintyRuleID) {
+		t.Fatalf("response = %+v, want allow without parser-uncertainty finding", response)
+	}
+
+	database, err := sql.Open("sqlite", fixture.path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer database.Close()
+	var persisted int
+	if err := database.QueryRow(
+		`SELECT COUNT(*) FROM scan_findings WHERE rule_id = ?`,
+		trustedParserUncertaintyRuleID,
+	).Scan(&persisted); err != nil {
+		t.Fatal(err)
+	}
+	if persisted != 0 {
+		t.Fatalf("persisted parser-uncertainty findings=%d, want 0", persisted)
+	}
+	alerts, err := fixture.store.ListAlerts(20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(alerts) != 0 {
+		t.Fatalf("parser uncertainty entered Alerts: %+v", alerts)
 	}
 }
 
@@ -168,7 +215,7 @@ func TestPythonInlineOwnerIsDetectionOnlyAcrossModesAndPersistence(t *testing.T)
 	}
 }
 
-func TestStrongerPythonOwnersRemainEnforceable(t *testing.T) {
+func TestPythonInlineSpecificOwnersRemainDetectionOnlyWithoutTypedProof(t *testing.T) {
 	const connector = "strong-python-inline-enforcement-test"
 	installDefaultProfileConnector(t, connector)
 
@@ -205,9 +252,9 @@ func TestStrongerPythonOwnersRemainEnforceable(t *testing.T) {
 			)
 			generic := findingWithID(verdict.DetailedFindings, "CMD-PYTHON-C")
 			owner := findingWithID(verdict.DetailedFindings, test.ruleID)
-			if verdict.Action != guardrailActionBlock || verdict.Severity != "CRITICAL" ||
-				generic == nil || generic.contributesToEnforcement() || owner == nil || !owner.contributesToEnforcement() {
-				t.Fatalf("verdict = %+v, generic = %+v, owner = %+v, want specific enforceable block", verdict, generic, owner)
+			if verdict.Action != guardrailActionAllow || verdict.Severity != "CRITICAL" ||
+				generic == nil || generic.contributesToEnforcement() || owner == nil || owner.contributesToEnforcement() {
+				t.Fatalf("verdict = %+v, generic = %+v, owner = %+v, want retained audit-only findings without typed proof", verdict, generic, owner)
 			}
 		})
 	}
@@ -248,10 +295,9 @@ func TestEvaluateCodexHook_DynamicExecutablesRemainDetectionOnly(t *testing.T) {
 				CWD:       "/repo",
 			})
 			if response.Action != guardrailActionAllow ||
-				response.RawAction != guardrailActionAllow ||
-				response.Severity != "LOW" || response.WouldBlock ||
-				!findingStringHasRuleID(response.Findings, trustedParserUncertaintyRuleID) {
-				t.Fatalf("hook response = %+v, want LOW detection-only parser telemetry", response)
+				response.RawAction != guardrailActionAllow || response.WouldBlock ||
+				findingStringHasRuleID(response.Findings, trustedParserUncertaintyRuleID) {
+				t.Fatalf("hook response = %+v, want parser uncertainty excluded from findings", response)
 			}
 		})
 	}
@@ -271,8 +317,8 @@ func TestInspectToolCalls_AllDetectionOnlyAllows(t *testing.T) {
 	}
 	verdict := proxy.inspectToolCalls(t.Context(), payload)
 	if verdict == nil || verdict.Action != guardrailActionAllow || verdict.Severity != "LOW" ||
-		!findingStringHasRuleID(verdict.Findings, trustedParserUncertaintyRuleID) {
-		t.Fatalf("proxy verdict = %+v, want retained LOW detection-only allow", verdict)
+		findingStringHasRuleID(verdict.Findings, trustedParserUncertaintyRuleID) {
+		t.Fatalf("proxy verdict = %+v, want LOW shadow evidence without parser telemetry finding", verdict)
 	}
 }
 

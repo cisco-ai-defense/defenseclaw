@@ -141,7 +141,7 @@ func TestPerlRubyInlineEffectFreeOwnersAreDetectionOnly(t *testing.T) {
 	}
 }
 
-func TestPerlRubyInlineEffectfulOrUncertainOwnersRemainEnforceable(t *testing.T) {
+func TestPerlRubyInlineGenericOwnerAlwaysRemainsAuditOnly(t *testing.T) {
 	resetConnectorRuleCategories(t)
 	const connector = "issue-708-perl-ruby-controls"
 	installIssue708ProfileConnector(t, connector, "default")
@@ -207,8 +207,14 @@ func TestPerlRubyInlineEffectfulOrUncertainOwnersRemainEnforceable(t *testing.T)
 				LegacyText: test.command, Connector: connector, EnforcementCapable: true,
 			})
 			matched := findingWithID(findings, test.ruleID)
-			if matched == nil || !matched.contributesToEnforcement() {
-				t.Fatalf("unsafe %s finding = %+v, want conservative enforcement: %+v", test.ruleID, matched, findings)
+			if matched == nil || matched.contributesToEnforcement() || matched.Severity != "LOW" {
+				t.Fatalf("generic %s finding = %+v, want LOW audit-only evidence: %+v", test.ruleID, matched, findings)
+			}
+			if strings.Contains(strings.ToLower(test.name), "fork bomb") {
+				dangerous := findingWithID(findings, "impact.fork_bomb")
+				if dangerous == nil || !dangerous.contributesToEnforcement() {
+					t.Fatalf("specific fork-bomb proof is not enforceable: %+v", findings)
+				}
 			}
 		})
 	}

@@ -62,13 +62,21 @@ type compiledSemanticRule struct {
 
 var semanticOwners = buildSemanticOwners(map[string]semanticOwner{
 	"PATH-ENV-FILE": {
-		prerequisite:     pathOwnerPrerequisite(pathValueMatcher(matchesEnvironmentFile)),
-		suppressFallback: pathOwnerSafeNegative(matchesEnvironmentFile, pathValueMatcher(matchesEnvironmentFile)),
+		prerequisite: pathOwnerPrerequisite(
+			matchesContextualEnvironmentFile,
+		),
+		suppressFallback: sensitivePathSafeNegativePreservingWrites(
+			matchesEnvironmentFile,
+			matchesContextualEnvironmentFile,
+		),
 	},
 	"PATH-SSH-KEY": {
 		equivalentAliases: []string{"PATH-WIN-SSH-KEY"},
 		prerequisite:      pathOwnerPrerequisite(matchesActiveSSHPrivateKey),
-		suppressFallback:  pathOwnerSafeNegative(matchesSSHPrivateKey, matchesActiveSSHPrivateKey),
+		suppressFallback: sensitivePathSafeNegativePreservingWrites(
+			matchesSSHPrivateKey,
+			matchesActiveSSHPrivateKey,
+		),
 	},
 	"PATH-AWS-CREDS": {
 		equivalentAliases: []string{"PATH-WIN-AWS-CREDS"},
@@ -104,7 +112,7 @@ var semanticOwners = buildSemanticOwners(map[string]semanticOwner{
 		suppressFallback:   environmentDumpSafeNegative,
 	},
 	"CMD-CURL-UPLOAD": {
-		prerequisite:     sensitiveFileUploadPrerequisite,
+		prerequisite:     externalFileUploadPrerequisite,
 		suppressFallback: fileUploadSafeNegative,
 	},
 	"CMD-PIPE-CURL": {
@@ -418,6 +426,35 @@ func pathOwnerSafeNegative(
 	}
 }
 
+// sensitivePathSafeNegativePreservingWrites distinguishes a proven sensitive
+// file mutation from a read or inert filename reference. Read expressions keep
+// their semantic owner, fixture/reference-only inputs are safe negatives, and
+// a live write deliberately retains the compatibility lane until a dedicated
+// write expression owns it.
+func sensitivePathSafeNegativePreservingWrites(
+	isCandidate semanticPathCandidate,
+	isActive semanticPathMatcher,
+) semanticOwnerPrerequisite {
+	baseSafeNegative := pathOwnerSafeNegative(isCandidate, isActive)
+	return func(facts actionfacts.Facts) bool {
+		if !facts.Authoritative() {
+			return false
+		}
+		for _, candidate := range facts.Paths {
+			if !isCandidate(semanticPathValue(candidate)) ||
+				!isActive(facts, candidate) ||
+				integrityPathHasFixtureSegment(semanticPathValue(candidate)) {
+				continue
+			}
+			command, ok := integrityCommandByID(facts, candidate.CommandID)
+			if ok && integrityCommandMutatesPath(command, candidate) {
+				return false
+			}
+		}
+		return baseSafeNegative(facts)
+	}
+}
+
 func semanticPathCandidates(facts actionfacts.Facts) []actionfacts.PathFact {
 	candidates := append([]actionfacts.PathFact(nil), facts.Paths...)
 	for _, command := range facts.Commands {
@@ -615,14 +652,36 @@ func readAndEgressPrerequisite(
 	return false
 }
 
-func sensitiveFileUploadPrerequisite(facts actionfacts.Facts) bool {
-	return fileUploadPrerequisite(facts, true, hasExternalUpload)
+func externalFileUploadPrerequisite(facts actionfacts.Facts) bool {
+	for _, command := range facts.Commands {
+		if !curlProgram(command.Program) ||
+			!hasOperation(command, actionfacts.OperationUpload) ||
+			!hasReadPath(facts, command.ID, true) ||
+			!hasExternalUpload(facts, command.ID) ||
+			!hasDataFlowTo(
+				facts,
+				command.ID,
+				actionfacts.DataFile,
+				actionfacts.DataProcess,
+			) ||
+			!hasDataFlowFrom(
+				facts,
+				command.ID,
+				"",
+				actionfacts.DataNetwork,
+			) {
+			continue
+		}
+		return true
+	}
+	return false
 }
 
 func fileUploadSafeNegative(facts actionfacts.Facts) bool {
 	sawRelevantUpload := false
 	for _, command := range facts.Commands {
-		if !hasOperation(command, actionfacts.OperationUpload) ||
+		if !curlProgram(command.Program) ||
+			!hasOperation(command, actionfacts.OperationUpload) ||
 			!hasDataFlowTo(
 				facts,
 				command.ID,
@@ -674,21 +733,9 @@ func allReadPathsDefinitelyNonSensitive(
 	return sawReadPath, sawReadPath
 }
 
-func fileUploadPrerequisite(
-	facts actionfacts.Facts,
-	sensitiveOnly bool,
-	networkMatches commandNetworkPredicate,
-) bool {
-	for _, command := range facts.Commands {
-		if hasOperation(command, actionfacts.OperationUpload) &&
-			hasReadPath(facts, command.ID, sensitiveOnly) &&
-			networkMatches(facts, command.ID) &&
-			hasDataFlowTo(facts, command.ID, actionfacts.DataFile, actionfacts.DataProcess) &&
-			hasDataFlowFrom(facts, command.ID, "", actionfacts.DataNetwork) {
-			return true
-		}
-	}
-	return false
+func curlProgram(program string) bool {
+	base := strings.ToLower(path.Base(strings.ReplaceAll(program, `\`, "/")))
+	return base == "curl" || base == "curl.exe"
 }
 
 func cloudSecretManagerPrerequisite(facts actionfacts.Facts) bool {
@@ -1038,7 +1085,7 @@ func matchesActiveSensitivePath(
 	candidate actionfacts.PathFact,
 ) bool {
 	value := semanticPathValue(candidate)
-	return matchesEnvironmentFile(value) ||
+	return matchesContextualEnvironmentFile(facts, candidate) ||
 		matchesActiveSSHPrivateKey(facts, candidate) ||
 		matchesActiveAWSCredentials(facts, candidate) ||
 		matchesActiveKubeConfig(facts, candidate) ||
@@ -1058,6 +1105,15 @@ func matchesEnvironmentFile(value string) bool {
 	default:
 		return false
 	}
+}
+
+func matchesContextualEnvironmentFile(
+	_ actionfacts.Facts,
+	candidate actionfacts.PathFact,
+) bool {
+	value := semanticPathValue(candidate)
+	return matchesEnvironmentFile(value) &&
+		!integrityPathHasFixtureSegment(value)
 }
 
 func matchesSSHPrivateKey(value string) bool {

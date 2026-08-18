@@ -359,6 +359,7 @@ func (c *hookOnlyConnector) HookProfile(opts SetupOpts) HookProfile {
 		// for the wire-shape contract this decoder honours and the
 		// empirical agy-version notes.
 		profile.Decode = antigravityProfileDecode
+		profile.DecodeToolArgs = antigravityToolArgsFromRawPayload
 	}
 	if c.name == "cursor" {
 		profile.Decode = cursorProfileDecode
